@@ -15,7 +15,7 @@ import {
 } from 'recharts';
 import { ChevronDown, ChevronRight, Download, FlaskConical, Play, RefreshCw, Square, AlertTriangle, Settings, ShieldCheck } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { summarize, type BtDayResult, type BtExitKind, type BtWindow } from '@/lib/breakdownBacktest';
+import { summarize, WARMUP_SESSIONS_NEEDED, type BtAudit, type BtDayResult, type BtExitKind, type BtWindow } from '@/lib/breakdownBacktest';
 import type { BreakdownConfig } from '@/lib/breakdownLedger';
 import { BacktestAuditReport } from './BacktestAuditReport';
 
@@ -38,6 +38,7 @@ interface BacktestResponse {
   status: RunStatus | null;
   from: string;
   dbRange?: { earliest: string; latest: string };
+  dataSource?: 'dhan' | 'breeze';
   missing: string[];
   configKey: string;
   config: BreakdownConfig;
@@ -51,6 +52,7 @@ interface BacktestResponse {
     config: BreakdownConfig;
     configKey: string;
     failures: Record<string, { at: string; error: string }>;
+    audit: BtAudit | null;
     days: BtDayResult[] | null;
   } | null;
 }
@@ -99,6 +101,8 @@ const CONFIG_LABELS: [keyof BreakdownConfig, string, (v: unknown) => string][] =
   ['eodExit', 'EOD', String],
   ['recoveryExit', 'Recovery exit', (v) => (v ? 'on' : 'off')],
   ['brokerage', 'Brokerage', (v) => (v === 0 ? '₹0 (Kotak)' : `₹${v ?? 20}/ord`)],
+  ['slippagePts', 'Slippage', (v) => (v ? `${v}pt/fill` : '0 (exact levels)')],
+  ['btWarmOnly', 'Cold contracts', (v) => (v ? 'skipped' : 'traded')],
 ];
 
 const ALL_WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'] as const;
@@ -109,7 +113,7 @@ function csvOf(days: BtDayResult[]): string {
     'date', 'weekday', 'expiry', 'dte', 'source', 'n', 'contract', 'entry_time', 'entry_price', 'exit_time', 'exit_price',
     'lots', 'qty', 'hold_min', 'exit_kind', 'exit_reason', 'gross', 'costs', 'net', 'initial_sl', 'target',
     'lowest', 'trailing_sl_at_exit', 'max_adverse', 'rank_score', 'breakdown_age_bars', 'trend', 'spot', 'atm',
-    'steps_from_atm', 'oi_view',
+    'steps_from_atm', 'oi_view', 'warmup_bars',
   ];
   const q = (v: unknown) => {
     const s = v == null ? '' : String(v);
@@ -123,7 +127,7 @@ function csvOf(days: BtDayResult[]): string {
           d.date, d.weekday, d.expiry, d.dte, d.source, t.n, t.contract, t.entryTime, t.entryPrice, t.exitTime, t.exitPrice,
           t.lots, t.qty, t.holdMin, t.exitKind, t.exitReason, t.gross, t.costs, t.net, t.initialSl, t.targetPrice,
           t.lowestPrice, t.trailingSlAtExit, t.maxAdverse, t.rankScore, t.breakdownAgeBars, t.trendAtEntry, t.spotAtEntry,
-          t.atmAtEntry, t.stepsFromAtm, t.oiView,
+          t.atmAtEntry, t.stepsFromAtm, t.oiView, t.warmupBars,
         ]
           .map(q)
           .join(','),
@@ -295,6 +299,14 @@ export function BacktestPanel({
     return () => clearTimeout(t);
   }, [data, post]);
 
+  // A source switch brings a different store and DB range: re-seed the date pickers from it.
+  const seenSource = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!data?.dataSource) return;
+    if (seenSource.current && seenSource.current !== data.dataSource) initializedDates.current = false;
+    seenSource.current = data.dataSource;
+  }, [data?.dataSource]);
+
   useEffect(() => {
     if (data?.store && !initializedDates.current) {
       initializedDates.current = true;
@@ -313,6 +325,17 @@ export function BacktestPanel({
     }
     return counts;
   }, [days]);
+
+  /** Sessions per weekday that started without the previous session for indicator warm-up (day field, else the audit's). */
+  const partialWarmup = useMemo(() => {
+    const out: Record<string, number> = {};
+    if (days.some((d) => d.warmupSessions != null)) {
+      for (const d of days) if (d.warmupSessions != null && d.warmupSessions < WARMUP_SESSIONS_NEEDED) out[d.weekday] = (out[d.weekday] ?? 0) + 1;
+    } else {
+      for (const [wd, w] of Object.entries(data?.store?.audit?.warmup ?? {})) out[wd] = w.partial;
+    }
+    return out;
+  }, [days, data?.store?.audit]);
 
   const filteredDays = useMemo(
     () => days.filter((d) => selectedWeekdays.has(d.weekday)),
@@ -363,7 +386,7 @@ export function BacktestPanel({
             <h2 className="text-sm font-bold text-white">
               Daily results {data?.store ? (data.store.to ? `${data.store.from} → ${data.store.to}` : `since ${data.store.from}`) : ''}{' '}
               <span className="text-xs font-medium text-emerald-400/90 font-mono">
-                (100% offline · options DB)
+                (100% offline · {data?.dataSource === 'breeze' ? 'ICICI Breeze DB' : 'Dhan options DB'})
               </span>
             </h2>
           </div>
@@ -587,6 +610,7 @@ export function BacktestPanel({
             {ALL_WEEKDAYS.map((wd) => {
               const isSelected = selectedWeekdays.has(wd);
               const count = weekdayCounts[wd] ?? 0;
+              const partial = partialWarmup[wd] ?? 0;
               return (
                 <button
                   key={wd}
@@ -598,9 +622,16 @@ export function BacktestPanel({
                       ? 'bg-violet-600 text-white shadow-sm hover:bg-violet-500'
                       : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200',
                   )}
-                  title={`${isSelected ? 'Deselect' : 'Select'} ${wd} (${count} session${count === 1 ? '' : 's'})`}
+                  title={`${isSelected ? 'Deselect' : 'Select'} ${wd} (${count} session${count === 1 ? '' : 's'})${
+                    partial ? ` — ${partial} with no previous-session indicator warm-up: not comparable with live` : ''
+                  }`}
                 >
                   <span>{wd}</span>
+                  {partial > 0 && (
+                    <span className="text-[10px] font-bold text-amber-400" aria-label={`${partial} sessions with partial warm-up`}>
+                      ⚠
+                    </span>
+                  )}
                   <span
                     className={cn(
                       'rounded px-1 text-[10px] font-mono tabular-nums',
@@ -879,14 +910,22 @@ export function BacktestPanel({
         )}
         <p className="mt-2 text-[10px] leading-relaxed text-zinc-500">
           Replays each session minute by minute through the live engine&apos;s own rules (lib/breakdownScalper.ts): signals on
-          closed 1-minute bars, entries at the next bar&apos;s open, stops/targets checked inside each bar (adverse move first), costs
-          per Dhan F&amp;O order. Indicators are warm from 09:15 (2 prior sessions). Not modelled: tick-level fills, slippage beyond
-          the bar, broker rejections. Max adverse = worst premium rise above entry while open.
+          closed bars, entries at the next bar&apos;s open, stops/targets checked inside each bar (adverse move first) and filled
+          only at prices the bar traded, costs per F&amp;O order. A slot freed inside a bar is reusable from the next bar&apos;s open.
+          Slippage is the configured points per fill (0 = fills exactly at the level, which live market orders will not get).
+          Wednesdays have no previous session in the options DB (the new weekly contract starts there), so their early-session
+          indicators differ from live; every other day warms up on the previous session. Not modelled: tick-level fills, broker rejections. Max adverse = worst premium rise above entry while open.
         </p>
 
         {/* Verification & Accuracy Audit Report */}
         <div id="backtest-audit-report" className="pt-2">
-          <BacktestAuditReport isOpen={auditOpen} onToggle={() => setAuditOpen((o) => !o)} />
+          <BacktestAuditReport
+            audit={data?.store?.audit ?? null}
+            storeConfigKey={data?.store?.configKey ?? null}
+            tradeCount={days.reduce((a, d) => a + d.trades.length, 0)}
+            isOpen={auditOpen}
+            onToggle={() => setAuditOpen((o) => !o)}
+          />
         </div>
       </div>
     </section>

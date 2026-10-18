@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import { spawn, execSync } from 'child_process';
-import { PROJECT_ROOT } from '@/lib/pyExec';
+import { PROJECT_ROOT, runPythonJson } from '@/lib/pyExec';
 import { isPidRunning } from '@/lib/processCheck';
 import { isRegularSession } from '@/lib/nseHolidays';
 import { istDayOf, normalizeConfig, DEFAULT_CONFIG } from '@/lib/breakdownLedger';
@@ -13,7 +13,7 @@ import { backfillStart, backtestConfigKey, sessionsToHold, type BtStore } from '
 // Read-only towards the broker: the runner only fetches market data.
 
 const DIR = path.join(PROJECT_ROOT, 'debug', 'breakdown_backtest');
-const STORE = path.join(DIR, 'results.json');
+const storePath = (source?: string) => path.join(DIR, source === 'breeze' ? 'results.breeze.json' : 'results.json');
 const STATUS = path.join(DIR, 'status.json');
 const STOP = path.join(DIR, 'stop.trigger');
 const RUN_LOCK = path.join(DIR, 'run.lock');
@@ -47,25 +47,51 @@ function currentConfig() {
 
 const istHm = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(11, 16);
 
+const DB_RANGES: Record<string, { earliest: string; latest: string }> = {
+  dhan: { earliest: '2020-12-31', latest: '2026-10-13' },
+};
+
+/** Breeze's coverage grows while the downloader runs, so ask the data script, at most once a minute (the panel polls). */
+const BREEZE_RANGE_TTL_MS = 60_000;
+const BREEZE_RANGE_FALLBACK = { earliest: '2026-04-07', latest: '2026-09-29' };
+let breezeRangeCache: { at: number; range: { earliest: string; latest: string } } | null = null;
+async function breezeRange(): Promise<{ earliest: string; latest: string }> {
+  if (breezeRangeCache && Date.now() - breezeRangeCache.at < BREEZE_RANGE_TTL_MS) return breezeRangeCache.range;
+  let range = breezeRangeCache?.range ?? BREEZE_RANGE_FALLBACK;
+  try {
+    const r = await runPythonJson<{ ok?: boolean; earliest?: string; latest?: string }>(
+      path.join(PROJECT_ROOT, 'scripts', 'tools', 'breakdown_backtest_data.py'), ['--source', 'breeze', '--db-range'], 20_000);
+    if (r.ok && r.earliest && r.latest) range = { earliest: r.earliest, latest: r.latest };
+  } catch {
+    /* keep the last good range */
+  }
+  breezeRangeCache = { at: Date.now(), range };
+  return range;
+}
+
 export async function GET(request: NextRequest) {
-  const store = readJson<BtStore>(STORE);
+  const config = currentConfig();
+  const dataSource = config.dataSource === 'breeze' ? 'breeze' : 'dhan';
+  const store = readJson<BtStore>(storePath(dataSource));
   // The page caches the day results and sends the version it holds (the store's updatedAt): while that is still
   // current, the reply carries status only, so a poll never re-sends the whole trade log.
   const known = new URL(request.url).searchParams.get('known');
   const unchanged = !!store && !!store.updatedAt && known === store.updatedAt;
-  const status = readJson<Record<string, unknown>>(STATUS);
+  const rawStatus = readJson<Record<string, unknown>>(STATUS);
+  // status.json is shared by both sources: a Dhan run's "done" must not read as the Breeze backtest's state.
+  const status = rawStatus && (rawStatus.source ?? 'dhan') === dataSource ? rawStatus : null;
   const pid = runnerPid();
   const isStarting = !pid && fs.existsSync(START_LOCK) && (Date.now() - fs.statSync(START_LOCK).mtimeMs < START_LOCK_STALE_MS);
   const isRunning = pid != null || isStarting;
-  const config = currentConfig();
   const configKey = backtestConfigKey(config);
   const today = istDayOf(Date.now());
   const from = store?.from ?? backfillStart(today, 'week');
   const sessions = sessionsToHold(from, today, istHm(), isRegularSession, store?.to ?? null);
-  const missing = sessions.filter((d) => !store?.days?.[d]);
+  const uncovered = new Set(store?.uncovered ?? []);
+  const missing = sessions.filter((d) => !store?.days?.[d] && !uncovered.has(d));
   // A status left at "running" by a runner that died (killed, machine slept) is reported as interrupted.
   const runStatus = status && status.state === 'running' && !isRunning ? { ...status, state: 'interrupted' } : status;
-  const DB_RANGE = { earliest: '2020-12-31', latest: '2026-10-13' };
+  const DB_RANGE = dataSource === 'breeze' ? await breezeRange() : DB_RANGES.dhan;
   return NextResponse.json({
     success: true,
     unchanged,
@@ -75,6 +101,7 @@ export async function GET(request: NextRequest) {
       : runStatus,
     from,
     dbRange: DB_RANGE,
+    dataSource,
     missing,
     configKey,
     config,
@@ -89,6 +116,8 @@ export async function GET(request: NextRequest) {
           config: store.config,
           configKey: store.configKey,
           failures: store.failures ?? {},
+          // Small (a dozen checks), so it is sent on every poll, unlike the days.
+          audit: store.audit ?? null,
           days: unchanged ? null : Object.values(store.days ?? {}).sort((a, b) => b.date.localeCompare(a.date)),
         }
       : null,

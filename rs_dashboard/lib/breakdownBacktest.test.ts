@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  auditResults,
   backfillStart,
   classifyBuildup,
   ewmLast,
@@ -149,4 +150,115 @@ test('summarize: totals, win rate and max drawdown on the cumulative daily net',
   assert.equal(s.maxDrawdown, -700); // peak 500 -> trough -200
   assert.equal(s.exitMix.TARGET, 2);
   assert.equal(s.worstDay?.date, '2026-10-02');
+});
+
+/** A put flat at ~100 that breaks down at minute `drop` (95, 90, 88) and then sits at 88 unless `after` overrides. */
+function putBars(drop: number, after: (m: number) => Partial<BtBar> | null = () => null): BtBar[] {
+  const bars: BtBar[] = [];
+  for (let m = 555; m <= 929; m++) {
+    const t = `${DAY} ${minToHm(m)}:00`;
+    let b: BtBar;
+    if (m < drop) b = { t, o: 100, h: 100.5, l: 99.5, c: 100 + (m % 2 ? 0.5 : -0.5), v: 2000, oi: 100000 };
+    else if (m === drop) b = { t, o: 100, h: 100, l: 95, c: 95, v: 2000, oi: 101000 };
+    else if (m === drop + 1) b = { t, o: 94, h: 94, l: 90, c: 90, v: 2000, oi: 102000 };
+    else if (m === drop + 2) b = { t, o: 90, h: 90, l: 88, c: 88, v: 2000, oi: 103000 };
+    else b = { t, o: 88, h: 88, l: 88, c: 88, v: 2000, oi: 103000 };
+    bars.push({ ...b, ...(after(m) ?? {}) });
+  }
+  return bars;
+}
+
+test('simulateDay: a slot freed inside bar m is not reused at bar m OPEN (no same-bar look-ahead)', () => {
+  // A (23000PE) enters 10:16 and is stopped on bar 10:41's HIGH. B (22950PE) is a fresh breakdown at 10:41.
+  // At 10:41's open A still held the only slot, so B can fill at 10:42's open at the earliest.
+  const day = scenario((m) => (m === 641 ? { o: 88, h: 120, l: 88, c: 110 } : null));
+  day.contracts['22950PE'] = { strike: 22950, option: 'PE', bars: putBars(640) };
+  const r = simulateDay(day, { ...cfg, maxConcurrent: 1 });
+  const a = r.trades.find((t) => t.contract === '23000PE')!;
+  const b = r.trades.find((t) => t.contract === '22950PE')!;
+  assert.equal(a.exitKind, 'INITIAL_SL');
+  assert.equal(a.exitTime, '10:41');
+  assert.equal(b.entryTime, '10:42', 'B waits for the next bar open');
+  assert.equal(b.entryPrice, 90);
+});
+
+test('simulateDay: a gap exit at the open frees its slot for an entry at that same open', () => {
+  const day = scenario((m) => (m === 641 ? { o: 130, h: 131, l: 125, c: 128 } : null));
+  day.contracts['22950PE'] = { strike: 22950, option: 'PE', bars: putBars(640) };
+  const r = simulateDay(day, { ...cfg, maxConcurrent: 1 });
+  assert.equal(r.trades.find((t) => t.contract === '22950PE')!.entryTime, '10:41');
+});
+
+test('simulateDay: a trail ratcheted below the bar low fills at the low, never below what traded', () => {
+  // trailBy 5 > trailStep 1: the low 74 sets the stop at 94 - 5x5 = 69, below the low itself.
+  const r = simulateDay(scenario((m) => (m === 620 ? { o: 88, h: 88, l: 74, c: 80 } : null)), { ...cfg, trailStepPts: 1, trailByPts: 5 });
+  const t = r.trades[0];
+  assert.equal(t.exitKind, 'TRAIL_SL');
+  assert.equal(t.exitTime, '10:20');
+  assert.equal(t.exitPrice, 74);
+});
+
+test('simulateDay: slippage sells lower and buys back higher on every fill', () => {
+  const r = simulateDay(scenario(() => null), { ...cfg, slippagePts: 0.5 });
+  const t = r.trades[0];
+  assert.equal(t.entryPrice, 93.5);
+  assert.equal(t.initialSl, 117.5, 'stops stay sized on the decision price, as the live ledger does');
+  assert.equal(t.exitPrice, 88.5);
+  assert.equal(t.gross, (93.5 - 88.5) * 65);
+});
+
+test('simulateDay: the recovery exit fires inside the bar, at the indicator level, as the live tick check does', () => {
+  // Bar 10:30 spikes to 110 but closes at 88: the old close-only check never saw it.
+  const r = simulateDay(scenario((m) => (m === 630 ? { o: 88, h: 110, l: 88, c: 88 } : null)), { ...cfg, recoveryExit: true });
+  const t = r.trades[0];
+  assert.equal(t.exitKind, 'RECOVERY');
+  assert.equal(t.exitTime, '10:30');
+  assert.ok(t.exitPrice > 88 && t.exitPrice < 110, `fills at the crossed level, got ${t.exitPrice}`);
+});
+
+test('auditResults: passes a clean run and flags a same-bar slot reuse and an untraded fill', () => {
+  const day = scenario((m) => (m === 641 ? { o: 88, h: 120, l: 88, c: 110 } : null));
+  day.contracts['22950PE'] = { strike: 22950, option: 'PE', bars: putBars(640) };
+  const c = { ...cfg, maxConcurrent: 1, maxSameSide: 1 };
+  const r = simulateDay(day, c);
+  const clean = auditResults([r], c, () => day);
+  assert.deepEqual(clean.checks.filter((x) => x.failures).map((x) => x.id), []);
+  assert.equal(clean.trades, r.trades.length);
+
+  // What the old engine produced: B filled at 10:41's open while A was still open, and an exit no bar traded.
+  const bad = structuredClone(r);
+  const b = bad.trades.find((t) => t.contract === '22950PE')!;
+  Object.assign(b, { entryTime: '10:41', entryPrice: 94 });
+  const a = bad.trades.find((t) => t.contract === '23000PE')!;
+  a.exitPrice = 125;
+  const audit = auditResults([bad], c, () => day);
+  const failed = Object.fromEntries(audit.checks.map((x) => [x.id, x.failures]));
+  assert.ok(failed.slots >= 1, 'slot reuse flagged');
+  assert.ok(failed.exitFill >= 1, 'fill above the bar high flagged');
+});
+
+test('simulateDay: each trade records its contract\'s previous-session bars; auditResults counts cold-contract entries', () => {
+  const warm = scenario(() => null);
+  const prevDay = '2026-09-22';
+  warm.contracts['23000PE'].bars.unshift(
+    ...Array.from({ length: 30 }, (_, i): BtBar => ({ t: `${prevDay} ${minToHm(555 + i)}:00`, o: 101, h: 101, l: 101, c: 101, v: 1000, oi: 99000 })),
+  );
+  const rw = simulateDay(warm, cfg);
+  assert.equal(rw.trades[0].warmupBars, 30);
+  const rc = simulateDay(scenario(() => null), cfg);
+  assert.equal(rc.trades[0].warmupBars, 0);
+  // tf 1 x EMA20 = 20 bars needed: 30 is warm, 0 is cold.
+  const audit = auditResults([rw, { ...rc, date: '2026-09-24' }], cfg, () => null);
+  assert.equal(audit.coldEntries?.minBars, 20);
+  assert.equal(audit.coldEntries?.trades, 1);
+});
+
+test('simulateDay: btWarmOnly skips a contract without enough previous-session bars, and keeps a warm one', () => {
+  const cold = simulateDay(scenario(() => null), { ...cfg, btWarmOnly: true });
+  assert.equal(cold.trades.length, 0, 'no previous-day bars: skipped');
+  const warm = scenario(() => null);
+  warm.contracts['23000PE'].bars.unshift(
+    ...Array.from({ length: 30 }, (_, i): BtBar => ({ t: `2026-09-22 ${minToHm(555 + i)}:00`, o: 101, h: 101, l: 101, c: 101, v: 1000, oi: 99000 })),
+  );
+  assert.equal(simulateDay(warm, { ...cfg, btWarmOnly: true }).trades.length, 1);
 });

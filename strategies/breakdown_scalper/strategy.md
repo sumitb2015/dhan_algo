@@ -224,16 +224,39 @@ Before trading real capital on this strategy:
 - **Engine**: `rs_dashboard/lib/breakdownBacktest.ts` `simulateDay` replays a session minute by minute through the live
   engine's own functions (`evaluateOptionBreakdown`, `evaluateUnderlyingTrend`, `rankBreakdownSignals`,
   `evaluatePositionRisk`) with the page's current rules (ledger config snapshot, stored with the results).
-- **Fills**: signals on bars closed before minute m; entry at bar m's open; stops/targets inside each bar in the order
-  open → high → low → close (adverse first); a level crossed intrabar fills at the level, a gap at the open; EOD at the
-  open of the cutoff bar. Costs per Dhan F&O order (`DHAN_OPTION_COSTS`). Not modelled: tick fills, slippage, rejections.
+- **Fills**: signals on bars closed before minute m; entry at bar m's open; stops/targets/recovery inside each bar in
+  the order open → high → low → close (adverse first, recovery on every point as the live tick check does); every fill
+  lies on the price segment the trigger happened on (a level crossed intrabar fills at the level, a stop ratcheted below
+  the price fills at the price, a gap at the open fills at the open); EOD at the open of the cutoff bar. Costs per F&O
+  order (`DHAN_OPTION_COSTS`, brokerage from the rules). Rules setting `slippagePts` (default 0) is lost on every fill.
+- **Slots**: a position closed inside bar m still holds its slot (and its P&L counts as open for the loss limit) for
+  entries at bar m's open; the slot frees from bar m+1. Before 2026-10-18 it was reused at bar m's own open, a
+  look-ahead that inflated the 6-month run from ₹1.83 L to ₹2.49 L.
+- **Audit**: the runner re-checks every stored trade against the rules and the bar files (`auditResults`) and stores it
+  as `results.json` `audit`; the page's audit card renders only that.
+- **Warm-up**: the previous session is enough to settle the indicators from 09:15 (`WARMUP_SESSIONS_NEEDED = 1`; the
+  data file carries up to 2). The options DB holds a weekly contract only from the day after the previous expiry, so
+  Wednesday sessions start with no previous session and their early-session indicators differ from live; every
+  other day is fully warmed. The DB also stores only ATM±10 strikes per minute, so a strike far from the previous
+  day's spot can have no warm-up bars either. Each trade records `warmupBars`; the audit counts "cold-contract
+  entries" (< EMA period × timeframe bars). In the 2026-04-16 → 10-13 run these were 179 of 807 trades and ~90% of
+  the net; the warm subset (628 trades) netted ₹12.4k. Read the cold share before trusting a result.
 - **Trend**: the options DB's 1-minute spot closes; VWAP = running mean (the live feed also falls back to it, the index
   has no volume); EMA9/20 = `ewm(adjust=False)` on today's timeframe closes, as `cyber_scalper_feed.py`.
-- **Data** (`scripts/tools/breakdown_backtest_data.py`, Dhan only, cached per session under `debug/breakdown_backtest/`):
-  the options DB, else Dhan's expired-options API (contract expired), else the intraday API with OI (contract live).
+- **Data** (`scripts/tools/breakdown_backtest_data.py`, cached per session under `debug/breakdown_backtest/`): runs are
+  offline, from `Options Data/nifty_options.db` only (the runner passes `--offline`; a session not in the DB fails). The
+  script's expired-options / intraday API paths below are currently unused.
   Every session carries the 2 previous sessions of the same contracts, so indicators are warm from 09:15; sessions on or
   before the previous weekly expiry come from the expired API with `expiry_code=2`. The expired API is slow (~25-60 s a
   call, one at a time to stay inside the account-wide DH-904 limit): a cold expiry week takes 20-40 minutes, once.
 - **Runs**: `rs_dashboard/scripts/breakdown-backtest.ts` (detached, one at a time). Opening the page after 15:35 IST
   appends any missing sessions (catch-up); Run now / Re-run (1 week or 1 month) in the panel. A rules change pauses
   appends until a Re-run, so every stored day used the same rules. NIFTY only (the options DB has no other index).
+
+### Backtest data source (Rules drawer → "Backtest Data Source")
+`config.dataSource` = `dhan` (default, `Options Data/nifty_options.db`) or `breeze` (`Options Data/breeze_nifty_options.db`, ICICI Breeze,
+ATM±20 strikes, 14 days per Tuesday expiry). Each source keeps its own store (`results.json` / `results.breeze.json`) and per-day cache
+(`data/` / `data/breeze/`); switching source changes the config key, so use Re-run. Breeze caveats: bars exist only for minutes with a
+trade (~330 of 375 per contract), `spot` is sparse (the data script forward-fills it, else derives it from put-call parity), `iv` /
+`strike_relative` are NULL, and there is no Dhan warm-up cache, so the first session of a contract uses what the DB holds. Fills and
+stops can therefore differ from the Dhan DB; do not compare the two sources day by day as if they were the same tape.

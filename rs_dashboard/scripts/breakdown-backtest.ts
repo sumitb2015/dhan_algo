@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile, type ChildProcess } from 'node:child_process';
 import {
+  auditResults,
   backfillStart,
   backtestConfigKey,
   sessionsToHold,
@@ -33,13 +34,24 @@ import { isRegularSession } from '../lib/nseHolidays.ts';
 import { PROJECT_ROOT, PYTHON_EXE } from '../lib/pyExec.ts';
 
 const DIR = path.join(PROJECT_ROOT, 'debug', 'breakdown_backtest');
-const STORE = path.join(DIR, 'results.json');
+const LEDGER = path.join(PROJECT_ROOT, 'debug', 'breakdown_scalper_state.json');
+// The data source is a rule (config.dataSource); each source keeps its own store and per-day cache.
+const SOURCE: 'dhan' | 'breeze' = (() => {
+  try {
+    return normalizeConfig((JSON.parse(fs.readFileSync(LEDGER, 'utf8')) as { config?: unknown }).config).dataSource === 'breeze'
+      ? 'breeze'
+      : 'dhan';
+  } catch {
+    return 'dhan';
+  }
+})();
+const STORE = path.join(DIR, SOURCE === 'breeze' ? 'results.breeze.json' : 'results.json');
+const DAY_DIR = path.join(DIR, 'data', ...(SOURCE === 'breeze' ? ['breeze'] : []));
 const STATUS = path.join(DIR, 'status.json');
 const STOP = path.join(DIR, 'stop.trigger');
 const LOCK = path.join(DIR, 'run.lock');
-const LEDGER = path.join(PROJECT_ROOT, 'debug', 'breakdown_scalper_state.json');
 const DATA_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'breakdown_backtest_data.py');
-// A cold expiry week from Dhan's expired-options API is 42-84 calls at ~25 s each (4 in parallel): allow an hour.
+// Runs are offline (options DB only), so a session takes seconds; the hour only matters if the API paths return.
 const DATA_TIMEOUT_MS = 60 * 60_000;
 const DATA_PROGRESS = path.join(DIR, 'data_progress.json');
 
@@ -93,6 +105,8 @@ function acquireLock(): boolean {
 interface Status {
   state: 'running' | 'done' | 'error' | 'stopped';
   mode: string;
+  /** Which options DB this run read; the panel hides a status written for the other source. */
+  source?: 'dhan' | 'breeze';
   pid: number;
   total: number;
   done: number;
@@ -106,6 +120,7 @@ interface Status {
 const status: Status = {
   state: 'running',
   mode,
+  source: SOURCE,
   pid: process.pid,
   total: 0,
   done: 0,
@@ -150,7 +165,7 @@ function runData(date: string, offline: boolean): Promise<{ ok: boolean; path?: 
   return new Promise((resolve) => {
     const child = execFile(
       PYTHON_EXE,
-      [DATA_SCRIPT, '--date', date, ...(offline ? ['--offline'] : [])],
+      [DATA_SCRIPT, '--source', SOURCE, '--date', date, ...(offline ? ['--offline'] : [])],
       { cwd: PROJECT_ROOT, timeout: DATA_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
       (err, stdout) => {
         activeChild = null;
@@ -220,7 +235,7 @@ async function main() {
       return;
     }
     if (!store || mode === 'rerun') {
-      const dbInfo = await runPy(['--db-range']);
+      const dbInfo = await runPy(['--source', SOURCE, '--db-range']);
       if (!dbInfo.ok || typeof dbInfo.latest !== 'string' || !dbInfo.latest) {
         saveStatus({ state: 'error', message: `Cannot read the options DB: ${String(dbInfo.error ?? 'empty')}`, finishedAt: nowIso() });
         return;
@@ -274,6 +289,7 @@ async function main() {
         : 'Up to date',
     });
 
+    let skippedUncovered = 0;
     for (const date of missing) {
       if (stopRequested()) {
         saveStatus({ state: 'stopped', message: `Stopped by user after ${status.done} session(s)`, current: null, finishedAt: nowIso() });
@@ -306,6 +322,15 @@ async function main() {
         }
       }, 1000);
       const res = await runData(date, offline).finally(() => clearInterval(relay));
+      // Breeze only holds the downloaded expiry windows: a day outside them is not a failure, just not covered.
+      if (SOURCE === 'breeze' && !res.ok && /is not in .*\.db/.test(res.error ?? '')) {
+        delete store.failures[date];
+        skippedUncovered++;
+        store.uncovered = [...new Set([...(store.uncovered ?? []), date])].sort();
+        writeJsonAtomic(STORE, store);
+        saveStatus({ done: status.done + 1, message: `${date}: not in the Breeze DB, skipped` });
+        continue;
+      }
       if (!res.ok || !res.path) {
         store.failures[date] = { at: nowIso(), error: res.error ?? 'unknown error' };
         writeJsonAtomic(STORE, store);
@@ -322,16 +347,28 @@ async function main() {
       const result = simulateDay(loadDay(res.path), config);
       store.days[date] = result;
       delete store.failures[date];
+      if (store.uncovered) store.uncovered = store.uncovered.filter((d) => d !== date);
       store.updatedAt = nowIso();
       writeJsonAtomic(STORE, store);
       saveStatus({ done: status.done + 1, message: `${date}: ${result.trades.length} trade(s), net ₹${result.net.toFixed(0)}` });
     }
+    saveStatus({ message: 'Auditing results against the bar data…' });
+    store.audit = auditResults(Object.values(store.days), config, (d) => {
+      try {
+        return loadDay(path.join(DAY_DIR, `${d}.json`));
+      } catch {
+        return null;
+      }
+    });
+    writeJsonAtomic(STORE, store);
     saveStatus({
       state: status.failed.length ? 'error' : 'done',
       current: null,
       message: status.failed.length
         ? `Finished with ${status.failed.length} session(s) unavailable: ${status.failed.join(', ')}`
-        : `Up to date through ${sessions[sessions.length - 1] ?? today}`,
+        : skippedUncovered
+          ? `Done · ${Object.keys(store.days).length} session(s) backtested, ${skippedUncovered} outside the Breeze DB skipped`
+          : `Up to date through ${sessions[sessions.length - 1] ?? today}`,
       finishedAt: nowIso(),
     });
   } catch (e) {
