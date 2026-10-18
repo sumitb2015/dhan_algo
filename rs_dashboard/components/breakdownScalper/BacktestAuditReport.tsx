@@ -215,7 +215,7 @@ export function BacktestAuditReport({
               </p>
               <ul className="space-y-1 text-[11px] text-zinc-300">
                 <li className="flex justify-between border-b border-zinc-800/60 pb-0.5">
-                  <span>Brokerage:</span> <span className="font-mono text-zinc-200">₹20.00 / order (Entry + Exit = ₹40)</span>
+                  <span>Brokerage:</span> <span className="font-mono text-zinc-200">Configurable (₹20 Dhan / ₹0 Kotak Trade Free)</span>
                 </li>
                 <li className="flex justify-between border-b border-zinc-800/60 pb-0.5">
                   <span>Securities Transaction Tax (STT):</span>{' '}

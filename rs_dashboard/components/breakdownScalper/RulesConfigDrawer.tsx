@@ -286,6 +286,56 @@ export function RulesConfigDrawer({
             </div>
           </div>
 
+          {/* Section 4b: Brokerage & Execution Costs */}
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3.5 flex flex-col gap-3">
+            <span className="font-bold text-zinc-200">Brokerage & Execution Fees</span>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-zinc-300 font-medium">Brokerage per Order (₹)</span>
+                <p className="text-[10px] text-zinc-500">₹20 for Dhan / Zerodha · ₹0 for Kotak Trade Free</p>
+              </div>
+              <div className="flex items-center gap-1">
+                <span className="text-zinc-500 font-mono">₹</span>
+                <RuleNumInput
+                  value={config.brokerage ?? 20}
+                  onCommit={(v) => onUpdateConfig({ brokerage: Math.max(0, Math.min(100, Number(v) || 0)) })}
+                  step={5}
+                  min={0}
+                  max={100}
+                  className="w-16 text-center"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-1 border-t border-zinc-800/60">
+              <button
+                type="button"
+                onClick={() => onUpdateConfig({ brokerage: 20 })}
+                className={cn(
+                  'flex-1 rounded py-1 text-[11px] font-bold border transition',
+                  (config.brokerage ?? 20) === 20
+                    ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-300'
+                    : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-white',
+                )}
+              >
+                Dhan / Std (₹20)
+              </button>
+              <button
+                type="button"
+                onClick={() => onUpdateConfig({ brokerage: 0 })}
+                className={cn(
+                  'flex-1 rounded py-1 text-[11px] font-bold border transition',
+                  config.brokerage === 0
+                    ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-300'
+                    : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-white',
+                )}
+              >
+                Kotak Neo (₹0)
+              </button>
+            </div>
+          </div>
+
           {/* Section 5: Stop-Loss & Trailing Stop */}
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3.5 flex flex-col gap-3">
             <span className="font-bold text-zinc-200">Stop-Loss & Profit Exits</span>

@@ -98,6 +98,7 @@ const CONFIG_LABELS: [keyof BreakdownConfig, string, (v: unknown) => string][] =
   ['entryEnd', 'until', String],
   ['eodExit', 'EOD', String],
   ['recoveryExit', 'Recovery exit', (v) => (v ? 'on' : 'off')],
+  ['brokerage', 'Brokerage', (v) => (v === 0 ? '₹0 (Kotak)' : `₹${v ?? 20}/ord`)],
 ];
 
 function csvOf(days: BtDayResult[]): string {

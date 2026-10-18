@@ -126,14 +126,20 @@ export const DHAN_OPTION_COSTS = {
   stampBuyPct: 0.003,
 } as const;
 
-export function orderCost(side: 'BUY' | 'SELL', premium: number, qty: number, c = DHAN_OPTION_COSTS): number {
+export function orderCost(
+  side: 'BUY' | 'SELL',
+  premium: number,
+  qty: number,
+  brokeragePerOrder = 20,
+  c = DHAN_OPTION_COSTS,
+): number {
   const turnover = premium * qty;
   const exchange = (turnover * c.exchangePct) / 100;
   const sebi = (turnover * c.sebiPerCrore) / 1e7;
-  const gst = ((c.brokeragePerOrder + exchange + sebi) * c.gstPct) / 100;
+  const gst = ((brokeragePerOrder + exchange + sebi) * c.gstPct) / 100;
   const stt = side === 'SELL' ? (turnover * c.sttSellPct) / 100 : 0;
   const stamp = side === 'BUY' ? (turnover * c.stampBuyPct) / 100 : 0;
-  return c.brokeragePerOrder + exchange + sebi + gst + stt + stamp;
+  return brokeragePerOrder + exchange + sebi + gst + stt + stamp;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -274,7 +280,8 @@ export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResu
 
   const close = (p: OpenPos, m: number, price: number, kind: BtExitKind, reason: string) => {
     const gross = (p.entryPrice - price) * p.qty;
-    const costs = orderCost('SELL', p.entryPrice, p.qty) + orderCost('BUY', price, p.qty);
+    const brokerage = config.brokerage ?? 20;
+    const costs = orderCost('SELL', p.entryPrice, p.qty, brokerage) + orderCost('BUY', price, p.qty, brokerage);
     realizedGross += gross;
     trades.push({
       n: trades.length + 1,
@@ -554,6 +561,7 @@ export function backtestConfigKey(c: BreakdownConfig): string {
     entryStart,
     entryEnd,
     eodExit,
+    brokerage: c.brokerage ?? 20,
   });
 }
 

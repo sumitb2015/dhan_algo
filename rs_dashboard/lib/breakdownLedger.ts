@@ -56,6 +56,7 @@ export interface BreakdownConfig {
   entryStart: string; // default "09:30"
   entryEnd: string; // default "15:00"
   eodExit: string; // default "15:15"
+  brokerage?: number; // ₹ per executed order (default 20 for Dhan, 0 for Kotak)
   trailPct?: number; // legacy alias for trailStartPct
 }
 
@@ -77,6 +78,7 @@ export const DEFAULT_CONFIG: BreakdownConfig = {
   entryStart: '09:30',
   entryEnd: '15:00',
   eodExit: '15:15',
+  brokerage: 20,
   trailPct: 15,
 };
 
@@ -153,7 +155,7 @@ export function sanitizeConfigPatch(patch: unknown): Partial<BreakdownConfig> {
   int('maxConcurrent', 1, 5);
   int('maxSameSide', 1, 5);
   int('lotsPerTrade', 1, MAX_LOTS_PER_TRADE);
-  const num = (k: 'slPct' | 'trailPct' | 'trailStartPct' | 'trailStepPts' | 'trailByPts' | 'targetPct' | 'dailyLossLimit', lo: number, hi: number) => {
+  const num = (k: 'slPct' | 'trailPct' | 'trailStartPct' | 'trailStepPts' | 'trailByPts' | 'targetPct' | 'dailyLossLimit' | 'brokerage', lo: number, hi: number) => {
     const n = clampNum(p[k], lo, hi);
     if (n !== undefined) out[k] = n;
   };
@@ -164,6 +166,7 @@ export function sanitizeConfigPatch(patch: unknown): Partial<BreakdownConfig> {
   num('trailPct', 5, 50);
   num('targetPct', 0, 90);
   num('dailyLossLimit', 1000, 10_000_000);
+  num('brokerage', 0, 100);
   // Keep legacy trailPct and new trailStartPct synced
   if (out.trailStartPct === undefined && out.trailPct !== undefined) {
     out.trailStartPct = out.trailPct;
@@ -198,6 +201,9 @@ export function normalizeConfig(raw: unknown): BreakdownConfig {
   }
   if (merged.trailByPts === undefined) {
     merged.trailByPts = DEFAULT_CONFIG.trailByPts;
+  }
+  if (merged.brokerage === undefined) {
+    merged.brokerage = DEFAULT_CONFIG.brokerage;
   }
   merged.trailPct = merged.trailStartPct;
   if (!timesInOrder(merged)) {
