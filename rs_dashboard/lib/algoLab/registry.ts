@@ -7,8 +7,9 @@ import { fieldsOf, defaultsOf, normalizeConfig } from './configSchema.ts';
 import type { AlgoConfig, ConfigField, StrategyDefinition } from './types.ts';
 import { vwapMomentumBuyer } from './strategies/vwapMomentumBuyer.ts';
 import { breakdownAutoScalper } from './strategies/breakdownAutoScalper.ts';
+import { managedStraddle } from './strategies/managedStraddle.ts';
 
-export const STRATEGIES: StrategyDefinition[] = [vwapMomentumBuyer, breakdownAutoScalper];
+export const STRATEGIES: StrategyDefinition[] = [vwapMomentumBuyer, breakdownAutoScalper, managedStraddle];
 
 const KEY_RE = /^[a-z0-9_]{2,40}$/;
 
