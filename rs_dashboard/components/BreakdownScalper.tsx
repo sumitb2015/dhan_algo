@@ -1058,6 +1058,16 @@ export default function BreakdownScalper() {
       });
 
       ranked = rankBreakdownSignals(rawCandidates, spot, atm, step, underlyingTrend, heldHere);
+      // A contract exited (or rejected) minutes ago is shown (and treated) as locked, so it neither reads as the top candidate
+      // nor blocks the next eligible contract.
+      ranked = ranked
+        .map((c) => {
+          const until = reentryLock.current.get(contractId({ underlying, expiry, strike: c.strike, option: c.option })) ?? 0;
+          return c.isEligible && until > now
+            ? { ...c, isEligible: false, blockReason: `Re-entry lock (${Math.ceil((until - now) / 1000)}s left)` }
+            : c;
+        })
+        .sort((a, b) => Number(b.isEligible) - Number(a.isEligible) || b.rankScore - a.rankScore);
       setScan({ chain: chainKey, rows: ranked });
     }
 
@@ -1170,16 +1180,18 @@ export default function BreakdownScalper() {
     if (entryBusy.current) return;
     if (modeLive.length >= config.maxConcurrent) return;
 
-    const topPick = ranked.find((c) => c.isEligible);
-    if (!topPick || topPick.ltp <= 0) return;
+    // The best-ranked contract that passes every entry rule — a locked or cooling contract never blocks the next one.
+    const sideCount = (opt: 'CE' | 'PE') => modeLive.filter((p) => p.option === opt).length;
+    const topPick = ranked.find((c) => {
+      if (!c.isEligible || !(c.ltp > 0)) return false;
+      if (sideCount(c.option) >= config.maxSameSide) return false;
+      const cid = contractId({ underlying, expiry, strike: c.strike, option: c.option });
+      if ((reentryLock.current.get(cid) ?? 0) > now) return false;
+      return now - (cooldownMap.current.get(cid) ?? 0) >= ENTRY_COOLDOWN_MS;
+    });
+    if (!topPick) return;
 
-    if (modeLive.filter((p) => p.option === topPick.option).length >= config.maxSameSide) return;
-
-    const id = contractId({ underlying, expiry, strike: topPick.strike, option: topPick.option });
-    if ((reentryLock.current.get(id) ?? 0) > now) return;
-    if (now - (cooldownMap.current.get(id) ?? 0) < ENTRY_COOLDOWN_MS) return;
-    cooldownMap.current.set(id, now);
-
+    cooldownMap.current.set(contractId({ underlying, expiry, strike: topPick.strike, option: topPick.option }), now);
     void openShort(topPick, 'AUTO');
   };
 
