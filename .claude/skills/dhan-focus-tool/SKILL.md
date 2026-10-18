@@ -64,6 +64,26 @@ doubled short) and an all-unknown entry cleared its latch and re-sold every tick
   those tests open with `view: 'pro'`). Event kind `order_unknown` carries `orderKind` — an `extra.kind` would overwrite
   the event's own kind in `logEvent`.
 
+## Order safety rules from the 2026-10-18 review (`e2e/focus-tool-order-safety.spec.ts`)
+- **A held leg has its own product.** `FocusRowFill.ceProduct` / `peProduct` is stamped on the flat→held move
+  (`nextLegProduct` in `adjustFillQty`); every lookup, close and ladder order uses `legProduct(row, leg, …)`
+  (`lib/focusToolBroker.ts` `legProductFor`), never the group's current product. The group PRODUCT select is locked while
+  any row on the index holds a position or has an order in flight (`productLockReason`, refused in `updateGroup`).
+- **Position rows: prefer the open one.** Dhan lists a closed-then-reopened leg as two rows of one product; match with
+  `openRowOfProduct` (`lib/positionProduct.ts`), never `.find(product)`.
+- **Orders are sliced** under the exchange freeze (lookup `freezeQty`: Dhan master `SM_FREEZE_QTY`, Kotak `lFreezeQty`,
+  read as the first refused size) and the route cap (`maxOrderUnits`; `fts` in fast-order `SOURCE_QTY_CAPS` and Kotak
+  `SOURCE_LOT_CAPS`, the latter sent on opens only). A rejected later slice is not a full close (no ledger wipe, no
+  re-entry); an unknown slice is held with everything already sent. Sliced fills settle from the book.
+- **ACK is not open.** Non-`awaitFill` opens count in `confirmsInFlightRef`; `checkEntryLegsFilled` / `awaitLegSettled`
+  wait for the real outcome and raise the persistent NAKED / LOPSIDED banner (`nakedAlerts`) on a late rejection.
+- **Header EXIT ALL** retires a row only once a fresh book shows its owned legs flat (8 s); others stay watched.
+- **Closes run under a cross-tab Web Lock per leg** (`withLegCloseLock`); manual, non-leader or waited-for closes size off a
+  fresh book. Sizing reads the latest ledger (`sizeRow`), not the caller's row copy. A close is refused when the broker
+  shows the contract LONG while the row holds a short (`close_refused_direction`).
+- **Auto-entry holds the row** (`enteringNowRef` + `busyRows`); whole-row exits and leg stops wait for it, then close all.
+- The account trail-floor reset effect depends on `trailX.kind/every/by` by value (a new object came with every save).
+
 ## Where live prices come from (the lag bug, 2026-10-09)
 | Underlying | Option LTP / P&L source |
 |---|---|

@@ -124,3 +124,15 @@ test('isIntradayProduct treats carried-forward and unknown products as NOT intra
   // @ts-expect-error exercising a broker payload with no product field at all
   assert.strictEqual(isIntradayProduct(undefined), false);
 });
+
+test('openRowOfProduct: the open row of a closed-then-reopened pair, whichever Dhan lists first', async () => {
+  const { openRowOfProduct } = await import('./positionProduct.ts');
+  const closed = { securityId: '1', productType: 'INTRADAY', positionType: 'CLOSED', netQty: 0 };
+  const open = { securityId: '1', productType: 'INTRADAY', positionType: 'SHORT', netQty: -65 };
+  const margin = { securityId: '1', productType: 'MARGIN', positionType: 'SHORT', netQty: -130 };
+  assert.equal(openRowOfProduct([closed, open], 'INTRADAY'), open);
+  assert.equal(openRowOfProduct([open, closed], 'INTRADAY'), open);
+  assert.equal(openRowOfProduct([closed], 'INTRADAY'), closed, 'only the flat row: report it flat');
+  assert.equal(openRowOfProduct([closed, margin], 'INTRADAY'), closed, 'never another product');
+  assert.equal(openRowOfProduct([margin], 'INTRADAY'), undefined);
+});

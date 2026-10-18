@@ -30,3 +30,10 @@ test('sourceLotCapError: the Breakdown Scalper (bds) is capped at 20 lots on ope
   assert.match(sourceLotCapError(65 * 21, 'bds', 'NIFTY26O2025000PE', 65) ?? '', /21 lots\) exceeds the bds per-order cap of 20 lots/);
   assert.strictEqual(sourceLotCapError(65 * 99, undefined, 'NIFTY26O2025000PE', 65), null, 'a close names no source and is never capped');
 });
+
+test("'fts' (Focus Tool opens) is capped at FTS_KOTAK_MAX_ORDER_LOTS lots; a close sends no source and is never capped", async () => {
+  const { FTS_KOTAK_MAX_ORDER_LOTS } = await import('./focusToolUnderlyings.ts');
+  assert.equal(sourceLotCapError(FTS_KOTAK_MAX_ORDER_LOTS * 65, 'fts', 'NIFTY26O1925200PE', 65), null);
+  assert.match(String(sourceLotCapError((FTS_KOTAK_MAX_ORDER_LOTS + 1) * 65, 'fts', 'NIFTY26O1925200PE', 65)), /fts per-order cap/);
+  assert.equal(sourceLotCapError(10_000 * 65, undefined, 'NIFTY26O1925200PE', 65), null);
+});

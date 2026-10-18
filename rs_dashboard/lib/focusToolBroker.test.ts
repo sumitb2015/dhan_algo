@@ -55,3 +55,26 @@ test('the selector locks on any open REAL row, but not while rows are split acro
   assert.equal(brokerSelectorLocked([row('real', 65, 0)]), true, 'an unrecorded open row still locks');
   assert.equal(brokerSelectorLocked([row('real', 65, 0, 'kotak'), row('real', 65, 0, 'dhan')]), false);
 });
+
+test('legProductFor: a held REAL leg keeps the product it opened under; anything else follows the group', async () => {
+  const { legProductFor } = await import('./focusToolBroker.ts');
+  const held = { mode: 'real' as const, fill: { ceStrike: 25000, peStrike: null, ceQty: 65, peQty: 0, ceProduct: 'INTRADAY' } as FocusRow['fill'] };
+  // Group switched to MARGIN while the CE is open: the CE is still looked up under INTRADAY.
+  assert.equal(legProductFor(held, 'CE', 'MARGIN'), 'INTRADAY');
+  // The flat PE follows the group.
+  assert.equal(legProductFor(held, 'PE', 'MARGIN'), 'MARGIN');
+  // A leg opened before the stamp existed: the group's.
+  const legacy = { mode: 'real' as const, fill: { ceStrike: 25000, peStrike: null, ceQty: 65, peQty: 0 } as FocusRow['fill'] };
+  assert.equal(legProductFor(legacy, 'CE', 'MIS'), 'MIS');
+  // SIM rows never use a stamp.
+  assert.equal(legProductFor({ ...held, mode: 'sim' }, 'CE', 'MARGIN'), 'MARGIN');
+});
+
+test('nextLegProduct: stamped on open from flat, kept on an add or reduce, dropped when flat or SIM', async () => {
+  const { nextLegProduct } = await import('./focusToolBroker.ts');
+  assert.equal(nextLegProduct(false, 0, 65, undefined, 'INTRADAY'), 'INTRADAY');
+  assert.equal(nextLegProduct(false, 65, 130, 'INTRADAY', 'MARGIN'), 'INTRADAY', 'an add keeps the open product');
+  assert.equal(nextLegProduct(false, 130, 65, 'INTRADAY', 'MARGIN'), 'INTRADAY');
+  assert.equal(nextLegProduct(false, 65, 0, 'INTRADAY', 'MARGIN'), undefined);
+  assert.equal(nextLegProduct(true, 0, 65, undefined, 'INTRADAY'), undefined);
+});

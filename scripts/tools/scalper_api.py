@@ -95,7 +95,8 @@ def main():
             (df['UNDERLYING_SYMBOL'] == under) &
             (df['SM_EXPIRY_DATE'] == args.expiry)
         )
-        rows = df[mask][['STRIKE_PRICE', 'OPTION_TYPE', 'SECURITY_ID']].copy()
+        cols = ['STRIKE_PRICE', 'OPTION_TYPE', 'SECURITY_ID'] + (['SM_FREEZE_QTY'] if 'SM_FREEZE_QTY' in df.columns else [])
+        rows = df[mask][cols].copy()
         if rows.empty:
             print(json.dumps({'success': False, 'error': f'No options found for {args.underlying} {args.expiry}'}))
             sys.exit(0)
@@ -129,7 +130,16 @@ def main():
             elif opt == 'PE':
                 strikes[strike]['peId'] = sec_id
 
-        print(json.dumps({'success': True, 'data': {'lotSize': int(lot_size), 'strikes': strikes}}))
+        # The exchange freeze quantity (the first REFUSED order size, in Dhan's order units: contracts, or lots for MCX).
+        # The smallest across the expiry's strikes, so one value is safe for every strike. Absent when the master has
+        # no usable figure: callers then fall back to their own conservative limit.
+        data = {'lotSize': int(lot_size), 'strikes': strikes}
+        if 'SM_FREEZE_QTY' in rows.columns:
+            freeze = pd.to_numeric(rows['SM_FREEZE_QTY'], errors='coerce')
+            freeze = freeze[freeze > 1]
+            if not freeze.empty:
+                data['freezeQty'] = int(freeze.min())
+        print(json.dumps({'success': True, 'data': data}))
 
     elif args.cmd == 'lotsize':
         # Single authority for lot sizes across the dashboard. Exchange lot sizes

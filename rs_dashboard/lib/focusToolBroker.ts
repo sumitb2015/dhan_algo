@@ -64,3 +64,23 @@ export function brokerSelectorLocked(rows: readonly RowLike[]): boolean {
   if (heldBrokers(rows).conflict) return false;
   return rows.some(holdsRealPosition);
 }
+
+/**
+ * The product a leg's position is looked up and closed under: the one it was OPENED under (`fill.ceProduct`, stamped
+ * on its flat→held move) while the row holds it, else `groupProduct` — the index group's current product in this
+ * broker's vocabulary (a flat leg, a SIM row, or a leg opened before the stamp existed). A group switched MIS → NRML
+ * mid-trade used to point every lookup at a product the open leg is not under, so the leg read flat.
+ */
+export function legProductFor(row: RowLike, leg: 'CE' | 'PE', groupProduct: string): string {
+  if (row.mode === 'sim') return groupProduct;
+  const held = (Number(leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0) > 0;
+  const stamped = leg === 'CE' ? row.fill?.ceProduct : row.fill?.peProduct;
+  return held && stamped ? stamped : groupProduct;
+}
+
+/** The product to stamp on a leg after a ledger move: the group's on a flat→held move, kept while held, none when
+ *  flat or SIM (the nextFillBroker pattern). */
+export function nextLegProduct(isSim: boolean, prevQty: number, nextQty: number, prev: string | undefined, groupProduct: string): string | undefined {
+  if (isSim || !(nextQty > 0)) return undefined;
+  return prevQty > 0 ? prev : groupProduct;
+}

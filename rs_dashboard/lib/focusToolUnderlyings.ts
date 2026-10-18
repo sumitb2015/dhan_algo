@@ -104,3 +104,50 @@ export function brokerOrderQuantity(broker: string, u: FocusUnderlying, internal
 export function brokerToInternalQuantity(broker: string, u: FocusUnderlying, brokerQty: number): number {
   return broker === 'dhan' ? toInternalQty(u, brokerQty) : brokerQty;
 }
+
+// ── Order size: exchange freeze limit and the Focus Tool's own per-order caps ──
+//
+// An order above the exchange freeze quantity is rejected outright, so a leg that grew past it through adds, ladder
+// fills or re-entries could never be closed by a stop that sends its whole size in one order. Every Focus Tool order
+// is therefore sliced to the largest whole-lot quantity under BOTH the freeze limit and the route's per-source cap.
+
+/** Per-order cap on Focus Tool orders at /api/scalper/fast-order (source 'fts'), in Dhan's own quantity units (contracts
+ *  for NSE/BSE, lots for MCX). The route rejects anything above it; slices are kept under it. */
+export const FTS_DHAN_MAX_ORDER_QTY = 3750;
+/** Per-order lot cap on Focus Tool OPENING orders at the Kotak route (SOURCE_LOT_CAPS.fts). Closes carry no source. */
+export const FTS_KOTAK_MAX_ORDER_LOTS = 100;
+
+/** Used when the contract lookup carries no freeze quantity (an older cache): page units, at or under the exchange
+ *  limits seen in the Dhan master on 2026-10-18 (NIFTY 3511, BANKNIFTY 1441, SENSEX 1001, CRUDEOILM ≥ 494 lots). */
+export const FALLBACK_FREEZE_UNITS: Record<FocusUnderlying, number> = {
+  NIFTY: 1800, BANKNIFTY: 900, SENSEX: 1000, CRUDEOILM: 4000,
+};
+
+/**
+ * The largest single order for this row, in page units and whole lots. `freezePageUnits` is the lookup's freeze
+ * quantity already in page units; it is read as the first REFUSED quantity (the Dhan master lists NIFTY 3511 and
+ * SENSEX 1001), so an order stays one below it. Never under one lot.
+ */
+export function maxOrderUnits(broker: string, u: FocusUnderlying, lotSize: number, freezePageUnits?: number | null): number {
+  if (!(lotSize > 0)) return 0;
+  const freeze = Number(freezePageUnits) > 1 ? Number(freezePageUnits) - 1 : FALLBACK_FREEZE_UNITS[u];
+  const cap = broker === 'dhan'
+    ? toInternalQty(u, FTS_DHAN_MAX_ORDER_QTY)
+    : broker === 'kotak' ? FTS_KOTAK_MAX_ORDER_LOTS * lotSize : Number.POSITIVE_INFINITY;
+  const lots = Math.floor(Math.min(freeze, cap) / lotSize);
+  return Math.max(1, lots) * lotSize;
+}
+
+/** `total` page units cut into orders of at most `maxPer` (largest first; the remainder, if any, last). */
+export function sliceOrderUnits(total: number, maxPer: number): number[] {
+  if (!(total > 0)) return [];
+  if (!(maxPer > 0) || total <= maxPer) return [total];
+  const out: number[] = [];
+  let rest = total;
+  while (rest > 0) {
+    const s = Math.min(rest, maxPer);
+    out.push(s);
+    rest -= s;
+  }
+  return out;
+}

@@ -25,7 +25,7 @@ import {
 import { TabTable, type SortState, BUILDUP_STYLES } from './Scalper';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { withSavedBroker } from '@/hooks/withSavedBroker';
-import { closeOrderProduct, positionProduct } from '@/lib/positionProduct';
+import { closeOrderProduct, positionProduct, openRowOfProduct } from '@/lib/positionProduct';
 import { scaleBrokerPnl } from '@/lib/positionPnl';
 import { useCopyTrade, CopyTradeControls, type CopyTradeApi } from './CopyTrade';
 import { useFocusToolWS, focusWsBookForExpiry, type FocusWSQuotes, type FocusWSStrike } from '@/lib/useFocusToolWS';
@@ -67,9 +67,9 @@ import { computeRowPnl, mtmForQty, pnlPctOfPremium, blendFillBasis, fillRebasePa
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
 import { useTabLeader } from '@/hooks/useTabLeader';
-import { brokerSelectorLocked, heldBrokers, nextFillBroker, rowBrokerMismatch } from '@/lib/focusToolBroker';
+import { brokerSelectorLocked, heldBrokers, nextFillBroker, rowBrokerMismatch, legProductFor, nextLegProduct } from '@/lib/focusToolBroker';
 import { classifyOrderReply, openHoldReason } from '@/lib/focusToolOrderOutcome';
-import { FOCUS_UNDERLYINGS, FEED_BRIDGE_UNDERLYINGS, isTradingDayFor, FEED_SESSION_START_HM, FEED_SESSION_END_HM, UNDERLYING_META, isMcxUnderlying, brokerOrderQuantity, brokerToInternalQuantity } from '@/lib/focusToolUnderlyings';
+import { FOCUS_UNDERLYINGS, FEED_BRIDGE_UNDERLYINGS, isTradingDayFor, FEED_SESSION_START_HM, FEED_SESSION_END_HM, UNDERLYING_META, isMcxUnderlying, brokerOrderQuantity, brokerToInternalQuantity, maxOrderUnits, sliceOrderUnits } from '@/lib/focusToolUnderlyings';
 import type { FocusConfigWrite } from '@/lib/focusToolRowsMerge';
 import {
   duplicateRow as duplicateRowRules, applyPresetPatch, presetBlockedReason, presetRules, normalizePresetName,
@@ -144,6 +144,32 @@ const PRODUCT_ALIAS: Record<'INTRADAY' | 'MARGIN', Record<Broker, string>> = {
   MARGIN:   { dhan: 'MARGIN',   zerodha: 'NRML', kotak: 'NRML' },
 };
 
+/** placeLeg's options. `fresh`: size a close off a fresh position read (manual exits). */
+type PlaceLegOpts = {
+  reduce: boolean; lots?: number; all?: boolean; strikeOverride?: number; awaitFill?: boolean;
+  orb?: FocusOrbStamp | null; fresh?: boolean;
+};
+
+/**
+ * Run `fn` holding a cross-tab lock named after one leg (Web Locks API; same origin, so every Focus Tool tab).
+ * `fn(waited)`: `waited` is true when another holder had it first — its close may have just changed the book, so the
+ * caller must size off a fresh read. Gives up after 10 s (`onBusy`). Without Web Locks (an insecure http origin) there
+ * is no lock: `fn(true)`, so every close at least sizes off a fresh book.
+ */
+async function withLegCloseLock<T>(key: string, fn: (waited: boolean) => Promise<T>, onBusy: () => T): Promise<T> {
+  const locks = typeof navigator !== 'undefined' ? (navigator as { locks?: LockManager }).locks : undefined;
+  if (!locks?.request) return fn(true);
+  const name = `focus-tool-close:${key}`;
+  const first = await locks.request(name, { ifAvailable: true },
+    async lock => (lock ? { ran: true as const, value: await fn(false) } : { ran: false as const }));
+  if (first.ran) return first.value;
+  try {
+    return await locks.request(name, { signal: AbortSignal.timeout(10_000) }, () => fn(true));
+  } catch {
+    return onBusy();
+  }
+}
+
 /**
  * Pick the one position that matches `wantProduct` out of a same-symbol/id
  * candidate list, or the single unambiguous candidate if none carries a
@@ -156,12 +182,23 @@ const PRODUCT_ALIAS: Record<'INTRADAY' | 'MARGIN', Record<Broker, string>> = {
  */
 function pickPositionByProduct(candidates: PosRow[], wantProduct: string): PosRow | null {
   if (candidates.length === 0) return null;
-  const matched = candidates.find(
-    p => positionProduct(p as unknown as Record<string, unknown>) === wantProduct);
+  const matched = openRowOfProduct(candidates, wantProduct);
   if (matched) return matched;
   return candidates.length === 1
     && !positionProduct(candidates[0] as unknown as Record<string, unknown>)
     ? candidates[0] : null;
+}
+
+/** The group's product for `u` in this broker's vocabulary. */
+function groupProduct(u: FocusUnderlying, broker: Broker, groups: FocusIndexGroup[]): string {
+  return PRODUCT_ALIAS[groups.find(g => g.underlying === u)?.product ?? 'INTRADAY'][broker];
+}
+
+/** The product a leg is looked up and closed under — its own while held (lib/focusToolBroker.ts legProductFor). */
+function legProduct(
+  row: Pick<FocusRow, 'mode' | 'fill' | 'underlying'>, leg: 'CE' | 'PE', broker: Broker, groups: FocusIndexGroup[],
+): string {
+  return legProductFor(row, leg, groupProduct(row.underlying, broker, groups));
 }
 
 /**
@@ -3086,11 +3123,13 @@ function ControlStrip({
 // â”€â”€ Index Group Bar â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 function IndexGroupBar({
-  group, onChange, spot, liveAtm, lot, dte, wsLive,
+  group, onChange, spot, liveAtm, lot, dte, wsLive, productLocked,
 }: {
   group: FocusIndexGroup;
   onChange: (patch: Partial<FocusIndexGroup>) => void;
   spot: number; liveAtm: number; lot: number | null; dte: number | null; wsLive: boolean;
+  /** Why PRODUCT is locked (a row holds a position), or null. */
+  productLocked?: string | null;
 }) {
   return (
     <div className="bg-zinc-900/60 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between gap-4 flex-wrap">
@@ -3138,9 +3177,11 @@ function IndexGroupBar({
           <span className="text-[11px] font-black text-zinc-500 uppercase tracking-widest">PRODUCT</span>
           <select
             value={group.product}
-            title="MIS is intraday and auto-squares off; NRML carries overnight"
+            disabled={!!productLocked}
+            aria-label={`${group.underlying} product`}
+            title={productLocked ?? 'MIS is intraday and auto-squares off; NRML carries overnight'}
             onChange={e => onChange({ product: e.target.value as 'INTRADAY' | 'MARGIN' })}
-            className="text-xs font-bold h-7 px-2 border border-zinc-700 rounded-lg bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500"
+            className="text-xs font-bold h-7 px-2 border border-zinc-700 rounded-lg bg-zinc-900 text-zinc-200 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <option value="INTRADAY">MIS</option>
             <option value="MARGIN">NRML</option>
@@ -4988,6 +5029,12 @@ function FocusTool() {
   // Orders sent but not confirmed filled in full, keyed row:leg — see
   // UnconfirmedOrder / reconcileUnconfirmedOrder.
   const unconfirmedOrderRef = useRef<Map<string, UnconfirmedOrder>>(new Map());
+  // Background fill checks still running per row:leg (placeLeg without awaitFill returns on the broker's ACK; the
+  // order can still be rejected a moment later — see awaitLegSettled).
+  const confirmsInFlightRef = useRef<Map<string, number>>(new Map());
+  // Rows left one-sided by an order the broker accepted and then rejected (margin, RMS): shown as a banner until the
+  // user dismisses it or the row is no longer one-sided. A toast lasted 4 s, which is how a naked leg went unnoticed.
+  const [nakedAlerts, setNakedAlerts] = useState<{ rowId: string; kind: 'entry' | 'add'; missing: ('CE' | 'PE')[]; at: number; text: string }[]>([]);
   // Last "position is on another broker" toast per row (refuseForeignBroker), so a stop re-firing every tick can't spam.
   const foreignBrokerToastRef = useRef<Map<string, number>>(new Map());
   // Rows held by an UNKNOWN order outcome, synchronously: the persisted FocusRow.orderUnknown lands in the scheduler's
@@ -5033,6 +5080,8 @@ function FocusTool() {
   // entry window stays open for the rest of the session, so without this a
   // row would re-enter on every 5s tick.
   const autoEnteringRef = useRef<Set<string>>(new Set());
+  // Rows whose entry legs are being SENT right now (autoEnteringRef is the one-entry latch and stays set after).
+  const enteringNowRef = useRef<Set<string>>(new Set());
   // Overall Momentum: each row's start premium and the strikes picked at the
   // entry time, stamped with its day (in memory — a reload re-captures it).
   // `min` / `last` / `close` build the 1-minute candle close of the combined
@@ -5472,10 +5521,14 @@ function FocusTool() {
   // render could fall, which is the one thing a trailing lock must never do).
   // This effect only RESETS it: turning the trail off, or changing its trigger
   // or gap, invalidates a floor derived from the old settings.
+  // By VALUE: applyServerConfig rebuilds `trailX` as a new object after every save and every re-read, and depending on
+  // the object reset the floor on each of them — in the default trail a reset while P&L sat between the floor and the
+  // trigger disarmed the lock until P&L climbed back to the trigger.
   useEffect(() => {
     lockFloorRef.current = null;
+    simLockFloorRef.current = null;
     setLockMtm(null);
-  }, [trailEnabled, triggerRupees, lockRupees, trailX]);
+  }, [trailEnabled, triggerRupees, lockRupees, trailX.kind, trailX.every, trailX.by]);
 
   const underlyingPnl = useMemo(() => {
     const out: Record<FocusUnderlying, number> = { NIFTY: 0, BANKNIFTY: 0, SENSEX: 0, CRUDEOILM: 0 };
@@ -5647,17 +5700,17 @@ function FocusTool() {
       // Prefer the candidate under this row's own group product; only fall
       // back to a symbol/id-only match when it is unambiguous — see
       // findPositionForRef's own doc comment.
-      const wantProduct = PRODUCT_ALIAS[group?.product ?? 'INTRADAY'][broker];
+      // Per leg: a held leg is looked up under the product it was opened with (legProduct).
       // A sim row's "position" is its own paper ledger, never the broker book —
       // a real position at the same strike (another row, a manual trade) is
       // not this paper row's, and the paper fill is nowhere in the broker's.
       const sim = isSimRow(row);
       const cePosition = sim
         ? simPositionFor(row.id, 'CE', row.fill?.ceQty ?? 0, row.fill?.ceEntry)
-        : findPositionForRef(positions, broker, ceRef, 'CE', wantProduct);
+        : findPositionForRef(positions, broker, ceRef, 'CE', legProduct(row, 'CE', broker, config.groups));
       const pePosition = sim
         ? simPositionFor(row.id, 'PE', row.fill?.peQty ?? 0, row.fill?.peEntry)
-        : findPositionForRef(positions, broker, peRef, 'PE', wantProduct);
+        : findPositionForRef(positions, broker, peRef, 'PE', legProduct(row, 'PE', broker, config.groups));
 
       const ltpCe = pick(ceWs?.ce?.ltp, ceCh?.ce);
       const ltpPe = pick(peWs?.pe?.ltp, peCh?.pe);
@@ -5993,10 +6046,35 @@ function FocusTool() {
       // Sim rows are untouched: the broker exit didn't close their paper
       // legs, and wiping their ledger would silently drop the forward test.
       if (exitOk) {
+        // The routes report the closing orders PLACED, not filled: an exit rejected after its ACK would leave a live
+        // position on a row whose ledger is gone, with nothing watching it. Retire a row only once a fresh book shows
+        // every leg it holds flat; the rest keep their ledgers (and stops) and are named.
+        const isCandidate = (r: FocusRow) => r.status !== 'draft' && !isSimRow(r) && !rowBrokerMismatch(r, broker);
+        const legFlatIn = (book: PosRow[], r: FocusRow, leg: 'CE' | 'PE') => {
+          if (!rowOwnsLeg(r, leg)) return true;
+          const strike = leg === 'CE' ? r.fill?.ceStrike : r.fill?.peStrike;
+          const expiry = r.expiry || expiries[r.underlying]?.[0] || '';
+          const ref = strike != null ? lookups[expKey(r.underlying, expiry)]?.strikes?.[strikeKey(strike)] : undefined;
+          if (!ref) return false;   // cannot tell: keep it watched
+          const p = findPositionForRef(book, broker, ref, leg, legProduct(r, leg, broker, schedulerRef.current.config.groups));
+          return Number(p?.netQty ?? 0) === 0;
+        };
+        const confirmedFlat = new Set<string>();
+        const deadline = Date.now() + 8_000;
+        for (;;) {
+          await new Promise(res => setTimeout(res, 800));
+          const book = await fetchPositionsNow();
+          if (book) {
+            for (const r of schedulerRef.current.config.rows) {
+              if (isCandidate(r) && legFlatIn(book, r, 'CE') && legFlatIn(book, r, 'PE')) confirmedFlat.add(r.id);
+            }
+            if (schedulerRef.current.config.rows.filter(isCandidate).every(r => confirmedFlat.has(r.id))) break;
+          }
+          if (Date.now() >= deadline) break;
+        }
         // schedulerRef holds the latest config; this closure is from before the awaits above.
         const nextRows = schedulerRef.current.config.rows.map(r => {
-          // A row whose position is on another broker account was not touched by this account's exit.
-          if (r.status === 'draft' || isSimRow(r) || rowBrokerMismatch(r, broker)) return r;
+          if (!isCandidate(r) || !confirmedFlat.has(r.id)) return r;
           return {
             ...r,
             status: 'exited' as FocusRow['status'],
@@ -6004,11 +6082,16 @@ function FocusTool() {
             updatedAt: new Date().toISOString(),
           };
         });
+        const stillOpen = schedulerRef.current.config.rows.filter(r => isCandidate(r) && !confirmedFlat.has(r.id) && !rowFlat(r));
         setConfig(prev => ({
           ...prev,
           rows: prev.rows.map(r => nextRows.find(n => n.id === r.id) ?? r),
         }));
         void saveConfig({ rows: nextRows });
+        if (stillOpen.length) {
+          addToast('error', 'Exit All: not confirmed flat',
+            `${stillOpen.map(r => `${r.underlying} ${r.id.slice(-4)}`).join(', ')} still show quantity at the broker 8 s after the exit — left open so their stops keep watching. Check the position book.`);
+        }
       } else {
         addToast('error', 'Exit All not confirmed', 'Rows were left as they are so their stops stay watched. Check the broker positions.');
       }
@@ -6366,7 +6449,8 @@ function FocusTool() {
         const nextPeQty = leg === 'PE' ? Math.max(0, (f?.peQty ?? 0) + delta) : (f?.peQty ?? 0);
         // The P&L basis (fill.ceFillEntry) blends the same way from the estimate; rebaseOpenOnTradedPrice then swaps
         // in the broker's traded price for this fill's share. Kept only where it can be made exact — a SIM paper fill,
-        // or a Dhan order (traded price): Zerodha / Kotak rows leave it unset and mark off the broker's own average.
+        // or a Dhan / Kotak order (both report the order's own traded price): Zerodha rows leave it unset and mark off
+        // the broker's own average.
         // Unknown stays unknown (blendFillBasis never dilutes toward 0); a reduce leaves it; a flat leg drops it.
         const trackFill = isSimRow(r) || tracksOrderStatus(broker);
         const prevFill = leg === 'CE' ? f?.ceFillEntry : f?.peFillEntry;
@@ -6415,6 +6499,14 @@ function FocusTool() {
           broker: nextFillBroker(isSimRow(r),
             { ceQty: f?.ceQty ?? 0, peQty: f?.peQty ?? 0, broker: f?.broker },
             { ceQty: nextCeQty, peQty: nextPeQty }, broker),
+          // The product this leg opened under (legProduct): stamped on its flat→held move from the group's product —
+          // locked while the index holds a position (updateGroup) — kept while held, dropped when flat.
+          ceProduct: leg === 'CE'
+            ? nextLegProduct(isSimRow(r), prevQty, nextCeQty, f?.ceProduct, groupProduct(r.underlying, broker, prev.groups))
+            : (nextCeQty > 0 && !isSimRow(r) ? f?.ceProduct : undefined),
+          peProduct: leg === 'PE'
+            ? nextLegProduct(isSimRow(r), prevQty, nextPeQty, f?.peProduct, groupProduct(r.underlying, broker, prev.groups))
+            : (nextPeQty > 0 && !isSimRow(r) ? f?.peProduct : undefined),
           ceEntry: leg === 'CE' ? nextEntry : (f?.ceEntry ?? null),
           peEntry: leg === 'PE' ? nextEntry : (f?.peEntry ?? null),
           ceFillEntry: nextCeQty <= 0 ? undefined : (leg === 'CE' ? (nextFillEntry ?? undefined) : f?.ceFillEntry),
@@ -6508,7 +6600,7 @@ function FocusTool() {
           ? rows.filter(p => String(p.securityId) === String(id))
           : rows.filter(p => String(p.tradingSymbol) === sym);
         const pos = product
-          ? candidates.find(p => positionProduct(p as unknown as Record<string, unknown>) === product)
+          ? openRowOfProduct(candidates, product)
           : (candidates.length === 1 ? candidates[0] : undefined);
         const netQtyNow = Number(pos?.netQty ?? 0);
         // Net moves toward BUY (+) or SELL (-) by exactly the filled
@@ -6587,7 +6679,7 @@ function FocusTool() {
           ? rows.filter(p => String(p.securityId) === String(rec.securityId))
           : rows.filter(p => String(p.tradingSymbol) === String(rec.symbol));
         const pos = rec.product
-          ? cands.find(p => positionProduct(p as unknown as Record<string, unknown>) === rec.product)
+          ? openRowOfProduct(cands, rec.product)
           : (cands.length === 1 ? cands[0] : undefined);
         const netNow = Number(pos?.netQty ?? 0);
         const observed = rec.side === 'BUY' ? netNow - rec.netBefore : rec.netBefore - netNow;
@@ -6657,11 +6749,21 @@ function FocusTool() {
    * a reducing order is clamped to the quantity the broker actually shows on
    * that leg — never more.
    */
-  async function placeLeg(
-    row: FocusRow,
-    leg: 'CE' | 'PE',
-    opts: { reduce: boolean; lots?: number; all?: boolean; strikeOverride?: number; awaitFill?: boolean; orb?: FocusOrbStamp | null },
-  ): Promise<boolean> {
+  async function placeLeg(row: FocusRow, leg: 'CE' | 'PE', opts: PlaceLegOpts): Promise<boolean> {
+    if (isSimRow(row) || !opts.reduce) return placeLegInner(row, leg, opts, false);
+    // Closes run under a cross-tab lock on the leg. Manual buttons work in every tab and each tab sizes a close off its
+    // own ledger and 2s-old book: a click in one tab right after the leader's stop sent a second buy-back and turned the
+    // short long. A close that had to wait for the lock, a manual one, or one from a tab that is not the leader sizes
+    // off a FRESH book.
+    const fresh = !!opts.fresh || !leaderRef.current;
+    return withLegCloseLock(`${row.id}:${leg}`, waited => placeLegInner(row, leg, opts, fresh || waited), () => {
+      addToast('error', `${row.underlying} ${leg} close not sent`,
+        'Another close on this leg (possibly in another tab) did not finish within 10 s — it is retried while the rule still holds');
+      return false;
+    });
+  }
+
+  async function placeLegInner(row: FocusRow, leg: 'CE' | 'PE', opts: PlaceLegOpts, freshBook: boolean): Promise<boolean> {
     const u = row.underlying;
     const expiry = row.expiry || expiries[u]?.[0] || '';
     const what = `${u} ${leg}`;
@@ -6732,8 +6834,8 @@ function FocusTool() {
     // check below, which made every shift-reopen report itself as unfilled
     // even when the real market order went through in full — see the shift
     // audit for the exact mechanism.
-    const group = config.groups.find(g => g.underlying === u);
-    const wantProduct = PRODUCT_ALIAS[group?.product ?? 'INTRADAY'][broker];
+    // A held leg: the product it was opened under (legProduct), never the group's current one.
+    const wantProduct = legProduct(latestRow, leg, broker, config.groups);
 
     // A previous order on this leg is still unconfirmed: settle it before
     // any close, and size off a FRESH book, never the 2s-poll state —
@@ -6750,7 +6852,17 @@ function FocusTool() {
         return false;
       }
       bookRows = fresh;
+    } else if (opts.reduce && freshBook) {
+      const fresh = await fetchPositionsNow();
+      if (!fresh) {
+        addToast('error', `${what} close not sent`, `${BROKER_LABELS[broker]} position book not readable — retrying`);
+        return false;
+      }
+      bookRows = fresh;
     }
+    // The ledger to size from: read after the awaits above (a ladder fill credited while its cancel ran is in it),
+    // never the caller's copy of the row, which can be several renders old.
+    const sizeRow = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? latestRow;
     if (opts.reduce && unconfirmedOrderRef.current.has(closeKey)) {
       const r = await reconcileUnconfirmedOrder(closeKey);
       if (r.state !== 'resolved') {
@@ -6773,7 +6885,7 @@ function FocusTool() {
     const pos = findPositionForRef(bookRows, broker, ref, leg, wantProduct);
     const netQty = Number(pos?.netQty ?? 0);
 
-    const pageOwn = Math.max(0, (Number(leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0) - credited);
+    const pageOwn = Math.max(0, (Number(leg === 'CE' ? sizeRow.fill?.ceQty : sizeRow.fill?.peQty) || 0) - credited);
     const ownQty = pageOwn > 0 ? pageOwn : undefined;
 
     let quantity: number;
@@ -6782,7 +6894,7 @@ function FocusTool() {
       const brokerQty = Math.abs(netQty);
 
       if (netQty === 0) {
-        const openedTs = leg === 'CE' ? row.fill?.ceOpenedTs : row.fill?.peOpenedTs;
+        const openedTs = leg === 'CE' ? sizeRow.fill?.ceOpenedTs : sizeRow.fill?.peOpenedTs;
         // Refuse to ghost-drop a leg this row only just opened — Kotak/
         // Zerodha have no fill-confirmation socket, so a poll right after a
         // real fill can still read the old (flat) position for a few
@@ -6802,9 +6914,9 @@ function FocusTool() {
           // trade(s) when Dhan's trade book explains the whole qty exactly;
           // otherwise book nothing and say so, rather than invent a price
           // (dropping it silently lost the slice's P&L — 2026-10-01 audit).
-          const entry = live ? legFillEntry(row, leg, live)
-            : (Number(leg === 'CE' ? (row.fill?.ceFillEntry ?? row.fill?.ceEntry) : (row.fill?.peFillEntry ?? row.fill?.peEntry)) || 0);
-          const openedAt = Number(leg === 'CE' ? row.fill?.ceOpenedTs : row.fill?.peOpenedTs) || 0;
+          const entry = live ? legFillEntry(sizeRow, leg, live)
+            : (Number(leg === 'CE' ? (sizeRow.fill?.ceFillEntry ?? sizeRow.fill?.ceEntry) : (sizeRow.fill?.peFillEntry ?? sizeRow.fill?.peEntry)) || 0);
+          const openedAt = Number(leg === 'CE' ? sizeRow.fill?.ceOpenedTs : sizeRow.fill?.peOpenedTs) || 0;
           const outsideIdent = broker === 'dhan' ? securityId : broker === 'kotak' ? symbol : undefined;
           const match = outsideIdent ? await outsideCloseExit(String(outsideIdent), pageOwn, openedAt) : null;
           const exit = match?.exitPrice ?? null;
@@ -6822,8 +6934,22 @@ function FocusTool() {
         addToast('error', `${what} already flat`, 'Nothing to reduce');
         return false;
       }
-      // Close against the direction the broker actually shows, not against an
-      // assumed short — a row could be held long.
+      // This tool only ever opens by SELLING, so a leg it holds is short. A broker book that reads LONG on the contract
+      // means something else netted it (another row, a manual or strategy buy): selling into it would close a position
+      // this row does not own and book the row's P&L with the wrong sign. Refused; a leg with no ledger (a position
+      // this page did not open) still closes in the direction the broker shows.
+      if (ownQty !== undefined && ownQty > 0 && netQty > 0) {
+        const k = `${row.id}:${leg}:dir`;
+        if (Date.now() - (foreignBrokerToastRef.current.get(k) ?? 0) > 10_000) {
+          foreignBrokerToastRef.current.set(k, Date.now());
+          addToast('error', `${what} close not sent`,
+            `This row holds a ${pageOwn}-qty SHORT but ${BROKER_LABELS[broker]} shows the contract LONG ${netQty} — something else netted it. Check the position book and close it there.`);
+          // Throttled with the toast: a stop re-fires this every tick while it is breached.
+          logEvent('close_refused_direction', sizeRow, 'broker shows the contract long; the row holds a short', { leg, netQty, own: pageOwn });
+        }
+        return false;
+      }
+      // Close against the direction the broker actually shows.
       side = netQty < 0 ? 'BUY' : 'SELL';
 
       // Size against THIS row's own ledger, clamped by what the broker still
@@ -6852,10 +6978,10 @@ function FocusTool() {
     }
     if (!(quantity > 0)) return false;
 
-    // Reducing: the position's own product. Opening: the group's.
+    // Reducing: the position's own product. Opening: the leg's (its own while held, else the group's).
     const rawProduct = opts.reduce && pos
       ? positionProduct(pos as unknown as Record<string, unknown>)
-      : PRODUCT_ALIAS[group?.product ?? 'INTRADAY'][broker];
+      : wantProduct;
     const product = closeOrderProduct(broker, rawProduct);
     if (!product) {
       addToast('error', `${what} order not sent`, `Cannot place a market order against product ${rawProduct}`);
@@ -6868,15 +6994,25 @@ function FocusTool() {
     }
     const exchange = orderExchange(broker, u);
     const url = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
-    // `quantity` is in page units (barrels for MCX); the broker takes lots there.
-    const sentQty = brokerOrderQuantity(broker, u, quantity);
-    if (!(sentQty > 0)) {
+    // `quantity` is in page units (barrels for MCX); the broker takes lots there. Cut into orders under the exchange
+    // freeze and the route's per-order cap (maxOrderUnits): one order above the freeze is refused outright, so a leg
+    // grown past it by adds, ladder fills or re-entries could otherwise never be closed by its stop.
+    const freezeRaw = Number(lookups[expKey(u, expiry)]?.freezeQty) || 0;
+    const maxPer = maxOrderUnits(broker, u, lotSize, freezeRaw > 0 ? brokerToInternalQuantity(broker, u, freezeRaw) : null);
+    const slices = sliceOrderUnits(quantity, maxPer)
+      .map(units => brokerOrderQuantity(broker, u, units))
+      .filter(wire => wire > 0)
+      .map(wire => ({ wire, units: brokerToInternalQuantity(broker, u, wire) }));
+    if (!slices.length) {
       addToast('error', `${what} order not sent`, `${quantity} is under one ${u} lot (${UNDERLYING_META[u].unitsPerLot})`);
       return false;
     }
-    const body = broker === 'dhan'
-      ? { securityId, quantity: sentQty, side, orderType: 'MARKET', exchangeSegment: exchange, ...product.fields, source: FTS_ORDER_SOURCE }
-      : { tradingsymbol: symbol, quantity: sentQty, side, orderType: 'MARKET', exchange, ...product.fields };
+    const sentTotal = slices.reduce((a, s) => a + s.units, 0);
+    const bodyFor = (wire: number) => broker === 'dhan'
+      ? { securityId, quantity: wire, side, orderType: 'MARKET', exchangeSegment: exchange, ...product.fields, source: FTS_ORDER_SOURCE }
+      // Kotak's per-source lot cap is for opens only: a close must never be refused for its size.
+      : { tradingsymbol: symbol, quantity: wire, side, orderType: 'MARKET', exchange, ...product.fields,
+          ...(broker === 'kotak' && !opts.reduce ? { source: FTS_ORDER_SOURCE } : {}) };
 
     // Computed before the send: an UNKNOWN outcome needs them for its hold record as much as a fill does.
     // Snapshot entry + LTP now so a reduce can bank the closed slice's
@@ -6887,8 +7023,8 @@ function FocusTool() {
     // (2026-10-01 audit). Both slots carry it; mtmForQty picks by netQty.
     // P&L basis: the leg's ACTUAL average fill (legFillEntry), not the stop reference — a close books what the
     // broker really filled on both sides (the exit side is rebased on the traded price below).
-    const ownEntry = live ? legFillEntry(row, leg, live)
-      : (Number(leg === 'CE' ? (row.fill?.ceFillEntry ?? row.fill?.ceEntry) : (row.fill?.peFillEntry ?? row.fill?.peEntry)) || 0);
+    const ownEntry = live ? legFillEntry(sizeRow, leg, live)
+      : (Number(leg === 'CE' ? (sizeRow.fill?.ceFillEntry ?? sizeRow.fill?.ceEntry) : (sizeRow.fill?.peFillEntry ?? sizeRow.fill?.peEntry)) || 0);
     const bookedSnap = opts.reduce ? {
       netQty,
       buyAvg: ownEntry,
@@ -6906,17 +7042,33 @@ function FocusTool() {
         ? simQuote(u, expiry, Number(strike), leg)
         : Number(leg === 'CE' ? live?.ltpCe : live?.ltpPe) || 0;
 
-    let replyStatus: number | null = null;
-    let reply: unknown;
-    try {
-      const res = await fetch(url, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-      });
-      replyStatus = res.status;
-      reply = await res.json().catch(() => undefined);
-    } catch { /* no reply at all: classified unknown below */ }
-    const outcome = classifyOrderReply(replyStatus, reply);
-    if (outcome.kind === 'unknown') {
+    // Slices go one after the other. An UNKNOWN slice stops the run and is held with everything already sent (a late
+    // fill of any of them is credited from the position book); a rejected slice stops it and the row tracks what was
+    // placed.
+    const orderIds: string[] = [];
+    const idUnits: number[] = [];
+    let placedUnits = 0;
+    let missingId = false;
+    let unknownSlice: { units: number; error: string } | null = null;
+    let rejectedError: string | null = null;
+    for (const s of slices) {
+      let replyStatus: number | null = null;
+      let reply: unknown;
+      try {
+        const res = await fetch(url, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(bodyFor(s.wire)),
+        });
+        replyStatus = res.status;
+        reply = await res.json().catch(() => undefined);
+      } catch { /* no reply at all: classified unknown below */ }
+      const outcome = classifyOrderReply(replyStatus, reply);
+      if (outcome.kind === 'unknown') { unknownSlice = { units: s.units, error: outcome.error }; break; }
+      if (outcome.kind === 'rejected') { rejectedError = outcome.error; break; }
+      placedUnits += s.units;
+      if (outcome.orderId) { orderIds.push(outcome.orderId); idUnits.push(s.units); } else missingId = true;
+      noteOwnOrder(outcome.orderId);
+    }
+    if (unknownSlice) {
       // It may be live. Never report it as rejected: the callers would retry it (a doubled short) or, for an
       // auto-entry, clear the latch and re-sell every tick. Hold it like an unconfirmed order, so a late fill is
       // credited to this row, and (for an open) pause every further open on the row until the user has checked.
@@ -6928,21 +7080,35 @@ function FocusTool() {
         orderId: null,
         securityId: securityId ? String(securityId) : null,
         symbol: symbol ? String(symbol) : null,
-        product: rawProduct, netBefore: netQty, requested: quantity, side,
+        product: rawProduct, netBefore: netQty, requested: placedUnits + unknownSlice.units, side,
         snap: bookedSnap ?? { netQty, buyAvg: 0, sellAvg: 0, ltp: 0 },
-      }, outcome.error);
+      }, placedUnits > 0
+        ? `${unknownSlice.error} (${placedUnits} of ${sentTotal} had already gone out in earlier slices.)`
+        : unknownSlice.error);
       return false;
     }
-    if (outcome.kind === 'rejected') {
-      addToast('error', `${what} order rejected`, outcome.error);
+    if (placedUnits === 0) {
+      addToast('error', `${what} order rejected`, rejectedError ?? 'Unknown broker error');
       return false;
     }
-    const j = { success: true as const, order_id: outcome.orderId ?? undefined };
+    if (rejectedError) {
+      addToast('error', `${what}: ${placedUnits} of ${sentTotal} sent`,
+        `A later slice was rejected (${rejectedError}) — the rest was NOT sent. This row tracks what was placed.`);
+    }
+    // From here on, the quantity is what actually went out.
+    quantity = placedUnits;
+    const sliced = slices.length > 1;
+    // One order carried it all: its fill is confirmed and re-priced off that order. Several slices: by the position
+    // book, and each slice is re-priced on its own once the whole quantity is confirmed.
+    const singleId = !sliced && orderIds.length === 1 ? orderIds[0] : null;
+    const j = { success: true as const, order_id: singleId ?? undefined };
 
     try {
       {
         noteOwnOrder(j.order_id);
-        addToast('success', `${side} ${quantity} ${strike} ${leg}`, j.order_id ? `Order ${j.order_id}` : undefined);
+        addToast('success', `${side} ${quantity} ${strike} ${leg}`,
+          orderIds.length > 1 ? `${orderIds.length} orders (freeze limit ${maxPer}): ${orderIds.join(', ')}`
+            : orderIds.length ? `Order ${orderIds[0]}` : undefined);
         // Confirm the actual fill in the background rather than blocking on
         // it — this is a scalping terminal, and the row's busy lock (see
         // runRowAction) is held until this function returns, so awaiting the
@@ -6954,6 +7120,10 @@ function FocusTool() {
         // in the meantime, since it never trusts the ledger past what the
         // broker book actually shows.
         const applyFill = (filled: number) => {
+          // Orders to re-price from their own traded price: the one order, or every slice once ALL of them filled
+          // (with a partial fill there is no telling which slice filled).
+          const priced: [string, number][] = singleId ? [[singleId, filled]]
+            : sliced && !missingId && filled >= quantity ? orderIds.map((id, i): [string, number] => [id, idUnits[i]]) : [];
           // The leg as it stood before this fill — what a traded-price correction of an open is measured against.
           const before = schedulerRef.current.config.rows.find(r => r.id === row.id)?.fill;
           const prevHeld = Number(leg === 'CE' ? before?.ceQty : before?.peQty) || 0;
@@ -6980,7 +7150,8 @@ function FocusTool() {
           // rejected/unconfirmed close left a live short untracked, with no
           // stop watching it.
           const delta = opts.reduce
-            ? (opts.all && filled >= quantity ? -pageOwn : -filled)
+            // Only when the WHOLE close went out: a rejected later slice left the rest of the leg open.
+            ? (opts.all && !rejectedError && filled >= quantity ? -pageOwn : -filled)
             : filled;
           if (filled < quantity) {
             unconfirmedOrderRef.current.set(`${row.id}:${leg}`, {
@@ -6997,6 +7168,8 @@ function FocusTool() {
               netBefore: netQty,
               requested: quantity,
               filled,
+              // Sliced: settled from the position book (no single order to read), held as long as an unknown order.
+              ...(sliced ? { holdMs: UNKNOWN_ORDER_HOLD_MS } : {}),
               side,
               snap: bookedSnap ?? { netQty, buyAvg: 0, sellAvg: 0, ltp: 0 },
               ts: Date.now(), lastCheck: Date.now(), lastToast: Date.now(),
@@ -7006,8 +7179,8 @@ function FocusTool() {
             opts.reduce ? undefined : Number(strike), bookedDelta, openEntryPx, opts.reduce ? undefined : opts.orb);
           // The close booked at the LTP snapshot; swap in the order's traded
           // average once Dhan reports it.
-          if (opts.reduce && filled > 0 && bookedDelta !== 0 && bookedSnap && tracksOrderStatus(broker) && j.order_id) {
-            void rebaseBookedOnTradedPrice(row.id, String(j.order_id), bookedSnap.netQty < 0, bookedSnap.ltp, filled);
+          if (opts.reduce && filled > 0 && bookedDelta !== 0 && bookedSnap && tracksOrderStatus(broker)) {
+            for (const [id, q] of priced) void rebaseBookedOnTradedPrice(row.id, id, bookedSnap.netQty < 0, bookedSnap.ltp, q);
           }
           // AlgoTest "Tgt/SL Ref Price: Traded Price" — re-base this fill's
           // share of the entry on what the broker actually filled at.
@@ -7015,8 +7188,10 @@ function FocusTool() {
           // from this leg's real fill, not the LTP quoted a moment before the order.
           // ONE order read corrects both: the stop reference (only for refPrice 'traded' or a shift's reopen) and the
           // P&L basis (always — a held leg whose basis is already unknown is left to its fallback).
-          if (!opts.reduce && filled > 0 && tracksOrderStatus(broker) && j.order_id) {
-            void rebaseOpenOnTradedPrice(row.id, leg, String(j.order_id), openEntryPx, filled, {
+          // Per slice, each against the same totals: fillRebasePatch moves only that slice's share of the basis, so the
+          // corrections add up.
+          if (!opts.reduce && filled > 0 && tracksOrderStatus(broker)) for (const [id, q] of priced) {
+            void rebaseOpenOnTradedPrice(row.id, leg, id, openEntryPx, q, {
               stop: row.refPrice === 'traded' || opts.strikeOverride != null,
               fill: !(prevHeld > 0 && !(prevBasis > 0)),
               heldAfterAdd: prevHeld + filled,
@@ -7024,7 +7199,8 @@ function FocusTool() {
               assumed: openEntryPx > 0 ? openEntryPx : (prevHeld > 0 ? prevBasis : 0),
             });
           }
-          return filled >= quantity && markOk;
+          // A close whose later slice was rejected is not a full close: no re-entry / roll may follow it.
+          return filled >= quantity && markOk && !(opts.reduce && rejectedError);
         };
         if (opts.awaitFill) {
           const filled = await confirmLegFillQty(
@@ -7034,8 +7210,15 @@ function FocusTool() {
           pollPositions();
           return applyFill(filled);
         }
+        // Counted until the fill check has landed (applyFill records any shortfall as unconfirmed first), so a caller
+        // can wait for this order's real outcome — awaitLegSettled.
+        const ck = `${row.id}:${leg}`;
+        confirmsInFlightRef.current.set(ck, (confirmsInFlightRef.current.get(ck) ?? 0) + 1);
         confirmLegFillQty(u, expiry, leg, strike, rawProduct, netQty, side, quantity).then(filled => {
           applyFill(filled);
+        }).finally(() => {
+          const left = (confirmsInFlightRef.current.get(ck) ?? 1) - 1;
+          if (left > 0) confirmsInFlightRef.current.set(ck, left); else confirmsInFlightRef.current.delete(ck);
         });
         pollPositions();
         return true;
@@ -7066,6 +7249,66 @@ function FocusTool() {
         `This row's position is on ${BROKER_LABELS[owner]}, the page is on ${BROKER_LABELS[broker]}. Switch the broker to ${BROKER_LABELS[owner]} to manage it.`);
     }
     return true;
+  }
+
+  /**
+   * Wait for an open's REAL outcome. placeLeg without awaitFill returns on the broker's ACK, and Dhan and Kotak both
+   * can still reject the order a moment later (margin / RMS), so "accepted" is not "open". True = the leg now holds
+   * more than `qtyBefore`; false = nothing about the order is pending any more and the leg did not grow (rejected, or
+   * never filled); null = still unsettled at the deadline (it stays held as an unconfirmed order).
+   */
+  async function awaitLegSettled(rowId: string, leg: 'CE' | 'PE', qtyBefore: number, maxMs = 75_000): Promise<boolean | null> {
+    const key = `${rowId}:${leg}`;
+    const held = () => {
+      const r = schedulerRef.current.config.rows.find(x => x.id === rowId);
+      return r ? Number(leg === 'CE' ? r.fill?.ceQty : r.fill?.peQty) || 0 : null;
+    };
+    const deadline = Date.now() + maxMs;
+    for (;;) {
+      const q = held();
+      if (q == null) return null;
+      if (q > qtyBefore) return true;
+      if (!confirmsInFlightRef.current.has(key) && !unconfirmedOrderRef.current.has(key)) {
+        // Settled: give the last ledger write a render to land before calling the leg unfilled.
+        await new Promise(res => setTimeout(res, 600));
+        const q2 = held();
+        return q2 == null ? null : q2 > qtyBefore;
+      }
+      if (Date.now() >= deadline) return null;
+      await new Promise(res => setTimeout(res, 300));
+    }
+  }
+
+  /** A row left one-sided: a persistent banner plus an event-log entry. */
+  function raiseNakedAlert(row: FocusRow, kind: 'entry' | 'add', missing: ('CE' | 'PE')[], text: string) {
+    logEvent('naked_leg', row, text, { missing: missing.join('+') });
+    addToast('error', `${row.underlying}: NAKED ${missing.join('+')} leg`, text);
+    setNakedAlerts(prev => [...prev.filter(a => a.rowId !== row.id), { rowId: row.id, kind, missing, at: Date.now(), text }]);
+  }
+
+  /**
+   * After an entry's legs were ACCEPTED, check each one really opened. A leg rejected after its ACK leaves the row
+   * one-sided (the sync retry and NAKED warning in autoEnterRow only see rejections in the reply itself).
+   */
+  function checkEntryLegsFilled(row: FocusRow, sent: ('CE' | 'PE')[], wanted: ('CE' | 'PE')[], what: string) {
+    if (isSimRow(row) || !sent.length) return;
+    const before = Object.fromEntries(sent.map(l => [l, Number(l === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0])) as Record<'CE' | 'PE', number>;
+    void (async () => {
+      const res = await Promise.all(sent.map(l => awaitLegSettled(row.id, l, before[l])));
+      const failed = sent.filter((_, i) => res[i] === false);
+      if (!failed.length) return;
+      const now = schedulerRef.current.config.rows.find(r => r.id === row.id);
+      if (!now) return;
+      const open = wanted.filter(l => rowOwnsLeg(now, l));
+      if (open.length) {
+        raiseNakedAlert(now, 'entry', failed,
+          `${what}: ${open.join('+')} is open but the ${failed.join('+')} order was accepted and then not filled (rejected by the broker — margin?). `
+          + 'The row is one-sided. Close it or place the missing leg by hand.');
+      } else {
+        addToast('error', `${row.underlying}: ${what} did not fill`,
+          `${failed.join('+')} was accepted by the broker and then not filled (rejected — margin?). Nothing is open on this row.`);
+      }
+    })();
   }
 
   /**
@@ -7301,7 +7544,7 @@ function FocusTool() {
         // same-strike position under a different product must not be
         // mistaken for this leg's own remaining quantity.
         const pos = product
-          ? candidates.find(p => positionProduct(p as unknown as Record<string, unknown>) === product)
+          ? openRowOfProduct(candidates, product)
           : (candidates.length === 1 ? candidates[0] : undefined);
         const remaining = Math.abs(Number(pos?.netQty ?? 0));
         const observedClosed = Math.max(0, brokerQtyBefore - remaining);
@@ -7368,7 +7611,7 @@ function FocusTool() {
       // (~60ms) for nothing. Each leg still reports its own rejection.
       // awaitFill so the ledger is confirmed-updated by the time waitRowFlat
       // reads it below.
-      const accepted = await Promise.all(legs.map(l => placeLeg(row, l, { reduce: true, all: true, awaitFill: true })));
+      const accepted = await Promise.all(legs.map(l => placeLeg(row, l, { reduce: true, all: true, awaitFill: true, fresh: true })));
       // Each leg already reported its own rejection via placeLeg's own toast;
       // still short-circuit here so a rejected leg does not sit through the
       // full waitRowFlat timeout for a row that was never fully closed (same
@@ -7407,7 +7650,7 @@ function FocusTool() {
       if (!(own > 0)) return;
       const chip = partialCloseChips(own, lotSize, [pct]).find(c => c.pct === pct);
       if (!chip?.enabled) return;
-      await placeLeg(row, leg, { reduce: true, lots: chip.lots, awaitFill: true });
+      await placeLeg(row, leg, { reduce: true, lots: chip.lots, awaitFill: true, fresh: true });
     });
   }
 
@@ -7505,7 +7748,7 @@ function FocusTool() {
           return;
         }
 
-        const closedOk = await placeLeg(row, leg, { reduce: true, all: true, awaitFill: true });
+        const closedOk = await placeLeg(row, leg, { reduce: true, all: true, awaitFill: true, fresh: true });
         if (!closedOk) {
           addToast('error', 'Shift aborted', `${currStrike} ${leg} close did not fully fill — position left on this strike`);
           return;
@@ -7525,11 +7768,9 @@ function FocusTool() {
         const afterRef = lookups[expKey(u, expiry)]?.strikes?.[strikeKey(currStrike)];
         const afterId = leg === 'CE' ? afterRef?.ceId : afterRef?.peId;
         const afterSym = leg === 'CE' ? afterRef?.ceSymbol : afterRef?.peSymbol;
-        const afterPos = broker === 'dhan'
-          ? afterRows.find(p => String(p.securityId) === String(afterId)
-            && positionProduct(p as unknown as Record<string, unknown>) === product)
-          : afterRows.find(p => String(p.tradingSymbol) === afterSym
-            && positionProduct(p as unknown as Record<string, unknown>) === product);
+        const afterPos = openRowOfProduct(broker === 'dhan'
+          ? afterRows.filter(p => String(p.securityId) === String(afterId))
+          : afterRows.filter(p => String(p.tradingSymbol) === afterSym), product);
         const brokerAfter = Math.abs(Number(afterPos?.netQty ?? 0));
         if (
           closedUnits == null
@@ -7711,11 +7952,18 @@ function FocusTool() {
     const securityId = leg === 'CE' ? ref?.ceId : ref?.peId;
     const symbol = leg === 'CE' ? ref?.ceSymbol : ref?.peSymbol;
     if (broker === 'dhan' ? !securityId : !symbol) { addToast('error', `${what} order not sent`, `No ${BROKER_LABELS[broker]} contract for ${strike} ${leg}`); return; }
-    const group = config.groups.find(g => g.underlying === row.underlying);
-    const product = closeOrderProduct(broker, PRODUCT_ALIAS[group?.product ?? 'INTRADAY'][broker]);
+    // Adds to the open short, so under the product that short was opened with (legProduct).
+    const product = closeOrderProduct(broker, legProduct(ladderRow, leg, broker, config.groups));
     if (!product) { addToast('error', `${what} order not sent`, 'Unsupported product'); return; }
     const price = Number(ladderPrice(ltp, pct).toFixed(2));
     const quantity = Math.max(1, Math.round(lots)) * lotSize;
+    // One resting order, so it must fit under the exchange freeze and the route cap on its own.
+    const ladderFreeze = Number(lookups[expKey(row.underlying, expiry)]?.freezeQty) || 0;
+    const ladderMax = maxOrderUnits(broker, row.underlying, lotSize, ladderFreeze > 0 ? brokerToInternalQuantity(broker, row.underlying, ladderFreeze) : null);
+    if (quantity > ladderMax) {
+      addToast('error', `${what} limit not sent`, `${quantity} is above the ${ladderMax} one order may carry (exchange freeze limit) — use fewer lots`);
+      return;
+    }
     const sentLadderQty = brokerOrderQuantity(broker, row.underlying, quantity);
     if (!(sentLadderQty > 0)) { addToast('error', `${what} order not sent`, 'Quantity is under one lot'); return; }
     let replyStatus: number | null = null;
@@ -7725,7 +7973,7 @@ function FocusTool() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(broker === 'dhan'
           ? { securityId, quantity: sentLadderQty, side: 'SELL', orderType: 'LIMIT', price, exchangeSegment: orderExchange(broker, row.underlying), ...product.fields, source: FTS_ORDER_SOURCE }
-          : { tradingsymbol: symbol, quantity: sentLadderQty, side: 'SELL', orderType: 'LIMIT', price, exchange: orderExchange(broker, row.underlying), ...product.fields }),
+          : { tradingsymbol: symbol, quantity: sentLadderQty, side: 'SELL', orderType: 'LIMIT', price, exchange: orderExchange(broker, row.underlying), ...product.fields, source: FTS_ORDER_SOURCE }),
       });
       replyStatus = res.status;
       reply = await res.json().catch(() => undefined);
@@ -7829,7 +8077,8 @@ function FocusTool() {
       logEvent('add_all_legs', row, `manual: add ${lots} lot(s) to every open leg`, { lots });
       const legs = legsOf(row).filter(l => rowOwnsLeg(row, l));
       if (legs.length === 0) { addToast('error', 'Nothing to add to', 'This row has no open leg'); return; }
-      const added: string[] = [];
+      const added: ('CE' | 'PE')[] = [];
+      const before = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
       for (const leg of legs) {
         const ok = await placeLeg(row, leg, { reduce: false, lots });
         if (!ok) {
@@ -7840,6 +8089,18 @@ function FocusTool() {
         added.push(leg);
       }
       addToast('success', `Added ${lots} lot(s) to ${added.join(' + ')}`, `${row.underlying} row`);
+      // Accepted is not filled: an add rejected after its ACK leaves the straddle lopsided.
+      if (!isSimRow(row) && added.length > 1) {
+        void (async () => {
+          const res = await Promise.all(added.map(l => awaitLegSettled(row.id, l, Number(l === 'CE' ? before.fill?.ceQty : before.fill?.peQty) || 0)));
+          const grew = added.filter((_, i) => res[i] === true);
+          const failed = added.filter((_, i) => res[i] === false);
+          const now = schedulerRef.current.config.rows.find(r => r.id === row.id);
+          if (now && grew.length && failed.length) {
+            raiseNakedAlert(now, 'add', failed, `Add ${lots} lot(s): ${grew.join('+')} got the extra lots but the ${failed.join('+')} add was accepted and then not filled — the row is lopsided. Fix ${failed.join('+')} by hand.`);
+          }
+        })();
+      }
     });
   }
 
@@ -7949,7 +8210,7 @@ function FocusTool() {
     if (autoExitingRef.current.has(row.id)) return;
     const closeUnsettled = unconfirmedOrderRef.current.has(`${row.id}:CE`)
       || unconfirmedOrderRef.current.has(`${row.id}:PE`);
-    if (busyRows.has(row.id) || (legExitsInFlightRef.current.get(row.id) ?? 0) > 0 || closeUnsettled) {
+    if (busyRows.has(row.id) || enteringNowRef.current.has(row.id) || (legExitsInFlightRef.current.get(row.id) ?? 0) > 0 || closeUnsettled) {
       // Something else holds the row (a leg exit/roll, a manual order). The
       // rules re-fire this every tick while the breach lasts, so it runs once
       // the row frees up — but record it, so an SL roll finishing in the
@@ -8684,7 +8945,7 @@ function FocusTool() {
     // Busy for any reason other than the OTHER leg's auto exit (a manual
     // order, a shift, a firing re-entry) → wait for it. Busy only because the
     // other leg is exiting → go ahead: different contract, breached now.
-    if (busyRows.has(row.id) && inFlight === 0) return false;
+    if ((busyRows.has(row.id) || enteringNowRef.current.has(row.id)) && inFlight === 0) return false;
     autoExitingLegRef.current.add(key);
     legExitsInFlightRef.current.set(row.id, inFlight + 1);
     // Also hold the manual busy lock (see autoExitRow above) — without it a
@@ -8796,7 +9057,7 @@ function FocusTool() {
     if (unconfirmedOrderRef.current.has(key)) return false;
     const inFlight = legExitsInFlightRef.current.get(row.id) ?? 0;
     // Busy for anything but another leg action (a manual order, a shift, a firing re-entry) → wait.
-    if (busyRows.has(row.id) && inFlight === 0) return false;
+    if ((busyRows.has(row.id) || enteringNowRef.current.has(row.id)) && inFlight === 0) return false;
     // A whole-row exit is waiting for the row to free up: taking profit on a leg about to be closed is pointless.
     const wantedAt = rowExitWantedRef.current.get(row.id);
     if (wantedAt != null && Date.now() - wantedAt < 5_000) return false;
@@ -9022,7 +9283,17 @@ function FocusTool() {
    */
   function autoEnterRow(row: FocusRow, reason: string, strikes?: { CE?: number | null; PE?: number | null }) {
     if (autoEnteringRef.current.has(row.id) || autoExitingRef.current.has(row.id)) return;
+    // A manual order or a leg action already holds the row: wait for it (the scheduler retries next tick).
+    if (busyRows.has(row.id) || (legExitsInFlightRef.current.get(row.id) ?? 0) > 0) return;
     autoEnteringRef.current.add(row.id);
+    // Hold the row while its legs are being sent: manual Exit / shift / +lots wait, and a whole-row exit that fires
+    // mid-entry (autoExitRow) waits for the entry instead of closing CE while PE is still being sold into the row.
+    enteringNowRef.current.add(row.id);
+    setBusyRows(prev => new Set(prev).add(row.id));
+    const release = () => {
+      enteringNowRef.current.delete(row.id);
+      setBusyRows(prev => { const next = new Set(prev); next.delete(row.id); return next; });
+    };
     lastAutoEntryAtRef.current[row.id] = Date.now();
     addToast('success', `${isSimRow(row) ? 'SIM ' : ''}Auto-entry: ${row.underlying} ${row.id.slice(-4)}`, reason);
     logEvent('auto_entry', row, reason);
@@ -9050,6 +9321,9 @@ function FocusTool() {
       // failure part-way through doesn't leave two orders racing.
       // Overall Momentum picks the strikes at the entry time and keeps them.
       const at = (leg: 'CE' | 'PE') => (strikes?.[leg] ? { strikeOverride: strikes[leg]! } : {});
+      // Every leg goes out even if a whole-row exit fires meanwhile: that exit is deferred until this entry releases
+      // the row (autoExitRow checks enteringNowRef) and then closes ALL of it — stopping half-way could leave a naked
+      // leg if the breach had cleared by then.
       for (const leg of wanted) {
         if (await placeLeg(row, leg, { reduce: false, lots: multipliedLots(row, legLots(row, leg)), ...at(leg) })) filled[leg] = true;
       }
@@ -9083,6 +9357,8 @@ function FocusTool() {
       }
 
       updateRow(row.id, { status: 'entered' });
+      // Accepted is not open: confirm each sent leg really filled (a late rejection leaves the row one-sided).
+      checkEntryLegsFilled(row, opened, wanted, 'Auto-entry');
 
       const stillMissing = wanted.filter(l => !filled[l]);
       if (stillMissing.length) {
@@ -9092,7 +9368,7 @@ function FocusTool() {
             : `${opened.join('+')} opened but ${stillMissing.join('+')} was rejected twice — this row is one-sided. Close it or place the missing leg manually.`);
       }
       await fetchPositionsNow();
-    })().catch(() => autoEnteringRef.current.delete(row.id));
+    })().catch(() => autoEnteringRef.current.delete(row.id)).finally(release);
   }
 
   /** Show (or clear, with '') one waiting-for-momentum status line. */
@@ -9341,6 +9617,7 @@ function FocusTool() {
           ? { high: armed.range.high, low: armed.range.low, side: rb.side, on: rb.on } : null;
         const ok = await placeLeg(fresh, leg, { reduce: false, lots: multipliedLots(row, legLots(row, leg)), strikeOverride: armed.strike, orb });
         if (ok) {
+          checkEntryLegsFilled(fresh, [leg], legsOf(row), `${leg} entry`);
           delete simMomRef.current[key];
           const cur = schedulerRef.current.config.rows.find(r => r.id === row.id);
           if (cur?.status === 'armed') updateRow(row.id, { status: 'entered' });
@@ -9598,7 +9875,27 @@ function FocusTool() {
    * the way to typing "25000") briefly reach disk, and a worker tick landing
    * in that instant would read spot >= 2 as breached and fire a real exit.
    */
+  /** Why this index's PRODUCT may not change right now, or null. Every held leg is matched and closed under its own
+   *  product, and the 15:17 intraday backstop follows the group's: switching mid-trade dropped live shorts from the
+   *  ledger and switched the backstop off. */
+  function productLockReason(underlying: FocusUnderlying): string | null {
+    const busy = config.rows.filter(r => r.underlying === underlying && (
+      !rowFlat(r) || !!r.orderUnknown || busyRows.has(r.id)
+      || unconfirmedOrderRef.current.has(`${r.id}:CE`) || unconfirmedOrderRef.current.has(`${r.id}:PE`)));
+    return busy.length
+      ? `${busy.length} ${underlying} row(s) hold a position or have an order in flight — exit them before changing MIS / NRML`
+      : null;
+  }
+
   function updateGroup(underlying: FocusUnderlying, patch: Partial<FocusIndexGroup>) {
+    const curGroup = config.groups.find(g => g.underlying === underlying);
+    if (patch.product !== undefined && patch.product !== (curGroup?.product ?? 'INTRADAY')) {
+      const why = productLockReason(underlying);
+      if (why) {
+        addToast('error', 'Product not changed', why);
+        return;
+      }
+    }
     // Book Exit levels get the same before-state check as a row's H↑/L↓: the
     // 5s scheduler reads these out of memory, so a level already behind spot
     // books out every row in the index on the next tick.
@@ -9714,6 +10011,19 @@ function FocusTool() {
     } catch (e) { return String(e); }
   }, []);
 
+  // A naked-leg alert ends with the row: it went flat, or every missing leg is open again (an add's "missing" leg is
+  // open throughout, so that kind clears on flat or Dismiss).
+  useEffect(() => {
+    setNakedAlerts(prev => {
+      const next = prev.filter(a => {
+        const r = config.rows.find(x => x.id === a.rowId);
+        if (!r || rowFlat(r)) return false;
+        return a.kind === 'add' || !a.missing.every(l => rowOwnsLeg(r, l));
+      });
+      return next.length === prev.length ? prev : next;
+    });
+  }, [config.rows]);
+
   const rowsByUnderlying = useMemo<Record<FocusUnderlying, FocusRow[]>>(() => {
     const m: Record<FocusUnderlying, FocusRow[]> = { NIFTY: [], BANKNIFTY: [], SENSEX: [], CRUDEOILM: [] };
     for (const r of config.rows) m[r.underlying].push(r);
@@ -9813,6 +10123,33 @@ function FocusTool() {
         </div>
       )}
 
+      {/* Rows left one-sided by an order the broker accepted and then did not fill (checkEntryLegsFilled). */}
+      {nakedAlerts.length > 0 && (
+        <div role="alert" className="z-20 bg-rose-950/95 border-b border-rose-500/40 px-4 py-2 space-y-1.5">
+          {nakedAlerts.map(a => {
+            const r = config.rows.find(x => x.id === a.rowId);
+            return (
+              <div key={a.rowId} className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs">
+                <span className="font-bold text-rose-200">
+                  {r?.underlying ?? ''} {a.rowId.slice(-4)} · NAKED / LOPSIDED — {a.missing.join('+')} missing
+                </span>
+                <span className="text-zinc-300">
+                  {a.text} Since {new Date(a.at).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })} IST
+                </span>
+                <button
+                  onClick={() => setNakedAlerts(prev => prev.filter(x => x.rowId !== a.rowId))}
+                  aria-label={`Dismiss the naked-leg alert on row ${a.rowId.slice(-4)}`}
+                  title="Dismiss once you have fixed the row (it also clears itself when the row is flat or the missing leg is open)"
+                  className={cn('px-2 py-0.5 rounded border border-rose-400/50 text-rose-100 font-semibold hover:bg-rose-500/20 cursor-pointer', FOCUS_RING)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <ControlStrip
         liveRealMoney={liveRealMoney} onToggleLive={toggleLiveRealMoney} broker={broker}
         riskEnabled={riskEnabled} onToggleRisk={toggleRiskEnabled}
@@ -9871,6 +10208,7 @@ function FocusTool() {
                   return base > 0 ? Math.round(base / stepU) * stepU : 0;
                 })()}
                 lot={lotSizes[u]} dte={dteFor(expiries[u]?.[0] ?? '')} wsLive={wsLive}
+                productLocked={productLockReason(u)}
               />
 
               <div className={cn("bg-zinc-900/40 border border-zinc-800/80 rounded-2xl overflow-hidden shadow-sm", viewMode === 'cards' ? 'p-4' : viewMode === 'pro' ? 'p-3' : '')}>
@@ -9913,7 +10251,7 @@ function FocusTool() {
                           onAddAllLegs={lots => addLotsToAllLegs(row, lots)}
                           onLadderPlace={(leg, pct, lots) => { void placeLadderOrder(row, leg, pct, lots); }}
                           onLadderCancel={(leg, orderId) => { void cancelLadderOrders(row.id, leg, orderId); }}
-                          onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots }))}
+                          onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots, fresh: true }))}
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
                           onBlocked={msg => addToast('error', 'Strike locked', msg)}
                           onCancelPending={leg => cancelPendingReentry(row.id, leg)}
@@ -9964,7 +10302,7 @@ function FocusTool() {
                           onExit={leg => handleManualExit(row, leg)}
                           onExitPartial={(leg, pct) => handleManualExitPartial(row, leg, pct)}
                           onAddLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots }))}
-                          onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots }))}
+                          onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots, fresh: true }))}
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
                           onBlocked={msg => addToast('error', 'Strike locked', msg)}
                           onCancelPending={leg => cancelPendingReentry(row.id, leg)}
@@ -10020,7 +10358,7 @@ function FocusTool() {
                           onExit={leg => handleManualExit(row, leg)}
                           onExitPartial={(leg, pct) => handleManualExitPartial(row, leg, pct)}
                           onAddLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: false, lots }))}
-                          onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots }))}
+                          onReduceLot={(leg, lots) => runRowAction(row.id, () => placeLeg(row, leg, { reduce: true, lots, fresh: true }))}
                           onShift={(leg, dir) => handleShiftStrike(row, leg, dir)}
                           onBlocked={msg => addToast('error', 'Strike locked', msg)}
                           onCancelPending={leg => cancelPendingReentry(row.id, leg)}
