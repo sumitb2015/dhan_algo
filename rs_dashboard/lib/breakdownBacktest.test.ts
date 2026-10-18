@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   auditResults,
   backfillStart,
+  backtestConfigKey,
   classifyBuildup,
+  coldMinBars,
   ewmLast,
   minToHm,
   orderCost,
@@ -262,3 +264,64 @@ test('simulateDay: btWarmOnly skips a contract without enough previous-session b
   );
   assert.equal(simulateDay(warm, { ...cfg, btWarmOnly: true }).trades.length, 1);
 });
+
+test('simulateDay: daily loss limit triggers hard circuit breaker emergency square-off when hardCircuitBreaker=true (default)', () => {
+  // Price jumps to 115 at 10:20 (gross loss: (94 - 115)*65 = -1365).
+  // With dailyLossLimit: 1000, hard breaker triggers at 10:20's open and squares off the position.
+  const day = scenario((m) => (m >= 620 ? { o: 115, h: 115, l: 115, c: 115 } : null));
+  const r = simulateDay(day, { ...cfg, dailyLossLimit: 1000, hardCircuitBreaker: true });
+  assert.equal(r.haltedAt, '10:20');
+  assert.equal(r.trades.length, 1);
+  const t = r.trades[0];
+  assert.equal(t.exitKind, 'CIRCUIT_BREAKER');
+  assert.equal(t.exitTime, '10:20');
+  assert.equal(t.exitPrice, 115);
+  assert.ok(t.exitReason.includes('CIRCUIT BREAKER'));
+});
+
+test('simulateDay: daily loss limit only halts entries and keeps position open when hardCircuitBreaker=false', () => {
+  // Price is 115 at 10:20 (loss -1365 breaches 1000 limit), then rises to hit Initial SL (117.5) at 10:25.
+  const day = scenario((m) => {
+    if (m >= 620 && m < 625) return { o: 115, h: 115, l: 115, c: 115 };
+    if (m === 625) return { o: 115, h: 120, l: 115, c: 118 };
+    return null;
+  });
+  const r = simulateDay(day, { ...cfg, dailyLossLimit: 1000, hardCircuitBreaker: false });
+  assert.equal(r.haltedAt, '10:20');
+  assert.equal(r.trades.length, 1);
+  const t = r.trades[0];
+  // Position was NOT squared off at 10:20; it ran until 10:25 to hit Initial SL
+  assert.equal(t.exitKind, 'INITIAL_SL');
+  assert.equal(t.exitTime, '10:25');
+  assert.equal(t.exitPrice, 117.5);
+});
+
+test('simulateDay: respects active indicator settings (e.g. useVwap=false allows entry when price is above VWAP)', () => {
+  // Option drops to 88, but huge volume at 70 anchors VWAP below 88 (VWAP ~70.5).
+  // With useVwap=true (default), price (88) is above VWAP so no breakdown.
+  // With useVwap=false, price is below ST & EMA so breakdown triggers entry.
+  const day = scenario(() => null);
+  day.contracts['23000PE'].bars[5] = { t: `${DAY} 09:20:00`, o: 70, h: 70, l: 70, c: 70, v: 50000000, oi: 100000 };
+  const rDefault = simulateDay(day, cfg);
+  assert.equal(rDefault.trades.length, 0, 'price is above VWAP, so no breakdown with default useVwap=true');
+  const rNoVwap = simulateDay(day, { ...cfg, useVwap: false });
+  assert.ok(rNoVwap.trades.length >= 1, 'breakdown triggers when useVwap is disabled');
+});
+
+test('backtestConfigKey: changes when indicator parameters change', () => {
+  const k1 = backtestConfigKey(cfg);
+  const k2 = backtestConfigKey({ ...cfg, stPeriod: 14 });
+  const k3 = backtestConfigKey({ ...cfg, stMultiplier: 3.0 });
+  const k4 = backtestConfigKey({ ...cfg, emaPeriod: 50 });
+  assert.notEqual(k1, k2);
+  assert.notEqual(k1, k3);
+  assert.notEqual(k1, k4);
+});
+
+test('coldMinBars: scales dynamically with emaPeriod', () => {
+  assert.equal(coldMinBars({ ...cfg, timeframe: 5, emaPeriod: 20 }), 100);
+  assert.equal(coldMinBars({ ...cfg, timeframe: 5, emaPeriod: 50 }), 250);
+  assert.equal(coldMinBars({ ...cfg, timeframe: 1, emaPeriod: 10 }), 10);
+});
+
+

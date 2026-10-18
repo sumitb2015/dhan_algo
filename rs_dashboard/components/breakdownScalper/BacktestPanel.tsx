@@ -64,6 +64,7 @@ const EXIT_LABEL: Record<BtExitKind, string> = {
   RECOVERY: 'Recovery',
   EOD: 'EOD',
   SESSION_END: 'Session end',
+  CIRCUIT_BREAKER: 'Circuit Breaker',
 };
 const EXIT_TONE: Record<BtExitKind, string> = {
   TARGET: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
@@ -72,6 +73,7 @@ const EXIT_TONE: Record<BtExitKind, string> = {
   RECOVERY: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
   EOD: 'bg-zinc-800 text-zinc-300 border-zinc-700',
   SESSION_END: 'bg-zinc-800 text-zinc-300 border-zinc-700',
+  CIRCUIT_BREAKER: 'bg-red-500/20 text-red-300 border-red-500/40',
 };
 
 const inr = (n: number | null | undefined, sign = true) => {
@@ -96,10 +98,17 @@ const CONFIG_LABELS: [keyof BreakdownConfig, string, (v: unknown) => string][] =
   ['maxConcurrent', 'Max open', String],
   ['maxSameSide', 'Per side', String],
   ['dailyLossLimit', 'Loss limit', (v) => `₹${Number(v).toLocaleString('en-IN')}`],
+  ['hardCircuitBreaker', 'Hard breaker', (v) => (v === false ? 'off' : 'auto square-off')],
   ['entryStart', 'Entries', String],
   ['entryEnd', 'until', String],
   ['eodExit', 'EOD', String],
   ['recoveryExit', 'Recovery exit', (v) => (v ? 'on' : 'off')],
+  ['useSupertrend', 'Supertrend', (v) => (v === false ? 'off' : 'on')],
+  ['stPeriod', 'ST Period', (v) => String(v ?? 10)],
+  ['stMultiplier', 'ST Mult', (v) => `${v ?? 2}x`],
+  ['useVwap', 'VWAP', (v) => (v === false ? 'off' : 'on')],
+  ['useEma', 'EMA', (v) => (v === false ? 'off' : 'on')],
+  ['emaPeriod', 'EMA Period', (v) => String(v ?? 20)],
   ['brokerage', 'Brokerage', (v) => (v === 0 ? '₹0 (Kotak)' : `₹${v ?? 20}/ord`)],
   ['slippagePts', 'Slippage', (v) => (v ? `${v}pt/fill` : '0 (exact levels)')],
   ['btWarmOnly', 'Cold contracts', (v) => (v ? 'skipped' : 'traded')],

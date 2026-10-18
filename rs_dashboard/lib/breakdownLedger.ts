@@ -53,6 +53,13 @@ export interface BreakdownConfig {
   targetPct: number; // default 35%
   recoveryExit: boolean; // default false
   dailyLossLimit: number; // default ₹5,000
+  hardCircuitBreaker?: boolean; // default true (emergency square off all open positions when daily loss limit is hit)
+  useSupertrend?: boolean; // default true (option must close below Supertrend)
+  useVwap?: boolean; // default true (option must close below VWAP)
+  useEma?: boolean; // default true (option must close below EMA 20)
+  stPeriod?: number; // default 10 (Supertrend ATR period)
+  stMultiplier?: number; // default 2.0 (Supertrend multiplier)
+  emaPeriod?: number; // default 20 (EMA period)
   entryStart: string; // default "09:30"
   entryEnd: string; // default "15:00"
   eodExit: string; // default "15:15"
@@ -84,6 +91,13 @@ export const DEFAULT_CONFIG: BreakdownConfig = {
   targetPct: 35,
   recoveryExit: false,
   dailyLossLimit: 5000,
+  hardCircuitBreaker: true,
+  useSupertrend: true,
+  useVwap: true,
+  useEma: true,
+  stPeriod: 10,
+  stMultiplier: 2.0,
+  emaPeriod: 20,
   entryStart: '09:30',
   entryEnd: '15:00',
   eodExit: '15:15',
@@ -152,6 +166,10 @@ export function sanitizeConfigPatch(patch: unknown): Partial<BreakdownConfig> {
   const p = patch as Record<string, unknown>;
   if (typeof p.engineActive === 'boolean') out.engineActive = p.engineActive;
   if (typeof p.recoveryExit === 'boolean') out.recoveryExit = p.recoveryExit;
+  if (typeof p.hardCircuitBreaker === 'boolean') out.hardCircuitBreaker = p.hardCircuitBreaker;
+  if (typeof p.useSupertrend === 'boolean') out.useSupertrend = p.useSupertrend;
+  if (typeof p.useVwap === 'boolean') out.useVwap = p.useVwap;
+  if (typeof p.useEma === 'boolean') out.useEma = p.useEma;
   if (typeof p.btWarmOnly === 'boolean') out.btWarmOnly = p.btWarmOnly;
   if (p.dataSource === 'dhan' || p.dataSource === 'breeze') out.dataSource = p.dataSource;
   if (p.timeframe === 1 || p.timeframe === 3 || p.timeframe === 5) out.timeframe = p.timeframe;
@@ -166,6 +184,14 @@ export function sanitizeConfigPatch(patch: unknown): Partial<BreakdownConfig> {
   int('maxConcurrent', 1, 5);
   int('maxSameSide', 1, 5);
   int('lotsPerTrade', 1, MAX_LOTS_PER_TRADE);
+  const indInt = (k: 'stPeriod' | 'emaPeriod', lo: number, hi: number) => {
+    const n = clampNum(p[k], lo, hi);
+    if (n !== undefined) out[k] = Math.round(n);
+  };
+  indInt('stPeriod', 2, 50);
+  indInt('emaPeriod', 3, 200);
+  const stMultVal = clampNum(p.stMultiplier ?? (p as Record<string, unknown>).stMult, 0.5, 10);
+  if (stMultVal !== undefined) out.stMultiplier = stMultVal;
   const num = (k: 'slPct' | 'trailPct' | 'trailStartPct' | 'trailStepPts' | 'trailByPts' | 'targetPct' | 'dailyLossLimit' | 'brokerage' | 'slippagePts', lo: number, hi: number) => {
     const n = clampNum(p[k], lo, hi);
     if (n !== undefined) out[k] = n;
@@ -216,6 +242,27 @@ export function normalizeConfig(raw: unknown): BreakdownConfig {
   }
   if (merged.brokerage === undefined) {
     merged.brokerage = DEFAULT_CONFIG.brokerage;
+  }
+  if (merged.hardCircuitBreaker === undefined) {
+    merged.hardCircuitBreaker = DEFAULT_CONFIG.hardCircuitBreaker;
+  }
+  if (merged.useSupertrend === undefined) {
+    merged.useSupertrend = DEFAULT_CONFIG.useSupertrend;
+  }
+  if (merged.useVwap === undefined) {
+    merged.useVwap = DEFAULT_CONFIG.useVwap;
+  }
+  if (merged.useEma === undefined) {
+    merged.useEma = DEFAULT_CONFIG.useEma;
+  }
+  if (merged.stPeriod === undefined) {
+    merged.stPeriod = DEFAULT_CONFIG.stPeriod;
+  }
+  if (merged.stMultiplier === undefined) {
+    merged.stMultiplier = DEFAULT_CONFIG.stMultiplier;
+  }
+  if (merged.emaPeriod === undefined) {
+    merged.emaPeriod = DEFAULT_CONFIG.emaPeriod;
   }
   merged.trailPct = merged.trailStartPct;
   if (!timesInOrder(merged)) {

@@ -28,14 +28,22 @@ import { closedBarsOnly, sessionVwap, type Timeframe } from './bearishStrikes.ts
 
 export interface BreakdownIndParams {
   stPeriod: number;
-  stMult: number;
+  stMult?: number;
+  stMultiplier?: number;
   emaPeriod: number;
+  useSupertrend?: boolean;
+  useVwap?: boolean;
+  useEma?: boolean;
 }
 
 export const DEFAULT_BREAKDOWN_PARAMS: BreakdownIndParams = {
   stPeriod: 10,
   stMult: 2,
+  stMultiplier: 2,
   emaPeriod: 20,
+  useSupertrend: true,
+  useVwap: true,
+  useEma: true,
 };
 
 export interface OptionIndicators {
@@ -104,12 +112,16 @@ export function evaluateOptionBreakdown(
 
   if (closedBars.length === 0) return defaultState;
 
+  const stPeriod = params.stPeriod ?? 10;
+  const stMult = params.stMultiplier ?? params.stMult ?? 2;
+  const emaPeriod = params.emaPeriod ?? 20;
+
   const st = supertrendSeries(
     closedBars.map((b) => ({ high: b.h, low: b.l, close: b.c })),
-    params.stPeriod,
-    params.stMult,
+    stPeriod,
+    stMult,
   );
-  const ema = emaSmaSeeded(closedBars.map((b) => b.c), params.emaPeriod);
+  const ema = emaSmaSeeded(closedBars.map((b) => b.c), emaPeriod);
   const vwapSeries = sessionVwap(closedBars);
 
   const n = closedBars.length;
@@ -131,6 +143,10 @@ export function evaluateOptionBreakdown(
     barsUsed: n,
   };
 
+  const useSt = params.useSupertrend !== false;
+  const useVw = params.useVwap !== false;
+  const useEm = params.useEma !== false;
+
   const checkBarBreakdown = (idx: number): { isBd: boolean; belowSt: boolean; belowVw: boolean; belowEma: boolean } => {
     if (idx < 0 || idx >= n) return { isBd: false, belowSt: false, belowVw: false, belowEma: false };
     const c = closedBars[idx].c;
@@ -143,8 +159,14 @@ export function evaluateOptionBreakdown(
     const bVw = c != null && vw != null && c < vw;
     const bEm = c != null && em != null && c < em;
 
+    const activeChecks: boolean[] = [];
+    if (useSt) activeChecks.push(bSt);
+    if (useVw) activeChecks.push(bVw);
+    if (useEm) activeChecks.push(bEm);
+    const isBd = activeChecks.length > 0 ? activeChecks.every(Boolean) : (bSt && bVw && bEm);
+
     return {
-      isBd: bSt && bVw && bEm,
+      isBd,
       belowSt: bSt,
       belowVw: bVw,
       belowEma: bEm,
@@ -174,7 +196,11 @@ export function evaluateOptionBreakdown(
   const pctVw = calcPctBelow(vwapVal, close);
   const pctEm = calcPctBelow(emaVal, close);
 
-  const validPcts = [pctSt, pctVw, pctEm].filter((p): p is number => p != null && p > 0);
+  const validPcts = [
+    useSt ? pctSt : null,
+    useVw ? pctVw : null,
+    useEm ? pctEm : null,
+  ].filter((p): p is number => p != null && p > 0);
   const avgPct = validPcts.length > 0 ? validPcts.reduce((a, b) => a + b, 0) / validPcts.length : null;
 
   return {

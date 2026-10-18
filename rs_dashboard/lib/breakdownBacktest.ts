@@ -56,7 +56,7 @@ export interface BtDayData {
 }
 
 // ── Result shape ────────────────────────────────────────────────────────────
-export type BtExitKind = 'TARGET' | 'TRAIL_SL' | 'INITIAL_SL' | 'RECOVERY' | 'EOD' | 'SESSION_END';
+export type BtExitKind = 'TARGET' | 'TRAIL_SL' | 'INITIAL_SL' | 'RECOVERY' | 'EOD' | 'SESSION_END' | 'CIRCUIT_BREAKER';
 
 export interface BtTrade {
   n: number;
@@ -270,7 +270,7 @@ export function exitOf(
 }
 
 /** Previous-session 1-minute bars a contract needs to seed EMA20 on the run's timeframe; fewer = a cold contract. */
-export const coldMinBars = (c: BreakdownConfig) => DEFAULT_BREAKDOWN_PARAMS.emaPeriod * c.timeframe;
+export const coldMinBars = (c: BreakdownConfig) => (c.emaPeriod ?? DEFAULT_BREAKDOWN_PARAMS.emaPeriod) * c.timeframe;
 
 // ── The simulator ───────────────────────────────────────────────────────────
 export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResult {
@@ -304,6 +304,16 @@ export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResu
   const strikes = [...new Set(keys.map((k) => data.contracts[k].strike))].sort((a, b) => a - b);
 
   // Indicator state per contract is cached per closed bucket (it only changes when a tf bucket closes).
+  const indParams = {
+    ...DEFAULT_BREAKDOWN_PARAMS,
+    stPeriod: config.stPeriod ?? DEFAULT_BREAKDOWN_PARAMS.stPeriod,
+    stMult: config.stMultiplier ?? DEFAULT_BREAKDOWN_PARAMS.stMult,
+    stMultiplier: config.stMultiplier ?? DEFAULT_BREAKDOWN_PARAMS.stMultiplier,
+    emaPeriod: config.emaPeriod ?? DEFAULT_BREAKDOWN_PARAMS.emaPeriod,
+    useSupertrend: config.useSupertrend !== false,
+    useVwap: config.useVwap !== false,
+    useEma: config.useEma !== false,
+  };
   const stateCache = new Map<string, { bucket: number; state: OptionBreakdownState }>();
   const stateAt = (k: string, m: number): OptionBreakdownState => {
     const bucket = Math.floor((m - SESSION_OPEN) / tf);
@@ -312,7 +322,7 @@ export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResu
     const cutoff = `${day} ${minToHm(m)}`;
     const bars = data.contracts[k].bars.filter((b) => b.t.slice(0, 16) < cutoff);
     const nowIst = Date.UTC(+day.slice(0, 4), +day.slice(5, 7) - 1, +day.slice(8, 10), Math.floor(m / 60), m % 60, 1);
-    const state = evaluateOptionBreakdown(bars, tf, nowIst);
+    const state = evaluateOptionBreakdown(bars, tf, nowIst, indParams);
     stateCache.set(k, { bucket, state });
     return state;
   };
@@ -344,6 +354,7 @@ export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResu
   const trailStart = config.trailStartPct ?? config.trailPct ?? 15;
   const trailStep = config.trailStepPts ?? 5;
   const trailBy = config.trailByPts ?? 2;
+  const hardBreaker = config.hardCircuitBreaker ?? true;
   /** Previous-session 1-minute bars a contract needs to seed EMA20 on this timeframe; fewer = a cold contract. */
   const coldBelow = coldMinBars(config);
   /**
@@ -431,6 +442,32 @@ export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResu
     const hm = minToHm(m);
     closedIntrabar = [];
 
+    // Daily loss limit check at bar m's OPEN: today's realized gross so far + open gross of every position open at open
+    let openGrossAtOpen = 0;
+    for (const p of open) {
+      const bar = byMin.get(p.key)?.get(m);
+      const px = bar ? bar.o : lastBefore(p.key, m)?.c ?? p.entryPrice;
+      openGrossAtOpen += (p.fillEntry - px) * p.qty;
+    }
+    const totalGrossAtOpen = realizedGross + openGrossAtOpen;
+    if (totalGrossAtOpen <= -config.dailyLossLimit) {
+      if (!haltedAt) {
+        haltedAt = hm;
+        notes.push(
+          `Daily loss limit ₹${config.dailyLossLimit} hit at ${hm}: ${
+            hardBreaker ? 'hard circuit breaker emergency square-off triggered' : 'no new entries for the rest of the day'
+          }.`,
+        );
+      }
+      if (hardBreaker && open.length > 0) {
+        for (const p of [...open]) {
+          const bar = byMin.get(p.key)?.get(m);
+          const px = bar ? bar.o : lastBefore(p.key, m)?.c ?? p.entryPrice;
+          close(p, m, px, 'CIRCUIT_BREAKER', `CIRCUIT BREAKER: Daily loss limit ₹${config.dailyLossLimit} hit at ${hm} - emergency square off`, true);
+        }
+      }
+    }
+
     // ── 1. Manage open positions inside bar m ──
     for (const p of [...open]) {
       const bar = byMin.get(p.key)!.get(m);
@@ -446,16 +483,6 @@ export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResu
     // ── 2. Entries ──
     if (m < entryStart || m > entryEnd || m >= eod || haltedAt) continue;
 
-    // Daily loss limit (gross, like the live engine), as known at bar m's OPEN: realized up to then, plus every
-    // position still open at the open (including those step 1 closed later inside this bar) at the last known close.
-    let openGross = 0;
-    for (const p of [...open, ...closedIntrabar]) openGross += (p.fillEntry - (lastBefore(p.key, m)?.c ?? p.entryPrice)) * p.qty;
-    const realizedAtOpen = realizedGross - closedIntrabar.reduce((a, p) => a + (p.closedGross ?? 0), 0);
-    if (realizedAtOpen + openGross <= -config.dailyLossLimit) {
-      haltedAt = hm;
-      notes.push(`Daily loss limit ₹${config.dailyLossLimit} hit at ${hm}: no new entries for the rest of the day.`);
-      continue;
-    }
     /** Slots taken at bar m's open: open positions plus those that only close later inside this bar. */
     const busy = () => open.length + closedIntrabar.length;
     const busySide = (opt: 'CE' | 'PE') => [...open, ...closedIntrabar].filter((p) => p.option === opt).length;
@@ -610,6 +637,13 @@ export function backtestConfigKey(c: BreakdownConfig): string {
     targetPct,
     recoveryExit,
     dailyLossLimit,
+    hardCircuitBreaker: c.hardCircuitBreaker ?? true,
+    useSupertrend: c.useSupertrend !== false,
+    useVwap: c.useVwap !== false,
+    useEma: c.useEma !== false,
+    stPeriod: c.stPeriod ?? 10,
+    stMultiplier: c.stMultiplier ?? 2.0,
+    emaPeriod: c.emaPeriod ?? 20,
     entryStart,
     entryEnd,
     eodExit,
@@ -720,7 +754,7 @@ export function summarize(days: BtDayResult[]): BtSummary {
   }
   const grossWin = wins.reduce((a, t) => a + t.net, 0);
   const grossLoss = -losses.reduce((a, t) => a + t.net, 0);
-  const exitMix = { TARGET: 0, TRAIL_SL: 0, INITIAL_SL: 0, RECOVERY: 0, EOD: 0, SESSION_END: 0 } as Record<BtExitKind, number>;
+  const exitMix = { TARGET: 0, TRAIL_SL: 0, INITIAL_SL: 0, RECOVERY: 0, EOD: 0, SESSION_END: 0, CIRCUIT_BREAKER: 0 } as Record<BtExitKind, number>;
   for (const t of trades) exitMix[t.exitKind]++;
   const byNet = [...sorted].sort((a, b) => a.net - b.net);
   const net = r2(sorted.reduce((a, d) => a + d.net, 0));
@@ -832,7 +866,7 @@ export function auditResults(
       data?.contracts[contract]?.bars.find((b) => b.t.slice(0, 10) === day.date && b.t.slice(11, 16) === hm);
     /** True when a trade's exit was a gap at its exit bar's open (that slot was free at the open). */
     const exitAtOpen = (t: BtTrade) => {
-      if (t.exitKind === 'EOD' || t.exitKind === 'SESSION_END') return true;
+      if (t.exitKind === 'EOD' || t.exitKind === 'SESSION_END' || t.exitKind === 'CIRCUIT_BREAKER') return true;
       const b = barOf(t.contract, t.exitTime);
       return !!b && near(t.exitPrice - slip, b.o, 0.006);
     };
@@ -869,10 +903,10 @@ export function auditResults(
         if (!eb || !near(t.entryPrice, Math.max(0.05, eb.o - slip), 0.006)) fail('entryFill', `${tag}: ${t.entryPrice} vs open ${eb?.o}`);
         checks.exitFill.checked++;
         const raw = t.exitPrice - slip;
-        if (t.exitKind === 'EOD') {
+        if (t.exitKind === 'EOD' || t.exitKind === 'CIRCUIT_BREAKER') {
           const xb = barOf(t.contract, t.exitTime);
           const prior = data.contracts[t.contract]?.bars.filter((b) => b.t.slice(0, 10) === day.date && b.t.slice(11, 16) < t.exitTime).pop();
-          if (!(xb ? near(raw, xb.o, 0.006) : prior ? near(raw, prior.c, 0.006) : true)) fail('exitFill', `${tag}: EOD ${t.exitPrice}`);
+          if (!(xb ? near(raw, xb.o, 0.006) : prior ? near(raw, prior.c, 0.006) : true)) fail('exitFill', `${tag}: ${t.exitKind} ${t.exitPrice}`);
         } else if (t.exitKind !== 'SESSION_END') {
           const xb = barOf(t.contract, t.exitTime);
           if (!xb || raw < xb.l - 0.006 || raw > xb.h + 0.006) fail('exitFill', `${tag}: exit ${t.exitPrice} outside ${xb?.l}..${xb?.h}`);

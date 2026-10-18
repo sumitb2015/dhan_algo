@@ -14,6 +14,7 @@ import { recordTick, mergeBars, type LiveMinutes } from '@/lib/bearishStrikes';
 import { fallbackLotSize } from '@/lib/multiLegFocus';
 import type { Bar } from '@/lib/volumeProfile';
 import {
+  DEFAULT_BREAKDOWN_PARAMS,
   evaluateOptionBreakdown,
   evaluateUnderlyingTrend,
   rankBreakdownSignals,
@@ -1038,6 +1039,17 @@ export default function BreakdownScalper() {
       return opt === 'CE' ? row?.ce : row?.pe;
     };
 
+    const indParams = {
+      ...DEFAULT_BREAKDOWN_PARAMS,
+      stPeriod: config.stPeriod ?? DEFAULT_BREAKDOWN_PARAMS.stPeriod,
+      stMult: config.stMultiplier ?? DEFAULT_BREAKDOWN_PARAMS.stMult,
+      stMultiplier: config.stMultiplier ?? DEFAULT_BREAKDOWN_PARAMS.stMultiplier,
+      emaPeriod: config.emaPeriod ?? DEFAULT_BREAKDOWN_PARAMS.emaPeriod,
+      useSupertrend: config.useSupertrend !== false,
+      useVwap: config.useVwap !== false,
+      useEma: config.useEma !== false,
+    };
+
     // ── Scanner (display + entry candidate) ──
     let ranked: CandidateSignal[] = [];
     if (q && scannedContracts.length) {
@@ -1079,7 +1091,7 @@ export default function BreakdownScalper() {
           volume: od?.volume ?? 0,
           oi: od?.oi ?? 0,
           buildup: od?.buildup,
-          state: evaluateOptionBreakdown(merged, config.timeframe, nowIstMs),
+          state: evaluateOptionBreakdown(merged, config.timeframe, nowIstMs, indParams),
         };
       });
 
@@ -1135,7 +1147,7 @@ export default function BreakdownScalper() {
       warnedUnwatched.current.delete(pos.id);
 
       const merged = mergeBars(barsCache.current.get(key)?.bars ?? [], liveMinRef.current.get(key) ?? new Map());
-      const optState = evaluateOptionBreakdown(merged, config.timeframe, nowIstMs);
+      const optState = evaluateOptionBreakdown(merged, config.timeframe, nowIstMs, indParams);
 
       const risk = evaluatePositionRisk(
         pos.entryPrice,
@@ -1192,6 +1204,16 @@ export default function BreakdownScalper() {
         haltedAt.current = now;
         haltEngine(`Auto-Trader halted: Daily loss limit of ₹${config.dailyLossLimit} reached! Total P&L: ₹${engineTotal.toFixed(0)}`);
         toast.error('Daily Loss Limit Breached', { description: `Auto-Trader halted. Total loss ₹${Math.abs(engineTotal).toFixed(0)}.` });
+        if ((config.hardCircuitBreaker ?? true) && modeLive.length > 0) {
+          addAuditLog('WARN', `HARD CIRCUIT BREAKER: Emergency square-off triggered for ${modeLive.length} open position(s).`);
+          void Promise.all(
+            modeLive.map((pos) =>
+              exitOnHold(pos)
+                ? Promise.resolve<ExitResult>('failed')
+                : executePositionExit(pos, priceForExit(pos), `CIRCUIT BREAKER: Daily loss limit ₹${config.dailyLossLimit} hit`),
+            ),
+          );
+        }
       }
       return;
     }

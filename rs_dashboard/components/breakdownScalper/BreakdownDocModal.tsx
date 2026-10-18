@@ -443,6 +443,12 @@ export default function BreakdownDocModal({ isOpen, onClose }: BreakdownDocModal
                         <td className="px-3 py-2 text-zinc-300">Hard stop circuit breaker that halts auto-trading</td>
                       </tr>
                       <tr>
+                        <td className="px-3 py-2 font-mono font-bold text-white">hardCircuitBreaker</td>
+                        <td className="px-3 py-2 font-mono text-zinc-400">true</td>
+                        <td className="px-3 py-2 font-mono text-emerald-400">true / false</td>
+                        <td className="px-3 py-2 text-zinc-300">Emergency squares off all open positions immediately on daily loss breach</td>
+                      </tr>
+                      <tr>
                         <td className="px-3 py-2 font-mono font-bold text-white">eodExit</td>
                         <td className="px-3 py-2 font-mono text-zinc-400">15:15</td>
                         <td className="px-3 py-2 font-mono text-emerald-400">15:15</td>

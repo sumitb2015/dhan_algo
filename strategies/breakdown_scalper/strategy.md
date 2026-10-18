@@ -155,7 +155,7 @@ Option premium moves quickly during squeezes, but premature trailing before a tr
 1. **Scalp Profit Target**: (Optional, default 35% decay) Immediately books profit if premium collapses to target.
 2. **Indicator Recovery Exit**: (Optional) Closes position if option price recovers back above its Supertrend or EMA 20.
 3. **Mandatory EOD Square-Off**: Exactly at **15:15 IST**, all active positions are closed at market to prevent overnight gap risk.
-4. **Daily Loss Circuit Breaker** (today's IST P&L in the active mode only; SIM never counts against REAL): If total realized + unrealized P&L drops below `-₹5,000` (configurable), the auto-trader immediately shuts down and locks out any further entries for the remainder of the session.
+4. **Daily Loss Circuit Breaker** (today's IST P&L in the active mode only; SIM never counts against REAL): If total realized + unrealized P&L drops below `-₹5,000` (configurable), the auto-trader immediately shuts down and locks out any further entries for the remainder of the session. If `hardCircuitBreaker` is enabled (default `true`), all currently active positions are also immediately emergency squared-off at market.
 
 ---
 
@@ -176,6 +176,13 @@ Option premium moves quickly during squeezes, but premature trailing before a tr
 | `maxSameSide` | `1` | `1` – `3` | Maximum concurrent positions on CE or PE side |
 | `lotsPerTrade` | `1` | `1` – `10` | Lots to short per trade |
 | `dailyLossLimit`| `₹5,000` | `₹1,000` – `₹25,000` | Hard daily circuit breaker cutoff |
+| `hardCircuitBreaker`| `true` | `true` / `false` | Emergency square off all open positions immediately on daily loss breach |
+| `useSupertrend` | `true` | `true` / `false` | Require option price to be below Supertrend |
+| `stPeriod` | `10` | `2` – `50` | Supertrend ATR period |
+| `stMultiplier` | `2.0` | `0.5` – `10.0` | Supertrend ATR multiplier |
+| `useVwap` | `true` | `true` / `false` | Require option price to be below Session VWAP |
+| `useEma` | `true` | `true` / `false` | Require option price to be below EMA |
+| `emaPeriod` | `20` | `3` – `200` | Exponential Moving Average period |
 | `eodExit` | `15:15` | `15:00` – `15:20` | Mandatory intraday square-off time (IST) |
 | `recoveryExit` | `true` | `true` / `false` | Close if premium reclaims Supertrend or EMA20 |
 

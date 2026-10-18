@@ -108,7 +108,7 @@ export function ScannerGrid({
               <th className="px-3 py-2.5 text-right">LTP</th>
               <th className="px-3 py-2.5 text-right">Supertrend</th>
               <th className="px-3 py-2.5 text-right">VWAP</th>
-              <th className="px-3 py-2.5 text-right">EMA 20</th>
+              <th className="px-3 py-2.5 text-right">EMA</th>
               <th className="px-3 py-2.5 text-center">Breakdown Condition</th>
               <th className="px-3 py-2.5 text-right">Depth (% Below)</th>
               <th className="px-3 py-2.5 text-center">Rank Score</th>

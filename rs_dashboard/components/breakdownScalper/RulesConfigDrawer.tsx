@@ -237,6 +237,100 @@ export function RulesConfigDrawer({
             </div>
           </div>
 
+          {/* Section 3b: Option Chart Breakdown Indicators */}
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3.5 flex flex-col gap-2.5">
+            <span className="font-bold text-zinc-200">Option Chart Indicators</span>
+            <p className="text-[11px] text-zinc-400 leading-relaxed">
+              Select which indicators the option premium must close below to trigger a breakdown signal, and configure their parameters:
+            </p>
+            <div className="flex flex-col gap-2 pt-1">
+              <div className="flex flex-col gap-1.5 py-1">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <div>
+                    <span className="text-zinc-300 font-medium">Supertrend</span>
+                    <p className="text-[10px] text-zinc-500">Bearish trailing volatility band (price &lt; Supertrend)</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={config.useSupertrend !== false}
+                    onChange={(e) => onUpdateConfig({ useSupertrend: e.target.checked })}
+                    aria-label="Use Supertrend indicator"
+                    className="h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500"
+                  />
+                </label>
+                {config.useSupertrend !== false && (
+                  <div className="grid grid-cols-2 gap-2 pl-3 pt-1 border-l-2 border-zinc-800">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[11px] text-zinc-400">ATR Period</span>
+                      <RuleNumInput
+                        value={config.stPeriod ?? 10}
+                        onCommit={(v) => onUpdateConfig({ stPeriod: Math.max(2, Math.min(50, Math.round(Number(v) || 10))) })}
+                        step={1}
+                        min={2}
+                        max={50}
+                        className="w-14 text-center"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[11px] text-zinc-400">Multiplier</span>
+                      <RuleNumInput
+                        value={config.stMultiplier ?? 2.0}
+                        onCommit={(v) => onUpdateConfig({ stMultiplier: Math.max(0.5, Math.min(10.0, Number(v) || 2.0)) })}
+                        step={0.1}
+                        min={0.5}
+                        max={10.0}
+                        className="w-14 text-center"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <label className="flex items-center justify-between cursor-pointer py-1 border-t border-zinc-800/60">
+                <div>
+                  <span className="text-zinc-300 font-medium">Session VWAP</span>
+                  <p className="text-[10px] text-zinc-500">Volume-Weighted Average Price (price &lt; VWAP)</p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={config.useVwap !== false}
+                  onChange={(e) => onUpdateConfig({ useVwap: e.target.checked })}
+                  aria-label="Use VWAP indicator"
+                  className="h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500"
+                />
+              </label>
+
+              <div className="flex flex-col gap-1.5 py-1 border-t border-zinc-800/60">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <div>
+                    <span className="text-zinc-300 font-medium">EMA</span>
+                    <p className="text-[10px] text-zinc-500">Exponential Moving Average (price &lt; EMA)</p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={config.useEma !== false}
+                    onChange={(e) => onUpdateConfig({ useEma: e.target.checked })}
+                    aria-label="Use EMA indicator"
+                    className="h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500"
+                  />
+                </label>
+                {config.useEma !== false && (
+                  <div className="flex items-center justify-between pl-3 pt-1 border-l-2 border-zinc-800">
+                    <span className="text-[11px] text-zinc-400">EMA Period</span>
+                    <RuleNumInput
+                      value={config.emaPeriod ?? 20}
+                      onCommit={(v) => onUpdateConfig({ emaPeriod: Math.max(3, Math.min(200, Math.round(Number(v) || 20))) })}
+                      step={1}
+                      min={3}
+                      max={200}
+                      className="w-14 text-center"
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+
           {/* Section 4: Position & Risk Limits */}
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3.5 flex flex-col gap-3">
             <span className="font-bold text-zinc-200">Portfolio & Risk Limits</span>
@@ -282,6 +376,20 @@ export function RulesConfigDrawer({
                 step={500}
                 min={1000}
                 className="w-24 text-right"
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-zinc-300 font-medium">Hard Circuit Breaker</span>
+                <p className="text-[10px] text-zinc-500">Emergency square off all open positions when daily loss limit is reached</p>
+              </div>
+              <input
+                type="checkbox"
+                checked={config.hardCircuitBreaker ?? true}
+                onChange={(e) => onUpdateConfig({ hardCircuitBreaker: e.target.checked })}
+                aria-label="Hard Circuit Breaker: emergency square off on daily loss limit"
+                className="h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500"
               />
             </div>
           </div>
