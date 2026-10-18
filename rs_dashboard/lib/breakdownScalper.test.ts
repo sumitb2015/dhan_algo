@@ -121,36 +121,45 @@ test('rankBreakdownSignals: Ranks fresh breakdown higher and filters by market t
   assert.ok(ranked[0].rankScore > (stalePeSignal?.rankScore ?? 0));
 });
 
-test('evaluatePositionRisk: Initial SL, Trailing SL ratcheting, Target exit', () => {
+test('evaluatePositionRisk: Initial SL, Lock to cost, Trailing SL ratcheting, Target exit', () => {
   const entry = 100;
   const slPct = 25; // SL at 125
-  const trailPct = 15;
+  const trailStartPct = 15; // locks to cost 100 at 15% profit (85)
+  const trailStepPts = 5;
+  const trailByPts = 2;
   const targetPct = 30; // Target at 70
 
   // 1. Just entered: LTP = 100, lowest = 100 -> Trailing SL is at initial SL (125)
-  const r1 = evaluatePositionRisk(entry, 100, 100, slPct, trailPct, targetPct, 110, 108);
+  const r1 = evaluatePositionRisk(entry, 100, 100, slPct, 15, targetPct, 110, 108, false, undefined, trailStartPct, trailStepPts, trailByPts);
   assert.equal(r1.initialSl, 125);
-  assert.equal(r1.trailingSl, 125); // protects with full initial SL until profit begins
+  assert.equal(r1.trailingSl, 125); // protects with full initial SL until profit threshold is reached
   assert.equal(r1.targetPrice, 70);
   assert.equal(r1.shouldExit, false);
 
-  // 2. Price falls to 80 (favorable for short): lowest drops to 80, trailing SL ratchets down to 92
-  const r2 = evaluatePositionRisk(entry, 80, 80, slPct, trailPct, targetPct, 105, 102, false, 125);
+  // 1b. Price drops to 90 (10% profit): still below 15% threshold -> Trailing SL stays at 125
+  const r1b = evaluatePositionRisk(entry, 90, 90, slPct, 15, targetPct, 110, 108, false, 125, trailStartPct, trailStepPts, trailByPts);
+  assert.equal(r1b.trailingSl, 125);
+  assert.equal(r1b.shouldExit, false);
+
+  // 1c. Price drops to 85 (15% profit reached): locks to cost 100!
+  const r1c = evaluatePositionRisk(entry, 85, 85, slPct, 15, targetPct, 110, 108, false, 125, trailStartPct, trailStepPts, trailByPts);
+  assert.equal(r1c.trailingSl, 100); // locked to cost!
+  assert.equal(r1c.shouldExit, false);
+
+  // 2. Price falls to 80 (5 pts gain beyond threshold): steps=1 -> trailing SL ratchets to 100 - (1*2) = 98
+  const r2 = evaluatePositionRisk(entry, 80, 80, slPct, 15, targetPct, 105, 102, false, 100, trailStartPct, trailStepPts, trailByPts);
   assert.equal(r2.lowestPrice, 80);
-  assert.equal(r2.trailingSl, 92); // 80 * 1.15 = 92 (ratcheted down below entry!)
-  assert.equal(r2.shouldExit, false);
-  assert.equal(r2.lowestPrice, 80);
-  assert.equal(r2.trailingSl, 92); // 80 * 1.15 = 92 (ratcheted down below entry!)
+  assert.equal(r2.trailingSl, 98); // 100 - (1 * 2) = 98
   assert.equal(r2.shouldExit, false);
 
-  // 3. Price bounces up to 93: hits trailing SL at 92!
-  const r3 = evaluatePositionRisk(entry, 93, 80, slPct, trailPct, targetPct, 105, 102);
+  // 3. Price bounces up to 99: hits trailing SL at 98!
+  const r3 = evaluatePositionRisk(entry, 99, 80, slPct, 15, targetPct, 105, 102, false, 98, trailStartPct, trailStepPts, trailByPts);
   assert.equal(r3.isTrailingSlHit, true);
   assert.equal(r3.shouldExit, true);
   assert.match(r3.exitReason ?? '', /TRAILING SL HIT/i);
 
   // 4. Target hit scenario: price falls to 69 <= 70
-  const r4 = evaluatePositionRisk(entry, 69, 69, slPct, trailPct, targetPct, 95, 90);
+  const r4 = evaluatePositionRisk(entry, 69, 69, slPct, 15, targetPct, 95, 90, false, 98, trailStartPct, trailStepPts, trailByPts);
   assert.equal(r4.isTargetHit, true);
   assert.equal(r4.shouldExit, true);
   assert.match(r4.exitReason ?? '', /TARGET HIT/i);

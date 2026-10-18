@@ -47,13 +47,16 @@ export interface BreakdownConfig {
   maxSameSide: number; // default 1
   lotsPerTrade: number; // default 1
   slPct: number; // default 25%
-  trailPct: number; // default 15%
+  trailStartPct: number; // default 15% profit to lock to cost & activate trail
+  trailStepPts: number; // default 5 pts (for every x pts gain)
+  trailByPts: number; // default 2 pts (trail SL by y pts)
   targetPct: number; // default 35%
   recoveryExit: boolean; // default false
   dailyLossLimit: number; // default ₹5,000
   entryStart: string; // default "09:30"
   entryEnd: string; // default "15:00"
   eodExit: string; // default "15:15"
+  trailPct?: number; // legacy alias for trailStartPct
 }
 
 export const DEFAULT_CONFIG: BreakdownConfig = {
@@ -65,13 +68,16 @@ export const DEFAULT_CONFIG: BreakdownConfig = {
   maxSameSide: 1,
   lotsPerTrade: 1,
   slPct: 25,
-  trailPct: 15,
+  trailStartPct: 15,
+  trailStepPts: 5,
+  trailByPts: 2,
   targetPct: 35,
   recoveryExit: false,
   dailyLossLimit: 5000,
   entryStart: '09:30',
   entryEnd: '15:00',
   eodExit: '15:15',
+  trailPct: 15,
 };
 
 export interface AuditLogItem {
@@ -147,14 +153,23 @@ export function sanitizeConfigPatch(patch: unknown): Partial<BreakdownConfig> {
   int('maxConcurrent', 1, 5);
   int('maxSameSide', 1, 5);
   int('lotsPerTrade', 1, MAX_LOTS_PER_TRADE);
-  const num = (k: 'slPct' | 'trailPct' | 'targetPct' | 'dailyLossLimit', lo: number, hi: number) => {
+  const num = (k: 'slPct' | 'trailPct' | 'trailStartPct' | 'trailStepPts' | 'trailByPts' | 'targetPct' | 'dailyLossLimit', lo: number, hi: number) => {
     const n = clampNum(p[k], lo, hi);
     if (n !== undefined) out[k] = n;
   };
   num('slPct', 5, 100);
+  num('trailStartPct', 5, 50);
+  num('trailStepPts', 0.5, 50);
+  num('trailByPts', 0.5, 50);
   num('trailPct', 5, 50);
   num('targetPct', 0, 90);
   num('dailyLossLimit', 1000, 10_000_000);
+  // Keep legacy trailPct and new trailStartPct synced
+  if (out.trailStartPct === undefined && out.trailPct !== undefined) {
+    out.trailStartPct = out.trailPct;
+  } else if (out.trailStartPct !== undefined && out.trailPct === undefined) {
+    out.trailPct = out.trailStartPct;
+  }
   for (const k of ['entryStart', 'entryEnd', 'eodExit'] as const) {
     if (isHHMM(p[k])) out[k] = p[k] as string;
   }
@@ -175,6 +190,16 @@ const TIME_KEYS = ['entryStart', 'entryEnd', 'eodExit'] as const;
  */
 export function normalizeConfig(raw: unknown): BreakdownConfig {
   const merged: BreakdownConfig = { ...DEFAULT_CONFIG, ...sanitizeConfigPatch(raw) };
+  if (merged.trailStartPct === undefined) {
+    merged.trailStartPct = merged.trailPct ?? DEFAULT_CONFIG.trailStartPct;
+  }
+  if (merged.trailStepPts === undefined) {
+    merged.trailStepPts = DEFAULT_CONFIG.trailStepPts;
+  }
+  if (merged.trailByPts === undefined) {
+    merged.trailByPts = DEFAULT_CONFIG.trailByPts;
+  }
+  merged.trailPct = merged.trailStartPct;
   if (!timesInOrder(merged)) {
     for (const k of TIME_KEYS) merged[k] = DEFAULT_CONFIG[k];
   }

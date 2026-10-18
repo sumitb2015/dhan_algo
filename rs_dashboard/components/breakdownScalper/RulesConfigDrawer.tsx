@@ -310,19 +310,58 @@ export function RulesConfigDrawer({
 
             <div className="flex items-center justify-between">
               <div>
-                <span className="text-zinc-300 font-medium">Trailing Stop-Loss %</span>
-                <p className="text-[10px] text-zinc-500">Ratchets down as premium drops, never loosens</p>
+                <span className="text-zinc-300 font-medium">Lock & Trail Trigger %</span>
+                <p className="text-[10px] text-zinc-500">At this profit %, lock SL to cost and start trailing</p>
               </div>
               <div className="flex items-center gap-1">
                 <RuleNumInput
-                  value={config.trailPct}
-                  onCommit={(v) => onUpdateConfig({ trailPct: Math.max(5, Math.min(50, Number(v) || 15)) })}
-                  step={5}
+                  value={config.trailStartPct ?? config.trailPct ?? 15}
+                  onCommit={(v) => {
+                    const val = Math.max(5, Math.min(50, Number(v) || 15));
+                    onUpdateConfig({ trailStartPct: val, trailPct: val });
+                  }}
+                  step={1}
                   min={5}
                   max={50}
                   className="w-16 text-center"
                 />
                 <span className="text-zinc-500">%</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-zinc-300 font-medium">Trail Step (x pts)</span>
+                <p className="text-[10px] text-zinc-500">For every X points gain in option premium beyond trigger</p>
+              </div>
+              <div className="flex items-center gap-1">
+                <RuleNumInput
+                  value={config.trailStepPts ?? 5}
+                  onCommit={(v) => onUpdateConfig({ trailStepPts: Math.max(0.5, Math.min(50, Number(v) || 5)) })}
+                  step={0.5}
+                  min={0.5}
+                  max={50}
+                  className="w-16 text-center"
+                />
+                <span className="text-zinc-500">pts</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-zinc-300 font-medium">Trail By (y pts)</span>
+                <p className="text-[10px] text-zinc-500">Tighten stop-loss by Y points for every step</p>
+              </div>
+              <div className="flex items-center gap-1">
+                <RuleNumInput
+                  value={config.trailByPts ?? 2}
+                  onCommit={(v) => onUpdateConfig({ trailByPts: Math.max(0.5, Math.min(50, Number(v) || 2)) })}
+                  step={0.5}
+                  min={0.5}
+                  max={50}
+                  className="w-16 text-center"
+                />
+                <span className="text-zinc-500">pts</span>
               </div>
             </div>
 

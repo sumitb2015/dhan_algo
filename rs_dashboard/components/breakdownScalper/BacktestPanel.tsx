@@ -31,6 +31,8 @@ interface RunStatus {
 
 interface BacktestResponse {
   success: boolean;
+  /** true when the store still matches the version the page sent: `store.days` is then null (keep the cached days). */
+  unchanged?: boolean;
   running: boolean;
   status: RunStatus | null;
   from: string;
@@ -47,7 +49,7 @@ interface BacktestResponse {
     config: BreakdownConfig;
     configKey: string;
     failures: Record<string, { at: string; error: string }>;
-    days: BtDayResult[];
+    days: BtDayResult[] | null;
   } | null;
 }
 
@@ -82,7 +84,9 @@ const CONFIG_LABELS: [keyof BreakdownConfig, string, (v: unknown) => string][] =
   ['strikeWindow', 'Strikes', (v) => `ATM±${v}`],
   ['trendMode', 'Trend', String],
   ['slPct', 'SL', (v) => `${v}%`],
-  ['trailPct', 'Trail', (v) => `${v}%`],
+  ['trailStartPct', 'Lock@Profit', (v) => `${v ?? 15}%`],
+  ['trailStepPts', 'Trail step', (v) => `${v ?? 5}pt`],
+  ['trailByPts', 'Trail by', (v) => `${v ?? 2}pt`],
   ['targetPct', 'Target', (v) => `${v}%`],
   ['lotsPerTrade', 'Lots', String],
   ['maxConcurrent', 'Max open', String],
@@ -139,10 +143,38 @@ function ChartTooltip({ active, payload }: { active?: boolean; payload?: { paylo
   );
 }
 
+/** Per-browser cache of the day results, keyed by the store's updatedAt: the page paints it instantly and only
+ *  downloads the trade log again after a run actually changed it. */
+const CACHE_KEY = 'breakdownScalper.backtestDays';
+
+function readCache(): { stamp: string; days: BtDayResult[] } | null {
+  try {
+    const c = JSON.parse(localStorage.getItem(CACHE_KEY) ?? 'null') as { stamp?: unknown; days?: unknown } | null;
+    return c && typeof c.stamp === 'string' && Array.isArray(c.days) ? { stamp: c.stamp, days: c.days as BtDayResult[] } : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeCache(stamp: string | null, days: BtDayResult[]) {
+  try {
+    if (stamp) localStorage.setItem(CACHE_KEY, JSON.stringify({ stamp, days }));
+    else localStorage.removeItem(CACHE_KEY);
+  } catch {
+    /* storage full or blocked: the next poll simply downloads again */
+  }
+}
+
 export function BacktestPanel({ pageConfig }: { pageConfig: BreakdownConfig }) {
   const [data, setData] = useState<BacktestResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [days, setDays] = useState<BtDayResult[]>([]);
+  /** Days whose trades are shown. Empty = every day folded, including days a later append adds. */
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  /** The whole trade-log section starts collapsed. */
+  const [logOpen, setLogOpen] = useState(false);
+  const stamp = useRef<string | null>(null);
+  const cacheRead = useRef(false);
   const [rerunWindow, setRerunWindow] = useState<BtWindow>('week');
   const [busy, setBusy] = useState(false);
   const seq = useRef(0);
@@ -150,13 +182,28 @@ export function BacktestPanel({ pageConfig }: { pageConfig: BreakdownConfig }) {
 
   const load = useCallback(async () => {
     const mine = ++seq.current;
+    if (!cacheRead.current) {
+      cacheRead.current = true;
+      const cached = readCache();
+      if (cached) {
+        stamp.current = cached.stamp;
+        setDays(cached.days);
+      }
+    }
     try {
-      const res = await fetch('/api/breakdown-scalper/backtest', { cache: 'no-store' });
+      const q = stamp.current ? `?known=${encodeURIComponent(stamp.current)}` : '';
+      const res = await fetch(`/api/breakdown-scalper/backtest${q}`, { cache: 'no-store' });
       const j = (await res.json()) as BacktestResponse;
       if (mine !== seq.current) return;
       if (j.success) {
         setData(j);
         setLoadError(null);
+        if (!j.unchanged) {
+          const next = j.store?.days ?? [];
+          stamp.current = j.store?.updatedAt ?? null;
+          setDays(next);
+          writeCache(stamp.current, next);
+        }
       } else setLoadError('Could not read backtest results');
     } catch (e) {
       if (mine === seq.current) setLoadError(String((e as Error).message ?? e));
@@ -201,7 +248,6 @@ export function BacktestPanel({ pageConfig }: { pageConfig: BreakdownConfig }) {
     return () => clearTimeout(t);
   }, [data, post]);
 
-  const days = useMemo(() => data?.store?.days ?? [], [data]);
   const summary = useMemo(() => summarize(days), [days]);
   const chart = useMemo(
     () =>
@@ -219,7 +265,7 @@ export function BacktestPanel({ pageConfig }: { pageConfig: BreakdownConfig }) {
   const status = data?.status;
   const failures = Object.entries(data?.store?.failures ?? {});
   const dataThrough = days[0]?.date ?? null;
-  const allCollapsed = days.length > 0 && days.every((d) => collapsed.has(d.date));
+  const allExpanded = days.length > 0 && days.every((d) => expanded.has(d.date));
 
   const exportCsv = () => {
     const blob = new Blob([csvOf(days)], { type: 'text/csv' });
@@ -432,24 +478,35 @@ export function BacktestPanel({ pageConfig }: { pageConfig: BreakdownConfig }) {
 
       {/* Day-wise trade log */}
       <div className="px-4 py-3">
-        <div className="mb-2 flex items-center justify-between">
-          <p className="text-xs font-bold text-zinc-200">Day-wise trade log</p>
-          {days.length > 0 && (
+        <div className="flex items-center justify-between">
+          <button
+            type="button"
+            onClick={() => setLogOpen((o) => !o)}
+            aria-expanded={logOpen}
+            className="flex items-center gap-1.5 text-xs font-bold text-zinc-200 hover:text-white"
+          >
+            {logOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            Day-wise trade log
+            <span className="font-medium text-zinc-500">
+              ({days.length} session{days.length === 1 ? '' : 's'}, {summary.trades} trade{summary.trades === 1 ? '' : 's'})
+            </span>
+          </button>
+          {logOpen && days.length > 0 && (
             <button
               type="button"
-              onClick={() => setCollapsed(allCollapsed ? new Set() : new Set(days.map((d) => d.date)))}
+              onClick={() => setExpanded(allExpanded ? new Set() : new Set(days.map((d) => d.date)))}
               className="text-[11px] font-bold text-sky-400 hover:text-sky-300"
             >
-              {allCollapsed ? 'Expand all' : 'Collapse all'}
+              {allExpanded ? 'Collapse all' : 'Expand all'}
             </button>
           )}
         </div>
-        {days.length === 0 ? (
-          <p className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-6 text-center text-xs text-zinc-500">
+        {!logOpen ? null : days.length === 0 ? (
+          <p className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-6 text-center text-xs text-zinc-500">
             {running ? 'The first sessions are being backtested…' : 'No backtest results yet.'}
           </p>
         ) : (
-          <div className="overflow-x-auto rounded-lg border border-zinc-800">
+          <div className="mt-2 overflow-x-auto rounded-lg border border-zinc-800">
             <table className="w-full min-w-[1500px] text-left text-xs">
               <thead className="bg-zinc-800 text-xs font-bold text-white">
                 <tr>
@@ -466,13 +523,13 @@ export function BacktestPanel({ pageConfig }: { pageConfig: BreakdownConfig }) {
               </thead>
               <tbody className="divide-y divide-zinc-800">
                 {days.map((d) => {
-                  const open = !collapsed.has(d.date);
+                  const open = expanded.has(d.date);
                   return (
                     <Fragment key={d.date}>
                       <tr
                         className="cursor-pointer bg-zinc-900 hover:bg-zinc-800/60"
                         onClick={() =>
-                          setCollapsed((s) => {
+                          setExpanded((s) => {
                             const n = new Set(s);
                             if (n.has(d.date)) n.delete(d.date);
                             else n.add(d.date);

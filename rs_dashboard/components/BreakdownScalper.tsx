@@ -1117,12 +1117,15 @@ export default function BreakdownScalper() {
         liveLtp,
         pos.lowestPrice,
         config.slPct,
-        config.trailPct,
+        config.trailStartPct ?? config.trailPct ?? 15,
         config.targetPct,
         optState.indicators.stLine,
         optState.indicators.ema,
         config.recoveryExit,
         pos.trailingSl,
+        config.trailStartPct ?? config.trailPct ?? 15,
+        config.trailStepPts ?? 5,
+        config.trailByPts ?? 2,
       );
 
       if (risk.lowestPrice !== pos.lowestPrice || risk.trailingSl !== pos.trailingSl) {

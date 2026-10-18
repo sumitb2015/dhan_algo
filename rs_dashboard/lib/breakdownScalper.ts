@@ -496,6 +496,9 @@ export function evaluatePositionRisk(
   emaLine: number | null,
   recoveryExitEnabled = false,
   previousTrailingSl?: number,
+  trailStartPct?: number,
+  trailStepPts?: number,
+  trailByPts?: number,
 ): {
   lowestPrice: number;
   initialSl: number;
@@ -515,11 +518,23 @@ export function evaluatePositionRisk(
   // Initial SL is above entry: entry * (1 + slPct / 100)
   const initialSl = Number((entryPrice * (1 + slPct / 100)).toFixed(2));
 
-  // Trailing SL: starts at initialSl.
-  // Only begins ratcheting down once price drops below entry in our favor!
+  // Lock & Trail Stop-Loss:
+  // Starts at initialSl and gives full breathing room before profit reaches the trigger threshold.
+  // Once profit reaches trailStartPct (default 15%), SL locks to cost (entryPrice).
+  // For every trailStepPts (x points) gain beyond the threshold, SL ratchets down by trailByPts (y points).
+  const startPct = trailStartPct ?? (trailPct > 0 ? trailPct : 15);
+  const stepPts = trailStepPts ?? 5;
+  const byPts = trailByPts ?? 2;
+
   let trailingSl = initialSl;
-  if (lowestPrice < entryPrice) {
-    const ratchetedSl = Number((lowestPrice * (1 + trailPct / 100)).toFixed(2));
+  const profitPts = entryPrice - lowestPrice;
+  const profitPct = entryPrice > 0 ? (profitPts / entryPrice) * 100 : 0;
+
+  if (startPct > 0 && profitPct >= startPct - 1e-9) {
+    const thresholdGainPts = entryPrice * (startPct / 100);
+    const extraGainPts = Math.max(0, profitPts - thresholdGainPts);
+    const steps = stepPts > 0 && byPts > 0 ? Math.floor(extraGainPts / stepPts + 1e-9) : 0;
+    const ratchetedSl = Number((entryPrice - steps * byPts).toFixed(2));
     trailingSl = Math.min(initialSl, ratchetedSl);
   }
 

@@ -330,12 +330,15 @@ export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResu
           px,
           p.lowest,
           config.slPct,
-          config.trailPct,
+          config.trailStartPct ?? config.trailPct ?? 15,
           config.targetPct,
           st.indicators.stLine,
           st.indicators.ema,
           config.recoveryExit && label === 'close',
           p.trailingSl,
+          config.trailStartPct ?? config.trailPct ?? 15,
+          config.trailStepPts ?? 5,
+          config.trailByPts ?? 2,
         );
         p.lowest = risk.lowestPrice;
         if (risk.shouldExit) {
@@ -457,8 +460,9 @@ export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResu
       ] as const) {
         p.maxAdverse = Math.max(p.maxAdverse, px - p.entryPrice);
         const risk = evaluatePositionRisk(
-          p.entryPrice, px, p.lowest, config.slPct, config.trailPct, config.targetPct,
+          p.entryPrice, px, p.lowest, config.slPct, config.trailStartPct ?? config.trailPct ?? 15, config.targetPct,
           st.indicators.stLine, st.indicators.ema, config.recoveryExit && label === 'close', p.trailingSl,
+          config.trailStartPct ?? config.trailPct ?? 15, config.trailStepPts ?? 5, config.trailByPts ?? 2,
         );
         p.lowest = risk.lowestPrice;
         p.trailingSl = risk.trailingSl;
@@ -515,8 +519,42 @@ export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResu
 // ── Run bookkeeping shared by the runner, the API route and the panel ────────
 /** The config fields that change a backtest result (engineActive and mode do not). */
 export function backtestConfigKey(c: BreakdownConfig): string {
-  const { strikeWindow, timeframe, trendMode, maxConcurrent, maxSameSide, lotsPerTrade, slPct, trailPct, targetPct, recoveryExit, dailyLossLimit, entryStart, entryEnd, eodExit } = c;
-  return JSON.stringify({ strikeWindow, timeframe, trendMode, maxConcurrent, maxSameSide, lotsPerTrade, slPct, trailPct, targetPct, recoveryExit, dailyLossLimit, entryStart, entryEnd, eodExit });
+  const {
+    strikeWindow,
+    timeframe,
+    trendMode,
+    maxConcurrent,
+    maxSameSide,
+    lotsPerTrade,
+    slPct,
+    trailStartPct,
+    trailStepPts,
+    trailByPts,
+    targetPct,
+    recoveryExit,
+    dailyLossLimit,
+    entryStart,
+    entryEnd,
+    eodExit,
+  } = c;
+  return JSON.stringify({
+    strikeWindow,
+    timeframe,
+    trendMode,
+    maxConcurrent,
+    maxSameSide,
+    lotsPerTrade,
+    slPct,
+    trailStartPct: trailStartPct ?? c.trailPct ?? 15,
+    trailStepPts: trailStepPts ?? 5,
+    trailByPts: trailByPts ?? 2,
+    targetPct,
+    recoveryExit,
+    dailyLossLimit,
+    entryStart,
+    entryEnd,
+    eodExit,
+  });
 }
 
 export type BtWindow = 'week' | 'month' | 'db4';

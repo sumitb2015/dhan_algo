@@ -198,11 +198,11 @@ export default function BreakdownDocModal({ isOpen, onClose }: BreakdownDocModal
                 },
                 {
                   step: 'RULE 4',
-                  title: 'Downward-Ratchet Trailing Stop-Loss',
+                  title: 'Lock & Trail Stop-Loss Engine',
                   color: 'text-amber-400',
                   border: 'border-amber-500/25',
                   bg: 'bg-amber-500/5',
-                  body: 'Trades initiate with an Initial SL (e.g. +30% above entry). As premium drops and prints new lowest lows, Trailing SL moves down as Lowest Price × (1 + Trail %). Crucially, this trailing stop-loss NEVER loosens or ratchets upward.',
+                  body: 'Trades initiate with an Initial SL (e.g. +25% above entry) to give full breathing room. Once profit reaches the trigger threshold (e.g. 15%), SL locks to cost (breakeven). For every X points gain beyond trigger, SL ratchets down by Y points. Crucially, the stop-loss NEVER loosens or ratchets upward.',
                 },
                 {
                   step: 'RULE 5',
@@ -296,12 +296,13 @@ export default function BreakdownDocModal({ isOpen, onClose }: BreakdownDocModal
             <div className="space-y-4">
               <div className="rounded-xl border border-zinc-800 bg-zinc-950/60 p-4">
                 <h3 className="text-xs font-bold uppercase tracking-wider text-amber-400 mb-2">
-                  Step-by-Step Trailing Ratchet Example
+                  Step-by-Step Lock & Trail Example
                 </h3>
                 <p className="text-xs text-zinc-300 leading-relaxed mb-4">
                   Assume you short a NIFTY 24500 PE at <strong className="text-white">₹100.00</strong> with a{' '}
-                  <strong className="text-amber-400">30% Initial SL</strong> and a{' '}
-                  <strong className="text-emerald-400">20% Trailing SL</strong>:
+                  <strong className="text-amber-400">25% Initial SL</strong>, a{' '}
+                  <strong className="text-emerald-400">15% Lock Trigger</strong>, and a{' '}
+                  <strong className="text-sky-400">Step: 5 pts / Trail by: 2 pts</strong> configuration:
                 </p>
 
                 <div className="overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-900/60">
@@ -320,39 +321,46 @@ export default function BreakdownDocModal({ isOpen, onClose }: BreakdownDocModal
                         <td className="px-3 py-2 text-zinc-300 font-sans">1. Trade Entry</td>
                         <td className="px-3 py-2 text-white">₹100.00</td>
                         <td className="px-3 py-2 text-zinc-400">₹100.00</td>
-                        <td className="px-3 py-2 text-red-400 font-bold">₹130.00 (Initial)</td>
-                        <td className="px-3 py-2 text-zinc-500 font-sans">Risk: ₹30/sh</td>
+                        <td className="px-3 py-2 text-red-400 font-bold">₹125.00 (Initial)</td>
+                        <td className="px-3 py-2 text-zinc-500 font-sans">Full breathing room (no early trail)</td>
                       </tr>
                       <tr>
-                        <td className="px-3 py-2 text-zinc-300 font-sans">2. Premium drops to ₹85</td>
+                        <td className="px-3 py-2 text-zinc-300 font-sans">2. Premium drops to ₹90</td>
+                        <td className="px-3 py-2 text-white">₹90.00</td>
+                        <td className="px-3 py-2 text-emerald-400 font-bold">₹90.00 (10% profit)</td>
+                        <td className="px-3 py-2 text-red-400 font-bold">₹125.00 (Initial)</td>
+                        <td className="px-3 py-2 text-zinc-400 font-sans">&lt; 15% trigger: SL stays untouched</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-2 text-zinc-300 font-sans">3. Premium hits ₹85 (15% profit)</td>
                         <td className="px-3 py-2 text-white">₹85.00</td>
                         <td className="px-3 py-2 text-emerald-400 font-bold">₹85.00</td>
-                        <td className="px-3 py-2 text-amber-400 font-bold">₹102.00 (85 × 1.20)</td>
-                        <td className="px-3 py-2 text-zinc-300 font-sans">Risk reduced to ₹2</td>
-                      </tr>
-                      <tr>
-                        <td className="px-3 py-2 text-zinc-300 font-sans">3. Premium drops to ₹70</td>
-                        <td className="px-3 py-2 text-white">₹70.00</td>
-                        <td className="px-3 py-2 text-emerald-400 font-bold">₹70.00</td>
-                        <td className="px-3 py-2 text-emerald-400 font-bold">₹84.00 (70 × 1.20)</td>
+                        <td className="px-3 py-2 text-emerald-400 font-bold">₹100.00 (LOCKED TO COST)</td>
                         <td className="px-3 py-2 text-emerald-400 font-sans font-bold">
-                          +₹16 PROFIT LOCKED!
+                          DOWNSIDE RISK ELIMINATED!
                         </td>
                       </tr>
                       <tr>
-                        <td className="px-3 py-2 text-zinc-300 font-sans">4. Pullback to ₹78</td>
-                        <td className="px-3 py-2 text-white">₹78.00</td>
-                        <td className="px-3 py-2 text-emerald-400">₹70.00 (unchanged)</td>
-                        <td className="px-3 py-2 text-emerald-400 font-bold">₹84.00 (unchanged)</td>
-                        <td className="px-3 py-2 text-zinc-400 font-sans">SL does NOT move up</td>
+                        <td className="px-3 py-2 text-zinc-300 font-sans">4. Further drop to ₹80 (+5 pts gain)</td>
+                        <td className="px-3 py-2 text-white">₹80.00</td>
+                        <td className="px-3 py-2 text-emerald-400 font-bold">₹80.00</td>
+                        <td className="px-3 py-2 text-sky-400 font-bold">₹98.00 (100 - 1×2)</td>
+                        <td className="px-3 py-2 text-emerald-400 font-sans font-bold">+₹2 PROFIT LOCKED!</td>
                       </tr>
                       <tr>
-                        <td className="px-3 py-2 text-zinc-300 font-sans">5. Reversal hits ₹84</td>
-                        <td className="px-3 py-2 text-red-400">₹84.00</td>
-                        <td className="px-3 py-2 text-emerald-400">₹70.00</td>
-                        <td className="px-3 py-2 text-red-400 font-bold">₹84.00 (TRIGGERED)</td>
+                        <td className="px-3 py-2 text-zinc-300 font-sans">5. Further drop to ₹75 (+10 pts gain)</td>
+                        <td className="px-3 py-2 text-white">₹75.00</td>
+                        <td className="px-3 py-2 text-emerald-400 font-bold">₹75.00</td>
+                        <td className="px-3 py-2 text-sky-400 font-bold">₹96.00 (100 - 2×2)</td>
+                        <td className="px-3 py-2 text-emerald-400 font-sans font-bold">+₹4 PROFIT LOCKED!</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-2 text-zinc-300 font-sans">6. Pullback / reversal hits ₹96</td>
+                        <td className="px-3 py-2 text-red-400">₹96.00</td>
+                        <td className="px-3 py-2 text-emerald-400">₹75.00</td>
+                        <td className="px-3 py-2 text-red-400 font-bold">₹96.00 (TRIGGERED)</td>
                         <td className="px-3 py-2 text-emerald-400 font-sans font-bold">
-                          Exited with +₹16 gain
+                          Exited safely with +₹4 gain
                         </td>
                       </tr>
                     </tbody>
@@ -388,15 +396,27 @@ export default function BreakdownDocModal({ isOpen, onClose }: BreakdownDocModal
                       </tr>
                       <tr>
                         <td className="px-3 py-2 font-mono font-bold text-white">slPct</td>
-                        <td className="px-3 py-2 font-mono text-zinc-400">30%</td>
-                        <td className="px-3 py-2 font-mono text-emerald-400">25% – 35%</td>
+                        <td className="px-3 py-2 font-mono text-zinc-400">25%</td>
+                        <td className="px-3 py-2 font-mono text-emerald-400">15% – 35%</td>
                         <td className="px-3 py-2 text-zinc-300">Initial Stop-Loss percentage above entry price</td>
                       </tr>
                       <tr>
-                        <td className="px-3 py-2 font-mono font-bold text-white">trailPct</td>
-                        <td className="px-3 py-2 font-mono text-zinc-400">20%</td>
-                        <td className="px-3 py-2 font-mono text-emerald-400">15% – 25%</td>
-                        <td className="px-3 py-2 text-zinc-300">Trailing ratchet percentage above lowest printed price</td>
+                        <td className="px-3 py-2 font-mono font-bold text-white">trailStartPct</td>
+                        <td className="px-3 py-2 font-mono text-zinc-400">15%</td>
+                        <td className="px-3 py-2 font-mono text-emerald-400">10% – 25%</td>
+                        <td className="px-3 py-2 text-zinc-300">Profit threshold to lock SL to cost and begin trailing</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-2 font-mono font-bold text-white">trailStepPts</td>
+                        <td className="px-3 py-2 font-mono text-zinc-400">5 pts</td>
+                        <td className="px-3 py-2 font-mono text-emerald-400">1 – 10 pts</td>
+                        <td className="px-3 py-2 text-zinc-300">Option gain step (pts) to advance trailing SL</td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-2 font-mono font-bold text-white">trailByPts</td>
+                        <td className="px-3 py-2 font-mono text-zinc-400">2 pts</td>
+                        <td className="px-3 py-2 font-mono text-emerald-400">1 – 5 pts</td>
+                        <td className="px-3 py-2 text-zinc-300">Points to ratchet trailing SL downward per step</td>
                       </tr>
                       <tr>
                         <td className="px-3 py-2 font-mono font-bold text-white">targetPct</td>

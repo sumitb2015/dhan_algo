@@ -47,8 +47,12 @@ function currentConfig() {
 
 const istHm = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(11, 16);
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   const store = readJson<BtStore>(STORE);
+  // The page caches the day results and sends the version it holds (the store's updatedAt): while that is still
+  // current, the reply carries status only, so a poll never re-sends the whole trade log.
+  const known = new URL(request.url).searchParams.get('known');
+  const unchanged = !!store && !!store.updatedAt && known === store.updatedAt;
   const status = readJson<Record<string, unknown>>(STATUS);
   const pid = runnerPid();
   const config = currentConfig();
@@ -61,6 +65,7 @@ export async function GET() {
   const runStatus = status && status.state === 'running' && !pid ? { ...status, state: 'interrupted' } : status;
   return NextResponse.json({
     success: true,
+    unchanged,
     running: pid != null,
     status: runStatus,
     from,
@@ -78,7 +83,7 @@ export async function GET() {
           config: store.config,
           configKey: store.configKey,
           failures: store.failures ?? {},
-          days: Object.values(store.days ?? {}).sort((a, b) => b.date.localeCompare(a.date)),
+          days: unchanged ? null : Object.values(store.days ?? {}).sort((a, b) => b.date.localeCompare(a.date)),
         }
       : null,
   });

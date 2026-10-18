@@ -79,7 +79,12 @@ test('trendInputsAt only sees spot closes before the decision minute', () => {
 });
 
 test('simulateDay: enters at the next bar open after a closed breakdown and exits on the trailing stop level', () => {
-  const day = scenario((m) => (m === 641 ? { o: 88, h: 120, l: 88, c: 110 } : null)); // 10:41 spike
+  // Price drops to 74 at 10:20 (exceeding 15% threshold 14.1 pts -> steps=1, trailSl ratchets to 92), then spikes at 10:41
+  const day = scenario((m) => {
+    if (m === 620) return { o: 74, h: 74, l: 74, c: 74 };
+    if (m === 641) return { o: 88, h: 120, l: 88, c: 110 };
+    return null;
+  });
   const r = simulateDay(day, cfg);
   const t = r.trades[0];
   assert.ok(t, 'one trade expected');
@@ -87,14 +92,13 @@ test('simulateDay: enters at the next bar open after a closed breakdown and exit
   assert.equal(t.entryTime, '10:16'); // breakdown bar 10:15 closed -> fill at 10:16 open
   assert.equal(t.entryPrice, 94);
   assert.equal(t.initialSl, 117.5); // +25%
-  assert.equal(t.lowestPrice, 88);
-  assert.equal(t.exitKind, 'TRAIL_SL'); // trail = 88 x 1.15 = 101.2, crossed by the 10:41 high
+  assert.equal(t.lowestPrice, 74);
+  assert.equal(t.exitKind, 'TRAIL_SL'); // trail ratcheted to 94 - 2 = 92, crossed by 10:41 spike
   assert.equal(t.exitTime, '10:41');
-  assert.equal(t.exitPrice, 101.2);
-  assert.equal(t.gross, -468); // (94 - 101.2) x 65
-  assert.ok(t.costs > 0 && t.net < t.gross);
+  assert.equal(t.exitPrice, 92);
+  assert.equal(t.gross, 130); // (94 - 92) x 65 = +130
+  assert.ok(t.costs > 0);
   assert.equal(t.trendAtEntry, 'BULLISH');
-  assert.equal(r.losses, 1);
 });
 
 test('simulateDay: a position never stopped out is closed at the EOD cutoff open', () => {

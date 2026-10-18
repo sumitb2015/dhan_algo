@@ -141,20 +141,18 @@ When multiple options break down during the same candle (e.g. 3 PEs break down a
 - **Max Same-Side Positions**: Default **1 position**. If the strategy is already short 24500 PE, it will not open 24450 PE, preventing double exposure to a sudden index drop.
 - **Contract Deduplication**: Active or recently exited strikes cannot be re-entered while a position in that strike remains open.
 
-### Rule 5: Dynamic Trailing Stop-Loss Engine
-Option premium moves quickly during squeezes. A static stop is insufficient:
-- **Initial Stop-Loss**: Fixed percentage above entry price (e.g. `Entry Price + 30%`).
-- **Lowest Price Tracking**: The algorithm tracks `lowestPrice = min(lowestPrice, currentLtp)` continuously.
-- **Dynamic Ratchet Trailing SL**:
-  $$\text{Trailing SL} = \text{lowestPrice} \times \left(1 + \frac{\text{trailPct}}{100}\right)$$
-  - As the option premium drops from ₹100 $\rightarrow$ ₹80 $\rightarrow$ ₹60, the stop-loss ratchets down:
-    - Entry ₹100: Initial SL = ₹130; the trailing stop starts AT the initial SL (₹130) and only ratchets down once the premium falls below entry
-    - Price drops to ₹80: Trail SL ratchets down to $80 \times 1.20 = \text{₹96}$ (locking in profit!)
-    - Price drops to ₹60: Trail SL ratchets down to $60 \times 1.20 = \text{₹72}$
-  - **Inviolable Invariant**: $\text{Trailing SL}$ can **only move downward**. It never increases or loosens.
+### Rule 5: Dynamic Lock & Trail Stop-Loss Engine
+Option premium moves quickly during squeezes, but premature trailing before a trade develops causes unnecessary stop-outs. This engine uses a 2-stage Lock & Trail protection mechanism:
+- **Phase 1 (Full Initial Breathing Room)**: The trade starts with a static Initial SL (`Entry Price × (1 + slPct / 100)`). The stop stays firmly at the initial SL until the position achieves the threshold profit `trailStartPct` (default 15% decay), preventing normal entry noise from triggering an early exit.
+- **Phase 2 (Lock to Cost / Breakeven)**: Once option premium drops by $\ge \text{trailStartPct}$ (e.g. 15% profit), the stop-loss immediately locks to **cost (`entryPrice`)**, eliminating all principal downside risk.
+- **Phase 3 (Step-and-Offset Trailing)**: For every additional `trailStepPts` ($x$ points) gain in option premium beyond the trigger threshold, the stop-loss ratchets down by `trailByPts` ($y$ points):
+  $$\text{Extra Gain} = (\text{entryPrice} - \text{lowestPrice}) - (\text{entryPrice} \times \frac{\text{trailStartPct}}{100})$$
+  $$\text{Steps} = \left\lfloor \frac{\text{Extra Gain}}{\text{trailStepPts}} \right\rfloor$$
+  $$\text{Trailing SL} = \text{entryPrice} - (\text{Steps} \times \text{trailByPts})$$
+- **Inviolable Invariant**: $\text{Trailing SL}$ can **only move downward**. It never increases or loosens.
 
 ### Rule 6: Exits & Circuit Breakers
-1. **Scalp Profit Target**: (Optional, default 50% decay) Immediately books profit if premium collapses to target.
+1. **Scalp Profit Target**: (Optional, default 35% decay) Immediately books profit if premium collapses to target.
 2. **Indicator Recovery Exit**: (Optional) Closes position if option price recovers back above its Supertrend or EMA 20.
 3. **Mandatory EOD Square-Off**: Exactly at **15:15 IST**, all active positions are closed at market to prevent overnight gap risk.
 4. **Daily Loss Circuit Breaker** (today's IST P&L in the active mode only; SIM never counts against REAL): If total realized + unrealized P&L drops below `-₹5,000` (configurable), the auto-trader immediately shuts down and locks out any further entries for the remainder of the session.
@@ -169,9 +167,11 @@ Option premium moves quickly during squeezes. A static stop is insufficient:
 | `stPeriod` | `10` | `7` – `14` | Supertrend ATR lookback period |
 | `stMultiplier` | `2.0` | `1.5` – `3.0` | Supertrend volatility multiplier |
 | `emaPeriod` | `20` | `9` – `50` | Moving average period for option breakdown |
-| `slPct` | `30%` | `15%` – `50%` | Initial Stop-Loss percentage above entry price |
-| `trailPct` | `20%` | `10%` – `30%` | Trailing Stop-Loss percentage above lowest price |
-| `targetPct` | `50%` | `0%` – `80%` | Scalp Profit Target (0 = disabled, ride trail) |
+| `slPct` | `25%` | `10%` – `50%` | Initial Stop-Loss percentage above entry price |
+| `trailStartPct` | `15%` | `5%` – `50%` | Profit threshold to lock SL to cost and begin trailing |
+| `trailStepPts` | `5 pts` | `0.5` – `50 pts` | For every X points gain in option premium beyond trigger |
+| `trailByPts` | `2 pts` | `0.5` – `50 pts` | Ratchet stop-loss down by Y points per step |
+| `targetPct` | `35%` | `0%` – `80%` | Scalp Profit Target (0 = disabled, ride trail) |
 | `maxPositions` | `2` | `1` – `5` | Maximum simultaneous open positions |
 | `maxSameSide` | `1` | `1` – `3` | Maximum concurrent positions on CE or PE side |
 | `lotsPerTrade` | `1` | `1` – `10` | Lots to short per trade |
