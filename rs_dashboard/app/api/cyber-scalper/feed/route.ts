@@ -17,6 +17,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const rawInterval = searchParams.get('interval') ?? '1';
   const expiry = searchParams.get('expiry') ?? '';
   const futureExpiry = searchParams.get('futureExpiry') ?? '';
+  const allBars = searchParams.get('allBars') === '1';
 
   // Basic validation
   const symbol = ALLOWED_SYMBOLS.has(rawSymbol) || /^[A-Z0-9&-]{1,15}$/.test(rawSymbol) ? rawSymbol : 'NIFTY';
@@ -30,7 +31,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     args.push('--future-expiry', futureExpiry);
   }
 
-  const dedupeKey = `cyber-scalper-feed:${symbol}:${interval}:${expiry || 'nearest'}:${futureExpiry || 'nearest'}`;
+  if (allBars) args.push('--all-bars');
+
+  const dedupeKey = `cyber-scalper-feed:${symbol}:${interval}:${expiry || 'nearest'}:${futureExpiry || 'nearest'}:${allBars ? 'all' : 'tail'}`;
 
   try {
     const data = await dedupe(dedupeKey, () =>

@@ -6,8 +6,9 @@
  *  2. Evaluates option breakdown: price closes below Supertrend(10,2), session VWAP, and EMA20 on completed closed candles.
  *  3. Detects fresh breakdown: option candle closes below all three, while previous candle was NOT below all three.
  *  4. Evaluates underlying market direction (NIFTY):
- *     - Bullish trend (Spot > VWAP, EMA9 > EMA20, Spread >= 0) -> Only PE eligible for selling.
- *     - Bearish trend (Spot < VWAP, EMA9 < EMA20, Spread <= 0) -> Only CE eligible for selling.
+ *     - Bullish trend (EMA fast > EMA slow, and index Supertrend up when enabled) -> Only PE eligible for selling.
+ *     - Bearish trend (EMA fast < EMA slow, and index Supertrend down when enabled) -> Only CE eligible for selling.
+ *     (No VWAP: the index has no volume, so its "VWAP" was only the day's average price.)
  *     - Sideways / unclear -> No new trades (or user can bypass).
  *  5. Ranks qualifying signals when multiple strikes trigger simultaneously:
  *     - Freshness (highest rank for 1 bar ago)
@@ -225,9 +226,11 @@ export type TrendFilterMode = 'AUTO' | 'BYPASS' | 'CE_ONLY' | 'PE_ONLY';
 
 export interface UnderlyingTrend {
   spot: number;
-  vwap: number | null;
-  ema9: number | null;
-  ema20: number | null;
+  emaFast: number | null;
+  emaSlow: number | null;
+  /** Index Supertrend line and direction (1 up, -1 down); null when disabled or still warming up. */
+  stLine: number | null;
+  stDir: 1 | -1 | null;
   spread: number | null;
   trend: TrendBias;
   eligibleSide: EligibleSide;
@@ -235,80 +238,121 @@ export interface UnderlyingTrend {
   detail: string;
 }
 
+/** Index (NIFTY) trend settings: EMA fast/slow cross, optionally confirmed by a Supertrend on the same bars. */
+export interface IndexTrendParams {
+  emaFast: number;
+  emaSlow: number;
+  useSupertrend: boolean;
+  stPeriod: number;
+  stMultiplier: number;
+}
+
 /**
- * Determines market bias and option selling eligibility based on underlying (NIFTY) price vs indicators.
- *  - Bullish: Spot > VWAP, EMA9 > EMA20, positive spread -> PE selling eligible.
- *  - Bearish: Spot < VWAP, EMA9 < EMA20, negative spread -> CE selling eligible.
- *  - Sideways / Unclear -> Neither eligible (blocked).
+ * Defaults from the 2026-10-18 backtest: the EMA cross alone made the most (+₹4.10L over 124 sessions); every index
+ * Supertrend variant cut profit (best, 7/3: +₹3.37L, though with lower drawdown), so it is off and starts at 7/3 when on.
+ */
+export const DEFAULT_INDEX_TREND: IndexTrendParams = { emaFast: 9, emaSlow: 20, useSupertrend: false, stPeriod: 7, stMultiplier: 3 };
+
+/** Index trend settings from a config, with defaults for fields an older config does not have. */
+export function indexTrendParamsOf(c: {
+  trendEmaFast?: number;
+  trendEmaSlow?: number;
+  trendUseSupertrend?: boolean;
+  trendStPeriod?: number;
+  trendStMultiplier?: number;
+}): IndexTrendParams {
+  return {
+    emaFast: c.trendEmaFast ?? DEFAULT_INDEX_TREND.emaFast,
+    emaSlow: c.trendEmaSlow ?? DEFAULT_INDEX_TREND.emaSlow,
+    useSupertrend: c.trendUseSupertrend ?? DEFAULT_INDEX_TREND.useSupertrend,
+    stPeriod: c.trendStPeriod ?? DEFAULT_INDEX_TREND.stPeriod,
+    stMultiplier: c.trendStMultiplier ?? DEFAULT_INDEX_TREND.stMultiplier,
+  };
+}
+
+/** EMA seeded on the first value (pandas ewm adjust=False, which the live feed used): the last value, or null. */
+function ewmLastOf(values: number[], span: number): number | null {
+  if (!values.length) return null;
+  const a = 2 / (span + 1);
+  let e = values[0];
+  for (let i = 1; i < values.length; i++) e = a * values[i] + (1 - a) * e;
+  return e;
+}
+
+/**
+ * The index trend inputs from the session's bar closes on the trend timeframe, oldest first (the last one may be the
+ * forming bar). Shared by the live page (feed candles) and the backtest (spot closes), so both decide alike. The
+ * Supertrend's ATR is close-to-close (high = low = close per bar): the backtest only stores index closes, so the live
+ * page must not use the candle highs and lows either.
+ */
+export function indexTrendInputs(closes: number[], p: IndexTrendParams) {
+  const emaFast = ewmLastOf(closes, p.emaFast);
+  const emaSlow = ewmLastOf(closes, p.emaSlow);
+  let stLine: number | null = null;
+  let stDir: 1 | -1 | null = null;
+  if (p.useSupertrend) {
+    const st = supertrendSeries(closes.map((c) => ({ high: c, low: c, close: c })), p.stPeriod, p.stMultiplier);
+    const last = st[st.length - 1];
+    if (last) {
+      stLine = last.line;
+      stDir = last.dir;
+    }
+  }
+  return { spot: closes[closes.length - 1] ?? 0, emaFast, emaSlow, stLine, stDir };
+}
+
+/**
+ * Market bias and option-selling eligibility from the index trend inputs:
+ *  - Bullish: EMA fast > EMA slow, and Supertrend up when it is enabled -> PE selling eligible.
+ *  - Bearish: EMA fast < EMA slow, and Supertrend down when it is enabled -> CE selling eligible.
+ *  - Disagreeing / still warming up -> neither (blocked) in AUTO mode.
  */
 export function evaluateUnderlyingTrend(
-  spot: number,
-  vwap: number | null,
-  ema9: number | null,
-  ema20: number | null,
+  inputs: { spot: number; emaFast: number | null; emaSlow: number | null; stLine: number | null; stDir: 1 | -1 | null },
+  p: IndexTrendParams,
   mode: TrendFilterMode = 'AUTO',
 ): UnderlyingTrend {
-  if (spot <= 0 || vwap == null || ema9 == null || ema20 == null) {
+  const { spot, emaFast, emaSlow, stLine, stDir } = inputs;
+  const forced: EligibleSide = mode === 'BYPASS' ? 'BOTH' : mode === 'CE_ONLY' ? 'CE' : mode === 'PE_ONLY' ? 'PE' : 'NONE';
+  if (spot <= 0 || emaFast == null || emaSlow == null || (p.useSupertrend && stDir == null)) {
     return {
       spot,
-      vwap,
-      ema9,
-      ema20,
+      emaFast,
+      emaSlow,
+      stLine,
+      stDir,
       spread: null,
       trend: 'SIDEWAYS',
-      eligibleSide: mode === 'BYPASS' ? 'BOTH' : mode === 'CE_ONLY' ? 'CE' : mode === 'PE_ONLY' ? 'PE' : 'NONE',
+      eligibleSide: forced,
       headline: 'Awaiting Indicators',
       detail: 'Underlying telemetry warming up. Holding new trades.',
     };
   }
 
-  const spread = ema9 - ema20;
-  const isBull = spot > vwap && ema9 > ema20 && spread > 0;
-  const isBear = spot < vwap && ema9 < ema20 && spread < 0;
+  const spread = emaFast - emaSlow;
+  const isBull = spread > 0 && (!p.useSupertrend || stDir === 1);
+  const isBear = spread < 0 && (!p.useSupertrend || stDir === -1);
+  const trend: TrendBias = isBull ? 'BULLISH' : isBear ? 'BEARISH' : 'SIDEWAYS';
 
-  let trend: TrendBias = 'SIDEWAYS';
-  if (isBull) trend = 'BULLISH';
-  else if (isBear) trend = 'BEARISH';
+  let eligibleSide: EligibleSide = forced;
+  if (mode === 'AUTO') eligibleSide = trend === 'BULLISH' ? 'PE' : trend === 'BEARISH' ? 'CE' : 'NONE';
 
-  let eligibleSide: EligibleSide = 'NONE';
-  if (mode === 'BYPASS') {
-    eligibleSide = 'BOTH';
-  } else if (mode === 'CE_ONLY') {
-    eligibleSide = 'CE';
-  } else if (mode === 'PE_ONLY') {
-    eligibleSide = 'PE';
-  } else {
-    // AUTO mode: follow market trend
-    if (trend === 'BULLISH') eligibleSide = 'PE';
-    else if (trend === 'BEARISH') eligibleSide = 'CE';
-    else eligibleSide = 'NONE';
-  }
-
-  let headline = '';
-  let detail = '';
-
+  const ema = `EMA${p.emaFast} ${spread > 0 ? '>' : spread < 0 ? '<' : '='} EMA${p.emaSlow} (${spread > 0 ? '+' : ''}${spread.toFixed(1)})`;
+  const st = p.useSupertrend ? ` and Supertrend(${p.stPeriod}, ${p.stMultiplier}) ${stDir === 1 ? 'up' : 'down'}` : '';
+  let headline: string;
+  let detail: string;
   if (trend === 'BULLISH') {
     headline = 'BULLISH TREND CONFIRMED';
-    detail = `Spot (${spot.toFixed(1)}) > VWAP (${vwap.toFixed(1)}) and EMA9 > EMA20 (+${spread.toFixed(1)} spread). Only PUT (PE) selling permitted.`;
+    detail = `${ema}${st}. Only PUT (PE) selling permitted.`;
   } else if (trend === 'BEARISH') {
     headline = 'BEARISH TREND CONFIRMED';
-    detail = `Spot (${spot.toFixed(1)}) < VWAP (${vwap.toFixed(1)}) and EMA9 < EMA20 (${spread.toFixed(1)} spread). Only CALL (CE) selling permitted.`;
+    detail = `${ema}${st}. Only CALL (CE) selling permitted.`;
   } else {
     headline = 'SIDEWAYS / RANGEBOUND CHOP';
-    detail = `Underlying is consolidating without clean alignment. New selling is blocked to avoid whipsaw losses.`;
+    detail = `${ema}${st}: the trend checks disagree. New selling is blocked to avoid whipsaw losses.`;
   }
 
-  return {
-    spot,
-    vwap,
-    ema9,
-    ema20,
-    spread,
-    trend,
-    eligibleSide,
-    headline,
-    detail,
-  };
+  return { spot, emaFast, emaSlow, stLine, stDir, spread, trend, eligibleSide, headline, detail };
 }
 
 export interface CandidateSignal {

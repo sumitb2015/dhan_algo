@@ -7,7 +7,7 @@
  */
 
 import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
-import type { TrendFilterMode } from './breakdownScalper.ts';
+import { DEFAULT_INDEX_TREND, type TrendFilterMode } from './breakdownScalper.ts';
 import { istDayOf } from './multiLegGuards.ts';
 
 export type LedgerMode = 'SIM' | 'REAL';
@@ -60,6 +60,12 @@ export interface BreakdownConfig {
   stPeriod?: number; // default 10 (Supertrend ATR period)
   stMultiplier?: number; // default 2.0 (Supertrend multiplier)
   emaPeriod?: number; // default 20 (EMA period)
+  /** Index (NIFTY) trend: EMA fast/slow cross on the option timeframe, optionally confirmed by a Supertrend. */
+  trendEmaFast?: number; // default 9
+  trendEmaSlow?: number; // default 20 (must be > trendEmaFast)
+  trendUseSupertrend?: boolean; // default false (it cut profit in the backtest)
+  trendStPeriod?: number; // default 7
+  trendStMultiplier?: number; // default 3
   entryStart: string; // default "09:30"
   entryEnd: string; // default "15:00"
   eodExit: string; // default "15:15"
@@ -98,6 +104,11 @@ export const DEFAULT_CONFIG: BreakdownConfig = {
   stPeriod: 10,
   stMultiplier: 2.0,
   emaPeriod: 20,
+  trendEmaFast: DEFAULT_INDEX_TREND.emaFast,
+  trendEmaSlow: DEFAULT_INDEX_TREND.emaSlow,
+  trendUseSupertrend: DEFAULT_INDEX_TREND.useSupertrend,
+  trendStPeriod: DEFAULT_INDEX_TREND.stPeriod,
+  trendStMultiplier: DEFAULT_INDEX_TREND.stMultiplier,
   entryStart: '09:30',
   entryEnd: '15:00',
   eodExit: '15:15',
@@ -170,6 +181,7 @@ export function sanitizeConfigPatch(patch: unknown): Partial<BreakdownConfig> {
   if (typeof p.useSupertrend === 'boolean') out.useSupertrend = p.useSupertrend;
   if (typeof p.useVwap === 'boolean') out.useVwap = p.useVwap;
   if (typeof p.useEma === 'boolean') out.useEma = p.useEma;
+  if (typeof p.trendUseSupertrend === 'boolean') out.trendUseSupertrend = p.trendUseSupertrend;
   if (typeof p.btWarmOnly === 'boolean') out.btWarmOnly = p.btWarmOnly;
   if (p.dataSource === 'dhan' || p.dataSource === 'breeze') out.dataSource = p.dataSource;
   if (p.timeframe === 1 || p.timeframe === 3 || p.timeframe === 5) out.timeframe = p.timeframe;
@@ -190,6 +202,15 @@ export function sanitizeConfigPatch(patch: unknown): Partial<BreakdownConfig> {
   };
   indInt('stPeriod', 2, 50);
   indInt('emaPeriod', 3, 200);
+  const trendInt = (k: 'trendEmaFast' | 'trendEmaSlow' | 'trendStPeriod', lo: number, hi: number) => {
+    const n = clampNum(p[k], lo, hi);
+    if (n !== undefined) out[k] = Math.round(n);
+  };
+  trendInt('trendEmaFast', 2, 100);
+  trendInt('trendEmaSlow', 3, 200);
+  trendInt('trendStPeriod', 2, 50);
+  const trendMult = clampNum(p.trendStMultiplier, 0.5, 10);
+  if (trendMult !== undefined) out.trendStMultiplier = trendMult;
   const stMultVal = clampNum(p.stMultiplier ?? (p as Record<string, unknown>).stMult, 0.5, 10);
   if (stMultVal !== undefined) out.stMultiplier = stMultVal;
   const num = (k: 'slPct' | 'trailPct' | 'trailStartPct' | 'trailStepPts' | 'trailByPts' | 'targetPct' | 'dailyLossLimit' | 'brokerage' | 'slippagePts', lo: number, hi: number) => {
@@ -260,6 +281,14 @@ export function normalizeConfig(raw: unknown): BreakdownConfig {
   }
   if (merged.stMultiplier === undefined) {
     merged.stMultiplier = DEFAULT_CONFIG.stMultiplier;
+  }
+  for (const k of ['trendEmaFast', 'trendEmaSlow', 'trendUseSupertrend', 'trendStPeriod', 'trendStMultiplier'] as const) {
+    if (merged[k] === undefined) (merged as unknown as Record<string, unknown>)[k] = DEFAULT_CONFIG[k];
+  }
+  // A fast EMA that is not faster than the slow one is no cross: reset the pair as a whole.
+  if ((merged.trendEmaFast as number) >= (merged.trendEmaSlow as number)) {
+    merged.trendEmaFast = DEFAULT_CONFIG.trendEmaFast;
+    merged.trendEmaSlow = DEFAULT_CONFIG.trendEmaSlow;
   }
   if (merged.emaPeriod === undefined) {
     merged.emaPeriod = DEFAULT_CONFIG.emaPeriod;

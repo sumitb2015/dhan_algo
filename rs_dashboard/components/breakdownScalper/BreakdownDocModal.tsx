@@ -178,7 +178,7 @@ export default function BreakdownDocModal({ isOpen, onClose }: BreakdownDocModal
                   color: 'text-emerald-400',
                   border: 'border-emerald-500/25',
                   bg: 'bg-emerald-500/5',
-                  body: 'Option charts alone are never trusted. NIFTY 50 spot price relative to Session VWAP and EMA 9/20 determines what is allowed: BULLISH trend allows PE shorts only; BEARISH trend allows CE shorts only; SIDEWAYS or unaligned halts all new entries.',
+                  body: 'Option charts alone are never trusted. A NIFTY 50 EMA cross (default 9/20), optionally confirmed by a NIFTY Supertrend, determines what is allowed (no VWAP: the index has no volume): BULLISH trend allows PE shorts only; BEARISH trend allows CE shorts only; SIDEWAYS or unaligned halts all new entries.',
                 },
                 {
                   step: 'RULE 2',

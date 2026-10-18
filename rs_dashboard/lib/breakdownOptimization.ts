@@ -65,10 +65,32 @@ export const OPTIMIZATION_REPORT = {
     'Strike window ±10 is needed: ±4, ±6 and ±8 all lost money.',
     'Starting entries at 09:30 or 09:45 instead of 09:20 cut profit sharply.',
   ],
+  /** Index-trend study (2026-10-18): 102 trend rules with the recommended option settings, same train/unseen split. */
+  trendStudy: {
+    tested: 108,
+    note: 'The index has no volume, so the "VWAP" leg is really the day\'s average price (TWAP); it was tested on and off. A true VWAP needs NIFTY futures volume, which the options DBs do not hold.',
+    rows: [
+      { rule: 'Old rule: 1-min EMA 9/20 + TWAP', train: { net: 259_000, pf: 1.97, dd: 31_000 }, test: { net: 148_000, pf: 2.26, dd: 35_000 } },
+      { rule: 'EMA 9/20 only, TWAP removed (new default)', train: { net: 267_000, pf: 1.98, dd: 30_000 }, test: { net: 143_000, pf: 2.21, dd: 32_000 }, current: true },
+      { rule: 'EMA 9/20 + index Supertrend 7/3', train: { net: 216_000, pf: 1.78, dd: 20_000 }, test: { net: 121_000, pf: 2.12, dd: 18_000 } },
+      { rule: 'EMA 9/20 + index Supertrend 10/3', train: { net: 190_000, pf: 1.66, dd: 19_000 }, test: { net: 96_000, pf: 1.81, dd: 22_000 } },
+      { rule: '1-min EMA 20/50 + TWAP (best in training)', train: { net: 279_000, pf: 2.09, dd: 25_000 }, test: { net: 97_000, pf: 1.85, dd: 30_000 } },
+      { rule: 'MACD 3-min, zero line', train: { net: 202_000, pf: 1.7, dd: 43_000 }, test: { net: 85_000, pf: 1.67, dd: 45_000 } },
+      { rule: 'No trend filter (BYPASS)', train: { net: 182_000, pf: 1.58, dd: 48_000 }, test: { net: 90_000, pf: 1.59, dd: 13_000 } },
+      { rule: 'EMA-20 slope, 5-min', train: { net: 184_000, pf: 1.67, dd: 26_000 } },
+      { rule: 'ADX/DMI 3-min, ADX ≥ 20', train: { net: 168_000, pf: 1.56, dd: 43_000 } },
+      { rule: 'Supertrend on index, 3-min 10/3', train: { net: 166_000, pf: 1.56, dd: 27_000 } },
+      { rule: 'Options OI build-up, ATM ±10', train: { net: 107_000, pf: 1.36, dd: 46_000 } },
+      { rule: 'Opening-range breakout, 15 min', train: { net: 57_000, pf: 1.19, dd: 60_000 } },
+    ] as { rule: string; train: OptStats; test?: OptStats; current?: boolean }[],
+    verdict:
+      'The trend gate is now the 1-minute EMA 9/20 cross alone: TWAP was removed (the index has no volume) at no cost (+₹4.10L vs +₹4.07L over all 124 days). An index Supertrend is available but off: every variant cut profit, though it lowered drawdown. Slower rules (3/5/15-min EMA, ADX, MACD) and OI / opening-range gates did worse, and EMA 20/50 topped training but lost a third on unseen days (overfit).',
+  },
   caveats: [
     'Six months of data only; Aug–Oct was a good stretch for every setting, so expect less in a bad month.',
     '1-minute signals are sensitive to fill quality: run in SIM first and compare live fills with the backtest.',
     'The Breeze DB was not used for validation: its sessions fall inside the training window.',
+    'The rule-set table above was run with the old EMA + TWAP trend gate; the EMA-only gate now in use scored within ₹5k of it in both periods.',
   ],
 };
 

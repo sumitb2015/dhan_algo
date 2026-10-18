@@ -78,7 +78,7 @@ test('trendInputsAt only sees spot closes before the decision minute', () => {
   const spot: [string, number][] = [['09:15', 100], ['09:16', 101], ['09:17', 999]];
   const t = trendInputsAt(spot, 9 * 60 + 17, 1)!;
   assert.equal(t.spot, 101);
-  assert.equal(t.vwap, 100.5);
+  assert.deepEqual(t.closes, [100, 101]);
 });
 
 test('simulateDay: enters at the next bar open after a closed breakdown and exits on the trailing stop level', () => {

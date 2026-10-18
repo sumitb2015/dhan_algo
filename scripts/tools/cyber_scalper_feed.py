@@ -559,6 +559,8 @@ def main():
     parser.add_argument("--interval", default="1", choices=["1", "3", "5"], help="Candle timeframe in minutes")
     parser.add_argument("--expiry", default=None, help="Target options expiry date YYYY-MM-DD")
     parser.add_argument("--future-expiry", default=None, help="Target future contract expiry date YYYY-MM-DD")
+    parser.add_argument("--all-bars", action="store_true",
+                        help="send every bar of the session, not the last 120 (the Breakdown Scalper's index trend needs them all)")
     args = parser.parse_args()
 
     symbol = args.symbol.upper()
@@ -645,7 +647,7 @@ def main():
         df_bars["vwap"] = compute_vwap(df_bars)
 
     # Format candles list (latest 120 bars for snappy rendering)
-    bars_to_send = df_bars.tail(120).copy()
+    bars_to_send = df_bars.copy() if args.all_bars else df_bars.tail(120).copy()
 
     candles = []
     ema9_series = []

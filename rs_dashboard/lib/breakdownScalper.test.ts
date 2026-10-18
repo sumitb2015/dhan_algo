@@ -2,42 +2,74 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   evaluateUnderlyingTrend,
+  indexTrendInputs,
+  indexTrendParamsOf,
   rankBreakdownSignals,
   evaluatePositionRisk,
   type OptionBreakdownState,
   type UnderlyingTrend,
 } from './breakdownScalper.ts';
 
-test('evaluateUnderlyingTrend: Bullish requires Spot > VWAP and EMA9 > EMA20', () => {
-  const t = evaluateUnderlyingTrend(25000, 24950, 24980, 24940, 'AUTO');
+const P = { emaFast: 9, emaSlow: 20, useSupertrend: true, stPeriod: 10, stMultiplier: 3 };
+const inp = (emaFast: number | null, emaSlow: number | null, stDir: 1 | -1 | null) => ({ spot: 25000, emaFast, emaSlow, stLine: 24900, stDir });
+
+test('evaluateUnderlyingTrend: Bullish requires EMA fast > EMA slow and Supertrend up', () => {
+  const t = evaluateUnderlyingTrend(inp(24980, 24940, 1), P, 'AUTO');
   assert.equal(t.trend, 'BULLISH');
   assert.equal(t.eligibleSide, 'PE');
 });
 
-test('evaluateUnderlyingTrend: Bearish requires Spot < VWAP and EMA9 < EMA20', () => {
-  const t = evaluateUnderlyingTrend(24800, 24850, 24820, 24860, 'AUTO');
+test('evaluateUnderlyingTrend: Bearish requires EMA fast < EMA slow and Supertrend down', () => {
+  const t = evaluateUnderlyingTrend(inp(24820, 24860, -1), P, 'AUTO');
   assert.equal(t.trend, 'BEARISH');
   assert.equal(t.eligibleSide, 'CE');
 });
 
-test('evaluateUnderlyingTrend: Sideways / Unclear blocks new trades in AUTO mode', () => {
-  // Spot > VWAP but EMA9 < EMA20 (conflicting alignment)
-  const t = evaluateUnderlyingTrend(25000, 24950, 24920, 24940, 'AUTO');
+test('evaluateUnderlyingTrend: EMA and Supertrend disagreeing blocks new trades in AUTO mode', () => {
+  const t = evaluateUnderlyingTrend(inp(24980, 24940, -1), P, 'AUTO');
   assert.equal(t.trend, 'SIDEWAYS');
   assert.equal(t.eligibleSide, 'NONE');
 });
 
+test('evaluateUnderlyingTrend: with Supertrend off, the EMA cross alone decides', () => {
+  const t = evaluateUnderlyingTrend(inp(24980, 24940, null), { ...P, useSupertrend: false }, 'AUTO');
+  assert.equal(t.trend, 'BULLISH');
+});
+
+test('evaluateUnderlyingTrend: a Supertrend still warming up holds entries', () => {
+  const t = evaluateUnderlyingTrend(inp(24980, 24940, null), P, 'AUTO');
+  assert.equal(t.headline, 'Awaiting Indicators');
+  assert.equal(t.eligibleSide, 'NONE');
+});
+
 test('evaluateUnderlyingTrend: BYPASS mode allows BOTH sides', () => {
-  const t = evaluateUnderlyingTrend(25000, 24950, 24980, 24940, 'BYPASS');
+  const t = evaluateUnderlyingTrend(inp(24980, 24940, -1), P, 'BYPASS');
   assert.equal(t.eligibleSide, 'BOTH');
+});
+
+test('indexTrendInputs: EMAs follow pandas ewm(adjust=False) and Supertrend needs period + 1 bars', () => {
+  const up = Array.from({ length: 30 }, (_, i) => 25000 + i * 5);
+  const t = indexTrendInputs(up, P);
+  assert.equal(t.spot, 25145);
+  assert.ok(t.emaFast! > t.emaSlow!);
+  assert.equal(t.stDir, 1);
+  assert.equal(indexTrendInputs(up.slice(0, 10), P).stDir, null);
+  const down = up.map((c) => 50000 - c);
+  assert.equal(indexTrendInputs(down, P).stDir, -1);
+});
+
+test('indexTrendParamsOf: defaults for a config saved before the index trend settings existed', () => {
+  assert.deepEqual(indexTrendParamsOf({}), { emaFast: 9, emaSlow: 20, useSupertrend: false, stPeriod: 7, stMultiplier: 3 });
+  assert.equal(indexTrendParamsOf({ trendEmaFast: 5, trendUseSupertrend: false }).emaFast, 5);
 });
 
 test('rankBreakdownSignals: Ranks fresh breakdown higher and filters by market trend', () => {
   const bullTrend: UnderlyingTrend = {
     spot: 25000,
-    vwap: 24950,
-    ema9: 24980,
-    ema20: 24940,
+    emaFast: 24980,
+    emaSlow: 24940,
+    stLine: null,
+    stDir: null,
     spread: 40,
     trend: 'BULLISH',
     eligibleSide: 'PE',
@@ -167,7 +199,7 @@ test('evaluatePositionRisk: Initial SL, Lock to cost, Trailing SL ratcheting, Ta
 
 test('rankBreakdownSignals: a stale breakdown is not eligible (no re-short after a stop-out)', () => {
   const trend: UnderlyingTrend = {
-    spot: 25000, vwap: 24950, ema9: 24980, ema20: 24940, spread: 40,
+    spot: 25000, emaFast: 24980, emaSlow: 24940, stLine: null, stDir: null, spread: 40,
     trend: 'BULLISH', eligibleSide: 'PE', headline: 'Bullish', detail: '',
   };
   const mk = (barsSinceBreakdown: number): OptionBreakdownState => ({

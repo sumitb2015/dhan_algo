@@ -39,13 +39,13 @@ To make this viable and robust, this strategy incorporates:
 ```
                         ┌───────────────────────────────┐
                         │   1. Market Direction Filter  │
-                        │    Nifty Spot vs VWAP & EMAs  │
+                        │ Nifty EMA cross (+ opt. ST)   │
                         └──────────────┬────────────────┘
                                        │
             ┌──────────────────────────┼──────────────────────────┐
             ▼                          ▼                          ▼
      [BULLISH TREND]            [SIDEWAYS / CHOP]          [BEARISH TREND]
-   Spot > VWAP & EMA9 > 20     Unaligned or Flat        Spot < VWAP & EMA9 < 20
+   EMA fast > slow             Checks disagree          EMA fast < slow
    Eligible: PE Shorts only    NO NEW TRADES (Lockout)  Eligible: CE Shorts only
             │                                                     │
             └──────────────────────────┬──────────────────────────┘
@@ -101,13 +101,21 @@ To make this viable and robust, this strategy incorporates:
 ### Rule 1: Underlying Index Market Direction Gate
 No trade is ever initiated based solely on the option's chart. The underlying index (NIFTY 50) dictates directional clearance:
 - **BULLISH**:
-  - `NIFTY Spot > Session VWAP` AND `EMA 9 > EMA 20`
+  - `EMA fast > EMA slow` (default 9 / 20), AND `NIFTY Supertrend up` when that is enabled (off by default; 7, 3 when on)
   - *Action*: Only Put Options (`PE`) are eligible for shorting. Call shorting is strictly locked out.
 - **BEARISH**:
-  - `NIFTY Spot < Session VWAP` AND `EMA 9 < EMA 20`
+  - `EMA fast < EMA slow` AND `NIFTY Supertrend down`
   - *Action*: Only Call Options (`CE`) are eligible for shorting. Put shorting is strictly locked out.
 - **SIDEWAYS / UNALIGNED**:
-  - Spot and EMAs are conflicting or flat within neutral threshold.
+  - The EMA cross and the Supertrend disagree, or the indicators are still warming up.
+- There is no VWAP in the trend gate: the index has no volume, so its "VWAP" was only the day's average price. All
+  trend indicators run on the option candle timeframe, on today's index closes from 09:15, and are set in the Rules
+  drawer (`trendEmaFast`, `trendEmaSlow`, `trendUseSupertrend`, `trendStPeriod`, `trendStMultiplier`). Live and
+  backtest share `indexTrendInputs()` in `lib/breakdownScalper.ts`; the index Supertrend's ATR is close-to-close because
+  the backtest stores only index closes, so live ignores the candle highs and lows too.
+- Why the Supertrend is off (2026-10-18 backtest, 124 Dhan sessions, recommended rules, 0.5 pt slippage): EMA 9/20 alone
+  +₹4.10L (the old EMA + "VWAP" rule +₹4.07L); adding a Supertrend cut profit in every variant tried (7/3 +₹3.37L,
+  14/3 +₹3.14L, 10/3 +₹2.86L, 10/2 +₹2.40L) while lowering drawdown from about ₹30k to ₹20k.
   - *Action*: Strategy goes into **Standby**. No new positions are permitted.
 
 ### Rule 2: Fresh Breakdown on Closed Candles
@@ -248,8 +256,9 @@ Before trading real capital on this strategy:
   day's spot can have no warm-up bars either. Each trade records `warmupBars`; the audit counts "cold-contract
   entries" (< EMA period × timeframe bars). In the 2026-04-16 → 10-13 run these were 179 of 807 trades and ~90% of
   the net; the warm subset (628 trades) netted ₹12.4k. Read the cold share before trusting a result.
-- **Trend**: the options DB's 1-minute spot closes; VWAP = running mean (the live feed also falls back to it, the index
-  has no volume); EMA9/20 = `ewm(adjust=False)` on today's timeframe closes, as `cyber_scalper_feed.py`.
+- **Trend**: the options DB's 1-minute spot closes, bucketed to the timeframe; `indexTrendInputs()` (shared with live,
+  which feeds it every candle of the session via `/api/cyber-scalper/feed?allBars=1`): EMAs = `ewm(adjust=False)`,
+  Supertrend on close-to-close range.
 - **Data** (`scripts/tools/breakdown_backtest_data.py`, cached per session under `debug/breakdown_backtest/`): runs are
   offline, from `Options Data/nifty_options.db` only (the runner passes `--offline`; a session not in the DB fails). The
   script's expired-options / intraday API paths below are currently unused.

@@ -2,7 +2,7 @@
 
 import { Play, Pause, AlertOctagon, Settings, ShieldAlert, TrendingUp, TrendingDown, Minus, BookOpen, Activity } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import type { UnderlyingTrend } from '@/lib/breakdownScalper';
+import { indexTrendParamsOf, type UnderlyingTrend } from '@/lib/breakdownScalper';
 import type { BreakdownConfig, LedgerMode } from '@/lib/breakdownLedger';
 
 interface MarketBiasStripProps {
@@ -44,6 +44,7 @@ export function MarketBiasStrip({
   wsStatus,
   wsStale,
 }: MarketBiasStripProps) {
+  const tp = indexTrendParamsOf(config);
   const totalPnl = realizedPnl + unrealizedPnl;
   const isLossBreached = totalPnl <= -config.dailyLossLimit;
   const remainingBudget = Math.max(0, config.dailyLossLimit + totalPnl);
@@ -69,14 +70,25 @@ export function MarketBiasStrip({
 
           <div className="flex items-center gap-2 text-xs font-medium text-zinc-400">
             <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
-              VWAP: <strong className="font-mono text-zinc-200">{trend.vwap ? trend.vwap.toFixed(1) : '—'}</strong>
+              EMA {tp.emaFast}: <strong className="font-mono text-zinc-200">{trend.emaFast ? trend.emaFast.toFixed(1) : '—'}</strong>
             </span>
             <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
-              EMA 9: <strong className="font-mono text-zinc-200">{trend.ema9 ? trend.ema9.toFixed(1) : '—'}</strong>
+              EMA {tp.emaSlow}: <strong className="font-mono text-zinc-200">{trend.emaSlow ? trend.emaSlow.toFixed(1) : '—'}</strong>
             </span>
-            <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
-              EMA 20: <strong className="font-mono text-zinc-200">{trend.ema20 ? trend.ema20.toFixed(1) : '—'}</strong>
-            </span>
+            {tp.useSupertrend && (
+              <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
+                ST ({tp.stPeriod}, {tp.stMultiplier}):{' '}
+                <strong
+                  className={cn(
+                    'font-mono',
+                    trend.stDir === 1 ? 'text-emerald-400' : trend.stDir === -1 ? 'text-red-400' : 'text-zinc-400',
+                  )}
+                >
+                  {trend.stDir === 1 ? '▲ ' : trend.stDir === -1 ? '▼ ' : ''}
+                  {trend.stLine ? trend.stLine.toFixed(1) : '—'}
+                </strong>
+              </span>
+            )}
             <span className="rounded bg-zinc-900 px-2 py-0.5 border border-zinc-800">
               Spread:{' '}
               <strong

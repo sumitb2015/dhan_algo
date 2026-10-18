@@ -5,6 +5,7 @@ import { X, Sliders, RefreshCcw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { RuleNumInput } from './RuleNumInput';
 import type { BreakdownConfig, LedgerMode } from '@/lib/breakdownLedger';
+import { indexTrendParamsOf } from '@/lib/breakdownScalper';
 
 interface RulesConfigDrawerProps {
   isOpen: boolean;
@@ -52,6 +53,7 @@ export function RulesConfigDrawer({
   onResetSim,
 }: RulesConfigDrawerProps) {
   if (!isOpen) return null;
+  const tp = indexTrendParamsOf(config);
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-oncolor-dark/70 backdrop-blur-sm">
@@ -145,7 +147,8 @@ export function RulesConfigDrawer({
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3.5 flex flex-col gap-2.5">
             <span className="font-bold text-zinc-200">Market Direction Filter</span>
             <p className="text-[11px] text-zinc-400 leading-relaxed">
-              Separates entry signals from market bias using NIFTY Spot vs VWAP & EMA 9/20:
+              Separates entry signals from market bias using an EMA cross on NIFTY, optionally confirmed by a NIFTY
+              Supertrend (no VWAP: the index has no volume). Computed on the candle timeframe below:
             </p>
             <div className="grid grid-cols-2 gap-2">
               <button
@@ -175,6 +178,82 @@ export function RulesConfigDrawer({
                 <div className="font-bold">BYPASS Filter</div>
                 <div className="text-[10px] text-zinc-400 mt-0.5">Allow both CE & PE breakdown entries</div>
               </button>
+            </div>
+
+            <div className="flex flex-col gap-2 border-t border-zinc-800/60 pt-2.5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-zinc-300 font-medium">Index EMA Cross</span>
+                  <p className="text-[10px] text-zinc-500">Bull when fast &gt; slow, bear when fast &lt; slow</p>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] text-zinc-400">Fast</span>
+                  <RuleNumInput
+                    value={tp.emaFast}
+                    onCommit={(v) =>
+                      onUpdateConfig({ trendEmaFast: Math.max(2, Math.min(tp.emaSlow - 1, Math.round(Number(v) || tp.emaFast))) })
+                    }
+                    step={1}
+                    min={2}
+                    max={tp.emaSlow - 1}
+                    className="w-14 text-center"
+                  />
+                  <span className="text-[11px] text-zinc-400">Slow</span>
+                  <RuleNumInput
+                    value={tp.emaSlow}
+                    onCommit={(v) =>
+                      onUpdateConfig({ trendEmaSlow: Math.max(tp.emaFast + 1, Math.min(200, Math.round(Number(v) || tp.emaSlow))) })
+                    }
+                    step={1}
+                    min={tp.emaFast + 1}
+                    max={200}
+                    className="w-14 text-center"
+                  />
+                </div>
+              </div>
+
+              <label className="flex items-center justify-between cursor-pointer">
+                <div>
+                  <span className="text-zinc-300 font-medium">Index Supertrend</span>
+                  <p className="text-[10px] text-zinc-500">Must agree with the EMA cross · off by default: it cut profit in the backtest</p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={tp.useSupertrend}
+                  onChange={(e) => onUpdateConfig({ trendUseSupertrend: e.target.checked })}
+                  aria-label="Use index Supertrend in the trend filter"
+                  className="h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500"
+                />
+              </label>
+              {tp.useSupertrend && (
+                <div className="grid grid-cols-2 gap-2 pl-3 border-l-2 border-zinc-800">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[11px] text-zinc-400">ATR Period</span>
+                    <RuleNumInput
+                      value={tp.stPeriod}
+                      onCommit={(v) => onUpdateConfig({ trendStPeriod: Math.max(2, Math.min(50, Math.round(Number(v) || tp.stPeriod))) })}
+                      step={1}
+                      min={2}
+                      max={50}
+                      className="w-14 text-center"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-[11px] text-zinc-400">Multiplier</span>
+                    <RuleNumInput
+                      value={tp.stMultiplier}
+                      onCommit={(v) => onUpdateConfig({ trendStMultiplier: Math.max(0.5, Math.min(10, Number(v) || tp.stMultiplier)) })}
+                      step={0.1}
+                      min={0.5}
+                      max={10}
+                      className="w-14 text-center"
+                    />
+                  </div>
+                </div>
+              )}
+              <p className="text-[10px] text-zinc-500">
+                The index Supertrend uses close-to-close range (the backtest stores only index closes, so live does the same).
+              </p>
             </div>
           </div>
 

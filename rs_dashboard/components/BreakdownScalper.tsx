@@ -17,6 +17,8 @@ import {
   DEFAULT_BREAKDOWN_PARAMS,
   evaluateOptionBreakdown,
   evaluateUnderlyingTrend,
+  indexTrendInputs,
+  indexTrendParamsOf,
   rankBreakdownSignals,
   evaluatePositionRisk,
   type CandidateSignal,
@@ -162,9 +164,10 @@ function pickIndexLtps(d: HeaderIndices): Record<string, number> {
 
 const INITIAL_TREND: UnderlyingTrend = {
   spot: 0,
-  vwap: null,
-  ema9: null,
-  ema20: null,
+  emaFast: null,
+  emaSlow: null,
+  stLine: null,
+  stDir: null,
   spread: null,
   trend: 'SIDEWAYS',
   eligibleSide: 'NONE',
@@ -469,31 +472,44 @@ export default function BreakdownScalper() {
   /** Underlying the current trend was computed for: a trend of another underlying never gates an entry. */
   const trendForRef = useRef('');
 
+  const trendParams = useMemo(
+    () =>
+      indexTrendParamsOf({
+        trendEmaFast: config.trendEmaFast,
+        trendEmaSlow: config.trendEmaSlow,
+        trendUseSupertrend: config.trendUseSupertrend,
+        trendStPeriod: config.trendStPeriod,
+        trendStMultiplier: config.trendStMultiplier,
+      }),
+    [config.trendEmaFast, config.trendEmaSlow, config.trendUseSupertrend, config.trendStPeriod, config.trendStMultiplier],
+  );
+
   const fetchUnderlyingFeed = useCallback(async () => {
-    const key = `${underlying}|${config.timeframe}|${expiry}|${config.trendMode}`;
+    const key = `${underlying}|${config.timeframe}|${expiry}|${config.trendMode}|${JSON.stringify(trendParams)}`;
     trendKeyRef.current = key;
     try {
-      const q = new URLSearchParams({ symbol: underlying, interval: String(config.timeframe) });
+      // Every bar of the session: the trend is computed here from the closes, exactly as the backtest computes it.
+      const q = new URLSearchParams({ symbol: underlying, interval: String(config.timeframe), allBars: '1' });
       if (expiry) q.set('expiry', expiry);
 
       const res = await fetch(`/api/cyber-scalper/feed?${q.toString()}`);
       const json = await res.json();
       if (trendKeyRef.current !== key) return; // selection changed while this was in flight
 
-      if (json.success && json.live) {
-        const spot = json.spot || json.live.close || 0;
-        const vwap = json.live.vwap || null;
-        const ema9 = json.live.ema9 || null;
-        const ema20 = json.live.ema20 || null;
-
-        setUnderlyingTrend(evaluateUnderlyingTrend(spot, vwap, ema9, ema20, config.trendMode));
+      const closes = Array.isArray(json.candles)
+        ? (json.candles as { close?: number }[]).map((c) => Number(c.close)).filter((c) => Number.isFinite(c) && c > 0)
+        : [];
+      if (json.success && closes.length) {
+        const inputs = indexTrendInputs(closes, trendParams);
+        const spot = json.spot || inputs.spot;
+        setUnderlyingTrend(evaluateUnderlyingTrend({ ...inputs, spot }, trendParams, config.trendMode));
         trendAtRef.current = clock();
         trendForRef.current = underlying;
       }
     } catch {
       // Keep the last trend; its age is checked before any entry (STALE_TREND_MS).
     }
-  }, [underlying, config.timeframe, config.trendMode, expiry]);
+  }, [underlying, config.timeframe, config.trendMode, expiry, trendParams]);
 
   useEffect(() => {
     const t0 = setTimeout(fetchUnderlyingFeed, 0);

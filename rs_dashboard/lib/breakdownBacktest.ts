@@ -14,8 +14,8 @@
  *  - EOD exits at the open of the first bar at/after config.eodExit.
  *
  * What the live engine does that this cannot: tick-level fills (LTP every second), broker rejections, slippage
- * beyond the bar's own range. The underlying trend uses the options DB's 1-minute spot closes (the live feed uses
- * index OHLC; with no index volume both fall back to the running mean of price for VWAP).
+ * beyond the bar's own range. The underlying trend runs indexTrendInputs() (shared with live) on the options DB's
+ * 1-minute spot closes; live feeds it the session's index candle closes.
  */
 
 import {
@@ -23,6 +23,8 @@ import {
   evaluateOptionBreakdown,
   evaluatePositionRisk,
   evaluateUnderlyingTrend,
+  indexTrendInputs,
+  indexTrendParamsOf,
   rankBreakdownSignals,
   type CandidateSignal,
   type OptionBreakdownState,
@@ -186,14 +188,12 @@ export function ewmLast(values: number[], span: number): number | null {
 }
 
 /**
- * The live trend feed's numbers at the start of minute `m` from today's spot closes before m: spot = last close,
- * VWAP = running mean (index has no volume), EMA9/EMA20 = ewm on tf-minute closes from 09:15 (forming bucket
- * included, as the live feed's last bar is the forming one).
+ * The index trend closes at the start of minute `m`, from today's spot closes before m: one close per tf-minute bar
+ * from 09:15, the forming bar included (the live feed's last candle is the forming one). `spot` = the last close.
  */
 export function trendInputsAt(spot: [string, number][], m: number, tf: number) {
   const known = spot.filter(([hm]) => hmToMin(hm) < m);
   if (!known.length) return null;
-  const closes = known.map(([, c]) => c);
   const buckets: number[] = [];
   let lastBucket = -1;
   for (const [hm, c] of known) {
@@ -203,12 +203,7 @@ export function trendInputsAt(spot: [string, number][], m: number, tf: number) {
       lastBucket = b;
     } else buckets[buckets.length - 1] = c;
   }
-  return {
-    spot: closes[closes.length - 1],
-    vwap: closes.reduce((a, b) => a + b, 0) / closes.length,
-    ema9: ewmLast(buckets, 9),
-    ema20: ewmLast(buckets, 20),
-  };
+  return { spot: known[known.length - 1][1], closes: buckets };
 }
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -277,6 +272,7 @@ export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResu
   const notes: string[] = [];
   const day = data.date;
   const tf = config.timeframe;
+  const trendParams = indexTrendParamsOf(config);
   const lots = config.lotsPerTrade;
   const qty = lots * data.lotSize;
 
@@ -490,7 +486,7 @@ export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResu
 
     const t = trendInputsAt(data.spot, m, tf);
     if (!t) continue;
-    const trend = evaluateUnderlyingTrend(t.spot, t.vwap, t.ema9, t.ema20, config.trendMode);
+    const trend = evaluateUnderlyingTrend(indexTrendInputs(t.closes, trendParams), trendParams, config.trendMode);
     const atm = strikes.reduce((a, b) => (Math.abs(b - t.spot) < Math.abs(a - t.spot) ? b : a), strikes[0]);
     const ai = strikes.indexOf(atm);
     const window = strikes.slice(Math.max(0, ai - config.strikeWindow), ai + config.strikeWindow + 1);
@@ -644,6 +640,8 @@ export function backtestConfigKey(c: BreakdownConfig): string {
     stPeriod: c.stPeriod ?? 10,
     stMultiplier: c.stMultiplier ?? 2.0,
     emaPeriod: c.emaPeriod ?? 20,
+    // Always keyed: the index trend rule changed (VWAP removed, Supertrend added), so older stores read as changed.
+    indexTrend: indexTrendParamsOf(c),
     entryStart,
     entryEnd,
     eodExit,

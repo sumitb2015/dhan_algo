@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, SlidersHorizontal, Lightbulb, AlertTriangle } from 'lucide-react';
+import { ChevronDown, ChevronRight, SlidersHorizontal, Lightbulb, AlertTriangle, TrendingUp } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { BreakdownConfig } from '@/lib/breakdownLedger';
 import { OPTIMIZATION_REPORT as R, matchesCandidate, type OptStats } from '@/lib/breakdownOptimization';
@@ -114,6 +114,38 @@ export function OptimizationReport({ pageConfig }: { pageConfig: BreakdownConfig
             </table>
           </div>
           <p className="font-mono text-[10px] text-zinc-400">Same in every row: {R.common}</p>
+
+          <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3">
+            <h4 className="mb-2 flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-zinc-400">
+              <TrendingUp className="h-3.5 w-3.5 text-sky-400" />
+              Index trend study · {R.trendStudy.tested} trend rules
+            </h4>
+            <div className="overflow-x-auto rounded-lg border border-zinc-800">
+              <table className="w-full min-w-[720px] text-left">
+                <thead className="bg-zinc-800">
+                  <tr className="text-xs font-bold text-white">
+                    <th className="px-2.5 py-2">Trend rule</th>
+                    <th className="px-2.5 py-2">Train ({R.train.sessions}d)</th>
+                    <th className="px-2.5 py-2">Unseen ({R.test.sessions}d)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-zinc-800">
+                  {R.trendStudy.rows.map((r) => (
+                    <tr key={r.rule} className={cn(r.current && 'bg-emerald-500/5')}>
+                      <td className="px-2.5 py-1.5 text-[11px] font-bold text-zinc-100">
+                        {r.rule}
+                        {r.current && <span className="ml-1.5 text-[10px] text-emerald-400">● in use</span>}
+                      </td>
+                      <StatCell s={r.train} />
+                      {r.test ? <StatCell s={r.test} /> : <td className="px-2.5 py-1.5 text-[11px] text-zinc-500">not shortlisted</td>}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-2 text-[11px] text-zinc-300">{R.trendStudy.verdict}</p>
+            <p className="mt-1 text-[10px] text-zinc-500">{R.trendStudy.note}</p>
+          </div>
 
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-3">
