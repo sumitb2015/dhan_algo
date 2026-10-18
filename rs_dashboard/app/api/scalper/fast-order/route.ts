@@ -91,6 +91,8 @@ const SOURCE_QTY_CAPS: Record<string, number> = {
   ts: 3750,
   // 'bs' = Bearish Strikes: same bound as 'ts' (50 lots x 75 units).
   bs: 3750,
+  // 'bds' = Breakdown Scalper: lots are capped at 20 on the ledger, so 20 x 75 would be 1500; same bound as 'ts'.
+  bds: 3750,
 };
 
 async function placeOrderOnce(body: {

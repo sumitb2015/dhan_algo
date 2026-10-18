@@ -14,7 +14,6 @@ import {
   Search,
   Maximize2,
   AlertCircle,
-  TrendingDown,
   Layers,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -23,7 +22,10 @@ import { legPnl, type BreakdownPosition } from '@/lib/breakdownLedger';
 export interface PositionsTableProps {
   positions: BreakdownPosition[];
   quotes: Record<string, { ltp?: number | null }>;
-  onClosePosition: (id: string, currentLtp: number) => void;
+  onClosePosition: (id: string) => void;
+  /** The chain on screen: a position on another underlying/expiry has no live quote here and must not borrow one. */
+  viewUnderlying: string;
+  viewExpiry: string;
   // Broker Order Book, Trade Book & Positions
   broker: 'dhan' | 'kotak';
   ordersData: Record<string, unknown>[];
@@ -59,6 +61,8 @@ export function PositionsTable({
   positions,
   quotes,
   onClosePosition,
+  viewUnderlying,
+  viewExpiry,
   broker,
   ordersData,
   tradesData,
@@ -442,12 +446,15 @@ export function PositionsTable({
                 <tbody className="divide-y divide-zinc-800/60 font-medium text-zinc-200">
                   {openStrategyPositions.map((pos) => {
                     const key = `${pos.strike}${pos.option}`;
-                    const quoteLtp = quotes[key]?.ltp ?? null;
-                    const currentLtp = quoteLtp ?? pos.entryPrice;
+                    const inView = pos.underlying === viewUnderlying && pos.expiry === viewExpiry;
+                    const quoteLtp = inView ? quotes[key]?.ltp ?? null : null;
                     const pnl = legPnl(pos, quoteLtp);
+                    // No quote on this view => no percentage or trail distance either (never computed off entry).
                     const pnlPct =
-                      currentLtp > 0 ? ((pos.entryPrice - currentLtp) / pos.entryPrice) * 100 : 0;
-                    const trailDistance = Number((pos.trailingSl - currentLtp).toFixed(1));
+                      quoteLtp != null && quoteLtp > 0 && pos.entryPrice > 0
+                        ? ((pos.entryPrice - quoteLtp) / pos.entryPrice) * 100
+                        : null;
+                    const trailDistance = quoteLtp != null ? Number((pos.trailingSl - quoteLtp).toFixed(1)) : null;
 
                     return (
                       <tr key={pos.id} className="hover:bg-zinc-900/40 transition-colors">
@@ -495,7 +502,7 @@ export function PositionsTable({
                         </td>
 
                         <td className="px-3 py-2.5 text-right font-mono tabular-nums font-bold text-white whitespace-nowrap">
-                          ₹{currentLtp.toFixed(1)}
+                          {quoteLtp != null ? `₹${quoteLtp.toFixed(1)}` : '—'}
                         </td>
 
                         <td className="px-3 py-2.5 text-right font-mono tabular-nums text-emerald-400/90 whitespace-nowrap">
@@ -517,9 +524,11 @@ export function PositionsTable({
                           >
                             ₹{pos.trailingSl.toFixed(1)}
                           </span>
-                          <span className="ml-1 text-[10px] text-zinc-500">
-                            ({trailDistance >= 0 ? `+${trailDistance}` : trailDistance})
-                          </span>
+                          {trailDistance != null && (
+                            <span className="ml-1 text-[10px] text-zinc-500">
+                              ({trailDistance >= 0 ? `+${trailDistance}` : trailDistance})
+                            </span>
+                          )}
                         </td>
 
                         <td className="px-3 py-2.5 text-right font-mono tabular-nums text-sky-400 whitespace-nowrap">
@@ -536,7 +545,7 @@ export function PositionsTable({
                         <td className="px-4 py-2.5 text-center whitespace-nowrap">
                           <button
                             type="button"
-                            onClick={() => onClosePosition(pos.id, currentLtp)}
+                            onClick={() => onClosePosition(pos.id)}
                             className="inline-flex items-center gap-1 rounded bg-red-500/10 px-2.5 py-1 text-[10px] font-bold text-red-400 border border-red-500/20 hover:bg-red-500/20 transition"
                             title="Manually close this short leg"
                           >

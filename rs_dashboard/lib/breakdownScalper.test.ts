@@ -1,14 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  evaluateOptionBreakdown,
   evaluateUnderlyingTrend,
   rankBreakdownSignals,
   evaluatePositionRisk,
   type OptionBreakdownState,
   type UnderlyingTrend,
 } from './breakdownScalper.ts';
-import type { Bar } from './volumeProfile.ts';
 
 test('evaluateUnderlyingTrend: Bullish requires Spot > VWAP and EMA9 > EMA20', () => {
   const t = evaluateUnderlyingTrend(25000, 24950, 24980, 24940, 'AUTO');
@@ -156,4 +154,35 @@ test('evaluatePositionRisk: Initial SL, Trailing SL ratcheting, Target exit', ()
   assert.equal(r4.isTargetHit, true);
   assert.equal(r4.shouldExit, true);
   assert.match(r4.exitReason ?? '', /TARGET HIT/i);
+});
+
+test('rankBreakdownSignals: a stale breakdown is not eligible (no re-short after a stop-out)', () => {
+  const trend: UnderlyingTrend = {
+    spot: 25000, vwap: 24950, ema9: 24980, ema20: 24940, spread: 40,
+    trend: 'BULLISH', eligibleSide: 'PE', headline: 'Bullish', detail: '',
+  };
+  const mk = (barsSinceBreakdown: number): OptionBreakdownState => ({
+    indicators: { close: 100, stLine: 120, stDir: -1, vwap: 115, ema: 110, barTime: '2026-10-17 10:00:00', barsUsed: 50 },
+    belowSt: true, belowVwap: true, belowEma: true, isBreakdown: true,
+    wasBreakdownPrev: barsSinceBreakdown > 1, isFreshBreakdown: barsSinceBreakdown === 1,
+    barsSinceBreakdown, pctBelowSt: 16, pctBelowVwap: 13, pctBelowEma: 9, avgPctBelow: 12.7,
+  });
+  const cand = (strike: number, bars: number) => ({
+    strike, option: 'PE' as const, contractKey: `${strike}PE`, ltp: 100, volume: 5000, oi: 20000, state: mk(bars),
+  });
+  const ranked = rankBreakdownSignals([cand(24900, 2), cand(24850, 6)], 25000, 25000, 50, trend, new Set());
+  assert.equal(ranked.find((r) => r.contractKey === '24900PE')?.isEligible, true);
+  const stale = ranked.find((r) => r.contractKey === '24850PE');
+  assert.equal(stale?.isEligible, false);
+  assert.match(stale?.blockReason ?? '', /stale breakdown/i);
+});
+
+test('evaluatePositionRisk: a trailing stop seeded at the initial SL does not exit before the initial SL', () => {
+  // slPct 25 -> SL 125, trailPct 15. At entry the trailing stop equals the initial stop (125), not 115.
+  const r = evaluatePositionRisk(100, 118, 100, 25, 15, 35, null, null, false, 125);
+  assert.equal(r.trailingSl, 125);
+  assert.equal(r.shouldExit, false);
+  const hit = evaluatePositionRisk(100, 126, 100, 25, 15, 35, null, null, false, 125);
+  assert.equal(hit.shouldExit, true);
+  assert.match(hit.exitReason ?? '', /INITIAL SL/);
 });

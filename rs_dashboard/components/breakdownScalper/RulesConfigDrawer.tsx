@@ -1,6 +1,7 @@
 'use client';
 
-import { X, ShieldAlert, Sliders, CheckCircle, RefreshCcw } from 'lucide-react';
+import { useState } from 'react';
+import { X, Sliders, RefreshCcw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { RuleNumInput } from './RuleNumInput';
 import type { BreakdownConfig, LedgerMode } from '@/lib/breakdownLedger';
@@ -13,6 +14,32 @@ interface RulesConfigDrawerProps {
   onUpdateConfig: (patch: Partial<BreakdownConfig>) => void;
   onSetMode: (mode: LedgerMode) => void;
   onResetSim: () => void;
+}
+
+/** HH:MM field that commits on blur/Enter only and reverts on anything that is not a valid time, so a half-typed
+ *  "1" can never become an EOD cutoff that closes every position (dhan-commit-on-blur). */
+function TimeInput({ value, onCommit, placeholder }: { value: string; onCommit: (v: string) => void; placeholder: string }) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const commit = () => {
+    if (draft !== null && draft !== value && /^([01]\d|2[0-3]):[0-5]\d$/.test(draft)) onCommit(draft);
+    setDraft(null);
+  };
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={draft ?? value}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        if (e.key === 'Escape') setDraft(null);
+      }}
+      placeholder={placeholder}
+      maxLength={5}
+      className="mt-1 h-7 w-full rounded border border-zinc-800 bg-zinc-950 px-2 font-mono text-xs text-white"
+    />
+  );
 }
 
 export function RulesConfigDrawer({
@@ -338,36 +365,18 @@ export function RulesConfigDrawer({
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <span className="text-[10px] text-zinc-400">Entry Window Start</span>
-                <input
-                  type="text"
-                  value={config.entryStart}
-                  onChange={(e) => onUpdateConfig({ entryStart: e.target.value })}
-                  placeholder="09:30"
-                  className="mt-1 h-7 w-full rounded border border-zinc-800 bg-zinc-950 px-2 font-mono text-xs text-white"
-                />
+                <TimeInput value={config.entryStart} onCommit={(v) => onUpdateConfig({ entryStart: v })} placeholder="09:30" />
               </div>
 
               <div>
                 <span className="text-[10px] text-zinc-400">Entry Window End</span>
-                <input
-                  type="text"
-                  value={config.entryEnd}
-                  onChange={(e) => onUpdateConfig({ entryEnd: e.target.value })}
-                  placeholder="15:00"
-                  className="mt-1 h-7 w-full rounded border border-zinc-800 bg-zinc-950 px-2 font-mono text-xs text-white"
-                />
+                <TimeInput value={config.entryEnd} onCommit={(v) => onUpdateConfig({ entryEnd: v })} placeholder="15:00" />
               </div>
             </div>
 
             <div>
               <span className="text-[10px] text-zinc-400">Mandatory EOD Exit Cutoff</span>
-              <input
-                type="text"
-                value={config.eodExit}
-                onChange={(e) => onUpdateConfig({ eodExit: e.target.value })}
-                placeholder="15:15"
-                className="mt-1 h-7 w-full rounded border border-zinc-800 bg-zinc-950 px-2 font-mono text-xs text-white"
-              />
+              <TimeInput value={config.eodExit} onCommit={(v) => onUpdateConfig({ eodExit: v })} placeholder="15:15" />
             </div>
           </div>
         </div>

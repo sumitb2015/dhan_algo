@@ -319,6 +319,9 @@ export const DEFAULT_WEIGHTS: RankingWeights = {
   oiBuildup: 10,
 };
 
+/** A breakdown older than this many closed bars is not a fresh entry (it only scores, never trades). */
+export const DEFAULT_MAX_BREAKDOWN_AGE = 3;
+
 /**
  * Evaluates and ranks breakdown signals across all scanned strikes.
  * Highest scoring eligible strike is the top candidate to short.
@@ -343,6 +346,7 @@ export function rankBreakdownSignals(
   minVolume = 1000,
   minOi = 5000,
   weights = DEFAULT_WEIGHTS,
+  maxBarsSinceBreakdown = DEFAULT_MAX_BREAKDOWN_AGE,
 ): CandidateSignal[] {
   const maxVol = Math.max(1, ...candidates.map((c) => c.volume));
   const maxOi = Math.max(1, ...candidates.map((c) => c.oi));
@@ -358,6 +362,13 @@ export function rankBreakdownSignals(
     if (!cand.state.isBreakdown) {
       isEligible = false;
       blockReason = 'No breakdown: trading above indicator(s)';
+    }
+
+    // Filter 1b: the breakdown must be recent. Without this, a contract that stays below all three
+    // indicators is re-shorted over and over after every stop-out.
+    if (isEligible && cand.state.barsSinceBreakdown > maxBarsSinceBreakdown) {
+      isEligible = false;
+      blockReason = `Stale breakdown (${cand.state.barsSinceBreakdown} bars old, max ${maxBarsSinceBreakdown})`;
     }
 
     // Filter 2: Underlying market direction

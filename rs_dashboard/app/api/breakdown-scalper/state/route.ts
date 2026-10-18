@@ -5,14 +5,16 @@ import { PROJECT_ROOT } from '@/lib/pyExec';
 import {
   applyOp,
   DEFAULT_CONFIG,
+  istDayOf,
   LedgerError,
+  normalizeConfig,
   type BreakdownStateFile,
   type LedgerOp,
 } from '@/lib/breakdownLedger';
 
 const FILE = path.join(PROJECT_ROOT, 'debug', 'breakdown_scalper_state.json');
 
-const todayStr = () => new Date().toISOString().slice(0, 10);
+const todayStr = () => istDayOf(Date.now());
 
 function read(): BreakdownStateFile {
   try {
@@ -21,7 +23,7 @@ function read(): BreakdownStateFile {
       return {
         rev: Number(raw.rev) || 0,
         mode: raw.mode === 'REAL' ? 'REAL' : 'SIM',
-        config: { ...DEFAULT_CONFIG, ...(raw.config || {}) },
+        config: normalizeConfig(raw.config),
         positions: Array.isArray(raw.positions) ? raw.positions : [],
         logs: Array.isArray(raw.logs) ? raw.logs : [],
         date: typeof raw.date === 'string' ? raw.date : todayStr(),

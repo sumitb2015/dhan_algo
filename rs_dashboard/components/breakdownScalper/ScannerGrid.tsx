@@ -1,24 +1,20 @@
 'use client';
 
 import { useState } from 'react';
-import { Sparkles, Shield, ArrowDown, Check, AlertCircle, ArrowUpRight } from 'lucide-react';
+import { Sparkles, ArrowDown, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { CandidateSignal } from '@/lib/breakdownScalper';
 
 interface ScannerGridProps {
   candidates: CandidateSignal[];
   atm: number;
-  spot: number;
   onManualShort: (candidate: CandidateSignal) => void;
-  isEngineActive: boolean;
 }
 
 export function ScannerGrid({
   candidates,
   atm,
-  spot,
   onManualShort,
-  isEngineActive,
 }: ScannerGridProps) {
   const [filterSide, setFilterSide] = useState<'ALL' | 'PE' | 'CE' | 'ELIGIBLE'>('ALL');
 

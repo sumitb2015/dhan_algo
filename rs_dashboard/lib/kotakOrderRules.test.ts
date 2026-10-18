@@ -24,3 +24,9 @@ test('snapToTick uses the contract tick, 0.05 when unknown', () => {
   assert.strictEqual(snapToTick(110.53, null), '110.55');   // no tick in the cache
   assert.strictEqual(snapToTick(23150.04, 0.1), '23150.00'); // NIFTY future
 });
+
+test('sourceLotCapError: the Breakdown Scalper (bds) is capped at 20 lots on opening orders', () => {
+  assert.strictEqual(sourceLotCapError(65 * 20, 'bds', 'NIFTY26O2025000PE', 65), null);
+  assert.match(sourceLotCapError(65 * 21, 'bds', 'NIFTY26O2025000PE', 65) ?? '', /21 lots\) exceeds the bds per-order cap of 20 lots/);
+  assert.strictEqual(sourceLotCapError(65 * 99, undefined, 'NIFTY26O2025000PE', 65), null, 'a close names no source and is never capped');
+});

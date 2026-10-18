@@ -121,6 +121,7 @@ To eliminate false intraday whipsaws and repainting errors:
    - `Current Bar` meets all 3 breakdown conditions.
    - `Previous Bar` did **NOT** meet all 3 conditions.
    - Prevents chasing options that broke down 30 minutes ago and are already overextended into support.
+   - **Entry recency gate** (engine): a breakdown more than 3 closed bars old is never eligible (it still scores). After any exit the same contract is locked for 5 minutes, so a stop-out is not re-shorted while it stays below the indicators.
 
 ### Rule 3: Signal Ranking & Selection Engine
 When multiple options break down during the same candle (e.g. 3 PEs break down at once), the engine ranks them on a 100-point scale:
@@ -147,7 +148,7 @@ Option premium moves quickly during squeezes. A static stop is insufficient:
 - **Dynamic Ratchet Trailing SL**:
   $$\text{Trailing SL} = \text{lowestPrice} \times \left(1 + \frac{\text{trailPct}}{100}\right)$$
   - As the option premium drops from ₹100 $\rightarrow$ ₹80 $\rightarrow$ ₹60, the stop-loss ratchets down:
-    - Entry ₹100: Initial SL = ₹130, Trail SL = ₹120
+    - Entry ₹100: Initial SL = ₹130; the trailing stop starts AT the initial SL (₹130) and only ratchets down once the premium falls below entry
     - Price drops to ₹80: Trail SL ratchets down to $80 \times 1.20 = \text{₹96}$ (locking in profit!)
     - Price drops to ₹60: Trail SL ratchets down to $60 \times 1.20 = \text{₹72}$
   - **Inviolable Invariant**: $\text{Trailing SL}$ can **only move downward**. It never increases or loosens.
@@ -156,7 +157,7 @@ Option premium moves quickly during squeezes. A static stop is insufficient:
 1. **Scalp Profit Target**: (Optional, default 50% decay) Immediately books profit if premium collapses to target.
 2. **Indicator Recovery Exit**: (Optional) Closes position if option price recovers back above its Supertrend or EMA 20.
 3. **Mandatory EOD Square-Off**: Exactly at **15:15 IST**, all active positions are closed at market to prevent overnight gap risk.
-4. **Daily Loss Circuit Breaker**: If total realized + unrealized P&L drops below `-₹5,000` (configurable), the auto-trader immediately shuts down and locks out any further entries for the remainder of the session.
+4. **Daily Loss Circuit Breaker** (today's IST P&L in the active mode only; SIM never counts against REAL): If total realized + unrealized P&L drops below `-₹5,000` (configurable), the auto-trader immediately shuts down and locks out any further entries for the remainder of the session.
 
 ---
 
@@ -201,3 +202,17 @@ Before trading real capital on this strategy:
 - [x] **Live Tick Bridge**: 1-minute live accumulator merging intraday candles without gaps (`liveMinRef`).
 - [x] **Circuit Breaker Verification**: Ensure engine stops automatically on `-₹5,000` daily loss.
 - [x] **EOD Exit Verification**: Ensure all open positions auto-exit at 15:15 IST.
+
+
+---
+
+## 5. Live-order behaviour (REAL mode)
+
+- **Brokers**: Dhan (security id, `NSE_FNO`/`BSE_FNO`, INTRADAY) and Kotak (trading symbol, `nse_fo`/`bse_fo`, MIS). NIFTY, BANKNIFTY, SENSEX. Zerodha is SIM-only here.
+- **One exit per position, across tabs and reloads**: each position's exit state (sending / accepted / unknown) lives in browser storage shared by every tab. A rejected exit retries after 15 s; a ledger-close failure retries only the ledger, never the order.
+- **Unknown-status exit**: never resent automatically (a resend after fast-order's 60 s idempotency window would book a second BUY; Kotak has no key). The engine halts and the row is excluded from auto-management until the user presses Close and confirms from the order book that it filled (ledger-only close) or did not (one new exit).
+- **Chain pin**: stops are evaluated only from the chain on screen, so the underlying/expiry selectors lock while today's positions are open and a reload jumps to their chain. A position on another chain is shown in a red banner as unwatched.
+- **Daily loss limit** prices every open row of the active mode (last seen price when off-screen); a row with no price pauses entries.
+- **Unknown or unrecorded entry** halts the engine; 3 rejected auto entries in a row also halt it.
+- **Engine runs in the browser tab only**; stops are software-only (no resting broker stop). One tab at a time acts (tab lock); keep it open and visible.
+- Entry/exit prices in the ledger are the LTP at the decision, not the broker fill.
