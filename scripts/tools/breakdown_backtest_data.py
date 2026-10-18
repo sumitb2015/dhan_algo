@@ -12,9 +12,10 @@ debug/breakdown_backtest/data/<date>.json (session data never changes, so it is 
   3. Dhan's intraday API (oi=True) when the contract is still live: NIFTY spot plus every strike within ATM +-10 of
      the session's spot range.
 
-Every source yields the same shape: the session's bars plus the 2 previous regular sessions of the SAME contracts, so
-Supertrend / EMA20 / VWAP are warm from 09:15 (the live page fetches the same 2 days, HISTORY_DAYS in
-app/api/bearish-strikes/bars). The DB and the "near week" expired fetch only hold a weekly contract from the day after
+Every source yields the same shape: the session's bars plus the previous regular session of the SAME contracts
+(WARMUP_SESSIONS), so Supertrend / EMA20 are warm from 09:15 (the live page fetches 2 days, HISTORY_DAYS in
+app/api/bearish-strikes/bars; one is ample). A strike the DB did not hold the previous day has no warm-up bars and
+starts cold: each trade records its contract's previous-session bar count (warmupBars). The DB and the "near week" expired fetch only hold a weekly contract from the day after
 the previous expiry, so warm-up sessions on or before that expiry come from the expired-options API with
 expiry_code=2 ("next week" as of those dates = this contract), cached in debug/breakdown_backtest/expired/<expiry>.warm.json.
 
@@ -42,13 +43,21 @@ sys.path.insert(0, os.path.join(ROOT, 'scripts', 'downloader'))
 
 from lib.nse_holidays import is_regular_session  # noqa: E402
 
-DB_PATH = os.path.join(ROOT, 'Options Data', 'nifty_options.db')
+DB_PATHS = {
+    'dhan': os.path.join(ROOT, 'Options Data', 'nifty_options.db'),
+    'breeze': os.path.join(ROOT, 'Options Data', 'breeze_nifty_options.db'),
+}
+DB_PATH = DB_PATHS['dhan']  # main() repoints this for --source breeze
+SOURCE = 'dhan'
 OUT_DIR = os.path.join(ROOT, 'debug', 'breakdown_backtest')
 DATA_DIR = os.path.join(OUT_DIR, 'data')
 EXPIRED_DIR = os.path.join(OUT_DIR, 'expired')
 IST = timezone(timedelta(hours=5, minutes=30))
 STEP = 50
-WARMUP_SESSIONS = 2
+# Indicator warm-up: the previous regular session only. It holds 75+ bars even on 5m, ample for EMA20 / Supertrend(10),
+# and older days must not be stitched on: the DB stores only ATM+-10 strikes per minute, so a strike missing from the
+# previous day would otherwise jump straight from two sessions back to today.
+WARMUP_SESSIONS = 1
 REL_STRIKES = ['ATM'] + [f'ATM{s}{i}' for i in range(1, 11) for s in ('+', '-')]
 CALL_GAP_S = 0.3
 EXPIRED_ATTEMPTS = 3
@@ -64,8 +73,8 @@ NIFTY_LOT_SIZES = [
     ('2021-07-01', 50),
     ('2020-01-01', 75),
 ]
-# Bump when the payload's meaning changes (2 = always 2 warm-up sessions): older cached day files are rebuilt.
-FORMAT_VERSION = 2
+# Bump when the payload's meaning changes (3 = previous session only as warm-up): older cached day files are rebuilt.
+FORMAT_VERSION = 3
 
 
 def lot_size_for(day: str):
@@ -114,6 +123,44 @@ def warm_sessions(day: str) -> list[str]:
     return prior_sessions(day, WARMUP_SESSIONS, None)
 
 
+def fill_spot(spot: dict, contracts: dict, day: str) -> dict:
+    """Breeze stores spot on only some days/rows. Real spot is kept as is; a missing minute takes the last real spot
+    (the first real one for leading minutes). A day with no real spot at all (early Breeze downloads) is built from
+    put-call parity instead: K + CE - PE at the strike whose CE and PE closes are nearest, carried over minutes with
+    no complete pair. Parity is the forward, not spot: measured against real spot on 8 Breeze days it is off by
+    5-35 pts (a per-day offset no flat carry rate removed), so it only seeds days that have no feed."""
+    pair_est: dict[str, dict[int, dict[str, float]]] = {}
+    for e in contracts.values():
+        for b in e['bars']:
+            if b[0][:10] != day or b[4] is None:
+                continue
+            hm = b[0][11:16]
+            slot = pair_est.setdefault(hm, {}).setdefault(e['strike'], {})
+            slot[e['option']] = b[4]
+    minutes = sorted(set(pair_est) | set(spot))
+    out: dict[str, float] = {}
+    if spot:
+        known = sorted(spot)
+        last = spot[known[0]]
+        for hm in minutes:
+            last = spot.get(hm, last)
+            out[hm] = last
+        return out
+    last = None
+    for hm in minutes:
+        best = None
+        for k, v in pair_est.get(hm, {}).items():
+            if 'CE' in v and 'PE' in v:
+                gap = abs(v['CE'] - v['PE'])
+                if best is None or gap < best[0]:
+                    best = (gap, k + v['CE'] - v['PE'])
+        if best is not None:
+            last = best[1]
+        if last is not None:
+            out[hm] = last
+    return out
+
+
 def build_payload(day: str, expiry: str, source: str, rows: list[tuple]) -> dict:
     """rows: (datetime 'YYYY-MM-DD HH:MM', option_type, strike, o, h, l, c, v, oi, spot); earlier rows win on duplicates."""
     keep_days = set(warm_sessions(day)) | {day}
@@ -131,6 +178,8 @@ def build_payload(day: str, expiry: str, source: str, rows: list[tuple]) -> dict
     for e in contracts.values():
         e['bars'] = [e['bars'][t] for t in sorted(e['bars'])]
     contracts = {k: v for k, v in contracts.items() if any(b[0][:10] == day for b in v['bars'])}
+    if SOURCE == 'breeze':
+        spot = fill_spot(spot, contracts, day)
     return {
         'v': FORMAT_VERSION, 'date': day, 'expiry': expiry, 'source': source, 'lotSize': lot_size_for(day),
         'spot': sorted(spot.items()), 'contracts': contracts,
@@ -234,26 +283,46 @@ def _fetch_one(h, rel: str, o_type: str, code: int, from_date: str, to_date: str
     return [], None  # persistent empty reply for this series: that strike had no data in the window
 
 
-def fetch_expired(day: str, label: str, code: int, from_date: str, to_date: str, cache: str):
+def empty_parts(cache: str) -> list[str]:
+    """Series of a fetch whose saved reply was empty (the API's timeout / empty-body replies): retried by a later pass."""
+    parts = cache + '.parts'
+    if not os.path.isdir(parts):
+        return []
+    out = []
+    for name in sorted(os.listdir(parts)):
+        if name.endswith('.json'):
+            with open(os.path.join(parts, name)) as f:
+                if not json.load(f):
+                    out.append(name[:-5])
+    return out
+
+
+def fetch_expired(day: str, label: str, code: int, from_date: str, to_date: str, cache: str, retry_empty: bool = False):
     """All 21 relative strikes x CE/PE for one window. One call at a time; every finished series is saved under
-    <cache>.parts/ so an interrupted fetch resumes. Returns (rows, error)."""
-    if os.path.exists(cache):
+    <cache>.parts/ so an interrupted fetch resumes. The parts are kept after the merged <cache> is written, so a later
+    pass with retry_empty=True re-asks only the series that came back empty and rewrites <cache>. Returns (rows, error)."""
+    if os.path.exists(cache) and not (retry_empty and empty_parts(cache)):
         with open(cache) as f:
             return [tuple(r) for r in json.load(f)], None
     parts = cache + '.parts'
     os.makedirs(parts, exist_ok=True)
     tasks = [(rel, o) for rel in REL_STRIKES for o in ('CALL', 'PUT')]
     rows = []
-    h = helper()
+    h = None
+    calls = 0
     for i, (rel, o) in enumerate(tasks):
         progress(day, label, i, len(tasks))
         part = os.path.join(parts, f'{rel}_{o}.json')
         if os.path.exists(part):
             with open(part) as f:
-                rows.extend(tuple(r) for r in json.load(f))
-            continue
-        if i:
+                saved = json.load(f)
+            if saved or not retry_empty:
+                rows.extend(tuple(r) for r in saved)
+                continue
+        if calls:
             time.sleep(CALL_GAP_S * 3)
+        h = h or helper()
+        calls += 1
         got, err = _fetch_one(h, rel, o, code, from_date, to_date)
         if err:
             return [], err
@@ -269,9 +338,6 @@ def fetch_expired(day: str, label: str, code: int, from_date: str, to_date: str,
     with open(cache + '.tmp', 'w') as f:
         json.dump(rows, f)
     os.replace(cache + '.tmp', cache)
-    for name in os.listdir(parts):
-        os.remove(os.path.join(parts, name))
-    os.rmdir(parts)
     return rows, None
 
 
@@ -282,18 +348,76 @@ def expired_main_rows(day: str, expiry: str, expiries: list[str]):
                          os.path.join(EXPIRED_DIR, f'{expiry}.json'))
 
 
-def warm_rows(day: str, expiry: str, prev: str | None):
-    """Warm-up rows for sessions on/before the previous expiry (not in the near-week data). ([], None) if none needed."""
+def warm_cache_path(expiry: str) -> str:
+    return os.path.join(EXPIRED_DIR, f'{expiry}.warm.json')
+
+
+def contract_first_session(prev: str) -> str | None:
+    """The first regular session after the previous weekly expiry: where the DB's near-week data for a contract starts."""
+    d = date.fromisoformat(prev)
+    for i in range(1, 10):
+        iso = (d + timedelta(days=i)).isoformat()
+        if is_regular_session(iso):
+            return iso
+    return None
+
+
+def warm_rows(day: str, expiry: str, prev: str | None, retry_empty: bool = False):
+    """Warm-up rows for sessions on/before the previous expiry (not in the near-week data). ([], None) if none needed.
+    Fetched with expiry_code=2: on those dates "next week" is this contract (on the previous expiry day itself, code 1
+    is the expiring contract). With WARMUP_SESSIONS = 1 this is just the previous expiry day, needed by the contract's
+    first session (normally a Wednesday)."""
     need = [d for d in warm_sessions(day) if prev and d <= prev]
     if not need:
         return [], None
-    # Cache the 2 sessions before the contract's first near-week session once per expiry (covers every day that needs it).
-    first_own = next((d for d in (date.fromisoformat(prev) + timedelta(days=i) for i in range(1, 10))
-                      if is_regular_session(d.isoformat())), None)
-    window = warm_sessions(first_own.isoformat()) if first_own else need
+    first_own = contract_first_session(prev)
+    window = warm_sessions(first_own) if first_own else need
     frm, to = min(window + need), max(window + need)
-    return fetch_expired(day, f'warm-up for {expiry} ({frm}..{to})', 2, frm, to,
-                         os.path.join(EXPIRED_DIR, f'{expiry}.warm.json'))
+    return fetch_expired(day, f'warm-up for {expiry} ({frm}..{to})', 2, frm, to, warm_cache_path(expiry), retry_empty)
+
+
+def cached_warm_rows(expiry: str) -> tuple[list[tuple], float | None]:
+    """Offline: the warm-up rows a separate --fetch-warm run cached for this contract, and the cache's mtime (None
+    when there is none). Never calls Dhan."""
+    path = warm_cache_path(expiry)
+    if not os.path.exists(path):
+        return [], None
+    with open(path) as f:
+        return [tuple(r) for r in json.load(f)], os.path.getmtime(path)
+
+
+def fetch_warm_all(frm: str, to: str, retry_empty: bool):
+    """--fetch-warm: for every contract in the options DB whose first session falls in [frm, to], fetch and cache its
+    previous-expiry-day bars (expiry_code=2). Newest first, one call at a time, resumable; safe to re-run."""
+    con = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
+    try:
+        expiries = [e for (e,) in con.execute('SELECT DISTINCT expiry FROM option_prices ORDER BY expiry')]
+    finally:
+        con.close()
+    todo = []
+    for prev, expiry in zip(expiries, expiries[1:]):
+        first = contract_first_session(prev)
+        if first and frm <= first <= to:
+            todo.append((expiry, prev, first))
+    todo.reverse()
+    done, failed = 0, []
+    for expiry, prev, first in todo:
+        cache = warm_cache_path(expiry)
+        if os.path.exists(cache) and not (retry_empty and empty_parts(cache)):
+            done += 1
+            continue
+        print(json.dumps({'expiry': expiry, 'warm_day': prev, 'first_session': first}), flush=True)
+        rows, err = warm_rows(first, expiry, prev, retry_empty)
+        if err:
+            failed.append({'expiry': expiry, 'error': err})
+            print(json.dumps({'expiry': expiry, 'error': err}), flush=True)
+            if 'rate' in err.lower() or 'login' in err.lower() or 'DH-9' in err:
+                break
+            continue
+        done += 1
+        print(json.dumps({'expiry': expiry, 'rows': len(rows), 'empty_series': empty_parts(cache)}), flush=True)
+    emit({'ok': not failed, 'contracts': len(todo), 'done': done, 'failed': failed,
+          'empty_series': {e: empty_parts(warm_cache_path(e)) for e, _, _ in todo if empty_parts(warm_cache_path(e))}})
 
 
 # ── 3. Intraday API (contract still live) ───────────────────────────────────
@@ -355,12 +479,31 @@ def from_intraday_api(day: str, expiry: str, expiries: list[str]):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--date')
+    ap.add_argument('--source', choices=sorted(DB_PATHS), default='dhan',
+                    help='options DB to read: dhan (nifty_options.db) or breeze (breeze_nifty_options.db)')
     ap.add_argument('--force', action='store_true', help='rebuild even if cached')
     ap.add_argument('--offline', action='store_true',
                     help='options DB only, no Dhan calls: warm-up is whatever the DB holds for the contract (Wed/Thu partial)')
     ap.add_argument('--db-latest', action='store_true', help='print the latest session in the options DB and exit')
     ap.add_argument('--db-range', action='store_true', help='print earliest and latest session in the options DB and exit')
+    ap.add_argument('--fetch-warm', action='store_true',
+                    help='fetch + cache the previous-expiry-day warm-up bars (expiry_code=2) of every DB contract whose '
+                         'first session is in --from..--to; the offline backtest then merges them')
+    ap.add_argument('--from', dest='frm')
+    ap.add_argument('--to')
+    ap.add_argument('--retry-empty', action='store_true', help='with --fetch-warm: re-ask series that came back empty')
     args = ap.parse_args()
+    global DB_PATH, SOURCE, DATA_DIR
+    SOURCE = args.source
+    DB_PATH = DB_PATHS[SOURCE]
+    if SOURCE == 'breeze':
+        DATA_DIR = os.path.join(DATA_DIR, 'breeze')
+    if args.fetch_warm:
+        if SOURCE != 'dhan':
+            emit({'ok': False, 'error': '--fetch-warm caches Dhan expired-API bars: --source dhan only', 'retry': False})
+        if not args.frm or not args.to:
+            emit({'ok': False, 'error': '--fetch-warm needs --from and --to', 'retry': False})
+        fetch_warm_all(args.frm, args.to, args.retry_empty)
     if args.db_latest or args.db_range:
         con = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
         try:
@@ -389,8 +532,15 @@ def main():
     if os.path.exists(out) and not args.force:
         with open(out) as f:
             cached = json.load(f)
-    # An offline build may lack warm-up sessions: only an offline run may reuse it; online rebuilds it in full.
-    if cached and cached.get('v') == FORMAT_VERSION and (args.offline or cached.get('warmupSessions', 0) >= WARMUP_SESSIONS):
+    # An offline build may lack warm-up sessions: only an offline run may reuse it; online rebuilds it in full. A day that
+    # needs the previous expiry day's warm-up is rebuilt when that cache appears or changes (a --fetch-warm run).
+    def warm_mtime(expiry):
+        path = warm_cache_path(expiry) if expiry else None
+        return os.path.getmtime(path) if path and os.path.exists(path) else None
+    warm_current = (not cached or not cached.get('warmNeeded')
+                    or cached.get('warmMtime') == warm_mtime(cached.get('expiry')))
+    if cached and cached.get('v') == FORMAT_VERSION and warm_current and (
+            args.offline or cached.get('warmupSessions', 0) >= WARMUP_SESSIONS):
         emit({'ok': True, 'source': cached.get('source'), 'path': out, 'contracts': len(cached.get('contracts', {})), 'cached': True})
 
     now = datetime.now(IST)
@@ -405,10 +555,19 @@ def main():
 
     db = from_db(day)
     if db is None:
-        emit({'ok': False, 'error': f'{day} is not in Options Data/nifty_options.db (offline backtest)', 'retry': False})
+        emit({'ok': False, 'error': f'{day} is not in {os.path.basename(DB_PATH)} (offline backtest)', 'retry': False})
     expiry, rows, prev = db
-    source = 'db'
+    source = 'db' if SOURCE == 'dhan' else 'breeze_db'
+    # The contract's first session (normally Wednesday) has no previous day in the DB: merge the previous expiry day
+    # from the --fetch-warm cache when one exists (DB rows come first, so they win any duplicate minute).
+    warm_needed = SOURCE == 'dhan' and any(prev and d <= prev for d in warm_sessions(day))
+    warm_m = None
+    if warm_needed:
+        extra, warm_m = cached_warm_rows(expiry)
+        rows = list(rows) + extra
     payload = build_payload(day, expiry, source, rows)
+    payload['warmNeeded'] = warm_needed
+    payload['warmMtime'] = warm_m
     if 'error' in payload:
         emit({'ok': False, 'error': payload['error'], 'retry': False})
     have = {b[0][:10] for c in payload['contracts'].values() for b in c['bars']} - {day}

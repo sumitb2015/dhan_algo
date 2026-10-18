@@ -57,6 +57,15 @@ export interface BreakdownConfig {
   entryEnd: string; // default "15:00"
   eodExit: string; // default "15:15"
   brokerage?: number; // ₹ per executed order (default 20 for Dhan, 0 for Kotak)
+  /** Backtest only: points lost on every fill (entry sells this much lower, every exit buys this much higher). Default 0. */
+  slippagePts?: number;
+  /**
+   * Backtest only: skip entries on a contract whose previous-session bars cannot seed EMA20 on the timeframe (the options
+   * DB lacks them: Wednesdays without a --fetch-warm cache, strikes far from the previous day's spot). Default false.
+   */
+  btWarmOnly?: boolean;
+  /** Backtest only: which expired-options DB feeds the replay. Default 'dhan' (nifty_options.db). */
+  dataSource?: 'dhan' | 'breeze';
   trailPct?: number; // legacy alias for trailStartPct
 }
 
@@ -143,6 +152,8 @@ export function sanitizeConfigPatch(patch: unknown): Partial<BreakdownConfig> {
   const p = patch as Record<string, unknown>;
   if (typeof p.engineActive === 'boolean') out.engineActive = p.engineActive;
   if (typeof p.recoveryExit === 'boolean') out.recoveryExit = p.recoveryExit;
+  if (typeof p.btWarmOnly === 'boolean') out.btWarmOnly = p.btWarmOnly;
+  if (p.dataSource === 'dhan' || p.dataSource === 'breeze') out.dataSource = p.dataSource;
   if (p.timeframe === 1 || p.timeframe === 3 || p.timeframe === 5) out.timeframe = p.timeframe;
   if (p.trendMode === 'AUTO' || p.trendMode === 'BYPASS' || p.trendMode === 'CE_ONLY' || p.trendMode === 'PE_ONLY') {
     out.trendMode = p.trendMode;
@@ -155,7 +166,7 @@ export function sanitizeConfigPatch(patch: unknown): Partial<BreakdownConfig> {
   int('maxConcurrent', 1, 5);
   int('maxSameSide', 1, 5);
   int('lotsPerTrade', 1, MAX_LOTS_PER_TRADE);
-  const num = (k: 'slPct' | 'trailPct' | 'trailStartPct' | 'trailStepPts' | 'trailByPts' | 'targetPct' | 'dailyLossLimit' | 'brokerage', lo: number, hi: number) => {
+  const num = (k: 'slPct' | 'trailPct' | 'trailStartPct' | 'trailStepPts' | 'trailByPts' | 'targetPct' | 'dailyLossLimit' | 'brokerage' | 'slippagePts', lo: number, hi: number) => {
     const n = clampNum(p[k], lo, hi);
     if (n !== undefined) out[k] = n;
   };
@@ -167,6 +178,7 @@ export function sanitizeConfigPatch(patch: unknown): Partial<BreakdownConfig> {
   num('targetPct', 0, 90);
   num('dailyLossLimit', 1000, 10_000_000);
   num('brokerage', 0, 100);
+  num('slippagePts', 0, 10);
   // Keep legacy trailPct and new trailStartPct synced
   if (out.trailStartPct === undefined && out.trailPct !== undefined) {
     out.trailStartPct = out.trailPct;

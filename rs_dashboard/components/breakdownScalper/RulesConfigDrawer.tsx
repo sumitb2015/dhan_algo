@@ -308,6 +308,55 @@ export function RulesConfigDrawer({
               </div>
             </div>
 
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-zinc-300 font-medium">Backtest Data Source</span>
+                <p className="text-[10px] text-zinc-500">
+                  Backtest only · Breeze = sparse trade-only bars, own results; change then Re-run
+                </p>
+              </div>
+              <select
+                value={config.dataSource ?? 'dhan'}
+                onChange={(e) => onUpdateConfig({ dataSource: e.target.value === 'breeze' ? 'breeze' : 'dhan' })}
+                aria-label="Backtest data source"
+                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200 focus:ring-emerald-500"
+              >
+                <option value="dhan">Dhan DB</option>
+                <option value="breeze">ICICI Breeze DB</option>
+              </select>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-zinc-300 font-medium">Backtest Slippage (pts per fill)</span>
+                <p className="text-[10px] text-zinc-500">Backtest only · entry sells lower, every exit buys higher · 0 = exact levels</p>
+              </div>
+              <RuleNumInput
+                value={config.slippagePts ?? 0}
+                onCommit={(v) => onUpdateConfig({ slippagePts: Math.max(0, Math.min(10, Number(v) || 0)) })}
+                step={0.05}
+                min={0}
+                max={10}
+                className="w-16 text-center"
+              />
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-zinc-300 font-medium">Backtest: Skip Cold Contracts</span>
+                <p className="text-[10px] text-zinc-500">
+                  Backtest only · no entry on a strike without enough previous-day bars to seed EMA20 (not like live)
+                </p>
+              </div>
+              <input
+                type="checkbox"
+                checked={!!config.btWarmOnly}
+                onChange={(e) => onUpdateConfig({ btWarmOnly: e.target.checked })}
+                aria-label="Backtest: skip cold contracts"
+                className="h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500"
+              />
+            </div>
+
             <div className="flex items-center gap-2 pt-1 border-t border-zinc-800/60">
               <button
                 type="button"

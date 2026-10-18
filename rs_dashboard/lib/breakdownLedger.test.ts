@@ -178,3 +178,13 @@ test('breakdownLedger: normalizeConfig repairs a stored config', () => {
   assert.equal((c as unknown as Record<string, unknown>).bogus, undefined);
   assert.deepEqual(normalizeConfig(null), DEFAULT_CONFIG);
 });
+
+test('dataSource: sanitized, defaults to dhan, and only a breeze source changes the backtest key', async () => {
+  const { backtestConfigKey } = await import('./breakdownBacktest.ts');
+  assert.equal(normalizeConfig({}).dataSource, undefined);
+  assert.equal((await import('./breakdownLedger.ts')).sanitizeConfigPatch({ dataSource: 'nope' }).dataSource, undefined);
+  assert.equal((await import('./breakdownLedger.ts')).sanitizeConfigPatch({ dataSource: 'breeze' }).dataSource, 'breeze');
+  const base = normalizeConfig({});
+  assert.equal(backtestConfigKey({ ...base, dataSource: 'dhan' }), backtestConfigKey(base));
+  assert.notEqual(backtestConfigKey({ ...base, dataSource: 'breeze' }), backtestConfigKey(base));
+});
