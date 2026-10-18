@@ -12,6 +12,24 @@ money and the backtest side honest.
 
 Reference implementation: `/breakdown-scalper?tab=backtest` — copy its structure, not its strategy.
 
+## Start here for a NEW strategy: Algo Lab (`/algo-lab`)
+
+The invariants below are already implemented generically in **Algo Lab** — a new automated strategy is one module
+there, not a new page. Read `strategies/algo_lab/README.md`, then:
+
+1. spec `strategies/algo_lab/<key>.md`;
+2. `rs_dashboard/lib/algoLab/strategies/<camelKey>.ts` exporting a `StrategyDefinition` (`lib/algoLab/types.ts`):
+   `schema`/`defaults` (drives the rules drawer, server validation and the backtest rules stamp), `warmupBars`,
+   `gate`, `scan`, `onEntry`, `manage`, `columns.scanner` — copy `vwapMomentumBuyer.ts`;
+3. register it in `lib/algoLab/registry.ts`; tests beside it (`npm test` includes `lib/algoLab/**`).
+
+What the strategy may NOT do (the framework owns it): read a forming bar (ctx has closed bars only), loosen a stop
+(`stepPosition` clamps), skip the stop check, size orders, touch caps / locks / EOD / loss limits, or read the index
+high/low (`ctx.spotBars1m` is close-only in both modes). Live and backtest share `stepPosition`
+(`lib/algoLab/engineStep.ts`), so a change to exit logic is a change to both. v1 is single-leg (`legs[]` length 1),
+NIFTY-only in the backtest. Build a separate page only when a strategy needs what the framework does not have
+(multi-leg, another underlying's data, multi-day) — then extend the framework rather than fork it where possible.
+
 ## Files of the reference implementation
 
 | Layer | File | Owns |

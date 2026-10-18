@@ -122,3 +122,6 @@ temp_data/
 
 # Breakdown Scalper backtest cache + results (rs_dashboard/scripts/breakdown-backtest.ts)
 debug/breakdown_backtest/
+
+# Algo Lab ledgers, backtest results and the shared day-data cache (lib/algoLab, scripts/algo-lab-backtest.ts)
+debug/algo_lab/

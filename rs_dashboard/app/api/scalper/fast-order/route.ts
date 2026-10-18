@@ -93,6 +93,8 @@ const SOURCE_QTY_CAPS: Record<string, number> = {
   bs: 3750,
   // 'bds' = Breakdown Scalper: lots are capped at 20 on the ledger, so 20 x 75 would be 1500; same bound as 'ts'.
   bds: 3750,
+  // 'alab' = Algo Lab entries (lib/algoLab/configSchema.ts MAX_LOTS_PER_TRADE = 20, also checked by its ledger).
+  alab: 3750,
 };
 
 async function placeOrderOnce(body: {

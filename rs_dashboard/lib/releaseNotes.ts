@@ -50,6 +50,8 @@ export const SCOPE_TO_HREF: Record<string, string> = {
   breakdown: '/breakdown-scalper',
   'breakdown-scalper': '/breakdown-scalper',
   scalping: '/breakdown-scalper',
+  'algo-lab': '/algo-lab',
+  algolab: '/algo-lab',
   'daily-market': '/daily-market',
   movers: '/movers',
   rrg: '/rrg',

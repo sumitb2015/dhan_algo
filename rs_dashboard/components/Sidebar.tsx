@@ -117,6 +117,7 @@ const NAV_GROUPS = [
       { href: '/focus-tool', label: 'Ultimate Scalper Terminal', desc: 'Straddles & strangles terminal — timed entry, level exits, real-money armed orders' },
       { href: '/cyber-scalper', label: 'Cyber Scalper (9/20 EMA)', desc: 'Futuristic 9/20 EMA & VWAP scalping terminal with live difference bias & big buy/sell order execution' },
       { href: '/breakdown-scalper', label: 'Breakdown Auto-Scalper', desc: 'Automated multi-strike option breakdown seller with NIFTY trend bias, signal ranking & trailing SL' },
+      { href: '/algo-lab', label: 'Algo Lab', desc: 'Pick an automated strategy: the same Live terminal and offline Backtest for every one' },
       { href: '/advanced-scalper', label: 'Advanced Scalper', desc: 'Configurable 2-5 box scalper with per-box CE/PE, strike & lot presets' },
       { href: '/synthetic-futures', label: 'Synthetic Futures', desc: 'Futuristic ATM synthetic futures scalper with 1-click execution, hedging wings, trailing SL & WebSocket ticks' },
       { href: '/options/quiktrade', label: 'QuikTrade', desc: 'OI buildup quadrants, live positions & P&L' },
