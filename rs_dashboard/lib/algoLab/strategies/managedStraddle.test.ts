@@ -231,3 +231,4 @@ test('managedStraddle manage: triggers leg target when price decays by 30%', () 
   const res = S.manage(cePos, 68, ctx, cfg({ legTargetPct: 30 }));
   assert.ok(res.exits?.some((e) => e.kind === 'LEG_TARGET'));
 });
+
