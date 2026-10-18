@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils';
 import { summarize, WARMUP_SESSIONS_NEEDED, type BtAudit, type BtDayResult, type BtExitKind, type BtWindow } from '@/lib/breakdownBacktest';
 import type { BreakdownConfig } from '@/lib/breakdownLedger';
 import { BacktestAuditReport } from './BacktestAuditReport';
+import { OptimizationReport } from './OptimizationReport';
 
 interface RunStatus {
   state: 'running' | 'done' | 'error' | 'stopped' | 'interrupted';
@@ -936,6 +937,8 @@ export function BacktestPanel({
             onToggle={() => setAuditOpen((o) => !o)}
           />
         </div>
+
+        <OptimizationReport pageConfig={pageConfig} />
       </div>
     </section>
   );
