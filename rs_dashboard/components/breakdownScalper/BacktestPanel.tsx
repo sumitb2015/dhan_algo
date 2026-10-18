@@ -101,6 +101,9 @@ const CONFIG_LABELS: [keyof BreakdownConfig, string, (v: unknown) => string][] =
   ['brokerage', 'Brokerage', (v) => (v === 0 ? '₹0 (Kotak)' : `₹${v ?? 20}/ord`)],
 ];
 
+const ALL_WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'] as const;
+type Weekday = (typeof ALL_WEEKDAYS)[number];
+
 function csvOf(days: BtDayResult[]): string {
   const head = [
     'date', 'weekday', 'expiry', 'dte', 'source', 'n', 'contract', 'entry_time', 'entry_price', 'exit_time', 'exit_price',
@@ -190,10 +193,20 @@ export function BacktestPanel({
   const [customFrom, setCustomFrom] = useState('2026-09-01');
   const [customTo, setCustomTo] = useState('2026-10-13');
   const [auditOpen, setAuditOpen] = useState(false);
+  const [selectedWeekdays, setSelectedWeekdays] = useState<Set<string>>(() => new Set(ALL_WEEKDAYS));
   const initializedDates = useRef(false);
   const [busy, setBusy] = useState(false);
   const seq = useRef(0);
   const autoStarted = useRef(false);
+
+  const toggleWeekday = (wd: string) => {
+    setSelectedWeekdays((prev) => {
+      const next = new Set(prev);
+      if (next.has(wd)) next.delete(wd);
+      else next.add(wd);
+      return next;
+    });
+  };
 
   const load = useCallback(async () => {
     const mine = ++seq.current;
@@ -293,30 +306,44 @@ export function BacktestPanel({
     }
   }, [data]);
 
-  const summary = useMemo(() => summarize(days), [days]);
+  const weekdayCounts = useMemo(() => {
+    const counts: Record<string, number> = { Mon: 0, Tue: 0, Wed: 0, Thu: 0, Fri: 0 };
+    for (const d of days) {
+      if (counts[d.weekday] !== undefined) counts[d.weekday]++;
+    }
+    return counts;
+  }, [days]);
+
+  const filteredDays = useMemo(
+    () => days.filter((d) => selectedWeekdays.has(d.weekday)),
+    [days, selectedWeekdays],
+  );
+
+  const summary = useMemo(() => summarize(filteredDays), [filteredDays]);
   const chart = useMemo(
     () =>
-      [...days]
+      [...filteredDays]
         .sort((a, b) => a.date.localeCompare(b.date))
         .reduce<{ date: string; full: string; net: number; cum: number; trades: number }[]>((acc, d) => {
           const prev = acc.length ? acc[acc.length - 1].cum : 0;
           acc.push({ date: d.date.slice(5), full: d.date, net: d.net, cum: Math.round((prev + d.net) * 100) / 100, trades: d.trades.length });
           return acc;
         }, []),
-    [days],
+    [filteredDays],
   );
   const cumByDate = useMemo(() => new Map(chart.map((c) => [c.full, c.cum])), [chart]);
 
   const status = data?.status;
   const failures = Object.entries(data?.store?.failures ?? {});
   const dataThrough = days[0]?.date ?? null;
-  const allExpanded = days.length > 0 && days.every((d) => expanded.has(d.date));
+  const allExpanded = filteredDays.length > 0 && filteredDays.every((d) => expanded.has(d.date));
 
   const exportCsv = () => {
-    const blob = new Blob([csvOf(days)], { type: 'text/csv' });
+    const target = filteredDays.length > 0 ? filteredDays : days;
+    const blob = new Blob([csvOf(target)], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `breakdown_scalper_backtest_${days[days.length - 1]?.date ?? 'x'}_${dataThrough ?? 'x'}.csv`;
+    a.download = `breakdown_scalper_backtest_${target[target.length - 1]?.date ?? 'x'}_${target[0]?.date ?? 'x'}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
   };
@@ -550,6 +577,89 @@ export function BacktestPanel({
         </div>
       </div>
 
+      {/* Weekday Filter Strip */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 bg-zinc-900/40 px-4 py-2.5">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+            Weekday Filter:
+          </span>
+          <div className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950/70 p-1">
+            {ALL_WEEKDAYS.map((wd) => {
+              const isSelected = selectedWeekdays.has(wd);
+              const count = weekdayCounts[wd] ?? 0;
+              return (
+                <button
+                  key={wd}
+                  type="button"
+                  onClick={() => toggleWeekday(wd)}
+                  className={cn(
+                    'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-bold transition-colors',
+                    isSelected
+                      ? 'bg-violet-600 text-white shadow-sm hover:bg-violet-500'
+                      : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200',
+                  )}
+                  title={`${isSelected ? 'Deselect' : 'Select'} ${wd} (${count} session${count === 1 ? '' : 's'})`}
+                >
+                  <span>{wd}</span>
+                  <span
+                    className={cn(
+                      'rounded px-1 text-[10px] font-mono tabular-nums',
+                      isSelected ? 'bg-violet-700/80 text-violet-100' : 'bg-zinc-800 text-zinc-400',
+                    )}
+                  >
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setSelectedWeekdays(new Set(ALL_WEEKDAYS))}
+              disabled={selectedWeekdays.size === ALL_WEEKDAYS.length}
+              className={cn(
+                'rounded px-2 py-0.5 text-[11px] font-medium transition-colors',
+                selectedWeekdays.size === ALL_WEEKDAYS.length
+                  ? 'cursor-not-allowed text-zinc-600'
+                  : 'text-violet-400 hover:bg-violet-500/10 hover:text-violet-300',
+              )}
+            >
+              All
+            </button>
+            <span className="text-zinc-700">·</span>
+            <button
+              type="button"
+              onClick={() => setSelectedWeekdays(new Set())}
+              disabled={selectedWeekdays.size === 0}
+              className={cn(
+                'rounded px-2 py-0.5 text-[11px] font-medium transition-colors',
+                selectedWeekdays.size === 0
+                  ? 'cursor-not-allowed text-zinc-600'
+                  : 'text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-200',
+              )}
+            >
+              Clear
+            </button>
+          </div>
+        </div>
+
+        {selectedWeekdays.size < ALL_WEEKDAYS.length && (
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-zinc-400">
+              Showing <span className="font-mono font-bold text-zinc-200">{filteredDays.length}</span> of{' '}
+              <span className="font-mono text-zinc-400">{days.length}</span> sessions
+            </span>
+            {filteredDays.length === 0 && (
+              <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-400">
+                All weekdays deselected
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* KPI tiles */}
       <div className="grid grid-cols-2 gap-2 px-4 py-3 sm:grid-cols-4 xl:grid-cols-8">
         {[
@@ -621,22 +731,26 @@ export function BacktestPanel({
             {logOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
             Day-wise trade log
             <span className="font-medium text-zinc-500">
-              ({days.length} session{days.length === 1 ? '' : 's'}, {summary.trades} trade{summary.trades === 1 ? '' : 's'})
+              ({filteredDays.length} session{filteredDays.length === 1 ? '' : 's'}, {summary.trades} trade{summary.trades === 1 ? '' : 's'})
             </span>
           </button>
-          {logOpen && days.length > 0 && (
+          {logOpen && filteredDays.length > 0 && (
             <button
               type="button"
-              onClick={() => setExpanded(allExpanded ? new Set() : new Set(days.map((d) => d.date)))}
+              onClick={() => setExpanded(allExpanded ? new Set() : new Set(filteredDays.map((d) => d.date)))}
               className="text-[11px] font-bold text-sky-400 hover:text-sky-300"
             >
               {allExpanded ? 'Collapse all' : 'Expand all'}
             </button>
           )}
         </div>
-        {!logOpen ? null : days.length === 0 ? (
+        {!logOpen ? null : filteredDays.length === 0 ? (
           <p className="mt-2 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-6 text-center text-xs text-zinc-500">
-            {running ? 'The first sessions are being backtested…' : 'No backtest results yet.'}
+            {days.length === 0
+              ? running
+                ? 'The first sessions are being backtested…'
+                : 'No backtest results yet.'
+              : 'No sessions match the selected weekday filter.'}
           </p>
         ) : (
           <div className="mt-2 overflow-x-auto rounded-lg border border-zinc-800">
@@ -655,7 +769,7 @@ export function BacktestPanel({
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800">
-                {days.map((d) => {
+                {filteredDays.map((d) => {
                   const open = expanded.has(d.date);
                   return (
                     <Fragment key={d.date}>
