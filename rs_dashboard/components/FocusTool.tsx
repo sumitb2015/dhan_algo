@@ -5037,6 +5037,10 @@ function FocusTool() {
   // Rows left one-sided by an order the broker accepted and then rejected (margin, RMS): shown as a banner until the
   // user dismisses it or the row is no longer one-sided. A toast lasted 4 s, which is how a naked leg went unnoticed.
   const [nakedAlerts, setNakedAlerts] = useState<{ rowId: string; kind: 'entry' | 'add'; missing: ('CE' | 'PE')[]; at: number; text: string }[]>([]);
+  // A stop closed a leg but the re-entry did NOT go out (index not started, a refusal, an unconfirmed order). The leg
+  // stays flat until the user acts, so this is a persistent banner, not a 4 s toast (2026-10-19: two PE stops re-sold
+  // nothing because the NIFTY index was not started, and nothing said so).
+  const [skippedReentries, setSkippedReentries] = useState<{ rowId: string; leg: 'CE' | 'PE'; trigger: string; closedStrike: number | null; reason: string; at: number }[]>([]);
   // Last "position is on another broker" toast per row (refuseForeignBroker), so a stop re-firing every tick can't spam.
   const foreignBrokerToastRef = useRef<Map<string, number>>(new Map());
   // Rows held by an UNKNOWN order outcome, synchronously: the persisted FocusRow.orderUnknown lands in the scheduler's
@@ -8501,8 +8505,14 @@ function FocusTool() {
       reentryTapsRef.current = reentryTapsRef.current.filter(t => t !== tap);
       const row = schedulerRef.current.config.rows.find(r => r.id === rowId);
       if (row && outcome !== 'reentered') {
-        logEvent('reentry_outcome', row, tap.length ? tap.join(' | ') : `re-entry ${outcome} (no refusal toast)`,
-          { leg, trigger, outcome, closedStrike, closedQty, trailedSteps });
+        const why = tap.length ? tap.join(' | ') : `re-entry ${outcome} (no refusal toast)`;
+        logEvent('reentry_outcome', row, why, { leg, trigger, outcome, closedStrike, closedQty, trailedSteps });
+        // A refusal toast (or an unconfirmed order) means a re-entry WAS wanted and did not happen. A silent skip is
+        // by design (re-entry off, end of a lazy chain) and stays quiet. Waiting modes return 'pending', not skipped.
+        if (!isSimRow(row) && (tap.length > 0 || outcome === 'unconfirmed')) {
+          setSkippedReentries(prev => [...prev.filter(x => !(x.rowId === rowId && x.leg === leg)),
+            { rowId, leg, trigger, closedStrike, reason: why, at: Date.now() }]);
+        }
       }
     }
   }
@@ -10080,6 +10090,17 @@ function FocusTool() {
     });
   }, [config.rows]);
 
+  // A skipped-re-entry banner ends when the leg is owned again (re-entered, shifted or re-entered by hand) or the row is gone.
+  useEffect(() => {
+    setSkippedReentries(prev => {
+      const next = prev.filter(a => {
+        const r = config.rows.find(x => x.id === a.rowId);
+        return !!r && !rowOwnsLeg(r, a.leg);
+      });
+      return next.length === prev.length ? prev : next;
+    });
+  }, [config.rows]);
+
   const rowsByUnderlying = useMemo<Record<FocusUnderlying, FocusRow[]>>(() => {
     const m: Record<FocusUnderlying, FocusRow[]> = { NIFTY: [], BANKNIFTY: [], SENSEX: [], CRUDEOILM: [] };
     for (const r of config.rows) m[r.underlying].push(r);
@@ -10197,6 +10218,34 @@ function FocusTool() {
                   aria-label={`Dismiss the naked-leg alert on row ${a.rowId.slice(-4)}`}
                   title="Dismiss once you have fixed the row (it also clears itself when the row is flat or the missing leg is open)"
                   className={cn('px-2 py-0.5 rounded border border-rose-400/50 text-rose-100 font-semibold hover:bg-rose-500/20 cursor-pointer', FOCUS_RING)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* A stop closed a leg and its re-entry did not go out — the leg stays flat until you act. */}
+      {skippedReentries.length > 0 && (
+        <div role="alert" className="z-20 bg-amber-950/95 border-b border-amber-500/40 px-4 py-2 space-y-1.5">
+          {skippedReentries.map(a => {
+            const r = config.rows.find(x => x.id === a.rowId);
+            return (
+              <div key={`${a.rowId}:${a.leg}`} className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs">
+                <span className="font-bold text-amber-200">
+                  {r?.underlying ?? ''} {a.rowId.slice(-4)} · {a.leg} NOT RE-ENTERED after {a.trigger === 'sl' ? 'stop' : 'target'}
+                  {a.closedStrike != null ? ` at ${a.closedStrike}` : ''} — leg is flat
+                </span>
+                <span className="text-zinc-300">
+                  {a.reason} Since {new Date(a.at).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })} IST
+                </span>
+                <button
+                  onClick={() => setSkippedReentries(prev => prev.filter(x => !(x.rowId === a.rowId && x.leg === a.leg)))}
+                  aria-label={`Dismiss the skipped re-entry alert on ${a.leg} of row ${a.rowId.slice(-4)}`}
+                  title="Dismiss once you have dealt with the leg (it also clears itself when the leg is open again)"
+                  className={cn('px-2 py-0.5 rounded border border-amber-400/50 text-amber-100 font-semibold hover:bg-amber-500/20 cursor-pointer', FOCUS_RING)}
                 >
                   Dismiss
                 </button>
