@@ -12,6 +12,7 @@ import {
   AlertTriangle,
   Flame,
   XCircle,
+  Sigma,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { cyberAudio } from '@/lib/cyberAudio';
@@ -135,6 +136,8 @@ interface PositionsPanelProps {
   onClosePosition: (pos: PositionItem, units?: number) => Promise<void>;
   /** Add lots to an open row (same side, market). Omitted = no ADD button. */
   onAddPosition?: (pos: PositionItem, lots: number) => Promise<void>;
+  /** Opens the portfolio Greeks scan. Omitted = no GREEKS button. */
+  onShowGreeks?: () => void;
   /** Lot size for a row, for sizing the 25/50/75% partial chips. Null hides them (full-close only). */
   lotSizeFor?: (pos: PositionItem) => number | null;
   onFlattenAll: () => Promise<void>;
@@ -153,6 +156,7 @@ export default function CyberPositionsPanel({
   onToggleTrailAll,
   onClosePosition,
   onAddPosition,
+  onShowGreeks,
   lotSizeFor,
   onFlattenAll,
   isExecuting,
@@ -324,6 +328,20 @@ export default function CyberPositionsPanel({
 
             {/* Right Side: Quick Actions & P&L Summary */}
             <div className="flex items-center gap-2 flex-wrap">
+              {activeTab === 'active' && openCount > 0 && onShowGreeks && (
+                <button
+                  onClick={() => {
+                    cyberAudio.click();
+                    onShowGreeks();
+                  }}
+                  className="px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold border transition-all flex items-center gap-1 active:scale-95 bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-400 hover:text-violet-300"
+                  title="Scan open positions and compute combined portfolio Greeks"
+                >
+                  <Sigma className="w-3 h-3" />
+                  <span>GREEKS</span>
+                </button>
+              )}
+
               {activeTab === 'active' && openCount > 0 && onToggleTrailAll && (
                 <button
                   onClick={onToggleTrailAll}

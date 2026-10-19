@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import ScalperGreeksModal from '../analytics/ScalperGreeksModal';
 import { Zap, RefreshCw, Volume2, VolumeX, Keyboard, AlertCircle, Wallet } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import NavBar from '@/components/NavBar';
@@ -175,6 +176,10 @@ function CyberScalperTerminal() {
     }
   }, [symbol, expiry, futureExpiry]);
 
+  // Broker-shaped rows behind `positions`, for the Greeks scan.
+  const [rawPositions, setRawPositions] = useState<Record<string, unknown>[]>([]);
+  const [showGreeks, setShowGreeks] = useState(false);
+
   // Poll open positions from broker
   const fetchPositions = useCallback(async () => {
     if (positionsInFlight.current) return;
@@ -286,6 +291,7 @@ function CyberScalperTerminal() {
           };
         });
         setPositions(mapped);
+        setRawPositions(rawPositions);
       }
     } catch {
       // quiet fallback
@@ -353,6 +359,7 @@ function CyberScalperTerminal() {
   // belonged to Zerodha/Kotak (or vice versa).
   useEffect(() => {
     setPositions([]);
+    setRawPositions([]);
     setFundsData(null);
     setOrders([]);
     prevOrderStatusRef.current = new Map();
@@ -1296,9 +1303,17 @@ function CyberScalperTerminal() {
           onToggleTrailAll={handleToggleTrailAll}
           onClosePosition={async (pos, units) => { await handleClosePosition(pos, units); }}
           onAddPosition={handleAddPosition}
+          onShowGreeks={() => setShowGreeks(true)}
           lotSizeFor={lotSizeForPosition}
           onFlattenAll={handleFlattenAll}
           isExecuting={isExecuting}
+        />
+
+        <ScalperGreeksModal
+          open={showGreeks}
+          onClose={() => setShowGreeks(false)}
+          rawPositions={rawPositions}
+          broker={broker}
         />
 
         {/* FOOTER KEYBOARD SHORTCUTS REFERENCE */}
