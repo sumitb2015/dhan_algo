@@ -2822,8 +2822,8 @@ function FocusHeader({
 
         <div className="flex items-center gap-1 bg-zinc-900/80 border border-zinc-800 rounded-xl px-3 py-2">
           {([
-            { label: 'REALISED', value: realised, hint: 'Booked P&L from legs already closed today' },
-            { label: 'UNREALISED', value: unrealised, hint: 'Mark-to-market P&L on legs still open' },
+            { label: 'REALISED', value: realised, hint: 'Booked P&L from legs this tool closed today (REAL rows only, not the whole broker book)' },
+            { label: 'UNREALISED', value: unrealised, hint: 'Mark-to-market P&L on legs this tool still holds (REAL rows only)' },
             { label: 'TOTAL', value: total, hint: 'Realised + unrealised for the session' },
           ] as const).map(({ label, value, hint }, i) => (
             <React.Fragment key={label}>
@@ -4973,11 +4973,6 @@ function FocusTool() {
   // actually compares against `vwap` (see evaluateRowExit) — a live tick
   // spike can't fire the exit on its own.
   const [rowVwap, setRowVwap] = useState<Record<string, { vwap: number | null; close: number | null }>>({});
-  const { realised, unrealised, total } = useMemo(() => {
-    let r = 0, u = 0;
-    for (const p of positions) { r += Number(p.realizedProfit) || 0; u += Number(p.unrealizedProfit) || 0; }
-    return { realised: r, unrealised: u, total: r + u };
-  }, [positions]);
   // Indices in use: those with a row or a started group — NIFTY is no different, so a
   // trader on another index can remove it. Everything fetched per index (expiries,
   // lookups, the live bridge) is limited to these.
@@ -5874,6 +5869,17 @@ function FocusTool() {
   useEffect(() => {
     if (toolPnl > 0) setPeakMtm(prev => Math.max(prev, toolPnl));
   }, [toolPnl]);
+  // Header P&L is this tool's own REAL rows (ledger-booked + live legs), not the broker's whole position book: that
+  // book also holds positions this tool never opened (other desks, MCX, older NRML), which inflated the tile far
+  // above the account's P&L for the tool's trades (Kotak showed +21,786 against -6k).
+  const { realised, unrealised, total } = useMemo(() => {
+    let r = 0;
+    for (const row of config.rows) {
+      if (!isSimRow(row)) r += rowDisplayBookedPnl(row.fill?.bookedPnl);
+    }
+    return { realised: r, unrealised: toolPnl - r, total: toolPnl };
+  }, [config.rows, toolPnl]);
+
   // The sim book's own peak and ratcheted floor — refs, not state: nothing on
   // screen shows them, they only feed the sim budget check.
   const simPeakRef = useRef(0);
