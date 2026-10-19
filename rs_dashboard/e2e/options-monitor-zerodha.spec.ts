@@ -4,7 +4,7 @@ import { json, signIn, type Call } from './support';
 // Options Monitor (/options-monitor) sending its basket to ZERODHA, every /api/* call mocked: nothing reaches a broker
 // and any unexpected write fails the test. The chain, live feed and Greeks stay Dhan's; the order ticket resolves
 // Zerodha's own contracts (trading symbols) and /api/options/order carries broker 'zerodha' with NFO legs. Zerodha
-// places MARKET and LIMIT only (no resting stop entries), so the ticket offers no SL types.
+// takes MARKET, LIMIT and resting stop entries (Kite SL / SL-M), so the ticket offers every order type.
 
 const EXP = '2026-10-27';
 const STRIKES = [24800, 24850, 24900, 24950, 25000, 25050, 25100, 25150, 25200];
@@ -59,8 +59,8 @@ test('Zerodha: the strangle goes by trading symbol on NFO, MARKET/LIMIT only, an
   await install(page);
   await page.goto('/options-monitor', { waitUntil: 'domcontentloaded' });
   await page.getByRole('button', { name: /EXECUTE BASKET/ }).first().click({ timeout: 90_000 });
-  // No resting stop entries on Zerodha.
-  await expect(page.getByRole('button', { name: 'SL-M', exact: true })).toHaveCount(0);
+  // Stop entries are offered on Zerodha too.
+  await expect(page.getByRole('button', { name: 'SL-M', exact: true })).toHaveCount(1);
   const submit = page.getByRole('button', { name: /SUBMIT BASKET ORDER/ });
   await expect(submit).toBeEnabled({ timeout: 30_000 });
   await submit.click();
