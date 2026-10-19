@@ -1197,6 +1197,7 @@ function CyberScalperTerminal() {
           isExecuting={isExecuting}
           onExecuteTrade={handleExecuteTrade}
           onSelectFutureExpiry={setFutureExpiry}
+          onSelectExpiry={setExpiry}
           onFlattenAll={handleFlattenAll}
           openPositionsCount={positions.filter((p) => p.netQty !== 0).length}
           suggestedTargetPts={padTargetPts ?? (feedData?.strategy?.target_pts ? Math.round(feedData.strategy.target_pts) : null)}

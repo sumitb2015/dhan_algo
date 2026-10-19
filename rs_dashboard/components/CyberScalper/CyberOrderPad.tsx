@@ -47,6 +47,13 @@ function formatExpiryMonth(dateStr: string): string {
   return dt.toLocaleDateString('en-IN', { month: 'short' }).toUpperCase();
 }
 
+/** "2026-10-27" -> "27 OCT" for the options expiry switcher (weeklies need the day, not just the month). */
+function formatExpiryDay(dateStr: string): string {
+  const dt = new Date(`${dateStr}T00:00:00`);
+  if (Number.isNaN(dt.getTime())) return dateStr;
+  return `${dt.getDate()} ${dt.toLocaleDateString('en-IN', { month: 'short' }).toUpperCase()}`;
+}
+
 interface OrderPadProps {
   symbol: string;
   spot: number;
@@ -78,6 +85,8 @@ interface OrderPadProps {
   }) => Promise<void>;
   onFlattenAll: () => Promise<void>;
   onSelectFutureExpiry?: (expiry: string | null) => void;
+  /** Options expiry (Options mode): the feed prices the ATM CE/PE of the chosen one. */
+  onSelectExpiry?: (expiry: string | null) => void;
   openPositionsCount: number;
   suggestedTargetPts?: number | null;
   suggestedSlPts?: number | null;
@@ -93,6 +102,7 @@ export default function CyberOrderPad({
   onExecuteTrade,
   onFlattenAll,
   onSelectFutureExpiry,
+  onSelectExpiry,
   openPositionsCount,
   suggestedTargetPts,
   suggestedSlPts,
@@ -383,6 +393,31 @@ export default function CyberOrderPad({
                   )}
                 >
                   {m}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Options expiry switcher — the nearest expiries the feed returns (find_atm_options' all_expiries). */}
+          {effectiveMode === 'OPTIONS' && (options?.all_expiries?.length ?? 0) > 1 && (
+            <div className="flex items-center bg-zinc-950 border border-zinc-800 rounded-lg p-0.5" role="group" aria-label="Options expiry">
+              {options!.all_expiries!.map((exp) => (
+                <button
+                  key={exp}
+                  onClick={() => {
+                    cyberAudio.click();
+                    onSelectExpiry?.(exp);
+                  }}
+                  aria-pressed={options?.expiry === exp}
+                  className={cn(
+                    'px-1.5 py-0.5 rounded text-[9px] font-mono font-bold transition-all',
+                    options?.expiry === exp
+                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                      : 'text-zinc-400 hover:text-white'
+                  )}
+                  title={exp}
+                >
+                  {formatExpiryDay(exp)}
                 </button>
               ))}
             </div>
