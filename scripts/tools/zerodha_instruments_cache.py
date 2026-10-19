@@ -116,6 +116,7 @@ def main():
             'expiry': expiry.strftime('%Y-%m-%d') if hasattr(expiry, 'strftime') else str(expiry),
             'instrument_type': inst['instrument_type'],
             'lot_size': int(inst['lot_size']),
+            'tick_size': float(inst.get('tick_size') or 0.05),
         })
 
     out_file = output_file(underlying)

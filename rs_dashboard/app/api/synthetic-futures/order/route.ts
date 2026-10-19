@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getDhanCredentials } from '@/lib/dhanToken';
 import { isKotakTokenValid } from '@/lib/kotakToken';
 import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
-import { kitePost, isZerodhaTokenValid } from '@/lib/zerodhaToken';
+import { isZerodhaTokenValid } from '@/lib/zerodhaToken';
+import { placeZerodhaOrder } from '@/lib/zerodhaPlaceOrder';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { exchangeSegmentFor, isCrudeUnderlying, type SyntheticFuturesUnderlying } from '@/lib/syntheticFuturesSegments';
 import {
@@ -101,7 +102,7 @@ async function placeKotakLeg(leg: SyntheticLegSpec): Promise<{ orderId?: string;
   return { error: r.error, ...(r.status === 'unknown' ? { unknown: true } : {}) };
 }
 
-async function placeZerodhaLeg(leg: SyntheticLegSpec): Promise<{ orderId?: string; error?: string }> {
+async function placeZerodhaLeg(leg: SyntheticLegSpec): Promise<{ orderId?: string; error?: string; unknown?: boolean }> {
   if (!leg.tradingSymbol) {
     return { error: `Missing Zerodha tradingsymbol for ${leg.strike} ${leg.optionType}` };
   }
@@ -126,12 +127,9 @@ async function placeZerodhaLeg(leg: SyntheticLegSpec): Promise<{ orderId?: strin
       params.market_protection = -1;
     }
 
-    const data = (await kitePost('/orders/regular', params)) as { order_id?: string; orderId?: string };
-    const orderId = data?.order_id ?? data?.orderId;
-    if (orderId) {
-      return { orderId: String(orderId) };
-    }
-    return { error: 'No order_id returned from Kite' };
+    const r = await placeZerodhaOrder(params);
+    if (r.status === 'placed') return { orderId: r.orderId };
+    return { error: r.error, ...(r.status === 'unknown' ? { unknown: true } : {}) };
   } catch (err) {
     return { error: String((err as Error).message ?? err) };
   }

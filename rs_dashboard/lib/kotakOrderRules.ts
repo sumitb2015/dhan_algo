@@ -14,11 +14,11 @@ export const SOURCE_LOT_CAPS: Record<string, number> = { as: 100, bds: 20, alab:
 export const DEFAULT_FO_TICK = 0.05;
 
 /** Why an order must be refused under its source's lot cap, or null. `lotSize` is null when the contract is unknown. */
-export function sourceLotCapError(qty: number, source: string | undefined, symbol: string, lotSize: number | null): string | null {
+export function sourceLotCapError(qty: number, source: string | undefined, symbol: string, lotSize: number | null, broker = 'Kotak'): string | null {
   const cap = source ? SOURCE_LOT_CAPS[source] : undefined;
   if (cap === undefined) return null;
   // Without the contract the lot size is unknown, so a capped (opening) order fails closed. Rejected, never clamped.
-  if (!(lotSize && lotSize > 0)) return `${symbol} is not in the Kotak instrument cache - cannot check the ${source} per-order cap`;
+  if (!(lotSize && lotSize > 0)) return `${symbol} is not in the ${broker} instrument cache - cannot check the ${source} per-order cap`;
   if (qty > cap * lotSize) return `Quantity ${qty} (${qty / lotSize} lots) exceeds the ${source} per-order cap of ${cap} lots`;
   return null;
 }

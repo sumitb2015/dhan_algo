@@ -1618,9 +1618,9 @@ function AdvancedScalper() {
             exchange,
             product: legProductType === 'MARGIN' ? 'NRML' : 'MIS',
             ...(mode === 'LIMIT' ? { price: limitPrice } : {}),
-            // Server-side twin of MAX_LOTS_PER_ORDER (kotak/order SOURCE_LOT_CAPS). Box and Add Lots orders only: a
+            // Server-side twin of MAX_LOTS_PER_ORDER (kotak/order and zerodha/order SOURCE_LOT_CAPS). Box and Add Lots orders only: a
             // close, or a strike-roll reopen sized off what was just closed, must never be refused for its size.
-            ...(broker === 'kotak' ? { source: 'as' } : {}),
+            ...(broker === 'kotak' || broker === 'zerodha' ? { source: 'as' } : {}),
           }),
         });
       } else {

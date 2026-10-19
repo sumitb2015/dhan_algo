@@ -1,6 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { placeZerodhaOrder } from '@/lib/zerodhaPlaceOrder';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { zerodhaContractFromRows, zerodhaLotCapError, zerodhaSnapPrice, zerodhaUnderlyingOf, type ZerodhaCachedContract } from '@/lib/zerodhaOrderRules';
+import fs from 'fs';
+import path from 'path';
+
+/** The cached contract for a symbol, read from disk only (never spawns the cache script on the order path). */
+function cachedContract(symbol: string) {
+  const underlying = zerodhaUnderlyingOf(symbol);
+  if (!underlying) return null;
+  try {
+    const file = path.join(path.resolve(process.cwd(), '..'), 'debug', `zerodha_${underlying.toLowerCase()}_instruments.json`);
+    return zerodhaContractFromRows(JSON.parse(fs.readFileSync(file, 'utf8')) as ZerodhaCachedContract[], symbol);
+  } catch { return null; }
+}
 
 /** Products this route will book. CO/BO are excluded — Kite holds its own exit
  *  order against them, which a plain market order would leave dangling. */
@@ -19,9 +32,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     price?: number;
     exchange?: string;
     product?: string;
+    /** Calling terminal, for the per-source lot cap (lib/kotakOrderRules SOURCE_LOT_CAPS). Absent = uncapped (closes). */
+    source?: string;
   };
 
-  const { tradingsymbol, quantity, side, orderType = 'MARKET', price = 0, exchange = 'NFO', product: productRaw } = body;
+  const { tradingsymbol, quantity, side, orderType = 'MARKET', price = 0, exchange = 'NFO', product: productRaw, source } = body;
 
   // Reject an unrecognised product rather than coercing it to MIS. A close order
   // booked under the wrong product does not reduce the position — Kite opens a
@@ -54,6 +69,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: false, error: `Invalid price for LIMIT order: ${price}` }, { status: 400 });
   }
 
+  const contract = source || isLimitOrder ? cachedContract(String(tradingsymbol)) : null;
+  const capError = zerodhaLotCapError(qtyNum, source, String(tradingsymbol), contract);
+  if (capError) return NextResponse.json({ success: false, error: capError }, { status: 400 });
+
   const params: Record<string, string | number> = {
     tradingsymbol,
     exchange,
@@ -64,7 +83,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     validity: 'DAY',
   };
   if (isLimitOrder) {
-    params.price = Number(price);
+    params.price = zerodhaSnapPrice(Number(price), contract);
   } else {
     // Zerodha rejects API market orders on options without market
     // protection; -1 = automatic system-managed protection band.
