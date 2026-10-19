@@ -544,12 +544,15 @@ function AdvancedScalper() {
   // a CRUDEOILM leg stays live while NIFTY is on screen (Kotak's positions payload carries no usable price, see
   // kotakShape.ts). Prices come back as liveQuotes.contracts[tradingSymbol]. Sent as a full replace whenever the set
   // changes (a closed leg just drops out), and re-sent on a new underlying because each bridge reads its own file.
+  // Zerodha is priced the same way (its positions' last_price is Kite market data, which this app does not use): the
+  // request is keyed by trading symbol and built from the Zerodha instrument cache's map.
   const kotakContractsJson = useMemo(
-    () => broker === 'kotak' ? JSON.stringify(kotakContractRequests(positionsData, kotakSymbolMap)) : '[]',
-    [broker, positionsData, kotakSymbolMap],
+    () => broker === 'kotak' ? JSON.stringify(kotakContractRequests(positionsData, kotakSymbolMap))
+      : broker === 'zerodha' ? JSON.stringify(kotakContractRequests(positionsData, zerodhaSymbolMap)) : '[]',
+    [broker, positionsData, kotakSymbolMap, zerodhaSymbolMap],
   );
   useEffect(() => {
-    if (broker !== 'kotak') return;
+    if (broker !== 'kotak' && broker !== 'zerodha') return;
     fetch('/api/options/live', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -588,9 +591,9 @@ function AdvancedScalper() {
       if (liveLtp > 0) return applyLtp(liveLtp);
     }
 
-    // Any other Kotak leg (another expiry, another underlying, a future): the bridge's per-contract bucket, keyed by
-    // the Kotak trading symbol (see kotakContractsJson / the /api/options/live `watchContracts` action).
-    if (broker === 'kotak') {
+    // Any other Kotak/Zerodha leg (another expiry, another underlying, a future): the bridge's per-contract bucket, keyed
+    // by the trading symbol (see kotakContractsJson / the /api/options/live `watchContracts` action).
+    if (broker === 'kotak' || broker === 'zerodha') {
       const contractLtp = liveQuotes?.contracts?.[String(pos.tradingSymbol ?? '')]?.ltp ?? 0;
       if (contractLtp > 0) return applyLtp(contractLtp);
     }
@@ -613,8 +616,8 @@ function AdvancedScalper() {
       // Kotak rows carry no expiry field, and its monthly trading symbol (NIFTY26OCT22500PE = Oct 2026, strike 22500)
       // cannot be told apart from the DD-MON-YY compact form by parsing — it read as 2026-10-26 → "2022-10-26", strike
       // 500. The instrument cache knows the real contract, so the Expiry column and Add Lots read it from there.
-      const kotakExpiry = broker === 'kotak' && !enriched.drvExpiryDate
-        ? kotakSymbolMap[String(pos.tradingSymbol ?? '')]?.expiry
+      const kotakExpiry = (broker === 'kotak' || broker === 'zerodha') && !enriched.drvExpiryDate
+        ? (broker === 'kotak' ? kotakSymbolMap : zerodhaSymbolMap)[String(pos.tradingSymbol ?? '')]?.expiry
         : undefined;
       const computed = kotakExpiry ? { ...enriched, drvExpiryDate: kotakExpiry } : enriched;
       const k = positionKey(pos);
@@ -637,7 +640,7 @@ function AdvancedScalper() {
     // recomputes exactly when it needs to without thrashing on its own
     // identity every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [realizedFixedPositions, liveQuotes, quotesStale, secIdToStrikeSide, positionJoinKey, broker, kotakSymbolMap]);
+  }, [realizedFixedPositions, liveQuotes, quotesStale, secIdToStrikeSide, positionJoinKey, broker, kotakSymbolMap, zerodhaSymbolMap]);
   /* eslint-enable react-hooks/refs */
 
   const totalPnl = useMemo(() => enrichedPositions.reduce((sum, p) =>
