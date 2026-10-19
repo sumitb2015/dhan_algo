@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { kitePost } from '@/lib/zerodhaToken';
+import { placeZerodhaOrder } from '@/lib/zerodhaPlaceOrder';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 /** Products this route will book. CO/BO are excluded — Kite holds its own exit
@@ -54,29 +54,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: false, error: `Invalid price for LIMIT order: ${price}` }, { status: 400 });
   }
 
-  try {
-    const params: Record<string, string | number> = {
-      tradingsymbol,
-      exchange,
-      transaction_type: sideUpper,
-      order_type: isLimitOrder ? 'LIMIT' : 'MARKET',
-      quantity: qtyNum,
-      product,
-      validity: 'DAY',
-    };
-    if (isLimitOrder) {
-      params.price = Number(price);
-    } else {
-      // Zerodha rejects API market orders on options without market
-      // protection; -1 = automatic system-managed protection band.
-      params.market_protection = -1;
-    }
-
-    const data = await kitePost('/orders/regular', params) as { order_id: string };
-    invalidateBrokerCache('zerodha');
-    return NextResponse.json({ success: true, order_id: data.order_id });
-  } catch (err) {
-    console.error('[scalper/zerodha/order] error:', err);
-    return NextResponse.json({ success: false, error: String((err as Error).message ?? err) });
+  const params: Record<string, string | number> = {
+    tradingsymbol,
+    exchange,
+    transaction_type: sideUpper,
+    order_type: isLimitOrder ? 'LIMIT' : 'MARKET',
+    quantity: qtyNum,
+    product,
+    validity: 'DAY',
+  };
+  if (isLimitOrder) {
+    params.price = Number(price);
+  } else {
+    // Zerodha rejects API market orders on options without market
+    // protection; -1 = automatic system-managed protection band.
+    params.market_protection = -1;
   }
+
+  const r = await placeZerodhaOrder(params);
+  if (r.status === 'placed') {
+    invalidateBrokerCache('zerodha');
+    return NextResponse.json({ success: true, order_id: r.orderId, ...(r.reconciled ? { reconciled: true } : {}) });
+  }
+  if (r.status === 'unknown') return NextResponse.json({ success: false, unknown: true, error: r.error }, { status: 504 });
+  return NextResponse.json({ success: false, error: r.error });
 }

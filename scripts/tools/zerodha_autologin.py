@@ -9,7 +9,7 @@ Output: JSON on stdout — {"success": true, "userId": "...", "expiryTime": "...
 import sys
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
@@ -19,6 +19,18 @@ sys.path.insert(0, PROJECT_ROOT)
 os.chdir(PROJECT_ROOT)
 
 TOKEN_FILE = os.path.join(PROJECT_ROOT, "zerodha_access_token.json")
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def next_kite_expiry(now=None):
+    """Kite access tokens die at ~06:00 IST the next day, not 24h after login."""
+    now = (now or datetime.now(IST)).astimezone(IST)
+    expiry = now.replace(hour=6, minute=0, second=0, microsecond=0)
+    if expiry <= now:
+        expiry += timedelta(days=1)
+    return expiry
 
 
 def main():
@@ -32,7 +44,7 @@ def main():
         print(json.dumps({"success": False, "error": str(e)}))
         sys.exit(0)
 
-    expiry_time = (datetime.now() + timedelta(hours=24)).isoformat()
+    expiry_time = next_kite_expiry().isoformat()
     user_id = profile.get("user_id")
 
     with open(TOKEN_FILE, 'w') as f:

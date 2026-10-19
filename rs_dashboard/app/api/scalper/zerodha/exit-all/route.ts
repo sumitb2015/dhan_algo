@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { kiteGet, kitePost } from '@/lib/zerodhaToken';
+import { kiteGet } from '@/lib/zerodhaToken';
+import { placeZerodhaOrder } from '@/lib/zerodhaPlaceOrder';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 /** Kite's derivative exchanges. NSE / BSE are cash equity, which the F&O terminals' Exit All must never sell. */
@@ -30,22 +31,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     for (const pos of open) {
       const qty = Math.abs(Number(pos.quantity));
       const side = Number(pos.quantity) > 0 ? 'SELL' : 'BUY';
-      try {
-        await kitePost('/orders/regular', {
-          tradingsymbol: pos.tradingsymbol,
-          exchange: pos.exchange ?? 'NFO',
-          transaction_type: side,
-          order_type: 'MARKET',
-          quantity: qty,
-          product: pos.product ?? 'MIS',
-          validity: 'DAY',
-          // Required for API market orders on options (-1 = automatic band).
-          market_protection: -1,
-        });
-        closed.push(pos.tradingsymbol);
-      } catch (err) {
-        errors.push(`${pos.tradingsymbol}: ${String((err as Error).message ?? err)}`);
-      }
+      const r = await placeZerodhaOrder({
+        tradingsymbol: pos.tradingsymbol,
+        exchange: pos.exchange ?? 'NFO',
+        transaction_type: side,
+        order_type: 'MARKET',
+        quantity: qty,
+        product: pos.product ?? 'MIS',
+        validity: 'DAY',
+        // Required for API market orders on options (-1 = automatic band).
+        market_protection: -1,
+      });
+      if (r.status === 'placed') closed.push(pos.tradingsymbol);
+      else errors.push(`${pos.tradingsymbol}: ${r.status === 'unknown' ? 'STATUS UNKNOWN (may have closed) - ' : ''}${r.error}`);
     }
 
     // Invalidate even on a partial failure — some legs can close while others

@@ -10,6 +10,10 @@ interface ZerodhaTokenCache { apiKey: string; accessToken: string; ts: number; f
 let cache: ZerodhaTokenCache | null = null;
 const TOKEN_TTL = 5 * 60 * 1000;
 
+/** Kite answered with a JSON refusal (4xx / status:error): nothing was sent to the exchange, so a retry is safe.
+ *  Any other throw (timeout, network, unreadable or 5xx reply) leaves an order's fate unknown. */
+export class KiteRejectedError extends Error {}
+
 /** True if the given ISO expiry timestamp is missing or in the past. */
 export function isTokenExpired(expiryTime: string | undefined): boolean {
   if (!expiryTime) return true;
@@ -111,7 +115,8 @@ export async function kitePost(
   });
   const json = await res.json() as Record<string, unknown>;
   if (!res.ok || json.status === 'error') {
-    throw new Error(String(json.message ?? `HTTP ${res.status}`));
+    const msg = String(json.message ?? `HTTP ${res.status}`);
+    throw res.status < 500 ? new KiteRejectedError(msg) : new Error(msg);
   }
   return json.data;
 }
