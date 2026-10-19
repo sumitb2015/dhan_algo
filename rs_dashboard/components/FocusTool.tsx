@@ -43,7 +43,7 @@ import type {
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
-  EMPTY_ROW_LIVE, anchoredReentryLots,
+  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
@@ -2254,6 +2254,15 @@ function LegSlLevels({
   const wantRule = leg === 'CE' ? row.ceSlRule : row.peSlRule;
   const orbWanted = !!(leg === 'CE' ? row.ceOrbSl : row.peOrbSl)?.enabled && !!(leg === 'CE' ? row.ceRangeBreakout : row.peRangeBreakout)?.enabled;
   const wantedKind = orbWanted ? 'orb' : legSlRuleOn(wantRule) ? wantRule.basis : null;
+  // Trail SL: armed (on, with a valid X-Y) shows a "T"; once it has moved the stop, the step count. A stop on the
+  // index is never trailed, so the badge is only for a premium / delta stop.
+  const legTrail = leg === 'CE' ? row.ceTrailSl : row.peTrailSl;
+  const trailArmed = held && legTrailOn(legTrail) && (stop?.on === 'premium' || stop?.on === 'delta');
+  const trailSteps = Number(stop?.trailed) || 0;
+  const trailWhat = trailArmed
+    ? `Trail SL ${legTrail.every}-${legTrail.by}${legTrail.unit === 'delta' ? ' delta' : legTrail.unit === 'pct' ? '%' : ' pts'}: every ${legTrail.every} the ${legTrail.unit === 'delta' ? 'delta' : 'premium'} falls, the stop drops ${legTrail.by}. `
+      + (trailSteps > 0 ? `Trailed ${trailSteps}× so far.` : 'Not moved yet.')
+    : '';
   const stopFallback = held && !runningLazyLeg(row, leg) && wantedKind != null && stop?.kind !== wantedKind;
   const fallbackWhat = wantedKind === 'delta' ? 'Delta' : wantedKind === 'orb' ? 'ORB' : wantedKind === 'pts' ? 'Points' : 'Underlying';
   const tgtSpot = held
@@ -2278,10 +2287,11 @@ function LegSlLevels({
         <span
           className={cn('text-[11px] font-mono font-bold tabular-nums', slTone(nowLeg, legLevel, leg === 'CE' ? 'text-emerald-400' : 'text-rose-400'))}
           title={stop && stop.on === 'premium'
-            ? `${leg} ${stop.label} fires when this leg's premium reaches ${legLevel.toFixed(2)} (entry ${stop.entry.toFixed(2)})`
-            : `${leg} SL % fires when this leg's premium reaches ${legLevel.toFixed(2)} (entry + ${slMultToPct(String(legSlMultiplier(row, leg)))}%)`}
+            ? `${leg} ${stop.label} fires when this leg's premium reaches ${legLevel.toFixed(2)} (entry ${stop.entry.toFixed(2)}). ${trailWhat}`.trim()
+            : `${leg} SL % fires when this leg's premium reaches ${legLevel.toFixed(2)} (entry + ${slMultToPct(String(legSlMultiplier(row, leg)))}%). ${trailWhat}`.trim()}
         >
-          {leg} {stop && stop.kind !== 'mult' && stop.kind !== 'lazy' ? 'SL' : '×'} {legLevel.toFixed(2)}{stop?.trailed ? ' ↓' : ''}
+          {leg} {stop && stop.kind !== 'mult' && stop.kind !== 'lazy' ? 'SL' : '×'} {legLevel.toFixed(2)}
+          {trailSteps > 0 ? ` ↓${trailSteps}×` : trailArmed ? ' T' : ''}
         </span>
       )}
       {spotStop && (
