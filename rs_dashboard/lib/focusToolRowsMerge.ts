@@ -1,5 +1,6 @@
 import type { FocusRow, FocusToolConfig } from './focusToolRows.ts';
 import { mergeRevItems } from './revMerge.ts';
+import { legacyStopToSigned } from './focusToolRules.ts';
 
 /** How many deleted row ids are remembered. */
 export const DELETED_ROW_CAP = 200;
@@ -30,6 +31,12 @@ export function mergeFocusConfigWrite(
 ): { config: FocusToolConfig; conflicts: string[]; refusedDeletes: string[] } {
   const { rows: incomingRows, deleteRowIds: incomingDeleted, deletedRowIds: _clientTombs, ...rest } = body;
   void _clientTombs;
+  // A save from a tab that predates the signed Stop carries a loss magnitude and no flag; stored as-is next to a
+  // `stopSigned: true` it would turn a 5000 loss stop into a +5000 profit stop. Convert it on the way in.
+  if (rest.stopRupees !== undefined && rest.stopSigned !== true) {
+    rest.stopRupees = legacyStopToSigned({ stopRupees: rest.stopRupees });
+    rest.stopSigned = true;
+  }
   const refusedDeletes: string[] = [];
   const toDelete = new Set<string>();
   for (const id of incomingDeleted ?? []) {

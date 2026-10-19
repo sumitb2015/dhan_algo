@@ -3114,7 +3114,7 @@ function ControlStrip({
         <div className="flex items-center gap-1.5">
           <ShieldOff className="h-3 w-3 text-rose-500" />
           <span className={cn(TXT_VALUE, 'font-black text-zinc-500 uppercase')}>Stop</span>
-          <RuleNumInput value={stopRupees} onCommit={setStopRupees} step={500} className="w-20" placeholder="0"
+          <RuleNumInput value={stopRupees} onCommit={setStopRupees} step={500} min={-10_000_000} className="w-20" placeholder="0"
             title="Close every open row once total P&L falls to this level (₹). A negative number is a loss (-3000), a positive one locks in profit (3000 exits if P&L drops back to +₹3,000). Applies when you leave the field, not while typing." />
         </div>
 
@@ -10087,6 +10087,15 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     saveRiskPatch({ targetRupees: v });
   }
   function handleSetStopRupees(v: string) {
+    // A profit stop at or above today's P&L is already breached: with Risk on it would flatten every open row on the
+    // next tick. Refuse it rather than discover that live.
+    const level = accountStopLevel({ stopRupees: v, stopSigned: true });
+    const holding = config.rows.some(r => (Number(r.fill?.ceQty) || 0) > 0 || (Number(r.fill?.peQty) || 0) > 0);
+    if (riskEnabled && holding && level != null && level > 0 && toolPnl <= level) {
+      addToast('error', 'Stop not set',
+        `+₹${level.toLocaleString('en-IN')} is at or above the current P&L (${fmtInr(toolPnl, true)}), so it would exit every open row at once. Enter a lower level, or turn Risk off first.`);
+      return;
+    }
     setStopRupees(v);
     saveRiskPatch({ stopRupees: v });
   }

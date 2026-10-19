@@ -1880,12 +1880,12 @@ export function accountStopLevel(cfg: Pick<RiskConfig, 'stopRupees' | 'stopSigne
 
 /**
  * A saved stop in the signed convention. A legacy value (no `stopSigned`) was a loss magnitude, so 5000
- * becomes '-5000'; a signed or empty one is returned as stored.
+ * becomes '-5000' (a legacy zero or negative one was off, so it becomes empty); a signed or empty one is returned as stored.
  */
 export function legacyStopToSigned(cfg: Pick<RiskConfig, 'stopRupees' | 'stopSigned'>): string {
   const n = num(cfg.stopRupees);
   if (cfg.stopSigned || n == null) return cfg.stopRupees ?? '';
-  return n === 0 ? '' : String(-Math.abs(n));
+  return n > 0 ? String(-n) : ''; // the legacy rule ignored a zero or negative stop (off)
 }
 
 /**

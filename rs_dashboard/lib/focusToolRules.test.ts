@@ -1209,5 +1209,6 @@ test('account stop: signed level locks profit, legacy value stays a loss limit',
   assert.equal(legacyStopToSigned({ stopRupees: '5000' }), '-5000');
   assert.equal(legacyStopToSigned({ stopRupees: '5000', stopSigned: true }), '5000');
   assert.equal(legacyStopToSigned({ stopRupees: '' }), '');
+  assert.equal(legacyStopToSigned({ stopRupees: '-200' }), '');
   assert.equal(accountStopLevel({ stopRupees: '0', stopSigned: true }), null);
 });

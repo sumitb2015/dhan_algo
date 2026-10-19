@@ -47,3 +47,13 @@ test('other fields stay last-write-wins, only when the save carries them', () =>
   assert.strictEqual(out.riskEnabled, true);
   assert.deepStrictEqual(out.rows.map(r => r.id), ['a']);
 });
+
+test('a save without stopSigned is a legacy loss magnitude and never becomes a profit stop', () => {
+  const stored = cfg([], { stopRupees: '-3000', stopSigned: true });
+  assert.deepStrictEqual(
+    (({ stopRupees, stopSigned }) => ({ stopRupees, stopSigned }))(mergeFocusConfigWrite(stored, { stopRupees: '5000' }).config),
+    { stopRupees: '-5000', stopSigned: true });
+  const signed = mergeFocusConfigWrite(stored, { stopRupees: '3000', stopSigned: true }).config;
+  assert.strictEqual(signed.stopRupees, '3000');
+  assert.strictEqual(mergeFocusConfigWrite(stored, { targetRupees: '1' }).config.stopRupees, '-3000');
+});
