@@ -23,7 +23,7 @@ import {
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { TabTable, type SortState, BUILDUP_STYLES } from './Scalper';
-import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
+import { useBrokerSelector, scalperRoute, BROKER_LABELS, BROKERS, type Broker } from '@/hooks/useBrokerSelector';
 import { withSavedBroker } from '@/hooks/withSavedBroker';
 import { closeOrderProduct, positionProduct, openRowOfProduct } from '@/lib/positionProduct';
 import { scaleBrokerPnl } from '@/lib/positionPnl';
@@ -2787,21 +2787,24 @@ function FocusHeader({
 
       {/* Right: Broker Selector + P&L tiles */}
       <div className="flex items-center gap-3">
-        {(authenticatedBrokers.length > 1 || !authenticatedBrokers.includes(broker)) && (
-          <select
-            value={broker}
-            disabled={brokerLocked}
-            title={brokerLocked
-              ? 'Locked: a REAL row holds a position on this broker. Exit it before switching, or its exits would go to the wrong account.'
-              : 'Broker this terminal trades and reads positions from'}
-            onChange={e => setBroker(e.target.value as Broker)}
-            className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed w-[90px] shrink-0"
-          >
-            {(authenticatedBrokers.includes(broker) ? authenticatedBrokers : [...authenticatedBrokers, broker]).map(b => (
-              <option key={b} value={b}>{BROKER_LABELS[b]}{authenticatedBrokers.includes(b) ? '' : ' (logged out)'}</option>
-            ))}
-          </select>
-        )}
+        {/* Always shown, so a broker whose session lapsed (Kotak's ends at midnight IST) is visible as "logged out" instead
+            of silently missing. A logged-out broker cannot be picked; the current one stays selectable so the select never
+            holds a value it has no option for. */}
+        <select
+          value={broker}
+          disabled={brokerLocked}
+          title={brokerLocked
+            ? 'Locked: a REAL row holds a position on this broker. Exit it before switching, or its exits would go to the wrong account.'
+            : 'Broker this terminal trades and reads positions from. A "(logged out)" broker needs a fresh login first.'}
+          onChange={e => setBroker(e.target.value as Broker)}
+          className="bg-zinc-900 border border-zinc-700 text-zinc-200 text-xs font-semibold rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-violet-500 disabled:opacity-50 disabled:cursor-not-allowed w-[130px] shrink-0"
+        >
+          {BROKERS.map(b => (
+            <option key={b} value={b} disabled={b !== broker && !authenticatedBrokers.includes(b)}>
+              {BROKER_LABELS[b]}{authenticatedBrokers.includes(b) ? '' : ' (logged out)'}
+            </option>
+          ))}
+        </select>
 
         <div className="flex items-center gap-1 bg-zinc-900/80 border border-zinc-800 rounded-xl px-3 py-2">
           {([
