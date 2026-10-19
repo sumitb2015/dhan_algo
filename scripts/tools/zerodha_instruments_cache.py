@@ -133,6 +133,7 @@ def main():
             'instrument_type': inst['instrument_type'],
             'lot_size': int(inst['lot_size']),
             'tick_size': float(inst.get('tick_size') or 0.05),
+            'exchange': exchange,
         })
 
     out_file = futures_output_file(underlying) if args.futures else output_file(underlying)

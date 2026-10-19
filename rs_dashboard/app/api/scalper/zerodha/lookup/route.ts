@@ -61,16 +61,29 @@ async function ensureCache(underlying: string): Promise<CachedInstrument[]> {
 /** Underlyings with a tradeable future (scripts/tools/zerodha_instruments_cache.py FUTURES_EXCHANGE). */
 const FUTURES_UNDERLYINGS = new Set(['NIFTY', 'CRUDEOIL', 'CRUDEOILM']);
 
+/** When a futures-cache rebuild last FAILED, per underlying: the script is not respawned (60 s timeout) on every lookup while Kite is down. */
+const futuresBuildFailedAt = new Map<string, number>();
+const FUTURES_RETRY_MS = 5 * 60_000;
+
 /** The future to trade for this underlying, or null when it has none / the requested expiry is not listed / the cache cannot be built. */
 async function futureFor(underlying: string, futureExpiry: string): Promise<{ trading_symbol: string; expiry: string; lot_size: number; exchange_segment: string } | null> {
   if (!FUTURES_UNDERLYINGS.has(underlying)) return null;
   try {
     const file = path.join(PROJECT_ROOT, 'debug', `zerodha_${underlying.toLowerCase()}_futures.json`);
     const stale = !fs.existsSync(file) || Date.now() - fs.statSync(file).mtimeMs > CACHE_MAX_AGE_MS;
-    if (stale) {
-      await dedupe(`zerodha-futures-cache:${underlying}`, () =>
-        runPythonJson<{ success: boolean }>(CACHE_SCRIPT, ['--underlying', underlying, '--futures'], 60_000));
+    const lastFail = futuresBuildFailedAt.get(underlying) ?? 0;
+    if (stale && Date.now() - lastFail > FUTURES_RETRY_MS) {
+      try {
+        const r = await dedupe(`zerodha-futures-cache:${underlying}`, () =>
+          runPythonJson<{ success: boolean; error?: string }>(CACHE_SCRIPT, ['--underlying', underlying, '--futures'], 60_000));
+        if (!r.success) throw new Error(r.error ?? 'futures cache build failed');
+        futuresBuildFailedAt.delete(underlying);
+      } catch (err) {
+        futuresBuildFailedAt.set(underlying, Date.now());
+        console.error('[scalper/zerodha/lookup] futures cache refresh failed (using the old file if any):', err);
+      }
     }
+    // An old file is still a valid contract list (a month's expiry does not change); only a missing one means no future.
     const rows = JSON.parse(fs.readFileSync(file, 'utf8')) as ZerodhaFutureRow[];
     const today = new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
     const f = pickZerodhaFuture(rows, futureExpiry || null, today);

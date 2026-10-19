@@ -5,6 +5,7 @@ import { shapeKotakOrderStatus } from '@/lib/kotakShape';
 import { kiteGet, kiteDelete } from '@/lib/zerodhaToken';
 import { shapeZerodhaOrderStatus } from '@/lib/zerodhaShape';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { modifyZerodhaLimitOrder } from '@/lib/zerodhaModifyOrder';
 
 // Kotak has no single-order endpoint, so every status read is a whole order-book call. Several confirm loops poll at
 // once (one per leg, ~2.5/s each): share one in-flight/just-finished read so they cost the broker one call per window.
@@ -136,6 +137,12 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
       });
       invalidateBrokerCache('kotak');
       return NextResponse.json({ success: true, data: res });
+    }
+
+    if (broker === 'zerodha') {
+      const r = await modifyZerodhaLimitOrder({ orderId, price, quantity });
+      zerodhaBook = null;
+      return r.ok ? NextResponse.json({ success: true, data: r.data }) : NextResponse.json({ success: false, error: r.error }, { status: r.status });
     }
 
     return NextResponse.json({ success: false, error: `Broker ${broker} order modification not yet supported` }, { status: 400 });
