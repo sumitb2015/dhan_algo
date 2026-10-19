@@ -78,6 +78,8 @@ export interface BreakdownConfig {
    * DB lacks them: Wednesdays without a --fetch-warm cache, strikes far from the previous day's spot). Default false.
    */
   btWarmOnly?: boolean;
+  /** Only OTM strikes are sellable: a call above spot, a put below spot. ATM/ITM contracts are blocked. Default true. */
+  otmOnly?: boolean;
   /** Backtest only: which expired-options DB feeds the replay. Default 'dhan' (nifty_options.db). */
   dataSource?: 'dhan' | 'breeze';
   trailPct?: number; // legacy alias for trailStartPct
@@ -115,6 +117,7 @@ export const DEFAULT_CONFIG: BreakdownConfig = {
   entryEnd: '15:00',
   eodExit: '15:15',
   brokerage: 20,
+  otmOnly: true,
   trailPct: 15,
 };
 
@@ -185,6 +188,7 @@ export function sanitizeConfigPatch(patch: unknown): Partial<BreakdownConfig> {
   if (typeof p.useEma === 'boolean') out.useEma = p.useEma;
   if (typeof p.trendUseEma === 'boolean') out.trendUseEma = p.trendUseEma;
   if (typeof p.trendUseSupertrend === 'boolean') out.trendUseSupertrend = p.trendUseSupertrend;
+  if (typeof p.otmOnly === 'boolean') out.otmOnly = p.otmOnly;
   if (typeof p.btWarmOnly === 'boolean') out.btWarmOnly = p.btWarmOnly;
   if (p.dataSource === 'dhan' || p.dataSource === 'breeze') out.dataSource = p.dataSource;
   if (p.timeframe === 1 || p.timeframe === 3 || p.timeframe === 5) out.timeframe = p.timeframe;

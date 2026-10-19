@@ -117,7 +117,7 @@ export const breakdownAutoScalper: StrategyDefinition = {
     trailStepPts: 2,
     trailByPts: 1,
     recoveryExit: false,
-    otmOnly: false,
+    otmOnly: true,
     useSupertrend: true,
     stPeriod: 7,
     stMultiplier: 1.5,

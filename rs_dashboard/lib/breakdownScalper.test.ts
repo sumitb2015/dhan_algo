@@ -244,3 +244,14 @@ test('evaluatePositionRisk: a trailing stop seeded at the initial SL does not ex
   assert.equal(hit.shouldExit, true);
   assert.match(hit.exitReason ?? '', /INITIAL SL/);
 });
+
+test('applyOtmOnly blocks ATM/ITM contracts and keeps OTM ones first', async () => {
+  const { applyOtmOnly } = await import('./breakdownScalper.ts');
+  const mk = (strike: number, option: 'CE' | 'PE') =>
+    ({ strike, option, contractKey: `${strike}${option}`, isEligible: true, rankScore: 1 }) as never;
+  const out = applyOtmOnly([mk(25000, 'CE'), mk(25200, 'CE'), mk(25000, 'PE'), mk(25200, 'PE')], 25100, true);
+  assert.deepEqual(out.map((c) => [c.contractKey, c.isEligible]), [['25200CE', true], ['25000PE', true], ['25000CE', false], ['25200PE', false]]);
+  assert.equal(out[2].blockReason, 'ATM/ITM — OTM only');
+  const off = applyOtmOnly([mk(25000, 'CE')], 25100, false);
+  assert.equal(off[0].isEligible, true);
+});

@@ -26,6 +26,7 @@ import {
   indexTrendInputs,
   indexTrendParamsOf,
   rankBreakdownSignals,
+  applyOtmOnly,
   type CandidateSignal,
   type OptionBreakdownState,
   type UnderlyingTrend,
@@ -516,7 +517,7 @@ export function simulateDay(data: BtDayData, config: BreakdownConfig): BtDayResu
       }
     }
     const held = new Set(open.map((p) => p.key));
-    const ranked: CandidateSignal[] = rankBreakdownSignals(raw, t.spot, atm, NIFTY_STEP, trend, held);
+    const ranked: CandidateSignal[] = applyOtmOnly(rankBreakdownSignals(raw, t.spot, atm, NIFTY_STEP, trend, held), t.spot, config.otmOnly);
     if (ranked.some((c) => c.isEligible)) signalMinutes++;
 
     // Same pick rule as the live engine: best-ranked contract passing every rule; repeat while slots remain
@@ -649,6 +650,8 @@ export function backtestConfigKey(c: BreakdownConfig): string {
     // Only keyed when set, so a store built before slippage existed (= 0) still matches a 0-slippage config.
     ...(c.slippagePts ? { slippagePts: c.slippagePts } : {}),
     ...(c.btWarmOnly ? { btWarmOnly: true } : {}),
+    // Only keyed when on, so a store built before the OTM rule existed still matches.
+    ...(c.otmOnly ? { otmOnly: true } : {}),
     // Only keyed for Breeze, so a store built before the selector existed (= Dhan) still matches.
     ...(c.dataSource === 'breeze' ? { dataSource: 'breeze' } : {}),
   });

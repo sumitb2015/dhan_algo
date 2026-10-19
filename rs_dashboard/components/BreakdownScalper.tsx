@@ -20,6 +20,7 @@ import {
   indexTrendInputs,
   indexTrendParamsOf,
   rankBreakdownSignals,
+  applyOtmOnly,
   evaluatePositionRisk,
   type CandidateSignal,
   type UnderlyingTrend,
@@ -260,6 +261,14 @@ export default function BreakdownScalper() {
       if (timer) clearTimeout(timer);
     };
   }, []);
+
+  const niftyQuote = indicesData?.quotes?.NIFTY;
+  const niftyLtp = niftyQuote?.ltp && niftyQuote.ltp > 0 ? niftyQuote.ltp : null;
+  const niftyPrevClose = prevCloseMap.NIFTY ?? niftyQuote?.prev_close ?? null;
+  const niftyChangePct =
+    niftyLtp != null && niftyPrevClose != null && niftyPrevClose > 0
+      ? ((niftyLtp - niftyPrevClose) / niftyPrevClose) * 100
+      : niftyQuote?.change_pct ?? null;
 
   const vixQuote = indicesData?.quotes?.VIX;
   const vixLtp = vixQuote?.ltp && vixQuote.ltp > 0 ? vixQuote.ltp : null;
@@ -1141,7 +1150,7 @@ export default function BreakdownScalper() {
         };
       });
 
-      ranked = rankBreakdownSignals(rawCandidates, spot, atm, step, underlyingTrend, heldHere);
+      ranked = applyOtmOnly(rankBreakdownSignals(rawCandidates, spot, atm, step, underlyingTrend, heldHere), spot, config.otmOnly);
       // A contract exited (or rejected) minutes ago is shown (and treated) as locked, so it neither reads as the top candidate
       // nor blocks the next eligible contract.
       ranked = ranked
@@ -1516,6 +1525,26 @@ export default function BreakdownScalper() {
               </div>
             </>
           )}
+
+          {/* NIFTY Live Chip */}
+          <div className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">NIFTY</span>
+            <span className="font-mono font-bold text-white">
+              {niftyLtp != null ? niftyLtp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}
+            </span>
+            {niftyChangePct != null && (
+              <span
+                className={cn(
+                  'font-mono text-[11px] font-bold',
+                  niftyChangePct > 0 ? 'text-emerald-400' : niftyChangePct < 0 ? 'text-red-400' : 'text-zinc-400',
+                )}
+                title={niftyPrevClose != null ? `Previous close: ${niftyPrevClose.toFixed(2)}` : undefined}
+              >
+                {niftyChangePct > 0 ? '▲' : niftyChangePct < 0 ? '▼' : ''}{' '}
+                {niftyChangePct > 0 ? `+${niftyChangePct.toFixed(2)}%` : `${niftyChangePct.toFixed(2)}%`}
+              </span>
+            )}
+          </div>
 
           {/* India VIX Live Chip */}
           <div className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs">

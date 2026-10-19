@@ -333,6 +333,23 @@ export function RulesConfigDrawer({
             </div>
           </div>
 
+          {/* Section 3a: OTM-only strike filter */}
+          <label className="flex items-center justify-between cursor-pointer rounded-lg border border-zinc-800 bg-zinc-900/60 p-3.5">
+            <div>
+              <span className="text-zinc-300 font-medium">OTM options only</span>
+              <p className="text-[10px] text-zinc-500">
+                Check only OTM calls (strike above spot) and OTM puts (strike below spot); ATM/ITM are blocked
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              checked={!!config.otmOnly}
+              onChange={(e) => onUpdateConfig({ otmOnly: e.target.checked })}
+              aria-label="Sell OTM options only"
+              className="h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500"
+            />
+          </label>
+
           {/* Section 3b: Option Chart Breakdown Indicators */}
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3.5 flex flex-col gap-2.5">
             <span className="font-bold text-zinc-200">Option Chart Indicators</span>

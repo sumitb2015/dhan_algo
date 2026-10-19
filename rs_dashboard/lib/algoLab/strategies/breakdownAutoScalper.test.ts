@@ -7,7 +7,7 @@ import type { AlgoConfig, AlgoCtx, Bar, CtxContract } from '../types.ts';
 
 const DAY = '2026-10-14';
 const cfg = (extra: Record<string, unknown> = {}): AlgoConfig =>
-  ({ ...defaultsOf(S), timeframe: 1, ...extra }) as AlgoConfig;
+  ({ ...defaultsOf(S), timeframe: 1, otmOnly: false, ...extra }) as AlgoConfig;
 
 /** 1-minute bars from 09:15 with the given closes (o = h = l = c, volume 2000, oi 100000). */
 const barsOf = (closes: number[]): Bar[] =>
@@ -138,6 +138,10 @@ test('breakdownAutoScalper scan: otmOnly blocks ATM/ITM strikes and keeps OTM on
   const ce = S.scan(ctxOf(falling, rising, 'CE'), cfg({ otmOnly: true }), {} as never);
   assert.equal(ce[0].eligible, false);
   assert.equal(ce[0].blockReason, 'ATM/ITM — OTM only');
-  const off = S.scan(ctxOf(falling, rising, 'CE'), cfg(), {} as never);
+  const off = S.scan(ctxOf(falling, rising, 'CE'), cfg({ otmOnly: false }), {} as never);
   assert.notEqual(off[0].blockReason, 'ATM/ITM — OTM only');
+});
+
+test('breakdownAutoScalper defaults: OTM only is on', () => {
+  assert.equal(defaultsOf(S).otmOnly, true);
 });

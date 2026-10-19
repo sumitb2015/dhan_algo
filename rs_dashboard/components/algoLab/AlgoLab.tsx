@@ -61,6 +61,9 @@ export default function AlgoLab() {
   // ── Top Indices & VIX Live Feed ──
   const { data: headerIndices } = useLiveTickerPoll('/api/scalper/top-indices', pickIndexLtps);
   const indexLtps = useMemo(() => (headerIndices ? pickIndexLtps(headerIndices) : {}), [headerIndices]);
+  const niftyLtp = indexLtps.NIFTY ?? null;
+  const niftyChangePct = headerIndices?.quotes?.NIFTY?.change_pct ?? null;
+  const niftyPrevClose = headerIndices?.quotes?.NIFTY?.prev_close ?? null;
   const vixLtp = indexLtps.VIX ?? null;
   const vixChangePct = headerIndices?.quotes?.VIX?.change_pct ?? null;
   const vixPrevClose = headerIndices?.quotes?.VIX?.prev_close ?? null;
@@ -277,6 +280,22 @@ export default function AlgoLab() {
               <span>{chain.feed}</span>
             </div>
           )}
+
+          {/* NIFTY Live Chip */}
+          <div className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-sky-400">NIFTY</span>
+            <span className="font-mono font-bold text-white">
+              {niftyLtp != null ? niftyLtp.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'}
+            </span>
+            {niftyChangePct != null && (
+              <span
+                className={cn('font-mono text-[11px] font-bold', niftyChangePct > 0 ? 'text-emerald-400' : niftyChangePct < 0 ? 'text-red-400' : 'text-zinc-400')}
+                title={niftyPrevClose != null ? `Previous close: ${niftyPrevClose.toFixed(2)}` : undefined}
+              >
+                {niftyChangePct > 0 ? '▲' : niftyChangePct < 0 ? '▼' : ''} {niftyChangePct > 0 ? `+${niftyChangePct.toFixed(2)}%` : `${niftyChangePct.toFixed(2)}%`}
+              </span>
+            )}
+          </div>
 
           {/* India VIX Live Chip */}
           <div className="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1 text-xs">

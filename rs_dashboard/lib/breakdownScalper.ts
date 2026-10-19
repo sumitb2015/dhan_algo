@@ -589,6 +589,19 @@ export function rankBreakdownSignals(
 }
 
 /**
+ * OTM-only rule: a call is OTM above spot, a put below spot. Every other contract is blocked (never entered) and sorts
+ * after the OTM ones; the order within each group is unchanged.
+ */
+export function applyOtmOnly(ranked: CandidateSignal[], spot: number, otmOnly: boolean | undefined): CandidateSignal[] {
+  if (!otmOnly) return ranked;
+  const isOtm = (c: CandidateSignal) => (c.option === 'CE' ? c.strike > spot : c.strike < spot);
+  const mark = (c: CandidateSignal): CandidateSignal =>
+    isOtm(c) ? c : { ...c, isEligible: false, blockReason: 'ATM/ITM — OTM only' };
+  const out = ranked.map(mark);
+  return [...out.filter((c) => c.isEligible), ...out.filter((c) => !c.isEligible)];
+}
+
+/**
  * Calculates stop-loss, trailing stop-loss, and exit conditions for an active short position.
  */
 export function evaluatePositionRisk(
