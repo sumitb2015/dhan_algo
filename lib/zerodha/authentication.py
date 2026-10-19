@@ -1,16 +1,7 @@
 import pyotp
 import requests
 from urllib.parse import urlparse, parse_qs
-try:
-    import credDemo as cred  # Assume this exists and contains your credentials
-except ImportError:
-    class DummyCred:
-        USER_ID = "PLACEHOLDER"
-        PASSWORD = "PLACEHOLDER"
-        TOTP = "PLACEHOLDER"
-        API_KEY = "PLACEHOLDER"
-        API_SECRET = "PLACEHOLDER"
-    cred = DummyCred()
+from . import credentials as cred
 import logging
 from kiteconnect import KiteConnect
 import os
@@ -33,6 +24,7 @@ def get_request_token():
       3. POST kite.zerodha.com/api/twofa  → TOTP 2FA
       4. GET kite.zerodha.com/connect/finish?sess_id=...  → redirects to app URL with request_token
     """
+    cred.require()
     session = requests.Session()
     session.headers.update({
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

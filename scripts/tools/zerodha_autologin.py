@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
-# credDemo.py loads ".env.zerodha" via a relative path, so the CWD must be
+# lib/zerodha/credentials.py loads ".env.zerodha" via a relative path, so the CWD must be
 # PROJECT_ROOT when it's imported (this script may be spawned with a
 # different CWD, e.g. from the Next.js dashboard's api routes).
 os.chdir(PROJECT_ROOT)

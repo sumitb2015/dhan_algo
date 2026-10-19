@@ -10,16 +10,7 @@ from . import websocket_handler
 from kiteconnect import KiteConnect
 from . import config
 
-try:
-    import credDemo as cred  # Assume this exists and contains your credentials
-except ImportError:
-    class DummyCred:
-        USER_ID = "PLACEHOLDER"
-        PASSWORD = "PLACEHOLDER"
-        TOTP = "PLACEHOLDER"
-        API_KEY = "PLACEHOLDER"
-        API_SECRET = "PLACEHOLDER"
-    cred = DummyCred()
+from . import credentials as cred
 
 # Configure logging
 logging.basicConfig(

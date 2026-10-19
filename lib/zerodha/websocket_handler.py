@@ -3,17 +3,7 @@ from kiteconnect import KiteTicker
 from . import config  # Import the config file relative to package
 import time
 
-try:
-    import credDemo as cred
-except ImportError:
-    # Fallback to allow dummy execution or placeholder
-    class DummyCred:
-        USER_ID = "PLACEHOLDER"
-        PASSWORD = "PLACEHOLDER"
-        TOTP = "PLACEHOLDER"
-        API_KEY = "PLACEHOLDER"
-        API_SECRET = "PLACEHOLDER"
-    cred = DummyCred()
+from . import credentials as cred
 
 # Configure logging
 logging.basicConfig(
