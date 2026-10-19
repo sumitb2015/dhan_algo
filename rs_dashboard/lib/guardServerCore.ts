@@ -35,6 +35,7 @@ const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
 const TICK_MS = 2500;
 const QUOTES_FRESH_MS = 6000;
 const LOCK_STALE_MS = 8000;
+const WARN_REPEAT_MS = 120_000;
 
 export const istDay = (): string => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
@@ -186,6 +187,15 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
     try { await updateGuardState(s => ({ ...s, events: [...s.events, { at: Date.now(), kind, text }].slice(-40) })); } catch { /* best effort */ }
   }
 
+  /** A standing problem (session gone, book unreadable, leg unpriced) is reported once per REPEAT_MS, not every tick. */
+  const lastWarned = new Map<string, number>();
+  async function warn(text: string): Promise<void> {
+    const now = Date.now();
+    if (now - (lastWarned.get(text) ?? 0) < WARN_REPEAT_MS) return;
+    lastWarned.set(text, now);
+    await note('error', text);
+  }
+
   /** True once every covered short shows flat in the position book (retried briefly: the book lags a fill). */
   async function shortsFlat(covers: ExitOrder[]): Promise<boolean> {
     for (let attempt = 0; attempt < 6; attempt++) {
@@ -205,8 +215,21 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
     if (!cur.pnl && cur.brackets.length === 0 && cur.watch.length === 0) return;
     loop.busy = true;
     try {
-      if (!adapter.isSessionValid()) return;   // nothing can be read or sent; the status route reports the session
-      const positions = await loadPositionsPriced();
+      if (!adapter.isSessionValid()) {
+        // Nothing can be read or sent, so the guard is NOT protecting anything: say so instead of idling silently.
+        await warn(`${adapter.key} session is not valid - guards cannot watch or exit until you log in again`);
+        return;
+      }
+      let positions: PosView[];
+      try {
+        positions = await loadPositionsPriced();
+      } catch (err) {
+        // A revoked token or a Kite/Neo outage looks valid to the file check; the first failing read is where it shows.
+        await warn(`could not read the ${adapter.key} position book (${String((err as Error).message ?? err)}) - guards are not watching`);
+        return;
+      }
+      const unpriced = positions.filter(p => p.netQty !== 0 && !(p.ltp > 0)).map(p => p.symbol);
+      if (unpriced.length) await warn(`no live price for ${unpriced.join(', ')} - guards pause on ${unpriced.length === 1 ? 'it' : 'them'} (only a P&L loss limit can still fire)`);
       const exits: ExitOrder[] = [];
       await updateGuardState(s => {
         const r = stepGuards(s, positions, Date.now(), istDay());

@@ -50,3 +50,24 @@ export async function placeZerodhaOrder(params: Record<string, string | number>)
   const found = await reconcile(tag);
   return found ? { status: 'placed', orderId: found, reconciled: true } : { status: 'unknown', error: ZERODHA_UNKNOWN_MSG };
 }
+
+/**
+ * Places `params` as one order per slice, in order, stopping at the first slice that is not placed. A single slice is
+ * exactly `placeZerodhaOrder`. When a LATER slice fails, part of the quantity is already live, so the result is `unknown`
+ * (never `rejected`): the caller must not retry or unwind around it automatically.
+ */
+export async function placeZerodhaOrderSliced(params: Record<string, string | number>, slices: number[]): Promise<ZerodhaPlaceResult> {
+  if (slices.length <= 1) return placeZerodhaOrder(params);
+  let placedQty = 0;
+  let firstId = '';
+  for (let i = 0; i < slices.length; i++) {
+    const r = await placeZerodhaOrder({ ...params, quantity: slices[i] });
+    if (r.status !== 'placed') {
+      if (i === 0) return r;
+      return { status: 'unknown', error: `${placedQty} of ${slices.reduce((a, b) => a + b, 0)} placed in ${i} order(s), then slice ${i + 1}/${slices.length} failed (${r.error}) - check Positions before retrying` };
+    }
+    placedQty += slices[i];
+    firstId ||= r.orderId;
+  }
+  return { status: 'placed', orderId: firstId, reconciled: false };
+}

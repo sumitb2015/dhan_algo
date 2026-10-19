@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { zerodhaContractFromRows, zerodhaLotCapError, zerodhaSnapPrice, zerodhaUnderlyingOf } from './zerodhaOrderRules.ts';
+import { zerodhaContractFromRows, zerodhaLotCapError, zerodhaSnapPrice, zerodhaUnderlyingOf, zerodhaOrderSlices } from './zerodhaOrderRules.ts';
 
 const rows = [{ tradingsymbol: 'NIFTY26OCT24500CE', lot_size: 75, tick_size: 0.05 }, { tradingsymbol: 'OLD', lot_size: 30 }];
 
@@ -28,4 +28,15 @@ test('underlying root needs a digit after it', () => {
   assert.equal(zerodhaUnderlyingOf('NIFTY2610624500CE'), 'NIFTY');
   assert.equal(zerodhaUnderlyingOf('BANKNIFTY26OCT55000PE'), 'BANKNIFTY');
   assert.equal(zerodhaUnderlyingOf('NIFTYBEES'), null);
+});
+
+test('slices stay whole lots under the freeze quantity; unknown lot or underlying is one order', () => {
+  assert.deepEqual(zerodhaOrderSlices(65 * 10, 'NIFTY', 65), [650]);                       // fits
+  const big = zerodhaOrderSlices(65 * 100, 'NIFTY', 65);                                    // 6500 > 1800
+  assert.equal(big.reduce((a, b) => a + b, 0), 6500);
+  assert.ok(big.every(q => q <= 1800 && q % 65 === 0), JSON.stringify(big));
+  assert.deepEqual(big.slice(0, -1).every(q => q === big[0]), true);
+  assert.deepEqual(zerodhaOrderSlices(6500, 'NIFTY', null), [6500]);
+  assert.deepEqual(zerodhaOrderSlices(6500, null, 65), [6500]);
+  assert.deepEqual(zerodhaOrderSlices(65, 'SENSEX', 20), [65]);
 });

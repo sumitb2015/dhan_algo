@@ -1,19 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { placeZerodhaOrder } from '@/lib/zerodhaPlaceOrder';
+import { placeZerodhaOrderSliced } from '@/lib/zerodhaPlaceOrder';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
-import { zerodhaContractFromRows, zerodhaLotCapError, zerodhaSnapPrice, zerodhaUnderlyingOf, type ZerodhaCachedContract } from '@/lib/zerodhaOrderRules';
-import fs from 'fs';
-import path from 'path';
-
-/** The cached contract for a symbol, read from disk only (never spawns the cache script on the order path). */
-function cachedContract(symbol: string) {
-  const underlying = zerodhaUnderlyingOf(symbol);
-  if (!underlying) return null;
-  try {
-    const file = path.join(path.resolve(process.cwd(), '..'), 'debug', `zerodha_${underlying.toLowerCase()}_instruments.json`);
-    return zerodhaContractFromRows(JSON.parse(fs.readFileSync(file, 'utf8')) as ZerodhaCachedContract[], symbol);
-  } catch { return null; }
-}
+import { zerodhaLotCapError, zerodhaSnapPrice } from '@/lib/zerodhaOrderRules';
+import { cachedZerodhaContract, slicesFor } from '@/lib/zerodhaContracts';
 
 /** Products this route will book. CO/BO are excluded — Kite holds its own exit
  *  order against them, which a plain market order would leave dangling. */
@@ -69,7 +58,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: false, error: `Invalid price for LIMIT order: ${price}` }, { status: 400 });
   }
 
-  const contract = source || isLimitOrder ? cachedContract(String(tradingsymbol)) : null;
+  const contract = source || isLimitOrder ? cachedZerodhaContract(String(tradingsymbol)) : null;
   const capError = zerodhaLotCapError(qtyNum, source, String(tradingsymbol), contract);
   if (capError) return NextResponse.json({ success: false, error: capError }, { status: 400 });
 
@@ -90,7 +79,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     params.market_protection = -1;
   }
 
-  const r = await placeZerodhaOrder(params);
+  // Over the exchange freeze quantity an order is rejected outright: send whole-lot slices instead.
+  const r = await placeZerodhaOrderSliced(params, slicesFor(String(tradingsymbol), qtyNum));
   if (r.status === 'placed') {
     invalidateBrokerCache('zerodha');
     return NextResponse.json({ success: true, order_id: r.orderId, ...(r.reconciled ? { reconciled: true } : {}) });

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { kiteGet } from '@/lib/zerodhaToken';
-import { placeZerodhaOrder } from '@/lib/zerodhaPlaceOrder';
+import { placeZerodhaOrderSliced } from '@/lib/zerodhaPlaceOrder';
+import { slicesFor } from '@/lib/zerodhaContracts';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 /** Kite's derivative exchanges. NSE / BSE are cash equity, which the F&O terminals' Exit All must never sell. */
@@ -31,7 +32,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     for (const pos of open) {
       const qty = Math.abs(Number(pos.quantity));
       const side = Number(pos.quantity) > 0 ? 'SELL' : 'BUY';
-      const r = await placeZerodhaOrder({
+      const r = await placeZerodhaOrderSliced({
         tradingsymbol: pos.tradingsymbol,
         exchange: pos.exchange ?? 'NFO',
         transaction_type: side,
@@ -41,7 +42,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         validity: 'DAY',
         // Required for API market orders on options (-1 = automatic band).
         market_protection: -1,
-      });
+      }, slicesFor(String(pos.tradingsymbol), qty));
       if (r.status === 'placed') closed.push(pos.tradingsymbol);
       else errors.push(`${pos.tradingsymbol}: ${r.status === 'unknown' ? 'STATUS UNKNOWN (may have closed) - ' : ''}${r.error}`);
     }

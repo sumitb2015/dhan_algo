@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import { kiteGet, isZerodhaTokenValid } from '@/lib/zerodhaToken';
-import { placeZerodhaOrder } from '@/lib/zerodhaPlaceOrder';
+import { placeZerodhaOrderSliced } from '@/lib/zerodhaPlaceOrder';
+import { slicesFor } from '@/lib/zerodhaContracts';
 import { shapeZerodhaPosition } from '@/lib/zerodhaShape';
 import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 import { createGuardServer, GuardExitRejected } from '@/lib/guardServerCore';
@@ -47,11 +48,11 @@ async function loadBook(): Promise<PosView[]> {
 
 /** Throws on a refusal or an unknown outcome; the caller notes which. A timed-out exit that Kite did book counts as sent. */
 async function sendExit(e: ExitOrder): Promise<void> {
-  const r = await placeZerodhaOrder({
+  const r = await placeZerodhaOrderSliced({
     tradingsymbol: e.symbol, exchange: e.exchange, transaction_type: e.side === 'B' ? 'BUY' : 'SELL',
     order_type: 'MARKET', quantity: e.qty, product: e.productRaw || 'MIS', validity: 'DAY',
     market_protection: -1,   // API market orders on options need it (-1 = automatic band)
-  });
+  }, slicesFor(e.symbol, e.qty));   // whole-lot slices under the exchange freeze quantity
   if (r.status === 'rejected') throw new GuardExitRejected(r.error);
   if (r.status === 'unknown') throw new Error(r.error);
 }
