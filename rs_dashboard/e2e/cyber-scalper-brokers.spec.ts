@@ -81,7 +81,7 @@ for (const c of CASES) {
     await expect.poll(() => seen.sent.filter((s) => s.path.endsWith('/order')).length, { timeout: 30_000 }).toBe(1);
     expect(seen.sent[0].body).toMatchObject({ tradingsymbol: c.sym('NOV'), side: 'BUY', quantity: c.qty, exchange: c.exchange, product: 'NRML' });
 
-    await page.getByRole('button', { name: /FLATTEN/ }).click();
+    await page.getByRole('button', { name: /FLATTEN/ }).first().click();   // the pad's and the positions panel's
     await expect.poll(() => seen.sent.some((s) => s.path === `/api/scalper/${c.broker}/exit-all`), { timeout: 30_000 }).toBe(true);
     expect(seen.blocked).toEqual([]);   // in particular: no /api/exit-all (Dhan's sweep) and no other broker's order route
   });

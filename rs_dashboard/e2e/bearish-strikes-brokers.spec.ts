@@ -107,9 +107,9 @@ for (const c of CASES) {
     await page.getByRole('button', { name: /Place & Add Leg/ }).click();
 
     const pos = page.getByRole('region', { name: 'Positions on this page' });
-    await expect(pos).toContainText('REAL', { timeout: 30_000 });
-    await expect(pos).toContainText('24600 CE');
-    await expect(pos).toContainText('OPEN');
+    // ('REAL' alone is in the panel's header, so wait for the row itself.)
+    await expect(pos).toContainText('24600 CE', { timeout: 30_000 });
+    await expect(pos).toContainText('OPEN', { timeout: 30_000 });
     expect(seen.sent).toHaveLength(1);
     expect(seen.sent[0].body).toMatchObject({ side: 'SELL', quantity: LOT, ...c.handle });
     const row = seen.ledger().positions[0];
