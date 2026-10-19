@@ -27,7 +27,15 @@ sys.path.insert(0, ROOT)
 
 from lib.nse_holidays import is_regular_session  # noqa: E402
 
-DB_PATH = os.path.join(ROOT, 'Options Data', 'nifty_options.db')
+DB_PATHS = {
+    'dhan': os.path.join(ROOT, 'Options Data', 'nifty_options.db'),
+    'breeze': os.path.join(ROOT, 'Options Data', 'breeze_nifty_options.db'),
+}
+DB_PATH = DB_PATHS['dhan']  # main() repoints this for --source breeze
+SOURCE = 'dhan'
+# Breeze: an expiry with fewer than this share of the fullest expiry's strikes is still downloading / a stray test
+# download and is not backtested (same rule as breakdown_backtest_data.py).
+MIN_STRIKE_SHARE = 0.8
 DATA_DIR = os.path.join(ROOT, 'debug', 'algo_lab', 'data')
 WARMUP_SESSIONS = 1
 FORMAT_VERSION = 1
@@ -68,6 +76,12 @@ def warm_sessions(day: str) -> list[str]:
     return sorted(out)
 
 
+def full_expiries(con) -> set[str]:
+    per = con.execute('SELECT expiry, COUNT(DISTINCT strike) FROM option_prices GROUP BY expiry').fetchall()
+    widest = max((n for _, n in per), default=0)
+    return {e for e, n in per if n >= MIN_STRIKE_SHARE * widest}
+
+
 def from_db(day: str):
     """(expiry, rows) for the nearest weekly expiry on/after `day`, or None."""
     if not os.path.exists(DB_PATH):
@@ -76,8 +90,11 @@ def from_db(day: str):
     try:
         d0 = date.fromisoformat(day)
         expiry = None
+        usable = full_expiries(con) if SOURCE == 'breeze' else None
         for i in range(0, 10):
             e = (d0 + timedelta(days=i)).isoformat()
+            if usable is not None and e not in usable:
+                continue
             if con.execute('SELECT 1 FROM option_prices WHERE expiry=? AND datetime BETWEEN ? AND ? LIMIT 1',
                            (e, f'{day} 09:15:00', f'{day} 15:29:59')).fetchone():
                 expiry = e
@@ -110,9 +127,12 @@ def build_payload(day: str, expiry: str, rows: list[tuple]) -> dict:
     for e in contracts.values():
         e['bars'] = [e['bars'][t] for t in sorted(e['bars'])]
     contracts = {k: v for k, v in contracts.items() if any(b[0][:10] == day for b in v['bars'])}
+    if SOURCE == 'breeze':  # Breeze stores spot on only some rows: carry / derive it the way the Breakdown backtest does
+        from scripts.tools.breakdown_backtest_data import fill_spot
+        spot = fill_spot(spot, contracts, day)
     have = {b[0][:10] for c in contracts.values() for b in c['bars']} - {day}
     return {
-        'v': FORMAT_VERSION, 'date': day, 'expiry': expiry, 'source': 'db', 'lotSize': lot_size_for(day),
+        'v': FORMAT_VERSION, 'date': day, 'expiry': expiry, 'source': SOURCE, 'lotSize': lot_size_for(day),
         'warmupSessions': len(set(warm_sessions(day)) & have),
         'spot': sorted(spot.items()), 'contracts': contracts,
     }
@@ -121,17 +141,28 @@ def build_payload(day: str, expiry: str, rows: list[tuple]) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--date')
+    ap.add_argument('--source', choices=sorted(DB_PATHS), default='dhan',
+                    help='options DB to read: dhan (nifty_options.db) or breeze (breeze_nifty_options.db)')
     ap.add_argument('--force', action='store_true', help='rebuild even if cached')
     ap.add_argument('--db-range', action='store_true', help='print earliest and latest session in the options DB and exit')
     args = ap.parse_args()
+    global DB_PATH, SOURCE, DATA_DIR
+    SOURCE = args.source
+    DB_PATH = DB_PATHS[SOURCE]
+    if SOURCE == 'breeze':
+        DATA_DIR = os.path.join(DATA_DIR, 'breeze')
 
     if args.db_range:
         if not os.path.exists(DB_PATH):
             emit({'ok': False, 'error': 'Options Data/nifty_options.db not found', 'retry': False})
         con = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
         try:
-            min_exp = con.execute('SELECT MIN(expiry) FROM option_prices').fetchone()[0]
-            max_exp = con.execute('SELECT MAX(expiry) FROM option_prices').fetchone()[0]
+            where, params = '', ()
+            if SOURCE == 'breeze':
+                full = sorted(full_expiries(con))
+                where, params = f" WHERE expiry IN ({','.join('?' * len(full))})", tuple(full)
+            min_exp = con.execute('SELECT MIN(expiry) FROM option_prices' + where, params).fetchone()[0]
+            max_exp = con.execute('SELECT MAX(expiry) FROM option_prices' + where, params).fetchone()[0]
             first = con.execute('SELECT MIN(datetime) FROM option_prices WHERE expiry=?', (min_exp,)).fetchone()[0]
             last = con.execute('SELECT MAX(datetime) FROM option_prices WHERE expiry=?', (max_exp,)).fetchone()[0]
         finally:
@@ -157,7 +188,7 @@ def main():
             with open(out) as f:
                 cached = json.load(f)
             if cached.get('v') == FORMAT_VERSION:
-                emit({'ok': True, 'source': 'db', 'path': out, 'contracts': len(cached.get('contracts', {})), 'cached': True})
+                emit({'ok': True, 'source': SOURCE, 'path': out, 'contracts': len(cached.get('contracts', {})), 'cached': True})
         except (OSError, ValueError):
             pass
 
@@ -171,7 +202,7 @@ def main():
     with open(out + '.tmp', 'w') as f:
         json.dump(payload, f, separators=(',', ':'))
     os.replace(out + '.tmp', out)
-    emit({'ok': True, 'source': 'db', 'path': out, 'contracts': len(payload['contracts'])})
+    emit({'ok': True, 'source': SOURCE, 'path': out, 'contracts': len(payload['contracts'])})
 
 
 if __name__ == '__main__':

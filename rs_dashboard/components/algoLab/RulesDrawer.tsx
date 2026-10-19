@@ -192,6 +192,7 @@ export function RulesDrawer({
     'useVwap',
     'useEma',
     'emaPeriod',
+    'otmOnly',
     'maxSignalAge',
     'minPremium',
     'maxPremium',
@@ -517,6 +518,22 @@ export function RulesDrawer({
                   />
                 </div>
               </FieldRow>
+            )}
+
+            {has('otmOnly') && (
+              <label className="flex cursor-pointer items-center justify-between py-1">
+                <div>
+                  <span className="font-medium text-zinc-300">OTM options only</span>
+                  <p className="text-[10px] text-zinc-500">Check only OTM calls (strike above spot) and OTM puts (strike below spot); ATM/ITM blocked</p>
+                </div>
+                <input
+                  type="checkbox"
+                  checked={Boolean(config.otmOnly)}
+                  onChange={(e) => onPatch({ otmOnly: e.target.checked })}
+                  aria-label="Sell OTM options only"
+                  className="h-4 w-4 rounded border-zinc-700 bg-zinc-900 text-emerald-500 focus:ring-emerald-500"
+                />
+              </label>
             )}
 
             {has('maxSignalAge') && (

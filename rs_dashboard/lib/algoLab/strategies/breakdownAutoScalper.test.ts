@@ -130,3 +130,14 @@ test('breakdownAutoScalper manage: triggers target exit when premium drops to ta
   assert.equal(r.exits?.[0]?.kind, 'TARGET');
 });
 
+
+test('breakdownAutoScalper scan: otmOnly blocks ATM/ITM strikes and keeps OTM ones', () => {
+  // spot ends near 25145: PE 25000 is OTM (below spot), CE 25000 is ITM (below spot).
+  const pe = S.scan(ctxOf(falling, rising, 'PE'), cfg({ otmOnly: true }), {} as never);
+  assert.notEqual(pe[0].blockReason, 'ATM/ITM — OTM only');
+  const ce = S.scan(ctxOf(falling, rising, 'CE'), cfg({ otmOnly: true }), {} as never);
+  assert.equal(ce[0].eligible, false);
+  assert.equal(ce[0].blockReason, 'ATM/ITM — OTM only');
+  const off = S.scan(ctxOf(falling, rising, 'CE'), cfg(), {} as never);
+  assert.notEqual(off[0].blockReason, 'ATM/ITM — OTM only');
+});

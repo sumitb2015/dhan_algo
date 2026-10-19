@@ -41,8 +41,11 @@ const toArg = arg('--to');
 const windowArg = arg('--window') ?? 'db4';
 const btWindow: BtWindow = fromArg && toArg ? 'custom' : BT_WINDOWS.includes(windowArg as BtWindow) ? (windowArg as BtWindow) : 'db4';
 
+const source = arg('--source') === 'breeze' ? 'breeze' : 'dhan';
+const configArg = arg('--config'); // JSON overriding the ledger's rules for this run (one-off studies)
+
 const ROOT_DIR = path.join(PROJECT_ROOT, 'debug', 'algo_lab');
-const DIR = path.join(ROOT_DIR, `${def.key}_backtest`);
+const DIR = path.join(ROOT_DIR, source === 'breeze' ? `${def.key}_backtest_breeze` : `${def.key}_backtest`);
 const STORE = path.join(DIR, 'results.json');
 const STATUS = path.join(DIR, 'status.json');
 const STOP = path.join(DIR, 'stop.trigger');
@@ -132,7 +135,7 @@ function runPy(args: string[]): Promise<Record<string, unknown>> {
   return new Promise((resolve) => {
     activeChild = execFile(
       PYTHON_EXE,
-      [DATA_SCRIPT, ...args],
+      [DATA_SCRIPT, '--source', source, ...args],
       { cwd: PROJECT_ROOT, timeout: DATA_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
       (err, stdout) => {
         activeChild = null;
@@ -182,7 +185,7 @@ async function main() {
     } catch {
       /* no ledger yet: defaults */
     }
-    const config = normalize(stored);
+    const config = normalize(configArg ? { ...(stored as object | null), ...(JSON.parse(configArg) as object) } : stored);
     const key = configKey(fields, config);
     let store: BtStore | null = null;
     try {
@@ -253,7 +256,7 @@ async function main() {
     saveStatus({ current: null, message: 'Auditing results against the bar data…' });
     store.audit = auditResults(def!, Object.values(store.days), config, key, (d) => {
       try {
-        return loadDay(path.join(ROOT_DIR, 'data', `${d}.json`));
+        return loadDay(path.join(ROOT_DIR, 'data', ...(source === 'breeze' ? ['breeze'] : []), `${d}.json`));
       } catch {
         return null;
       }

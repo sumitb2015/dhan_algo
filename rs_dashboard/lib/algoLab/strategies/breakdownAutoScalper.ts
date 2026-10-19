@@ -68,6 +68,13 @@ export const breakdownAutoScalper: StrategyDefinition = {
     { key: 'useVwap', label: 'Option VWAP support', group: 'Breakdown', kind: 'boolean' },
     { key: 'useEma', label: 'Option EMA support', group: 'Breakdown', kind: 'boolean' },
     { key: 'emaPeriod', label: 'Option EMA period', group: 'Breakdown', kind: 'number', min: 5, max: 100, integer: true },
+    {
+      key: 'otmOnly',
+      label: 'OTM options only',
+      group: 'Breakdown',
+      kind: 'boolean',
+      help: 'Only check OTM calls (strike above spot) and OTM puts (strike below spot) for selling; ATM and ITM strikes are blocked.',
+    },
     { key: 'maxSignalAge', label: 'Max breakdown age', group: 'Breakdown', kind: 'number', min: 1, max: 10, integer: true, unit: 'bars' },
     { key: 'minVolume', label: 'Min traded volume', group: 'Breakdown', kind: 'number', min: 0, max: 1000000, integer: true },
     { key: 'minOi', label: 'Min open interest', group: 'Breakdown', kind: 'number', min: 0, max: 10000000, integer: true },
@@ -110,6 +117,7 @@ export const breakdownAutoScalper: StrategyDefinition = {
     trailStepPts: 2,
     trailByPts: 1,
     recoveryExit: false,
+    otmOnly: false,
     useSupertrend: true,
     stPeriod: 7,
     stMultiplier: 1.5,
@@ -223,14 +231,20 @@ export const breakdownAutoScalper: StrategyDefinition = {
       num(c, 'maxSignalAge') || 3,
     );
 
-    return ranked.map((r) => ({
+    const otmOnly = Boolean(c.otmOnly);
+    const isOtm = (strike: number, option: OptType) => (option === 'CE' ? strike > ctx.spot : strike < ctx.spot);
+    const scoped = otmOnly
+      ? [...ranked.filter((r) => isOtm(r.strike, r.option)), ...ranked.filter((r) => !isOtm(r.strike, r.option))]
+      : ranked;
+
+    return scoped.map((r) => ({
       key: r.contractKey,
       strike: r.strike,
       option: r.option,
       ltp: r.ltp,
       score: r2(r.rankScore),
-      eligible: r.isEligible,
-      blockReason: r.blockReason,
+      eligible: r.isEligible && !(otmOnly && !isOtm(r.strike, r.option)),
+      blockReason: otmOnly && !isOtm(r.strike, r.option) ? 'ATM/ITM — OTM only' : r.blockReason,
       cols: {
         st: r.state.indicators.stLine != null ? r2(r.state.indicators.stLine) : null,
         vwap: r.state.indicators.vwap != null ? r2(r.state.indicators.vwap) : null,
