@@ -4945,14 +4945,14 @@ function FocusTool() {
   const { broker, setBroker, followBroker, authenticatedBrokers, hasAuthenticatedBroker, authChecked } = useBrokerSelector();
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastSeqRef = useRef(0);
-  const addToast = useCallback((type: 'success' | 'error', message: string, detail?: string) => {
-    const id = `${Date.now()}-${++toastSeqRef.current}`;   // Date.now() alone collides for the CE + PE toasts of one tick
-    setToasts(prev => [...prev, { id, type, message, detail }]);
   // Error toasts raised while a re-entry runs are copied here, so the events log keeps WHY a re-entry did not happen
   // (a toast vanishes after 4 s; 2026-10-19 a PE re-entry after a trailed stop sent no order and left no trace).
   const reentryTapsRef = useRef<string[][]>([]);
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+  const addToast = useCallback((type: 'success' | 'error', message: string, detail?: string) => {
     if (type === 'error') for (const tap of reentryTapsRef.current) tap.push(detail ? `${message}: ${detail}` : message);
+    const id = `${Date.now()}-${++toastSeqRef.current}`;   // Date.now() alone collides for the CE + PE toasts of one tick
+    setToasts(prev => [...prev, { id, type, message, detail }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
   }, []);
 
   const copyTrade = useCopyTrade(addToast);
@@ -5881,12 +5881,12 @@ function FocusTool() {
     return { realised: r, unrealised: toolPnl - r, total: toolPnl };
   }, [config.rows, toolPnl]);
 
-  // The sim book's own peak and ratcheted floor — refs, not state: nothing on
-  // screen shows them, they only feed the sim budget check.
-  const simPeakRef = useRef(0);
   useEffect(() => {
     if (toolPnl > 0) setPeakMtm(prev => Math.max(prev, toolPnl));
   }, [toolPnl]);
+  // The sim book's own peak and ratcheted floor — refs, not state: nothing on
+  // screen shows them, they only feed the sim budget check.
+  const simPeakRef = useRef(0);
   const simLockFloorRef = useRef<number | null>(null);
   useEffect(() => {
     if (simPnl > simPeakRef.current) simPeakRef.current = simPnl;
@@ -8462,11 +8462,8 @@ function FocusTool() {
    * Reads row/config/functions fresh (schedulerRef / actionsRef): this runs
    * after the close's awaits, and the render that started it is stale.
    */
-  async function reenterLegAfterExit(
-    rowId: string, leg: 'CE' | 'PE', trigger: FocusReentryTrigger,
-    closedStrike: number | null, closedQty: number, closedEntry: number, closedLazyId: string | null = null,
   /** Runs the re-entry and logs every outcome other than a clean re-sale, with the refusal toasts it raised. */
-    /** Trail SL steps the stop that closed the leg had taken (0 = untrailed). */
+  async function reenterLegAfterExit(
     rowId: string, leg: 'CE' | 'PE', trigger: FocusReentryTrigger,
     closedStrike: number | null, closedQty: number, closedEntry: number, closedLazyId: string | null = null,
     trailedSteps = 0,
@@ -8488,6 +8485,9 @@ function FocusTool() {
   }
 
   async function reenterLegAfterExitInner(
+    rowId: string, leg: 'CE' | 'PE', trigger: FocusReentryTrigger,
+    closedStrike: number | null, closedQty: number, closedEntry: number, closedLazyId: string | null = null,
+    /** Trail SL steps the stop that closed the leg had taken (0 = untrailed). */
     trailedSteps = 0,
   ): Promise<'reentered' | 'pending' | 'skipped' | 'unconfirmed'> {
     const snap = schedulerRef.current;
@@ -8705,10 +8705,10 @@ function FocusTool() {
       return 'skipped';
     }
     patchFill(rowId, () => countPatch(done + 1));
+    for (const tap of reentryTapsRef.current) tap.push(`picked ${newStrike} ${leg}${anchorNote}`);
     const fresh = schedulerRef.current.config.rows.find(r => r.id === rowId) ?? row;
     const ok = await actionsRef.current.placeLeg(fresh, leg, {
       reduce: false, lots, strikeOverride: newStrike, awaitFill: true,
-    for (const tap of reentryTapsRef.current) tap.push(`picked ${newStrike} ${leg}${anchorNote}`);
     });
     if (!ok) {
       addToast('error', `${tag} re-entry not confirmed`,
