@@ -16,7 +16,7 @@ import { cachedZerodhaContract, slicesFor } from '@/lib/zerodhaContracts';
 // broker 'dhan' (default): straight to Dhan's order API by securityId. broker 'kotak': by trading symbol through the
 // same payload builder and placement as /api/scalper/kotak/order (lib/kotakOrderPayload.ts, lib/kotakPlaceOrder.ts).
 // broker 'zerodha': by trading symbol through lib/zerodhaPlaceOrder.ts (placed / rejected / unknown, same as
-// /api/scalper/zerodha/order). Kite's API places no resting stop entries, so STOP_LOSS legs are refused for Zerodha.
+// /api/scalper/zerodha/order). Zerodha stop entries go out as Kite SL / SL-M.
 // Each leg's result says placed / failed / UNKNOWN (`unknown: true`: no clean reply — it may be live; the caller must
 // not retry it). Market data never comes from here.
 
@@ -130,7 +130,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     for (const leg of legs) {
       const symbol = String(leg.tradingSymbol);
       const ot = leg.orderType ?? 'MARKET';
-      if (ot !== 'MARKET' && ot !== 'LIMIT') refused.push(`${symbol}: Zerodha places MARKET and LIMIT orders only (no resting stop entries)`);
+      if (ot !== 'MARKET' && ot !== 'LIMIT' && ot !== 'STOP_LOSS' && ot !== 'STOP_LOSS_MARKET') refused.push(`${symbol}: unsupported order type ${ot}`);
+      else if (ot === 'STOP_LOSS' && !(Number(leg.price) > 0)) refused.push(`${symbol}: SL needs a limit price`);
+      else if (ot === 'STOP_LOSS' && (leg.side === 'BUY' ? Number(leg.price) < Number(leg.triggerPrice) : Number(leg.price) > Number(leg.triggerPrice))) refused.push(`${symbol}: ${leg.side} SL limit must be ${leg.side === 'BUY' ? '>=' : '<='} its trigger`);
       else if (slicesFor(symbol, Number(leg.quantity)).length > 1) refused.push(`${symbol}: ${leg.quantity} is above the exchange freeze quantity - use fewer lots per order`);
     }
     if (refused.length) {
@@ -139,12 +141,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const results: LegResult[] = await Promise.all(legs.map(async (leg): Promise<LegResult> => {
       const symbol = String(leg.tradingSymbol);
       const isLimit = leg.orderType === 'LIMIT';
+      const isSl = leg.orderType === 'STOP_LOSS';
+      const isSlm = leg.orderType === 'STOP_LOSS_MARKET';
+      const contract = cachedZerodhaContract(symbol);
       const params: Record<string, string | number> = {
         tradingsymbol: symbol, exchange: leg.exchange ?? 'NFO', transaction_type: leg.side, quantity: Number(leg.quantity),
-        order_type: isLimit ? 'LIMIT' : 'MARKET', product: mode === 'positional' ? 'NRML' : 'MIS', validity: 'DAY',
+        order_type: isSl ? 'SL' : isSlm ? 'SL-M' : isLimit ? 'LIMIT' : 'MARKET', product: mode === 'positional' ? 'NRML' : 'MIS', validity: 'DAY',
       };
-      if (isLimit) params.price = zerodhaSnapPrice(Number(leg.price), cachedZerodhaContract(symbol));
-      else params.market_protection = -1;   // Kite refuses API market orders on options without protection
+      if (isLimit || isSl) params.price = zerodhaSnapPrice(Number(leg.price), contract);
+      if (isSl || isSlm) params.trigger_price = zerodhaSnapPrice(Number(leg.triggerPrice), contract);
+      if (!isLimit && !isSl) params.market_protection = -1;   // Kite refuses API market orders on options without protection
       const r = await placeZerodhaOrder(params);
       if (r.status === 'placed') return { success: true, orderId: r.orderId, tradingSymbol: symbol };
       return { success: false, error: r.error, tradingSymbol: symbol, ...(r.status === 'unknown' ? { unknown: true } : {}) };

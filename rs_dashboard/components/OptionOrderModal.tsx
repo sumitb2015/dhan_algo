@@ -93,8 +93,7 @@ export default function OptionOrderModal({
 }: OptionOrderModalProps) {
   // The leg's contract identifier on this broker: Dhan's securityId, the trading symbol on Kotak and Zerodha.
   const identOf = useCallback((l: { securityId?: string; tradingSymbol?: string }) => (broker !== 'dhan' ? l.tradingSymbol : l.securityId), [broker]);
-  // Kite's API places no resting stop entries: Zerodha offers MARKET and LIMIT only.
-  const orderTypeChoices = (Object.keys(ORDER_TYPE_LABELS) as OrderTypeChoice[]).filter((ot) => broker !== 'zerodha' || ot === 'MARKET' || ot === 'LIMIT');
+  const orderTypeChoices = Object.keys(ORDER_TYPE_LABELS) as OrderTypeChoice[];
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
   const [productTypeLock, setProductTypeLock] = useState<'INTRADAY' | 'MARGIN' | null>(null);
   const [lotsMultiplier, setLotsMultiplier] = useState<number>(1);
