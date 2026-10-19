@@ -7,8 +7,9 @@ import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
   Clock, Plus, Layers, Target, Lock, RefreshCw, X, Trash2,
-  ChevronUp, ChevronDown, Grid3x3, Calendar, Minus, Ellipsis, ArrowRight, LayoutList, Sigma, LogOut, Bookmark,
+  ChevronUp, ChevronDown, Grid3x3, Calendar, Minus, Ellipsis, ArrowRight, LayoutList, Sigma, LogOut, Bookmark, CircleHelp,
 } from 'lucide-react';
+import HelpModal from './HelpModal';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -2736,7 +2737,7 @@ function VixTile({ q }: { q: (FutQuote & { at: number }) | null }) {
 
 function FocusHeader({
   futQuotes, vixQuote, shown, realised, unrealised, total, marginAvailable, marginUtilized,
-  wsLive, broker, setBroker, authenticatedBrokers, brokerLocked,
+  wsLive, broker, setBroker, authenticatedBrokers, brokerLocked, onHelp,
 }: {
   futQuotes: Record<FocusUnderlying, FutQuote | null>;
   /** India VIX, shown after the futures; dimmed with its age once the feed's timestamp is stale. */
@@ -2751,6 +2752,8 @@ function FocusHeader({
   authenticatedBrokers: Broker[];
   /** A REAL row holds a position: exits and stops route to the page's broker, so it must not change. */
   brokerLocked: boolean;
+  /** Opens the page's README (risks and how to use); the button is hidden when there is no guide. */
+  onHelp?: () => void;
 }) {
   return (
     <div className="sticky top-0 z-40 bg-zinc-950/95 backdrop-blur border-b border-zinc-800 px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
@@ -2796,6 +2799,18 @@ function FocusHeader({
 
       {/* Right: Broker Selector + P&L tiles */}
       <div className="flex items-center gap-3">
+        {onHelp && (
+          <button
+            type="button"
+            onClick={onHelp}
+            aria-label="Open the Focus Tool guide: risks and how to use"
+            title="Risks and how to use the Focus Tool"
+            className={cn('h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white transition-colors cursor-pointer shrink-0', FOCUS_RING)}
+          >
+            <CircleHelp className="w-3.5 h-3.5 text-zinc-400" />
+            <span>Risks &amp; guide</span>
+          </button>
+        )}
         {/* Always shown, so a broker whose session lapsed (Kotak's ends at midnight IST) is visible as "logged out" instead
             of silently missing. A logged-out broker cannot be picked; the current one stays selectable so the select never
             holds a value it has no option for. */}
@@ -4953,7 +4968,7 @@ export function FocusModal({
 
 // ── Main Component ──────────────────────────────────────────────────────────
 
-function FocusTool() {
+function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   const { broker, setBroker, followBroker, authenticatedBrokers, hasAuthenticatedBroker, authChecked } = useBrokerSelector();
   const [toasts, setToasts] = useState<Toast[]>([]);
   const toastSeqRef = useRef(0);
@@ -4977,6 +4992,7 @@ function FocusTool() {
   // two saves close together apply in order instead of racing each other.
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 
+  const [showHelp, setShowHelp] = useState(false);
   const [positions, setPositions] = useState<PosRow[]>([]);
   // availabelBalance is a genuine Dhan API misspelling, kept verbatim here (and
   // by the Zerodha/Kotak funds routes reshaping onto the same key) rather than
@@ -10145,7 +10161,12 @@ function FocusTool() {
         <NavBar />
       </div>
 
+      {showHelp && helpMarkdown && (
+        <HelpModal title="Focus Tool — risks and how to use" markdown={helpMarkdown} onClose={() => setShowHelp(false)} />
+      )}
+
       <FocusHeader
+        onHelp={helpMarkdown ? () => setShowHelp(true) : undefined}
         futQuotes={effectiveFutQuotes}
         vixQuote={vixQuote}
         shown={UNDERLYINGS}
