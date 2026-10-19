@@ -7,9 +7,10 @@ import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
   Clock, Plus, Layers, Target, Lock, RefreshCw, X, Trash2,
-  ChevronUp, ChevronDown, Grid3x3, Calendar, Minus, Ellipsis, ArrowRight, LayoutList, Sigma, LogOut, Bookmark, CircleHelp,
+  ChevronUp, ChevronDown, Grid3x3, Calendar, Minus, Ellipsis, ArrowRight, LayoutList, Sigma, LogOut, Bookmark, CircleHelp, ChartColumn,
 } from 'lucide-react';
 import HelpModal from './HelpModal';
+import CumulativeOIModal from './CumulativeOIModal';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -2747,7 +2748,7 @@ function VixTile({ q }: { q: (FutQuote & { at: number }) | null }) {
 
 function FocusHeader({
   futQuotes, vixQuote, shown, realised, unrealised, total, marginAvailable, marginUtilized,
-  wsLive, broker, setBroker, authenticatedBrokers, brokerLocked, onHelp,
+  wsLive, broker, setBroker, authenticatedBrokers, brokerLocked, onHelp, onCumulativeOI,
 }: {
   futQuotes: Record<FocusUnderlying, FutQuote | null>;
   /** India VIX, shown after the futures; dimmed with its age once the feed's timestamp is stale. */
@@ -2764,6 +2765,8 @@ function FocusHeader({
   brokerLocked: boolean;
   /** Opens the page's README (risks and how to use); the button is hidden when there is no guide. */
   onHelp?: () => void;
+  /** Opens the cumulative OI chart from the Options page. */
+  onCumulativeOI?: () => void;
 }) {
   return (
     <div className="sticky top-0 z-40 bg-zinc-950/95 backdrop-blur border-b border-zinc-800 px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
@@ -2809,6 +2812,18 @@ function FocusHeader({
 
       {/* Right: Broker Selector + P&L tiles */}
       <div className="flex items-center gap-3">
+        {onCumulativeOI && (
+          <button
+            type="button"
+            onClick={onCumulativeOI}
+            aria-label="Open the cumulative OI chart"
+            title="Cumulative CE / PE open interest (NIFTY), same chart as the Options page"
+            className={cn('h-8 px-3 inline-flex items-center gap-1.5 text-xs font-bold rounded-lg border border-zinc-700 bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white transition-colors cursor-pointer shrink-0', FOCUS_RING)}
+          >
+            <ChartColumn className="w-3.5 h-3.5 text-zinc-400" />
+            <span>Cumulative OI</span>
+          </button>
+        )}
         {onHelp && (
           <button
             type="button"
@@ -5003,6 +5018,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   const saveQueueRef = useRef<Promise<unknown>>(Promise.resolve());
 
   const [showHelp, setShowHelp] = useState(false);
+  const [showCumOI, setShowCumOI] = useState(false);
   const [positions, setPositions] = useState<PosRow[]>([]);
   // availabelBalance is a genuine Dhan API misspelling, kept verbatim here (and
   // by the Zerodha/Kotak funds routes reshaping onto the same key) rather than
@@ -10175,7 +10191,10 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         <HelpModal title="Focus Tool — risks and how to use" markdown={helpMarkdown} onClose={() => setShowHelp(false)} />
       )}
 
+      {showCumOI && <CumulativeOIModal onClose={() => setShowCumOI(false)} />}
+
       <FocusHeader
+        onCumulativeOI={() => setShowCumOI(true)}
         onHelp={helpMarkdown ? () => setShowHelp(true) : undefined}
         futQuotes={effectiveFutQuotes}
         vixQuote={vixQuote}
