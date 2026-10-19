@@ -112,16 +112,10 @@ function offsetLabel(n: number, step: number): string {
 
 const FUT_LABELS = Object.fromEntries(FOCUS_UNDERLYINGS.map(u => [u, UNDERLYING_META[u].futLabel])) as Record<FocusUnderlying, string>;
 
-/** MCX (CRUDEOILM) trades on Dhan (quantity in lots) and Kotak (absolute barrels — see brokerOrderQty). Zerodha has
- *  no MCX instrument cache here, so a Zerodha MCX order would be unroutable. */
-function brokerTradesUnderlying(broker: Broker, u: FocusUnderlying): boolean {
-  return !isMcxUnderlying(u) || broker === 'dhan' || broker === 'kotak';
-}
-
-/** Brokers with a per-order status route (/api/scalper/orders?orderId=&broker=): Dhan and Kotak. They are the ones
+/** Brokers with a per-order status route (/api/scalper/orders?orderId=&broker=): all three. They are the ones
  *  whose fills can be confirmed and re-priced from the order itself rather than guessed from the position book. */
-function tracksOrderStatus(b: Broker): b is 'dhan' | 'kotak' {
-  return b === 'dhan' || b === 'kotak';
+function tracksOrderStatus(b: Broker): b is 'dhan' | 'kotak' | 'zerodha' {
+  return b === 'dhan' || b === 'kotak' || b === 'zerodha';
 }
 
 // Order-routing vocabulary. SENSEX is the only BSE underlying here, and each
@@ -133,7 +127,7 @@ function orderExchange(broker: Broker, u: FocusUnderlying): string {
   const bse = u === 'SENSEX';
   if (broker === 'dhan')  return UNDERLYING_SEGMENT[u];
   if (broker === 'kotak') return bse ? 'bse_fo' : isMcxUnderlying(u) ? 'mcx_fo' : 'nse_fo';
-  return bse ? 'BFO' : 'NFO';
+  return bse ? 'BFO' : isMcxUnderlying(u) ? 'MCX' : 'NFO';
 }
 
 // A group's product in each broker's own vocabulary. Sent on every order: an
@@ -1302,7 +1296,7 @@ function StrikeCriteriaControl({ row, onUpdate }: { row: FocusRow; onUpdate: (pa
             options={Array.from({ length: 10 }, (_, i) => ({ value: String(i + 1), label: `×${i + 1}` }))}
             onChange={v => onUpdate({ qtyMultiplier: Number(v) })} className="w-16" />
         </div>
-        <div className={lbl} title="Tgt/SL Ref Price (AlgoTest): measure leg stops and targets from the LTP when the order went out (Trigger), or from the broker's average traded price (Traded — Dhan and Kotak, read from the order; Zerodha keeps the trigger price)">
+        <div className={lbl} title="Tgt/SL Ref Price (AlgoTest): measure leg stops and targets from the LTP when the order went out (Trigger), or from the broker's average traded price (Traded — read from the order)">
           Tgt/SL ref
           <MiniSelect value={row.refPrice ?? 'trigger'} ariaLabel="Target and stop reference price"
             options={[{ value: 'trigger', label: 'Trigger Price' }, { value: 'traded', label: 'Traded Price' }]}
@@ -5097,6 +5091,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   // Rows held by an UNKNOWN order outcome, synchronously: the persisted FocusRow.orderUnknown lands in the scheduler's
   // view only after a render, and the NEXT leg of the same entry runs before that. Cleared with the field.
   const unknownHoldRef = useRef<Set<string>>(new Set());
+  const zerodhaMcxNoticeRef = useRef(false);
   function clearUnknownHold(rowId: string) {
     unknownHoldRef.current.delete(rowId);
     updateRow(rowId, { orderUnknown: undefined });
@@ -5479,11 +5474,11 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
           // Dhan rows carry `exchangeSegment` (NSE_FNO / MCX_COMM); Kotak and Zerodha rows carry `exchange`
           // (nse_fo / mcx_fo / NFO). Reading only exchangeSegment dropped EVERY Kotak position.
           const seg = String(p.exchangeSegment ?? (p as { exchange?: unknown }).exchange ?? '').toUpperCase();
-          // MCX is admitted only for Dhan (lots) and Kotak (barrels), the brokers whose MCX quantity convention this
-          // page converts, and only CRUDEOILM: other MCX contracts (CRUDEOIL x100, gas, gold...) have no unit
+          // MCX is admitted for every broker (Dhan / Zerodha count lots, Kotak barrels; brokerToInternalQuantity
+          // converts), and only CRUDEOILM: other MCX contracts (CRUDEOIL x100, gas, gold...) have no unit
           // conversion here and would corrupt the header P&L if admitted.
           if (seg.startsWith('MCX')) {
-            return tracksOrderStatus(broker) && underlyingOfSymbol(String(p.tradingSymbol ?? '')) === 'CRUDEOILM';
+            return underlyingOfSymbol(String(p.tradingSymbol ?? '')) === 'CRUDEOILM';
           }
           return seg.includes('FNO') || seg.includes('FO');
         })
@@ -6519,8 +6514,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         const nextPeQty = leg === 'PE' ? Math.max(0, (f?.peQty ?? 0) + delta) : (f?.peQty ?? 0);
         // The P&L basis (fill.ceFillEntry) blends the same way from the estimate; rebaseOpenOnTradedPrice then swaps
         // in the broker's traded price for this fill's share. Kept only where it can be made exact — a SIM paper fill,
-        // or a Dhan / Kotak order (both report the order's own traded price): Zerodha rows leave it unset and mark off
-        // the broker's own average.
+        // or a REAL order (every broker reports the order's own traded price).
         // Unknown stays unknown (blendFillBasis never dilutes toward 0); a reduce leaves it; a flat leg drops it.
         const trackFill = isSimRow(r) || tracksOrderStatus(broker);
         const prevFill = leg === 'CE' ? f?.ceFillEntry : f?.peFillEntry;
@@ -6987,7 +6981,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
           const entry = live ? legFillEntry(sizeRow, leg, live)
             : (Number(leg === 'CE' ? (sizeRow.fill?.ceFillEntry ?? sizeRow.fill?.ceEntry) : (sizeRow.fill?.peFillEntry ?? sizeRow.fill?.peEntry)) || 0);
           const openedAt = Number(leg === 'CE' ? sizeRow.fill?.ceOpenedTs : sizeRow.fill?.peOpenedTs) || 0;
-          const outsideIdent = broker === 'dhan' ? securityId : broker === 'kotak' ? symbol : undefined;
+          const outsideIdent = broker === 'dhan' ? securityId : symbol;
           const match = outsideIdent ? await outsideCloseExit(String(outsideIdent), pageOwn, openedAt) : null;
           const exit = match?.exitPrice ?? null;
           const booked = exit != null ? closedSliceBooked(true, entry, exit, pageOwn) : 0;
@@ -7058,9 +7052,12 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
       return false;
     }
 
-    if (!brokerTradesUnderlying(broker, u)) {
-      addToast('error', `${what} order not sent`, `${u} trades on Dhan or Kotak only — switch broker`);
-      return false;
+    // Zerodha MCX read-back (positions / fills in lots) follows Kite's value = qty × multiplier × price and was never
+    // observed live: say so on the first REAL open of the session so the first lot is checked by eye.
+    if (broker === 'zerodha' && isMcxUnderlying(u) && !opts.reduce && !zerodhaMcxNoticeRef.current) {
+      zerodhaMcxNoticeRef.current = true;
+      addToast('success', 'Zerodha MCX: check the first lot',
+        `${u} orders go out in lots. After the fill, Positions should show quantity ${quantity / UNDERLYING_META[u].unitsPerLot} (lots), not ${quantity}. If it differs, press Exit and report it.`);
     }
     const exchange = orderExchange(broker, u);
     const url = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
@@ -7080,9 +7077,9 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     const sentTotal = slices.reduce((a, s) => a + s.units, 0);
     const bodyFor = (wire: number) => broker === 'dhan'
       ? { securityId, quantity: wire, side, orderType: 'MARKET', exchangeSegment: exchange, ...product.fields, source: FTS_ORDER_SOURCE }
-      // Kotak's per-source lot cap is for opens only: a close must never be refused for its size.
+      // The Kotak / Zerodha per-source lot cap is for opens only: a close must never be refused for its size.
       : { tradingsymbol: symbol, quantity: wire, side, orderType: 'MARKET', exchange, ...product.fields,
-          ...(broker === 'kotak' && !opts.reduce ? { source: FTS_ORDER_SOURCE } : {}) };
+          ...(!opts.reduce ? { source: FTS_ORDER_SOURCE } : {}) };
 
     // Computed before the send: an UNKNOWN outcome needs them for its hold record as much as a fill does.
     // Snapshot entry + LTP now so a reduce can bank the closed slice's
@@ -7322,7 +7319,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   }
 
   /**
-   * Wait for an open's REAL outcome. placeLeg without awaitFill returns on the broker's ACK, and Dhan and Kotak both
+   * Wait for an open's REAL outcome. placeLeg without awaitFill returns on the broker's ACK, and every broker
    * can still reject the order a moment later (margin / RMS), so "accepted" is not "open". True = the leg now holds
    * more than `qtyBefore`; false = nothing about the order is pending any more and the leg did not grow (rejected, or
    * never filled); null = still unsettled at the deadline (it stays held as an unconfirmed order).
@@ -7407,27 +7404,27 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         : `${error} The close may have gone through. Further closes on this leg wait up to 60 s for the position book — check ${BROKER_LABELS[broker]}.`);
   }
 
-  /** Remembers an order this tool placed on a broker that cannot tag orders (Kotak). */
+  /** Remembers an order this tool placed on a broker whose trade book carries no tag (Kotak, Zerodha). */
   function noteOwnOrder(orderId: unknown) {
-    if (broker !== 'kotak' || !orderId) return;
-    try { rememberOwnOrder(localStorage, 'kotak', istToday(), String(orderId)); } catch { /* storage unavailable */ }
+    if (broker === 'dhan' || !orderId) return;
+    try { rememberOwnOrder(localStorage, broker, istToday(), String(orderId)); } catch { /* storage unavailable */ }
   }
 
   /** Average price of the outside BUY trade(s) that closed `qty` of this
-   *  contract: today's trade book (Dhan, or Kotak), minus the Focus Tool's own
-   *  orders (Dhan: FTS_ORDER_SOURCE correlationIds; Kotak: remembered order ids),
+   *  contract: today's trade book, minus the Focus Tool's own
+   *  orders (Dhan: FTS_ORDER_SOURCE correlationIds; Kotak / Zerodha: remembered order ids),
    *  since the leg opened, not already used for another row. Null unless a run
    *  of trades adds up to exactly `qty` (matchOutsideTrades). */
   async function outsideCloseExit(ident: string, qty: number, openedAt: number): Promise<{ exitPrice: number; keys: string[] } | null> {
     try {
-      // `ident` is the Dhan security id, or the trading symbol on Kotak (the trade rows' own join key there).
+      // `ident` is the Dhan security id, or the trading symbol on Kotak / Zerodha (the trade rows' own join key there).
       const r = await fetch(scalperRoute(broker, 'poll'));
       const j = await r.json() as { success?: boolean; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[] };
       if (!j.success || !Array.isArray(j.trades)) return null;
-      // Dhan tags this tool's orders with a correlationId prefix; Kotak cannot, so its own order ids were remembered
-      // at placement (noteOwnOrder). Anything else on the contract is an outside trade.
-      const own = broker === 'kotak'
-        ? loadOwnOrders(localStorage, 'kotak', istToday())
+      // Dhan tags this tool's orders with a correlationId prefix; Kotak's and Zerodha's trade books carry no tag, so
+      // their own order ids were remembered at placement (noteOwnOrder). Anything else on the contract is an outside trade.
+      const own = broker !== 'dhan'
+        ? loadOwnOrders(localStorage, broker, istToday())
         : new Set((j.orders ?? [])
             .filter(o => String(o.correlationId ?? '').startsWith(FTS_ORDER_SOURCE))
             .map(o => String(o.orderId ?? '')));
@@ -7927,7 +7924,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   // ── Limit ladder ───────────────────────────────────────────────────────
   // Resting SELL limits on an open short leg at +5…30% of its price at click. A fill
   // sells the leg further, so it is credited to the row's fill ledger (the stops and
-  // exits size off that ledger) as it lands. Dhan and Kotak, REAL rows only. Cancelled whenever
+  // exits size off that ledger) as it lands. REAL rows only. Cancelled whenever
   // the leg is fully exited or rolled (placeLeg), so a late fill can never open a
   // position nothing is watching.
   const ladderCreditedRef = useRef<Map<string, number>>(new Map());
@@ -8024,7 +8021,6 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     if (refuseForeignBroker(ladderRow, what)) return;
     const hold = openHoldReason(ladderRow) ?? (unknownHoldRef.current.has(row.id) ? 'An order on this row came back with an UNKNOWN status' : null);
     if (hold) { addToast('error', `${what} limit not sent`, hold); return; }
-    if (!tracksOrderStatus(broker)) { addToast('error', 'Limit ladder not available', 'Dhan and Kotak only'); return; }
     if (!liveRealMoney) { addToast('error', 'Dry run', 'Enable LIVE · REAL MONEY to place orders'); return; }
     if (!hasAuthenticatedBroker) { addToast('error', 'No broker logged in', 'Log in to your broker before placing orders'); return; }
     const live = rowLive[row.id];

@@ -19,6 +19,32 @@ interface CachedInstrument {
   lot_size: number;
 }
 
+const SCALPER_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'scalper_api.py');
+const freezeCache = new Map<string, { freezeQty: number | null; ts: number }>();
+const FREEZE_TTL_MS = 4 * 60 * 60 * 1000;
+
+/**
+ * The exchange freeze quantity for this expiry, from Dhan's instrument master (SM_FREEZE_QTY). Kite's own dump carries
+ * none, and the figure is the exchange's, not the broker's, so it is the same in Kite's order units (contracts; lots
+ * for MCX). Instrument metadata only — no Zerodha market data. Null when unavailable: the caller then keeps its
+ * conservative per-underlying limit.
+ */
+async function exchangeFreezeQty(underlying: string, expiry: string): Promise<number | null> {
+  const key = `${underlying}:${expiry}`;
+  const hit = freezeCache.get(key);
+  if (hit && Date.now() - hit.ts < FREEZE_TTL_MS) return hit.freezeQty;
+  try {
+    const r = await dedupe(`zerodha-freeze:${key}`, () =>
+      runPythonJson<{ success: boolean; data?: { freezeQty?: number } }>(
+        SCALPER_SCRIPT, ['lookup', '--underlying', underlying, '--expiry', expiry], 30_000));
+    const q = r.success && Number(r.data?.freezeQty) > 1 ? Number(r.data?.freezeQty) : null;
+    freezeCache.set(key, { freezeQty: q, ts: Date.now() });
+    return q;
+  } catch {
+    return null;   // not cached: the next lookup retries
+  }
+}
+
 async function ensureCache(underlying: string): Promise<CachedInstrument[]> {
   const cacheFile = cacheFileFor(underlying);
   const stale = !fs.existsSync(cacheFile) ||
@@ -57,7 +83,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       else strikes[key].peSymbol = r.tradingsymbol;
     }
 
-    return NextResponse.json({ success: true, data: { lotSize, strikes } });
+    const freezeQty = await exchangeFreezeQty(underlying, expiry);
+    return NextResponse.json({ success: true, data: { lotSize, strikes, ...(freezeQty ? { freezeQty } : {}) } });
   } catch (err) {
     console.error('[scalper/zerodha/lookup] error:', err);
     return NextResponse.json({ success: false, error: String((err as Error).message ?? err) }, { status: 500 });

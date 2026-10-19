@@ -94,15 +94,16 @@ export function isTradingDayFor(u: FocusUnderlying, iso: string): boolean {
  * request under one lot returns 0 and the caller must refuse it. NSE/BSE (unitsPerLot 1) pass through unchanged.
  */
 export function brokerOrderQuantity(broker: string, u: FocusUnderlying, internalQty: number): number {
-  if (broker === 'dhan') return orderQuantity(u, internalQty);
+  if (broker === 'dhan' || broker === 'zerodha') return orderQuantity(u, internalQty);
   const per = UNDERLYING_META[u].unitsPerLot;
   if (per === 1) return internalQty;
   return internalQty > 0 ? Math.floor(internalQty / per) * per : 0;
 }
 
-/** The inverse: a quantity the broker reported → page units. Only Dhan reports MCX in lots. */
+/** The inverse: a quantity the broker reported → page units. Dhan and Zerodha count MCX in lots (Zerodha's order
+ *  quantity verified on its margin calculator; its position / fill read-back follows the same convention, unconfirmed). */
 export function brokerToInternalQuantity(broker: string, u: FocusUnderlying, brokerQty: number): number {
-  return broker === 'dhan' ? toInternalQty(u, brokerQty) : brokerQty;
+  return broker === 'dhan' || broker === 'zerodha' ? toInternalQty(u, brokerQty) : brokerQty;
 }
 
 // ── Order size: exchange freeze limit and the Focus Tool's own per-order caps ──
@@ -133,7 +134,7 @@ export function maxOrderUnits(broker: string, u: FocusUnderlying, lotSize: numbe
   const freeze = Number(freezePageUnits) > 1 ? Number(freezePageUnits) - 1 : FALLBACK_FREEZE_UNITS[u];
   const cap = broker === 'dhan'
     ? toInternalQty(u, FTS_DHAN_MAX_ORDER_QTY)
-    : broker === 'kotak' ? FTS_KOTAK_MAX_ORDER_LOTS * lotSize : Number.POSITIVE_INFINITY;
+    : FTS_KOTAK_MAX_ORDER_LOTS * lotSize;   // Kotak and Zerodha: the routes' 'fts' per-source lot cap (opens)
   const lots = Math.floor(Math.min(freeze, cap) / lotSize);
   return Math.max(1, lots) * lotSize;
 }

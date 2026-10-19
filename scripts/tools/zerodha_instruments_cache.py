@@ -1,6 +1,6 @@
 """
 Fetches and caches Zerodha option instruments (NIFTY/BANKNIFTY/FINNIFTY on
-NFO, SENSEX on BFO) for the scalper's strike -> tradingsymbol lookup
+NFO, SENSEX on BFO, CRUDEOILM on MCX) for the scalper's strike -> tradingsymbol lookup
 (Zerodha has no numeric securityId like Dhan).
 
 Usage:
@@ -28,6 +28,7 @@ UNDERLYING_EXCHANGE = {
     'BANKNIFTY': 'NFO',
     'FINNIFTY':  'NFO',
     'SENSEX':    'BFO',
+    'CRUDEOILM': 'MCX',   # lot_size reads 1 in Kite's MCX dump; order quantity is in LOTS (checked on the margin calculator 2026-10-19)
 }
 
 

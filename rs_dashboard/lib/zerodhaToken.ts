@@ -120,3 +120,15 @@ export async function kitePost(
   }
   return json.data;
 }
+
+/** Authenticated DELETE against the Kite Connect REST API (cancel an order). Returns the `data` payload. */
+export async function kiteDelete(apiPath: string, timeoutMs = 10_000): Promise<unknown> {
+  const res = await fetch(`${KITE_BASE}${apiPath}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const json = await res.json() as Record<string, unknown>;
+  if (!res.ok || json.status === 'error') throw new Error(String(json.message ?? `HTTP ${res.status}`));
+  return json.data;
+}

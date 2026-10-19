@@ -18,7 +18,7 @@ const RULES = {
 };
 
 /** A REAL NIFTY 23150 straddle row holding 1 lot a leg, opened an hour ago (past the ghost-drop grace). */
-export function realRow(id: string, broker: 'dhan' | 'kotak' | undefined) {
+export function realRow(id: string, broker: 'dhan' | 'kotak' | 'zerodha' | undefined) {
   return {
     ...RULES, id, status: 'entered',
     fill: {
@@ -68,6 +68,7 @@ export interface FocusMock {
   /** Saved rows as the page POSTed them, newest last. */
   saves: { rows?: { id: string; orderUnknown?: unknown; fill?: { ceQty?: number; peQty?: number } }[] }[];
   kotakPositions: Record<string, unknown>[];
+  zerodhaPositions: Record<string, unknown>[];
   dhanPositions: Record<string, unknown>[];
   /** What Kotak's poll answers for positions: the book, or the "not connected" shape (success, empty, positionsError). */
   kotakPositionsError: string | null;
@@ -81,13 +82,13 @@ export interface FocusMock {
 
 export function newFocusMock(): FocusMock {
   return {
-    calls: [], blocked: [], config: config([]), saves: [], kotakPositions: [], dhanPositions: [], kotakPositionsError: null,
+    calls: [], blocked: [], config: config([]), saves: [], kotakPositions: [], zerodhaPositions: [], dhanPositions: [], kotakPositionsError: null,
     orderReply: () => ({ status: 200, body: { success: true, order_id: 'E2E1' } }),
     orderStatus: () => null,
   };
 }
 
-export const ORDER_ROUTES = ['/api/scalper/kotak/order', '/api/scalper/fast-order'];
+export const ORDER_ROUTES = ['/api/scalper/kotak/order', '/api/scalper/zerodha/order', '/api/scalper/fast-order'];
 export const orders = (m: FocusMock) => m.calls.filter(c => c.method === 'POST' && ORDER_ROUTES.includes(c.path));
 
 /** The audit events the page logged (POST /api/focus-tool/events) of one kind. */
@@ -103,7 +104,7 @@ export const lastSavedRow = (m: FocusMock, id: string) => {
 };
 
 /** `view`: the row view to open in ('pro' has "Enter now"; a fresh browser opens in 'table'). */
-export async function installFocusMock(page: Page, m: FocusMock, savedBroker: 'dhan' | 'kotak', view: 'pro' | 'table' = 'table'): Promise<void> {
+export async function installFocusMock(page: Page, m: FocusMock, savedBroker: 'dhan' | 'kotak' | 'zerodha', view: 'pro' | 'table' = 'table'): Promise<void> {
   await page.addInitScript(([b, v]) => {
     try { localStorage.setItem('dhan_algo.selected_broker', b); localStorage.setItem('focusTool.viewMode', v); } catch { /* ignore */ }
   }, [savedBroker, view] as const);
@@ -115,7 +116,7 @@ export async function installFocusMock(page: Page, m: FocusMock, savedBroker: 'd
     const body = method === 'GET' ? null : (req.postDataJSON() as Record<string, unknown> | null);
     m.calls.push({ method, path: p, search: u.search, body });
 
-    if (p === '/api/auth/broker-status') return json(route, { dhan: true, zerodha: false, kotak: true });
+    if (p === '/api/auth/broker-status') return json(route, { dhan: true, zerodha: true, kotak: true });
     if (p === '/api/focus-tool/rows') {
       if (method === 'GET') return json(route, { success: true, data: m.config });
       if (method === 'POST') {
@@ -146,13 +147,18 @@ export async function installFocusMock(page: Page, m: FocusMock, savedBroker: 'd
       const strikes = Object.fromEntries(STRIKES.map(k => [k, { ceSymbol: `NIFTY26O19${k}CE`, peSymbol: `NIFTY26O19${k}PE` }]));
       return json(route, { success: true, data: { lotSize: 65, strikes, ...(m.freezeQty ? { freezeQty: m.freezeQty } : {}) } });
     }
+    if (p === '/api/scalper/zerodha/lookup') {
+      const strikes = Object.fromEntries(STRIKES.map(k => [k, { ceSymbol: `NIFTY26O19${k}CE`, peSymbol: `NIFTY26O19${k}PE` }]));
+      return json(route, { success: true, data: { lotSize: 65, strikes, ...(m.freezeQty ? { freezeQty: m.freezeQty } : {}) } });
+    }
+    if (p === '/api/scalper/zerodha/poll') return json(route, { success: true, positions: m.zerodhaPositions, positionsError: null, orders: [], trades: [] });
     if (p === '/api/scalper/poll') return json(route, { success: true, positions: m.dhanPositions, positionsError: null, orders: [], trades: [] });
     if (p === '/api/scalper/kotak/poll') {
       return json(route, m.kotakPositionsError
         ? { success: true, positions: [], positionsError: m.kotakPositionsError, orders: [], trades: [] }
         : { success: true, positions: m.kotakPositions, positionsError: null, orders: [], trades: [] });
     }
-    if (p === '/api/scalper/funds' || p === '/api/scalper/kotak/funds') return json(route, { success: true, data: { availabelBalance: 500000 } });
+    if (p === '/api/scalper/funds' || p === '/api/scalper/kotak/funds' || p === '/api/scalper/zerodha/funds') return json(route, { success: true, data: { availabelBalance: 500000 } });
     if (p === '/api/scalper/orders' || p === '/api/scalper/kotak/orders') {
       // A single order's status (fill confirmation / traded price): unknown to the mock → "not found", like a lag.
       const oid = u.searchParams.get('orderId');
@@ -162,7 +168,7 @@ export async function installFocusMock(page: Page, m: FocusMock, savedBroker: 'd
       }
       return json(route, { success: true, data: [] });
     }
-    if (p === '/api/scalper/trades' || p === '/api/scalper/kotak/trades') return json(route, { success: true, data: [] });
+    if (p === '/api/scalper/trades' || p === '/api/scalper/kotak/trades' || p === '/api/scalper/zerodha/trades') return json(route, { success: true, data: [] });
     if (method === 'POST' && ORDER_ROUTES.includes(p)) {
       const r = m.orderReply(p, body, m);
       return json(route, r.body, r.status);

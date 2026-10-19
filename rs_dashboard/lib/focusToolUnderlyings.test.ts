@@ -79,6 +79,7 @@ test('maxOrderUnits: one under the freeze, whole lots, never above the route cap
   assert.equal(maxOrderUnits('dhan', 'NIFTY', 65, 9000), 3705);
   // Kotak: its 100-lot opening cap.
   assert.equal(maxOrderUnits('kotak', 'SENSEX', 20, 9000), 2000);
+  assert.equal(maxOrderUnits('zerodha', 'SENSEX', 20, 9000), 2000);   // Zerodha's route enforces the same 'fts' lot cap on opens
   // No freeze in the lookup: the conservative fallback.
   assert.equal(maxOrderUnits('dhan', 'NIFTY', 65, undefined), Math.floor(FALLBACK_FREEZE_UNITS.NIFTY / 65) * 65);
   // MCX in page units (barrels): Dhan freeze 494 lots → 4930 barrels.
@@ -95,4 +96,12 @@ test('sliceOrderUnits: whole slices first, the remainder last, nothing lost', as
   assert.deepEqual(sliceOrderUnits(7020, 3510), [3510, 3510]);
   assert.deepEqual(sliceOrderUnits(0, 3510), []);
   assert.equal(sliceOrderUnits(13000, 3510).reduce((a, b) => a + b, 0), 13000);
+});
+
+test('Zerodha counts MCX in lots, like Dhan (order quantity checked on its margin calculator)', async () => {
+  const { brokerOrderQuantity, brokerToInternalQuantity } = await import('./focusToolUnderlyings.ts');
+  assert.equal(brokerOrderQuantity('zerodha', 'CRUDEOILM', 50), 5);
+  assert.equal(brokerOrderQuantity('zerodha', 'CRUDEOILM', 4), 0);
+  assert.equal(brokerToInternalQuantity('zerodha', 'CRUDEOILM', 5), 50);
+  assert.equal(brokerOrderQuantity('kotak', 'CRUDEOILM', 50), 50);   // Kotak stays in barrels
 });

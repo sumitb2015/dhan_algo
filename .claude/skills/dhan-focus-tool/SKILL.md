@@ -46,6 +46,17 @@ opened before the field). Pure rules in `lib/focusToolBroker.ts` (+ test), brows
   `placeLeg` re-reads it). Either read as flat made the next exit drop a live leg as "closed outside the tool".
 - New order path or new rule loop → add the mismatch check; new fill writer → go through `adjustFillQty`.
 
+## Zerodha parity (2026-10-19)
+Zerodha has the same order safety as Dhan/Kotak: per-order status + cancel through `/api/scalper/orders?orderId=&broker=zerodha`
+(`shapeZerodhaOrderStatus`, shared order-book read), traded-price re-pricing, the limit ladder, own-order ids remembered for the
+outside-close match (`noteOwnOrder`), opens carry `source:'fts'` (100-lot cap; closes never), exchange freeze from Dhan's master
+via the Zerodha lookup route. `tracksOrderStatus` is now true for every broker — do not use it as a proxy for "MCX allowed".
+**CRUDEOILM on Zerodha:** order quantity is in LOTS (checked on Kite's margin calculator: qty 1 = 10 barrels; its MCX dump
+lists `lot_size` 1), so `brokerOrderQuantity` / `brokerToInternalQuantity` treat it like Dhan, and `shapeZerodhaPosition`
+multiplies MCX P&L by barrels per lot. Position / fill / trade-book read-back units were NEVER observed live (the Kite app had
+no static IP, so no probe order could be placed): first REAL lot shows a one-time toast to check Positions quantity = lots.
+Proof: `e2e/focus-tool-zerodha.spec.ts`.
+
 ## An order with an UNKNOWN outcome (2026-10-17)
 `classifyOrderReply` (`lib/focusToolOrderOutcome.ts` + test) sorts every order reply into placed / rejected / unknown.
 Unknown = no reply, a 504 (Dhan: not found by correlationId; Kotak: not in the order book within ~5 s; both routes now

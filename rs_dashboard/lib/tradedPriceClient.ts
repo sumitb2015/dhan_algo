@@ -1,5 +1,5 @@
 /**
- * An order's FINAL traded price, from the browser (Dhan and Kotak: /api/scalper/orders reports a per-order
+ * An order's FINAL traded price, from the browser (Dhan, Kotak and Zerodha: /api/scalper/orders reports a per-order
  * averageTradedPrice). One implementation for every terminal (Focus Tool, Synthetic Futures, Triple Straddle) — see the
  * dhan-fill-price-pnl skill.
  *
@@ -27,7 +27,7 @@ export function finalAvgOf(r: OrderPriceRead | null | undefined): number {
 }
 
 /** One network read of the order. Null = unreadable (rate limit, network). */
-export async function readOrderPrice(orderId: string, broker: 'dhan' | 'kotak' = 'dhan'): Promise<OrderPriceRead | null> {
+export async function readOrderPrice(orderId: string, broker: 'dhan' | 'kotak' | 'zerodha' = 'dhan'): Promise<OrderPriceRead | null> {
   try {
     const r = await fetch(`/api/scalper/orders?orderId=${encodeURIComponent(orderId)}&broker=${broker}`);
     const j = await r.json() as { success?: boolean; data?: { orderStatus?: string; filledQty?: number; averageTradedPrice?: number } };
@@ -43,7 +43,7 @@ export async function readOrderPrice(orderId: string, broker: 'dhan' | 'kotak' =
  */
 export async function fetchSliceTradedPrice(
   orderId: string, kind: 'open' | 'close', sliceQty: number, memo: TradedSliceMemo,
-  opts: { peek?: OrderPeek; waits?: readonly number[]; broker?: 'dhan' | 'kotak' } = {},
+  opts: { peek?: OrderPeek; waits?: readonly number[]; broker?: 'dhan' | 'kotak' | 'zerodha' } = {},
 ): Promise<number | null> {
   for (const wait of opts.waits ?? [1000, 2000, 4000, 8000]) {
     await new Promise(res => setTimeout(res, wait));

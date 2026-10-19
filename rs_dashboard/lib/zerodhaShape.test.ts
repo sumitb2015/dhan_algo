@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { shapeZerodhaPosition, shapeZerodhaOrder, shapeZerodhaTrade } from './zerodhaShape.ts';
+import { shapeZerodhaPosition, shapeZerodhaOrder, shapeZerodhaTrade, shapeZerodhaOrderStatus, classifyZerodhaStatus } from './zerodhaShape.ts';
 
 test('shapeZerodhaPosition maps Kite fields to the UI position shape', () => {
   const raw = {
@@ -96,4 +96,36 @@ test('shapeZerodhaTrade maps Kite fields to the UI trade shape', () => {
     tradedPrice: 120.5,
     createTime: '2026-07-19 15:30:01',
   });
+});
+
+test('classifyZerodhaStatus: COMPLETE is TRADED, transient states are never final', () => {
+  assert.equal(classifyZerodhaStatus('COMPLETE', 65, 65), 'TRADED');
+  assert.equal(classifyZerodhaStatus('REJECTED', 0, 65), 'REJECTED');
+  assert.equal(classifyZerodhaStatus('CANCELLED', 0, 65), 'CANCELLED');
+  assert.equal(classifyZerodhaStatus('CANCELLED', 30, 65), 'CANCELLED');
+  // "CANCEL PENDING" is an order still live: never read it as cancelled.
+  assert.equal(classifyZerodhaStatus('CANCEL PENDING', 0, 65), 'TRANSIT');
+  assert.equal(classifyZerodhaStatus('PUT ORDER REQ RECEIVED', 0, 65), 'TRANSIT');
+  assert.equal(classifyZerodhaStatus('OPEN', 0, 65), 'PENDING');
+  assert.equal(classifyZerodhaStatus('OPEN', 30, 65), 'PART_TRADED');
+  // a full fill is a fill whatever the word
+  assert.equal(classifyZerodhaStatus('UPDATE', 65, 65), 'TRADED');
+});
+
+test('shapeZerodhaOrderStatus carries the per-order fill and traded average', () => {
+  assert.deepStrictEqual(
+    shapeZerodhaOrderStatus({ order_id: '2610190001', status: 'COMPLETE', quantity: 130, filled_quantity: 130, average_price: 101.35 }),
+    { orderId: '2610190001', orderStatus: 'TRADED', quantity: 130, filledQty: 130, averageTradedPrice: 101.35, reason: '' });
+  assert.equal(shapeZerodhaOrderStatus({ status: 'REJECTED', quantity: 65, status_message: 'Insufficient funds' }, 'x').reason, 'Insufficient funds');
+});
+
+test('MCX position: quantity stays in lots, the per-unit move is multiplied by barrels per lot', () => {
+  const p = shapeZerodhaPosition({
+    tradingsymbol: 'CRUDEOILM26NOV8500CE', instrument_token: 1, exchange: 'MCX', quantity: -2, buy_price: 0, sell_price: 100,
+    last_price: 90, pnl: 200, product: 'NRML',
+  });
+  assert.equal(p.exchange, 'MCX');
+  assert.equal(p.netQty, -2);
+  assert.equal(p.unrealizedProfit, 200);   // 2 lots x (100 - 90) x 10 barrels
+  assert.equal(p.realizedProfit, 0);
 });
