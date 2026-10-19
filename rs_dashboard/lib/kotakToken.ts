@@ -244,6 +244,40 @@ export async function kotakGet(apiPath: string, timeoutMs = 10_000): Promise<Rec
   return json;
 }
 
+// Display polls (positions / orders / trades, every open tab every 2 s) share one Kotak call per path: Kotak answers
+// stCode 100025 "rate limit exceeded" past a few requests a second, and every tab (plus the guard tickers) was making
+// its own three. Concurrent callers join the call in flight; a result is reused for SHARED_GET_TTL_MS; after a 100025
+// the same error is replayed for RATE_LIMIT_COOLDOWN_MS instead of hammering the limit. Anything that sizes an order
+// off the book must keep calling `kotakGet` (always live) — and any order POST drops this cache, so a poll right
+// after a placement never reads the pre-order book.
+const SHARED_GET_TTL_MS = 1_200;
+const RATE_LIMIT_COOLDOWN_MS = 3_000;
+const KOTAK_RATE_LIMIT = 100025;
+const sharedGets = new Map<string, { at: number; json?: Record<string, unknown>; err?: unknown; inflight?: Promise<Record<string, unknown>> }>();
+
+export async function kotakGetShared(apiPath: string): Promise<Record<string, unknown>> {
+  const hit = sharedGets.get(apiPath);
+  if (hit?.inflight) return hit.inflight;
+  if (hit) {
+    const age = Date.now() - hit.at;
+    if (hit.json && age < SHARED_GET_TTL_MS) return hit.json;
+    if (hit.err && age < RATE_LIMIT_COOLDOWN_MS) throw hit.err;
+  }
+  const inflight = kotakGet(apiPath).then(
+    json => { sharedGets.set(apiPath, { at: Date.now(), json }); return json; },
+    err => {
+      // Only a rate limit is remembered; any other failure is retried by the next caller.
+      if (String((err as Error)?.message ?? err).includes(String(KOTAK_RATE_LIMIT))) sharedGets.set(apiPath, { at: Date.now(), err });
+      else sharedGets.delete(apiPath);
+      throw err;
+    },
+  );
+  sharedGets.set(apiPath, { at: hit?.at ?? 0, json: hit?.json, err: hit?.err, inflight });
+  return inflight;
+}
+
+const ORDER_WRITE_PATHS: ReadonlySet<string> = new Set([KOTAK_PATHS.placeOrder, KOTAK_PATHS.cancelOrder, KOTAK_PATHS.modifyOrder]);
+
 /**
  * Authenticated form-encoded POST against the Kotak Neo REST API.
  *
@@ -270,6 +304,7 @@ export async function kotakPost(
     return await res.json() as Record<string, unknown>;
   };
 
+  if (ORDER_WRITE_PATHS.has(apiPath)) sharedGets.clear();
   // Kotak rejects a request under a dead session outright rather than
   // silently accepting it (see reloginKotak's doc comment) — a retry after a
   // fresh login cannot double-place an order the first attempt never placed.
@@ -277,6 +312,7 @@ export async function kotakPost(
   if (isSessionDead(json) && await reloginKotak()) {
     json = await doRequest();
   }
+  if (ORDER_WRITE_PATHS.has(apiPath)) sharedGets.clear();
   raiseIfError(json);
   return json;
 }

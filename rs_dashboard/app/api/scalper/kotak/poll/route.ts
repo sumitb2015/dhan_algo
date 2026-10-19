@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { kotakGet, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
+import { kotakGetShared, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { shapeKotakPosition, shapeKotakOrder, shapeKotakTrade } from '@/lib/kotakShape';
 
 export async function GET(): Promise<NextResponse> {
@@ -20,13 +20,13 @@ export async function GET(): Promise<NextResponse> {
   try {
     let positionsError: string | null = null;
     const [positions, orders, trades] = await Promise.all([
-      kotakGet(KOTAK_PATHS.positions).catch(err => {
+      kotakGetShared(KOTAK_PATHS.positions).catch(err => {
         positionsError = String(err?.message ?? err);
         console.error('[scalper/kotak/poll] positions fetch failed:', err);
         return {} as Record<string, unknown>;
       }),
-      kotakGet(KOTAK_PATHS.orderBook).catch(() => ({} as Record<string, unknown>)),
-      kotakGet(KOTAK_PATHS.tradeBook).catch(() => ({} as Record<string, unknown>)),
+      kotakGetShared(KOTAK_PATHS.orderBook).catch(() => ({} as Record<string, unknown>)),
+      kotakGetShared(KOTAK_PATHS.tradeBook).catch(() => ({} as Record<string, unknown>)),
     ]);
 
     return NextResponse.json({
