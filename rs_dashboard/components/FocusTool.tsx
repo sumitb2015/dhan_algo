@@ -4948,7 +4948,11 @@ function FocusTool() {
   const addToast = useCallback((type: 'success' | 'error', message: string, detail?: string) => {
     const id = `${Date.now()}-${++toastSeqRef.current}`;   // Date.now() alone collides for the CE + PE toasts of one tick
     setToasts(prev => [...prev, { id, type, message, detail }]);
+  // Error toasts raised while a re-entry runs are copied here, so the events log keeps WHY a re-entry did not happen
+  // (a toast vanishes after 4 s; 2026-10-19 a PE re-entry after a trailed stop sent no order and left no trace).
+  const reentryTapsRef = useRef<string[][]>([]);
     setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+    if (type === 'error') for (const tap of reentryTapsRef.current) tap.push(detail ? `${message}: ${detail}` : message);
   }, []);
 
   const copyTrade = useCopyTrade(addToast);
@@ -5866,9 +5870,6 @@ function FocusTool() {
     return { toolPnl: real, simPnl: paper };
   }, [config.rows, rowLive]);
 
-  useEffect(() => {
-    if (toolPnl > 0) setPeakMtm(prev => Math.max(prev, toolPnl));
-  }, [toolPnl]);
   // Header P&L is this tool's own REAL rows (ledger-booked + live legs), not the broker's whole position book: that
   // book also holds positions this tool never opened (other desks, MCX, older NRML), which inflated the tile far
   // above the account's P&L for the tool's trades (Kotak showed +21,786 against -6k).
@@ -5883,6 +5884,9 @@ function FocusTool() {
   // The sim book's own peak and ratcheted floor — refs, not state: nothing on
   // screen shows them, they only feed the sim budget check.
   const simPeakRef = useRef(0);
+  useEffect(() => {
+    if (toolPnl > 0) setPeakMtm(prev => Math.max(prev, toolPnl));
+  }, [toolPnl]);
   const simLockFloorRef = useRef<number | null>(null);
   useEffect(() => {
     if (simPnl > simPeakRef.current) simPeakRef.current = simPnl;
@@ -8461,7 +8465,29 @@ function FocusTool() {
   async function reenterLegAfterExit(
     rowId: string, leg: 'CE' | 'PE', trigger: FocusReentryTrigger,
     closedStrike: number | null, closedQty: number, closedEntry: number, closedLazyId: string | null = null,
+  /** Runs the re-entry and logs every outcome other than a clean re-sale, with the refusal toasts it raised. */
     /** Trail SL steps the stop that closed the leg had taken (0 = untrailed). */
+    rowId: string, leg: 'CE' | 'PE', trigger: FocusReentryTrigger,
+    closedStrike: number | null, closedQty: number, closedEntry: number, closedLazyId: string | null = null,
+    trailedSteps = 0,
+  ): Promise<'reentered' | 'pending' | 'skipped' | 'unconfirmed'> {
+    const tap: string[] = [];
+    reentryTapsRef.current.push(tap);
+    let outcome: 'reentered' | 'pending' | 'skipped' | 'unconfirmed' = 'skipped';
+    try {
+      outcome = await reenterLegAfterExitInner(rowId, leg, trigger, closedStrike, closedQty, closedEntry, closedLazyId, trailedSteps);
+      return outcome;
+    } finally {
+      reentryTapsRef.current = reentryTapsRef.current.filter(t => t !== tap);
+      const row = schedulerRef.current.config.rows.find(r => r.id === rowId);
+      if (row && outcome !== 'reentered') {
+        logEvent('reentry_outcome', row, tap.length ? tap.join(' | ') : `re-entry ${outcome} (no refusal toast)`,
+          { leg, trigger, outcome, closedStrike, closedQty, trailedSteps });
+      }
+    }
+  }
+
+  async function reenterLegAfterExitInner(
     trailedSteps = 0,
   ): Promise<'reentered' | 'pending' | 'skipped' | 'unconfirmed'> {
     const snap = schedulerRef.current;
@@ -8682,6 +8708,7 @@ function FocusTool() {
     const fresh = schedulerRef.current.config.rows.find(r => r.id === rowId) ?? row;
     const ok = await actionsRef.current.placeLeg(fresh, leg, {
       reduce: false, lots, strikeOverride: newStrike, awaitFill: true,
+    for (const tap of reentryTapsRef.current) tap.push(`picked ${newStrike} ${leg}${anchorNote}`);
     });
     if (!ok) {
       addToast('error', `${tag} re-entry not confirmed`,
