@@ -7,14 +7,20 @@ import { buildKotakOrderPayload } from '@/lib/kotakOrderPayload';
 import { kotakDerivativeBySymbol } from '@/lib/kotakContracts';
 import { kotakUnderlyingOf } from '@/lib/kotakPositionContracts';
 import { isKotakTokenValid } from '@/lib/kotakToken';
+import { placeZerodhaOrder } from '@/lib/zerodhaPlaceOrder';
+import { isZerodhaTokenValid } from '@/lib/zerodhaToken';
+import { zerodhaSnapPrice } from '@/lib/zerodhaOrderRules';
+import { cachedZerodhaContract, slicesFor } from '@/lib/zerodhaContracts';
 
 // A basket of option legs (Live Options Charts' order modal and trading desk), every leg sent concurrently.
 // broker 'dhan' (default): straight to Dhan's order API by securityId. broker 'kotak': by trading symbol through the
 // same payload builder and placement as /api/scalper/kotak/order (lib/kotakOrderPayload.ts, lib/kotakPlaceOrder.ts).
+// broker 'zerodha': by trading symbol through lib/zerodhaPlaceOrder.ts (placed / rejected / unknown, same as
+// /api/scalper/zerodha/order). Kite's API places no resting stop entries, so STOP_LOSS legs are refused for Zerodha.
 // Each leg's result says placed / failed / UNKNOWN (`unknown: true`: no clean reply — it may be live; the caller must
 // not retry it). Market data never comes from here.
 
-/** One leg's outcome, in leg order. `securityId` (Dhan) or `tradingSymbol` (Kotak) echoes the leg. */
+/** One leg's outcome, in leg order. `securityId` (Dhan) or `tradingSymbol` (Kotak, Zerodha) echoes the leg. */
 interface LegResult { success: boolean; orderId?: string; securityId?: string; tradingSymbol?: string; error?: string; unknown?: boolean }
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
@@ -56,12 +62,12 @@ function getToken(): { clientId: string; token: string } {
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const body = await req.json().catch(() => null) as {
-    broker?: 'dhan' | 'kotak';
+    broker?: 'dhan' | 'kotak' | 'zerodha';
     legs?: {
       securityId?: string;
-      /** Kotak: the contract's trading symbol (Kotak has no Dhan security id). */
+      /** Kotak / Zerodha: the contract's trading symbol (neither has a Dhan security id). */
       tradingSymbol?: string;
-      /** Kotak: nse_fo / bse_fo / mcx_fo. */
+      /** Kotak: nse_fo / bse_fo / mcx_fo. Zerodha: NFO / BFO / MCX. */
       exchange?: string;
       quantity: number;
       side: 'BUY' | 'SELL';
@@ -79,10 +85,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const { legs, mode = 'intraday' } = body;
   const broker = body.broker ?? 'dhan';
-  if (broker !== 'dhan' && broker !== 'kotak') {
+  if (broker !== 'dhan' && broker !== 'kotak' && broker !== 'zerodha') {
     return NextResponse.json({ success: false, error: `Unsupported broker: ${broker}` }, { status: 400 });
   }
-  const identOf = (leg: { securityId?: string; tradingSymbol?: string }) => (broker === 'kotak' ? leg.tradingSymbol : leg.securityId);
+  const identOf = (leg: { securityId?: string; tradingSymbol?: string }) => (broker !== 'dhan' ? leg.tradingSymbol : leg.securityId);
 
   // Maximum quantity ceiling per leg (e.g. 5,000 units = ~76 lots of Nifty)
   // Enforces Invariant #1 of dhan-order-tickets skill against uncapped API calls
@@ -93,7 +99,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   for (const leg of legs) {
     const ident = identOf(leg);
     if (!ident || String(ident) === 'null' || String(ident).trim() === '') {
-      invalidLegs.push(`leg ${ident ?? 'unknown'}: missing ${broker === 'kotak' ? 'Kotak trading symbol' : 'securityId'} (option chain data may not have loaded yet)`);
+      invalidLegs.push(`leg ${ident ?? 'unknown'}: missing ${broker === 'kotak' ? 'Kotak trading symbol' : broker === 'zerodha' ? 'Zerodha trading symbol' : 'securityId'} (option chain data may not have loaded yet)`);
     }
     if (!Number.isFinite(leg.quantity) || leg.quantity <= 0) {
       invalidLegs.push(`leg ${leg.securityId}: invalid quantity=${leg.quantity}`);
@@ -114,6 +120,36 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       success: false,
       error: `Cannot place order — invalid leg(s): ${invalidLegs.join('; ')}`,
     }, { status: 400 });
+  }
+
+  if (broker === 'zerodha') {
+    if (!isZerodhaTokenValid()) return NextResponse.json({ success: false, error: 'Zerodha not connected — run scripts/tools/zerodha_autologin.py' }, { status: 401 });
+    // Validate every leg before anything is sent. One order per leg: a leg over the exchange freeze would be cut into
+    // several orders whose ids the caller cannot track, so it is refused instead.
+    const refused: string[] = [];
+    for (const leg of legs) {
+      const symbol = String(leg.tradingSymbol);
+      const ot = leg.orderType ?? 'MARKET';
+      if (ot !== 'MARKET' && ot !== 'LIMIT') refused.push(`${symbol}: Zerodha places MARKET and LIMIT orders only (no resting stop entries)`);
+      else if (slicesFor(symbol, Number(leg.quantity)).length > 1) refused.push(`${symbol}: ${leg.quantity} is above the exchange freeze quantity - use fewer lots per order`);
+    }
+    if (refused.length) {
+      return NextResponse.json({ success: false, error: `Cannot place order — invalid leg(s): ${refused.join('; ')}` }, { status: 400 });
+    }
+    const results: LegResult[] = await Promise.all(legs.map(async (leg): Promise<LegResult> => {
+      const symbol = String(leg.tradingSymbol);
+      const isLimit = leg.orderType === 'LIMIT';
+      const params: Record<string, string | number> = {
+        tradingsymbol: symbol, exchange: leg.exchange ?? 'NFO', transaction_type: leg.side, quantity: Number(leg.quantity),
+        order_type: isLimit ? 'LIMIT' : 'MARKET', product: mode === 'positional' ? 'NRML' : 'MIS', validity: 'DAY',
+      };
+      if (isLimit) params.price = zerodhaSnapPrice(Number(leg.price), cachedZerodhaContract(symbol));
+      else params.market_protection = -1;   // Kite refuses API market orders on options without protection
+      const r = await placeZerodhaOrder(params);
+      if (r.status === 'placed') return { success: true, orderId: r.orderId, tradingSymbol: symbol };
+      return { success: false, error: r.error, tradingSymbol: symbol, ...(r.status === 'unknown' ? { unknown: true } : {}) };
+    }));
+    return basketReply('zerodha', results);
   }
 
   if (broker === 'kotak') {
@@ -204,7 +240,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
 /** The basket's reply: per-leg `data` always (a partial basket still placed what it placed), `unknown: true` when any
  *  leg's outcome is unknown. */
-function basketReply(broker: 'dhan' | 'kotak', results: LegResult[]): NextResponse {
+function basketReply(broker: 'dhan' | 'kotak' | 'zerodha', results: LegResult[]): NextResponse {
   // Invalidate even on a partial failure — a basket can place some legs and reject others, and any placed (or
   // possibly placed) leg still means positions moved.
   if (results.some(r => r.success || r.unknown)) invalidateBrokerCache(broker);

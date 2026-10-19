@@ -8,7 +8,7 @@
 
 export type LedgerOptionType = 'CE' | 'PE';
 /** The account a basket was placed on. Missing = Dhan (every basket before Kotak support). */
-export type LedgerBroker = 'dhan' | 'kotak';
+export type LedgerBroker = 'dhan' | 'kotak' | 'zerodha';
 export type LedgerAction = 'BUY' | 'SELL';
 export type LedgerProductType = 'INTRADAY' | 'MARGIN';
 
@@ -59,13 +59,13 @@ export type BrokerPositionRow = Record<string, unknown>;
 
 export const basketBroker = (b: Pick<LedgerBasket, 'broker'>): LedgerBroker => b.broker ?? 'dhan';
 
-/** A contract's identifier on a broker: Dhan's numeric securityId, Kotak's trading symbol (Kotak's own
+/** A contract's identifier on a broker: Dhan's numeric securityId, the trading symbol on Kotak and Zerodha (Kotak's own
  *  `securityId` field is its instrument token, unrelated to Dhan's). */
 export function legIdent(leg: Pick<LedgerLeg, 'securityId' | 'tradingSymbol'>, broker: LedgerBroker = 'dhan'): string {
-  return String((broker === 'kotak' ? leg.tradingSymbol : leg.securityId) ?? '');
+  return String((broker !== 'dhan' ? leg.tradingSymbol : leg.securityId) ?? '');
 }
 export function rowIdent(row: BrokerPositionRow, broker: LedgerBroker = 'dhan'): string {
-  return String((broker === 'kotak' ? row.tradingSymbol ?? row.trading_symbol : row.securityId ?? row.security_id) ?? '');
+  return String((broker !== 'dhan' ? row.tradingSymbol ?? row.trading_symbol : row.securityId ?? row.security_id) ?? '');
 }
 /** One product vocabulary: Kotak / Zerodha report MIS / NRML for Dhan's INTRADAY / MARGIN. */
 export function normProduct(p: unknown): string {

@@ -67,6 +67,7 @@ test('shapeZerodhaOrder maps Kite fields to the UI order shape', () => {
     order_type: 'MARKET',
     order_timestamp: '2026-07-19 15:30:00',
     average_price: 88.4,
+    filled_quantity: 75,
   };
   assert.deepStrictEqual(shapeZerodhaOrder(raw), {
     orderId: '250719000123456',
@@ -78,6 +79,7 @@ test('shapeZerodhaOrder maps Kite fields to the UI order shape', () => {
     orderType: 'MARKET',
     createTime: '2026-07-19 15:30:00',
     averagePrice: 88.4,
+    filledQty: 75,
   });
 });
 

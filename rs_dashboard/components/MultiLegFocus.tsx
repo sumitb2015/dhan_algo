@@ -1345,12 +1345,12 @@ function MultiLegFocus({
     return true;
   }, [addToast]);
 
-  // Dhan ACKs an order as TRANSIT and can reject it (RMS/margin/freeze) seconds
+  // Every broker ACKs an order before it is final (Dhan as TRANSIT) and can reject it (RMS/margin/freeze) seconds
   // later. Where a later step depends on a leg really being open — the SELLs
   // after the hedges, or auto-reversing legs on an abort — the ACK is not
   // enough: wait for the order's actual outcome. 'pending' after the deadline
   // means unknown (treat as NOT confirmed; the poll's pendingOrders settles it).
-  const confirmDhanOrder = useCallback(async (orderId: string, orderType: 'MARKET' | 'LIMIT' | 'SL' | 'SLM', timeoutMs = 6000, confirmBroker: 'dhan' | 'kotak' = 'dhan'): Promise<{
+  const confirmDhanOrder = useCallback(async (orderId: string, orderType: 'MARKET' | 'LIMIT' | 'SL' | 'SLM', timeoutMs = 6000, confirmBroker: Broker = 'dhan'): Promise<{
     phase: DhanOrderPhase; filledQty: number; avgPrice: number; reason: string;
   }> => {
     const deadline = Date.now() + timeoutMs;
@@ -1604,7 +1604,7 @@ function MultiLegFocus({
           // it gates the SELL phase and decides what an abort auto-reverses.
           let confirmedQty = qty;
           let unconfirmed = false;
-          if ((bk === 'dhan' || bk === 'kotak') && j.order_id) {
+          if (j.order_id) {
             const c = await confirmDhanOrder(String(j.order_id), leg.type, 6000, bk);
             if (c.phase === 'dead') {
               working = working.map(l => (l.id === leg.id ? { ...l, status: 'FAILED' as MultiLegStatus } : l));
@@ -2621,7 +2621,7 @@ function MultiLegFocus({
           addToast('error', `${label}: stop order not confirmed`, 'Dhan returned no order id — check Orders before retrying. Nothing was recorded here.');
           return false;
         }
-        const c = await confirmDhanOrder(String(j.order_id), params.orderType, 6000, bk === 'kotak' ? 'kotak' : 'dhan');
+        const c = await confirmDhanOrder(String(j.order_id), params.orderType, 6000, bk);
         if (c.phase === 'dead') {
           addToast('error', `${label} stop order rejected`, c.reason || 'Rejected/cancelled by the broker — nothing is resting.');
           return false;
@@ -2658,7 +2658,7 @@ function MultiLegFocus({
         // Dhan: confirm the ACK became a fill before reporting success — a shift
         // reopens its SELLs only after the BUY reopen returns true.
         let unconfirmed = false;
-        if ((bk === 'dhan' || bk === 'kotak') && j.order_id) {
+        if (j.order_id) {
           const c = await confirmDhanOrder(String(j.order_id), params.orderType, 6000, bk);
           if (c.phase === 'dead') {
             addToast('error', `${label} rejected after acceptance`, c.reason || 'Order rejected/cancelled by the broker — nothing opened');
@@ -2874,7 +2874,7 @@ function MultiLegFocus({
         let fillPrice = (j.price && j.price > 0) ? j.price : (currentLtp > 0 ? currentLtp : (leg.price ?? 0));
         // Dhan: a hedge ACK must be a real fill before the SELL phase runs.
         let unconfirmed = false;
-        if ((bk === 'dhan' || bk === 'kotak') && j.order_id) {
+        if (j.order_id) {
           const c = await confirmDhanOrder(String(j.order_id), 'MARKET', 6000, bk);
           if (c.phase === 'dead') throw new Error(`${leg.strike} ${leg.option} rejected after acceptance${c.reason ? `: ${c.reason}` : ''}`);
           if (c.phase === 'filled' && c.avgPrice > 0) fillPrice = c.avgPrice;

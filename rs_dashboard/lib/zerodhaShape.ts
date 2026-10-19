@@ -106,6 +106,7 @@ export function shapeZerodhaOrder(o: Record<string, any>): ScalperOrder {
     orderType: String(o.order_type ?? ''),
     createTime: String(o.order_timestamp ?? ''),
     averagePrice: Number(o.average_price) || 0,
+    filledQty: Number(o.filled_quantity) || 0,
   };
 }
 

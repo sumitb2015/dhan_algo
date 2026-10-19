@@ -9,7 +9,7 @@ import { PanelStyles } from '@/components/PanelStyles';
 import { type ChartUnderlying } from '@/lib/underlyings';
 import OptionOrderModal, { type OptionOrderInitialState, type PlacedOptionLeg } from '@/components/OptionOrderModal';
 import LiveTradingDesk from '@/components/LiveTradingDesk';
-import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
+import { BrokerPicker, usePageBroker, type DhanKotak } from '@/components/BrokerPicker';   // this page's desk is Dhan / Kotak only: its baskets never carry Zerodha
 import { basketIsFlat } from '@/lib/liveChartsLedger';
 import { type LedgerBasket } from '@/lib/liveChartsLedger';
 import { LiveChartsIndexTicker } from '@/components/LiveChartsIndexTicker';
@@ -194,7 +194,7 @@ export default function LiveOptionsChartsPage() {
             Live <span className="lc-header-accent">{SPREAD_LABELS[spreadType]}</span> Chart
           </h1>
           <div className="lc-header-controls">
-            <BrokerPicker value={broker} onChange={setPageBroker} disabled={!!openBasket}
+            <BrokerPicker value={broker as DhanKotak} onChange={setPageBroker} disabled={!!openBasket}
               disabledReason={`Locked: a basket placed here is open on ${broker === 'kotak' ? 'Kotak' : 'Dhan'}. Exit it before switching.`} />
             <LiveChartsIndexTicker />
             <NavBar />

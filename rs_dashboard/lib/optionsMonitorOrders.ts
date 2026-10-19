@@ -8,16 +8,16 @@
  */
 import { normProduct, rowIdent, type BrokerPositionRow } from './liveChartsLedger.ts';
 
-export type OrderBroker = 'dhan' | 'kotak';
+export type OrderBroker = 'dhan' | 'kotak' | 'zerodha';
 
 export interface LegOrder {
   broker: OrderBroker;
   /** Units this page placed on this leg and has not exited (already lot-multiplied). */
   qty: number;
   productType: 'INTRADAY' | 'MARGIN';
-  /** Dhan's security id or Kotak's trading symbol — see rowIdent. */
+  /** Dhan's security id or the Kotak / Zerodha trading symbol — see rowIdent. */
   ident: string;
-  /** Order segment / exchange for that broker (NSE_FNO … / nse_fo …). */
+  /** Order segment / exchange for that broker (NSE_FNO … / nse_fo … / NFO …). */
   exchange: string;
   /** When the last order on this leg went out: a flat book within the grace is lag, not a close. */
   at: number;
@@ -48,7 +48,7 @@ export function stampPlacedLegs<T extends LegLike>(
     if ((l.underlying ?? pageDefaults.underlying) !== basket.underlying || (l.expiry ?? pageDefaults.expiry) !== basket.expiry) return l;
     const p = placed.find((x) => x.strike === l.strike && x.optionType === l.type && x.action === l.side);
     if (!p) return l;
-    const ident = broker === 'kotak' ? String(p.tradingSymbol ?? '') : String(p.securityId ?? '');
+    const ident = broker !== 'dhan' ? String(p.tradingSymbol ?? '') : String(p.securityId ?? '');
     const prev = l.order;
     const same = prev && prev.broker === broker && prev.productType === p.productType && prev.ident === ident;
     return {
@@ -96,7 +96,7 @@ export async function sendSingleLegOrder(
       body: JSON.stringify({
         broker,
         legs: [{
-          ...(broker === 'kotak' ? { tradingSymbol: leg.ident, exchange: leg.exchange } : { securityId: leg.ident, exchangeSegment: leg.exchange }),
+          ...(broker !== 'dhan' ? { tradingSymbol: leg.ident, exchange: leg.exchange } : { securityId: leg.ident, exchangeSegment: leg.exchange }),
           quantity: qty, side, orderType: 'MARKET',
         }],
         mode: normProduct(productType) === 'MARGIN' ? 'positional' : 'intraday',
@@ -129,7 +129,7 @@ export function isStoredTradeLeg(v: unknown): v is StoredTradeLeg {
   if (!v || typeof v !== 'object') return false;
   const l = v as { id?: unknown; order?: Partial<LegOrder> };
   const o = l.order;
-  return typeof l.id === 'string' && !!o && (o.broker === 'dhan' || o.broker === 'kotak')
+  return typeof l.id === 'string' && !!o && (o.broker === 'dhan' || o.broker === 'kotak' || o.broker === 'zerodha')
     && typeof o.qty === 'number' && o.qty > 0 && typeof o.ident === 'string' && o.ident !== ''
     && typeof o.at === 'number' && (o.productType === 'INTRADAY' || o.productType === 'MARGIN');
 }

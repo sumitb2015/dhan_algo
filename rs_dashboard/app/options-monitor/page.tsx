@@ -12,7 +12,7 @@ import HotkeysModal from '@/components/options-monitor/HotkeysModal';
 import OptionChainModal from '@/components/options-monitor/OptionChainModal';
 import OptionOrderModal, { type OptionOrderInitialState, type OptionTradeLeg, type PlacedOptionLeg } from '@/components/OptionOrderModal';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
-import { scalperRoute, BROKER_LABELS } from '@/hooks/useBrokerSelector';
+import { scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { afterExit, exitPlan, sendSingleLegOrder, stampPlacedLegs, isStoredTradeLeg, tradeSaveDiff } from '@/lib/optionsMonitorOrders';
 import { UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
@@ -42,11 +42,14 @@ function modelLeg(
 }
 
 
+/** Accounts the order ticket can trade on (prices, chain and Greeks stay Dhan's). */
+const OM_BROKERS = ['dhan', 'kotak', 'zerodha'] as const satisfies readonly Broker[];
+
 export default function OptionsMonitorPage() {
   // The account this page's orders go to (Dhan or Kotak; this page only). The chain, live feed, Greeks and every price
   // stay Dhan's; the order ticket resolves the contracts on the chosen broker. The first render is always Dhan
   // (usePageBroker), so the funds read and the order ticket wait for `brokerLoaded`.
-  const [broker, setBroker, brokerLoaded] = usePageBroker('optionsMonitor.broker');
+  const [broker, setBroker, brokerLoaded] = usePageBroker<Broker>('optionsMonitor.broker', OM_BROKERS);
   // Underlying configuration
   const [selectedUnderlying, setSelectedUnderlying] = useState<string>('NIFTY');
   const uConfig = UNDERLYINGS[selectedUnderlying] || UNDERLYINGS.NIFTY;
@@ -1845,7 +1848,7 @@ export default function OptionsMonitorPage() {
 
           {/* Right Controls: order broker + Global Navbar */}
           <div className="flex items-center gap-2">
-            <BrokerPicker value={broker} onChange={setBroker} disabled={orderModalOpen || brokerLockedByLeg}
+            <BrokerPicker value={broker} onChange={setBroker} brokers={OM_BROKERS} disabled={orderModalOpen || brokerLockedByLeg}
               disabledReason={brokerLockedByLeg ? `Locked: a leg placed here is open on ${BROKER_LABELS[broker]}. Exit it before switching.` : 'Close the order ticket to switch broker'} />
             <NavBar />
           </div>

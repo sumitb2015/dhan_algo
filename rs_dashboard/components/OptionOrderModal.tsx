@@ -91,8 +91,10 @@ export default function OptionOrderModal({
   existingBaskets,
   broker = 'dhan',
 }: OptionOrderModalProps) {
-  // The leg's contract identifier on this broker: Dhan's securityId, Kotak's trading symbol.
-  const identOf = useCallback((l: { securityId?: string; tradingSymbol?: string }) => (broker === 'kotak' ? l.tradingSymbol : l.securityId), [broker]);
+  // The leg's contract identifier on this broker: Dhan's securityId, the trading symbol on Kotak and Zerodha.
+  const identOf = useCallback((l: { securityId?: string; tradingSymbol?: string }) => (broker !== 'dhan' ? l.tradingSymbol : l.securityId), [broker]);
+  // Kite's API places no resting stop entries: Zerodha offers MARKET and LIMIT only.
+  const orderTypeChoices = (Object.keys(ORDER_TYPE_LABELS) as OrderTypeChoice[]).filter((ot) => broker !== 'zerodha' || ot === 'MARKET' || ot === 'LIMIT');
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
   const [productTypeLock, setProductTypeLock] = useState<'INTRADAY' | 'MARGIN' | null>(null);
   const [lotsMultiplier, setLotsMultiplier] = useState<number>(1);
@@ -178,7 +180,7 @@ export default function OptionOrderModal({
       setStrikesMap(chainStrikes);
       const updated = baseLegs.map((leg) => {
         const strikeEntry = chainStrikes[String(leg.strike)];
-        if (broker === 'kotak') {
+        if (broker !== 'dhan') {
           return { ...leg, tradingSymbol: (leg.optionType === 'CE' ? strikeEntry?.ceSymbol : strikeEntry?.peSymbol) || undefined };
         }
         const secId = (leg.optionType === 'CE' ? strikeEntry?.ceId : strikeEntry?.peId) || leg.securityId;
@@ -354,7 +356,7 @@ export default function OptionOrderModal({
 
     const missingSecId = resolvedLegs.find((l) => !identOf(l));
     if (missingSecId) {
-      setErrorMsg(`${broker === 'kotak' ? 'Kotak trading symbol' : 'Contract ID'} missing for ${missingSecId.strike} ${missingSecId.optionType}. Please click Refresh.`);
+      setErrorMsg(`${broker !== 'dhan' ? `${BROKER_LABELS[broker]} trading symbol` : 'Contract ID'} missing for ${missingSecId.strike} ${missingSecId.optionType}. Please click Refresh.`);
       return;
     }
 
@@ -378,14 +380,16 @@ export default function OptionOrderModal({
       const isCrude = underUpper === 'CRUDEOIL' || underUpper === 'CRUDEOILM';
       const exchangeSegment = broker === 'kotak'
         ? (underUpper === 'SENSEX' ? 'bse_fo' : isCrude ? 'mcx_fo' : 'nse_fo')
-        : (underUpper === 'SENSEX' ? 'BSE_FNO' : isCrude ? 'MCX_COMM' : 'NSE_FNO');
+        : broker === 'zerodha'
+          ? (underUpper === 'SENSEX' ? 'BFO' : isCrude ? 'MCX' : 'NFO')
+          : (underUpper === 'SENSEX' ? 'BSE_FNO' : isCrude ? 'MCX_COMM' : 'NSE_FNO');
       const dhanOrderType = orderType === 'SL-M' ? 'STOP_LOSS_MARKET' : orderType === 'SL' ? 'STOP_LOSS' : orderType;
 
-      // Quantity in units: Dhan's lookup reports MCX lot size 1 (its MCX orders are in lots), Kotak's the absolute
-      // units per lot (its MCX orders are in units) — so lots x lot size is right for either.
+      // Quantity in units: Dhan's and Zerodha's lookups report MCX lot size 1 (their MCX orders are in lots), Kotak's the
+      // absolute units per lot (its MCX orders are in units) — so lots x lot size is right for each.
       const placedLegs: PlacedOptionLeg[] = resolvedLegs.map((leg) => ({
-        securityId: broker === 'kotak' ? '' : String(leg.securityId),
-        ...(broker === 'kotak' ? { tradingSymbol: String(leg.tradingSymbol) } : {}),
+        securityId: broker !== 'dhan' ? '' : String(leg.securityId),
+        ...(broker !== 'dhan' ? { tradingSymbol: String(leg.tradingSymbol) } : {}),
         exchangeSegment,
         strike: leg.strike,
         optionType: leg.optionType,
@@ -395,7 +399,7 @@ export default function OptionOrderModal({
       }));
 
       const payloadLegs = placedLegs.map((leg) => ({
-        ...(broker === 'kotak' ? { tradingSymbol: leg.tradingSymbol, exchange: exchangeSegment } : { securityId: leg.securityId, exchangeSegment }),
+        ...(broker !== 'dhan' ? { tradingSymbol: leg.tradingSymbol, exchange: exchangeSegment } : { securityId: leg.securityId, exchangeSegment }),
         quantity: leg.qty,
         side: leg.action,
         orderType: dhanOrderType,
@@ -431,7 +435,7 @@ export default function OptionOrderModal({
       const results = Array.isArray(json.data) ? json.data : [];
       const outcome = placedLegs.map((leg, i) => {
         const r = results[i];
-        const sameLeg = r && String(broker === 'kotak' ? r.tradingSymbol : r.securityId) === String(identOf(leg));
+        const sameLeg = r && String(broker !== 'dhan' ? r.tradingSymbol : r.securityId) === String(identOf(leg));
         // A reply that cannot be tied to this leg proves nothing about it.
         if (!sameLeg) return json!.success ? 'placed' : 'unknown';
         if (r.success) { if (r.orderId) leg.orderId = String(r.orderId); return 'placed'; }
@@ -441,7 +445,7 @@ export default function OptionOrderModal({
 
       const placedOnly = placedLegs.filter((_, i) => outcome[i] === 'placed');
       const orderIds: string[] = placedOnly.map((l) => l.orderId ?? '').filter(Boolean);
-      const summary = `${displayTitle} · ${lotsMultiplier}x (${lotsMultiplier * lotSize} qty) · ${productType} · ${ORDER_TYPE_LABELS[orderType]}${broker === 'kotak' ? ' · Kotak' : ''}`;
+      const summary = `${displayTitle} · ${lotsMultiplier}x (${lotsMultiplier * lotSize} qty) · ${productType} · ${ORDER_TYPE_LABELS[orderType]}${broker !== 'dhan' ? ` · ${BROKER_LABELS[broker]}` : ''}`;
 
       // Whatever went out is handed to the ledger, even when another leg failed: a placed leg left out of the ledger
       // is a live position this page neither shows as its own nor can exit as its own.
@@ -596,7 +600,7 @@ export default function OptionOrderModal({
               Order Type
             </label>
             <div className="grid grid-cols-4 gap-2 mb-2">
-              {(Object.keys(ORDER_TYPE_LABELS) as OrderTypeChoice[]).map((ot) => (
+              {orderTypeChoices.map((ot) => (
                 <button
                   key={ot}
                   type="button"
@@ -697,7 +701,7 @@ export default function OptionOrderModal({
                         {leg.lots * lotsMultiplier} lot{leg.lots * lotsMultiplier > 1 ? 's' : ''} (<strong className="text-white">{legQty}</strong> qty)
                       </span>
                       <span className="text-[10px] text-zinc-500">
-                        {identOf(leg) ? `${broker === 'kotak' ? '' : 'ID: '}${identOf(leg)}` : <span className="text-amber-400">Resolving...</span>}
+                        {identOf(leg) ? `${broker !== 'dhan' ? '' : 'ID: '}${identOf(leg)}` : <span className="text-amber-400">Resolving...</span>}
                       </span>
                     </div>
                   </div>

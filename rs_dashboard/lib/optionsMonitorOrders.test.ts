@@ -73,7 +73,8 @@ test('only open order records are stored or restored', () => {
   assert.equal(isStoredTradeLeg(stored('a', T0)), true);
   assert.equal(isStoredTradeLeg({ id: 'a', order: { ...order(), qty: 0 } }), false);
   assert.equal(isStoredTradeLeg({ id: 'a' }), false);
-  assert.equal(isStoredTradeLeg({ id: 'a', order: { ...order(), broker: 'zerodha' } }), false);
+  assert.equal(isStoredTradeLeg({ id: 'a', order: { ...order(), broker: 'zerodha' } }), true);
+  assert.equal(isStoredTradeLeg({ id: 'a', order: { ...order(), broker: 'angel' } }), false);
 });
 
 test('the save diff sends new / changed legs and removes the ones no longer open', () => {
@@ -87,4 +88,10 @@ test('the save diff sends new / changed legs and removes the ones no longer open
   assert.deepEqual(upserts.map((u) => u.id), ['b', 'c']);
   assert.deepEqual(removed, []);
   assert.deepEqual(tradeSaveDiff([{ id: 'a' }], last, T0 + 9).removed, [{ id: 'a', at: T0 + 9 }, { id: 'b', at: T0 + 9 }]);
+});
+
+test('Zerodha legs are stamped and exited by trading symbol, like Kotak', () => {
+  const out = stampPlacedLegs([leg()], [placed({ exchangeSegment: 'NFO' })], 'zerodha', B, B, T0);
+  assert.deepEqual(out[0].order, { broker: 'zerodha', qty: 65, productType: 'INTRADAY', ident: 'NIFTY26O2725100CE', exchange: 'NFO', at: T0 });
+  assert.deepEqual(exitPlan(out[0].order!, 'SELL', [row(-65)], T0 + 60_000), { kind: 'send', qty: 65, side: 'BUY' });
 });
