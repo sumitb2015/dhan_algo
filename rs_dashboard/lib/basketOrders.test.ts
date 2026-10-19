@@ -111,9 +111,11 @@ test('resolveOrderRequest: a Kotak stop carries its trigger (and limit for SL) b
   assert.strictEqual(slm?.body.price, undefined);
 });
 
-test('resolveOrderRequest: stop orders are refused for Zerodha and when trigger/limit are missing', () => {
+test('resolveOrderRequest: Zerodha places stop orders by trading symbol, and stops are refused when trigger/limit are missing', () => {
   const sl = { ...stopLeg, type: 'SL' as const, price: 238, triggerPrice: 240 };
-  assert.strictEqual(resolveOrderRequest('zerodha', sl, { '24000': { ceSymbol: 'X' } }), null);
+  const z = resolveOrderRequest('zerodha', sl, { '24000': { ceSymbol: 'X' } });
+  assert.deepStrictEqual({ url: z?.url, type: z?.body.orderType, trig: z?.body.triggerPrice, px: z?.body.price }, { url: '/api/scalper/zerodha/order', type: 'SL', trig: 240, px: 238 });
+  assert.strictEqual(resolveOrderRequest('zerodha', { ...sl, triggerPrice: undefined }, { '24000': { ceSymbol: 'X' } }), null);
   assert.strictEqual(resolveOrderRequest('kotak', { ...sl, triggerPrice: undefined }, { '24000': { ceSymbol: 'X' } }), null);
   assert.strictEqual(resolveOrderRequest('kotak', { ...sl, price: undefined }, { '24000': { ceSymbol: 'X' } }), null);
   assert.strictEqual(resolveOrderRequest('dhan', { ...sl, triggerPrice: undefined }, stopMap), null);

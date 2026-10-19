@@ -43,7 +43,7 @@ before changing any of it**; this skill only maps the page.
    **no P&L** (never value against 0). Groups with futures show rupee P&L only; points/% and strategy Target/SL are off.
 5. **Day roll.** A leg opened on an earlier IST day whose security id is absent from the broker book is marked CLOSED
    (no exit price recoverable); the same day an absent row only waits (order-propagation lag). `86a03d93`.
-6. **Stop-loss entry orders (SL-L / SL-M, Dhan and Kotak; Zerodha refused, `ca20e7c7`).** A resting stop is a `WaitingEntry` on
+6. **Stop-loss entry orders (SL-L / SL-M; Dhan, Kotak and Zerodha, `ca20e7c7`; Zerodha 2026-10-19, unconfirmed on a live account).** A resting stop is a `WaitingEntry` on
    `basket.waitingEntries`, **never a leg**. Each poll, `settleWaitingEntry(w, orderRow)` returns wait / open / dead /
    expired; only `open` creates a leg (`applyTriggeredEntry`, at the traded qty and average, idempotent by order id).
    No order book this tick = nothing settles. If another group already tracks that security id the fill is **not**
@@ -108,7 +108,7 @@ before changing any of it**; this skill only maps the page.
      for settling shorts), then disarms. Otherwise a leg added the same day would be closed at once by the realized loss.
    - **Test the engine, not the effect:** add a case to `lib/multiLegGuardEngine.test.ts` for any new guard behaviour.
 
-12. **Resting LIMIT exits** (Exit ticket, Dhan and Kotak; Zerodha is MARKET only, 2026-10-13). Unlike a market exit, a limit exit does NOT flip the leg to
+12. **Resting LIMIT exits** (Exit ticket, all three brokers; Zerodha since 2026-10-19). Unlike a market exit, a limit exit does NOT flip the leg to
    CLOSED on ACK: it records `pendingOrders` `{kind:'exit', resting:true}` and the leg stays OPEN, so its SL/target/guards keep
    working. The fill reaches the ledger through broker reconcile (full close, or `brokerClampSlice` for a partial, price
    estimated from the row). `applyOrderOutcomes` only retires a resting entry (never reopens/re-prices; TTL 8 h, not 30 min) and

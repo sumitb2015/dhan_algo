@@ -1035,7 +1035,8 @@ function MultiLegFocus({
   // drops it once the order book says CANCELLED, and — if the trigger printed first so Dhan
   // refuses the cancel — opens the leg it became. Removing it locally would orphan that position.
   const cancelWaitingEntry = useCallback(async (basketId: string, orderId: string): Promise<boolean> => {
-    const waitingBroker = basketsRef.current.find(b => b.id === basketId)?.broker === 'kotak' ? 'kotak' : 'dhan';
+    const wb = basketsRef.current.find(b => b.id === basketId)?.broker;
+    const waitingBroker = wb === 'kotak' || wb === 'zerodha' ? wb : 'dhan';
     try {
       const res = await fetch('/api/scalper/orders', {
         method: 'DELETE',
@@ -2541,8 +2542,8 @@ function MultiLegFocus({
     const qty = params.lots * lotSize;
     const label = `${params.side === 'B' ? 'BUY' : 'SELL'} ${params.strike} ${params.option}`;
     const isStop = params.orderType === 'SL' || params.orderType === 'SLM';
-    if (isStop && ((bk !== 'dhan' && bk !== 'kotak') || opts?.carry)) {
-      addToast('error', `Stop order refused for ${label}`, 'Stop-loss entry orders are available on Dhan and Kotak only, and only from Add New Leg.');
+    if (isStop && opts?.carry) {
+      addToast('error', `Stop order refused for ${label}`, 'Stop-loss entry orders are only available from Add New Leg.');
       return false;
     }
     // Dhan nets by security id: a stop on the OPPOSITE side of a leg this row already holds would
@@ -3429,7 +3430,7 @@ function MultiLegFocus({
           const adoptFrom = (from: MultiLegBasket[]) => {
             // Only entries whose order has not traded anything: once a stop is part-filled its position is
             // live, so it must stay visible to adoption (and so carry stops) instead of hiding behind the entry.
-            // Dhan rows are matched on security id, Kotak rows on trading symbol (it has no numeric id).
+            // Dhan rows are matched on security id, Kotak and Zerodha rows on trading symbol.
             const waitingFor = (bk: Broker) => new Set(from.flatMap(b => (b.broker === bk
               ? (b.waitingEntries ?? []).filter(w => {
                   const o = ordersByBroker[bk]?.get(w.orderId);
@@ -3438,10 +3439,12 @@ function MultiLegFocus({
               : [])));
             const waitingDhan = waitingFor('dhan');
             const waitingKotak = waitingFor('kotak');
+            const waitingZerodha = waitingFor('zerodha');
             return (Object.entries(rowsByBroker) as [Broker, Record<string, unknown>[]][])
               .flatMap(([b, rows]) => outsidePositionBaskets(from, b,
                 b === 'dhan' && waitingDhan.size ? rows.filter(r => !waitingDhan.has(String(r.securityId ?? '')))
                 : b === 'kotak' && waitingKotak.size ? rows.filter(r => !waitingKotak.has(String(r.tradingSymbol ?? '')))
+                : b === 'zerodha' && waitingZerodha.size ? rows.filter(r => !waitingZerodha.has(String(r.tradingSymbol ?? '')))
                 : rows,
                 Object.keys(DEFAULT_INDEX_SPOT), lotSizeFor(b), day, nowIso));
           };

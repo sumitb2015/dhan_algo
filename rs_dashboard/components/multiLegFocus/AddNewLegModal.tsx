@@ -96,7 +96,7 @@ export default function AddNewLegModal({
   const rollKey = rollWarn ? `${side}${option}${lots}/${rollWarn.stoppedLots}` : '';
   const rollBlocked = !!rollWarn && ackedRoll !== rollKey;
 
-  // Stop-loss entry: Dhan and Kotak. It rests until the trigger prints, so it must sit on the far
+  // Stop-loss entry: Dhan, Kotak and Zerodha. It rests until the trigger prints, so it must sit on the far
   // side of the live price (a BUY stop above it, a SELL stop below it) or Dhan rejects it.
   const isStop = orderType === 'SL' || orderType === 'SLM';
   // Compared exactly as it will be sent: the order request snaps both prices to the contract's grid (0.05, CRUDEOIL 0.10).
@@ -318,13 +318,13 @@ export default function AddNewLegModal({
           </div>
 
           {/* Order Type & Price */}
-          <div className={`grid gap-2 ${(basket.broker === 'dhan' || basket.broker === 'kotak') && allowStops ? 'grid-cols-4' : 'grid-cols-2'}`}>
+          <div className={`grid gap-2 ${allowStops ? 'grid-cols-4' : 'grid-cols-2'}`}>
             {([
               ['MARKET', 'MARKET', 'Fill now at the market'],
               ['LIMIT', 'LIMIT', 'Rest at your limit price'],
               ['SL', 'SL-L', 'Stop-limit: open when the trigger prints, at your limit price'],
               ['SLM', 'SL-M', 'Stop-market: open at the market when the trigger prints'],
-            ] as const).filter(([k]) => ((basket.broker === 'dhan' || basket.broker === 'kotak') && allowStops) || k === 'MARKET' || k === 'LIMIT').map(([k, label, tip]) => (
+            ] as const).filter(([k]) => allowStops || k === 'MARKET' || k === 'LIMIT').map(([k, label, tip]) => (
               <button
                 key={k}
                 type="button"

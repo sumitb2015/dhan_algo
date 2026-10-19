@@ -44,9 +44,9 @@ export function appendToArchive(archive: ArchivedBasket[], retired: MultiLegBask
   return [...archive.filter(a => !ids.has(a.id)), ...incoming.map(b => ({ ...b, archivedAt: nowIso }))];
 }
 
-/** Dhan quotes MCX crude in lots, so its per-point value needs the contract multiplier (same rule as the live page). */
+/** Dhan and Zerodha quote MCX crude in lots, so the per-point value needs the contract multiplier (same rule as the live page). */
 export function pnlMultiplier(basket: Pick<MultiLegBasket, 'broker' | 'underlying'>): number {
-  if (basket.broker !== 'dhan') return 1;
+  if (basket.broker !== 'dhan' && basket.broker !== 'zerodha') return 1;
   return basket.underlying === 'CRUDEOIL' ? 100 : basket.underlying === 'CRUDEOILM' ? 10 : 1;
 }
 

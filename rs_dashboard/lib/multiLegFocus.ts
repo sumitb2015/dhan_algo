@@ -177,10 +177,10 @@ export function isLooseTrade(basket: MultiLegBasket): boolean {
   return basket.legs.length === 1 && basket.legs[0].status !== 'DRAFT' && !basket.groupName?.trim();
 }
 
-/** Dhan reports MCX crude quantity in lots-of-barrels differently per contract: CRUDEOIL x100,
+/** Dhan and Zerodha report MCX crude quantity in lots-of-barrels differently per contract: CRUDEOIL x100,
  *  CRUDEOILM x10. Every other underlying/broker is 1. Single source for ledger-qty -> P&L scaling. */
 export function crudeQtyMultiplier(underlying: string, broker: string): number {
-  if (broker !== 'dhan') return 1;
+  if (broker !== 'dhan' && broker !== 'zerodha') return 1;   // Kotak counts barrels already
   return underlying === 'CRUDEOIL' ? 100 : underlying === 'CRUDEOILM' ? 10 : 1;
 }
 

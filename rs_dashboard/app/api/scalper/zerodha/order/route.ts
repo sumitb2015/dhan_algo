@@ -8,6 +8,8 @@ import { cachedZerodhaContract, slicesFor } from '@/lib/zerodhaContracts';
  *  order against them, which a plain market order would leave dangling. */
 const KITE_PRODUCTS = new Set(['MIS', 'NRML', 'CNC']);
 
+const sideOf = (side: unknown): string => String(side).toUpperCase();
+
 export async function GET(): Promise<NextResponse> {
   return NextResponse.json({ ready: true });
 }
@@ -19,6 +21,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     side: string;
     orderType?: string;
     price?: number;
+    /** Stop orders (orderType SL / SLM): the trigger the exchange watches. */
+    triggerPrice?: number;
     exchange?: string;
     product?: string;
     /** Calling terminal, for the per-source lot cap (lib/kotakOrderRules SOURCE_LOT_CAPS). Absent = uncapped (closes). */
@@ -53,12 +57,27 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ success: false, error: `Invalid side: ${side} (must be BUY or SELL)` }, { status: 400 });
   }
 
-  const isLimitOrder = String(orderType).toUpperCase() === 'LIMIT';
-  if (isLimitOrder && !(Number(price) > 0)) {
-    return NextResponse.json({ success: false, error: `Invalid price for LIMIT order: ${price}` }, { status: 400 });
+  const orderTypeUpper = String(orderType).toUpperCase();
+  const isLimitOrder = orderTypeUpper === 'LIMIT';
+  const isStopLimit = orderTypeUpper === 'SL' || orderTypeUpper === 'STOP_LOSS';
+  const isStopMarket = orderTypeUpper === 'SLM' || orderTypeUpper === 'SL-M' || orderTypeUpper === 'STOP_LOSS_MARKET';
+  const isStop = isStopLimit || isStopMarket;
+  if (!isLimitOrder && !isStop && orderTypeUpper !== 'MARKET') {
+    return NextResponse.json({ success: false, error: `Unsupported order type: ${orderType}` }, { status: 400 });
+  }
+  if ((isLimitOrder || isStopLimit) && !(Number(price) > 0)) {
+    return NextResponse.json({ success: false, error: `Invalid price for ${orderTypeUpper} order: ${price}` }, { status: 400 });
+  }
+  // A stop with no positive trigger must never fall through as a market order.
+  const triggerNum = Number(body.triggerPrice) || 0;
+  if (isStop && !(triggerNum > 0)) {
+    return NextResponse.json({ success: false, error: `Invalid triggerPrice for ${orderTypeUpper} order: ${body.triggerPrice}` }, { status: 400 });
+  }
+  if (isStopLimit && (sideOf(side) === 'BUY' ? Number(price) < triggerNum : Number(price) > triggerNum)) {
+    return NextResponse.json({ success: false, error: `${sideOf(side)} SL limit ${price} must be ${sideOf(side) === 'BUY' ? '>=' : '<='} its trigger ${triggerNum}` }, { status: 400 });
   }
 
-  const contract = source || isLimitOrder ? cachedZerodhaContract(String(tradingsymbol)) : null;
+  const contract = source || isLimitOrder || isStop ? cachedZerodhaContract(String(tradingsymbol)) : null;
   const capError = zerodhaLotCapError(qtyNum, source, String(tradingsymbol), contract);
   if (capError) return NextResponse.json({ success: false, error: capError }, { status: 400 });
 
@@ -66,21 +85,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     tradingsymbol,
     exchange,
     transaction_type: sideUpper,
-    order_type: isLimitOrder ? 'LIMIT' : 'MARKET',
+    order_type: isStopLimit ? 'SL' : isStopMarket ? 'SL-M' : isLimitOrder ? 'LIMIT' : 'MARKET',
     quantity: qtyNum,
     product,
     validity: 'DAY',
   };
-  if (isLimitOrder) {
-    params.price = zerodhaSnapPrice(Number(price), contract);
-  } else {
+  if (isLimitOrder || isStopLimit) params.price = zerodhaSnapPrice(Number(price), contract);
+  if (isStop) params.trigger_price = zerodhaSnapPrice(triggerNum, contract);
+  if (!isLimitOrder && !isStopLimit) {
     // Zerodha rejects API market orders on options without market
     // protection; -1 = automatic system-managed protection band.
     params.market_protection = -1;
   }
 
   // Over the exchange freeze quantity an order is rejected outright: send whole-lot slices instead.
-  const r = await placeZerodhaOrderSliced(params, slicesFor(String(tradingsymbol), qtyNum));
+  const slices = slicesFor(String(tradingsymbol), qtyNum);
+  // A resting stop is tracked by ONE order id, so it cannot be cut into several orders.
+  if (isStop && slices.length > 1) {
+    return NextResponse.json({ success: false, error: `A stop order of ${qtyNum} is above the exchange freeze quantity — use fewer lots (nothing was sent).` }, { status: 400 });
+  }
+  const r = await placeZerodhaOrderSliced(params, slices);
   if (r.status === 'placed') {
     invalidateBrokerCache('zerodha');
     return NextResponse.json({ success: true, order_id: r.orderId, ...(r.reconciled ? { reconciled: true } : {}) });

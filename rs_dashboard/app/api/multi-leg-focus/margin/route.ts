@@ -118,10 +118,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const legMargins: Record<string, number> = {};
       const legMarginSource: Record<string, 'live' | 'estimate'> = {};
       const defaultSpot = underlying === 'BANKNIFTY' ? 51000 : underlying === 'SENSEX' ? 79000 : isCrude ? 8500 : 24000;
-      // Dhan's crude quantity is in lots and needs scaling to barrels for rupee
-      // math; every other broker already sends quantity in barrels (see
+      // Dhan's and Zerodha's crude quantity is in lots and needs scaling to barrels for
+      // rupee math; Kotak already sends quantity in barrels (see
       // lib/multiLegFocus.ts's fallbackLotSize), so no further scaling there.
-      const crudeMult = broker !== 'dhan' ? 1 : (underlying === 'CRUDEOIL' ? 100 : underlying === 'CRUDEOILM' ? 10 : 1);
+      const countsMcxInLots = broker === 'dhan' || broker === 'zerodha';
+      const crudeMult = !countsMcxInLots ? 1 : (underlying === 'CRUDEOIL' ? 100 : underlying === 'CRUDEOILM' ? 10 : 1);
       // Dhan's margin calculator is the only one of the three brokers this
       // dashboard supports that exposes a real SPAN+exposure endpoint. For a
       // Kotak/Zerodha basket this does NOT mean falling back to a flat,
@@ -133,11 +134,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // is reserved for when the Dhan
       // lookup itself fails (expiry not yet in the master list, etc).
       const hasLiveMarginApi = broker === 'dhan';
-      // Crude is cross-priced too: Dhan's calculator takes MCX quantity in LOTS, while every other broker's order
-      // quantity is in barrels, so the barrels are converted back to lots (dhanQtyFor) before the call.
+      // Crude is cross-priced too: Dhan's calculator takes MCX quantity in LOTS. Zerodha counts lots as well; Kotak's
+      // order quantity is in barrels, so its barrels are converted back to lots (dhanQtyFor) before the call.
       const crossPriceViaDhan = !hasLiveMarginApi;
       const crudeBarrelsPerLot = underlying === 'CRUDEOIL' ? 100 : underlying === 'CRUDEOILM' ? 10 : 1;
-      const dhanQtyFor = (leg: LegInput): number => (hasLiveMarginApi || !isCrude
+      const dhanQtyFor = (leg: LegInput): number => (countsMcxInLots || !isCrude
         ? leg.quantity
         : (leg.quantity % crudeBarrelsPerLot === 0 ? leg.quantity / crudeBarrelsPerLot : 0));
       // A Calendar/Diagonal far leg trades a DIFFERENT expiry than the

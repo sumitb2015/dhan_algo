@@ -1404,3 +1404,13 @@ test('normalizeTradeRow reads a Kotak "DD-Mon-YYYY HH:MM:SS" stamp as IST (an un
   assert.strictEqual(t2?.at, Date.parse('2026-09-01T09:05:00+05:30'));
   assert.strictEqual(normalizeTradeRow({ tradingSymbol: 'X', transactionType: 'SELL', tradedQuantity: 1, tradedPrice: 1, createTime: '5-Foo-2026 09:05:00' })?.at, 0);
 });
+
+test('MCX crude counts in lots on Dhan and Zerodha (barrels-per-lot multiplier, lot size 1), in barrels on Kotak', async () => {
+  const { crudeQtyMultiplier, fallbackLotSize } = await import('./multiLegFocus.ts');
+  for (const b of ['dhan', 'zerodha']) {
+    assert.strictEqual(crudeQtyMultiplier('CRUDEOILM', b), 10);
+    assert.strictEqual(fallbackLotSize('CRUDEOILM', b), 1);
+  }
+  assert.strictEqual(crudeQtyMultiplier('CRUDEOILM', 'kotak'), 1);
+  assert.strictEqual(crudeQtyMultiplier('NIFTY', 'zerodha'), 1);
+});

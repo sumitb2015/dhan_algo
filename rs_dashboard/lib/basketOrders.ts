@@ -53,8 +53,7 @@ export function resolveOrderRequest(
   const limitPrice = leg.type === 'LIMIT' && leg.price != null ? snap(leg.price) : undefined;
 
   const isStop = leg.type === 'SL' || leg.type === 'SLM';
-  // Stop entries rest at the exchange: Dhan (Super/STOP_LOSS) and Kotak (SL / SL-M) place them; Zerodha's route does not.
-  if (isStop && broker !== 'dhan' && broker !== 'kotak') return null;
+  // Stop entries rest at the exchange: Dhan (STOP_LOSS), Kotak (SL / SL-M) and Zerodha (SL / SL-M) all place them.
   const triggerPrice = isStop && leg.triggerPrice != null && leg.triggerPrice > 0 ? snap(leg.triggerPrice) : undefined;
   if (isStop && triggerPrice == null) return null;
   const stopLimit = leg.type === 'SL' && leg.price != null && leg.price > 0 ? snap(leg.price) : undefined;

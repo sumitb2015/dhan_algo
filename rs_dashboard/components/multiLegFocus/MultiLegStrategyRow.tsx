@@ -21,7 +21,7 @@ import LegColumnsMenu from './LegColumnsMenu';
 import { DEFAULT_LEG_COLUMNS, type LegColumns } from '@/lib/legColumns';
 import {
   computeLegTrailingSL, withAutoLegRisk, computeStrategyMetrics, checkStrategyRisk, computeBasketStatus,
-  classifyBasketStructure, legCountsToday, legPnl, legAvgPrice, legPnlPct, legQtyUnits, crudeQtyMultiplier, basketLabel,
+  classifyBasketStructure, legCountsToday, legPnl, legAvgPrice, legPnlPct, legQtyUnits, crudeQtyMultiplier, basketLabel, fallbackLotSize,
   findSiblingLegCollisions, type SiblingLegCollision, scaleBasketMultiplier, futuresAsSyntheticPayoffLegs, isOptionLeg,
   type MultiLegBasket, type MultiLegLeg, type StrategyRiskConfig, type AutoLegRule, type AutoReentryRule, DEFAULT_AUTO_LEG_RULE, SAME_DISTANCE, MATCH_OPPOSITE,
 } from '@/lib/multiLegFocus';
@@ -338,10 +338,7 @@ export default function MultiLegStrategyRow({
 
   const defaultLotSize = useMemo(() => {
     if (lotSize && lotSize > 0) return lotSize;
-    if (basket.underlying === 'NIFTY') return 65;
-    if (basket.underlying === 'BANKNIFTY') return 15;
-    if (basket.underlying === 'SENSEX') return 20;
-    return broker === 'dhan' ? 1 : (basket.underlying === 'CRUDEOIL' ? 100 : 10);
+    return fallbackLotSize(basket.underlying, broker);
   }, [lotSize, basket.underlying, broker]);
 
   // On-demand Greeks panel. Computed through the central payoff library from each leg's live mark — the same numbers as the payoff
@@ -427,7 +424,7 @@ export default function MultiLegStrategyRow({
   // values the book as of the NEAREST expiry (later legs keep their time value), finds exact break-evens, and returns the
   // header numbers, curves, SD band, POP and net Greeks the chart and the stats strips below all read. No curve is built here.
   // Collapsed rows only need the header numbers, so they ask for the `light` model (no curves).
-  const payoffMultiplier = (broker === 'dhan' && (basket.underlying === 'CRUDEOIL' || basket.underlying === 'CRUDEOILM')) ? crudeMult : 1;
+  const payoffMultiplier = ((broker === 'dhan' || broker === 'zerodha') && (basket.underlying === 'CRUDEOIL' || basket.underlying === 'CRUDEOILM')) ? crudeMult : 1;
 
   const payoffLegInputs = basket.legs
     .filter(l => l.status !== 'CLOSED')
@@ -1228,7 +1225,7 @@ export default function MultiLegStrategyRow({
                       basketMarginSource === 'live'
                         ? "Real SPAN+exposure margin from Dhan's multi-leg margin calculator"
                         : broker !== 'dhan'
-                          ? `${broker} has no live margin-calculator API — this is a flat ~12% estimate`
+                          ? `${broker} has no live margin-calculator API — this is a flat ~12% estimate (its strikes are priced through Dhan's calculator when that lookup works)`
                           : 'Flat ~12% estimate — a leg is not yet resolved to a security ID or the live calculator call failed'
                     }
                   >
