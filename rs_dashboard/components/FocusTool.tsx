@@ -7677,7 +7677,27 @@ function FocusTool() {
    * mirrored when linked and the other leg is flat.
    */
   async function handleShiftStrike(row: FocusRow, leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') {
-    if (busyRows.has(row.id)) return;
+    // Every refusal below is only a toast, which is gone after 4 s: copy the error toasts into the events log so a
+    // shift that did nothing says why (2026-10-19: a CE shift DOWN on an open leg sent no order and left no trace).
+    const tap: string[] = [];
+    reentryTapsRef.current.push(tap);
+    try {
+      await handleShiftStrikeInner(row, leg, direction);
+    } finally {
+      reentryTapsRef.current = reentryTapsRef.current.filter(t => t !== tap);
+      const latest = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
+      // 'Linked leg kept its strike' is informational: the shift itself went through.
+      const failures = tap.filter(t => !t.startsWith('Linked leg kept its strike'));
+      logEvent('shift_outcome', latest, failures.length ? failures.join(' | ') : 'shift completed',
+        { leg, direction, ok: failures.length === 0, notes: tap.length - failures.length || undefined });
+    }
+  }
+
+  async function handleShiftStrikeInner(row: FocusRow, leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') {
+    if (busyRows.has(row.id)) {
+      addToast('error', 'Shift ignored', 'An order on this row is still in flight');
+      return;
+    }
     logEvent('manual_shift', row, `manual: shift ${leg} ${direction}`, { leg, direction });
     const u = row.underlying;
     // A shift only moves the strike, never the expiry — always this row's own.
