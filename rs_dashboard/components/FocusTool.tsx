@@ -7,7 +7,7 @@ import NavBar from './NavBar';
 import {
   TrendingUp, Zap, ShieldOff, Shield, Activity,
   Clock, Plus, Layers, Target, Lock, RefreshCw, X, Trash2,
-  ChevronUp, ChevronDown, Grid3x3, Calendar, Minus, Ellipsis, ArrowRight, LayoutList, Sigma, LogOut, Bookmark, CircleHelp, ChartColumn,
+  ChevronUp, ChevronDown, Grid3x3, Calendar, Minus, Ellipsis, ArrowRight, LayoutList, Sigma, Calculator, LogOut, Bookmark, CircleHelp, ChartColumn,
 } from 'lucide-react';
 import HelpModal from './HelpModal';
 import CumulativeOIModal from './CumulativeOIModal';
@@ -61,6 +61,8 @@ import {
 import { postFocusEvent } from '@/lib/focusToolEvents';
 import { buildPayoffModel } from '@/lib/optionsPayoff';
 import { computeBasketGreeks, type GreekLeg } from '@/lib/multiLegGreeks';
+import NetDeltaCalculator from '@/components/NetDeltaCalculator';
+import { calcLegsFromGreekLegs } from '@/lib/deltaCalcLegs';
 import { useFocusMarketData, expKey, strikeKey, type FutQuote, type StrikeRef } from '@/lib/useFocusMarketData';
 import { isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
 import { fetchSliceTradedPrice } from '@/lib/tradedPriceClient';
@@ -2965,7 +2967,7 @@ function ControlStrip({
   lockRupees, setLockRupees, trailX, setTrailX,
   totalPnl, peakMtm, lockMtm, simPnl, simRows,
   copyTrade,
-  onOpenRisk, onOpenOrders, onOpenOptionChain, onOpenGreeks, onOpenPresets, onSetViewMode, viewMode,
+  onOpenRisk, onOpenOrders, onOpenOptionChain, onOpenGreeks, onOpenDeltaCalc, onOpenPresets, onSetViewMode, viewMode,
   onExitAll, confirmExitAll, exitingAll,
 }: {
   liveRealMoney: boolean; onToggleLive: () => void; broker: Broker;
@@ -2984,6 +2986,7 @@ function ControlStrip({
   onOpenOrders: () => void;
   onOpenOptionChain: () => void;
   onOpenGreeks: () => void;
+  onOpenDeltaCalc: () => void;
   /** Presets & backup drawer (duplicate / presets / export / import). */
   onOpenPresets: () => void;
   onSetViewMode: (mode: FocusViewMode) => void;
@@ -3055,6 +3058,10 @@ function ControlStrip({
         <GhostBtn onClick={onOpenGreeks} title="Net Delta / Gamma / Theta / Vega of every open leg across the rows, from each leg's live price">
           <Sigma className="h-3.5 w-3.5 text-violet-400" />
           Greeks
+        </GhostBtn>
+        <GhostBtn onClick={onOpenDeltaCalc} title="What-if net delta: change lots and price on the open legs of one index">
+          <Calculator className="h-3.5 w-3.5 text-cyan-400" />
+          Delta calc
         </GhostBtn>
         <GhostBtn onClick={onOpenOrders} title="Today's broker order book and tradebook for this account">
           <Activity className="h-3.5 w-3.5 text-zinc-400" />
@@ -8101,37 +8108,65 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     at: Date;
     groups: { underlying: FocusUnderlying; spot: number; result: ReturnType<typeof computeBasketGreeks>; labels: Record<string, string> }[];
   } | null>(null);
+  // Open legs of one index across every row, as GreekLegs with their live marks. Shared by the Greeks window and the delta calculator.
+  function collectGreekLegs(u: FocusUnderlying) {
+    const legs: GreekLeg[] = [];
+    const marks: Record<string, number> = {};
+    const labels: Record<string, string> = {};
+    for (const row of config.rows) {
+      if (row.underlying !== u) continue;
+      const live = rowLive[row.id];
+      if (!live) continue;
+      for (const leg of legsOf(row)) {
+        if (!rowOwnsLeg(row, leg)) continue;
+        const units = legOwnContracts(row, leg, live);
+        const strike = leg === 'CE' ? live.ceStrike : live.peStrike;
+        if (!(units > 0) || !strike) continue;
+        const pos = leg === 'CE' ? live.cePosition : live.pePosition;
+        const id = `${row.id}:${leg}`;
+        legs.push({
+          legId: id, side: Number(pos?.netQty) > 0 ? 'B' : 'S', option: leg, strike,
+          expiry: row.expiry || expiries[u]?.[0] || '', units,
+        });
+        const ltp = Number(leg === 'CE' ? live.ltpCe : live.ltpPe) || 0;
+        if (ltp > 0) marks[id] = ltp;
+        labels[id] = `${isSimRow(row) ? 'SIM ' : ''}${row.id.slice(-4)}`;
+      }
+    }
+    return { legs, marks, labels };
+  }
+
   function runPortfolioGreeks() {
     const groups: NonNullable<typeof greeksSnap>['groups'] = [];
     for (const u of UNDERLYINGS) {
-      const legs: GreekLeg[] = [];
-      const marks: Record<string, number> = {};
-      const labels: Record<string, string> = {};
-      for (const row of config.rows) {
-        if (row.underlying !== u) continue;
-        const live = rowLive[row.id];
-        if (!live) continue;
-        for (const leg of legsOf(row)) {
-          if (!rowOwnsLeg(row, leg)) continue;
-          const units = legOwnContracts(row, leg, live);
-          const strike = leg === 'CE' ? live.ceStrike : live.peStrike;
-          if (!(units > 0) || !strike) continue;
-          const pos = leg === 'CE' ? live.cePosition : live.pePosition;
-          const id = `${row.id}:${leg}`;
-          legs.push({
-            legId: id, side: Number(pos?.netQty) > 0 ? 'B' : 'S', option: leg, strike,
-            expiry: row.expiry || expiries[u]?.[0] || '', units,
-          });
-          const ltp = Number(leg === 'CE' ? live.ltpCe : live.ltpPe) || 0;
-          if (ltp > 0) marks[id] = ltp;
-          labels[id] = `${isSimRow(row) ? 'SIM ' : ''}${row.id.slice(-4)}`;
-        }
-      }
+      const { legs, marks, labels } = collectGreekLegs(u);
       if (legs.length === 0) continue;
       const result = computeBasketGreeks(legs, { spot: spots[u] ?? 0, markOf: gl => marks[gl.legId], fallbackIv: 0.15 });
       groups.push({ underlying: u, spot: spots[u] ?? 0, result, labels });
     }
     setGreeksSnap({ at: new Date(), groups });
+  }
+
+  // ── Net-delta what-if calculator ───────────────────────────────────────
+  // One index at a time (deltas of different indices are not additive). Reads the same legs and marks as the Greeks window.
+  const [calcOpen, setCalcOpen] = useState(false);
+  const [calcUnderlying, setCalcUnderlying] = useState<FocusUnderlying | null>(null);
+  const calcCandidates = calcOpen ? UNDERLYINGS.filter(u => collectGreekLegs(u).legs.length > 0) : [];
+  const calcActive = calcUnderlying && calcCandidates.includes(calcUnderlying) ? calcUnderlying : (calcCandidates[0] ?? null);
+  function openDeltaCalc() { setCalcUnderlying(null); setCalcOpen(true); }
+  function calcSnapshot() {
+    if (!calcActive) return { legs: [], price: 0, isFuturesPricing: false };
+    const { legs, marks, labels } = collectGreekLegs(calcActive);
+    const price = spots[calcActive] ?? 0;
+    const isFutures = isMcxUnderlying(calcActive);
+    return {
+      legs: calcLegsFromGreekLegs(legs, {
+        unitsPerLot: lotSizes[calcActive] || 1,
+        price, isFutures, markOf: gl => marks[gl.legId], fallbackIv: 0.15,
+        labelOf: gl => `${labels[gl.legId] ?? ''} ${gl.option} ${gl.strike.toLocaleString('en-IN')}`.trim(),
+      }),
+      price, isFuturesPricing: isFutures,
+    };
   }
 
   /**
@@ -10354,6 +10389,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         onOpenOrders={() => setActiveModal('orderbook')}
         onOpenOptionChain={() => setActiveModal('optionchain')}
         onOpenGreeks={() => { runPortfolioGreeks(); setActiveModal('greeks'); }}
+        onOpenDeltaCalc={openDeltaCalc}
         onOpenPresets={() => { setPresetRowId(null); setActiveModal('presets'); }}
         onSetViewMode={setViewMode}
         viewMode={viewMode}
@@ -10595,6 +10631,31 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         )}
       </div>
 
+
+      <NetDeltaCalculator
+        open={calcOpen}
+        onClose={() => setCalcOpen(false)}
+        subtitle="What-if on the open legs of one index. Nothing is ordered."
+        snapshotKey={calcActive ?? ''}
+        getSnapshot={calcSnapshot}
+        headerExtra={calcCandidates.length > 1 ? (
+          <div className="flex flex-wrap gap-1.5" role="group" aria-label="Underlying">
+            {calcCandidates.map(u => (
+              <button
+                key={u}
+                type="button"
+                onClick={() => setCalcUnderlying(u)}
+                className={cn(
+                  'rounded-lg border px-2.5 py-1 text-[11px] font-bold transition-colors',
+                  u === calcActive ? 'border-cyan-500/60 bg-cyan-500/15 text-cyan-300' : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-white',
+                )}
+              >
+                {u}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      />
 
       <FocusModal
         isOpen={activeModal === 'greeks'}

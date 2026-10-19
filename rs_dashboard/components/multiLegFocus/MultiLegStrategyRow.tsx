@@ -2,7 +2,7 @@
 
 import React, { useState, useMemo, useCallback } from 'react';
 import {
-  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Loader2, RefreshCw, Table2, BarChart3, LineChart, Pencil, Unlink, ShieldAlert,
+  ChevronDown, ChevronUp, Trash2, Plus, Minus, X, Check, Layers, Sigma, Calculator, Loader2, RefreshCw, Table2, BarChart3, LineChart, Pencil, Unlink, ShieldAlert,
 } from 'lucide-react';
 import MultiLegLegRow from './MultiLegLegRow';
 import RuleNumInput from './RuleNumInput';
@@ -34,6 +34,8 @@ import PayoffDiagram, { modelToDiagramProps } from '@/components/strategy/Payoff
 import { buildPayoffModel, type PayoffModel, type PayoffLegInput } from '@/lib/optionsPayoff';
 import { StatChip } from '@/components/analytics/PayoffMetricStrip';
 import { basketToGreekLegs, computeBasketGreeks } from '@/lib/multiLegGreeks';
+import NetDeltaCalculator from '@/components/NetDeltaCalculator';
+import { calcLegsFromGreekLegs } from '@/lib/deltaCalcLegs';
 
 /** Dhan's option-chain API is rate limited (~1 call / 3.5 s per underlying). */
 
@@ -347,6 +349,7 @@ export default function MultiLegStrategyRow({
     result: ReturnType<typeof computeBasketGreeks>; at: Date; collisions: SiblingLegCollision[];
   } | null>(null);
   const [greeksOpen, setGreeksOpen] = useState(false);
+  const [calcOpen, setCalcOpen] = useState(false);
   const runGreeks = useCallback(() => {
     const legs = basketToGreekLegs(basket, defaultLotSize, crudeMult);
     setGreeksOpen(true);
@@ -902,6 +905,16 @@ export default function MultiLegStrategyRow({
 
           <button
             type="button"
+            onClick={() => setCalcOpen(true)}
+            title="What-if net delta: change lots and price on this strategy's legs"
+            className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-cyan-500/40 bg-cyan-500/10 text-cyan-300 hover:bg-cyan-500/20 ${FOCUS_RING}`}
+          >
+            <Calculator className="w-3 h-3" />
+            Delta calc
+          </button>
+
+          <button
+            type="button"
             onClick={() => setShowPositionVisualizer(true)}
             title="Position Map: horizontal strike line, vertical position bars, CE/PE annotations, and live spot"
             className={`h-7 px-2.5 inline-flex items-center gap-1 text-[11px] font-bold rounded-lg border border-indigo-500/40 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20 ${FOCUS_RING}`}
@@ -986,6 +999,26 @@ export default function MultiLegStrategyRow({
           </button>
         </div>
       </div>
+
+      <NetDeltaCalculator
+        open={calcOpen}
+        onClose={() => setCalcOpen(false)}
+        subtitle="What-if on this strategy's open legs. Nothing is ordered."
+        getSnapshot={() => {
+          const byId = new Map(basket.legs.map(l => [l.id, l]));
+          const price = spot ?? 0;
+          const isFutures = /^CRUDEOIL/.test(basket.underlying);
+          const legs = calcLegsFromGreekLegs(basketToGreekLegs(basket, defaultLotSize, crudeMult), {
+            unitsPerLot: defaultLotSize * crudeMult,
+            price,
+            isFutures,
+            markOf: gl => { const l = byId.get(gl.legId); const v = l ? ltpFor(l) : 0; return v > 0 ? v : undefined; },
+            chainIvOf: gl => (gl.option === 'FUT' ? undefined : ivForStrike?.(gl.strike, gl.option, gl.expiry) || undefined),
+            fallbackIv: FALLBACK_IV,
+          });
+          return { legs, price, isFuturesPricing: isFutures };
+        }}
+      />
 
       {greeksOpen && (
         <div className="px-4 py-2.5 border-t border-zinc-800/80 bg-zinc-950/40 flex flex-col gap-2">

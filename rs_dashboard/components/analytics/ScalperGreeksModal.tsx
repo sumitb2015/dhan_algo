@@ -26,6 +26,7 @@ import {
 import { lookupChainLegData, type ChainOc } from '@/lib/optionsStrategy';
 import { positionNetGreeksBy, type FutureRef } from '@/lib/positionPayoff';
 import type { ScalperPosition } from '@/lib/zerodhaShape';
+import { contractMultiplier } from '@/lib/positionPnl';
 import { StatChip } from './PayoffMetricStrip';
 
 /** Dhan's option-chain API is rate limited (~1 call / 3.5 s per underlying). */
@@ -44,6 +45,38 @@ function legUnderlying(leg: PositionLeg): string {
   return parseTradingSymbol(leg.display.tradingSymbol)?.underlying ?? '—';
 }
 
+/**
+ * Forward price implied by the chain itself (put-call parity, F = K + C − P), read at the at-the-money strike — the one
+ * where the cheaper side still carries the most premium (far strikes sit at a stale 0.05 on both sides and would give a
+ * nonsense forward). Prices are the bid/ask mid when both sides quote, else the last price. Used only when the chain
+ * response carries no spot — MCX futures quotes can come back empty while the chain's own option prices are live.
+ */
+function parityForward(oc: ChainOc): number | null {
+  const px = (leg: any): number => {
+    const bid = Number(leg?.top_bid_price), ask = Number(leg?.top_ask_price);
+    return bid > 0 && ask > 0 ? (bid + ask) / 2 : Number(leg?.last_price);
+  };
+  let best: { f: number; weight: number } | null = null;
+  for (const [key, row] of Object.entries(oc as Record<string, any>)) {
+    const k = Number(key);
+    const c = px(row?.ce), p = px(row?.pe);
+    if (!(k > 0) || !(c > 0) || !(p > 0)) continue;
+    const weight = Math.min(c, p);
+    if (!best || weight > best.weight) best = { f: k + c - p, weight };
+  }
+  return best && best.f > 0 ? best.f : null;
+}
+
+/** A futures position: delta 1 per unit, no gamma/theta/vega — it adds only to the net delta. */
+interface FutureLeg {
+  tradingSymbol: string;
+  productType: string;
+  /** Signed units (barrels / shares), same convention as an option leg's display qty. */
+  units: number;
+}
+
+const isFutureSymbol = (sym: string) => /FUT$/.test(sym.trim().toUpperCase());
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -57,6 +90,7 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
   const [progress, setProgress] = useState('');
   const [legs, setLegs] = useState<PositionLeg[]>([]);
   const [unparseable, setUnparseable] = useState<UnparseableLeg[]>([]);
+  const [futs, setFuts] = useState<FutureLeg[]>([]);
   const [chainErrors, setChainErrors] = useState<string[]>([]);
   const [truncated, setTruncated] = useState(0);
   const [scannedAt, setScannedAt] = useState<Date | null>(null);
@@ -74,7 +108,23 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
       // Kotak/Zerodha rows are already shaped and resolve via trading-symbol parsing.
       raw: broker === 'dhan' ? rawPositions : undefined,
     });
-    setUnparseable(unp);
+
+    // Futures are not option legs, but they carry delta — fold them into the net instead of dropping them.
+    const futLegs: FutureLeg[] = [];
+    for (const r of rawPositions) {
+      const sym = String(r.tradingSymbol ?? '');
+      const qty = Number(r.netQty ?? 0);
+      if (!isFutureSymbol(sym) || qty === 0) continue;
+      // Dhan reports MCX quantity in lots; scale to units like the option legs do. Other brokers are already in units.
+      const mult = broker === 'dhan' ? contractMultiplier(r) : 1;
+      futLegs.push({
+        tradingSymbol: sym,
+        productType: String(r.productType ?? r.prod ?? ''),
+        units: qty * mult,
+      });
+    }
+    setFuts(futLegs);
+    setUnparseable(unp.filter((u) => !isFutureSymbol(u.tradingSymbol)));
 
     if (!rawLegs.length) {
       setLegs([]);
@@ -113,6 +163,9 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
         if (!mkts[underlying] && typeof json.data.spot === 'number' && json.data.spot > 0) {
           const fp = json.data.future_price, fe = json.data.future_expiry;
           mkts[underlying] = { spot: json.data.spot, future: typeof fp === 'number' && fp > 0 && typeof fe === 'string' && fe ? { price: fp, expiry: fe } : null };
+        } else if (!mkts[underlying]) {
+          const f = parityForward(json.data.chain.oc as ChainOc);
+          if (f) mkts[underlying] = { spot: f, future: null };
         }
       } catch (err) {
         errors.push(`${underlying} ${expiry}: ${String((err as Error).message ?? err)}`);
@@ -167,7 +220,9 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
   if (!open) return null;
 
   // Computed through the central pricing library from each leg's live mark, against its own underlying's spot.
-  const net = positionNetGreeksBy(legs, legUnderlying, (u) => markets[u]);
+  const optNet = positionNetGreeksBy(legs, legUnderlying, (u) => markets[u]);
+  const futDelta = futs.reduce((sum, f) => sum + f.units, 0);
+  const net = { ...optNet, delta: optNet.delta + futDelta };
   const expiries = legExpiries(legs);
 
   return (
@@ -207,13 +262,13 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
             </div>
           )}
 
-          {!scanning && legs.length === 0 && unparseable.length === 0 && (
+          {!scanning && legs.length === 0 && futs.length === 0 && unparseable.length === 0 && (
             <p className="py-10 text-center text-xs text-zinc-500">
               No open {broker !== 'dhan' ? `${broker} ` : ''}positions to show greeks for.
             </p>
           )}
 
-          {!scanning && (legs.length > 0 || unparseable.length > 0) && (
+          {!scanning && (legs.length > 0 || futs.length > 0 || unparseable.length > 0) && (
             <>
               <div className="flex flex-wrap items-center gap-y-3 rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3 shadow-inner">
                 <StatChip
@@ -231,7 +286,8 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
                 <StatChip label="Net Vega" value={net.vega.toFixed(2)}
                   sub="per 1% IV"
                   color={net.vega < 0 ? 'text-rose-400' : 'text-zinc-100'} />
-                <StatChip label="Legs" value={String(legs.length)} />
+                <StatChip label="Legs" value={String(legs.length + futs.length)}
+                  sub={futs.length ? `${futs.length} future${futs.length > 1 ? 's' : ''}` : undefined} />
                 <StatChip label="Expiries" value={expiries.length ? expiries.join(', ') : '—'} />
               </div>
 
@@ -271,7 +327,7 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
                 </div>
               )}
 
-              {legs.length > 0 && (
+              {(legs.length > 0 || futs.length > 0) && (
                 <div className="overflow-x-auto rounded-xl border border-zinc-800/80 bg-zinc-950/40 shadow-inner">
                   <table className="w-full border-collapse">
                     <thead>
@@ -318,6 +374,30 @@ export default function ScalperGreeksModal({ open, onClose, rawPositions, broker
                           </tr>
                         );
                       })}
+                      {futs.map((f) => (
+                        <tr key={`${f.tradingSymbol}|${f.productType}`} className="transition-colors even:bg-zinc-900/25 hover:bg-zinc-800/40">
+                          <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-left">
+                            <span className={cn(
+                              'mr-1.5 inline-flex items-center justify-center rounded px-1 py-0.25 text-[8.5px] font-bold leading-none',
+                              f.units < 0
+                                ? 'border border-rose-500/30 bg-rose-500/15 text-rose-300'
+                                : 'border border-sky-500/30 bg-sky-500/15 text-sky-300',
+                            )}>
+                              {f.units < 0 ? 'SELL' : 'BUY'}
+                            </span>
+                            <span className="font-semibold text-zinc-100">{f.tradingSymbol}</span>
+                          </td>
+                          <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">{f.units.toLocaleString('en-IN')}</td>
+                          <td className="px-3 py-2 font-mono text-xs text-zinc-500 whitespace-nowrap text-center">—</td>
+                          <td className="px-3 py-2 font-mono text-xs tabular-nums text-zinc-200 whitespace-nowrap text-center">1.0000</td>
+                          <td className={cn('px-3 py-2 font-mono text-xs tabular-nums whitespace-nowrap text-center font-bold', f.units > 0 ? 'text-emerald-400' : 'text-red-400')}>
+                            {f.units.toFixed(2)}
+                          </td>
+                          <td className="px-3 py-2 font-mono text-xs text-zinc-500 whitespace-nowrap text-center">—</td>
+                          <td className="px-3 py-2 font-mono text-xs text-zinc-500 whitespace-nowrap text-center">—</td>
+                          <td className="px-3 py-2 font-mono text-xs text-zinc-500 whitespace-nowrap text-center">—</td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>

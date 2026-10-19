@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ScalperGreeksModal from '../analytics/ScalperGreeksModal';
+import CyberDeltaCalculator from './CyberDeltaCalculator';
 import { Zap, RefreshCw, Volume2, VolumeX, Keyboard, AlertCircle, Wallet } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import NavBar from '@/components/NavBar';
@@ -179,6 +180,10 @@ function CyberScalperTerminal() {
   // Broker-shaped rows behind `positions`, for the Greeks scan.
   const [rawPositions, setRawPositions] = useState<Record<string, unknown>[]>([]);
   const [showGreeks, setShowGreeks] = useState(false);
+  // Ids (same `${symbol}_${product}` key as PositionItem.id) of the rows the Greeks scan covers.
+  const [greeksIds, setGreeksIds] = useState<string[]>([]);
+  const [showCalc, setShowCalc] = useState(false);
+  const [calcIds, setCalcIds] = useState<string[]>([]);
 
   // Poll open positions from broker
   const fetchPositions = useCallback(async () => {
@@ -1303,7 +1308,8 @@ function CyberScalperTerminal() {
           onToggleTrailAll={handleToggleTrailAll}
           onClosePosition={async (pos, units) => { await handleClosePosition(pos, units); }}
           onAddPosition={handleAddPosition}
-          onShowGreeks={() => setShowGreeks(true)}
+          onShowGreeks={(ids) => { setGreeksIds(ids); setShowGreeks(true); }}
+          onShowCalculator={(ids) => { setCalcIds(ids); setShowCalc(true); }}
           lotSizeFor={lotSizeForPosition}
           onFlattenAll={handleFlattenAll}
           isExecuting={isExecuting}
@@ -1312,8 +1318,22 @@ function CyberScalperTerminal() {
         <ScalperGreeksModal
           open={showGreeks}
           onClose={() => setShowGreeks(false)}
+          rawPositions={rawPositions.filter((p: any) => {
+            if (Number(p.netQty || 0) === 0) return false;
+            const id = `${String(p.tradingSymbol || p.securityId || 'POSITION')}_${String(p.productType || p.prod || 'INTRADAY')}`;
+            return greeksIds.includes(id);
+          })}
+          broker={broker}
+        />
+
+        <CyberDeltaCalculator
+          open={showCalc}
+          onClose={() => setShowCalc(false)}
+          positions={positions.filter((p) => calcIds.includes(p.id))}
           rawPositions={rawPositions}
           broker={broker}
+          lotSizeFor={lotSizeForPosition}
+          spotHint={feedData?.spot || 0}
         />
 
         {/* FOOTER KEYBOARD SHORTCUTS REFERENCE */}

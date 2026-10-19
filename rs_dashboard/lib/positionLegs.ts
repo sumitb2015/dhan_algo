@@ -134,17 +134,18 @@ export function parseTradingSymbol(symbol: string): ParsedSymbol | null {
   const s = symbol.trim().toUpperCase();
   if (!s) return null;
 
-  // Dhan: SYMBOL-MonYYYY-STRIKE-CE
-  const dhan = /^([A-Z]+)-([A-Z]{3})(\d{4})-(\d+(?:\.\d+)?)-(CE|PE)$/.exec(s);
-  if (dhan && MONTHS[dhan[2]]) {
+  // Dhan: SYMBOL-MonYYYY-STRIKE-CE (NSE/BSE), or SYMBOL-DDMonYYYY-STRIKE-CE (MCX, e.g. CRUDEOILM-17Nov2026-9000-PE)
+  const dhan = /^([A-Z]+)-(?:(\d{2}))?([A-Z]{3})(\d{4})-(\d+(?:\.\d+)?)-(CE|PE)$/.exec(s);
+  if (dhan && MONTHS[dhan[3]]) {
     return {
       underlying: dhan[1],
-      strike: parseFloat(dhan[4]),
-      type: dhan[5] as OptType,
-      // This form carries only month precision — a weekly expiry's day is simply
+      strike: parseFloat(dhan[5]),
+      type: dhan[6] as OptType,
+      // The NSE/BSE form carries only month precision — a weekly expiry's day is simply
       // not in the string. Left null rather than guessing the monthly expiry,
       // which would misprice every weekly leg. The caller supplies the real date.
-      expiry: null,
+      // The MCX form does carry the day, so it is exact.
+      expiry: dhan[2] ? `${dhan[4]}-${MONTHS[dhan[3]]}-${dhan[2]}` : null,
     };
   }
 

@@ -272,3 +272,13 @@ test('parseTradingSymbol reads Kotak monthly SYMBOL+YY+MON+STRIKE instead of an 
     underlying: 'NIFTY', strike: 24000, type: 'PE', expiry: null,
   });
 });
+
+test('parseTradingSymbol reads the Dhan MCX form that carries a day (CRUDEOILM-17Nov2026-9000-PE)', () => {
+  // Without the optional day group this returned null, so the Greeks window showed the underlying as "—" and priced nothing.
+  assert.deepStrictEqual(parseTradingSymbol('CRUDEOILM-17Nov2026-9000-PE'), {
+    underlying: 'CRUDEOILM', strike: 9000, type: 'PE', expiry: '2026-11-17',
+  });
+  assert.deepStrictEqual(parseTradingSymbol('NIFTY-Aug2026-25000-CE'), {
+    underlying: 'NIFTY', strike: 25000, type: 'CE', expiry: null,
+  });
+});

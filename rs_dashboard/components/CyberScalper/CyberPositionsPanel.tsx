@@ -13,6 +13,7 @@ import {
   Flame,
   XCircle,
   Sigma,
+  Calculator,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { cyberAudio } from '@/lib/cyberAudio';
@@ -136,8 +137,10 @@ interface PositionsPanelProps {
   onClosePosition: (pos: PositionItem, units?: number) => Promise<void>;
   /** Add lots to an open row (same side, market). Omitted = no ADD button. */
   onAddPosition?: (pos: PositionItem, lots: number) => Promise<void>;
-  /** Opens the portfolio Greeks scan. Omitted = no GREEKS button. */
-  onShowGreeks?: () => void;
+  /** Opens the portfolio Greeks scan for the given rows (the active ones on screen). Omitted = no GREEKS button. */
+  onShowGreeks?: (positionIds: string[]) => void;
+  /** Opens the net-delta what-if calculator for the given rows. Omitted = no CALC button. */
+  onShowCalculator?: (positionIds: string[]) => void;
   /** Lot size for a row, for sizing the 25/50/75% partial chips. Null hides them (full-close only). */
   lotSizeFor?: (pos: PositionItem) => number | null;
   onFlattenAll: () => Promise<void>;
@@ -160,6 +163,7 @@ export default function CyberPositionsPanel({
   onClosePosition,
   onAddPosition,
   onShowGreeks,
+  onShowCalculator,
   lotSizeFor,
   onFlattenAll,
   isExecuting,
@@ -240,9 +244,9 @@ export default function CyberPositionsPanel({
     `${v >= 0 ? '+' : '−'}₹${Math.abs(v).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-1 gap-4">
       {/* Positions Table (3 cols on large screen) */}
-      <div className="lg:col-span-3 bg-zinc-900/70 border border-zinc-800/80 rounded-2xl p-4 lg:p-5 backdrop-blur-md flex flex-col justify-between shadow-xl">
+      <div className="bg-zinc-900/70 border border-zinc-800/80 rounded-2xl p-4 lg:p-5 backdrop-blur-md flex flex-col justify-between shadow-xl">
         <div>
           {/* Header Bar with Tabs */}
           <div className="flex items-center justify-between pb-3 mb-3 border-b border-zinc-800 flex-wrap gap-2">
@@ -337,13 +341,27 @@ export default function CyberPositionsPanel({
                 <button
                   onClick={() => {
                     cyberAudio.click();
-                    onShowGreeks();
+                    onShowGreeks(activePositions.map((p) => p.id));
                   }}
                   className="px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold border transition-all flex items-center gap-1 active:scale-95 bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-400 hover:text-violet-300"
-                  title="Scan open positions and compute combined portfolio Greeks"
+                  title="Compute combined Greeks for the active positions shown below"
                 >
                   <Sigma className="w-3 h-3" />
                   <span>GREEKS</span>
+                </button>
+              )}
+
+              {activeTab === 'active' && openCount > 0 && onShowCalculator && (
+                <button
+                  onClick={() => {
+                    cyberAudio.click();
+                    onShowCalculator(activePositions.map((p) => p.id));
+                  }}
+                  className="px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold border transition-all flex items-center gap-1 active:scale-95 bg-zinc-800 hover:bg-zinc-700 border-zinc-700 text-zinc-400 hover:text-cyan-300"
+                  title="Net delta what-if: change lots and price on the active positions"
+                >
+                  <Calculator className="w-3 h-3" />
+                  <span>DELTA CALC</span>
                 </button>
               )}
 
@@ -889,63 +907,6 @@ export default function CyberPositionsPanel({
               </div>
             )
           )}
-        </div>
-      </div>
-
-      {/* Cyber Scalp Telemetry Log (1 col on large screen) */}
-      <div className="bg-zinc-900/70 border border-zinc-800/80 rounded-2xl p-4 lg:p-5 backdrop-blur-md flex flex-col justify-between h-full shadow-xl">
-        <div>
-          <div className="flex items-center justify-between pb-3 mb-3 border-b border-zinc-800">
-            <div className="flex items-center gap-2">
-              <div className="p-1 rounded-lg bg-purple-500/10 border border-purple-500/30 text-purple-400">
-                <Clock className="w-4 h-4" />
-              </div>
-              <h3 className="text-xs font-mono font-bold uppercase tracking-wider text-white">
-                EXECUTION TELEMETRY
-              </h3>
-            </div>
-            <span className="text-[10px] font-mono text-zinc-500 flex items-center gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-ping" />
-              <span>LIVE BUS</span>
-            </span>
-          </div>
-
-          <div className="space-y-2 max-h-[360px] overflow-y-auto pr-1">
-            {logs.length === 0 ? (
-              <div className="py-12 text-center text-zinc-500 font-mono text-xs">
-                AWAITING FIRST TRADE EXECUTION
-              </div>
-            ) : (
-              logs.slice(0, 15).map((log) => (
-                <div
-                  key={log.id}
-                  className="p-2 rounded-xl bg-zinc-950/80 border border-zinc-800/80 text-[11px] font-mono flex items-start gap-2 shadow-sm"
-                >
-                  <span
-                    className={cn(
-                      'px-1.5 py-0.2 rounded text-[9px] font-bold shrink-0 mt-0.5',
-                      log.type === 'BUY'
-                        ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                        : log.type === 'SELL'
-                        ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
-                        : log.type === 'EXIT'
-                        ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30'
-                        : 'bg-red-500/20 text-red-400 border border-red-500/30'
-                    )}
-                  >
-                    {log.type}
-                  </span>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-zinc-200 font-semibold truncate">{log.message}</p>
-                    {log.detail && (
-                      <p className="text-zinc-500 text-[10px] truncate">{log.detail}</p>
-                    )}
-                  </div>
-                  <span className="text-[9px] text-zinc-600 shrink-0">{log.time}</span>
-                </div>
-              ))
-            )}
-          </div>
         </div>
       </div>
     </div>
