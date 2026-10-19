@@ -52,6 +52,10 @@ function CyberScalperTerminal() {
   const [brokerStrikeMap, setBrokerStrikeMap] = useState<Record<string, { ceSymbol?: string; peSymbol?: string }>>({});
   // Kotak / Zerodha FUT contract (the month the pad shows) for futures-capable underlyings (CRUDEOILM/CRUDEOIL/NIFTY); null for all others.
   const [brokerFuture, setBrokerFuture] = useState<{ trading_symbol: string; expiry?: string; lot_size?: number; exchange_segment?: string } | null>(null);
+  // Latest copies for fetchPositions (its callback only re-creates on a broker change).
+  const brokerFutureRef = useRef(brokerFuture);
+  const brokerStrikeMapRef = useRef(brokerStrikeMap);
+  useEffect(() => { brokerFutureRef.current = brokerFuture; brokerStrikeMapRef.current = brokerStrikeMap; }, [brokerFuture, brokerStrikeMap]);
 
   // Live Data Feed
   const [feedData, setFeedData] = useState<any>(null);
@@ -186,7 +190,8 @@ function CyberScalperTerminal() {
     positionsInFlight.current = true;
     const requestedBroker = broker;
     try {
-      const res = await fetch(scalperRoute(broker, 'poll'));
+      // Kotak's positions carry no price: `ltp=1` asks the route to join Dhan's chain prices onto its open options.
+      const res = await fetch(`${scalperRoute(broker, 'poll')}${broker === 'kotak' ? '?ltp=1' : ''}`);
       const json = await res.json();
       // Broker was switched while this request was in flight — drop it rather than
       // repopulate the (already-cleared) positions list with the previous broker's rows.
@@ -239,42 +244,26 @@ function CyberScalperTerminal() {
             if (Number.isFinite(derived) && derived > 0) ltp = derived;
           }
 
-          // Join live market LTP from feedData if broker returns 0 (essential for Kotak/Zerodha):
+          // The broker gave no price (Kotak never does; the poll's `?ltp=1` join prices its options from Dhan's chain). Fall
+          // back to the feed ONLY for the exact contract it prices: the displayed future, or the ATM CE/PE. Anything else stays
+          // 0 = unknown (no P&L, and the target/SL guard skips it): never the index spot, which marked a Kotak option at
+          // ~24,500 and let the guard "hit" at once, and never another month's future.
           if (!ltp && currentFeed) {
             const symUpper = sym.toUpperCase();
             const secId = String(p.securityId || '');
-
-            // 1. Future contract match (e.g. CRUDEOILM21SEP26FUT)
-            if (
-              currentFeed.future?.ltp && (
-                symUpper.includes('FUT') ||
-                symUpper === String(currentFeed.future.trading_symbol || '').toUpperCase() ||
-                secId === String(currentFeed.future.security_id || '')
-              )
-            ) {
+            const futSym = broker === 'dhan' ? String(currentFeed.future?.trading_symbol || '') : String(brokerFutureRef.current?.trading_symbol || '');
+            const atm = Number(currentFeed.options?.atm_strike) || 0;
+            const strikeSyms = brokerStrikeMapRef.current[String(atm)];
+            if (currentFeed.future?.ltp && futSym && (symUpper === futSym.toUpperCase() || (broker === 'dhan' && secId === String(currentFeed.future.security_id || '')))) {
               ltp = Number(currentFeed.future.ltp) || 0;
-            }
-            // 2. CE contract match
-            else if (
-              currentFeed.options?.ce?.ltp && (
-                symUpper === String(currentFeed.options.ce.trading_symbol || '').toUpperCase() ||
-                secId === String(currentFeed.options.ce.security_id || '')
-              )
-            ) {
+            } else if (currentFeed.options?.ce?.ltp && (
+              (broker === 'dhan' && (symUpper === String(currentFeed.options.ce.trading_symbol || '').toUpperCase() || secId === String(currentFeed.options.ce.security_id || '')))
+              || (broker !== 'dhan' && !!strikeSyms?.ceSymbol && symUpper === strikeSyms.ceSymbol.toUpperCase()))) {
               ltp = Number(currentFeed.options.ce.ltp) || 0;
-            }
-            // 3. PE contract match
-            else if (
-              currentFeed.options?.pe?.ltp && (
-                symUpper === String(currentFeed.options.pe.trading_symbol || '').toUpperCase() ||
-                secId === String(currentFeed.options.pe.security_id || '')
-              )
-            ) {
+            } else if (currentFeed.options?.pe?.ltp && (
+              (broker === 'dhan' && (symUpper === String(currentFeed.options.pe.trading_symbol || '').toUpperCase() || secId === String(currentFeed.options.pe.security_id || '')))
+              || (broker !== 'dhan' && !!strikeSyms?.peSymbol && symUpper === strikeSyms.peSymbol.toUpperCase()))) {
               ltp = Number(currentFeed.options.pe.ltp) || 0;
-            }
-            // 4. Spot fallback if matches underlying symbol
-            else if (currentFeed.spot && symUpper.includes(symbol)) {
-              ltp = Number(currentFeed.spot) || 0;
             }
           }
 

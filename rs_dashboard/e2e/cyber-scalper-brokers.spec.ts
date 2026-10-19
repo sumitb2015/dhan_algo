@@ -86,3 +86,52 @@ for (const c of CASES) {
     expect(seen.blocked).toEqual([]);   // in particular: no /api/exit-all (Dhan's sweep) and no other broker's order route
   });
 }
+
+// ── Kotak option position pricing ─────────────────────────────────────────────────────────────────────────────
+// Kotak's positions carry NO price (lib/kotakShape.ts), so the terminal must price an open option from somewhere real.
+// It used to fall back to the index SPOT for any option on the selected underlying, which marked a 100-rupee call at
+// ~24,500 and let the target/SL guard "hit" at once.
+async function installKotakOption(page: Page, ltpFromServer: number) {
+  const sent: string[] = [];
+  const blocked: string[] = [];
+  await page.addInitScript(() => { try { localStorage.setItem('dhan_algo.selected_broker', 'kotak'); } catch { /* ignore */ } });
+  await page.route('**/api/**', async (route: Route) => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const p = url.pathname;
+    const method = req.method();
+    if (p === '/api/auth/broker-status') return json(route, { dhan: true, kotak: true });
+    if (p === '/api/cyber-scalper/feed') return json(route, { ...FEED, symbol: 'NIFTY', spot: 24500, options: null, future: null });
+    if (p === '/api/scalper/kotak/poll') {
+      sent.push(url.search);
+      const pos = { tradingSymbol: 'NIFTY26OCT24600CE', securityId: '1', exchange: 'nse_fo', exchangeSegment: 'nse_fo', netQty: 65, buyQty: 65, sellQty: 0,
+        buyAvg: 100, sellAvg: 0, lastTradedPrice: url.searchParams.get('ltp') === '1' ? ltpFromServer : 0, realizedProfit: 0, unrealizedProfit: 0, productType: 'MIS' };
+      return json(route, { success: true, positions: [pos], positionsError: null, orders: [], trades: [] });
+    }
+    if (p === '/api/scalper/kotak/funds') return json(route, { success: true, data: { availabelBalance: 250000 } });
+    if (p === '/api/scalper/kotak/orders' && method === 'GET') return json(route, { success: true, data: [] });
+    if (method === 'GET') return json(route, { success: false, error: 'e2e' }, 503);
+    blocked.push(`${method} ${p}`);                      // an auto-exit from a phantom price would POST an order here
+    return route.fulfill({ status: 599, body: 'blocked by e2e' });
+  });
+  return { sent, blocked };
+}
+
+test('Kotak: an open option is priced from the server join, never from the index spot', async ({ page }) => {
+  const seen = await installKotakOption(page, 105);
+  await page.goto('/cyber-scalper', { waitUntil: 'domcontentloaded' });
+  // (105 - 100) x 65 = 325
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('MTM+₹325', { timeout: 60_000 });
+  expect(seen.sent.some((s) => s.includes('ltp=1'))).toBe(true);
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Kotak: an option with no price shows no P&L instead of marking it at the index spot', async ({ page }) => {
+  const seen = await installKotakOption(page, 0);
+  await page.goto('/cyber-scalper', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('MTM', { timeout: 60_000 });
+  await page.waitForTimeout(3000);
+  await expect(page.getByRole('heading', { level: 1 })).not.toContainText('₹1,5');   // 24500 - 100 would be ~₹15.9 lakh
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('MTM+₹0');
+  expect(seen.blocked).toEqual([]);
+});
