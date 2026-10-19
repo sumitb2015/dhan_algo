@@ -196,6 +196,8 @@ function AdvancedScalper() {
   // by looking its symbol up here. Feeds the off-expiry live-price request
   // below (see /api/options/live's `watchExtra` action).
   const [kotakSymbolMap, setKotakSymbolMap] = useState<KotakSymbolMap>({});
+  // Zerodha twin, used only to identify a leg for Add Lots (its weekly symbols hold no readable expiry).
+  const [zerodhaSymbolMap, setZerodhaSymbolMap] = useState<KotakSymbolMap>({});
   // null until the lookup resolves it from DhanHelper.get_lot_size(). Never seed
   // this with a literal: exchange lot sizes get revised (NIFTY has been 75 and is
   // 65 today), and a seeded value is indistinguishable from a resolved one — it
@@ -1177,6 +1179,33 @@ function AdvancedScalper() {
     return [...set].sort().join(',');
   }, [broker, underlying, positionsData]);
 
+  const zerodhaMapUnderlyings = useMemo(() => {
+    if (broker !== 'zerodha') return '';
+    const set = new Set<string>([underlying]);
+    for (const pos of positionsData) {
+      if (Number(pos.netQty) === 0) continue;
+      const root = kotakUnderlyingOf(String(pos.tradingSymbol ?? ''));
+      if (root) set.add(root);
+    }
+    return [...set].sort().join(',');
+  }, [broker, underlying, positionsData]);
+
+  useEffect(() => {
+    if (!zerodhaMapUnderlyings) return;
+    let cancelled = false;
+    Promise.all(zerodhaMapUnderlyings.split(',').map(u =>
+      fetch(`/api/scalper/zerodha/symbol-lookup?underlying=${u}`)
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: Record<string, { expiry: string; strike: number; side: 'CE' | 'PE' }> }) => {
+          const out: KotakSymbolMap = {};
+          for (const [sym, info] of Object.entries(j.success && j.data ? j.data : {})) out[sym] = { ...info, underlying: u };
+          return out;
+        })
+        .catch(() => ({} as KotakSymbolMap))))
+      .then(maps => { if (!cancelled) setZerodhaSymbolMap(Object.assign({}, ...maps)); });
+    return () => { cancelled = true; };
+  }, [zerodhaMapUnderlyings]);
+
   useEffect(() => {
     if (!kotakMapUnderlyings) return;
     let cancelled = false;
@@ -1537,7 +1566,7 @@ function AdvancedScalper() {
     // The modal looks the strike up, and the order picks its exchange, against the SELECTED underlying. A leg on
     // another one would resolve to the selected underlying's contract at the same strike and expiry — a FINNIFTY
     // 27000 CE (same monthly day as NIFTY) became a NIFTY 27000 CE order. Refuse rather than guess.
-    const kotakInfo = broker === 'kotak' ? kotakSymbolMap[sym] : undefined;
+    const kotakInfo = broker === 'kotak' ? kotakSymbolMap[sym] : broker === 'zerodha' ? zerodhaSymbolMap[sym] : undefined;
     // A future is never an Add Lots target (an options modal), whatever its underlying: say so first.
     if (kotakInfo?.side === 'FUT') {
       addToast('error', 'Could not resolve this position’s contract', sym);
@@ -1564,7 +1593,7 @@ function AdvancedScalper() {
       return;
     }
     setAddLotsTarget({ pos, posExpiry, strike: parsed.strike, option: parsed.type });
-  }, [secIdToStrikeSide, positionJoinKey, broker, expiry, addToast, kotakSymbolMap, underlying]);
+  }, [secIdToStrikeSide, positionJoinKey, broker, expiry, addToast, kotakSymbolMap, zerodhaSymbolMap, underlying]);
 
   // ─── placeOrder ───────────────────────────────────────────────────
 
