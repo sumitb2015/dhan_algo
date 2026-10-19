@@ -30,6 +30,21 @@ function resolveMultiplier(sym: string, overrides: Record<string, number>): numb
   return 1;
 }
 
+/**
+ * Per-symbol multiplier overrides for `matchTradesFifo`. Dhan and Zerodha count MCX in LOTS, so the barrels-per-lot multiplier
+ * applies (the default); Kotak's quantities are already barrels, so its MCX symbols are 1 — without this a Kotak crude round
+ * trip showed 10x (CRUDEOILM) / 100x (CRUDEOIL) too much realized P&L.
+ */
+export function fifoMultipliersFor(broker: string, trades: RawTrade[]): Record<string, number> {
+  if (broker !== 'kotak') return {};
+  const out: Record<string, number> = {};
+  for (const t of trades) {
+    const sym = String(t.tradingSymbol || t.symbol || '').trim();
+    if (sym && resolveMultiplier(sym, {}) !== 1) out[sym] = 1;
+  }
+  return out;
+}
+
 export interface RawTrade {
   tradingSymbol?: string;
   symbol?: string;

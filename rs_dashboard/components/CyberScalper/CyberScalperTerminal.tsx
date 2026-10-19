@@ -9,7 +9,7 @@ import CyberOrderPad from './CyberOrderPad';
 import CyberPositionsPanel, { PositionItem, PositionGuard, ScalpLogItem } from './CyberPositionsPanel';
 import CyberOrderBook, { OrderBookRow } from './CyberOrderBook';
 import CyberStrategyIntelligence, { StrategyData } from './CyberStrategyIntelligence';
-import { matchTradesFifo, type ExitedPositionItem } from '@/lib/fifoPositions';
+import { matchTradesFifo, fifoMultipliersFor, type ExitedPositionItem } from '@/lib/fifoPositions';
 import { saveTerminalOrder } from '@/lib/terminalTradeStore';
 import { cyberAudio } from '@/lib/cyberAudio';
 import { contractMultiplier, scaleBrokerPnl, MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
@@ -196,14 +196,16 @@ function CyberScalperTerminal() {
       // Broker was switched while this request was in flight — drop it rather than
       // repopulate the (already-cleared) positions list with the previous broker's rows.
       if (requestedBroker !== brokerRef.current) return;
-      if (json.success && Array.isArray(json.positions)) {
+      // A poll whose position read FAILED carries an empty list meaning "unknown", not "flat" (Kite token expired, Kotak
+      // timeout): keep what is on screen so the guards, the FLATTEN button and the P&L do not vanish under an open position.
+      if (json.success && Array.isArray(json.positions) && !json.positionsError) {
         const rawPositions = json.positions;
         const currentFeed = feedDataRef.current;
 
         // Perform FIFO trade matching to resolve true active open entry prices & exited trades
         let fifoOpenMap: Record<string, any> = {};
         if (Array.isArray(json.trades) && json.trades.length > 0) {
-          const fifoRes = matchTradesFifo(json.trades);
+          const fifoRes = matchTradesFifo(json.trades, fifoMultipliersFor(requestedBroker, json.trades));
           fifoOpenMap = fifoRes.openMap;
           if (fifoRes.exitedList.length > 0) {
             setExitedPositions(fifoRes.exitedList);

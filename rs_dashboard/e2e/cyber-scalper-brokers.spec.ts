@@ -135,3 +135,32 @@ test('Kotak: an option with no price shows no P&L instead of marking it at the i
   await expect(page.getByRole('heading', { level: 1 })).toContainText('MTM+₹0');
   expect(seen.blocked).toEqual([]);
 });
+
+// ── A failed position read is "unknown", not "flat" ─────────────────────────────────────────────────────────────
+test('Zerodha: a poll whose position read failed keeps the open position on screen (guards and FLATTEN stay)', async ({ page }) => {
+  const c = CASES[0];
+  let polls = 0;
+  await page.addInitScript(() => { try { localStorage.setItem('dhan_algo.selected_broker', 'zerodha'); } catch { /* ignore */ } });
+  await page.route('**/api/**', async (route: Route) => {
+    const req = route.request();
+    const p = new URL(req.url()).pathname;
+    if (p === '/api/auth/broker-status') return json(route, { dhan: true, zerodha: true });
+    if (p === '/api/cyber-scalper/feed') return json(route, FEED);
+    if (p === '/api/scalper/zerodha/poll') {
+      polls++;
+      const pos = { tradingSymbol: c.sym('NOV'), securityId: '1', exchange: 'MCX', exchangeSegment: 'MCX', netQty: 1, buyQty: 1, sellQty: 0,
+        buyAvg: 9340, sellAvg: 0, lastTradedPrice: 9350, realizedProfit: 0, unrealizedProfit: 100, productType: 'NRML' };
+      return polls <= 2
+        ? json(route, { success: true, positions: [pos], positionsError: null, orders: [], trades: [] })
+        : json(route, { success: true, positions: [], positionsError: 'Kite session expired', orders: [], trades: [] });
+    }
+    if (p === '/api/scalper/zerodha/funds') return json(route, { success: true, data: { availabelBalance: 1 } });
+    if (req.method() === 'GET') return json(route, { success: false, error: 'e2e' }, 503);
+    return route.fulfill({ status: 599, body: 'blocked by e2e' });
+  });
+  await page.goto('/cyber-scalper', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('MTM+₹100', { timeout: 60_000 });
+  await expect.poll(() => polls, { timeout: 30_000 }).toBeGreaterThan(4);        // several failing polls have gone by
+  await expect(page.getByRole('heading', { level: 1 })).toContainText('MTM+₹100');
+  await expect(page.getByRole('button', { name: /FLATTEN/ }).first()).toBeVisible();
+});

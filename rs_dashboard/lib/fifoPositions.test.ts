@@ -38,3 +38,17 @@ test('matchTradesFifo resolves CRUDEOILM (10x), not CRUDEOIL (100x), for a CRUDE
   const { exitedList } = matchTradesFifo(trades);
   assert.strictEqual(exitedList[0].pnl, 10); // 1 pt * 1 qty * 10x (CRUDEOILM), not 100x
 });
+
+import { fifoMultipliersFor } from './fifoPositions.ts';
+test('MCX multiplier: lots on Dhan/Zerodha (default), barrels on Kotak (override to 1)', () => {
+  const trades = [
+    { tradingSymbol: 'CRUDEOILM19NOV26FUT', transactionType: 'BUY', tradedQuantity: 10, tradedPrice: 9340, createTime: '10:00' },
+    { tradingSymbol: 'CRUDEOILM19NOV26FUT', transactionType: 'SELL', tradedQuantity: 10, tradedPrice: 9350, createTime: '10:05' },
+    { tradingSymbol: 'NIFTY26OCT24600CE', transactionType: 'BUY', tradedQuantity: 65, tradedPrice: 100, createTime: '10:00' },
+  ];
+  assert.deepEqual(fifoMultipliersFor('zerodha', trades), {});
+  assert.deepEqual(fifoMultipliersFor('dhan', trades), {});
+  assert.deepEqual(fifoMultipliersFor('kotak', trades), { CRUDEOILM19NOV26FUT: 1 });
+  assert.equal(matchTradesFifo(trades, fifoMultipliersFor('kotak', trades)).exitedList[0].pnl, 100);      // 10 points x 10 barrels
+  assert.equal(matchTradesFifo(trades.map((t) => ({ ...t, tradedQuantity: t.tradingSymbol.startsWith('CRUDE') ? 1 : 65 }))).exitedList[0].pnl, 100);   // 10 points x 1 lot x 10
+});
