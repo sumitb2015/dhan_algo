@@ -1,8 +1,11 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { kotakGetShared, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { shapeKotakPosition, shapeKotakOrder, shapeKotakTrade } from '@/lib/kotakShape';
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(req: NextRequest): Promise<NextResponse> {
+  // `?only=positions`: the Focus Tool's 2 s poll reads only the position book, so skip the order and trade books
+  // (two of the three Kotak calls per poll, which is what tripped stCode 100025).
+  const positionsOnly = req.nextUrl.searchParams.get('only') === 'positions';
   // Kotak is an optional broker — this route is polled unconditionally by
   // whatever's on screen regardless of whether Kotak is actually linked, so
   // a not-connected session must not attempt a request (or log an error) on
@@ -25,8 +28,8 @@ export async function GET(): Promise<NextResponse> {
         console.error('[scalper/kotak/poll] positions fetch failed:', err);
         return {} as Record<string, unknown>;
       }),
-      kotakGetShared(KOTAK_PATHS.orderBook).catch(() => ({} as Record<string, unknown>)),
-      kotakGetShared(KOTAK_PATHS.tradeBook).catch(() => ({} as Record<string, unknown>)),
+      (positionsOnly ? Promise.resolve({}) : kotakGetShared(KOTAK_PATHS.orderBook)).catch(() => ({} as Record<string, unknown>)),
+      (positionsOnly ? Promise.resolve({}) : kotakGetShared(KOTAK_PATHS.tradeBook)).catch(() => ({} as Record<string, unknown>)),
     ]);
 
     return NextResponse.json({

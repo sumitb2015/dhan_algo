@@ -5411,7 +5411,7 @@ function FocusTool() {
     const seq = ++positionsSeqRef.current;
     const askedBroker = broker;
     try {
-      const res = await fetch(scalperRoute(broker, 'poll'));
+      const res = await fetch(`${scalperRoute(broker, 'poll')}?only=positions`);
       const j = await res.json() as { success: boolean; positions?: PosRow[]; positionsError?: string | null };
       // Kotak / Zerodha answer success:true with an EMPTY list and `positionsError` when the session is gone or the
       // positions call failed. That is an unknown book, not a flat one — read as flat, the next exit dropped a live leg
