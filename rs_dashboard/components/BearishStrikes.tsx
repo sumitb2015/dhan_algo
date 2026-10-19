@@ -329,6 +329,9 @@ export default function BearishStrikes() {
     return () => { dead = true; };
   }, [underlying, expiry, broker]);
   const lotSize = lookup?.lotSize ?? fallbackLotSize(underlying, broker);
+  // OI / volume come from Dhan's feed whichever account is selected, and Dhan counts MCX in lots (1 per lot), so the
+  // "lots" columns and filters divide by that: Kotak's lot size is barrels per lot and would shrink them 10x.
+  const feedLot = underlying.startsWith('CRUDEOIL') ? 1 : lotSize;
 
   // ── Candles: 1-min backfill per contract + LTP-built live minutes ─
   const barsRef = useRef<Map<string, { minute: string; bars: Bar[]; error?: string }>>(new Map());
@@ -459,7 +462,7 @@ export default function BearishStrikes() {
             key, option, strike: Number(s), ltp: d.ltp, oi: d.oi ?? 0, volume: d.volume ?? 0,
             changePct: d.change_pct ?? null, oiChgPct: d.oi_chg_pct ?? null, buildup: d.buildup ?? '', sig, liveBelowAll,
           };
-          if (passesFilters({ option, strike: row.strike, ltp: d.ltp, oi: row.oi, volume: row.volume, spreadPct: null, sig, buildup: row.buildup }, spot, lotSize, filters)) next.push(row);
+          if (passesFilters({ option, strike: row.strike, ltp: d.ltp, oi: row.oi, volume: row.volume, spreadPct: null, sig, buildup: row.buildup }, spot, feedLot, filters)) next.push(row);
         }
       }
       const rank = (r: Row) => Number(r.liveBelowAll) * 2 + Number(oiView(r.buildup, r.sig) === 'confirm');   // live-bearish first, OI-backed ahead of the rest
@@ -467,7 +470,7 @@ export default function BearishStrikes() {
       setRows(next);
     }, 1000);
     return () => clearInterval(id);
-  }, [tf, filters, lotSize, strike100, underlying, atmMin, indCfg, candidateContracts]);
+  }, [tf, filters, feedLot, strike100, underlying, atmMin, indCfg, candidateContracts]);
 
   // ── Ledger ──────────────────────────────────────────────────────
   const [positions, setPositions] = useState<BsPosition[]>([]);
@@ -1130,7 +1133,7 @@ export default function BearishStrikes() {
             </thead>
             <tbody>
               {rows.map((r) => {
-                const lot = lotSize || 1;
+                const lot = feedLot || 1;
                 const full = r.sig.bearish === true;
                 const oi = oiView(r.buildup, r.sig);
                 // Which levels the live price has climbed back above (the reason a closed-bar-bearish row is only WATCH).

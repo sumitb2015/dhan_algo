@@ -3,8 +3,8 @@ import { json, signIn } from './support';
 import { applyOp, type LedgerFile, type LedgerOp } from '../lib/bearishLedger';
 
 // Bearish Strikes, SIM mode only. Every /api call is answered here; any non-GET that is not handled is refused (599)
-// and fails the test, and the test asserts /api/scalper/fast-order was never touched. Never add a REAL-mode case: on a
-// machine with a live token it would place a real order.
+// and fails the test, and the test asserts /api/scalper/fast-order was never touched. REAL-mode cases live in
+// bearish-strikes-brokers.spec.ts, where every order route is answered in the browser too (nothing reaches a broker).
 
 const pad = (n: number) => String(n).padStart(2, '0');
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
