@@ -4,11 +4,9 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Zap, RefreshCw, Volume2, VolumeX, Keyboard, AlertCircle, Wallet } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import NavBar from '@/components/NavBar';
-import CyberBiasRadar from './CyberBiasRadar';
 import CyberOrderPad from './CyberOrderPad';
 import CyberPositionsPanel, { PositionItem, PositionGuard, ScalpLogItem } from './CyberPositionsPanel';
 import CyberOrderBook, { OrderBookRow } from './CyberOrderBook';
-import CyberStrategyIntelligence, { StrategyData } from './CyberStrategyIntelligence';
 import { matchTradesFifo, fifoMultipliersFor, type ExitedPositionItem } from '@/lib/fifoPositions';
 import { saveTerminalOrder } from '@/lib/terminalTradeStore';
 import { sendOrderRequest, UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
@@ -24,15 +22,11 @@ const FILLED_STATUSES = new Set(['COMPLETE', 'TRADED']);
 const FILLED_OR_DONE_STATUSES = new Set(['COMPLETE', 'TRADED', 'REJECTED', 'CANCELLED', 'CANCELED', 'EXPIRED']);
 
 const POPULAR_SYMBOLS = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'SENSEX', 'CRUDEOILM', 'CRUDEOIL', 'RELIANCE', 'HDFCBANK'];
-const INTERVALS = [
-  { value: '1', label: '1m Scalp' },
-  { value: '3', label: '3m Momentum' },
-  { value: '5', label: '5m Trend' },
-];
+// Single fixed candle interval (minutes); the 1m/3m/5m mode picker was removed.
+const TIMEFRAME = '1';
 
 function CyberScalperTerminal() {
   const [symbol, setSymbol] = useState('NIFTY');
-  const [timeframe, setTimeframe] = useState('1');
   const [expiry, setExpiry] = useState<string | null>(null);
   // Selected future contract expiry (Futures mode only) — independent of `expiry`
   // above, since NIFTY options expire weekly but its futures only expire monthly.
@@ -150,22 +144,12 @@ function CyberScalperTerminal() {
     addLog('BUY', `Guard armed for ${pos.tradingSymbol}`, parts);
   }, []);
 
-  // Strategy suggested levels overrides for the order pad
-  const [padTargetPts, setPadTargetPts] = useState<number | null>(null);
-  const [padSlPts, setPadSlPts] = useState<number | null>(null);
-
-  const handleApplyStrategyLevels = (tPts: number, sPts: number) => {
-    setPadTargetPts(tPts);
-    setPadSlPts(sPts);
-    addLog('BUY', `Loaded 9/20 Strategy Quant Levels: TP +${tPts} pts | SL -${sPts} pts`);
-  };
-
   // Poll feed data
   const fetchFeed = useCallback(async () => {
     if (feedInFlight.current) return;
     feedInFlight.current = true;
     try {
-      const q = new URLSearchParams({ symbol, interval: timeframe });
+      const q = new URLSearchParams({ symbol, interval: TIMEFRAME });
       if (expiry) q.set('expiry', expiry);
       if (futureExpiry) q.set('futureExpiry', futureExpiry);
 
@@ -189,7 +173,7 @@ function CyberScalperTerminal() {
       setIsLoading(false);
       feedInFlight.current = false;
     }
-  }, [symbol, timeframe, expiry, futureExpiry]);
+  }, [symbol, expiry, futureExpiry]);
 
   // Poll open positions from broker
   const fetchPositions = useCallback(async () => {
@@ -1030,12 +1014,6 @@ function CyberScalperTerminal() {
       } else if (key === 'X') {
         e.preventDefault();
         handleFlattenAll();
-      } else if (key === '1') {
-        setTimeframe('1');
-      } else if (key === '2') {
-        setTimeframe('3');
-      } else if (key === '3') {
-        setTimeframe('5');
       } else if (key === 'M') {
         toggleMute();
       }
@@ -1158,27 +1136,6 @@ function CyberScalperTerminal() {
             ))}
           </div>
 
-          {/* Timeframe selector */}
-          <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
-            {INTERVALS.map((intv) => (
-              <button
-                key={intv.value}
-                onClick={() => {
-                  cyberAudio.click();
-                  setTimeframe(intv.value);
-                }}
-                className={cn(
-                  'px-2 py-1 rounded text-xs font-mono font-bold transition-all',
-                  timeframe === intv.value
-                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-sm'
-                    : 'text-zinc-400 hover:text-white'
-                )}
-              >
-                {intv.label}
-              </button>
-            ))}
-          </div>
-
           {/* Audio Mute button */}
           <button
             onClick={toggleMute}
@@ -1215,16 +1172,7 @@ function CyberScalperTerminal() {
 
       {/* MAIN TERMINAL BODY */}
       <div className="flex-1 flex flex-col gap-3 p-4 lg:p-6 max-w-[1700px] mx-auto w-full">
-        {/* 1. TACTICAL SETUP + SL/TP ANCHORS */}
-        <CyberStrategyIntelligence
-          strategy={feedData?.strategy || null}
-          onApplyLevels={handleApplyStrategyLevels}
-        />
-
-        {/* 2. BIAS + SPREAD + VWAP READOUT */}
-        <CyberBiasRadar live={feedData?.live || null} />
-
-        {/* 3. THE BIG SCALPING TERMINAL: MASSIVE BUY & SELL BUTTONS */}
+        {/* 1. THE BIG SCALPING TERMINAL: MASSIVE BUY & SELL BUTTONS */}
         <CyberOrderPad
           symbol={symbol}
           spot={spot}
@@ -1243,8 +1191,8 @@ function CyberScalperTerminal() {
           onSelectExpiry={setExpiry}
           onFlattenAll={handleFlattenAll}
           openPositionsCount={positions.filter((p) => p.netQty !== 0).length}
-          suggestedTargetPts={padTargetPts ?? (feedData?.strategy?.target_pts ? Math.round(feedData.strategy.target_pts) : null)}
-          suggestedSlPts={padSlPts ?? (feedData?.strategy?.sl_pts ? Math.round(feedData.strategy.sl_pts) : null)}
+          suggestedTargetPts={feedData?.strategy?.target_pts ? Math.round(feedData.strategy.target_pts) : null}
+          suggestedSlPts={feedData?.strategy?.sl_pts ? Math.round(feedData.strategy.sl_pts) : null}
         />
 
         {/* 4. RESTING LIMIT ORDERS — edit or cancel Buy Below / Short Above orders */}
@@ -1287,9 +1235,6 @@ function CyberScalperTerminal() {
             </span>
             <span>
               <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 text-red-500 font-bold border border-zinc-700">X</kbd> Flatten All
-            </span>
-            <span>
-              <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 text-purple-400 font-bold border border-zinc-700">1/2/3</kbd> 1m/3m/5m Timeframe
             </span>
             <span>
               <kbd className="px-1.5 py-0.5 rounded bg-zinc-800 text-cyan-400 font-bold border border-zinc-700">M</kbd> Mute SFX
