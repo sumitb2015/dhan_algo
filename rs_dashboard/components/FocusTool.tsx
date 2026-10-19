@@ -55,7 +55,7 @@ import {
   multipliedLots, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, otmReentryStrike, reentryOtmFromAtm, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, MAX_SCALE_STEPS, legLevelOn, levelCrossStep, entryLevelFiredToday, levelSig,
+  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, otmReentryStrike, reentryOtmFromAtm, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, MAX_SCALE_STEPS, legLevelOn, levelCrossStep, entryLevelFiredToday, levelSig, accountStopLevel, legacyStopToSigned,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { postFocusEvent } from '@/lib/focusToolEvents';
@@ -2909,13 +2909,13 @@ function RiskRail({ totalPnl, target, stop, lockFloor, peakMtm }: {
   lockFloor: number | null; peakMtm: number;
 }) {
   const hasTarget = target != null && target > 0;
-  const hasStop = stop != null && stop > 0;
+  const hasStop = stop != null;
 
   let bar: React.ReactNode = (
     <div className="h-1.5 w-32 rounded-full bg-zinc-800" title="Set a Target or Stop to see it plotted here" />
   );
   if (hasTarget || hasStop) {
-    const lo = hasStop ? -(stop as number) : Math.min(totalPnl, 0) * 1.2 || -1;
+    const lo = hasStop ? (stop as number) : Math.min(totalPnl, 0) * 1.2 || -1;
     const hi = hasTarget ? (target as number) : Math.max(totalPnl, 0) * 1.2 || 1;
     if (hi > lo) {
       const pct = (v: number) => ((Math.min(Math.max(v, lo), hi) - lo) / (hi - lo)) * 100;
@@ -2923,7 +2923,7 @@ function RiskRail({ totalPnl, target, stop, lockFloor, peakMtm }: {
       bar = (
         <div
           className="relative h-1.5 w-32 rounded-full bg-zinc-800 overflow-hidden"
-          title={`Stop ${hasStop ? fmtInr(-(stop as number)) : '—'} · Target ${hasTarget ? fmtInr(target as number) : '—'} · Total ${fmtInr(totalPnl, true)}`}
+          title={`Stop ${hasStop ? fmtInr(stop as number) : '—'} · Target ${hasTarget ? fmtInr(target as number) : '—'} · Total ${fmtInr(totalPnl, true)}`}
         >
           <div className="absolute inset-y-0 bg-rose-500/25" style={{ left: 0, width: `${zero}%` }} />
           <div className="absolute inset-y-0 bg-emerald-500/25" style={{ left: `${zero}%`, width: `${100 - zero}%` }} />
@@ -3115,7 +3115,7 @@ function ControlStrip({
           <ShieldOff className="h-3 w-3 text-rose-500" />
           <span className={cn(TXT_VALUE, 'font-black text-zinc-500 uppercase')}>Stop</span>
           <RuleNumInput value={stopRupees} onCommit={setStopRupees} step={500} className="w-20" placeholder="0"
-            title="Close every open row once total P&L falls to this loss (₹). Applies when you leave the field, not while typing." />
+            title="Close every open row once total P&L falls to this level (₹). A negative number is a loss (-3000), a positive one locks in profit (3000 exits if P&L drops back to +₹3,000). Applies when you leave the field, not while typing." />
         </div>
 
         <div className="h-4 w-px bg-zinc-800" />
@@ -3153,7 +3153,7 @@ function ControlStrip({
           </div>
         </>)}
 
-        <RiskRail totalPnl={totalPnl} target={Number(targetRupees) || null} stop={Number(stopRupees) || null}
+        <RiskRail totalPnl={totalPnl} target={Number(targetRupees) || null} stop={accountStopLevel({ stopRupees, stopSigned: true })}
           lockFloor={lockMtm} peakMtm={peakMtm} />
       </div>
 
@@ -5208,7 +5208,9 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
 
   const [riskEnabled, setRiskEnabled] = useState(config.riskEnabled);
   const [targetRupees, setTargetRupees] = useState(config.targetRupees);
-  const [stopRupees, setStopRupees] = useState(config.stopRupees);
+  // A legacy stop is a loss magnitude; show it as the negative P&L level it always meant (saved with stopSigned below).
+  const [stopRupees, setStopRupees] = useState(() => legacyStopToSigned(config));
+  const stopLevel = accountStopLevel({ stopRupees, stopSigned: true });
   const [trailEnabled, setTrailEnabled] = useState(config.trailEnabled);
   const [triggerRupees, setTriggerRupees] = useState(config.triggerRupees);
   const [lockRupees, setLockRupees] = useState(config.lockRupees);
@@ -5402,7 +5404,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     } else setConfig(d);
     setRiskEnabled(d.riskEnabled);
     setTargetRupees(d.targetRupees);
-    setStopRupees(d.stopRupees);
+    setStopRupees(legacyStopToSigned(d));
     setTrailEnabled(d.trailEnabled);
     setTriggerRupees(d.triggerRupees);
     setLockRupees(d.lockRupees);
@@ -6024,7 +6026,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   async function doSaveConfig(patch?: FocusConfigWrite) {
     try {
       const raw = patch ?? {
-        riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
+        riskEnabled, targetRupees, stopRupees, stopSigned: true, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
         trailKind: trailX.kind, trailEvery: trailX.every, trailBy: trailX.by,
         groups: config.groups,
       };
@@ -9266,7 +9268,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     // Evaluated twice, once per book, with the same thresholds: the real book
     // against real P&L, the sim book against paper P&L, each with its own
     // peak and trail floor. A breach in one flattens only that book.
-    const riskCfg = { riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees,
+    const riskCfg = { riskEnabled, targetRupees, stopRupees, stopSigned: true, trailEnabled, triggerRupees, lockRupees,
       trailKind: trailX.kind, trailEvery: trailX.every, trailBy: trailX.by };
     const realOpen = openRows.filter(r => !isSimRow(r));
     const simOpen = openRows.filter(r => isSimRow(r));
@@ -10051,11 +10053,11 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
    * about-to-be-stale closures, since setState is async.
    */
   function saveRiskPatch(partial: Partial<Pick<FocusToolConfig,
-    'riskEnabled' | 'trailEnabled' | 'liveRealMoney' | 'liveArmedOn' | 'targetRupees' | 'stopRupees' | 'triggerRupees' | 'lockRupees'
+    'riskEnabled' | 'trailEnabled' | 'liveRealMoney' | 'liveArmedOn' | 'targetRupees' | 'stopRupees' | 'stopSigned' | 'triggerRupees' | 'lockRupees'
     | 'trailKind' | 'trailEvery' | 'trailBy'
   >>) {
     saveConfig({
-      riskEnabled, targetRupees, stopRupees, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
+      riskEnabled, targetRupees, stopRupees, stopSigned: true, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
       trailKind: trailX.kind, trailEvery: trailX.every, trailBy: trailX.by,
       ...partial,
       // No rows/groups: this render's `config` can be stale, and a stale row
@@ -10694,7 +10696,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
               </div>
               <div className="flex justify-between border-b border-zinc-850 py-1">
                 <span className="text-zinc-500">Stop Loss:</span>
-                <span className="font-mono text-rose-400 font-bold">{stopRupees ? `-₹${Number(stopRupees).toLocaleString('en-IN')}` : 'Off'}</span>
+                <span className="font-mono text-rose-400 font-bold">{stopLevel != null ? fmtInr(stopLevel) : 'Off'}</span>
               </div>
               <div className="flex justify-between border-b border-zinc-850 py-1">
                 <span className="text-zinc-500">Trail SL Trigger:</span>
@@ -10706,8 +10708,8 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
               </div>
               <div className="flex justify-between border-b border-zinc-850 py-1 col-span-2">
                 <span className="text-zinc-500">Room to Stop:</span>
-                <span className={cn("font-mono font-bold", toolPnl + (Number(stopRupees) || 0) < 0 ? "text-rose-400" : "text-zinc-300")}>
-                  {stopRupees ? fmtInr(toolPnl + Number(stopRupees), true) : '—'}
+                <span className={cn("font-mono font-bold", stopLevel != null && toolPnl - stopLevel < 0 ? "text-rose-400" : "text-zinc-300")}>
+                  {stopLevel != null ? fmtInr(toolPnl - stopLevel, true) : '—'}
                 </span>
               </div>
             </div>

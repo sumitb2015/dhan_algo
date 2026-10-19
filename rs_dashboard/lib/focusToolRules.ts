@@ -1831,6 +1831,8 @@ export interface RiskConfig {
   riskEnabled: boolean;
   targetRupees: string;
   stopRupees: string;
+  /** See FocusToolConfig.stopSigned. Missing = `stopRupees` is a loss magnitude. */
+  stopSigned?: boolean;
   trailEnabled: boolean;
   triggerRupees: string;
   lockRupees: string;
@@ -1866,6 +1868,27 @@ function num(v: string | number | null | undefined): number | null {
 }
 
 /**
+ * The account STOP as a P&L level: the book exits once total P&L is at or below it. Signed values
+ * (`stopSigned`) are taken as typed, so a positive one locks in profit; a legacy value is a loss
+ * magnitude. Empty or 0 = off.
+ */
+export function accountStopLevel(cfg: Pick<RiskConfig, 'stopRupees' | 'stopSigned'>): number | null {
+  const n = num(cfg.stopRupees);
+  if (n == null || n === 0) return null;
+  return cfg.stopSigned ? n : -Math.abs(n);
+}
+
+/**
+ * A saved stop in the signed convention. A legacy value (no `stopSigned`) was a loss magnitude, so 5000
+ * becomes '-5000'; a signed or empty one is returned as stored.
+ */
+export function legacyStopToSigned(cfg: Pick<RiskConfig, 'stopRupees' | 'stopSigned'>): string {
+  const n = num(cfg.stopRupees);
+  if (cfg.stopSigned || n == null) return cfg.stopRupees ?? '';
+  return n === 0 ? '' : String(-Math.abs(n));
+}
+
+/**
  * The account-level budget: TARGET ₹ / STOP ₹ and the trailing lock.
  *
  * The trail is dormant until P&L clears TRIGGER, then a floor that ratchets up
@@ -1882,13 +1905,12 @@ export function evaluateGlobalRisk(cfg: RiskConfig, ctx: GlobalRiskContext): Glo
 
   if (cfg.riskEnabled) {
     const target = num(cfg.targetRupees);
-    const stop = num(cfg.stopRupees);
+    const stop = accountStopLevel(cfg);
     if (target != null && target > 0 && ctx.totalPnl >= target) {
       return { exitAll: true, reason: `Target ₹${target.toFixed(0)} reached (₹${ctx.totalPnl.toFixed(0)})`, lockFloor, trailState: trailState.v };
     }
-    // STOP is stored as a positive magnitude; the UI labels it a loss limit.
-    if (stop != null && stop > 0 && ctx.totalPnl <= -stop) {
-      return { exitAll: true, reason: `Stop ₹${stop.toFixed(0)} hit (₹${ctx.totalPnl.toFixed(0)})`, lockFloor, trailState: trailState.v };
+    if (stop != null && ctx.totalPnl <= stop) {
+      return { exitAll: true, reason: `Stop ${stop < 0 ? `₹${(-stop).toFixed(0)}` : `+₹${stop.toFixed(0)} (profit lock)`} hit (₹${ctx.totalPnl.toFixed(0)})`, lockFloor, trailState: trailState.v };
     }
   }
 
@@ -1899,11 +1921,11 @@ export function evaluateGlobalRisk(cfg: RiskConfig, ctx: GlobalRiskContext): Glo
     const every = num(cfg.trailEvery) ?? 0;
     const by = num(cfg.trailBy) ?? 0;
     if (kind === 'trailSl') {
-      const stop = num(cfg.stopRupees);
-      if (stop == null || !(stop > 0) || !(every > 0) || !(by > 0)) return { exitAll: false, reason: '', lockFloor, trailState: 'INACTIVE' };
+      const stop = accountStopLevel(cfg);
+      if (stop == null || !(every > 0) || !(by > 0)) return { exitAll: false, reason: '', lockFloor, trailState: 'INACTIVE' };
       const n = Math.floor(Math.max(0, ctx.peakPnl) / every);
       if (!(n > 0)) return { exitAll: false, reason: '', lockFloor, trailState: 'DORMANT' };
-      const floor = -(stop - n * by);
+      const floor = stop + n * by;
       if (ctx.totalPnl <= floor) {
         return { exitAll: true, reason: `Trail SL ₹${floor.toFixed(0)} hit (₹${ctx.totalPnl.toFixed(0)}, peak ₹${ctx.peakPnl.toFixed(0)})`, lockFloor: floor, trailState: 'ARMED' };
       }

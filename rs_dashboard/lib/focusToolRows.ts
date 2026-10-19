@@ -752,6 +752,11 @@ export interface FocusToolConfig {
   riskEnabled: boolean;
   targetRupees: string;
   stopRupees: string;
+  /**
+   * true = `stopRupees` is a signed P&L level (3000 stops at +₹3,000 profit, -3000 at a ₹3,000 loss).
+   * Missing = the legacy loss magnitude (5000 meant -₹5,000); the page rewrites such a value on load.
+   */
+  stopSigned?: boolean;
   trailEnabled: boolean;
   triggerRupees: string;
   lockRupees: string;

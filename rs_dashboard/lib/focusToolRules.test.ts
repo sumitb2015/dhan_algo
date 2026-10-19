@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
-  evaluateEntry, evaluateEntryMomentum, reRangeWindow, overallSlConfig, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, runningLazyLeg, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, evaluateRowExit, legStopReason,
+  evaluateEntry, evaluateEntryMomentum, reRangeWindow, overallSlConfig, nextOverallPeak, evaluateOverallExit, overallExitKind, evaluateOverallReentry, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, runningLazyLeg, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, legHasOwnSl, simpleMomOn, simpleMomLevel, simpleMomHit, evaluateGlobalRisk, accountStopLevel, legacyStopToSigned, evaluateRowExit, legStopReason,
   dteForExpiry, dteMatches, sidePremium, legsOf, legsFlat, rowOwnsLeg,
   stopPremium, legStopPremium, pairStopPremium, legOwnContracts,
   nextOpenedTs, isGhostDropProtected, GHOST_DROP_GRACE_MS,
@@ -1196,3 +1196,18 @@ test('modelAbsDelta100: a stale last print outside the quoted book is not used t
   assert.equal(modelAbsDelta100('CE', 22900, exp, 11.5, 14, 0.9, market, { bid: 11, ask: 12 }), modelAbsDelta100('CE', 22900, exp, 11.5, 14, 0.9, market));
 });
 
+
+test('account stop: signed level locks profit, legacy value stays a loss limit', () => {
+  const base = { riskEnabled: true, targetRupees: '', trailEnabled: false, triggerRupees: '', lockRupees: '' };
+  const at = (cfg: object, totalPnl: number) => evaluateGlobalRisk({ ...base, ...cfg } as never, { totalPnl, peakPnl: totalPnl, lockFloor: null }).exitAll;
+  assert.equal(at({ stopRupees: '3000', stopSigned: true }, 3500), false);
+  assert.equal(at({ stopRupees: '3000', stopSigned: true }, 3000), true);
+  assert.equal(at({ stopRupees: '-3000', stopSigned: true }, 100), false);
+  assert.equal(at({ stopRupees: '-3000', stopSigned: true }, -3000), true);
+  assert.equal(at({ stopRupees: '3000' }, 100), false);
+  assert.equal(at({ stopRupees: '3000' }, -3000), true);
+  assert.equal(legacyStopToSigned({ stopRupees: '5000' }), '-5000');
+  assert.equal(legacyStopToSigned({ stopRupees: '5000', stopSigned: true }), '5000');
+  assert.equal(legacyStopToSigned({ stopRupees: '' }), '');
+  assert.equal(accountStopLevel({ stopRupees: '0', stopSigned: true }), null);
+});
