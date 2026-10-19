@@ -169,6 +169,7 @@ export default function CyberPositionsPanel({
   // ADD is real money: the first click arms a row for 3 s, the second sends it.
   const [armedAddId, setArmedAddId] = useState<string | null>(null);
   const [addLotsDraft, setAddLotsDraft] = useState<Record<string, string>>({});
+  const [closeLotsDraft, setCloseLotsDraft] = useState<Record<string, string>>({});
   useEffect(() => {
     if (!armedAddId) return;
     const t = setTimeout(() => setArmedAddId(null), 3000);
@@ -648,17 +649,53 @@ export default function CyberPositionsPanel({
                           {/* Square Off Button + partial (25/50/75%) chips */}
                           <td className="py-3 px-3 text-right whitespace-nowrap">
                             <div className="flex flex-col items-end gap-1">
-                              <button
-                                onClick={() => {
-                                  cyberAudio.click();
-                                  onClosePosition(pos);
-                                }}
-                                disabled={isExecuting}
-                                className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-rose-500/20 hover:text-rose-400 hover:border-rose-500/50 border border-zinc-700 text-zinc-300 text-[10px] font-bold transition-all active:scale-95 disabled:opacity-50"
-                                title="Square off this leg instantly at market — 100%"
-                              >
-                                SQUARE OFF
-                              </button>
+                              {(() => {
+                                // Blank = close everything. A typed lot count closes just that many,
+                                // parsed only on click (free-typed draft, never mid-edit).
+                                const ls = lotSizeFor?.(pos) ?? 0;
+                                const heldLots = ls > 0 ? Math.floor(Math.abs(pos.netQty) / ls) : 0;
+                                const draft = closeLotsDraft[pos.id] ?? '';
+                                const lots = Number(draft);
+                                const partial = draft !== '';
+                                const valid = !partial || (Number.isInteger(lots) && lots >= 1 && lots <= heldLots);
+                                return (
+                                  <div className="flex items-center gap-1">
+                                    {ls > 0 && heldLots > 0 && (
+                                      <input
+                                        type="text"
+                                        inputMode="numeric"
+                                        value={draft}
+                                        placeholder="all"
+                                        onChange={(e) =>
+                                          setCloseLotsDraft((d) => ({ ...d, [pos.id]: e.target.value.replace(/[^0-9]/g, '') }))
+                                        }
+                                        aria-label="Lots to square off"
+                                        title={`Lots to square off (1-${heldLots}); blank = all`}
+                                        className={cn(
+                                          'w-9 px-1 py-1 rounded-lg bg-zinc-900 border text-center text-[10px] font-mono font-bold text-white placeholder:text-zinc-600 focus:outline-none focus:border-rose-500/60',
+                                          valid ? 'border-zinc-700' : 'border-rose-500/60'
+                                        )}
+                                      />
+                                    )}
+                                    <button
+                                      onClick={() => {
+                                        cyberAudio.click();
+                                        if (partial) {
+                                          onClosePosition(pos, lots * ls);
+                                          setCloseLotsDraft((d) => ({ ...d, [pos.id]: '' }));
+                                        } else {
+                                          onClosePosition(pos);
+                                        }
+                                      }}
+                                      disabled={isExecuting || !valid}
+                                      className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-rose-500/20 hover:text-rose-400 hover:border-rose-500/50 border border-zinc-700 text-zinc-300 text-[10px] font-bold transition-all active:scale-95 disabled:opacity-50"
+                                      title={partial && valid ? `Square off ${lots} lot(s) at market` : 'Square off this leg instantly at market — 100%'}
+                                    >
+                                      {partial && valid ? `SQUARE OFF ${lots}L` : 'SQUARE OFF'}
+                                    </button>
+                                  </div>
+                                );
+                              })()}
                               {onAddPosition && lotSizeFor && (lotSizeFor(pos) ?? 0) > 0 && (() => {
                                 // Free-typed draft, parsed only when the button is clicked (never mid-edit).
                                 const draft = addLotsDraft[pos.id] ?? '1';
