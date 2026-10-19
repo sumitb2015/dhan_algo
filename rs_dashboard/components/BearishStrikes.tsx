@@ -20,7 +20,9 @@ import AddNewLegModal from '@/components/multiLegFocus/AddNewLegModal';
 import ExitLotsModal from '@/components/multiLegFocus/ExitLotsModal';
 import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
 import { FOCUS_RING } from '@/components/Scalper';
-import { BrokerPicker, usePageBroker, type DhanKotak } from '@/components/BrokerPicker';
+import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
+import { BROKER_LABELS, scalperRoute, type Broker } from '@/hooks/useBrokerSelector';
+import { ZERODHA_FREEZE_UNITS } from '@/lib/zerodhaOrderRules';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useLiveTickerPoll, isStale } from '@/lib/useLiveTickerPoll';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
@@ -43,6 +45,8 @@ const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOILM'] as const;
 type Underlying = (typeof UNDERLYINGS)[number];
 const MAX_LOTS = 50;
 const SOURCE = 'bs';
+/** Accounts this page can sell on. */
+const BS_BROKERS = ['dhan', 'kotak', 'zerodha'] as const satisfies readonly Broker[];
 const FILL_GRACE_MS = 30_000;
 const SETTLE_GIVE_UP_MS = 6 * 3600_000;
 /** A reservation (order recorded, broker id not back yet) older than this belongs to a tab that died mid-send. */
@@ -167,7 +171,7 @@ export default function BearishStrikes() {
   const [armed, setArmed] = useState(false);     // REAL money — per page load, never persisted
   const mode: 'SIM' | 'REAL' = armed ? 'REAL' : 'SIM';
   // Account NEW sells go to. A row keeps the broker it was opened on; its exits, settles and reconcile follow the row.
-  const [broker, setBroker] = usePageBroker('bearishStrikes.broker');
+  const [broker, setBroker] = usePageBroker<Broker>('bearishStrikes.broker', BS_BROKERS);
 
   // ── Exit alerts for open positions (settings are per-viewer conveniences, kept in localStorage) ──
   const [watchSt, setWatchSt] = useState(true);
@@ -309,12 +313,13 @@ export default function BearishStrikes() {
 
   // ── Lot size + security ids ─────────────────────────────────────
   const [lookupState, setLookup] = useState<{ scope: string; entry: LookupEntry } | null>(null);
-  // Per broker: Dhan gives security ids (MCX lot size 1 = lots), Kotak trading symbols (MCX lot size = barrels per lot).
+  // Per broker: Dhan gives security ids (MCX lot size 1 = lots), Kotak trading symbols (MCX lot size = barrels per lot),
+  // Zerodha trading symbols (MCX lot size reads 1 = lots, like Dhan).
   const lookup = lookupState && lookupState.scope === `${broker}|${underlying}|${expiry}` ? lookupState.entry : null;
   useEffect(() => {
     if (!expiry) return;
     let dead = false;
-    fetch(`/api/scalper/${broker === 'kotak' ? 'kotak/' : ''}lookup?underlying=${underlying}&expiry=${expiry}`)
+    fetch(`${scalperRoute(broker, 'lookup')}?underlying=${underlying}&expiry=${expiry}`)
       .then((r) => r.json())
       .then((j: { success: boolean; data?: { lotSize?: number; strikes?: Record<string, StrikeIdentifier> } }) => {
         if (dead || !j.success || !j.data) return;
@@ -595,7 +600,7 @@ export default function BearishStrikes() {
         for (const p of positionsRef.current) {
           for (const o of p.pendingOrders ?? []) {
             if (p.mode !== 'REAL') continue;
-            const bkName = p.broker === 'kotak' ? 'Kotak' : 'Dhan';
+            const bkName = BROKER_LABELS[p.broker ?? 'dhan'];
             if (isReservation(o.orderId)) {
               // Recorded before sending, broker id never written back: the sending tab died (or is still sending).
               if (Date.now() - o.at > RESERVATION_STALE_MS) {
@@ -632,15 +637,15 @@ export default function BearishStrikes() {
     const id = setInterval(async () => {
       const real = positionsRef.current.filter((p) => p.mode === 'REAL' && p.status === 'OPEN' && p.qty > 0 && !p.pendingOrders?.length && Date.now() - p.filledAt > FILL_GRACE_MS);
       if (!real.length) return;
-      // Each row against ITS broker's book: Dhan by security id, Kotak by trading symbol (product MIS = INTRADAY).
-      for (const bk of ['dhan', 'kotak'] as const) {
+      // Each row against ITS broker's book: Dhan by security id, Kotak / Zerodha by trading symbol (product MIS = INTRADAY).
+      for (const bk of BS_BROKERS) {
         const mine = real.filter((p) => (p.broker ?? 'dhan') === bk);
         if (!mine.length) continue;
         try {
-          const j = await (await fetch(bk === 'kotak' ? '/api/scalper/kotak/positions' : '/api/scalper/positions')).json() as { success: boolean; data?: Record<string, unknown>[] };
+          const j = await (await fetch(scalperRoute(bk, 'positions'))).json() as { success: boolean; data?: Record<string, unknown>[] };
           if (!j.success || !Array.isArray(j.data)) continue;                     // unreadable book: touch nothing
           for (const p of mine) {
-            const rows = j.data.filter((r) => (bk === 'kotak' ? String(r.tradingSymbol) === p.symbol : String(r.securityId) === p.securityId)
+            const rows = j.data.filter((r) => (bk !== 'dhan' ? String(r.tradingSymbol) === p.symbol : String(r.securityId) === p.securityId)
               && ['INTRADAY', 'MIS'].includes(String(r.productType ?? 'INTRADAY').toUpperCase()));
             const shortQty = rows.reduce((a, r) => a + Math.max(0, -(Number(r.netQty) || 0)), 0);
             if (shortQty < p.qty) {
@@ -673,7 +678,7 @@ export default function BearishStrikes() {
   const fetchBook = useCallback(async () => {
     setBookLoading(true); setBookError(null);
     try {
-      const j = await (await fetch(broker === 'kotak' ? '/api/scalper/kotak/poll' : '/api/scalper/poll')).json() as {
+      const j = await (await fetch(scalperRoute(broker, 'poll'))).json() as {
         success: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[];
         positionsError?: string | null; error?: string;
       };
@@ -710,7 +715,7 @@ export default function BearishStrikes() {
 
   const lock = useRef(false);   // taken synchronously before any await: a double-click cannot place twice
 
-  const confirmOrder = useCallback(async (orderId: string, bk: DhanKotak, timeoutMs = 6000) => {
+  const confirmOrder = useCallback(async (orderId: string, bk: Broker, timeoutMs = 6000) => {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       try {
@@ -727,16 +732,16 @@ export default function BearishStrikes() {
     }
   }, []);
 
-  /** Sends one order: Dhan through the shared fast-order route (server caps `bs` at 3750 units per order), Kotak by
-   *  trading symbol through its own route (which checks the order book itself when the reply is unclear). */
+  /** Sends one order: Dhan through the shared fast-order route (server caps `bs` at 3750 units per order), Kotak and
+   *  Zerodha by trading symbol through their own routes (which check the order book themselves when the reply is unclear). */
   const sendOrder = useCallback(async (args: {
-    broker: DhanKotak; underlying: string;
+    broker: Broker; underlying: string;
     side: 'S' | 'B'; option: 'CE' | 'PE'; strike: number; qty: number; type: 'MARKET' | 'LIMIT'; price?: number; ident: string; idem: string;
   }): Promise<{ orderId: string | null; error?: string; unknown?: boolean }> => {
     const req = resolveOrderRequest(args.broker, {
       side: args.side, option: args.option, strike: args.strike, qty: args.qty, type: args.type, price: args.price,
       underlying: args.underlying, productType: 'INTRADAY',
-      ...(args.broker === 'kotak' ? { tradingsymbol: args.ident } : { securityId: args.ident }),
+      ...(args.broker !== 'dhan' ? { tradingsymbol: args.ident } : { securityId: args.ident }),
     }, {}, SOURCE);
     if (!req) return { orderId: null, error: 'Could not build the order' };
     try {
@@ -774,11 +779,18 @@ export default function BearishStrikes() {
       }
 
       const ident = lookup?.strikes[String(p.strike)];
-      const contract = broker === 'kotak'
+      const contract = broker !== 'dhan'
         ? (p.option === 'CE' ? ident?.ceSymbol : ident?.peSymbol)
         : (p.option === 'CE' ? ident?.ceId : ident?.peId);
-      if (!contract) { toast.error(`No ${broker === 'kotak' ? 'Kotak trading symbol' : 'security id'} for ${label} — lookup not loaded`); return; }
-      const bkName = broker === 'kotak' ? 'Kotak' : 'Dhan';
+      if (!contract) { toast.error(`No ${broker !== 'dhan' ? `${BROKER_LABELS[broker]} trading symbol` : 'security id'} for ${label} — lookup not loaded`); return; }
+      const bkName = BROKER_LABELS[broker];
+      // Zerodha's order route would cut an order above the exchange freeze into several, but this page tracks ONE order id,
+      // so the other slices would fill unwatched. Keep every Zerodha order inside the freeze instead.
+      const zFreeze = broker === 'zerodha' ? ZERODHA_FREEZE_UNITS[underlying] : undefined;
+      if (zFreeze && qty > Math.floor(zFreeze / lotSize) * lotSize) {
+        toast.error(`${p.lots} lots is above the exchange freeze limit — Zerodha orders on this page are capped at ${Math.floor(zFreeze / lotSize)} lots`);
+        return;
+      }
       const idem = `bs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       // Record the order BEFORE sending it. The ledger refuses a CLOSED row (this tab's copy can be 5 s old), so a sell
       // can never fill onto a row nothing watches; nothing is sent if the reservation is refused.
@@ -790,7 +802,7 @@ export default function BearishStrikes() {
       } else {
         const np = newPosition({
           mode, underlying, expiry: p.expiry, option: p.option, strike: p.strike, lotSize, qty: 0, avgPrice: 0, broker,
-          ...(broker === 'kotak' ? { symbol: contract } : { securityId: contract }), pendingOrders: [resv],
+          ...(broker !== 'dhan' ? { symbol: contract } : { securityId: contract }), pendingOrders: [resv],
         });
         if (!await op({ op: 'open', position: np })) { void refreshLedger(); return; }
         rowId = np.id;
@@ -829,10 +841,10 @@ export default function BearishStrikes() {
         if (ok) toast.success(`SIM bought back ${label} @ ${price.toFixed(2)}`);
         return ok;
       }
-      const bk: DhanKotak = pos.broker ?? 'dhan';
-      const bkName = bk === 'kotak' ? 'Kotak' : 'Dhan';
-      const contract = bk === 'kotak' ? pos.symbol : pos.securityId;
-      if (!contract) { toast.error(`Position has no ${bkName === 'Kotak' ? 'Kotak trading symbol' : 'security id'}`); return false; }
+      const bk: Broker = pos.broker ?? 'dhan';
+      const bkName = BROKER_LABELS[bk];
+      const contract = bk !== 'dhan' ? pos.symbol : pos.securityId;
+      if (!contract) { toast.error(`Position has no ${bk !== 'dhan' ? `${bkName} trading symbol` : 'security id'}`); return false; }
       // A resting exit must be cancelled first or the two would together over-buy; abort if the cancel fails.
       for (const o of (pos.pendingOrders ?? []).filter((x) => x.kind === 'exit')) {
         if (isReservation(o.orderId)) { toast.error(`Another exit for ${label} is being sent right now — wait for it to settle`); return false; }
@@ -991,7 +1003,7 @@ export default function BearishStrikes() {
             </span>
             <button
               type="button" onClick={() => setShowBook(true)}
-              title={`${broker === 'kotak' ? 'Kotak' : 'Dhan'} order book, trade book and open positions (whole account)`}
+              title={`${BROKER_LABELS[broker]} order book, trade book and open positions (whole account)`}
               className={`h-7 px-2 rounded border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800 hover:text-white flex items-center gap-1 ${FOCUS_RING}`}
             >
               <ClipboardList className="w-3.5 h-3.5 text-sky-400" aria-hidden="true" />Orders · Trades · Positions
@@ -1001,11 +1013,11 @@ export default function BearishStrikes() {
                 <TriangleAlert className="w-3.5 h-3.5" aria-hidden="true" />{alertCount} ALERT{alertCount > 1 ? 'S' : ''}
               </span>
             )}
-            <BrokerPicker value={broker} onChange={setBroker} disabled={armed}
+            <BrokerPicker value={broker} onChange={setBroker} brokers={BS_BROKERS} disabled={armed}
               disabledReason="Return to SIM first: new sells must not switch account while armed. Open rows always exit on their own broker." />
             <button
               type="button" onClick={() => setArmed((a) => !a)} aria-pressed={armed}
-              title={armed ? `REAL orders go to ${broker === 'kotak' ? 'Kotak' : 'Dhan'}. Click to return to SIM.` : `SIM: paper fills at live LTP. Click to arm REAL (${broker === 'kotak' ? 'Kotak' : 'Dhan'}, per page load).`}
+              title={armed ? `REAL orders go to ${BROKER_LABELS[broker]}. Click to return to SIM.` : `SIM: paper fills at live LTP. Click to arm REAL (${BROKER_LABELS[broker]}, per page load).`}
               className={`h-7 px-2 rounded border text-[11px] font-bold font-mono flex items-center gap-1 ${FOCUS_RING} ${armed ? 'bg-red-600 border-red-500 text-oncolor' : 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:text-white'}`}
             >
               <ShieldAlert className="w-3.5 h-3.5" aria-hidden="true" />{armed ? 'LIVE · REAL MONEY' : 'SIM'}

@@ -168,3 +168,13 @@ test('validateOp refuses non-numeric fields and unknown ops', () => {
   assert.doesNotThrow(() => validateOp({ op: 'pending', id: 'a', pending: null, clearOrderId: 'resv-1' }));
   assert.doesNotThrow(() => validateOp({ op: 'open', position: base() }));
 });
+
+test('Zerodha rows: own contract key, MCX counts lots like Dhan, REAL needs a trading symbol', () => {
+  const base = { id: 'z1', mode: 'REAL', underlying: 'CRUDEOILM', expiry: '2026-11-17', option: 'CE', strike: 8500, side: 'S', lotSize: 1,
+    qty: 2, avgPrice: 100, status: 'OPEN', openedAt: 1, filledAt: 1, realized: 0, broker: 'zerodha' } as const;
+  assert.notStrictEqual(contractKeyK(base as never), contractKeyK({ ...base, broker: 'dhan' } as never));
+  assert.strictEqual(pnlMultiplierK('CRUDEOILM', 'zerodha'), 10);
+  assert.strictEqual(legPnlK({ ...base, symbol: 'CRUDEOILM26NOV8500CE' } as never, 90), 200);   // 2 lots x 10 pts x 10 barrels
+  assert.throws(() => applyOpK({ rev: 0, positions: [] }, { op: 'open', position: base as never }), /Zerodha trading symbol/);
+  assert.doesNotThrow(() => validateOp({ op: 'open', position: { ...base, symbol: 'CRUDEOILM26NOV8500CE' } }));
+});

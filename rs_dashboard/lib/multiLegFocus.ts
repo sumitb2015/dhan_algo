@@ -117,7 +117,7 @@ export function fallbackLotSize(underlying: string, broker: string): number {
   if (underlying === 'NIFTY') return 65;
   if (underlying === 'BANKNIFTY') return 15;
   if (underlying === 'SENSEX') return 20;
-  if (broker === 'dhan') return 1;
+  if (broker === 'dhan' || broker === 'zerodha') return 1;   // lots: Dhan and Zerodha count MCX in lots, Kotak in barrels
   return underlying === 'CRUDEOIL' ? 100 : 10;
 }
 

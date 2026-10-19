@@ -26,7 +26,7 @@ function strike(ltp: number) {
 }
 
 async function install(page: Page) {
-  const seen = { fastOrder: 0, blocked: [] as string[] };
+  const seen = { fastOrder: 0, blocked: [] as string[], paths: [] as string[] };
   let ledger: LedgerFile = { rev: 0, positions: [] };
   const spot = 24500;
   const px = { ce24600: 100 };
@@ -44,6 +44,7 @@ async function install(page: Page) {
     const req = route.request();
     const p = new URL(req.url()).pathname;
     const method = req.method();
+    seen.paths.push(p);
     if (p === '/api/scalper/fast-order') { seen.fastOrder++; return json(route, { success: false, error: 'e2e: orders disabled' }, 400); }
     if (p === '/api/scalper/poll') return json(route, { success: true, positions: [], orders: [{ orderId: '9001', orderStatus: 'TRADED', tradingSymbol: 'NIFTY-Oct2026-24600-CE', transactionType: 'SELL', quantity: 65 }], trades: [] });
     if (p === '/api/scalper/nifty-prev-close') {
@@ -61,6 +62,8 @@ async function install(page: Page) {
       return json(route, { success: true, status: { status: 'RUNNING', subscribed: 6 }, quotes: quotes(), history: { history: [] } });
     }
     if (p === '/api/scalper/lookup') return json(route, { success: true, data: { lotSize: 65, strikes: { '24600': { ceId: '1', peId: '2' } } } });
+    if (p === '/api/scalper/zerodha/lookup') return json(route, { success: true, data: { lotSize: 65, strikes: { '24600': { ceSymbol: 'NIFTY26O2024600CE', peSymbol: 'NIFTY26O2024600PE' } } } });
+    if (p === '/api/scalper/zerodha/poll') return json(route, { success: true, positions: [], positionsError: null, orders: [{ orderId: '9002', orderStatus: 'COMPLETE', tradingSymbol: 'NIFTY26O2024600CE', transactionType: 'SELL', quantity: 65 }], trades: [] });
     if (p === '/api/bearish-strikes/bars') {
       const keys = (new URL(req.url()).searchParams.get('contracts') ?? '').split(',').filter(Boolean);
       const out: Record<string, unknown> = {};
@@ -189,3 +192,19 @@ for (const theme of ['light', 'beige']) {
     await expect(banner.getByRole('button', { name: /Exit 24600 CE now/ })).toHaveCSS('color', 'rgb(255, 255, 255)');
   });
 }
+
+test('Zerodha can be picked: its lookup and book are used, and SIM never reaches a broker order route', async ({ page }) => {
+  const seen = await install(page);
+  await page.goto('/bearish-strikes', { waitUntil: 'domcontentloaded' });
+  const picker = page.getByRole('combobox', { name: 'Broker for new orders' });
+  // Before hydration the select has no handler: retry until the page keeps the choice.
+  await expect(async () => { await picker.selectOption('zerodha'); await expect(picker).toHaveValue('zerodha', { timeout: 1_000 }); }).toPass({ timeout: 30_000 });
+  await expect.poll(() => seen.paths.includes('/api/scalper/zerodha/lookup'), { timeout: 60_000 }).toBe(true);
+
+  await page.getByRole('button', { name: /Orders · Trades · Positions/ }).click();
+  await expect(page.getByText('NIFTY26O2024600CE').first()).toBeVisible({ timeout: 30_000 });
+  await page.keyboard.press('Escape');
+
+  expect(seen.paths.filter((x) => /\/order$|fast-order/.test(x))).toEqual([]);
+  expect(seen.blocked).toEqual([]);
+});

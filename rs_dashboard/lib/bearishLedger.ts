@@ -32,10 +32,10 @@ export interface BsPosition {
   qty: number;
   avgPrice: number;
   /** Account the row trades on. Absent on older rows = Dhan. Every later order for the row goes to THIS broker. */
-  broker?: 'dhan' | 'kotak';
+  broker?: 'dhan' | 'kotak' | 'zerodha';
   /** Dhan contract id (Dhan rows) ... */
   securityId?: string;
-  /** ... or Kotak trading symbol (Kotak rows: Kotak has no numeric id). */
+  /** ... or the trading symbol (Kotak and Zerodha rows: neither has a usable numeric id). */
   symbol?: string;
   status: 'OPEN' | 'CLOSED';
   openedAt: number;
@@ -88,8 +88,9 @@ export const contractKey = (p: Pick<BsPosition, 'mode' | 'underlying' | 'expiry'
 /** Rupees per 1.00 premium move per ledger qty unit. Dhan takes MCX quantity in LOTS (lotSize 1), so qty is lots and
  *  one lot of CRUDEOILM is 10 barrels (CRUDEOIL 100): P&L must be scaled by barrels/lot. Every other underlying is 1
  *  because its lotSize already makes qty real contract units. */
-export const pnlMultiplier = (underlying: string, broker: 'dhan' | 'kotak' = 'dhan'): number =>
-  // Kotak counts MCX in barrels (its lot size is barrels per lot), so its qty is already real units.
+export const pnlMultiplier = (underlying: string, broker: 'dhan' | 'kotak' | 'zerodha' = 'dhan'): number =>
+  // Kotak counts MCX in barrels (its lot size is barrels per lot), so its qty is already real units. Dhan and Zerodha
+  // count lots, so the barrels-per-lot multiplier applies.
   (broker === 'kotak' ? 1 : MCX_LOT_MULTIPLIER[underlying] ?? 1);
 
 /** PnL sign: a short gains when price falls. */
@@ -117,8 +118,8 @@ export function applyOp(file: LedgerFile, op: LedgerOp): LedgerFile {
       // qty 0 is allowed only as a placeholder for an order whose outcome is still unknown (it is tracked, not forgotten).
       const awaiting = !(p.qty > 0) && (p.pendingOrders?.length ?? 0) > 0;
       if (!(p.lotSize > 0) || (!awaiting && (!(p.qty > 0) || !(p.avgPrice > 0)))) throw new LedgerError('qty, avgPrice and lotSize must be positive');
-      if (p.mode === 'REAL' && ((p.broker ?? 'dhan') === 'kotak' ? !p.symbol : !p.securityId)) {
-        throw new LedgerError(`REAL position needs a ${(p.broker ?? 'dhan') === 'kotak' ? 'Kotak trading symbol' : 'securityId'}`);
+      if (p.mode === 'REAL' && ((p.broker ?? 'dhan') !== 'dhan' ? !p.symbol : !p.securityId)) {
+        throw new LedgerError(`REAL position needs a ${p.broker === 'kotak' ? 'Kotak trading symbol' : p.broker === 'zerodha' ? 'Zerodha trading symbol' : 'securityId'}`);
       }
       // One strike per row: the same contract in the same mode is added to, never duplicated.
       if (positions.some((x) => x.status === 'OPEN' && contractKey(x) === contractKey(p))) {
@@ -262,7 +263,7 @@ export function validateOp(raw: unknown): LedgerOp {
       if (p.mode !== 'SIM' && p.mode !== 'REAL') bad('position.mode');
       if (p.option !== 'CE' && p.option !== 'PE') bad('position.option');
       if (p.side !== 'S' && p.side !== 'B') bad('position.side');
-      if (p.broker != null && p.broker !== 'dhan' && p.broker !== 'kotak') bad('position.broker');
+      if (p.broker != null && p.broker !== 'dhan' && p.broker !== 'kotak' && p.broker !== 'zerodha') bad('position.broker');
       if (p.securityId != null && typeof p.securityId !== 'string') bad('position.securityId');
       if (p.symbol != null && typeof p.symbol !== 'string') bad('position.symbol');
       if (p.pendingOrders != null) { if (!Array.isArray(p.pendingOrders)) bad('position.pendingOrders'); (p.pendingOrders as unknown[]).forEach(pend); }
