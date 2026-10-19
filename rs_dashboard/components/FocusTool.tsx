@@ -10083,6 +10083,15 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   }
 
   function handleSetTargetRupees(v: string) {
+    // Same guard as the Stop: a target at or below today's P&L is already reached and would close every open row on
+    // the next tick (a half-finished number committed on blur is the usual way to land here).
+    const target = Number(v);
+    const holding = config.rows.some(r => (Number(r.fill?.ceQty) || 0) > 0 || (Number(r.fill?.peQty) || 0) > 0);
+    if (riskEnabled && holding && v.trim() !== '' && target > 0 && toolPnl >= target) {
+      addToast('error', 'Target not set',
+        `₹${target.toLocaleString('en-IN')} is at or below the current P&L (${fmtInr(toolPnl, true)}), so it would close every open row at once. Enter a higher target, or turn Risk off first.`);
+      return;
+    }
     setTargetRupees(v);
     saveRiskPatch({ targetRupees: v });
   }
