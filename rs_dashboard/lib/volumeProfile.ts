@@ -92,7 +92,7 @@ const MAX_TICKS_PER_COLUMN = 4000;
  * two agree (555 divides evenly), but for 30m and 60m only the session anchor puts a
  * boundary at 09:15, which is where every Indian charting platform places it.
  */
-export function resampleBars(bars: Bar[], minutes: number): Bar[] {
+export function resampleBars(bars: Bar[], minutes: number, sessionStartMin: number = SESSION_START_MIN): Bar[] {
   if (minutes <= 1) return bars;
   const pad = (n: number) => String(n).padStart(2, '0');
   const buckets = new Map<string, Bar>();
@@ -103,10 +103,10 @@ export function resampleBars(bars: Bar[], minutes: number): Bar[] {
     const [, day, hh, mm] = m;
 
     const mins = Number(hh) * 60 + Number(mm);
-    const offset = mins - SESSION_START_MIN;
+    const offset = mins - sessionStartMin;
     // Pre-open prints (should not survive the session filter) collapse into the first bucket.
     const floored =
-      offset < 0 ? SESSION_START_MIN : SESSION_START_MIN + Math.floor(offset / minutes) * minutes;
+      offset < 0 ? sessionStartMin : sessionStartMin + Math.floor(offset / minutes) * minutes;
     const key = `${day} ${pad(Math.floor(floored / 60))}:${pad(floored % 60)}:00`;
 
     const cur = buckets.get(key);

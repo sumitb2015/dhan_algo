@@ -25,7 +25,7 @@ import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useLiveTickerPoll, isStale } from '@/lib/useLiveTickerPoll';
 import { startLiveIndicesBridge } from '@/lib/startLiveIndicesBridge';
 import {
-  computeIndicators, DEFAULT_IND_PARAMS, type IndParams, evaluateBearish, istNowMs, mergeBars, oiView, passesFilters, pctBelow, recordTick,
+  computeIndicators, DEFAULT_IND_PARAMS, sessionStartFor, type IndParams, evaluateBearish, istNowMs, mergeBars, oiView, passesFilters, pctBelow, recordTick,
   type BearishSignal, type LiveMinutes, type OiMode, type StrikeFilters, type Timeframe,
 } from '@/lib/bearishStrikes';
 import { RESERVATION_PREFIX, isReservation, legPnl, type BsPosition, type LedgerOp, type PendingOrder } from '@/lib/bearishLedger';
@@ -446,7 +446,7 @@ export default function BearishStrikes() {
           if (!inScan.has(key)) continue;
           const cached = barsRef.current.get(key);
           if (!cached || !cached.bars.length) continue;          // no backfill = no VWAP/ST: never guess
-          const ind = computeIndicators(mergeBars(cached.bars, lm), tf, nowIst, indCfg);
+          const ind = computeIndicators(mergeBars(cached.bars, lm), tf, nowIst, indCfg, sessionStartFor(underlying));
           const sig = evaluateBearish(ind);
           const liveBelowAll = sig.stLine != null && sig.vwap != null && sig.ema != null && sig.stDir === -1
             && d.ltp < sig.stLine && d.ltp < sig.vwap && d.ltp < sig.ema;
@@ -505,7 +505,7 @@ export default function BearishStrikes() {
         const ltp = d && d.ltp > 0 ? d.ltp : null;
         const key = `${p.strike}${p.option}`;
         const cached = inScope ? barsRef.current.get(key) : undefined;
-        const ind = cached?.bars.length ? computeIndicators(mergeBars(cached.bars, liveMinRef.current.get(key) ?? new Map()), tf, nowIst, indCfg) : null;
+        const ind = cached?.bars.length ? computeIndicators(mergeBars(cached.bars, liveMinRef.current.get(key) ?? new Map()), tf, nowIst, indCfg, sessionStartFor(p.underlying)) : null;
         const states = ind ? levelStates(ind, ltp, alertBasis) : { st: null, vwap: null, ema: null };
         const ws = watchState({ inScope, feedFresh, hasPrice: ltp != null, hasBars: !!ind, states, watch });
         next[p.id] = { ws, states, ind, ltp };
@@ -901,9 +901,10 @@ export default function BearishStrikes() {
         if (ltp == null) continue;
         const sent = lowSent.current[p.id];
         const known = Math.min(p.low ?? Infinity, sent?.v ?? Infinity);
-        if (risk.trail > 0 && ltp < known) {     // new low: remember it now, persist at most every 5 s
-          lowSent.current[p.id] = { v: ltp, at: sent?.at ?? 0 };
-          if (now - (sent?.at ?? 0) > 5000) { lowSent.current[p.id].at = now; void op({ op: 'low', id: p.id, low: ltp }); }
+        if (risk.trail > 0) {     // new low: remember it now, persist at most every 5 s (a low held back is flushed on a later tick)
+          if (ltp < known) lowSent.current[p.id] = { v: ltp, at: sent?.at ?? 0 };
+          const cur = lowSent.current[p.id];
+          if (cur && cur.v < (p.low ?? Infinity) && now - cur.at > 5000) { cur.at = now; void op({ op: 'low', id: p.id, low: cur.v }); }
         }
         const low = Math.min(known, ltp);
         const hit = riskHit(p.avgPrice, Number.isFinite(low) ? low : null, ltp, risk);
@@ -990,7 +991,7 @@ export default function BearishStrikes() {
             </span>
             <button
               type="button" onClick={() => setShowBook(true)}
-              title="Dhan order book, trade book and open positions (whole account)"
+              title={`${broker === 'kotak' ? 'Kotak' : 'Dhan'} order book, trade book and open positions (whole account)`}
               className={`h-7 px-2 rounded border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800 hover:text-white flex items-center gap-1 ${FOCUS_RING}`}
             >
               <ClipboardList className="w-3.5 h-3.5 text-sky-400" aria-hidden="true" />Orders · Trades · Positions

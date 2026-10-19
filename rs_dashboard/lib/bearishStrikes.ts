@@ -12,11 +12,14 @@
  *    zero-volume bars; a 0/0 VWAP must not read as "price below VWAP").
  */
 import { emaSmaSeeded, supertrendSeries } from './indicators.ts';
-import { resampleBars, type Bar } from './volumeProfile.ts';
+import { resampleBars, SESSION_START_MIN, type Bar } from './volumeProfile.ts';
 
 export const ST_PERIOD = 10;
 export const ST_MULT = 2;
 export const EMA_PERIOD = 20;
+
+/** First minute of the trading day (minutes after midnight IST) for bucketing: MCX opens at 09:00, NSE/BSE at 09:15. */
+export const sessionStartFor = (underlying: string): number => (underlying.startsWith('CRUDEOIL') ? 9 * 60 : SESSION_START_MIN);
 
 /** Indicator settings the page lets the user change. VWAP is the session VWAP and has no parameter. */
 export interface IndParams { stPeriod: number; stMult: number; emaPeriod: number }
@@ -76,11 +79,11 @@ export function istNowMs(now = Date.now()): number {
   return now + 5.5 * 3600_000;
 }
 
-/** Indicators on the last CLOSED bar of `bars1m` resampled to `tf` minutes. */
-export function computeIndicators(bars1m: Bar[], tf: Timeframe, nowIstMs: number, params: IndParams = DEFAULT_IND_PARAMS): Indicators {
+/** Indicators on the last CLOSED bar of `bars1m` resampled to `tf` minutes. `sessionStartMin` anchors the buckets (MCX opens 09:00, not 09:15). */
+export function computeIndicators(bars1m: Bar[], tf: Timeframe, nowIstMs: number, params: IndParams = DEFAULT_IND_PARAMS, sessionStartMin: number = SESSION_START_MIN): Indicators {
   const empty: Indicators = { close: null, stLine: null, stDir: null, vwap: null, ema: null, barTime: null, barsUsed: 0 };
   if (!bars1m.length) return empty;
-  const bars = closedBarsOnly(resampleBars(bars1m, tf), tf, nowIstMs);
+  const bars = closedBarsOnly(resampleBars(bars1m, tf, sessionStartMin), tf, nowIstMs);
   if (!bars.length) return empty;
 
   const st = supertrendSeries(bars.map((b) => ({ high: b.h, low: b.l, close: b.c })), params.stPeriod, params.stMult);

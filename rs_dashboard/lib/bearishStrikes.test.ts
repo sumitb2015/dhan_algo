@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import {
-  sessionVwap, closedBarsOnly, computeIndicators, evaluateBearish, recordTick, mergeBars, passesFilters, oiView, type LiveMinutes,
+  sessionVwap, sessionStartFor, closedBarsOnly, computeIndicators, evaluateBearish, recordTick, mergeBars, passesFilters, oiView, type LiveMinutes,
 } from './bearishStrikes.ts';
 import type { Bar } from './volumeProfile.ts';
 
@@ -145,4 +145,15 @@ test('maxLtp keeps only premiums at or below it (0 = off)', () => {
   assert.strictEqual(passesFilters(row(50), 9000, 1, { ...f, maxLtp: 50 }), true);
   assert.strictEqual(passesFilters(row(50.05), 9000, 1, { ...f, maxLtp: 50 }), false);
   assert.strictEqual(passesFilters(row(500), 9000, 1, { ...f, maxLtp: 0 }), true);
+});
+
+test('MCX 3m buckets keep 09:00-09:14 bars out of the 09:15 bucket', () => {
+  const bars: Bar[] = Array.from({ length: 30 }, (_, i) => {
+    const mins = 9 * 60 + i;
+    return { t: `2026-10-14 ${pad(Math.floor(mins / 60))}:${pad(mins % 60)}:00`, o: 100, h: 101, l: 99, c: 100, v: 10 };
+  });
+  const mcx = computeIndicators(bars, 3, NOW, undefined, sessionStartFor('CRUDEOILM'));
+  assert.strictEqual(mcx.barsUsed, 10);                   // 30 minutes / 3, none merged
+  const nse = computeIndicators(bars, 3, NOW);             // NSE anchor would fold the first 15 minutes into one bar
+  assert.strictEqual(nse.barsUsed, 5);
 });
