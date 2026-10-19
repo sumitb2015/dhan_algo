@@ -396,7 +396,10 @@ function CyberScalperTerminal() {
     }
     let cancelled = false;
     const q = new URLSearchParams({ underlying: symbol, expiry: expiryVal });
-    if (futureExpiry) q.set('futureExpiry', futureExpiry);
+    // The contract the pad shows (Dhan's feed picked it) is the one to resolve on this broker: with no explicit choice the
+    // route's own "nearest" could be a different month than the price and chart on screen.
+    const wantFutureExpiry = futureExpiry ?? feedData?.future?.expiry;
+    if (wantFutureExpiry) q.set('futureExpiry', wantFutureExpiry);
     fetch(`${scalperRoute(broker, 'lookup')}?${q.toString()}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { strikes: Record<string, { ceSymbol?: string; peSymbol?: string }>; future?: { trading_symbol: string; expiry?: string; lot_size?: number; exchange_segment?: string } | null } }) => {
@@ -407,7 +410,7 @@ function CyberScalperTerminal() {
       })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [broker, symbol, feedData?.options?.expiry, futureExpiry]);
+  }, [broker, symbol, feedData?.options?.expiry, feedData?.future?.expiry, futureExpiry]);
 
   // Main polling loop (every 2.5 seconds for fresh candles and bias calculations)
   useEffect(() => {
@@ -464,6 +467,10 @@ function CyberScalperTerminal() {
         // (2 lots × 10 barrels/lot = 20). Index futures (e.g. NIFTY) already carry
         // their true per-lot size on both sides, so this multiply is a no-op for them.
         brokerTradingSymbol = brokerFuture?.trading_symbol;
+        // A lookup still in flight (or failed) after an expiry switch leaves the previous month's symbol here: never
+        // trade a different month than the pad shows.
+        const shownExpiry = feedDataRef.current?.future?.expiry;
+        if (brokerFuture?.expiry && shownExpiry && brokerFuture.expiry !== shownExpiry) brokerTradingSymbol = undefined;
         brokerExchange = brokerFuture?.exchange_segment ?? (symbol.includes('CRUDE') ? 'mcx_fo' : 'nse_fo');
         if (!brokerTradingSymbol) {
           cyberAudio.error();

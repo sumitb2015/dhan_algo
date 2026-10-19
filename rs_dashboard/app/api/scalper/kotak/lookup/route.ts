@@ -75,8 +75,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const futureRows = all
       .filter(r => r.instrument_type === 'FUT')
       .sort((a, b) => a.expiry.localeCompare(b.expiry));
+    // A requested expiry that is not listed resolves to NO contract: falling back to the nearest would trade a different
+    // month than the one the caller is showing.
     const selectedFut = futureExpiry
-      ? futureRows.find(r => r.expiry === futureExpiry) ?? futureRows[0] ?? null
+      ? futureRows.find(r => r.expiry === futureExpiry) ?? null
       : futureRows[0] ?? null;
     const future = selectedFut
       ? {
