@@ -144,6 +144,9 @@ interface PositionsPanelProps {
   isExecuting: boolean;
 }
 
+// Ceiling for one ADD click; the order route enforces its own cap as well.
+const MAX_ADD_LOTS = 25;
+
 export default function CyberPositionsPanel({
   symbol,
   positions,
@@ -165,6 +168,7 @@ export default function CyberPositionsPanel({
   const [scope, setScope] = useState<'terminal' | 'symbol' | 'all'>('terminal');
   // ADD is real money: the first click arms a row for 3 s, the second sends it.
   const [armedAddId, setArmedAddId] = useState<string | null>(null);
+  const [addLotsDraft, setAddLotsDraft] = useState<Record<string, string>>({});
   useEffect(() => {
     if (!armedAddId) return;
     const t = setTimeout(() => setArmedAddId(null), 3000);
@@ -655,30 +659,54 @@ export default function CyberPositionsPanel({
                               >
                                 SQUARE OFF
                               </button>
-                              {onAddPosition && lotSizeFor && (lotSizeFor(pos) ?? 0) > 0 && (
-                                <button
-                                  type="button"
-                                  disabled={isExecuting}
-                                  onClick={() => {
-                                    cyberAudio.click();
-                                    if (armedAddId === pos.id) {
-                                      setArmedAddId(null);
-                                      onAddPosition(pos, 1);
-                                    } else {
-                                      setArmedAddId(pos.id);
-                                    }
-                                  }}
-                                  className={cn(
-                                    'px-3 py-1 rounded-lg border text-[10px] font-bold transition-all active:scale-95 disabled:opacity-50',
-                                    armedAddId === pos.id
-                                      ? 'bg-emerald-600 border-emerald-500 text-white'
-                                      : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-emerald-500/20 hover:text-emerald-400 hover:border-emerald-500/50'
-                                  )}
-                                  title={`Add 1 lot to this leg (${pos.netQty > 0 ? 'BUY' : 'SELL'} at market) — click twice to confirm`}
-                                >
-                                  {armedAddId === pos.id ? 'CONFIRM +1 LOT' : '+ ADD'}
-                                </button>
-                              )}
+                              {onAddPosition && lotSizeFor && (lotSizeFor(pos) ?? 0) > 0 && (() => {
+                                // Free-typed draft, parsed only when the button is clicked (never mid-edit).
+                                const draft = addLotsDraft[pos.id] ?? '1';
+                                const lots = Number(draft);
+                                const valid = Number.isInteger(lots) && lots >= 1 && lots <= MAX_ADD_LOTS;
+                                const armed = armedAddId === pos.id;
+                                return (
+                                  <div className="flex items-center gap-1">
+                                    <input
+                                      type="text"
+                                      inputMode="numeric"
+                                      value={draft}
+                                      onChange={(e) => {
+                                        setAddLotsDraft((d) => ({ ...d, [pos.id]: e.target.value.replace(/[^0-9]/g, '') }));
+                                        setArmedAddId(null);
+                                      }}
+                                      aria-label="Lots to add"
+                                      title={`Lots to add (1-${MAX_ADD_LOTS})`}
+                                      className={cn(
+                                        'w-9 px-1 py-1 rounded-lg bg-zinc-900 border text-center text-[10px] font-mono font-bold text-white focus:outline-none focus:border-emerald-500/60',
+                                        valid ? 'border-zinc-700' : 'border-rose-500/60'
+                                      )}
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={isExecuting || !valid}
+                                      onClick={() => {
+                                        cyberAudio.click();
+                                        if (armed) {
+                                          setArmedAddId(null);
+                                          onAddPosition(pos, lots);
+                                        } else {
+                                          setArmedAddId(pos.id);
+                                        }
+                                      }}
+                                      className={cn(
+                                        'px-3 py-1 rounded-lg border text-[10px] font-bold transition-all active:scale-95 disabled:opacity-50',
+                                        armed
+                                          ? 'bg-emerald-600 border-emerald-500 text-white'
+                                          : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-emerald-500/20 hover:text-emerald-400 hover:border-emerald-500/50'
+                                      )}
+                                      title={`Add ${valid ? lots : '?'} lot(s) to this leg (${pos.netQty > 0 ? 'BUY' : 'SELL'} at market) — click twice to confirm`}
+                                    >
+                                      {armed ? `CONFIRM +${lots}L` : '+ ADD'}
+                                    </button>
+                                  </div>
+                                );
+                              })()}
                               {/* 100% is the button above, so only the fractions appear
                                   here. A chip is disabled when it maps to under a lot, or
                                   to the same lot count as a smaller one — see lib/partialQty. */}
