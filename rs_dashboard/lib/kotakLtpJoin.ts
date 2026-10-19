@@ -120,14 +120,18 @@ interface JoinablePosition {
  * "unknown" outcome the rest of this codebase already settled on, not
  * something to paper over with a guessed mark.
  */
-export async function joinKotakLtp(positions: JoinablePosition[]): Promise<void> {
+export async function joinKotakLtp(
+  positions: JoinablePosition[],
+  /** Another broker's instrument-cache reader (Zerodha's guards reuse this join): same shape as kotakSymbolMap. */
+  symbolMapFor: (underlying: string) => Promise<Record<string, KotakSymbolInfo>> = kotakSymbolMap,
+): Promise<void> {
   const unpriced = positions.filter(p => p.isOpen && p.lastPrice <= 0);
   if (unpriced.length === 0) return;
 
   const underlyings = [...new Set(unpriced.map(p => underlyingPrefix(p.tradingSymbol)).filter(Boolean))];
   const symbolMaps: Record<string, Record<string, KotakSymbolInfo>> = {};
   await Promise.all(underlyings.map(async u => {
-    try { symbolMaps[u] = await kotakSymbolMap(u); } catch { symbolMaps[u] = {}; }
+    try { symbolMaps[u] = await symbolMapFor(u); } catch { symbolMaps[u] = {}; }
   }));
 
   const infoFor = (p: JoinablePosition): KotakSymbolInfo | undefined =>

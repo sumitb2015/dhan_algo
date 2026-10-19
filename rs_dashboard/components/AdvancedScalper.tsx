@@ -243,7 +243,9 @@ function AdvancedScalper() {
   const bracketActive = bracketOn && broker === 'dhan';
   // Kotak has no resting bracket, so the same toggle registers a bracket with the dashboard SERVER (lib/kotakGuardServer):
   // it arms when the entry shows in the book and exits at the target / stop even with this tab closed.
-  const softBracketActive = bracketOn && broker === 'kotak';
+  // Zerodha is the same: no resting bracket or P&L exit, so the same server watcher (lib/zerodhaGuardServer) holds them.
+  const serverGuardBroker = broker === 'kotak' || broker === 'zerodha';
+  const softBracketActive = bracketOn && serverGuardBroker;
   const bracketShown = bracketActive || softBracketActive;
   // Set once this tab books a bracket: from then on a failed look-up at close time is loud, not silent.
   const bracketPlacedRef = useRef(false);
@@ -899,17 +901,17 @@ function AdvancedScalper() {
   // Dhan-only, matching where the guard controls render: the other brokers report
   // Kite/Neo product names (MIS/NRML) that this vocabulary does not describe.
   const uncoveredGuardProducts = useMemo(() => {
-    if (broker !== 'dhan' && broker !== 'kotak') return [];
+    if (broker !== 'dhan' && !serverGuardBroker) return [];
     const out = new Set<string>();
     for (const pos of enrichedPositions) {
       if (Number(pos.netQty) === 0) continue;
-      if (broker === 'kotak' && !isFnoSegment(pos)) continue;
-      // Kotak names products MIS / NRML; the chips are INTRADAY / MARGIN / CNC.
-      const pt = broker === 'kotak' ? guardProductOf(pos.productType) : String(pos.productType ?? '').toUpperCase();
+      if (serverGuardBroker && !isFnoSegment(pos)) continue;
+      // Kotak and Zerodha name products MIS / NRML; the chips are INTRADAY / MARGIN / CNC.
+      const pt = serverGuardBroker ? guardProductOf(pos.productType) : String(pos.productType ?? '').toUpperCase();
       if (pt && !guardProductTypes.includes(pt)) out.add(pt);
     }
     return [...out];
-  }, [enrichedPositions, guardProductTypes, broker]);
+  }, [enrichedPositions, guardProductTypes, broker, serverGuardBroker]);
 
   // Position row keyed by security ID — lets each box look up its own open position/P&L
   // An open row wins over a flat one for the same contract (see indexOpenRowByKey): last-row-wins made a live leg
@@ -1438,7 +1440,7 @@ function AdvancedScalper() {
   const seenGuardEventRef = useRef<number | null>(null);
   const refreshServerGuard = useCallback(async () => {
     try {
-      const res = await fetch('/api/scalper/kotak/guards');
+      const res = await fetch(scalperRoute(broker, 'guards'));
       const j = await res.json() as { success: boolean; sessionValid?: boolean; state?: ServerGuardState };
       if (!j.success || !j.state) return;
       setServerGuard({ sessionValid: !!j.sessionValid, state: j.state });
@@ -1452,20 +1454,20 @@ function AdvancedScalper() {
       }
       seenGuardEventRef.current = Math.max(seenGuardEventRef.current, last);
     } catch { /* unreadable: keep the last view */ }
-  }, [addToast]);
+  }, [addToast, broker]);
   useEffect(() => {
     seenGuardEventRef.current = null;
     setServerGuard(null);
-    if (broker !== 'kotak') return;
+    if (!serverGuardBroker) return;
     void refreshServerGuard();
     const id = setInterval(() => { void refreshServerGuard(); }, 3000);
     return () => clearInterval(id);
-  }, [broker, refreshServerGuard]);
-  const serverPnlGuard = broker === 'kotak' ? serverGuard?.state.pnl ?? null : null;
-  const serverBrackets = broker === 'kotak' ? serverGuard?.state.brackets ?? [] : [];
+  }, [serverGuardBroker, refreshServerGuard]);
+  const serverPnlGuard = serverGuardBroker ? serverGuard?.state.pnl ?? null : null;
+  const serverBrackets = serverGuardBroker ? serverGuard?.state.brackets ?? [] : [];
   const postGuard = useCallback(async (body: Record<string, unknown>): Promise<boolean> => {
     try {
-      const res = await fetch('/api/scalper/kotak/guards', {
+      const res = await fetch(scalperRoute(broker, 'guards'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
       const j = await res.json() as { success: boolean; error?: string; state?: ServerGuardState };
@@ -1476,7 +1478,7 @@ function AdvancedScalper() {
       addToast('error', 'Guard not registered', String(e));
       return false;
     }
-  }, [addToast, refreshServerGuard]);
+  }, [addToast, refreshServerGuard, broker]);
 
   // ─── Box management ─────────────────────────────────────────────
 
@@ -1819,7 +1821,7 @@ function AdvancedScalper() {
         // Registered with the server BEFORE the order goes out, so it is already watching when the fill lands. If it
         // cannot be registered the order is not sent (an unprotected "bracketed" order is the failure to avoid); if the
         // order then fails, the registration is withdrawn below.
-        const reg = await fetch('/api/scalper/kotak/guards', {
+        const reg = await fetch(scalperRoute(broker, 'guards'), {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             action: 'addBracket', symbol, product: productType, dir: side === 'BUY' ? 1 : -1, target: r.target, sl: r.sl,
@@ -3080,7 +3082,7 @@ function AdvancedScalper() {
   }, []);
 
   const handleSetPnl = async () => {
-    if (broker === 'kotak') {
+    if (serverGuardBroker) {
       const p = Math.abs(parseFloat(profitTarget)) || 0;
       const l = Math.abs(parseFloat(lossLimit)) || 0;
       const err = validateSoftPnlGuard(p, l, guardProductTypes);
@@ -3143,7 +3145,7 @@ function AdvancedScalper() {
   };
 
   const handleClearPnl = async () => {
-    if (broker === 'kotak') {
+    if (serverGuardBroker) {
       if (!confirmClear) { setConfirmClear(true); setTimeout(() => setConfirmClear(false), 3000); return; }
       setConfirmClear(false);
       if (await postGuard({ action: 'clearPnl' })) addToast('success', 'P&L Guard cleared');
@@ -3308,12 +3310,10 @@ function AdvancedScalper() {
               <button
                 type="button"
                 onClick={() => setBracketOn(v => !v)}
-                disabled={broker !== 'dhan' && broker !== 'kotak'}
+                disabled={broker !== 'dhan' && !serverGuardBroker}
                 aria-pressed={bracketShown}
-                title={broker === 'kotak'
-                  ? 'Kotak has no resting bracket, so orders that open or add a position register a target and stop-loss with the dashboard SERVER, which exits at market when one is hit. It keeps working with this tab closed (not if the dashboard server stops). Closing orders go out plain.'
-                  : broker !== 'dhan'
-                  ? 'Bracket orders (Dhan Super Order) are Dhan-only'
+                title={serverGuardBroker
+                  ? `${BROKER_LABELS[broker]} has no resting bracket, so orders that open or add a position register a target and stop-loss with the dashboard SERVER, which exits at market when one is hit. It keeps working with this tab closed (not if the dashboard server stops). Closing orders go out plain.`
                   : 'When ON, orders that open or add a position carry a target and stop-loss held at the broker (survive closing this tab). Closing orders go out plain. Re-arm after each page load.'}
                 className={cn(
                   'px-3 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed',
@@ -3332,7 +3332,7 @@ function AdvancedScalper() {
                   <GuardInput value={bracketTrail} onCommit={setBracketTrail} colorCls="text-amber-400" focusBorderCls="focus:border-amber-500" />
                 </>
               )}
-              {broker === 'kotak' && serverBrackets.length > 0 && (
+              {serverGuardBroker && serverBrackets.length > 0 && (
                 <>
                   <span className={cn(TXT_CAPTION, 'text-amber-300 font-mono whitespace-nowrap')}
                     title={serverBrackets.map(b => `${b.symbol} ${b.state} tgt ${b.target} / SL ${b.sl}`).join('\n')}>
@@ -3434,7 +3434,7 @@ function AdvancedScalper() {
         {/* P&L Guard bar — always visible; controls themselves are Dhan-only (see below) */}
         <div className="mt-2 pt-2 border-t border-amber-500/25">
           {(() => {
-            const soft = broker === 'kotak';
+            const soft = serverGuardBroker;
             const isActive = soft ? !!serverPnlGuard : pnlGuardStatus?.pnlExitStatus === 'ACTIVE';
             // Dhan may echo loss back as the negative level it was stored at rather
             // than the positive magnitude we sent — compare by magnitude either way.
@@ -3458,7 +3458,7 @@ function AdvancedScalper() {
                   <Shield className="w-3 h-3 text-amber-400" /> P&amp;L Guard
                 </span>
 
-                {broker !== 'dhan' && broker !== 'kotak' ? (
+                {broker !== 'dhan' && !serverGuardBroker ? (
                   // Dhan's native /pnlExit is an account-level kill switch with no
                   // Zerodha equivalent — showing live-looking controls here would
                   // silently configure Dhan's guard while this tab shows Zerodha
@@ -3618,9 +3618,9 @@ function AdvancedScalper() {
 
                 {/* Current guard values + persistent error, kept inside the Guard
                     card since both describe its own state. */}
-                {broker === 'kotak' && serverPnlGuard && (
+                {serverGuardBroker && serverPnlGuard && (
                   <span className={cn(TXT_VALUE, 'text-zinc-500 font-mono shrink-0 whitespace-nowrap')}
-                    title="Kotak has no broker-side P&L exit, so the dashboard SERVER watches this guard. It keeps working with this tab closed, but not if the dashboard server is stopped. With a leg unpriced only the loss limit can fire.">
+                    title={`${BROKER_LABELS[broker]} has no broker-side P&L exit, so the dashboard SERVER watches this guard. It keeps working with this tab closed, but not if the dashboard server is stopped. With a leg unpriced only the loss limit can fire.`}>
                     {serverPnlGuard.profit > 0 ? `🎯 ₹${serverPnlGuard.profit}` : ''}
                     {serverPnlGuard.profit > 0 && serverPnlGuard.loss > 0 ? '  ' : ''}
                     {serverPnlGuard.loss > 0 ? `🛑 ₹${serverPnlGuard.loss}` : ''}
@@ -3634,7 +3634,7 @@ function AdvancedScalper() {
                     {Math.abs(Number(pnlGuardStatus?.loss)) > 0 ? `🛑 ₹${Math.abs(Number(pnlGuardStatus?.loss))}` : ''}
                   </span>
                 )}
-                {(broker === 'dhan' || broker === 'kotak') && guardError && (
+                {(broker === 'dhan' || serverGuardBroker) && guardError && (
                   <span className={cn(TXT_VALUE, 'text-rose-400 font-semibold shrink-0 whitespace-nowrap')}>⚠ {guardError}</span>
                 )}
                 </div>

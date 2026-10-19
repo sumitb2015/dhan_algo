@@ -171,13 +171,16 @@ process.on('exit', () => {
 
 
 
-// ─── Server-resident Kotak guards (P&L Guard + brackets) ────────────
-// Kotak has no broker-side P&L exit or bracket, so this server watches them; it must keep running with every tab closed.
+// ─── Server-resident Kotak + Zerodha guards (P&L Guard + brackets) ───
+// Neither broker has a broker-side P&L exit or bracket, so this server watches them; it must keep running with every tab closed.
 // Idle (a file read every 2.5 s) until a guard is registered.
 if (process.env.DASHBOARD_NO_BACKGROUND === '1') {
   console.log('[kotak-guard] DASHBOARD_NO_BACKGROUND set — not starting');
 } else {
   import('./lib/kotakGuardServer').then(m => m.startKotakGuardLoop()).catch(err => {
     console.warn('[kotak-guard] could not start the watcher:', err);
+  });
+  import('./lib/zerodhaGuardServer').then(m => m.startZerodhaGuardLoop()).catch(err => {
+    console.warn('[zerodha-guard] could not start the watcher:', err);
   });
 }
