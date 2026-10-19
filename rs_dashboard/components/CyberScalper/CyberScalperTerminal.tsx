@@ -667,6 +667,86 @@ function CyberScalperTerminal() {
     }
   };
 
+  // Scale into an open position: one more lot, same side, same contract and
+  // product, at market. Sized from the row's own lot (lotSizeForPosition), so it
+  // follows the same quantity units as the partial square-off chips.
+  const handleAddPosition = async (pos: PositionItem, lots: number) => {
+    if (pos.netQty === 0) return;
+    if (broker === 'dhan' && !pos.securityId) return;
+    if (broker !== 'dhan' && !pos.tradingSymbol) return;
+    const lotUnits = lotSizeForPosition(pos);
+    if (!lotUnits || lotUnits <= 0) return;
+    const qty = lotUnits * Math.max(1, Math.floor(lots));
+    const addKey = String(pos.tradingSymbol || pos.securityId || '');
+    const addHold = unknownHoldLeft(addKey);
+    if (addHold > 0) {
+      cyberAudio.error();
+      addLog('ERROR', `Add held: an earlier order on ${addKey} has an UNKNOWN outcome`, `${UNKNOWN_ORDER_HINT} (${Math.ceil(addHold / 1000)} s left)`);
+      return;
+    }
+    if (orderLockRef.current) return;
+    orderLockRef.current = true;
+    setIsExecuting(true);
+    const addSide = pos.netQty > 0 ? 'BUY' : 'SELL';
+    addLog(addSide, `Adding to ${pos.tradingSymbol}`, `${qty} Qty (${BROKER_LABELS[broker]})`);
+
+    try {
+      const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
+      const { outcome, reply } = await sendOrderRequest(
+        orderUrl,
+        broker === 'dhan'
+          ? {
+              securityId: pos.securityId,
+              quantity: qty,
+              side: addSide,
+              orderType: 'MARKET',
+              exchangeSegment: pos.exchangeSegment,
+              productType: pos.productType,
+              idempotencyKey: `cs-a-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+            }
+          : {
+              tradingsymbol: pos.tradingSymbol,
+              quantity: qty,
+              side: addSide,
+              orderType: 'MARKET',
+              exchange: pos.exchangeSegment,
+              product: pos.productType,
+            },
+      );
+      if (outcome.kind === 'unknown') {
+        unknownHoldRef.current.set(addKey, Date.now());
+        cyberAudio.error();
+        addLog('ERROR', `Add status UNKNOWN for ${addKey}`, `${outcome.error} ${UNKNOWN_ORDER_HINT}`);
+        await fetchPositions();
+        return;
+      }
+      if (outcome.kind === 'placed') {
+        cyberAudio.buy();
+        addLog(addSide, `Added to ${pos.tradingSymbol}`, `${qty} Qty`);
+        saveTerminalOrder({
+          orderId: reply?.order_id ? String(reply.order_id) : undefined,
+          tradingSymbol: pos.tradingSymbol,
+          securityId: pos.securityId ? String(pos.securityId) : undefined,
+          side: addSide,
+          qty,
+          price: pos.ltp,
+          broker,
+          symbol,
+        });
+        await fetchPositions();
+      } else {
+        cyberAudio.error();
+        addLog('ERROR', `Add failed: ${outcome.error}`);
+      }
+    } catch (err: any) {
+      cyberAudio.error();
+      addLog('ERROR', `Add error: ${err.message || err}`);
+    } finally {
+      orderLockRef.current = false;
+      setIsExecuting(false);
+    }
+  };
+
   // Lot size for a positions-table row, for sizing the 25/50/75% partial
   // square-off chips. Only resolved for rows on the currently selected
   // underlying (a bare prefix match would wrongly give e.g. NIFTYNXT50 the
@@ -1215,6 +1295,7 @@ function CyberScalperTerminal() {
           onSetPresetPts={handleSetPresetPts}
           onToggleTrailAll={handleToggleTrailAll}
           onClosePosition={async (pos, units) => { await handleClosePosition(pos, units); }}
+          onAddPosition={handleAddPosition}
           lotSizeFor={lotSizeForPosition}
           onFlattenAll={handleFlattenAll}
           isExecuting={isExecuting}

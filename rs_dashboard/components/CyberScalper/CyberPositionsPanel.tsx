@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import {
   Wallet,
   Clock,
@@ -133,6 +133,8 @@ interface PositionsPanelProps {
   onSetPresetPts: (pos: PositionItem, type: 'TP' | 'SL', pts: number) => void;
   onToggleTrailAll?: () => void;
   onClosePosition: (pos: PositionItem, units?: number) => Promise<void>;
+  /** Add lots to an open row (same side, market). Omitted = no ADD button. */
+  onAddPosition?: (pos: PositionItem, lots: number) => Promise<void>;
   /** Lot size for a row, for sizing the 25/50/75% partial chips. Null hides them (full-close only). */
   lotSizeFor?: (pos: PositionItem) => number | null;
   onFlattenAll: () => Promise<void>;
@@ -150,12 +152,20 @@ export default function CyberPositionsPanel({
   onSetPresetPts,
   onToggleTrailAll,
   onClosePosition,
+  onAddPosition,
   lotSizeFor,
   onFlattenAll,
   isExecuting,
 }: PositionsPanelProps) {
   const [activeTab, setActiveTab] = useState<'active' | 'exited'>('active');
   const [scope, setScope] = useState<'terminal' | 'symbol' | 'all'>('terminal');
+  // ADD is real money: the first click arms a row for 3 s, the second sends it.
+  const [armedAddId, setArmedAddId] = useState<string | null>(null);
+  useEffect(() => {
+    if (!armedAddId) return;
+    const t = setTimeout(() => setArmedAddId(null), 3000);
+    return () => clearTimeout(t);
+  }, [armedAddId]);
 
   // Pin each position to the order it was first seen in, so rows never jump or
   // reshuffle across ticks as broker payloads arrive.
@@ -626,6 +636,30 @@ export default function CyberPositionsPanel({
                               >
                                 SQUARE OFF
                               </button>
+                              {onAddPosition && lotSizeFor && (lotSizeFor(pos) ?? 0) > 0 && (
+                                <button
+                                  type="button"
+                                  disabled={isExecuting}
+                                  onClick={() => {
+                                    cyberAudio.click();
+                                    if (armedAddId === pos.id) {
+                                      setArmedAddId(null);
+                                      onAddPosition(pos, 1);
+                                    } else {
+                                      setArmedAddId(pos.id);
+                                    }
+                                  }}
+                                  className={cn(
+                                    'px-3 py-1 rounded-lg border text-[10px] font-bold transition-all active:scale-95 disabled:opacity-50',
+                                    armedAddId === pos.id
+                                      ? 'bg-emerald-600 border-emerald-500 text-white'
+                                      : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-emerald-500/20 hover:text-emerald-400 hover:border-emerald-500/50'
+                                  )}
+                                  title={`Add 1 lot to this leg (${pos.netQty > 0 ? 'BUY' : 'SELL'} at market) — click twice to confirm`}
+                                >
+                                  {armedAddId === pos.id ? 'CONFIRM +1 LOT' : '+ ADD'}
+                                </button>
+                              )}
                               {/* 100% is the button above, so only the fractions appear
                                   here. A chip is disabled when it maps to under a lot, or
                                   to the same lot count as a smaller one — see lib/partialQty. */}
