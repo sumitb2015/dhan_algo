@@ -52,9 +52,29 @@ def clean_float(val: any, default: float = 0.0) -> float:
         return default
 
 
-def resolve_symbol(helper: DhanHelper, symbol: str) -> tuple[int, str, str, str]:
+def live_future_expiries(helper: DhanHelper, sym: str, exch: str, inst: str) -> list[str]:
+    """Unexpired expiries of `sym`'s future contracts, nearest first, capped at 3 (current month + next 2 months --
+    NSE/MCX only ever list that many active monthly contracts at once). The expiry switcher offers exactly these."""
+    df_m = helper._load_master_list()
+    mask = (
+        (df_m["EXCH_ID"] == exch)
+        & (df_m["INSTRUMENT"] == inst)
+        & (df_m["UNDERLYING_SYMBOL"] == sym)
+    )
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    return sorted(
+        e for e in df_m.loc[mask, "SM_EXPIRY_DATE"].dropna().unique().tolist()
+        if str(e) >= today_str
+    )[:3]
+
+
+def resolve_symbol(helper: DhanHelper, symbol: str, future_expiry: str | None = None) -> tuple[int, str, str, str]:
     """
     Returns (security_id, exchange_segment, instrument_type, symbol_type)
+
+    For a commodity the future IS the chart instrument, so `future_expiry` (one of live_future_expiries) picks which
+    contract's candles are read; without it the nearest contract is used. Index futures trade at a basis to the index,
+    so their chart stays the index and the chosen future is priced separately (find_future_contract).
     """
     sym = symbol.upper()
     if sym in UNDERLYINGS_INFO:
@@ -65,7 +85,8 @@ def resolve_symbol(helper: DhanHelper, symbol: str) -> tuple[int, str, str, str]
                 raise ValueError("Could not resolve SENSEX index")
             return int(sec["SECURITY_ID"]), "IDX_I", "INDEX", "index"
         elif sym in ("CRUDEOIL", "CRUDEOILM"):
-            sec = helper.find_future(sym, exchange="MCX", instrument="FUTCOM")
+            chosen = future_expiry if future_expiry in live_future_expiries(helper, sym, "MCX", "FUTCOM") else None
+            sec = helper.find_future(sym, expiry=chosen, exchange="MCX", instrument="FUTCOM")
             if not sec:
                 raise ValueError(f"Could not resolve active futures for {sym}")
             return int(sec["SECURITY_ID"]), "MCX_COMM", "FUTCOM", "commodity"
@@ -503,18 +524,7 @@ def find_future_contract(
     # List every unexpired expiry for this underlying's future contracts, nearest
     # first, capped at 3 (current month + next 2 months -- NSE/MCX only ever list
     # that many active monthly contracts at once anyway).
-    df_m = helper._load_master_list()
-    mask = (
-        (df_m["EXCH_ID"] == exch)
-        & (df_m["INSTRUMENT"] == inst)
-        & (df_m["UNDERLYING_SYMBOL"] == sym)
-    )
-    today_str = datetime.now(IST).strftime("%Y-%m-%d")
-    all_exp = sorted(
-        e for e in df_m.loc[mask, "SM_EXPIRY_DATE"].dropna().unique().tolist()
-        if str(e) >= today_str
-    )
-    all_expiries = all_exp[:3]
+    all_expiries = live_future_expiries(helper, sym, exch, inst)
 
     # Only honor an explicitly chosen expiry if it's actually one of the live
     # contracts -- otherwise fall back to find_future()'s own nearest-contract pick
@@ -574,7 +584,7 @@ def main():
     helper = DhanHelper(dhan, skip_session_validation=True, master_list_cache=True)
 
     try:
-        sec_id, exch_seg, inst_type, sym_type = resolve_symbol(helper, symbol)
+        sec_id, exch_seg, inst_type, sym_type = resolve_symbol(helper, symbol, args.future_expiry)
     except Exception as e:
         print(json.dumps({"error": str(e)}))
         sys.exit(0)
