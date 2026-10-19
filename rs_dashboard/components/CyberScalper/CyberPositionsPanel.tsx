@@ -18,7 +18,7 @@ import { cyberAudio } from '@/lib/cyberAudio';
 import { partialCloseChips } from '@/lib/partialQty';
 
 import { ExitedPositionItem } from '@/lib/fifoPositions';
-import { getTerminalTradingSymbols, isSymbolMatch } from '@/lib/terminalTradeStore';
+import { getTerminalTradingSymbols, getTerminalSecurityIds, isSymbolMatch } from '@/lib/terminalTradeStore';
 
 export interface PositionItem {
   id: string;
@@ -174,6 +174,7 @@ export default function CyberPositionsPanel({
 
   // Terminal trading symbols from local store (auto-refreshed when logs change)
   const terminalSymbols = useMemo(() => getTerminalTradingSymbols(), [logs]);
+  const terminalSecurityIds = useMemo(() => getTerminalSecurityIds(), [logs]);
 
   // Filter positions by scope (Terminal Only / Current Symbol / All Broker)
   const activePositions = useMemo(() => {
@@ -181,7 +182,7 @@ export default function CyberPositionsPanel({
       if (p.netQty === 0 || (p as any).positionType === 'CLOSED') return false;
       const ts = (p.tradingSymbol || p.id || '').toUpperCase().trim();
       if (scope === 'terminal') {
-        return terminalSymbols.has(ts);
+        return terminalSymbols.has(ts) || (!!p.securityId && terminalSecurityIds.has(String(p.securityId).toUpperCase().trim()));
       }
       if (scope === 'symbol') {
         return isSymbolMatch(ts, symbol);
@@ -201,7 +202,7 @@ export default function CyberPositionsPanel({
       const keyB = `${b.tradingSymbol || b.id}_${b.productType}`;
       return (order.get(keyA) ?? 0) - (order.get(keyB) ?? 0);
     });
-  }, [positions, scope, symbol, terminalSymbols]);
+  }, [positions, scope, symbol, terminalSymbols, terminalSecurityIds]);
 
   // Filter exited positions by scope
   const filteredExitedPositions = useMemo(() => {

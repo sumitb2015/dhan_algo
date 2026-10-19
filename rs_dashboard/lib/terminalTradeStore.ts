@@ -52,13 +52,45 @@ export function getTerminalOrders(): TerminalOrderRecord[] {
   }
 }
 
+// A carried (NRML/MARGIN) position outlives the day it was opened, so the symbols
+// the terminal placed are read from every recent day, not only today's key —
+// otherwise "This Terminal" goes blank the morning after. Older days are pruned.
+const KEEP_DAYS = 60;
+
 export function getTerminalTradingSymbols(): Set<string> {
-  const orders = getTerminalOrders();
+  return collectTerminalKeys('tradingSymbol');
+}
+
+// Dhan positions are keyed by securityId, and a futures order saved from the pad
+// can carry only the bare underlying as its tradingSymbol ("CRUDEOILM") while the
+// position row is "CRUDEOILM-19Nov2026-FUT" — so the securityId is the reliable join.
+export function getTerminalSecurityIds(): Set<string> {
+  return collectTerminalKeys('securityId');
+}
+
+function collectTerminalKeys(field: 'tradingSymbol' | 'securityId'): Set<string> {
   const set = new Set<string>();
-  for (const o of orders) {
-    if (o.tradingSymbol) {
-      set.add(o.tradingSymbol.toUpperCase().trim());
+  if (typeof window === 'undefined') return set;
+  try {
+    const cutoff = getTodayKey().slice(STORAGE_PREFIX.length);
+    const oldest = new Date(Date.now() - KEEP_DAYS * 86400000);
+    const oldestDay = `${oldest.getFullYear()}-${String(oldest.getMonth() + 1).padStart(2, '0')}-${String(oldest.getDate()).padStart(2, '0')}`;
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i);
+      if (!key || !key.startsWith(STORAGE_PREFIX)) continue;
+      const day = key.slice(STORAGE_PREFIX.length);
+      if (day < oldestDay) {
+        localStorage.removeItem(key);
+        continue;
+      }
+      if (day > cutoff) continue;
+      const orders: TerminalOrderRecord[] = JSON.parse(localStorage.getItem(key) || '[]');
+      for (const o of orders) {
+        if (o[field]) set.add(String(o[field]).toUpperCase().trim());
+      }
     }
+  } catch (err) {
+    console.warn('[terminalTradeStore] Failed to read terminal symbols from localStorage:', err);
   }
   return set;
 }
