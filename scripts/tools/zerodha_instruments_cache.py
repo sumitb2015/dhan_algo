@@ -28,6 +28,7 @@ UNDERLYING_EXCHANGE = {
     'BANKNIFTY': 'NFO',
     'FINNIFTY':  'NFO',
     'SENSEX':    'BFO',
+    'CRUDEOIL':  'MCX',   # lot_size 1, tick 0.1 in Kite's MCX dump (716 rows, checked 2026-10-19); quantity is in LOTS of 100 barrels
     'CRUDEOILM': 'MCX',   # lot_size reads 1 in Kite's MCX dump; order quantity is in LOTS (checked on the margin calculator 2026-10-19)
 }
 
