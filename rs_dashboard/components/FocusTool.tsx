@@ -42,7 +42,7 @@ import type {
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
-  EMPTY_ROW_LIVE,
+  EMPTY_ROW_LIVE, anchoredReentryLots,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
@@ -2111,6 +2111,15 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
             </ToggleGroup>
           </div>
         )}
+        {(anyOtm || tgtOtm) && (
+          <div className={lbl} title={'Size of an RE OTM re-sale that is counted from the ATM or the row strike (after a target, or after a stop that had trailed), as a % of the lots that just closed. '
+            + 'Those re-sales land near the money, so they can go in smaller. Whole lots, at least 1. A plain SL roll from the stopped strike keeps its full size'}>
+            RE qty
+            <MiniSelect value={String(row.reAnchoredQtyPct ?? 100)} ariaLabel="Size of an ATM-anchored RE OTM re-entry, percent of the closed lots"
+              options={[100, 75, 50, 25].map(n => ({ value: String(n), label: `${n}%` }))}
+              onChange={v => onUpdate({ reAnchoredQtyPct: Number(v) })} className="w-16" />
+          </div>
+        )}
       </div>
       </SettingsCard>
       <SettingsCard title="Lazy legs">
@@ -3797,7 +3806,7 @@ const PRO_STATUS: Record<FocusRowStatus, { cls: string; bar: string }> = {
 const CLEARED_RULES: Partial<FocusRow> = {
   levelHigh: '', levelLow: '', levelVw: false, vwapInterval: '1', vwapBufferPct: '0.1',
   slRupees: '', slMultiplier: '', ceSlMultiplier: '1.2', peSlMultiplier: '1.2',
-  slRollStrikes: 0, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
+  slRollStrikes: 0, reAnchoredQtyPct: undefined, slToCost: false, slToCostScope: undefined, squareOff: undefined, reSlMode: 'off', reTgtMode: 'off',
   ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '',
   ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined,
   lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
@@ -8676,6 +8685,7 @@ function FocusTool() {
     // resolves its strikes from): the closed strike can be deep OTM, so rolling further out from it would leave the
     // other leg naked. A plain SL hit rolls from the closed strike (see reentryOtmFromAtm).
     let anchorNote = '';
+    let anchoredPick = false;
     let newStrike: number | null;
     if (cfg.mode === 'otm') {
       const from = row.reOtmFrom === 'row' ? 'row' : 'atm';
@@ -8693,6 +8703,7 @@ function FocusTool() {
         trigger, trailedSteps, leg, atm, closedStrike, strikes: cfg.otmStrikes, step: rowStep(row), from, rowStrike,
       });
       newStrike = pick.strike;
+      anchoredPick = pick.anchored;
       // Only claim an anchor when the strike was counted from it (not the closed-strike fallback).
       if (pick.anchored && from === 'atm' && atm != null) anchorNote = ` (${cfg.otmStrikes} OTM of ATM ${atm})`;
       if (pick.anchored && from === 'row' && rowStrike != null) anchorNote = ` (${cfg.otmStrikes} beyond the row's strike ${rowStrike})`;
@@ -8737,11 +8748,14 @@ function FocusTool() {
         : 'Could not resolve the current strike');
       return 'skipped';
     }
+    // An ATM-anchored re-sale lands near the money, riskier than the leg it replaces: size it by the row's setting.
+    const reLots = cfg.mode === 'otm' && anchoredPick ? anchoredReentryLots(lots, row.reAnchoredQtyPct) : lots;
+    if (reLots !== lots) anchorNote += ` at ${reLots} of ${lots} lot(s)`;
     patchFill(rowId, () => countPatch(done + 1));
     for (const tap of reentryTapsRef.current) tap.push(`picked ${newStrike} ${leg}${anchorNote}`);
     const fresh = schedulerRef.current.config.rows.find(r => r.id === rowId) ?? row;
     const ok = await actionsRef.current.placeLeg(fresh, leg, {
-      reduce: false, lots, strikeOverride: newStrike, awaitFill: true,
+      reduce: false, lots: reLots, strikeOverride: newStrike, awaitFill: true,
     });
     if (!ok) {
       addToast('error', `${tag} re-entry not confirmed`,
@@ -8750,7 +8764,7 @@ function FocusTool() {
       return 'unconfirmed';
     }
     addToast('success', `${tag} re-entered (${cfg.mode.toUpperCase()}${momKind === 'asap' ? ' — RE MOMENTUM with no momentum set' : ''})`,
-      `${what} at ${closedStrike} → re-sold ${lots} lot(s) at ${newStrike}${anchorNote} (${done + 1}/${cfg.max})`);
+      `${what} at ${closedStrike} → re-sold ${reLots} lot(s) at ${newStrike}${anchorNote} (${done + 1}/${cfg.max})`);
     return 'reentered';
   }
 

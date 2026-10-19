@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  EMPTY_ROW_LIVE, legStopReason, legStopLevel, legTargetReason, reentryConfig, evaluateReentry,
+  EMPTY_ROW_LIVE, legStopReason, legStopLevel, legTargetReason, reentryConfig, evaluateReentry, anchoredReentryLots,
   slRollStrike, reTgtOtmStrike, reentryOtmFromAtm, otmReentryStrike, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, legLevelOn, levelSide, levelCrossStep, entryLevelFiredToday, levelSig, legFillEntry, legOwnEntry, pendingReentryLevel, pendingReentryHit, costReentryBasis, awaitingMomentumQuote,
   MAX_LEG_REENTRIES, DEFAULT_SL_ROLL_MAX,
   type RowLive,
@@ -443,6 +443,17 @@ for (const m of MARKETS) {
     assert.equal(reentryConfig({ reTgtMode: 'otm', reOtmFrom: 'row' } as never, 'tgt').otmStrikes, 1);
     assert.equal(reentryConfig({ reTgtMode: 'otm', reOtmFrom: 'row', reTgtOtmStrikes: 0 } as never, 'tgt').otmStrikes, 0);
     assert.equal(reentryConfig({ reTgtMode: 'otm', reTgtOtmStrikes: 0 } as never, 'tgt').otmStrikes, 1);
+  });
+
+  test(`${tag} ATM-anchored re-entry size: whole lots, never below one`, () => {
+    assert.equal(anchoredReentryLots(4, 50), 2);
+    assert.equal(anchoredReentryLots(3, 50), 1);
+    assert.equal(anchoredReentryLots(1, 50), 1);
+    assert.equal(anchoredReentryLots(5, 25), 1);
+    assert.equal(anchoredReentryLots(4, undefined), 4);
+    assert.equal(anchoredReentryLots(4, 100), 4);
+    assert.equal(anchoredReentryLots(4, 0), 4);
+    assert.equal(anchoredReentryLots(0, 50), 0);
   });
 
   test(`${tag} RE Cost / Momentum: what a waiting re-entry waits for`, () => {

@@ -576,6 +576,12 @@ export interface FocusRow {
    * enter at now (its own ATM ± offset / criteria), so a re-entry is never closer to the money than a fresh entry.
    */
   reOtmFrom?: 'atm' | 'row';
+  /**
+   * Size of an ATM-anchored RE OTM re-entry (after a target, or a stop that had trailed) as a % of the lots that just
+   * closed. Such a re-sale lands near the money, with more risk than the leg it replaces, so it can go in smaller.
+   * Missing = 100 (same size). Whole lots, never below one. A plain SL roll (from the closed strike) is never scaled.
+   */
+  reAnchoredQtyPct?: number;
   /** Lazy Leg to open when the leg's SL / target closes it (reSlMode / reTgtMode = 'lazy'). */
   reSlLazyId?: string;
   reTgtLazyId?: string;

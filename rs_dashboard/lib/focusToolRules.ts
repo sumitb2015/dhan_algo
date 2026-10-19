@@ -798,6 +798,17 @@ export function reentryOtmFromAtm(trigger: FocusReentryTrigger, trailedSteps = 0
 }
 
 /**
+ * Lots for an ATM-anchored RE OTM re-entry: `pct` % of the lots that closed, in whole lots, never below one and never
+ * above what closed. `pct` missing / invalid / >= 100 = the same size.
+ */
+export function anchoredReentryLots(closedLots: number, pct: number | undefined): number {
+  const lots = Math.max(0, Math.trunc(Number(closedLots) || 0));
+  const p = Number(pct);
+  if (!(lots > 0) || !Number.isFinite(p) || p >= 100 || p <= 0) return lots;
+  return Math.min(lots, Math.max(1, Math.floor((lots * p) / 100)));
+}
+
+/**
  * RE OTM counted from the ATM now: `strikes` OTM of it (CE up, PE down). A target hits because spot has moved away
  * from the leg, so the closed strike is already deep OTM (rolling further from it leaves the other leg naked), while
  * RE ASAP's row offset can land on ATM. Measuring from today's ATM keeps the new leg a set distance from spot. Null
