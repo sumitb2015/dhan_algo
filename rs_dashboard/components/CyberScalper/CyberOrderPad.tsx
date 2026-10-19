@@ -332,7 +332,7 @@ export default function CyberOrderPad({
   // Panic flatten all
   const handlePanicFlatten = async () => {
     cyberAudio.exit();
-    const confirmed = window.confirm('EMERGENCY FLATTEN ALL: Close all active F&O scalping positions immediately?');
+    const confirmed = window.confirm('EMERGENCY FLATTEN ALL: close EVERY open F&O position on the selected broker account at market, including positions opened by other strategies?');
     if (confirmed) {
       await onFlattenAll();
     }

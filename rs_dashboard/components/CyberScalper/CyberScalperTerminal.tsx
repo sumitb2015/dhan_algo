@@ -11,6 +11,7 @@ import CyberOrderBook, { OrderBookRow } from './CyberOrderBook';
 import CyberStrategyIntelligence, { StrategyData } from './CyberStrategyIntelligence';
 import { matchTradesFifo, fifoMultipliersFor, type ExitedPositionItem } from '@/lib/fifoPositions';
 import { saveTerminalOrder } from '@/lib/terminalTradeStore';
+import { sendOrderRequest, UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import { cyberAudio } from '@/lib/cyberAudio';
 import { contractMultiplier, scaleBrokerPnl, MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
@@ -52,6 +53,12 @@ function CyberScalperTerminal() {
   const [brokerStrikeMap, setBrokerStrikeMap] = useState<Record<string, { ceSymbol?: string; peSymbol?: string }>>({});
   // Kotak / Zerodha FUT contract (the month the pad shows) for futures-capable underlyings (CRUDEOILM/CRUDEOIL/NIFTY); null for all others.
   const [brokerFuture, setBrokerFuture] = useState<{ trading_symbol: string; expiry?: string; lot_size?: number; exchange_segment?: string } | null>(null);
+  // One order at a time, taken synchronously (isExecuting is state, so a fast double click could still send two), and a
+  // per-contract hold after an UNKNOWN outcome: the order may be live, so a retry could double a position or flip a close.
+  const orderLockRef = useRef(false);
+  const unknownHoldRef = useRef<Map<string, number>>(new Map());
+  const UNKNOWN_HOLD_MS = 30_000;
+  const unknownHoldLeft = (key: string): number => Math.max(0, (unknownHoldRef.current.get(key) ?? 0) + UNKNOWN_HOLD_MS - Date.now());
   // Latest copies for fetchPositions (its callback only re-creates on a broker change).
   const brokerFutureRef = useRef(brokerFuture);
   const brokerStrikeMapRef = useRef(brokerStrikeMap);
@@ -480,6 +487,15 @@ function CyberScalperTerminal() {
       return;
     }
 
+    const holdKey = String(brokerTradingSymbol || params.securityId || '');
+    const holdLeft = unknownHoldLeft(holdKey);
+    if (holdLeft > 0) {
+      cyberAudio.error();
+      addLog('ERROR', `Held: an earlier order on ${holdKey} has an UNKNOWN outcome`, `${UNKNOWN_ORDER_HINT} (${Math.ceil(holdLeft / 1000)} s left)`);
+      return;
+    }
+    if (orderLockRef.current) return;
+    orderLockRef.current = true;
     setIsExecuting(true);
     addLog(
       params.direction,
@@ -489,33 +505,40 @@ function CyberScalperTerminal() {
 
     try {
       const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
-      const res = await fetch(orderUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
-          broker === 'dhan'
-            ? {
-                securityId: params.securityId,
-                quantity: params.qty,
-                side: params.direction,
-                orderType: params.orderType,
-                price: params.orderType === 'LIMIT' ? params.price : 0,
-                exchangeSegment: brokerExchange,
-                productType: params.productType,
-              }
-            : {
-                tradingsymbol: brokerTradingSymbol,
-                quantity: params.qty,
-                side: params.direction,
-                orderType: params.orderType,
-                price: params.orderType === 'LIMIT' ? params.price : 0,
-                exchange: brokerExchange,
-                product: params.productType === 'MARGIN' ? 'NRML' : 'MIS',
-              },
-        ),
-      });
-
-      const json = await res.json();
+      // idempotencyKey: Dhan's order route answers a repeat of the same key with the first result instead of booking again.
+      const idem = `cs-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const { outcome, reply } = await sendOrderRequest(
+        orderUrl,
+        broker === 'dhan'
+          ? {
+              securityId: params.securityId,
+              quantity: params.qty,
+              side: params.direction,
+              orderType: params.orderType,
+              price: params.orderType === 'LIMIT' ? params.price : 0,
+              exchangeSegment: brokerExchange,
+              productType: params.productType,
+              idempotencyKey: idem,
+            }
+          : {
+              tradingsymbol: brokerTradingSymbol,
+              quantity: params.qty,
+              side: params.direction,
+              orderType: params.orderType,
+              price: params.orderType === 'LIMIT' ? params.price : 0,
+              exchange: brokerExchange,
+              product: params.productType === 'MARGIN' ? 'NRML' : 'MIS',
+            },
+      );
+      const json = { ...(reply ?? {}), success: outcome.kind === 'placed', error: outcome.kind === 'placed' ? undefined : outcome.error } as { success: boolean; order_id?: string | number; error?: string };
+      if (outcome.kind === 'unknown') {
+        unknownHoldRef.current.set(holdKey, Date.now());
+        cyberAudio.error();
+        addLog('ERROR', `Order status UNKNOWN for ${holdKey}`, `${outcome.error} ${UNKNOWN_ORDER_HINT}`);
+        alert(`Order status UNKNOWN — it may have been placed.\n\n${UNKNOWN_ORDER_HINT}`);
+        await fetchPositions();
+        return;
+      }
       if (json.success) {
         cyberAudio.buy();
         addLog(
@@ -563,6 +586,7 @@ function CyberScalperTerminal() {
       cyberAudio.error();
       addLog('ERROR', `Network execution failed: ${err.message || err}`);
     } finally {
+      orderLockRef.current = false;
       setIsExecuting(false);
     }
   };
@@ -570,34 +594,43 @@ function CyberScalperTerminal() {
   // Close single position leg. `units` (absolute qty) closes a fraction of the
   // leg for the 25/50/75% partial square-off chips — omitted (or ≥ netQty)
   // closes it entirely, same convention as AdvancedScalper.tsx's closePosition.
-  const handleClosePosition = async (pos: PositionItem, units?: number) => {
-    if (pos.netQty === 0) return;
-    if (broker === 'dhan' && !pos.securityId) return;
-    if (broker !== 'dhan' && !pos.tradingSymbol) return;
+  type CloseResult = 'sent' | 'rejected' | 'unknown' | 'skipped';
+  const handleClosePosition = async (pos: PositionItem, units?: number): Promise<CloseResult> => {
+    if (pos.netQty === 0) return 'skipped';
+    if (broker === 'dhan' && !pos.securityId) return 'skipped';
+    if (broker !== 'dhan' && !pos.tradingSymbol) return 'skipped';
     const liveAbs = Math.abs(pos.netQty);
     const reqUnits = Math.floor(Number(units ?? liveAbs));
     const qty = Math.max(1, Math.min(liveAbs, reqUnits > 0 ? reqUnits : liveAbs));
     const isPartial = qty < liveAbs;
+    const closeKey = String(pos.tradingSymbol || pos.securityId || '');
+    const closeHold = unknownHoldLeft(closeKey);
+    if (closeHold > 0) {
+      cyberAudio.error();
+      addLog('ERROR', `Close held: an earlier order on ${closeKey} has an UNKNOWN outcome`, `${UNKNOWN_ORDER_HINT} (${Math.ceil(closeHold / 1000)} s left)`);
+      return 'skipped';
+    }
+    if (orderLockRef.current) return 'skipped';
+    orderLockRef.current = true;
     setIsExecuting(true);
     const closeSide = pos.netQty > 0 ? 'SELL' : 'BUY';
     addLog('EXIT', `${isPartial ? 'Partially closing' : 'Closing'} ${pos.tradingSymbol}`, `${qty}${isPartial ? ` of ${liveAbs}` : ''} Qty (${BROKER_LABELS[broker]})`);
 
     try {
       const orderUrl = broker === 'dhan' ? '/api/scalper/fast-order' : scalperRoute(broker, 'order');
-      const res = await fetch(orderUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(
-          broker === 'dhan'
-            ? {
-                securityId: pos.securityId,
-                quantity: qty,
-                side: closeSide,
-                orderType: 'MARKET',
-                exchangeSegment: pos.exchangeSegment,
-                productType: pos.productType,
-              }
-            : {
+      const { outcome, reply } = await sendOrderRequest(
+        orderUrl,
+        broker === 'dhan'
+          ? {
+              securityId: pos.securityId,
+              quantity: qty,
+              side: closeSide,
+              orderType: 'MARKET',
+              exchangeSegment: pos.exchangeSegment,
+              productType: pos.productType,
+              idempotencyKey: `cs-x-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+            }
+          : {
                 // Dhan is the only broker that closes by numeric securityId; the rest
                 // close by trading symbol. pos.exchangeSegment and pos.productType
                 // already carry that broker's own native spelling (e.g. Kotak's
@@ -611,10 +644,15 @@ function CyberScalperTerminal() {
                 exchange: pos.exchangeSegment,
                 product: pos.productType,
               },
-        ),
-      });
-
-      const json = await res.json();
+      );
+      const json = { ...(reply ?? {}), success: outcome.kind === 'placed', error: outcome.kind === 'placed' ? undefined : outcome.error } as { success: boolean; order_id?: string | number; error?: string };
+      if (outcome.kind === 'unknown') {
+        unknownHoldRef.current.set(closeKey, Date.now());
+        cyberAudio.error();
+        addLog('ERROR', `Close status UNKNOWN for ${closeKey}`, `${outcome.error} ${UNKNOWN_ORDER_HINT}`);
+        await fetchPositions();
+        return 'unknown';
+      }
       if (json.success) {
         cyberAudio.exit();
         addLog('EXIT', `${isPartial ? 'Partially closed' : 'Position Closed'}: ${pos.tradingSymbol}`, isPartial ? `${qty} of ${liveAbs} qty` : undefined);
@@ -629,14 +667,18 @@ function CyberScalperTerminal() {
           symbol,
         });
         await fetchPositions();
+        return 'sent';
       } else {
         cyberAudio.error();
         addLog('ERROR', `Square-off failed: ${json.error}`);
+        return 'rejected';
       }
     } catch (err: any) {
       cyberAudio.error();
       addLog('ERROR', `Close error: ${err.message || err}`);
+      return 'rejected';
     } finally {
+      orderLockRef.current = false;
       setIsExecuting(false);
     }
   };
@@ -742,7 +784,7 @@ function CyberScalperTerminal() {
           })
         : await fetch(scalperRoute(broker, 'exit-all'), { method: 'POST' });
       const json = await res.json();
-      if (broker === 'dhan' ? json.ok : json.success) {
+      if (json.success) {
         cyberAudio.exit();
         addLog('EXIT', 'ALL F&O POSITIONS FLATTENED CLEANLY');
         await fetchPositions();
@@ -828,6 +870,16 @@ function CyberScalperTerminal() {
     addLog('BUY', anyOff ? 'Trailing SL enabled on all open positions' : 'Trailing SL disabled on all positions');
   }, [positions, guards]);
 
+  // A guard's exit that was NOT sent (another order in flight, a hold) or was refused must try again: `triggered` only
+  // locks against a double send while the exit is in flight, and left set it disarmed the stop for good. An UNKNOWN or
+  // placed exit keeps the lock (the order may be live; the position list shows what is left).
+  const closeForGuard = useCallback((pos: PositionItem) => {
+    void handleClosePosition(pos).then((r) => {
+      if (r !== 'skipped' && r !== 'rejected') return;
+      setTimeout(() => setGuards((prev) => (prev[pos.id] ? { ...prev, [pos.id]: { ...prev[pos.id], triggered: false } } : prev)), 5000);
+    });
+  }, [handleClosePosition]);
+
   // ─── Automated Risk Watcher (TP, SL, Trailing SL) ───────────────────
   useEffect(() => {
     const active = positions.filter((p) => p.netQty !== 0);
@@ -857,7 +909,7 @@ function CyberScalperTerminal() {
             `TARGET HIT: +${pos.points.toFixed(2)} pts!`,
             `Closed ${pos.tradingSymbol} @ ₹${ltp.toFixed(2)} (Target: ₹${targetNum.toFixed(2)})`
           );
-          handleClosePosition(pos);
+          closeForGuard(pos);
           continue;
         }
       }
@@ -887,7 +939,7 @@ function CyberScalperTerminal() {
                 `TRAILING STOP TRIGGERED!`,
                 `Closed ${pos.tradingSymbol} @ ₹${ltp.toFixed(2)} (Locked floor: ₹${trailFloor.toFixed(2)})`
               );
-              handleClosePosition(pos);
+              closeForGuard(pos);
               continue;
             }
           } else if ((isLong && ltp <= slNum) || (!isLong && ltp >= slNum)) {
@@ -898,7 +950,7 @@ function CyberScalperTerminal() {
               `STOP LOSS HIT!`,
               `Closed ${pos.tradingSymbol} @ ₹${ltp.toFixed(2)} (SL: ₹${slNum.toFixed(2)})`
             );
-            handleClosePosition(pos);
+            closeForGuard(pos);
             continue;
           }
         } else {
@@ -911,7 +963,7 @@ function CyberScalperTerminal() {
               `STOP LOSS HIT!`,
               `Closed ${pos.tradingSymbol} @ ₹${ltp.toFixed(2)} (SL: ₹${slNum.toFixed(2)})`
             );
-            handleClosePosition(pos);
+            closeForGuard(pos);
             continue;
           }
         }
@@ -927,7 +979,7 @@ function CyberScalperTerminal() {
         return next;
       });
     }
-  }, [positions, guards, handleClosePosition]);
+  }, [positions, guards, closeForGuard]);
 
   // Global Keyboard Shortcuts (B = Buy Call, S = Buy Put, X = Flatten All)
   useEffect(() => {
@@ -1214,7 +1266,7 @@ function CyberScalperTerminal() {
           onToggleTrail={handleToggleTrail}
           onSetPresetPts={handleSetPresetPts}
           onToggleTrailAll={handleToggleTrailAll}
-          onClosePosition={handleClosePosition}
+          onClosePosition={async (pos, units) => { await handleClosePosition(pos, units); }}
           lotSizeFor={lotSizeForPosition}
           onFlattenAll={handleFlattenAll}
           isExecuting={isExecuting}

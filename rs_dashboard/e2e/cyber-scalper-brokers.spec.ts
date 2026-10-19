@@ -164,3 +164,86 @@ test('Zerodha: a poll whose position read failed keeps the open position on scre
   await expect(page.getByRole('heading', { level: 1 })).toContainText('MTM+₹100');
   await expect(page.getByRole('button', { name: /FLATTEN/ }).first()).toBeVisible();
 });
+
+// ── Dhan flow: order outcomes, flatten result, guard retry ─────────────────────────────────────────────────────
+async function installDhan(page: Page, opts: { orderReplies: (n: number, body: Record<string, unknown>) => { status: number; body: unknown }; positions?: Record<string, unknown>[] }) {
+  const orders: Record<string, unknown>[] = [];
+  const hits: string[] = [];
+  const blocked: string[] = [];
+  await page.addInitScript(() => { try { localStorage.setItem('dhan_algo.selected_broker', 'dhan'); } catch { /* ignore */ } });
+  await page.route('**/api/**', async (route: Route) => {
+    const req = route.request();
+    const p = new URL(req.url()).pathname;
+    const method = req.method();
+    if (p === '/api/auth/broker-status') return json(route, { dhan: true });
+    if (p === '/api/cyber-scalper/feed') return json(route, FEED);
+    if (p === '/api/scalper/poll') return json(route, { success: true, positions: opts.positions ?? [], positionsError: null, orders: [], trades: [] });
+    if (p === '/api/scalper/funds') return json(route, { success: true, data: { availabelBalance: 250000 } });
+    if (p === '/api/scalper/orders' && method === 'GET') return json(route, { success: true, data: [] });
+    if (p === '/api/scalper/fast-order' && method === 'POST') {
+      const body = req.postDataJSON() as Record<string, unknown>;
+      orders.push(body);
+      const r = opts.orderReplies(orders.length, body);
+      return json(route, r.body, r.status);
+    }
+    if (p === '/api/exit-all' && method === 'POST') { hits.push(p); return json(route, { success: true, broker_exit: true, killed: [], trigger_fallback: [] }); }
+    if (method === 'GET') return json(route, { success: false, error: 'e2e' }, 503);
+    blocked.push(`${method} ${p}`);
+    return route.fulfill({ status: 599, body: 'blocked by e2e' });
+  });
+  return { orders, hits, blocked };
+}
+
+const DHAN_POS = { tradingSymbol: 'CRUDEOILM', securityId: '573423', exchangeSegment: 'MCX_COMM', netQty: 1, buyQty: 1, sellQty: 0, buyAvg: 9340, sellAvg: 0,
+  costPrice: 9340, realizedProfit: 0, unrealizedProfit: 60, productType: 'MARGIN' };   // Dhan reports MCX P&L in lots, without the x10
+
+test('Dhan: an order with an UNKNOWN outcome is reported as unknown and blocks a blind retry', async ({ page }) => {
+  const seen = await installDhan(page, { orderReplies: () => ({ status: 504, body: { success: false, unknown: true, error: 'No clean reply from Dhan' } }) });
+  const dialogs: string[] = [];
+  page.on('dialog', (d) => { dialogs.push(d.message()); void d.accept(); });
+  await page.goto('/cyber-scalper', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'CRUDEOILM', exact: true }).click();
+  await expect(page.getByRole('button', { name: /LONG FUTURE/ })).toBeVisible({ timeout: 60_000 });
+
+  await page.getByRole('button', { name: /LONG FUTURE/ }).click();
+  await expect.poll(() => seen.orders.length, { timeout: 30_000 }).toBe(1);
+  expect(seen.orders[0]).toMatchObject({ securityId: expect.any(String), side: 'BUY', quantity: 1, exchangeSegment: 'MCX_COMM', idempotencyKey: expect.stringMatching(/^cs-/) });
+  await expect.poll(() => dialogs.some((m) => /UNKNOWN/.test(m)), { timeout: 15_000 }).toBe(true);   // not "Order Failed"
+  expect(dialogs.some((m) => /Order Failed/.test(m))).toBe(false);
+
+  await page.getByRole('button', { name: /LONG FUTURE/ }).click();                                    // the held retry
+  await page.waitForTimeout(1500);
+  expect(seen.orders).toHaveLength(1);
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Dhan: FLATTEN reports success from the exit-all reply (it has `success`, not `ok`)', async ({ page }) => {
+  const seen = await installDhan(page, { orderReplies: () => ({ status: 200, body: { success: true, order_id: '1' } }), positions: [DHAN_POS] });
+  page.on('dialog', (d) => { void d.accept(); });
+  await page.goto('/cyber-scalper', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'CRUDEOILM', exact: true }).click();
+  await page.getByRole('button', { name: /FLATTEN/ }).first().click({ timeout: 60_000 });
+  await expect.poll(() => seen.hits.length, { timeout: 30_000 }).toBe(1);
+  await expect(page.getByText('ALL F&O POSITIONS FLATTENED CLEANLY')).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText(/Emergency exit warning/)).toHaveCount(0);
+});
+
+test('Dhan: a target/stop exit that was refused is retried, not left disarmed', async ({ page }) => {
+  // Open long CRUDEOILM at 9340, price 9400 (derived from Dhan's lot-based P&L x10): a 30-point target is already hit.
+  const seen = await installDhan(page, {
+    orderReplies: (n) => (n === 1 ? { status: 400, body: { success: false, error: 'RMS: refused' } } : { status: 200, body: { success: true, order_id: `ok-${n}` } }),
+    positions: [DHAN_POS],
+  });
+  page.on('dialog', (d) => { void d.accept(); });
+  await page.goto('/cyber-scalper', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'CRUDEOILM', exact: true }).click();
+  // Arm a target on the open row through the positions table.
+  await page.getByRole('button', { name: 'ALL BROKER' }).first().click({ timeout: 60_000 });   // the row was not placed from this terminal
+  const target = page.getByPlaceholder('TP Price').first();
+  await target.fill('9370');
+  await target.blur();
+  await expect.poll(() => seen.orders.length, { timeout: 30_000 }).toBeGreaterThanOrEqual(1);
+  await expect.poll(() => seen.orders.length, { timeout: 40_000 }).toBeGreaterThanOrEqual(2);       // the refused exit is sent again
+  expect(seen.orders[1]).toMatchObject({ side: 'SELL', quantity: 1, securityId: '573423' });
+  expect(seen.blocked).toEqual([]);
+});
