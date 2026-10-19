@@ -40,3 +40,17 @@ test('slices stay whole lots under the freeze quantity; unknown lot or underlyin
   assert.deepEqual(zerodhaOrderSlices(6500, null, 65), [6500]);
   assert.deepEqual(zerodhaOrderSlices(65, 'SENSEX', 20), [65]);
 });
+
+import { pickZerodhaFuture } from './zerodhaOrderRules.ts';
+const FUT_ROWS = [
+  { tradingsymbol: 'CRUDEOILM26DECFUT', expiry: '2026-12-18', lot_size: 1 },
+  { tradingsymbol: 'CRUDEOILM26OCTFUT', expiry: '2026-10-19', lot_size: 1 },
+  { tradingsymbol: 'CRUDEOILM26NOVFUT', expiry: '2026-11-19', lot_size: 1 },
+];
+test('pickZerodhaFuture: nearest unexpired by default, the exact month when asked, nothing for an unlisted expiry', () => {
+  assert.equal(pickZerodhaFuture(FUT_ROWS, null, '2026-10-19')?.tradingsymbol, 'CRUDEOILM26OCTFUT');   // expiry day: still live
+  assert.equal(pickZerodhaFuture(FUT_ROWS, null, '2026-10-20')?.tradingsymbol, 'CRUDEOILM26NOVFUT');   // expired rows are skipped
+  assert.equal(pickZerodhaFuture(FUT_ROWS, '2026-12-18', '2026-10-19')?.tradingsymbol, 'CRUDEOILM26DECFUT');
+  assert.equal(pickZerodhaFuture(FUT_ROWS, '2026-11-18', '2026-10-19'), null);                          // never the nearest instead
+  assert.equal(pickZerodhaFuture([], null, '2026-10-19'), null);
+});

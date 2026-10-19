@@ -12,7 +12,7 @@ import CyberStrategyIntelligence, { StrategyData } from './CyberStrategyIntellig
 import { matchTradesFifo, type ExitedPositionItem } from '@/lib/fifoPositions';
 import { saveTerminalOrder } from '@/lib/terminalTradeStore';
 import { cyberAudio } from '@/lib/cyberAudio';
-import { contractMultiplier, scaleBrokerPnl } from '@/lib/positionPnl';
+import { contractMultiplier, scaleBrokerPnl, MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { useBrokerSelector, scalperRoute, BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import { withSavedBroker } from '@/hooks/withSavedBroker';
 
@@ -42,15 +42,15 @@ function CyberScalperTerminal() {
   // regardless of the broker selected here — same convention as AdvancedScalper.tsx.
   // Only order placement and the positions book are broker-specific.
   const { broker, setBroker, authenticatedBrokers } = useBrokerSelector();
-  // This terminal only supports Dhan and Kotak (Zerodha has no MCX/futures leg
-  // and isn't offered here) — filter the shared broker list down to those two.
-  const scalperBrokers = authenticatedBrokers.filter((b) => b !== 'zerodha');
+  // Every broker with a live session is offered: Dhan, Kotak and Zerodha all trade the options and the
+  // futures here (Zerodha's future comes from its own FUT cache via /api/scalper/zerodha/lookup).
+  const scalperBrokers = authenticatedBrokers;
   // Non-Dhan CE/PE trading symbols for the currently selected expiry, keyed by
   // strike — Dhan is the only broker with a numeric securityId, everyone else
   // orders by trading symbol (see submitLegOrder in AdvancedScalper.tsx, same
   // pattern). Unused while broker === 'dhan'.
   const [brokerStrikeMap, setBrokerStrikeMap] = useState<Record<string, { ceSymbol?: string; peSymbol?: string }>>({});
-  // Kotak near-month FUT contract for futures-capable underlyings (CRUDEOILM/CRUDEOIL/NIFTY); null for all others.
+  // Kotak / Zerodha FUT contract (the month the pad shows) for futures-capable underlyings (CRUDEOILM/CRUDEOIL/NIFTY); null for all others.
   const [brokerFuture, setBrokerFuture] = useState<{ trading_symbol: string; expiry?: string; lot_size?: number; exchange_segment?: string } | null>(null);
 
   // Live Data Feed
@@ -223,14 +223,19 @@ function CyberScalperTerminal() {
 
           const mult = contractMultiplier(p);
           const scaled = scaleBrokerPnl(p, mult);
+          // Zerodha counts MCX in lots like Dhan, but ITS P&L fields already include the barrels-per-lot multiplier
+          // (lib/zerodhaShape.ts), so it must not be rescaled above (`mult` stays 1) — only the points x qty path needs it.
+          const pnlMult = broker === 'zerodha' && String(p.exchange ?? '').toUpperCase() === 'MCX'
+            ? (MCX_LOT_MULTIPLIER[String(p.tradingSymbol ?? '').toUpperCase().match(/^[A-Z]+/)?.[0] ?? ''] ?? 1)
+            : mult;
           const unrealized = Number(scaled.unrealizedProfit) || 0;
           const realized = Number(scaled.realizedProfit) || 0;
 
           let ltp = Number(p.ltp || p.lastPrice || p.lastTradedPrice || 0);
           if (!ltp && qty !== 0 && unrealized !== 0 && mult > 0) {
             const derived = qty > 0
-              ? buyAvg + unrealized / (qty * mult)
-              : sellAvg - unrealized / (Math.abs(qty) * mult);
+              ? buyAvg + unrealized / (qty * pnlMult)
+              : sellAvg - unrealized / (Math.abs(qty) * pnlMult);
             if (Number.isFinite(derived) && derived > 0) ltp = derived;
           }
 
@@ -279,7 +284,7 @@ function CyberScalperTerminal() {
 
           // Pure active open position unrealized P&L
           let pnl = qty !== 0
-            ? (points !== 0 ? points * Math.abs(qty) * (mult > 0 ? mult : 1) : unrealized)
+            ? (points !== 0 ? points * Math.abs(qty) * (pnlMult > 0 ? pnlMult : 1) : unrealized)
             : realized;
 
           return {
@@ -377,13 +382,6 @@ function CyberScalperTerminal() {
     return () => clearInterval(id);
   }, [fetchFunds]);
 
-  // This terminal only offers Dhan/Kotak — if the shared broker selector was left
-  // on Zerodha by another page, fall back to Dhan rather than silently trading an
-  // account this terminal doesn't expose a selector for.
-  useEffect(() => {
-    if (broker === 'zerodha') setBroker('dhan');
-  }, [broker, setBroker]);
-
   // Non-Dhan CE/PE trading-symbol lookup for the currently selected underlying +
   // expiry. Dhan's own ce/pe security IDs come from feedData.options directly (see
   // cyber_scalper_feed.py) and need no separate lookup.
@@ -444,15 +442,6 @@ function CyberScalperTerminal() {
     targetPts?: number;
     slPts?: number;
   }) => {
-    // Zerodha doesn't support MCX commodity — block futures mode for it.
-    // Kotak is now supported via brokerFuture resolved from the instruments cache.
-    if (broker === 'zerodha' && params.contractType === 'DIRECT') {
-      cyberAudio.error();
-      addLog('ERROR', `Futures trading not supported on Zerodha`, `Zerodha has no MCX commodity support`);
-      alert(`Futures trading is not supported on Zerodha`);
-      return;
-    }
-
     // Every non-Dhan broker orders by trading symbol (Dhan is the only one with a
     // numeric securityId) — resolve it from the broker's own strike lookup rather
     // than the Dhan-sourced tradingSymbol the order pad passed in, which is in
@@ -461,11 +450,11 @@ function CyberScalperTerminal() {
     let brokerExchange = symbol === 'SENSEX' ? 'BSE_FNO' : symbol.includes('CRUDE') ? 'MCX_COMM' : 'NSE_FNO';
     if (broker !== 'dhan') {
       if (params.contractType === 'DIRECT') {
-        // Kotak futures: use the resolved near-month FUT trading symbol.
+        // Kotak / Zerodha futures: use the resolved FUT trading symbol (the month the pad shows).
         // Dhan's MCX lot_size is always 1 (it orders by lots, not barrels), so for
         // CRUDEOILM params.qty = lots × 1 but Kotak Neo requires absolute barrels
-        // (2 lots × 10 barrels/lot = 20). Index futures (e.g. NIFTY) already carry
-        // their true per-lot size on both sides, so this multiply is a no-op for them.
+        // (2 lots × 10 barrels/lot = 20). Zerodha counts MCX in lots (its FUT lot_size is 1), and index
+        // futures (e.g. NIFTY) carry their true per-lot size everywhere, so the multiply is a no-op there.
         brokerTradingSymbol = brokerFuture?.trading_symbol;
         // A lookup still in flight (or failed) after an expiry switch leaves the previous month's symbol here: never
         // trade a different month than the pad shows.
@@ -474,11 +463,11 @@ function CyberScalperTerminal() {
         brokerExchange = brokerFuture?.exchange_segment ?? (symbol.includes('CRUDE') ? 'mcx_fo' : 'nse_fo');
         if (!brokerTradingSymbol) {
           cyberAudio.error();
-          addLog('ERROR', `Kotak future contract still loading`, `${symbol} FUT not resolved yet`);
-          alert(`Cannot place order: Kotak future contract not resolved yet — try again in a moment`);
+          addLog('ERROR', `${BROKER_LABELS[broker]} future contract still loading`, `${symbol} FUT not resolved yet`);
+          alert(`Cannot place order: ${BROKER_LABELS[broker]} future contract not resolved yet — try again in a moment`);
           return;
         }
-        // Scale lots → absolute contract quantity for the Kotak Neo order API
+        // Scale lots → the broker's own contract quantity
         params = { ...params, qty: params.lots * (brokerFuture?.lot_size ?? params.qty / params.lots) };
       } else {
         const entry = params.strike != null ? brokerStrikeMap[String(params.strike)] : undefined;
@@ -678,10 +667,10 @@ function CyberScalperTerminal() {
     // barrels-per-lot figure, or a real multi-lot CRUDEOIL(M) position floors
     // to 0 "lots" and every chip shows disabled. Kotak reports MCX quantity in
     // absolute barrels, so it still needs the real per-lot size below.
-    if (pos.exchangeSegment === 'MCX_COMM') return 1;
+    if (pos.exchangeSegment === 'MCX_COMM' || (broker === 'zerodha' && pos.exchangeSegment === 'MCX')) return 1;
 
     const isFuture = sym.includes('FUT');
-    // brokerFuture is only populated for Kotak (see the lookup effect above) —
+    // brokerFuture is only populated for Kotak / Zerodha (see the lookup effect above) —
     // Dhan's own future lot size comes from feedData.future instead, same
     // source the order pad uses for Dhan (see the `future` prop passed to
     // CyberOrderPad).
@@ -752,19 +741,23 @@ function CyberScalperTerminal() {
     addLog('EXIT', 'EMERGENCY FLATTEN ALL INITIATED', 'Liquidating all open F&O positions');
 
     try {
-      const res = await fetch('/api/exit-all', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scope: 'fno' }),
-      });
+      // Each broker flattens its OWN account: the shared /api/exit-all sweep is Dhan's, so it would leave a Kotak /
+      // Zerodha position open and close Dhan's instead.
+      const res = broker === 'dhan'
+        ? await fetch('/api/exit-all', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scope: 'fno' }),
+          })
+        : await fetch(scalperRoute(broker, 'exit-all'), { method: 'POST' });
       const json = await res.json();
-      if (json.ok) {
+      if (broker === 'dhan' ? json.ok : json.success) {
         cyberAudio.exit();
         addLog('EXIT', 'ALL F&O POSITIONS FLATTENED CLEANLY');
         await fetchPositions();
       } else {
         cyberAudio.error();
-        addLog('ERROR', `Emergency exit warning: ${json.error || 'Partial exit failure'}`);
+        addLog('ERROR', `Emergency exit warning: ${json.error || (Array.isArray(json.errors) && json.errors.length ? json.errors.join('; ') : 'Partial exit failure')}`);
       }
     } catch (err: any) {
       cyberAudio.error();
@@ -1066,7 +1059,7 @@ function CyberScalperTerminal() {
 
         {/* Right: Controls & Selectors */}
         <div className="flex items-center gap-2 flex-wrap">
-          {/* Broker selector (Dhan / Kotak only) */}
+          {/* Broker selector (every broker with a live session) */}
           <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg p-0.5">
             {scalperBrokers.map((b) => (
               <button
@@ -1196,8 +1189,8 @@ function CyberScalperTerminal() {
           future={
             broker === 'dhan'
               ? feedData?.future || null
-              : broker === 'kotak' && brokerFuture && feedData?.future
-              ? { ...feedData.future, trading_symbol: brokerFuture.trading_symbol, lot_size: brokerFuture.lot_size ?? 10 }
+              : brokerFuture && feedData?.future
+              ? { ...feedData.future, trading_symbol: brokerFuture.trading_symbol, lot_size: brokerFuture.lot_size ?? (broker === 'kotak' ? 10 : 1) }
               : null
           }
           bias={feedData?.live?.bias || 'NEUTRAL'}

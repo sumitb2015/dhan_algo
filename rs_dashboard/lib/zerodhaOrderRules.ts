@@ -43,3 +43,17 @@ export function zerodhaOrderSlices(qty: number, underlying: string | null, lotSi
   for (let left = qty; left > 0; left -= per) out.push(Math.min(per, left));
   return out;
 }
+
+/** One row of debug/zerodha_<underlying>_futures.json (scripts/tools/zerodha_instruments_cache.py --futures). */
+export interface ZerodhaFutureRow { tradingsymbol: string; expiry: string; lot_size?: number; tick_size?: number; exchange?: string }
+
+/**
+ * The future to trade. An explicit `expiry` must be listed: an unlisted one resolves to NOTHING, never to the nearest
+ * contract (the caller is showing a price and chart for that month). With no expiry it is the nearest one that has not
+ * expired (`today` is the IST date, YYYY-MM-DD). Pure.
+ */
+export function pickZerodhaFuture(rows: ZerodhaFutureRow[], expiry: string | null | undefined, today: string): ZerodhaFutureRow | null {
+  const sorted = [...rows].sort((a, b) => a.expiry.localeCompare(b.expiry));
+  if (expiry) return sorted.find((r) => r.expiry === expiry) ?? null;
+  return sorted.find((r) => r.expiry >= today) ?? null;
+}

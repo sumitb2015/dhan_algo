@@ -36,6 +36,16 @@ UNDERLYING_EXCHANGE = {
 def output_file(underlying: str) -> str:
     return os.path.join(ROOT, 'debug', f'zerodha_{underlying.lower()}_instruments.json')
 
+
+# Underlyings with a tradeable future of their own (the Cyber Scalper's Futures mode). Their FUT rows go to a SEPARATE
+# file: the options cache is read by consumers that treat every row as an option (expiry lists, strike maps), and a
+# future's expiry is not an options expiry (CRUDEOILM options 17 Nov, future 19 Nov).
+FUTURES_EXCHANGE = {'NIFTY': 'NFO', 'CRUDEOIL': 'MCX', 'CRUDEOILM': 'MCX'}
+
+
+def futures_output_file(underlying: str) -> str:
+    return os.path.join(ROOT, 'debug', f'zerodha_{underlying.lower()}_futures.json')
+
 INSTRUMENTS_CACHE_MAX_AGE_SEC = 24 * 3600
 
 
@@ -89,9 +99,13 @@ def restore_session_from_json():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--underlying', default='NIFTY')
+    parser.add_argument('--futures', action='store_true', help='write the underlying\'s FUT contracts (zerodha_<u>_futures.json) instead of its options')
     args = parser.parse_args()
     underlying = args.underlying.upper()
-    exchange = UNDERLYING_EXCHANGE.get(underlying, 'NFO')
+    if args.futures and underlying not in FUTURES_EXCHANGE:
+        print(json.dumps({'success': False, 'error': f'{underlying} has no tradeable future here'}))
+        sys.exit(1)
+    exchange = FUTURES_EXCHANGE[underlying] if args.futures else UNDERLYING_EXCHANGE.get(underlying, 'NFO')
 
     kite = restore_session_from_json()
     if kite is None:
@@ -108,7 +122,7 @@ def main():
     for inst in instruments:
         if inst.get('name') != underlying:
             continue
-        if inst.get('instrument_type') not in ('CE', 'PE'):
+        if inst.get('instrument_type') not in (('FUT',) if args.futures else ('CE', 'PE')):
             continue
         expiry = inst.get('expiry')
         rows.append({
@@ -121,7 +135,7 @@ def main():
             'tick_size': float(inst.get('tick_size') or 0.05),
         })
 
-    out_file = output_file(underlying)
+    out_file = futures_output_file(underlying) if args.futures else output_file(underlying)
     os.makedirs(os.path.dirname(out_file), exist_ok=True)
     with open(out_file, 'w') as f:
         json.dump(rows, f)

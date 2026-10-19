@@ -7,10 +7,15 @@ import { zerodhaContractFromRows, zerodhaUnderlyingOf, zerodhaOrderSlices, type 
 export function cachedZerodhaContract(symbol: string): ZerodhaContractInfo | null {
   const underlying = zerodhaUnderlyingOf(symbol);
   if (!underlying) return null;
-  try {
-    const file = path.join(PROJECT_ROOT, 'debug', `zerodha_${underlying.toLowerCase()}_instruments.json`);
-    return zerodhaContractFromRows(JSON.parse(fs.readFileSync(file, 'utf8')) as ZerodhaCachedContract[], symbol);
-  } catch { return null; }
+  // Options first, then the futures file (a future's tick differs: an MCX future ticks at 1.00, NIFTY's at 0.10).
+  for (const kind of ['instruments', 'futures']) {
+    try {
+      const file = path.join(PROJECT_ROOT, 'debug', `zerodha_${underlying.toLowerCase()}_${kind}.json`);
+      const hit = zerodhaContractFromRows(JSON.parse(fs.readFileSync(file, 'utf8')) as ZerodhaCachedContract[], symbol);
+      if (hit) return hit;
+    } catch { /* file missing or unreadable: try the next */ }
+  }
+  return null;
 }
 
 /** `qty` of `symbol` as orders under the exchange freeze quantity (one order when the contract is not in the cache). */
