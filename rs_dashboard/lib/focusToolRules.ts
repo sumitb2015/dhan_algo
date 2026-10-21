@@ -1616,6 +1616,16 @@ export function levelEntryLots(cfg: FocusLegLevel | null | undefined, legLots: n
 }
 
 /**
+ * Lots an index-level entry ADDS to a leg that is already open. The box must hold an explicit whole number — a blank
+ * would mean "the leg's lots again", i.e. doubling the position, so it adds nothing (null). Capped at the leg's own
+ * configured lots per fire, never more. An unusable value is null too.
+ */
+export function levelAddLots(cfg: FocusLegLevel | null | undefined, legLots: number): number | null {
+  const n = levelLots(cfg);
+  return n == null ? null : Math.min(n, legLots);
+}
+
+/**
  * Lots an index-level EXIT closes when it should close only part of the leg: the box's number times the row's Qty ×,
  * when that is fewer than the leg holds. Null = close the whole leg (blank box, an unusable one — closing is the
  * risk-reducing direction —, or a number at or above what the leg holds).

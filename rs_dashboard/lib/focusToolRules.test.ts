@@ -21,7 +21,7 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote, legTargetLevel,
-  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots, balanceRollPlan, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
+  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots, balanceRollPlan, levelAddLots, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
   resolveCriteriaStrike, closestPremiumStrike, absDelta100, modelAbsDelta100, legDeltaBasis, legDeltaNow, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
   tradingDaysBack, tradingDte, dateForDte, rangeWindow, rangeWindowPhase, candleBucket, addMinutesHm,
   type RowLive, type PosRow, type WorkerHold,
@@ -978,6 +978,18 @@ test('balanceRollPlan: rolls the dearer leg to the strike matching the cheaper l
   assert.equal(none.kind, 'skip');
   // Undecidable: the dearer leg has no known strike.
   assert.equal(balanceRollPlan({ ...base, ceStrike: null }).kind, 'none');
+});
+
+test('levelAddLots: an open leg needs an explicit lots number; never blank, never above the leg\'s own lots', () => {
+  const lv = (lots?: string) => ({ level: '22745', dir: 'below' as const, lots });
+  assert.equal(levelAddLots(lv('1'), 2), 1);
+  assert.equal(levelAddLots(lv('2'), 2), 2);
+  assert.equal(levelAddLots(lv('5'), 2), 2);     // capped at the leg's lots
+  assert.equal(levelAddLots(lv(''), 2), null);   // blank would double the position
+  assert.equal(levelAddLots(lv(undefined), 2), null);
+  assert.equal(levelAddLots(lv('0'), 2), null);
+  assert.equal(levelAddLots(lv('1.5'), 2), null);
+  assert.equal(levelAddLots(undefined, 2), null);
 });
 
 test('balanceLegsOn needs the switch and a usable gap', () => {

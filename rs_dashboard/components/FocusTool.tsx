@@ -44,7 +44,7 @@ import type {
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
-  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn, balanceRollPlan, levelLotsInvalid, levelEntryLots, levelPartialCloseLots,
+  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn, balanceRollPlan, levelAddLots, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
@@ -1867,7 +1867,7 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
   const isCe = leg === 'CE';
   const en: FocusLegEntryLevel = (isCe ? row.ceEntryLevel : row.peEntryLevel) ?? { level: '', dir: isCe ? 'below' : 'above' };
   const ex: FocusLegLevel = (isCe ? row.ceExitLevel : row.peExitLevel) ?? { level: '', dir: isCe ? 'above' : 'below' };
-  const setEn = (patch: Partial<FocusLegEntryLevel>) => onUpdate(isCe ? { ceEntryLevel: { ...en, ...patch } } : { peEntryLevel: { ...en, ...patch } });
+  const setEn = (patch: Partial<FocusLegEntryLevel>) => { const next = { ...en, ...patch, ...('level' in patch || 'dir' in patch ? { firedOn: undefined } : {}) }; onUpdate(isCe ? { ceEntryLevel: next } : { peEntryLevel: next }); };
   const setEx = (patch: Partial<FocusLegLevel>) => onUpdate(isCe ? { ceExitLevel: { ...ex, ...patch } } : { peExitLevel: { ...ex, ...patch } });
   const dirOpts = [{ value: 'above', label: 'above' }, { value: 'below', label: 'below' }];
   const lbl = 'text-[11px] font-bold text-zinc-400';
@@ -1879,7 +1879,7 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
         {leg} index
       </span>
       <span className={lbl}
-        title={`Sell ${leg} when the index crosses this level, between the row's entry and exit time, while ${leg} holds nothing. Once per day — Arm re-enables it. Replaces this leg's Range Breakout / Simple Momentum. Ignored under Overall Momentum and in an overall re-entry cycle`}>
+        title={`Sell ${leg} when the index crosses this level, between the row's entry and exit time. While ${leg} holds nothing it opens the leg (lots box blank = the leg's lots); when ${leg} is ALREADY OPEN it ADDS the lots in the box (the box must hold a number). Once per day — changing the level re-enables it. Replaces this leg's Range Breakout / Simple Momentum. Ignored under Overall Momentum and in an overall re-entry cycle`}>
         sell when
       </span>
       <MiniSelect value={en.dir} ariaLabel={`${leg} entry level direction`} options={dirOpts}
@@ -1901,8 +1901,10 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
         label={`${leg} exit lots`} className="w-12 h-6 text-center"
         title={`Lots to close when the exit level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies: 1 closes ${rowQtyMultiplier(row)})` : ''}. Blank = close the whole ${leg} leg. Fewer than it holds closes that many and keeps the rest open; it fires again only after spot comes back and crosses the level again. A value that is not a whole number closes the whole leg`} />
       {levelLotsInvalid(en) && <span className="text-[11px] text-rose-400 font-semibold">entry lots: whole number ≥ 1 — level not used</span>}
+      {legLevelOn(en) && !levelLotsInvalid(en) && rowOwnsLeg(row, leg) && levelLots(en) == null && <span className="text-[11px] text-amber-300 font-semibold">{leg} is open: set lots to add</span>}
+      {legLevelOn(en) && (levelLots(en) ?? 0) > legLots(row, leg) && <span className="text-[11px] text-amber-300 font-semibold">capped at {legLots(row, leg)} lot(s)</span>}
       {levelLotsInvalid(ex) && <span className="text-[11px] text-rose-400 font-semibold">exit lots: whole number ≥ 1 — closes all</span>}
-      {entryLevelFiredToday(en, istToday()) && <span className="text-[11px] text-amber-300 font-semibold">entry used today — Arm to re-enable</span>}
+      {entryLevelFiredToday(en, istToday()) && <span className="text-[11px] text-amber-300 font-semibold">entry used today — {rowOwnsLeg(row, leg) ? 'change the level to re-enable' : 'Arm to re-enable'}</span>}
       {ignored && <span className="text-[11px] text-amber-300 font-semibold">entry ignored: Overall Momentum on</span>}
     </div>
   );
@@ -1920,12 +1922,12 @@ function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch
         const isCe = leg === 'CE';
         const en: FocusLegEntryLevel = (isCe ? row.ceEntryLevel : row.peEntryLevel) ?? { level: '', dir: isCe ? 'below' : 'above' };
         const ex: FocusLegLevel = (isCe ? row.ceExitLevel : row.peExitLevel) ?? { level: '', dir: isCe ? 'above' : 'below' };
-        const setEn = (patch: Partial<FocusLegEntryLevel>) => onUpdate(isCe ? { ceEntryLevel: { ...en, ...patch } } : { peEntryLevel: { ...en, ...patch } });
+        const setEn = (patch: Partial<FocusLegEntryLevel>) => { const next = { ...en, ...patch, ...('level' in patch || 'dir' in patch ? { firedOn: undefined } : {}) }; onUpdate(isCe ? { ceEntryLevel: next } : { peEntryLevel: next }); };
         const setEx = (patch: Partial<FocusLegLevel>) => onUpdate(isCe ? { ceExitLevel: { ...ex, ...patch } } : { peExitLevel: { ...ex, ...patch } });
         return (
           <div key={leg} className="flex flex-col gap-1">
             <div className="flex flex-wrap items-center gap-1.5"
-              title={`Sell ${leg} when the index CROSSES this level (spot must first be on the other side), between the row's entry and exit time, while ${leg} holds nothing. Once per day — Arm re-enables it. Replaces this leg's Range Breakout / Simple Momentum`}>
+              title={`Sell ${leg} when the index CROSSES this level (spot must first be on the other side), between the row's entry and exit time. While ${leg} holds nothing it opens the leg; when ${leg} is ALREADY OPEN it ADDS the lots in the box (the box must hold a number). Once per day — changing the level re-enables it. Replaces this leg's Range Breakout / Simple Momentum`}>
               <span className={cn('font-black w-6', isCe ? 'text-emerald-400' : 'text-rose-400')}>{leg}</span>
               <span className={lbl}>Entry: sell when spot</span>
               <MiniSelect value={en.dir} ariaLabel={`${leg} entry level direction`} options={dirOpts}
@@ -1937,7 +1939,9 @@ function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch
                 label={`${leg} entry lots`} className="w-14 h-6 text-center"
                 title={`Lots to sell when the entry level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies)` : ''}. Blank = all of ${leg}'s lots (${legLots(row, leg)}); more than that is capped. A value that is not a whole number stops the level from firing`} />
               {levelLotsInvalid(en) && <span className="text-rose-400 font-semibold">whole number ≥ 1 — level not used</span>}
-              {entryLevelFiredToday(en, today) && <span className="text-amber-300 font-semibold">used today — Arm to re-enable</span>}
+              {legLevelOn(en) && !levelLotsInvalid(en) && rowOwnsLeg(row, leg) && levelLots(en) == null && <span className="text-amber-300 font-semibold">{leg} is open: set lots to add</span>}
+              {legLevelOn(en) && (levelLots(en) ?? 0) > legLots(row, leg) && <span className="text-amber-300 font-semibold">capped at {legLots(row, leg)} lot(s)</span>}
+              {entryLevelFiredToday(en, today) && <span className="text-amber-300 font-semibold">used today — {rowOwnsLeg(row, leg) ? 'change the level to re-enable' : 'Arm to re-enable'}</span>}
             </div>
             <div className="flex flex-wrap items-center gap-1.5"
               title={`Close ${leg} when the index CROSSES this level (spot must first be on the other side while ${leg} is held). Handled as ${leg}'s SL: RE on SL runs and uses one of its re-entries`}>
@@ -9870,14 +9874,14 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         if (why) addToast('error', `${tag} entry cancelled`, why);
       };
       let st: (typeof simMomRef.current)[string] | undefined = simMomRef.current[key];
-      if (st && (st.day !== today || rowOwnsLeg(row, leg))) { drop(); st = undefined; }
-      if (st && closedReason) { drop(closedReason); continue; }
+      if (st && (st.day !== today || (rowOwnsLeg(row, leg) && kind !== 'level'))) { drop(); st = undefined; }
+      if (st && closedReason) { drop(rowOwnsLeg(row, leg) ? undefined : closedReason); continue; }
       // The leg's gate was edited while waiting: start over.
       if (st && st.kind !== kind) { drop(); st = undefined; }
 
       const lv = leg === 'CE' ? row.ceEntryLevel : row.peEntryLevel;
-      if (!st && kind === 'level' && entryLevelFiredToday(lv, today) && !rowOwnsLeg(row, leg)) {
-        putMomStatus(key, closedReason ? '' : `${leg}: index entry level used today — Arm the row to enable it again`);
+      if (!st && kind === 'level' && entryLevelFiredToday(lv, today)) {
+        putMomStatus(key, closedReason ? '' : `${leg}: index entry level used today — ${rowOwnsLeg(row, leg) ? 'change the level to enable it again' : 'Arm the row to enable it again'}`);
         continue;
       }
       if (!st) {
@@ -9885,7 +9889,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         // reloaded mid-wait): inside the window, while this leg holds nothing and has no re-entry of its own waiting.
         const levelLate = kind === 'level' && row.status === 'entered' && !closedReason && nowHm >= row.entryTime
           && !(leg === 'CE' ? row.fill?.cePending : row.fill?.pePending);
-        if (!((row.status === 'armed' && enterOk) || levelLate) || rowOwnsLeg(row, leg)) continue;
+        if (!((row.status === 'armed' && enterOk) || levelLate) || (rowOwnsLeg(row, leg) && !(kind === 'level' && levelLate))) continue;
         let strike: number | null = leg === 'CE' ? live.ceStrike : live.peStrike;
         let start = 0;
         if (kind === 'range' && rb && win) {
@@ -9978,6 +9982,12 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
       } else if (kind === 'level' && legLevelOn(lv)) {
         // Edited level / direction while waiting: the new setting must see its own safe side first.
         if (st.levelSig !== levelSig(lv)) { st.levelSig = levelSig(lv); st.seenSafe = false; }
+        // An open leg is ADDED to, so the lots must be explicit: blank would mean "the leg's lots again" (a doubled position).
+        if (rowOwnsLeg(row, leg) && levelAddLots(lv, legLots(row, leg)) == null) {
+          putMomStatus(key, `${leg}: leg is open — set the lots to ADD when this level is crossed (blank would double it, so nothing fires)`);
+          st.seenSafe = false;
+          continue;
+        }
         // An unusable lots box must never become "all lots": the level is not used until it is fixed (nothing is spent).
         if (levelLotsInvalid(lv)) {
           putMomStatus(key, `${leg}: entry lots "${lv.lots}" is not a whole number of 1 or more — fix it, this level is not used`);
@@ -10012,31 +10022,48 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         const freshLv = leg === 'CE' ? fresh.ceEntryLevel : fresh.peEntryLevel;
         // An index-level entry may be set to sell fewer lots than the leg's own (never more). Edited into something
         // unusable since the cross was seen: refuse before anything is spent or sent.
-        const entryLots = kind === 'level' ? levelEntryLots(freshLv, legLots(row, leg)) : legLots(row, leg);
+        // On a leg that is already open the level ADDS lots (explicit number only); on a flat leg it opens it.
+        const adding = kind === 'level' && rowOwnsLeg(fresh, leg);
+        const entryLots = kind !== 'level' ? legLots(row, leg)
+          : adding ? levelAddLots(freshLv, legLots(row, leg)) : levelEntryLots(freshLv, legLots(row, leg));
         if (entryLots == null) {
-          addToast('error', `${tag} entry skipped`, `The ${leg} entry lots "${freshLv?.lots}" is not a whole number of 1 or more — nothing was sent`);
+          addToast('error', `${tag} ${adding ? 'add' : 'entry'} skipped`, `The ${leg} entry lots "${freshLv?.lots ?? ''}" is not a whole number of 1 or more — nothing was sent`);
           return;
         }
         if (kind === 'level' && freshLv) {
           updateRow(row.id, leg === 'CE' ? { ceEntryLevel: { ...freshLv, firedOn: today } } : { peEntryLevel: { ...freshLv, firedOn: today } });
         }
         const sellLots = multipliedLots(row, entryLots);
-        addToast('success', `${tag} entry`, trigger
-          ? `${trigger} — selling ${sellLots} lot(s) ${armed.strike} ${leg}`
+        addToast('success', `${tag} ${adding ? 'add' : 'entry'}`, trigger
+          ? `${trigger} — ${adding ? 'adding' : 'selling'} ${sellLots} lot(s) ${armed.strike} ${leg}`
           : `Entry time reached — selling ${sellLots} lot(s) ${armed.strike} ${leg}`);
         // The range it broke out of is the base of its ORB Range stop — handed
         // to the ledger write that opens the leg (whenever the fill confirms).
         const orb = kind === 'range' && rb && armed.range
           ? { high: armed.range.high, low: armed.range.low, side: rb.side, on: rb.on } : null;
-        const ok = await placeLeg(fresh, leg, { reduce: false, lots: sellLots, strikeOverride: armed.strike, orb });
+        // An add goes in exactly like the + button: no strike override, so it lands on the strike the leg already holds.
+        const ok = await placeLeg(fresh, leg, { reduce: false, lots: sellLots, ...(adding ? {} : { strikeOverride: armed.strike }), orb });
         if (ok) {
-          checkEntryLegsFilled(fresh, [leg], legsOf(row), `${leg} entry`);
+          if (adding) {
+            // The leg was already open: an unfilled add is not a one-sided row, just an add that did not land.
+            const before = Number(leg === 'CE' ? fresh.fill?.ceQty : fresh.fill?.peQty) || 0;
+            if (!isSimRow(fresh)) {
+              void awaitLegSettled(row.id, leg, before).then(res => {
+                if (res === false) addToast('error', `${tag} add not filled`, `The ${sellLots}-lot add to ${armed.strike} ${leg} was accepted by the broker and then not filled (rejected — margin?). The leg is as it was.`);
+              });
+            }
+          } else {
+            checkEntryLegsFilled(fresh, [leg], legsOf(row), `${leg} entry`);
+          }
           delete simMomRef.current[key];
           const cur = schedulerRef.current.config.rows.find(r => r.id === row.id);
           if (cur?.status === 'armed') updateRow(row.id, { status: 'entered' });
         } else {
           armed.failed = true;
           const other: 'CE' | 'PE' = leg === 'CE' ? 'PE' : 'CE';
+          if (adding) {
+            addToast('error', `${tag} add not confirmed`, `The ${sellLots}-lot add to ${armed.strike} ${leg} was rejected or not confirmed. It may still fill — check the order book before adding by hand. Not retried.`);
+          } else
           addToast('error', `${tag} entry failed`, legsOf(row).includes(other) && rowOwnsLeg(fresh, other)
             ? `${other} is open but ${leg} was rejected — this row is one-sided. Place ${leg} manually if you want it.`
             : `${leg} was rejected — not retried. Disarm and re-arm the row to try again.`);
