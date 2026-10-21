@@ -22,14 +22,21 @@ function writeJsonAtomic(file: string, data: unknown) {
   fs.renameSync(tmp, file);
 }
 
+/**
+ * The live ledger. A missing file is an empty ledger; an UNREADABLE one throws. Every save is read-modify-write, so
+ * answering [] for a corrupt or half-written file made the next save replace the whole ledger with a single basket
+ * (and the page, on a failed read, keeps showing its local copy rather than an empty one).
+ */
 export function readBaskets(): MultiLegBasket[] {
+  if (!fs.existsSync(STORE_FILE)) return [];
+  let raw: Partial<Store>;
   try {
-    if (!fs.existsSync(STORE_FILE)) return [];
-    const raw = JSON.parse(fs.readFileSync(STORE_FILE, 'utf-8')) as Partial<Store>;
-    return Array.isArray(raw.baskets) ? raw.baskets : [];
-  } catch {
-    return [];
+    raw = JSON.parse(fs.readFileSync(STORE_FILE, 'utf-8')) as Partial<Store>;
+  } catch (err) {
+    throw new Error(`multi_leg_baskets.json unreadable (not overwritten): ${String(err)}`);
   }
+  if (!raw || !Array.isArray(raw.baskets)) throw new Error('multi_leg_baskets.json has no "baskets" list (not overwritten)');
+  return raw.baskets;
 }
 
 export function writeBaskets(baskets: MultiLegBasket[]): void {

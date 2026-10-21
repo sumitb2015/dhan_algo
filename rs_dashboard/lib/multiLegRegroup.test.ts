@@ -98,3 +98,10 @@ test('guards (spot triggers, Greek bands, alarm) are disarmed on a changed group
   assert.deepEqual(r.disarmed, ['A']);
   assert.equal(made.guards, undefined);
 });
+
+test('group: a row emptied of legs but holding a resting stop entry is kept (its order must stay tracked)', () => {
+  const w = { id: 'w1', orderId: 'o1' } as unknown as NonNullable<MultiLegBasket['waitingEntries']>[number];
+  const r = regroupBaskets([bk('A', [leg('1', { status: 'CLOSED' })], { waitingEntries: [w] })], { op: 'group', legIds: ['1'], name: 'N' }, nid, 'now');
+  assert.ok(r.ok);
+  assert.ok(r.baskets.some(b => b.id === 'A' && b.legs.length === 0 && b.waitingEntries?.length === 1));
+});

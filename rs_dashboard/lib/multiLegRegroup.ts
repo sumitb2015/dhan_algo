@@ -125,7 +125,9 @@ export function regroupBaskets(
   }
 
   // A basket the move emptied has nothing left to track.
-  const emptied = new Set(next.filter(b => b.legs.length === 0 && baskets.some(o => o.id === b.id && o.legs.length > 0)).map(b => b.id));
+  // A row still holding a resting stop entry is kept: dropping it would orphan an order at the broker that Exit All
+  // could no longer cancel (a finished row keeps showing for the same reason, see isFullyClosed).
+  const emptied = new Set(next.filter(b => b.legs.length === 0 && !(b.waitingEntries?.length) && baskets.some(o => o.id === b.id && o.legs.length > 0)).map(b => b.id));
   return {
     ok: true,
     baskets: next.filter(b => !emptied.has(b.id)),
