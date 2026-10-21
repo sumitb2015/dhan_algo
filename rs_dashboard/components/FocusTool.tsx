@@ -70,6 +70,7 @@ import { loadOwnOrders, rememberOwnOrder } from '@/lib/focusOwnOrders';
 import { computeRowPnl, mtmForQty, pnlPctOfPremium, blendFillBasis, fillRebasePatch, shiftMayReopen, canMarkMtm, shiftCloseConfirmed, rowDisplayBookedPnl, putCallRatio, valuePutCallRatio, pickOpenInterest, closeRebaseDelta, closedSliceBooked, FTS_ORDER_SOURCE } from '@/lib/focusToolPnl';
 import { normalizeTradeRow, matchOutsideTrades, type NormalizedTrade } from '@/lib/multiLegFocus';
 import { stampItems, noteItems, adoptItems, canon, type RevBook } from '@/lib/revMerge';
+import { checkOrderMarginGate } from '@/lib/marginGateClient';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { brokerSelectorLocked, heldBrokers, nextFillBroker, rowBrokerMismatch, legProductFor, nextLegProduct } from '@/lib/focusToolBroker';
 import { classifyOrderReply, openHoldReason } from '@/lib/focusToolOrderOutcome';
@@ -1879,7 +1880,7 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
         {leg} index
       </span>
       <span className={lbl}
-        title={`Sell ${leg} when the index crosses this level, between the row's entry and exit time. While ${leg} holds nothing it opens the leg (lots box blank = the leg's lots); when ${leg} is ALREADY OPEN it ADDS the lots in the box (the box must hold a number). Once per day — changing the level re-enables it. Replaces this leg's Range Breakout / Simple Momentum. Ignored under Overall Momentum and in an overall re-entry cycle`}>
+        title={`Sell ${leg} when the index crosses this level, between the row's entry and exit time. While ${leg} holds nothing it opens the leg (lots box blank = the leg's lots); when ${leg} is ALREADY OPEN it ADDS the lots in the box (the box must hold a number; on a REAL Dhan index-option row the add is blocked if margin or funds cannot be verified). Once per day — changing the level re-enables it. Replaces this leg's Range Breakout / Simple Momentum. Ignored under Overall Momentum and in an overall re-entry cycle`}>
         sell when
       </span>
       <MiniSelect value={en.dir} ariaLabel={`${leg} entry level direction`} options={dirOpts}
@@ -1932,7 +1933,7 @@ function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch
         return (
           <div key={leg} className="flex flex-col gap-1">
             <div className="flex flex-wrap items-center gap-1.5"
-              title={`Sell ${leg} when the index CROSSES this level (spot must first be on the other side), between the row's entry and exit time. While ${leg} holds nothing it opens the leg; when ${leg} is ALREADY OPEN it ADDS the lots in the box (the box must hold a number). Once per day — changing the level re-enables it. Replaces this leg's Range Breakout / Simple Momentum`}>
+              title={`Sell ${leg} when the index CROSSES this level (spot must first be on the other side), between the row's entry and exit time. While ${leg} holds nothing it opens the leg; when ${leg} is ALREADY OPEN it ADDS the lots in the box (the box must hold a number; on a REAL Dhan index-option row the add is blocked if margin or funds cannot be verified). Once per day — changing the level re-enables it. Replaces this leg's Range Breakout / Simple Momentum`}>
               <span className={cn('font-black w-6', isCe ? 'text-emerald-400' : 'text-rose-400')}>{leg}</span>
               <span className={lbl}>Entry: sell when spot</span>
               <MiniSelect value={en.dir} ariaLabel={`${leg} entry level direction`} options={dirOpts}
@@ -9392,6 +9393,30 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   }
 
   /**
+   * Margin check for adding `lots` to an open short leg (Dhan, NSE / BSE index options): the standalone SELL margin of
+   * the added lots against the account's available funds. Fails closed — an unresolved contract, price, lot size,
+   * margin or funds read blocks the add.
+   */
+  async function checkAddMargin(row: FocusRow, leg: 'CE' | 'PE', lots: number): Promise<{ ok: boolean; message: string }> {
+    const u = row.underlying;
+    const expiry = row.expiry || expiriesRef.current[u]?.[0] || '';
+    const l = schedulerRef.current.rowLive[row.id];
+    const strike = leg === 'CE' ? l?.ceStrike : l?.peStrike;
+    const price = Number(leg === 'CE' ? l?.ltpCe : l?.ltpPe) || 0;
+    const lotSize = lotSizes[u] ?? 0;
+    const ref = strike ? lookups[expKey(u, expiry)]?.strikes?.[strikeKey(strike)] : undefined;
+    const securityId = leg === 'CE' ? ref?.ceId : ref?.peId;
+    if (!strike || !expiry || !(price > 0) || !(lotSize > 0) || !securityId || !(lots > 0)) {
+      return { ok: false, message: 'Margin could not be verified (contract, price or lot size not resolved) — add blocked' };
+    }
+    const r = await checkOrderMarginGate({
+      underlying: u, expiry,
+      legs: [{ id: `${leg}-add`, side: 'S', option: leg, strike, expiry, lots, quantity: lots * lotSize, price, securityId: String(securityId) }],
+    });
+    return { ok: r.ok, message: r.message };
+  }
+
+  /**
    * Close part of a leg when its index exit level fires (the level was set to a number of lots below what the leg holds).
    * Same locks as a scale-out reduce: the leg sits in scalingLegRef (not autoExitingLegRef — it is not a full close) and
    * the row counts in legExitsInFlightRef, so a whole-row exit waits for it and the other leg's stop is not held up.
@@ -10046,6 +10071,18 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         if (entryLots == null) {
           addToast('error', `${tag} ${adding ? 'add' : 'entry'} skipped`, `The ${leg} entry lots "${freshLv?.lots ?? ''}" is not a whole number of 1 or more — nothing was sent`);
           return;
+        }
+        // An ADD puts on more exposure: REAL Dhan rows on NSE / BSE index options pass a fail-closed margin check first
+        // (unknown margin or funds blocks it). Checked before the day's trigger is spent; a blocked add waits for a
+        // fresh cross instead of being re-checked on every tick.
+        if (adding && !isSimRow(fresh) && broker === 'dhan' && !isMcxUnderlying(row.underlying)) {
+          const gate = await checkAddMargin(fresh, leg, multipliedLots(row, entryLots));
+          if (!gate.ok) {
+            armed.seenSafe = false;
+            logEvent('level_add_blocked', fresh, gate.message, { leg, lots: entryLots });
+            addToast('error', `${tag} add blocked`, `${gate.message} — nothing was sent. The level re-arms once spot crosses back and again.`);
+            return;
+          }
         }
         if (kind === 'level' && freshLv) {
           updateRow(row.id, leg === 'CE' ? { ceEntryLevel: { ...freshLv, firedOn: today } } : { peEntryLevel: { ...freshLv, firedOn: today } });
