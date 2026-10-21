@@ -78,6 +78,10 @@ export interface FocusMock {
   orderStatus: (orderId: string, m: FocusMock) => Record<string, unknown> | null;
   /** Freeze quantity the lookups report (the broker's own units), or undefined for an older cache without one. */
   freezeQty?: number;
+  /** The index spot the top-indices poll answers (a test moves it to cross a level). */
+  spot: number;
+  /** Basket margin the Dhan pre-check route answers; null = the route fails (the add must then be refused). */
+  margin: number | null;
 }
 
 export function newFocusMock(): FocusMock {
@@ -85,6 +89,7 @@ export function newFocusMock(): FocusMock {
     calls: [], blocked: [], config: config([]), saves: [], kotakPositions: [], zerodhaPositions: [], dhanPositions: [], kotakPositionsError: null,
     orderReply: () => ({ status: 200, body: { success: true, order_id: 'E2E1' } }),
     orderStatus: () => null,
+    spot: 23150, margin: null,
   };
 }
 
@@ -132,7 +137,11 @@ export async function installFocusMock(page: Page, m: FocusMock, savedBroker: 'd
     }
     // Spot, so an ATM row resolves its strikes (23150).
     if (p === '/api/scalper/top-indices') {
-      return json(route, { success: true, updated_at: new Date().toISOString(), quotes: { 'NIFTY 50': { ltp: 23150, change_pct: 0 } } });
+      return json(route, { success: true, updated_at: new Date().toISOString(), quotes: { 'NIFTY 50': { ltp: m.spot, change_pct: 0 } } });
+    }
+    // Dhan's pre-trade margin check (read-only; a failure answers the add's "could not verify").
+    if (p === '/api/multi-leg-focus/margin' && method === 'POST') {
+      return m.margin == null ? json(route, { success: false, error: 'e2e' }) : json(route, { success: true, data: { basketMargin: m.margin } });
     }
     if (p === '/api/options/expiries') return json(route, { success: true, data: [EXPIRY] });
     if (p === '/api/options/chain') {
