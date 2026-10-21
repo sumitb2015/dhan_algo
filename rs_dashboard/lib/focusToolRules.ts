@@ -1615,14 +1615,18 @@ export function levelEntryLots(cfg: FocusLegLevel | null | undefined, legLots: n
   return n == null ? legLots : Math.min(n, legLots);
 }
 
+/** The most lots one index-level add may put on in a single fire — a guard against a typo like 300, not a sizing rule. */
+export const MAX_LEVEL_ADD_LOTS = 20;
+
 /**
  * Lots an index-level entry ADDS to a leg that is already open. The box must hold an explicit whole number — a blank
- * would mean "the leg's lots again", i.e. doubling the position, so it adds nothing (null). Capped at the leg's own
- * configured lots per fire, never more. An unusable value is null too.
+ * would mean "the leg's lots again", i.e. doubling the position, so it adds nothing (null). Not capped at the leg's own
+ * lots (the margin check and the once-a-day limit guard it), only at MAX_LEVEL_ADD_LOTS per fire. An unusable value is
+ * null too.
  */
-export function levelAddLots(cfg: FocusLegLevel | null | undefined, legLots: number): number | null {
+export function levelAddLots(cfg: FocusLegLevel | null | undefined): number | null {
   const n = levelLots(cfg);
-  return n == null ? null : Math.min(n, legLots);
+  return n == null ? null : Math.min(n, MAX_LEVEL_ADD_LOTS);
 }
 
 /**
@@ -1743,7 +1747,7 @@ export function entryLevelStep(p: {
   cfg: FocusLegEntryLevel; leg: 'CE' | 'PE'; owned: boolean; legLots: number; spot: number; seenSafe: boolean; strikeNow: number | null;
 }): { seenSafe: boolean; fire: { adding: boolean; lots: number } | null; status: string } {
   const { cfg, leg, owned, legLots: own, spot } = p;
-  if (owned && levelAddLots(cfg, own) == null) {
+  if (owned && levelAddLots(cfg) == null) {
     return { seenSafe: false, fire: null, status: `${leg}: leg is open — set the lots to ADD when this level is crossed (blank would double it, so nothing fires)` };
   }
   if (levelLotsInvalid(cfg)) {
@@ -1758,7 +1762,7 @@ export function entryLevelStep(p: {
     return { seenSafe: stp.seenSafe, fire: null, status };
   }
   if (!p.strikeNow) return { seenSafe: stp.seenSafe, fire: null, status: `${leg}: level crossed — waiting for the strike to resolve` };
-  const lots = owned ? levelAddLots(cfg, own) : levelEntryLots(cfg, own);
+  const lots = owned ? levelAddLots(cfg) : levelEntryLots(cfg, own);
   if (lots == null) return { seenSafe: stp.seenSafe, fire: null, status: `${leg}: entry lots "${cfg.lots ?? ''}" is not usable — nothing fires` };
   return { seenSafe: stp.seenSafe, fire: { adding: owned, lots }, status: '' };
 }

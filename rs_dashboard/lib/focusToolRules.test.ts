@@ -21,7 +21,7 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote, legTargetLevel,
-  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots, balanceRollPlan, levelAddLots, levelSide, levelCrossStep, levelRearmBuffer, levelSafeThreshold, exitLevelStep, levelFiredMark, levelExitHoldsReentry, exitLevelStatus, entryLevelStep, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
+  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots, balanceRollPlan, levelAddLots, MAX_LEVEL_ADD_LOTS, levelSide, levelCrossStep, levelRearmBuffer, levelSafeThreshold, exitLevelStep, levelFiredMark, levelExitHoldsReentry, exitLevelStatus, entryLevelStep, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
   resolveCriteriaStrike, closestPremiumStrike, absDelta100, modelAbsDelta100, legDeltaBasis, legDeltaNow, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
   tradingDaysBack, tradingDte, dateForDte, rangeWindow, rangeWindowPhase, candleBucket, addMinutesHm,
   type RowLive, type PosRow, type WorkerHold,
@@ -1087,6 +1087,7 @@ test('entryLevelStep: the whole entry-level decision (flat open, add to an open 
   assert.deepEqual(entryLevelStep({ ...base, cfg: lv('5'), owned: false, seenSafe: true, spot: 22744 }).fire, { adding: false, lots: 2 });
   // Open leg: ADDS the lots in the box; blank fires nothing and says why.
   assert.deepEqual(entryLevelStep({ ...base, cfg: lv('1'), owned: true, seenSafe: true, spot: 22744 }).fire, { adding: true, lots: 1 });
+  assert.deepEqual(entryLevelStep({ ...base, cfg: lv('3'), owned: true, seenSafe: true, spot: 22744 }).fire, { adding: true, lots: 3 });   // above the leg's 2 lots
   r = entryLevelStep({ ...base, cfg: lv(''), owned: true, seenSafe: true, spot: 22744 });
   assert.equal(r.fire, null);
   assert.equal(r.seenSafe, false);
@@ -1117,16 +1118,18 @@ test('levelRearmBuffer: blank = the index default, a number (even 0) is taken as
   assert.equal(levelRearmBuffer({ underlying: 'NIFTY', levelRearmPts: 'abc' }), 10);
 });
 
-test('levelAddLots: an open leg needs an explicit lots number; never blank, never above the leg\'s own lots', () => {
+test('levelAddLots: an open leg needs an explicit lots number; not capped at the leg\'s lots, only at the per-fire ceiling', () => {
   const lv = (lots?: string) => ({ level: '22745', dir: 'below' as const, lots });
-  assert.equal(levelAddLots(lv('1'), 2), 1);
-  assert.equal(levelAddLots(lv('2'), 2), 2);
-  assert.equal(levelAddLots(lv('5'), 2), 2);     // capped at the leg's lots
-  assert.equal(levelAddLots(lv(''), 2), null);   // blank would double the position
-  assert.equal(levelAddLots(lv(undefined), 2), null);
-  assert.equal(levelAddLots(lv('0'), 2), null);
-  assert.equal(levelAddLots(lv('1.5'), 2), null);
-  assert.equal(levelAddLots(undefined, 2), null);
+  assert.equal(levelAddLots(lv('1')), 1);
+  assert.equal(levelAddLots(lv('3')), 3);        // above a 2-lot leg: allowed
+  assert.equal(levelAddLots(lv('20')), 20);
+  assert.equal(levelAddLots(lv('300')), MAX_LEVEL_ADD_LOTS);   // a typo is held at the ceiling
+  assert.equal(MAX_LEVEL_ADD_LOTS, 20);
+  assert.equal(levelAddLots(lv('')), null);      // blank would double the position
+  assert.equal(levelAddLots(lv(undefined)), null);
+  assert.equal(levelAddLots(lv('0')), null);
+  assert.equal(levelAddLots(lv('1.5')), null);
+  assert.equal(levelAddLots(undefined), null);
 });
 
 test('balanceLegsOn needs the switch and a usable gap', () => {

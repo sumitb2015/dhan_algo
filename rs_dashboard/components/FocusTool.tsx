@@ -44,7 +44,7 @@ import type {
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
-  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn, balanceRollPlan, levelAddLots, levelRearmBuffer, exitLevelStep, exitLevelStatus, entryLevelStep, levelFiredMark, levelExitHoldsReentry, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots,
+  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn, balanceRollPlan, levelAddLots, MAX_LEVEL_ADD_LOTS, levelRearmBuffer, exitLevelStep, exitLevelStatus, entryLevelStep, levelFiredMark, levelExitHoldsReentry, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
@@ -1889,7 +1889,7 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
         label={`${leg} entry level`} className="w-20 h-6 text-center" />
       <RuleNumInput value={en.lots ?? ''} onCommit={v => setEn({ lots: v })} placeholder="all" step={1} min={1} offBelowMin
         label={`${leg} entry lots`} className="w-12 h-6 text-center"
-        title={`Lots to sell when the entry level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies, as for any entry)` : ''}. Blank = all of ${leg}'s lots (${legLots(row, leg)}); more than that is capped at ${legLots(row, leg)}. A value that is not a whole number stops the level from firing`} />
+        title={`Lots to sell when the entry level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies, as for any entry)` : ''}. On a flat leg: blank = all of ${leg}'s lots (${legLots(row, leg)}), more than that is capped at ${legLots(row, leg)}. On an open leg: adds exactly the lots typed (not capped at the leg's lots; up to ${MAX_LEVEL_ADD_LOTS} per fire). A value that is not a whole number stops the level from firing`} />
       <span className={lbl}
         title={`Close ${leg} when the index crosses this level (spot must first be on the other side while ${leg} is held). Handled as ${leg}'s SL, except that RE on SL is skipped while spot is still beyond the level`}>
         close when
@@ -1903,7 +1903,8 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
         title={`Lots to close when the exit level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies: 1 closes ${rowQtyMultiplier(row)})` : ''}. Blank = close the whole ${leg} leg. Fewer than it holds closes that many and keeps the rest open; it fires again only after spot comes back and crosses the level again. A value that is not a whole number closes the whole leg`} />
       {levelLotsInvalid(en) && <span className="text-[11px] text-rose-400 font-semibold">entry lots: whole number ≥ 1 — level not used</span>}
       {legLevelOn(en) && !levelLotsInvalid(en) && rowOwnsLeg(row, leg) && levelLots(en) == null && <span className="text-[11px] text-amber-300 font-semibold">{leg} is open: set lots to add</span>}
-      {legLevelOn(en) && (levelLots(en) ?? 0) > legLots(row, leg) && <span className="text-[11px] text-amber-300 font-semibold">capped at {legLots(row, leg)} lot(s)</span>}
+      {legLevelOn(en) && rowOwnsLeg(row, leg) && (levelLots(en) ?? 0) > MAX_LEVEL_ADD_LOTS && <span className="text-[11px] text-amber-300 font-semibold">max {MAX_LEVEL_ADD_LOTS} lots per add</span>}
+      {legLevelOn(en) && !rowOwnsLeg(row, leg) && (levelLots(en) ?? 0) > legLots(row, leg) && <span className="text-[11px] text-amber-300 font-semibold">opens at most {legLots(row, leg)} lot(s) (the leg&rsquo;s lots)</span>}
       {levelLotsInvalid(ex) && <span className="text-[11px] text-rose-400 font-semibold">exit lots: whole number ≥ 1 — closes all</span>}
       {entryLevelFiredToday(en, istToday()) && <span className="text-[11px] text-amber-300 font-semibold">entry used today — {rowOwnsLeg(row, leg) ? 'change the level to re-enable' : 'Arm to re-enable'}</span>}
       {legLevelOn(en) && !entryLevelFiredToday(en, istToday()) && momStatus[`${row.id}:${leg}`] && (
@@ -1943,10 +1944,11 @@ function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch
               <span className={lbl}>lots</span>
               <RuleNumInput value={en.lots ?? ''} onCommit={v => setEn({ lots: v })} placeholder="all" step={1} min={1} offBelowMin
                 label={`${leg} entry lots`} className="w-14 h-6 text-center"
-                title={`Lots to sell when the entry level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies)` : ''}. Blank = all of ${leg}'s lots (${legLots(row, leg)}); more than that is capped. A value that is not a whole number stops the level from firing`} />
+                title={`Lots to sell when the entry level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies)` : ''}. On a flat leg: blank = all of ${leg}'s lots (${legLots(row, leg)}), more is capped. On an open leg: adds exactly the lots typed (up to ${MAX_LEVEL_ADD_LOTS} per fire). A value that is not a whole number stops the level from firing`} />
               {levelLotsInvalid(en) && <span className="text-rose-400 font-semibold">whole number ≥ 1 — level not used</span>}
               {legLevelOn(en) && !levelLotsInvalid(en) && rowOwnsLeg(row, leg) && levelLots(en) == null && <span className="text-amber-300 font-semibold">{leg} is open: set lots to add</span>}
-              {legLevelOn(en) && (levelLots(en) ?? 0) > legLots(row, leg) && <span className="text-amber-300 font-semibold">capped at {legLots(row, leg)} lot(s)</span>}
+              {legLevelOn(en) && rowOwnsLeg(row, leg) && (levelLots(en) ?? 0) > MAX_LEVEL_ADD_LOTS && <span className="text-amber-300 font-semibold">max {MAX_LEVEL_ADD_LOTS} lots per add</span>}
+              {legLevelOn(en) && !rowOwnsLeg(row, leg) && (levelLots(en) ?? 0) > legLots(row, leg) && <span className="text-amber-300 font-semibold">opens at most {legLots(row, leg)} lot(s) (the leg&rsquo;s lots)</span>}
               {entryLevelFiredToday(en, today) && <span className="text-amber-300 font-semibold">used today — {rowOwnsLeg(row, leg) ? 'change the level to re-enable' : 'Arm to re-enable'}</span>}
             </div>
             <div className="flex flex-wrap items-center gap-1.5"
@@ -10067,7 +10069,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         // On a leg that is already open the level ADDS lots (explicit number only); on a flat leg it opens it.
         const adding = kind === 'level' && rowOwnsLeg(fresh, leg);
         const entryLots = kind !== 'level' ? legLots(row, leg)
-          : adding ? levelAddLots(freshLv, legLots(row, leg)) : levelEntryLots(freshLv, legLots(row, leg));
+          : adding ? levelAddLots(freshLv) : levelEntryLots(freshLv, legLots(row, leg));
         if (entryLots == null) {
           addToast('error', `${tag} ${adding ? 'add' : 'entry'} skipped`, `The ${leg} entry lots "${freshLv?.lots ?? ''}" is not a whole number of 1 or more — nothing was sent`);
           return;
