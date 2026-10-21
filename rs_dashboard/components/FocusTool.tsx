@@ -39,12 +39,12 @@ import type {
   FocusToolConfig, FocusRow, FocusRowFill, FocusIndexGroup,
   FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode,
   FocusUnderlying, FocusDte, FocusSide, FocusRowStatus, FocusStrikeMode,
-  FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusLadderOrder, FocusScaleOut, FocusScaleStep,
+  FocusLegSlRule, FocusLegTrailSl, FocusBalanceLegs, FocusLegOrbSl, FocusOrbStamp, FocusLadderOrder, FocusScaleOut, FocusScaleStep,
   FocusLegLevel, FocusLegEntryLevel,
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
-  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance,
+  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
@@ -335,6 +335,14 @@ function bridgeExpiriesForUnderlying(
  * else from that expiry's chain (both quote the matching contract); Spot / Fut is the same thing there.
  * Index rows: the group's ATM BY pick (index spot or the near futures), as before.
  */
+/** Leg-value balance guards (see maybeBalanceLegs): the gap must persist, rolls are spaced and capped per row. */
+const BALANCE_CONFIRM_MS = 20_000;
+const BALANCE_COOLDOWN_MS = 10 * 60_000;
+const BALANCE_MAX_ROLLS = 3;
+
+/** A shift to one exact strike (the balance rule) instead of one step, with the reason to log. */
+interface ShiftOpts { toStrike?: number; reason?: string }
+
 function rowAtmBase(
   row: Pick<FocusRow, 'underlying' | 'expiry'>,
   ctx: {
@@ -1316,6 +1324,33 @@ function StrikeCriteriaControl({ row, onUpdate }: { row: FocusRow; onUpdate: (pa
 }
 
 /**
+ * Leg-value balance (row.balanceLegs): roll the dearer leg further OTM when the two legs' values (qty × price) drift
+ * apart by more than the gap. The rule itself is `maybeBalanceLegs` in the scheduler; this only edits the setting.
+ */
+function BalanceLegsControl({ row, onUpdate }: { row: FocusRow; onUpdate: (patch: Partial<FocusRow>) => void }) {
+  const cfg: FocusBalanceLegs = row.balanceLegs ?? { enabled: false, gapPct: '60' };
+  const set = (patch: Partial<FocusBalanceLegs>) => onUpdate({ balanceLegs: { ...cfg, ...patch } });
+  const valid = balanceLegsOn(cfg);
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-zinc-400 font-bold">
+      <label className="inline-flex items-center gap-1.5 cursor-pointer text-zinc-300"
+        title={'While both legs are open, compare their values (lots × price). When the smaller is more than the gap below the larger, the dearer leg is closed and re-sold further OTM, at the strike whose value matches the cheaper leg (same lots). '
+          + 'The gap must hold for 20 s; at most 3 rolls per row, 10 min apart, and never after the row\'s re-entry window closes. Works on rows holding both legs, real or SIM'}>
+        <Switch size="sm" checked={cfg.enabled} onCheckedChange={c => set({ enabled: !!c })} aria-label="Balance leg values" />
+        Balance legs
+      </label>
+      {cfg.enabled && (<>
+        <span className="text-zinc-500">when one leg is</span>
+        <RuleNumInput value={cfg.gapPct} onCommit={v => set({ gapPct: v })} placeholder="60" className="w-12 h-6 text-center text-[11px]"
+          title="Gap in %: the smaller leg's value is this far below the larger (60 = under 40% of it)" />
+        <span className="text-zinc-500">% cheaper → roll the dearer leg OTM</span>
+        {!valid && <span className="text-rose-400">Enter 1-99</span>}
+      </>)}
+    </div>
+  );
+}
+
+/**
  * AlgoTest per-leg stop loss types, Trail SL and the ORB Range stop, for each
  * leg the row trades. "SL × (Percentage)" keeps the row's own SL × input (×1.3
  * = 30%); any other type replaces it for that leg. Amounts are free-typed →
@@ -2063,6 +2098,7 @@ function LegReentryControls({ row, onUpdate, onCancelPending, legTargetsElsewher
         {modeSelect('tgt')}
       </div>
       <LegStopRulesControl row={row} onUpdate={onUpdate} />
+      <BalanceLegsControl row={row} onUpdate={onUpdate} />
       <div className="flex flex-wrap items-center gap-2">
         {!legTargetsElsewhere && (<>
         <label className={lbl} title={`CE leg target: exit CE alone once it has moved this many ${tgtUnitWord}. Blank = off`}>
@@ -3862,7 +3898,7 @@ const CLEARED_RULES: Partial<FocusRow> = {
   ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '',
   ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined,
   lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
-  overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined, scaleOut: undefined,
+  overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined, scaleOut: undefined, balanceLegs: undefined,
   ceEntryLevel: undefined, peEntryLevel: undefined, ceExitLevel: undefined, peExitLevel: undefined,
 };
 
@@ -5081,6 +5117,10 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   // A scale-out step that was refused before any order went out is retried, but not before this time (ms), and at
   // most twice per step (`rowId:leg:at` → attempts).
   const scaleRetryRef = useRef<Map<string, { notBefore: number; tries: number }>>(new Map());
+  // Leg-value balance: when each row's gap was first seen (it must hold for BALANCE_CONFIRM_MS before anything is sent),
+  // and the rolls already done per row (cooldown + a cap). In memory only: a reload starts the clock again.
+  const balanceSeenRef = useRef<Map<string, number>>(new Map());
+  const balanceDoneRef = useRef<Map<string, { count: number; at: number }>>(new Map());
   // Auto leg exits (and their SL rolls) in flight per row. The two legs are
   // independent contracts, so a PE stop must not wait behind the CE's close +
   // roll (easily 10s) — they may run together, and the row's busy lock is only
@@ -7748,13 +7788,13 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
    * strike. Flat legs only move the config (ATM ±1 or PREMIUM target = new LTP),
    * mirrored when linked and the other leg is flat.
    */
-  async function handleShiftStrike(row: FocusRow, leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') {
+  async function handleShiftStrike(row: FocusRow, leg: 'CE' | 'PE', direction: 'UP' | 'DOWN', opts?: ShiftOpts) {
     // Every refusal below is only a toast, which is gone after 4 s: copy the error toasts into the events log so a
     // shift that did nothing says why (2026-10-19: a CE shift DOWN on an open leg sent no order and left no trace).
     const tap: string[] = [];
     reentryTapsRef.current.push(tap);
     try {
-      await handleShiftStrikeInner(row, leg, direction);
+      await handleShiftStrikeInner(row, leg, direction, opts);
     } finally {
       reentryTapsRef.current = reentryTapsRef.current.filter(t => t !== tap);
       const latest = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
@@ -7765,12 +7805,12 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     }
   }
 
-  async function handleShiftStrikeInner(row: FocusRow, leg: 'CE' | 'PE', direction: 'UP' | 'DOWN') {
+  async function handleShiftStrikeInner(row: FocusRow, leg: 'CE' | 'PE', direction: 'UP' | 'DOWN', opts?: ShiftOpts) {
     if (busyRows.has(row.id)) {
       addToast('error', 'Shift ignored', 'An order on this row is still in flight');
       return;
     }
-    logEvent('manual_shift', row, `manual: shift ${leg} ${direction}`, { leg, direction });
+    logEvent(opts?.reason ? 'balance_shift' : 'manual_shift', row, opts?.reason ?? `manual: shift ${leg} ${direction}`, { leg, direction, toStrike: opts?.toStrike });
     const u = row.underlying;
     // A shift only moves the strike, never the expiry — always this row's own.
     const expiry = row.expiry || expiries[u]?.[0] || '';
@@ -7781,7 +7821,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
       addToast('error', 'Cannot shift', `${leg} strike not resolved yet`);
       return;
     }
-    const newStrike = direction === 'UP' ? currStrike + step : currStrike - step;
+    const newStrike = opts?.toStrike ?? (direction === 'UP' ? currStrike + step : currStrike - step);
     const newRef = lookups[expKey(u, expiry)]?.strikes?.[strikeKey(newStrike)];
     const hasContract = broker === 'dhan' ? !!(leg === 'CE' ? newRef?.ceId : newRef?.peId)
                                            : !!(leg === 'CE' ? newRef?.ceSymbol : newRef?.peSymbol);
@@ -7930,7 +7970,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         }
       } else {
         const curOffset = leg === 'CE' ? (row.ceOffset ?? 0) : (row.peOffset ?? 0);
-        const newOffset = curOffset + (direction === 'UP' ? 1 : -1);
+        const newOffset = curOffset + (opts?.toStrike != null ? Math.round((newStrike - currStrike) / step) : (direction === 'UP' ? 1 : -1));
         const patch: Partial<FocusRow> = leg === 'CE' ? { ceOffset: newOffset } : { peOffset: newOffset };
         if (linked) { if (leg === 'CE') patch.peOffset = -newOffset; else patch.ceOffset = -newOffset; }
         updateRow(row.id, patch);
@@ -9286,6 +9326,81 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     return true;
   }
 
+  /**
+   * Leg-value balance (row.balanceLegs). While both legs are open, compare qty × live price. When the smaller side is
+   * more than the gap below the larger, the DEARER leg is rolled further OTM, to the strike whose value matches the
+   * cheaper leg, through the same all-or-nothing close-then-reopen as a manual shift (`handleShiftStrike`).
+   *
+   * Conservative on purpose — this closes and re-sells a real position: the gap must hold for BALANCE_CONFIRM_MS (a
+   * flickering quote never fires it), at most BALANCE_MAX_ROLLS per row with BALANCE_COOLDOWN_MS between them, never
+   * while any order on the row is in flight / unconfirmed / a whole-row exit is wanted, and never past the row's
+   * re-entry window. The roll is stamped BEFORE it is sent, so a failed one is not retried in a loop.
+   */
+  function maybeBalanceLegs(row: FocusRow, live: RowLive): void {
+    const cfg = row.balanceLegs;
+    if (!balanceLegsOn(cfg)) return;
+    const ceQty = Number(row.fill?.ceQty) || 0;
+    const peQty = Number(row.fill?.peQty) || 0;
+    if (!(ceQty > 0) || !(peQty > 0) || !rowOwnsLeg(row, 'CE') || !rowOwnsLeg(row, 'PE')) { balanceSeenRef.current.delete(row.id); return; }
+    const decision = legValueBalance({
+      ceValue: ceQty * (Number(live.ltpCe) || 0), peValue: peQty * (Number(live.ltpPe) || 0), gapPct: Number(cfg.gapPct),
+    });
+    if (!decision) { balanceSeenRef.current.delete(row.id); return; }
+    const now = Date.now();
+    const firstSeen = balanceSeenRef.current.get(row.id) ?? now;
+    balanceSeenRef.current.set(row.id, firstSeen);
+    if (now - firstSeen < BALANCE_CONFIRM_MS) return;
+    const done = balanceDoneRef.current.get(row.id);
+    if (done && (done.count >= BALANCE_MAX_ROLLS || now - done.at < BALANCE_COOLDOWN_MS)) return;
+    // Anything else touching the row: wait for it (checked again next tick).
+    if (busyRows.has(row.id) || enteringNowRef.current.has(row.id) || autoExitingRef.current.has(row.id)) return;
+    if ((legExitsInFlightRef.current.get(row.id) ?? 0) > 0 || row.orderUnknown) return;
+    for (const l of ['CE', 'PE'] as const) {
+      const k = `${row.id}:${l}`;
+      if (autoExitingLegRef.current.has(k) || scalingLegRef.current.has(k) || unconfirmedOrderRef.current.has(k)) return;
+    }
+    const wantedAt = rowExitWantedRef.current.get(row.id);
+    if (wantedAt != null && now - wantedAt < 5_000) return;
+    const snap = schedulerRef.current;
+    const u = row.underlying;
+    const group = snap.config.groups.find(g => g.underlying === u);
+    if (reentryWindowClosed(row, { nowHm: istHm(), product: group?.product ?? 'INTRADAY', groupEnabled: !!group?.enabled, backstopHm: UNDERLYING_META[u].backstopHm })) return;
+
+    const leg = decision.dear;
+    const dearQty = leg === 'CE' ? ceQty : peQty;
+    const currStrike = leg === 'CE' ? live.ceStrike : live.peStrike;
+    const tag = `${isSimRow(row) ? 'SIM ' : ''}${u} ${leg}`;
+    const stamp = () => balanceDoneRef.current.set(row.id, { count: (done?.count ?? 0) + 1, at: now });
+    const skip = (why: string) => {
+      stamp();
+      logEvent('balance_skipped', row, why, { leg, gapPct: Math.round(decision.gapPct) });
+      addToast('error', `${tag} balance skipped`, why);
+    };
+    if (currStrike == null) return;
+    const expiry = row.expiry || expiries[u]?.[0] || '';
+    const step = rowStep(row);
+    const atm = atmStrike(atmBaseFor(row, snap.spots, snap.futQuotes), step);
+    // Value of the cheaper leg spread over the dearer leg's qty = the price the replacement should have.
+    const target = decision.cheaperValue / dearQty;
+    const keys = new Set<number>([
+      ...Object.keys(chains[expKey(u, expiry)]?.oc ?? {}).map(Number),
+      ...Object.keys(focusWsBookForExpiry(focusWsQuotes?.[u], expiry)?.strikes ?? {}).map(Number),
+    ]);
+    const quotes = [...keys]
+      .filter(k => Number.isFinite(k) && k > 0 && Math.abs(k / step - Math.round(k / step)) < 1e-9)
+      .map(k => ({ strike: k, px: simQuote(u, expiry, k, leg) }));
+    const newStrike = matchPremiumStrike({ quotes, leg, target, atm, exclude: currStrike });
+    const furtherOtm = newStrike != null && (leg === 'CE' ? newStrike > currStrike : newStrike < currStrike);
+    if (newStrike == null || !furtherOtm) {
+      skip(`${leg} is ${Math.round(decision.gapPct)}% dearer than the other leg, but no strike further OTM than ${currStrike} has a premium near ₹${target.toFixed(2)}`);
+      return;
+    }
+    stamp();
+    const reason = `balance: ${leg} value is ${Math.round(decision.gapPct)}% above the other leg (gap limit ${cfg.gapPct}%) — roll ${currStrike} → ${newStrike} ${leg} to match ₹${target.toFixed(2)}`;
+    addToast('success', `${tag} balance roll`, reason);
+    void handleShiftStrike(row, leg, leg === 'CE' ? 'UP' : 'DOWN', { toStrike: newStrike, reason });
+  }
+
   useEffect(() => {
     if (isLeader !== true) return; // another tab runs the automatic rules
     // Real rows are only watched while LIVE is armed (a dry run must not spam
@@ -9435,6 +9550,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         row, live, spot, undefined, live.lotSize,
       ) ?? evaluateOverallExit(row, live, peak, undefined, live.lotSize)?.reason ?? null;
       if (reason) autoExitRow(row, reason);
+      else maybeBalanceLegs(row, live);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rowLive, spots, liveRealMoney, toolPnl, simPnl, riskEnabled, targetRupees, stopRupees,

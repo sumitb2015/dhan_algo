@@ -421,6 +421,17 @@ export interface FocusLegTrailSl {
 }
 
 /**
+ * Leg-value balance. While both legs are open, compare their values (qty × live price). When the smaller is more
+ * than `gapPct` % below the larger, the dearer leg is rolled further OTM to the strike whose value matches the
+ * cheaper leg. Off by default.
+ */
+export interface FocusBalanceLegs {
+  enabled: boolean;
+  /** 1-99. 60 = act when the smaller side is under 40% of the larger. */
+  gapPct: string;
+}
+
+/**
  * AlgoTest "Stop-loss based on Range Breakout" (ORB Range): the stop distance
  * is the entry range's size (high − low) `sign` `value` points or % of the
  * range, measured from the level the leg broke out at, against the position.
@@ -595,6 +606,8 @@ export interface FocusRow {
    * once per leg position; off when the leg has no target.
    */
   scaleOut?: FocusScaleOut;
+  /** Roll the dearer leg further OTM when the two legs' values drift apart (see FocusBalanceLegs). */
+  balanceLegs?: FocusBalanceLegs;
   /**
    * Per-leg index levels. Entry: sell this leg when spot crosses the level (inside the row's window, while the leg
    * holds nothing; once per day). Exit: close this leg when spot crosses the level — handled as the leg's SL (RE on SL

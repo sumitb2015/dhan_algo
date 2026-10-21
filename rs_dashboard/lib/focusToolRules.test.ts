@@ -21,7 +21,7 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote, legTargetLevel,
-  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
+  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
   resolveCriteriaStrike, closestPremiumStrike, absDelta100, modelAbsDelta100, legDeltaBasis, legDeltaNow, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
   tradingDaysBack, tradingDte, dateForDte, rangeWindow, rangeWindowPhase, candleBucket, addMinutesHm,
   type RowLive, type PosRow, type WorkerHold,
@@ -894,6 +894,32 @@ test('leg target types: Underlying Pts / % in the short leg\'s favour (doc numbe
   assert.equal(legTargetReason(r, 'CE', liveAt(10), undefined, 43651), null);
   assert.match(legTargetReason(r, 'CE', liveAt(10), undefined, 43650) ?? '', /CE target 50 pts on the index hit/);
   assert.match(legTargetReason(r, 'PE', liveAt(200, 10), undefined, 43750) ?? '', /PE target 50 pts on the index hit/);
+});
+
+test('legValueBalance: flags the dearer leg once the smaller side is more than gap% below it', () => {
+  // 60%: smaller must be under 40% of larger.
+  assert.equal(legValueBalance({ ceValue: 1000, peValue: 410, gapPct: 60 }), null);
+  const d = legValueBalance({ ceValue: 1000, peValue: 390, gapPct: 60 });
+  assert.equal(d?.dear, 'CE');
+  assert.equal(d?.cheaperValue, 390);
+  assert.ok(Math.abs((d?.gapPct ?? 0) - 61) < 1e-9);
+  assert.equal(legValueBalance({ ceValue: 300, peValue: 1000, gapPct: 60 })?.dear, 'PE');
+  // Exactly at the threshold is not "beyond" it.
+  assert.equal(legValueBalance({ ceValue: 1000, peValue: 400, gapPct: 60 }), null);
+  // An unpriced or empty leg is never judged.
+  assert.equal(legValueBalance({ ceValue: 0, peValue: 500, gapPct: 60 }), null);
+  assert.equal(legValueBalance({ ceValue: NaN, peValue: 500, gapPct: 60 }), null);
+  // A silly threshold turns the rule off rather than firing on everything.
+  assert.equal(legValueBalance({ ceValue: 1000, peValue: 10, gapPct: 0 }), null);
+  assert.equal(legValueBalance({ ceValue: 1000, peValue: 10, gapPct: 100 }), null);
+});
+
+test('balanceLegsOn needs the switch and a usable gap', () => {
+  assert.equal(balanceLegsOn(undefined), false);
+  assert.equal(balanceLegsOn({ enabled: false, gapPct: '60' }), false);
+  assert.equal(balanceLegsOn({ enabled: true, gapPct: '60' }), true);
+  assert.equal(balanceLegsOn({ enabled: true, gapPct: '' }), false);
+  assert.equal(balanceLegsOn({ enabled: true, gapPct: '100' }), false);
 });
 
 test('leg Trail SL start: dormant until the premium has fallen startAt, then steps count from that level', () => {

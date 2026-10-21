@@ -26,7 +26,7 @@ import { greeksForLeg, trustedMark, type FutureQuote } from './optionsPricing.ts
 import { openLots } from './partialQty.ts';
 import type {
   FocusRow, FocusDte, FocusRowStatus, FocusReentryMode, FocusReentryTrigger, FocusPendingReentry, FocusLegSimpleMom, FocusLazyLeg, FocusLegRangeBreakout, FocusOverallMode, FocusOverallTrail,
-  FocusLegSlRule, FocusLegTrailSl, FocusLegOrbSl, FocusOrbStamp, FocusStrikeCriteria, FocusLegCrit, FocusScaleOut,
+  FocusLegSlRule, FocusLegTrailSl, FocusBalanceLegs, FocusLegOrbSl, FocusOrbStamp, FocusStrikeCriteria, FocusLegCrit, FocusScaleOut,
   FocusLegLevel, FocusLegEntryLevel,
 } from '@/lib/focusToolRows';
 
@@ -487,6 +487,30 @@ function lazySlRule(lazy: FocusLazyLeg): FocusLegSlRule | null {
   if (b === 'pct') return null;
   const r: FocusLegSlRule = { enabled: true, basis: b, value: lazy.slPct };
   return legSlRuleOn(r) ? r : null;
+}
+
+/** The balance rule is live: switched on with a gap between 1 and 99 %. */
+export function balanceLegsOn(b: FocusBalanceLegs | null | undefined): b is FocusBalanceLegs {
+  const g = Number(b?.gapPct);
+  return !!b && b.enabled && Number.isFinite(g) && g >= 1 && g <= 99;
+}
+
+/**
+ * Leg-value balance. `ceValue` / `peValue` are qty × live price of each open leg. The gap is how far the smaller sits
+ * below the larger, as a % of the larger; strictly above `gapPct` flags the DEARER leg (the one to roll further OTM)
+ * and the value its replacement should match. Null when either side is unpriced, or the gap is not beyond the
+ * threshold. A threshold outside 1-99 is treated as off.
+ */
+export function legValueBalance(p: { ceValue: number; peValue: number; gapPct: number }):
+  { dear: 'CE' | 'PE'; gapPct: number; cheaperValue: number } | null {
+  const { ceValue, peValue, gapPct } = p;
+  if (!(ceValue > 0) || !(peValue > 0) || !(gapPct >= 1 && gapPct <= 99)) return null;
+  const dear = ceValue >= peValue ? 'CE' : 'PE';
+  const larger = Math.max(ceValue, peValue);
+  const smaller = Math.min(ceValue, peValue);
+  const gap = (larger - smaller) / larger * 100;
+  if (!(gap > gapPct + 1e-9)) return null;
+  return { dear, gapPct: gap, cheaperValue: smaller };
 }
 
 /** A leg's Trail SL, when it is switched on with both amounts. */
