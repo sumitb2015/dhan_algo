@@ -44,7 +44,7 @@ import type {
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
-  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn,
+  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn, levelLotsInvalid, levelEntryLots, levelPartialCloseLots,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
@@ -52,7 +52,7 @@ import {
   legPinnedStrike, costStopReason, legOwnEntry, legFillEntry, DEFAULT_SL_ROLL_MAX,
   reentryConfig, evaluateReentry, reentryWindowClosed, monitoringStopped, momentumReentryKind, momentumTrigger,
   addMinutesHm, resolveCriteriaStrike, closestPremiumStrike, ownedLegStop, legStopHit, legDeltaNow, legDeltaBasis, legTargetDeltaLevel,
-  multipliedLots, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
+  multipliedLots, rowQtyMultiplier, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
   evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, otmReentryStrike, reentryOtmFromAtm, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, MAX_SCALE_STEPS, legLevelOn, levelCrossStep, entryLevelFiredToday, levelSig, accountStopLevel, legacyStopToSigned,
@@ -1886,6 +1886,9 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
         onChange={v => setEn({ dir: v as 'above' | 'below' })} className="w-[4.5rem]" />
       <RuleNumInput value={en.level} onCommit={v => setEn({ level: v })} placeholder="off" step={step} min={step} offBelowMin stepFromBlank={false}
         label={`${leg} entry level`} className="w-20 h-6 text-center" />
+      <RuleNumInput value={en.lots ?? ''} onCommit={v => setEn({ lots: v })} placeholder="all" step={1} min={1} offBelowMin
+        label={`${leg} entry lots`} className="w-12 h-6 text-center"
+        title={`Lots to sell when the entry level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies, as for any entry)` : ''}. Blank = all of ${leg}'s lots (${legLots(row, leg)}); more than that is capped at ${legLots(row, leg)}. A value that is not a whole number stops the level from firing`} />
       <span className={lbl}
         title={`Close ${leg} when the index crosses this level (spot must first be on the other side while ${leg} is held). Handled as ${leg}'s SL: RE on SL runs`}>
         close when
@@ -1894,6 +1897,11 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
         onChange={v => setEx({ dir: v as 'above' | 'below' })} className="w-[4.5rem]" />
       <RuleNumInput value={ex.level} onCommit={v => setEx({ level: v })} placeholder="off" step={step} min={step} offBelowMin stepFromBlank={false}
         label={`${leg} exit level`} className="w-20 h-6 text-center" />
+      <RuleNumInput value={ex.lots ?? ''} onCommit={v => setEx({ lots: v })} placeholder="all" step={1} min={1} offBelowMin
+        label={`${leg} exit lots`} className="w-12 h-6 text-center"
+        title={`Lots to close when the exit level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies: 1 closes ${rowQtyMultiplier(row)})` : ''}. Blank = close the whole ${leg} leg. Fewer than it holds closes that many and keeps the rest open; it fires again only after spot comes back and crosses the level again. A value that is not a whole number closes the whole leg`} />
+      {levelLotsInvalid(en) && <span className="text-[11px] text-rose-400 font-semibold">entry lots: whole number ≥ 1 — level not used</span>}
+      {levelLotsInvalid(ex) && <span className="text-[11px] text-rose-400 font-semibold">exit lots: whole number ≥ 1 — closes all</span>}
       {entryLevelFiredToday(en, istToday()) && <span className="text-[11px] text-amber-300 font-semibold">entry used today — Arm to re-enable</span>}
       {ignored && <span className="text-[11px] text-amber-300 font-semibold">entry ignored: Overall Momentum on</span>}
     </div>
@@ -1924,6 +1932,11 @@ function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch
                 onChange={v => setEn({ dir: v as 'above' | 'below' })} className="w-28" />
               <RuleNumInput value={en.level} onCommit={v => setEn({ level: v })} placeholder="off" step={step} min={step} offBelowMin stepFromBlank={false}
                 label={`${leg} entry level`} className="w-24 h-6 text-center" />
+              <span className={lbl}>lots</span>
+              <RuleNumInput value={en.lots ?? ''} onCommit={v => setEn({ lots: v })} placeholder="all" step={1} min={1} offBelowMin
+                label={`${leg} entry lots`} className="w-14 h-6 text-center"
+                title={`Lots to sell when the entry level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies)` : ''}. Blank = all of ${leg}'s lots (${legLots(row, leg)}); more than that is capped. A value that is not a whole number stops the level from firing`} />
+              {levelLotsInvalid(en) && <span className="text-rose-400 font-semibold">whole number ≥ 1 — level not used</span>}
               {entryLevelFiredToday(en, today) && <span className="text-amber-300 font-semibold">used today — Arm to re-enable</span>}
             </div>
             <div className="flex flex-wrap items-center gap-1.5"
@@ -1934,6 +1947,11 @@ function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch
                 onChange={v => setEx({ dir: v as 'above' | 'below' })} className="w-28" />
               <RuleNumInput value={ex.level} onCommit={v => setEx({ level: v })} placeholder="off" step={step} min={step} offBelowMin stepFromBlank={false}
                 label={`${leg} exit level`} className="w-24 h-6 text-center" />
+              <span className={lbl}>lots</span>
+              <RuleNumInput value={ex.lots ?? ''} onCommit={v => setEx({ lots: v })} placeholder="all" step={1} min={1} offBelowMin
+                label={`${leg} exit lots`} className="w-14 h-6 text-center"
+                title={`Lots to close when the exit level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies)` : ''}. Blank = the whole ${leg} leg; fewer closes that many and keeps the rest. A value that is not a whole number closes the whole leg`} />
+              {levelLotsInvalid(ex) && <span className="text-rose-400 font-semibold">whole number ≥ 1 — closes all</span>}
             </div>
           </div>
         );
@@ -5131,6 +5149,8 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   // Leg-value balance: when each row's gap was first seen (it must hold for BALANCE_CONFIRM_MS before anything is sent),
   // and the rolls already done per row (cooldown + a cap). In memory only: a reload starts the clock again.
   const balanceSeenRef = useRef<Map<string, number>>(new Map());
+  // An index-level partial exit refused BEFORE anything went out is retried (30 s apart, twice), like a scale-out step.
+  const levelRetryRef = useRef<Map<string, { notBefore: number; tries: number }>>(new Map());
   const balanceDoneRef = useRef<Map<string, { count: number; at: number }>>(new Map());
   // Auto leg exits (and their SL rolls) in flight per row. The two legs are
   // independent contracts, so a PE stop must not wait behind the CE's close +
@@ -9338,6 +9358,60 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   }
 
   /**
+   * Close part of a leg when its index exit level fires (the level was set to a number of lots below what the leg holds).
+   * Same locks as a scale-out reduce: the leg sits in scalingLegRef (not autoExitingLegRef — it is not a full close) and
+   * the row counts in legExitsInFlightRef, so a whole-row exit waits for it and the other leg's stop is not held up.
+   * The "seen on the safe side" mark is cleared BEFORE the order goes out, so one cross reduces once; the level fires
+   * again only after spot comes back to the safe side and crosses again. A refused or unconfirmed reduce is not retried.
+   */
+  function reduceLegAtLevel(row: FocusRow, leg: 'CE' | 'PE', lots: number, reason: string): boolean {
+    const key = `${row.id}:${leg}`;
+    if (autoExitingLegRef.current.has(key) || scalingLegRef.current.has(key) || autoExitingRef.current.has(row.id)) return false;
+    if (unconfirmedOrderRef.current.has(key)) return false;
+    const inFlight = legExitsInFlightRef.current.get(row.id) ?? 0;
+    if ((busyRows.has(row.id) || enteringNowRef.current.has(row.id)) && inFlight === 0) return false;
+    const wantedAt = rowExitWantedRef.current.get(row.id);
+    if (wantedAt != null && Date.now() - wantedAt < 5_000) return false;
+    const retry = levelRetryRef.current.get(key);
+    if (retry && Date.now() < retry.notBefore) return false;
+    const tag = `${isSimRow(row) ? 'SIM ' : ''}${row.underlying} ${leg}`;
+    const prevSeen = leg === 'CE' ? row.fill?.ceExitLevelSeen : row.fill?.peExitLevelSeen;
+    const heldBefore = Number(leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0;
+    patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: undefined } : { peExitLevelSeen: undefined }));
+    logEvent('level_reduce_leg', row, `${reason} — close ${lots} lot(s), rest stays open`, { leg, lots });
+    addToast('success', `${tag} index exit`, `${reason} — closing ${lots} lot(s), the rest stays open`);
+    scalingLegRef.current.add(key);
+    legExitsInFlightRef.current.set(row.id, inFlight + 1);
+    setBusyRows(prev => new Set(prev).add(row.id));
+    placeLeg(row, leg, { reduce: true, lots, awaitFill: true })
+      .then(ok => {
+        if (ok) { levelRetryRef.current.delete(key); return; }
+        const now = schedulerRef.current.config.rows.find(r => r.id === row.id);
+        const heldNow = Number(leg === 'CE' ? now?.fill?.ceQty : now?.fill?.peQty) || 0;
+        const tries = (retry?.tries ?? 0) + 1;
+        // Nothing went out (the ledger did not move and no order is left unconfirmed): the level is still breached, so
+        // put its mark back and try again in 30 s, at most twice.
+        if (!unconfirmedOrderRef.current.has(key) && heldNow === heldBefore && tries <= 2) {
+          levelRetryRef.current.set(key, { notBefore: Date.now() + 30_000, tries });
+          if (prevSeen) patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: prevSeen } : { peExitLevelSeen: prevSeen }));
+          addToast('error', `${tag} index exit not sent`, `The ${lots}-lot reduce was refused before it filled — retrying in 30s (${tries}/2)`);
+          return;
+        }
+        levelRetryRef.current.delete(key);
+        addToast('error', `${tag} index exit not confirmed`,
+          `The ${lots}-lot reduce was rejected or not confirmed in time. It may still fill — do NOT re-send it by hand; the level is not retried until spot crosses it again.`);
+      })
+      .finally(() => {
+        scalingLegRef.current.delete(key);
+        const left = (legExitsInFlightRef.current.get(row.id) ?? 1) - 1;
+        if (left > 0) { legExitsInFlightRef.current.set(row.id, left); return; }
+        legExitsInFlightRef.current.delete(row.id);
+        setBusyRows(prev => { const next = new Set(prev); next.delete(row.id); return next; });
+      });
+    return true;
+  }
+
+  /**
    * Leg-value balance (row.balanceLegs). While both legs are open, compare qty × live price. When the smaller side is
    * more than the gap below the larger, the DEARER leg is rolled further OTM, to the strike whose value matches the
    * cheaper leg, through the same all-or-nothing close-then-reopen as a manual shift (`handleShiftStrike`).
@@ -9543,7 +9617,14 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
             patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: sig } : { peExitLevelSeen: sig }));
           }
           if (stp.hit) {
-            if (autoExitLeg(row, leg, `${leg} index exit: spot ${spot.toFixed(2)} ${xl.dir === 'above' ? '≥' : '≤'} ${xl.level}`, 'sl')) legAction = true;
+            const reason = `${leg} index exit: spot ${spot.toFixed(2)} ${xl.dir === 'above' ? '≥' : '≤'} ${xl.level}`;
+            // Set to close only some of the lots: reduce by that many and keep the rest running (no SL roll, since the leg
+            // lives on). Closing all of them — or more than it holds — is the ordinary exit below.
+            const lotSz = live.lotSize > 0 ? live.lotSize : (lotSizes[row.underlying] ?? 0);
+            const heldLots = lotSz > 0 ? legOwnContracts(row, leg, live) / lotSz : 0;
+            const closeLots = levelPartialCloseLots(xl, heldLots, rowQtyMultiplier(row));
+            if (closeLots != null) { reduceLegAtLevel(row, leg, closeLots, reason); continue; }
+            if (autoExitLeg(row, leg, reason, 'sl')) legAction = true;
             continue;
           }
         }
@@ -9872,6 +9953,12 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
       } else if (kind === 'level' && legLevelOn(lv)) {
         // Edited level / direction while waiting: the new setting must see its own safe side first.
         if (st.levelSig !== levelSig(lv)) { st.levelSig = levelSig(lv); st.seenSafe = false; }
+        // An unusable lots box must never become "all lots": the level is not used until it is fixed (nothing is spent).
+        if (levelLotsInvalid(lv)) {
+          putMomStatus(key, `${leg}: entry lots "${lv.lots}" is not a whole number of 1 or more — fix it, this level is not used`);
+          st.seenSafe = false;
+          continue;
+        }
         const stp = levelCrossStep(!!st.seenSafe, lv, spot);
         st.seenSafe = stp.seenSafe;
         const want = `${lv.dir === 'above' ? '≥' : '≤'} ${lv.level}`;
@@ -9898,17 +9985,25 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         // Once per day is reserved BEFORE the order goes out: a reload during the fill wait, or a late fill, must not
         // leave the level free to sell this leg a second time today.
         const freshLv = leg === 'CE' ? fresh.ceEntryLevel : fresh.peEntryLevel;
+        // An index-level entry may be set to sell fewer lots than the leg's own (never more). Edited into something
+        // unusable since the cross was seen: refuse before anything is spent or sent.
+        const entryLots = kind === 'level' ? levelEntryLots(freshLv, legLots(row, leg)) : legLots(row, leg);
+        if (entryLots == null) {
+          addToast('error', `${tag} entry skipped`, `The ${leg} entry lots "${freshLv?.lots}" is not a whole number of 1 or more — nothing was sent`);
+          return;
+        }
         if (kind === 'level' && freshLv) {
           updateRow(row.id, leg === 'CE' ? { ceEntryLevel: { ...freshLv, firedOn: today } } : { peEntryLevel: { ...freshLv, firedOn: today } });
         }
+        const sellLots = multipliedLots(row, entryLots);
         addToast('success', `${tag} entry`, trigger
-          ? `${trigger} — selling ${multipliedLots(row, legLots(row, leg))} lot(s) ${armed.strike} ${leg}`
-          : `Entry time reached — selling ${multipliedLots(row, legLots(row, leg))} lot(s) ${armed.strike} ${leg}`);
+          ? `${trigger} — selling ${sellLots} lot(s) ${armed.strike} ${leg}`
+          : `Entry time reached — selling ${sellLots} lot(s) ${armed.strike} ${leg}`);
         // The range it broke out of is the base of its ORB Range stop — handed
         // to the ledger write that opens the leg (whenever the fill confirms).
         const orb = kind === 'range' && rb && armed.range
           ? { high: armed.range.high, low: armed.range.low, side: rb.side, on: rb.on } : null;
-        const ok = await placeLeg(fresh, leg, { reduce: false, lots: multipliedLots(row, legLots(row, leg)), strikeOverride: armed.strike, orb });
+        const ok = await placeLeg(fresh, leg, { reduce: false, lots: sellLots, strikeOverride: armed.strike, orb });
         if (ok) {
           checkEntryLegsFilled(fresh, [leg], legsOf(row), `${leg} entry`);
           delete simMomRef.current[key];

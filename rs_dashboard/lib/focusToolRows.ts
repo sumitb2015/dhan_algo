@@ -453,7 +453,12 @@ export interface FocusLegOrbSl {
 export type FocusOverallMode = 'mtm' | 'premiumPct';
 
 /** A fixed index level for one leg (FocusRow.ceEntryLevel / ceExitLevel …): fires when spot CROSSES it in `dir`. */
-export interface FocusLegLevel { level: string; dir: 'above' | 'below' }
+export interface FocusLegLevel {
+  level: string;
+  dir: 'above' | 'below';
+  /** Whole lots to sell (entry) or close (exit) when the level fires. Blank / missing = all of the leg's lots. */
+  lots?: string;
+}
 /** An entry level also remembers the IST day it last fired — once per day, re-enabled by Arm. */
 export type FocusLegEntryLevel = FocusLegLevel & { firedOn?: string };
 

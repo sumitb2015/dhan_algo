@@ -1559,6 +1559,42 @@ export function legLevelOn(cfg: FocusLegLevel | null | undefined): cfg is FocusL
     && (cfg.dir === 'above' || cfg.dir === 'below');
 }
 
+/** Lots a leg level was set to act on: a whole number of at least 1, else null (= all of the leg's lots). */
+export function levelLots(cfg: FocusLegLevel | null | undefined): number | null {
+  const raw = String(cfg?.lots ?? '').trim();
+  if (raw === '') return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1 ? n : null;
+}
+
+/** The lots box holds text that is not a whole number of at least 1 ("0", "2.5", "all", "1,5"). Blank is NOT invalid. */
+export function levelLotsInvalid(cfg: FocusLegLevel | null | undefined): boolean {
+  return String(cfg?.lots ?? '').trim() !== '' && levelLots(cfg) == null;
+}
+
+/**
+ * Lots an index-level ENTRY sells: the box's number capped at the leg's own lots (never more), or the leg's lots when
+ * the box is blank. Null when the box holds something unusable — the entry must then NOT fire (a typo must never
+ * sell more than was meant), and the once-a-day mark is not spent.
+ */
+export function levelEntryLots(cfg: FocusLegLevel | null | undefined, legLots: number): number | null {
+  if (levelLotsInvalid(cfg)) return null;
+  const n = levelLots(cfg);
+  return n == null ? legLots : Math.min(n, legLots);
+}
+
+/**
+ * Lots an index-level EXIT closes when it should close only part of the leg: the box's number times the row's Qty ×,
+ * when that is fewer than the leg holds. Null = close the whole leg (blank box, an unusable one — closing is the
+ * risk-reducing direction —, or a number at or above what the leg holds).
+ */
+export function levelPartialCloseLots(cfg: FocusLegLevel | null | undefined, heldLots: number, multiplier: number): number | null {
+  const n = levelLots(cfg);
+  if (n == null) return null;
+  const lots = n * Math.max(1, Math.trunc(multiplier) || 1);
+  return heldLots > lots ? lots : null;
+}
+
 /** Which side of a leg level spot is on: 'trigger' at or beyond it in `dir`, else 'safe'. Null without a spot. */
 export function levelSide(cfg: FocusLegLevel, spot: number): 'trigger' | 'safe' | null {
   if (!(spot > 0) || !legLevelOn(cfg)) return null;

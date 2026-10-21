@@ -21,7 +21,7 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote, legTargetLevel,
-  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
+  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
   resolveCriteriaStrike, closestPremiumStrike, absDelta100, modelAbsDelta100, legDeltaBasis, legDeltaNow, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
   tradingDaysBack, tradingDte, dateForDte, rangeWindow, rangeWindowPhase, candleBucket, addMinutesHm,
   type RowLive, type PosRow, type WorkerHold,
@@ -912,6 +912,39 @@ test('legValueBalance: flags the dearer leg once the smaller side is more than g
   // A silly threshold turns the rule off rather than firing on everything.
   assert.equal(legValueBalance({ ceValue: 1000, peValue: 10, gapPct: 0 }), null);
   assert.equal(legValueBalance({ ceValue: 1000, peValue: 10, gapPct: 100 }), null);
+});
+
+test('levelLots: a usable whole-lot count, else null (= all lots)', () => {
+  assert.equal(levelLots({ level: '23000', dir: 'above', lots: '2' }), 2);
+  assert.equal(levelLots({ level: '23000', dir: 'above', lots: ' 3 ' }), 3);
+  assert.equal(levelLots({ level: '23000', dir: 'above', lots: '' }), null);
+  assert.equal(levelLots({ level: '23000', dir: 'above' }), null);
+  assert.equal(levelLots({ level: '23000', dir: 'above', lots: '0' }), null);
+  assert.equal(levelLots({ level: '23000', dir: 'above', lots: '-1' }), null);
+  assert.equal(levelLots({ level: '23000', dir: 'above', lots: '1.5' }), null);
+  assert.equal(levelLots({ level: '23000', dir: 'above', lots: 'abc' }), null);
+  assert.equal(levelLots(undefined), null);
+});
+
+test('level lots: invalid text is flagged, an entry never sells more than the leg, an exit closes part only when fewer', () => {
+  const lv = (lots?: string) => ({ level: '23000', dir: 'above' as const, lots });
+  // Invalid vs blank.
+  for (const bad of ['0', '2.5', 'all', '1,5', '-2']) assert.equal(levelLotsInvalid(lv(bad)), true, bad);
+  for (const ok of [undefined, '', '  ', '1', '4']) assert.equal(levelLotsInvalid(lv(ok)), false, String(ok));
+  // Entry: blank = the leg's lots; a number is capped at them; an unusable value refuses (null).
+  assert.equal(levelEntryLots(lv(''), 3), 3);
+  assert.equal(levelEntryLots(lv('2'), 3), 2);
+  assert.equal(levelEntryLots(lv('5'), 3), 3);
+  assert.equal(levelEntryLots(lv('0'), 3), null);
+  assert.equal(levelEntryLots(lv('2.5'), 3), null);
+  assert.equal(levelEntryLots(undefined, 3), 3);
+  // Exit: part only when the box is below what the leg holds; Qty x scales the box.
+  assert.equal(levelPartialCloseLots(lv('1'), 4, 1), 1);
+  assert.equal(levelPartialCloseLots(lv('1'), 6, 3), 3);     // 1 row lot x Qty 3
+  assert.equal(levelPartialCloseLots(lv('4'), 4, 1), null);  // all of it = ordinary exit
+  assert.equal(levelPartialCloseLots(lv('9'), 4, 1), null);  // more than held = ordinary exit
+  assert.equal(levelPartialCloseLots(lv(''), 4, 1), null);
+  assert.equal(levelPartialCloseLots(lv('abc'), 4, 1), null); // unusable: close it all (the risk-reducing side)
 });
 
 test('balanceLegsOn needs the switch and a usable gap', () => {
