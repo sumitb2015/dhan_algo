@@ -1087,7 +1087,8 @@ test('entryLevelStep: the whole entry-level decision (flat open, add to an open 
   assert.deepEqual(entryLevelStep({ ...base, cfg: lv('5'), owned: false, seenSafe: true, spot: 22744 }).fire, { adding: false, lots: 2 });
   // Open leg: ADDS the lots in the box; blank fires nothing and says why.
   assert.deepEqual(entryLevelStep({ ...base, cfg: lv('1'), owned: true, seenSafe: true, spot: 22744 }).fire, { adding: true, lots: 1 });
-  assert.deepEqual(entryLevelStep({ ...base, cfg: lv('3'), owned: true, seenSafe: true, spot: 22744 }).fire, { adding: true, lots: 3 });   // above the leg's 2 lots
+  assert.deepEqual(entryLevelStep({ ...base, cfg: lv('3'), owned: true, seenSafe: true, spot: 22744, marginGated: true }).fire, { adding: true, lots: 3 });   // above the leg's 2 lots, margin-checked
+  assert.deepEqual(entryLevelStep({ ...base, cfg: lv('3'), owned: true, seenSafe: true, spot: 22744 }).fire, { adding: true, lots: 2 });   // no margin check: capped at the leg's lots
   r = entryLevelStep({ ...base, cfg: lv(''), owned: true, seenSafe: true, spot: 22744 });
   assert.equal(r.fire, null);
   assert.equal(r.seenSafe, false);
@@ -1125,6 +1126,7 @@ test('levelAddLots: an open leg needs an explicit lots number; not capped at the
   assert.equal(levelAddLots(lv('20')), 20);
   assert.equal(levelAddLots(lv('300')), MAX_LEVEL_ADD_LOTS);   // a typo is held at the ceiling
   assert.equal(MAX_LEVEL_ADD_LOTS, 20);
+  assert.equal(levelAddLots(lv('5'), 2), 2);     // no margin check: the leg's own lots
   assert.equal(levelAddLots(lv('')), null);      // blank would double the position
   assert.equal(levelAddLots(lv(undefined)), null);
   assert.equal(levelAddLots(lv('0')), null);

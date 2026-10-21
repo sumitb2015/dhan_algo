@@ -1889,7 +1889,7 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
         label={`${leg} entry level`} className="w-20 h-6 text-center" />
       <RuleNumInput value={en.lots ?? ''} onCommit={v => setEn({ lots: v })} placeholder="all" step={1} min={1} offBelowMin
         label={`${leg} entry lots`} className="w-12 h-6 text-center"
-        title={`Lots to sell when the entry level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies, as for any entry)` : ''}. On a flat leg: blank = all of ${leg}'s lots (${legLots(row, leg)}), more than that is capped at ${legLots(row, leg)}. On an open leg: adds exactly the lots typed (not capped at the leg's lots; up to ${MAX_LEVEL_ADD_LOTS} per fire). A value that is not a whole number stops the level from firing`} />
+        title={`Lots to sell when the entry level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies, as for any entry)` : ''}. On a flat leg: blank = all of ${leg}'s lots (${legLots(row, leg)}), more than that is capped at ${legLots(row, leg)}. On an open leg: adds exactly the lots typed (up to ${MAX_LEVEL_ADD_LOTS} per fire on a Dhan NSE/BSE row, which is margin-checked first; on Kotak, Zerodha and MCX capped at the leg's ${legLots(row, leg)}). A value that is not a whole number stops the level from firing`} />
       <span className={lbl}
         title={`Close ${leg} when the index crosses this level (spot must first be on the other side while ${leg} is held). Handled as ${leg}'s SL, except that RE on SL is skipped while spot is still beyond the level`}>
         close when
@@ -5260,7 +5260,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     day: string; kind: 'range' | 'momentum' | 'level' | 'now'; strike: number; start: number; failed?: boolean;
     /** Index entry level: spot has been seen on the level's safe side since this gate started (a real cross) — for
      *  the setting in `levelSig`; an edit to the level / direction resets it. */
-    seenSafe?: boolean; levelSig?: string;
+    seenSafe?: boolean; levelSig?: string; blockedUntil?: number;
     range?: { high: number; low: number }; rangeSince?: number; rangeNextTry?: number; rangeFetching?: boolean; rangeFailed?: boolean;
     /** Strike being rebuilt from the index's open at the range start (the tab was not open then). */
     strikeFetching?: boolean; strikeNextTry?: number; strikeSince?: number;
@@ -9399,6 +9399,11 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
    * the added lots against the account's available funds. Fails closed — an unresolved contract, price, lot size,
    * margin or funds read blocks the add.
    */
+  /** Whether an index-level ADD on this row passes a margin check first: REAL Dhan rows on NSE / BSE options only. A SIM row spends nothing. */
+  function addMarginGated(row: FocusRow): boolean {
+    return isSimRow(row) || (broker === 'dhan' && !isMcxUnderlying(row.underlying));
+  }
+
   async function checkAddMargin(row: FocusRow, leg: 'CE' | 'PE', lots: number): Promise<{ ok: boolean; message: string }> {
     const u = row.underlying;
     const expiry = row.expiry || expiriesRef.current[u]?.[0] || '';
@@ -10046,8 +10051,11 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         const strikeNow = leg === 'CE' ? live.ceStrike : live.peStrike;
         const dec = entryLevelStep({
           cfg: lv, leg, owned: rowOwnsLeg(row, leg), legLots: legLots(row, leg), spot, seenSafe: !!st.seenSafe, strikeNow,
+          marginGated: addMarginGated(row),
         });
         st.seenSafe = dec.seenSafe;
+        // A margin-blocked add waits a minute before it asks again, however spot wiggles around the level.
+        if (st.blockedUntil && Date.now() < st.blockedUntil) { putMomStatus(key, `${leg}: add blocked by the margin check — retrying after a short pause`); continue; }
         if (!dec.fire) { putMomStatus(key, dec.status); continue; }
         // Sell the strike the row resolves to NOW, not the one noted when the gate started.
         st.strike = strikeNow as number;
@@ -10064,12 +10072,12 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         // Once per day is reserved BEFORE the order goes out: a reload during the fill wait, or a late fill, must not
         // leave the level free to sell this leg a second time today.
         const freshLv = leg === 'CE' ? fresh.ceEntryLevel : fresh.peEntryLevel;
-        // An index-level entry may be set to sell fewer lots than the leg's own (never more). Edited into something
+        // An index-level entry may be set to sell fewer lots than the leg's own. Edited into something
         // unusable since the cross was seen: refuse before anything is spent or sent.
         // On a leg that is already open the level ADDS lots (explicit number only); on a flat leg it opens it.
         const adding = kind === 'level' && rowOwnsLeg(fresh, leg);
         const entryLots = kind !== 'level' ? legLots(row, leg)
-          : adding ? levelAddLots(freshLv) : levelEntryLots(freshLv, legLots(row, leg));
+          : adding ? levelAddLots(freshLv, addMarginGated(fresh) ? undefined : legLots(fresh, leg)) : levelEntryLots(freshLv, legLots(row, leg));
         if (entryLots == null) {
           addToast('error', `${tag} ${adding ? 'add' : 'entry'} skipped`, `The ${leg} entry lots "${freshLv?.lots ?? ''}" is not a whole number of 1 or more — nothing was sent`);
           return;
@@ -10077,10 +10085,11 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         // An ADD puts on more exposure: REAL Dhan rows on NSE / BSE index options pass a fail-closed margin check first
         // (unknown margin or funds blocks it). Checked before the day's trigger is spent; a blocked add waits for a
         // fresh cross instead of being re-checked on every tick.
-        if (adding && !isSimRow(fresh) && broker === 'dhan' && !isMcxUnderlying(row.underlying)) {
+        if (adding && !isSimRow(fresh) && addMarginGated(fresh)) {
           const gate = await checkAddMargin(fresh, leg, multipliedLots(row, entryLots));
           if (!gate.ok) {
             armed.seenSafe = false;
+            armed.blockedUntil = Date.now() + 60_000;
             logEvent('level_add_blocked', fresh, gate.message, { leg, lots: entryLots });
             addToast('error', `${tag} add blocked`, `${gate.message} — nothing was sent. The level re-arms once spot crosses back and again.`);
             return;

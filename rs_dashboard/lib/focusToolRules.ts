@@ -1620,13 +1620,15 @@ export const MAX_LEVEL_ADD_LOTS = 20;
 
 /**
  * Lots an index-level entry ADDS to a leg that is already open. The box must hold an explicit whole number — a blank
- * would mean "the leg's lots again", i.e. doubling the position, so it adds nothing (null). Not capped at the leg's own
- * lots (the margin check and the once-a-day limit guard it), only at MAX_LEVEL_ADD_LOTS per fire. An unusable value is
- * null too.
+ * would mean "the leg's lots again", i.e. doubling the position, so it adds nothing (null). With a pre-trade margin check
+ * (`ownLots` omitted) it is held only at MAX_LEVEL_ADD_LOTS per fire; where no margin check exists (Kotak, Zerodha,
+ * MCX) pass the leg's own lots as `ownLots` and the add is also capped at them. An unusable value is null too.
  */
-export function levelAddLots(cfg: FocusLegLevel | null | undefined): number | null {
+export function levelAddLots(cfg: FocusLegLevel | null | undefined, ownLots?: number): number | null {
   const n = levelLots(cfg);
-  return n == null ? null : Math.min(n, MAX_LEVEL_ADD_LOTS);
+  if (n == null) return null;
+  const cap = ownLots != null && ownLots >= 1 ? Math.min(MAX_LEVEL_ADD_LOTS, ownLots) : MAX_LEVEL_ADD_LOTS;
+  return Math.min(n, cap);
 }
 
 /**
@@ -1739,15 +1741,17 @@ export function exitLevelStatus(mark: string | undefined, cfg: FocusLegLevel, sp
 
 /**
  * The whole entry-level decision for one leg on one tick (the watcher only applies it). An open leg is ADDED to (the
- * lots must be an explicit number, capped at the leg's own); a flat leg is opened (blank lots = the leg's lots); an
+ * lots must be an explicit number; capped at the leg's own lots unless `marginGated`, i.e. a margin check guards the add); a flat leg is opened (blank lots = the leg's lots); an
  * unusable lots box never fires. `seenSafe` is the in-memory armed mark; the result carries its next value, a `fire`
  * (null = not yet) and the status line to show.
  */
 export function entryLevelStep(p: {
   cfg: FocusLegEntryLevel; leg: 'CE' | 'PE'; owned: boolean; legLots: number; spot: number; seenSafe: boolean; strikeNow: number | null;
+  marginGated?: boolean;
 }): { seenSafe: boolean; fire: { adding: boolean; lots: number } | null; status: string } {
   const { cfg, leg, owned, legLots: own, spot } = p;
-  if (owned && levelAddLots(cfg) == null) {
+  const addCap = p.marginGated ? undefined : own;
+  if (owned && levelAddLots(cfg, addCap) == null) {
     return { seenSafe: false, fire: null, status: `${leg}: leg is open — set the lots to ADD when this level is crossed (blank would double it, so nothing fires)` };
   }
   if (levelLotsInvalid(cfg)) {
@@ -1756,13 +1760,13 @@ export function entryLevelStep(p: {
   const stp = levelCrossStep(p.seenSafe, cfg, spot);
   const want = `${cfg.dir === 'above' ? '≥' : '≤'} ${cfg.level}`;
   if (!stp.hit) {
-    const status = `${leg}: spot ${spot > 0 ? spot.toFixed(2) : '—'} — ${stp.seenSafe
+    const status = `${leg}: ${spot > 0 ? '' : 'no spot — '}${stp.seenSafe
       ? `waiting to cross ${cfg.dir} ${cfg.level}`
       : `already ${want}; waiting for spot to go back ${cfg.dir === 'above' ? 'below' : 'above'} ${cfg.level} first`}`;
     return { seenSafe: stp.seenSafe, fire: null, status };
   }
   if (!p.strikeNow) return { seenSafe: stp.seenSafe, fire: null, status: `${leg}: level crossed — waiting for the strike to resolve` };
-  const lots = owned ? levelAddLots(cfg) : levelEntryLots(cfg, own);
+  const lots = owned ? levelAddLots(cfg, addCap) : levelEntryLots(cfg, own);
   if (lots == null) return { seenSafe: stp.seenSafe, fire: null, status: `${leg}: entry lots "${cfg.lots ?? ''}" is not usable — nothing fires` };
   return { seenSafe: stp.seenSafe, fire: { adding: owned, lots }, status: '' };
 }
