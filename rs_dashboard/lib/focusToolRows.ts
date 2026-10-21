@@ -611,6 +611,9 @@ export interface FocusRow {
    * once per leg position; off when the leg has no target.
    */
   scaleOut?: FocusScaleOut;
+  /** Index points a per-leg index level must travel back before it can fire again. Blank = the index default
+   *  (`levelRearmBuffer`); 0 = none. Stops jitter around a level counting as fresh crosses. */
+  levelRearmPts?: string;
   /** Roll the dearer leg further OTM when the two legs' values drift apart (see FocusBalanceLegs). */
   balanceLegs?: FocusBalanceLegs;
   /**

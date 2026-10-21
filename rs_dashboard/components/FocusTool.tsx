@@ -44,7 +44,7 @@ import type {
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
-  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn, balanceRollPlan, levelAddLots, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots,
+  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn, balanceRollPlan, levelAddLots, levelRearmBuffer, exitLevelStep, levelFiredMark, levelExitHoldsReentry, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
@@ -1890,7 +1890,7 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
         label={`${leg} entry lots`} className="w-12 h-6 text-center"
         title={`Lots to sell when the entry level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies, as for any entry)` : ''}. Blank = all of ${leg}'s lots (${legLots(row, leg)}); more than that is capped at ${legLots(row, leg)}. A value that is not a whole number stops the level from firing`} />
       <span className={lbl}
-        title={`Close ${leg} when the index crosses this level (spot must first be on the other side while ${leg} is held). Handled as ${leg}'s SL: RE on SL runs`}>
+        title={`Close ${leg} when the index crosses this level (spot must first be on the other side while ${leg} is held). Handled as ${leg}'s SL, except that RE on SL is skipped while spot is still beyond the level`}>
         close when
       </span>
       <MiniSelect value={ex.dir} ariaLabel={`${leg} exit level direction`} options={dirOpts}
@@ -1944,7 +1944,7 @@ function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch
               {entryLevelFiredToday(en, today) && <span className="text-amber-300 font-semibold">used today — {rowOwnsLeg(row, leg) ? 'change the level to re-enable' : 'Arm to re-enable'}</span>}
             </div>
             <div className="flex flex-wrap items-center gap-1.5"
-              title={`Close ${leg} when the index CROSSES this level (spot must first be on the other side while ${leg} is held). Handled as ${leg}'s SL: RE on SL runs and uses one of its re-entries`}>
+              title={`Close ${leg} when the index CROSSES this level (spot must first be on the other side while ${leg} is held). Handled as ${leg}'s SL: RE on SL is skipped while spot is still beyond the level`}>
               <span className="w-6" />
               <span className={lbl}>Exit: close when spot</span>
               <MiniSelect value={ex.dir} ariaLabel={`${leg} exit level direction`} options={dirOpts}
@@ -1960,9 +1960,16 @@ function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch
           </div>
         );
       })}
+      <div className="flex flex-wrap items-center gap-1.5"
+        title="After an EXIT level has partly closed a leg, spot must travel back past it by this many index points before the level is armed again, so jitter around it (NIFTY crossed 22740 several times a minute on 2026-10-21) cannot fire it again and again. It does not delay the first arming or the entry levels. Blank = the index default; 0 = no buffer">
+        <span className={lbl}>Re-arm buffer</span>
+        <RuleNumInput value={row.levelRearmPts ?? ''} onCommit={v => onUpdate({ levelRearmPts: v })} placeholder={String(levelRearmBuffer({ underlying: row.underlying }))}
+          step={1} min={0} stepFromBlank={false} label="re-arm buffer" className="w-16 h-6 text-center" />
+        <span className={lbl}>pts (blank = {levelRearmBuffer({ underlying: row.underlying })} for {row.underlying})</span>
+      </div>
       <span className="text-zinc-500">
         A level fires on a real cross only: if spot is already past it, it waits for spot to come back and cross again.
-        An exit is handled like the leg&rsquo;s SL (RE on SL applies).
+        An exit is handled like the leg&rsquo;s SL, except that RE on SL is skipped while spot is still beyond the level.
       </span>
       {momOn && legsOf(row).some(l => legLevelOn(l === 'CE' ? row.ceEntryLevel : row.peEntryLevel)) && (
         <span className="text-amber-300 font-semibold">Overall Momentum is on, so the entry levels are ignored (exit levels still work).</span>
@@ -3931,7 +3938,7 @@ const CLEARED_RULES: Partial<FocusRow> = {
   ceTgtPct: '', peTgtPct: '', noReEntryAfter: '', entryMomEnabled: false, entryMomValue: '',
   ceSimpleMom: undefined, peSimpleMom: undefined, ceRangeBreakout: undefined, peRangeBreakout: undefined,
   lazyLegs: undefined, reSlLazyId: undefined, reTgtLazyId: undefined,
-  overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined, scaleOut: undefined, balanceLegs: undefined,
+  overallTarget: undefined, overallTrail: undefined, overallReSl: undefined, overallReTgt: undefined, scaleOut: undefined, balanceLegs: undefined, levelRearmPts: undefined,
   ceEntryLevel: undefined, peEntryLevel: undefined, ceExitLevel: undefined, peExitLevel: undefined,
 };
 
@@ -9177,6 +9184,8 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     row: FocusRow, leg: 'CE' | 'PE', reason: string, kind: 'sl' | 'tgt' | 'cost' = 'sl',
     /** Trail SL steps the breached stop had taken — RE OTM then counts from the ATM now. */
     trailedSteps = 0,
+    /** The exit came from this leg's index EXIT level: it does not roll through RE on SL while spot is still beyond it. */
+    levelExit = false,
   ): boolean {
     const key = `${row.id}:${leg}`;
     if (autoExitingLegRef.current.has(key) || autoExitingRef.current.has(row.id)) return false;
@@ -9254,7 +9263,21 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
               `${leg} stopped out — ${other} now exits if its premium returns to its entry`);
           }
         }
-        if (!squaredOff && (kind === 'sl' || kind === 'tgt')) {
+        // A level exit while spot is still at / beyond that level: re-selling now (RE on SL steps one strike out) puts
+        // the new leg straight back into the breach — on 2026-10-21 that rolled a CE through five strikes in 15 s.
+        let holdRe = false;
+        if (!squaredOff && levelExit && kind === 'sl') {
+          const cur = schedulerRef.current.config.rows.find(r => r.id === row.id);
+          const xl = leg === 'CE' ? cur?.ceExitLevel : cur?.peExitLevel;
+          const spotNow = schedulerRef.current.spots[row.underlying] ?? 0;
+          if (levelExitHoldsReentry(xl, spotNow)) {
+            holdRe = true;
+            const why = spotNow > 0 ? `spot is still beyond its exit level ${xl?.level}` : 'spot is unknown, so it is not re-sold blind';
+            logEvent('level_exit_no_reentry', row, `${leg} left closed: ${why}`, { leg });
+            addToast('error', `${row.underlying} ${leg} left closed`, `RE on SL was skipped: ${why}`);
+          }
+        }
+        if (!squaredOff && !holdRe && (kind === 'sl' || kind === 'tgt')) {
           const re = await reenterLegAfterExit(row.id, leg, kind, closedStrike, closingQty, closedEntry, closedLazyId, trailedSteps);
           // 'unconfirmed': an order went out but didn't confirm — it may fill
           // late, so don't retire on a momentarily-flat ledger. 'pending':
@@ -9367,8 +9390,8 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
    * Close part of a leg when its index exit level fires (the level was set to a number of lots below what the leg holds).
    * Same locks as a scale-out reduce: the leg sits in scalingLegRef (not autoExitingLegRef — it is not a full close) and
    * the row counts in legExitsInFlightRef, so a whole-row exit waits for it and the other leg's stop is not held up.
-   * The "seen on the safe side" mark is cleared BEFORE the order goes out, so one cross reduces once; the level fires
-   * again only after spot comes back to the safe side and crosses again. A refused or unconfirmed reduce is not retried.
+   * The "seen on the safe side" mark is replaced by a "fired" one BEFORE the order goes out, so one cross reduces once;
+   * the level is armed again only after spot is back past it by the re-arm buffer, and fires on the next cross. A refused or unconfirmed reduce is not retried.
    */
   function reduceLegAtLevel(row: FocusRow, leg: 'CE' | 'PE', lots: number, reason: string): boolean {
     const key = `${row.id}:${leg}`;
@@ -9383,7 +9406,9 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     const tag = `${isSimRow(row) ? 'SIM ' : ''}${row.underlying} ${leg}`;
     const prevSeen = leg === 'CE' ? row.fill?.ceExitLevelSeen : row.fill?.peExitLevelSeen;
     const heldBefore = Number(leg === 'CE' ? row.fill?.ceQty : row.fill?.peQty) || 0;
-    patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: undefined } : { peExitLevelSeen: undefined }));
+    const xlNow = leg === 'CE' ? row.ceExitLevel : row.peExitLevel;
+    const firedMark = xlNow && legLevelOn(xlNow) ? levelFiredMark(xlNow) : undefined;
+    patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: firedMark } : { peExitLevelSeen: firedMark }));
     logEvent('level_reduce_leg', row, `${reason} — close ${lots} lot(s), rest stays open`, { leg, lots });
     addToast('success', `${tag} index exit`, `${reason} — closing ${lots} lot(s), the rest stays open`);
     scalingLegRef.current.add(key);
@@ -9632,18 +9657,18 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         if (tgtReason) { if (autoExitLeg(row, leg, tgtReason, 'tgt')) legAction = true; continue; }
         const costReason = costStopReason(row, leg, live);
         if (costReason) { if (autoExitLeg(row, leg, costReason, 'cost')) legAction = true; continue; }
-        // Index exit level: close this leg on a REAL cross, handled as its SL (RE on SL runs, ×N counts).
+        // Index exit level: close this leg on a REAL cross, handled as its SL, but RE on SL is skipped while spot is still beyond the level.
         const xl = leg === 'CE' ? row.ceExitLevel : row.peExitLevel;
         const seenSig = leg === 'CE' ? row.fill?.ceExitLevelSeen : row.fill?.peExitLevelSeen;
         // Switched off: forget what was seen, so switching it back on needs a fresh safe-side sighting.
         if (!legLevelOn(xl) && seenSig) patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: undefined } : { peExitLevelSeen: undefined }));
         if (legLevelOn(xl) && rowOwnsLeg(row, leg)) {
-          // "Seen" only counts for the exact level / direction it was seen against — an edit must see its own safe side.
-          const seen = seenSig === levelSig(xl);
-          const stp = levelCrossStep(seen, xl, spot);
-          if (stp.seenSafe && !seen) {
-            const sig = levelSig(xl);
-            patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: sig } : { peExitLevelSeen: sig }));
+          // The mark only counts for the exact level / direction it was set against — an edit must see its own safe
+          // side. A first arming needs no buffer; re-arming after a partial exit fired needs one (exitLevelStep).
+          const stp = exitLevelStep(seenSig, xl, spot, levelRearmBuffer(row));
+          if (stp.setMark) {
+            const mark = stp.setMark;
+            patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: mark } : { peExitLevelSeen: mark }));
           }
           if (stp.hit) {
             const reason = `${leg} index exit: spot ${spot.toFixed(2)} ${xl.dir === 'above' ? '≥' : '≤'} ${xl.level}`;
@@ -9653,7 +9678,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
             const heldLots = lotSz > 0 ? legOwnContracts(row, leg, live) / lotSz : 0;
             const closeLots = levelPartialCloseLots(xl, heldLots, rowQtyMultiplier(row));
             if (closeLots != null) { reduceLegAtLevel(row, leg, closeLots, reason); continue; }
-            if (autoExitLeg(row, leg, reason, 'sl')) legAction = true;
+            if (autoExitLeg(row, leg, reason, 'sl', 0, true)) legAction = true;
             continue;
           }
         }

@@ -21,7 +21,7 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote, legTargetLevel,
-  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots, balanceRollPlan, levelAddLots, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
+  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots, balanceRollPlan, levelAddLots, levelSide, levelCrossStep, levelRearmBuffer, levelSafeThreshold, exitLevelStep, levelFiredMark, levelExitHoldsReentry, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
   resolveCriteriaStrike, closestPremiumStrike, absDelta100, modelAbsDelta100, legDeltaBasis, legDeltaNow, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
   tradingDaysBack, tradingDte, dateForDte, rangeWindow, rangeWindowPhase, candleBucket, addMinutesHm,
   type RowLive, type PosRow, type WorkerHold,
@@ -978,6 +978,88 @@ test('balanceRollPlan: rolls the dearer leg to the strike matching the cheaper l
   assert.equal(none.kind, 'skip');
   // Undecidable: the dearer leg has no known strike.
   assert.equal(balanceRollPlan({ ...base, ceStrike: null }).kind, 'none');
+});
+
+test('level re-arm buffer: jitter inside the buffer neither re-arms nor fires (the 22740 chop)', () => {
+  const dn = { level: '22740', dir: 'below' as const };   // fires when spot <= 22740
+  const up = { level: '22740', dir: 'above' as const };   // fires when spot >= 22740
+  // below-level: safe only 10 pts above it; in between neither side.
+  assert.equal(levelSide(dn, 22739.9, 10), 'trigger');
+  assert.equal(levelSide(dn, 22745, 10), 'between');
+  assert.equal(levelSide(dn, 22750, 10), 'safe');
+  assert.equal(levelSide(up, 22735, 10), 'between');
+  assert.equal(levelSide(up, 22730, 10), 'safe');
+  // No buffer = the old behaviour (nothing is "between").
+  assert.equal(levelSide(dn, 22745), 'safe');
+  assert.equal(levelSide(dn, 22741), 'safe');
+  assert.equal(levelSafeThreshold(dn, 10), 22750);
+  assert.equal(levelSafeThreshold(up, 10), 22730);
+  // The incident: the leg fired, then spot jittered 22739.9 / 22741 / 22739.9 ... never reaching 22750.
+  let st = levelCrossStep(true, dn, 22739.5, 10);
+  assert.equal(st.hit, true);
+  let seen = false;                       // the mark is cleared when it fires
+  for (const px of [22741, 22739.9, 22744, 22739.7, 22746, 22739.6]) {
+    st = levelCrossStep(seen, dn, px, 10);
+    seen = st.seenSafe;
+    assert.equal(st.hit, false, `no fire on jitter at ${px}`);
+  }
+  assert.equal(seen, false);
+  // A real recovery (10+ pts away) re-arms it; the next dip fires once.
+  st = levelCrossStep(seen, dn, 22751, 10);
+  assert.equal(st.seenSafe, true);
+  assert.equal(levelCrossStep(st.seenSafe, dn, 22744, 10).hit, false); // still between: not a hit, mark kept
+  assert.equal(levelCrossStep(true, dn, 22739.9, 10).hit, true);
+});
+
+test('exitLevelStep: the first arming needs no buffer, only a re-arm after a fire does', () => {
+  const up = { level: '22800', dir: 'above' as const };    // closes when spot >= 22800
+  const dn = { level: '22740', dir: 'below' as const };    // closes when spot <= 22740
+  // First arming with spot a few points from the level (inside the 10-pt buffer): armed at once, fires on the cross.
+  let r = exitLevelStep(undefined, up, 22795, 10);
+  assert.equal(r.hit, false);
+  assert.equal(r.setMark, 'above:22800');
+  r = exitLevelStep('above:22800', up, 22801, 10);
+  assert.equal(r.hit, true);
+  // Not seen on the safe side yet and already beyond: waits (no hit, no mark).
+  r = exitLevelStep(undefined, up, 22801, 10);
+  assert.deepEqual(r, { hit: false, setMark: undefined });
+  // After a fire the mark is the "fired" one: jitter inside the buffer neither arms nor fires...
+  const fired = levelFiredMark(dn);
+  assert.equal(fired, 'fired:below:22740');
+  for (const px of [22741, 22739.9, 22744, 22739.7, 22746, 22739.6]) {
+    r = exitLevelStep(fired, dn, px, 10);
+    assert.equal(r.hit, false, String(px));
+    assert.equal(r.setMark, undefined, String(px));
+  }
+  // ...and only a real recovery (10+ pts back) arms it again, after which the next dip fires.
+  r = exitLevelStep(fired, dn, 22751, 10);
+  assert.equal(r.setMark, 'below:22740');
+  assert.equal(exitLevelStep('below:22740', dn, 22739.9, 10).hit, true);
+  // A mark for another level or direction (the level was edited) counts for nothing: plain first arming.
+  assert.equal(exitLevelStep('below:22700', dn, 22745, 10).setMark, 'below:22740');
+  assert.equal(exitLevelStep('fired:below:22700', dn, 22745, 10).setMark, 'below:22740');
+  // No spot / no level: nothing.
+  assert.deepEqual(exitLevelStep(undefined, dn, 0, 10), { hit: false, setMark: undefined });
+  assert.deepEqual(exitLevelStep(undefined, { level: '', dir: 'below' }, 22745, 10), { hit: false, setMark: undefined });
+});
+
+test('levelExitHoldsReentry: a level exit does not re-enter while spot is still beyond the level, or unknown', () => {
+  const dn = { level: '22740', dir: 'below' as const };
+  assert.equal(levelExitHoldsReentry(dn, 22739.5), true);   // still beyond: hold
+  assert.equal(levelExitHoldsReentry(dn, 22740), true);     // exactly at the level counts as beyond
+  assert.equal(levelExitHoldsReentry(dn, 22741), false);    // recovered past it: re-entry may run
+  assert.equal(levelExitHoldsReentry(dn, 0), true);         // spot unknown: do not re-sell blind
+  assert.equal(levelExitHoldsReentry({ level: '', dir: 'below' }, 22739), false);   // level removed meanwhile
+  assert.equal(levelExitHoldsReentry(undefined, 22739), false);
+});
+
+test('levelRearmBuffer: blank = the index default, a number (even 0) is taken as typed', () => {
+  assert.equal(levelRearmBuffer({ underlying: 'NIFTY' }), 10);
+  assert.equal(levelRearmBuffer({ underlying: 'BANKNIFTY', levelRearmPts: '' }), 25);
+  assert.equal(levelRearmBuffer({ underlying: 'NIFTY', levelRearmPts: '20' }), 20);
+  assert.equal(levelRearmBuffer({ underlying: 'NIFTY', levelRearmPts: '0' }), 0);
+  assert.equal(levelRearmBuffer({ underlying: 'NIFTY', levelRearmPts: '-5' }), 10);
+  assert.equal(levelRearmBuffer({ underlying: 'NIFTY', levelRearmPts: 'abc' }), 10);
 });
 
 test('levelAddLots: an open leg needs an explicit lots number; never blank, never above the leg\'s own lots', () => {

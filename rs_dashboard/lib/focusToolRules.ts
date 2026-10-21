@@ -1637,23 +1637,87 @@ export function levelPartialCloseLots(cfg: FocusLegLevel | null | undefined, hel
   return heldLots > lots ? lots : null;
 }
 
-/** Which side of a leg level spot is on: 'trigger' at or beyond it in `dir`, else 'safe'. Null without a spot. */
-export function levelSide(cfg: FocusLegLevel, spot: number): 'trigger' | 'safe' | null {
-  if (!(spot > 0) || !legLevelOn(cfg)) return null;
+/**
+ * Index points a leg level needs between "fired" and "armed again" so jitter around it cannot count as fresh crosses
+ * (the 2026-10-21 chop: NIFTY crossed 22740 several times a minute). About 0.045 % of the index; a row can override.
+ */
+export const LEVEL_REARM_PTS: Record<string, number> = { NIFTY: 10, BANKNIFTY: 25, SENSEX: 35, CRUDEOILM: 5 };
+
+/** The row's re-arm buffer in index points: its own number when typed (0 = none), else the index default. */
+export function levelRearmBuffer(row: Pick<FocusRow, 'underlying'> & { levelRearmPts?: string }): number {
+  const raw = String(row.levelRearmPts ?? '').trim();
+  if (raw !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return LEVEL_REARM_PTS[row.underlying] ?? 0;
+}
+
+/** The spot a level must be back past (by `buffer`, on the side it does NOT fire from) before it is armed again. */
+export function levelSafeThreshold(cfg: FocusLegLevel, buffer = 0): number {
   const v = Number(cfg.level);
-  return (cfg.dir === 'above' ? spot >= v : spot <= v) ? 'trigger' : 'safe';
+  const b = Math.max(0, Number(buffer) || 0);
+  return cfg.dir === 'above' ? v - b : v + b;
 }
 
 /**
- * One tick of a REAL cross: a level fires only after spot has been seen on its safe side and then reaches it. A level
- * already passed when watching starts therefore waits for spot to come back and cross again — and a leg re-entered
- * beyond its exit level is not closed again at once.
+ * Which side of a leg level spot is on: 'trigger' at or beyond it in `dir`; 'safe' once it is back past the level by
+ * `buffer` points; 'between' in the buffer (neither fires nor arms). With no buffer there is no 'between'. Null without
+ * a spot or a usable level.
  */
-export function levelCrossStep(seenSafe: boolean, cfg: FocusLegLevel, spot: number): { seenSafe: boolean; hit: boolean } {
-  const side = levelSide(cfg, spot);
-  if (side == null) return { seenSafe, hit: false };
+export function levelSide(cfg: FocusLegLevel, spot: number, buffer = 0): 'trigger' | 'safe' | 'between' | null {
+  if (!(spot > 0) || !legLevelOn(cfg)) return null;
+  const v = Number(cfg.level);
+  if (cfg.dir === 'above' ? spot >= v : spot <= v) return 'trigger';
+  const safe = cfg.dir === 'above' ? spot <= levelSafeThreshold(cfg, buffer) : spot >= levelSafeThreshold(cfg, buffer);
+  return safe ? 'safe' : 'between';
+}
+
+/**
+ * One tick of a REAL cross: a level fires only after spot has been seen on its safe side (back past it by `buffer`)
+ * and then reaches it. A level already passed when watching starts therefore waits for spot to come back and cross
+ * again — and a leg re-entered beyond its exit level is not closed again at once. Inside the buffer nothing changes:
+ * the mark is neither set nor used.
+ */
+export function levelCrossStep(seenSafe: boolean, cfg: FocusLegLevel, spot: number, buffer = 0): { seenSafe: boolean; hit: boolean } {
+  const side = levelSide(cfg, spot, buffer);
+  if (side == null || side === 'between') return { seenSafe, hit: false };
   if (side === 'safe') return { seenSafe: true, hit: false };
   return { seenSafe, hit: seenSafe };
+}
+
+/** The saved "seen" value that means "this level has fired and must be re-armed with the buffer". */
+export function levelFiredMark(cfg: FocusLegLevel): string {
+  return `fired:${levelSig(cfg)}`;
+}
+
+/**
+ * One tick of an exit level against the leg's saved mark (`fill.ceExitLevelSeen`):
+ *  - mark = the level's own signature → armed: it fires on the next real cross;
+ *  - mark = its "fired" form (set when a partial exit fired) → it must be back past the level by `buffer` points
+ *    before it arms again, so jitter around the level cannot re-fire it;
+ *  - anything else (nothing, or a mark for a level since edited) → a first arming: the plain safe side, NO buffer,
+ *    so a level set a few points from spot protects at once.
+ * Returns whether to fire, and the mark to store (when it changes to armed).
+ */
+export function exitLevelStep(
+  mark: string | undefined, cfg: FocusLegLevel, spot: number, buffer: number,
+): { hit: boolean; setMark: string | undefined } {
+  if (!legLevelOn(cfg)) return { hit: false, setMark: undefined };
+  const armed = mark === levelSig(cfg);
+  const fired = mark === levelFiredMark(cfg);
+  const step = levelCrossStep(armed, cfg, spot, fired ? buffer : 0);
+  return { hit: step.hit, setMark: step.seenSafe && !armed ? levelSig(cfg) : undefined };
+}
+
+/**
+ * After an exit level fully closes a leg: hold the RE on SL re-entry while spot is still at / beyond that level — or
+ * unknown, since a blind re-sell could land straight back in the breach. A level cleared meanwhile holds nothing.
+ */
+export function levelExitHoldsReentry(cfg: FocusLegLevel | null | undefined, spot: number): boolean {
+  if (!legLevelOn(cfg)) return false;
+  if (!(spot > 0)) return true;
+  return levelSide(cfg, spot) === 'trigger';
 }
 
 /** Identity of a level setting (`dir:level`): a "seen on the safe side" mark only counts for the same setting. */
