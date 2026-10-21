@@ -661,6 +661,8 @@ const UNCONFIRMED_ORDER_HOLD_MS = 15_000;
 const UNKNOWN_ORDER_HOLD_MS = 60_000;
 /** Live WS quotes older than this (market hours) are treated as a stalled feed. */
 const WS_STALE_MS = 8_000;
+/** The REST spot poll is older than this: index levels pause rather than act on a frozen price. */
+const SPOT_STALE_MS = 30_000;
 
 /**
  * The legs a row's VWAP series should cover, and the strikes to key it on.
@@ -5133,7 +5135,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   const watchedKey = UNDERLYINGS.filter(u => config.rows.some(r => r.underlying === u)
     || config.groups.some(g => g.underlying === u && g.enabled)).join(',');
   const watched = useMemo(() => watchedKey.split(',').filter(Boolean) as FocusUnderlying[], [watchedKey]);
-  const { futQuotes, vixQuote, spotPrices, lotSizes, expiries, lookups, chains } = useFocusMarketData({
+  const { futQuotes, vixQuote, spotPrices, spotAt, lotSizes, expiries, lookups, chains } = useFocusMarketData({
     broker, watched, watchedKey, rows: config.rows, groups: config.groups,
   });
   // For handlers that run outside a render (the fill-ledger writer stamps the
@@ -8364,6 +8366,17 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   schedulerRef.current = schedulerSnapshot;
   const expiriesRef = useRef(expiries);
   expiriesRef.current = expiries;
+  // Index levels read spot. The tick feed drops its own stale quotes; the REST top-indices poll it falls back to does
+  // not, so a dead poll would leave the last spot on screen and every level silently unwatched.
+  const spotAtRef = useRef(spotAt);
+  spotAtRef.current = spotAt;
+  const wsQuotesRef = useRef(focusWsQuotes);
+  wsQuotesRef.current = focusWsQuotes;
+  function spotFeedStale(u: FocusUnderlying): boolean {
+    if ((wsQuotesRef.current?.[u]?.spot ?? 0) > 0) return false;
+    const at = spotAtRef.current[u];
+    return at > 0 && Date.now() - at > SPOT_STALE_MS;
+  }
 
   /**
    * The row's running peak P&L / premium profit this cycle — what the trailing
@@ -9700,7 +9713,9 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         // Switched off: forget what was seen, so switching it back on needs a fresh safe-side sighting.
         if (!legLevelOn(xl) && seenSig) patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: undefined } : { peExitLevelSeen: undefined }));
         if (!(legLevelOn(xl) && rowOwnsLeg(row, leg))) putMomStatus(`${row.id}:${leg}:x`, '');
-        if (legLevelOn(xl) && rowOwnsLeg(row, leg)) {
+        const levelSpotStale = legLevelOn(xl) && rowOwnsLeg(row, leg) && spotFeedStale(row.underlying);
+        if (levelSpotStale) putMomStatus(`${row.id}:${leg}:x`, 'paused — the index price feed is stale; the level cannot fire until it resumes');
+        if (legLevelOn(xl) && rowOwnsLeg(row, leg) && !levelSpotStale) {
           // The mark only counts for the exact level / direction it was set against — an edit must see its own safe
           // side. A first arming needs no buffer; re-arming after a partial exit fired needs one (exitLevelStep).
           const stp = exitLevelStep(seenSig, xl, spot, levelRearmBuffer(row));
@@ -10047,6 +10062,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
       } else if (kind === 'level' && legLevelOn(lv)) {
         // Edited level / direction while waiting: the new setting must see its own safe side first.
         if (st.levelSig !== levelSig(lv)) { st.levelSig = levelSig(lv); st.seenSafe = false; }
+        if (spotFeedStale(u)) { putMomStatus(key, `${leg}: the index price feed is stale — level paused until it resumes`); continue; }
         // The decision itself (open vs add, lots, armed mark, status line) is the pure entryLevelStep.
         const strikeNow = leg === 'CE' ? live.ceStrike : live.peStrike;
         const dec = entryLevelStep({
@@ -10092,6 +10108,18 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
             armed.blockedUntil = Date.now() + 60_000;
             logEvent('level_add_blocked', fresh, gate.message, { leg, lots: entryLots });
             addToast('error', `${tag} add blocked`, `${gate.message} — nothing was sent. The level re-arms once spot crosses back and again.`);
+            return;
+          }
+        }
+        // The margin await above is a window in which the leg may have been stopped out or the row told to exit: an ADD
+        // decided on an open leg must not become a fresh short on a flat one.
+        if (adding) {
+          const cur = schedulerRef.current.config.rows.find(r => r.id === row.id);
+          const wantedAt = rowExitWantedRef.current.get(row.id);
+          if (!cur || !rowOwnsLeg(cur, leg) || autoExitingRef.current.has(row.id) || autoExitingLegRef.current.has(key)
+            || (wantedAt != null && Date.now() - wantedAt < 5_000)) {
+            armed.seenSafe = false;
+            addToast('error', `${tag} add cancelled`, `The ${leg} leg is no longer open (or the row is exiting) — nothing was sent`);
             return;
           }
         }
