@@ -21,7 +21,7 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote, legTargetLevel,
-  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots, balanceRollPlan, levelAddLots, levelSide, levelCrossStep, levelRearmBuffer, levelSafeThreshold, exitLevelStep, levelFiredMark, levelExitHoldsReentry, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
+  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots, balanceRollPlan, levelAddLots, levelSide, levelCrossStep, levelRearmBuffer, levelSafeThreshold, exitLevelStep, levelFiredMark, levelExitHoldsReentry, exitLevelStatus, entryLevelStep, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
   resolveCriteriaStrike, closestPremiumStrike, absDelta100, modelAbsDelta100, legDeltaBasis, legDeltaNow, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
   tradingDaysBack, tradingDte, dateForDte, rangeWindow, rangeWindowPhase, candleBucket, addMinutesHm,
   type RowLive, type PosRow, type WorkerHold,
@@ -1051,6 +1051,61 @@ test('levelExitHoldsReentry: a level exit does not re-enter while spot is still 
   assert.equal(levelExitHoldsReentry(dn, 0), true);         // spot unknown: do not re-sell blind
   assert.equal(levelExitHoldsReentry({ level: '', dir: 'below' }, 22739), false);   // level removed meanwhile
   assert.equal(levelExitHoldsReentry(undefined, 22739), false);
+});
+
+test('exitLevelStatus: says whether an exit level is armed, waiting for a first safe sighting, or re-arming (no live numbers)', () => {
+  const dn = { level: '22740', dir: 'below' as const, lots: '2' };
+  assert.equal(exitLevelStatus('below:22740', dn, 22760, 10), 'armed — closes 2 lot(s) when spot ≤ 22740');
+  assert.equal(exitLevelStatus(undefined, { ...dn, lots: '' }, 22760, 10), 'armed — closes the leg when spot ≤ 22740');
+  // No mark yet, spot already beyond: needs a first safe sighting (no buffer).
+  assert.equal(exitLevelStatus(undefined, dn, 22738, 10), 'not armed yet — spot is already ≤ 22740; waiting for it to go back above 22740');
+  // No mark, spot on the safe side: it arms on this very tick (shown as armed).
+  assert.equal(exitLevelStatus(undefined, dn, 22745, 10).startsWith('armed'), true);
+  // After a fire: re-arming needs the buffer.
+  const fired = levelFiredMark(dn);
+  assert.equal(exitLevelStatus(fired, dn, 22744, 10), 'fired — re-arms once spot is back above 22750');
+  assert.equal(exitLevelStatus(fired, dn, 22738, 10), 'fired — re-arms once spot is back above 22750');
+  assert.equal(exitLevelStatus(fired, dn, 22751, 10).startsWith('armed'), true);
+  // The mirror: an 'above' level re-arms below.
+  const up = { level: '22745', dir: 'above' as const };
+  assert.equal(exitLevelStatus(levelFiredMark(up), up, 22750, 10), 'fired — re-arms once spot is back below 22735');
+  assert.equal(exitLevelStatus(undefined, { level: '', dir: 'below' }, 22745, 10), '');
+});
+
+test('entryLevelStep: the whole entry-level decision (flat open, add to an open leg, waiting, refusing)', () => {
+  const base = { leg: 'CE' as const, legLots: 2, spot: 22760, seenSafe: false, strikeNow: 22800 };
+  const lv = (lots?: string, level = '22745', dir: 'above' | 'below' = 'below') => ({ level, dir, lots });
+  // Flat leg, blank lots: first sighting on the safe side arms it, no fire yet.
+  let r = entryLevelStep({ ...base, cfg: lv(''), owned: false });
+  assert.equal(r.fire, null);
+  assert.equal(r.seenSafe, true);
+  // Armed + crossed: opens with the leg's lots.
+  r = entryLevelStep({ ...base, cfg: lv(''), owned: false, seenSafe: true, spot: 22744 });
+  assert.deepEqual(r.fire, { adding: false, lots: 2 });
+  // Flat leg with a number: sells that many, capped at the leg's lots.
+  assert.deepEqual(entryLevelStep({ ...base, cfg: lv('1'), owned: false, seenSafe: true, spot: 22744 }).fire, { adding: false, lots: 1 });
+  assert.deepEqual(entryLevelStep({ ...base, cfg: lv('5'), owned: false, seenSafe: true, spot: 22744 }).fire, { adding: false, lots: 2 });
+  // Open leg: ADDS the lots in the box; blank fires nothing and says why.
+  assert.deepEqual(entryLevelStep({ ...base, cfg: lv('1'), owned: true, seenSafe: true, spot: 22744 }).fire, { adding: true, lots: 1 });
+  r = entryLevelStep({ ...base, cfg: lv(''), owned: true, seenSafe: true, spot: 22744 });
+  assert.equal(r.fire, null);
+  assert.equal(r.seenSafe, false);
+  assert.match(r.status, /set the lots to ADD/);
+  // Unusable lots: never fires, never becomes "all".
+  r = entryLevelStep({ ...base, cfg: lv('0'), owned: false, seenSafe: true, spot: 22744 });
+  assert.equal(r.fire, null);
+  assert.match(r.status, /not a whole number/);
+  // Already beyond and never seen safe: waits (no fire) and says to go back first.
+  r = entryLevelStep({ ...base, cfg: lv('1'), owned: false, seenSafe: false, spot: 22740 });
+  assert.equal(r.fire, null);
+  assert.match(r.status, /already ≤ 22745; waiting for spot to go back above 22745 first/);
+  // Crossed but the strike is not resolved yet: waits, keeps the armed mark.
+  r = entryLevelStep({ ...base, cfg: lv('1'), owned: false, seenSafe: true, spot: 22744, strikeNow: null });
+  assert.equal(r.fire, null);
+  assert.equal(r.seenSafe, true);
+  assert.match(r.status, /waiting for the strike to resolve/);
+  // 'above' levels mirror it.
+  assert.deepEqual(entryLevelStep({ ...base, cfg: lv('1', '22800', 'above'), owned: false, seenSafe: true, spot: 22801 }).fire, { adding: false, lots: 1 });
 });
 
 test('levelRearmBuffer: blank = the index default, a number (even 0) is taken as typed', () => {

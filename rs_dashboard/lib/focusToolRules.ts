@@ -1711,6 +1711,59 @@ export function exitLevelStep(
 }
 
 /**
+ * One line for the leg's exit level, from its saved mark: armed (fires on the next real cross), not armed yet (spot is
+ * already beyond it and has not been back), or re-arming after a fire (spot must get back past it by the buffer). No
+ * live numbers in the text, so it only changes when the state does. Empty when there is no usable level.
+ */
+export function exitLevelStatus(mark: string | undefined, cfg: FocusLegLevel, spot: number, buffer: number): string {
+  if (!legLevelOn(cfg)) return '';
+  const v = cfg.level;
+  const cmp = cfg.dir === 'above' ? '≥' : '≤';
+  const back = cfg.dir === 'above' ? 'below' : 'above';
+  const n = levelLots(cfg);
+  const acts = n != null ? `closes ${n} lot(s)` : 'closes the leg';
+  if (mark === levelFiredMark(cfg)) {
+    const step = exitLevelStep(mark, cfg, spot, buffer);
+    if (!step.setMark) return `fired — re-arms once spot is back ${back} ${levelSafeThreshold(cfg, buffer)}`;
+    return `armed — ${acts} when spot ${cmp} ${v}`;
+  }
+  const step = exitLevelStep(mark, cfg, spot, buffer);
+  if (mark === levelSig(cfg) || step.setMark) return `armed — ${acts} when spot ${cmp} ${v}`;
+  if (levelSide(cfg, spot) === 'trigger') return `not armed yet — spot is already ${cmp} ${v}; waiting for it to go back ${back} ${v}`;
+  return `armed — ${acts} when spot ${cmp} ${v}`;
+}
+
+/**
+ * The whole entry-level decision for one leg on one tick (the watcher only applies it). An open leg is ADDED to (the
+ * lots must be an explicit number, capped at the leg's own); a flat leg is opened (blank lots = the leg's lots); an
+ * unusable lots box never fires. `seenSafe` is the in-memory armed mark; the result carries its next value, a `fire`
+ * (null = not yet) and the status line to show.
+ */
+export function entryLevelStep(p: {
+  cfg: FocusLegEntryLevel; leg: 'CE' | 'PE'; owned: boolean; legLots: number; spot: number; seenSafe: boolean; strikeNow: number | null;
+}): { seenSafe: boolean; fire: { adding: boolean; lots: number } | null; status: string } {
+  const { cfg, leg, owned, legLots: own, spot } = p;
+  if (owned && levelAddLots(cfg, own) == null) {
+    return { seenSafe: false, fire: null, status: `${leg}: leg is open — set the lots to ADD when this level is crossed (blank would double it, so nothing fires)` };
+  }
+  if (levelLotsInvalid(cfg)) {
+    return { seenSafe: false, fire: null, status: `${leg}: entry lots "${cfg.lots}" is not a whole number of 1 or more — fix it, this level is not used` };
+  }
+  const stp = levelCrossStep(p.seenSafe, cfg, spot);
+  const want = `${cfg.dir === 'above' ? '≥' : '≤'} ${cfg.level}`;
+  if (!stp.hit) {
+    const status = `${leg}: spot ${spot > 0 ? spot.toFixed(2) : '—'} — ${stp.seenSafe
+      ? `waiting to cross ${cfg.dir} ${cfg.level}`
+      : `already ${want}; waiting for spot to go back ${cfg.dir === 'above' ? 'below' : 'above'} ${cfg.level} first`}`;
+    return { seenSafe: stp.seenSafe, fire: null, status };
+  }
+  if (!p.strikeNow) return { seenSafe: stp.seenSafe, fire: null, status: `${leg}: level crossed — waiting for the strike to resolve` };
+  const lots = owned ? levelAddLots(cfg, own) : levelEntryLots(cfg, own);
+  if (lots == null) return { seenSafe: stp.seenSafe, fire: null, status: `${leg}: entry lots "${cfg.lots ?? ''}" is not usable — nothing fires` };
+  return { seenSafe: stp.seenSafe, fire: { adding: owned, lots }, status: '' };
+}
+
+/**
  * After an exit level fully closes a leg: hold the RE on SL re-entry while spot is still at / beyond that level — or
  * unknown, since a blind re-sell could land straight back in the breach. A level cleared meanwhile holds nothing.
  */

@@ -44,7 +44,7 @@ import type {
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
-  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn, balanceRollPlan, levelAddLots, levelRearmBuffer, exitLevelStep, levelFiredMark, levelExitHoldsReentry, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots,
+  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn, balanceRollPlan, levelAddLots, levelRearmBuffer, exitLevelStep, exitLevelStatus, entryLevelStep, levelFiredMark, levelExitHoldsReentry, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
@@ -55,7 +55,7 @@ import {
   multipliedLots, rowQtyMultiplier, legLots, hasLegLots, clampHm, rangeWindow, rangeWindowPhase, rowHasMultiDayRange, candleBucket, tradingDte,
   legSlRuleOn, legStopLevel, legTargetSpotLevel, legTgtUnitLabel, MAX_LEG_REENTRIES, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis,
   awaitingMomentumQuote, MOMENTUM_QUOTE_WAIT_MS, legTargetLevel,
-  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, otmReentryStrike, reentryOtmFromAtm, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, MAX_SCALE_STEPS, legLevelOn, levelCrossStep, entryLevelFiredToday, levelSig, accountStopLevel, legacyStopToSigned,
+  evaluateEntryMomentum, reRangeWindow, entryMomentumOn, overallSlConfig, overallProgress, nextOverallPeak, evaluateOverallExit, overallTrailInvalid, overallExitKind, evaluateOverallReentry, MAX_OVERALL_REENTRIES, rangeBreakoutOn, rangeBreakoutHit, costStopApplies, squareOffLegs, atmStrike, resolveRowLegStrike, mirrorLinkedPatch, MAX_LAZY_LEGS, legSlMultiplier, legTarget, nextLazyLegId, lazyLegStrike, runningLazyLeg, simpleMomOn, simpleMomLevel, simpleMomHit, otmReentryStrike, reentryOtmFromAtm, matchPremiumStrike, legTargetProgress, dueScaleOutStep, scaleOutLots, scaleOutSteps, scaleOutStepsPassed, MAX_SCALE_STEPS, legLevelOn, entryLevelFiredToday, levelSig, accountStopLevel, legacyStopToSigned,
   type PosRow, type RowLive,
 } from '@/lib/focusToolRules';
 import { postFocusEvent } from '@/lib/focusToolEvents';
@@ -1863,6 +1863,7 @@ function OverallSettingsControls({ row, onUpdate }: { row: FocusRow; onUpdate: (
  */
 /** One leg's index entry / exit levels, compact, for that leg's own line (Pro sub-row, Table leg box). */
 function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE'; onUpdate: (patch: Partial<FocusRow>) => void }) {
+  const momStatus = useContext(EntryMomContext);
   const isCe = leg === 'CE';
   const en: FocusLegEntryLevel = (isCe ? row.ceEntryLevel : row.peEntryLevel) ?? { level: '', dir: isCe ? 'below' : 'above' };
   const ex: FocusLegLevel = (isCe ? row.ceExitLevel : row.peExitLevel) ?? { level: '', dir: isCe ? 'above' : 'below' };
@@ -1904,6 +1905,12 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
       {legLevelOn(en) && (levelLots(en) ?? 0) > legLots(row, leg) && <span className="text-[11px] text-amber-300 font-semibold">capped at {legLots(row, leg)} lot(s)</span>}
       {levelLotsInvalid(ex) && <span className="text-[11px] text-rose-400 font-semibold">exit lots: whole number ≥ 1 — closes all</span>}
       {entryLevelFiredToday(en, istToday()) && <span className="text-[11px] text-amber-300 font-semibold">entry used today — {rowOwnsLeg(row, leg) ? 'change the level to re-enable' : 'Arm to re-enable'}</span>}
+      {legLevelOn(en) && !entryLevelFiredToday(en, istToday()) && momStatus[`${row.id}:${leg}`] && (
+        <span className="basis-full text-[11px] text-zinc-400 font-semibold" title="What the entry level is doing right now">sell: {momStatus[`${row.id}:${leg}`].replace(/^(CE|PE): /, '')}</span>
+      )}
+      {legLevelOn(ex) && rowOwnsLeg(row, leg) && momStatus[`${row.id}:${leg}:x`] && (
+        <span className="basis-full text-[11px] text-zinc-400 font-semibold" title="What the exit level is doing right now">close: {momStatus[`${row.id}:${leg}:x`]}</span>
+      )}
       {ignored && <span className="text-[11px] text-amber-300 font-semibold">entry ignored: Overall Momentum on</span>}
     </div>
   );
@@ -9660,6 +9667,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
         const seenSig = leg === 'CE' ? row.fill?.ceExitLevelSeen : row.fill?.peExitLevelSeen;
         // Switched off: forget what was seen, so switching it back on needs a fresh safe-side sighting.
         if (!legLevelOn(xl) && seenSig) patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: undefined } : { peExitLevelSeen: undefined }));
+        if (!(legLevelOn(xl) && rowOwnsLeg(row, leg))) putMomStatus(`${row.id}:${leg}:x`, '');
         if (legLevelOn(xl) && rowOwnsLeg(row, leg)) {
           // The mark only counts for the exact level / direction it was set against — an edit must see its own safe
           // side. A first arming needs no buffer; re-arming after a partial exit fired needs one (exitLevelStep).
@@ -9668,6 +9676,8 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
             const mark = stp.setMark;
             patchFill(row.id, () => (leg === 'CE' ? { ceExitLevelSeen: mark } : { peExitLevelSeen: mark }));
           }
+          // Shown beside the level so it is clear whether it is armed, waiting for a first safe sighting, or re-arming.
+          putMomStatus(`${row.id}:${leg}:x`, exitLevelStatus(stp.setMark ?? seenSig, xl, spot, levelRearmBuffer(row)));
           if (stp.hit) {
             const reason = `${leg} index exit: spot ${spot.toFixed(2)} ${xl.dir === 'above' ? '≥' : '≤'} ${xl.level}`;
             // Set to close only some of the lots: reduce by that many and keep the rest running (no SL roll, since the leg
@@ -10005,31 +10015,15 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
       } else if (kind === 'level' && legLevelOn(lv)) {
         // Edited level / direction while waiting: the new setting must see its own safe side first.
         if (st.levelSig !== levelSig(lv)) { st.levelSig = levelSig(lv); st.seenSafe = false; }
-        // An open leg is ADDED to, so the lots must be explicit: blank would mean "the leg's lots again" (a doubled position).
-        if (rowOwnsLeg(row, leg) && levelAddLots(lv, legLots(row, leg)) == null) {
-          putMomStatus(key, `${leg}: leg is open — set the lots to ADD when this level is crossed (blank would double it, so nothing fires)`);
-          st.seenSafe = false;
-          continue;
-        }
-        // An unusable lots box must never become "all lots": the level is not used until it is fixed (nothing is spent).
-        if (levelLotsInvalid(lv)) {
-          putMomStatus(key, `${leg}: entry lots "${lv.lots}" is not a whole number of 1 or more — fix it, this level is not used`);
-          st.seenSafe = false;
-          continue;
-        }
-        const stp = levelCrossStep(!!st.seenSafe, lv, spot);
-        st.seenSafe = stp.seenSafe;
-        const want = `${lv.dir === 'above' ? '≥' : '≤'} ${lv.level}`;
-        if (!stp.hit) {
-          putMomStatus(key, `${leg}: spot ${spot > 0 ? spot.toFixed(2) : '—'} — ${st.seenSafe
-            ? `waiting to cross ${lv.dir} ${lv.level}`
-            : `already ${want}; waiting for spot to go back ${lv.dir === 'above' ? 'below' : 'above'} ${lv.level} first`}`);
-          continue;
-        }
-        // Sell the strike the row resolves to NOW, not the one noted when the gate started.
+        // The decision itself (open vs add, lots, armed mark, status line) is the pure entryLevelStep.
         const strikeNow = leg === 'CE' ? live.ceStrike : live.peStrike;
-        if (!strikeNow) { putMomStatus(key, `${leg}: level crossed — waiting for the strike to resolve`); continue; }
-        st.strike = strikeNow;
+        const dec = entryLevelStep({
+          cfg: lv, leg, owned: rowOwnsLeg(row, leg), legLots: legLots(row, leg), spot, seenSafe: !!st.seenSafe, strikeNow,
+        });
+        st.seenSafe = dec.seenSafe;
+        if (!dec.fire) { putMomStatus(key, dec.status); continue; }
+        // Sell the strike the row resolves to NOW, not the one noted when the gate started.
+        st.strike = strikeNow as number;
         trigger = `Index level: spot ${spot.toFixed(2)} crossed ${lv.dir} ${lv.level}`;
       }
       putMomStatus(key, '');
