@@ -505,7 +505,19 @@ export function legTrailSteps(t: FocusLegTrailSl | null | undefined, entry: numb
   // 'delta': entry / ltp are the leg's |delta| × 100 at entry and now.
   const every = t.unit === 'pct' ? entry * Number(t.every) / 100 : Number(t.every);
   if (!(every > 0)) return 0;
-  return Math.max(0, Math.floor((entry - ltp) / every + 1e-9));
+  return Math.max(0, Math.floor((entry - ltp - legTrailStartDistance(t, entry)) / every + 1e-9));
+}
+
+/**
+ * Profit (premium points below entry) the leg must reach before its Trail SL starts counting steps; the
+ * first step then comes one `every` beyond it. 0 when no start is set, and for a delta trail (its
+ * "entry" is a delta, not a premium).
+ */
+export function legTrailStartDistance(t: FocusLegTrailSl, entry: number): number {
+  if (t.unit === 'delta') return 0;
+  const v = Number(t.startAt);
+  if (!(v > 0) || !(entry > 0)) return 0;
+  return t.startUnit === 'pct' ? entry * v / 100 : v;
 }
 
 /** How far one Trail SL step moves the stop, in premium points. */

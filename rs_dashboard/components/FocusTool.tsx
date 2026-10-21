@@ -44,7 +44,7 @@ import type {
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
-  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn,
+  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
@@ -1345,7 +1345,7 @@ function LegStopRulesControl({ row, onUpdate }: { row: FocusRow; onUpdate: (patc
                   const nextRule = v === 'mult' ? { ...rule, enabled: false } : { ...rule, enabled: true, basis: v as FocusLegSlRule['basis'] };
                   // A Delta stop trails in delta; a premium stop in points / %.
                   const unit: FocusLegTrailSl['unit'] = v === 'delta' ? 'delta' : (trail.unit === 'delta' ? 'pts' : trail.unit);
-                  const nextTrail = { ...trail, unit };
+                  const nextTrail = { ...trail, unit, ...(unit === 'delta' ? { startAt: '' } : {}) };
                   onUpdate(leg === 'CE' ? { ceSlRule: nextRule, ceTrailSl: nextTrail } : { peSlRule: nextRule, peTrailSl: nextTrail });
                 }}
                 className="w-40" />
@@ -1367,6 +1367,15 @@ function LegStopRulesControl({ row, onUpdate }: { row: FocusRow; onUpdate: (patc
               <RuleNumInput value={trail.every} onCommit={v => setTrail({ every: v })} placeholder="X" className={num} title="X: the move in your favour" />
               <span className="text-zinc-500">−</span>
               <RuleNumInput value={trail.by} onCommit={v => setTrail({ by: v })} placeholder="Y" className={num} title="Y: how far the stop moves" />
+              {trail.unit !== 'delta' && (
+                <div className={lbl} title={`Start the ${leg} trail only after the premium has fallen this far below entry (profit). Blank = trail from entry. The first step comes one X beyond it: start 30, X 10 → the stop first moves when the premium is 40 below entry. Switching this on while the leg is already past the start moves the stop at once`}>
+                  from profit
+                  <RuleNumInput value={trail.startAt ?? ''} onCommit={v => setTrail({ startAt: v })} placeholder="0" className={num} />
+                  <MiniSelect value={trail.startUnit ?? 'pts'} ariaLabel={`${leg} Trail SL start unit`}
+                    options={[{ value: 'pts', label: 'Points' }, { value: 'pct', label: '% of entry' }]}
+                    onChange={v => setTrail({ startUnit: v as 'pts' | 'pct' })} className="w-24" />
+                </div>
+              )}
             </>)}
             {rbOn && (<>
               <label className={cn(lbl, 'cursor-pointer text-zinc-300')}
@@ -2256,8 +2265,10 @@ function LegSlLevels({
   const legTrail = leg === 'CE' ? row.ceTrailSl : row.peTrailSl;
   const trailArmed = held && legTrailOn(legTrail) && (stop?.on === 'premium' || stop?.on === 'delta');
   const trailSteps = Number(stop?.trailed) || 0;
+  const trailStart = trailArmed && stop?.on === 'premium' && stop.entry > 0 ? legTrailStartDistance(legTrail, stop.entry) : 0;
   const trailWhat = trailArmed
     ? `Trail SL ${legTrail.every}-${legTrail.by}${legTrail.unit === 'delta' ? ' delta' : legTrail.unit === 'pct' ? '%' : ' pts'}: every ${legTrail.every} the ${legTrail.unit === 'delta' ? 'delta' : 'premium'} falls, the stop drops ${legTrail.by}. `
+      + (trailStart > 0 ? `Starts once the premium is ${trailStart.toFixed(2)} below entry. ` : '')
       + (trailSteps > 0 ? `Trailed ${trailSteps}× so far.` : 'Not moved yet.')
     : '';
   const stopFallback = held && !runningLazyLeg(row, leg) && wantedKind != null && stop?.kind !== wantedKind;
@@ -2288,7 +2299,7 @@ function LegSlLevels({
             : `${leg} SL % fires when this leg's premium reaches ${legLevel.toFixed(2)} (entry + ${slMultToPct(String(legSlMultiplier(row, leg)))}%). ${trailWhat}`.trim()}
         >
           {leg} {stop && stop.kind !== 'mult' && stop.kind !== 'lazy' ? 'SL' : '×'} {legLevel.toFixed(2)}
-          {trailSteps > 0 ? ` ↓${trailSteps}×` : trailArmed ? ' T' : ''}
+          {trailSteps > 0 ? ` ↓${trailSteps}×` : trailArmed ? (trailStart > 0 ? ` T ≥${trailStart.toFixed(0)}` : ' T') : ''}
         </span>
       )}
       {spotStop && (

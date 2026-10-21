@@ -896,6 +896,36 @@ test('leg target types: Underlying Pts / % in the short leg\'s favour (doc numbe
   assert.match(legTargetReason(r, 'PE', liveAt(200, 10), undefined, 43750) ?? '', /PE target 50 pts on the index hit/);
 });
 
+test('leg Trail SL start: dormant until the premium has fallen startAt, then steps count from that level', () => {
+  const pts = { enabled: true, unit: 'pts' as const, every: '10', by: '5', startAt: '30', startUnit: 'pts' as const };
+  assert.equal(legTrailSteps(pts, 200, 176), 0);   // 24 pts in profit, below the start
+  assert.equal(legTrailSteps(pts, 200, 170), 0);   // exactly at the start: armed, no step yet
+  assert.equal(legTrailSteps(pts, 200, 160), 1);   // 10 beyond the start
+  assert.equal(legTrailSteps(pts, 200, 150), 2);
+  // % of the entry price: 15% of 200 = 30 pts; the step size stays what it was without a start.
+  const pct = { enabled: true, unit: 'pts' as const, every: '10', by: '5', startAt: '15', startUnit: 'pct' as const };
+  assert.equal(legTrailSteps(pct, 200, 171), 0);
+  assert.equal(legTrailSteps(pct, 200, 160), 1);
+  // No start (or 0 / blank) behaves exactly as before.
+  assert.equal(legTrailSteps({ ...pts, startAt: '' }, 200, 190), 1);
+  assert.equal(legTrailSteps({ ...pts, startAt: '0' }, 200, 190), 1);
+  // A trail in delta ignores the start (its profit is not a premium move).
+  assert.equal(legTrailSteps({ enabled: true, unit: 'delta' as const, every: '5', by: '5', startAt: '30', startUnit: 'pts' as const }, 40, 30), 2);
+});
+
+test('leg Trail SL start reaches the stop in force: SL holds until the start, saved steps never loosen', () => {
+  // Entry 200, SL 25 pts (225), trail 10-5, start 30 pts. Premium 175 (25 in profit) → still 225, no badge.
+  const t = { enabled: true, unit: 'pts' as const, every: '10', by: '5', startAt: '30' };
+  const r = held({ ceSlRule: { enabled: true, basis: 'pts', value: '25' }, ceTrailSl: t });
+  assert.equal(legStopLevel(r, 'CE', liveAt(175), 175)?.level, 225);
+  assert.equal(legStopLevel(r, 'CE', liveAt(175), 175)?.trailed, 0);
+  assert.equal(legStopLevel(r, 'CE', liveAt(170), 170)?.level, 225);   // armed, first step not earned
+  assert.equal(legStopLevel(r, 'CE', liveAt(160), 160)?.level, 220);   // one X past the start
+  const saved = held({ ceSlRule: { enabled: true, basis: 'pts', value: '25' }, ceTrailSl: t,
+    fill: { ceStrike: 1, peStrike: 1, ceQty: 75, peQty: 0, ceEntry: 200, ceTrailSteps: 1, ts: '' } });
+  assert.equal(legStopLevel(saved, 'CE', liveAt(199), 199)?.level, 220);
+});
+
 test('leg Trail SL "X - Y" (points doc example, mirrored for a short)', () => {
   // Doc (buy): entry 200, SL 175, trail 20-10 → 240 moves SL to 195, 280 to 215.
   // Short mirror: entry 200, SL 225 (25 pts), premium 160 → 215, 120 → 205.

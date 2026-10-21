@@ -414,6 +414,10 @@ export interface FocusLegTrailSl {
   unit: 'pts' | 'pct' | 'delta';
   every: string;
   by: string;
+  /** Start the trail only once the premium has fallen this far below entry (profit). Blank / 0 = from entry. Premium trails only. */
+  startAt?: string;
+  /** `startAt` in points, or % of the leg's entry price. Default points. */
+  startUnit?: 'pts' | 'pct';
 }
 
 /**
