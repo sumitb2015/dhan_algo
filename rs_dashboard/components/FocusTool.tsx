@@ -1863,7 +1863,6 @@ function OverallSettingsControls({ row, onUpdate }: { row: FocusRow; onUpdate: (
  */
 /** One leg's index entry / exit levels, compact, for that leg's own line (Pro sub-row, Table leg box). */
 function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE'; onUpdate: (patch: Partial<FocusRow>) => void }) {
-  const step = rowStep(row);
   const isCe = leg === 'CE';
   const en: FocusLegEntryLevel = (isCe ? row.ceEntryLevel : row.peEntryLevel) ?? { level: '', dir: isCe ? 'below' : 'above' };
   const ex: FocusLegLevel = (isCe ? row.ceExitLevel : row.peExitLevel) ?? { level: '', dir: isCe ? 'above' : 'below' };
@@ -1884,7 +1883,7 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
       </span>
       <MiniSelect value={en.dir} ariaLabel={`${leg} entry level direction`} options={dirOpts}
         onChange={v => setEn({ dir: v as 'above' | 'below' })} className="w-[4.5rem]" />
-      <RuleNumInput value={en.level} onCommit={v => setEn({ level: v })} placeholder="off" step={step} min={step} offBelowMin stepFromBlank={false}
+      <RuleNumInput value={en.level} onCommit={v => setEn({ level: v })} placeholder="off" step={1} min={1} offBelowMin stepFromBlank={false}
         label={`${leg} entry level`} className="w-20 h-6 text-center" />
       <RuleNumInput value={en.lots ?? ''} onCommit={v => setEn({ lots: v })} placeholder="all" step={1} min={1} offBelowMin
         label={`${leg} entry lots`} className="w-12 h-6 text-center"
@@ -1895,7 +1894,7 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
       </span>
       <MiniSelect value={ex.dir} ariaLabel={`${leg} exit level direction`} options={dirOpts}
         onChange={v => setEx({ dir: v as 'above' | 'below' })} className="w-[4.5rem]" />
-      <RuleNumInput value={ex.level} onCommit={v => setEx({ level: v })} placeholder="off" step={step} min={step} offBelowMin stepFromBlank={false}
+      <RuleNumInput value={ex.level} onCommit={v => setEx({ level: v })} placeholder="off" step={1} min={1} offBelowMin stepFromBlank={false}
         label={`${leg} exit level`} className="w-20 h-6 text-center" />
       <RuleNumInput value={ex.lots ?? ''} onCommit={v => setEx({ lots: v })} placeholder="all" step={1} min={1} offBelowMin
         label={`${leg} exit lots`} className="w-12 h-6 text-center"
@@ -1911,7 +1910,6 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
 }
 
 function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch: Partial<FocusRow>) => void }) {
-  const step = rowStep(row);
   const today = istToday();
   const dirOpts = [{ value: 'above', label: 'crosses above' }, { value: 'below', label: 'crosses below' }];
   const lbl = 'text-zinc-500';
@@ -1932,7 +1930,7 @@ function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch
               <span className={lbl}>Entry: sell when spot</span>
               <MiniSelect value={en.dir} ariaLabel={`${leg} entry level direction`} options={dirOpts}
                 onChange={v => setEn({ dir: v as 'above' | 'below' })} className="w-28" />
-              <RuleNumInput value={en.level} onCommit={v => setEn({ level: v })} placeholder="off" step={step} min={step} offBelowMin stepFromBlank={false}
+              <RuleNumInput value={en.level} onCommit={v => setEn({ level: v })} placeholder="off" step={1} min={1} offBelowMin stepFromBlank={false}
                 label={`${leg} entry level`} className="w-24 h-6 text-center" />
               <span className={lbl}>lots</span>
               <RuleNumInput value={en.lots ?? ''} onCommit={v => setEn({ lots: v })} placeholder="all" step={1} min={1} offBelowMin
@@ -1949,7 +1947,7 @@ function IndexLevelControls({ row, onUpdate }: { row: FocusRow; onUpdate: (patch
               <span className={lbl}>Exit: close when spot</span>
               <MiniSelect value={ex.dir} ariaLabel={`${leg} exit level direction`} options={dirOpts}
                 onChange={v => setEx({ dir: v as 'above' | 'below' })} className="w-28" />
-              <RuleNumInput value={ex.level} onCommit={v => setEx({ level: v })} placeholder="off" step={step} min={step} offBelowMin stepFromBlank={false}
+              <RuleNumInput value={ex.level} onCommit={v => setEx({ level: v })} placeholder="off" step={1} min={1} offBelowMin stepFromBlank={false}
                 label={`${leg} exit level`} className="w-24 h-6 text-center" />
               <span className={lbl}>lots</span>
               <RuleNumInput value={ex.lots ?? ''} onCommit={v => setEx({ lots: v })} placeholder="all" step={1} min={1} offBelowMin
