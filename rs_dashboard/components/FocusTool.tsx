@@ -44,7 +44,7 @@ import type {
 } from '@/lib/focusToolRows';
 // The pure rule engine for entry and exit decisions.
 import {
-  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn, levelLotsInvalid, levelEntryLots, levelPartialCloseLots,
+  EMPTY_ROW_LIVE, anchoredReentryLots, legTrailOn, legTrailStartDistance, legValueBalance, balanceLegsOn, balanceRollPlan, levelLotsInvalid, levelEntryLots, levelPartialCloseLots,
   legsOf, rowFlat, rowOwnsLeg, sidePremium, legOwnContracts,
   dteMatches, dteForExpiry, evaluateRowExit, evaluateEntry, evaluateGlobalRisk,
   legStopPremium, pairStopPremium, nextOpenedTs, isGhostDropProtected,
@@ -1345,10 +1345,10 @@ function BalanceLegsControl({ row, onUpdate }: { row: FocusRow; onUpdate: (patch
   return (
     <div className="flex flex-wrap items-center gap-2 text-zinc-400 font-bold">
       <label className="inline-flex items-center gap-1.5 cursor-pointer text-zinc-300"
-        title={'While both legs are open, compare their values (lots × price). When the smaller is more than the gap below the larger, the dearer leg is closed and re-sold further OTM, at the strike whose value matches the cheaper leg (same lots). '
-          + 'The gap must hold for 20 s; at most 3 rolls per row, 10 min apart, and never after the row\'s re-entry window closes. Works on rows holding both legs, real or SIM'}>
+        title={'Balances rupee VALUE (lots × price), not delta. While both legs are open and priced from the live feed, compare their values. When the smaller is more than the gap below the larger, the dearer leg is closed and re-sold further OTM, at the strike whose value matches the cheaper leg (same lots). '
+          + 'A gap that already exists when you switch this on is acted on after 20 s (a toast announces it first). At most 3 rolls per row per day, 10 min apart, and never after the row\'s re-entry window closes. Works on rows holding both legs, real or SIM'}>
         <Switch size="sm" checked={cfg.enabled} onCheckedChange={c => set({ enabled: !!c })} aria-label="Balance leg values" />
-        Balance legs
+        Balance legs (by value)
       </label>
       {cfg.enabled && (<>
         <span className="text-zinc-500">when one leg is</span>
@@ -5151,7 +5151,9 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   const balanceSeenRef = useRef<Map<string, number>>(new Map());
   // An index-level partial exit refused BEFORE anything went out is retried (30 s apart, twice), like a scale-out step.
   const levelRetryRef = useRef<Map<string, { notBefore: number; tries: number }>>(new Map());
-  const balanceDoneRef = useRef<Map<string, { count: number; at: number }>>(new Map());
+  const balanceDoneRef = useRef<Map<string, { count: number; at: number; day: string }>>(new Map());
+  // When a row's last "no suitable strike" skip happened — it only delays the next look, it never uses a roll.
+  const balanceSkipRef = useRef<Map<string, number>>(new Map());
   // Auto leg exits (and their SL rolls) in flight per row. The two legs are
   // independent contracts, so a PE stop must not wait behind the CE's close +
   // roll (easily 10s) — they may run together, and the row's busy lock is only
@@ -9412,31 +9414,62 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   }
 
   /**
-   * Leg-value balance (row.balanceLegs). While both legs are open, compare qty × live price. When the smaller side is
-   * more than the gap below the larger, the DEARER leg is rolled further OTM, to the strike whose value matches the
-   * cheaper leg, through the same all-or-nothing close-then-reopen as a manual shift (`handleShiftStrike`).
+   * Leg-value balance (row.balanceLegs). While both legs are open, compare qty × live price (rupee VALUE — not delta).
+   * When the smaller side is more than the gap below the larger, the DEARER leg is rolled further OTM, to the strike
+   * whose value matches the cheaper leg, through the same all-or-nothing close-then-reopen as a manual shift
+   * (`handleShiftStrike`). The decision itself is the pure `balanceRollPlan`.
    *
-   * Conservative on purpose — this closes and re-sells a real position: the gap must hold for BALANCE_CONFIRM_MS (a
-   * flickering quote never fires it), at most BALANCE_MAX_ROLLS per row with BALANCE_COOLDOWN_MS between them, never
-   * while any order on the row is in flight / unconfirmed / a whole-row exit is wanted, and never past the row's
-   * re-entry window. The roll is stamped BEFORE it is sent, so a failed one is not retried in a loop.
+   * Conservative on purpose — this closes and re-sells a real position:
+   *  - both legs must be priced from the LIVE FEED (a stalled feed falls back to the 30 s-cached chain, which can show
+   *    or hide a gap that is not there), and the gap must hold for BALANCE_CONFIRM_MS;
+   *  - a toast announces the first sighting of a gap, so switching the rule on over an existing gap is never a surprise;
+   *  - at most BALANCE_MAX_ROLLS rolls per row per IST day, BALANCE_COOLDOWN_MS apart — a "no suitable strike" skip
+   *    uses neither (it only waits BALANCE_COOLDOWN_MS before looking again);
+   *  - never while any order on the row is in flight / unconfirmed / a whole-row exit is wanted, nor past the row's
+   *    re-entry window. A roll is stamped BEFORE it is sent, so a failed one is not retried in a loop.
    */
+  function legsOnFreshFeed(row: FocusRow, live: RowLive): boolean {
+    const u = row.underlying;
+    const book = focusWsBookForExpiry(focusWsQuotes?.[u], row.expiry || expiries[u]?.[0] || '');
+    if (!book) return false;   // a stale feed is dropped upstream (focusWsQuotes null), so "no book" = not fresh
+    const px = (strike: number | null, leg: 'CE' | 'PE') => {
+      if (strike == null) return 0;
+      for (const v of Object.values(book.strikes ?? {})) {
+        if (Number(v.strike) === strike) return Number(leg === 'CE' ? v.ce?.ltp : v.pe?.ltp) || 0;
+      }
+      return 0;
+    };
+    return px(live.ceStrike, 'CE') > 0 && px(live.peStrike, 'PE') > 0;
+  }
+
   function maybeBalanceLegs(row: FocusRow, live: RowLive): void {
     const cfg = row.balanceLegs;
     if (!balanceLegsOn(cfg)) return;
     const ceQty = Number(row.fill?.ceQty) || 0;
     const peQty = Number(row.fill?.peQty) || 0;
-    if (!(ceQty > 0) || !(peQty > 0) || !rowOwnsLeg(row, 'CE') || !rowOwnsLeg(row, 'PE')) { balanceSeenRef.current.delete(row.id); return; }
-    const decision = legValueBalance({
-      ceValue: ceQty * (Number(live.ltpCe) || 0), peValue: peQty * (Number(live.ltpPe) || 0), gapPct: Number(cfg.gapPct),
-    });
-    if (!decision) { balanceSeenRef.current.delete(row.id); return; }
+    const ltpCe = Number(live.ltpCe) || 0;
+    const ltpPe = Number(live.ltpPe) || 0;
+    const reset = () => { balanceSeenRef.current.delete(row.id); };
+    if (!(ceQty > 0) || !(peQty > 0) || !rowOwnsLeg(row, 'CE') || !rowOwnsLeg(row, 'PE')) { reset(); return; }
+    if (!legsOnFreshFeed(row, live)) { reset(); return; }
+    const gate = legValueBalance({ ceValue: ceQty * ltpCe, peValue: peQty * ltpPe, gapPct: Number(cfg.gapPct) });
+    if (!gate) { reset(); return; }
     const now = Date.now();
-    const firstSeen = balanceSeenRef.current.get(row.id) ?? now;
-    balanceSeenRef.current.set(row.id, firstSeen);
+    const tag = `${isSimRow(row) ? 'SIM ' : ''}${row.underlying} ${gate.dear}`;
+    let firstSeen = balanceSeenRef.current.get(row.id);
+    if (firstSeen == null) {
+      firstSeen = now;
+      balanceSeenRef.current.set(row.id, now);
+      addToast('success', `${tag} balance watch`,
+        `The ${gate.dear} leg's value is ${Math.round(gate.gapPct)}% above the other (limit ${cfg.gapPct}%). If it holds for ${BALANCE_CONFIRM_MS / 1000}s it will be rolled further OTM — switch Balance legs off to stop it.`);
+    }
     if (now - firstSeen < BALANCE_CONFIRM_MS) return;
-    const done = balanceDoneRef.current.get(row.id);
-    if (done && (done.count >= BALANCE_MAX_ROLLS || now - done.at < BALANCE_COOLDOWN_MS)) return;
+    const today = istToday();
+    const prev = balanceDoneRef.current.get(row.id);
+    const done = prev && prev.day === today ? prev : { count: 0, at: 0, day: today };
+    if (done.count >= BALANCE_MAX_ROLLS || (done.at && now - done.at < BALANCE_COOLDOWN_MS)) return;
+    const skippedAt = balanceSkipRef.current.get(row.id);
+    if (skippedAt != null && now - skippedAt < BALANCE_COOLDOWN_MS) return;
     // Anything else touching the row: wait for it (checked again next tick).
     if (busyRows.has(row.id) || enteringNowRef.current.has(row.id) || autoExitingRef.current.has(row.id)) return;
     if ((legExitsInFlightRef.current.get(row.id) ?? 0) > 0 || row.orderUnknown) return;
@@ -9451,39 +9484,31 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     const group = snap.config.groups.find(g => g.underlying === u);
     if (reentryWindowClosed(row, { nowHm: istHm(), product: group?.product ?? 'INTRADAY', groupEnabled: !!group?.enabled, backstopHm: UNDERLYING_META[u].backstopHm })) return;
 
-    const leg = decision.dear;
-    const dearQty = leg === 'CE' ? ceQty : peQty;
-    const currStrike = leg === 'CE' ? live.ceStrike : live.peStrike;
-    const tag = `${isSimRow(row) ? 'SIM ' : ''}${u} ${leg}`;
-    const stamp = () => balanceDoneRef.current.set(row.id, { count: (done?.count ?? 0) + 1, at: now });
-    const skip = (why: string) => {
-      stamp();
-      logEvent('balance_skipped', row, why, { leg, gapPct: Math.round(decision.gapPct) });
-      addToast('error', `${tag} balance skipped`, why);
-    };
-    if (currStrike == null) return;
     const expiry = row.expiry || expiries[u]?.[0] || '';
     const step = rowStep(row);
-    const atm = atmStrike(atmBaseFor(row, snap.spots, snap.futQuotes), step);
-    // Value of the cheaper leg spread over the dearer leg's qty = the price the replacement should have.
-    const target = decision.cheaperValue / dearQty;
     const keys = new Set<number>([
       ...Object.keys(chains[expKey(u, expiry)]?.oc ?? {}).map(Number),
       ...Object.keys(focusWsBookForExpiry(focusWsQuotes?.[u], expiry)?.strikes ?? {}).map(Number),
     ]);
-    const quotes = [...keys]
-      .filter(k => Number.isFinite(k) && k > 0 && Math.abs(k / step - Math.round(k / step)) < 1e-9)
-      .map(k => ({ strike: k, px: simQuote(u, expiry, k, leg) }));
-    const newStrike = matchPremiumStrike({ quotes, leg, target, atm, exclude: currStrike });
-    const furtherOtm = newStrike != null && (leg === 'CE' ? newStrike > currStrike : newStrike < currStrike);
-    if (newStrike == null || !furtherOtm) {
-      skip(`${leg} is ${Math.round(decision.gapPct)}% dearer than the other leg, but no strike further OTM than ${currStrike} has a premium near ₹${target.toFixed(2)}`);
+    const plan = balanceRollPlan({
+      ceQty, peQty, ltpCe, ltpPe, ceStrike: live.ceStrike, peStrike: live.peStrike, gapPct: Number(cfg.gapPct),
+      atm: atmStrike(atmBaseFor(row, snap.spots, snap.futQuotes), step),
+      quotesFor: leg => [...keys]
+        .filter(k => Number.isFinite(k) && k > 0 && Math.abs(k / step - Math.round(k / step)) < 1e-9)
+        .map(k => ({ strike: k, px: simQuote(u, expiry, k, leg) })),
+    });
+    if (plan.kind === 'none') return;
+    if (plan.kind === 'skip') {
+      balanceSkipRef.current.set(row.id, now);
+      const why = `${plan.leg} is ${Math.round(plan.gapPct)}% dearer than the other leg, but no strike further OTM than ${plan.currStrike} has a premium near ₹${plan.target.toFixed(2)}`;
+      logEvent('balance_skipped', row, why, { leg: plan.leg, gapPct: Math.round(plan.gapPct) });
+      addToast('error', `${tag} balance skipped`, why);
       return;
     }
-    stamp();
-    const reason = `balance: ${leg} value is ${Math.round(decision.gapPct)}% above the other leg (gap limit ${cfg.gapPct}%) — roll ${currStrike} → ${newStrike} ${leg} to match ₹${target.toFixed(2)}`;
+    balanceDoneRef.current.set(row.id, { count: done.count + 1, at: now, day: today });
+    const reason = `balance: ${plan.leg} value is ${Math.round(plan.gapPct)}% above the other leg (gap limit ${cfg.gapPct}%) — roll ${plan.currStrike} → ${plan.toStrike} ${plan.leg} to match ₹${plan.target.toFixed(2)}`;
     addToast('success', `${tag} balance roll`, reason);
-    void handleShiftStrike(row, leg, leg === 'CE' ? 'UP' : 'DOWN', { toStrike: newStrike, reason });
+    void handleShiftStrike(row, plan.leg, plan.leg === 'CE' ? 'UP' : 'DOWN', { toStrike: plan.toStrike, reason });
   }
 
   useEffect(() => {

@@ -21,7 +21,7 @@ import {
   isSimRow, simLegPosition,
   legPinnedStrike, slRollStrike, evaluateReentry, costStopReason, legOwnEntry, DEFAULT_SL_ROLL_MAX,
   reentryWindowClosed, pendingReentryLevel, pendingReentryHit, legTargetReason, costReentryBasis, awaitingMomentumQuote, legTargetLevel,
-  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
+  monitoringStopped, momentumReentryKind, legTrailSteps, legStopLevel, legValueBalance, balanceLegsOn, levelLots, levelLotsInvalid, levelEntryLots, levelPartialCloseLots, balanceRollPlan, orbStopDistance, legTargetSpotLevel, MAX_LEG_REENTRIES,
   resolveCriteriaStrike, closestPremiumStrike, absDelta100, modelAbsDelta100, legDeltaBasis, legDeltaNow, legTargetDeltaLevel, ownedLegStop, legStopHit, rowQtyMultiplier, multipliedLots,
   tradingDaysBack, tradingDte, dateForDte, rangeWindow, rangeWindowPhase, candleBucket, addMinutesHm,
   type RowLive, type PosRow, type WorkerHold,
@@ -945,6 +945,39 @@ test('level lots: invalid text is flagged, an entry never sells more than the le
   assert.equal(levelPartialCloseLots(lv('9'), 4, 1), null);  // more than held = ordinary exit
   assert.equal(levelPartialCloseLots(lv(''), 4, 1), null);
   assert.equal(levelPartialCloseLots(lv('abc'), 4, 1), null); // unusable: close it all (the risk-reducing side)
+});
+
+test('balanceRollPlan: rolls the dearer leg to the strike matching the cheaper leg\'s value, further OTM only', () => {
+  // NIFTY-like chain, step 50, ATM 23000. CE 23000 is dear (100) vs PE 22900 (30): CE value 100*130 vs PE 30*130.
+  const ceQuotes = [23000, 23050, 23100, 23150, 23200].map((k, i) => ({ strike: k, px: [100, 70, 45, 30, 18][i] }));
+  const peQuotes = [22900, 22850, 22800].map((k, i) => ({ strike: k, px: [30, 20, 12][i] }));
+  const base = { ceQty: 130, peQty: 130, ltpCe: 100, ltpPe: 30, ceStrike: 23000, peStrike: 22900, gapPct: 60, atm: 23000,
+    quotesFor: (leg: 'CE' | 'PE') => (leg === 'CE' ? ceQuotes : peQuotes) };
+  const plan = balanceRollPlan(base);
+  assert.equal(plan.kind, 'roll');
+  if (plan.kind === 'roll') {
+    assert.equal(plan.leg, 'CE');
+    assert.equal(plan.toStrike, 23150);      // premium 30 = the PE's 30
+    assert.equal(plan.currStrike, 23000);
+    assert.equal(plan.target, 30);
+    assert.ok(plan.gapPct > 60);
+  }
+  // Unequal lots: the target is the cheaper leg's VALUE over the dearer leg's qty (PE 30 x 130 over CE 65 = 60).
+  const uneven = balanceRollPlan({ ...base, ceQty: 65, ltpCe: 200, ltpPe: 30, ceStrike: 23000,
+    quotesFor: (leg: 'CE' | 'PE') => (leg === 'CE' ? [23000, 23050, 23100].map((k, i) => ({ strike: k, px: [200, 130, 60][i] })) : peQuotes) });
+  assert.equal(uneven.kind === 'roll' ? uneven.toStrike : null, 23100);
+  // Within the gap: nothing to do.
+  assert.equal(balanceRollPlan({ ...base, ltpCe: 40 }).kind, 'none');
+  // The PE side too, rolling DOWN.
+  const pe = balanceRollPlan({ ...base, ltpCe: 30, ltpPe: 100, ceStrike: 23100, peStrike: 22950, atm: 23000,
+    quotesFor: (leg: 'CE' | 'PE') => (leg === 'CE' ? ceQuotes : [22950, 22900, 22850, 22800].map((k, i) => ({ strike: k, px: [100, 60, 30, 14][i] }))) });
+  assert.equal(pe.kind === 'roll' ? pe.leg : null, 'PE');
+  assert.equal(pe.kind === 'roll' ? pe.toStrike : null, 22850);
+  // No quoted strike further OTM near the target: skip, never a roll to the same or a nearer strike.
+  const none = balanceRollPlan({ ...base, quotesFor: (leg: 'CE' | 'PE') => (leg === 'CE' ? [{ strike: 23000, px: 100 }] : peQuotes) });
+  assert.equal(none.kind, 'skip');
+  // Undecidable: the dearer leg has no known strike.
+  assert.equal(balanceRollPlan({ ...base, ceStrike: null }).kind, 'none');
 });
 
 test('balanceLegsOn needs the switch and a usable gap', () => {

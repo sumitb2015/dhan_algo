@@ -513,6 +513,38 @@ export function legValueBalance(p: { ceValue: number; peValue: number; gapPct: n
   return { dear, gapPct: gap, cheaperValue: smaller };
 }
 
+/** What the balance rule wants done for one row right now. */
+export type BalancePlan =
+  | { kind: 'none' }
+  | { kind: 'skip'; leg: 'CE' | 'PE'; gapPct: number; currStrike: number; target: number }
+  | { kind: 'roll'; leg: 'CE' | 'PE'; gapPct: number; currStrike: number; toStrike: number; target: number };
+
+/**
+ * The whole balance decision for a row holding both legs: which leg is too dear, and the strike to roll it to.
+ * `none` = within the gap, or not decidable (an unpriced leg, no strike for the dearer leg). `skip` = a leg is too
+ * dear but no strike FURTHER OTM than its own has a premium near the value to match — nothing is rolled.
+ * `roll` = close `leg` and re-sell it at `toStrike`, priced about `target` per unit (the cheaper leg's whole value
+ * spread over the dearer leg's quantity), never the strike it is on.
+ * `quotesFor` supplies the listed strikes and prices of that leg's type.
+ */
+export function balanceRollPlan(p: {
+  ceQty: number; peQty: number; ltpCe: number; ltpPe: number;
+  ceStrike: number | null; peStrike: number | null; gapPct: number; atm: number | null;
+  quotesFor: (leg: 'CE' | 'PE') => { strike: number; px: number }[];
+}): BalancePlan {
+  const d = legValueBalance({ ceValue: p.ceQty * p.ltpCe, peValue: p.peQty * p.ltpPe, gapPct: p.gapPct });
+  if (!d) return { kind: 'none' };
+  const leg = d.dear;
+  const currStrike = leg === 'CE' ? p.ceStrike : p.peStrike;
+  const dearQty = leg === 'CE' ? p.ceQty : p.peQty;
+  if (currStrike == null || !(dearQty > 0)) return { kind: 'none' };
+  const target = d.cheaperValue / dearQty;
+  const toStrike = matchPremiumStrike({ quotes: p.quotesFor(leg), leg, target, atm: p.atm, exclude: currStrike });
+  const furtherOtm = toStrike != null && (leg === 'CE' ? toStrike > currStrike : toStrike < currStrike);
+  if (toStrike == null || !furtherOtm) return { kind: 'skip', leg, gapPct: d.gapPct, currStrike, target };
+  return { kind: 'roll', leg, gapPct: d.gapPct, currStrike, toStrike, target };
+}
+
 /** A leg's Trail SL, when it is switched on with both amounts. */
 export function legTrailOn(t: FocusLegTrailSl | null | undefined): t is FocusLegTrailSl {
   return !!t && t.enabled && Number(t.every) > 0 && Number(t.by) > 0;
