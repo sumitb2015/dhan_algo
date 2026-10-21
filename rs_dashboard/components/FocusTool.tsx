@@ -555,12 +555,23 @@ function LtpStack({
         )}
       </div>
 
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[10px] font-black uppercase tracking-wider text-zinc-500 leading-none">Total value</span>
-        <span
-          className="font-mono text-xs font-black text-zinc-100 tabular-nums leading-none whitespace-nowrap"
-          title="Total rupee value across every lot this row holds — CE + PE combined"
-        >₹{fmtValue(totalValue)}</span>
+      <div className="flex flex-col gap-1.5">
+        {([['CE', ceValue, 'text-emerald-400'], ['PE', peValue, 'text-rose-400']] as const).map(([name, value, tone]) => (
+          <div key={name} className="flex items-center justify-between gap-2">
+            <span className={cn('text-[10px] font-black uppercase tracking-wider leading-none', tone)}>{name} value</span>
+            <span
+              className="font-mono text-xs font-semibold text-zinc-300 tabular-nums leading-none whitespace-nowrap"
+              title={`${name} value = premium × contracts held (or contracts this row is sized for, before it opens)`}
+            >₹{fmtValue(value)}</span>
+          </div>
+        ))}
+        <div className="flex items-center justify-between gap-2 border-t border-zinc-800 pt-1.5">
+          <span className="text-[10px] font-black uppercase tracking-wider text-zinc-500 leading-none">Total value</span>
+          <span
+            className="font-mono text-xs font-black text-zinc-100 tabular-nums leading-none whitespace-nowrap"
+            title="Total rupee value across every lot this row holds — CE + PE combined"
+          >₹{fmtValue(totalValue)}</span>
+        </div>
       </div>
 
       <div
