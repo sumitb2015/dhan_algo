@@ -10,7 +10,7 @@ import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
 import { FOCUS_RING } from '@/components/Scalper';
 import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
-import { isPairLive, pairName, pairNowPnl, sumPairPnl, PAIR_STRIKE_STEP, type LadderPair, type PairStructure } from '@/lib/priceLadderPair';
+import { isPairLive, pairName, pairNowPnl, sumPairPnl, LEG_KEYS, PAIR_STRIKE_STEP, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
   MAX_LADDER_LOTS, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
@@ -33,7 +33,7 @@ const XY_TICKS = [1, 5, 10, 25];
 const PLAIN_TICKS = [0.05, 0.5, 1];
 /** Pair mode's axis is the combined CE + PE premium. */
 const PAIR_TICKS = [0.5, 1, 2, 5];
-/** The page's ladder: the two single-option modes, or Pair (a straddle / strangle on its combined premium, SIM only). */
+/** The page's ladder: the two single-option modes, or Pair (a straddle / strangle on its combined premium). */
 type PageMode = LadderMode | 'pair';
 const MODE_TICK: Record<PageMode, number> = { xy: 5, plain: 0.05, pair: 1 };
 const ROWS = 31;
@@ -494,7 +494,7 @@ export default function PriceLadder() {
     const marks: EntryMark[] = [];
     if (mode === 'pair') {
       // A pair's entry on the combined axis (the row IS the combined fill, so no separate fill tag).
-      for (const p of myPairs) if (p.state === 'open' && p.entryY) marks.push({ y: p.entryY, side: p.side, qty: p.qty });
+      for (const p of myPairs) if ((p.state === 'open' || p.state === 'broken' || p.state === 'exiting' || p.state === 'unknown') && p.entryY) marks.push({ y: p.entryY, side: p.side, qty: p.qty });
       return marks;
     }
     for (const s of mine) {
@@ -570,14 +570,21 @@ export default function PriceLadder() {
       side, lots, product, orderType, level: price, zones, expect,
       ...(style !== 'Single' ? { bracket: { tgtPts: style === 'Cover' ? 0 : tgtPts, slPts, ...(trailOn ? { trailPts } : {}) } }
         : trailOn ? { bracket: { tgtPts: 0, slPts: trailPts, trailPts } } : {}),
-    }).then(ok => { if (ok) toast.success(`SIM ${side} ${structure} armed at combined ${price}`); });
+    }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${structure} armed at combined ${price}`); });
   }, [post, broker, real, underlying, expiry, structure, pairOk, pairCe, pairPe, lots, product, orderType, zones, style, tgtPts, slPts, trailOn, trailPts]);
 
   const onPlace = (side: LadderSide, price: number) => {
     if (mode === 'pair') {
-      if (real) { toast.warning('Pair mode is SIM only for now'); return; }
       const v = classifyClick({ mode: 'plain', opt: 'CE', side, level: price, ref: refPrice, orderType, zones });
       if (!v.ok) { toast.warning(v.error); return; }
+      if (real && !realAck) {
+        const name = structure === 'straddle' ? `${pairCe} straddle` : `${pairCe}CE / ${pairPe}PE strangle`;
+        setConfirm({
+          text: `${side} ${lots} lot(s) ${underlying} ${name} — BOTH legs at MARKET when the combined premium ${v.dir === 'below' ? 'falls to' : 'rises to'} ${price}. If only one leg fills, it is closed again at market`,
+          run: () => sendPair(side, price, { kind: v.kind, dir: v.dir }),
+        });
+        return;
+      }
       sendPair(side, price, { kind: v.kind, dir: v.dir });
       return;
     }
@@ -637,7 +644,7 @@ export default function PriceLadder() {
 
   const stale = mode === 'xy' && !spotFreshNow;
   const placeDisabled = busy || !brokerLoaded || !strike || !(refPrice > 0) || realBlocked || brokerUnsupported || (real && sessionDown) || (mode === 'xy' && stale)
-    || (mode === 'pair' && (real || !pairView));
+    || (mode === 'pair' && !pairView);
   const decimals = mode === 'xy' ? (tick < 1 ? 2 : 0) : 2;
   const ticks = mode === 'xy' ? XY_TICKS : mode === 'pair' ? PAIR_TICKS : PLAIN_TICKS;
   const dataDate = data ? data.state.date : null;
@@ -728,7 +735,7 @@ export default function PriceLadder() {
             </h1>
             <p className="text-[10px] text-zinc-500 font-medium mt-1">
               {mode === 'xy' ? `Trade the option on ${mcx ? 'its futures month\'s' : 'index'} levels — the server fires armed levels with this tab closed`
-                : mode === 'pair' ? 'Straddles / strangles on their combined CE + PE premium — SIM only for now'
+                : mode === 'pair' ? 'Straddles / strangles on their combined CE + PE premium — the server fires both legs with this tab closed'
                   : 'One-click LIMIT / SL orders on the option premium'}
             </p>
           </div>
@@ -817,11 +824,6 @@ export default function PriceLadder() {
         {brokerUnsupported && (
           <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
             <AlertTriangle className="w-4 h-4" /> {underlying} trades on Dhan only in the Price Ladder — switch the broker to Dhan to place orders.
-          </div>
-        )}
-        {mode === 'pair' && real && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
-            <ShieldAlert className="w-4 h-4" /> Pair mode is SIM only for now — switch to SIM to place a straddle or strangle. Single-option REAL orders work in XY / Plain.
           </div>
         )}
         {mode === 'pair' && pairView && !(pairView.combined && pairView.combined > 0) && (
@@ -954,7 +956,7 @@ export default function PriceLadder() {
             </div>
             <p className="text-[10px] text-zinc-500 leading-relaxed">
               {mode === 'pair'
-                ? `Pair (SIM only): the ladder is the combined premium (CE + PE). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. Both legs fill together when the combined crosses the level; target / SL / trail are in combined-premium points and exit both legs.`
+                ? `Pair: the ladder is the combined premium (CE + PE). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. Both legs go at MARKET together when the combined crosses the level (REAL: if only one fills, it is closed again); target / SL / trail are in combined-premium points and exit both legs.`
                 : mode === 'xy'
                 ? `Click the Buy or Sell column at an index level. ${opt === 'PE' ? 'Put: the ladder is inverted — a Buy is a limit ABOVE spot. ' : ''}Limit = the option is cheaper/dearer at that level; the other side ${zones === 'anywhere' ? 'is a breakout by itself (Anywhere)' : 'needs SL (breakout)'}. The option order goes at MARKET when ${axisName} crosses the level.`
                 : zones === 'anywhere'
@@ -1000,7 +1002,7 @@ export default function PriceLadder() {
                     >
                       <span>{p.legs.ce.contract.underlying} {pairName(p)}</span>
                       <span className={p.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}>{p.side}</span>
-                      <span className="text-[10px] text-zinc-400">(SIM · {p.lots}L{p.state === 'armed' ? ' · armed' : ''})</span>
+                      <span className="text-[10px] text-zinc-400">({p.mode === 'real' ? <span className="text-red-400 font-bold">REAL</span> : 'SIM'} · {p.lots}L{p.state !== 'open' ? ` · ${p.state}` : ''})</span>
                       {!isCur && <span className="text-[10px] text-amber-300 underline font-sans ml-0.5">View on ladder</span>}
                     </button>
                   );
@@ -1288,7 +1290,7 @@ function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; 
   );
 }
 
-/** Pair mode's own orders & positions (both legs on one row; SIM only in Phase 1). */
+/** Pair mode's own orders & positions (both legs on one row, with each leg's own order status). */
 function PairTable({ pairs, ltps, busy, post, trailPts, onSelect }: {
   pairs: LadderPair[]; ltps: Record<string, number>; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean>;
   trailPts: number; onSelect: (p: LadderPair) => void;
@@ -1304,7 +1306,7 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect }: {
   return (
     <div className="rounded-lg border border-zinc-800 overflow-x-auto">
       <div className="flex items-center justify-between px-3 py-2 bg-zinc-900/40">
-        <p className="text-xs font-bold text-white">Pair orders &amp; positions <span className="text-zinc-500 font-medium">({pairs.filter(isPairLive).length} live · SIM only)</span></p>
+        <p className="text-xs font-bold text-white">Pair orders &amp; positions <span className="text-zinc-500 font-medium">({pairs.filter(isPairLive).length} live)</span></p>
       </div>
       <table className="w-full text-xs">
         <thead className="bg-zinc-800">
@@ -1319,13 +1321,22 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect }: {
             const ce = p.legs.ce, pe = p.legs.pe;
             const nowCe = ltps[ce.contract.securityId], nowPe = ltps[pe.contract.securityId];
             const mult = ce.contract.mult;
-            const stateClass = p.state === 'open' ? 'text-emerald-400 font-bold' : p.state === 'armed' ? 'text-sky-300' : 'text-zinc-400';
+            const stateClass = p.state === 'unknown' || p.state === 'broken' ? 'text-red-400 font-bold'
+              : p.state === 'open' ? 'text-emerald-400 font-bold' : p.state === 'armed' || p.state === 'placing' || p.state === 'exiting' ? 'text-sky-300' : 'text-zinc-400';
+            const holding = p.state === 'open' || p.state === 'broken' || p.state === 'exiting';
+            const unknownLegs = LEG_KEYS.filter(k => p.legs[k].unknown);
             return (
               <tr key={p.id} className={`border-t border-zinc-900 ${live ? '' : 'opacity-60'}`}>
                 <td className="px-2 py-1 font-mono text-zinc-400 whitespace-nowrap">{timeOf(p.createdAt)}</td>
-                <td className="px-2 py-1 whitespace-nowrap"><span className="text-zinc-300">{p.mode.toUpperCase()}</span> <span className="text-zinc-500">{p.broker}</span></td>
-                <td onClick={() => onSelect(p)} title="Click to view this pair on the ladder" className="px-2 py-1 whitespace-nowrap text-zinc-200 cursor-pointer hover:text-white hover:underline">
-                  {ce.contract.underlying} {ce.contract.expiry.slice(5)} {pairName(p)} <span className="text-zinc-500">{p.product}</span>
+                <td className="px-2 py-1 whitespace-nowrap"><span className={p.mode === 'real' ? 'font-bold text-red-400' : 'text-zinc-300'}>{p.mode.toUpperCase()}</span> <span className="text-zinc-500">{p.broker}</span></td>
+                <td className="px-2 py-1 whitespace-nowrap text-zinc-200">
+                  <span onClick={() => onSelect(p)} title="Click to view this pair on the ladder" className="cursor-pointer hover:text-white hover:underline">
+                    {ce.contract.underlying} {ce.contract.expiry.slice(5)} {pairName(p)} <span className="text-zinc-500">{p.product}</span>
+                  </span>
+                  {/* REAL: each leg's own order, so a one-legged moment is visible as it happens. */}
+                  {p.mode === 'real' && p.state !== 'armed' && (
+                    <span className="block text-[10px] font-mono text-zinc-400">{LEG_KEYS.map(k => <span key={k} className={`mr-2 ${p.legs[k].unknown || p.legs[k].outside || p.legs[k].entry === 'dead' ? 'text-red-400' : ''}`}>{legStatus(k, p.legs[k])}</span>)}</span>
+                  )}
                 </td>
                 <td className={`px-2 py-1 font-bold ${p.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>{p.side}</td>
                 <td className="px-2 py-1 font-mono text-zinc-200 whitespace-nowrap">
@@ -1333,9 +1344,10 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect }: {
                 </td>
                 <td className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap">{p.entryLevel ? `CE+PE ${p.entryDir === 'below' ? '≤' : '≥'} ${p.entryLevel}` : '—'}</td>
                 <td className="px-2 py-1 font-mono font-bold text-zinc-100 whitespace-nowrap">{two(ce.avg, pe.avg)}</td>
-                <td className="px-2 py-1 font-mono text-zinc-200 whitespace-nowrap">{p.state === 'open' ? two(nowCe, nowPe) : '—'}</td>
+                <td className="px-2 py-1 font-mono text-zinc-200 whitespace-nowrap">{holding ? two(nowCe, nowPe) : '—'}</td>
                 <td className="px-2 py-1 font-mono text-zinc-200 whitespace-nowrap">
-                  {ce.exitAvg && pe.exitAvg ? <>{two(ce.exitAvg, pe.exitAvg)}{p.closedAt ? <span className="text-zinc-500"> · {timeOf(p.closedAt)}</span> : null}</> : '—'}
+                  {ce.exitAvg && pe.exitAvg ? <>{two(ce.exitAvg, pe.exitAvg)}{p.closedAt ? <span className="text-zinc-500"> · {timeOf(p.closedAt)}</span> : null}</>
+                    : ce.exitAvg || pe.exitAvg ? `${ce.exitAvg ? `CE ${ce.exitAvg.toFixed(2)}` : ''}${pe.exitAvg ? ` PE ${pe.exitAvg.toFixed(2)}` : ''}` : '—'}
                 </td>
                 <td className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap">
                   {p.bracket ? `${p.bracket.tgtPts > 0 ? (p.tgtY ?? `±${p.bracket.tgtPts}`) : 'Cover'} / ${p.slY ?? `±${p.bracket.slPts}`}${p.bracket.trailPts ? ` · T${p.bracket.trailPts}` : ''}` : '—'}
@@ -1350,10 +1362,26 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect }: {
                     {p.state === 'armed' && (
                       <button type="button" disabled={busy} onClick={() => void post({ action: 'pair', op: 'cancel', id: p.id })} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">Cancel</button>
                     )}
-                    {p.state === 'open' && (
-                      <button type="button" disabled={busy || !!p.exitWanted} onClick={() => void post({ action: 'pair', op: 'exit', id: p.id })} className="px-1.5 py-0.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40">{p.exitWanted ? 'Exiting…' : 'Exit both'}</button>
+                    {(p.state === 'open' || p.state === 'broken') && (
+                      <button type="button" disabled={busy || !!p.exitWanted} onClick={() => void post({ action: 'pair', op: 'exit', id: p.id })}
+                        title={p.state === 'broken' ? 'Exit what is left of this pair at market' : 'Exit both legs at market'}
+                        className="px-1.5 py-0.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40">
+                        {p.exitWanted ? 'Exiting…' : p.state === 'broken' ? 'Exit remaining' : 'Exit both'}
+                      </button>
                     )}
-                    {live && p.bracket && <PairTrailControl p={p} busy={busy} post={post} fallback={trailPts} />}
+                    {/* UNKNOWN: the user checks Orders / Positions and says what each unknown leg really is. */}
+                    {p.state === 'unknown' && unknownLegs.map(k => (
+                      <span key={k} className="inline-flex items-center gap-1">
+                        <span className="text-[10px] font-bold text-red-400">{k.toUpperCase()}</span>
+                        <button type="button" disabled={busy} onClick={() => void post({ action: 'pair', op: 'resolve', id: p.id, leg: k, outcome: 'open' })}
+                          title={p.legs[k].unknown === 'entry' ? 'You checked Positions: this leg filled — track it' : 'You checked Positions: this leg is still open — send its exit again'}
+                          className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">It is open</button>
+                        <button type="button" disabled={busy} onClick={() => void post({ action: 'pair', op: 'resolve', id: p.id, leg: k, outcome: 'flat' })}
+                          title={p.legs[k].unknown === 'entry' ? 'You checked Positions: nothing opened on this leg' : 'You checked Positions: this leg is closed'}
+                          className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">Nothing open</button>
+                      </span>
+                    ))}
+                    {(p.state === 'open' || p.state === 'armed') && p.bracket && <PairTrailControl p={p} busy={busy} post={post} fallback={trailPts} />}
                   </div>
                 </td>
               </tr>
@@ -1363,6 +1391,18 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect }: {
       </table>
     </div>
   );
+}
+
+/** One REAL leg's order status, short: "CE 65 @ 120.50", "PE rejected", "CE UNKNOWN", "PE exit sent". */
+function legStatus(k: PairLegKey, l: PairLeg): string {
+  const K = k.toUpperCase();
+  if (l.unknown) return `${K} UNKNOWN (${l.unknown})`;
+  if (l.entry === 'dead') return `${K} rejected${l.note ? `: ${l.note}` : ''}`;
+  if (l.entry === 'sent') return `${K} sent`;
+  if (l.exitOrderId || l.exitSentAt) return `${K} exit sent`;
+  const held = l.held ?? 0;
+  const bits = [held > 0 ? `${held} held` : (l.exitedQty ?? 0) > 0 ? 'flat' : '', l.avg ? `@ ${l.avg.toFixed(2)}` : '', l.outside ? '(closed outside)' : ''].filter(Boolean);
+  return `${K} ${bits.join(' ') || '—'}`;
 }
 
 /** A pair's continuous trailing SL (combined-premium points): edit = set, 0 / Off = off. */

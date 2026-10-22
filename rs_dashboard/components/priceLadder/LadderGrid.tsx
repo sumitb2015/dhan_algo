@@ -119,6 +119,10 @@ export function pairWidgetsFor(pairs: LadderPair[]): LadderWidget[] {
         out.push({ ...common, key: `ps|${p.id}`, price: lv.slY, column: exitCol, kind: 'sl', label: slLabel, planned: true, drag: 'sl', ...trail });
       }
     }
+    // A position (also while exiting, BROKEN or UNKNOWN) stays marked at its combined fill; only an open pair's exits drag.
+    if ((p.state === 'exiting' || p.state === 'broken' || p.state === 'unknown') && p.entryY != null) {
+      out.push({ ...common, key: `pp|${p.id}`, price: p.entryY, column: p.side, kind: 'pos', label: `Pair position (${p.state})`, lots: Math.max(1, Math.round(p.qty / lotSize)) });
+    }
     if (p.state === 'open') {
       if (p.entryY != null) out.push({ ...common, key: `pp|${p.id}`, price: p.entryY, column: p.side, kind: 'pos', label: 'Pair position', lots: Math.max(1, Math.round(p.qty / lotSize)) });
       if (p.tgtY != null) out.push({ ...common, key: `pt|${p.id}`, price: p.tgtY, column: exitCol, kind: 'tgt', label: 'Target', drag: 'tgt' });

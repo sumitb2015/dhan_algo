@@ -24,7 +24,10 @@ import {
   rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS,
   type Job, type LadderOrderHow, type LadderBroker, type LadderContract, type LadderSide, type LadderSlice, type LadderState,
 } from '@/lib/priceLadder';
-import { isPairLive, planPairs } from '@/lib/priceLadderPair';
+import {
+  cutPairLeg, cutsNewestFirst, isPairLive, LEG_KEYS, pairName, patchPair, planPairs, settleLegEntry, settleLegExit, PAIR_EXIT_RETRY_MS,
+  type LadderPair, type PairJob, type PairLegKey,
+} from '@/lib/priceLadderPair';
 
 // The Price Ladder's server watcher. It owns debug/price_ladder_state.json (re-read on every tick and every request,
 // never cached, because the instrumentation hook and the API route can be separate module instances) and, about once
@@ -523,8 +526,18 @@ function warnOnce(key: string, ms: number): boolean {
   return true;
 }
 
-/** Slices with a job (order, cancel or status read) still running: the next ticks do not start another for them. */
-const jobsInFlight: Set<string> = ((globalThis as { __priceLadderJobs?: Set<string> }).__priceLadderJobs ??= new Set());
+/**
+ * Slices / pairs with a job (order, cancel or status read) still running: the next ticks do not start another for them.
+ * Counted, not a set — one tick can start two jobs for one pair (a settle and an exit retry), and the first to finish
+ * must not clear the mark while the other is still on the wire.
+ */
+class InFlight {
+  private n = new Map<string, number>();
+  add(id: string): void { this.n.set(id, (this.n.get(id) ?? 0) + 1); }
+  delete(id: string): void { const c = (this.n.get(id) ?? 0) - 1; if (c > 0) this.n.set(id, c); else this.n.delete(id); }
+  has(id: string): boolean { return (this.n.get(id) ?? 0) > 0; }
+}
+const jobsInFlight: InFlight = ((globalThis as { __priceLadderJobCounts?: InFlight }).__priceLadderJobCounts ??= new InFlight());
 
 /** Run an order the API route sends itself under the same in-flight mark, so the watcher never declares it orphaned. */
 export async function withJob<T>(id: string, fn: () => Promise<T>): Promise<T> {
@@ -559,7 +572,7 @@ async function commit(id: string, expect: LadderSlice['state'], apply: (s: Ladde
  * it is known. Closes on one contract still share the broker capacity: the book is read once per broker and each close
  * takes its share synchronously before its own order goes out.
  */
-async function runJobs(s: LadderState, jobs: Job[], prices: PriceView): Promise<void> {
+async function runJobs(s: LadderState, jobs: Job[], prices: PriceView, pairJobs: PairJob[] = []): Promise<void> {
   const now = Date.now();
   const byId = new Map(s.slices.map(x => [x.id, x]));
   const books = new Map<LadderBroker, Map<string, number> | null>();
@@ -685,10 +698,149 @@ async function runJobs(s: LadderState, jobs: Job[], prices: PriceView): Promise<
     }
   };
 
-  await Promise.allSettled(jobs.map(async j => {
-    jobsInFlight.add(j.id);
-    try { await one(j); } catch (err) { console.error(`${TAG} job ${j.kind} ${j.id} failed:`, err); } finally { jobsInFlight.delete(j.id); }
-  }));
+  await Promise.allSettled([
+    ...jobs.map(async j => {
+      jobsInFlight.add(j.id);
+      try { await one(j); } catch (err) { console.error(`${TAG} job ${j.kind} ${j.id} failed:`, err); } finally { jobsInFlight.delete(j.id); }
+    }),
+    // Pair jobs share this tick's broker reads and close capacity: a slice and a pair leg on one contract never both
+    // size an exit off the same broker row.
+    ...pairJobs.map(async j => {
+      jobsInFlight.add(j.id);
+      try { await runPairJob(s, j, prices, { bookFor, used, orderBooks }); } catch (err) { console.error(`${TAG} pair job ${j.kind} ${j.id} failed:`, err); } finally { jobsInFlight.delete(j.id); }
+    }),
+  ]);
+}
+
+// ── pair jobs (Pair mode, REAL) ───────────────────────────────────────
+
+interface JobCtx {
+  bookFor: (b: LadderBroker) => Promise<Map<string, number> | null>;
+  used: Map<string, number>;
+  orderBooks: OrderBooks;
+}
+
+/** A pair leg in the shape the slice order IO takes (broker, contract, product). */
+const legOrder = (p: LadderPair, k: PairLegKey) => ({ broker: p.broker, contract: p.legs[k].contract, product: p.product });
+/** The broker book key of a pair leg (the same row a slice on that contract uses). */
+const legBookKey = (p: LadderPair, k: PairLegKey) => bookKey({ broker: p.broker, contract: p.legs[k].contract, product: p.product } as LadderSlice);
+
+/** Record a pair job's outcome only while the pair is still in the state the job started from (retried like commit). */
+async function commitPair(id: string, expect: LadderPair['state'], apply: (p: LadderPair, s: LadderState) => LadderState): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    try {
+      await updateLadderState(st => {
+        const p = (st.pairs ?? []).find(y => y.id === id);
+        return p && p.state === expect ? apply(p, st) : st;
+      });
+      return;
+    } catch (err) {
+      if (i === 4) console.error(`${TAG} could not record the outcome for pair ${id}:`, err);
+      await new Promise(r => setTimeout(r, 300));
+    }
+  }
+}
+
+/** A send that never throws: an exception is an unknown outcome (the order may have gone out). */
+const safePlace = (...a: Parameters<typeof placeFor>): Promise<PlaceOutcome> =>
+  placeFor(...a).catch((err: unknown) => ({ status: 'unknown' as const, error: String((err as Error)?.message ?? err) }));
+
+async function runPairJob(s: LadderState, j: PairJob, prices: PriceView, ctx: JobCtx): Promise<void> {
+  const p = (s.pairs ?? []).find(y => y.id === j.id);
+  if (!p) return;
+  const name = pairName(p);
+  const now = Date.now();
+
+  if (j.kind === 'pairOpen') {
+    // Both legs together (MARKET, the 'pl' lot cap, the broker's own order body): every outcome is recorded.
+    const out = await Promise.all(LEG_KEYS.map(k => safePlace(legOrder(p, k), p.side, p.qty, true)));
+    await commitPair(p.id, 'placing', (cur, st) => {
+      const legs = { ...cur.legs };
+      const msgs: string[] = [];
+      LEG_KEYS.forEach((k, i) => {
+        const r = out[i];
+        if (r.status === 'placed') legs[k] = { ...legs[k], orderId: r.orderId, entry: 'sent' };
+        else if (r.status === 'rejected') { legs[k] = { ...legs[k], entry: 'dead', filledQty: 0, note: r.error }; msgs.push(`${k.toUpperCase()} rejected: ${r.error}`); }
+        else { legs[k] = { ...legs[k], entry: 'unknown', unknown: 'entry', note: r.error }; msgs.push(`${k.toUpperCase()} UNKNOWN: ${r.error}`); }
+      });
+      const next = patchPair(st, p.id, { legs });
+      return pushEvent(next, ev(msgs.length ? 'error' : 'info', `${name}: entry orders ${msgs.length ? msgs.join('; ') : 'placed'}`, p.id));
+    });
+    return;
+  }
+
+  if (j.kind === 'pairSettle') {
+    lastPoll.set(p.id, Date.now());
+    const entry = p.state === 'placing';
+    const reads = await Promise.all(LEG_KEYS.map(async k => {
+      const l = p.legs[k];
+      const id = entry ? (l.entry === 'sent' ? l.orderId : undefined) : l.exitOrderId;
+      if (!id) return undefined;
+      const st = await orderStatus(p.broker, id, ctx.orderBooks);
+      return { id, v: st ? settleOrder(st) : null };
+    }));
+    await commitPair(p.id, p.state, (cur, st) => {
+      const legs = { ...cur.legs };
+      let msg = '';
+      LEG_KEYS.forEach((k, i) => {
+        const read = reads[i];
+        if (read === undefined) return;
+        const before = legs[k];
+        // Only for the order that was read: a leg that has since moved on to another order (a retried exit) keeps it.
+        if ((entry ? before.orderId : before.exitOrderId) !== read.id || (entry && before.entry !== 'sent')) return;
+        const v = read.v;
+        const after = entry
+          ? settleLegEntry(before, v, cur.sentAt ?? now, now)
+          : settleLegExit(before, v, now, prices.ltps[before.contract.securityId]);
+        legs[k] = after;
+        if (entry && after.entry !== before.entry) msg += ` ${k.toUpperCase()} ${after.entry}${after.avg ? ` @ ${after.avg.toFixed(2)}` : ''}${after.entry === 'dead' ? ` (${after.note})` : ''};`;
+        if (!entry && (after.held ?? 0) !== (before.held ?? 0)) msg += ` ${k.toUpperCase()} exited ${(before.held ?? 0) - (after.held ?? 0)} @ ${after.exitAvg?.toFixed(2) ?? '?'};`;
+        if (!entry && v?.kind === 'dead') msg += ` ${k.toUpperCase()} exit ${v.reason} — retrying;`;
+      });
+      const next = patchPair(st, p.id, { legs });
+      return msg ? pushEvent(next, ev(/dead|retrying|unknown/.test(msg) ? 'error' : 'info', `${name}:${msg}`, p.id)) : next;
+    });
+    return;
+  }
+
+  // pairClose: each leg marked for sending, sized against the broker book (never more than the broker still shows in
+  // that direction, after any slice / leg on the same row this tick), then sent together.
+  const exitSide: LadderSide = p.side === 'BUY' ? 'SELL' : 'BUY';
+  const send = LEG_KEYS.filter(k => p.legs[k].exitSentAt && !p.legs[k].exitOrderId && (p.legs[k].held ?? 0) > 0);
+  const book = send.length ? await ctx.bookFor(p.broker) : null;
+  const inGrace = now - (p.openedAt ?? 0) < FILL_GRACE_MS;
+  const sized = send.map(k => {
+    const own = p.legs[k].held ?? 0;
+    const key = legBookKey(p, k);
+    let qty: number;
+    if (book == null) qty = exitQtyFor(own, p.side, { failed: true }, inGrace);
+    else {
+      const raw = book.has(key) ? book.get(key)! : null;
+      const usedHere = ctx.used.get(key) ?? 0;
+      qty = exitQtyFor(own, p.side, { net: raw == null ? null : (p.side === 'BUY' ? raw - usedHere : raw + usedHere) }, inGrace);
+    }
+    if (qty > 0) ctx.used.set(key, (ctx.used.get(key) ?? 0) + qty);
+    return { k, qty };
+  });
+  const out = await Promise.all(sized.map(({ k, qty }) => (qty > 0 ? safePlace(legOrder(p, k), exitSide, qty, false) : Promise.resolve(null))));
+  await commitPair(p.id, 'exiting', (cur, st) => {
+    const legs = { ...cur.legs };
+    const msgs: string[] = [];
+    sized.forEach(({ k, qty }, i) => {
+      const r = out[i];
+      const l = legs[k];
+      if (r == null) {
+        // The broker no longer shows it: closed outside the ladder (booked at the live price when there is one).
+        Object.assign(legs, cutPairLeg({ ...cur, legs }, k, l.held ?? 0, prices.ltps[l.contract.securityId], now).legs);
+        legs[k] = { ...legs[k], exitSentAt: undefined };
+        msgs.push(`${k.toUpperCase()} not at the broker any more — closed outside the ladder`);
+      } else if (r.status === 'placed') legs[k] = { ...l, exitOrderId: r.orderId, exitQty: qty };
+      else if (r.status === 'rejected') { legs[k] = { ...l, exitSentAt: undefined, exitRetryAt: now + PAIR_EXIT_RETRY_MS, note: `Exit rejected: ${r.error}` }; msgs.push(`${k.toUpperCase()} exit rejected: ${r.error} — retrying in 15s`); }
+      else { legs[k] = { ...l, unknown: 'exit', note: r.error }; msgs.push(`${k.toUpperCase()} exit UNKNOWN: ${r.error}`); }
+    });
+    const next = patchPair(st, p.id, { legs });
+    return pushEvent(next, ev(msgs.length ? (msgs.some(m => /UNKNOWN|rejected/.test(m)) ? 'error' : 'warn') : 'info', `${name}: exit ${msgs.length ? msgs.join('; ') : `orders placed (${sized.map(x => `${x.qty} ${x.k.toUpperCase()}`).join(' + ')})`}`, p.id));
+  });
 }
 
 export function openedPatch(s: LadderState, x: LadderSlice, qty: number, avg: number, now: number): LadderState {
@@ -725,32 +877,60 @@ export function afterSend(s: LadderState, id: string, r: PlaceOutcome, which: 'e
  * ladder holds on that contract, the newest slices outside the fill grace are closed as "closed outside the ladder".
  */
 async function reconcileDown(s: LadderState, prices: PriceView, now: number): Promise<void> {
-  const out: { id: string; apply: (st: LadderState) => LadderState }[] = [];
-  const groups = new Map<string, LadderSlice[]>();
+  const out: { kind: 'slice' | 'pair'; id: string; apply: (st: LadderState) => LadderState }[] = [];
+  // One broker book row (contract + product) can hold slices AND pair legs: the ladder's whole ownership on it is
+  // compared with the broker, so neither engine's units hide a gap in the other's.
+  type Holder = { id: string; qty: number; openedAt: number; side: LadderSide; slice?: LadderSlice; pair?: { p: LadderPair; k: PairLegKey } };
+  const groups = new Map<string, { broker: LadderBroker; holders: Holder[] }>();
+  const add = (broker: LadderBroker, key: string, h: Holder) => {
+    const k = `${broker}|${key}`;
+    (groups.get(k) ?? groups.set(k, { broker, holders: [] }).get(k)!).holders.push(h);
+  };
   for (const x of s.slices) {
     if (x.mode !== 'real' || x.state !== 'open') continue;
-    const k = `${x.broker}|${bookKey(x)}`;
-    (groups.get(k) ?? groups.set(k, []).get(k)!).push(x);
+    add(x.broker, bookKey(x), { id: x.id, qty: Number(x.filledQty) || 0, openedAt: x.openedAt ?? 0, side: x.side, slice: x });
+  }
+  for (const p of s.pairs ?? []) {
+    if (p.mode !== 'real' || (p.state !== 'open' && p.state !== 'broken')) continue;
+    for (const k of LEG_KEYS) {
+      if ((p.legs[k].held ?? 0) > 0) add(p.broker, legBookKey(p, k), { id: `${p.id}:${k}`, qty: p.legs[k].held!, openedAt: p.openedAt ?? 0, side: p.side, pair: { p, k } });
+    }
   }
   if (!groups.size) return;
   const books = new Map<LadderBroker, Map<string, number> | null>();
-  for (const [k, xs] of groups) {
-    const broker = xs[0].broker;
+  for (const [k, g] of groups) {
+    const broker = g.broker;
     if (!books.has(broker)) books.set(broker, await brokerBook(broker));
     const book = books.get(broker);
     if (!book) continue;                                        // unreadable: leave the ledger alone
-    if (xs.some(x => now - (x.openedAt ?? 0) < FILL_GRACE_MS)) continue; // a fresh fill may not be in the book yet
+    if (g.holders.some(h => now - h.openedAt < FILL_GRACE_MS)) continue; // a fresh fill may not be in the book yet
     const raw = book.get(k.slice(broker.length + 1)) ?? 0;
     for (const side of ['BUY', 'SELL'] as const) {
-      const mine = xs.filter(x => x.side === side).sort((a, b) => (b.openedAt ?? 0) - (a.openedAt ?? 0));
-      let own = mine.reduce((a, x) => a + (Number(x.filledQty) || 0), 0);
+      const mine = g.holders.filter(h => h.side === side);
       const capacity = side === 'BUY' ? Math.max(0, raw) : Math.max(0, -raw);
-      for (const x of mine) {
-        if (own <= capacity) break;
-        const cut = Math.min(Number(x.filledQty) || 0, own - capacity);
-        own -= cut;
+      const cuts = cutsNewestFirst(mine, capacity);
+      for (const h of mine) {
+        const cut = cuts.get(h.id);
+        if (!cut) continue;
+        if (h.pair) {
+          const { p, k: leg } = h.pair;
+          const ltp = prices.ltps[p.legs[leg].contract.securityId];
+          out.push({
+            kind: 'pair',
+            id: p.id,
+            apply: st => {
+              const cur = (st.pairs ?? []).find(y => y.id === p.id);
+              if (!cur || (cur.state !== 'open' && cur.state !== 'broken')) return st;
+              const patch = cutPairLeg(cur, leg, Math.min(cut, cur.legs[leg].held ?? 0), ltp, now);
+              return pushEvent(patchPair(st, p.id, patch, now), ev('error', `${pairName(cur)}: broker shows ${cut} fewer ${leg.toUpperCase()} — ${patch.state === 'closed' ? 'both legs gone, closed' : 'pair BROKEN, bracket stopped; exit what is left from the pair table'}`, p.id));
+            },
+          });
+          continue;
+        }
+        const x = h.slice!;
         const ltp = prices.ltps[x.contract.securityId];
         out.push({
+          kind: 'slice',
           id: x.id,
           apply: st => {
             const cur = st.slices.find(y => y.id === x.id);
@@ -763,7 +943,11 @@ async function reconcileDown(s: LadderState, prices: PriceView, now: number): Pr
       }
     }
   }
-  for (const o of out) await commit(o.id, 'open', o.apply);
+  // Pair cuts check their own state inside apply (open or broken); slice cuts need the slice still open.
+  for (const o of out) {
+    if (o.kind === 'pair') await updateLadderState(o.apply);
+    else await commit(o.id, 'open', o.apply);
+  }
 }
 
 const LOOP_KEY = '__priceLadderLoop';
@@ -813,10 +997,17 @@ async function tick(): Promise<void> {
   // between our read and the lock). Opens and closes are protected by that mark: the next tick sees 'placing' /
   // 'exiting' and never sends them again.
   let jobs: Job[] = [];
-  // Pairs are SIM only (Phase 1): planPairs fills and exits them in the same write, with no broker job.
-  const planned = await updateLadderState(cur => { const r = planTick(cur, prices, now, io); jobs = r.jobs; return planPairs(r.next, prices.ltps, now); });
+  let pairJobs: PairJob[] = [];
+  const planned = await updateLadderState(cur => {
+    const r = planTick(cur, prices, now, io);
+    jobs = r.jobs;
+    // Pairs: SIM fills / exits happen in this write; REAL orders are marked here and sent by the pair jobs below.
+    const pr = planPairs(r.next, prices.ltps, now, io);
+    pairJobs = pr.jobs;
+    return pr.next;
+  });
   // Not awaited: the watcher keeps ticking (and checking every other stop) while orders are on the wire.
-  if (jobs.length) void runJobs(planned, jobs, prices);
+  if (jobs.length || pairJobs.length) void runJobs(planned, jobs, prices, pairJobs);
   if (!reconciling && Date.now() - lastReconcile >= RECONCILE_MS) {
     lastReconcile = Date.now();
     reconciling = true;

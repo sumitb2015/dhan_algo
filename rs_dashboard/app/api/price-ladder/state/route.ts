@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { buildLadderView, resolveContract } from '@/lib/priceLadderView';
 import { pairAction } from '@/lib/priceLadderPairActions';
-import { isPairLive } from '@/lib/priceLadderPair';
+import { isPairLive, lotsOnContract } from '@/lib/priceLadderPair';
 import {
   readLadderState, updateLadderState, startPriceLadderLoop, loadPrices, placeFor, afterSend, cancelAtBroker,
   brokerSessionOk, availableFunds, dhanSellMargin, withJob, commitIf, openedPatch, LADDER_UNDERLYINGS,
@@ -193,10 +193,8 @@ async function arm(b: ArmBody): Promise<NextResponse> {
  * cap). Armed XY levels count: the watcher fires them at market without re-checking, so several could cross at once.
  */
 function lotsHeld(st: LadderState, p: LadderSlice, exceptId?: string): number {
-  return st.slices
-    .filter(x => x.id !== exceptId && x.contract.securityId === p.contract.securityId && x.broker === p.broker && x.mode === p.mode && x.side === p.side
-      && ['armed', 'open', 'exiting', 'placing', 'working'].includes(x.state))
-    .reduce((a, x) => a + x.lots, 0);
+  // Pair legs on the same contract count too (one cap across single options and pairs).
+  return lotsOnContract(st, p.contract.securityId, p.broker, p.mode, p.side, exceptId);
 }
 
 /**

@@ -503,8 +503,21 @@ export function rollDay(s: LadderState, today: string, now: number): LadderState
       return x;
     })
     .filter(x => !TERMINAL.has(x.state));
-  // Pairs: armed levels expire with the day, finished ones are dropped, open ones are carried (NRML).
-  const pairs = (s.pairs ?? []).filter(p => p.state === 'open');
+  // Pairs: armed levels expire with the day and finished ones are dropped; anything that may still be at the broker is
+  // carried. A REAL pair caught mid-order (placing / exiting) becomes UNKNOWN: an earlier session's order can no longer
+  // be read by id, so the user checks Orders/Positions and resolves each leg.
+  const pairs = (s.pairs ?? [])
+    .filter(p => p.state !== 'armed' && p.state !== 'closed' && p.state !== 'cancelled')
+    .map(p => {
+      if (p.state !== 'placing' && p.state !== 'exiting') return p;
+      const leg = (l: typeof p.legs.ce) => (p.state === 'placing'
+        ? (l.entry === 'sent' || l.entry == null ? { ...l, entry: 'unknown' as const, unknown: 'entry' as const } : l)
+        : (l.exitOrderId || l.exitSentAt ? { ...l, unknown: 'exit' as const } : l));
+      const legs = { ce: leg(p.legs.ce), pe: leg(p.legs.pe) };
+      // Nothing was in flight (e.g. an exit waiting to retry): it carries on as it was.
+      if (!legs.ce.unknown && !legs.pe.unknown) return p;
+      return { ...p, state: 'unknown' as const, legs, note: 'Order from an earlier session — check Orders/Positions, then resolve each leg', updatedAt: now };
+    });
   return { date: today, slices, events: [], liveArmedOn: undefined, ...(pairs.length ? { pairs } : {}), ...(s.rev != null ? { rev: s.rev } : {}) };
 }
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { rollDay, type LadderState } from './priceLadder.ts';
-import { planPairs, pairEntryFills, pairCombined, pairNowPnl, sumPairPnl, pairLevelSane, type LadderPair } from './priceLadderPair.ts';
+import { planPairs as planPairsTick, blendExitAvg, pairEntryVerdict, settleLegEntry, settleLegExit, cutsNewestFirst, cutPairLeg, lotsOnContract, pairEntryFills, pairCombined, pairNowPnl, sumPairPnl, pairLevelSane, type LadderPair } from './priceLadderPair.ts';
 
 const leg = (opt: 'CE' | 'PE', securityId: string, over: Record<string, unknown> = {}) => ({
   contract: { underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt, securityId, lotSize: 65, exchangeSegment: 'NSE_FNO', ...over },
@@ -15,6 +15,7 @@ const st = (p: LadderPair): LadderState => ({ date: '2026-10-22', slices: [], ev
 // 2026-10-22 (Thursday) at hh:mm IST.
 const at = (hh: number, mm: number) => Date.UTC(2026, 9, 22, hh, mm) - 330 * 60_000;
 const one = (s: LadderState) => s.pairs![0];
+const planPairs = (s: LadderState, ltps: Record<string, number>, now: number) => planPairsTick(s, ltps, now).next;
 
 test('pairCombined: both legs priced, else null', () => {
   assert.equal(pairCombined(pair(), { 1: 150.1, 2: 149.95 }), 300.05);
@@ -165,4 +166,202 @@ test('rollDay: armed and finished pairs go, open ones are carried', () => {
   const s: LadderState = { date: '2026-10-21', slices: [], events: [], pairs: [pair({ id: 'a' }), openShort({ id: 'b', product: 'NRML' }), pair({ id: 'c', state: 'closed' })] };
   const r = rollDay(s, '2026-10-22', at(9, 0));
   assert.deepEqual(r.pairs!.map(p => p.id), ['b']);
+});
+
+// ── REAL pairs (Phase 2) ──
+const realSt = (p: LadderPair): LadderState => ({ date: '2026-10-22', slices: [], events: [], pairs: [p], liveArmedOn: '2026-10-22' });
+const io = (over: Partial<{ polled: number; busy: boolean }> = {}) => ({ polledAt: () => over.polled ?? 0, busy: () => over.busy ?? false });
+
+test('REAL armed: a cross marks placing (both legs sent by a job), nothing filled here; LIVE arm off cancels', () => {
+  const p = pair({ mode: 'real' });
+  const r = planPairsTick(realSt(p), { 1: 151, 2: 150 }, at(10, 0), io());
+  assert.equal(one(r.next).state, 'placing');
+  assert.equal(one(r.next).crossY, 301);
+  assert.equal(one(r.next).legs.ce.avg, undefined);
+  assert.deepEqual(r.jobs, [{ kind: 'pairOpen', id: 'p1' }]);
+  const off = planPairsTick({ ...realSt(p), liveArmedOn: undefined }, { 1: 151, 2: 150 }, at(10, 0), io());
+  assert.equal(one(off.next).state, 'cancelled');
+  assert.equal(off.jobs.length, 0);
+});
+
+const placing = (ce: Partial<LadderPair['legs']['ce']>, pe: Partial<LadderPair['legs']['pe']>, over: Partial<LadderPair> = {}) => pair({
+  mode: 'real', state: 'placing', sentAt: at(10, 0), crossY: 300, bracket: { tgtPts: 20, slPts: 15 },
+  legs: { ce: { ...leg('CE', '1'), ...ce }, pe: { ...leg('PE', '2'), ...pe } }, ...over,
+});
+
+test('pairEntryVerdict: unknown wins, then wait, then open (both in full), else unwind', () => {
+  assert.equal(pairEntryVerdict(placing({ entry: 'unknown' }, { entry: 'dead' })), 'unknown');
+  assert.equal(pairEntryVerdict(placing({ entry: 'filled', filledQty: 65 }, { entry: 'sent' })), 'wait');
+  assert.equal(pairEntryVerdict(placing({ entry: 'filled', filledQty: 65 }, { entry: 'filled', filledQty: 65 })), 'open');
+  assert.equal(pairEntryVerdict(placing({ entry: 'filled', filledQty: 65 }, { entry: 'dead' })), 'unwind');
+  assert.equal(pairEntryVerdict(placing({ entry: 'filled', filledQty: 65 }, { entry: 'filled', filledQty: 30 })), 'unwind');
+});
+
+test('REAL placing: both filled → open at the traded prices, bracket from that combined', () => {
+  const r = planPairsTick(realSt(placing({ entry: 'filled', filledQty: 65, avg: 152 }, { entry: 'filled', filledQty: 65, avg: 150.5 })), {}, at(10, 1), io());
+  const o = one(r.next);
+  assert.equal(o.state, 'open');
+  assert.equal(o.entryY, 302.5);
+  assert.equal(o.legs.ce.held, 65);
+  assert.equal(o.tgtY, 282.5);
+  assert.equal(o.slY, 317.5);
+});
+
+test('REAL placing: one leg rejected → unwind the filled leg at once (exiting + pairClose); none filled → cancelled', () => {
+  const r = planPairsTick(realSt(placing({ entry: 'filled', filledQty: 65, avg: 152 }, { entry: 'dead', note: 'margin' })), {}, at(10, 1), io());
+  const o = one(r.next);
+  assert.equal(o.state, 'exiting');
+  assert.equal(o.exitReason, 'Entry failed — unwinding');
+  assert.equal(o.legs.ce.held, 65);
+  assert.equal(o.legs.ce.exitSentAt, at(10, 1));
+  assert.equal(o.legs.pe.held, 0);
+  assert.deepEqual(r.jobs, [{ kind: 'pairClose', id: 'p1' }]);
+  const none = planPairsTick(realSt(placing({ entry: 'dead' }, { entry: 'dead' })), {}, at(10, 1), io());
+  assert.equal(one(none.next).state, 'cancelled');
+  assert.equal(none.jobs.length, 0);
+});
+
+test('REAL placing: an unknown leg → UNKNOWN, nothing reversed; working orders are polled; an orphan send → UNKNOWN', () => {
+  const u = planPairsTick(realSt(placing({ entry: 'filled', filledQty: 65 }, { entry: 'unknown', unknown: 'entry' })), {}, at(10, 1), io());
+  assert.equal(one(u.next).state, 'unknown');
+  assert.equal(u.jobs.length, 0);
+  const w = planPairsTick(realSt(placing({ entry: 'sent', orderId: 'a' }, { entry: 'sent', orderId: 'b' })), {}, at(10, 1), io());
+  assert.deepEqual(w.jobs, [{ kind: 'pairSettle', id: 'p1' }]);
+  assert.equal(planPairsTick(realSt(placing({ entry: 'sent', orderId: 'a' }, { entry: 'sent', orderId: 'b' })), {}, at(10, 1), io({ polled: Infinity })).jobs.length, 0);
+  const orphan = planPairsTick(realSt(placing({}, {})), {}, at(10, 1), io());
+  assert.equal(one(orphan.next).state, 'unknown');
+  assert.equal(one(planPairsTick(realSt(placing({}, {})), {}, at(10, 1), io({ busy: true })).next).state, 'placing');
+});
+
+test('settleLegEntry / settleLegExit: fills, rejections, partial exits, timeouts', () => {
+  const l = { ...leg('CE', '1'), orderId: 'a', entry: 'sent' as const };
+  assert.deepEqual(settleLegEntry(l, { kind: 'filled', filledQty: 65, avg: 120 }, 0, 1000).entry, 'filled');
+  assert.equal(settleLegEntry(l, { kind: 'dead', reason: 'REJECTED' }, 0, 1000).entry, 'dead');
+  assert.equal(settleLegEntry(l, null, 0, 61_000).unknown, 'entry');
+  assert.equal(settleLegEntry(l, { kind: 'wait', filledQty: 0 }, 0, 1000).entry, 'sent');
+  const x = { ...leg('CE', '1'), held: 65, exitOrderId: 'e', exitQty: 65, exitSentAt: 0 };
+  const part = settleLegExit(x, { kind: 'filled', filledQty: 30, avg: 100 }, 1000);
+  assert.equal(part.held, 35);
+  assert.equal(part.exitedQty, 30);
+  assert.equal(part.exitAvg, 100);
+  assert.equal(part.exitOrderId, undefined);
+  assert.equal(part.exitRetryAt, 1000 + 15_000);
+  const all = settleLegExit({ ...part, exitOrderId: 'f', exitQty: 35 }, { kind: 'filled', filledQty: 35, avg: 110 }, 2000);
+  assert.equal(all.held, 0);
+  assert.equal(all.exitAvg, Number(((100 * 30 + 110 * 35) / 65).toFixed(2)));
+  const dead = settleLegExit(x, { kind: 'dead', reason: 'REJECTED' }, 1000);
+  assert.equal(dead.held, 65);
+  assert.equal(dead.exitRetryAt, 16_000);
+  assert.equal(settleLegExit(x, null, 61_000).unknown, 'exit');
+});
+
+const openReal = (over: Partial<LadderPair> = {}) => openShort({
+  mode: 'real', legs: { ce: { ...leg('CE', '1'), avg: 150, held: 65, filledQty: 65, entry: 'filled' }, pe: { ...leg('PE', '2'), avg: 150, held: 65, filledQty: 65, entry: 'filled' } }, ...over,
+});
+
+test('REAL open: an SL hit marks exiting and both legs for sending; outside the session it is held', () => {
+  const r = planPairsTick(realSt(openReal()), { 1: 160, 2: 156 }, at(10, 0), io());
+  const o = one(r.next);
+  assert.equal(o.state, 'exiting');
+  assert.match(o.exitReason!, /^SL 315/);
+  assert.ok(o.legs.ce.exitSentAt && o.legs.pe.exitSentAt);
+  assert.deepEqual(r.jobs, [{ kind: 'pairClose', id: 'p1' }]);
+  const h = planPairsTick(realSt(openReal({ exitWanted: 'Manual exit' })), { 1: 150, 2: 150 }, at(16, 0), io());
+  assert.equal(one(h.next).state, 'open');
+  assert.equal(h.jobs.length, 0);
+});
+
+test('REAL exiting: a rejected leg is sent again after its wait; both flat → closed', () => {
+  const ex = (ce: Partial<LadderPair['legs']['ce']>, pe: Partial<LadderPair['legs']['pe']>) => openReal({
+    state: 'exiting', exitReason: 'SL 315',
+    legs: { ce: { ...leg('CE', '1'), avg: 150, ...ce }, pe: { ...leg('PE', '2'), avg: 150, ...pe } },
+  });
+  const wait = planPairsTick(realSt(ex({ held: 65, exitRetryAt: at(10, 1) }, { held: 0, exitedQty: 65, exitAvg: 151 })), {}, at(10, 0), io());
+  assert.equal(wait.jobs.length, 0);
+  const again = planPairsTick(realSt(ex({ held: 65, exitRetryAt: at(10, 0) }, { held: 0, exitedQty: 65, exitAvg: 151 })), {}, at(10, 1), io());
+  assert.deepEqual(again.jobs, [{ kind: 'pairClose', id: 'p1' }]);
+  assert.ok(one(again.next).legs.ce.exitSentAt);
+  const done = planPairsTick(realSt(ex({ held: 0, exitedQty: 65, exitAvg: 149 }, { held: 0, exitedQty: 65, exitAvg: 151 })), {}, at(10, 1), io());
+  assert.equal(one(done.next).state, 'closed');
+  assert.equal(pairNowPnl(one(done.next), {}), (150 - 149) * 65 + (150 - 151) * 65);
+});
+
+test('REAL broken: the bracket is off, a manual exit sends only what is left', () => {
+  const p = openReal({ state: 'broken', legs: { ce: { ...leg('CE', '1'), avg: 150, held: 0, exitedQty: 65, exitAvg: 140, outside: true }, pe: { ...leg('PE', '2'), avg: 150, held: 65 } } });
+  assert.equal(one(planPairsTick(realSt(p), { 1: 200, 2: 200 }, at(10, 0), io()).next).state, 'broken');
+  const r = planPairsTick(realSt({ ...p, exitWanted: 'Manual exit' }), { 1: 150, 2: 150 }, at(10, 0), io());
+  assert.equal(one(r.next).state, 'exiting');
+  assert.equal(one(r.next).legs.ce.exitSentAt, undefined);
+  assert.ok(one(r.next).legs.pe.exitSentAt);
+});
+
+test('cutsNewestFirst / cutPairLeg: down-only, newest first; a cut leg breaks the pair, both gone closes it', () => {
+  const cuts = cutsNewestFirst([{ id: 'old', qty: 65, openedAt: 1 }, { id: 'new', qty: 65, openedAt: 2 }], 65);
+  assert.deepEqual([...cuts], [['new', 65]]);
+  assert.equal(cutsNewestFirst([{ id: 'a', qty: 65, openedAt: 1 }], 130).size, 0);
+  const p = openReal();
+  const b = cutPairLeg(p, 'ce', 65, 140, 5);
+  assert.equal(b.state, 'broken');
+  assert.equal(b.legs!.ce.held, 0);
+  assert.equal(b.legs!.ce.outside, true);
+  const c = cutPairLeg({ ...p, ...b } as LadderPair, 'pe', 65, 160, 6);
+  assert.equal(c.state, 'closed');
+});
+
+test('lotsOnContract: slices and pair legs share one cap per contract', () => {
+  const st: LadderState = { date: '2026-10-22', events: [], pairs: [openReal({ lots: 3 })], slices: [
+    { id: 's', kind: 'xy', broker: 'dhan', mode: 'real', contract: leg('CE', '1').contract, side: 'SELL', lots: 2, qty: 130, product: 'MIS', state: 'open', createdAt: 0, updatedAt: 0 },
+  ] };
+  assert.equal(lotsOnContract(st, '1', 'dhan', 'real', 'SELL'), 5);
+  assert.equal(lotsOnContract(st, '2', 'dhan', 'real', 'SELL'), 3);
+  assert.equal(lotsOnContract(st, '1', 'dhan', 'sim', 'SELL'), 0);
+});
+
+test('rollDay: a REAL pair caught mid-entry becomes UNKNOWN on the next day', () => {
+  const s: LadderState = { date: '2026-10-21', slices: [], events: [], pairs: [placing({ entry: 'sent', orderId: 'a' }, { entry: 'filled', filledQty: 65 })] };
+  const r = rollDay(s, '2026-10-22', at(9, 0));
+  assert.equal(r.pairs![0].state, 'unknown');
+  assert.equal(r.pairs![0].legs.ce.unknown, 'entry');
+  assert.equal(r.pairs![0].legs.pe.unknown, undefined);
+});
+
+// ── review fixes (Phase 2) ──
+test('unwind: starts inside the fill grace (openedAt = now) so its exit is not sized off a book without the fill', () => {
+  const r = planPairsTick(realSt(placing({ entry: 'filled', filledQty: 65, avg: 152 }, { entry: 'dead' })), {}, at(10, 1), io());
+  assert.equal(one(r.next).openedAt, at(10, 1));
+});
+
+test('open verdict: a fill with no average takes the live LTP; with neither the pair waits (no NaN bracket)', () => {
+  const p = placing({ entry: 'filled', filledQty: 65 }, { entry: 'filled', filledQty: 65, avg: 150 });
+  const wait = planPairsTick(realSt(p), {}, at(10, 1), io());
+  assert.equal(one(wait.next).state, 'placing');
+  assert.match(one(wait.next).note!, /waiting for a price/);
+  const o = one(planPairsTick(realSt(p), { 1: 151 }, at(10, 1), io()).next);
+  assert.equal(o.state, 'open');
+  assert.equal(o.entryY, 301);
+  assert.ok(Number.isFinite(o.slY!));
+});
+
+test('a filled leg counts in P&L while the other is in doubt (placing / unknown)', () => {
+  const p = placing({ entry: 'filled', filledQty: 65, avg: 150 }, { entry: 'unknown', unknown: 'entry' }, { state: 'unknown' });
+  assert.equal(pairNowPnl(p, { 1: 160 }), (150 - 160) * 65);
+});
+
+test('blendExitAvg: weighted; no price books at the entry average, never blanks P&L', () => {
+  assert.equal(blendExitAvg({ ...leg('CE', '1'), avg: 100, exitedQty: 30, exitAvg: 90 }, 30, 110), 100);
+  assert.equal(blendExitAvg({ ...leg('CE', '1'), avg: 100 }, 65, undefined), 100);
+  const cut = cutPairLeg(openReal(), 'ce', 65, undefined, 5);
+  assert.equal(cut.legs!.ce.exitAvg, 150);
+  assert.notEqual(pairNowPnl({ ...openReal(), ...cut } as LadderPair, { 2: 150 }), null);
+});
+
+test('exiting past expiry: closed (settled at the broker), not retried forever', () => {
+  const p = openReal({
+    state: 'exiting', exitReason: 'SL 315',
+    legs: { ce: { ...leg('CE', '1', { expiry: '2026-10-20' }), avg: 150, held: 65, exitRetryAt: 0 }, pe: { ...leg('PE', '2', { expiry: '2026-10-20' }), avg: 150, held: 0 } },
+  });
+  const r = planPairsTick(realSt(p), {}, at(10, 0), io());
+  assert.equal(one(r.next).state, 'closed');
+  assert.equal(one(r.next).exitReason, 'Expired');
+  assert.equal(r.jobs.length, 0);
 });
