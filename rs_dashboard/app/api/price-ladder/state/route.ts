@@ -35,7 +35,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const strike = Number(req.nextUrl.searchParams.get('strike'));
     const opt = req.nextUrl.searchParams.get('opt');
     let shown: LadderContract | null = null;
-    if (want && /^\d{4}-\d{2}-\d{2}$/.test(expiry) && strike > 0 && (opt === 'CE' || opt === 'PE')) {
+    if (LADDER_UNDERLYINGS.includes(want) && /^\d{4}-\d{2}-\d{2}$/.test(expiry) && strike > 0 && (opt === 'CE' || opt === 'PE')) {
       const c = await resolveContract('dhan', want, expiry, strike, opt);
       if (typeof c !== 'string') shown = c;
     }
@@ -134,6 +134,9 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   const c = await resolveContract(b.broker, u, b.expiry, strike, b.opt);
   if (typeof c === 'string') return bad(c);
   const qty = lots * c.lotSize;
+  const probe = { contract: c, broker: b.broker, mode: b.mode, side: b.side } as LadderSlice;
+  const held0 = lotsHeld(state, probe);
+  if (held0 + lots > MAX_LADDER_LOTS) return bad(`The ladder already holds or has armed ${held0} lots of this contract — the cap is ${MAX_LADDER_LOTS}`);
 
   const prices = await loadPrices([u], [c]);
   const spot = prices.spots[u];
@@ -166,7 +169,13 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   if (b.kind === 'xy') {
     const slice: LadderSlice = { ...base, entryLevel: level, entryDir: verdict.dir, seenSafe: true, orderType: b.orderType, ...(bracket ? { bracket } : {}) };
     const br = bracket ? ` · ${bracket.tgtPts > 0 ? `TGT ${bracket.tgtPts} / ` : 'Cover · '}SL ${bracket.slPts}${bracket.trailPts ? ` / trail ${bracket.trailPts}` : ''} pts` : '';
-    const s = await updateLadderState(st => pushEvent({ ...st, slices: [...st.slices, slice] }, ev('info', `Armed ${what} when ${u} ${verdict.dir === 'below' ? '≤' : '≥'} ${level}${br}`, slice.id)));
+    let capped = false;
+    const s = await updateLadderState(st => {
+      // Re-checked inside the lock: two clicks in flight must not both pass the read above.
+      if (lotsHeld(st, slice) + lots > MAX_LADDER_LOTS) { capped = true; return st; }
+      return pushEvent({ ...st, slices: [...st.slices, slice] }, ev('info', `Armed ${what} when ${u} ${verdict.dir === 'below' ? '≤' : '≥'} ${level}${br}`, slice.id));
+    });
+    if (capped) return bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
     return NextResponse.json({ success: true, data: { id: slice.id, state: s } });
   }
 
@@ -188,11 +197,14 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   return NextResponse.json({ success: false, error: r.error, data: { state: s } });
 }
 
-/** Lots this ladder holds or has on the wire on the same contract, broker, mode and side (the 20-lot holding cap). */
+/**
+ * Lots this ladder holds, has on the wire or has armed on the same contract, broker, mode and side (the 20-lot holding
+ * cap). Armed XY levels count: the watcher fires them at market without re-checking, so several could cross at once.
+ */
 function lotsHeld(st: LadderState, p: LadderSlice, exceptId?: string): number {
   return st.slices
     .filter(x => x.id !== exceptId && x.contract.securityId === p.contract.securityId && x.broker === p.broker && x.mode === p.mode && x.side === p.side
-      && ['open', 'exiting', 'placing', 'working'].includes(x.state))
+      && ['armed', 'open', 'exiting', 'placing', 'working'].includes(x.state))
     .reduce((a, x) => a + x.lots, 0);
 }
 
@@ -425,9 +437,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             for (const sid of ids) {
               const y = next.slices.find(z => z.id === sid);
               if (!y || y.state !== 'open' || y.kind !== 'xy' || !y.bracket || y.contract.securityId !== x.contract.securityId) continue;
-              const patch: Partial<LadderSlice> = { trailFrom: sp.spot, peakY: sp.spot };
+              const patch: Partial<LadderSlice> = {};
               if (body.tgtY != null) patch.tgtY = tgtY;
-              if (body.slY != null) Object.assign(patch, { slY, slY0: slY });
+              // Only a moved SL restarts trailing (from the new SL, measured from here). A target-only move leaves the
+              // trail's base untouched — resetting trailFrom/peakY there froze an already-trailed SL.
+              if (body.slY != null) Object.assign(patch, { slY, slY0: slY, trailFrom: sp.spot, peakY: sp.spot });
               next = patchSlice(next, sid, patch);
               moved++;
             }
@@ -442,12 +456,24 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       case 'trail': {
         const trail = Number(body.trailPts);
         if (!(trail >= 0) || !Number.isFinite(trail)) return bad('trailPts must be 0 or more');
+        let n = 0;
         const s = await updateLadderState(st => {
           const x = st.slices.find(y => y.id === id);
           if (!x || !x.bracket || TERMINAL.has(x.state)) return st;
-          // Trailing restarts from the SL as it stands, so switching it on never loosens a stop.
-          return pushEvent(patchSlice(st, id, { bracket: { ...x.bracket, trailPts: trail || undefined }, slY0: x.slY ?? x.slY0, trailFrom: x.state === 'open' ? (x.peakY ?? x.entryY) : undefined }), ev('info', trail ? `Trailing SL every ${trail} pts` : 'Trailing off', id));
+          // A '+1 lot' child shares its parent's target / SL: an open position's trail covers every open slice on those
+          // same levels, so no lot is left on the old, wider stop.
+          const joined = (y: LadderSlice) => y.id === id || (x.state === 'open' && y.state === 'open' && !!y.bracket && y.kind === x.kind
+            && y.contract.securityId === x.contract.securityId && y.broker === x.broker && y.mode === x.mode && y.side === x.side
+            && y.slY === x.slY && y.tgtY === x.tgtY);
+          let next = st;
+          for (const y of st.slices.filter(joined)) {
+            // Trailing restarts from the SL as it stands, so switching it on never loosens a stop.
+            next = patchSlice(next, y.id, { bracket: { ...y.bracket!, trailPts: trail || undefined }, slY0: y.slY ?? y.slY0, trailFrom: y.state === 'open' ? (y.peakY ?? y.entryY) : undefined });
+            n++;
+          }
+          return pushEvent(next, ev('info', `${trail ? `Trailing SL every ${trail} pts` : 'Trailing off'}${n > 1 ? ` (${n} slices)` : ''}`, id));
         });
+        if (!n) return bad('It is closed — trailing not changed', 409);
         return NextResponse.json({ success: true, data: { state: s } });
       }
 

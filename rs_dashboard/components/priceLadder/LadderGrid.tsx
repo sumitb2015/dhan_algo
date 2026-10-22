@@ -1,6 +1,7 @@
 'use client';
 
-import { Minus, Plus, X } from 'lucide-react';
+import { useEffect, useRef } from 'react';
+import { ChevronDown, ChevronUp, Minus, Plus, X } from 'lucide-react';
 import { bias, bracketLevels, ladderRows, snapToStep, type LadderSide, type LadderSlice } from '@/lib/priceLadder';
 
 /**
@@ -179,7 +180,7 @@ function OuterControlWidget({ w, onAdjust, onCancel }: {
  *  - When an open position is active, a horizontal blue line marks its entry level across the ladder.
  */
 export function LadderGrid({
-  center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryLevels,
+  center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryLevels, onScroll,
 }: {
   center: number; refPrice: number; tick: number; rows: number; widgets: LadderWidget[];
   limitZoneBuy: 'below' | 'above';
@@ -189,8 +190,34 @@ export function LadderGrid({
   onAdjust: (w: LadderWidget, delta: 1 | -1) => void;
   disabled: boolean; decimals: number;
   entryLevels?: number[];
+  /** Scroll the window by N ticks (positive = up, toward higher prices). Wheel over the rows or the ▲ / ▼ buttons. */
+  onScroll?: (ticks: number) => void;
 }) {
   const prices = ladderRows(center, tick, rows);
+  // Native, non-passive wheel listener: React's onWheel is passive, so it cannot stop the page scrolling too.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef(onScroll);
+  const rowsRef = useRef(rows);
+  useEffect(() => { scrollRef.current = onScroll; rowsRef.current = rows; }, [onScroll, rows]);
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    let acc = 0;
+    const onWheel = (e: WheelEvent) => {
+      if (!scrollRef.current || e.ctrlKey) return;
+      e.preventDefault();
+      // One tick per ~40px so a trackpad's stream of small deltas does not fly through the ladder.
+      // deltaMode 1 = lines, 2 = pages (a page of rows); 0 = pixels.
+      acc += e.deltaMode === 1 ? e.deltaY * 40 : e.deltaMode === 2 ? e.deltaY * 40 * rowsRef.current : e.deltaY;
+      const steps = Math.trunc(acc / 40);
+      if (steps === 0) return;
+      acc -= steps * 40;
+      scrollRef.current(-steps);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+  const page = Math.max(1, Math.floor(rows / 3));
   const refRow = refPrice > 0 ? snapToStep(refPrice, tick) : null;
   const byRow = new Map<number, LadderWidget[]>();
   for (const w of widgets) {
@@ -208,6 +235,13 @@ export function LadderGrid({
         <div className="px-2 py-1.5 text-center">Offers</div>
         <div className="px-2 py-1.5 text-center">Sell</div>
       </div>
+      {onScroll && (
+        <button type="button" onClick={() => onScroll(page)} aria-label={`Scroll ladder up ${page} ticks`} title="Scroll up (or use the mouse wheel)"
+          className="w-full flex items-center justify-center py-0.5 border-t border-zinc-900 text-zinc-400 hover:text-white hover:bg-zinc-800/60">
+          <ChevronUp className="w-4 h-4" />
+        </button>
+      )}
+      <div ref={bodyRef}>
       {prices.map(p => {
         const isRef = refRow != null && Math.abs(p - refRow) < tick / 2;
         const isEntry = entryLevels?.some(y => Math.abs(p - snapToStep(y, tick)) < tick / 2);
@@ -282,6 +316,13 @@ export function LadderGrid({
           </div>
         );
       })}
+      </div>
+      {onScroll && (
+        <button type="button" onClick={() => onScroll(-page)} aria-label={`Scroll ladder down ${page} ticks`} title="Scroll down (or use the mouse wheel)"
+          className="w-full flex items-center justify-center py-0.5 border-t border-zinc-900 text-zinc-400 hover:text-white hover:bg-zinc-800/60">
+          <ChevronDown className="w-4 h-4" />
+        </button>
+      )}
     </div>
   );
 }

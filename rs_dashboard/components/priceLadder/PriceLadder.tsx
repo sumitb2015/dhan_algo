@@ -110,6 +110,8 @@ export default function PriceLadder() {
   const [tick, setTick] = useState(5);
   const [center, setCenter] = useState(0);
   const [follow, setFollow] = useState(true);
+  // The user scrolled the ladder away: hold the window where they put it until Centre / Follow price.
+  const [manual, setManual] = useState(false);
   const [data, setData] = useState<StateResp | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [indexQ, setIndexQ] = useState<IndexQuote | null>(null);
@@ -125,8 +127,8 @@ export default function PriceLadder() {
     /* eslint-enable react-hooks/set-state-in-effect */
     return installAlertSoundUnlock();
   }, []);
-  const setMode = (m: LadderMode) => { setModeRaw(m); savePref('price-ladder-mode', m); setTick(m === 'xy' ? 5 : 0.05); setFollow(true); };
-  const setUnderlying = (u: string) => { setUnderlyingRaw(u); savePref('price-ladder-underlying', u); setStrike(null); setFollow(true); };
+  const setMode = (m: LadderMode) => { setModeRaw(m); savePref('price-ladder-mode', m); setTick(m === 'xy' ? 5 : 0.05); setFollow(true); setManual(false); };
+  const setUnderlying = (u: string) => { setUnderlyingRaw(u); savePref('price-ladder-underlying', u); setStrike(null); setFollow(true); setManual(false); };
 
   // The indices feed is the XY ladder's spot source; the server falls back to a paced REST quote if it is down.
   useEffect(() => {
@@ -232,8 +234,21 @@ export default function PriceLadder() {
     if (!(refPrice > 0)) return;
     const half = Math.floor(ROWS / 2) * tick;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (follow || center === 0 || Math.abs(refPrice - center) > half * 0.8) setCenter(refPrice);
-  }, [refPrice, follow, tick, center]);
+    if (follow || center === 0 || (!manual && Math.abs(refPrice - center) > half * 0.8)) setCenter(refPrice);
+  }, [refPrice, follow, manual, tick, center]);
+  // A different contract (strike / CE-PE / expiry, or an Active Trades chip) is a new price axis in plain mode: drop the
+  // scroll hold so the walk-off re-centre can bring its price back on screen.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setManual(false);
+  }, [underlying, expiry, strike, opt]);
+  const scrollLadder = useCallback((ticks: number) => {
+    setFollow(false); setManual(true);
+    setCenter(c => {
+      const next = Number(((c > 0 ? c : refPrice) + ticks * tick).toFixed(2));
+      return next > tick * Math.floor(ROWS / 2) ? next : c;
+    });
+  }, [refPrice, tick]);
 
   const slices = useMemo(() => data?.state.slices ?? [], [data?.state.slices]);
   // The position block, its P&L and Exit follow the page's SIM/REAL switch: paper and real slices never net together.
@@ -270,7 +285,11 @@ export default function PriceLadder() {
     try {
       const r = await fetch('/api/price-ladder/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const j = await r.json().catch(() => ({})) as { success?: boolean; error?: string; unknown?: boolean; data?: { state?: LadderState } };
-      if (j.data?.state) setData(d => (d ? { ...d, state: j.data!.state! } : d));
+      if (j.data?.state) {
+        // Newer than any poll still in flight: bump seq so an older GET reply cannot put back what this changed.
+        seq.current++;
+        setData(d => (d ? { ...d, state: j.data!.state! } : d));
+      }
       if (j.unknown) { toast.error(`Order status UNKNOWN — check Positions/Orders before doing anything else. ${j.error ?? ''}`); return false; }
       if (!j.success) { toast.error(j.error ?? `Request failed (${r.status})`); return false; }
       return true;
@@ -347,32 +366,32 @@ export default function PriceLadder() {
   const live = slices.filter(isLive);
   const done = slices.filter(s => !isLive(s));
 
-  // Auto-focus the contract of any active live trade on first load so the user immediately sees it
-  const autoFocusedRef = useRef(false);
-  useEffect(() => {
-    if (autoFocusedRef.current || !data) return;
-    const liveSlices = data.state.slices.filter(isLive);
-    if (!liveSlices.length) return;
-    const latest = liveSlices[liveSlices.length - 1];
-    if (latest.contract) {
-      autoFocusedRef.current = true;
-      if (latest.contract.underlying) setUnderlyingRaw(latest.contract.underlying);
-      if (latest.contract.expiry) setExpiry(latest.contract.expiry);
-      if (latest.contract.strike) setStrike(latest.contract.strike);
-      if (latest.contract.opt) setOpt(latest.contract.opt);
-      if (latest.broker) setBroker(latest.broker);
-      if (latest.mode === 'real') setReal(true);
-    }
-  }, [data, setBroker]);
-
+  // Switch the page to a slice's contract (Active Trades chip, orders list). Moving into REAL re-arms the first-click
+  // confirmation, exactly like the SIM/REAL switch.
   const selectContract = useCallback((s: { contract: LadderContract; broker?: LadderBroker; mode?: 'real' | 'sim' }) => {
     if (s.contract.underlying) setUnderlyingRaw(s.contract.underlying);
     if (s.contract.expiry) setExpiry(s.contract.expiry);
     if (s.contract.strike) setStrike(s.contract.strike);
     if (s.contract.opt) setOpt(s.contract.opt);
     if (s.broker) setBroker(s.broker);
-    if (s.mode) setReal(s.mode === 'real');
+    if (s.mode) { setReal(s.mode === 'real'); setRealAck(false); }
   }, [setBroker]);
+
+  // Auto-focus the contract of the newest live trade on first load so the user immediately sees it. It never switches
+  // the page into REAL on its own: it prefers a trade in the page's mode (SIM on load) and otherwise shows the contract
+  // only — the REAL chip in Active Trades switches mode with a click.
+  const autoFocusedRef = useRef(false);
+  useEffect(() => {
+    if (autoFocusedRef.current || !data) return;
+    const liveSlices = data.state.slices.filter(isLive);
+    if (!liveSlices.length) return;
+    const sameMode = liveSlices.filter(x => x.mode === (real ? 'real' : 'sim'));
+    const latest = (sameMode.length ? sameMode : liveSlices)[(sameMode.length ? sameMode : liveSlices).length - 1];
+    if (!latest.contract) return;
+    autoFocusedRef.current = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot on first data, guarded by autoFocusedRef
+    selectContract({ contract: latest.contract, broker: latest.broker });
+  }, [data, real, selectContract]);
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
@@ -489,14 +508,14 @@ export default function PriceLadder() {
                   <button
                     type="button"
                     onClick={() => setSide('BUY')}
-                    className={`py-1 rounded text-xs font-bold transition-all ${side === 'BUY' ? 'bg-emerald-600 text-white shadow' : 'bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-zinc-200'}`}
+                    className={`py-1 rounded text-xs font-bold transition-all ${side === 'BUY' ? 'bg-emerald-600 text-oncolor shadow' : 'bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-zinc-200'}`}
                   >
                     Buy
                   </button>
                   <button
                     type="button"
                     onClick={() => setSide('SELL')}
-                    className={`py-1 rounded text-xs font-bold transition-all ${side === 'SELL' ? 'bg-red-600 text-white shadow' : 'bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-zinc-200'}`}
+                    className={`py-1 rounded text-xs font-bold transition-all ${side === 'SELL' ? 'bg-red-600 text-oncolor shadow' : 'bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-zinc-200'}`}
                   >
                     Sell
                   </button>
@@ -563,10 +582,10 @@ export default function PriceLadder() {
             <div className="flex items-center gap-2 flex-wrap text-xs">
               <span className="text-zinc-400">Tick</span>
               <Seg value={String(tick)} options={ticks.map(String)} onChange={v => setTick(Number(v))} />
-              <button type="button" onClick={() => { setFollow(true); setCenter(refPrice); }} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white">
+              <button type="button" onClick={() => { setFollow(true); setManual(false); setCenter(refPrice); }} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white">
                 <Crosshair className="w-3.5 h-3.5" /> Centre
               </button>
-              <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => setFollow(e.target.checked)} /> Follow price</label>
+              <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow price</label>
               <button
                 type="button" disabled={busy || pendingHere === 0}
                 onClick={() => void post({ action: 'cancelAll', securityId, broker, mode: pageMode })}
@@ -582,6 +601,7 @@ export default function PriceLadder() {
               limitZoneBuy={limitZone(mode, opt, 'BUY')}
               onPlace={onPlace} onCancel={id => void post({ action: 'cancel', id })} onMove={onMove} onAdjust={onAdjust}
               disabled={placeDisabled} decimals={decimals} entryLevels={entryLevels}
+              onScroll={refPrice > 0 ? scrollLadder : undefined}
             />
           </div>
         </div>

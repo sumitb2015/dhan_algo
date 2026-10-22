@@ -9,6 +9,9 @@ interface CacheEntry { data: DhanLookupData; ts: number }
 
 const cache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours — strike security ids don't change intraday
+// A failed lookup is remembered briefly: 1 s pollers (the Price Ladder) would otherwise spawn a Python process per poll.
+const failed = new Map<string, number>();
+const FAIL_TTL_MS = 15_000;
 
 /**
  * Dhan's own strike -> securityId map for an underlying/expiry, independent of
@@ -26,6 +29,7 @@ export async function getDhanStrikeLookup(underlying: string, expiry: string): P
   const key = `${underlying}:${expiry}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.ts < CACHE_TTL_MS) return hit.data;
+  if (Date.now() - (failed.get(key) ?? 0) < FAIL_TTL_MS) return null;
 
   try {
     const parsed = await dedupe(`dhan-strike-lookup:${key}`, () =>
@@ -37,10 +41,13 @@ export async function getDhanStrikeLookup(underlying: string, expiry: string): P
     );
     if (parsed.success && parsed.data) {
       cache.set(key, { data: parsed.data, ts: Date.now() });
+      failed.delete(key);
       return parsed.data;
     }
+    failed.set(key, Date.now());
     return null;
   } catch {
+    failed.set(key, Date.now());
     return null;
   }
 }

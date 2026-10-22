@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 
 export type DhanKotak = 'dhan' | 'kotak';
@@ -28,10 +28,11 @@ export function usePageBroker<B extends Broker = DhanKotak>(storageKey: string, 
     setLoaded(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storageKey]);
-  const set = (b: B) => {
+  // Stable across renders, so callers can list it in useCallback / useEffect deps.
+  const set = useCallback((b: B) => {
     setBroker(b);
     try { localStorage.setItem(storageKey, b); } catch { /* best effort */ }
-  };
+  }, [storageKey]);
   return [broker, set, loaded];
 }
 
