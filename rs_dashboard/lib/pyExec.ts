@@ -22,7 +22,7 @@ function resolvePythonExe(): string {
       ];
 
   for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
+    if (fs.existsSync(/*turbopackIgnore: true*/ candidate)) return candidate;
   }
   return process.platform === 'win32' ? 'python' : 'python3';
 }

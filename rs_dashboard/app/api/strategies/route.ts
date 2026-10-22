@@ -393,7 +393,7 @@ export async function POST(request: NextRequest) {
       }
       for (const f of [stateFile, pidMetaPath(stateKey), path.join(DEBUG_DIR, `${stateKey}_shutdown.trigger`)]) {
         try {
-          if (fs.existsSync(f)) fs.unlinkSync(f);
+          if (fs.existsSync(/*turbopackIgnore: true*/ f)) fs.unlinkSync(/*turbopackIgnore: true*/ f);
         } catch (rmErr) {
           console.error(`Failed to remove ${f}:`, rmErr);
         }
@@ -534,7 +534,7 @@ export async function POST(request: NextRequest) {
       // 3. Drop the stale pid meta and any pending trigger, so the next start is clean.
       for (const f of [pidMetaPath(stateKey), path.join(DEBUG_DIR, `${stateKey}_shutdown.trigger`)]) {
         try {
-          if (fs.existsSync(f)) fs.unlinkSync(f);
+          if (fs.existsSync(/*turbopackIgnore: true*/ f)) fs.unlinkSync(/*turbopackIgnore: true*/ f);
         } catch (rmErr) {
           console.error(`Failed to remove ${f}:`, rmErr);
         }

@@ -12,13 +12,13 @@ export async function GET(req: NextRequest) {
 
   try {
     let filePath = meta.readmePath;
-    if (!fs.existsSync(filePath)) {
+    if (!fs.existsSync(/*turbopackIgnore: true*/ filePath)) {
       const dirFallback = path.join(path.dirname(meta.path), 'strategy.md');
-      if (fs.existsSync(dirFallback)) {
+      if (fs.existsSync(/*turbopackIgnore: true*/ dirFallback)) {
         filePath = dirFallback;
       }
     }
-    const content = fs.readFileSync(filePath, 'utf-8');
+    const content = fs.readFileSync(/*turbopackIgnore: true*/ filePath, 'utf-8');
     return NextResponse.json({ success: true, name: meta.name, content });
   } catch {
     return NextResponse.json({ success: false, error: 'Readme not found for this strategy yet.' }, { status: 404 });
