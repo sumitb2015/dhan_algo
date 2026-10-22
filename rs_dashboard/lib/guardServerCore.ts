@@ -3,6 +3,7 @@ import path from 'path';
 import { joinKotakLtp, underlyingPrefix, type KotakSymbolInfo } from '@/lib/kotakLtpJoin';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { PROJECT_ROOT } from '@/lib/pyExec';
+import { withFileLock, writeJsonAtomic } from '@/lib/lockedJsonFile';
 import {
   emptyGuardState, stepGuards, contractPricesFromBridges, type ServerGuardState, type PosView, type ExitOrder, type BridgeQuoteFile,
 } from '@/lib/kotakGuardEngine';
@@ -91,27 +92,10 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
   }
 
   function writeStateFile(s: ServerGuardState): void {
-    fs.mkdirSync(DEBUG_DIR, { recursive: true });
-    const tmp = `${stateFile}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(s), 'utf8');
-    fs.renameSync(tmp, stateFile);
+    writeJsonAtomic(stateFile, s);
   }
 
-  async function withLock<T>(fn: () => T | Promise<T>): Promise<T> {
-    const deadline = Date.now() + LOCK_STALE_MS;
-    for (;;) {
-      try {
-        fs.mkdirSync(DEBUG_DIR, { recursive: true });
-        fs.closeSync(fs.openSync(lockFile, 'wx'));
-        break;
-      } catch {
-        try { if (Date.now() - fs.statSync(lockFile).mtimeMs > LOCK_STALE_MS) fs.unlinkSync(lockFile); } catch { /* raced */ }
-        if (Date.now() > deadline) throw new Error(`${adapter.key} guard state is locked`);
-        await new Promise(r => setTimeout(r, 25));
-      }
-    }
-    try { return await fn(); } finally { try { fs.unlinkSync(lockFile); } catch { /* already gone */ } }
-  }
+  const withLock = <T,>(fn: () => T | Promise<T>): Promise<T> => withFileLock(lockFile, LOCK_STALE_MS, `${adapter.key} guard state`, fn);
 
   /** Current state (read-only view; rolls to a fresh day without writing). */
   function readGuardState(): ServerGuardState {

@@ -3,13 +3,10 @@ import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 import { pickZerodhaFuture, type ZerodhaFutureRow } from '@/lib/zerodhaOrderRules';
+import { ensureZerodhaInstrumentCache } from '@/lib/zerodhaContracts';
 
 const CACHE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'zerodha_instruments_cache.py');
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-
-function cacheFileFor(underlying: string): string {
-  return path.join(PROJECT_ROOT, 'debug', `zerodha_${underlying.toLowerCase()}_instruments.json`);
-}
 
 interface CachedInstrument {
   tradingsymbol: string;
@@ -47,14 +44,7 @@ async function exchangeFreezeQty(underlying: string, expiry: string): Promise<nu
 }
 
 async function ensureCache(underlying: string): Promise<CachedInstrument[]> {
-  const cacheFile = cacheFileFor(underlying);
-  const stale = !fs.existsSync(cacheFile) ||
-    Date.now() - fs.statSync(cacheFile).mtimeMs > CACHE_MAX_AGE_MS;
-
-  if (stale) {
-    await dedupe(`zerodha-instruments-cache:${underlying}`, () =>
-      runPythonJson<{ success: boolean; error?: string }>(CACHE_SCRIPT, ['--underlying', underlying], 60_000));
-  }
+  const cacheFile = await ensureZerodhaInstrumentCache(underlying);
   return JSON.parse(fs.readFileSync(cacheFile, 'utf8')) as CachedInstrument[];
 }
 
