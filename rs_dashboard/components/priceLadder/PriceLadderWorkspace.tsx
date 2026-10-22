@@ -3,9 +3,9 @@
 import { useState } from 'react';
 import PriceLadder from './PriceLadder';
 
-/** One ladder to start with; the header's "Add ladder" opens a second beside it (at most two). */
+/** Two ladders to start with — ATM call and ATM put. Close ladder 2 leaves one; "Add ladder" brings the second back (at most two). */
 export default function PriceLadderWorkspace() {
-  const [dual, setDual] = useState(false);
+  const [dual, setDual] = useState(true);
   if (!dual) return <PriceLadder onAddLadder={() => setDual(true)} />;
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-zinc-800 min-h-screen bg-zinc-950">

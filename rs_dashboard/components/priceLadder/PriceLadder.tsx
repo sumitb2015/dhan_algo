@@ -107,7 +107,7 @@ function Seg<T extends string>({ value, options, onChange, labels, disabled }: {
     <div className="inline-flex rounded-md border border-zinc-700 overflow-hidden">
       {options.map(o => (
         <button
-          key={o} type="button" disabled={disabled} onClick={() => onChange(o)}
+          key={o} type="button" disabled={disabled} aria-pressed={value === o} onClick={() => onChange(o)}
           className={`px-2.5 py-1 text-xs font-semibold transition-colors disabled:opacity-50 ${value === o ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}
         >
           {labels?.[o] ?? o}
@@ -148,7 +148,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [expiry, setExpiry] = useState('');
   const [strikes, setStrikes] = useState<number[]>([]);
   const [strike, setStrike] = useState<number | null>(null);
-  const [opt, setOpt] = useState<OptType>('CE');
+  // Ladder 1 starts on the ATM call, ladder 2 on the ATM put (the strike defaults to ATM once the chain loads).
+  const [opt, setOpt] = useState<OptType>(second ? 'PE' : 'CE');
   const [product, setProduct] = useState<'NRML' | 'MIS'>('MIS');
   const [orderType, setOrderType] = useState<ClickType>('LIMIT');
   // Classic: fixed limit zones (the other side needs Order Type SL). Anywhere: both columns at every level, the side of

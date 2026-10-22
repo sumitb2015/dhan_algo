@@ -64,11 +64,19 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
   return seen;
 }
 
+// The page opens with two ladders (ATM call + ATM put); the single-ladder tests below close the second so their
+// locators stay unique.
+async function gotoSingle(page: Page) {
+  await page.goto('/price-ladder');
+  await page.getByRole('button', { name: /Close ladder 2/ }).click();
+  await expect(page.getByLabel('Underlying')).toHaveCount(1);
+}
+
 test.beforeEach(async ({ context }) => { await signIn(context); });
 
 test('XY SIM: clicking Buy below spot arms a bracketed CE entry, and its badge cancels it', async ({ page }) => {
   const seen = await install(page);
-  await page.goto('/price-ladder');
+  await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /NIFTY\s+23200\.00/ })).toBeVisible();
   await page.getByRole('button', { name: 'Buy at 23180' }).click();
   await expect.poll(() => seen.posts.filter(b => b.action === 'arm').length).toBe(1);
@@ -81,7 +89,7 @@ test('XY SIM: clicking Buy below spot arms a bracketed CE entry, and its badge c
 
 test('XY: a Buy above spot with Order Type Limit is refused in the page (it is a breakout: needs SL)', async ({ page }) => {
   const seen = await install(page);
-  await page.goto('/price-ladder');
+  await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByRole('button', { name: 'Buy at 23220' }).click();
   await expect(page.getByText(/breakout entry — switch Order Type to SL/)).toBeVisible();
@@ -90,7 +98,7 @@ test('XY: a Buy above spot with Order Type Limit is refused in the page (it is a
 
 test('Put in XY mode: the ladder is inverted — a Buy above spot is a limit', async ({ page }) => {
   const seen = await install(page);
-  await page.goto('/price-ladder');
+  await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByRole('button', { name: 'Put' }).click();
   await page.getByRole('button', { name: 'Buy at 23220' }).click();
@@ -100,7 +108,7 @@ test('Put in XY mode: the ladder is inverted — a Buy above spot is a limit', a
 
 test('REAL without the daily arm: the ladder is disabled and nothing is sent', async ({ page }) => {
   const seen = await install(page, { liveArmed: false });
-  await page.goto('/price-ladder');
+  await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByRole('button', { name: 'REAL', exact: true }).click();
   await expect(page.getByText(/arm LIVE · REAL MONEY for today before placing/)).toBeVisible();
@@ -111,7 +119,7 @@ test('REAL without the daily arm: the ladder is disabled and nothing is sent', a
 
 test('REAL armed: the first click asks for confirmation before anything is sent', async ({ page }) => {
   const seen = await install(page, { liveArmed: true });
-  await page.goto('/price-ladder');
+  await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByRole('button', { name: 'REAL', exact: true }).click();
   await page.getByRole('button', { name: 'Buy at 23180' }).click();
@@ -124,7 +132,7 @@ test('REAL armed: the first click asks for confirmation before anything is sent'
 
 test('Bracket: target and SL show on the ladder as soon as it is armed (dashed, before the fill)', async ({ page }) => {
   await install(page);
-  await page.goto('/price-ladder');
+  await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByRole('button', { name: 'Buy at 23180' }).click();
   // 23180 + 40 = 23220 target, 23180 - 30 = 23150 SL
@@ -134,7 +142,7 @@ test('Bracket: target and SL show on the ladder as soon as it is armed (dashed, 
 
 test('Cover order sends an SL-only bracket (target 0)', async ({ page }) => {
   const seen = await install(page);
-  await page.goto('/price-ladder');
+  await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByRole('button', { name: 'Cover', exact: true }).click();
   await expect(page.getByLabel('Target points')).toHaveCount(0);
@@ -145,7 +153,7 @@ test('Cover order sends an SL-only bracket (target 0)', async ({ page }) => {
 
 test('Drag an armed entry to another row to move its level', async ({ page }) => {
   const seen = await install(page);
-  await page.goto('/price-ladder');
+  await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByRole('button', { name: 'Buy at 23180' }).click();
   const badge = page.locator('[title="Entry — drag to another price to move it"]');
@@ -157,7 +165,7 @@ test('Drag an armed entry to another row to move its level', async ({ page }) =>
 
 test('Zerodha: the broker picker offers Zerodha and new ladder orders go to it', async ({ page }) => {
   const seen = await install(page);
-  await page.goto('/price-ladder');
+  await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByLabel('Broker for new orders').selectOption('zerodha');
   await expect(page.getByText(/SIM · Zerodha/)).toBeVisible();
@@ -169,7 +177,7 @@ test('Zerodha: the broker picker offers Zerodha and new ladder orders go to it',
 
 test('An armed order sits in the Buy column as price | + − | qty, and the Price column shows only prices', async ({ page }) => {
   const seen = await install(page);
-  await page.goto('/price-ladder');
+  await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByRole('button', { name: 'Buy at 23180' }).click();
   const buyCell = page.getByRole('button', { name: 'Buy at 23180' });
@@ -186,7 +194,7 @@ test('An armed order sits in the Buy column as price | + − | qty, and the Pric
 
 test('An open bracket shows TGT and SL widgets in the Sell column; + adds a lot, − exits a lot', async ({ page }) => {
   const seen = await install(page, { openLong: true });
-  await page.goto('/price-ladder');
+  await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   const tgt = page.getByRole('button', { name: 'Sell at 23220' }).locator('[data-widget="tgt"]');
   const sl = page.getByRole('button', { name: 'Sell at 23150' }).locator('[data-widget="sl"]');
@@ -199,22 +207,24 @@ test('An open bracket shows TGT and SL widgets in the Sell column; + adds a lot,
   expect(seen.blocked).toEqual([]);
 });
 
-test('Two ladders: Add ladder opens a second with its own selection (max 2), Close ladder 2 removes it', async ({ page }) => {
+test('Two ladders by default: ladder 1 is the call, ladder 2 the put, each with its own selection; Close / Add ladder toggles the second', async ({ page }) => {
   const seen = await install(page);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/price-ladder');
-  await expect(page.getByLabel('Underlying')).toHaveCount(1);
-  await expect(page.getByRole('button', { name: /Add ladder/ })).toBeVisible();
-  await page.getByRole('button', { name: /Add ladder/ }).click();
   const underlying = page.getByLabel('Underlying');
   await expect(underlying).toHaveCount(2);
   await expect(page.getByRole('button', { name: /Add ladder/ })).toHaveCount(0);   // at most two
+  // Call on ladder 1, Put on ladder 2 (the Call/Put switch's pressed side)
+  await expect(page.getByRole('button', { name: 'Call', exact: true, pressed: true })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Put', exact: true, pressed: true })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Call', exact: true })).toHaveCount(2);
   await underlying.nth(1).selectOption('BANKNIFTY');
   await expect(underlying.nth(0)).toHaveValue('NIFTY');
   await expect(underlying.nth(1)).toHaveValue('BANKNIFTY');
-  // No horizontal page scroll at 1440 px
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.getByRole('button', { name: /Close ladder 2/ }).click();
   await expect(underlying).toHaveCount(1);
+  await page.getByRole('button', { name: /Add ladder/ }).click();
+  await expect(underlying).toHaveCount(2);
   expect(seen.blocked).toEqual([]);
 });
