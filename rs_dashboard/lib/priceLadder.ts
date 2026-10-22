@@ -105,7 +105,13 @@ export function parseSpotKey(k: string): { segment: string; securityId: string }
 }
 
 /** Index-point exits around an XY entry. `tgtPts` 0 = no target (a Cover order: stop-loss only). */
-export interface LadderBracket { tgtPts: number; slPts: number; trailPts?: number }
+/**
+ * Index-point exits around an XY entry. `tgtPts` 0 = no target (a Cover order: stop-loss only). `trailPts` with
+ * `trailMode: 'distance'` = a continuous trailing SL kept `trailPts` behind the best index level reached; without a
+ * mode it is the older step rule (`trailPts` of SL per full `trailPts` of favourable move) — kept for brackets armed
+ * before continuous trailing existed, so a live stop never changes rule under the user.
+ */
+export interface LadderBracket { tgtPts: number; slPts: number; trailPts?: number; trailMode?: 'distance' }
 
 export interface LadderSlice {
   id: string;
@@ -258,7 +264,7 @@ export function cleanBracket(raw: unknown): LadderBracket | null {
   const tgt = Number(r.tgtPts), sl = Number(r.slPts), trail = Number(r.trailPts ?? 0);
   if (!(tgt >= 0) || !(sl > 0) || !Number.isFinite(tgt) || !Number.isFinite(sl)) return null;
   if (!(trail >= 0) || !Number.isFinite(trail)) return null;
-  return trail > 0 ? { tgtPts: tgt, slPts: sl, trailPts: trail } : { tgtPts: tgt, slPts: sl };
+  return trail > 0 ? { tgtPts: tgt, slPts: sl, trailPts: trail, trailMode: 'distance' } : { tgtPts: tgt, slPts: sl };
 }
 
 /** One tick of an armed XY entry: fires only on a real cross from the safe side (Focus Tool's latch, buffer 0). */
@@ -274,7 +280,8 @@ export function bracketLevels(b: 1 | -1, entryY: number, br: LadderBracket): { t
 }
 
 /**
- * One tick of an open XY bracket. Trailing moves the SL by `trailPts` for every full `trailPts` the index has gone in
+ * One tick of an open XY bracket. Continuous trailing ('distance') keeps the SL `trailPts` behind the best level reached;
+ * the older step rule moves the SL by `trailPts` for every full `trailPts` the index has gone in
  * the position's favour from the entry, and only ever towards profit. Returns the (possibly moved) SL, the new peak,
  * and which side was hit. A target is checked before the SL on the same tick.
  */
@@ -286,7 +293,11 @@ export function bracketStep(
   const peakY = b > 0 ? Math.max(prevPeak, spot) : Math.min(prevPeak, spot);
   let slY = s.slY;
   const trail = s.bracket?.trailPts ?? 0;
-  if (trail > 0 && s.slY0 != null && slY != null) {
+  if (trail > 0 && slY != null && s.bracket?.trailMode === 'distance') {
+    // Continuous: the SL follows the best level reached, `trail` behind it — every new high (low) moves it.
+    const candidate = Number((peakY - b * trail).toFixed(2));
+    slY = b > 0 ? Math.max(slY, candidate) : Math.min(slY, candidate);
+  } else if (trail > 0 && s.slY0 != null && slY != null) {
     const fav = (peakY - (s.trailFrom ?? s.entryY)) * b;
     const steps = Math.floor(fav / trail + 1e-9);
     const trailed = s.slY0 + b * steps * trail;

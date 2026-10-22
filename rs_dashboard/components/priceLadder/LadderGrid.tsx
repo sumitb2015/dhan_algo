@@ -30,6 +30,8 @@ export interface LadderWidget {
   drag?: 'entry' | 'tgt' | 'sl';
   /** MCX (Dhan qty in lots): barrels per lot, so the badge can show barrels. Absent = qty is already in units. */
   mult?: number;
+  /** A trailing SL's distance behind the best level (continuous trail); the marker shows it with − / + to change it. */
+  trail?: number;
 }
 
 /** An open position's entry on the ladder's axis: drawn as a tinted row with a side / qty / fill tag in the Price column. */
@@ -65,7 +67,7 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
           const lv = bracketLevels(bias(s.contract.opt, s.side), s.entryLevel, s.bracket);
           // Draggable before the fill too: moving one changes the bracket's points from the entry level.
           if (lv.tgtY != null) add({ price: lv.tgtY, column: opposite(s.side), kind: 'tgt', label: 'Target', qty: s.qty, lots: s.lots, ids: [s.id], planned: true, drag: 'tgt' }, 0);
-          add({ price: lv.slY, column: opposite(s.side), kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', qty: s.qty, lots: s.lots, ids: [s.id], planned: true, drag: 'sl' }, 0);
+          add({ price: lv.slY, column: opposite(s.side), kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', qty: s.qty, lots: s.lots, ids: [s.id], planned: true, drag: 'sl', ...(s.bracket.trailPts ? { trail: s.bracket.trailPts } : {}) }, 0);
         }
       }
       if ((s.state === 'open' || s.state === 'exiting') && held > 0) {
@@ -79,7 +81,7 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
         if (s.bracket) {
           const common = { column: opposite(s.side), qty: held, lots: heldLots, ids: [s.id], ...(live ? { adjust: 'position' as const } : {}) };
           if (s.tgtY != null) add({ ...common, price: s.tgtY, kind: 'tgt', label: 'Target', ...(live ? { drag: 'tgt' as const } : {}) }, s.openedAt ?? 0);
-          if (s.slY != null) add({ ...common, price: s.slY, kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', ...(live ? { drag: 'sl' as const } : {}) }, s.openedAt ?? 0);
+          if (s.slY != null) add({ ...common, price: s.slY, kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', ...(live ? { drag: 'sl' as const } : {}), ...(s.bracket.trailPts ? { trail: s.bracket.trailPts } : {}) }, s.openedAt ?? 0);
         }
       }
     }
@@ -102,9 +104,27 @@ const TAG: Record<LadderWidget['kind'], string> = { entry: '', tgt: 'TGT', sl: '
 
 const DRAG_MIME = 'application/x-price-ladder';
 
-function InnerPriceWidget({ w, decimals }: { w: LadderWidget; decimals: number }) {
+function InnerPriceWidget({ w, decimals, tick, onTrail }: {
+  w: LadderWidget; decimals: number; tick: number; onTrail?: (w: LadderWidget, delta: number) => void;
+}) {
   const stop = (e: React.SyntheticEvent) => e.stopPropagation();
   const what = `${w.label} at ${w.price.toFixed(decimals)}`;
+  // A trailing SL: its distance in view, with − / + (one ladder tick) to tighten / widen it.
+  if (w.trail != null && onTrail) {
+    const btn = 'px-0.5 rounded text-zinc-400 hover:text-white hover:bg-zinc-700 focus-visible:outline focus-visible:outline-1 focus-visible:outline-zinc-400';
+    return (
+      <div onClick={stop} onKeyDown={stop} data-widget={w.kind} className="flex items-center gap-0.5 select-none">
+        <button type="button" className={btn} aria-label={`Tighten the trailing SL by ${tick} (now ${w.trail} behind)`} title={`Tighten the trail by ${tick} — the SL moves closer now`} onClick={() => onTrail(w, -tick)}>
+          <Minus className="w-2.5 h-2.5" />
+        </button>
+        <InnerPriceWidget w={{ ...w, trail: undefined }} decimals={decimals} tick={tick} />
+        <span className="font-mono text-[10px] text-amber-300" title={`Trailing ${w.trail} behind the best level`}>T{w.trail}</span>
+        <button type="button" className={btn} aria-label={`Widen the trailing SL by ${tick} (now ${w.trail} behind)`} title={`Widen the trail by ${tick} — the SL follows from further back (it never moves back)`} onClick={() => onTrail(w, tick)}>
+          <Plus className="w-2.5 h-2.5" />
+        </button>
+      </div>
+    );
+  }
   return (
     <div
       onClick={stop} onKeyDown={stop}
@@ -196,7 +216,7 @@ function OuterControlWidget({ w, onAdjust, onCancel }: {
  */
 export function LadderGrid({
   center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryMarks, onScroll,
-  zones = 'classic', stopLimitFor,
+  zones = 'classic', stopLimitFor, onTrail,
 }: {
   center: number; refPrice: number; tick: number; rows: number; widgets: LadderWidget[];
   limitZoneBuy: 'below' | 'above';
@@ -204,6 +224,8 @@ export function LadderGrid({
   zones?: LadderZones;
   /** Plain: the SL-limit's limit for a stop click at `price` (labels only; the server computes the real one). */
   stopLimitFor?: (side: LadderSide, price: number) => number | null;
+  /** − / + on a trailing SL marker: change its trail distance by `delta` index points. */
+  onTrail?: (w: LadderWidget, delta: number) => void;
   onPlace: (side: LadderSide, price: number) => void; onCancel: (id: string) => void;
   /** A widget dropped on another row: move that entry level / target / SL there (for every slice behind the widget). */
   onMove: (ids: string[], what: 'entry' | 'tgt' | 'sl', price: number) => void;
@@ -330,7 +352,7 @@ export function LadderGrid({
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('BUY', p); } }}
               className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/10' : buyStop ? 'bg-amber-500/10' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/20'}`}
             >
-              {buyWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} />)}
+              {buyWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} tick={tick} onTrail={onTrail} />)}
               {buyStop && !buyWs.length && <span aria-hidden className="text-[10px] font-semibold text-amber-300">{stopTag}</span>}
             </div>
 
@@ -358,7 +380,7 @@ export function LadderGrid({
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('SELL', p); } }}
               className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/10' : sellStop ? 'bg-amber-500/10' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/20'}`}
             >
-              {sellWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} />)}
+              {sellWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} tick={tick} onTrail={onTrail} />)}
               {sellStop && !sellWs.length && <span aria-hidden className="text-[10px] font-semibold text-amber-300">{stopTag}</span>}
             </div>
 

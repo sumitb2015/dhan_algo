@@ -153,7 +153,7 @@ async function arm(b: ArmBody): Promise<NextResponse> {
 
   if (b.kind === 'xy') {
     const slice: LadderSlice = { ...base, entryLevel: level, entryDir: verdict.dir, seenSafe: true, orderType, ...(zones === 'anywhere' ? { zones } : {}), ...(bracket ? { bracket } : {}) };
-    const br = bracket ? ` · ${bracket.tgtPts > 0 ? `TGT ${bracket.tgtPts} / ` : 'Cover · '}SL ${bracket.slPts}${bracket.trailPts ? ` / trail ${bracket.trailPts}` : ''} pts` : '';
+    const br = bracket ? ` · ${bracket.tgtPts > 0 ? `TGT ${bracket.tgtPts} / ` : 'Cover · '}SL ${bracket.slPts}${bracket.trailPts ? ` / trailing ${bracket.trailPts} behind` : ''} pts` : '';
     let capped = false;
     const s = await updateLadderState(st => {
       // Re-checked inside the lock: two clicks in flight must not both pass the read above.
@@ -469,12 +469,34 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
 
       case 'trail': {
-        const trail = Number(body.trailPts);
-        if (!(trail >= 0) || !Number.isFinite(trail)) return bad('trailPts must be 0 or more');
+        // Continuous trailing SL for a position (and the '+1 lot' slices that share its levels): `trailPts` sets the
+        // distance (0 = off); `delta` widens (+) or tightens (-) the current one (the ladder SL marker's +/-). The SL
+        // never loosens: widening only lets it follow from further back from here on; tightening pulls it up now.
+        const abs = body.trailPts == null ? null : Number(body.trailPts);
+        const delta = body.delta == null ? null : Number(body.delta);
+        if (abs == null && delta == null) return bad('trailPts or delta required');
+        if (abs != null && !(abs >= 0 && Number.isFinite(abs))) return bad('trailPts must be 0 or more');
+        if (delta != null && !Number.isFinite(delta)) return bad('delta must be a number');
+        const x0 = readLadderState().slices.find(y => y.id === id);
+        if (!x0 || !x0.bracket || TERMINAL.has(x0.state)) return bad('It is closed — trailing not changed', 409);
+        // An open position's trail starts from the index level now (not an old peak), so switching it on or changing it
+        // cannot jump the SL up to a level the market has already left.
+        let spotNow: number | null = null;
+        if (x0.state === 'open') {
+          const sp = (await loadPrices([spotKey(x0.contract)], [])).spots[spotKey(x0.contract)];
+          if (!sp || !spotFresh(sp.at, Date.now())) return bad('No fresh price to start the trail from — try again in a moment');
+          spotNow = sp.spot;
+        }
         let n = 0;
+        let label = '';
         const s = await updateLadderState(st => {
           const x = st.slices.find(y => y.id === id);
           if (!x || !x.bracket || TERMINAL.has(x.state)) return st;
+          const cur = x.bracket.trailPts ?? 0;
+          const next0 = abs != null ? abs : Math.max(0, Number((cur + (delta ?? 0)).toFixed(2)));
+          // Tightening below one point would park the SL on the price.
+          const trail = next0 > 0 ? Math.max(1, next0) : 0;
+          label = trail ? `Trailing SL ${trail} pts behind the best level` : 'Trailing off';
           // A '+1 lot' child shares its parent's target / SL: an open position's trail covers every open slice on those
           // same levels, so no lot is left on the old, wider stop.
           const joined = (y: LadderSlice) => y.id === id || (x.state === 'open' && y.state === 'open' && !!y.bracket && y.kind === x.kind
@@ -482,11 +504,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             && y.slY === x.slY && y.tgtY === x.tgtY);
           let next = st;
           for (const y of st.slices.filter(joined)) {
-            // Trailing restarts from the SL as it stands, so switching it on never loosens a stop.
-            next = patchSlice(next, y.id, { bracket: { ...y.bracket!, trailPts: trail || undefined }, slY0: y.slY ?? y.slY0, trailFrom: y.state === 'open' ? (y.peakY ?? y.entryY) : undefined });
+            const bracket = trail
+              ? { ...y.bracket!, trailPts: trail, trailMode: 'distance' as const }
+              : { tgtPts: y.bracket!.tgtPts, slPts: y.bracket!.slPts };
+            next = patchSlice(next, y.id, { bracket, ...(y.state === 'open' && spotNow != null ? { peakY: spotNow } : {}) });
             n++;
           }
-          return pushEvent(next, ev('info', `${trail ? `Trailing SL every ${trail} pts` : 'Trailing off'}${n > 1 ? ` (${n} slices)` : ''}`, id));
+          return pushEvent(next, ev('info', `${label}${n > 1 ? ` (${n} slices)` : ''}`, id));
         });
         if (!n) return bad('It is closed — trailing not changed', 409);
         return NextResponse.json({ success: true, data: { state: s } });

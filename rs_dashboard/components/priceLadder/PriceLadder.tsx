@@ -124,7 +124,7 @@ export default function PriceLadder() {
   const [tgtPts, setTgtPts] = useState(40);
   const [slPts, setSlPts] = useState(30);
   const [trailOn, setTrailOn] = useState(false);
-  const [trailPts, setTrailPts] = useState(10);
+  const [trailPts, setTrailPts] = useState(30);
   const [lots, setLots] = useState(1);
   const [tick, setTick] = useState(5);
   const [center, setCenter] = useState(0);
@@ -506,7 +506,9 @@ export default function PriceLadder() {
       action: 'arm', kind: mode, broker, mode: real ? 'real' : 'sim', underlying, expiry, strike, opt, side, lots, product,
       orderType, level: price, zones, expect, ...(zones === 'anywhere' && mode === 'plain' ? { slBufferPct } : {}),
       // Cover = SL only (tgtPts 0), as OptionX's Cover order; Bracket = target + SL.
-      ...(mode === 'xy' && style !== 'Single' ? { bracket: { tgtPts: style === 'Cover' ? 0 : tgtPts, slPts, ...(trailOn ? { trailPts } : {}) } } : {}),
+      // Single + trail = a trailing stop on its own: SL only, starting at the trail distance.
+      ...(mode === 'xy' && style !== 'Single' ? { bracket: { tgtPts: style === 'Cover' ? 0 : tgtPts, slPts, ...(trailOn ? { trailPts } : {}) } }
+        : mode === 'xy' && trailOn ? { bracket: { tgtPts: 0, slPts: trailPts, trailPts } } : {}),
     }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${mode === 'xy' ? 'armed at' : 'placed at'} ${price}`); });
   }, [post, mode, broker, real, underlying, expiry, strike, opt, lots, product, orderType, zones, slBufferPct, style, tgtPts, slPts, trailOn, trailPts]);
 
@@ -777,16 +779,15 @@ export default function PriceLadder() {
                   <div className="flex items-center justify-between"><span className="text-zinc-400">Style</span>
                     <Seg value={style} options={['Single', 'Bracket', 'Cover'] as const} onChange={setStyle} />
                   </div>
-                  {style !== 'Single' && (
-                    <div className="grid grid-cols-2 gap-2 items-center">
-                      {style === 'Bracket' && <><span className="text-zinc-400">Target pts</span><NumField label="Target points" value={tgtPts} onCommit={setTgtPts} min={1} /></>}
-                      <span className="text-zinc-400">SL pts</span><NumField label="Stop-loss points" value={slPts} onCommit={setSlPts} min={1} />
-                      <label className="flex items-center gap-1.5 text-zinc-400">
-                        <input type="checkbox" checked={trailOn} onChange={e => setTrailOn(e.target.checked)} /> Trail every
-                      </label>
-                      <NumField label="Trailing step points" value={trailPts} onCommit={setTrailPts} min={1} />
-                    </div>
-                  )}
+                  <div className="grid grid-cols-2 gap-2 items-center">
+                    {style === 'Bracket' && <><span className="text-zinc-400">Target pts</span><NumField label="Target points" value={tgtPts} onCommit={setTgtPts} min={1} /></>}
+                    {style !== 'Single' && <><span className="text-zinc-400">SL pts</span><NumField label="Stop-loss points" value={slPts} onCommit={setSlPts} min={1} /></>}
+                    {/* Every style: Single + trail = a trailing stop on its own (the SL starts at the trail distance). */}
+                    <label className="flex items-center gap-1.5 text-zinc-400" title="Continuous trailing SL: the SL stays this many points behind the best level reached and moves with every new high / low — never back">
+                      <input type="checkbox" checked={trailOn} onChange={e => setTrailOn(e.target.checked)} /> Trail SL by
+                    </label>
+                    <NumField label="Trailing SL distance in points" value={trailPts} onCommit={setTrailPts} min={1} />
+                  </div>
                 </>
               )}
               <div className="flex items-center justify-between"><span className="text-zinc-400">Lots {lotSize ? <span className="text-zinc-500">({mcx ? `${lots * (shownC?.mult ?? 1)} bbl` : `${lots * lotSize} qty`})</span> : null}</span>
@@ -856,6 +857,7 @@ export default function PriceLadder() {
               onPlace={onPlace} onCancel={id => void post({ action: 'cancel', id })} onMove={onMove} onAdjust={onAdjust}
               disabled={placeDisabled} decimals={decimals} entryMarks={entryMarks}
               onScroll={refPrice > 0 ? scrollLadder : undefined}
+              onTrail={(w, delta) => { void post({ action: 'trail', id: w.ids[0], delta }); }}
             />
           </div>
         </div>
@@ -989,6 +991,31 @@ function BookButton({ icon, label, count, onClick }: { icon: ReactNode; label: s
   );
 }
 
+/** A position's trailing SL: its distance (edit = set, 0 = off), or a button to switch it on at the panel's distance. */
+function TrailControl({ s, busy, post, fallback }: { s: LadderSlice; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean>; fallback: number }) {
+  const cur = s.bracket?.trailPts ?? 0;
+  const step = s.bracket?.trailMode !== 'distance' && cur > 0;   // an older step trail, kept until changed
+  if (!cur) {
+    return (
+      <button type="button" disabled={busy} onClick={() => void post({ action: 'trail', id: s.id, trailPts: fallback })}
+        className={`px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white ${FOCUS_RING}`}
+        title={`Trail the SL ${fallback} points behind the best level from now on`}>
+        Trail {fallback}
+      </button>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1" title={step ? `Step trail: ${cur} pts of SL per ${cur} pts of move. Change the distance to switch to continuous trailing.` : `Continuous trailing SL, ${cur} pts behind the best level`}>
+      <span className="text-amber-300 text-[11px]">{step ? 'Step' : 'Trail'}</span>
+      <NumField label="Trailing SL distance in points" value={cur} min={0} width="w-12" onCommit={v => { if (v !== cur) void post({ action: 'trail', id: s.id, trailPts: v }); }} />
+      <button type="button" disabled={busy} onClick={() => void post({ action: 'trail', id: s.id, trailPts: 0 })}
+        className={`px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white ${FOCUS_RING}`}>
+        Off
+      </button>
+    </span>
+  );
+}
+
 function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; ltp: number | undefined; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean>; trailPts: number; onSelect?: (s: LadderSlice) => void }) {
   const live = isLive(s);
   const pnl = sliceNowPnl(s, ltp) ?? null;
@@ -1038,11 +1065,9 @@ function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; 
           {s.state === 'open' && (
             <button type="button" disabled={busy} onClick={() => void post({ action: 'exit', id: s.id, pct: 100 })} className="px-1.5 py-0.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/15">Exit</button>
           )}
-          {/* Auto trailing SL, switched on any time (the video enables it after the entry fills), with the panel's step. */}
+          {/* Trailing SL, switched on or changed any time: the distance behind the best level (commit on Enter / blur). */}
           {(s.state === 'open' || s.state === 'armed') && s.bracket && (
-            <button type="button" disabled={busy} onClick={() => void post({ action: 'trail', id: s.id, trailPts: s.bracket!.trailPts ? 0 : trailPts })} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white" title={s.bracket.trailPts ? undefined : `Trail the SL every ${trailPts} index points`}>
-              {s.bracket.trailPts ? 'Trail off' : `Trail ${trailPts}`}
-            </button>
+            <TrailControl s={s} busy={busy} post={post} fallback={trailPts} />
           )}
           {s.state === 'unknown' && (
             <>

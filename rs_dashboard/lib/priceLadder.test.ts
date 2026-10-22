@@ -47,7 +47,7 @@ test('levelSane / capLots / cleanBracket refuse bad input', () => {
   assert.equal(capLots(1.5), null);
   assert.equal(capLots(MAX_LADDER_LOTS + 1), null);
   assert.deepEqual(cleanBracket({ tgtPts: 43, slPts: 31 }), { tgtPts: 43, slPts: 31 });
-  assert.deepEqual(cleanBracket({ tgtPts: 43, slPts: 31, trailPts: 5 }), { tgtPts: 43, slPts: 31, trailPts: 5 });
+  assert.deepEqual(cleanBracket({ tgtPts: 43, slPts: 31, trailPts: 5 }), { tgtPts: 43, slPts: 31, trailPts: 5, trailMode: 'distance' });
   assert.equal(cleanBracket({ tgtPts: -5, slPts: 31 }), null);
   assert.equal(cleanBracket({ tgtPts: 10, slPts: 'x' }), null);
 });
@@ -487,4 +487,24 @@ test('planTick SIM SL-limit: triggered past the limit rests as a LIMIT, fills on
   assert.equal(at(119, w).avg, 119);                                   // triggered inside the limit: fills at once
   // Classic SL-M (no stopLimitPrice): fills at the ltp on the trigger, however far.
   assert.equal(at(110, { ...w, stopLimitPrice: undefined }).avg, 110);
+});
+
+// ── continuous trailing SL ──
+test('bracketStep continuous trail: the SL follows the best level at the trail distance, never back', () => {
+  const s = { entryY: 100, tgtY: 200, slY: 70, slY0: 70, peakY: 100, bracket: { tgtPts: 100, slPts: 30, trailPts: 30, trailMode: 'distance' as const } };
+  assert.equal(bracketStep(s, 1, 105).slY, 75);          // every new high moves it, tick by tick
+  assert.equal(bracketStep({ ...s, slY: 75, peakY: 105 }, 1, 103).slY, 75);   // a pullback never moves it back
+  assert.equal(bracketStep({ ...s, slY: 75, peakY: 105 }, 1, 120).slY, 90);
+  // Short side (PE buy / CE sell): mirror image.
+  const sh = { entryY: 100, tgtY: 0, slY: 130, slY0: 130, peakY: 100, bracket: { tgtPts: 100, slPts: 30, trailPts: 30, trailMode: 'distance' as const } };
+  assert.equal(bracketStep(sh, -1, 92).slY, 122);
+  assert.equal(bracketStep({ ...sh, slY: 122, peakY: 92 }, -1, 121).hit, null);
+  assert.equal(bracketStep({ ...sh, slY: 122, peakY: 92 }, -1, 122).hit, 'sl');
+});
+
+test('bracketStep: a bracket armed before continuous trailing keeps the step rule', () => {
+  const s = { entryY: 100, tgtY: 200, slY: 90, slY0: 90, peakY: 100, trailFrom: 100, bracket: { tgtPts: 100, slPts: 10, trailPts: 10 } };
+  assert.equal(bracketStep(s, 1, 105).slY, 90);           // half a step: no move
+  assert.equal(bracketStep(s, 1, 110).slY, 100);          // one full step
+  assert.deepEqual(cleanBracket({ tgtPts: 40, slPts: 30, trailPts: 25 }), { tgtPts: 40, slPts: 30, trailPts: 25, trailMode: 'distance' });
 });
