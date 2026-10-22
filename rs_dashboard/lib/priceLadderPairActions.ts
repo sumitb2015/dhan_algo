@@ -10,7 +10,7 @@ import {
   type ClickType, type LadderBroker, type LadderContract, type LadderProduct, type LadderSide, type LadderState, type LadderZones,
 } from '@/lib/priceLadder';
 import {
-  blendExitAvg, cleanLegSlPct, legHeld, lotsOnContract, splitOneLot, pairBias, pairCombined, pairLevelSane, pairName, patchPair, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS,
+  blendExitAvg, cleanLegSlPct, fillLeg, legHeld, lotsOnContract, splitOneLot, pairBias, pairCombined, pairLevelSane, pairName, patchPair, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS,
   LEG_KEYS, type LadderPair, type PairLeg, type PairLegKey, type PairStructure,
 } from '@/lib/priceLadderPair';
 
@@ -58,14 +58,35 @@ async function liveCombined(p: Pick<LadderPair, 'legs'>): Promise<number | null>
   return pairCombined(p, prices.ltps);
 }
 
+/** Resolve the root pair ID by following joinedTo links. */
+function rootPairId(st: LadderState, id: string): string {
+  let cur = id;
+  const seen = new Set<string>([cur]);
+  while (true) {
+    const p = (st.pairs ?? []).find(y => y.id === cur);
+    if (!p?.joinedTo || seen.has(p.joinedTo)) break;
+    seen.add(p.joinedTo);
+    cur = p.joinedTo;
+  }
+  return cur;
+}
+
 /**
- * Open pairs sharing `p`'s exits: the same two legs, broker, mode and side on the same target / SL (a '+1 lot' joins its
- * pair's levels). A drag, a trail change or a leg SL applies to all of them, so no lot is left on an old stop.
+ * Open (and placing joined) pairs sharing `p`'s exits: pairs linked by explicit joinedTo relationships
+ * (sharing the same root pair), same broker, mode, side, and contracts.
+ *
+ * Bug 8 fix: the old implementation matched by SL+TGT levels, so two independent same-strike no-bracket pairs would
+ * silently share each other's leg-SL. Explicit joinedTo links are used now; two independently-armed pairs never share.
  */
 function joinedTo(st: LadderState, p: LadderPair): LadderPair[] {
-  return (st.pairs ?? []).filter(y => y.id === p.id || (p.state === 'open' && y.state === 'open' && y.broker === p.broker && y.mode === p.mode && y.side === p.side
-    && y.legs.ce.contract.securityId === p.legs.ce.contract.securityId && y.legs.pe.contract.securityId === p.legs.pe.contract.securityId
-    && y.slY === p.slY && y.tgtY === p.tgtY));
+  const root = rootPairId(st, p.id);
+  return (st.pairs ?? []).filter(y =>
+    (y.state === 'open' || (y.state === 'placing' && !!y.joinedTo)) &&
+    y.broker === p.broker && y.mode === p.mode && y.side === p.side &&
+    y.legs.ce.contract.securityId === p.legs.ce.contract.securityId &&
+    y.legs.pe.contract.securityId === p.legs.pe.contract.securityId &&
+    rootPairId(st, y.id) === root
+  );
 }
 
 /** Apply `mutate` only if the pair still passes `okFn` inside the lock (the watcher can move it in between). */
@@ -78,6 +99,27 @@ async function guarded(id: string, okFn: (p: LadderPair) => boolean, mutate: (s:
     return mutate(st);
   });
   return { applied, state };
+}
+
+/**
+ * Bug 10 fix: the session / arm / session checks were copy-pasted into arm(), addLot() and roll(). One place now.
+ * Returns an error string to return to the caller, or null when the open is allowed.
+ * `isArm` = true for arm() which checks the auto-exit itself differently (arms are allowed up to close).
+ */
+function checkOpenAllowed(
+  u: string, now: number, mode: 'sim' | 'real', broker: LadderBroker, st: LadderState,
+  { isArm = false }: { isArm?: boolean } = {},
+): string | null {
+  const sess = sessionFor(u, istDay(now));
+  const hhmm = istHhmm(now);
+  if (sess.open >= sess.close) return sess.note ?? 'The market is closed today';
+  if (!isArm && (hhmm < sess.open || hhmm >= sess.close)) return 'The market is closed';
+  if (hhmm >= sess.autoExit) return `After ${sess.autoExitLabel} the ladder only exits`;
+  if (mode === 'real') {
+    if (!realArmed(st, istDay(now))) return 'Switch on LIVE · REAL MONEY first';
+    if (!brokerSessionOk(broker)) return `${BROKER_NAME[broker]} session is not logged in`;
+  }
+  return null;
 }
 
 async function arm(b: Record<string, unknown>): Promise<NextResponse> {
@@ -118,9 +160,9 @@ async function arm(b: Record<string, unknown>): Promise<NextResponse> {
   if (b.bracket != null && !bracket) return bad('Bracket needs a positive SL in points (target 0 = Cover order)');
   const legSlPct = b.legSlPct == null || Number(b.legSlPct) === 0 ? null : cleanLegSlPct(b.legSlPct, side);
   if (b.legSlPct != null && Number(b.legSlPct) !== 0 && legSlPct == null) return bad(side === 'SELL' ? 'Leg SL must be 1-1000 % (a short leg rising by it)' : 'Leg SL must be 1-99 % (a long leg falling by it)');
-  const sess = sessionFor(u, istDay(now));
-  if (sess.open >= sess.close) return bad(sess.note ?? 'The market is closed today');
-  if (istHhmm(now) >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
+  // Bug 10 fix: shared session / arm / broker check (isArm=true: session hours are checked by the auto-exit guard only).
+  const openErr = checkOpenAllowed(u, now, mode, broker, readLadderState(), { isArm: true });
+  if (openErr) return bad(openErr, openErr.includes('LIVE') || openErr.includes('session') ? 403 : 400);
 
   const [ce, pe] = await Promise.all([resolveContract(broker, u, expiry, ceStrike, 'CE'), resolveContract(broker, u, expiry, peStrike, 'PE')]);
   if (typeof ce === 'string') return bad(ce);
@@ -310,14 +352,9 @@ async function addLot(id: string): Promise<NextResponse> {
   const p = (st0.pairs ?? []).find(y => y.id === id);
   if (!p || p.state !== 'open') return bad('That pair is not open');
   const u = p.legs.ce.contract.underlying;
-  const sess = sessionFor(u, istDay(now));
-  const hhmm = istHhmm(now);
-  if (hhmm < sess.open || hhmm >= sess.close || sess.open >= sess.close) return bad('The market is closed');
-  if (hhmm >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
-  if (p.mode === 'real') {
-    if (!realArmed(st0, istDay(now))) return bad('Switch on LIVE · REAL MONEY first', 403);
-    if (!brokerSessionOk(p.broker)) return bad(`${BROKER_NAME[p.broker]} session is not logged in`, 403);
-  }
+  // Bug 10 fix: use the shared open-allowed check instead of the inline copy.
+  const openErr = checkOpenAllowed(u, now, p.mode, p.broker, st0);
+  if (openErr) return bad(openErr, openErr.includes('LIVE') || openErr.includes('session') ? 403 : 400);
   for (const k of LEG_KEYS) {
     const held = lotsOnContract(st0, p.legs[k].contract.securityId, p.broker, p.mode, p.side);
     if (held + 1 > MAX_LADDER_LOTS) return bad(`The ladder holds ${held} lots of ${p.legs[k].contract.strike}${p.legs[k].contract.opt} — the cap is ${MAX_LADDER_LOTS}`);
@@ -341,8 +378,8 @@ async function addLot(id: string): Promise<NextResponse> {
   const child: LadderPair = p.mode === 'real'
     ? { ...base, sendWanted: true, crossY: round2(ce + pe) }
     : { ...base, openedAt: now, legs: {
-      ce: { ...base.legs.ce, avg: ce, held: lot, filledQty: lot, entry: 'filled' },
-      pe: { ...base.legs.pe, avg: pe, held: lot, filledQty: lot, entry: 'filled' },
+      ce: fillLeg(base.legs.ce, lot, ce),
+      pe: fillLeg(base.legs.pe, lot, pe),
     } };
   let capped = false;
   const s = await updateLadderState(st => {
@@ -373,15 +410,13 @@ async function roll(b: Record<string, unknown>, id: string): Promise<NextRespons
   const p = (st0.pairs ?? []).find(y => y.id === id);
   if (!p || p.state !== 'open') return bad('Only an open pair can be rolled');
   if (LEG_KEYS.some(k => (p.legs[k].held ?? p.qty) !== p.qty)) return bad('Its legs no longer hold the same quantity — exit it from the pair table');
+  // Bug 6 fix: refuse a roll when an exit is already queued. A roll arriving in the same tick as an Exit click would
+  // otherwise silently clear exitWanted and open new strikes instead of exiting.
+  if (p.exitWanted) return bad('An exit is already queued for this pair — let it exit first', 409);
   const u = p.legs.ce.contract.underlying;
-  const sess = sessionFor(u, istDay(now));
-  const hhmm = istHhmm(now);
-  if (hhmm < sess.open || hhmm >= sess.close || sess.open >= sess.close) return bad('The market is closed');
-  if (hhmm >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
-  if (p.mode === 'real') {
-    if (!realArmed(st0, istDay(now))) return bad('Switch on LIVE · REAL MONEY first', 403);
-    if (!brokerSessionOk(p.broker)) return bad(`${BROKER_NAME[p.broker]} session is not logged in`, 403);
-  }
+  // Bug 10 fix: use the shared open-allowed check instead of the inline copy.
+  const openErr = checkOpenAllowed(u, now, p.mode, p.broker, st0);
+  if (openErr) return bad(openErr, openErr.includes('LIVE') || openErr.includes('session') ? 403 : 400);
   const step = PAIR_STRIKE_STEP[u];
   if (!step) return bad(`No strike step for ${u}`);
   const moving: readonly PairLegKey[] = which === 'both' ? LEG_KEYS : [which];
@@ -416,7 +451,7 @@ async function roll(b: Record<string, unknown>, id: string): Promise<NextRespons
     if (need > have) return bad(`The new leg needs about ₹${Math.round(need).toLocaleString('en-IN')}, ${BROKER_NAME[p.broker]} has ₹${Math.round(have).toLocaleString('en-IN')}`);
   }
   const what = `${which === 'both' ? 'Shift' : `Roll ${which.toUpperCase()}`} ${steps > 0 ? '+' : ''}${steps} strike(s): ${moving.map(k => `${p.legs[k].contract.strike}${k.toUpperCase()} → ${rollTo[k]!.strike}${k.toUpperCase()}`).join(', ')}`;
-  const r = await guarded(id, y => y.state === 'open', st => {
+  const r = await guarded(id, y => y.state === 'open' && !y.exitWanted, st => {
     const cur = (st.pairs ?? []).find(y => y.id === id)!;
     // The kept leg's own fill stands as "filled in full", so the roll's verdict reads both legs.
     const legs = { ...cur.legs };
@@ -426,7 +461,7 @@ async function roll(b: Record<string, unknown>, id: string): Promise<NextRespons
     }
     return pushEvent(patchPair(st, id, { state: 'rolling', rollTo, legs, exitWanted: undefined, note: what }, now), ev('info', `${pairName(cur)}: ${what} — closing first`, id));
   });
-  if (!r.applied) return bad('That pair is not open any more', 409);
+  if (!r.applied) return bad('That pair is not open, or an exit is queued — let it settle first', 409);
   return ok(r.state);
 }
 
@@ -482,8 +517,15 @@ export async function pairAction(b: Record<string, unknown>): Promise<NextRespon
     case 'exit': {
       // Both legs exit together on the watcher's next tick (at their live prices).
       // A BROKEN pair exits what is left of it (its bracket is off; nothing else would close it).
-      const r = await guarded(id, y => y.state === 'open' || y.state === 'broken',
-        st => pushEvent(patchPair(st, id, { exitWanted: 'Manual exit' }), ev('info', 'Pair exit requested', id)));
+      // Bug 2 fix: a ROLLING pair must also accept Exit — the watcher detects exitWanted and cancels the roll.
+      // Every joined pair exits together so adding lots doesn't leave orphan positions.
+      const r = await guarded(id, y => y.state === 'open' || y.state === 'broken' || y.state === 'rolling', st => {
+        const cur = (st.pairs ?? []).find(y => y.id === id)!;
+        const all = joinedTo(st, cur);
+        let next = st;
+        for (const y of all) next = patchPair(next, y.id, { exitWanted: 'Manual exit' });
+        return pushEvent(next, ev('info', `Pair exit requested${all.length > 1 ? ` (${all.length} pairs)` : ''}`, id));
+      });
       if (!r.applied) return bad('That pair is not open', 409);
       return ok(r.state);
     }

@@ -74,7 +74,7 @@ export interface LadderPair {
   /** REAL '+1 lot': its two entry orders are to be sent by the watcher on its next tick (marked, then sent). */
   sendWanted?: boolean;
   /**
-   * A roll in progress (state `rolling`): the listed legs move to these contracts — both = a shift, one = a leg roll. The
+   * A roll in progress (state `rolling`): the listed legs move to these contracts — both = a shift, one = a roll. The
    * old leg is closed in full before the new one opens (Inv 4); the other leg is not touched.
    */
   rollTo?: { ce?: LadderContract; pe?: LadderContract; steps: number };
@@ -159,11 +159,13 @@ export function legSlPrice(p: Pick<LadderPair, 'side' | 'legSlPct'>, l: PairLeg)
   return round2(Number(l.avg) * f);
 }
 
-/** Why a leg's own stop exits the pair now ("Leg SL CE 1040.00"), or null. A leg with no live price is not judged. */
-export function legSlReason(p: LadderPair, ltps: Record<string, number>): string | null {
+/** Why a leg's own stop exits the pair now ("Leg SL CE 1040.00"), or null. A leg with no live price is not judged.
+ * Joined pairs (+1 lot) pass the root parent as refPair to share that parent's stop level. */
+export function legSlReason(p: LadderPair, ltps: Record<string, number>, refPair?: LadderPair): string | null {
+  const ref = refPair ?? p;
   for (const k of LEG_KEYS) {
     const l = p.legs[k];
-    const at = legSlPrice(p, l);
+    const at = legSlPrice(ref, ref.legs[k]);
     const ltp = ltps[l.contract.securityId];
     if (at == null || !(ltp > 0) || legHeld(p, l) <= 0) continue;
     if (p.side === 'SELL' ? ltp >= at : ltp <= at) return `Leg SL ${k.toUpperCase()} ${at.toFixed(2)}`;
@@ -264,6 +266,11 @@ export function blendExitAvg(l: PairLeg, qty: number, px: number | undefined): n
   const price = px && px > 0 ? px : l.avg;
   if (!(qty > 0) || !(price && price > 0)) return l.exitAvg;
   return Number((((l.exitAvg ?? 0) * prev + price * qty) / (prev + qty)).toFixed(2));
+}
+
+/** A leg filled to open with quantity and average price (SIM fill, roll fresh fill, or +1 lot SIM fill). */
+export function fillLeg(l: PairLeg, qty: number, avg: number): PairLeg {
+  return { ...l, avg, held: qty, filledQty: qty, entry: 'filled' };
 }
 
 /** The IST day a pair's legs expire, passed: nothing more can be priced or exited. */
@@ -395,8 +402,8 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
         const x: Partial<LadderPair> = {
           state: 'open', seenSafe: r.seenSafe, openedAt: now, entryY,
           legs: {
-            ce: { ...p.legs.ce, avg: fill.ce, held: p.qty, filledQty: p.qty, entry: 'filled' },
-            pe: { ...p.legs.pe, avg: fill.pe, held: p.qty, filledQty: p.qty, entry: 'filled' },
+            ce: fillLeg(p.legs.ce, p.qty, fill.ce),
+            pe: fillLeg(p.legs.pe, p.qty, fill.pe),
           },
           ...pairBracketAt(p, entryY),
         };
@@ -442,11 +449,16 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
         }
         const ce = { ...p.legs.ce, avg: ceAvg }, pe = { ...p.legs.pe, avg: peAvg };
         const entryY = round2(ceAvg + peAvg);
+        // Bug 7 fix: a '+1 lot' joining an open pair takes the parent's CURRENT levels on fill, so any drag made
+        // while the added lot was filling (in the 1-3s before) is not missed.
+        const parent = p.joinedTo ? pairs.find(y => y.id === p.joinedTo && isPairLive(y)) : null;
+        const joinedLevels = parent && parent.slY != null
+          ? { entryY: parent.entryY ?? p.entryY ?? entryY, tgtY: parent.tgtY, slY: parent.slY, slY0: parent.slY0, peakY: parent.peakY, trailFrom: parent.trailFrom, ...(parent.bracket ? { bracket: parent.bracket } : {}) }
+          : (p.joinedTo && p.slY != null ? { entryY: p.entryY ?? entryY } : { entryY, ...pairBracketAt(p, entryY) });
         next = say(patch(p.id, {
           state: 'open', openedAt: now, note: undefined,
           legs: { ce: { ...ce, held: ce.filledQty }, pe: { ...pe, held: pe.filledQty } },
-          // A '+1 lot' keeps the levels it joined (one target / SL for the whole position); a new pair gets its own.
-          ...(p.joinedTo && p.slY != null ? { entryY: p.entryY ?? entryY } : { entryY, ...pairBracketAt(p, entryY) }),
+          ...joinedLevels,
         }), 'info', `${p.side} ${p.lots} lot(s) ${name} filled: CE ${ceAvg.toFixed(2)} + PE ${peAvg.toFixed(2)} = ${entryY.toFixed(2)} (crossed at ${p.crossY ?? '?'})`, p.id);
       } else if (v === 'unwind') {
         // Never one leg on its own: exit every unit that did fill. Nothing filled at all = nothing to undo.
@@ -470,6 +482,35 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
       const ro = p.rollTo;
       if (!ro) { next = patch(p.id, { state: 'open' }); continue; }
       const moving = LEG_KEYS.filter(k => ro[k]);
+
+      // Bug 2 fix: honour expiry, auto-exit and manual Exit while rolling. A roll started before the auto-exit time
+      // must not open a new leg after it — instead unwind whatever is still held.
+      if (pairExpired(p, today)) {
+        beginExit({ ...p }, 'Expired while rolling — unwinding', { rollTo: undefined, openedAt: now });
+        continue;
+      }
+      if (p.exitWanted) {
+        // The user clicked Exit while the roll was in progress: cancel the roll and exit whatever is held.
+        next = say(patch(p.id, { note: `Exit requested while rolling — cancelling roll` }), 'warn', `${name}: Exit requested mid-roll — cancelling roll and exiting`, p.id);
+        beginExit({ ...p }, p.exitWanted, { rollTo: undefined, openedAt: now });
+        continue;
+      }
+      if (afterClose && p.product === 'MIS') {
+        // Auto square-off: refuse to open any new leg, unwind what is held.
+        beginExit({ ...p }, `Auto square-off ${at} while rolling — unwinding`, { rollTo: undefined, openedAt: now });
+        continue;
+      }
+
+      // Bug 2 fix: protection while rolling. If the leg that isn't moving hits its leg SL (or combined SL hits),
+      // cancel the roll and unwind whatever is still held — never leave a losing unmoved leg unprotected.
+      const rollSlReason = legSlReason(p, ltps) ?? (p.bracket && c != null ? openExitStep(p, pairBias(p.side), c, afterClose, at).reason : null);
+      if (rollSlReason) {
+        next = say(patch(p.id, { note: `${rollSlReason} while rolling — cancelling roll and unwinding` }),
+          'warn', `${name}: ${rollSlReason} mid-roll — cancelling roll and unwinding`, p.id);
+        beginExit({ ...p }, rollSlReason, { rollTo: undefined, openedAt: now });
+        continue;
+      }
+
       if (LEG_KEYS.some(k => p.legs[k].unknown)) {
         next = say(patch(p.id, { state: 'unknown', note: 'A roll order has an unknown outcome — check Orders/Positions, then resolve each leg' }), 'error', `${name}: roll UNKNOWN — nothing more is sent until you resolve it`, p.id);
         continue;
@@ -479,6 +520,18 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
       const oldLegs = moving.filter(k => p.legs[k].contract.securityId !== ro[k]!.securityId);
       if (oldLegs.length) {
         const inFlight = oldLegs.some(k => p.legs[k].exitOrderId || p.legs[k].exitSentAt);
+
+        // Bug 3 fix: if a close was sent but never got an order id back, and no job is running, the send was
+        // interrupted — go UNKNOWN just like the exiting block does.
+        if (real) {
+          const orphan = oldLegs.find(k => p.legs[k].exitSentAt && !p.legs[k].exitOrderId && !io.busy(p.id) && now - Number(p.legs[k].exitSentAt) > PAIR_ORPHAN_MS);
+          if (orphan) {
+            next = say(patch(p.id, x => ({ state: 'unknown', note: 'Roll close send was interrupted — check Positions', legs: { ...x.legs, [orphan]: { ...x.legs[orphan], unknown: 'exit' } } })),
+              'error', `${name}: ${orphan.toUpperCase()} roll close send interrupted — outcome UNKNOWN`, p.id);
+            continue;
+          }
+        }
+
         if (oldLegs.every(k => (p.legs[k].held ?? 0) <= 0) && !inFlight) {
           // Flat: book what the old leg made, put the new contract in its place, and send its entry.
           let booked = p.bookedPnl ?? 0;
@@ -489,7 +542,14 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
             legs[k] = { contract: ro[k]! };
           }
           if (real) {
-            if (!sessionOpen) continue;
+            // Bug 2 fix: refuse to open the new leg if the session is already past the auto-exit time.
+            if (!sessionOpen || afterClose) {
+              // Old leg already closed; we cannot open the new one. Unwind any remaining held leg(s).
+              next = say(patch(p.id, { bookedPnl: round2(booked), legs, rollTo: undefined, openedAt: now }),
+                'warn', `${name}: old leg closed but past ${at} — not opening new strike; exiting remaining legs`, p.id);
+              beginExit({ ...p, legs, bookedPnl: round2(booked) }, `Past ${at} — roll abandoned`, { rollTo: undefined, openedAt: now });
+              continue;
+            }
             next = say(patch(p.id, { legs, bookedPnl: round2(booked), sentAt: now }), 'info', `${name}: old ${oldLegs.map(k => k.toUpperCase()).join(' + ')} closed — opening ${oldLegs.map(k => `${ro[k]!.strike}${k.toUpperCase()}`).join(' + ')} at MARKET`, p.id);
             jobs.push({ kind: 'pairOpen', id: p.id });
           } else {
@@ -523,7 +583,7 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
         if (fresh.length) {
           if (!sessionOpen || fresh.some(k => !(ltps[p.legs[k].contract.securityId] > 0))) continue;
           const legs = { ...p.legs };
-          for (const k of fresh) legs[k] = { ...legs[k], avg: ltps[legs[k].contract.securityId], held: p.qty, filledQty: p.qty, entry: 'filled' };
+          for (const k of fresh) legs[k] = fillLeg(legs[k], p.qty, ltps[legs[k].contract.securityId]);
           next = patch(p.id, { legs });
           continue;
         }
@@ -543,8 +603,10 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
         const ce = { ...p.legs.ce, avg: ceAvg }, pe = { ...p.legs.pe, avg: peAvg };
         const entryY = round2(ceAvg + peAvg);
         const structure: PairStructure = ce.contract.strike === pe.contract.strike ? 'straddle' : 'strangle';
+        // Bug 1 fix: restart the fill grace allowance (openedAt = now) so the reconcile watcher does not
+        // declare the new leg gone / closed outside while the broker's position book catches up.
         next = say(patch(p.id, {
-          state: 'open', rollTo: undefined, structure, entryY, note: undefined,
+          state: 'open', rollTo: undefined, openedAt: now, structure, entryY, note: undefined,
           legs: { ce: { ...ce, held: ce.held ?? ce.filledQty }, pe: { ...pe, held: pe.held ?? pe.filledQty } },
           // The bracket keeps its distances, measured from the new combined fill.
           ...pairBracketAt(p, entryY),
@@ -607,9 +669,13 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
       continue;
     }
     // A broken pair's bracket is off (its combined no longer describes what is held): only MIS / manual exits act.
+    const parent = p.joinedTo ? pairs.find(y => y.id === p.joinedTo) : null;
+    const parentExited = parent && (parent.state === 'exiting' || parent.state === 'closed');
     const step = openExitStep(p, pairBias(p.side), p.state === 'broken' ? null : c, afterClose, at);
     // A leg's own stop (open pairs only — a broken pair's bracket is off) exits both legs, never one alone.
-    const reason = step.reason ?? (p.state === 'open' ? legSlReason(p, ltps) : null);
+    // Bug 5 fix: joined lots share one stop level (the parent's stop level) across joined lots so the parent and
+    // child exit together. Also, if the parent has already exited, any joined child exits immediately with it.
+    const reason = step.reason ?? (parentExited ? (parent.exitReason ?? 'Parent exited') : (p.state === 'open' ? legSlReason(p, ltps, parent ?? undefined) : null));
     if (real && reason) { beginExit(p, reason, step.patch); continue; }
     if (reason && c == null) {
       // SIM: both legs exit together at their own prices; with one unpriced, wait (said once).
@@ -685,6 +751,7 @@ export function splitOneLot(p: LadderPair, newId: string, now: number): { parent
   const legOne = (l: PairLeg): PairLeg => ({ ...l, held: lot, filledQty: lot, exitedQty: 0, exitAvg: undefined, note: undefined });
   return {
     parent: { lots: p.lots - 1, qty: rest, legs: { ce: legRest(p.legs.ce), pe: legRest(p.legs.pe) } },
-    child: { ...p, id: newId, lots: 1, qty: lot, legs: { ce: legOne(p.legs.ce), pe: legOne(p.legs.pe) }, joinedTo: p.id, exitWanted: 'Manual exit (−1 lot)', createdAt: now, updatedAt: now },
+    // Bug 4 fix: the split-off lot must not inherit the parent's bookedPnl — it has not participated in any rolled leg.
+    child: { ...p, id: newId, lots: 1, qty: lot, legs: { ce: legOne(p.legs.ce), pe: legOne(p.legs.pe) }, joinedTo: p.id, bookedPnl: undefined, exitWanted: 'Manual exit (−1 lot)', createdAt: now, updatedAt: now },
   };
 }

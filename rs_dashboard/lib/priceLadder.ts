@@ -509,6 +509,11 @@ export function rollDay(s: LadderState, today: string, now: number): LadderState
   const pairs = (s.pairs ?? [])
     .filter(p => p.state !== 'armed' && p.state !== 'closed' && p.state !== 'cancelled')
     .map(p => {
+      // Bug 9 fix: a '+1 lot' in `placing` with sendWanted=true was never sent to the broker — no order exists.
+      // Cancel it instead of marking it UNKNOWN so the user is not asked to resolve a ghost position next day.
+      if (p.state === 'placing' && p.sendWanted) {
+        return { ...p, state: 'cancelled' as const, sendWanted: undefined, note: 'Not sent before the session ended — cancelled', updatedAt: now };
+      }
       if (p.state !== 'placing' && p.state !== 'exiting' && p.state !== 'rolling') return p;
       // Per leg: an entry still working (or never sent) → unknown entry; an exit in flight → unknown exit.
       const leg = (l: typeof p.legs.ce) => (l.entry === 'sent' || (p.state === 'placing' && l.entry == null)
@@ -518,7 +523,9 @@ export function rollDay(s: LadderState, today: string, now: number): LadderState
       // Nothing was in flight (e.g. an exit waiting to retry): it carries on as it was.
       if (!legs.ce.unknown && !legs.pe.unknown) return p;
       return { ...p, state: 'unknown' as const, legs, note: 'Order from an earlier session — check Orders/Positions, then resolve each leg', updatedAt: now };
-    });
+    })
+    // Drop the cancelled ones that were just created (they have nothing to show next day).
+    .filter(p => p.state !== 'cancelled');
   return { date: today, slices, events: [], liveArmedOn: undefined, ...(pairs.length ? { pairs } : {}), ...(s.rev != null ? { rev: s.rev } : {}) };
 }
 

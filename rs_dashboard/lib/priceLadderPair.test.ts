@@ -489,3 +489,119 @@ test('REAL roll: the new leg rejected → the kept leg is unwound (never left al
   assert.equal(o.rollTo, undefined);
   assert.deepEqual(r.jobs, [{ kind: 'pairClose', id: 'p1' }]);
 });
+
+test('Bug 1: roll complete restarts fill grace (openedAt = now)', () => {
+  const filled = openReal({ state: 'rolling', openedAt: 100, rollTo: { ce: c9450, steps: 2 },
+    legs: { ce: { ...leg('CE', '3'), orderId: 'n', entry: 'filled', filledQty: 65, avg: 110 }, pe: { ...leg('PE', '2'), avg: 150, held: 65, filledQty: 65, entry: 'filled' } } });
+  const now = at(10, 5);
+  const o = one(planPairsTick(realSt(filled), {}, now, io()).next);
+  assert.equal(o.state, 'open');
+  assert.equal(o.openedAt, now); // restarted!
+});
+
+test('Bug 2: rolling pair honours MIS auto-exit and manual exit', () => {
+  // Past 15:17: unwinds the rolling pair
+  const p = openReal({ state: 'rolling', product: 'MIS', rollTo: { ce: c9450, steps: 2 },
+    legs: { ce: { ...leg('CE', '1'), held: 65 }, pe: { ...leg('PE', '2'), held: 65 } } });
+  const rAuto = planPairsTick(realSt(p), {}, at(15, 18), io());
+  assert.equal(one(rAuto.next).state, 'exiting');
+  assert.ok(one(rAuto.next).exitReason?.includes('Auto square-off'));
+
+  // Manual exit requested while rolling
+  const pExit = openReal({ state: 'rolling', exitWanted: 'Manual exit', rollTo: { ce: c9450, steps: 2 },
+    legs: { ce: { ...leg('CE', '1'), held: 65 }, pe: { ...leg('PE', '2'), held: 65 } } });
+  const rMan = planPairsTick(realSt(pExit), {}, at(11, 0), io());
+  assert.equal(one(rMan.next).state, 'exiting');
+  assert.equal(one(rMan.next).exitReason, 'Manual exit');
+
+  // Leg SL hit on the unmoved leg (PE) while CE is rolling: cancels roll and unwinds
+  const pLegSl = openReal({ state: 'rolling', legSlPct: 50, rollTo: { ce: c9450, steps: 2 },
+    legs: { ce: { ...leg('CE', '1'), held: 0, exitedQty: 65, exitAvg: 170 }, pe: { ...leg('PE', '2'), avg: 100, held: 65 } } });
+  // PE stop at 150; LTP hits 160
+  const rLegSl = planPairsTick(realSt(pLegSl), { 2: 160 }, at(11, 0), io());
+  assert.equal(one(rLegSl.next).state, 'exiting');
+  assert.equal(one(rLegSl.next).exitReason, 'Leg SL PE 150.00');
+  assert.equal(one(rLegSl.next).rollTo, undefined);
+});
+
+test('Bug 3: interrupted roll exit turns UNKNOWN after 30s', () => {
+  const p = openReal({ state: 'rolling', rollTo: { ce: c9450, steps: 2 },
+    legs: { ce: { ...leg('CE', '1'), held: 65, exitSentAt: 1000 }, pe: { ...leg('PE', '2'), held: 65 } } });
+  const r = planPairsTick(realSt(p), {}, 1000 + 35_000, io());
+  assert.equal(one(r.next).state, 'unknown');
+  assert.equal(one(r.next).legs.ce.unknown, 'exit');
+});
+
+test('Bug 4: splitOneLot does not copy bookedPnl to child', () => {
+  const p: LadderPair = {
+    id: 'p0', broker: 'dhan', mode: 'sim', structure: 'straddle', side: 'SELL', lots: 2, qty: 130, product: 'MIS', state: 'open',
+    legs: { ce: { ...leg('CE', '1'), held: 130, avg: 100 }, pe: { ...leg('PE', '2'), held: 130, avg: 100 } },
+    bookedPnl: 5000, createdAt: 1, updatedAt: 1,
+  };
+  const sp = splitOneLot(p, 'child1', 2);
+  assert.ok(typeof sp !== 'string');
+  if (typeof sp !== 'string' && sp.child) {
+    assert.equal(sp.child.bookedPnl, undefined);
+  }
+});
+
+test('Bug 5: +1 lot joinedTo parent skips separate leg-SL check', () => {
+  // A joined pair with a low fill should not exit before the parent if parent leg-SL has not triggered
+  const parent: LadderPair = {
+    id: 'parent', broker: 'dhan', mode: 'sim', structure: 'straddle', side: 'SELL', lots: 1, qty: 65, product: 'MIS', state: 'open',
+    legs: { ce: { ...leg('CE', '1'), avg: 200, held: 65 }, pe: { ...leg('PE', '2'), avg: 200, held: 65 } },
+    legSlPct: 100, createdAt: 1, updatedAt: 1,
+  };
+  const child: LadderPair = {
+    id: 'child', broker: 'dhan', mode: 'sim', structure: 'straddle', side: 'SELL', lots: 1, qty: 65, product: 'MIS', state: 'open',
+    legs: { ce: { ...leg('CE', '1'), avg: 130, held: 65 }, pe: { ...leg('PE', '2'), avg: 200, held: 65 } },
+    legSlPct: 100, joinedTo: 'parent', createdAt: 1, updatedAt: 1,
+  };
+  // If CE trades at 270:
+  // Child's own 100% stop would be 260 -> would trigger if judged independently!
+  // Parent's 100% stop is 400 -> not triggered.
+  // With Bug 5 fix, child shares parent's stop (400) and remains open.
+  const st: LadderState = { date: '2026-10-21', slices: [], events: [], pairs: [parent, child] };
+  const r1 = planPairsTick(st, { 1: 270, 2: 200 }, at(10, 0), io());
+  const c1 = r1.next.pairs?.find(x => x.id === 'child');
+  assert.equal(c1?.state, 'open');
+
+  // If CE trades at 405:
+  // Both parent and child hit the shared 400.00 stop and exit together!
+  const r2 = planPairsTick(st, { 1: 405, 2: 200 }, at(10, 0), io());
+  const p2 = r2.next.pairs?.find(x => x.id === 'parent');
+  const c2 = r2.next.pairs?.find(x => x.id === 'child');
+  assert.equal(p2?.state, 'closed');
+  assert.equal(p2?.exitReason, 'Leg SL CE 400.00');
+  assert.equal(c2?.state, 'closed');
+  assert.equal(c2?.exitReason, 'Leg SL CE 400.00');
+});
+
+test('Bug 7: +1 lot takes parent current levels on fill even if parent moved during fill', () => {
+  const parent: LadderPair = {
+    id: 'parent', broker: 'dhan', mode: 'real', structure: 'straddle', side: 'SELL', lots: 1, qty: 65, product: 'MIS', state: 'open',
+    legs: { ce: { ...leg('CE', '1'), avg: 150, held: 65, filledQty: 65, entry: 'filled' }, pe: { ...leg('PE', '2'), avg: 150, held: 65, filledQty: 65, entry: 'filled' } },
+    entryY: 300, slY: 340, tgtY: 260, createdAt: 1, updatedAt: 1,
+  };
+  // Child was created when parent SL was 320, but parent SL is now 340
+  const child: LadderPair = {
+    id: 'child', broker: 'dhan', mode: 'real', structure: 'straddle', side: 'SELL', lots: 1, qty: 65, product: 'MIS', state: 'placing',
+    legs: { ce: { ...leg('CE', '1'), orderId: 'c1', entry: 'filled', filledQty: 65, avg: 152 }, pe: { ...leg('PE', '2'), orderId: 'c2', entry: 'filled', filledQty: 65, avg: 148 } },
+    joinedTo: 'parent', slY: 320, tgtY: 270, createdAt: 1, updatedAt: 1,
+  };
+  const st: LadderState = { date: '2026-10-21', slices: [], events: [], pairs: [parent, child] };
+  const r = planPairsTick(st, {}, at(10, 0), io());
+  const c = r.next.pairs?.find(x => x.id === 'child');
+  assert.equal(c?.state, 'open');
+  assert.equal(c?.slY, 340); // Inherited parent's current slY!
+});
+
+test('Bug 9: placing +1 lot with sendWanted is cancelled on rollDay, not marked UNKNOWN', () => {
+  const unsent: LadderPair = {
+    id: 'unsent', broker: 'dhan', mode: 'real', structure: 'straddle', side: 'SELL', lots: 1, qty: 65, product: 'MIS', state: 'placing',
+    sendWanted: true, legs: { ce: leg('CE', '1'), pe: leg('PE', '2') }, createdAt: 1, updatedAt: 1,
+  };
+  const st: LadderState = { date: '2026-10-21', slices: [], events: [], pairs: [unsent] };
+  const rolled = rollDay(st, '2026-10-22', 1000);
+  assert.equal(rolled.pairs?.length ?? 0, 0); // cancelled and filtered out
+});
