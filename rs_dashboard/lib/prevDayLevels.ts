@@ -1,11 +1,16 @@
+import fs from 'fs';
+import path from 'path';
 import { getDhanCredentials } from './dhanToken.ts';
+import { writeJsonAtomic } from './lockedJsonFile.ts';
 import { istDay, isMcxUnderlying } from './priceLadder.ts';
 
 // Previous day's high / low / close for the Price Ladder's PDH / PDL marks (XY mode). Dhan only (the repo's data rule):
-// daily candles from /charts/historical — no CSV or other-source fallback; no Dhan answer = no mark. The ladder's view
-// is rebuilt up to 4x a second, so it never waits on this: `prevDayLevelsNow` returns what is cached and starts at most
-// one background fetch per key; a failure is remembered for FAIL_RETRY_MS so a broken token or an unknown id cannot
-// turn every view build into a Dhan call.
+// daily candles from /charts/historical — no CSV or other-source fallback; no Dhan answer = no mark.
+// Fetched ONCE per underlying per IST day: a success is kept in memory and in debug/prev_day_levels.json (that day's
+// levels only), so a dashboard restart reuses it instead of calling Dhan again. The ladder's view is rebuilt up to 4x a
+// second, so it never waits on this: `prevDayLevelsNow` returns what is cached and starts at most one background fetch
+// per key; only a FAILED fetch is tried again, after FAIL_RETRY_MS (a broken token or an unknown id must not turn every
+// view build into a Dhan call, nor leave the marks missing all day).
 
 const DHAN_HISTORICAL_URL = 'https://api.dhan.co/v2/charts/historical';
 /** After a failed / empty fetch, the next try waits this long. */
@@ -18,6 +23,30 @@ const INDEX_IDS: Record<string, string> = { NIFTY: '13', BANKNIFTY: '25', SENSEX
 
 interface Memo { ok: Map<string, PrevDayLevel>; failedAt: Map<string, number>; inFlight: Set<string> }
 const memo: Memo = ((globalThis as { __prevDayLevels?: Memo }).__prevDayLevels ??= { ok: new Map(), failedAt: new Map(), inFlight: new Set() });
+
+/** Today's fetched levels on disk: { date, levels: { key: level } } (keys are `${date}:${underlying}:${mcxId}`). */
+const CACHE_FILE = path.join(path.resolve(process.cwd(), '..'), 'debug', 'prev_day_levels.json');
+/** The day whose disk cache has been loaded into memory (loaded once per day per process). */
+let loadedDay = '';
+
+function loadDisk(today: string): void {
+  if (loadedDay === today) return;
+  loadedDay = today;
+  try {
+    const f = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')) as { date?: string; levels?: Record<string, PrevDayLevel> };
+    if (f.date !== today) return;                       // an older day's file: ignored, overwritten on the next fetch
+    for (const [k, v] of Object.entries(f.levels ?? {})) {
+      if (v && v.high > 0 && v.low > 0 && v.close > 0) memo.ok.set(k, v);
+    }
+  } catch { /* none yet, or unreadable: fetch */ }
+}
+
+function saveDisk(today: string): void {
+  try {
+    const levels = Object.fromEntries([...memo.ok].filter(([k]) => k.startsWith(`${today}:`)));
+    writeJsonAtomic(CACHE_FILE, { date: today, levels });
+  } catch { /* best effort: the memory cache still holds it */ }
+}
 
 /**
  * The last complete day before `today` (IST) in a Dhan daily-candle reply, or null. Pure. Rows with a non-positive
@@ -53,7 +82,7 @@ async function fetchPrevDay(key: string, inst: NonNullable<ReturnType<typeof ins
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     const lv = res.ok ? pickPrevDay(await res.json(), today) : null;
-    if (lv) { memo.ok.set(key, lv); memo.failedAt.delete(key); } else memo.failedAt.set(key, Date.now());
+    if (lv) { memo.ok.set(key, lv); memo.failedAt.delete(key); saveDisk(today); } else memo.failedAt.set(key, Date.now());
   } catch {
     memo.failedAt.set(key, Date.now());
   } finally {
@@ -69,6 +98,7 @@ export function prevDayLevelsNow(underlying: string, mcxFuturesId?: string | nul
   const u = underlying.toUpperCase();
   const today = istDay();
   const key = `${today}:${u}:${mcxFuturesId ?? ''}`;
+  loadDisk(today);
   const hit = memo.ok.get(key);
   if (hit) return hit;
   const inst = instrumentFor(u, mcxFuturesId);
