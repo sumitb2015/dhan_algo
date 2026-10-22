@@ -142,7 +142,7 @@ export default function PriceLadder() {
   }, []);
   const setMode = (m: LadderMode) => { setModeRaw(m); savePref('price-ladder-mode', m); setTick(m === 'xy' ? 5 : 0.05); setFollow(true); setManual(false); };
   // The expiry is cleared too: the old underlying's date must not be asked of the new one's chain for a render.
-  const setUnderlying = (u: string) => { setUnderlyingRaw(u); savePref('price-ladder-underlying', u); setExpiry(''); setExpiries([]); setStrike(null); setFollow(true); setManual(false); };
+  const setUnderlying = (u: string) => { setUnderlyingRaw(u); savePref('price-ladder-underlying', u); setExpiry(''); setExpiries([]); setStrike(null); setCenter(0); setFollow(true); setManual(false); };
 
   // The indices feed is the XY ladder's spot source; the server falls back to a paced REST quote if it is down.
   useEffect(() => {
@@ -168,7 +168,7 @@ export default function PriceLadder() {
     let cancelled = false;
     fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=dhan`)
       .then(r => r.json())
-      .then((j: { success: boolean; data?: { chain?: { oc?: Record<string, unknown> }; spot?: number } }) => {
+      .then((j: { success: boolean; data?: { chain?: { oc?: Record<string, { ce?: { last_price?: number }; pe?: { last_price?: number } }> }; spot?: number } }) => {
         if (cancelled) return;
         const oc = j.data?.chain?.oc;
         if (!j.success || !oc) { setLoadError(`Could not load the ${underlying} option chain`); return; }
@@ -179,7 +179,17 @@ export default function PriceLadder() {
         setStrike(prev => {
           if (prev != null && list.includes(prev)) return prev;
           if (!list.length) return null;
-          const atm = spot > 0 ? Math.round(spot / step) * step : list[Math.floor(list.length / 2)];
+          // No spot in the reply: the strike where call and put are closest in price (put-call parity's ATM).
+          const parity = () => {
+            let best: number | null = null, gap = Infinity;
+            for (const k of list) {
+              const row = oc[String(k)] ?? oc[k.toFixed(6)];
+              const ce = Number(row?.ce?.last_price), pe = Number(row?.pe?.last_price);
+              if (ce > 0 && pe > 0 && Math.abs(ce - pe) < gap) { gap = Math.abs(ce - pe); best = k; }
+            }
+            return best;
+          };
+          const atm = spot > 0 ? Math.round(spot / step) * step : parity() ?? list[Math.floor(list.length / 2)];
           return list.reduce((a, b) => (Math.abs(b - atm) < Math.abs(a - atm) ? b : a));
         });
         setLoadError(null);
@@ -188,9 +198,15 @@ export default function PriceLadder() {
     return () => { cancelled = true; };
   }, [underlying, expiry]);
 
-  // Ladder state + spot + the shown contract's LTP, once a second. Out-of-order replies are dropped.
+  // Ladder state + spot + the shown contract's LTP, once a second. Out-of-order replies are dropped. One request per
+  // selection at a time: a reply can take longer than the 1 s tick (an MCX contract waits on the shared quote lane), and
+  // starting a new poll every tick would make every reply "out of order" and the page would never update.
   const seq = useRef(0);
+  const pollInFlight = useRef<string | null>(null);
   const poll = useCallback(async () => {
+    const key = `${underlying}|${expiry}|${strike}|${opt}`;
+    if (pollInFlight.current === key) return;
+    pollInFlight.current = key;
     const my = ++seq.current;
     const q = new URLSearchParams({ underlying });
     if (expiry && strike) { q.set('expiry', expiry); q.set('strike', String(strike)); q.set('opt', opt); }
@@ -203,6 +219,8 @@ export default function PriceLadder() {
       setLoadError(null);
     } catch {
       if (my === seq.current) setLoadError('Could not reach the dashboard server');
+    } finally {
+      if (pollInFlight.current === key) pollInFlight.current = null;
     }
   }, [underlying, expiry, strike, opt]);
   useEffect(() => {
@@ -470,13 +488,15 @@ export default function PriceLadder() {
   // Switch the page to a slice's contract (Active Trades chip, orders list). Moving into REAL re-arms the first-click
   // confirmation, exactly like the SIM/REAL switch.
   const selectContract = useCallback((s: { contract: LadderContract; broker?: LadderBroker; mode?: 'real' | 'sim' }) => {
+    // Another underlying is another price axis: drop the old rows until its price arrives.
+    if (s.contract.underlying && s.contract.underlying !== underlying) setCenter(0);
     if (s.contract.underlying) setUnderlyingRaw(s.contract.underlying);
     if (s.contract.expiry) setExpiry(s.contract.expiry);
     if (s.contract.strike) setStrike(s.contract.strike);
     if (s.contract.opt) setOpt(s.contract.opt);
     if (s.broker) setBroker(s.broker);
     if (s.mode) { setReal(s.mode === 'real'); setRealAck(false); }
-  }, [setBroker]);
+  }, [setBroker, underlying]);
 
   // Auto-focus the contract of the newest live trade on first load so the user immediately sees it. It never switches
   // the page into REAL on its own: it prefers a trade in the page's mode (SIM on load) and otherwise shows the contract
