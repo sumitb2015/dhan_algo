@@ -570,6 +570,22 @@ export default function PriceLadder() {
   const latestEvent = data?.state.events.length ? data.state.events[data.state.events.length - 1] : null;
   const optLabel = strike ? `${underlying} ${expiry} ${strike} ${opt}` : `${underlying} —`;
   const live = slices.filter(isLive);
+  // Live slices grouped per position (contract + broker + mode + side): one chip / banner line, not one per slice.
+  const liveGroups = useMemo(() => {
+    const m = new Map<string, { key: string; slices: LadderSlice[]; lots: number; armed: number }>();
+    for (const x of slices.filter(isLive)) {
+      const key = `${x.contract.securityId}|${x.broker}|${x.mode}|${x.side}`;
+      const g = m.get(key) ?? m.set(key, { key, slices: [], lots: 0, armed: 0 }).get(key)!;
+      g.slices.push(x);
+      const held = Number(x.filledQty) || 0;
+      if (held > 0) g.lots += Math.max(1, Math.round(held / x.contract.lotSize));
+      else g.armed += 1;
+    }
+    return [...m.values()];
+  }, [slices]);
+  // Live orders on the contract on screen that the ladder does not draw (the other SIM/REAL mode, or another broker).
+  const hiddenHere = liveGroups.filter(g => g.slices[0].contract.securityId === securityId
+    && (g.slices[0].mode !== pageMode || g.slices[0].broker !== broker));
   const done = slices.filter(s => !isLive(s));
 
   // Switch the page to a slice's contract (Active Trades chip, orders list). Moving into REAL re-arms the first-click
@@ -817,20 +833,40 @@ export default function PriceLadder() {
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                   Active Trades:
                 </span>
-                {live.map(s => {
-                  const isCur = s.contract.securityId === securityId && s.broker === broker && s.mode === pageMode;
+                {liveGroups.map(g => {
+                  const s0 = g.slices[0];
+                  const isCur = s0.contract.securityId === securityId && s0.broker === broker && s0.mode === pageMode;
                   return (
                     <button
-                      key={s.id} type="button"
-                      onClick={() => selectContract(s)}
-                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono border transition-colors ${isCur ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300 font-bold shadow-sm' : 'bg-zinc-800/90 border-zinc-700 text-zinc-300 hover:text-white hover:border-zinc-500'}`}
+                      key={g.key} type="button"
+                      onClick={() => selectContract(s0)}
+                      title={isCur ? 'On the ladder now' : `Show it on the ladder (${s0.mode.toUpperCase()} · ${BROKER_LABELS[s0.broker]})`}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono border transition-colors ${FOCUS_RING} ${isCur ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300 font-bold shadow-sm' : 'bg-zinc-800/90 border-zinc-700 text-zinc-300 hover:text-white hover:border-zinc-500'}`}
                     >
-                      <span>{s.contract.underlying} {s.contract.strike}{s.contract.opt}</span>
-                      <span className="text-[10px] text-zinc-400">({s.mode.toUpperCase()} · {s.qty})</span>
+                      <span>{s0.contract.underlying} {s0.contract.strike}{s0.contract.opt}</span>
+                      <span className={s0.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}>{s0.side}</span>
+                      <span className="text-[10px] text-zinc-400">
+                        ({s0.mode === 'real' ? <span className="text-red-400 font-bold">REAL</span> : 'SIM'} · {g.lots}L{s0.contract.mult ? ` · ${g.lots * s0.contract.mult} bbl` : ''}{g.armed ? ` · ${g.armed} armed` : ''})
+                      </span>
                       {!isCur && <span className="text-[10px] text-amber-300 underline font-sans ml-0.5">View on ladder</span>}
                     </button>
                   );
                 })}
+              </div>
+            )}
+            {hiddenHere.length > 0 && (
+              <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-amber-500/40 bg-amber-500/10 text-xs text-amber-300">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                {hiddenHere.map(g => (
+                  <span key={g.key} className="inline-flex items-center gap-2">
+                    {g.lots} lot(s) {g.slices[0].side} {g.slices[0].mode === 'real' ? 'REAL' : 'SIM'} on {BROKER_LABELS[g.slices[0].broker]} on this contract
+                    {g.armed ? ` (${g.armed} armed)` : ''} — not shown: the ladder is on {real ? 'REAL' : 'SIM'} · {BROKER_LABELS[broker]}.
+                    <button type="button" onClick={() => selectContract(g.slices[0])}
+                      className={`px-2 py-0.5 rounded border border-amber-500/50 font-bold hover:bg-amber-500/20 ${FOCUS_RING}`}>
+                      Show {g.slices[0].mode === 'real' ? 'REAL' : 'SIM'}{g.slices[0].broker !== broker ? ` · ${BROKER_LABELS[g.slices[0].broker]}` : ''}
+                    </button>
+                  </span>
+                ))}
               </div>
             )}
             <div className="flex items-center gap-2 flex-wrap text-xs">
