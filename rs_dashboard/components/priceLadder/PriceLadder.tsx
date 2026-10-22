@@ -168,13 +168,14 @@ export default function PriceLadder() {
     let cancelled = false;
     fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=dhan`)
       .then(r => r.json())
-      .then((j: { success: boolean; data?: { chain?: { oc?: Record<string, { ce?: { last_price?: number }; pe?: { last_price?: number } }> }; spot?: number } }) => {
+      .then((j: { success: boolean; data?: { chain?: { oc?: Record<string, { ce?: { last_price?: number }; pe?: { last_price?: number } }> }; spot?: number; future_price?: number } }) => {
         if (cancelled) return;
         const oc = j.data?.chain?.oc;
         if (!j.success || !oc) { setLoadError(`Could not load the ${underlying} option chain`); return; }
         const list = Object.keys(oc).map(Number).filter(n => n > 0).sort((a, b) => a - b);
         setStrikes(list);
-        const spot = Number(j.data?.spot) || 0;
+        // MCX chains can come back with spot 0 but the option month's futures price set: that is the right ATM base.
+        const spot = Number(j.data?.spot) || Number(j.data?.future_price) || 0;
         const step = STRIKE_STEP[underlying] ?? 50;
         setStrike(prev => {
           if (prev != null && list.includes(prev)) return prev;
@@ -185,7 +186,8 @@ export default function PriceLadder() {
             for (const k of list) {
               const row = oc[String(k)] ?? oc[k.toFixed(6)];
               const ce = Number(row?.ce?.last_price), pe = Number(row?.pe?.last_price);
-              if (ce > 0 && pe > 0 && Math.abs(ce - pe) < gap) { gap = Math.abs(ce - pe); best = k; }
+              // Both legs priced above a token tick: two untraded far strikes at 0.05 / 0.05 are "equal" but not ATM.
+              if (ce >= 1 && pe >= 1 && Math.abs(ce - pe) < gap) { gap = Math.abs(ce - pe); best = k; }
             }
             return best;
           };
