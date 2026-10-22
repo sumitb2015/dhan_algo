@@ -214,6 +214,9 @@ test('Two ladders by default: ladder 1 is the call, ladder 2 the put, each with 
   const underlying = page.getByLabel('Underlying');
   await expect(underlying).toHaveCount(2);
   await expect(page.getByRole('button', { name: /Add ladder/ })).toHaveCount(0);   // at most two
+  // Both panes hydrated (their expiry lists loaded): an earlier selectOption would be reset by the mount effect that restores saved choices.
+  await expect(page.getByLabel('Expiry').first()).toHaveValue('2026-10-27');
+  await expect(page.getByLabel('Expiry').nth(1)).toHaveValue('2026-10-27');
   // Call on ladder 1, Put on ladder 2 (the Call/Put switch's pressed side)
   await expect(page.getByRole('button', { name: 'Call', exact: true, pressed: true })).toHaveCount(1);
   await expect(page.getByRole('button', { name: 'Put', exact: true, pressed: true })).toHaveCount(1);
