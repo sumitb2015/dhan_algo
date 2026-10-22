@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText } from 'lucide-react';
+import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from '@/components/NavBar';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
@@ -119,6 +119,7 @@ export default function PriceLadder() {
   const [zones, setZonesRaw] = useState<LadderZones>('classic');
   const setZones = (z: LadderZones) => { setZonesRaw(z); savePref('price-ladder-zones', z); };
   const [slBufferPct, setSlBufferPct] = useState(DEFAULT_SL_BUFFER_PCT);
+  const [eventsOpen, setEventsOpen] = useState(false);
   const [style, setStyle] = useState<'Single' | 'Bracket' | 'Cover'>('Bracket');
   const [tgtPts, setTgtPts] = useState(40);
   const [slPts, setSlPts] = useState(30);
@@ -148,6 +149,7 @@ export default function PriceLadder() {
     // The tick belongs to the mode (setMode sets it on a click): a page reopened into Plain must not keep XY's 5.
     setTick(savedMode === 'xy' ? 5 : 0.05);
     setZonesRaw(readPref('price-ladder-zones', ['classic', 'anywhere'] as const, 'classic'));
+    setEventsOpen(readPref('price-ladder-events-open', ['0', '1'] as const, '0') === '1');
     setUnderlyingRaw(readPref('price-ladder-underlying', UNDERLYINGS, 'NIFTY'));
     /* eslint-enable react-hooks/set-state-in-effect */
     return installAlertSoundUnlock();
@@ -549,6 +551,7 @@ export default function PriceLadder() {
   const decimals = mode === 'xy' ? (tick < 1 ? 2 : 0) : 2;
   const ticks = mode === 'xy' ? XY_TICKS : PLAIN_TICKS;
   const dataDate = data ? data.state.date : null;
+  const latestEvent = data?.state.events.length ? data.state.events[data.state.events.length - 1] : null;
   const optLabel = strike ? `${underlying} ${expiry} ${strike} ${opt}` : `${underlying} —`;
   const live = slices.filter(isLive);
   const done = slices.filter(s => !isLive(s));
@@ -880,9 +883,23 @@ export default function PriceLadder() {
           )}
         </div>
 
-        <div className="rounded-lg border border-zinc-800 p-3">
-          <p className="text-xs font-bold text-white mb-2">Events</p>
-          <div className="flex flex-col gap-0.5 max-h-48 overflow-y-auto font-mono text-[11px]">
+        {/* Collapsed by default (remembered per browser); the header keeps the count and the newest event in view. */}
+        <details
+          open={eventsOpen}
+          onToggle={e => { const o = (e.currentTarget as HTMLDetailsElement).open; setEventsOpen(o); savePref('price-ladder-events-open', o ? '1' : '0'); }}
+          className="rounded-lg border border-zinc-800 group"
+        >
+          <summary className={`flex items-center gap-2 px-3 py-2 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden rounded-lg ${FOCUS_RING}`}>
+            <ChevronRight className="w-3.5 h-3.5 text-zinc-400 transition-transform group-open:rotate-90" aria-hidden />
+            <span className="text-xs font-bold text-white">Events</span>
+            <span className="text-xs text-zinc-500">({data?.state.events.length ?? 0})</span>
+            {latestEvent && (
+              <span className={`ml-2 min-w-0 truncate font-mono text-[11px] ${latestEvent.level === 'error' ? 'text-red-400' : latestEvent.level === 'warn' ? 'text-amber-300' : 'text-zinc-400'}`}>
+                {timeOf(latestEvent.at)} {latestEvent.msg}
+              </span>
+            )}
+          </summary>
+          <div className="flex flex-col gap-0.5 max-h-48 overflow-y-auto font-mono text-[11px] px-3 pb-3">
             {(data?.state.events ?? []).slice(-60).reverse().map((e, i) => (
               <p key={`${e.at}-${i}`} className={e.level === 'error' ? 'text-red-400' : e.level === 'warn' ? 'text-amber-300' : 'text-zinc-400'}>
                 {timeOf(e.at)} {e.msg}
@@ -890,7 +907,7 @@ export default function PriceLadder() {
             ))}
             {!data?.state.events.length && <p className="text-zinc-500">Nothing yet.</p>}
           </div>
-        </div>
+        </details>
       </div>
 
       {confirm && (

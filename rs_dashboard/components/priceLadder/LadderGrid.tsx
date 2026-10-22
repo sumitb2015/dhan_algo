@@ -280,6 +280,8 @@ export function LadderGrid({
         const buyZone = limitZoneBuy === 'below' ? below : above;
         const sellZone = limitZoneBuy === 'below' ? above : below;
         const anywhere = zones === 'anywhere';
+        // Declared before `what` below, which reads it (a later `const` would throw while the row renders).
+        const atRef = Math.abs(p - refPrice) < 1e-9;
         // What a click places, for the label: the limit side is a LIMIT; in Anywhere the other side is a stop.
         const what = (side: LadderSide, inZone: boolean) => {
           const verb = side === 'BUY' ? 'Buy' : 'Sell';
@@ -289,7 +291,6 @@ export function LadderGrid({
         };
         const buyLabel = what('BUY', buyZone);
         const sellLabel = what('SELL', sellZone);
-        const atRef = Math.abs(p - refPrice) < 1e-9;
         const buyStop = anywhere && !buyZone && refPrice > 0 && !atRef;
         const sellStop = anywhere && !sellZone && refPrice > 0 && !atRef;
         // The stop side is marked in words, not only by tint: what a click there places.
