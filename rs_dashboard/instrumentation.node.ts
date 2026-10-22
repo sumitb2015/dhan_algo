@@ -183,4 +183,9 @@ if (process.env.DASHBOARD_NO_BACKGROUND === '1') {
   import('./lib/zerodhaGuardServer').then(m => m.startZerodhaGuardLoop()).catch(err => {
     console.warn('[zerodha-guard] could not start the watcher:', err);
   });
+  // Price Ladder: fires armed index-level entries and runs its index-point brackets with every tab closed.
+  // Idle (one file read a second) while the ladder holds nothing live.
+  import('./lib/priceLadderServer').then(m => m.startPriceLadderLoop()).catch(err => {
+    console.warn('[price-ladder] could not start the watcher:', err);
+  });
 }
