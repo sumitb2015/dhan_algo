@@ -324,7 +324,7 @@ export function LadderGrid({
         return (
           <div
             key={p}
-            className={`grid grid-cols-[1.3fr_0.8fr_0.8fr_0.8fr_1.3fr] border-t border-zinc-900 text-xs relative ${isRef ? 'bg-amber-500/15' : isEntry ? 'bg-blue-500/10' : ''} ${isEntry ? 'border-y-2 border-y-blue-500' : ''}`}
+            className={`grid grid-cols-[1.3fr_0.8fr_0.8fr_0.8fr_1.3fr] border-t border-zinc-900 dark:border-zinc-800 text-xs relative ${isRef ? 'bg-amber-500/15 dark:bg-amber-500/25' : isEntry ? 'bg-blue-500/10 dark:bg-blue-500/20' : ''} ${isEntry ? 'border-y-2 border-y-blue-500' : ''}`}
             onDragOver={e => { if (e.dataTransfer.types.includes(DRAG_MIME)) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; } }}
             onDrop={e => {
               const raw = e.dataTransfer.getData(DRAG_MIME);
@@ -339,7 +339,7 @@ export function LadderGrid({
               aria-label={buyLabel} title={buyStop ? buyLabel : undefined}
               onClick={() => { if (!disabled) onPlace('BUY', p); }}
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('BUY', p); } }}
-              className={`h-7 flex items-center justify-end gap-1 px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/5' : buyStop ? 'bg-amber-500/5' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/25'} focus-visible:outline focus-visible:outline-1 focus-visible:outline-emerald-400`}
+              className={`h-7 flex items-center justify-end gap-1 px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/5 dark:bg-emerald-500/12' : buyStop ? 'bg-amber-500/5 dark:bg-amber-500/10' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/25 dark:hover:bg-emerald-500/35'} focus-visible:outline focus-visible:outline-1 focus-visible:outline-emerald-400`}
             >
               {buyWs.map(w => <OuterControlWidget key={w.key} w={w} onAdjust={onAdjust} onCancel={onCancel} />)}
             </div>
@@ -350,14 +350,14 @@ export function LadderGrid({
               aria-label={buyStop ? buyLabel : `Bid ${fmt(p)}`} title={buyStop ? buyLabel : undefined}
               onClick={() => { if (!disabled) onPlace('BUY', p); }}
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('BUY', p); } }}
-              className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/10' : buyStop ? 'bg-amber-500/10' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/20'}`}
+              className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/10 dark:bg-emerald-500/22' : buyStop ? 'bg-amber-500/10 dark:bg-amber-500/18' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/20 dark:hover:bg-emerald-500/35'}`}
             >
               {buyWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} tick={tick} onTrail={onTrail} />)}
               {buyStop && !buyWs.length && <span aria-hidden className="text-[10px] font-semibold text-amber-300">{stopTag}</span>}
             </div>
 
             {/* Column 3: Price */}
-            <div className={`h-7 flex items-center justify-center gap-1 font-mono overflow-hidden ${isRef ? 'font-bold text-amber-300' : isEntry ? 'font-bold text-blue-300' : 'text-zinc-200'}`}>
+            <div className={`h-7 flex items-center justify-center gap-1 font-mono overflow-hidden ${isRef ? 'font-bold text-amber-300' : isEntry ? 'font-bold text-blue-300' : 'text-zinc-200 dark:text-zinc-100'}`}>
               {isEntry && tags.map(t => (
                 <span
                   key={t.side}
@@ -378,7 +378,7 @@ export function LadderGrid({
               aria-label={sellStop ? sellLabel : `Offer ${fmt(p)}`} title={sellStop ? sellLabel : undefined}
               onClick={() => { if (!disabled) onPlace('SELL', p); }}
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('SELL', p); } }}
-              className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/10' : sellStop ? 'bg-amber-500/10' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/20'}`}
+              className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/10 dark:bg-red-500/22' : sellStop ? 'bg-amber-500/10 dark:bg-amber-500/18' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/20 dark:hover:bg-red-500/35'}`}
             >
               {sellWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} tick={tick} onTrail={onTrail} />)}
               {sellStop && !sellWs.length && <span aria-hidden className="text-[10px] font-semibold text-amber-300">{stopTag}</span>}
@@ -390,7 +390,7 @@ export function LadderGrid({
               aria-label={sellLabel} title={sellStop ? sellLabel : undefined}
               onClick={() => { if (!disabled) onPlace('SELL', p); }}
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('SELL', p); } }}
-              className={`h-7 flex items-center justify-start gap-1 px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/5' : sellStop ? 'bg-amber-500/5' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/25'} focus-visible:outline focus-visible:outline-1 focus-visible:outline-red-400`}
+              className={`h-7 flex items-center justify-start gap-1 px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/5 dark:bg-red-500/12' : sellStop ? 'bg-amber-500/5 dark:bg-amber-500/10' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/25 dark:hover:bg-red-500/35'} focus-visible:outline focus-visible:outline-1 focus-visible:outline-red-400`}
             >
               {sellWs.map(w => <OuterControlWidget key={w.key} w={w} onAdjust={onAdjust} onCancel={onCancel} />)}
             </div>
