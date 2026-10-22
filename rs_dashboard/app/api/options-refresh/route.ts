@@ -3,25 +3,13 @@ import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
+import { PYTHON_EXE } from '@/lib/pyExec';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
 const SCRIPT_PATH  = path.join(PROJECT_ROOT, 'scripts', 'downloader', 'download_expired_options.py');
 const STATUS_FILE  = path.join(DEBUG_DIR, 'options_refresh_status.json');
 const STOP_FILE    = path.join(DEBUG_DIR, 'options_refresh_stop.trigger');
-
-function getPythonExe(): string {
-  const candidates = [
-    path.join(PROJECT_ROOT, 'venv', 'Scripts', 'pythonw.exe'),
-    path.join(PROJECT_ROOT, 'venv', 'Scripts', 'python.exe'),
-    path.join(PROJECT_ROOT, 'venv', 'bin', 'python3'),
-    path.join(PROJECT_ROOT, 'venv', 'bin', 'python'),
-  ];
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
-  }
-  return process.platform === 'win32' ? 'python' : 'python3';
-}
 
 function readStatus() {
   try {
@@ -62,8 +50,7 @@ export async function POST(): Promise<NextResponse> {
   }
   if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
-  const pythonExe = getPythonExe();
-  const child = spawn(pythonExe, [SCRIPT_PATH], {
+  const child = spawn(/*turbopackIgnore: true*/ PYTHON_EXE, [SCRIPT_PATH], {
     cwd: PROJECT_ROOT,
     detached: true,
     stdio: 'ignore',

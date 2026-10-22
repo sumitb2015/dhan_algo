@@ -90,7 +90,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Backfill already running', pid: existing.pid }, { status: 409 });
   }
 
-  if (fs.existsSync(stopFile)) fs.unlinkSync(stopFile);
+  if (fs.existsSync(/*turbopackIgnore: true*/ stopFile)) {
+    try { fs.unlinkSync(/*turbopackIgnore: true*/ stopFile); } catch { /* ignore */ }
+  }
   if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
   try {
@@ -100,7 +102,7 @@ export async function POST(req: NextRequest) {
     }));
   } catch { /* non-fatal */ }
 
-  const child = spawn(PYTHON_EXE, [script, '--start-date', startDate], {
+  const child = spawn(/*turbopackIgnore: true*/ PYTHON_EXE, [script, '--start-date', startDate], {
     cwd: PROJECT_ROOT,
     detached: true,
     stdio: 'ignore',

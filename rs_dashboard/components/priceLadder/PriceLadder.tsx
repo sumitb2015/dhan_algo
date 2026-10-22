@@ -11,6 +11,7 @@ import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
   MAX_LADDER_LOTS, isLive, limitZone, ownNet, slicePnl, classifyClick,
   type ClickType, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
+  type LadderContract,
 } from '@/lib/priceLadder';
 
 // Price Ladder (/price-ladder). XY mode trades an option on the INDEX's levels (OptionX "Price Ladder XY"): click a

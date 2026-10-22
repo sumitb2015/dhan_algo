@@ -40,11 +40,11 @@ export async function GET(request: NextRequest) {
   }
 
   const report = REPORTS[type as ReportType];
-  const filePath = path.join(DEBUG_DIR, report.file);
+  const filePath = path.join(/*turbopackIgnore: true*/ DEBUG_DIR, report.file);
 
   let body: Buffer;
   try {
-    body = fs.readFileSync(filePath);
+    body = fs.readFileSync(/*turbopackIgnore: true*/ filePath);
   } catch {
     return NextResponse.json(
       {
