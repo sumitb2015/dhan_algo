@@ -183,7 +183,9 @@ export default function PriceLadder() {
     /* eslint-enable react-hooks/set-state-in-effect */
     return installAlertSoundUnlock();
   }, []);
-  const setMode = (m: PageMode) => { setModeRaw(m); savePref('price-ladder-mode', m); setTick(MODE_TICK[m]); setFollow(true); setManual(false); };
+  // Each mode has its own axis (index / premium / combined premium): drop the old rows until the new price arrives,
+  // so a Pair ladder never shows the XY futures levels as if they were combined premiums.
+  const setMode = (m: PageMode) => { setModeRaw(m); savePref('price-ladder-mode', m); setTick(MODE_TICK[m]); setCenter(0); setFollow(true); setManual(false); };
   // The pair's strikes: CE = centre + wing steps, PE = centre − wing steps (a straddle: both on the centre). Null when a
   // leg is not in the chain's strike list.
   const pairStep = STRIKE_STEP[underlying] ?? 50;
