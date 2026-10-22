@@ -21,14 +21,14 @@ import { pacedMarginCall } from '@/lib/ultimateScannerDhan';
 import {
   EXIT_RETRY_MS, FILL_GRACE_MS, SETTLE_TIMEOUT_MS, SPOT_STALE_MS,
   bias, bracketLevels, emptyLadderState, exitQtyFor, isLive, istDay, pushEvent,
-  rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, zerodhaLadderParams,
+  rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS,
   type Job, type LadderBroker, type LadderContract, type LadderSide, type LadderSlice, type LadderState,
 } from '@/lib/priceLadder';
 
 // The Price Ladder's server watcher. It owns debug/price_ladder_state.json (re-read on every tick and every request,
 // never cached, because the instrumentation hook and the API route can be separate module instances) and, about once
 // a second, fires armed XY entries when the index crosses their level, settles orders against the broker, runs the
-// bracket target / SL / trailing SL in index points, and squares off at 15:17 IST. It keeps working with every tab
+// bracket target / SL / trailing SL in index points, and squares off MIS at 15:17 IST (MCX crude: 23:00). It keeps working with every tab
 // closed; it stops with the dashboard server.
 //
 // Every order follows the same three-step write: mark the slice ('placing' / 'exiting') under the lock BEFORE the
@@ -46,9 +46,9 @@ const TAG = '[price-ladder]';
 
 /** Dhan index security ids for spot (IDX_I). */
 export const INDEX_IDS: Record<string, string> = { NIFTY: '13', BANKNIFTY: '25', SENSEX: '51' };
-export const LADDER_UNDERLYINGS = Object.keys(INDEX_IDS);
+export const LADDER_UNDERLYINGS = [...Object.keys(INDEX_IDS), ...MCX_LADDER_UNDERLYINGS];
 
-export const dhanSegmentFor = (u: string) => (u === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO');
+export const dhanSegmentFor = (u: string) => (isMcxUnderlying(u) ? 'MCX_COMM' : u === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO');
 export const kotakExchangeFor = (u: string) => (u === 'SENSEX' ? 'bse_fo' : 'nse_fo');
 export const zerodhaExchangeFor = (u: string) => (u === 'SENSEX' ? 'BFO' : 'NFO');
 /** Brokers that key orders and positions by their own trading symbol (Dhan keys by security id). */
@@ -127,6 +127,14 @@ function spotFromFiles(u: string, memo: FileMemo): SpotRead | null {
 
 /** How long an index may print an unchanged value before it is treated as a frozen feed. */
 const SPOT_STILL_MS = 15_000;
+/** The same for an MCX futures axis: crude mini can sit on one price longer in a quiet evening, so it gets more room. */
+const FUT_STILL_MS = 60_000;
+/** When `key`'s value last changed (recorded on first sight). */
+function movedAt(key: string, v: number, at: number): number {
+  const seen = spotMoved.get(key);
+  if (!seen || seen.spot !== v) spotMoved.set(key, { spot: v, at });
+  return spotMoved.get(key)!.at;
+}
 /** Last value and when it last changed, per underlying (in this server process; survives the module via globalThis). */
 const spotMoved: Map<string, { spot: number; at: number }> =
   ((globalThis as { __priceLadderSpotMoved?: Map<string, { spot: number; at: number }> }).__priceLadderSpotMoved ??= new Map());
@@ -167,7 +175,8 @@ let restInFlight: Promise<void> | null = null;
 
 async function refreshRest(underlyings: string[], contracts: LadderContract[]): Promise<void> {
   const now = Date.now();
-  for (const u of underlyings) if (INDEX_IDS[u]) wantedSpots.set(u, now);
+  // A spot key is an index name (IDX_I) or names a contract (an MCX futures month: its own segment).
+  for (const u of underlyings) if (INDEX_IDS[u] || parseSpotKey(u)) wantedSpots.set(u, now);
   for (const c of contracts) wantedContracts.set(c.securityId, { c, at: now });
   // A fetch already under way may not include keys asked for after it started: wait for it, then fetch again at once
   // if anything asked for here is still missing (the quote lane itself spaces the calls). Otherwise one per 2 s.
@@ -176,7 +185,7 @@ async function refreshRest(underlyings: string[], contracts: LadderContract[]): 
   // or a run of failed fetches then waits for the normal cadence instead of making every caller fetch again.
   const have = (m: Map<string, { at: number }>, k: string) => { const r = m.get(k); return !!r && Date.now() - r.at <= SPOT_STALE_MS; };
   const triedRecently = (k: string) => Date.now() - (attemptedAt.get(k) ?? 0) < REST_QUOTE_MS;
-  const missing = underlyings.some(u => INDEX_IDS[u] && !have(restSpots, u) && !triedRecently(`u:${u}`))
+  const missing = underlyings.some(u => (INDEX_IDS[u] || parseSpotKey(u)) && !have(restSpots, u) && !triedRecently(`u:${u}`))
     || contracts.some(c => !have(restLtps, c.securityId) && !triedRecently(`c:${c.securityId}`));
   if (restInFlight) return restInFlight;
   if (!missing && Date.now() - restAt < REST_QUOTE_MS) return;
@@ -185,7 +194,11 @@ async function refreshRest(underlyings: string[], contracts: LadderContract[]): 
   const us = [...wantedSpots.keys()];
   const cs = [...wantedContracts.values()].map(w => w.c);
   const body: Record<string, number[]> = {};
-  for (const u of us) (body.IDX_I ??= []).push(Number(INDEX_IDS[u]));
+  for (const u of us) {
+    const ref = parseSpotKey(u);
+    if (ref) (body[ref.segment] ??= []).push(Number(ref.securityId));
+    else (body.IDX_I ??= []).push(Number(INDEX_IDS[u]));
+  }
   for (const c of cs) (body[c.exchangeSegment] ??= []).push(Number(c.securityId));
   if (!Object.keys(body).length) return;
   restAt = Date.now();
@@ -196,7 +209,8 @@ async function refreshRest(underlyings: string[], contracts: LadderContract[]): 
       const res = await pacedQuoteCall(() => dhanPost('/marketfeed/ltp', body, 5000)) as { data?: Record<string, Record<string, { last_price?: number }>> };
       const at = Date.now();
       for (const u of us) {
-        const v = Number(res.data?.IDX_I?.[INDEX_IDS[u]]?.last_price) || 0;
+        const ref = parseSpotKey(u);
+        const v = Number(ref ? res.data?.[ref.segment]?.[ref.securityId]?.last_price : res.data?.IDX_I?.[INDEX_IDS[u]]?.last_price) || 0;
         if (v > 0) restSpots.set(u, { v, at });
       }
       for (const c of cs) {
@@ -215,7 +229,10 @@ async function refreshRest(underlyings: string[], contracts: LadderContract[]): 
 
 export interface PriceView { spots: Record<string, SpotRead>; ltps: Record<string, number> }
 
-/** Spots for `underlyings` and LTPs for `contracts`: files first, the paced REST snapshot for the rest. */
+/**
+ * Spots for `underlyings` (spot keys: an index name, or a futures contract's key from spotKey()) and LTPs for
+ * `contracts`: files first (indices only — a futures axis always comes from the paced REST quote), REST for the rest.
+ */
 export async function loadPrices(underlyings: string[], contracts: LadderContract[]): Promise<PriceView> {
   const now = Date.now();
   const memo: FileMemo = new Map();
@@ -223,7 +240,7 @@ export async function loadPrices(underlyings: string[], contracts: LadderContrac
   const ltps: Record<string, number> = {};
   const needU: string[] = [];
   for (const u of underlyings) {
-    const f = spotFromFiles(u, memo);
+    const f = parseSpotKey(u) ? null : spotFromFiles(u, memo);
     if (f && spotFresh(f.at, now)) spots[u] = f; else needU.push(u);
   }
   const needC: LadderContract[] = [];
@@ -236,7 +253,15 @@ export async function loadPrices(underlyings: string[], contracts: LadderContrac
   }
   if (needU.length || needC.length) {
     await refreshRest(needU, needC);
-    for (const u of needU) { const r = restSpots.get(u); if (r) spots[u] = { spot: r.v, at: r.at, source: 'rest' }; }
+    for (const u of needU) {
+      const r = restSpots.get(u);
+      if (!r) continue;
+      // A futures axis has no feed of its own to go quiet: REST keeps returning the last price, stamped with the fetch
+      // time. Age it by when the value last CHANGED (as the indices hub is), so a frozen price pauses levels and stops.
+      const fut = parseSpotKey(u);
+      const at = fut ? Math.min(r.at, movedAt(u, r.v, r.at) + FUT_STILL_MS) : r.at;
+      spots[u] = { spot: r.v, at, source: 'rest' };
+    }
     for (const c of needC) { const r = restLtps.get(c.securityId); if (r && Date.now() - r.at <= SPOT_STALE_MS) ltps[c.securityId] = r.v; }
   }
   return { spots, ltps };
@@ -259,6 +284,11 @@ export async function placeFor(
   s: Pick<LadderSlice, 'broker' | 'contract' | 'product'>, side: LadderSide, qty: number, open: boolean,
   how: { type: 'MARKET' } | { type: 'LIMIT'; price: number } | { type: 'SL'; trigger: number } = { type: 'MARKET' },
 ): Promise<PlaceOutcome> {
+  // MCX is Dhan only: Kotak's and Kite's exchange mapping and quantity units here are NSE/BSE F&O's. Checked where the
+  // order is built, not only where the contract was resolved, so no path can send crude to an equity F&O exchange.
+  if (s.broker !== 'dhan' && (s.contract.exchangeSegment === 'MCX_COMM' || isMcxUnderlying(s.contract.underlying))) {
+    return { status: 'rejected', error: `${s.contract.underlying} trades on Dhan only in the Price Ladder` };
+  }
   if (s.broker === 'zerodha') return placeZerodha(s, side, qty, open, how);
   if (s.broker === 'kotak') {
     const symbol = s.contract.tradingSymbol;
@@ -695,14 +725,14 @@ async function tick(): Promise<void> {
   const now = Date.now();
   // Prices only for slices whose rules read them (armed / open XY need spot; SIM fills and exits need the option LTP).
   const priced = live.filter(x => x.state === 'armed' || x.state === 'open' || (x.mode === 'sim' && (x.state === 'working' || x.state === 'exiting')));
-  const underlyings = [...new Set(priced.map(x => x.contract.underlying))];
+  const underlyings = [...new Set(priced.map(x => spotKey(x.contract)))];
   const prices: PriceView = priced.length ? await loadPrices(underlyings, priced.map(x => x.contract)) : { spots: {}, ltps: {} };
 
   for (const u of underlyings) {
-    const needsSpot = live.some(x => x.contract.underlying === u && x.kind === 'xy' && (x.state === 'armed' || x.state === 'open'));
+    const needsSpot = live.some(x => spotKey(x.contract) === u && x.kind === 'xy' && (x.state === 'armed' || x.state === 'open'));
     const sp = prices.spots[u];
     if (needsSpot && !(sp && spotFresh(sp.at, now)) && warnOnce(`stale:${u}`, 60_000)) {
-      await updateLadderState(st => pushEvent(st, ev('warn', `${u} spot is stale — index levels paused`)));
+      await updateLadderState(st => pushEvent(st, ev('warn', `${spotKeyUnderlying(u)}${parseSpotKey(u) ? ' futures' : ''} price is stale — levels paused`)));
     }
   }
 

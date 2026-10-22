@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mcxSession, usDstActive } from './mcxSession.ts';
 import {
   bias, limitZone, classifyClick, levelSane, capLots, cleanBracket, entryStep, bracketLevels, bracketStep, spotFresh,
   settleOrder, exitQtyFor, slicePnl, sliceNowPnl, sumSlicePnl, ownNet, ladderRows, snapToStep, rollDay, realArmed, pushEvent, istHhmm,
-  MAX_LADDER_LOTS, SPOT_STALE_MS, planTick, type LadderSlice, type LadderState,
+  MAX_LADDER_LOTS, SPOT_STALE_MS, planTick, sessionFor, spotKey, parseSpotKey, type LadderSlice, type LadderState,
 } from './priceLadder.ts';
 
 const contract = { underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt: 'CE' as const, securityId: '111', lotSize: 65, exchangeSegment: 'NSE_FNO' };
@@ -361,4 +362,76 @@ test('sumSlicePnl: closed at exit, open at LTP; an unpriced open slice makes the
   assert.equal(sumSlicePnl([closed, open], all, () => undefined), null);
   assert.equal(sumSlicePnl([armed], all, () => 11), null);
   assert.equal(sumSlicePnl([closed, open], s => s.id === 'c', () => undefined), 130);
+});
+
+// ── MCX (CRUDEOILM on Dhan) ──
+const crude = {
+  underlying: 'CRUDEOILM', expiry: '2026-11-17', strike: 9200, opt: 'CE' as const, securityId: '900', lotSize: 1,
+  exchangeSegment: 'MCX_COMM', mult: 10, ref: { securityId: '573423', segment: 'MCX_COMM', expiry: '2026-11-19' },
+};
+const EVENING = Date.parse('2026-10-22T14:30:00Z');       // 20:00 IST
+const LATE = Date.parse('2026-10-22T17:35:00Z');          // 23:05 IST
+
+test('MCX: session hours and the futures-month axis key', () => {
+  assert.deepEqual(sessionFor('CRUDEOILM', '2026-10-22'), { open: 900, close: 2330, autoExit: 2300, autoExitLabel: '23:00' });
+  assert.equal(sessionFor('NIFTY', '2026-10-22').autoExitLabel, '15:17');
+  assert.equal(spotKey(crude), 'CRUDEOILM@MCX_COMM:573423');
+  assert.deepEqual(parseSpotKey(spotKey(crude)), { segment: 'MCX_COMM', securityId: '573423' });
+  assert.equal(parseSpotKey('NIFTY'), null);
+  assert.equal(spotKey(contract), 'NIFTY');
+});
+
+test('MCX: P&L is lots x 10 barrels (Dhan qty is in lots)', () => {
+  assert.equal(slicePnl({ side: 'BUY', avg: 100, filledQty: 2, contract: crude }, 110), 200);
+  assert.equal(slicePnl({ side: 'SELL', avg: 100, filledQty: 1, contract: crude }, 110), -100);
+});
+
+test('MCX: an armed level fires at 20:00 IST on the futures price; a NIFTY one is cancelled then', () => {
+  const c = slice({ id: 'c', contract: crude, state: 'armed', entryLevel: 9180, entryDir: 'below', seenSafe: true, lots: 1, qty: 1 });
+  const n = armedXY({ id: 'n' });
+  const prices = { spots: { [spotKey(crude)]: { spot: 9179, at: EVENING }, NIFTY: { spot: 23179, at: EVENING } }, ltps: {} };
+  const r = planTick(st([c, n]), prices, EVENING, io);
+  assert.deepEqual(r.jobs, [{ kind: 'open', id: 'c' }]);
+  assert.equal(r.next.slices.find(x => x.id === 'c')!.entryY, 9179);
+  assert.equal(r.next.slices.find(x => x.id === 'n')!.state, 'cancelled');
+});
+
+test('MCX: an index price under the plain underlying name never drives a CRUDEOILM level', () => {
+  const c = slice({ id: 'c', contract: crude, state: 'armed', entryLevel: 9180, entryDir: 'below', seenSafe: true, lots: 1, qty: 1 });
+  const r = planTick(st([c]), { spots: { CRUDEOILM: { spot: 9100, at: EVENING } }, ltps: {} }, EVENING, io);
+  assert.deepEqual(r.jobs, []);
+});
+
+test('MCX calendar: US-DST close, holidays, weekends', () => {
+  // Summer (US DST): 23:30 close, MIS out at 23:00. Winter from Mon 2 Nov 2026: 23:55 / 23:25.
+  assert.equal(mcxSession('2026-10-30').close, 2330);
+  assert.deepEqual(mcxSession('2026-11-02'), { open: 900, close: 2355, autoExit: 2325, autoExitLabel: '23:25' });
+  assert.equal(mcxSession('2027-03-05').close, 2355);
+  assert.equal(mcxSession('2027-03-15').close, 2330);           // DST starts Sun 14 Mar 2027
+  assert.equal(usDstActive('2026-03-09'), true);
+  assert.equal(usDstActive('2026-03-06'), false);
+  // Evening-only holiday, full holiday, weekend.
+  assert.equal(mcxSession('2026-11-10').open, 1700);
+  const xmas = mcxSession('2026-12-25');
+  assert.equal(xmas.open >= xmas.close, true);
+  const sat = mcxSession('2026-10-24');
+  assert.equal(sat.open >= sat.close, true);
+});
+
+test('MCX: nothing fires and REAL exits are held on an MCX holiday', () => {
+  const XMAS = Date.parse('2026-12-25T14:30:00Z');           // 20:00 IST
+  const c = slice({ id: 'c', contract: crude, state: 'armed', entryLevel: 9180, entryDir: 'below', seenSafe: true, lots: 1, qty: 1 });
+  const o = slice({ id: 'o', contract: crude, mode: 'real', product: 'NRML', lots: 1, qty: 1, filledQty: 1, avg: 100, openedAt: 0, exitWanted: 'Manual exit' });
+  const day = (slices: LadderSlice[]): LadderState => ({ date: '2026-12-25', slices, events: [], liveArmedOn: '2026-12-25' });
+  const r = planTick(day([c, o]), { spots: { [spotKey(crude)]: { spot: 9100, at: XMAS } }, ltps: { '900': 101 } }, XMAS, io);
+  assert.deepEqual(r.jobs, []);
+  assert.equal(r.next.slices.find(x => x.id === 'c')!.state, 'armed');
+  assert.equal(r.next.slices.find(x => x.id === 'o')!.state, 'open');
+});
+
+test('MCX: MIS squared off at 23:00 IST, NRML kept', () => {
+  const open = (id: string, product: 'MIS' | 'NRML') => slice({ id, contract: crude, product, lots: 1, qty: 1, filledQty: 1, avg: 100, openedAt: EVENING });
+  const r = planTick(st([open('m', 'MIS'), open('r', 'NRML')]), { spots: {}, ltps: { '900': 101 } }, LATE, io);
+  assert.deepEqual(r.jobs, [{ kind: 'close', id: 'm' }]);
+  assert.equal(r.next.slices.find(x => x.id === 'm')!.exitReason, 'Auto square-off 23:00');
 });

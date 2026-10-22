@@ -4,7 +4,12 @@ import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 const SCALPER_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'scalper_api.py');
 
 export interface StrikeLookup { ceId?: string; peId?: string }
-export interface DhanLookupData { lotSize: number; strikes: Record<string, StrikeLookup> }
+export interface DhanLookupData {
+  lotSize: number;
+  strikes: Record<string, StrikeLookup>;
+  /** MCX only: the futures month this option expiry is priced off (nearest FUTCOM expiring on/after it). */
+  future?: { securityId: string; expiry: string };
+}
 interface CacheEntry { data: DhanLookupData; ts: number }
 
 const cache = new Map<string, CacheEntry>();

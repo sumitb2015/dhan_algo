@@ -134,6 +134,14 @@ def main():
         # The smallest across the expiry's strikes, so one value is safe for every strike. Absent when the master has
         # no usable figure: callers then fall back to their own conservative limit.
         data = {'lotSize': int(lot_size), 'strikes': strikes}
+        if is_crude:
+            # An MCX option month is priced off ITS OWN futures month: the nearest FUTCOM expiring on or after the
+            # option's expiry (Nov options -> Nov futures even while Oct is the front month). The Price Ladder's XY
+            # axis is that contract's price. Same rule as the chain's spot (premarket_data._find_nearest_future).
+            from premarket_data import _find_nearest_future
+            f = _find_nearest_future(helper, under, exchange=exchange, instrument='FUTCOM', on_or_after=args.expiry)
+            if f:
+                data['future'] = {'securityId': str(int(float(f['SECURITY_ID']))), 'expiry': str(f['SM_EXPIRY_DATE'])[:10]}
         if 'SM_FREEZE_QTY' in rows.columns:
             freeze = pd.to_numeric(rows['SM_FREEZE_QTY'], errors='coerce')
             freeze = freeze[freeze > 1]

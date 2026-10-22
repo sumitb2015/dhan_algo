@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getDhanStrikeLookup } from '@/lib/dhanStrikeLookup';
+import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { kotakOptionContract } from '@/lib/kotakContracts';
 import { zerodhaOptionContract } from '@/lib/zerodhaContracts';
 import {
@@ -7,7 +8,7 @@ import {
   brokerSessionOk, availableFunds, dhanSellMargin, withJob, commitIf, dhanSegmentFor, openedPatch, LADDER_UNDERLYINGS,
 } from '@/lib/priceLadderServer';
 import {
-  AUTO_EXIT_HHMM, SESSION_OPEN_HHMM, SESSION_CLOSE_HHMM, MAX_LADDER_LOTS, capLots, classifyClick, cleanBracket, isLive, istDay, istHhmm, levelSane, pushEvent, realArmed,
+  sessionFor, spotKey, isMcxUnderlying, MAX_LADDER_LOTS, capLots, classifyClick, cleanBracket, isLive, istDay, istHhmm, levelSane, pushEvent, realArmed,
   snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev,
   type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
 } from '@/lib/priceLadder';
@@ -29,24 +30,32 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const want = (req.nextUrl.searchParams.get('underlying') ?? '').toUpperCase();
     const state = readLadderState();
     const live = state.slices.filter(isLive);
-    const unders = [...new Set([...(LADDER_UNDERLYINGS.includes(want) ? [want] : []), ...live.map(x => x.contract.underlying)])];
     // The contract the page is showing (Dhan ids price every broker's contract): its live LTP rides the same snapshot.
     const expiry = req.nextUrl.searchParams.get('expiry') ?? '';
     const strike = Number(req.nextUrl.searchParams.get('strike'));
     const opt = req.nextUrl.searchParams.get('opt');
     let shown: LadderContract | null = null;
+    let contractError: string | null = null;
     if (LADDER_UNDERLYINGS.includes(want) && /^\d{4}-\d{2}-\d{2}$/.test(expiry) && strike > 0 && (opt === 'CE' || opt === 'PE')) {
       const c = await resolveContract('dhan', want, expiry, strike, opt);
-      if (typeof c !== 'string') shown = c;
+      if (typeof c !== 'string') shown = c; else contractError = c;
     }
+    // The page's XY axis: the index, or for MCX the shown option month's own futures (known once a contract is picked).
+    const shownKey = shown ? spotKey(shown) : (LADDER_UNDERLYINGS.includes(want) && !isMcxUnderlying(want) ? want : null);
+    const unders = [...new Set([...(shownKey ? [shownKey] : []), ...live.map(x => spotKey(x.contract))])];
     const prices = await loadPrices(unders, [...live.map(x => x.contract), ...(shown ? [shown] : [])]);
     const now = Date.now();
     const spots = Object.fromEntries(Object.entries(prices.spots).map(([u, v]) => [u, { ...v, fresh: spotFresh(v.at, now) }]));
     return NextResponse.json({
       success: true,
       data: {
-        state, spots, ltps: prices.ltps, liveArmed: realArmed(state, istDay()), now,
-        contract: shown ? { securityId: shown.securityId, lotSize: shown.lotSize, ltp: prices.ltps[shown.securityId] ?? null } : null,
+        state, spots, ltps: prices.ltps, liveArmed: realArmed(state, istDay()), now, spotKey: shownKey, contractError,
+        // Which contract this reply describes: the page ignores a reply for a selection it has since moved off.
+        request: { underlying: want, expiry, strike: strike > 0 ? strike : null, opt },
+        contract: shown ? {
+          securityId: shown.securityId, lotSize: shown.lotSize, ltp: prices.ltps[shown.securityId] ?? null,
+          mult: shown.mult ?? 1, ...(shown.ref ? { refExpiry: shown.ref.expiry } : {}),
+        } : null,
       },
     });
   } catch (err) {
@@ -71,6 +80,16 @@ async function resolveContract(broker: LadderBroker, u: string, expiry: string, 
   const securityId = opt === 'CE' ? row?.ceId : row?.peId;
   if (!look || !securityId || !(look.lotSize > 0)) return `${u} ${expiry} ${strike}${opt} is not in Dhan's master list`;
   const c: LadderContract = { underlying: u, expiry, strike, opt, securityId: String(securityId), lotSize: look.lotSize, exchangeSegment: dhanSegmentFor(u) };
+  if (isMcxUnderlying(u)) {
+    // Dhan only: Kotak / Zerodha MCX order sizing (absolute units) and symbols are not wired into the ladder.
+    if (broker !== 'dhan') return `${u} trades on Dhan only in the Price Ladder`;
+    // Dhan orders MCX in LOTS (lotSize 1); P&L and premium cost need the barrels per lot.
+    const mult = MCX_LOT_MULTIPLIER[u];
+    if (look.lotSize !== 1 || !(mult > 1)) return `${u}: unexpected lot size ${look.lotSize} — refused`;
+    if (!look.future) return `${u}: no futures month on or after ${expiry} in Dhan's master list (restart the dashboard if the master was just refreshed)`;
+    c.mult = mult;
+    c.ref = { securityId: look.future.securityId, segment: 'MCX_COMM', expiry: look.future.expiry };
+  }
   if (broker === 'zerodha') {
     // Kite's own instrument dump (metadata only — prices stay Dhan-sourced).
     const z = await zerodhaOptionContract(u, expiry, strike, opt);
@@ -95,7 +114,7 @@ async function resolveContract(broker: LadderBroker, u: string, expiry: string, 
 async function realOpenBlocked(broker: LadderBroker, c: LadderContract, side: LadderSide, qty: number, product: string, price: number): Promise<string | null> {
   const funds = await availableFunds(broker);
   if (funds == null) return `Could not read ${BROKER_NAME[broker]} funds — order refused (fail closed)`;
-  const need = side === 'BUY' ? qty * price * 1.02 : await dhanSellMargin(c, qty, product, price);
+  const need = side === 'BUY' ? qty * (c.mult ?? 1) * price * 1.02 : await dhanSellMargin(c, qty, product, price);
   if (need == null || !(need > 0)) return 'Could not read the margin for this order — refused (fail closed)';
   const have = side === 'BUY' ? funds.buy : funds.sell;
   if (need > have) return `Needs about ₹${Math.round(need).toLocaleString('en-IN')}, ${BROKER_NAME[broker]} has ₹${Math.round(have).toLocaleString('en-IN')}`;
@@ -118,10 +137,12 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   if (lots == null) return bad('Lots must be a whole number from 1 to 20');
   const strike = Number(b.strike);
   if (!(strike > 0)) return bad('Invalid strike');
-  if (istHhmm(now) >= AUTO_EXIT_HHMM) return bad('After 15:17 the ladder only exits');
+  const sess = sessionFor(u, istDay(now));
+  if (sess.open >= sess.close) return bad(sess.note ?? 'The market is closed today');
+  if (istHhmm(now) >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
   // A REAL plain order goes to the broker now, so the market must be open. (An XY level may be armed early: the
   // watcher only fires it inside the session.)
-  if (b.mode === 'real' && b.kind === 'plain' && (istHhmm(now) < SESSION_OPEN_HHMM || istHhmm(now) >= SESSION_CLOSE_HHMM)) return bad('The market is closed');
+  if (b.mode === 'real' && b.kind === 'plain' && (istHhmm(now) < sess.open || istHhmm(now) >= sess.close)) return bad('The market is closed');
   const bracket = b.bracket == null ? null : cleanBracket(b.bracket);
   if (b.bracket != null && !bracket) return bad('Bracket needs a positive SL in points (target 0 = Cover order)');
   if (bracket && b.kind !== 'xy') return bad('Brackets are index-level (XY) orders only');
@@ -138,13 +159,13 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   const held0 = lotsHeld(state, probe);
   if (held0 + lots > MAX_LADDER_LOTS) return bad(`The ladder already holds or has armed ${held0} lots of this contract — the cap is ${MAX_LADDER_LOTS}`);
 
-  const prices = await loadPrices([u], [c]);
-  const spot = prices.spots[u];
+  const prices = await loadPrices([spotKey(c)], [c]);
+  const spot = prices.spots[spotKey(c)];
   const ltp = prices.ltps[c.securityId] ?? 0;
   const level = b.kind === 'xy' ? Number(b.level) : snapToStep(Number(b.level), OPTION_TICK);
 
   if (b.kind === 'xy') {
-    if (!spot || !spotFresh(spot.at, now)) return bad(`No fresh ${u} spot — start the indices feed`);
+    if (!spot || !spotFresh(spot.at, now)) return bad(c.ref ? `No fresh ${u} futures price yet — try again in a moment` : `No fresh ${u} spot — start the indices feed`);
     if (!levelSane(level, spot.spot)) return bad(`Level ${level} is more than 5% from spot ${spot.spot}`);
   } else if (!(ltp > 0)) {
     return bad('No live option price yet');
@@ -211,7 +232,7 @@ function lotsHeld(st: LadderState, p: LadderSlice, exceptId?: string): number {
 /**
  * The + on an open position's widget: one more lot of the same contract at MARKET now, joining that position's
  * target / SL / trailing levels (it is exited with them). An opening order: every check an arm has applies — the
- * REAL arm, a live session, market hours, 15:17, the 20-lot cap (on the whole open position) and funds/margin.
+ * REAL arm, a live session, market hours, the auto-exit time, the 20-lot cap (on the whole open position) and funds/margin.
  */
 async function addLot(id: string): Promise<NextResponse> {
   const now = Date.now();
@@ -219,15 +240,17 @@ async function addLot(id: string): Promise<NextResponse> {
   const p = st0.slices.find(y => y.id === id);
   if (!p || p.state !== 'open') return bad('That position is not open');
   const hhmm = istHhmm(now);
-  if (hhmm >= AUTO_EXIT_HHMM) return bad('After 15:17 the ladder only exits');
+  const sess = sessionFor(p.contract.underlying, istDay(now));
+  if (sess.open >= sess.close) return bad(sess.note ?? 'The market is closed today');
+  if (hhmm >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
   if (p.mode === 'real') {
-    if (hhmm < SESSION_OPEN_HHMM || hhmm >= SESSION_CLOSE_HHMM) return bad('The market is closed');
+    if (hhmm < sess.open || hhmm >= sess.close) return bad('The market is closed');
     if (!realArmed(st0, istDay(now))) return bad('Switch on LIVE · REAL MONEY first', 403);
     if (!brokerSessionOk(p.broker)) return bad(`${BROKER_NAME[p.broker]} session is not logged in`, 403);
   }
   const heldLots = lotsHeld(st0, p);
   if (heldLots + 1 > MAX_LADDER_LOTS) return bad(`The ladder holds ${heldLots} lots of this contract — the cap is ${MAX_LADDER_LOTS}`);
-  const prices = await loadPrices([p.contract.underlying], [p.contract]);
+  const prices = await loadPrices([spotKey(p.contract)], [p.contract]);
   const ltp = prices.ltps[p.contract.securityId] ?? 0;
   if (!(ltp > 0)) return bad('No live option price yet');
   const qty = p.contract.lotSize;
@@ -369,7 +392,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // More lots on a REAL level is a bigger opening order: the same holding cap and funds/margin check as an arm.
         if (x0.mode === 'real' && lots > x0.lots) {
           if (lotsHeld(st0, x0, x0.id) + lots > MAX_LADDER_LOTS) return bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
-          const prices = await loadPrices([x0.contract.underlying], [x0.contract]);
+          const prices = await loadPrices([spotKey(x0.contract)], [x0.contract]);
           const ltp = prices.ltps[x0.contract.securityId] ?? 0;
           if (!(ltp > 0)) return bad('No live option price to check margin against');
           const blocked = await realOpenBlocked(x0.broker, x0.contract, x0.side, lots * x0.contract.lotSize, x0.product, ltp);
@@ -409,8 +432,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       case 'modify': {
         const x = readLadderState().slices.find(y => y.id === id);
         if (!x) return bad('Unknown order');
-        const prices = await loadPrices([x.contract.underlying], []);
-        const sp = prices.spots[x.contract.underlying];
+        const prices = await loadPrices([spotKey(x.contract)], []);
+        const sp = prices.spots[spotKey(x.contract)];
         if (!sp || !spotFresh(sp.at, Date.now())) return bad('No fresh spot to check the level against');
         if (x.state === 'armed' && x.kind === 'xy' && x.bracket && (body.tgtY != null || body.slY != null) && body.level == null) {
           // A planned target / SL dragged before the fill: stored as points from the entry level, so they still move
@@ -505,7 +528,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         if (outcome !== 'open' && outcome !== 'flat') return bad("outcome must be 'open' or 'flat'");
         const x = readLadderState().slices.find(y => y.id === id);
         if (!x || x.state !== 'unknown') return bad('That order is not UNKNOWN');
-        const prices = await loadPrices([x.contract.underlying], [x.contract]);
+        const prices = await loadPrices([spotKey(x.contract)], [x.contract]);
         const ltp = prices.ltps[x.contract.securityId] ?? 0;
         const now = Date.now();
         const r = await guarded(id, y => y.state === 'unknown', st => {

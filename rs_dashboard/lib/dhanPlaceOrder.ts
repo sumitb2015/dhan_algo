@@ -36,6 +36,12 @@ export const SOURCE_QTY_CAPS: Record<string, number> = {
   pl: 1500,
 };
 
+/** The same backstop where Dhan's order quantity is LOTS (MCX_COMM), not units: 1500 there would mean 1500 lots. */
+export const SOURCE_QTY_CAPS_MCX: Record<string, number> = {
+  // 'pl' = Price Ladder: MAX_LADDER_LOTS.
+  pl: 20,
+};
+
 export interface DhanOrderInput {
   securityId: string;
   quantity: number;
@@ -84,7 +90,9 @@ export async function placeDhanOrder(body: DhanOrderInput): Promise<DhanPlaceRes
 
   // Per-source sanity cap on units per order (a backstop against a UI bug, not an auth
   // boundary: callers that send no source are uncapped, as before). Rejected, never clamped.
-  const sourceCap = body.source ? SOURCE_QTY_CAPS[body.source] : undefined;
+  const sourceCap = !body.source ? undefined
+    : String(exchangeSegment).toUpperCase() === 'MCX_COMM' ? (SOURCE_QTY_CAPS_MCX[body.source] ?? SOURCE_QTY_CAPS[body.source])
+      : SOURCE_QTY_CAPS[body.source];
   if (sourceCap !== undefined && qtyNum > sourceCap) {
     return { status: 'invalid', http: 400, error: `Quantity ${qtyNum} exceeds the ${body.source} per-order cap of ${sourceCap}` };
   }

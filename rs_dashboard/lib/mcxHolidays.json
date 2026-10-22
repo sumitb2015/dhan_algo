@@ -1,0 +1,6 @@
+{
+  "_comment": "MCX commodity holidays (IST dates). closed = no session; evening_only = morning session shut, evening from 17:00; morning_only = no evening session (closes 17:00). UNCONFIRMED against MCX's own circular: compiled 2026-10-22 from broker-published 2026 lists (ICICI Direct, 5paisa, Upstox, Kotak Neo). Confirm at mcxindia.com (Circulars > Trading holidays) and edit here — lib/mcxSession.ts reads only this file.",
+  "closed": ["2026-01-26", "2026-04-03", "2026-10-02", "2026-12-25"],
+  "evening_only": ["2026-03-03", "2026-03-26", "2026-03-31", "2026-04-14", "2026-05-01", "2026-05-28", "2026-06-26", "2026-09-14", "2026-10-20", "2026-11-10", "2026-11-24"],
+  "morning_only": ["2026-01-01"]
+}

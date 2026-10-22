@@ -12,7 +12,7 @@ import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { LadderGrid, type EntryMark, widgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
-  MAX_LADDER_LOTS, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
+  MAX_LADDER_LOTS, MCX_LADDER_UNDERLYINGS, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
   type ClickType, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
   type LadderContract,
 } from '@/lib/priceLadder';
@@ -22,10 +22,11 @@ import {
 // fires them (lib/priceLadderServer.ts), so closing this tab does not disarm anything. Plain mode is a one-click
 // LIMIT / SL ladder on the option's own premium. This component only draws and asks; every rule and check is server-side.
 
-const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
+/** Index underlyings, then the MCX ones the ladder trades (MCX_LADDER_UNDERLYINGS — Dhan only). */
+const UNDERLYINGS: readonly string[] = ['NIFTY', 'BANKNIFTY', 'SENSEX', ...MCX_LADDER_UNDERLYINGS];
 /** Accounts the ladder can trade on. Prices always come from Dhan; only orders, positions and order books are per broker. */
 const LADDER_BROKERS = ['dhan', 'kotak', 'zerodha'] as const;
-const STRIKE_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100 };
+const STRIKE_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100, CRUDEOILM: 50 };
 const XY_TICKS = [1, 5, 10, 25];
 const PLAIN_TICKS = [0.05, 0.5, 1];
 const ROWS = 31;
@@ -34,7 +35,13 @@ const POLL_MS = 1000;
 interface SpotView { spot: number; at: number; source: string; fresh: boolean }
 interface StateResp {
   state: LadderState; spots: Record<string, SpotView>; ltps: Record<string, number>; liveArmed: boolean; now: number;
-  contract: { securityId: string; lotSize: number; ltp: number | null } | null;
+  /** Where the page's XY axis sits in `spots`: the index name, or for MCX the option month's futures contract. */
+  spotKey?: string | null;
+  /** Why the selected contract could not be resolved (e.g. no MCX futures month), or null. */
+  contractError?: string | null;
+  /** The selection this reply describes. */
+  request?: { underlying: string; expiry: string; strike: number | null; opt: string | null };
+  contract: { securityId: string; lotSize: number; ltp: number | null; mult?: number; refExpiry?: string } | null;
 }
 interface IndexQuote { ltp: number; prev_close: number; change_pct: number | null; day_high: number | null; day_low: number | null }
 
@@ -118,7 +125,9 @@ export default function PriceLadder() {
   const [data, setData] = useState<StateResp | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [quotes, setQuotes] = useState<Record<string, IndexQuote>>({});
-  const indexQ = quotes[underlying] ?? null;
+  // Change and day range come from top-indices, whose CRUDEOILM row is the FRONT futures month — not the option month's
+  // futures on this ladder's axis — so MCX shows neither rather than mix two contracts.
+  const indexQ = isMcxUnderlying(underlying) ? null : quotes[underlying] ?? null;
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const lastEventAt = useRef<number>(0);
@@ -132,7 +141,8 @@ export default function PriceLadder() {
     return installAlertSoundUnlock();
   }, []);
   const setMode = (m: LadderMode) => { setModeRaw(m); savePref('price-ladder-mode', m); setTick(m === 'xy' ? 5 : 0.05); setFollow(true); setManual(false); };
-  const setUnderlying = (u: string) => { setUnderlyingRaw(u); savePref('price-ladder-underlying', u); setStrike(null); setFollow(true); setManual(false); };
+  // The expiry is cleared too: the old underlying's date must not be asked of the new one's chain for a render.
+  const setUnderlying = (u: string) => { setUnderlyingRaw(u); savePref('price-ladder-underlying', u); setExpiry(''); setExpiries([]); setStrike(null); setFollow(true); setManual(false); };
 
   // The indices feed is the XY ladder's spot source; the server falls back to a paced REST quote if it is down.
   useEffect(() => {
@@ -300,12 +310,27 @@ export default function PriceLadder() {
     for (const e of fresh) if (e.level === 'error') toast.error(e.msg);
   }, [data?.state.events]);
 
-  const spotView = data?.spots[underlying];
+  const mcx = isMcxUnderlying(underlying);
+  // The reply describes the selection on screen (it can lag one poll behind an expiry / strike / underlying switch).
+  // Anything tied to the contract — its LTP, lot, and for MCX the futures month on the axis — is read only from a
+  // matching reply; until then the ladder shows no price and cannot place.
+  const rq = data?.request;
+  const matches = !!rq && rq.underlying === underlying && rq.expiry === expiry && rq.strike === strike && rq.opt === opt;
+  const shownC = matches ? data?.contract ?? null : null;
+  const axisKey = mcx
+    ? (matches && data?.spotKey && spotKeyUnderlying(data.spotKey) === underlying ? data.spotKey : null)
+    : underlying;
+  const spotView = axisKey ? data?.spots[axisKey] : undefined;
+  const axisName = mcx ? `${underlying} FUT${shownC?.refExpiry ? ` ${shownC.refExpiry}` : ''}` : underlying;
+  const contractError = matches ? data?.contractError ?? null : null;
+  const sessionNote = sessionFor(underlying, istDay()).note ?? null;
+  // MCX on the ladder is Dhan only (the server refuses the others too).
+  const brokerUnsupported = mcx && broker !== 'dhan';
   const spot = spotView?.spot ?? 0;
   const spotFreshNow = !!spotView?.fresh;
-  const optLtp = data?.contract?.ltp ?? 0;
-  const lotSize = data?.contract?.lotSize ?? null;
-  const securityId = data?.contract?.securityId ?? null;
+  const optLtp = shownC?.ltp ?? 0;
+  const lotSize = shownC?.lotSize ?? null;
+  const securityId = shownC?.securityId ?? null;
   const refPrice = mode === 'xy' ? spot : optLtp;
 
   // Keep the ladder centred on the reference price while following; re-centre when it walks off the visible window.
@@ -434,7 +459,7 @@ export default function PriceLadder() {
   const pendingHere = mine.filter(s => (s.state === 'armed' || s.state === 'working') && s.mode === pageMode).length;
 
   const stale = mode === 'xy' && !spotFreshNow;
-  const placeDisabled = busy || !brokerLoaded || !strike || !(refPrice > 0) || realBlocked || (mode === 'xy' && stale);
+  const placeDisabled = busy || !brokerLoaded || !strike || !(refPrice > 0) || realBlocked || brokerUnsupported || (mode === 'xy' && stale);
   const decimals = mode === 'xy' ? (tick < 1 ? 2 : 0) : 2;
   const ticks = mode === 'xy' ? XY_TICKS : PLAIN_TICKS;
   const dataDate = data ? data.state.date : null;
@@ -480,10 +505,10 @@ export default function PriceLadder() {
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">PRICE LADDER · {mode === 'xy' ? 'XY' : 'PLAIN'}</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">
-              {underlying} <span className="font-mono">{spot ? spot.toFixed(2) : '—'}</span>
+              {axisName} <span className="font-mono">{spot ? spot.toFixed(2) : '—'}</span>
             </h1>
             <p className="text-[10px] text-zinc-500 font-medium mt-1">
-              {mode === 'xy' ? 'Trade the option on index levels — the server fires armed levels with this tab closed' : 'One-click LIMIT / SL orders on the option premium'}
+              {mode === 'xy' ? `Trade the option on ${mcx ? 'its futures month\'s' : 'index'} levels — the server fires armed levels with this tab closed` : 'One-click LIMIT / SL orders on the option premium'}
             </p>
           </div>
         </div>
@@ -543,7 +568,22 @@ export default function PriceLadder() {
         )}
         {stale && (
           <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
-            <AlertTriangle className="w-4 h-4" /> {underlying} spot is stale{spotView ? ` (last ${timeOf(spotView.at)}, ${spotView.source})` : ''} — index levels are paused until it updates.
+            <AlertTriangle className="w-4 h-4" /> {axisName} {mcx ? 'price' : 'spot'} is stale{spotView ? ` (last ${timeOf(spotView.at)}, ${spotView.source})` : ''} — {mcx ? 'futures' : 'index'} levels are paused until it updates.
+          </div>
+        )}
+        {contractError && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-300">
+            <AlertTriangle className="w-4 h-4" /> {contractError}
+          </div>
+        )}
+        {mcx && sessionNote && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
+            <AlertTriangle className="w-4 h-4" /> {sessionNote}
+          </div>
+        )}
+        {brokerUnsupported && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
+            <AlertTriangle className="w-4 h-4" /> {underlying} trades on Dhan only in the Price Ladder — switch the broker to Dhan to place orders.
           </div>
         )}
         {realBlocked && (
@@ -559,7 +599,7 @@ export default function PriceLadder() {
               <p className="text-xs font-bold text-white">{optLabel}</p>
               <p className="text-lg font-mono font-bold text-zinc-100">{optLtp ? optLtp.toFixed(2) : '—'}</p>
               <div className="mt-2 pt-2 border-t border-zinc-800 text-xs">
-                <p className="font-bold text-zinc-300">{underlying} <span className="font-mono text-zinc-100">{spot ? spot.toFixed(2) : '—'}</span>
+                <p className="font-bold text-zinc-300">{axisName} <span className="font-mono text-zinc-100">{spot ? spot.toFixed(2) : '—'}</span>
                   {indexQ?.change_pct != null && <span className={`ml-2 font-mono ${indexQ.change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{indexQ.change_pct >= 0 ? '+' : ''}{indexQ.change_pct.toFixed(2)}%</span>}
                 </p>
                 <p className="font-mono text-zinc-500 mt-0.5">H {indexQ?.day_high?.toFixed(2) ?? '—'} · L {indexQ?.day_low?.toFixed(2) ?? '—'}</p>
@@ -646,7 +686,7 @@ export default function PriceLadder() {
                   )}
                 </>
               )}
-              <div className="flex items-center justify-between"><span className="text-zinc-400">Lots {lotSize ? <span className="text-zinc-500">({lots * lotSize} qty)</span> : null}</span>
+              <div className="flex items-center justify-between"><span className="text-zinc-400">Lots {lotSize ? <span className="text-zinc-500">({mcx ? `${lots * (shownC?.mult ?? 1)} bbl` : `${lots * lotSize} qty`})</span> : null}</span>
                 <div className="flex items-center gap-1">
                   <NumField label="Lots" value={lots} onCommit={v => setLots(Math.min(MAX_LADDER_LOTS, Math.max(1, Math.round(v))))} min={1} max={MAX_LADDER_LOTS} width="w-14" />
                   {[1, 5, 10].map(n => (
@@ -658,7 +698,7 @@ export default function PriceLadder() {
             </div>
             <p className="text-[10px] text-zinc-500 leading-relaxed">
               {mode === 'xy'
-                ? `Click the Buy or Sell column at an index level. ${opt === 'PE' ? 'Put: the ladder is inverted — a Buy is a limit ABOVE spot. ' : ''}Limit = the option is cheaper/dearer at that level; the other side needs SL (breakout). The option order goes at MARKET when ${underlying} crosses the level.`
+                ? `Click the Buy or Sell column at an index level. ${opt === 'PE' ? 'Put: the ladder is inverted — a Buy is a limit ABOVE spot. ' : ''}Limit = the option is cheaper/dearer at that level; the other side needs SL (breakout). The option order goes at MARKET when ${axisName} crosses the level.`
                 : 'Click Buy below LTP or Sell above it for a LIMIT; the other side places an SL-M stop. Orders rest at the broker.'}
             </p>
           </div>
@@ -772,7 +812,7 @@ export default function PriceLadder() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 p-4" role="dialog" aria-modal="true">
           <div className="w-full max-w-md rounded-lg border border-zinc-700 bg-zinc-900 p-4 flex flex-col gap-3">
             <p className="text-sm font-bold text-white">Arm LIVE · REAL MONEY for today?</p>
-            <p className="text-xs text-zinc-300">REAL ladder orders will place real orders on your broker account. Armed index levels are fired by the dashboard server even with this tab closed, until 15:17 IST.</p>
+            <p className="text-xs text-zinc-300">REAL ladder orders will place real orders on your broker account. Armed index levels are fired by the dashboard server even with this tab closed, until {sessionFor(underlying, istDay()).autoExitLabel} IST{mcx ? ` (${underlying}, today)` : ''}.</p>
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setArmModal(false)} className="px-3 py-1.5 rounded-md border border-zinc-700 text-xs text-zinc-300">Cancel</button>
               <button type="button" onClick={() => { setArmModal(false); void post({ action: 'live', on: true }); }} className="px-3 py-1.5 rounded-md bg-red-600 text-xs font-bold text-oncolor">Arm for today</button>

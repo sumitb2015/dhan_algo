@@ -5,6 +5,7 @@
 // THIS ladder's own order filled, never the broker's net, and the broker only ever shrinks it.
 
 import { levelCrossStep } from './focusToolRules.ts';
+import { mcxSession } from './mcxSession.ts';
 import { zerodhaSnapPrice, type ZerodhaContractInfo } from './zerodhaOrderRules.ts';
 
 export type LadderMode = 'xy' | 'plain';
@@ -33,6 +34,21 @@ export const AUTO_EXIT_HHMM = 1517;
 export const SESSION_OPEN_HHMM = 915;
 export const SESSION_CLOSE_HHMM = 1530;
 
+/** MCX underlyings the ladder trades (Dhan only): CRUDEOILM options, on their own futures month's price in XY. */
+export const MCX_LADDER_UNDERLYINGS = ['CRUDEOILM'];
+export const isMcxUnderlying = (u: string) => MCX_LADDER_UNDERLYINGS.includes(u);
+
+export interface LadderSession { open: number; close: number; autoExit: number; autoExitLabel: string; note?: string }
+/**
+ * Trading hours per underlying for one IST date (hhmm). NSE/BSE F&O: 09:15-15:30, MIS squared off at 15:17. MCX:
+ * lib/mcxSession.ts — 09:00 to 23:30 (US DST) or 23:55, MIS squared off 30 min before, MCX holidays and weekends
+ * closed (open === close: nothing fires, REAL orders are held).
+ */
+export function sessionFor(underlying: string, day: string): LadderSession {
+  if (isMcxUnderlying(underlying)) return mcxSession(day);
+  return { open: SESSION_OPEN_HHMM, close: SESSION_CLOSE_HHMM, autoExit: AUTO_EXIT_HHMM, autoExitLabel: '15:17' };
+}
+
 export type SliceState =
   | 'armed'      // XY: waiting for the index to cross the entry level
   | 'placing'    // marked before the order is sent; becomes working / unknown / rejected
@@ -52,7 +68,31 @@ export interface LadderContract {
   /** The broker's own trading symbol (Kotak / Zerodha orders, positions and order book); Dhan uses the security id. */
   tradingSymbol?: string;
   lotSize: number;
-  exchangeSegment: string; // Dhan segment: NSE_FNO / BSE_FNO
+  exchangeSegment: string; // Dhan segment: NSE_FNO / BSE_FNO / MCX_COMM
+  /**
+   * Rupees per unit of qty per point of premium, when it is not 1. MCX on Dhan: qty is in LOTS (lotSize 1), and one
+   * CRUDEOILM lot is 10 barrels, so P&L and premium cost multiply by 10 (MCX_LOT_MULTIPLIER).
+   */
+  mult?: number;
+  /**
+   * The XY axis when it is not the index: an MCX option month moves with ITS OWN futures month (the nearest FUTCOM
+   * expiring on or after the option), so its levels are that contract's price. Absent = the index spot.
+   */
+  ref?: { securityId: string; segment: string; expiry: string };
+}
+
+/** The key a contract's XY reference price is stored under in a price snapshot (`spots`). */
+export function spotKey(c: Pick<LadderContract, 'underlying' | 'ref'>): string {
+  return c.ref ? `${c.underlying}@${c.ref.segment}:${c.ref.securityId}` : c.underlying;
+}
+/** The underlying a spot key belongs to (the index name, or the part before '@'). */
+export function spotKeyUnderlying(k: string): string {
+  return k.split('@')[0];
+}
+/** The segment / security id behind a spot key that names a contract, or null for an index key. */
+export function parseSpotKey(k: string): { segment: string; securityId: string } | null {
+  const m = /^[^@]+@([A-Z_]+):(\d+)$/.exec(k);
+  return m ? { segment: m[1], securityId: m[2] } : null;
 }
 
 /** Index-point exits around an XY entry. `tgtPts` 0 = no target (a Cover order: stop-loss only). */
@@ -261,10 +301,10 @@ export function exitQtyFor(own: number, side: LadderSide, broker: { failed: true
 }
 
 /** P&L in rupees of an open (or closed, given the exit price) slice. */
-export function slicePnl(s: Pick<LadderSlice, 'side' | 'avg' | 'filledQty'>, price: number | null | undefined): number | null {
+export function slicePnl(s: Pick<LadderSlice, 'side' | 'avg' | 'filledQty'> & { contract?: Pick<LadderContract, 'mult'> }, price: number | null | undefined): number | null {
   if (!(Number(s.avg) > 0) || !(Number(s.filledQty) > 0) || !(Number(price) > 0)) return null;
   const dir = s.side === 'BUY' ? 1 : -1;
-  return (Number(price) - Number(s.avg)) * Number(s.filledQty) * dir;
+  return (Number(price) - Number(s.avg)) * Number(s.filledQty) * (s.contract?.mult ?? 1) * dir;
 }
 
 /**
@@ -400,17 +440,20 @@ export function planTick(
   const jobs: Job[] = [];
   const today = istDay(now);
   const hhmm = istHhmm(now);
-  const afterClose = hhmm >= AUTO_EXIT_HHMM;
-  const sessionOpen = hhmm >= SESSION_OPEN_HHMM && hhmm < SESSION_CLOSE_HHMM;
   let next = s;
   for (const x of s.slices) {
     if (!isLive(x)) continue;
-    const sp = prices.spots[x.contract.underlying];
+    // Hours are the contract's own market's (NSE/BSE vs MCX).
+    const sess = sessionFor(x.contract.underlying, today);
+    const afterClose = hhmm >= sess.autoExit;
+    const sessionOpen = hhmm >= sess.open && hhmm < sess.close;
+    const at = sess.autoExitLabel;
+    const sp = prices.spots[spotKey(x.contract)];
     const fresh = !!sp && spotFresh(sp.at, now);
     const spot = fresh ? sp!.spot : 0;
 
     if (x.state === 'armed') {
-      if (afterClose) { next = pushEvent(patchSlice(next, x.id, { state: 'cancelled', note: 'Cancelled at 15:17' }), ev('info', 'Armed level cancelled at 15:17', x.id)); continue; }
+      if (afterClose) { next = pushEvent(patchSlice(next, x.id, { state: 'cancelled', note: `Cancelled at ${at}` }), ev('info', `Armed level cancelled at ${at}`, x.id)); continue; }
       if (x.mode === 'real' && !realArmed(s, today)) {
         next = pushEvent(patchSlice(next, x.id, { state: 'cancelled', note: 'LIVE · REAL MONEY is off' }), ev('warn', 'REAL level cancelled: the live arm is off', x.id));
         continue;
@@ -448,7 +491,7 @@ export function planTick(
 
     if (x.state === 'working') {
       if (afterClose && x.mode === 'sim') {
-        next = patchSlice(next, x.id, { state: 'cancelled', note: 'Cancelled at 15:17' });
+        next = patchSlice(next, x.id, { state: 'cancelled', note: `Cancelled at ${at}` });
         continue;
       }
       // REAL after 15:17: cancel at the broker AND keep settling, so a fill that beat the cancel becomes an owned
@@ -481,7 +524,7 @@ export function planTick(
       let reason: string | null = null;
       let patch: Partial<LadderSlice> = {};
       // 15:17 squares off intraday (MIS) only: NRML was chosen to be carried, and its bracket resumes at the next open.
-      if (afterClose && x.product === 'MIS') reason = 'Auto square-off 15:17';
+      if (afterClose && x.product === 'MIS') reason = `Auto square-off ${at}`;
       else if (x.exitWanted) reason = x.exitWanted;
       else if (x.kind === 'xy' && x.bracket && fresh) {
         const r = bracketStep(x, bias(x.contract.opt, x.side), spot);
