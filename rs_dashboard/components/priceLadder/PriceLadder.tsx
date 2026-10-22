@@ -6,7 +6,7 @@ import { toast } from 'sonner';
 import NavBar from '@/components/NavBar';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import { BROKER_LABELS } from '@/hooks/useBrokerSelector';
-import { LadderGrid, widgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
+import { LadderGrid, type EntryMark, widgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
   MAX_LADDER_LOTS, isLive, limitZone, ownNet, slicePnl, classifyClick,
@@ -255,16 +255,17 @@ export default function PriceLadder() {
   const pageMode = real ? 'real' : 'sim';
   // Ladder markers follow the SIM/REAL switch too: a paper level must never look like a real one on the ladder.
   const mine = useMemo(() => slices.filter(s => isLive(s) && s.broker === broker && s.mode === pageMode && s.contract.securityId === securityId), [slices, broker, pageMode, securityId]);
-  const entryLevels = useMemo(() => {
-    const levels: number[] = [];
+  // Where each open position was entered, on the ladder's own axis (index level in XY, fill premium in plain).
+  const entryMarks = useMemo(() => {
+    const marks: EntryMark[] = [];
     for (const s of mine) {
-      if ((s.state === 'open' || s.state === 'exiting') && Number(s.filledQty) > 0) {
-        const y = s.entryY ?? s.entryLevel;
-        if (y && Number.isFinite(y)) levels.push(y);
-      }
+      const held = Number(s.filledQty) || 0;
+      if ((s.state !== 'open' && s.state !== 'exiting') || held <= 0) continue;
+      const y = mode === 'xy' ? (s.kind === 'xy' ? s.entryY ?? s.entryLevel : undefined) : s.avg;
+      if (y && Number.isFinite(y)) marks.push({ y, side: s.side, qty: held, avg: s.avg });
     }
-    return levels;
-  }, [mine]);
+    return marks;
+  }, [mine, mode]);
   const net = securityId ? ownNet(slices.filter(s => s.broker === broker && s.mode === pageMode), securityId) : { qty: 0, avg: null };
   const contractPnl = useMemo(() => {
     let sum = 0, any = false;
@@ -600,7 +601,7 @@ export default function PriceLadder() {
               widgets={widgetsFor(mine, mode)}
               limitZoneBuy={limitZone(mode, opt, 'BUY')}
               onPlace={onPlace} onCancel={id => void post({ action: 'cancel', id })} onMove={onMove} onAdjust={onAdjust}
-              disabled={placeDisabled} decimals={decimals} entryLevels={entryLevels}
+              disabled={placeDisabled} decimals={decimals} entryMarks={entryMarks}
               onScroll={refPrice > 0 ? scrollLadder : undefined}
             />
           </div>

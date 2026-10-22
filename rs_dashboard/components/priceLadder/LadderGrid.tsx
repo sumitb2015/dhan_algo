@@ -30,6 +30,9 @@ export interface LadderWidget {
   drag?: 'entry' | 'tgt' | 'sl';
 }
 
+/** An open position's entry on the ladder's axis: drawn as a tinted row with a side / qty / fill tag in the Price column. */
+export interface EntryMark { y: number; side: LadderSide; qty: number; avg?: number }
+
 const opposite = (s: LadderSide): LadderSide => (s === 'BUY' ? 'SELL' : 'BUY');
 
 /** Widgets for the slices of the contract on screen, on the ladder's own axis (index levels in XY, premium in plain). */
@@ -178,10 +181,11 @@ function OuterControlWidget({ w, onAdjust, onCancel }: {
  *  - Trigger prices for Target / SL / armed orders sit in the INNER column (Bids for BUY, Offers for SELL).
  *  - Controls (+ / − buttons and lot quantity) sit in the OUTER column (Buy for BUY, Sell for SELL).
  *  - The central Price column displays sequential price rungs, with the reference price (spot / LTP) highlighted.
- *  - When an open position is active, a horizontal blue line marks its entry level across the ladder.
+ *  - An open position's entry row is tinted and outlined in blue, with a B/S + qty tag (and, in XY, the option's fill
+ *    premium) in the Price column.
  */
 export function LadderGrid({
-  center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryLevels, onScroll,
+  center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryMarks, onScroll,
 }: {
   center: number; refPrice: number; tick: number; rows: number; widgets: LadderWidget[];
   limitZoneBuy: 'below' | 'above';
@@ -190,7 +194,7 @@ export function LadderGrid({
   onMove: (ids: string[], what: 'entry' | 'tgt' | 'sl', price: number) => void;
   onAdjust: (w: LadderWidget, delta: 1 | -1) => void;
   disabled: boolean; decimals: number;
-  entryLevels?: number[];
+  entryMarks?: EntryMark[];
   /** Scroll the window by N ticks (positive = up, toward higher prices). Wheel over the rows or the ▲ / ▼ buttons. */
   onScroll?: (ticks: number) => void;
 }) {
@@ -245,7 +249,17 @@ export function LadderGrid({
       <div ref={bodyRef}>
       {prices.map(p => {
         const isRef = refRow != null && Math.abs(p - refRow) < tick / 2;
-        const isEntry = entryLevels?.some(y => Math.abs(p - snapToStep(y, tick)) < tick / 2);
+        const marks = entryMarks?.filter(m => Math.abs(p - snapToStep(m.y, tick)) < tick / 2) ?? [];
+        const isEntry = marks.length > 0;
+        // One tag per side on this row (several fills at one level add up); the avg is qty-weighted.
+        const tags = (['BUY', 'SELL'] as const).map(side => {
+          const ms = marks.filter(m => m.side === side);
+          const qty = ms.reduce((a, m) => a + m.qty, 0);
+          const priced = ms.filter(m => m.avg != null && m.avg > 0);
+          const pq = priced.reduce((a, m) => a + m.qty, 0);
+          const avg = pq > 0 ? priced.reduce((a, m) => a + m.avg! * m.qty, 0) / pq : null;
+          return { side, qty, avg };
+        }).filter(t => t.qty > 0);
         const below = refPrice > 0 && p < refPrice;
         const above = refPrice > 0 && p > refPrice;
         const buyZone = limitZoneBuy === 'below' ? below : above;
@@ -257,7 +271,7 @@ export function LadderGrid({
         return (
           <div
             key={p}
-            className={`grid grid-cols-[1.3fr_0.8fr_0.8fr_0.8fr_1.3fr] border-t border-zinc-900 text-xs relative ${isRef ? 'bg-amber-500/15' : ''} ${isEntry ? 'border-b-2 border-b-blue-500' : ''}`}
+            className={`grid grid-cols-[1.3fr_0.8fr_0.8fr_0.8fr_1.3fr] border-t border-zinc-900 text-xs relative ${isRef ? 'bg-amber-500/15' : isEntry ? 'bg-blue-500/10' : ''} ${isEntry ? 'border-y-2 border-y-blue-500' : ''}`}
             onDragOver={e => { if (e.dataTransfer.types.includes(DRAG_MIME)) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; } }}
             onDrop={e => {
               const raw = e.dataTransfer.getData(DRAG_MIME);
@@ -289,8 +303,19 @@ export function LadderGrid({
             </div>
 
             {/* Column 3: Price */}
-            <div className={`h-7 flex items-center justify-center font-mono ${isRef ? 'font-bold text-amber-300' : 'text-zinc-200'}`}>
-              {isRef ? refPrice.toFixed(2) : fmt(p)}
+            <div className={`h-7 flex items-center justify-center gap-1 font-mono overflow-hidden ${isRef ? 'font-bold text-amber-300' : isEntry ? 'font-bold text-blue-300' : 'text-zinc-200'}`}>
+              {isEntry && tags.map(t => (
+                <span
+                  key={t.side}
+                  title={`Entered: ${t.side} ${t.qty} at ${fmt(p)}${t.avg != null ? ` · fill ₹${t.avg.toFixed(2)}` : ''}`}
+                  className={`shrink-0 px-1 rounded text-[10px] font-bold leading-4 text-oncolor ${t.side === 'BUY' ? 'bg-emerald-600' : 'bg-red-600'}`}
+                >
+                  {t.side === 'BUY' ? 'B' : 'S'}{t.qty}
+                </span>
+              ))}
+              <span>{isRef ? refPrice.toFixed(2) : fmt(p)}</span>
+              {/* XY only: the option's fill premium (in plain mode the row price IS the fill). */}
+              {isEntry && tags[0]?.avg != null && Math.abs(tags[0].avg - p) >= tick && <span className="shrink-0 text-[10px] font-semibold text-blue-300">@{tags[0].avg.toFixed(2)}</span>}
             </div>
 
             {/* Column 4: Offers (Inner trigger price for Sell-side triggers) */}
