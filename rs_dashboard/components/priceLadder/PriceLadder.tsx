@@ -14,7 +14,7 @@ import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, type LadderWidg
 import { isPairLive, legSlPrice, pairName, pairNowPnl, sumPairPnl, LEG_KEYS, PAIR_STRIKE_STEP, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
-  MAX_LADDER_LOTS, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
+  MAX_LADDER_LOTS, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
   type ClickType, type LadderZones, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
   type LadderContract,
 } from '@/lib/priceLadder';
@@ -737,6 +737,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   };
   const pendingHere = mode === 'pair' ? 0 : mine.filter(s => (s.state === 'armed' || s.state === 'working') && s.mode === pageMode).length;
 
+  // A price that has not moved is only a problem while the market is trading: outside the session there are no live
+  // prices, so the stale warning is not shown (the server still refuses to arm without a fresh price).
+  // The server's own clock (its last reply), so render stays pure; before the first reply there is nothing to warn about.
+  const sess = sessionFor(underlying, istDay(data?.now), data?.state?.settings?.mcxAutoExitTime);
+  const hhmmNow = data ? istHhmm(data.now) : 0;
+  const inSession = !!data && sess.open < sess.close && hhmmNow >= sess.open && hhmmNow < sess.close;
   const stale = mode === 'xy' && !spotFreshNow;
   const placeDisabled = busy || !brokerLoaded || !strike || !(refPrice > 0) || realBlocked || brokerUnsupported || (real && sessionDown) || (mode === 'xy' && stale)
     || (mode === 'pair' && !pairView);
@@ -929,7 +935,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <AlertTriangle className="w-4 h-4" /> {loadError}
           </div>
         )}
-        {stale && (
+        {stale && inSession && (
           <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
             <AlertTriangle className="w-4 h-4" /> {axisName} {mcx ? 'price' : 'spot'} is stale{spotView ? ` (last ${timeOf(spotView.at)}, ${spotView.source})` : ''} — {mcx ? 'futures' : 'index'} levels are paused until it updates.
           </div>

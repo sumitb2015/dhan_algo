@@ -8,7 +8,8 @@ import type { LadderSlice, LadderState } from '../lib/priceLadder';
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const SPOT = 23200;
 
-async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean> } = {}) {
+async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string } = {}) {
+  const clock = opts.staleAt ? new Date(`${istToday()}T${opts.staleAt}:00+05:30`).getTime() : null;
   const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[] };
   const state: LadderState = { date: istToday(), slices: [], events: [] };
   if (opts.openLong) {
@@ -48,8 +49,8 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
     if (p === '/api/price-ladder/state') {
       if (method === 'GET') {
         return json(route, { success: true, data: {
-          state, spots: { NIFTY: { spot: SPOT, at: Date.now(), source: 'indices', fresh: true } }, ltps: { '111': 120 },
-          liveArmed: !!opts.liveArmed, now: Date.now(),
+          state, spots: { NIFTY: clock ? { spot: SPOT, at: clock - 60_000, source: 'ws (not moved yet)', fresh: false } : { spot: SPOT, at: Date.now(), source: 'indices', fresh: true } }, ltps: { '111': 120 },
+          liveArmed: !!opts.liveArmed, now: clock ?? Date.now(),
           // The page reads the contract only from a reply that echoes the selection it is showing.
           request: { underlying: u.searchParams.get('underlying'), expiry: u.searchParams.get('expiry') ?? '', strike: Number(u.searchParams.get('strike')) || null, opt: u.searchParams.get('opt'), pairCe: Number(u.searchParams.get('pairCe')) || null, pairPe: Number(u.searchParams.get('pairPe')) || null },
           pair: Number(u.searchParams.get('pairCe')) > 0 ? {
@@ -362,4 +363,18 @@ test('Two ladders on different brokers: each shows its own broker account chip a
   await expect(page.getByText('Kotak P&L')).toHaveCount(1);
   await page.getByLabel('Broker for new orders').nth(1).selectOption('dhan');
   await expect(page.getByRole('button', { name: /^Positions/ })).toHaveCount(1);
+});
+
+test('The stale-price warning shows only while the market is trading, not after hours', async ({ page }) => {
+  await install(page, { staleAt: '11:00' });
+  await gotoSingle(page);
+  await expect(page.getByText(/price is stale|spot is stale/)).toBeVisible();
+});
+
+test('After hours (05:30 IST) a stale price is not warned about', async ({ page }) => {
+  await install(page, { staleAt: '05:30' });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.waitForTimeout(1500);
+  await expect(page.getByText(/is stale/)).toHaveCount(0);
 });
