@@ -12,8 +12,8 @@ import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { LadderGrid, type EntryMark, widgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
-  MAX_LADDER_LOTS, MCX_LADDER_UNDERLYINGS, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
-  type ClickType, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
+  MAX_LADDER_LOTS, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
+  type ClickType, type LadderZones, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
   type LadderContract,
 } from '@/lib/priceLadder';
 
@@ -41,7 +41,11 @@ interface StateResp {
   contractError?: string | null;
   /** The selection this reply describes. */
   request?: { underlying: string; expiry: string; strike: number | null; opt: string | null };
-  contract: { securityId: string; lotSize: number; ltp: number | null; mult?: number; refExpiry?: string } | null;
+  contract: {
+    securityId: string; lotSize: number; ltp: number | null; mult?: number; refExpiry?: string;
+    /** MCX: the futures axis's day high / low / previous close, from its WebSocket quote. */
+    axisDay?: { high: number | null; low: number | null; prevClose: number | null } | null;
+  } | null;
 }
 interface IndexQuote { ltp: number; prev_close: number; change_pct: number | null; day_high: number | null; day_low: number | null }
 
@@ -108,9 +112,13 @@ export default function PriceLadder() {
   const [strikes, setStrikes] = useState<number[]>([]);
   const [strike, setStrike] = useState<number | null>(null);
   const [opt, setOpt] = useState<OptType>('CE');
-  const [side, setSide] = useState<LadderSide>('BUY');
   const [product, setProduct] = useState<'NRML' | 'MIS'>('MIS');
   const [orderType, setOrderType] = useState<ClickType>('LIMIT');
+  // Classic: fixed limit zones (the other side needs Order Type SL). Anywhere: both columns at every level, the side of
+  // the price deciding LIMIT or stop (plain: an SL-limit `slBufferPct` past the trigger).
+  const [zones, setZonesRaw] = useState<LadderZones>('classic');
+  const setZones = (z: LadderZones) => { setZonesRaw(z); savePref('price-ladder-zones', z); };
+  const [slBufferPct, setSlBufferPct] = useState(DEFAULT_SL_BUFFER_PCT);
   const [style, setStyle] = useState<'Single' | 'Bracket' | 'Cover'>('Bracket');
   const [tgtPts, setTgtPts] = useState(40);
   const [slPts, setSlPts] = useState(30);
@@ -125,9 +133,9 @@ export default function PriceLadder() {
   const [data, setData] = useState<StateResp | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [quotes, setQuotes] = useState<Record<string, IndexQuote>>({});
-  // Change and day range come from top-indices, whose CRUDEOILM row is the FRONT futures month — not the option month's
-  // futures on this ladder's axis — so MCX shows neither rather than mix two contracts.
-  const indexQ = isMcxUnderlying(underlying) ? null : quotes[underlying] ?? null;
+  // An index's change and day range come from top-indices. Its CRUDEOILM row is the FRONT futures month, not the option
+  // month's futures on this ladder's axis, so MCX takes them from that axis's own WebSocket quote instead (below).
+  const topIndexQ = isMcxUnderlying(underlying) ? null : quotes[underlying] ?? null;
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const lastEventAt = useRef<number>(0);
@@ -135,7 +143,11 @@ export default function PriceLadder() {
   // Preferences (after mount: the first render must match the server HTML).
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect */
-    setModeRaw(readPref('price-ladder-mode', ['xy', 'plain'] as const, 'xy'));
+    const savedMode = readPref('price-ladder-mode', ['xy', 'plain'] as const, 'xy');
+    setModeRaw(savedMode);
+    // The tick belongs to the mode (setMode sets it on a click): a page reopened into Plain must not keep XY's 5.
+    setTick(savedMode === 'xy' ? 5 : 0.05);
+    setZonesRaw(readPref('price-ladder-zones', ['classic', 'anywhere'] as const, 'classic'));
     setUnderlyingRaw(readPref('price-ladder-underlying', UNDERLYINGS, 'NIFTY'));
     /* eslint-enable react-hooks/set-state-in-effect */
     return installAlertSoundUnlock();
@@ -200,12 +212,54 @@ export default function PriceLadder() {
     return () => { cancelled = true; };
   }, [underlying, expiry]);
 
-  // Ladder state + spot + the shown contract's LTP, once a second. Out-of-order replies are dropped. One request per
-  // selection at a time: a reply can take longer than the 1 s tick (an MCX contract waits on the shared quote lane), and
-  // starting a new poll every tick would make every reply "out of order" and the page would never update.
+  // Ladder state + spot + the shown contract's LTP. Pushed by /api/price-ladder/stream (Server-Sent Events) the moment
+  // it changes; the 1 s poll below only runs while the stream is not delivering. A view's ledger is applied only if it
+  // is not OLDER than the one on screen (state.rev, bumped per write) — a late push or poll must not undo a click.
+  const applyView = useCallback((v: StateResp) => {
+    setData(d => {
+      if (!d) return v;
+      const older = v.state.date === d.state.date && (v.state.rev ?? 0) < (d.state.rev ?? 0);
+      return older ? { ...v, state: d.state, liveArmed: d.liveArmed } : v;
+    });
+  }, []);
+  // Open = the stream is connected (it sends only on change, plus a keepalive comment, so silence is not a failure).
+  const streamOpen = useRef(false);
+  useEffect(() => {
+    if (typeof EventSource === 'undefined') return;
+    const q = new URLSearchParams({ underlying });
+    if (expiry && strike) { q.set('expiry', expiry); q.set('strike', String(strike)); q.set('opt', opt); }
+    // Open only while the tab is visible: each open stream holds one of the browser's ~6 connections to this server
+    // (HTTP/1.1), shared with every dashboard tab — a hidden ladder must not hold one and queue another tab's orders.
+    let es: EventSource | null = null;
+    const open = () => {
+      if (es || document.hidden) return;
+      es = new EventSource(`/api/price-ladder/stream?${q}`);
+      es.onmessage = onMsg;
+      es.onopen = () => { streamOpen.current = true; };
+      // EventSource reconnects on its own; until it does, the poll below takes over.
+      es.onerror = () => { streamOpen.current = false; };
+    };
+    const close = () => { es?.close(); es = null; streamOpen.current = false; };
+    const onVis = () => (document.hidden ? close() : open());
+    const onMsg = (e: MessageEvent<string>) => {
+      try {
+        const j = JSON.parse(e.data) as { success: boolean; data?: StateResp; error?: string };
+        if (!j.success || !j.data) { setLoadError(j.error ?? 'Could not read the ladder'); return; }
+        applyView(j.data);
+        setLoadError(null);
+      } catch { /* a malformed event: the next one replaces it */ }
+    };
+    open();
+    document.addEventListener('visibilitychange', onVis);
+    return () => { document.removeEventListener('visibilitychange', onVis); close(); };
+  }, [underlying, expiry, strike, opt, applyView]);
+
+  // Fallback poll: out-of-order replies are dropped, one request per selection at a time (a reply can outlive the 1 s
+  // tick, and a new poll every tick would make every reply "out of order").
   const seq = useRef(0);
   const pollInFlight = useRef<string | null>(null);
   const poll = useCallback(async () => {
+    if (streamOpen.current) return;
     const key = `${underlying}|${expiry}|${strike}|${opt}`;
     if (pollInFlight.current === key) return;
     pollInFlight.current = key;
@@ -217,14 +271,14 @@ export default function PriceLadder() {
       const j = await r.json() as { success: boolean; data?: StateResp; error?: string };
       if (my !== seq.current) return;
       if (!j.success || !j.data) { setLoadError(j.error ?? 'Could not read the ladder'); return; }
-      setData(j.data);
+      applyView(j.data);
       setLoadError(null);
     } catch {
       if (my === seq.current) setLoadError('Could not reach the dashboard server');
     } finally {
       if (pollInFlight.current === key) pollInFlight.current = null;
     }
-  }, [underlying, expiry, strike, opt]);
+  }, [underlying, expiry, strike, opt, applyView]);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void poll();
@@ -349,6 +403,11 @@ export default function PriceLadder() {
   const spot = spotView?.spot ?? 0;
   const spotFreshNow = !!spotView?.fresh;
   const optLtp = shownC?.ltp ?? 0;
+  const ax = shownC?.axisDay;
+  const indexQ: IndexQuote | null = !mcx ? topIndexQ : ax && spot > 0 ? {
+    ltp: spot, prev_close: ax.prevClose ?? 0, day_high: ax.high, day_low: ax.low,
+    change_pct: ax.prevClose ? ((spot - ax.prevClose) / ax.prevClose) * 100 : null,
+  } : null;
   const lotSize = shownC?.lotSize ?? null;
   const securityId = shownC?.securityId ?? null;
   const refPrice = mode === 'xy' ? spot : optLtp;
@@ -409,7 +468,8 @@ export default function PriceLadder() {
       if (j.data?.state) {
         // Newer than any poll still in flight: bump seq so an older GET reply cannot put back what this changed.
         seq.current++;
-        setData(d => (d ? { ...d, state: j.data!.state! } : d));
+        const st = j.data.state;
+        setData(d => (d && !(st.date === d.state.date && (st.rev ?? 0) < (d.state.rev ?? 0)) ? { ...d, state: st } : d));
       }
       if (j.unknown) { toast.error(`Order status UNKNOWN — check Positions/Orders before doing anything else. ${j.error ?? ''}`); return false; }
       if (!j.success) { toast.error(j.error ?? `Request failed (${r.status})`); return false; }
@@ -422,28 +482,34 @@ export default function PriceLadder() {
     }
   }, []);
 
-  const send = useCallback((side: LadderSide, price: number) => {
+  // `expect` = the verdict the user saw / confirmed: the server refuses rather than place a different kind of order if
+  // the price crossed the level in between.
+  const send = useCallback((side: LadderSide, price: number, expect: { kind: 'limit' | 'stop'; dir: 'above' | 'below' }) => {
     if (!expiry || !strike) return;
     void post({
       action: 'arm', kind: mode, broker, mode: real ? 'real' : 'sim', underlying, expiry, strike, opt, side, lots, product,
-      orderType, level: price,
+      orderType, level: price, zones, expect, ...(zones === 'anywhere' && mode === 'plain' ? { slBufferPct } : {}),
       // Cover = SL only (tgtPts 0), as OptionX's Cover order; Bracket = target + SL.
       ...(mode === 'xy' && style !== 'Single' ? { bracket: { tgtPts: style === 'Cover' ? 0 : tgtPts, slPts, ...(trailOn ? { trailPts } : {}) } } : {}),
     }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${mode === 'xy' ? 'armed at' : 'placed at'} ${price}`); });
-  }, [post, mode, broker, real, underlying, expiry, strike, opt, lots, product, orderType, style, tgtPts, slPts, trailOn, trailPts]);
+  }, [post, mode, broker, real, underlying, expiry, strike, opt, lots, product, orderType, zones, slBufferPct, style, tgtPts, slPts, trailOn, trailPts]);
 
   const onPlace = (side: LadderSide, price: number) => {
     // Same verdict the server applies, shown before the click costs a round trip.
-    const v = classifyClick({ mode, opt, side, level: price, ref: refPrice, orderType });
+    const v = classifyClick({ mode, opt, side, level: price, ref: refPrice, orderType, zones });
     if (!v.ok) { toast.warning(v.error); return; }
     if (real && !realAck) {
+      // The server computes the SL-limit's limit from the same buffer; this preview uses the same function.
+      const lim = mode === 'plain' && v.kind === 'stop' && zones === 'anywhere' ? stopLimitPrice(side, price, slBufferPct) : null;
       const what = mode === 'xy'
-        ? `${side} ${lots} lot(s) ${underlying} ${strike}${opt} at MARKET when ${underlying} ${v.dir === 'below' ? 'falls to' : 'rises to'} ${price}`
-        : `${v.kind === 'limit' ? 'LIMIT' : 'SL'} ${side} ${lots} lot(s) ${underlying} ${strike}${opt} at ${price}`;
-      setConfirm({ text: what, run: () => send(side, price) });
+        ? `${side} ${lots} lot(s) ${underlying} ${strike}${opt} at MARKET when ${axisName} ${v.dir === 'below' ? 'falls to' : 'rises to'} ${price}`
+        : lim
+          ? `SL-limit ${side} ${lots} lot(s) ${underlying} ${strike}${opt}: trigger ${price.toFixed(2)}, limit ${lim.toFixed(2)}`
+          : `${v.kind === 'limit' ? 'LIMIT' : 'SL'} ${side} ${lots} lot(s) ${underlying} ${strike}${opt} at ${price}`;
+      setConfirm({ text: what, run: () => send(side, price, { kind: v.kind, dir: v.dir }) });
       return;
     }
-    send(side, price);
+    send(side, price, { kind: v.kind, dir: v.dir });
   };
 
   // Drag-to-modify (OptionX): an armed entry moves its level; an open bracket moves its target or SL. The server re-checks
@@ -570,6 +636,7 @@ export default function PriceLadder() {
         <OrdersTradesModal
           isOpen
           readOnly
+          subtitle="View only — change ladder orders from the ladder"
           initialTab={bookOpen}
           onClose={() => setBookOpen(null)}
           broker={broker}
@@ -670,27 +737,18 @@ export default function PriceLadder() {
                   <Seg value={opt} options={['CE', 'PE'] as const} labels={{ CE: 'Call', PE: 'Put' }} onChange={setOpt} />
                 </div>
               </div>
-              <div className="flex items-center justify-between"><span className="text-zinc-400">Order Type</span>
-                <Seg value={orderType} options={['LIMIT', 'SL'] as const} labels={{ LIMIT: 'Limit', SL: 'SL' }} onChange={setOrderType} />
+              <div className="flex items-center justify-between"><span className="text-zinc-400" title="Classic: Buy and Sell each work on their limit side (the other side needs Order Type SL). Anywhere: both columns at every level — the other side is a stop by itself.">Zones</span>
+                <Seg value={zones} options={['classic', 'anywhere'] as const} labels={{ classic: 'Classic', anywhere: 'Anywhere' }} onChange={setZones} />
               </div>
-              <div className="flex items-center justify-between"><span className="text-zinc-400">Side</span>
-                <div className="grid grid-cols-2 gap-1.5 w-32">
-                  <button
-                    type="button"
-                    onClick={() => setSide('BUY')}
-                    className={`py-1 rounded text-xs font-bold transition-all ${side === 'BUY' ? 'bg-emerald-600 text-oncolor shadow' : 'bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-zinc-200'}`}
-                  >
-                    Buy
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSide('SELL')}
-                    className={`py-1 rounded text-xs font-bold transition-all ${side === 'SELL' ? 'bg-red-600 text-oncolor shadow' : 'bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-zinc-200'}`}
-                  >
-                    Sell
-                  </button>
+              {zones === 'classic' ? (
+                <div className="flex items-center justify-between"><span className="text-zinc-400">Order Type</span>
+                  <Seg value={orderType} options={['LIMIT', 'SL'] as const} labels={{ LIMIT: 'Limit', SL: 'SL' }} onChange={setOrderType} />
                 </div>
-              </div>
+              ) : mode === 'plain' ? (
+                <div className="flex items-center justify-between"><span className="text-zinc-400" title="An SL-limit's limit sits this % past its trigger: below it for a Sell, above it for a Buy">SL limit buffer %</span>
+                  <NumField label="SL limit buffer percent" value={slBufferPct} onCommit={setSlBufferPct} min={MIN_SL_BUFFER_PCT} max={MAX_SL_BUFFER_PCT} step={0.1} />
+                </div>
+              ) : null}
               {mode === 'xy' && (
                 <>
                   <div className="flex items-center justify-between"><span className="text-zinc-400">Style</span>
@@ -720,8 +778,10 @@ export default function PriceLadder() {
             </div>
             <p className="text-[10px] text-zinc-500 leading-relaxed">
               {mode === 'xy'
-                ? `Click the Buy or Sell column at an index level. ${opt === 'PE' ? 'Put: the ladder is inverted — a Buy is a limit ABOVE spot. ' : ''}Limit = the option is cheaper/dearer at that level; the other side needs SL (breakout). The option order goes at MARKET when ${axisName} crosses the level.`
-                : 'Click Buy below LTP or Sell above it for a LIMIT; the other side places an SL-M stop. Orders rest at the broker.'}
+                ? `Click the Buy or Sell column at an index level. ${opt === 'PE' ? 'Put: the ladder is inverted — a Buy is a limit ABOVE spot. ' : ''}Limit = the option is cheaper/dearer at that level; the other side ${zones === 'anywhere' ? 'is a breakout by itself (Anywhere)' : 'needs SL (breakout)'}. The option order goes at MARKET when ${axisName} crosses the level.`
+                : zones === 'anywhere'
+                  ? `Anywhere: Buy below LTP / Sell above it = LIMIT; Sell below / Buy above = SL-limit, its limit ${slBufferPct}% past the trigger. Orders rest at the broker.`
+                  : 'Click Buy below LTP or Sell above it for a LIMIT; the other side places an SL-M stop (Order Type SL). Orders rest at the broker.'}
             </p>
           </div>
 
@@ -769,6 +829,7 @@ export default function PriceLadder() {
               center={center} refPrice={refPrice} tick={tick} rows={ROWS}
               widgets={widgetsFor(mine, mode)}
               limitZoneBuy={limitZone(mode, opt, 'BUY')}
+              zones={zones} stopLimitFor={mode === 'plain' ? (side, p) => stopLimitPrice(side, p, slBufferPct) : undefined}
               onPlace={onPlace} onCancel={id => void post({ action: 'cancel', id })} onMove={onMove} onAdjust={onAdjust}
               disabled={placeDisabled} decimals={decimals} entryMarks={entryMarks}
               onScroll={refPrice > 0 ? scrollLadder : undefined}
@@ -896,8 +957,9 @@ function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; 
   const pnl = sliceNowPnl(s, ltp) ?? null;
   const qty = Number(s.filledQty) || s.qty;
   const trig = s.kind === 'xy'
-    ? (s.entryLevel ? `${s.contract.underlying} ${s.entryDir === 'below' ? '≤' : '≥'} ${s.entryLevel}` : '—')
-    : `${s.orderType === 'SL' ? 'SL ' : ''}${s.limitPrice ?? s.triggerPrice ?? '—'}`;
+    ? (s.entryLevel ? `${s.contract.underlying}${s.contract.ref ? ' FUT' : ''} ${s.entryDir === 'below' ? '≤' : '≥'} ${s.entryLevel}` : '—')
+    : s.stopLimitPrice ? `SL ${s.triggerPrice} → ${s.stopLimitPrice.toFixed(2)}`
+      : `${s.orderType === 'SL' ? 'SL ' : ''}${s.limitPrice ?? s.triggerPrice ?? '—'}`;
   const stateClass = s.state === 'unknown' || s.state === 'rejected' ? 'text-red-400 font-bold'
     : s.state === 'open' ? 'text-emerald-400 font-bold' : s.state === 'armed' || s.state === 'working' ? 'text-sky-300' : 'text-zinc-400';
   return (

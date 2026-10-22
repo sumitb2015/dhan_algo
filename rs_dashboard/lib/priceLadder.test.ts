@@ -4,7 +4,7 @@ import { mcxSession, usDstActive } from './mcxSession.ts';
 import {
   bias, limitZone, classifyClick, levelSane, capLots, cleanBracket, entryStep, bracketLevels, bracketStep, spotFresh,
   settleOrder, exitQtyFor, slicePnl, sliceNowPnl, sumSlicePnl, ownNet, ladderRows, snapToStep, rollDay, realArmed, pushEvent, istHhmm,
-  MAX_LADDER_LOTS, SPOT_STALE_MS, planTick, sessionFor, spotKey, parseSpotKey, type LadderSlice, type LadderState,
+  MAX_LADDER_LOTS, SPOT_STALE_MS, planTick, stopLimitPrice, cleanBufferPct, sessionFor, spotKey, parseSpotKey, type LadderSlice, type LadderState,
 } from './priceLadder.ts';
 
 const contract = { underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt: 'CE' as const, securityId: '111', lotSize: 65, exchangeSegment: 'NSE_FNO' };
@@ -434,4 +434,57 @@ test('MCX: MIS squared off at 23:00 IST, NRML kept', () => {
   const r = planTick(st([open('m', 'MIS'), open('r', 'NRML')]), { spots: {}, ltps: { '900': 101 } }, LATE, io);
   assert.deepEqual(r.jobs, [{ kind: 'close', id: 'm' }]);
   assert.equal(r.next.slices.find(x => x.id === 'm')!.exitReason, 'Auto square-off 23:00');
+});
+
+test('rollDay keeps the state revision (a page holding rev N must accept the new day)', () => {
+  const s: LadderState = { date: '2026-10-21', slices: [], events: [], rev: 41 };
+  assert.equal(rollDay(s, '2026-10-22', T).rev, 41);
+  assert.equal(rollDay({ date: '2026-10-21', slices: [], events: [] }, '2026-10-22', T).rev, undefined);
+});
+
+// ── Anywhere zones / SL-limit ──
+test('classifyClick Anywhere: the other side is a stop with Limit selected; Classic still refuses it', () => {
+  const base = { mode: 'plain' as const, opt: 'CE' as const, side: 'SELL' as const, ref: 120, orderType: 'LIMIT' as const };
+  assert.deepEqual(classifyClick({ ...base, level: 115, zones: 'anywhere' }), { ok: true, kind: 'stop', dir: 'below' });
+  assert.deepEqual(classifyClick({ ...base, level: 125, zones: 'anywhere' }), { ok: true, kind: 'limit', dir: 'above' });
+  assert.equal(classifyClick({ ...base, level: 115 }).ok, false);
+  assert.equal(classifyClick({ ...base, level: 120, zones: 'anywhere' }).ok, false);
+  // XY CE: a Buy above spot is a breakout in Anywhere.
+  assert.deepEqual(classifyClick({ mode: 'xy', opt: 'CE', side: 'BUY', level: 23220, ref: 23200, orderType: 'LIMIT', zones: 'anywhere' }), { ok: true, kind: 'stop', dir: 'above' });
+});
+
+test('stopLimitPrice: buffer past the trigger, snapped away from it, at least one tick', () => {
+  assert.equal(stopLimitPrice('SELL', 120, 2), 117.6);
+  assert.equal(stopLimitPrice('BUY', 120, 2), 122.4);
+  assert.equal(stopLimitPrice('SELL', 101.03, 2), 99);       // 99.0094 snapped down
+  assert.equal(stopLimitPrice('BUY', 101.03, 2), 103.1);     // 103.0506 snapped up
+  assert.equal(stopLimitPrice('SELL', 1, 0.1), 0.95);        // one tick minimum
+  assert.equal(stopLimitPrice('BUY', 1, 0.1), 1.05);
+  assert.equal(stopLimitPrice('SELL', 0.05, 2), null);
+  assert.equal(cleanBufferPct(2), 2);
+  assert.equal(cleanBufferPct(0), null);
+  assert.equal(cleanBufferPct(11), null);
+});
+
+test('zerodhaLadderParams: an explicit SL limit is used instead of the 5% default', async () => {
+  const { zerodhaLadderParams } = await import('./priceLadder.ts');
+  const p = zerodhaLadderParams('NIFTY26OCT22800CE', 'NFO', 'SELL', 65, 'MIS', { type: 'SL', trigger: 120, limit: 117.6 }, null);
+  assert.equal(p.order_type, 'SL');
+  assert.equal(p.trigger_price, 120);
+  assert.equal(p.price, 117.6);
+});
+
+test('planTick SIM SL-limit: triggered past the limit rests as a LIMIT, fills once back inside it', () => {
+  const w = slice({ kind: 'plain', side: 'SELL', state: 'working', orderType: 'SL', triggerPrice: 120, stopLimitPrice: 117.6 });
+  const at = (ltp: number, x: LadderSlice) => planTick(st([x]), { spots: {}, ltps: { '111': ltp } }, T, io).next.slices[0];
+  assert.equal(at(121, w).state, 'working');                          // not triggered
+  const gapped = at(116, w);                                           // triggered, below the limit
+  assert.equal(gapped.state, 'working');
+  assert.equal(gapped.stopTriggered, true);
+  const filled = at(118, gapped);                                      // back inside the limit
+  assert.equal(filled.state, 'open');
+  assert.equal(filled.avg, 118);
+  assert.equal(at(119, w).avg, 119);                                   // triggered inside the limit: fills at once
+  // Classic SL-M (no stopLimitPrice): fills at the ltp on the trigger, however far.
+  assert.equal(at(110, { ...w, stopLimitPrice: undefined }).avg, 110);
 });

@@ -22,7 +22,7 @@ import {
   EXIT_RETRY_MS, FILL_GRACE_MS, SETTLE_TIMEOUT_MS, SPOT_STALE_MS,
   bias, bracketLevels, emptyLadderState, exitQtyFor, isLive, istDay, pushEvent,
   rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS,
-  type Job, type LadderBroker, type LadderContract, type LadderSide, type LadderSlice, type LadderState,
+  type Job, type LadderOrderHow, type LadderBroker, type LadderContract, type LadderSide, type LadderSlice, type LadderState,
 } from '@/lib/priceLadder';
 
 // The Price Ladder's server watcher. It owns debug/price_ladder_state.json (re-read on every tick and every request,
@@ -65,6 +65,7 @@ function readStateFile(): LadderState {
       slices: Array.isArray(s.slices) ? s.slices : [],
       events: Array.isArray(s.events) ? s.events : [],
       ...(s.liveArmedOn ? { liveArmedOn: String(s.liveArmedOn) } : {}),
+      ...(Number.isFinite(Number(s.rev)) ? { rev: Number(s.rev) } : {}),
     };
   } catch (err) {
     // A missing file is a fresh start; an unreadable one must not be overwritten with an empty ledger that forgets
@@ -86,8 +87,12 @@ export async function updateLadderState(mutate: (s: LadderState) => LadderState)
     const base = rollDay(raw, istDay(), Date.now());
     if (base !== raw) writeJsonAtomic(STATE_FILE, base);
     const next = mutate(base);
-    if (next !== base) writeJsonAtomic(STATE_FILE, next);
-    return next;
+    if (next === base) return base;
+    // A revision per write, so a page can tell a late (older) view from the one it already shows. Time-based (at least
+    // previous + 1): a recreated file must not restart at 1 under a page that already showed a higher number.
+    const out = { ...next, rev: Math.max((base.rev ?? 0) + 1, Date.now()) };
+    writeJsonAtomic(STATE_FILE, out);
+    return out;
   });
 }
 
@@ -190,7 +195,7 @@ const WS_SETTLED_MS = 8_000;
 interface WsState { want: Map<string, number>; written: string; writtenAt: number; startAt: number }
 const ws: WsState = ((globalThis as { __priceLadderWs?: WsState }).__priceLadderWs ??= { want: new Map(), written: '', writtenAt: 0, startAt: 0 });
 
-interface WsQuote { ltp: number; ltt?: string; changed_ms: number | null; since_ms: number }
+interface WsQuote { ltp: number; ltt?: string; changed_ms: number | null; since_ms: number; high?: number; low?: number; prev_close?: number }
 
 /** Ask the bridge for an instrument; returns its quote key (`SEGMENT:securityId`). */
 function wsWant(segment: string, securityId: string): string {
@@ -263,7 +268,11 @@ function wsQuote(key: string, memo: FileMemo): WsQuote | null {
   return q && Number(q.ltp) > 0 ? q : null;
 }
 
-export interface PriceView { spots: Record<string, SpotRead>; ltps: Record<string, number> }
+/** `days`: a futures axis's day high / low / quote `close` (previous close while its session runs) — display only. */
+export interface PriceView {
+  spots: Record<string, SpotRead>; ltps: Record<string, number>;
+  days?: Record<string, { high: number | null; low: number | null; close: number | null }>;
+}
 
 /**
  * Spots for `underlyings` (spot keys: an index name, or a futures contract's key from spotKey()) and LTPs for
@@ -275,12 +284,14 @@ export async function loadPrices(underlyings: string[], contracts: LadderContrac
   const memo: FileMemo = new Map();
   const spots: Record<string, SpotRead> = {};
   const ltps: Record<string, number> = {};
+  const days: NonNullable<PriceView['days']> = {};
   for (const u of underlyings) {
     const fut = parseSpotKey(u);
     const f = fut ? null : spotFromFiles(u, memo);
     if (f && spotFresh(f.at, now)) { spots[u] = f; continue; }
     const key = fut ? wsWant(fut.segment, fut.securityId) : INDEX_IDS[u] ? wsWant('IDX_I', INDEX_IDS[u]) : null;
     const q = key ? wsQuote(key, memo) : null;
+    if (fut && q) days[u] = { high: q.high ?? null, low: q.low ?? null, close: q.prev_close ?? null };
     if (q && q.changed_ms != null) {
       // Fresh while it keeps changing: the still-allowance (an index may print one value for a few seconds, crude
       // mini longer in a quiet evening) after its last change.
@@ -304,7 +315,7 @@ export async function loadPrices(underlyings: string[], contracts: LadderContrac
     if (q && (q.changed_ms != null || now - q.since_ms >= WS_SETTLED_MS)) ltps[c.securityId] = q.ltp;
   }
   syncWs(memo);
-  return { spots, ltps };
+  return { spots, ltps, days };
 }
 
 // ── broker IO ─────────────────────────────────────────────────────────
@@ -322,7 +333,7 @@ const dhanProduct = (p: string) => (p === 'NRML' ? 'MARGIN' : 'INTRADAY');
 /** Place one order for a slice's contract. `open` orders carry the 'pl' source (its lot cap); closes never do. */
 export async function placeFor(
   s: Pick<LadderSlice, 'broker' | 'contract' | 'product'>, side: LadderSide, qty: number, open: boolean,
-  how: { type: 'MARKET' } | { type: 'LIMIT'; price: number } | { type: 'SL'; trigger: number } = { type: 'MARKET' },
+  how: LadderOrderHow = { type: 'MARKET' },
 ): Promise<PlaceOutcome> {
   // MCX is Dhan only: Kotak's and Kite's exchange mapping and quantity units here are NSE/BSE F&O's. Checked where the
   // order is built, not only where the contract was resolved, so no path can send crude to an equity F&O exchange.
@@ -335,8 +346,9 @@ export async function placeFor(
     if (!symbol) return { status: 'rejected', error: 'No Kotak trading symbol for this contract' };
     const built = buildKotakOrderPayload({
       tradingsymbol: symbol, quantity: qty, side, exchange: kotakExchangeFor(s.contract.underlying), product: s.product,
-      orderType: how.type === 'MARKET' ? 'MARKET' : how.type === 'LIMIT' ? 'LIMIT' : 'SLM',
-      ...(how.type === 'LIMIT' ? { price: how.price } : {}), ...(how.type === 'SL' ? { triggerPrice: how.trigger } : {}),
+      // A stop with a limit is an SL-limit ('SL'); without one, SL-M.
+      orderType: how.type === 'MARKET' ? 'MARKET' : how.type === 'LIMIT' ? 'LIMIT' : how.limit ? 'SL' : 'SLM',
+      ...(how.type === 'LIMIT' ? { price: how.price } : {}), ...(how.type === 'SL' ? { triggerPrice: how.trigger, ...(how.limit ? { price: how.limit } : {}) } : {}),
       ...(open ? { source: 'pl' } : {}),
     }, kotakDerivativeBySymbol(symbol, s.contract.underlying));
     if ('error' in built) return { status: 'rejected', error: built.error };
@@ -347,8 +359,8 @@ export async function placeFor(
   const r = await placeDhanOrder({
     securityId: s.contract.securityId, quantity: qty, side, exchangeSegment: s.contract.exchangeSegment,
     productType: dhanProduct(s.product),
-    orderType: how.type === 'MARKET' ? 'MARKET' : how.type === 'LIMIT' ? 'LIMIT' : 'STOP_LOSS_MARKET',
-    ...(how.type === 'LIMIT' ? { price: how.price } : {}), ...(how.type === 'SL' ? { triggerPrice: how.trigger } : {}),
+    orderType: how.type === 'MARKET' ? 'MARKET' : how.type === 'LIMIT' ? 'LIMIT' : how.limit ? 'STOP_LOSS' : 'STOP_LOSS_MARKET',
+    ...(how.type === 'LIMIT' ? { price: how.price } : {}), ...(how.type === 'SL' ? { triggerPrice: how.trigger, ...(how.limit ? { price: how.limit } : {}) } : {}),
     ...(open ? { source: 'pl' } : {}),
   });
   if (r.status === 'invalid') return { status: 'rejected', error: r.error };
@@ -360,7 +372,7 @@ export async function placeFor(
  *  quantity is refused (one slice = one order id). */
 async function placeZerodha(
   s: Pick<LadderSlice, 'contract' | 'product'>, side: LadderSide, qty: number, open: boolean,
-  how: { type: 'MARKET' } | { type: 'LIMIT'; price: number } | { type: 'SL'; trigger: number },
+  how: LadderOrderHow,
 ): Promise<PlaceOutcome> {
   const symbol = s.contract.tradingSymbol;
   if (!symbol) return { status: 'rejected', error: 'No Zerodha trading symbol for this contract' };
@@ -753,7 +765,10 @@ async function reconcileDown(s: LadderState, prices: PriceView, now: number): Pr
 }
 
 const LOOP_KEY = '__priceLadderLoop';
-type LoopHolder = { [LOOP_KEY]?: { timer: ReturnType<typeof setInterval>; busy: boolean } };
+type LoopHolder = { [LOOP_KEY]?: { timer: ReturnType<typeof setInterval>; busy: boolean; startedAt?: number } };
+/** No "price is stale" event this soon after the watcher starts. */
+const START_GRACE_MS = 30_000;
+const loopStartedAt = () => (globalThis as LoopHolder)[LOOP_KEY]?.startedAt ?? 0;
 
 let reconciling = false;
 
@@ -775,7 +790,9 @@ async function tick(): Promise<void> {
   for (const u of underlyings) {
     const needsSpot = live.some(x => spotKey(x.contract) === u && x.kind === 'xy' && (x.state === 'armed' || x.state === 'open'));
     const sp = prices.spots[u];
-    if (needsSpot && !(sp && spotFresh(sp.at, now)) && warnOnce(`stale:${u}`, 60_000)) {
+    // Not in the first moments after a start: a price is only trusted once it is seen to change (and the price bridge
+    // may still be subscribing), so every start would otherwise log a "stale" that is not one.
+    if (needsSpot && now - loopStartedAt() > START_GRACE_MS && !(sp && spotFresh(sp.at, now)) && warnOnce(`stale:${u}`, 60_000)) {
       await updateLadderState(st => pushEvent(st, ev('warn', `${spotKeyUnderlying(u)}${parseSpotKey(u) ? ' futures' : ''} price is stale — levels paused`)));
     }
   }
@@ -804,7 +821,7 @@ async function tick(): Promise<void> {
 export function startPriceLadderLoop(): void {
   const g = globalThis as LoopHolder;
   if (g[LOOP_KEY]) return;
-  const holder = { busy: false, timer: setInterval(() => {
+  const holder = { busy: false, startedAt: Date.now(), timer: setInterval(() => {
     if (holder.busy) return;
     holder.busy = true;
     tick().catch(err => console.error(`${TAG} tick failed:`, err)).finally(() => { holder.busy = false; });

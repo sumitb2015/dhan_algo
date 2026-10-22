@@ -9,7 +9,8 @@ MCX option month's own futures (the CRUDEOILM XY axis), option strikes no bridge
                  (one file per dashboard server process; files older than WANTED_STALE_SEC are ignored)
   this bridge -> market_hub_client.register_wanted('price_ladder', ...)   (ONE shared Dhan connection, no new one)
   this bridge -> debug/price_ladder_ws_quotes.json
-                 {"updated_ms", "hub_alive", "quotes": {"MCX_COMM:573423": {"ltp", "ltt", "changed_ms", "since_ms"}}}
+                 {"updated_ms", "hub_alive", "quotes": {"MCX_COMM:573423": {"ltp", "ltt", "changed_ms", "since_ms",
+                                                                 "high", "low", "prev_close"}}}
 
 Per instrument, `since_ms` is when this bridge started asking for it and `changed_ms` is when its tick content last
 CHANGED while asked for (null until it does). The hub keeps an instrument's last tick after it stops being subscribed,
@@ -163,7 +164,17 @@ def main() -> None:
                     except (TypeError, ValueError):
                         ltp = 0.0
                     if ltp > 0:
-                        quotes[f'{seg}:{sid}'] = {'ltp': ltp, 'ltt': tick.get('LTT'), 'changed_ms': changed.get(k), 'since_ms': since[k]}
+                        q = {'ltp': ltp, 'ltt': tick.get('LTT'), 'changed_ms': changed.get(k), 'since_ms': since[k]}
+                        # Day range and previous close (a Quote packet's `close` is the PREVIOUS session's close while
+                        # the session runs) — display only, for the ladder's header card.
+                        for src, dst in (('high', 'high'), ('low', 'low'), ('close', 'prev_close')):
+                            try:
+                                v = float(tick.get(src) or 0)
+                            except (TypeError, ValueError):
+                                v = 0.0
+                            if v > 0:
+                                q[dst] = v
+                        quotes[f'{seg}:{sid}'] = q
                 atomic_write(QUOTES_FILE, {'updated_ms': ms, 'hub_alive': hub_client.is_hub_alive(), 'quotes': quotes})
                 atomic_write(STATUS_FILE, {'status': 'RUNNING', 'pid': os.getpid(), 'started_at': started,
                                            'heartbeat_ms': ms, 'subscribed': len(instruments)})

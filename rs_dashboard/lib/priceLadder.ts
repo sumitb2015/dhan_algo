@@ -14,6 +14,15 @@ export type LadderSide = 'BUY' | 'SELL';
 export type OptType = 'CE' | 'PE';
 export type LadderProduct = 'NRML' | 'MIS';
 export type ClickType = 'LIMIT' | 'SL';
+/**
+ * Classic: a click outside the limit zone needs Order Type SL. Anywhere: both columns work at every level — outside the
+ * limit zone the click is a stop by itself (plain: an SL-limit at the broker; XY: a breakout level fired at market).
+ */
+export type LadderZones = 'classic' | 'anywhere';
+/** SL-limit buffer (plain, Anywhere): the limit sits this % past the trigger, so it fills in a fast move but not at any price. */
+export const MIN_SL_BUFFER_PCT = 0.1;
+export const MAX_SL_BUFFER_PCT = 10;
+export const DEFAULT_SL_BUFFER_PCT = 2;
 
 /** Per-click lot cap, checked by the API before anything is stored and again by the order routes ('pl' source). */
 export const MAX_LADDER_LOTS = 20;
@@ -120,6 +129,12 @@ export interface LadderSlice {
   orderType?: ClickType;
   limitPrice?: number;
   triggerPrice?: number;
+  /** Plain SL-limit (Anywhere): the limit price the stop becomes once triggered. Absent = SL-M. */
+  stopLimitPrice?: number;
+  /** SIM SL-limit: the trigger has printed; it now rests as a LIMIT at stopLimitPrice. */
+  stopTriggered?: boolean;
+  /** Armed in the Anywhere view: a drag may carry it across the price (it becomes a stop there, as a click would). */
+  zones?: LadderZones;
   /** The entry is a MARKET order (an XY fire, or a '+1 lot' add): an id that never settles in 60 s is UNKNOWN. */
   market?: boolean;
   // order tracking
@@ -156,6 +171,8 @@ export interface LadderState {
   events: LadderEvent[];
   /** IST day the LIVE · REAL MONEY arm was switched on; only today's arm lets REAL opens through. */
   liveArmedOn?: string;
+  /** Bumped on every write: a reader that already showed a newer revision ignores an older one arriving late. */
+  rev?: number;
 }
 
 export const emptyLadderState = (date: string): LadderState => ({ date, slices: [], events: [] });
@@ -186,19 +203,39 @@ export type ClickVerdict =
 
 /** What clicking `level` on the BUY or SELL column means, given the ladder's reference price `ref`. */
 export function classifyClick(p: {
-  mode: LadderMode; opt: OptType; side: LadderSide; level: number; ref: number; orderType: ClickType;
+  mode: LadderMode; opt: OptType; side: LadderSide; level: number; ref: number; orderType: ClickType; zones?: LadderZones;
 }): ClickVerdict {
-  const { mode, opt, side, level, ref, orderType } = p;
+  const { mode, opt, side, level, ref, orderType, zones = 'classic' } = p;
   if (!(level > 0)) return { ok: false, error: 'Pick a price on the ladder' };
   if (!(ref > 0)) return { ok: false, error: mode === 'xy' ? 'No live index price yet' : 'No live option price yet' };
   if (level === ref) return { ok: false, error: 'That is the current price — pick a level above or below it' };
   const dir = level < ref ? 'below' : 'above';
   const zone = limitZone(mode, opt, side);
   if (dir === zone) return { ok: true, kind: 'limit', dir };
-  if (orderType !== 'SL') {
+  if (orderType !== 'SL' && zones !== 'anywhere') {
     return { ok: false, error: `A ${side} ${dir} the current price is a breakout entry — switch Order Type to SL` };
   }
   return { ok: true, kind: 'stop', dir };
+}
+
+/**
+ * The limit of an SL-limit: `bufferPct` past the trigger, against the order (a SELL's limit below its trigger, a BUY's
+ * above), snapped to the tick away from the trigger and always at least one tick past it. Null when unusable.
+ */
+export function stopLimitPrice(side: LadderSide, trigger: number, bufferPct: number, tick = 0.05): number | null {
+  if (!(trigger > 0) || !(bufferPct > 0) || !(tick > 0)) return null;
+  const dir = side === 'SELL' ? -1 : 1;
+  const raw = trigger * (1 + (dir * bufferPct) / 100);
+  const steps = side === 'SELL' ? Math.floor(raw / tick + 1e-9) : Math.ceil(raw / tick - 1e-9);
+  let v = Number((steps * tick).toFixed(2));
+  if (side === 'SELL' ? v > trigger - tick : v < trigger + tick) v = Number((trigger + dir * tick).toFixed(2));
+  return v > 0 ? v : null;
+}
+
+/** An SL-limit buffer % within MIN..MAX_SL_BUFFER_PCT, else null. */
+export function cleanBufferPct(raw: unknown): number | null {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= MIN_SL_BUFFER_PCT && n <= MAX_SL_BUFFER_PCT ? n : null;
 }
 
 /** XY levels must sit within MAX_LEVEL_DISTANCE of spot. */
@@ -393,7 +430,7 @@ export function rollDay(s: LadderState, today: string, now: number): LadderState
       return x;
     })
     .filter(x => !TERMINAL.has(x.state));
-  return { date: today, slices, events: [], liveArmedOn: undefined };
+  return { date: today, slices, events: [], liveArmedOn: undefined, ...(s.rev != null ? { rev: s.rev } : {}) };
 }
 
 /** REAL opens need today's arm. Exits never do. */
@@ -499,9 +536,20 @@ export function planTick(
       if (afterClose && x.mode === 'real' && x.orderId && io.mayCancel(x.id)) jobs.push({ kind: 'cancel', id: x.id });
       if (x.mode === 'sim') {
         const ltp = prices.ltps[x.contract.securityId];
-        const hit = ltp > 0 && (x.orderType === 'SL'
-          ? (x.side === 'BUY' ? ltp >= Number(x.triggerPrice) : ltp <= Number(x.triggerPrice))
-          : (x.side === 'BUY' ? ltp <= Number(x.limitPrice) : ltp >= Number(x.limitPrice)));
+        if (!(ltp > 0)) continue;
+        const triggerHit = x.side === 'BUY' ? ltp >= Number(x.triggerPrice) : ltp <= Number(x.triggerPrice);
+        if (x.orderType === 'SL' && x.stopLimitPrice) {
+          // SL-limit: the trigger turns it into a LIMIT at stopLimitPrice, filled (at ltp) only while ltp is within it.
+          const triggered = x.stopTriggered || triggerHit;
+          const within = x.side === 'BUY' ? ltp <= x.stopLimitPrice : ltp >= x.stopLimitPrice;
+          if (triggered && within) {
+            next = pushEvent(patchSlice(next, x.id, { state: 'open', filledQty: x.qty, avg: ltp, openedAt: now, stopTriggered: true }), ev('info', `SIM ${x.side} SL-limit filled @ ${ltp.toFixed(2)}`, x.id));
+          } else if (triggered && !x.stopTriggered) {
+            next = pushEvent(patchSlice(next, x.id, { stopTriggered: true }), ev('warn', `SIM ${x.side} SL-limit triggered at ${ltp.toFixed(2)} — past its limit ${x.stopLimitPrice.toFixed(2)}, resting as a LIMIT`, x.id));
+          }
+          continue;
+        }
+        const hit = x.orderType === 'SL' ? triggerHit : (x.side === 'BUY' ? ltp <= Number(x.limitPrice) : ltp >= Number(x.limitPrice));
         if (hit) {
           const avg = x.orderType === 'SL' ? ltp : Number(x.limitPrice);
           next = pushEvent(patchSlice(next, x.id, { state: 'open', filledQty: x.qty, avg, openedAt: now }), ev('info', `SIM ${x.side} filled @ ${avg.toFixed(2)}`, x.id));
@@ -553,7 +601,8 @@ export function planTick(
 
 // ── Zerodha order body ──
 
-export type LadderOrderHow = { type: 'MARKET' } | { type: 'LIMIT'; price: number } | { type: 'SL'; trigger: number };
+/** `SL` with `limit` = SL-limit at that price; without = SL-M (Kite: a stop-limit 5 % past the trigger). */
+export type LadderOrderHow = { type: 'MARKET' } | { type: 'LIMIT'; price: number } | { type: 'SL'; trigger: number; limit?: number };
 
 /**
  * Kite's /orders/regular body for a ladder order (same fields as /api/scalper/zerodha/order). MARKET carries Kite's
@@ -573,7 +622,7 @@ export function zerodhaLadderParams(
   if (how.type === 'LIMIT') params.price = zerodhaSnapPrice(how.price, contract);
   if (how.type === 'SL') {
     params.trigger_price = zerodhaSnapPrice(how.trigger, contract);
-    params.price = zerodhaSnapPrice(side === 'BUY' ? how.trigger * 1.05 : how.trigger * 0.95, contract);
+    params.price = zerodhaSnapPrice(how.limit ?? (side === 'BUY' ? how.trigger * 1.05 : how.trigger * 0.95), contract);
   }
   if (how.type === 'MARKET') params.market_protection = -1;
   return params;

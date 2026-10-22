@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import { ChevronDown, ChevronUp, Minus, Plus, X } from 'lucide-react';
-import { bias, bracketLevels, ladderRows, snapToStep, type LadderSide, type LadderSlice } from '@/lib/priceLadder';
+import { bias, bracketLevels, ladderRows, snapToStep, type LadderSide, type LadderSlice, type LadderZones } from '@/lib/priceLadder';
 
 /**
  * One order on the ladder, drawn as OptionX draws it: in the Buy or Sell column of its price row, as
@@ -28,6 +28,8 @@ export interface LadderWidget {
   adjust?: 'order' | 'position';
   cancellable?: boolean;
   drag?: 'entry' | 'tgt' | 'sl';
+  /** MCX (Dhan qty in lots): barrels per lot, so the badge can show barrels. Absent = qty is already in units. */
+  mult?: number;
 }
 
 /** An open position's entry on the ladder's axis: drawn as a tinted row with a side / qty / fill tag in the Price column. */
@@ -37,6 +39,8 @@ const opposite = (s: LadderSide): LadderSide => (s === 'BUY' ? 'SELL' : 'BUY');
 
 /** Widgets for the slices of the contract on screen, on the ladder's own axis (index levels in XY, premium in plain). */
 export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderWidget[] {
+  // Every slice on screen is one contract, so one multiplier.
+  const contractMult = slices.find(s => s.contract.mult)?.contract.mult;
   const groups = new Map<string, LadderWidget>();
   const newest = new Map<string, number>();
   const add = (w: Omit<LadderWidget, 'key'>, at: number) => {
@@ -44,7 +48,7 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
     // + / − / drag controls from the open ones).
     const key = `${w.kind}|${w.column}|${w.price}|${w.planned ? 'p' : ''}|${w.adjust ?? 'none'}|${w.adjust === 'order' ? w.ids[0] : ''}`;
     const g = groups.get(key);
-    if (!g) { groups.set(key, { ...w, key }); newest.set(key, at); return; }
+    if (!g) { groups.set(key, { ...w, key, ...(contractMult ? { mult: contractMult } : {}) }); newest.set(key, at); return; }
     // One exit level shared by several slices: one widget with their total quantity, newest slice first.
     g.qty += w.qty; g.lots += w.lots;
     if (at >= (newest.get(key) ?? 0)) { g.ids = [...w.ids, ...g.ids]; newest.set(key, at); } else g.ids = [...g.ids, ...w.ids];
@@ -115,6 +119,16 @@ function InnerPriceWidget({ w, decimals }: { w: LadderWidget; decimals: number }
   );
 }
 
+/** Quantity on a widget: units (index options), or barrels for MCX where Dhan's qty is lots. */
+function QtyBadge({ w }: { w: LadderWidget }) {
+  const lots = `${w.lots} lot${w.lots === 1 ? '' : 's'}`;
+  return (
+    <span className={`px-2 py-0.5 rounded font-mono font-bold text-xs whitespace-nowrap ${QTY_TONE[w.column]}`} title={w.mult ? `${lots} = ${w.qty * w.mult} barrels` : lots}>
+      {w.mult ? `${w.qty * w.mult} bbl` : w.qty}
+    </span>
+  );
+}
+
 function OuterControlWidget({ w, onAdjust, onCancel }: {
   w: LadderWidget;
   onAdjust: (w: LadderWidget, delta: 1 | -1) => void;
@@ -141,9 +155,7 @@ function OuterControlWidget({ w, onAdjust, onCancel }: {
       )}
 
       {w.column === 'BUY' && (
-        <span className={`px-2 py-0.5 rounded font-mono font-bold text-xs ${QTY_TONE[w.column]}`} title={`${w.lots} lot${w.lots === 1 ? '' : 's'}`}>
-          {w.qty}
-        </span>
+        <QtyBadge w={w} />
       )}
 
       {w.adjust && (
@@ -160,9 +172,7 @@ function OuterControlWidget({ w, onAdjust, onCancel }: {
       )}
 
       {w.column === 'SELL' && (
-        <span className={`px-2 py-0.5 rounded font-mono font-bold text-xs ${QTY_TONE[w.column]}`} title={`${w.lots} lot${w.lots === 1 ? '' : 's'}`}>
-          {w.qty}
-        </span>
+        <QtyBadge w={w} />
       )}
 
       {w.cancellable && w.column === 'SELL' && (
@@ -186,9 +196,14 @@ function OuterControlWidget({ w, onAdjust, onCancel }: {
  */
 export function LadderGrid({
   center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryMarks, onScroll,
+  zones = 'classic', stopLimitFor,
 }: {
   center: number; refPrice: number; tick: number; rows: number; widgets: LadderWidget[];
   limitZoneBuy: 'below' | 'above';
+  /** Anywhere: the stop side of each column is live too, lightly tinted and labelled with what a click there places. */
+  zones?: LadderZones;
+  /** Plain: the SL-limit's limit for a stop click at `price` (labels only; the server computes the real one). */
+  stopLimitFor?: (side: LadderSide, price: number) => number | null;
   onPlace: (side: LadderSide, price: number) => void; onCancel: (id: string) => void;
   /** A widget dropped on another row: move that entry level / target / SL there (for every slice behind the widget). */
   onMove: (ids: string[], what: 'entry' | 'tgt' | 'sl', price: number) => void;
@@ -264,6 +279,21 @@ export function LadderGrid({
         const above = refPrice > 0 && p > refPrice;
         const buyZone = limitZoneBuy === 'below' ? below : above;
         const sellZone = limitZoneBuy === 'below' ? above : below;
+        const anywhere = zones === 'anywhere';
+        // What a click places, for the label: the limit side is a LIMIT; in Anywhere the other side is a stop.
+        const what = (side: LadderSide, inZone: boolean) => {
+          const verb = side === 'BUY' ? 'Buy' : 'Sell';
+          if (inZone || !anywhere || refPrice <= 0 || atRef) return `${verb} at ${fmt(p)}`;
+          const lim = stopLimitFor?.(side, p);
+          return stopLimitFor ? `${verb} SL-limit at ${fmt(p)}${lim ? ` (limit ${lim.toFixed(2)})` : ''}` : `${verb} breakout at ${fmt(p)}`;
+        };
+        const buyLabel = what('BUY', buyZone);
+        const sellLabel = what('SELL', sellZone);
+        const atRef = Math.abs(p - refPrice) < 1e-9;
+        const buyStop = anywhere && !buyZone && refPrice > 0 && !atRef;
+        const sellStop = anywhere && !sellZone && refPrice > 0 && !atRef;
+        // The stop side is marked in words, not only by tint: what a click there places.
+        const stopTag = stopLimitFor ? 'SL' : 'BO';
         const ws = byRow.get(p) ?? [];
         const buyWs = ws.filter(w => w.column === 'BUY');
         const sellWs = ws.filter(w => w.column === 'SELL');
@@ -283,10 +313,10 @@ export function LadderGrid({
             {/* Column 1: Buy (Outer controls) */}
             <div
               role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
-              aria-label={`Buy at ${fmt(p)}`}
+              aria-label={buyLabel} title={buyStop ? buyLabel : undefined}
               onClick={() => { if (!disabled) onPlace('BUY', p); }}
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('BUY', p); } }}
-              className={`h-7 flex items-center justify-end gap-1 px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/5' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/25'} focus-visible:outline focus-visible:outline-1 focus-visible:outline-emerald-400`}
+              className={`h-7 flex items-center justify-end gap-1 px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/5' : buyStop ? 'bg-amber-500/5' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/25'} focus-visible:outline focus-visible:outline-1 focus-visible:outline-emerald-400`}
             >
               {buyWs.map(w => <OuterControlWidget key={w.key} w={w} onAdjust={onAdjust} onCancel={onCancel} />)}
             </div>
@@ -294,12 +324,13 @@ export function LadderGrid({
             {/* Column 2: Bids (Inner trigger price for Buy-side triggers) */}
             <div
               role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
-              aria-label={`Bid ${fmt(p)}`}
+              aria-label={buyStop ? buyLabel : `Bid ${fmt(p)}`} title={buyStop ? buyLabel : undefined}
               onClick={() => { if (!disabled) onPlace('BUY', p); }}
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('BUY', p); } }}
-              className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/10' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/20'}`}
+              className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/10' : buyStop ? 'bg-amber-500/10' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/20'}`}
             >
               {buyWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} />)}
+              {buyStop && !buyWs.length && <span aria-hidden className="text-[10px] font-semibold text-amber-300">{stopTag}</span>}
             </div>
 
             {/* Column 3: Price */}
@@ -321,21 +352,22 @@ export function LadderGrid({
             {/* Column 4: Offers (Inner trigger price for Sell-side triggers) */}
             <div
               role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
-              aria-label={`Offer ${fmt(p)}`}
+              aria-label={sellStop ? sellLabel : `Offer ${fmt(p)}`} title={sellStop ? sellLabel : undefined}
               onClick={() => { if (!disabled) onPlace('SELL', p); }}
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('SELL', p); } }}
-              className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/10' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/20'}`}
+              className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/10' : sellStop ? 'bg-amber-500/10' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/20'}`}
             >
               {sellWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} />)}
+              {sellStop && !sellWs.length && <span aria-hidden className="text-[10px] font-semibold text-amber-300">{stopTag}</span>}
             </div>
 
             {/* Column 5: Sell (Outer controls) */}
             <div
               role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
-              aria-label={`Sell at ${fmt(p)}`}
+              aria-label={sellLabel} title={sellStop ? sellLabel : undefined}
               onClick={() => { if (!disabled) onPlace('SELL', p); }}
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('SELL', p); } }}
-              className={`h-7 flex items-center justify-start gap-1 px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/5' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/25'} focus-visible:outline focus-visible:outline-1 focus-visible:outline-red-400`}
+              className={`h-7 flex items-center justify-start gap-1 px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/5' : sellStop ? 'bg-amber-500/5' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/25'} focus-visible:outline focus-visible:outline-1 focus-visible:outline-red-400`}
             >
               {sellWs.map(w => <OuterControlWidget key={w.key} w={w} onAdjust={onAdjust} onCancel={onCancel} />)}
             </div>

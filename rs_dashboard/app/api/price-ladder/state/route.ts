@@ -1,16 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDhanStrikeLookup } from '@/lib/dhanStrikeLookup';
-import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
-import { kotakOptionContract } from '@/lib/kotakContracts';
-import { zerodhaOptionContract } from '@/lib/zerodhaContracts';
+import { buildLadderView, resolveContract } from '@/lib/priceLadderView';
 import {
   readLadderState, updateLadderState, startPriceLadderLoop, loadPrices, placeFor, afterSend, cancelAtBroker,
-  brokerSessionOk, availableFunds, dhanSellMargin, withJob, commitIf, dhanSegmentFor, openedPatch, LADDER_UNDERLYINGS,
+  brokerSessionOk, availableFunds, dhanSellMargin, withJob, commitIf, openedPatch, LADDER_UNDERLYINGS,
 } from '@/lib/priceLadderServer';
 import {
-  sessionFor, spotKey, isMcxUnderlying, MAX_LADDER_LOTS, capLots, classifyClick, cleanBracket, isLive, istDay, istHhmm, levelSane, pushEvent, realArmed,
+  sessionFor, spotKey, MAX_LADDER_LOTS, cleanBufferPct, stopLimitPrice, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, capLots, classifyClick, cleanBracket, istDay, istHhmm, levelSane, pushEvent, realArmed,
   snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev,
-  type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
+  type ClickType, type LadderZones, type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
 } from '@/lib/priceLadder';
 
 // The Price Ladder's ledger (debug/price_ladder_state.json) and its actions. Real-money endpoint: every check that can
@@ -27,37 +24,7 @@ const newId = () => `pl${Date.now().toString(36)}${Math.random().toString(36).sl
 export async function GET(req: NextRequest): Promise<NextResponse> {
   startPriceLadderLoop();
   try {
-    const want = (req.nextUrl.searchParams.get('underlying') ?? '').toUpperCase();
-    const state = readLadderState();
-    const live = state.slices.filter(isLive);
-    // The contract the page is showing (Dhan ids price every broker's contract): its live LTP rides the same snapshot.
-    const expiry = req.nextUrl.searchParams.get('expiry') ?? '';
-    const strike = Number(req.nextUrl.searchParams.get('strike'));
-    const opt = req.nextUrl.searchParams.get('opt');
-    let shown: LadderContract | null = null;
-    let contractError: string | null = null;
-    if (LADDER_UNDERLYINGS.includes(want) && /^\d{4}-\d{2}-\d{2}$/.test(expiry) && strike > 0 && (opt === 'CE' || opt === 'PE')) {
-      const c = await resolveContract('dhan', want, expiry, strike, opt);
-      if (typeof c !== 'string') shown = c; else contractError = c;
-    }
-    // The page's XY axis: the index, or for MCX the shown option month's own futures (known once a contract is picked).
-    const shownKey = shown ? spotKey(shown) : (LADDER_UNDERLYINGS.includes(want) && !isMcxUnderlying(want) ? want : null);
-    const unders = [...new Set([...(shownKey ? [shownKey] : []), ...live.map(x => spotKey(x.contract))])];
-    const prices = await loadPrices(unders, [...live.map(x => x.contract), ...(shown ? [shown] : [])]);
-    const now = Date.now();
-    const spots = Object.fromEntries(Object.entries(prices.spots).map(([u, v]) => [u, { ...v, fresh: spotFresh(v.at, now) }]));
-    return NextResponse.json({
-      success: true,
-      data: {
-        state, spots, ltps: prices.ltps, liveArmed: realArmed(state, istDay()), now, spotKey: shownKey, contractError,
-        // Which contract this reply describes: the page ignores a reply for a selection it has since moved off.
-        request: { underlying: want, expiry, strike: strike > 0 ? strike : null, opt },
-        contract: shown ? {
-          securityId: shown.securityId, lotSize: shown.lotSize, ltp: prices.ltps[shown.securityId] ?? null,
-          mult: shown.mult ?? 1, ...(shown.ref ? { refExpiry: shown.ref.expiry } : {}),
-        } : null,
-      },
-    });
+    return NextResponse.json({ success: true, data: await buildLadderView(req.nextUrl.searchParams) });
   } catch (err) {
     return bad(String((err as Error).message ?? err), 500);
   }
@@ -72,39 +39,15 @@ interface ArmBody {
   /** XY: the index level. Plain: the option price. */
   level: number;
   bracket?: unknown;
+  /** 'anywhere': a click outside the limit zone is a stop without Order Type SL (plain: an SL-limit). */
+  zones?: string;
+  /** Plain + Anywhere stops: the SL-limit buffer %, the limit is computed here from it (never sent as a price). */
+  slBufferPct?: unknown;
+  /** What the page showed / the user confirmed ('limit' | 'stop', and which side of the price). Refused if the server's
+   *  own read of the price makes it a different order. */
+  expect?: { kind?: unknown; dir?: unknown };
 }
 
-async function resolveContract(broker: LadderBroker, u: string, expiry: string, strike: number, opt: OptType): Promise<LadderContract | string> {
-  const look = await getDhanStrikeLookup(u, expiry);
-  const row = look?.strikes?.[String(strike)] ?? look?.strikes?.[strike.toFixed(1)];
-  const securityId = opt === 'CE' ? row?.ceId : row?.peId;
-  if (!look || !securityId || !(look.lotSize > 0)) return `${u} ${expiry} ${strike}${opt} is not in Dhan's master list`;
-  const c: LadderContract = { underlying: u, expiry, strike, opt, securityId: String(securityId), lotSize: look.lotSize, exchangeSegment: dhanSegmentFor(u) };
-  if (isMcxUnderlying(u)) {
-    // Dhan only: Kotak / Zerodha MCX order sizing (absolute units) and symbols are not wired into the ladder.
-    if (broker !== 'dhan') return `${u} trades on Dhan only in the Price Ladder`;
-    // Dhan orders MCX in LOTS (lotSize 1); P&L and premium cost need the barrels per lot.
-    const mult = MCX_LOT_MULTIPLIER[u];
-    if (look.lotSize !== 1 || !(mult > 1)) return `${u}: unexpected lot size ${look.lotSize} — refused`;
-    if (!look.future) return `${u}: no futures month on or after ${expiry} in Dhan's master list (restart the dashboard if the master was just refreshed)`;
-    c.mult = mult;
-    c.ref = { securityId: look.future.securityId, segment: 'MCX_COMM', expiry: look.future.expiry };
-  }
-  if (broker === 'zerodha') {
-    // Kite's own instrument dump (metadata only — prices stay Dhan-sourced).
-    const z = await zerodhaOptionContract(u, expiry, strike, opt);
-    if (!z) return `Zerodha does not list ${u} ${expiry} ${strike}${opt}`;
-    c.tradingSymbol = z.tradingsymbol;
-    c.lotSize = z.lotSize;
-  }
-  if (broker === 'kotak') {
-    const k = await kotakOptionContract(u, expiry, strike, opt);
-    if (!k) return `Kotak does not list ${u} ${expiry} ${strike}${opt}`;
-    c.tradingSymbol = k.tradingsymbol;
-    c.lotSize = k.lotSize;
-  }
-  return c;
-}
 
 /**
  * Funds/margin for a REAL open on any broker; fails closed (an unreadable figure refuses the order). A BUY needs its
@@ -171,11 +114,32 @@ async function arm(b: ArmBody): Promise<NextResponse> {
     return bad('No live option price yet');
   }
   const ref = b.kind === 'xy' ? spot!.spot : ltp;
-  const verdict = classifyClick({ mode: b.kind, opt: b.opt, side: b.side, level, ref, orderType: b.orderType });
+  const zones: LadderZones = b.zones === 'anywhere' ? 'anywhere' : 'classic';
+  const verdict = classifyClick({ mode: b.kind, opt: b.opt, side: b.side, level, ref, orderType: b.orderType, zones });
   if (!verdict.ok) return bad(verdict.error);
+  // The price may have crossed the level between the click and now: never turn a confirmed LIMIT into a stop (or a dip
+  // entry into a breakout) behind the user's back.
+  if (b.expect && (b.expect.kind !== verdict.kind || b.expect.dir !== verdict.dir)) {
+    return bad(`The price crossed ${level} since you clicked — that would now be a ${verdict.kind === 'stop' ? 'stop' : 'LIMIT'} order, not what you placed. Nothing was sent; click again.`, 409);
+  }
+  // What the order really is: a stop is SL; otherwise what was chosen (a Classic SL in the limit zone stays SL, so it
+  // can still be dragged across the price).
+  const orderType: ClickType = verdict.kind === 'stop' ? 'SL' : b.orderType;
+  // Plain + Anywhere stop = SL-limit: its limit comes from the validated buffer, computed here.
+  let stopLimit: number | null = null;
+  if (b.kind === 'plain' && verdict.kind === 'stop' && zones === 'anywhere') {
+    const buf = cleanBufferPct(b.slBufferPct ?? DEFAULT_SL_BUFFER_PCT);
+    if (buf == null) return bad(`SL limit buffer must be ${MIN_SL_BUFFER_PCT}-${MAX_SL_BUFFER_PCT}%`);
+    stopLimit = stopLimitPrice(b.side, level, buf, OPTION_TICK);
+    if (stopLimit == null) return bad('Could not price the SL-limit — pick another level or buffer');
+  }
 
   if (b.mode === 'real') {
-    const price = b.kind === 'xy' ? ltp : level;
+    // A BUY stop can fill above its trigger: check funds at the worst case — an SL-limit's limit, an SL-M's trigger + 5%
+    // (it fills at market). XY entries fire at market from the live premium.
+    const price = b.kind === 'xy' ? ltp
+      : b.side === 'BUY' && verdict.kind === 'stop' ? (stopLimit ?? snapToStep(level * 1.05, OPTION_TICK))
+        : level;
     if (!(price > 0)) return bad('No live option price to check margin against');
     const blocked = await realOpenBlocked(b.broker, c, b.side, qty, b.product, price);
     if (blocked) return bad(blocked);
@@ -188,7 +152,7 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   const what = `${b.mode === 'sim' ? 'SIM ' : ''}${b.side} ${lots} lot(s) ${u} ${strike}${b.opt}`;
 
   if (b.kind === 'xy') {
-    const slice: LadderSlice = { ...base, entryLevel: level, entryDir: verdict.dir, seenSafe: true, orderType: b.orderType, ...(bracket ? { bracket } : {}) };
+    const slice: LadderSlice = { ...base, entryLevel: level, entryDir: verdict.dir, seenSafe: true, orderType, ...(zones === 'anywhere' ? { zones } : {}), ...(bracket ? { bracket } : {}) };
     const br = bracket ? ` · ${bracket.tgtPts > 0 ? `TGT ${bracket.tgtPts} / ` : 'Cover · '}SL ${bracket.slPts}${bracket.trailPts ? ` / trail ${bracket.trailPts}` : ''} pts` : '';
     let capped = false;
     const s = await updateLadderState(st => {
@@ -202,17 +166,21 @@ async function arm(b: ArmBody): Promise<NextResponse> {
 
   // Plain: a resting order on the option's own price.
   const plain: LadderSlice = {
-    ...base, orderType: b.orderType,
-    ...(verdict.kind === 'limit' ? { limitPrice: level } : { triggerPrice: level }),
+    ...base, orderType,
+    ...(verdict.kind === 'limit' ? { limitPrice: level } : { triggerPrice: level, ...(stopLimit ? { stopLimitPrice: stopLimit } : {}) }),
   };
+  const kindLabel = verdict.kind === 'limit' ? 'LIMIT' : stopLimit ? 'SL-limit' : 'SL';
+  const at = stopLimit ? `trigger ${level} → limit ${stopLimit.toFixed(2)}` : `@ ${level}`;
   if (b.mode === 'sim') {
-    const s = await updateLadderState(st => pushEvent({ ...st, slices: [...st.slices, { ...plain, state: 'working' }] }, ev('info', `SIM ${verdict.kind === 'limit' ? 'LIMIT' : 'SL'} ${what} @ ${level}`, plain.id)));
+    const s = await updateLadderState(st => pushEvent({ ...st, slices: [...st.slices, { ...plain, state: 'working' }] }, ev('info', `SIM ${kindLabel} ${what} ${at}`, plain.id)));
     return NextResponse.json({ success: true, data: { id: plain.id, state: s } });
   }
   // REAL: checkpoint before the order (Triple Straddle rule) — if this write fails nothing is sent.
   await updateLadderState(st => ({ ...st, slices: [...st.slices, { ...plain, state: 'placing', sentAt: now }] }));
-  const r = await withJob(plain.id, () => placeFor(plain, b.side, qty, true, verdict.kind === 'limit' ? { type: 'LIMIT', price: level } : { type: 'SL', trigger: level }));
-  const s = await commitIf(plain.id, 'placing', st => pushEvent(afterSend(st, plain.id, r, 'entry'), ev('info', `${verdict.kind === 'limit' ? 'LIMIT' : 'SL'} ${what} @ ${level}: ${r.status}`, plain.id)));
+  const r = await withJob(plain.id, () => placeFor(plain, b.side, qty, true, verdict.kind === 'limit'
+    ? { type: 'LIMIT', price: level }
+    : { type: 'SL', trigger: level, ...(stopLimit ? { limit: stopLimit } : {}) }));
+  const s = await commitIf(plain.id, 'placing', st => pushEvent(afterSend(st, plain.id, r, 'entry'), ev('info', `${kindLabel} ${what} ${at}: ${r.status}`, plain.id)));
   if (r.status === 'placed') return NextResponse.json({ success: true, data: { id: plain.id, state: s } });
   if (r.status === 'unknown') return NextResponse.json({ success: false, unknown: true, error: r.error, data: { state: s } }, { status: 504 });
   return NextResponse.json({ success: false, error: r.error, data: { state: s } });
@@ -460,11 +428,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         if (x.state === 'armed' && x.kind === 'xy') {
           const level = Number(body.level);
           if (!levelSane(level, sp.spot)) return bad('Level is more than 5% from spot');
-          // The same rules as a click: a LIMIT entry cannot be dragged across spot into a breakout.
-          const v = classifyClick({ mode: 'xy', opt: x.contract.opt, side: x.side, level, ref: sp.spot, orderType: x.orderType ?? 'LIMIT' });
-          if (!v.ok) return bad(v.error);
+          // The same rules as a click, in the view it was armed in: a Classic LIMIT entry cannot be dragged across spot into
+          // a breakout; an Anywhere one can, and becomes a stop there (and a LIMIT again if dragged back).
+          const v = classifyClick({ mode: 'xy', opt: x.contract.opt, side: x.side, level, ref: sp.spot, orderType: x.orderType ?? 'LIMIT', zones: x.zones });
+          if (!v.ok) return bad(x.zones === 'anywhere' ? v.error : `${v.error} (or arm it in the Anywhere view)`);
+          const orderType: ClickType = v.kind === 'stop' ? 'SL' : x.zones === 'anywhere' ? 'LIMIT' : (x.orderType ?? 'LIMIT');
           const r = await guarded(id, y => y.state === 'armed',
-            st => pushEvent(patchSlice(st, id, { entryLevel: level, entryDir: v.dir, seenSafe: true }), ev('info', `Entry moved to ${level}`, id)));
+            st => pushEvent(patchSlice(st, id, { entryLevel: level, entryDir: v.dir, seenSafe: true, orderType }), ev('info', `Entry moved to ${level}${v.kind === 'stop' ? ' (breakout)' : ''}`, id)));
           if (!r.applied) return bad('Too late — it has just fired', 409);
           return NextResponse.json({ success: true, data: { state: r.state } });
         }

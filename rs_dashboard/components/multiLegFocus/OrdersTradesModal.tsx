@@ -19,6 +19,8 @@ export interface OrdersTradesModalProps {
   initialTab?: 'orders' | 'trades' | 'positions';
   /** View only: no Edit Price / Cancel on pending orders (a page whose own engine owns its orders, e.g. Price Ladder). */
   readOnly?: boolean;
+  /** Header line under the title; defaults to the editable / view-only wording. */
+  subtitle?: string;
 }
 
 function isOrderPending(status: unknown): boolean {
@@ -51,6 +53,7 @@ export default function OrdersTradesModal({
   onRefresh,
   initialTab = 'orders',
   readOnly = false,
+  subtitle,
 }: OrdersTradesModalProps) {
   const [ordersTab, setOrdersTab] = useState<'orders' | 'trades' | 'positions'>(initialTab);
   const [tableSort, setTableSort] = useState<SortState>({ key: 'createTime', dir: 'desc' });
@@ -217,7 +220,7 @@ export default function OrdersTradesModal({
               {BROKER_LABELS[broker]}
             </span>
             <span className="text-[11px] text-zinc-500 hidden sm:inline">
-              Modify pending limit orders or track fills in real-time
+              {subtitle ?? (readOnly ? 'View only' : 'Modify pending limit orders or track fills in real-time')}
             </span>
           </div>
 
