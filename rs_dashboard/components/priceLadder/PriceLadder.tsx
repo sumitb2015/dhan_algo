@@ -60,6 +60,13 @@ interface StateResp {
     /** MCX: the futures axis's day high / low / previous close, from its WebSocket quote. */
     axisDay?: { high: number | null; low: number | null; prevClose: number | null } | null;
   } | null;
+  /** Key market levels (PDH, PDL, Today High, Today Low) for the active underlying. */
+  keyLevels?: {
+    pdh: number | null;
+    pdl: number | null;
+    dayHigh: number | null;
+    dayLow: number | null;
+  } | null;
 }
 interface IndexQuote { ltp: number; prev_close: number; change_pct: number | null; day_high: number | null; day_low: number | null }
 
@@ -1104,6 +1111,12 @@ export default function PriceLadder() {
               onScroll={refPrice > 0 ? scrollLadder : undefined}
               onTrail={(w, delta) => { void post(mode === 'pair' ? { action: 'pair', op: 'trail', id: w.ids[0], delta } : { action: 'trail', id: w.ids[0], delta }); }}
               onHoldChange={setHeld}
+              keyLevels={mode === 'xy' ? {
+                pdh: data?.keyLevels?.pdh ?? null,
+                pdl: data?.keyLevels?.pdl ?? null,
+                dayHigh: indexQ?.day_high ?? data?.keyLevels?.dayHigh ?? null,
+                dayLow: indexQ?.day_low ?? data?.keyLevels?.dayLow ?? null,
+              } : undefined}
             />
           </div>
         </div>

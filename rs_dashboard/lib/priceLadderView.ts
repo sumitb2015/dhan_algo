@@ -8,6 +8,7 @@ import {
   type LadderBroker, type LadderContract, type OptType,
 } from '@/lib/priceLadder';
 import { isPairLive, pairCombined } from '@/lib/priceLadderPair';
+import { getPrevDayLevels } from '@/lib/prevDayLevels';
 
 // What the Price Ladder page shows, built once for both the 1 s poll (GET /api/price-ladder/state) and the push stream
 // (GET /api/price-ladder/stream), and the contract resolution every order route shares. Server only.
@@ -80,8 +81,19 @@ export async function buildLadderView(params: URLSearchParams) {
   ]);
   const now = Date.now();
   const spots = Object.fromEntries(Object.entries(prices.spots).map(([u, v]) => [u, { ...v, fresh: spotFresh(v.at, now) }]));
+  const d = prices.days?.[shownKey ?? want];
+  const prevDay = want ? await getPrevDayLevels(want, shown?.ref?.securityId) : null;
+  const dayHigh = d?.high ?? (shown?.ref ? axisDayOf(shown, prices.days, now)?.high : null);
+  const dayLow = d?.low ?? (shown?.ref ? axisDayOf(shown, prices.days, now)?.low : null);
+
   return {
     state, spots, ltps: prices.ltps, liveArmed: realArmed(state, istDay()), now, spotKey: shownKey, contractError, pairError,
+    keyLevels: {
+      pdh: prevDay?.high ?? null,
+      pdl: prevDay?.low ?? null,
+      dayHigh: dayHigh && dayHigh > 0 ? dayHigh : null,
+      dayLow: dayLow && dayLow > 0 ? dayLow : null,
+    },
     // Which contract this reply describes: the page ignores a reply for a selection it has since moved off.
     request: { underlying: want, expiry, strike: strike > 0 ? strike : null, opt, pairCe: pairCe > 0 ? pairCe : null, pairPe: pairPe > 0 ? pairPe : null },
     pair: pairLegs ? {

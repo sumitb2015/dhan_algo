@@ -293,6 +293,11 @@ export async function loadPrices(underlyings: string[], contracts: LadderContrac
   for (const u of underlyings) {
     const fut = parseSpotKey(u);
     const f = fut ? null : spotFromFiles(u, memo);
+    if (!fut) {
+      const hub = readJson('live_indices_quotes.json', memo);
+      const hq = (hub?.quotes as Record<string, { high?: number; low?: number; prev_close?: number }> | undefined)?.[u];
+      if (hq) days[u] = { high: hq.high ?? null, low: hq.low ?? null, close: hq.prev_close ?? null };
+    }
     if (f && spotFresh(f.at, now)) { spots[u] = f; continue; }
     const key = fut ? wsWant(fut.segment, fut.securityId) : INDEX_IDS[u] ? wsWant('IDX_I', INDEX_IDS[u]) : null;
     const q = key ? wsQuote(key, memo) : null;

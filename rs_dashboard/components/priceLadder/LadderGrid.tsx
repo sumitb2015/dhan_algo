@@ -182,9 +182,18 @@ function InnerPriceWidget({ w, decimals, tick, onTrail }: {
       onDragStart={w.drag ? e => { e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ ids: w.ids, what: w.drag })); e.dataTransfer.effectAllowed = 'move'; } : undefined}
       title={w.planned ? `${w.label} — set when the entry fills; drag to another price to move it` : w.drag ? `${w.label} — drag to another price to move it` : what}
       data-widget={w.kind}
-      className={`font-mono text-xs font-semibold select-none px-1 py-0.5 rounded transition-colors ${w.planned ? 'text-zinc-400 italic opacity-75' : 'text-zinc-100'} ${w.drag ? 'cursor-grab active:cursor-grabbing hover:text-white hover:bg-zinc-800/60' : ''}`}
+      className={`font-mono text-xs font-semibold select-none px-1 py-0.5 rounded transition-colors inline-flex items-center gap-1 ${w.planned ? 'text-zinc-400 italic opacity-75' : 'text-zinc-100'} ${w.drag ? 'cursor-grab active:cursor-grabbing hover:text-white hover:bg-zinc-800/60' : ''}`}
     >
-      {w.price.toFixed(decimals)}
+      {TAG[w.kind] && (
+        <span className={`px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight ${
+          w.kind === 'tgt' ? 'bg-emerald-600 text-oncolor' :
+          w.kind === 'sl' ? 'bg-red-600 text-oncolor' :
+          'bg-blue-600 text-oncolor'
+        }`}>
+          {TAG[w.kind]}
+        </span>
+      )}
+      <span>{w.price.toFixed(decimals)}</span>
     </div>
   );
 }
@@ -255,6 +264,13 @@ function OuterControlWidget({ w, onAdjust, onCancel }: {
   );
 }
 
+export interface LadderKeyLevels {
+  pdh?: number | null;
+  pdl?: number | null;
+  dayHigh?: number | null;
+  dayLow?: number | null;
+}
+
 /**
  * The ladder: Buy | Bids | Price | Offers | Sell.
  * Reference UI (OptionX):
@@ -266,7 +282,7 @@ function OuterControlWidget({ w, onAdjust, onCancel }: {
  */
 export function LadderGrid({
   center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryMarks, onScroll,
-  zones = 'classic', stopLimitFor, onTrail, onHoldChange,
+  zones = 'classic', stopLimitFor, onTrail, onHoldChange, keyLevels,
 }: {
   center: number; refPrice: number; tick: number; rows: number; widgets: LadderWidget[];
   limitZoneBuy: 'below' | 'above';
@@ -289,6 +305,8 @@ export function LadderGrid({
    * the rows still meanwhile, so a re-centre on a price tick cannot move a row under the mouse between aim and click.
    */
   onHoldChange?: (held: boolean) => void;
+  /** Key market levels (PDH, PDL, Today High, Today Low) to mark in the 2nd column. */
+  keyLevels?: LadderKeyLevels;
 }) {
   const prices = ladderRows(center, tick, rows);
   // Native, non-passive wheel listener: React's onWheel is passive, so it cannot stop the page scrolling too.
@@ -381,6 +399,17 @@ export function LadderGrid({
         const buyWs = ws.filter(w => w.column === 'BUY');
         const sellWs = ws.filter(w => w.column === 'SELL');
 
+        const isPdh = keyLevels?.pdh != null && Math.abs(p - snapToStep(keyLevels.pdh, tick)) < tick / 2;
+        const isPdl = keyLevels?.pdl != null && Math.abs(p - snapToStep(keyLevels.pdl, tick)) < tick / 2;
+        const isDayHigh = keyLevels?.dayHigh != null && Math.abs(p - snapToStep(keyLevels.dayHigh, tick)) < tick / 2;
+        const isDayLow = keyLevels?.dayLow != null && Math.abs(p - snapToStep(keyLevels.dayLow, tick)) < tick / 2;
+
+        const hasBuyTgt = buyWs.some(w => w.kind === 'tgt');
+        const hasBuySl = buyWs.some(w => w.kind === 'sl');
+        const hasRowTgt = ws.some(w => w.kind === 'tgt');
+        const hasRowSl = ws.some(w => w.kind === 'sl');
+        const hasMarks = isPdh || isDayHigh || isDayLow || isPdl || (hasRowTgt && !hasBuyTgt) || (hasRowSl && !hasBuySl) || buyWs.length > 0;
+
         return (
           <div
             key={p}
@@ -404,16 +433,52 @@ export function LadderGrid({
               {buyWs.map(w => <OuterControlWidget key={w.key} w={w} onAdjust={onAdjust} onCancel={onCancel} />)}
             </div>
 
-            {/* Column 2: Bids (Inner trigger price for Buy-side triggers) */}
+            {/* Column 2: Bids (Inner trigger price for Buy-side triggers & key level marks) */}
             <div
               role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
               aria-label={buyStop ? buyLabel : `Bid ${fmt(p)}`} title={buyStop ? buyLabel : undefined}
               onClick={() => { if (!disabled) onPlace('BUY', p); }}
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('BUY', p); } }}
-              className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/10 dark:bg-emerald-500/22' : buyStop ? 'bg-amber-500/10 dark:bg-amber-500/18' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/20 dark:hover:bg-emerald-500/35'}`}
+              className={`h-7 flex items-center justify-center gap-1 px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/10 dark:bg-emerald-500/22' : buyStop ? 'bg-amber-500/10 dark:bg-amber-500/18' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/20 dark:hover:bg-emerald-500/35'}`}
             >
               {buyWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} tick={tick} onTrail={onTrail} />)}
-              {buyStop && !buyWs.length && <span aria-hidden className="text-[10px] font-semibold text-amber-300">{stopTag}</span>}
+              {isPdh && (
+                <span title={`Previous Day High: ${keyLevels?.pdh?.toFixed(decimals)}`}
+                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-rose-500/20 text-rose-300 border border-rose-500/40 pointer-events-none select-none">
+                  PDH
+                </span>
+              )}
+              {isDayHigh && (
+                <span title={`Today's High: ${keyLevels?.dayHigh?.toFixed(decimals)}`}
+                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-amber-500/20 text-amber-300 border border-amber-500/40 pointer-events-none select-none">
+                  DH
+                </span>
+              )}
+              {isDayLow && (
+                <span title={`Today's Low: ${keyLevels?.dayLow?.toFixed(decimals)}`}
+                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 pointer-events-none select-none">
+                  DL
+                </span>
+              )}
+              {isPdl && (
+                <span title={`Previous Day Low: ${keyLevels?.pdl?.toFixed(decimals)}`}
+                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 pointer-events-none select-none">
+                  PDL
+                </span>
+              )}
+              {hasRowTgt && !hasBuyTgt && (
+                <span title="Target"
+                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-emerald-600 text-oncolor pointer-events-none select-none">
+                  TGT
+                </span>
+              )}
+              {hasRowSl && !hasBuySl && (
+                <span title="Stop Loss"
+                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-red-600 text-oncolor pointer-events-none select-none">
+                  SL
+                </span>
+              )}
+              {buyStop && !hasMarks && <span aria-hidden className="text-[10px] font-semibold text-amber-300">{stopTag}</span>}
             </div>
 
             {/* Column 3: Price */}
