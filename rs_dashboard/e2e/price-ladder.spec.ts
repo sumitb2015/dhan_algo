@@ -198,3 +198,23 @@ test('An open bracket shows TGT and SL widgets in the Sell column; + adds a lot,
   await expect.poll(() => seen.posts.find(b => b.action === 'add')).toMatchObject({ action: 'add', id: 'open1' });
   expect(seen.blocked).toEqual([]);
 });
+
+test('Two ladders: Add ladder opens a second with its own selection (max 2), Close ladder 2 removes it', async ({ page }) => {
+  const seen = await install(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/price-ladder');
+  await expect(page.getByLabel('Underlying')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: /Add ladder/ })).toBeVisible();
+  await page.getByRole('button', { name: /Add ladder/ }).click();
+  const underlying = page.getByLabel('Underlying');
+  await expect(underlying).toHaveCount(2);
+  await expect(page.getByRole('button', { name: /Add ladder/ })).toHaveCount(0);   // at most two
+  await underlying.nth(1).selectOption('BANKNIFTY');
+  await expect(underlying.nth(0)).toHaveValue('NIFTY');
+  await expect(underlying.nth(1)).toHaveValue('BANKNIFTY');
+  // No horizontal page scroll at 1440 px
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.getByRole('button', { name: /Close ladder 2/ }).click();
+  await expect(underlying).toHaveCount(1);
+  expect(seen.blocked).toEqual([]);
+});

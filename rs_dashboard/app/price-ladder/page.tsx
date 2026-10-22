@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import PriceLadder from '@/components/priceLadder/PriceLadder';
+import PriceLadder from '@/components/priceLadder/PriceLadderWorkspace';
 
 export const metadata: Metadata = {
   title: 'Price Ladder',

@@ -1,9 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, Clock, Settings, X } from 'lucide-react';
+import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, Clock, Settings, X, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from '@/components/NavBar';
+import { sharedJson } from '@/lib/sharedPoll';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import { BROKER_LABELS, scalperRoute } from '@/hooks/useBrokerSelector';
 import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
@@ -120,8 +121,15 @@ const fmtMoney = (v: number | null) => (v == null ? '—' : `${v >= 0 ? '+' : ''
 const pnlClass = (v: number | null) => (v == null ? 'text-zinc-400' : v >= 0 ? 'text-emerald-400' : 'text-red-400');
 const timeOf = (at: number) => new Date(at).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
 
-export default function PriceLadder() {
-  const [broker, setBroker, brokerLoaded] = usePageBroker<LadderBroker>('price-ladder-broker', LADDER_BROKERS);
+/** One ladder pane. The page can show two side by side: the second keeps its own saved choices (keys end in `-2`), has no
+ *  NavBar, and neither auto-focuses a live contract nor chimes (the first pane already does both). The ledger and the
+ *  server watcher are shared — every slice carries its own contract, so the panes only differ in what they display. */
+export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, onRemoveLadder }: {
+  ladderId?: 1 | 2; dual?: boolean; onAddLadder?: () => void; onRemoveLadder?: () => void;
+}) {
+  const second = ladderId === 2;
+  const k = useCallback((key: string) => (second ? `${key}-2` : key), [second]);
+  const [broker, setBroker, brokerLoaded] = usePageBroker<LadderBroker>(k('price-ladder-broker'), LADDER_BROKERS);
   const [mode, setModeRaw] = useState<PageMode>('xy');
   // Pair mode: a straddle on the centre strike, or a strangle `wing` strikes either side of it (CE above, PE below).
   const [structure, setStructure] = useState<PairStructure>('straddle');
@@ -146,7 +154,7 @@ export default function PriceLadder() {
   // Classic: fixed limit zones (the other side needs Order Type SL). Anywhere: both columns at every level, the side of
   // the price deciding LIMIT or stop (plain: an SL-limit `slBufferPct` past the trigger).
   const [zones, setZonesRaw] = useState<LadderZones>('classic');
-  const setZones = (z: LadderZones) => { setZonesRaw(z); savePref('price-ladder-zones', z); };
+  const setZones = (z: LadderZones) => { setZonesRaw(z); savePref(k('price-ladder-zones'), z); };
   const [slBufferPct, setSlBufferPct] = useState(DEFAULT_SL_BUFFER_PCT);
   const [eventsOpen, setEventsOpen] = useState(false);
   const [style, setStyle] = useState<'Single' | 'Bracket' | 'Cover'>('Bracket');
@@ -173,19 +181,19 @@ export default function PriceLadder() {
   // Preferences (after mount: the first render must match the server HTML).
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect */
-    const savedMode = readPref('price-ladder-mode', ['xy', 'plain', 'pair'] as const, 'xy');
+    const savedMode = readPref(k('price-ladder-mode'), ['xy', 'plain', 'pair'] as const, 'xy');
     setModeRaw(savedMode);
     // The tick belongs to the mode (setMode sets it on a click): a page reopened into Plain must not keep XY's 5.
     setTick(MODE_TICK[savedMode]);
-    setZonesRaw(readPref('price-ladder-zones', ['classic', 'anywhere'] as const, 'classic'));
-    setEventsOpen(readPref('price-ladder-events-open', ['0', '1'] as const, '0') === '1');
-    setUnderlyingRaw(readPref('price-ladder-underlying', UNDERLYINGS, 'NIFTY'));
+    setZonesRaw(readPref(k('price-ladder-zones'), ['classic', 'anywhere'] as const, 'classic'));
+    setEventsOpen(readPref(k('price-ladder-events-open'), ['0', '1'] as const, '0') === '1');
+    setUnderlyingRaw(readPref(k('price-ladder-underlying'), UNDERLYINGS, 'NIFTY'));
     /* eslint-enable react-hooks/set-state-in-effect */
     return installAlertSoundUnlock();
-  }, []);
+  }, [k]);
   // Each mode has its own axis (index / premium / combined premium): drop the old rows until the new price arrives,
   // so a Pair ladder never shows the XY futures levels as if they were combined premiums.
-  const setMode = (m: PageMode) => { setModeRaw(m); savePref('price-ladder-mode', m); setTick(MODE_TICK[m]); setCenter(0); setFollow(true); setManual(false); };
+  const setMode = (m: PageMode) => { setModeRaw(m); savePref(k('price-ladder-mode'), m); setTick(MODE_TICK[m]); setCenter(0); setFollow(true); setManual(false); };
   // The pair's strikes: CE = centre + wing steps, PE = centre − wing steps (a straddle: both on the centre). Null when a
   // leg is not in the chain's strike list.
   const pairStep = STRIKE_STEP[underlying] ?? 50;
@@ -193,7 +201,7 @@ export default function PriceLadder() {
   const pairPe = mode === 'pair' && strike ? (structure === 'straddle' ? strike : strike - wing * pairStep) : null;
   const pairOk = pairCe != null && pairPe != null && strikes.includes(pairCe) && strikes.includes(pairPe);
   // The expiry is cleared too: the old underlying's date must not be asked of the new one's chain for a render.
-  const setUnderlying = (u: string) => { setUnderlyingRaw(u); savePref('price-ladder-underlying', u); setExpiry(''); setExpiries([]); setStrike(null); setCenter(0); setFollow(true); setManual(false); };
+  const setUnderlying = (u: string) => { setUnderlyingRaw(u); savePref(k('price-ladder-underlying'), u); setExpiry(''); setExpiries([]); setStrike(null); setCenter(0); setFollow(true); setManual(false); };
 
   // The indices feed is the XY ladder's spot source; the server falls back to a paced REST quote if it is down.
   useEffect(() => {
@@ -330,7 +338,7 @@ export default function PriceLadder() {
   // Index card: change and day range.
   useEffect(() => {
     let cancelled = false;
-    const load = () => fetch('/api/scalper/top-indices').then(r => r.json()).then((j: { quotes?: Record<string, IndexQuote> }) => {
+    const load = () => sharedJson<{ quotes?: Record<string, IndexQuote> }>('/api/scalper/top-indices', 2500).then(j => {
       if (!cancelled) setQuotes(j.quotes ?? {});
     }).catch(() => {});
     void load();
@@ -343,8 +351,8 @@ export default function PriceLadder() {
   const [sessions, setSessions] = useState<Partial<Record<LadderBroker, boolean>>>({});
   useEffect(() => {
     let cancelled = false;
-    const load = () => fetch('/api/auth/broker-status', { cache: 'no-store' }).then(r => r.json())
-      .then((j: Partial<Record<LadderBroker, boolean>>) => { if (!cancelled) setSessions(j); }).catch(() => {});
+    const load = () => sharedJson<Partial<Record<LadderBroker, boolean>>>('/api/auth/broker-status', 30_000)
+      .then(j => { if (!cancelled) setSessions(j); }).catch(() => {});
     void load();
     const t = setInterval(load, 60_000);
     return () => { cancelled = true; clearInterval(t); };
@@ -363,8 +371,7 @@ export default function PriceLadder() {
     const load = async () => {
       if (typeof document !== 'undefined' && document.hidden) return;
       try {
-        const r = await fetch(`/api/dashboard/portfolio?broker=${broker}`, { cache: 'no-store' });
-        const j = await r.json() as { success?: boolean; brokers?: BrokerPortfolio[] };
+        const j = await sharedJson<{ success?: boolean; brokers?: BrokerPortfolio[] }>(`/api/dashboard/portfolio?broker=${broker}`, 4000);
         if (my !== acctSeq.current) return;
         const b = j.brokers?.find(x => x.broker === broker);
         if (!j.success || !b) return fail('Could not read the account');
@@ -433,9 +440,9 @@ export default function PriceLadder() {
     if (lastEventAt.current === 0) { lastEventAt.current = newest; return; }
     const fresh = evs.filter(e => e.at > lastEventAt.current);
     lastEventAt.current = Math.max(lastEventAt.current, newest);
-    if (fresh.some(e => /filled|Exited|SIM exit|UNKNOWN|rejected/i.test(e.msg))) playAlertChime();
+    if (!second && fresh.some(e => /filled|Exited|SIM exit|UNKNOWN|rejected/i.test(e.msg))) playAlertChime();
     for (const e of fresh) if (e.level === 'error') toast.error(e.msg);
-  }, [data?.state.events]);
+  }, [data?.state.events, second]);
 
   const mcx = isMcxUnderlying(underlying);
   // The reply describes the selection on screen (it can lag one poll behind an expiry / strike / underlying switch).
@@ -778,7 +785,7 @@ export default function PriceLadder() {
   // only — the REAL chip in Active Trades switches mode with a click.
   const autoFocusedRef = useRef(false);
   useEffect(() => {
-    if (autoFocusedRef.current || !data) return;
+    if (autoFocusedRef.current || !data || second) return;
     const liveSlices = data.state.slices.filter(isLive);
     if (!liveSlices.length) return;
     const sameMode = liveSlices.filter(x => x.mode === (real ? 'real' : 'sim'));
@@ -787,10 +794,10 @@ export default function PriceLadder() {
     autoFocusedRef.current = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot on first data, guarded by autoFocusedRef
     selectContract({ contract: latest.contract, broker: latest.broker });
-  }, [data, real, selectContract]);
+  }, [data, real, selectContract, second]);
 
   return (
-    <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
+    <div className="flex flex-col min-h-screen bg-zinc-950 text-white min-w-0">
       <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
       <div className="flex items-center justify-between gap-3 flex-wrap px-6 py-3">
         <div className="flex items-center gap-3">
@@ -798,7 +805,7 @@ export default function PriceLadder() {
             <Rows3 className="w-4 h-4 text-emerald-400" />
           </div>
           <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">PRICE LADDER · {mode === 'xy' ? 'XY' : mode === 'pair' ? 'PAIR' : 'PLAIN'}</p>
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">PRICE LADDER{dual ? ` ${ladderId}` : ''} · {mode === 'xy' ? 'XY' : mode === 'pair' ? 'PAIR' : 'PLAIN'}</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">
               {axisName} <span className="font-mono">{spot ? spot.toFixed(2) : '—'}</span>
             </h1>
@@ -830,8 +837,18 @@ export default function PriceLadder() {
             <Settings className="w-3.5 h-3.5 text-amber-400" />
             Settings
           </button>
-          <span className="w-px h-5 bg-zinc-800 shrink-0" />
-          <NavBar />
+          {second ? (
+            <button type="button" onClick={onRemoveLadder} title="Close this ladder (orders it placed keep running on the server)"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer">
+              <X className="w-3.5 h-3.5 text-red-400" /> Close ladder 2
+            </button>
+          ) : !dual && onAddLadder && (
+            <button type="button" onClick={onAddLadder} title="Show a second, independent ladder beside this one (max 2)"
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer">
+              <Plus className="w-3.5 h-3.5 text-emerald-400" /> Add ladder
+            </button>
+          )}
+          {!second && (<><span className="w-px h-5 bg-zinc-800 shrink-0" /><NavBar /></>)}
         </div>
       </div>
       {/* Market + P&L + broker book strip */}
@@ -915,7 +932,7 @@ export default function PriceLadder() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] gap-4">
+        <div className={`grid grid-cols-1 gap-4 ${dual ? '2xl:grid-cols-[320px_minmax(0,1fr)]' : 'lg:grid-cols-[320px_minmax(0,1fr)]'}`}>
           {/* ── left panel ── */}
           <div className="flex flex-col gap-3">
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
@@ -1233,7 +1250,7 @@ export default function PriceLadder() {
         {/* Collapsed by default (remembered per browser); the header keeps the count and the newest event in view. */}
         <details
           open={eventsOpen}
-          onToggle={e => { const o = (e.currentTarget as HTMLDetailsElement).open; setEventsOpen(o); savePref('price-ladder-events-open', o ? '1' : '0'); }}
+          onToggle={e => { const o = (e.currentTarget as HTMLDetailsElement).open; setEventsOpen(o); savePref(k('price-ladder-events-open'), o ? '1' : '0'); }}
           className="rounded-lg border border-zinc-800 group"
         >
           <summary className={`flex items-center gap-2 px-3 py-2 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden rounded-lg ${FOCUS_RING}`}>
