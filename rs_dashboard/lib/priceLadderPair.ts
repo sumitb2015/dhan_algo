@@ -116,6 +116,33 @@ export function lotsOnContract(st: LadderState, securityId: string, broker: Ladd
   return slices + pairs;
 }
 
+/** The pair a joined lot hangs off, following joinedTo links to the first pair (cycle-safe). */
+export function rootPairId(st: LadderState, id: string): string {
+  let cur = id;
+  const seen = new Set<string>([cur]);
+  for (;;) {
+    const p = (st.pairs ?? []).find(y => y.id === cur);
+    if (!p?.joinedTo || seen.has(p.joinedTo)) return cur;
+    seen.add(p.joinedTo);
+    cur = p.joinedTo;
+  }
+}
+
+/**
+ * The pairs an action on `p` applies to: `p` ITSELF (whatever its state — an armed pair's trail, a broken pair's
+ * "Exit remaining", a rolling pair's Exit), plus the open pairs (and '+1 lots' still placing) linked to it by explicit
+ * joinedTo links on the same legs, broker, mode and side. Two separately armed pairs never share (no matching by levels).
+ */
+export function joinedGroup(st: LadderState, p: LadderPair): LadderPair[] {
+  const root = rootPairId(st, p.id);
+  return (st.pairs ?? []).filter(y => y.id === p.id || (
+    (y.state === 'open' || (y.state === 'placing' && !!y.joinedTo)) &&
+    y.broker === p.broker && y.mode === p.mode && y.side === p.side &&
+    y.legs.ce.contract.securityId === p.legs.ce.contract.securityId &&
+    y.legs.pe.contract.securityId === p.legs.pe.contract.securityId &&
+    rootPairId(st, y.id) === root));
+}
+
 export type PairLegKey = 'ce' | 'pe';
 export const LEG_KEYS: readonly PairLegKey[] = ['ce', 'pe'];
 
@@ -165,7 +192,9 @@ export function legSlReason(p: LadderPair, ltps: Record<string, number>, refPair
   const ref = refPair ?? p;
   for (const k of LEG_KEYS) {
     const l = p.legs[k];
-    const at = legSlPrice(ref, ref.legs[k]);
+    // The parent's stop level only while it is on the same strike (it may have rolled away); else this leg's own.
+    const base = ref.legs[k].contract.securityId === l.contract.securityId ? ref : p;
+    const at = legSlPrice(base, base.legs[k]);
     const ltp = ltps[l.contract.securityId];
     if (at == null || !(ltp > 0) || legHeld(p, l) <= 0) continue;
     if (p.side === 'SELL' ? ltp >= at : ltp <= at) return `Leg SL ${k.toUpperCase()} ${at.toFixed(2)}`;
@@ -483,6 +512,13 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
       if (!ro) { next = patch(p.id, { state: 'open' }); continue; }
       const moving = LEG_KEYS.filter(k => ro[k]);
 
+      // An entry order of the new strike still working: nothing may abort around it — an exit begun now would close
+      // the pair while that order fills later, untracked (a naked leg). Wait for it to settle (UNKNOWN goes to the user).
+      if (LEG_KEYS.some(k => p.legs[k].entry === 'sent')) {
+        if (real && needsSettle(p) && now - io.polledAt(p.id) >= PAIR_POLL_MS) jobs.push({ kind: 'pairSettle', id: p.id });
+        continue;
+      }
+
       // Bug 2 fix: honour expiry, auto-exit and manual Exit while rolling. A roll started before the auto-exit time
       // must not open a new leg after it — instead unwind whatever is still held.
       if (pairExpired(p, today)) {
@@ -503,7 +539,10 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
 
       // Bug 2 fix: protection while rolling. If the leg that isn't moving hits its leg SL (or combined SL hits),
       // cancel the roll and unwind whatever is still held — never leave a losing unmoved leg unprotected.
-      const rollSlReason = legSlReason(p, ltps) ?? (p.bracket && c != null ? openExitStep(p, pairBias(p.side), c, afterClose, at).reason : null);
+      // The combined bracket only while both OLD strikes are still in place: once a new strike has replaced one, the
+      // combined is measured on different contracts than its levels (a shift to cheaper strikes would "hit target").
+      const replaced = moving.some(k => p.legs[k].contract.securityId === ro[k]!.securityId);
+      const rollSlReason = legSlReason(p, ltps) ?? (p.bracket && c != null && !replaced ? openExitStep(p, pairBias(p.side), c, afterClose, at).reason : null);
       if (rollSlReason) {
         next = say(patch(p.id, { note: `${rollSlReason} while rolling — cancelling roll and unwinding` }),
           'warn', `${name}: ${rollSlReason} mid-roll — cancelling roll and unwinding`, p.id);

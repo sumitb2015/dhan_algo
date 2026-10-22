@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { rollDay, type LadderState } from './priceLadder.ts';
-import { planPairs as planPairsTick, blendExitAvg, cleanLegSlPct, legSlPrice, splitOneLot, pairEntryVerdict, settleLegEntry, settleLegExit, cutsNewestFirst, cutPairLeg, lotsOnContract, pairEntryFills, pairCombined, pairNowPnl, sumPairPnl, pairLevelSane, type LadderPair } from './priceLadderPair.ts';
+import { planPairs as planPairsTick, joinedGroup, legSlReason, blendExitAvg, cleanLegSlPct, legSlPrice, splitOneLot, pairEntryVerdict, settleLegEntry, settleLegExit, cutsNewestFirst, cutPairLeg, lotsOnContract, pairEntryFills, pairCombined, pairNowPnl, sumPairPnl, pairLevelSane, type LadderPair } from './priceLadderPair.ts';
 
 const leg = (opt: 'CE' | 'PE', securityId: string, over: Record<string, unknown> = {}) => ({
   contract: { underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt, securityId, lotSize: 65, exchangeSegment: 'NSE_FNO', ...over },
@@ -604,4 +604,53 @@ test('Bug 9: placing +1 lot with sendWanted is cancelled on rollDay, not marked 
   const st: LadderState = { date: '2026-10-21', slices: [], events: [], pairs: [unsent] };
   const rolled = rollDay(st, '2026-10-22', 1000);
   assert.equal(rolled.pairs?.length ?? 0, 0); // cancelled and filtered out
+});
+
+// ── follow-up fixes to 3b744c5a ──
+test('joinedGroup: always includes the pair itself (armed / broken / rolling), links only by joinedTo', () => {
+  const armed = pair({ id: 'a' });
+  const broken = openReal({ id: 'b', state: 'broken' });
+  const rolling = openReal({ id: 'r', state: 'rolling' });
+  const s0: LadderState = { date: '2026-10-22', slices: [], events: [], pairs: [armed, broken, rolling] };
+  assert.deepEqual(joinedGroup(s0, armed).map(p => p.id), ['a']);
+  assert.deepEqual(joinedGroup(s0, broken).map(p => p.id), ['b']);
+  assert.deepEqual(joinedGroup(s0, rolling).map(p => p.id), ['r']);
+  // Two independent open pairs on the same strikes do not share; a +1 lot (joinedTo) does, from either end.
+  const p1 = openReal({ id: 'p1' }), p2 = openReal({ id: 'p2' }), kid = openReal({ id: 'k', joinedTo: 'p1' });
+  const s1: LadderState = { date: '2026-10-22', slices: [], events: [], pairs: [p1, p2, kid] };
+  assert.deepEqual(joinedGroup(s1, p1).map(p => p.id).sort(), ['k', 'p1']);
+  assert.deepEqual(joinedGroup(s1, kid).map(p => p.id).sort(), ['k', 'p1']);
+  assert.deepEqual(joinedGroup(s1, p2).map(p => p.id), ['p2']);
+});
+
+test('rolling: a new-strike entry order still working blocks any abort (no naked leg); it is polled', () => {
+  const p = openReal({ state: 'rolling', rollTo: { ce: c9450, steps: 2 }, exitWanted: 'Manual exit',
+    legs: { ce: { contract: c9450, orderId: 'n', entry: 'sent' }, pe: { ...leg('PE', '2'), avg: 150, held: 65, filledQty: 65, entry: 'filled' } } });
+  const r = planPairsTick(realSt(p), {}, at(10, 0), io());
+  assert.equal(one(r.next).state, 'rolling');
+  assert.deepEqual(r.jobs, [{ kind: 'pairSettle', id: 'p1' }]);
+  // Once it has settled (filled), the Exit cancels the roll and exits BOTH held legs.
+  const done = { ...p, legs: { ...p.legs, ce: { ...p.legs.ce, entry: 'filled' as const, filledQty: 65, avg: 110 } } };
+  const r2 = planPairsTick(realSt(done), {}, at(10, 1), io());
+  assert.equal(one(r2.next).state, 'exiting');
+});
+
+test('rolling: the combined bracket is not judged once a new strike has replaced an old one', () => {
+  // Short pair, target 280 on the OLD strikes; the new CE is far cheaper, so the "combined" would read 230.
+  const p = openReal({ state: 'rolling', rollTo: { ce: c9450, steps: 2 }, tgtY: 280, slY: 315,
+    legs: { ce: { contract: c9450 }, pe: { ...leg('PE', '2'), avg: 150, held: 65, filledQty: 65, entry: 'filled' } } });
+  const r = planPairsTick(realSt(p), { 3: 80, 2: 150 }, at(10, 0), io());
+  assert.equal(one(r.next).state, 'rolling');
+  assert.ok(!r.jobs.some(j => j.kind === 'pairClose'), 'no exit from a stale combined');
+  assert.equal(one(r.next).exitReason, undefined);
+});
+
+test('leg SL of a +1 lot uses its parent\'s level only on the same strike', () => {
+  const parent = openReal({ id: 'p0', legSlPct: 100, legs: { ce: { ...leg('CE', '1'), avg: 100, held: 65 }, pe: { ...leg('PE', '2'), avg: 100, held: 65 } } });
+  const kid = openReal({ id: 'k', joinedTo: 'p0', legSlPct: 100, legs: { ce: { ...leg('CE', '1'), avg: 130, held: 65 }, pe: { ...leg('PE', '2'), avg: 100, held: 65 } } });
+  assert.equal(legSlReason(kid, { 1: 205, 2: 100 }, parent), 'Leg SL CE 200.00');
+  // The parent rolled its CE to another strike: the kid falls back to its own fill (130 → 260).
+  const rolled = { ...parent, legs: { ...parent.legs, ce: { ...parent.legs.ce, contract: c9450 } } };
+  assert.equal(legSlReason(kid, { 1: 205, 2: 100 }, rolled), null);
+  assert.equal(legSlReason(kid, { 1: 261, 2: 100 }, rolled), 'Leg SL CE 260.00');
 });

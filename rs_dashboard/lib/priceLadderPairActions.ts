@@ -10,7 +10,7 @@ import {
   type ClickType, type LadderBroker, type LadderContract, type LadderProduct, type LadderSide, type LadderState, type LadderZones,
 } from '@/lib/priceLadder';
 import {
-  blendExitAvg, cleanLegSlPct, fillLeg, legHeld, lotsOnContract, splitOneLot, pairBias, pairCombined, pairLevelSane, pairName, patchPair, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS,
+  blendExitAvg, cleanLegSlPct, fillLeg, joinedGroup, legHeld, lotsOnContract, splitOneLot, pairBias, pairCombined, pairLevelSane, pairName, patchPair, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS,
   LEG_KEYS, type LadderPair, type PairLeg, type PairLegKey, type PairStructure,
 } from '@/lib/priceLadderPair';
 
@@ -56,37 +56,6 @@ const ok = (state: LadderState, extra: Record<string, unknown> = {}) => NextResp
 async function liveCombined(p: Pick<LadderPair, 'legs'>): Promise<number | null> {
   const prices = await loadPrices([], [p.legs.ce.contract, p.legs.pe.contract]);
   return pairCombined(p, prices.ltps);
-}
-
-/** Resolve the root pair ID by following joinedTo links. */
-function rootPairId(st: LadderState, id: string): string {
-  let cur = id;
-  const seen = new Set<string>([cur]);
-  while (true) {
-    const p = (st.pairs ?? []).find(y => y.id === cur);
-    if (!p?.joinedTo || seen.has(p.joinedTo)) break;
-    seen.add(p.joinedTo);
-    cur = p.joinedTo;
-  }
-  return cur;
-}
-
-/**
- * Open (and placing joined) pairs sharing `p`'s exits: pairs linked by explicit joinedTo relationships
- * (sharing the same root pair), same broker, mode, side, and contracts.
- *
- * Bug 8 fix: the old implementation matched by SL+TGT levels, so two independent same-strike no-bracket pairs would
- * silently share each other's leg-SL. Explicit joinedTo links are used now; two independently-armed pairs never share.
- */
-function joinedTo(st: LadderState, p: LadderPair): LadderPair[] {
-  const root = rootPairId(st, p.id);
-  return (st.pairs ?? []).filter(y =>
-    (y.state === 'open' || (y.state === 'placing' && !!y.joinedTo)) &&
-    y.broker === p.broker && y.mode === p.mode && y.side === p.side &&
-    y.legs.ce.contract.securityId === p.legs.ce.contract.securityId &&
-    y.legs.pe.contract.securityId === p.legs.pe.contract.securityId &&
-    rootPairId(st, y.id) === root
-  );
 }
 
 /** Apply `mutate` only if the pair still passes `okFn` inside the lock (the watcher can move it in between). */
@@ -255,7 +224,7 @@ async function modify(b: Record<string, unknown>, id: string): Promise<NextRespo
       // Only a moved SL restarts trailing (from here); a target-only move leaves the trail's base alone.
       if (b.slY != null) Object.assign(patch, { slY, slY0: slY, trailFrom: c, peakY: c });
       // Every pair on these exits moves together (a '+1 lot' shares its pair's target / SL).
-      const all = joinedTo(st, (st.pairs ?? []).find(y => y.id === id)!);
+      const all = joinedGroup(st, (st.pairs ?? []).find(y => y.id === id)!);
       let next = st;
       for (const y of all) next = patchPair(next, y.id, patch);
       return pushEvent(next, ev('info', `Pair bracket moved: TGT ${tgtY ?? '—'} / SL ${slY}${all.length > 1 ? ` (${all.length} pairs)` : ''}`, id));
@@ -286,7 +255,7 @@ async function trail(b: Record<string, unknown>, id: string): Promise<NextRespon
     const trailPts = trailedBracket(y.bracket!, req, MIN_PAIR_TRAIL_PTS).trailPts ?? 0;
     label = trailPts ? `Trailing SL ${trailPts} pts behind the best combined premium` : 'Trailing off';
     // The same trail on every pair sharing these exits.
-    const all = joinedTo(st, y);
+    const all = joinedGroup(st, y);
     let next = st;
     for (const z of all) {
       const bracket = trailedBracket(z.bracket!, { abs: trailPts, delta: null }, MIN_PAIR_TRAIL_PTS);
@@ -506,7 +475,7 @@ export async function pairAction(b: Record<string, unknown>): Promise<NextRespon
       const pct = off ? null : cleanLegSlPct(b.legSlPct, p0.side);
       if (!off && pct == null) return bad(p0.side === 'SELL' ? 'Leg SL must be 1-1000 % (0 = off)' : 'Leg SL must be 1-99 % (0 = off)');
       const r = await guarded(id, y => y.state === 'armed' || y.state === 'open', st => {
-        const all = joinedTo(st, (st.pairs ?? []).find(y => y.id === id)!);
+        const all = joinedGroup(st, (st.pairs ?? []).find(y => y.id === id)!);
         let next = st;
         for (const y of all) next = patchPair(next, y.id, { legSlPct: pct ?? undefined });
         return pushEvent(next, ev('info', pct ? `Leg SL ${pct}% — either leg ${p0.side === 'SELL' ? 'rising' : 'falling'} that far from its fill exits both` : 'Leg SL off', id));
@@ -521,7 +490,7 @@ export async function pairAction(b: Record<string, unknown>): Promise<NextRespon
       // Every joined pair exits together so adding lots doesn't leave orphan positions.
       const r = await guarded(id, y => y.state === 'open' || y.state === 'broken' || y.state === 'rolling', st => {
         const cur = (st.pairs ?? []).find(y => y.id === id)!;
-        const all = joinedTo(st, cur);
+        const all = joinedGroup(st, cur);
         let next = st;
         for (const y of all) next = patchPair(next, y.id, { exitWanted: 'Manual exit' });
         return pushEvent(next, ev('info', `Pair exit requested${all.length > 1 ? ` (${all.length} pairs)` : ''}`, id));
