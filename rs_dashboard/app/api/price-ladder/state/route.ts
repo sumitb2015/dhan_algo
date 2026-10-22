@@ -165,7 +165,7 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   const level = b.kind === 'xy' ? Number(b.level) : snapToStep(Number(b.level), OPTION_TICK);
 
   if (b.kind === 'xy') {
-    if (!spot || !spotFresh(spot.at, now)) return bad(c.ref ? `No fresh ${u} futures price yet — try again in a moment` : `No fresh ${u} spot — start the indices feed`);
+    if (!spot || !spotFresh(spot.at, now)) return bad(`No fresh live ${u}${c.ref ? ' futures' : ''} price yet — the WebSocket feed may still be subscribing, or the market is quiet or shut; try again in a moment`);
     if (!levelSane(level, spot.spot)) return bad(`Level ${level} is more than 5% from spot ${spot.spot}`);
   } else if (!(ltp > 0)) {
     return bad('No live option price yet');

@@ -1,9 +1,9 @@
 import fs from 'fs';
 import path from 'path';
-import { PROJECT_ROOT } from '@/lib/pyExec';
+import { spawn } from 'child_process';
+import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
 import { withFileLock, writeJsonAtomic } from '@/lib/lockedJsonFile';
 import { getDhanCredentials, dhanGet, dhanDelete, dhanPost } from '@/lib/dhanToken';
-import { pacedQuoteCall } from '@/lib/dhanQuotePacer';
 import { placeDhanOrder } from '@/lib/dhanPlaceOrder';
 import { reserveOrderSlot } from '@/lib/dhanOrderPacer';
 import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
@@ -39,9 +39,10 @@ const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
 const STATE_FILE = path.join(DEBUG_DIR, 'price_ladder_state.json');
 const LOCK_FILE = `${STATE_FILE}.lock`;
 const LOCK_STALE_MS = 8000;
+/** A SIM fill / exit with no option price yet waits up to this many 0.5 s reads (the price bridge's first subscription). */
+const SIM_PRICE_WAIT_TRIES = 24;
 const TICK_MS = 1000;
 const RECONCILE_MS = 5000;
-const REST_QUOTE_MS = 2000;
 const TAG = '[price-ladder]';
 
 /** Dhan index security ids for spot (IDX_I). */
@@ -108,7 +109,7 @@ const tsOf = (v: unknown): number => { const t = Date.parse(String(v ?? '')); re
 /**
  * Spot from the indices hub file (live_indices_ws.py: the dedicated index feed), or null. The options and Focus Tool
  * bridge files are NOT used for spot: they stamp one file-wide updated_at whenever any option ticks, so a frozen index
- * value there would pass as fresh. SENSEX is not on the hub and comes from the paced REST quote instead.
+ * value there would pass as fresh. SENSEX is not in that file: it comes from price_ladder_ws.py (loadPrices).
  */
 function spotFromFiles(u: string, memo: FileMemo): SpotRead | null {
   const hub = readJson('live_indices_quotes.json', memo);
@@ -119,22 +120,20 @@ function spotFromFiles(u: string, memo: FileMemo): SpotRead | null {
   // The hub restamps updated_at every ~2 s from its in-memory ticks even when no index tick arrived, so the stamp alone
   // cannot tell a live index from a frozen one. The spot's own age is when its value last CHANGED (+ SPOT_STILL_MS of
   // allowance, an index can print the same value for a few seconds): a feed that stops ticking goes stale on its own.
-  const seen = spotMoved.get(u);
-  if (!seen || seen.spot !== spot) spotMoved.set(u, { spot, at: fileAt || Date.now() });
-  const movedAt = spotMoved.get(u)!.at;
-  return { spot, at: Math.min(fileAt, movedAt + SPOT_STILL_MS), source: 'indices' };
+  // A value first seen (a server restart, a feed that was already frozen) is not fresh until it is seen to change:
+  // recorded at 0, so a leftover value can never look like a live cross. Keyed apart from any other source.
+  const k = `file:${u}`;
+  const seen = spotMoved.get(k);
+  if (!seen) spotMoved.set(k, { spot, at: 0 });
+  else if (seen.spot !== spot) spotMoved.set(k, { spot, at: fileAt || Date.now() });
+  const movedAt = spotMoved.get(k)!.at;
+  return { spot, at: movedAt ? Math.min(fileAt, movedAt + SPOT_STILL_MS) : 0, source: 'indices' };
 }
 
 /** How long an index may print an unchanged value before it is treated as a frozen feed. */
 const SPOT_STILL_MS = 15_000;
 /** The same for an MCX futures axis: crude mini can sit on one price longer in a quiet evening, so it gets more room. */
 const FUT_STILL_MS = 60_000;
-/** When `key`'s value last changed (recorded on first sight). */
-function movedAt(key: string, v: number, at: number): number {
-  const seen = spotMoved.get(key);
-  if (!seen || seen.spot !== v) spotMoved.set(key, { spot: v, at });
-  return spotMoved.get(key)!.at;
-}
 /** Last value and when it last changed, per underlying (in this server process; survives the module via globalThis). */
 const spotMoved: Map<string, { spot: number; at: number }> =
   ((globalThis as { __priceLadderSpotMoved?: Map<string, { spot: number; at: number }> }).__priceLadderSpotMoved ??= new Map());
@@ -160,110 +159,151 @@ function optionLtpFromFiles(c: LadderContract, now: number, memo: FileMemo): num
   return null;
 }
 
-// One paced REST call (index spots + option LTPs in a single /marketfeed/ltp request) at most every 2 s, for what no
-// file could supply. Every caller (the watcher's tick, each tab's poll) registers what it needs in `wanted`, and each
-// fetch asks for everything wanted recently — so callers asking for different contracts never starve each other.
-// Values are cached per key with their own time. Shares the account-wide quote lane with every other dashboard caller.
-const WANT_TTL_MS = 10_000;
-const wantedSpots = new Map<string, number>();
-const wantedContracts = new Map<string, { c: LadderContract; at: number }>();
-const restSpots = new Map<string, { v: number; at: number }>();
-const restLtps = new Map<string, { v: number; at: number }>();
-let restAt = 0;
-const attemptedAt = new Map<string, number>();
-let restInFlight: Promise<void> | null = null;
+// ── WebSocket prices ───────────────────────────────────────────────────
+// Every price the ladder trades on comes from a Dhan WebSocket — never a REST quote, whose shared lane slows to one call
+// per 10+ s after a 429 (seen live: CRUDEOILM's futures axis went stale with every reply ~31 s late). Index spots ride
+// live_indices_ws.py's file and option LTPs the options bridges' files. Everything else (SENSEX, an MCX option month's
+// futures axis, strikes no bridge covers) comes from scripts/tools/price_ladder_ws.py: a Python consumer of the shared
+// market data hub (ONE Dhan connection; the hub only accepts Python consumers), which this server starts on demand. It
+// reads what this process wants from debug/price_ladder_ws_wanted_<pid>.json and writes per-instrument LTPs with
+// when each was first asked for (`since_ms`) and last CHANGED (`changed_ms`) — the hub keeps old ticks after an
+// unsubscribe, so a value being present proves nothing about its age.
+// No WebSocket price = no price: levels pause and SIM fills wait rather than act on an old quote.
 
-async function refreshRest(underlyings: string[], contracts: LadderContract[]): Promise<void> {
+const WS_WANTED_FILE = path.join(DEBUG_DIR, `price_ladder_ws_wanted_${process.pid}.json`);
+const WS_QUOTES = 'price_ladder_ws_quotes.json';
+const WS_STATUS_FILE = path.join(DEBUG_DIR, 'price_ladder_ws_status.json');
+const WS_START_LOCK = path.join(DEBUG_DIR, 'price_ladder_ws_start.lock');
+const WS_LOG = path.join(DEBUG_DIR, 'price_ladder_ws.log');
+const WS_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'price_ladder_ws.py');
+/** An instrument nobody has asked for in this long is dropped from the wanted list. */
+const WS_WANT_TTL_MS = 30_000;
+/** The bridge ignores a wanted file 60 s old: rewrite well inside that. */
+const WS_REWRITE_MS = 20_000;
+/** The bridge's quotes file / heartbeat older than this = the bridge is not running. */
+const WS_FILE_STALE_MS = 3_000;
+const WS_HEARTBEAT_STALE_MS = 10_000;
+const WS_START_EVERY_MS = 30_000;
+/** A subscription this old has had the hub's replay of the current last packet (hub scans every 3 s). */
+const WS_SETTLED_MS = 8_000;
+
+interface WsState { want: Map<string, number>; written: string; writtenAt: number; startAt: number }
+const ws: WsState = ((globalThis as { __priceLadderWs?: WsState }).__priceLadderWs ??= { want: new Map(), written: '', writtenAt: 0, startAt: 0 });
+
+interface WsQuote { ltp: number; ltt?: string; changed_ms: number | null; since_ms: number }
+
+/** Ask the bridge for an instrument; returns its quote key (`SEGMENT:securityId`). */
+function wsWant(segment: string, securityId: string): string {
+  const k = `${segment}:${securityId}`;
+  ws.want.set(k, Date.now());
+  return k;
+}
+
+/** This process's wanted file (written on change and every 20 s) and the bridge started if it is not running. */
+function syncWs(memo: FileMemo): void {
   const now = Date.now();
-  // A spot key is an index name (IDX_I) or names a contract (an MCX futures month: its own segment).
-  for (const u of underlyings) if (INDEX_IDS[u] || parseSpotKey(u)) wantedSpots.set(u, now);
-  for (const c of contracts) wantedContracts.set(c.securityId, { c, at: now });
-  // A fetch already under way may not include keys asked for after it started: wait for it, then fetch again at once
-  // if anything asked for here is still missing (the quote lane itself spaces the calls). Otherwise one per 2 s.
-  if (restInFlight) await restInFlight;
-  // "Missing" = no fresh value AND not asked of Dhan in the last 2 s: a key Dhan returns nothing for (an illiquid strike)
-  // or a run of failed fetches then waits for the normal cadence instead of making every caller fetch again.
-  const have = (m: Map<string, { at: number }>, k: string) => { const r = m.get(k); return !!r && Date.now() - r.at <= SPOT_STALE_MS; };
-  const triedRecently = (k: string) => Date.now() - (attemptedAt.get(k) ?? 0) < REST_QUOTE_MS;
-  const missing = underlyings.some(u => (INDEX_IDS[u] || parseSpotKey(u)) && !have(restSpots, u) && !triedRecently(`u:${u}`))
-    || contracts.some(c => !have(restLtps, c.securityId) && !triedRecently(`c:${c.securityId}`));
-  if (restInFlight) return restInFlight;
-  if (!missing && Date.now() - restAt < REST_QUOTE_MS) return;
-  for (const [k, at] of wantedSpots) if (now - at > WANT_TTL_MS) wantedSpots.delete(k);
-  for (const [k, w] of wantedContracts) if (now - w.at > WANT_TTL_MS) wantedContracts.delete(k);
-  const us = [...wantedSpots.keys()];
-  const cs = [...wantedContracts.values()].map(w => w.c);
-  const body: Record<string, number[]> = {};
-  for (const u of us) {
-    const ref = parseSpotKey(u);
-    if (ref) (body[ref.segment] ??= []).push(Number(ref.securityId));
-    else (body.IDX_I ??= []).push(Number(INDEX_IDS[u]));
-  }
-  for (const c of cs) (body[c.exchangeSegment] ??= []).push(Number(c.securityId));
-  if (!Object.keys(body).length) return;
-  restAt = Date.now();
-  for (const u of us) attemptedAt.set(`u:${u}`, restAt);
-  for (const c of cs) attemptedAt.set(`c:${c.securityId}`, restAt);
-  restInFlight = (async () => {
-    try {
-      const res = await pacedQuoteCall(() => dhanPost('/marketfeed/ltp', body, 5000)) as { data?: Record<string, Record<string, { last_price?: number }>> };
-      const at = Date.now();
-      for (const u of us) {
-        const ref = parseSpotKey(u);
-        const v = Number(ref ? res.data?.[ref.segment]?.[ref.securityId]?.last_price : res.data?.IDX_I?.[INDEX_IDS[u]]?.last_price) || 0;
-        if (v > 0) restSpots.set(u, { v, at });
-      }
-      for (const c of cs) {
-        const v = Number(res.data?.[c.exchangeSegment]?.[c.securityId]?.last_price) || 0;
-        if (v > 0) restLtps.set(c.securityId, { v, at });
-      }
-    } catch (err) {
-      const e = err as { busy?: boolean; status?: number };
-      if (!e.busy && e.status !== 429) console.warn(`${TAG} REST quote failed:`, (err as Error).message);
-    } finally {
-      restInFlight = null;
+  for (const [k, at] of ws.want) if (now - at > WS_WANT_TTL_MS) ws.want.delete(k);
+  const keys = [...ws.want.keys()].sort();
+  const sig = keys.join(',');
+  try {
+    if (!keys.length) {
+      if (ws.written) { fs.rmSync(WS_WANTED_FILE, { force: true }); ws.written = ''; }
+      return;
     }
-  })();
-  return restInFlight;
+    if (sig !== ws.written || now - ws.writtenAt >= WS_REWRITE_MS) {
+      writeJsonAtomic(WS_WANTED_FILE, { pid: process.pid, updated_ms: now, instruments: keys.map(k => k.split(':')) });
+      ws.written = sig; ws.writtenAt = now;
+    }
+  } catch (err) {
+    if (warnOnce('ws-wanted', 60_000)) console.warn(`${TAG} could not write the price bridge request:`, (err as Error).message);
+    return;
+  }
+  if (bridgeRunning(memo) || now - ws.startAt < WS_START_EVERY_MS) return;
+  ws.startAt = now;
+  startBridge();
+}
+
+function bridgeRunning(memo: FileMemo): boolean {
+  const q = readJson(WS_QUOTES, memo);
+  if (q && Date.now() - Number(q.updated_ms) <= WS_FILE_STALE_MS) return true;
+  try {
+    const st = JSON.parse(fs.readFileSync(WS_STATUS_FILE, 'utf8')) as { status?: string; heartbeat_ms?: number };
+    return st.status === 'RUNNING' && Date.now() - Number(st.heartbeat_ms) <= WS_HEARTBEAT_STALE_MS;
+  } catch { return false; }
+}
+
+/** Spawn the bridge once (O_EXCL lock, stolen after a minute); the bridge itself refuses to run twice. */
+function startBridge(): void {
+  try {
+    try {
+      fs.writeFileSync(WS_START_LOCK, String(process.pid), { flag: 'wx' });
+    } catch {
+      const age = Date.now() - fs.statSync(WS_START_LOCK).mtimeMs;
+      if (age < 60_000) return;                         // another process is starting it
+      fs.writeFileSync(WS_START_LOCK, String(process.pid));
+    }
+    const log = fs.openSync(WS_LOG, 'a');
+    const child = spawn(PYTHON_EXE, [WS_SCRIPT], { cwd: PROJECT_ROOT, detached: true, stdio: ['ignore', log, log], windowsHide: true });
+    child.on('error', err => console.warn(`${TAG} price bridge failed to start:`, err.message));
+    child.unref();
+    fs.closeSync(log);
+    // Released once the bridge has had time to write its heartbeat; a crash before then is retried 30 s later.
+    setTimeout(() => { try { fs.rmSync(WS_START_LOCK, { force: true }); } catch { /* best effort */ } }, 15_000).unref?.();
+    console.log(`${TAG} starting the price bridge (price_ladder_ws.py)`);
+  } catch (err) {
+    console.warn(`${TAG} could not start the price bridge:`, (err as Error).message);
+  }
+}
+
+/** A bridge quote, or null when the bridge is not running or does not have it. */
+function wsQuote(key: string, memo: FileMemo): WsQuote | null {
+  const f = readJson(WS_QUOTES, memo);
+  if (!f || Date.now() - Number(f.updated_ms) > WS_FILE_STALE_MS || f.hub_alive === false) return null;
+  const q = (f.quotes as Record<string, WsQuote> | undefined)?.[key];
+  return q && Number(q.ltp) > 0 ? q : null;
 }
 
 export interface PriceView { spots: Record<string, SpotRead>; ltps: Record<string, number> }
 
 /**
  * Spots for `underlyings` (spot keys: an index name, or a futures contract's key from spotKey()) and LTPs for
- * `contracts`: files first (indices only — a futures axis always comes from the paced REST quote), REST for the rest.
+ * `contracts`, all from WebSocket feeds. A spot's age is when its value last CHANGED (a frozen feed goes stale on its
+ * own; a value never seen to change is not fresh). An option LTP needs a settled subscription or a change since.
  */
 export async function loadPrices(underlyings: string[], contracts: LadderContract[]): Promise<PriceView> {
   const now = Date.now();
   const memo: FileMemo = new Map();
   const spots: Record<string, SpotRead> = {};
   const ltps: Record<string, number> = {};
-  const needU: string[] = [];
   for (const u of underlyings) {
-    const f = parseSpotKey(u) ? null : spotFromFiles(u, memo);
-    if (f && spotFresh(f.at, now)) spots[u] = f; else needU.push(u);
+    const fut = parseSpotKey(u);
+    const f = fut ? null : spotFromFiles(u, memo);
+    if (f && spotFresh(f.at, now)) { spots[u] = f; continue; }
+    const key = fut ? wsWant(fut.segment, fut.securityId) : INDEX_IDS[u] ? wsWant('IDX_I', INDEX_IDS[u]) : null;
+    const q = key ? wsQuote(key, memo) : null;
+    if (q && q.changed_ms != null) {
+      // Fresh while it keeps changing: the still-allowance (an index may print one value for a few seconds, crude
+      // mini longer in a quiet evening) after its last change.
+      const still = fut ? FUT_STILL_MS : SPOT_STILL_MS;
+      spots[u] = { spot: q.ltp, at: Math.min(now, q.changed_ms + still), source: 'ws' };
+    } else if (f) {
+      spots[u] = f;                                     // the stale file value, reported as stale
+    } else if (q) {
+      spots[u] = { spot: q.ltp, at: 0, source: 'ws (not moved yet)' };
+    }
   }
-  const needC: LadderContract[] = [];
   const seen = new Set<string>();
   for (const c of contracts) {
     if (seen.has(c.securityId)) continue;
     seen.add(c.securityId);
     const v = optionLtpFromFiles(c, now, memo);
-    if (v) ltps[c.securityId] = v; else needC.push(c);
+    if (v) { ltps[c.securityId] = v; continue; }
+    const q = wsQuote(wsWant(c.exchangeSegment, c.securityId), memo);
+    // An option may not trade for minutes, so its LTP is not aged by change — but a value is only trusted once the
+    // subscription has had time for the hub to replay the current packet (or it has changed since we asked).
+    if (q && (q.changed_ms != null || now - q.since_ms >= WS_SETTLED_MS)) ltps[c.securityId] = q.ltp;
   }
-  if (needU.length || needC.length) {
-    await refreshRest(needU, needC);
-    for (const u of needU) {
-      const r = restSpots.get(u);
-      if (!r) continue;
-      // A futures axis has no feed of its own to go quiet: REST keeps returning the last price, stamped with the fetch
-      // time. Age it by when the value last CHANGED (as the indices hub is), so a frozen price pauses levels and stops.
-      const fut = parseSpotKey(u);
-      const at = fut ? Math.min(r.at, movedAt(u, r.v, r.at) + FUT_STILL_MS) : r.at;
-      spots[u] = { spot: r.v, at, source: 'rest' };
-    }
-    for (const c of needC) { const r = restLtps.get(c.securityId); if (r && Date.now() - r.at <= SPOT_STALE_MS) ltps[c.securityId] = r.v; }
-  }
+  syncWs(memo);
   return { spots, ltps };
 }
 
@@ -525,9 +565,13 @@ async function runJobs(s: LadderState, jobs: Job[], prices: PriceView): Promise<
     if (!x) return;
     let ltp = prices.ltps[x.contract.securityId] ?? 0;
     // A SIM fill or exit needs the option price; a contract armed moments ago may not be in this tick's snapshot yet
-    // (seen live: the first cross on a new strike re-armed for lack of it). Ask for it now — loadPrices waits for a fetch.
+    // (seen live: the first cross on a new strike re-armed for lack of it). Wait for it — asking registers it with the
+    // price bridge, whose first subscription takes a few seconds (the job runs on its own; other stops keep ticking).
     if (!(ltp > 0) && x.mode === 'sim' && (j.kind === 'open' || j.kind === 'close')) {
-      ltp = (await loadPrices([], [x.contract])).ltps[x.contract.securityId] ?? 0;
+      for (let i = 0; i < SIM_PRICE_WAIT_TRIES && !(ltp > 0); i++) {
+        ltp = (await loadPrices([], [x.contract])).ltps[x.contract.securityId] ?? 0;
+        if (!(ltp > 0)) await new Promise(r => setTimeout(r, 500));
+      }
     }
     const done = (apply: (st: LadderState) => LadderState) => commit(x.id, x.state, apply);
 
