@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect } from 'react';
-import { Settings, Sun, Moon, Coffee, Check } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Settings, Sun, Moon, Coffee, Check, Clock } from 'lucide-react';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
 } from '@/components/ui/sheet';
@@ -29,6 +29,8 @@ const THEME_OPTIONS: { value: ThemeMode; label: string; icon: typeof Sun }[] = [
 export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const theme = useThemeMode();
   const headingFont = useHeadingFont();
+  const [mcxCutoff, setMcxCutoff] = useState('23:15');
+  const [savingCutoff, setSavingCutoff] = useState(false);
 
   // Preferences persist to localStorage the moment they're picked (no
   // separate Save step) — same immediacy as the standalone ThemeToggle, so
@@ -37,6 +39,34 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
     initTheme();
     initPreferences();
   }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    fetch('/api/price-ladder/settings')
+      .then(r => r.json())
+      .then(j => {
+        if (j.success && j.settings?.mcxAutoExitTime) {
+          setMcxCutoff(j.settings.mcxAutoExitTime);
+        }
+      })
+      .catch(() => {});
+  }, [open]);
+
+  const updateCutoff = async (time: string) => {
+    setMcxCutoff(time);
+    setSavingCutoff(true);
+    try {
+      await fetch('/api/price-ladder/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mcxAutoExitTime: time }),
+      });
+    } catch {
+      // Best effort
+    } finally {
+      setSavingCutoff(false);
+    }
+  };
 
   return (
     <Sheet open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
@@ -122,11 +152,48 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               ))}
             </div>
           </div>
+
+          <Separator className="bg-zinc-800/60" />
+
+          {/* Trading & Sessions */}
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600">
+                Commodity Trading Cutoff (MCX / CRUDEOILM)
+              </span>
+              {savingCutoff && <span className="text-[10px] text-amber-400">Saving…</span>}
+            </div>
+            <p className="text-[11px] text-zinc-500 leading-relaxed">
+              Trading threshold and MIS auto square-off time for CRUDEOILM. After this time, new orders and armed levels are blocked ahead of session close.
+            </p>
+            <div className="grid grid-cols-4 gap-2">
+              {(['23:00', '23:15', '23:20', '23:25'] as const).map(time => {
+                const active = mcxCutoff === time;
+                return (
+                  <button
+                    key={time}
+                    type="button"
+                    onClick={() => void updateCutoff(time)}
+                    className={cn(
+                      'relative flex flex-col items-center justify-center py-2 px-1 rounded-xl border text-xs font-mono transition-all cursor-pointer',
+                      active
+                        ? 'border-amber-500/50 bg-amber-500/10 text-amber-300 font-bold'
+                        : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700',
+                    )}
+                  >
+                    {time}
+                    <span className="text-[9px] font-sans font-normal text-zinc-500">
+                      {time === '23:15' ? 'Default' : time === '23:00' ? '11:00 PM' : 'IST'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
 
         <div className="flex-none px-5 py-3 border-t border-zinc-800/60 text-[10px] text-zinc-600">
-          Preferences are stored per-browser (localStorage) and apply immediately —
-          no separate save step, and nothing is sent to the server.
+          Appearance is saved per-browser; trading cutoff settings are synced to the server engine.
         </div>
       </SheetContent>
     </Sheet>

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight } from 'lucide-react';
+import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, Clock } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from '@/components/NavBar';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
@@ -450,7 +450,7 @@ export default function PriceLadder() {
   // Each error is shown only in the mode it belongs to: a pair leg's in Pair mode, the single contract's in XY / Plain.
   const contractError = matches && mode !== 'pair' ? data?.contractError ?? null : null;
   const pairError = matches && mode === 'pair' ? data?.pairError ?? null : null;
-  const sessionNote = sessionFor(underlying, istDay()).note ?? null;
+  const sessionNote = sessionFor(underlying, istDay(), data?.state?.settings?.mcxAutoExitTime).note ?? null;
   // MCX on the ladder is Dhan only (the server refuses the others too).
   const brokerUnsupported = mcx && broker !== 'dhan';
   // False only once the status says so (unknown = not blocked; the server still checks every REAL order).
@@ -1092,6 +1092,23 @@ export default function PriceLadder() {
               </button>
               <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow price</label>
               {held && <span className="text-[10px] text-amber-300" title="The rows stay put while the pointer is on the ladder, so a price tick cannot move a level under the mouse; they re-centre when it leaves">Rows held</span>}
+              {mcx && (
+                <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-zinc-700 bg-zinc-900/60 text-xs">
+                  <Clock className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="text-zinc-400">Cutoff:</span>
+                  <select
+                    value={data?.state?.settings?.mcxAutoExitTime ?? '23:15'}
+                    onChange={e => void post({ action: 'settings', mcxAutoExitTime: e.target.value })}
+                    className="bg-transparent font-mono font-bold text-amber-300 focus:outline-none cursor-pointer"
+                    title="MCX trading threshold & MIS auto square-off time. After this time, new orders and armed levels are blocked."
+                  >
+                    <option value="23:00" className="bg-zinc-900 text-zinc-100">23:00 IST</option>
+                    <option value="23:15" className="bg-zinc-900 text-zinc-100">23:15 IST (Default)</option>
+                    <option value="23:20" className="bg-zinc-900 text-zinc-100">23:20 IST</option>
+                    <option value="23:25" className="bg-zinc-900 text-zinc-100">23:25 IST</option>
+                  </select>
+                </div>
+              )}
               <button
                 type="button" disabled={busy || pendingHere === 0}
                 onClick={() => void post({ action: 'cancelAll', securityId, broker, mode: pageMode })}

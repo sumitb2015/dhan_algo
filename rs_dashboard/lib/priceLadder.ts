@@ -48,14 +48,26 @@ export const SESSION_CLOSE_HHMM = 1530;
 export const MCX_LADDER_UNDERLYINGS = ['CRUDEOILM'];
 export const isMcxUnderlying = (u: string) => MCX_LADDER_UNDERLYINGS.includes(u);
 
+export function parseHhmm(str?: string | null): number | null {
+  if (!str || !/^\d{1,2}:\d{2}$/.test(str)) return null;
+  const [h, m] = str.split(':').map(Number);
+  if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+  return h * 100 + m;
+}
+
 export interface LadderSession { open: number; close: number; autoExit: number; autoExitLabel: string; note?: string }
 /**
  * Trading hours per underlying for one IST date (hhmm). NSE/BSE F&O: 09:15-15:30, MIS squared off at 15:17. MCX:
- * lib/mcxSession.ts — 09:00 to 23:30 (US DST) or 23:55, MIS squared off 30 min before, MCX holidays and weekends
+ * lib/mcxSession.ts — 09:00 to 23:30 (US DST) or 23:55, MIS squared off at 23:15 (configurable), MCX holidays and weekends
  * closed (open === close: nothing fires, REAL orders are held).
  */
-export function sessionFor(underlying: string, day: string): LadderSession {
-  if (isMcxUnderlying(underlying)) return mcxSession(day);
+export function sessionFor(underlying: string, day: string, customMcxAutoExit?: string | number | null): LadderSession {
+  if (isMcxUnderlying(underlying)) {
+    const hhmm = typeof customMcxAutoExit === 'string'
+      ? parseHhmm(customMcxAutoExit)
+      : (typeof customMcxAutoExit === 'number' ? customMcxAutoExit : null);
+    return mcxSession(day, hhmm);
+  }
   return { open: SESSION_OPEN_HHMM, close: SESSION_CLOSE_HHMM, autoExit: AUTO_EXIT_HHMM, autoExitLabel: '15:17' };
 }
 
@@ -182,6 +194,10 @@ export interface LadderState {
   pairs?: LadderPair[];
   /** Bumped on every write: a reader that already showed a newer revision ignores an older one arriving late. */
   rev?: number;
+  /** Configurable settings (e.g. MCX auto-exit time). */
+  settings?: {
+    mcxAutoExitTime?: string;
+  };
 }
 
 export const emptyLadderState = (date: string): LadderState => ({ date, slices: [], events: [] });
@@ -526,7 +542,7 @@ export function rollDay(s: LadderState, today: string, now: number): LadderState
     })
     // Drop the cancelled ones that were just created (they have nothing to show next day).
     .filter(p => p.state !== 'cancelled');
-  return { date: today, slices, events: [], liveArmedOn: undefined, ...(pairs.length ? { pairs } : {}), ...(s.rev != null ? { rev: s.rev } : {}) };
+  return { date: today, slices, events: [], liveArmedOn: undefined, ...(pairs.length ? { pairs } : {}), ...(s.rev != null ? { rev: s.rev } : {}), ...(s.settings ? { settings: s.settings } : {}) };
 }
 
 /** REAL opens need today's arm. Exits never do. */
@@ -577,7 +593,7 @@ export function planTick(
   for (const x of s.slices) {
     if (!isLive(x)) continue;
     // Hours are the contract's own market's (NSE/BSE vs MCX).
-    const sess = sessionFor(x.contract.underlying, today);
+    const sess = sessionFor(x.contract.underlying, today, s.settings?.mcxAutoExitTime);
     const afterClose = hhmm >= sess.autoExit;
     const sessionOpen = hhmm >= sess.open && hhmm < sess.close;
     const at = sess.autoExitLabel;

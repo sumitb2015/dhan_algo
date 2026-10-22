@@ -373,7 +373,9 @@ const EVENING = Date.parse('2026-10-22T14:30:00Z');       // 20:00 IST
 const LATE = Date.parse('2026-10-22T17:35:00Z');          // 23:05 IST
 
 test('MCX: session hours and the futures-month axis key', () => {
-  assert.deepEqual(sessionFor('CRUDEOILM', '2026-10-22'), { open: 900, close: 2330, autoExit: 2300, autoExitLabel: '23:00' });
+  assert.deepEqual(sessionFor('CRUDEOILM', '2026-10-22'), { open: 900, close: 2330, autoExit: 2315, autoExitLabel: '23:15' });
+  assert.deepEqual(sessionFor('CRUDEOILM', '2026-10-22', '23:00'), { open: 900, close: 2330, autoExit: 2300, autoExitLabel: '23:00' });
+  assert.deepEqual(sessionFor('CRUDEOILM', '2026-10-22', '23:20'), { open: 900, close: 2330, autoExit: 2320, autoExitLabel: '23:20' });
   assert.equal(sessionFor('NIFTY', '2026-10-22').autoExitLabel, '15:17');
   assert.equal(spotKey(crude), 'CRUDEOILM@MCX_COMM:573423');
   assert.deepEqual(parseSpotKey(spotKey(crude)), { segment: 'MCX_COMM', securityId: '573423' });
@@ -403,9 +405,11 @@ test('MCX: an index price under the plain underlying name never drives a CRUDEOI
 });
 
 test('MCX calendar: US-DST close, holidays, weekends', () => {
-  // Summer (US DST): 23:30 close, MIS out at 23:00. Winter from Mon 2 Nov 2026: 23:55 / 23:25.
+  // Summer (US DST): 23:30 close, default MIS out at 23:15. Winter from Mon 2 Nov 2026: 23:55 / 23:40.
   assert.equal(mcxSession('2026-10-30').close, 2330);
-  assert.deepEqual(mcxSession('2026-11-02'), { open: 900, close: 2355, autoExit: 2325, autoExitLabel: '23:25' });
+  assert.deepEqual(mcxSession('2026-10-30'), { open: 900, close: 2330, autoExit: 2315, autoExitLabel: '23:15' });
+  assert.deepEqual(mcxSession('2026-11-02'), { open: 900, close: 2355, autoExit: 2340, autoExitLabel: '23:40' });
+  assert.deepEqual(mcxSession('2026-11-02', 2320), { open: 900, close: 2355, autoExit: 2320, autoExitLabel: '23:20' });
   assert.equal(mcxSession('2027-03-05').close, 2355);
   assert.equal(mcxSession('2027-03-15').close, 2330);           // DST starts Sun 14 Mar 2027
   assert.equal(usDstActive('2026-03-09'), true);
@@ -429,11 +433,12 @@ test('MCX: nothing fires and REAL exits are held on an MCX holiday', () => {
   assert.equal(r.next.slices.find(x => x.id === 'o')!.state, 'open');
 });
 
-test('MCX: MIS squared off at 23:00 IST, NRML kept', () => {
+test('MCX: MIS squared off at 23:15 IST, NRML kept', () => {
+  const AFTER_AUTO_EXIT = Date.parse('2026-10-22T17:46:00Z');    // 23:16 IST
   const open = (id: string, product: 'MIS' | 'NRML') => slice({ id, contract: crude, product, lots: 1, qty: 1, filledQty: 1, avg: 100, openedAt: EVENING });
-  const r = planTick(st([open('m', 'MIS'), open('r', 'NRML')]), { spots: {}, ltps: { '900': 101 } }, LATE, io);
+  const r = planTick(st([open('m', 'MIS'), open('r', 'NRML')]), { spots: {}, ltps: { '900': 101 } }, AFTER_AUTO_EXIT, io);
   assert.deepEqual(r.jobs, [{ kind: 'close', id: 'm' }]);
-  assert.equal(r.next.slices.find(x => x.id === 'm')!.exitReason, 'Auto square-off 23:00');
+  assert.equal(r.next.slices.find(x => x.id === 'm')!.exitReason, 'Auto square-off 23:15');
 });
 
 test('rollDay keeps the state revision (a page holding rev N must accept the new day)', () => {

@@ -29,17 +29,19 @@ export function usDstActive(iso: string): boolean {
 
 const label = (hhmm: number) => `${String(Math.floor(hhmm / 100)).padStart(2, '0')}:${String(hhmm % 100).padStart(2, '0')}`;
 
-export function mcxSession(iso: string): McxSession {
+export function mcxSession(iso: string, customAutoExit?: number | null): McxSession {
   const shut = (note: string): McxSession => ({ open: 2400, close: 2400, autoExit: 2400, autoExitLabel: '—', note });
   const dow = new Date(`${iso}T00:00:00Z`).getUTCDay();
   if (dow === 0 || dow === 6) return shut('MCX is closed at weekends');
   if (CLOSED.has(iso)) return shut('MCX holiday — closed today');
   const summer = usDstActive(iso);
-  // MIS squared off 30 min before the close, ahead of the broker's own intraday square-off.
+  // Default: 23:15 (11:15 PM) in summer (15 min before 23:30 close); 23:40 in winter (15 min before 23:55 close).
   let close = summer ? 2330 : 2355;
-  let autoExit = summer ? 2300 : 2325;
+  let autoExit = customAutoExit != null && customAutoExit > 0 && customAutoExit < close
+    ? customAutoExit
+    : (summer ? 2315 : 2340);
   let open = 900;
   if (EVENING_ONLY.has(iso)) open = 1700;
-  if (MORNING_ONLY.has(iso)) { close = 1700; autoExit = 1630; }
+  if (MORNING_ONLY.has(iso)) { close = 1700; autoExit = Math.min(autoExit, 1630); }
   return { open, close, autoExit, autoExitLabel: label(autoExit), ...(open > 900 ? { note: 'MCX holiday: evening session only (from 17:00)' } : {}) };
 }

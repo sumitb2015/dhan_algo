@@ -11,6 +11,7 @@ import {
   snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev, newLadderId, parseTrailRequest, replanBracket, trailedBracket,
   type ClickType, type LadderZones, type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
 } from '@/lib/priceLadder';
+import { writeLadderSettings } from '@/lib/priceLadderSettings';
 
 // The Price Ladder's ledger (debug/price_ladder_state.json) and its actions. Real-money endpoint: every check that can
 // refuse an order runs here, server-side — lot cap, level sanity, the contract resolved from the brokers' own masters
@@ -82,7 +83,8 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   if (lots == null) return bad('Lots must be a whole number from 1 to 20');
   const strike = Number(b.strike);
   if (!(strike > 0)) return bad('Invalid strike');
-  const sess = sessionFor(u, istDay(now));
+  const state = readLadderState();
+  const sess = sessionFor(u, istDay(now), state.settings?.mcxAutoExitTime);
   if (sess.open >= sess.close) return bad(sess.note ?? 'The market is closed today');
   if (istHhmm(now) >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
   // A REAL plain order goes to the broker now, so the market must be open. (An XY level may be armed early: the
@@ -92,7 +94,6 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   if (b.bracket != null && !bracket) return bad('Bracket needs a positive SL in points (target 0 = Cover order)');
   if (bracket && b.kind !== 'xy') return bad('Brackets are index-level (XY) orders only');
 
-  const state = readLadderState();
   if (b.mode === 'real') {
     if (!realArmed(state, istDay(now))) return bad('Switch on LIVE · REAL MONEY first', 403);
     if (!brokerSessionOk(b.broker)) return bad(`${BROKER_NAME[b.broker]} session is not logged in`, 403);
@@ -208,7 +209,7 @@ async function addLot(id: string): Promise<NextResponse> {
   const p = st0.slices.find(y => y.id === id);
   if (!p || p.state !== 'open') return bad('That position is not open');
   const hhmm = istHhmm(now);
-  const sess = sessionFor(p.contract.underlying, istDay(now));
+  const sess = sessionFor(p.contract.underlying, istDay(now), st0.settings?.mcxAutoExitTime);
   if (sess.open >= sess.close) return bad(sess.note ?? 'The market is closed today');
   if (hhmm >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
   if (p.mode === 'real') {
@@ -307,6 +308,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const on = body.on === true;
         const s = await updateLadderState(st => pushEvent({ ...st, liveArmedOn: on ? today : undefined }, ev(on ? 'warn' : 'info', on ? 'LIVE · REAL MONEY armed for today' : 'LIVE · REAL MONEY off — armed REAL levels will be cancelled')));
         return NextResponse.json({ success: true, data: { state: s } });
+      }
+
+      case 'settings': {
+        const mcxTime = typeof body.mcxAutoExitTime === 'string' ? body.mcxAutoExitTime.trim() : '23:15';
+        const updated = writeLadderSettings({ mcxAutoExitTime: mcxTime });
+        const s = await updateLadderState(st => ({
+          ...st,
+          settings: { ...st.settings, mcxAutoExitTime: updated.mcxAutoExitTime },
+        }));
+        return NextResponse.json({ success: true, settings: updated, data: { state: s } });
       }
 
       case 'cancel': {

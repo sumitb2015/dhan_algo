@@ -110,7 +110,7 @@ function checkOpenAllowed(
   u: string, now: number, mode: 'sim' | 'real', broker: LadderBroker, st: LadderState,
   { isArm = false }: { isArm?: boolean } = {},
 ): string | null {
-  const sess = sessionFor(u, istDay(now));
+  const sess = sessionFor(u, istDay(now), st.settings?.mcxAutoExitTime);
   const hhmm = istHhmm(now);
   if (sess.open >= sess.close) return sess.note ?? 'The market is closed today';
   if (!isArm && (hhmm < sess.open || hhmm >= sess.close)) return 'The market is closed';

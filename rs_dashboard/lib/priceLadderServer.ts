@@ -28,6 +28,7 @@ import {
   cutPairLeg, cutsNewestFirst, isPairLive, LEG_KEYS, pairName, patchPair, planPairs, settleLegEntry, settleLegExit, PAIR_EXIT_RETRY_MS,
   type LadderPair, type PairJob, type PairLegKey,
 } from '@/lib/priceLadderPair';
+import { readLadderSettings } from '@/lib/priceLadderSettings';
 
 // The Price Ladder's server watcher. It owns debug/price_ladder_state.json (re-read on every tick and every request,
 // never cached, because the instrumentation hook and the API route can be separate module instances) and, about once
@@ -64,6 +65,7 @@ const bySymbol = (b: LadderBroker) => b !== 'dhan';
 function readStateFile(): LadderState {
   try {
     const s = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')) as Partial<LadderState>;
+    const settings = readLadderSettings();
     return {
       date: String(s.date ?? istDay()),
       slices: Array.isArray(s.slices) ? s.slices : [],
@@ -71,6 +73,7 @@ function readStateFile(): LadderState {
       ...(s.liveArmedOn ? { liveArmedOn: String(s.liveArmedOn) } : {}),
       ...(Array.isArray(s.pairs) && s.pairs.length ? { pairs: s.pairs } : {}),
       ...(Number.isFinite(Number(s.rev)) ? { rev: Number(s.rev) } : {}),
+      settings: s.settings ?? settings,
     };
   } catch (err) {
     // A missing file is a fresh start; an unreadable one must not be overwritten with an empty ledger that forgets

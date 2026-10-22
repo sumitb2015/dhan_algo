@@ -83,8 +83,8 @@ export async function buildLadderView(params: URLSearchParams) {
   const spots = Object.fromEntries(Object.entries(prices.spots).map(([u, v]) => [u, { ...v, fresh: spotFresh(v.at, now) }]));
   const d = prices.days?.[shownKey ?? want];
   const prevDay = want ? await getPrevDayLevels(want, shown?.ref?.securityId) : null;
-  const dayHigh = d?.high ?? (shown?.ref ? axisDayOf(shown, prices.days, now)?.high : null);
-  const dayLow = d?.low ?? (shown?.ref ? axisDayOf(shown, prices.days, now)?.low : null);
+  const dayHigh = d?.high ?? (shown?.ref ? axisDayOf(shown, prices.days, now, state.settings?.mcxAutoExitTime)?.high : null);
+  const dayLow = d?.low ?? (shown?.ref ? axisDayOf(shown, prices.days, now, state.settings?.mcxAutoExitTime)?.low : null);
 
   return {
     state, spots, ltps: prices.ltps, liveArmed: realArmed(state, istDay()), now, spotKey: shownKey, contractError, pairError,
@@ -104,7 +104,7 @@ export async function buildLadderView(params: URLSearchParams) {
     } : null,
     contract: shown ? {
       securityId: shown.securityId, lotSize: shown.lotSize, ltp: prices.ltps[shown.securityId] ?? null,
-      mult: shown.mult ?? 1, ...(shown.ref ? { refExpiry: shown.ref.expiry, axisDay: axisDayOf(shown, prices.days, now) } : {}),
+      mult: shown.mult ?? 1, ...(shown.ref ? { refExpiry: shown.ref.expiry, axisDay: axisDayOf(shown, prices.days, now, state.settings?.mcxAutoExitTime) } : {}),
     } : null,
   };
 }
@@ -114,10 +114,10 @@ export async function buildLadderView(params: URLSearchParams) {
  * close only while the session runs — at the bell it flips to today's close (dhan-prevclose-pct-change), so outside the
  * session no previous close is given (the card then shows the range without a % change).
  */
-function axisDayOf(c: LadderContract, days: Awaited<ReturnType<typeof loadPrices>>['days'], now: number) {
+function axisDayOf(c: LadderContract, days: Awaited<ReturnType<typeof loadPrices>>['days'], now: number, mcxTime?: string) {
   const d = days?.[spotKey(c)];
   if (!d) return null;
-  const sess = sessionFor(c.underlying, istDay(now));
+  const sess = sessionFor(c.underlying, istDay(now), mcxTime);
   const hhmm = istHhmm(now);
   const inSession = hhmm >= sess.open && hhmm < sess.close;
   return { high: d.high, low: d.low, prevClose: inSession ? d.close : null };
