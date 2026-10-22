@@ -221,6 +221,15 @@ test('Two ladders by default: ladder 1 is the call, ladder 2 the put, each with 
   await expect(page.getByRole('button', { name: 'Call', exact: true, pressed: true })).toHaveCount(1);
   await expect(page.getByRole('button', { name: 'Put', exact: true, pressed: true })).toHaveCount(1);
   await expect(page.getByRole('button', { name: 'Call', exact: true })).toHaveCount(2);
+  // Page-wide header controls appear once, not once per ladder
+  for (const name of [/Arm LIVE/, /Order book/, /Trade book/, /^Positions/]) await expect(page.getByRole('button', { name })).toHaveCount(1);
+  await expect(page.locator('.sticky').getByText('Settings', { exact: true })).toHaveCount(1);
+  await expect(page.getByText(/^DATA:/)).toHaveCount(1);
+  // Side by side, the two ladders start at the same height (headers held to the taller one)
+  await expect.poll(async () => {
+    const h = await page.locator('.sticky').evaluateAll(els => els.filter(e => e.querySelector('h1')).map(e => Math.round(e.getBoundingClientRect().height)));
+    return h.length === 2 && h[0] === h[1];
+  }).toBe(true);
   await underlying.nth(1).selectOption('BANKNIFTY');
   await expect(underlying.nth(0)).toHaveValue('NIFTY');
   await expect(underlying.nth(1)).toHaveValue('BANKNIFTY');
@@ -230,4 +239,27 @@ test('Two ladders by default: ladder 1 is the call, ladder 2 the put, each with 
   await page.getByRole('button', { name: /Add ladder/ }).click();
   await expect(underlying).toHaveCount(2);
   expect(seen.blocked).toEqual([]);
+});
+
+test('The header controls fold away for more room (both ladders at once), keep a broker · mode chip, and stay folded on reload', async ({ page }) => {
+  await install(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/price-ladder');
+  await expect(page.getByLabel('Expiry').first()).toHaveValue('2026-10-27');
+  await expect(page.getByRole('button', { name: /Arm LIVE/ })).toHaveCount(1);
+  const head = () => page.locator('.sticky').first().evaluate(e => e.getBoundingClientRect().height);
+  const open = await head();
+  await page.getByRole('button', { name: 'Hide header controls' }).first().click();
+  await expect(page.getByRole('button', { name: /Arm LIVE/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Show header controls' })).toHaveCount(2);
+  await expect(page.getByText('Dhan · SIM')).toHaveCount(2);
+  // Indices and P&L stay visible while the controls are folded
+  await expect(page.getByText('INDIA VIX')).toBeVisible();
+  await expect(page.getByText(/^Ladder P&L/)).toHaveCount(2);
+  await expect(page.getByRole('button', { name: /Order book/ })).toHaveCount(0);
+  expect(await head()).toBeLessThan(open);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Show header controls' })).toHaveCount(2);
+  await page.getByRole('button', { name: 'Show header controls' }).first().click();
+  await expect(page.getByRole('button', { name: /Arm LIVE/ })).toHaveCount(1);
 });

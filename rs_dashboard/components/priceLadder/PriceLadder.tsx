@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, Clock, Settings, X, Plus } from 'lucide-react';
+import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from '@/components/NavBar';
 import { sharedJson } from '@/lib/sharedPoll';
@@ -124,12 +124,30 @@ const timeOf = (at: number) => new Date(at).toLocaleTimeString('en-IN', { timeZo
 /** One ladder pane. The page can show two side by side: the second keeps its own saved choices (keys end in `-2`), has no
  *  NavBar, and neither auto-focuses a live contract nor chimes (the first pane already does both). The ledger and the
  *  server watcher are shared — every slice carries its own contract, so the panes only differ in what they display. */
-export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, onRemoveLadder }: {
+export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, onRemoveLadder, onBrokerChange, peerBroker, onHeaderHeight, headerMinHeight, collapsed = false, onToggleCollapsed }: {
   ladderId?: 1 | 2; dual?: boolean; onAddLadder?: () => void; onRemoveLadder?: () => void;
+  /** Reports this pane's broker; the other pane gets it as `peerBroker`. */
+  onBrokerChange?: (b: LadderBroker) => void; peerBroker?: LadderBroker | null;
+  /** Side by side: this header's own height is reported, and both headers are held to the taller one so the two ladders start level. */
+  onHeaderHeight?: (h: number) => void; headerMinHeight?: number;
+  /** The header's control rows folded away (shared by both panes), leaving the title row. */
+  collapsed?: boolean; onToggleCollapsed?: () => void;
 }) {
   const second = ladderId === 2;
   const k = useCallback((key: string) => (second ? `${key}-2` : key), [second]);
   const [broker, setBroker, brokerLoaded] = usePageBroker<LadderBroker>(k('price-ladder-broker'), LADDER_BROKERS);
+  useEffect(() => { onBrokerChange?.(broker); }, [broker, onBrokerChange]);
+  // The broker account chip and the Positions / Order / Trade book buttons are shown once: on ladder 1, and on ladder 2
+  // only when it trades a different broker (they describe that broker's account, not the ladder).
+  const showAccount = !second || peerBroker == null || peerBroker !== broker;
+  const headRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = headRef.current;
+    if (!el || !onHeaderHeight) return;
+    const ro = new ResizeObserver(() => onHeaderHeight(el.offsetHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [onHeaderHeight]);
   const [mode, setModeRaw] = useState<PageMode>('xy');
   // Pair mode: a straddle on the centre strike, or a strangle `wing` strikes either side of it (CE above, PE below).
   const [structure, setStructure] = useState<PairStructure>('straddle');
@@ -799,7 +817,21 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white min-w-0">
-      <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+      <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur xl:min-h-[var(--ladder-head-h)]" style={headerMinHeight ? ({ '--ladder-head-h': `${headerMinHeight + 1}px` } as React.CSSProperties) : undefined}>
+      <div ref={headRef}>
+      {/* Indices + P&L: always visible, above the foldable controls */}
+      <div className="flex items-center gap-2 flex-wrap px-6 pt-2.5 text-xs">
+        {!second && <>
+          <QuoteChip label="NIFTY" q={quotes.NIFTY} />
+          <QuoteChip label="INDIA VIX" q={quotes.VIX} />
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
+        </>}
+        <PnlChip label={`Ladder P&L · ${real ? 'REAL' : 'SIM'}`} value={ladderPnl}
+          title={`The ladder's own P&L on ${BROKER_LABELS[broker]}, every contract, ${real ? 'REAL' : 'SIM'} orders only: closed at their exit, open at the live LTP, since entry (a carried NRML position counts from its entry). '—' if an open leg has no price.`} />
+        {showAccount && <PnlChip label={`${BROKER_LABELS[broker]} P&L`} value={acct.pnl}
+          title={`${BROKER_LABELS[broker]} account P&L today: realised + unrealised over all positions, as the broker reports it (includes trades not made on the ladder)${acct.note ? ` — ${acct.note}` : ''}`} />}
+        {showAccount && acct.note && <span className="text-amber-300 truncate max-w-[18rem]" title={acct.note}>{acct.note}</span>}
+      </div>
       <div className="flex items-center justify-between gap-3 flex-wrap px-6 py-3">
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
@@ -816,20 +848,34 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   : 'One-click LIMIT / SL orders on the option premium'}
             </p>
           </div>
+          {onToggleCollapsed && (
+            <button type="button" onClick={onToggleCollapsed} aria-expanded={!collapsed}
+              aria-label={collapsed ? 'Show header controls' : 'Hide header controls'}
+              title={collapsed ? 'Show the controls (broker, SIM/REAL, P&L, books)' : 'Hide the controls for more room'}
+              className="p-1.5 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white hover:border-zinc-500 cursor-pointer">
+              {collapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
+            </button>
+          )}
+          {collapsed && (
+            <span className={`text-[10px] font-mono font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${real ? 'text-red-300 bg-red-500/10 border-red-500/30' : 'text-zinc-300 bg-zinc-900 border-zinc-700'}`}
+              title="Broker and order mode for this ladder (shown while the controls are hidden)">
+              {BROKER_LABELS[broker]} · {real ? 'REAL' : 'SIM'}
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
+        {!collapsed && <div className="flex items-center gap-2 flex-wrap">
           <BrokerPicker value={broker} onChange={setBroker} disabled={busy} brokers={LADDER_BROKERS} />
           <Seg value={real ? 'REAL' : 'SIM'} options={['SIM', 'REAL'] as const} onChange={v => { setReal(v === 'REAL'); setRealAck(false); }} />
-          <button
+          {!second && <button
             type="button" onClick={() => (liveArmed ? void post({ action: 'live', on: false }) : setArmModal(true))}
             className={`px-2.5 py-1 rounded-md text-xs font-bold border transition-colors ${liveArmed ? 'bg-red-600 border-red-500 text-oncolor' : 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:text-white'}`}
           >
             {liveArmed ? 'LIVE · REAL MONEY ON' : 'Arm LIVE · REAL MONEY'}
-          </button>
-          <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
+          </button>}
+          {!second && <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
             DATA: {dataDate ?? '—'}
-          </span>
-          <button
+          </span>}
+          {!second && <button
             type="button"
             onClick={() => setSettingsModalOpen(true)}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer"
@@ -837,7 +883,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           >
             <Settings className="w-3.5 h-3.5 text-amber-400" />
             Settings
-          </button>
+          </button>}
           {second ? (
             <button type="button" onClick={onRemoveLadder} title="Close this ladder (orders it placed keep running on the server)"
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer">
@@ -850,22 +896,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             </button>
           )}
           {!second && (<><span className="w-px h-5 bg-zinc-800 shrink-0" /><NavBar /></>)}
-        </div>
+        </div>}
       </div>
-      {/* Market + P&L + broker book strip */}
-      <div className="flex items-center gap-2 flex-wrap px-6 pb-2.5 text-xs">
-        <QuoteChip label="NIFTY" q={quotes.NIFTY} />
-        <QuoteChip label="INDIA VIX" q={quotes.VIX} />
-        <span className="w-px h-5 bg-zinc-800 shrink-0" />
-        <PnlChip label={`Ladder P&L · ${real ? 'REAL' : 'SIM'}`} value={ladderPnl}
-          title={`The ladder's own P&L on ${BROKER_LABELS[broker]}, every contract, ${real ? 'REAL' : 'SIM'} orders only: closed at their exit, open at the live LTP, since entry (a carried NRML position counts from its entry). '—' if an open leg has no price.`} />
-        <PnlChip label={`${BROKER_LABELS[broker]} P&L`} value={acct.pnl}
-          title={`${BROKER_LABELS[broker]} account P&L today: realised + unrealised over all positions, as the broker reports it (includes trades not made on the ladder)${acct.note ? ` — ${acct.note}` : ''}`} />
-        {acct.note && <span className="text-amber-300 truncate max-w-[18rem]" title={acct.note}>{acct.note}</span>}
-        <span className="w-px h-5 bg-zinc-800 shrink-0" />
+      {/* Books: part of the foldable controls (the chips above stay visible) */}
+      {!collapsed && showAccount && <div className="flex items-center gap-2 flex-wrap px-6 pb-2.5 text-xs">
         <BookButton icon={<Briefcase className="w-3.5 h-3.5" />} label="Positions" count={acct.open} onClick={() => setBookOpen('positions')} />
         <BookButton icon={<ClipboardList className="w-3.5 h-3.5" />} label="Order book" onClick={() => setBookOpen('orders')} />
         <BookButton icon={<ReceiptText className="w-3.5 h-3.5" />} label="Trade book" onClick={() => setBookOpen('trades')} />
+      </div>}
       </div>
       </div>
       {bookOpen && (
@@ -1153,23 +1191,6 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               >
                 <Settings className="w-3.5 h-3.5 text-amber-400" /> Settings
               </button>
-              {mcx && (
-                <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-zinc-700 bg-zinc-900/60 text-xs">
-                  <Clock className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="text-zinc-400">Cutoff:</span>
-                  <select
-                    value={data?.state?.settings?.mcxAutoExitTime ?? '23:15'}
-                    onChange={e => setCutoff(e.target.value)}
-                    className="bg-transparent font-mono font-bold text-amber-300 focus:outline-none cursor-pointer"
-                    title="MCX trading threshold & MIS auto square-off time. After this time, new orders and armed levels are blocked."
-                  >
-                    <option value="23:00" className="bg-zinc-900 text-zinc-100">23:00 IST</option>
-                    <option value="23:15" className="bg-zinc-900 text-zinc-100">23:15 IST (Default)</option>
-                    <option value="23:20" className="bg-zinc-900 text-zinc-100">23:20 IST</option>
-                    <option value="23:25" className="bg-zinc-900 text-zinc-100">23:25 IST</option>
-                  </select>
-                </div>
-              )}
               <button
                 type="button" disabled={busy || pendingHere === 0}
                 onClick={() => void post({ action: 'cancelAll', securityId, broker, mode: pageMode })}
