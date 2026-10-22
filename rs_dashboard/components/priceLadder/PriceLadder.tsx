@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, Clock } from 'lucide-react';
+import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, Clock, Settings, X } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from '@/components/NavBar';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
@@ -132,6 +132,7 @@ export default function PriceLadder() {
   const [realAck, setRealAck] = useState(false);         // first REAL click this page load asks first
   const [confirm, setConfirm] = useState<null | { text: string; run: () => void }>(null);
   const [armModal, setArmModal] = useState(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [underlying, setUnderlyingRaw] = useState<string>('NIFTY');
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
@@ -795,6 +796,15 @@ export default function PriceLadder() {
           <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
             DATA: {dataDate ?? '—'}
           </span>
+          <button
+            type="button"
+            onClick={() => setSettingsModalOpen(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer"
+            title="Configure Price Ladder trading cutoff & session thresholds"
+          >
+            <Settings className="w-3.5 h-3.5 text-amber-400" />
+            Settings
+          </button>
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <NavBar />
         </div>
@@ -1092,6 +1102,14 @@ export default function PriceLadder() {
               </button>
               <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow price</label>
               {held && <span className="text-[10px] text-amber-300" title="The rows stay put while the pointer is on the ladder, so a price tick cannot move a level under the mouse; they re-centre when it leaves">Rows held</span>}
+              <button
+                type="button"
+                onClick={() => setSettingsModalOpen(true)}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 bg-zinc-900/60 text-zinc-300 hover:text-white hover:border-zinc-500 cursor-pointer"
+                title="Configure trading cutoff & Price Ladder settings"
+              >
+                <Settings className="w-3.5 h-3.5 text-amber-400" /> Settings
+              </button>
               {mcx && (
                 <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-zinc-700 bg-zinc-900/60 text-xs">
                   <Clock className="w-3.5 h-3.5 text-amber-400" />
@@ -1235,6 +1253,77 @@ export default function PriceLadder() {
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setArmModal(false)} className="px-3 py-1.5 rounded-md border border-zinc-700 text-xs text-zinc-300">Cancel</button>
               <button type="button" onClick={() => { setArmModal(false); void post({ action: 'live', on: true }); }} className="px-3 py-1.5 rounded-md bg-red-600 text-xs font-bold text-oncolor">Arm for today</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {settingsModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 p-4" role="dialog" aria-modal="true">
+          <div className="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-950 p-5 flex flex-col gap-4 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-lg bg-amber-500/10 border border-amber-500/20">
+                  <Settings className="w-4 h-4 text-amber-400" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Price Ladder Settings</h3>
+                  <p className="text-[10px] text-zinc-400">Configure trading cutoffs and session thresholds</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSettingsModalOpen(false)}
+                className="p-1 rounded text-zinc-400 hover:text-white hover:bg-zinc-800"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-zinc-200 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-amber-400" />
+                  MCX Trading Cutoff (CRUDEOILM)
+                </span>
+                <span className="text-xs font-mono font-bold text-amber-300">
+                  {data?.state?.settings?.mcxAutoExitTime ?? '23:15'} IST
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-400 leading-relaxed">
+                Trading cutoff and MIS auto square-off threshold. After this time, new orders and armed levels are rejected ahead of the session close.
+              </p>
+              <div className="grid grid-cols-4 gap-2 pt-1">
+                {(['23:00', '23:15', '23:20', '23:25'] as const).map(time => {
+                  const active = (data?.state?.settings?.mcxAutoExitTime ?? '23:15') === time;
+                  return (
+                    <button
+                      key={time}
+                      type="button"
+                      onClick={() => void post({ action: 'settings', mcxAutoExitTime: time })}
+                      className={`flex flex-col items-center justify-center py-2 px-1 rounded-lg border text-xs font-mono transition-all cursor-pointer ${
+                        active
+                          ? 'border-amber-500/50 bg-amber-500/20 text-amber-300 font-bold shadow-[0_0_10px_rgba(245,158,11,0.15)]'
+                          : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                      }`}
+                    >
+                      {time}
+                      <span className="text-[9px] font-sans font-normal text-zinc-500">
+                        {time === '23:15' ? 'Default' : time === '23:00' ? '11:00 PM' : 'IST'}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-zinc-800 flex justify-end">
+              <button
+                type="button"
+                onClick={() => setSettingsModalOpen(false)}
+                className="px-4 py-1.5 rounded-lg bg-zinc-800 text-xs font-semibold text-white hover:bg-zinc-700 transition-colors cursor-pointer"
+              >
+                Done
+              </button>
             </div>
           </div>
         </div>

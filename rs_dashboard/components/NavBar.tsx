@@ -51,7 +51,7 @@ export default function NavBar() {
           <Settings className="h-3.5 w-3.5" />
         </TooltipTrigger>
         <TooltipContent>
-          Settings — theme &amp; heading font
+          Settings — MCX trading cutoff, theme &amp; typography
         </TooltipContent>
       </Tooltip>
       <Tooltip>

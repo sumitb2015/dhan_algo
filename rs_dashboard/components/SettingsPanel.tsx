@@ -96,6 +96,51 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         </SheetHeader>
 
         <div className="flex-1 flex flex-col min-h-0 px-5 py-4 gap-5 overflow-y-auto">
+          {/* Trading & Sessions */}
+          <div className="space-y-2.5 p-3 rounded-xl border border-amber-500/25 bg-amber-500/5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-amber-400" />
+                <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+                  MCX Trading Cutoff (CRUDEOILM)
+                </span>
+              </div>
+              {savingCutoff && <span className="text-[10px] text-amber-400 font-medium">Saving…</span>}
+            </div>
+            <p className="text-[11px] text-zinc-400 leading-relaxed">
+              Orders and armed levels are permitted until this time. After this cutoff, new orders are blocked and the engine exits positions ahead of session close.
+            </p>
+            <div className="grid grid-cols-4 gap-2">
+              {(['23:00', '23:15', '23:20', '23:25'] as const).map(time => {
+                const active = mcxCutoff === time;
+                return (
+                  <button
+                    key={time}
+                    type="button"
+                    onClick={() => void updateCutoff(time)}
+                    className={cn(
+                      'relative flex flex-col items-center justify-center py-2 px-1 rounded-xl border text-xs font-mono transition-all cursor-pointer',
+                      active
+                        ? 'border-amber-500/50 bg-amber-500/20 text-amber-300 font-bold shadow-[0_0_10px_rgba(245,158,11,0.15)]'
+                        : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700',
+                    )}
+                  >
+                    {time}
+                    <span className="text-[9px] font-sans font-normal text-zinc-500">
+                      {time === '23:15' ? 'Default' : time === '23:00' ? '11:00 PM' : 'IST'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex items-center justify-between text-[10px] text-zinc-500 pt-1">
+              <span>Active cutoff: <strong className="text-amber-300 font-mono">{mcxCutoff} IST</strong></span>
+              <span>Syncs to server</span>
+            </div>
+          </div>
+
+          <Separator className="bg-zinc-800/60" />
+
           {/* Appearance */}
           <div className="space-y-2.5">
             <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600">
@@ -150,44 +195,6 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   onSelect={() => setHeadingFont(value)}
                 />
               ))}
-            </div>
-          </div>
-
-          <Separator className="bg-zinc-800/60" />
-
-          {/* Trading & Sessions */}
-          <div className="space-y-2.5">
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-semibold uppercase tracking-widest text-zinc-600">
-                Commodity Trading Cutoff (MCX / CRUDEOILM)
-              </span>
-              {savingCutoff && <span className="text-[10px] text-amber-400">Saving…</span>}
-            </div>
-            <p className="text-[11px] text-zinc-500 leading-relaxed">
-              Trading threshold and MIS auto square-off time for CRUDEOILM. After this time, new orders and armed levels are blocked ahead of session close.
-            </p>
-            <div className="grid grid-cols-4 gap-2">
-              {(['23:00', '23:15', '23:20', '23:25'] as const).map(time => {
-                const active = mcxCutoff === time;
-                return (
-                  <button
-                    key={time}
-                    type="button"
-                    onClick={() => void updateCutoff(time)}
-                    className={cn(
-                      'relative flex flex-col items-center justify-center py-2 px-1 rounded-xl border text-xs font-mono transition-all cursor-pointer',
-                      active
-                        ? 'border-amber-500/50 bg-amber-500/10 text-amber-300 font-bold'
-                        : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700',
-                    )}
-                  >
-                    {time}
-                    <span className="text-[9px] font-sans font-normal text-zinc-500">
-                      {time === '23:15' ? 'Default' : time === '23:00' ? '11:00 PM' : 'IST'}
-                    </span>
-                  </button>
-                );
-              })}
             </div>
           </div>
         </div>
