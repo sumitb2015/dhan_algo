@@ -305,7 +305,7 @@ export function LadderGrid({
    * the rows still meanwhile, so a re-centre on a price tick cannot move a row under the mouse between aim and click.
    */
   onHoldChange?: (held: boolean) => void;
-  /** Key market levels (PDH, PDL, Today High, Today Low) to mark in the 2nd column. */
+  /** Key market levels (PDH, PDL, Today High, Today Low), marked in the Price column. */
   keyLevels?: LadderKeyLevels;
 }) {
   const prices = ladderRows(center, tick, rows);
@@ -393,8 +393,7 @@ export function LadderGrid({
         const sellLabel = what('SELL', sellZone);
         const buyStop = anywhere && !buyZone && refPrice > 0 && !atRef;
         const sellStop = anywhere && !sellZone && refPrice > 0 && !atRef;
-        // The stop side is marked in words, not only by tint: what a click there places.
-        const stopTag = stopLimitFor ? 'SL' : 'BO';
+        // The stop side is the amber tint; its tooltip / aria-label say what a click there places.
         const ws = byRow.get(p) ?? [];
         const buyWs = ws.filter(w => w.column === 'BUY');
         const sellWs = ws.filter(w => w.column === 'SELL');
@@ -408,7 +407,6 @@ export function LadderGrid({
         const hasBuySl = buyWs.some(w => w.kind === 'sl');
         const hasRowTgt = ws.some(w => w.kind === 'tgt');
         const hasRowSl = ws.some(w => w.kind === 'sl');
-        const hasMarks = isPdh || isDayHigh || isDayLow || isPdl || (hasRowTgt && !hasBuyTgt) || (hasRowSl && !hasBuySl) || buyWs.length > 0;
 
         return (
           <div
@@ -433,7 +431,7 @@ export function LadderGrid({
               {buyWs.map(w => <OuterControlWidget key={w.key} w={w} onAdjust={onAdjust} onCancel={onCancel} />)}
             </div>
 
-            {/* Column 2: Bids (Inner trigger price for Buy-side triggers & key level marks) */}
+            {/* Column 2: Bids (Inner trigger price for Buy-side triggers) */}
             <div
               role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
               aria-label={buyStop ? buyLabel : `Bid ${fmt(p)}`} title={buyStop ? buyLabel : undefined}
@@ -442,30 +440,6 @@ export function LadderGrid({
               className={`h-7 flex items-center justify-center gap-1 px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/10 dark:bg-emerald-500/22' : buyStop ? 'bg-amber-500/10 dark:bg-amber-500/18' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/20 dark:hover:bg-emerald-500/35'}`}
             >
               {buyWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} tick={tick} onTrail={onTrail} />)}
-              {isPdh && (
-                <span title={`Previous Day High: ${keyLevels?.pdh?.toFixed(decimals)}`}
-                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-rose-500/20 text-rose-300 border border-rose-500/40 pointer-events-none select-none">
-                  PDH
-                </span>
-              )}
-              {isDayHigh && (
-                <span title={`Today's High: ${keyLevels?.dayHigh?.toFixed(decimals)}`}
-                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-amber-500/20 text-amber-300 border border-amber-500/40 pointer-events-none select-none">
-                  DH
-                </span>
-              )}
-              {isDayLow && (
-                <span title={`Today's Low: ${keyLevels?.dayLow?.toFixed(decimals)}`}
-                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 pointer-events-none select-none">
-                  DL
-                </span>
-              )}
-              {isPdl && (
-                <span title={`Previous Day Low: ${keyLevels?.pdl?.toFixed(decimals)}`}
-                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 pointer-events-none select-none">
-                  PDL
-                </span>
-              )}
               {hasRowTgt && !hasBuyTgt && (
                 <span title="Target"
                   className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-emerald-600 text-oncolor pointer-events-none select-none">
@@ -478,11 +452,10 @@ export function LadderGrid({
                   SL
                 </span>
               )}
-              {buyStop && !hasMarks && <span aria-hidden className="text-[10px] font-semibold text-amber-300">{stopTag}</span>}
             </div>
 
             {/* Column 3: Price */}
-            <div className={`h-7 flex items-center justify-center gap-1 font-mono overflow-hidden ${isRef ? 'font-bold text-amber-300' : isEntry ? 'font-bold text-blue-300' : 'text-zinc-200 dark:text-zinc-100'}`}>
+            <div className={`h-7 flex items-center justify-center gap-1 font-mono overflow-hidden ${isPdh ? 'bg-rose-500/25 ring-1 ring-inset ring-rose-500/50' : isPdl ? 'bg-emerald-500/25 ring-1 ring-inset ring-emerald-500/50' : isDayHigh ? 'bg-amber-500/25 ring-1 ring-inset ring-amber-500/50' : isDayLow ? 'bg-cyan-500/25 ring-1 ring-inset ring-cyan-500/50' : ''} ${isRef ? 'font-bold text-amber-300' : isEntry ? 'font-bold text-blue-300' : 'text-zinc-200 dark:text-zinc-100'}`}>
               {isEntry && tags.map(t => (
                 <span
                   key={t.side}
@@ -493,6 +466,30 @@ export function LadderGrid({
                 </span>
               ))}
               <span>{isRef ? refPrice.toFixed(2) : fmt(p)}</span>
+              {isPdh && (
+                <span title={`Previous Day High: ${keyLevels?.pdh?.toFixed(decimals)}`}
+                  className="shrink-0 px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight leading-none shadow-sm bg-rose-500/20 text-rose-300 border border-rose-500/40 pointer-events-none select-none">
+                  PDH
+                </span>
+              )}
+              {isDayHigh && (
+                <span title={`Today's High: ${keyLevels?.dayHigh?.toFixed(decimals)}`}
+                  className="shrink-0 px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight leading-none shadow-sm bg-amber-500/20 text-amber-300 border border-amber-500/40 pointer-events-none select-none">
+                  DH
+                </span>
+              )}
+              {isDayLow && (
+                <span title={`Today's Low: ${keyLevels?.dayLow?.toFixed(decimals)}`}
+                  className="shrink-0 px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight leading-none shadow-sm bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 pointer-events-none select-none">
+                  DL
+                </span>
+              )}
+              {isPdl && (
+                <span title={`Previous Day Low: ${keyLevels?.pdl?.toFixed(decimals)}`}
+                  className="shrink-0 px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight leading-none shadow-sm bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 pointer-events-none select-none">
+                  PDL
+                </span>
+              )}
               {/* XY only: the option's fill premium (in plain mode the row price IS the fill). */}
               {isEntry && tags[0]?.avg != null && Math.abs(tags[0].avg - p) >= tick && <span className="shrink-0 text-[10px] font-semibold text-blue-300">@{tags[0].avg.toFixed(2)}</span>}
             </div>
@@ -506,7 +503,6 @@ export function LadderGrid({
               className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/10 dark:bg-red-500/22' : sellStop ? 'bg-amber-500/10 dark:bg-amber-500/18' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/20 dark:hover:bg-red-500/35'}`}
             >
               {sellWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} tick={tick} onTrail={onTrail} />)}
-              {sellStop && !sellWs.length && <span aria-hidden className="text-[10px] font-semibold text-amber-300">{stopTag}</span>}
             </div>
 
             {/* Column 5: Sell (Outer controls) */}

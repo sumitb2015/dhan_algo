@@ -78,8 +78,8 @@ function readPref<T extends string>(key: string, allowed: readonly T[], fallback
 function savePref(key: string, v: string) { try { localStorage.setItem(key, v); } catch { /* best effort */ } }
 
 /** A number box that commits on blur / Enter only (dhan-commit-on-blur), so a half-typed value never reaches a rule. */
-function NumField({ value, onCommit, min, max, step, label, width = 'w-16' }: {
-  value: number; onCommit: (v: number) => void; min: number; max?: number; step?: number; label: string; width?: string;
+function NumField({ value, onCommit, min, max, step, label, width = 'w-16', compact }: {
+  value: number; onCommit: (v: number) => void; min: number; max?: number; step?: number; label: string; width?: string; compact?: boolean;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
   const commit = () => {
@@ -91,7 +91,7 @@ function NumField({ value, onCommit, min, max, step, label, width = 'w-16' }: {
   return (
     <input
       aria-label={label} inputMode="decimal" step={step}
-      className={`${width} px-2 py-1 rounded bg-zinc-900 border border-zinc-700 text-xs font-mono text-zinc-100 focus:outline-none focus:border-zinc-500`}
+      className={`${width} px-2 ${compact ? 'py-0.5' : 'py-1'} rounded bg-zinc-900 border border-zinc-700 text-xs font-mono text-zinc-100 focus:outline-none focus:border-zinc-500`}
       value={draft ?? String(value)}
       onChange={e => setDraft(e.target.value)}
       onBlur={commit}
@@ -100,15 +100,15 @@ function NumField({ value, onCommit, min, max, step, label, width = 'w-16' }: {
   );
 }
 
-function Seg<T extends string>({ value, options, onChange, labels, disabled }: {
-  value: T; options: readonly T[]; onChange: (v: T) => void; labels?: Partial<Record<T, string>>; disabled?: boolean;
+function Seg<T extends string>({ value, options, onChange, labels, disabled, compact }: {
+  value: T; options: readonly T[]; onChange: (v: T) => void; labels?: Partial<Record<T, string>>; disabled?: boolean; compact?: boolean;
 }) {
   return (
     <div className="inline-flex rounded-md border border-zinc-700 overflow-hidden">
       {options.map(o => (
         <button
           key={o} type="button" disabled={disabled} aria-pressed={value === o} onClick={() => onChange(o)}
-          className={`px-2.5 py-1 text-xs font-semibold transition-colors disabled:opacity-50 ${value === o ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}
+          className={`px-2.5 ${compact ? 'py-0.5' : 'py-1'} text-xs font-semibold transition-colors disabled:opacity-50 ${value === o ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}
         >
           {labels?.[o] ?? o}
         </button>
@@ -973,121 +973,124 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
 
         <div className={`grid grid-cols-1 gap-4 ${dual ? '2xl:grid-cols-[320px_minmax(0,1fr)]' : 'lg:grid-cols-[320px_minmax(0,1fr)]'}`}>
           {/* ── left panel ── */}
-          <div className="flex flex-col gap-3">
-            <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3">
-              <p className="text-xs font-bold text-white">{optLabel}</p>
+          <div className="flex flex-col gap-2" style={{ fontFeatureSettings: '"cv11", "ss01"' }}>
+            {/* Side by side below 2xl when two ladders stack their panel above the grid: the two cards share a row. */}
+            <div className={dual ? 'grid grid-cols-2 2xl:grid-cols-1 gap-2 items-start [&>*:only-child]:col-span-2 2xl:[&>*:only-child]:col-span-1' : 'contents'}>
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5">
+              <p className="text-[13px] font-semibold tracking-tight text-zinc-100">{optLabel}</p>
               {mode === 'pair' ? (
                 <>
-                  <p className="text-lg font-mono font-bold text-zinc-100" title="Combined premium: CE LTP + PE LTP">{combined ? combined.toFixed(2) : '—'}</p>
+                  <p className="text-xl font-mono font-semibold tracking-tight text-white leading-tight" title="Combined premium: CE LTP + PE LTP">{combined ? combined.toFixed(2) : '—'}</p>
                   <p className="font-mono text-xs text-zinc-400">
                     CE {pairView?.ce.strike ?? '—'} <span className="text-zinc-200">{pairView?.ce.ltp?.toFixed(2) ?? '—'}</span>
                     {' + '}PE {pairView?.pe.strike ?? '—'} <span className="text-zinc-200">{pairView?.pe.ltp?.toFixed(2) ?? '—'}</span>
                   </p>
                 </>
               ) : (
-                <p className="text-lg font-mono font-bold text-zinc-100">{optLtp ? optLtp.toFixed(2) : '—'}</p>
+                <p className="text-xl font-mono font-semibold tracking-tight text-white leading-tight">{optLtp ? optLtp.toFixed(2) : '—'}</p>
               )}
-              <div className="mt-2 pt-2 border-t border-zinc-800 text-xs">
-                <p className="font-bold text-zinc-300">{axisName} <span className="font-mono text-zinc-100">{spot ? spot.toFixed(2) : '—'}</span>
+              <div className="mt-1.5 pt-1.5 border-t border-zinc-800 text-xs">
+                <p className="font-semibold text-zinc-300">{axisName} <span className="font-mono text-zinc-100">{spot ? spot.toFixed(2) : '—'}</span>
                   {indexQ?.change_pct != null && <span className={`ml-2 font-mono ${indexQ.change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{indexQ.change_pct >= 0 ? '+' : ''}{indexQ.change_pct.toFixed(2)}%</span>}
                 </p>
                 <p className="font-mono text-zinc-500 mt-0.5">H {indexQ?.day_high?.toFixed(2) ?? '—'} · L {indexQ?.day_low?.toFixed(2) ?? '—'}</p>
               </div>
             </div>
 
-            {mode !== 'pair' && <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 grid grid-cols-2 gap-y-1 text-xs">
-              <span className="text-zinc-400">Net Pos <span className="text-zinc-500">({pageMode.toUpperCase()})</span></span><span className="font-mono text-right text-zinc-100">{net.qty}</span>
-              <span className="text-zinc-400">P&amp;L</span><span className={`font-mono text-right ${pnlClass(contractPnl)}`}>{fmtMoney(contractPnl)}</span>
-              <span className="text-zinc-400">Avg Price</span><span className="font-mono text-right text-zinc-100">{net.avg ? net.avg.toFixed(2) : '—'}</span>
-              <div className="col-span-2 flex gap-1 mt-2">
+            {mode !== 'pair' && <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 grid grid-cols-2 gap-y-0.5 text-xs">
+              <span className="text-zinc-400 font-medium">Net Pos <span className="text-zinc-500">({pageMode.toUpperCase()})</span></span><span className="font-mono text-right text-zinc-100">{net.qty}</span>
+              <span className="text-zinc-400 font-medium">P&amp;L</span><span className={`font-mono text-right ${pnlClass(contractPnl)}`}>{fmtMoney(contractPnl)}</span>
+              <span className="text-zinc-400 font-medium">Avg Price</span><span className="font-mono text-right text-zinc-100">{net.avg ? net.avg.toFixed(2) : '—'}</span>
+              <div className="col-span-2 flex gap-1 mt-1.5">
                 {[25, 50, 75, 100].map(p => (
                   <button
                     key={p} type="button" disabled={busy || net.qty === 0}
                     onClick={() => void post({ action: 'exit', securityId, broker, mode: pageMode, pct: p })}
-                    className="flex-1 px-1 py-1 rounded text-xs font-bold border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40"
+                    className="flex-1 px-1 py-0.5 rounded text-xs font-semibold border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40"
                   >
                     {p === 100 ? `Exit (${net.qty})` : `${p}%`}
                   </button>
                 ))}
               </div>
             </div>}
+            </div>
 
-            <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3 flex flex-col gap-2 text-xs">
-              <div className="flex items-center justify-between"><span className="text-zinc-400">Ladder</span>
-                <Seg value={mode} options={['xy', 'plain', 'pair'] as const} labels={{ xy: 'XY (index)', plain: 'Plain', pair: 'Pair' }} onChange={setMode} />
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 flex flex-col gap-1.5 text-xs">
+              <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Ladder</span>
+                <Seg compact value={mode} options={['xy', 'plain', 'pair'] as const} labels={{ xy: 'XY (index)', plain: 'Plain', pair: 'Pair' }} onChange={setMode} />
               </div>
-              <div className="flex items-center justify-between"><span className="text-zinc-400">Product</span>
-                <Seg value={product} options={['NRML', 'MIS'] as const} onChange={setProduct} />
+              <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Product</span>
+                <Seg compact value={product} options={['NRML', 'MIS'] as const} onChange={setProduct} />
               </div>
-              <div className="flex items-center justify-between"><span className="text-zinc-400">Underlying</span>
-                <select aria-label="Underlying" value={underlying} onChange={e => setUnderlying(e.target.value)} className="px-2 py-1 rounded bg-zinc-900 border border-zinc-700 text-zinc-100">
+              <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Underlying</span>
+                <select aria-label="Underlying" value={underlying} onChange={e => setUnderlying(e.target.value)} className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100">
                   {UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
                 </select>
               </div>
-              <div className="flex items-center justify-between"><span className="text-zinc-400">Expiry</span>
-                <select aria-label="Expiry" value={expiry} onChange={e => { setExpiry(e.target.value); setStrike(null); }} className="px-2 py-1 rounded bg-zinc-900 border border-zinc-700 text-zinc-100">
+              <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Expiry</span>
+                <select aria-label="Expiry" value={expiry} onChange={e => { setExpiry(e.target.value); setStrike(null); }} className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100">
                   {expiries.map(x => <option key={x} value={x}>{x}</option>)}
                 </select>
               </div>
-              <div className="flex items-center justify-between gap-2"><span className="text-zinc-400">Strike</span>
+              <div className="flex items-center justify-between gap-2"><span className="text-zinc-400 font-medium">Strike</span>
                 <div className="flex items-center gap-2">
-                  <select aria-label="Strike" value={strike ?? ''} onChange={e => setStrike(Number(e.target.value))} className="px-2 py-1 rounded bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono">
+                  <select aria-label="Strike" value={strike ?? ''} onChange={e => setStrike(Number(e.target.value))} className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono">
                     {strikes.map(k => <option key={k} value={k}>{k}</option>)}
                   </select>
-                  {mode !== 'pair' && <Seg value={opt} options={['CE', 'PE'] as const} labels={{ CE: 'Call', PE: 'Put' }} onChange={setOpt} />}
+                  {mode !== 'pair' && <Seg compact value={opt} options={['CE', 'PE'] as const} labels={{ CE: 'Call', PE: 'Put' }} onChange={setOpt} />}
                 </div>
               </div>
               {mode === 'pair' && (
                 <>
-                  <div className="flex items-center justify-between"><span className="text-zinc-400" title="Straddle: CE and PE on the strike above. Strangle: CE the wing above it, PE the wing below.">Structure</span>
-                    <Seg value={structure} options={['straddle', 'strangle'] as const} labels={{ straddle: 'Straddle', strangle: 'Strangle' }} onChange={setStructure} />
+                  <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title="Straddle: CE and PE on the strike above. Strangle: CE the wing above it, PE the wing below.">Structure</span>
+                    <Seg compact value={structure} options={['straddle', 'strangle'] as const} labels={{ straddle: 'Straddle', strangle: 'Strangle' }} onChange={setStructure} />
                   </div>
                   {structure === 'strangle' && (
-                    <div className="flex items-center justify-between"><span className="text-zinc-400" title={`Strikes either side of the centre (${pairStep} each)`}>Wing (strikes)</span>
-                      <NumField label="Strangle wing in strikes" value={wing} onCommit={v => setWing(Math.max(1, Math.min(20, Math.round(v))))} min={1} max={20} width="w-14" />
+                    <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title={`Strikes either side of the centre (${pairStep} each)`}>Wing (strikes)</span>
+                      <NumField compact label="Strangle wing in strikes" value={wing} onCommit={v => setWing(Math.max(1, Math.min(20, Math.round(v))))} min={1} max={20} width="w-14" />
                     </div>
                   )}
                   <p className="text-zinc-500">{pairOk ? `CE ${pairCe} · PE ${pairPe}` : 'Those strikes are not in the chain — pick another centre or wing'}</p>
-                  <div className="flex items-center justify-between"><span className="text-zinc-400" title="Per-leg stop: either leg moving this % against its own fill exits BOTH legs (a short leg rising — 100 = doubled; a long leg falling). 0 = off. Runs alongside the combined target / SL.">Leg SL %</span>
-                    <NumField label="Per-leg stop-loss percent (0 = off)" value={legSlPct} onCommit={v => setLegSlPct(Math.max(0, Math.round(v)))} min={0} max={1000} width="w-16" />
+                  <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title="Per-leg stop: either leg moving this % against its own fill exits BOTH legs (a short leg rising — 100 = doubled; a long leg falling). 0 = off. Runs alongside the combined target / SL.">Leg SL %</span>
+                    <NumField compact label="Per-leg stop-loss percent (0 = off)" value={legSlPct} onCommit={v => setLegSlPct(Math.max(0, Math.round(v)))} min={0} max={1000} width="w-16" />
                   </div>
                 </>
               )}
-              <div className="flex items-center justify-between"><span className="text-zinc-400" title="Classic: Buy and Sell each work on their limit side (the other side needs Order Type SL). Anywhere: both columns at every level — the other side is a stop by itself.">Zones</span>
-                <Seg value={zones} options={['classic', 'anywhere'] as const} labels={{ classic: 'Classic', anywhere: 'Anywhere' }} onChange={setZones} />
+              <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title="Classic: Buy and Sell each work on their limit side (the other side needs Order Type SL). Anywhere: both columns at every level — the other side is a stop by itself.">Zones</span>
+                <Seg compact value={zones} options={['classic', 'anywhere'] as const} labels={{ classic: 'Classic', anywhere: 'Anywhere' }} onChange={setZones} />
               </div>
               {zones === 'classic' ? (
-                <div className="flex items-center justify-between"><span className="text-zinc-400">Order Type</span>
-                  <Seg value={orderType} options={['LIMIT', 'SL'] as const} labels={{ LIMIT: 'Limit', SL: 'SL' }} onChange={setOrderType} />
+                <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Order Type</span>
+                  <Seg compact value={orderType} options={['LIMIT', 'SL'] as const} labels={{ LIMIT: 'Limit', SL: 'SL' }} onChange={setOrderType} />
                 </div>
               ) : mode === 'plain' ? (
-                <div className="flex items-center justify-between"><span className="text-zinc-400" title="An SL-limit's limit sits this % past its trigger: below it for a Sell, above it for a Buy">SL limit buffer %</span>
-                  <NumField label="SL limit buffer percent" value={slBufferPct} onCommit={setSlBufferPct} min={MIN_SL_BUFFER_PCT} max={MAX_SL_BUFFER_PCT} step={0.1} />
+                <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title="An SL-limit's limit sits this % past its trigger: below it for a Sell, above it for a Buy">SL limit buffer %</span>
+                  <NumField compact label="SL limit buffer percent" value={slBufferPct} onCommit={setSlBufferPct} min={MIN_SL_BUFFER_PCT} max={MAX_SL_BUFFER_PCT} step={0.1} />
                 </div>
               ) : null}
               {(mode === 'xy' || mode === 'pair') && (
                 <>
-                  <div className="flex items-center justify-between"><span className="text-zinc-400" title={mode === 'pair' ? 'Target / SL / trail are points of the combined premium' : undefined}>Style</span>
-                    <Seg value={style} options={['Single', 'Bracket', 'Cover'] as const} onChange={setStyle} />
+                  <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title={mode === 'pair' ? 'Target / SL / trail are points of the combined premium' : undefined}>Style</span>
+                    <Seg compact value={style} options={['Single', 'Bracket', 'Cover'] as const} onChange={setStyle} />
                   </div>
-                  <div className="grid grid-cols-2 gap-2 items-center">
-                    {style === 'Bracket' && <><span className="text-zinc-400">Target pts</span><NumField label="Target points" value={tgtPts} onCommit={setTgtPts} min={1} /></>}
-                    {style !== 'Single' && <><span className="text-zinc-400">SL pts</span><NumField label="Stop-loss points" value={slPts} onCommit={setSlPts} min={1} /></>}
+                  <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 items-center">
+                    {style === 'Bracket' && <><span className="text-zinc-400 font-medium">Target pts</span><NumField compact label="Target points" value={tgtPts} onCommit={setTgtPts} min={1} /></>}
+                    {style !== 'Single' && <><span className="text-zinc-400 font-medium">SL pts</span><NumField compact label="Stop-loss points" value={slPts} onCommit={setSlPts} min={1} /></>}
                     {/* Every style: Single + trail = a trailing stop on its own (the SL starts at the trail distance). */}
                     <label className="flex items-center gap-1.5 text-zinc-400" title="Continuous trailing SL: the SL stays this many points behind the best level reached and moves with every new high / low — never back">
                       <input type="checkbox" checked={trailOn} onChange={e => setTrailOn(e.target.checked)} /> Trail SL by
                     </label>
-                    <NumField label="Trailing SL distance in points" value={trailPts} onCommit={setTrailPts} min={1} />
+                    <NumField compact label="Trailing SL distance in points" value={trailPts} onCommit={setTrailPts} min={1} />
                   </div>
                 </>
               )}
-              <div className="flex items-center justify-between"><span className="text-zinc-400">Lots {lotSize ? <span className="text-zinc-500">({mcx ? `${lots * (shownC?.mult ?? 1)} bbl` : `${lots * lotSize} qty`})</span> : null}</span>
+              <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Lots {lotSize ? <span className="text-zinc-500">({mcx ? `${lots * (shownC?.mult ?? 1)} bbl` : `${lots * lotSize} qty`})</span> : null}</span>
                 <div className="flex items-center gap-1">
-                  <NumField label="Lots" value={lots} onCommit={v => setLots(Math.min(MAX_LADDER_LOTS, Math.max(1, Math.round(v))))} min={1} max={MAX_LADDER_LOTS} width="w-14" />
+                  <NumField compact label="Lots" value={lots} onCommit={v => setLots(Math.min(MAX_LADDER_LOTS, Math.max(1, Math.round(v))))} min={1} max={MAX_LADDER_LOTS} width="w-14" />
                   {[1, 5, 10].map(n => (
-                    <button key={n} type="button" onClick={() => setLots(l => Math.min(MAX_LADDER_LOTS, l + n))} className="px-1.5 py-1 rounded border border-zinc-700 text-zinc-300 hover:text-white">+{n}</button>
+                    <button key={n} type="button" onClick={() => setLots(l => Math.min(MAX_LADDER_LOTS, l + n))} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">+{n}</button>
                   ))}
-                  <button type="button" onClick={() => setLots(1)} className="px-1.5 py-1 rounded border border-zinc-700 text-zinc-400 hover:text-white">Clear</button>
+                  <button type="button" onClick={() => setLots(1)} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-400 hover:text-white">Clear</button>
                 </div>
               </div>
             </div>
