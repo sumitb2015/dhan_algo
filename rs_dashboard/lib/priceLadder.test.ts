@@ -4,7 +4,7 @@ import { mcxSession, usDstActive } from './mcxSession.ts';
 import {
   bias, limitZone, classifyClick, levelSane, capLots, cleanBracket, entryStep, bracketLevels, bracketStep, spotFresh,
   settleOrder, exitQtyFor, slicePnl, sliceNowPnl, sumSlicePnl, ownNet, ladderRows, snapToStep, rollDay, realArmed, pushEvent, istHhmm,
-  MAX_LADDER_LOTS, SPOT_STALE_MS, planTick, stopLimitPrice, cleanBufferPct, sessionFor, spotKey, parseSpotKey, type LadderSlice, type LadderState,
+  MAX_LADDER_LOTS, SPOT_STALE_MS, planTick, parseTrailRequest, trailedBracket, replanBracket, openExitStep, stopLimitPrice, cleanBufferPct, sessionFor, spotKey, parseSpotKey, type LadderSlice, type LadderState,
 } from './priceLadder.ts';
 
 const contract = { underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt: 'CE' as const, securityId: '111', lotSize: 65, exchangeSegment: 'NSE_FNO' };
@@ -507,4 +507,30 @@ test('bracketStep: a bracket armed before continuous trailing keeps the step rul
   assert.equal(bracketStep(s, 1, 105).slY, 90);           // half a step: no move
   assert.equal(bracketStep(s, 1, 110).slY, 100);          // one full step
   assert.deepEqual(cleanBracket({ tgtPts: 40, slPts: 30, trailPts: 25 }), { tgtPts: 40, slPts: 30, trailPts: 25, trailMode: 'distance' });
+});
+
+test('parseTrailRequest / trailedBracket: set, widen, tighten to the minimum, switch off', () => {
+  assert.equal(typeof parseTrailRequest({}), 'string');
+  assert.equal(typeof parseTrailRequest({ trailPts: -1 }), 'string');
+  const br = { tgtPts: 40, slPts: 30, trailPts: 10, trailMode: 'distance' as const };
+  assert.equal(trailedBracket(br, { abs: null, delta: 5 }, 1).trailPts, 15);
+  assert.equal(trailedBracket(br, { abs: null, delta: -9.8 }, 1).trailPts, 1);
+  assert.equal(trailedBracket(br, { abs: null, delta: -9.8 }, 0.5).trailPts, 0.5);
+  assert.deepEqual(trailedBracket(br, { abs: 0, delta: null }, 1), { tgtPts: 40, slPts: 30 });
+});
+
+test('replanBracket: dragged planned levels become points from the entry; wrong side refused', () => {
+  const br = { tgtPts: 40, slPts: 30 };
+  const ok = (v: number) => v > 0;
+  assert.deepEqual(replanBracket(br, 300, -1, 270, 320, ok), { tgtPts: 30, slPts: 20 });
+  assert.equal(typeof replanBracket(br, 300, -1, 310, null, ok), 'string');
+  assert.equal(typeof replanBracket({ tgtPts: 0, slPts: 30 }, 300, -1, 270, null, ok), 'string');
+});
+
+test('openExitStep: MIS square-off, then manual, then the bracket only with a price', () => {
+  const x = { product: 'MIS' as const, bracket: { tgtPts: 20, slPts: 15 }, entryY: 300, tgtY: 280, slY: 315, slY0: 315, peakY: 300 };
+  assert.equal(openExitStep(x, -1, 320, true, '15:17').reason, 'Auto square-off 15:17');
+  assert.equal(openExitStep({ ...x, exitWanted: 'Manual exit' }, -1, null, false, '15:17').reason, 'Manual exit');
+  assert.equal(openExitStep(x, -1, null, false, '15:17').reason, null);
+  assert.match(openExitStep(x, -1, 316, false, '15:17').reason!, /^SL 315/);
 });

@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { buildLadderView, resolveContract } from '@/lib/priceLadderView';
+import { pairAction } from '@/lib/priceLadderPairActions';
+import { isPairLive } from '@/lib/priceLadderPair';
 import {
   readLadderState, updateLadderState, startPriceLadderLoop, loadPrices, placeFor, afterSend, cancelAtBroker,
   brokerSessionOk, availableFunds, dhanSellMargin, withJob, commitIf, openedPatch, LADDER_UNDERLYINGS,
 } from '@/lib/priceLadderServer';
 import {
   sessionFor, spotKey, MAX_LADDER_LOTS, cleanBufferPct, stopLimitPrice, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, capLots, classifyClick, cleanBracket, istDay, istHhmm, levelSane, pushEvent, realArmed,
-  snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev,
+  snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev, newLadderId, parseTrailRequest, replanBracket, trailedBracket,
   type ClickType, type LadderZones, type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
 } from '@/lib/priceLadder';
 
@@ -19,7 +21,7 @@ const OPTION_TICK = 0.05;
 const parseBroker = (v: unknown): LadderBroker | null => (v === 'dhan' || v === 'kotak' || v === 'zerodha' ? v : null);
 const BROKER_NAME: Record<LadderBroker, string> = { dhan: 'Dhan', kotak: 'Kotak', zerodha: 'Zerodha' };
 const bad = (error: string, status = 400) => NextResponse.json({ success: false, error }, { status });
-const newId = () => `pl${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+const newId = () => newLadderId('pl');
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   startPriceLadderLoop();
@@ -299,6 +301,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       case 'arm':
         return await arm(body as unknown as ArmBody);
 
+      case 'pair':
+        // Pair mode (straddle / strangle on the combined premium): SIM only for now.
+        return await pairAction(body);
+
       case 'live': {
         const on = body.on === true;
         const s = await updateLadderState(st => pushEvent({ ...st, liveArmedOn: on ? today : undefined }, ev(on ? 'warn' : 'info', on ? 'LIVE · REAL MONEY armed for today' : 'LIVE · REAL MONEY off — armed REAL levels will be cancelled')));
@@ -410,16 +416,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           const entry = Number(x.entryLevel);
           const tgtY = body.tgtY == null ? null : Number(body.tgtY);
           const slY = body.slY == null ? null : Number(body.slY);
-          if (tgtY != null && x.bracket.tgtPts <= 0) return bad('A Cover order has no target');
-          if (tgtY != null && !(levelSane(tgtY, sp.spot) && (tgtY - entry) * b > 0)) return bad('Target must be on the profit side of the entry');
-          if (slY != null && !(levelSane(slY, sp.spot) && (entry - slY) * b > 0)) return bad('SL must be on the loss side of the entry');
+          const sane = (v: number) => levelSane(v, sp.spot);
+          const check = replanBracket(x.bracket, entry, b, tgtY, slY, sane);
+          if (typeof check === 'string') return bad(check);
           const r = await guarded(id, y => y.state === 'armed' && !!y.bracket && y.entryLevel === x.entryLevel, st => {
             const y = st.slices.find(z => z.id === id)!;
-            const bracket = {
-              ...y.bracket!,
-              ...(tgtY != null ? { tgtPts: Number(((tgtY - entry) * b).toFixed(2)) } : {}),
-              ...(slY != null ? { slPts: Number(((entry - slY) * b).toFixed(2)) } : {}),
-            };
+            const bracket = replanBracket(y.bracket!, entry, b, tgtY, slY, sane) as typeof check;
             return pushEvent(patchSlice(st, id, { bracket }), ev('info', `Planned bracket: TGT ${bracket.tgtPts > 0 ? `${bracket.tgtPts} pts` : '—'} / SL ${bracket.slPts} pts`, id));
           });
           if (!r.applied) return bad('Too late — it has just fired or moved; try again', 409);
@@ -472,11 +474,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // Continuous trailing SL for a position (and the '+1 lot' slices that share its levels): `trailPts` sets the
         // distance (0 = off); `delta` widens (+) or tightens (-) the current one (the ladder SL marker's +/-). The SL
         // never loosens: widening only lets it follow from further back from here on; tightening pulls it up now.
-        const abs = body.trailPts == null ? null : Number(body.trailPts);
-        const delta = body.delta == null ? null : Number(body.delta);
-        if (abs == null && delta == null) return bad('trailPts or delta required');
-        if (abs != null && !(abs >= 0 && Number.isFinite(abs))) return bad('trailPts must be 0 or more');
-        if (delta != null && !Number.isFinite(delta)) return bad('delta must be a number');
+        const req = parseTrailRequest(body);
+        if (typeof req === 'string') return bad(req);
         const x0 = readLadderState().slices.find(y => y.id === id);
         if (!x0 || !x0.bracket || TERMINAL.has(x0.state)) return bad('It is closed — trailing not changed', 409);
         // An open position's trail starts from the index level now (not an old peak), so switching it on or changing it
@@ -492,10 +491,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const s = await updateLadderState(st => {
           const x = st.slices.find(y => y.id === id);
           if (!x || !x.bracket || TERMINAL.has(x.state)) return st;
-          const cur = x.bracket.trailPts ?? 0;
-          const next0 = abs != null ? abs : Math.max(0, Number((cur + (delta ?? 0)).toFixed(2)));
-          // Tightening below one point would park the SL on the price.
-          const trail = next0 > 0 ? Math.max(1, next0) : 0;
+          // Index points: tightening below one point would park the SL on the price.
+          const trail = trailedBracket(x.bracket, req, 1).trailPts ?? 0;
           label = trail ? `Trailing SL ${trail} pts behind the best level` : 'Trailing off';
           // A '+1 lot' child shares its parent's target / SL: an open position's trail covers every open slice on those
           // same levels, so no lot is left on the old, wider stop.
@@ -504,9 +501,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             && y.slY === x.slY && y.tgtY === x.tgtY);
           let next = st;
           for (const y of st.slices.filter(joined)) {
-            const bracket = trail
-              ? { ...y.bracket!, trailPts: trail, trailMode: 'distance' as const }
-              : { tgtPts: y.bracket!.tgtPts, slPts: y.bracket!.slPts };
+            const bracket = trailedBracket(y.bracket!, { abs: trail, delta: null }, 1);
             next = patchSlice(next, y.id, { bracket, ...(y.state === 'open' && spotNow != null ? { peakY: spotNow } : {}) });
             n++;
           }
@@ -546,7 +541,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
 
       case 'clear': {
-        const s = await updateLadderState(st => ({ ...st, slices: st.slices.filter(x => !TERMINAL.has(x.state)) }));
+        const s = await updateLadderState(st => ({ ...st, slices: st.slices.filter(x => !TERMINAL.has(x.state)), ...(st.pairs ? { pairs: st.pairs.filter(isPairLive) } : {}) }));
         return NextResponse.json({ success: true, data: { state: s } });
       }
 

@@ -3,6 +3,7 @@
 import { useEffect, useRef } from 'react';
 import { ChevronDown, ChevronUp, Minus, Plus, X } from 'lucide-react';
 import { bias, bracketLevels, ladderRows, snapToStep, type LadderSide, type LadderSlice, type LadderZones } from '@/lib/priceLadder';
+import { pairBias, type LadderPair } from '@/lib/priceLadderPair';
 
 /**
  * One order on the ladder, drawn as OptionX draws it: in the Buy or Sell column of its price row, as
@@ -94,6 +95,37 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
     }
   }
   return [...groups.values()];
+}
+
+/**
+ * Widgets for the pairs on screen, on the combined-premium axis: an armed entry (× cancels, drag moves) with its planned
+ * target / SL, and an open pair's position plus target / SL (drag; a trailing SL shows − / +). No + / − lots on a pair
+ * in Phase 1: exit it from the pair table.
+ */
+export function pairWidgetsFor(pairs: LadderPair[]): LadderWidget[] {
+  const out: LadderWidget[] = [];
+  for (const p of pairs) {
+    const lotSize = p.legs.ce.contract.lotSize;
+    const mult = p.legs.ce.contract.mult;
+    const common = { qty: p.qty, lots: p.lots, ids: [p.id], ...(mult ? { mult } : {}) };
+    const exitCol = opposite(p.side);
+    const trail = p.bracket?.trailPts ? { trail: p.bracket.trailPts } : {};
+    const slLabel = p.bracket?.trailPts ? 'Trailing SL' : 'SL';
+    if (p.state === 'armed' && p.entryLevel) {
+      out.push({ ...common, key: `pe|${p.id}`, price: p.entryLevel, column: p.side, kind: 'entry', label: p.orderType === 'SL' ? 'Pair breakout entry' : 'Pair entry', cancellable: true, drag: 'entry' });
+      if (p.bracket) {
+        const lv = bracketLevels(pairBias(p.side), p.entryLevel, p.bracket);
+        if (lv.tgtY != null) out.push({ ...common, key: `pt|${p.id}`, price: lv.tgtY, column: exitCol, kind: 'tgt', label: 'Target', planned: true, drag: 'tgt' });
+        out.push({ ...common, key: `ps|${p.id}`, price: lv.slY, column: exitCol, kind: 'sl', label: slLabel, planned: true, drag: 'sl', ...trail });
+      }
+    }
+    if (p.state === 'open') {
+      if (p.entryY != null) out.push({ ...common, key: `pp|${p.id}`, price: p.entryY, column: p.side, kind: 'pos', label: 'Pair position', lots: Math.max(1, Math.round(p.qty / lotSize)) });
+      if (p.tgtY != null) out.push({ ...common, key: `pt|${p.id}`, price: p.tgtY, column: exitCol, kind: 'tgt', label: 'Target', drag: 'tgt' });
+      if (p.slY != null) out.push({ ...common, key: `ps|${p.id}`, price: p.slY, column: exitCol, kind: 'sl', label: slLabel, drag: 'sl', ...trail });
+    }
+  }
+  return out;
 }
 
 const QTY_TONE: Record<LadderSide, string> = {

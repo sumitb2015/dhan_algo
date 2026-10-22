@@ -7,6 +7,7 @@
 import { levelCrossStep } from './focusToolRules.ts';
 import { mcxSession } from './mcxSession.ts';
 import { zerodhaSnapPrice, type ZerodhaContractInfo } from './zerodhaOrderRules.ts';
+import type { LadderPair } from './priceLadderPair.ts';
 
 export type LadderMode = 'xy' | 'plain';
 export type LadderBroker = 'dhan' | 'kotak' | 'zerodha';
@@ -177,6 +178,8 @@ export interface LadderState {
   events: LadderEvent[];
   /** IST day the LIVE · REAL MONEY arm was switched on; only today's arm lets REAL opens through. */
   liveArmedOn?: string;
+  /** Pair mode (lib/priceLadderPair.ts): straddles / strangles on their combined premium. */
+  pairs?: LadderPair[];
   /** Bumped on every write: a reader that already showed a newer revision ignores an older one arriving late. */
   rev?: number;
 }
@@ -306,6 +309,65 @@ export function bracketStep(
   if (s.tgtY != null && (b > 0 ? spot >= s.tgtY : spot <= s.tgtY)) return { hit: 'target', slY, peakY };
   if (slY != null && (b > 0 ? spot <= slY : spot >= slY)) return { hit: 'sl', slY, peakY };
   return { hit: null, slY, peakY };
+}
+
+/** A new ledger id: `prefix` + time + a little randomness ('pl' slices, 'pp' pairs). */
+export function newLadderId(prefix: string): string {
+  return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+}
+
+/** A trail request: `trailPts` sets the distance (0 = off), `delta` widens (+) / tightens (-) it. Error text if unusable. */
+export function parseTrailRequest(body: { trailPts?: unknown; delta?: unknown }): { abs: number | null; delta: number | null } | string {
+  const abs = body.trailPts == null ? null : Number(body.trailPts);
+  const delta = body.delta == null ? null : Number(body.delta);
+  if (abs == null && delta == null) return 'trailPts or delta required';
+  if (abs != null && !(abs >= 0 && Number.isFinite(abs))) return 'trailPts must be 0 or more';
+  if (delta != null && !Number.isFinite(delta)) return 'delta must be a number';
+  return { abs, delta };
+}
+
+/**
+ * The bracket after a trail request: a continuous trail at the new distance, or no trail (0). A distance above 0 is held
+ * at `minPts` or more — tighter would park the SL on the price (index points: 1; a pair's premium points: 0.5).
+ */
+export function trailedBracket(br: LadderBracket, req: { abs: number | null; delta: number | null }, minPts: number): LadderBracket {
+  const cur = br.trailPts ?? 0;
+  const next0 = req.abs != null ? req.abs : Math.max(0, Number((cur + (req.delta ?? 0)).toFixed(2)));
+  const trail = next0 > 0 ? Math.max(minPts, next0) : 0;
+  return trail ? { ...br, trailPts: trail, trailMode: 'distance' } : { tgtPts: br.tgtPts, slPts: br.slPts };
+}
+
+/**
+ * A planned (not yet filled) bracket re-planned from a dragged target / SL level: kept as points from the entry level, so
+ * it still moves with the entry and opens where the fill lands. Error text when a level is on the wrong side.
+ */
+export function replanBracket(br: LadderBracket, entry: number, b: 1 | -1, tgtY: number | null, slY: number | null, sane: (v: number) => boolean): LadderBracket | string {
+  if (tgtY != null && br.tgtPts <= 0) return 'A Cover order has no target';
+  if (tgtY != null && !(sane(tgtY) && (tgtY - entry) * b > 0)) return 'Target must be on the profit side of the entry';
+  if (slY != null && !(sane(slY) && (entry - slY) * b > 0)) return 'SL must be on the loss side of the entry';
+  return {
+    ...br,
+    ...(tgtY != null ? { tgtPts: Number(((tgtY - entry) * b).toFixed(2)) } : {}),
+    ...(slY != null ? { slPts: Number(((entry - slY) * b).toFixed(2)) } : {}),
+  };
+}
+
+/** The fields an open position's exit rules read (a slice or a pair). */
+export type OpenRuleFields = Pick<LadderSlice, 'product' | 'exitWanted' | 'bracket' | 'entryY' | 'tgtY' | 'slY' | 'slY0' | 'peakY' | 'trailFrom'>;
+
+/**
+ * Why an open position exits this tick, if it does, and how its trailing SL moved — shared by slices (index levels) and
+ * pairs (combined premium). Order: the MIS square-off, a manual exit, then the bracket (target before SL), which runs
+ * only when `price` is given (fresh, and in a state where the caller lets it act).
+ */
+export function openExitStep(x: OpenRuleFields, b: 1 | -1, price: number | null, afterClose: boolean, at: string): { reason: string | null; patch: { slY?: number; peakY?: number } } {
+  if (afterClose && x.product === 'MIS') return { reason: `Auto square-off ${at}`, patch: {} };
+  if (x.exitWanted) return { reason: x.exitWanted, patch: {} };
+  if (!x.bracket || price == null) return { reason: null, patch: {} };
+  const r = bracketStep(x, b, price);
+  const patch = r.slY !== x.slY || r.peakY !== x.peakY ? { slY: r.slY, peakY: r.peakY } : {};
+  const reason = !r.hit ? null : r.hit === 'target' ? `Target ${x.tgtY}` : `${x.slY0 !== r.slY ? 'Trailing SL' : 'SL'} ${r.slY}`;
+  return { reason, patch };
 }
 
 /** Fresh enough to act on. */
@@ -441,7 +503,9 @@ export function rollDay(s: LadderState, today: string, now: number): LadderState
       return x;
     })
     .filter(x => !TERMINAL.has(x.state));
-  return { date: today, slices, events: [], liveArmedOn: undefined, ...(s.rev != null ? { rev: s.rev } : {}) };
+  // Pairs: armed levels expire with the day, finished ones are dropped, open ones are carried (NRML).
+  const pairs = (s.pairs ?? []).filter(p => p.state === 'open');
+  return { date: today, slices, events: [], liveArmedOn: undefined, ...(pairs.length ? { pairs } : {}), ...(s.rev != null ? { rev: s.rev } : {}) };
 }
 
 /** REAL opens need today's arm. Exits never do. */
@@ -580,16 +644,10 @@ export function planTick(
     }
 
     if (x.state === 'open') {
-      let reason: string | null = null;
-      let patch: Partial<LadderSlice> = {};
       // 15:17 squares off intraday (MIS) only: NRML was chosen to be carried, and its bracket resumes at the next open.
-      if (afterClose && x.product === 'MIS') reason = `Auto square-off ${at}`;
-      else if (x.exitWanted) reason = x.exitWanted;
-      else if (x.kind === 'xy' && x.bracket && fresh) {
-        const r = bracketStep(x, bias(x.contract.opt, x.side), spot);
-        if (r.slY !== x.slY || r.peakY !== x.peakY) patch = { slY: r.slY, peakY: r.peakY };
-        if (r.hit) reason = r.hit === 'target' ? `Target ${x.tgtY}` : `${x.slY0 !== r.slY ? 'Trailing SL' : 'SL'} ${r.slY}`;
-      }
+      const step = openExitStep(x, bias(x.contract.opt, x.side), x.kind === 'xy' && fresh ? spot : null, afterClose, at);
+      let reason = step.reason;
+      const patch: Partial<LadderSlice> = step.patch;
       if (reason && x.exitRetryAt && now < x.exitRetryAt) reason = null;
       // Outside the session a REAL exit would only be rejected (and retried every 15 s): hold it and say so once.
       if (reason && x.mode === 'real' && !sessionOpen) {

@@ -7,6 +7,7 @@ import {
   spotKey, isMcxUnderlying, isLive, istDay, istHhmm, realArmed, sessionFor, spotFresh,
   type LadderBroker, type LadderContract, type OptType,
 } from '@/lib/priceLadder';
+import { isPairLive, pairCombined } from '@/lib/priceLadderPair';
 
 // What the Price Ladder page shows, built once for both the 1 s poll (GET /api/price-ladder/state) and the push stream
 // (GET /api/price-ladder/stream), and the contract resolution every order route shares. Server only.
@@ -61,14 +62,33 @@ export async function buildLadderView(params: URLSearchParams) {
   }
   // The page's XY axis: the index, or for MCX the shown option month's own futures (known once a contract is picked).
   const shownKey = shown ? spotKey(shown) : (LADDER_UNDERLYINGS.includes(want) && !isMcxUnderlying(want) ? want : null);
+  // Pair mode: the CE and PE legs on screen (`pairCe` / `pairPe` strikes, same underlying and expiry).
+  const pairCe = Number(params.get('pairCe')), pairPe = Number(params.get('pairPe'));
+  let pairLegs: { ce: LadderContract; pe: LadderContract } | null = null;
+  // A pair leg's own error, apart from the single contract's (the page shows each against its own selection).
+  let pairError: string | null = null;
+  if (LADDER_UNDERLYINGS.includes(want) && /^\d{4}-\d{2}-\d{2}$/.test(expiry) && pairCe > 0 && pairPe > 0) {
+    const [ce, pe] = await Promise.all([resolveContract('dhan', want, expiry, pairCe, 'CE'), resolveContract('dhan', want, expiry, pairPe, 'PE')]);
+    if (typeof ce !== 'string' && typeof pe !== 'string') pairLegs = { ce, pe };
+    else pairError = typeof ce === 'string' ? ce : pe as string;
+  }
+  const livePairLegs = (state.pairs ?? []).filter(isPairLive).flatMap(p => [p.legs.ce.contract, p.legs.pe.contract]);
   const unders = [...new Set([...(shownKey ? [shownKey] : []), ...live.map(x => spotKey(x.contract))])];
-  const prices = await loadPrices(unders, [...live.map(x => x.contract), ...(shown ? [shown] : [])]);
+  const prices = await loadPrices(unders, [
+    ...live.map(x => x.contract), ...(shown ? [shown] : []), ...livePairLegs, ...(pairLegs ? [pairLegs.ce, pairLegs.pe] : []),
+  ]);
   const now = Date.now();
   const spots = Object.fromEntries(Object.entries(prices.spots).map(([u, v]) => [u, { ...v, fresh: spotFresh(v.at, now) }]));
   return {
-    state, spots, ltps: prices.ltps, liveArmed: realArmed(state, istDay()), now, spotKey: shownKey, contractError,
+    state, spots, ltps: prices.ltps, liveArmed: realArmed(state, istDay()), now, spotKey: shownKey, contractError, pairError,
     // Which contract this reply describes: the page ignores a reply for a selection it has since moved off.
-    request: { underlying: want, expiry, strike: strike > 0 ? strike : null, opt },
+    request: { underlying: want, expiry, strike: strike > 0 ? strike : null, opt, pairCe: pairCe > 0 ? pairCe : null, pairPe: pairPe > 0 ? pairPe : null },
+    pair: pairLegs ? {
+      ce: { strike: pairLegs.ce.strike, securityId: pairLegs.ce.securityId, ltp: prices.ltps[pairLegs.ce.securityId] ?? null },
+      pe: { strike: pairLegs.pe.strike, securityId: pairLegs.pe.securityId, ltp: prices.ltps[pairLegs.pe.securityId] ?? null },
+      combined: pairCombined({ legs: { ce: { contract: pairLegs.ce }, pe: { contract: pairLegs.pe } } }, prices.ltps),
+      lotSize: pairLegs.ce.lotSize, mult: pairLegs.ce.mult ?? 1,
+    } : null,
     contract: shown ? {
       securityId: shown.securityId, lotSize: shown.lotSize, ltp: prices.ltps[shown.securityId] ?? null,
       mult: shown.mult ?? 1, ...(shown.ref ? { refExpiry: shown.ref.expiry, axisDay: axisDayOf(shown, prices.days, now) } : {}),

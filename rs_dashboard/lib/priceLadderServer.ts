@@ -24,6 +24,7 @@ import {
   rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS,
   type Job, type LadderOrderHow, type LadderBroker, type LadderContract, type LadderSide, type LadderSlice, type LadderState,
 } from '@/lib/priceLadder';
+import { isPairLive, planPairs } from '@/lib/priceLadderPair';
 
 // The Price Ladder's server watcher. It owns debug/price_ladder_state.json (re-read on every tick and every request,
 // never cached, because the instrumentation hook and the API route can be separate module instances) and, about once
@@ -65,6 +66,7 @@ function readStateFile(): LadderState {
       slices: Array.isArray(s.slices) ? s.slices : [],
       events: Array.isArray(s.events) ? s.events : [],
       ...(s.liveArmedOn ? { liveArmedOn: String(s.liveArmedOn) } : {}),
+      ...(Array.isArray(s.pairs) && s.pairs.length ? { pairs: s.pairs } : {}),
       ...(Number.isFinite(Number(s.rev)) ? { rev: Number(s.rev) } : {}),
     };
   } catch (err) {
@@ -780,12 +782,16 @@ async function tick(): Promise<void> {
   }
   // UNKNOWN slices wait for the user and need nothing from the watcher; everything else live does.
   const live = s.slices.filter(x => isLive(x) && x.state !== 'unknown');
-  if (!live.length) return;
+  const livePairs = (s.pairs ?? []).filter(isPairLive);
+  if (!live.length && !livePairs.length) return;
   const now = Date.now();
   // Prices only for slices whose rules read them (armed / open XY need spot; SIM fills and exits need the option LTP).
   const priced = live.filter(x => x.state === 'armed' || x.state === 'open' || (x.mode === 'sim' && (x.state === 'working' || x.state === 'exiting')));
   const underlyings = [...new Set(priced.map(x => spotKey(x.contract)))];
-  const prices: PriceView = priced.length ? await loadPrices(underlyings, priced.map(x => x.contract)) : { spots: {}, ltps: {} };
+  // A pair's rules read both legs' premiums (its combined price).
+  const pairLegs = livePairs.flatMap(p => [p.legs.ce.contract, p.legs.pe.contract]);
+  const prices: PriceView = priced.length || pairLegs.length
+    ? await loadPrices(underlyings, [...priced.map(x => x.contract), ...pairLegs]) : { spots: {}, ltps: {} };
 
   for (const u of underlyings) {
     const needsSpot = live.some(x => spotKey(x.contract) === u && x.kind === 'xy' && (x.state === 'armed' || x.state === 'open'));
@@ -807,7 +813,8 @@ async function tick(): Promise<void> {
   // between our read and the lock). Opens and closes are protected by that mark: the next tick sees 'placing' /
   // 'exiting' and never sends them again.
   let jobs: Job[] = [];
-  const planned = await updateLadderState(cur => { const r = planTick(cur, prices, now, io); jobs = r.jobs; return r.next; });
+  // Pairs are SIM only (Phase 1): planPairs fills and exits them in the same write, with no broker job.
+  const planned = await updateLadderState(cur => { const r = planTick(cur, prices, now, io); jobs = r.jobs; return planPairs(r.next, prices.ltps, now); });
   // Not awaited: the watcher keeps ticking (and checking every other stop) while orders are on the wire.
   if (jobs.length) void runJobs(planned, jobs, prices);
   if (!reconciling && Date.now() - lastReconcile >= RECONCILE_MS) {
