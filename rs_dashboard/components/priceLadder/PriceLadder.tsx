@@ -299,6 +299,18 @@ export default function PriceLadder() {
     return () => { cancelled = true; clearInterval(t); };
   }, []);
 
+  // Whether each broker's saved session is still valid (/api/auth/broker-status, a file check — no broker call). A REAL
+  // order on an expired session is refused by the server anyway; this says so up front instead of on the click.
+  const [sessions, setSessions] = useState<Partial<Record<LadderBroker, boolean>>>({});
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => fetch('/api/auth/broker-status', { cache: 'no-store' }).then(r => r.json())
+      .then((j: Partial<Record<LadderBroker, boolean>>) => { if (!cancelled) setSessions(j); }).catch(() => {});
+    void load();
+    const t = setInterval(load, 60_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, []);
+
   // Header account P&L: the shared, server-cached portfolio read (display only — it never sizes an order), every 5 s
   // while the tab is visible. A failed or incomplete read shows '—', never a stale or partial number.
   const [acct, setAcct] = useState<{ pnl: number | null; open: number | null; note: string | null }>({ pnl: null, open: null, note: null });
@@ -402,6 +414,8 @@ export default function PriceLadder() {
   const sessionNote = sessionFor(underlying, istDay()).note ?? null;
   // MCX on the ladder is Dhan only (the server refuses the others too).
   const brokerUnsupported = mcx && broker !== 'dhan';
+  // False only once the status says so (unknown = not blocked; the server still checks every REAL order).
+  const sessionDown = sessions[broker] === false;
   const spot = spotView?.spot ?? 0;
   const spotFreshNow = !!spotView?.fresh;
   const optLtp = shownC?.ltp ?? 0;
@@ -547,7 +561,7 @@ export default function PriceLadder() {
   const pendingHere = mine.filter(s => (s.state === 'armed' || s.state === 'working') && s.mode === pageMode).length;
 
   const stale = mode === 'xy' && !spotFreshNow;
-  const placeDisabled = busy || !brokerLoaded || !strike || !(refPrice > 0) || realBlocked || brokerUnsupported || (mode === 'xy' && stale);
+  const placeDisabled = busy || !brokerLoaded || !strike || !(refPrice > 0) || realBlocked || brokerUnsupported || (real && sessionDown) || (mode === 'xy' && stale);
   const decimals = mode === 'xy' ? (tick < 1 ? 2 : 0) : 2;
   const ticks = mode === 'xy' ? XY_TICKS : PLAIN_TICKS;
   const dataDate = data ? data.state.date : null;
@@ -671,6 +685,12 @@ export default function PriceLadder() {
         {mcx && sessionNote && (
           <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
             <AlertTriangle className="w-4 h-4" /> {sessionNote}
+          </div>
+        )}
+        {sessionDown && !brokerUnsupported && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
+            <AlertTriangle className="w-4 h-4" />
+            {BROKER_LABELS[broker]} session is not logged in — {real ? 'REAL orders are off until you log in (Autologin); exits already sent keep retrying.' : 'SIM works; REAL needs a fresh login (Autologin).'}
           </div>
         )}
         {brokerUnsupported && (
