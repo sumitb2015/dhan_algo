@@ -97,6 +97,7 @@ export default function PriceLadder() {
   const [strikes, setStrikes] = useState<number[]>([]);
   const [strike, setStrike] = useState<number | null>(null);
   const [opt, setOpt] = useState<OptType>('CE');
+  const [side, setSide] = useState<LadderSide>('BUY');
   const [product, setProduct] = useState<'NRML' | 'MIS'>('MIS');
   const [orderType, setOrderType] = useState<ClickType>('LIMIT');
   const [style, setStyle] = useState<'Single' | 'Bracket' | 'Cover'>('Bracket');
@@ -238,6 +239,16 @@ export default function PriceLadder() {
   const pageMode = real ? 'real' : 'sim';
   // Ladder markers follow the SIM/REAL switch too: a paper level must never look like a real one on the ladder.
   const mine = useMemo(() => slices.filter(s => isLive(s) && s.broker === broker && s.mode === pageMode && s.contract.securityId === securityId), [slices, broker, pageMode, securityId]);
+  const entryLevels = useMemo(() => {
+    const levels: number[] = [];
+    for (const s of mine) {
+      if ((s.state === 'open' || s.state === 'exiting') && Number(s.filledQty) > 0) {
+        const y = s.entryY ?? s.entryLevel;
+        if (y && Number.isFinite(y)) levels.push(y);
+      }
+    }
+    return levels;
+  }, [mine]);
   const net = securityId ? ownNet(slices.filter(s => s.broker === broker && s.mode === pageMode), securityId) : { qty: 0, avg: null };
   const contractPnl = useMemo(() => {
     let sum = 0, any = false;
@@ -445,6 +456,24 @@ export default function PriceLadder() {
               <div className="flex items-center justify-between"><span className="text-zinc-400">Order Type</span>
                 <Seg value={orderType} options={['LIMIT', 'SL'] as const} labels={{ LIMIT: 'Limit', SL: 'SL' }} onChange={setOrderType} />
               </div>
+              <div className="flex items-center justify-between"><span className="text-zinc-400">Side</span>
+                <div className="grid grid-cols-2 gap-1.5 w-32">
+                  <button
+                    type="button"
+                    onClick={() => setSide('BUY')}
+                    className={`py-1 rounded text-xs font-bold transition-all ${side === 'BUY' ? 'bg-emerald-600 text-white shadow' : 'bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-zinc-200'}`}
+                  >
+                    Buy
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSide('SELL')}
+                    className={`py-1 rounded text-xs font-bold transition-all ${side === 'SELL' ? 'bg-red-600 text-white shadow' : 'bg-zinc-900 border border-zinc-700 text-zinc-400 hover:text-zinc-200'}`}
+                  >
+                    Sell
+                  </button>
+                </div>
+              </div>
               {mode === 'xy' && (
                 <>
                   <div className="flex items-center justify-between"><span className="text-zinc-400">Style</span>
@@ -502,7 +531,7 @@ export default function PriceLadder() {
               widgets={widgetsFor(mine, mode)}
               limitZoneBuy={limitZone(mode, opt, 'BUY')}
               onPlace={onPlace} onCancel={id => void post({ action: 'cancel', id })} onMove={onMove} onAdjust={onAdjust}
-              disabled={placeDisabled} decimals={decimals}
+              disabled={placeDisabled} decimals={decimals} entryLevels={entryLevels}
             />
           </div>
         </div>

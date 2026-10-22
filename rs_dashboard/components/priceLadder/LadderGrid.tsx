@@ -84,60 +84,93 @@ const TAG: Record<LadderWidget['kind'], string> = { entry: '', tgt: 'TGT', sl: '
 
 const DRAG_MIME = 'application/x-price-ladder';
 
-function Widget({ w, decimals, onAdjust, onCancel }: {
-  w: LadderWidget; decimals: number;
-  onAdjust: (w: LadderWidget, delta: 1 | -1) => void; onCancel: (id: string) => void;
+function InnerPriceWidget({ w, decimals }: { w: LadderWidget; decimals: number }) {
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+  const what = `${w.label} at ${w.price.toFixed(decimals)}`;
+  return (
+    <div
+      onClick={stop} onKeyDown={stop}
+      draggable={!!w.drag}
+      onDragStart={w.drag ? e => { e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ ids: w.ids, what: w.drag })); e.dataTransfer.effectAllowed = 'move'; } : undefined}
+      title={w.planned ? `${w.label} — set when the entry fills` : w.drag ? `${w.label} — drag to another price to move it` : what}
+      data-widget={w.kind}
+      className={`font-mono text-xs font-semibold select-none px-1 py-0.5 rounded transition-colors ${w.planned ? 'text-zinc-400 italic opacity-75' : 'text-zinc-100'} ${w.drag ? 'cursor-grab active:cursor-grabbing hover:text-white hover:bg-zinc-800/60' : ''}`}
+    >
+      {w.price.toFixed(decimals)}
+    </div>
+  );
+}
+
+function OuterControlWidget({ w, onAdjust, onCancel }: {
+  w: LadderWidget;
+  onAdjust: (w: LadderWidget, delta: 1 | -1) => void;
+  onCancel: (id: string) => void;
 }) {
   const stop = (e: React.SyntheticEvent) => e.stopPropagation();
   const what = `${w.label} ${w.column} ${w.lots} lot${w.lots === 1 ? '' : 's'} at ${w.price}`;
   const plusTitle = w.adjust === 'position' ? 'Add 1 lot to the position at market' : 'One more lot on this order';
   const minusTitle = w.adjust === 'position' ? 'Exit 1 lot at market' : 'One lot fewer on this order';
+
   return (
-    <span
+    <div
       onClick={stop} onKeyDown={stop}
       draggable={!!w.drag}
       onDragStart={w.drag ? e => { e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ ids: w.ids, what: w.drag })); e.dataTransfer.effectAllowed = 'move'; } : undefined}
-      title={w.planned ? `${w.label} — set when the entry fills` : w.drag ? `${w.label} — drag to another price to move it` : w.label}
+      className={`inline-flex items-center gap-1 select-none ${w.planned ? 'opacity-70' : ''}`}
       data-widget={w.kind}
-      className={`inline-flex items-stretch h-5 rounded border text-[10px] font-mono overflow-hidden ${w.planned ? 'border-dashed border-zinc-600 opacity-60' : 'border-zinc-700'} ${w.drag ? 'cursor-grab' : ''}`}
     >
-      <span className="flex items-center gap-1 px-1.5 bg-zinc-800 text-zinc-200">
-        {TAG[w.kind] && <span className="font-bold text-zinc-400">{TAG[w.kind]}</span>}
-        {w.price.toFixed(decimals)}
-      </span>
-      {w.adjust && (
-        <span className="flex flex-col bg-zinc-900 border-x border-zinc-700">
-          <button type="button" aria-label={`Plus one lot: ${what}`} title={plusTitle} onClick={() => onAdjust(w, 1)}
-            className="flex-1 px-0.5 text-zinc-300 hover:text-white hover:bg-zinc-700 focus-visible:outline focus-visible:outline-1 focus-visible:outline-zinc-400">
-            <Plus className="w-2.5 h-2.5" />
-          </button>
-          <button type="button" aria-label={`Minus one lot: ${what}`} title={minusTitle} onClick={() => onAdjust(w, -1)}
-            className="flex-1 px-0.5 text-zinc-300 hover:text-white hover:bg-zinc-700 focus-visible:outline focus-visible:outline-1 focus-visible:outline-zinc-400">
-            <Minus className="w-2.5 h-2.5" />
-          </button>
-        </span>
-      )}
-      <span className={`flex items-center px-1.5 font-bold ${QTY_TONE[w.column]}`} title={`${w.lots} lot${w.lots === 1 ? '' : 's'}`}>
-        {w.qty}
-      </span>
-      {w.cancellable && (
+      {w.cancellable && w.column === 'BUY' && (
         <button type="button" aria-label={`Cancel ${what}`} onClick={() => onCancel(w.ids[0])}
-          className="px-0.5 bg-zinc-900 text-zinc-400 hover:text-white hover:bg-zinc-700 focus-visible:outline focus-visible:outline-1 focus-visible:outline-zinc-400">
+          className="p-0.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded focus-visible:outline focus-visible:outline-1 focus-visible:outline-zinc-400">
           <X className="w-3 h-3" />
         </button>
       )}
-    </span>
+
+      {w.column === 'BUY' && (
+        <span className={`px-2 py-0.5 rounded font-mono font-bold text-xs ${QTY_TONE[w.column]}`} title={`${w.lots} lot${w.lots === 1 ? '' : 's'}`}>
+          {w.qty}
+        </span>
+      )}
+
+      {w.adjust && (
+        <div className="flex flex-col justify-center bg-zinc-900 border border-zinc-700 rounded overflow-hidden leading-none">
+          <button type="button" aria-label={`Plus one lot: ${what}`} title={plusTitle} onClick={() => onAdjust(w, 1)}
+            className="px-1 py-0.5 text-zinc-300 hover:text-white hover:bg-zinc-700 focus-visible:outline focus-visible:outline-1 focus-visible:outline-zinc-400">
+            <Plus className="w-2.5 h-2.5" />
+          </button>
+          <button type="button" aria-label={`Minus one lot: ${what}`} title={minusTitle} onClick={() => onAdjust(w, -1)}
+            className="px-1 py-0.5 text-zinc-300 hover:text-white hover:bg-zinc-700 border-t border-zinc-800 focus-visible:outline focus-visible:outline-1 focus-visible:outline-zinc-400">
+            <Minus className="w-2.5 h-2.5" />
+          </button>
+        </div>
+      )}
+
+      {w.column === 'SELL' && (
+        <span className={`px-2 py-0.5 rounded font-mono font-bold text-xs ${QTY_TONE[w.column]}`} title={`${w.lots} lot${w.lots === 1 ? '' : 's'}`}>
+          {w.qty}
+        </span>
+      )}
+
+      {w.cancellable && w.column === 'SELL' && (
+        <button type="button" aria-label={`Cancel ${what}`} onClick={() => onCancel(w.ids[0])}
+          className="p-0.5 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded focus-visible:outline focus-visible:outline-1 focus-visible:outline-zinc-400">
+          <X className="w-3 h-3" />
+        </button>
+      )}
+    </div>
   );
 }
 
 /**
- * The ladder: Buy | Bids | Price | Offers | Sell. A click on an empty part of the Buy or Sell cell places at that row's
- * price; orders sit in those cells as widgets. No depth in v1 (Bids/Offers only carry the limit-zone tint), and the
- * reference row (spot in XY, LTP in plain) is lit. `limitZoneBuy` flips for a Put in XY mode, so the tint follows the
- * option, not the index.
+ * The ladder: Buy | Bids | Price | Offers | Sell.
+ * Reference UI (OptionX):
+ *  - Trigger prices for Target / SL / armed orders sit in the INNER column (Bids for BUY, Offers for SELL).
+ *  - Controls (+ / − buttons and lot quantity) sit in the OUTER column (Buy for BUY, Sell for SELL).
+ *  - The central Price column displays sequential price rungs, with the reference price (spot / LTP) highlighted.
+ *  - When an open position is active, a horizontal blue line marks its entry level across the ladder.
  */
 export function LadderGrid({
-  center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals,
+  center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryLevels,
 }: {
   center: number; refPrice: number; tick: number; rows: number; widgets: LadderWidget[];
   limitZoneBuy: 'below' | 'above';
@@ -146,6 +179,7 @@ export function LadderGrid({
   onMove: (ids: string[], what: 'entry' | 'tgt' | 'sl', price: number) => void;
   onAdjust: (w: LadderWidget, delta: 1 | -1) => void;
   disabled: boolean; decimals: number;
+  entryLevels?: number[];
 }) {
   const prices = ladderRows(center, tick, rows);
   const refRow = refPrice > 0 ? snapToStep(refPrice, tick) : null;
@@ -156,21 +190,9 @@ export function LadderGrid({
   }
   const fmt = (v: number) => v.toFixed(decimals);
 
-  const cell = (side: LadderSide, p: number, zone: boolean, ws: LadderWidget[]) => (
-    <div
-      role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
-      aria-label={`${side === 'BUY' ? 'Buy' : 'Sell'} at ${fmt(p)}`}
-      onClick={() => { if (!disabled) onPlace(side, p); }}
-      onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace(side, p); } }}
-      className={`h-7 flex items-center gap-1 px-1 overflow-hidden transition-colors ${side === 'BUY' ? 'justify-end' : 'justify-start'} ${zone ? (side === 'BUY' ? 'bg-emerald-500/5' : 'bg-red-500/5') : ''} ${disabled ? 'cursor-not-allowed' : side === 'BUY' ? 'cursor-pointer hover:bg-emerald-500/25' : 'cursor-pointer hover:bg-red-500/25'} focus-visible:outline focus-visible:outline-1 ${side === 'BUY' ? 'focus-visible:outline-emerald-400' : 'focus-visible:outline-red-400'}`}
-    >
-      {ws.map(w => <Widget key={w.key} w={w} decimals={decimals} onAdjust={onAdjust} onCancel={onCancel} />)}
-    </div>
-  );
-
   return (
     <div className="rounded-lg border border-zinc-800 overflow-hidden bg-zinc-950">
-      <div className="grid grid-cols-[1.6fr_0.6fr_0.8fr_0.6fr_1.6fr] text-xs font-bold text-white bg-zinc-800">
+      <div className="grid grid-cols-[1.3fr_0.8fr_0.8fr_0.8fr_1.3fr] text-xs font-bold text-white bg-zinc-800">
         <div className="px-2 py-1.5 text-center">Buy</div>
         <div className="px-2 py-1.5 text-center">Bids</div>
         <div className="px-2 py-1.5 text-center">Price</div>
@@ -179,15 +201,19 @@ export function LadderGrid({
       </div>
       {prices.map(p => {
         const isRef = refRow != null && Math.abs(p - refRow) < tick / 2;
+        const isEntry = entryLevels?.some(y => Math.abs(p - snapToStep(y, tick)) < tick / 2);
         const below = refPrice > 0 && p < refPrice;
         const above = refPrice > 0 && p > refPrice;
         const buyZone = limitZoneBuy === 'below' ? below : above;
         const sellZone = limitZoneBuy === 'below' ? above : below;
         const ws = byRow.get(p) ?? [];
+        const buyWs = ws.filter(w => w.column === 'BUY');
+        const sellWs = ws.filter(w => w.column === 'SELL');
+
         return (
           <div
             key={p}
-            className={`grid grid-cols-[1.6fr_0.6fr_0.8fr_0.6fr_1.6fr] border-t border-zinc-900 text-xs ${isRef ? 'bg-amber-500/15' : ''}`}
+            className={`grid grid-cols-[1.3fr_0.8fr_0.8fr_0.8fr_1.3fr] border-t border-zinc-900 text-xs relative ${isRef ? 'bg-amber-500/15' : ''} ${isEntry ? 'border-b-2 border-b-blue-500' : ''}`}
             onDragOver={e => { if (e.dataTransfer.types.includes(DRAG_MIME)) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; } }}
             onDrop={e => {
               const raw = e.dataTransfer.getData(DRAG_MIME);
@@ -196,13 +222,54 @@ export function LadderGrid({
               try { const d = JSON.parse(raw) as { ids: string[]; what: 'entry' | 'tgt' | 'sl' }; onMove(d.ids, d.what, p); } catch { /* not ours */ }
             }}
           >
-            {cell('BUY', p, buyZone, ws.filter(w => w.column === 'BUY'))}
-            <div className={`h-7 ${buyZone ? 'bg-emerald-500/10' : ''}`} />
+            {/* Column 1: Buy (Outer controls) */}
+            <div
+              role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
+              aria-label={`Buy at ${fmt(p)}`}
+              onClick={() => { if (!disabled) onPlace('BUY', p); }}
+              onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('BUY', p); } }}
+              className={`h-7 flex items-center justify-end gap-1 px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/5' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/25'} focus-visible:outline focus-visible:outline-1 focus-visible:outline-emerald-400`}
+            >
+              {buyWs.map(w => <OuterControlWidget key={w.key} w={w} onAdjust={onAdjust} onCancel={onCancel} />)}
+            </div>
+
+            {/* Column 2: Bids (Inner trigger price for Buy-side triggers) */}
+            <div
+              role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
+              aria-label={`Bid ${fmt(p)}`}
+              onClick={() => { if (!disabled) onPlace('BUY', p); }}
+              onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('BUY', p); } }}
+              className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/10' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/20'}`}
+            >
+              {buyWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} />)}
+            </div>
+
+            {/* Column 3: Price */}
             <div className={`h-7 flex items-center justify-center font-mono ${isRef ? 'font-bold text-amber-300' : 'text-zinc-200'}`}>
               {isRef ? refPrice.toFixed(2) : fmt(p)}
             </div>
-            <div className={`h-7 ${sellZone ? 'bg-red-500/10' : ''}`} />
-            {cell('SELL', p, sellZone, ws.filter(w => w.column === 'SELL'))}
+
+            {/* Column 4: Offers (Inner trigger price for Sell-side triggers) */}
+            <div
+              role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
+              aria-label={`Offer ${fmt(p)}`}
+              onClick={() => { if (!disabled) onPlace('SELL', p); }}
+              onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('SELL', p); } }}
+              className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/10' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/20'}`}
+            >
+              {sellWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} />)}
+            </div>
+
+            {/* Column 5: Sell (Outer controls) */}
+            <div
+              role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
+              aria-label={`Sell at ${fmt(p)}`}
+              onClick={() => { if (!disabled) onPlace('SELL', p); }}
+              onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('SELL', p); } }}
+              className={`h-7 flex items-center justify-start gap-1 px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/5' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/25'} focus-visible:outline focus-visible:outline-1 focus-visible:outline-red-400`}
+            >
+              {sellWs.map(w => <OuterControlWidget key={w.key} w={w} onAdjust={onAdjust} onCancel={onCancel} />)}
+            </div>
           </div>
         );
       })}
