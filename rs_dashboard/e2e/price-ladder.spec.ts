@@ -8,8 +8,8 @@ import type { LadderSlice, LadderState } from '../lib/priceLadder';
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const SPOT = 23200;
 
-async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean } = {}) {
-  const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[] };
+async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean> } = {}) {
+  const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[] };
   const state: LadderState = { date: istToday(), slices: [], events: [] };
   if (opts.openLong) {
     state.slices.push({
@@ -24,6 +24,19 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
     const u = new URL(req.url());
     const p = u.pathname;
     const method = req.method();
+    // The push stream would answer from the real server's ledger and overwrite this fake: refuse it, the page falls back to its 1 s poll.
+    if (p === '/api/price-ladder/stream') return route.fulfill({ status: 404, contentType: 'text/plain', body: 'mocked off' });
+    // Read-only broker endpoints the page polls: answered here so a test never reads a real account.
+    if (p === '/api/auth/broker-status') return json(route, { dhan: true, kotak: true, zerodha: true, ...opts.sessions });
+    if (p === '/api/dashboard/portfolio') {
+      seen.gets.push(`${p}?broker=${u.searchParams.get('broker')}`);
+      const broker = u.searchParams.get('broker');
+      return json(route, { success: true, brokers: [{ broker, connected: true, error: null, unpricedPositions: 0, openPositions: 2, totalPnl: broker === 'dhan' ? -8012 : 150 }] });
+    }
+    if (/^\/api\/scalper(\/(kotak|zerodha))?\/poll$/.test(p)) {
+      seen.gets.push(p);
+      return json(route, { success: true, positions: [], orders: [], trades: [] });
+    }
     if (p === '/api/options/expiries') return json(route, { success: true, data: ['2026-10-27'] });
     if (p === '/api/options/chain') {
       const oc: Record<string, unknown> = {};
@@ -36,14 +49,21 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
       if (method === 'GET') {
         return json(route, { success: true, data: {
           state, spots: { NIFTY: { spot: SPOT, at: Date.now(), source: 'indices', fresh: true } }, ltps: { '111': 120 },
-          liveArmed: !!opts.liveArmed, now: Date.now(), contract: { securityId: '111', lotSize: 65, ltp: 120 },
+          liveArmed: !!opts.liveArmed, now: Date.now(),
+          // The page reads the contract only from a reply that echoes the selection it is showing.
+          request: { underlying: u.searchParams.get('underlying'), expiry: u.searchParams.get('expiry') ?? '', strike: Number(u.searchParams.get('strike')) || null, opt: u.searchParams.get('opt'), pairCe: Number(u.searchParams.get('pairCe')) || null, pairPe: Number(u.searchParams.get('pairPe')) || null },
+          pair: Number(u.searchParams.get('pairCe')) > 0 ? {
+            ce: { strike: Number(u.searchParams.get('pairCe')), securityId: '111', ltp: 120 }, pe: { strike: Number(u.searchParams.get('pairPe')), securityId: '222', ltp: 100 },
+            combined: 220, lotSize: 65, mult: 1,
+          } : null,
+          contract: { securityId: '111', lotSize: 65, ltp: 120 },
         } });
       }
       const body = req.postDataJSON() as Record<string, unknown>;
       seen.posts.push(body);
       if (body.action === 'arm') {
         const s: LadderSlice = {
-          id: `t${seen.posts.length}`, kind: 'xy', broker: 'dhan', mode: 'sim',
+          id: `t${seen.posts.length}`, kind: 'xy', broker: (body.broker as 'dhan') ?? 'dhan', mode: 'sim',
           contract: { underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt: 'CE', securityId: '111', lotSize: 65, exchangeSegment: 'NSE_FNO' },
           side: body.side as 'BUY', lots: 1, qty: 65, product: 'MIS', state: 'armed', createdAt: Date.now(), updatedAt: Date.now(),
           entryLevel: Number(body.level), entryDir: 'below', seenSafe: true, bracket: body.bracket as LadderSlice['bracket'],
@@ -136,8 +156,8 @@ test('Bracket: target and SL show on the ladder as soon as it is armed (dashed, 
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByRole('button', { name: 'Buy at 23180' }).click();
   // 23180 + 40 = 23220 target, 23180 - 30 = 23150 SL
-  await expect(page.locator('[title="Target — set when the entry fills"]', { hasText: '23220' })).toHaveCount(1);
-  await expect(page.locator('[title="SL — set when the entry fills"]', { hasText: '23150' })).toHaveCount(1);
+  await expect(page.locator('[title^="Target — set when the entry fills"]', { hasText: '23220' })).toHaveCount(1);
+  await expect(page.locator('[title^="SL — set when the entry fills"]', { hasText: '23150' })).toHaveCount(1);
 });
 
 test('Cover order sends an SL-only bracket (target 0)', async ({ page }) => {
@@ -262,4 +282,84 @@ test('The header controls fold away for more room (both ladders at once), keep a
   await expect(page.getByRole('button', { name: 'Show header controls' })).toHaveCount(2);
   await page.getByRole('button', { name: 'Show header controls' }).first().click();
   await expect(page.getByRole('button', { name: /Arm LIVE/ })).toHaveCount(1);
+});
+
+// ── every broker ──────────────────────────────────────────────────────────────────────────────────────────────
+// The browser side of the per-broker paths (the order/placement code itself is covered by the unit tests and cannot be
+// run against a live account): each mode sends the selected broker, the books and account chip read THAT broker, a
+// logged-out broker blocks REAL, and MCX stays Dhan-only.
+for (const broker of ['dhan', 'kotak', 'zerodha'] as const) {
+  const Name = { dhan: 'Dhan', kotak: 'Kotak', zerodha: 'Zerodha' }[broker];
+  test.describe(`${Name}`, () => {
+    test(`XY, Plain and Pair orders all carry the broker`, async ({ page }) => {
+      const seen = await install(page);
+      await gotoSingle(page);
+      await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+      await page.getByLabel('Broker for new orders').selectOption(broker);
+      await expect(page.getByText(new RegExp(`SIM · ${Name}`))).toBeVisible();
+      await page.getByRole('button', { name: 'Buy at 23180' }).click();
+      await expect.poll(() => seen.posts.filter(b => b.action === 'arm').length).toBe(1);
+      expect(seen.posts[0]).toMatchObject({ kind: 'xy', broker, mode: 'sim', side: 'BUY', level: 23180 });
+      await page.getByRole('button', { name: 'Plain', exact: true }).click();
+      await page.getByRole('button', { name: /^Buy at 119\.9/ }).first().click();
+      await expect.poll(() => seen.posts.filter(b => b.action === 'arm').length).toBe(2);
+      expect(seen.posts[1]).toMatchObject({ kind: 'plain', broker, mode: 'sim', side: 'BUY' });
+      await page.getByRole('button', { name: 'Pair', exact: true }).click();
+      await page.getByRole('button', { name: /^Buy at 21[0-9]/ }).first().click();
+      await expect.poll(() => seen.posts.filter(b => b.action === 'pair').length).toBe(1);
+      expect(seen.posts.find(b => b.action === 'pair')).toMatchObject({ op: 'arm', broker, mode: 'sim', side: 'BUY' });
+      expect(seen.blocked).toEqual([]);
+    });
+
+    test(`the account chip and the books read ${Name}'s own endpoints`, async ({ page }) => {
+      const seen = await install(page);
+      await gotoSingle(page);
+      await page.getByLabel('Broker for new orders').selectOption(broker);
+      await expect(page.getByText(`${Name} P&L`)).toBeVisible();
+      await expect.poll(() => seen.gets.includes(`/api/dashboard/portfolio?broker=${broker}`)).toBe(true);
+      await page.getByRole('button', { name: /^Positions/ }).click();
+      await expect.poll(() => seen.gets.includes(broker === 'dhan' ? '/api/scalper/poll' : `/api/scalper/${broker}/poll`)).toBe(true);
+      expect(seen.blocked).toEqual([]);
+    });
+
+    test(`REAL with ${Name} logged out is blocked up front and sends nothing`, async ({ page }) => {
+      const seen = await install(page, { liveArmed: true, sessions: { [broker]: false } });
+      await gotoSingle(page);
+      await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+      await page.getByLabel('Broker for new orders').selectOption(broker);
+      await page.getByRole('button', { name: 'REAL', exact: true }).first().click();
+      await expect(page.getByText(new RegExp(`${Name} session is not logged in`))).toBeVisible();
+      await page.getByRole('button', { name: 'Buy at 23180' }).click({ force: true });
+      await page.waitForTimeout(500);
+      expect(seen.posts.filter(b => b.action === 'arm')).toEqual([]);
+      expect(seen.blocked).toEqual([]);
+    });
+
+    if (broker !== 'dhan') {
+      test(`MCX crude is Dhan-only: ${Name} shows why and places nothing`, async ({ page }) => {
+        const seen = await install(page);
+        await gotoSingle(page);
+        await page.getByLabel('Broker for new orders').selectOption(broker);
+        await page.getByLabel('Underlying').selectOption('CRUDEOILM');
+        await expect(page.getByText(/trades on Dhan only in the Price Ladder/)).toBeVisible();
+        await page.waitForTimeout(500);
+        expect(seen.posts.filter(b => b.action === 'arm' || b.action === 'pair')).toEqual([]);
+        expect(seen.blocked).toEqual([]);
+      });
+    }
+  });
+}
+
+test('Two ladders on different brokers: each shows its own broker account chip and books; on the same broker they are shown once', async ({ page }) => {
+  await install(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/price-ladder');
+  await expect(page.getByLabel('Expiry').nth(1)).toHaveValue('2026-10-27');
+  await expect(page.getByRole('button', { name: /^Positions/ })).toHaveCount(1);
+  await page.getByLabel('Broker for new orders').nth(1).selectOption('kotak');
+  await expect(page.getByRole('button', { name: /^Positions/ })).toHaveCount(2);
+  await expect(page.getByText('Dhan P&L')).toHaveCount(1);
+  await expect(page.getByText('Kotak P&L')).toHaveCount(1);
+  await page.getByLabel('Broker for new orders').nth(1).selectOption('dhan');
+  await expect(page.getByRole('button', { name: /^Positions/ })).toHaveCount(1);
 });
