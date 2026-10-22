@@ -752,12 +752,15 @@ async function runPairJob(s: LadderState, j: PairJob, prices: PriceView, ctx: Jo
   const now = Date.now();
 
   if (j.kind === 'pairOpen') {
-    // Both legs together (MARKET, the 'pl' lot cap, the broker's own order body): every outcome is recorded.
-    const out = await Promise.all(LEG_KEYS.map(k => safePlace(legOrder(p, k), p.side, p.qty, true)));
-    await commitPair(p.id, 'placing', (cur, st) => {
+    // Every leg not yet sent, together (MARKET, the 'pl' lot cap, the broker's own order body): both legs of a new pair
+    // or '+1 lot', the new strike(s) of a roll. Every outcome is recorded.
+    const toSend = LEG_KEYS.filter(k => !p.legs[k].orderId && !p.legs[k].entry);
+    const out = await Promise.all(toSend.map(k => safePlace(legOrder(p, k), p.side, p.qty, true)));
+    await commitPair(p.id, p.state, (cur, st) => {
       const legs = { ...cur.legs };
       const msgs: string[] = [];
-      LEG_KEYS.forEach((k, i) => {
+      toSend.forEach((k, i) => {
+        if (legs[k].contract.securityId !== p.legs[k].contract.securityId) return;
         const r = out[i];
         if (r.status === 'placed') legs[k] = { ...legs[k], orderId: r.orderId, entry: 'sent' };
         else if (r.status === 'rejected') { legs[k] = { ...legs[k], entry: 'dead', filledQty: 0, note: r.error }; msgs.push(`${k.toUpperCase()} rejected: ${r.error}`); }
@@ -771,13 +774,14 @@ async function runPairJob(s: LadderState, j: PairJob, prices: PriceView, ctx: Jo
 
   if (j.kind === 'pairSettle') {
     lastPoll.set(p.id, Date.now());
-    const entry = p.state === 'placing';
+    // Per leg: a working entry order, or a placed exit order (a roll can have one leg of each kind in flight).
     const reads = await Promise.all(LEG_KEYS.map(async k => {
       const l = p.legs[k];
-      const id = entry ? (l.entry === 'sent' ? l.orderId : undefined) : l.exitOrderId;
+      const entry = l.entry === 'sent' && !!l.orderId;
+      const id = entry ? l.orderId : l.exitOrderId;
       if (!id) return undefined;
       const st = await orderStatus(p.broker, id, ctx.orderBooks);
-      return { id, v: st ? settleOrder(st) : null };
+      return { id, entry, v: st ? settleOrder(st) : null };
     }));
     await commitPair(p.id, p.state, (cur, st) => {
       const legs = { ...cur.legs };
@@ -786,6 +790,7 @@ async function runPairJob(s: LadderState, j: PairJob, prices: PriceView, ctx: Jo
         const read = reads[i];
         if (read === undefined) return;
         const before = legs[k];
+        const entry = read.entry;
         // Only for the order that was read: a leg that has since moved on to another order (a retried exit) keeps it.
         if ((entry ? before.orderId : before.exitOrderId) !== read.id || (entry && before.entry !== 'sent')) return;
         const v = read.v;
@@ -823,7 +828,7 @@ async function runPairJob(s: LadderState, j: PairJob, prices: PriceView, ctx: Jo
     return { k, qty };
   });
   const out = await Promise.all(sized.map(({ k, qty }) => (qty > 0 ? safePlace(legOrder(p, k), exitSide, qty, false) : Promise.resolve(null))));
-  await commitPair(p.id, 'exiting', (cur, st) => {
+  await commitPair(p.id, p.state, (cur, st) => {
     const legs = { ...cur.legs };
     const msgs: string[] = [];
     sized.forEach(({ k, qty }, i) => {
@@ -973,7 +978,7 @@ async function tick(): Promise<void> {
   const priced = live.filter(x => x.state === 'armed' || x.state === 'open' || (x.mode === 'sim' && (x.state === 'working' || x.state === 'exiting')));
   const underlyings = [...new Set(priced.map(x => spotKey(x.contract)))];
   // A pair's rules read both legs' premiums (its combined price).
-  const pairLegs = livePairs.flatMap(p => [p.legs.ce.contract, p.legs.pe.contract]);
+  const pairLegs = livePairs.flatMap(p => [p.legs.ce.contract, p.legs.pe.contract, ...(p.rollTo?.ce ? [p.rollTo.ce] : []), ...(p.rollTo?.pe ? [p.rollTo.pe] : [])]);
   const prices: PriceView = priced.length || pairLegs.length
     ? await loadPrices(underlyings, [...priced.map(x => x.contract), ...pairLegs]) : { spots: {}, ltps: {} };
 

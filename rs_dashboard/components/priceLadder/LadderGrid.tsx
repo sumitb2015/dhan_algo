@@ -104,6 +104,17 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
  */
 export function pairWidgetsFor(pairs: LadderPair[]): LadderWidget[] {
   const out: LadderWidget[] = [];
+  // Open pairs on one level (a '+1 lot' shares its pair's levels) draw as ONE widget with their total, newest id first —
+  // its + / − and drag act on all of them.
+  const merged = new Map<string, LadderWidget>();
+  const newest = new Map<string, number>();
+  const addOpen = (w: LadderWidget, at: number) => {
+    const k = `${w.kind}|${w.column}|${w.price}`;
+    const g = merged.get(k);
+    if (!g) { merged.set(k, { ...w, key: `po|${k}` }); newest.set(k, at); return; }
+    g.qty += w.qty; g.lots += w.lots;
+    if (at >= (newest.get(k) ?? 0)) { g.ids = [...w.ids, ...g.ids]; newest.set(k, at); } else g.ids = [...g.ids, ...w.ids];
+  };
   for (const p of pairs) {
     const lotSize = p.legs.ce.contract.lotSize;
     const mult = p.legs.ce.contract.mult;
@@ -120,16 +131,19 @@ export function pairWidgetsFor(pairs: LadderPair[]): LadderWidget[] {
       }
     }
     // A position (also while exiting, BROKEN or UNKNOWN) stays marked at its combined fill; only an open pair's exits drag.
-    if ((p.state === 'exiting' || p.state === 'broken' || p.state === 'unknown') && p.entryY != null) {
+    if ((p.state === 'exiting' || p.state === 'rolling' || p.state === 'broken' || p.state === 'unknown') && p.entryY != null) {
       out.push({ ...common, key: `pp|${p.id}`, price: p.entryY, column: p.side, kind: 'pos', label: `Pair position (${p.state})`, lots: Math.max(1, Math.round(p.qty / lotSize)) });
     }
     if (p.state === 'open') {
-      if (p.entryY != null) out.push({ ...common, key: `pp|${p.id}`, price: p.entryY, column: p.side, kind: 'pos', label: 'Pair position', lots: Math.max(1, Math.round(p.qty / lotSize)) });
-      if (p.tgtY != null) out.push({ ...common, key: `pt|${p.id}`, price: p.tgtY, column: exitCol, kind: 'tgt', label: 'Target', drag: 'tgt' });
-      if (p.slY != null) out.push({ ...common, key: `ps|${p.id}`, price: p.slY, column: exitCol, kind: 'sl', label: slLabel, drag: 'sl', ...trail });
+      // + adds one lot to both legs at market (joining these levels); − exits one lot of both legs.
+      const live = { ...common, adjust: 'position' as const, lots: Math.max(1, Math.round(p.qty / lotSize)) };
+      const at = p.openedAt ?? p.createdAt;
+      if (p.entryY != null) addOpen({ ...live, key: '', price: p.entryY, column: p.side, kind: 'pos', label: 'Pair position' }, at);
+      if (p.tgtY != null) addOpen({ ...live, key: '', price: p.tgtY, column: exitCol, kind: 'tgt', label: 'Target', drag: 'tgt' }, at);
+      if (p.slY != null) addOpen({ ...live, key: '', price: p.slY, column: exitCol, kind: 'sl', label: slLabel, drag: 'sl', ...trail }, at);
     }
   }
-  return out;
+  return [...out, ...merged.values()];
 }
 
 const QTY_TONE: Record<LadderSide, string> = {

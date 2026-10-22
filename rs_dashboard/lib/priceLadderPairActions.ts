@@ -10,8 +10,8 @@ import {
   type ClickType, type LadderBroker, type LadderContract, type LadderProduct, type LadderSide, type LadderState, type LadderZones,
 } from '@/lib/priceLadder';
 import {
-  blendExitAvg, lotsOnContract, pairBias, pairCombined, pairLevelSane, pairName, patchPair, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS,
-  LEG_KEYS, type LadderPair, type PairLeg, type PairStructure,
+  blendExitAvg, cleanLegSlPct, legHeld, lotsOnContract, splitOneLot, pairBias, pairCombined, pairLevelSane, pairName, patchPair, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS,
+  LEG_KEYS, type LadderPair, type PairLeg, type PairLegKey, type PairStructure,
 } from '@/lib/priceLadderPair';
 
 // The Price Ladder's Pair-mode actions (POST /api/price-ladder/state with action 'pair'). Real-money endpoint: every
@@ -49,12 +49,23 @@ async function realPairBlocked(broker: LadderBroker, u: string, legs: { ce: Ladd
 }
 
 const bad = (error: string, status = 400) => NextResponse.json({ success: false, error }, { status });
+const round2 = (v: number) => Number(v.toFixed(2));
 const ok = (state: LadderState, extra: Record<string, unknown> = {}) => NextResponse.json({ success: true, data: { state, ...extra } });
 
 /** The live combined premium of a pair's legs, or null. */
 async function liveCombined(p: Pick<LadderPair, 'legs'>): Promise<number | null> {
   const prices = await loadPrices([], [p.legs.ce.contract, p.legs.pe.contract]);
   return pairCombined(p, prices.ltps);
+}
+
+/**
+ * Open pairs sharing `p`'s exits: the same two legs, broker, mode and side on the same target / SL (a '+1 lot' joins its
+ * pair's levels). A drag, a trail change or a leg SL applies to all of them, so no lot is left on an old stop.
+ */
+function joinedTo(st: LadderState, p: LadderPair): LadderPair[] {
+  return (st.pairs ?? []).filter(y => y.id === p.id || (p.state === 'open' && y.state === 'open' && y.broker === p.broker && y.mode === p.mode && y.side === p.side
+    && y.legs.ce.contract.securityId === p.legs.ce.contract.securityId && y.legs.pe.contract.securityId === p.legs.pe.contract.securityId
+    && y.slY === p.slY && y.tgtY === p.tgtY));
 }
 
 /** Apply `mutate` only if the pair still passes `okFn` inside the lock (the watcher can move it in between). */
@@ -105,6 +116,8 @@ async function arm(b: Record<string, unknown>): Promise<NextResponse> {
   if (lots == null) return bad('Lots must be a whole number from 1 to 20');
   const bracket = b.bracket == null ? null : cleanBracket(b.bracket);
   if (b.bracket != null && !bracket) return bad('Bracket needs a positive SL in points (target 0 = Cover order)');
+  const legSlPct = b.legSlPct == null || Number(b.legSlPct) === 0 ? null : cleanLegSlPct(b.legSlPct, side);
+  if (b.legSlPct != null && Number(b.legSlPct) !== 0 && legSlPct == null) return bad(side === 'SELL' ? 'Leg SL must be 1-1000 % (a short leg rising by it)' : 'Leg SL must be 1-99 % (a long leg falling by it)');
   const sess = sessionFor(u, istDay(now));
   if (sess.open >= sess.close) return bad(sess.note ?? 'The market is closed today');
   if (istHhmm(now) >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
@@ -143,6 +156,7 @@ async function arm(b: Record<string, unknown>): Promise<NextResponse> {
     id: newLadderId('pp'), broker, mode, structure, side, lots, qty, product: b.product, state: 'armed',
     legs, createdAt: now, updatedAt: now, entryLevel: level, entryDir: verdict.dir, seenSafe: true,
     orderType: verdict.kind === 'stop' ? 'SL' : orderType, ...(zones === 'anywhere' ? { zones } : {}), ...(bracket ? { bracket } : {}),
+    ...(legSlPct ? { legSlPct } : {}),
   };
   const br = bracket ? ` · ${bracket.tgtPts > 0 ? `TGT ${bracket.tgtPts} / ` : 'Cover · '}SL ${bracket.slPts}${bracket.trailPts ? ` / trailing ${bracket.trailPts} behind` : ''} pts` : '';
   let capped = false;
@@ -198,7 +212,11 @@ async function modify(b: Record<string, unknown>, id: string): Promise<NextRespo
       if (b.tgtY != null) patch.tgtY = tgtY;
       // Only a moved SL restarts trailing (from here); a target-only move leaves the trail's base alone.
       if (b.slY != null) Object.assign(patch, { slY, slY0: slY, trailFrom: c, peakY: c });
-      return pushEvent(patchPair(st, id, patch), ev('info', `Pair bracket moved: TGT ${tgtY ?? '—'} / SL ${slY}`, id));
+      // Every pair on these exits moves together (a '+1 lot' shares its pair's target / SL).
+      const all = joinedTo(st, (st.pairs ?? []).find(y => y.id === id)!);
+      let next = st;
+      for (const y of all) next = patchPair(next, y.id, patch);
+      return pushEvent(next, ev('info', `Pair bracket moved: TGT ${tgtY ?? '—'} / SL ${slY}${all.length > 1 ? ` (${all.length} pairs)` : ''}`, id));
     });
     if (!r.applied) return bad('It is closed — not modified', 409);
     return ok(r.state);
@@ -223,9 +241,16 @@ async function trail(b: Record<string, unknown>, id: string): Promise<NextRespon
   let label = '';
   const r = await guarded(id, trailable, st => {
     const y = (st.pairs ?? []).find(z => z.id === id)!;
-    const bracket = trailedBracket(y.bracket!, req, MIN_PAIR_TRAIL_PTS);
-    label = bracket.trailPts ? `Trailing SL ${bracket.trailPts} pts behind the best combined premium` : 'Trailing off';
-    return pushEvent(patchPair(st, id, { bracket, ...(y.state === 'open' && now != null ? { peakY: now } : {}) }), ev('info', label, id));
+    const trailPts = trailedBracket(y.bracket!, req, MIN_PAIR_TRAIL_PTS).trailPts ?? 0;
+    label = trailPts ? `Trailing SL ${trailPts} pts behind the best combined premium` : 'Trailing off';
+    // The same trail on every pair sharing these exits.
+    const all = joinedTo(st, y);
+    let next = st;
+    for (const z of all) {
+      const bracket = trailedBracket(z.bracket!, { abs: trailPts, delta: null }, MIN_PAIR_TRAIL_PTS);
+      next = patchPair(next, z.id, { bracket, ...(z.state === 'open' && now != null ? { peakY: now } : {}) });
+    }
+    return pushEvent(next, ev('info', `${label}${all.length > 1 ? ` (${all.length} pairs)` : ''}`, id));
   });
   if (!r.applied) return bad('It is closed — trailing not changed', 409);
   return ok(r.state);
@@ -264,11 +289,144 @@ async function resolve(b: Record<string, unknown>, id: string): Promise<NextResp
     }
     const legs = { ...p.legs, [k]: leg };
     const settled = LEG_KEYS.every(x => !legs[x].unknown);
-    const state = settled ? (p.exitReason ? 'exiting' : 'placing') : 'unknown';
+    // Back to where it was: an exit, a roll, or an entry.
+    const state = settled ? (p.exitReason ? 'exiting' : p.rollTo ? 'rolling' : 'placing') : 'unknown';
     return pushEvent(patchPair(st, id, { legs, state, ...(settled ? { note: undefined } : {}) }, now),
       ev('info', `${pairName(p)}: ${k.toUpperCase()} resolved as ${outcome}${settled ? ' — the pair carries on' : ''}`, id));
   });
   if (!r.applied) return bad('That leg is not UNKNOWN any more', 409);
+  return ok(r.state);
+}
+
+/**
+ * + 1 lot on an open pair: both legs at MARKET now, joining that pair's target / SL / trail / leg SL (exited with them).
+ * An opening order, so every arm check applies: market hours, the auto-exit time, the shared 20-lot cap per leg and, for
+ * REAL, the live arm, the broker session and funds. SIM fills at the live prices here; a REAL one is written as
+ * `placing` + `sendWanted` and the watcher sends it like an entry (confirm each fill; a lone leg is unwound).
+ */
+async function addLot(id: string): Promise<NextResponse> {
+  const now = Date.now();
+  const st0 = readLadderState();
+  const p = (st0.pairs ?? []).find(y => y.id === id);
+  if (!p || p.state !== 'open') return bad('That pair is not open');
+  const u = p.legs.ce.contract.underlying;
+  const sess = sessionFor(u, istDay(now));
+  const hhmm = istHhmm(now);
+  if (hhmm < sess.open || hhmm >= sess.close || sess.open >= sess.close) return bad('The market is closed');
+  if (hhmm >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
+  if (p.mode === 'real') {
+    if (!realArmed(st0, istDay(now))) return bad('Switch on LIVE · REAL MONEY first', 403);
+    if (!brokerSessionOk(p.broker)) return bad(`${BROKER_NAME[p.broker]} session is not logged in`, 403);
+  }
+  for (const k of LEG_KEYS) {
+    const held = lotsOnContract(st0, p.legs[k].contract.securityId, p.broker, p.mode, p.side);
+    if (held + 1 > MAX_LADDER_LOTS) return bad(`The ladder holds ${held} lots of ${p.legs[k].contract.strike}${p.legs[k].contract.opt} — the cap is ${MAX_LADDER_LOTS}`);
+  }
+  const lot = p.legs.ce.contract.lotSize;
+  const prices = await loadPrices([], [p.legs.ce.contract, p.legs.pe.contract]);
+  const ce = prices.ltps[p.legs.ce.contract.securityId], pe = prices.ltps[p.legs.pe.contract.securityId];
+  if (!(ce > 0) || !(pe > 0)) return bad('No live price for both legs yet — try again in a moment');
+  if (p.mode === 'real') {
+    const blocked = await realPairBlocked(p.broker, u, { ce: p.legs.ce.contract, pe: p.legs.pe.contract }, p.side, lot, p.product, prices.ltps);
+    if (blocked) return bad(blocked);
+  }
+  const fresh = (l: PairLeg): PairLeg => ({ contract: l.contract });
+  const levels = { entryY: p.entryY, tgtY: p.tgtY, slY: p.slY, slY0: p.slY0, peakY: p.peakY, trailFrom: p.trailFrom };
+  const base: LadderPair = {
+    id: newLadderId('pp'), broker: p.broker, mode: p.mode, structure: p.structure, side: p.side, lots: 1, qty: lot, product: p.product,
+    state: p.mode === 'real' ? 'placing' : 'open', legs: { ce: fresh(p.legs.ce), pe: fresh(p.legs.pe) }, createdAt: now, updatedAt: now,
+    entryLevel: p.entryLevel, entryDir: p.entryDir, orderType: p.orderType, ...(p.bracket ? { bracket: p.bracket } : {}),
+    ...(p.legSlPct ? { legSlPct: p.legSlPct } : {}), joinedTo: p.id, ...levels,
+  };
+  const child: LadderPair = p.mode === 'real'
+    ? { ...base, sendWanted: true, crossY: round2(ce + pe) }
+    : { ...base, openedAt: now, legs: {
+      ce: { ...base.legs.ce, avg: ce, held: lot, filledQty: lot, entry: 'filled' },
+      pe: { ...base.legs.pe, avg: pe, held: lot, filledQty: lot, entry: 'filled' },
+    } };
+  let capped = false;
+  const s = await updateLadderState(st => {
+    // Re-checked inside the lock: the pair may have closed, or another click taken the cap, since the reads above.
+    const cur = (st.pairs ?? []).find(y => y.id === id);
+    if (!cur || cur.state !== 'open') { capped = true; return st; }
+    if (LEG_KEYS.some(k => lotsOnContract(st, p.legs[k].contract.securityId, p.broker, p.mode, p.side) + 1 > MAX_LADDER_LOTS)) { capped = true; return st; }
+    return pushEvent({ ...st, pairs: [...(st.pairs ?? []), child] },
+      ev('info', `${p.mode === 'real' ? '' : 'SIM '}+1 lot ${p.side} ${pairName(p)}${p.mode === 'real' ? ' — both legs at MARKET' : ` filled: CE ${ce.toFixed(2)} + PE ${pe.toFixed(2)}`}`, child.id));
+  });
+  if (capped) return bad('The pair closed, or the lot cap was reached, before the lot was added', 409);
+  return ok(s, { id: child.id });
+}
+
+/**
+ * Roll an open pair: `legs` 'both' = shift the pair, 'ce' / 'pe' = roll that leg only; `steps` strikes up (+) or down
+ * (−). The old leg(s) close in full before the new strike(s) open (dhan-terminal-position-ownership Inv 4); the other
+ * leg is not touched. Refused if it would invert the pair (CE strike below PE). A new leg is an opening order, so the
+ * arm checks apply to it: hours, auto-exit, the lot cap on the new strike and, for REAL, the live arm, session and funds.
+ */
+async function roll(b: Record<string, unknown>, id: string): Promise<NextResponse> {
+  const now = Date.now();
+  const which = b.legs;
+  if (which !== 'both' && which !== 'ce' && which !== 'pe') return bad("legs must be 'both', 'ce' or 'pe'");
+  const steps = Number(b.steps);
+  if (!Number.isInteger(steps) || steps === 0 || Math.abs(steps) > 20) return bad('steps must be a whole number of strikes, 1-20 up or down');
+  const st0 = readLadderState();
+  const p = (st0.pairs ?? []).find(y => y.id === id);
+  if (!p || p.state !== 'open') return bad('Only an open pair can be rolled');
+  if (LEG_KEYS.some(k => (p.legs[k].held ?? p.qty) !== p.qty)) return bad('Its legs no longer hold the same quantity — exit it from the pair table');
+  const u = p.legs.ce.contract.underlying;
+  const sess = sessionFor(u, istDay(now));
+  const hhmm = istHhmm(now);
+  if (hhmm < sess.open || hhmm >= sess.close || sess.open >= sess.close) return bad('The market is closed');
+  if (hhmm >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
+  if (p.mode === 'real') {
+    if (!realArmed(st0, istDay(now))) return bad('Switch on LIVE · REAL MONEY first', 403);
+    if (!brokerSessionOk(p.broker)) return bad(`${BROKER_NAME[p.broker]} session is not logged in`, 403);
+  }
+  const step = PAIR_STRIKE_STEP[u];
+  if (!step) return bad(`No strike step for ${u}`);
+  const moving: readonly PairLegKey[] = which === 'both' ? LEG_KEYS : [which];
+  const strike = (k: 'ce' | 'pe') => p.legs[k].contract.strike + (moving.includes(k) ? steps * step : 0);
+  // Inversion guard (CLAUDE.md): never a CE strike below the PE strike.
+  if (strike('ce') < strike('pe')) return bad(`That would put the CE (${strike('ce')}) below the PE (${strike('pe')}) — refused`);
+  const resolved = await Promise.all(moving.map(k => resolveContract(p.broker, u, p.legs[k].contract.expiry, strike(k), k === 'ce' ? 'CE' : 'PE')));
+  const bad1 = resolved.find(r => typeof r === 'string');
+  if (bad1) return bad(bad1 as string);
+  const rollTo: NonNullable<LadderPair['rollTo']> = { steps };
+  moving.forEach((k, i) => { rollTo[k] = resolved[i] as LadderContract; });
+  for (const k of moving) {
+    const c = rollTo[k]!;
+    if (c.lotSize !== p.legs.ce.contract.lotSize) return bad(`${c.strike}${c.opt} has a different lot size — refused`);
+    const held = lotsOnContract(st0, c.securityId, p.broker, p.mode, p.side, p.id);
+    if (held + p.lots > MAX_LADDER_LOTS) return bad(`The ladder already holds or has armed ${held} lots of ${c.strike}${c.opt} — the cap is ${MAX_LADDER_LOTS}`);
+  }
+  const prices = await loadPrices([], moving.map(k => rollTo[k]!));
+  if (moving.some(k => !(prices.ltps[rollTo[k]!.securityId] > 0))) return bad('No live price for the new strike yet — try again in a moment');
+  if (p.mode === 'real') {
+    // The new leg(s) checked on their own (the old leg's margin is not counted as freed — fail closed).
+    const funds = await availableFunds(p.broker);
+    if (funds == null) return bad(`Could not read ${BROKER_NAME[p.broker]} funds — roll refused (fail closed)`);
+    let need: number | null = 0;
+    for (const k of moving) {
+      const c = rollTo[k]!, px = prices.ltps[c.securityId];
+      const m = p.side === 'BUY' ? px * p.qty * (c.mult ?? 1) * 1.02 : await dhanSellMargin(c, p.qty, p.product, px);
+      need = m == null || need == null ? null : need + m;
+    }
+    if (need == null || !(need > 0)) return bad('Could not read the margin for the new leg — refused (fail closed)');
+    const have = p.side === 'BUY' ? funds.buy : funds.sell;
+    if (need > have) return bad(`The new leg needs about ₹${Math.round(need).toLocaleString('en-IN')}, ${BROKER_NAME[p.broker]} has ₹${Math.round(have).toLocaleString('en-IN')}`);
+  }
+  const what = `${which === 'both' ? 'Shift' : `Roll ${which.toUpperCase()}`} ${steps > 0 ? '+' : ''}${steps} strike(s): ${moving.map(k => `${p.legs[k].contract.strike}${k.toUpperCase()} → ${rollTo[k]!.strike}${k.toUpperCase()}`).join(', ')}`;
+  const r = await guarded(id, y => y.state === 'open', st => {
+    const cur = (st.pairs ?? []).find(y => y.id === id)!;
+    // The kept leg's own fill stands as "filled in full", so the roll's verdict reads both legs.
+    const legs = { ...cur.legs };
+    for (const k of LEG_KEYS) {
+      const held = legHeld(cur, legs[k]);
+      legs[k] = { ...legs[k], held, ...(moving.includes(k) ? {} : { entry: 'filled' as const, filledQty: held }) };
+    }
+    return pushEvent(patchPair(st, id, { state: 'rolling', rollTo, legs, exitWanted: undefined, note: what }, now), ev('info', `${pairName(cur)}: ${what} — closing first`, id));
+  });
+  if (!r.applied) return bad('That pair is not open any more', 409);
   return ok(r.state);
 }
 
@@ -283,6 +441,42 @@ export async function pairAction(b: Record<string, unknown>): Promise<NextRespon
       const r = await guarded(id, y => y.state === 'armed',
         st => pushEvent(patchPair(st, id, { state: 'cancelled', note: 'Cancelled by you' }), ev('info', 'Pair cancelled', id)));
       if (!r.applied) return bad('Too late — it has just fired or is gone; check the pair list', 409);
+      return ok(r.state);
+    }
+    case 'add':
+      return addLot(id);
+    case 'roll':
+      return roll(b, id);
+    case 'reduce': {
+      // − 1 lot: split one lot off as its own pair that exits both legs (a one-lot pair just exits). Only reduces.
+      const childId = newLadderId('pp');
+      let err = '';
+      const r = await guarded(id, y => y.state === 'open', st => {
+        const p = (st.pairs ?? []).find(y => y.id === id)!;
+        const sp = splitOneLot(p, childId, Date.now());
+        if (typeof sp === 'string') { err = sp; return st; }
+        let next = patchPair(st, id, sp.parent);
+        if (sp.child) next = { ...next, pairs: [...(next.pairs ?? []), sp.child] };
+        return pushEvent(next, ev('info', `${pairName(p)}: −1 lot — exiting it at market`, id));
+      });
+      if (err) return bad(err, 409);
+      if (!r.applied) return bad('That pair is not open', 409);
+      return ok(r.state);
+    }
+    case 'legsl': {
+      // Set (or 0 = clear) an armed / open pair's per-leg stop, on every pair sharing its exits.
+      const p0 = (readLadderState().pairs ?? []).find(y => y.id === id);
+      if (!p0 || (p0.state !== 'armed' && p0.state !== 'open')) return bad('Leg SL can be set on an armed or open pair', 409);
+      const off = Number(b.legSlPct) === 0;
+      const pct = off ? null : cleanLegSlPct(b.legSlPct, p0.side);
+      if (!off && pct == null) return bad(p0.side === 'SELL' ? 'Leg SL must be 1-1000 % (0 = off)' : 'Leg SL must be 1-99 % (0 = off)');
+      const r = await guarded(id, y => y.state === 'armed' || y.state === 'open', st => {
+        const all = joinedTo(st, (st.pairs ?? []).find(y => y.id === id)!);
+        let next = st;
+        for (const y of all) next = patchPair(next, y.id, { legSlPct: pct ?? undefined });
+        return pushEvent(next, ev('info', pct ? `Leg SL ${pct}% — either leg ${p0.side === 'SELL' ? 'rising' : 'falling'} that far from its fill exits both` : 'Leg SL off', id));
+      });
+      if (!r.applied) return bad('That pair is not armed or open', 409);
       return ok(r.state);
     }
     case 'exit': {

@@ -10,7 +10,7 @@ import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
 import { FOCUS_RING } from '@/components/Scalper';
 import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
-import { isPairLive, pairName, pairNowPnl, sumPairPnl, LEG_KEYS, PAIR_STRIKE_STEP, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
+import { isPairLive, legSlPrice, pairName, pairNowPnl, sumPairPnl, LEG_KEYS, PAIR_STRIKE_STEP, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
   MAX_LADDER_LOTS, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
@@ -119,6 +119,8 @@ export default function PriceLadder() {
   // Pair mode: a straddle on the centre strike, or a strangle `wing` strikes either side of it (CE above, PE below).
   const [structure, setStructure] = useState<PairStructure>('straddle');
   const [wing, setWing] = useState(2);
+  // Pair mode: a leg moving this % against its own fill exits both legs (0 = off).
+  const [legSlPct, setLegSlPct] = useState(0);
   const [real, setReal] = useState(false);               // per page load, never persisted
   const [realAck, setRealAck] = useState(false);         // first REAL click this page load asks first
   const [confirm, setConfirm] = useState<null | { text: string; run: () => void }>(null);
@@ -572,11 +574,11 @@ export default function PriceLadder() {
     if (!expiry || !pairOk) return;
     void post({
       action: 'pair', op: 'arm', broker, mode: real ? 'real' : 'sim', underlying, expiry, structure, ceStrike: pairCe, peStrike: pairPe,
-      side, lots, product, orderType, level: price, zones, expect,
+      side, lots, product, orderType, level: price, zones, expect, ...(legSlPct > 0 ? { legSlPct } : {}),
       ...(style !== 'Single' ? { bracket: { tgtPts: style === 'Cover' ? 0 : tgtPts, slPts, ...(trailOn ? { trailPts } : {}) } }
         : trailOn ? { bracket: { tgtPts: 0, slPts: trailPts, trailPts } } : {}),
     }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${structure} armed at combined ${price}`); });
-  }, [post, broker, real, underlying, expiry, structure, pairOk, pairCe, pairPe, lots, product, orderType, zones, style, tgtPts, slPts, trailOn, trailPts]);
+  }, [post, broker, real, underlying, expiry, structure, pairOk, pairCe, pairPe, lots, product, orderType, zones, legSlPct, style, tgtPts, slPts, trailOn, trailPts]);
 
   const onPlace = (side: LadderSide, price: number) => {
     if (mode === 'pair') {
@@ -610,6 +612,20 @@ export default function PriceLadder() {
     send(side, price, { kind: v.kind, dir: v.dir });
   };
 
+  // Shift a pair (both legs) or roll one leg N strikes: the old leg closes in full first, then the new strike opens at
+  // MARKET — opening orders, so a REAL pair asks first (every time: a roll is two trades, never a one-click habit).
+  const onRoll = (p: LadderPair, legs: 'both' | 'ce' | 'pe', steps: number) => {
+    const step = STRIKE_STEP[p.legs.ce.contract.underlying] ?? 50;
+    const moving = legs === 'both' ? (['ce', 'pe'] as const) : [legs];
+    const to = moving.map(k => `${p.legs[k].contract.strike}${k.toUpperCase()} → ${p.legs[k].contract.strike + steps * step}${k.toUpperCase()}`).join(', ');
+    const run = () => void post({ action: 'pair', op: 'roll', id: p.id, legs, steps }).then(ok => { if (ok) toast.success(`Rolling ${to}`); });
+    if (p.mode === 'real') {
+      setConfirm({ text: `${legs === 'both' ? 'Shift' : `Roll the ${legs.toUpperCase()} leg of`} the ${pairName(p)} ${steps > 0 ? 'up' : 'down'} ${Math.abs(steps)} strike(s): ${to}. The old leg is closed at MARKET first, then the new one opened at MARKET (if it fails, the whole pair is closed)`, run });
+      return;
+    }
+    run();
+  };
+
   // Drag-to-modify (OptionX): an armed entry moves its level; an open bracket moves its target or SL. The server re-checks
   // every rule (a LIMIT entry cannot be dragged across spot into a breakout; target/SL must stay on their side of spot).
   const onMove = (ids: string[], what: 'entry' | 'tgt' | 'sl', price: number) => {
@@ -625,7 +641,22 @@ export default function PriceLadder() {
   // The + / − on a ladder widget. An unfilled order changes its lots in place (− stops at 1 lot: × cancels). An open
   // position: − exits one lot at market (never confirmed — it only reduces), + adds one lot at market under the same
   // target / SL — an opening order, so on REAL the first one this page load asks first, like a ladder click.
-  const onAdjust = (w: LadderWidget, delta: 1 | -1) => {
+  const onAdjust = (w: LadderWidget, delta: 1 | -1, pair = mode === 'pair') => {
+    if (pair) {
+      if (w.adjust !== 'position') return;
+      // − exits one lot of both legs (only reduces: never confirmed); + adds one to both at market — an opening order,
+      // so the first REAL one this page load asks first.
+      if (delta < 0) { void post({ action: 'pair', op: 'reduce', id: w.ids[0] }).then(ok => { if (ok) toast.success('Exiting 1 lot of both legs'); }); return; }
+      const addOne = () => void post({ action: 'pair', op: 'add', id: w.ids[0] }).then(ok => { if (ok) toast.success('Adding 1 lot to both legs at market'); });
+      // The pair's own mode decides (the table can show a REAL pair while the page is on SIM).
+      const target = pairs.find(x => x.id === w.ids[0]);
+      if ((target?.mode === 'real' || (!target && real)) && !realAck) {
+        setConfirm({ text: `Add 1 lot to BOTH legs of this pair at MARKET (it joins the same target / SL; if only one leg fills, it is closed again)`, run: addOne });
+        return;
+      }
+      addOne();
+      return;
+    }
     if (w.adjust === 'order') {
       const lots = w.lots + delta;
       if (lots < 1) { toast.info('One lot is the minimum — use × to cancel'); return; }
@@ -919,6 +950,9 @@ export default function PriceLadder() {
                     </div>
                   )}
                   <p className="text-zinc-500">{pairOk ? `CE ${pairCe} · PE ${pairPe}` : 'Those strikes are not in the chain — pick another centre or wing'}</p>
+                  <div className="flex items-center justify-between"><span className="text-zinc-400" title="Per-leg stop: either leg moving this % against its own fill exits BOTH legs (a short leg rising — 100 = doubled; a long leg falling). 0 = off. Runs alongside the combined target / SL.">Leg SL %</span>
+                    <NumField label="Per-leg stop-loss percent (0 = off)" value={legSlPct} onCommit={v => setLegSlPct(Math.max(0, Math.round(v)))} min={0} max={1000} width="w-16" />
+                  </div>
                 </>
               )}
               <div className="flex items-center justify-between"><span className="text-zinc-400" title="Classic: Buy and Sell each work on their limit side (the other side needs Order Type SL). Anywhere: both columns at every level — the other side is a stop by itself.">Zones</span>
@@ -1118,7 +1152,9 @@ export default function PriceLadder() {
         </div>
 
         {pairs.length > 0 && (
-          <PairTable pairs={pairs} ltps={data?.ltps ?? {}} busy={busy} post={post} trailPts={trailPts} onSelect={selectPair} />
+          <PairTable pairs={pairs} ltps={data?.ltps ?? {}} busy={busy} post={post} trailPts={trailPts} onSelect={selectPair}
+            onLots={(p, d) => onAdjust({ key: p.id, price: 0, column: p.side, kind: 'pos', label: 'Pair position', qty: p.qty, lots: p.lots, ids: [p.id], adjust: 'position' }, d, true)}
+            onRoll={onRoll} />
         )}
 
         {/* Collapsed by default (remembered per browser); the header keeps the count and the newest event in view. */}
@@ -1298,9 +1334,13 @@ function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; 
 }
 
 /** Pair mode's own orders & positions (both legs on one row, with each leg's own order status). */
-function PairTable({ pairs, ltps, busy, post, trailPts, onSelect }: {
+function PairTable({ pairs, ltps, busy, post, trailPts, onSelect, onLots, onRoll }: {
   pairs: LadderPair[]; ltps: Record<string, number>; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean>;
   trailPts: number; onSelect: (p: LadderPair) => void;
+  /** + / − one lot on both legs (the page asks first for a REAL add, as on the ladder). */
+  onLots: (p: LadderPair, delta: 1 | -1) => void;
+  /** Shift both legs / roll one leg N strikes (the page asks first for a REAL pair). */
+  onRoll: (p: LadderPair, legs: 'both' | 'ce' | 'pe', steps: number) => void;
 }) {
   const heads: [string, string][] = [
     ['Time', 'When the pair was armed'], ['Mode', ''], ['Pair', ''], ['Side', ''], ['Qty', 'Per leg, in lots'],
@@ -1329,8 +1369,8 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect }: {
             const nowCe = ltps[ce.contract.securityId], nowPe = ltps[pe.contract.securityId];
             const mult = ce.contract.mult;
             const stateClass = p.state === 'unknown' || p.state === 'broken' ? 'text-red-400 font-bold'
-              : p.state === 'open' ? 'text-emerald-400 font-bold' : p.state === 'armed' || p.state === 'placing' || p.state === 'exiting' ? 'text-sky-300' : 'text-zinc-400';
-            const holding = p.state === 'open' || p.state === 'broken' || p.state === 'exiting';
+              : p.state === 'open' ? 'text-emerald-400 font-bold' : p.state === 'armed' || p.state === 'placing' || p.state === 'exiting' || p.state === 'rolling' ? 'text-sky-300' : 'text-zinc-400';
+            const holding = p.state === 'open' || p.state === 'broken' || p.state === 'exiting' || p.state === 'rolling';
             const unknownLegs = LEG_KEYS.filter(k => p.legs[k].unknown);
             return (
               <tr key={p.id} className={`border-t border-zinc-900 ${live ? '' : 'opacity-60'}`}>
@@ -1358,6 +1398,11 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect }: {
                 </td>
                 <td className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap">
                   {p.bracket ? `${p.bracket.tgtPts > 0 ? (p.tgtY ?? `±${p.bracket.tgtPts}`) : 'Cover'} / ${p.slY ?? `±${p.bracket.slPts}`}${p.bracket.trailPts ? ` · T${p.bracket.trailPts}` : ''}` : '—'}
+                  {p.legSlPct ? (
+                    <span className="block text-[10px] text-amber-300" title="Per-leg stop: either leg reaching its level exits both legs">
+                      Leg SL {p.legSlPct}%{LEG_KEYS.map(k => { const v = legSlPrice(p, p.legs[k]); return v != null ? ` · ${k.toUpperCase()} ${v.toFixed(2)}` : ''; }).join('')}
+                    </span>
+                  ) : null}
                 </td>
                 <td className={`px-2 py-1 whitespace-nowrap ${stateClass}`} title={p.note ?? p.exitReason ?? ''}>
                   {p.state.toUpperCase()}{p.state === 'closed' && p.exitReason ? <span className="text-zinc-500 font-normal"> · {p.exitReason}</span> : null}
@@ -1388,6 +1433,22 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect }: {
                           className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">Nothing open</button>
                       </span>
                     ))}
+                    {p.state === 'open' && (
+                      <span className="inline-flex rounded border border-zinc-700 overflow-hidden">
+                        <button type="button" disabled={busy} onClick={() => onLots(p, 1)} title="Add 1 lot to both legs at market (joins this pair's target / SL)" aria-label={`Add 1 lot to ${pairName(p)}`}
+                          className="px-1.5 py-0.5 text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-40">+1</button>
+                        <button type="button" disabled={busy} onClick={() => onLots(p, -1)} title="Exit 1 lot of both legs at market" aria-label={`Exit 1 lot of ${pairName(p)}`}
+                          className="px-1.5 py-0.5 text-zinc-300 hover:text-white hover:bg-zinc-800 border-l border-zinc-700 disabled:opacity-40">−1</button>
+                      </span>
+                    )}
+                    {p.state === 'open' && <PairRollControl p={p} busy={busy} onRoll={onRoll} />}
+                    {(p.state === 'open' || p.state === 'armed') && (
+                      <span className="inline-flex items-center gap-1" title="Per-leg stop %: either leg moving this far against its own fill exits both legs (0 = off)">
+                        <span className="text-[11px] text-zinc-400">Leg SL%</span>
+                        <NumField label="Per-leg stop-loss percent (0 = off)" value={p.legSlPct ?? 0} min={0} max={1000} width="w-12"
+                          onCommit={v => { if (v !== (p.legSlPct ?? 0)) void post({ action: 'pair', op: 'legsl', id: p.id, legSlPct: Math.round(v) }); }} />
+                      </span>
+                    )}
                     {(p.state === 'open' || p.state === 'armed') && p.bracket && <PairTrailControl p={p} busy={busy} post={post} fallback={trailPts} />}
                   </div>
                 </td>
@@ -1410,6 +1471,28 @@ function legStatus(k: PairLegKey, l: PairLeg): string {
   const held = l.held ?? 0;
   const bits = [held > 0 ? `${held} held` : (l.exitedQty ?? 0) > 0 ? 'flat' : '', l.avg ? `@ ${l.avg.toFixed(2)}` : '', l.outside ? '(closed outside)' : ''].filter(Boolean);
   return `${K} ${bits.join(' ') || '—'}`;
+}
+
+/** Shift both legs / roll one leg of an open pair N strikes up (+) or down (−). */
+function PairRollControl({ p, busy, onRoll }: { p: LadderPair; busy: boolean; onRoll: (p: LadderPair, legs: 'both' | 'ce' | 'pe', steps: number) => void }) {
+  const [legs, setLegs] = useState<'both' | 'ce' | 'pe'>('both');
+  const [steps, setSteps] = useState(1);
+  const btn = `px-1.5 py-0.5 text-zinc-300 hover:text-white hover:bg-zinc-800 disabled:opacity-40 ${FOCUS_RING}`;
+  return (
+    <span className="inline-flex items-center gap-1" title="Shift both legs, or roll one leg, by N strikes: the old leg closes first, then the new strike opens">
+      <select aria-label="What to roll" value={legs} onChange={e => setLegs(e.target.value as 'both' | 'ce' | 'pe')}
+        className="px-1 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-[11px] text-zinc-200">
+        <option value="both">Shift</option>
+        <option value="ce">Roll CE</option>
+        <option value="pe">Roll PE</option>
+      </select>
+      <NumField label="Strikes to roll" value={steps} min={1} max={20} width="w-10" onCommit={v => setSteps(Math.max(1, Math.min(20, Math.round(v))))} />
+      <span className="inline-flex rounded border border-zinc-700 overflow-hidden">
+        <button type="button" disabled={busy} className={btn} aria-label={`${legs === 'both' ? 'Shift' : `Roll ${legs.toUpperCase()}`} up ${steps} strike(s)`} title={`Up ${steps} strike(s)`} onClick={() => onRoll(p, legs, steps)}>↑</button>
+        <button type="button" disabled={busy} className={`${btn} border-l border-zinc-700`} aria-label={`${legs === 'both' ? 'Shift' : `Roll ${legs.toUpperCase()}`} down ${steps} strike(s)`} title={`Down ${steps} strike(s)`} onClick={() => onRoll(p, legs, -steps)}>↓</button>
+      </span>
+    </span>
+  );
 }
 
 /** A pair's continuous trailing SL (combined-premium points): edit = set, 0 / Off = off. */

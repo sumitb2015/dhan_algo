@@ -72,7 +72,8 @@ export async function buildLadderView(params: URLSearchParams) {
     if (typeof ce !== 'string' && typeof pe !== 'string') pairLegs = { ce, pe };
     else pairError = typeof ce === 'string' ? ce : pe as string;
   }
-  const livePairLegs = (state.pairs ?? []).filter(isPairLive).flatMap(p => [p.legs.ce.contract, p.legs.pe.contract]);
+  const livePairLegs = (state.pairs ?? []).filter(isPairLive)
+    .flatMap(p => [p.legs.ce.contract, p.legs.pe.contract, ...(p.rollTo?.ce ? [p.rollTo.ce] : []), ...(p.rollTo?.pe ? [p.rollTo.pe] : [])]);
   const unders = [...new Set([...(shownKey ? [shownKey] : []), ...live.map(x => spotKey(x.contract))])];
   const prices = await loadPrices(unders, [
     ...live.map(x => x.contract), ...(shown ? [shown] : []), ...livePairLegs, ...(pairLegs ? [pairLegs.ce, pairLegs.pe] : []),

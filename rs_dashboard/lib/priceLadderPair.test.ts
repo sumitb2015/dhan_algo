@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { rollDay, type LadderState } from './priceLadder.ts';
-import { planPairs as planPairsTick, blendExitAvg, pairEntryVerdict, settleLegEntry, settleLegExit, cutsNewestFirst, cutPairLeg, lotsOnContract, pairEntryFills, pairCombined, pairNowPnl, sumPairPnl, pairLevelSane, type LadderPair } from './priceLadderPair.ts';
+import { planPairs as planPairsTick, blendExitAvg, cleanLegSlPct, legSlPrice, splitOneLot, pairEntryVerdict, settleLegEntry, settleLegExit, cutsNewestFirst, cutPairLeg, lotsOnContract, pairEntryFills, pairCombined, pairNowPnl, sumPairPnl, pairLevelSane, type LadderPair } from './priceLadderPair.ts';
 
 const leg = (opt: 'CE' | 'PE', securityId: string, over: Record<string, unknown> = {}) => ({
   contract: { underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt, securityId, lotSize: 65, exchangeSegment: 'NSE_FNO', ...over },
@@ -364,4 +364,128 @@ test('exiting past expiry: closed (settled at the broker), not retried forever',
   assert.equal(one(r.next).state, 'closed');
   assert.equal(one(r.next).exitReason, 'Expired');
   assert.equal(r.jobs.length, 0);
+});
+
+// ── per-leg SL and +/- lot ──
+test('cleanLegSlPct: a short leg may rise 1-1000 %, a long one fall 1-99 %', () => {
+  assert.equal(cleanLegSlPct(100, 'SELL'), 100);
+  assert.equal(cleanLegSlPct(100, 'BUY'), null);
+  assert.equal(cleanLegSlPct(50, 'BUY'), 50);
+  assert.equal(cleanLegSlPct(0, 'SELL'), null);
+});
+
+test('leg SL (SIM short): a leg reaching its own stop exits BOTH legs, even with the combined inside its bracket', () => {
+  const p = openShort({ legSlPct: 50, bracket: { tgtPts: 100, slPts: 100 }, tgtY: 200, slY: 400 });
+  assert.equal(legSlPrice(p, p.legs.ce), 225);
+  // CE 230 (> 225) while PE fell: combined 330 is inside 200..400.
+  const o = one(planPairs(st(p), { 1: 230, 2: 100 }, at(10, 0)));
+  assert.equal(o.state, 'closed');
+  assert.equal(o.exitReason, 'Leg SL CE 225.00');
+  assert.equal(o.legs.pe.exitAvg, 100);
+  assert.equal(one(planPairs(st(p), { 1: 220, 2: 100 }, at(10, 0))).state, 'open');
+  // A leg with no price is not judged.
+  assert.equal(one(planPairs(st(p), { 2: 100 }, at(10, 0))).state, 'open');
+});
+
+test('leg SL (REAL long): a leg falling to its stop marks both legs for exit; a broken pair does not use it', () => {
+  const p = openReal({ side: 'BUY', legSlPct: 40, bracket: undefined, tgtY: undefined, slY: undefined });
+  const r = planPairsTick(realSt(p), { 1: 89, 2: 160 }, at(10, 0), io());
+  assert.equal(one(r.next).state, 'exiting');
+  assert.equal(one(r.next).exitReason, 'Leg SL CE 90.00');
+  assert.deepEqual(r.jobs, [{ kind: 'pairClose', id: 'p1' }]);
+  assert.equal(one(planPairsTick(realSt({ ...p, state: 'broken' }), { 1: 50, 2: 160 }, at(10, 0), io()).next).state, 'broken');
+});
+
+test('splitOneLot: one lot split off to exit, the rest keeps its levels; a one-lot pair just exits', () => {
+  const p = openReal({ lots: 3, qty: 195, legs: { ce: { ...leg('CE', '1'), avg: 150, held: 195, filledQty: 195 }, pe: { ...leg('PE', '2'), avg: 150, held: 195, filledQty: 195 } } });
+  const sp = splitOneLot(p, 'c1', 7);
+  assert.ok(typeof sp !== 'string');
+  if (typeof sp === 'string') return;
+  assert.equal(sp.parent.lots, 2);
+  assert.equal(sp.parent.legs!.ce.held, 130);
+  assert.equal(sp.child!.lots, 1);
+  assert.equal(sp.child!.legs.pe.held, 65);
+  assert.equal(sp.child!.legs.pe.avg, 150);
+  assert.equal(sp.child!.exitWanted, 'Manual exit (−1 lot)');
+  assert.equal(sp.child!.slY, p.slY);
+  const one1 = splitOneLot(openReal(), 'c2', 7);
+  assert.ok(typeof one1 !== 'string' && one1.child === null && one1.parent.exitWanted);
+  assert.equal(typeof splitOneLot(openReal({ state: 'broken' }), 'c3', 7), 'string');
+});
+
+test('REAL +1 lot: sendWanted is dispatched (marked + pairOpen) in session; on fill it keeps the joined levels', () => {
+  const child = placing({}, {}, { sendWanted: true, sentAt: undefined, joinedTo: 'p0', entryY: 300, tgtY: 280, slY: 310, slY0: 315, peakY: 295 });
+  const r = planPairsTick(realSt(child), {}, at(10, 0), io());
+  assert.deepEqual(r.jobs, [{ kind: 'pairOpen', id: 'p1' }]);
+  assert.equal(one(r.next).sendWanted, undefined);
+  assert.equal(one(r.next).sentAt, at(10, 0));
+  const closed = planPairsTick(realSt(child), {}, at(16, 0), io());
+  assert.equal(one(closed.next).state, 'cancelled');
+  const filled = placing({ entry: 'filled', filledQty: 65, avg: 160 }, { entry: 'filled', filledQty: 65, avg: 150 }, { joinedTo: 'p0', entryY: 300, tgtY: 280, slY: 310, slY0: 315, peakY: 295 });
+  const o = one(planPairsTick(realSt(filled), {}, at(10, 1), io()).next);
+  assert.equal(o.state, 'open');
+  assert.equal(o.slY, 310);
+  assert.equal(o.tgtY, 280);
+  assert.equal(o.entryY, 300);
+});
+
+// ── shift / roll ──
+const c9450 = { ...leg('CE', '3').contract, strike: 23300 };
+const p9450 = { ...leg('PE', '4').contract, strike: 23300 };
+
+test('SIM shift: closes both old legs, then opens the new strikes, then re-measures the bracket; booked P&L kept', () => {
+  const p = openShort({ state: 'rolling', rollTo: { ce: c9450, pe: p9450, steps: 2 },
+    legs: { ce: { ...leg('CE', '1'), avg: 150, held: 65, filledQty: 65, entry: 'filled' }, pe: { ...leg('PE', '2'), avg: 150, held: 65, filledQty: 65, entry: 'filled' } } });
+  const ltps = { 1: 140, 2: 165, 3: 120, 4: 190 };
+  const s1 = planPairs(st(p), ltps, at(10, 0));                       // old legs closed
+  assert.equal(one(s1).legs.ce.held, 0);
+  assert.equal(one(s1).legs.ce.exitAvg, 140);
+  const s2 = planPairs(s1, ltps, at(10, 1));                          // new contracts in place, P&L booked
+  assert.equal(one(s2).legs.ce.contract.securityId, '3');
+  assert.equal(one(s2).bookedPnl, (150 - 140) * 65 + (150 - 165) * 65);
+  const s3 = planPairs(s2, ltps, at(10, 2));                          // SIM fill of the new legs
+  assert.equal(one(s3).legs.pe.avg, 190);
+  const o = one(planPairs(s3, ltps, at(10, 3)));                      // verdict: open on the new combined
+  assert.equal(o.state, 'open');
+  assert.equal(o.entryY, 310);
+  assert.equal(o.slY, 325);
+  assert.equal(o.tgtY, 290);
+  assert.equal(o.rollTo, undefined);
+  assert.equal(pairNowPnl(o, ltps), (150 - 140) * 65 + (150 - 165) * 65);
+});
+
+test('REAL roll of one leg: closes it (job), then opens the new strike (job); the kept leg is not touched', () => {
+  const base = openReal({ state: 'rolling', rollTo: { ce: c9450, steps: 2 } });
+  const r1 = planPairsTick(realSt(base), { 1: 170, 2: 120 }, at(10, 0), io());
+  assert.deepEqual(r1.jobs, [{ kind: 'pairClose', id: 'p1' }]);
+  assert.ok(one(r1.next).legs.ce.exitSentAt);
+  assert.equal(one(r1.next).legs.pe.exitSentAt, undefined);
+  // Old CE exited at 170 (a 20-point loss on the short).
+  const flat = openReal({ state: 'rolling', rollTo: { ce: c9450, steps: 2 },
+    legs: { ce: { ...leg('CE', '1'), avg: 150, held: 0, exitedQty: 65, exitAvg: 170, entry: 'filled', filledQty: 65 }, pe: { ...leg('PE', '2'), avg: 150, held: 65, filledQty: 65, entry: 'filled' } } });
+  const r2 = planPairsTick(realSt(flat), {}, at(10, 1), io());
+  assert.deepEqual(r2.jobs, [{ kind: 'pairOpen', id: 'p1' }]);
+  assert.equal(one(r2.next).legs.ce.contract.securityId, '3');
+  assert.equal(one(r2.next).legs.ce.entry, undefined);
+  assert.equal(one(r2.next).legs.pe.held, 65);
+  assert.equal(one(r2.next).bookedPnl, -20 * 65);
+  // New CE filled → open, the structure becomes a strangle, bracket from the new combined.
+  const filled = { ...one(r2.next), legs: { ...one(r2.next).legs, ce: { ...one(r2.next).legs.ce, orderId: 'n', entry: 'filled' as const, filledQty: 65, avg: 110 } } };
+  const o = one(planPairsTick(realSt(filled), {}, at(10, 2), io()).next);
+  assert.equal(o.state, 'open');
+  assert.equal(o.structure, 'strangle');
+  assert.equal(o.entryY, 260);
+  assert.equal(o.legs.ce.held, 65);
+});
+
+test('REAL roll: the new leg rejected → the kept leg is unwound (never left alone)', () => {
+  const p = openReal({ state: 'rolling', rollTo: { ce: c9450, steps: 2 },
+    legs: { ce: { contract: c9450, orderId: 'n', entry: 'dead', filledQty: 0, note: 'margin' }, pe: { ...leg('PE', '2'), avg: 150, held: 65, filledQty: 65, entry: 'filled' } } });
+  const r = planPairsTick(realSt(p), {}, at(10, 0), io());
+  const o = one(r.next);
+  assert.equal(o.state, 'exiting');
+  assert.equal(o.exitReason, 'Roll failed — unwinding');
+  assert.ok(o.legs.pe.exitSentAt);
+  assert.equal(o.rollTo, undefined);
+  assert.deepEqual(r.jobs, [{ kind: 'pairClose', id: 'p1' }]);
 });

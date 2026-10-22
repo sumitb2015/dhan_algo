@@ -16,7 +16,7 @@ export type PairStructure = 'straddle' | 'strangle';
  * sent or reversed until the user resolves it. `broken`: a leg was closed outside the ladder — the bracket stops and
  * only an exit of what is left is sent (by the user, or the MIS square-off).
  */
-export type PairState = 'armed' | 'placing' | 'open' | 'exiting' | 'closed' | 'cancelled' | 'unknown' | 'broken';
+export type PairState = 'armed' | 'placing' | 'open' | 'exiting' | 'rolling' | 'closed' | 'cancelled' | 'unknown' | 'broken';
 
 /** One leg: its contract, its fills, and (REAL) its own entry / exit order. Prices are per unit of premium. */
 export interface PairLeg {
@@ -64,6 +64,22 @@ export interface LadderPair {
   orderType?: ClickType;
   zones?: LadderZones;
   bracket?: LadderBracket;
+  /**
+   * Per-leg stop: a leg that moves this % against its own fill exits BOTH legs (short: a leg rises by it — 100 = it
+   * doubled; long: a leg falls by it). Absent = off. Runs alongside the combined bracket.
+   */
+  legSlPct?: number;
+  /** A '+1 lot' added to an open pair: it opens on that pair's target / SL / trail rather than its own. */
+  joinedTo?: string;
+  /** REAL '+1 lot': its two entry orders are to be sent by the watcher on its next tick (marked, then sent). */
+  sendWanted?: boolean;
+  /**
+   * A roll in progress (state `rolling`): the listed legs move to these contracts — both = a shift, one = a leg roll. The
+   * old leg is closed in full before the new one opens (Inv 4); the other leg is not touched.
+   */
+  rollTo?: { ce?: LadderContract; pe?: LadderContract; steps: number };
+  /** Realised P&L (rupees) of legs rolled away from this pair. */
+  bookedPnl?: number;
   /** REAL: when the entry orders were marked for sending, and the combined at the cross. */
   sentAt?: number;
   crossY?: number;
@@ -94,7 +110,8 @@ export function lotsOnContract(st: LadderState, securityId: string, broker: Ladd
     .reduce((a, x) => a + x.lots, 0);
   const pairs = (st.pairs ?? [])
     .filter(p => p.id !== exceptId && isPairLive(p) && p.broker === broker && p.mode === mode && p.side === side
-      && (p.legs.ce.contract.securityId === securityId || p.legs.pe.contract.securityId === securityId))
+      && (p.legs.ce.contract.securityId === securityId || p.legs.pe.contract.securityId === securityId
+        || p.rollTo?.ce?.securityId === securityId || p.rollTo?.pe?.securityId === securityId))
     .reduce((a, p) => a + p.lots, 0);
   return slices + pairs;
 }
@@ -128,6 +145,32 @@ const legExited = (p: LadderPair, l: PairLeg): number => l.exitedQty ?? (p.state
 /** +1 when the pair gains as the combined premium rises (a long pair), -1 for a short one. */
 export const pairBias = (side: LadderSide): 1 | -1 => (side === 'BUY' ? 1 : -1);
 
+/** A leg-SL % for this side, or null: a short's leg may rise 1-1000 %, a long's fall 1-99 % (it cannot fall 100 %). */
+export function cleanLegSlPct(raw: unknown, side: LadderSide): number | null {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  return n >= 1 && n <= (side === 'SELL' ? 1000 : 99) ? n : null;
+}
+
+/** The premium at which a leg's own stop hits (from its fill), or null without a fill / stop. */
+export function legSlPrice(p: Pick<LadderPair, 'side' | 'legSlPct'>, l: PairLeg): number | null {
+  if (!p.legSlPct || !(Number(l.avg) > 0)) return null;
+  const f = p.side === 'SELL' ? 1 + p.legSlPct / 100 : 1 - p.legSlPct / 100;
+  return round2(Number(l.avg) * f);
+}
+
+/** Why a leg's own stop exits the pair now ("Leg SL CE 1040.00"), or null. A leg with no live price is not judged. */
+export function legSlReason(p: LadderPair, ltps: Record<string, number>): string | null {
+  for (const k of LEG_KEYS) {
+    const l = p.legs[k];
+    const at = legSlPrice(p, l);
+    const ltp = ltps[l.contract.securityId];
+    if (at == null || !(ltp > 0) || legHeld(p, l) <= 0) continue;
+    if (p.side === 'SELL' ? ltp >= at : ltp <= at) return `Leg SL ${k.toUpperCase()} ${at.toFixed(2)}`;
+  }
+  return null;
+}
+
 /** Level within MAX_PAIR_LEVEL_DISTANCE of the combined premium. */
 export function pairLevelSane(level: number, combined: number): boolean {
   return level > 0 && combined > 0 && Math.abs(level - combined) / combined <= MAX_PAIR_LEVEL_DISTANCE;
@@ -154,8 +197,8 @@ export function pairName(p: Pick<LadderPair, 'legs' | 'structure'>): string {
  */
 export function pairNowPnl(p: LadderPair, ltps: Record<string, number>): number | null | undefined {
   if (p.exitReason === 'Expired') return undefined;
-  if (!(p.legs.ce.avg || p.legs.pe.avg)) return undefined;
-  let sum = 0;
+  if (!(p.legs.ce.avg || p.legs.pe.avg) && !p.bookedPnl) return undefined;
+  let sum = p.bookedPnl ?? 0;
   for (const leg of [p.legs.ce, p.legs.pe]) {
     if (!leg.avg) continue;
     const base = { side: p.side, avg: leg.avg, contract: leg.contract };
@@ -284,7 +327,7 @@ export const legNeedsExitSend = (l: PairLeg, now: number) => (l.held ?? 0) > 0 &
 /** Settle work outstanding on a pair: an entry order working, or an exit order placed. */
 const needsSettle = (p: LadderPair) => LEG_KEYS.some(k => {
   const l = p.legs[k];
-  return p.state === 'placing' ? !!l.orderId && l.entry === 'sent' : !!l.exitOrderId;
+  return (!!l.orderId && l.entry === 'sent') || !!l.exitOrderId;
 });
 
 export interface PairTickIo {
@@ -365,6 +408,16 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
     }
 
     if (p.state === 'placing') {
+      if (p.sendWanted) {
+        // A REAL '+1 lot' written by the API: marked here (sentAt) in the same write that hands it to the order job.
+        if (!sessionOpen || afterClose) {
+          next = say(patch(p.id, { state: 'cancelled', sendWanted: undefined, note: 'Market closed before it was sent' }), 'warn', `${name}: +1 lot not sent — the market is closed`, p.id);
+        } else {
+          next = patch(p.id, { sendWanted: undefined, sentAt: now });
+          jobs.push({ kind: 'pairOpen', id: p.id });
+        }
+        continue;
+      }
       if (LEG_KEYS.some(k => p.legs[k].unknown)) {
         next = say(patch(p.id, { state: 'unknown', note: 'An entry order has an unknown outcome — check Orders/Positions, then resolve each leg' }), 'error', `${name}: entry UNKNOWN — nothing more is sent or reversed until you resolve it`, p.id);
         continue;
@@ -390,9 +443,10 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
         const ce = { ...p.legs.ce, avg: ceAvg }, pe = { ...p.legs.pe, avg: peAvg };
         const entryY = round2(ceAvg + peAvg);
         next = say(patch(p.id, {
-          state: 'open', openedAt: now, entryY, note: undefined,
+          state: 'open', openedAt: now, note: undefined,
           legs: { ce: { ...ce, held: ce.filledQty }, pe: { ...pe, held: pe.filledQty } },
-          ...pairBracketAt(p, entryY),
+          // A '+1 lot' keeps the levels it joined (one target / SL for the whole position); a new pair gets its own.
+          ...(p.joinedTo && p.slY != null ? { entryY: p.entryY ?? entryY } : { entryY, ...pairBracketAt(p, entryY) }),
         }), 'info', `${p.side} ${p.lots} lot(s) ${name} filled: CE ${ceAvg.toFixed(2)} + PE ${peAvg.toFixed(2)} = ${entryY.toFixed(2)} (crossed at ${p.crossY ?? '?'})`, p.id);
       } else if (v === 'unwind') {
         // Never one leg on its own: exit every unit that did fill. Nothing filled at all = nothing to undo.
@@ -408,6 +462,99 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
         }
       } else if (needsSettle(p) && now - io.polledAt(p.id) >= PAIR_POLL_MS) {
         jobs.push({ kind: 'pairSettle', id: p.id });
+      }
+      continue;
+    }
+
+    if (p.state === 'rolling') {
+      const ro = p.rollTo;
+      if (!ro) { next = patch(p.id, { state: 'open' }); continue; }
+      const moving = LEG_KEYS.filter(k => ro[k]);
+      if (LEG_KEYS.some(k => p.legs[k].unknown)) {
+        next = say(patch(p.id, { state: 'unknown', note: 'A roll order has an unknown outcome — check Orders/Positions, then resolve each leg' }), 'error', `${name}: roll UNKNOWN — nothing more is sent until you resolve it`, p.id);
+        continue;
+      }
+      if (real && needsSettle(p) && now - io.polledAt(p.id) >= PAIR_POLL_MS) jobs.push({ kind: 'pairSettle', id: p.id });
+      // Phase 1: close the old leg(s) in full. Phase 2 (once flat): open the new strike(s). Phase 3: the verdict.
+      const oldLegs = moving.filter(k => p.legs[k].contract.securityId !== ro[k]!.securityId);
+      if (oldLegs.length) {
+        const inFlight = oldLegs.some(k => p.legs[k].exitOrderId || p.legs[k].exitSentAt);
+        if (oldLegs.every(k => (p.legs[k].held ?? 0) <= 0) && !inFlight) {
+          // Flat: book what the old leg made, put the new contract in its place, and send its entry.
+          let booked = p.bookedPnl ?? 0;
+          const legs = { ...p.legs };
+          for (const k of oldLegs) {
+            const l = legs[k];
+            booked += slicePnl({ side: p.side, avg: l.avg, filledQty: l.exitedQty ?? 0, contract: l.contract }, l.exitAvg) ?? 0;
+            legs[k] = { contract: ro[k]! };
+          }
+          if (real) {
+            if (!sessionOpen) continue;
+            next = say(patch(p.id, { legs, bookedPnl: round2(booked), sentAt: now }), 'info', `${name}: old ${oldLegs.map(k => k.toUpperCase()).join(' + ')} closed — opening ${oldLegs.map(k => `${ro[k]!.strike}${k.toUpperCase()}`).join(' + ')} at MARKET`, p.id);
+            jobs.push({ kind: 'pairOpen', id: p.id });
+          } else {
+            next = patch(p.id, { legs, bookedPnl: round2(booked) });
+          }
+          continue;
+        }
+        if (!sessionOpen) continue;
+        if (real) {
+          if (!io.busy(p.id) && oldLegs.some(k => legNeedsExitSend(p.legs[k], now))) {
+            const legs = { ...p.legs };
+            for (const k of oldLegs) if (legNeedsExitSend(legs[k], now)) legs[k] = { ...legs[k], exitSentAt: now };
+            next = patch(p.id, { legs });
+            jobs.push({ kind: 'pairClose', id: p.id });
+          }
+        } else {
+          // SIM: the old leg closes at its live price (waits for one).
+          if (oldLegs.some(k => !(ltps[p.legs[k].contract.securityId] > 0))) continue;
+          const legs = { ...p.legs };
+          for (const k of oldLegs) {
+            const l = legs[k], px = ltps[l.contract.securityId], held = legHeld(p, l);
+            legs[k] = { ...l, held: 0, exitedQty: (l.exitedQty ?? 0) + held, exitAvg: blendExitAvg(l, held, px) };
+          }
+          next = say(patch(p.id, { legs }), 'info', `SIM ${name}: rolled leg closed (${oldLegs.map(k => `${k.toUpperCase()} @ ${ltps[p.legs[k].contract.securityId].toFixed(2)}`).join(', ')})`, p.id);
+        }
+        continue;
+      }
+      // New strike(s) in place.
+      if (!real) {
+        const fresh = moving.filter(k => !p.legs[k].entry);
+        if (fresh.length) {
+          if (!sessionOpen || fresh.some(k => !(ltps[p.legs[k].contract.securityId] > 0))) continue;
+          const legs = { ...p.legs };
+          for (const k of fresh) legs[k] = { ...legs[k], avg: ltps[legs[k].contract.securityId], held: p.qty, filledQty: p.qty, entry: 'filled' };
+          next = patch(p.id, { legs });
+          continue;
+        }
+      }
+      const sentNothing = moving.every(k => !p.legs[k].orderId && !p.legs[k].entry);
+      if (real && sentNothing && !io.busy(p.id) && now - (p.sentAt ?? now) > PAIR_ORPHAN_MS) {
+        next = say(patch(p.id, x => ({ state: 'unknown', note: 'Roll entry send was interrupted — check Orders/Positions',
+          legs: { ...x.legs, ...Object.fromEntries(moving.map(k => [k, { ...x.legs[k], entry: 'unknown', unknown: 'entry' }])) } })),
+        'error', `${name}: roll entry send interrupted — outcome UNKNOWN`, p.id);
+        continue;
+      }
+      const v = pairEntryVerdict(p);
+      if (v === 'open') {
+        const ceAvg = p.legs.ce.avg || ltps[p.legs.ce.contract.securityId];
+        const peAvg = p.legs.pe.avg || ltps[p.legs.pe.contract.securityId];
+        if (!(ceAvg > 0) || !(peAvg > 0)) continue;
+        const ce = { ...p.legs.ce, avg: ceAvg }, pe = { ...p.legs.pe, avg: peAvg };
+        const entryY = round2(ceAvg + peAvg);
+        const structure: PairStructure = ce.contract.strike === pe.contract.strike ? 'straddle' : 'strangle';
+        next = say(patch(p.id, {
+          state: 'open', rollTo: undefined, structure, entryY, note: undefined,
+          legs: { ce: { ...ce, held: ce.held ?? ce.filledQty }, pe: { ...pe, held: pe.held ?? pe.filledQty } },
+          // The bracket keeps its distances, measured from the new combined fill.
+          ...pairBracketAt(p, entryY),
+        }), 'info', `${pairName({ ...p, legs: { ce, pe }, structure })}: roll done — CE ${ceAvg.toFixed(2)} + PE ${peAvg.toFixed(2)} = ${entryY.toFixed(2)}`, p.id);
+      } else if (v === 'unwind') {
+        // The new leg failed: never one leg on its own — exit everything that is held.
+        const legs = { ...p.legs };
+        for (const k of moving) legs[k] = { ...legs[k], held: legs[k].filledQty ?? 0 };
+        next = say(patch(p.id, { legs }), 'error', `${name}: roll failed (${moving.map(k => `${k.toUpperCase()} ${legs[k].entry === 'dead' ? legs[k].note ?? 'rejected' : `filled ${legs[k].filledQty ?? 0} of ${p.qty}`}`).join('; ')}) — unwinding the pair`, p.id);
+        beginExit({ ...p, legs }, 'Roll failed — unwinding', { rollTo: undefined, openedAt: now });
       }
       continue;
     }
@@ -461,20 +608,22 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
     }
     // A broken pair's bracket is off (its combined no longer describes what is held): only MIS / manual exits act.
     const step = openExitStep(p, pairBias(p.side), p.state === 'broken' ? null : c, afterClose, at);
-    if (real && step.reason) { beginExit(p, step.reason, step.patch); continue; }
-    if (step.reason && c == null) {
+    // A leg's own stop (open pairs only — a broken pair's bracket is off) exits both legs, never one alone.
+    const reason = step.reason ?? (p.state === 'open' ? legSlReason(p, ltps) : null);
+    if (real && reason) { beginExit(p, reason, step.patch); continue; }
+    if (reason && c == null) {
       // SIM: both legs exit together at their own prices; with one unpriced, wait (said once).
       const note = 'Exit waiting for both leg prices';
-      next = p.note === note ? next : say(patch(p.id, { ...step.patch, note }), 'warn', `${name}: ${step.reason} due but a leg has no live price — waiting`, p.id);
+      next = p.note === note ? next : say(patch(p.id, { ...step.patch, note }), 'warn', `${name}: ${reason} due but a leg has no live price — waiting`, p.id);
       continue;
     }
-    if (step.reason) {
+    if (reason) {
       const ce = ltps[p.legs.ce.contract.securityId], pe = ltps[p.legs.pe.contract.securityId];
       const shut = (l: PairLeg, px: number): PairLeg => ({ ...l, held: 0, exitedQty: (l.exitedQty ?? 0) + legHeld(p, l), exitAvg: px });
       next = say(patch(p.id, {
-        ...step.patch, state: 'closed', exitReason: step.reason, exitWanted: undefined, closedAt: now, note: undefined,
+        ...step.patch, state: 'closed', exitReason: reason, exitWanted: undefined, closedAt: now, note: undefined,
         legs: { ce: shut(p.legs.ce, ce), pe: shut(p.legs.pe, pe) },
-      }), 'info', `SIM exit ${name} (${step.reason}): CE ${ce.toFixed(2)} + PE ${pe.toFixed(2)} = ${(ce + pe).toFixed(2)}`, p.id);
+      }), 'info', `SIM exit ${name} (${reason}): CE ${ce.toFixed(2)} + PE ${pe.toFixed(2)} = ${(ce + pe).toFixed(2)}`, p.id);
     } else if (Object.keys(step.patch).length || (p.note && p.state === 'open')) {
       next = patch(p.id, { ...step.patch, ...(p.note && p.state === 'open' ? { note: undefined } : {}) });
     }
@@ -520,4 +669,22 @@ export function cutPairLeg(p: LadderPair, k: PairLegKey, cut: number, ltp: numbe
   return flat
     ? { legs, state: 'closed', closedAt: now, exitReason: 'Closed outside the ladder' }
     : { legs, state: 'broken', note: `${k.toUpperCase()} closed outside the ladder — bracket stopped; exit what is left from the pair table` };
+}
+
+/**
+ * The − on an open pair: one lot split off as its own pair that exits both legs at once (manual exit), the rest stays
+ * open on the same levels. A one-lot pair simply exits. Only a whole pair (both legs holding its full qty) can split.
+ */
+export function splitOneLot(p: LadderPair, newId: string, now: number): { parent: Partial<LadderPair>; child: LadderPair | null } | string {
+  if (p.state !== 'open') return 'Only an open pair can shed a lot';
+  const lot = p.legs.ce.contract.lotSize;
+  if (LEG_KEYS.some(k => legHeld(p, p.legs[k]) !== p.qty)) return 'Its legs no longer hold the same quantity — exit it from the pair table';
+  if (p.lots <= 1) return { parent: { exitWanted: 'Manual exit (−1 lot)' }, child: null };
+  const rest = p.qty - lot;
+  const legRest = (l: PairLeg): PairLeg => ({ ...l, held: rest, filledQty: rest });
+  const legOne = (l: PairLeg): PairLeg => ({ ...l, held: lot, filledQty: lot, exitedQty: 0, exitAvg: undefined, note: undefined });
+  return {
+    parent: { lots: p.lots - 1, qty: rest, legs: { ce: legRest(p.legs.ce), pe: legRest(p.legs.pe) } },
+    child: { ...p, id: newId, lots: 1, qty: lot, legs: { ce: legOne(p.legs.ce), pe: legOne(p.legs.pe) }, joinedTo: p.id, exitWanted: 'Manual exit (−1 lot)', createdAt: now, updatedAt: now },
+  };
 }

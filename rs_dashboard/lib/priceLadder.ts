@@ -509,9 +509,10 @@ export function rollDay(s: LadderState, today: string, now: number): LadderState
   const pairs = (s.pairs ?? [])
     .filter(p => p.state !== 'armed' && p.state !== 'closed' && p.state !== 'cancelled')
     .map(p => {
-      if (p.state !== 'placing' && p.state !== 'exiting') return p;
-      const leg = (l: typeof p.legs.ce) => (p.state === 'placing'
-        ? (l.entry === 'sent' || l.entry == null ? { ...l, entry: 'unknown' as const, unknown: 'entry' as const } : l)
+      if (p.state !== 'placing' && p.state !== 'exiting' && p.state !== 'rolling') return p;
+      // Per leg: an entry still working (or never sent) → unknown entry; an exit in flight → unknown exit.
+      const leg = (l: typeof p.legs.ce) => (l.entry === 'sent' || (p.state === 'placing' && l.entry == null)
+        ? { ...l, entry: 'unknown' as const, unknown: 'entry' as const }
         : (l.exitOrderId || l.exitSentAt ? { ...l, unknown: 'exit' as const } : l));
       const legs = { ce: leg(p.legs.ce), pe: leg(p.legs.pe) };
       // Nothing was in flight (e.g. an exit waiting to retry): it carries on as it was.
