@@ -3,7 +3,8 @@ import fs from 'fs';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
-const SETTINGS_FILE = path.join(DEBUG_DIR, 'price_ladder_settings.json');
+// PRICE_LADDER_SETTINGS_FILE: tests point this at a temp file — they must never rewrite the live cutoff.
+const SETTINGS_FILE = process.env.PRICE_LADDER_SETTINGS_FILE || path.join(DEBUG_DIR, 'price_ladder_settings.json');
 
 export interface PriceLadderSettings {
   /**
@@ -71,7 +72,8 @@ export function writeLadderSettings(patch: Partial<PriceLadderSettings>): PriceL
   }
 
   try {
-    if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
+    const dir = path.dirname(SETTINGS_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const tmp = `${SETTINGS_FILE}.tmp.${Date.now()}`;
     fs.writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8');
     fs.renameSync(tmp, SETTINGS_FILE);

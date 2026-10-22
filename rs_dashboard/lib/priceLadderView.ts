@@ -8,7 +8,7 @@ import {
   type LadderBroker, type LadderContract, type OptType,
 } from '@/lib/priceLadder';
 import { isPairLive, pairCombined } from '@/lib/priceLadderPair';
-import { getPrevDayLevels } from '@/lib/prevDayLevels';
+import { prevDayLevelsNow } from '@/lib/prevDayLevels';
 
 // What the Price Ladder page shows, built once for both the 1 s poll (GET /api/price-ladder/state) and the push stream
 // (GET /api/price-ladder/stream), and the contract resolution every order route shares. Server only.
@@ -82,7 +82,8 @@ export async function buildLadderView(params: URLSearchParams) {
   const now = Date.now();
   const spots = Object.fromEntries(Object.entries(prices.spots).map(([u, v]) => [u, { ...v, fresh: spotFresh(v.at, now) }]));
   const d = prices.days?.[shownKey ?? want];
-  const prevDay = want ? await getPrevDayLevels(want, shown?.ref?.securityId) : null;
+  // Cached or null — never awaited: a slow / failing Dhan history call must not stall the ladder's price stream.
+  const prevDay = want ? prevDayLevelsNow(want, shown?.ref?.securityId) : null;
   const dayHigh = d?.high ?? (shown?.ref ? axisDayOf(shown, prices.days, now, state.settings?.mcxAutoExitTime)?.high : null);
   const dayLow = d?.low ?? (shown?.ref ? axisDayOf(shown, prices.days, now, state.settings?.mcxAutoExitTime)?.low : null);
 

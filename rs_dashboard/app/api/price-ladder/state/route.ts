@@ -11,7 +11,7 @@ import {
   snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev, newLadderId, parseTrailRequest, replanBracket, trailedBracket,
   type ClickType, type LadderZones, type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
 } from '@/lib/priceLadder';
-import { writeLadderSettings } from '@/lib/priceLadderSettings';
+import { setMcxCutoff } from '@/lib/priceLadderCutoff';
 
 // The Price Ladder's ledger (debug/price_ladder_state.json) and its actions. Real-money endpoint: every check that can
 // refuse an order runs here, server-side — lot cap, level sanity, the contract resolved from the brokers' own masters
@@ -311,13 +311,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
 
       case 'settings': {
-        const mcxTime = typeof body.mcxAutoExitTime === 'string' ? body.mcxAutoExitTime.trim() : '23:15';
-        const updated = writeLadderSettings({ mcxAutoExitTime: mcxTime });
-        const s = await updateLadderState(st => ({
-          ...st,
-          settings: { ...st.settings, mcxAutoExitTime: updated.mcxAutoExitTime },
-        }));
-        return NextResponse.json({ success: true, settings: updated, data: { state: s } });
+        // The MCX cutoff: one server path with /api/price-ladder/settings (range check; a passed time needs confirmPast).
+        const r = await setMcxCutoff(body.mcxAutoExitTime, body.confirmPast === true);
+        if (!r.ok) return NextResponse.json({ success: false, error: r.error, ...(r.needsConfirm ? { needsConfirm: true } : {}) }, { status: r.status });
+        return NextResponse.json({ success: true, settings: r.settings, data: { state: readLadderState() } });
       }
 
       case 'cancel': {

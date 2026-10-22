@@ -130,7 +130,9 @@ export default function PriceLadder() {
   const [legSlPct, setLegSlPct] = useState(0);
   const [real, setReal] = useState(false);               // per page load, never persisted
   const [realAck, setRealAck] = useState(false);         // first REAL click this page load asks first
-  const [confirm, setConfirm] = useState<null | { text: string; run: () => void }>(null);
+  // A REAL order's first-click confirmation (confirming it lets later clicks this page load straight through), or a
+  // `setting` confirmation (its own title and button; it never switches the REAL-order confirmation off).
+  const [confirm, setConfirm] = useState<null | { text: string; run: () => void; setting?: { title: string; button: string } }>(null);
   const [armModal, setArmModal] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [underlying, setUnderlyingRaw] = useState<string>('NIFTY');
@@ -634,6 +636,27 @@ export default function PriceLadder() {
     run();
   };
 
+  // The MCX cutoff (MIS square-off / "only exits" time). A time already passed would square off open MCX MIS positions
+  // at once: the server refuses that without confirmPast, and the page asks first, naming what it would do.
+  const setCutoff = (time: string) => {
+    const send = async (confirmPast: boolean) => {
+      try {
+        const r = await fetch('/api/price-ladder/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'settings', mcxAutoExitTime: time, confirmPast }) });
+        const j = await r.json().catch(() => ({})) as { success?: boolean; error?: string; needsConfirm?: boolean; data?: { state?: LadderState } };
+        if (j.needsConfirm && !confirmPast) {
+          setConfirm({ text: j.error ?? `Set the MCX cutoff to ${time}?`, run: () => { void send(true); }, setting: { title: `Set the MCX cutoff to ${time}?`, button: 'Set cutoff and square off' } });
+          return;
+        }
+        if (!j.success) { toast.error(j.error ?? `Could not set the cutoff (${r.status})`); return; }
+        if (j.data?.state) { seq.current++; const st = j.data.state; setData(d => (d ? { ...d, state: st } : d)); }
+        toast.success(`MCX cutoff set to ${time} IST`);
+      } catch {
+        toast.error('No reply from the server — check the cutoff before trading');
+      }
+    };
+    void send(false);
+  };
+
   // Drag-to-modify (OptionX): an armed entry moves its level; an open bracket moves its target or SL. The server re-checks
   // every rule (a LIMIT entry cannot be dragged across spot into a breakout; target/SL must stay on their side of spot).
   const onMove = (ids: string[], what: 'entry' | 'tgt' | 'sl', price: number) => {
@@ -1116,7 +1139,7 @@ export default function PriceLadder() {
                   <span className="text-zinc-400">Cutoff:</span>
                   <select
                     value={data?.state?.settings?.mcxAutoExitTime ?? '23:15'}
-                    onChange={e => void post({ action: 'settings', mcxAutoExitTime: e.target.value })}
+                    onChange={e => setCutoff(e.target.value)}
                     className="bg-transparent font-mono font-bold text-amber-300 focus:outline-none cursor-pointer"
                     title="MCX trading threshold & MIS auto square-off time. After this time, new orders and armed levels are blocked."
                   >
@@ -1235,12 +1258,12 @@ export default function PriceLadder() {
       {confirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 p-4" role="dialog" aria-modal="true">
           <div className="w-full max-w-md rounded-lg border border-zinc-700 bg-zinc-900 p-4 flex flex-col gap-3">
-            <p className="text-sm font-bold text-white">Place a REAL-money order?</p>
-            <p className="text-xs text-zinc-300">{confirm.text} on {BROKER_LABELS[broker]}.</p>
-            <p className="text-[11px] text-zinc-500">Further clicks on this page load go straight through.</p>
+            <p className="text-sm font-bold text-white">{confirm.setting ? confirm.setting.title : 'Place a REAL-money order?'}</p>
+            <p className="text-xs text-zinc-300">{confirm.setting ? confirm.text : `${confirm.text} on ${BROKER_LABELS[broker]}.`}</p>
+            {!confirm.setting && <p className="text-[11px] text-zinc-500">Further clicks on this page load go straight through.</p>}
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setConfirm(null)} className="px-3 py-1.5 rounded-md border border-zinc-700 text-xs text-zinc-300">Cancel</button>
-              <button type="button" onClick={() => { const c = confirm; setConfirm(null); setRealAck(true); c.run(); }} className="px-3 py-1.5 rounded-md bg-red-600 text-xs font-bold text-oncolor">Place REAL order</button>
+              <button type="button" onClick={() => { const c = confirm; setConfirm(null); if (!c.setting) setRealAck(true); c.run(); }} className="px-3 py-1.5 rounded-md bg-red-600 text-xs font-bold text-oncolor">{confirm.setting ? confirm.setting.button : 'Place REAL order'}</button>
             </div>
           </div>
         </div>
@@ -1299,10 +1322,10 @@ export default function PriceLadder() {
                     <button
                       key={time}
                       type="button"
-                      onClick={() => void post({ action: 'settings', mcxAutoExitTime: time })}
+                      onClick={() => setCutoff(time)}
                       className={`flex flex-col items-center justify-center py-2 px-1 rounded-lg border text-xs font-mono transition-all cursor-pointer ${
                         active
-                          ? 'border-amber-500/50 bg-amber-500/20 text-amber-300 font-bold shadow-[0_0_10px_rgba(245,158,11,0.15)]'
+                          ? 'border-amber-500/50 bg-amber-500/20 text-amber-300 font-bold ring-1 ring-amber-500/30'
                           : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
                       }`}
                     >

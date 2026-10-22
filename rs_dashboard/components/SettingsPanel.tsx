@@ -1,5 +1,6 @@
 'use client';
 
+import { toast } from 'sonner';
 import { useEffect, useState } from 'react';
 import { Settings, Sun, Moon, Coffee, Check, Clock } from 'lucide-react';
 import {
@@ -52,17 +53,25 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
       .catch(() => {});
   }, [open]);
 
-  const updateCutoff = async (time: string) => {
-    setMcxCutoff(time);
+  // A cutoff already passed would square off open MCX MIS positions at once: the server refuses that without
+  // confirmPast, and this asks first. The picker shows what the server holds, never an unsaved choice.
+  const updateCutoff = async (time: string, confirmPast = false): Promise<void> => {
     setSavingCutoff(true);
     try {
-      await fetch('/api/price-ladder/settings', {
+      const r = await fetch('/api/price-ladder/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mcxAutoExitTime: time }),
+        body: JSON.stringify({ mcxAutoExitTime: time, confirmPast }),
       });
+      const j = await r.json().catch(() => ({})) as { success?: boolean; error?: string; needsConfirm?: boolean; settings?: { mcxAutoExitTime?: string } };
+      if (j.needsConfirm && !confirmPast) {
+        if (window.confirm(`Set the MCX cutoff to ${time}?\n\n${j.error ?? ''}`)) await updateCutoff(time, true);
+        return;
+      }
+      if (!j.success) { toast.error(j.error ?? 'Could not set the MCX cutoff'); return; }
+      if (j.settings?.mcxAutoExitTime) setMcxCutoff(j.settings.mcxAutoExitTime);
     } catch {
-      // Best effort
+      toast.error('Could not reach the server — the MCX cutoff was not changed');
     } finally {
       setSavingCutoff(false);
     }
@@ -121,7 +130,7 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                     className={cn(
                       'relative flex flex-col items-center justify-center py-2 px-1 rounded-xl border text-xs font-mono transition-all cursor-pointer',
                       active
-                        ? 'border-amber-500/50 bg-amber-500/20 text-amber-300 font-bold shadow-[0_0_10px_rgba(245,158,11,0.15)]'
+                        ? 'border-amber-500/50 bg-amber-500/20 text-amber-300 font-bold ring-1 ring-amber-500/30'
                         : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700',
                     )}
                   >

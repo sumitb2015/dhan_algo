@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readLadderSettings, writeLadderSettings, timeStringToHhmm } from '@/lib/priceLadderSettings';
-import { updateLadderState } from '@/lib/priceLadderServer';
+import { readLadderSettings } from '@/lib/priceLadderSettings';
+import { setMcxCutoff } from '@/lib/priceLadderCutoff';
 
 export async function GET() {
   const settings = readLadderSettings();
   return NextResponse.json({ success: true, settings });
 }
 
+/** The MCX trading cutoff (lib/priceLadderCutoff.ts: range check; a time already passed needs `confirmPast`). */
 export async function POST(req: NextRequest) {
   let body: Record<string, unknown>;
   try {
@@ -14,17 +15,7 @@ export async function POST(req: NextRequest) {
   } catch {
     return NextResponse.json({ success: false, error: 'Invalid JSON' }, { status: 400 });
   }
-
-  const mcxTime = typeof body.mcxAutoExitTime === 'string' ? body.mcxAutoExitTime.trim() : null;
-  if (!mcxTime || timeStringToHhmm(mcxTime) == null) {
-    return NextResponse.json({ success: false, error: 'Invalid time format. Expected HH:MM (e.g. 23:15)' }, { status: 400 });
-  }
-
-  const updated = writeLadderSettings({ mcxAutoExitTime: mcxTime });
-  await updateLadderState(s => ({
-    ...s,
-    settings: { ...s.settings, mcxAutoExitTime: updated.mcxAutoExitTime },
-  }));
-
-  return NextResponse.json({ success: true, settings: updated });
+  const r = await setMcxCutoff(body.mcxAutoExitTime, body.confirmPast === true);
+  if (!r.ok) return NextResponse.json({ success: false, error: r.error, ...(r.needsConfirm ? { needsConfirm: true } : {}) }, { status: r.status });
+  return NextResponse.json({ success: true, settings: r.settings });
 }

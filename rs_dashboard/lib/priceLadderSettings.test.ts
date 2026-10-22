@@ -1,9 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+// A temp settings file, set BEFORE the module loads: these tests must never touch the live
+// debug/price_ladder_settings.json (a running dashboard would square off MCX MIS at whatever they write).
+const TMP_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'pl-settings-'));
+process.env.PRICE_LADDER_SETTINGS_FILE = path.join(TMP_DIR, 'price_ladder_settings.json');
+const {
   readLadderSettings, writeLadderSettings, timeStringToHhmm, hhmmToTimeString,
   DEFAULT_PRICE_LADDER_SETTINGS,
-} from './priceLadderSettings.ts';
+} = await import('./priceLadderSettings.ts');
+test.after(() => fs.rmSync(TMP_DIR, { recursive: true, force: true }));
 
 test('timeStringToHhmm: converts HH:MM to numeric hhmm', () => {
   assert.equal(timeStringToHhmm('23:15'), 2315);

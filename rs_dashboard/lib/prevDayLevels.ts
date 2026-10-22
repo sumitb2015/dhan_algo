@@ -1,159 +1,81 @@
-import path from 'path';
-import fs from 'fs';
 import { getDhanCredentials } from './dhanToken.ts';
 import { istDay, isMcxUnderlying } from './priceLadder.ts';
 
-const PROJECT_ROOT = path.resolve(process.cwd(), '..');
+// Previous day's high / low / close for the Price Ladder's PDH / PDL marks (XY mode). Dhan only (the repo's data rule):
+// daily candles from /charts/historical — no CSV or other-source fallback; no Dhan answer = no mark. The ladder's view
+// is rebuilt up to 4x a second, so it never waits on this: `prevDayLevelsNow` returns what is cached and starts at most
+// one background fetch per key; a failure is remembered for FAIL_RETRY_MS so a broken token or an unknown id cannot
+// turn every view build into a Dhan call.
+
 const DHAN_HISTORICAL_URL = 'https://api.dhan.co/v2/charts/historical';
+/** After a failed / empty fetch, the next try waits this long. */
+const FAIL_RETRY_MS = 5 * 60_000;
+const FETCH_TIMEOUT_MS = 5000;
 
-export interface PrevDayLevel {
-  high: number;
-  low: number;
-  close: number;
-}
+export interface PrevDayLevel { high: number; low: number; close: number }
 
-const cache = new Map<string, PrevDayLevel>();
+const INDEX_IDS: Record<string, string> = { NIFTY: '13', BANKNIFTY: '25', SENSEX: '51' };
 
-const INDEX_CONFIG: Record<string, { securityId: string; segment: string; instrument: string; csvFile: string }> = {
-  NIFTY: {
-    securityId: '13',
-    segment: 'IDX_I',
-    instrument: 'INDEX',
-    csvFile: path.join(PROJECT_ROOT, 'Historical Data', 'NIFTY_50_Daily_5Y.csv'),
-  },
-  BANKNIFTY: {
-    securityId: '25',
-    segment: 'IDX_I',
-    instrument: 'INDEX',
-    csvFile: path.join(PROJECT_ROOT, 'Historical Data', 'Indices', 'BANKNIFTY.csv'),
-  },
-  SENSEX: {
-    securityId: '51',
-    segment: 'IDX_I',
-    instrument: 'INDEX',
-    csvFile: path.join(PROJECT_ROOT, 'Historical Data', 'Indices', 'SENSEX.csv'),
-  },
-};
+interface Memo { ok: Map<string, PrevDayLevel>; failedAt: Map<string, number>; inFlight: Set<string> }
+const memo: Memo = ((globalThis as { __prevDayLevels?: Memo }).__prevDayLevels ??= { ok: new Map(), failedAt: new Map(), inFlight: new Set() });
 
 /**
- * Fetch previous day high, low and close for the given underlying.
- * Sourced from Dhan historical daily candles, with CSV fallback.
- * Cached in memory per IST trading day.
+ * The last complete day before `today` (IST) in a Dhan daily-candle reply, or null. Pure. Rows with a non-positive
+ * price are skipped (a holiday placeholder must not become a level).
  */
-export async function getPrevDayLevels(underlying: string, mcxSecurityId?: string | null): Promise<PrevDayLevel | null> {
-  const u = underlying.toUpperCase();
-  const today = istDay();
-  const cacheKey = `${today}:${u}:${mcxSecurityId ?? ''}`;
-  const hit = cache.get(cacheKey);
-  if (hit) return hit;
+export function pickPrevDay(json: { high?: number[]; low?: number[]; close?: number[]; timestamp?: number[] }, today: string): PrevDayLevel | null {
+  const ts = json.timestamp ?? [];
+  let last: PrevDayLevel | null = null;
+  for (let i = 0; i < ts.length; i++) {
+    const day = new Date(ts[i] * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+    const h = Number(json.high?.[i]), l = Number(json.low?.[i]), c = Number(json.close?.[i]);
+    if (day < today && h > 0 && l > 0 && c > 0) last = { high: h, low: l, close: c };
+  }
+  return last;
+}
 
-  // 1. Try Dhan Historical Daily Candle API
+/** The Dhan instrument for an underlying's daily candles: the index, or for MCX the option month's own futures. */
+function instrumentFor(u: string, mcxFuturesId?: string | null): { securityId: string; exchangeSegment: string; instrument: string } | null {
+  if (isMcxUnderlying(u)) return mcxFuturesId ? { securityId: mcxFuturesId, exchangeSegment: 'MCX_COMM', instrument: 'FUTCOM' } : null;
+  return INDEX_IDS[u] ? { securityId: INDEX_IDS[u], exchangeSegment: 'IDX_I', instrument: 'INDEX' } : null;
+}
+
+async function fetchPrevDay(key: string, inst: NonNullable<ReturnType<typeof instrumentFor>>, today: string): Promise<void> {
   try {
     const creds = getDhanCredentials();
-    if (creds.token && creds.clientId) {
-      let securityId = '';
-      let segment = '';
-      let instrument = '';
-
-      if (isMcxUnderlying(u)) {
-        if (mcxSecurityId) {
-          securityId = mcxSecurityId;
-          segment = 'MCX_COMM';
-          instrument = 'FUTCOM';
-        }
-      } else if (INDEX_CONFIG[u]) {
-        securityId = INDEX_CONFIG[u].securityId;
-        segment = INDEX_CONFIG[u].segment;
-        instrument = INDEX_CONFIG[u].instrument;
-      }
-
-      if (securityId && segment && instrument) {
-        const to = new Date();
-        const from = new Date(to);
-        from.setDate(from.getDate() - 10);
-        const fmt = (d: Date) => d.toISOString().slice(0, 10);
-
-        const res = await fetch(DHAN_HISTORICAL_URL, {
-          method: 'POST',
-          headers: {
-            'access-token': creds.token,
-            'client-id': creds.clientId,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-          body: JSON.stringify({
-            securityId,
-            exchangeSegment: segment,
-            instrument,
-            oi: false,
-            fromDate: fmt(from),
-            toDate: fmt(to),
-          }),
-          signal: AbortSignal.timeout(5000),
-        });
-
-        if (res.ok) {
-          const json = (await res.json()) as {
-            high?: number[];
-            low?: number[];
-            close?: number[];
-            timestamp?: number[];
-          };
-          const highs = json.high ?? [];
-          const lows = json.low ?? [];
-          const closes = json.close ?? [];
-          const timestamps = json.timestamp ?? [];
-
-          // Find rows strictly before today
-          const priorRows: PrevDayLevel[] = [];
-          for (let i = 0; i < timestamps.length; i++) {
-            const dateStr = new Date(timestamps[i] * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
-            if (dateStr < today && highs[i] > 0 && lows[i] > 0 && closes[i] > 0) {
-              priorRows.push({ high: highs[i], low: lows[i], close: closes[i] });
-            }
-          }
-
-          if (priorRows.length > 0) {
-            const last = priorRows[priorRows.length - 1];
-            cache.set(cacheKey, last);
-            return last;
-          }
-        }
-      }
-    }
-  } catch (err) {
-    // Non-fatal: continue to CSV fallback
-  }
-
-  // 2. CSV fallback
-  try {
-    const cfg = INDEX_CONFIG[u];
-    if (cfg && fs.existsSync(cfg.csvFile)) {
-      const content = fs.readFileSync(cfg.csvFile, 'utf8');
-      const lines = content.split(/\r?\n/).filter(Boolean);
-      let best: PrevDayLevel | null = null;
-      for (const line of lines) {
-        const parts = line.split(',');
-        if (parts.length >= 5) {
-          const d = parts[0].trim();
-          if (d < today) {
-            const h = parseFloat(parts[2]);
-            const l = parseFloat(parts[3]);
-            const c = parseFloat(parts[4]);
-            if (!isNaN(h) && !isNaN(l) && !isNaN(c) && h > 0 && l > 0 && c > 0) {
-              best = { high: h, low: l, close: c };
-            }
-          }
-        }
-      }
-      if (best) {
-        cache.set(cacheKey, best);
-        return best;
-      }
-    }
+    const to = new Date();
+    const from = new Date(to.getTime() - 10 * 86_400_000);
+    const fmt = (d: Date) => d.toISOString().slice(0, 10);
+    const res = await fetch(DHAN_HISTORICAL_URL, {
+      method: 'POST',
+      headers: { 'access-token': creds.token, 'client-id': creds.clientId, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ ...inst, oi: false, fromDate: fmt(from), toDate: fmt(to) }),
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    const lv = res.ok ? pickPrevDay(await res.json(), today) : null;
+    if (lv) { memo.ok.set(key, lv); memo.failedAt.delete(key); } else memo.failedAt.set(key, Date.now());
   } catch {
-    // Non-fatal
+    memo.failedAt.set(key, Date.now());
+  } finally {
+    memo.inFlight.delete(key);
   }
+}
 
+/**
+ * Cached previous-day levels, or null while unknown. Never waits: a miss starts one background fetch (none while one
+ * is running, or within FAIL_RETRY_MS of a failure); the next view build picks up its result.
+ */
+export function prevDayLevelsNow(underlying: string, mcxFuturesId?: string | null): PrevDayLevel | null {
+  const u = underlying.toUpperCase();
+  const today = istDay();
+  const key = `${today}:${u}:${mcxFuturesId ?? ''}`;
+  const hit = memo.ok.get(key);
+  if (hit) return hit;
+  const inst = instrumentFor(u, mcxFuturesId);
+  if (!inst || memo.inFlight.has(key)) return null;
+  const failed = memo.failedAt.get(key);
+  if (failed != null && Date.now() - failed < FAIL_RETRY_MS) return null;
+  memo.inFlight.add(key);
+  void fetchPrevDay(key, inst, today);
   return null;
 }
