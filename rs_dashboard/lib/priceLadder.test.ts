@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   bias, limitZone, classifyClick, levelSane, capLots, cleanBracket, entryStep, bracketLevels, bracketStep, spotFresh,
-  settleOrder, exitQtyFor, slicePnl, ownNet, ladderRows, snapToStep, rollDay, realArmed, pushEvent, istHhmm,
+  settleOrder, exitQtyFor, slicePnl, sliceNowPnl, sumSlicePnl, ownNet, ladderRows, snapToStep, rollDay, realArmed, pushEvent, istHhmm,
   MAX_LADDER_LOTS, SPOT_STALE_MS, planTick, type LadderSlice, type LadderState,
 } from './priceLadder.ts';
 
@@ -349,4 +349,16 @@ test('planTick: a SIM slice left mid-job by a restart recovers (entry re-armed, 
 
 test('planTick: an XY fire is marked as a MARKET order (its settle times out to UNKNOWN)', () => {
   assert.equal(planTick(st([armedXY()]), px(23179), T, io).next.slices[0].market, true);
+});
+
+test('sumSlicePnl: closed at exit, open at LTP; an unpriced open slice makes the total unknown', () => {
+  const closed = slice({ id: 'c', state: 'closed', avg: 10, filledQty: 65, exitAvg: 12 });
+  const open = slice({ id: 'o', avg: 10, filledQty: 65 });
+  const armed = slice({ id: 'x', state: 'armed' });
+  const all = () => true;
+  assert.equal(sliceNowPnl(armed, 50), undefined);
+  assert.equal(sumSlicePnl([closed, open, armed], all, () => 11), 130 + 65);
+  assert.equal(sumSlicePnl([closed, open], all, () => undefined), null);
+  assert.equal(sumSlicePnl([armed], all, () => 11), null);
+  assert.equal(sumSlicePnl([closed, open], s => s.id === 'c', () => undefined), 130);
 });

@@ -1,15 +1,18 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from '@/components/NavBar';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
-import { BROKER_LABELS } from '@/hooks/useBrokerSelector';
+import { BROKER_LABELS, scalperRoute } from '@/hooks/useBrokerSelector';
+import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
+import { FOCUS_RING } from '@/components/Scalper';
+import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { LadderGrid, type EntryMark, widgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
-  MAX_LADDER_LOTS, isLive, limitZone, ownNet, slicePnl, classifyClick,
+  MAX_LADDER_LOTS, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
   type ClickType, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
   type LadderContract,
 } from '@/lib/priceLadder';
@@ -114,7 +117,8 @@ export default function PriceLadder() {
   const [manual, setManual] = useState(false);
   const [data, setData] = useState<StateResp | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [indexQ, setIndexQ] = useState<IndexQuote | null>(null);
+  const [quotes, setQuotes] = useState<Record<string, IndexQuote>>({});
+  const indexQ = quotes[underlying] ?? null;
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const lastEventAt = useRef<number>(0);
@@ -202,12 +206,87 @@ export default function PriceLadder() {
   useEffect(() => {
     let cancelled = false;
     const load = () => fetch('/api/scalper/top-indices').then(r => r.json()).then((j: { quotes?: Record<string, IndexQuote> }) => {
-      if (!cancelled) setIndexQ(j.quotes?.[underlying] ?? null);
+      if (!cancelled) setQuotes(j.quotes ?? {});
     }).catch(() => {});
     void load();
     const t = setInterval(load, 3000);
     return () => { cancelled = true; clearInterval(t); };
-  }, [underlying]);
+  }, []);
+
+  // Header account P&L: the shared, server-cached portfolio read (display only — it never sizes an order), every 5 s
+  // while the tab is visible. A failed or incomplete read shows '—', never a stale or partial number.
+  const [acct, setAcct] = useState<{ pnl: number | null; open: number | null; note: string | null }>({ pnl: null, open: null, note: null });
+  const acctSeq = useRef(0);
+  useEffect(() => {
+    const my = ++acctSeq.current;     // a broker switch drops the previous broker's in-flight reply
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAcct({ pnl: null, open: null, note: null });
+    if (!brokerLoaded) return;
+    const fail = (note: string) => { if (my === acctSeq.current) setAcct({ pnl: null, open: null, note }); };
+    const load = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      try {
+        const r = await fetch(`/api/dashboard/portfolio?broker=${broker}`, { cache: 'no-store' });
+        const j = await r.json() as { success?: boolean; brokers?: BrokerPortfolio[] };
+        if (my !== acctSeq.current) return;
+        const b = j.brokers?.find(x => x.broker === broker);
+        if (!j.success || !b) return fail('Could not read the account');
+        if (!b.connected) return fail(b.error ?? 'Not connected');
+        if (b.error && /positions|ltp-join/.test(b.error)) return fail(b.error);
+        if (b.unpricedPositions > 0) {
+          return void setAcct({ pnl: null, open: b.openPositions, note: `${b.unpricedPositions} open leg(s) have no live price — total unknown` });
+        }
+        setAcct({ pnl: b.totalPnl, open: b.openPositions, note: null });
+      } catch (e) {
+        fail(String((e as Error).message ?? e));
+      }
+    };
+    void load();
+    const t = setInterval(() => { void load(); }, 5000);
+    return () => clearInterval(t);
+  }, [broker, brokerLoaded]);
+
+  // The broker book (positions / orders / trades), fetched only while its window is open. View only on this page:
+  // ladder orders are changed from the ladder, so the book never resizes one behind the engine's lot cap.
+  type BookTab = 'positions' | 'orders' | 'trades';
+  const [bookOpen, setBookOpen] = useState<BookTab | null>(null);
+  const [book, setBook] = useState<{ positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; trades: Record<string, unknown>[] }>({ positions: [], orders: [], trades: [] });
+  const [bookLoading, setBookLoading] = useState(false);
+  const [bookError, setBookError] = useState<string | null>(null);
+  const bookSeq = useRef(0);
+  const fetchBook = useCallback(async () => {
+    const my = ++bookSeq.current;
+    setBookLoading(true);
+    try {
+      // Kotak sends no LTP: ?ltp=1 prices its open option legs from Dhan's chain (unpriced legs stay 0 = unknown).
+      const r = await fetch(`${scalperRoute(broker, 'poll')}${broker === 'kotak' ? '?ltp=1' : ''}`, { cache: 'no-store' });
+      const j = await r.json() as { success?: boolean; positions?: Record<string, unknown>[]; orders?: Record<string, unknown>[]; trades?: Record<string, unknown>[]; positionsError?: string | null; ordersError?: string | null; tradesError?: string | null; error?: string };
+      if (my !== bookSeq.current) return;
+      if (!j.success) { setBookError(j.error ?? 'Could not read the broker book'); return; }
+      // A part that failed keeps its last good rows; the error says so rather than showing an empty book.
+      setBook(d => ({
+        positions: !j.positionsError && Array.isArray(j.positions) ? j.positions : d.positions,
+        orders: !j.ordersError && Array.isArray(j.orders) ? j.orders : d.orders,
+        trades: !j.tradesError && Array.isArray(j.trades) ? j.trades : d.trades,
+      }));
+      const errs = [j.positionsError && `positions: ${j.positionsError}`, j.ordersError && `orders: ${j.ordersError}`, j.tradesError && `trades: ${j.tradesError}`].filter(Boolean);
+      setBookError(errs.length ? `${errs.join(' · ')} — showing the last good rows` : null);
+    } catch (e) {
+      if (my === bookSeq.current) setBookError(String((e as Error).message ?? e));
+    } finally {
+      if (my === bookSeq.current) setBookLoading(false);
+    }
+  }, [broker]);
+  useEffect(() => {
+    ++bookSeq.current;                // a broker switch or close drops any reply still in flight
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setBook({ positions: [], orders: [], trades: [] });
+    setBookError(null);
+    if (!bookOpen || !brokerLoaded) return;
+    void fetchBook();
+    const t = setInterval(() => { void fetchBook(); }, 5000);
+    return () => clearInterval(t);
+  }, [bookOpen, brokerLoaded, fetchBook]);
 
   // Chime on fills and exits (the server writes the event; any open tab hears it).
   useEffect(() => {
@@ -267,15 +346,11 @@ export default function PriceLadder() {
     return marks;
   }, [mine, mode]);
   const net = securityId ? ownNet(slices.filter(s => s.broker === broker && s.mode === pageMode), securityId) : { qty: 0, avg: null };
-  const contractPnl = useMemo(() => {
-    let sum = 0, any = false;
-    for (const s of slices) {
-      if (s.broker !== broker || s.mode !== pageMode || s.contract.securityId !== securityId) continue;
-      const p = s.state === 'closed' ? slicePnl(s, s.exitAvg) : (s.state === 'open' || s.state === 'exiting') ? slicePnl(s, optLtp) : null;
-      if (p != null) { sum += p; any = true; }
-    }
-    return any ? sum : null;
-  }, [slices, broker, pageMode, securityId, optLtp]);
+  const contractPnl = useMemo(() => sumSlicePnl(slices, s => s.broker === broker && s.mode === pageMode && s.contract.securityId === securityId, () => optLtp),
+    [slices, broker, pageMode, securityId, optLtp]);
+  // The ladder's own P&L across every contract, for this broker and the page's SIM/REAL mode (open legs at live LTP).
+  const ladderPnl = useMemo(() => sumSlicePnl(slices, s => s.broker === broker && s.mode === pageMode, s => data?.ltps[s.contract.securityId]),
+    [slices, broker, pageMode, data?.ltps]);
 
   const liveArmed = !!data?.liveArmed;
   const realBlocked = real && !liveArmed;
@@ -396,7 +471,8 @@ export default function PriceLadder() {
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
-      <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+      <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
+      <div className="flex items-center justify-between gap-3 flex-wrap px-6 py-3">
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
             <Rows3 className="w-4 h-4 text-emerald-400" />
@@ -427,6 +503,37 @@ export default function PriceLadder() {
           <NavBar />
         </div>
       </div>
+      {/* Market + P&L + broker book strip */}
+      <div className="flex items-center gap-2 flex-wrap px-6 pb-2.5 text-xs">
+        <QuoteChip label="NIFTY" q={quotes.NIFTY} />
+        <QuoteChip label="INDIA VIX" q={quotes.VIX} />
+        <span className="w-px h-5 bg-zinc-800 shrink-0" />
+        <PnlChip label={`Ladder P&L · ${real ? 'REAL' : 'SIM'}`} value={ladderPnl}
+          title={`The ladder's own P&L on ${BROKER_LABELS[broker]}, every contract, ${real ? 'REAL' : 'SIM'} orders only: closed at their exit, open at the live LTP, since entry (a carried NRML position counts from its entry). '—' if an open leg has no price.`} />
+        <PnlChip label={`${BROKER_LABELS[broker]} P&L`} value={acct.pnl}
+          title={`${BROKER_LABELS[broker]} account P&L today: realised + unrealised over all positions, as the broker reports it (includes trades not made on the ladder)${acct.note ? ` — ${acct.note}` : ''}`} />
+        {acct.note && <span className="text-amber-300 truncate max-w-[18rem]" title={acct.note}>{acct.note}</span>}
+        <span className="w-px h-5 bg-zinc-800 shrink-0" />
+        <BookButton icon={<Briefcase className="w-3.5 h-3.5" />} label="Positions" count={acct.open} onClick={() => setBookOpen('positions')} />
+        <BookButton icon={<ClipboardList className="w-3.5 h-3.5" />} label="Order book" onClick={() => setBookOpen('orders')} />
+        <BookButton icon={<ReceiptText className="w-3.5 h-3.5" />} label="Trade book" onClick={() => setBookOpen('trades')} />
+      </div>
+      </div>
+      {bookOpen && (
+        <OrdersTradesModal
+          isOpen
+          readOnly
+          initialTab={bookOpen}
+          onClose={() => setBookOpen(null)}
+          broker={broker}
+          ordersData={book.orders}
+          tradesData={book.trades}
+          positionsData={book.positions}
+          isLoading={bookLoading}
+          error={bookError}
+          onRefresh={() => { void fetchBook(); }}
+        />
+      )}
 
       <div className="flex-1 flex flex-col gap-4 px-6 py-5 max-w-[1680px] w-full mx-auto">
         {loadError && (
@@ -677,9 +784,39 @@ export default function PriceLadder() {
   );
 }
 
+function QuoteChip({ label, q }: { label: string; q?: IndexQuote }) {
+  const ch = q?.change_pct;
+  return (
+    <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-zinc-800 bg-zinc-900">
+      <span className="text-[10px] font-bold tracking-wider text-zinc-400">{label}</span>
+      <span className="font-mono font-bold text-zinc-100">{q?.ltp ? q.ltp.toFixed(2) : '—'}</span>
+      {ch != null && <span className={`font-mono ${ch >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{ch >= 0 ? '+' : ''}{ch.toFixed(2)}%</span>}
+    </span>
+  );
+}
+
+function PnlChip({ label, value, title }: { label: string; value: number | null; title: string }) {
+  const tone = value == null ? 'text-zinc-400' : value > 0 ? 'text-emerald-400' : value < 0 ? 'text-red-400' : 'text-zinc-200';
+  return (
+    <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-zinc-800 bg-zinc-900" title={title}>
+      <span className="text-[10px] font-bold tracking-wider text-zinc-400 uppercase">{label}</span>
+      <span className={`font-mono font-bold ${tone}`}>{value == null ? '—' : `${value >= 0 ? '+' : '−'}₹${Math.abs(value).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`}</span>
+    </span>
+  );
+}
+
+function BookButton({ icon, label, count, onClick }: { icon: ReactNode; label: string; count?: number | null; onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick}
+      className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white hover:bg-zinc-800 ${FOCUS_RING}`}>
+      {icon}{label}{count != null && <span className="font-mono text-zinc-400">({count})</span>}
+    </button>
+  );
+}
+
 function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; ltp: number | undefined; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean>; trailPts: number; onSelect?: (s: LadderSlice) => void }) {
   const live = isLive(s);
-  const pnl = s.state === 'closed' ? slicePnl(s, s.exitAvg) : (s.state === 'open' || s.state === 'exiting') ? slicePnl(s, ltp) : null;
+  const pnl = sliceNowPnl(s, ltp) ?? null;
   const trig = s.kind === 'xy'
     ? (s.entryLevel ? `${s.contract.underlying} ${s.entryDir === 'below' ? '≤' : '≥'} ${s.entryLevel}` : '—')
     : `${s.orderType === 'SL' ? 'SL ' : ''}${s.limitPrice ?? s.triggerPrice ?? '—'}`;

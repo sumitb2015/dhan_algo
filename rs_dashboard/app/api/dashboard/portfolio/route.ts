@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { dhanGet } from '@/lib/dhanToken';
 import { kiteGet, isZerodhaTokenValid } from '@/lib/zerodhaToken';
 import { kotakGet, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
@@ -336,8 +336,13 @@ async function loadKotak(): Promise<BrokerPortfolio> {
   return out;
 }
 
-export async function GET() {
-  const brokers = await Promise.all([loadDhan(), loadZerodha(), loadKotak()]);
+export async function GET(req?: NextRequest) {
+  // `?broker=dhan|zerodha|kotak` loads just that account (the Price Ladder's header P&L); default is all three.
+  const only = req?.nextUrl.searchParams.get('broker');
+  const loaders = { dhan: loadDhan, zerodha: loadZerodha, kotak: loadKotak } as const;
+  const brokers = only === 'dhan' || only === 'zerodha' || only === 'kotak'
+    ? [await loaders[only]()]
+    : await Promise.all([loadDhan(), loadZerodha(), loadKotak()]);
 
   const totals = brokers.reduce(
     (acc, b) => ({

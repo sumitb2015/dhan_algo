@@ -9,6 +9,8 @@ import { dedupePositions } from '@/lib/positionProduct';
 export async function GET(): Promise<NextResponse> {
   try {
     let positionsError: string | null = null;
+    let ordersError: string | null = null;
+    let tradesError: string | null = null;
     const [positions, orders, trades] = await Promise.all([
       dhanGet('/positions').catch(err => {
         positionsError = String(err?.message ?? err);
@@ -19,14 +21,16 @@ export async function GET(): Promise<NextResponse> {
         }
         return null;
       }),
-      dhanGet('/orders').catch(() => []),
-      dhanGet('/trades').catch(() => []),
+      dhanGet('/orders').catch(err => { ordersError = String(err?.message ?? err); return []; }),
+      dhanGet('/trades').catch(err => { tradesError = String(err?.message ?? err); return []; }),
     ]);
 
     return NextResponse.json({
       success: true,
       positions: dedupePositions(Array.isArray(positions) ? positions as Record<string, unknown>[] : []),
       positionsError,
+      ordersError,
+      tradesError,
       orders: Array.isArray(orders) ? orders : [],
       trades: Array.isArray(trades) ? trades : [],
     });

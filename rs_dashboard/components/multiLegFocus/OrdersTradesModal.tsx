@@ -15,6 +15,10 @@ export interface OrdersTradesModalProps {
   isLoading: boolean;
   error: string | null;
   onRefresh: () => void;
+  /** Tab shown when the modal mounts (default: orders). */
+  initialTab?: 'orders' | 'trades' | 'positions';
+  /** View only: no Edit Price / Cancel on pending orders (a page whose own engine owns its orders, e.g. Price Ladder). */
+  readOnly?: boolean;
 }
 
 function isOrderPending(status: unknown): boolean {
@@ -45,8 +49,10 @@ export default function OrdersTradesModal({
   isLoading,
   error,
   onRefresh,
+  initialTab = 'orders',
+  readOnly = false,
 }: OrdersTradesModalProps) {
-  const [ordersTab, setOrdersTab] = useState<'orders' | 'trades' | 'positions'>('orders');
+  const [ordersTab, setOrdersTab] = useState<'orders' | 'trades' | 'positions'>(initialTab);
   const [tableSort, setTableSort] = useState<SortState>({ key: 'createTime', dir: 'desc' });
   const [filterText, setFilterText] = useState('');
 
@@ -488,7 +494,7 @@ export default function OrdersTradesModal({
                               <span className="font-mono text-zinc-200 font-semibold tabular-nums">
                                 {price > 0 ? `₹${price.toFixed(2)}` : 'MKT'}
                               </span>
-                              {isPending && (
+                              {isPending && !readOnly && (
                                 <button
                                   type="button"
                                   onClick={() => startEdit(row)}
@@ -540,7 +546,7 @@ export default function OrdersTradesModal({
                                 <X className="w-3 h-3" />
                               </button>
                             </div>
-                          ) : isPending ? (
+                          ) : isPending && !readOnly ? (
                             <div className="flex items-center gap-1.5 justify-center">
                               <button
                                 type="button"

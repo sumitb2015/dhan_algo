@@ -20,20 +20,24 @@ export async function GET(): Promise<NextResponse> {
 
   try {
     let positionsError: string | null = null;
+    let ordersError: string | null = null;
+    let tradesError: string | null = null;
     const [positions, orders, trades] = await Promise.all([
       kiteGet('/portfolio/positions').catch(err => {
         positionsError = String(err?.message ?? err);
         console.error('[scalper/zerodha/poll] positions fetch failed:', err);
         return { net: [] };
       }) as Promise<{ net: any[] }>,
-      kiteGet('/orders').catch(() => []) as Promise<any[]>,
-      kiteGet('/trades').catch(() => []) as Promise<any[]>,
+      kiteGet('/orders').catch(err => { ordersError = String(err?.message ?? err); return []; }) as Promise<any[]>,
+      kiteGet('/trades').catch(err => { tradesError = String(err?.message ?? err); return []; }) as Promise<any[]>,
     ]);
 
     return NextResponse.json({
       success: true,
       positions: (positions.net ?? []).map(shapeZerodhaPosition),
       positionsError,
+      ordersError,
+      tradesError,
       orders: (Array.isArray(orders) ? orders : []).map(shapeZerodhaOrder),
       trades: (Array.isArray(trades) ? trades : []).map(shapeZerodhaTrade),
     });

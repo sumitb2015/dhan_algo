@@ -23,14 +23,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   try {
     let positionsError: string | null = null;
+    let ordersError: string | null = null;
+    let tradesError: string | null = null;
     const [positions, orders, trades] = await Promise.all([
       kotakGetShared(KOTAK_PATHS.positions).catch(err => {
         positionsError = String(err?.message ?? err);
         console.error('[scalper/kotak/poll] positions fetch failed:', err);
         return {} as Record<string, unknown>;
       }),
-      (positionsOnly ? Promise.resolve({}) : kotakGetShared(KOTAK_PATHS.orderBook)).catch(() => ({} as Record<string, unknown>)),
-      (positionsOnly ? Promise.resolve({}) : kotakGetShared(KOTAK_PATHS.tradeBook)).catch(() => ({} as Record<string, unknown>)),
+      (positionsOnly ? Promise.resolve({}) : kotakGetShared(KOTAK_PATHS.orderBook)).catch(err => { ordersError = String(err?.message ?? err); return {} as Record<string, unknown>; }),
+      (positionsOnly ? Promise.resolve({}) : kotakGetShared(KOTAK_PATHS.tradeBook)).catch(err => { tradesError = String(err?.message ?? err); return {} as Record<string, unknown>; }),
     ]);
 
     const shaped = kotakRows(positions).map(shapeKotakPosition);
@@ -49,6 +51,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       success: true,
       positions: shaped,
       positionsError,
+      ordersError,
+      tradesError,
       orders: kotakRows(orders).map(shapeKotakOrder),
       trades: kotakRows(trades).map(shapeKotakTrade),
     });

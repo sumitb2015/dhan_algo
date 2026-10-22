@@ -267,6 +267,32 @@ export function slicePnl(s: Pick<LadderSlice, 'side' | 'avg' | 'filledQty'>, pri
   return (Number(price) - Number(s.avg)) * Number(s.filledQty) * dir;
 }
 
+/**
+ * A slice's P&L as it stands: a closed one at its exit average, an open / exiting one at `ltp`. `undefined` = the slice
+ * has no P&L to count (never filled, cancelled, …); `null` = it should, but there is no price for it yet.
+ */
+export function sliceNowPnl(s: LadderSlice, ltp: number | null | undefined): number | null | undefined {
+  if (s.state === 'closed') return slicePnl(s, s.exitAvg) ?? undefined;
+  if (s.state === 'open' || s.state === 'exiting') return Number(s.filledQty) > 0 ? slicePnl(s, ltp) : undefined;
+  return undefined;
+}
+
+/**
+ * Total P&L over the slices `pick` selects, each open one priced by `ltpOf`. Null when nothing counts, or when any open
+ * slice has no price — a partial sum would hide that leg's loss behind a number that looks complete.
+ */
+export function sumSlicePnl(slices: LadderSlice[], pick: (s: LadderSlice) => boolean, ltpOf: (s: LadderSlice) => number | null | undefined): number | null {
+  let sum = 0, any = false;
+  for (const s of slices) {
+    if (!pick(s)) continue;
+    const p = sliceNowPnl(s, ltpOf(s));
+    if (p === undefined) continue;
+    if (p === null) return null;
+    sum += p; any = true;
+  }
+  return any ? sum : null;
+}
+
 /** The ladder's own net position on a contract (BUY +, SELL -), over open/exiting slices. */
 export function ownNet(slices: LadderSlice[], securityId: string): { qty: number; avg: number | null } {
   let qty = 0, cost = 0;
