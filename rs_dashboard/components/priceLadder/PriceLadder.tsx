@@ -458,13 +458,18 @@ export default function PriceLadder() {
   const securityId = shownC?.securityId ?? null;
   const refPrice = mode === 'xy' ? spot : mode === 'pair' ? combined : optLtp;
 
+  // The pointer (or keyboard focus) is on the ladder: its rows hold still, so a price tick cannot re-centre a different
+  // level under the mouse between aiming and clicking (seen live: a click armed a breakout three rows from the aim).
+  const [held, setHeld] = useState(false);
   // Keep the ladder centred on the reference price while following; re-centre when it walks off the visible window.
+  // Held rows only move for a first price (center 0); the re-centre catches up the moment the pointer leaves.
   useEffect(() => {
     if (!(refPrice > 0)) return;
+    if (held && center !== 0) return;
     const half = Math.floor(ROWS / 2) * tick;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (follow || center === 0 || (!manual && Math.abs(refPrice - center) > half * 0.8)) setCenter(refPrice);
-  }, [refPrice, follow, manual, tick, center]);
+  }, [refPrice, follow, manual, tick, center, held]);
   // A different contract (strike / CE-PE / expiry, or an Active Trades chip) is a new price axis in plain mode: drop the
   // scroll hold so the walk-off re-centre can bring its price back on screen.
   useEffect(() => {
@@ -1045,6 +1050,7 @@ export default function PriceLadder() {
                 <Crosshair className="w-3.5 h-3.5" /> Centre
               </button>
               <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow price</label>
+              {held && <span className="text-[10px] text-amber-300" title="The rows stay put while the pointer is on the ladder, so a price tick cannot move a level under the mouse; they re-centre when it leaves">Rows held</span>}
               <button
                 type="button" disabled={busy || pendingHere === 0}
                 onClick={() => void post({ action: 'cancelAll', securityId, broker, mode: pageMode })}
@@ -1063,6 +1069,7 @@ export default function PriceLadder() {
               disabled={placeDisabled} decimals={decimals} entryMarks={entryMarks}
               onScroll={refPrice > 0 ? scrollLadder : undefined}
               onTrail={(w, delta) => { void post(mode === 'pair' ? { action: 'pair', op: 'trail', id: w.ids[0], delta } : { action: 'trail', id: w.ids[0], delta }); }}
+              onHoldChange={setHeld}
             />
           </div>
         </div>

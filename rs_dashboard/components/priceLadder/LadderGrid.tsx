@@ -252,7 +252,7 @@ function OuterControlWidget({ w, onAdjust, onCancel }: {
  */
 export function LadderGrid({
   center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryMarks, onScroll,
-  zones = 'classic', stopLimitFor, onTrail,
+  zones = 'classic', stopLimitFor, onTrail, onHoldChange,
 }: {
   center: number; refPrice: number; tick: number; rows: number; widgets: LadderWidget[];
   limitZoneBuy: 'below' | 'above';
@@ -270,6 +270,11 @@ export function LadderGrid({
   entryMarks?: EntryMark[];
   /** Scroll the window by N ticks (positive = up, toward higher prices). Wheel over the rows or the ▲ / ▼ buttons. */
   onScroll?: (ticks: number) => void;
+  /**
+   * The pointer is over the ladder (or a cell has keyboard focus): true while it is, false when it leaves. The page holds
+   * the rows still meanwhile, so a re-centre on a price tick cannot move a row under the mouse between aim and click.
+   */
+  onHoldChange?: (held: boolean) => void;
 }) {
   const prices = ladderRows(center, tick, rows);
   // Native, non-passive wheel listener: React's onWheel is passive, so it cannot stop the page scrolling too.
@@ -305,7 +310,12 @@ export function LadderGrid({
   const fmt = (v: number) => v.toFixed(decimals);
 
   return (
-    <div className="rounded-lg border border-zinc-800 overflow-hidden bg-zinc-950">
+    <div
+      className="rounded-lg border border-zinc-800 overflow-hidden bg-zinc-950"
+      onMouseEnter={() => onHoldChange?.(true)} onMouseLeave={() => onHoldChange?.(false)}
+      onFocus={() => onHoldChange?.(true)}
+      onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) onHoldChange?.(false); }}
+    >
       <div className="grid grid-cols-[1.3fr_0.8fr_0.8fr_0.8fr_1.3fr] text-xs font-bold text-white bg-zinc-800">
         <div className="px-2 py-1.5 text-center">Buy</div>
         <div className="px-2 py-1.5 text-center">Bids</div>
