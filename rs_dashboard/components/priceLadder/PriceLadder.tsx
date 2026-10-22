@@ -790,8 +790,23 @@ export default function PriceLadder() {
             <table className="w-full text-xs">
               <thead className="bg-zinc-800">
                 <tr className="text-left">
-                  {['Time', 'Mode', 'Contract', 'Side', 'Qty', 'Trigger / Price', 'TGT / SL', 'State', 'Avg', 'P&L', ''].map(h => (
-                    <th key={h} className="px-2 py-1.5 text-xs font-bold text-white whitespace-nowrap">{h}</th>
+                  {[
+                    ['Time', 'When the order was placed / armed'],
+                    ['Mode', ''],
+                    ['Contract', ''],
+                    ['Side', ''],
+                    ['Qty', 'Filled quantity (ordered while unfilled), in lots'],
+                    ['Trigger', 'XY: the index / futures level that fires the entry. Plain: the LIMIT / SL price'],
+                    ['Fired at', 'XY: the index / futures level when the entry fired (the bracket is measured from it)'],
+                    ['Entry ₹', 'Option entry price: the average fill'],
+                    ['LTP ₹', 'Option live price (open positions)'],
+                    ['Exit ₹', 'Option exit price: the average exit fill, with the exit time'],
+                    ['TGT / SL', 'Bracket target / stop on the index / futures level (T = trailing step)'],
+                    ['State', ''],
+                    ['P&L', 'Closed: at the exit price. Open: at the live price'],
+                    ['', ''],
+                  ].map(([h, t], i) => (
+                    <th key={`${h}-${i}`} title={t || undefined} className="px-2 py-1.5 text-xs font-bold text-white whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -877,6 +892,7 @@ function BookButton({ icon, label, count, onClick }: { icon: ReactNode; label: s
 function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; ltp: number | undefined; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean>; trailPts: number; onSelect?: (s: LadderSlice) => void }) {
   const live = isLive(s);
   const pnl = sliceNowPnl(s, ltp) ?? null;
+  const qty = Number(s.filledQty) || s.qty;
   const trig = s.kind === 'xy'
     ? (s.entryLevel ? `${s.contract.underlying} ${s.entryDir === 'below' ? '≤' : '≥'} ${s.entryLevel}` : '—')
     : `${s.orderType === 'SL' ? 'SL ' : ''}${s.limitPrice ?? s.triggerPrice ?? '—'}`;
@@ -894,8 +910,17 @@ function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; 
         {s.contract.underlying} {s.contract.expiry.slice(5)} {s.contract.strike}{s.contract.opt} <span className="text-zinc-500">{s.product}</span>
       </td>
       <td className={`px-2 py-1 font-bold ${s.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>{s.side}</td>
-      <td className="px-2 py-1 font-mono text-zinc-200">{s.filledQty ?? s.qty} <span className="text-zinc-500">({s.lots}L)</span></td>
+      <td className="px-2 py-1 font-mono text-zinc-200 whitespace-nowrap">
+        {/* MCX on Dhan: qty is lots, so show the barrels too. */}
+        {s.contract.mult ? <>{qty}L <span className="text-zinc-500">({qty * s.contract.mult} bbl)</span></> : <>{qty} <span className="text-zinc-500">({s.lots}L)</span></>}
+      </td>
       <td className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap">{trig}</td>
+      <td className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap">{s.kind === 'xy' && s.entryY ? s.entryY.toFixed(2) : '—'}</td>
+      <td className="px-2 py-1 font-mono font-bold text-zinc-100 whitespace-nowrap">{s.avg ? s.avg.toFixed(2) : '—'}</td>
+      <td className="px-2 py-1 font-mono text-zinc-200 whitespace-nowrap">{(s.state === 'open' || s.state === 'exiting') && ltp ? ltp.toFixed(2) : '—'}</td>
+      <td className="px-2 py-1 font-mono text-zinc-200 whitespace-nowrap">
+        {s.exitAvg ? <>{s.exitAvg.toFixed(2)}{s.closedAt ? <span className="text-zinc-500"> · {timeOf(s.closedAt)}</span> : null}</> : '—'}
+      </td>
       <td className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap">
         {s.bracket ? `${s.bracket.tgtPts > 0 ? (s.tgtY ?? `+${s.bracket.tgtPts}`) : 'Cover'} / ${s.slY ?? `-${s.bracket.slPts}`}${s.bracket.trailPts ? ` · T${s.bracket.trailPts}` : ''}` : '—'}
       </td>
@@ -903,7 +928,6 @@ function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; 
         {s.state.toUpperCase()}{s.state === 'closed' && s.exitReason ? <span className="text-zinc-500 font-normal"> · {s.exitReason}</span> : null}
         {s.note && s.state !== 'closed' ? <span className="block text-[10px] font-normal text-zinc-500 max-w-64 truncate">{s.note}</span> : null}
       </td>
-      <td className="px-2 py-1 font-mono text-zinc-200">{s.avg ? s.avg.toFixed(2) : '—'}{s.exitAvg ? <span className="text-zinc-500"> → {s.exitAvg.toFixed(2)}</span> : null}</td>
       <td className={`px-2 py-1 font-mono ${pnlClass(pnl)}`}>{fmtMoney(pnl)}</td>
       <td className="px-2 py-1 whitespace-nowrap">
         <div className="flex gap-1">
