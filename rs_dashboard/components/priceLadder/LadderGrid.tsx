@@ -59,10 +59,19 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
           add({ price: lv.slY, column: opposite(s.side), kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', qty: s.qty, lots: s.lots, ids: [s.id], planned: true }, 0);
         }
       }
-      if ((s.state === 'open' || s.state === 'exiting') && s.bracket && held > 0) {
-        const common = { column: opposite(s.side), qty: held, lots: heldLots, ids: [s.id], ...(live ? { adjust: 'position' as const } : {}) };
-        if (s.tgtY != null) add({ ...common, price: s.tgtY, kind: 'tgt', label: 'Target', ...(live ? { drag: 'tgt' as const } : {}) }, s.openedAt ?? 0);
-        if (s.slY != null) add({ ...common, price: s.slY, kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', ...(live ? { drag: 'sl' as const } : {}) }, s.openedAt ?? 0);
+      if ((s.state === 'open' || s.state === 'exiting') && held > 0) {
+        const entryPrice = s.entryY ?? s.entryLevel;
+        if (entryPrice != null) {
+          add({
+            price: entryPrice, column: s.side, kind: 'pos', label: 'Position',
+            qty: held, lots: heldLots, ids: [s.id], ...(live ? { adjust: 'position' as const } : {}),
+          }, s.openedAt ?? 0);
+        }
+        if (s.bracket) {
+          const common = { column: opposite(s.side), qty: held, lots: heldLots, ids: [s.id], ...(live ? { adjust: 'position' as const } : {}) };
+          if (s.tgtY != null) add({ ...common, price: s.tgtY, kind: 'tgt', label: 'Target', ...(live ? { drag: 'tgt' as const } : {}) }, s.openedAt ?? 0);
+          if (s.slY != null) add({ ...common, price: s.slY, kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', ...(live ? { drag: 'sl' as const } : {}) }, s.openedAt ?? 0);
+        }
       }
     }
     if (mode === 'plain' && s.kind === 'plain' && s.state === 'working') {

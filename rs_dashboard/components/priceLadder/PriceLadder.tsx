@@ -346,6 +346,33 @@ export default function PriceLadder() {
   const live = slices.filter(isLive);
   const done = slices.filter(s => !isLive(s));
 
+  // Auto-focus the contract of any active live trade on first load so the user immediately sees it
+  const autoFocusedRef = useRef(false);
+  useEffect(() => {
+    if (autoFocusedRef.current || !data) return;
+    const liveSlices = data.state.slices.filter(isLive);
+    if (!liveSlices.length) return;
+    const latest = liveSlices[liveSlices.length - 1];
+    if (latest.contract) {
+      autoFocusedRef.current = true;
+      if (latest.contract.underlying) setUnderlyingRaw(latest.contract.underlying);
+      if (latest.contract.expiry) setExpiry(latest.contract.expiry);
+      if (latest.contract.strike) setStrike(latest.contract.strike);
+      if (latest.contract.opt) setOpt(latest.contract.opt);
+      if (latest.broker) setBroker(latest.broker);
+      if (latest.mode === 'real') setReal(true);
+    }
+  }, [data, setBroker]);
+
+  const selectContract = useCallback((s: { contract: LadderContract; broker?: LadderBroker; mode?: 'real' | 'sim' }) => {
+    if (s.contract.underlying) setUnderlyingRaw(s.contract.underlying);
+    if (s.contract.expiry) setExpiry(s.contract.expiry);
+    if (s.contract.strike) setStrike(s.contract.strike);
+    if (s.contract.opt) setOpt(s.contract.opt);
+    if (s.broker) setBroker(s.broker);
+    if (s.mode) setReal(s.mode === 'real');
+  }, [setBroker]);
+
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
       <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
@@ -510,6 +537,28 @@ export default function PriceLadder() {
 
           {/* ── ladder ── */}
           <div className="flex flex-col gap-2 min-w-0">
+            {live.length > 0 && (
+              <div className="flex items-center gap-1.5 flex-wrap px-2.5 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800 text-xs">
+                <span className="text-zinc-400 font-semibold flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  Active Trades:
+                </span>
+                {live.map(s => {
+                  const isCur = s.contract.securityId === securityId && s.broker === broker && s.mode === pageMode;
+                  return (
+                    <button
+                      key={s.id} type="button"
+                      onClick={() => selectContract(s)}
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono border transition-colors ${isCur ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300 font-bold shadow-sm' : 'bg-zinc-800/90 border-zinc-700 text-zinc-300 hover:text-white hover:border-zinc-500'}`}
+                    >
+                      <span>{s.contract.underlying} {s.contract.strike}{s.contract.opt}</span>
+                      <span className="text-[10px] text-zinc-400">({s.mode.toUpperCase()} · {s.qty})</span>
+                      {!isCur && <span className="text-[10px] text-amber-300 underline font-sans ml-0.5">View on ladder</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             <div className="flex items-center gap-2 flex-wrap text-xs">
               <span className="text-zinc-400">Tick</span>
               <Seg value={String(tick)} options={ticks.map(String)} onChange={v => setTick(Number(v))} />
@@ -558,7 +607,7 @@ export default function PriceLadder() {
                 </tr>
               </thead>
               <tbody>
-                {[...slices].reverse().map(s => <SliceRow key={s.id} s={s} ltp={data?.ltps[s.contract.securityId]} busy={busy} post={post} trailPts={trailPts} />)}
+                {[...slices].reverse().map(s => <SliceRow key={s.id} s={s} ltp={data?.ltps[s.contract.securityId]} busy={busy} post={post} trailPts={trailPts} onSelect={selectContract} />)}
               </tbody>
             </table>
           )}
@@ -606,7 +655,7 @@ export default function PriceLadder() {
   );
 }
 
-function SliceRow({ s, ltp, busy, post, trailPts }: { s: LadderSlice; ltp: number | undefined; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean>; trailPts: number }) {
+function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; ltp: number | undefined; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean>; trailPts: number; onSelect?: (s: LadderSlice) => void }) {
   const live = isLive(s);
   const pnl = s.state === 'closed' ? slicePnl(s, s.exitAvg) : (s.state === 'open' || s.state === 'exiting') ? slicePnl(s, ltp) : null;
   const trig = s.kind === 'xy'
@@ -618,7 +667,13 @@ function SliceRow({ s, ltp, busy, post, trailPts }: { s: LadderSlice; ltp: numbe
     <tr className={`border-t border-zinc-900 ${live ? '' : 'opacity-60'}`}>
       <td className="px-2 py-1 font-mono text-zinc-400 whitespace-nowrap">{timeOf(s.createdAt)}</td>
       <td className="px-2 py-1 whitespace-nowrap"><span className={s.mode === 'real' ? 'font-bold text-red-400' : 'text-zinc-300'}>{s.mode.toUpperCase()}</span> <span className="text-zinc-500">{s.broker}</span></td>
-      <td className="px-2 py-1 whitespace-nowrap text-zinc-200">{s.contract.underlying} {s.contract.expiry.slice(5)} {s.contract.strike}{s.contract.opt} <span className="text-zinc-500">{s.product}</span></td>
+      <td
+        onClick={() => onSelect?.(s)}
+        title={onSelect ? 'Click to view this contract on the ladder' : undefined}
+        className={`px-2 py-1 whitespace-nowrap text-zinc-200 ${onSelect ? 'cursor-pointer hover:text-white hover:underline' : ''}`}
+      >
+        {s.contract.underlying} {s.contract.expiry.slice(5)} {s.contract.strike}{s.contract.opt} <span className="text-zinc-500">{s.product}</span>
+      </td>
       <td className={`px-2 py-1 font-bold ${s.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>{s.side}</td>
       <td className="px-2 py-1 font-mono text-zinc-200">{s.filledQty ?? s.qty} <span className="text-zinc-500">({s.lots}L)</span></td>
       <td className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap">{trig}</td>
