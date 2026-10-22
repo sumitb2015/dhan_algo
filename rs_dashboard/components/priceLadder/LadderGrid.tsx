@@ -11,7 +11,7 @@ import { bias, bracketLevels, ladderRows, snapToStep, type LadderSide, type Ladd
  *  - tgt / sl: an open bracket's exits, in the EXIT side's column with the position's quantity; + adds a lot to the
  *    position at market (it joins these levels), − exits one lot.
  *  - pos: a plain-mode open position at its average, in its side's column; + adds a lot, − exits one.
- *  - planned: the target / SL an armed bracket will get when it fills (dashed, no controls).
+ *  - planned: the target / SL an armed bracket will get when it fills (dimmed, no + / −; drag moves it).
  */
 export interface LadderWidget {
   key: string;
@@ -56,8 +56,9 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
         if (s.bracket) {
           // As in OptionX: the bracket's target and SL show the moment it is placed, before it fills.
           const lv = bracketLevels(bias(s.contract.opt, s.side), s.entryLevel, s.bracket);
-          if (lv.tgtY != null) add({ price: lv.tgtY, column: opposite(s.side), kind: 'tgt', label: 'Target', qty: s.qty, lots: s.lots, ids: [s.id], planned: true }, 0);
-          add({ price: lv.slY, column: opposite(s.side), kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', qty: s.qty, lots: s.lots, ids: [s.id], planned: true }, 0);
+          // Draggable before the fill too: moving one changes the bracket's points from the entry level.
+          if (lv.tgtY != null) add({ price: lv.tgtY, column: opposite(s.side), kind: 'tgt', label: 'Target', qty: s.qty, lots: s.lots, ids: [s.id], planned: true, drag: 'tgt' }, 0);
+          add({ price: lv.slY, column: opposite(s.side), kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', qty: s.qty, lots: s.lots, ids: [s.id], planned: true, drag: 'sl' }, 0);
         }
       }
       if ((s.state === 'open' || s.state === 'exiting') && held > 0) {
@@ -102,7 +103,7 @@ function InnerPriceWidget({ w, decimals }: { w: LadderWidget; decimals: number }
       onClick={stop} onKeyDown={stop}
       draggable={!!w.drag}
       onDragStart={w.drag ? e => { e.dataTransfer.setData(DRAG_MIME, JSON.stringify({ ids: w.ids, what: w.drag })); e.dataTransfer.effectAllowed = 'move'; } : undefined}
-      title={w.planned ? `${w.label} — set when the entry fills` : w.drag ? `${w.label} — drag to another price to move it` : what}
+      title={w.planned ? `${w.label} — set when the entry fills; drag to another price to move it` : w.drag ? `${w.label} — drag to another price to move it` : what}
       data-widget={w.kind}
       className={`font-mono text-xs font-semibold select-none px-1 py-0.5 rounded transition-colors ${w.planned ? 'text-zinc-400 italic opacity-75' : 'text-zinc-100'} ${w.drag ? 'cursor-grab active:cursor-grabbing hover:text-white hover:bg-zinc-800/60' : ''}`}
     >

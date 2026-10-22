@@ -412,6 +412,28 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const prices = await loadPrices([x.contract.underlying], []);
         const sp = prices.spots[x.contract.underlying];
         if (!sp || !spotFresh(sp.at, Date.now())) return bad('No fresh spot to check the level against');
+        if (x.state === 'armed' && x.kind === 'xy' && x.bracket && (body.tgtY != null || body.slY != null) && body.level == null) {
+          // A planned target / SL dragged before the fill: stored as points from the entry level, so they still move
+          // with the entry and open where the fill lands.
+          const b = bias(x.contract.opt, x.side);
+          const entry = Number(x.entryLevel);
+          const tgtY = body.tgtY == null ? null : Number(body.tgtY);
+          const slY = body.slY == null ? null : Number(body.slY);
+          if (tgtY != null && x.bracket.tgtPts <= 0) return bad('A Cover order has no target');
+          if (tgtY != null && !(levelSane(tgtY, sp.spot) && (tgtY - entry) * b > 0)) return bad('Target must be on the profit side of the entry');
+          if (slY != null && !(levelSane(slY, sp.spot) && (entry - slY) * b > 0)) return bad('SL must be on the loss side of the entry');
+          const r = await guarded(id, y => y.state === 'armed' && !!y.bracket && y.entryLevel === x.entryLevel, st => {
+            const y = st.slices.find(z => z.id === id)!;
+            const bracket = {
+              ...y.bracket!,
+              ...(tgtY != null ? { tgtPts: Number(((tgtY - entry) * b).toFixed(2)) } : {}),
+              ...(slY != null ? { slPts: Number(((entry - slY) * b).toFixed(2)) } : {}),
+            };
+            return pushEvent(patchSlice(st, id, { bracket }), ev('info', `Planned bracket: TGT ${bracket.tgtPts > 0 ? `${bracket.tgtPts} pts` : '—'} / SL ${bracket.slPts} pts`, id));
+          });
+          if (!r.applied) return bad('Too late — it has just fired or moved; try again', 409);
+          return NextResponse.json({ success: true, data: { state: r.state } });
+        }
         if (x.state === 'armed' && x.kind === 'xy') {
           const level = Number(body.level);
           if (!levelSane(level, sp.spot)) return bad('Level is more than 5% from spot');
