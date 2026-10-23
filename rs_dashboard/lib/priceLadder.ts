@@ -180,6 +180,8 @@ export interface LadderSlice {
   exitRetryAt?: number;
   closedAt?: number;
   note?: string;
+  /** The ladder pane that placed it when two are open (absent = ladder 1). Display only: which table lists it. */
+  pane?: 2;
 }
 
 export interface LadderEvent { at: number; level: 'info' | 'warn' | 'error'; msg: string; sliceId?: string }
@@ -201,6 +203,9 @@ export interface LadderState {
   /** Global MTM guards (lib/priceLadderGuard.ts), keyed `broker:mode`. Reset with the day. */
   guards?: Record<string, import('./priceLadderGuard').LadderGuard>;
 }
+
+/** Which ladder pane lists an order or position: 2 if ladder 2 placed it, else 1 (also every order from before panes). */
+export const paneOf = (x: { pane?: number }): 1 | 2 => (x.pane === 2 ? 2 : 1);
 
 export const emptyLadderState = (date: string): LadderState => ({ date, slices: [], events: [] });
 

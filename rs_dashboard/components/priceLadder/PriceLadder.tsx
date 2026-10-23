@@ -18,7 +18,7 @@ import { scopeMtm } from '@/lib/priceLadderGuard';
 import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
-  MAX_LADDER_LOTS, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
+  MAX_LADDER_LOTS, paneOf, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
   type ClickType, type LadderZones, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
   type LadderContract,
 } from '@/lib/priceLadder';
@@ -657,24 +657,24 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     if (!expiry || !strike) return;
     void post({
       action: 'arm', kind: mode, broker, mode: real ? 'real' : 'sim', underlying, expiry, strike, opt, side, lots, product,
-      orderType, level: price, zones, expect, ...(zones === 'anywhere' && mode === 'plain' ? { slBufferPct } : {}),
+      orderType, level: price, zones, expect, ...(zones === 'anywhere' && mode === 'plain' ? { slBufferPct } : {}), ...(second ? { pane: 2 } : {}),
       // Cover = SL only (tgtPts 0), as OptionX's Cover order; Bracket = target + SL.
       // Single + trail = a trailing stop on its own: SL only, starting at the trail distance.
       ...(mode === 'xy' && style !== 'Single' ? { bracket: { tgtPts: style === 'Cover' ? 0 : tgtPts, slPts, ...(trailOn ? { trailPts } : {}) } }
         : mode === 'xy' && trailOn ? { bracket: { tgtPts: 0, slPts: trailPts, trailPts } } : {}),
     }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${mode === 'xy' ? 'armed at' : 'placed at'} ${price}`); });
-  }, [post, mode, broker, real, underlying, expiry, strike, opt, lots, product, orderType, zones, slBufferPct, style, tgtPts, slPts, trailOn, trailPts]);
+  }, [post, mode, broker, real, underlying, expiry, strike, opt, lots, product, orderType, zones, slBufferPct, style, tgtPts, slPts, trailOn, trailPts, second]);
 
   // Pair mode: the entry is on the combined premium (Buy below / Sell above = limit-like; the other side a breakout).
   const sendPair = useCallback((side: LadderSide, price: number, expect: { kind: 'limit' | 'stop'; dir: 'above' | 'below' }) => {
     if (!expiry || !pairOk) return;
     void post({
       action: 'pair', op: 'arm', broker, mode: real ? 'real' : 'sim', underlying, expiry, structure, ceStrike: pairCe, peStrike: pairPe,
-      side, lots, product, orderType, level: price, zones, expect, ...(legSlPct > 0 ? { legSlPct } : {}),
+      side, lots, product, orderType, level: price, zones, expect, ...(legSlPct > 0 ? { legSlPct } : {}), ...(second ? { pane: 2 } : {}),
       ...(style !== 'Single' ? { bracket: { tgtPts: style === 'Cover' ? 0 : tgtPts, slPts, ...(trailOn ? { trailPts } : {}) } }
         : trailOn ? { bracket: { tgtPts: 0, slPts: trailPts, trailPts } } : {}),
     }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${structure} armed at combined ${price}`); });
-  }, [post, broker, real, underlying, expiry, structure, pairOk, pairCe, pairPe, lots, product, orderType, zones, legSlPct, style, tgtPts, slPts, trailOn, trailPts]);
+  }, [post, broker, real, underlying, expiry, structure, pairOk, pairCe, pairPe, lots, product, orderType, zones, legSlPct, style, tgtPts, slPts, trailOn, trailPts, second]);
 
   const onPlace = (side: LadderSide, price: number) => {
     if (mode === 'pair') {
@@ -814,15 +814,26 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   ? `Anywhere: Buy below LTP / Sell above it = LIMIT; Sell below / Buy above = SL-limit, its limit ${slBufferPct}% past the trigger. Orders rest at the broker.`
                   : 'Click Buy below LTP or Sell above it for a LIMIT; the other side places an SL-M stop (Order Type SL). Orders rest at the broker.';
   const dataDate = data ? data.state.date : null;
-  const latestEvent = data?.state.events.length ? data.state.events[data.state.events.length - 1] : null;
   const optLabel = mode === 'pair'
     ? (pairOk ? `${underlying} ${expiry} ${structure === 'straddle' ? `${pairCe} straddle` : `${pairCe}CE / ${pairPe}PE strangle`}` : `${underlying} — pair strikes not in the chain`)
     : strike ? `${underlying} ${expiry} ${strike} ${opt}` : `${underlying} —`;
-  const live = slices.filter(isLive);
+  // With two ladders open each lists only the orders it placed (ladder 1 also every order from before panes); one
+  // ladder lists everything, so closing ladder 2 never hides its positions.
+  const inPane = useCallback((x: { pane?: number }) => !dual || paneOf(x) === ladderId, [dual, ladderId]);
+  const paneSlices = useMemo(() => slices.filter(inPane), [slices, inPane]);
+  const panePairs = useMemo(() => pairs.filter(inPane), [pairs, inPane]);
+  const paneEvents = useMemo(() => {
+    const evs = data?.state.events ?? [];
+    if (!dual) return evs;
+    const ids = new Set([...paneSlices.map(x => x.id), ...panePairs.map(p => p.id)]);
+    return evs.filter(e => (e.sliceId ? ids.has(e.sliceId) : ladderId === 1));
+  }, [data?.state.events, dual, ladderId, paneSlices, panePairs]);
+  const live = paneSlices.filter(isLive);
+  const latestEvent = paneEvents.length ? paneEvents[paneEvents.length - 1] : null;
   // Live slices grouped per position (contract + broker + mode + side): one chip / banner line, not one per slice.
   const liveGroups = useMemo(() => {
     const m = new Map<string, { key: string; slices: LadderSlice[]; lots: number; armed: number }>();
-    for (const x of slices.filter(isLive)) {
+    for (const x of paneSlices.filter(isLive)) {
       const key = `${x.contract.securityId}|${x.broker}|${x.mode}|${x.side}`;
       const g = m.get(key) ?? m.set(key, { key, slices: [], lots: 0, armed: 0 }).get(key)!;
       g.slices.push(x);
@@ -831,7 +842,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       else g.armed += 1;
     }
     return [...m.values()];
-  }, [slices]);
+  }, [paneSlices]);
   // Live orders on the contract on screen that the ladder does not draw (the other SIM/REAL mode, or another broker).
   // Pair mode: live pairs on these same two legs that the ladder does not draw (another broker or SIM/REAL).
   const hiddenPairs = mode === 'pair' && pairView ? pairs.filter(p => isPairLive(p)
@@ -839,8 +850,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     && (p.broker !== broker || p.mode !== pageMode)) : [];
   const hiddenHere = mode === 'pair' ? [] : liveGroups.filter(g => g.slices[0].contract.securityId === securityId
     && (g.slices[0].mode !== pageMode || g.slices[0].broker !== broker));
-  const done = slices.filter(s => !isLive(s));
-  const livePairs = pairs.filter(isPairLive);
+  const done = paneSlices.filter(s => !isLive(s));
+  const livePairs = panePairs.filter(isPairLive);
 
   // Switch the page to a slice's contract (Active Trades chip, orders list). Moving into REAL re-arms the first-click
   // confirmation, exactly like the SIM/REAL switch.
@@ -1298,14 +1309,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         <div className="rounded-lg border border-zinc-800 overflow-x-auto">
           <div className="flex items-center justify-between px-3 py-2 bg-zinc-900/40">
             <p className="text-xs font-bold text-white">Ladder orders &amp; positions <span className="text-zinc-500 font-medium">({live.length} live)</span></p>
-            {(done.length > 0 || pairs.some(p => !isPairLive(p))) && (
-              <button type="button" onClick={() => void post({ action: 'clear' })} className="inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-white">
+            {(done.length > 0 || panePairs.some(p => !isPairLive(p))) && (
+              <button type="button" onClick={() => void post({ action: 'clear', ...(dual ? { pane: ladderId } : {}) })} className="inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-white">
                 <Trash2 className="w-3.5 h-3.5" /> Clear finished
               </button>
             )}
           </div>
-          {slices.length === 0 ? (
-            <p className="px-3 py-6 text-center text-xs text-zinc-500">No ladder orders today. Click a price on the ladder to place one.</p>
+          {paneSlices.length === 0 ? (
+            <p className="px-3 py-6 text-center text-xs text-zinc-500">No ladder orders today{dual ? ' from this ladder' : ''}. Click a price on the ladder to place one.</p>
           ) : (
             <table className="w-full text-xs">
               <thead className="bg-zinc-800">
@@ -1331,14 +1342,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 </tr>
               </thead>
               <tbody>
-                {[...slices].reverse().map(s => <SliceRow key={s.id} s={s} ltp={data?.ltps[s.contract.securityId]} busy={busy} post={post} trailPts={trailPts} onSelect={selectContract} />)}
+                {[...paneSlices].reverse().map(s => <SliceRow key={s.id} s={s} ltp={data?.ltps[s.contract.securityId]} busy={busy} post={post} trailPts={trailPts} onSelect={selectContract} />)}
               </tbody>
             </table>
           )}
         </div>
 
-        {pairs.length > 0 && (
-          <PairTable pairs={pairs} ltps={data?.ltps ?? {}} busy={busy} post={post} trailPts={trailPts} onSelect={selectPair}
+        {panePairs.length > 0 && (
+          <PairTable pairs={panePairs} ltps={data?.ltps ?? {}} busy={busy} post={post} trailPts={trailPts} onSelect={selectPair}
             onLots={(p, d) => onAdjust({ key: p.id, price: 0, column: p.side, kind: 'pos', label: 'Pair position', qty: p.qty, lots: p.lots, ids: [p.id], adjust: 'position' }, d, true)}
             onRoll={onRoll} />
         )}
@@ -1352,7 +1363,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           <summary className={`flex items-center gap-2 px-3 py-2 cursor-pointer select-none list-none [&::-webkit-details-marker]:hidden rounded-lg ${FOCUS_RING}`}>
             <ChevronRight className="w-3.5 h-3.5 text-zinc-400 transition-transform group-open:rotate-90" aria-hidden />
             <span className="text-xs font-bold text-white">Events</span>
-            <span className="text-xs text-zinc-500">({data?.state.events.length ?? 0})</span>
+            <span className="text-xs text-zinc-500">({paneEvents.length})</span>
             {latestEvent && (
               <span className={`ml-2 min-w-0 truncate font-mono text-[11px] ${latestEvent.level === 'error' ? 'text-red-400' : latestEvent.level === 'warn' ? 'text-amber-300' : 'text-zinc-400'}`}>
                 {timeOf(latestEvent.at)} {latestEvent.msg}
@@ -1360,12 +1371,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             )}
           </summary>
           <div className="flex flex-col gap-0.5 max-h-48 overflow-y-auto font-mono text-[11px] px-3 pb-3">
-            {(data?.state.events ?? []).slice(-60).reverse().map((e, i) => (
+            {paneEvents.slice(-60).reverse().map((e, i) => (
               <p key={`${e.at}-${i}`} className={e.level === 'error' ? 'text-red-400' : e.level === 'warn' ? 'text-amber-300' : 'text-zinc-400'}>
                 {timeOf(e.at)} {e.msg}
               </p>
             ))}
-            {!data?.state.events.length && <p className="text-zinc-500">Nothing yet.</p>}
+            {!paneEvents.length && <p className="text-zinc-500">Nothing yet.</p>}
           </div>
         </details>
       </div>

@@ -167,7 +167,7 @@ async function arm(b: Record<string, unknown>): Promise<NextResponse> {
     id: newLadderId('pp'), broker, mode, structure, side, lots, qty, product: b.product, state: 'armed',
     legs, createdAt: now, updatedAt: now, entryLevel: level, entryDir: verdict.dir, seenSafe: true,
     orderType: verdict.kind === 'stop' ? 'SL' : orderType, ...(zones === 'anywhere' ? { zones } : {}), ...(bracket ? { bracket } : {}),
-    ...(legSlPct ? { legSlPct } : {}),
+    ...(legSlPct ? { legSlPct } : {}), ...(b.pane === 2 ? { pane: 2 as const } : {}),
   };
   const br = bracket ? ` · ${bracket.tgtPts > 0 ? `TGT ${bracket.tgtPts} / ` : 'Cover · '}SL ${bracket.slPts}${bracket.trailPts ? ` / trailing ${bracket.trailPts} behind` : ''} pts` : '';
   let capped = false;
@@ -342,7 +342,7 @@ async function addLot(id: string): Promise<NextResponse> {
     id: newLadderId('pp'), broker: p.broker, mode: p.mode, structure: p.structure, side: p.side, lots: 1, qty: lot, product: p.product,
     state: p.mode === 'real' ? 'placing' : 'open', legs: { ce: fresh(p.legs.ce), pe: fresh(p.legs.pe) }, createdAt: now, updatedAt: now,
     entryLevel: p.entryLevel, entryDir: p.entryDir, orderType: p.orderType, ...(p.bracket ? { bracket: p.bracket } : {}),
-    ...(p.legSlPct ? { legSlPct: p.legSlPct } : {}), joinedTo: p.id, ...levels,
+    ...(p.legSlPct ? { legSlPct: p.legSlPct } : {}), joinedTo: p.id, ...levels, ...(p.pane ? { pane: p.pane } : {}),
   };
   const child: LadderPair = p.mode === 'real'
     ? { ...base, sendWanted: true, crossY: round2(ce + pe) }

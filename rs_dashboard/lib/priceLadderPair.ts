@@ -96,6 +96,8 @@ export interface LadderPair {
   exitReason?: string;
   closedAt?: number;
   note?: string;
+  /** The ladder pane that placed it when two are open (absent = ladder 1). */
+  pane?: 2;
 }
 
 /**

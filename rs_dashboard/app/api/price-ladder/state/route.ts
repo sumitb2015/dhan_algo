@@ -7,7 +7,7 @@ import {
   brokerSessionOk, availableFunds, dhanSellMargin, withJob, commitIf, openedPatch, LADDER_UNDERLYINGS,
 } from '@/lib/priceLadderServer';
 import {
-  sessionFor, spotKey, MAX_LADDER_LOTS, cleanBufferPct, stopLimitPrice, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, capLots, classifyClick, cleanBracket, istDay, istHhmm, levelSane, pushEvent, realArmed,
+  paneOf, sessionFor, spotKey, MAX_LADDER_LOTS, cleanBufferPct, stopLimitPrice, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, capLots, classifyClick, cleanBracket, istDay, istHhmm, levelSane, pushEvent, realArmed,
   snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev, newLadderId, parseTrailRequest, replanBracket, trailedBracket,
   type ClickType, type LadderZones, type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
 } from '@/lib/priceLadder';
@@ -50,6 +50,8 @@ interface ArmBody {
   /** What the page showed / the user confirmed ('limit' | 'stop', and which side of the price). Refused if the server's
    *  own read of the price makes it a different order. */
   expect?: { kind?: unknown; dir?: unknown };
+  /** 2 = placed from ladder 2 (which table lists it). */
+  pane?: unknown;
 }
 
 
@@ -151,7 +153,7 @@ async function arm(b: ArmBody): Promise<NextResponse> {
 
   const base: LadderSlice = {
     id: newId(), kind: b.kind, broker: b.broker, mode: b.mode, contract: c, side: b.side, lots, qty, product: b.product,
-    state: 'armed', createdAt: now, updatedAt: now,
+    state: 'armed', createdAt: now, updatedAt: now, ...(b.pane === 2 ? { pane: 2 as const } : {}),
   };
   const what = `${b.mode === 'sim' ? 'SIM ' : ''}${b.side} ${lots} lot(s) ${u} ${strike}${b.opt}`;
 
@@ -233,7 +235,7 @@ async function addLot(id: string): Promise<NextResponse> {
     product: p.product, state: 'placing', createdAt: now, updatedAt: now, sentAt: now, orderType: p.orderType, market: true,
     entryLevel: p.entryLevel, entryDir: p.entryDir, entryY: p.entryY,
     ...(p.bracket ? { bracket: p.bracket, tgtY: p.tgtY, slY: p.slY, slY0: p.slY0, trailFrom: p.trailFrom, peakY: p.peakY } : {}),
-    note: `Added to ${p.id}`,
+    note: `Added to ${p.id}`, ...(p.pane ? { pane: p.pane } : {}),
   };
   const what = `${p.mode === 'sim' ? 'SIM ' : ''}+1 lot ${p.side} ${p.contract.strike}${p.contract.opt}`;
   if (p.mode === 'sim') {
@@ -573,7 +575,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
 
       case 'clear': {
-        const s = await updateLadderState(st => ({ ...st, slices: st.slices.filter(x => !TERMINAL.has(x.state)), ...(st.pairs ? { pairs: st.pairs.filter(isPairLive) } : {}) }));
+        // `pane`: only that ladder's finished rows (two ladders open); none = every finished row.
+        const pane = body.pane === 1 || body.pane === 2 ? body.pane : null;
+        const keep = (x: { pane?: number }) => pane != null && paneOf(x) !== pane;
+        const s = await updateLadderState(st => ({ ...st, slices: st.slices.filter(x => !TERMINAL.has(x.state) || keep(x)), ...(st.pairs ? { pairs: st.pairs.filter(p => isPairLive(p) || keep(p)) } : {}) }));
         return NextResponse.json({ success: true, data: { state: s } });
       }
 
