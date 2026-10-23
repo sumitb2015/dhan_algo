@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import { ChevronDown, ChevronUp, Minus, Plus, X } from 'lucide-react';
+import { oiAtRow, barPct, oiChangePct, compactOi, type OiStrike } from '@/lib/priceLadderOi';
 import { bias, bracketLevels, ladderRows, rowPnl, snapToStep, type LadderSide, type LadderSlice, type LadderZones } from '@/lib/priceLadder';
 import { pairBias, type LadderPair } from '@/lib/priceLadderPair';
 
@@ -281,7 +282,7 @@ export interface LadderKeyLevels {
  *    premium) in the Price column.
  */
 export function LadderGrid({
-  center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryMarks, onScroll,
+  center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryMarks, oi, onScroll,
   zones = 'classic', stopLimitFor, onTrail, onHoldChange, keyLevels,
 }: {
   center: number; refPrice: number; tick: number; rows: number; widgets: LadderWidget[];
@@ -298,6 +299,8 @@ export function LadderGrid({
   onAdjust: (w: LadderWidget, delta: 1 | -1) => void;
   disabled: boolean; decimals: number;
   entryMarks?: EntryMark[];
+  /** XY only: the chain's OI per strike, drawn as bars behind the strike rows (put left of Price, call right), `max` = 100 %. */
+  oi?: { rows: OiStrike[]; max: number };
   /** Scroll the window by N ticks (positive = up, toward higher prices). Wheel over the rows or the ▲ / ▼ buttons. */
   onScroll?: (ticks: number) => void;
   /**
@@ -404,6 +407,7 @@ export function LadderGrid({
         const isDayHigh = keyLevels?.dayHigh != null && Math.abs(p - snapToStep(keyLevels.dayHigh, tick)) < tick / 2;
         const isDayLow = keyLevels?.dayLow != null && Math.abs(p - snapToStep(keyLevels.dayLow, tick)) < tick / 2;
 
+        const oiRow = oi ? oiAtRow(oi.rows, p, tick) : null;
         const hasBuyTgt = buyWs.some(w => w.kind === 'tgt');
         const hasBuySl = buyWs.some(w => w.kind === 'sl');
         const hasRowTgt = ws.some(w => w.kind === 'tgt');
@@ -421,6 +425,25 @@ export function LadderGrid({
               try { const d = JSON.parse(raw) as { ids: string[]; what: 'entry' | 'tgt' | 'sl' }; onMove(d.ids, d.what, p); } catch { /* not ours */ }
             }}
           >
+            {oiRow && oi && (() => {
+              const chg = (v: number, pv: number | null) => { const c = oiChangePct(v, pv); return c == null ? 'no previous-day OI' : `${c >= 0 ? '+' : ''}${c.toFixed(1)}% vs prev day`; };
+              const pePct = barPct(oiRow.peOi, oi.max), cePct = barPct(oiRow.ceOi, oi.max);
+              // Price column spans 42%-58% of the row (1.3 / 0.8 / 0.8 / 0.8 / 1.3): each bar uses at most the 42% outside it.
+              return (
+                <div className="absolute inset-0 pointer-events-none select-none" aria-hidden="true">
+                  {pePct > 0 && (
+                    <div title={`${oiRow.strike} PE OI ${oiRow.peOi.toLocaleString('en-IN')} · ${chg(oiRow.peOi, oiRow.pePrev)}`}
+                      className="absolute top-0.5 bottom-0.5 right-[58%] rounded-l bg-emerald-500/25 flex items-center pl-1 text-[9px] font-mono text-zinc-400"
+                      style={{ width: `${pePct * 0.42}%` }}>{compactOi(oiRow.peOi)}</div>
+                  )}
+                  {cePct > 0 && (
+                    <div title={`${oiRow.strike} CE OI ${oiRow.ceOi.toLocaleString('en-IN')} · ${chg(oiRow.ceOi, oiRow.cePrev)}`}
+                      className="absolute top-0.5 bottom-0.5 left-[58%] rounded-r bg-red-500/25 flex items-center justify-end pr-1 text-[9px] font-mono text-zinc-400"
+                      style={{ width: `${cePct * 0.42}%` }}>{compactOi(oiRow.ceOi)}</div>
+                  )}
+                </div>
+              );
+            })()}
             {/* Column 1: Buy (Outer controls) */}
             <div
               role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
