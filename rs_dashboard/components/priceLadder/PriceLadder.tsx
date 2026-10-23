@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info } from 'lucide-react';
+import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2 } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from '@/components/NavBar';
 import { sharedJson } from '@/lib/sharedPoll';
@@ -12,6 +12,7 @@ import { FOCUS_RING } from '@/components/Scalper';
 import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { isPairLive, legSlPrice, pairName, pairNowPnl, sumPairPnl, LEG_KEYS, PAIR_STRIKE_STEP, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
+import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
@@ -40,6 +41,9 @@ type PageMode = LadderMode | 'pair';
 const MODE_TICK: Record<PageMode, number> = { xy: 5, plain: 1, pair: 1 };
 const ROWS = 31;
 const POLL_MS = 1000;
+/** The one-shot expiry / option-chain loads retry this many times, LOAD_RETRY_MS × attempt apart. */
+const LOAD_RETRIES = 4;
+const LOAD_RETRY_MS = 4000;
 
 interface SpotView { spot: number; at: number; source: string; fresh: boolean }
 interface StateResp {
@@ -203,6 +207,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [confirm, setConfirm] = useState<null | { text: string; run: () => void; setting?: { title: string; button: string } }>(null);
   const [armModal, setArmModal] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [chainOpen, setChainOpen] = useState(false);
   const [underlying, setUnderlyingRaw] = useState<string>('NIFTY');
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
@@ -264,7 +269,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // The expiry is cleared too: the old underlying's date must not be asked of the new one's chain for a render.
   const setUnderlying = (u: string) => { setUnderlyingRaw(u); savePref(k('price-ladder-underlying'), u); setExpiry(''); setExpiries([]); setStrike(null); setCenter(0); setFollow(true); setManual(false); };
 
-  // The indices feed is the XY ladder's spot source; the server falls back to a paced REST quote if it is down.
+  // The indices feed is the XY ladder's spot source. There is no REST fallback: if the feed is down the levels pause (a quote call would feed Dhan's 1/s limit).
   useEffect(() => {
     fetch('/api/live-indices', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'start' }) }).catch(() => {});
   }, []);
@@ -272,26 +277,38 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Expiries -> strikes (the chain gives the strike list and an ATM to start on).
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/options/expiries?underlying=${underlying}&broker=dhan`)
-      .then(r => r.json())
-      .then((j: { success: boolean; data?: string[] }) => {
-        if (cancelled) return;
-        if (j.success && j.data?.length) { setExpiries(j.data); setExpiry(prev => (j.data!.includes(prev) ? prev : j.data![0])); }
-        else setLoadError(`Could not load ${underlying} expiries`);
-      })
-      .catch(() => { if (!cancelled) setLoadError(`Could not load ${underlying} expiries`); });
-    return () => { cancelled = true; };
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // One-shot per underlying. A failure (Dhan rate limit, a slow spawn) is retried a few times, spaced wider than the
+    // option-chain limit (~1 call / 3 s), instead of leaving the page on an error until a reload.
+    const load = (attempt: number) => {
+      fetch(`/api/options/expiries?underlying=${underlying}&broker=dhan`)
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: string[] }) => {
+          if (cancelled) return;
+          if (j.success && j.data?.length) { setExpiries(j.data); setExpiry(prev => (j.data!.includes(prev) ? prev : j.data![0])); setLoadError(null); }
+          else throw new Error('no expiries');
+        })
+        .catch(() => {
+          if (cancelled) return;
+          if (attempt < LOAD_RETRIES) timer = setTimeout(() => load(attempt + 1), LOAD_RETRY_MS * (attempt + 1));
+          else setLoadError(`Could not load ${underlying} expiries`);
+        });
+    };
+    load(0);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [underlying]);
 
   useEffect(() => {
     if (!expiry) return;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const load = (attempt: number) => {
     fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=dhan`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { chain?: { oc?: Record<string, { ce?: { last_price?: number }; pe?: { last_price?: number } }> }; spot?: number; future_price?: number } }) => {
         if (cancelled) return;
         const oc = j.data?.chain?.oc;
-        if (!j.success || !oc) { setLoadError(`Could not load the ${underlying} option chain`); return; }
+        if (!j.success || !oc) throw new Error('no chain');
         const list = Object.keys(oc).map(Number).filter(n => n > 0).sort((a, b) => a - b);
         setStrikes(list);
         // MCX chains can come back with spot 0 but the option month's futures price set: that is the right ATM base.
@@ -316,8 +333,15 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         });
         setLoadError(null);
       })
-      .catch(() => { if (!cancelled) setLoadError(`Could not load the ${underlying} option chain`); });
-    return () => { cancelled = true; };
+      .catch(() => {
+        if (cancelled) return;
+        // The chain is Dhan's rate-limited REST call (~1 per 3 s, shared with every other tab): back off, then give up.
+        if (attempt < LOAD_RETRIES) timer = setTimeout(() => load(attempt + 1), LOAD_RETRY_MS * (attempt + 1));
+        else setLoadError(`Could not load the ${underlying} option chain`);
+      });
+    };
+    load(0);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [underlying, expiry]);
 
   // Ladder state + spot + the shown contract's LTP. Pushed by /api/price-ladder/stream (Server-Sent Events) the moment
@@ -930,6 +954,11 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           {!second && <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
             DATA: {dataDate ?? '—'}
           </span>}
+          <button type="button" onClick={() => setChainOpen(true)} disabled={!expiry}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer disabled:opacity-50"
+            title={`The ${underlying} option chain for ${expiry || 'the selected expiry'}`}>
+            <Table2 className="w-3.5 h-3.5 text-emerald-400" /> Option chain
+          </button>
           {!second && <button
             type="button"
             onClick={() => setSettingsModalOpen(true)}
@@ -1373,6 +1402,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             </div>
           </div>
         </div>
+      )}
+      {chainOpen && expiry && (
+        <LadderOptionChain underlying={underlying} expiry={expiry} selectedStrike={strike} selectedOpt={opt}
+          onPick={(k, o) => { setStrike(k); setOpt(o); }} onClose={() => setChainOpen(false)} />
       )}
       {settingsModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 p-4" role="dialog" aria-modal="true">

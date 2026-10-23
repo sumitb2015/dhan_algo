@@ -18,6 +18,13 @@ Real-money endpoint — SIM (paper) is the default; REAL needs the daily LIVE ·
 - Number boxes have up/down arrows (and ArrowUp/ArrowDown). Target / SL / trail step by 1 point; per-leg SL % by 5; the SL
   buffer by 0.1. An arrow run commits once, half a second after you stop.
 
+## Option chain window
+
+The **Option chain** button in the header opens the chain of the ladder's current underlying + expiry (OI, OI change vs the
+previous day, volume, IV and price per side, ±8 / 12 / 20 strikes around ATM, OI bars). Click a CE or PE price to put the
+ladder on that contract. It is Dhan's rate-limited REST chain, so it loads on open and then every 20 s while open (the
+server dedupes and spaces calls and serves the last good chain, flagged, if Dhan refuses).
+
 ## Global MTM guard
 
 One guard per **broker + SIM/REAL mode**, over the ladder's whole P&L for that scope (closed trades at their exits, open
@@ -48,3 +55,16 @@ become a position.
 - No price for an open leg = no decision (a partial sum would hide that leg's loss). Prices come from the WebSocket bridges
   and are only used when fresh.
 - A guard only ever exits or cancels, so it needs no REAL arm.
+
+## Prices and Dhan rate limits
+
+- **Every price the ladder trades on is a WebSocket price** — never a REST quote (a `/marketfeed` call shares Dhan's 1/s
+  limit and slows to 10+ s after a 429). Index spots ride `live_indices_ws.py`; option LTPs the options bridges; everything
+  else (SENSEX, MCX futures axis, uncovered strikes) `scripts/tools/price_ladder_ws.py` on the shared market-data hub (one
+  Dhan connection). No fresh WebSocket price = levels pause and SIM fills wait; there is no REST fallback.
+- **The only REST calls**, all paced: expiries (cached 1 h) and the option chain (strike list + ATM; one call per
+  underlying/expiry change, deduped + spaced server-side, retried with back-off by the page); order status for a working
+  REAL order (every 1.5 s each); the broker positions book for the REAL reconcile (every 5 s while a REAL position is
+  open); the header account P&L (every 5 s, server-cached); the books window (every 5 s, only while open). Orders and
+  cancels go through the shared order-rate lane (8/s).
+- The MTM guard makes no REST calls at all — it reads the same WebSocket prices.
