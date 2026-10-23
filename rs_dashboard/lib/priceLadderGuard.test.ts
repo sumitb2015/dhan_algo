@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyGuards, carryRuntime, cleanGuard, evalGuard, lockFloor, type LadderGuard } from './priceLadderGuard.ts';
+import { applyGuards, carryRuntime, cleanGuard, evalGuard, guardKey, lockFloor, parseGuardKey, scopeMtm, type LadderGuard } from './priceLadderGuard.ts';
 import type { LadderState } from './priceLadder.ts';
 
 const g = (o: Partial<LadderGuard> = {}): LadderGuard => ({ on: true, ...o });
@@ -145,4 +145,84 @@ test('an exiting REAL slice with a price still counts in the MTM', () => {
   const s = state([slice({ mode: 'real', state: 'exiting' })], { 'dhan:real': g({ target: 500 }) });
   assert.ok(applyGuards(s, { 1: 106 }, 1).next.slices[0]);
   assert.equal(applyGuards(s, { 1: 106 }, 1).fired.length, 1);
+});
+
+// ── Two ladders: each guard sees and exits only the orders its own ladder placed (pane tag; untagged = ladder 1) ──
+
+const L1 = { broker: 'dhan', mode: 'sim', pane: 1 } as const;
+const L2 = { broker: 'dhan', mode: 'sim', pane: 2 } as const;
+// Ladder 1 long on contract 1 (+600 at 106); ladder 2 long on contract 2 (−900 at 91); both on dhan SIM.
+const twoLadders = (guards: Record<string, LadderGuard>) => state([
+  slice({ id: 'a1' }),
+  slice({ id: 'a1-armed', state: 'armed' }),
+  slice({ id: 'b2', pane: 2, contract: { ...(slice({}).contract as object), securityId: '2' } }),
+  slice({ id: 'b2-armed', pane: 2, state: 'armed' }),
+], guards);
+const LTPS = { 1: 106, 2: 91 };
+
+test('guard keys: ladder 1 keeps the pre-pane key, ladder 2 adds :2, anything else is ignored', () => {
+  assert.equal(guardKey('dhan', 'sim'), 'dhan:sim');
+  assert.equal(guardKey('dhan', 'sim', 1), 'dhan:sim');
+  assert.equal(guardKey('kotak', 'real', 2), 'kotak:real:2');
+  assert.deepEqual(parseGuardKey('dhan:sim'), L1);
+  assert.deepEqual(parseGuardKey('dhan:sim:2'), L2);
+  for (const bad of ['dhan:sim:1', 'dhan:sim:3', 'dhan:sim:2:x', 'ibkr:sim', 'dhan:paper', 'junk']) assert.equal(parseGuardKey(bad), null, bad);
+});
+
+test('each ladder reads only its own MTM on the same broker + mode', () => {
+  const s = twoLadders({});
+  assert.equal(scopeMtm(s, L1, LTPS), 600);
+  assert.equal(scopeMtm(s, L2, LTPS), -900);
+  // A ladder with nothing of its own has no reading (no decision), even when the other ladder has positions.
+  assert.equal(scopeMtm(state([slice({ id: 'a1' })], {}), L2, LTPS), null);
+});
+
+test('ladder 1 tripping exits and cancels only ladder 1; ladder 2 is untouched', () => {
+  const r = applyGuards(twoLadders({ 'dhan:sim': g({ target: 500 }) }), LTPS, 1);
+  const by = (id: string) => r.next.slices.find(x => x.id === id)!;
+  assert.deepEqual(r.fired.map(f => [f.pane, f.broker, f.mode]), [[1, 'dhan', 'sim']]);
+  assert.match(by('a1').exitWanted ?? '', /target/);
+  assert.equal(by('a1-armed').state, 'cancelled');
+  assert.equal(by('b2').exitWanted, undefined);
+  assert.equal(by('b2-armed').state, 'armed');
+  // Combined MTM is −300, so a combined guard would never have hit +500: this one read ladder 1 alone.
+});
+
+test("ladder 2's own stop trips on ladder 2's loss only, and says so", () => {
+  const r = applyGuards(twoLadders({ 'dhan:sim': g({ stop: 800 }), 'dhan:sim:2': g({ stop: 800 }) }), LTPS, 1);
+  const by = (id: string) => r.next.slices.find(x => x.id === id)!;
+  assert.deepEqual(r.fired.map(f => f.pane), [2]);                 // ladder 1 is +600: its stop does not fire
+  assert.match(by('b2').exitWanted ?? '', /stop-loss/);
+  assert.equal(by('b2-armed').state, 'cancelled');
+  assert.equal(by('a1').exitWanted, undefined);
+  assert.equal(by('a1-armed').state, 'armed');
+  assert.equal(r.next.guards!['dhan:sim'].on, true);
+  assert.equal(r.next.guards!['dhan:sim'].tripped, undefined);
+  assert.match(r.next.events.at(-1)!.msg, /ladder 2 · dhan SIM/);
+});
+
+test("a ladder's tripped guard switches off once ITS positions are gone, whatever the other ladder holds", () => {
+  const r1 = applyGuards(twoLadders({ 'dhan:sim:2': g({ stop: 800 }) }), LTPS, 1);
+  const closed = { ...r1.next, slices: r1.next.slices.map(x => (x.id === 'b2' ? { ...x, state: 'closed' as const } : x)) };
+  const off = applyGuards(closed, LTPS, 2).next.guards!['dhan:sim:2'];
+  assert.equal(off.on, false);                                     // ladder 1's open a1 does not keep it on
+});
+
+test('REAL: shorts-before-hedges is per ladder — a ladder 2 short does not hold back ladder 1', () => {
+  const long1 = slice({ id: 'l1', mode: 'real', side: 'BUY' });
+  const short2 = slice({ id: 's2', mode: 'real', side: 'SELL', pane: 2, contract: { ...(slice({}).contract as object), securityId: '2' } });
+  const s = state([long1, short2], { 'dhan:real': g({ stop: 100, tripped: 'MTM stop-loss ₹100 hit' }) });
+  const r = applyGuards(s, { 1: 100, 2: 100 }, 1);
+  assert.ok(r.next.slices.find(x => x.id === 'l1')!.exitWanted);
+  assert.equal(r.next.slices.find(x => x.id === 's2')!.exitWanted, undefined);
+});
+
+test('pairs are scoped by ladder too: an armed ladder 2 pair survives a ladder 1 trip', () => {
+  const pair = { id: 'p2', broker: 'dhan', mode: 'sim', structure: 'straddle', side: 'SELL', lots: 1, qty: 100, product: 'MIS',
+    state: 'armed', pane: 2, legs: { ce: { contract: slice({}).contract }, pe: { contract: slice({}).contract } }, createdAt: 0, updatedAt: 0 };
+  const s = { ...twoLadders({ 'dhan:sim': g({ target: 500 }) }), pairs: [pair] as unknown as LadderState['pairs'] };
+  const r = applyGuards(s, LTPS, 1);
+  assert.equal(r.next.pairs![0].state, 'armed');
+  const s1 = { ...s, pairs: [{ ...pair, pane: undefined }] as unknown as LadderState['pairs'] };
+  assert.equal(applyGuards(s1, LTPS, 1).next.pairs![0].state, 'cancelled');
 });

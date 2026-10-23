@@ -6,11 +6,11 @@ import { Info, ShieldCheck } from 'lucide-react';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
 
-// The global MTM guard of one broker + SIM/REAL mode: target, stop-loss, trailing and Protect profit over the ladder's
-// whole P&L. The server watcher enforces it (lib/priceLadderGuard.ts), so it works with this tab closed. Numbers are
+// The MTM guard of one ladder + broker + SIM/REAL mode: target, stop-loss, trailing and Protect profit over the P&L of
+// the orders this ladder placed (the other ladder has its own). The server watcher enforces it (lib/priceLadderGuard.ts), so it works with this tab closed. Numbers are
 // typed as drafts and only sent by Save — a half-typed level must never reach a live rule (dhan-commit-on-blur).
 
-const HELP = 'Watches this broker\'s ladder P&L (closed + open, all contracts and pairs). When a rule trips, every open position exits at market, armed levels are cancelled and the guard switches off. Protect profit: once MTM touches the trigger, a drop to the locked amount exits. Runs on the server, so it works with this tab closed. Resets each day. Full guide: docs/PRICE_LADDER_GUIDE.md';
+const HELP = 'Watches this ladder\'s P&L on this broker (closed + open, every contract and pair this ladder placed; the other ladder has its own guard). When a rule trips, every open position of this ladder exits at market, armed levels are cancelled and the guard switches off. Protect profit: once MTM touches the trigger, a drop to the locked amount exits. Runs on the server, so it works with this tab closed. Resets each day. Full guide: docs/PRICE_LADDER_GUIDE.md';
 
 const FIELDS = ['target', 'stop', 'trailBy', 'lockAt', 'lockKeep', 'lockStepEvery', 'lockStepKeep'] as const;
 type Field = (typeof FIELDS)[number];
@@ -38,8 +38,8 @@ function Box({ label, value, onChange, step = 100 }: { label: string; value: str
   );
 }
 
-export function MtmGuardCard({ broker, real, mtm, guard, post }: {
-  broker: string; real: boolean; mtm: number | null; guard?: LadderGuard;
+export function MtmGuardCard({ broker, real, ladderId = 1, mtm, guard, post }: {
+  broker: string; real: boolean; ladderId?: 1 | 2; mtm: number | null; guard?: LadderGuard;
   post: (body: Record<string, unknown>) => Promise<boolean>;
 }) {
   const [draft, setDraft] = useState<Draft>(() => toDraft(guard));
@@ -78,7 +78,7 @@ export function MtmGuardCard({ broker, real, mtm, guard, post }: {
     if (!nextOn) {
       // Switching off never needs a valid draft: a half-typed edit must not keep a live exit-everything rule on.
       setConfirmNow(null);
-      void post({ action: 'guard', broker, mode: real ? 'real' : 'sim', on: false });
+      void post({ action: 'guard', broker, mode: real ? 'real' : 'sim', pane: ladderId, on: false });
       return;
     }
     const v = parse();
@@ -88,7 +88,7 @@ export function MtmGuardCard({ broker, real, mtm, guard, post }: {
       if (warn && !confirmNow) { setConfirmNow(warn); return; }
     }
     setConfirmNow(null);
-    void post({ action: 'guard', broker, mode: real ? 'real' : 'sim', on: nextOn, ...v }).then(ok => { if (ok) setDirty(false); });
+    void post({ action: 'guard', broker, mode: real ? 'real' : 'sim', pane: ladderId, on: nextOn, ...v }).then(ok => { if (ok) setDirty(false); });
   };
 
   const row = 'flex items-center justify-between gap-2';
@@ -96,8 +96,8 @@ export function MtmGuardCard({ broker, real, mtm, guard, post }: {
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 flex flex-col gap-1.5 text-xs">
       <div className={row}>
-        <span className="flex items-center gap-1.5 text-[13px] font-semibold tracking-tight text-zinc-100"><ShieldCheck className="w-3.5 h-3.5 text-emerald-400" aria-hidden /> MTM guard <span className="inline-flex text-zinc-500" title={`${HELP} This one guard covers every ladder on ${broker} ${real ? 'REAL' : 'SIM'}.`} aria-label={HELP} role="img"><Info className="w-3 h-3" aria-hidden /></span></span>
-        <span className={`font-mono font-semibold ${mtm == null ? 'text-zinc-500' : mtm >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title="The ladder's own P&L for this broker and mode">{mtm == null ? '—' : rs(mtm)}</span>
+        <span className="flex items-center gap-1.5 text-[13px] font-semibold tracking-tight text-zinc-100"><ShieldCheck className="w-3.5 h-3.5 text-emerald-400" aria-hidden /> MTM guard <span className="inline-flex text-zinc-500" title={`${HELP} This guard covers only ladder ${ladderId} on ${broker} ${real ? 'REAL' : 'SIM'}.`} aria-label={HELP} role="img"><Info className="w-3 h-3" aria-hidden /></span></span>
+        <span className={`font-mono font-semibold ${mtm == null ? 'text-zinc-500' : mtm >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title={`Ladder ${ladderId}'s own P&L for this broker and mode`}>{mtm == null ? '—' : rs(mtm)}</span>
       </div>
       <div className={row}><span className={lab}>Target ₹</span><Box label="MTM target in rupees" value={draft.target} onChange={set('target')} /></div>
       <div className={row}><span className={lab}>Stop-loss ₹</span><Box label="MTM stop-loss in rupees" value={draft.stop} onChange={set('stop')} /></div>

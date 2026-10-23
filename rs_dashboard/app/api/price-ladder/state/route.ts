@@ -11,7 +11,7 @@ import {
   snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev, newLadderId, parseTrailRequest, replanBracket, trailedBracket,
   type ClickType, type LadderZones, type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
 } from '@/lib/priceLadder';
-import { carryRuntime, cleanGuard, guardKey } from '@/lib/priceLadderGuard';
+import { carryRuntime, cleanGuard, guardKey, guardLabel } from '@/lib/priceLadderGuard';
 import { setMcxCutoff } from '@/lib/priceLadderCutoff';
 
 // The Price Ladder's ledger (debug/price_ladder_state.json) and its actions. Real-money endpoint: every check that can
@@ -314,17 +314,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
 
       case 'guard': {
-        // The global MTM guard of one broker + mode. It only ever exits (and cancels entries), so no REAL arm is needed.
+        // The MTM guard of one ladder + broker + mode. It only ever exits (and cancels entries), so no REAL arm is needed.
+        // `pane: 2` = ladder 2's guard; absent = ladder 1 (the pre-pane key, so an existing guard stays ladder 1's).
         const broker = parseBroker(body.broker);
         const mode = body.mode === 'real' ? 'real' : body.mode === 'sim' ? 'sim' : null;
         if (!broker || !mode) return bad('broker and mode required');
-        const key = guardKey(broker, mode);
+        if (body.pane !== undefined && body.pane !== 1 && body.pane !== 2) return bad('pane must be 1 or 2');
+        const sc = { broker, mode, pane: body.pane === 2 ? 2 : 1 } as const;
+        const key = guardKey(broker, mode, sc.pane);
         if (body.on !== true) {
           // Switching off never validates: a half-edited draft must not keep a live exit-everything rule on.
           const s = await updateLadderState(st => {
             const old = st.guards?.[key];
             const off = { ...(old ?? {}), on: false, tripped: undefined, peak: undefined, floor: undefined, firedReason: undefined };
-            return pushEvent({ ...st, guards: { ...(st.guards ?? {}), [key]: off } }, ev('info', `MTM guard ${broker} ${mode.toUpperCase()} off`));
+            return pushEvent({ ...st, guards: { ...(st.guards ?? {}), [key]: off } }, ev('info', `MTM guard ${guardLabel(sc)} off`));
           });
           return NextResponse.json({ success: true, data: { state: s } });
         }
@@ -333,7 +336,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const s = await updateLadderState(st => {
           const guards = { ...(st.guards ?? {}) };
           guards[key] = carryRuntime(g, guards[key]);
-          return pushEvent({ ...st, guards }, ev('info', g.on ? `MTM guard ${broker} ${mode.toUpperCase()} on` : `MTM guard ${broker} ${mode.toUpperCase()} off`));
+          return pushEvent({ ...st, guards }, ev('info', `MTM guard ${guardLabel(sc)} ${g.on ? 'on' : 'off'}`));
         });
         return NextResponse.json({ success: true, data: { state: s } });
       }

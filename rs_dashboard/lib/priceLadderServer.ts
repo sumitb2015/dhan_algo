@@ -28,7 +28,7 @@ import {
   cutPairLeg, cutsNewestFirst, isPairLive, LEG_KEYS, pairName, patchPair, planPairs, settleLegEntry, settleLegExit, PAIR_EXIT_RETRY_MS,
   type LadderPair, type PairJob, type PairLegKey,
 } from '@/lib/priceLadderPair';
-import { applyGuards } from '@/lib/priceLadderGuard';
+import { applyGuards, inScope, parseGuardKey } from '@/lib/priceLadderGuard';
 import { readLadderSettings } from '@/lib/priceLadderSettings';
 
 // The Price Ladder's server watcher. It owns debug/price_ladder_state.json (re-read on every tick and every request,
@@ -1040,8 +1040,10 @@ async function tick(): Promise<void> {
   // Off the tick (a slow broker endpoint must not stall every other stop), retried every 30 s while one still rests.
   for (const [key, g] of Object.entries(planned.guards ?? {})) {
     if (!g.tripped) continue;
-    const [broker, mode] = key.split(':');
-    for (const x of planned.slices.filter(y => y.broker === broker && y.mode === mode && y.mode === 'real' && y.state === 'working' && y.orderId)) {
+    // Only the orders of the ladder that tripped: the other ladder's resting entries are not this guard's to pull.
+    const sc = parseGuardKey(key);
+    if (!sc) continue;
+    for (const x of planned.slices.filter(y => inScope(y, sc) && y.mode === 'real' && y.state === 'working' && y.orderId)) {
       if (!warnOnce(`guard-cancel:${x.id}`, 30_000)) continue;
       void guardCancel(x);
     }

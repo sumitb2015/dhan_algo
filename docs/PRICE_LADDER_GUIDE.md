@@ -25,12 +25,15 @@ previous day, volume, IV and price per side, ±8 / 12 / 20 strikes around ATM, O
 ladder on that contract. It is Dhan's rate-limited REST chain, so it loads on open and then every 20 s while open (the
 server dedupes and spaces calls and serves the last good chain, flagged, if Dhan refuses).
 
-## Global MTM guard
+## MTM guard (one per ladder)
 
-One guard per **broker + SIM/REAL mode**, over the ladder's whole P&L for that scope (closed trades at their exits, open
-ones at live prices, every contract and pair — the same number as the header "Ladder P&L" chip). It is enforced by the
-**server watcher** (`lib/priceLadderGuard.ts`, evaluated once a second inside the ledger lock), so it works with every tab
-closed. It resets each day.
+One guard per **ladder + broker + SIM/REAL mode**, over the P&L of the orders **that ladder placed** (closed trades at
+their exits, open ones at live prices, every contract and pair it placed — the same number as that ladder's header
+"Ladder P&L" chip). Ladder 1 and ladder 2 have independent guards even on the same broker and mode: one never reads,
+exits or cancels the other's positions. Orders from before ladders were tagged count as ladder 1's. It is enforced by
+the **server watcher** (`lib/priceLadderGuard.ts`, evaluated once a second inside the ledger lock), so it works with
+every tab closed — closing ladder 2 leaves its guard running over its positions (reopen ladder 2 to see or change it).
+It resets each day.
 
 | Rule | Meaning |
 |---|---|
@@ -45,7 +48,8 @@ Example: trigger 1,000, lock 400, every +500 raise 250 → lock 400 at MTM 1,000
 REAL entry orders are cancelled at the broker (off the watcher's tick, retried every 30 s; a failure that leaves the order
 resting is logged as an error). The guard then stays on — shown as *Tripped* — until nothing of its scope is live: a
 rejected or held exit (e.g. market closed) is queued again, an entry still in flight is exited when it opens, and on REAL
-a long (a hedge) exits only after the shorts are closed. Only then does it switch itself off and report *Fired*. Switching
+a long (a hedge) exits only after that ladder's shorts are closed — a short on the *other* ladder does not hold it back,
+so a long that hedges the other ladder's short can exit and raise that short's margin. Only then does it switch itself off and report *Fired*. Switching
 off by hand never needs a valid draft.
 
 **Things to know**

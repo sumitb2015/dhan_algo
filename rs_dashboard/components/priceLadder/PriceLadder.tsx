@@ -14,7 +14,7 @@ import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, type LadderWidg
 import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
-import { scopeMtm } from '@/lib/priceLadderGuard';
+import { guardKey, scopeMtm } from '@/lib/priceLadderGuard';
 import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
@@ -620,10 +620,13 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const net = securityId ? ownNet(slices.filter(s => s.broker === broker && s.mode === pageMode), securityId) : { qty: 0, avg: null };
   const contractPnl = useMemo(() => sumSlicePnl(slices, s => s.broker === broker && s.mode === pageMode && s.contract.securityId === securityId, () => optLtp),
     [slices, broker, pageMode, securityId, optLtp]);
-  // The ladder's own P&L across every contract, for this broker and the page's SIM/REAL mode (open legs at live LTP).
-  // Pairs count too; '—' when any open slice or pair has no price (a partial sum would hide that leg's loss).
-  // The same function the server's MTM guard reads, so the chip and the guard can never disagree.
-  const ladderPnl = useMemo(() => (data ? scopeMtm(data.state, broker, pageMode, data.ltps ?? {}) : null), [data, broker, pageMode]);
+  // This ladder's own P&L across every contract it placed, for this broker and the page's SIM/REAL mode (open legs at
+  // live LTP). Pairs count too; '—' when any open slice or pair has no price (a partial sum would hide that leg's loss).
+  // The same function and scope the server's MTM guard reads, so the chip and the guard can never disagree. Each ladder
+  // has its own guard over only the orders it placed, even when both are on one broker.
+  const guardScope = useMemo(() => ({ broker, mode: pageMode, pane: ladderId } as const), [broker, pageMode, ladderId]);
+  const ladderPnl = useMemo(() => (data ? scopeMtm(data.state, guardScope, data.ltps ?? {}) : null), [data, guardScope]);
+  const myGuardKey = guardKey(broker, pageMode, ladderId);
 
   const liveArmed = !!data?.liveArmed;
   const realBlocked = real && !liveArmed;
@@ -1181,7 +1184,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 </div>
               </div>
             </div>
-            <MtmGuardCard key={`${broker}:${pageMode}`} broker={broker} real={real} mtm={ladderPnl} guard={data?.state?.guards?.[`${broker}:${pageMode}`]} post={post} />
+            <MtmGuardCard key={myGuardKey} broker={broker} real={real} ladderId={ladderId} mtm={ladderPnl} guard={data?.state?.guards?.[myGuardKey]} post={post} />
             <p className="flex items-center gap-1.5 text-[10px] text-zinc-500">
               <span className="inline-flex" title={HELP_TEXT} aria-label={HELP_TEXT} role="img"><Info className="w-3.5 h-3.5" aria-hidden /></span>
             </p>

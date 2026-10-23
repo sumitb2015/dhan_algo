@@ -200,7 +200,7 @@ export interface LadderState {
   settings?: {
     mcxAutoExitTime?: string;
   };
-  /** Global MTM guards (lib/priceLadderGuard.ts), keyed `broker:mode`. Reset with the day. */
+  /** MTM guards (lib/priceLadderGuard.ts), one per ladder: keyed `broker:mode` (ladder 1) or `broker:mode:2`. Reset with the day. */
   guards?: Record<string, import('./priceLadderGuard').LadderGuard>;
 }
 
