@@ -7,6 +7,7 @@ import pyotp
 import argparse
 import time
 from datetime import datetime, timezone, timedelta
+from contextlib import contextmanager
 from typing import Optional, Dict, Any
 from dhanhq import dhanhq, DhanLogin
 from dotenv import load_dotenv
@@ -24,6 +25,51 @@ ENV_FILE = os.path.join(BASE_DIR, ".env")
 load_dotenv(ENV_FILE)
 
 LAST_TOTP_ERROR = None
+
+# Dhan issues one token per 2 minutes per account and every new token kills the previous one, so two scripts starting
+# together (both seeing yesterday's token) must not both mint: the second would fail ("once every 2 minutes") or
+# invalidate the first one's token. A cross-process lock file (O_EXCL: works on Windows and Linux) serialises minting;
+# a caller that waited reuses the token minted meanwhile instead of minting again.
+MINT_LOCK = os.path.join(BASE_DIR, "debug", "dhan_token_mint.lock")
+MINT_LOCK_STALE_S = 120   # a holder that died mid-mint (a mint + one TOTP-window retry takes ~35 s)
+MINT_WAIT_S = 90
+
+
+@contextmanager
+def _mint_lock():
+    os.makedirs(os.path.dirname(MINT_LOCK), exist_ok=True)
+    deadline = time.time() + MINT_WAIT_S
+    while True:
+        try:
+            fd = os.open(MINT_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            break
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(MINT_LOCK) > MINT_LOCK_STALE_S:
+                    os.remove(MINT_LOCK)
+                    continue
+            except FileNotFoundError:
+                continue
+            if time.time() > deadline:
+                raise TimeoutError(f"another process has been minting a Dhan token for over {MINT_WAIT_S}s ({MINT_LOCK})")
+            time.sleep(0.5)
+    try:
+        yield
+    finally:
+        try:
+            os.remove(MINT_LOCK)
+        except FileNotFoundError:
+            pass
+
+
+def _saved_token() -> Optional[Dict[str, Any]]:
+    try:
+        with open(TOKEN_FILE, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 
 def get_token_issue_time(token_data: Dict[str, Any]) -> Optional[datetime]:
@@ -213,6 +259,25 @@ def get_new_access_token_via_totp():
         print(f"TOTP autologin skipped: {LAST_TOTP_ERROR}")
         return None
 
+    # The token on disk before waiting: if it has changed (and is current) once we hold the lock, another process
+    # minted while we waited — use that one rather than minting (and killing it) again.
+    before = (_saved_token() or {}).get('accessToken')
+    try:
+        with _mint_lock():
+            now_saved = _saved_token()
+            if now_saved and now_saved.get('accessToken') != before and is_token_from_current_session(now_saved):
+                print("Another process just generated a Dhan token - reusing it.")
+                return now_saved['accessToken']
+            return _mint_totp_token(client_id, pin, totp_key)
+    except TimeoutError as e:
+        LAST_TOTP_ERROR = str(e)
+        print(f"TOTP autologin skipped: {LAST_TOTP_ERROR}")
+        return None
+
+
+def _mint_totp_token(client_id: str, pin: str, totp_key: str) -> Optional[str]:
+    """One TOTP mint (+ one retry on a fresh code). Call only under _mint_lock()."""
+    global LAST_TOTP_ERROR
     totp = pyotp.TOTP(totp_key)
     dhan_login = DhanLogin(client_id)
 
@@ -243,8 +308,11 @@ def get_new_access_token_via_totp():
     if access_token:
         created_at_iso = datetime.now(IST).isoformat()
         token_res_to_save = {**token_res, "dhanClientId": client_id, "createdAt": created_at_iso}
-        with open(TOKEN_FILE, 'w') as f:
+        # Atomic: the dashboard and every bridge read this file while it is being replaced.
+        tmp = f"{TOKEN_FILE}.tmp.{os.getpid()}"
+        with open(tmp, 'w') as f:
             json.dump(token_res_to_save, f)
+        os.replace(tmp, TOKEN_FILE)
         print("Successfully obtained and saved Access Token via TOTP autologin!")
         return access_token
     else:
