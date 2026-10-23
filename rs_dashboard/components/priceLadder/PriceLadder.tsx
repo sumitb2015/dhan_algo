@@ -1152,7 +1152,6 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <MtmGuardCard key={`${broker}:${pageMode}`} broker={broker} real={real} mtm={ladderPnl} guard={data?.state?.guards?.[`${broker}:${pageMode}`]} post={post} />
             <p className="flex items-center gap-1.5 text-[10px] text-zinc-500">
               <span className="inline-flex" title={HELP_TEXT} aria-label={HELP_TEXT} role="img"><Info className="w-3.5 h-3.5" aria-hidden /></span>
-              How this ladder works — hover the icon, or see docs/PRICE_LADDER_GUIDE.md
             </p>
           </div>
 
