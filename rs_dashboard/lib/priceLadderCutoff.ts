@@ -1,15 +1,19 @@
 import { mcxSession } from '@/lib/mcxSession';
-import { istDay, istHhmm, isMcxUnderlying } from '@/lib/priceLadder';
+import { istDay, istHhmm, isMcxUnderlying, sessionFor } from '@/lib/priceLadder';
 import { readLadderState, updateLadderState } from '@/lib/priceLadderServer';
 import { timeStringToHhmm, writeLadderSettings, type PriceLadderSettings } from '@/lib/priceLadderSettings';
 
-// The MCX (CRUDEOILM) trading cutoff — MIS square-off and "only exits" time — set from the Price Ladder header, its
+// The MCX (CRUDEOILM) and NSE/BSE trading cutoffs — MIS square-off and "only exits" time — set from the Price Ladder header, its
 // settings modal and the global settings drawer. One server path for all three. Moving the cutoff is a real-money
 // action: a time that has already passed squares off every open MCX MIS position on the next tick, so that needs an
 // explicit confirmation, and the time must sit in the evening session, before the day's close.
 
 /** Earliest cutoff accepted: nothing earlier is an end-of-session cutoff (09:00 would block MCX trading all day). */
 export const MIN_MCX_CUTOFF_HHMM = 2200;
+
+/** NSE / BSE: the cutoff must fall inside the continuous session, late enough to be an end-of-day cutoff. */
+export const MIN_NSE_CUTOFF_HHMM = 1300;
+export const MAX_NSE_CUTOFF_HHMM = 1529;
 
 export type CutoffResult =
   | { ok: true; settings: PriceLadderSettings }
@@ -47,4 +51,61 @@ export async function setMcxCutoff(raw: unknown, confirmPast: boolean, now = Dat
   const settings = writeLadderSettings({ mcxAutoExitTime: time });
   await updateLadderState(s => ({ ...s, settings: { ...s.settings, mcxAutoExitTime: settings.mcxAutoExitTime } }));
   return { ok: true, settings };
+}
+
+/** Open NSE / BSE MIS positions the ladder would square off at the cutoff (single options and pairs, SIM and REAL). */
+function openNseMis(): number {
+  const st = readLadderState();
+  const slices = st.slices.filter(x => !isMcxUnderlying(x.contract.underlying) && x.product === 'MIS' && (x.state === 'open' || x.state === 'exiting')).length;
+  const pairs = (st.pairs ?? []).filter(p => !isMcxUnderlying(p.legs.ce.contract.underlying) && p.product === 'MIS'
+    && (p.state === 'open' || p.state === 'broken' || p.state === 'rolling' || p.state === 'exiting')).length;
+  return slices + pairs;
+}
+
+/**
+ * The NSE / BSE (Nifty, Bank Nifty, Fin Nifty, Sensex, ...) trading cutoff. Same contract as the MCX one: a time that
+ * has already passed squares off every open NSE/BSE MIS position on the next tick, so it needs `confirmPast`.
+ */
+export async function setNseCutoff(raw: unknown, confirmPast: boolean, now = Date.now()): Promise<CutoffResult> {
+  const time = typeof raw === 'string' ? raw.trim() : '';
+  const hhmm = timeStringToHhmm(time);
+  if (hhmm == null) return { ok: false, status: 400, error: 'Invalid time — expected HH:MM, e.g. 15:17' };
+  if (hhmm < MIN_NSE_CUTOFF_HHMM || hhmm > MAX_NSE_CUTOFF_HHMM) {
+    return { ok: false, status: 400, error: 'The NSE cutoff must be between 13:00 and 15:29 (the session closes at 15:30)' };
+  }
+  const nowHhmm = istHhmm(now);
+  const open = isNseTradingNow(now, nowHhmm);
+  const n = open && hhmm <= nowHhmm ? openNseMis() : 0;
+  if (n > 0 && !confirmPast) {
+    return {
+      ok: false, status: 409, needsConfirm: true,
+      error: `${time} has already passed — ${n} open NSE/BSE MIS position(s) would be squared off at MARKET on the next tick. Confirm to apply.`,
+    };
+  }
+  const settings = writeLadderSettings({ nseAutoExitTime: time });
+  await updateLadderState(s => ({ ...s, settings: { ...s.settings, nseAutoExitTime: settings.nseAutoExitTime } }));
+  return { ok: true, settings };
+}
+
+function isNseTradingNow(now: number, nowHhmm: number): boolean {
+  const sess = sessionFor('NIFTY', istDay(now));
+  return sess.open < sess.close && nowHhmm >= sess.open && nowHhmm < sess.close;
+}
+
+/** The settings routes' one entry point: applies whichever cutoff(s) the body carries (MCX and/or NSE). */
+export async function setCutoffsFromBody(body: Record<string, unknown>): Promise<CutoffResult> {
+  const confirmPast = body.confirmPast === true;
+  if (body.nseAutoExitTime === undefined && body.mcxAutoExitTime === undefined) {
+    return { ok: false, status: 400, error: 'Send mcxAutoExitTime and/or nseAutoExitTime' };
+  }
+  let last: CutoffResult | null = null;
+  if (body.nseAutoExitTime !== undefined) {
+    last = await setNseCutoff(body.nseAutoExitTime, confirmPast);
+    if (!last.ok) return last;
+  }
+  if (body.mcxAutoExitTime !== undefined) {
+    last = await setMcxCutoff(body.mcxAutoExitTime, confirmPast);
+    if (!last.ok) return last;
+  }
+  return last!;
 }

@@ -377,6 +377,12 @@ test('MCX: session hours and the futures-month axis key', () => {
   assert.deepEqual(sessionFor('CRUDEOILM', '2026-10-22', '23:00'), { open: 900, close: 2330, autoExit: 2300, autoExitLabel: '23:00' });
   assert.deepEqual(sessionFor('CRUDEOILM', '2026-10-22', '23:20'), { open: 900, close: 2330, autoExit: 2320, autoExitLabel: '23:20' });
   assert.equal(sessionFor('NIFTY', '2026-10-22').autoExitLabel, '15:17');
+  // The NSE / BSE cutoff is configurable too; a saved time outside the session is ignored (default 15:17).
+  assert.deepEqual(sessionFor('NIFTY', '2026-10-22', null, '15:25'), { open: 915, close: 1530, autoExit: 1525, autoExitLabel: '15:25' });
+  assert.equal(sessionFor('BANKNIFTY', '2026-10-22', '23:00', '15:00').autoExitLabel, '15:00');
+  assert.equal(sessionFor('CRUDEOILM', '2026-10-22', '23:00', '15:00').autoExitLabel, '23:00');   // NSE time never moves MCX
+  assert.equal(sessionFor('NIFTY', '2026-10-22', null, '08:00').autoExitLabel, '15:17');
+  assert.equal(sessionFor('NIFTY', '2026-10-22', null, '15:40').autoExitLabel, '15:17');
   assert.equal(spotKey(crude), 'CRUDEOILM@MCX_COMM:573423');
   assert.deepEqual(parseSpotKey(spotKey(crude)), { segment: 'MCX_COMM', securityId: '573423' });
   assert.equal(parseSpotKey('NIFTY'), null);

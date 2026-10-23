@@ -12,7 +12,7 @@ import {
   type ClickType, type LadderZones, type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
 } from '@/lib/priceLadder';
 import { carryRuntime, cleanGuard, guardKey, guardLabel } from '@/lib/priceLadderGuard';
-import { setMcxCutoff } from '@/lib/priceLadderCutoff';
+import { setCutoffsFromBody } from '@/lib/priceLadderCutoff';
 
 // The Price Ladder's ledger (debug/price_ladder_state.json) and its actions. Real-money endpoint: every check that can
 // refuse an order runs here, server-side — lot cap, level sanity, the contract resolved from the brokers' own masters
@@ -87,7 +87,7 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   const strike = Number(b.strike);
   if (!(strike > 0)) return bad('Invalid strike');
   const state = readLadderState();
-  const sess = sessionFor(u, istDay(now), state.settings?.mcxAutoExitTime);
+  const sess = sessionFor(u, istDay(now), state.settings?.mcxAutoExitTime, state.settings?.nseAutoExitTime);
   if (sess.open >= sess.close) return bad(sess.note ?? 'The market is closed today');
   if (istHhmm(now) >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
   // A REAL plain order goes to the broker now, so the market must be open. (An XY level may be armed early: the
@@ -214,7 +214,7 @@ async function marketOrder(b: Record<string, unknown>): Promise<NextResponse> {
   if (!(strike > 0)) return bad('Invalid strike');
   const mode = b.mode, side = b.side, opt = b.opt, product = b.product;
   const st0 = readLadderState();
-  const sess = sessionFor(u, istDay(now), st0.settings?.mcxAutoExitTime);
+  const sess = sessionFor(u, istDay(now), st0.settings?.mcxAutoExitTime, st0.settings?.nseAutoExitTime);
   if (sess.open >= sess.close) return bad(sess.note ?? 'The market is closed today');
   if (istHhmm(now) >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
   if (mode === 'real') {
@@ -281,7 +281,7 @@ async function addLot(id: string): Promise<NextResponse> {
   const p = st0.slices.find(y => y.id === id);
   if (!p || p.state !== 'open') return bad('That position is not open');
   const hhmm = istHhmm(now);
-  const sess = sessionFor(p.contract.underlying, istDay(now), st0.settings?.mcxAutoExitTime);
+  const sess = sessionFor(p.contract.underlying, istDay(now), st0.settings?.mcxAutoExitTime, st0.settings?.nseAutoExitTime);
   if (sess.open >= sess.close) return bad(sess.note ?? 'The market is closed today');
   if (hhmm >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
   if (p.mode === 'real') {
@@ -414,8 +414,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
 
       case 'settings': {
-        // The MCX cutoff: one server path with /api/price-ladder/settings (range check; a passed time needs confirmPast).
-        const r = await setMcxCutoff(body.mcxAutoExitTime, body.confirmPast === true);
+        // The MCX / NSE cutoffs: one server path with /api/price-ladder/settings (range check; a passed time needs confirmPast).
+        const r = await setCutoffsFromBody(body);
         if (!r.ok) return NextResponse.json({ success: false, error: r.error, ...(r.needsConfirm ? { needsConfirm: true } : {}) }, { status: r.status });
         return NextResponse.json({ success: true, settings: r.settings, data: { state: readLadderState() } });
       }

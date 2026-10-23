@@ -562,7 +562,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Each error is shown only in the mode it belongs to: a pair leg's in Pair mode, the single contract's in XY / Plain.
   const contractError = matches && mode !== 'pair' ? data?.contractError ?? null : null;
   const pairError = matches && mode === 'pair' ? data?.pairError ?? null : null;
-  const sessionNote = sessionFor(underlying, istDay(), data?.state?.settings?.mcxAutoExitTime).note ?? null;
+  const sessionNote = sessionFor(underlying, istDay(), data?.state?.settings?.mcxAutoExitTime, data?.state?.settings?.nseAutoExitTime).note ?? null;
   // MCX on the ladder is Dhan only (the server refuses the others too).
   const brokerUnsupported = mcx && broker !== 'dhan';
   // False only once the status says so (unknown = not blocked; the server still checks every REAL order).
@@ -750,20 +750,22 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     run();
   };
 
-  // The MCX cutoff (MIS square-off / "only exits" time). A time already passed would square off open MCX MIS positions
+  // The MCX / NSE cutoffs (MIS square-off / "only exits" time). A time already passed would square off open MIS positions
   // at once: the server refuses that without confirmPast, and the page asks first, naming what it would do.
-  const setCutoff = (time: string) => {
+  const setCutoff = (market: 'mcx' | 'nse', time: string) => {
+    const label = market === 'mcx' ? 'MCX' : 'NSE';
+    const field = market === 'mcx' ? 'mcxAutoExitTime' : 'nseAutoExitTime';
     const send = async (confirmPast: boolean) => {
       try {
-        const r = await fetch('/api/price-ladder/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'settings', mcxAutoExitTime: time, confirmPast }) });
+        const r = await fetch('/api/price-ladder/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'settings', [field]: time, confirmPast }) });
         const j = await r.json().catch(() => ({})) as { success?: boolean; error?: string; needsConfirm?: boolean; data?: { state?: LadderState } };
         if (j.needsConfirm && !confirmPast) {
-          setConfirm({ text: j.error ?? `Set the MCX cutoff to ${time}?`, run: () => { void send(true); }, setting: { title: `Set the MCX cutoff to ${time}?`, button: 'Set cutoff and square off' } });
+          setConfirm({ text: j.error ?? `Set the ${label} cutoff to ${time}?`, run: () => { void send(true); }, setting: { title: `Set the ${label} cutoff to ${time}?`, button: 'Set cutoff and square off' } });
           return;
         }
         if (!j.success) { toast.error(j.error ?? `Could not set the cutoff (${r.status})`); return; }
         if (j.data?.state) { seq.current++; const st = j.data.state; setData(d => (d ? { ...d, state: st } : d)); }
-        toast.success(`MCX cutoff set to ${time} IST`);
+        toast.success(`${label} cutoff set to ${time} IST`);
       } catch {
         toast.error('No reply from the server — check the cutoff before trading');
       }
@@ -826,7 +828,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // A price that has not moved is only a problem while the market is trading: outside the session there are no live
   // prices, so the stale warning is not shown (the server still refuses to arm without a fresh price).
   // The server's own clock (its last reply), so render stays pure; before the first reply there is nothing to warn about.
-  const sess = sessionFor(underlying, istDay(data?.now), data?.state?.settings?.mcxAutoExitTime);
+  const sess = sessionFor(underlying, istDay(data?.now), data?.state?.settings?.mcxAutoExitTime, data?.state?.settings?.nseAutoExitTime);
   const hhmmNow = data ? istHhmm(data.now) : 0;
   const inSession = !!data && sess.open < sess.close && hhmmNow >= sess.open && hhmmNow < sess.close;
   const stale = mode === 'xy' && !spotFreshNow;
@@ -1429,7 +1431,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 p-4" role="dialog" aria-modal="true">
           <div className="w-full max-w-md rounded-lg border border-zinc-700 bg-zinc-900 p-4 flex flex-col gap-3">
             <p className="text-sm font-bold text-white">Arm LIVE · REAL MONEY for today?</p>
-            <p className="text-xs text-zinc-300">REAL ladder orders will place real orders on your broker account. Armed index levels are fired by the dashboard server even with this tab closed, until {sessionFor(underlying, istDay()).autoExitLabel} IST{mcx ? ` (${underlying}, today)` : ''}.</p>
+            <p className="text-xs text-zinc-300">REAL ladder orders will place real orders on your broker account. Armed index levels are fired by the dashboard server even with this tab closed, until {sessionFor(underlying, istDay(), data?.state?.settings?.mcxAutoExitTime, data?.state?.settings?.nseAutoExitTime).autoExitLabel} IST{mcx ? ` (${underlying}, today)` : ''}.</p>
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setArmModal(false)} className="px-3 py-1.5 rounded-md border border-zinc-700 text-xs text-zinc-300">Cancel</button>
               <button type="button" onClick={() => { setArmModal(false); void post({ action: 'live', on: true }); }} className="px-3 py-1.5 rounded-md bg-red-600 text-xs font-bold text-oncolor">Arm for today</button>
@@ -1483,7 +1485,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                     <button
                       key={time}
                       type="button"
-                      onClick={() => setCutoff(time)}
+                      onClick={() => setCutoff('mcx', time)}
                       className={`flex flex-col items-center justify-center py-2 px-1 rounded-lg border text-xs font-mono transition-all cursor-pointer ${
                         active
                           ? 'border-amber-500/50 bg-amber-500/20 text-amber-300 font-bold ring-1 ring-amber-500/30'
@@ -1493,6 +1495,43 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                       {time}
                       <span className="text-[9px] font-sans font-normal text-zinc-500">
                         {time === '23:15' ? 'Default' : time === '23:00' ? '11:00 PM' : 'IST'}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="space-y-3 pt-3 border-t border-zinc-800">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-zinc-200 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-amber-400" />
+                  NSE Trading Cutoff (Nifty, Bank Nifty & other indices)
+                </span>
+                <span className="text-xs font-mono font-bold text-amber-300">
+                  {data?.state?.settings?.nseAutoExitTime ?? '15:17'} IST
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-400 leading-relaxed">
+                Trading cutoff and MIS auto square-off for NSE / BSE index options. After this time, new orders and armed levels are rejected ahead of the 15:30 close.
+              </p>
+              <div className="grid grid-cols-4 gap-2 pt-1">
+                {(['15:00', '15:10', '15:17', '15:25'] as const).map(time => {
+                  const active = (data?.state?.settings?.nseAutoExitTime ?? '15:17') === time;
+                  return (
+                    <button
+                      key={time}
+                      type="button"
+                      onClick={() => setCutoff('nse', time)}
+                      className={`flex flex-col items-center justify-center py-2 px-1 rounded-lg border text-xs font-mono transition-all cursor-pointer ${
+                        active
+                          ? 'border-amber-500/50 bg-amber-500/20 text-amber-300 font-bold ring-1 ring-amber-500/30'
+                          : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                      }`}
+                    >
+                      {time}
+                      <span className="text-[9px] font-sans font-normal text-zinc-500">
+                        {time === '15:17' ? 'Default' : 'IST'}
                       </span>
                     </button>
                   );

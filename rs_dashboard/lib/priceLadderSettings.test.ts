@@ -45,3 +45,17 @@ test('writeLadderSettings: updates and reads back', () => {
     writeLadderSettings({ mcxAutoExitTime: orig || DEFAULT_PRICE_LADDER_SETTINGS.mcxAutoExitTime });
   }
 });
+
+test('NSE cutoff: defaults to 15:17, writes independently of the MCX one, ignores a malformed time', () => {
+  assert.equal(readLadderSettings().nseAutoExitTime, '15:17');
+  const mcx = readLadderSettings().mcxAutoExitTime;
+  try {
+    const u = writeLadderSettings({ nseAutoExitTime: '15:10' });
+    assert.equal(u.nseAutoExitTime, '15:10');
+    assert.equal(u.mcxAutoExitTime, mcx);
+    assert.equal(writeLadderSettings({ nseAutoExitTime: 'nope' }).nseAutoExitTime, '15:10');
+    assert.equal(readLadderSettings().nseAutoExitTime, '15:10');
+  } finally {
+    writeLadderSettings({ nseAutoExitTime: DEFAULT_PRICE_LADDER_SETTINGS.nseAutoExitTime });
+  }
+});

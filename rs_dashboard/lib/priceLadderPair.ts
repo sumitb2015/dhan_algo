@@ -406,7 +406,7 @@ export function planPairs(s: LadderState, ltps: Record<string, number>, now: num
   };
   for (const p of pairs) {
     if (!isPairLive(p)) continue;
-    const sess = sessionFor(p.legs.ce.contract.underlying, today, s.settings?.mcxAutoExitTime);
+    const sess = sessionFor(p.legs.ce.contract.underlying, today, s.settings?.mcxAutoExitTime, s.settings?.nseAutoExitTime);
     const afterClose = hhmm >= sess.autoExit;
     const sessionOpen = hhmm >= sess.open && hhmm < sess.close;
     const at = sess.autoExitLabel;

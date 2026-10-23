@@ -13,10 +13,16 @@ export interface PriceLadderSettings {
    * After this time, new orders/arms are blocked and MIS positions are auto squared off.
    */
   mcxAutoExitTime: string;
+  /**
+   * NSE / BSE (Nifty, Bank Nifty, Fin Nifty, Sensex, ...) trading cutoff & MIS square-off time in HH:MM IST.
+   * Default: '15:17'. After this time new orders/arms are blocked and MIS positions are auto squared off.
+   */
+  nseAutoExitTime: string;
 }
 
 export const DEFAULT_PRICE_LADDER_SETTINGS: PriceLadderSettings = {
   mcxAutoExitTime: '23:15',
+  nseAutoExitTime: '15:17',
 };
 
 let cachedSettings: PriceLadderSettings | null = null;
@@ -49,7 +55,10 @@ export function readLadderSettings(): PriceLadderSettings {
       const mcxTime = typeof raw.mcxAutoExitTime === 'string' && timeStringToHhmm(raw.mcxAutoExitTime) != null
         ? raw.mcxAutoExitTime
         : DEFAULT_PRICE_LADDER_SETTINGS.mcxAutoExitTime;
-      cachedSettings = { mcxAutoExitTime: mcxTime };
+      const nseTime = typeof raw.nseAutoExitTime === 'string' && timeStringToHhmm(raw.nseAutoExitTime) != null
+        ? raw.nseAutoExitTime
+        : DEFAULT_PRICE_LADDER_SETTINGS.nseAutoExitTime;
+      cachedSettings = { mcxAutoExitTime: mcxTime, nseAutoExitTime: nseTime };
       cachedMtime = stat.mtimeMs;
       return cachedSettings;
     }
@@ -68,6 +77,13 @@ export function writeLadderSettings(patch: Partial<PriceLadderSettings>): PriceL
     const hhmm = timeStringToHhmm(patch.mcxAutoExitTime);
     if (hhmm != null) {
       next.mcxAutoExitTime = patch.mcxAutoExitTime;
+    }
+  }
+
+  if (patch.nseAutoExitTime !== undefined) {
+    const hhmm = timeStringToHhmm(patch.nseAutoExitTime);
+    if (hhmm != null) {
+      next.nseAutoExitTime = patch.nseAutoExitTime;
     }
   }
 

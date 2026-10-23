@@ -202,6 +202,19 @@ test('The chime toggle mutes and unmutes trade sounds and is remembered', async 
   await expect(page.getByRole('button', { name: 'Mute trade chimes' })).toBeVisible();
 });
 
+test('Settings: the NSE cutoff is set separately from the MCX one', async ({ page }) => {
+  const seen = await install(page);
+  await gotoSingle(page);
+  await page.getByTitle('Configure Price Ladder trading cutoff & session thresholds').click();
+  await expect(page.getByText('NSE Trading Cutoff (Nifty, Bank Nifty & other indices)')).toBeVisible();
+  await expect(page.getByText('MCX Trading Cutoff (CRUDEOILM)')).toBeVisible();
+  const nse = page.getByText('NSE Trading Cutoff (Nifty, Bank Nifty & other indices)').locator('xpath=ancestor::div[contains(@class,"space-y-3")][1]');
+  await nse.getByRole('button', { name: /^15:10/ }).click();
+  await expect.poll(() => seen.posts.filter(b => b.action === 'settings').length).toBe(1);
+  expect(seen.posts.find(b => b.action === 'settings')).toMatchObject({ nseAutoExitTime: '15:10', confirmPast: false });
+  expect(seen.posts.find(b => b.action === 'settings')).not.toHaveProperty('mcxAutoExitTime');
+});
+
 test('Bracket: target and SL show on the ladder as soon as it is armed (dashed, before the fill)', async ({ page }) => {
   await install(page);
   await gotoSingle(page);

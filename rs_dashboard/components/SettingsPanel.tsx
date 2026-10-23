@@ -31,6 +31,7 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const theme = useThemeMode();
   const headingFont = useHeadingFont();
   const [mcxCutoff, setMcxCutoff] = useState('23:15');
+  const [nseCutoff, setNseCutoff] = useState('15:17');
   const [savingCutoff, setSavingCutoff] = useState(false);
 
   // Preferences persist to localStorage the moment they're picked (no
@@ -49,29 +50,32 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
         if (j.success && j.settings?.mcxAutoExitTime) {
           setMcxCutoff(j.settings.mcxAutoExitTime);
         }
+        if (j.success && j.settings?.nseAutoExitTime) setNseCutoff(j.settings.nseAutoExitTime);
       })
       .catch(() => {});
   }, [open]);
 
-  // A cutoff already passed would square off open MCX MIS positions at once: the server refuses that without
+  // A cutoff already passed would square off open MIS positions at once: the server refuses that without
   // confirmPast, and this asks first. The picker shows what the server holds, never an unsaved choice.
-  const updateCutoff = async (time: string, confirmPast = false): Promise<void> => {
+  const updateCutoff = async (market: 'mcx' | 'nse', time: string, confirmPast = false): Promise<void> => {
+    const label = market === 'mcx' ? 'MCX' : 'NSE';
     setSavingCutoff(true);
     try {
       const r = await fetch('/api/price-ladder/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mcxAutoExitTime: time, confirmPast }),
+        body: JSON.stringify({ [market === 'mcx' ? 'mcxAutoExitTime' : 'nseAutoExitTime']: time, confirmPast }),
       });
-      const j = await r.json().catch(() => ({})) as { success?: boolean; error?: string; needsConfirm?: boolean; settings?: { mcxAutoExitTime?: string } };
+      const j = await r.json().catch(() => ({})) as { success?: boolean; error?: string; needsConfirm?: boolean; settings?: { mcxAutoExitTime?: string; nseAutoExitTime?: string } };
       if (j.needsConfirm && !confirmPast) {
-        if (window.confirm(`Set the MCX cutoff to ${time}?\n\n${j.error ?? ''}`)) await updateCutoff(time, true);
+        if (window.confirm(`Set the ${label} cutoff to ${time}?\n\n${j.error ?? ''}`)) await updateCutoff(market, time, true);
         return;
       }
-      if (!j.success) { toast.error(j.error ?? 'Could not set the MCX cutoff'); return; }
+      if (!j.success) { toast.error(j.error ?? `Could not set the ${label} cutoff`); return; }
       if (j.settings?.mcxAutoExitTime) setMcxCutoff(j.settings.mcxAutoExitTime);
+      if (j.settings?.nseAutoExitTime) setNseCutoff(j.settings.nseAutoExitTime);
     } catch {
-      toast.error('Could not reach the server — the MCX cutoff was not changed');
+      toast.error(`Could not reach the server — the ${label} cutoff was not changed`);
     } finally {
       setSavingCutoff(false);
     }
@@ -126,7 +130,7 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                   <button
                     key={time}
                     type="button"
-                    onClick={() => void updateCutoff(time)}
+                    onClick={() => void updateCutoff('mcx', time)}
                     className={cn(
                       'relative flex flex-col items-center justify-center py-2 px-1 rounded-xl border text-xs font-mono transition-all cursor-pointer',
                       active
@@ -144,6 +148,45 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             </div>
             <div className="flex items-center justify-between text-[10px] text-zinc-500 pt-1">
               <span>Active cutoff: <strong className="text-amber-300 font-mono">{mcxCutoff} IST</strong></span>
+              <span>Syncs to server</span>
+            </div>
+          </div>
+
+          <div className="space-y-2.5 p-3 rounded-xl border border-amber-500/25 bg-amber-500/5">
+            <div className="flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 text-amber-400" />
+              <span className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+                NSE Trading Cutoff (Nifty, Bank Nifty & other indices)
+              </span>
+            </div>
+            <p className="text-[11px] text-zinc-400 leading-relaxed">
+              Orders and armed levels are permitted until this time. After this cutoff, new NSE / BSE orders are blocked and the engine exits MIS positions ahead of the 15:30 close.
+            </p>
+            <div className="grid grid-cols-4 gap-2">
+              {(['15:00', '15:10', '15:17', '15:25'] as const).map(time => {
+                const active = nseCutoff === time;
+                return (
+                  <button
+                    key={time}
+                    type="button"
+                    onClick={() => void updateCutoff('nse', time)}
+                    className={cn(
+                      'relative flex flex-col items-center justify-center py-2 px-1 rounded-xl border text-xs font-mono transition-all cursor-pointer',
+                      active
+                        ? 'border-amber-500/50 bg-amber-500/20 text-amber-300 font-bold ring-1 ring-amber-500/30'
+                        : 'border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700',
+                    )}
+                  >
+                    {time}
+                    <span className="text-[9px] font-sans font-normal text-zinc-500">
+                      {time === '15:17' ? 'Default' : 'IST'}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex items-center justify-between text-[10px] text-zinc-500 pt-1">
+              <span>Active cutoff: <strong className="text-amber-300 font-mono">{nseCutoff} IST</strong></span>
               <span>Syncs to server</span>
             </div>
           </div>

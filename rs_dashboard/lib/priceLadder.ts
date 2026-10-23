@@ -61,14 +61,17 @@ export interface LadderSession { open: number; close: number; autoExit: number; 
  * lib/mcxSession.ts — 09:00 to 23:30 (US DST) or 23:55, MIS squared off at 23:15 (configurable), MCX holidays and weekends
  * closed (open === close: nothing fires, REAL orders are held).
  */
-export function sessionFor(underlying: string, day: string, customMcxAutoExit?: string | number | null): LadderSession {
+export function sessionFor(underlying: string, day: string, customMcxAutoExit?: string | number | null, customNseAutoExit?: string | number | null): LadderSession {
   if (isMcxUnderlying(underlying)) {
     const hhmm = typeof customMcxAutoExit === 'string'
       ? parseHhmm(customMcxAutoExit)
       : (typeof customMcxAutoExit === 'number' ? customMcxAutoExit : null);
     return mcxSession(day, hhmm);
   }
-  return { open: SESSION_OPEN_HHMM, close: SESSION_CLOSE_HHMM, autoExit: AUTO_EXIT_HHMM, autoExitLabel: '15:17' };
+  const custom = typeof customNseAutoExit === 'string' ? parseHhmm(customNseAutoExit) : (typeof customNseAutoExit === 'number' ? customNseAutoExit : null);
+  // A saved cutoff outside the session (or before the open) is ignored: it would block, or square off, all day.
+  const autoExit = custom != null && custom > SESSION_OPEN_HHMM && custom < SESSION_CLOSE_HHMM ? custom : AUTO_EXIT_HHMM;
+  return { open: SESSION_OPEN_HHMM, close: SESSION_CLOSE_HHMM, autoExit, autoExitLabel: `${String(Math.floor(autoExit / 100)).padStart(2, '0')}:${String(autoExit % 100).padStart(2, '0')}` };
 }
 
 export type SliceState =
@@ -199,6 +202,8 @@ export interface LadderState {
   /** Configurable settings (e.g. MCX auto-exit time). */
   settings?: {
     mcxAutoExitTime?: string;
+    /** NSE / BSE (Nifty, Bank Nifty, Sensex, ...) trading cutoff & MIS square-off, HH:MM IST. Default 15:17. */
+    nseAutoExitTime?: string;
   };
   /** MTM guards (lib/priceLadderGuard.ts), one per ladder: keyed `broker:mode` (ladder 1) or `broker:mode:2`. Reset with the day. */
   guards?: Record<string, import('./priceLadderGuard').LadderGuard>;
@@ -600,7 +605,7 @@ export function planTick(
   for (const x of s.slices) {
     if (!isLive(x)) continue;
     // Hours are the contract's own market's (NSE/BSE vs MCX).
-    const sess = sessionFor(x.contract.underlying, today, s.settings?.mcxAutoExitTime);
+    const sess = sessionFor(x.contract.underlying, today, s.settings?.mcxAutoExitTime, s.settings?.nseAutoExitTime);
     const afterClose = hhmm >= sess.autoExit;
     const sessionOpen = hhmm >= sess.open && hhmm < sess.close;
     const at = sess.autoExitLabel;
