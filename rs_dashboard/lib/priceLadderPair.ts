@@ -151,7 +151,7 @@ export const LEG_KEYS: readonly PairLegKey[] = ['ce', 'pe'];
 export type PairJob = { kind: 'pairOpen'; id: string } | { kind: 'pairSettle'; id: string } | { kind: 'pairClose'; id: string };
 
 /** Strike step per underlying: a strangle's legs sit a whole number of steps either side of its centre. */
-export const PAIR_STRIKE_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100, CRUDEOILM: 50 };
+export const PAIR_STRIKE_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100, CRUDEOILM: 100 };
 /** Narrowest trailing distance on a pair, in combined-premium points (index-level slices use 1 point). */
 export const MIN_PAIR_TRAIL_PTS = 0.5;
 

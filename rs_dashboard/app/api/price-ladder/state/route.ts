@@ -10,6 +10,7 @@ import {
   paneOf, sessionFor, spotKey, MAX_LADDER_LOTS, cleanBufferPct, stopLimitPrice, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, capLots, classifyClick, cleanBracket, istDay, istHhmm, levelSane, pushEvent, realArmed,
   snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev, newLadderId, parseTrailRequest, replanBracket, trailedBracket,
   type ClickType, type LadderZones, type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
+  isTradedStrike,
 } from '@/lib/priceLadder';
 import { carryRuntime, cleanGuard, guardKey, guardLabel } from '@/lib/priceLadderGuard';
 import { setCutoffsFromBody } from '@/lib/priceLadderCutoff';
@@ -86,6 +87,7 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   if (lots == null) return bad('Lots must be a whole number from 1 to 20');
   const strike = Number(b.strike);
   if (!(strike > 0)) return bad('Invalid strike');
+  if (!isTradedStrike(u, strike)) return bad(`${u} strike ${strike} is not offered — the Price Ladder trades 100-point strikes only`);
   const state = readLadderState();
   const sess = sessionFor(u, istDay(now), state.settings?.mcxAutoExitTime, state.settings?.nseAutoExitTime);
   if (sess.open >= sess.close) return bad(sess.note ?? 'The market is closed today');

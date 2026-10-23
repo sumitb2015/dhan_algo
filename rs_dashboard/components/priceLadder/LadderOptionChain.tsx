@@ -1,5 +1,6 @@
 'use client';
 
+import { isTradedStrike } from '@/lib/priceLadder';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, X, Table2 } from 'lucide-react';
 
@@ -72,7 +73,7 @@ export function LadderOptionChain({ underlying, expiry, selectedStrike, selected
   const rows = useMemo(() => {
     const oc = data?.chain?.oc;
     if (!oc) return [];
-    return Object.entries(oc).map(([k, v]) => ({ strike: Number(k), ce: v.ce, pe: v.pe })).filter(r => r.strike > 0).sort((a, b) => a.strike - b.strike);
+    return Object.entries(oc).map(([k, v]) => ({ strike: Number(k), ce: v.ce, pe: v.pe })).filter(r => r.strike > 0 && isTradedStrike(underlying, r.strike)).sort((a, b) => a.strike - b.strike);
   }, [data]);
   const atm = useMemo(() => {
     if (!rows.length) return null;

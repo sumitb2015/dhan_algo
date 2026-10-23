@@ -20,7 +20,7 @@ import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { chimeFor } from '@/lib/priceLadderChime';
 import {
-  MAX_LADDER_LOTS, paneOf, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
+  MAX_LADDER_LOTS, isTradedStrike, paneOf, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
   type ClickType, type LadderZones, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
   type LadderContract,
 } from '@/lib/priceLadder';
@@ -324,7 +324,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         if (cancelled) return;
         const oc = j.data?.chain?.oc;
         if (!j.success || !oc) throw new Error('no chain');
-        const list = Object.keys(oc).map(Number).filter(n => n > 0).sort((a, b) => a - b);
+        const list = Object.keys(oc).map(Number).filter(n => n > 0 && isTradedStrike(underlying, n)).sort((a, b) => a - b);
         setStrikes(list);
         // MCX chains can come back with spot 0 but the option month's futures price set: that is the right ATM base.
         const spot = Number(j.data?.spot) || Number(j.data?.future_price) || 0;

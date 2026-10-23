@@ -48,6 +48,15 @@ export const SESSION_CLOSE_HHMM = 1530;
 export const MCX_LADDER_UNDERLYINGS = ['CRUDEOILM'];
 export const isMcxUnderlying = (u: string) => MCX_LADDER_UNDERLYINGS.includes(u);
 
+/** Strike spacing the ladder trades per MCX underlying: CRUDEOILM lists every 50 but only the 100s are liquid. */
+const MCX_TRADED_STRIKE_STEP: Record<string, number> = { CRUDEOILM: 100 };
+
+/** True when `strike` is one the ladder offers for `underlying` (every listed strike, except MCX off its traded step). */
+export function isTradedStrike(underlying: string, strike: number): boolean {
+  const step = MCX_TRADED_STRIKE_STEP[underlying];
+  return !step || Math.round(strike) % step === 0;
+}
+
 /** Barrels per lot, the one table (also lib/positionPnl.ts MCX_LOT_MULTIPLIER; kept equal by a test). */
 const MCX_BBL_PER_LOT: Record<string, number> = { CRUDEOILM: 10 };
 

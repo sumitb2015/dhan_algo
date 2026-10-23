@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mcxSession, usDstActive } from './mcxSession.ts';
 import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
-import { mcxUnitError, MCX_LADDER_UNDERLYINGS } from './priceLadder.ts';
+import { mcxUnitError, isTradedStrike, MCX_LADDER_UNDERLYINGS } from './priceLadder.ts';
 import {
   bias, limitZone, classifyClick, levelSane, capLots, cleanBracket, entryStep, bracketLevels, bracketStep, spotFresh,
   settleOrder, exitQtyFor, slicePnl, sliceNowPnl, sumSlicePnl, ownNet, ladderRows, snapToStep, rollDay, realArmed, pushEvent, istHhmm,
@@ -562,4 +562,11 @@ test('mcxUnitError: lots for Dhan / Zerodha, whole-lot barrels for Kotak', () =>
 
 test('the ladder lot table matches the dashboard MCX multiplier', () => {
   for (const u of MCX_LADDER_UNDERLYINGS) assert.equal(mcxUnitError('kotak', { underlying: u, lotSize: MCX_LOT_MULTIPLIER[u] }, MCX_LOT_MULTIPLIER[u]), null);
+});
+
+test('isTradedStrike: CRUDEOILM offers only the 100s, index underlyings every listed strike', () => {
+  assert.equal(isTradedStrike('CRUDEOILM', 9600), true);
+  assert.equal(isTradedStrike('CRUDEOILM', 9650), false);
+  assert.equal(isTradedStrike('CRUDEOILM', 9550), false);
+  assert.equal(isTradedStrike('NIFTY', 23250), true);
 });
