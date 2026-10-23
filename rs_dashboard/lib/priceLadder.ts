@@ -485,6 +485,20 @@ export function sliceNowPnl(s: LadderSlice, ltp: number | null | undefined): num
 }
 
 /**
+ * The P&L to print on one ladder row from the entry marks on it: the sum, `null` when any mark has no price yet (a
+ * partial sum would hide that position's loss), `undefined` when no mark carries a P&L at all.
+ */
+export function rowPnl(marks: ReadonlyArray<{ pnl?: number | null }>): number | null | undefined {
+  let sum = 0, any = false;
+  for (const m of marks) {
+    if (m.pnl === undefined) continue;
+    if (m.pnl === null) return null;
+    sum += m.pnl; any = true;
+  }
+  return any ? sum : undefined;
+}
+
+/**
  * Total P&L over the slices `pick` selects, each open one priced by `ltpOf`. Null when nothing counts, or when any open
  * slice has no price — a partial sum would hide that leg's loss behind a number that looks complete.
  */

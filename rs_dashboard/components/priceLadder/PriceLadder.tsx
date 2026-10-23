@@ -619,17 +619,17 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     const marks: EntryMark[] = [];
     if (mode === 'pair') {
       // A pair's entry on the combined axis (the row IS the combined fill, so no separate fill tag).
-      for (const p of myPairs) if ((p.state === 'open' || p.state === 'broken' || p.state === 'exiting' || p.state === 'unknown') && p.entryY) marks.push({ y: p.entryY, side: p.side, qty: p.qty });
+      for (const p of myPairs) if ((p.state === 'open' || p.state === 'broken' || p.state === 'exiting' || p.state === 'unknown') && p.entryY) marks.push({ y: p.entryY, side: p.side, qty: p.qty, pnl: pairNowPnl(p, data?.ltps ?? {}) });
       return marks;
     }
     for (const s of mine) {
       const held = Number(s.filledQty) || 0;
       if ((s.state !== 'open' && s.state !== 'exiting') || held <= 0) continue;
       const y = mode === 'xy' ? (s.kind === 'xy' ? s.entryY ?? s.entryLevel : undefined) : s.avg;
-      if (y && Number.isFinite(y)) marks.push({ y, side: s.side, qty: held, avg: s.avg });
+      if (y && Number.isFinite(y)) marks.push({ y, side: s.side, qty: held, avg: s.avg, pnl: sliceNowPnl(s, optLtp) ?? null });
     }
     return marks;
-  }, [mine, mode, myPairs]);
+  }, [mine, mode, myPairs, optLtp, data?.ltps]);
   const net = securityId ? ownNet(slices.filter(s => s.broker === broker && s.mode === pageMode), securityId) : { qty: 0, avg: null };
   const contractPnl = useMemo(() => sumSlicePnl(slices, s => s.broker === broker && s.mode === pageMode && s.contract.securityId === securityId, () => optLtp),
     [slices, broker, pageMode, securityId, optLtp]);

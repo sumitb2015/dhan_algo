@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mcxSession, usDstActive } from './mcxSession.ts';
 import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
-import { mcxUnitError, isTradedStrike, MCX_LADDER_UNDERLYINGS } from './priceLadder.ts';
+import { mcxUnitError, isTradedStrike, rowPnl, MCX_LADDER_UNDERLYINGS } from './priceLadder.ts';
 import {
   bias, limitZone, classifyClick, levelSane, capLots, cleanBracket, entryStep, bracketLevels, bracketStep, spotFresh,
   settleOrder, exitQtyFor, slicePnl, sliceNowPnl, sumSlicePnl, ownNet, ladderRows, snapToStep, rollDay, realArmed, pushEvent, istHhmm,
@@ -569,4 +569,11 @@ test('isTradedStrike: CRUDEOILM offers only the 100s, index underlyings every li
   assert.equal(isTradedStrike('CRUDEOILM', 9650), false);
   assert.equal(isTradedStrike('CRUDEOILM', 9550), false);
   assert.equal(isTradedStrike('NIFTY', 23250), true);
+});
+
+test('rowPnl: sums the marks, one unpriced mark blanks it, no P&L at all is undefined', () => {
+  assert.equal(rowPnl([{ pnl: 100 }, { pnl: -40 }]), 60);
+  assert.equal(rowPnl([{ pnl: 100 }, { pnl: null }]), null);
+  assert.equal(rowPnl([{}, { pnl: 5 }]), 5);
+  assert.equal(rowPnl([{}]), undefined);
 });

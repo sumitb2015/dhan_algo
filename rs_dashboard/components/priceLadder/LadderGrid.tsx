@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 import { ChevronDown, ChevronUp, Minus, Plus, X } from 'lucide-react';
-import { bias, bracketLevels, ladderRows, snapToStep, type LadderSide, type LadderSlice, type LadderZones } from '@/lib/priceLadder';
+import { bias, bracketLevels, ladderRows, rowPnl, snapToStep, type LadderSide, type LadderSlice, type LadderZones } from '@/lib/priceLadder';
 import { pairBias, type LadderPair } from '@/lib/priceLadderPair';
 
 /**
@@ -36,7 +36,7 @@ export interface LadderWidget {
 }
 
 /** An open position's entry on the ladder's axis: drawn as a tinted row with a side / qty / fill tag in the Price column. */
-export interface EntryMark { y: number; side: LadderSide; qty: number; avg?: number }
+export interface EntryMark { y: number; side: LadderSide; qty: number; avg?: number; /** Open P&L in rupees; null = no price yet, absent = not shown. */ pnl?: number | null }
 
 const opposite = (s: LadderSide): LadderSide => (s === 'BUY' ? 'SELL' : 'BUY');
 
@@ -366,6 +366,7 @@ export function LadderGrid({
         const isRef = refRow != null && Math.abs(p - refRow) < tick / 2;
         const marks = entryMarks?.filter(m => Math.abs(p - snapToStep(m.y, tick)) < tick / 2) ?? [];
         const isEntry = marks.length > 0;
+        const rowPnlNow = isEntry ? rowPnl(marks) : undefined;
         // One tag per side on this row (several fills at one level add up); the avg is qty-weighted.
         const tags = (['BUY', 'SELL'] as const).map(side => {
           const ms = marks.filter(m => m.side === side);
@@ -492,6 +493,14 @@ export function LadderGrid({
               )}
               {/* XY only: the option's fill premium (in plain mode the row price IS the fill). */}
               {isEntry && tags[0]?.avg != null && Math.abs(tags[0].avg - p) >= tick && <span className="shrink-0 text-[10px] font-semibold text-blue-300">@{tags[0].avg.toFixed(2)}</span>}
+              {rowPnlNow !== undefined && (
+                <span
+                  title="Open P&L at the live price"
+                  className={`shrink-0 px-1 rounded text-[10px] font-bold leading-4 ${rowPnlNow == null ? 'text-zinc-400' : rowPnlNow >= 0 ? 'text-emerald-400' : 'text-red-400'}`}
+                >
+                  {rowPnlNow == null ? '—' : `${rowPnlNow >= 0 ? '+' : '−'}₹${Math.abs(Math.round(rowPnlNow)).toLocaleString('en-IN')}`}
+                </span>
+              )}
             </div>
 
             {/* Column 4: Offers (Inner trigger price for Sell-side triggers) */}
