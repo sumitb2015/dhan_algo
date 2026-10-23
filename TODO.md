@@ -72,3 +72,31 @@ stop. A Dhan Conditional Trigger lives at Dhan and fires with nothing of ours ru
 ### Decision gate
 If item 2 (fire-time) fails or evaluation latency is unacceptable (tens of seconds), drop this and rely on
 Super Order brackets (`/api/super-order`) for broker-side stops instead.
+
+## Price Ladder: 20-level market depth (bid/ask) on the ladder
+
+Status: idea 2026-10-23, not researched against the docs, not built. Read-only feature (no orders).
+
+### Why
+The ladder shows price only; resting quantity at each level (bids/offers) would show where liquidity sits
+around the live price. The repo only has 5-level depth today (full-data packet on the market WebSocket, or REST
+`/marketfeed/quote` at 1 req/s on the shared quote lane). `scripts/tools/price_ladder_ws.py` carries LTP / high /
+low / prev close only, no depth.
+
+### Known / believed (UNVERIFIED — check dhanhq.co/docs/v2 first)
+- Dhan has a separate 20-level depth WebSocket (`wss://depth-api-feed.dhan.co/twentydepth`). Believed to cover
+  NSE equity and NSE derivatives only, **not MCX** — so NIFTY / BANKNIFTY / SENSEX ladders yes, CRUDEOILM likely no
+  (its fallback would be the 5-level depth from the full packet).
+- It is its own connection, so it counts against the account's WebSocket connection limit. Repo rule: one shared
+  Dhan connection through `scripts/tools/market_data_hub.py` — find out whether the hub can carry it.
+
+### Design sketch
+- New read-only Python bridge on the hub (like `price_ladder_ws.py`) writing depth for the contract(s) on screen.
+- UI: the Bids / Offers columns already hold trigger prices for armed orders, so do not reuse them. Draw a depth
+  bar behind each price row (width = resting qty, small number on it; bids green, offers red), 20 levels around
+  the live price, only for the contract on screen (`components/priceLadder/LadderGrid.tsx`).
+- Depth ticks far faster than LTP: the 1 s poll will not do, use the SSE stream (`/api/price-ladder/stream`).
+
+### Decision gate
+Confirm MCX coverage and the connection limit in the docs, then build for the NSE / BSE ladders only. If CRUDEOILM
+depth matters most, settle the 5-level fallback before building anything.
