@@ -181,7 +181,8 @@ breaks at 15:17 and the outer loop restarted at once because dry-run bypasses th
 ## Running the tests safely
 
 Only run the stubbed suites: `tests/test_algo_kit.py`, `tests/test_strategy_kit_invariants.py`, the strategy tests
-(`test_put_condor.py`, `test_condor_ratio.py`, ...) and `smoke_test_skeleton.py`. Never run `tests/test_*.py` with a
+(`test_put_condor.py`, `test_condor_ratio.py`, ...), `smoke_test_skeleton.py`, and the Dhan health tests
+`test_dhan_health.py` / `test_dhan_account_reads.py`. Never run `tests/test_*.py` with a
 wildcard (`test_11_maintenance.py` also OVERWRITES `master_list.csv` with only the NSE_EQ/NSE_FNO segments, which
 breaks every MCX and BSE/SENSEX lookup until `helper.fetch_security_list()` is run with its default segments): the numbered tests (01-19) and several others talk to the real account, and `test_06_orders.py` places AMO
 orders while `test_11` / `test_13` call `cancel_all_orders()`.

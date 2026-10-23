@@ -128,6 +128,30 @@ workaround while blocked: fix the whitelist at web.dhan.co (DhanHQ Trading APIs 
 whitelist), then re-run `login.py`; close open positions manually from the Dhan app
 meanwhile.
 
+## DH-905 on account reads while orders work — a Dhan-side outage, not our request
+
+On 2026-10-23, from about 09:10 IST until some time between 10:09 and 10:11, every account read (GET `/positions`,
+`/orders`, `/trades`, `/fundlimit`, `/holdings`, `/ip/getIP`, `/killswitch`, ...) answered
+`400 {"errorType":"Input_Exception","errorCode":"DH-905","errorMessage":"Missing required fields, bad values for
+parameters etc."}`. In the same window `/profile`, market data and order placement all worked, from the whitelisted
+IP. These GETs take no parameters, so here the message is a catch-all, not a real validation failure.
+
+- **It was not the request:** curl, Node `fetch` and the official `dhanhq` SDK failed the same way, with every header
+  variation. It was not the token either: tokens minted at 09:24, 09:49 and 10:08 all failed. At 10:09:09 the
+  market-data hub's `get_holdings()` check still got DH-905 with the 10:08 token, and at 10:11:45 the same token read
+  everything. It was not the IP: `getIP` shows the whitelist last changed on 2026-06-23.
+- **What made it work: nothing on our side.** Reads recovered on Dhan's end with the same token, code and IP. The cause
+  is unexplained (with Dhan).
+- **Don't re-mint tokens to fix it.** Each mint kills the previous token at once (DH-906 within seconds), Dhan allows
+  one mint per 2 minutes, and every process holding the old token in memory then needs a reconnect. A new token does
+  nothing for this outage.
+- **Diagnose with** `venv/bin/python scripts/testing/check_dhan_account_reads.py` (read-only). Verdict
+  `account_reads_blocked` is this pattern (rules in `lib/dhan_health.diagnose_account_reads`, tests in
+  `tests/test_dhan_account_reads.py`). Add `--watch 30` to log when it recovers.
+- **Note for strategy pre-flight:** `evaluate_preflight()` only warns when `/killswitch` is unreadable, so a `--live`
+  launch would not be blocked during this outage. Strategies that read positions or the order book at startup or
+  during recovery will see empty or failed reads in that window.
+
 ## Order-update WebSocket sends non-JSON binary heartbeat frames
 
 The order-update socket (`wss://api-order-update.dhan.co`) periodically pushes a binary heartbeat
