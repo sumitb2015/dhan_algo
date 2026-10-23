@@ -13,7 +13,7 @@ export const MIN_MCX_CUTOFF_HHMM = 2200;
 
 /** NSE / BSE: the cutoff must fall inside the continuous session, late enough to be an end-of-day cutoff. */
 export const MIN_NSE_CUTOFF_HHMM = 1300;
-export const MAX_NSE_CUTOFF_HHMM = 1529;
+export const MAX_NSE_CUTOFF_HHMM = 1539;
 
 export type CutoffResult =
   | { ok: true; settings: PriceLadderSettings }
@@ -71,7 +71,7 @@ export async function setNseCutoff(raw: unknown, confirmPast: boolean, now = Dat
   const hhmm = timeStringToHhmm(time);
   if (hhmm == null) return { ok: false, status: 400, error: 'Invalid time — expected HH:MM, e.g. 15:17' };
   if (hhmm < MIN_NSE_CUTOFF_HHMM || hhmm > MAX_NSE_CUTOFF_HHMM) {
-    return { ok: false, status: 400, error: 'The NSE cutoff must be between 13:00 and 15:29 (the session closes at 15:30)' };
+    return { ok: false, status: 400, error: 'The NSE cutoff must be between 13:00 and 15:39 (the session closes at 15:40)' };
   }
   const nowHhmm = istHhmm(now);
   const open = isNseTradingNow(now, nowHhmm);

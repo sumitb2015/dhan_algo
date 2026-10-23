@@ -209,9 +209,9 @@ test('Settings: the NSE cutoff is set separately from the MCX one', async ({ pag
   await expect(page.getByText('NSE Trading Cutoff (Nifty, Bank Nifty & other indices)')).toBeVisible();
   await expect(page.getByText('MCX Trading Cutoff (CRUDEOILM)')).toBeVisible();
   const nse = page.getByText('NSE Trading Cutoff (Nifty, Bank Nifty & other indices)').locator('xpath=ancestor::div[contains(@class,"space-y-3")][1]');
-  await nse.getByRole('button', { name: /^15:10/ }).click();
+  await nse.getByRole('button', { name: /^15:35/ }).click();
   await expect.poll(() => seen.posts.filter(b => b.action === 'settings').length).toBe(1);
-  expect(seen.posts.find(b => b.action === 'settings')).toMatchObject({ nseAutoExitTime: '15:10', confirmPast: false });
+  expect(seen.posts.find(b => b.action === 'settings')).toMatchObject({ nseAutoExitTime: '15:35', confirmPast: false });
   expect(seen.posts.find(b => b.action === 'settings')).not.toHaveProperty('mcxAutoExitTime');
 });
 

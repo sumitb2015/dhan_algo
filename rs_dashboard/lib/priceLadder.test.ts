@@ -317,12 +317,12 @@ test('planTick: a placement still on the wire after 30s is not declared UNKNOWN 
   assert.equal(planTick(st([x]), px(23200), T, { ...io, busy: () => false }).next.slices[0].state, 'unknown');
 });
 
-test('planTick: before 09:15 a crossed level is not fired; after 15:30 a REAL exit is held, not sent', () => {
+test('planTick: before 09:15 a crossed level is not fired; after 15:40 a REAL exit is held, not sent', () => {
   const PRE = Date.parse('2026-10-22T03:30:00Z');          // 09:00 IST
   const pre = planTick(st([armedXY()]), px(23179, PRE), PRE, io);
   assert.deepEqual(pre.jobs, []);
   assert.equal(pre.next.slices[0].state, 'armed');
-  const LATE = Date.parse('2026-10-22T10:05:00Z');         // 15:35 IST
+  const LATE = Date.parse('2026-10-22T10:15:00Z');         // 15:45 IST
   const open = slice({ mode: 'real', state: 'open', filledQty: 65, avg: 100 });
   const late = planTick(st([open]), px(23200, LATE), LATE, io);
   assert.deepEqual(late.jobs, []);
@@ -380,11 +380,11 @@ test('MCX: session hours and the futures-month axis key', () => {
   assert.deepEqual(sessionFor('CRUDEOILM', '2026-10-22', '23:20'), { open: 900, close: 2330, autoExit: 2320, autoExitLabel: '23:20' });
   assert.equal(sessionFor('NIFTY', '2026-10-22').autoExitLabel, '15:17');
   // The NSE / BSE cutoff is configurable too; a saved time outside the session is ignored (default 15:17).
-  assert.deepEqual(sessionFor('NIFTY', '2026-10-22', null, '15:25'), { open: 915, close: 1530, autoExit: 1525, autoExitLabel: '15:25' });
+  assert.deepEqual(sessionFor('NIFTY', '2026-10-22', null, '15:25'), { open: 915, close: 1540, autoExit: 1525, autoExitLabel: '15:25' });
   assert.equal(sessionFor('BANKNIFTY', '2026-10-22', '23:00', '15:00').autoExitLabel, '15:00');
   assert.equal(sessionFor('CRUDEOILM', '2026-10-22', '23:00', '15:00').autoExitLabel, '23:00');   // NSE time never moves MCX
   assert.equal(sessionFor('NIFTY', '2026-10-22', null, '08:00').autoExitLabel, '15:17');
-  assert.equal(sessionFor('NIFTY', '2026-10-22', null, '15:40').autoExitLabel, '15:17');
+  assert.equal(sessionFor('NIFTY', '2026-10-22', null, '15:41').autoExitLabel, '15:17');
   assert.equal(spotKey(crude), 'CRUDEOILM@MCX_COMM:573423');
   assert.deepEqual(parseSpotKey(spotKey(crude)), { segment: 'MCX_COMM', securityId: '573423' });
   assert.equal(parseSpotKey('NIFTY'), null);

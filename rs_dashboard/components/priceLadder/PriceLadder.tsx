@@ -1547,10 +1547,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400 leading-relaxed">
-                Trading cutoff and MIS auto square-off for NSE / BSE index options. After this time, new orders and armed levels are rejected ahead of the 15:30 close.
+                Trading cutoff and MIS auto square-off for NSE / BSE index options. After this time, new orders and armed levels are rejected ahead of the 15:40 close.
               </p>
               <div className="grid grid-cols-4 gap-2 pt-1">
-                {(['15:00', '15:10', '15:17', '15:25'] as const).map(time => {
+                {(['15:17', '15:25', '15:35', '15:39'] as const).map(time => {
                   const active = (data?.state?.settings?.nseAutoExitTime ?? '15:17') === time;
                   return (
                     <button

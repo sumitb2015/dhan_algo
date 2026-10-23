@@ -42,7 +42,7 @@ export const AUTO_EXIT_HHMM = 1517;
 /** NSE/BSE F&O continuous session. Before the open an armed level never fires (pre-open prints are not tradeable);
  *  after the close no order is sent at all (an exit retried every 15 s until midnight would only be rejected). */
 export const SESSION_OPEN_HHMM = 915;
-export const SESSION_CLOSE_HHMM = 1530;
+export const SESSION_CLOSE_HHMM = 1540;
 
 /** MCX underlyings the ladder trades (all three brokers): CRUDEOILM options, on their own futures month's price in XY. */
 export const MCX_LADDER_UNDERLYINGS = ['CRUDEOILM'];
@@ -86,7 +86,7 @@ export function parseHhmm(str?: string | null): number | null {
 
 export interface LadderSession { open: number; close: number; autoExit: number; autoExitLabel: string; note?: string }
 /**
- * Trading hours per underlying for one IST date (hhmm). NSE/BSE F&O: 09:15-15:30, MIS squared off at 15:17. MCX:
+ * Trading hours per underlying for one IST date (hhmm). NSE/BSE F&O: 09:15-15:40, MIS squared off at 15:17. MCX:
  * lib/mcxSession.ts — 09:00 to 23:30 (US DST) or 23:55, MIS squared off at 23:15 (configurable), MCX holidays and weekends
  * closed (open === close: nothing fires, REAL orders are held).
  */

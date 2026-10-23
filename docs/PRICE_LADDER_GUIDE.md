@@ -27,7 +27,7 @@ Real-money endpoint — SIM (paper) is the default; REAL needs the daily LIVE ·
 Two settings, in the ladder's Settings modal and the global Settings drawer: **MCX Trading Cutoff (CRUDEOILM)**, default 23:15,
 and **NSE Trading Cutoff** (Nifty, Bank Nifty, Fin Nifty, Sensex and the other indices), default 15:17. After its cutoff a market
 takes no new orders or armed levels and the ladder squares off that market's open MIS positions (NRML is carried). The NSE
-cutoff must be 13:00-15:29 (the session closes 15:30); the MCX one 22:00 to the close. Setting a time that has already passed
+cutoff must be 13:00-15:39 (the session closes 15:40; the last minute is left so the square-off can still be sent); the MCX one 22:00 to the close. Setting a time that has already passed
 asks first, because it would square off open MIS positions on the next tick. Code: `lib/priceLadderCutoff.ts`,
 `sessionFor()` in `lib/priceLadder.ts`.
 

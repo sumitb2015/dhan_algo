@@ -160,10 +160,10 @@ export default function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               </span>
             </div>
             <p className="text-[11px] text-zinc-400 leading-relaxed">
-              Orders and armed levels are permitted until this time. After this cutoff, new NSE / BSE orders are blocked and the engine exits MIS positions ahead of the 15:30 close.
+              Orders and armed levels are permitted until this time. After this cutoff, new NSE / BSE orders are blocked and the engine exits MIS positions ahead of the 15:40 close.
             </p>
             <div className="grid grid-cols-4 gap-2">
-              {(['15:00', '15:10', '15:17', '15:25'] as const).map(time => {
+              {(['15:17', '15:25', '15:35', '15:39'] as const).map(time => {
                 const active = nseCutoff === time;
                 return (
                   <button
