@@ -971,6 +971,17 @@ type LoopHolder = { [LOOP_KEY]?: { timer: ReturnType<typeof setInterval>; busy: 
 const START_GRACE_MS = 30_000;
 const loopStartedAt = () => (globalThis as LoopHolder)[LOOP_KEY]?.startedAt ?? 0;
 
+/** One resting REAL order pulled by a tripped guard. A failure is only an error if the order is still resting after it. */
+async function guardCancel(x: LadderSlice): Promise<void> {
+  try {
+    await Promise.race([cancelAtBroker(x.broker, x.orderId!), new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timed out after 8 s')), 8000))]);
+  } catch (err) {
+    console.error(`${TAG} guard cancel failed for ${x.orderId}:`, err);
+    const still = readLadderState().slices.find(y => y.id === x.id)?.state === 'working';
+    if (still) await updateLadderState(st => pushEvent(st, ev('error', `MTM guard: could not cancel the resting order ${x.orderId} (${(err as Error).message}) — cancel it at the broker; the guard stays on until it is gone`, x.id)));
+  }
+}
+
 let reconciling = false;
 
 async function tick(): Promise<void> {
@@ -985,7 +996,8 @@ async function tick(): Promise<void> {
   if (!live.length && !livePairs.length) return;
   const now = Date.now();
   // Prices only for slices whose rules read them (armed / open XY need spot; SIM fills and exits need the option LTP).
-  const priced = live.filter(x => x.state === 'armed' || x.state === 'open' || (x.mode === 'sim' && (x.state === 'working' || x.state === 'exiting')));
+  // An exiting REAL slice is priced too: its open units count in the MTM, and an unpriced one blinds the global guard.
+  const priced = live.filter(x => x.state === 'armed' || x.state === 'open' || x.state === 'exiting' || (x.mode === 'sim' && x.state === 'working'));
   const underlyings = [...new Set(priced.map(x => spotKey(x.contract)))];
   // A pair's rules read both legs' premiums (its combined price).
   const pairLegs = livePairs.flatMap(p => [p.legs.ce.contract, p.legs.pe.contract, ...(p.rollTo?.ce ? [p.rollTo.ce] : []), ...(p.rollTo?.pe ? [p.rollTo.pe] : [])]);
@@ -1025,16 +1037,13 @@ async function tick(): Promise<void> {
     return pr.next;
   });
   // A tripped guard also pulls the resting REAL entry orders (a fill after the exit would reopen what it just closed).
-  // Retried every 30 s while one is still resting; a failure is put on the event log, never swallowed.
+  // Off the tick (a slow broker endpoint must not stall every other stop), retried every 30 s while one still rests.
   for (const [key, g] of Object.entries(planned.guards ?? {})) {
     if (!g.tripped) continue;
     const [broker, mode] = key.split(':');
     for (const x of planned.slices.filter(y => y.broker === broker && y.mode === mode && y.mode === 'real' && y.state === 'working' && y.orderId)) {
       if (!warnOnce(`guard-cancel:${x.id}`, 30_000)) continue;
-      try { await cancelAtBroker(x.broker, x.orderId!); } catch (err) {
-        console.error(`${TAG} guard cancel failed for ${x.orderId}:`, err);
-        await updateLadderState(st => pushEvent(st, ev('error', `MTM guard: could not cancel the resting order ${x.orderId} — cancel it at the broker; the guard stays on until it is gone`, x.id)));
-      }
+      void guardCancel(x);
     }
   }
   // Not awaited: the watcher keeps ticking (and checking every other stop) while orders are on the wire.

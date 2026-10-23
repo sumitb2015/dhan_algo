@@ -61,8 +61,12 @@ test('a trip queues every open exit, cancels armed levels, scopes by broker+mode
   assert.match(by('s1').exitWanted ?? '', /target/);
   assert.equal(by('s2').state, 'cancelled');
   assert.equal(by('s3').exitWanted, undefined);
-  assert.equal(r.next.guards!['dhan:sim'].on, false);
-  assert.ok(r.next.guards!['dhan:sim'].firedReason);
+  // The exit is only queued: the guard stays on until the slice has closed, then switches off and says why.
+  assert.equal(r.next.guards!['dhan:sim'].on, true);
+  const done = { ...r.next, slices: r.next.slices.map(x => (x.id === 's1' ? { ...x, state: 'closed' as const } : x)) };
+  const off = applyGuards(done, {}, 2).next.guards!['dhan:sim'];
+  assert.equal(off.on, false);
+  assert.ok(off.firedReason);
 });
 
 test('no price for an open leg: no decision', () => {
@@ -92,7 +96,7 @@ test('an entry in flight keeps a tripped guard on and it exits what then opens',
   const r2 = applyGuards(filled, { 1: 90 }, 2);
   assert.equal(r2.fired.length, 0);
   assert.match(r2.next.slices.find(x => x.id === 's4')!.exitWanted ?? '', /target/);
-  assert.equal(r2.next.guards!['dhan:sim'].on, false);
+  assert.equal(r2.next.guards!['dhan:sim'].on, true);
 });
 
 test('a resting REAL order keeps the guard on until it is gone', () => {
@@ -107,4 +111,38 @@ test('a resting REAL order keeps the guard on until it is gone', () => {
 test('a malformed guard key is ignored', () => {
   const r = applyGuards(state([slice({})], { 'junk': g({ target: 1 }) }), { 1: 999 }, 1);
   assert.equal(r.fired.length, 0);
+});
+
+test('a rejected exit is re-queued: the guard stays on until the slice is closed', () => {
+  const s = state([slice({})], { 'dhan:real': g({ target: 500 }) });
+  const real = { ...s, slices: s.slices.map(x => ({ ...x, mode: 'real' as const })) };
+  const r1 = applyGuards(real, { 1: 106 }, 1);
+  assert.equal(r1.next.guards!['dhan:real'].on, true);          // exit queued, slice not closed yet
+  // The exit was rejected: back to open, no exitWanted (an automatic reason is not kept).
+  const back = { ...r1.next, slices: r1.next.slices.map(x => ({ ...x, state: 'open' as const, exitWanted: undefined })) };
+  const r2 = applyGuards(back, { 1: 99 }, 2);
+  assert.match(r2.next.slices[0].exitWanted ?? '', /target/);   // queued again although the price fell back
+  assert.equal(r2.next.guards!['dhan:real'].on, true);
+  const closed = { ...r2.next, slices: r2.next.slices.map(x => ({ ...x, state: 'closed' as const })) };
+  assert.equal(applyGuards(closed, {}, 3).next.guards!['dhan:real'].on, false);
+});
+
+test('REAL: a long (hedge) exits only after the shorts', () => {
+  const short = slice({ id: 'sh', mode: 'real', side: 'SELL' });
+  const hedge = slice({ id: 'hg', mode: 'real', side: 'BUY', contract: { ...(slice({}).contract as object), securityId: '2' } });
+  const s = state([short, hedge], { 'dhan:real': g({ stop: 100 }) });
+  const r1 = applyGuards(s, { 1: 100, 2: 1 }, 1);      // short loses: (100-? ) ensure trip below
+  const forced = applyGuards({ ...s, guards: { 'dhan:real': g({ stop: 100, tripped: 'MTM stop-loss ₹100 hit' }) } }, { 1: 100, 2: 1 }, 1);
+  const by = (st: LadderState, id: string) => st.slices.find(x => x.id === id)!;
+  assert.ok(by(forced.next, 'sh').exitWanted);
+  assert.equal(by(forced.next, 'hg').exitWanted, undefined);
+  void r1;
+  const shortsGone = { ...forced.next, slices: forced.next.slices.map(x => (x.id === 'sh' ? { ...x, state: 'closed' as const, exitWanted: undefined } : x)) };
+  assert.ok(by(applyGuards(shortsGone, { 2: 1 }, 2).next, 'hg').exitWanted);
+});
+
+test('an exiting REAL slice with a price still counts in the MTM', () => {
+  const s = state([slice({ mode: 'real', state: 'exiting' })], { 'dhan:real': g({ target: 500 }) });
+  assert.ok(applyGuards(s, { 1: 106 }, 1).next.slices[0]);
+  assert.equal(applyGuards(s, { 1: 106 }, 1).fired.length, 1);
 });

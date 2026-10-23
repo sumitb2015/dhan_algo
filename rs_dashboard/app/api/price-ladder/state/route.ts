@@ -316,9 +316,18 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         const broker = parseBroker(body.broker);
         const mode = body.mode === 'real' ? 'real' : body.mode === 'sim' ? 'sim' : null;
         if (!broker || !mode) return bad('broker and mode required');
+        const key = guardKey(broker, mode);
+        if (body.on !== true) {
+          // Switching off never validates: a half-edited draft must not keep a live exit-everything rule on.
+          const s = await updateLadderState(st => {
+            const old = st.guards?.[key];
+            const off = { ...(old ?? {}), on: false, tripped: undefined, peak: undefined, floor: undefined, firedReason: undefined };
+            return pushEvent({ ...st, guards: { ...(st.guards ?? {}), [key]: off } }, ev('info', `MTM guard ${broker} ${mode.toUpperCase()} off`));
+          });
+          return NextResponse.json({ success: true, data: { state: s } });
+        }
         const g = cleanGuard(body);
         if (typeof g === 'string') return bad(g);
-        const key = guardKey(broker, mode);
         const s = await updateLadderState(st => {
           const guards = { ...(st.guards ?? {}) };
           guards[key] = carryRuntime(g, guards[key]);

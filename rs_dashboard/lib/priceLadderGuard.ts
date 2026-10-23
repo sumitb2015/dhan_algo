@@ -26,8 +26,9 @@ export interface LadderGuard {
   floor?: number;
   firedAt?: number;
   firedReason?: string;
-  /** A rule tripped but an entry is still in flight (placing / a resting REAL order): the guard stays on, exiting whatever
-   *  opens, and switches itself off only once nothing of its scope can still become a position. */
+  /** A rule tripped but something of its scope is still live (an entry in flight, an exit being sent or retried, a leg
+   *  waiting its turn): the guard stays on, re-queuing exits, and switches itself off only once nothing of its scope
+   *  holds or can still become a position. */
   tripped?: string;
 }
 
@@ -102,10 +103,16 @@ export function scopeMtm(s: LadderState, broker: LadderBroker, mode: 'sim' | 're
 
 const BROKERS: ReadonlySet<string> = new Set(['dhan', 'kotak', 'zerodha']);
 
-/** An entry of this scope that may still fill: a market entry being sent, or a REAL order resting at the broker. */
-function entryInFlight(s: LadderState, broker: LadderBroker, mode: 'sim' | 'real'): boolean {
-  return s.slices.some(x => inScope(x, broker, mode) && (x.state === 'placing' || (x.state === 'working' && x.mode === 'real')))
-    || (s.pairs ?? []).some(p => inScope(p, broker, mode) && p.state === 'placing');
+/** Anything of this scope that holds a position or may become one (an unresolved UNKNOWN is the user's to settle). */
+function scopeLive(s: LadderState, broker: LadderBroker, mode: 'sim' | 'real'): boolean {
+  return s.slices.some(x => inScope(x, broker, mode) && (x.state === 'open' || x.state === 'exiting' || x.state === 'placing' || (x.state === 'working' && (x.mode === 'real' || x.filledQty))))
+    || (s.pairs ?? []).some(p => inScope(p, broker, mode) && (p.state === 'open' || p.state === 'broken' || p.state === 'rolling' || p.state === 'exiting' || p.state === 'placing'));
+}
+
+/** A short (SELL) slice or pair of this scope that still holds, or is closing. */
+function shortsPending(s: LadderState, broker: LadderBroker, mode: 'sim' | 'real'): boolean {
+  return s.slices.some(x => inScope(x, broker, mode) && x.side === 'SELL' && (x.state === 'open' || x.state === 'exiting' || x.state === 'placing'))
+    || (s.pairs ?? []).some(p => inScope(p, broker, mode) && p.side === 'SELL' && (p.state === 'open' || p.state === 'broken' || p.state === 'rolling' || p.state === 'exiting' || p.state === 'placing'));
 }
 
 /** Does the scope hold a position, or an order that could become one? (A guard with nothing to guard does not tick.) */
@@ -131,23 +138,28 @@ export function applyGuards(s: LadderState, ltps: Record<string, number>, now: n
       if (r.guard !== g) next = { ...next, guards: { ...next.guards, [key]: r.guard } };
       continue;
     }
+    // REAL: shorts exit first and a long (a hedge) only once no short of the scope is left, so a hedge can never go
+    // while its short cover is still pending or rejected. SIM has no margin, so everything goes at once.
+    const shortsLeft = mode === 'real' && shortsPending(next, broker, mode);
     for (const x of next.slices) {
       if (!inScope(x, broker, mode)) continue;
-      if (x.state === 'open' && !x.exitWanted) next = patchSlice(next, x.id, { exitWanted: r.reason });
-      else if (x.state === 'armed' || (x.state === 'working' && x.mode === 'sim')) next = patchSlice(next, x.id, { state: 'cancelled', note: 'Cancelled by the MTM guard' });
+      if (x.state === 'open' && !x.exitWanted) {
+        if (!shortsLeft || x.side === 'SELL') next = patchSlice(next, x.id, { exitWanted: r.reason });
+      } else if (x.state === 'armed' || (x.state === 'working' && x.mode === 'sim')) next = patchSlice(next, x.id, { state: 'cancelled', note: 'Cancelled by the MTM guard' });
     }
     for (const p of next.pairs ?? []) {
       if (!inScope(p, broker, mode) || !isPairLive(p)) continue;
       if (p.state === 'armed') next = patchPair(next, p.id, { state: 'cancelled', note: 'Cancelled by the MTM guard' });
-      else if ((p.state === 'open' || p.state === 'broken' || p.state === 'rolling') && !p.exitWanted) next = patchPair(next, p.id, { exitWanted: r.reason });
+      else if ((p.state === 'open' || p.state === 'broken' || p.state === 'rolling') && !p.exitWanted && (!shortsLeft || p.side === 'SELL')) next = patchPair(next, p.id, { exitWanted: r.reason });
     }
     const first = !g.tripped;
     if (first) {
       fired.push({ broker, mode, reason: r.reason });
       next = pushEvent(next, ev('warn', `MTM guard (${broker} ${mode.toUpperCase()}): ${r.reason} — exiting everything`));
     }
-    // An entry still in flight can open after this write: stay on and exit it when it does.
-    const pending = entryInFlight(next, broker, mode);
+    // Stay on until nothing of the scope is live: an exit that was rejected or is held (market closed) is re-queued by
+    // the next tick, an entry in flight is exited when it opens, a long waits for its short.
+    const pending = scopeLive(next, broker, mode);
     next = { ...next, guards: { ...next.guards, [key]: pending
       ? { ...r.guard, tripped: r.reason, firedAt: g.firedAt ?? now, firedReason: undefined }
       : { ...r.guard, on: false, tripped: undefined, firedAt: g.firedAt ?? now, firedReason: r.reason } } };

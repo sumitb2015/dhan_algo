@@ -16,7 +16,7 @@ Real-money endpoint — SIM (paper) is the default; REAL needs the daily LIVE ·
 - **Style** — Single (no exit rule), Bracket (target + SL in index points) or Cover (SL only). **Trail SL by** keeps the SL
   that many points behind the best level reached; it only moves in your favour.
 - Number boxes have up/down arrows (and ArrowUp/ArrowDown). Target / SL / trail step by 1 point; per-leg SL % by 5; the SL
-  buffer by 0.1. An arrow run commits once, half a second after you stop.
+  buffer by 0.1 (a fractional value steps from itself, so 2.5 → 3.5). The tick you pick is remembered per mode (Plain defaults to 1). An arrow run commits once, half a second after you stop.
 
 ## Option chain window
 
@@ -41,11 +41,12 @@ closed. It resets each day.
 
 Example: trigger 1,000, lock 400, every +500 raise 250 → lock 400 at MTM 1,000, 650 at 1,500, 900 at 2,000.
 
-**When a rule trips:** every open position of that scope exits at market, armed levels are cancelled, resting REAL entry
-orders are cancelled at the broker (retried every 30 s; a failure is logged as an error), and the guard switches itself
-off — switch it on again to carry on. If an entry is still in flight (a market entry being sent, a resting REAL order, a
-pair placing) the guard stays on, shown as *Tripped*, exits whatever then opens, and switches off once nothing can still
-become a position.
+**When a rule trips:** every open position of that scope is queued to exit at market, armed levels are cancelled and resting
+REAL entry orders are cancelled at the broker (off the watcher's tick, retried every 30 s; a failure that leaves the order
+resting is logged as an error). The guard then stays on — shown as *Tripped* — until nothing of its scope is live: a
+rejected or held exit (e.g. market closed) is queued again, an entry still in flight is exited when it opens, and on REAL
+a long (a hedge) exits only after the shorts are closed. Only then does it switch itself off and report *Fired*. Switching
+off by hand never needs a valid draft.
 
 **Things to know**
 - MTM includes P&L already booked today. Switching on a 2,000 stop when the day is already −3,000 would exit at once, so
@@ -55,6 +56,7 @@ become a position.
 - No price for an open leg = no decision (a partial sum would hide that leg's loss). Prices come from the WebSocket bridges
   and are only used when fresh.
 - A guard only ever exits or cancels, so it needs no REAL arm.
+- One guard covers every ladder on that broker + mode (both cards show the same guard).
 
 ## Prices and Dhan rate limits
 

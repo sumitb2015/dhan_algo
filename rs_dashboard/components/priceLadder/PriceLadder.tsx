@@ -11,8 +11,10 @@ import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
 import { FOCUS_RING } from '@/components/Scalper';
 import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
-import { isPairLive, legSlPrice, pairName, pairNowPnl, sumPairPnl, LEG_KEYS, PAIR_STRIKE_STEP, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
+import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
+import { StepArrows } from '@/components/priceLadder/StepArrows';
+import { scopeMtm } from '@/lib/priceLadderGuard';
 import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
@@ -39,6 +41,7 @@ const PAIR_TICKS = [0.5, 1, 2, 5];
 /** The page's ladder: the two single-option modes, or Pair (a straddle / strangle on its combined premium). */
 type PageMode = LadderMode | 'pair';
 const MODE_TICK: Record<PageMode, number> = { xy: 5, plain: 1, pair: 1 };
+const TICKS_OF: Record<PageMode, readonly number[]> = { xy: XY_TICKS, plain: PLAIN_TICKS, pair: PAIR_TICKS };
 const ROWS = 31;
 const POLL_MS = 1000;
 /** The one-shot expiry / option-chain loads retry this many times, LOAD_RETRY_MS × attempt apart. */
@@ -92,6 +95,8 @@ function NumField({ value, onCommit, min, max, step, label, width = 'w-16', comp
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pending = useRef<number | null>(null);
   const clearTimer = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } };
+  // A step still waiting to commit is dropped with the row: the stale onCommit must not post for a closed leg.
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
   const commit = () => {
     clearTimer();
     if (draft == null) return;
@@ -104,7 +109,8 @@ function NumField({ value, onCommit, min, max, step, label, width = 'w-16', comp
     const inc = step ?? 1;
     const cur = pending.current ?? Number(draft ?? value);
     const base = Number.isFinite(cur) ? cur : value;
-    const dp = (String(inc).split('.')[1] ?? '').length;
+    const decimals = (v: number) => (String(v).split('.')[1] ?? '').length;
+    const dp = Math.max(decimals(inc), decimals(base));
     let n = Number((base + dir * inc).toFixed(dp));
     if (n < min) n = min;
     if (max != null && n > max) n = max;
@@ -119,14 +125,13 @@ function NumField({ value, onCommit, min, max, step, label, width = 'w-16', comp
       if (v != null && v !== value) onCommit(v);
     }, 500);
   };
-  const arrow = 'flex-1 flex items-center justify-center text-zinc-500 hover:text-white hover:bg-zinc-800 leading-none';
   return (
     <div className={`${width} relative inline-flex`}>
       <input
         aria-label={label} inputMode="decimal"
         className={`w-full pl-2 pr-5 ${compact ? 'py-0.5' : 'py-1'} rounded bg-zinc-900 border border-zinc-700 text-xs font-mono text-zinc-100 focus:outline-none focus:border-zinc-500`}
         value={draft ?? String(value)}
-        onChange={e => { pending.current = null; setDraft(e.target.value); }}
+        onChange={e => { clearTimer(); pending.current = null; setDraft(e.target.value); }}
         onBlur={commit}
         onKeyDown={e => {
           if (e.key === 'Enter') commit();
@@ -134,14 +139,7 @@ function NumField({ value, onCommit, min, max, step, label, width = 'w-16', comp
           if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); stepBy(e.key === 'ArrowUp' ? 1 : -1); }
         }}
       />
-      <div className="absolute right-px top-px bottom-px w-4 flex flex-col rounded-r overflow-hidden border-l border-zinc-700">
-        <button type="button" tabIndex={-1} aria-label={`Increase ${label}`} onMouseDown={e => e.preventDefault()} onClick={() => stepBy(1)} className={`${arrow} border-b border-zinc-700`}>
-          <svg width="8" height="5" viewBox="0 0 8 5" fill="currentColor"><path d="M4 0l4 5H0z" /></svg>
-        </button>
-        <button type="button" tabIndex={-1} aria-label={`Decrease ${label}`} onMouseDown={e => e.preventDefault()} onClick={() => stepBy(-1)} className={arrow}>
-          <svg width="8" height="5" viewBox="0 0 8 5" fill="currentColor"><path d="M4 5L0 0h8z" /></svg>
-        </button>
-      </div>
+      <StepArrows label={label} onStep={stepBy} />
     </div>
   );
 }
@@ -221,6 +219,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // the price deciding LIMIT or stop (plain: an SL-limit `slBufferPct` past the trigger).
   const [zones, setZonesRaw] = useState<LadderZones>('classic');
   const setZones = (z: LadderZones) => { setZonesRaw(z); savePref(k('price-ladder-zones'), z); };
+  /** The mode's tick: the one last chosen for it (remembered per mode), else its default. */
+  const tickFor = useCallback((m: PageMode) => Number(readPref(k(`price-ladder-tick-${m}`), TICKS_OF[m].map(String), String(MODE_TICK[m]))), [k]);
+  const chooseTick = (t: number, m: PageMode) => { setTick(t); savePref(k(`price-ladder-tick-${m}`), String(t)); };
   const [slBufferPct, setSlBufferPct] = useState(DEFAULT_SL_BUFFER_PCT);
   const [eventsOpen, setEventsOpen] = useState(false);
   const [style, setStyle] = useState<'Single' | 'Bracket' | 'Cover'>('Bracket');
@@ -250,16 +251,16 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     const savedMode = readPref(k('price-ladder-mode'), ['xy', 'plain', 'pair'] as const, 'xy');
     setModeRaw(savedMode);
     // The tick belongs to the mode (setMode sets it on a click): a page reopened into Plain must not keep XY's 5.
-    setTick(MODE_TICK[savedMode]);
+    setTick(tickFor(savedMode));
     setZonesRaw(readPref(k('price-ladder-zones'), ['classic', 'anywhere'] as const, 'classic'));
     setEventsOpen(readPref(k('price-ladder-events-open'), ['0', '1'] as const, '0') === '1');
     setUnderlyingRaw(readPref(k('price-ladder-underlying'), UNDERLYINGS, 'NIFTY'));
     /* eslint-enable react-hooks/set-state-in-effect */
     return installAlertSoundUnlock();
-  }, [k]);
+  }, [k, tickFor]);
   // Each mode has its own axis (index / premium / combined premium): drop the old rows until the new price arrives,
   // so a Pair ladder never shows the XY futures levels as if they were combined premiums.
-  const setMode = (m: PageMode) => { setModeRaw(m); savePref(k('price-ladder-mode'), m); setTick(MODE_TICK[m]); setCenter(0); setFollow(true); setManual(false); };
+  const setMode = (m: PageMode) => { setModeRaw(m); savePref(k('price-ladder-mode'), m); setTick(tickFor(m)); setCenter(0); setFollow(true); setManual(false); };
   // The pair's strikes: CE = centre + wing steps, PE = centre − wing steps (a straddle: both on the centre). Null when a
   // leg is not in the chain's strike list.
   const pairStep = STRIKE_STEP[underlying] ?? 50;
@@ -621,17 +622,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     [slices, broker, pageMode, securityId, optLtp]);
   // The ladder's own P&L across every contract, for this broker and the page's SIM/REAL mode (open legs at live LTP).
   // Pairs count too; '—' when any open slice or pair has no price (a partial sum would hide that leg's loss).
-  const ladderPnl = useMemo(() => {
-    const ltps = data?.ltps ?? {};
-    const pickS = (s: LadderSlice) => s.broker === broker && s.mode === pageMode;
-    const pickP = (p: LadderPair) => p.broker === broker && p.mode === pageMode;
-    const hasS = slices.some(s => pickS(s) && sliceNowPnl(s, ltps[s.contract.securityId]) !== undefined);
-    const hasP = pairs.some(p => pickP(p) && pairNowPnl(p, ltps) !== undefined);
-    if (!hasS && !hasP) return null;
-    const a = hasS ? sumSlicePnl(slices, pickS, s => ltps[s.contract.securityId]) : 0;
-    const b = hasP ? sumPairPnl(pairs, pickP, ltps) : 0;
-    return a == null || b == null ? null : a + b;
-  }, [slices, pairs, broker, pageMode, data?.ltps]);
+  // The same function the server's MTM guard reads, so the chip and the guard can never disagree.
+  const ladderPnl = useMemo(() => (data ? scopeMtm(data.state, broker, pageMode, data.ltps ?? {}) : null), [data, broker, pageMode]);
 
   const liveArmed = !!data?.liveArmed;
   const realBlocked = real && !liveArmed;
@@ -869,14 +861,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     if (c.underlying !== underlying) setCenter(0);
     setUnderlyingRaw(c.underlying);
     setExpiry(c.expiry);
-    setModeRaw('pair'); setTick(MODE_TICK.pair);
+    setModeRaw('pair'); setTick(tickFor('pair'));
     setStructure(p.structure);
     const step = STRIKE_STEP[c.underlying] ?? 50;
     setStrike((c.strike + pc.strike) / 2);
     setWing(Math.max(1, Math.round((c.strike - pc.strike) / 2 / step)));
     setBroker(p.broker);
     setReal(p.mode === 'real'); setRealAck(false);
-  }, [setBroker, underlying]);
+  }, [setBroker, underlying, tickFor]);
 
   // Auto-focus the contract of the newest live trade on first load so the user immediately sees it. It never switches
   // the page into REAL on its own: it prefers a trade in the page's mode (SIM on load) and otherwise shows the contract
@@ -1259,7 +1251,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             )}
             <div className="flex items-center gap-2 flex-wrap text-xs">
               <span className="text-zinc-400">Tick</span>
-              <Seg value={String(tick)} options={ticks.map(String)} onChange={v => setTick(Number(v))} />
+              <Seg value={String(tick)} options={ticks.map(String)} onChange={v => chooseTick(Number(v), mode)} />
               <button type="button" onClick={() => { setFollow(true); setManual(false); setCenter(refPrice); }} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white">
                 <Crosshair className="w-3.5 h-3.5" /> Centre
               </button>

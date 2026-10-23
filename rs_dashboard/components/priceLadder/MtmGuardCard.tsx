@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { Info, ShieldCheck } from 'lucide-react';
+import { StepArrows } from '@/components/priceLadder/StepArrows';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
 
 // The global MTM guard of one broker + SIM/REAL mode: target, stop-loss, trailing and Protect profit over the ladder's
@@ -24,7 +25,6 @@ function Box({ label, value, onChange, step = 100 }: { label: string; value: str
     const n = Number(value) || 0;
     onChange(String(Math.max(0, n + dir * step)));
   };
-  const arrow = 'flex-1 flex items-center justify-center text-zinc-500 hover:text-white hover:bg-zinc-800 leading-none';
   return (
     <div className="relative inline-flex w-24">
       <input
@@ -33,14 +33,7 @@ function Box({ label, value, onChange, step = 100 }: { label: string; value: str
         onKeyDown={e => { if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); bump(e.key === 'ArrowUp' ? 1 : -1); } }}
         className="w-full pl-2 pr-5 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-xs font-mono text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
       />
-      <div className="absolute right-px top-px bottom-px w-4 flex flex-col rounded-r overflow-hidden border-l border-zinc-700">
-        <button type="button" tabIndex={-1} aria-label={`Increase ${label}`} onMouseDown={e => e.preventDefault()} onClick={() => bump(1)} className={`${arrow} border-b border-zinc-700`}>
-          <svg width="8" height="5" viewBox="0 0 8 5" fill="currentColor"><path d="M4 0l4 5H0z" /></svg>
-        </button>
-        <button type="button" tabIndex={-1} aria-label={`Decrease ${label}`} onMouseDown={e => e.preventDefault()} onClick={() => bump(-1)} className={arrow}>
-          <svg width="8" height="5" viewBox="0 0 8 5" fill="currentColor"><path d="M4 5L0 0h8z" /></svg>
-        </button>
-      </div>
+      <StepArrows label={label} onStep={bump} />
     </div>
   );
 }
@@ -82,6 +75,12 @@ export function MtmGuardCard({ broker, real, mtm, guard, post }: {
     return null;
   };
   const save = (nextOn: boolean) => {
+    if (!nextOn) {
+      // Switching off never needs a valid draft: a half-typed edit must not keep a live exit-everything rule on.
+      setConfirmNow(null);
+      void post({ action: 'guard', broker, mode: real ? 'real' : 'sim', on: false });
+      return;
+    }
     const v = parse();
     if (typeof v === 'string') { toast.error(v); return; }
     if (nextOn && !on) {
@@ -97,7 +96,7 @@ export function MtmGuardCard({ broker, real, mtm, guard, post }: {
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 flex flex-col gap-1.5 text-xs">
       <div className={row}>
-        <span className="flex items-center gap-1.5 text-[13px] font-semibold tracking-tight text-zinc-100"><ShieldCheck className="w-3.5 h-3.5 text-emerald-400" aria-hidden /> MTM guard <span className="inline-flex text-zinc-500" title={HELP} aria-label={HELP} role="img"><Info className="w-3 h-3" aria-hidden /></span></span>
+        <span className="flex items-center gap-1.5 text-[13px] font-semibold tracking-tight text-zinc-100"><ShieldCheck className="w-3.5 h-3.5 text-emerald-400" aria-hidden /> MTM guard <span className="inline-flex text-zinc-500" title={`${HELP} This one guard covers every ladder on ${broker} ${real ? 'REAL' : 'SIM'}.`} aria-label={HELP} role="img"><Info className="w-3 h-3" aria-hidden /></span></span>
         <span className={`font-mono font-semibold ${mtm == null ? 'text-zinc-500' : mtm >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title="The ladder's own P&L for this broker and mode">{mtm == null ? '—' : rs(mtm)}</span>
       </div>
       <div className={row}><span className={lab}>Target ₹</span><Box label="MTM target in rupees" value={draft.target} onChange={set('target')} /></div>
@@ -131,7 +130,7 @@ export function MtmGuardCard({ broker, real, mtm, guard, post }: {
         <p className="text-[10px] text-amber-300">{confirmNow} — switching on exits everything straight away. Press Switch on again to confirm, or change the level.</p>
       )}
       {on && guard?.tripped && (
-        <p className="text-[10px] text-amber-300">Tripped: {guard.tripped}. Exiting; waiting for an order still in flight to settle.</p>
+        <p className="text-[10px] text-amber-300">Tripped: {guard.tripped}. Exiting — it stays on until every position and order of this broker and mode is closed (a rejected or held exit is retried; a long waits for its short).</p>
       )}
       {!on && guard?.firedReason && (
         <p className="text-[10px] text-amber-300">Fired: {guard.firedReason}. Everything was exited; switch on to guard again.</p>
