@@ -872,8 +872,6 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const hiddenPairs = mode === 'pair' && pairView ? pairs.filter(p => isPairLive(p)
     && p.legs.ce.contract.securityId === pairView.ce.securityId && p.legs.pe.contract.securityId === pairView.pe.securityId
     && (p.broker !== broker || p.mode !== pageMode)) : [];
-  const hiddenHere = mode === 'pair' ? [] : liveGroups.filter(g => g.slices[0].contract.securityId === securityId
-    && (g.slices[0].mode !== pageMode || g.slices[0].broker !== broker));
   const done = paneSlices.filter(s => !isLive(s));
   const livePairs = panePairs.filter(isPairLive);
 
@@ -1278,21 +1276,6 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                     <button type="button" onClick={() => selectPair(p)}
                       className={`px-2 py-0.5 rounded border border-amber-500/50 font-bold hover:bg-amber-500/20 ${FOCUS_RING}`}>
                       Show {p.mode === 'real' ? 'REAL' : 'SIM'}{p.broker !== broker ? ` · ${BROKER_LABELS[p.broker]}` : ''}
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-            {hiddenHere.length > 0 && (
-              <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-amber-500/40 bg-amber-500/10 text-xs text-amber-300">
-                <AlertTriangle className="w-4 h-4 shrink-0" />
-                {hiddenHere.map(g => (
-                  <span key={g.key} className="inline-flex items-center gap-2">
-                    {g.lots} lot(s) {g.slices[0].side} {g.slices[0].mode === 'real' ? 'REAL' : 'SIM'} on {BROKER_LABELS[g.slices[0].broker]} on this contract
-                    {g.armed ? ` (${g.armed} armed)` : ''} — not shown: the ladder is on {real ? 'REAL' : 'SIM'} · {BROKER_LABELS[broker]}.
-                    <button type="button" onClick={() => selectContract(g.slices[0])}
-                      className={`px-2 py-0.5 rounded border border-amber-500/50 font-bold hover:bg-amber-500/20 ${FOCUS_RING}`}>
-                      Show {g.slices[0].mode === 'real' ? 'REAL' : 'SIM'}{g.slices[0].broker !== broker ? ` · ${BROKER_LABELS[g.slices[0].broker]}` : ''}
                     </button>
                   </span>
                 ))}
