@@ -9,7 +9,8 @@ description: >-
   rs_dashboard/lib/alertSound.ts (installAlertSoundUnlock + playAlertChime),
   the browser autoplay rule that silences timer-fired sounds until the user
   clicks, throttling, which tab should chime, and how to unit-test it without
-  a browser. Not for order-click sound effects (lib/cyberAudio.ts, Cyber
+  a browser, and the entry / exit / warning chime family for order-placing terminals (distinct sounds, mute toggle,
+  pure event classifier). Not for order-click sound effects (lib/cyberAudio.ts, Cyber
   Scalper) and not for desktop notifications or persistent banners.
 ---
 
@@ -79,6 +80,42 @@ Engine tests should assert the `toast` effect, not the sound.
 
 Manual check: open the page, click once, trigger the alert (e.g. a spot rule just past the current price in a SIM/paper
 setup — never a live exit to test a sound), and listen; then reload without clicking and confirm the toast shows silently.
+
+## Trade chimes: entry, exit, warning (Price Ladder, 2026-10-23)
+For an order-placing terminal, one chime is not enough: the user must tell an entry from an exit without looking.
+`lib/alertSound.ts` therefore exports a family that shares ONE `ctx`, the unlock and the 1.5 s throttle (a private
+`playTones(freqs, type, now, step)` builds them all):
+
+| Function | Sound | Use for |
+|---|---|---|
+| `playAlertChime` | 3 rising triangle tones | generic alert (risk rules, level hit) |
+| `playEntryChime` | 2 rising sine tones (784, 1047 Hz) | a trade was taken |
+| `playExitChime` | 2 falling sine tones (1047, 698 Hz) | a trade was closed |
+| `playWarnChime` | 3 low flat square buzzes (330 Hz) | rejected / UNKNOWN order, needs a look |
+
+Adding a new sound: add a one-line export on top of `playTones`; never a second AudioContext.
+
+**Pick the sound from the server's event messages, in a pure module** (`lib/priceLadderChime.ts` — `chimeFor(messages)`
+returns `'warn' | 'exit' | 'entry' | null`, tested in `lib/priceLadderChime.test.ts`). Priority inside one poll batch:
+a problem (`UNKNOWN`, `rejected`) beats an exit (`Exited`, `SIM exit`) beats an entry (` filled `), so a burst never hides a
+rejection behind a friendly sound, and the 1.5 s throttle plays only one sound per burst. Matching is on message text,
+so **if you reword a ladder event message, update the regexes and the test**.
+
+Wiring pattern (PriceLadder.tsx): the page diffs `state.events` against `lastEventAt` each poll, then
+`chimeFor(fresh.map(e => e.msg))` → one `play*Chime()`. The first poll after load only records the newest time (no chime
+for history). Only the first ladder pane chimes (`!second`) so two panes do not double-ring.
+
+**Mute toggle** (the one this skill used to say "add later"): a Volume2/VolumeX icon button, `aria-pressed`, labelled
+"Mute trade chimes" / "Unmute trade chimes", stored in its own localStorage key (`price-ladder-sound`, '1'/'0', default
+on, read/written through the page's try/catch `readPref`/`savePref`). Put it on the main controls row, not only the
+collapsed one, and render it once per terminal. Sound stays an addition to the toast: muted or locked, errors still toast.
+
+**Gotcha when inserting JSX with a script:** matching a short indented string can hit the same text inside another
+block (the collapsed-header fragment matched the main-row anchor and the button rendered only when collapsed). Anchor
+on a unique line, and let an e2e test click the control.
+
+Testing: `lib/alertSound.test.ts` covers the family (oscillator counts 2/2/3, shared throttle);
+`e2e/price-ladder.spec.ts` covers the toggle and that it is remembered across a reload.
 
 ## Checklist
 - [ ] `installAlertSoundUnlock()` in a mount `useEffect` of the page (returns its own cleanup).

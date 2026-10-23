@@ -21,7 +21,7 @@ class FakeCtx {
   removeEventListener: (k: string, fn: () => void) => { listeners[k] = (listeners[k] ?? []).filter(f => f !== fn); },
 };
 
-const { installAlertSoundUnlock, playAlertChime } = await import('./alertSound.ts');
+const { installAlertSoundUnlock, playAlertChime, playEntryChime, playExitChime, playWarnChime } = await import('./alertSound.ts');
 
 test('alert chime: silent before the page is clicked, plays after, and one chime per burst', () => {
   installAlertSoundUnlock();
@@ -33,4 +33,15 @@ test('alert chime: silent before the page is clicked, plays after, and one chime
   assert.equal(oscillators, 3);
   assert.equal(playAlertChime(20_500), false);                  // several rules on one tick: one chime
   assert.equal(playAlertChime(21_600), true);
+});
+
+test('entry, exit and warning chimes share the unlock and the throttle', () => {
+  oscillators = 0;
+  assert.equal(playEntryChime(30_000), true);
+  assert.equal(oscillators, 2);
+  assert.equal(playExitChime(30_500), false);                  // inside the gap: one sound per burst
+  assert.equal(playExitChime(32_000), true);
+  assert.equal(oscillators, 4);
+  assert.equal(playWarnChime(34_000), true);
+  assert.equal(oscillators, 7);
 });

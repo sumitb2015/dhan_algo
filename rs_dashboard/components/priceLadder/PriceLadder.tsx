@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2 } from 'lucide-react';
+import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2, Volume2, VolumeX } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from '@/components/NavBar';
 import { sharedJson } from '@/lib/sharedPoll';
@@ -16,7 +16,8 @@ import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
 import { guardKey, scopeMtm } from '@/lib/priceLadderGuard';
 import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
-import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
+import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
+import { chimeFor } from '@/lib/priceLadderChime';
 import {
   MAX_LADDER_LOTS, paneOf, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
   type ClickType, type LadderZones, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
@@ -209,6 +210,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Pair mode: a leg moving this % against its own fill exits both legs (0 = off).
   const [legSlPct, setLegSlPct] = useState(0);
   const [real, setReal] = useState(false);               // per page load, never persisted
+  const [soundOn, setSoundOn] = useState(true);          // trade chimes; remembered per browser
   const [realAck, setRealAck] = useState(false);         // first REAL click this page load asks first
   // A REAL order's first-click confirmation (confirming it lets later clicks this page load straight through), or a
   // `setting` confirmation (its own title and button; it never switches the REAL-order confirmation off).
@@ -264,6 +266,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     setTick(tickFor(savedMode));
     setZonesRaw(readPref(k('price-ladder-zones'), ['classic', 'anywhere'] as const, 'classic'));
     setEventsOpen(readPref(k('price-ladder-events-open'), ['0', '1'] as const, '0') === '1');
+    setSoundOn(readPref(k('price-ladder-sound'), ['0', '1'] as const, '1') === '1');
     setUnderlyingRaw(readPref(k('price-ladder-underlying'), UNDERLYINGS, 'NIFTY'));
     /* eslint-enable react-hooks/set-state-in-effect */
     return installAlertSoundUnlock();
@@ -536,9 +539,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     if (lastEventAt.current === 0) { lastEventAt.current = newest; return; }
     const fresh = evs.filter(e => e.at > lastEventAt.current);
     lastEventAt.current = Math.max(lastEventAt.current, newest);
-    if (!second && fresh.some(e => /filled|Exited|SIM exit|UNKNOWN|rejected/i.test(e.msg))) playAlertChime();
+    const chime = !second && soundOn ? chimeFor(fresh.map(e => e.msg)) : null;
+    if (chime === 'warn') playWarnChime(); else if (chime === 'exit') playExitChime(); else if (chime === 'entry') playEntryChime();
     for (const e of fresh) if (e.level === 'error') toast.error(e.msg);
-  }, [data?.state.events, second]);
+  }, [data?.state.events, second, soundOn]);
 
   const mcx = isMcxUnderlying(underlying);
   // The reply describes the selection on screen (it can lag one poll behind an expiry / strike / underlying switch).
@@ -974,6 +978,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           <BrokerPicker value={broker} onChange={setBroker} disabled={busy} brokers={LADDER_BROKERS} />
           <Seg value={real ? 'REAL' : 'SIM'} options={['SIM', 'REAL'] as const} onChange={v => { setReal(v === 'REAL'); setRealAck(false); }} />
           {!real && <SimBadge />}
+          {!second && <button type="button" aria-pressed={soundOn} aria-label={soundOn ? 'Mute trade chimes' : 'Unmute trade chimes'}
+            title={soundOn ? 'Trade chimes on: rising = entry, falling = exit, low buzz = rejected / unknown. Click to mute' : 'Trade chimes muted. Click to unmute'}
+            onClick={() => { const v = !soundOn; setSoundOn(v); savePref(k('price-ladder-sound'), v ? '1' : '0'); }}
+            className={`p-1.5 rounded-md border bg-zinc-900 cursor-pointer ${soundOn ? 'border-zinc-700 text-zinc-300 hover:text-white' : 'border-amber-500/50 text-amber-400'}`}>
+            {soundOn ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+          </button>}
           {!second && <button
             type="button" onClick={() => (liveArmed ? void post({ action: 'live', on: false }) : setArmModal(true))}
             className={`px-2.5 py-1 rounded-md text-xs font-bold border transition-colors ${liveArmed ? 'bg-red-600 border-red-500 text-oncolor' : 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:text-white'}`}

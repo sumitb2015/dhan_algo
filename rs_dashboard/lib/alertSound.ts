@@ -35,28 +35,48 @@ export function installAlertSoundUnlock(): () => void {
   return remove;
 }
 
-/** Two rising tones then one high tone (~0.6 s). No-op until audio is unlocked, and at most once per MIN_GAP_MS. */
-export function playAlertChime(now = Date.now()): boolean {
+/** Plays `freqs` one after another on the shared context. Gated like every chime: unlocked, and one per MIN_GAP_MS. */
+function playTones(freqs: number[], type: OscillatorType, now: number, step = 0.18): boolean {
   const c = ctx;
   if (!c || c.state !== 'running' || now - lastPlayed < MIN_GAP_MS) return false;
   lastPlayed = now;
   try {
-    [660, 880, 1175].forEach((f, i) => {
+    freqs.forEach((f, i) => {
       const o = c.createOscillator();
       const g = c.createGain();
-      const t = c.currentTime + i * 0.18;
-      o.type = 'triangle';
+      const t = c.currentTime + i * step;
+      o.type = type;
       o.frequency.value = f;
       g.gain.setValueAtTime(0.0001, t);
       g.gain.exponentialRampToValueAtTime(0.2, t + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + step - 0.02);
       o.connect(g);
       g.connect(c.destination);
       o.start(t);
-      o.stop(t + 0.17);
+      o.stop(t + step - 0.01);
     });
     return true;
   } catch {
     return false;   // audio unavailable: the toast still shows
   }
+}
+
+/** Two rising tones then one high tone (~0.6 s). No-op until audio is unlocked, and at most once per MIN_GAP_MS. */
+export function playAlertChime(now = Date.now()): boolean {
+  return playTones([660, 880, 1175], 'triangle', now);
+}
+
+/** A trade was taken: two quick rising tones. */
+export function playEntryChime(now = Date.now()): boolean {
+  return playTones([784, 1047], 'sine', now, 0.14);
+}
+
+/** A trade was closed: two falling tones, so an exit never sounds like an entry. */
+export function playExitChime(now = Date.now()): boolean {
+  return playTones([1047, 698], 'sine', now, 0.14);
+}
+
+/** Something needs attention (a rejection or an unknown order): three low, flat buzzes. */
+export function playWarnChime(now = Date.now()): boolean {
+  return playTones([330, 330, 330], 'square', now, 0.16);
 }

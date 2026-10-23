@@ -190,6 +190,18 @@ test('SIM mode shows a loud paper marker; REAL hides it', async ({ page }) => {
   await expect(badge).toHaveCount(0);
 });
 
+test('The chime toggle mutes and unmutes trade sounds and is remembered', async ({ page }) => {
+  await install(page);
+  await gotoSingle(page);
+  await page.getByRole('button', { name: 'Mute trade chimes' }).click();
+  await expect(page.getByRole('button', { name: 'Unmute trade chimes' })).toBeVisible();
+  await page.reload();
+  await page.getByRole('button', { name: /Close ladder 2/ }).click();
+  await expect(page.getByRole('button', { name: 'Unmute trade chimes' })).toBeVisible();
+  await page.getByRole('button', { name: 'Unmute trade chimes' }).click();
+  await expect(page.getByRole('button', { name: 'Mute trade chimes' })).toBeVisible();
+});
+
 test('Bracket: target and SL show on the ladder as soon as it is armed (dashed, before the fill)', async ({ page }) => {
   await install(page);
   await gotoSingle(page);
