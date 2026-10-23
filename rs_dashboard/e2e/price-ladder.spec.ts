@@ -71,6 +71,13 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
         };
         state.slices.push(s);
       }
+      if (body.action === 'market') {
+        state.slices.push({
+          id: `m${seen.posts.length}`, kind: 'plain', broker: (body.broker as 'dhan') ?? 'dhan', mode: body.mode === 'real' ? 'real' : 'sim',
+          contract: { underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt: 'CE', securityId: '111', lotSize: 65, exchangeSegment: 'NSE_FNO' },
+          side: body.side as 'BUY', lots: 1, qty: 65, product: 'MIS', state: 'open', createdAt: Date.now(), updatedAt: Date.now(), market: true,
+        } as LadderSlice);
+      }
       if (body.action === 'cancel') state.slices = state.slices.map(x => (x.id === body.id ? { ...x, state: 'cancelled' } : x));
       if (body.action === 'lots') state.slices = state.slices.map(x => (x.id === body.id ? { ...x, lots: Number(body.lots), qty: Number(body.lots) * 65 } : x));
       if (body.action === 'modify') state.slices = state.slices.map(x => (x.id === body.id ? { ...x, entryLevel: Number(body.level) } : x));
@@ -149,6 +156,29 @@ test('REAL armed: the first click asks for confirmation before anything is sent'
   await page.getByRole('button', { name: 'Place REAL order' }).click();
   await expect.poll(() => seen.posts.filter(b => b.action === 'arm').length).toBe(1);
   expect(seen.posts[0]).toMatchObject({ mode: 'real', level: 23180 });
+});
+
+test('Buy Market / Sell Market (SIM): one click sends the selected contract at market with the current lots', async ({ page }) => {
+  const seen = await install(page);
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Sell at market' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.action === 'market').length).toBe(1);
+  expect(seen.posts.find(b => b.action === 'market')).toMatchObject({ mode: 'sim', broker: 'dhan', side: 'SELL', lots: 1, opt: 'CE', strike: 23200 });
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Buy Market (REAL): the first click asks for confirmation before anything is sent', async ({ page }) => {
+  const seen = await install(page, { liveArmed: true });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'REAL', exact: true }).click();
+  await page.getByRole('button', { name: 'Buy at market' }).click();
+  await expect(page.getByText('Place a REAL-money order?')).toBeVisible();
+  expect(seen.posts).toEqual([]);
+  await page.getByRole('button', { name: 'Place REAL order' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.action === 'market').length).toBe(1);
+  expect(seen.posts[0]).toMatchObject({ action: 'market', mode: 'real', side: 'BUY' });
 });
 
 test('Bracket: target and SL show on the ladder as soon as it is armed (dashed, before the fill)', async ({ page }) => {

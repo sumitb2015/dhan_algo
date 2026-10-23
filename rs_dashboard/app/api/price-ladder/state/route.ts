@@ -193,6 +193,75 @@ async function arm(b: ArmBody): Promise<NextResponse> {
 }
 
 /**
+ * Buy / Sell Market buttons: one option contract at MARKET now, no level, no bracket (Single style; exit it from its
+ * widget or the MTM guard). An opening order, so every check an arm has applies — the REAL arm, a live session, market
+ * hours, the auto-exit time, the 20-lot cap and funds/margin. SIM opens at the live premium, as the "+1 lot" does.
+ */
+async function marketOrder(b: Record<string, unknown>): Promise<NextResponse> {
+  const now = Date.now();
+  const u = String(b.underlying ?? '').toUpperCase();
+  if (!LADDER_UNDERLYINGS.includes(u)) return bad(`Unsupported underlying ${b.underlying}`);
+  const broker = b.broker;
+  if (broker !== 'dhan' && broker !== 'kotak' && broker !== 'zerodha') return bad('broker must be dhan, kotak or zerodha');
+  if (b.mode !== 'sim' && b.mode !== 'real') return bad('mode must be sim or real');
+  if (b.opt !== 'CE' && b.opt !== 'PE') return bad('opt must be CE or PE');
+  if (b.side !== 'BUY' && b.side !== 'SELL') return bad('side must be BUY or SELL');
+  if (b.product !== 'NRML' && b.product !== 'MIS') return bad('product must be NRML or MIS');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(b.expiry))) return bad('expiry must be YYYY-MM-DD');
+  const lots = capLots(b.lots);
+  if (lots == null) return bad('Lots must be a whole number from 1 to 20');
+  const strike = Number(b.strike);
+  if (!(strike > 0)) return bad('Invalid strike');
+  const mode = b.mode, side = b.side, opt = b.opt, product = b.product;
+  const st0 = readLadderState();
+  const sess = sessionFor(u, istDay(now), st0.settings?.mcxAutoExitTime);
+  if (sess.open >= sess.close) return bad(sess.note ?? 'The market is closed today');
+  if (istHhmm(now) >= sess.autoExit) return bad(`After ${sess.autoExitLabel} the ladder only exits`);
+  if (mode === 'real') {
+    if (istHhmm(now) < sess.open || istHhmm(now) >= sess.close) return bad('The market is closed');
+    if (!realArmed(st0, istDay(now))) return bad('Switch on LIVE · REAL MONEY first', 403);
+    if (!brokerSessionOk(broker)) return bad(`${BROKER_NAME[broker]} session is not logged in`, 403);
+  }
+  const c = await resolveContract(broker, u, String(b.expiry), strike, opt);
+  if (typeof c === 'string') return bad(c);
+  const qty = lots * c.lotSize;
+  const prices = await loadPrices([spotKey(c)], [c]);
+  const ltp = prices.ltps[c.securityId] ?? 0;
+  if (!(ltp > 0)) return bad('No live option price yet');
+  const child: LadderSlice = {
+    id: newId(), kind: 'plain', broker, mode, contract: c, side, lots, qty, product, state: 'placing',
+    createdAt: now, updatedAt: now, sentAt: now, orderType: 'LIMIT', market: true,
+    note: 'Market order', ...(b.pane === 2 ? { pane: 2 as const } : {}),
+  };
+  if (lotsHeld(st0, child) + lots > MAX_LADDER_LOTS) return bad(`The ladder already holds or has armed ${lotsHeld(st0, child)} lots of this contract — the cap is ${MAX_LADDER_LOTS}`);
+  if (mode === 'real') {
+    // Worst case a market BUY fills a little above the last price.
+    const blocked = await realOpenBlocked(broker, c, side, qty, product, side === 'BUY' ? snapToStep(ltp * 1.05, OPTION_TICK) : ltp);
+    if (blocked) return bad(blocked);
+  }
+  const what = `${mode === 'sim' ? 'SIM ' : ''}${side} ${lots} lot(s) ${u} ${strike}${opt} at MARKET`;
+  let capped = false;
+  const withSlice = (st: LadderState): LadderState => {
+    // Re-checked inside the lock: two clicks in flight must not both pass the read above.
+    if (lotsHeld(st, child) + lots > MAX_LADDER_LOTS) { capped = true; return st; }
+    return { ...st, slices: [...st.slices, child] };
+  };
+  if (mode === 'sim') {
+    const s = await updateLadderState(st => { const n = withSlice(st); return n === st ? st : openedPatch(pushEvent(n, ev('info', what, child.id)), child, qty, ltp, now); });
+    if (capped) return bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
+    return NextResponse.json({ success: true, data: { id: child.id, state: s } });
+  }
+  // REAL: checkpoint before the order; the watcher settles its fill like any entry.
+  await updateLadderState(withSlice);
+  if (capped) return bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
+  const r = await withJob(child.id, () => placeFor(child, side, qty, true));
+  const s = await commitIf(child.id, 'placing', st => pushEvent(afterSend(st, child.id, r, 'entry'), ev('info', `${what}: ${r.status}`, child.id)));
+  if (r.status === 'placed') return NextResponse.json({ success: true, data: { id: child.id, state: s } });
+  if (r.status === 'unknown') return NextResponse.json({ success: false, unknown: true, error: r.error, data: { state: s } }, { status: 504 });
+  return NextResponse.json({ success: false, error: r.error, data: { state: s } });
+}
+
+/**
  * Lots this ladder holds, has on the wire or has armed on the same contract, broker, mode and side (the 20-lot holding
  * cap). Armed XY levels count: the watcher fires them at market without re-checking, so several could cross at once.
  */
@@ -302,6 +371,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     switch (action) {
       case 'arm':
         return await arm(body as unknown as ArmBody);
+
+      case 'market':
+        return await marketOrder(body);
 
       case 'pair':
         // Pair mode (straddle / strangle on the combined premium): SIM only for now.

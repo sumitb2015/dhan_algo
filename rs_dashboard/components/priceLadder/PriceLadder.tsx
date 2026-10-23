@@ -668,6 +668,17 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${mode === 'xy' ? 'armed at' : 'placed at'} ${price}`); });
   }, [post, mode, broker, real, underlying, expiry, strike, opt, lots, product, orderType, zones, slBufferPct, style, tgtPts, slPts, trailOn, trailPts, second]);
 
+  // Buy / Sell Market buttons: the selected contract at market now (single option; the server applies every arm check).
+  const sendMarket = useCallback((side: LadderSide) => {
+    if (!expiry || !strike) return;
+    const what = `${side} ${lots} lot(s) ${underlying} ${strike}${opt} at MARKET now`;
+    // Like every REAL ladder click, the first one this page load asks first.
+    const run = () => void post({
+      action: 'market', broker, mode: real ? 'real' : 'sim', underlying, expiry, strike, opt, side, lots, product, ...(second ? { pane: 2 } : {}),
+    }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${lots} lot(s) ${underlying} ${strike}${opt} sent at MARKET`); });
+    if (real && !realAck) setConfirm({ text: what, run }); else run();
+  }, [post, broker, real, realAck, underlying, expiry, strike, opt, lots, product, second]);
+
   // Pair mode: the entry is on the combined premium (Buy below / Sell above = limit-like; the other side a breakout).
   const sendPair = useCallback((side: LadderSide, price: number, expect: { kind: 'limit' | 'stop'; dir: 'above' | 'below' }) => {
     if (!expiry || !pairOk) return;
@@ -1183,6 +1194,16 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   <button type="button" onClick={() => setLots(1)} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-400 hover:text-white">Clear</button>
                 </div>
               </div>
+              {mode !== 'pair' && (
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button type="button" disabled={busy || !expiry || !strike} onClick={() => sendMarket('BUY')}
+                    title={`BUY ${lots} lot(s) ${strike ?? ''}${opt} at market now`} aria-label="Buy at market"
+                    className="px-2 py-1.5 rounded bg-emerald-600 text-oncolor font-bold hover:bg-emerald-500 disabled:opacity-50">Buy Market</button>
+                  <button type="button" disabled={busy || !expiry || !strike} onClick={() => sendMarket('SELL')}
+                    title={`SELL ${lots} lot(s) ${strike ?? ''}${opt} at market now`} aria-label="Sell at market"
+                    className="px-2 py-1.5 rounded bg-red-600 text-oncolor font-bold hover:bg-red-500 disabled:opacity-50">Sell Market</button>
+                </div>
+              )}
             </div>
             <MtmGuardCard key={myGuardKey} broker={broker} real={real} ladderId={ladderId} mtm={ladderPnl} guard={data?.state?.guards?.[myGuardKey]} post={post} />
             <p className="flex items-center gap-1.5 text-[10px] text-zinc-500">
