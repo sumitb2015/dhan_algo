@@ -181,6 +181,15 @@ test('Buy Market (REAL): the first click asks for confirmation before anything i
   expect(seen.posts[0]).toMatchObject({ action: 'market', mode: 'real', side: 'BUY' });
 });
 
+test('SIM mode shows a loud paper marker; REAL hides it', async ({ page }) => {
+  await install(page, { liveArmed: true });
+  await gotoSingle(page);
+  const badge = page.getByRole('status').filter({ hasText: 'SIM · PAPER — NOT REAL' });
+  await expect(badge).toBeVisible();
+  await page.getByRole('button', { name: 'REAL', exact: true }).click();
+  await expect(badge).toHaveCount(0);
+});
+
 test('Bracket: target and SL show on the ladder as soon as it is armed (dashed, before the fill)', async ({ page }) => {
   await install(page);
   await gotoSingle(page);

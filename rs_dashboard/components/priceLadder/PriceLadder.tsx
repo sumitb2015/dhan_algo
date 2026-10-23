@@ -144,6 +144,16 @@ function NumField({ value, onCommit, min, max, step, label, width = 'w-16', comp
   );
 }
 
+/** Loud paper-trading marker: SIM orders never reach the broker, so it must be impossible to mistake for REAL. */
+function SimBadge({ className = '' }: { className?: string }) {
+  return (
+    <span role="status" title="SIM mode: paper orders only — nothing is sent to the broker"
+      className={`inline-flex items-center gap-1.5 rounded-md bg-amber-400 px-2 py-1 text-xs font-extrabold uppercase tracking-wider text-oncolor-dark ring-2 ring-amber-400/50 animate-pulse ${className}`}>
+      <span className="w-1.5 h-1.5 rounded-full bg-oncolor-dark" aria-hidden />SIM · PAPER — NOT REAL
+    </span>
+  );
+}
+
 function Seg<T extends string>({ value, options, onChange, labels, disabled, compact }: {
   value: T; options: readonly T[]; onChange: (v: T) => void; labels?: Partial<Record<T, string>>; disabled?: boolean; compact?: boolean;
 }) {
@@ -953,15 +963,19 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             </button>
           )}
           {collapsed && (
-            <span className={`text-[10px] font-mono font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${real ? 'text-red-300 bg-red-500/10 border-red-500/30' : 'text-zinc-300 bg-zinc-900 border-zinc-700'}`}
-              title="Broker and order mode for this ladder (shown while the controls are hidden)">
-              {BROKER_LABELS[broker]} · {real ? 'REAL' : 'SIM'}
-            </span>
+            <>
+              <span className={`text-[10px] font-mono font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border ${real ? 'text-red-300 bg-red-500/10 border-red-500/30' : 'text-zinc-300 bg-zinc-900 border-zinc-700'}`}
+                title="Broker and order mode for this ladder (shown while the controls are hidden)">
+                {BROKER_LABELS[broker]} · {real ? 'REAL' : 'SIM'}
+              </span>
+              {!real && <SimBadge />}
+            </>
           )}
         </div>
         {!collapsed && <div className="flex items-center gap-2 flex-wrap">
           <BrokerPicker value={broker} onChange={setBroker} disabled={busy} brokers={LADDER_BROKERS} />
           <Seg value={real ? 'REAL' : 'SIM'} options={['SIM', 'REAL'] as const} onChange={v => { setReal(v === 'REAL'); setRealAck(false); }} />
+          {!real && <SimBadge />}
           {!second && <button
             type="button" onClick={() => (liveArmed ? void post({ action: 'live', on: false }) : setArmModal(true))}
             className={`px-2.5 py-1 rounded-md text-xs font-bold border transition-colors ${liveArmed ? 'bg-red-600 border-red-500 text-oncolor' : 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:text-white'}`}
@@ -1307,7 +1321,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               >
                 Cancel all ({pendingHere})
               </button>
-              <span className="ml-auto text-zinc-500">{real ? <span className="font-bold text-red-400">REAL</span> : <span className="font-bold text-zinc-300">SIM</span>} · {BROKER_LABELS[broker]}</span>
+              <span className="ml-auto text-zinc-500">{real ? <span className="font-bold text-red-400">REAL</span> : <span className="rounded bg-amber-400 px-1.5 py-0.5 font-extrabold text-oncolor-dark">SIM</span>} · {BROKER_LABELS[broker]}</span>
             </div>
             <LadderGrid
               center={center} refPrice={refPrice} tick={tick} rows={ROWS}
