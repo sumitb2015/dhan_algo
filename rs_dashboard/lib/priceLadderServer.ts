@@ -21,7 +21,7 @@ import { pacedMarginCall } from '@/lib/ultimateScannerDhan';
 import {
   EXIT_RETRY_MS, FILL_GRACE_MS, SETTLE_TIMEOUT_MS, SPOT_STALE_MS,
   bias, bracketLevels, emptyLadderState, exitQtyFor, isLive, istDay, pushEvent,
-  rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS,
+  rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS, mcxUnitError,
   type Job, type LadderOrderHow, type LadderBroker, type LadderContract, type LadderSide, type LadderSlice, type LadderState,
 } from '@/lib/priceLadder';
 import {
@@ -56,8 +56,8 @@ export const INDEX_IDS: Record<string, string> = { NIFTY: '13', BANKNIFTY: '25',
 export const LADDER_UNDERLYINGS = [...Object.keys(INDEX_IDS), ...MCX_LADDER_UNDERLYINGS];
 
 export const dhanSegmentFor = (u: string) => (isMcxUnderlying(u) ? 'MCX_COMM' : u === 'SENSEX' ? 'BSE_FNO' : 'NSE_FNO');
-export const kotakExchangeFor = (u: string) => (u === 'SENSEX' ? 'bse_fo' : 'nse_fo');
-export const zerodhaExchangeFor = (u: string) => (u === 'SENSEX' ? 'BFO' : 'NFO');
+export const kotakExchangeFor = (u: string) => (isMcxUnderlying(u) ? 'mcx_fo' : u === 'SENSEX' ? 'bse_fo' : 'nse_fo');
+export const zerodhaExchangeFor = (u: string) => (isMcxUnderlying(u) ? 'MCX' : u === 'SENSEX' ? 'BFO' : 'NFO');
 /** Brokers that key orders and positions by their own trading symbol (Dhan keys by security id). */
 const bySymbol = (b: LadderBroker) => b !== 'dhan';
 
@@ -350,10 +350,10 @@ export async function placeFor(
   s: Pick<LadderSlice, 'broker' | 'contract' | 'product'>, side: LadderSide, qty: number, open: boolean,
   how: LadderOrderHow = { type: 'MARKET' },
 ): Promise<PlaceOutcome> {
-  // MCX is Dhan only: Kotak's and Kite's exchange mapping and quantity units here are NSE/BSE F&O's. Checked where the
-  // order is built, not only where the contract was resolved, so no path can send crude to an equity F&O exchange.
-  if (s.broker !== 'dhan' && (s.contract.exchangeSegment === 'MCX_COMM' || isMcxUnderlying(s.contract.underlying))) {
-    return { status: 'rejected', error: `${s.contract.underlying} trades on Dhan only in the Price Ladder` };
+  // MCX quantity units differ per broker (mcxUnitError), and a crude contract must never reach an equity F&O exchange.
+  if (s.contract.exchangeSegment === 'MCX_COMM' || isMcxUnderlying(s.contract.underlying)) {
+    const unitError = mcxUnitError(s.broker, s.contract, qty);
+    if (unitError) return { status: 'rejected', error: unitError };
   }
   if (s.broker === 'zerodha') return placeZerodha(s, side, qty, open, how);
   if (s.broker === 'kotak') {
@@ -513,9 +513,12 @@ export async function availableFunds(broker: LadderBroker): Promise<{ buy: numbe
 
 /** Dhan's margin for SELLING `qty` of a contract, or null when unreadable. */
 export async function dhanSellMargin(c: LadderContract, qty: number, product: string, price: number): Promise<number | null> {
+  // Dhan takes MCX quantity in LOTS: lotSize is 1 for Dhan / Zerodha slices (no change) and 10 for a Kotak slice (barrels).
+  const dhanQty = isMcxUnderlying(c.underlying) ? qty / c.lotSize : qty;
+  if (!Number.isInteger(dhanQty) || dhanQty <= 0) return null;
   try {
     const r = await pacedMarginCall(() => dhanPost('/margincalculator', {
-      securityId: c.securityId, exchangeSegment: c.exchangeSegment, transactionType: 'SELL', quantity: qty,
+      securityId: c.securityId, exchangeSegment: c.exchangeSegment, transactionType: 'SELL', quantity: dhanQty,
       productType: dhanProduct(product), price,
     })) as Record<string, unknown>;
     const m = Number(r?.totalMargin ?? 0);

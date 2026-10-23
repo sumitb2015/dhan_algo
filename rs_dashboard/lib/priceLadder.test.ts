@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mcxSession, usDstActive } from './mcxSession.ts';
+import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
+import { mcxUnitError, MCX_LADDER_UNDERLYINGS } from './priceLadder.ts';
 import {
   bias, limitZone, classifyClick, levelSane, capLots, cleanBracket, entryStep, bracketLevels, bracketStep, spotFresh,
   settleOrder, exitQtyFor, slicePnl, sliceNowPnl, sumSlicePnl, ownNet, ladderRows, snapToStep, rollDay, realArmed, pushEvent, istHhmm,
@@ -544,4 +546,20 @@ test('openExitStep: MIS square-off, then manual, then the bracket only with a pr
   assert.equal(openExitStep({ ...x, exitWanted: 'Manual exit' }, -1, null, false, '15:17').reason, 'Manual exit');
   assert.equal(openExitStep(x, -1, null, false, '15:17').reason, null);
   assert.match(openExitStep(x, -1, 316, false, '15:17').reason!, /^SL 315/);
+});
+
+test('mcxUnitError: lots for Dhan / Zerodha, whole-lot barrels for Kotak', () => {
+  const lots = { underlying: 'CRUDEOILM', lotSize: 1, mult: 10 };
+  const bbl = { underlying: 'CRUDEOILM', lotSize: 10 };
+  assert.equal(mcxUnitError('dhan', lots, 3), null);
+  assert.equal(mcxUnitError('zerodha', lots, 3), null);
+  assert.equal(mcxUnitError('kotak', bbl, 30), null);
+  assert.match(mcxUnitError('kotak', lots, 3) ?? '', /barrels/);   // lots-style contract on Kotak would send 3 bbl, not 3 lots
+  assert.match(mcxUnitError('kotak', bbl, 25) ?? '', /whole number/);
+  assert.match(mcxUnitError('zerodha', bbl, 30) ?? '', /lots/);    // barrels-style contract on Kite would send 30 lots
+  assert.match(mcxUnitError('dhan', { underlying: 'CRUDEOILM', lotSize: 1 }, 3) ?? '', /lots/);
+});
+
+test('the ladder lot table matches the dashboard MCX multiplier', () => {
+  for (const u of MCX_LADDER_UNDERLYINGS) assert.equal(mcxUnitError('kotak', { underlying: u, lotSize: MCX_LOT_MULTIPLIER[u] }, MCX_LOT_MULTIPLIER[u]), null);
 });

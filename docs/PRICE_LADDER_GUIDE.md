@@ -87,3 +87,15 @@ off by hand never needs a valid draft.
   open); the header account P&L (every 5 s, server-cached); the books window (every 5 s, only while open). Orders and
   cancels go through the shared order-rate lane (8/s).
 - The MTM guard makes no REST calls at all — it reads the same WebSocket prices.
+
+## CRUDEOILM on Zerodha and Kotak
+
+CRUDEOILM trades on all three brokers. Prices always come from Dhan; only the order unit differs, and it is fixed when the contract is resolved (`resolveContract`):
+
+| Broker | Exchange | Order qty | lotSize | `mult` | Sell margin |
+|---|---|---|---|---|---|
+| Dhan | `MCX_COMM` | lots | 1 | 10 | Dhan calculator, qty in lots |
+| Zerodha | `MCX` | lots (Kite's dump reads lot_size 1) | 1 | 10 | same Dhan calculator |
+| Kotak | `mcx_fo` | barrels (10 per lot) | 10 | unset (1) | Dhan calculator, qty / 10 lots |
+
+A contract whose broker lot size is not the expected one is refused rather than guessed. Kotak and Zerodha positions are matched by trading symbol and product, as for the index options. Not yet confirmed against live Zerodha/Kotak MCX fills.

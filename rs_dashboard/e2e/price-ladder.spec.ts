@@ -401,13 +401,13 @@ for (const broker of ['dhan', 'kotak', 'zerodha'] as const) {
     });
 
     if (broker !== 'dhan') {
-      test(`MCX crude is Dhan-only: ${Name} shows why and places nothing`, async ({ page }) => {
+      test(`MCX crude is selectable on ${Name}: no Dhan-only banner, nothing placed`, async ({ page }) => {
         const seen = await install(page);
         await gotoSingle(page);
         await page.getByLabel('Broker for new orders').selectOption(broker);
         await page.getByLabel('Underlying').selectOption('CRUDEOILM');
-        await expect(page.getByText(/trades on Dhan only in the Price Ladder/)).toBeVisible();
         await page.waitForTimeout(500);
+        await expect(page.getByText(/trades on Dhan only in the Price Ladder/)).toHaveCount(0);
         expect(seen.posts.filter(b => b.action === 'arm' || b.action === 'pair')).toEqual([]);
         expect(seen.blocked).toEqual([]);
       });

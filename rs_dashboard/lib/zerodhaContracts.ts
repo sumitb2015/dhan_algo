@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 import { zerodhaContractFromRows, zerodhaUnderlyingOf, zerodhaOrderSlices, type ZerodhaCachedContract, type ZerodhaContractInfo } from '@/lib/zerodhaOrderRules';
 
@@ -56,7 +57,7 @@ export async function ensureZerodhaInstrumentCache(underlying: string): Promise<
 }
 
 interface ZerodhaOptionRow extends ZerodhaCachedContract { strike: number; expiry: string; instrument_type: 'CE' | 'PE' }
-export interface ZerodhaOptionContract { tradingsymbol: string; lotSize: number; tick: number | null; exchange: 'NFO' | 'BFO' }
+export interface ZerodhaOptionContract { tradingsymbol: string; lotSize: number; tick: number | null; exchange: 'NFO' | 'BFO' | 'MCX' }
 
 /**
  * The Kite option for (underlying, expiry YYYY-MM-DD, strike, CE/PE) from Kite's own instrument dump (refreshed by
@@ -71,6 +72,6 @@ export async function zerodhaOptionContract(underlying: string, expiry: string, 
   if (!hit || !(Number(hit.lot_size) > 0)) return null;
   return {
     tradingsymbol: hit.tradingsymbol, lotSize: Number(hit.lot_size),
-    tick: Number(hit.tick_size) > 0 ? Number(hit.tick_size) : null, exchange: underlying === 'SENSEX' ? 'BFO' : 'NFO',
+    tick: Number(hit.tick_size) > 0 ? Number(hit.tick_size) : null, exchange: underlying === 'SENSEX' ? 'BFO' : underlying in MCX_LOT_MULTIPLIER ? 'MCX' : 'NFO',
   };
 }

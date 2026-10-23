@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2, Volume2, VolumeX } from 'lucide-react';
 import { toast } from 'sonner';
+import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import NavBar from '@/components/NavBar';
 import { sharedJson } from '@/lib/sharedPoll';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
@@ -29,7 +30,7 @@ import {
 // fires them (lib/priceLadderServer.ts), so closing this tab does not disarm anything. Plain mode is a one-click
 // LIMIT / SL ladder on the option's own premium. This component only draws and asks; every rule and check is server-side.
 
-/** Index underlyings, then the MCX ones the ladder trades (MCX_LADDER_UNDERLYINGS — Dhan only). */
+/** Index underlyings, then the MCX ones the ladder trades (MCX_LADDER_UNDERLYINGS). */
 const UNDERLYINGS: readonly string[] = ['NIFTY', 'BANKNIFTY', 'SENSEX', ...MCX_LADDER_UNDERLYINGS];
 /** Accounts the ladder can trade on. Prices always come from Dhan; only orders, positions and order books are per broker. */
 const LADDER_BROKERS = ['dhan', 'kotak', 'zerodha'] as const;
@@ -563,8 +564,6 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const contractError = matches && mode !== 'pair' ? data?.contractError ?? null : null;
   const pairError = matches && mode === 'pair' ? data?.pairError ?? null : null;
   const sessionNote = sessionFor(underlying, istDay(), data?.state?.settings?.mcxAutoExitTime, data?.state?.settings?.nseAutoExitTime).note ?? null;
-  // MCX on the ladder is Dhan only (the server refuses the others too).
-  const brokerUnsupported = mcx && broker !== 'dhan';
   // False only once the status says so (unknown = not blocked; the server still checks every REAL order).
   const sessionDown = sessions[broker] === false;
   const spot = spotView?.spot ?? 0;
@@ -832,7 +831,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const hhmmNow = data ? istHhmm(data.now) : 0;
   const inSession = !!data && sess.open < sess.close && hhmmNow >= sess.open && hhmmNow < sess.close;
   const stale = mode === 'xy' && !spotFreshNow;
-  const placeDisabled = busy || !brokerLoaded || !strike || !(refPrice > 0) || realBlocked || brokerUnsupported || (real && sessionDown) || (mode === 'xy' && stale)
+  const placeDisabled = busy || !brokerLoaded || !strike || !(refPrice > 0) || realBlocked || (real && sessionDown) || (mode === 'xy' && stale)
     || (mode === 'pair' && !pairView);
   const decimals = mode === 'xy' ? (tick < 1 ? 2 : 0) : 2;
   const ticks = mode === 'xy' ? XY_TICKS : mode === 'pair' ? PAIR_TICKS : PLAIN_TICKS;
@@ -1074,15 +1073,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <AlertTriangle className="w-4 h-4" /> {sessionNote}
           </div>
         )}
-        {sessionDown && !brokerUnsupported && (
+        {sessionDown && (
           <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
             <AlertTriangle className="w-4 h-4" />
             {BROKER_LABELS[broker]} session is not logged in — {real ? 'REAL orders are off until you log in (Autologin); exits already sent keep retrying.' : 'SIM works; REAL needs a fresh login (Autologin).'}
-          </div>
-        )}
-        {brokerUnsupported && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
-            <AlertTriangle className="w-4 h-4" /> {underlying} trades on Dhan only in the Price Ladder — switch the broker to Dhan to place orders.
           </div>
         )}
         {mode === 'pair' && pairView && !(pairView.combined && pairView.combined > 0) && (
@@ -1209,7 +1203,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   </div>
                 </>
               )}
-              <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1"><span className="text-zinc-400 font-medium">Lots {lotSize ? <span className="text-zinc-500">({mcx ? `${lots * (shownC?.mult ?? 1)} bbl` : `${lots * lotSize} qty`})</span> : null}</span>
+              <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1"><span className="text-zinc-400 font-medium">Lots {lotSize ? <span className="text-zinc-500">({mcx ? `${lots * (MCX_LOT_MULTIPLIER[underlying] ?? 1)} bbl` : `${lots * lotSize} qty`})</span> : null}</span>
                 <div className="flex flex-wrap items-center gap-1">
                   <NumField compact label="Lots" value={lots} onCommit={v => setLots(Math.min(MAX_LADDER_LOTS, Math.max(1, Math.round(v))))} min={1} max={MAX_LADDER_LOTS} width="w-14" />
                   {[1, 5, 10].map(n => (

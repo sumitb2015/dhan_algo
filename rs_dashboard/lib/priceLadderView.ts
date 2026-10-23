@@ -21,25 +21,27 @@ export async function resolveContract(broker: LadderBroker, u: string, expiry: s
   if (!look || !securityId || !(look.lotSize > 0)) return `${u} ${expiry} ${strike}${opt} is not in Dhan's master list`;
   const c: LadderContract = { underlying: u, expiry, strike, opt, securityId: String(securityId), lotSize: look.lotSize, exchangeSegment: dhanSegmentFor(u) };
   if (isMcxUnderlying(u)) {
-    // Dhan only: Kotak / Zerodha MCX order sizing (absolute units) and symbols are not wired into the ladder.
-    if (broker !== 'dhan') return `${u} trades on Dhan only in the Price Ladder`;
-    // Dhan orders MCX in LOTS (lotSize 1); P&L and premium cost need the barrels per lot.
+    // Dhan's master lists MCX at lotSize 1 and orders it in LOTS; P&L and premium cost need the barrels per lot.
     const mult = MCX_LOT_MULTIPLIER[u];
     if (look.lotSize !== 1 || !(mult > 1)) return `${u}: unexpected lot size ${look.lotSize} — refused`;
     if (!look.future) return `${u}: no futures month on or after ${expiry} in Dhan's master list (restart the dashboard if the master was just refreshed)`;
-    c.mult = mult;
+    // Dhan and Zerodha take MCX quantity in lots (Kite's dump reads lot_size 1), so qty is lots and `mult` converts to
+    // barrels. Kotak takes absolute barrels (lot_size 10): qty is barrels already and mult stays 1 (set below).
+    if (broker !== 'kotak') c.mult = mult;
     c.ref = { securityId: look.future.securityId, segment: 'MCX_COMM', expiry: look.future.expiry };
   }
   if (broker === 'zerodha') {
     // Kite's own instrument dump (metadata only — prices stay Dhan-sourced).
     const z = await zerodhaOptionContract(u, expiry, strike, opt);
     if (!z) return `Zerodha does not list ${u} ${expiry} ${strike}${opt}`;
+    if (isMcxUnderlying(u) && z.lotSize !== 1) return `${u}: unexpected Zerodha lot size ${z.lotSize} — refused`;
     c.tradingSymbol = z.tradingsymbol;
     c.lotSize = z.lotSize;
   }
   if (broker === 'kotak') {
     const k = await kotakOptionContract(u, expiry, strike, opt);
     if (!k) return `Kotak does not list ${u} ${expiry} ${strike}${opt}`;
+    if (isMcxUnderlying(u) && k.lotSize !== MCX_LOT_MULTIPLIER[u]) return `${u}: unexpected Kotak lot size ${k.lotSize} — refused`;
     c.tradingSymbol = k.tradingsymbol;
     c.lotSize = k.lotSize;
   }

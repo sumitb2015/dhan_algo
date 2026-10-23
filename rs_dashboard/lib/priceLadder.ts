@@ -44,9 +44,29 @@ export const AUTO_EXIT_HHMM = 1517;
 export const SESSION_OPEN_HHMM = 915;
 export const SESSION_CLOSE_HHMM = 1530;
 
-/** MCX underlyings the ladder trades (Dhan only): CRUDEOILM options, on their own futures month's price in XY. */
+/** MCX underlyings the ladder trades (all three brokers): CRUDEOILM options, on their own futures month's price in XY. */
 export const MCX_LADDER_UNDERLYINGS = ['CRUDEOILM'];
 export const isMcxUnderlying = (u: string) => MCX_LADDER_UNDERLYINGS.includes(u);
+
+/** Barrels per lot, the one table (also lib/positionPnl.ts MCX_LOT_MULTIPLIER; kept equal by a test). */
+const MCX_BBL_PER_LOT: Record<string, number> = { CRUDEOILM: 10 };
+
+/**
+ * Why a MCX order's quantity unit does not match its broker, or null. Dhan and Zerodha count LOTS (lotSize 1, `mult` =
+ * barrels per lot); Kotak counts BARRELS (lotSize = barrels per lot, no `mult`) so `qty` must be whole lots of it.
+ * Checked where the order is built, so a stale or hand-built slice can never go out in the wrong unit.
+ */
+export function mcxUnitError(broker: LadderBroker, c: Pick<LadderContract, 'underlying' | 'lotSize' | 'mult'>, qty: number): string | null {
+  const bbl = MCX_BBL_PER_LOT[c.underlying];
+  if (!bbl) return `${c.underlying} has no MCX lot table — refused`;
+  if (broker === 'kotak') {
+    if (c.lotSize !== bbl || c.mult) return `${c.underlying} on Kotak must be sized in barrels (lot ${bbl}) — refused`;
+    if (!Number.isInteger(qty / bbl)) return `${qty} is not a whole number of ${c.underlying} lots (${bbl} bbl) — refused`;
+    return null;
+  }
+  if (c.lotSize !== 1 || c.mult !== bbl) return `${c.underlying} on ${broker === 'zerodha' ? 'Zerodha' : 'Dhan'} must be sized in lots — refused`;
+  return null;
+}
 
 export function parseHhmm(str?: string | null): number | null {
   if (!str || !/^\d{1,2}:\d{2}$/.test(str)) return null;
