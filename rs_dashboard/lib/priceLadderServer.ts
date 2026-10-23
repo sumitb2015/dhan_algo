@@ -28,6 +28,7 @@ import {
   cutPairLeg, cutsNewestFirst, isPairLive, LEG_KEYS, pairName, patchPair, planPairs, settleLegEntry, settleLegExit, PAIR_EXIT_RETRY_MS,
   type LadderPair, type PairJob, type PairLegKey,
 } from '@/lib/priceLadderPair';
+import { applyGuards } from '@/lib/priceLadderGuard';
 import { readLadderSettings } from '@/lib/priceLadderSettings';
 
 // The Price Ladder's server watcher. It owns debug/price_ladder_state.json (re-read on every tick and every request,
@@ -72,6 +73,7 @@ function readStateFile(): LadderState {
       events: Array.isArray(s.events) ? s.events : [],
       ...(s.liveArmedOn ? { liveArmedOn: String(s.liveArmedOn) } : {}),
       ...(Array.isArray(s.pairs) && s.pairs.length ? { pairs: s.pairs } : {}),
+      ...(s.guards && Object.keys(s.guards).length ? { guards: s.guards } : {}),
       ...(Number.isFinite(Number(s.rev)) ? { rev: Number(s.rev) } : {}),
       settings: s.settings ?? settings,
     };
@@ -1012,6 +1014,9 @@ async function tick(): Promise<void> {
   let jobs: Job[] = [];
   let pairJobs: PairJob[] = [];
   const planned = await updateLadderState(cur => {
+    // The global MTM guards first: a trip queues every exit of its scope, which planTick then sends in this same write.
+    const g = applyGuards(cur, prices.ltps, now);
+    cur = g.next;
     const r = planTick(cur, prices, now, io);
     jobs = r.jobs;
     // Pairs: SIM fills / exits happen in this write; REAL orders are marked here and sent by the pair jobs below.
@@ -1019,6 +1024,19 @@ async function tick(): Promise<void> {
     pairJobs = pr.jobs;
     return pr.next;
   });
+  // A tripped guard also pulls the resting REAL entry orders (a fill after the exit would reopen what it just closed).
+  // Retried every 30 s while one is still resting; a failure is put on the event log, never swallowed.
+  for (const [key, g] of Object.entries(planned.guards ?? {})) {
+    if (!g.tripped) continue;
+    const [broker, mode] = key.split(':');
+    for (const x of planned.slices.filter(y => y.broker === broker && y.mode === mode && y.mode === 'real' && y.state === 'working' && y.orderId)) {
+      if (!warnOnce(`guard-cancel:${x.id}`, 30_000)) continue;
+      try { await cancelAtBroker(x.broker, x.orderId!); } catch (err) {
+        console.error(`${TAG} guard cancel failed for ${x.orderId}:`, err);
+        await updateLadderState(st => pushEvent(st, ev('error', `MTM guard: could not cancel the resting order ${x.orderId} — cancel it at the broker; the guard stays on until it is gone`, x.id)));
+      }
+    }
+  }
   // Not awaited: the watcher keeps ticking (and checking every other stop) while orders are on the wire.
   if (jobs.length || pairJobs.length) void runJobs(planned, jobs, prices, pairJobs);
   if (!reconciling && Date.now() - lastReconcile >= RECONCILE_MS) {

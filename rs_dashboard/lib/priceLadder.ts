@@ -198,6 +198,8 @@ export interface LadderState {
   settings?: {
     mcxAutoExitTime?: string;
   };
+  /** Global MTM guards (lib/priceLadderGuard.ts), keyed `broker:mode`. Reset with the day. */
+  guards?: Record<string, import('./priceLadderGuard').LadderGuard>;
 }
 
 export const emptyLadderState = (date: string): LadderState => ({ date, slices: [], events: [] });

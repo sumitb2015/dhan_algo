@@ -11,6 +11,7 @@ import {
   snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev, newLadderId, parseTrailRequest, replanBracket, trailedBracket,
   type ClickType, type LadderZones, type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
 } from '@/lib/priceLadder';
+import { carryRuntime, cleanGuard, guardKey } from '@/lib/priceLadderGuard';
 import { setMcxCutoff } from '@/lib/priceLadderCutoff';
 
 // The Price Ladder's ledger (debug/price_ladder_state.json) and its actions. Real-money endpoint: every check that can
@@ -307,6 +308,22 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       case 'live': {
         const on = body.on === true;
         const s = await updateLadderState(st => pushEvent({ ...st, liveArmedOn: on ? today : undefined }, ev(on ? 'warn' : 'info', on ? 'LIVE · REAL MONEY armed for today' : 'LIVE · REAL MONEY off — armed REAL levels will be cancelled')));
+        return NextResponse.json({ success: true, data: { state: s } });
+      }
+
+      case 'guard': {
+        // The global MTM guard of one broker + mode. It only ever exits (and cancels entries), so no REAL arm is needed.
+        const broker = parseBroker(body.broker);
+        const mode = body.mode === 'real' ? 'real' : body.mode === 'sim' ? 'sim' : null;
+        if (!broker || !mode) return bad('broker and mode required');
+        const g = cleanGuard(body);
+        if (typeof g === 'string') return bad(g);
+        const key = guardKey(broker, mode);
+        const s = await updateLadderState(st => {
+          const guards = { ...(st.guards ?? {}) };
+          guards[key] = carryRuntime(g, guards[key]);
+          return pushEvent({ ...st, guards }, ev('info', g.on ? `MTM guard ${broker} ${mode.toUpperCase()} on` : `MTM guard ${broker} ${mode.toUpperCase()} off`));
+        });
         return NextResponse.json({ success: true, data: { state: s } });
       }
 
