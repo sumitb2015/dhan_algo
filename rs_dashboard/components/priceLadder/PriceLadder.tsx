@@ -12,6 +12,7 @@ import { FOCUS_RING } from '@/components/Scalper';
 import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { isPairLive, legSlPrice, pairName, pairNowPnl, sumPairPnl, LEG_KEYS, PAIR_STRIKE_STEP, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
+import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import {
   MAX_LADDER_LOTS, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
@@ -82,21 +83,62 @@ function NumField({ value, onCommit, min, max, step, label, width = 'w-16', comp
   value: number; onCommit: (v: number) => void; min: number; max?: number; step?: number; label: string; width?: string; compact?: boolean;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
+  // Arrow steps only move the draft; the value is committed once the user stops stepping (or on blur / Enter), so a
+  // held key or a run of clicks sends ONE change to a live rule instead of one per step.
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pending = useRef<number | null>(null);
+  const clearTimer = () => { if (timer.current) { clearTimeout(timer.current); timer.current = null; } };
   const commit = () => {
+    clearTimer();
     if (draft == null) return;
-    const n = Number(draft);
+    const n = pending.current ?? Number(draft);
+    pending.current = null;
     if (Number.isFinite(n) && n >= min && (max == null || n <= max)) onCommit(n);
     setDraft(null);
   };
+  const stepBy = (dir: 1 | -1) => {
+    const inc = step ?? 1;
+    const cur = pending.current ?? Number(draft ?? value);
+    const base = Number.isFinite(cur) ? cur : value;
+    const dp = (String(inc).split('.')[1] ?? '').length;
+    let n = Number((base + dir * inc).toFixed(dp));
+    if (n < min) n = min;
+    if (max != null && n > max) n = max;
+    pending.current = n;
+    setDraft(String(n));
+    clearTimer();
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      const v = pending.current;
+      pending.current = null;
+      setDraft(null);
+      if (v != null && v !== value) onCommit(v);
+    }, 500);
+  };
+  const arrow = 'flex-1 flex items-center justify-center text-zinc-500 hover:text-white hover:bg-zinc-800 leading-none';
   return (
-    <input
-      aria-label={label} inputMode="decimal" step={step}
-      className={`${width} px-2 ${compact ? 'py-0.5' : 'py-1'} rounded bg-zinc-900 border border-zinc-700 text-xs font-mono text-zinc-100 focus:outline-none focus:border-zinc-500`}
-      value={draft ?? String(value)}
-      onChange={e => setDraft(e.target.value)}
-      onBlur={commit}
-      onKeyDown={e => { if (e.key === 'Enter') commit(); if (e.key === 'Escape') setDraft(null); }}
-    />
+    <div className={`${width} relative inline-flex`}>
+      <input
+        aria-label={label} inputMode="decimal"
+        className={`w-full pl-2 pr-5 ${compact ? 'py-0.5' : 'py-1'} rounded bg-zinc-900 border border-zinc-700 text-xs font-mono text-zinc-100 focus:outline-none focus:border-zinc-500`}
+        value={draft ?? String(value)}
+        onChange={e => { pending.current = null; setDraft(e.target.value); }}
+        onBlur={commit}
+        onKeyDown={e => {
+          if (e.key === 'Enter') commit();
+          if (e.key === 'Escape') { clearTimer(); pending.current = null; setDraft(null); }
+          if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); stepBy(e.key === 'ArrowUp' ? 1 : -1); }
+        }}
+      />
+      <div className="absolute right-px top-px bottom-px w-4 flex flex-col rounded-r overflow-hidden border-l border-zinc-700">
+        <button type="button" tabIndex={-1} aria-label={`Increase ${label}`} onMouseDown={e => e.preventDefault()} onClick={() => stepBy(1)} className={`${arrow} border-b border-zinc-700`}>
+          <svg width="8" height="5" viewBox="0 0 8 5" fill="currentColor"><path d="M4 0l4 5H0z" /></svg>
+        </button>
+        <button type="button" tabIndex={-1} aria-label={`Decrease ${label}`} onMouseDown={e => e.preventDefault()} onClick={() => stepBy(-1)} className={arrow}>
+          <svg width="8" height="5" viewBox="0 0 8 5" fill="currentColor"><path d="M4 5L0 0h8z" /></svg>
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -977,7 +1019,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           </div>
         )}
 
-        <div className={`grid grid-cols-1 gap-4 ${dual ? '2xl:grid-cols-[320px_minmax(0,1fr)]' : 'lg:grid-cols-[320px_minmax(0,1fr)]'}`}>
+        <div className={`grid grid-cols-1 gap-4 ${dual ? '2xl:grid-cols-[272px_minmax(0,1fr)]' : 'lg:grid-cols-[272px_minmax(0,1fr)]'}`}>
           {/* ── left panel ── */}
           <div className="flex flex-col gap-2" style={{ fontFeatureSettings: '"cv11", "ss01"' }}>
             {/* Side by side below 2xl when two ladders stack their panel above the grid: the two cards share a row. */}
@@ -1058,7 +1100,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   )}
                   <p className="text-zinc-500">{pairOk ? `CE ${pairCe} · PE ${pairPe}` : 'Those strikes are not in the chain — pick another centre or wing'}</p>
                   <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title="Per-leg stop: either leg moving this % against its own fill exits BOTH legs (a short leg rising — 100 = doubled; a long leg falling). 0 = off. Runs alongside the combined target / SL.">Leg SL %</span>
-                    <NumField compact label="Per-leg stop-loss percent (0 = off)" value={legSlPct} onCommit={v => setLegSlPct(Math.max(0, Math.round(v)))} min={0} max={1000} width="w-16" />
+                    <NumField compact label="Per-leg stop-loss percent (0 = off)" value={legSlPct} onCommit={v => setLegSlPct(Math.max(0, Math.round(v)))} min={0} max={1000} step={5} width="w-16" />
                   </div>
                 </>
               )}
@@ -1090,8 +1132,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   </div>
                 </>
               )}
-              <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Lots {lotSize ? <span className="text-zinc-500">({mcx ? `${lots * (shownC?.mult ?? 1)} bbl` : `${lots * lotSize} qty`})</span> : null}</span>
-                <div className="flex items-center gap-1">
+              <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1"><span className="text-zinc-400 font-medium">Lots {lotSize ? <span className="text-zinc-500">({mcx ? `${lots * (shownC?.mult ?? 1)} bbl` : `${lots * lotSize} qty`})</span> : null}</span>
+                <div className="flex flex-wrap items-center gap-1">
                   <NumField compact label="Lots" value={lots} onCommit={v => setLots(Math.min(MAX_LADDER_LOTS, Math.max(1, Math.round(v))))} min={1} max={MAX_LADDER_LOTS} width="w-14" />
                   {[1, 5, 10].map(n => (
                     <button key={n} type="button" onClick={() => setLots(l => Math.min(MAX_LADDER_LOTS, l + n))} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">+{n}</button>
@@ -1100,6 +1142,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 </div>
               </div>
             </div>
+            <MtmGuardCard key={`${broker}:${pageMode}`} broker={broker} real={real} mtm={ladderPnl} guard={data?.state?.guards?.[`${broker}:${pageMode}`]} post={post} />
             <p className="text-[10px] text-zinc-500 leading-relaxed">
               {mode === 'pair'
                 ? `Pair: the ladder is the combined premium (CE + PE). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. Both legs go at MARKET together when the combined crosses the level (REAL: if only one fills, it is closed again); target / SL / trail are in combined-premium points and exit both legs.`
@@ -1451,7 +1494,7 @@ function TrailControl({ s, busy, post, fallback }: { s: LadderSlice; busy: boole
   return (
     <span className="inline-flex items-center gap-1" title={step ? `Step trail: ${cur} pts of SL per ${cur} pts of move. Change the distance to switch to continuous trailing.` : `Continuous trailing SL, ${cur} pts behind the best level`}>
       <span className="text-amber-300 text-[11px]">{step ? 'Step' : 'Trail'}</span>
-      <NumField label="Trailing SL distance in points" value={cur} min={0} width="w-12" onCommit={v => { if (v !== cur) void post({ action: 'trail', id: s.id, trailPts: v }); }} />
+      <NumField label="Trailing SL distance in points" value={cur} min={0} width="w-14" onCommit={v => { if (v !== cur) void post({ action: 'trail', id: s.id, trailPts: v }); }} />
       <button type="button" disabled={busy} onClick={() => void post({ action: 'trail', id: s.id, trailPts: 0 })}
         className={`px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white ${FOCUS_RING}`}>
         Off
@@ -1637,7 +1680,7 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect, onLots, onRoll
                     {(p.state === 'open' || p.state === 'armed') && (
                       <span className="inline-flex items-center gap-1" title="Per-leg stop %: either leg moving this far against its own fill exits both legs (0 = off)">
                         <span className="text-[11px] text-zinc-400">Leg SL%</span>
-                        <NumField label="Per-leg stop-loss percent (0 = off)" value={p.legSlPct ?? 0} min={0} max={1000} width="w-12"
+                        <NumField label="Per-leg stop-loss percent (0 = off)" value={p.legSlPct ?? 0} min={0} max={1000} step={5} width="w-14"
                           onCommit={v => { if (v !== (p.legSlPct ?? 0)) void post({ action: 'pair', op: 'legsl', id: p.id, legSlPct: Math.round(v) }); }} />
                       </span>
                     )}
@@ -1678,7 +1721,7 @@ function PairRollControl({ p, busy, onRoll }: { p: LadderPair; busy: boolean; on
         <option value="ce">Roll CE</option>
         <option value="pe">Roll PE</option>
       </select>
-      <NumField label="Strikes to roll" value={steps} min={1} max={20} width="w-10" onCommit={v => setSteps(Math.max(1, Math.min(20, Math.round(v))))} />
+      <NumField label="Strikes to roll" value={steps} min={1} max={20} width="w-12" onCommit={v => setSteps(Math.max(1, Math.min(20, Math.round(v))))} />
       <span className="inline-flex rounded border border-zinc-700 overflow-hidden">
         <button type="button" disabled={busy} className={btn} aria-label={`${legs === 'both' ? 'Shift' : `Roll ${legs.toUpperCase()}`} up ${steps} strike(s)`} title={`Up ${steps} strike(s)`} onClick={() => onRoll(p, legs, steps)}>↑</button>
         <button type="button" disabled={busy} className={`${btn} border-l border-zinc-700`} aria-label={`${legs === 'both' ? 'Shift' : `Roll ${legs.toUpperCase()}`} down ${steps} strike(s)`} title={`Down ${steps} strike(s)`} onClick={() => onRoll(p, legs, -steps)}>↓</button>
@@ -1702,7 +1745,7 @@ function PairTrailControl({ p, busy, post, fallback }: { p: LadderPair; busy: bo
   return (
     <span className="inline-flex items-center gap-1" title={`Continuous trailing SL, ${cur} pts of combined premium behind the best level`}>
       <span className="text-amber-300 text-[11px]">Trail</span>
-      <NumField label="Pair trailing SL distance in points" value={cur} min={0} width="w-12" onCommit={v => { if (v !== cur) send(v); }} />
+      <NumField label="Pair trailing SL distance in points" value={cur} min={0} width="w-14" onCommit={v => { if (v !== cur) send(v); }} />
       <button type="button" disabled={busy} onClick={() => send(0)} className={`px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white ${FOCUS_RING}`}>Off</button>
     </span>
   );
