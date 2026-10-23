@@ -484,15 +484,15 @@ export async function dhanAvailableFunds(): Promise<{ buy: number; sell: number 
     const f = await dhanGet('/fundlimit', 6000) as Record<string, unknown>;
     const v = Number(f.availabelBalance ?? f.availableBalance);
     if (!Number.isFinite(v)) return null;
-    // Premium is paid from cash: collateral (pledged holdings) backs a short's margin but cannot pay for a BUY.
-    const collateral = Number(f.collateralAmount) || 0;
-    return { buy: Math.max(0, v - collateral), sell: v };
+    // Dhan lets a BUY draw on its available balance (collateral included), so both sides use it; Dhan itself rejects an
+    // order it cannot fund. (Until 2026-10-23 a BUY was held to cash only, available - collateral.)
+    return { buy: v, sell: v };
   } catch { return null; }
 }
 
 /**
- * What the account can spend, per broker: `buy` pays option premium (cash only — collateral cannot), `sell` backs a
- * short's margin (collateral included). Null = unreadable, which the caller treats as a refusal (fail closed).
+ * What the account can spend, per broker: `buy` pays option premium, `sell` backs a
+ * short's margin (Dhan: both are the available balance, collateral included). Null = unreadable, which the caller treats as a refusal (fail closed).
  */
 export async function availableFunds(broker: LadderBroker): Promise<{ buy: number; sell: number } | null> {
   try {
