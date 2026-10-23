@@ -99,3 +99,7 @@ CRUDEOILM trades on all three brokers. Prices always come from Dhan; only the or
 | Kotak | `mcx_fo` | barrels (10 per lot) | 10 | unset (1) | Dhan calculator, qty / 10 lots |
 
 A contract whose broker lot size is not the expected one is refused rather than guessed. Kotak and Zerodha positions are matched by trading symbol and product, as for the index options. Not yet confirmed against live Zerodha/Kotak MCX fills.
+
+## OI bars (XY ladder only — test feature, branch `feat/ladder-oi-bars`)
+
+The XY ladder's rows are index / futures levels, so each strike row carries that strike's open interest from the option chain: **put OI** as a green bar growing left of the Price column (support), **call OI** as a red bar growing right (resistance), both scaled to the largest OI on the whole chain. Hover a bar for the exact OI and its change vs the previous day (shown only when Dhan sends a previous-day OI). Rows that are not a strike (tick 5 against 100-point strikes) have no bar. Toggle with the **OI** checkbox in the ladder header. The chain is re-read every 30 s. Plain and Pair ladders show none: their rows are premiums, not levels. CRUDEOILM's OI unit (lots or barrels) is not yet confirmed against the chain, so the bars carry no unit label.

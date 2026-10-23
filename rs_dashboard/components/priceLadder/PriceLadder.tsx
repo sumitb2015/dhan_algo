@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2, Volume2, VolumeX } from 'lucide-react';
 import { toast } from 'sonner';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
+import { oiRowsFor, maxOi, type OiStrike } from '@/lib/priceLadderOi';
 import NavBar from '@/components/NavBar';
 import { sharedJson } from '@/lib/sharedPoll';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
@@ -80,6 +81,9 @@ interface StateResp {
   } | null;
 }
 interface IndexQuote { ltp: number; prev_close: number; change_pct: number | null; day_high: number | null; day_low: number | null }
+
+/** How often an XY ladder re-reads the chain for its OI bars. */
+const OI_POLL_MS = 30_000;
 
 function readPref<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
   try { const v = localStorage.getItem(key); if (v && (allowed as readonly string[]).includes(v)) return v as T; } catch { /* none */ }
@@ -211,6 +215,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Pair mode: a leg moving this % against its own fill exits both legs (0 = off).
   const [legSlPct, setLegSlPct] = useState(0);
   const [real, setReal] = useState(false);               // per page load, never persisted
+  const [oiOn, setOiOn] = useState(true);                 // XY only: OI bars behind the strike rows; remembered per browser
+  const oiShownRef = useRef(false);   // XY mode with the OI bars on: Plain / Pair ladders never build OI rows
+  const [oiRows, setOiRows] = useState<{ key: string; rows: OiStrike[]; at: number; staleSince: number | null }>({ key: '', rows: [], at: 0, staleSince: null });   // keyed by underlying|expiry so a switch never shows the old chain's bars
   const [soundOn, setSoundOn] = useState(true);          // trade chimes; remembered per browser
   const [realAck, setRealAck] = useState(false);         // first REAL click this page load asks first
   // A REAL order's first-click confirmation (confirming it lets later clicks this page load straight through), or a
@@ -268,6 +275,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     setZonesRaw(readPref(k('price-ladder-zones'), ['classic', 'anywhere'] as const, 'classic'));
     setEventsOpen(readPref(k('price-ladder-events-open'), ['0', '1'] as const, '0') === '1');
     setSoundOn(readPref(k('price-ladder-sound'), ['0', '1'] as const, '1') === '1');
+    setOiOn(readPref(k('price-ladder-oi'), ['0', '1'] as const, '1') === '1');
     setUnderlyingRaw(readPref(k('price-ladder-underlying'), UNDERLYINGS, 'NIFTY'));
     /* eslint-enable react-hooks/set-state-in-effect */
     return installAlertSoundUnlock();
@@ -326,6 +334,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         if (!j.success || !oc) throw new Error('no chain');
         const list = Object.keys(oc).map(Number).filter(n => n > 0 && isTradedStrike(underlying, n)).sort((a, b) => a - b);
         setStrikes(list);
+        if (oiShownRef.current) setOiRows({ key: `${underlying}|${expiry}`, rows: oiRowsFor(oc, n => isTradedStrike(underlying, n)), at: Date.now(), staleSince: null });
         // MCX chains can come back with spot 0 but the option month's futures price set: that is the right ATM base.
         const spot = Number(j.data?.spot) || Number(j.data?.future_price) || 0;
         const step = STRIKE_STEP[underlying] ?? 50;
@@ -358,6 +367,34 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     load(0);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [underlying, expiry]);
+
+  // OI changes slowly: re-read the chain every 30 s while the tab is visible, only for an XY ladder showing the bars (and at
+  // once when the bars come back after being off for longer). The chain route dedupes and paces the call (Dhan's ~1 per
+  // 3 s). One read at a time, newest wins, and a failed read keeps the last bars rather than blanking them.
+  useEffect(() => { oiShownRef.current = oiOn && mode === 'xy'; }, [oiOn, mode]);
+  const oiAtRef = useRef(0);
+  useEffect(() => { oiAtRef.current = oiRows.at; }, [oiRows.at]);
+  useEffect(() => {
+    if (!oiOn || mode !== 'xy' || !expiry) return;
+    let cancelled = false, inFlight = false;
+    const key = `${underlying}|${expiry}`;
+    const readOnce = () => {
+      if (document.hidden || inFlight) return;
+      inFlight = true;
+      fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=dhan&allowStale=1`, { cache: 'no-store' })
+        .then(r => r.json())
+        .then((j: { success?: boolean; stale?: boolean; as_of?: number; data?: { chain?: { oc?: Record<string, { ce?: { oi?: number; previous_oi?: number }; pe?: { oi?: number; previous_oi?: number } }> } } }) => {
+          const oc = j.data?.chain?.oc;
+          // allowStale=1: when Dhan refused a fresh chain the route answers with the last good one, flagged `stale` + `as_of`.
+          if (!cancelled && j.success && oc) setOiRows({ key, rows: oiRowsFor(oc, n => isTradedStrike(underlying, n)), at: Date.now(), staleSince: j.stale && j.as_of ? j.as_of : null });
+        })
+        .catch(() => { /* keep the last bars */ })
+        .finally(() => { inFlight = false; });
+    };
+    if (Date.now() - oiAtRef.current > OI_POLL_MS) readOnce();
+    const t = setInterval(readOnce, OI_POLL_MS);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [oiOn, mode, underlying, expiry]);
 
   // Ladder state + spot + the shown contract's LTP. Pushed by /api/price-ladder/stream (Server-Sent Events) the moment
   // it changes; the 1 s poll below only runs while the stream is not delivering. A view's ledger is applied only if it
@@ -1293,6 +1330,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               <button type="button" onClick={() => { setFollow(true); setManual(false); setCenter(refPrice); }} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white">
                 <Crosshair className="w-3.5 h-3.5" /> Centre
               </button>
+              {mode === 'xy' && <label className="flex items-center gap-1.5 text-zinc-400" title="Open-interest bars on the strike rows: puts left of the Price column, calls right"><input type="checkbox" checked={oiOn} onChange={e => { setOiOn(e.target.checked); savePref(k('price-ladder-oi'), e.target.checked ? '1' : '0'); }} /> OI</label>}
+              {mode === 'xy' && oiOn && oiRows.staleSince != null && <span className="text-[10px] text-amber-300" title="Dhan refused a fresh option chain, so the OI bars come from the last good one">OI stale since {timeOf(oiRows.staleSince)}</span>}
               <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow price</label>
               {held && <span className="text-[10px] text-amber-300" title="The rows stay put while the pointer is on the ladder, so a price tick cannot move a level under the mouse; they re-centre when it leaves">Rows held</span>}
               <button
@@ -1319,6 +1358,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               zones={zones} stopLimitFor={mode === 'plain' ? (side, p) => stopLimitPrice(side, p, slBufferPct) : undefined}
               onPlace={onPlace} onCancel={id => void post(mode === 'pair' ? { action: 'pair', op: 'cancel', id } : { action: 'cancel', id })} onMove={onMove} onAdjust={onAdjust}
               disabled={placeDisabled} decimals={decimals} entryMarks={entryMarks}
+              oi={mode === 'xy' && oiOn && oiRows.key === `${underlying}|${expiry}` && oiRows.rows.length ? { rows: oiRows.rows, max: maxOi(oiRows.rows) } : undefined}
               onScroll={refPrice > 0 ? scrollLadder : undefined}
               onTrail={(w, delta) => { void post(mode === 'pair' ? { action: 'pair', op: 'trail', id: w.ids[0], delta } : { action: 'trail', id: w.ids[0], delta }); }}
               onHoldChange={setHeld}
