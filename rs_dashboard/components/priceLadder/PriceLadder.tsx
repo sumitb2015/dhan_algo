@@ -37,7 +37,7 @@ const PLAIN_TICKS = [0.05, 0.5, 1];
 const PAIR_TICKS = [0.5, 1, 2, 5];
 /** The page's ladder: the two single-option modes, or Pair (a straddle / strangle on its combined premium). */
 type PageMode = LadderMode | 'pair';
-const MODE_TICK: Record<PageMode, number> = { xy: 5, plain: 0.05, pair: 1 };
+const MODE_TICK: Record<PageMode, number> = { xy: 5, plain: 1, pair: 1 };
 const ROWS = 31;
 const POLL_MS = 1000;
 
