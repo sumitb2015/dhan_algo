@@ -432,18 +432,20 @@ export function LadderGrid({
             {oiRow && oi && (() => {
               const chg = (v: number, pv: number | null) => { const c = oiChangePct(v, pv); return c == null ? 'no previous-day OI' : `${c >= 0 ? '+' : ''}${c.toFixed(1)}% vs prev day`; };
               const pePct = barPct(oiRow.peOi, oi.max), cePct = barPct(oiRow.ceOi, oi.max);
+              // A row carrying order widgets keeps its bars but not their numbers: the labels would sit under the widgets (hover still gives the OI).
+              const showNum = ws.length === 0 && buyWs.length === 0;
               // Each bar uses at most the PRICE_COL_LEFT_PCT of the row outside the Price column.
               return (
                 <div className="absolute inset-0 pointer-events-none select-none" aria-hidden="true">
                   {pePct > 0 && (
                     <div title={`${oiRow.strike} PE OI ${oiRow.peOi.toLocaleString('en-IN')} · ${chg(oiRow.peOi, oiRow.pePrev)}`}
                       className="absolute top-0.5 bottom-0.5 right-[58%] rounded-l bg-emerald-500/25 flex items-center pl-1 text-[9px] font-mono text-zinc-400"
-                      style={{ width: `${pePct * PRICE_COL_LEFT_PCT / 100}%` }}>{compactOi(oiRow.peOi)}</div>
+                      style={{ width: `${pePct * PRICE_COL_LEFT_PCT / 100}%` }}>{showNum ? compactOi(oiRow.peOi) : null}</div>
                   )}
                   {cePct > 0 && (
                     <div title={`${oiRow.strike} CE OI ${oiRow.ceOi.toLocaleString('en-IN')} · ${chg(oiRow.ceOi, oiRow.cePrev)}`}
                       className="absolute top-0.5 bottom-0.5 left-[58%] rounded-r bg-red-500/25 flex items-center justify-end pr-1 text-[9px] font-mono text-zinc-400"
-                      style={{ width: `${cePct * PRICE_COL_LEFT_PCT / 100}%` }}>{compactOi(oiRow.ceOi)}</div>
+                      style={{ width: `${cePct * PRICE_COL_LEFT_PCT / 100}%` }}>{showNum ? compactOi(oiRow.ceOi) : null}</div>
                   )}
                 </div>
               );
