@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { oiStrikesFromChain, maxOi, oiAtRow, barPct, oiChangePct, compactOi } from './priceLadderOi.ts';
+import { oiRowsFor, oiStrikesFromChain, maxOi, oiAtRow, barPct, oiChangePct, compactOi } from './priceLadderOi.ts';
 
 const oc = {
   '23200.000000': { ce: { oi: 1000, previous_oi: 800 }, pe: { oi: 3000, previous_oi: 0 } },
@@ -41,4 +41,14 @@ test('oiChangePct / compactOi', () => {
   assert.equal(compactOi(950), '950');
   assert.equal(compactOi(123456), '1.2L');
   assert.equal(compactOi(4.5e7), '4.5Cr');
+});
+
+test('review fixes: null strike rows, nearest strike in a wide tick, unit-boundary labels, shared filter', () => {
+  assert.deepEqual(oiStrikesFromChain({ '23150': null as never, '23200': { ce: { oi: 5 } } }).map(r => r.strike), [23200]);
+  const rows = oiStrikesFromChain({ '23100': { ce: { oi: 1 } }, '23200': { ce: { oi: 1 } }, '23150': { ce: { oi: 1 } } });
+  assert.equal(oiAtRow(rows, 23160, 100)?.strike, 23150);   // 23100, 23150 and 23200 all fit a +-50 window: the nearest wins
+  assert.equal(compactOi(9999950), '1.0Cr');
+  assert.equal(compactOi(999960), '10.0L');
+  assert.equal(compactOi(99999), '1.0L');
+  assert.deepEqual(oiRowsFor({ '1': { ce: { oi: 1 } }, '2': { ce: { oi: 1 } } }, s => s === 2).map(r => r.strike), [2]);
 });

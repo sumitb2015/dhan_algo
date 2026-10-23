@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2, Volume2, VolumeX } from 'lucide-react';
 import { toast } from 'sonner';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
-import { oiStrikesFromChain, maxOi, type OiStrike } from '@/lib/priceLadderOi';
+import { oiRowsFor, maxOi, type OiStrike } from '@/lib/priceLadderOi';
 import NavBar from '@/components/NavBar';
 import { sharedJson } from '@/lib/sharedPoll';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
@@ -81,6 +81,9 @@ interface StateResp {
   } | null;
 }
 interface IndexQuote { ltp: number; prev_close: number; change_pct: number | null; day_high: number | null; day_low: number | null }
+
+/** How often an XY ladder re-reads the chain for its OI bars. */
+const OI_POLL_MS = 30_000;
 
 function readPref<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
   try { const v = localStorage.getItem(key); if (v && (allowed as readonly string[]).includes(v)) return v as T; } catch { /* none */ }
@@ -213,7 +216,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [legSlPct, setLegSlPct] = useState(0);
   const [real, setReal] = useState(false);               // per page load, never persisted
   const [oiOn, setOiOn] = useState(true);                 // XY only: OI bars behind the strike rows; remembered per browser
-  const [oiRows, setOiRows] = useState<{ key: string; rows: OiStrike[] }>({ key: '', rows: [] });   // keyed by underlying|expiry so a switch never shows the old chain's bars
+  const [oiRows, setOiRows] = useState<{ key: string; rows: OiStrike[]; at: number }>({ key: '', rows: [], at: 0 });   // keyed by underlying|expiry so a switch never shows the old chain's bars
   const [soundOn, setSoundOn] = useState(true);          // trade chimes; remembered per browser
   const [realAck, setRealAck] = useState(false);         // first REAL click this page load asks first
   // A REAL order's first-click confirmation (confirming it lets later clicks this page load straight through), or a
@@ -330,7 +333,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         if (!j.success || !oc) throw new Error('no chain');
         const list = Object.keys(oc).map(Number).filter(n => n > 0 && isTradedStrike(underlying, n)).sort((a, b) => a - b);
         setStrikes(list);
-        setOiRows({ key: `${underlying}|${expiry}`, rows: oiStrikesFromChain(oc).filter(r => isTradedStrike(underlying, r.strike)) });
+        setOiRows({ key: `${underlying}|${expiry}`, rows: oiRowsFor(oc, n => isTradedStrike(underlying, n)), at: Date.now() });
         // MCX chains can come back with spot 0 but the option month's futures price set: that is the right ATM base.
         const spot = Number(j.data?.spot) || Number(j.data?.future_price) || 0;
         const step = STRIKE_STEP[underlying] ?? 50;
@@ -364,22 +367,29 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [underlying, expiry]);
 
-  // OI changes slowly: re-read the chain every 30 s while the tab is visible, only for an XY ladder showing the bars. The
-  // chain route dedupes and paces the call (Dhan's ~1 per 3 s), and a failed read keeps the last bars rather than blanking them.
+  // OI changes slowly: re-read the chain every 30 s while the tab is visible, only for an XY ladder showing the bars (and at
+  // once when the bars come back after being off for longer). The chain route dedupes and paces the call (Dhan's ~1 per
+  // 3 s). One read at a time, newest wins, and a failed read keeps the last bars rather than blanking them.
+  const oiAtRef = useRef(0);
+  useEffect(() => { oiAtRef.current = oiRows.at; }, [oiRows.at]);
   useEffect(() => {
     if (!oiOn || mode !== 'xy' || !expiry) return;
-    let cancelled = false;
-    const tickOnce = () => {
-      if (document.hidden) return;
+    let cancelled = false, inFlight = false;
+    const key = `${underlying}|${expiry}`;
+    const readOnce = () => {
+      if (document.hidden || inFlight) return;
+      inFlight = true;
       fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&broker=dhan&allowStale=1`, { cache: 'no-store' })
         .then(r => r.json())
         .then((j: { success?: boolean; data?: { chain?: { oc?: Record<string, { ce?: { oi?: number; previous_oi?: number }; pe?: { oi?: number; previous_oi?: number } }> } } }) => {
           const oc = j.data?.chain?.oc;
-          if (!cancelled && j.success && oc) setOiRows({ key: `${underlying}|${expiry}`, rows: oiStrikesFromChain(oc).filter(r => isTradedStrike(underlying, r.strike)) });
+          if (!cancelled && j.success && oc) setOiRows({ key, rows: oiRowsFor(oc, n => isTradedStrike(underlying, n)), at: Date.now() });
         })
-        .catch(() => { /* keep the last bars */ });
+        .catch(() => { /* keep the last bars */ })
+        .finally(() => { inFlight = false; });
     };
-    const t = setInterval(tickOnce, 30_000);
+    if (Date.now() - oiAtRef.current > OI_POLL_MS) readOnce();
+    const t = setInterval(readOnce, OI_POLL_MS);
     return () => { cancelled = true; clearInterval(t); };
   }, [oiOn, mode, underlying, expiry]);
 

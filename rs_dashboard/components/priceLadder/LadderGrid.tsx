@@ -151,6 +151,10 @@ const QTY_TONE: Record<LadderSide, string> = {
   BUY: 'bg-emerald-600 text-oncolor',
   SELL: 'bg-red-600 text-oncolor',
 };
+/** The Price column's span of the row, in %: the grid template below is 1.3 / 0.8 / 0.8 / 0.8 / 1.3 fr (total 5), so Price starts at
+ *  (1.3+0.8)/5 = 42 % and ends at 58 %. The OI bars use the 42 % outside it (the right-[58%] / left-[58%] classes below are the same geometry as literals Tailwind can see); change them together. */
+const PRICE_COL_LEFT_PCT = 42;
+
 const TAG: Record<LadderWidget['kind'], string> = { entry: '', tgt: 'TGT', sl: 'SL', pos: 'POS' };
 
 const DRAG_MIME = 'application/x-price-ladder';
@@ -428,18 +432,18 @@ export function LadderGrid({
             {oiRow && oi && (() => {
               const chg = (v: number, pv: number | null) => { const c = oiChangePct(v, pv); return c == null ? 'no previous-day OI' : `${c >= 0 ? '+' : ''}${c.toFixed(1)}% vs prev day`; };
               const pePct = barPct(oiRow.peOi, oi.max), cePct = barPct(oiRow.ceOi, oi.max);
-              // Price column spans 42%-58% of the row (1.3 / 0.8 / 0.8 / 0.8 / 1.3): each bar uses at most the 42% outside it.
+              // Each bar uses at most the PRICE_COL_LEFT_PCT of the row outside the Price column.
               return (
                 <div className="absolute inset-0 pointer-events-none select-none" aria-hidden="true">
                   {pePct > 0 && (
                     <div title={`${oiRow.strike} PE OI ${oiRow.peOi.toLocaleString('en-IN')} · ${chg(oiRow.peOi, oiRow.pePrev)}`}
                       className="absolute top-0.5 bottom-0.5 right-[58%] rounded-l bg-emerald-500/25 flex items-center pl-1 text-[9px] font-mono text-zinc-400"
-                      style={{ width: `${pePct * 0.42}%` }}>{compactOi(oiRow.peOi)}</div>
+                      style={{ width: `${pePct * PRICE_COL_LEFT_PCT / 100}%` }}>{compactOi(oiRow.peOi)}</div>
                   )}
                   {cePct > 0 && (
                     <div title={`${oiRow.strike} CE OI ${oiRow.ceOi.toLocaleString('en-IN')} · ${chg(oiRow.ceOi, oiRow.cePrev)}`}
                       className="absolute top-0.5 bottom-0.5 left-[58%] rounded-r bg-red-500/25 flex items-center justify-end pr-1 text-[9px] font-mono text-zinc-400"
-                      style={{ width: `${cePct * 0.42}%` }}>{compactOi(oiRow.ceOi)}</div>
+                      style={{ width: `${cePct * PRICE_COL_LEFT_PCT / 100}%` }}>{compactOi(oiRow.ceOi)}</div>
                   )}
                 </div>
               );
