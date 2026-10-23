@@ -2,12 +2,14 @@
 
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { ShieldCheck } from 'lucide-react';
+import { Info, ShieldCheck } from 'lucide-react';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
 
 // The global MTM guard of one broker + SIM/REAL mode: target, stop-loss, trailing and Protect profit over the ladder's
 // whole P&L. The server watcher enforces it (lib/priceLadderGuard.ts), so it works with this tab closed. Numbers are
 // typed as drafts and only sent by Save — a half-typed level must never reach a live rule (dhan-commit-on-blur).
+
+const HELP = 'Watches this broker\'s ladder P&L (closed + open, all contracts and pairs). When a rule trips, every open position exits at market, armed levels are cancelled and the guard switches off. Protect profit: once MTM touches the trigger, a drop to the locked amount exits. Runs on the server, so it works with this tab closed. Resets each day. Full guide: docs/PRICE_LADDER_GUIDE.md';
 
 const FIELDS = ['target', 'stop', 'trailBy', 'lockAt', 'lockKeep', 'lockStepEvery', 'lockStepKeep'] as const;
 type Field = (typeof FIELDS)[number];
@@ -95,7 +97,7 @@ export function MtmGuardCard({ broker, real, mtm, guard, post }: {
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 flex flex-col gap-1.5 text-xs">
       <div className={row}>
-        <span className="flex items-center gap-1.5 text-[13px] font-semibold tracking-tight text-zinc-100"><ShieldCheck className="w-3.5 h-3.5 text-emerald-400" aria-hidden /> MTM guard</span>
+        <span className="flex items-center gap-1.5 text-[13px] font-semibold tracking-tight text-zinc-100"><ShieldCheck className="w-3.5 h-3.5 text-emerald-400" aria-hidden /> MTM guard <span className="inline-flex text-zinc-500" title={HELP} aria-label={HELP} role="img"><Info className="w-3 h-3" aria-hidden /></span></span>
         <span className={`font-mono font-semibold ${mtm == null ? 'text-zinc-500' : mtm >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title="The ladder's own P&L for this broker and mode">{mtm == null ? '—' : rs(mtm)}</span>
       </div>
       <div className={row}><span className={lab}>Target ₹</span><Box label="MTM target in rupees" value={draft.target} onChange={set('target')} /></div>
@@ -134,9 +136,6 @@ export function MtmGuardCard({ broker, real, mtm, guard, post }: {
       {!on && guard?.firedReason && (
         <p className="text-[10px] text-amber-300">Fired: {guard.firedReason}. Everything was exited; switch on to guard again.</p>
       )}
-      <p className="text-[10px] text-zinc-500 leading-relaxed">
-        Watches this broker&apos;s {real ? 'REAL' : 'SIM'} ladder P&amp;L (closed + open, all contracts and pairs). When a rule trips, every open position exits at market, armed levels are cancelled and the guard switches off. Protect profit: once MTM touches the trigger, a drop to the locked amount exits. Runs on the server — works with this tab closed. Resets each day.
-      </p>
     </div>
   );
 }

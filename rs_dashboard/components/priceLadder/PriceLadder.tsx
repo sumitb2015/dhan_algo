@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus } from 'lucide-react';
+import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from '@/components/NavBar';
 import { sharedJson } from '@/lib/sharedPoll';
@@ -790,6 +790,13 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     || (mode === 'pair' && !pairView);
   const decimals = mode === 'xy' ? (tick < 1 ? 2 : 0) : 2;
   const ticks = mode === 'xy' ? XY_TICKS : mode === 'pair' ? PAIR_TICKS : PLAIN_TICKS;
+  const HELP_TEXT = mode === 'pair'
+                ? `Pair: the ladder is the combined premium (CE + PE). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. Both legs go at MARKET together when the combined crosses the level (REAL: if only one fills, it is closed again); target / SL / trail are in combined-premium points and exit both legs.`
+                : mode === 'xy'
+                ? `Click the Buy or Sell column at an index level. ${opt === 'PE' ? 'Put: the ladder is inverted — a Buy is a limit ABOVE spot. ' : ''}Limit = the option is cheaper/dearer at that level; the other side ${zones === 'anywhere' ? 'is a breakout by itself (Anywhere)' : 'needs SL (breakout)'}. The option order goes at MARKET when ${axisName} crosses the level.`
+                : zones === 'anywhere'
+                  ? `Anywhere: Buy below LTP / Sell above it = LIMIT; Sell below / Buy above = SL-limit, its limit ${slBufferPct}% past the trigger. Orders rest at the broker.`
+                  : 'Click Buy below LTP or Sell above it for a LIMIT; the other side places an SL-M stop (Order Type SL). Orders rest at the broker.';
   const dataDate = data ? data.state.date : null;
   const latestEvent = data?.state.events.length ? data.state.events[data.state.events.length - 1] : null;
   const optLabel = mode === 'pair'
@@ -1143,14 +1150,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               </div>
             </div>
             <MtmGuardCard key={`${broker}:${pageMode}`} broker={broker} real={real} mtm={ladderPnl} guard={data?.state?.guards?.[`${broker}:${pageMode}`]} post={post} />
-            <p className="text-[10px] text-zinc-500 leading-relaxed">
-              {mode === 'pair'
-                ? `Pair: the ladder is the combined premium (CE + PE). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. Both legs go at MARKET together when the combined crosses the level (REAL: if only one fills, it is closed again); target / SL / trail are in combined-premium points and exit both legs.`
-                : mode === 'xy'
-                ? `Click the Buy or Sell column at an index level. ${opt === 'PE' ? 'Put: the ladder is inverted — a Buy is a limit ABOVE spot. ' : ''}Limit = the option is cheaper/dearer at that level; the other side ${zones === 'anywhere' ? 'is a breakout by itself (Anywhere)' : 'needs SL (breakout)'}. The option order goes at MARKET when ${axisName} crosses the level.`
-                : zones === 'anywhere'
-                  ? `Anywhere: Buy below LTP / Sell above it = LIMIT; Sell below / Buy above = SL-limit, its limit ${slBufferPct}% past the trigger. Orders rest at the broker.`
-                  : 'Click Buy below LTP or Sell above it for a LIMIT; the other side places an SL-M stop (Order Type SL). Orders rest at the broker.'}
+            <p className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+              <span className="inline-flex" title={HELP_TEXT} aria-label={HELP_TEXT} role="img"><Info className="w-3.5 h-3.5" aria-hidden /></span>
+              How this ladder works — hover the icon, or see docs/PRICE_LADDER_GUIDE.md
             </p>
           </div>
 
