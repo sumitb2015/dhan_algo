@@ -332,7 +332,7 @@ for (const broker of ['dhan', 'kotak', 'zerodha'] as const) {
       await expect.poll(() => seen.posts.filter(b => b.action === 'arm').length).toBe(1);
       expect(seen.posts[0]).toMatchObject({ kind: 'xy', broker, mode: 'sim', side: 'BUY', level: 23180 });
       await page.getByRole('button', { name: 'Plain', exact: true }).click();
-      await page.getByRole('button', { name: /^Buy at 119\.9/ }).first().click();
+      await page.getByRole('button', { name: /^Buy at 119\.00/ }).first().click();
       await expect.poll(() => seen.posts.filter(b => b.action === 'arm').length).toBe(2);
       expect(seen.posts[1]).toMatchObject({ kind: 'plain', broker, mode: 'sim', side: 'BUY' });
       await page.getByRole('button', { name: 'Pair', exact: true }).click();
