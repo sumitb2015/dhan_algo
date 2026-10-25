@@ -266,12 +266,14 @@ function Banner({ tone, children }: { tone: 'red' | 'amber'; children: React.Rea
   );
 }
 
-export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, onRemoveLadder, onBrokerChange, peerBroker, onHeaderHeight, headerMinHeight, onTopHeight, topMinHeight, onBannerHeight, bannerMinHeight, collapsed = false, onToggleCollapsed }: {
+export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, onRemoveLadder, onBrokerChange, peerBroker, onHeaderHeight, headerMinHeight, onRowHeight, rowMinHeight, onTopHeight, topMinHeight, onBannerHeight, bannerMinHeight, collapsed = false, onToggleCollapsed }: {
   ladderId?: 1 | 2; dual?: boolean; onAddLadder?: () => void; onRemoveLadder?: () => void;
   /** Reports this pane's broker; the other pane gets it as `peerBroker`. */
   onBrokerChange?: (b: LadderBroker) => void; peerBroker?: LadderBroker | null;
   /** Side by side: this header's own height is reported, and both headers are held to the taller one so the two ladders start level. */
   onHeaderHeight?: (h: number) => void; headerMinHeight?: number;
+  /** The chips + header-buttons row above the title: ladder 1's wraps onto two lines (it carries the NavBar), so both panes are held to the taller one and the titles sit level. */
+  onRowHeight?: (h: number) => void; rowMinHeight?: number;
   /** Height of the banners + ladder block above the orders panel; the workspace holds both panes to the taller so the orders panels line up. */
   onTopHeight?: (h: number) => void; topMinHeight?: number;
   /** Same for the banner stack alone, so a notice in one pane ("MCX is closed") cannot push that pane's ladder below the other's. */
@@ -294,6 +296,15 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     ro.observe(el);
     return () => ro.disconnect();
   }, [onHeaderHeight]);
+  const rowRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = rowRef.current;
+    if (!el || !onRowHeight) return;
+    // The min-height is on an outer wrapper, so this reads the row's own natural height.
+    const ro = new ResizeObserver(() => onRowHeight(el.offsetHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [onRowHeight]);
   const topRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = topRef.current;
@@ -1338,7 +1349,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur xl:min-h-[var(--ladder-head-h)]" style={headerMinHeight ? ({ '--ladder-head-h': `${headerMinHeight + 1}px` } as React.CSSProperties) : undefined}>
       <div ref={headRef}>
       {/* Indices + P&L: always visible, above the foldable controls */}
-      <div className="flex items-center gap-2 flex-wrap px-6 pt-2.5 text-xs min-h-[38px]">
+      <div className="xl:min-h-[var(--ladder-row-h)]" style={rowMinHeight ? ({ '--ladder-row-h': `${rowMinHeight}px` } as React.CSSProperties) : undefined}>
+      <div ref={rowRef} className="flex items-center gap-2 flex-wrap px-6 pt-2.5 text-xs min-h-[38px]">
         {notTracking && (
           <span role="alert" title="The dashboard server is not running its watcher: brackets, armed levels, the MTM guard and the square-off are NOT being run. Orders already at the broker stay live. Restart the dashboard server."
             className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-red-500/40 bg-red-500/15 text-red-300 font-bold">
@@ -1355,9 +1367,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         {showAccount && <PnlChip label={`${BROKER_LABELS[broker]} P&L`} value={acct.pnl}
           title={`${BROKER_LABELS[broker]} account P&L today: realised + unrealised over all positions, as the broker reports it (includes trades not made on the ladder)${acct.note ? ` — ${acct.note}` : ''}`} />}
         {showAccount && acct.note && <span className="text-amber-300 truncate max-w-[18rem]" title={acct.note}>{acct.note}</span>}
-        {/* The standard header buttons (theme, alerts, settings, Sync Data, Update, Disconnect): in the always-visible top row, after the account P&L. */}
-        {!second && (<><span className="w-px h-5 bg-zinc-800 shrink-0" /><NavBar /></>)}
-        {!second && !dual && headControls && <div className="ml-auto">{headControls}</div>}
+        {/* The standard header buttons (theme, alerts, settings, Sync Data, Update, Disconnect): at the top right of the page, in the always-visible top row. Side by side that is ladder 2's row; alone, ladder 1's. */}
+        {(dual ? second : true) && <div className="ml-auto"><NavBar /></div>}
+        {!second && !dual && headControls && <div>{headControls}</div>}
+      </div>
       </div>
       <div className="flex items-center justify-between gap-3 flex-wrap px-6 py-3">
         <div className="flex items-center gap-3 min-w-0 max-w-full">

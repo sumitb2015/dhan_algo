@@ -11,6 +11,10 @@ export default function PriceLadderWorkspace() {
   const [heads, setHeads] = useState<[number, number]>([0, 0]);
   const head1 = useCallback((h: number) => setHeads(p => (p[0] === h ? p : [h, p[1]])), []);
   const head2 = useCallback((h: number) => setHeads(p => (p[1] === h ? p : [p[0], h])), []);
+  const [rows, setRows] = useState<[number, number]>([0, 0]);
+  const row1 = useCallback((h: number) => setRows(p => (p[0] === h ? p : [h, p[1]])), []);
+  const row2 = useCallback((h: number) => setRows(p => (p[1] === h ? p : [p[0], h])), []);
+  const rowMax = Math.max(rows[0], rows[1]);
   const [tops, setTops] = useState<[number, number]>([0, 0]);
   const top1 = useCallback((h: number) => setTops(p => (p[0] === h ? p : [h, p[1]])), []);
   const top2 = useCallback((h: number) => setTops(p => (p[1] === h ? p : [p[0], h])), []);
@@ -34,8 +38,8 @@ export default function PriceLadderWorkspace() {
   if (!dual) return <PriceLadder onAddLadder={() => setDual(true)} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />;
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-zinc-800 min-h-screen bg-zinc-950">
-      <PriceLadder ladderId={1} dual onBrokerChange={setFirstBroker} onHeaderHeight={head1} onTopHeight={top1} onBannerHeight={ban1} headerMinHeight={headMax} topMinHeight={topMax} bannerMinHeight={bannerMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
-      <PriceLadder ladderId={2} dual peerBroker={firstBroker} onHeaderHeight={head2} onTopHeight={top2} onBannerHeight={ban2} headerMinHeight={headMax} topMinHeight={topMax} bannerMinHeight={bannerMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} onRemoveLadder={() => setDual(false)} />
+      <PriceLadder ladderId={1} dual onBrokerChange={setFirstBroker} onHeaderHeight={head1} onRowHeight={row1} rowMinHeight={rowMax} onTopHeight={top1} onBannerHeight={ban1} headerMinHeight={headMax} topMinHeight={topMax} bannerMinHeight={bannerMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
+      <PriceLadder ladderId={2} dual peerBroker={firstBroker} onHeaderHeight={head2} onRowHeight={row2} rowMinHeight={rowMax} onTopHeight={top2} onBannerHeight={ban2} headerMinHeight={headMax} topMinHeight={topMax} bannerMinHeight={bannerMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} onRemoveLadder={() => setDual(false)} />
     </div>
   );
 }
