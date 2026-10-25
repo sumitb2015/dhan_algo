@@ -26,12 +26,13 @@ function Box({ label, value, onChange, step = 100 }: { label: string; value: str
     onChange(String(Math.max(0, n + dir * step)));
   };
   return (
-    <div className="relative inline-flex w-24">
+    <div className="relative inline-flex w-28">
+      <span className="absolute left-2 top-1/2 -translate-y-1/2 text-xs text-zinc-500 pointer-events-none select-none" aria-hidden>₹</span>
       <input
         aria-label={label} inputMode="decimal" placeholder="off" value={value}
         onChange={e => onChange(e.target.value.replace(/[^\d.]/g, ''))}
         onKeyDown={e => { if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); bump(e.key === 'ArrowUp' ? 1 : -1); } }}
-        className="w-full pl-2 pr-5 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-xs font-mono text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
+        className="w-full h-6 pl-5 pr-6 rounded bg-zinc-900 border border-zinc-700 text-xs font-mono text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-zinc-500"
       />
       <StepArrows label={label} onStep={bump} />
     </div>
@@ -99,26 +100,26 @@ export function MtmGuardCard({ broker, real, ladderId = 1, mtm, guard, post }: {
         <span className="flex items-center gap-1.5 text-[13px] font-semibold tracking-tight text-zinc-100"><ShieldCheck className="w-3.5 h-3.5 text-emerald-400" aria-hidden /> MTM guard <span className="inline-flex text-zinc-500" title={`${HELP} This guard covers only ladder ${ladderId} on ${broker} ${real ? 'REAL' : 'SIM'}.`} aria-label={HELP} role="img"><Info className="w-3 h-3" aria-hidden /></span></span>
         <span className={`font-mono font-semibold ${mtm == null ? 'text-zinc-500' : mtm >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title={`Ladder ${ladderId}'s own P&L for this broker and mode`}>{mtm == null ? '—' : rs(mtm)}</span>
       </div>
-      <div className={row}><span className={lab}>Target ₹</span><Box label="MTM target in rupees" value={draft.target} onChange={set('target')} /></div>
-      <div className={row}><span className={lab}>Stop-loss ₹</span><Box label="MTM stop-loss in rupees" value={draft.stop} onChange={set('stop')} /></div>
-      <div className={row} title="Exit when MTM gives back this much from its best since the guard was switched on"><span className={lab}>Trail by ₹</span><Box label="MTM trailing give-back in rupees" value={draft.trailBy} onChange={set('trailBy')} /></div>
+      <div className={row}><span className={lab}>Target</span><Box label="MTM target in rupees" value={draft.target} onChange={set('target')} /></div>
+      <div className={row}><span className={lab}>Stop-loss</span><Box label="MTM stop-loss in rupees" value={draft.stop} onChange={set('stop')} /></div>
+      <div className={row} title="Exit when MTM gives back this much from its best since the guard was switched on"><span className={lab}>Trail by</span><Box label="MTM trailing give-back in rupees" value={draft.trailBy} onChange={set('trailBy')} /></div>
 
-      <div className="mt-1 pt-1.5 border-t border-zinc-800 flex flex-col gap-1.5">
-        <span className="text-[11px] font-semibold text-zinc-300">Protect profit</span>
-        <div className={row}><span className={lab}>When MTM reaches ₹</span><Box label="Protect profit trigger in rupees" value={draft.lockAt} onChange={set('lockAt')} /></div>
-        <div className={row}><span className={lab}>Lock at least ₹</span><Box label="Profit to lock in rupees" value={draft.lockKeep} onChange={set('lockKeep')} /></div>
-        <div className={row} title="Optional: for every further step of MTM, the locked profit rises too"><span className={lab}>Then every +₹</span><Box label="Lock step in rupees" value={draft.lockStepEvery} onChange={set('lockStepEvery')} /></div>
-        <div className={row}><span className={lab}>Raise lock by ₹</span><Box label="Lock raise per step in rupees" value={draft.lockStepKeep} onChange={set('lockStepKeep')} /></div>
+      <div className="mt-1.5 pt-2 border-t border-zinc-800 flex flex-col gap-1.5">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-zinc-300" title="Once MTM reaches the trigger, a floor is locked: if MTM falls back to it, everything exits">Protect profit</span>
+        <div className={row}><span className={lab}>When MTM reaches</span><Box label="Protect profit trigger in rupees" value={draft.lockAt} onChange={set('lockAt')} /></div>
+        <div className={row}><span className={lab}>Lock at least</span><Box label="Profit to lock in rupees" value={draft.lockKeep} onChange={set('lockKeep')} /></div>
+        <div className={row} title="Optional: for every further step of MTM, the locked profit rises too"><span className={lab}>Then every +</span><Box label="Lock step in rupees" value={draft.lockStepEvery} onChange={set('lockStepEvery')} /></div>
+        <div className={row}><span className={lab}>Raise lock by</span><Box label="Lock raise per step in rupees" value={draft.lockStepKeep} onChange={set('lockStepKeep')} /></div>
       </div>
 
-      <div className="flex items-center gap-1.5 pt-1">
+      <div className="flex items-center gap-1.5 pt-1.5">
         {on ? (
           <>
-            <button type="button" onClick={() => save(true)} disabled={!dirty} className="flex-1 px-2 py-1 rounded border border-zinc-700 text-zinc-200 hover:text-white disabled:opacity-40">Update</button>
-            <button type="button" onClick={() => save(false)} className="flex-1 px-2 py-1 rounded border border-red-500/40 bg-red-500/10 text-red-300 hover:text-red-200">Switch off</button>
+            <button type="button" onClick={() => save(true)} disabled={!dirty} className="flex-1 h-7 px-2 rounded border border-zinc-700 text-zinc-200 font-semibold hover:text-white disabled:opacity-40">Update</button>
+            <button type="button" onClick={() => save(false)} className="flex-1 h-7 px-2 rounded border border-red-500/40 bg-red-500/10 text-red-300 font-semibold hover:text-red-200">Switch off</button>
           </>
         ) : (
-          <button type="button" onClick={() => save(true)} className="flex-1 px-2 py-1 rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 font-semibold hover:text-emerald-200">Switch on</button>
+          <button type="button" onClick={() => save(true)} className="flex-1 h-7 px-2 rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 font-semibold hover:text-emerald-200">Switch on</button>
         )}
       </div>
       {on && guard && !guard.tripped && (

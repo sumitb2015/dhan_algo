@@ -144,7 +144,7 @@ function NumField({ value, onCommit, min, max, step, label, width = 'w-16', comp
     <div className={`${width} relative inline-flex`}>
       <input
         aria-label={label} inputMode="decimal"
-        className={`w-full pl-2 pr-5 ${compact ? 'py-0.5' : 'py-1'} rounded bg-zinc-900 border border-zinc-700 text-xs font-mono text-zinc-100 focus:outline-none focus:border-zinc-500`}
+        className={`w-full pl-2 pr-6 ${compact ? 'py-[3px]' : 'py-1'} rounded bg-zinc-900 border border-zinc-700 text-xs font-mono text-zinc-100 focus:outline-none focus:border-zinc-500`}
         value={draft ?? String(value)}
         onChange={e => { clearTimer(); pending.current = null; setDraft(e.target.value); }}
         onBlur={commit}
@@ -169,6 +169,9 @@ function SimBadge({ className = '' }: { className?: string }) {
   );
 }
 
+/** The ladder form's dropdowns: one height (matches the segmented buttons) and one width, so every control's left edge lines up. */
+const SELECT_CLS = `h-6 w-36 max-w-full min-w-0 px-2 rounded bg-zinc-900 border border-zinc-700 text-xs text-zinc-100 ${FOCUS_RING}`;
+
 function Seg<T extends string>({ value, options, onChange, labels, disabled, compact }: {
   value: T; options: readonly T[]; onChange: (v: T) => void; labels?: Partial<Record<T, string>>; disabled?: boolean; compact?: boolean;
 }) {
@@ -177,7 +180,7 @@ function Seg<T extends string>({ value, options, onChange, labels, disabled, com
       {options.map(o => (
         <button
           key={o} type="button" disabled={disabled} aria-pressed={value === o} onClick={() => onChange(o)}
-          className={`px-2.5 ${compact ? 'py-0.5' : 'py-1'} text-xs font-semibold transition-colors disabled:opacity-50 ${value === o ? 'bg-sky-500/15 text-sky-300 ring-1 ring-inset ring-sky-500/30' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}
+          className={`px-2.5 ${compact ? 'py-[3px]' : 'py-1'} text-xs font-semibold transition-colors disabled:opacity-50 ${value === o ? 'bg-sky-500/15 text-sky-300 ring-1 ring-inset ring-sky-500/30' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}
         >
           {labels?.[o] ?? o}
         </button>
@@ -1597,18 +1600,18 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 <Seg compact value={product} options={['NRML', 'MIS'] as const} onChange={setProduct} />
               </div>
               <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Underlying</span>
-                <select aria-label="Underlying" value={underlying} onChange={e => setUnderlying(e.target.value)} className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100">
+                <select aria-label="Underlying" value={underlying} onChange={e => setUnderlying(e.target.value)} className={SELECT_CLS}>
                   {UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
                 </select>
               </div>
               <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Expiry</span>
-                <select aria-label="Expiry" value={expiry} onChange={e => { setExpiry(e.target.value); setStrike(null); }} className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100">
+                <select aria-label="Expiry" value={expiry} onChange={e => { setExpiry(e.target.value); setStrike(null); }} className={SELECT_CLS}>
                   {expiries.map(x => <option key={x} value={x}>{x}</option>)}
                 </select>
               </div>
               {mode !== 'basket' && <div className="flex items-center justify-between gap-2 min-w-0"><span className="text-zinc-400 font-medium">Strike</span>
                 {/* min-w-0 + a width cap: the longer "22600 · ATM+10" labels shrink the select; they must not push anything over the ladder. */}
-                <select aria-label="Strike" value={strike ?? ''} onChange={e => setStrike(Number(e.target.value))} className="min-w-0 w-full max-w-[9.5rem] px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono">
+                <select aria-label="Strike" value={strike ?? ''} onChange={e => setStrike(Number(e.target.value))} className={`${SELECT_CLS} font-mono`}>
                   {strikes.map(k => { const off = atmOffsetLabel(strikes, atmStrike, k); return <option key={k} value={k}>{off ? `${k}  ·  ${off}` : k}</option>; })}
                 </select>
               </div>}
@@ -1616,7 +1619,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 <>
                   <div className="flex items-center justify-between gap-2 min-w-0"><span className="text-zinc-400 font-medium">Strategy</span>
                     <select aria-label="Basket strategy" value={basketKey} onChange={e => { setBasketKey(e.target.value); setBasketEdited(false); }} disabled={basketLocked}
-                      className="min-w-0 w-full max-w-[9.5rem] px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100 disabled:opacity-50">
+                      className={`${SELECT_CLS} disabled:opacity-50`}>
                       {[...new Set(basketTemplates().map(t => t.category))].map(c => (
                         <optgroup key={c} label={c}>{basketTemplates().filter(t => t.category === c).map(t => <option key={t.key} value={t.key}>{t.name}</option>)}</optgroup>
                       ))}
@@ -1625,7 +1628,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   {(tplHasFar || basketHasFar) && (
                     <div className="flex items-center justify-between gap-2"><span className="text-zinc-400 font-medium" title="The far legs of a calendar / diagonal trade on this expiry; the near legs on the Expiry above.">Far expiry</span>
                       <select aria-label="Far expiry" value={farExpiry} onChange={e => setFarExpiry(e.target.value)} disabled={basketLocked}
-                        className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100 disabled:opacity-50">
+                        className={`${SELECT_CLS} disabled:opacity-50`}>
                         {expiries.filter(x => x > expiry).map(x => <option key={x} value={x}>{x}</option>)}
                       </select>
                     </div>
