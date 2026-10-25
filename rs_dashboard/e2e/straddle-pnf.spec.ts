@@ -151,3 +151,16 @@ test('a double bottom in history is marked but never alerts; a live one alerts o
   await expect(page.getByTestId('pnf-log-row')).toHaveCount(1);
   expect(m.blocked).toEqual([]);
 });
+
+test('the price axis sits at the right edge of each panel and the newest column is next to it, even with few columns', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [] });
+  await page.goto('/straddle-pnf');
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
+  await expect(panel.getByTestId('pnf-axis')).toBeAttached();
+  const p = (await panel.boundingBox())!;
+  const axis = (await panel.getByTestId('pnf-axis').boundingBox())!;
+  expect(p.x + p.width - (axis.x + axis.width)).toBeLessThan(24); // labels end at the panel's right edge
+  const lastGlyph = panel.locator('svg path, svg circle').last();
+  const g = (await lastGlyph.boundingBox())!;
+  expect(axis.x - (g.x + g.width)).toBeLessThan(40);               // newest column hugs the axis, no empty gap
+});

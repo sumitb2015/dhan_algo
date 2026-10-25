@@ -74,9 +74,11 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     yMax += 2 * box;
   }
   const yOf = (p: number) => PAD_TOP + ((yMax - p) / box) * cell;
-  const xOf = (j: number) => j * cell;
   const vis = columns.slice(first);
-  const plotW = Math.max(cell, vis.length * cell);
+  // The axis is pinned to the panel's right edge and the newest column sits against it; with few columns the empty space is on the left.
+  const plotW = Math.max(cell, width - AXIS_W);
+  const offsetX = Math.max(0, plotW - vis.length * cell);
+  const xOf = (j: number) => offsetX + j * cell;
   const svgW = plotW + AXIS_W;
   const s = cell * 0.34;
 
@@ -177,13 +179,14 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                         x={xOf(a)} y={y} width={cell * 2} height={h} rx={1}
                         className={sell ? 'fill-red-400' : 'fill-emerald-400'} />
                   {g.id === lastEntryId && (
-                    <text x={xOf(a) + cell} y={y + h + 9} textAnchor="middle" className="fill-red-400 font-mono" fontSize={8}>ENTRY</text>
+                    <text x={Math.min(xOf(a) + cell, plotW - 16)} y={y + h + 9} textAnchor="middle" className="fill-red-400 font-mono" fontSize={8}>ENTRY</text>
                   )}
                 </g>
               );
             })}
 
             {/* right axis */}
+            <g data-testid="pnf-axis">
             {Array.from({ length: Math.floor((yMax - yMin) / box) + 1 }, (_, i) => i)
               .filter(i => i % tickEvery === 0)
               .filter(i => liveValue === null || Math.abs(yOf(yMin + i * box) - yOf(liveValue)) > 10)
@@ -191,6 +194,8 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                 const p = yMin + i * box;
                 return <text key={`t${i}`} x={plotW + 6} y={yOf(p) + 3} className="fill-zinc-500 font-mono" fontSize={9}>{fmt(p)}</text>;
               })}
+
+            </g>
 
             {/* live value tag */}
             {liveValue !== null && (
