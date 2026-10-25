@@ -43,26 +43,6 @@ test('no bars gives an empty model, not a throw', () => {
   assert.equal(m.box, 0);
 });
 
-// A column can open on one day and keep going on the next. Its overlay value is read at its LAST bar, so the line must be split
-// by the session of that bar: splitting by the session the column opened in draws the new day's VWAP inside the old day's
-// segment, as a vertical streak.
-test('overlaySession is the session of the bar each overlay value comes from', () => {
-  const DAY = 86_400;
-  const day1 = [0, 5].map((l, i) => ({ t: BASE_T + i * 60, ce: priceAt(l) / 2, pe: priceAt(l) / 2, straddle: priceAt(l), vol: 10 }));
-  const day2 = [6, 7].map((l, i) => ({ t: BASE_T + DAY + i * 60, ce: priceAt(l) / 2, pe: priceAt(l) / 2, straddle: priceAt(l), vol: 10 }));
-  const b = [...day1, ...day2];
-  const m = buildPanelModel(b, 'vwap');
-  assert.equal(m.columns.length, 1);                                  // one X column that spans midnight
-  assert.equal(m.columns[0].session, sessionOf(b[1].t));              // it opened on day 1
-  assert.equal(m.overlaySession[0], sessionOf(b[3].t));               // but its overlay value is day 2's
-  assert.notEqual(m.overlaySession[0], m.columns[0].session);
-});
-
-test('overlaySession has one entry per column', () => {
-  const m = buildPanelModel(bars(PATH), 'vwap');
-  assert.equal(m.overlaySession.length, m.columns.length);
-});
-
 test('sessionOpen is the first close of the most recent session in the bars', () => {
   const DAY = 86_400;
   const d1 = [0, 5].map((l, i) => ({ t: BASE_T + i * 60, ce: priceAt(l) / 2, pe: priceAt(l) / 2, straddle: priceAt(l), vol: 10 }));

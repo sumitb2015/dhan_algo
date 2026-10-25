@@ -13,8 +13,6 @@ export type PanelModel = {
   exits: { col: number; bar: number }[];
   /** Overlay value (VWAP or SMA10) at each column's last bar; null while the SMA has fewer than 10 bars. */
   overlay: (number | null)[];
-  /** IST session of the bar each overlay value is read from (a column's last bar). The line is split on this, not on the session the column opened in. */
-  overlaySession: string[];
   /** Time of the last closed bar the model was built from; the page's alert watermark follows it. */
   lastBarT: number | null;
   /** First usable close of the most recent session in the bars: the "open" the header's change is measured against. */
@@ -41,7 +39,6 @@ export function buildPanelModel(closedBars: Bar[], overlay: Overlay): PanelModel
     signals: detectSignals(columns, closedBars, vw),
     exits: exitTags(columns, closedBars, vw),
     overlay: columns.map(c => line[c.endBar]),
-    overlaySession: columns.map(c => sessionOf(closedBars[c.endBar].t)),
     lastBarT: closedBars.length ? closedBars[closedBars.length - 1].t : null,
     sessionOpen: sessionOpenOf(closedBars),
   };

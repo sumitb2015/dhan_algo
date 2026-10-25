@@ -90,22 +90,11 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   const lastEntryId = [...signals].reverse().find(g => g.kind === 'DOUBLE_BOTTOM_SELL' && g.belowVwap)?.id;
   const ring = flash === 'buy' ? 'ring-2 ring-emerald-400' : flash === 'sell' ? 'ring-2 ring-red-400' : '';
 
-  const overlaySegments: string[] = [];
-  let currentSeg: string[] = [];
-  let currentSession = '';
-  vis.forEach((c, j) => {
-    const v = model.overlay[first + j];
-    const seg = model.overlaySession[first + j]; // the session the value belongs to, so a column spanning midnight cannot draw a vertical streak
-    if (seg !== currentSession) {
-      if (currentSeg.length > 0) overlaySegments.push(currentSeg.join(' '));
-      currentSeg = [];
-      currentSession = seg;
-    }
-    if (v !== null) {
-      currentSeg.push(`${xOf(j) + cell / 2},${yOf(v)}`);
-    }
-  });
-  if (currentSeg.length > 0) overlaySegments.push(currentSeg.join(' '));
+  const overlayPts = vis
+    .map((c, j) => ({ v: model.overlay[first + j], x: xOf(j) + cell / 2 }))
+    .filter(p => p.v !== null)
+    .map(p => `${p.x},${yOf(p.v as number)}`)
+    .join(' ');
 
   const tickEvery = Math.max(1, Math.round(((yMax - yMin) / box) / 9));
 
@@ -204,11 +193,11 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                 }),
               )}
 
-              {/* VWAP / SMA10 (segmented per session so it never crosses day boundaries) */}
-              {overlaySegments.map((pts, i) => (
-                <polyline key={`ov-${i}`} points={pts} fill="none" strokeWidth={1.8}
+              {/* VWAP / SMA10: one continuous line across the loaded sessions */}
+              {overlayPts && (
+                <polyline points={overlayPts} fill="none" strokeWidth={1.8}
                           className={overlay === 'vwap' ? 'stroke-amber-300' : 'stroke-zinc-500'} />
-              ))}
+              )}
 
               {/* exit cue: first bar of a green X column trading above VWAP */}
               {exits.length > 0 && (
