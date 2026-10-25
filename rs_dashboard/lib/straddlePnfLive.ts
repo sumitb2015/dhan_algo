@@ -1,5 +1,5 @@
 // Live-tick helpers for the Straddle P&F page. Pure: time arrives in the arguments, nothing here reads a clock.
-import type { Bar, PnfSignal } from './straddlePnf';
+import type { Bar, PnfSignal } from './straddlePnf.ts';
 
 export type Tick = { t: number; ce: number; pe: number };
 
