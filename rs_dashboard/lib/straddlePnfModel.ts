@@ -35,6 +35,8 @@ export type PanelOptions = {
   interval?: number;
   /** Box size as a percentage of the first price (default 0.5). */
   boxPct?: number;
+  /** Boxes against the column needed to reverse it (default 3). */
+  reversal?: number;
 };
 
 export function buildPanelModel(closedBars: Bar[], overlay: Overlay, opts: PanelOptions = {}): PanelModel {
@@ -46,7 +48,7 @@ export function buildPanelModel(closedBars: Bar[], overlay: Overlay, opts: Panel
   const { bars, endIdx } = resample(closedBars, interval);
   const vw = endIdx.map(i => vw1[i]);
   const firstPrice = closedBars.find(b => b.straddle > 0)?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
-  const { anchor, box, columns } = buildPnf(bars, boxPct, 3, firstPrice);
+  const { anchor, box, columns } = buildPnf(bars, boxPct, opts.reversal ?? 3, firstPrice);
   const line = overlay === 'vwap' ? vw : sma(bars.map(b => b.straddle), SMA_PERIOD);
   return {
     box,

@@ -102,3 +102,12 @@ test('a history shorter than one interval gives an empty chart, not a throw', ()
   assert.deepEqual([m.columns, m.signals, m.overlay], [[], [], []]);
   assert.equal(m.lastBarT, null);
 });
+
+test('the reversal setting sets how many boxes against the column it takes to reverse', () => {
+  // X column up to level 5, then back to level 3: a 2-box reversal turns, a 3-box one does not
+  const b = bars([0, 5, 3]);
+  assert.equal(buildPanelModel(b, 'vwap', { reversal: 2 }).columns.length, 2);
+  assert.equal(buildPanelModel(b, 'vwap', { reversal: 3 }).columns.length, 1);
+  assert.equal(buildPanelModel(b, 'vwap').columns.length, 1); // default stays 3
+  assert.equal(buildPanelModel(bars([0, 5, 4]), 'vwap', { reversal: 1 }).columns.length, 2);
+});

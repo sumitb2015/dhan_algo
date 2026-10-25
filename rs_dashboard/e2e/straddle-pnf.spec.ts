@@ -323,3 +323,24 @@ test('the charts fit the window even though the header wraps, and opening the al
   const after = (await panel.boundingBox())!;
   expect(Math.abs(after.y - before.y)).toBeLessThan(2);              // the log floats over the page instead of moving the charts
 });
+
+// ── reversal ──────────────────────────────────────────────────────────────────
+test('the reversal control defaults to 3 boxes, changes how often columns turn, persists, and never alerts for old signals', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [], longHistory: true });
+  await page.goto('/straddle-pnf');
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM + 200}"]`);
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
+  await expect(page.getByLabel('Reversal')).toHaveValue('3');
+  await expect(page.getByLabel('Reversal').locator('option')).toHaveText(['1-box', '2-box', '3-box', '4-box', '5-box']);
+  const three = await cols(panel);
+  await page.getByRole('button', { name: 'Alert log' }).click();
+  await page.getByLabel('Reversal').selectOption('2');
+  await expect(page.getByText('1-min · 0.5% box · 2-box reversal')).toBeVisible();
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('2-box');
+  await expect.poll(async () => cols(panel)).toBeGreaterThan(three);   // a smaller reversal turns the column more often
+  await page.waitForTimeout(400);
+  await expect(page.getByTestId('pnf-log-row')).toHaveCount(0);        // redrawing never alerts
+  await page.reload();
+  await expect(page.getByLabel('Expiry').locator('option').first()).toBeAttached();
+  await expect(page.getByLabel('Reversal')).toHaveValue('2');
+});

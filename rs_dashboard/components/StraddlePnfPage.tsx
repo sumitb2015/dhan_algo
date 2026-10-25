@@ -13,8 +13,8 @@ import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/al
 import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
 import { foldTick, newSignalsAfter, nextWatermark, capLog } from '@/lib/straddlePnfLive';
 import { historyQuery, tickAcceptable } from '@/lib/straddlePnfLoad';
-import { INTERVALS, type Interval } from '@/lib/straddlePnfInterval';
-import { DEFAULT_SETTINGS, MAX_BOX_PCT, MIN_BOX_PCT, parseBoxPct, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
+import SettingsControls from './straddlePnf/SettingsControls';
+import { DEFAULT_SETTINGS, SETTINGS_KEY, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import { pickExpiries, type PnfExpiry } from '@/lib/straddlePnfExpiries';
 import type { Bar } from '@/lib/straddlePnf';
 
@@ -30,7 +30,6 @@ const TITLES = ['ATM −200', 'ATM', 'ATM +200'];
 const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
 const OVERLAY_KEY = 'straddle-pnf-overlay';
-const SETTINGS_KEY = 'straddle-pnf-settings';
 
 const minuteOf = (t: number) => Math.floor(t / 60) * 60;
 const fmt = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -49,7 +48,6 @@ export default function StraddlePnfPage() {
   const [atmInput, setAtmInput] = useState('auto');
   const [overlay, setOverlay] = useState<Overlay>('vwap');
   const [settings, setSettings] = useState<PnfSettings>(DEFAULT_SETTINGS);
-  const [boxDraft, setBoxDraft] = useState(String(DEFAULT_SETTINGS.boxPct));
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [rows, setRows] = useState<Record<string, Row>>({});
   const [loading, setLoading] = useState(true);
@@ -82,7 +80,6 @@ export default function StraddlePnfPage() {
     if (readPref(OVERLAY_KEY) === 'sma') setOverlay('sma');
     const stored = readSettings(readPref(SETTINGS_KEY));
     setSettings(stored);
-    setBoxDraft(String(stored.boxPct));
     rebaselineRef.current = true;
     if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
     try {
@@ -252,15 +249,6 @@ export default function StraddlePnfPage() {
     setSettings(next);
     savePref(SETTINGS_KEY, serializeSettings(next));
   };
-  const pickInterval = (v: string) => applySettings({ ...settings, interval: Number(v) as Interval });
-  // Free-typed, so it commits on Enter / blur only (a half-typed "0." must not rebuild the charts); an invalid entry reverts.
-  const commitBox = () => {
-    const n = parseBoxPct(boxDraft);
-    if (n === null) { setBoxDraft(String(settings.boxPct)); return; }
-    setBoxDraft(String(n));
-    if (n !== settings.boxPct) applySettings({ ...settings, boxPct: n });
-  };
-  const boxInvalid = boxDraft.trim() !== '' && parseBoxPct(boxDraft) === null;
   const toggleMute = () => {
     const next = !muted;
     setMuted(next);
@@ -283,7 +271,7 @@ export default function StraddlePnfPage() {
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · NIFTY</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">Straddle Point &amp; Figure</h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">{settings.interval}-min · {settings.boxPct}% box · 3-box reversal · signals only</p>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">{settings.interval}-min · {settings.boxPct}% box · {settings.reversal}-box reversal · signals only</p>
           </div>
         </div>
 
@@ -303,21 +291,7 @@ export default function StraddlePnfPage() {
           >
             {expiries.map(e => <option key={e.value} value={e.value}>{e.label}</option>)}
           </select>
-          <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
-            Interval
-            <select aria-label="Interval" value={settings.interval} onChange={e => pickInterval(e.target.value)}
-                    className="h-7 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-xs text-zinc-200">
-              {INTERVALS.map(n => <option key={n} value={n}>{n} min</option>)}
-            </select>
-          </label>
-          <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
-            Box %
-            <input aria-label="Box %" type="text" inputMode="decimal" value={boxDraft} aria-invalid={boxInvalid}
-                   title={`Box size as a % of the first price (${MIN_BOX_PCT}-${MAX_BOX_PCT}); press Enter to apply`}
-                   onChange={e => setBoxDraft(e.target.value)} onBlur={commitBox}
-                   onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commitBox(); } if (e.key === 'Escape') setBoxDraft(String(settings.boxPct)); }}
-                   className={`h-7 w-16 rounded-md border bg-zinc-900 px-2 text-xs text-zinc-200 ${boxInvalid ? 'border-red-500' : 'border-zinc-700'}`} />
-          </label>
+          <SettingsControls settings={settings} onChange={applySettings} />
           <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
             ATM
             <input aria-label="ATM" type="text" inputMode="numeric" value={atmInput}
@@ -370,6 +344,7 @@ export default function StraddlePnfPage() {
                 loading={loading && !row}
                 interval={settings.interval}
                 boxPct={settings.boxPct}
+                reversal={settings.reversal}
                 fill
                 error={loaded?.errors[String(strike)]}
               />

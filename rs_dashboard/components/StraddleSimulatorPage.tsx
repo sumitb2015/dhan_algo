@@ -7,6 +7,8 @@ import NavBar from './NavBar';
 import DataChip from './DataChip';
 import PnfPanel from './straddlePnf/PnfPanel';
 import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
+import SettingsControls from './straddlePnf/SettingsControls';
+import { DEFAULT_SETTINGS, SETTINGS_KEY, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
 import { newSignalsAfter, nextWatermark, capLog } from '@/lib/straddlePnfLive';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
@@ -47,6 +49,7 @@ export default function StraddleSimulatorPage() {
   const [index, setIndex] = useState('NIFTY');
   const [atmText, setAtmText] = useState('auto');
   const [overlay, setOverlay] = useState<Overlay>('vwap');
+  const [settings, setSettings] = useState<PnfSettings>(DEFAULT_SETTINGS);
   const [data, setData] = useState<Loaded | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,6 +70,7 @@ export default function StraddleSimulatorPage() {
   useEffect(() => installAlertSoundUnlock(), []);
   useEffect(() => {
     if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
+    setSettings(readSettings(readPref(SETTINGS_KEY)));   // the same preference the live page uses
     const timers = flashTimers.current;
     return () => { timers.forEach(clearTimeout); };
   }, []);
@@ -159,8 +163,8 @@ export default function StraddleSimulatorPage() {
   // ── charts: only the bars up to the replay time exist ───────────────────
   const strikes = useMemo(() => data?.strikes ?? [0, 0, 0], [data]);
   const models = useMemo(
-    () => strikes.map(strike => buildPanelModel(data ? barsUpTo(data.bars[String(strike)] ?? [], T) : [], overlay)),
-    [data, strikes, T, overlay],
+    () => strikes.map(strike => buildPanelModel(data ? barsUpTo(data.bars[String(strike)] ?? [], T) : [], overlay, settings)),
+    [data, strikes, T, overlay, settings],
   );
 
   // ── alerts: only bars that close during playback; a jump (load / scrub / reset) re-baselines the watermark silently ──
@@ -195,6 +199,11 @@ export default function StraddleSimulatorPage() {
     }
   }, [models, data]);
 
+  const applySettings = (next: PnfSettings) => {
+    seekRef.current = true;             // the charts are about to be redrawn from the same bars: re-baseline, alert on nothing
+    setSettings(next);
+    savePref(SETTINGS_KEY, serializeSettings(next));
+  };
   const toggleMute = () => {
     const next = !muted;
     setMuted(next);
@@ -225,7 +234,7 @@ export default function StraddleSimulatorPage() {
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · NIFTY replay</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">Straddle Simulator</h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">Replay past sessions · 1-min · 0.5% box · 3-box reversal · signals only</p>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">Replay past sessions · {settings.interval}-min · {settings.boxPct}% box · {settings.reversal}-box reversal · signals only</p>
           </div>
         </div>
 
@@ -302,6 +311,7 @@ export default function StraddleSimulatorPage() {
           <span data-testid="sim-spot" className="text-xs font-mono text-zinc-300">Spot <b className="text-white">{spot !== null ? fmt(spot) : '—'}</b></span>
           {data?.preloadSession && <span className="text-[10px] font-mono text-zinc-500">Preloaded {data.preloadSession}</span>}
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <SettingsControls settings={settings} onChange={applySettings} />
           <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-950" role="group" aria-label="Overlay">
             <button type="button" aria-pressed={overlay === 'vwap'} onClick={() => setOverlay('vwap')} className={seg(overlay === 'vwap')}>VWAP</button>
             <button type="button" aria-pressed={overlay === 'sma'} onClick={() => setOverlay('sma')} className={seg(overlay === 'sma')}>SMA 10</button>
@@ -333,6 +343,9 @@ export default function StraddleSimulatorPage() {
                 stale={false}
                 flash={flash[strike] ?? null}
                 loading={loading}
+                interval={settings.interval}
+                boxPct={settings.boxPct}
+                reversal={settings.reversal}
                 fill
               />
             );

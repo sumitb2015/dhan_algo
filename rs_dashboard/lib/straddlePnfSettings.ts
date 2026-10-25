@@ -1,9 +1,16 @@
-// The Straddle P&F page's user settings: bar interval and box size. Pure, so parsing and persistence rules are tested.
+// The Straddle P&F pages' user settings: bar interval, box size and reversal. Pure, so parsing and persistence rules are tested.
 import { INTERVALS, type Interval } from './straddlePnfInterval.ts';
 
-export type PnfSettings = { interval: Interval; boxPct: number };
+/** Boxes against the column it takes to reverse it (the classic setting is 3). */
+export const REVERSALS = [1, 2, 3, 4, 5] as const;
+export type Reversal = (typeof REVERSALS)[number];
 
-export const DEFAULT_SETTINGS: PnfSettings = { interval: 1, boxPct: 0.5 };
+export type PnfSettings = { interval: Interval; boxPct: number; reversal: Reversal };
+
+/** localStorage key shared by the live page and the simulator, so both show the chart the same way. */
+export const SETTINGS_KEY = 'straddle-pnf-settings';
+
+export const DEFAULT_SETTINGS: PnfSettings = { interval: 1, boxPct: 0.5, reversal: 3 };
 /** Box size limits, in % of the first price: below the minimum the chart turns into thousands of boxes, above the maximum it is a single column. */
 export const MIN_BOX_PCT = 0.05;
 export const MAX_BOX_PCT = 5;
@@ -25,7 +32,9 @@ export function readSettings(raw: string | null): PnfSettings {
     ? (o.interval as Interval) : DEFAULT_SETTINGS.interval;
   const boxPct = typeof o.boxPct === 'number' && Number.isFinite(o.boxPct) && o.boxPct >= MIN_BOX_PCT && o.boxPct <= MAX_BOX_PCT
     ? o.boxPct : DEFAULT_SETTINGS.boxPct;
-  return { interval, boxPct };
+  const reversal = typeof o.reversal === 'number' && (REVERSALS as readonly number[]).includes(o.reversal)
+    ? (o.reversal as Reversal) : DEFAULT_SETTINGS.reversal;
+  return { interval, boxPct, reversal };
 }
 
 export function serializeSettings(s: PnfSettings): string {

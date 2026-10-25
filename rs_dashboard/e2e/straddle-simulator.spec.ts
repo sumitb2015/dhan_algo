@@ -161,3 +161,44 @@ test('the charts fit the window and opening the alert log does not push them dow
   const after = (await panel.boundingBox())!;
   expect(Math.abs(after.y - before.y)).toBeLessThan(2);              // the log floats over the page instead of moving the charts
 });
+
+// ── interval / box % / reversal in the simulator ──────────────────────────────
+test('the simulator has the same interval, box % and reversal controls with the same defaults', async ({ page }) => {
+  await install(page, { loads: [], blocked: [] });
+  await load(page);
+  await expect(page.getByLabel('Interval')).toHaveValue('1');
+  await expect(page.getByLabel('Box %')).toHaveValue('0.5');
+  await expect(page.getByLabel('Reversal')).toHaveValue('3');
+  await expect(page.getByText('1-min · 0.5% box · 3-box reversal')).toBeVisible();
+  await page.getByLabel('Box %').fill('1');
+  await page.getByLabel('Box %').press('Enter');
+  await expect(page.getByText('1-min · 1% box · 3-box reversal')).toBeVisible();
+  await expect(page.getByTestId('pnf-box-info').first()).toContainText('(1% of');
+  await page.getByLabel('Box %').fill('abc');
+  await expect(page.getByLabel('Box %')).toHaveAttribute('aria-invalid', 'true');
+  await page.getByLabel('Box %').blur();
+  await expect(page.getByLabel('Box %')).toHaveValue('1');             // an invalid entry reverts
+});
+
+test('a 5-minute replay alerts only when a 5-minute bar closes; changing a setting mid-way never alerts', async ({ page }) => {
+  await install(page, { loads: [], blocked: [] });
+  await load(page);
+  await page.getByLabel('Interval').selectOption('5');
+  await page.getByRole('button', { name: '200X' }).click();
+  await page.getByRole('button', { name: 'Play' }).click();
+  await page.getByRole('button', { name: 'Alert log' }).click();
+  await expect(page.getByTestId('sim-clock')).toContainText('minute 4 of 4');
+  await expect(page.getByTestId('pnf-log-row')).toHaveCount(0);        // 4 minutes never complete a 5-minute bar
+
+  await page.getByLabel('Interval').selectOption('1');                 // same bars, 1-minute chart: its signals are old news
+  await page.waitForTimeout(400);
+  await expect(page.getByTestId('pnf-log-row')).toHaveCount(0);
+  await page.getByLabel('Reversal').selectOption('2');
+  await page.waitForTimeout(400);
+  await expect(page.getByTestId('pnf-log-row')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Reset' }).click();           // a fresh run on the 1-minute chart does alert
+  await page.getByLabel('Reversal').selectOption('3');
+  await page.getByRole('button', { name: 'Play' }).click();
+  await expect(page.getByTestId('pnf-log-row')).toHaveCount(2);
+});

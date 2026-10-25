@@ -25,6 +25,7 @@ export type PnfPanelProps = {
   /** Minutes per chart bar and box size in %: only used to describe the chart in the header (defaults 1 and 0.5). */
   interval?: number;
   boxPct?: number;
+  reversal?: number;
   /** Fill the height of the parent (a flex/grid cell) instead of the live page's fixed viewport-based height. */
   fill?: boolean;
 };
@@ -54,7 +55,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, interval = 1, boxPct = 0.5 }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -130,7 +131,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         </p>
         <div className="mt-0.5 flex items-center justify-between gap-2">
           <p data-testid="pnf-box-info" className="text-[10px] font-mono text-zinc-500 truncate">
-            {box > 0 ? `Box ${box.toFixed(2)} (${boxPct}% of ${model.anchor.toFixed(2)}) · 3-box · ${columns.length} cols` : 'Box —'}
+            {box > 0 ? `Box ${box.toFixed(2)} (${boxPct}% of ${model.anchor.toFixed(2)}) · ${reversal}-box · ${columns.length} cols` : 'Box —'}
           </p>
           {lastSignal && (
             <span data-testid="pnf-last-signal"
