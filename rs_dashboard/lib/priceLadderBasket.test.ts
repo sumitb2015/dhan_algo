@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   basketTemplates, draftFromTemplate, validateDraft, basketAxis, orientLegs, basketCombined, basketName, basketNowPnl, sumBasketPnl,
-  planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, type LadderBasket, type BasketLeg, type DraftLeg,
+  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, type LadderBasket, type BasketLeg, type DraftLeg,
 } from './priceLadderBasket.ts';
 import { rollDay, type LadderState } from './priceLadder.ts';
 import { lotsOnContract, openPositionCount } from './priceLadderPair.ts';
@@ -294,4 +294,44 @@ test('REAL entry: an interrupted SHORTS send (hedges already filled) is UNKNOWN 
   assert.deepEqual(out.legs.map(l => [l.side, l.unknown ?? null]), [['SELL', 'entry'], ['BUY', null], ['SELL', 'entry'], ['BUY', null]]);
   // while a send is still running it is not orphaned
   assert.equal(planBaskets(st([b]), PX, NOW, { polledAt: () => 0, busy: () => true }).next.baskets![0].state, 'placing');
+});
+
+// ── calendars / diagonals: two expiries ──────────────────────────────────────────────────────────
+
+test('calendar templates are offered, with their far legs flagged', () => {
+  const t = basketTemplates().find(x => x.key === 'calendar-call-spread');
+  assert.ok(t, 'calendar call spread offered');
+  assert.ok(basketTemplates().some(x => x.key === 'double-calendar'));
+  assert.ok(!basketTemplates().some(x => x.key === 'low-gamma-diagonal-call'), 'DTE-window templates stay out');
+  const d = draftFromTemplate(t!.legs, 22500, 50, listed);
+  assert.deepEqual(d.map(l => [l.side, l.strike, l.far ?? false]), [['SELL', 22500, false], ['BUY', 22500, true]]);
+});
+
+test('a near and a far leg on one strike are a calendar, not a contradiction', () => {
+  const cal: DraftLeg[] = [{ side: 'SELL', opt: 'CE', strike: 22500, ratio: 1 }, { side: 'BUY', opt: 'CE', strike: 22500, ratio: 1, far: true }];
+  assert.equal(validateDraft(cal), null);
+  assert.match(validateDraft([...cal, { side: 'BUY', opt: 'CE', strike: 22500, ratio: 1 }]) ?? '', /both bought and sold/);
+  assert.match(validateDraft([cal[1], { ...cal[1] }]) ?? '', /twice/);
+});
+
+test('a calendar sell-near / buy-far is a debit', () => {
+  const cal: DraftLeg[] = [{ side: 'SELL', opt: 'CE', strike: 22500, ratio: 1 }, { side: 'BUY', opt: 'CE', strike: 22500, ratio: 1, far: true }];
+  const px = [30, 55];
+  const ax = basketAxis(cal, l => px[cal.indexOf(l)]);
+  assert.deepEqual(ax, { a: 25, credit: false });
+});
+
+test('the price-request form round-trips and carries the far expiry on the far legs', () => {
+  const cal: DraftLeg[] = [{ side: 'SELL', opt: 'PE', strike: 22300, ratio: 1 }, { side: 'BUY', opt: 'PE', strike: 22300, ratio: 2, far: true }];
+  const param = draftToParam(cal, '2026-11-24');
+  assert.equal(param, '22300:PE:S:1,22300:PE:B:2:F:2026-11-24');
+  assert.deepEqual(draftFromParam(param), { legs: cal, farExpiry: '2026-11-24' });
+  assert.equal(draftFromParam('22300:PE:S:1').farExpiry, null);
+  assert.equal(draftFromParam('22300:PE:B:1:F:garbage').farExpiry, null);
+});
+
+test('mixedExpiry tells a calendar from a single-expiry basket', () => {
+  const leg = (expiry: string) => ({ contract: { ...contract(22500, 'CE'), expiry } }) as BasketLeg;
+  assert.equal(mixedExpiry({ legs: [leg('2026-10-27'), leg('2026-11-24')] }), true);
+  assert.equal(mixedExpiry({ legs: [leg('2026-10-27'), leg('2026-10-27')] }), false);
 });

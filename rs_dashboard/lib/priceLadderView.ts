@@ -8,7 +8,7 @@ import {
   type LadderBroker, type LadderContract, type OptType,
 } from '@/lib/priceLadder';
 import { isPairLive, pairCombined } from '@/lib/priceLadderPair';
-import { isBasketLive, basketAxis, validateDraft, type DraftLeg } from '@/lib/priceLadderBasket';
+import { isBasketLive, basketAxis, validateDraft, draftFromParam, type DraftLeg } from '@/lib/priceLadderBasket';
 import { prevDayLevelsNow } from '@/lib/prevDayLevels';
 
 // What the Price Ladder page shows, built once for both the 1 s poll (GET /api/price-ladder/state) and the push stream
@@ -77,16 +77,14 @@ export async function buildLadderView(params: URLSearchParams) {
     else pairError = typeof ce === 'string' ? ce : pe as string;
   }
   // Basket mode: the legs on screen (`basket` = `strike:opt:side:ratio,...`, side B / S as the strategy defines them).
-  const draft: DraftLeg[] = (params.get('basket') ?? '').split(',').filter(Boolean).slice(0, 12).map(t => {
-    const [strike, opt, side, ratio] = t.split(':');
-    return { strike: Number(strike), opt: opt as 'CE' | 'PE', side: side === 'S' ? 'SELL' : 'BUY', ratio: Number(ratio) };
-  });
+  const { legs: draft, farExpiry: basketFar } = draftFromParam(params.get('basket') ?? '');
   let basketLegs: LadderContract[] | null = null;
   let basketError: string | null = null;
   if (LADDER_UNDERLYINGS.includes(want) && /^\d{4}-\d{2}-\d{2}$/.test(expiry) && draft.length) {
     basketError = validateDraft(draft);
+    if (!basketError && draft.some(l => l.far) && !(basketFar && basketFar > expiry)) basketError = 'A calendar needs a far expiry after the near one';
     if (!basketError) {
-      const cs = await Promise.all(draft.map(l => resolveContract('dhan', want, expiry, l.strike, l.opt)));
+      const cs = await Promise.all(draft.map(l => resolveContract('dhan', want, l.far ? basketFar! : expiry, l.strike, l.opt)));
       const failed = cs.find(c => typeof c === 'string');
       if (failed) basketError = failed as string; else basketLegs = cs as LadderContract[];
     }
@@ -127,7 +125,7 @@ export async function buildLadderView(params: URLSearchParams) {
     basket: basketLegs ? (() => {
       const ax = basketAxis(draft, l => prices.ltps[basketLegs![draft.indexOf(l)].securityId]);
       return {
-        legs: draft.map((l, i) => ({ strike: l.strike, opt: l.opt, side: l.side, ratio: l.ratio, securityId: basketLegs![i].securityId, ltp: prices.ltps[basketLegs![i].securityId] ?? null })),
+        legs: draft.map((l, i) => ({ strike: l.strike, opt: l.opt, side: l.side, ratio: l.ratio, ...(l.far ? { far: true } : {}), expiry: basketLegs![i].expiry, securityId: basketLegs![i].securityId, ltp: prices.ltps[basketLegs![i].securityId] ?? null })),
         a: ax?.a ?? null, credit: ax?.credit ?? null, lotSize: basketLegs![0].lotSize, mult: basketLegs![0].mult ?? 1,
       };
     })() : null,

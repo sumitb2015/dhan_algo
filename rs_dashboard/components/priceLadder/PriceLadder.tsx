@@ -16,7 +16,7 @@ import { FOCUS_RING } from '@/components/Scalper';
 import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, basketWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { BasketLegsModal } from '@/components/priceLadder/BasketLegsModal';
-import { basketTemplates, draftFromTemplate, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
+import { basketTemplates, draftFromTemplate, draftToParam, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
 import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, sumPairPnl, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
@@ -69,7 +69,7 @@ interface StateResp {
   /** The selection this reply describes. */
   request?: { underlying: string; expiry: string; strike: number | null; opt: string | null; pairCe?: number | null; pairPe?: number | null; basket?: string };
   /** Basket mode: the legs on screen with their live premiums, and the net premium A (credit = the strategy as defined receives money). */
-  basket?: { legs: { strike: number; opt: 'CE' | 'PE'; side: LadderSide; ratio: number; securityId: string; ltp: number | null }[]; a: number | null; credit: boolean | null; lotSize: number; mult: number } | null;
+  basket?: { legs: { strike: number; opt: 'CE' | 'PE'; side: LadderSide; ratio: number; far?: boolean; expiry?: string; securityId: string; ltp: number | null }[]; a: number | null; credit: boolean | null; lotSize: number; mult: number } | null;
   basketError?: string | null;
   /** Pair mode: the CE / PE legs on screen and their combined premium (null when a leg has no live price). */
   pair?: {
@@ -318,7 +318,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [basketLegs, setBasketLegs] = useState<DraftLeg[]>([]);
   const [basketEdited, setBasketEdited] = useState(false);
   const [basketModalOpen, setBasketModalOpen] = useState(false);
-  const basketParam = mode === 'basket' ? basketLegs.map(l => `${l.strike}:${l.opt}:${l.side === 'SELL' ? 'S' : 'B'}:${l.ratio}`).join(',') : '';
+  // A calendar / diagonal's far expiry (later than `expiry`); rides in the price request on the far legs themselves.
+  const [farExpiry, setFarExpiry] = useState('');
+  const basketHasFar = basketLegs.some(l => l.far);
+  const basketParam = mode === 'basket' && (!basketHasFar || farExpiry) ? draftToParam(basketLegs, farExpiry) : '';
   // Pair mode: a leg moving this % against its own fill exits both legs (0 = off).
   const [legSlPct, setLegSlPct] = useState(0);
   const [real, setReal] = useState(false);               // per page load, never persisted
@@ -785,6 +788,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // ── Basket mode ── the strategy's legs on the listed strikes around ATM, built once per strategy / underlying / expiry
   // (an ATM drift never moves legs the user is looking at, and edited legs are never rebuilt).
   const basketTpl = useMemo(() => basketTemplates().find(t => t.key === basketKey) ?? null, [basketKey]);
+  const tplHasFar = !!basketTpl?.legs.some(l => l.expiryRole === 'far');
+  // The far expiry follows the near one: the next listed expiry, unless the chosen one is still later than it.
+  useEffect(() => {
+    if (mode !== 'basket' || !(tplHasFar || basketHasFar)) return;
+    const later = expiries.filter(x => x > expiry);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!later.includes(farExpiry)) setFarExpiry(later[0] ?? '');
+  }, [mode, tplHasFar, basketHasFar, expiries, expiry, farExpiry]);
   const atmRef = useRef<number | null>(null);
   useEffect(() => { atmRef.current = atmStrike; }, [atmStrike]);
   const buildBasket = useCallback(() => {
@@ -981,7 +992,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   }, [post, broker, real, underlying, expiry, structure, pairOk, pairCe, pairPe, lots, product, orderType, zones, legSlPct, style, tgtPts, slPts, trailOn, trailPts, second]);
 
   // Basket mode (SIM only for now: the server refuses a REAL basket, and the page says so before asking).
-  const basketPayload = { strategy: basketKey, name: basketTpl?.name ?? 'Basket', legs: basketLegs, underlying, expiry, broker, product, lots, mode: (real ? 'real' : 'sim') as 'real' | 'sim' };
+  const basketPayload = { strategy: basketKey, name: basketTpl?.name ?? 'Basket', legs: basketLegs, underlying, expiry, ...(basketHasFar ? { farExpiry } : {}), broker, product, lots, mode: (real ? 'real' : 'sim') as 'real' | 'sim' };
   const sendBasket = useCallback((side: LadderSide, price: number, expect: { kind: 'limit' | 'stop'; dir: 'above' | 'below' }) => {
     if (!expiry || !basketView?.a) return;
     void post({
@@ -990,7 +1001,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         : trailOn ? { bracket: { tgtPts: 0, slPts: trailPts, trailPts } } : {}),
     }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${basketTpl?.name ?? 'basket'} armed at net ${price}`); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [post, basketKey, basketTpl, basketLegs, underlying, expiry, broker, real, product, lots, orderType, zones, style, tgtPts, slPts, trailOn, trailPts, second, basketView?.a]);
+  }, [post, basketKey, basketTpl, basketLegs, basketHasFar, farExpiry, underlying, expiry, broker, real, product, lots, orderType, zones, style, tgtPts, slPts, trailOn, trailPts, second, basketView?.a]);
   const sendBasketMarket = (side: LadderSide) => {
     if (!expiry || !basketView?.a) return;
     const run = () => void post({ action: 'basket', op: 'market', ...basketPayload, side, ...(second ? { pane: 2 } : {}) })
@@ -1178,7 +1189,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   : 'Click Buy below LTP or Sell above it for a LIMIT; the other side places an SL-M stop (Order Type SL). Orders rest at the broker.';
   const dataDate = data ? data.state.date : null;
   const optLabel = mode === 'basket'
-    ? `${underlying} ${expiry} ${basketTpl?.name ?? 'Basket'}${basketEdited ? ' (edited)' : ''}`
+    ? `${underlying} ${expiry}${basketHasFar && farExpiry ? ` / ${farExpiry}` : ''} ${basketTpl?.name ?? 'Basket'}${basketEdited ? ' (edited)' : ''}`
     : mode === 'pair'
     ? (pairOk ? `${underlying} ${expiry} ${structure === 'straddle' ? `${pairCe} straddle` : `${pairCe}CE / ${pairPe}PE strangle`}` : `${underlying} — pair strikes not in the chain`)
     : strike ? `${underlying} ${expiry} ${strike} ${opt}` : `${underlying} —`;
@@ -1610,6 +1621,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                       ))}
                     </select>
                   </div>
+                  {(tplHasFar || basketHasFar) && (
+                    <div className="flex items-center justify-between gap-2"><span className="text-zinc-400 font-medium" title="The far legs of a calendar / diagonal trade on this expiry; the near legs on the Expiry above.">Far expiry</span>
+                      <select aria-label="Far expiry" value={farExpiry} onChange={e => setFarExpiry(e.target.value)} disabled={basketLocked}
+                        className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100 disabled:opacity-50">
+                        {expiries.filter(x => x > expiry).map(x => <option key={x} value={x}>{x}</option>)}
+                      </select>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Legs <span className="text-zinc-500">({basketLegs.length})</span></span>
                     <button type="button" onClick={() => setBasketModalOpen(true)} className={`px-2.5 py-0.5 rounded border border-zinc-700 text-zinc-200 hover:text-white ${FOCUS_RING}`}>Edit legs</button>
                   </div>
@@ -1818,7 +1837,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           <BasketTable baskets={paneBaskets} ltps={data?.ltps ?? {}} busy={busy} post={post} shown={new Set(myBaskets.map(y => y.id))} onSelect={selectBasket} />
         )}
         {basketModalOpen && (
-          <BasketLegsModal name={basketTpl?.name ?? 'Basket'} legs={basketLegs} strikes={strikes} atmStrike={atmStrike} locked={basketLocked}
+          <BasketLegsModal name={basketTpl?.name ?? 'Basket'} legs={basketLegs} strikes={strikes} atmStrike={atmStrike} locked={basketLocked} farExpiry={tplHasFar || basketHasFar ? farExpiry : null}
             prices={basketLegs.map((_, i) => basketView?.legs[i]?.ltp ?? null)}
             onChange={l => { setBasketLegs(l); setBasketEdited(true); }}
             onReset={() => { setBasketEdited(false); buildBasket(); }}

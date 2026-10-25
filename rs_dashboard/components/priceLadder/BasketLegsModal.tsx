@@ -17,6 +17,8 @@ interface Props {
   prices: readonly (number | null)[];
   /** The legs are in an armed / open basket: the draft cannot change under it. */
   locked: boolean;
+  /** The far expiry of a calendar / diagonal (null = single-expiry basket): a leg can be set to it. */
+  farExpiry?: string | null;
   onChange: (legs: DraftLeg[]) => void;
   onReset: () => void;
   onClose: () => void;
@@ -25,7 +27,7 @@ interface Props {
 const cell = 'px-1.5 py-1';
 const sel = `px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100 text-xs ${FOCUS_RING}`;
 
-export function BasketLegsModal({ name, legs, strikes, atmStrike, prices, locked, onChange, onReset, onClose }: Props) {
+export function BasketLegsModal({ name, legs, strikes, atmStrike, prices, locked, farExpiry, onChange, onReset, onClose }: Props) {
   const set = (i: number, patch: Partial<DraftLeg>) => onChange(legs.map((l, j) => (j === i ? { ...l, ...patch } : l)));
   const add = () => {
     const last = legs[legs.length - 1];
@@ -45,7 +47,7 @@ export function BasketLegsModal({ name, legs, strikes, atmStrike, prices, locked
             <thead>
               <tr className="text-left text-zinc-400">
                 <th className={`${cell} font-bold`}>Side</th><th className={`${cell} font-bold`}>Type</th><th className={`${cell} font-bold`}>Strike</th>
-                <th className={`${cell} font-bold`}>Ratio</th><th className={`${cell} font-bold text-right`}>Premium</th><th className={cell} />
+                <th className={`${cell} font-bold`}>Ratio</th>{farExpiry && <th className={`${cell} font-bold`}>Expiry</th>}<th className={`${cell} font-bold text-right`}>Premium</th><th className={cell} />
               </tr>
             </thead>
             <tbody>
@@ -73,6 +75,13 @@ export function BasketLegsModal({ name, legs, strikes, atmStrike, prices, locked
                       {Array.from({ length: MAX_BASKET_RATIO }, (_, n) => n + 1).map(n => <option key={n} value={n}>×{n}</option>)}
                     </select>
                   </td>
+                  {farExpiry && (
+                    <td className={cell}>
+                      <select aria-label={`Leg ${i + 1} expiry`} disabled={locked} value={l.far ? 'far' : 'near'} onChange={e => set(i, { far: e.target.value === 'far' })} className={sel}>
+                        <option value="near">Near</option><option value="far">Far {farExpiry}</option>
+                      </select>
+                    </td>
+                  )}
                   <td className={`${cell} text-right font-mono text-zinc-300`}>{prices[i] != null ? prices[i]!.toFixed(2) : '—'}</td>
                   <td className={`${cell} text-right`}>
                     <button type="button" disabled={locked || legs.length <= 1} onClick={() => onChange(legs.filter((_, j) => j !== i))}

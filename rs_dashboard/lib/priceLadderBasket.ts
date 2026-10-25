@@ -75,7 +75,28 @@ export interface LadderBasket {
 }
 
 /** A leg as the page edits it before anything is armed: the side AS DEFINED by the strategy, not yet oriented. */
-export interface DraftLeg { side: LadderSide; opt: 'CE' | 'PE'; strike: number; ratio: number }
+export interface DraftLeg {
+  side: LadderSide; opt: 'CE' | 'PE'; strike: number; ratio: number;
+  /** A calendar / diagonal's far-expiry leg: resolved on the basket's far expiry instead of its (near) expiry. */
+  far?: boolean;
+}
+
+/** The wire form of a draft in the page's price request: `strike:opt:S|B:ratio` plus `:F:<far expiry>` on a far leg. */
+export function draftToParam(legs: readonly DraftLeg[], farExpiry: string): string {
+  return legs.map(l => `${l.strike}:${l.opt}:${l.side === 'SELL' ? 'S' : 'B'}:${l.ratio}${l.far ? `:F:${farExpiry}` : ''}`).join(',');
+}
+
+/** Parses `draftToParam`; the far expiry rides on the far legs themselves (null when a far leg has none or the date is malformed). */
+export function draftFromParam(param: string): { legs: DraftLeg[]; farExpiry: string | null } {
+  let farExpiry: string | null = null;
+  const legs = param.split(',').filter(Boolean).slice(0, 12).map((t): DraftLeg => {
+    const [strike, opt, side, ratio, flag, exp] = t.split(':');
+    const far = flag === 'F';
+    if (far && /^\d{4}-\d{2}-\d{2}$/.test(exp ?? '')) farExpiry = exp;
+    return { strike: Number(strike), opt: opt as 'CE' | 'PE', side: side === 'S' ? 'SELL' : 'BUY', ratio: Number(ratio), ...(far ? { far: true } : {}) };
+  });
+  return { legs, farExpiry };
+}
 
 export const MAX_BASKET_LEGS = 8;
 export const MAX_BASKET_RATIO = 10;
@@ -92,13 +113,13 @@ export const basketLegQty = (lots: number, ratio: number, lotSize: number) => lo
 
 export const basketLegHeld = (l: BasketLeg): number => l.held ?? (l.entry === 'filled' ? (l.filledQty ?? 0) : 0);
 
-/** The listed strikes of every basket the Ladder offers: single-expiry templates only (a calendar / diagonal needs two expiries). */
+/** The baskets the Ladder offers: single-expiry templates and calendars / diagonals (two expiries); not the DTE-window ones (flyagonal, low-gamma diagonal). */
 export interface BasketTemplateInfo { category: string; key: string; name: string; legs: StrategyTemplate['legs'] }
 export function basketTemplates(): BasketTemplateInfo[] {
   const out: BasketTemplateInfo[] = [];
   for (const [category, list] of Object.entries(STRATEGY_CATEGORIES)) {
     for (const t of list) {
-      if (t.dte || t.legs.some(l => l.expiryRole === 'far')) continue;
+      if (t.dte) continue;
       out.push({ category, key: t.key, name: t.name, legs: t.legs });
     }
   }
@@ -109,7 +130,7 @@ export function basketTemplates(): BasketTemplateInfo[] {
 export function draftFromTemplate(legs: StrategyTemplate['legs'], atm: number, step: number, listed: readonly number[]): DraftLeg[] {
   return legs.map(l => {
     const target = atm + l.offset * step;
-    return { side: l.side === 'B' ? 'BUY' : 'SELL', opt: l.option, strike: (listed.length ? nearestStrike([...listed], target) : target) ?? atm, ratio: l.ratio };
+    return { side: l.side === 'B' ? 'BUY' : 'SELL', opt: l.option, strike: (listed.length ? nearestStrike([...listed], target) : target) ?? atm, ratio: l.ratio, ...(l.expiryRole === 'far' ? { far: true } : {}) };
   });
 }
 
@@ -123,10 +144,12 @@ export function validateDraft(legs: readonly DraftLeg[]): string | null {
     if (l.opt !== 'CE' && l.opt !== 'PE') return 'Every leg needs CE or PE';
     if (!(l.strike > 0)) return 'Every leg needs a strike';
     if (!Number.isInteger(l.ratio) || l.ratio < 1 || l.ratio > MAX_BASKET_RATIO) return `Leg ratios are whole numbers 1-${MAX_BASKET_RATIO}`;
-    const k = `${l.strike}${l.opt}${l.side}`;
+    // A near and a far leg on one strike are different contracts (a calendar), so the expiry is part of the key.
+    const x = l.far ? 'F' : '';
+    const k = `${l.strike}${l.opt}${l.side}${x}`;
     if (seen.has(k)) return `${l.strike}${l.opt} is in the basket twice on the same side — raise its ratio instead`;
     // The same contract bought AND sold nets out: usually a template squeezed onto a short strike list, never a real leg pair.
-    const opposite = `${l.strike}${l.opt}${l.side === 'BUY' ? 'SELL' : 'BUY'}`;
+    const opposite = `${l.strike}${l.opt}${l.side === 'BUY' ? 'SELL' : 'BUY'}${x}`;
     if (seen.has(opposite)) return `${l.strike}${l.opt} is both bought and sold — change one leg's strike`;
     seen.add(k);
   }
@@ -215,7 +238,9 @@ export function patchBasket(s: LadderState, id: string, patch: Partial<LadderBas
   return { ...s, baskets: (s.baskets ?? []).map(b => (b.id === id ? { ...b, ...(typeof patch === 'function' ? patch(b) : patch), updatedAt: now } : b)) };
 }
 
-/** The IST day a basket's legs expire (they share one expiry), passed: nothing more can be priced. */
+/** True once any leg's expiry has passed (for a calendar, the near leg): nothing more can be priced as a whole. */
+/** A calendar / diagonal: the legs do not share one expiry. */
+export const mixedExpiry = (b: Pick<LadderBasket, 'legs'>) => new Set(b.legs.map(l => l.contract.expiry)).size > 1;
 export const basketExpired = (b: Pick<LadderBasket, 'legs'>, today: string) => b.legs.some(l => l.contract.expiry < today);
 
 /** The bracket levels for a basket filled at `entryY` (measured from the fill, so a gap through the level cannot leave the SL hit). */
@@ -375,8 +400,8 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
     // open / broken
     if (b.state !== 'open' && b.state !== 'broken') continue;
     if (basketExpired(b, today)) {
-      next = say(patch(b.id, { state: 'closed', exitReason: 'Expired', closedAt: now, exitWanted: undefined, note: real ? 'Expired while open — settled at the broker' : 'Expired while open — no exit price (SIM)' }),
-        'warn', `${name}: expired while open — closed without an exit price`, b.id);
+      next = say(patch(b.id, { state: 'closed', exitReason: 'Expired', closedAt: now, exitWanted: undefined, note: real ? `Expired while open — settled at the broker${mixedExpiry(b) ? '; the far leg may still be open, check Positions' : ''}` : 'Expired while open — no exit price (SIM)' }),
+        'warn', `${name}: expired while open — closed without an exit price${mixedExpiry(b) ? ' (the far-expiry leg may still be open — check Positions)' : ''}`, b.id);
       continue;
     }
     // Outside the session nothing acts: the bracket does not read off-hours prints and an exit waits for the open (said once).

@@ -27,7 +27,7 @@ function parseDraft(raw: unknown): DraftLeg[] | string {
   if (!Array.isArray(raw)) return 'legs must be a list';
   const legs: DraftLeg[] = raw.slice(0, 20).map(x => {
     const r = (x ?? {}) as Record<string, unknown>;
-    return { side: r.side as LadderSide, opt: r.opt as 'CE' | 'PE', strike: Number(r.strike), ratio: Number(r.ratio) };
+    return { side: r.side as LadderSide, opt: r.opt as 'CE' | 'PE', strike: Number(r.strike), ratio: Number(r.ratio), ...(r.far === true ? { far: true } : {}) };
   });
   return validateDraft(legs) ?? legs;
 }
@@ -95,13 +95,19 @@ async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<P
   if (mode === 'real' && lots > MAX_REAL_BASKET_LOTS) return bad(`REAL baskets are limited to ${MAX_REAL_BASKET_LOTS} lots for now`);
   const draft = parseDraft(b.legs);
   if (typeof draft === 'string') return bad(draft);
+  // A calendar / diagonal: the far legs trade on a later expiry than the near ones.
+  const farExpiry = String(b.farExpiry ?? '');
+  if (draft.some(l => l.far)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(farExpiry)) return bad('farExpiry must be YYYY-MM-DD');
+    if (farExpiry <= expiry) return bad('The far expiry must be after the near expiry');
+  }
   const step = PAIR_STRIKE_STEP[u];
   if (!step || draft.some(l => l.strike % step !== 0)) return bad(`Basket strikes must be ${step ?? '?'}-point strikes`);
   // REAL: the daily arm, the broker session and (for a Market order) the open market; a SIM arm may be placed any time.
   const openErr = checkOpenAllowed(u, now, mode, broker, readLadderState(), { isArm: !isMarket });
   if (openErr) return bad(openErr, openErr.includes('LIVE') || openErr.includes('session') ? 403 : 400);
 
-  const contracts = await Promise.all(draft.map(l => resolveContract(broker, u, expiry, l.strike, l.opt)));
+  const contracts = await Promise.all(draft.map(l => resolveContract(broker, u, l.far ? farExpiry : expiry, l.strike, l.opt)));
   for (const c of contracts) if (typeof c === 'string') return bad(c);
   const cs = contracts as LadderContract[];
   if (new Set(cs.map(c => c.lotSize)).size > 1) return bad('The legs have different lot sizes — refused');

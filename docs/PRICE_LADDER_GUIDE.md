@@ -26,7 +26,7 @@ orders and cancels armed REAL levels; exits always work). The arm lapses at the 
 
 ## Basket mode (prebuilt strategies on the net premium)
 
-The **Ladder** switch has a fourth mode, **Basket**: pick one of the Baskets page's single-expiry strategies (iron condor, iron
+The **Ladder** switch has a fourth mode, **Basket**: pick one of the Baskets page's strategies (single-expiry, plus calendars and diagonals) (iron condor, iron
 butterfly, butterflies, batman, spreads, ratio spreads, lizards, ...). The legs are placed on the listed strikes around ATM
 (offsets as on the Baskets page) and the ladder shows the strategy's **net premium**: a credit (iron condor) or a debit
 (butterfly), always as a positive number. **Sell** = receive that premium, **Buy** = pay it. In the direction that matches the
@@ -47,7 +47,14 @@ strategy (Sell a credit / Buy a debit) the legs are as defined; in the other dir
   ("Is open" / "Is flat") in the Baskets table. Exits cover the shorts first and sell the hedges only once none is held.
   A leg closed outside the ladder makes the basket BROKEN (bracket off; exit what is left). The first REAL run should be a
   1-lot defined-risk basket after a SIM day.
-- Two-expiry strategies (calendars, diagonals) are not offered. No OI bars in Basket mode (rows are premiums).
+- **Calendars and diagonals** (Calendar Call/Put Spread, Diagonal Call/Put Spread, Double Calendar) are offered: the near legs
+  trade on the **Expiry** above and the far legs on the **Far expiry** picker that appears (default: the next expiry; it must be
+  later than the near one). Edit legs has an **Expiry** column to move a leg between near and far. As on the Baskets page the
+  template sells the near option and buys the far one, a net **debit**, so you Buy it at the net premium. The DTE-window
+  templates (Flyagonal, Low-Gamma Diagonal) are not offered. Take a calendar off before the near expiry: once the near leg's
+  expiry passes the ladder closes the basket without an exit price and the far leg may still be open at the broker, so check
+  Positions. REAL sends the far (bought) leg first and the near (sold) leg after it fills, like any hedge.
+- No OI bars in Basket mode (rows are premiums).
 
 ## Trading cutoffs (MCX and NSE)
 
