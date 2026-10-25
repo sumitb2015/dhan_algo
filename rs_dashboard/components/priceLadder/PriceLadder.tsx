@@ -1421,7 +1421,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         />
       )}
 
-      <div className="flex-1 flex flex-col gap-4 px-6 py-5 max-w-[1680px] w-full mx-auto">
+      <div className="flex-1 flex flex-col gap-4 px-6 pt-1.5 pb-5 max-w-[1680px] w-full mx-auto">
         <div className="flex flex-col gap-4 xl:min-h-[var(--ladder-top-h)]" style={topMinHeight ? ({ '--ladder-top-h': `${topMinHeight}px` } as React.CSSProperties) : undefined}>
         <div ref={topRef} className="flex flex-col gap-4">
         <div className="xl:min-h-[var(--ladder-banner-h)]" style={{ ...(bannerMinHeight ? { '--ladder-banner-h': `${bannerMinHeight}px` } : { marginBottom: -16 }) } as React.CSSProperties}>
