@@ -191,6 +191,21 @@ const timeOf = (at: number) => new Date(at).toLocaleTimeString('en-IN', { timeZo
 /** One ladder pane. The page can show two side by side: the second keeps its own saved choices (keys end in `-2`), has no
  *  NavBar, and neither auto-focuses a live contract nor chimes (the first pane already does both). The ledger and the
  *  server watcher are shared — every slice carries its own contract, so the panes only differ in what they display. */
+/** A page notice with a close button. Hidden until it remounts: the condition clearing and returning, or a new `key` (a changed message), shows it again. */
+function Banner({ tone, children }: { tone: 'red' | 'amber'; children: React.ReactNode }) {
+  const [open, setOpen] = useState(true);
+  if (!open) return null;
+  const c = tone === 'red' ? 'border-red-500/30 bg-red-500/10 text-red-300' : 'border-amber-500/30 bg-amber-500/10 text-xs text-amber-300';
+  return (
+    <div className={`flex items-center gap-2 px-3 py-2 rounded-md border text-xs ${c}`}>
+      {children}
+      <button type="button" onClick={() => setOpen(false)} aria-label="Dismiss notice" title="Dismiss" className="ml-auto shrink-0 rounded p-0.5 hover:bg-zinc-800/60 focus-visible:outline focus-visible:outline-2">
+        <X className="w-3.5 h-3.5" aria-hidden />
+      </button>
+    </div>
+  );
+}
+
 export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, onRemoveLadder, onBrokerChange, peerBroker, onHeaderHeight, headerMinHeight, onTopHeight, topMinHeight, onBannerHeight, bannerMinHeight, collapsed = false, onToggleCollapsed }: {
   ladderId?: 1 | 2; dual?: boolean; onAddLadder?: () => void; onRemoveLadder?: () => void;
   /** Reports this pane's broker; the other pane gets it as `peerBroker`. */
@@ -1299,50 +1314,50 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         <div className="xl:min-h-[var(--ladder-banner-h)]" style={{ ...(bannerMinHeight ? { '--ladder-banner-h': `${bannerMinHeight}px` } : { marginBottom: -16 }) } as React.CSSProperties}>
         <div ref={bannerRef} className="flex flex-col gap-4">
         {loadError && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-300">
+          <Banner tone="red" key={String(loadError)}>
             <AlertTriangle className="w-4 h-4" /> {loadError}
-          </div>
+          </Banner>
         )}
         {stale && inSession && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
+          <Banner tone="amber">
             <AlertTriangle className="w-4 h-4" /> {axisName} {mcx ? 'price' : 'spot'} is stale{spotView ? ` (last ${timeOf(spotView.at)}, ${spotView.source})` : ''} — {mcx ? 'futures' : 'index'} levels are paused until it updates.
-          </div>
+          </Banner>
         )}
         {pairError && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-300">
+          <Banner tone="red" key={String(pairError)}>
             <AlertTriangle className="w-4 h-4" /> Pair leg: {pairError}
-          </div>
+          </Banner>
         )}
         {contractError && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-300">
+          <Banner tone="red" key={String(contractError)}>
             <AlertTriangle className="w-4 h-4" /> {contractError}
-          </div>
+          </Banner>
         )}
         {mcx && sessionNote && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
+          <Banner tone="amber" key={String(sessionNote)}>
             <AlertTriangle className="w-4 h-4" /> {sessionNote}
-          </div>
+          </Banner>
         )}
         {sessionDown && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
+          <Banner tone="amber">
             <AlertTriangle className="w-4 h-4" />
             {BROKER_LABELS[broker]} session is not logged in — {real ? 'REAL orders are off until you log in (Autologin); exits already sent keep retrying.' : 'SIM works; REAL needs a fresh login (Autologin).'}
-          </div>
+          </Banner>
         )}
         {mode === 'pair' && pairView && !(pairView.combined && pairView.combined > 0) && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
+          <Banner tone="amber">
             <AlertTriangle className="w-4 h-4" /> No live price for {pairView.ce.ltp ? 'the PE leg' : pairView.pe.ltp ? 'the CE leg' : 'either leg'} yet — pair levels are paused until both legs price (the feed may still be subscribing).
-          </div>
+          </Banner>
         )}
         {mode === 'basket' && (basketErr || (basketView && !basketView.a)) && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
+          <Banner tone="amber" key={String(basketErr)}>
             <AlertTriangle className="w-4 h-4" /> {basketErr ?? 'No live price for every leg yet (or the strategy nets to nothing) — basket levels are paused until all legs price.'}
-          </div>
+          </Banner>
         )}
         {realBlocked && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-300">
+          <Banner tone="red">
             <ShieldAlert className="w-4 h-4" /> REAL mode: arm LIVE · REAL MONEY for today before placing. Exits always work.
-          </div>
+          </Banner>
         )}
 
         </div>
