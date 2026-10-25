@@ -56,7 +56,7 @@ their exits, open ones at live prices, every contract and pair it placed — the
 exits or cancels the other's positions. Orders from before ladders were tagged count as ladder 1's. It is enforced by
 the **server watcher** (`lib/priceLadderGuard.ts`, evaluated once a second inside the ledger lock), so it works with
 every tab closed — closing ladder 2 leaves its guard running over its positions (reopen ladder 2 to see or change it).
-It resets each day.
+Each new day the levels you saved are restored but the guard is OFF (its best MTM and locked profit do not carry): switch it on again. If it was ON yesterday the event log says so.
 
 | Rule | Meaning |
 |---|---|
@@ -84,6 +84,20 @@ off by hand never needs a valid draft.
   and are only used when fresh.
 - A guard only ever exits or cancels, so it needs no REAL arm.
 - One guard covers every ladder on that broker + mode (both cards show the same guard).
+
+## Saved trades (restart-proof)
+
+The ledger `debug/price_ladder_state.json` is written atomically on every change, so a restart the same day, or the next
+day, brings back everything live: open positions (NRML carries; MIS is squared off at the cutoff), exits in flight,
+UNKNOWN orders to resolve, pairs, settings, and the MTM guard levels (OFF). The armed XY levels and the REAL arm are
+one-day things and lapse with the day.
+
+Everything the ledger is about to forget is saved first, in `debug/price_ladder_archive_<YYYY-MM-DD>.json` (one file per
+IST day, kept forever, not in git): at the first write of a new day the whole previous day's ledger (every slice and
+pair — closed, cancelled, rejected, open — the event log and the guards as they were), and on **Clear** the rows it
+removes. A position carried overnight appears in that day's file as it stood at day end, and again under the day it
+finally closes. Files merge by id, so a retry never duplicates a trade. If the archive cannot be written the ladder keeps
+running and logs a red "Trade archive failed" event instead of stopping. There is no history window yet: open the file.
 
 ## Prices and Dhan rate limits
 

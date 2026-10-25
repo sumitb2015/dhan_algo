@@ -626,7 +626,21 @@ export function rollDay(s: LadderState, today: string, now: number): LadderState
     })
     // Drop the cancelled ones that were just created (they have nothing to show next day).
     .filter(p => p.state !== 'cancelled');
-  return { date: today, slices, events: [], liveArmedOn: undefined, ...(pairs.length ? { pairs } : {}), ...(s.rev != null ? { rev: s.rev } : {}), ...(s.settings ? { settings: s.settings } : {}) };
+  // MTM guards: the levels are remembered, the guard is not. Its best MTM / locked profit belong to the day it ran, and a
+  // stale exit-everything rule must not switch itself on over a new day's trades: it comes back OFF for the user to switch on.
+  // (The setting keys mirror cleanGuard in priceLadderGuard.ts, which cannot be imported here without a value import cycle.)
+  const guards: NonNullable<LadderState['guards']> = {};
+  const wasOn: string[] = [];
+  for (const [key, g] of Object.entries(s.guards ?? {})) {
+    guards[key] = { on: false, target: g.target, stop: g.stop, trailBy: g.trailBy, lockAt: g.lockAt, lockKeep: g.lockKeep, lockStepEvery: g.lockStepEvery, lockStepKeep: g.lockStepKeep };
+    if (g.on) wasOn.push(key);
+  }
+  const events = wasOn.length ? [ev('warn', `New day: MTM guard ${wasOn.join(', ')} was ON yesterday — its levels are restored but it is OFF. Switch it on to protect today's positions.`)] : [];
+  return {
+    date: today, slices, events, liveArmedOn: undefined, ...(pairs.length ? { pairs } : {}),
+    ...(Object.keys(guards).length ? { guards } : {}),
+    ...(s.rev != null ? { rev: s.rev } : {}), ...(s.settings ? { settings: s.settings } : {}),
+  };
 }
 
 /** REAL opens need today's arm. Exits never do. */

@@ -10,7 +10,7 @@ import type { LadderGuard } from '@/lib/priceLadderGuard';
 // the orders this ladder placed (the other ladder has its own). The server watcher enforces it (lib/priceLadderGuard.ts), so it works with this tab closed. Numbers are
 // typed as drafts and only sent by Save — a half-typed level must never reach a live rule (dhan-commit-on-blur).
 
-const HELP = 'Watches this ladder\'s P&L on this broker (closed + open, every contract and pair this ladder placed; the other ladder has its own guard). When a rule trips, every open position of this ladder exits at market, armed levels are cancelled and the guard switches off. Protect profit: once MTM touches the trigger, a drop to the locked amount exits. Runs on the server, so it works with this tab closed. Resets each day. Full guide: docs/PRICE_LADDER_GUIDE.md';
+const HELP = 'Watches this ladder\'s P&L on this broker (closed + open, every contract and pair this ladder placed; the other ladder has its own guard). When a rule trips, every open position of this ladder exits at market, armed levels are cancelled and the guard switches off. Protect profit: once MTM touches the trigger, a drop to the locked amount exits. Runs on the server, so it works with this tab closed. Your levels are remembered across days, but the guard starts OFF each day: switch it on. Full guide: docs/PRICE_LADDER_GUIDE.md';
 
 const FIELDS = ['target', 'stop', 'trailBy', 'lockAt', 'lockKeep', 'lockStepEvery', 'lockStepKeep'] as const;
 type Field = (typeof FIELDS)[number];

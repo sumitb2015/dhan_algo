@@ -30,6 +30,7 @@ import {
 } from '@/lib/priceLadderPair';
 import { applyGuards, inScope, parseGuardKey } from '@/lib/priceLadderGuard';
 import { readLadderSettings } from '@/lib/priceLadderSettings';
+import { archiveDay, partsToArchive } from '@/lib/priceLadderArchive';
 
 // The Price Ladder's server watcher. It owns debug/price_ladder_state.json (re-read on every tick and every request,
 // never cached, because the instrumentation hook and the API route can be separate module instances) and, about once
@@ -94,10 +95,31 @@ export function readLadderState(): LadderState {
 export async function updateLadderState(mutate: (s: LadderState) => LadderState): Promise<LadderState> {
   return withFileLock(LOCK_FILE, LOCK_STALE_MS, 'price ladder state', () => {
     const raw = readStateFile();
-    const base = rollDay(raw, istDay(), Date.now());
-    if (base !== raw) writeJsonAtomic(STATE_FILE, base);
+    const rolledTo = rollDay(raw, istDay(), Date.now());
+    const rolled = rolledTo !== raw;
+    let base = rolledTo;
+    // Saved before the ledger forgets it (a new day drops finished trades; Clear removes them): see priceLadderArchive.ts.
+    // An archive error never stops the watcher (live positions would go untracked): it is logged and shown as an event.
+    const saveDropped = (next: LadderState): string | null => {
+      const a = partsToArchive(raw, base, next);
+      if (!a) return null;
+      try { archiveDay(DEBUG_DIR, a.date, a.part); return null; } catch (err) {
+        const msg = `could not archive ${a.date}'s trades before dropping them: ${(err as Error).message}`;
+        console.error(`${TAG} ${msg}`);
+        return msg;
+      }
+    };
+    if (rolled) {
+      const failed = saveDropped(base);
+      if (failed) base = pushEvent(base, ev('error', `Trade archive failed — ${failed}`));
+      writeJsonAtomic(STATE_FILE, base);
+    }
     const next = mutate(base);
     if (next === base) return base;
+    if (!rolled) {
+      const failed = saveDropped(next);
+      if (failed) next.events = [...next.events, ev('error', `Trade archive failed — ${failed}`)];
+    }
     // A revision per write, so a page can tell a late (older) view from the one it already shows. Time-based (at least
     // previous + 1): a recreated file must not restart at 1 under a page that already showed a higher number.
     const out = { ...next, rev: Math.max((base.rev ?? 0) + 1, Date.now()) };

@@ -165,6 +165,7 @@ test('rollDay drops finished slices, cancels armed levels, keeps live positions 
   };
   const r = rollDay(s, '2026-10-22', 5);
   assert.deepEqual(r.slices.map(x => x.id), ['c', 'd']);
+  assert.equal(r.guards, undefined);
   assert.equal(realArmed(r, '2026-10-22'), false);
   assert.equal(rollDay(r, '2026-10-22', 6), r);
 });
@@ -612,4 +613,21 @@ test('atmStrikeOf / atmOffsetLabel: the ATM strike and each strike\'s distance f
   assert.equal(atmOffsetLabel(list, 22600, 22550), 'ATM-1');
   assert.equal(atmOffsetLabel(list, null, 22550), null);
   assert.equal(atmOffsetLabel(list, 22600, 99999), null);
+});
+
+test('rollDay keeps MTM guard levels but switches every guard OFF with no runtime state, and says so when one was ON', () => {
+  const s: LadderState = {
+    date: '2026-10-21', events: [], slices: [slice({ id: 'c', state: 'open' })],
+    guards: {
+      'dhan:real': { on: true, target: 2000, stop: 1500, trailBy: 500, lockAt: 1000, lockKeep: 400, peak: 1800, floor: 400, firedAt: 9, tripped: 'x', firedReason: 'y' },
+      'kotak:sim:2': { on: false, stop: 300 },
+    },
+  };
+  const r = rollDay(s, '2026-10-22', 5);
+  assert.deepEqual(r.guards!['dhan:real'], { on: false, target: 2000, stop: 1500, trailBy: 500, lockAt: 1000, lockKeep: 400, lockStepEvery: undefined, lockStepKeep: undefined });
+  assert.equal(r.guards!['kotak:sim:2'].on, false);
+  assert.equal(r.guards!['kotak:sim:2'].stop, 300);
+  assert.equal(r.events.length, 1);                                    // one warning, for the guard that was ON
+  assert.match(r.events[0].msg, /dhan:real/);
+  assert.equal(rollDay({ ...s, guards: { 'dhan:sim': { on: false, stop: 1 } } }, '2026-10-22', 5).events.length, 0);
 });

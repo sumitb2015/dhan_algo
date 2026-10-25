@@ -59,7 +59,13 @@ per write; the page drops a view older than the one on screen). It is re-read on
     takes barrels (lotSize 10). CRUDEOILM trades only the 100-point strikes (`isTradedStrike`).
 11. **Two ladders share one ledger.** Slices carry `pane` (untagged = 1); the guard is per pane + broker + mode. Bulk actions
     (`exit` / `cancelAll` by securityId) are NOT pane-scoped — pass `ids` from the page.
-12. **`settings` lives in two places** (the settings file and `state.settings`; the state's wins, shallow). Change a cutoff only
+12. **Nothing leaves the ledger unsaved.** `updateLadderState` archives what a write is about to drop
+    (`lib/priceLadderArchive.ts`: the whole old ledger at a day roll, the removed rows on Clear) into
+    `debug/price_ladder_archive_<date>.json`, merged by id, BEFORE the ledger is rewritten; an archive error is logged and
+    shown as an event, never thrown (the watcher must keep running). Any new way of removing a slice or pair must go through
+    `updateLadderState`. `rollDay` keeps MTM guard LEVELS but restores every guard OFF with no runtime state (a stale
+    exit-everything rule must not switch itself on over a new day); armed levels and the REAL arm lapse with the day.
+13. **`settings` lives in two places** (the settings file and `state.settings`; the state's wins, shallow). Change a cutoff only
     through `setCutoffsFromBody`.
 
 ## Tests

@@ -6,7 +6,7 @@ import { isPairLive, patchPair, sumPairPnl, pairNowPnl } from './priceLadderPair
 // each other's positions, even on the same broker and mode. Target, stop, trailing and Protect Profit all read the same number — the ladder's own P&L (closed at
 // their exits, open at live prices) — and when one trips, everything of that scope exits and armed levels are
 // cancelled, then the guard switches itself off (re-arm it to carry on). Evaluated by the server watcher inside the
-// ledger lock, so it works with every tab closed. It resets with the day (rollDay builds a fresh state).
+// ledger lock, so it works with every tab closed. At a new day rollDay keeps the levels but restores every guard OFF with no runtime state.
 
 export interface LadderGuard {
   on: boolean;
