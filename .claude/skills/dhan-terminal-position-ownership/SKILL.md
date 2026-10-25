@@ -476,6 +476,9 @@ Classify every order reply with `lib/orderOutcome.ts` (`classifyOrderReply`, `se
 - **Keep protection attached.** Advanced Scalper keeps a Kotak server bracket on an unknown entry (the pending TTL
   drops it if no position appears); only a clean rejection withdraws it.
 - **Say it.** "status UNKNOWN — check Positions", never "failed" / "rejected" (`UNKNOWN_ORDER_HINT`).
+- **A send that throws, and a JSON 5xx (Price Ladder, 2026-10-25).** `placeDhanOrder` now reconciles a reply with no order id
+  and HTTP >= 500 by correlationId (else UNKNOWN), not only a non-JSON one. In the ladder a thrown ENTRY send is UNKNOWN,
+  a thrown EXIT send is rejected and retried against the broker book (`outcomeOnThrow`, `dhan-price-ladder` rule 3).
 Proofs: `e2e/focus-tool-unknown-order.spec.ts`, `e2e/multi-leg-brokers.spec.ts` (UNKNOWN cases),
 `e2e/scalper-kotak.spec.ts` (UNKNOWN cases), `lib/tripleStraddleClient.test.ts`, `lib/multiLegUnknownOrder.test.ts`.
 

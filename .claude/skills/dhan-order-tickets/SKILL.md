@@ -185,6 +185,13 @@ Per the `dhan-broker-positions` skill, position identity is **always** `(symbol,
 
 ---
 
+### 7. A close from a list row: the browser names the position, the server sizes the order (Price Ladder, 2026-10-25)
+A Close button on a positions table must not send side, quantity or segment. Send the broker, the contract key, the product
+and a share (25/50/75/100); the route re-reads the broker's own book (uncached), derives the opposite side and the
+quantity (whole lots rounded down, 100% = `|net|` verbatim), refuses a flat row, and holds one close per position at a
+time plus a short cooldown so a double click cannot send a second order off a lagging book (`lib/priceLadderClose.ts`).
+Exits need no REAL arm. See `dhan-price-ladder`.
+
 ## Order Ticket Checklist
 
 Before releasing any new order ticket or trade desk component:
@@ -196,5 +203,6 @@ Before releasing any new order ticket or trade desk component:
 - [ ] Are async contract fetches guarded with a monotonic sequence ref (`fetchSeqRef`)?
 - [ ] Is the margin estimate adjusted for commodity vs index vs equity rates?
 - [ ] Does the order confirmation feedback surface both `symbol` and `productType`?
+- [ ] Is every cap re-checked inside the ledger lock, not only before the awaits? Does a throwing send become UNKNOWN (entry) / a retried exit?
 - [ ] Does successful order placement trigger `invalidateBrokerCache()`?
 - [ ] Are modal backdrops styled with `bg-oncolor-dark/70` and text themed via tokens?

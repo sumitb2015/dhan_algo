@@ -263,6 +263,13 @@ it and replace the closed position. Route every save through one promise chain, 
 current record inside the chain (not from a closure captured earlier) and skip if the record changed or closed. The server
 refusing CLOSED to OPEN only covers one transition.
 
+### 17. A cap checked before the awaits must be checked again inside the lock (Price Ladder, 2026-10-25)
+
+`arm()` read the held lots, then awaited the contract lookup, prices and a funds call, then appended the slice. Two fast
+clicks both passed the 20-lot cap. Keep the early check for a quick refusal, but repeat it inside the
+`updateLadderState` callback that appends (return the state unchanged and set a flag to answer "cap"). This is guard 1 and 2 applied
+to a limit rather than a spawn: any check-then-act over a shared ledger needs the check in the same critical section.
+
 ## Before You Ship
 - Can two tabs run this at once? What happens if they do?
 - If this spawns something, what stops a second spawn during the startup window?
