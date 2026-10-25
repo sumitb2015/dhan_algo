@@ -8,7 +8,7 @@ import type { LadderSlice, LadderState } from '../lib/priceLadder';
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const SPOT = 23200;
 
-async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
+async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
   const clock = opts.staleAt ? new Date(`${istToday()}T${opts.staleAt}:00+05:30`).getTime() : null;
   const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[], closes: [] as Record<string, unknown>[] };
   const state: LadderState = { date: istToday(), slices: [], events: [] };
@@ -54,7 +54,7 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
       if (method === 'GET') {
         return json(route, { success: true, data: {
           state, spots: { NIFTY: clock ? { spot: SPOT, at: clock - 60_000, source: 'ws (not moved yet)', fresh: false } : { spot: SPOT, at: Date.now(), source: 'indices', fresh: true } }, ltps: { '111': 120 },
-          liveArmed: !!opts.liveArmed, now: clock ?? Date.now(),
+          liveArmed: !!opts.liveArmed, now: clock ?? Date.now(), watcherAt: opts.watcherLagMs != null ? (clock ?? Date.now()) - opts.watcherLagMs : undefined,
           // The page reads the contract only from a reply that echoes the selection it is showing.
           request: { underlying: u.searchParams.get('underlying'), expiry: u.searchParams.get('expiry') ?? '', strike: Number(u.searchParams.get('strike')) || null, opt: u.searchParams.get('opt'), pairCe: Number(u.searchParams.get('pairCe')) || null, pairPe: Number(u.searchParams.get('pairPe')) || null },
           pair: Number(u.searchParams.get('pairCe')) > 0 ? {
@@ -488,4 +488,22 @@ test('Positions window: a refused close shows the server error and an unknown ou
   await page.getByRole('button', { name: 'Close 100% of NIFTY-Nov2026-22000-PE' }).click();
   await expect(page.getByText(/Order status unknown — check Orders\/Positions before retrying/)).toBeVisible();
   expect(seen.closes).toHaveLength(1);
+});
+
+test('Header warns when the server watcher has gone quiet while a position is live, and not otherwise', async ({ page }) => {
+  await install(page, { openLong: true, watcherLagMs: 30_000 });
+  await gotoSingle(page);
+  await expect(page.getByText('Server not tracking your trades')).toBeVisible();
+});
+
+test('No "not tracking" warning when the watcher is ticking, or when nothing is live', async ({ page }) => {
+  await install(page, { openLong: true, watcherLagMs: 1_000 });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await expect(page.getByText('Server not tracking your trades')).toHaveCount(0);
+  const idle = await page.context().newPage();
+  await install(idle, { watcherLagMs: 30_000 });
+  await gotoSingle(idle);
+  await expect(idle.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await expect(idle.getByText('Server not tracking your trades')).toHaveCount(0);
 });

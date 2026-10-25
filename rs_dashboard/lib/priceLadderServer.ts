@@ -1000,9 +1000,11 @@ async function reconcileDown(s: LadderState, prices: PriceView, now: number): Pr
 }
 
 const LOOP_KEY = '__priceLadderLoop';
-type LoopHolder = { [LOOP_KEY]?: { timer: ReturnType<typeof setInterval>; busy: boolean; startedAt?: number } };
+type LoopHolder = { [LOOP_KEY]?: { timer: ReturnType<typeof setInterval>; busy: boolean; startedAt?: number; lastTickAt?: number } };
 /** No "price is stale" event this soon after the watcher starts. */
 const START_GRACE_MS = 30_000;
+/** When the watcher last started a tick (the page warns when this goes quiet while something is live), or null if it never ran. */
+export const watcherTickAt = (): number | null => (globalThis as LoopHolder)[LOOP_KEY]?.lastTickAt ?? null;
 const loopStartedAt = () => (globalThis as LoopHolder)[LOOP_KEY]?.startedAt ?? 0;
 
 /** One resting REAL order pulled by a tripped guard. A failure is only an error if the order is still resting after it. */
@@ -1019,6 +1021,8 @@ async function guardCancel(x: LadderSlice): Promise<void> {
 let reconciling = false;
 
 async function tick(): Promise<void> {
+  const holder = (globalThis as LoopHolder)[LOOP_KEY];
+  if (holder) holder.lastTickAt = Date.now();
   let s: LadderState;
   try { s = readLadderState(); } catch (err) {
     if (warnOnce('unreadable', 60_000)) console.error(`${TAG}`, (err as Error).message);
@@ -1095,7 +1099,7 @@ async function tick(): Promise<void> {
 export function startPriceLadderLoop(): void {
   const g = globalThis as LoopHolder;
   if (g[LOOP_KEY]) return;
-  const holder = { busy: false, startedAt: Date.now(), timer: setInterval(() => {
+  const holder: NonNullable<LoopHolder[typeof LOOP_KEY]> = { busy: false, startedAt: Date.now(), lastTickAt: Date.now(), timer: setInterval(() => {
     if (holder.busy) return;
     holder.busy = true;
     tick().catch(err => console.error(`${TAG} tick failed:`, err)).finally(() => { holder.busy = false; });
