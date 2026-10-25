@@ -2,15 +2,13 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { Overlay, PanelModel } from '@/lib/straddlePnfModel';
+import { layoutPanel, AXIS_W, PAD_TOP } from '@/lib/straddlePnfLayout';
 
-// One straddle P&F chart: X (green) / O (red) glyphs on a fixed box grid, VWAP or SMA10 line, a bar above the two columns
-// before every double top / double bottom, date dividers where a new session starts and a tag at the live price.
+// One straddle P&F chart: X (green) / O (red) glyphs on a visible box grid, VWAP or SMA10 line, a bar at the level every double
+// top / double bottom broke, date dividers where a new session starts and a tag at the live price. Every column is drawn: the
+// chart scrolls (it opens on the newest column) and the price axis stays pinned to the right edge while you pan.
 
 const MIN_HEIGHT = 420;
-const PAD_TOP = 22;
-const AXIS_W = 58;
-const MAX_CELL = 14;
-const MIN_CELL = 5;
 
 export type PnfPanelProps = {
   title: string;
@@ -56,33 +54,33 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   const overlayLabel = overlay === 'vwap' ? 'VWAP' : 'SMA 10';
   const overlayNow = [...model.overlay].reverse().find(v => v !== null) ?? null;
 
-  // Pick the cell size so the visible columns' price range fits the height, then how many columns fit the width.
-  let cell = 12;
-  let first = 0;
-  let yMin = 0;
-  let yMax = 0;
-  if (columns.length && box > 0) {
-    for (let pass = 0; pass < 2; pass++) {
-      first = Math.max(0, columns.length - Math.floor((width - AXIS_W) / cell));
-      const vis = columns.slice(first);
-      yMin = Math.min(...vis.map(c => c.low), liveValue ?? Infinity);
-      yMax = Math.max(...vis.map(c => c.high), liveValue ?? -Infinity);
-      const rows = Math.ceil((yMax - yMin) / box) + 3;
-      cell = Math.max(MIN_CELL, Math.min(MAX_CELL, Math.floor((HEIGHT - PAD_TOP) / rows)));
-    }
-    yMin -= box;
-    yMax += 2 * box;
-  }
+  const L = layoutPanel(columns, box, liveValue, width, HEIGHT);
+  const { cell, yMin, yMax, plotW, contentW, contentH, offsetX } = L;
   const yOf = (p: number) => PAD_TOP + ((yMax - p) / box) * cell;
-  const vis = columns.slice(first);
-  // The axis is pinned to the panel's right edge and the newest column sits against it; with few columns the empty space is on the left.
-  const plotW = Math.max(cell, width - AXIS_W);
-  const offsetX = Math.max(0, plotW - vis.length * cell);
   const xOf = (j: number) => offsetX + j * cell;
-  const svgW = plotW + AXIS_W;
+  const vis = columns;
+  const first = 0;
   const s = cell * 0.34;
+  const gridId = `pnf-grid-${strike}`;
+  const gridY = columns.length ? ((yOf(columns[0].low) % cell) + cell) % cell : 0; // a cell edge, so grid lines run along the box edges
 
-  const lastEntryId = [...signals].reverse().find(g => g.kind === 'DOUBLE_BOTTOM_SELL' && g.belowVwap && g.col - 2 >= first)?.id;
+  // Open on the newest column, centred on the latest price; keep following the newest column unless the user has panned away.
+  const scrollRef = wrapRef;
+  const stickRef = useRef(true);
+  const centeredFor = useRef<number | null>(null);
+  const lastY = liveValue ?? (columns.length ? (columns[columns.length - 1].low + columns[columns.length - 1].high) / 2 : null);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || columns.length === 0) return;
+    if (stickRef.current) el.scrollLeft = el.scrollWidth;
+    if (centeredFor.current !== strike && lastY !== null && box > 0) {
+      el.scrollTop = Math.max(0, yOf(lastY) - el.clientHeight / 2);
+      centeredFor.current = strike;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columns.length, contentW, contentH, strike]);
+
+  const lastEntryId = [...signals].reverse().find(g => g.kind === 'DOUBLE_BOTTOM_SELL' && g.belowVwap)?.id;
   const ring = flash === 'buy' ? 'ring-2 ring-emerald-400' : flash === 'sell' ? 'ring-2 ring-red-400' : '';
 
   const overlayPts = vis
@@ -118,7 +116,16 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         </p>
       </div>
 
-      <div ref={wrapRef} className="relative overflow-hidden" style={{ height: 'calc(100vh - 215px)', minHeight: MIN_HEIGHT }}>
+      <div
+        ref={wrapRef}
+        data-testid="pnf-scroll"
+        role="region"
+        aria-label={`${title} chart, scrollable`}
+        tabIndex={0}
+        onScroll={e => { const el = e.currentTarget; stickRef.current = el.scrollLeft + el.clientWidth >= el.scrollWidth - 30; }}
+        className="relative overflow-auto"
+        style={{ height: 'calc(100vh - 215px)', minHeight: MIN_HEIGHT }}
+      >
         {error ? (
           <p className="p-3 text-xs text-red-400">{error}</p>
         ) : loading ? (
@@ -126,86 +133,98 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         ) : columns.length === 0 ? (
           <p className="p-3 text-xs text-zinc-400">Building chart — the first column needs a 0.5% move.</p>
         ) : (
-          <svg width={svgW} height={HEIGHT} className="block" role="img" aria-label={`${title} point and figure chart`}>
-            {/* session dividers */}
-            {vis.map((c, j) => {
-              const prev = columns[first + j - 1];
-              if (!prev || prev.session === c.session) return null;
-              return (
-                <g key={`d${j}`}>
-                  <line x1={xOf(j)} x2={xOf(j)} y1={PAD_TOP - 6} y2={HEIGHT} className="stroke-zinc-600" strokeDasharray="2 3" />
-                  <text x={xOf(j) + 3} y={PAD_TOP - 9} className="fill-zinc-500 font-mono" fontSize={9}>{sessionLabel(c.session)}</text>
-                </g>
-              );
-            })}
+          <div className="flex" style={{ width: contentW, height: contentH }}>
+            <svg width={plotW} height={contentH} className="block shrink-0" role="img" aria-label={`${title} point and figure chart`}>
+              <defs>
+                <pattern id={gridId} x={offsetX} y={gridY} width={cell} height={cell} patternUnits="userSpaceOnUse">
+                  <path d={`M${cell} 0V${cell}M0 ${cell}H${cell}`} fill="none" strokeWidth={1} className="stroke-zinc-800" />
+                </pattern>
+              </defs>
+              <rect data-testid="pnf-grid" x={0} y={0} width={plotW} height={contentH} fill={`url(#${gridId})`} />
 
-            {/* X / O glyphs */}
-            {vis.map((c, j) =>
-              Array.from({ length: c.boxes }, (_, k) => {
-                const cx = xOf(j) + cell / 2;
-                const cy = yOf(c.low + (k + 0.5) * box);
-                return c.dir === 'X' ? (
-                  <path key={`${j}-${k}`} d={`M${cx - s} ${cy - s}L${cx + s} ${cy + s}M${cx + s} ${cy - s}L${cx - s} ${cy + s}`}
-                        className="stroke-emerald-400" strokeWidth={1.4} fill="none" />
-                ) : (
-                  <circle key={`${j}-${k}`} cx={cx} cy={cy} r={s} className="stroke-red-400" strokeWidth={1.4} fill="none" />
+              {/* session dividers */}
+              {vis.map((c, j) => {
+                const prev = columns[first + j - 1];
+                if (!prev || prev.session === c.session) return null;
+                return (
+                  <g key={`d${j}`}>
+                    <line x1={xOf(j)} x2={xOf(j)} y1={PAD_TOP - 6} y2={contentH} className="stroke-zinc-600" strokeDasharray="2 3" />
+                    <text x={xOf(j) + 3} y={PAD_TOP - 9} className="fill-zinc-500 font-mono" fontSize={9}>{sessionLabel(c.session)}</text>
+                  </g>
                 );
-              }),
-            )}
-
-            {/* VWAP / SMA10 */}
-            {overlayPts && (
-              <polyline points={overlayPts} fill="none" strokeWidth={1.6}
-                        className={overlay === 'vwap' ? 'stroke-amber-300' : 'stroke-zinc-500'} />
-            )}
-
-            {/* exit cue: first bar of a green X column trading above VWAP */}
-            {exits.length > 0 && exits[exits.length - 1].col >= first && (
-              <text data-testid="pnf-exit" x={xOf(exits[exits.length - 1].col - first) + cell / 2} y={yOf(columns[exits[exits.length - 1].col].high) - 4}
-                    textAnchor="middle" className="fill-emerald-400 font-mono" fontSize={8}>EXIT</text>
-            )}
-
-            {/* double top buy / double bottom sell: a bar at the level that was broken, just outside the previous same-direction
-                column's extreme (above the old top for a buy, below the old bottom for a sell), spanning that column and the one after it */}
-            {signals.filter(g => g.col - 2 >= first).map(g => {
-              const a = g.col - 2 - first;
-              const sell = g.kind === 'DOUBLE_BOTTOM_SELL';
-              const entry = sell && g.belowVwap;
-              const h = entry ? 5 : 3;
-              const y = sell ? yOf(columns[g.col - 2].low) + 3 : yOf(columns[g.col - 2].high) - h - 3;
-              return (
-                <g key={g.id}>
-                  <rect data-testid="pnf-signal" data-kind={g.kind} data-col={g.col} data-entry={entry ? '1' : '0'}
-                        x={xOf(a)} y={y} width={cell * 2} height={h} rx={1}
-                        className={sell ? 'fill-red-400' : 'fill-emerald-400'} />
-                  {g.id === lastEntryId && (
-                    <text x={Math.min(xOf(a) + cell, plotW - 16)} y={y + h + 9} textAnchor="middle" className="fill-red-400 font-mono" fontSize={8}>ENTRY</text>
-                  )}
-                </g>
-              );
-            })}
-
-            {/* right axis */}
-            <g data-testid="pnf-axis">
-            {Array.from({ length: Math.floor((yMax - yMin) / box) + 1 }, (_, i) => i)
-              .filter(i => i % tickEvery === 0)
-              .filter(i => liveValue === null || Math.abs(yOf(yMin + i * box) - yOf(liveValue)) > 10)
-              .map(i => {
-                const p = yMin + i * box;
-                return <text key={`t${i}`} x={plotW + 6} y={yOf(p) + 3} className="fill-zinc-500 font-mono" fontSize={9}>{fmt(p)}</text>;
               })}
 
-            </g>
+              {/* X / O glyphs */}
+              {vis.map((c, j) =>
+                Array.from({ length: c.boxes }, (_, k) => {
+                  const cx = xOf(j) + cell / 2;
+                  const cy = yOf(c.low + (k + 0.5) * box);
+                  return c.dir === 'X' ? (
+                    <path key={`${j}-${k}`} d={`M${cx - s} ${cy - s}L${cx + s} ${cy + s}M${cx + s} ${cy - s}L${cx - s} ${cy + s}`}
+                          className="stroke-emerald-400" strokeWidth={1.4} fill="none" />
+                  ) : (
+                    <circle key={`${j}-${k}`} cx={cx} cy={cy} r={s} className="stroke-red-400" strokeWidth={1.4} fill="none" />
+                  );
+                }),
+              )}
 
-            {/* live value tag */}
-            {liveValue !== null && (
-              <g>
+              {/* VWAP / SMA10 */}
+              {overlayPts && (
+                <polyline points={overlayPts} fill="none" strokeWidth={1.6}
+                          className={overlay === 'vwap' ? 'stroke-amber-300' : 'stroke-zinc-500'} />
+              )}
+
+              {/* exit cue: first bar of a green X column trading above VWAP */}
+              {exits.length > 0 && (
+                <text data-testid="pnf-exit" x={xOf(exits[exits.length - 1].col) + cell / 2} y={yOf(columns[exits[exits.length - 1].col].high) - 4}
+                      textAnchor="middle" className="fill-emerald-400 font-mono" fontSize={8}>EXIT</text>
+              )}
+
+              {/* double top buy / double bottom sell: a bar at the level that was broken, just outside the previous same-direction
+                  column's extreme (above the old top for a buy, below the old bottom for a sell), spanning that column and the one after it */}
+              {signals.map(g => {
+                const a = g.col - 2;
+                const sell = g.kind === 'DOUBLE_BOTTOM_SELL';
+                const entry = sell && g.belowVwap;
+                const h = entry ? 5 : 3;
+                const y = sell ? yOf(columns[g.col - 2].low) + 3 : yOf(columns[g.col - 2].high) - h - 3;
+                return (
+                  <g key={g.id}>
+                    <rect data-testid="pnf-signal" data-kind={g.kind} data-col={g.col} data-entry={entry ? '1' : '0'}
+                          x={xOf(a)} y={y} width={cell * 2} height={h} rx={1}
+                          className={sell ? 'fill-red-400' : 'fill-emerald-400'} />
+                    {g.id === lastEntryId && (
+                      <text x={Math.min(xOf(a) + cell, plotW - 16)} y={y + h + 9} textAnchor="middle" className="fill-red-400 font-mono" fontSize={8}>ENTRY</text>
+                    )}
+                  </g>
+                );
+              })}
+
+              {/* live price line */}
+              {liveValue !== null && (
                 <line x1={0} x2={plotW} y1={yOf(liveValue)} y2={yOf(liveValue)} className="stroke-zinc-500" strokeDasharray="3 3" />
-                <rect x={plotW + 2} y={yOf(liveValue) - 7} width={AXIS_W - 4} height={14} rx={2} className="fill-amber-300" />
-                <text x={plotW + 6} y={yOf(liveValue) + 3} className="fill-oncolor-dark font-mono" fontSize={9} fontWeight={700}>{fmt(liveValue)}</text>
+              )}
+            </svg>
+
+            {/* price axis: sticky, so it stays at the panel's right edge while the chart is panned */}
+            <svg width={AXIS_W} height={contentH} className="block shrink-0 sticky right-0 bg-zinc-900" aria-hidden="true">
+              <g data-testid="pnf-axis">
+                {Array.from({ length: Math.floor((yMax - yMin) / box) + 1 }, (_, i) => i)
+                  .filter(i => i % tickEvery === 0)
+                  .filter(i => liveValue === null || Math.abs(yOf(yMin + i * box) - yOf(liveValue)) > 10)
+                  .map(i => {
+                    const p = yMin + i * box;
+                    return <text key={`t${i}`} x={6} y={yOf(p) + 3} className="fill-zinc-500 font-mono" fontSize={9}>{fmt(p)}</text>;
+                  })}
               </g>
-            )}
-          </svg>
+              {liveValue !== null && (
+                <g>
+                  <rect x={2} y={yOf(liveValue) - 7} width={AXIS_W - 4} height={14} rx={2} className="fill-amber-300" />
+                  <text x={6} y={yOf(liveValue) + 3} className="fill-oncolor-dark font-mono" fontSize={9} fontWeight={700}>{fmt(liveValue)}</text>
+                </g>
+              )}
+            </svg>
+          </div>
         )}
       </div>
     </section>

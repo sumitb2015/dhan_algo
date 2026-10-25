@@ -22,6 +22,21 @@ interface Mock {
   /** 0 = no ticks yet, 1 = a tick in minute M (bar forming), 2 = a tick in minute M+1 (bar M closes). */
   phase: 0 | 1 | 2;
   blocked: Call[];
+  /** Give the +200 strike a long, wide history (many columns) instead of the short quiet one. */
+  longHistory?: boolean;
+}
+
+/** A deterministic wandering series: many columns over a wide price range. */
+function longHistory() {
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+  const start = NOW_MIN - 120 - 799 * 60;
+  let level = 0;
+  return Array.from({ length: 800 }, (_, i) => {
+    level += Math.round((rnd() - 0.5) * 9);
+    const s = i === 0 ? A : Math.max(10, priceAt(level));
+    return { t: start + i * 60, ce: s / 2, pe: s / 2, straddle: s, vol: 10 };
+  });
 }
 
 function history(levels: number[]) {
@@ -68,7 +83,7 @@ async function install(page: Page, m: Mock) {
     if (p === '/api/straddle-pnf' && method === 'GET') {
       return json(route, {
         success: true, atm: ATM, strikes: STRIKES, errors: {}, dataDate: '2026-10-23',
-        bars: { [STRIKES[0]]: history(PATH_WITH_BREAK), [STRIKES[1]]: history(PATH_BEFORE_BREAK), [STRIKES[2]]: history(PATH_QUIET) },
+        bars: { [STRIKES[0]]: history(PATH_WITH_BREAK), [STRIKES[1]]: history(PATH_BEFORE_BREAK), [STRIKES[2]]: m.longHistory ? longHistory() : history(PATH_QUIET) },
       });
     }
     if (p === '/api/options/expiries') return json(route, { success: true, data: upcomingTuesdays(10) });
@@ -163,4 +178,27 @@ test('the price axis sits at the right edge of each panel and the newest column 
   const lastGlyph = panel.locator('svg path, svg circle').last();
   const g = (await lastGlyph.boundingBox())!;
   expect(axis.x - (g.x + g.width)).toBeLessThan(40);               // newest column hugs the axis, no empty gap
+});
+
+test('the chart shows a box grid', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [] });
+  await page.goto('/straddle-pnf');
+  await expect(page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`).getByTestId('pnf-grid')).toBeAttached();
+});
+
+test('a long history is never clipped: the chart scrolls, opens on the newest column, and the axis stays put while panning', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [], longHistory: true });
+  await page.goto('/straddle-pnf');
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM + 200}"]`);
+  const scroller = panel.getByTestId('pnf-scroll');
+  await expect(scroller).toBeAttached();
+  const dims = () => scroller.evaluate(el => ({ sw: el.scrollWidth, cw: el.clientWidth, sl: el.scrollLeft }));
+  await expect.poll(async () => (await dims()).sw).toBeGreaterThan((await dims()).cw + 100); // wider than the view: nothing dropped
+  const start = await dims();
+  expect(start.sl + start.cw).toBeGreaterThanOrEqual(start.sw - 40);                          // opens at the newest column
+  const before = (await panel.getByTestId('pnf-axis').boundingBox())!;
+  await scroller.evaluate(el => { el.scrollLeft = 0; });
+  expect((await dims()).sl).toBe(0);                                                          // the oldest columns are reachable
+  const after = (await panel.getByTestId('pnf-axis').boundingBox())!;
+  expect(Math.abs(after.x - before.x)).toBeLessThan(2);                                       // the price axis did not move
 });
