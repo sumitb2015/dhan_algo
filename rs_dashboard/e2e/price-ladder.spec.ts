@@ -324,7 +324,7 @@ test('Zerodha: the broker picker offers Zerodha and new ladder orders go to it',
   await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByLabel('Broker for new orders').selectOption('zerodha');
-  await expect(page.locator('span.ml-auto').filter({ hasText: 'Zerodha' })).toBeVisible();
+  await expect(page.getByLabel('Broker for new orders')).toHaveValue('zerodha');
   await page.getByRole('button', { name: 'Buy at 23180' }).click();
   await expect.poll(() => seen.posts.filter(b => b.action === 'arm').length).toBe(1);
   expect(seen.posts[0]).toMatchObject({ broker: 'zerodha', mode: 'sim', side: 'BUY', level: 23180 });
@@ -433,7 +433,7 @@ for (const broker of ['dhan', 'kotak', 'zerodha'] as const) {
       await gotoSingle(page);
       await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
       await page.getByLabel('Broker for new orders').selectOption(broker);
-      await expect(page.locator('span.ml-auto').filter({ hasText: Name })).toBeVisible();   // the toolbar names the account (SIM is in the header)
+      await expect(page.getByLabel('Broker for new orders')).toHaveValue(broker);   // the toolbar no longer repeats the broker name; the posts below prove it is the one used
       await page.getByRole('button', { name: 'Buy at 23180' }).click();
       await expect.poll(() => seen.posts.filter(b => b.action === 'arm').length).toBe(1);
       expect(seen.posts[0]).toMatchObject({ kind: 'xy', broker, mode: 'sim', side: 'BUY', level: 23180 });

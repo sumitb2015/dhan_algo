@@ -1692,13 +1692,16 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   </div>
                 </>
               )}
-              <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1"><span className="text-zinc-400 font-medium">Lots {lotSize ? <span className="text-zinc-500">({mcx ? `${lots * (MCX_LOT_MULTIPLIER[underlying] ?? 1)} bbl` : `${lots * lotSize} qty`})</span> : null}</span>
-                <div className="flex flex-wrap items-center gap-1">
-                  <NumField compact label="Lots" value={lots} onCommit={v => setLots(Math.min(MAX_LADDER_LOTS, Math.max(1, Math.round(v))))} min={1} max={MAX_LADDER_LOTS} width="w-14" />
+              <div className="flex flex-col gap-1.5">
+                <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Lots {lotSize ? <span className="text-zinc-500">({mcx ? `${lots * (MCX_LOT_MULTIPLIER[underlying] ?? 1)} bbl` : `${lots * lotSize} qty`})</span> : null}</span>
+                  <NumField compact label="Lots" value={lots} onCommit={v => setLots(Math.min(MAX_LADDER_LOTS, Math.max(1, Math.round(v))))} min={1} max={MAX_LADDER_LOTS} />
+                </div>
+                {/* Quick sizes in four equal buttons, the same height as the form's other controls. */}
+                <div className="grid grid-cols-4 gap-1.5">
                   {[1, 5, 10].map(n => (
-                    <button key={n} type="button" onClick={() => setLots(l => Math.min(MAX_LADDER_LOTS, l + n))} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">+{n}</button>
+                    <button key={n} type="button" onClick={() => setLots(l => Math.min(MAX_LADDER_LOTS, l + n))} className={`h-6 rounded border border-zinc-700 text-xs text-zinc-300 hover:text-white ${FOCUS_RING}`}>+{n}</button>
                   ))}
-                  <button type="button" onClick={() => setLots(1)} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-400 hover:text-white">Clear</button>
+                  <button type="button" onClick={() => setLots(1)} className={`h-6 rounded border border-zinc-700 text-xs text-zinc-400 hover:text-white ${FOCUS_RING}`}>Clear</button>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-1.5">
