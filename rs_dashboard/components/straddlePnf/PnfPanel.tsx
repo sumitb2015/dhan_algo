@@ -90,10 +90,11 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   let currentSession = '';
   vis.forEach((c, j) => {
     const v = model.overlay[first + j];
-    if (c.session !== currentSession) {
+    const seg = model.overlaySession[first + j]; // the session the value belongs to, so a column spanning midnight cannot draw a vertical streak
+    if (seg !== currentSession) {
       if (currentSeg.length > 0) overlaySegments.push(currentSeg.join(' '));
       currentSeg = [];
-      currentSession = c.session;
+      currentSession = seg;
     }
     if (v !== null) {
       currentSeg.push(`${xOf(j) + cell / 2},${yOf(v)}`);
@@ -213,9 +214,6 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                     <circle cx={cx} cy={y} r={Math.max(3, s * 0.9)} className={`${fillCls} opacity-25`} />
                     <circle cx={cx} cy={y} r={Math.max(3, s * 0.9)} fill="none" strokeWidth={1.5} className={strokeCls} />
                     <circle cx={cx} cy={y} r={1.5} className={fillCls} />
-                    {/* Backward-compat rect for test locator */}
-                    <rect data-testid="pnf-signal" data-kind={g.kind} data-col={g.col} data-entry={entry ? '1' : '0'}
-                          x={x1} y={sell ? y + 2 : y - 4} width={x2 - x1} height={2} className={`${fillCls} opacity-0`} />
                     {g.id === lastEntryId && (
                       <g>
                         <rect x={cx - 16} y={y + 8} width={32} height={12} rx={2} className="fill-red-500/20 stroke stroke-red-500/40" />
