@@ -1728,7 +1728,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 title={`This ladder's total P&L on ${BROKER_LABELS[broker]} · ${real ? 'REAL' : 'SIM'} — the same number as the Ladder P&L chip above and the MTM guard: trades closed today at their exit, open ones at the live price. '—' while an open leg has no price.`} />
             </div>
             {/* -mb-2 takes the column gap back: the Tick row sits right above the Buy / Bids header. */}
-            <div className="flex items-center gap-2 flex-wrap text-xs -mb-2">
+            <div className="flex items-center gap-2 flex-wrap text-xs -mt-1.5 -mb-2">
               <div className="flex items-center gap-2 w-full rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-2.5 py-1">
               <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
               <span className="text-zinc-400">Tick</span>
