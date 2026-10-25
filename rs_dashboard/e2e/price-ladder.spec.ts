@@ -8,9 +8,9 @@ import type { LadderSlice, LadderState } from '../lib/priceLadder';
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const SPOT = 23200;
 
-async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string } = {}) {
+async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
   const clock = opts.staleAt ? new Date(`${istToday()}T${opts.staleAt}:00+05:30`).getTime() : null;
-  const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[] };
+  const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[], closes: [] as Record<string, unknown>[] };
   const state: LadderState = { date: istToday(), slices: [], events: [] };
   if (opts.openLong) {
     state.slices.push({
@@ -36,7 +36,11 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
     }
     if (/^\/api\/scalper(\/(kotak|zerodha))?\/poll$/.test(p)) {
       seen.gets.push(p);
-      return json(route, { success: true, positions: [], orders: [], trades: [] });
+      return json(route, { success: true, positions: opts.positions ?? [], orders: [], trades: [] });
+    }
+    if (p === '/api/price-ladder/close-position' && method === 'POST') {
+      seen.closes.push(req.postDataJSON() as Record<string, unknown>);
+      return json(route, opts.closeReply?.body ?? { success: true, data: { message: 'Close sent: e2e' } }, opts.closeReply?.status ?? 200);
     }
     if (p === '/api/options/expiries') return json(route, { success: true, data: ['2026-10-27'] });
     if (p === '/api/options/chain') {
@@ -441,4 +445,47 @@ test('After hours (05:30 IST) a stale price is not warned about', async ({ page 
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.waitForTimeout(1500);
   await expect(page.getByText(/is stale/)).toHaveCount(0);
+});
+
+// Positions window: close all / part of a broker position. The server derives side and quantity from the broker's own
+// book, so the page may only name the position and the share.
+const SHORT_PE = { tradingSymbol: 'NIFTY-Nov2026-22000-PE', securityId: '222', exchangeSegment: 'NSE_FNO', productType: 'MARGIN', netQty: -195, buyAvg: 0, sellAvg: 114.24, unrealizedProfit: -15495.07, realizedProfit: 0 };
+
+async function openPositions(page: Page) {
+  await gotoSingle(page);
+  await page.getByRole('button', { name: /^Positions/ }).click();
+  await expect(page.getByText('NIFTY-Nov2026-22000-PE')).toBeVisible();
+}
+
+test('Positions window: Close asks first, and dismissing the confirm sends nothing', async ({ page }) => {
+  const seen = await install(page, { positions: [SHORT_PE] });
+  const asked: string[] = [];
+  page.on('dialog', d => { asked.push(d.message()); void d.dismiss(); });
+  await openPositions(page);
+  await page.getByRole('button', { name: 'Close 100% of NIFTY-Nov2026-22000-PE' }).click();
+  await expect.poll(() => asked.length).toBe(1);
+  expect(asked[0]).toMatch(/Close ALL of Dhan/);
+  await expect(page.getByText('Cancelled — nothing was sent')).toBeVisible();
+  expect(seen.closes).toEqual([]);
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Positions window: 50% names only the position and the share (no side / qty from the browser)', async ({ page }) => {
+  const seen = await install(page, { positions: [SHORT_PE] });
+  page.on('dialog', d => { void d.accept(); });
+  await openPositions(page);
+  await page.getByRole('button', { name: 'Close 50% of NIFTY-Nov2026-22000-PE' }).click();
+  await expect.poll(() => seen.closes.length).toBe(1);
+  expect(seen.closes[0]).toEqual({ broker: 'dhan', key: '222', product: 'MARGIN', pct: 50 });
+  await expect(page.getByText('Close sent: e2e')).toBeVisible();
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Positions window: a refused close shows the server error and an unknown outcome says to check the book', async ({ page }) => {
+  const seen = await install(page, { positions: [SHORT_PE], closeReply: { status: 504, body: { success: false, unknown: true, error: 'Order status unknown' } } });
+  page.on('dialog', d => { void d.accept(); });
+  await openPositions(page);
+  await page.getByRole('button', { name: 'Close 100% of NIFTY-Nov2026-22000-PE' }).click();
+  await expect(page.getByText(/Order status unknown — check Orders\/Positions before retrying/)).toBeVisible();
+  expect(seen.closes).toHaveLength(1);
 });
