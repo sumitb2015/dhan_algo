@@ -17,9 +17,18 @@ export type PanelModel = {
   overlaySession: string[];
   /** Time of the last closed bar the model was built from; the page's alert watermark follows it. */
   lastBarT: number | null;
+  /** First usable close of the most recent session in the bars: the "open" the header's change is measured against. */
+  sessionOpen: number | null;
 };
 
 export const SMA_PERIOD = 10;
+
+function sessionOpenOf(bars: Bar[]): number | null {
+  if (!bars.length) return null;
+  const session = sessionOf(bars[bars.length - 1].t);
+  const first = bars.find(b => b.straddle > 0 && sessionOf(b.t) === session);
+  return first ? first.straddle : null;
+}
 
 export function buildPanelModel(closedBars: Bar[], overlay: Overlay): PanelModel {
   const { anchor, box, columns } = buildPnf(closedBars);
@@ -34,5 +43,6 @@ export function buildPanelModel(closedBars: Bar[], overlay: Overlay): PanelModel
     overlay: columns.map(c => line[c.endBar]),
     overlaySession: columns.map(c => sessionOf(closedBars[c.endBar].t)),
     lastBarT: closedBars.length ? closedBars[closedBars.length - 1].t : null,
+    sessionOpen: sessionOpenOf(closedBars),
   };
 }

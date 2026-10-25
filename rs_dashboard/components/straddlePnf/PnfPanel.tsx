@@ -41,6 +41,8 @@ function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
 }
 
 const fmt = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const signed = (n: number) => `${n >= 0 ? '+' : '-'}${Math.abs(n).toFixed(2)}`;
+const hhmm = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString().slice(11, 16);
 
 function sessionLabel(iso: string): string {
   const d = new Date(`${iso}T00:00:00Z`);
@@ -55,6 +57,9 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   const liveValue = live ? live.ce + live.pe : null;
   const overlayLabel = overlay === 'vwap' ? 'VWAP' : 'SMA 10';
   const overlayNow = [...model.overlay].reverse().find(v => v !== null) ?? null;
+  const change = liveValue !== null && model.sessionOpen ? liveValue - model.sessionOpen : null;
+  const changePct = change !== null && model.sessionOpen ? (change / model.sessionOpen) * 100 : null;
+  const lastSignal = signals.length ? signals[signals.length - 1] : null;
 
   const L = layoutPanel(columns, box, liveValue, width, HEIGHT);
   const { cell, yMin, yMax, plotW, contentW, contentH, offsetX } = L;
@@ -115,7 +120,14 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
           <h2 className="text-xs font-bold text-zinc-100 truncate">{title}</h2>
           <div className="flex items-center gap-2">
             {stale && <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">Stale</span>}
-            <span className="text-lg font-bold font-mono text-white leading-none">{liveValue !== null ? fmt(liveValue) : '—'}</span>
+            <div className="flex flex-col items-end">
+              <span className="text-lg font-bold font-mono text-white leading-none">{liveValue !== null ? fmt(liveValue) : '—'}</span>
+              {change !== null && changePct !== null && (
+                <span data-testid="pnf-vs-open" className={`mt-0.5 text-[10px] font-mono ${change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {signed(change)} ({signed(changePct)}%) vs open
+                </span>
+              )}
+            </div>
           </div>
         </div>
         <p className="text-[10px] font-mono text-zinc-400 mt-1 truncate">
@@ -124,9 +136,20 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
             {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : ''}
           </span>
         </p>
-        <p className="text-[10px] font-mono text-zinc-500 mt-0.5 truncate">
-          {box > 0 ? `Box ${box.toFixed(2)} (0.5% of ${model.anchor.toFixed(2)}) · 3-box · ${columns.length} cols` : 'Box —'}
-        </p>
+        <div className="mt-0.5 flex items-center justify-between gap-2">
+          <p className="text-[10px] font-mono text-zinc-500 truncate">
+            {box > 0 ? `Box ${box.toFixed(2)} (0.5% of ${model.anchor.toFixed(2)}) · 3-box · ${columns.length} cols` : 'Box —'}
+          </p>
+          {lastSignal && (
+            <span data-testid="pnf-last-signal"
+                  className={`shrink-0 text-[10px] font-bold font-mono px-1.5 py-0.5 rounded border ${
+                    lastSignal.kind === 'DOUBLE_BOTTOM_SELL'
+                      ? 'text-red-400 border-red-500/30 bg-red-500/10'
+                      : 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'}`}>
+              {lastSignal.kind === 'DOUBLE_BOTTOM_SELL' ? '▼ DB sell' : '▲ DT buy'} {hhmm(lastSignal.t)}
+            </span>
+          )}
+        </div>
       </div>
 
       <div

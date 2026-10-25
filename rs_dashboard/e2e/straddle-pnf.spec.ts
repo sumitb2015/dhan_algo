@@ -202,3 +202,15 @@ test('a long history is never clipped: the chart scrolls, opens on the newest co
   const after = (await panel.getByTestId('pnf-axis').boundingBox())!;
   expect(Math.abs(after.x - before.x)).toBeLessThan(2);                                       // the price axis did not move
 });
+
+test('each panel header shows the change versus the session open and the latest signal', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [] });
+  await page.goto('/straddle-pnf');
+  const sell = page.locator('[data-testid="pnf-panel"][data-strike="24800"]');   // history ends on a double bottom, 100.00 -> 99.50
+  await expect(sell.getByTestId('pnf-vs-open')).toHaveText(/-0\.50 \(-0\.50%\) vs open/);
+  await expect(sell.getByTestId('pnf-last-signal')).toContainText('DB sell');
+  const buy = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);   // latest signal is a double top
+  await expect(buy.getByTestId('pnf-last-signal')).toContainText('DT buy');
+  const quiet = page.locator('[data-testid="pnf-panel"][data-strike="25200"]');  // no signal at all: no chip
+  await expect(quiet.getByTestId('pnf-last-signal')).toHaveCount(0);
+});

@@ -62,3 +62,18 @@ test('overlaySession has one entry per column', () => {
   const m = buildPanelModel(bars(PATH), 'vwap');
   assert.equal(m.overlaySession.length, m.columns.length);
 });
+
+test('sessionOpen is the first close of the most recent session in the bars', () => {
+  const DAY = 86_400;
+  const d1 = [0, 5].map((l, i) => ({ t: BASE_T + i * 60, ce: priceAt(l) / 2, pe: priceAt(l) / 2, straddle: priceAt(l), vol: 10 }));
+  const d2 = [3, 4, 6].map((l, i) => ({ t: BASE_T + DAY + i * 60, ce: priceAt(l) / 2, pe: priceAt(l) / 2, straddle: priceAt(l), vol: 10 }));
+  assert.equal(buildPanelModel([...d1, ...d2], 'vwap').sessionOpen, priceAt(3));
+  assert.equal(buildPanelModel(d1, 'vwap').sessionOpen, priceAt(0));
+  assert.equal(buildPanelModel([], 'vwap').sessionOpen, null);
+});
+
+test('sessionOpen skips a zero-price first bar', () => {
+  const zero = { t: BASE_T, ce: 0, pe: 0, straddle: 0, vol: 0 };
+  const b = [zero, ...bars([2, 3]).map(x => ({ ...x, t: x.t + 60 }))];
+  assert.equal(buildPanelModel(b, 'vwap').sessionOpen, priceAt(2));
+});
