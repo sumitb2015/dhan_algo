@@ -474,6 +474,37 @@ async function brokerBook(broker: LadderBroker): Promise<Map<string, number> | n
   }
 }
 
+/** One broker position row, in the broker's own units, for the positions window's close. */
+export interface BrokerPositionRow { key: string; symbol: string; product: string; net: number; exchange: string; lotSize: number | null }
+
+/** The broker's live positions, one row per contract + product (summed), or null when the book is unreadable. Never cached. */
+export async function brokerPositionRows(broker: LadderBroker): Promise<BrokerPositionRow[] | null> {
+  try {
+    const rows = new Map<string, BrokerPositionRow>();
+    const add = (r: BrokerPositionRow) => {
+      const k = `${r.key}|${r.product}`;
+      const cur = rows.get(k);
+      if (cur) cur.net += r.net; else rows.set(k, r);
+    };
+    if (broker === 'dhan') {
+      const book = await dhanGet('/positions', 8000);
+      for (const p of (Array.isArray(book) ? book : []) as Record<string, unknown>[]) {
+        add({ key: String(p.securityId), symbol: String(p.tradingSymbol ?? ''), product: String(p.productType).toUpperCase(), net: Number(p.netQty) || 0, exchange: String(p.exchangeSegment ?? ''), lotSize: null });
+      }
+    } else {
+      const shaped = broker === 'zerodha'
+        ? ((await kiteGet('/portfolio/positions') as { net?: Record<string, unknown>[] } | null)?.net ?? []).map(shapeZerodhaPosition)
+        : kotakRows(await kotakGet(KOTAK_PATHS.positions)).map(shapeKotakPosition);
+      for (const p of shaped) {
+        add({ key: p.tradingSymbol, symbol: p.tradingSymbol, product: String(p.productType).toUpperCase(), net: Number(p.netQty) || 0, exchange: String(p.exchange ?? ''), lotSize: Number(p.lotSize) > 0 ? Number(p.lotSize) : null });
+      }
+    }
+    return [...rows.values()];
+  } catch {
+    return null;
+  }
+}
+
 const bookKey = (s: LadderSlice) => (bySymbol(s.broker)
   ? `${s.contract.tradingSymbol}|${s.product}`
   : `${s.contract.securityId}|${dhanProduct(s.product)}`);

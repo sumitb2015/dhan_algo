@@ -569,6 +569,30 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     return () => clearInterval(t);
   }, [bookOpen, brokerLoaded, fetchBook]);
 
+  // Close all / part of a broker position from the positions window. The server re-reads the broker book and sizes the
+  // order itself; this only names the position and the share, after asking.
+  const closeBrokerPosition = useCallback(async (row: Record<string, unknown>, pct: 25 | 50 | 75 | 100): Promise<{ ok: boolean; text: string }> => {
+    const sym = String(row.tradingSymbol ?? row.symbol ?? '');
+    const net = Number(row.netQty ?? 0);
+    const key = broker === 'dhan' ? String(row.securityId ?? '') : sym;
+    const product = String(row.productType ?? '');
+    if (!key || !product || !net) return { ok: false, text: 'This row has no open quantity to close' };
+    const label = `${BROKER_LABELS[broker]} · ${sym} (${product}, net ${net})`;
+    const hedge = net > 0 ? '\n\nThis is a bought position: closing it can raise margin if you still hold shorts.' : '';
+    if (!window.confirm(`Close ${pct === 100 ? 'ALL' : `${pct}%`} of ${label} at MARKET now?${hedge}`)) return { ok: false, text: 'Cancelled — nothing was sent' };
+    try {
+      const r = await fetch('/api/price-ladder/close-position', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ broker, key, product, pct }),
+      });
+      const j = await r.json() as { success?: boolean; error?: string; unknown?: boolean; data?: { message?: string } };
+      if (j.success) return { ok: true, text: j.data?.message ?? 'Close sent' };
+      return { ok: false, text: j.unknown ? `${j.error ?? 'Status unknown'} — check Orders/Positions before retrying` : (j.error ?? 'Close failed') };
+    } catch (e) {
+      return { ok: false, text: `Status unknown — ${String((e as Error).message ?? e)}. Check Positions before retrying` };
+    }
+  }, [broker]);
+
   // Chime on fills and exits (the server writes the event; any open tab hears it).
   useEffect(() => {
     const evs = data?.state.events ?? [];
@@ -1071,7 +1095,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         <OrdersTradesModal
           isOpen
           readOnly
-          subtitle="View only — change ladder orders from the ladder"
+          subtitle="Orders: view only — change ladder orders from the ladder. Positions: close at market (all or a share)"
           initialTab={bookOpen}
           onClose={() => setBookOpen(null)}
           broker={broker}
@@ -1081,6 +1105,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           isLoading={bookLoading}
           error={bookError}
           onRefresh={() => { void fetchBook(); }}
+          onClosePosition={closeBrokerPosition}
         />
       )}
 

@@ -21,7 +21,12 @@ export interface OrdersTradesModalProps {
   readOnly?: boolean;
   /** Header line under the title; defaults to the editable / view-only wording. */
   subtitle?: string;
+  /** Adds a Close column to the Positions tab: the page sends the order (and asks the user first) and reports back. */
+  onClosePosition?: (row: Record<string, unknown>, pct: 25 | 50 | 75 | 100) => Promise<{ ok: boolean; text: string }>;
 }
+
+const CLOSE_CHOICES = [25, 50, 75, 100] as const;
+const fmtNum = (v: unknown, d = 2) => (Number.isFinite(Number(v)) && Number(v) !== 0 ? Number(v).toFixed(d) : '0');
 
 function isOrderPending(status: unknown): boolean {
   const s = String(status ?? '').trim().toUpperCase();
@@ -54,6 +59,7 @@ export default function OrdersTradesModal({
   initialTab = 'orders',
   readOnly = false,
   subtitle,
+  onClosePosition,
 }: OrdersTradesModalProps) {
   const [ordersTab, setOrdersTab] = useState<'orders' | 'trades' | 'positions'>(initialTab);
   const [tableSort, setTableSort] = useState<SortState>({ key: 'createTime', dir: 'desc' });
@@ -65,6 +71,22 @@ export default function OrdersTradesModal({
   const [editQty, setEditQty] = useState<string>('');
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [closingKey, setClosingKey] = useState<string | null>(null);
+
+  const closePosition = async (row: Record<string, unknown>, pct: 25 | 50 | 75 | 100, rowKey: string) => {
+    if (!onClosePosition || closingKey) return;
+    setClosingKey(rowKey);
+    setActionMsg(null);
+    try {
+      const r = await onClosePosition(row, pct);
+      setActionMsg({ type: r.ok ? 'success' : 'error', text: r.text });
+      if (r.ok) onRefresh();
+    } catch (err) {
+      setActionMsg({ type: 'error', text: (err as Error).message });
+    } finally {
+      setClosingKey(null);
+    }
+  };
 
   // Close modal on Escape key (unless currently editing an order)
   useEffect(() => {
@@ -354,6 +376,66 @@ export default function OrdersTradesModal({
                 Loading {ordersTab === 'orders' ? 'order book' : ordersTab === 'trades' ? 'tradebook' : 'positions'} from {BROKER_LABELS[broker]}…
               </span>
             </div>
+          ) : ordersTab === 'positions' && onClosePosition ? (
+            <table className="w-full text-xs text-left border-collapse">
+              <thead className="sticky top-0 bg-zinc-800 z-10">
+                <tr>
+                  <th className="px-3 py-2.5 text-xs font-bold text-white whitespace-nowrap">Symbol</th>
+                  <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Qty</th>
+                  <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Buy Avg</th>
+                  <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Sell Avg</th>
+                  <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">LTP</th>
+                  <th className="px-3 py-2.5 text-xs font-bold text-white text-right whitespace-nowrap">Unreal. P&amp;L</th>
+                  <th className="px-3 py-2.5 text-xs font-bold text-white whitespace-nowrap">Product</th>
+                  <th className="px-3 py-2.5 text-xs font-bold text-white text-center whitespace-nowrap">Close</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-800/50">
+                {sortRows(filteredData, tableSort).length === 0 ? (
+                  <tr><td colSpan={8} className="py-12 text-center text-zinc-500">No positions found</td></tr>
+                ) : sortRows(filteredData, tableSort).map((row, idx) => {
+                  const net = Number(row.netQty ?? 0);
+                  const sym = String(row.tradingSymbol ?? row.symbol ?? '—');
+                  const product = String(row.productType ?? '');
+                  const rowKey = `${String(row.securityId ?? sym)}|${product}|${idx}`;
+                  const busy = closingKey === rowKey;
+                  const pnl = Number(row.unrealizedProfit ?? 0);
+                  const ltp = Number(row.lastTradedPrice ?? 0);
+                  return (
+                    <tr key={rowKey} className="hover:bg-zinc-800/30 transition-colors">
+                      <td className="px-3 py-2 font-mono text-zinc-200 whitespace-nowrap">{sym}</td>
+                      <td className={`px-3 py-2 text-right font-mono whitespace-nowrap ${net > 0 ? 'text-emerald-400' : net < 0 ? 'text-rose-400' : 'text-zinc-500'}`}>{net}</td>
+                      <td className="px-3 py-2 text-right font-mono text-zinc-300 whitespace-nowrap">{fmtNum(row.buyAvg, 2)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-zinc-300 whitespace-nowrap">{fmtNum(row.sellAvg, 2)}</td>
+                      <td className="px-3 py-2 text-right font-mono text-zinc-300 whitespace-nowrap">{ltp > 0 ? ltp.toFixed(2) : '—'}</td>
+                      <td className={`px-3 py-2 text-right font-mono whitespace-nowrap ${pnl > 0 ? 'text-emerald-400' : pnl < 0 ? 'text-rose-400' : 'text-zinc-400'}`}>{pnl.toFixed(2)}</td>
+                      <td className="px-3 py-2 text-zinc-300 whitespace-nowrap">{product || '—'}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        {net === 0 ? <span className="text-zinc-600 block text-center">flat</span> : (
+                          <div className="flex items-center justify-center gap-1">
+                            {CLOSE_CHOICES.map(pct => (
+                              <button
+                                key={pct}
+                                type="button"
+                                disabled={!!closingKey}
+                                onClick={() => { void closePosition(row, pct, rowKey); }}
+                                title={pct === 100 ? 'Close the whole position at market' : `Close ${pct}% of the position at market (whole lots)`}
+                                aria-label={`Close ${pct}% of ${sym}`}
+                                className={`h-6 px-1.5 rounded border text-[10px] font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${FOCUS_RING} ${
+                                  pct === 100 ? 'border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20' : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white'
+                                }`}
+                              >
+                                {busy ? '…' : pct === 100 ? 'Close' : `${pct}%`}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           ) : ordersTab !== 'orders' ? (
             <TabTable
               tab={ordersTab}

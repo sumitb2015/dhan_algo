@@ -31,6 +31,16 @@ cutoff must be 13:00-15:39 (the session closes 15:40; the last minute is left so
 asks first, because it would square off open MIS positions on the next tick. Code: `lib/priceLadderCutoff.ts`,
 `sessionFor()` in `lib/priceLadder.ts`.
 
+## Closing from the positions window
+
+The Positions tab of the books window has a **Close** column: 25 / 50 / 75 % (whole lots, rounded down) or **Close** (all) per
+row, MARKET, after a confirm. The browser sends only the broker, the contract key, the product and the share
+(`/api/price-ladder/close-position`); the server re-reads the broker's own book, derives the side and quantity, and the
+order can only reduce that position. No REAL arm is needed (an exit). One close per position at a time, then an 8 s cooldown
+while the book catches up. Not supported from here: Kotak / Zerodha MCX (quantity units unconfirmed), non-F&O rows. A ladder
+slice on the same contract is trimmed by the watcher's down-only reconcile once the book shows the change. Order-book
+edit / cancel stays view-only on this page.
+
 ## Option chain window
 
 The **Option chain** button in the header opens the chain of the ladder's current underlying + expiry (OI, OI change vs the
