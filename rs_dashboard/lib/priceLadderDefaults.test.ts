@@ -12,6 +12,13 @@ test('sanitize keeps valid fields and drops the rest', () => {
   assert.deepEqual(sanitizeDefaults('x'), {});
 });
 
+test('the OI bar placement is center or edges, anything else is dropped', () => {
+  assert.equal(sanitizeDefaults({ oiPlace: 'edges' }).oiPlace, 'edges');
+  assert.equal(sanitizeDefaults({ oiPlace: 'left' }).oiPlace, undefined);
+  assert.equal(resolveDefaults({}).oiPlace, 'edges');
+  assert.equal(resolveDefaults({ oiPlace: 'center' }).oiPlace, 'center');
+});
+
 test('lots must be a whole number within the cap', () => {
   assert.equal(sanitizeDefaults({ lots: 2.5 }).lots, undefined);
   assert.equal(sanitizeDefaults({ lots: 0 }).lots, undefined);

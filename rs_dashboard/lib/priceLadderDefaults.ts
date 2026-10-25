@@ -16,6 +16,8 @@ export interface LadderDefaults {
   /** Which option each ladder starts on: ladder 1 and ladder 2 are independent. */
   opt1?: 'CE' | 'PE';
   opt2?: 'CE' | 'PE';
+  /** Where the XY ladder's OI bars sit: on the outer edges (call OI from the far left, put OI from the far right; the default) or beside the Price column. */
+  oiPlace?: 'center' | 'edges';
 }
 
 export const LADDER_UNDERLYINGS: readonly string[] = ['NIFTY', 'BANKNIFTY', 'SENSEX', ...MCX_LADDER_UNDERLYINGS];
@@ -23,7 +25,7 @@ export const LADDER_DEFAULTS_KEY = 'price-ladder-defaults';
 /** Built-in values: what the ladder used before defaults existed. */
 export const BUILT_IN_DEFAULTS: Required<LadderDefaults> = {
   mode: 'xy', product: 'MIS', underlying: 'NIFTY', zones: 'classic', orderType: 'LIMIT', style: 'Bracket',
-  tgtPts: 40, slPts: 30, trailOn: false, trailPts: 30, lots: 1, opt1: 'CE', opt2: 'PE',
+  tgtPts: 40, slPts: 30, trailOn: false, trailPts: 30, lots: 1, opt1: 'CE', opt2: 'PE', oiPlace: 'edges',
 };
 
 const oneOf = <T extends string>(v: unknown, allowed: readonly T[]): T | undefined => (typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : undefined);
@@ -46,6 +48,7 @@ export function sanitizeDefaults(raw: unknown): LadderDefaults {
     lots,
     opt1: oneOf(r.opt1, ['CE', 'PE'] as const),
     opt2: oneOf(r.opt2, ['CE', 'PE'] as const),
+    oiPlace: oneOf(r.oiPlace, ['center', 'edges'] as const),
   };
   return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined)) as LadderDefaults;
 }

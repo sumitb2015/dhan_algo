@@ -706,6 +706,24 @@ test('OI bars: call OI is drawn left of the Price column and put OI right of it'
   expect(c!.x + c!.width).toBeLessThanOrEqual(p!.x);          // the call bar ends before the put bar starts: call left, put right
 });
 
+test('OI bars: they start on the outer edges (call far left, put far right); the Settings choice "Beside price" moves them to the Price column and is remembered', async ({ page }) => {
+  await install(page, { oi: true });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  const ce = page.getByTitle(/^23200 CE OI/), pe = page.getByTitle(/^23200 PE OI/);
+  await expect(ce).toHaveCount(1);
+  const row = ce.locator('xpath=ancestor::div[contains(@class,"grid-cols")][1]');
+  const rowBox = (await row.boundingBox())!;
+  const c0 = (await ce.boundingBox())!, p0 = (await pe.boundingBox())!;
+  expect(Math.round(c0.x - rowBox.x)).toBeLessThanOrEqual(1);                                      // call bar starts at the row's left edge
+  expect(Math.round(rowBox.x + rowBox.width - (p0.x + p0.width))).toBeLessThanOrEqual(1);          // put bar ends at the right edge
+  await page.getByTitle('Configure Price Ladder trading cutoff & session thresholds').click();
+  await page.getByRole('button', { name: 'Beside price' }).click();
+  await page.keyboard.press('Escape');
+  await expect.poll(async () => (await ce.boundingBox())!.x + (await ce.boundingBox())!.width).toBeGreaterThan(rowBox.x + rowBox.width * 0.3);   // now ends at the Price column (~42 % across)
+  expect(await page.evaluate(() => localStorage.getItem('price-ladder-defaults'))).toContain('"oiPlace":"center"');
+});
+
 // ── Basket mode ──
 async function openBasketMode(page: Page, opts: Parameters<typeof install>[1] = {}) {
   const seen = await install(page, opts);

@@ -320,7 +320,7 @@ export interface LadderKeyLevels {
  *    premium) in the Price column.
  */
 export function LadderGrid({
-  center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryMarks, oi, onScroll,
+  center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryMarks, oi, oiPlace = 'edges', onScroll,
   zones = 'classic', stopLimitFor, onTrail, onHoldChange, keyLevels,
 }: {
   center: number; refPrice: number; tick: number; rows: number; widgets: LadderWidget[];
@@ -339,6 +339,8 @@ export function LadderGrid({
   entryMarks?: EntryMark[];
   /** XY only: the chain's OI per strike, drawn as bars behind the strike rows (call left of Price, put right), `max` = 100 %. */
   oi?: { rows: OiStrike[]; max: number };
+  /** 'edges' (default): call OI grows from the far left, put OI from the far right; 'center': bars sit beside the Price column. */
+  oiPlace?: 'center' | 'edges';
   /** Scroll the window by N ticks (positive = up, toward higher prices). Wheel over the rows or the ▲ / ▼ buttons. */
   onScroll?: (ticks: number) => void;
   /**
@@ -471,15 +473,15 @@ export function LadderGrid({
               // Each bar uses at most the PRICE_COL_LEFT_PCT of the row outside the Price column.
               return (
                 <div className="absolute inset-0 pointer-events-none select-none" aria-hidden="true">
-                  {/* Call OI (red) grows to the LEFT of the Price column, Put OI (green) to the RIGHT. */}
+                  {/* Call OI (red) grows to the LEFT of the Price column, Put OI (green) to the RIGHT; with oiPlace 'edges' they start at the outer edges instead. */}
                   {cePct > 0 && (
                     <div title={`${oiRow.strike} CE OI ${oiRow.ceOi.toLocaleString('en-IN')} · ${chg(oiRow.ceOi, oiRow.cePrev)}`}
-                      className="absolute top-0.5 bottom-0.5 right-[58%] rounded-l bg-red-500/25 flex items-center pl-1 text-[9px] font-mono text-zinc-400"
+                      className={`absolute top-0.5 bottom-0.5 bg-red-500/25 flex items-center text-[9px] font-mono text-zinc-400 ${oiPlace === 'edges' ? 'left-0 rounded-r pl-1' : 'right-[58%] rounded-l pl-1'}`}
                       style={{ width: `${cePct * PRICE_COL_LEFT_PCT / 100}%` }}>{showNum ? compactOi(oiRow.ceOi) : null}</div>
                   )}
                   {pePct > 0 && (
                     <div title={`${oiRow.strike} PE OI ${oiRow.peOi.toLocaleString('en-IN')} · ${chg(oiRow.peOi, oiRow.pePrev)}`}
-                      className="absolute top-0.5 bottom-0.5 left-[58%] rounded-r bg-emerald-500/25 flex items-center justify-end pr-1 text-[9px] font-mono text-zinc-400"
+                      className={`absolute top-0.5 bottom-0.5 bg-emerald-500/25 flex items-center justify-end pr-1 text-[9px] font-mono text-zinc-400 ${oiPlace === 'edges' ? 'right-0 rounded-l' : 'left-[58%] rounded-r'}`}
                       style={{ width: `${pePct * PRICE_COL_LEFT_PCT / 100}%` }}>{showNum ? compactOi(oiRow.peOi) : null}</div>
                   )}
                 </div>

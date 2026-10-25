@@ -238,6 +238,7 @@ function DefaultsPanel({ saved, onChange, onReset, onApplyNow }: { saved: Ladder
       <div className={row}><span className={lab}>Target pts</span><NumField compact label="Default target points" value={d.tgtPts} onCommit={tgtPts => onChange({ tgtPts })} min={1} /></div>
       <div className={row}><span className={lab}>SL pts</span><NumField compact label="Default stop-loss points" value={d.slPts} onCommit={slPts => onChange({ slPts })} min={1} /></div>
       <div className={row}><label className={`${lab} flex items-center gap-1.5`}><input type="checkbox" checked={d.trailOn} onChange={e => onChange({ trailOn: e.target.checked })} /> Trail SL by (pts)</label><NumField compact label="Default trailing points" value={d.trailPts} onCommit={trailPts => onChange({ trailPts })} min={1} /></div>
+      <div className={row}><span className={lab} title="Index ladder only: where the open-interest bars are drawn. Applies at once.">OI bars</span><Seg compact value={d.oiPlace} options={['center', 'edges'] as const} labels={{ center: 'Beside price', edges: 'Outer edges' }} onChange={oiPlace => onChange({ oiPlace })} /></div>
       <div className={row}><span className={lab}>Lots</span><NumField compact label="Default lots" value={d.lots} onCommit={v => onChange({ lots: Math.min(MAX_LADDER_LOTS, Math.max(1, Math.round(v))) })} min={1} max={MAX_LADDER_LOTS} width="w-14" /></div>
       <div className="flex items-center gap-2 pt-1">
         <button type="button" onClick={onApplyNow} className="px-3 py-1 rounded-md border border-zinc-700 text-xs font-semibold text-zinc-200 hover:text-white hover:border-zinc-500">Apply now</button>
@@ -1768,6 +1769,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               onPlace={onPlace} onCancel={id => void post(mode === 'basket' ? { action: 'basket', op: 'cancel', id } : mode === 'pair' ? { action: 'pair', op: 'cancel', id } : { action: 'cancel', id })} onMove={onMove} onAdjust={onAdjust}
               disabled={placeDisabled} decimals={decimals} entryMarks={entryMarks}
               oi={mode === 'xy' && oiOn && oiRows.key === `${underlying}|${expiry}` && oiRows.rows.length ? { rows: oiRows.rows, max: maxOi(oiRows.rows) } : undefined}
+              oiPlace={resolveDefaults(savedDefaults).oiPlace}
               onScroll={refPrice > 0 ? scrollLadder : undefined}
               onTrail={(w, delta) => { void post(mode === 'basket' ? { action: 'basket', op: 'trail', id: w.ids[0], delta } : mode === 'pair' ? { action: 'pair', op: 'trail', id: w.ids[0], delta } : { action: 'trail', id: w.ids[0], delta }); }}
               onHoldChange={setHeld}
