@@ -1,7 +1,9 @@
 # Price Ladder guide (`/price-ladder`)
 
 User guide for the Price Ladder terminal. Code: `rs_dashboard/components/priceLadder/`, `rs_dashboard/lib/priceLadder*.ts`.
-Real-money endpoint — SIM (paper) is the default; REAL needs the daily LIVE · REAL MONEY arm.
+Real-money endpoint — SIM (paper) is the default. REAL needs the daily LIVE · REAL MONEY arm: choosing REAL while unarmed opens the
+arm confirmation ("Arm for today and switch to REAL"); once armed, the header shows **REAL armed · Disarm** (disarming refuses new REAL
+orders and cancels armed REAL levels; exits always work). The arm lapses at the day roll and is shared by both ladders.
 
 ## Placing orders
 

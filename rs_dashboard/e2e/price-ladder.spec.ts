@@ -20,6 +20,7 @@ const SPOT = 23200;
 
 async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** One open SIM short iron condor (2 lots) on the mocked strikes. */ openBasket?: boolean; /** N armed (not yet fired) pairs on the two legs the Pair ladder shows. */ armedPairs?: number; /** One armed pair on OTHER strikes (23300 CE / 23100 PE) than the Pair ladder shows. */ offPair?: boolean; /** Give the chain open interest on 23200 so the XY ladder draws OI bars. */ oi?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
   const clock = opts.staleAt ? new Date(`${lastTradingDay()}T${opts.staleAt}:00+05:30`).getTime() : null;
+  let armed = !!opts.liveArmed;   // POST action 'live' flips it, as the server does
   const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[], closes: [] as Record<string, unknown>[] };
   const state: LadderState = { date: istToday(), slices: [], events: [] };
   if (opts.openLong) {
@@ -98,7 +99,7 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
       if (method === 'GET') {
         return json(route, { success: true, data: {
           state, spots: { NIFTY: clock ? { spot: SPOT, at: clock - 60_000, source: 'ws (not moved yet)', fresh: false } : { spot: SPOT, at: Date.now(), source: 'indices', fresh: true } }, ltps: { '111': 120, '222': 100, ...(opts.openBasket ? Object.fromEntries([[23350, 'CE'], [23500, 'CE'], [23050, 'PE'], [22900, 'PE']].map(([k, o]) => [`${k}${o}`, bpx(k as number, o as 'CE' | 'PE')])) : {}) },
-          liveArmed: !!opts.liveArmed, now: clock ?? Date.now(), watcherQuiet: (opts.watcherLagMs ?? 0) > 8000,
+          liveArmed: armed, now: clock ?? Date.now(), watcherQuiet: (opts.watcherLagMs ?? 0) > 8000,
           // The page reads the contract only from a reply that echoes the selection it is showing.
           request: { underlying: u.searchParams.get('underlying'), expiry: u.searchParams.get('expiry') ?? '', strike: Number(u.searchParams.get('strike')) || null, opt: u.searchParams.get('opt'), pairCe: Number(u.searchParams.get('pairCe')) || null, pairPe: Number(u.searchParams.get('pairPe')) || null, basket: u.searchParams.get('basket') ?? '' },
           pair: Number(u.searchParams.get('pairCe')) > 0 ? {
@@ -115,6 +116,7 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
       }
       const body = req.postDataJSON() as Record<string, unknown>;
       seen.posts.push(body);
+      if (body.action === 'live') armed = body.on === true;
       if (body.action === 'arm') {
         const s: LadderSlice = {
           id: `t${seen.posts.length}`, kind: 'xy', broker: (body.broker as 'dhan') ?? 'dhan', mode: 'sim',
@@ -188,14 +190,29 @@ test('Put in XY mode: the ladder is inverted — a Buy above spot is a limit', a
   expect(seen.posts[0]).toMatchObject({ opt: 'PE', side: 'BUY', level: 23220 });
 });
 
-test('REAL without the daily arm: the ladder is disabled and nothing is sent', async ({ page }) => {
+test('Choosing REAL without the daily arm asks first; Cancel stays on SIM and sends nothing', async ({ page }) => {
   const seen = await install(page, { liveArmed: false });
   await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByRole('button', { name: 'REAL', exact: true }).click();
-  await expect(page.getByText(/arm LIVE · REAL MONEY for today before placing/)).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Buy at 23180' })).toBeDisabled();
+  await expect(page.getByRole('dialog').getByText(/Arm LIVE · REAL MONEY for today\?/)).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'SIM', exact: true })).toHaveAttribute('aria-pressed', 'true');
   expect(seen.posts).toEqual([]);
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Arming from the REAL choice arms for today, switches to REAL, and the header offers Disarm', async ({ page }) => {
+  const seen = await install(page, { liveArmed: false });
+  await gotoSingle(page);
+  await page.getByRole('button', { name: 'REAL', exact: true }).click();
+  await page.getByRole('button', { name: /Arm for today and switch to REAL/ }).click();
+  await expect.poll(() => seen.posts.filter(b => b.action === 'live')).toEqual([{ action: 'live', on: true }]);
+  await expect(page.getByRole('button', { name: 'REAL', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('button', { name: /REAL armed · Disarm/ })).toBeVisible();
+  await page.getByRole('button', { name: /REAL armed · Disarm/ }).click();
+  await expect.poll(() => seen.posts.filter(b => b.action === 'live').length).toBe(2);
+  await expect(page.getByRole('button', { name: /REAL armed · Disarm/ })).toHaveCount(0);
   expect(seen.blocked).toEqual([]);
 });
 
@@ -361,7 +378,6 @@ test('Two ladders by default: ladder 1 is the call, ladder 2 the put, each with 
   await expect(page.getByRole('button', { name: 'Put', exact: true, pressed: true })).toHaveCount(1);
   await expect(page.getByRole('button', { name: 'Call', exact: true })).toHaveCount(2);
   // Page-wide header controls appear once, not once per ladder
-  await expect(page.getByRole('button', { name: /Arm LIVE/ })).toHaveCount(1);
   // The books sit under each ladder's header (the account chips stay once)
   for (const name of [/Order book/, /Trade book/, /^Positions/]) await expect(page.getByRole('button', { name })).toHaveCount(2);
   await expect(page.locator('.sticky').getByText('Settings', { exact: true })).toHaveCount(1);
@@ -387,11 +403,11 @@ test('The header controls fold away for more room (both ladders at once), keep a
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/price-ladder');
   await expect(page.getByLabel('Expiry').first()).toHaveValue('2026-10-27');
-  await expect(page.getByRole('button', { name: /Arm LIVE/ })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: /Option chain/ })).toHaveCount(2);
   const head = () => page.locator('.sticky').first().evaluate(e => e.getBoundingClientRect().height);
   const open = await head();
   await page.getByRole('button', { name: 'Hide header controls' }).first().click();
-  await expect(page.getByRole('button', { name: /Arm LIVE/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: /Option chain/ })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Show header controls' })).toHaveCount(2);
   await expect(page.getByText('Dhan · SIM')).toHaveCount(2);
   // Indices and P&L stay visible while the controls are folded
@@ -402,7 +418,7 @@ test('The header controls fold away for more room (both ladders at once), keep a
   await page.reload();
   await expect(page.getByRole('button', { name: 'Show header controls' })).toHaveCount(2);
   await page.getByRole('button', { name: 'Show header controls' }).first().click();
-  await expect(page.getByRole('button', { name: /Arm LIVE/ })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: /Option chain/ })).toHaveCount(2);
 });
 
 // ── every broker ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -784,11 +800,12 @@ test('Basket mode REAL: needs the daily arm; the first order asks and says hedge
   expect(seen.blocked).toEqual([]);
 });
 
-test('Basket mode REAL without the daily arm: the ladder is disabled and nothing is sent', async ({ page }) => {
+test('Basket mode REAL without the daily arm: choosing REAL asks to arm and nothing is sent', async ({ page }) => {
   const seen = await openBasketMode(page, { liveArmed: false });
   await page.getByRole('button', { name: 'REAL', exact: true }).click();
-  await expect(page.getByText(/arm LIVE · REAL MONEY for today before placing/)).toBeVisible();
-  await expect(page.getByRole('button', { name: /^Sell at 9[2-9]/ }).first()).toBeDisabled();
+  await expect(page.getByRole('dialog').getByText(/Arm LIVE · REAL MONEY for today\?/)).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.getByRole('button', { name: /^Sell at 9[2-9]/ }).first()).toBeEnabled();   // still SIM: the ladder works
   expect(seen.posts.filter(b => b.action === 'basket')).toEqual([]);
 });
 

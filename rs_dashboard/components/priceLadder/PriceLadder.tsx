@@ -1272,7 +1272,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // the index chips (right-aligned, same order); with two, each ladder keeps them in its own title row.
   const headControls = !collapsed && (<div className="flex items-center gap-2 flex-wrap">
       <BrokerPicker value={broker} onChange={setBroker} disabled={busy} brokers={LADDER_BROKERS} />
-      <Seg value={real ? 'REAL' : 'SIM'} options={['SIM', 'REAL'] as const} onChange={v => { setReal(v === 'REAL'); setRealAck(false); }} />
+      {/* REAL needs the daily arm: choosing it while unarmed asks once (the dialog below arms for today and then switches). */}
+      <Seg value={real ? 'REAL' : 'SIM'} options={['SIM', 'REAL'] as const} onChange={v => { if (v === 'REAL' && !liveArmed) { setArmModal(true); return; } setReal(v === 'REAL'); setRealAck(false); }} />
       {!real && <SimBadge />}
       {!second && <button type="button" aria-pressed={soundOn} aria-label={soundOn ? 'Mute trade chimes' : 'Unmute trade chimes'}
         title={soundOn ? 'Trade chimes on: rising = entry, falling = exit, low buzz = rejected / unknown. Click to mute' : 'Trade chimes muted. Click to unmute'}
@@ -1280,11 +1281,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         className={`p-1.5 rounded-md border bg-zinc-900 cursor-pointer ${soundOn ? 'border-zinc-700 text-zinc-300 hover:text-white' : 'border-amber-500/50 text-amber-400'}`}>
         {soundOn ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
       </button>}
-      {!second && <button
-        type="button" onClick={() => (liveArmed ? void post({ action: 'live', on: false }) : setArmModal(true))}
-        className={`px-2.5 py-1 rounded-md text-xs font-bold border transition-colors ${liveArmed ? 'bg-red-600 border-red-500 text-oncolor' : 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:text-white'}`}
+      {!second && liveArmed && <button
+        type="button" onClick={() => void post({ action: 'live', on: false })}
+        title="REAL is armed for today. Disarm: new REAL orders are refused and armed REAL levels are cancelled (exits still work)"
+        className="px-2.5 py-1 rounded-md text-xs font-bold border border-red-500/50 bg-red-500/10 text-red-300 hover:bg-red-500/20 transition-colors"
       >
-        {liveArmed ? 'LIVE · REAL MONEY ON' : 'Arm LIVE · REAL MONEY'}
+        REAL armed · Disarm
       </button>}
       {!second && <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
         DATA: {dataDate ?? '—'}
@@ -1496,6 +1498,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         {realBlocked && (
           <Banner tone="red">
             <ShieldAlert className="w-4 h-4" /> REAL mode: arm LIVE · REAL MONEY for today before placing. Exits always work.
+            <button type="button" onClick={() => setArmModal(true)} className={`ml-2 px-2 py-0.5 rounded border border-red-500/50 font-bold hover:bg-red-500/20 ${FOCUS_RING}`}>Arm for today</button>
           </Banner>
         )}
 
@@ -1869,7 +1872,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <p className="text-xs text-zinc-300">REAL ladder orders will place real orders on your broker account. Armed index levels are fired by the dashboard server even with this tab closed, until {sessionFor(underlying, istDay(), data?.state?.settings?.mcxAutoExitTime, data?.state?.settings?.nseAutoExitTime).autoExitLabel} IST{mcx ? ` (${underlying}, today)` : ''}.</p>
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setArmModal(false)} className="px-3 py-1.5 rounded-md border border-zinc-700 text-xs text-zinc-300">Cancel</button>
-              <button type="button" onClick={() => { setArmModal(false); void post({ action: 'live', on: true }); }} className="px-3 py-1.5 rounded-md bg-red-600 text-xs font-bold text-oncolor">Arm for today</button>
+              <button type="button" onClick={() => { setArmModal(false); void post({ action: 'live', on: true }); setReal(true); setRealAck(false); }} className="px-3 py-1.5 rounded-md bg-red-600 text-xs font-bold text-oncolor">Arm for today and switch to REAL</button>
             </div>
           </div>
         </div>
