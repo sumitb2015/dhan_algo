@@ -955,6 +955,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     && (p.broker !== broker || p.mode !== pageMode)) : [];
   const done = paneSlices.filter(s => !isLive(s));
   const livePairs = panePairs.filter(isPairLive);
+  // Positions held (not armed levels): a contract + side group with filled lots, and a pair that has a leg on.
+  const openPositions = liveGroups.filter(g => g.lots > 0).length
+    + livePairs.filter(p => p.state === 'open' || p.state === 'exiting' || p.state === 'broken' || p.state === 'rolling').length;
 
   // Switch the page to a slice's contract (Active Trades chip, orders list). Moving into REAL re-arms the first-click
   // confirmation, exactly like the SIM/REAL switch.
@@ -1324,44 +1327,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           <div className="flex flex-col gap-2 min-w-0">
             {(live.length > 0 || livePairs.length > 0) && (
               <div className="flex items-center gap-1.5 flex-wrap px-2.5 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800 text-xs">
-                <span className="text-zinc-400 font-semibold flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                  Active Trades:
+                <span className="text-zinc-400 font-semibold flex items-center gap-1.5"
+                  title="Positions this ladder holds right now: one per contract + side (a strangle or straddle counts as one). Armed levels and resting orders are not positions; they show on the ladder.">
+                  <span className={`w-2 h-2 rounded-full ${openPositions > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-600'}`} />
+                  Open positions:
                 </span>
-                {liveGroups.map(g => {
-                  const s0 = g.slices[0];
-                  const isCur = s0.contract.securityId === securityId && s0.broker === broker && s0.mode === pageMode;
-                  return (
-                    <button
-                      key={g.key} type="button"
-                      onClick={() => selectContract(s0)}
-                      title={isCur ? 'On the ladder now' : `Show it on the ladder (${s0.mode.toUpperCase()} · ${BROKER_LABELS[s0.broker]})`}
-                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono border transition-colors ${FOCUS_RING} ${isCur ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300 font-bold shadow-sm' : 'bg-zinc-800/90 border-zinc-700 text-zinc-300 hover:text-white hover:border-zinc-500'}`}
-                    >
-                      <span>{s0.contract.underlying} {s0.contract.strike}{s0.contract.opt}</span>
-                      <span className={s0.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}>{s0.side}</span>
-                      <span className="text-[10px] text-zinc-400">
-                        ({s0.mode === 'real' ? <span className="text-red-400 font-bold">REAL</span> : 'SIM'} · {g.lots}L{s0.contract.mult ? ` · ${g.lots * s0.contract.mult} bbl` : ''}{g.armed ? ` · ${g.armed} armed` : ''})
-                      </span>
-                      {!isCur && <span className="text-[10px] text-amber-300 underline font-sans ml-0.5">View on ladder</span>}
-                    </button>
-                  );
-                })}
-                {livePairs.map(p => {
-                  const isCur = myPairs.some(y => y.id === p.id);
-                  return (
-                    <button
-                      key={p.id} type="button" onClick={() => selectPair(p)}
-                      title={isCur ? 'On the ladder now' : 'Show this pair on the ladder (Pair mode)'}
-                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono border transition-colors ${FOCUS_RING} ${isCur ? 'bg-emerald-500/20 border-emerald-500 text-emerald-300 font-bold shadow-sm' : 'bg-zinc-800/90 border-zinc-700 text-zinc-300 hover:text-white hover:border-zinc-500'}`}
-                    >
-                      <span>{p.legs.ce.contract.underlying} {pairName(p)}</span>
-                      <span className={p.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}>{p.side}</span>
-                      <span className="text-[10px] text-zinc-400">({p.mode === 'real' ? <span className="text-red-400 font-bold">REAL</span> : 'SIM'} · {p.lots}L{p.state !== 'open' ? ` · ${p.state}` : ''})</span>
-                      {!isCur && <span className="text-[10px] text-amber-300 underline font-sans ml-0.5">View on ladder</span>}
-                    </button>
-                  );
-                })}
+                <span className="font-mono font-bold text-zinc-100" aria-label="Open positions">{openPositions}</span>
               </div>
             )}
             {hiddenPairs.length > 0 && (

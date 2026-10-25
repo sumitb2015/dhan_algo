@@ -547,3 +547,14 @@ test('Pair strangle: the call and put offsets are set separately and the legs sh
   await expect(page.getByText('A strangle needs the call above the put')).toBeVisible();
   expect(seen.blocked).toEqual([]);
 });
+
+test('The trades strip shows only the number of open positions (armed levels are not positions)', async ({ page }) => {
+  const seen = await install(page, { openLong: true });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await expect(page.getByLabel('Open positions', { exact: true })).toHaveText('1');
+  await page.getByRole('button', { name: 'Buy at 23180' }).click();             // an armed level: still 1 open position
+  await expect.poll(() => seen.posts.filter(b => b.action === 'arm').length).toBe(1);
+  await expect(page.getByLabel('Open positions', { exact: true })).toHaveText('1');
+  await expect(page.getByText('View on ladder')).toHaveCount(0);
+});
