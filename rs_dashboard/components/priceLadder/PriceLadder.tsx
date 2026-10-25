@@ -1571,7 +1571,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             </div>
             <MtmGuardCard key={myGuardKey} broker={broker} real={real} ladderId={ladderId} mtm={ladderPnl} guard={data?.state?.guards?.[myGuardKey]} post={post} />
             <p className="flex items-center gap-1.5 text-[10px] text-zinc-500">
-              <span className="inline-flex" title={HELP_TEXT} aria-label={HELP_TEXT} role="img"><Info className="w-3.5 h-3.5" aria-hidden /></span>
+              <span className="inline-flex items-center gap-1 cursor-help" title={HELP_TEXT} aria-label={HELP_TEXT} role="img"><Info className="w-3.5 h-3.5" aria-hidden /> How the ladder works</span>
             </p>
           </div>
 
@@ -1624,6 +1624,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               </div>
             )}
             <div className="flex items-center gap-2 flex-wrap text-xs">
+              <div className="flex items-center gap-2 flex-wrap rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-2.5 py-1">
               <span className="text-zinc-400">Tick</span>
               <Seg value={String(tick)} options={ticks.map(String)} onChange={v => chooseTick(Number(v), mode)} />
               <button type="button" onClick={() => { setFollow(true); setManual(false); setCenter(refPrice); }} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white">
@@ -1633,6 +1634,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               {mode === 'xy' && oiOn && oiRows.staleSince != null && <span className="text-[10px] text-amber-300" title="Dhan refused a fresh option chain, so the OI bars come from the last good one">OI stale since {timeOf(oiRows.staleSince)}</span>}
               <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow price</label>
               {held && <span className="text-[10px] text-amber-300" title="The rows stay put while the pointer is on the ladder, so a price tick cannot move a level under the mouse; they re-centre when it leaves">Rows held</span>}
+              </div>
+              <div className="flex items-center gap-2 flex-1 min-w-0 rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-2.5 py-1">
               <button
                 type="button"
                 onClick={() => setSettingsModalOpen(true)}
@@ -1648,7 +1651,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               >
                 Cancel all ({pendingHere})
               </button>
-              <span className="ml-auto text-zinc-500">{real ? <span className="font-bold text-red-400">REAL</span> : <span className="rounded bg-amber-400 px-1.5 py-0.5 font-extrabold text-oncolor-dark">SIM</span>} · {BROKER_LABELS[broker]}</span>
+              <span className="ml-auto text-zinc-500">{real && <span className="font-bold text-red-400">REAL · </span>}{BROKER_LABELS[broker]}</span>
+              </div>
             </div>
             <LadderGrid
               center={center} refPrice={refPrice} tick={tick} rows={ROWS}
@@ -1685,7 +1689,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             )}
           </div>
           {paneSlices.length === 0 ? (
-            <p className="px-3 py-6 text-center text-xs text-zinc-500">No ladder orders today{dual ? ' from this ladder' : ''}. Click a price on the ladder to place one.</p>
+            <p className="px-3 py-3 text-center text-xs text-zinc-500">No ladder orders today{dual ? ' from this ladder' : ''}. Click a price on the ladder to place one.</p>
           ) : (
             <table className="w-full text-xs">
               <thead className="bg-zinc-800">
@@ -1840,7 +1844,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                       }`}
                     >
                       {time}
-                      <span className="text-[9px] font-sans font-normal text-zinc-500">
+                      <span className="text-[10px] font-sans font-normal text-zinc-500">
                         {time === '23:15' ? 'Default' : time === '23:00' ? '11:00 PM' : 'IST'}
                       </span>
                     </button>
@@ -1877,7 +1881,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                       }`}
                     >
                       {time}
-                      <span className="text-[9px] font-sans font-normal text-zinc-500">
+                      <span className="text-[10px] font-sans font-normal text-zinc-500">
                         {time === '15:17' ? 'Default' : 'IST'}
                       </span>
                     </button>

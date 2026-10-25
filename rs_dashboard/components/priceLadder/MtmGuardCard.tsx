@@ -108,7 +108,7 @@ export function MtmGuardCard({ broker, real, ladderId = 1, mtm, guard, post }: {
         <div className={row}><span className={lab}>When MTM reaches ₹</span><Box label="Protect profit trigger in rupees" value={draft.lockAt} onChange={set('lockAt')} /></div>
         <div className={row}><span className={lab}>Lock at least ₹</span><Box label="Profit to lock in rupees" value={draft.lockKeep} onChange={set('lockKeep')} /></div>
         <div className={row} title="Optional: for every further step of MTM, the locked profit rises too"><span className={lab}>Then every +₹</span><Box label="Lock step in rupees" value={draft.lockStepEvery} onChange={set('lockStepEvery')} /></div>
-        <div className={row}><span className={lab}>raise lock by ₹</span><Box label="Lock raise per step in rupees" value={draft.lockStepKeep} onChange={set('lockStepKeep')} /></div>
+        <div className={row}><span className={lab}>Raise lock by ₹</span><Box label="Lock raise per step in rupees" value={draft.lockStepKeep} onChange={set('lockStepKeep')} /></div>
       </div>
 
       <div className="flex items-center gap-1.5 pt-1">
