@@ -670,7 +670,9 @@ test('Pair ladder has the Net Pos / P&L / Avg Price panel with 25 / 50 / 75 / Ex
   await page.getByRole('button', { name: 'Pair', exact: true }).click();
   await expect(page.getByLabel('Pair net position')).toHaveText('-1 lot');                // one short 1-lot strangle on these legs
   await expect(page.getByText('190.00', { exact: true })).toBeVisible();                  // combined entry 100 + 90
-  await expect(page.getByRole('button', { name: /^25%$/ })).toBeDisabled();               // 25% of 1 lot is under a lot
+  await page.getByRole('button', { name: 'Partial exit' }).click();
+  await expect(page.getByRole('menuitem', { name: 'Exit 25%' })).toBeDisabled();           // 25% of 1 lot is under a lot
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: /^Exit \(1L\)$/ }).click();
   await expect.poll(() => seen.posts.filter(b => b.op === 'exitShare').length).toBe(1);
   expect(seen.posts.find(b => b.op === 'exitShare')).toMatchObject({ action: 'pair', op: 'exitShare', ids: ['pp1'], pct: 100 });
@@ -754,8 +756,9 @@ test('Basket mode: an open basket shows in Net Pos, the strip and the Exit butto
   await expect(page.getByLabel('Basket net position')).toHaveText('-2 lots');             // a short condor, 2 lots
   await expect(page.getByLabel('Open positions', { exact: true })).toHaveText('1');
   await expect(page.getByText('90.00', { exact: true }).first()).toBeVisible();           // entry net
-  await expect(page.getByRole('button', { name: /^25%$/ })).toBeDisabled();               // 25% of 2 lots is under a lot
-  await page.getByRole('button', { name: /^50%$/ }).click();
+  await page.getByRole('button', { name: 'Partial exit' }).click();
+  await expect(page.getByRole('menuitem', { name: 'Exit 25%' })).toBeDisabled();           // 25% of 2 lots is under a lot
+  await page.getByRole('menuitem', { name: 'Exit 50%' }).click();
   await expect.poll(() => seen.posts.filter(b => b.op === 'exitShare').length).toBe(1);
   expect(seen.posts.find(b => b.op === 'exitShare')).toMatchObject({ action: 'basket', op: 'exitShare', ids: ['bk1'], pct: 50 });
   await page.getByRole('button', { name: /^Exit \(2L\)$/ }).click();

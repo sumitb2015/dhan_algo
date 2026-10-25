@@ -1,6 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { loadDefaults, saveDefaults, clearDefaults, resolveDefaults, LADDER_UNDERLYINGS, type LadderDefaults } from '@/lib/priceLadderDefaults';
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu';
 import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2, Volume2, VolumeX } from 'lucide-react';
 import { toast } from 'sonner';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
@@ -191,6 +193,60 @@ const timeOf = (at: number) => new Date(at).toLocaleTimeString('en-IN', { timeZo
 /** One ladder pane. The page can show two side by side: the second keeps its own saved choices (keys end in `-2`), has no
  *  NavBar, and neither auto-focuses a live contract nor chimes (the first pane already does both). The ledger and the
  *  server watcher are shared — every slice carries its own contract, so the panes only differ in what they display. */
+const EXIT_BTN = 'flex-1 px-2 py-1 rounded text-xs font-semibold border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40 disabled:cursor-not-allowed';
+
+/** One "Exit 25 / 50 / 75 %" dropdown instead of three more buttons; shares that would exit nothing are disabled, and so is the trigger when none is usable. */
+function PartialExit({ disabled, isOff, tip, onPick }: { disabled: boolean; isOff?: (pct: number) => boolean; tip?: string; onPick: (pct: number) => void }) {
+  const pcts = [25, 50, 75];
+  const none = disabled || pcts.every(p => isOff?.(p));
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger disabled={none} aria-label="Partial exit" title={none ? 'Nothing to part-exit' : 'Exit a share of the open lots at market'}
+        className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-semibold border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40 disabled:cursor-not-allowed">
+        Part <ChevronDown className="w-3 h-3" aria-hidden />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {pcts.map(p => <DropdownMenuItem key={p} disabled={isOff?.(p)} title={tip} onClick={() => onPick(p)}>Exit {p}%</DropdownMenuItem>)}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** The ladder form's starting values, saved in this browser and applied whenever the page loads. */
+function DefaultsPanel({ saved, onChange, onReset, onApplyNow }: { saved: LadderDefaults; onChange: (patch: LadderDefaults) => void; onReset: () => void; onApplyNow: () => void }) {
+  const d = resolveDefaults(saved);
+  const row = 'flex items-center justify-between gap-3';
+  const lab = 'text-xs font-medium text-zinc-300';
+  return (
+    <div className="space-y-2.5 pt-3 border-t border-zinc-800">
+      <div>
+        <span className="text-xs font-bold text-zinc-200">Ladder defaults</span>
+        <p className="text-[11px] text-zinc-400 leading-relaxed mt-0.5">What a ladder starts with each time this page loads. Saved in this browser; changes apply from the next load, or press Apply now.</p>
+      </div>
+      <div className={row}><span className={lab}>Ladder mode</span><Seg compact value={d.mode} options={['xy', 'plain', 'pair', 'basket'] as const} labels={{ xy: 'XY', plain: 'Plain', pair: 'Pair', basket: 'Basket' }} onChange={mode => onChange({ mode })} /></div>
+      <div className={row}><span className={lab}>Product</span><Seg compact value={d.product} options={['NRML', 'MIS'] as const} onChange={product => onChange({ product })} /></div>
+      <div className={row}><span className={lab}>Underlying</span>
+        <select aria-label="Default underlying" value={d.underlying} onChange={e => onChange({ underlying: e.target.value })} className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-xs text-zinc-100">
+          {LADDER_UNDERLYINGS.map(u => <option key={u} value={u}>{u}</option>)}
+        </select>
+      </div>
+      <div className={row}><span className={lab}>Ladder 1 option</span><Seg compact value={d.opt1} options={['CE', 'PE'] as const} labels={{ CE: 'Call', PE: 'Put' }} onChange={opt1 => onChange({ opt1 })} /></div>
+      <div className={row}><span className={lab}>Ladder 2 option</span><Seg compact value={d.opt2} options={['CE', 'PE'] as const} labels={{ CE: 'Call', PE: 'Put' }} onChange={opt2 => onChange({ opt2 })} /></div>
+      <div className={row}><span className={lab}>Zones</span><Seg compact value={d.zones} options={['classic', 'anywhere'] as const} labels={{ classic: 'Classic', anywhere: 'Anywhere' }} onChange={zones => onChange({ zones })} /></div>
+      <div className={row}><span className={lab}>Order type</span><Seg compact value={d.orderType} options={['LIMIT', 'SL'] as const} labels={{ LIMIT: 'Limit', SL: 'SL' }} onChange={orderType => onChange({ orderType })} /></div>
+      <div className={row}><span className={lab}>Style</span><Seg compact value={d.style} options={['Single', 'Bracket', 'Cover'] as const} onChange={style => onChange({ style })} /></div>
+      <div className={row}><span className={lab}>Target pts</span><NumField compact label="Default target points" value={d.tgtPts} onCommit={tgtPts => onChange({ tgtPts })} min={1} /></div>
+      <div className={row}><span className={lab}>SL pts</span><NumField compact label="Default stop-loss points" value={d.slPts} onCommit={slPts => onChange({ slPts })} min={1} /></div>
+      <div className={row}><label className={`${lab} flex items-center gap-1.5`}><input type="checkbox" checked={d.trailOn} onChange={e => onChange({ trailOn: e.target.checked })} /> Trail SL by (pts)</label><NumField compact label="Default trailing points" value={d.trailPts} onCommit={trailPts => onChange({ trailPts })} min={1} /></div>
+      <div className={row}><span className={lab}>Lots</span><NumField compact label="Default lots" value={d.lots} onCommit={v => onChange({ lots: Math.min(MAX_LADDER_LOTS, Math.max(1, Math.round(v))) })} min={1} max={MAX_LADDER_LOTS} width="w-14" /></div>
+      <div className="flex items-center gap-2 pt-1">
+        <button type="button" onClick={onApplyNow} className="px-3 py-1 rounded-md border border-zinc-700 text-xs font-semibold text-zinc-200 hover:text-white hover:border-zinc-500">Apply now</button>
+        <button type="button" onClick={onReset} className="px-3 py-1 rounded-md border border-zinc-800 text-xs text-zinc-400 hover:text-white">Reset to built-in</button>
+      </div>
+    </div>
+  );
+}
+
 /** A page notice with a close button. Hidden until it remounts: the condition clearing and returning, or a new `key` (a changed message), shows it again. */
 function Banner({ tone, children }: { tone: 'red' | 'amber'; children: React.ReactNode }) {
   const [open, setOpen] = useState(true);
@@ -276,6 +332,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [confirm, setConfirm] = useState<null | { text: string; run: () => void; setting?: { title: string; button: string } }>(null);
   const [armModal, setArmModal] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [savedDefaults, setSavedDefaults] = useState<LadderDefaults>({});
   const [chainOpen, setChainOpen] = useState(false);
   const [underlying, setUnderlyingRaw] = useState<string>('NIFTY');
   const [expiries, setExpiries] = useState<string[]>([]);
@@ -332,9 +389,25 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     setSoundOn(readPref(k('price-ladder-sound'), ['0', '1'] as const, '1') === '1');
     setOiOn(readPref(k('price-ladder-oi'), ['0', '1'] as const, '1') === '1');
     setUnderlyingRaw(readPref(k('price-ladder-underlying'), UNDERLYINGS, 'NIFTY'));
+    // The user's saved defaults win over the last-used values above, field by field; an unset field keeps its old behaviour.
+    const d = loadDefaults();
+    setSavedDefaults(d);
+    if (d.mode) { setModeRaw(d.mode); setTick(tickFor(d.mode)); }
+    if (d.zones) setZonesRaw(d.zones);
+    if (d.underlying) setUnderlyingRaw(d.underlying);
+    if (d.product) setProduct(d.product);
+    if (d.orderType) setOrderType(d.orderType);
+    if (d.style) setStyle(d.style);
+    if (d.tgtPts != null) setTgtPts(d.tgtPts);
+    if (d.slPts != null) setSlPts(d.slPts);
+    if (d.trailOn != null) setTrailOn(d.trailOn);
+    if (d.trailPts != null) setTrailPts(d.trailPts);
+    if (d.lots != null) setLots(d.lots);
+    const o = second ? d.opt2 : d.opt1;
+    if (o) setOpt(o);
     /* eslint-enable react-hooks/set-state-in-effect */
     return installAlertSoundUnlock();
-  }, [k, tickFor]);
+  }, [k, tickFor, second]);
   // Each mode has its own axis (index / premium / combined premium): drop the old rows until the new price arrives,
   // so a Pair ladder never shows the XY futures levels as if they were combined premiums.
   const setMode = (m: PageMode) => { setModeRaw(m); savePref(k('price-ladder-mode'), m); setTick(tickFor(m)); setCenter(0); setFollow(true); setManual(false); };
@@ -347,6 +420,22 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const pairOk = pairCe != null && pairPe != null && strikes.includes(pairCe) && strikes.includes(pairPe);
   // The expiry is cleared too: the old underlying's date must not be asked of the new one's chain for a render.
   const setUnderlying = (u: string) => { setUnderlyingRaw(u); savePref(k('price-ladder-underlying'), u); setExpiry(''); setExpiries([]); setStrike(null); setCenter(0); setFollow(true); setManual(false); };
+
+  // The other pane may have saved defaults since this one loaded: re-read when the dialog opens.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- storage is only readable after mount
+  useEffect(() => { if (settingsModalOpen) setSavedDefaults(loadDefaults()); }, [settingsModalOpen]);
+  // Saves only what the user touched: an untouched field keeps following the last-used value.
+  const changeDefaults = (patch: LadderDefaults) => { const next = { ...savedDefaults, ...patch }; saveDefaults(next); setSavedDefaults(next); };
+  const resetDefaults = () => { clearDefaults(); setSavedDefaults({}); };
+  /** Puts this ladder on the saved defaults now (the other pane takes them on its next load). */
+  const applyDefaultsNow = () => {
+    const d = resolveDefaults(savedDefaults);
+    setMode(d.mode); setZones(d.zones);
+    if (d.underlying !== underlying) setUnderlying(d.underlying);
+    setProduct(d.product); setOrderType(d.orderType); setStyle(d.style);
+    setTgtPts(d.tgtPts); setSlPts(d.slPts); setTrailOn(d.trailOn); setTrailPts(d.trailPts); setLots(d.lots);
+    setOpt(second ? d.opt2 : d.opt1);
+  };
 
   // The indices feed is the XY ladder's spot source. There is no REST fallback: if the feed is down the levels pause (a quote call would feed Dhan's 1/s limit).
   useEffect(() => {
@@ -1283,7 +1372,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         {(second || dual) && <div className="basis-full">{headControls}</div>}
       </div>
       {/* Books: part of the foldable controls (the chips above stay visible) */}
-      {!collapsed && showAccount && <div className="flex items-center gap-2 flex-wrap px-6 pb-2.5 text-xs">
+      {!collapsed && <div className="flex items-center gap-2 flex-wrap px-6 pb-2.5 text-xs">
         <BookButton icon={<Briefcase className="w-3.5 h-3.5" />} label="Positions" count={acct.open} onClick={() => setBookOpen('positions')} />
         <BookButton icon={<ClipboardList className="w-3.5 h-3.5" />} label="Order book" onClick={() => setBookOpen('orders')} />
         <BookButton icon={<ReceiptText className="w-3.5 h-3.5" />} label="Trade book" onClick={() => setBookOpen('trades')} />
@@ -1354,6 +1443,46 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <AlertTriangle className="w-4 h-4" /> {basketErr ?? 'No live price for every leg yet (or the strategy nets to nothing) — basket levels are paused until all legs price.'}
           </Banner>
         )}
+        {((mode === 'pair' && offPairs.length > 0) || (mode === 'basket' && offBaskets.length > 0) || hiddenPairs.length > 0) && (
+          <Banner tone="amber">
+            <div className="flex flex-col gap-1.5 min-w-0">
+            {mode === 'pair' && offPairs.length > 0 && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                {offPairs.length} live pair(s) are on other strikes, so they are not drawn on this ladder:
+                {offPairs.slice(0, 4).map(p => (
+                  <button key={p.id} type="button" onClick={() => selectPair(p)} title="Put this pair on the ladder"
+                    className={`px-2 py-0.5 rounded border border-amber-500/50 font-bold hover:bg-amber-500/20 ${FOCUS_RING}`}>Show {pairName(p)}</button>
+                ))}
+              </div>
+            )}
+            {mode === 'basket' && offBaskets.length > 0 && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                {offBaskets.length} live basket(s) are on other legs, so they are not drawn on this ladder:
+                {offBaskets.slice(0, 4).map(b => (
+                  <button key={b.id} type="button" onClick={() => selectBasket(b)} title="Put this basket on the ladder"
+                    className={`px-2 py-0.5 rounded border border-amber-500/50 font-bold hover:bg-amber-500/20 ${FOCUS_RING}`}>Show {basketName(b)}</button>
+                ))}
+              </div>
+            )}
+            {hiddenPairs.length > 0 && (
+              <div className="flex items-center gap-2 flex-wrap">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                {hiddenPairs.map(p => (
+                  <span key={p.id} className="inline-flex items-center gap-2">
+                    {p.lots} lot(s) {p.side} {p.state === 'armed' ? 'armed ' : ''}{p.mode === 'real' ? 'REAL' : 'SIM'} {pairName(p)} on {BROKER_LABELS[p.broker]} — not shown: the ladder is on {real ? 'REAL' : 'SIM'} · {BROKER_LABELS[broker]}.
+                    <button type="button" onClick={() => selectPair(p)}
+                      className={`px-2 py-0.5 rounded border border-amber-500/50 font-bold hover:bg-amber-500/20 ${FOCUS_RING}`}>
+                      Show {p.mode === 'real' ? 'REAL' : 'SIM'}{p.broker !== broker ? ` · ${BROKER_LABELS[p.broker]}` : ''}
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            </div>
+          </Banner>
+        )}
         {realBlocked && (
           <Banner tone="red">
             <ShieldAlert className="w-4 h-4" /> REAL mode: arm LIVE · REAL MONEY for today before placing. Exits always work.
@@ -1369,10 +1498,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             {/* Side by side below 2xl when two ladders stack their panel above the grid: the two cards share a row. */}
             <div className={dual ? 'grid grid-cols-2 2xl:grid-cols-1 gap-2 items-start [&>*:only-child]:col-span-2 2xl:[&>*:only-child]:col-span-1' : 'contents'}>
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5">
-              <p className="text-[13px] font-semibold tracking-tight text-zinc-100">{optLabel}</p>
+              <p className="text-xs font-semibold tracking-tight text-zinc-400">{optLabel}</p>
               {mode === 'basket' ? (
                 <>
-                  <p className="text-xl font-mono font-semibold tracking-tight text-white leading-tight" title="Net premium: the strategy's legs, signed by side and ratio">
+                  <p className="text-2xl font-mono font-bold tracking-tight text-white leading-tight" title="Net premium: the strategy's legs, signed by side and ratio">
                     {netA ? netA.toFixed(2) : '—'}
                     {basketView?.credit != null && <span className={`ml-2 text-xs font-bold ${basketView.credit ? 'text-emerald-400' : 'text-sky-300'}`}>{basketView.credit ? 'net credit' : 'net debit'}</span>}
                   </p>
@@ -1384,17 +1513,17 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 </>
               ) : mode === 'pair' ? (
                 <>
-                  <p className="text-xl font-mono font-semibold tracking-tight text-white leading-tight" title="Combined premium: CE LTP + PE LTP">{combined ? combined.toFixed(2) : '—'}</p>
+                  <p className="text-2xl font-mono font-bold tracking-tight text-white leading-tight" title="Combined premium: CE LTP + PE LTP">{combined ? combined.toFixed(2) : '—'}</p>
                   <p className="font-mono text-xs text-zinc-400">
                     CE {pairView?.ce.strike ?? '—'} <span className="text-zinc-200">{pairView?.ce.ltp?.toFixed(2) ?? '—'}</span>
                     {' + '}PE {pairView?.pe.strike ?? '—'} <span className="text-zinc-200">{pairView?.pe.ltp?.toFixed(2) ?? '—'}</span>
                   </p>
                 </>
               ) : (
-                <p className="text-xl font-mono font-semibold tracking-tight text-white leading-tight">{optLtp ? optLtp.toFixed(2) : '—'}</p>
+                <p className="text-2xl font-mono font-bold tracking-tight text-white leading-tight">{optLtp ? optLtp.toFixed(2) : '—'}</p>
               )}
               <div className="mt-1.5 pt-1.5 border-t border-zinc-800 text-xs">
-                <p className="font-semibold text-zinc-300">{axisName} <span className="font-mono text-zinc-100">{spot ? spot.toFixed(2) : '—'}</span>
+                <p className="font-medium text-zinc-400">{axisName} <span className="font-mono text-zinc-200">{spot ? spot.toFixed(2) : '—'}</span>
                   {indexQ?.change_pct != null && <span className={`ml-2 font-mono ${indexQ.change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{indexQ.change_pct >= 0 ? '+' : ''}{indexQ.change_pct.toFixed(2)}%</span>}
                 </p>
                 <p className="font-mono text-zinc-500 mt-0.5">H {indexQ?.day_high?.toFixed(2) ?? '—'} · L {indexQ?.day_low?.toFixed(2) ?? '—'}</p>
@@ -1406,15 +1535,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               <span className="text-zinc-400 font-medium">P&amp;L</span><span className={`font-mono text-right ${pnlClass(contractPnl)}`}>{fmtMoney(contractPnl)}</span>
               <span className="text-zinc-400 font-medium">Avg Price</span><span className="font-mono text-right text-zinc-100">{net.avg ? net.avg.toFixed(2) : '—'}</span>
               <div className="col-span-2 flex gap-1 mt-1.5">
-                {[25, 50, 75, 100].map(p => (
-                  <button
-                    key={p} type="button" disabled={busy || net.qty === 0}
-                    onClick={() => void post({ action: 'exit', securityId, broker, mode: pageMode, pct: p })}
-                    className="flex-1 px-1 py-0.5 rounded text-xs font-semibold border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40"
-                  >
-                    {p === 100 ? `Exit (${net.qty})` : `${p}%`}
-                  </button>
-                ))}
+                <button type="button" disabled={busy || net.qty === 0} onClick={() => void post({ action: 'exit', securityId, broker, mode: pageMode, pct: 100 })}
+                  className={EXIT_BTN}>Exit ({net.qty})</button>
+                <PartialExit disabled={busy || net.qty === 0} onPick={p => void post({ action: 'exit', securityId, broker, mode: pageMode, pct: p })} />
               </div>
             </div>}
             {mode === 'basket' && <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 grid grid-cols-2 gap-y-0.5 text-xs">
@@ -1422,19 +1545,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               <span className="text-zinc-400 font-medium">P&amp;L</span><span className={`font-mono text-right ${pnlClass(basketPnl)}`}>{fmtMoney(basketPnl)}</span>
               <span className="text-zinc-400 font-medium" title="Net premium at entry, weighted by lots">Avg Price</span><span className="font-mono text-right text-zinc-100">{basketAvgEntry ? basketAvgEntry.toFixed(2) : '—'}</span>
               <div className="col-span-2 flex gap-1 mt-1.5">
-                {[25, 50, 75, 100].map(p => {
-                  const none = basketExitable.length === 0 || (p < 100 && Math.floor((basketOpenLots * p) / 100) < 1);
-                  return (
-                    <button
-                      key={p} type="button" disabled={busy || none}
-                      title={p === 100 ? 'Exit every open basket on these legs at market' : `Exit ${p}% of the open lots (whole lots, rounded down) at market`}
-                      onClick={() => void post({ action: 'basket', op: 'exitShare', ids: basketExitable.map(y => y.id), pct: p })}
-                      className="flex-1 px-1 py-0.5 rounded text-xs font-semibold border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40"
-                    >
-                      {p === 100 ? `Exit (${basketLotsHeld}L)` : `${p}%`}
-                    </button>
-                  );
-                })}
+                <button type="button" disabled={busy || basketExitable.length === 0} title="Exit every open basket on these legs at market"
+                  onClick={() => void post({ action: 'basket', op: 'exitShare', ids: basketExitable.map(y => y.id), pct: 100 })}
+                  className={EXIT_BTN}>Exit ({basketLotsHeld}L)</button>
+                <PartialExit disabled={busy || basketExitable.length === 0} tip="Whole lots, rounded down, at market" isOff={p => Math.floor((basketOpenLots * p) / 100) < 1} onPick={p => void post({ action: 'basket', op: 'exitShare', ids: basketExitable.map(y => y.id), pct: p })} />
               </div>
             </div>}
             {mode === 'pair' && <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 grid grid-cols-2 gap-y-0.5 text-xs">
@@ -1442,19 +1556,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               <span className="text-zinc-400 font-medium">P&amp;L</span><span className={`font-mono text-right ${pnlClass(pairPnl)}`}>{fmtMoney(pairPnl)}</span>
               <span className="text-zinc-400 font-medium" title="Combined CE + PE entry premium, weighted by lots">Avg Price</span><span className="font-mono text-right text-zinc-100">{pairAvgEntry ? pairAvgEntry.toFixed(2) : '—'}</span>
               <div className="col-span-2 flex gap-1 mt-1.5">
-                {[25, 50, 75, 100].map(p => {
-                  const none = pairExitable.length === 0 || (p < 100 && Math.floor((pairOpenLots * p) / 100) < 1);
-                  return (
-                    <button
-                      key={p} type="button" disabled={busy || none}
-                      title={p === 100 ? 'Exit every open pair on these legs, both legs at market' : `Exit ${p}% of the open lots (whole lots, rounded down), both legs at market`}
-                      onClick={() => void post({ action: 'pair', op: 'exitShare', ids: pairExitable.map(y => y.id), pct: p })}
-                      className="flex-1 px-1 py-0.5 rounded text-xs font-semibold border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40"
-                    >
-                      {p === 100 ? `Exit (${pairLotsHeld}L)` : `${p}%`}
-                    </button>
-                  );
-                })}
+                <button type="button" disabled={busy || pairExitable.length === 0} title="Exit every open pair on these legs, both legs at market"
+                  onClick={() => void post({ action: 'pair', op: 'exitShare', ids: pairExitable.map(y => y.id), pct: 100 })}
+                  className={EXIT_BTN}>Exit ({pairLotsHeld}L)</button>
+                <PartialExit disabled={busy || pairExitable.length === 0} tip="Whole lots, rounded down, both legs at market" isOff={p => Math.floor((pairOpenLots * p) / 100) < 1} onPick={p => void post({ action: 'pair', op: 'exitShare', ids: pairExitable.map(y => y.id), pct: p })} />
               </div>
             </div>}
             </div>
@@ -1589,40 +1694,6 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               <PnlChip label="Total P&L" value={ladderPnl}
                 title={`This ladder's total P&L on ${BROKER_LABELS[broker]} · ${real ? 'REAL' : 'SIM'} — the same number as the Ladder P&L chip above and the MTM guard: trades closed today at their exit, open ones at the live price. '—' while an open leg has no price.`} />
             </div>
-            {mode === 'pair' && offPairs.length > 0 && (
-              <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-amber-500/40 bg-amber-500/10 text-xs text-amber-300">
-                <AlertTriangle className="w-4 h-4 shrink-0" />
-                {offPairs.length} live pair(s) are on other strikes, so they are not drawn on this ladder:
-                {offPairs.slice(0, 4).map(p => (
-                  <button key={p.id} type="button" onClick={() => selectPair(p)} title="Put this pair on the ladder"
-                    className={`px-2 py-0.5 rounded border border-amber-500/50 font-bold hover:bg-amber-500/20 ${FOCUS_RING}`}>Show {pairName(p)}</button>
-                ))}
-              </div>
-            )}
-            {mode === 'basket' && offBaskets.length > 0 && (
-              <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-amber-500/40 bg-amber-500/10 text-xs text-amber-300">
-                <AlertTriangle className="w-4 h-4 shrink-0" />
-                {offBaskets.length} live basket(s) are on other legs, so they are not drawn on this ladder:
-                {offBaskets.slice(0, 4).map(b => (
-                  <button key={b.id} type="button" onClick={() => selectBasket(b)} title="Put this basket on the ladder"
-                    className={`px-2 py-0.5 rounded border border-amber-500/50 font-bold hover:bg-amber-500/20 ${FOCUS_RING}`}>Show {basketName(b)}</button>
-                ))}
-              </div>
-            )}
-            {hiddenPairs.length > 0 && (
-              <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-amber-500/40 bg-amber-500/10 text-xs text-amber-300">
-                <AlertTriangle className="w-4 h-4 shrink-0" />
-                {hiddenPairs.map(p => (
-                  <span key={p.id} className="inline-flex items-center gap-2">
-                    {p.lots} lot(s) {p.side} {p.state === 'armed' ? 'armed ' : ''}{p.mode === 'real' ? 'REAL' : 'SIM'} {pairName(p)} on {BROKER_LABELS[p.broker]} — not shown: the ladder is on {real ? 'REAL' : 'SIM'} · {BROKER_LABELS[broker]}.
-                    <button type="button" onClick={() => selectPair(p)}
-                      className={`px-2 py-0.5 rounded border border-amber-500/50 font-bold hover:bg-amber-500/20 ${FOCUS_RING}`}>
-                      Show {p.mode === 'real' ? 'REAL' : 'SIM'}{p.broker !== broker ? ` · ${BROKER_LABELS[p.broker]}` : ''}
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
             <div className="flex items-center gap-2 flex-wrap text-xs">
               <div className="flex items-center gap-2 flex-wrap rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-2.5 py-1">
               <span className="text-zinc-400">Tick</span>
@@ -1796,7 +1867,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       )}
       {settingsModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 p-4" role="dialog" aria-modal="true">
-          <div className="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-950 p-5 flex flex-col gap-4 shadow-2xl">
+          <div className="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-950 p-5 flex flex-col gap-4 shadow-2xl">
             <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 rounded-lg bg-amber-500/10 border border-amber-500/20">
@@ -1804,7 +1875,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-white">Price Ladder Settings</h3>
-                  <p className="text-[10px] text-zinc-400">Configure trading cutoffs and session thresholds</p>
+                  <p className="text-[10px] text-zinc-400">Trading cutoffs and ladder defaults</p>
                 </div>
               </div>
               <button
@@ -1889,6 +1960,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 })}
               </div>
             </div>
+
+            <DefaultsPanel saved={savedDefaults} onChange={changeDefaults} onReset={resetDefaults} onApplyNow={applyDefaultsNow} />
 
             <div className="pt-3 border-t border-zinc-800 flex justify-end">
               <button
