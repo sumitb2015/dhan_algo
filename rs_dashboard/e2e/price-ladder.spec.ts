@@ -5,11 +5,21 @@ import type { LadderSlice, LadderState } from '../lib/priceLadder';
 // Price Ladder, browser side only. /api/price-ladder/state is answered by an in-browser fake (no server watcher, no
 // broker); every other non-GET that is not handled is refused (599) and fails the test, so nothing can reach an order route.
 
+import { isRegularSession } from '../lib/nseHolidays';
+
+/** The latest IST date (today or before) on which NSE had a regular session: the 'market is trading' tests need one, and today may be a weekend. */
+const lastTradingDay = () => {
+  for (let back = 0; back < 10; back++) {
+    const d = new Date(Date.now() + 5.5 * 3600_000 - back * 86_400_000).toISOString().slice(0, 10);
+    if (isRegularSession(d)) return d;
+  }
+  return new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
+};
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const SPOT = 23200;
 
 async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
-  const clock = opts.staleAt ? new Date(`${istToday()}T${opts.staleAt}:00+05:30`).getTime() : null;
+  const clock = opts.staleAt ? new Date(`${lastTradingDay()}T${opts.staleAt}:00+05:30`).getTime() : null;
   const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[], closes: [] as Record<string, unknown>[] };
   const state: LadderState = { date: istToday(), slices: [], events: [] };
   if (opts.openLong) {

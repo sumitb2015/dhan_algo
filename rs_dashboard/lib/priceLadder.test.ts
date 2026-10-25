@@ -592,3 +592,10 @@ test('isAmbiguousReply: a 5xx without an order id is reconciled, a 4xx is a refu
   assert.equal(isAmbiguousReply(429), false);
   assert.equal(isAmbiguousReply(200), false);
 });
+
+test('sessionFor (NSE/BSE): weekends and holidays are closed, a trading day is 09:15-15:40', () => {
+  const sun = sessionFor('NIFTY', '2026-10-25');
+  assert.equal(sun.open, sun.close);                      // closed: nothing fires, no stale-price warning
+  assert.equal(sessionFor('SENSEX', '2026-10-24').open, sessionFor('SENSEX', '2026-10-24').close);   // Saturday
+  assert.deepEqual([sessionFor('NIFTY', '2026-10-27').open, sessionFor('NIFTY', '2026-10-27').close], [915, 1540]);   // Tuesday
+});

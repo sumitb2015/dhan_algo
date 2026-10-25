@@ -6,6 +6,7 @@
 
 import { levelCrossStep } from './focusToolRules.ts';
 import { mcxSession } from './mcxSession.ts';
+import { isRegularSession } from './nseHolidays.ts';
 import { zerodhaSnapPrice, type ZerodhaContractInfo } from './zerodhaOrderRules.ts';
 import type { LadderPair } from './priceLadderPair.ts';
 
@@ -97,6 +98,9 @@ export function sessionFor(underlying: string, day: string, customMcxAutoExit?: 
       : (typeof customMcxAutoExit === 'number' ? customMcxAutoExit : null);
     return mcxSession(day, hhmm);
   }
+  // Weekends, NSE holidays and Muhurat hours (a one-hour session, not 09:15-15:40): closed, like an MCX holiday — nothing
+  // fires and the page shows no "price is stale" warning for an index that is simply not trading.
+  if (!isRegularSession(day)) return { open: 0, close: 0, autoExit: AUTO_EXIT_HHMM, autoExitLabel: '15:17', note: 'NSE/BSE are closed today' };
   const custom = typeof customNseAutoExit === 'string' ? parseHhmm(customNseAutoExit) : (typeof customNseAutoExit === 'number' ? customNseAutoExit : null);
   // A saved cutoff outside the session (or before the open) is ignored: it would block, or square off, all day.
   const autoExit = custom != null && custom > SESSION_OPEN_HHMM && custom < SESSION_CLOSE_HHMM ? custom : AUTO_EXIT_HHMM;
