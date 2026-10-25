@@ -15,6 +15,11 @@ test('a quiet refresh with nothing loaded yet falls back to auto', () => {
   assert.equal(historyQuery('2026-10-27', false, null), 'expiry=2026-10-27&atm=auto');
 });
 
+test('an explicit typed ATM is preserved across fresh loads and quiet refreshes', () => {
+  assert.equal(historyQuery('2026-10-27', true, null, '24500'), 'expiry=2026-10-27&atm=24500');
+  assert.equal(historyQuery('2026-10-27', false, 24500, '24500'), 'expiry=2026-10-27&atm=24500');
+});
+
 test('ticks fold only into the expiry that is loaded', () => {
   assert.equal(tickAcceptable('2026-10-27', '2026-10-27', '2026-10-27'), true);
   assert.equal(tickAcceptable('2026-10-27', '2026-10-27', undefined), true);     // quote carries no expiry: trust the page

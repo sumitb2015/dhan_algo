@@ -110,11 +110,18 @@ export function detectSignals(columns: PnfColumn[], bars: Bar[], vwapSeries: (nu
   return out.sort((a, b) => a.bar - b.bar || a.col - b.col);
 }
 
-/** Cumulative VWAP of the straddle over the loaded range; cumulative mean while no volume has traded. */
+/** Intraday VWAP of the straddle: resets at the start of each session (IST date); cumulative mean while no volume has traded. */
 export function vwap(bars: Bar[]): (number | null)[] {
+  let currentSession = '';
   let sumPV = 0, sumV = 0, sumP = 0, n = 0;
   let last: number | null = null;
   return bars.map(b => {
+    const s = sessionOf(b.t);
+    if (s !== currentSession) {
+      currentSession = s;
+      sumPV = 0; sumV = 0; sumP = 0; n = 0;
+      last = null;
+    }
     if (b.straddle > 0) {
       sumPV += b.straddle * b.vol; sumV += b.vol; sumP += b.straddle; n += 1;
       last = sumV > 0 ? sumPV / sumV : sumP / n;

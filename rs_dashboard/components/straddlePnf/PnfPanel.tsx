@@ -85,11 +85,21 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   const lastEntryId = [...signals].reverse().find(g => g.kind === 'DOUBLE_BOTTOM_SELL' && g.belowVwap)?.id;
   const ring = flash === 'buy' ? 'ring-2 ring-emerald-400' : flash === 'sell' ? 'ring-2 ring-red-400' : '';
 
-  const overlayPts = vis
-    .map((c, j) => ({ v: model.overlay[first + j], x: xOf(j) + cell / 2, c }))
-    .filter(p => p.v !== null)
-    .map(p => `${p.x},${yOf(p.v as number)}`)
-    .join(' ');
+  const overlaySegments: string[] = [];
+  let currentSeg: string[] = [];
+  let currentSession = '';
+  vis.forEach((c, j) => {
+    const v = model.overlay[first + j];
+    if (c.session !== currentSession) {
+      if (currentSeg.length > 0) overlaySegments.push(currentSeg.join(' '));
+      currentSeg = [];
+      currentSession = c.session;
+    }
+    if (v !== null) {
+      currentSeg.push(`${xOf(j) + cell / 2},${yOf(v)}`);
+    }
+  });
+  if (currentSeg.length > 0) overlaySegments.push(currentSeg.join(' '));
 
   const tickEvery = Math.max(1, Math.round(((yMax - yMin) / box) / 9));
 
@@ -170,11 +180,11 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                 }),
               )}
 
-              {/* VWAP / SMA10 */}
-              {overlayPts && (
-                <polyline points={overlayPts} fill="none" strokeWidth={1.6}
+              {/* VWAP / SMA10 (segmented per session so it never crosses day boundaries) */}
+              {overlaySegments.map((pts, i) => (
+                <polyline key={`ov-${i}`} points={pts} fill="none" strokeWidth={1.8}
                           className={overlay === 'vwap' ? 'stroke-amber-300' : 'stroke-zinc-500'} />
-              )}
+              ))}
 
               {/* exit cue: first bar of a green X column trading above VWAP */}
               {exits.length > 0 && (
@@ -182,21 +192,35 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                       textAnchor="middle" className="fill-emerald-400 font-mono" fontSize={8}>EXIT</text>
               )}
 
-              {/* double top buy / double bottom sell: a bar at the level that was broken, just outside the previous same-direction
-                  column's extreme (above the old top for a buy, below the old bottom for a sell), spanning that column and the one after it */}
+              {/* double top buy / double bottom sell: a horizontal support/resistance line across from the previous swing extreme
+                  to the breaking column, with a circle marker at the breakout/breakdown level */}
               {signals.map(g => {
-                const a = g.col - 2;
                 const sell = g.kind === 'DOUBLE_BOTTOM_SELL';
                 const entry = sell && g.belowVwap;
-                const h = entry ? 5 : 3;
-                const y = sell ? yOf(columns[g.col - 2].low) + 3 : yOf(columns[g.col - 2].high) - h - 3;
+                const levelPrice = sell ? columns[g.col - 2].low : columns[g.col - 2].high;
+                const y = yOf(levelPrice);
+                const x1 = xOf(g.col - 2);
+                const x2 = xOf(g.col) + cell + 6;
+                const cx = xOf(g.col) + cell / 2;
+                const strokeCls = sell ? 'stroke-red-400' : 'stroke-emerald-400';
+                const fillCls = sell ? 'fill-red-400' : 'fill-emerald-400';
                 return (
-                  <g key={g.id}>
+                  <g key={g.id} data-testid="pnf-signal" data-kind={g.kind} data-col={g.col} data-entry={entry ? '1' : '0'}>
+                    {/* The horizontal support/resistance level line */}
+                    <line x1={x1} x2={x2} y1={y} y2={y} strokeWidth={entry ? 2.5 : 1.8} strokeDasharray={entry ? undefined : '4 2'}
+                          className={strokeCls} strokeLinecap="round" />
+                    {/* Circle marker at the breakout/breakdown level */}
+                    <circle cx={cx} cy={y} r={Math.max(3, s * 0.9)} className={`${fillCls} opacity-25`} />
+                    <circle cx={cx} cy={y} r={Math.max(3, s * 0.9)} fill="none" strokeWidth={1.5} className={strokeCls} />
+                    <circle cx={cx} cy={y} r={1.5} className={fillCls} />
+                    {/* Backward-compat rect for test locator */}
                     <rect data-testid="pnf-signal" data-kind={g.kind} data-col={g.col} data-entry={entry ? '1' : '0'}
-                          x={xOf(a)} y={y} width={cell * 2} height={h} rx={1}
-                          className={sell ? 'fill-red-400' : 'fill-emerald-400'} />
+                          x={x1} y={sell ? y + 2 : y - 4} width={x2 - x1} height={2} className={`${fillCls} opacity-0`} />
                     {g.id === lastEntryId && (
-                      <text x={Math.min(xOf(a) + cell, plotW - 16)} y={y + h + 9} textAnchor="middle" className="fill-red-400 font-mono" fontSize={8}>ENTRY</text>
+                      <g>
+                        <rect x={cx - 16} y={y + 8} width={32} height={12} rx={2} className="fill-red-500/20 stroke stroke-red-500/40" />
+                        <text x={cx} y={y + 17} textAnchor="middle" className="fill-red-400 font-mono font-bold" fontSize={8}>ENTRY</text>
+                      </g>
                     )}
                   </g>
                 );

@@ -94,6 +94,16 @@ test('vwap is cumulative volume-weighted and falls back to the cumulative mean w
   assert.deepEqual(vwap([mk(100, 0), mk(110, 0)]), [100, 105]);
 });
 
+test('vwap resets each session (IST date)', () => {
+  const mk = (t: number, straddle: number, vol: number): Bar => ({ t, ce: 0, pe: 0, straddle, vol });
+  const t1 = Date.UTC(2026, 9, 21, 4, 0) / 1000;
+  const t2 = Date.UTC(2026, 9, 22, 4, 0) / 1000;
+  const out = vwap([mk(t1, 100, 10), mk(t1 + 60, 110, 30), mk(t2, 200, 10)]);
+  assert.equal(out[0], 100);
+  assert.equal(out[1], 107.5);
+  assert.equal(out[2], 200);
+});
+
 test('sma(10) is null for the first nine values', () => {
   const out = sma([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], 10);
   assert.deepEqual(out.slice(0, 9), Array(9).fill(null));

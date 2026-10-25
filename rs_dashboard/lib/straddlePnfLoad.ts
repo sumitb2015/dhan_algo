@@ -1,10 +1,15 @@
 // Small decisions in the Straddle P&F page's data loading, kept pure so they can be tested.
 
 /**
- * Query for /api/straddle-pnf. Only a fresh load or Re-center may pick a new ATM; a quiet refresh (the bridge-down fallback
- * poll) must keep the strikes the page is showing, or the charts would swap to different contracts as spot moves.
+ * Query for /api/straddle-pnf. If user specifies a numeric ATM, that strike is pinned; otherwise only a fresh load or
+ * Re-center picks a new ATM from spot ('auto'), while quiet refreshes keep the loaded strike.
  */
-export function historyQuery(expiry: string, reset: boolean, loadedAtm: number | null): string {
+export function historyQuery(expiry: string, reset: boolean, loadedAtm: number | null, userAtm?: string): string {
+  if (userAtm !== undefined && userAtm.trim() !== '') {
+    const trimmed = userAtm.trim();
+    if (trimmed.toLowerCase() !== 'auto') return `expiry=${expiry}&atm=${trimmed}`;
+    return `expiry=${expiry}&atm=${reset || loadedAtm === null ? 'auto' : loadedAtm}`;
+  }
   return `expiry=${expiry}&atm=${reset || loadedAtm === null ? 'auto' : loadedAtm}`;
 }
 

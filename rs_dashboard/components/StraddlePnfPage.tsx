@@ -43,6 +43,7 @@ function savePref(key: string, value: string) {
 export default function StraddlePnfPage() {
   const [expiries, setExpiries] = useState<PnfExpiry[]>([]);
   const [expiry, setExpiry] = useState('');
+  const [atmInput, setAtmInput] = useState('auto');
   const [overlay, setOverlay] = useState<Overlay>('vwap');
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [rows, setRows] = useState<Record<string, Row>>({});
@@ -105,7 +106,7 @@ export default function StraddlePnfPage() {
     const id = ++reqRef.current;
     if (reset) { setLoading(true); setLoadError(null); }
     try {
-      const res = await fetch(`/api/straddle-pnf?${historyQuery(expiry, reset, loadedAtmRef.current)}`);
+      const res = await fetch(`/api/straddle-pnf?${historyQuery(expiry, reset, loadedAtmRef.current, atmInput)}`);
       const j = await res.json() as {
         success?: boolean; error?: string; atm: number; strikes: number[]; dataDate: string | null;
         bars: Record<string, Bar[]>; errors: Record<string, string>;
@@ -136,7 +137,7 @@ export default function StraddlePnfPage() {
     } finally {
       if (id === reqRef.current) setLoading(false);
     }
-  }, [expiry]);
+  }, [expiry, atmInput]);
 
   useEffect(() => { void load(true); }, [load, recenter]);
 
@@ -278,6 +279,18 @@ export default function StraddlePnfPage() {
           >
             {expiries.map(e => <option key={e.value} value={e.value}>{e.label}</option>)}
           </select>
+          <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+            ATM
+            <input aria-label="ATM" type="text" inputMode="numeric" value={atmInput}
+                   onChange={e => setAtmInput(e.target.value)}
+                   onKeyDown={e => { if (e.key === 'Enter') setRecenter(n => n + 1); }}
+                   placeholder="auto"
+                   className="h-7 w-20 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-xs text-zinc-200" />
+          </label>
+          <button type="button" onClick={() => { setAtmInput('auto'); setRecenter(n => n + 1); }}
+                  className="h-7 px-2 rounded-md border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-300 hover:bg-zinc-800">
+            Auto
+          </button>
           <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
             <button type="button" aria-pressed={overlay === 'vwap'} onClick={() => pickOverlay('vwap')} className={seg(overlay === 'vwap')}>VWAP</button>
             <button type="button" aria-pressed={overlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(overlay === 'sma')}>SMA 10</button>
