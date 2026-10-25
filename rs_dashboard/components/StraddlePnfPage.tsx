@@ -13,6 +13,8 @@ import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/al
 import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
 import { foldTick, newSignalsAfter, nextWatermark, capLog } from '@/lib/straddlePnfLive';
 import { historyQuery, tickAcceptable } from '@/lib/straddlePnfLoad';
+import { INTERVALS, type Interval } from '@/lib/straddlePnfInterval';
+import { DEFAULT_SETTINGS, MAX_BOX_PCT, MIN_BOX_PCT, parseBoxPct, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import { pickExpiries, type PnfExpiry } from '@/lib/straddlePnfExpiries';
 import type { Bar } from '@/lib/straddlePnf';
 
@@ -28,6 +30,7 @@ const TITLES = ['ATM −200', 'ATM', 'ATM +200'];
 const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
 const OVERLAY_KEY = 'straddle-pnf-overlay';
+const SETTINGS_KEY = 'straddle-pnf-settings';
 
 const minuteOf = (t: number) => Math.floor(t / 60) * 60;
 const fmt = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -45,6 +48,8 @@ export default function StraddlePnfPage() {
   const [expiry, setExpiry] = useState('');
   const [atmInput, setAtmInput] = useState('auto');
   const [overlay, setOverlay] = useState<Overlay>('vwap');
+  const [settings, setSettings] = useState<PnfSettings>(DEFAULT_SETTINGS);
+  const [boxDraft, setBoxDraft] = useState(String(DEFAULT_SETTINGS.boxPct));
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [rows, setRows] = useState<Record<string, Row>>({});
   const [loading, setLoading] = useState(true);
@@ -64,6 +69,9 @@ export default function StraddlePnfPage() {
   // Per strike: the last closed bar already evaluated for alerts. Alerts are keyed on bar time, never on column numbers.
   const watermarkRef = useRef<Record<string, number>>({});
   const loadedAtmRef = useRef<number | null>(null);
+  // The next alert evaluation is a re-baseline (history loaded / charts redrawn with other settings): move the watermarks to the new
+  // charts' last closed bar and alert on nothing, so old signals can never fire as new ones.
+  const rebaselineRef = useRef(false);
   const logLoadedRef = useRef(false);
 
   const { liveQuotes } = useLiveOptionsWS(expiry, 'dhan', ['dhan'], 'NIFTY');
@@ -72,6 +80,10 @@ export default function StraddlePnfPage() {
   useEffect(() => installAlertSoundUnlock(), []);
   useEffect(() => {
     if (readPref(OVERLAY_KEY) === 'sma') setOverlay('sma');
+    const stored = readSettings(readPref(SETTINGS_KEY));
+    setSettings(stored);
+    setBoxDraft(String(stored.boxPct));
+    rebaselineRef.current = true;
     if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
     try {
       const raw = readPref(LOG_KEY);
@@ -121,13 +133,8 @@ export default function StraddlePnfPage() {
         const last = bars[bars.length - 1];
         const open = last && last.t >= nowMin ? last.t : null; // the minute still forming is not closed yet
         next[k] = { bars, openT: open };
-        if (reset) {
-          // History never alerts: only bars that close after the last CLOSED history bar can (a bar still forming at load can).
-          const lastClosed = open !== null ? bars[bars.length - 2] : last;
-          watermarkRef.current[k] = lastClosed ? lastClosed.t : 0;
-        }
       }
-      if (reset) loadedAtmRef.current = j.atm;
+      if (reset) { loadedAtmRef.current = j.atm; rebaselineRef.current = true; } // history never alerts
       setRows(next);
       setLoaded({ expiry, atm: j.atm, strikes: j.strikes, dataDate: j.dataDate, errors: j.errors ?? {} });
       setLoadError(null);
@@ -204,15 +211,18 @@ export default function StraddlePnfPage() {
     const row = rows[String(strike)];
     const bars = row?.bars ?? [];
     const forming = row?.openT != null && bars[bars.length - 1]?.t === row.openT;
-    return buildPanelModel(forming ? bars.slice(0, -1) : bars, overlay);
-  }), [rows, strikes, overlay]);
+    return buildPanelModel(forming ? bars.slice(0, -1) : bars, overlay, settings);
+  }), [rows, strikes, overlay, settings]);
 
   // ── alerts: new signals on newly closed bars, once each ─────────────────
   useEffect(() => {
     if (!loaded) return;
+    const rebaseline = rebaselineRef.current;
+    rebaselineRef.current = false;
     const fresh: LogEntry[] = [];
     loaded.strikes.forEach((strike, i) => {
       const k = String(strike);
+      if (rebaseline) { watermarkRef.current[k] = models[i].lastBarT ?? watermarkRef.current[k] ?? 0; return; }
       const wm = watermarkRef.current[k] ?? models[i].lastBarT ?? 0; // a strike with no watermark never alerts on what is already there
       for (const s of newSignalsAfter(models[i].signals, wm)) {
         fresh.push({ id: `${strike}:${loaded.expiry}:${s.kind}:${s.t}`, t: s.t, strike, kind: s.kind, price: s.price, belowVwap: s.belowVwap });
@@ -237,6 +247,20 @@ export default function StraddlePnfPage() {
   }, [models, loaded, leaderRef]);
 
   const pickOverlay = (o: Overlay) => { setOverlay(o); savePref(OVERLAY_KEY, o); };
+  const applySettings = (next: PnfSettings) => {
+    rebaselineRef.current = true;     // the charts are about to be redrawn from the same data: that must not alert
+    setSettings(next);
+    savePref(SETTINGS_KEY, serializeSettings(next));
+  };
+  const pickInterval = (v: string) => applySettings({ ...settings, interval: Number(v) as Interval });
+  // Free-typed, so it commits on Enter / blur only (a half-typed "0." must not rebuild the charts); an invalid entry reverts.
+  const commitBox = () => {
+    const n = parseBoxPct(boxDraft);
+    if (n === null) { setBoxDraft(String(settings.boxPct)); return; }
+    setBoxDraft(String(n));
+    if (n !== settings.boxPct) applySettings({ ...settings, boxPct: n });
+  };
+  const boxInvalid = boxDraft.trim() !== '' && parseBoxPct(boxDraft) === null;
   const toggleMute = () => {
     const next = !muted;
     setMuted(next);
@@ -250,7 +274,7 @@ export default function StraddlePnfPage() {
   const iconBtn = 'inline-flex items-center justify-center h-7 w-7 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white hover:bg-zinc-800';
 
   return (
-    <div className="flex flex-col min-h-screen bg-zinc-950 text-white">
+    <div className="flex flex-col h-screen bg-zinc-950 text-white">
       <div className="sticky top-0 z-30 flex items-center justify-between gap-3 flex-wrap px-6 py-3 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
@@ -259,7 +283,7 @@ export default function StraddlePnfPage() {
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · NIFTY</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">Straddle Point &amp; Figure</h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">1-min · 0.5% box · 3-box reversal · signals only</p>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">{settings.interval}-min · {settings.boxPct}% box · 3-box reversal · signals only</p>
           </div>
         </div>
 
@@ -279,6 +303,21 @@ export default function StraddlePnfPage() {
           >
             {expiries.map(e => <option key={e.value} value={e.value}>{e.label}</option>)}
           </select>
+          <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+            Interval
+            <select aria-label="Interval" value={settings.interval} onChange={e => pickInterval(e.target.value)}
+                    className="h-7 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-xs text-zinc-200">
+              {INTERVALS.map(n => <option key={n} value={n}>{n} min</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
+            Box %
+            <input aria-label="Box %" type="text" inputMode="decimal" value={boxDraft} aria-invalid={boxInvalid}
+                   title={`Box size as a % of the first price (${MIN_BOX_PCT}-${MAX_BOX_PCT}); press Enter to apply`}
+                   onChange={e => setBoxDraft(e.target.value)} onBlur={commitBox}
+                   onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); commitBox(); } if (e.key === 'Escape') setBoxDraft(String(settings.boxPct)); }}
+                   className={`h-7 w-16 rounded-md border bg-zinc-900 px-2 text-xs text-zinc-200 ${boxInvalid ? 'border-red-500' : 'border-zinc-700'}`} />
+          </label>
           <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
             ATM
             <input aria-label="ATM" type="text" inputMode="numeric" value={atmInput}
@@ -311,10 +350,10 @@ export default function StraddlePnfPage() {
         </div>
       </div>
 
-      <div className="flex-1 flex flex-col gap-3 px-4 py-4">
+      <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 py-4">
         {loadError && <p role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{loadError}</p>}
-        {logOpen && <AlertLog entries={log} />}
-        <div className="grid grid-cols-3 gap-3">
+        {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} /></div>}
+        <div className="flex-1 min-h-0 grid grid-cols-3 gap-3" style={{ gridTemplateRows: 'minmax(0, 1fr)' }}>
           {strikes.map((strike, i) => {
             const row = rows[String(strike)];
             const last = row?.bars[row.bars.length - 1];
@@ -329,6 +368,9 @@ export default function StraddlePnfPage() {
                 stale={!liveFresh}
                 flash={flash[strike] ?? null}
                 loading={loading && !row}
+                interval={settings.interval}
+                boxPct={settings.boxPct}
+                fill
                 error={loaded?.errors[String(strike)]}
               />
             );

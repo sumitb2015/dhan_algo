@@ -48,10 +48,14 @@ export function sessionOf(t: number): string {
 
 type Work = { dir: 'X' | 'O'; lo: number; hi: number; startBar: number; endBar: number; breakBar: number | null };
 
-export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3): { anchor: number; box: number; columns: PnfColumn[] } {
+/**
+ * `anchorPrice` overrides the price the grid and the box are anchored on (default: the first usable close). The page passes the
+ * first 1-minute price so that changing the chart interval regroups the bars without moving the grid or resizing the box.
+ */
+export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3, anchorPrice?: number): { anchor: number; box: number; columns: PnfColumn[] } {
   const first = bars.find(b => b.straddle > 0);
   if (!first) return { anchor: 0, box: 0, columns: [] };
-  const anchor = first.straddle;
+  const anchor = anchorPrice !== undefined && anchorPrice > 0 ? anchorPrice : first.straddle;
   const box = anchor * boxPct;
   const work: Work[] = [];
 

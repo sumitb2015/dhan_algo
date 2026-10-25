@@ -24,6 +24,18 @@ interface Mock {
   blocked: Call[];
   /** Give the +200 strike a long, wide history (many columns) instead of the short quiet one. */
   longHistory?: boolean;
+  /** Give the ATM strike a history at fixed IST times (Fri 23 Oct from 09:15) whose 1-minute chart has a double bottom that the 5-minute chart does not. */
+  fixedHistory?: boolean;
+}
+
+// 12 minutes from 09:15 IST. 1-minute chart: double top at minute 5, double bottom at minute 7. 5-minute chart (closes at minutes 4 and 9): X 1..3 then a reversal, no signal.
+const FIXED_LEVELS = [0, 5, 2, 0, 3, 7, 4, -1, -1, -1, -1, -1];
+function fixedHistory() {
+  const start = Date.UTC(2026, 9, 23, 3, 45) / 1000;
+  return FIXED_LEVELS.map((l, i) => {
+    const s = priceAt(l);
+    return { t: start + i * 60, ce: s / 2, pe: s / 2, straddle: s, vol: 10 };
+  });
 }
 
 /** A deterministic wandering series: many columns over a wide price range. */
@@ -83,7 +95,7 @@ async function install(page: Page, m: Mock) {
     if (p === '/api/straddle-pnf' && method === 'GET') {
       return json(route, {
         success: true, atm: ATM, strikes: STRIKES, errors: {}, dataDate: '2026-10-23',
-        bars: { [STRIKES[0]]: history(PATH_WITH_BREAK), [STRIKES[1]]: history(PATH_BEFORE_BREAK), [STRIKES[2]]: m.longHistory ? longHistory() : history(PATH_QUIET) },
+        bars: { [STRIKES[0]]: history(PATH_WITH_BREAK), [STRIKES[1]]: m.fixedHistory ? fixedHistory() : history(PATH_BEFORE_BREAK), [STRIKES[2]]: m.longHistory ? longHistory() : history(PATH_QUIET) },
       });
     }
     if (p === '/api/options/expiries') return json(route, { success: true, data: upcomingTuesdays(10) });
@@ -213,4 +225,101 @@ test('each panel header shows the change versus the session open and the latest 
   await expect(buy.getByTestId('pnf-last-signal')).toContainText('DT buy');
   const quiet = page.locator('[data-testid="pnf-panel"][data-strike="25200"]');  // no signal at all: no chip
   await expect(quiet.getByTestId('pnf-last-signal')).toHaveCount(0);
+});
+
+// ── interval and box size ─────────────────────────────────────────────────────
+const cols = async (panel: ReturnType<Page['locator']>) => Number(((await panel.getByTestId('pnf-box-info').textContent()) ?? '').match(/(\d+) cols/)?.[1]);
+
+test('the interval and box % controls default to 1 minute / 0.5% and say so in the header', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [] });
+  await page.goto('/straddle-pnf');
+  await expect(page.getByLabel('Interval')).toHaveValue('1');
+  await expect(page.getByLabel('Box %')).toHaveValue('0.5');
+  await expect(page.getByText('1-min · 0.5% box · 3-box reversal')).toBeVisible();
+  await expect(page.getByTestId('pnf-box-info').first()).toContainText('(0.5% of');
+});
+
+test('changing the interval regroups the bars: fewer columns, and the header says 5-min', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [], longHistory: true });
+  await page.goto('/straddle-pnf');
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM + 200}"]`);
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
+  const one = await cols(panel);
+  await page.getByLabel('Interval').selectOption('15');
+  await expect(page.getByText('15-min · 0.5% box · 3-box reversal')).toBeVisible();
+  await expect.poll(async () => cols(panel)).toBeLessThan(one);
+  await expect(page.getByLabel('Interval').locator('option')).toHaveText(['1 min', '3 min', '5 min', '15 min']);
+});
+
+test('the box % applies on Enter, an invalid entry is refused and reverts, and the header follows', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [], longHistory: true });
+  await page.goto('/straddle-pnf');
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM + 200}"]`);
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
+  const boxOf = async () => Number(((await panel.getByTestId('pnf-box-info').textContent()) ?? '').match(/Box ([\d.]+)/)?.[1]);
+  const half = await boxOf();
+
+  const input = page.getByLabel('Box %');
+  await input.fill('1');
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('(0.5% of');           // typing alone changes nothing
+  await input.press('Enter');
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('(1% of');
+  expect(Math.abs((await boxOf()) / half - 2)).toBeLessThan(0.05);                      // twice the box
+  await expect(page.getByText('1-min · 1% box · 3-box reversal')).toBeVisible();
+
+  await input.fill('abc');
+  await expect(input).toHaveAttribute('aria-invalid', 'true');
+  await input.blur();
+  await expect(input).toHaveValue('1');                                                  // reverted to the last valid value
+  await input.fill('99');
+  await input.blur();
+  await expect(input).toHaveValue('1');                                                  // out of range (0.05-5) is refused too
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('(1% of');
+});
+
+test('the chosen interval and box % are remembered after a reload', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [] });
+  await page.goto('/straddle-pnf');
+  // Wait until the page is live: the expiry list loads after hydration, and a control changed before then is reset by hydration.
+  await expect(page.getByLabel('Expiry').locator('option').first()).toBeAttached();
+  await page.getByLabel('Interval').selectOption('5');
+  await page.getByLabel('Box %').fill('0.75');
+  await page.getByLabel('Box %').press('Enter');
+  await expect(page.getByText('5-min · 0.75% box · 3-box reversal')).toBeVisible();
+  await page.reload();
+  await expect(page.getByLabel('Interval')).toHaveValue('5');
+  await expect(page.getByLabel('Box %')).toHaveValue('0.75');
+  await expect(page.getByText('5-min · 0.75% box · 3-box reversal')).toBeVisible();
+});
+
+test('changing the interval or the box % redraws the charts but never fires an alert for old signals', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [], fixedHistory: true });
+  await page.addInitScript(() => { try { localStorage.setItem('straddle-pnf-settings', JSON.stringify({ interval: 5, boxPct: 0.5 })); } catch { /* ignore */ } });
+  await page.goto('/straddle-pnf');
+  const mid = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
+  await expect(page.getByLabel('Interval')).toHaveValue('5');
+  await expect(mid.locator('[data-testid="pnf-signal"]')).toHaveCount(0);               // the 5-minute chart has no signal ...
+  await page.getByRole('button', { name: 'Alert log' }).click();
+  await page.getByLabel('Interval').selectOption('1');
+  await expect(mid.locator('[data-testid="pnf-signal"]')).toHaveCount(2);               // ... the 1-minute chart of the same data has two
+  await page.waitForTimeout(500);
+  await expect(page.getByTestId('pnf-log-row')).toHaveCount(0);                          // and neither alerted
+  await page.getByLabel('Box %').fill('1');
+  await page.getByLabel('Box %').press('Enter');
+  await page.waitForTimeout(500);
+  await expect(page.getByTestId('pnf-log-row')).toHaveCount(0);
+});
+
+test('the charts fit the window even though the header wraps, and opening the alert log does not push them down', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [] });
+  await page.goto('/straddle-pnf');
+  await expect(page.getByLabel('Expiry').locator('option').first()).toBeAttached();
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
+  const before = (await panel.boundingBox())!;
+  const vh = page.viewportSize()!.height;
+  expect(before.y + before.height).toBeLessThanOrEqual(vh + 2);      // nothing cut off below the window
+  await page.getByRole('button', { name: 'Alert log' }).click();
+  await expect(page.getByTestId('pnf-log')).toBeVisible();
+  const after = (await panel.boundingBox())!;
+  expect(Math.abs(after.y - before.y)).toBeLessThan(2);              // the log floats over the page instead of moving the charts
 });

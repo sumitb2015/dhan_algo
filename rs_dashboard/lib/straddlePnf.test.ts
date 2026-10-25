@@ -195,3 +195,11 @@ test('buildPnf exposes the anchor price the box is a percentage of', () => {
   assert.equal(r.anchor, 200);
   assert.equal(r.box, 1);
 });
+
+test('an explicit anchor price sets the grid and the box instead of the first bar', () => {
+  const bars = at(104, 104 + 2 * 0.52); // first bar 104, but the chart is anchored on 100 (box 0.5)
+  const r = buildPnf(bars, 0.005, 3, 100);
+  assert.equal(r.anchor, 100);
+  assert.equal(r.box, 0.5);
+  assert.equal(buildPnf(bars).anchor, 104);   // without it: the first bar, as before
+});

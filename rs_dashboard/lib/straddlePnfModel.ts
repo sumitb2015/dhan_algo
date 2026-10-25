@@ -1,6 +1,8 @@
 // One chart panel's data: P&F columns, signals, exit cues and the overlay line, from CLOSED 1-min bars only
-// (a bar still forming must never feed a signal, or the marker would repaint).
+// (a bar still forming must never feed a signal, or the marker would repaint). The 1-min bars are grouped into the chosen
+// interval first; the box size is a percentage of the first price.
 import { buildPnf, detectSignals, exitTags, sessionOf, sma, vwap, type Bar, type PnfColumn, type PnfSignal } from './straddlePnf.ts';
+import { resample } from './straddlePnfInterval.ts';
 
 export type Overlay = 'vwap' | 'sma';
 
@@ -28,18 +30,32 @@ function sessionOpenOf(bars: Bar[]): number | null {
   return first ? first.straddle : null;
 }
 
-export function buildPanelModel(closedBars: Bar[], overlay: Overlay): PanelModel {
-  const { anchor, box, columns } = buildPnf(closedBars);
-  const vw = vwap(closedBars); // always computed: signals' belowVwap and the exit cue need it whichever line is drawn
-  const line = overlay === 'vwap' ? vw : sma(closedBars.map(b => b.straddle), SMA_PERIOD);
+export type PanelOptions = {
+  /** Minutes per chart bar (default 1). */
+  interval?: number;
+  /** Box size as a percentage of the first price (default 0.5). */
+  boxPct?: number;
+};
+
+export function buildPanelModel(closedBars: Bar[], overlay: Overlay, opts: PanelOptions = {}): PanelModel {
+  const interval = opts.interval ?? 1;
+  const boxPct = (opts.boxPct ?? 0.5) / 100;
+  // VWAP is always computed on the 1-minute bars (signals' belowVwap and the exit cue need it whichever line is drawn) and read
+  // at each chart bar's last minute, so it does not drift with the interval.
+  const vw1 = vwap(closedBars);
+  const { bars, endIdx } = resample(closedBars, interval);
+  const vw = endIdx.map(i => vw1[i]);
+  const firstPrice = closedBars.find(b => b.straddle > 0)?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
+  const { anchor, box, columns } = buildPnf(bars, boxPct, 3, firstPrice);
+  const line = overlay === 'vwap' ? vw : sma(bars.map(b => b.straddle), SMA_PERIOD);
   return {
     box,
     anchor,
     columns,
-    signals: detectSignals(columns, closedBars, vw),
-    exits: exitTags(columns, closedBars, vw),
+    signals: detectSignals(columns, bars, vw),
+    exits: exitTags(columns, bars, vw),
     overlay: columns.map(c => line[c.endBar]),
-    lastBarT: closedBars.length ? closedBars[closedBars.length - 1].t : null,
-    sessionOpen: sessionOpenOf(closedBars),
+    lastBarT: bars.length ? bars[bars.length - 1].t : null,
+    sessionOpen: sessionOpenOf(bars),
   };
 }

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildPanelModel } from './straddlePnfModel.ts';
-import { vwap, sessionOf, type Bar } from './straddlePnf.ts';
+import { vwap, type Bar } from './straddlePnf.ts';
+import { resample } from './straddlePnfInterval.ts';
 
 const BASE_T = Date.UTC(2026, 9, 23, 3, 45) / 1000;
 const A = 100;
@@ -56,4 +57,48 @@ test('sessionOpen skips a zero-price first bar', () => {
   const zero = { t: BASE_T, ce: 0, pe: 0, straddle: 0, vol: 0 };
   const b = [zero, ...bars([2, 3]).map(x => ({ ...x, t: x.t + 60 }))];
   assert.equal(buildPanelModel(b, 'vwap').sessionOpen, priceAt(2));
+});
+
+// ── interval and box size ──────────────────────────────────────────────────
+const wander = (n: number) => bars(Array.from({ length: n }, (_, i) => Math.round(8 * Math.sin(i / 3)) + (i > 40 ? -(i - 40) / 2 : 0)));
+
+test('an interval groups the 1-minute bars into that many minutes per chart bar', () => {
+  const b = wander(20);
+  const m = buildPanelModel(b, 'vwap', { interval: 5 });
+  assert.equal(m.lastBarT, b[0].t + 15 * 60);               // the 4th five-minute bar starts at minute 15
+  assert.equal(m.anchor, b[0].straddle);                    // the box still comes from the first price
+});
+
+test('a coarser interval never draws more columns than the 1-minute chart of the same data', () => {
+  const b = wander(120);
+  const one = buildPanelModel(b, 'vwap').columns.length;
+  const fifteen = buildPanelModel(b, 'vwap', { interval: 15 }).columns.length;
+  assert.ok(fifteen <= one, `${fifteen} <= ${one}`);
+});
+
+test('VWAP is computed on the 1-minute bars and read at each chart bar\'s last minute, so it does not change with the interval', () => {
+  const b = wander(30);
+  const m = buildPanelModel(b, 'vwap', { interval: 5 });
+  const v1 = vwap(b);
+  const { endIdx } = resample(b, 5);
+  m.columns.forEach((c, i) => assert.equal(m.overlay[i], v1[endIdx[c.endBar]]));
+});
+
+test('the box size follows the percentage: 1% is twice 0.5%, from the same anchor', () => {
+  const b = wander(30);
+  const half = buildPanelModel(b, 'vwap', { boxPct: 0.5 });
+  const one = buildPanelModel(b, 'vwap', { boxPct: 1 });
+  assert.ok(Math.abs(one.box - 2 * half.box) < 1e-9);
+  assert.equal(one.anchor, half.anchor);
+});
+
+test('omitting the options keeps the original 1-minute / 0.5% chart', () => {
+  const b = wander(30);
+  assert.deepEqual(buildPanelModel(b, 'vwap'), buildPanelModel(b, 'vwap', { interval: 1, boxPct: 0.5 }));
+});
+
+test('a history shorter than one interval gives an empty chart, not a throw', () => {
+  const m = buildPanelModel(wander(3), 'vwap', { interval: 15 });
+  assert.deepEqual([m.columns, m.signals, m.overlay], [[], [], []]);
+  assert.equal(m.lastBarT, null);
 });
