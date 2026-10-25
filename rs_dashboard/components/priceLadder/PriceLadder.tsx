@@ -1235,14 +1235,17 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   {expiries.map(x => <option key={x} value={x}>{x}</option>)}
                 </select>
               </div>
-              <div className="flex items-center justify-between gap-2"><span className="text-zinc-400 font-medium">Strike</span>
-                <div className="flex items-center gap-2">
-                  <select aria-label="Strike" value={strike ?? ''} onChange={e => setStrike(Number(e.target.value))} className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono">
-                    {strikes.map(k => { const off = atmOffsetLabel(strikes, atmStrike, k); return <option key={k} value={k}>{off ? `${k}  ·  ${off}` : k}</option>; })}
-                  </select>
-                  {mode !== 'pair' && <Seg compact value={opt} options={['CE', 'PE'] as const} labels={{ CE: 'Call', PE: 'Put' }} onChange={setOpt} />}
-                </div>
+              <div className="flex items-center justify-between gap-2 min-w-0"><span className="text-zinc-400 font-medium">Strike</span>
+                {/* min-w-0 + a width cap: the longer "22600 · ATM+10" labels shrink the select; they must not push anything over the ladder. */}
+                <select aria-label="Strike" value={strike ?? ''} onChange={e => setStrike(Number(e.target.value))} className="min-w-0 w-full max-w-[9.5rem] px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono">
+                  {strikes.map(k => { const off = atmOffsetLabel(strikes, atmStrike, k); return <option key={k} value={k}>{off ? `${k}  ·  ${off}` : k}</option>; })}
+                </select>
               </div>
+              {mode !== 'pair' && (
+                <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Option</span>
+                  <Seg compact value={opt} options={['CE', 'PE'] as const} labels={{ CE: 'Call', PE: 'Put' }} onChange={setOpt} />
+                </div>
+              )}
               {mode === 'pair' && (
                 <>
                   <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title="Straddle: CE and PE on the strike above. Strangle: CE the wing above it, PE the wing below.">Structure</span>
