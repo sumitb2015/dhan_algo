@@ -1012,12 +1012,60 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     selectContract({ contract: latest.contract, broker: latest.broker });
   }, [data, real, selectContract, second]);
 
+  // The broker / SIM-REAL / arm / data / chain / settings / add-ladder buttons. With ONE ladder they sit in the top row beside
+  // the index chips (right-aligned, same order); with two, each ladder keeps them in its own title row.
+  const headControls = !collapsed && (<div className="flex items-center gap-2 flex-wrap">
+      <BrokerPicker value={broker} onChange={setBroker} disabled={busy} brokers={LADDER_BROKERS} />
+      <Seg value={real ? 'REAL' : 'SIM'} options={['SIM', 'REAL'] as const} onChange={v => { setReal(v === 'REAL'); setRealAck(false); }} />
+      {!real && <SimBadge />}
+      {!second && <button type="button" aria-pressed={soundOn} aria-label={soundOn ? 'Mute trade chimes' : 'Unmute trade chimes'}
+        title={soundOn ? 'Trade chimes on: rising = entry, falling = exit, low buzz = rejected / unknown. Click to mute' : 'Trade chimes muted. Click to unmute'}
+        onClick={() => { const v = !soundOn; setSoundOn(v); savePref(k('price-ladder-sound'), v ? '1' : '0'); }}
+        className={`p-1.5 rounded-md border bg-zinc-900 cursor-pointer ${soundOn ? 'border-zinc-700 text-zinc-300 hover:text-white' : 'border-amber-500/50 text-amber-400'}`}>
+        {soundOn ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+      </button>}
+      {!second && <button
+        type="button" onClick={() => (liveArmed ? void post({ action: 'live', on: false }) : setArmModal(true))}
+        className={`px-2.5 py-1 rounded-md text-xs font-bold border transition-colors ${liveArmed ? 'bg-red-600 border-red-500 text-oncolor' : 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:text-white'}`}
+      >
+        {liveArmed ? 'LIVE · REAL MONEY ON' : 'Arm LIVE · REAL MONEY'}
+      </button>}
+      {!second && <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
+        DATA: {dataDate ?? '—'}
+      </span>}
+      <button type="button" onClick={() => setChainOpen(true)} disabled={!expiry}
+        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer disabled:opacity-50"
+        title={`The ${underlying} option chain for ${expiry || 'the selected expiry'}`}>
+        <Table2 className="w-3.5 h-3.5 text-emerald-400" /> Option chain
+      </button>
+      {!second && <button
+        type="button"
+        onClick={() => setSettingsModalOpen(true)}
+        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer"
+        title="Configure Price Ladder trading cutoff & session thresholds"
+      >
+        <Settings className="w-3.5 h-3.5 text-amber-400" />
+        Settings
+      </button>}
+      {second ? (
+        <button type="button" onClick={onRemoveLadder} title="Close this ladder (orders it placed keep running on the server)"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer">
+          <X className="w-3.5 h-3.5 text-red-400" /> Close ladder 2
+        </button>
+      ) : !dual && onAddLadder && (
+        <button type="button" onClick={onAddLadder} title="Show a second, independent ladder beside this one (max 2)"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer">
+          <Plus className="w-3.5 h-3.5 text-emerald-400" /> Add ladder
+        </button>
+      )}
+    </div>);
+
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white min-w-0">
       <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur xl:min-h-[var(--ladder-head-h)]" style={headerMinHeight ? ({ '--ladder-head-h': `${headerMinHeight + 1}px` } as React.CSSProperties) : undefined}>
       <div ref={headRef}>
       {/* Indices + P&L: always visible, above the foldable controls */}
-      <div className="flex items-center gap-2 flex-wrap px-6 pt-2.5 text-xs">
+      <div className="flex items-center gap-2 flex-wrap px-6 pt-2.5 text-xs min-h-[38px]">
         {notTracking && (
           <span role="alert" title="The dashboard server is not running its watcher: brackets, armed levels, the MTM guard and the square-off are NOT being run. Orders already at the broker stay live. Restart the dashboard server."
             className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-red-500/40 bg-red-500/15 text-red-300 font-bold">
@@ -1034,18 +1082,22 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         {showAccount && <PnlChip label={`${BROKER_LABELS[broker]} P&L`} value={acct.pnl}
           title={`${BROKER_LABELS[broker]} account P&L today: realised + unrealised over all positions, as the broker reports it (includes trades not made on the ladder)${acct.note ? ` — ${acct.note}` : ''}`} />}
         {showAccount && acct.note && <span className="text-amber-300 truncate max-w-[18rem]" title={acct.note}>{acct.note}</span>}
+        {/* The standard header buttons (theme, alerts, settings, Sync Data, Update, Disconnect): in the always-visible top row, after the account P&L. */}
+        {!second && (<><span className="w-px h-5 bg-zinc-800 shrink-0" /><NavBar /></>)}
+        {!second && !dual && headControls && <div className="ml-auto">{headControls}</div>}
       </div>
       <div className="flex items-center justify-between gap-3 flex-wrap px-6 py-3">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 min-w-0 max-w-full">
           <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
             <Rows3 className="w-4 h-4 text-emerald-400" />
           </div>
-          <div>
+          <div className="min-w-0">
             <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">PRICE LADDER{dual ? ` ${ladderId}` : ''} · {mode === 'xy' ? 'XY' : mode === 'pair' ? 'PAIR' : 'PLAIN'}</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">
               {axisName} <span className="font-mono">{spot ? spot.toFixed(2) : '—'}</span>
             </h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">
+            {/* One line with two ladders (the longer pair text would wrap and push that pane's button row lower than the other's). */}
+            <p className={`text-[10px] text-zinc-500 font-medium mt-1 ${dual ? 'truncate' : ''}`} title={dual ? 'Hover for the full description' : undefined}>
               {mode === 'xy' ? `Trade the option on ${mcx ? 'its futures month\'s' : 'index'} levels — the server fires armed levels with this tab closed`
                 : mode === 'pair' ? 'Straddles / strangles on their combined CE + PE premium — the server fires both legs with this tab closed'
                   : 'One-click LIMIT / SL orders on the option premium'}
@@ -1069,52 +1121,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             </>
           )}
         </div>
-        {!collapsed && <div className="flex items-center gap-2 flex-wrap">
-          <BrokerPicker value={broker} onChange={setBroker} disabled={busy} brokers={LADDER_BROKERS} />
-          <Seg value={real ? 'REAL' : 'SIM'} options={['SIM', 'REAL'] as const} onChange={v => { setReal(v === 'REAL'); setRealAck(false); }} />
-          {!real && <SimBadge />}
-          {!second && <button type="button" aria-pressed={soundOn} aria-label={soundOn ? 'Mute trade chimes' : 'Unmute trade chimes'}
-            title={soundOn ? 'Trade chimes on: rising = entry, falling = exit, low buzz = rejected / unknown. Click to mute' : 'Trade chimes muted. Click to unmute'}
-            onClick={() => { const v = !soundOn; setSoundOn(v); savePref(k('price-ladder-sound'), v ? '1' : '0'); }}
-            className={`p-1.5 rounded-md border bg-zinc-900 cursor-pointer ${soundOn ? 'border-zinc-700 text-zinc-300 hover:text-white' : 'border-amber-500/50 text-amber-400'}`}>
-            {soundOn ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
-          </button>}
-          {!second && <button
-            type="button" onClick={() => (liveArmed ? void post({ action: 'live', on: false }) : setArmModal(true))}
-            className={`px-2.5 py-1 rounded-md text-xs font-bold border transition-colors ${liveArmed ? 'bg-red-600 border-red-500 text-oncolor' : 'bg-zinc-900 border-zinc-700 text-zinc-300 hover:text-white'}`}
-          >
-            {liveArmed ? 'LIVE · REAL MONEY ON' : 'Arm LIVE · REAL MONEY'}
-          </button>}
-          {!second && <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
-            DATA: {dataDate ?? '—'}
-          </span>}
-          <button type="button" onClick={() => setChainOpen(true)} disabled={!expiry}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer disabled:opacity-50"
-            title={`The ${underlying} option chain for ${expiry || 'the selected expiry'}`}>
-            <Table2 className="w-3.5 h-3.5 text-emerald-400" /> Option chain
-          </button>
-          {!second && <button
-            type="button"
-            onClick={() => setSettingsModalOpen(true)}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer"
-            title="Configure Price Ladder trading cutoff & session thresholds"
-          >
-            <Settings className="w-3.5 h-3.5 text-amber-400" />
-            Settings
-          </button>}
-          {second ? (
-            <button type="button" onClick={onRemoveLadder} title="Close this ladder (orders it placed keep running on the server)"
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer">
-              <X className="w-3.5 h-3.5 text-red-400" /> Close ladder 2
-            </button>
-          ) : !dual && onAddLadder && (
-            <button type="button" onClick={onAddLadder} title="Show a second, independent ladder beside this one (max 2)"
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer">
-              <Plus className="w-3.5 h-3.5 text-emerald-400" /> Add ladder
-            </button>
-          )}
-          {!second && (<><span className="w-px h-5 bg-zinc-800 shrink-0" /><NavBar /></>)}
-        </div>}
+        {/* Two ladders: each pane's buttons take their own full-width row under its title, so both rows sit at the same height. */}
+        {(second || dual) && <div className="basis-full">{headControls}</div>}
       </div>
       {/* Books: part of the foldable controls (the chips above stay visible) */}
       {!collapsed && showAccount && <div className="flex items-center gap-2 flex-wrap px-6 pb-2.5 text-xs">
