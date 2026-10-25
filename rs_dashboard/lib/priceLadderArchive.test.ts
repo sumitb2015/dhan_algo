@@ -45,7 +45,7 @@ test('partsToArchive: a day roll saves the whole old ledger; a same-day clear sa
   assert.equal(partsToArchive({ date: '2026-10-21', slices: [], events: [] }, { date: '2026-10-22', slices: [], events: [] }, { date: '2026-10-22', slices: [], events: [] }), null);
 });
 
-test('archiveDay: writes the day file, merges a second write into it, and refuses to overwrite an unreadable one', () => {
+test('archiveDay: writes the day file, merges a second write into it, and sets an unreadable one aside and still saves', () => {
   const dir = tmp();
   archiveDay(dir, '2026-10-21', { slices: [slice({ id: 'a' })] }, 1);
   archiveDay(dir, '2026-10-21', { slices: [slice({ id: 'b' })] }, 2);
@@ -53,9 +53,15 @@ test('archiveDay: writes the day file, merges a second write into it, and refuse
   assert.deepEqual(f.slices.map(x => x.id).sort(), ['a', 'b']);
   assert.equal(path.basename(archiveFile(dir, '2026-10-21')), 'price_ladder_archive_2026-10-21.json');
   fs.writeFileSync(archiveFile(dir, '2026-10-22'), '{not json');
-  assert.throws(() => archiveDay(dir, '2026-10-22', { slices: [slice({})] }), /unreadable/);
-  assert.equal(fs.readFileSync(archiveFile(dir, '2026-10-22'), 'utf8'), '{not json');   // earlier trades are not overwritten
+  archiveDay(dir, '2026-10-22', { slices: [slice({ id: 'z' })] }, 7);
+  assert.equal(fs.readFileSync(`${archiveFile(dir, '2026-10-22')}.corrupt_7`, 'utf8'), '{not json');   // the bad file is kept aside, not overwritten
+  assert.deepEqual((JSON.parse(fs.readFileSync(archiveFile(dir, '2026-10-22'), 'utf8')) as DayArchive).slices.map(x => x.id), ['z']);   // and the trades still land
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('archiveFile: a date that is not YYYY-MM-DD never reaches a path', () => {
+  assert.equal(path.basename(archiveFile('/d', '../../etc/x')), 'price_ladder_archive_undated.json');
+  assert.equal(path.dirname(archiveFile('/d', '2026-10-21/../..')), '/d');
 });
 
 test('rehearsal: a ledger dated yesterday rolls into the archive, the new ledger keeps only what is still live', () => {

@@ -1026,6 +1026,8 @@ type LoopHolder = { [LOOP_KEY]?: { timer: ReturnType<typeof setInterval>; busy: 
 /** No "price is stale" event this soon after the watcher starts. */
 const START_GRACE_MS = 30_000;
 /** When the watcher last started a tick (the page warns when this goes quiet while something is live), or null if it never ran. */
+/** The watcher ticks every second; this long without one while something is live reads as 'not tracking'. */
+export const WATCHER_QUIET_MS = 8000;
 export const watcherTickAt = (): number | null => (globalThis as LoopHolder)[LOOP_KEY]?.lastTickAt ?? null;
 const loopStartedAt = () => (globalThis as LoopHolder)[LOOP_KEY]?.startedAt ?? 0;
 

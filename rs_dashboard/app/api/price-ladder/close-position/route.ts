@@ -8,9 +8,9 @@ import { placeZerodhaOrder } from '@/lib/zerodhaPlaceOrder';
 import { cachedZerodhaContract, slicesFor } from '@/lib/zerodhaContracts';
 import { resolveLotSize } from '@/lib/lotSize';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
-import { brokerPositionRows, brokerSessionOk, updateLadderState, startPriceLadderLoop } from '@/lib/priceLadderServer';
+import { brokerPositionRows, brokerSessionOk, updateLadderState, readLadderState, startPriceLadderLoop } from '@/lib/priceLadderServer';
 import { zerodhaLadderParams, pushEvent, ev, type LadderBroker } from '@/lib/priceLadder';
-import { planClose, isClosePct, CloseGuard } from '@/lib/priceLadderClose';
+import { planClose, isClosePct, CloseGuard, ladderExitInFlight } from '@/lib/priceLadderClose';
 
 // Close all or part of a broker position from the Price Ladder's positions window. Real money, so the browser only names
 // the position (broker + contract key + product) and a share; the side, quantity and segment come from the broker's own
@@ -39,10 +39,16 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!guard.tryStart(gkey, Date.now())) return bad('A close for this position was just sent — wait a few seconds for the broker book to update', 409);
   let sent = false;
   try {
-    const rows = await brokerPositionRows(broker);
-    if (!rows) return bad(`Could not read the ${NAME[broker]} positions — nothing was sent`, 502);
-    const row = rows.find(r => r.key === key && r.product === product);
+    const readRow = async () => {
+      const rows = await brokerPositionRows(broker);
+      return rows ? (rows.find(r => r.key === key && r.product === product) ?? null) : undefined;
+    };
+    let row = await readRow();
+    if (row === undefined) return bad(`Could not read the ${NAME[broker]} positions — nothing was sent`, 502);
     if (!row || row.net === 0) return bad('That position is flat at the broker — refresh');
+    // The ladder's own exit may be on the wire: a second one off the same book would flip the position.
+    const inFlight = ladderExitInFlight(readLadderState(), broker, key);
+    if (inFlight) return bad(`Not sent: ${inFlight} — wait for it to settle, then refresh`, 409);
 
     const symbol = row.symbol;
     const mcx = row.exchange === 'MCX_COMM' || /^mcx/i.test(row.exchange) || row.exchange === 'MCX';
@@ -55,6 +61,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // Dhan MCX quantity is in lots (lot size 1); NSE / BSE F&O is in units.
         lotSize = mcx ? 1 : await resolveLotSize(symbol.split('-')[0]).catch(() => null);
       } else if (broker === 'zerodha') lotSize = cachedZerodhaContract(symbol)?.lotSize ?? null;
+    }
+    // The Dhan lot-size lookup can take seconds (a Python call): the book is read again after it, so the share is sized
+    // off the position as it is now, never off a net that a fill has since reduced.
+    if (pct !== 100 && broker === 'dhan' && !mcx) {
+      row = await readRow();
+      if (row === undefined) return bad(`Could not read the ${NAME[broker]} positions — nothing was sent`, 502);
+      if (!row || row.net === 0) return bad('That position is flat at the broker — refresh');
     }
     const plan = planClose(row.net, lotSize, pct);
     if (typeof plan === 'string') return bad(plan);

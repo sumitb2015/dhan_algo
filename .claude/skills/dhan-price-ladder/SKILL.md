@@ -53,7 +53,9 @@ per write; the page drops a view older than the one on screen). It is re-read on
    `{broker, key (securityId on Dhan, trading symbol otherwise), product, pct 25|50|75|100}`, re-reads the broker book
    (`brokerPositionRows`, never cached), derives side and quantity (`planClose`: opposite side, whole lots rounded down,
    100 = |net| verbatim), and one `CloseGuard` entry per position blocks a double click (in flight + 8 s cooldown while the
-   book lags). Refused: Kotak/Zerodha MCX (units unconfirmed), non-F&O rows, a Zerodha order above the freeze quantity.
+   book lags). Refused: Kotak/Zerodha MCX (units unconfirmed), non-F&O rows, a Zerodha order above the freeze quantity, and any
+   contract the ladder itself is already exiting for real (`ladderExitInFlight`: a second exit sized off the same lagging book
+   would flip the position). A Dhan partial re-reads the book after its lot-size lookup (a Python call that takes seconds).
    Never accept side / qty / security id for the order from the browser.
 10. **MCX units differ per broker** (`mcxUnitError`, `resolveContract`): Dhan and Zerodha take lots (lotSize 1, `mult` 10), Kotak
     takes barrels (lotSize 10). CRUDEOILM trades only the 100-point strikes (`isTradedStrike`).

@@ -35,3 +35,21 @@ test('CloseGuard: one close per position at a time, then a cooldown while the bo
   assert.equal(g.tryStart('k', 20_001), true);
   assert.equal(g.tryStart('other', 1000), true);
 });
+
+test('ladderExitInFlight: a REAL exit on the wire for the same contract blocks a manual close', async () => {
+  const { ladderExitInFlight } = await import('./priceLadderClose.ts');
+  const c = { underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt: 'CE' as const, securityId: '111', tradingSymbol: 'NIFTY26OCT23200CE', lotSize: 65, exchangeSegment: 'NSE_FNO' };
+  const sl = (o: object) => ({ id: 'a', kind: 'xy', broker: 'dhan', mode: 'real', contract: c, side: 'SELL', lots: 1, qty: 65, product: 'NRML', state: 'open', createdAt: 1, updatedAt: 1, ...o });
+  const st = (slices: object[], pairs: object[] = []) => ({ date: 'd', events: [], slices, pairs }) as never;
+  assert.equal(ladderExitInFlight(st([sl({})]), 'dhan', '111'), null);                                   // plain open position
+  assert.match(ladderExitInFlight(st([sl({ state: 'exiting' })]), 'dhan', '111')!, /already exiting 23200CE/);
+  assert.match(ladderExitInFlight(st([sl({ exitWanted: 'Manual exit' })]), 'dhan', '111')!, /already exiting/);
+  assert.equal(ladderExitInFlight(st([sl({ state: 'exiting' })]), 'dhan', '999'), null);                 // another contract
+  assert.equal(ladderExitInFlight(st([sl({ state: 'exiting', mode: 'sim' })]), 'dhan', '111'), null);   // paper
+  assert.equal(ladderExitInFlight(st([sl({ state: 'exiting' })]), 'kotak', 'NIFTY26OCT23200CE'), null); // another broker
+  assert.match(ladderExitInFlight(st([sl({ state: 'exiting', broker: 'kotak' })]), 'kotak', 'NIFTY26OCT23200CE')!, /already exiting/);   // Kotak keys by trading symbol
+  const leg = { contract: c, held: 65, exitOrderId: '77' };
+  const pair = { id: 'p', broker: 'dhan', mode: 'real', state: 'open', legs: { ce: leg, pe: { contract: { ...c, securityId: '222', opt: 'PE' as const } } } };
+  assert.match(ladderExitInFlight(st([], [pair]), 'dhan', '111')!, /leg of a pair/);
+  assert.equal(ladderExitInFlight(st([], [pair]), 'dhan', '222'), null);
+});

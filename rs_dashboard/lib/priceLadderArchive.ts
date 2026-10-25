@@ -64,15 +64,17 @@ export function partsToArchive(raw: LadderState, base: LadderState, next: Ladder
   return slices.length || pairs.length ? { date: base.date, part: { slices, pairs } } : null;
 }
 
-export const archiveFile = (dir: string, date: string) => path.join(dir, `price_ladder_archive_${date}.json`);
+// The date comes from the ledger file: only a plain YYYY-MM-DD may reach a file name (anything else is filed as 'undated').
+export const archiveFile = (dir: string, date: string) => path.join(dir, `price_ladder_archive_${/^\d{4}-\d{2}-\d{2}$/.test(date) ? date : 'undated'}.json`);
 
 /** Merge `part` into the day's archive file (created if absent). Throws on an IO error; the caller decides what that means. */
 export function archiveDay(dir: string, date: string, part: ArchivePart, now = Date.now()): void {
   const file = archiveFile(dir, date);
   let existing: DayArchive | null = null;
   try { existing = JSON.parse(fs.readFileSync(file, 'utf8')) as DayArchive; } catch (err) {
-    // A missing file is a first write; an unreadable one must not be overwritten (it holds earlier trades).
-    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') throw new Error(`price ladder archive ${path.basename(file)} is unreadable: ${(err as Error).message}`);
+    // A missing file is a first write. An unreadable one holds earlier trades, so it is kept aside (never overwritten) and
+    // today's part is written to a fresh file: failing here would drop the part at the day roll.
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') fs.renameSync(file, `${file}.corrupt_${now}`);
   }
   writeJsonAtomic(file, mergeDayArchive(existing, date, part, now));
 }

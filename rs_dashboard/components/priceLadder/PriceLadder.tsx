@@ -52,13 +52,10 @@ const LOAD_RETRIES = 4;
 const LOAD_RETRY_MS = 4000;
 
 interface SpotView { spot: number; at: number; source: string; fresh: boolean }
-/** The server watcher ticks every second; this long without one while something is live is shown as 'not tracking'. */
-const WATCHER_QUIET_MS = 8000;
-
 interface StateResp {
   state: LadderState; spots: Record<string, SpotView>; ltps: Record<string, number>; liveArmed: boolean; now: number;
-  /** When the server watcher last ticked (server clock); a gap means brackets / the guard are not being run. */
-  watcherAt?: number | null;
+  /** The server watcher has not ticked for a while (decided on the server, so the push stream carries the change). */
+  watcherQuiet?: boolean;
   /** Where the page's XY axis sits in `spots`: the index name, or for MCX the option month's futures contract. */
   spotKey?: string | null;
   /** Why the selected contract could not be resolved (e.g. no MCX futures month), or null. */
@@ -909,7 +906,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const stale = mode === 'xy' && !spotFreshNow;
   // Something live in the ledger, and the server that runs it has gone quiet (no reply, or its watcher tick is overdue).
   const anyLive = !!data && (data.state.slices.some(x => isLive(x) && x.state !== 'unknown') || (data.state.pairs ?? []).some(isPairLive));
-  const notTracking = anyLive && (unreachable || (data?.watcherAt != null && data.now - data.watcherAt > WATCHER_QUIET_MS));
+  const notTracking = anyLive && (unreachable || !!data?.watcherQuiet);
   const placeDisabled = busy || !brokerLoaded || !strike || !(refPrice > 0) || realBlocked || (real && sessionDown) || (mode === 'xy' && stale)
     || (mode === 'pair' && !pairView);
   const decimals = mode === 'xy' ? (tick < 1 ? 2 : 0) : 2;

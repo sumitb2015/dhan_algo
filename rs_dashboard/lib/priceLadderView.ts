@@ -2,7 +2,7 @@ import { getDhanStrikeLookup } from '@/lib/dhanStrikeLookup';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { kotakOptionContract } from '@/lib/kotakContracts';
 import { zerodhaOptionContract } from '@/lib/zerodhaContracts';
-import { readLadderState, loadPrices, dhanSegmentFor, watcherTickAt, LADDER_UNDERLYINGS } from '@/lib/priceLadderServer';
+import { readLadderState, loadPrices, dhanSegmentFor, watcherTickAt, WATCHER_QUIET_MS, LADDER_UNDERLYINGS } from '@/lib/priceLadderServer';
 import {
   spotKey, isMcxUnderlying, isLive, istDay, istHhmm, realArmed, sessionFor, spotFresh,
   type LadderBroker, type LadderContract, type OptType,
@@ -90,7 +90,7 @@ export async function buildLadderView(params: URLSearchParams) {
   const dayLow = d?.low ?? (shown?.ref ? axisDayOf(shown, prices.days, now, state.settings?.mcxAutoExitTime)?.low : null);
 
   return {
-    state, spots, ltps: prices.ltps, liveArmed: realArmed(state, istDay()), now, watcherAt: watcherTickAt(), spotKey: shownKey, contractError, pairError,
+    state, spots, ltps: prices.ltps, liveArmed: realArmed(state, istDay()), now, watcherQuiet: (watcherTickAt() ?? now) < now - WATCHER_QUIET_MS, spotKey: shownKey, contractError, pairError,
     keyLevels: {
       pdh: prevDay?.high ?? null,
       pdl: prevDay?.low ?? null,

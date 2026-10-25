@@ -64,7 +64,7 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
       if (method === 'GET') {
         return json(route, { success: true, data: {
           state, spots: { NIFTY: clock ? { spot: SPOT, at: clock - 60_000, source: 'ws (not moved yet)', fresh: false } : { spot: SPOT, at: Date.now(), source: 'indices', fresh: true } }, ltps: { '111': 120 },
-          liveArmed: !!opts.liveArmed, now: clock ?? Date.now(), watcherAt: opts.watcherLagMs != null ? (clock ?? Date.now()) - opts.watcherLagMs : undefined,
+          liveArmed: !!opts.liveArmed, now: clock ?? Date.now(), watcherQuiet: (opts.watcherLagMs ?? 0) > 8000,
           // The page reads the contract only from a reply that echoes the selection it is showing.
           request: { underlying: u.searchParams.get('underlying'), expiry: u.searchParams.get('expiry') ?? '', strike: Number(u.searchParams.get('strike')) || null, opt: u.searchParams.get('opt'), pairCe: Number(u.searchParams.get('pairCe')) || null, pairPe: Number(u.searchParams.get('pairPe')) || null },
           pair: Number(u.searchParams.get('pairCe')) > 0 ? {

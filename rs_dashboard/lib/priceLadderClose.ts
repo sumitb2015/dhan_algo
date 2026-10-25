@@ -1,4 +1,5 @@
 import { fractionUnits } from './partialQty.ts';
+import type { LadderBroker, LadderState } from './priceLadder.ts';
 
 // Closing a broker position straight from the Price Ladder's positions window. Pure rules; the route does the IO.
 // The browser names a position (broker + key + product) and a share of it. Everything else — side, quantity, segment —
@@ -45,4 +46,25 @@ export class CloseGuard {
     if (sent) this.last.set(key, now);
     for (const [k, at] of this.last) if (now - at > 60_000) this.last.delete(k);
   }
+}
+
+/**
+ * Is the ladder already exiting this contract for real? A manual close sized off the broker book while the ladder's own
+ * exit (bracket, guard, manual) is on the wire would send a second exit for the same units and flip the position to the
+ * other side. `key` is the Dhan security id, or the trading symbol on the other brokers. Returns what is in flight, or null.
+ */
+export function ladderExitInFlight(st: LadderState, broker: LadderBroker, key: string): string | null {
+  const same = (c: { securityId: string; tradingSymbol?: string }) => (broker === 'dhan' ? c.securityId === key : c.tradingSymbol === key);
+  for (const x of st.slices) {
+    if (x.broker !== broker || x.mode !== 'real' || !same(x.contract)) continue;
+    if (x.state === 'exiting' || x.state === 'placing' || (x.state === 'open' && x.exitWanted)) return `the ladder is already exiting ${x.contract.strike}${x.contract.opt}`;
+  }
+  for (const p of st.pairs ?? []) {
+    if (p.broker !== broker || p.mode !== 'real') continue;
+    for (const k of ['ce', 'pe'] as const) {
+      const l = p.legs[k];
+      if (same(l.contract) && (p.state === 'exiting' || p.state === 'placing' || p.state === 'rolling' || l.exitSentAt || l.exitOrderId)) return `the ladder is already exiting the ${l.contract.strike}${l.contract.opt} leg of a pair`;
+    }
+  }
+  return null;
 }
