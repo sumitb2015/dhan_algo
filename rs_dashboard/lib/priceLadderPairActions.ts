@@ -178,6 +178,75 @@ async function arm(b: Record<string, unknown>): Promise<NextResponse> {
   return ok(s, { id: pair.id });
 }
 
+/**
+ * Buy / Sell Market on a pair: both legs at MARKET now, no level and no bracket (Single style; exit it from its widget or
+ * the MTM guard). An opening order, so every check an arm has applies, plus the market hours for REAL. SIM opens at the
+ * live premiums; REAL is marked 'placing' with `sendWanted` and the watcher sends both legs on its next tick (the path a
+ * '+1 lot' takes), unwinding a lone filled leg.
+ */
+async function market(b: Record<string, unknown>): Promise<NextResponse> {
+  const now = Date.now();
+  const mode = b.mode;
+  if (mode !== 'sim' && mode !== 'real') return bad('mode must be sim or real');
+  const broker = b.broker as LadderBroker;
+  if (broker !== 'dhan' && broker !== 'kotak' && broker !== 'zerodha') return bad('broker must be dhan, kotak or zerodha');
+  const u = String(b.underlying ?? '').toUpperCase();
+  if (!LADDER_UNDERLYINGS.includes(u)) return bad(`Unsupported underlying ${b.underlying}`);
+  const expiry = String(b.expiry ?? '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) return bad('expiry must be YYYY-MM-DD');
+  const structure = b.structure as PairStructure;
+  if (structure !== 'straddle' && structure !== 'strangle') return bad('structure must be straddle or strangle');
+  const ceStrike = Number(b.ceStrike), peStrike = Number(b.peStrike);
+  if (!(ceStrike > 0) || !(peStrike > 0)) return bad('Invalid strikes');
+  if (structure === 'straddle' && ceStrike !== peStrike) return bad('A straddle has one strike for both legs');
+  if (structure === 'strangle' && !(ceStrike > peStrike)) return bad('A strangle needs the CE strike above the PE strike');
+  const step = PAIR_STRIKE_STEP[u];
+  if (!step || ceStrike % step !== 0 || peStrike % step !== 0) return bad(`Pair strikes must be ${step ?? '?'}-point strikes`);
+  const side = b.side as LadderSide;
+  if (side !== 'BUY' && side !== 'SELL') return bad('side must be BUY or SELL');
+  if (b.product !== 'NRML' && b.product !== 'MIS') return bad('product must be NRML or MIS');
+  const lots = capLots(b.lots);
+  if (lots == null) return bad('Lots must be a whole number from 1 to 20');
+  // REAL needs the market open (the watcher would cancel it otherwise); a SIM open is allowed whenever there are prices.
+  const openErr = checkOpenAllowed(u, now, mode, broker, readLadderState(), { isArm: mode === 'sim' });
+  if (openErr) return bad(openErr, openErr.includes('LIVE') || openErr.includes('session') ? 403 : 400);
+
+  const [ce, pe] = await Promise.all([resolveContract(broker, u, expiry, ceStrike, 'CE'), resolveContract(broker, u, expiry, peStrike, 'PE')]);
+  if (typeof ce === 'string') return bad(ce);
+  if (typeof pe === 'string') return bad(pe);
+  if (ce.lotSize !== pe.lotSize) return bad(`The legs have different lot sizes (${ce.lotSize} / ${pe.lotSize}) — refused`);
+  const qty = lots * ce.lotSize;
+  const st0 = readLadderState();
+  for (const c of [ce, pe]) {
+    const held = lotsOnContract(st0, c.securityId, broker, mode, side);
+    if (held + lots > MAX_LADDER_LOTS) return bad(`The ladder already holds or has armed ${held} lots of ${c.strike}${c.opt} — the cap is ${MAX_LADDER_LOTS}`);
+  }
+  const prices = await loadPrices([], [ce, pe]);
+  const ceLtp = prices.ltps[ce.securityId], peLtp = prices.ltps[pe.securityId];
+  if (!(ceLtp > 0) || !(peLtp > 0)) return bad('No live price for both legs yet — the WebSocket feed may still be subscribing; try again in a moment');
+  if (mode === 'real') {
+    const blocked = await realPairBlocked(broker, u, { ce, pe }, side, qty, b.product, prices.ltps);
+    if (blocked) return bad(blocked);
+  }
+  const base: LadderPair = {
+    id: newLadderId('pp'), broker, mode, structure, side, lots, qty, product: b.product, state: mode === 'real' ? 'placing' : 'open',
+    legs: { ce: { contract: ce }, pe: { contract: pe } }, createdAt: now, updatedAt: now, note: 'Market order',
+    ...(b.pane === 2 ? { pane: 2 as const } : {}),
+  };
+  const pair: LadderPair = mode === 'real'
+    ? { ...base, sendWanted: true, crossY: round2(ceLtp + peLtp) }
+    : { ...base, openedAt: now, entryY: round2(ceLtp + peLtp), legs: { ce: fillLeg(base.legs.ce, qty, ceLtp), pe: fillLeg(base.legs.pe, qty, peLtp) } };
+  let capped = false;
+  const s = await updateLadderState(st => {
+    // Re-checked inside the lock: two clicks in flight must not both pass the read above.
+    if (LEG_KEYS.some(k => lotsOnContract(st, base.legs[k].contract.securityId, broker, mode, side) + lots > MAX_LADDER_LOTS)) { capped = true; return st; }
+    return pushEvent({ ...st, pairs: [...(st.pairs ?? []), pair] },
+      ev('info', `${mode === 'real' ? '' : 'SIM '}${side} ${lots} lot(s) ${u} ${pairName(pair)} at MARKET${mode === 'real' ? ' — both legs' : ` filled: CE ${ceLtp.toFixed(2)} + PE ${peLtp.toFixed(2)}`}`, pair.id));
+  });
+  if (capped) return bad(`That would take a leg past the ${MAX_LADDER_LOTS}-lot cap`);
+  return ok(s, { id: pair.id });
+}
+
 async function modify(b: Record<string, unknown>, id: string): Promise<NextResponse> {
   const p = (readLadderState().pairs ?? []).find(y => y.id === id);
   if (!p) return bad('Unknown pair');
@@ -438,6 +507,8 @@ export async function pairAction(b: Record<string, unknown>): Promise<NextRespon
   switch (op) {
     case 'arm':
       return arm(b);
+    case 'market':
+      return market(b);
     case 'cancel': {
       const r = await guarded(id, y => y.state === 'armed',
         st => pushEvent(patchPair(st, id, { state: 'cancelled', note: 'Cancelled by you' }), ev('info', 'Pair cancelled', id)));

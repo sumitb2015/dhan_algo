@@ -18,7 +18,7 @@ Real-money endpoint — SIM (paper) is the default; REAL needs the daily LIVE ·
 - Number boxes have up/down arrows (and ArrowUp/ArrowDown). Target / SL / trail step by 1 point; per-leg SL % by 5; the SL
   buffer by 0.1 (a fractional value steps from itself, so 2.5 → 3.5). The tick you pick is remembered per mode (Plain defaults to 1). An arrow run commits once, half a second after you stop.
 
-- **Buy Market / Sell Market** (under Lots, Plain and XY ladders) — one click sends the selected contract at MARKET now, with the
+- **Buy Market / Sell Market** (under Lots, on every ladder) — one click sends the selected contract at MARKET now (on a Pair ladder, both legs of the shown straddle / strangle together; REAL: a lone filled leg is closed again), with the
   current lots, product, broker and SIM/REAL mode; the first REAL click each page load asks first; no bracket (exit from its widget or the MTM guard). The
   server applies every arm check (REAL arm, session, hours, auto-exit time, 20-lot cap, funds).
 

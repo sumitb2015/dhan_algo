@@ -583,3 +583,52 @@ test('The open positions count and total P&L are the same in XY, Plain and Pair 
     await expect(page.getByTitle(/This ladder's total P&L/)).toContainText('−₹325');
   }
 });
+
+test('Every ladder shows its open positions and total P&L, even with nothing open, in every mode', async ({ page }) => {
+  await install(page);
+  await page.goto('/price-ladder');                                   // two ladders by default
+  await expect(page.getByLabel('Underlying')).toHaveCount(2);
+  await expect(page.getByLabel('Open positions', { exact: true })).toHaveCount(2);
+  await expect(page.getByTitle(/This ladder's total P&L/)).toHaveCount(2);
+  await expect(page.getByLabel('Open positions', { exact: true }).nth(1)).toHaveText('0');
+  for (const name of ['Plain', 'Pair', 'XY (index)']) {
+    await page.getByRole('button', { name, exact: true }).nth(1).click();   // ladder 2's mode
+    await expect(page.getByLabel('Open positions', { exact: true })).toHaveCount(2);
+  }
+});
+
+test('Pair mode has Buy Market / Sell Market: both legs of the shown structure at market, no level, no bracket', async ({ page }) => {
+  const seen = await install(page);
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Pair', exact: true }).click();
+  await page.getByRole('button', { name: 'Strangle', exact: true }).click();
+  const call = page.getByLabel('Call strikes above the centre', { exact: true }), put = page.getByLabel('Put strikes below the centre', { exact: true });
+  await call.fill('1'); await call.blur();
+  await put.fill('2'); await put.blur();
+  await expect(page.getByText('CE 23250 (ATM+1) · PE 23100 (ATM-2)')).toBeVisible();
+  await page.getByRole('button', { name: 'Sell at market' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.action === 'pair' && b.op === 'market').length).toBe(1);
+  const sent = seen.posts.find(b => b.op === 'market')!;
+  expect(sent).toMatchObject({ action: 'pair', op: 'market', mode: 'sim', broker: 'dhan', side: 'SELL', lots: 1, structure: 'strangle', ceStrike: 23250, peStrike: 23100 });
+  expect(sent).not.toHaveProperty('level');
+  expect(sent).not.toHaveProperty('bracket');
+  await page.getByRole('button', { name: 'Buy at market' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.op === 'market').length).toBe(2);
+  expect(seen.posts.filter(b => b.op === 'market')[1]).toMatchObject({ side: 'BUY' });
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Pair mode REAL: the first Buy / Sell Market asks before sending both legs', async ({ page }) => {
+  const seen = await install(page, { liveArmed: true });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Pair', exact: true }).click();
+  await page.getByRole('button', { name: 'REAL', exact: true }).click();
+  await page.getByRole('button', { name: 'Sell at market' }).click();
+  await expect(page.getByText('Place a REAL-money order?')).toBeVisible();
+  expect(seen.posts.filter(b => b.op === 'market')).toEqual([]);
+  await page.getByRole('button', { name: 'Place REAL order' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.op === 'market').length).toBe(1);
+  expect(seen.posts.find(b => b.op === 'market')).toMatchObject({ mode: 'real', side: 'SELL', structure: 'straddle' });
+});

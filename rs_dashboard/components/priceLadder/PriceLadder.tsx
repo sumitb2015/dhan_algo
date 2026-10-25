@@ -765,6 +765,17 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     if (real && !realAck) setConfirm({ text: what, run }); else run();
   }, [post, broker, real, realAck, underlying, expiry, strike, opt, lots, product, second]);
 
+  // Pair mode Buy / Sell Market: both legs at market now, no level and no bracket (exit from the pair widget or the MTM guard).
+  const sendPairMarket = useCallback((side: LadderSide) => {
+    if (!expiry || !pairOk) return;
+    const name = structure === 'straddle' ? `${pairCe} straddle` : `${pairCe}CE / ${pairPe}PE strangle`;
+    const run = () => void post({
+      action: 'pair', op: 'market', broker, mode: real ? 'real' : 'sim', underlying, expiry, structure, ceStrike: pairCe, peStrike: pairPe,
+      side, lots, product, ...(second ? { pane: 2 } : {}),
+    }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${lots} lot(s) ${underlying} ${name} sent at MARKET`); });
+    if (real && !realAck) setConfirm({ text: `${side} ${lots} lot(s) ${underlying} ${name} — BOTH legs at MARKET now. If only one leg fills, it is closed again at market`, run }); else run();
+  }, [post, broker, real, realAck, underlying, expiry, structure, pairOk, pairCe, pairPe, lots, product, second]);
+
   // Pair mode: the entry is on the combined premium (Buy below / Sell above = limit-like; the other side a breakout).
   const sendPair = useCallback((side: LadderSide, price: number, expect: { kind: 'limit' | 'stop'; dir: 'above' | 'below' }) => {
     if (!expiry || !pairOk) return;
@@ -941,7 +952,6 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     && p.legs.ce.contract.securityId === pairView.ce.securityId && p.legs.pe.contract.securityId === pairView.pe.securityId
     && (p.broker !== broker || p.mode !== pageMode)) : [];
   const done = paneSlices.filter(s => !isLive(s));
-  const livePairs = panePairs.filter(isPairLive);
   // Positions held (not armed levels): a contract + side group with filled lots, and a pair that has a leg on.
   const openPositions = openPositionCount(paneSlices, panePairs);
 
@@ -1292,16 +1302,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   <button type="button" onClick={() => setLots(1)} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-400 hover:text-white">Clear</button>
                 </div>
               </div>
-              {mode !== 'pair' && (
-                <div className="grid grid-cols-2 gap-1.5">
-                  <button type="button" disabled={busy || !expiry || !strike} onClick={() => sendMarket('BUY')}
-                    title={`BUY ${lots} lot(s) ${strike ?? ''}${opt} at market now`} aria-label="Buy at market"
-                    className="px-2 py-1.5 rounded bg-emerald-600 text-oncolor font-bold hover:bg-emerald-500 disabled:opacity-50">Buy Market</button>
-                  <button type="button" disabled={busy || !expiry || !strike} onClick={() => sendMarket('SELL')}
-                    title={`SELL ${lots} lot(s) ${strike ?? ''}${opt} at market now`} aria-label="Sell at market"
-                    className="px-2 py-1.5 rounded bg-red-600 text-oncolor font-bold hover:bg-red-500 disabled:opacity-50">Sell Market</button>
-                </div>
-              )}
+              <div className="grid grid-cols-2 gap-1.5">
+                <button type="button" disabled={busy || !expiry || (mode === 'pair' ? !pairOk : !strike)} onClick={() => (mode === 'pair' ? sendPairMarket('BUY') : sendMarket('BUY'))}
+                  title={mode === 'pair' ? `BUY ${lots} lot(s) of the ${structure} (both legs) at market now` : `BUY ${lots} lot(s) ${strike ?? ''}${opt} at market now`} aria-label="Buy at market"
+                  className="px-2 py-1.5 rounded bg-emerald-600 text-oncolor font-bold hover:bg-emerald-500 disabled:opacity-50">Buy Market</button>
+                <button type="button" disabled={busy || !expiry || (mode === 'pair' ? !pairOk : !strike)} onClick={() => (mode === 'pair' ? sendPairMarket('SELL') : sendMarket('SELL'))}
+                  title={mode === 'pair' ? `SELL ${lots} lot(s) of the ${structure} (both legs) at market now` : `SELL ${lots} lot(s) ${strike ?? ''}${opt} at market now`} aria-label="Sell at market"
+                  className="px-2 py-1.5 rounded bg-red-600 text-oncolor font-bold hover:bg-red-500 disabled:opacity-50">Sell Market</button>
+              </div>
             </div>
             <MtmGuardCard key={myGuardKey} broker={broker} real={real} ladderId={ladderId} mtm={ladderPnl} guard={data?.state?.guards?.[myGuardKey]} post={post} />
             <p className="flex items-center gap-1.5 text-[10px] text-zinc-500">
@@ -1311,19 +1319,18 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
 
           {/* ── ladder ── */}
           <div className="flex flex-col gap-2 min-w-0">
-            {(live.length > 0 || livePairs.length > 0 || ladderPnl != null) && (
-              <div className="flex items-center gap-2 flex-wrap px-2.5 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800 text-xs">
-                <span className="text-zinc-400 font-semibold flex items-center gap-1.5"
-                  title="Positions this ladder holds right now: one per contract + side (a strangle or straddle counts as one). Armed levels and resting orders are not positions; they show on the ladder.">
-                  <span className={`w-2 h-2 rounded-full ${openPositions > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-600'}`} />
-                  Open positions:
-                </span>
-                <span className="font-mono font-bold text-zinc-100" aria-label="Open positions">{openPositions}</span>
-                <span className="w-px h-4 bg-zinc-800 shrink-0 mx-1" />
-                <PnlChip label="Total P&L" value={ladderPnl}
-                  title={`This ladder's total P&L on ${BROKER_LABELS[broker]} · ${real ? 'REAL' : 'SIM'} — the same number as the Ladder P&L chip above and the MTM guard: trades closed today at their exit, open ones at the live price. '—' while an open leg has no price.`} />
-              </div>
-            )}
+            {/* Every ladder shows it, in every mode, whether or not it holds anything yet. */}
+            <div className="flex items-center gap-2 flex-wrap px-2.5 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800 text-xs">
+              <span className="text-zinc-400 font-semibold flex items-center gap-1.5"
+                title="Positions this ladder holds right now: one per contract + side (a strangle or straddle counts as one). Armed levels and resting orders are not positions; they show on the ladder.">
+                <span className={`w-2 h-2 rounded-full ${openPositions > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-600'}`} />
+                Open positions:
+              </span>
+              <span className="font-mono font-bold text-zinc-100" aria-label="Open positions">{openPositions}</span>
+              <span className="w-px h-4 bg-zinc-800 shrink-0 mx-1" />
+              <PnlChip label="Total P&L" value={ladderPnl}
+                title={`This ladder's total P&L on ${BROKER_LABELS[broker]} · ${real ? 'REAL' : 'SIM'} — the same number as the Ladder P&L chip above and the MTM guard: trades closed today at their exit, open ones at the live price. '—' while an open leg has no price.`} />
+            </div>
             {hiddenPairs.length > 0 && (
               <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-amber-500/40 bg-amber-500/10 text-xs text-amber-300">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
