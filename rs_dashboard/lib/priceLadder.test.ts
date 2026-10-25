@@ -599,3 +599,17 @@ test('sessionFor (NSE/BSE): weekends and holidays are closed, a trading day is 0
   assert.equal(sessionFor('SENSEX', '2026-10-24').open, sessionFor('SENSEX', '2026-10-24').close);   // Saturday
   assert.deepEqual([sessionFor('NIFTY', '2026-10-27').open, sessionFor('NIFTY', '2026-10-27').close], [915, 1540]);   // Tuesday
 });
+
+test('atmStrikeOf / atmOffsetLabel: the ATM strike and each strike\'s distance from it in listed strikes', async () => {
+  const { atmStrikeOf, atmOffsetLabel } = await import('./priceLadder.ts');
+  const list = [22500, 22550, 22600, 22650, 22700];
+  assert.equal(atmStrikeOf(list, 22610), 22600);
+  assert.equal(atmStrikeOf(list, 22625), 22600);          // a tie goes to the lower strike
+  assert.equal(atmStrikeOf(list, 0), null);
+  assert.equal(atmStrikeOf([], 22600), null);
+  assert.equal(atmOffsetLabel(list, 22600, 22600), 'ATM');
+  assert.equal(atmOffsetLabel(list, 22600, 22700), 'ATM+2');
+  assert.equal(atmOffsetLabel(list, 22600, 22550), 'ATM-1');
+  assert.equal(atmOffsetLabel(list, null, 22550), null);
+  assert.equal(atmOffsetLabel(list, 22600, 99999), null);
+});

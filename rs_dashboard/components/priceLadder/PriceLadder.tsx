@@ -21,7 +21,7 @@ import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { chimeFor } from '@/lib/priceLadderChime';
 import {
-  MAX_LADDER_LOTS, isTradedStrike, paneOf, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
+  MAX_LADDER_LOTS, isTradedStrike, paneOf, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, atmStrikeOf, atmOffsetLabel, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
   type ClickType, type LadderZones, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
   type LadderContract,
 } from '@/lib/priceLadder';
@@ -235,6 +235,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
   const [strikes, setStrikes] = useState<number[]>([]);
+  // The spot / futures price the chain was read at: the ATM marker's fallback until the live axis price arrives.
+  const [chainSpot, setChainSpot] = useState(0);
   const [strike, setStrike] = useState<number | null>(null);
   // Ladder 1 starts on the ATM call, ladder 2 on the ATM put (the strike defaults to ATM once the chain loads).
   const [opt, setOpt] = useState<OptType>(second ? 'PE' : 'CE');
@@ -344,6 +346,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         if (oiShownRef.current) setOiRows({ key: `${underlying}|${expiry}`, rows: oiRowsFor(oc, n => isTradedStrike(underlying, n)), at: Date.now(), staleSince: null });
         // MCX chains can come back with spot 0 but the option month's futures price set: that is the right ATM base.
         const spot = Number(j.data?.spot) || Number(j.data?.future_price) || 0;
+        setChainSpot(spot);
         const step = STRIKE_STEP[underlying] ?? 50;
         setStrike(prev => {
           if (prev != null && list.includes(prev)) return prev;
@@ -637,6 +640,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const sessionDown = sessions[broker] === false;
   const spot = spotView?.spot ?? 0;
   const spotFreshNow = !!spotView?.fresh;
+  // ATM from the live axis price (the chain's own spot until it arrives), so every strike reads as its distance from ATM.
+  const atmStrike = atmStrikeOf(strikes, spotView?.spot || chainSpot);
   const optLtp = shownC?.ltp ?? 0;
   const ax = shownC?.axisDay;
   const indexQ: IndexQuote | null = !mcx ? topIndexQ : ax && spot > 0 ? {
@@ -1233,7 +1238,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               <div className="flex items-center justify-between gap-2"><span className="text-zinc-400 font-medium">Strike</span>
                 <div className="flex items-center gap-2">
                   <select aria-label="Strike" value={strike ?? ''} onChange={e => setStrike(Number(e.target.value))} className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono">
-                    {strikes.map(k => <option key={k} value={k}>{k}</option>)}
+                    {strikes.map(k => { const off = atmOffsetLabel(strikes, atmStrike, k); return <option key={k} value={k}>{off ? `${k}  ·  ${off}` : k}</option>; })}
                   </select>
                   {mode !== 'pair' && <Seg compact value={opt} options={['CE', 'PE'] as const} labels={{ CE: 'Call', PE: 'Put' }} onChange={setOpt} />}
                 </div>

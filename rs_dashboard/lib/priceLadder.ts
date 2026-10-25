@@ -542,6 +542,21 @@ export function ownNet(slices: LadderSlice[], securityId: string): { qty: number
   return { qty, avg: qty !== 0 ? cost / qty : null };
 }
 
+/** The listed strike nearest `spot` (the lower one on a tie), or null with no strikes / no price. `strikes` is ascending. */
+export function atmStrikeOf(strikes: readonly number[], spot: number): number | null {
+  if (!strikes.length || !(spot > 0)) return null;
+  return strikes.reduce((a, b) => (Math.abs(b - spot) < Math.abs(a - spot) ? b : a));
+}
+
+/** "ATM", "ATM+2", "ATM-1": how many LISTED strikes `strike` is from the ATM strike (null when either is not listed). */
+export function atmOffsetLabel(strikes: readonly number[], atm: number | null, strike: number): string | null {
+  if (atm == null) return null;
+  const i = strikes.indexOf(strike), a = strikes.indexOf(atm);
+  if (i < 0 || a < 0) return null;
+  const n = i - a;
+  return n === 0 ? 'ATM' : `ATM${n > 0 ? '+' : '-'}${Math.abs(n)}`;
+}
+
 /** Prices for `count` ladder rows centred on `center`, highest first, on a `tick` grid. */
 export function ladderRows(center: number, tick: number, count: number): number[] {
   if (!(center > 0) || !(tick > 0) || count < 1) return [];

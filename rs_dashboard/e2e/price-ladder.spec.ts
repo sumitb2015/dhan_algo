@@ -517,3 +517,13 @@ test('No "not tracking" warning when the watcher is ticking, or when nothing is 
   await expect(idle.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await expect(idle.getByText('Server not tracking your trades')).toHaveCount(0);
 });
+
+test('Strike choices carry their distance from ATM (ATM, ATM+1, ATM-2 …)', async ({ page }) => {
+  await install(page);
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  const strike = page.getByLabel('Strike');
+  await expect(strike.locator('option', { hasText: '23200' })).toHaveText(/23200\s+·\s+ATM$/);
+  await expect(strike.locator('option', { hasText: '23250' })).toHaveText(/ATM\+1$/);
+  await expect(strike.locator('option', { hasText: '23100' })).toHaveText(/ATM-2$/);
+});
