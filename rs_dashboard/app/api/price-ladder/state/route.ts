@@ -4,8 +4,8 @@ import { pairAction } from '@/lib/priceLadderPairActions';
 import { basketAction } from '@/lib/priceLadderBasketActions';
 import { isPairLive, lotsOnContract } from '@/lib/priceLadderPair';
 import {
-  readLadderState, updateLadderState, startPriceLadderLoop, loadPrices, placeFor, afterSend, cancelAtBroker,
-  brokerSessionOk, availableFunds, dhanSellMargin, withJob, commitIf, openedPatch, LADDER_UNDERLYINGS,
+  readLadderState, updateLadderState, startPriceLadderLoop, loadPrices, afterSend, cancelAtBroker,
+  brokerSessionOk, availableFunds, dhanSellMargin, withJob, commitIf, safePlace, openedPatch, LADDER_UNDERLYINGS,
 } from '@/lib/priceLadderServer';
 import {
   paneOf, sessionFor, spotKey, MAX_LADDER_LOTS, cleanBufferPct, stopLimitPrice, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, capLots, classifyClick, cleanBracket, istDay, istHhmm, levelSane, pushEvent, realArmed,
@@ -147,7 +147,7 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   if (b.mode === 'real') {
     // A BUY stop can fill above its trigger: check funds at the worst case — an SL-limit's limit, an SL-M's trigger + 5%
     // (it fills at market). XY entries fire at market from the live premium.
-    const price = b.kind === 'xy' ? ltp
+    const price = b.kind === 'xy' ? (b.side === 'BUY' ? snapToStep(ltp * 1.05, OPTION_TICK) : ltp)
       : b.side === 'BUY' && verdict.kind === 'stop' ? (stopLimit ?? snapToStep(level * 1.05, OPTION_TICK))
         : level;
     if (!(price > 0)) return bad('No live option price to check margin against');
@@ -197,7 +197,7 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   // REAL: checkpoint before the order (Triple Straddle rule) — if this write fails nothing is sent.
   await updateLadderState(withPlain({ ...plain, state: 'placing', sentAt: now }));
   if (capped) return cappedReply();
-  const r = await withJob(plain.id, () => placeFor(plain, b.side, qty, true, verdict.kind === 'limit'
+  const r = await withJob(plain.id, () => safePlace(plain, b.side, qty, true, verdict.kind === 'limit'
     ? { type: 'LIMIT', price: level }
     : { type: 'SL', trigger: level, ...(stopLimit ? { limit: stopLimit } : {}) }));
   const s = await commitIf(plain.id, 'placing', st => pushEvent(afterSend(st, plain.id, r, 'entry'), ev('info', `${kindLabel} ${what} ${at}: ${r.status}`, plain.id)));
@@ -268,7 +268,7 @@ async function marketOrder(b: Record<string, unknown>): Promise<NextResponse> {
   // REAL: checkpoint before the order; the watcher settles its fill like any entry.
   await updateLadderState(withSlice);
   if (capped) return bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
-  const r = await withJob(child.id, () => placeFor(child, side, qty, true));
+  const r = await withJob(child.id, () => safePlace(child, side, qty, true));
   const s = await commitIf(child.id, 'placing', st => pushEvent(afterSend(st, child.id, r, 'entry'), ev('info', `${what}: ${r.status}`, child.id)));
   if (r.status === 'placed') return NextResponse.json({ success: true, data: { id: child.id, state: s } });
   if (r.status === 'unknown') return NextResponse.json({ success: false, unknown: true, error: r.error, data: { state: s } }, { status: 504 });
@@ -310,7 +310,7 @@ async function addLot(id: string): Promise<NextResponse> {
   if (!(ltp > 0)) return bad('No live option price yet');
   const qty = p.contract.lotSize;
   if (p.mode === 'real') {
-    const blocked = await realOpenBlocked(p.broker, p.contract, p.side, qty, p.product, ltp);
+    const blocked = await realOpenBlocked(p.broker, p.contract, p.side, qty, p.product, p.side === 'BUY' ? snapToStep(ltp * 1.05, OPTION_TICK) : ltp);
     if (blocked) return bad(blocked);
   }
   const child: LadderSlice = {
@@ -320,14 +320,24 @@ async function addLot(id: string): Promise<NextResponse> {
     ...(p.bracket ? { bracket: p.bracket, tgtY: p.tgtY, slY: p.slY, slY0: p.slY0, trailFrom: p.trailFrom, peakY: p.peakY } : {}),
     note: `Added to ${p.id}`, ...(p.pane ? { pane: p.pane } : {}),
   };
+  let capped = false;
   const what = `${p.mode === 'sim' ? 'SIM ' : ''}+1 lot ${p.side} ${p.contract.strike}${p.contract.opt}`;
   if (p.mode === 'sim') {
-    const s = await updateLadderState(st => openedPatch(pushEvent({ ...st, slices: [...st.slices, child] }, ev('info', what, child.id)), child, qty, ltp, now));
+    const s = await updateLadderState(st => {
+      // Re-checked inside the lock: two + clicks in flight must not both pass the read above.
+      if (lotsHeld(st, child) + 1 > MAX_LADDER_LOTS) { capped = true; return st; }
+      return openedPatch(pushEvent({ ...st, slices: [...st.slices, child] }, ev('info', what, child.id)), child, qty, ltp, now);
+    });
+    if (capped) return bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
     return NextResponse.json({ success: true, data: { id: child.id, state: s } });
   }
   // REAL: checkpoint before the order; the watcher settles its fill like any entry.
-  await updateLadderState(st => ({ ...st, slices: [...st.slices, child] }));
-  const r = await withJob(child.id, () => placeFor(child, child.side, qty, true));
+  await updateLadderState(st => {
+    if (lotsHeld(st, child) + 1 > MAX_LADDER_LOTS) { capped = true; return st; }
+    return { ...st, slices: [...st.slices, child] };
+  });
+  if (capped) return bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
+  const r = await withJob(child.id, () => safePlace(child, child.side, qty, true));
   const s = await commitIf(child.id, 'placing', st => pushEvent(afterSend(st, child.id, r, 'entry'), ev('info', `${what} at MARKET: ${r.status}`, child.id)));
   if (r.status === 'placed') return NextResponse.json({ success: true, data: { id: child.id, state: s } });
   if (r.status === 'unknown') return NextResponse.json({ success: false, unknown: true, error: r.error, data: { state: s } }, { status: 504 });
@@ -450,7 +460,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         }
         if (x.state === 'working' && x.mode === 'real' && x.orderId) {
           // The watcher settles it from the order book once the broker confirms the cancel.
-          await cancelAtBroker(x.broker, x.orderId);
+          try { await cancelAtBroker(x.broker, x.orderId); } catch (err) {
+            return bad(`${BROKER_NAME[x.broker]} did not confirm the cancel: ${String((err as Error).message ?? err)} — check Orders before retrying`, 502);
+          }
           const s = await updateLadderState(st => pushEvent(st, ev('info', `Cancel sent for order ${x.orderId}`, id)));
           return NextResponse.json({ success: true, data: { state: s } });
         }
@@ -499,10 +511,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           const blocked = await realOpenBlocked(x0.broker, x0.contract, x0.side, lots * x0.contract.lotSize, x0.product, ltp);
           if (blocked) return bad(blocked);
         }
+        let capped = false;
         const r = await guarded(id, y => y.state === 'armed' || (y.state === 'working' && y.mode === 'sim'), st => {
           const x = st.slices.find(y => y.id === id)!;
+          // Re-checked inside the lock: two + clicks in flight must not both pass the read above.
+          if (x.mode === 'real' && lots > x.lots && lotsHeld(st, x, x.id) + lots > MAX_LADDER_LOTS) { capped = true; return st; }
           return pushEvent(patchSlice(st, id, { lots, qty: lots * x.contract.lotSize }), ev('info', `Lots changed to ${lots}`, id));
         });
+        if (capped) return bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
         if (!r.applied) return bad('Only an armed level or a SIM resting order can change its lots — cancel and place it again', 409);
         return NextResponse.json({ success: true, data: { state: r.state } });
       }

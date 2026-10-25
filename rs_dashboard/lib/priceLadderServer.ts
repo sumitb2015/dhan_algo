@@ -815,7 +815,7 @@ async function commitPair(id: string, expect: LadderPair['state'], apply: (p: La
 }
 
 /** A send that never throws: an exception becomes an outcome (see outcomeOnThrow). */
-const safePlace = (...a: Parameters<typeof placeFor>): Promise<PlaceOutcome> =>
+export const safePlace = (...a: Parameters<typeof placeFor>): Promise<PlaceOutcome> =>
   placeFor(...a).catch((err: unknown) => outcomeOnThrow(a[3], err));
 
 async function runPairJob(s: LadderState, j: PairJob, prices: PriceView, ctx: JobCtx): Promise<void> {
