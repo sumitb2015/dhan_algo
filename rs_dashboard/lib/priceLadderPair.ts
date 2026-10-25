@@ -831,3 +831,48 @@ export function splitOneLot(p: LadderPair, newId: string, now: number): { parent
     child: { ...p, id: newId, lots: 1, qty: lot, legs: { ce: legOne(p.legs.ce), pe: legOne(p.legs.pe) }, joinedTo: p.id, bookedPnl: undefined, exitWanted: 'Manual exit (−1 lot)', createdAt: now, updatedAt: now },
   };
 }
+
+/**
+ * Exit a share of the open pairs on one pair ladder (the 25 / 50 / 75 / Exit buttons of its Net Pos panel). `ids` are the
+ * pairs on screen; each brings the lots joined to it ('+1 lot' children). 100 = every one of them exits both legs at market
+ * (a broken or rolling pair too: nothing else would close it). Below 100 only whole OPEN pairs count: `pct` of the total
+ * lots, rounded down, goes oldest first — a pair larger than what is left sheds lots one at a time (splitOneLot), so the
+ * rest keeps its levels. Error text when nothing can go. Pure: the route writes the result under the ledger lock.
+ */
+export function applyPairShare(st: LadderState, ids: readonly string[], pct: number, now: number, newId: () => string): { next: LadderState; lots: number } | string {
+  if (![25, 50, 75, 100].includes(pct)) return 'pct must be 25, 50, 75 or 100';
+  const want = new Set<string>();
+  for (const id of ids) {
+    const p = (st.pairs ?? []).find(y => y.id === id);
+    if (p) for (const y of joinedGroup(st, p)) want.add(y.id);
+  }
+  const usable = (p: LadderPair) => !p.exitWanted && (p.state === 'open' || (pct === 100 && (p.state === 'broken' || p.state === 'rolling')));
+  const cands = (st.pairs ?? []).filter(p => want.has(p.id) && usable(p)).sort((a, b) => (a.openedAt ?? 0) - (b.openedAt ?? 0));
+  if (!cands.length) return 'Nothing is open to exit';
+  const total = cands.reduce((a, p) => a + p.lots, 0);
+  let next = st;
+  if (pct === 100) {
+    for (const p of cands) next = patchPair(next, p.id, { exitWanted: 'Manual exit' }, now);
+    return { next, lots: total };
+  }
+  let left = Math.floor((total * pct) / 100);
+  if (left < 1) return `${pct}% of ${total} lot(s) is less than one lot — pick a larger share`;
+  const out = left;
+  for (const p of cands) {
+    if (left <= 0) break;
+    if (left >= p.lots) {
+      next = patchPair(next, p.id, { exitWanted: `Manual exit (${pct}%)` }, now);
+      left -= p.lots;
+      continue;
+    }
+    for (let i = 0; i < left; i++) {
+      const cur = (next.pairs ?? []).find(y => y.id === p.id)!;
+      const sp = splitOneLot(cur, newId(), now);
+      if (typeof sp === 'string') return sp;
+      next = patchPair(next, p.id, sp.parent, now);
+      if (sp.child) next = { ...next, pairs: [...(next.pairs ?? []), sp.child] };
+    }
+    left = 0;
+  }
+  return { next, lots: out };
+}

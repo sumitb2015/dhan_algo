@@ -694,3 +694,38 @@ test('openPositionCount and scopeMtm: XY and Plain slices and Pair pairs are cou
   assert.equal(scopeMtm(st([xy], []), sc, ltps), 650);
   assert.equal(scopeMtm(st([], [pair]), sc, ltps), -1950);
 });
+
+test('applyPairShare: 100% exits every open pair; a share sheds whole lots oldest-first, rounded down', async () => {
+  const { applyPairShare } = await import('./priceLadderPair.ts');
+  const c = (id: string, opt: 'CE' | 'PE') => ({ underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt, securityId: id, lotSize: 65, exchangeSegment: 'NSE_FNO' });
+  const pair = (id: string, lots: number, o: object = {}) => ({
+    id, broker: 'dhan', mode: 'sim', structure: 'straddle', side: 'SELL', lots, qty: lots * 65, product: 'MIS', state: 'open', createdAt: 1, updatedAt: 1, openedAt: Number(id.slice(1)),
+    legs: { ce: { contract: c('111', 'CE'), avg: 100, held: lots * 65, filledQty: lots * 65 }, pe: { contract: c('222', 'PE'), avg: 90, held: lots * 65, filledQty: lots * 65 } }, ...o,
+  });
+  const st = (pairs: object[]) => ({ date: 'd', events: [], slices: [], pairs }) as never;
+  let n = 0; const newId = () => `n${++n}`;
+  // 100%: both pairs are marked for a manual exit
+  const all = applyPairShare(st([pair('p1', 2), pair('p2', 1)]), ['p1', 'p2'], 100, 5, newId) as { next: { pairs: { id: string; exitWanted?: string }[] }; lots: number };
+  assert.equal(all.lots, 3);
+  assert.deepEqual(all.next.pairs.map(p => p.exitWanted), ['Manual exit', 'Manual exit']);
+  // 50% of 3 lots = 1 lot: shed from the oldest (p1, 2 lots -> 1 left + a 1-lot child that exits)
+  const half = applyPairShare(st([pair('p1', 2), pair('p2', 1)]), ['p1', 'p2'], 50, 5, newId) as { next: { pairs: { id: string; lots: number; exitWanted?: string }[] }; lots: number };
+  assert.equal(half.lots, 1);
+  const byId = Object.fromEntries(half.next.pairs.map(p => [p.id, p]));
+  assert.equal(byId.p1.lots, 1);
+  assert.equal(byId.p1.exitWanted, undefined);
+  assert.equal(byId.p2.exitWanted, undefined);
+  const child = half.next.pairs.find(p => p.id.startsWith('n'))!;
+  assert.deepEqual([child.lots, child.exitWanted], [1, 'Manual exit (−1 lot)']);
+  // 75% of 4 lots = 3: the whole 2-lot pair goes, 1 lot is shed from the next
+  const q = applyPairShare(st([pair('p1', 2), pair('p2', 2)]), ['p1', 'p2'], 75, 5, newId) as { next: { pairs: { id: string; lots: number; exitWanted?: string }[] }; lots: number };
+  assert.equal(q.lots, 3);
+  // a share under one lot, a flat book, a bad pct
+  assert.match(applyPairShare(st([pair('p1', 1)]), ['p1'], 25, 5, newId) as string, /less than one lot/);
+  assert.match(applyPairShare(st([pair('p1', 1, { state: 'closed' })]), ['p1'], 100, 5, newId) as string, /Nothing is open/);
+  assert.match(applyPairShare(st([pair('p1', 1)]), ['p1'], 30, 5, newId) as string, /pct must be/);
+  // a pair already exiting is not exited twice; a broken pair only goes on 100%
+  assert.match(applyPairShare(st([pair('p1', 2, { exitWanted: 'Manual exit' })]), ['p1'], 100, 5, newId) as string, /Nothing is open/);
+  assert.match(applyPairShare(st([pair('p1', 2, { state: 'broken' })]), ['p1'], 50, 5, newId) as string, /Nothing is open/);
+  assert.equal((applyPairShare(st([pair('p1', 2, { state: 'broken' })]), ['p1'], 100, 5, newId) as { lots: number }).lots, 2);
+});

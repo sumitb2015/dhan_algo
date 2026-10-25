@@ -632,3 +632,17 @@ test('Pair mode REAL: the first Buy / Sell Market asks before sending both legs'
   await expect.poll(() => seen.posts.filter(b => b.op === 'market').length).toBe(1);
   expect(seen.posts.find(b => b.op === 'market')).toMatchObject({ mode: 'real', side: 'SELL', structure: 'straddle' });
 });
+
+test('Pair ladder has the Net Pos / P&L / Avg Price panel with 25 / 50 / 75 / Exit for the pairs on its legs', async ({ page }) => {
+  const seen = await install(page, { openAll: true });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Pair', exact: true }).click();
+  await expect(page.getByLabel('Pair net position')).toHaveText('-1 lot');                // one short 1-lot strangle on these legs
+  await expect(page.getByText('190.00', { exact: true })).toBeVisible();                  // combined entry 100 + 90
+  await expect(page.getByRole('button', { name: /^25%$/ })).toBeDisabled();               // 25% of 1 lot is under a lot
+  await page.getByRole('button', { name: /^Exit \(1L\)$/ }).click();
+  await expect.poll(() => seen.posts.filter(b => b.op === 'exitShare').length).toBe(1);
+  expect(seen.posts.find(b => b.op === 'exitShare')).toMatchObject({ action: 'pair', op: 'exitShare', ids: ['pp1'], pct: 100 });
+  expect(seen.blocked).toEqual([]);
+});

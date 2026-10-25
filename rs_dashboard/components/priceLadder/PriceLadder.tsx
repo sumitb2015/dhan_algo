@@ -13,7 +13,7 @@ import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
 import { FOCUS_RING } from '@/components/Scalper';
 import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
-import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
+import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, sumPairPnl, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
 import { guardKey, scopeMtm } from '@/lib/priceLadderGuard';
@@ -714,6 +714,19 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const ladderPnl = useMemo(() => (data ? scopeMtm(data.state, guardScope, data.ltps ?? {}) : null), [data, guardScope]);
   const myGuardKey = guardKey(broker, pageMode, ladderId);
 
+  // Pair mode's Net Pos panel: the pairs on the two legs on screen (this broker and mode). Net is in lots (a short pair is
+  // negative), P&L includes the ones closed today, the average is the combined entry premium weighted by lots.
+  const pairHere = useMemo(() => (pairView ? pairs.filter(p => p.broker === broker && p.mode === pageMode
+    && p.legs.ce.contract.securityId === pairView.ce.securityId && p.legs.pe.contract.securityId === pairView.pe.securityId) : []), [pairs, pairView, broker, pageMode]);
+  const pairPnl = useMemo(() => sumPairPnl(pairHere, () => true, data?.ltps ?? {}), [pairHere, data?.ltps]);
+  const pairHeldNow = myPairs.filter(p => p.state === 'open' || p.state === 'broken' || p.state === 'rolling' || p.state === 'exiting');
+  const pairNetLots = pairHeldNow.reduce((a, p) => a + (p.side === 'SELL' ? -1 : 1) * p.lots, 0);
+  const pairLotsHeld = pairHeldNow.reduce((a, p) => a + p.lots, 0);
+  const pairAvgEntry = pairLotsHeld > 0
+    ? pairHeldNow.reduce((a, p) => a + p.lots * (p.entryY ?? ((p.legs.ce.avg ?? 0) + (p.legs.pe.avg ?? 0))), 0) / pairLotsHeld : null;
+  const pairExitable = myPairs.filter(p => (p.state === 'open' || p.state === 'broken' || p.state === 'rolling') && !p.exitWanted);
+  const pairOpenLots = myPairs.filter(p => p.state === 'open' && !p.exitWanted).reduce((a, p) => a + p.lots, 0);
+
   const liveArmed = !!data?.liveArmed;
   const realBlocked = real && !liveArmed;
 
@@ -1212,6 +1225,26 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                     {p === 100 ? `Exit (${net.qty})` : `${p}%`}
                   </button>
                 ))}
+              </div>
+            </div>}
+            {mode === 'pair' && <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 grid grid-cols-2 gap-y-0.5 text-xs">
+              <span className="text-zinc-400 font-medium">Net Pos <span className="text-zinc-500">({pageMode.toUpperCase()})</span></span><span className="font-mono text-right text-zinc-100" aria-label="Pair net position">{pairNetLots} lot{Math.abs(pairNetLots) === 1 ? '' : 's'}</span>
+              <span className="text-zinc-400 font-medium">P&amp;L</span><span className={`font-mono text-right ${pnlClass(pairPnl)}`}>{fmtMoney(pairPnl)}</span>
+              <span className="text-zinc-400 font-medium" title="Combined CE + PE entry premium, weighted by lots">Avg Price</span><span className="font-mono text-right text-zinc-100">{pairAvgEntry ? pairAvgEntry.toFixed(2) : '—'}</span>
+              <div className="col-span-2 flex gap-1 mt-1.5">
+                {[25, 50, 75, 100].map(p => {
+                  const none = pairExitable.length === 0 || (p < 100 && Math.floor((pairOpenLots * p) / 100) < 1);
+                  return (
+                    <button
+                      key={p} type="button" disabled={busy || none}
+                      title={p === 100 ? 'Exit every open pair on these legs, both legs at market' : `Exit ${p}% of the open lots (whole lots, rounded down), both legs at market`}
+                      onClick={() => void post({ action: 'pair', op: 'exitShare', ids: pairExitable.map(y => y.id), pct: p })}
+                      className="flex-1 px-1 py-0.5 rounded text-xs font-semibold border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40"
+                    >
+                      {p === 100 ? `Exit (${pairLotsHeld}L)` : `${p}%`}
+                    </button>
+                  );
+                })}
               </div>
             </div>}
             </div>

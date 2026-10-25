@@ -10,7 +10,7 @@ import {
   type ClickType, type LadderBroker, type LadderContract, type LadderProduct, type LadderSide, type LadderState, type LadderZones,
 } from '@/lib/priceLadder';
 import {
-  blendExitAvg, cleanLegSlPct, fillLeg, joinedGroup, legHeld, lotsOnContract, splitOneLot, pairBias, pairCombined, pairLevelSane, pairName, patchPair, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS,
+  applyPairShare, blendExitAvg, cleanLegSlPct, fillLeg, joinedGroup, legHeld, lotsOnContract, splitOneLot, pairBias, pairCombined, pairLevelSane, pairName, patchPair, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS,
   LEG_KEYS, type LadderPair, type PairLeg, type PairLegKey, type PairStructure,
 } from '@/lib/priceLadderPair';
 
@@ -534,6 +534,20 @@ export async function pairAction(b: Record<string, unknown>): Promise<NextRespon
       if (err) return bad(err, 409);
       if (!r.applied) return bad('That pair is not open', 409);
       return ok(r.state);
+    }
+    case 'exitShare': {
+      // The 25 / 50 / 75 / Exit buttons of the Net Pos panel: a share of the pairs on screen exits at market.
+      const ids = Array.isArray(b.ids) ? b.ids.map(String).slice(0, 50) : [];
+      if (!ids.length) return bad('ids required');
+      let err = '', lots = 0;
+      const s = await updateLadderState(st => {
+        const r = applyPairShare(st, ids, Number(b.pct), Date.now(), () => newLadderId('pp'));
+        if (typeof r === 'string') { err = r; return st; }
+        lots = r.lots;
+        return pushEvent(r.next, ev('info', `Pair exit ${Number(b.pct)}% requested (${r.lots} lot(s))`, ids[0]));
+      });
+      if (err) return bad(err, 409);
+      return ok(s, { lots });
     }
     case 'legsl': {
       // Set (or 0 = clear) an armed / open pair's per-leg stop, on every pair sharing its exits.
