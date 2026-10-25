@@ -307,7 +307,7 @@ test('Zerodha: the broker picker offers Zerodha and new ladder orders go to it',
   await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
   await page.getByLabel('Broker for new orders').selectOption('zerodha');
-  await expect(page.getByText(/SIM · Zerodha/)).toBeVisible();
+  await expect(page.locator('span.ml-auto').filter({ hasText: 'Zerodha' })).toBeVisible();
   await page.getByRole('button', { name: 'Buy at 23180' }).click();
   await expect.poll(() => seen.posts.filter(b => b.action === 'arm').length).toBe(1);
   expect(seen.posts[0]).toMatchObject({ broker: 'zerodha', mode: 'sim', side: 'BUY', level: 23180 });
@@ -361,7 +361,9 @@ test('Two ladders by default: ladder 1 is the call, ladder 2 the put, each with 
   await expect(page.getByRole('button', { name: 'Put', exact: true, pressed: true })).toHaveCount(1);
   await expect(page.getByRole('button', { name: 'Call', exact: true })).toHaveCount(2);
   // Page-wide header controls appear once, not once per ladder
-  for (const name of [/Arm LIVE/, /Order book/, /Trade book/, /^Positions/]) await expect(page.getByRole('button', { name })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: /Arm LIVE/ })).toHaveCount(1);
+  // The books sit under each ladder's header (the account chips stay once)
+  for (const name of [/Order book/, /Trade book/, /^Positions/]) await expect(page.getByRole('button', { name })).toHaveCount(2);
   await expect(page.locator('.sticky').getByText('Settings', { exact: true })).toHaveCount(1);
   await expect(page.getByText(/^DATA:/)).toHaveCount(1);
   // Side by side, the two ladders start at the same height (headers held to the taller one)
@@ -415,7 +417,7 @@ for (const broker of ['dhan', 'kotak', 'zerodha'] as const) {
       await gotoSingle(page);
       await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
       await page.getByLabel('Broker for new orders').selectOption(broker);
-      await expect(page.getByText(new RegExp(`SIM · ${Name}`))).toBeVisible();
+      await expect(page.locator('span.ml-auto').filter({ hasText: Name })).toBeVisible();   // the toolbar names the account (SIM is in the header)
       await page.getByRole('button', { name: 'Buy at 23180' }).click();
       await expect.poll(() => seen.posts.filter(b => b.action === 'arm').length).toBe(1);
       expect(seen.posts[0]).toMatchObject({ kind: 'xy', broker, mode: 'sim', side: 'BUY', level: 23180 });
@@ -469,18 +471,18 @@ for (const broker of ['dhan', 'kotak', 'zerodha'] as const) {
   });
 }
 
-test('Two ladders on different brokers: each shows its own broker account chip and books; on the same broker they are shown once', async ({ page }) => {
+test('Two ladders on different brokers: each shows its own broker account chip; on the same broker the chip is shown once (both ladders keep their own books)', async ({ page }) => {
   await install(page);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/price-ladder');
   await expect(page.getByLabel('Expiry').nth(1)).toHaveValue('2026-10-27');
-  await expect(page.getByRole('button', { name: /^Positions/ })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: /^Positions/ })).toHaveCount(2);
   await page.getByLabel('Broker for new orders').nth(1).selectOption('kotak');
   await expect(page.getByRole('button', { name: /^Positions/ })).toHaveCount(2);
   await expect(page.getByText('Dhan P&L')).toHaveCount(1);
   await expect(page.getByText('Kotak P&L')).toHaveCount(1);
   await page.getByLabel('Broker for new orders').nth(1).selectOption('dhan');
-  await expect(page.getByRole('button', { name: /^Positions/ })).toHaveCount(1);
+  await expect(page.getByRole('button', { name: /^Positions/ })).toHaveCount(2);
 });
 
 test('The stale-price warning shows only while the market is trading, not after hours', async ({ page }) => {
@@ -670,9 +672,7 @@ test('Pair ladder has the Net Pos / P&L / Avg Price panel with 25 / 50 / 75 / Ex
   await page.getByRole('button', { name: 'Pair', exact: true }).click();
   await expect(page.getByLabel('Pair net position')).toHaveText('-1 lot');                // one short 1-lot strangle on these legs
   await expect(page.getByText('190.00', { exact: true })).toBeVisible();                  // combined entry 100 + 90
-  await page.getByRole('button', { name: 'Partial exit' }).click();
-  await expect(page.getByRole('menuitem', { name: 'Exit 25%' })).toBeDisabled();           // 25% of 1 lot is under a lot
-  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Partial exit' })).toBeDisabled();         // 25/50/75% of 1 lot are all under a lot: nothing to part-exit
   await page.getByRole('button', { name: /^Exit \(1L\)$/ }).click();
   await expect.poll(() => seen.posts.filter(b => b.op === 'exitShare').length).toBe(1);
   expect(seen.posts.find(b => b.op === 'exitShare')).toMatchObject({ action: 'pair', op: 'exitShare', ids: ['pp1'], pct: 100 });

@@ -1159,10 +1159,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Why a click on the ladder would do nothing, in the order the checks run; shown as a chip so a blocked cursor is never unexplained.
   const placeBlockReason = !placeDisabled || busy ? null
     : !brokerLoaded ? 'loading the broker account'
-    : realBlocked ? 'REAL mode is not armed for today (arm LIVE · REAL MONEY, or switch to SIM)'
-    : real && sessionDown ? `${BROKER_LABELS[broker]} session is not logged in`
+    : realBlocked || (real && sessionDown) ? null   // each already has its own banner above
     : !strike || !(refPrice > 0) ? (mode === 'xy' ? `waiting for the ${mcx ? 'futures' : 'index'} price and the option chain` : 'waiting for the option chain and live premiums')
-    : mode === 'xy' && stale ? `${axisName} ${mcx ? 'price' : 'spot'} is not updating${inSession ? '' : ' (market closed?)'}; levels are paused until it moves`
+    : mode === 'xy' && stale ? (inSession ? null : `${axisName} ${mcx ? 'price' : 'spot'} is not updating (market closed?); levels are paused until it moves`)
     : mode === 'pair' && !pairView ? 'waiting for both legs of the pair'
     : mode === 'basket' && !basketView?.a ? 'waiting for a live price on every basket leg'
     : null;
