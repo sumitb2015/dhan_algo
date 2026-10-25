@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { buildLadderView, resolveContract } from '@/lib/priceLadderView';
 import { pairAction } from '@/lib/priceLadderPairActions';
+import { basketAction } from '@/lib/priceLadderBasketActions';
 import { isPairLive, lotsOnContract } from '@/lib/priceLadderPair';
 import {
   readLadderState, updateLadderState, startPriceLadderLoop, loadPrices, placeFor, afterSend, cancelAtBroker,
@@ -14,6 +15,7 @@ import {
 } from '@/lib/priceLadder';
 import { carryRuntime, cleanGuard, guardKey, guardLabel } from '@/lib/priceLadderGuard';
 import { setCutoffsFromBody } from '@/lib/priceLadderCutoff';
+import { isBasketLive } from '@/lib/priceLadderBasket';
 
 // The Price Ladder's ledger (debug/price_ladder_state.json) and its actions. Real-money endpoint: every check that can
 // refuse an order runs here, server-side — lot cap, level sanity, the contract resolved from the brokers' own masters
@@ -387,6 +389,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       case 'market':
         return await marketOrder(body);
 
+      case 'basket':
+        // Basket mode (prebuilt multi-leg strategies on their net premium): SIM only in release 1.
+        return await basketAction(body);
+
       case 'pair':
         // Pair mode (straddle / strangle on the combined premium): SIM only for now.
         return await pairAction(body);
@@ -665,7 +671,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // `pane`: only that ladder's finished rows (two ladders open); none = every finished row.
         const pane = body.pane === 1 || body.pane === 2 ? body.pane : null;
         const keep = (x: { pane?: number }) => pane != null && paneOf(x) !== pane;
-        const s = await updateLadderState(st => ({ ...st, slices: st.slices.filter(x => !TERMINAL.has(x.state) || keep(x)), ...(st.pairs ? { pairs: st.pairs.filter(p => isPairLive(p) || keep(p)) } : {}) }));
+        const s = await updateLadderState(st => ({ ...st, slices: st.slices.filter(x => !TERMINAL.has(x.state) || keep(x)), ...(st.pairs ? { pairs: st.pairs.filter(p => isPairLive(p) || keep(p)) } : {}), ...(st.baskets ? { baskets: st.baskets.filter(b => isBasketLive(b) || keep(b)) } : {}) }));
         return NextResponse.json({ success: true, data: { state: s } });
       }
 

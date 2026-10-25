@@ -1,5 +1,6 @@
 import { patchSlice, pushEvent, ev, sumSlicePnl, sliceNowPnl, paneOf, type LadderBroker, type LadderState } from './priceLadder.ts';
 import { isPairLive, patchPair, sumPairPnl, pairNowPnl } from './priceLadderPair.ts';
+import { isBasketLive, patchBasket, sumBasketPnl, basketNowPnl } from './priceLadderBasket.ts';
 
 // The Price Ladder's MTM guard: one per ladder pane + broker + SIM/REAL mode, over the positions THAT ladder placed
 // (slices and pairs tagged with its pane; untagged = ladder 1, as in the tables). The two ladders never see or exit
@@ -113,19 +114,22 @@ export function evalGuard(g: LadderGuard, mtm: number | null): { guard: LadderGu
 /** The scope's MTM: slices + pairs of this ladder, broker and mode. Null when nothing counts, or an open leg has no price. */
 export function scopeMtm(s: LadderState, sc: GuardScope, ltps: Record<string, number>): number | null {
   const pickS = (x: { broker: LadderBroker; mode: 'sim' | 'real'; pane?: number }) => inScope(x, sc);
-  const slices = s.slices, pairs = s.pairs ?? [];
+  const slices = s.slices, pairs = s.pairs ?? [], baskets = s.baskets ?? [];
   const hasS = slices.some(x => pickS(x) && sliceNowPnl(x, ltps[x.contract.securityId]) !== undefined);
   const hasP = pairs.some(p => pickS(p) && pairNowPnl(p, ltps) !== undefined);
-  if (!hasS && !hasP) return null;
+  const hasB = baskets.some(k => pickS(k) && basketNowPnl(k, ltps) !== undefined);
+  if (!hasS && !hasP && !hasB) return null;
   const a = hasS ? sumSlicePnl(slices, pickS, x => ltps[x.contract.securityId]) : 0;
   const b = hasP ? sumPairPnl(pairs, pickS, ltps) : 0;
-  return a == null || b == null ? null : a + b;
+  const k = hasB ? sumBasketPnl(baskets, pickS, ltps) : 0;
+  return a == null || b == null || k == null ? null : a + b + k;
 }
 
 /** Anything of this scope that holds a position or may become one (an unresolved UNKNOWN is the user's to settle). */
 function scopeLive(s: LadderState, sc: GuardScope): boolean {
   return s.slices.some(x => inScope(x, sc) && (x.state === 'open' || x.state === 'exiting' || x.state === 'placing' || (x.state === 'working' && (x.mode === 'real' || x.filledQty))))
-    || (s.pairs ?? []).some(p => inScope(p, sc) && (p.state === 'open' || p.state === 'broken' || p.state === 'rolling' || p.state === 'exiting' || p.state === 'placing'));
+    || (s.pairs ?? []).some(p => inScope(p, sc) && (p.state === 'open' || p.state === 'broken' || p.state === 'rolling' || p.state === 'exiting' || p.state === 'placing'))
+    || (s.baskets ?? []).some(b => inScope(b, sc) && (b.state === 'open' || b.state === 'exiting' || b.state === 'placing'));
 }
 
 /** A short (SELL) slice or pair of this scope that still holds, or is closing. */
@@ -168,6 +172,11 @@ export function applyGuards(s: LadderState, ltps: Record<string, number>, now: n
       if (!inScope(p, sc) || !isPairLive(p)) continue;
       if (p.state === 'armed') next = patchPair(next, p.id, { state: 'cancelled', note: 'Cancelled by the MTM guard' });
       else if ((p.state === 'open' || p.state === 'broken' || p.state === 'rolling') && !p.exitWanted && (!shortsLeft || p.side === 'SELL')) next = patchPair(next, p.id, { exitWanted: r.reason });
+    }
+    for (const k of next.baskets ?? []) {
+      if (!inScope(k, sc) || !isBasketLive(k)) continue;
+      if (k.state === 'armed') next = patchBasket(next, k.id, { state: 'cancelled', note: 'Cancelled by the MTM guard' });
+      else if (k.state === 'open' && !k.exitWanted) next = patchBasket(next, k.id, { exitWanted: r.reason });
     }
     const first = !g.tripped;
     if (first) {

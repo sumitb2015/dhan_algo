@@ -5,6 +5,7 @@ import { ChevronDown, ChevronUp, Minus, Plus, X } from 'lucide-react';
 import { oiAtRow, barPct, oiChangePct, compactOi, type OiStrike } from '@/lib/priceLadderOi';
 import { bias, bracketLevels, ladderRows, rowPnl, snapToStep, type LadderSide, type LadderSlice, type LadderZones } from '@/lib/priceLadder';
 import { pairBias, type LadderPair } from '@/lib/priceLadderPair';
+import type { LadderBasket } from '@/lib/priceLadderBasket';
 
 /**
  * One order on the ladder, drawn as OptionX draws it: in the Buy or Sell column of its price row, as
@@ -145,6 +146,39 @@ export function pairWidgetsFor(pairs: LadderPair[]): LadderWidget[] {
     }
   }
   return [...out, ...merged.values()];
+}
+
+/**
+ * Widgets for the baskets on screen, on the net-premium axis: an armed entry (× cancels, drag moves) with its planned
+ * target / SL, and an open basket's position plus target / SL (drag; a trailing SL shows − / +). Lots are changed with the
+ * 25 / 50 / 75 / Exit buttons, so no + / − on the widgets.
+ */
+export function basketWidgetsFor(baskets: LadderBasket[]): LadderWidget[] {
+  const out: LadderWidget[] = [];
+  for (const b of baskets) {
+    const lotSize = b.legs[0].contract.lotSize;
+    const mult = b.legs[0].contract.mult;
+    const common = { qty: b.lots * lotSize, lots: b.lots, ids: [b.id], ...(mult ? { mult } : {}) };
+    const exitCol = opposite(b.side);
+    const trail = b.bracket?.trailPts ? { trail: b.bracket.trailPts } : {};
+    const slLabel = b.bracket?.trailPts ? 'Trailing SL' : 'SL';
+    if (b.state === 'armed' && b.entryLevel) {
+      out.push({ ...common, key: `be|${b.id}`, price: b.entryLevel, column: b.side, kind: 'entry', label: b.orderType === 'SL' ? 'Basket breakout entry' : 'Basket entry', cancellable: true, drag: 'entry' });
+      if (b.bracket) {
+        const lv = bracketLevels(pairBias(b.side), b.entryLevel, b.bracket);
+        if (lv.tgtY != null) out.push({ ...common, key: `bt|${b.id}`, price: lv.tgtY, column: exitCol, kind: 'tgt', label: 'Target', planned: true, drag: 'tgt' });
+        out.push({ ...common, key: `bs|${b.id}`, price: lv.slY, column: exitCol, kind: 'sl', label: slLabel, planned: true, drag: 'sl', ...trail });
+      }
+    }
+    if ((b.state === 'open' || b.state === 'exiting' || b.state === 'unknown') && b.entryY != null) {
+      out.push({ ...common, key: `bp|${b.id}`, price: b.entryY, column: b.side, kind: 'pos', label: b.state === 'open' ? 'Basket position' : `Basket position (${b.state})` });
+      if (b.state === 'open') {
+        if (b.tgtY != null) out.push({ ...common, key: `bpt|${b.id}`, price: b.tgtY, column: exitCol, kind: 'tgt', label: 'Target', drag: 'tgt' });
+        if (b.slY != null) out.push({ ...common, key: `bps|${b.id}`, price: b.slY, column: exitCol, kind: 'sl', label: slLabel, drag: 'sl', ...trail });
+      }
+    }
+  }
+  return out;
 }
 
 const QTY_TONE: Record<LadderSide, string> = {

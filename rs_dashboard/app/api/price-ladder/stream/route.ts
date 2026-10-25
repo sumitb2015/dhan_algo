@@ -35,7 +35,7 @@ function sharedBuild(key: string, params: URLSearchParams): Shared['run'] {
 export async function GET(req: NextRequest): Promise<Response> {
   startPriceLadderLoop();
   const params = new URLSearchParams(req.nextUrl.searchParams);
-  const key = ['underlying', 'expiry', 'strike', 'opt', 'pairCe', 'pairPe'].map(k => params.get(k) ?? '').join('|');
+  const key = ['underlying', 'expiry', 'strike', 'opt', 'pairCe', 'pairPe', 'basket'].map(k => params.get(k) ?? '').join('|');
   const encoder = new TextEncoder();
   let closed = false;
   let timer: ReturnType<typeof setTimeout> | null = null;

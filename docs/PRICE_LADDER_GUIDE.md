@@ -22,6 +22,24 @@ Real-money endpoint — SIM (paper) is the default; REAL needs the daily LIVE ·
   current lots, product, broker and SIM/REAL mode; the first REAL click each page load asks first; no bracket (exit from its widget or the MTM guard). The
   server applies every arm check (REAL arm, session, hours, auto-exit time, 20-lot cap, funds).
 
+## Basket mode (prebuilt strategies on the net premium) — SIM only for now
+
+The **Ladder** switch has a fourth mode, **Basket**: pick one of the Baskets page's single-expiry strategies (iron condor, iron
+butterfly, butterflies, batman, spreads, ratio spreads, lizards, ...). The legs are placed on the listed strikes around ATM
+(offsets as on the Baskets page) and the ladder shows the strategy's **net premium**: a credit (iron condor) or a debit
+(butterfly), always as a positive number. **Sell** = receive that premium, **Buy** = pay it. In the direction that matches the
+strategy (Sell a credit / Buy a debit) the legs are as defined; in the other direction every leg is mirrored.
+
+- **Edit legs** opens a pop-up: change a leg's side, CE / PE, strike (with ATM±n labels) or ratio (x1-x10), remove a leg, **Add leg**
+  (up to 8), or **Reset to template**. The ladder re-prices as you edit; the legs are locked while a basket on them is armed or open.
+- Everything else is the Pair ladder's behaviour on the net premium: arm at a level (Buy below / Sell above; the other side needs
+  Order Type SL or Anywhere), Buy Market / Sell Market, Style (Single / Bracket / Cover) with Target / SL / Trail in net-premium points,
+  drag the entry / target / SL, the Net Pos panel (25 / 50 / 75 / Exit, whole lots oldest first), the Open positions / Total P&L strip,
+  the MTM guard, the day archive, the cutoff square-off, and the server watcher with every tab closed.
+- A fill takes every leg at its live price at once (SIM). **REAL baskets are refused** (the server answers 403 and the page says so):
+  REAL placement (hedges first, then the shorts, unwinding a failed leg) is the next release.
+- Two-expiry strategies (calendars, diagonals) are not offered. No OI bars in Basket mode (rows are premiums).
+
 ## Trading cutoffs (MCX and NSE)
 
 Two settings, in the ladder's Settings modal and the global Settings drawer: **MCX Trading Cutoff (CRUDEOILM)**, default 23:15,

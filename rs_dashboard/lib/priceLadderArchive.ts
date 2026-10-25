@@ -3,6 +3,7 @@ import path from 'node:path';
 import { writeJsonAtomic } from './lockedJsonFile.ts';
 import type { LadderEvent, LadderSlice, LadderState } from './priceLadder.ts';
 import type { LadderPair } from './priceLadderPair.ts';
+import type { LadderBasket } from './priceLadderBasket.ts';
 
 // The Price Ladder's permanent trade record, one file per IST day: debug/price_ladder_archive_<YYYY-MM-DD>.json.
 // The live ledger forgets finished trades at the day roll and on Clear; everything it is about to forget is merged into
@@ -14,6 +15,7 @@ export interface DayArchive {
   archivedAt: number;
   slices: LadderSlice[];
   pairs: LadderPair[];
+  baskets?: LadderBasket[];
   events: LadderEvent[];
   guards?: LadderState['guards'];
 }
@@ -21,6 +23,7 @@ export interface DayArchive {
 export interface ArchivePart {
   slices?: LadderSlice[];
   pairs?: LadderPair[];
+  baskets?: LadderBasket[];
   events?: LadderEvent[];
   guards?: LadderState['guards'];
 }
@@ -41,6 +44,7 @@ export function mergeDayArchive(existing: DayArchive | null, date: string, add: 
     archivedAt: now,
     slices: byId(existing?.slices ?? [], add.slices ?? []),
     pairs: byId(existing?.pairs ?? [], add.pairs ?? []),
+    ...((add.baskets?.length || existing?.baskets?.length) ? { baskets: byId(existing?.baskets ?? [], add.baskets ?? []) } : {}),
     events,
     ...((add.guards ?? existing?.guards) ? { guards: add.guards ?? existing?.guards } : {}),
   };
@@ -54,14 +58,16 @@ export function mergeDayArchive(existing: DayArchive | null, date: string, add: 
  */
 export function partsToArchive(raw: LadderState, base: LadderState, next: LadderState): { date: string; part: ArchivePart } | null {
   if (base !== raw) {
-    if (!raw.slices.length && !(raw.pairs ?? []).length && !raw.events.length && !Object.keys(raw.guards ?? {}).length) return null;
-    return { date: raw.date, part: { slices: raw.slices, pairs: raw.pairs ?? [], events: raw.events, guards: raw.guards } };
+    if (!raw.slices.length && !(raw.pairs ?? []).length && !(raw.baskets ?? []).length && !raw.events.length && !Object.keys(raw.guards ?? {}).length) return null;
+    return { date: raw.date, part: { slices: raw.slices, pairs: raw.pairs ?? [], baskets: raw.baskets ?? [], events: raw.events, guards: raw.guards } };
   }
   if (next === base) return null;
   const keepS = new Set(next.slices.map(x => x.id)), keepP = new Set((next.pairs ?? []).map(x => x.id));
   const slices = base.slices.filter(x => !keepS.has(x.id));
   const pairs = (base.pairs ?? []).filter(x => !keepP.has(x.id));
-  return slices.length || pairs.length ? { date: base.date, part: { slices, pairs } } : null;
+  const keepB = new Set((next.baskets ?? []).map(x => x.id));
+  const baskets = (base.baskets ?? []).filter(x => !keepB.has(x.id));
+  return slices.length || pairs.length || baskets.length ? { date: base.date, part: { slices, pairs, baskets } } : null;
 }
 
 // The date comes from the ledger file: only a plain YYYY-MM-DD may reach a file name (anything else is filed as 'undated').

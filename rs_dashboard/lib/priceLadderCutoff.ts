@@ -25,7 +25,8 @@ function openMcxMis(): number {
   const slices = st.slices.filter(x => isMcxUnderlying(x.contract.underlying) && x.product === 'MIS' && (x.state === 'open' || x.state === 'exiting')).length;
   const pairs = (st.pairs ?? []).filter(p => isMcxUnderlying(p.legs.ce.contract.underlying) && p.product === 'MIS'
     && (p.state === 'open' || p.state === 'broken' || p.state === 'rolling' || p.state === 'exiting')).length;
-  return slices + pairs;
+  const baskets = (st.baskets ?? []).filter(b => isMcxUnderlying(b.legs[0].contract.underlying) && b.product === 'MIS' && (b.state === 'open' || b.state === 'exiting')).length;
+  return slices + pairs + baskets;
 }
 
 export async function setMcxCutoff(raw: unknown, confirmPast: boolean, now = Date.now()): Promise<CutoffResult> {
@@ -59,7 +60,8 @@ function openNseMis(): number {
   const slices = st.slices.filter(x => !isMcxUnderlying(x.contract.underlying) && x.product === 'MIS' && (x.state === 'open' || x.state === 'exiting')).length;
   const pairs = (st.pairs ?? []).filter(p => !isMcxUnderlying(p.legs.ce.contract.underlying) && p.product === 'MIS'
     && (p.state === 'open' || p.state === 'broken' || p.state === 'rolling' || p.state === 'exiting')).length;
-  return slices + pairs;
+  const baskets = (st.baskets ?? []).filter(b => !isMcxUnderlying(b.legs[0].contract.underlying) && b.product === 'MIS' && (b.state === 'open' || b.state === 'exiting')).length;
+  return slices + pairs + baskets;
 }
 
 /**

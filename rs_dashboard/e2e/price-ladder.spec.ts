@@ -18,7 +18,7 @@ const lastTradingDay = () => {
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const SPOT = 23200;
 
-async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** Give the chain open interest on 23200 so the XY ladder draws OI bars. */ oi?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
+async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** One open SIM short iron condor (2 lots) on the mocked strikes. */ openBasket?: boolean; /** Give the chain open interest on 23200 so the XY ladder draws OI bars. */ oi?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
   const clock = opts.staleAt ? new Date(`${lastTradingDay()}T${opts.staleAt}:00+05:30`).getTime() : null;
   const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[], closes: [] as Record<string, unknown>[] };
   const state: LadderState = { date: istToday(), slices: [], events: [] };
@@ -39,6 +39,16 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
     );
     const leg = (id: string, opt: 'CE' | 'PE', avg: number) => ({ contract: c(id, opt), avg, held: 65, entry: 'filled' });
     state.pairs = [{ id: 'pp1', broker: 'dhan', mode: 'sim', structure: 'strangle', side: 'SELL', lots: 1, qty: 65, product: 'MIS', state: 'open', legs: { ce: leg('111', 'CE', 100), pe: leg('222', 'PE', 90) }, createdAt: Date.now(), updatedAt: Date.now(), openedAt: Date.now() }] as unknown as LadderState['pairs'];
+  }
+  const bpx = (strike: number, opt: 'CE' | 'PE') => Math.max(5, opt === 'CE' ? 120 - (strike - 23200) * 0.4 : 100 + (strike - 23200) * 0.4);
+  if (opts.openBasket) {
+    const c = (strike: number, opt: 'CE' | 'PE') => ({ underlying: 'NIFTY', expiry: '2026-10-27', strike, opt, securityId: `${strike}${opt}`, lotSize: 65, exchangeSegment: 'NSE_FNO' });
+    const leg = (key: string, side: 'BUY' | 'SELL', strike: number, opt: 'CE' | 'PE') => ({ key, side, ratio: 1, contract: c(strike, opt), avg: bpx(strike, opt), held: 130, filledQty: 130, entry: 'filled' });
+    state.baskets = [{
+      id: 'bk1', strategy: 'iron-condor', name: 'Iron Condor', broker: 'dhan', mode: 'sim', side: 'SELL', lots: 2, product: 'MIS', state: 'open',
+      legs: [leg('l0', 'SELL', 23350, 'CE'), leg('l1', 'BUY', 23500, 'CE'), leg('l2', 'SELL', 23050, 'PE'), leg('l3', 'BUY', 22900, 'PE')],
+      createdAt: Date.now(), updatedAt: Date.now(), openedAt: Date.now(), entryY: 90,
+    }] as unknown as LadderState['baskets'];
   }
   await page.route('**/api/**', async (route: Route) => {
     const req = route.request();
@@ -65,7 +75,7 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
     if (p === '/api/options/expiries') return json(route, { success: true, data: ['2026-10-27'] });
     if (p === '/api/options/chain') {
       const oc: Record<string, unknown> = {};
-      for (const k of [23100, 23150, 23200, 23250, 23300]) oc[`${k}.000000`] = opts.oi && k === 23200 ? { ce: { oi: 3_146_455 }, pe: { oi: 1_722_500 } } : { ce: {}, pe: {} };
+      for (const k of [22800, 22850, 22900, 22950, 23000, 23050, 23100, 23150, 23200, 23250, 23300, 23350, 23400, 23450, 23500, 23550, 23600]) oc[`${k}.000000`] = opts.oi && k === 23200 ? { ce: { oi: 3_146_455 }, pe: { oi: 1_722_500 } } : { ce: {}, pe: {} };
       return json(route, { success: true, data: { spot: SPOT, chain: { oc } } });
     }
     if (p === '/api/scalper/top-indices') return json(route, { success: true, quotes: { NIFTY: { ltp: SPOT, prev_close: 23100, change_pct: 0.43, day_high: 23250, day_low: 23050 } } });
@@ -73,15 +83,20 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
     if (p === '/api/price-ladder/state') {
       if (method === 'GET') {
         return json(route, { success: true, data: {
-          state, spots: { NIFTY: clock ? { spot: SPOT, at: clock - 60_000, source: 'ws (not moved yet)', fresh: false } : { spot: SPOT, at: Date.now(), source: 'indices', fresh: true } }, ltps: { '111': 120, '222': 100 },
+          state, spots: { NIFTY: clock ? { spot: SPOT, at: clock - 60_000, source: 'ws (not moved yet)', fresh: false } : { spot: SPOT, at: Date.now(), source: 'indices', fresh: true } }, ltps: { '111': 120, '222': 100, ...(opts.openBasket ? Object.fromEntries([[23350, 'CE'], [23500, 'CE'], [23050, 'PE'], [22900, 'PE']].map(([k, o]) => [`${k}${o}`, bpx(k as number, o as 'CE' | 'PE')])) : {}) },
           liveArmed: !!opts.liveArmed, now: clock ?? Date.now(), watcherQuiet: (opts.watcherLagMs ?? 0) > 8000,
           // The page reads the contract only from a reply that echoes the selection it is showing.
-          request: { underlying: u.searchParams.get('underlying'), expiry: u.searchParams.get('expiry') ?? '', strike: Number(u.searchParams.get('strike')) || null, opt: u.searchParams.get('opt'), pairCe: Number(u.searchParams.get('pairCe')) || null, pairPe: Number(u.searchParams.get('pairPe')) || null },
+          request: { underlying: u.searchParams.get('underlying'), expiry: u.searchParams.get('expiry') ?? '', strike: Number(u.searchParams.get('strike')) || null, opt: u.searchParams.get('opt'), pairCe: Number(u.searchParams.get('pairCe')) || null, pairPe: Number(u.searchParams.get('pairPe')) || null, basket: u.searchParams.get('basket') ?? '' },
           pair: Number(u.searchParams.get('pairCe')) > 0 ? {
             ce: { strike: Number(u.searchParams.get('pairCe')), securityId: '111', ltp: 120 }, pe: { strike: Number(u.searchParams.get('pairPe')), securityId: '222', ltp: 100 },
             combined: 220, lotSize: 65, mult: 1,
           } : null,
           contract: { securityId: '111', lotSize: 65, ltp: 120 },
+          ...(u.searchParams.get('basket') ? (() => {
+            const legs = u.searchParams.get('basket')!.split(',').map(t => { const [k, o, s, r] = t.split(':'); return { strike: Number(k), opt: o as 'CE' | 'PE', side: s === 'S' ? 'SELL' as const : 'BUY' as const, ratio: Number(r) }; });
+            const d = legs.reduce((a, l) => a + (l.side === 'BUY' ? 1 : -1) * l.ratio * bpx(l.strike, l.opt), 0);
+            return { basket: { legs: legs.map(l => ({ ...l, securityId: `${l.strike}${l.opt}`, ltp: bpx(l.strike, l.opt) })), a: Math.abs(Number(d.toFixed(2))), credit: d < 0, lotSize: 65, mult: 1 } };
+          })() : {}),
         } });
       }
       const body = req.postDataJSON() as Record<string, unknown>;
@@ -656,4 +671,87 @@ test('OI bars: call OI is drawn left of the Price column and put OI right of it'
   await expect(pe).toHaveCount(1);
   const [c, p] = [await ce.boundingBox(), await pe.boundingBox()];
   expect(c!.x + c!.width).toBeLessThanOrEqual(p!.x);          // the call bar ends before the put bar starts: call left, put right
+});
+
+// ── Basket mode ──
+async function openBasketMode(page: Page, opts: Parameters<typeof install>[1] = {}) {
+  const seen = await install(page, opts);
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Basket', exact: true }).click();
+  await expect(page.getByLabel('Basket strategy')).toHaveValue('iron-condor');
+  return seen;
+}
+
+test('Basket mode: the iron condor is built around ATM with its net credit as the ladder axis', async ({ page }) => {
+  await openBasketMode(page);
+  const legs = page.getByLabel('Basket legs').locator('li');
+  await expect(legs).toHaveCount(4);
+  // sells 3 strikes out, buys 6 out, both sides (ATM 23200, step 50): 23350 CE / 23500 CE / 23050 PE / 22900 PE
+  await expect(legs.nth(0)).toContainText('23350CE');
+  await expect(legs.nth(1)).toContainText('23500CE');
+  await expect(legs.nth(2)).toContainText('23050PE');
+  await expect(legs.nth(3)).toContainText('22900PE');
+  await expect(page.getByText('net credit')).toBeVisible();                           // 60 - 5 + 40 - 5 = 90
+  await expect(page.getByTitle(/Net premium: the strategy/)).toContainText('90.00');
+});
+
+test('Basket mode: legs can be edited, added, removed and reset in the pop-up', async ({ page }) => {
+  await openBasketMode(page);
+  await page.getByRole('button', { name: 'Edit legs' }).click();
+  const dlg = page.getByRole('dialog', { name: 'Edit basket legs' });
+  await expect(dlg).toBeVisible();
+  await dlg.getByLabel('Remove leg 4').click();
+  await expect(page.getByLabel('Basket legs').locator('li')).toHaveCount(3);
+  await dlg.getByLabel('Leg 1 ratio').selectOption('2');
+  await expect(page.getByLabel('Basket legs').locator('li').nth(0)).toContainText('×2');
+  await dlg.getByRole('button', { name: 'Add leg' }).click();
+  await expect(page.getByLabel('Basket legs').locator('li')).toHaveCount(4);
+  await dlg.getByLabel('Leg 4 side').selectOption('SELL');
+  await dlg.getByLabel('Leg 4 strike').selectOption('23000');
+  await expect(page.getByText(/edited/).first()).toBeVisible();
+  await dlg.getByRole('button', { name: 'Reset to template' }).click();
+  await expect(page.getByLabel('Basket legs').locator('li').nth(3)).toContainText('22900PE');
+  await expect(page.getByLabel('Basket legs').locator('li').nth(0)).not.toContainText('×2');
+  await dlg.getByRole('button', { name: 'Done' }).click();
+  await expect(dlg).toHaveCount(0);
+});
+
+test('Basket mode: Sell at a level above the credit arms the edited legs; Market sends them now; REAL is refused in the page', async ({ page }) => {
+  const seen = await openBasketMode(page);
+  await page.getByRole('button', { name: /^Sell at 9[2-9]/ }).first().click();
+  await expect.poll(() => seen.posts.filter(b => b.action === 'basket' && b.op === 'arm').length).toBe(1);
+  const arm = seen.posts.find(b => b.op === 'arm')!;
+  expect(arm).toMatchObject({ action: 'basket', op: 'arm', mode: 'sim', broker: 'dhan', side: 'SELL', lots: 1, strategy: 'iron-condor', underlying: 'NIFTY' });
+  expect(arm.legs).toEqual([
+    { side: 'SELL', opt: 'CE', strike: 23350, ratio: 1 }, { side: 'BUY', opt: 'CE', strike: 23500, ratio: 1 },
+    { side: 'SELL', opt: 'PE', strike: 23050, ratio: 1 }, { side: 'BUY', opt: 'PE', strike: 22900, ratio: 1 },
+  ]);
+  expect(arm).toHaveProperty('bracket');
+  await page.getByRole('button', { name: 'Buy at market' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.op === 'market').length).toBe(1);
+  expect(seen.posts.find(b => b.op === 'market')).toMatchObject({ action: 'basket', side: 'BUY', mode: 'sim' });
+  // REAL: the page says so and sends nothing
+  const before = seen.posts.length;
+  await page.getByRole('button', { name: 'REAL', exact: true }).click();
+  await expect(page.getByText('Basket REAL orders are not enabled yet').first()).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Sell at market' })).toBeDisabled();
+  await page.getByRole('button', { name: /^Sell at 9[2-9]/ }).first().click({ force: true }).catch(() => undefined);
+  expect(seen.posts.length).toBe(before);
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Basket mode: an open basket shows in Net Pos, the strip and the Exit buttons', async ({ page }) => {
+  const seen = await openBasketMode(page, { openBasket: true });
+  await expect(page.getByLabel('Basket net position')).toHaveText('-2 lots');             // a short condor, 2 lots
+  await expect(page.getByLabel('Open positions', { exact: true })).toHaveText('1');
+  await expect(page.getByText('90.00', { exact: true }).first()).toBeVisible();           // entry net
+  await expect(page.getByRole('button', { name: /^25%$/ })).toBeDisabled();               // 25% of 2 lots is under a lot
+  await page.getByRole('button', { name: /^50%$/ }).click();
+  await expect.poll(() => seen.posts.filter(b => b.op === 'exitShare').length).toBe(1);
+  expect(seen.posts.find(b => b.op === 'exitShare')).toMatchObject({ action: 'basket', op: 'exitShare', ids: ['bk1'], pct: 50 });
+  await page.getByRole('button', { name: /^Exit \(2L\)$/ }).click();
+  await expect.poll(() => seen.posts.filter(b => b.op === 'exitShare').length).toBe(2);
+  await expect(page.getByText('Basket orders & positions')).toBeVisible();
+  expect(seen.blocked).toEqual([]);
 });

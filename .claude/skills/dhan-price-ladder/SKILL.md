@@ -67,7 +67,14 @@ per write; the page drops a view older than the one on screen). It is re-read on
     shown as an event, never thrown (the watcher must keep running). Any new way of removing a slice or pair must go through
     `updateLadderState`. `rollDay` keeps MTM guard LEVELS but restores every guard OFF with no runtime state (a stale
     exit-everything rule must not switch itself on over a new day); armed levels and the REAL arm lapse with the day.
-13. **`settings` lives in two places** (the settings file and `state.settings`; the state's wins, shallow). Change a cutoff only
+13. **Basket mode (release 1: SIM only).** `lib/priceLadderBasket.ts` (pure: axis, orientation, planner, partial shares) +
+    `priceLadderBasketActions.ts` (`action:'basket'`), records in `state.baskets[]`. The axis is the net premium magnitude A; `side` is the
+    CASH direction (SELL receives, BUY pays) and each leg stores the side it actually trades, so `pairBias`, `classifyClick`, `entryStep`,
+    `openExitStep` apply unchanged. The 2-leg Pair engine is NOT reused (it is hard-wired to `{ce, pe}` with one side / qty): copy its
+    patterns, reuse its leg-level helpers. Every new place that handles `pairs` (guard, archive, rollDay, cap, strip, cutoff, clear)
+    needs its `baskets` twin. REAL is refused server-side (`prepare` returns 403) until the hedge-first placement job exists
+    (`dhan-terminal-position-ownership` Inv 4, 9, 10, 14).
+14. **`settings` lives in two places** (the settings file and `state.settings`; the state's wins, shallow). Change a cutoff only
     through `setCutoffsFromBody`.
 
 ## Tests

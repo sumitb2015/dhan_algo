@@ -9,6 +9,7 @@ import { mcxSession } from './mcxSession.ts';
 import { isRegularSession } from './nseHolidays.ts';
 import { zerodhaSnapPrice, type ZerodhaContractInfo } from './zerodhaOrderRules.ts';
 import type { LadderPair } from './priceLadderPair.ts';
+import type { LadderBasket } from './priceLadderBasket.ts';
 
 export type LadderMode = 'xy' | 'plain';
 export type LadderBroker = 'dhan' | 'kotak' | 'zerodha';
@@ -230,6 +231,8 @@ export interface LadderState {
   liveArmedOn?: string;
   /** Pair mode (lib/priceLadderPair.ts): straddles / strangles on their combined premium. */
   pairs?: LadderPair[];
+  /** Basket mode (lib/priceLadderBasket.ts): prebuilt multi-leg strategies on their net premium. */
+  baskets?: LadderBasket[];
   /** Bumped on every write: a reader that already showed a newer revision ignores an older one arriving late. */
   rev?: number;
   /** Configurable settings (e.g. MCX auto-exit time). */
@@ -626,6 +629,12 @@ export function rollDay(s: LadderState, today: string, now: number): LadderState
     })
     // Drop the cancelled ones that were just created (they have nothing to show next day).
     .filter(p => p.state !== 'cancelled');
+  // Baskets: armed levels expire with the day and finished ones are dropped; a live one is carried. A REAL basket caught
+  // mid-order (placing / exiting) becomes UNKNOWN — an earlier session's order can no longer be read by id.
+  const baskets = (s.baskets ?? [])
+    .filter(b => b.state !== 'armed' && b.state !== 'closed' && b.state !== 'cancelled')
+    .map(b => (b.mode === 'real' && (b.state === 'placing' || b.state === 'exiting')
+      ? { ...b, state: 'unknown' as const, note: 'Order from an earlier session — check Orders/Positions', updatedAt: now } : b));
   // MTM guards: the levels are remembered, the guard is not. Its best MTM / locked profit belong to the day it ran, and a
   // stale exit-everything rule must not switch itself on over a new day's trades: it comes back OFF for the user to switch on.
   // (The setting keys mirror cleanGuard in priceLadderGuard.ts, which cannot be imported here without a value import cycle.)
@@ -637,7 +646,7 @@ export function rollDay(s: LadderState, today: string, now: number): LadderState
   }
   const events = wasOn.length ? [ev('warn', `New day: MTM guard ${wasOn.join(', ')} was ON yesterday — its levels are restored but it is OFF. Switch it on to protect today's positions.`)] : [];
   return {
-    date: today, slices, events, liveArmedOn: undefined, ...(pairs.length ? { pairs } : {}),
+    date: today, slices, events, liveArmedOn: undefined, ...(pairs.length ? { pairs } : {}), ...(baskets.length ? { baskets } : {}),
     ...(Object.keys(guards).length ? { guards } : {}),
     ...(s.rev != null ? { rev: s.rev } : {}), ...(s.settings ? { settings: s.settings } : {}),
   };

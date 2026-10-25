@@ -106,6 +106,10 @@ export interface LadderPair {
  * them at market without re-checking).
  */
 export function lotsOnContract(st: LadderState, securityId: string, broker: LadderBroker, mode: 'sim' | 'real', side: LadderSide, exceptId?: string): number {
+  // Basket legs count too (ratio x lots on this contract and side): one cap per contract across slices, pairs and baskets.
+  const baskets = (st.baskets ?? [])
+    .filter(b => b.id !== exceptId && b.state !== 'closed' && b.state !== 'cancelled' && b.broker === broker && b.mode === mode)
+    .reduce((a, b) => a + b.legs.filter(l => l.contract.securityId === securityId && l.side === side).reduce((x, l) => x + b.lots * l.ratio, 0), 0);
   const slices = st.slices
     .filter(x => x.id !== exceptId && x.contract.securityId === securityId && x.broker === broker && x.mode === mode && x.side === side
       && ['armed', 'open', 'exiting', 'placing', 'working'].includes(x.state))
@@ -115,7 +119,7 @@ export function lotsOnContract(st: LadderState, securityId: string, broker: Ladd
       && (p.legs.ce.contract.securityId === securityId || p.legs.pe.contract.securityId === securityId
         || p.rollTo?.ce?.securityId === securityId || p.rollTo?.pe?.securityId === securityId))
     .reduce((a, p) => a + p.lots, 0);
-  return slices + pairs;
+  return slices + pairs + baskets;
 }
 
 /**
@@ -123,13 +127,13 @@ export function lotsOnContract(st: LadderState, securityId: string, broker: Ladd
  * units (several slices on it, such as a '+1 lot', are one position), plus one per pair with a leg on. Armed levels and
  * resting orders are not positions. The same count for every ladder mode (XY and Plain slices, Pair pairs).
  */
-export function openPositionCount(slices: readonly LadderSlice[], pairs: readonly LadderPair[]): number {
+export function openPositionCount(slices: readonly LadderSlice[], pairs: readonly LadderPair[], baskets: readonly { state: string }[] = []): number {
   const held = new Set<string>();
   for (const x of slices) {
     if (isLive(x) && (Number(x.filledQty) || 0) > 0) held.add(`${x.contract.securityId}|${x.broker}|${x.mode}|${x.side}`);
   }
   const open = pairs.filter(p => p.state === 'open' || p.state === 'exiting' || p.state === 'broken' || p.state === 'rolling').length;
-  return held.size + open;
+  return held.size + open + baskets.filter(b => b.state === 'open' || b.state === 'exiting').length;
 }
 
 /** The pair a joined lot hangs off, following joinedTo links to the first pair (cycle-safe). */

@@ -75,7 +75,7 @@ async function guarded(id: string, okFn: (p: LadderPair) => boolean, mutate: (s:
  * Returns an error string to return to the caller, or null when the open is allowed.
  * `isArm` = true for arm() which checks the auto-exit itself differently (arms are allowed up to close).
  */
-function checkOpenAllowed(
+export function checkOpenAllowed(
   u: string, now: number, mode: 'sim' | 'real', broker: LadderBroker, st: LadderState,
   { isArm = false }: { isArm?: boolean } = {},
 ): string | null {

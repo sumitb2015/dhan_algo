@@ -12,7 +12,9 @@ import { BROKER_LABELS, scalperRoute } from '@/hooks/useBrokerSelector';
 import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
 import { FOCUS_RING } from '@/components/Scalper';
 import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
-import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
+import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, basketWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
+import { BasketLegsModal } from '@/components/priceLadder/BasketLegsModal';
+import { basketTemplates, draftFromTemplate, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
 import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, sumPairPnl, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
@@ -41,10 +43,10 @@ const XY_TICKS = [1, 5, 10, 25];
 const PLAIN_TICKS = [0.05, 0.5, 1];
 /** Pair mode's axis is the combined CE + PE premium. */
 const PAIR_TICKS = [0.5, 1, 2, 5];
-/** The page's ladder: the two single-option modes, or Pair (a straddle / strangle on its combined premium). */
-type PageMode = LadderMode | 'pair';
-const MODE_TICK: Record<PageMode, number> = { xy: 5, plain: 1, pair: 1 };
-const TICKS_OF: Record<PageMode, readonly number[]> = { xy: XY_TICKS, plain: PLAIN_TICKS, pair: PAIR_TICKS };
+/** The page's ladder: the two single-option modes, Pair (a straddle / strangle on its combined premium) or Basket (a prebuilt multi-leg strategy on its net premium). */
+type PageMode = LadderMode | 'pair' | 'basket';
+const MODE_TICK: Record<PageMode, number> = { xy: 5, plain: 1, pair: 1, basket: 1 };
+const TICKS_OF: Record<PageMode, readonly number[]> = { xy: XY_TICKS, plain: PLAIN_TICKS, pair: PAIR_TICKS, basket: PAIR_TICKS };
 const ROWS = 31;
 const POLL_MS = 1000;
 /** The one-shot expiry / option-chain loads retry this many times, LOAD_RETRY_MS × attempt apart. */
@@ -63,7 +65,10 @@ interface StateResp {
   /** Pair mode: why a pair leg could not be resolved, or null. */
   pairError?: string | null;
   /** The selection this reply describes. */
-  request?: { underlying: string; expiry: string; strike: number | null; opt: string | null; pairCe?: number | null; pairPe?: number | null };
+  request?: { underlying: string; expiry: string; strike: number | null; opt: string | null; pairCe?: number | null; pairPe?: number | null; basket?: string };
+  /** Basket mode: the legs on screen with their live premiums, and the net premium A (credit = the strategy as defined receives money). */
+  basket?: { legs: { strike: number; opt: 'CE' | 'PE'; side: LadderSide; ratio: number; securityId: string; ltp: number | null }[]; a: number | null; credit: boolean | null; lotSize: number; mult: number } | null;
+  basketError?: string | null;
   /** Pair mode: the CE / PE legs on screen and their combined premium (null when a leg has no live price). */
   pair?: {
     ce: { strike: number; securityId: string; ltp: number | null }; pe: { strike: number; securityId: string; ltp: number | null };
@@ -215,6 +220,13 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [structure, setStructure] = useState<PairStructure>('straddle');
   const [ceOff, setCeOff] = useState(2);
   const [peOff, setPeOff] = useState(2);
+  // Basket mode: the strategy template, the legs on screen (edited in the pop-up; the side is AS DEFINED by the strategy) and whether
+  // the user changed them (an edited draft is never re-built from the template when ATM moves).
+  const [basketKey, setBasketKey] = useState('iron-condor');
+  const [basketLegs, setBasketLegs] = useState<DraftLeg[]>([]);
+  const [basketEdited, setBasketEdited] = useState(false);
+  const [basketModalOpen, setBasketModalOpen] = useState(false);
+  const basketParam = mode === 'basket' ? basketLegs.map(l => `${l.strike}:${l.opt}:${l.side === 'SELL' ? 'S' : 'B'}:${l.ratio}`).join(',') : '';
   // Pair mode: a leg moving this % against its own fill exits both legs (0 = off).
   const [legSlPct, setLegSlPct] = useState(0);
   const [real, setReal] = useState(false);               // per page load, never persisted
@@ -275,7 +287,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Preferences (after mount: the first render must match the server HTML).
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect */
-    const savedMode = readPref(k('price-ladder-mode'), ['xy', 'plain', 'pair'] as const, 'xy');
+    const savedMode = readPref(k('price-ladder-mode'), ['xy', 'plain', 'pair', 'basket'] as const, 'xy');
     setModeRaw(savedMode);
     // The tick belongs to the mode (setMode sets it on a click): a page reopened into Plain must not keep XY's 5.
     setTick(tickFor(savedMode));
@@ -423,6 +435,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     const q = new URLSearchParams({ underlying });
     if (expiry && strike) { q.set('expiry', expiry); q.set('strike', String(strike)); q.set('opt', opt); }
     if (expiry && pairOk) { q.set('pairCe', String(pairCe)); q.set('pairPe', String(pairPe)); }
+    if (expiry && basketParam) q.set('basket', basketParam);
     // Open only while the tab is visible: each open stream holds one of the browser's ~6 connections to this server
     // (HTTP/1.1), shared with every dashboard tab — a hidden ladder must not hold one and queue another tab's orders.
     let es: EventSource | null = null;
@@ -447,7 +460,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     open();
     document.addEventListener('visibilitychange', onVis);
     return () => { document.removeEventListener('visibilitychange', onVis); close(); };
-  }, [underlying, expiry, strike, opt, pairOk, pairCe, pairPe, applyView]);
+  }, [underlying, expiry, strike, opt, pairOk, pairCe, pairPe, basketParam, applyView]);
 
   // Fallback poll: out-of-order replies are dropped, one request per selection at a time (a reply can outlive the 1 s
   // tick, and a new poll every tick would make every reply "out of order").
@@ -455,13 +468,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const pollInFlight = useRef<string | null>(null);
   const poll = useCallback(async () => {
     if (streamOpen.current) return;
-    const key = `${underlying}|${expiry}|${strike}|${opt}|${pairOk ? `${pairCe}/${pairPe}` : ''}`;
+    const key = `${underlying}|${expiry}|${strike}|${opt}|${pairOk ? `${pairCe}/${pairPe}` : ''}|${basketParam}`;
     if (pollInFlight.current === key) return;
     pollInFlight.current = key;
     const my = ++seq.current;
     const q = new URLSearchParams({ underlying });
     if (expiry && strike) { q.set('expiry', expiry); q.set('strike', String(strike)); q.set('opt', opt); }
     if (expiry && pairOk) { q.set('pairCe', String(pairCe)); q.set('pairPe', String(pairPe)); }
+    if (expiry && basketParam) q.set('basket', basketParam);
     try {
       const r = await fetch(`/api/price-ladder/state?${q}`, { cache: 'no-store' });
       const j = await r.json() as { success: boolean; data?: StateResp; error?: string };
@@ -474,7 +488,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     } finally {
       if (pollInFlight.current === key) pollInFlight.current = null;
     }
-  }, [underlying, expiry, strike, opt, pairOk, pairCe, pairPe, applyView]);
+  }, [underlying, expiry, strike, opt, pairOk, pairCe, pairPe, basketParam, applyView]);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void poll();
@@ -642,6 +656,26 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // ATM from the live axis price (the chain's own spot until it arrives), so every strike reads as its distance from ATM.
   const atmStrike = atmStrikeOf(strikes, spotView?.spot || chainSpot);
   const optLtp = shownC?.ltp ?? 0;
+  // ── Basket mode ── the strategy's legs on the listed strikes around ATM, built once per strategy / underlying / expiry
+  // (an ATM drift never moves legs the user is looking at, and edited legs are never rebuilt).
+  const basketTpl = useMemo(() => basketTemplates().find(t => t.key === basketKey) ?? null, [basketKey]);
+  const atmRef = useRef<number | null>(null);
+  useEffect(() => { atmRef.current = atmStrike; }, [atmStrike]);
+  const buildBasket = useCallback(() => {
+    const atm = atmRef.current;
+    if (!basketTpl || !strikes.length || atm == null) return;
+    setBasketLegs(draftFromTemplate(basketTpl.legs, atm, STRIKE_STEP[underlying] ?? 50, strikes));
+  }, [basketTpl, strikes, underlying]);
+  const atmReady = atmStrike != null;
+  useEffect(() => { if (mode === 'basket' && !basketEdited) buildBasket(); }, [mode, basketEdited, buildBasket, atmReady, expiry]);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setBasketEdited(false);
+  }, [underlying, expiry]);
+  const basketOk = mode === 'basket' && matches && rq?.basket === basketParam;
+  const basketView = basketOk ? data?.basket ?? null : null;
+  const basketErr = basketOk ? data?.basketError ?? null : null;
+  const netA = basketView?.a ?? 0;
   const ax = shownC?.axisDay;
   const indexQ: IndexQuote | null = !mcx ? topIndexQ : ax && spot > 0 ? {
     ltp: spot, prev_close: ax.prevClose ?? 0, day_high: ax.high, day_low: ax.low,
@@ -649,7 +683,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   } : null;
   const lotSize = shownC?.lotSize ?? null;
   const securityId = shownC?.securityId ?? null;
-  const refPrice = mode === 'xy' ? spot : mode === 'pair' ? combined : optLtp;
+  const refPrice = mode === 'xy' ? spot : mode === 'pair' ? combined : mode === 'basket' ? netA : optLtp;
 
   // The pointer (or keyboard focus) is on the ladder: its rows hold still, so a price tick cannot re-centre a different
   // level under the mouse between aiming and clicking (seen live: a click armed a breakout three rows from the aim).
@@ -683,6 +717,13 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Ladder markers follow the SIM/REAL switch too: a paper level must never look like a real one on the ladder.
   const mine = useMemo(() => slices.filter(s => isLive(s) && s.broker === broker && s.mode === pageMode && s.contract.securityId === securityId), [slices, broker, pageMode, securityId]);
   const pairs = useMemo(() => data?.state.pairs ?? [], [data?.state.pairs]);
+  const baskets = useMemo(() => data?.state.baskets ?? [], [data?.state.baskets]);
+  // Baskets drawn on the ladder: this broker, the page's mode, exactly the contracts on screen (side-blind: it is the same instrument).
+  const viewSig = basketView ? basketView.legs.map(l => l.securityId).sort().join(',') : '';
+  const sigOf = (b: LadderBasket) => b.legs.map(l => l.contract.securityId).sort().join(',');
+  const myBaskets = useMemo(() => (viewSig ? baskets.filter(b => isBasketLive(b) && b.broker === broker && b.mode === pageMode && sigOf(b) === viewSig) : []),
+    [baskets, viewSig, broker, pageMode]);
+  const basketLocked = myBaskets.length > 0;
   // Pairs drawn on the ladder: this broker, the page's mode, exactly the two legs on screen.
   const myPairs = useMemo(() => (pairView ? pairs.filter(p => isPairLive(p) && p.broker === broker && p.mode === pageMode
     && p.legs.ce.contract.securityId === pairView.ce.securityId && p.legs.pe.contract.securityId === pairView.pe.securityId) : []),
@@ -690,6 +731,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Where each open position was entered, on the ladder's own axis (index level in XY, fill premium in plain).
   const entryMarks = useMemo(() => {
     const marks: EntryMark[] = [];
+    if (mode === 'basket') {
+      for (const b of myBaskets) if ((b.state === 'open' || b.state === 'exiting' || b.state === 'unknown') && b.entryY) marks.push({ y: b.entryY, side: b.side, qty: b.lots * b.legs[0].contract.lotSize, pnl: basketNowPnl(b, data?.ltps ?? {}) });
+      return marks;
+    }
     if (mode === 'pair') {
       // A pair's entry on the combined axis (the row IS the combined fill, so no separate fill tag).
       for (const p of myPairs) if ((p.state === 'open' || p.state === 'broken' || p.state === 'exiting' || p.state === 'unknown') && p.entryY) marks.push({ y: p.entryY, side: p.side, qty: p.qty, pnl: pairNowPnl(p, data?.ltps ?? {}) });
@@ -702,7 +747,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       if (y && Number.isFinite(y)) marks.push({ y, side: s.side, qty: held, avg: s.avg, pnl: sliceNowPnl(s, optLtp) ?? null });
     }
     return marks;
-  }, [mine, mode, myPairs, optLtp, data?.ltps]);
+  }, [mine, mode, myPairs, myBaskets, optLtp, data?.ltps]);
   const net = securityId ? ownNet(slices.filter(s => s.broker === broker && s.mode === pageMode), securityId) : { qty: 0, avg: null };
   const contractPnl = useMemo(() => sumSlicePnl(slices, s => s.broker === broker && s.mode === pageMode && s.contract.securityId === securityId, () => optLtp),
     [slices, broker, pageMode, securityId, optLtp]);
@@ -726,6 +771,15 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     ? pairHeldNow.reduce((a, p) => a + p.lots * (p.entryY ?? ((p.legs.ce.avg ?? 0) + (p.legs.pe.avg ?? 0))), 0) / pairLotsHeld : null;
   const pairExitable = myPairs.filter(p => (p.state === 'open' || p.state === 'broken' || p.state === 'rolling') && !p.exitWanted);
   const pairOpenLots = myPairs.filter(p => p.state === 'open' && !p.exitWanted).reduce((a, p) => a + p.lots, 0);
+  // Basket mode's Net Pos panel: the same numbers for the baskets on the legs on screen.
+  const basketHere = useMemo(() => (viewSig ? baskets.filter(b => b.broker === broker && b.mode === pageMode && sigOf(b) === viewSig) : []), [baskets, viewSig, broker, pageMode]);
+  const basketPnl = useMemo(() => sumBasketPnl(basketHere, () => true, data?.ltps ?? {}), [basketHere, data?.ltps]);
+  const basketHeldNow = myBaskets.filter(b => b.state === 'open' || b.state === 'exiting');
+  const basketNetLots = basketHeldNow.reduce((a, b) => a + (b.side === 'SELL' ? -1 : 1) * b.lots, 0);
+  const basketLotsHeld = basketHeldNow.reduce((a, b) => a + b.lots, 0);
+  const basketAvgEntry = basketLotsHeld > 0 ? basketHeldNow.reduce((a, b) => a + b.lots * (b.entryY ?? 0), 0) / basketLotsHeld : null;
+  const basketExitable = myBaskets.filter(b => b.state === 'open' && !b.exitWanted);
+  const basketOpenLots = basketExitable.reduce((a, b) => a + b.lots, 0);
 
   const liveArmed = !!data?.liveArmed;
   const realBlocked = real && !liveArmed;
@@ -800,7 +854,32 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${structure} armed at combined ${price}`); });
   }, [post, broker, real, underlying, expiry, structure, pairOk, pairCe, pairPe, lots, product, orderType, zones, legSlPct, style, tgtPts, slPts, trailOn, trailPts, second]);
 
+  // Basket mode (SIM only for now: the server refuses a REAL basket, and the page says so before asking).
+  const basketPayload = { strategy: basketKey, name: basketTpl?.name ?? 'Basket', legs: basketLegs, underlying, expiry, broker, product, lots, mode: 'sim' as const };
+  const sendBasket = useCallback((side: LadderSide, price: number, expect: { kind: 'limit' | 'stop'; dir: 'above' | 'below' }) => {
+    if (!expiry || !basketView?.a) return;
+    void post({
+      action: 'basket', op: 'arm', ...basketPayload, side, orderType, level: price, zones, expect, ...(second ? { pane: 2 } : {}),
+      ...(style !== 'Single' ? { bracket: { tgtPts: style === 'Cover' ? 0 : tgtPts, slPts, ...(trailOn ? { trailPts } : {}) } }
+        : trailOn ? { bracket: { tgtPts: 0, slPts: trailPts, trailPts } } : {}),
+    }).then(ok => { if (ok) toast.success(`SIM ${side} ${basketTpl?.name ?? 'basket'} armed at net ${price}`); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [post, basketKey, basketTpl, basketLegs, underlying, expiry, broker, product, lots, orderType, zones, style, tgtPts, slPts, trailOn, trailPts, second, basketView?.a]);
+  const sendBasketMarket = (side: LadderSide) => {
+    if (!expiry || !basketView?.a) return;
+    if (real) { toast.warning('Basket REAL orders are not enabled yet — switch to SIM'); return; }
+    void post({ action: 'basket', op: 'market', ...basketPayload, side, ...(second ? { pane: 2 } : {}) })
+      .then(ok => { if (ok) toast.success(`SIM ${side} ${lots} lot(s) ${basketTpl?.name ?? 'basket'} sent at MARKET`); });
+  };
+
   const onPlace = (side: LadderSide, price: number) => {
+    if (mode === 'basket') {
+      if (real) { toast.warning('Basket REAL orders are not enabled yet — switch to SIM'); return; }
+      const v = classifyClick({ mode: 'plain', opt: 'CE', side, level: price, ref: refPrice, orderType, zones });
+      if (!v.ok) { toast.warning(v.error); return; }
+      sendBasket(side, price, { kind: v.kind, dir: v.dir });
+      return;
+    }
     if (mode === 'pair') {
       const v = classifyClick({ mode: 'plain', opt: 'CE', side, level: price, ref: refPrice, orderType, zones });
       if (!v.ok) { toast.warning(v.error); return; }
@@ -873,6 +952,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // every rule (a LIMIT entry cannot be dragged across spot into a breakout; target/SL must stay on their side of spot).
   const onMove = (ids: string[], what: 'entry' | 'tgt' | 'sl', price: number) => {
     const done = (ok: boolean) => { if (ok) toast.success(`${what === 'entry' ? 'Entry' : what === 'tgt' ? 'Target' : 'SL'} moved to ${price}`); };
+    if (mode === 'basket') {
+      void post({ action: 'basket', op: 'modify', id: ids[0], ...(what === 'entry' ? { level: price } : what === 'tgt' ? { tgtY: price } : { slY: price }) }).then(done);
+      return;
+    }
     if (mode === 'pair') {
       void post({ action: 'pair', op: 'modify', id: ids[0], ...(what === 'entry' ? { level: price } : what === 'tgt' ? { tgtY: price } : { slY: price }) }).then(done);
       return;
@@ -885,6 +968,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // position: − exits one lot at market (never confirmed — it only reduces), + adds one lot at market under the same
   // target / SL — an opening order, so on REAL the first one this page load asks first, like a ladder click.
   const onAdjust = (w: LadderWidget, delta: 1 | -1, pair = mode === 'pair') => {
+    if (mode === 'basket') { toast.info('Use the 25 / 50 / 75 / Exit buttons to change a basket\'s lots'); return; }
     if (pair) {
       if (w.adjust !== 'position') return;
       // − exits one lot of both legs (only reduces: never confirmed); + adds one to both at market — an opening order,
@@ -919,7 +1003,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     }
     addOne();
   };
-  const pendingHere = mode === 'pair' ? 0 : mine.filter(s => (s.state === 'armed' || s.state === 'working') && s.mode === pageMode).length;
+  const pendingHere = mode === 'pair' || mode === 'basket' ? 0 : mine.filter(s => (s.state === 'armed' || s.state === 'working') && s.mode === pageMode).length;
 
   // A price that has not moved is only a problem while the market is trading: outside the session there are no live
   // prices, so the stale warning is not shown (the server still refuses to arm without a fresh price).
@@ -929,13 +1013,15 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const inSession = !!data && sess.open < sess.close && hhmmNow >= sess.open && hhmmNow < sess.close;
   const stale = mode === 'xy' && !spotFreshNow;
   // Something live in the ledger, and the server that runs it has gone quiet (no reply, or its watcher tick is overdue).
-  const anyLive = !!data && (data.state.slices.some(x => isLive(x) && x.state !== 'unknown') || (data.state.pairs ?? []).some(isPairLive));
+  const anyLive = !!data && (data.state.slices.some(x => isLive(x) && x.state !== 'unknown') || (data.state.pairs ?? []).some(isPairLive) || (data.state.baskets ?? []).some(isBasketLive));
   const notTracking = anyLive && (unreachable || !!data?.watcherQuiet);
   const placeDisabled = busy || !brokerLoaded || !strike || !(refPrice > 0) || realBlocked || (real && sessionDown) || (mode === 'xy' && stale)
-    || (mode === 'pair' && !pairView);
+    || (mode === 'pair' && !pairView) || (mode === 'basket' && !basketView?.a);
   const decimals = mode === 'xy' ? (tick < 1 ? 2 : 0) : 2;
-  const ticks = mode === 'xy' ? XY_TICKS : mode === 'pair' ? PAIR_TICKS : PLAIN_TICKS;
-  const HELP_TEXT = mode === 'pair'
+  const ticks = mode === 'xy' ? XY_TICKS : mode === 'pair' || mode === 'basket' ? PAIR_TICKS : PLAIN_TICKS;
+  const HELP_TEXT = mode === 'basket'
+                ? `Basket: the ladder is the strategy's NET premium (${basketView?.credit ? 'a credit: Sell = collect it' : basketView?.credit === false ? 'a debit: Buy = pay it' : 'credit or debit'}). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. The legs are as the strategy defines them when your direction matches (Sell a credit / Buy a debit), every leg mirrored otherwise. All legs fill together when the net crosses the level; target / SL / trail are net-premium points and exit every leg. SIM only for now.`
+                : mode === 'pair'
                 ? `Pair: the ladder is the combined premium (CE + PE). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. Both legs go at MARKET together when the combined crosses the level (REAL: if only one fills, it is closed again); target / SL / trail are in combined-premium points and exit both legs.`
                 : mode === 'xy'
                 ? `Click the Buy or Sell column at an index level. ${opt === 'PE' ? 'Put: the ladder is inverted — a Buy is a limit ABOVE spot. ' : ''}Limit = the option is cheaper/dearer at that level; the other side ${zones === 'anywhere' ? 'is a breakout by itself (Anywhere)' : 'needs SL (breakout)'}. The option order goes at MARKET when ${axisName} crosses the level.`
@@ -943,7 +1029,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   ? `Anywhere: Buy below LTP / Sell above it = LIMIT; Sell below / Buy above = SL-limit, its limit ${slBufferPct}% past the trigger. Orders rest at the broker.`
                   : 'Click Buy below LTP or Sell above it for a LIMIT; the other side places an SL-M stop (Order Type SL). Orders rest at the broker.';
   const dataDate = data ? data.state.date : null;
-  const optLabel = mode === 'pair'
+  const optLabel = mode === 'basket'
+    ? `${underlying} ${expiry} ${basketTpl?.name ?? 'Basket'}${basketEdited ? ' (edited)' : ''}`
+    : mode === 'pair'
     ? (pairOk ? `${underlying} ${expiry} ${structure === 'straddle' ? `${pairCe} straddle` : `${pairCe}CE / ${pairPe}PE strangle`}` : `${underlying} — pair strikes not in the chain`)
     : strike ? `${underlying} ${expiry} ${strike} ${opt}` : `${underlying} —`;
   // With two ladders open each lists only the orders it placed (ladder 1 also every order from before panes); one
@@ -951,12 +1039,13 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const inPane = useCallback((x: { pane?: number }) => !dual || paneOf(x) === ladderId, [dual, ladderId]);
   const paneSlices = useMemo(() => slices.filter(inPane), [slices, inPane]);
   const panePairs = useMemo(() => pairs.filter(inPane), [pairs, inPane]);
+  const paneBaskets = useMemo(() => baskets.filter(inPane), [baskets, inPane]);
   const paneEvents = useMemo(() => {
     const evs = data?.state.events ?? [];
     if (!dual) return evs;
-    const ids = new Set([...paneSlices.map(x => x.id), ...panePairs.map(p => p.id)]);
+    const ids = new Set([...paneSlices.map(x => x.id), ...panePairs.map(p => p.id), ...paneBaskets.map(b => b.id)]);
     return evs.filter(e => (e.sliceId ? ids.has(e.sliceId) : ladderId === 1));
-  }, [data?.state.events, dual, ladderId, paneSlices, panePairs]);
+  }, [data?.state.events, dual, ladderId, paneSlices, panePairs, paneBaskets]);
   const live = paneSlices.filter(isLive);
   const latestEvent = paneEvents.length ? paneEvents[paneEvents.length - 1] : null;
   // Live orders on the contract on screen that the ladder does not draw (the other SIM/REAL mode, or another broker).
@@ -966,7 +1055,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     && (p.broker !== broker || p.mode !== pageMode)) : [];
   const done = paneSlices.filter(s => !isLive(s));
   // Positions held (not armed levels): a contract + side group with filled lots, and a pair that has a leg on.
-  const openPositions = openPositionCount(paneSlices, panePairs);
+  const openPositions = openPositionCount(paneSlices, panePairs, paneBaskets);
 
   // Switch the page to a slice's contract (Active Trades chip, orders list). Moving into REAL re-arms the first-click
   // confirmation, exactly like the SIM/REAL switch.
@@ -1092,13 +1181,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <Rows3 className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="min-w-0">
-            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">PRICE LADDER{dual ? ` ${ladderId}` : ''} · {mode === 'xy' ? 'XY' : mode === 'pair' ? 'PAIR' : 'PLAIN'}</p>
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">PRICE LADDER{dual ? ` ${ladderId}` : ''} · {mode === 'xy' ? 'XY' : mode === 'pair' ? 'PAIR' : mode === 'basket' ? 'BASKET' : 'PLAIN'}</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">
               {axisName} <span className="font-mono">{spot ? spot.toFixed(2) : '—'}</span>
             </h1>
             {/* One line with two ladders (the longer pair text would wrap and push that pane's button row lower than the other's). */}
             <p className={`text-[10px] text-zinc-500 font-medium mt-1 ${dual ? 'truncate' : ''}`} title={dual ? 'Hover for the full description' : undefined}>
               {mode === 'xy' ? `Trade the option on ${mcx ? 'its futures month\'s' : 'index'} levels — the server fires armed levels with this tab closed`
+                : mode === 'basket' ? 'Prebuilt strategies (iron condor, butterfly, …) on their net premium — the server fires every leg with this tab closed'
                 : mode === 'pair' ? 'Straddles / strangles on their combined CE + PE premium — the server fires both legs with this tab closed'
                   : 'One-click LIMIT / SL orders on the option premium'}
             </p>
@@ -1187,6 +1277,16 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <AlertTriangle className="w-4 h-4" /> No live price for {pairView.ce.ltp ? 'the PE leg' : pairView.pe.ltp ? 'the CE leg' : 'either leg'} yet — pair levels are paused until both legs price (the feed may still be subscribing).
           </div>
         )}
+        {mode === 'basket' && (basketErr || (basketView && !basketView.a)) && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-amber-500/30 bg-amber-500/10 text-xs text-amber-300">
+            <AlertTriangle className="w-4 h-4" /> {basketErr ?? 'No live price for every leg yet (or the strategy nets to nothing) — basket levels are paused until all legs price.'}
+          </div>
+        )}
+        {mode === 'basket' && real && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-300">
+            <ShieldAlert className="w-4 h-4" /> Basket REAL orders are not enabled yet — switch to SIM to trade a basket.
+          </div>
+        )}
         {realBlocked && (
           <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-300">
             <ShieldAlert className="w-4 h-4" /> REAL mode: arm LIVE · REAL MONEY for today before placing. Exits always work.
@@ -1200,7 +1300,19 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <div className={dual ? 'grid grid-cols-2 2xl:grid-cols-1 gap-2 items-start [&>*:only-child]:col-span-2 2xl:[&>*:only-child]:col-span-1' : 'contents'}>
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5">
               <p className="text-[13px] font-semibold tracking-tight text-zinc-100">{optLabel}</p>
-              {mode === 'pair' ? (
+              {mode === 'basket' ? (
+                <>
+                  <p className="text-xl font-mono font-semibold tracking-tight text-white leading-tight" title="Net premium: the strategy's legs, signed by side and ratio">
+                    {netA ? netA.toFixed(2) : '—'}
+                    {basketView?.credit != null && <span className={`ml-2 text-xs font-bold ${basketView.credit ? 'text-emerald-400' : 'text-sky-300'}`}>{basketView.credit ? 'net credit' : 'net debit'}</span>}
+                  </p>
+                  <ul className="font-mono text-[11px] text-zinc-400 mt-0.5" aria-label="Basket legs">
+                    {(basketView?.legs ?? []).map((l, i) => (
+                      <li key={i}><span className={l.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}>{l.side === 'BUY' ? 'B' : 'S'}</span> {l.strike}{l.opt}{l.ratio > 1 ? ` ×${l.ratio}` : ''} <span className="text-zinc-200">{l.ltp?.toFixed(2) ?? '—'}</span></li>
+                    ))}
+                  </ul>
+                </>
+              ) : mode === 'pair' ? (
                 <>
                   <p className="text-xl font-mono font-semibold tracking-tight text-white leading-tight" title="Combined premium: CE LTP + PE LTP">{combined ? combined.toFixed(2) : '—'}</p>
                   <p className="font-mono text-xs text-zinc-400">
@@ -1219,7 +1331,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               </div>
             </div>
 
-            {mode !== 'pair' && <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 grid grid-cols-2 gap-y-0.5 text-xs">
+            {mode !== 'pair' && mode !== 'basket' && <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 grid grid-cols-2 gap-y-0.5 text-xs">
               <span className="text-zinc-400 font-medium">Net Pos <span className="text-zinc-500">({pageMode.toUpperCase()})</span></span><span className="font-mono text-right text-zinc-100">{net.qty}</span>
               <span className="text-zinc-400 font-medium">P&amp;L</span><span className={`font-mono text-right ${pnlClass(contractPnl)}`}>{fmtMoney(contractPnl)}</span>
               <span className="text-zinc-400 font-medium">Avg Price</span><span className="font-mono text-right text-zinc-100">{net.avg ? net.avg.toFixed(2) : '—'}</span>
@@ -1233,6 +1345,26 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                     {p === 100 ? `Exit (${net.qty})` : `${p}%`}
                   </button>
                 ))}
+              </div>
+            </div>}
+            {mode === 'basket' && <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 grid grid-cols-2 gap-y-0.5 text-xs">
+              <span className="text-zinc-400 font-medium">Net Pos <span className="text-zinc-500">({pageMode.toUpperCase()})</span></span><span className="font-mono text-right text-zinc-100" aria-label="Basket net position">{basketNetLots} lot{Math.abs(basketNetLots) === 1 ? '' : 's'}</span>
+              <span className="text-zinc-400 font-medium">P&amp;L</span><span className={`font-mono text-right ${pnlClass(basketPnl)}`}>{fmtMoney(basketPnl)}</span>
+              <span className="text-zinc-400 font-medium" title="Net premium at entry, weighted by lots">Avg Price</span><span className="font-mono text-right text-zinc-100">{basketAvgEntry ? basketAvgEntry.toFixed(2) : '—'}</span>
+              <div className="col-span-2 flex gap-1 mt-1.5">
+                {[25, 50, 75, 100].map(p => {
+                  const none = basketExitable.length === 0 || (p < 100 && Math.floor((basketOpenLots * p) / 100) < 1);
+                  return (
+                    <button
+                      key={p} type="button" disabled={busy || none}
+                      title={p === 100 ? 'Exit every open basket on these legs at market' : `Exit ${p}% of the open lots (whole lots, rounded down) at market`}
+                      onClick={() => void post({ action: 'basket', op: 'exitShare', ids: basketExitable.map(y => y.id), pct: p })}
+                      className="flex-1 px-1 py-0.5 rounded text-xs font-semibold border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40"
+                    >
+                      {p === 100 ? `Exit (${basketLotsHeld}L)` : `${p}%`}
+                    </button>
+                  );
+                })}
               </div>
             </div>}
             {mode === 'pair' && <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 grid grid-cols-2 gap-y-0.5 text-xs">
@@ -1259,7 +1391,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
 
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 flex flex-col gap-1.5 text-xs">
               <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Ladder</span>
-                <Seg compact value={mode} options={['xy', 'plain', 'pair'] as const} labels={{ xy: 'XY (index)', plain: 'Plain', pair: 'Pair' }} onChange={setMode} />
+                <Seg compact value={mode} options={['xy', 'plain', 'pair', 'basket'] as const} labels={{ xy: 'XY (index)', plain: 'Plain', pair: 'Pair', basket: 'Basket' }} onChange={setMode} />
               </div>
               <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Product</span>
                 <Seg compact value={product} options={['NRML', 'MIS'] as const} onChange={setProduct} />
@@ -1274,13 +1406,28 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   {expiries.map(x => <option key={x} value={x}>{x}</option>)}
                 </select>
               </div>
-              <div className="flex items-center justify-between gap-2 min-w-0"><span className="text-zinc-400 font-medium">Strike</span>
+              {mode !== 'basket' && <div className="flex items-center justify-between gap-2 min-w-0"><span className="text-zinc-400 font-medium">Strike</span>
                 {/* min-w-0 + a width cap: the longer "22600 · ATM+10" labels shrink the select; they must not push anything over the ladder. */}
                 <select aria-label="Strike" value={strike ?? ''} onChange={e => setStrike(Number(e.target.value))} className="min-w-0 w-full max-w-[9.5rem] px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100 font-mono">
                   {strikes.map(k => { const off = atmOffsetLabel(strikes, atmStrike, k); return <option key={k} value={k}>{off ? `${k}  ·  ${off}` : k}</option>; })}
                 </select>
-              </div>
-              {mode !== 'pair' && (
+              </div>}
+              {mode === 'basket' && (
+                <>
+                  <div className="flex items-center justify-between gap-2 min-w-0"><span className="text-zinc-400 font-medium">Strategy</span>
+                    <select aria-label="Basket strategy" value={basketKey} onChange={e => { setBasketKey(e.target.value); setBasketEdited(false); }} disabled={basketLocked}
+                      className="min-w-0 w-full max-w-[9.5rem] px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-zinc-100 disabled:opacity-50">
+                      {[...new Set(basketTemplates().map(t => t.category))].map(c => (
+                        <optgroup key={c} label={c}>{basketTemplates().filter(t => t.category === c).map(t => <option key={t.key} value={t.key}>{t.name}</option>)}</optgroup>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Legs <span className="text-zinc-500">({basketLegs.length})</span></span>
+                    <button type="button" onClick={() => setBasketModalOpen(true)} className={`px-2.5 py-0.5 rounded border border-zinc-700 text-zinc-200 hover:text-white ${FOCUS_RING}`}>Edit legs</button>
+                  </div>
+                </>
+              )}
+              {mode !== 'pair' && mode !== 'basket' && (
                 <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Option</span>
                   <Seg compact value={opt} options={['CE', 'PE'] as const} labels={{ CE: 'Call', PE: 'Put' }} onChange={setOpt} />
                 </div>
@@ -1318,9 +1465,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   <NumField compact label="SL limit buffer percent" value={slBufferPct} onCommit={setSlBufferPct} min={MIN_SL_BUFFER_PCT} max={MAX_SL_BUFFER_PCT} step={0.1} />
                 </div>
               ) : null}
-              {(mode === 'xy' || mode === 'pair') && (
+              {(mode === 'xy' || mode === 'pair' || mode === 'basket') && (
                 <>
-                  <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title={mode === 'pair' ? 'Target / SL / trail are points of the combined premium' : undefined}>Style</span>
+                  <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title={mode === 'pair' ? 'Target / SL / trail are points of the combined premium' : mode === 'basket' ? 'Target / SL / trail are points of the basket\'s net premium' : undefined}>Style</span>
                     <Seg compact value={style} options={['Single', 'Bracket', 'Cover'] as const} onChange={setStyle} />
                   </div>
                   <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 items-center">
@@ -1344,11 +1491,11 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-1.5">
-                <button type="button" disabled={busy || !expiry || (mode === 'pair' ? !pairOk : !strike)} onClick={() => (mode === 'pair' ? sendPairMarket('BUY') : sendMarket('BUY'))}
-                  title={mode === 'pair' ? `BUY ${lots} lot(s) of the ${structure} (both legs) at market now` : `BUY ${lots} lot(s) ${strike ?? ''}${opt} at market now`} aria-label="Buy at market"
+                <button type="button" disabled={busy || !expiry || (mode === 'basket' ? !basketView?.a || real : mode === 'pair' ? !pairOk : !strike)} onClick={() => (mode === 'basket' ? sendBasketMarket('BUY') : mode === 'pair' ? sendPairMarket('BUY') : sendMarket('BUY'))}
+                  title={mode === 'basket' ? `BUY ${lots} lot(s) of the basket (every leg) at market now` : mode === 'pair' ? `BUY ${lots} lot(s) of the ${structure} (both legs) at market now` : `BUY ${lots} lot(s) ${strike ?? ''}${opt} at market now`} aria-label="Buy at market"
                   className="px-2 py-1.5 rounded bg-emerald-600 text-oncolor font-bold hover:bg-emerald-500 disabled:opacity-50">Buy Market</button>
-                <button type="button" disabled={busy || !expiry || (mode === 'pair' ? !pairOk : !strike)} onClick={() => (mode === 'pair' ? sendPairMarket('SELL') : sendMarket('SELL'))}
-                  title={mode === 'pair' ? `SELL ${lots} lot(s) of the ${structure} (both legs) at market now` : `SELL ${lots} lot(s) ${strike ?? ''}${opt} at market now`} aria-label="Sell at market"
+                <button type="button" disabled={busy || !expiry || (mode === 'basket' ? !basketView?.a || real : mode === 'pair' ? !pairOk : !strike)} onClick={() => (mode === 'basket' ? sendBasketMarket('SELL') : mode === 'pair' ? sendPairMarket('SELL') : sendMarket('SELL'))}
+                  title={mode === 'basket' ? `SELL ${lots} lot(s) of the basket (every leg) at market now` : mode === 'pair' ? `SELL ${lots} lot(s) of the ${structure} (both legs) at market now` : `SELL ${lots} lot(s) ${strike ?? ''}${opt} at market now`} aria-label="Sell at market"
                   className="px-2 py-1.5 rounded bg-red-600 text-oncolor font-bold hover:bg-red-500 disabled:opacity-50">Sell Market</button>
               </div>
             </div>
@@ -1415,14 +1562,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             </div>
             <LadderGrid
               center={center} refPrice={refPrice} tick={tick} rows={ROWS}
-              widgets={mode === 'pair' ? pairWidgetsFor(myPairs) : widgetsFor(mine, mode)}
-              limitZoneBuy={limitZone(mode === 'pair' ? 'plain' : mode, opt, 'BUY')}
+              widgets={mode === 'basket' ? basketWidgetsFor(myBaskets) : mode === 'pair' ? pairWidgetsFor(myPairs) : widgetsFor(mine, mode)}
+              limitZoneBuy={limitZone(mode === 'pair' || mode === 'basket' ? 'plain' : mode, opt, 'BUY')}
               zones={zones} stopLimitFor={mode === 'plain' ? (side, p) => stopLimitPrice(side, p, slBufferPct) : undefined}
-              onPlace={onPlace} onCancel={id => void post(mode === 'pair' ? { action: 'pair', op: 'cancel', id } : { action: 'cancel', id })} onMove={onMove} onAdjust={onAdjust}
+              onPlace={onPlace} onCancel={id => void post(mode === 'basket' ? { action: 'basket', op: 'cancel', id } : mode === 'pair' ? { action: 'pair', op: 'cancel', id } : { action: 'cancel', id })} onMove={onMove} onAdjust={onAdjust}
               disabled={placeDisabled} decimals={decimals} entryMarks={entryMarks}
               oi={mode === 'xy' && oiOn && oiRows.key === `${underlying}|${expiry}` && oiRows.rows.length ? { rows: oiRows.rows, max: maxOi(oiRows.rows) } : undefined}
               onScroll={refPrice > 0 ? scrollLadder : undefined}
-              onTrail={(w, delta) => { void post(mode === 'pair' ? { action: 'pair', op: 'trail', id: w.ids[0], delta } : { action: 'trail', id: w.ids[0], delta }); }}
+              onTrail={(w, delta) => { void post(mode === 'basket' ? { action: 'basket', op: 'trail', id: w.ids[0], delta } : mode === 'pair' ? { action: 'pair', op: 'trail', id: w.ids[0], delta } : { action: 'trail', id: w.ids[0], delta }); }}
               onHoldChange={setHeld}
               keyLevels={mode === 'xy' ? {
                 pdh: data?.keyLevels?.pdh ?? null,
@@ -1481,6 +1628,17 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           <PairTable pairs={panePairs} ltps={data?.ltps ?? {}} busy={busy} post={post} trailPts={trailPts} onSelect={selectPair}
             onLots={(p, d) => onAdjust({ key: p.id, price: 0, column: p.side, kind: 'pos', label: 'Pair position', qty: p.qty, lots: p.lots, ids: [p.id], adjust: 'position' }, d, true)}
             onRoll={onRoll} />
+        )}
+
+        {paneBaskets.length > 0 && (
+          <BasketTable baskets={paneBaskets} ltps={data?.ltps ?? {}} busy={busy} post={post} />
+        )}
+        {basketModalOpen && (
+          <BasketLegsModal name={basketTpl?.name ?? 'Basket'} legs={basketLegs} strikes={strikes} atmStrike={atmStrike} locked={basketLocked}
+            prices={basketLegs.map((_, i) => basketView?.legs[i]?.ltp ?? null)}
+            onChange={l => { setBasketLegs(l); setBasketEdited(true); }}
+            onReset={() => { setBasketEdited(false); buildBasket(); }}
+            onClose={() => setBasketModalOpen(false)} />
         )}
 
         {/* Collapsed by default (remembered per browser); the header keeps the count and the newest event in view. */}
@@ -1951,5 +2109,53 @@ function PairTrailControl({ p, busy, post, fallback }: { p: LadderPair; busy: bo
       <NumField label="Pair trailing SL distance in points" value={cur} min={0} width="w-14" onCommit={v => { if (v !== cur) send(v); }} />
       <button type="button" disabled={busy} onClick={() => send(0)} className={`px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white ${FOCUS_RING}`}>Off</button>
     </span>
+  );
+}
+
+
+/** The baskets (armed, open and finished today) of this ladder: what each is, where it entered, its P&L, and its Cancel / Exit. */
+function BasketTable({ baskets, ltps, busy, post }: { baskets: LadderBasket[]; ltps: Record<string, number>; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean> }) {
+  const heads = ['Time', 'Mode', 'Basket', 'Side', 'Lots', 'Legs', 'Trigger', 'Entry net', 'Now net', 'TGT / SL', 'State', 'P&L', ''];
+  return (
+    <div className="rounded-lg border border-zinc-800 overflow-x-auto">
+      <div className="flex items-center justify-between px-3 py-2 bg-zinc-900/40">
+        <p className="text-xs font-bold text-white">Basket orders &amp; positions <span className="text-zinc-500 font-medium">({baskets.filter(isBasketLive).length} live)</span></p>
+      </div>
+      <table className="w-full text-xs">
+        <thead className="bg-zinc-800">
+          <tr className="text-left">{heads.map((h, i) => <th key={`${h}-${i}`} className="px-2 py-1.5 text-xs font-bold text-white whitespace-nowrap">{h}</th>)}</tr>
+        </thead>
+        <tbody>
+          {[...baskets].reverse().map(b => {
+            const live = isBasketLive(b);
+            const pnl = basketNowPnl(b, ltps) ?? null;
+            let now: number | null = null;
+            { let v = 0, ok = true; for (const l of b.legs) { const px = ltps[l.contract.securityId]; if (!(px > 0)) { ok = false; break; } v += (l.side === 'BUY' ? 1 : -1) * l.ratio * px; } if (ok) now = Math.round((b.side === 'BUY' ? v : -v) * 100) / 100; }
+            const stateClass = b.state === 'open' ? 'text-emerald-400 font-bold' : b.state === 'armed' || b.state === 'exiting' || b.state === 'placing' ? 'text-sky-300' : b.state === 'unknown' ? 'text-red-400 font-bold' : 'text-zinc-400';
+            return (
+              <tr key={b.id} className={`border-t border-zinc-900 ${live ? '' : 'opacity-60'}`}>
+                <td className="px-2 py-1 font-mono text-zinc-400 whitespace-nowrap">{timeOf(b.createdAt)}</td>
+                <td className="px-2 py-1">{b.mode === 'real' ? <span className="text-red-400 font-bold">REAL</span> : 'SIM'}</td>
+                <td className="px-2 py-1 font-mono whitespace-nowrap" title={basketName(b)}>{basketName(b)}</td>
+                <td className={`px-2 py-1 font-bold ${b.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`} title={b.side === 'SELL' ? 'Receives the net premium' : 'Pays the net premium'}>{b.side}</td>
+                <td className="px-2 py-1 font-mono">{b.lots}</td>
+                <td className="px-2 py-1 font-mono text-zinc-400 whitespace-nowrap">{b.legs.map(l => `${l.side === 'BUY' ? '+' : '−'}${l.contract.strike}${l.contract.opt}${l.ratio > 1 ? `×${l.ratio}` : ''}`).join(' ')}</td>
+                <td className="px-2 py-1 font-mono whitespace-nowrap">{b.entryLevel ? `net ${b.entryDir === 'below' ? '≤' : '≥'} ${b.entryLevel}` : '—'}</td>
+                <td className="px-2 py-1 font-mono">{b.entryY ? b.entryY.toFixed(2) : '—'}</td>
+                <td className="px-2 py-1 font-mono">{live && b.state !== 'armed' && now != null ? now.toFixed(2) : '—'}</td>
+                <td className="px-2 py-1 font-mono whitespace-nowrap">{b.tgtY != null || b.slY != null ? `${b.tgtY != null ? b.tgtY.toFixed(2) : '—'} / ${b.slY != null ? b.slY.toFixed(2) : '—'}${b.bracket?.trailPts ? ` (T${b.bracket.trailPts})` : ''}` : '—'}</td>
+                <td className={`px-2 py-1 ${stateClass}`}>{b.state.toUpperCase()}{b.state === 'closed' && b.exitReason ? <span className="text-zinc-500 font-normal"> · {b.exitReason}</span> : null}{b.note && b.state !== 'closed' ? <span className="block text-[10px] font-normal text-zinc-500 max-w-64 truncate">{b.note}</span> : null}</td>
+                <td className={`px-2 py-1 font-mono ${pnlClass(pnl)}`}>{fmtMoney(pnl)}</td>
+                <td className="px-2 py-1 whitespace-nowrap">
+                  {b.state === 'armed' && <button type="button" disabled={busy} onClick={() => void post({ action: 'basket', op: 'cancel', id: b.id })} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">Cancel</button>}
+                  {b.state === 'open' && <button type="button" disabled={busy || !!b.exitWanted} onClick={() => void post({ action: 'basket', op: 'exit', id: b.id })} title="Exit every leg at market"
+                    className="px-1.5 py-0.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40">{b.exitWanted ? 'Exiting…' : 'Exit all legs'}</button>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }

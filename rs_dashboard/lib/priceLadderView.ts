@@ -8,6 +8,7 @@ import {
   type LadderBroker, type LadderContract, type OptType,
 } from '@/lib/priceLadder';
 import { isPairLive, pairCombined } from '@/lib/priceLadderPair';
+import { isBasketLive, basketAxis, validateDraft, type DraftLeg } from '@/lib/priceLadderBasket';
 import { prevDayLevelsNow } from '@/lib/prevDayLevels';
 
 // What the Price Ladder page shows, built once for both the 1 s poll (GET /api/price-ladder/state) and the push stream
@@ -75,11 +76,28 @@ export async function buildLadderView(params: URLSearchParams) {
     if (typeof ce !== 'string' && typeof pe !== 'string') pairLegs = { ce, pe };
     else pairError = typeof ce === 'string' ? ce : pe as string;
   }
+  // Basket mode: the legs on screen (`basket` = `strike:opt:side:ratio,...`, side B / S as the strategy defines them).
+  const draft: DraftLeg[] = (params.get('basket') ?? '').split(',').filter(Boolean).slice(0, 12).map(t => {
+    const [strike, opt, side, ratio] = t.split(':');
+    return { strike: Number(strike), opt: opt as 'CE' | 'PE', side: side === 'S' ? 'SELL' : 'BUY', ratio: Number(ratio) };
+  });
+  let basketLegs: LadderContract[] | null = null;
+  let basketError: string | null = null;
+  if (LADDER_UNDERLYINGS.includes(want) && /^\d{4}-\d{2}-\d{2}$/.test(expiry) && draft.length) {
+    basketError = validateDraft(draft);
+    if (!basketError) {
+      const cs = await Promise.all(draft.map(l => resolveContract('dhan', want, expiry, l.strike, l.opt)));
+      const failed = cs.find(c => typeof c === 'string');
+      if (failed) basketError = failed as string; else basketLegs = cs as LadderContract[];
+    }
+  }
+  const liveBasketLegs = (state.baskets ?? []).filter(isBasketLive).flatMap(b => b.legs.map(l => l.contract));
   const livePairLegs = (state.pairs ?? []).filter(isPairLive)
     .flatMap(p => [p.legs.ce.contract, p.legs.pe.contract, ...(p.rollTo?.ce ? [p.rollTo.ce] : []), ...(p.rollTo?.pe ? [p.rollTo.pe] : [])]);
   const unders = [...new Set([...(shownKey ? [shownKey] : []), ...live.map(x => spotKey(x.contract))])];
   const prices = await loadPrices(unders, [
     ...live.map(x => x.contract), ...(shown ? [shown] : []), ...livePairLegs, ...(pairLegs ? [pairLegs.ce, pairLegs.pe] : []),
+    ...liveBasketLegs, ...(basketLegs ?? []),
   ]);
   const now = Date.now();
   const spots = Object.fromEntries(Object.entries(prices.spots).map(([u, v]) => [u, { ...v, fresh: spotFresh(v.at, now) }]));
@@ -98,13 +116,21 @@ export async function buildLadderView(params: URLSearchParams) {
       dayLow: dayLow && dayLow > 0 ? dayLow : null,
     },
     // Which contract this reply describes: the page ignores a reply for a selection it has since moved off.
-    request: { underlying: want, expiry, strike: strike > 0 ? strike : null, opt, pairCe: pairCe > 0 ? pairCe : null, pairPe: pairPe > 0 ? pairPe : null },
+    request: { underlying: want, expiry, strike: strike > 0 ? strike : null, opt, pairCe: pairCe > 0 ? pairCe : null, pairPe: pairPe > 0 ? pairPe : null, basket: params.get('basket') ?? '' },
     pair: pairLegs ? {
       ce: { strike: pairLegs.ce.strike, securityId: pairLegs.ce.securityId, ltp: prices.ltps[pairLegs.ce.securityId] ?? null },
       pe: { strike: pairLegs.pe.strike, securityId: pairLegs.pe.securityId, ltp: prices.ltps[pairLegs.pe.securityId] ?? null },
       combined: pairCombined({ legs: { ce: { contract: pairLegs.ce }, pe: { contract: pairLegs.pe } } }, prices.ltps),
       lotSize: pairLegs.ce.lotSize, mult: pairLegs.ce.mult ?? 1,
     } : null,
+    basketError,
+    basket: basketLegs ? (() => {
+      const ax = basketAxis(draft, l => prices.ltps[basketLegs![draft.indexOf(l)].securityId]);
+      return {
+        legs: draft.map((l, i) => ({ strike: l.strike, opt: l.opt, side: l.side, ratio: l.ratio, securityId: basketLegs![i].securityId, ltp: prices.ltps[basketLegs![i].securityId] ?? null })),
+        a: ax?.a ?? null, credit: ax?.credit ?? null, lotSize: basketLegs![0].lotSize, mult: basketLegs![0].mult ?? 1,
+      };
+    })() : null,
     contract: shown ? {
       securityId: shown.securityId, lotSize: shown.lotSize, ltp: prices.ltps[shown.securityId] ?? null,
       mult: shown.mult ?? 1, ...(shown.ref ? { refExpiry: shown.ref.expiry, axisDay: axisDayOf(shown, prices.days, now, state.settings?.mcxAutoExitTime) } : {}),

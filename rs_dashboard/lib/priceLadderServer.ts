@@ -29,6 +29,7 @@ import {
   type LadderPair, type PairJob, type PairLegKey,
 } from '@/lib/priceLadderPair';
 import { applyGuards, inScope, parseGuardKey } from '@/lib/priceLadderGuard';
+import { isBasketLive, planBaskets } from '@/lib/priceLadderBasket';
 import { readLadderSettings } from '@/lib/priceLadderSettings';
 import { archiveDay, partsToArchive } from '@/lib/priceLadderArchive';
 
@@ -74,6 +75,7 @@ function readStateFile(): LadderState {
       events: Array.isArray(s.events) ? s.events : [],
       ...(s.liveArmedOn ? { liveArmedOn: String(s.liveArmedOn) } : {}),
       ...(Array.isArray(s.pairs) && s.pairs.length ? { pairs: s.pairs } : {}),
+      ...(Array.isArray(s.baskets) && s.baskets.length ? { baskets: s.baskets } : {}),
       ...(s.guards && Object.keys(s.guards).length ? { guards: s.guards } : {}),
       ...(Number.isFinite(Number(s.rev)) ? { rev: Number(s.rev) } : {}),
       settings: s.settings ?? settings,
@@ -1055,7 +1057,8 @@ async function tick(): Promise<void> {
   // UNKNOWN slices wait for the user and need nothing from the watcher; everything else live does.
   const live = s.slices.filter(x => isLive(x) && x.state !== 'unknown');
   const livePairs = (s.pairs ?? []).filter(isPairLive);
-  if (!live.length && !livePairs.length) return;
+  const liveBaskets = (s.baskets ?? []).filter(isBasketLive);
+  if (!live.length && !livePairs.length && !liveBaskets.length) return;
   const now = Date.now();
   // Prices only for slices whose rules read them (armed / open XY need spot; SIM fills and exits need the option LTP).
   // An exiting REAL slice is priced too: its open units count in the MTM, and an unpriced one blinds the global guard.
@@ -1063,8 +1066,9 @@ async function tick(): Promise<void> {
   const underlyings = [...new Set(priced.map(x => spotKey(x.contract)))];
   // A pair's rules read both legs' premiums (its combined price).
   const pairLegs = livePairs.flatMap(p => [p.legs.ce.contract, p.legs.pe.contract, ...(p.rollTo?.ce ? [p.rollTo.ce] : []), ...(p.rollTo?.pe ? [p.rollTo.pe] : [])]);
-  const prices: PriceView = priced.length || pairLegs.length
-    ? await loadPrices(underlyings, [...priced.map(x => x.contract), ...pairLegs]) : { spots: {}, ltps: {} };
+  const basketLegs = liveBaskets.flatMap(b => b.legs.map(l => l.contract));
+  const prices: PriceView = priced.length || pairLegs.length || basketLegs.length
+    ? await loadPrices(underlyings, [...priced.map(x => x.contract), ...pairLegs, ...basketLegs]) : { spots: {}, ltps: {} };
 
   for (const u of underlyings) {
     const needsSpot = live.some(x => spotKey(x.contract) === u && x.kind === 'xy' && (x.state === 'armed' || x.state === 'open'));
@@ -1096,7 +1100,8 @@ async function tick(): Promise<void> {
     // Pairs: SIM fills / exits happen in this write; REAL orders are marked here and sent by the pair jobs below.
     const pr = planPairs(r.next, prices.ltps, now, io);
     pairJobs = pr.jobs;
-    return pr.next;
+    // Baskets (SIM only in release 1): armed levels fire and open ones exit in this same write; no order jobs.
+    return planBaskets(pr.next, prices.ltps, now).next;
   });
   // A tripped guard also pulls the resting REAL entry orders (a fill after the exit would reopen what it just closed).
   // Off the tick (a slow broker endpoint must not stall every other stop), retried every 30 s while one still rests.
