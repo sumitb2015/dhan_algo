@@ -332,6 +332,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [confirm, setConfirm] = useState<null | { text: string; run: () => void; setting?: { title: string; button: string } }>(null);
   const [armModal, setArmModal] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [dismissedBlock, setDismissedBlock] = useState<string | null>(null);   // the pause reason the user closed; a different reason shows again
   const [savedDefaults, setSavedDefaults] = useState<LadderDefaults>({});
   const [chainOpen, setChainOpen] = useState(false);
   const [underlying, setUnderlyingRaw] = useState<string>('NIFTY');
@@ -1155,6 +1156,16 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const notTracking = anyLive && (unreachable || !!data?.watcherQuiet);
   const placeDisabled = busy || !brokerLoaded || !strike || !(refPrice > 0) || realBlocked || (real && sessionDown) || (mode === 'xy' && stale)
     || (mode === 'pair' && !pairView) || (mode === 'basket' && !basketView?.a);
+  // Why a click on the ladder would do nothing, in the order the checks run; shown as a chip so a blocked cursor is never unexplained.
+  const placeBlockReason = !placeDisabled || busy ? null
+    : !brokerLoaded ? 'loading the broker account'
+    : realBlocked ? 'REAL mode is not armed for today (arm LIVE · REAL MONEY, or switch to SIM)'
+    : real && sessionDown ? `${BROKER_LABELS[broker]} session is not logged in`
+    : !strike || !(refPrice > 0) ? (mode === 'xy' ? `waiting for the ${mcx ? 'futures' : 'index'} price and the option chain` : 'waiting for the option chain and live premiums')
+    : mode === 'xy' && stale ? `${axisName} ${mcx ? 'price' : 'spot'} is not updating${inSession ? '' : ' (market closed?)'}; levels are paused until it moves`
+    : mode === 'pair' && !pairView ? 'waiting for both legs of the pair'
+    : mode === 'basket' && !basketView?.a ? 'waiting for a live price on every basket leg'
+    : null;
   const decimals = mode === 'xy' ? (tick < 1 ? 2 : 0) : 2;
   const ticks = mode === 'xy' ? XY_TICKS : mode === 'pair' || mode === 'basket' ? PAIR_TICKS : PLAIN_TICKS;
   const HELP_TEXT = mode === 'basket'
@@ -1704,6 +1715,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               {mode === 'xy' && <label className="flex items-center gap-1.5 text-zinc-400" title="Open-interest bars on the strike rows: puts left of the Price column, calls right"><input type="checkbox" checked={oiOn} onChange={e => { setOiOn(e.target.checked); savePref(k('price-ladder-oi'), e.target.checked ? '1' : '0'); }} /> OI</label>}
               {mode === 'xy' && oiOn && oiRows.staleSince != null && <span className="text-[10px] text-amber-300" title="Dhan refused a fresh option chain, so the OI bars come from the last good one">OI stale since {timeOf(oiRows.staleSince)}</span>}
               <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow price</label>
+              {/* Closing it keeps its space (invisible, not removed) so the two ladders stay level. */}
+              {placeBlockReason && <span className={`inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 pl-2 pr-1 py-0.5 text-[11px] font-semibold text-amber-300 ${dismissedBlock === placeBlockReason ? 'invisible' : ''}`} role="status" title="Clicks on the ladder are ignored until this clears"><AlertTriangle className="w-3 h-3" aria-hidden /> Ordering paused: {placeBlockReason}
+                <button type="button" onClick={() => setDismissedBlock(placeBlockReason)} aria-label="Dismiss notice" title="Dismiss" tabIndex={dismissedBlock === placeBlockReason ? -1 : 0} className="ml-0.5 rounded p-0.5 hover:bg-amber-500/20"><X className="w-3 h-3" aria-hidden /></button></span>}
               {held && <span className="text-[10px] text-amber-300" title="The rows stay put while the pointer is on the ladder, so a price tick cannot move a level under the mouse; they re-centre when it leaves">Rows held</span>}
               </div>
               <div className="flex items-center gap-2 flex-1 min-w-0 rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-2.5 py-1">
