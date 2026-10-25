@@ -133,7 +133,7 @@ export function openPositionCount(slices: readonly LadderSlice[], pairs: readonl
     if (isLive(x) && (Number(x.filledQty) || 0) > 0) held.add(`${x.contract.securityId}|${x.broker}|${x.mode}|${x.side}`);
   }
   const open = pairs.filter(p => p.state === 'open' || p.state === 'exiting' || p.state === 'broken' || p.state === 'rolling').length;
-  return held.size + open + baskets.filter(b => b.state === 'open' || b.state === 'exiting').length;
+  return held.size + open + baskets.filter(b => b.state === 'open' || b.state === 'broken' || b.state === 'exiting').length;
 }
 
 /** The pair a joined lot hangs off, following joinedTo links to the first pair (cycle-safe). */

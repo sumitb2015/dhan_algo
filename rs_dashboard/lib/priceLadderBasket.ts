@@ -1,9 +1,9 @@
 import { STRATEGY_CATEGORIES, nearestStrike, type StrategyTemplate } from './basketStrategies.ts';
 import {
-  bracketLevels, entryStep, istDay, istHhmm, openExitStep, pushEvent, sessionFor, slicePnl,
+  bracketLevels, entryStep, istDay, istHhmm, openExitStep, pushEvent, realArmed, sessionFor, slicePnl,
   type ClickType, type LadderBracket, type LadderBroker, type LadderEvent, type LadderProduct, type LadderSide, type LadderState, type LadderZones,
 } from './priceLadder.ts';
-import { blendExitAvg, fillLeg, pairBias, type PairLeg } from './priceLadderPair.ts';
+import { blendExitAvg, fillLeg, legNeedsExitSend, pairBias, PAIR_ORPHAN_MS, PAIR_POLL_MS, type PairLeg } from './priceLadderPair.ts';
 
 // Pure rules for the Price Ladder's Basket mode: a prebuilt multi-leg strategy (iron condor, butterfly, ...) traded on its
 // NET premium. Release 1 is SIM only (the server refuses REAL baskets), so the planner below fills and exits in this write;
@@ -15,10 +15,12 @@ import { blendExitAvg, fillLeg, pairBias, type PairLeg } from './priceLadderPair
 // actually traded on, so a held basket's A rises/falls like a pair's combined premium and pairBias / entryStep /
 // openExitStep apply unchanged (profit BUY = A up, SELL = A down).
 
-export type BasketState = 'armed' | 'placing' | 'open' | 'exiting' | 'closed' | 'cancelled' | 'unknown';
+export type BasketState = 'armed' | 'placing' | 'open' | 'broken' | 'exiting' | 'closed' | 'cancelled' | 'unknown';
 
 /** A leg of a basket: a pair-style leg (contract, fills, REAL order fields) plus the side it trades on and its lots ratio. */
 export interface BasketLeg extends PairLeg {
+  /** A stable id of the leg inside its basket ('l0', 'l1', ...). */
+  key: string;
   /** The side actually traded (already mirrored for the opposite direction). */
   side: LadderSide;
   /** Lots of this leg per basket lot (a butterfly's body is 2). */
@@ -49,6 +51,10 @@ export interface LadderBasket {
   bracket?: LadderBracket;
   /** Realised P&L (rupees) of legs rolled away or closed out of this basket. */
   bookedPnl?: number;
+  /** REAL entry: the hedges (BUY legs) go first and must fill in full before the shorts (SELL legs) are sent. */
+  phase?: 'hedges' | 'shorts';
+  /** REAL Buy / Sell Market: written `placing` by the API; the watcher marks it sent and starts the order job on its next tick. */
+  sendWanted?: boolean;
   sentAt?: number;
   crossY?: number;
   // position (net premium terms)
@@ -220,21 +226,31 @@ function bracketAt(b: LadderBasket, entryY: number): Partial<LadderBasket> {
 }
 
 /**
- * One watcher tick for every live SIM basket (pure; every stamp is `now`). An armed level fires on a cross of the net premium
- * inside the session: every leg fills at its live price at once. An open basket exits on its bracket / trail, a manual exit,
- * or the MIS square-off, every leg at its live price (waiting while one has none). A basket past its expiry is closed without
- * a price. REAL baskets are not handled here (release 2).
+ * One watcher tick for every live basket (pure; every stamp is `now`). An armed level fires on a cross of the net premium inside
+ * the session: SIM fills every leg at its live price at once; REAL is marked `placing` (hedges phase first) and the order jobs
+ * send the legs. An open basket exits on its bracket / trail, a manual exit, or the MIS square-off. A basket past its expiry is
+ * closed without a price.
  */
-export function planBaskets(s: LadderState, ltps: Record<string, number>, now: number): { next: LadderState } {
+export function planBaskets(s: LadderState, ltps: Record<string, number>, now: number, io: BasketTickIo = NO_IO): { next: LadderState; jobs: BasketJob[] } {
   const baskets = s.baskets ?? [];
-  if (!baskets.some(b => isBasketLive(b) && b.mode === 'sim')) return { next: s };
+  const jobs: BasketJob[] = [];
+  if (!baskets.some(isBasketLive)) return { next: s, jobs };
   const today = istDay(now);
   const hhmm = istHhmm(now);
   let next = s;
-  const patch = (id: string, x: Partial<LadderBasket>) => patchBasket(next, id, x, now);
+  const patch = (id: string, x: Partial<LadderBasket> | ((b: LadderBasket) => Partial<LadderBasket>)) => patchBasket(next, id, x, now);
   const say = (st: LadderState, level: LadderEvent['level'], msg: string, id: string) => pushEvent(st, bev(level, msg, id, now));
+  /** Start (or resume) exiting: the REAL legs allowed to exit now (shorts first) are marked for sending in this same write. */
+  const beginExit = (b: LadderBasket, reason: string, extra: Partial<LadderBasket> = {}): void => {
+    const send = exitLegs(b, now).map(l => l.key);
+    const legs = b.legs.map(l => (send.includes(l.key) ? { ...l, exitSentAt: now, note: undefined } as BasketLeg : l));
+    next = say(patch(b.id, { ...extra, state: 'exiting', exitReason: reason, exitWanted: undefined, legs, note: undefined }),
+      'info', `${basketName(b)}: ${reason} — exiting ${legs.filter(l => (l.held ?? 0) > 0).map(l => `${l.held} ${l.contract.strike}${l.contract.opt}`).join(' + ') || 'nothing left'}`, b.id);
+    if (send.length) jobs.push({ kind: 'basketClose', id: b.id });
+  };
   for (const b of baskets) {
-    if (!isBasketLive(b) || b.mode !== 'sim') continue;
+    if (!isBasketLive(b)) continue;
+    const real = b.mode === 'real';
     const sess = sessionFor(b.legs[0].contract.underlying, today, s.settings?.mcxAutoExitTime, s.settings?.nseAutoExitTime);
     const afterClose = hhmm >= sess.autoExit;
     const sessionOpen = hhmm >= sess.open && hhmm < sess.close;
@@ -242,11 +258,19 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
     const name = basketName(b);
     const c = basketCombined(b, ltps);
 
+    if (b.state === 'unknown') continue;                 // the user resolves it; nothing automatic
+
     if (b.state === 'armed') {
       if (afterClose || basketExpired(b, today)) { next = say(patch(b.id, { state: 'cancelled', note: `Cancelled at ${at}` }), 'info', `${name}: armed level cancelled at ${at}`, b.id); continue; }
+      if (real && !realArmed(s, today)) { next = say(patch(b.id, { state: 'cancelled', note: 'LIVE · REAL MONEY is off' }), 'warn', `${name}: REAL level cancelled — the live arm is off`, b.id); continue; }
       if (c == null) continue;
       const r = entryStep(b, c);
-      if (r.fire && sessionOpen) {
+      if (r.fire && sessionOpen && real) {
+        // Marked before anything is sent: a crash or a second process can never send these orders twice.
+        next = say(patch(b.id, { state: 'placing', phase: firstPhase(b), seenSafe: r.seenSafe, sentAt: now, crossY: c }),
+          'info', `Net ${c.toFixed(2)} crossed ${b.entryLevel} — ${b.side} ${b.lots} lot(s) ${name}: ${phaseLegs(b, 'hedges').length ? 'hedges first, then the shorts' : 'every leg at MARKET'}`, b.id);
+        jobs.push({ kind: 'basketOpen', id: b.id });
+      } else if (r.fire && sessionOpen) {
         const legs = b.legs.map(l => fillLeg(l, basketLegQty(b.lots, l.ratio, l.contract.lotSize), ltps[l.contract.securityId]) as BasketLeg);
         const entryY = basketCombined({ legs, side: b.side }, Object.fromEntries(legs.map(l => [l.contract.securityId, l.avg!]))) ?? c;
         next = say(patch(b.id, { state: 'open', seenSafe: r.seenSafe, openedAt: now, entryY, legs, ...bracketAt(b, entryY) }),
@@ -257,9 +281,101 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
       continue;
     }
 
-    if (b.state !== 'open') continue;
+    if (b.state === 'placing') {
+      if (!real) continue;
+      if (b.sendWanted) {
+        // A REAL Buy / Sell Market written by the API: marked here (sentAt) in the same write that hands it to the order job.
+        if (!sessionOpen || afterClose) {
+          next = say(patch(b.id, { state: 'cancelled', sendWanted: undefined, note: 'Market closed before it was sent' }), 'warn', `${name}: market order not sent — the market is closed`, b.id);
+        } else {
+          next = patch(b.id, { sendWanted: undefined, sentAt: now });
+          jobs.push({ kind: 'basketOpen', id: b.id });
+        }
+        continue;
+      }
+      if (b.legs.some(l => l.unknown)) {
+        next = say(patch(b.id, { state: 'unknown', note: 'An entry order has an unknown outcome — check Orders/Positions, then resolve each leg' }), 'error', `${name}: entry UNKNOWN — nothing more is sent or reversed until you resolve it`, b.id);
+        continue;
+      }
+      // The CURRENT phase's legs were marked for sending but none has an order id and no send is running: the send was
+      // interrupted (e.g. the shorts after the hedges filled). Those legs are UNKNOWN; the user resolves them (the filled hedges stay).
+      const phaseKeys = new Set(phaseLegs(b, b.phase ?? 'shorts').map(l => l.key));
+      const sentNothing = b.legs.filter(l => phaseKeys.has(l.key)).every(l => !l.orderId && !l.entry);
+      if (sentNothing && !io.busy(b.id) && now - (b.sentAt ?? now) > PAIR_ORPHAN_MS) {
+        next = say(patch(b.id, x => ({ state: 'unknown', note: 'Entry send was interrupted — check Orders/Positions',
+          legs: x.legs.map(l => (phaseKeys.has(l.key) ? { ...l, entry: 'unknown', unknown: 'entry' } as BasketLeg : l)) })), 'error', `${name}: entry send interrupted — outcome UNKNOWN`, b.id);
+        continue;
+      }
+      const v = basketEntryVerdict(b);
+      if (v === 'advance') {
+        // Every hedge filled in full: only now are the shorts sent.
+        next = say(patch(b.id, { phase: 'shorts', sentAt: now }), 'info', `${name}: hedges filled — sending the shorts`, b.id);
+        jobs.push({ kind: 'basketOpen', id: b.id });
+      } else if (v === 'open') {
+        // The bracket is measured from the traded prices. A fill reported without an average takes the live LTP; with neither the basket waits.
+        const avgs = b.legs.map(l => l.avg || ltps[l.contract.securityId]);
+        if (avgs.some(a => !(a > 0))) {
+          const note = 'Every leg filled — waiting for a price to set the bracket';
+          if (b.note !== note) next = say(patch(b.id, { note }), 'warn', `${name}: filled, but a leg has no fill price or live price yet — the bracket waits`, b.id);
+          continue;
+        }
+        const legs = b.legs.map((l, i) => ({ ...l, avg: avgs[i], held: l.filledQty } as BasketLeg));
+        const entryY = basketCombined({ legs, side: b.side }, Object.fromEntries(legs.map(l => [l.contract.securityId, l.avg!]))) ?? c ?? 0;
+        next = say(patch(b.id, { state: 'open', phase: undefined, openedAt: now, note: undefined, entryY, legs, ...bracketAt(b, entryY) }),
+          'info', `${b.side} ${b.lots} lot(s) ${name} filled at net ${entryY.toFixed(2)} (crossed at ${b.crossY ?? '?'})`, b.id);
+      } else if (v === 'unwind') {
+        // Never a partial structure: exit every unit that did fill (shorts first). Nothing filled at all = nothing to undo.
+        const legs = b.legs.map(l => ({ ...l, held: l.filledQty ?? 0 }) as BasketLeg);
+        const why = legs.map(l => (l.entry === 'dead' ? `${l.contract.strike}${l.contract.opt} ${l.note ?? 'rejected'}` : !legFull(b, l) && l.entry !== 'sent' && l.entry != null ? `${l.contract.strike}${l.contract.opt} filled ${l.filledQty ?? 0} of ${basketLegQty(b.lots, l.ratio, l.contract.lotSize)}` : '')).filter(Boolean).join('; ') || 'a leg did not fill';
+        if (legs.every(l => !(l.held ?? 0))) {
+          next = say(patch(b.id, { state: 'cancelled', legs, note: `Entry failed: ${why}` }), 'error', `${name}: entry failed (${why}) — nothing filled`, b.id);
+        } else {
+          next = say(patch(b.id, { legs }), 'error', `${name}: entry failed (${why}) — unwinding what filled`, b.id);
+          // openedAt = now: the fills are seconds old and may not be in the broker's book yet (the fill grace), so the unwind is not sized to 0.
+          beginExit({ ...b, legs }, 'Entry failed — unwinding', { openedAt: now });
+        }
+      } else if (needsSettle(b) && now - io.polledAt(b.id) >= PAIR_POLL_MS) {
+        jobs.push({ kind: 'basketSettle', id: b.id });
+      }
+      continue;
+    }
+
+    if (b.state === 'exiting') {
+      if (!real) continue;
+      if (basketExpired(b, today)) {
+        next = say(patch(b.id, { state: 'closed', exitReason: 'Expired', closedAt: now, note: 'Expired while exiting — settled at the broker; check Positions' }),
+          'warn', `${name}: expired while its exit was still being retried — closed; check Positions`, b.id);
+        continue;
+      }
+      if (b.legs.some(l => l.unknown)) {
+        next = say(patch(b.id, { state: 'unknown', note: 'An exit order has an unknown outcome — check Orders/Positions, then resolve each leg' }), 'error', `${name}: exit UNKNOWN — nothing more is sent until you resolve it`, b.id);
+        continue;
+      }
+      const orphan = b.legs.find(l => l.exitSentAt && !l.exitOrderId && !io.busy(b.id) && now - Number(l.exitSentAt) > PAIR_ORPHAN_MS);
+      if (orphan) {
+        next = say(patch(b.id, x => ({ state: 'unknown', note: 'Exit send was interrupted — check Positions', legs: x.legs.map(l => (l.key === orphan.key ? { ...l, unknown: 'exit' } as BasketLeg : l)) })),
+          'error', `${name}: ${orphan.contract.strike}${orphan.contract.opt} exit send interrupted — outcome UNKNOWN`, b.id);
+        continue;
+      }
+      if (b.legs.every(l => (l.held ?? 0) <= 0 && !l.exitOrderId && !l.exitSentAt)) {
+        next = say(patch(b.id, { state: 'closed', closedAt: now, note: undefined }), 'info', `${name}: exited (${b.exitReason})`, b.id);
+        continue;
+      }
+      if (needsSettle(b) && now - io.polledAt(b.id) >= PAIR_POLL_MS) jobs.push({ kind: 'basketSettle', id: b.id });
+      // The next leg(s) allowed to exit (shorts first; hedges once no short is held) go inside the session only.
+      const send = exitLegs(b, now);
+      if (sessionOpen && !io.busy(b.id) && send.length) {
+        const keys = send.map(l => l.key);
+        next = patch(b.id, { legs: b.legs.map(l => (keys.includes(l.key) ? { ...l, exitSentAt: now } as BasketLeg : l)) });
+        jobs.push({ kind: 'basketClose', id: b.id });
+      }
+      continue;
+    }
+
+    // open / broken
+    if (b.state !== 'open' && b.state !== 'broken') continue;
     if (basketExpired(b, today)) {
-      next = say(patch(b.id, { state: 'closed', exitReason: 'Expired', closedAt: now, exitWanted: undefined, note: 'Expired while open — no exit price (SIM)' }),
+      next = say(patch(b.id, { state: 'closed', exitReason: 'Expired', closedAt: now, exitWanted: undefined, note: real ? 'Expired while open — settled at the broker' : 'Expired while open — no exit price (SIM)' }),
         'warn', `${name}: expired while open — closed without an exit price`, b.id);
       continue;
     }
@@ -270,9 +386,11 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
       if (due && b.note !== note) next = say(patch(b.id, { note }), 'warn', `${name}: exit due but the market is closed — waiting for the open`, b.id);
       continue;
     }
+    // A broken basket's bracket is off (its net no longer describes what is held): only MIS / manual exits act.
     // The bracket reads the net premium; a manual / MIS exit needs only every leg's price (a net that has fallen to nothing
     // must not strand the exit). So the net is passed only while it is a usable price.
-    const step = openExitStep(b, pairBias(b.side), c, afterClose, at);
+    const step = openExitStep(b, pairBias(b.side), b.state === 'broken' ? null : c, afterClose, at);
+    if (real && step.reason) { beginExit(b, step.reason, step.patch); continue; }
     const allPriced = b.legs.every(l => ltps[l.contract.securityId] > 0);
     if (step.reason && !allPriced) {
       const note = 'Exit waiting for every leg price';
@@ -283,11 +401,11 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
       const legs = b.legs.map(l => ({ ...l, held: 0, exitedQty: (l.exitedQty ?? 0) + basketLegHeld(l), exitAvg: blendExitAvg(l, basketLegHeld(l), ltps[l.contract.securityId]) } as BasketLeg));
       next = say(patch(b.id, { ...step.patch, state: 'closed', exitReason: step.reason, exitWanted: undefined, closedAt: now, note: undefined, legs }),
         'info', `SIM exit ${name} (${step.reason})${c != null ? ` at net ${c.toFixed(2)}` : ''}`, b.id);
-    } else if (Object.keys(step.patch).length || b.note) {
-      next = patch(b.id, { ...step.patch, ...(b.note ? { note: undefined } : {}) });
+    } else if (Object.keys(step.patch).length || (b.note && b.state === 'open')) {
+      next = patch(b.id, { ...step.patch, ...(b.note && b.state === 'open' ? { note: undefined } : {}) });
     }
   }
-  return { next };
+  return { next, jobs };
 }
 
 /**
@@ -314,7 +432,8 @@ export function splitBasketLots(b: LadderBasket, k: number, newId: string, now: 
 export function applyBasketShare(st: LadderState, ids: readonly string[], pct: number, now: number, newId: () => string): { next: LadderState; lots: number } | string {
   if (![25, 50, 75, 100].includes(pct)) return 'pct must be 25, 50, 75 or 100';
   const want = new Set(ids);
-  const cands = (st.baskets ?? []).filter(b => want.has(b.id) && b.state === 'open' && !b.exitWanted).sort((a, b) => (a.openedAt ?? 0) - (b.openedAt ?? 0));
+  // A broken basket (a leg closed outside the ladder) can only exit whole: its legs no longer hold their full quantities.
+  const cands = (st.baskets ?? []).filter(b => want.has(b.id) && (b.state === 'open' || (pct === 100 && b.state === 'broken')) && !b.exitWanted).sort((a, b) => (a.openedAt ?? 0) - (b.openedAt ?? 0));
   if (!cands.length) return 'Nothing is open to exit';
   const total = cands.reduce((a, b) => a + b.lots, 0);
   let next = st;
@@ -330,6 +449,7 @@ export function applyBasketShare(st: LadderState, ids: readonly string[], pct: n
     const take = Math.min(left, b.lots);
     const cur = (next.baskets ?? []).find(y => y.id === b.id)!;
     const sp = splitBasketLots(cur, take, newId(), now);
+
     if (typeof sp === 'string') return sp;
     next = patchBasket(next, b.id, sp.parent, now);
     if (sp.child) next = { ...next, baskets: [...(next.baskets ?? []), sp.child] };
@@ -341,3 +461,80 @@ export function applyBasketShare(st: LadderState, ids: readonly string[], pct: n
 /** Lots this basket puts on one contract and side (ratio x lots): the 20-lot cap counts them with every slice and pair. */
 export const basketLotsOn = (b: LadderBasket, securityId: string, side: LadderSide): number =>
   b.legs.filter(l => l.contract.securityId === securityId && l.side === side).reduce((a, l) => a + b.lots * l.ratio, 0);
+
+// ── REAL placement (release 2) ───────────────────────────────────────────────────────────────────────────────────
+// Hedges first, shorts second (dhan-terminal-position-ownership Inv 9): the BUY legs go together and must all fill in full
+// before any SELL leg is sent, so a naked short never exists. If a hedge fails nothing is short and the filled hedges are
+// simply sold again; if a short then fails or part-fills, every filled leg is unwound — shorts covered first, then the hedges.
+// An unknown outcome stops everything and reverses nothing (Inv 14). Exits are the mirror: cover the shorts, and only once
+// none is held (or in flight) sell the hedges.
+
+export type BasketJob = { kind: 'basketOpen' | 'basketSettle' | 'basketClose'; id: string };
+export interface BasketTickIo {
+  /** When this basket's orders were last read from the broker (Infinity while a job for it runs). */
+  polledAt: (id: string) => number;
+  /** A job for this basket is running. */
+  busy: (id: string) => boolean;
+}
+const NO_IO: BasketTickIo = { polledAt: () => 0, busy: () => false };
+
+/** The tighter cap on a REAL basket's lots for this first REAL release (the per-contract 20-lot cap still applies). */
+export const MAX_REAL_BASKET_LOTS = 5;
+
+/** The legs the phase sends: hedges (BUY) first; shorts (SELL) once the hedges are filled. */
+export const phaseLegs = (b: Pick<LadderBasket, 'legs'>, phase: 'hedges' | 'shorts'): BasketLeg[] => b.legs.filter(l => (phase === 'hedges' ? l.side === 'BUY' : l.side === 'SELL'));
+
+/** The first phase that has legs: a basket of only SELL legs (a short strangle) starts at the shorts. */
+export const firstPhase = (b: Pick<LadderBasket, 'legs'>): 'hedges' | 'shorts' => (phaseLegs(b, 'hedges').length ? 'hedges' : 'shorts');
+
+const legFull = (b: Pick<LadderBasket, 'lots'>, l: BasketLeg) => (l.filledQty ?? 0) >= basketLegQty(b.lots, l.ratio, l.contract.lotSize);
+
+/**
+ * What a REAL basket's entry has come to. `advance` = the hedges are all filled in full: send the shorts. `open` = every leg
+ * filled in full. `unwind` = a leg died or part-filled (every filled unit is exited, shorts first). `wait` = an order is
+ * still working or not yet sent. `unknown` wins over everything (stop, reverse nothing).
+ */
+export function basketEntryVerdict(b: Pick<LadderBasket, 'legs' | 'lots' | 'phase'>): 'wait' | 'advance' | 'open' | 'unwind' | 'unknown' {
+  if (b.legs.some(l => l.entry === 'unknown')) return 'unknown';
+  const phase = b.phase ?? 'shorts';
+  const considered = phase === 'hedges' ? phaseLegs(b, 'hedges') : b.legs;
+  if (considered.some(l => l.entry == null || l.entry === 'sent')) return 'wait';
+  if (considered.every(l => l.entry === 'filled' && legFull(b, l))) return phase === 'hedges' ? 'advance' : 'open';
+  return 'unwind';
+}
+
+/**
+ * The legs whose exit may be sent now. Shorts are covered first; hedges only once no short is held or has an exit in flight
+ * (a hedge must never go while its short cover is still pending or was rejected).
+ */
+export function exitLegs(b: Pick<LadderBasket, 'legs'>, now: number): BasketLeg[] {
+  const shortsActive = b.legs.some(l => l.side === 'SELL' && ((l.held ?? 0) > 0 || !!l.exitOrderId || !!l.exitSentAt));
+  const pool = shortsActive ? b.legs.filter(l => l.side === 'SELL') : b.legs.filter(l => l.side === 'BUY');
+  return pool.filter(l => legNeedsExitSend(l, now));
+}
+
+/** Settle work outstanding: an entry order working, or an exit order placed. */
+const needsSettle = (b: LadderBasket) => b.legs.some(l => (!!l.orderId && l.entry === 'sent') || !!l.exitOrderId);
+
+/**
+ * A basket leg cut by the reconcile (closed outside the ladder): it holds less (booked at `ltp` when known) and the basket is
+ * BROKEN — its bracket stops and nothing is sent for the other legs. Every leg flat → closed.
+ */
+export function cutBasketLeg(b: LadderBasket, key: string, cut: number, ltp: number | undefined, now: number): Partial<LadderBasket> {
+  const l = b.legs.find(x => x.key === key)!;
+  const held = Math.max(0, (l.held ?? 0) - cut);
+  const exitAvg = blendExitAvg(l, cut, ltp);
+  const priced = ltp && ltp > 0 ? '' : ' (no live price — booked at entry)';
+  const legs = b.legs.map(x => (x.key === key ? { ...x, held, exitedQty: (x.exitedQty ?? 0) + cut, exitAvg, outside: true, note: `${cut} closed outside the ladder${priced}` } as BasketLeg : x));
+  return legs.every(x => (x.held ?? 0) <= 0)
+    ? { legs, state: 'closed', closedAt: now, exitReason: 'Closed outside the ladder' }
+    : { legs, state: 'broken', note: `${l.contract.strike}${l.contract.opt} closed outside the ladder — bracket stopped; exit what is left from the baskets table` };
+}
+
+/** Every basket leg that still holds units has the same share of its full quantity (so a share of the lots can be split off). */
+export const basketIntact = (b: LadderBasket) => b.legs.every(l => basketLegHeld(l) === basketLegQty(b.lots, l.ratio, l.contract.lotSize));
+
+/** Does a basket have a SELL leg (it is short something)? Hedge-only baskets (a long straddle) wait for a scope's shorts to cover. */
+export const basketHasShort = (b: Pick<LadderBasket, 'legs'>) => b.legs.some(l => l.side === 'SELL');
+
+export { needsSettle as basketNeedsSettle, PAIR_POLL_MS as BASKET_POLL_MS, PAIR_ORPHAN_MS as BASKET_ORPHAN_MS };

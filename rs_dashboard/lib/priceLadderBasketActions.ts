@@ -1,26 +1,27 @@
 import { NextResponse } from 'next/server';
 import { resolveContract } from '@/lib/priceLadderView';
-import { readLadderState, updateLadderState, loadPrices, LADDER_UNDERLYINGS } from '@/lib/priceLadderServer';
+import { readLadderState, updateLadderState, loadPrices, availableFunds, dhanSellMargin, LADDER_UNDERLYINGS } from '@/lib/priceLadderServer';
+import { fetchNettedMargin } from '@/lib/ultimateScannerDhan';
 import {
-  capLots, classifyClick, cleanBracket, ev, newLadderId, parseTrailRequest, pushEvent, replanBracket, snapToStep, trailedBracket, MAX_LADDER_LOTS,
+  capLots, classifyClick, cleanBracket, ev, isMcxUnderlying, newLadderId, parseTrailRequest, pushEvent, replanBracket, snapToStep, trailedBracket, MAX_LADDER_LOTS,
   type ClickType, type LadderBroker, type LadderContract, type LadderProduct, type LadderSide, type LadderState, type LadderZones,
 } from '@/lib/priceLadder';
-import { lotsOnContract, pairBias, pairLevelSane, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS } from '@/lib/priceLadderPair';
+import { blendExitAvg, lotsOnContract, pairBias, pairLevelSane, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS } from '@/lib/priceLadderPair';
 import {
-  applyBasketShare, basketAxis, basketCombined, basketLegQty, basketName, isBasketLive, orientLegs, patchBasket, validateDraft,
+  applyBasketShare, basketAxis, basketCombined, basketLegQty, basketName, firstPhase, isBasketLive, orientLegs, patchBasket, validateDraft, MAX_REAL_BASKET_LOTS,
   type BasketLeg, type DraftLeg, type LadderBasket,
 } from '@/lib/priceLadderBasket';
 import { checkOpenAllowed } from '@/lib/priceLadderPairActions';
 
-// The Price Ladder's Basket-mode actions (POST /api/price-ladder/state with action 'basket'). Release 1 is SIM only: a REAL
-// basket is refused (403) before anything is resolved, so no order can leave from here. Every other check mirrors the Pair
-// arm: each leg's contract resolved from the broker's own master (never an id from the browser), strikes on the grid, the
+// The Price Ladder's Basket-mode actions (POST /api/price-ladder/state with action 'basket'). Real-money endpoint for mode
+// 'real': a REAL basket also needs the daily LIVE · REAL MONEY arm, a live broker session, at most MAX_REAL_BASKET_LOTS lots
+// and a fail-closed funds / margin check; its orders are sent by the watcher's basket jobs (hedges first, then the shorts).
+// Every check mirrors the Pair arm: each leg's contract resolved from the broker's own master (never an id from the browser), strikes on the grid, the
 // 20-lot cap per contract (counted with slices and pairs, re-checked inside the lock), session / auto-exit, a live price for
 // every leg, the click verdict the user saw, and the level against the live net premium.
 
 const bad = (error: string, status = 400) => NextResponse.json({ success: false, error }, { status });
 const ok = (state: LadderState, extra: Record<string, unknown> = {}) => NextResponse.json({ success: true, data: { state, ...extra } });
-const REAL_REFUSED = 'Basket REAL orders are not enabled yet — use SIM for baskets';
 
 function parseDraft(raw: unknown): DraftLeg[] | string {
   if (!Array.isArray(raw)) return 'legs must be a list';
@@ -40,15 +41,46 @@ function overCap(st: LadderState, broker: LadderBroker, mode: 'sim' | 'real', le
   return null;
 }
 
+const BROKER_NAME: Record<LadderBroker, string> = { dhan: 'Dhan', kotak: 'Kotak', zerodha: 'Zerodha' };
+
+/**
+ * Funds for a REAL basket, fail closed (an unreadable figure refuses it). Cash needed = the hedged exchange margin of the whole
+ * basket (Dhan's basket margin for NSE / BSE; for MCX each short's own margin, no hedge credit) plus the premium of every
+ * BUY leg (+2%): the bought legs are paid for in full on top of the margin. SPAN + exposure are the exchange's, the same on
+ * every broker; compared with that broker's own funds.
+ */
+async function realBasketBlocked(broker: LadderBroker, u: string, legs: BasketLeg[], lots: number, product: LadderProduct, ltps: Record<string, number>): Promise<string | null> {
+  const funds = await availableFunds(broker);
+  if (funds == null) return `Could not read ${BROKER_NAME[broker]} funds — order refused (fail closed)`;
+  const qtyOf = (l: BasketLeg) => basketLegQty(lots, l.ratio, l.contract.lotSize);
+  const buyPremium = legs.filter(l => l.side === 'BUY').reduce((a, l) => a + qtyOf(l) * (l.contract.mult ?? 1) * (ltps[l.contract.securityId] ?? 0) * 1.02, 0);
+  const sells = legs.filter(l => l.side === 'SELL');
+  let margin: number | null = 0;
+  if (sells.length) {
+    if (isMcxUnderlying(u)) {
+      const each = await Promise.all(sells.map(l => dhanSellMargin(l.contract, qtyOf(l), product, ltps[l.contract.securityId] ?? 0)));
+      margin = each.every(x => x != null) ? each.reduce((a, x) => a + (x as number), 0) : null;
+    } else {
+      margin = await fetchNettedMargin(u, legs.map(l => ({ side: l.side, securityId: l.contract.securityId, quantity: qtyOf(l) })));
+    }
+    if (margin == null || !(margin > 0)) return 'Could not read the margin for this basket — refused (fail closed)';
+  }
+  const need = margin + buyPremium;
+  const have = sells.length ? funds.sell : funds.buy;
+  if (need > have) return `Needs about ₹${Math.round(need).toLocaleString('en-IN')}, ${BROKER_NAME[broker]} has ₹${Math.round(have).toLocaleString('en-IN')}`;
+  return null;
+}
+
 interface Prepared {
-  now: number; broker: LadderBroker; u: string; side: LadderSide; lots: number; product: LadderProduct; strategy: string; name: string;
+  now: number; mode: 'sim' | 'real'; broker: LadderBroker; u: string; side: LadderSide; lots: number; product: LadderProduct; strategy: string; name: string;
   legs: BasketLeg[]; ltps: Record<string, number>; a: number; pane?: 2;
 }
 
 /** The checks arm and market share; returns the prepared basket legs and live net premium, or the refusal. */
 async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<Prepared | NextResponse> {
   const now = Date.now();
-  if (b.mode !== 'sim') return bad(REAL_REFUSED, 403);
+  const mode = b.mode;
+  if (mode !== 'sim' && mode !== 'real') return bad('mode must be sim or real');
   const broker = b.broker as LadderBroker;
   if (broker !== 'dhan' && broker !== 'kotak' && broker !== 'zerodha') return bad('broker must be dhan, kotak or zerodha');
   const u = String(b.underlying ?? '').toUpperCase();
@@ -60,12 +92,14 @@ async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<P
   if (b.product !== 'NRML' && b.product !== 'MIS') return bad('product must be NRML or MIS');
   const lots = capLots(b.lots);
   if (lots == null) return bad('Lots must be a whole number from 1 to 20');
+  if (mode === 'real' && lots > MAX_REAL_BASKET_LOTS) return bad(`REAL baskets are limited to ${MAX_REAL_BASKET_LOTS} lots for now`);
   const draft = parseDraft(b.legs);
   if (typeof draft === 'string') return bad(draft);
   const step = PAIR_STRIKE_STEP[u];
   if (!step || draft.some(l => l.strike % step !== 0)) return bad(`Basket strikes must be ${step ?? '?'}-point strikes`);
-  const openErr = checkOpenAllowed(u, now, 'sim', broker, readLadderState(), { isArm: !isMarket });
-  if (openErr) return bad(openErr);
+  // REAL: the daily arm, the broker session and (for a Market order) the open market; a SIM arm may be placed any time.
+  const openErr = checkOpenAllowed(u, now, mode, broker, readLadderState(), { isArm: !isMarket });
+  if (openErr) return bad(openErr, openErr.includes('LIVE') || openErr.includes('session') ? 403 : 400);
 
   const contracts = await Promise.all(draft.map(l => resolveContract(broker, u, expiry, l.strike, l.opt)));
   for (const c of contracts) if (typeof c === 'string') return bad(c);
@@ -77,9 +111,13 @@ async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<P
   if (!axis) return bad('No live price for every leg yet (or the strategy nets to nothing) — try again in a moment');
   const oriented = orientLegs(draft, side, axis.credit);
   const legs: BasketLeg[] = oriented.map((l, i) => ({ key: `l${i}`, side: l.side, ratio: l.ratio, contract: cs[i] }));
-  const capErr = overCap(readLadderState(), broker, 'sim', legs, lots);
+  const capErr = overCap(readLadderState(), broker, mode, legs, lots);
   if (capErr) return bad(capErr);
-  return { now, broker, u, side, lots, product: b.product, strategy: String(b.strategy ?? 'custom').slice(0, 40), name: String(b.name ?? 'Custom').slice(0, 40), legs, ltps: prices.ltps, a: axis.a, ...(b.pane === 2 ? { pane: 2 as const } : {}) };
+  if (mode === 'real') {
+    const blocked = await realBasketBlocked(broker, u, legs, lots, b.product, prices.ltps);
+    if (blocked) return bad(blocked);
+  }
+  return { now, mode, broker, u, side, lots, product: b.product, strategy: String(b.strategy ?? 'custom').slice(0, 40), name: String(b.name ?? 'Custom').slice(0, 40), legs, ltps: prices.ltps, a: axis.a, ...(b.pane === 2 ? { pane: 2 as const } : {}) };
 }
 
 async function arm(b: Record<string, unknown>): Promise<NextResponse> {
@@ -100,16 +138,16 @@ async function arm(b: Record<string, unknown>): Promise<NextResponse> {
     return bad(`The net premium crossed ${level} since you clicked — that would now be a ${verdict.kind === 'stop' ? 'breakout' : 'limit'} entry, not what you placed. Nothing was armed; click again.`, 409);
   }
   const basket: LadderBasket = {
-    id: newLadderId('pb'), strategy: p.strategy, name: p.name, broker: p.broker, mode: 'sim', side: p.side, lots: p.lots, product: p.product, state: 'armed',
+    id: newLadderId('pb'), strategy: p.strategy, name: p.name, broker: p.broker, mode: p.mode, side: p.side, lots: p.lots, product: p.product, state: 'armed',
     legs: p.legs, createdAt: p.now, updatedAt: p.now, entryLevel: level, entryDir: verdict.dir, seenSafe: true,
     orderType: verdict.kind === 'stop' ? 'SL' : orderType, ...(zones === 'anywhere' ? { zones } : {}), ...(bracket ? { bracket } : {}), ...(p.pane ? { pane: p.pane } : {}),
   };
   let err: string | null = null;
   const s = await updateLadderState(st => {
-    err = overCap(st, p.broker, 'sim', basket.legs, basket.lots);       // re-checked inside the lock: two clicks in flight must not both pass
+    err = overCap(st, p.broker, p.mode, basket.legs, basket.lots);       // re-checked inside the lock: two clicks in flight must not both pass
     if (err) return st;
     return pushEvent({ ...st, baskets: [...(st.baskets ?? []), basket] },
-      ev('info', `Armed SIM ${p.side} ${p.lots} lot(s) ${basketName(basket)} when the net ${verdict.dir === 'below' ? '≤' : '≥'} ${level}`, basket.id));
+      ev('info', `Armed ${p.mode === 'real' ? 'REAL' : 'SIM'} ${p.side} ${p.lots} lot(s) ${basketName(basket)} when the net ${verdict.dir === 'below' ? '≤' : '≥'} ${level}`, basket.id));
   });
   if (err) return bad(err);
   return ok(s, { id: basket.id });
@@ -118,17 +156,23 @@ async function arm(b: Record<string, unknown>): Promise<NextResponse> {
 async function market(b: Record<string, unknown>): Promise<NextResponse> {
   const p = await prepare(b, true);
   if (p instanceof NextResponse) return p;
-  const legs = p.legs.map(l => ({ ...l, avg: p.ltps[l.contract.securityId], held: basketLegQty(p.lots, l.ratio, l.contract.lotSize), filledQty: basketLegQty(p.lots, l.ratio, l.contract.lotSize), entry: 'filled' as const }));
-  const basket: LadderBasket = {
-    id: newLadderId('pb'), strategy: p.strategy, name: p.name, broker: p.broker, mode: 'sim', side: p.side, lots: p.lots, product: p.product, state: 'open',
-    legs, createdAt: p.now, updatedAt: p.now, openedAt: p.now, entryY: p.a, note: 'Market order', ...(p.pane ? { pane: p.pane } : {}),
-  };
+  const isReal = p.mode === 'real';
+  // SIM fills every leg at its live price here. REAL is written `placing` + `sendWanted` (hedges phase first): the watcher marks it
+  // sent and the basket job places the hedges, then — once they filled in full — the shorts.
+  const basket: LadderBasket = isReal
+    ? { id: newLadderId('pb'), strategy: p.strategy, name: p.name, broker: p.broker, mode: 'real', side: p.side, lots: p.lots, product: p.product, state: 'placing',
+      phase: firstPhase({ legs: p.legs }), sendWanted: true, crossY: p.a, legs: p.legs, createdAt: p.now, updatedAt: p.now, note: 'Market order', ...(p.pane ? { pane: p.pane } : {}) }
+    : { id: newLadderId('pb'), strategy: p.strategy, name: p.name, broker: p.broker, mode: 'sim', side: p.side, lots: p.lots, product: p.product, state: 'open',
+      legs: p.legs.map(l => ({ ...l, avg: p.ltps[l.contract.securityId], held: basketLegQty(p.lots, l.ratio, l.contract.lotSize), filledQty: basketLegQty(p.lots, l.ratio, l.contract.lotSize), entry: 'filled' as const })),
+      createdAt: p.now, updatedAt: p.now, openedAt: p.now, entryY: p.a, note: 'Market order', ...(p.pane ? { pane: p.pane } : {}) };
   let err: string | null = null;
   const s = await updateLadderState(st => {
-    err = overCap(st, p.broker, 'sim', basket.legs, basket.lots);
+    err = overCap(st, p.broker, p.mode, basket.legs, basket.lots);
     if (err) return st;
     return pushEvent({ ...st, baskets: [...(st.baskets ?? []), basket] },
-      ev('info', `SIM ${p.side} ${p.lots} lot(s) ${basketName(basket)} at MARKET: filled at net ${p.a.toFixed(2)}`, basket.id));
+      ev('info', isReal
+        ? `${p.side} ${p.lots} lot(s) ${basketName(basket)} at MARKET — hedges first, then the shorts`
+        : `SIM ${p.side} ${p.lots} lot(s) ${basketName(basket)} at MARKET: filled at net ${p.a.toFixed(2)}`, basket.id));
   });
   if (err) return bad(err);
   return ok(s, { id: basket.id });
@@ -222,6 +266,43 @@ async function trail(body: Record<string, unknown>, id: string): Promise<NextRes
   return ok(r.state);
 }
 
+/** The user checked Orders / Positions for an UNKNOWN leg: 'open' = it filled / is still held, 'flat' = nothing is open on it. */
+async function resolve(body: Record<string, unknown>, id: string): Promise<NextResponse> {
+  const key = String(body.leg ?? '');
+  const outcome = body.outcome;
+  if (outcome !== 'open' && outcome !== 'flat') return bad("outcome must be 'open' or 'flat'");
+  const b0 = (readLadderState().baskets ?? []).find(y => y.id === id);
+  const l0 = b0?.legs.find(l => l.key === key);
+  if (!b0 || b0.state !== 'unknown' || !l0?.unknown) return bad('That leg is not UNKNOWN');
+  const ltp = (await loadPrices([], [l0.contract])).ltps[l0.contract.securityId] ?? 0;
+  const now = Date.now();
+  const r = await guarded(id, y => y.state === 'unknown' && !!y.legs.find(l => l.key === key)?.unknown, st => {
+    const b = (st.baskets ?? []).find(y => y.id === id)!;
+    const l = b.legs.find(x => x.key === key)!;
+    let leg: BasketLeg;
+    if (l.unknown === 'entry') {
+      leg = outcome === 'open'
+        ? { ...l, entry: 'filled', filledQty: basketLegQty(b.lots, l.ratio, l.contract.lotSize), avg: l.avg || ltp || undefined, unknown: undefined, note: 'Confirmed open by you' }
+        : { ...l, entry: 'dead', filledQty: 0, unknown: undefined, note: 'Confirmed: nothing opened' };
+    } else {
+      const cleared = { unknown: undefined, exitOrderId: undefined, exitSentAt: undefined, exitQty: undefined };
+      if (outcome === 'open') leg = { ...l, ...cleared, exitRetryAt: now, note: 'Confirmed still open — its exit is sent again' };
+      else {
+        const held = l.held ?? 0;
+        leg = { ...l, ...cleared, held: 0, exitedQty: (l.exitedQty ?? 0) + held, exitAvg: blendExitAvg(l, held, ltp), note: `Confirmed closed by you${ltp > 0 ? '' : ' (no live price — booked at entry)'}` };
+      }
+    }
+    const legs = b.legs.map(x => (x.key === key ? leg : x));
+    const settled = legs.every(x => !x.unknown);
+    // Back to where it was: an exit, or an entry.
+    const state = settled ? (b.exitReason ? 'exiting' : 'placing') : 'unknown';
+    return pushEvent(patchBasket(st, id, { legs, state, ...(settled ? { note: undefined } : {}) }, now),
+      ev('info', `${basketName(b)}: ${l.contract.strike}${l.contract.opt} resolved as ${outcome}${settled ? ' — the basket carries on' : ''}`, id));
+  });
+  if (!r.applied) return bad('That leg is not UNKNOWN any more', 409);
+  return ok(r.state);
+}
+
 export async function basketAction(b: Record<string, unknown>): Promise<NextResponse> {
   const op = String(b.op ?? '');
   const id = typeof b.id === 'string' ? b.id : '';
@@ -237,7 +318,7 @@ export async function basketAction(b: Record<string, unknown>): Promise<NextResp
       return ok(r.state);
     }
     case 'exit': {
-      const r = await guarded(id, y => y.state === 'open' && !y.exitWanted,
+      const r = await guarded(id, y => (y.state === 'open' || y.state === 'broken') && !y.exitWanted,
         st => pushEvent(patchBasket(st, id, { exitWanted: 'Manual exit' }), ev('info', 'Basket exit requested', id)));
       if (!r.applied) return bad('That basket is not open', 409);
       return ok(r.state);
@@ -255,6 +336,8 @@ export async function basketAction(b: Record<string, unknown>): Promise<NextResp
       if (err) return bad(err, 409);
       return ok(s, { lots });
     }
+    case 'resolve':
+      return resolve(b, id);
     case 'modify':
       return modify(b, id);
     case 'trail':

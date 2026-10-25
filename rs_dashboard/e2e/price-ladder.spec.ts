@@ -717,7 +717,7 @@ test('Basket mode: legs can be edited, added, removed and reset in the pop-up', 
   await expect(dlg).toHaveCount(0);
 });
 
-test('Basket mode: Sell at a level above the credit arms the edited legs; Market sends them now; REAL is refused in the page', async ({ page }) => {
+test('Basket mode: Sell at a level above the credit arms the edited legs and Market sends them now', async ({ page }) => {
   const seen = await openBasketMode(page);
   await page.getByRole('button', { name: /^Sell at 9[2-9]/ }).first().click();
   await expect.poll(() => seen.posts.filter(b => b.action === 'basket' && b.op === 'arm').length).toBe(1);
@@ -731,13 +731,6 @@ test('Basket mode: Sell at a level above the credit arms the edited legs; Market
   await page.getByRole('button', { name: 'Buy at market' }).click();
   await expect.poll(() => seen.posts.filter(b => b.op === 'market').length).toBe(1);
   expect(seen.posts.find(b => b.op === 'market')).toMatchObject({ action: 'basket', side: 'BUY', mode: 'sim' });
-  // REAL: the page says so and sends nothing
-  const before = seen.posts.length;
-  await page.getByRole('button', { name: 'REAL', exact: true }).click();
-  await expect(page.getByText('Basket REAL orders are not enabled yet').first()).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Sell at market' })).toBeDisabled();
-  await page.getByRole('button', { name: /^Sell at 9[2-9]/ }).first().click({ force: true }).catch(() => undefined);
-  expect(seen.posts.length).toBe(before);
   expect(seen.blocked).toEqual([]);
 });
 
@@ -754,4 +747,29 @@ test('Basket mode: an open basket shows in Net Pos, the strip and the Exit butto
   await expect.poll(() => seen.posts.filter(b => b.op === 'exitShare').length).toBe(2);
   await expect(page.getByText('Basket orders & positions')).toBeVisible();
   expect(seen.blocked).toEqual([]);
+});
+
+test('Basket mode REAL: needs the daily arm; the first order asks and says hedges go first; the request carries mode real', async ({ page }) => {
+  const seen = await openBasketMode(page, { liveArmed: true });
+  await page.getByRole('button', { name: 'REAL', exact: true }).click();
+  await page.getByRole('button', { name: /^Sell at 9[2-9]/ }).first().click();
+  await expect(page.getByText('Place a REAL-money order?')).toBeVisible();
+  await expect(page.getByText(/BUY legs at MARKET first, the SELL legs only after they fill/)).toBeVisible();
+  expect(seen.posts.filter(b => b.action === 'basket')).toEqual([]);
+  await page.getByRole('button', { name: 'Place REAL order' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.action === 'basket' && b.op === 'arm').length).toBe(1);
+  expect(seen.posts.find(b => b.op === 'arm')).toMatchObject({ action: 'basket', mode: 'real', side: 'SELL' });
+  // a REAL Market order asks only once per page load (the first confirm covers it)
+  await page.getByRole('button', { name: 'Buy at market' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.op === 'market').length).toBe(1);
+  expect(seen.posts.find(b => b.op === 'market')).toMatchObject({ mode: 'real', side: 'BUY' });
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Basket mode REAL without the daily arm: the ladder is disabled and nothing is sent', async ({ page }) => {
+  const seen = await openBasketMode(page, { liveArmed: false });
+  await page.getByRole('button', { name: 'REAL', exact: true }).click();
+  await expect(page.getByText(/arm LIVE · REAL MONEY for today before placing/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Sell at 9[2-9]/ }).first()).toBeDisabled();
+  expect(seen.posts.filter(b => b.action === 'basket')).toEqual([]);
 });

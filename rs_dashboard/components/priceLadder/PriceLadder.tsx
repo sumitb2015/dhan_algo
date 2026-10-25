@@ -732,7 +732,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const entryMarks = useMemo(() => {
     const marks: EntryMark[] = [];
     if (mode === 'basket') {
-      for (const b of myBaskets) if ((b.state === 'open' || b.state === 'exiting' || b.state === 'unknown') && b.entryY) marks.push({ y: b.entryY, side: b.side, qty: b.lots * b.legs[0].contract.lotSize, pnl: basketNowPnl(b, data?.ltps ?? {}) });
+      for (const b of myBaskets) if ((b.state === 'open' || b.state === 'broken' || b.state === 'exiting' || b.state === 'unknown') && b.entryY) marks.push({ y: b.entryY, side: b.side, qty: b.lots * b.legs[0].contract.lotSize, pnl: basketNowPnl(b, data?.ltps ?? {}) });
       return marks;
     }
     if (mode === 'pair') {
@@ -774,12 +774,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Basket mode's Net Pos panel: the same numbers for the baskets on the legs on screen.
   const basketHere = useMemo(() => (viewSig ? baskets.filter(b => b.broker === broker && b.mode === pageMode && sigOf(b) === viewSig) : []), [baskets, viewSig, broker, pageMode]);
   const basketPnl = useMemo(() => sumBasketPnl(basketHere, () => true, data?.ltps ?? {}), [basketHere, data?.ltps]);
-  const basketHeldNow = myBaskets.filter(b => b.state === 'open' || b.state === 'exiting');
+  const basketHeldNow = myBaskets.filter(b => b.state === 'open' || b.state === 'broken' || b.state === 'exiting');
   const basketNetLots = basketHeldNow.reduce((a, b) => a + (b.side === 'SELL' ? -1 : 1) * b.lots, 0);
   const basketLotsHeld = basketHeldNow.reduce((a, b) => a + b.lots, 0);
   const basketAvgEntry = basketLotsHeld > 0 ? basketHeldNow.reduce((a, b) => a + b.lots * (b.entryY ?? 0), 0) / basketLotsHeld : null;
-  const basketExitable = myBaskets.filter(b => b.state === 'open' && !b.exitWanted);
-  const basketOpenLots = basketExitable.reduce((a, b) => a + b.lots, 0);
+  const basketExitable = myBaskets.filter(b => (b.state === 'open' || b.state === 'broken') && !b.exitWanted);
+  const basketOpenLots = basketExitable.filter(b => b.state === 'open').reduce((a, b) => a + b.lots, 0);
 
   const liveArmed = !!data?.liveArmed;
   const realBlocked = real && !liveArmed;
@@ -855,28 +855,38 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   }, [post, broker, real, underlying, expiry, structure, pairOk, pairCe, pairPe, lots, product, orderType, zones, legSlPct, style, tgtPts, slPts, trailOn, trailPts, second]);
 
   // Basket mode (SIM only for now: the server refuses a REAL basket, and the page says so before asking).
-  const basketPayload = { strategy: basketKey, name: basketTpl?.name ?? 'Basket', legs: basketLegs, underlying, expiry, broker, product, lots, mode: 'sim' as const };
+  const basketPayload = { strategy: basketKey, name: basketTpl?.name ?? 'Basket', legs: basketLegs, underlying, expiry, broker, product, lots, mode: (real ? 'real' : 'sim') as 'real' | 'sim' };
   const sendBasket = useCallback((side: LadderSide, price: number, expect: { kind: 'limit' | 'stop'; dir: 'above' | 'below' }) => {
     if (!expiry || !basketView?.a) return;
     void post({
       action: 'basket', op: 'arm', ...basketPayload, side, orderType, level: price, zones, expect, ...(second ? { pane: 2 } : {}),
       ...(style !== 'Single' ? { bracket: { tgtPts: style === 'Cover' ? 0 : tgtPts, slPts, ...(trailOn ? { trailPts } : {}) } }
         : trailOn ? { bracket: { tgtPts: 0, slPts: trailPts, trailPts } } : {}),
-    }).then(ok => { if (ok) toast.success(`SIM ${side} ${basketTpl?.name ?? 'basket'} armed at net ${price}`); });
+    }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${basketTpl?.name ?? 'basket'} armed at net ${price}`); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [post, basketKey, basketTpl, basketLegs, underlying, expiry, broker, product, lots, orderType, zones, style, tgtPts, slPts, trailOn, trailPts, second, basketView?.a]);
+  }, [post, basketKey, basketTpl, basketLegs, underlying, expiry, broker, real, product, lots, orderType, zones, style, tgtPts, slPts, trailOn, trailPts, second, basketView?.a]);
   const sendBasketMarket = (side: LadderSide) => {
     if (!expiry || !basketView?.a) return;
-    if (real) { toast.warning('Basket REAL orders are not enabled yet — switch to SIM'); return; }
-    void post({ action: 'basket', op: 'market', ...basketPayload, side, ...(second ? { pane: 2 } : {}) })
-      .then(ok => { if (ok) toast.success(`SIM ${side} ${lots} lot(s) ${basketTpl?.name ?? 'basket'} sent at MARKET`); });
+    const run = () => void post({ action: 'basket', op: 'market', ...basketPayload, side, ...(second ? { pane: 2 } : {}) })
+      .then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${lots} lot(s) ${basketTpl?.name ?? 'basket'} sent at MARKET`); });
+    if (real && !realAck) {
+      setConfirm({ text: `${side} ${lots} lot(s) ${underlying} ${basketTpl?.name ?? 'basket'} (${basketLegs.length} legs) at MARKET now — the BUY legs first, the SELL legs only after they fill. If a leg fails, what filled is closed again at market`, run });
+      return;
+    }
+    run();
   };
 
   const onPlace = (side: LadderSide, price: number) => {
     if (mode === 'basket') {
-      if (real) { toast.warning('Basket REAL orders are not enabled yet — switch to SIM'); return; }
       const v = classifyClick({ mode: 'plain', opt: 'CE', side, level: price, ref: refPrice, orderType, zones });
       if (!v.ok) { toast.warning(v.error); return; }
+      if (real && !realAck) {
+        setConfirm({
+          text: `${side} ${lots} lot(s) ${underlying} ${basketTpl?.name ?? 'basket'} (${basketLegs.length} legs) when the net premium ${v.dir === 'below' ? 'falls to' : 'rises to'} ${price} — the BUY legs at MARKET first, the SELL legs only after they fill. If a leg fails, what filled is closed again at market`,
+          run: () => sendBasket(side, price, { kind: v.kind, dir: v.dir }),
+        });
+        return;
+      }
       sendBasket(side, price, { kind: v.kind, dir: v.dir });
       return;
     }
@@ -1020,7 +1030,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const decimals = mode === 'xy' ? (tick < 1 ? 2 : 0) : 2;
   const ticks = mode === 'xy' ? XY_TICKS : mode === 'pair' || mode === 'basket' ? PAIR_TICKS : PLAIN_TICKS;
   const HELP_TEXT = mode === 'basket'
-                ? `Basket: the ladder is the strategy's NET premium (${basketView?.credit ? 'a credit: Sell = collect it' : basketView?.credit === false ? 'a debit: Buy = pay it' : 'credit or debit'}). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. The legs are as the strategy defines them when your direction matches (Sell a credit / Buy a debit), every leg mirrored otherwise. All legs fill together when the net crosses the level; target / SL / trail are net-premium points and exit every leg. SIM only for now.`
+                ? `Basket: the ladder is the strategy's NET premium (${basketView?.credit ? 'a credit: Sell = collect it' : basketView?.credit === false ? 'a debit: Buy = pay it' : 'credit or debit'}). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. The legs are as the strategy defines them when your direction matches (Sell a credit / Buy a debit), every leg mirrored otherwise. When the net crosses the level the legs fill together (REAL: the BUY legs first, the SELL legs once they filled; a failed leg closes what filled); target / SL / trail are net-premium points and exit every leg (REAL: shorts covered first).`
                 : mode === 'pair'
                 ? `Pair: the ladder is the combined premium (CE + PE). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. Both legs go at MARKET together when the combined crosses the level (REAL: if only one fills, it is closed again); target / SL / trail are in combined-premium points and exit both legs.`
                 : mode === 'xy'
@@ -1282,11 +1292,6 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <AlertTriangle className="w-4 h-4" /> {basketErr ?? 'No live price for every leg yet (or the strategy nets to nothing) — basket levels are paused until all legs price.'}
           </div>
         )}
-        {mode === 'basket' && real && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-300">
-            <ShieldAlert className="w-4 h-4" /> Basket REAL orders are not enabled yet — switch to SIM to trade a basket.
-          </div>
-        )}
         {realBlocked && (
           <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-300">
             <ShieldAlert className="w-4 h-4" /> REAL mode: arm LIVE · REAL MONEY for today before placing. Exits always work.
@@ -1491,10 +1496,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-1.5">
-                <button type="button" disabled={busy || !expiry || (mode === 'basket' ? !basketView?.a || real : mode === 'pair' ? !pairOk : !strike)} onClick={() => (mode === 'basket' ? sendBasketMarket('BUY') : mode === 'pair' ? sendPairMarket('BUY') : sendMarket('BUY'))}
+                <button type="button" disabled={busy || !expiry || (mode === 'basket' ? !basketView?.a : mode === 'pair' ? !pairOk : !strike)} onClick={() => (mode === 'basket' ? sendBasketMarket('BUY') : mode === 'pair' ? sendPairMarket('BUY') : sendMarket('BUY'))}
                   title={mode === 'basket' ? `BUY ${lots} lot(s) of the basket (every leg) at market now` : mode === 'pair' ? `BUY ${lots} lot(s) of the ${structure} (both legs) at market now` : `BUY ${lots} lot(s) ${strike ?? ''}${opt} at market now`} aria-label="Buy at market"
                   className="px-2 py-1.5 rounded bg-emerald-600 text-oncolor font-bold hover:bg-emerald-500 disabled:opacity-50">Buy Market</button>
-                <button type="button" disabled={busy || !expiry || (mode === 'basket' ? !basketView?.a || real : mode === 'pair' ? !pairOk : !strike)} onClick={() => (mode === 'basket' ? sendBasketMarket('SELL') : mode === 'pair' ? sendPairMarket('SELL') : sendMarket('SELL'))}
+                <button type="button" disabled={busy || !expiry || (mode === 'basket' ? !basketView?.a : mode === 'pair' ? !pairOk : !strike)} onClick={() => (mode === 'basket' ? sendBasketMarket('SELL') : mode === 'pair' ? sendPairMarket('SELL') : sendMarket('SELL'))}
                   title={mode === 'basket' ? `SELL ${lots} lot(s) of the basket (every leg) at market now` : mode === 'pair' ? `SELL ${lots} lot(s) of the ${structure} (both legs) at market now` : `SELL ${lots} lot(s) ${strike ?? ''}${opt} at market now`} aria-label="Sell at market"
                   className="px-2 py-1.5 rounded bg-red-600 text-oncolor font-bold hover:bg-red-500 disabled:opacity-50">Sell Market</button>
               </div>
@@ -2131,7 +2136,8 @@ function BasketTable({ baskets, ltps, busy, post }: { baskets: LadderBasket[]; l
             const pnl = basketNowPnl(b, ltps) ?? null;
             let now: number | null = null;
             { let v = 0, ok = true; for (const l of b.legs) { const px = ltps[l.contract.securityId]; if (!(px > 0)) { ok = false; break; } v += (l.side === 'BUY' ? 1 : -1) * l.ratio * px; } if (ok) now = Math.round((b.side === 'BUY' ? v : -v) * 100) / 100; }
-            const stateClass = b.state === 'open' ? 'text-emerald-400 font-bold' : b.state === 'armed' || b.state === 'exiting' || b.state === 'placing' ? 'text-sky-300' : b.state === 'unknown' ? 'text-red-400 font-bold' : 'text-zinc-400';
+            const stateClass = b.state === 'open' ? 'text-emerald-400 font-bold' : b.state === 'armed' || b.state === 'exiting' || b.state === 'placing' ? 'text-sky-300' : b.state === 'unknown' || b.state === 'broken' ? 'text-red-400 font-bold' : 'text-zinc-400';
+            const unknownLegs = b.legs.filter(l => l.unknown);
             return (
               <tr key={b.id} className={`border-t border-zinc-900 ${live ? '' : 'opacity-60'}`}>
                 <td className="px-2 py-1 font-mono text-zinc-400 whitespace-nowrap">{timeOf(b.createdAt)}</td>
@@ -2148,8 +2154,16 @@ function BasketTable({ baskets, ltps, busy, post }: { baskets: LadderBasket[]; l
                 <td className={`px-2 py-1 font-mono ${pnlClass(pnl)}`}>{fmtMoney(pnl)}</td>
                 <td className="px-2 py-1 whitespace-nowrap">
                   {b.state === 'armed' && <button type="button" disabled={busy} onClick={() => void post({ action: 'basket', op: 'cancel', id: b.id })} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">Cancel</button>}
-                  {b.state === 'open' && <button type="button" disabled={busy || !!b.exitWanted} onClick={() => void post({ action: 'basket', op: 'exit', id: b.id })} title="Exit every leg at market"
-                    className="px-1.5 py-0.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40">{b.exitWanted ? 'Exiting…' : 'Exit all legs'}</button>}
+                  {(b.state === 'open' || b.state === 'broken') && <button type="button" disabled={busy || !!b.exitWanted} onClick={() => void post({ action: 'basket', op: 'exit', id: b.id })} title={b.state === 'broken' ? 'Exit what is left of this basket at market' : 'Exit every leg at market (shorts first)'}
+                    className="px-1.5 py-0.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40">{b.exitWanted ? 'Exiting…' : b.state === 'broken' ? 'Exit remaining' : 'Exit all legs'}</button>}
+                  {/* UNKNOWN: the user checks Orders / Positions and says what each unknown leg really is. */}
+                  {b.state === 'unknown' && unknownLegs.map(l => (
+                    <span key={l.key} className="inline-flex items-center gap-1 mr-2" title={`${l.contract.strike}${l.contract.opt}: ${l.unknown} order outcome unknown`}>
+                      <span className="font-mono text-zinc-300">{l.contract.strike}{l.contract.opt}</span>
+                      <button type="button" disabled={busy} onClick={() => void post({ action: 'basket', op: 'resolve', id: b.id, leg: l.key, outcome: 'open' })} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">Is open</button>
+                      <button type="button" disabled={busy} onClick={() => void post({ action: 'basket', op: 'resolve', id: b.id, leg: l.key, outcome: 'flat' })} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">Is flat</button>
+                    </span>
+                  ))}
                 </td>
               </tr>
             );

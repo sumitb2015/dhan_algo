@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   basketTemplates, draftFromTemplate, validateDraft, basketAxis, orientLegs, basketCombined, basketName, basketNowPnl, sumBasketPnl,
-  planBaskets, splitBasketLots, applyBasketShare, basketLegQty, type LadderBasket, type BasketLeg, type DraftLeg,
+  planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, type LadderBasket, type BasketLeg, type DraftLeg,
 } from './priceLadderBasket.ts';
 import { rollDay, type LadderState } from './priceLadder.ts';
 import { lotsOnContract, openPositionCount } from './priceLadderPair.ts';
@@ -182,4 +182,116 @@ test('integration: guard, archive and Clear see baskets', async () => {
   assert.deepEqual(partsToArchive(raw, rolled, rolled)!.part.baskets!.map(b => b.id), ['b1', 'c1']);
   const cleared = { ...raw, baskets: raw.baskets!.filter(b => b.state !== 'closed') };
   assert.deepEqual(partsToArchive(raw, raw, cleared)!.part.baskets!.map(b => b.id), ['c1']);
+});
+
+// ── REAL placement ──
+const ARMED = (over: Partial<LadderState> = {}): LadderState => ({ ...st([]), liveArmedOn: '2026-10-27', ...over });
+const real = (o: Partial<LadderBasket> = {}): LadderBasket => basket({ mode: 'real', ...o });
+const filled = (l: BasketLeg, q = 130): BasketLeg => ({ ...l, orderId: `o${l.key}`, entry: 'filled', filledQty: q, avg: PX[`${l.contract.strike}${l.contract.opt}`] });
+const sent = (l: BasketLeg): BasketLeg => ({ ...l, orderId: `o${l.key}`, entry: 'sent' });
+const NOIO = { polledAt: () => 0, busy: () => false };
+
+test('REAL arm: crossing marks the basket placing with the hedges phase first and starts the open job; no live arm = cancelled', () => {
+  const b = real({ entryLevel: 50, entryDir: 'above' });
+  const hit = planBaskets({ ...ARMED(), baskets: [b] }, { ...PX, '22700CE': 43 }, NOW, NOIO);
+  assert.equal(hit.next.baskets![0].state, 'placing');
+  assert.equal(hit.next.baskets![0].phase, 'hedges');
+  assert.deepEqual(hit.jobs, [{ kind: 'basketOpen', id: 'b1' }]);
+  assert.deepEqual(phaseLegs(b, 'hedges').map(l => l.side), ['BUY', 'BUY']);
+  const off = planBaskets({ ...st([b]) }, { ...PX, '22700CE': 43 }, NOW, NOIO);                 // liveArmedOn missing
+  assert.equal(off.next.baskets![0].state, 'cancelled');
+  assert.equal(off.jobs.length, 0);
+  // a basket of only SELL legs (a short strangle) starts at the shorts
+  assert.equal(firstPhase({ legs: b.legs.filter(l => l.side === 'SELL') }), 'shorts');
+});
+
+test('REAL entry: the shorts are sent only after every hedge filled in full; a failed hedge sends no short', () => {
+  const b0 = real({ state: 'placing', phase: 'hedges', sentAt: NOW });
+  const hedgesSent = { ...b0, legs: b0.legs.map(l => (l.side === 'BUY' ? sent(l) : l)) };
+  assert.equal(basketEntryVerdict(hedgesSent), 'wait');
+  const hedgesFilled = { ...b0, legs: b0.legs.map(l => (l.side === 'BUY' ? filled(l) : l)) };
+  assert.equal(basketEntryVerdict(hedgesFilled), 'advance');
+  const adv = planBaskets(st([hedgesFilled]), PX, NOW, NOIO);
+  assert.equal(adv.next.baskets![0].phase, 'shorts');
+  assert.deepEqual(adv.jobs, [{ kind: 'basketOpen', id: 'b1' }]);
+  // a hedge rejected: unwind (nothing short exists) — nothing filled at all is simply cancelled
+  const dead = { ...b0, legs: b0.legs.map(l => (l.side === 'BUY' ? { ...l, orderId: 'x', entry: 'dead' as const, filledQty: 0, note: 'RMS reject' } : l)) };
+  assert.equal(basketEntryVerdict(dead), 'unwind');
+  const none = planBaskets(st([dead]), PX, NOW, NOIO);
+  assert.equal(none.next.baskets![0].state, 'cancelled');
+  assert.equal(none.jobs.length, 0);
+  // one hedge filled, the other rejected: the filled hedge is sold again, no short was ever sent
+  const mixed = { ...b0, legs: b0.legs.map((l, i) => (l.side === 'BUY' ? (i === 1 ? filled(l) : { ...l, entry: 'dead' as const, filledQty: 0 }) : l)) };
+  const un = planBaskets(st([mixed]), PX, NOW, NOIO);
+  assert.equal(un.next.baskets![0].state, 'exiting');
+  assert.deepEqual(un.jobs, [{ kind: 'basketClose', id: 'b1' }]);
+  assert.equal(un.next.baskets![0].legs.filter(l => l.exitSentAt).length, 1);
+  // an UNKNOWN hedge stops everything
+  const unk = { ...b0, legs: b0.legs.map(l => (l.side === 'BUY' ? { ...l, orderId: 'u', entry: 'unknown' as const, unknown: 'entry' as const } : l)) };
+  assert.equal(planBaskets(st([unk]), PX, NOW, NOIO).next.baskets![0].state, 'unknown');
+});
+
+test('REAL entry: all legs filled opens the basket at the traded net; a short that part-fills unwinds shorts first', () => {
+  const b0 = real({ state: 'placing', phase: 'shorts', sentAt: NOW, bracket: { tgtPts: 20, slPts: 15 } });
+  const all = { ...b0, legs: b0.legs.map(l => filled(l)) };
+  assert.equal(basketEntryVerdict(all), 'open');
+  const open = planBaskets(st([all]), PX, NOW, NOIO).next.baskets![0];
+  assert.equal(open.state, 'open');
+  assert.equal(open.entryY, 48);
+  assert.equal(open.slY, 63);
+  assert.deepEqual(open.legs.map(l => l.held), [130, 130, 130, 130]);
+  // one short filled only 65 of 130: unwind every filled unit; the covering order is for the short first
+  const part = { ...b0, legs: b0.legs.map((l, i) => (i === 0 ? filled(l, 65) : filled(l))) };
+  assert.equal(basketEntryVerdict(part), 'unwind');
+  const un = planBaskets(st([part]), PX, NOW, NOIO);
+  assert.equal(un.next.baskets![0].state, 'exiting');
+  const marked = un.next.baskets![0].legs.filter(l => l.exitSentAt).map(l => l.side);
+  assert.deepEqual(marked, ['SELL', 'SELL']);                                      // only the shorts are sent now; hedges wait
+});
+
+test('REAL exit: shorts are covered first, hedges only once no short is held; flat closes it', () => {
+  const held = (b: LadderBasket, patch: (l: BasketLeg) => Partial<BasketLeg>) => ({ ...b, legs: b.legs.map(l => ({ ...l, avg: 10, held: 130, filledQty: 130, entry: 'filled' as const, ...patch(l) })) });
+  const open = held(real({ state: 'open', openedAt: 1, entryY: 48, exitWanted: 'Manual exit' }), () => ({}));
+  const begin = planBaskets(st([open]), PX, NOW, NOIO);
+  assert.equal(begin.next.baskets![0].state, 'exiting');
+  assert.deepEqual(begin.next.baskets![0].legs.filter(l => l.exitSentAt).map(l => l.side), ['SELL', 'SELL']);
+  assert.deepEqual(begin.jobs, [{ kind: 'basketClose', id: 'b1' }]);
+  // shorts' exit orders in flight: the hedges are still held back
+  const flight = held({ ...open, state: 'exiting', exitReason: 'Manual exit', exitWanted: undefined }, l => (l.side === 'SELL' ? { exitOrderId: 'x', exitSentAt: NOW } : {}));
+  assert.deepEqual(exitLegs(flight, NOW), []);
+  // shorts flat: now the hedges go
+  const shortsDone = held({ ...open, state: 'exiting', exitReason: 'Manual exit', exitWanted: undefined }, l => (l.side === 'SELL' ? { held: 0, exitedQty: 130, exitAvg: 5 } : {}));
+  assert.deepEqual(exitLegs(shortsDone, NOW).map(l => l.side), ['BUY', 'BUY']);
+  const next = planBaskets(st([shortsDone]), PX, NOW, NOIO);
+  assert.deepEqual(next.jobs, [{ kind: 'basketClose', id: 'b1' }]);
+  // everything flat: closed
+  const flat = held({ ...open, state: 'exiting', exitReason: 'Manual exit', exitWanted: undefined }, () => ({ held: 0, exitedQty: 130, exitAvg: 5 }));
+  assert.equal(planBaskets(st([flat]), PX, NOW, NOIO).next.baskets![0].state, 'closed');
+  // a rejected cover waits its retry before it is sent again
+  const retry = held({ ...open, state: 'exiting', exitReason: 'Manual exit', exitWanted: undefined }, l => (l.side === 'SELL' ? { exitRetryAt: NOW + 10_000 } : {}));
+  assert.deepEqual(exitLegs(retry, NOW), []);
+});
+
+test('REAL reconcile: a leg cut outside the ladder breaks the basket (bracket off); every leg gone closes it', () => {
+  const open = real({ state: 'open', openedAt: 1, entryY: 48, bracket: { tgtPts: 20, slPts: 15 }, tgtY: 28, slY: 63 });
+  open.legs = open.legs.map(l => ({ ...l, avg: 10, held: 130, filledQty: 130, entry: 'filled' as const }));
+  const cut = cutBasketLeg(open, 'l0', 130, 20, NOW);
+  assert.equal(cut.state, 'broken');
+  const broken = { ...open, ...cut } as LadderBasket;
+  // a broken basket only exits on a manual / MIS reason, never its bracket
+  const stopHit = planBaskets(st([broken]), { ...PX, '22500PE': 90 }, NOW, NOIO);
+  assert.equal(stopHit.next.baskets![0].state, 'broken');
+  let b = broken;
+  for (const k of ['l1', 'l2', 'l3']) b = { ...b, ...cutBasketLeg(b, k, 130, 5, NOW) } as LadderBasket;
+  assert.equal(b.state, 'closed');
+});
+
+test('REAL entry: an interrupted SHORTS send (hedges already filled) is UNKNOWN for the shorts only; the hedges stay', () => {
+  const b = real({ state: 'placing', phase: 'shorts', sentAt: NOW - 60_000 });
+  b.legs = b.legs.map(l => (l.side === 'BUY' ? filled(l) : l));
+  const out = planBaskets(st([b]), PX, NOW, NOIO).next.baskets![0];
+  assert.equal(out.state, 'unknown');
+  assert.deepEqual(out.legs.map(l => [l.side, l.unknown ?? null]), [['SELL', 'entry'], ['BUY', null], ['SELL', 'entry'], ['BUY', null]]);
+  // while a send is still running it is not orphaned
+  assert.equal(planBaskets(st([b]), PX, NOW, { polledAt: () => 0, busy: () => true }).next.baskets![0].state, 'placing');
 });

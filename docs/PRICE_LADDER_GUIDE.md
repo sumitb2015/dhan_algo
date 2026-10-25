@@ -22,7 +22,7 @@ Real-money endpoint — SIM (paper) is the default; REAL needs the daily LIVE ·
   current lots, product, broker and SIM/REAL mode; the first REAL click each page load asks first; no bracket (exit from its widget or the MTM guard). The
   server applies every arm check (REAL arm, session, hours, auto-exit time, 20-lot cap, funds).
 
-## Basket mode (prebuilt strategies on the net premium) — SIM only for now
+## Basket mode (prebuilt strategies on the net premium)
 
 The **Ladder** switch has a fourth mode, **Basket**: pick one of the Baskets page's single-expiry strategies (iron condor, iron
 butterfly, butterflies, batman, spreads, ratio spreads, lizards, ...). The legs are placed on the listed strikes around ATM
@@ -36,8 +36,15 @@ strategy (Sell a credit / Buy a debit) the legs are as defined; in the other dir
   Order Type SL or Anywhere), Buy Market / Sell Market, Style (Single / Bracket / Cover) with Target / SL / Trail in net-premium points,
   drag the entry / target / SL, the Net Pos panel (25 / 50 / 75 / Exit, whole lots oldest first), the Open positions / Total P&L strip,
   the MTM guard, the day archive, the cutoff square-off, and the server watcher with every tab closed.
-- A fill takes every leg at its live price at once (SIM). **REAL baskets are refused** (the server answers 403 and the page says so):
-  REAL placement (hedges first, then the shorts, unwinding a failed leg) is the next release.
+- **SIM** fills every leg at its live price at once.
+- **REAL** needs the daily LIVE · REAL MONEY arm and a live broker session, is limited to **5 lots** per basket for now (the
+  20-lot per-contract cap still applies) and passes a fail-closed funds check (the basket's hedged exchange margin plus the
+  premium of the BUY legs). The orders go **hedges first**: the BUY legs together at MARKET, and only once every one filled in
+  full the SELL legs. A hedge that fails sends no short (what filled is sold again); a short that fails or part-fills closes
+  every filled leg, shorts first. An unknown order outcome stops everything and reverses nothing: resolve each leg
+  ("Is open" / "Is flat") in the Baskets table. Exits cover the shorts first and sell the hedges only once none is held.
+  A leg closed outside the ladder makes the basket BROKEN (bracket off; exit what is left). The first REAL run should be a
+  1-lot defined-risk basket after a SIM day.
 - Two-expiry strategies (calendars, diagonals) are not offered. No OI bars in Basket mode (rows are premiums).
 
 ## Trading cutoffs (MCX and NSE)

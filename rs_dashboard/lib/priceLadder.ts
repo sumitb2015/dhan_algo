@@ -633,8 +633,16 @@ export function rollDay(s: LadderState, today: string, now: number): LadderState
   // mid-order (placing / exiting) becomes UNKNOWN — an earlier session's order can no longer be read by id.
   const baskets = (s.baskets ?? [])
     .filter(b => b.state !== 'armed' && b.state !== 'closed' && b.state !== 'cancelled')
-    .map(b => (b.mode === 'real' && (b.state === 'placing' || b.state === 'exiting')
-      ? { ...b, state: 'unknown' as const, note: 'Order from an earlier session — check Orders/Positions', updatedAt: now } : b));
+    .map(b => {
+      if (b.mode !== 'real' || (b.state !== 'placing' && b.state !== 'exiting' && b.state !== 'broken')) return b;
+      if (b.state === 'broken') return b;
+      // Per leg: an entry still working (or never sent) -> unknown entry; an exit in flight -> unknown exit (as for pairs).
+      const legs = b.legs.map(l => (l.entry === 'sent' || (b.state === 'placing' && l.entry == null)
+        ? { ...l, entry: 'unknown' as const, unknown: 'entry' as const }
+        : (l.exitOrderId || l.exitSentAt ? { ...l, unknown: 'exit' as const } : l)));
+      if (!legs.some(l => l.unknown)) return b;
+      return { ...b, state: 'unknown' as const, legs, note: 'Order from an earlier session — check Orders/Positions, then resolve each leg', updatedAt: now };
+    });
   // MTM guards: the levels are remembered, the guard is not. Its best MTM / locked profit belong to the day it ran, and a
   // stale exit-everything rule must not switch itself on over a new day's trades: it comes back OFF for the user to switch on.
   // (The setting keys mirror cleanGuard in priceLadderGuard.ts, which cannot be imported here without a value import cycle.)

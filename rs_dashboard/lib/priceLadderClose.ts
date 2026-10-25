@@ -66,5 +66,11 @@ export function ladderExitInFlight(st: LadderState, broker: LadderBroker, key: s
       if (same(l.contract) && (p.state === 'exiting' || p.state === 'placing' || p.state === 'rolling' || l.exitSentAt || l.exitOrderId)) return `the ladder is already exiting the ${l.contract.strike}${l.contract.opt} leg of a pair`;
     }
   }
+  for (const b of st.baskets ?? []) {
+    if (b.broker !== broker || b.mode !== 'real') continue;
+    for (const l of b.legs) {
+      if (same(l.contract) && (b.state === 'exiting' || b.state === 'placing' || (b.state === 'open' && b.exitWanted) || l.exitSentAt || l.exitOrderId)) return `the ladder is already working the ${l.contract.strike}${l.contract.opt} leg of a basket`;
+    }
+  }
   return null;
 }
