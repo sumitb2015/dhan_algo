@@ -177,7 +177,7 @@ function Seg<T extends string>({ value, options, onChange, labels, disabled, com
       {options.map(o => (
         <button
           key={o} type="button" disabled={disabled} aria-pressed={value === o} onClick={() => onChange(o)}
-          className={`px-2.5 ${compact ? 'py-0.5' : 'py-1'} text-xs font-semibold transition-colors disabled:opacity-50 ${value === o ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}
+          className={`px-2.5 ${compact ? 'py-0.5' : 'py-1'} text-xs font-semibold transition-colors disabled:opacity-50 ${value === o ? 'bg-sky-500/15 text-sky-300 ring-1 ring-inset ring-sky-500/30' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}
         >
           {labels?.[o] ?? o}
         </button>
@@ -223,7 +223,7 @@ function DefaultsPanel({ saved, onChange, onReset, onApplyNow }: { saved: Ladder
         <span className="text-xs font-bold text-zinc-200">Ladder defaults</span>
         <p className="text-[11px] text-zinc-400 leading-relaxed mt-0.5">What a ladder starts with each time this page loads. Saved in this browser; changes apply from the next load, or press Apply now.</p>
       </div>
-      <div className={row}><span className={lab}>Ladder mode</span><Seg compact value={d.mode} options={['xy', 'plain', 'pair', 'basket'] as const} labels={{ xy: 'XY', plain: 'Plain', pair: 'Pair', basket: 'Basket' }} onChange={mode => onChange({ mode })} /></div>
+      <div className={row}><span className={lab}>Ladder mode</span><Seg compact value={d.mode} options={['xy', 'plain', 'pair', 'basket'] as const} labels={{ xy: 'Index', plain: 'Plain', pair: 'Pair', basket: 'Basket' }} onChange={mode => onChange({ mode })} /></div>
       <div className={row}><span className={lab}>Product</span><Seg compact value={d.product} options={['NRML', 'MIS'] as const} onChange={product => onChange({ product })} /></div>
       <div className={row}><span className={lab}>Underlying</span>
         <select aria-label="Default underlying" value={d.underlying} onChange={e => onChange({ underlying: e.target.value })} className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-xs text-zinc-100">
@@ -1349,7 +1349,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <Rows3 className="w-4 h-4 text-emerald-400" />
           </div>
           <div className="min-w-0">
-            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">PRICE LADDER{dual ? ` ${ladderId}` : ''} · {mode === 'xy' ? 'XY' : mode === 'pair' ? 'PAIR' : mode === 'basket' ? 'BASKET' : 'PLAIN'}</p>
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">PRICE LADDER{dual ? ` ${ladderId}` : ''} · {mode === 'xy' ? 'Index' : mode === 'pair' ? 'PAIR' : mode === 'basket' ? 'BASKET' : 'PLAIN'}</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">
               {axisName} <span className="font-mono">{spot ? spot.toFixed(2) : '—'}</span>
             </h1>
@@ -1577,7 +1577,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
 
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 flex flex-col gap-1.5 text-xs">
               <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Ladder</span>
-                <Seg compact value={mode} options={['xy', 'plain', 'pair', 'basket'] as const} labels={{ xy: 'XY (index)', plain: 'Plain', pair: 'Pair', basket: 'Basket' }} onChange={setMode} />
+                <Seg compact value={mode} options={['xy', 'plain', 'pair', 'basket'] as const} labels={{ xy: 'Index', plain: 'Plain', pair: 'Pair', basket: 'Basket' }} onChange={setMode} />
               </div>
               <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Product</span>
                 <Seg compact value={product} options={['NRML', 'MIS'] as const} onChange={setProduct} />
@@ -1785,8 +1785,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                     ['Contract', ''],
                     ['Side', ''],
                     ['Qty', 'Filled quantity (ordered while unfilled), in lots'],
-                    ['Trigger', 'XY: the index / futures level that fires the entry. Plain: the LIMIT / SL price'],
-                    ['Fired at', 'XY: the index / futures level when the entry fired (the bracket is measured from it)'],
+                    ['Trigger', 'Index: the index / futures level that fires the entry. Plain: the LIMIT / SL price'],
+                    ['Fired at', 'Index: the index / futures level when the entry fired (the bracket is measured from it)'],
                     ['Entry ₹', 'Option entry price: the average fill'],
                     ['LTP ₹', 'Option live price (open positions)'],
                     ['Exit ₹', 'Option exit price: the average exit fill, with the exit time'],

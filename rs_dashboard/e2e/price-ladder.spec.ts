@@ -606,7 +606,7 @@ test('The open positions count and total P&L are the same in XY, Plain and Pair 
   await install(page, { openAll: true });
   await gotoSingle(page);
   const strip = () => page.getByLabel('Open positions', { exact: true });
-  for (const [name, heading] of [['XY (index)', /23200\.00/], ['Plain', /23200/], ['Pair', /23200/]] as const) {
+  for (const [name, heading] of [['Index', /23200\.00/], ['Plain', /23200/], ['Pair', /23200/]] as const) {
     await page.getByRole('button', { name, exact: true }).click();
     await expect(page.getByRole('heading', { name: heading }).first()).toBeVisible();
     await expect(strip()).toHaveText('3');
@@ -621,7 +621,7 @@ test('Every ladder shows its open positions and total P&L, even with nothing ope
   await expect(page.getByLabel('Open positions', { exact: true })).toHaveCount(2);
   await expect(page.getByTitle(/This ladder's total P&L/)).toHaveCount(2);
   await expect(page.getByLabel('Open positions', { exact: true }).nth(1)).toHaveText('0');
-  for (const name of ['Plain', 'Pair', 'XY (index)']) {
+  for (const name of ['Plain', 'Pair', 'Index']) {
     await page.getByRole('button', { name, exact: true }).nth(1).click();   // ladder 2's mode
     await expect(page.getByLabel('Open positions', { exact: true })).toHaveCount(2);
   }

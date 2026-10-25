@@ -110,7 +110,7 @@ export function LadderOptionChain({ underlying, expiry, selectedStrike, selected
             <div className="inline-flex rounded-md border border-zinc-700 overflow-hidden" role="group" aria-label="Strikes either side of ATM">
               {WINDOWS.map(w => (
                 <button key={w} type="button" aria-pressed={half === w} onClick={() => setHalf(w)}
-                  className={`px-2 py-0.5 text-xs font-semibold ${half === w ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}>±{w}</button>
+                  className={`px-2 py-0.5 text-xs font-semibold ${half === w ? 'bg-sky-500/15 text-sky-300 ring-1 ring-inset ring-sky-500/30' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}>±{w}</button>
               ))}
             </div>
             <button type="button" onClick={() => void load()} disabled={loading} aria-label="Refresh the chain" title="Refresh (the chain also refreshes every 20 s)"
