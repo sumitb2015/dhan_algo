@@ -317,6 +317,19 @@ export async function basketAction(b: Record<string, unknown>): Promise<NextResp
       if (!r.applied) return bad('Too late — it has just fired or is gone; check the basket list', 409);
       return ok(r.state);
     }
+    case 'cancelAll': {
+      // Every ARMED basket among `ids` (levels not yet fired); open baskets and anything at the broker are untouched.
+      const ids = new Set(Array.isArray(b.ids) ? b.ids.map(String).slice(0, 200) : []);
+      if (!ids.size) return bad('ids required');
+      let n = 0;
+      const s = await updateLadderState(st => {
+        let next = st;
+        for (const k of st.baskets ?? []) if (ids.has(k.id) && k.state === 'armed') { next = patchBasket(next, k.id, { state: 'cancelled', note: 'Cancelled by you (all)' }); n++; }
+        return n ? pushEvent(next, ev('info', `Cancel all: ${n} armed basket(s) cancelled`)) : st;
+      });
+      if (!n) return bad('Nothing armed to cancel', 409);
+      return ok(s, { cancelled: n });
+    }
     case 'exit': {
       const r = await guarded(id, y => (y.state === 'open' || y.state === 'broken') && !y.exitWanted,
         st => pushEvent(patchBasket(st, id, { exitWanted: 'Manual exit' }), ev('info', 'Basket exit requested', id)));

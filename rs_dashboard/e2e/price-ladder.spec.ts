@@ -18,7 +18,7 @@ const lastTradingDay = () => {
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const SPOT = 23200;
 
-async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** One open SIM short iron condor (2 lots) on the mocked strikes. */ openBasket?: boolean; /** Give the chain open interest on 23200 so the XY ladder draws OI bars. */ oi?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
+async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** One open SIM short iron condor (2 lots) on the mocked strikes. */ openBasket?: boolean; /** N armed (not yet fired) pairs on the two legs the Pair ladder shows. */ armedPairs?: number; /** One armed pair on OTHER strikes (23300 CE / 23100 PE) than the Pair ladder shows. */ offPair?: boolean; /** Give the chain open interest on 23200 so the XY ladder draws OI bars. */ oi?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
   const clock = opts.staleAt ? new Date(`${lastTradingDay()}T${opts.staleAt}:00+05:30`).getTime() : null;
   const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[], closes: [] as Record<string, unknown>[] };
   const state: LadderState = { date: istToday(), slices: [], events: [] };
@@ -39,6 +39,20 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
     );
     const leg = (id: string, opt: 'CE' | 'PE', avg: number) => ({ contract: c(id, opt), avg, held: 65, entry: 'filled' });
     state.pairs = [{ id: 'pp1', broker: 'dhan', mode: 'sim', structure: 'strangle', side: 'SELL', lots: 1, qty: 65, product: 'MIS', state: 'open', legs: { ce: leg('111', 'CE', 100), pe: leg('222', 'PE', 90) }, createdAt: Date.now(), updatedAt: Date.now(), openedAt: Date.now() }] as unknown as LadderState['pairs'];
+  }
+  if (opts.armedPairs) {
+    const c = (securityId: string, opt: 'CE' | 'PE') => ({ underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt, securityId, lotSize: 65, exchangeSegment: 'NSE_FNO' });
+    state.pairs = Array.from({ length: opts.armedPairs }, (_, i) => ({
+      id: `ap${i}`, broker: 'dhan', mode: 'sim', structure: 'straddle', side: i % 2 ? 'BUY' : 'SELL', lots: 1, qty: 65, product: 'MIS', state: 'armed',
+      legs: { ce: { contract: c('111', 'CE') }, pe: { contract: c('222', 'PE') } }, createdAt: Date.now() + i, updatedAt: Date.now(), entryLevel: 250 + i, entryDir: 'above', seenSafe: true,
+    })) as unknown as LadderState['pairs'];
+  }
+  if (opts.offPair) {
+    const c = (strike: number, opt: 'CE' | 'PE') => ({ underlying: 'NIFTY', expiry: '2026-10-27', strike, opt, securityId: `${strike}${opt}`, lotSize: 65, exchangeSegment: 'NSE_FNO' });
+    state.pairs = [...(state.pairs ?? []), {
+      id: 'off1', broker: 'dhan', mode: 'sim', structure: 'strangle', side: 'SELL', lots: 1, qty: 65, product: 'MIS', state: 'armed',
+      legs: { ce: { contract: c(23300, 'CE') }, pe: { contract: c(23100, 'PE') } }, createdAt: Date.now(), updatedAt: Date.now(), entryLevel: 185, entryDir: 'above', seenSafe: true,
+    }] as unknown as LadderState['pairs'];
   }
   const bpx = (strike: number, opt: 'CE' | 'PE') => Math.max(5, opt === 'CE' ? 120 - (strike - 23200) * 0.4 : 100 + (strike - 23200) * 0.4);
   if (opts.openBasket) {
@@ -117,6 +131,7 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
           side: body.side as 'BUY', lots: 1, qty: 65, product: 'MIS', state: 'open', createdAt: Date.now(), updatedAt: Date.now(), market: true,
         } as LadderSlice);
       }
+      if (body.action === 'pair' && body.op === 'cancelAll') state.pairs = (state.pairs ?? []).map(x => ((body.ids as string[]).includes(x.id) && x.state === 'armed' ? { ...x, state: 'cancelled' as const } : x));
       if (body.action === 'cancel') state.slices = state.slices.map(x => (x.id === body.id ? { ...x, state: 'cancelled' } : x));
       if (body.action === 'lots') state.slices = state.slices.map(x => (x.id === body.id ? { ...x, lots: Number(body.lots), qty: Number(body.lots) * 65 } : x));
       if (body.action === 'modify') state.slices = state.slices.map(x => (x.id === body.id ? { ...x, entryLevel: Number(body.level) } : x));
@@ -772,4 +787,30 @@ test('Basket mode REAL without the daily arm: the ladder is disabled and nothing
   await expect(page.getByText(/arm LIVE · REAL MONEY for today before placing/)).toBeVisible();
   await expect(page.getByRole('button', { name: /^Sell at 9[2-9]/ }).first()).toBeDisabled();
   expect(seen.posts.filter(b => b.action === 'basket')).toEqual([]);
+});
+
+test('Pair mode has a Cancel all: the toolbar button and the table header cancel every armed pair, open ones are untouched', async ({ page }) => {
+  const seen = await install(page, { armedPairs: 3 });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Pair', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Cancel all (3)' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'Cancel all armed (3)' })).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel all (3)' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.op === 'cancelAll').length).toBe(1);
+  expect(seen.posts.find(b => b.op === 'cancelAll')).toMatchObject({ action: 'pair', op: 'cancelAll', ids: ['ap0', 'ap1', 'ap2'] });
+  await expect(page.getByRole('button', { name: 'Cancel all (0)' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: /Cancel all armed/ })).toHaveCount(0);
+  expect(seen.blocked).toEqual([]);
+});
+
+test('A pair on other strikes is not drawn on the ladder: the page says so and one click puts it there', async ({ page }) => {
+  await install(page, { offPair: true });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Pair', exact: true }).click();
+  await expect(page.getByText(/1 live pair\(s\) are on other strikes/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'View on ladder' })).toBeVisible();
+  await page.getByRole('button', { name: /^Show 23300CE\/23100PE strangle$/ }).click();
+  await expect(page.getByText('CE 23300 (ATM+2) · PE 23100 (ATM-2)')).toBeVisible();
 });

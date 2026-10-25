@@ -1013,7 +1013,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     }
     addOne();
   };
-  const pendingHere = mode === 'pair' || mode === 'basket' ? 0 : mine.filter(s => (s.state === 'armed' || s.state === 'working') && s.mode === pageMode).length;
+  // Armed (not yet fired) levels on what the ladder shows: its option, or the pairs / baskets on the legs on screen.
+  const armedPairIds = myPairs.filter(p => p.state === 'armed').map(p => p.id);
+  const armedBasketIds = myBaskets.filter(b => b.state === 'armed').map(b => b.id);
+  const pendingHere = mode === 'pair' ? armedPairIds.length : mode === 'basket' ? armedBasketIds.length : mine.filter(s => (s.state === 'armed' || s.state === 'working') && s.mode === pageMode).length;
 
   // A price that has not moved is only a problem while the market is trading: outside the session there are no live
   // prices, so the stale warning is not shown (the server still refuses to arm without a fresh price).
@@ -1064,6 +1067,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     && p.legs.ce.contract.securityId === pairView.ce.securityId && p.legs.pe.contract.securityId === pairView.pe.securityId
     && (p.broker !== broker || p.mode !== pageMode)) : [];
   const done = paneSlices.filter(s => !isLive(s));
+  // Live pairs / baskets of this ladder that the ladder is NOT drawing (other strikes / legs): the table lists them, so the page
+  // says why they have no marker and offers to put them on the ladder. (The same legs on another broker / mode have their own banner.)
+  const offPairs = panePairs.filter(p => isPairLive(p) && !myPairs.some(y => y.id === p.id) && !hiddenPairs.some(h => h.id === p.id));
+  const offBaskets = paneBaskets.filter(b => isBasketLive(b) && !myBaskets.some(y => y.id === b.id));
   // Positions held (not armed levels): a contract + side group with filled lots, and a pair that has a leg on.
   const openPositions = openPositionCount(paneSlices, panePairs, paneBaskets);
 
@@ -1093,6 +1100,21 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     setStrike(o.centre); setCeOff(o.ceOff); setPeOff(o.peOff);
     setBroker(p.broker);
     setReal(p.mode === 'real'); setRealAck(false);
+  }, [setBroker, underlying, tickFor]);
+
+  // Show a basket on the ladder: Basket mode on its underlying / expiry with its own legs (side-blind: the same contracts draw the same
+  // net premium, whichever direction it was traded).
+  const selectBasket = useCallback((b: LadderBasket) => {
+    const c = b.legs[0].contract;
+    if (c.underlying !== underlying) setCenter(0);
+    setUnderlyingRaw(c.underlying);
+    setExpiry(c.expiry);
+    setModeRaw('basket'); setTick(tickFor('basket'));
+    if (basketTemplates().some(t => t.key === b.strategy)) setBasketKey(b.strategy);
+    setBasketLegs(b.legs.map(l => ({ side: l.side, opt: l.contract.opt, strike: l.contract.strike, ratio: l.ratio })));
+    setBasketEdited(true);
+    setBroker(b.broker);
+    setReal(b.mode === 'real'); setRealAck(false);
   }, [setBroker, underlying, tickFor]);
 
   // Auto-focus the contract of the newest live trade on first load so the user immediately sees it. It never switches
@@ -1524,6 +1546,26 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               <PnlChip label="Total P&L" value={ladderPnl}
                 title={`This ladder's total P&L on ${BROKER_LABELS[broker]} · ${real ? 'REAL' : 'SIM'} — the same number as the Ladder P&L chip above and the MTM guard: trades closed today at their exit, open ones at the live price. '—' while an open leg has no price.`} />
             </div>
+            {mode === 'pair' && offPairs.length > 0 && (
+              <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-amber-500/40 bg-amber-500/10 text-xs text-amber-300">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                {offPairs.length} live pair(s) are on other strikes, so they are not drawn on this ladder:
+                {offPairs.slice(0, 4).map(p => (
+                  <button key={p.id} type="button" onClick={() => selectPair(p)} title="Put this pair on the ladder"
+                    className={`px-2 py-0.5 rounded border border-amber-500/50 font-bold hover:bg-amber-500/20 ${FOCUS_RING}`}>Show {pairName(p)}</button>
+                ))}
+              </div>
+            )}
+            {mode === 'basket' && offBaskets.length > 0 && (
+              <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-amber-500/40 bg-amber-500/10 text-xs text-amber-300">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                {offBaskets.length} live basket(s) are on other legs, so they are not drawn on this ladder:
+                {offBaskets.slice(0, 4).map(b => (
+                  <button key={b.id} type="button" onClick={() => selectBasket(b)} title="Put this basket on the ladder"
+                    className={`px-2 py-0.5 rounded border border-amber-500/50 font-bold hover:bg-amber-500/20 ${FOCUS_RING}`}>Show {basketName(b)}</button>
+                ))}
+              </div>
+            )}
             {hiddenPairs.length > 0 && (
               <div className="flex items-center gap-2 flex-wrap px-3 py-2 rounded-md border border-amber-500/40 bg-amber-500/10 text-xs text-amber-300">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
@@ -1558,7 +1600,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               </button>
               <button
                 type="button" disabled={busy || pendingHere === 0}
-                onClick={() => void post({ action: 'cancelAll', securityId, broker, mode: pageMode })}
+                onClick={() => void post(mode === 'pair' ? { action: 'pair', op: 'cancelAll', ids: armedPairIds } : mode === 'basket' ? { action: 'basket', op: 'cancelAll', ids: armedBasketIds } : { action: 'cancelAll', securityId, broker, mode: pageMode })}
                 className="px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white disabled:opacity-40"
               >
                 Cancel all ({pendingHere})
@@ -1630,13 +1672,13 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         </div>
 
         {panePairs.length > 0 && (
-          <PairTable pairs={panePairs} ltps={data?.ltps ?? {}} busy={busy} post={post} trailPts={trailPts} onSelect={selectPair}
+          <PairTable pairs={panePairs} ltps={data?.ltps ?? {}} busy={busy} post={post} trailPts={trailPts} onSelect={selectPair} shown={new Set(myPairs.map(y => y.id))}
             onLots={(p, d) => onAdjust({ key: p.id, price: 0, column: p.side, kind: 'pos', label: 'Pair position', qty: p.qty, lots: p.lots, ids: [p.id], adjust: 'position' }, d, true)}
             onRoll={onRoll} />
         )}
 
         {paneBaskets.length > 0 && (
-          <BasketTable baskets={paneBaskets} ltps={data?.ltps ?? {}} busy={busy} post={post} />
+          <BasketTable baskets={paneBaskets} ltps={data?.ltps ?? {}} busy={busy} post={post} shown={new Set(myBaskets.map(y => y.id))} onSelect={selectBasket} />
         )}
         {basketModalOpen && (
           <BasketLegsModal name={basketTpl?.name ?? 'Basket'} legs={basketLegs} strikes={strikes} atmStrike={atmStrike} locked={basketLocked}
@@ -1935,7 +1977,9 @@ function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; 
 }
 
 /** Pair mode's own orders & positions (both legs on one row, with each leg's own order status). */
-function PairTable({ pairs, ltps, busy, post, trailPts, onSelect, onLots, onRoll }: {
+function PairTable({ pairs, ltps, busy, post, trailPts, onSelect, shown, onLots, onRoll }: {
+  /** The pairs the ladder is drawing right now (the others get a 'View on ladder' link). */
+  shown: ReadonlySet<string>;
   pairs: LadderPair[]; ltps: Record<string, number>; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean>;
   trailPts: number; onSelect: (p: LadderPair) => void;
   /** + / − one lot on both legs (the page asks first for a REAL add, as on the ladder). */
@@ -1955,6 +1999,11 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect, onLots, onRoll
     <div className="rounded-lg border border-zinc-800 overflow-x-auto">
       <div className="flex items-center justify-between px-3 py-2 bg-zinc-900/40">
         <p className="text-xs font-bold text-white">Pair orders &amp; positions <span className="text-zinc-500 font-medium">({pairs.filter(isPairLive).length} live)</span></p>
+        {pairs.some(p => p.state === 'armed') && (
+          <button type="button" disabled={busy} onClick={() => void post({ action: 'pair', op: 'cancelAll', ids: pairs.filter(p => p.state === 'armed').map(p => p.id) })}
+            title="Cancel every armed (not yet fired) pair in this table; open pairs are not touched"
+            className={`px-2 py-0.5 rounded border border-zinc-700 text-xs text-zinc-300 hover:text-white disabled:opacity-40 ${FOCUS_RING}`}>Cancel all armed ({pairs.filter(p => p.state === 'armed').length})</button>
+        )}
       </div>
       <table className="w-full text-xs">
         <thead className="bg-zinc-800">
@@ -1981,6 +2030,7 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect, onLots, onRoll
                   <span onClick={() => onSelect(p)} title="Click to view this pair on the ladder" className="cursor-pointer hover:text-white hover:underline">
                     {ce.contract.underlying} {ce.contract.expiry.slice(5)} {pairName(p)} <span className="text-zinc-500">{p.product}</span>
                   </span>
+                  {live && !shown.has(p.id) && <button type="button" onClick={() => onSelect(p)} className="ml-2 text-[10px] text-amber-300 underline font-sans">View on ladder</button>}
                   {/* REAL: each leg's own order, so a one-legged moment is visible as it happens. */}
                   {p.mode === 'real' && p.state !== 'armed' && (
                     <span className="block text-[10px] font-mono text-zinc-400">{LEG_KEYS.map(k => <span key={k} className={`mr-2 ${p.legs[k].unknown || p.legs[k].outside || p.legs[k].entry === 'dead' ? 'text-red-400' : ''}`}>{legStatus(k, p.legs[k])}</span>)}</span>
@@ -2119,12 +2169,17 @@ function PairTrailControl({ p, busy, post, fallback }: { p: LadderPair; busy: bo
 
 
 /** The baskets (armed, open and finished today) of this ladder: what each is, where it entered, its P&L, and its Cancel / Exit. */
-function BasketTable({ baskets, ltps, busy, post }: { baskets: LadderBasket[]; ltps: Record<string, number>; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean> }) {
+function BasketTable({ baskets, ltps, busy, post, shown, onSelect }: { baskets: LadderBasket[]; ltps: Record<string, number>; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean>; shown: ReadonlySet<string>; onSelect: (b: LadderBasket) => void }) {
   const heads = ['Time', 'Mode', 'Basket', 'Side', 'Lots', 'Legs', 'Trigger', 'Entry net', 'Now net', 'TGT / SL', 'State', 'P&L', ''];
   return (
     <div className="rounded-lg border border-zinc-800 overflow-x-auto">
       <div className="flex items-center justify-between px-3 py-2 bg-zinc-900/40">
         <p className="text-xs font-bold text-white">Basket orders &amp; positions <span className="text-zinc-500 font-medium">({baskets.filter(isBasketLive).length} live)</span></p>
+        {baskets.some(b => b.state === 'armed') && (
+          <button type="button" disabled={busy} onClick={() => void post({ action: 'basket', op: 'cancelAll', ids: baskets.filter(b => b.state === 'armed').map(b => b.id) })}
+            title="Cancel every armed (not yet fired) basket in this table; open baskets are not touched"
+            className={`px-2 py-0.5 rounded border border-zinc-700 text-xs text-zinc-300 hover:text-white disabled:opacity-40 ${FOCUS_RING}`}>Cancel all armed ({baskets.filter(b => b.state === 'armed').length})</button>
+        )}
       </div>
       <table className="w-full text-xs">
         <thead className="bg-zinc-800">
@@ -2142,7 +2197,7 @@ function BasketTable({ baskets, ltps, busy, post }: { baskets: LadderBasket[]; l
               <tr key={b.id} className={`border-t border-zinc-900 ${live ? '' : 'opacity-60'}`}>
                 <td className="px-2 py-1 font-mono text-zinc-400 whitespace-nowrap">{timeOf(b.createdAt)}</td>
                 <td className="px-2 py-1">{b.mode === 'real' ? <span className="text-red-400 font-bold">REAL</span> : 'SIM'}</td>
-                <td className="px-2 py-1 font-mono whitespace-nowrap" title={basketName(b)}>{basketName(b)}</td>
+                <td className="px-2 py-1 font-mono whitespace-nowrap" title={basketName(b)}>{basketName(b)}{live && !shown.has(b.id) && <button type="button" onClick={() => onSelect(b)} className="ml-2 text-[10px] text-amber-300 underline font-sans">View on ladder</button>}</td>
                 <td className={`px-2 py-1 font-bold ${b.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`} title={b.side === 'SELL' ? 'Receives the net premium' : 'Pays the net premium'}>{b.side}</td>
                 <td className="px-2 py-1 font-mono">{b.lots}</td>
                 <td className="px-2 py-1 font-mono text-zinc-400 whitespace-nowrap">{b.legs.map(l => `${l.side === 'BUY' ? '+' : '−'}${l.contract.strike}${l.contract.opt}${l.ratio > 1 ? `×${l.ratio}` : ''}`).join(' ')}</td>

@@ -515,6 +515,19 @@ export async function pairAction(b: Record<string, unknown>): Promise<NextRespon
       if (!r.applied) return bad('Too late — it has just fired or is gone; check the pair list', 409);
       return ok(r.state);
     }
+    case 'cancelAll': {
+      // Every ARMED pair among `ids` (levels not yet fired); open pairs and anything at the broker are untouched.
+      const ids = new Set(Array.isArray(b.ids) ? b.ids.map(String).slice(0, 200) : []);
+      if (!ids.size) return bad('ids required');
+      let n = 0;
+      const s = await updateLadderState(st => {
+        let next = st;
+        for (const p of st.pairs ?? []) if (ids.has(p.id) && p.state === 'armed') { next = patchPair(next, p.id, { state: 'cancelled', note: 'Cancelled by you (all)' }); n++; }
+        return n ? pushEvent(next, ev('info', `Cancel all: ${n} armed pair(s) cancelled`)) : st;
+      });
+      if (!n) return bad('Nothing armed to cancel', 409);
+      return ok(s, { cancelled: n });
+    }
     case 'add':
       return addLot(id);
     case 'roll':
