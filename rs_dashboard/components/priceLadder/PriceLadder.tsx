@@ -191,12 +191,16 @@ const timeOf = (at: number) => new Date(at).toLocaleTimeString('en-IN', { timeZo
 /** One ladder pane. The page can show two side by side: the second keeps its own saved choices (keys end in `-2`), has no
  *  NavBar, and neither auto-focuses a live contract nor chimes (the first pane already does both). The ledger and the
  *  server watcher are shared — every slice carries its own contract, so the panes only differ in what they display. */
-export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, onRemoveLadder, onBrokerChange, peerBroker, onHeaderHeight, headerMinHeight, collapsed = false, onToggleCollapsed }: {
+export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, onRemoveLadder, onBrokerChange, peerBroker, onHeaderHeight, headerMinHeight, onTopHeight, topMinHeight, onBannerHeight, bannerMinHeight, collapsed = false, onToggleCollapsed }: {
   ladderId?: 1 | 2; dual?: boolean; onAddLadder?: () => void; onRemoveLadder?: () => void;
   /** Reports this pane's broker; the other pane gets it as `peerBroker`. */
   onBrokerChange?: (b: LadderBroker) => void; peerBroker?: LadderBroker | null;
   /** Side by side: this header's own height is reported, and both headers are held to the taller one so the two ladders start level. */
   onHeaderHeight?: (h: number) => void; headerMinHeight?: number;
+  /** Height of the banners + ladder block above the orders panel; the workspace holds both panes to the taller so the orders panels line up. */
+  onTopHeight?: (h: number) => void; topMinHeight?: number;
+  /** Same for the banner stack alone, so a notice in one pane ("MCX is closed") cannot push that pane's ladder below the other's. */
+  onBannerHeight?: (h: number) => void; bannerMinHeight?: number;
   /** The header's control rows folded away (shared by both panes), leaving the title row. */
   collapsed?: boolean; onToggleCollapsed?: () => void;
 }) {
@@ -215,6 +219,23 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     ro.observe(el);
     return () => ro.disconnect();
   }, [onHeaderHeight]);
+  const topRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = topRef.current;
+    if (!el || !onTopHeight) return;
+    // Measure the natural height: the min-height we apply is dropped from the reading by observing the inner wrapper.
+    const ro = new ResizeObserver(() => onTopHeight(el.offsetHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [onTopHeight]);
+  const bannerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = bannerRef.current;
+    if (!el || !onBannerHeight) return;
+    const ro = new ResizeObserver(() => onBannerHeight(el.offsetHeight));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [onBannerHeight]);
   const [mode, setModeRaw] = useState<PageMode>('xy');
   // Pair mode: a straddle on the centre strike, or a strangle with its CE `ceOff` strikes above it and its PE `peOff` strikes below it (independent).
   const [structure, setStructure] = useState<PairStructure>('straddle');
@@ -1273,6 +1294,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       )}
 
       <div className="flex-1 flex flex-col gap-4 px-6 py-5 max-w-[1680px] w-full mx-auto">
+        <div className="flex flex-col gap-4 xl:min-h-[var(--ladder-top-h)]" style={topMinHeight ? ({ '--ladder-top-h': `${topMinHeight}px` } as React.CSSProperties) : undefined}>
+        <div ref={topRef} className="flex flex-col gap-4">
+        <div className="xl:min-h-[var(--ladder-banner-h)]" style={{ ...(bannerMinHeight ? { '--ladder-banner-h': `${bannerMinHeight}px` } : { marginBottom: -16 }) } as React.CSSProperties}>
+        <div ref={bannerRef} className="flex flex-col gap-4">
         {loadError && (
           <div className="flex items-center gap-2 px-3 py-2 rounded-md border border-red-500/30 bg-red-500/10 text-xs text-red-300">
             <AlertTriangle className="w-4 h-4" /> {loadError}
@@ -1319,6 +1344,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <ShieldAlert className="w-4 h-4" /> REAL mode: arm LIVE · REAL MONEY for today before placing. Exits always work.
           </div>
         )}
+
+        </div>
+        </div>
 
         <div className={`grid grid-cols-1 gap-4 ${dual ? '2xl:grid-cols-[272px_minmax(0,1fr)]' : 'lg:grid-cols-[272px_minmax(0,1fr)]'}`}>
           {/* ── left panel ── */}
@@ -1626,6 +1654,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               } : undefined}
             />
           </div>
+        </div>
+
+        </div>
         </div>
 
         {/* ── orders ── */}

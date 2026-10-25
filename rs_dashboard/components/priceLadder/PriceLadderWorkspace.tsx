@@ -11,6 +11,14 @@ export default function PriceLadderWorkspace() {
   const [heads, setHeads] = useState<[number, number]>([0, 0]);
   const head1 = useCallback((h: number) => setHeads(p => (p[0] === h ? p : [h, p[1]])), []);
   const head2 = useCallback((h: number) => setHeads(p => (p[1] === h ? p : [p[0], h])), []);
+  const [tops, setTops] = useState<[number, number]>([0, 0]);
+  const top1 = useCallback((h: number) => setTops(p => (p[0] === h ? p : [h, p[1]])), []);
+  const top2 = useCallback((h: number) => setTops(p => (p[1] === h ? p : [p[0], h])), []);
+  const topMax = Math.max(tops[0], tops[1]);
+  const [banners, setBanners] = useState<[number, number]>([0, 0]);
+  const ban1 = useCallback((h: number) => setBanners(p => (p[0] === h ? p : [h, p[1]])), []);
+  const ban2 = useCallback((h: number) => setBanners(p => (p[1] === h ? p : [p[0], h])), []);
+  const bannerMax = Math.max(banners[0], banners[1]);
   const headMax = Math.max(heads[0], heads[1]);
   // The header's control rows fold away to leave more room for the ladder; one setting for both panes, remembered.
   const [collapsed, setCollapsed] = useState(false);
@@ -26,8 +34,8 @@ export default function PriceLadderWorkspace() {
   if (!dual) return <PriceLadder onAddLadder={() => setDual(true)} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />;
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-zinc-800 min-h-screen bg-zinc-950">
-      <PriceLadder ladderId={1} dual onBrokerChange={setFirstBroker} onHeaderHeight={head1} headerMinHeight={headMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
-      <PriceLadder ladderId={2} dual peerBroker={firstBroker} onHeaderHeight={head2} headerMinHeight={headMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} onRemoveLadder={() => setDual(false)} />
+      <PriceLadder ladderId={1} dual onBrokerChange={setFirstBroker} onHeaderHeight={head1} onTopHeight={top1} onBannerHeight={ban1} headerMinHeight={headMax} topMinHeight={topMax} bannerMinHeight={bannerMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
+      <PriceLadder ladderId={2} dual peerBroker={firstBroker} onHeaderHeight={head2} onTopHeight={top2} onBannerHeight={ban2} headerMinHeight={headMax} topMinHeight={topMax} bannerMinHeight={bannerMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} onRemoveLadder={() => setDual(false)} />
     </div>
   );
 }
