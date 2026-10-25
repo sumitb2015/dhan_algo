@@ -128,7 +128,7 @@ async function market(b: Record<string, unknown>): Promise<NextResponse> {
     err = overCap(st, p.broker, 'sim', basket.legs, basket.lots);
     if (err) return st;
     return pushEvent({ ...st, baskets: [...(st.baskets ?? []), basket] },
-      ev('info', `SIM ${p.side} ${p.lots} lot(s) ${basketName(basket)} at MARKET: net ${p.a.toFixed(2)}`, basket.id));
+      ev('info', `SIM ${p.side} ${p.lots} lot(s) ${basketName(basket)} at MARKET: filled at net ${p.a.toFixed(2)}`, basket.id));
   });
   if (err) return bad(err);
   return ok(s, { id: basket.id });

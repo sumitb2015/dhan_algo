@@ -119,6 +119,9 @@ export function validateDraft(legs: readonly DraftLeg[]): string | null {
     if (!Number.isInteger(l.ratio) || l.ratio < 1 || l.ratio > MAX_BASKET_RATIO) return `Leg ratios are whole numbers 1-${MAX_BASKET_RATIO}`;
     const k = `${l.strike}${l.opt}${l.side}`;
     if (seen.has(k)) return `${l.strike}${l.opt} is in the basket twice on the same side — raise its ratio instead`;
+    // The same contract bought AND sold nets out: usually a template squeezed onto a short strike list, never a real leg pair.
+    const opposite = `${l.strike}${l.opt}${l.side === 'BUY' ? 'SELL' : 'BUY'}`;
+    if (seen.has(opposite)) return `${l.strike}${l.opt} is both bought and sold — change one leg's strike`;
     seen.add(k);
   }
   return null;
@@ -267,8 +270,11 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
       if (due && b.note !== note) next = say(patch(b.id, { note }), 'warn', `${name}: exit due but the market is closed — waiting for the open`, b.id);
       continue;
     }
+    // The bracket reads the net premium; a manual / MIS exit needs only every leg's price (a net that has fallen to nothing
+    // must not strand the exit). So the net is passed only while it is a usable price.
     const step = openExitStep(b, pairBias(b.side), c, afterClose, at);
-    if (step.reason && c == null) {
+    const allPriced = b.legs.every(l => ltps[l.contract.securityId] > 0);
+    if (step.reason && !allPriced) {
       const note = 'Exit waiting for every leg price';
       next = b.note === note ? next : say(patch(b.id, { ...step.patch, note }), 'warn', `${name}: ${step.reason} due but a leg has no live price — waiting`, b.id);
       continue;
@@ -276,7 +282,7 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
     if (step.reason) {
       const legs = b.legs.map(l => ({ ...l, held: 0, exitedQty: (l.exitedQty ?? 0) + basketLegHeld(l), exitAvg: blendExitAvg(l, basketLegHeld(l), ltps[l.contract.securityId]) } as BasketLeg));
       next = say(patch(b.id, { ...step.patch, state: 'closed', exitReason: step.reason, exitWanted: undefined, closedAt: now, note: undefined, legs }),
-        'info', `SIM exit ${name} (${step.reason}) at net ${c!.toFixed(2)}`, b.id);
+        'info', `SIM exit ${name} (${step.reason})${c != null ? ` at net ${c.toFixed(2)}` : ''}`, b.id);
     } else if (Object.keys(step.patch).length || b.note) {
       next = patch(b.id, { ...step.patch, ...(b.note ? { note: undefined } : {}) });
     }

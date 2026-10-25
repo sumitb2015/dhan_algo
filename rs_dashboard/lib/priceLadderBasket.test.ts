@@ -45,7 +45,7 @@ test('validateDraft: legs, ratios and duplicates', () => {
   assert.match(validateDraft(Array.from({ length: 9 }, (_, i) => ({ side: 'BUY' as const, opt: 'CE' as const, strike: 22000 + i * 50, ratio: 1 })))!, /at most 8/);
   assert.match(validateDraft([{ ...condorDraft[0], ratio: 0 }])!, /whole numbers/);
   assert.match(validateDraft([condorDraft[0], condorDraft[0]])!, /twice/);
-  assert.equal(validateDraft([condorDraft[0], { ...condorDraft[0], side: 'BUY' }]), null);          // same strike, other side: allowed
+  assert.match(validateDraft([condorDraft[0], { ...condorDraft[0], side: 'BUY' }])!, /both bought and sold/);   // a template squeezed onto a short strike list
 });
 
 test('basketAxis / orientLegs / basketCombined: credit strategy, both directions, A is always the positive magnitude', () => {
@@ -149,4 +149,37 @@ test('integration: baskets count in the 20-lot cap, the open count and survive t
   assert.equal(openPositionCount([], [], two), 1);                                           // armed is not a position
   const rolled = rollDay(st([armed, { ...armed, id: 'o', state: 'open' }, { ...armed, id: 'c', state: 'closed' }], { date: '2026-10-26' }), '2026-10-27', 5);
   assert.deepEqual(rolled.baskets!.map(b => b.id), ['o']);
+});
+
+test('planBaskets: a net that has fallen to nothing still exits on a manual / MIS reason (it needs every leg price, not a positive net)', () => {
+  const b = basket({ state: 'open', openedAt: 1, entryY: 48, exitWanted: 'Manual exit' });
+  b.legs = b.legs.map(l => ({ ...l, avg: 10, held: 130, filledQty: 130, entry: 'filled' as const }));
+  const flat = { '22700CE': 20, '22800CE': 20, '22500PE': 20, '22400PE': 20 };       // net = 0: no axis price
+  assert.equal(basketCombined(b, flat), null);
+  const out = planBaskets(st([b]), flat, NOW).next.baskets![0];
+  assert.equal(out.state, 'closed');
+  assert.equal(out.exitReason, 'Manual exit');
+});
+
+test('integration: guard, archive and Clear see baskets', async () => {
+  const { scopeMtm, applyGuards } = await import('./priceLadderGuard.ts');
+  const { partsToArchive } = await import('./priceLadderArchive.ts');
+  const open = basket({ state: 'open', openedAt: 1, entryY: 48 });
+  open.legs = open.legs.map(l => ({ ...l, avg: PX[`${l.contract.strike}${l.contract.opt}`], held: 130, filledQty: 130, entry: 'filled' as const }));
+  const sc = { broker: 'dhan', mode: 'sim', pane: 1 } as const;
+  assert.equal(scopeMtm(st([open]), sc, PX), 0);
+  assert.equal(scopeMtm(st([open]), sc, { ...PX, '22700CE': 30 }), 10 * 130);          // the short CE decayed 40 -> 30
+  assert.equal(scopeMtm(st([open]), { ...sc, mode: 'real' }, PX), null);
+  // a tripped guard queues the exit of an open basket and cancels an armed one
+  const armed = basket({ id: 'a2' });
+  const tripped = { ...st([open, armed]), guards: { 'dhan:sim': { on: true, stop: 100 } } };
+  const g = applyGuards(tripped, { ...PX, '22700CE': 120 }, NOW).next;               // MTM far below -100
+  assert.equal(g.baskets!.find(b => b.id === 'b1')!.exitWanted?.length ? true : false, true);
+  assert.equal(g.baskets!.find(b => b.id === 'a2')!.state, 'cancelled');
+  // archive: a roll saves the baskets, Clear saves the ones it removes
+  const raw = st([open, basket({ id: 'c1', state: 'closed' })]);
+  const rolled = rollDay(raw, '2026-10-28', 5);
+  assert.deepEqual(partsToArchive(raw, rolled, rolled)!.part.baskets!.map(b => b.id), ['b1', 'c1']);
+  const cleared = { ...raw, baskets: raw.baskets!.filter(b => b.state !== 'closed') };
+  assert.deepEqual(partsToArchive(raw, raw, cleared)!.part.baskets!.map(b => b.id), ['c1']);
 });
