@@ -18,7 +18,7 @@ const lastTradingDay = () => {
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const SPOT = 23200;
 
-async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
+async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** Give the chain open interest on 23200 so the XY ladder draws OI bars. */ oi?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
   const clock = opts.staleAt ? new Date(`${lastTradingDay()}T${opts.staleAt}:00+05:30`).getTime() : null;
   const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[], closes: [] as Record<string, unknown>[] };
   const state: LadderState = { date: istToday(), slices: [], events: [] };
@@ -65,7 +65,7 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
     if (p === '/api/options/expiries') return json(route, { success: true, data: ['2026-10-27'] });
     if (p === '/api/options/chain') {
       const oc: Record<string, unknown> = {};
-      for (const k of [23100, 23150, 23200, 23250, 23300]) oc[`${k}.000000`] = { ce: {}, pe: {} };
+      for (const k of [23100, 23150, 23200, 23250, 23300]) oc[`${k}.000000`] = opts.oi && k === 23200 ? { ce: { oi: 3_146_455 }, pe: { oi: 1_722_500 } } : { ce: {}, pe: {} };
       return json(route, { success: true, data: { spot: SPOT, chain: { oc } } });
     }
     if (p === '/api/scalper/top-indices') return json(route, { success: true, quotes: { NIFTY: { ltp: SPOT, prev_close: 23100, change_pct: 0.43, day_high: 23250, day_low: 23050 } } });
@@ -645,4 +645,15 @@ test('Pair ladder has the Net Pos / P&L / Avg Price panel with 25 / 50 / 75 / Ex
   await expect.poll(() => seen.posts.filter(b => b.op === 'exitShare').length).toBe(1);
   expect(seen.posts.find(b => b.op === 'exitShare')).toMatchObject({ action: 'pair', op: 'exitShare', ids: ['pp1'], pct: 100 });
   expect(seen.blocked).toEqual([]);
+});
+
+test('OI bars: call OI is drawn left of the Price column and put OI right of it', async ({ page }) => {
+  await install(page, { oi: true });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  const ce = page.getByTitle(/^23200 CE OI/), pe = page.getByTitle(/^23200 PE OI/);
+  await expect(ce).toHaveCount(1);
+  await expect(pe).toHaveCount(1);
+  const [c, p] = [await ce.boundingBox(), await pe.boundingBox()];
+  expect(c!.x + c!.width).toBeLessThanOrEqual(p!.x);          // the call bar ends before the put bar starts: call left, put right
 });

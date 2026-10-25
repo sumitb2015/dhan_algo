@@ -303,7 +303,7 @@ export function LadderGrid({
   onAdjust: (w: LadderWidget, delta: 1 | -1) => void;
   disabled: boolean; decimals: number;
   entryMarks?: EntryMark[];
-  /** XY only: the chain's OI per strike, drawn as bars behind the strike rows (put left of Price, call right), `max` = 100 %. */
+  /** XY only: the chain's OI per strike, drawn as bars behind the strike rows (call left of Price, put right), `max` = 100 %. */
   oi?: { rows: OiStrike[]; max: number };
   /** Scroll the window by N ticks (positive = up, toward higher prices). Wheel over the rows or the ▲ / ▼ buttons. */
   onScroll?: (ticks: number) => void;
@@ -437,15 +437,16 @@ export function LadderGrid({
               // Each bar uses at most the PRICE_COL_LEFT_PCT of the row outside the Price column.
               return (
                 <div className="absolute inset-0 pointer-events-none select-none" aria-hidden="true">
-                  {pePct > 0 && (
-                    <div title={`${oiRow.strike} PE OI ${oiRow.peOi.toLocaleString('en-IN')} · ${chg(oiRow.peOi, oiRow.pePrev)}`}
-                      className="absolute top-0.5 bottom-0.5 right-[58%] rounded-l bg-emerald-500/25 flex items-center pl-1 text-[9px] font-mono text-zinc-400"
-                      style={{ width: `${pePct * PRICE_COL_LEFT_PCT / 100}%` }}>{showNum ? compactOi(oiRow.peOi) : null}</div>
-                  )}
+                  {/* Call OI (red) grows to the LEFT of the Price column, Put OI (green) to the RIGHT. */}
                   {cePct > 0 && (
                     <div title={`${oiRow.strike} CE OI ${oiRow.ceOi.toLocaleString('en-IN')} · ${chg(oiRow.ceOi, oiRow.cePrev)}`}
-                      className="absolute top-0.5 bottom-0.5 left-[58%] rounded-r bg-red-500/25 flex items-center justify-end pr-1 text-[9px] font-mono text-zinc-400"
+                      className="absolute top-0.5 bottom-0.5 right-[58%] rounded-l bg-red-500/25 flex items-center pl-1 text-[9px] font-mono text-zinc-400"
                       style={{ width: `${cePct * PRICE_COL_LEFT_PCT / 100}%` }}>{showNum ? compactOi(oiRow.ceOi) : null}</div>
+                  )}
+                  {pePct > 0 && (
+                    <div title={`${oiRow.strike} PE OI ${oiRow.peOi.toLocaleString('en-IN')} · ${chg(oiRow.peOi, oiRow.pePrev)}`}
+                      className="absolute top-0.5 bottom-0.5 left-[58%] rounded-r bg-emerald-500/25 flex items-center justify-end pr-1 text-[9px] font-mono text-zinc-400"
+                      style={{ width: `${pePct * PRICE_COL_LEFT_PCT / 100}%` }}>{showNum ? compactOi(oiRow.peOi) : null}</div>
                   )}
                 </div>
               );

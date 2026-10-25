@@ -1,5 +1,5 @@
 // Open-interest bars on an XY ladder's rows. A strike is a level on the ladder's index / futures axis, so the chain's OI
-// per strike draws as an OI profile: put OI (support) to the left of the Price column, call OI (resistance) to the right.
+// per strike draws as an OI profile: call OI (resistance, red) to the left of the Price column, put OI (support, green) to the right.
 // Pure; the chain comes from /api/options/chain (the page already loads it for the strike list). OI is shown exactly as
 // Dhan's chain reports it (contracts for index options; CRUDEOILM's unit is not confirmed), so bars carry no unit label.
 
