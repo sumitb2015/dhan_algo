@@ -1325,14 +1325,17 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
 
           {/* ── ladder ── */}
           <div className="flex flex-col gap-2 min-w-0">
-            {(live.length > 0 || livePairs.length > 0) && (
-              <div className="flex items-center gap-1.5 flex-wrap px-2.5 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800 text-xs">
+            {(live.length > 0 || livePairs.length > 0 || ladderPnl != null) && (
+              <div className="flex items-center gap-2 flex-wrap px-2.5 py-1.5 rounded-lg bg-zinc-900/80 border border-zinc-800 text-xs">
                 <span className="text-zinc-400 font-semibold flex items-center gap-1.5"
                   title="Positions this ladder holds right now: one per contract + side (a strangle or straddle counts as one). Armed levels and resting orders are not positions; they show on the ladder.">
                   <span className={`w-2 h-2 rounded-full ${openPositions > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-600'}`} />
                   Open positions:
                 </span>
                 <span className="font-mono font-bold text-zinc-100" aria-label="Open positions">{openPositions}</span>
+                <span className="w-px h-4 bg-zinc-800 shrink-0 mx-1" />
+                <PnlChip label="Total P&L" value={ladderPnl}
+                  title={`This ladder's total P&L on ${BROKER_LABELS[broker]} · ${real ? 'REAL' : 'SIM'} — the same number as the Ladder P&L chip above and the MTM guard: trades closed today at their exit, open ones at the live price. '—' while an open leg has no price.`} />
               </div>
             )}
             {hiddenPairs.length > 0 && (

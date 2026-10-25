@@ -557,4 +557,6 @@ test('The trades strip shows only the number of open positions (armed levels are
   await expect.poll(() => seen.posts.filter(b => b.action === 'arm').length).toBe(1);
   await expect(page.getByLabel('Open positions', { exact: true })).toHaveText('1');
   await expect(page.getByText('View on ladder')).toHaveCount(0);
+  // The strip also carries the ladder's total P&L (open leg 65 units, 110 -> 120 = +650), the same figure as the header chip.
+  await expect(page.getByTitle(/This ladder's total P&L/)).toContainText('+₹650');
 });
