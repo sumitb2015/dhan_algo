@@ -654,3 +654,20 @@ test('leg SL of a +1 lot uses its parent\'s level only on the same strike', () =
   assert.equal(legSlReason(kid, { 1: 205, 2: 100 }, rolled), null);
   assert.equal(legSlReason(kid, { 1: 261, 2: 100 }, rolled), 'Leg SL CE 260.00');
 });
+
+test('pairStrikes: a strangle takes independent CE-above / PE-below offsets from the centre', async () => {
+  const { pairStrikes, pairCentreOffsets } = await import('./priceLadderPair.ts');
+  assert.deepEqual(pairStrikes('straddle', 22600, 50, 3, 5), { ce: 22600, pe: 22600 });
+  assert.deepEqual(pairStrikes('strangle', 22600, 50, 2, 2), { ce: 22700, pe: 22500 });
+  assert.deepEqual(pairStrikes('strangle', 22600, 50, 1, 4), { ce: 22650, pe: 22400 });     // asymmetric
+  assert.deepEqual(pairStrikes('strangle', 22600, 50, 0, 3), { ce: 22600, pe: 22450 });     // CE on the ATM
+  assert.equal(pairStrikes('strangle', 22600, 50, 0, 0), null);                              // CE must be above PE
+  assert.equal(pairStrikes('strangle', 22600, 50, -1, 2), null);
+  assert.equal(pairStrikes('strangle', 22600, 50, 1.5, 2), null);
+  assert.equal(pairStrikes('strangle', 0, 50, 1, 1), null);
+  // showing an existing pair again
+  assert.deepEqual(pairCentreOffsets(22700, 22500, 50), { centre: 22600, ceOff: 2, peOff: 2 });
+  assert.deepEqual(pairCentreOffsets(22650, 22400, 50), { centre: 22400, ceOff: 5, peOff: 0 });  // odd gap: centred on the PE
+  const o = pairCentreOffsets(22650, 22400, 50);
+  assert.deepEqual(pairStrikes('strangle', o.centre, 50, o.ceOff, o.peOff), { ce: 22650, pe: 22400 });
+});

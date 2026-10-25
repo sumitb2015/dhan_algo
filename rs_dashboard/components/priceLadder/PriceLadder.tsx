@@ -13,7 +13,7 @@ import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
 import { FOCUS_RING } from '@/components/Scalper';
 import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
-import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
+import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
 import { guardKey, scopeMtm } from '@/lib/priceLadderGuard';
@@ -214,9 +214,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     return () => ro.disconnect();
   }, [onHeaderHeight]);
   const [mode, setModeRaw] = useState<PageMode>('xy');
-  // Pair mode: a straddle on the centre strike, or a strangle `wing` strikes either side of it (CE above, PE below).
+  // Pair mode: a straddle on the centre strike, or a strangle with its CE `ceOff` strikes above it and its PE `peOff` strikes below it (independent).
   const [structure, setStructure] = useState<PairStructure>('straddle');
-  const [wing, setWing] = useState(2);
+  const [ceOff, setCeOff] = useState(2);
+  const [peOff, setPeOff] = useState(2);
   // Pair mode: a leg moving this % against its own fill exits both legs (0 = off).
   const [legSlPct, setLegSlPct] = useState(0);
   const [real, setReal] = useState(false);               // per page load, never persisted
@@ -292,11 +293,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Each mode has its own axis (index / premium / combined premium): drop the old rows until the new price arrives,
   // so a Pair ladder never shows the XY futures levels as if they were combined premiums.
   const setMode = (m: PageMode) => { setModeRaw(m); savePref(k('price-ladder-mode'), m); setTick(tickFor(m)); setCenter(0); setFollow(true); setManual(false); };
-  // The pair's strikes: CE = centre + wing steps, PE = centre − wing steps (a straddle: both on the centre). Null when a
+  // The pair's strikes: CE = centre + ceOff steps, PE = centre − peOff steps (a straddle: both on the centre). Null when a
   // leg is not in the chain's strike list.
   const pairStep = STRIKE_STEP[underlying] ?? 50;
-  const pairCe = mode === 'pair' && strike ? (structure === 'straddle' ? strike : strike + wing * pairStep) : null;
-  const pairPe = mode === 'pair' && strike ? (structure === 'straddle' ? strike : strike - wing * pairStep) : null;
+  const built = mode === 'pair' && strike ? pairStrikes(structure, strike, pairStep, ceOff, peOff) : null;
+  const pairCe = built?.ce ?? null;
+  const pairPe = built?.pe ?? null;
   const pairOk = pairCe != null && pairPe != null && strikes.includes(pairCe) && strikes.includes(pairPe);
   // The expiry is cleared too: the old underlying's date must not be asked of the new one's chain for a render.
   const setUnderlying = (u: string) => { setUnderlyingRaw(u); savePref(k('price-ladder-underlying'), u); setExpiry(''); setExpiries([]); setStrike(null); setCenter(0); setFollow(true); setManual(false); };
@@ -970,7 +972,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     if (s.mode) { setReal(s.mode === 'real'); setRealAck(false); }
   }, [setBroker, underlying]);
 
-  // Show a pair on the ladder: Pair mode on its underlying / expiry, centre strike and wing.
+  // Show a pair on the ladder: Pair mode on its underlying / expiry, centre strike and offsets.
   const selectPair = useCallback((p: LadderPair) => {
     const c = p.legs.ce.contract, pc = p.legs.pe.contract;
     if (c.underlying !== underlying) setCenter(0);
@@ -979,8 +981,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     setModeRaw('pair'); setTick(tickFor('pair'));
     setStructure(p.structure);
     const step = STRIKE_STEP[c.underlying] ?? 50;
-    setStrike((c.strike + pc.strike) / 2);
-    setWing(Math.max(1, Math.round((c.strike - pc.strike) / 2 / step)));
+    const o = pairCentreOffsets(c.strike, pc.strike, step);
+    setStrike(o.centre); setCeOff(o.ceOff); setPeOff(o.peOff);
     setBroker(p.broker);
     setReal(p.mode === 'real'); setRealAck(false);
   }, [setBroker, underlying, tickFor]);
@@ -1248,15 +1250,20 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               )}
               {mode === 'pair' && (
                 <>
-                  <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title="Straddle: CE and PE on the strike above. Strangle: CE the wing above it, PE the wing below.">Structure</span>
+                  <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title="Straddle: CE and PE on the strike above. Strangle: CE some strikes above it, PE some below — set separately.">Structure</span>
                     <Seg compact value={structure} options={['straddle', 'strangle'] as const} labels={{ straddle: 'Straddle', strangle: 'Strangle' }} onChange={setStructure} />
                   </div>
                   {structure === 'strangle' && (
-                    <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title={`Strikes either side of the centre (${pairStep} each)`}>Wing (strikes)</span>
-                      <NumField compact label="Strangle wing in strikes" value={wing} onCommit={v => setWing(Math.max(1, Math.min(20, Math.round(v))))} min={1} max={20} width="w-14" />
+                    <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title={`How many strikes (${pairStep} points each) the call is above the Strike and the put below it. Set them independently; the Strike above is the centre (ATM by default).`}>Call + / Put −</span>
+                      <span className="flex items-center gap-1">
+                        <NumField compact label="Call strikes above the centre" value={ceOff} onCommit={v => setCeOff(Math.max(0, Math.min(30, Math.round(v))))} min={0} max={30} width="w-12" />
+                        <NumField compact label="Put strikes below the centre" value={peOff} onCommit={v => setPeOff(Math.max(0, Math.min(30, Math.round(v))))} min={0} max={30} width="w-12" />
+                      </span>
                     </div>
                   )}
-                  <p className="text-zinc-500">{pairOk ? `CE ${pairCe} · PE ${pairPe}` : 'Those strikes are not in the chain — pick another centre or wing'}</p>
+                  <p className="text-zinc-500">{pairOk
+                    ? `CE ${pairCe} (${atmOffsetLabel(strikes, atmStrike, pairCe!) ?? '—'}) · PE ${pairPe} (${atmOffsetLabel(strikes, atmStrike, pairPe!) ?? '—'})`
+                    : structure === 'strangle' && ceOff + peOff < 1 ? 'A strangle needs the call above the put — raise an offset' : 'Those strikes are not in the chain — pick another centre or offset'}</p>
                   <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title="Per-leg stop: either leg moving this % against its own fill exits BOTH legs (a short leg rising — 100 = doubled; a long leg falling). 0 = off. Runs alongside the combined target / SL.">Leg SL %</span>
                     <NumField compact label="Per-leg stop-loss percent (0 = off)" value={legSlPct} onCommit={v => setLegSlPct(Math.max(0, Math.round(v)))} min={0} max={1000} step={5} width="w-16" />
                   </div>

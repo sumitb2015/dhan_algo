@@ -527,3 +527,23 @@ test('Strike choices carry their distance from ATM (ATM, ATM+1, ATM-2 …)', asy
   await expect(strike.locator('option', { hasText: '23250' })).toHaveText(/ATM\+1$/);
   await expect(strike.locator('option', { hasText: '23100' })).toHaveText(/ATM-2$/);
 });
+
+test('Pair strangle: the call and put offsets are set separately and the legs show their distance from ATM', async ({ page }) => {
+  const seen = await install(page);
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Pair', exact: true }).click();
+  await page.getByRole('button', { name: 'Strangle', exact: true }).click();
+  const call = page.getByLabel('Call strikes above the centre', { exact: true }), put = page.getByLabel('Put strikes below the centre', { exact: true });
+  await call.fill('1'); await call.blur();
+  await put.fill('2'); await put.blur();
+  await expect(page.getByText('CE 23250 (ATM+1) · PE 23100 (ATM-2)')).toBeVisible();
+  await page.getByRole('button', { name: /^Buy at 21[0-9]/ }).first().click();
+  await expect.poll(() => seen.posts.filter(b => b.action === 'pair').length).toBe(1);
+  expect(seen.posts.find(b => b.action === 'pair')).toMatchObject({ op: 'arm', structure: 'strangle', ceStrike: 23250, peStrike: 23100 });
+  // both offsets 0 would put the CE on the PE: refused in the page
+  await call.fill('0'); await call.blur();
+  await put.fill('0'); await put.blur();
+  await expect(page.getByText('A strangle needs the call above the put')).toBeVisible();
+  expect(seen.blocked).toEqual([]);
+});

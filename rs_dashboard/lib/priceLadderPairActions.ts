@@ -112,12 +112,9 @@ async function arm(b: Record<string, unknown>): Promise<NextResponse> {
   if (structure === 'straddle' && ceStrike !== peStrike) return bad('A straddle has one strike for both legs');
   // Inversion guard (CLAUDE.md): a strangle's call strike is above its put strike.
   if (structure === 'strangle' && !(ceStrike > peStrike)) return bad('A strangle needs the CE strike above the PE strike');
-  // Symmetric about a listed centre, a whole number of strike steps each side: the only shape the page builds and can
-  // show again (centre + wing).
+  // Each leg on its own listed strike (the two sides are independent: any CE offset above and PE offset below the centre).
   const step = PAIR_STRIKE_STEP[u];
-  if (structure === 'strangle' && (!step || (ceStrike - peStrike) % (2 * step) !== 0)) {
-    return bad(`A strangle needs its legs the same number of ${step ?? '?'}-point strikes either side of a centre strike`);
-  }
+  if (!step || ceStrike % step !== 0 || peStrike % step !== 0) return bad(`Pair strikes must be ${step ?? '?'}-point strikes`);
   const side = b.side as LadderSide;
   if (side !== 'BUY' && side !== 'SELL') return bad('side must be BUY or SELL');
   if (b.product !== 'NRML' && b.product !== 'MIS') return bad('product must be NRML or MIS');

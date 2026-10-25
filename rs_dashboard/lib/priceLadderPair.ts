@@ -150,7 +150,7 @@ export const LEG_KEYS: readonly PairLegKey[] = ['ce', 'pe'];
 
 export type PairJob = { kind: 'pairOpen'; id: string } | { kind: 'pairSettle'; id: string } | { kind: 'pairClose'; id: string };
 
-/** Strike step per underlying: a strangle's legs sit a whole number of steps either side of its centre. */
+/** Strike step per underlying: a strangle's legs sit whole steps from its centre strike. */
 export const PAIR_STRIKE_STEP: Record<string, number> = { NIFTY: 50, BANKNIFTY: 100, SENSEX: 100, CRUDEOILM: 100 };
 /** Narrowest trailing distance on a pair, in combined-premium points (index-level slices use 1 point). */
 export const MIN_PAIR_TRAIL_PTS = 0.5;
@@ -215,6 +215,27 @@ const round2 = (v: number) => Number(v.toFixed(2));
 export function pairCombined(p: Pick<LadderPair, 'legs'>, ltps: Record<string, number>): number | null {
   const ce = ltps[p.legs.ce.contract.securityId], pe = ltps[p.legs.pe.contract.securityId];
   return ce > 0 && pe > 0 ? round2(ce + pe) : null;
+}
+
+/**
+ * The legs of a pair built from a centre strike: a straddle has both on the centre; a strangle has its CE `ceOff` strike
+ * steps above the centre and its PE `peOff` steps below it — the two sides are independent (not a fixed wing). A strangle
+ * needs the CE strictly above the PE (ceOff + peOff >= 1). Null when it cannot be built.
+ */
+export function pairStrikes(structure: PairStructure, centre: number, step: number, ceOff: number, peOff: number): { ce: number; pe: number } | null {
+  if (!(centre > 0) || !(step > 0)) return null;
+  if (structure === 'straddle') return { ce: centre, pe: centre };
+  if (!Number.isInteger(ceOff) || !Number.isInteger(peOff) || ceOff < 0 || peOff < 0 || ceOff + peOff < 1) return null;
+  return { ce: centre + ceOff * step, pe: centre - peOff * step };
+}
+
+/** The inverse, to show an existing pair again: a symmetric strangle keeps its middle strike as the centre, an asymmetric
+ *  one is centred on its PE with the whole gap as the CE offset. */
+export function pairCentreOffsets(ce: number, pe: number, step: number): { centre: number; ceOff: number; peOff: number } {
+  if (!(step > 0) || ce <= pe) return { centre: ce, ceOff: 0, peOff: 0 };
+  const gap = Math.round((ce - pe) / step);
+  if (gap % 2 === 0) return { centre: (ce + pe) / 2, ceOff: gap / 2, peOff: gap / 2 };
+  return { centre: pe, ceOff: gap, peOff: 0 };
 }
 
 /** "23200 straddle" / "23300/23100 strangle". */
