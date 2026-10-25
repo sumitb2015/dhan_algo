@@ -116,6 +116,7 @@ const NAV_GROUPS = [
       { href: '/scalp-cockpit', label: 'Scalp Cockpit', desc: 'Tight multi-window scalping desk: Cumulative OI, Strikes OI slider, India VIX, collapsible Multi-Leg Focus trade desk & analysis windows' },
       { href: '/price-ladder', label: 'Price Ladder XY', desc: 'Trade an option on index levels — click a Nifty level to arm an entry with a bracket target/SL and trailing SL in index points; server-fired' },
       { href: '/straddle-pnf', label: 'Straddle P&F', desc: 'Three live NIFTY straddle Point & Figure charts (ATM-200 / ATM / ATM+200) with VWAP or SMA10, double top / double bottom alerts and a 30-alert log — signals only' },
+      { href: '/straddle-simulator', label: 'Straddle Simulator', desc: 'Replay past NIFTY straddle sessions through the Straddle P&F engine at 1X / 50X / 100X / 200X — alerts, VWAP and the 30-alert log, signals only' },
       { href: '/focus-tool', label: 'Ultimate Scalper Terminal', desc: 'Straddles & strangles terminal — timed entry, level exits, real-money armed orders' },
       { href: '/cyber-scalper', label: 'Cyber Scalper (9/20 EMA)', desc: 'Futuristic 9/20 EMA & VWAP scalping terminal with live difference bias & big buy/sell order execution' },
       { href: '/breakdown-scalper', label: 'Breakdown Auto-Scalper', desc: 'Automated multi-strike option breakdown seller with NIFTY trend bias, signal ranking & trailing SL' },

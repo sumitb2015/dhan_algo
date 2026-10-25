@@ -22,6 +22,8 @@ export type PnfPanelProps = {
   flash: 'buy' | 'sell' | null;
   error?: string;
   loading?: boolean;
+  /** Fill the height of the parent (a flex/grid cell) instead of the live page's fixed viewport-based height. */
+  fill?: boolean;
 };
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
@@ -47,7 +49,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -95,7 +97,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     <section
       data-testid="pnf-panel"
       data-strike={strike}
-      className={`min-w-0 rounded-lg border border-zinc-800 bg-zinc-900 flex flex-col ${ring}`}
+      className={`min-w-0 rounded-lg border border-zinc-800 bg-zinc-900 flex flex-col ${fill ? 'h-full min-h-0' : ''} ${ring}`}
     >
       <div className="px-3 pt-2 pb-1 border-b border-zinc-800">
         <div className="flex items-baseline justify-between gap-2">
@@ -123,8 +125,8 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         aria-label={`${title} chart, scrollable`}
         tabIndex={0}
         onScroll={e => { const el = e.currentTarget; stickRef.current = el.scrollLeft + el.clientWidth >= el.scrollWidth - 30; }}
-        className="relative overflow-auto"
-        style={{ height: 'calc(100vh - 215px)', minHeight: MIN_HEIGHT }}
+        className={`relative overflow-auto ${fill ? 'flex-1 min-h-0' : ''}`}
+        style={fill ? { minHeight: 200 } : { height: 'calc(100vh - 215px)', minHeight: MIN_HEIGHT }}
       >
         {error ? (
           <p className="p-3 text-xs text-red-400">{error}</p>

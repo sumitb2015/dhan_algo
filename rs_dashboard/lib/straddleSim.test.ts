@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { SPEEDS, MAX_SESSIONS, msPerBar, validateSimParams, timelineOf, barsUpTo, clockLabel, type ExpiryInfo } from './straddleSim.ts';
+import { SPEEDS, MAX_SESSIONS, msPerBar, validateSimParams, timelineOf, barsUpTo, clockLabel, valueAt, type ExpiryInfo } from './straddleSim.ts';
 import type { Bar } from './straddlePnf.ts';
 
 const EXPIRIES: ExpiryInfo[] = [
@@ -70,4 +70,14 @@ test('barsUpTo returns the bars at or before the replay time, as a prefix of the
 test('clockLabel reads like "Mon 12 Oct 09:15" in IST', () => {
   assert.equal(clockLabel(Date.UTC(2026, 9, 12, 3, 45) / 1000), 'Mon 12 Oct 09:15');
   assert.equal(clockLabel(Date.UTC(2026, 9, 12, 9, 59) / 1000), 'Mon 12 Oct 15:29');
+});
+
+test('valueAt gives the latest value at or before t, and null before the first', () => {
+  const times = [10, 70, 130];
+  const values = [1, 2, 3];
+  assert.equal(valueAt(times, values, 70), 2);
+  assert.equal(valueAt(times, values, 100), 2);
+  assert.equal(valueAt(times, values, 999), 3);
+  assert.equal(valueAt(times, values, 5), null);
+  assert.equal(valueAt([], [], 5), null);
 });

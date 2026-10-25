@@ -15,7 +15,7 @@ const hhmmss = (t: number) =>
 
 export default function AlertLog({ entries }: { entries: LogEntry[] }) {
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900 w-full max-w-md">
+    <div data-testid="pnf-log" className="rounded-lg border border-zinc-800 bg-zinc-900 w-full max-w-md">
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800">
         <h2 className="text-xs font-bold text-zinc-100">Alert log</h2>
         <span className="text-[10px] font-mono text-zinc-500">last {entries.length} of 30</span>

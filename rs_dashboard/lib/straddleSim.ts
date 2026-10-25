@@ -75,3 +75,14 @@ export function clockLabel(t: number): string {
   const mm = String(d.getUTCMinutes()).padStart(2, '0');
   return `${DAYS[d.getUTCDay()]} ${String(d.getUTCDate()).padStart(2, '0')} ${MONTHS[d.getUTCMonth()]} ${hh}:${mm}`;
 }
+
+/** The latest value at or before time `t` from parallel ascending arrays, or null before the first one. */
+export function valueAt(times: number[], values: number[], t: number): number | null {
+  let lo = 0;
+  let hi = times.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] <= t) lo = mid + 1; else hi = mid;
+  }
+  return lo === 0 ? null : values[lo - 1];
+}
