@@ -451,6 +451,16 @@ export function settleOrder(st: { orderStatus: string; filledQty: number; averag
 }
 
 /**
+ * The outcome to record when an order send THROWS. An entry that threw may already be live at the broker, so it is
+ * UNKNOWN (never resent). An exit is sized against the broker book on every attempt, so retrying it cannot add exposure:
+ * it is rejected and retried, instead of leaving the position unprotected in UNKNOWN until the user resolves it.
+ */
+export function outcomeOnThrow(open: boolean, err: unknown): { status: 'rejected' | 'unknown'; error: string } {
+  const error = String((err as Error)?.message ?? err);
+  return { status: open ? 'unknown' : 'rejected', error };
+}
+
+/**
  * Units to send to close `own` units of a position on `side` (the side that OPENED it), clamped by what the broker
  * still shows in that direction (dhan-terminal-position-ownership Invariant 2 / Triple Straddle's brokerCapacity):
  *  - broker read failed       -> own (fail open: an exit only reduces risk);

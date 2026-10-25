@@ -1,7 +1,7 @@
 import { getDhanCredentials } from '@/lib/dhanToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { reserveOrderSlot, ORDER_WINDOW_MS } from '@/lib/dhanOrderPacer';
-import { reconcileByCorrelationId } from '@/lib/dhanOrderReconcile';
+import { reconcileByCorrelationId, isAmbiguousReply } from '@/lib/dhanOrderReconcile';
 import { FTS_DHAN_MAX_ORDER_QTY } from '@/lib/focusToolUnderlyings';
 
 // The one way server code places a plain Dhan order (the Dhan twin of lib/kotakPlaceOrder.ts). /api/scalper/fast-order
@@ -195,6 +195,16 @@ export async function placeDhanOrder(body: DhanOrderInput): Promise<DhanPlaceRes
 
     const errMsg = String(json.remarks ?? json.message ?? JSON.stringify(json));
     console.error('[dhanPlaceOrder] Dhan API error:', errMsg, 'HTTP', res.status);
+    // A 5xx without an order id does not prove nothing was booked (a gateway can fail after the OMS accepted the order):
+    // look it up by correlationId before calling it rejected.
+    if (isAmbiguousReply(res.status)) {
+      const recovered = await reconcileByCorrelationId(correlationId, clientId, token);
+      if (recovered) {
+        invalidateBrokerCache('dhan');
+        return { status: 'placed', orderId: recovered };
+      }
+      return { status: 'unknown', error: DHAN_UNKNOWN_MSG };
+    }
     return { status: 'rejected', error: errMsg };
 
   } catch (err) {

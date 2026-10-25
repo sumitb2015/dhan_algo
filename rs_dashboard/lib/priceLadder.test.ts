@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { isAmbiguousReply } from './dhanOrderReconcile.ts';
 import assert from 'node:assert/strict';
 import { mcxSession, usDstActive } from './mcxSession.ts';
 import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
@@ -6,7 +7,7 @@ import { mcxUnitError, isTradedStrike, rowPnl, MCX_LADDER_UNDERLYINGS } from './
 import {
   bias, limitZone, classifyClick, levelSane, capLots, cleanBracket, entryStep, bracketLevels, bracketStep, spotFresh,
   settleOrder, exitQtyFor, slicePnl, sliceNowPnl, sumSlicePnl, ownNet, ladderRows, snapToStep, rollDay, realArmed, pushEvent, istHhmm,
-  MAX_LADDER_LOTS, SPOT_STALE_MS, planTick, parseTrailRequest, trailedBracket, replanBracket, openExitStep, stopLimitPrice, cleanBufferPct, sessionFor, spotKey, parseSpotKey, type LadderSlice, type LadderState,
+  MAX_LADDER_LOTS, SPOT_STALE_MS, planTick, parseTrailRequest, trailedBracket, replanBracket, openExitStep, stopLimitPrice, cleanBufferPct, sessionFor, spotKey, parseSpotKey, outcomeOnThrow, type LadderSlice, type LadderState,
 } from './priceLadder.ts';
 
 const contract = { underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt: 'CE' as const, securityId: '111', lotSize: 65, exchangeSegment: 'NSE_FNO' };
@@ -576,4 +577,18 @@ test('rowPnl: sums the marks, one unpriced mark blanks it, no P&L at all is unde
   assert.equal(rowPnl([{ pnl: 100 }, { pnl: null }]), null);
   assert.equal(rowPnl([{}, { pnl: 5 }]), 5);
   assert.equal(rowPnl([{}]), undefined);
+});
+
+test('outcomeOnThrow: a thrown entry is UNKNOWN (never resent), a thrown exit is retried', () => {
+  assert.deepEqual(outcomeOnThrow(true, new Error('boom')), { status: 'unknown', error: 'boom' });
+  assert.deepEqual(outcomeOnThrow(false, new Error('boom')), { status: 'rejected', error: 'boom' });
+  assert.equal(outcomeOnThrow(false, 'plain text').error, 'plain text');
+});
+
+test('isAmbiguousReply: a 5xx without an order id is reconciled, a 4xx is a refusal', () => {
+  assert.equal(isAmbiguousReply(500), true);
+  assert.equal(isAmbiguousReply(503), true);
+  assert.equal(isAmbiguousReply(400), false);
+  assert.equal(isAmbiguousReply(429), false);
+  assert.equal(isAmbiguousReply(200), false);
 });

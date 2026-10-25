@@ -20,7 +20,7 @@ import { cachedZerodhaContract, slicesFor } from '@/lib/zerodhaContracts';
 import { pacedMarginCall } from '@/lib/ultimateScannerDhan';
 import {
   EXIT_RETRY_MS, FILL_GRACE_MS, SETTLE_TIMEOUT_MS, SPOT_STALE_MS,
-  bias, bracketLevels, emptyLadderState, exitQtyFor, isLive, istDay, pushEvent,
+  bias, bracketLevels, emptyLadderState, exitQtyFor, isLive, outcomeOnThrow, istDay, pushEvent,
   rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS, mcxUnitError,
   type Job, type LadderOrderHow, type LadderBroker, type LadderContract, type LadderSide, type LadderSlice, type LadderState,
 } from '@/lib/priceLadder';
@@ -624,7 +624,7 @@ async function runJobs(s: LadderState, jobs: Job[], prices: PriceView, pairJobs:
         await done(st => openedPatch(st, x, x.qty, ltp, now));
         return;
       }
-      const r = await placeFor(x, x.side, x.qty, true);
+      const r = await safePlace(x, x.side, x.qty, true);
       await done(st => afterSend(st, x.id, r, 'entry'));
       return;
     }
@@ -656,7 +656,7 @@ async function runJobs(s: LadderState, jobs: Job[], prices: PriceView, pairJobs:
         return;
       }
       used.set(key, (used.get(key) ?? 0) + qty);
-      const r = await placeFor(x, exitSide, qty, false);
+      const r = await safePlace(x, exitSide, qty, false);
       await done(st => afterSend(patchSlice(st, x.id, { exitQty: qty }), x.id, r, 'exit'));
       return;
     }
@@ -754,9 +754,9 @@ async function commitPair(id: string, expect: LadderPair['state'], apply: (p: La
   }
 }
 
-/** A send that never throws: an exception is an unknown outcome (the order may have gone out). */
+/** A send that never throws: an exception becomes an outcome (see outcomeOnThrow). */
 const safePlace = (...a: Parameters<typeof placeFor>): Promise<PlaceOutcome> =>
-  placeFor(...a).catch((err: unknown) => ({ status: 'unknown' as const, error: String((err as Error)?.message ?? err) }));
+  placeFor(...a).catch((err: unknown) => outcomeOnThrow(a[3], err));
 
 async function runPairJob(s: LadderState, j: PairJob, prices: PriceView, ctx: JobCtx): Promise<void> {
   const p = (s.pairs ?? []).find(y => y.id === j.id);

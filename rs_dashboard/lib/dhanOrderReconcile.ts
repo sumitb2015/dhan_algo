@@ -32,3 +32,6 @@ export async function reconcileByCorrelationId(correlationId: string, clientId: 
   }
   return null;
 }
+
+/** A reply with no order id that still leaves the outcome open: the server failed (5xx), it did not refuse (4xx). */
+export const isAmbiguousReply = (httpStatus: number): boolean => httpStatus >= 500;

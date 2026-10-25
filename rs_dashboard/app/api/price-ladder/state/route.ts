@@ -179,12 +179,22 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   };
   const kindLabel = verdict.kind === 'limit' ? 'LIMIT' : stopLimit ? 'SL-limit' : 'SL';
   const at = stopLimit ? `trigger ${level} → limit ${stopLimit.toFixed(2)}` : `@ ${level}`;
+  // Re-checked inside the lock like the XY arm and the Market button: two clicks in flight must not both pass the read above.
+  let capped = false;
+  const withPlain = (add: LadderSlice, log?: ReturnType<typeof ev>) => (st: LadderState): LadderState => {
+    if (lotsHeld(st, add) + lots > MAX_LADDER_LOTS) { capped = true; return st; }
+    const next = { ...st, slices: [...st.slices, add] };
+    return log ? pushEvent(next, log) : next;
+  };
+  const cappedReply = () => bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
   if (b.mode === 'sim') {
-    const s = await updateLadderState(st => pushEvent({ ...st, slices: [...st.slices, { ...plain, state: 'working' }] }, ev('info', `SIM ${kindLabel} ${what} ${at}`, plain.id)));
+    const s = await updateLadderState(withPlain({ ...plain, state: 'working' }, ev('info', `SIM ${kindLabel} ${what} ${at}`, plain.id)));
+    if (capped) return cappedReply();
     return NextResponse.json({ success: true, data: { id: plain.id, state: s } });
   }
   // REAL: checkpoint before the order (Triple Straddle rule) — if this write fails nothing is sent.
-  await updateLadderState(st => ({ ...st, slices: [...st.slices, { ...plain, state: 'placing', sentAt: now }] }));
+  await updateLadderState(withPlain({ ...plain, state: 'placing', sentAt: now }));
+  if (capped) return cappedReply();
   const r = await withJob(plain.id, () => placeFor(plain, b.side, qty, true, verdict.kind === 'limit'
     ? { type: 'LIMIT', price: level }
     : { type: 'SL', trigger: level, ...(stopLimit ? { limit: stopLimit } : {}) }));
