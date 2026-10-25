@@ -1,15 +1,22 @@
 // Point & Figure engine for straddle charts. Pure: no I/O, no clocks (time arrives in the bars).
 //
-// Construction is close-based on 1-min straddle closes (CE + PE). The box is a fixed % of the first usable price and the
-// grid is anchored on that price; a level is the number of whole boxes the price sits from the anchor, truncated toward
-// zero, so a one-box move prints exactly one X or O in either direction. A column reverses only after `reversal` boxes
-// against its extreme (3-box reversal = 1.5% at the default 0.5% box).
+// Construction is close-based on 1-min straddle closes (CE + PE), the usual close-only P&F rules. The box is a fixed % of the
+// first usable price and the grid is anchored on it: box k is the price label anchor + k*box, and glyph cells are centred on
+// their label. An X is plotted for every label the close has reached from below (k = floor(x)), an O for every label it has
+// reached from above (k = ceil(x)), with x = (close - anchor) / box. A column reverses only when the close is `reversal` full
+// boxes from the column's last label (3 boxes = 1.5% at the default 0.5% box), measured with the rounding of the new
+// direction, so a 2.1-box move never reverses. The first column starts once the close is a full box from the anchor
+// (X: labels 1..k, O: labels -1..k).
 
-export type Bar = { t: number; ce: number; pe: number; straddle: number; vol: number };
+export type Bar = {
+  t: number; ce: number; pe: number; straddle: number; vol: number;
+  /** Live bars only: the feed's cumulative day volume (CE + PE) at the latest tick, and its value when this bar's volume started counting. */
+  cum?: number; cumBase?: number;
+};
 
 export type PnfColumn = {
   dir: 'X' | 'O';
-  /** Bottom and top edge of the column in price. */
+  /** Bottom and top edge of the column's glyph cells in price (cells are centred on their box label). */
   low: number;
   high: number;
   boxes: number;
@@ -41,9 +48,9 @@ export function sessionOf(t: number): string {
 
 type Work = { dir: 'X' | 'O'; lo: number; hi: number; startBar: number; endBar: number; breakBar: number | null };
 
-export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3): { box: number; columns: PnfColumn[] } {
+export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3): { anchor: number; box: number; columns: PnfColumn[] } {
   const first = bars.find(b => b.straddle > 0);
-  if (!first) return { box: 0, columns: [] };
+  if (!first) return { anchor: 0, box: 0, columns: [] };
   const anchor = first.straddle;
   const box = anchor * boxPct;
   const work: Work[] = [];
@@ -57,37 +64,38 @@ export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3): { box: numb
   bars.forEach((b, i) => {
     if (!(b.straddle > 0)) return;
     const x = (b.straddle - anchor) / box;
-    const lvl = Math.trunc(x + Math.sign(x) * EPS);
+    const up = Math.floor(x + EPS);   // highest label the close has reached from below
+    const down = Math.ceil(x - EPS);  // lowest label the close has reached from above
     const cur = work[work.length - 1];
     if (!cur) {
-      if (lvl >= 1) work.push({ dir: 'X', lo: 1, hi: lvl, startBar: i, endBar: i, breakBar: null });
-      else if (lvl <= -1) work.push({ dir: 'O', lo: lvl, hi: -1, startBar: i, endBar: i, breakBar: null });
+      if (up >= 1) work.push({ dir: 'X', lo: 1, hi: up, startBar: i, endBar: i, breakBar: null });
+      else if (down <= -1) work.push({ dir: 'O', lo: down, hi: -1, startBar: i, endBar: i, breakBar: null });
       return;
     }
     if (cur.dir === 'X') {
-      if (lvl > cur.hi) { cur.hi = lvl; cur.endBar = i; markBreak(cur, i); }
-      else if (lvl <= cur.hi - reversal) {
-        work.push({ dir: 'O', lo: lvl, hi: cur.hi - 1, startBar: i, endBar: i, breakBar: null });
+      if (up > cur.hi) { cur.hi = up; cur.endBar = i; markBreak(cur, i); }
+      else if (down <= cur.hi - reversal) {
+        work.push({ dir: 'O', lo: down, hi: cur.hi - 1, startBar: i, endBar: i, breakBar: null });
         markBreak(work[work.length - 1], i);
       }
-    } else if (lvl < cur.lo) { cur.lo = lvl; cur.endBar = i; markBreak(cur, i); }
-    else if (lvl >= cur.lo + reversal) {
-      work.push({ dir: 'X', lo: cur.lo + 1, hi: lvl, startBar: i, endBar: i, breakBar: null });
+    } else if (down < cur.lo) { cur.lo = down; cur.endBar = i; markBreak(cur, i); }
+    else if (up >= cur.lo + reversal) {
+      work.push({ dir: 'X', lo: cur.lo + 1, hi: up, startBar: i, endBar: i, breakBar: null });
       markBreak(work[work.length - 1], i);
     }
   });
 
   const columns = work.map<PnfColumn>(c => ({
     dir: c.dir,
-    low: anchor + c.lo * box,
-    high: anchor + (c.hi + 1) * box,
+    low: anchor + (c.lo - 0.5) * box,
+    high: anchor + (c.hi + 0.5) * box,
     boxes: c.hi - c.lo + 1,
     startBar: c.startBar,
     endBar: c.endBar,
     session: sessionOf(bars[c.startBar].t),
     breakBar: c.breakBar,
   }));
-  return { box, columns };
+  return { anchor, box, columns };
 }
 
 export function detectSignals(columns: PnfColumn[], bars: Bar[], vwapSeries: (number | null)[]): PnfSignal[] {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { foldTick, newSignalsSince, capLog } from './straddlePnfLive.ts';
-import type { Bar, PnfSignal } from './straddlePnf.ts';
+import { foldTick, newSignalsAfter, nextWatermark, capLog } from './straddlePnfLive.ts';
+import { vwap, type Bar, type PnfSignal } from './straddlePnf.ts';
 
 const T0 = Date.UTC(2026, 9, 23, 3, 45) / 1000; // 09:15 IST, a minute start
 const bar = (i: number, ce: number, pe: number): Bar => ({ t: T0 + i * 60, ce, pe, straddle: ce + pe, vol: 7 });
@@ -53,16 +53,26 @@ test('the first tick on an empty chart starts a bar without closing one', () => 
 
 const sig = (id: string, t: number): PnfSignal => ({ id, kind: 'DOUBLE_BOTTOM_SELL', col: 3, bar: 7, t, price: 100, belowVwap: true });
 
-test('newSignalsSince drops seen ids and signals from before the first live bar (a reload never re-alerts)', () => {
+test('newSignalsAfter keeps only signals on bars newer than the watermark (history and old bars never alert)', () => {
   const history = sig('DOUBLE_BOTTOM_SELL:1', T0 + 100);
-  const seen = sig('DOUBLE_TOP_BUY:2', T0 + 9000);
+  const onWatermark = sig('DOUBLE_TOP_BUY:2', T0 + 9000);
   const fresh = sig('DOUBLE_BOTTOM_SELL:3', T0 + 9060);
-  const out = newSignalsSince([history, seen, fresh], new Set([seen.id]), T0 + 9000);
-  assert.deepEqual(out.map(s => s.id), ['DOUBLE_BOTTOM_SELL:3']);
+  assert.deepEqual(newSignalsAfter([history, onWatermark, fresh], T0 + 9000).map(s => s.id), ['DOUBLE_BOTTOM_SELL:3']);
 });
 
-test('newSignalsSince keeps a signal that lands exactly on the first live bar', () => {
-  assert.equal(newSignalsSince([sig('a', T0 + 60)], new Set(), T0 + 60).length, 1);
+test('a signal that comes back with a different column number is not re-alerted once the watermark has advanced', () => {
+  const first = sig('DOUBLE_BOTTOM_SELL:3', T0 + 500);
+  let wm = T0 + 400;
+  assert.equal(newSignalsAfter([first], wm).length, 1);
+  wm = nextWatermark(wm, T0 + 500);                       // the evaluation consumed that bar
+  const renumbered = { ...first, id: 'DOUBLE_BOTTOM_SELL:5', col: 5 }; // e.g. the 3-session window dropped a day
+  assert.equal(newSignalsAfter([renumbered], wm).length, 0);
+});
+
+test('nextWatermark only moves forward and ignores an empty chart', () => {
+  assert.equal(nextWatermark(100, 160), 160);
+  assert.equal(nextWatermark(160, 100), 160);
+  assert.equal(nextWatermark(160, null), 160);
 });
 
 test('capLog keeps the newest 30, newest first', () => {
@@ -71,4 +81,50 @@ test('capLog keeps the newest 30, newest first', () => {
   assert.equal(log.length, 30);
   assert.equal(log[0], 34);
   assert.equal(log[29], 5);
+});
+
+// Live bars must carry volume or VWAP stops moving once the feed starts: the bridge sends cumulative day volume (CE + PE),
+// and a minute's volume is the growth in that figure inside the minute.
+test('live minutes get volume from the growth of cumulative volume', () => {
+  let bars: Bar[] = [bar(0, 100, 50)];
+  const feed = (t: number, cumVol: number) => { bars = foldTick(bars, { t, ce: 100, pe: 50, cumVol }).bars; };
+  feed(T0 + 60 + 1, 1000);                       // first tick: no baseline yet, nothing to attribute
+  assert.equal(bars[1].vol, 0);
+  feed(T0 + 60 + 40, 1600);                      // +600 inside the minute
+  assert.equal(bars[1].vol, 600);
+  feed(T0 + 120 + 2, 2100);                      // new minute: +500 since the last tick belongs to the new bar
+  assert.equal(bars[2].vol, 500);
+  feed(T0 + 120 + 50, 2300);
+  assert.equal(bars[2].vol, 700);
+  assert.equal(bars[1].vol, 600);                // a closed bar keeps its volume
+});
+
+test('a history bar that is still forming keeps its volume and gains the live growth on top', () => {
+  let bars: Bar[] = [{ ...bar(0, 100, 50), vol: 400 }];
+  bars = foldTick(bars, { t: T0 + 10, ce: 100, pe: 50, cumVol: 5000 }).bars;
+  assert.equal(bars[0].vol, 400);
+  bars = foldTick(bars, { t: T0 + 30, ce: 100, pe: 50, cumVol: 5250 }).bars;
+  assert.equal(bars[0].vol, 650);
+});
+
+test('a cumulative volume that goes backwards (bridge restart) never makes a negative or lost volume', () => {
+  let bars: Bar[] = [bar(0, 100, 50)];
+  bars = foldTick(bars, { t: T0 + 61, ce: 100, pe: 50, cumVol: 9000 }).bars;
+  bars = foldTick(bars, { t: T0 + 100, ce: 100, pe: 50, cumVol: 9300 }).bars;
+  bars = foldTick(bars, { t: T0 + 125, ce: 100, pe: 50, cumVol: 40 }).bars;   // restart: counter reset
+  assert.ok(bars[bars.length - 1].vol >= 0);
+});
+
+test('a tick without volume leaves the bar volume alone', () => {
+  const r = foldTick([{ ...bar(0, 100, 50), vol: 77 }], { t: T0 + 20, ce: 101, pe: 50 });
+  assert.equal(r.bars[0].vol, 77);
+});
+
+test('VWAP keeps moving with live bars once they carry volume', () => {
+  const hist: Bar[] = [{ t: T0, ce: 50, pe: 50, straddle: 100, vol: 1000 }];
+  let bars = hist;
+  bars = foldTick(bars, { t: T0 + 61, ce: 60, pe: 60, cumVol: 10 }).bars;
+  bars = foldTick(bars, { t: T0 + 100, ce: 60, pe: 60, cumVol: 3010 }).bars; // 3000 traded at 120
+  const v = vwap(bars);
+  assert.ok(Math.abs((v[1] as number) - (100 * 1000 + 120 * 3000) / 4000) < 1e-9);
 });

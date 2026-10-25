@@ -112,7 +112,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
           </span>
         </p>
         <p className="text-[10px] font-mono text-zinc-500 mt-0.5 truncate">
-          {box > 0 ? `Box ${box.toFixed(2)} (0.5%) · 3-box · ${columns.length} cols` : 'Box —'}
+          {box > 0 ? `Box ${box.toFixed(2)} (0.5% of ${model.anchor.toFixed(2)}) · 3-box · ${columns.length} cols` : 'Box —'}
         </p>
       </div>
 
@@ -163,19 +163,21 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                     textAnchor="middle" className="fill-emerald-400 font-mono" fontSize={8}>EXIT</text>
             )}
 
-            {/* double top buy / double bottom sell: a bar above the two columns before the signal column */}
+            {/* double top buy / double bottom sell: a bar at the level that was broken, just outside the previous same-direction
+                column's extreme (above the old top for a buy, below the old bottom for a sell), spanning that column and the one after it */}
             {signals.filter(g => g.col - 2 >= first).map(g => {
               const a = g.col - 2 - first;
-              const top = Math.max(columns[g.col - 2].high, columns[g.col - 1].high);
               const sell = g.kind === 'DOUBLE_BOTTOM_SELL';
-              const h = sell && g.belowVwap ? 5 : 3;
+              const entry = sell && g.belowVwap;
+              const h = entry ? 5 : 3;
+              const y = sell ? yOf(columns[g.col - 2].low) + 3 : yOf(columns[g.col - 2].high) - h - 3;
               return (
                 <g key={g.id}>
-                  <rect data-testid="pnf-signal" data-kind={g.kind} data-col={g.col} data-entry={sell && g.belowVwap ? '1' : '0'}
-                        x={xOf(a)} y={yOf(top) - h - 3} width={cell * 2} height={h} rx={1}
+                  <rect data-testid="pnf-signal" data-kind={g.kind} data-col={g.col} data-entry={entry ? '1' : '0'}
+                        x={xOf(a)} y={y} width={cell * 2} height={h} rx={1}
                         className={sell ? 'fill-red-400' : 'fill-emerald-400'} />
                   {g.id === lastEntryId && (
-                    <text x={xOf(a) + cell} y={yOf(top) - h - 6} textAnchor="middle" className="fill-red-400 font-mono" fontSize={8}>ENTRY</text>
+                    <text x={xOf(a) + cell} y={y + h + 9} textAnchor="middle" className="fill-red-400 font-mono" fontSize={8}>ENTRY</text>
                   )}
                 </g>
               );

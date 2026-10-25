@@ -6,7 +6,7 @@ import { vwap, type Bar } from './straddlePnf.ts';
 const BASE_T = Date.UTC(2026, 9, 23, 3, 45) / 1000;
 const A = 100;
 const BOX = A * 0.005;
-const priceAt = (l: number) => A + (l + (l > 0 ? 0.3 : l < 0 ? -0.3 : 0)) * BOX;
+const priceAt = (l: number) => A + l * BOX; // exactly on a box label
 const bars = (levels: number[]): Bar[] => levels.map((l, i) => ({ t: BASE_T + i * 60, ce: priceAt(l) / 2, pe: priceAt(l) / 2, straddle: priceAt(l), vol: 1 }));
 const PATH = [0, 5, 2, 0, 3, 7, 4, -1]; // X, O, X, O with one double top buy and one double bottom sell
 
@@ -29,6 +29,12 @@ test('the sma overlay is null until ten bars exist, and vwap still drives the si
 test('the sma overlay has values once ten bars exist', () => {
   const m = buildPanelModel(bars([0, 5, 2, 0, 3, 7, 4, -1, -2, -3, -4, -5]), 'sma');
   assert.ok(m.overlay[m.overlay.length - 1] !== null);
+});
+
+test('the model reports the time of its last closed bar for the alert watermark', () => {
+  const b = bars(PATH);
+  assert.equal(buildPanelModel(b, 'vwap').lastBarT, b[b.length - 1].t);
+  assert.equal(buildPanelModel([], 'vwap').lastBarT, null);
 });
 
 test('no bars gives an empty model, not a throw', () => {

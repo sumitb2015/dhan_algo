@@ -6,10 +6,9 @@ const BASE_T = Date.UTC(2026, 9, 23, 3, 45) / 1000; // 2026-10-23 09:15 IST
 const A = 100;
 const BOX = A * 0.005;
 
-/** One bar per level: level 0 is the anchor price itself, others sit 0.3 of a box inside their level. */
+/** One bar per box label; label 0 is the anchor price itself. */
 function priceAt(level: number): number {
-  const frac = level > 0 ? 0.3 : level < 0 ? -0.3 : 0;
-  return A + (level + frac) * BOX;
+  return A + level * BOX; // exactly on a box label: an X (floor) and an O (ceil) both land on `level`
 }
 function barsFromLevels(levels: number[]): Bar[] {
   return levels.map((l, i) => {
@@ -45,8 +44,9 @@ test('builds the X/O/X/O column list for the reference path', () => {
   assert.deepEqual(columns.map(c => [c.dir, c.boxes, c.startBar, c.endBar]), [
     ['X', 5, 1, 1], ['O', 5, 2, 3], ['X', 7, 4, 5], ['O', 8, 6, 7],
   ]);
-  assert.ok(Math.abs(columns[0].low - (A + 1 * BOX)) < 1e-9);
-  assert.ok(Math.abs(columns[0].high - (A + 6 * BOX)) < 1e-9);
+  // glyph cells are centred on their label: boxes 1..5 span [A + 0.5 box, A + 5.5 box]
+  assert.ok(Math.abs(columns[0].low - (A + 0.5 * BOX)) < 1e-9);
+  assert.ok(Math.abs(columns[0].high - (A + 5.5 * BOX)) < 1e-9);
   assert.equal(columns[0].session, '2026-10-23');
 });
 
@@ -121,4 +121,67 @@ test('a single bar jumping five boxes fills five boxes in one column', () => {
 test('sessionOf returns the IST calendar date', () => {
   assert.equal(sessionOf(BASE_T), '2026-10-23');
   assert.equal(sessionOf(Date.UTC(2026, 9, 23, 23, 0) / 1000), '2026-10-24'); // 04:30 IST next day
+});
+
+// A column must sit on the box its price belongs to: at its last bar an X column's price is in [label, label+1 box) of its top
+// box and an O column's price is in (label-1 box, label] of its bottom box; cells are centred on the label, so the end edge is
+// within half a box of the price either way.
+function assertColumnsMatchPrices(bars: Bar[]) {
+  const { box, columns } = buildPnf(bars);
+  const eps = 1e-6;
+  columns.forEach((c, i) => {
+    const p = bars[c.endBar].straddle;
+    if (c.dir === 'X') {
+      const top = c.high - 0.5 * box; // label of the top box
+      assert.ok(p >= top - eps && p < top + box + eps, `X col ${i}: price ${p} not in [${top}, ${top + box})`);
+    } else {
+      const bottom = c.low + 0.5 * box; // label of the bottom box
+      assert.ok(p > bottom - box - eps && p <= bottom + eps, `O col ${i}: price ${p} not in (${bottom - box}, ${bottom}]`);
+    }
+    if (i > 0) assert.notEqual(c.dir, columns[i - 1].dir);
+  });
+}
+
+test('columns match their prices on a decaying series that crosses and stays below the anchor', () => {
+  let seed = 12345;
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+  const bars: Bar[] = [];
+  let p = A;
+  for (let i = 0; i < 600; i++) {
+    p = Math.max(1, p + (rnd() - 0.56) * BOX * 2.2);
+    const s = i === 0 ? A : p;
+    bars.push({ t: BASE_T + i * 60, ce: s / 2, pe: s / 2, straddle: s, vol: 1 });
+  }
+  assertColumnsMatchPrices(bars);
+});
+
+const at = (...prices: number[]): Bar[] => prices.map((s, i) => ({ t: BASE_T + i * 60, ce: s / 2, pe: s / 2, straddle: s, vol: 1 }));
+
+test('a fall through the anchor and a rebound back over it keeps the grid continuous', () => {
+  const bars = at(A, A - 3.5 * BOX, A + 2.5 * BOX);
+  const { columns } = buildPnf(bars);
+  assert.deepEqual(columns.map(c => [c.dir, c.boxes]), [['O', 3], ['X', 5]]); // boxes -1..-3, then -2..2
+  assertColumnsMatchPrices(bars);
+});
+
+test('3-box reversal is measured from the top box label: peak 110.00, box 0.5', () => {
+  const top = 110; // box label 20 above the anchor 100
+  assert.equal(buildPnf(at(100, top, 108.95)).columns.length, 1); // only 2.1 boxes down: no reversal
+  assert.equal(buildPnf(at(100, top, 108.6)).columns.length, 1);
+  const rev = buildPnf(at(100, top, 108.5)).columns;               // exactly 3 boxes down
+  assert.deepEqual(rev.map(c => c.dir), ['X', 'O']);
+  assert.equal(rev[1].boxes, 3);                                   // O fills labels 19.5, 19, 18.5... i.e. one box under the top down to the close
+});
+
+test('3-box reversal below the anchor: trough 90.00, box 0.5', () => {
+  const bars = (last: number) => at(100, 90, last);
+  assert.equal(buildPnf(bars(91.05)).columns.length, 1);           // 2.1 boxes up: no reversal
+  const rev = buildPnf(bars(91.5)).columns;                        // exactly 3 boxes up
+  assert.deepEqual(rev.map(c => c.dir), ['O', 'X']);
+});
+
+test('buildPnf exposes the anchor price the box is a percentage of', () => {
+  const r = buildPnf(at(200, 201));
+  assert.equal(r.anchor, 200);
+  assert.equal(r.box, 1);
 });

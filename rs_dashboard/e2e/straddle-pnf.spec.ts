@@ -9,7 +9,7 @@ const ATM = 25000;
 const STRIKES = [ATM - 200, ATM, ATM + 200];
 const A = 100; // first straddle price of every history series
 const BOX = A * 0.005;
-const priceAt = (l: number) => A + (l + (l > 0 ? 0.3 : l < 0 ? -0.3 : 0)) * BOX;
+const priceAt = (l: number) => A + l * BOX; // exactly on a box label
 
 // Level paths (see lib/straddlePnf.test.ts): X, O, X, O with a double bottom on the last bar / one short of it / quiet.
 const PATH_WITH_BREAK = [0, 5, 2, 0, 3, 7, 4, -1];
@@ -42,7 +42,7 @@ function quotes(phase: Mock['phase']) {
     }
   }
   return {
-    updated_at: new Date(updated * 1000).toISOString(), underlying: 'NIFTY', expiry: '2026-10-27', spot: 25012.3, atm: ATM,
+    updated_at: new Date(updated * 1000).toISOString(), underlying: 'NIFTY', expiry: upcomingTuesdays(1)[0], spot: 25012.3, atm: ATM,
     straddle_premium: 190, strikes, future: { ltp: 25050.1 },
   };
 }

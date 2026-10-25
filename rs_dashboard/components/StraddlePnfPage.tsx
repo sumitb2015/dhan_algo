@@ -11,14 +11,15 @@ import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/alertSound';
 import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
-import { foldTick, newSignalsSince, capLog } from '@/lib/straddlePnfLive';
+import { foldTick, newSignalsAfter, nextWatermark, capLog } from '@/lib/straddlePnfLive';
+import { historyQuery, tickAcceptable } from '@/lib/straddlePnfLoad';
 import { pickExpiries, type PnfExpiry } from '@/lib/straddlePnfExpiries';
 import type { Bar } from '@/lib/straddlePnf';
 
 // Straddle Point & Figure: three NIFTY straddle charts (ATM-200 / ATM / ATM+200), signals only — this page places no orders.
 
 type Row = { bars: Bar[]; openT: number | null };
-type Loaded = { atm: number; strikes: number[]; dataDate: string | null; errors: Record<string, string> };
+type Loaded = { expiry: string; atm: number; strikes: number[]; dataDate: string | null; errors: Record<string, string> };
 
 const STALE_MS = 60_000;
 const POLL_FALLBACK_MS = 60_000;
@@ -59,8 +60,9 @@ export default function StraddlePnfPage() {
   const mutedRef = useRef(false);
   const reqRef = useRef(0);
   const lastTickRef = useRef<string | null>(null);
-  const seenRef = useRef<Record<string, Set<string>>>({});
-  const firstLiveRef = useRef<Record<string, number>>({});
+  // Per strike: the last closed bar already evaluated for alerts. Alerts are keyed on bar time, never on column numbers.
+  const watermarkRef = useRef<Record<string, number>>({});
+  const loadedAtmRef = useRef<number | null>(null);
   const logLoadedRef = useRef(false);
 
   const { liveQuotes } = useLiveOptionsWS(expiry, 'dhan', ['dhan'], 'NIFTY');
@@ -103,7 +105,7 @@ export default function StraddlePnfPage() {
     const id = ++reqRef.current;
     if (reset) { setLoading(true); setLoadError(null); }
     try {
-      const res = await fetch(`/api/straddle-pnf?expiry=${expiry}&atm=auto`);
+      const res = await fetch(`/api/straddle-pnf?${historyQuery(expiry, reset, loadedAtmRef.current)}`);
       const j = await res.json() as {
         success?: boolean; error?: string; atm: number; strikes: number[]; dataDate: string | null;
         bars: Record<string, Bar[]>; errors: Record<string, string>;
@@ -119,13 +121,14 @@ export default function StraddlePnfPage() {
         const open = last && last.t >= nowMin ? last.t : null; // the minute still forming is not closed yet
         next[k] = { bars, openT: open };
         if (reset) {
-          // History never alerts: only bars from the first one after the loaded history onward can.
-          firstLiveRef.current[k] = last ? (open !== null ? last.t : last.t + 60) : nowMin;
-          seenRef.current[k] = new Set();
+          // History never alerts: only bars that close after the last CLOSED history bar can (a bar still forming at load can).
+          const lastClosed = open !== null ? bars[bars.length - 2] : last;
+          watermarkRef.current[k] = lastClosed ? lastClosed.t : 0;
         }
       }
+      if (reset) loadedAtmRef.current = j.atm;
       setRows(next);
-      setLoaded({ atm: j.atm, strikes: j.strikes, dataDate: j.dataDate, errors: j.errors ?? {} });
+      setLoaded({ expiry, atm: j.atm, strikes: j.strikes, dataDate: j.dataDate, errors: j.errors ?? {} });
       setLoadError(null);
     } catch (e) {
       if (id !== reqRef.current) return;
@@ -171,6 +174,8 @@ export default function StraddlePnfPage() {
   // ── live ticks → open bar ───────────────────────────────────────────────
   useEffect(() => {
     if (!liveQuotes?.updated_at || !loaded || liveQuotes.updated_at === lastTickRef.current) return;
+    // Never fold a tick into history of a different expiry (a switch is still loading) — it would jump a closed bar between contracts.
+    if (!tickAcceptable(expiry, loaded.expiry, liveQuotes.expiry)) return;
     const t = Date.parse(liveQuotes.updated_at) / 1000; // the tick's own time, so a slow render never mis-buckets a minute
     if (!Number.isFinite(t)) return;
     lastTickRef.current = liveQuotes.updated_at;
@@ -182,14 +187,15 @@ export default function StraddlePnfPage() {
         const q = quotes.find(s => Number(s.strike) === strike);
         const row = prev[String(strike)];
         if (!q || !row) continue;
-        const res = foldTick(row.bars, { t, ce: Number(q.ce?.ltp), pe: Number(q.pe?.ltp) });
+        const cumVol = Number(q.ce?.volume) + Number(q.pe?.volume); // the bridge's cumulative day volume, same units as history
+        const res = foldTick(row.bars, { t, ce: Number(q.ce?.ltp), pe: Number(q.pe?.ltp), cumVol: Number.isFinite(cumVol) ? cumVol : undefined });
         if (res.bars === row.bars) continue;
         changed = true;
         next[String(strike)] = { bars: res.bars, openT: res.bars[res.bars.length - 1].t };
       }
       return changed ? next : prev;
     });
-  }, [liveQuotes, loaded]);
+  }, [liveQuotes, loaded, expiry]);
 
   // ── panel models: CLOSED bars only, so a signal never repaints ──────────
   const strikes = useMemo(() => loaded?.strikes ?? [0, 0, 0], [loaded]);
@@ -206,14 +212,14 @@ export default function StraddlePnfPage() {
     const fresh: LogEntry[] = [];
     loaded.strikes.forEach((strike, i) => {
       const k = String(strike);
-      const seen = (seenRef.current[k] ??= new Set());
-      for (const s of newSignalsSince(models[i].signals, seen, firstLiveRef.current[k] ?? Infinity)) {
-        seen.add(s.id);
-        fresh.push({ id: `${strike}:${s.id}`, t: s.t, strike, kind: s.kind, price: s.price, belowVwap: s.belowVwap });
+      const wm = watermarkRef.current[k] ?? models[i].lastBarT ?? 0; // a strike with no watermark never alerts on what is already there
+      for (const s of newSignalsAfter(models[i].signals, wm)) {
+        fresh.push({ id: `${strike}:${loaded.expiry}:${s.kind}:${s.t}`, t: s.t, strike, kind: s.kind, price: s.price, belowVwap: s.belowVwap });
       }
+      watermarkRef.current[k] = nextWatermark(wm, models[i].lastBarT);
     });
     if (!fresh.length) return;
-    setLog(prev => fresh.reduce((l, e) => capLog(l, e), prev));
+    setLog(prev => fresh.filter(e => !prev.some(p => p.id === e.id)).reduce((l, e) => capLog(l, e), prev));
     for (const e of fresh) {
       const sell = e.kind === 'DOUBLE_BOTTOM_SELL';
       const title = `${e.strike} straddle · ${sell ? 'Double bottom SELL' : 'Double top BUY'} @ ${e.price.toFixed(2)}`;
