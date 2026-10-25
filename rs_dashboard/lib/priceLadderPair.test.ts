@@ -671,3 +671,26 @@ test('pairStrikes: a strangle takes independent CE-above / PE-below offsets from
   const o = pairCentreOffsets(22650, 22400, 50);
   assert.deepEqual(pairStrikes('strangle', o.centre, 50, o.ceOff, o.peOff), { ce: 22650, pe: 22400 });
 });
+
+test('openPositionCount and scopeMtm: XY and Plain slices and Pair pairs are counted and priced together', async () => {
+  const { openPositionCount } = await import('./priceLadderPair.ts');
+  const { scopeMtm } = await import('./priceLadderGuard.ts');
+  const c = (id: string, opt: 'CE' | 'PE') => ({ underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt, securityId: id, lotSize: 65, exchangeSegment: 'NSE_FNO' });
+  const sl = (o: object) => ({ id: 'x', kind: 'xy', broker: 'dhan', mode: 'sim', contract: c('111', 'CE'), side: 'BUY', lots: 1, qty: 65, product: 'MIS', state: 'open', createdAt: 1, updatedAt: 1, filledQty: 65, avg: 110, ...o });
+  const leg = (id: string, opt: 'CE' | 'PE', avg: number) => ({ contract: c(id, opt), avg, held: 65, entry: 'filled' });
+  const pair = { id: 'p', broker: 'dhan', mode: 'sim', structure: 'strangle', side: 'SELL', lots: 1, qty: 65, product: 'MIS', state: 'open', legs: { ce: leg('111', 'CE', 100), pe: leg('222', 'PE', 90) }, createdAt: 1, updatedAt: 1 };
+  const xy = sl({ id: 'a' }), plain = sl({ id: 'b', kind: 'plain', contract: c('222', 'PE'), avg: 85 });
+  const ltps = { '111': 120, '222': 100 };
+  const st = (slices: object[], pairs: object[]) => ({ date: 'd', events: [], slices, pairs }) as never;
+  assert.equal(openPositionCount([xy] as never, []), 1);                                   // XY
+  assert.equal(openPositionCount([plain] as never, []), 1);                                // Plain
+  assert.equal(openPositionCount([], [pair] as never), 1);                                       // Pair
+  assert.equal(openPositionCount([xy, plain, sl({ id: 'c' })] as never, [pair] as never), 3);    // '+1 lot' on the XY contract is the same position
+  assert.equal(openPositionCount([sl({ id: 'd', state: 'armed', filledQty: undefined })] as never, []), 0);   // armed: not a position
+  assert.equal(openPositionCount([sl({ id: 'e', state: 'closed' })] as never, [{ ...pair, state: 'closed' }] as never), 0);
+  // P&L: xy +650 (110->120), plain +975 (85->100), short pair -(20+10)*65 = -1950
+  const sc = { broker: 'dhan', mode: 'sim', pane: 1 } as const;
+  assert.equal(scopeMtm(st([xy, plain], [pair]), sc, ltps), 650 + 975 - 1950);
+  assert.equal(scopeMtm(st([xy], []), sc, ltps), 650);
+  assert.equal(scopeMtm(st([], [pair]), sc, ltps), -1950);
+});

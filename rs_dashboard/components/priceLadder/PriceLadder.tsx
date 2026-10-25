@@ -13,7 +13,7 @@ import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
 import { FOCUS_RING } from '@/components/Scalper';
 import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
-import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
+import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
 import { guardKey, scopeMtm } from '@/lib/priceLadderGuard';
@@ -935,19 +935,6 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   }, [data?.state.events, dual, ladderId, paneSlices, panePairs]);
   const live = paneSlices.filter(isLive);
   const latestEvent = paneEvents.length ? paneEvents[paneEvents.length - 1] : null;
-  // Live slices grouped per position (contract + broker + mode + side): one chip / banner line, not one per slice.
-  const liveGroups = useMemo(() => {
-    const m = new Map<string, { key: string; slices: LadderSlice[]; lots: number; armed: number }>();
-    for (const x of paneSlices.filter(isLive)) {
-      const key = `${x.contract.securityId}|${x.broker}|${x.mode}|${x.side}`;
-      const g = m.get(key) ?? m.set(key, { key, slices: [], lots: 0, armed: 0 }).get(key)!;
-      g.slices.push(x);
-      const held = Number(x.filledQty) || 0;
-      if (held > 0) g.lots += Math.max(1, Math.round(held / x.contract.lotSize));
-      else g.armed += 1;
-    }
-    return [...m.values()];
-  }, [paneSlices]);
   // Live orders on the contract on screen that the ladder does not draw (the other SIM/REAL mode, or another broker).
   // Pair mode: live pairs on these same two legs that the ladder does not draw (another broker or SIM/REAL).
   const hiddenPairs = mode === 'pair' && pairView ? pairs.filter(p => isPairLive(p)
@@ -956,8 +943,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const done = paneSlices.filter(s => !isLive(s));
   const livePairs = panePairs.filter(isPairLive);
   // Positions held (not armed levels): a contract + side group with filled lots, and a pair that has a leg on.
-  const openPositions = liveGroups.filter(g => g.lots > 0).length
-    + livePairs.filter(p => p.state === 'open' || p.state === 'exiting' || p.state === 'broken' || p.state === 'rolling').length;
+  const openPositions = openPositionCount(paneSlices, panePairs);
 
   // Switch the page to a slice's contract (Active Trades chip, orders list). Moving into REAL re-arms the first-click
   // confirmation, exactly like the SIM/REAL switch.

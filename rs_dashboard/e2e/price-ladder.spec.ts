@@ -18,7 +18,7 @@ const lastTradingDay = () => {
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const SPOT = 23200;
 
-async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
+async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
   const clock = opts.staleAt ? new Date(`${lastTradingDay()}T${opts.staleAt}:00+05:30`).getTime() : null;
   const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[], closes: [] as Record<string, unknown>[] };
   const state: LadderState = { date: istToday(), slices: [], events: [] };
@@ -29,6 +29,16 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
       createdAt: Date.now(), updatedAt: Date.now(), openedAt: Date.now(), filledQty: 65, avg: 110, entryLevel: 23180, entryY: 23180,
       bracket: { tgtPts: 40, slPts: 30 }, tgtY: 23220, slY: 23150, slY0: 23150,
     });
+  }
+  if (opts.openAll) {
+    const c = (securityId: string, opt: 'CE' | 'PE') => ({ underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt, securityId, lotSize: 65, exchangeSegment: 'NSE_FNO' });
+    const base = { broker: 'dhan', mode: 'sim', side: 'BUY', lots: 1, qty: 65, product: 'MIS', state: 'open', createdAt: Date.now(), updatedAt: Date.now(), openedAt: Date.now(), filledQty: 65 };
+    state.slices.push(
+      { ...base, id: 'xy1', kind: 'xy', contract: c('111', 'CE'), avg: 110, entryLevel: 23180, entryY: 23180, bracket: { tgtPts: 40, slPts: 30 }, tgtY: 23220, slY: 23150, slY0: 23150 } as LadderSlice,
+      { ...base, id: 'pl1', kind: 'plain', contract: c('222', 'PE'), avg: 85, orderType: 'LIMIT' } as LadderSlice,
+    );
+    const leg = (id: string, opt: 'CE' | 'PE', avg: number) => ({ contract: c(id, opt), avg, held: 65, entry: 'filled' });
+    state.pairs = [{ id: 'pp1', broker: 'dhan', mode: 'sim', structure: 'strangle', side: 'SELL', lots: 1, qty: 65, product: 'MIS', state: 'open', legs: { ce: leg('111', 'CE', 100), pe: leg('222', 'PE', 90) }, createdAt: Date.now(), updatedAt: Date.now(), openedAt: Date.now() }] as unknown as LadderState['pairs'];
   }
   await page.route('**/api/**', async (route: Route) => {
     const req = route.request();
@@ -63,7 +73,7 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
     if (p === '/api/price-ladder/state') {
       if (method === 'GET') {
         return json(route, { success: true, data: {
-          state, spots: { NIFTY: clock ? { spot: SPOT, at: clock - 60_000, source: 'ws (not moved yet)', fresh: false } : { spot: SPOT, at: Date.now(), source: 'indices', fresh: true } }, ltps: { '111': 120 },
+          state, spots: { NIFTY: clock ? { spot: SPOT, at: clock - 60_000, source: 'ws (not moved yet)', fresh: false } : { spot: SPOT, at: Date.now(), source: 'indices', fresh: true } }, ltps: { '111': 120, '222': 100 },
           liveArmed: !!opts.liveArmed, now: clock ?? Date.now(), watcherQuiet: (opts.watcherLagMs ?? 0) > 8000,
           // The page reads the contract only from a reply that echoes the selection it is showing.
           request: { underlying: u.searchParams.get('underlying'), expiry: u.searchParams.get('expiry') ?? '', strike: Number(u.searchParams.get('strike')) || null, opt: u.searchParams.get('opt'), pairCe: Number(u.searchParams.get('pairCe')) || null, pairPe: Number(u.searchParams.get('pairPe')) || null },
@@ -559,4 +569,17 @@ test('The trades strip shows only the number of open positions (armed levels are
   await expect(page.getByText('View on ladder')).toHaveCount(0);
   // The strip also carries the ladder's total P&L (open leg 65 units, 110 -> 120 = +650), the same figure as the header chip.
   await expect(page.getByTitle(/This ladder's total P&L/)).toContainText('+₹650');
+});
+
+test('The open positions count and total P&L are the same in XY, Plain and Pair modes', async ({ page }) => {
+  // XY +650 (110 -> 120), Plain +975 (85 -> 100), short strangle -1950: three positions, -₹325, whichever ladder is showing.
+  await install(page, { openAll: true });
+  await gotoSingle(page);
+  const strip = () => page.getByLabel('Open positions', { exact: true });
+  for (const [name, heading] of [['XY (index)', /23200\.00/], ['Plain', /23200/], ['Pair', /23200/]] as const) {
+    await page.getByRole('button', { name, exact: true }).click();
+    await expect(page.getByRole('heading', { name: heading }).first()).toBeVisible();
+    await expect(strip()).toHaveText('3');
+    await expect(page.getByTitle(/This ladder's total P&L/)).toContainText('−₹325');
+  }
 });

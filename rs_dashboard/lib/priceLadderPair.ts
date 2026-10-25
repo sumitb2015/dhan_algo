@@ -5,9 +5,9 @@
 // planPairs on the server watcher and lib/priceLadderPair.test.ts pins it.
 
 import {
-  bracketLevels, entryStep, istDay, istHhmm, limitZone, openExitStep, pushEvent, realArmed, sessionFor, slicePnl,
+  bracketLevels, entryStep, isLive, istDay, istHhmm, limitZone, openExitStep, pushEvent, realArmed, sessionFor, slicePnl,
   type ClickType, type LadderBracket, type LadderBroker, type LadderContract, type LadderEvent, type LadderProduct,
-  type LadderSide, type LadderState, type LadderZones,
+  type LadderSide, type LadderSlice, type LadderState, type LadderZones,
 } from './priceLadder.ts';
 
 export type PairStructure = 'straddle' | 'strangle';
@@ -116,6 +116,20 @@ export function lotsOnContract(st: LadderState, securityId: string, broker: Ladd
         || p.rollTo?.ce?.securityId === securityId || p.rollTo?.pe?.securityId === securityId))
     .reduce((a, p) => a + p.lots, 0);
   return slices + pairs;
+}
+
+/**
+ * How many positions a set of slices and pairs holds right now: one per contract + broker + mode + side that has filled
+ * units (several slices on it, such as a '+1 lot', are one position), plus one per pair with a leg on. Armed levels and
+ * resting orders are not positions. The same count for every ladder mode (XY and Plain slices, Pair pairs).
+ */
+export function openPositionCount(slices: readonly LadderSlice[], pairs: readonly LadderPair[]): number {
+  const held = new Set<string>();
+  for (const x of slices) {
+    if (isLive(x) && (Number(x.filledQty) || 0) > 0) held.add(`${x.contract.securityId}|${x.broker}|${x.mode}|${x.side}`);
+  }
+  const open = pairs.filter(p => p.state === 'open' || p.state === 'exiting' || p.state === 'broken' || p.state === 'rolling').length;
+  return held.size + open;
 }
 
 /** The pair a joined lot hangs off, following joinedTo links to the first pair (cycle-safe). */
