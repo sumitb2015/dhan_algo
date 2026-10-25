@@ -368,7 +368,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [tick, setTick] = useState(5);
   const [center, setCenter] = useState(0);
   const [follow, setFollow] = useState(true);
-  // The user scrolled the ladder away: hold the window where they put it until Centre / Follow price.
+  // The user scrolled the ladder away: hold the window where they put it until Centre / Follow.
   const [manual, setManual] = useState(false);
   const [data, setData] = useState<StateResp | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1727,8 +1727,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               <PnlChip label="Total P&L" value={ladderPnl}
                 title={`This ladder's total P&L on ${BROKER_LABELS[broker]} · ${real ? 'REAL' : 'SIM'} — the same number as the Ladder P&L chip above and the MTM guard: trades closed today at their exit, open ones at the live price. '—' while an open leg has no price.`} />
             </div>
-            <div className="flex items-center gap-2 flex-wrap text-xs">
-              <div className="flex items-center gap-2 flex-wrap rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-2.5 py-1">
+            {/* -mb-2 takes the column gap back: the Tick row sits right above the Buy / Bids header. */}
+            <div className="flex items-center gap-2 flex-wrap text-xs -mb-2">
+              <div className="flex items-center gap-2 w-full rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-2.5 py-1">
+              <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
               <span className="text-zinc-400">Tick</span>
               <Seg value={String(tick)} options={ticks.map(String)} onChange={v => chooseTick(Number(v), mode)} />
               <button type="button" onClick={() => { setFollow(true); setManual(false); setCenter(refPrice); }} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white">
@@ -1736,13 +1738,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               </button>
               {mode === 'xy' && <label className="flex items-center gap-1.5 text-zinc-400" title="Open-interest bars on the strike rows: puts left of the Price column, calls right"><input type="checkbox" checked={oiOn} onChange={e => { setOiOn(e.target.checked); savePref(k('price-ladder-oi'), e.target.checked ? '1' : '0'); }} /> OI</label>}
               {mode === 'xy' && oiOn && oiRows.staleSince != null && <span className="text-[10px] text-amber-300" title="Dhan refused a fresh option chain, so the OI bars come from the last good one">OI stale since {timeOf(oiRows.staleSince)}</span>}
-              <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow price</label>
-              {/* Closing it keeps its space (invisible, not removed) so the two ladders stay level. */}
-              {placeBlockReason && <span className={`inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 pl-2 pr-1 py-0.5 text-[11px] font-semibold text-amber-300 ${dismissedBlock === placeBlockReason ? 'invisible' : ''}`} role="status" title="Clicks on the ladder are ignored until this clears"><AlertTriangle className="w-3 h-3" aria-hidden /> Ordering paused: {placeBlockReason}
-                <button type="button" onClick={() => setDismissedBlock(placeBlockReason)} aria-label="Dismiss notice" title="Dismiss" tabIndex={dismissedBlock === placeBlockReason ? -1 : 0} className="ml-0.5 rounded p-0.5 hover:bg-amber-500/20"><X className="w-3 h-3" aria-hidden /></button></span>}
-              {held && <span className="text-[10px] text-amber-300" title="The rows stay put while the pointer is on the ladder, so a price tick cannot move a level under the mouse; they re-centre when it leaves">Rows held</span>}
-              </div>
-              <div className="flex items-center gap-2 flex-1 min-w-0 rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-2.5 py-1">
+              <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow</label>
+              <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"
                 onClick={() => setSettingsModalOpen(true)}
@@ -1758,7 +1755,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               >
                 Cancel all ({pendingHere})
               </button>
-              <span className="ml-auto text-zinc-500">{real && <span className="font-bold text-red-400">REAL · </span>}{BROKER_LABELS[broker]}</span>
+              </div>
+              {real && <span className="font-bold text-red-400" title="REAL orders">REAL</span>}
+              {/* Closing it keeps its space (invisible, not removed) so the two ladders stay level. */}
+              {placeBlockReason && <span className={`inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 pl-2 pr-1 py-0.5 text-[11px] font-semibold text-amber-300 ${dismissedBlock === placeBlockReason ? 'invisible' : ''}`} role="status" title="Clicks on the ladder are ignored until this clears"><AlertTriangle className="w-3 h-3" aria-hidden /> Ordering paused: {placeBlockReason}
+                <button type="button" onClick={() => setDismissedBlock(placeBlockReason)} aria-label="Dismiss notice" title="Dismiss" tabIndex={dismissedBlock === placeBlockReason ? -1 : 0} className="ml-0.5 rounded p-0.5 hover:bg-amber-500/20"><X className="w-3 h-3" aria-hidden /></button></span>}
+              </div>
               </div>
             </div>
             <LadderGrid
