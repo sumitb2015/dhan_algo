@@ -1837,7 +1837,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           <BasketTable baskets={paneBaskets} ltps={data?.ltps ?? {}} busy={busy} post={post} shown={new Set(myBaskets.map(y => y.id))} onSelect={selectBasket} />
         )}
         {basketModalOpen && (
-          <BasketLegsModal name={basketTpl?.name ?? 'Basket'} legs={basketLegs} strikes={strikes} atmStrike={atmStrike} locked={basketLocked} farExpiry={tplHasFar || basketHasFar ? farExpiry : null}
+          <BasketLegsModal name={basketTpl?.name ?? 'Basket'} legs={basketLegs} strikes={strikes} atmStrike={atmStrike} locked={basketLocked} farExpiry={tplHasFar || basketHasFar ? farExpiry : null} nearExpiry={expiry} spot={spot} lots={lots} unitsPerLot={(basketView?.lotSize ?? 0) * (basketView?.mult ?? 1)}
             prices={basketLegs.map((_, i) => basketView?.legs[i]?.ltp ?? null)}
             onChange={l => { setBasketLegs(l); setBasketEdited(true); }}
             onReset={() => { setBasketEdited(false); buildBasket(); }}
