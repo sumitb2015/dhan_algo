@@ -325,8 +325,17 @@ export async function kotakPost(
  * Verified against the SDK's LimitsAPI.limit_init.
  */
 export async function kotakLimits(timeoutMs = 10_000): Promise<Record<string, unknown>> {
-  return kotakPost(KOTAK_PATHS.limits, { seg: 'ALL', exch: 'ALL', prod: 'ALL' }, timeoutMs);
+  // A read-only POST, but it counts against the same limit as the GETs: after a 100025 replay the error for
+  // RATE_LIMIT_COOLDOWN_MS rather than retrying on every poll (a failed fetch is not cached upstream).
+  if (limitsRateLimit && Date.now() - limitsRateLimit.at < RATE_LIMIT_COOLDOWN_MS) throw limitsRateLimit.err;
+  try {
+    return await kotakPost(KOTAK_PATHS.limits, { seg: 'ALL', exch: 'ALL', prod: 'ALL' }, timeoutMs);
+  } catch (err) {
+    if (String((err as Error)?.message ?? err).includes(String(KOTAK_RATE_LIMIT))) limitsRateLimit = { at: Date.now(), err };
+    throw err;
+  }
 }
+let limitsRateLimit: { at: number; err: unknown } | null = null;
 
 /** The row list from a positions/orders/trades response — `[]` when genuinely empty. */
 export function kotakRows(json: Record<string, unknown>): Record<string, unknown>[] {

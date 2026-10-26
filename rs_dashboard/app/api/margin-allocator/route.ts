@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { dhanGet } from '@/lib/dhanToken';
 import { isDhanTokenValid } from '@/lib/session';
-import { kotakGet, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
+import { kotakGetShared, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { shapeKotakPosition, shapeKotakFunds } from '@/lib/kotakShape';
 import { dedupePositions } from '@/lib/positionProduct';
 import { getCachedPositions, getCachedFunds, brokerCacheGeneration } from '@/lib/brokerPositionsCache';
@@ -112,7 +112,7 @@ async function loadDhanRaw(): Promise<RawFundsAndPositions> {
 async function loadKotakRaw(): Promise<RawFundsAndPositions> {
   const [limitsRes, posRes] = await Promise.allSettled([
     getCachedFunds('kotak', () => kotakLimits()),
-    getCachedPositions('kotak', () => kotakGet(KOTAK_PATHS.positions)),
+    getCachedPositions('kotak', () => kotakGetShared(KOTAK_PATHS.positions)),
   ]);
 
   let funds: MarginAllocatorFunds | null = null;

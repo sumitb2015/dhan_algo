@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { dhanGet } from '@/lib/dhanToken';
 import { kiteGet, isZerodhaTokenValid } from '@/lib/zerodhaToken';
-import { kotakGet, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
+import { kotakGetShared, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { isDhanTokenValid } from '@/lib/session';
 import { shapeZerodhaPosition } from '@/lib/zerodhaShape';
 import { shapeKotakPosition, shapeKotakFunds } from '@/lib/kotakShape';
@@ -297,7 +297,7 @@ async function loadKotak(): Promise<BrokerPortfolio> {
 
   const [limitsRes, posRes] = await Promise.allSettled([
     getCachedFunds('kotak', () => kotakLimits()),
-    getCachedPositions('kotak', () => kotakGet(KOTAK_PATHS.positions)),
+    getCachedPositions('kotak', () => kotakGetShared(KOTAK_PATHS.positions)),
   ]);
 
   if (limitsRes.status === 'fulfilled') {
