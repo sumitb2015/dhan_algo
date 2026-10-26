@@ -5,7 +5,7 @@ import { loadDefaults, saveDefaults, clearDefaults, resolveDefaults, LADDER_UNDE
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu';
 import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2, Volume2, VolumeX } from 'lucide-react';
 import { toast } from 'sonner';
-import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
+import { MCX_LOT_MULTIPLIER, scaleBrokerPnl } from '@/lib/positionPnl';
 import { oiRowsFor, maxOi, type OiStrike } from '@/lib/priceLadderOi';
 import NavBar from '@/components/NavBar';
 import { sharedJson } from '@/lib/sharedPoll';
@@ -731,7 +731,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       if (!j.success) { setBookError(j.error ?? 'Could not read the broker book'); return; }
       // A part that failed keeps its last good rows; the error says so rather than showing an empty book.
       setBook(d => ({
-        positions: !j.positionsError && Array.isArray(j.positions) ? j.positions : d.positions,
+        // Dhan reports MCX P&L per lot, without the barrels-per-lot multiplier (CRUDEOILM x10): rescale it here, as the other terminals do.
+        positions: !j.positionsError && Array.isArray(j.positions) ? j.positions.map(p => scaleBrokerPnl(p)) : d.positions,
         orders: !j.ordersError && Array.isArray(j.orders) ? j.orders : d.orders,
         trades: !j.tradesError && Array.isArray(j.trades) ? j.trades : d.trades,
       }));
