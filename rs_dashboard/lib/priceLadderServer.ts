@@ -9,7 +9,7 @@ import { reserveOrderSlot } from '@/lib/dhanOrderPacer';
 import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
 import { buildKotakOrderPayload } from '@/lib/kotakOrderPayload';
 import { kotakDerivativeBySymbol } from '@/lib/kotakContracts';
-import { kotakGet, kotakPost, kotakRows, kotakLimits, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
+import { kotakGet, kotakGetShared, kotakPost, kotakRows, kotakLimits, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { shapeKotakFunds, shapeKotakOrderStatus, shapeKotakPosition } from '@/lib/kotakShape';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { kiteGet, kiteDelete, isZerodhaTokenValid } from '@/lib/zerodhaToken';
@@ -468,8 +468,12 @@ export async function cancelAtBroker(broker: LadderBroker, orderId: string): Pro
   invalidateBrokerCache('dhan');
 }
 
-/** Broker net qty per contract key (Dhan security id / Kotak symbol) + product, or null when the book is unreadable. */
-async function brokerBook(broker: LadderBroker): Promise<Map<string, number> | null> {
+/**
+ * Broker net qty per contract key (Dhan security id / Kotak symbol) + product, or null when the book is unreadable.
+ * `shared` reads Kotak through the display-poll cache (1.2 s reuse, back-off after stCode 100025): only for the reconcile,
+ * which clamps down and tolerates a slightly old book. Anything that sizes an order reads live.
+ */
+async function brokerBook(broker: LadderBroker, shared = false): Promise<Map<string, number> | null> {
   try {
     const out = new Map<string, number>();
     if (broker === 'zerodha') {
@@ -481,7 +485,7 @@ async function brokerBook(broker: LadderBroker): Promise<Map<string, number> | n
       return out;
     }
     if (broker === 'kotak') {
-      for (const p of kotakRows(await kotakGet(KOTAK_PATHS.positions)).map(shapeKotakPosition)) {
+      for (const p of kotakRows(await (shared ? kotakGetShared : kotakGet)(KOTAK_PATHS.positions)).map(shapeKotakPosition)) {
         const k = `${p.tradingSymbol}|${String(p.productType).toUpperCase()}`;
         out.set(k, (out.get(k) ?? 0) + (Number(p.netQty) || 0));
       }
@@ -651,7 +655,7 @@ async function runJobs(s: LadderState, jobs: Job[], prices: PriceView, pairJobs:
   let kotakBookP: Promise<Record<string, unknown>[]> | null = null;
   let zerodhaBookP: Promise<Record<string, unknown>[]> | null = null;
   const orderBooks: OrderBooks = {
-    kotak: () => (kotakBookP ??= kotakGet(KOTAK_PATHS.orderBook).then(kotakRows)),
+    kotak: () => (kotakBookP ??= kotakGetShared(KOTAK_PATHS.orderBook).then(kotakRows)),
     zerodha: () => (zerodhaBookP ??= kiteGet('/orders').then(r => (Array.isArray(r) ? r as Record<string, unknown>[] : []))),
   };
 
@@ -1122,7 +1126,7 @@ async function reconcileDown(s: LadderState, prices: PriceView, now: number): Pr
   const books = new Map<LadderBroker, Map<string, number> | null>();
   for (const [k, g] of groups) {
     const broker = g.broker;
-    if (!books.has(broker)) books.set(broker, await brokerBook(broker));
+    if (!books.has(broker)) books.set(broker, await brokerBook(broker, true));
     const book = books.get(broker);
     if (!book) continue;                                        // unreadable: leave the ledger alone
     if (g.holders.some(h => now - h.openedAt < FILL_GRACE_MS)) continue; // a fresh fill may not be in the book yet
