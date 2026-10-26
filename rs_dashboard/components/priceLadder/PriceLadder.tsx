@@ -688,6 +688,29 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Header account P&L: the shared, server-cached portfolio read (display only — it never sizes an order), every 5 s
   // while the tab is visible. A failed or incomplete read shows '—', never a stale or partial number.
   const [acct, setAcct] = useState<{ pnl: number | null; open: number | null; note: string | null }>({ pnl: null, open: null, note: null });
+  // Estimated charges on today's executed orders (Dhan Rs 20 / order, Kotak 0): the Net P&L chip is the account P&L minus these.
+  const [charges, setCharges] = useState<{ total: number | null; orders: number; brokerage: number; note: string | null; breakdown: Record<string, number> | null }>({ total: null, orders: 0, brokerage: 0, note: null, breakdown: null });
+  const chargesSeq = useRef(0);
+  useEffect(() => {
+    const my = ++chargesSeq.current;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCharges({ total: null, orders: 0, brokerage: 0, note: null, breakdown: null });
+    if (!brokerLoaded) return;
+    const load = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      try {
+        const j = await sharedJson<{ success?: boolean; charges?: number; orders?: number; brokeragePerOrder?: number; breakdown?: Record<string, number>; error?: string }>(`/api/price-ladder/charges?broker=${broker}`, 10_000);
+        if (my !== chargesSeq.current) return;
+        if (!j.success || typeof j.charges !== 'number') return setCharges({ total: null, orders: 0, brokerage: 0, note: j.error ?? 'Could not read the trade book', breakdown: null });
+        setCharges({ total: j.charges, orders: j.orders ?? 0, brokerage: j.brokeragePerOrder ?? 0, note: null, breakdown: j.breakdown ?? null });
+      } catch (e) {
+        if (my === chargesSeq.current) setCharges({ total: null, orders: 0, brokerage: 0, note: String((e as Error).message ?? e), breakdown: null });
+      }
+    };
+    void load();
+    const t = setInterval(() => { void load(); }, 10_000);
+    return () => clearInterval(t);
+  }, [broker, brokerLoaded]);
   const acctSeq = useRef(0);
   useEffect(() => {
     const my = ++acctSeq.current;     // a broker switch drops the previous broker's in-flight reply
@@ -1403,6 +1426,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           title={`The ladder's own P&L on ${BROKER_LABELS[broker]}, every contract, ${real ? 'REAL' : 'SIM'} orders only: closed at their exit, open at the live LTP, since entry (a carried NRML position counts from its entry). '—' if an open leg has no price.`} />
         {showAccount && <PnlChip label={`${BROKER_LABELS[broker]} P&L`} value={acct.pnl}
           title={`${BROKER_LABELS[broker]} account P&L today: realised + unrealised over all positions, as the broker reports it (includes trades not made on the ladder)${acct.note ? ` — ${acct.note}` : ''}`} />}
+        {showAccount && <PnlChip label="Net P&L" value={acct.pnl != null && charges.total != null ? acct.pnl - charges.total : null}
+          title={charges.total == null
+            ? `${BROKER_LABELS[broker]} P&L minus charges — charges unavailable${charges.note ? `: ${charges.note}` : ''}`
+            : `${BROKER_LABELS[broker]} P&L after estimated charges of ₹${Math.round(charges.total).toLocaleString('en-IN')} on ${charges.orders} executed order(s) today (brokerage ₹${charges.brokerage}/order${charges.breakdown ? ` · STT/CTT ₹${Math.round(charges.breakdown.stt)} · exchange ₹${Math.round(charges.breakdown.exchange)} · GST ₹${Math.round(charges.breakdown.gst)} · stamp ₹${Math.round(charges.breakdown.stamp)} · SEBI ₹${Math.round(charges.breakdown.sebi)}` : ''}). An estimate from rate tables, not your contract note.`} />}
         {showAccount && acct.note && <span className="text-amber-300 truncate max-w-[18rem]" title={acct.note}>{acct.note}</span>}
         {/* The standard header buttons (theme, alerts, settings, Sync Data, Update, Disconnect): at the top right of the page, in the always-visible top row. Side by side that is ladder 2's row; alone, ladder 1's. */}
         {(dual ? second : true) && <div className="ml-auto"><NavBar /></div>}
