@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { roundToStep, strikesFor, parseAtmParam } from './straddlePnfStrikes.ts';
+import { roundToStep, strikesFor, parseAtmParam, parseOffsetsParam } from './straddlePnfStrikes.ts';
 
 test('roundToStep snaps to the nearest 50', () => {
   assert.equal(roundToStep(25024.9), 25000);
@@ -19,4 +19,18 @@ test('parseAtmParam accepts auto or a positive number and rejects the rest', () 
   assert.equal(parseAtmParam('abc'), null);
   assert.equal(parseAtmParam('-50'), null);
   assert.equal(parseAtmParam(null), null);
+});
+
+test('strikesFor takes custom offsets', () => {
+  assert.deepEqual(strikesFor(25000, [-100, 0, 300]), [24900, 25000, 25300]);
+});
+
+test('parseOffsetsParam needs three distinct multiples of 50 within the limit', () => {
+  assert.deepEqual(parseOffsetsParam('-200,0,200'), [-200, 0, 200]);
+  assert.deepEqual(parseOffsetsParam('-100,+300,ATM'), [-100, 300, 0]);
+  assert.equal(parseOffsetsParam('-200,0'), null);
+  assert.equal(parseOffsetsParam('0,0,200'), null);
+  assert.equal(parseOffsetsParam('-210,0,200'), null);
+  assert.equal(parseOffsetsParam('-1050,0,200'), null);
+  assert.equal(parseOffsetsParam(null), null);
 });

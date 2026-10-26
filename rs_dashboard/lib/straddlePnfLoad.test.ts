@@ -27,3 +27,8 @@ test('ticks fold only into the expiry that is loaded', () => {
   assert.equal(tickAcceptable('2026-11-24', '2026-11-24', '2026-10-27'), false); // bridge still on the old expiry
   assert.equal(tickAcceptable('', '2026-10-27', '2026-10-27'), false);
 });
+
+test('custom offsets are sent; the default offsets add nothing', () => {
+  assert.equal(historyQuery('2026-10-27', true, null, 'auto', [-100, 0, 300]), 'expiry=2026-10-27&atm=auto&offsets=-100,0,300');
+  assert.equal(historyQuery('2026-10-27', true, null, 'auto', [-200, 0, 200]), 'expiry=2026-10-27&atm=auto');
+});

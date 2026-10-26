@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { PROJECT_ROOT, runPythonJson, dedupe, spaced } from '@/lib/pyExec';
-import { parseAtmParam, roundToStep, strikesFor } from '@/lib/straddlePnfStrikes';
+import { DEFAULT_OFFSETS, parseAtmParam, parseOffsetsParam, roundToStep, strikesFor } from '@/lib/straddlePnfStrikes';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
 
 // Read-only market-data route for the Straddle P&F page: no order code lives here.
@@ -26,6 +26,11 @@ export async function GET(request: NextRequest) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) {
     return NextResponse.json({ success: false, error: 'expiry must be YYYY-MM-DD' }, { status: 400 });
   }
+  const offsetsRaw = searchParams.get('offsets');
+  const offsets = offsetsRaw === null ? DEFAULT_OFFSETS : parseOffsetsParam(offsetsRaw);
+  if (!offsets) {
+    return NextResponse.json({ success: false, error: 'offsets must be three distinct multiples of 50, e.g. -200,0,200 (max +-1000)' }, { status: 400 });
+  }
   if (!atmParam) {
     return NextResponse.json({ success: false, error: 'atm must be "auto" or a positive number' }, { status: 400 });
   }
@@ -48,11 +53,14 @@ export async function GET(request: NextRequest) {
     atm = atmParam.atm;
   }
 
-  const key = `${underlying}:${expiry}:${atm}`;
+  const key = `${underlying}:${expiry}:${atm}:${offsets.join(',')}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.ts < CACHE_TTL) return NextResponse.json(hit.body);
 
-  const strikes = strikesFor(atm);
+  const strikes = strikesFor(atm, offsets);
+  if (strikes.some(k => !(k > 0))) {
+    return NextResponse.json({ success: false, error: `ATM ${atm} with these offsets gives a strike at or below zero (${strikes.join(', ')})` }, { status: 400 });
+  }
   try {
     const out = await dedupe(`straddle-pnf:${key}`, () =>
       runPythonJson<BarsScriptOut>(

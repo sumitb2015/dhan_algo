@@ -13,12 +13,13 @@ import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/al
 import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
 import { foldTick, newSignalsAfter, nextWatermark, capLog } from '@/lib/straddlePnfLive';
 import { historyQuery, tickAcceptable } from '@/lib/straddlePnfLoad';
-import SettingsControls from './straddlePnf/SettingsControls';
-import { DEFAULT_SETTINGS, SETTINGS_KEY, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
+import SettingsControls, { OffsetControls } from './straddlePnf/SettingsControls';
+import { DEFAULT_OFFSETS, offsetLabel, type Offsets } from '@/lib/straddlePnfStrikes';
+import { DEFAULT_SETTINGS, OFFSETS_KEY, SETTINGS_KEY, readOffsets, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import { pickExpiries, type PnfExpiry } from '@/lib/straddlePnfExpiries';
 import type { Bar } from '@/lib/straddlePnf';
 
-// Straddle Point & Figure: three NIFTY straddle charts (ATM-200 / ATM / ATM+200), signals only — this page places no orders.
+// Straddle Point & Figure: three NIFTY straddle charts (default ATM-200 / ATM / ATM+200, offsets editable), signals only — this page places no orders.
 
 type Row = { bars: Bar[]; openT: number | null };
 type Loaded = { expiry: string; atm: number; strikes: number[]; dataDate: string | null; errors: Record<string, string> };
@@ -26,7 +27,6 @@ type Loaded = { expiry: string; atm: number; strikes: number[]; dataDate: string
 const STALE_MS = 60_000;
 const POLL_FALLBACK_MS = 60_000;
 const FLASH_MS = 4000;
-const TITLES = ['ATM −200', 'ATM', 'ATM +200'];
 const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
 const OVERLAY_KEY = 'straddle-pnf-overlay';
@@ -48,6 +48,7 @@ export default function StraddlePnfPage() {
   const [atmInput, setAtmInput] = useState('auto');
   const [overlay, setOverlay] = useState<Overlay>('vwap');
   const [settings, setSettings] = useState<PnfSettings>(DEFAULT_SETTINGS);
+  const [offsets, setOffsets] = useState<Offsets>(DEFAULT_OFFSETS);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [rows, setRows] = useState<Record<string, Row>>({});
   const [loading, setLoading] = useState(true);
@@ -80,6 +81,7 @@ export default function StraddlePnfPage() {
     if (readPref(OVERLAY_KEY) === 'sma') setOverlay('sma');
     const stored = readSettings(readPref(SETTINGS_KEY));
     setSettings(stored);
+    setOffsets(readOffsets(readPref(OFFSETS_KEY)));
     rebaselineRef.current = true;
     if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
     try {
@@ -115,7 +117,7 @@ export default function StraddlePnfPage() {
     const id = ++reqRef.current;
     if (reset) { setLoading(true); setLoadError(null); }
     try {
-      const res = await fetch(`/api/straddle-pnf?${historyQuery(expiry, reset, loadedAtmRef.current, atmInput)}`);
+      const res = await fetch(`/api/straddle-pnf?${historyQuery(expiry, reset, loadedAtmRef.current, atmInput, offsets)}`);
       const j = await res.json() as {
         success?: boolean; error?: string; atm: number; strikes: number[]; dataDate: string | null;
         bars: Record<string, Bar[]>; errors: Record<string, string>;
@@ -141,7 +143,7 @@ export default function StraddlePnfPage() {
     } finally {
       if (id === reqRef.current) setLoading(false);
     }
-  }, [expiry, atmInput]);
+  }, [expiry, atmInput, offsets]);
 
   useEffect(() => { void load(true); }, [load, recenter]);
 
@@ -249,6 +251,10 @@ export default function StraddlePnfPage() {
     setSettings(next);
     savePref(SETTINGS_KEY, serializeSettings(next));
   };
+  const applyOffsets = (next: Offsets) => {
+    setOffsets(next);                 // changes `load`, which reloads with reset and re-baselines alerts
+    savePref(OFFSETS_KEY, JSON.stringify(next));
+  };
   const toggleMute = () => {
     const next = !muted;
     setMuted(next);
@@ -292,6 +298,7 @@ export default function StraddlePnfPage() {
             {expiries.map(e => <option key={e.value} value={e.value}>{e.label}</option>)}
           </select>
           <SettingsControls settings={settings} onChange={applySettings} />
+          <OffsetControls offsets={offsets} onChange={applyOffsets} />
           <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
             ATM
             <input aria-label="ATM" type="text" inputMode="numeric" value={atmInput}
@@ -334,7 +341,7 @@ export default function StraddlePnfPage() {
             return (
               <PnfPanel
                 key={i}
-                title={`${TITLES[i]} · ${strike || '—'} straddle`}
+                title={`${offsetLabel(loaded ? loaded.strikes[i] - loaded.atm : offsets[i])} · ${strike || '—'} straddle`}
                 strike={strike}
                 model={models[i]}
                 live={last ? { ce: last.ce, pe: last.pe } : null}

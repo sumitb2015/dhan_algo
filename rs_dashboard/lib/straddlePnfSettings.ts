@@ -1,4 +1,5 @@
 // The Straddle P&F pages' user settings: bar interval, box size and reversal. Pure, so parsing and persistence rules are tested.
+import { DEFAULT_OFFSETS, parseOffsetsParam, type Offsets } from './straddlePnfStrikes.ts';
 import { INTERVALS, type Interval } from './straddlePnfInterval.ts';
 
 /** Boxes against the column it takes to reverse it (the classic setting is 3). */
@@ -39,4 +40,16 @@ export function readSettings(raw: string | null): PnfSettings {
 
 export function serializeSettings(s: PnfSettings): string {
   return JSON.stringify(s);
+}
+
+/** localStorage key for the three chart offsets from ATM. */
+export const OFFSETS_KEY = 'straddle-pnf-offsets';
+
+/** Stored offsets, or the defaults when missing or invalid. */
+export function readOffsets(raw: string | null): Offsets {
+  try {
+    const a = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(a)) return parseOffsetsParam(a.join(',')) ?? DEFAULT_OFFSETS;
+  } catch { /* corrupt: defaults */ }
+  return DEFAULT_OFFSETS;
 }
