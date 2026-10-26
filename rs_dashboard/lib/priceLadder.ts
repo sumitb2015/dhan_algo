@@ -250,6 +250,36 @@ export const paneOf = (x: { pane?: number }): 1 | 2 => (x.pane === 2 ? 2 : 1);
 
 export const emptyLadderState = (date: string): LadderState => ({ date, slices: [], events: [] });
 
+/**
+ * A REAL entry that fills while the ladder holds the OPPOSITE side of the same contract and product is, at the broker,
+ * a close (it nets the row), not a new position. Offsets the fill against those open slices, oldest first: a fully
+ * offset slice is closed at `avg`, a partly offset one keeps the rest. Returns what is left of the fill to open.
+ */
+export function netAgainstOpposite(slices: LadderSlice[], x: LadderSlice, qty: number, avg: number, now: number): { slices: LadderSlice[]; left: number } {
+  if (x.mode !== 'real') return { slices, left: qty };
+  const same = (y: LadderSlice) => y.id !== x.id && y.mode === 'real' && y.state === 'open' && y.broker === x.broker && y.side !== x.side
+    && y.product === x.product && y.contract.securityId === x.contract.securityId && y.contract.tradingSymbol === x.contract.tradingSymbol;
+  let left = qty;
+  const cuts = new Map<string, number>();
+  for (const y of slices.filter(same).sort((a, b) => (a.openedAt ?? 0) - (b.openedAt ?? 0))) {
+    if (left <= 0) break;
+    const take = Math.min(left, Number(y.filledQty) || 0);
+    if (take > 0) { cuts.set(y.id, take); left -= take; }
+  }
+  if (!cuts.size) return { slices, left: qty };
+  return {
+    left,
+    slices: slices.map(y => {
+      const take = cuts.get(y.id);
+      if (!take) return y;
+      const held = Number(y.filledQty) || 0;
+      return take >= held
+        ? { ...y, state: 'closed' as const, exitQty: held, exitAvg: avg || undefined, closedAt: now, updatedAt: now, exitReason: 'Closed by an opposite order', exitWanted: undefined }
+        : { ...y, filledQty: held - take, updatedAt: now };
+    }),
+  };
+}
+
 export const TERMINAL: ReadonlySet<SliceState> = new Set(['closed', 'cancelled', 'rejected']);
 export const isLive = (s: LadderSlice) => !TERMINAL.has(s.state);
 

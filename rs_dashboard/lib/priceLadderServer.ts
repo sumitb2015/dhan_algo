@@ -20,7 +20,7 @@ import { cachedZerodhaContract, slicesFor } from '@/lib/zerodhaContracts';
 import { pacedMarginCall } from '@/lib/ultimateScannerDhan';
 import {
   EXIT_RETRY_MS, FILL_GRACE_MS, SETTLE_TIMEOUT_MS, SPOT_STALE_MS,
-  bias, bracketLevels, emptyLadderState, exitQtyFor, isLive, outcomeOnThrow, istDay, pushEvent,
+  bias, bracketLevels, emptyLadderState, exitQtyFor, netAgainstOpposite, isLive, outcomeOnThrow, istDay, pushEvent,
   rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS, mcxUnitError,
   type Job, type LadderOrderHow, type LadderBroker, type LadderContract, type LadderSide, type LadderSlice, type LadderState,
 } from '@/lib/priceLadder';
@@ -1051,6 +1051,14 @@ async function runBasketJob(s: LadderState, j: BasketJob, prices: PriceView, ctx
 }
 
 export function openedPatch(s: LadderState, x: LadderSlice, qty: number, avg: number, now: number): LadderState {
+  // The broker nets a fill against an opposite open position on the same contract: that is a close, not a new trade.
+  const net = netAgainstOpposite(s.slices, x, qty, avg, now);
+  if (net.left < qty) {
+    const label = `${x.side} ${x.contract.strike}${x.contract.opt}`;
+    const base = pushEvent({ ...s, slices: net.slices }, ev('info', `${label} filled ${qty} @ ${avg ? avg.toFixed(2) : '?'} — closed ${qty - net.left} of the opposite position`, x.id));
+    if (net.left <= 0) return patchSlice(base, x.id, { state: 'closed', filledQty: qty, avg: avg || undefined, openedAt: now, closedAt: now, exitQty: 0, exitAvg: avg || undefined, note: 'Closed the opposite position' });
+    return openedPatch(base, x, net.left, avg, now);
+  }
   const patch: Partial<LadderSlice> = { state: 'open', filledQty: qty, avg: avg || undefined, openedAt: now };
   // A lot added to an open position arrives with that position's levels already set: it keeps them (one widget, one exit).
   if (x.kind === 'xy' && x.bracket && x.slY == null) {

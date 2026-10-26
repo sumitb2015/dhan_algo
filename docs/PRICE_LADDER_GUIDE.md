@@ -23,6 +23,11 @@ orders and cancels armed REAL levels; exits always work). The arm lapses at the 
 - **Buy Market / Sell Market** (under Lots, on every ladder) — one click sends the selected contract at MARKET now (on a Pair ladder, both legs of the shown straddle / strangle together; REAL: a lone filled leg is closed again), with the
   current lots, product, broker and SIM/REAL mode; the first REAL click each page load asks first; no bracket (exit from its widget or the MTM guard). The
   server applies every arm check (REAL arm, session, hours, auto-exit time, 20-lot cap, funds).
+- **An order against an open position closes it.** In REAL mode a Plain or Market order on the opposite side of a position the
+  ladder holds (same contract and product) is a close, as at the broker, which nets the two. The ladder offsets the fill
+  against the open position (oldest first) and closes or shrinks it at the fill price; only any excess opens a new position.
+  Before this, the order showed as a second, new position for ~20 s until the reconcile dropped it. SIM mode is unchanged.
+  Not yet booked: the profit on the closed part of a partly closed position.
 
 ## Basket mode (prebuilt strategies on the net premium)
 

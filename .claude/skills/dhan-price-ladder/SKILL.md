@@ -77,7 +77,11 @@ per write; the page drops a view older than the one on screen). It is re-read on
     hedge sends no short, a failed short unwinds shorts first, exits cover shorts before hedges (`exitLegs`), an UNKNOWN leg stops and
     reverses nothing (resolve per leg), the reconcile cuts legs down only (`cutBasketLeg` -> BROKEN). Capped at `MAX_REAL_BASKET_LOTS`
     (5) and funds-checked fail closed (`realBasketBlocked`) until it has run live (`dhan-terminal-position-ownership` Inv 4, 9, 10, 14).
-14. **`settings` lives in two places** (the settings file and `state.settings`; the state's wins, shallow). Change a cutoff only
+14. **A REAL fill nets against the opposite open slice.** The broker nets a row, so `openedPatch` calls `netAgainstOpposite`
+    (`priceLadder.ts`: same broker, contract, product, REAL, state `open`, opposite side, oldest first) and only the excess opens a
+    slice. Without it the closing order showed as a new position for `FILL_GRACE_MS`, until `reconcileDown` cut it. Pair / basket
+    legs are not netted this way. Gap: a partial close does not book the closed part's P&L (2026-10-26).
+15. **`settings` lives in two places** (the settings file and `state.settings`; the state's wins, shallow). Change a cutoff only
     through `setCutoffsFromBody`.
 
 ## Tests

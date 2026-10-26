@@ -631,3 +631,23 @@ test('rollDay keeps MTM guard levels but switches every guard OFF with no runtim
   assert.match(r.events[0].msg, /dhan:real/);
   assert.equal(rollDay({ ...s, guards: { 'dhan:sim': { on: false, stop: 1 } } }, '2026-10-22', 5).events.length, 0);
 });
+
+test('netAgainstOpposite: a REAL buy against an open short closes it instead of opening a long', async () => {
+  const { netAgainstOpposite } = await import('./priceLadder.ts');
+  const mk = (id: string, side: 'BUY' | 'SELL', qty: number, extra: object = {}) => ({
+    id, side, mode: 'real', broker: 'kotak', product: 'MIS', state: 'open', filledQty: qty, openedAt: 1,
+    contract: { securityId: '1', tradingSymbol: 'NIFTY22600PE', strike: 22600, opt: 'PE' }, ...extra,
+  }) as never;
+  const short = mk('s', 'SELL', 130);
+  const buy = mk('b', 'BUY', 65, { state: 'working' });
+  const half = netAgainstOpposite([short, buy], buy, 65, 70, 99);
+  assert.equal(half.left, 0);
+  assert.equal(half.slices[0].filledQty, 65);
+  assert.equal(half.slices[0].state, 'open');
+  const full = netAgainstOpposite([short, buy], buy, 200, 70, 99);
+  assert.equal(full.left, 70);
+  assert.equal(full.slices[0].state, 'closed');
+  assert.equal(full.slices[0].exitAvg, 70);
+  const sim = netAgainstOpposite([short], mk('x', 'BUY', 65, { mode: 'sim' }), 65, 70, 99);
+  assert.equal(sim.left, 65);
+});
