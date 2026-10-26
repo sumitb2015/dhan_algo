@@ -21,7 +21,7 @@ import { pacedMarginCall } from '@/lib/ultimateScannerDhan';
 import {
   EXIT_RETRY_MS, FILL_GRACE_MS, SETTLE_TIMEOUT_MS, SPOT_STALE_MS,
   bias, bracketLevels, emptyLadderState, exitQtyFor, netAgainstOpposite, isLive, outcomeOnThrow, istDay, pushEvent,
-  rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, legTag, FUT_TICK, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS, mcxUnitError,
+  rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, legTag, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS, mcxUnitError,
   type Job, type LadderOrderHow, type LadderBroker, type LadderContract, type LadderSide, type LadderSlice, type LadderState,
 } from '@/lib/priceLadder';
 import {
@@ -1065,6 +1065,8 @@ export function openedPatch(s: LadderState, x: LadderSlice, qty: number, avg: nu
     return openedPatch(base, x, net.left, avg, now);
   }
   const patch: Partial<LadderSlice> = { state: 'open', filledQty: qty, avg: avg || undefined, openedAt: now };
+  // A future's Index axis IS its own price: a Market fill is drawn at the fill itself.
+  if (x.market && x.kind === 'plain' && x.contract.opt === 'FUT' && avg > 0) patch.entryY = avg;
   // A lot added to an open position arrives with that position's levels already set: it keeps them (one widget, one exit).
   if (x.kind === 'xy' && x.bracket && x.slY == null) {
     // The bracket keeps its planned distances (OptionX: 23180 -> 23223 / 23149) but is measured from the index level

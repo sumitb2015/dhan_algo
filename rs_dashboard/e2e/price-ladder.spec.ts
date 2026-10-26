@@ -131,6 +131,8 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
           id: `m${seen.posts.length}`, kind: 'plain', broker: (body.broker as 'dhan') ?? 'dhan', mode: body.mode === 'real' ? 'real' : 'sim',
           contract: { underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt: 'CE', securityId: '111', lotSize: 65, exchangeSegment: 'NSE_FNO' },
           side: body.side as 'BUY', lots: 1, qty: 65, product: 'MIS', state: 'open', createdAt: Date.now(), updatedAt: Date.now(), market: true,
+          // What the server records for a Market-button fill: the fill premium and the axis price when it was sent.
+          openedAt: Date.now(), filledQty: 65, avg: 110, entryY: 23195,
         } as LadderSlice);
       }
       if (body.action === 'pair' && body.op === 'cancelAll') state.pairs = (state.pairs ?? []).map(x => ((body.ids as string[]).includes(x.id) && x.state === 'armed' ? { ...x, state: 'cancelled' as const } : x));
@@ -236,6 +238,19 @@ test('Buy Market / Sell Market (SIM): one click sends the selected contract at m
   await page.getByRole('button', { name: 'Sell at market' }).click();
   await expect.poll(() => seen.posts.filter(b => b.action === 'market').length).toBe(1);
   expect(seen.posts.find(b => b.action === 'market')).toMatchObject({ mode: 'sim', broker: 'dhan', side: 'SELL', lots: 1, opt: 'CE', strike: 23200 });
+  expect(seen.blocked).toEqual([]);
+});
+
+test('A Buy Market fill is drawn on the Index ladder: a Position widget on the axis price it was sent at, tagged with the fill premium', async ({ page }) => {
+  const seen = await install(page);
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Buy at market' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.action === 'market').length).toBe(1);
+  const pos = page.getByRole('button', { name: 'Buy at 23195' }).locator('[data-widget="pos"]');
+  await expect(pos).toBeVisible();
+  await expect(pos).toContainText('65');
+  await expect(page.getByText('@110.00').first()).toBeVisible();
   expect(seen.blocked).toEqual([]);
 });
 

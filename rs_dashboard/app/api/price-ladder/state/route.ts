@@ -248,10 +248,15 @@ async function marketOrder(b: Record<string, unknown>): Promise<NextResponse> {
   const prices = await loadPrices([spotKey(c)], [c]);
   const ltp = prices.ltps[c.securityId] ?? 0;
   if (!(ltp > 0)) return bad('No live option price yet');
+  // Where the axis (index / futures) stood when the order went: the Index ladder draws the position on that row. A stale
+  // price is left out rather than drawn at a level the market was not at.
+  const axis = prices.spots[spotKey(c)];
   const child: LadderSlice = {
     id: newId(), kind: 'plain', broker, mode, contract: c, side, lots, qty, product, state: 'placing',
     createdAt: now, updatedAt: now, sentAt: now, orderType: 'LIMIT', market: true,
-    note: 'Market order', ...(b.pane === 2 ? { pane: 2 as const } : {}),
+    // Without a live axis price the Index ladder cannot place the position on a row: say so on the slice.
+    note: axis && spotFresh(axis.at, now) ? 'Market order' : `Market order (no live ${u} price: not drawn on the Index ladder)`,
+    ...(axis && spotFresh(axis.at, now) ? { entryY: axis.spot } : {}), ...(b.pane === 2 ? { pane: 2 as const } : {}),
   };
   if (lotsHeld(st0, child) + lots > MAX_LADDER_LOTS) return bad(`The ladder already holds or has armed ${lotsHeld(st0, child)} lots of this contract — the cap is ${MAX_LADDER_LOTS}`);
   if (mode === 'real') {

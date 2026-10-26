@@ -14,6 +14,7 @@ import { BROKER_LABELS, scalperRoute } from '@/hooks/useBrokerSelector';
 import OrdersTradesModal from '@/components/multiLegFocus/OrdersTradesModal';
 import { FOCUS_RING } from '@/components/Scalper';
 import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
+import { computePivots, pivotChips, PIVOT_FORMULAS } from '@/lib/pivotLevels';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, basketWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { BasketLegsModal } from '@/components/priceLadder/BasketLegsModal';
 import { basketTemplates, draftFromTemplate, draftToParam, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
@@ -89,6 +90,7 @@ interface StateResp {
   keyLevels?: {
     pdh: number | null;
     pdl: number | null;
+    pdc?: number | null;
     dayHigh: number | null;
     dayLow: number | null;
   } | null;
@@ -245,6 +247,9 @@ function DefaultsPanel({ saved, onChange, onReset, onApplyNow }: { saved: Ladder
       <div className={row}><span className={lab}>Target pts</span><NumField compact label="Default target points" value={d.tgtPts} onCommit={tgtPts => onChange({ tgtPts })} min={1} /></div>
       <div className={row}><span className={lab}>SL pts</span><NumField compact label="Default stop-loss points" value={d.slPts} onCommit={slPts => onChange({ slPts })} min={1} /></div>
       <div className={row}><label className={`${lab} flex items-center gap-1.5`}><input type="checkbox" checked={d.trailOn} onChange={e => onChange({ trailOn: e.target.checked })} /> Trail SL by (pts)</label><NumField compact label="Default trailing points" value={d.trailPts} onCommit={trailPts => onChange({ trailPts })} min={1} /></div>
+      <div className={row}><span className={lab} title="Index ladder only: the previous day's Central Pivot Range — TC / P / BC marks, and the rows between BC and TC tinted. Applies at once.">CPR (TC / P / BC)</span><Seg compact value={d.cprOn ? 'on' : 'off'} options={['on', 'off'] as const} labels={{ on: 'On', off: 'Off' }} onChange={v => onChange({ cprOn: v === 'on' })} /></div>
+      <div className={row}><span className={lab} title="Index ladder only: the previous day's R1-R4 resistance and S1-S4 support marks. Applies at once.">Pivots (R1-R4 / S1-S4)</span><Seg compact value={d.pivotsOn ? 'on' : 'off'} options={['on', 'off'] as const} labels={{ on: 'On', off: 'Off' }} onChange={v => onChange({ pivotsOn: v === 'on' })} /></div>
+      <div className={row}><span className={lab} title="Classic: R1 = 2P-L, R2 = P+range, R3 = P+2 range, R4 = P+3 range. Traditional: R3 = H+2(P-L), R4 = R3+(R2-R1). Camarilla: close ± range x 1.1/12, /6, /4, /2. The CPR is the same in all three.">Pivot formula</span><Seg compact value={d.pivotFormula} options={PIVOT_FORMULAS} labels={{ classic: 'Classic', traditional: 'Traditional (default)', camarilla: 'Camarilla' }} onChange={pivotFormula => onChange({ pivotFormula })} /></div>
       <div className={row}><span className={lab} title="Index ladder only: where the open-interest bars are drawn. Applies at once.">OI bars</span><Seg compact value={d.oiPlace} options={['center', 'edges'] as const} labels={{ center: 'Beside price', edges: 'Outer edges' }} onChange={oiPlace => onChange({ oiPlace })} /></div>
       <div className={row}><span className={lab}>Lots</span><NumField compact label="Default lots" value={d.lots} onCommit={v => onChange({ lots: Math.min(MAX_LADDER_LOTS, Math.max(1, Math.round(v))) })} min={1} max={MAX_LADDER_LOTS} width="w-14" /></div>
       <div className="flex items-center gap-2 pt-1">
@@ -913,11 +918,17 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     for (const s of mine) {
       const held = Number(s.filledQty) || 0;
       if ((s.state !== 'open' && s.state !== 'exiting') || held <= 0) continue;
-      const y = mode === 'xy' ? (s.kind === 'xy' ? s.entryY ?? s.entryLevel : undefined) : s.avg;
+      const y = mode === 'xy' ? (s.kind === 'xy' ? s.entryY ?? s.entryLevel : s.market ? s.entryY : undefined) : s.avg;
       if (y && Number.isFinite(y)) marks.push({ y, side: s.side, qty: held, avg: s.avg, pnl: sliceNowPnl(s, optLtp) ?? null });
     }
     return marks;
   }, [mine, mode, myPairs, myBaskets, optLtp, data?.ltps]);
+  // Previous-day CPR and R1-R4 / S1-S4 for the Index ladder, from the previous session's high / low / close the view carries.
+  const pivotPrefs = resolveDefaults(savedDefaults);
+  const pivots = useMemo(() => {
+    const k = data?.keyLevels;
+    return pivotChips(computePivots(k?.pdh ?? 0, k?.pdl ?? 0, k?.pdc ?? 0, pivotPrefs.pivotFormula), { cpr: pivotPrefs.cprOn, pivots: pivotPrefs.pivotsOn });
+  }, [data?.keyLevels?.pdh, data?.keyLevels?.pdl, data?.keyLevels?.pdc, pivotPrefs.pivotFormula, pivotPrefs.cprOn, pivotPrefs.pivotsOn]);  // eslint-disable-line react-hooks/exhaustive-deps
   const net = securityId ? ownNet(slices.filter(s => s.broker === broker && s.mode === pageMode), securityId) : { qty: 0, avg: null };
   const contractPnl = useMemo(() => sumSlicePnl(slices, s => s.broker === broker && s.mode === pageMode && s.contract.securityId === securityId, () => optLtp),
     [slices, broker, pageMode, securityId, optLtp]);
@@ -1233,6 +1244,13 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const paneSlices = useMemo(() => slices.filter(inPane), [slices, inPane]);
   const panePairs = useMemo(() => pairs.filter(inPane), [pairs, inPane]);
   const paneBaskets = useMemo(() => baskets.filter(inPane), [baskets, inPane]);
+  // The ladder draws only the page's own mode (SIM or REAL), and the page always opens in SIM (REAL is never remembered), so after
+  // a reload REAL positions are live at the broker but not on the ladder: count them so the page can say so.
+  const hiddenReal = useMemo(() => (real ? 0
+    : paneSlices.filter(x => isLive(x) && x.broker === broker && x.mode === 'real').length
+      + panePairs.filter(x => isPairLive(x) && x.broker === broker && x.mode === 'real').length
+      + paneBaskets.filter(x => isBasketLive(x) && x.broker === broker && x.mode === 'real').length),
+  [real, paneSlices, panePairs, paneBaskets, broker]);
   const paneEvents = useMemo(() => {
     const evs = data?.state.events ?? [];
     if (!dual) return evs;
@@ -1484,6 +1502,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         {mcx && sessionNote && (
           <Banner tone="amber" key={String(sessionNote)}>
             <AlertTriangle className="w-4 h-4" /> {sessionNote}
+          </Banner>
+        )}
+        {hiddenReal > 0 && (
+          <Banner tone="amber">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span className="min-w-0">{hiddenReal} live REAL order(s) / position(s) on {BROKER_LABELS[broker]} are not drawn here: this page is in SIM (it always opens in SIM). They are still running; the table below lists them.</span>
+            <button type="button" onClick={() => { if (!liveArmed) { setArmModal(true); return; } setReal(true); setRealAck(false); }}
+              className={`px-2 py-0.5 rounded border border-amber-500/50 font-bold hover:bg-amber-500/20 whitespace-nowrap ${FOCUS_RING}`}>Show REAL</button>
           </Banner>
         )}
         {sessionDown && (
@@ -1774,6 +1800,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               <button type="button" onClick={() => { setFollow(true); setManual(false); setCenter(refPrice); }} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white">
                 <Crosshair className="w-3.5 h-3.5" /> Centre
               </button>
+              {mode === 'xy' && <label className="flex items-center gap-1.5 text-zinc-400" title="Previous day's Central Pivot Range: TC / P / BC marks, the rows between BC and TC tinted. Formula and the R/S switch are in Settings."><input type="checkbox" checked={pivotPrefs.cprOn} onChange={e => changeDefaults({ cprOn: e.target.checked })} /> CPR</label>}
+              {mode === 'xy' && <label className="flex items-center gap-1.5 text-zinc-400" title={`Previous day's R1-R4 and S1-S4 (${pivotPrefs.pivotFormula} formula; change it in Settings)`}><input type="checkbox" checked={pivotPrefs.pivotsOn} onChange={e => changeDefaults({ pivotsOn: e.target.checked })} /> R/S</label>}
               {mode === 'xy' && !isFut && <label className="flex items-center gap-1.5 text-zinc-400" title="Open-interest bars on the strike rows: puts left of the Price column, calls right"><input type="checkbox" checked={oiOn} onChange={e => { setOiOn(e.target.checked); savePref(k('price-ladder-oi'), e.target.checked ? '1' : '0'); }} /> OI</label>}
               {mode === 'xy' && oiOn && oiRows.staleSince != null && <span className="text-[10px] text-amber-300" title="Dhan refused a fresh option chain, so the OI bars come from the last good one">OI stale since {timeOf(oiRows.staleSince)}</span>}
               <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow</label>
@@ -1813,6 +1841,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               onScroll={refPrice > 0 ? scrollLadder : undefined}
               onTrail={(w, delta) => { void post(mode === 'basket' ? { action: 'basket', op: 'trail', id: w.ids[0], delta } : mode === 'pair' ? { action: 'pair', op: 'trail', id: w.ids[0], delta } : { action: 'trail', id: w.ids[0], delta }); }}
               onHoldChange={setHeld}
+              pivots={mode === 'xy' ? pivots : undefined}
               keyLevels={mode === 'xy' ? {
                 pdh: data?.keyLevels?.pdh ?? null,
                 pdl: data?.keyLevels?.pdl ?? null,

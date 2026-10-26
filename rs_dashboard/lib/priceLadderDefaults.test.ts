@@ -19,6 +19,13 @@ test('the OI bar placement is center or edges, anything else is dropped', () => 
   assert.equal(resolveDefaults({ oiPlace: 'center' }).oiPlace, 'center');
 });
 
+test('CPR and pivot switches default on; the formula is one of the three, anything else is dropped', () => {
+  const d = resolveDefaults({});
+  assert.deepEqual([d.cprOn, d.pivotsOn, d.pivotFormula], [true, true, 'traditional']);
+  assert.deepEqual(sanitizeDefaults({ cprOn: false, pivotsOn: false, pivotFormula: 'camarilla' }), { cprOn: false, pivotsOn: false, pivotFormula: 'camarilla' });
+  assert.deepEqual(sanitizeDefaults({ cprOn: 'no', pivotsOn: 0, pivotFormula: 'fibonacci' }), {});
+});
+
 test('lots must be a whole number within the cap', () => {
   assert.equal(sanitizeDefaults({ lots: 2.5 }).lots, undefined);
   assert.equal(sanitizeDefaults({ lots: 0 }).lots, undefined);

@@ -1,4 +1,5 @@
 import { MAX_LADDER_LOTS, MCX_LADDER_UNDERLYINGS } from './priceLadder.ts';
+import { PIVOT_FORMULAS, type PivotFormula } from './pivotLevels.ts';
 
 /** The form values a ladder starts with. Every field is optional: an unset one keeps its built-in value. */
 export interface LadderDefaults {
@@ -18,6 +19,10 @@ export interface LadderDefaults {
   opt2?: 'CE' | 'PE';
   /** Where the XY ladder's OI bars sit: on the outer edges (call OI from the far left, put OI from the far right; the default) or beside the Price column. */
   oiPlace?: 'center' | 'edges';
+  /** Index ladder: the previous day's CPR (P / TC / BC) and R1-R4 / S1-S4 marks in the Price column, each on or off, and the R3 / R4 / S3 / S4 formula. */
+  cprOn?: boolean;
+  pivotsOn?: boolean;
+  pivotFormula?: PivotFormula;
 }
 
 export const LADDER_UNDERLYINGS: readonly string[] = ['NIFTY', 'BANKNIFTY', 'SENSEX', ...MCX_LADDER_UNDERLYINGS];
@@ -26,6 +31,7 @@ export const LADDER_DEFAULTS_KEY = 'price-ladder-defaults';
 export const BUILT_IN_DEFAULTS: Required<LadderDefaults> = {
   mode: 'xy', product: 'MIS', underlying: 'NIFTY', zones: 'classic', orderType: 'LIMIT', style: 'Bracket',
   tgtPts: 40, slPts: 30, trailOn: false, trailPts: 30, lots: 1, opt1: 'CE', opt2: 'PE', oiPlace: 'edges',
+  cprOn: true, pivotsOn: true, pivotFormula: 'traditional',
 };
 
 const oneOf = <T extends string>(v: unknown, allowed: readonly T[]): T | undefined => (typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : undefined);
@@ -49,6 +55,9 @@ export function sanitizeDefaults(raw: unknown): LadderDefaults {
     opt1: oneOf(r.opt1, ['CE', 'PE'] as const),
     opt2: oneOf(r.opt2, ['CE', 'PE'] as const),
     oiPlace: oneOf(r.oiPlace, ['center', 'edges'] as const),
+    cprOn: typeof r.cprOn === 'boolean' ? r.cprOn : undefined,
+    pivotsOn: typeof r.pivotsOn === 'boolean' ? r.pivotsOn : undefined,
+    pivotFormula: oneOf(r.pivotFormula, PIVOT_FORMULAS),
   };
   return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined)) as LadderDefaults;
 }

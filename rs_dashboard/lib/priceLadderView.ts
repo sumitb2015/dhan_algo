@@ -131,6 +131,7 @@ export async function buildLadderView(params: URLSearchParams) {
     keyLevels: {
       pdh: prevDay?.high ?? null,
       pdl: prevDay?.low ?? null,
+      pdc: prevDay?.close ?? null,
       dayHigh: dayHigh && dayHigh > 0 ? dayHigh : null,
       dayLow: dayLow && dayLow > 0 ? dayLow : null,
     },

@@ -73,6 +73,9 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
           add({ price: lv.slY, column: opposite(s.side), kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', qty: s.qty, lots: s.lots, ids: [s.id], planned: true, drag: 'sl', ...(s.bracket.trailPts ? { trail: s.bracket.trailPts } : {}) }, 0);
         }
       }
+    }
+    // The Index ladder also shows a Market-button position (no armed level): on the axis price recorded when it was sent.
+    if (mode === 'xy' && (s.kind === 'xy' || s.market)) {
       if ((s.state === 'open' || s.state === 'exiting') && held > 0) {
         const entryPrice = s.entryY ?? s.entryLevel;
         if (entryPrice != null) {
@@ -303,6 +306,15 @@ function OuterControlWidget({ w, onAdjust, onCancel }: {
   );
 }
 
+/** One previous-day pivot mark (CPR: TC / P / BC, R1-R4, S1-S4) drawn as a chip in the Price column. */
+export interface LadderPivotChip { key: string; label: string; price: number; group: 'cpr' | 'r' | 's' }
+const PIVOT_TONE: Record<LadderPivotChip['group'], string> = {
+  cpr: 'bg-violet-500/20 text-violet-300 border-violet-500/40',
+  r: 'bg-orange-500/20 text-orange-300 border-orange-500/40',
+  s: 'bg-sky-500/20 text-sky-300 border-sky-500/40',
+};
+const PIVOT_NAME: Record<string, string> = { tc: 'CPR top (TC)', p: 'Pivot (P)', bc: 'CPR bottom (BC)' };
+
 export interface LadderKeyLevels {
   pdh?: number | null;
   pdl?: number | null;
@@ -321,7 +333,7 @@ export interface LadderKeyLevels {
  */
 export function LadderGrid({
   center, refPrice, tick, rows, widgets, limitZoneBuy, onPlace, onCancel, onMove, onAdjust, disabled, decimals, entryMarks, oi, oiPlace = 'edges', onScroll,
-  zones = 'classic', stopLimitFor, onTrail, onHoldChange, keyLevels,
+  zones = 'classic', stopLimitFor, onTrail, onHoldChange, keyLevels, pivots,
 }: {
   center: number; refPrice: number; tick: number; rows: number; widgets: LadderWidget[];
   limitZoneBuy: 'below' | 'above';
@@ -350,6 +362,8 @@ export function LadderGrid({
   onHoldChange?: (held: boolean) => void;
   /** Key market levels (PDH, PDL, Today High, Today Low), marked in the Price column. */
   keyLevels?: LadderKeyLevels;
+  /** Previous-day CPR / R1-R4 / S1-S4 chips (already filtered by the user's switches); rows between BC and TC are tinted. */
+  pivots?: LadderPivotChip[];
 }) {
   const prices = ladderRows(center, tick, rows);
   // Native, non-passive wheel listener: React's onWheel is passive, so it cannot stop the page scrolling too.
@@ -446,6 +460,10 @@ export function LadderGrid({
         const isPdl = keyLevels?.pdl != null && Math.abs(p - snapToStep(keyLevels.pdl, tick)) < tick / 2;
         const isDayHigh = keyLevels?.dayHigh != null && Math.abs(p - snapToStep(keyLevels.dayHigh, tick)) < tick / 2;
         const isDayLow = keyLevels?.dayLow != null && Math.abs(p - snapToStep(keyLevels.dayLow, tick)) < tick / 2;
+        const rowPivots = pivots?.filter(c => Math.abs(p - snapToStep(c.price, tick)) < tick / 2) ?? [];
+        // The CPR band: every row from BC to TC (the whole band is one row on a coarse tick).
+        const cprLevels = pivots?.filter(c => c.group === 'cpr') ?? [];
+        const inCpr = cprLevels.length > 1 && p >= snapToStep(Math.min(...cprLevels.map(c => c.price)), tick) - 1e-9 && p <= snapToStep(Math.max(...cprLevels.map(c => c.price)), tick) + 1e-9;
 
         const oiRow = oi ? oiAtRow(oi.rows, p, tick) : null;
         const hasBuyTgt = buyWs.some(w => w.kind === 'tgt');
@@ -522,7 +540,7 @@ export function LadderGrid({
             </div>
 
             {/* Column 3: Price */}
-            <div className={`h-7 flex items-center justify-center gap-1 font-mono overflow-hidden ${isPdh ? 'bg-rose-500/25 ring-1 ring-inset ring-rose-500/50' : isPdl ? 'bg-emerald-500/25 ring-1 ring-inset ring-emerald-500/50' : isDayHigh ? 'bg-amber-500/25 ring-1 ring-inset ring-amber-500/50' : isDayLow ? 'bg-cyan-500/25 ring-1 ring-inset ring-cyan-500/50' : ''} ${isRef ? 'font-bold text-amber-300' : isEntry ? 'font-bold text-blue-300' : 'text-zinc-200 dark:text-zinc-100'}`}>
+            <div className={`h-7 flex items-center justify-center gap-1 font-mono overflow-hidden ${isPdh ? 'bg-rose-500/25 ring-1 ring-inset ring-rose-500/50' : isPdl ? 'bg-emerald-500/25 ring-1 ring-inset ring-emerald-500/50' : isDayHigh ? 'bg-amber-500/25 ring-1 ring-inset ring-amber-500/50' : isDayLow ? 'bg-cyan-500/25 ring-1 ring-inset ring-cyan-500/50' : inCpr ? 'bg-violet-500/10' : ''} ${isRef ? 'font-bold text-amber-300' : isEntry ? 'font-bold text-blue-300' : 'text-zinc-200 dark:text-zinc-100'}`}>
               {isEntry && tags.map(t => (
                 <span
                   key={t.side}
@@ -557,6 +575,12 @@ export function LadderGrid({
                   PDL
                 </span>
               )}
+              {rowPivots.map(c => (
+                <span key={c.key} title={`${PIVOT_NAME[c.key] ?? `${c.label} (previous-day pivot)`}: ${c.price.toFixed(decimals)}`}
+                  className={`shrink-0 px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight leading-none shadow-sm border pointer-events-none select-none ${PIVOT_TONE[c.group]}`}>
+                  {c.label}
+                </span>
+              ))}
               {/* XY only: the option's fill premium (in plain mode the row price IS the fill). */}
               {isEntry && tags[0]?.avg != null && Math.abs(tags[0].avg - p) >= tick && <span className="shrink-0 text-[10px] font-semibold text-blue-300">@{tags[0].avg.toFixed(2)}</span>}
               {rowPnlNow !== undefined && (
