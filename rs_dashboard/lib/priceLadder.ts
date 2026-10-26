@@ -14,7 +14,8 @@ import type { LadderBasket } from './priceLadderBasket.ts';
 export type LadderMode = 'xy' | 'plain';
 export type LadderBroker = 'dhan' | 'kotak' | 'zerodha';
 export type LadderSide = 'BUY' | 'SELL';
-export type OptType = 'CE' | 'PE';
+/** CE / PE: an option. FUT: the futures contract itself (MCX CRUDEOILM, Dhan only) — strike 0, its XY axis is its own price. */
+export type OptType = 'CE' | 'PE' | 'FUT';
 export type LadderProduct = 'NRML' | 'MIS';
 export type ClickType = 'LIMIT' | 'SL';
 /**
@@ -133,6 +134,8 @@ export interface LadderContract {
    * CRUDEOILM lot is 10 barrels, so P&L and premium cost multiply by 10 (MCX_LOT_MULTIPLIER).
    */
   mult?: number;
+  /** A future's price tick, from the master list (absent = FUT_TICK; options use the 0.05 option tick). */
+  tick?: number;
   /**
    * The XY axis when it is not the index: an MCX option month moves with ITS OWN futures month (the nearest FUTCOM
    * expiring on or after the option), so its levels are that contract's price. Absent = the index spot.
@@ -285,8 +288,17 @@ export const isLive = (s: LadderSlice) => !TERMINAL.has(s.state);
 
 /** +1 when the position gains as the index rises (CE BUY, PE SELL), -1 when it gains as it falls. */
 export function bias(opt: OptType, side: LadderSide): 1 | -1 {
-  return (opt === 'CE') === (side === 'BUY') ? 1 : -1;
+  // A future gains as the price rises when bought, like a CE; only a PE inverts.
+  return (opt !== 'PE') === (side === 'BUY') ? 1 : -1;
 }
+
+/** The contract as shown in messages and chips: `22600CE`, or `FUT 11-19` for a future (strike 0). */
+export function legTag(c: Pick<LadderContract, 'strike' | 'opt' | 'expiry'>): string {
+  return c.opt === 'FUT' ? `FUT ${c.expiry.slice(5)}` : `${c.strike}${c.opt}`;
+}
+
+/** Price tick of a futures contract (CRUDEOILM: 1.00 — the master lists 100 in paise); options use the 0.05 option tick. */
+export const FUT_TICK = 1;
 
 /**
  * Where on the ladder a click is a LIMIT-like order (the option is cheaper to buy / dearer to sell than now), relative
@@ -295,7 +307,7 @@ export function bias(opt: OptType, side: LadderSide): 1 | -1 {
  */
 export function limitZone(mode: LadderMode, opt: OptType, side: LadderSide): 'below' | 'above' {
   if (mode === 'plain') return side === 'BUY' ? 'below' : 'above';
-  const cheaperBelow = opt === 'CE';
+  const cheaperBelow = opt !== 'PE';
   const wantCheaper = side === 'BUY';
   return cheaperBelow === wantCheaper ? 'below' : 'above';
 }
@@ -758,7 +770,7 @@ export function planTick(
       if (r.fire && !sessionOpen) { if (r.seenSafe !== !!x.seenSafe) next = patchSlice(next, x.id, { seenSafe: r.seenSafe }); continue; }
       if (r.fire) {
         next = pushEvent(patchSlice(next, x.id, { state: 'placing', seenSafe: r.seenSafe, sentAt: now, entryY: spot, market: true }),
-          ev('info', `${x.contract.underlying} ${spot.toFixed(2)} crossed ${x.entryLevel} — ${x.side} ${x.lots} lot(s) ${x.contract.strike}${x.contract.opt}`, x.id));
+          ev('info', `${x.contract.underlying} ${spot.toFixed(2)} crossed ${x.entryLevel} — ${x.side} ${x.lots} lot(s) ${legTag(x.contract)}`, x.id));
         jobs.push({ kind: 'open', id: x.id });
       } else if (r.seenSafe !== !!x.seenSafe) {
         next = patchSlice(next, x.id, { seenSafe: r.seenSafe });
@@ -834,12 +846,12 @@ export function planTick(
       // Outside the session a REAL exit would only be rejected (and retried every 15 s): hold it and say so once.
       if (reason && x.mode === 'real' && !sessionOpen) {
         const note = 'Market closed — exit not sent; check this position at the broker';
-        if (x.note !== note) next = pushEvent(patchSlice(next, x.id, { ...patch, note }), ev('warn', `${x.contract.strike}${x.contract.opt}: ${reason} due but the market is closed — not sent`, x.id));
+        if (x.note !== note) next = pushEvent(patchSlice(next, x.id, { ...patch, note }), ev('warn', `${legTag(x.contract)}: ${reason} due but the market is closed — not sent`, x.id));
         continue;
       }
       if (reason) {
         next = pushEvent(patchSlice(next, x.id, { ...patch, state: 'exiting', exitReason: reason, exitSentAt: now, exitOrderId: undefined, exitWanted: undefined }),
-          ev('info', `${reason}${fresh ? ` (spot ${spot.toFixed(2)})` : ''} — exiting ${x.filledQty} ${x.contract.strike}${x.contract.opt}`, x.id));
+          ev('info', `${reason}${fresh ? ` (spot ${spot.toFixed(2)})` : ''} — exiting ${x.filledQty} ${legTag(x.contract)}`, x.id));
         jobs.push({ kind: 'close', id: x.id });
       } else if (Object.keys(patch).length) {
         next = patchSlice(next, x.id, patch);

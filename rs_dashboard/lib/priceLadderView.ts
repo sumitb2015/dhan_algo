@@ -1,10 +1,11 @@
 import { getDhanStrikeLookup } from '@/lib/dhanStrikeLookup';
+import { getDhanFutures } from '@/lib/dhanFuturesLookup';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { kotakOptionContract } from '@/lib/kotakContracts';
 import { zerodhaOptionContract } from '@/lib/zerodhaContracts';
 import { readLadderState, loadPrices, dhanSegmentFor, watcherTickAt, WATCHER_QUIET_MS, LADDER_UNDERLYINGS } from '@/lib/priceLadderServer';
 import {
-  spotKey, isMcxUnderlying, isLive, istDay, istHhmm, realArmed, sessionFor, spotFresh,
+  spotKey, isMcxUnderlying, FUT_TICK, isLive, istDay, istHhmm, realArmed, sessionFor, spotFresh,
   type LadderBroker, type LadderContract, type OptType,
 } from '@/lib/priceLadder';
 import { isPairLive, pairCombined } from '@/lib/priceLadderPair';
@@ -16,6 +17,7 @@ import { prevDayLevelsNow } from '@/lib/prevDayLevels';
 
 /** A contract resolved from the brokers' own masters (never a security id from the browser), or why it cannot be. */
 export async function resolveContract(broker: LadderBroker, u: string, expiry: string, strike: number, opt: OptType): Promise<LadderContract | string> {
+  if (opt === 'FUT') return resolveFuture(broker, u, expiry);
   const look = await getDhanStrikeLookup(u, expiry);
   const row = look?.strikes?.[String(strike)] ?? look?.strikes?.[strike.toFixed(1)];
   const securityId = opt === 'CE' ? row?.ceId : row?.peId;
@@ -49,6 +51,25 @@ export async function resolveContract(broker: LadderBroker, u: string, expiry: s
   return c;
 }
 
+/**
+ * A futures contract (MCX, Dhan only): its XY axis is its own price. Kotak / Zerodha futures quantity units and
+ * positions are unconfirmed, so they are refused rather than guessed (the options' mcxUnitError discipline).
+ */
+async function resolveFuture(broker: LadderBroker, u: string, expiry: string): Promise<LadderContract | string> {
+  if (!isMcxUnderlying(u)) return `${u} futures are not offered on the ladder`;
+  if (broker !== 'dhan') return `${u} futures trade on Dhan only (${broker} futures units are unconfirmed)`;
+  const mult = MCX_LOT_MULTIPLIER[u];
+  if (!(mult > 1)) return `${u}: no MCX lot multiplier — refused`;
+  const list = await getDhanFutures(u);
+  const f = list?.find(x => x.expiry === expiry);
+  if (!f) return `${u} futures ${expiry} is not in Dhan's master list`;
+  if (f.lotSize !== 1) return `${u}: unexpected futures lot size ${f.lotSize} — refused`;
+  return {
+    underlying: u, expiry, strike: 0, opt: 'FUT', securityId: f.securityId, lotSize: 1, exchangeSegment: 'MCX_COMM', mult, ...(f.tick > 0 ? { tick: f.tick } : {}),
+    ref: { securityId: f.securityId, segment: 'MCX_COMM', expiry },
+  };
+}
+
 /** The ladder state, the page's XY axis and contract prices, for one selection (`underlying` / `expiry` / `strike` / `opt`). */
 export async function buildLadderView(params: URLSearchParams) {
   const want = (params.get('underlying') ?? '').toUpperCase();
@@ -60,8 +81,8 @@ export async function buildLadderView(params: URLSearchParams) {
   const opt = params.get('opt');
   let shown: LadderContract | null = null;
   let contractError: string | null = null;
-  if (LADDER_UNDERLYINGS.includes(want) && /^\d{4}-\d{2}-\d{2}$/.test(expiry) && strike > 0 && (opt === 'CE' || opt === 'PE')) {
-    const c = await resolveContract('dhan', want, expiry, strike, opt);
+  if (LADDER_UNDERLYINGS.includes(want) && /^\d{4}-\d{2}-\d{2}$/.test(expiry) && ((strike > 0 && (opt === 'CE' || opt === 'PE')) || opt === 'FUT')) {
+    const c = await resolveContract('dhan', want, expiry, opt === 'FUT' ? 0 : strike, opt);
     if (typeof c !== 'string') shown = c; else contractError = c;
   }
   // The page's XY axis: the index, or for MCX the shown option month's own futures (known once a contract is picked).
@@ -114,7 +135,7 @@ export async function buildLadderView(params: URLSearchParams) {
       dayLow: dayLow && dayLow > 0 ? dayLow : null,
     },
     // Which contract this reply describes: the page ignores a reply for a selection it has since moved off.
-    request: { underlying: want, expiry, strike: strike > 0 ? strike : null, opt, pairCe: pairCe > 0 ? pairCe : null, pairPe: pairPe > 0 ? pairPe : null, basket: params.get('basket') ?? '' },
+    request: { underlying: want, expiry, strike: opt === 'FUT' ? strike : strike > 0 ? strike : null, opt, pairCe: pairCe > 0 ? pairCe : null, pairPe: pairPe > 0 ? pairPe : null, basket: params.get('basket') ?? '' },
     pair: pairLegs ? {
       ce: { strike: pairLegs.ce.strike, securityId: pairLegs.ce.securityId, ltp: prices.ltps[pairLegs.ce.securityId] ?? null },
       pe: { strike: pairLegs.pe.strike, securityId: pairLegs.pe.securityId, ltp: prices.ltps[pairLegs.pe.securityId] ?? null },
@@ -131,7 +152,7 @@ export async function buildLadderView(params: URLSearchParams) {
     })() : null,
     contract: shown ? {
       securityId: shown.securityId, lotSize: shown.lotSize, ltp: prices.ltps[shown.securityId] ?? null,
-      mult: shown.mult ?? 1, ...(shown.ref ? { refExpiry: shown.ref.expiry, axisDay: axisDayOf(shown, prices.days, now, state.settings?.mcxAutoExitTime) } : {}),
+      mult: shown.mult ?? 1, tick: shown.opt === 'FUT' ? (shown.tick ?? FUT_TICK) : 0.05, ...(shown.ref ? { refExpiry: shown.ref.expiry, axisDay: axisDayOf(shown, prices.days, now, state.settings?.mcxAutoExitTime) } : {}),
     } : null,
   };
 }

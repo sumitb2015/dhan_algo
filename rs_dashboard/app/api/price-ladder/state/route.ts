@@ -11,7 +11,7 @@ import {
   paneOf, sessionFor, spotKey, MAX_LADDER_LOTS, cleanBufferPct, stopLimitPrice, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, capLots, classifyClick, cleanBracket, istDay, istHhmm, levelSane, pushEvent, realArmed,
   snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev, newLadderId, parseTrailRequest, replanBracket, trailedBracket,
   type ClickType, type LadderZones, type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
-  isTradedStrike,
+  isTradedStrike, legTag, FUT_TICK,
 } from '@/lib/priceLadder';
 import { carryRuntime, cleanGuard, guardKey, guardLabel } from '@/lib/priceLadderGuard';
 import { setCutoffsFromBody } from '@/lib/priceLadderCutoff';
@@ -23,6 +23,8 @@ import { isBasketLive } from '@/lib/priceLadderBasket';
 // funds/margin check. Armed index levels are then fired by the server watcher (lib/priceLadderServer.ts).
 
 const OPTION_TICK = 0.05;
+/** The price step orders on this contract snap to. */
+const tickOf = (c: Pick<LadderContract, 'opt' | 'tick'>) => (c.opt === 'FUT' ? (c.tick ?? FUT_TICK) : OPTION_TICK);
 const parseBroker = (v: unknown): LadderBroker | null => (v === 'dhan' || v === 'kotak' || v === 'zerodha' ? v : null);
 const BROKER_NAME: Record<LadderBroker, string> = { dhan: 'Dhan', kotak: 'Kotak', zerodha: 'Zerodha' };
 const bad = (error: string, status = 400) => NextResponse.json({ success: false, error }, { status });
@@ -66,9 +68,11 @@ interface ArmBody {
 async function realOpenBlocked(broker: LadderBroker, c: LadderContract, side: LadderSide, qty: number, product: string, price: number): Promise<string | null> {
   const funds = await availableFunds(broker);
   if (funds == null) return `Could not read ${BROKER_NAME[broker]} funds — order refused (fail closed)`;
-  const need = side === 'BUY' ? qty * (c.mult ?? 1) * price * 1.02 : await dhanSellMargin(c, qty, product, price);
+  // A future is margined both ways (no premium is paid): Dhan's calculator for the side, against the margin balance.
+  const isFut = c.opt === 'FUT';
+  const need = side === 'BUY' && !isFut ? qty * (c.mult ?? 1) * price * 1.02 : await dhanSellMargin(c, qty, product, price, side);
   if (need == null || !(need > 0)) return 'Could not read the margin for this order — refused (fail closed)';
-  const have = side === 'BUY' ? funds.buy : funds.sell;
+  const have = side === 'BUY' && !isFut ? funds.buy : funds.sell;
   if (need > have) return `Needs about ₹${Math.round(need).toLocaleString('en-IN')}, ${BROKER_NAME[broker]} has ₹${Math.round(have).toLocaleString('en-IN')}`;
   return null;
 }
@@ -80,16 +84,17 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   if (b.kind !== 'xy' && b.kind !== 'plain') return bad('kind must be xy or plain');
   if (b.broker !== 'dhan' && b.broker !== 'kotak' && b.broker !== 'zerodha') return bad('broker must be dhan, kotak or zerodha');
   if (b.mode !== 'sim' && b.mode !== 'real') return bad('mode must be sim or real');
-  if (b.opt !== 'CE' && b.opt !== 'PE') return bad('opt must be CE or PE');
+  if (b.opt !== 'CE' && b.opt !== 'PE' && b.opt !== 'FUT') return bad('opt must be CE, PE or FUT');
   if (b.side !== 'BUY' && b.side !== 'SELL') return bad('side must be BUY or SELL');
   if (b.product !== 'NRML' && b.product !== 'MIS') return bad('product must be NRML or MIS');
   if (b.orderType !== 'LIMIT' && b.orderType !== 'SL') return bad('orderType must be LIMIT or SL');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(b.expiry))) return bad('expiry must be YYYY-MM-DD');
   const lots = capLots(b.lots);
   if (lots == null) return bad('Lots must be a whole number from 1 to 20');
-  const strike = Number(b.strike);
-  if (!(strike > 0)) return bad('Invalid strike');
-  if (!isTradedStrike(u, strike)) return bad(`${u} strike ${strike} is not offered — the Price Ladder trades 100-point strikes only`);
+  // A future has no strike: the contract is its expiry alone.
+  const strike = b.opt === 'FUT' ? 0 : Number(b.strike);
+  if (b.opt !== 'FUT' && !(strike > 0)) return bad('Invalid strike');
+  if (b.opt !== 'FUT' && !isTradedStrike(u, strike)) return bad(`${u} strike ${strike} is not offered — the Price Ladder trades 100-point strikes only`);
   const state = readLadderState();
   const sess = sessionFor(u, istDay(now), state.settings?.mcxAutoExitTime, state.settings?.nseAutoExitTime);
   if (sess.open >= sess.close) return bad(sess.note ?? 'The market is closed today');
@@ -115,7 +120,7 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   const prices = await loadPrices([spotKey(c)], [c]);
   const spot = prices.spots[spotKey(c)];
   const ltp = prices.ltps[c.securityId] ?? 0;
-  const level = b.kind === 'xy' ? Number(b.level) : snapToStep(Number(b.level), OPTION_TICK);
+  const level = b.kind === 'xy' ? Number(b.level) : snapToStep(Number(b.level), tickOf(c));
 
   if (b.kind === 'xy') {
     if (!spot || !spotFresh(spot.at, now)) return bad(`No fresh live ${u}${c.ref ? ' futures' : ''} price yet — the WebSocket feed may still be subscribing, or the market is quiet or shut; try again in a moment`);
@@ -140,15 +145,15 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   if (b.kind === 'plain' && verdict.kind === 'stop' && zones === 'anywhere') {
     const buf = cleanBufferPct(b.slBufferPct ?? DEFAULT_SL_BUFFER_PCT);
     if (buf == null) return bad(`SL limit buffer must be ${MIN_SL_BUFFER_PCT}-${MAX_SL_BUFFER_PCT}%`);
-    stopLimit = stopLimitPrice(b.side, level, buf, OPTION_TICK);
+    stopLimit = stopLimitPrice(b.side, level, buf, tickOf(c));
     if (stopLimit == null) return bad('Could not price the SL-limit — pick another level or buffer');
   }
 
   if (b.mode === 'real') {
     // A BUY stop can fill above its trigger: check funds at the worst case — an SL-limit's limit, an SL-M's trigger + 5%
     // (it fills at market). XY entries fire at market from the live premium.
-    const price = b.kind === 'xy' ? (b.side === 'BUY' ? snapToStep(ltp * 1.05, OPTION_TICK) : ltp)
-      : b.side === 'BUY' && verdict.kind === 'stop' ? (stopLimit ?? snapToStep(level * 1.05, OPTION_TICK))
+    const price = b.kind === 'xy' ? (b.side === 'BUY' ? snapToStep(ltp * 1.05, tickOf(c)) : ltp)
+      : b.side === 'BUY' && verdict.kind === 'stop' ? (stopLimit ?? snapToStep(level * 1.05, tickOf(c)))
         : level;
     if (!(price > 0)) return bad('No live option price to check margin against');
     const blocked = await realOpenBlocked(b.broker, c, b.side, qty, b.product, price);
@@ -159,7 +164,7 @@ async function arm(b: ArmBody): Promise<NextResponse> {
     id: newId(), kind: b.kind, broker: b.broker, mode: b.mode, contract: c, side: b.side, lots, qty, product: b.product,
     state: 'armed', createdAt: now, updatedAt: now, ...(b.pane === 2 ? { pane: 2 as const } : {}),
   };
-  const what = `${b.mode === 'sim' ? 'SIM ' : ''}${b.side} ${lots} lot(s) ${u} ${strike}${b.opt}`;
+  const what = `${b.mode === 'sim' ? 'SIM ' : ''}${b.side} ${lots} lot(s) ${u} ${legTag(c)}`;
 
   if (b.kind === 'xy') {
     const slice: LadderSlice = { ...base, entryLevel: level, entryDir: verdict.dir, seenSafe: true, orderType, ...(zones === 'anywhere' ? { zones } : {}), ...(bracket ? { bracket } : {}) };
@@ -218,14 +223,15 @@ async function marketOrder(b: Record<string, unknown>): Promise<NextResponse> {
   const broker = b.broker;
   if (broker !== 'dhan' && broker !== 'kotak' && broker !== 'zerodha') return bad('broker must be dhan, kotak or zerodha');
   if (b.mode !== 'sim' && b.mode !== 'real') return bad('mode must be sim or real');
-  if (b.opt !== 'CE' && b.opt !== 'PE') return bad('opt must be CE or PE');
+  if (b.opt !== 'CE' && b.opt !== 'PE' && b.opt !== 'FUT') return bad('opt must be CE, PE or FUT');
   if (b.side !== 'BUY' && b.side !== 'SELL') return bad('side must be BUY or SELL');
   if (b.product !== 'NRML' && b.product !== 'MIS') return bad('product must be NRML or MIS');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(b.expiry))) return bad('expiry must be YYYY-MM-DD');
   const lots = capLots(b.lots);
   if (lots == null) return bad('Lots must be a whole number from 1 to 20');
-  const strike = Number(b.strike);
-  if (!(strike > 0)) return bad('Invalid strike');
+  // A future has no strike: the contract is its expiry alone.
+  const strike = b.opt === 'FUT' ? 0 : Number(b.strike);
+  if (b.opt !== 'FUT' && !(strike > 0)) return bad('Invalid strike');
   const mode = b.mode, side = b.side, opt = b.opt, product = b.product;
   const st0 = readLadderState();
   const sess = sessionFor(u, istDay(now), st0.settings?.mcxAutoExitTime, st0.settings?.nseAutoExitTime);
@@ -250,10 +256,10 @@ async function marketOrder(b: Record<string, unknown>): Promise<NextResponse> {
   if (lotsHeld(st0, child) + lots > MAX_LADDER_LOTS) return bad(`The ladder already holds or has armed ${lotsHeld(st0, child)} lots of this contract — the cap is ${MAX_LADDER_LOTS}`);
   if (mode === 'real') {
     // Worst case a market BUY fills a little above the last price.
-    const blocked = await realOpenBlocked(broker, c, side, qty, product, side === 'BUY' ? snapToStep(ltp * 1.05, OPTION_TICK) : ltp);
+    const blocked = await realOpenBlocked(broker, c, side, qty, product, side === 'BUY' ? snapToStep(ltp * 1.05, tickOf(c)) : ltp);
     if (blocked) return bad(blocked);
   }
-  const what = `${mode === 'sim' ? 'SIM ' : ''}${side} ${lots} lot(s) ${u} ${strike}${opt} at MARKET`;
+  const what = `${mode === 'sim' ? 'SIM ' : ''}${side} ${lots} lot(s) ${u} ${legTag(c)} at MARKET`;
   let capped = false;
   const withSlice = (st: LadderState): LadderState => {
     // Re-checked inside the lock: two clicks in flight must not both pass the read above.
@@ -310,7 +316,7 @@ async function addLot(id: string): Promise<NextResponse> {
   if (!(ltp > 0)) return bad('No live option price yet');
   const qty = p.contract.lotSize;
   if (p.mode === 'real') {
-    const blocked = await realOpenBlocked(p.broker, p.contract, p.side, qty, p.product, p.side === 'BUY' ? snapToStep(ltp * 1.05, OPTION_TICK) : ltp);
+    const blocked = await realOpenBlocked(p.broker, p.contract, p.side, qty, p.product, p.side === 'BUY' ? snapToStep(ltp * 1.05, tickOf(p.contract)) : ltp);
     if (blocked) return bad(blocked);
   }
   const child: LadderSlice = {
@@ -321,7 +327,7 @@ async function addLot(id: string): Promise<NextResponse> {
     note: `Added to ${p.id}`, ...(p.pane ? { pane: p.pane } : {}),
   };
   let capped = false;
-  const what = `${p.mode === 'sim' ? 'SIM ' : ''}+1 lot ${p.side} ${p.contract.strike}${p.contract.opt}`;
+  const what = `${p.mode === 'sim' ? 'SIM ' : ''}+1 lot ${p.side} ${legTag(p.contract)}`;
   if (p.mode === 'sim') {
     const s = await updateLadderState(st => {
       // Re-checked inside the lock: two + clicks in flight must not both pass the read above.

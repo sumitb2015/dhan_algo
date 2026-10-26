@@ -21,7 +21,7 @@ import { pacedMarginCall } from '@/lib/ultimateScannerDhan';
 import {
   EXIT_RETRY_MS, FILL_GRACE_MS, SETTLE_TIMEOUT_MS, SPOT_STALE_MS,
   bias, bracketLevels, emptyLadderState, exitQtyFor, netAgainstOpposite, isLive, outcomeOnThrow, istDay, pushEvent,
-  rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS, mcxUnitError,
+  rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, legTag, FUT_TICK, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS, mcxUnitError,
   type Job, type LadderOrderHow, type LadderBroker, type LadderContract, type LadderSide, type LadderSlice, type LadderState,
 } from '@/lib/priceLadder';
 import {
@@ -179,6 +179,7 @@ const spotMoved: Map<string, { spot: number; at: number }> =
 
 /** Option LTP from a bridge file when one covers this expiry and is fresh. */
 function optionLtpFromFiles(c: LadderContract, now: number, memo: FileMemo): number | null {
+  if (c.opt === 'FUT') return null;                     // a future is no strike of any options bridge: WebSocket only
   const strikeKey = String(c.strike);
   const leg = c.opt === 'CE' ? 'ce' : 'pe';
   const opt = readJson(`live_options_quotes_dhan_${c.underlying.toLowerCase()}.json`, memo);
@@ -570,14 +571,14 @@ export async function availableFunds(broker: LadderBroker): Promise<{ buy: numbe
   } catch { return null; }
 }
 
-/** Dhan's margin for SELLING `qty` of a contract, or null when unreadable. */
-export async function dhanSellMargin(c: LadderContract, qty: number, product: string, price: number): Promise<number | null> {
+/** Dhan's margin for opening `qty` of a contract (a short option by default; a future either way), or null when unreadable. */
+export async function dhanSellMargin(c: LadderContract, qty: number, product: string, price: number, side: LadderSide = 'SELL'): Promise<number | null> {
   // Dhan takes MCX quantity in LOTS: lotSize is 1 for Dhan / Zerodha slices (no change) and 10 for a Kotak slice (barrels).
   const dhanQty = isMcxUnderlying(c.underlying) ? qty / c.lotSize : qty;
   if (!Number.isInteger(dhanQty) || dhanQty <= 0) return null;
   try {
     const r = await pacedMarginCall(() => dhanPost('/margincalculator', {
-      securityId: c.securityId, exchangeSegment: c.exchangeSegment, transactionType: 'SELL', quantity: dhanQty,
+      securityId: c.securityId, exchangeSegment: c.exchangeSegment, transactionType: side, quantity: dhanQty,
       productType: dhanProduct(product), price,
     })) as Record<string, unknown>;
     const m = Number(r?.totalMargin ?? 0);
@@ -967,7 +968,7 @@ async function runBasketJob(s: LadderState, j: BasketJob, prices: PriceView, ctx
         const i = toSend.findIndex(x => sameLeg(l, x));
         if (i < 0) return l;
         const r = out[i];
-        const tag = `${l.contract.strike}${l.contract.opt}`;
+        const tag = `${legTag(l.contract)}`;
         if (r.status === 'placed') return { ...l, orderId: r.orderId, entry: 'sent' as const };
         if (r.status === 'rejected') { msgs.push(`${tag} rejected: ${r.error}`); return { ...l, entry: 'dead' as const, filledQty: 0, note: r.error }; }
         msgs.push(`${tag} UNKNOWN: ${r.error}`);
@@ -996,7 +997,7 @@ async function runBasketJob(s: LadderState, j: BasketJob, prices: PriceView, ctx
         if (read === undefined) return l;
         // Only for the order that was read: a leg that has since moved on to another order keeps it.
         if ((read.entry ? l.orderId : l.exitOrderId) !== read.id || (read.entry && l.entry !== 'sent')) return l;
-        const tag = `${l.contract.strike}${l.contract.opt}`;
+        const tag = `${legTag(l.contract)}`;
         const after = (read.entry ? settleLegEntry(l, read.v, cur.sentAt ?? now, now) : settleLegExit(l, read.v, now, prices.ltps[l.contract.securityId])) as BasketLeg;
         if (read.entry && after.entry !== l.entry) msg += ` ${tag} ${after.entry}${after.avg ? ` @ ${after.avg.toFixed(2)}` : ''}${after.entry === 'dead' ? ` (${after.note})` : ''};`;
         if (!read.entry && (after.held ?? 0) !== (l.held ?? 0)) msg += ` ${tag} exited ${(l.held ?? 0) - (after.held ?? 0)} @ ${after.exitAvg?.toFixed(2) ?? '?'};`;
@@ -1034,7 +1035,7 @@ async function runBasketJob(s: LadderState, j: BasketJob, prices: PriceView, ctx
     sized.forEach(({ l, qty }, i) => {
       const r = out[i];
       const now2 = Date.now();
-      const tag = `${l.contract.strike}${l.contract.opt}`;
+      const tag = `${legTag(l.contract)}`;
       legs = legs.map(x => {
         if (!sameLeg(x, l)) return x;
         if (r == null) {
@@ -1050,7 +1051,7 @@ async function runBasketJob(s: LadderState, j: BasketJob, prices: PriceView, ctx
       });
     });
     return pushEvent(patchBasket(st, b.id, { legs }), ev(msgs.length ? (msgs.some(m => /UNKNOWN|rejected/.test(m)) ? 'error' : 'warn') : 'info',
-      `${name}: exit ${msgs.length ? msgs.join('; ') : `orders placed (${sized.map(x => `${x.qty} ${x.l.contract.strike}${x.l.contract.opt}`).join(' + ')})`}`, b.id));
+      `${name}: exit ${msgs.length ? msgs.join('; ') : `orders placed (${sized.map(x => `${x.qty} ${legTag(x.l.contract)}`).join(' + ')})`}`, b.id));
   });
 }
 
@@ -1058,7 +1059,7 @@ export function openedPatch(s: LadderState, x: LadderSlice, qty: number, avg: nu
   // The broker nets a fill against an opposite open position on the same contract: that is a close, not a new trade.
   const net = netAgainstOpposite(s.slices, x, qty, avg, now);
   if (net.left < qty) {
-    const label = `${x.side} ${x.contract.strike}${x.contract.opt}`;
+    const label = `${x.side} ${legTag(x.contract)}`;
     const base = pushEvent({ ...s, slices: net.slices }, ev('info', `${label} filled ${qty} @ ${avg ? avg.toFixed(2) : '?'} — closed ${qty - net.left} of the opposite position`, x.id));
     if (net.left <= 0) return patchSlice(base, x.id, { state: 'closed', filledQty: qty, avg: avg || undefined, openedAt: now, closedAt: now, exitQty: 0, exitAvg: avg || undefined, note: 'Closed the opposite position' });
     return openedPatch(base, x, net.left, avg, now);
@@ -1074,7 +1075,7 @@ export function openedPatch(s: LadderState, x: LadderSlice, qty: number, avg: nu
   }
   const label = x.mode === 'sim' ? 'SIM ' : '';
   const short = qty < x.qty ? ` (only ${qty} of ${x.qty})` : '';
-  return pushEvent(patchSlice(s, x.id, patch), ev('info', `${label}${x.side} ${x.contract.strike}${x.contract.opt} filled ${qty}${short} @ ${avg ? avg.toFixed(2) : '?'}`, x.id));
+  return pushEvent(patchSlice(s, x.id, patch), ev('info', `${label}${x.side} ${legTag(x.contract)} filled ${qty}${short} @ ${avg ? avg.toFixed(2) : '?'}`, x.id));
 }
 
 /** A manual exit stays wanted after a failed attempt (an automatic one re-fires from its own rule). */
@@ -1164,7 +1165,7 @@ async function reconcileDown(s: LadderState, prices: PriceView, now: number): Pr
               const cur = (st.baskets ?? []).find(y => y.id === b.id);
               if (!cur || (cur.state !== 'open' && cur.state !== 'broken')) return st;
               const patch = cutBasketLeg(cur, legKey, Math.min(cut, cur.legs.find(l => l.key === legKey)?.held ?? 0), ltp, now);
-              return pushEvent(patchBasket(st, b.id, patch, now), ev('error', `${basketName(cur)}: broker shows ${cut} fewer ${leg.contract.strike}${leg.contract.opt} — ${patch.state === 'closed' ? 'every leg gone, closed' : 'basket BROKEN, bracket stopped; exit what is left from the baskets table'}`, b.id));
+              return pushEvent(patchBasket(st, b.id, patch, now), ev('error', `${basketName(cur)}: broker shows ${cut} fewer ${legTag(leg.contract)} — ${patch.state === 'closed' ? 'every leg gone, closed' : 'basket BROKEN, bracket stopped; exit what is left from the baskets table'}`, b.id));
             },
           });
           continue;
@@ -1178,8 +1179,8 @@ async function reconcileDown(s: LadderState, prices: PriceView, now: number): Pr
             const cur = st.slices.find(y => y.id === x.id);
             if (!cur || cur.state !== 'open') return st;
             const left = (Number(cur.filledQty) || 0) - cut;
-            if (left <= 0) return pushEvent(patchSlice(st, x.id, { state: 'closed', exitQty: 0, exitAvg: ltp || undefined, closedAt: now, note: 'Closed outside the ladder' }), ev('warn', `${x.contract.strike}${x.contract.opt}: broker shows it closed — dropped from the ladder`, x.id));
-            return pushEvent(patchSlice(st, x.id, { filledQty: left }), ev('warn', `${x.contract.strike}${x.contract.opt}: broker shows ${cut} fewer — ladder qty reduced`, x.id));
+            if (left <= 0) return pushEvent(patchSlice(st, x.id, { state: 'closed', exitQty: 0, exitAvg: ltp || undefined, closedAt: now, note: 'Closed outside the ladder' }), ev('warn', `${legTag(x.contract)}: broker shows it closed — dropped from the ladder`, x.id));
+            return pushEvent(patchSlice(st, x.id, { filledQty: left }), ev('warn', `${legTag(x.contract)}: broker shows ${cut} fewer — ladder qty reduced`, x.id));
           },
         });
       }

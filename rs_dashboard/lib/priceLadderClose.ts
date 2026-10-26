@@ -1,5 +1,5 @@
 import { fractionUnits } from './partialQty.ts';
-import type { LadderBroker, LadderState } from './priceLadder.ts';
+import { legTag, type LadderBroker, type LadderState } from './priceLadder.ts';
 
 // Closing a broker position straight from the Price Ladder's positions window. Pure rules; the route does the IO.
 // The browser names a position (broker + key + product) and a share of it. Everything else — side, quantity, segment —
@@ -57,19 +57,19 @@ export function ladderExitInFlight(st: LadderState, broker: LadderBroker, key: s
   const same = (c: { securityId: string; tradingSymbol?: string }) => (broker === 'dhan' ? c.securityId === key : c.tradingSymbol === key);
   for (const x of st.slices) {
     if (x.broker !== broker || x.mode !== 'real' || !same(x.contract)) continue;
-    if (x.state === 'exiting' || x.state === 'placing' || (x.state === 'open' && x.exitWanted)) return `the ladder is already exiting ${x.contract.strike}${x.contract.opt}`;
+    if (x.state === 'exiting' || x.state === 'placing' || (x.state === 'open' && x.exitWanted)) return `the ladder is already exiting ${legTag(x.contract)}`;
   }
   for (const p of st.pairs ?? []) {
     if (p.broker !== broker || p.mode !== 'real') continue;
     for (const k of ['ce', 'pe'] as const) {
       const l = p.legs[k];
-      if (same(l.contract) && (p.state === 'exiting' || p.state === 'placing' || p.state === 'rolling' || l.exitSentAt || l.exitOrderId)) return `the ladder is already exiting the ${l.contract.strike}${l.contract.opt} leg of a pair`;
+      if (same(l.contract) && (p.state === 'exiting' || p.state === 'placing' || p.state === 'rolling' || l.exitSentAt || l.exitOrderId)) return `the ladder is already exiting the ${legTag(l.contract)} leg of a pair`;
     }
   }
   for (const b of st.baskets ?? []) {
     if (b.broker !== broker || b.mode !== 'real') continue;
     for (const l of b.legs) {
-      if (same(l.contract) && (b.state === 'exiting' || b.state === 'placing' || (b.state === 'open' && b.exitWanted) || l.exitSentAt || l.exitOrderId)) return `the ladder is already working the ${l.contract.strike}${l.contract.opt} leg of a basket`;
+      if (same(l.contract) && (b.state === 'exiting' || b.state === 'placing' || (b.state === 'open' && b.exitWanted) || l.exitSentAt || l.exitOrderId)) return `the ladder is already working the ${legTag(l.contract)} leg of a basket`;
     }
   }
   return null;

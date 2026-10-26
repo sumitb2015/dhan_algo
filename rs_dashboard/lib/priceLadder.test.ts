@@ -651,3 +651,37 @@ test('netAgainstOpposite: a REAL buy against an open short closes it instead of 
   const sim = netAgainstOpposite([short], mk('x', 'BUY', 65, { mode: 'sim' }), 65, 70, 99);
   assert.equal(sim.left, 65);
 });
+
+// ── futures (opt 'FUT', MCX / Dhan) ──
+import { legTag } from './priceLadder.ts';
+const fut = { underlying: 'CRUDEOILM', expiry: '2026-11-19', strike: 0, opt: 'FUT' as const, securityId: '573423', lotSize: 1, exchangeSegment: 'MCX_COMM', mult: 10 };
+
+test('futures: a BUY gains as the price rises, a SELL as it falls (no CE/PE inversion)', () => {
+  assert.equal(bias('FUT', 'BUY'), 1);
+  assert.equal(bias('FUT', 'SELL'), -1);
+});
+
+test('futures: limit zones follow the price directly in XY and Plain', () => {
+  for (const mode of ['xy', 'plain'] as const) {
+    assert.equal(limitZone(mode, 'FUT', 'BUY'), 'below');
+    assert.equal(limitZone(mode, 'FUT', 'SELL'), 'above');
+  }
+  assert.equal(classifyClick({ mode: 'xy', opt: 'FUT', side: 'BUY', level: 9100, ref: 9200, orderType: 'LIMIT' }).ok, true);
+  const v = classifyClick({ mode: 'xy', opt: 'FUT', side: 'BUY', level: 9300, ref: 9200, orderType: 'LIMIT' });
+  assert.equal(v.ok, false);
+  const bo = classifyClick({ mode: 'xy', opt: 'FUT', side: 'BUY', level: 9300, ref: 9200, orderType: 'SL' });
+  assert.deepEqual(bo, { ok: true, kind: 'stop', dir: 'above' });
+});
+
+test('futures: a long future\'s bracket target is above the entry and its stop below', () => {
+  const lv = bracketLevels(bias('FUT', 'BUY'), 9200, { tgtPts: 40, slPts: 30 });
+  assert.equal(lv.tgtY, 9240);
+  assert.equal(lv.slY, 9170);
+});
+
+test('futures: legTag and the lot unit (Dhan lots, mult 10; Kotak futures refused by the unit check)', () => {
+  assert.equal(legTag(fut), 'FUT 11-19');
+  assert.equal(legTag(contract), '23200CE');
+  assert.equal(mcxUnitError('dhan', fut, 1), null);
+  assert.match(mcxUnitError('kotak', fut, 1) ?? '', /barrels/);
+});

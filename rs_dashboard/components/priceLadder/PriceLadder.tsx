@@ -41,6 +41,10 @@ const UNDERLYINGS: readonly string[] = ['NIFTY', 'BANKNIFTY', 'SENSEX', ...MCX_L
 const LADDER_BROKERS = ['dhan', 'kotak', 'zerodha'] as const;
 /** The server checks a strangle against the same steps (lib/priceLadderPair.ts). */
 const STRIKE_STEP = PAIR_STRIKE_STEP;
+/** The `strike` state of a futures selection: a sentinel that keeps every "a contract is selected" check truthy. */
+const FUT_STRIKE = -1;
+/** A contract as shown in labels: `22600CE`, or `FUT` for the futures. */
+const tagOf = (strike: number | null, opt: OptType) => (opt === 'FUT' ? 'FUT' : `${strike ?? ''}${opt}`);
 const XY_TICKS = [1, 5, 10, 25];
 const PLAIN_TICKS = [0.05, 0.5, 1];
 /** Pair mode's axis is the combined CE + PE premium. */
@@ -362,6 +366,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [strike, setStrike] = useState<number | null>(null);
   // Ladder 1 starts on the ATM call, ladder 2 on the ATM put (the strike defaults to ATM once the chain loads).
   const [opt, setOpt] = useState<OptType>(second ? 'PE' : 'CE');
+  // Futures (MCX, Dhan only) are the same selection with opt 'FUT': no strike, so `strike` holds FUT_STRIKE (truthy, never sent as a strike).
+  const isFut = opt === 'FUT';
+  // Futures trade on Dhan only (the server refuses them elsewhere): leave Future when the account moves off Dhan.
+  useEffect(() => { if (opt === 'FUT' && brokerLoaded && broker !== 'dhan') { setOpt('CE'); setStrike(null); setExpiry(''); setExpiries([]); } }, [opt, broker, brokerLoaded]);  // eslint-disable-line react-hooks/set-state-in-effect
   const [product, setProduct] = useState<'NRML' | 'MIS'>('MIS');
   const [orderType, setOrderType] = useState<ClickType>('LIMIT');
   // Classic: fixed limit zones (the other side needs Order Type SL). Anywhere: both columns at every level, the side of
@@ -379,7 +387,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [trailOn, setTrailOn] = useState(false);
   const [trailPts, setTrailPts] = useState(30);
   const [lots, setLots] = useState(1);
-  const [tick, setTick] = useState(5);
+  const [tickRaw, setTick] = useState(5);
+  // A future's Plain ladder steps in whole rupees: a saved option-premium tick (0.05) would make 31 rows span ₹1.5.
+  const tick = isFut && tickRaw < 1 ? 1 : tickRaw;
   const [center, setCenter] = useState(0);
   const [follow, setFollow] = useState(true);
   // The user scrolled the ladder away: hold the window where they put it until Centre / Follow.
@@ -438,7 +448,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const pairPe = built?.pe ?? null;
   const pairOk = pairCe != null && pairPe != null && strikes.includes(pairCe) && strikes.includes(pairPe);
   // The expiry is cleared too: the old underlying's date must not be asked of the new one's chain for a render.
-  const setUnderlying = (u: string) => { setUnderlyingRaw(u); savePref(k('price-ladder-underlying'), u); setExpiry(''); setExpiries([]); setStrike(null); setCenter(0); setFollow(true); setManual(false); };
+  const setUnderlying = (u: string) => { if (opt === 'FUT' && !isMcxUnderlying(u)) setOpt('CE'); setUnderlyingRaw(u); savePref(k('price-ladder-underlying'), u); setExpiry(''); setExpiries([]); setStrike(opt === 'FUT' && isMcxUnderlying(u) ? FUT_STRIKE : null); setCenter(0); setFollow(true); setManual(false); };
+
+  // Option <-> Future: a different expiry list and no strike, so the old selection is dropped until the new list arrives.
+  // The Pair / Basket ladders are options-only (two legs / a strategy), so a future falls back to Index.
+  const chooseOpt = (o: OptType) => {
+    if ((o === 'FUT') !== isFut) { setExpiry(''); setExpiries([]); setStrikes([]); setCenter(0); setFollow(true); setManual(false); setStrike(o === 'FUT' ? FUT_STRIKE : null); if (o === 'FUT' && (mode === 'pair' || mode === 'basket')) setMode('xy'); }
+    setOpt(o);
+  };
 
   // The other pane may have saved defaults since this one loaded: re-read when the dialog opens.
   // eslint-disable-next-line react-hooks/set-state-in-effect -- storage is only readable after mount
@@ -468,7 +485,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     // One-shot per underlying. A failure (Dhan rate limit, a slow spawn) is retried a few times, spaced wider than the
     // option-chain limit (~1 call / 3 s), instead of leaving the page on an error until a reload.
     const load = (attempt: number) => {
-      fetch(`/api/options/expiries?underlying=${underlying}&broker=dhan`)
+      fetch(isFut ? `/api/price-ladder/futures?underlying=${underlying}` : `/api/options/expiries?underlying=${underlying}&broker=dhan`)
         .then(r => r.json())
         .then((j: { success: boolean; data?: string[] }) => {
           if (cancelled) return;
@@ -483,10 +500,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     };
     load(0);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [underlying]);
+  }, [underlying, isFut]);
 
   useEffect(() => {
-    if (!expiry) return;
+    if (!expiry || isFut) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const load = (attempt: number) => {
@@ -531,16 +548,16 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     };
     load(0);
     return () => { cancelled = true; if (timer) clearTimeout(timer); };
-  }, [underlying, expiry]);
+  }, [underlying, expiry, isFut]);
 
   // OI changes slowly: re-read the chain every 30 s while the tab is visible, only for an XY ladder showing the bars (and at
   // once when the bars come back after being off for longer). The chain route dedupes and paces the call (Dhan's ~1 per
   // 3 s). One read at a time, newest wins, and a failed read keeps the last bars rather than blanking them.
-  useEffect(() => { oiShownRef.current = oiOn && mode === 'xy'; }, [oiOn, mode]);
+  useEffect(() => { oiShownRef.current = oiOn && mode === 'xy' && !isFut; }, [oiOn, mode, isFut]);
   const oiAtRef = useRef(0);
   useEffect(() => { oiAtRef.current = oiRows.at; }, [oiRows.at]);
   useEffect(() => {
-    if (!oiOn || mode !== 'xy' || !expiry) return;
+    if (!oiOn || mode !== 'xy' || !expiry || isFut) return;
     let cancelled = false, inFlight = false;
     const key = `${underlying}|${expiry}`;
     const readOnce = () => {
@@ -559,7 +576,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     if (Date.now() - oiAtRef.current > OI_POLL_MS) readOnce();
     const t = setInterval(readOnce, OI_POLL_MS);
     return () => { cancelled = true; clearInterval(t); };
-  }, [oiOn, mode, underlying, expiry]);
+  }, [oiOn, mode, underlying, expiry, isFut]);
 
   // Ladder state + spot + the shown contract's LTP. Pushed by /api/price-ladder/stream (Server-Sent Events) the moment
   // it changes; the 1 s poll below only runs while the stream is not delivering. A view's ledger is applied only if it
@@ -976,11 +993,11 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Buy / Sell Market buttons: the selected contract at market now (single option; the server applies every arm check).
   const sendMarket = useCallback((side: LadderSide) => {
     if (!expiry || !strike) return;
-    const what = `${side} ${lots} lot(s) ${underlying} ${strike}${opt} at MARKET now`;
+    const what = `${side} ${lots} lot(s) ${underlying} ${tagOf(strike, opt)} at MARKET now`;
     // Like every REAL ladder click, the first one this page load asks first.
     const run = () => void post({
       action: 'market', broker, mode: real ? 'real' : 'sim', underlying, expiry, strike, opt, side, lots, product, ...(second ? { pane: 2 } : {}),
-    }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${lots} lot(s) ${underlying} ${strike}${opt} sent at MARKET`); });
+    }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${lots} lot(s) ${underlying} ${tagOf(strike, opt)} sent at MARKET`); });
     if (real && !realAck) setConfirm({ text: what, run }); else run();
   }, [post, broker, real, realAck, underlying, expiry, strike, opt, lots, product, second]);
 
@@ -1063,10 +1080,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       // The server computes the SL-limit's limit from the same buffer; this preview uses the same function.
       const lim = mode === 'plain' && v.kind === 'stop' && zones === 'anywhere' ? stopLimitPrice(side, price, slBufferPct) : null;
       const what = mode === 'xy'
-        ? `${side} ${lots} lot(s) ${underlying} ${strike}${opt} at MARKET when ${axisName} ${v.dir === 'below' ? 'falls to' : 'rises to'} ${price}`
+        ? `${side} ${lots} lot(s) ${underlying} ${tagOf(strike, opt)} at MARKET when ${axisName} ${v.dir === 'below' ? 'falls to' : 'rises to'} ${price}`
         : lim
-          ? `SL-limit ${side} ${lots} lot(s) ${underlying} ${strike}${opt}: trigger ${price.toFixed(2)}, limit ${lim.toFixed(2)}`
-          : `${v.kind === 'limit' ? 'LIMIT' : 'SL'} ${side} ${lots} lot(s) ${underlying} ${strike}${opt} at ${price}`;
+          ? `SL-limit ${side} ${lots} lot(s) ${underlying} ${tagOf(strike, opt)}: trigger ${price.toFixed(2)}, limit ${lim.toFixed(2)}`
+          : `${v.kind === 'limit' ? 'LIMIT' : 'SL'} ${side} ${lots} lot(s) ${underlying} ${tagOf(strike, opt)} at ${price}`;
       setConfirm({ text: what, run: () => send(side, price, { kind: v.kind, dir: v.dir }) });
       return;
     }
@@ -1160,7 +1177,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     }
     const addOne = () => void post({ action: 'add', id: w.ids[0] }).then(ok => { if (ok) toast.success('Adding 1 lot at market'); });
     if (real && !realAck) {
-      setConfirm({ text: `Add 1 lot to the ${underlying} ${strike}${opt} position at MARKET (it joins the same target / SL)`, run: addOne });
+      setConfirm({ text: `Add 1 lot to the ${underlying} ${tagOf(strike, opt)} position at MARKET (it joins the same target / SL)`, run: addOne });
       return;
     }
     addOne();
@@ -1191,8 +1208,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     : mode === 'pair' && !pairView ? 'waiting for both legs of the pair'
     : mode === 'basket' && !basketView?.a ? 'waiting for a live price on every basket leg'
     : null;
-  const decimals = mode === 'xy' ? (tick < 1 ? 2 : 0) : 2;
-  const ticks = mode === 'xy' ? XY_TICKS : mode === 'pair' || mode === 'basket' ? PAIR_TICKS : PLAIN_TICKS;
+  const decimals = mode === 'xy' || isFut ? (tick < 1 ? 2 : 0) : 2;
+  // A future's price moves in whole rupees (tick 1), so its Plain ladder uses the Index ladder's steps, not the option premium's.
+  const ticks = mode === 'xy' || isFut ? XY_TICKS : mode === 'pair' || mode === 'basket' ? PAIR_TICKS : PLAIN_TICKS;
   const HELP_TEXT = mode === 'basket'
                 ? `Basket: the ladder is the strategy's NET premium (${basketView?.credit ? 'a credit: Sell = collect it' : basketView?.credit === false ? 'a debit: Buy = pay it' : 'credit or debit'}). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. The legs are as the strategy defines them when your direction matches (Sell a credit / Buy a debit), every leg mirrored otherwise. When the net crosses the level the legs fill together (REAL: the BUY legs first, the SELL legs once they filled; a failed leg closes what filled); target / SL / trail are net-premium points and exit every leg (REAL: shorts covered first).`
                 : mode === 'pair'
@@ -1207,7 +1225,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     ? `${underlying} ${expiry}${basketHasFar && farExpiry ? ` / ${farExpiry}` : ''} ${basketTpl?.name ?? 'Basket'}${basketEdited ? ' (edited)' : ''}`
     : mode === 'pair'
     ? (pairOk ? `${underlying} ${expiry} ${structure === 'straddle' ? `${pairCe} straddle` : `${pairCe}CE / ${pairPe}PE strangle`}` : `${underlying} — pair strikes not in the chain`)
-    : strike ? `${underlying} ${expiry} ${strike} ${opt}` : `${underlying} —`;
+    : strike ? `${underlying} ${expiry} ${isFut ? 'FUT' : `${strike} ${opt}`}` : `${underlying} —`;
   // With two ladders open each lists only the orders it placed (ladder 1 also every order from before panes); one
   // ladder lists everything, so closing ladder 2 never hides its positions.
   const inPane = useCallback((x: { pane?: number }) => !dual || paneOf(x) === ladderId, [dual, ladderId]);
@@ -1242,7 +1260,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     if (s.contract.underlying && s.contract.underlying !== underlying) setCenter(0);
     if (s.contract.underlying) setUnderlyingRaw(s.contract.underlying);
     if (s.contract.expiry) setExpiry(s.contract.expiry);
-    if (s.contract.strike) setStrike(s.contract.strike);
+    if (s.contract.opt === 'FUT') setStrike(FUT_STRIKE); else if (s.contract.strike) setStrike(s.contract.strike);
     if (s.contract.opt) setOpt(s.contract.opt);
     if (s.broker) setBroker(s.broker);
     if (s.mode) { setReal(s.mode === 'real'); setRealAck(false); }
@@ -1272,7 +1290,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     setExpiry(c.expiry);
     setModeRaw('basket'); setTick(tickFor('basket'));
     if (basketTemplates().some(t => t.key === b.strategy)) setBasketKey(b.strategy);
-    setBasketLegs(b.legs.map(l => ({ side: l.side, opt: l.contract.opt, strike: l.contract.strike, ratio: l.ratio })));
+    setBasketLegs(b.legs.map(l => ({ side: l.side, opt: l.contract.opt as 'CE' | 'PE', strike: l.contract.strike, ratio: l.ratio })));
     setBasketEdited(true);
     setBroker(b.broker);
     setReal(b.mode === 'real'); setRealAck(false);
@@ -1317,9 +1335,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       {!second && <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
         DATA: {dataDate ?? '—'}
       </span>}
-      <button type="button" onClick={() => setChainOpen(true)} disabled={!expiry}
+      <button type="button" onClick={() => setChainOpen(true)} disabled={!expiry || isFut}
         className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer disabled:opacity-50"
-        title={`The ${underlying} option chain for ${expiry || 'the selected expiry'}`}>
+        title={isFut ? 'Futures have no option chain' : `The ${underlying} option chain for ${expiry || 'the selected expiry'}`}>
         <Table2 className="w-3.5 h-3.5 text-emerald-400" /> Option chain
       </button>
       {!second && <button
@@ -1607,7 +1625,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
 
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 flex flex-col gap-1.5 text-xs">
               <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Ladder</span>
-                <Seg compact value={mode} options={['xy', 'plain', 'pair', 'basket'] as const} labels={{ xy: 'Index', plain: 'Plain', pair: 'Pair', basket: 'Basket' }} onChange={setMode} />
+                <Seg compact value={mode} options={(isFut ? ['xy', 'plain'] : ['xy', 'plain', 'pair', 'basket']) as readonly PageMode[]} labels={{ xy: 'Index', plain: 'Plain', pair: 'Pair', basket: 'Basket' }} onChange={setMode} />
               </div>
               <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Product</span>
                 <Seg compact value={product} options={['NRML', 'MIS'] as const} onChange={setProduct} />
@@ -1618,11 +1636,11 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 </select>
               </div>
               <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Expiry</span>
-                <select aria-label="Expiry" value={expiry} onChange={e => { setExpiry(e.target.value); setStrike(null); }} className={SELECT_CLS}>
+                <select aria-label="Expiry" value={expiry} onChange={e => { setExpiry(e.target.value); setStrike(isFut ? FUT_STRIKE : null); }} className={SELECT_CLS}>
                   {expiries.map(x => <option key={x} value={x}>{x}</option>)}
                 </select>
               </div>
-              {mode !== 'basket' && <div className="flex items-center justify-between gap-2 min-w-0"><span className="text-zinc-400 font-medium">Strike</span>
+              {mode !== 'basket' && !isFut && <div className="flex items-center justify-between gap-2 min-w-0"><span className="text-zinc-400 font-medium">Strike</span>
                 {/* min-w-0 + a width cap: the longer "22600 · ATM+10" labels shrink the select; they must not push anything over the ladder. */}
                 <select aria-label="Strike" value={strike ?? ''} onChange={e => setStrike(Number(e.target.value))} className={`${SELECT_CLS} font-mono`}>
                   {strikes.map(k => { const off = atmOffsetLabel(strikes, atmStrike, k); return <option key={k} value={k}>{off ? `${k}  ·  ${off}` : k}</option>; })}
@@ -1653,7 +1671,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               )}
               {mode !== 'pair' && mode !== 'basket' && (
                 <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Option</span>
-                  <Seg compact value={opt} options={['CE', 'PE'] as const} labels={{ CE: 'Call', PE: 'Put' }} onChange={setOpt} />
+                  <Seg compact value={opt} options={(mcx && broker === 'dhan' ? ['CE', 'PE', 'FUT'] : ['CE', 'PE']) as readonly OptType[]} labels={{ CE: 'Call', PE: 'Put', FUT: 'Future' }} onChange={chooseOpt} />
                 </div>
               )}
               {mode === 'pair' && (
@@ -1755,7 +1773,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               <button type="button" onClick={() => { setFollow(true); setManual(false); setCenter(refPrice); }} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white">
                 <Crosshair className="w-3.5 h-3.5" /> Centre
               </button>
-              {mode === 'xy' && <label className="flex items-center gap-1.5 text-zinc-400" title="Open-interest bars on the strike rows: puts left of the Price column, calls right"><input type="checkbox" checked={oiOn} onChange={e => { setOiOn(e.target.checked); savePref(k('price-ladder-oi'), e.target.checked ? '1' : '0'); }} /> OI</label>}
+              {mode === 'xy' && !isFut && <label className="flex items-center gap-1.5 text-zinc-400" title="Open-interest bars on the strike rows: puts left of the Price column, calls right"><input type="checkbox" checked={oiOn} onChange={e => { setOiOn(e.target.checked); savePref(k('price-ladder-oi'), e.target.checked ? '1' : '0'); }} /> OI</label>}
               {mode === 'xy' && oiOn && oiRows.staleSince != null && <span className="text-[10px] text-amber-300" title="Dhan refused a fresh option chain, so the OI bars come from the last good one">OI stale since {timeOf(oiRows.staleSince)}</span>}
               <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow</label>
               <div className="flex items-center gap-2 shrink-0">
@@ -1789,7 +1807,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               zones={zones} stopLimitFor={mode === 'plain' ? (side, p) => stopLimitPrice(side, p, slBufferPct) : undefined}
               onPlace={onPlace} onCancel={id => void post(mode === 'basket' ? { action: 'basket', op: 'cancel', id } : mode === 'pair' ? { action: 'pair', op: 'cancel', id } : { action: 'cancel', id })} onMove={onMove} onAdjust={onAdjust}
               disabled={placeDisabled} decimals={decimals} entryMarks={entryMarks}
-              oi={mode === 'xy' && oiOn && oiRows.key === `${underlying}|${expiry}` && oiRows.rows.length ? { rows: oiRows.rows, max: maxOi(oiRows.rows) } : undefined}
+              oi={mode === 'xy' && !isFut && oiOn && oiRows.key === `${underlying}|${expiry}` && oiRows.rows.length ? { rows: oiRows.rows, max: maxOi(oiRows.rows) } : undefined}
               oiPlace={resolveDefaults(savedDefaults).oiPlace}
               onScroll={refPrice > 0 ? scrollLadder : undefined}
               onTrail={(w, delta) => { void post(mode === 'basket' ? { action: 'basket', op: 'trail', id: w.ids[0], delta } : mode === 'pair' ? { action: 'pair', op: 'trail', id: w.ids[0], delta } : { action: 'trail', id: w.ids[0], delta }); }}
@@ -1920,7 +1938,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         </div>
       )}
       {chainOpen && expiry && (
-        <LadderOptionChain underlying={underlying} expiry={expiry} selectedStrike={strike} selectedOpt={opt}
+        <LadderOptionChain underlying={underlying} expiry={expiry} selectedStrike={strike} selectedOpt={opt === 'FUT' ? 'CE' : opt}
           onPick={(k, o) => { setStrike(k); setOpt(o); }} onClose={() => setChainOpen(false)} />
       )}
       {settingsModalOpen && (
@@ -2111,7 +2129,7 @@ function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; 
         title={onSelect ? 'Click to view this contract on the ladder' : undefined}
         className={`px-2 py-1 whitespace-nowrap text-zinc-200 ${onSelect ? 'cursor-pointer hover:text-white hover:underline' : ''}`}
       >
-        {s.contract.underlying} {s.contract.expiry.slice(5)} {s.contract.strike}{s.contract.opt} <span className="text-zinc-500">{s.product}</span>
+        {s.contract.underlying} {s.contract.expiry.slice(5)} {s.contract.opt === 'FUT' ? 'FUT' : `${s.contract.strike}${s.contract.opt}`} <span className="text-zinc-500">{s.product}</span>
       </td>
       <td className={`px-2 py-1 font-bold ${s.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>{s.side}</td>
       <td className="px-2 py-1 font-mono text-zinc-200 whitespace-nowrap">

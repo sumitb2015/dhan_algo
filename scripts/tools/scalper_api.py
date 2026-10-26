@@ -52,6 +52,10 @@ def main():
     p_lkp.add_argument('--underlying', default='NIFTY')
     p_lkp.add_argument('--expiry', required=True)
 
+    # futures subcommand — the listed futures contracts of an MCX underlying (the Price Ladder's futures mode)
+    p_fut = sub.add_parser('futures')
+    p_fut.add_argument('--underlying', default='CRUDEOILM')
+
     # lotsize subcommand — helper-resolved lot sizes for one or more underlyings
     p_lot = sub.add_parser('lotsize')
     p_lot.add_argument('--symbols', required=True, help='Comma-separated underlyings, e.g. NIFTY,BANKNIFTY')
@@ -148,6 +152,26 @@ def main():
             if not freeze.empty:
                 data['freezeQty'] = int(freeze.min())
         print(json.dumps({'success': True, 'data': data}))
+
+    elif args.cmd == 'futures':
+        under = args.underlying.upper()
+        if under not in ('CRUDEOIL', 'CRUDEOILM'):
+            print(json.dumps({'success': False, 'error': f'{under} futures are not supported here'}))
+            sys.exit(0)
+        df = helper._load_master_list()
+        rows = df[(df['EXCH_ID'] == 'MCX') & (df['INSTRUMENT'] == 'FUTCOM') & (df['UNDERLYING_SYMBOL'] == under)].copy()
+        today = pd.Timestamp.now(tz='Asia/Kolkata').strftime('%Y-%m-%d')
+        rows['exp'] = rows['SM_EXPIRY_DATE'].astype(str).str[:10]
+        rows = rows[rows['exp'] > today].sort_values('exp')   # not a contract on its last day
+        if rows.empty:
+            print(json.dumps({'success': False, 'error': f'No live {under} futures in the master list'}))
+            sys.exit(0)
+        contracts = []
+        for _, row in rows.iterrows():
+            # TICK_SIZE is in paise (100 = Rs 1.00). MCX LOT_SIZE is 1 because Dhan orders MCX in lots.
+            tick = float(row['TICK_SIZE']) / 100.0 if float(row['TICK_SIZE']) > 0 else 1.0
+            contracts.append({'securityId': str(int(float(row['SECURITY_ID']))), 'expiry': row['exp'], 'tick': tick, 'lotSize': int(float(row['LOT_SIZE']))})
+        print(json.dumps({'success': True, 'data': {'contracts': contracts}}))
 
     elif args.cmd == 'lotsize':
         # Single authority for lot sizes across the dashboard. Exchange lot sizes
