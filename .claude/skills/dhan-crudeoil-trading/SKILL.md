@@ -76,6 +76,10 @@ of the trading side above:
   not ~4 — 100 barrels/lot). `unrealizedProfit`/`realizedProfit` are *also* reported
   unmultiplied by Dhan for MCX (same file, `contractMultiplier()` / `scaleBrokerPnl()`)
   — recompute, don't trust the raw broker P&L field, for any MCX row.
+- **Realized is NOT per-lot (2026-10-26):** a closed CRUDEOILM 9700 PE (3 lots, 579.45 -> 586.6667) came back `realizedProfit: 216.5` = 3 x 10 x 7.2167,
+  already multiplied, while `unrealizedProfit` was per lot (47.45 for 5 lots x 9.49 pts). `scaleBrokerPnl` once multiplied both and the
+  Price Ladder header read ~1.9k above Dhan's app. It now recomputes realized from the fills (`min(buyQty, sellQty) x (sellAvg - buyAvg) x mult`)
+  and scales only unrealized (`lib/positionPnl.test.ts`).
 - `MCX_LOT_MULTIPLIER = { CRUDEOIL: 100, CRUDEOILM: 10 }` (`positionPnl.ts:10-13`) is the
   one canonical source for this multiplier on the dashboard side; `lib/analyticsUnderlyings.ts`,
   `lib/multiLegFocus.ts:62`, and `lib/fifoPositions.test.ts` all key off the same two

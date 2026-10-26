@@ -25,11 +25,13 @@ export function contractMultiplier(pos: Record<string, unknown>): number {
   return MCX_LOT_MULTIPLIER[underlying] ?? 1;
 }
 
-/** Dhan reports MCX position P&L the same way it reports MCX quantity: in lots, with the
- *  barrels-per-lot multiplier left off. A single short CRUDEOIL option at 175.55 marked at
- *  173.50 comes back as `unrealizedProfit: 2.05`, not 205 (and `realizedProfit` behaves the
- *  same — see the flat-position recompute in Scalper/AdvancedScalper, which already multiplies).
- *  Rescale both fields before anything downstream reads them.
+/** Dhan reports MCX UNREALIZED P&L in lots, with the barrels-per-lot multiplier left off: a short
+ *  CRUDEOIL option at 175.55 marked at 173.50 comes back as `unrealizedProfit: 2.05`, not 205.
+ *  REALIZED P&L is not the same: on 2026-10-26 a closed CRUDEOILM 9700 PE (3 lots, bought 579.45, sold
+ *  586.6667) came back as 216.5 = 3 x 10 x 7.2167, i.e. ALREADY multiplied, so scaling it again showed
+ *  the account P&L about 1.9k too high. Realized is therefore recomputed from the fills (closed lots x
+ *  (sellAvg - buyAvg) x multiplier — the formula that also reproduces Dhan's own NSE rows) and only falls
+ *  back to Dhan's figure, unscaled, when a field is missing.
  *
  *  A no-op for every non-MCX position (mult === 1), so callers can apply it unconditionally. */
 export function scaleBrokerPnl<T extends Record<string, unknown>>(
@@ -37,11 +39,14 @@ export function scaleBrokerPnl<T extends Record<string, unknown>>(
   mult: number = contractMultiplier(pos),
 ): T {
   if (mult === 1) return pos;
-  const realized = Number(pos.realizedProfit);
   const unrealized = Number(pos.unrealizedProfit);
+  const buyQty = Number(pos.buyQty), sellQty = Number(pos.sellQty), buyAvg = Number(pos.buyAvg), sellAvg = Number(pos.sellAvg);
+  const fromFills = [buyQty, sellQty, buyAvg, sellAvg].every(Number.isFinite)
+    ? Math.min(buyQty, sellQty) * (sellAvg - buyAvg) * mult
+    : null;
   return {
     ...pos,
-    realizedProfit: Number.isFinite(realized) ? realized * mult : pos.realizedProfit,
+    realizedProfit: fromFills != null ? Math.round(fromFills * 100) / 100 : pos.realizedProfit,
     unrealizedProfit: Number.isFinite(unrealized) ? unrealized * mult : pos.unrealizedProfit,
   };
 }
