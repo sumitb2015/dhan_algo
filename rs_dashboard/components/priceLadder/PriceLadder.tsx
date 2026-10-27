@@ -17,7 +17,7 @@ import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { computePivots, pivotChips, PIVOT_FORMULAS } from '@/lib/pivotLevels';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, basketWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { BasketLegsModal } from '@/components/priceLadder/BasketLegsModal';
-import { basketTemplates, draftFromTemplate, draftSyn, draftToParam, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
+import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_NOTE, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
 import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, sumPairPnl, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
@@ -886,7 +886,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     setBasketLegs(draftFromTemplate(basketTpl.legs, atm, STRIKE_STEP[underlying] ?? 50, strikes));
   }, [basketTpl, strikes, underlying, syn]);
   const atmReady = atmStrike != null;
-  useEffect(() => { if (mode === 'basket' && !basketEdited) buildBasket(); }, [mode, basketEdited, buildBasket, atmReady, expiry]);
+  // A synthetic sits on the ATM strike: when ATM moves its legs are rebuilt on the new one, unless a live synthetic of this
+  // broker / mode / underlying / expiry exists (the page then keeps showing the strike that position is on).
+  const synLive = syn && (data?.state.baskets ?? []).some(b => b.kind === 'syn' && isBasketLive(b) && b.broker === broker && b.mode === (real ? 'real' : 'sim')
+    && b.legs[0].contract.underlying === underlying && b.legs[0].contract.expiry === expiry);
+  const synAtm = syn && !synLive ? atmStrike : null;
+  useEffect(() => { if (mode === 'basket' && !basketEdited) buildBasket(); }, [mode, basketEdited, buildBasket, atmReady, expiry, synAtm]);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setBasketEdited(false);
@@ -1577,6 +1582,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <AlertTriangle className="w-4 h-4" /> No live price for {pairView.ce.ltp ? 'the PE leg' : pairView.pe.ltp ? 'the CE leg' : 'either leg'} yet — pair levels are paused until both legs price (the feed may still be subscribing).
           </Banner>
         )}
+        {syn && (() => {
+          const live = (data?.state.baskets ?? []).some(b => b.kind === 'syn' && isBasketLive(b) && b.note === SYN_PAUSED_NOTE);
+          const a = basketView?.a ?? 0;
+          const bad = a > 0 && !(spot > 0 && spotView?.fresh !== false && synSane(a, spot, daysToExpiry(expiry, istDay(data?.now))));
+          return live || bad ? <Banner tone="amber"><AlertTriangle className="w-4 h-4" /> {SYN_PAUSED_NOTE}</Banner> : null;
+        })()}
         {mode === 'basket' && (basketErr || (basketView && !basketView.a)) && (
           <Banner tone="amber" key={String(basketErr)}>
             <AlertTriangle className="w-4 h-4" /> {basketErr ?? 'No live price for every leg yet (or the strategy nets to nothing) — basket levels are paused until all legs price.'}
@@ -1729,7 +1740,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               </div>}
               {mode === 'basket' && syn && (
                 <div className="flex items-center justify-between gap-2 min-w-0"><span className="text-zinc-400 font-medium" title="The synthetic sits on the at-the-money strike, picked when the legs are built">Strike</span>
-                  <span className="font-mono text-zinc-100" aria-label="Synthetic strike">{synK ? `${synK} ATM` : '—'}
+                  <span className="font-mono text-zinc-100" aria-label="Synthetic strike">{synK ? (atmStrike != null && synK !== atmStrike ? `${synK} (${synK > atmStrike ? '+' : ''}${synK - atmStrike} from ATM ${atmStrike})` : `${synK} ATM`) : '—'}
                     {basketView && <span className="ml-2 text-zinc-400">CE {basketView.legs.find(l => l.opt === 'CE')?.ltp ?? '—'} · PE {basketView.legs.find(l => l.opt === 'PE')?.ltp ?? '—'}</span>}</span>
                 </div>
               )}

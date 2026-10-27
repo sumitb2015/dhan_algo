@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   basketTemplates, draftFromTemplate, validateDraft, basketAxis, orientLegs, basketCombined, basketName, basketNowPnl, sumBasketPnl,
-  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, MAX_REAL_SYN_LOTS, MAX_REAL_BASKET_LOTS, type LadderBasket, type BasketLeg, type DraftLeg,
+  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, synLotsLive, daysToExpiry, SYN_PAUSED_NOTE, MAX_REAL_SYN_LOTS, MAX_REAL_BASKET_LOTS, type LadderBasket, type BasketLeg, type DraftLeg,
 } from './priceLadderBasket.ts';
 import { rollDay, type LadderState } from './priceLadder.ts';
 import { lotsOnContract, openPositionCount } from './priceLadderPair.ts';
@@ -336,6 +336,7 @@ test('mixedExpiry tells a calendar from a single-expiry basket', () => {
   assert.equal(mixedExpiry({ legs: [leg('2026-10-27'), leg('2026-10-27')] }), false);
 });
 
+const SPOT_IO = { polledAt: () => 0, busy: () => false, spotOf: () => 22510 as number | undefined };
 // ── Synthetic future ─────────────────────────────────────────────────────────────────────────────────────────────────
 const SYN_K = 22500;
 const SYN_PX: Record<string, number> = { '22500CE': 160, '22500PE': 140 };      // synthetic = 22500 + 160 - 140 = 22520
@@ -368,15 +369,24 @@ test('basketCombined: a synthetic is K + CE - PE in BOTH directions', () => {
   assert.equal(basketCombined(synBasket('BUY'), { '22500CE': 150, '22500PE': 150 }), 22500);
 });
 
-test('synSane bounds the synthetic against the spot; an unknown spot does not block', () => {
+test('synSane bounds the synthetic against the spot; no spot to check against is NOT sane (fail closed)', () => {
   assert.equal(synSane(22520, 22510), true);
   assert.equal(synSane(22900, 22510), false);             // one stale leg shifted it by ~380 pts (1.7%)
-  assert.equal(synSane(22520, undefined), true);
+  assert.equal(synSane(22520, undefined), false);
+  assert.equal(synSane(22520, 0), false);
+});
+
+test('synSane allows the cost of carry on a far expiry (a 3-month synthetic sits ~3% above spot)', () => {
+  assert.equal(synSane(23200, 22500, 0), false);          // 3.1% over: refused near expiry
+  assert.equal(synSane(23200, 22500, 90), true);          // the same gap is plausible three months out
+  assert.equal(synSane(24500, 22500, 90), false);         // but a real mis-print still is not
+  assert.equal(daysToExpiry('2026-11-27', '2026-10-27'), 31);
+  assert.equal(daysToExpiry('2026-10-20', '2026-10-27'), 0);
 });
 
 test('SIM synthetic: a long fires on the crossing synthetic price and its bracket is in synthetic points', () => {
   const b = synBasket('BUY', { bracket: { tgtPts: 30, slPts: 20 } as LadderBasket['bracket'] });
-  const { next } = planBaskets(st([b]), SYN_PX, NOW);
+  const { next } = planBaskets(st([b]), SYN_PX, NOW, SPOT_IO);
   const o = next.baskets![0];
   assert.equal(o.state, 'open');
   assert.equal(o.entryY, 22520);
@@ -387,7 +397,7 @@ test('SIM synthetic: a long fires on the crossing synthetic price and its bracke
 
 test('SIM synthetic short: gains as the synthetic falls', () => {
   const b = synBasket('SELL', { entryDir: 'below', entryLevel: 22530, bracket: { tgtPts: 30, slPts: 20 } as LadderBasket['bracket'] });
-  const { next } = planBaskets(st([b]), SYN_PX, NOW);
+  const { next } = planBaskets(st([b]), SYN_PX, NOW, SPOT_IO);
   const o = next.baskets![0];
   assert.equal(o.state, 'open');
   assert.equal(o.tgtY, 22490);
@@ -418,4 +428,42 @@ test('REAL synthetic entry: the bought leg goes first (CE for a long, PE for a s
 
 test('the REAL synthetic cap is tighter than the REAL basket cap', () => {
   assert.ok(MAX_REAL_SYN_LOTS < MAX_REAL_BASKET_LOTS);
+});
+
+test('an entry on a synthetic with NO fresh spot pauses (the guard cannot be checked), and fires once a spot is known', () => {
+  const b = synBasket('BUY');
+  assert.equal(planBaskets(st([b]), SYN_PX, NOW).next.baskets![0].state, 'armed');
+  assert.equal(planBaskets(st([b]), SYN_PX, NOW, { ...SPOT_IO, spotOf: () => undefined }).next.baskets![0].state, 'armed');
+  assert.equal(planBaskets(st([b]), SYN_PX, NOW, SPOT_IO).next.baskets![0].state, 'open');
+});
+
+test('an OPEN REAL synthetic whose price goes bad says so once, keeps the note, and its bracket is not acted on', () => {
+  const legs = synBasket('BUY').legs.map(l => ({ ...l, avg: SYN_PX[l.contract.securityId], held: LOT, filledQty: LOT, entry: 'filled' as const }));
+  const open = synBasket('BUY', { state: 'open', mode: 'real', entryY: 22520, legs, bracket: { tgtPts: 30, slPts: 20 } as LadderBasket['bracket'], slY: 22500, tgtY: 22550 });
+  const bad = { ...SPOT_IO, spotOf: () => 22000 as number | undefined };       // the synthetic (22520) is 2.4% off this spot
+  const r1 = planBaskets(st([open]), { '22500CE': 100, '22500PE': 140 }, NOW, bad);          // SL would be hit on a good price
+  const o1 = r1.next.baskets![0];
+  assert.equal(o1.state, 'open');
+  assert.equal(o1.note, SYN_PAUSED_NOTE);
+  assert.equal(r1.next.events.filter(e => e.msg.includes('Synthetic price paused')).length, 1);
+  assert.equal(r1.jobs.length, 0);
+  // the next tick does not repeat the event
+  const r2 = planBaskets(r1.next, SYN_PX, NOW + 1000, bad);
+  assert.equal(r2.next.events.filter(e => e.msg.includes('Synthetic price paused')).length, 1);
+  // and the note clears once the price is trustworthy again
+  assert.equal(planBaskets(r2.next, SYN_PX, NOW + 2000, SPOT_IO).next.baskets![0].note, undefined);
+});
+
+test('synLotsLive counts every live synthetic of the broker, mode and underlying (armed ones too), not closed ones or other baskets', () => {
+  const real = (o: Partial<LadderBasket>) => synBasket('BUY', { mode: 'real', ...o });
+  const s = st([real({ id: 'a', lots: 1 }), real({ id: 'b', lots: 1, state: 'open' }), real({ id: 'c', lots: 2, state: 'closed' }), real({ id: 'd', mode: 'sim', lots: 2 }),
+    real({ id: 'e', broker: 'kotak', lots: 2 }), basket({ mode: 'real' })]);
+  assert.equal(synLotsLive(s, 'dhan', 'real', 'NIFTY'), 2);
+  assert.equal(synLotsLive(s, 'dhan', 'sim', 'NIFTY'), 2);
+  assert.equal(synLotsLive(s, 'dhan', 'real', 'BANKNIFTY'), 0);
+});
+
+test('synStrikeFor picks the ATM on the strike grid', () => {
+  assert.equal(synStrikeFor(22524, 50), 22500);
+  assert.equal(synStrikeFor(22526, 50), 22550);
 });

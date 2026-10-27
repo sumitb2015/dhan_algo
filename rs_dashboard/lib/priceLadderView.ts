@@ -145,18 +145,13 @@ export async function buildLadderView(params: URLSearchParams) {
     } : null,
     basketError,
     basket: basketLegs ? (() => {
-      const ax = basketAxis(draft, l => prices.ltps[basketLegs![draft.indexOf(l)].securityId]);
-      // A synthetic future (`syn` = its strike): the axis is the synthetic price K + CE - PE, not the net premium.
+      const legsOut = draft.map((l, i) => ({ strike: l.strike, opt: l.opt, side: l.side, ratio: l.ratio, ...(l.far ? { far: true } : {}), expiry: basketLegs![i].expiry, securityId: basketLegs![i].securityId, ltp: prices.ltps[basketLegs![i].securityId] ?? null }));
+      const base = { legs: legsOut, lotSize: basketLegs![0].lotSize, mult: basketLegs![0].mult ?? 1 };
+      // A synthetic future (`syn` = its strike): the axis is the synthetic price K + CE - PE, not the net premium (which flips sign).
       const synK = Number(params.get('syn'));
-      const synth = synK > 0 ? synAxis(synK, prices.ltps[basketLegs![draft.findIndex(l => l.opt === 'CE')]?.securityId], prices.ltps[basketLegs![draft.findIndex(l => l.opt === 'PE')]?.securityId]) : null;
-      if (synK > 0) return {
-        legs: draft.map((l, i) => ({ strike: l.strike, opt: l.opt, side: l.side, ratio: l.ratio, expiry: basketLegs![i].expiry, securityId: basketLegs![i].securityId, ltp: prices.ltps[basketLegs![i].securityId] ?? null })),
-        a: synth, credit: null, lotSize: basketLegs![0].lotSize, mult: basketLegs![0].mult ?? 1, syn: true,
-      };
-      return {
-        legs: draft.map((l, i) => ({ strike: l.strike, opt: l.opt, side: l.side, ratio: l.ratio, ...(l.far ? { far: true } : {}), expiry: basketLegs![i].expiry, securityId: basketLegs![i].securityId, ltp: prices.ltps[basketLegs![i].securityId] ?? null })),
-        a: ax?.a ?? null, credit: ax?.credit ?? null, lotSize: basketLegs![0].lotSize, mult: basketLegs![0].mult ?? 1,
-      };
+      if (synK > 0) return { ...base, a: synAxis(synK, legsOut.find(l => l.opt === 'CE')?.ltp ?? undefined, legsOut.find(l => l.opt === 'PE')?.ltp ?? undefined), credit: null, syn: true };
+      const ax = basketAxis(draft, l => prices.ltps[basketLegs![draft.indexOf(l)].securityId]);
+      return { ...base, a: ax?.a ?? null, credit: ax?.credit ?? null };
     })() : null,
     contract: shown ? {
       securityId: shown.securityId, lotSize: shown.lotSize, ltp: prices.ltps[shown.securityId] ?? null,

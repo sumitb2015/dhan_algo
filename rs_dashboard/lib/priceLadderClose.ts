@@ -1,6 +1,5 @@
 import { fractionUnits } from './partialQty.ts';
 import { legTag, type LadderBroker, type LadderState } from './priceLadder.ts';
-import { basketHasPosition } from './priceLadderBasket.ts';
 
 // Closing a broker position straight from the Price Ladder's positions window. Pure rules; the route does the IO.
 // The browser names a position (broker + key + product) and a share of it. Everything else — side, quantity, segment —
@@ -84,7 +83,9 @@ export function ladderExitInFlight(st: LadderState, broker: LadderBroker, key: s
 export function synLegOwner(st: LadderState, broker: LadderBroker, key: string): string | null {
   const same = (c: { securityId: string; tradingSymbol?: string }) => (broker === 'dhan' ? c.securityId === key : c.tradingSymbol === key);
   for (const b of st.baskets ?? []) {
-    if (b.kind !== 'syn' || b.broker !== broker || b.mode !== 'real' || !basketHasPosition(b)) continue;
+    // Only while the ladder's own Exit can cover both legs. An UNKNOWN or BROKEN synthetic cannot be exited from the ladder, so the
+    // window must stay usable there: it is the only way to flatten the leg that is left.
+    if (b.kind !== 'syn' || b.broker !== broker || b.mode !== 'real' || !(b.state === 'placing' || b.state === 'open' || b.state === 'exiting')) continue;
     const l = b.legs.find(x => same(x.contract));
     if (l) return `${legTag(l.contract)} is one leg of a synthetic future — closing it alone would leave the other leg naked. Use Exit on the ladder (it covers the short leg first)`;
   }

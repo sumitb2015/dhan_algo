@@ -62,6 +62,11 @@ test('synLegOwner: a leg of a live REAL synthetic is refused; SIM, closed and ot
   assert.equal(synLegOwner(st([b({})]), 'dhan', '999'), null);
   assert.equal(synLegOwner(st([b({ mode: 'sim' })]), 'dhan', '222'), null);
   assert.equal(synLegOwner(st([b({ state: 'closed' })]), 'dhan', '222'), null);
+  // UNKNOWN / BROKEN cannot be exited from the ladder, so the positions window stays usable to flatten what is left.
+  assert.equal(synLegOwner(st([b({ state: 'unknown' })]), 'dhan', '222'), null);
+  assert.equal(synLegOwner(st([b({ state: 'broken' })]), 'dhan', '222'), null);
+  assert.match(synLegOwner(st([b({ state: 'exiting' })]), 'dhan', '222') ?? '', /synthetic/);
+  assert.match(synLegOwner(st([b({ state: 'placing' })]), 'dhan', '222') ?? '', /synthetic/);
   assert.equal(synLegOwner(st([b({ kind: undefined })]), 'dhan', '222'), null);      // an ordinary basket is the ladder's exit-in-flight rule's business
   assert.equal(synLegOwner(st([b({})]), 'kotak', '222'), null);
 });

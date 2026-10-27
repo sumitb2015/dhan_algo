@@ -183,9 +183,10 @@ export function orientLegs<T extends { side: LadderSide }>(legs: readonly T[], c
 /**
  * The basket's live net premium A in its own cash direction, or null when a leg has no price / it nets to nothing.
  * A synthetic future's axis is its synthetic price `K + CE - PE` instead (the legs trade as BUY CE + SELL PE for a long, the
- * mirror for a short, so CE - PE is the same sum in both directions); that is an index level, never near zero.
+ * mirror for a short, so CE - PE is the same sum in both directions); that is an index level, never near zero. It takes the whole
+ * basket (not a `{legs, side}` slice) because `side` means a cash direction for a premium basket and long / short for a synthetic.
  */
-export function basketCombined(b: Pick<LadderBasket, 'legs' | 'side' | 'kind' | 'synStrike'>, ltps: Record<string, number>): number | null {
+export function basketCombined(b: LadderBasket, ltps: Record<string, number>): number | null {
   let v = 0;
   for (const l of b.legs) {
     const px = ltps[l.contract.securityId];
@@ -214,10 +215,27 @@ export function synStrikeFor(spot: number, step: number): number | null {
   return spot > 0 && step > 0 ? Math.round(spot / step) * step : null;
 }
 
-/** How far the synthetic price may sit from the index before it is treated as a bad print (one stale leg shifts it by a whole move). */
+/** How far the synthetic price may sit from the index before it is treated as a bad print (one stale leg shifts it by a whole option move). */
 export const SYN_MAX_BASIS = 0.015;
-/** True when the synthetic price is within SYN_MAX_BASIS of the spot. An unknown spot passes (the leg prices are already fresh-gated). */
-export const synSane = (synth: number, spot: number | undefined): boolean => !(spot != null && spot > 0) || Math.abs(synth - spot) / spot <= SYN_MAX_BASIS;
+/** Cost of carry the bound allows per year: a synthetic on a far expiry sits above spot by about rate x time (generous 12%). */
+const SYN_CARRY_PER_YEAR = 0.12;
+
+/** Whole days from `today` to `expiry` (both YYYY-MM-DD), never negative. */
+export function daysToExpiry(expiry: string, today: string): number {
+  const d = (Date.parse(`${expiry}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / 86_400_000;
+  return Number.isFinite(d) && d > 0 ? Math.round(d) : 0;
+}
+
+/**
+ * True when the synthetic price is within SYN_MAX_BASIS (plus the cost of carry to `dte` days) of the spot. An unknown or
+ * non-positive spot is NOT sane: with no index price to check against, a bad option print cannot be told from a real one,
+ * so the caller pauses (the same fail-closed rule as the order route).
+ */
+export const synSane = (synth: number, spot: number | undefined, dte = 0): boolean =>
+  spot != null && spot > 0 && Math.abs(synth - spot) / spot <= SYN_MAX_BASIS + SYN_CARRY_PER_YEAR * (dte / 365);
+
+/** Why a live synthetic's levels are paused (shown on the basket and in the page), or null while it is trustworthy. */
+export const SYN_PAUSED_NOTE = 'Synthetic price paused — a leg price or the index spot looks stale; target / SL / trail are OFF until it clears (manual exit and square-off still work)';
 
 /** "Iron Condor 22400/22500/22700/22800": the strategy and its distinct strikes. */
 export function basketName(b: Pick<LadderBasket, 'name' | 'legs'>): string {
@@ -312,10 +330,10 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
     const at = sess.autoExitLabel;
     const name = basketName(b);
     let c = basketCombined(b, ltps);
-    // A synthetic with one leg's print stale or wrong sits far from the index: pause its levels (entry and bracket) rather than
-    // fire on it. An exit due (manual / square-off) needs only the leg prices, so it still runs.
-    if (c != null && b.kind === 'syn' && !synSane(c, io.spotOf?.(b))) c = null;
-
+    // A synthetic with one leg's print stale or wrong sits far from the index (or has no fresh index to be checked against): pause
+    // its levels (entry and bracket) rather than fire on it. An exit due (manual / square-off) needs only the leg prices, so it still runs.
+    const synPaused = b.kind === 'syn' && c != null && !synSane(c, io.spotOf?.(b), daysToExpiry(b.legs[0].contract.expiry, today));
+    if (synPaused) c = null;
     if (b.state === 'unknown') continue;                 // the user resolves it; nothing automatic
 
     if (b.state === 'armed') {
@@ -459,6 +477,9 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
       const legs = b.legs.map(l => ({ ...l, held: 0, exitedQty: (l.exitedQty ?? 0) + basketLegHeld(l), exitAvg: blendExitAvg(l, basketLegHeld(l), ltps[l.contract.securityId]) } as BasketLeg));
       next = say(patch(b.id, { ...step.patch, state: 'closed', exitReason: step.reason, exitWanted: undefined, closedAt: now, note: undefined, legs }),
         'info', `SIM exit ${name} (${step.reason})${c != null ? ` at net ${c.toFixed(2)}` : ''}`, b.id);
+    } else if (synPaused) {
+      // Said once, and kept on the basket while it lasts: the user must see that the bracket is off on a naked short leg.
+      if (b.note !== SYN_PAUSED_NOTE) next = say(patch(b.id, { ...step.patch, note: SYN_PAUSED_NOTE }), 'error', `${name}: ${SYN_PAUSED_NOTE}`, b.id);
     } else if (Object.keys(step.patch).length || (b.note && b.state === 'open')) {
       next = patch(b.id, { ...step.patch, ...(b.note && b.state === 'open' ? { note: undefined } : {}) });
     }
@@ -540,8 +561,14 @@ const NO_IO: BasketTickIo = { polledAt: () => 0, busy: () => false };
 
 /** The tighter cap on a REAL basket's lots for this first REAL release (the per-contract 20-lot cap still applies). */
 export const MAX_REAL_BASKET_LOTS = 5;
-/** A REAL synthetic future is capped lower still until it has run live (2026-10-27). */
+/** A REAL synthetic future is capped lower still until it has run live (2026-10-27): per request AND in total (see synLotsLive). */
 export const MAX_REAL_SYN_LOTS = 2;
+
+/** Lots of live synthetic futures (armed ones too) on this broker, mode and underlying: the REAL cap counts every one of them. */
+export function synLotsLive(st: Pick<LadderState, 'baskets'>, broker: LadderBroker, mode: 'sim' | 'real', underlying: string): number {
+  return (st.baskets ?? []).filter(b => b.kind === 'syn' && b.broker === broker && b.mode === mode && isBasketLive(b) && b.legs[0].contract.underlying === underlying)
+    .reduce((a, b) => a + b.lots, 0);
+}
 
 /** The legs the phase sends: hedges (BUY) first; shorts (SELL) once the hedges are filled. */
 export const phaseLegs = (b: Pick<LadderBasket, 'legs'>, phase: 'hedges' | 'shorts'): BasketLeg[] => b.legs.filter(l => (phase === 'hedges' ? l.side === 'BUY' : l.side === 'SELL'));

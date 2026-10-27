@@ -3,12 +3,12 @@ import { resolveContract } from '@/lib/priceLadderView';
 import { readLadderState, updateLadderState, loadPrices, availableFunds, dhanSellMargin, LADDER_UNDERLYINGS } from '@/lib/priceLadderServer';
 import { fetchNettedMargin } from '@/lib/ultimateScannerDhan';
 import {
-  capLots, classifyClick, cleanBracket, ev, isMcxUnderlying, newLadderId, parseTrailRequest, pushEvent, replanBracket, snapToStep, spotFresh, trailedBracket, MAX_LADDER_LOTS,
+  capLots, classifyClick, cleanBracket, ev, isMcxUnderlying, newLadderId, parseTrailRequest, pushEvent, replanBracket, snapToStep, spotFresh, istDay, trailedBracket, MAX_LADDER_LOTS,
   type ClickType, type LadderBroker, type LadderContract, type LadderProduct, type LadderSide, type LadderState, type LadderZones,
 } from '@/lib/priceLadder';
 import { blendExitAvg, lotsOnContract, pairBias, pairLevelSane, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS } from '@/lib/priceLadderPair';
 import {
-  applyBasketShare, basketAxis, basketCombined, basketLegQty, basketName, draftSyn, firstPhase, isBasketLive, orientLegs, patchBasket, synAxis, synSane, validateDraft,
+  applyBasketShare, basketAxis, basketCombined, basketLegQty, basketName, daysToExpiry, draftSyn, firstPhase, isBasketLive, orientLegs, patchBasket, synAxis, synLotsLive, synSane, synStrikeFor, validateDraft,
   MAX_REAL_BASKET_LOTS, MAX_REAL_SYN_LOTS,
   type BasketLeg, type DraftLeg, type LadderBasket,
 } from '@/lib/priceLadderBasket';
@@ -79,8 +79,15 @@ interface Prepared {
   syn?: { kind: 'syn'; synStrike: number };
 }
 
-/** A synthetic future's strike may sit at most this far from the index (it is the ATM strike when the order is placed). */
-const SYN_MAX_STRIKE_DISTANCE = 0.02;
+/** A synthetic future's strike may sit at most this many strike steps from the ATM strike of the live spot. */
+const SYN_MAX_STEPS_FROM_ATM = 1;
+
+/** The REAL synthetic cap counts every live synthetic (armed included) plus this request; null when it fits. */
+function synTotalCap(st: LadderState, p: { broker: LadderBroker; mode: 'sim' | 'real'; u: string; lots: number }): string | null {
+  if (p.mode !== 'real') return null;
+  const held = synLotsLive(st, p.broker, p.mode, p.u);
+  return held + p.lots > MAX_REAL_SYN_LOTS ? `REAL synthetic futures are limited to ${MAX_REAL_SYN_LOTS} lots in total for now — ${held} already held or armed on ${p.u}` : null;
+}
 
 /** The checks arm and market share; returns the prepared basket legs and live net premium, or the refusal. */
 async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<Prepared | NextResponse> {
@@ -101,7 +108,7 @@ async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<P
   if (mode === 'real' && lots > MAX_REAL_BASKET_LOTS) return bad(`REAL baskets are limited to ${MAX_REAL_BASKET_LOTS} lots for now`);
   const isSyn = b.kind === 'syn';
   if (isSyn && isMcxUnderlying(u)) return bad(`${u}: a synthetic future is offered on the indices only`);
-  if (isSyn && mode === 'real' && lots > MAX_REAL_SYN_LOTS) return bad(`REAL synthetic futures are limited to ${MAX_REAL_SYN_LOTS} lots for now`);
+  if (isSyn) { const e = synTotalCap(readLadderState(), { broker, mode, u, lots }); if (e) return bad(e); }
   const synStrike = Number(b.synStrike);
   if (isSyn && !(synStrike > 0)) return bad('A synthetic future needs its strike');
   // The synthetic's legs are built here from the strike and the direction, never taken from the browser.
@@ -132,8 +139,10 @@ async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<P
     const sp = prices.spots[u];
     if (a == null) return bad('No live price for both legs yet — try again in a moment');
     if (!sp || !(sp.spot > 0) || !spotFresh(sp.at, now)) return bad(`${u} spot price is stale — try again in a moment`);
-    if (Math.abs(synStrike - sp.spot) / sp.spot > SYN_MAX_STRIKE_DISTANCE) return bad(`Strike ${synStrike} is too far from ${u} ${sp.spot} — the synthetic must be at the money`);
-    if (!synSane(a, sp.spot)) return bad(`The synthetic price ${a} is too far from ${u} ${sp.spot} — a leg's price looks stale; refused`);
+    // The ATM strike is derived here from the live spot; the browser's strike must be that one or its neighbour.
+    const atm = synStrikeFor(sp.spot, step);
+    if (atm == null || Math.abs(synStrike - atm) > SYN_MAX_STEPS_FROM_ATM * step) return bad(`Strike ${synStrike} is not at the money (${u} ${sp.spot}, ATM ${atm ?? '?'}) — the synthetic must be at the money; refresh the legs`);
+    if (!synSane(a, sp.spot, daysToExpiry(expiry, istDay(now)))) return bad(`The synthetic price ${a} is too far from ${u} ${sp.spot} — a leg's price looks stale; refused`);
     axis = { a, credit: false };
   } else {
     axis = basketAxis(draft, priceOf);
@@ -175,7 +184,7 @@ async function arm(b: Record<string, unknown>): Promise<NextResponse> {
   };
   let err: string | null = null;
   const s = await updateLadderState(st => {
-    err = overCap(st, p.broker, p.mode, basket.legs, basket.lots);       // re-checked inside the lock: two clicks in flight must not both pass
+    err = overCap(st, p.broker, p.mode, basket.legs, basket.lots) ?? (basket.kind === 'syn' ? synTotalCap(st, p) : null);       // re-checked inside the lock: two clicks in flight must not both pass
     if (err) return st;
     return pushEvent({ ...st, baskets: [...(st.baskets ?? []), basket] },
       ev('info', `Armed ${p.mode === 'real' ? 'REAL' : 'SIM'} ${p.side} ${p.lots} lot(s) ${basketName(basket)} when the net ${verdict.dir === 'below' ? '≤' : '≥'} ${level}`, basket.id));
@@ -198,7 +207,7 @@ async function market(b: Record<string, unknown>): Promise<NextResponse> {
       createdAt: p.now, updatedAt: p.now, openedAt: p.now, entryY: p.a, note: 'Market order', ...(p.pane ? { pane: p.pane } : {}) };
   let err: string | null = null;
   const s = await updateLadderState(st => {
-    err = overCap(st, p.broker, p.mode, basket.legs, basket.lots);
+    err = overCap(st, p.broker, p.mode, basket.legs, basket.lots) ?? (basket.kind === 'syn' ? synTotalCap(st, p) : null);
     if (err) return st;
     return pushEvent({ ...st, baskets: [...(st.baskets ?? []), basket] },
       ev('info', isReal
@@ -222,15 +231,20 @@ async function guarded(id: string, okFn: (b: LadderBasket) => boolean, mutate: (
 }
 
 async function liveNet(b: LadderBasket): Promise<number | null> {
-  const prices = await loadPrices([], b.legs.map(l => l.contract));
-  return basketCombined(b, prices.ltps);
+  const u = b.legs[0].contract.underlying;
+  const prices = await loadPrices(b.kind === 'syn' ? [u] : [], b.legs.map(l => l.contract));
+  const c = basketCombined(b, prices.ltps);
+  if (c == null || b.kind !== 'syn') return c;
+  // A synthetic is checked against a fresh index spot, as `prepare` and the watcher do: a level is never judged on a bad print.
+  const sp = prices.spots[u];
+  return sp && spotFresh(sp.at, Date.now()) && synSane(c, sp.spot, daysToExpiry(b.legs[0].contract.expiry, istDay())) ? c : null;
 }
 
 async function modify(body: Record<string, unknown>, id: string): Promise<NextResponse> {
   const b = (readLadderState().baskets ?? []).find(y => y.id === id);
   if (!b) return bad('Unknown basket');
   const c = await liveNet(b);
-  if (c == null) return bad('No live price for every leg to check the level against');
+  if (c == null) return bad(b.kind === 'syn' ? 'No fresh, consistent price for both legs and the index to check the level against' : 'No live price for every leg to check the level against');
   const bs = pairBias(b.side);
   if (b.state === 'armed' && b.bracket && (body.tgtY != null || body.slY != null) && body.level == null) {
     const entry = Number(b.entryLevel);
