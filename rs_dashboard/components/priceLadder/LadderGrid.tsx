@@ -550,6 +550,10 @@ export function LadderGrid({
                   {t.side === 'BUY' ? 'B' : 'S'}{t.qty}
                 </span>
               ))}
+              {isRef && (
+                <span aria-hidden="true" title="Current price" data-testid="ladder-ltp-dot"
+                  className="shrink-0 w-2 h-2 rounded-full bg-emerald-400 animate-pulse motion-reduce:animate-none shadow-[0_0_6px_rgba(52,211,153,0.8)] pointer-events-none" />
+              )}
               <span>{isRef ? refPrice.toFixed(2) : fmt(p)}</span>
               {isPdh && (
                 <span title={`Previous Day High: ${keyLevels?.pdh?.toFixed(decimals)}`}
