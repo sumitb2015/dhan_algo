@@ -17,7 +17,7 @@ import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { computePivots, pivotChips, PIVOT_FORMULAS } from '@/lib/pivotLevels';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, basketWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { BasketLegsModal } from '@/components/priceLadder/BasketLegsModal';
-import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_NOTE, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
+import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_PREFIX, SYN_PAUSED_NOTE, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
 import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, sumPairPnl, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
@@ -74,7 +74,9 @@ interface StateResp {
   /** The selection this reply describes. */
   request?: { underlying: string; expiry: string; strike: number | null; opt: string | null; pairCe?: number | null; pairPe?: number | null; basket?: string };
   /** Basket mode: the legs on screen with their live premiums, and the net premium A (credit = the strategy as defined receives money). */
-  basket?: { legs: { strike: number; opt: 'CE' | 'PE'; side: LadderSide; ratio: number; far?: boolean; expiry?: string; securityId: string; ltp: number | null }[]; a: number | null; credit: boolean | null; lotSize: number; mult: number } | null;
+  basket?: { legs: { strike: number; opt: 'CE' | 'PE'; side: LadderSide; ratio: number; far?: boolean; expiry?: string; securityId: string; ltp: number | null; bid?: number | null; ask?: number | null }[]; a: number | null; credit: boolean | null; lotSize: number; mult: number;
+    /** A synthetic future: what its legs can be traded at (null until the bridge has both books), and why the last prices are not trusted. */
+    syn?: boolean; market?: { buy: number; sell: number; spread: number } | null; marketStale?: string | null; marketWide?: string | null } | null;
   basketError?: string | null;
   /** Pair mode: the CE / PE legs on screen and their combined premium (null when a leg has no live price). */
   pair?: {
@@ -1583,10 +1585,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           </Banner>
         )}
         {syn && (() => {
-          const live = (data?.state.baskets ?? []).some(b => b.kind === 'syn' && isBasketLive(b) && b.note === SYN_PAUSED_NOTE);
+          const live = (data?.state.baskets ?? []).some(b => b.kind === 'syn' && isBasketLive(b) && b.note?.startsWith(SYN_PAUSED_PREFIX));
           const a = basketView?.a ?? 0;
           const bad = a > 0 && !(spot > 0 && spotView?.fresh !== false && synSane(a, spot, daysToExpiry(expiry, istDay(data?.now))));
-          return live || bad ? <Banner tone="amber"><AlertTriangle className="w-4 h-4" /> {SYN_PAUSED_NOTE}</Banner> : null;
+          const why = basketView?.marketStale ? `${SYN_PAUSED_PREFIX} — ${basketView.marketStale}; levels are paused until it clears` : null;
+          const wide = !why && basketView?.marketWide ? `New entries are refused: ${basketView.marketWide}` : null;
+          return live || bad || why || wide ? <Banner tone="amber"><AlertTriangle className="w-4 h-4" /> {why ?? (live || bad ? SYN_PAUSED_NOTE : wide)}</Banner> : null;
         })()}
         {mode === 'basket' && (basketErr || (basketView && !basketView.a)) && (
           <Banner tone="amber" key={String(basketErr)}>
@@ -1739,10 +1743,18 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 </select>
               </div>}
               {mode === 'basket' && syn && (
+                <>
                 <div className="flex items-center justify-between gap-2 min-w-0"><span className="text-zinc-400 font-medium" title="The synthetic sits on the at-the-money strike, picked when the legs are built">Strike</span>
                   <span className="font-mono text-zinc-100" aria-label="Synthetic strike">{synK ? (atmStrike != null && synK !== atmStrike ? `${synK} (${synK > atmStrike ? '+' : ''}${synK - atmStrike} from ATM ${atmStrike})` : `${synK} ATM`) : '—'}
                     {basketView && <span className="ml-2 text-zinc-400">CE {basketView.legs.find(l => l.opt === 'CE')?.ltp ?? '—'} · PE {basketView.legs.find(l => l.opt === 'PE')?.ltp ?? '—'}</span>}</span>
                 </div>
+                <div className="flex items-center justify-between gap-2 min-w-0 font-mono text-[11px]" aria-label="Synthetic market">
+                  <span className="text-zinc-400 font-sans font-medium" title="What the two legs can really be traded at: buy = CE ask − PE bid, sell = CE bid − PE ask">Market</span>
+                  {basketView?.market
+                    ? <span className="text-zinc-100">Buy {basketView.market.buy.toFixed(2)} · Sell {basketView.market.sell.toFixed(2)} <span className={basketView.marketWide ? 'text-amber-400' : 'text-zinc-400'}>spread {basketView.market.spread.toFixed(2)}</span></span>
+                    : <span className="text-zinc-500" title="Needs the bid / ask of both legs from the price bridge; the last prices and the index check still guard the ladder">no market depth</span>}
+                </div>
+                </>
               )}
               {mode === 'basket' && !syn && (
                 <>

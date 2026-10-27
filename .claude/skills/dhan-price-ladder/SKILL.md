@@ -88,6 +88,11 @@ per write; the page drops a view older than the one on screen). It is re-read on
     entry, bracket and `modify`, never a requested exit; on an open position the pause is said once and kept as `SYN_PAUSED_NOTE` (the bracket
     is OFF on a naked short leg: it must never be silent). The page's `syn` flag is page-only (not an `OptType`); the positions-window close
     refuses a REAL syn leg only while placing/open/exiting (`synLegOwner`), never UNKNOWN/BROKEN, where the ladder's Exit cannot run.
+    Bid/ask: the ladder's prices are LAST trades, so `synQuoteVerdict` judges them against each leg's book: a last price outside its market
+    (by the market's width) = `stale` (pauses entry, Market, `modify` AND the bracket), a combined spread > `SYN_MAX_SPREAD` (0.1% of K) =
+    `wide` (refuses a NEW entry only, never an open position's bracket). The book is the best level of a Full packet: `loadPrices(.., depthFor)` ->
+    `ws.depth` -> the wanted file's `depth` list -> `price_ladder_ws.py` subscribes only those NSE/BSE legs as Full (never MCX) and writes
+    `bid`/`ask` per instrument. Missing book = cannot judge (not a pause): the basis check stays the guard. Unconfirmed live (2026-10-27).
 14. **A REAL fill nets against the opposite open slice.** The broker nets a row, so `openedPatch` calls `netAgainstOpposite`
     (`priceLadder.ts`: same broker, contract, product, REAL, state `open`, opposite side, oldest first) and only the excess opens a
     slice. Without it the closing order showed as a new position for `FILL_GRACE_MS`, until `reconcileDown` cut it. Pair / basket

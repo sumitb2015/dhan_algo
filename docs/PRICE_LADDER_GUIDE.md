@@ -173,7 +173,9 @@ The **Option** row has a fourth choice, **Synthetic**: a long call against a sho
 - **Positions window:** closing one leg of a REAL synthetic that is placing, open or exiting is refused (it would leave the other leg naked); use Exit on the ladder. An UNKNOWN or BROKEN synthetic cannot be exited from the ladder, so its legs can be closed from the window.
 - Like every bracket, the SL / target / trail run in the dashboard process, not at the broker: closing the dashboard stops them.
 
-Unconfirmed (2026-10-27): live REAL fills, especially the second leg on Kotak and Zerodha. Confirm with one SIM trade, then a 1-lot REAL one on Dhan.
+- **Market row (bid / ask):** the ladder prices each leg from its LAST traded price, and an ATM option can go minutes without a trade, so the two prints can be from different moments. The panel's **Market** row shows what the legs can really be traded at: *Buy* = K + CE ask − PE bid, *Sell* = K + CE bid − PE ask, and the combined bid-ask *spread*. A leg whose last price sits outside its own market by more than the market's width is a stale trade: it pauses entry, Market orders, moving a level and the bracket (banner with the reason, and the note on an open basket). A combined spread wider than 0.1% of the strike (about 23 points on NIFTY 22750) refuses a NEW entry only (never an open position's bracket). The books come from the price bridge, which asks for Full packets (5-level depth) for the synthetic's two legs only; with no book (the row says "no market depth") the last prices and the index check are the only guards.
+
+Unconfirmed (2026-10-27): live REAL fills, especially the second leg on Kotak and Zerodha; and the Full-packet depth for NSE / BSE options through the shared hub (tested against built packets only; confirm in market hours that the Market row fills and its Buy / Sell sit around the last prices). Confirm with one SIM trade, then a 1-lot REAL one on Dhan.
 
 ## CRUDEOILM on Zerodha and Kotak
 

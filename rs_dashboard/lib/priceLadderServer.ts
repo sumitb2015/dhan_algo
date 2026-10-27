@@ -227,10 +227,14 @@ const WS_START_EVERY_MS = 30_000;
 /** A subscription this old has had the hub's replay of the current last packet (hub scans every 3 s). */
 const WS_SETTLED_MS = 8_000;
 
-interface WsState { want: Map<string, number>; written: string; writtenAt: number; startAt: number }
-const ws: WsState = ((globalThis as { __priceLadderWs?: WsState }).__priceLadderWs ??= { want: new Map(), written: '', writtenAt: 0, startAt: 0 });
+interface WsState { want: Map<string, number>; depth: Map<string, number>; written: string; writtenAt: number; startAt: number }
+const ws: WsState = ((globalThis as { __priceLadderWs?: WsState }).__priceLadderWs ??= { want: new Map(), depth: new Map(), written: '', writtenAt: 0, startAt: 0 });
+ws.depth ??= new Map();       // a state object created by an older build of this module (hot reload) has none
 
-interface WsQuote { ltp: number; ltt?: string; changed_ms: number | null; since_ms: number; high?: number; low?: number; prev_close?: number }
+interface WsQuote { ltp: number; ltt?: string; changed_ms: number | null; since_ms: number; high?: number; low?: number; prev_close?: number; bid?: number; ask?: number; bid_qty?: number; ask_qty?: number }
+
+/** The best bid / ask of a contract's book (from a Full packet), for the synthetic future's market check. */
+export interface BookQuote { bid: number; ask: number; bidQty?: number; askQty?: number }
 
 /** Ask the bridge for an instrument; returns its quote key (`SEGMENT:securityId`). */
 function wsWant(segment: string, securityId: string): string {
@@ -239,19 +243,26 @@ function wsWant(segment: string, securityId: string): string {
   return k;
 }
 
+/** Ask the bridge for the contract's market depth too (Full packets instead of Quote); NSE / BSE options only. */
+function wsWantDepth(segment: string, securityId: string): void {
+  if (segment === 'NSE_FNO' || segment === 'BSE_FNO') ws.depth.set(`${segment}:${securityId}`, Date.now());
+}
+
 /** This process's wanted file (written on change and every 20 s) and the bridge started if it is not running. */
 function syncWs(memo: FileMemo): void {
   const now = Date.now();
   for (const [k, at] of ws.want) if (now - at > WS_WANT_TTL_MS) ws.want.delete(k);
+  for (const [k, at] of ws.depth) if (now - at > WS_WANT_TTL_MS) ws.depth.delete(k);
   const keys = [...ws.want.keys()].sort();
-  const sig = keys.join(',');
+  const depthKeys = [...ws.depth.keys()].sort();
+  const sig = `${keys.join(',')}|${depthKeys.join(',')}`;
   try {
     if (!keys.length) {
       if (ws.written) { fs.rmSync(WS_WANTED_FILE, { force: true }); ws.written = ''; }
       return;
     }
     if (sig !== ws.written || now - ws.writtenAt >= WS_REWRITE_MS) {
-      writeJsonAtomic(WS_WANTED_FILE, { pid: process.pid, updated_ms: now, instruments: keys.map(k => k.split(':')) });
+      writeJsonAtomic(WS_WANTED_FILE, { pid: process.pid, updated_ms: now, instruments: keys.map(k => k.split(':')), depth: depthKeys });
       ws.written = sig; ws.writtenAt = now;
     }
   } catch (err) {
@@ -307,6 +318,8 @@ function wsQuote(key: string, memo: FileMemo): WsQuote | null {
 export interface PriceView {
   spots: Record<string, SpotRead>; ltps: Record<string, number>;
   days?: Record<string, { high: number | null; low: number | null; close: number | null }>;
+  /** The best bid / ask of the contracts a depth was asked for (loadPrices' third argument), where the bridge has a two-sided book. */
+  quotes?: Record<string, BookQuote>;
 }
 
 /**
@@ -314,7 +327,7 @@ export interface PriceView {
  * `contracts`, all from WebSocket feeds. A spot's age is when its value last CHANGED (a frozen feed goes stale on its
  * own; a value never seen to change is not fresh). An option LTP needs a settled subscription or a change since.
  */
-export async function loadPrices(underlyings: string[], contracts: LadderContract[]): Promise<PriceView> {
+export async function loadPrices(underlyings: string[], contracts: LadderContract[], depthFor: LadderContract[] = []): Promise<PriceView> {
   const now = Date.now();
   const memo: FileMemo = new Map();
   const spots: Record<string, SpotRead> = {};
@@ -343,6 +356,16 @@ export async function loadPrices(underlyings: string[], contracts: LadderContrac
       spots[u] = { spot: q.ltp, at: 0, source: 'ws (not moved yet)' };
     }
   }
+  // A bid / ask only for the contracts that asked (they are subscribed as Full packets). Read before the LTP loop: an LTP
+  // taken from an options bridge file never reaches the WebSocket branch below, but the depth always comes from it.
+  const quotes: Record<string, BookQuote> = {};
+  for (const c of depthFor) {
+    wsWantDepth(c.exchangeSegment, c.securityId);
+    const q = wsQuote(wsWant(c.exchangeSegment, c.securityId), memo);
+    if (q && q.bid != null && q.ask != null && q.bid > 0 && q.ask >= q.bid && (q.changed_ms != null || now - q.since_ms >= WS_SETTLED_MS)) {
+      quotes[c.securityId] = { bid: q.bid, ask: q.ask, ...(q.bid_qty != null ? { bidQty: q.bid_qty } : {}), ...(q.ask_qty != null ? { askQty: q.ask_qty } : {}) };
+    }
+  }
   const seen = new Set<string>();
   for (const c of contracts) {
     if (seen.has(c.securityId)) continue;
@@ -355,7 +378,7 @@ export async function loadPrices(underlyings: string[], contracts: LadderContrac
     if (q && (q.changed_ms != null || now - q.since_ms >= WS_SETTLED_MS)) ltps[c.securityId] = q.ltp;
   }
   syncWs(memo);
-  return { spots, ltps, days };
+  return { spots, ltps, days, ...(depthFor.length ? { quotes } : {}) };
 }
 
 // ── broker IO ─────────────────────────────────────────────────────────
@@ -1293,8 +1316,10 @@ async function tick(): Promise<void> {
   // A pair's rules read both legs' premiums (its combined price).
   const pairLegs = livePairs.flatMap(p => [p.legs.ce.contract, p.legs.pe.contract, ...(p.rollTo?.ce ? [p.rollTo.ce] : []), ...(p.rollTo?.pe ? [p.rollTo.pe] : [])]);
   const basketLegs = liveBaskets.flatMap(b => b.legs.map(l => l.contract));
+  // A live synthetic's legs also ask for their market depth (the bid / ask check on its last prices).
+  const synLegs = liveBaskets.filter(b => b.kind === 'syn').flatMap(b => b.legs.map(l => l.contract));
   const prices: PriceView = priced.length || pairLegs.length || basketLegs.length
-    ? await loadPrices(underlyings, [...priced.map(x => x.contract), ...pairLegs, ...basketLegs]) : { spots: {}, ltps: {} };
+    ? await loadPrices(underlyings, [...priced.map(x => x.contract), ...pairLegs, ...basketLegs], synLegs) : { spots: {}, ltps: {} };
 
   for (const u of underlyings) {
     const needsSpot = live.some(x => spotKey(x.contract) === u && x.kind === 'xy' && (x.state === 'armed' || x.state === 'open'));
@@ -1312,6 +1337,10 @@ async function tick(): Promise<void> {
     mayCancel: (id: string) => !jobsInFlight.has(id) && warnOnce(`cancel:${id}`, 30_000),
     busy: (id: string) => jobsInFlight.has(id),
     // The index spot of a synthetic basket, only while it is fresh (a stale one cannot vouch for the synthetic price).
+    legBooks: (b: LadderBasket) => ({
+      ce: prices.quotes?.[b.legs.find(l => l.contract.opt === 'CE')?.contract.securityId ?? ''],
+      pe: prices.quotes?.[b.legs.find(l => l.contract.opt === 'PE')?.contract.securityId ?? ''],
+    }),
     spotOf: (b: LadderBasket) => { const sp = prices.spots[b.legs[0].contract.underlying]; return sp && spotFresh(sp.at, now) ? sp.spot : undefined; },
   };
   // Plan and mark inside the lock, so the jobs match exactly what was written (a request may have changed a slice

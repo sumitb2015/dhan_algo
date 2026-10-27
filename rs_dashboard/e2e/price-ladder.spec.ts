@@ -18,7 +18,7 @@ const lastTradingDay = () => {
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const SPOT = 23200;
 
-async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** One open SIM short iron condor (2 lots) on the mocked strikes. */ openBasket?: boolean; /** N armed (not yet fired) pairs on the two legs the Pair ladder shows. */ armedPairs?: number; /** One armed pair on OTHER strikes (23300 CE / 23100 PE) than the Pair ladder shows. */ offPair?: boolean; /** Give the chain open interest on 23200 so the XY ladder draws OI bars. */ oi?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
+async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** One open SIM short iron condor (2 lots) on the mocked strikes. */ openBasket?: boolean; /** The synthetic future's market: tight books around the last prices, a stale CE last trade, or no depth at all (default). */ synBook?: 'tight' | 'stale'; /** N armed (not yet fired) pairs on the two legs the Pair ladder shows. */ armedPairs?: number; /** One armed pair on OTHER strikes (23300 CE / 23100 PE) than the Pair ladder shows. */ offPair?: boolean; /** Give the chain open interest on 23200 so the XY ladder draws OI bars. */ oi?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
   const clock = opts.staleAt ? new Date(`${lastTradingDay()}T${opts.staleAt}:00+05:30`).getTime() : null;
   let armed = !!opts.liveArmed;   // POST action 'live' flips it, as the server does
   const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[], closes: [] as Record<string, unknown>[] };
@@ -114,7 +114,14 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
             const synK = Number(u.searchParams.get('syn'));
             if (synK > 0) {
               const px = (o: 'CE' | 'PE') => bpx(synK, o);
-              return { basket: { legs: legs.map(l => ({ ...l, securityId: `${l.strike}${l.opt}`, ltp: bpx(l.strike, l.opt) })), a: Number((synK + px('CE') - px('PE')).toFixed(2)), credit: null, lotSize: 65, mult: 1, syn: true } };
+              const book = (o: 'CE' | 'PE') => (opts.synBook === 'tight' ? { bid: px(o) - 0.5, ask: px(o) + 0.5 } : opts.synBook === 'stale' ? (o === 'CE' ? { bid: px(o) + 30, ask: px(o) + 31 } : { bid: px(o) - 0.5, ask: px(o) + 0.5 }) : null);
+              const ce = book('CE'), pe = book('PE');
+              return { basket: {
+                legs: legs.map(l => ({ ...l, securityId: `${l.strike}${l.opt}`, ltp: bpx(l.strike, l.opt), bid: book(l.opt)?.bid ?? null, ask: book(l.opt)?.ask ?? null })),
+                a: Number((synK + px('CE') - px('PE')).toFixed(2)), credit: null, lotSize: 65, mult: 1, syn: true,
+                market: ce && pe ? { buy: Number((synK + ce.ask - pe.bid).toFixed(2)), sell: Number((synK + ce.bid - pe.ask).toFixed(2)), spread: Number((ce.ask - ce.bid + pe.ask - pe.bid).toFixed(2)) } : null,
+                marketStale: opts.synBook === 'stale' ? `CE last price ${px('CE')} is outside its market ${ce!.bid}–${ce!.ask} (a stale last trade)` : null, marketWide: null,
+              } };
             }
             return { basket: { legs: legs.map(l => ({ ...l, securityId: `${l.strike}${l.opt}`, ltp: bpx(l.strike, l.opt) })), a: Math.abs(Number(d.toFixed(2))), credit: d < 0, lotSize: 65, mult: 1 } };
           })() : {}),
@@ -910,4 +917,32 @@ test('Synthetic future: choosing Call again leaves it and restores the Index lad
   await page.getByRole('button', { name: 'Call', exact: true }).click();
   await expect(page.getByLabel('Synthetic strike')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Index', exact: true })).toBeVisible();
+});
+
+test('Synthetic future: the Market row shows what the legs can really be traded at (buy = CE ask − PE bid, sell = CE bid − PE ask)', async ({ page }) => {
+  await install(page, { synBook: 'tight' });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Synthetic', exact: true }).click();
+  // CE 120 / PE 100 at 23200: the synthetic is 23220; each leg is ±0.5 wide.
+  await expect(page.getByLabel('Synthetic market')).toContainText('Buy 23221.00 · Sell 23219.00');
+  await expect(page.getByLabel('Synthetic market')).toContainText('spread 2.00');
+  await expect(page.getByText(/Synthetic price paused/)).toHaveCount(0);
+});
+
+test('Synthetic future: with no depth from the bridge the Market row says so and nothing is blocked', async ({ page }) => {
+  await install(page);
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Synthetic', exact: true }).click();
+  await expect(page.getByLabel('Synthetic market')).toContainText('no market depth');
+  await expect(page.getByRole('button', { name: 'Buy at market' })).toBeEnabled();
+});
+
+test('Synthetic future: a last trade outside its own market shows the paused banner with the reason', async ({ page }) => {
+  await install(page, { synBook: 'stale' });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Synthetic', exact: true }).click();
+  await expect(page.getByText(/Synthetic price paused — CE last price 120 is outside its market 150–151/)).toBeVisible();
 });

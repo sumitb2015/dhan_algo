@@ -9,7 +9,7 @@ import {
   type LadderBroker, type LadderContract, type OptType,
 } from '@/lib/priceLadder';
 import { isPairLive, pairCombined } from '@/lib/priceLadderPair';
-import { isBasketLive, basketAxis, synAxis, validateDraft, draftFromParam } from '@/lib/priceLadderBasket';
+import { isBasketLive, basketAxis, synAxis, synQuoteVerdict, validateDraft, draftFromParam } from '@/lib/priceLadderBasket';
 import { prevDayLevelsNow } from '@/lib/prevDayLevels';
 
 // What the Price Ladder page shows, built once for both the 1 s poll (GET /api/price-ladder/state) and the push stream
@@ -117,7 +117,7 @@ export async function buildLadderView(params: URLSearchParams) {
   const prices = await loadPrices(unders, [
     ...live.map(x => x.contract), ...(shown ? [shown] : []), ...livePairLegs, ...(pairLegs ? [pairLegs.ce, pairLegs.pe] : []),
     ...liveBasketLegs, ...(basketLegs ?? []),
-  ]);
+  ], Number(params.get('syn')) > 0 ? (basketLegs ?? []) : []);
   const now = Date.now();
   const spots = Object.fromEntries(Object.entries(prices.spots).map(([u, v]) => [u, { ...v, fresh: spotFresh(v.at, now) }]));
   const d = prices.days?.[shownKey ?? want];
@@ -149,7 +149,17 @@ export async function buildLadderView(params: URLSearchParams) {
       const base = { legs: legsOut, lotSize: basketLegs![0].lotSize, mult: basketLegs![0].mult ?? 1 };
       // A synthetic future (`syn` = its strike): the axis is the synthetic price K + CE - PE, not the net premium (which flips sign).
       const synK = Number(params.get('syn'));
-      if (synK > 0) return { ...base, a: synAxis(synK, legsOut.find(l => l.opt === 'CE')?.ltp ?? undefined, legsOut.find(l => l.opt === 'PE')?.ltp ?? undefined), credit: null, syn: true };
+      if (synK > 0) {
+        const ce = legsOut.find(l => l.opt === 'CE'), pe = legsOut.find(l => l.opt === 'PE');
+        const qv = synQuoteVerdict(synK, ce?.ltp ?? undefined, pe?.ltp ?? undefined, ce ? prices.quotes?.[ce.securityId] : undefined, pe ? prices.quotes?.[pe.securityId] : undefined);
+        const book = (id?: string) => (id ? prices.quotes?.[id] : undefined);
+        return {
+          ...base, legs: legsOut.map(l => ({ ...l, bid: book(l.securityId)?.bid ?? null, ask: book(l.securityId)?.ask ?? null })),
+          a: synAxis(synK, ce?.ltp ?? undefined, pe?.ltp ?? undefined), credit: null, syn: true,
+          // What the legs can really be traded at, and why (if) the last prices are not trusted; `market` null = no depth yet.
+          market: qv.market, marketStale: qv.stale, marketWide: qv.wide,
+        };
+      }
       const ax = basketAxis(draft, l => prices.ltps[basketLegs![draft.indexOf(l)].securityId]);
       return { ...base, a: ax?.a ?? null, credit: ax?.credit ?? null };
     })() : null,

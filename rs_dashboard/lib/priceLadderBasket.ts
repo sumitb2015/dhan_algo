@@ -234,8 +234,51 @@ export function daysToExpiry(expiry: string, today: string): number {
 export const synSane = (synth: number, spot: number | undefined, dte = 0): boolean =>
   spot != null && spot > 0 && Math.abs(synth - spot) / spot <= SYN_MAX_BASIS + SYN_CARRY_PER_YEAR * (dte / 365);
 
-/** Why a live synthetic's levels are paused (shown on the basket and in the page), or null while it is trustworthy. */
-export const SYN_PAUSED_NOTE = 'Synthetic price paused — a leg price or the index spot looks stale; target / SL / trail are OFF until it clears (manual exit and square-off still work)';
+/** What every "paused" note starts with (the page and the tests match on it; the reason follows). */
+export const SYN_PAUSED_PREFIX = 'Synthetic price paused';
+/** The note kept on a live synthetic whose levels are paused: said once, with the reason. The bracket is OFF while it stands. */
+export const synPausedNote = (reason = 'a leg price or the index spot looks stale') =>
+  `${SYN_PAUSED_PREFIX} — ${reason}; target / SL / trail are OFF until it clears (manual exit and square-off still work)`;
+export const SYN_PAUSED_NOTE = synPausedNote();
+
+// ── the market behind the last prices ──────────────────────────────────────────────────────────────────────────────
+// The ladder trades on each leg's LAST traded price, and an ATM option can go minutes without a trade, so the two prints can
+// be from different moments. The best bid / ask of each leg (a Full packet's top level) says what the legs can really be
+// traded at: a last price outside its own market is stale, and a wide combined spread makes the synthetic expensive to enter.
+
+/** The best bid / ask of one leg. */
+export interface LegBook { bid: number; ask: number }
+/** The synthetic future as it can be traded now: `buy` = K + CE ask - PE bid (going long), `sell` = K + CE bid - PE ask (going short). */
+export interface SynMarket { buy: number; sell: number; spread: number }
+/** A wider combined bid-ask spread than this share of the strike refuses a NEW entry (about 23 points on NIFTY 22750). */
+export const SYN_MAX_SPREAD = 0.001;
+/** The smallest tolerance for a last price outside its market (one tick). */
+const SYN_BOOK_TOL = 0.05;
+
+export function synMarket(k: number, ce: LegBook | undefined, pe: LegBook | undefined): SynMarket | null {
+  if (!(k > 0) || !ce || !pe) return null;
+  return { buy: round2(k + ce.ask - pe.bid), sell: round2(k + ce.bid - pe.ask), spread: round2((ce.ask - ce.bid) + (pe.ask - pe.bid)) };
+}
+
+/**
+ * Judge the legs' last prices against their books. `stale` = a last price sits outside its own market by more than the
+ * market's width (a stale last trade: pause entries AND the bracket); `wide` = the combined spread is too wide (refuse a new
+ * ENTRY only: an open position's bracket must not stop because the market is thin). With a leg's book missing nothing can be
+ * judged (both null, `market` null): the basis check against the index remains the guard.
+ */
+export function synQuoteVerdict(k: number, ceLtp: number | undefined, peLtp: number | undefined, ce: LegBook | undefined, pe: LegBook | undefined): { stale: string | null; wide: string | null; market: SynMarket | null } {
+  const market = synMarket(k, ce, pe);
+  if (!market || !ce || !pe) return { stale: null, wide: null, market: null };
+  let stale: string | null = null;
+  for (const [name, ltp, b] of [['CE', ceLtp, ce], ['PE', peLtp, pe]] as const) {
+    if (!(ltp != null && ltp > 0)) continue;
+    const w = Math.max(b.ask - b.bid, SYN_BOOK_TOL);
+    if (ltp < b.bid - w || ltp > b.ask + w) { stale = `${name} last price ${ltp} is outside its market ${b.bid}–${b.ask} (a stale last trade)`; break; }
+  }
+  const limit = round2(k * SYN_MAX_SPREAD);
+  const wide = market.spread > limit ? `the market is wide: the two legs' bid-ask spread is ${market.spread} points (limit ${limit})` : null;
+  return { stale, wide, market };
+}
 
 /** "Iron Condor 22400/22500/22700/22800": the strategy and its distinct strikes. */
 export function basketName(b: Pick<LadderBasket, 'name' | 'legs'>): string {
@@ -332,7 +375,18 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
     let c = basketCombined(b, ltps);
     // A synthetic with one leg's print stale or wrong sits far from the index (or has no fresh index to be checked against): pause
     // its levels (entry and bracket) rather than fire on it. An exit due (manual / square-off) needs only the leg prices, so it still runs.
-    const synPaused = b.kind === 'syn' && c != null && !synSane(c, io.spotOf?.(b), daysToExpiry(b.legs[0].contract.expiry, today));
+    // Two guards: the basis against the index, and the last prices against the legs' own books (a stale last trade; a wide market
+    // refuses an ENTRY only — the bracket of an open position must not stop because the market is thin).
+    let synWhy: string | null = null;
+    if (b.kind === 'syn' && c != null) {
+      const ceL = b.legs.find(l => l.contract.opt === 'CE'), peL = b.legs.find(l => l.contract.opt === 'PE');
+      const books = io.legBooks?.(b);
+      const qv = ceL && peL && b.synStrike ? synQuoteVerdict(b.synStrike, ltps[ceL.contract.securityId], ltps[peL.contract.securityId], books?.ce, books?.pe) : null;
+      if (!synSane(c, io.spotOf?.(b), daysToExpiry(b.legs[0].contract.expiry, today))) synWhy = 'a leg price or the index spot looks stale';
+      else if (qv?.stale) synWhy = qv.stale;
+      else if (qv?.wide && b.state === 'armed') synWhy = qv.wide;
+    }
+    const synPaused = synWhy != null;
     if (synPaused) c = null;
     if (b.state === 'unknown') continue;                 // the user resolves it; nothing automatic
 
@@ -479,7 +533,8 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
         'info', `SIM exit ${name} (${step.reason})${c != null ? ` at net ${c.toFixed(2)}` : ''}`, b.id);
     } else if (synPaused) {
       // Said once, and kept on the basket while it lasts: the user must see that the bracket is off on a naked short leg.
-      if (b.note !== SYN_PAUSED_NOTE) next = say(patch(b.id, { ...step.patch, note: SYN_PAUSED_NOTE }), 'error', `${name}: ${SYN_PAUSED_NOTE}`, b.id);
+      const note = synPausedNote(synWhy ?? undefined);
+      if (b.note !== note) next = say(patch(b.id, { ...step.patch, note }), 'error', `${name}: ${note}`, b.id);
     } else if (Object.keys(step.patch).length || (b.note && b.state === 'open')) {
       next = patch(b.id, { ...step.patch, ...(b.note && b.state === 'open' ? { note: undefined } : {}) });
     }
@@ -556,6 +611,8 @@ export interface BasketTickIo {
   busy: (id: string) => boolean;
   /** The fresh index spot of a synthetic basket's underlying (for the basis bound), or undefined when it has none. */
   spotOf?: (b: LadderBasket) => number | undefined;
+  /** The best bid / ask of a synthetic basket's two legs, where the bridge has them (absent = the books cannot be judged). */
+  legBooks?: (b: LadderBasket) => { ce?: LegBook; pe?: LegBook };
 }
 const NO_IO: BasketTickIo = { polledAt: () => 0, busy: () => false };
 

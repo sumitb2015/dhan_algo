@@ -5,12 +5,14 @@ The Price Ladder's server watcher (rs_dashboard/lib/priceLadderServer.ts) trades
 it reads from live_indices_ws.py's file and option LTPs from the options bridges' files; everything else — SENSEX, an
 MCX option month's own futures (the CRUDEOILM XY axis), option strikes no bridge covers — comes through here:
 
-  dashboard  ->  debug/price_ladder_ws_wanted_<pid>.json   {"instruments": [["MCX_COMM", "573423"], ...]}
+  dashboard  ->  debug/price_ladder_ws_wanted_<pid>.json   {"instruments": [["MCX_COMM", "573423"], ...], "depth": ["NSE_FNO:123", ...]}
+                 (`depth` = the NSE / BSE option legs a bid / ask is wanted for: subscribed as Full packets instead of Quote)
                  (one file per dashboard server process; files older than WANTED_STALE_SEC are ignored)
   this bridge -> market_hub_client.register_wanted('price_ladder', ...)   (ONE shared Dhan connection, no new one)
   this bridge -> debug/price_ladder_ws_quotes.json
                  {"updated_ms", "hub_alive", "quotes": {"MCX_COMM:573423": {"ltp", "ltt", "changed_ms", "since_ms",
-                                                                 "high", "low", "prev_close"}}}
+                                                                 "high", "low", "prev_close", "bid", "ask", "bid_qty", "ask_qty"}}}
+                 (bid / ask / quantities only for a `depth` instrument whose book has a usable two-sided top level)
 
 Per instrument, `since_ms` is when this bridge started asking for it and `changed_ms` is when its tick content last
 CHANGED while asked for (null until it does). The hub keeps an instrument's last tick after it stops being subscribed,
@@ -43,6 +45,8 @@ CONSUMER = 'price_ladder'
 # Dhan marketfeed segment codes (live_options_ws.py uses the same).
 SEGMENTS = {'IDX_I': 0, 'NSE_FNO': 2, 'MCX_COMM': 5, 'BSE_FNO': 8}
 FEED_QUOTE = 17          # Quote packets: an MCX contract sends nothing in Full mode while shut (MCX_SNAPSHOT_NOTE)
+FEED_FULL = 21           # Full packets carry the 5-level market depth; asked only for the contracts that need a bid / ask
+DEPTH_SEGMENTS = ('NSE_FNO', 'BSE_FNO')     # never MCX (see above)
 LOOP_SEC = 0.25
 WRITE_SEC = 0.5
 REGISTER_SEC = 5         # well under market_hub_client.WANTED_STALE_SEC (60 s)
@@ -62,20 +66,43 @@ def now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def read_wanted() -> set:
-    """Union of every live dashboard process's request: {(segment_name, security_id)}."""
-    out = set()
+def read_wanted() -> tuple:
+    """Union of every live dashboard process's request: ({(segment_name, security_id)}, {those that also want market depth})."""
+    out, depth = set(), set()
     for path in glob.glob(WANTED_GLOB):
         try:
             if time.time() - os.path.getmtime(path) > WANTED_STALE_SEC:
                 continue
             with open(path) as f:
-                for seg, sid in (json.load(f).get('instruments') or []):
-                    if seg in SEGMENTS and str(sid).isdigit():
-                        out.add((seg, str(sid)))
+                data = json.load(f)
+            for seg, sid in (data.get('instruments') or []):
+                if seg in SEGMENTS and str(sid).isdigit():
+                    out.add((seg, str(sid)))
+            # `depth`: "SEG:id" keys of the instruments a bid / ask is wanted for (a synthetic future's two legs).
+            for key in (data.get('depth') or []):
+                seg, _, sid = str(key).partition(':')
+                if seg in DEPTH_SEGMENTS and sid.isdigit():
+                    depth.add((seg, sid))
         except (OSError, ValueError, TypeError):
             continue    # mid-write or malformed: the next pass reads it
-    return out
+    return out, depth & out
+
+
+def best_bid_ask(tick: dict):
+    """The best bid / ask of a Full packet's depth as (bid, ask, bid_qty, ask_qty), or None when the book has no usable
+    two-sided top level (absent, zero, or crossed: a crossed book is a mid-update read, never a price)."""
+    depth = tick.get('depth')
+    if not isinstance(depth, list) or not depth:
+        return None
+    top = depth[0]
+    try:
+        bid, ask = float(top.get('bid_price') or 0), float(top.get('ask_price') or 0)
+        bq, aq = int(top.get('bid_quantity') or 0), int(top.get('ask_quantity') or 0)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if not (bid > 0 and ask > 0 and bid <= ask):
+        return None
+    return bid, ask, bq, aq
 
 
 def another_bridge_alive() -> bool:
@@ -90,7 +117,7 @@ def another_bridge_alive() -> bool:
 
 
 def fingerprint(tick: dict) -> tuple:
-    return (tick.get('LTP'), tick.get('LTT'), tick.get('volume'), tick.get('total_buy_quantity'), tick.get('total_sell_quantity'))
+    return (tick.get('LTP'), tick.get('LTT'), tick.get('volume'), tick.get('total_buy_quantity'), tick.get('total_sell_quantity'), best_bid_ask(tick))
 
 
 def main() -> None:
@@ -121,7 +148,7 @@ def main() -> None:
                 print('[price_ladder_ws] stop trigger — exiting', flush=True)
                 break
 
-            wanted = read_wanted()
+            wanted, depth_wanted = read_wanted()
             t = time.time()
             ms = now_ms()
             keys = {f'{SEGMENTS[seg]}:{sid}': (seg, sid) for seg, sid in wanted}
@@ -131,7 +158,7 @@ def main() -> None:
             for k in keys:
                 since.setdefault(k, ms)
 
-            instruments = sorted([SEGMENTS[seg], sid, FEED_QUOTE] for seg, sid in wanted)
+            instruments = sorted([SEGMENTS[seg], sid, FEED_FULL if (seg, sid) in depth_wanted else FEED_QUOTE] for seg, sid in wanted)
             if instruments != registered or t - last_register >= REGISTER_SEC:
                 if instruments:
                     hub_client.register_wanted(CONSUMER, [tuple(i) for i in instruments])
@@ -174,6 +201,9 @@ def main() -> None:
                                 v = 0.0
                             if v > 0:
                                 q[dst] = v
+                        ba = best_bid_ask(tick)
+                        if ba:
+                            q['bid'], q['ask'], q['bid_qty'], q['ask_qty'] = ba
                         quotes[f'{seg}:{sid}'] = q
                 atomic_write(QUOTES_FILE, {'updated_ms': ms, 'hub_alive': hub_client.is_hub_alive(), 'quotes': quotes})
                 atomic_write(STATUS_FILE, {'status': 'RUNNING', 'pid': os.getpid(), 'started_at': started,

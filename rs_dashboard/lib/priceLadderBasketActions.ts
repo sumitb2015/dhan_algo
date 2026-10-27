@@ -8,7 +8,7 @@ import {
 } from '@/lib/priceLadder';
 import { blendExitAvg, lotsOnContract, pairBias, pairLevelSane, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS } from '@/lib/priceLadderPair';
 import {
-  applyBasketShare, basketAxis, basketCombined, basketLegQty, basketName, daysToExpiry, draftSyn, firstPhase, isBasketLive, orientLegs, patchBasket, synAxis, synLotsLive, synSane, synStrikeFor, validateDraft,
+  applyBasketShare, basketAxis, basketCombined, basketLegQty, basketName, daysToExpiry, draftSyn, firstPhase, isBasketLive, orientLegs, patchBasket, synAxis, synLotsLive, synQuoteVerdict, synSane, synStrikeFor, validateDraft,
   MAX_REAL_BASKET_LOTS, MAX_REAL_SYN_LOTS,
   type BasketLeg, type DraftLeg, type LadderBasket,
 } from '@/lib/priceLadderBasket';
@@ -130,7 +130,7 @@ async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<P
   for (const c of contracts) if (typeof c === 'string') return bad(c);
   const cs = contracts as LadderContract[];
   if (new Set(cs.map(c => c.lotSize)).size > 1) return bad('The legs have different lot sizes — refused');
-  const prices = await loadPrices(isSyn ? [u] : [], cs);
+  const prices = await loadPrices(isSyn ? [u] : [], cs, isSyn ? cs : []);
   const priceOf = (l: DraftLeg) => prices.ltps[cs[draft.indexOf(l)].securityId];
   let axis: { a: number; credit: boolean } | null;
   if (isSyn) {
@@ -143,6 +143,11 @@ async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<P
     const atm = synStrikeFor(sp.spot, step);
     if (atm == null || Math.abs(synStrike - atm) > SYN_MAX_STEPS_FROM_ATM * step) return bad(`Strike ${synStrike} is not at the money (${u} ${sp.spot}, ATM ${atm ?? '?'}) — the synthetic must be at the money; refresh the legs`);
     if (!synSane(a, sp.spot, daysToExpiry(expiry, istDay(now)))) return bad(`The synthetic price ${a} is too far from ${u} ${sp.spot} — a leg's price looks stale; refused`);
+    // The legs' own books: a last price outside its market is a stale trade, and a wide market refuses a new entry. With no book
+    // from the bridge yet the basis check above is the guard (the page says "no market depth").
+    const qv = synQuoteVerdict(synStrike, priceOf(draft[0]), priceOf(draft[1]), prices.quotes?.[cs[0].securityId], prices.quotes?.[cs[1].securityId]);
+    if (qv.stale) return bad(`Refused: ${qv.stale}`);
+    if (qv.wide) return bad(`Refused: ${qv.wide}`);
     axis = { a, credit: false };
   } else {
     axis = basketAxis(draft, priceOf);
@@ -232,9 +237,12 @@ async function guarded(id: string, okFn: (b: LadderBasket) => boolean, mutate: (
 
 async function liveNet(b: LadderBasket): Promise<number | null> {
   const u = b.legs[0].contract.underlying;
-  const prices = await loadPrices(b.kind === 'syn' ? [u] : [], b.legs.map(l => l.contract));
+  const contracts = b.legs.map(l => l.contract);
+  const prices = await loadPrices(b.kind === 'syn' ? [u] : [], contracts, b.kind === 'syn' ? contracts : []);
   const c = basketCombined(b, prices.ltps);
   if (c == null || b.kind !== 'syn') return c;
+  const ceL = b.legs.find(l => l.contract.opt === 'CE'), peL = b.legs.find(l => l.contract.opt === 'PE');
+  if (ceL && peL && b.synStrike && synQuoteVerdict(b.synStrike, prices.ltps[ceL.contract.securityId], prices.ltps[peL.contract.securityId], prices.quotes?.[ceL.contract.securityId], prices.quotes?.[peL.contract.securityId]).stale) return null;
   // A synthetic is checked against a fresh index spot, as `prepare` and the watcher do: a level is never judged on a bad print.
   const sp = prices.spots[u];
   return sp && spotFresh(sp.at, Date.now()) && synSane(c, sp.spot, daysToExpiry(b.legs[0].contract.expiry, istDay())) ? c : null;

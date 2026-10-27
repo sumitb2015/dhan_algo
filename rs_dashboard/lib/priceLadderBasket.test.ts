@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   basketTemplates, draftFromTemplate, validateDraft, basketAxis, orientLegs, basketCombined, basketName, basketNowPnl, sumBasketPnl,
-  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, synLotsLive, daysToExpiry, SYN_PAUSED_NOTE, MAX_REAL_SYN_LOTS, MAX_REAL_BASKET_LOTS, type LadderBasket, type BasketLeg, type DraftLeg,
+  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, synLotsLive, daysToExpiry, SYN_PAUSED_NOTE, synMarket, synQuoteVerdict, synPausedNote, SYN_MAX_SPREAD, MAX_REAL_SYN_LOTS, MAX_REAL_BASKET_LOTS, type LadderBasket, type BasketLeg, type DraftLeg,
 } from './priceLadderBasket.ts';
 import { rollDay, type LadderState } from './priceLadder.ts';
 import { lotsOnContract, openPositionCount } from './priceLadderPair.ts';
@@ -466,4 +466,60 @@ test('synLotsLive counts every live synthetic of the broker, mode and underlying
 test('synStrikeFor picks the ATM on the strike grid', () => {
   assert.equal(synStrikeFor(22524, 50), 22500);
   assert.equal(synStrikeFor(22526, 50), 22550);
+});
+
+// ── the legs' books ──
+const BOOK_CE = { bid: 159.5, ask: 160.5 }, BOOK_PE = { bid: 139.5, ask: 140.5 };       // around the SYN_PX last prices 160 / 140
+
+test('synMarket: buy = K + CE ask - PE bid, sell = K + CE bid - PE ask, spread = both legs\' widths', () => {
+  assert.deepEqual(synMarket(SYN_K, BOOK_CE, BOOK_PE), { buy: 22521, sell: 22519, spread: 2 });
+  assert.equal(synMarket(SYN_K, BOOK_CE, undefined), null);
+  assert.equal(synMarket(0, BOOK_CE, BOOK_PE), null);
+});
+
+test('synQuoteVerdict: last prices inside their markets are fine; one outside by more than the market\'s width is a stale trade', () => {
+  const ok = synQuoteVerdict(SYN_K, 160, 140, BOOK_CE, BOOK_PE);
+  assert.deepEqual([ok.stale, ok.wide], [null, null]);
+  assert.match(synQuoteVerdict(SYN_K, 150, 140, BOOK_CE, BOOK_PE).stale ?? '', /CE last price 150 is outside its market 159.5–160.5/);
+  assert.match(synQuoteVerdict(SYN_K, 160, 146, BOOK_CE, BOOK_PE).stale ?? '', /^PE last price 146/);
+  // one tick outside is inside the tolerance (a book that moved since the last trade)
+  assert.equal(synQuoteVerdict(SYN_K, 161, 140, BOOK_CE, BOOK_PE).stale, null);
+});
+
+test('synQuoteVerdict: a wide combined spread is flagged against the strike; no books = nothing to judge', () => {
+  const wide = synQuoteVerdict(SYN_K, 160, 140, { bid: 150, ask: 170 }, { bid: 130, ask: 150 });          // 40 points wide vs a 22.5 limit
+  assert.match(wide.wide ?? '', /bid-ask spread is 40 points \(limit 22.5\)/);
+  assert.equal(wide.stale, null);
+  assert.ok(SYN_MAX_SPREAD > 0);
+  const none = synQuoteVerdict(SYN_K, 150, 140, undefined, BOOK_PE);
+  assert.deepEqual([none.stale, none.wide, none.market], [null, null, null]);
+});
+
+test('planBaskets: a stale last trade pauses an armed entry AND an open bracket, with the reason on the basket', () => {
+  const books = { ...SPOT_IO, legBooks: () => ({ ce: { bid: 149, ask: 151 }, pe: BOOK_PE }) };            // CE last 160 is far above its 149-151 market
+  assert.equal(planBaskets(st([synBasket('BUY')]), SYN_PX, NOW, books).next.baskets![0].state, 'armed');
+  const legs = synBasket('BUY').legs.map(l => ({ ...l, avg: SYN_PX[l.contract.securityId], held: LOT, filledQty: LOT, entry: 'filled' as const }));
+  const open = synBasket('BUY', { state: 'open', mode: 'real', entryY: 22520, legs, bracket: { tgtPts: 30, slPts: 20 } as LadderBasket['bracket'], slY: 22500, tgtY: 22550 });
+  const r = planBaskets(st([open]), { '22500CE': 100, '22500PE': 140 }, NOW, books).next.baskets![0];
+  assert.equal(r.state, 'open');                                                                          // the SL did not fire on the stale price
+  assert.match(r.note ?? '', /^Synthetic price paused — CE last price 100 is outside its market 149–151/);
+});
+
+test('planBaskets: a wide market refuses an ENTRY but never stops an open position\'s bracket', () => {
+  const wideBooks = { ...SPOT_IO, legBooks: () => ({ ce: { bid: 150, ask: 170 }, pe: { bid: 130, ask: 150 } }) };
+  assert.equal(planBaskets(st([synBasket('BUY')]), SYN_PX, NOW, wideBooks).next.baskets![0].state, 'armed');
+  const legs = synBasket('BUY').legs.map(l => ({ ...l, avg: SYN_PX[l.contract.securityId], held: LOT, filledQty: LOT, entry: 'filled' as const }));
+  const open = synBasket('BUY', { state: 'open', entryY: 22520, legs, bracket: { tgtPts: 30, slPts: 20 } as LadderBasket['bracket'], slY: 22500, tgtY: 22550 });
+  const r = planBaskets(st([open]), { '22500CE': 130, '22500PE': 150 }, NOW, wideBooks).next.baskets![0];     // synthetic 22480: below the SL, both last prices inside their (wide) markets
+  assert.equal(r.state, 'closed');
+  assert.match(r.exitReason ?? '', /SL/);
+});
+
+test('planBaskets: with no books the synthetic behaves as before (the basis check is the guard)', () => {
+  assert.equal(planBaskets(st([synBasket('BUY')]), SYN_PX, NOW, { ...SPOT_IO, legBooks: () => ({}) }).next.baskets![0].state, 'open');
+});
+
+test('the paused note carries its reason and the default one is the stale-price text', () => {
+  assert.equal(SYN_PAUSED_NOTE, synPausedNote());
+  assert.match(synPausedNote('CE is stale'), /^Synthetic price paused — CE is stale; target \/ SL \/ trail are OFF/);
 });
