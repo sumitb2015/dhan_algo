@@ -9,7 +9,7 @@ import {
   type LadderBroker, type LadderContract, type OptType,
 } from '@/lib/priceLadder';
 import { isPairLive, pairCombined } from '@/lib/priceLadderPair';
-import { isBasketLive, basketAxis, validateDraft, draftFromParam, type DraftLeg } from '@/lib/priceLadderBasket';
+import { isBasketLive, basketAxis, synAxis, validateDraft, draftFromParam } from '@/lib/priceLadderBasket';
 import { prevDayLevelsNow } from '@/lib/prevDayLevels';
 
 // What the Price Ladder page shows, built once for both the 1 s poll (GET /api/price-ladder/state) and the push stream
@@ -113,7 +113,7 @@ export async function buildLadderView(params: URLSearchParams) {
   const liveBasketLegs = (state.baskets ?? []).filter(isBasketLive).flatMap(b => b.legs.map(l => l.contract));
   const livePairLegs = (state.pairs ?? []).filter(isPairLive)
     .flatMap(p => [p.legs.ce.contract, p.legs.pe.contract, ...(p.rollTo?.ce ? [p.rollTo.ce] : []), ...(p.rollTo?.pe ? [p.rollTo.pe] : [])]);
-  const unders = [...new Set([...(shownKey ? [shownKey] : []), ...live.map(x => spotKey(x.contract))])];
+  const unders = [...new Set([...(shownKey ? [shownKey] : []), ...(Number(params.get('syn')) > 0 && LADDER_UNDERLYINGS.includes(want) ? [want] : []), ...live.map(x => spotKey(x.contract))])];
   const prices = await loadPrices(unders, [
     ...live.map(x => x.contract), ...(shown ? [shown] : []), ...livePairLegs, ...(pairLegs ? [pairLegs.ce, pairLegs.pe] : []),
     ...liveBasketLegs, ...(basketLegs ?? []),
@@ -136,7 +136,7 @@ export async function buildLadderView(params: URLSearchParams) {
       dayLow: dayLow && dayLow > 0 ? dayLow : null,
     },
     // Which contract this reply describes: the page ignores a reply for a selection it has since moved off.
-    request: { underlying: want, expiry, strike: opt === 'FUT' ? strike : strike > 0 ? strike : null, opt, pairCe: pairCe > 0 ? pairCe : null, pairPe: pairPe > 0 ? pairPe : null, basket: params.get('basket') ?? '' },
+    request: { underlying: want, expiry, strike: opt === 'FUT' ? strike : strike > 0 ? strike : null, opt, pairCe: pairCe > 0 ? pairCe : null, pairPe: pairPe > 0 ? pairPe : null, basket: params.get('basket') ?? '', syn: Number(params.get('syn')) > 0 ? Number(params.get('syn')) : null },
     pair: pairLegs ? {
       ce: { strike: pairLegs.ce.strike, securityId: pairLegs.ce.securityId, ltp: prices.ltps[pairLegs.ce.securityId] ?? null },
       pe: { strike: pairLegs.pe.strike, securityId: pairLegs.pe.securityId, ltp: prices.ltps[pairLegs.pe.securityId] ?? null },
@@ -146,6 +146,13 @@ export async function buildLadderView(params: URLSearchParams) {
     basketError,
     basket: basketLegs ? (() => {
       const ax = basketAxis(draft, l => prices.ltps[basketLegs![draft.indexOf(l)].securityId]);
+      // A synthetic future (`syn` = its strike): the axis is the synthetic price K + CE - PE, not the net premium.
+      const synK = Number(params.get('syn'));
+      const synth = synK > 0 ? synAxis(synK, prices.ltps[basketLegs![draft.findIndex(l => l.opt === 'CE')]?.securityId], prices.ltps[basketLegs![draft.findIndex(l => l.opt === 'PE')]?.securityId]) : null;
+      if (synK > 0) return {
+        legs: draft.map((l, i) => ({ strike: l.strike, opt: l.opt, side: l.side, ratio: l.ratio, expiry: basketLegs![i].expiry, securityId: basketLegs![i].securityId, ltp: prices.ltps[basketLegs![i].securityId] ?? null })),
+        a: synth, credit: null, lotSize: basketLegs![0].lotSize, mult: basketLegs![0].mult ?? 1, syn: true,
+      };
       return {
         legs: draft.map((l, i) => ({ strike: l.strike, opt: l.opt, side: l.side, ratio: l.ratio, ...(l.far ? { far: true } : {}), expiry: basketLegs![i].expiry, securityId: basketLegs![i].securityId, ltp: prices.ltps[basketLegs![i].securityId] ?? null })),
         a: ax?.a ?? null, credit: ax?.credit ?? null, lotSize: basketLegs![0].lotSize, mult: basketLegs![0].mult ?? 1,

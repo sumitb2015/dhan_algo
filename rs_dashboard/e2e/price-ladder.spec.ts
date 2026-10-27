@@ -110,6 +110,12 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
           ...(u.searchParams.get('basket') ? (() => {
             const legs = u.searchParams.get('basket')!.split(',').map(t => { const [k, o, s, r] = t.split(':'); return { strike: Number(k), opt: o as 'CE' | 'PE', side: s === 'S' ? 'SELL' as const : 'BUY' as const, ratio: Number(r) }; });
             const d = legs.reduce((a, l) => a + (l.side === 'BUY' ? 1 : -1) * l.ratio * bpx(l.strike, l.opt), 0);
+            // A synthetic future (`syn` = its strike): the axis is K + CE - PE, not the net premium.
+            const synK = Number(u.searchParams.get('syn'));
+            if (synK > 0) {
+              const px = (o: 'CE' | 'PE') => bpx(synK, o);
+              return { basket: { legs: legs.map(l => ({ ...l, securityId: `${l.strike}${l.opt}`, ltp: bpx(l.strike, l.opt) })), a: Number((synK + px('CE') - px('PE')).toFixed(2)), credit: null, lotSize: 65, mult: 1, syn: true } };
+            }
             return { basket: { legs: legs.map(l => ({ ...l, securityId: `${l.strike}${l.opt}`, ltp: bpx(l.strike, l.opt) })), a: Math.abs(Number(d.toFixed(2))), credit: d < 0, lotSize: 65, mult: 1 } };
           })() : {}),
         } });
@@ -866,4 +872,42 @@ test('A pair on other strikes is not drawn on the ladder: the page says so and o
   await expect(page.getByRole('button', { name: 'View on ladder' })).toBeVisible();
   await page.getByRole('button', { name: /^Show 23300CE\/23100PE strangle$/ }).click();
   await expect(page.getByText('CE 23300 (ATM+2) · PE 23100 (ATM-2)')).toBeVisible();
+});
+
+// ── Synthetic future ──
+test('Synthetic future: the Option row offers it; the ladder shows the ATM strike, both premiums and the mode locks to Synthetic', async ({ page }) => {
+  const seen = await install(page);
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Synthetic', exact: true }).click();
+  await expect(page.getByLabel('Synthetic strike')).toContainText('23200 ATM');
+  await expect(page.getByLabel('Synthetic strike')).toContainText('CE 120');
+  await expect(page.getByLabel('Synthetic strike')).toContainText('PE 100');
+  await expect(page.getByLabel('Basket strategy')).toHaveCount(0);
+  // The mode switch has only Synthetic; Pair / Basket / Index / Plain are not offered while it is chosen.
+  for (const n of ['Index', 'Plain', 'Pair', 'Basket']) await expect(page.getByRole('button', { name: n, exact: true })).toHaveCount(0);
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Synthetic future: Buy at market sends a syn basket with its strike, and the legs are not taken from the page', async ({ page }) => {
+  const seen = await install(page);
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Synthetic', exact: true }).click();
+  await expect(page.getByLabel('Synthetic strike')).toContainText('23200 ATM');
+  await page.getByRole('button', { name: 'Buy at market' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.op === 'market').length).toBe(1);
+  expect(seen.posts.find(b => b.op === 'market')).toMatchObject({ action: 'basket', op: 'market', kind: 'syn', synStrike: 23200, side: 'BUY', mode: 'sim', underlying: 'NIFTY' });
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Synthetic future: choosing Call again leaves it and restores the Index ladder', async ({ page }) => {
+  await install(page);
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Synthetic', exact: true }).click();
+  await expect(page.getByLabel('Synthetic strike')).toBeVisible();
+  await page.getByRole('button', { name: 'Call', exact: true }).click();
+  await expect(page.getByLabel('Synthetic strike')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Index', exact: true })).toBeVisible();
 });

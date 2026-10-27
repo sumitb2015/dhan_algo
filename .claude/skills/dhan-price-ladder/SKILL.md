@@ -80,6 +80,11 @@ per write; the page drops a view older than the one on screen). It is re-read on
     hedge sends no short, a failed short unwinds shorts first, exits cover shorts before hedges (`exitLegs`), an UNKNOWN leg stops and
     reverses nothing (resolve per leg), the reconcile cuts legs down only (`cutBasketLeg` -> BROKEN). Capped at `MAX_REAL_BASKET_LOTS`
     (5) and funds-checked fail closed (`realBasketBlocked`) until it has run live (`dhan-terminal-position-ownership` Inv 4, 9, 10, 14).
+16. **Synthetic future = a Basket with `kind: 'syn'`** (2026-10-27). Two legs at the ATM strike (`draftSyn`: long BUY CE + SELL PE, short the mirror),
+    `side` is the DIRECTION (BUY = long), the axis is `K + CE - PE` (`basketCombined` / `synAxis`; the premium axis flips sign, so it cannot be used).
+    The server builds the legs from `synStrike` + `side` and ignores any legs the browser sends. Entry/unwind/UNKNOWN/exit rules are the Basket's;
+    REAL cap `MAX_REAL_SYN_LOTS` (2). `synSane` (1.5% of the index) pauses entry and bracket on a stale leg, never a requested exit. The page's
+    `syn` flag is page-only (not an `OptType`); the positions-window close refuses a live REAL syn leg (`synLegOwner`).
 14. **A REAL fill nets against the opposite open slice.** The broker nets a row, so `openedPatch` calls `netAgainstOpposite`
     (`priceLadder.ts`: same broker, contract, product, REAL, state `open`, opposite side, oldest first) and only the excess opens a
     slice. Without it the closing order showed as a new position for `FILL_GRACE_MS`, until `reconcileDown` cut it. Pair / basket

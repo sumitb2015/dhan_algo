@@ -411,7 +411,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         return await marketOrder(body);
 
       case 'basket':
-        // Basket mode (prebuilt multi-leg strategies on their net premium): SIM only in release 1.
+        // Basket mode (prebuilt multi-leg strategies on their net premium): SIM and REAL (priceLadderBasketActions).
         return await basketAction(body);
 
       case 'pair':

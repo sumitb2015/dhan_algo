@@ -1288,7 +1288,8 @@ async function tick(): Promise<void> {
   // Prices only for slices whose rules read them (armed / open XY need spot; SIM fills and exits need the option LTP).
   // An exiting REAL slice is priced too: its open units count in the MTM, and an unpriced one blinds the global guard.
   const priced = live.filter(x => x.state === 'armed' || x.state === 'open' || x.state === 'exiting' || (x.mode === 'sim' && x.state === 'working'));
-  const underlyings = [...new Set(priced.map(x => spotKey(x.contract)))];
+  // A synthetic basket's basis check reads the index spot too.
+  const underlyings = [...new Set([...priced.map(x => spotKey(x.contract)), ...liveBaskets.filter(b => b.kind === 'syn').map(b => b.legs[0].contract.underlying)])];
   // A pair's rules read both legs' premiums (its combined price).
   const pairLegs = livePairs.flatMap(p => [p.legs.ce.contract, p.legs.pe.contract, ...(p.rollTo?.ce ? [p.rollTo.ce] : []), ...(p.rollTo?.pe ? [p.rollTo.pe] : [])]);
   const basketLegs = liveBaskets.flatMap(b => b.legs.map(l => l.contract));
@@ -1310,6 +1311,8 @@ async function tick(): Promise<void> {
     polledAt: (id: string) => (jobsInFlight.has(id) ? Number.POSITIVE_INFINITY : lastPoll.get(id) ?? 0),
     mayCancel: (id: string) => !jobsInFlight.has(id) && warnOnce(`cancel:${id}`, 30_000),
     busy: (id: string) => jobsInFlight.has(id),
+    // The index spot of a synthetic basket, only while it is fresh (a stale one cannot vouch for the synthetic price).
+    spotOf: (b: LadderBasket) => { const sp = prices.spots[b.legs[0].contract.underlying]; return sp && spotFresh(sp.at, now) ? sp.spot : undefined; },
   };
   // Plan and mark inside the lock, so the jobs match exactly what was written (a request may have changed a slice
   // between our read and the lock). Opens and closes are protected by that mark: the next tick sees 'placing' /

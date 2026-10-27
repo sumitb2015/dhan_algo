@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   basketTemplates, draftFromTemplate, validateDraft, basketAxis, orientLegs, basketCombined, basketName, basketNowPnl, sumBasketPnl,
-  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, type LadderBasket, type BasketLeg, type DraftLeg,
+  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, MAX_REAL_SYN_LOTS, MAX_REAL_BASKET_LOTS, type LadderBasket, type BasketLeg, type DraftLeg,
 } from './priceLadderBasket.ts';
 import { rollDay, type LadderState } from './priceLadder.ts';
 import { lotsOnContract, openPositionCount } from './priceLadderPair.ts';
@@ -334,4 +334,88 @@ test('mixedExpiry tells a calendar from a single-expiry basket', () => {
   const leg = (expiry: string) => ({ contract: { ...contract(22500, 'CE'), expiry } }) as BasketLeg;
   assert.equal(mixedExpiry({ legs: [leg('2026-10-27'), leg('2026-11-24')] }), true);
   assert.equal(mixedExpiry({ legs: [leg('2026-10-27'), leg('2026-10-27')] }), false);
+});
+
+// ── Synthetic future ─────────────────────────────────────────────────────────────────────────────────────────────────
+const SYN_K = 22500;
+const SYN_PX: Record<string, number> = { '22500CE': 160, '22500PE': 140 };      // synthetic = 22500 + 160 - 140 = 22520
+function synBasket(side: 'BUY' | 'SELL', o: Partial<LadderBasket> = {}): LadderBasket {
+  const legs = draftSyn(SYN_K, side).map((l, i) => ({ key: `l${i}`, side: l.side, ratio: 1, contract: contract(l.strike, l.opt) }) as BasketLeg);
+  return { id: 's1', strategy: 'synthetic-future', name: 'Synthetic Future', broker: 'dhan', mode: 'sim', side, kind: 'syn', synStrike: SYN_K, lots: 1, product: 'MIS', state: 'armed', legs, createdAt: 1, updatedAt: 1, entryLevel: 22510, entryDir: 'above', seenSafe: true, orderType: 'LIMIT', ...o };
+}
+
+test('draftSyn: long = BUY CE + SELL PE, short = SELL CE + BUY PE, both at one strike', () => {
+  assert.deepEqual(draftSyn(SYN_K, 'BUY').map(l => [l.side, l.opt, l.strike]), [['BUY', 'CE', SYN_K], ['SELL', 'PE', SYN_K]]);
+  assert.deepEqual(draftSyn(SYN_K, 'SELL').map(l => [l.side, l.opt, l.strike]), [['SELL', 'CE', SYN_K], ['BUY', 'PE', SYN_K]]);
+  assert.equal(validateDraft(draftSyn(SYN_K, 'BUY')), null);
+  assert.equal(validateDraft(draftSyn(SYN_K, 'SELL')), null);
+});
+
+test('synAxis is K + CE - PE and needs both prices; synStrikeFor snaps to the grid', () => {
+  assert.equal(synAxis(SYN_K, 160, 140), 22520);
+  assert.equal(synAxis(SYN_K, 140, 160), 22480);          // sign flips freely: it is an index level, not a premium
+  assert.equal(synAxis(SYN_K, undefined, 140), null);
+  assert.equal(synAxis(SYN_K, 160, 0), null);
+  assert.equal(synStrikeFor(22537, 50), 22550);
+  assert.equal(synStrikeFor(0, 50), null);
+});
+
+test('basketCombined: a synthetic is K + CE - PE in BOTH directions', () => {
+  assert.equal(basketCombined(synBasket('BUY'), SYN_PX), 22520);
+  assert.equal(basketCombined(synBasket('SELL'), SYN_PX), 22520);
+  assert.equal(basketCombined(synBasket('BUY'), { '22500CE': 160 }), null);
+  // CE == PE: a premium basket would have no axis; the synthetic is just the strike.
+  assert.equal(basketCombined(synBasket('BUY'), { '22500CE': 150, '22500PE': 150 }), 22500);
+});
+
+test('synSane bounds the synthetic against the spot; an unknown spot does not block', () => {
+  assert.equal(synSane(22520, 22510), true);
+  assert.equal(synSane(22900, 22510), false);             // one stale leg shifted it by ~380 pts (1.7%)
+  assert.equal(synSane(22520, undefined), true);
+});
+
+test('SIM synthetic: a long fires on the crossing synthetic price and its bracket is in synthetic points', () => {
+  const b = synBasket('BUY', { bracket: { tgtPts: 30, slPts: 20 } as LadderBasket['bracket'] });
+  const { next } = planBaskets(st([b]), SYN_PX, NOW);
+  const o = next.baskets![0];
+  assert.equal(o.state, 'open');
+  assert.equal(o.entryY, 22520);
+  assert.equal(o.tgtY, 22550);                            // a long gains as the synthetic rises
+  assert.equal(o.slY, 22500);
+  assert.deepEqual(o.legs.map(l => [l.side, l.avg]), [['BUY', 160], ['SELL', 140]]);
+});
+
+test('SIM synthetic short: gains as the synthetic falls', () => {
+  const b = synBasket('SELL', { entryDir: 'below', entryLevel: 22530, bracket: { tgtPts: 30, slPts: 20 } as LadderBasket['bracket'] });
+  const { next } = planBaskets(st([b]), SYN_PX, NOW);
+  const o = next.baskets![0];
+  assert.equal(o.state, 'open');
+  assert.equal(o.tgtY, 22490);
+  assert.equal(o.slY, 22540);
+});
+
+test('a synthetic far from the spot (a stale leg) pauses its entry; an unknown spot does not', () => {
+  const b = synBasket('BUY');
+  const io = { polledAt: () => 0, busy: () => false, spotOf: () => 22000 as number | undefined };
+  assert.equal(planBaskets(st([b]), SYN_PX, NOW, io).next.baskets![0].state, 'armed');
+  assert.equal(planBaskets(st([b]), SYN_PX, NOW, { ...io, spotOf: () => 22510 }).next.baskets![0].state, 'open');
+});
+
+test('a synthetic exit still runs while the basis check pauses its bracket', () => {
+  const open = synBasket('BUY', { state: 'open', entryY: 22520, exitWanted: 'Manual exit', legs: synBasket('BUY').legs.map(l => ({ ...l, avg: SYN_PX[l.contract.securityId], held: LOT, filledQty: LOT, entry: 'filled' as const })) });
+  const io = { polledAt: () => 0, busy: () => false, spotOf: () => 22000 as number | undefined };
+  const r = planBaskets(st([open]), SYN_PX, NOW, io).next.baskets![0];
+  assert.equal(r.state, 'closed');
+  assert.equal(r.exitReason, 'Manual exit');
+});
+
+test('REAL synthetic entry: the bought leg goes first (CE for a long, PE for a short); exit covers the short leg first', () => {
+  assert.deepEqual(phaseLegs(synBasket('BUY'), 'hedges').map(l => l.contract.opt), ['CE']);
+  assert.deepEqual(phaseLegs(synBasket('SELL'), 'hedges').map(l => l.contract.opt), ['PE']);
+  const held = synBasket('BUY', { state: 'open', mode: 'real', legs: synBasket('BUY').legs.map(l => ({ ...l, held: LOT, filledQty: LOT, entry: 'filled' as const })) });
+  assert.deepEqual(exitLegs(held, NOW).map(l => l.contract.opt), ['PE']);      // the short put is covered before the long call is sold
+});
+
+test('the REAL synthetic cap is tighter than the REAL basket cap', () => {
+  assert.ok(MAX_REAL_SYN_LOTS < MAX_REAL_BASKET_LOTS);
 });

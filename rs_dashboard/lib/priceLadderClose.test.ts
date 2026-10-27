@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planClose, isClosePct, CloseGuard, CLOSE_COOLDOWN_MS } from './priceLadderClose.ts';
+import { planClose, isClosePct, CloseGuard, CLOSE_COOLDOWN_MS, synLegOwner } from './priceLadderClose.ts';
 
 test('planClose: a short is closed with a BUY, a long with a SELL, 100% sends |net| verbatim', () => {
   assert.deepEqual(planClose(-195, 65, 100), { side: 'BUY', qty: 195 });
@@ -52,4 +52,16 @@ test('ladderExitInFlight: a REAL exit on the wire for the same contract blocks a
   const pair = { id: 'p', broker: 'dhan', mode: 'real', state: 'open', legs: { ce: leg, pe: { contract: { ...c, securityId: '222', opt: 'PE' as const } } } };
   assert.match(ladderExitInFlight(st([], [pair]), 'dhan', '111')!, /leg of a pair/);
   assert.equal(ladderExitInFlight(st([], [pair]), 'dhan', '222'), null);
+});
+
+test('synLegOwner: a leg of a live REAL synthetic is refused; SIM, closed and other contracts are not', () => {
+  const leg = (securityId: string, opt: 'CE' | 'PE', side: 'BUY' | 'SELL') => ({ key: securityId, side, ratio: 1, contract: { underlying: 'NIFTY', expiry: '2026-10-27', strike: 22500, opt, securityId, lotSize: 65, exchangeSegment: 'NSE_FNO' } });
+  const b = (o: object) => ({ id: 's', kind: 'syn', broker: 'dhan', mode: 'real', state: 'open', legs: [leg('111', 'CE', 'BUY'), leg('222', 'PE', 'SELL')], ...o });
+  const st = (baskets: object[]) => ({ date: '2026-10-27', events: [], slices: [], baskets }) as never;
+  assert.match(synLegOwner(st([b({})]), 'dhan', '222') ?? '', /one leg of a synthetic future/);
+  assert.equal(synLegOwner(st([b({})]), 'dhan', '999'), null);
+  assert.equal(synLegOwner(st([b({ mode: 'sim' })]), 'dhan', '222'), null);
+  assert.equal(synLegOwner(st([b({ state: 'closed' })]), 'dhan', '222'), null);
+  assert.equal(synLegOwner(st([b({ kind: undefined })]), 'dhan', '222'), null);      // an ordinary basket is the ladder's exit-in-flight rule's business
+  assert.equal(synLegOwner(st([b({})]), 'kotak', '222'), null);
 });

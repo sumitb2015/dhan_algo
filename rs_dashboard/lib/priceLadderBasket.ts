@@ -34,8 +34,11 @@ export interface LadderBasket {
   name: string;
   broker: LadderBroker;
   mode: 'sim' | 'real';
-  /** Cash direction: SELL = receive the net premium, BUY = pay it. */
+  /** Cash direction: SELL = receive the net premium, BUY = pay it. For a synthetic future (`kind: 'syn'`) it is the direction: BUY = long. */
   side: LadderSide;
+  /** 'syn' = a synthetic future (long: BUY CE + SELL PE at `synStrike`); its axis is the synthetic price, not the net premium. */
+  kind?: 'syn';
+  synStrike?: number;
   lots: number;
   product: LadderProduct;
   state: BasketState;
@@ -177,8 +180,12 @@ export function orientLegs<T extends { side: LadderSide }>(legs: readonly T[], c
   return legs.map(l => ({ ...l, side: asDefined ? l.side : (l.side === 'BUY' ? 'SELL' : 'BUY') }));
 }
 
-/** The basket's live net premium A in its own cash direction, or null when a leg has no price / it nets to nothing. */
-export function basketCombined(b: Pick<LadderBasket, 'legs' | 'side'>, ltps: Record<string, number>): number | null {
+/**
+ * The basket's live net premium A in its own cash direction, or null when a leg has no price / it nets to nothing.
+ * A synthetic future's axis is its synthetic price `K + CE - PE` instead (the legs trade as BUY CE + SELL PE for a long, the
+ * mirror for a short, so CE - PE is the same sum in both directions); that is an index level, never near zero.
+ */
+export function basketCombined(b: Pick<LadderBasket, 'legs' | 'side' | 'kind' | 'synStrike'>, ltps: Record<string, number>): number | null {
   let v = 0;
   for (const l of b.legs) {
     const px = ltps[l.contract.securityId];
@@ -186,8 +193,31 @@ export function basketCombined(b: Pick<LadderBasket, 'legs' | 'side'>, ltps: Rec
     v += (l.side === 'BUY' ? 1 : -1) * l.ratio * px;
   }
   const a = round2(b.side === 'BUY' ? v : -v);
+  if (b.kind === 'syn') return b.synStrike ? round2(b.synStrike + a) : null;
   return a > 0 ? a : null;
 }
+
+/** A synthetic future's two legs at strike `k` as the draft shows them: long = BUY CE + SELL PE, short = the mirror. */
+export function draftSyn(k: number, side: LadderSide): DraftLeg[] {
+  const [ce, pe]: LadderSide[] = side === 'BUY' ? ['BUY', 'SELL'] : ['SELL', 'BUY'];
+  return [{ side: ce, opt: 'CE', strike: k, ratio: 1 }, { side: pe, opt: 'PE', strike: k, ratio: 1 }];
+}
+
+/** The synthetic price K + CE - PE from the two live premiums, or null when either has no price. */
+export function synAxis(k: number, ce: number | undefined, pe: number | undefined): number | null {
+  if (!(k > 0) || !(ce != null && ce > 0) || !(pe != null && pe > 0)) return null;
+  return round2(k + ce - pe);
+}
+
+/** The nearest strike on the `step` grid to the spot (the synthetic's strike), or null with no spot. */
+export function synStrikeFor(spot: number, step: number): number | null {
+  return spot > 0 && step > 0 ? Math.round(spot / step) * step : null;
+}
+
+/** How far the synthetic price may sit from the index before it is treated as a bad print (one stale leg shifts it by a whole move). */
+export const SYN_MAX_BASIS = 0.015;
+/** True when the synthetic price is within SYN_MAX_BASIS of the spot. An unknown spot passes (the leg prices are already fresh-gated). */
+export const synSane = (synth: number, spot: number | undefined): boolean => !(spot != null && spot > 0) || Math.abs(synth - spot) / spot <= SYN_MAX_BASIS;
 
 /** "Iron Condor 22400/22500/22700/22800": the strategy and its distinct strikes. */
 export function basketName(b: Pick<LadderBasket, 'name' | 'legs'>): string {
@@ -281,7 +311,10 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
     const sessionOpen = hhmm >= sess.open && hhmm < sess.close;
     const at = sess.autoExitLabel;
     const name = basketName(b);
-    const c = basketCombined(b, ltps);
+    let c = basketCombined(b, ltps);
+    // A synthetic with one leg's print stale or wrong sits far from the index: pause its levels (entry and bracket) rather than
+    // fire on it. An exit due (manual / square-off) needs only the leg prices, so it still runs.
+    if (c != null && b.kind === 'syn' && !synSane(c, io.spotOf?.(b))) c = null;
 
     if (b.state === 'unknown') continue;                 // the user resolves it; nothing automatic
 
@@ -297,7 +330,7 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
         jobs.push({ kind: 'basketOpen', id: b.id });
       } else if (r.fire && sessionOpen) {
         const legs = b.legs.map(l => fillLeg(l, basketLegQty(b.lots, l.ratio, l.contract.lotSize), ltps[l.contract.securityId]) as BasketLeg);
-        const entryY = basketCombined({ legs, side: b.side }, Object.fromEntries(legs.map(l => [l.contract.securityId, l.avg!]))) ?? c;
+        const entryY = basketCombined({ ...b, legs }, Object.fromEntries(legs.map(l => [l.contract.securityId, l.avg!]))) ?? c;
         next = say(patch(b.id, { state: 'open', seenSafe: r.seenSafe, openedAt: now, entryY, legs, ...bracketAt(b, entryY) }),
           'info', `SIM ${b.side} ${b.lots} lot(s) ${name} filled at net ${entryY.toFixed(2)} (level ${b.entryLevel}, net ${c.toFixed(2)})`, b.id);
       } else if (r.seenSafe !== !!b.seenSafe) {
@@ -345,7 +378,7 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
           continue;
         }
         const legs = b.legs.map((l, i) => ({ ...l, avg: avgs[i], held: l.filledQty } as BasketLeg));
-        const entryY = basketCombined({ legs, side: b.side }, Object.fromEntries(legs.map(l => [l.contract.securityId, l.avg!]))) ?? c ?? 0;
+        const entryY = basketCombined({ ...b, legs }, Object.fromEntries(legs.map(l => [l.contract.securityId, l.avg!]))) ?? c ?? 0;
         next = say(patch(b.id, { state: 'open', phase: undefined, openedAt: now, note: undefined, entryY, legs, ...bracketAt(b, entryY) }),
           'info', `${b.side} ${b.lots} lot(s) ${name} filled at net ${entryY.toFixed(2)} (crossed at ${b.crossY ?? '?'})`, b.id);
       } else if (v === 'unwind') {
@@ -500,11 +533,15 @@ export interface BasketTickIo {
   polledAt: (id: string) => number;
   /** A job for this basket is running. */
   busy: (id: string) => boolean;
+  /** The fresh index spot of a synthetic basket's underlying (for the basis bound), or undefined when it has none. */
+  spotOf?: (b: LadderBasket) => number | undefined;
 }
 const NO_IO: BasketTickIo = { polledAt: () => 0, busy: () => false };
 
 /** The tighter cap on a REAL basket's lots for this first REAL release (the per-contract 20-lot cap still applies). */
 export const MAX_REAL_BASKET_LOTS = 5;
+/** A REAL synthetic future is capped lower still until it has run live (2026-10-27). */
+export const MAX_REAL_SYN_LOTS = 2;
 
 /** The legs the phase sends: hedges (BUY) first; shorts (SELL) once the hedges are filled. */
 export const phaseLegs = (b: Pick<LadderBasket, 'legs'>, phase: 'hedges' | 'shorts'): BasketLeg[] => b.legs.filter(l => (phase === 'hedges' ? l.side === 'BUY' : l.side === 'SELL'));

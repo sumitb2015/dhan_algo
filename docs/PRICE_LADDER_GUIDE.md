@@ -162,6 +162,19 @@ For CRUDEOILM the **Option** row has a third choice, **Future**: the Expiry list
 
 Kotak and Zerodha futures are **refused** (their futures quantity units and positions are not confirmed against live fills); the contract does not resolve for them. Unconfirmed (2026-10-26): live fills and the position window's close on a CRUDEOILM future. Confirm with one SIM trade, then a 1-lot REAL one.
 
+## Synthetic future (NIFTY / BANKNIFTY / SENSEX)
+
+The **Option** row has a fourth choice, **Synthetic**: a long call against a short put at the at-the-money strike, traded as one position on the **synthetic price** `strike + CE − PE`. Dhan, Kotak and Zerodha. The strike is picked from the ATM when the legs are built and shown read-only (with both premiums); the Mode switch shows only *Synthetic* (it rides Basket mode) and Pair / Basket / Index / Plain are off while it is chosen. Steps are 1 / 5 / 10 / 25 like the Index ladder.
+
+- **Buy = long** (BUY CE + SELL PE), **Sell = short** (SELL CE + BUY PE). A long gains as the synthetic price rises. Buy below it / Sell above it is the limit-like entry; the other side is a breakout (Anywhere view or Order Type SL). Target / SL / trail are synthetic-price points; Buy / Sell Market fills both legs now.
+- **REAL order sequence** is the Basket's: the BOUGHT leg goes first and must fill in full before the SOLD leg is sent; a failed or part-filled leg closes what filled; a send with an unknown outcome stops everything and reverses nothing (resolve it per leg). Exit covers the SOLD leg first, then sells the bought one.
+- **Caps:** 2 lots in REAL (the Basket's 5 and the 20-lot-per-contract cap still apply), funds / margin checked fail closed.
+- **Safety pauses:** entry and bracket pause while either leg has no fresh price or the synthetic sits more than 1.5% from the index (a stale leg moves it by a whole option move). An exit you ask for, the MTM guard and the square-off still run.
+- **Positions window:** closing one leg of a live REAL synthetic is refused (it would leave the other leg naked). Use Exit on the ladder.
+- Like every bracket, the SL / target / trail run in the dashboard process, not at the broker: closing the dashboard stops them.
+
+Unconfirmed (2026-10-27): live REAL fills, especially the second leg on Kotak and Zerodha. Confirm with one SIM trade, then a 1-lot REAL one on Dhan.
+
 ## CRUDEOILM on Zerodha and Kotak
 
 CRUDEOILM trades on all three brokers. Prices always come from Dhan; only the order unit differs, and it is fixed when the contract is resolved (`resolveContract`):

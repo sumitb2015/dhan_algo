@@ -10,7 +10,7 @@ import { resolveLotSize } from '@/lib/lotSize';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { brokerPositionRows, brokerSessionOk, updateLadderState, readLadderState, startPriceLadderLoop } from '@/lib/priceLadderServer';
 import { zerodhaLadderParams, pushEvent, ev, type LadderBroker } from '@/lib/priceLadder';
-import { planClose, isClosePct, CloseGuard, ladderExitInFlight } from '@/lib/priceLadderClose';
+import { planClose, isClosePct, CloseGuard, ladderExitInFlight, synLegOwner } from '@/lib/priceLadderClose';
 
 // Close all or part of a broker position from the Price Ladder's positions window. Real money, so the browser only names
 // the position (broker + contract key + product) and a share; the side, quantity and segment come from the broker's own
@@ -47,6 +47,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (row === undefined) return bad(`Could not read the ${NAME[broker]} positions — nothing was sent`, 502);
     if (!row || row.net === 0) return bad('That position is flat at the broker — refresh');
     // The ladder's own exit may be on the wire: a second one off the same book would flip the position.
+    const synLeg = synLegOwner(readLadderState(), broker, key);
+    if (synLeg) return bad(`Not sent: ${synLeg}`, 409);
     const inFlight = ladderExitInFlight(readLadderState(), broker, key);
     if (inFlight) return bad(`Not sent: ${inFlight} — wait for it to settle, then refresh`, 409);
 

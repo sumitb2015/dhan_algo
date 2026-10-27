@@ -17,7 +17,7 @@ import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { computePivots, pivotChips, PIVOT_FORMULAS } from '@/lib/pivotLevels';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, basketWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { BasketLegsModal } from '@/components/priceLadder/BasketLegsModal';
-import { basketTemplates, draftFromTemplate, draftToParam, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
+import { basketTemplates, draftFromTemplate, draftSyn, draftToParam, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
 import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, sumPairPnl, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
@@ -338,6 +338,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [peOff, setPeOff] = useState(2);
   // Basket mode: the strategy template, the legs on screen (edited in the pop-up; the side is AS DEFINED by the strategy) and whether
   // the user changed them (an edited draft is never re-built from the template when ATM moves).
+  // A synthetic future (NIFTY / BANKNIFTY / SENSEX): a page-only choice, never an `opt`. It rides Basket mode with two fixed legs
+  // (long = BUY CE + SELL PE at ATM) and trades on the synthetic price K + CE - PE.
+  const [syn, setSyn] = useState(false);
   const [basketKey, setBasketKey] = useState('iron-condor');
   const [basketLegs, setBasketLegs] = useState<DraftLeg[]>([]);
   const [basketEdited, setBasketEdited] = useState(false);
@@ -345,7 +348,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // A calendar / diagonal's far expiry (later than `expiry`); rides in the price request on the far legs themselves.
   const [farExpiry, setFarExpiry] = useState('');
   const basketHasFar = basketLegs.some(l => l.far);
-  const basketParam = mode === 'basket' && (!basketHasFar || farExpiry) ? draftToParam(basketLegs, farExpiry) : '';
+  // Until the synthetic's own two legs are built, the legs on screen are the last strategy's: nothing is requested for them.
+  const synShaped = basketLegs.length === 2 && basketLegs[0].strike === basketLegs[1].strike && basketLegs[0].opt !== basketLegs[1].opt;
+  const basketParam = mode === 'basket' && (!basketHasFar || farExpiry) && (!syn || synShaped) ? draftToParam(basketLegs, farExpiry) : '';
+  const synK = syn && synShaped ? basketLegs[0].strike : 0;
   // Pair mode: a leg moving this % against its own fill exits both legs (0 = off).
   const [legSlPct, setLegSlPct] = useState(0);
   const [real, setReal] = useState(false);               // per page load, never persisted
@@ -453,11 +459,21 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const pairPe = built?.pe ?? null;
   const pairOk = pairCe != null && pairPe != null && strikes.includes(pairCe) && strikes.includes(pairPe);
   // The expiry is cleared too: the old underlying's date must not be asked of the new one's chain for a render.
-  const setUnderlying = (u: string) => { if (opt === 'FUT' && !isMcxUnderlying(u)) setOpt('CE'); setUnderlyingRaw(u); savePref(k('price-ladder-underlying'), u); setExpiry(''); setExpiries([]); setStrike(opt === 'FUT' && isMcxUnderlying(u) ? FUT_STRIKE : null); setCenter(0); setFollow(true); setManual(false); };
+  const setUnderlying = (u: string) => { if (opt === 'FUT' && !isMcxUnderlying(u)) setOpt('CE'); if (syn && isMcxUnderlying(u)) { setSyn(false); setMode('xy'); } setUnderlyingRaw(u); savePref(k('price-ladder-underlying'), u); setExpiry(''); setExpiries([]); setStrike(opt === 'FUT' && isMcxUnderlying(u) ? FUT_STRIKE : null); setCenter(0); setFollow(true); setManual(false); };
 
   // Option <-> Future: a different expiry list and no strike, so the old selection is dropped until the new list arrives.
   // The Pair / Basket ladders are options-only (two legs / a strategy), so a future falls back to Index.
-  const chooseOpt = (o: OptType) => {
+  const chooseOpt = (o: OptType | 'SYN') => {
+    if (o === 'SYN') {
+      if (syn) return;
+      // The reply is matched on strike + opt like any selection, so a Put or option strike stays selected (a Future's sentinel is dropped).
+      setSyn(true); setBasketEdited(false);
+      if (isFut) { setOpt('CE'); setStrike(null); setExpiry(''); setExpiries([]); setStrikes([]); }
+      setCenter(0); setFollow(true); setManual(false);
+      if (mode !== 'basket') setMode('basket');
+      return;
+    }
+    if (syn) { setSyn(false); setBasketEdited(false); setMode('xy'); }
     if ((o === 'FUT') !== isFut) { setExpiry(''); setExpiries([]); setStrikes([]); setCenter(0); setFollow(true); setManual(false); setStrike(o === 'FUT' ? FUT_STRIKE : null); if (o === 'FUT' && (mode === 'pair' || mode === 'basket')) setMode('xy'); }
     setOpt(o);
   };
@@ -602,6 +618,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     if (expiry && strike) { q.set('expiry', expiry); q.set('strike', String(strike)); q.set('opt', opt); }
     if (expiry && pairOk) { q.set('pairCe', String(pairCe)); q.set('pairPe', String(pairPe)); }
     if (expiry && basketParam) q.set('basket', basketParam);
+    if (expiry && basketParam && synK > 0) q.set('syn', String(synK));
     // Open only while the tab is visible: each open stream holds one of the browser's ~6 connections to this server
     // (HTTP/1.1), shared with every dashboard tab — a hidden ladder must not hold one and queue another tab's orders.
     let es: EventSource | null = null;
@@ -626,7 +643,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     open();
     document.addEventListener('visibilitychange', onVis);
     return () => { document.removeEventListener('visibilitychange', onVis); close(); };
-  }, [underlying, expiry, strike, opt, pairOk, pairCe, pairPe, basketParam, applyView]);
+  }, [underlying, expiry, strike, opt, pairOk, pairCe, pairPe, basketParam, synK, applyView]);
 
   // Fallback poll: out-of-order replies are dropped, one request per selection at a time (a reply can outlive the 1 s
   // tick, and a new poll every tick would make every reply "out of order").
@@ -634,7 +651,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const pollInFlight = useRef<string | null>(null);
   const poll = useCallback(async () => {
     if (streamOpen.current) return;
-    const key = `${underlying}|${expiry}|${strike}|${opt}|${pairOk ? `${pairCe}/${pairPe}` : ''}|${basketParam}`;
+    const key = `${underlying}|${expiry}|${strike}|${opt}|${pairOk ? `${pairCe}/${pairPe}` : ''}|${basketParam}|${synK}`;
     if (pollInFlight.current === key) return;
     pollInFlight.current = key;
     const my = ++seq.current;
@@ -642,6 +659,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     if (expiry && strike) { q.set('expiry', expiry); q.set('strike', String(strike)); q.set('opt', opt); }
     if (expiry && pairOk) { q.set('pairCe', String(pairCe)); q.set('pairPe', String(pairPe)); }
     if (expiry && basketParam) q.set('basket', basketParam);
+    if (expiry && basketParam && synK > 0) q.set('syn', String(synK));
     try {
       const r = await fetch(`/api/price-ladder/state?${q}`, { cache: 'no-store' });
       const j = await r.json() as { success: boolean; data?: StateResp; error?: string };
@@ -654,7 +672,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     } finally {
       if (pollInFlight.current === key) pollInFlight.current = null;
     }
-  }, [underlying, expiry, strike, opt, pairOk, pairCe, pairPe, basketParam, applyView]);
+  }, [underlying, expiry, strike, opt, pairOk, pairCe, pairPe, basketParam, synK, applyView]);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void poll();
@@ -861,15 +879,20 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   useEffect(() => { atmRef.current = atmStrike; }, [atmStrike]);
   const buildBasket = useCallback(() => {
     const atm = atmRef.current;
-    if (!basketTpl || !strikes.length || atm == null) return;
+    if (!strikes.length || atm == null) return;
+    // The synthetic sits on the ATM strike (long as defined; the server orients it by the side clicked).
+    if (syn) { setBasketLegs(draftSyn(atm, 'BUY')); return; }
+    if (!basketTpl) return;
     setBasketLegs(draftFromTemplate(basketTpl.legs, atm, STRIKE_STEP[underlying] ?? 50, strikes));
-  }, [basketTpl, strikes, underlying]);
+  }, [basketTpl, strikes, underlying, syn]);
   const atmReady = atmStrike != null;
   useEffect(() => { if (mode === 'basket' && !basketEdited) buildBasket(); }, [mode, basketEdited, buildBasket, atmReady, expiry]);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setBasketEdited(false);
   }, [underlying, expiry]);
+  // The synthetic's price moves in whole rupees like a future's, so it uses the Index ladder's steps.
+  useEffect(() => { if (syn && !XY_TICKS.includes(tickRaw)) setTick(1); }, [syn, tickRaw]);
   const basketOk = mode === 'basket' && matches && rq?.basket === basketParam;
   const basketView = basketOk ? data?.basket ?? null : null;
   const basketErr = basketOk ? data?.basketError ?? null : null;
@@ -1059,7 +1082,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   }, [post, broker, real, underlying, expiry, structure, pairOk, pairCe, pairPe, lots, product, orderType, zones, legSlPct, style, tgtPts, slPts, trailOn, trailPts, second]);
 
   // Basket mode (SIM only for now: the server refuses a REAL basket, and the page says so before asking).
-  const basketPayload = { strategy: basketKey, name: basketTpl?.name ?? 'Basket', legs: basketLegs, underlying, expiry, ...(basketHasFar ? { farExpiry } : {}), broker, product, lots, mode: (real ? 'real' : 'sim') as 'real' | 'sim' };
+  const basketPayload = { strategy: basketKey, name: basketTpl?.name ?? 'Basket', legs: basketLegs, ...(syn ? { kind: 'syn' as const, synStrike: synK } : {}), underlying, expiry, ...(basketHasFar ? { farExpiry } : {}), broker, product, lots, mode: (real ? 'real' : 'sim') as 'real' | 'sim' };
   const sendBasket = useCallback((side: LadderSide, price: number, expect: { kind: 'limit' | 'stop'; dir: 'above' | 'below' }) => {
     if (!expiry || !basketView?.a) return;
     void post({
@@ -1068,7 +1091,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         : trailOn ? { bracket: { tgtPts: 0, slPts: trailPts, trailPts } } : {}),
     }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${basketTpl?.name ?? 'basket'} armed at net ${price}`); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [post, basketKey, basketTpl, basketLegs, basketHasFar, farExpiry, underlying, expiry, broker, real, product, lots, orderType, zones, style, tgtPts, slPts, trailOn, trailPts, second, basketView?.a]);
+  }, [post, basketKey, basketTpl, basketLegs, syn, synK, basketHasFar, farExpiry, underlying, expiry, broker, real, product, lots, orderType, zones, style, tgtPts, slPts, trailOn, trailPts, second, basketView?.a]);
   const sendBasketMarket = (side: LadderSide) => {
     if (!expiry || !basketView?.a) return;
     const run = () => void post({ action: 'basket', op: 'market', ...basketPayload, side, ...(second ? { pane: 2 } : {}) })
@@ -1243,10 +1266,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     : mode === 'pair' && !pairView ? 'waiting for both legs of the pair'
     : mode === 'basket' && !basketView?.a ? 'waiting for a live price on every basket leg'
     : null;
-  const decimals = mode === 'xy' || isFut ? (tick < 1 ? 2 : 0) : 2;
+  const decimals = mode === 'xy' || isFut || syn ? (tick < 1 ? 2 : 0) : 2;
   // A future's price moves in whole rupees (tick 1), so its Plain ladder uses the Index ladder's steps, not the option premium's.
-  const ticks = mode === 'xy' || isFut ? XY_TICKS : mode === 'pair' || mode === 'basket' ? PAIR_TICKS : PLAIN_TICKS;
-  const HELP_TEXT = mode === 'basket'
+  const ticks = mode === 'xy' || isFut || syn ? XY_TICKS : mode === 'pair' || mode === 'basket' ? PAIR_TICKS : PLAIN_TICKS;
+  const HELP_TEXT = syn
+                ? `Synthetic future: the ladder is the synthetic price ${synK || 'K'} + CE − PE (ATM call against put). Buy = long (BUY CE + SELL PE), Sell = short (SELL CE + BUY PE); a long gains as the price rises. Buy below it / Sell above it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. Both legs fill when it crosses the level (REAL: the BOUGHT leg first, the SOLD leg once it filled; a failed leg closes what filled); target / SL / trail are synthetic-price points and exit both legs (REAL: the sold leg is covered first). Levels pause while either leg's price is stale or the synthetic strays more than 1.5% from the index.`
+                : mode === 'basket'
                 ? `Basket: the ladder is the strategy's NET premium (${basketView?.credit ? 'a credit: Sell = collect it' : basketView?.credit === false ? 'a debit: Buy = pay it' : 'credit or debit'}). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. The legs are as the strategy defines them when your direction matches (Sell a credit / Buy a debit), every leg mirrored otherwise. When the net crosses the level the legs fill together (REAL: the BUY legs first, the SELL legs once they filled; a failed leg closes what filled); target / SL / trail are net-premium points and exit every leg (REAL: shorts covered first).`
                 : mode === 'pair'
                 ? `Pair: the ladder is the combined premium (CE + PE). Sell above it / Buy below it = limit-like entry; the other side ${zones === 'anywhere' ? 'is a breakout (BO)' : 'needs Order Type SL (breakout)'}. Both legs go at MARKET together when the combined crosses the level (REAL: if only one fills, it is closed again); target / SL / trail are in combined-premium points and exit both legs.`
@@ -1256,7 +1281,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   ? `Anywhere: Buy below LTP / Sell above it = LIMIT; Sell below / Buy above = SL-limit, its limit ${slBufferPct}% past the trigger. Orders rest at the broker.`
                   : 'Click Buy below LTP or Sell above it for a LIMIT; the other side places an SL-M stop (Order Type SL). Orders rest at the broker.';
   const dataDate = data ? data.state.date : null;
-  const optLabel = mode === 'basket'
+  const optLabel = syn
+    ? `${underlying} ${expiry} ${synK ? `${synK} ` : ''}Synthetic Future`
+    : mode === 'basket'
     ? `${underlying} ${expiry}${basketHasFar && farExpiry ? ` / ${farExpiry}` : ''} ${basketTpl?.name ?? 'Basket'}${basketEdited ? ' (edited)' : ''}`
     : mode === 'pair'
     ? (pairOk ? `${underlying} ${expiry} ${structure === 'straddle' ? `${pairCe} straddle` : `${pairCe}CE / ${pairPe}PE strangle`}` : `${underlying} — pair strikes not in the chain`)
@@ -1679,7 +1706,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
 
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 flex flex-col gap-1.5 text-xs">
               <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Ladder</span>
-                <Seg compact value={mode} options={(isFut ? ['xy', 'plain'] : ['xy', 'plain', 'pair', 'basket']) as readonly PageMode[]} labels={{ xy: 'Index', plain: 'Plain', pair: 'Pair', basket: 'Basket' }} onChange={setMode} />
+                <Seg compact value={mode} options={(syn ? ['basket'] : isFut ? ['xy', 'plain'] : ['xy', 'plain', 'pair', 'basket']) as readonly PageMode[]} labels={{ xy: 'Index', plain: 'Plain', pair: 'Pair', basket: syn ? 'Synthetic' : 'Basket' }} onChange={setMode} />
               </div>
               <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Product</span>
                 <Seg compact value={product} options={['NRML', 'MIS'] as const} onChange={setProduct} />
@@ -1700,7 +1727,13 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   {strikes.map(k => { const off = atmOffsetLabel(strikes, atmStrike, k); return <option key={k} value={k}>{off ? `${k}  ·  ${off}` : k}</option>; })}
                 </select>
               </div>}
-              {mode === 'basket' && (
+              {mode === 'basket' && syn && (
+                <div className="flex items-center justify-between gap-2 min-w-0"><span className="text-zinc-400 font-medium" title="The synthetic sits on the at-the-money strike, picked when the legs are built">Strike</span>
+                  <span className="font-mono text-zinc-100" aria-label="Synthetic strike">{synK ? `${synK} ATM` : '—'}
+                    {basketView && <span className="ml-2 text-zinc-400">CE {basketView.legs.find(l => l.opt === 'CE')?.ltp ?? '—'} · PE {basketView.legs.find(l => l.opt === 'PE')?.ltp ?? '—'}</span>}</span>
+                </div>
+              )}
+              {mode === 'basket' && !syn && (
                 <>
                   <div className="flex items-center justify-between gap-2 min-w-0"><span className="text-zinc-400 font-medium">Strategy</span>
                     <select aria-label="Basket strategy" value={basketKey} onChange={e => { setBasketKey(e.target.value); setBasketEdited(false); }} disabled={basketLocked}
@@ -1723,9 +1756,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   </div>
                 </>
               )}
-              {mode !== 'pair' && mode !== 'basket' && (
+              {((mode !== 'pair' && mode !== 'basket') || syn) && (
                 <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Option</span>
-                  <Seg compact value={opt} options={(mcx && broker === 'dhan' ? ['CE', 'PE', 'FUT'] : ['CE', 'PE']) as readonly OptType[]} labels={{ CE: 'Call', PE: 'Put', FUT: 'Future' }} onChange={chooseOpt} />
+                  <Seg compact value={(syn ? 'SYN' : opt) as OptType | 'SYN'} options={(mcx ? (broker === 'dhan' ? ['CE', 'PE', 'FUT'] : ['CE', 'PE']) : ['CE', 'PE', 'SYN']) as readonly (OptType | 'SYN')[]} labels={{ CE: 'Call', PE: 'Put', FUT: 'Future', SYN: 'Synthetic' }} onChange={chooseOpt} />
                 </div>
               )}
               {mode === 'pair' && (

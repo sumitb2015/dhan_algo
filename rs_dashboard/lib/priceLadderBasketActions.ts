@@ -3,12 +3,13 @@ import { resolveContract } from '@/lib/priceLadderView';
 import { readLadderState, updateLadderState, loadPrices, availableFunds, dhanSellMargin, LADDER_UNDERLYINGS } from '@/lib/priceLadderServer';
 import { fetchNettedMargin } from '@/lib/ultimateScannerDhan';
 import {
-  capLots, classifyClick, cleanBracket, ev, isMcxUnderlying, newLadderId, parseTrailRequest, pushEvent, replanBracket, snapToStep, trailedBracket, MAX_LADDER_LOTS,
+  capLots, classifyClick, cleanBracket, ev, isMcxUnderlying, newLadderId, parseTrailRequest, pushEvent, replanBracket, snapToStep, spotFresh, trailedBracket, MAX_LADDER_LOTS,
   type ClickType, type LadderBroker, type LadderContract, type LadderProduct, type LadderSide, type LadderState, type LadderZones,
 } from '@/lib/priceLadder';
 import { blendExitAvg, lotsOnContract, pairBias, pairLevelSane, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS } from '@/lib/priceLadderPair';
 import {
-  applyBasketShare, basketAxis, basketCombined, basketLegQty, basketName, firstPhase, isBasketLive, orientLegs, patchBasket, validateDraft, MAX_REAL_BASKET_LOTS,
+  applyBasketShare, basketAxis, basketCombined, basketLegQty, basketName, draftSyn, firstPhase, isBasketLive, orientLegs, patchBasket, synAxis, synSane, validateDraft,
+  MAX_REAL_BASKET_LOTS, MAX_REAL_SYN_LOTS,
   type BasketLeg, type DraftLeg, type LadderBasket,
 } from '@/lib/priceLadderBasket';
 import { checkOpenAllowed } from '@/lib/priceLadderPairActions';
@@ -74,7 +75,12 @@ async function realBasketBlocked(broker: LadderBroker, u: string, legs: BasketLe
 interface Prepared {
   now: number; mode: 'sim' | 'real'; broker: LadderBroker; u: string; side: LadderSide; lots: number; product: LadderProduct; strategy: string; name: string;
   legs: BasketLeg[]; ltps: Record<string, number>; a: number; pane?: 2;
+  /** A synthetic future: `a` is the synthetic price K + CE - PE and `side` is the direction (BUY = long). */
+  syn?: { kind: 'syn'; synStrike: number };
 }
+
+/** A synthetic future's strike may sit at most this far from the index (it is the ATM strike when the order is placed). */
+const SYN_MAX_STRIKE_DISTANCE = 0.02;
 
 /** The checks arm and market share; returns the prepared basket legs and live net premium, or the refusal. */
 async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<Prepared | NextResponse> {
@@ -93,7 +99,13 @@ async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<P
   const lots = capLots(b.lots);
   if (lots == null) return bad('Lots must be a whole number from 1 to 20');
   if (mode === 'real' && lots > MAX_REAL_BASKET_LOTS) return bad(`REAL baskets are limited to ${MAX_REAL_BASKET_LOTS} lots for now`);
-  const draft = parseDraft(b.legs);
+  const isSyn = b.kind === 'syn';
+  if (isSyn && isMcxUnderlying(u)) return bad(`${u}: a synthetic future is offered on the indices only`);
+  if (isSyn && mode === 'real' && lots > MAX_REAL_SYN_LOTS) return bad(`REAL synthetic futures are limited to ${MAX_REAL_SYN_LOTS} lots for now`);
+  const synStrike = Number(b.synStrike);
+  if (isSyn && !(synStrike > 0)) return bad('A synthetic future needs its strike');
+  // The synthetic's legs are built here from the strike and the direction, never taken from the browser.
+  const draft = isSyn ? draftSyn(synStrike, side) : parseDraft(b.legs);
   if (typeof draft === 'string') return bad(draft);
   // A calendar / diagonal: the far legs trade on a later expiry than the near ones.
   const farExpiry = String(b.farExpiry ?? '');
@@ -111,11 +123,23 @@ async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<P
   for (const c of contracts) if (typeof c === 'string') return bad(c);
   const cs = contracts as LadderContract[];
   if (new Set(cs.map(c => c.lotSize)).size > 1) return bad('The legs have different lot sizes — refused');
-  const prices = await loadPrices([], cs);
+  const prices = await loadPrices(isSyn ? [u] : [], cs);
   const priceOf = (l: DraftLeg) => prices.ltps[cs[draft.indexOf(l)].securityId];
-  const axis = basketAxis(draft, priceOf);
+  let axis: { a: number; credit: boolean } | null;
+  if (isSyn) {
+    // The synthetic price; the spot must be fresh and close to both the strike and the synthetic, so a stale leg cannot set the level.
+    const a = synAxis(synStrike, priceOf(draft[0]), priceOf(draft[1]));
+    const sp = prices.spots[u];
+    if (a == null) return bad('No live price for both legs yet — try again in a moment');
+    if (!sp || !(sp.spot > 0) || !spotFresh(sp.at, now)) return bad(`${u} spot price is stale — try again in a moment`);
+    if (Math.abs(synStrike - sp.spot) / sp.spot > SYN_MAX_STRIKE_DISTANCE) return bad(`Strike ${synStrike} is too far from ${u} ${sp.spot} — the synthetic must be at the money`);
+    if (!synSane(a, sp.spot)) return bad(`The synthetic price ${a} is too far from ${u} ${sp.spot} — a leg's price looks stale; refused`);
+    axis = { a, credit: false };
+  } else {
+    axis = basketAxis(draft, priceOf);
+  }
   if (!axis) return bad('No live price for every leg yet (or the strategy nets to nothing) — try again in a moment');
-  const oriented = orientLegs(draft, side, axis.credit);
+  const oriented = isSyn ? draft : orientLegs(draft, side, axis.credit);
   const legs: BasketLeg[] = oriented.map((l, i) => ({ key: `l${i}`, side: l.side, ratio: l.ratio, contract: cs[i] }));
   const capErr = overCap(readLadderState(), broker, mode, legs, lots);
   if (capErr) return bad(capErr);
@@ -123,7 +147,8 @@ async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<P
     const blocked = await realBasketBlocked(broker, u, legs, lots, b.product, prices.ltps);
     if (blocked) return bad(blocked);
   }
-  return { now, mode, broker, u, side, lots, product: b.product, strategy: String(b.strategy ?? 'custom').slice(0, 40), name: String(b.name ?? 'Custom').slice(0, 40), legs, ltps: prices.ltps, a: axis.a, ...(b.pane === 2 ? { pane: 2 as const } : {}) };
+  return { now, mode, broker, u, side, lots, product: b.product, strategy: isSyn ? 'synthetic-future' : String(b.strategy ?? 'custom').slice(0, 40), name: isSyn ? 'Synthetic Future' : String(b.name ?? 'Custom').slice(0, 40), legs, ltps: prices.ltps, a: axis.a,
+    ...(isSyn ? { syn: { kind: 'syn' as const, synStrike } } : {}), ...(b.pane === 2 ? { pane: 2 as const } : {}) };
 }
 
 async function arm(b: Record<string, unknown>): Promise<NextResponse> {
@@ -145,7 +170,7 @@ async function arm(b: Record<string, unknown>): Promise<NextResponse> {
   }
   const basket: LadderBasket = {
     id: newLadderId('pb'), strategy: p.strategy, name: p.name, broker: p.broker, mode: p.mode, side: p.side, lots: p.lots, product: p.product, state: 'armed',
-    legs: p.legs, createdAt: p.now, updatedAt: p.now, entryLevel: level, entryDir: verdict.dir, seenSafe: true,
+    legs: p.legs, ...(p.syn ?? {}), createdAt: p.now, updatedAt: p.now, entryLevel: level, entryDir: verdict.dir, seenSafe: true,
     orderType: verdict.kind === 'stop' ? 'SL' : orderType, ...(zones === 'anywhere' ? { zones } : {}), ...(bracket ? { bracket } : {}), ...(p.pane ? { pane: p.pane } : {}),
   };
   let err: string | null = null;
@@ -167,9 +192,9 @@ async function market(b: Record<string, unknown>): Promise<NextResponse> {
   // sent and the basket job places the hedges, then — once they filled in full — the shorts.
   const basket: LadderBasket = isReal
     ? { id: newLadderId('pb'), strategy: p.strategy, name: p.name, broker: p.broker, mode: 'real', side: p.side, lots: p.lots, product: p.product, state: 'placing',
-      phase: firstPhase({ legs: p.legs }), sendWanted: true, crossY: p.a, legs: p.legs, createdAt: p.now, updatedAt: p.now, note: 'Market order', ...(p.pane ? { pane: p.pane } : {}) }
+      phase: firstPhase({ legs: p.legs }), sendWanted: true, crossY: p.a, legs: p.legs, ...(p.syn ?? {}), createdAt: p.now, updatedAt: p.now, note: 'Market order', ...(p.pane ? { pane: p.pane } : {}) }
     : { id: newLadderId('pb'), strategy: p.strategy, name: p.name, broker: p.broker, mode: 'sim', side: p.side, lots: p.lots, product: p.product, state: 'open',
-      legs: p.legs.map(l => ({ ...l, avg: p.ltps[l.contract.securityId], held: basketLegQty(p.lots, l.ratio, l.contract.lotSize), filledQty: basketLegQty(p.lots, l.ratio, l.contract.lotSize), entry: 'filled' as const })),
+      legs: p.legs.map(l => ({ ...l, avg: p.ltps[l.contract.securityId], held: basketLegQty(p.lots, l.ratio, l.contract.lotSize), filledQty: basketLegQty(p.lots, l.ratio, l.contract.lotSize), entry: 'filled' as const })), ...(p.syn ?? {}),
       createdAt: p.now, updatedAt: p.now, openedAt: p.now, entryY: p.a, note: 'Market order', ...(p.pane ? { pane: p.pane } : {}) };
   let err: string | null = null;
   const s = await updateLadderState(st => {

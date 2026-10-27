@@ -1,5 +1,6 @@
 import { fractionUnits } from './partialQty.ts';
 import { legTag, type LadderBroker, type LadderState } from './priceLadder.ts';
+import { basketHasPosition } from './priceLadderBasket.ts';
 
 // Closing a broker position straight from the Price Ladder's positions window. Pure rules; the route does the IO.
 // The browser names a position (broker + key + product) and a share of it. Everything else — side, quantity, segment —
@@ -71,6 +72,21 @@ export function ladderExitInFlight(st: LadderState, broker: LadderBroker, key: s
     for (const l of b.legs) {
       if (same(l.contract) && (b.state === 'exiting' || b.state === 'placing' || (b.state === 'open' && b.exitWanted) || l.exitSentAt || l.exitOrderId)) return `the ladder is already working the ${legTag(l.contract)} leg of a basket`;
     }
+  }
+  return null;
+}
+
+/**
+ * Is this broker position one leg of a live REAL synthetic future? Closing a single leg from the positions window would leave the
+ * other leg naked (a long synthetic is a long call against a short put), so the window refuses it: the ladder's own Exit covers the
+ * short leg first and then the hedge. `key` is the Dhan security id, or the trading symbol on the other brokers.
+ */
+export function synLegOwner(st: LadderState, broker: LadderBroker, key: string): string | null {
+  const same = (c: { securityId: string; tradingSymbol?: string }) => (broker === 'dhan' ? c.securityId === key : c.tradingSymbol === key);
+  for (const b of st.baskets ?? []) {
+    if (b.kind !== 'syn' || b.broker !== broker || b.mode !== 'real' || !basketHasPosition(b)) continue;
+    const l = b.legs.find(x => same(x.contract));
+    if (l) return `${legTag(l.contract)} is one leg of a synthetic future — closing it alone would leave the other leg naked. Use Exit on the ladder (it covers the short leg first)`;
   }
   return null;
 }
