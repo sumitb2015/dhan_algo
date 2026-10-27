@@ -237,17 +237,35 @@ export function findRecentKotakOrder(
   /** Clock-skew allowance. Small on purpose: a wider window could pick up an identical order sent just before. */
   skewMs = 2000,
 ): string | null {
+  const { ids } = kotakOrderCandidates(rows, want, skewMs);
+  return ids.length === 1 ? ids[0] || null : null;
+}
+
+/**
+ * Every live-looking order that matches `want` (same symbol, side, quantity, not rejected/cancelled), split by whether its
+ * timestamp could be read: `ids` entered no earlier than `since` (minus the skew), `unreadable` is how many matching rows
+ * have a timestamp that could not be parsed. A caller that wants to conclude "no such order" must treat unreadable > 0 as
+ * "cannot tell" - findRecentKotakOrder ignores them, which is right for adopting an order and wrong for ruling one out.
+ */
+export function kotakOrderCandidates(
+  rows: Record<string, any>[],
+  want: { symbol: string; side: 'BUY' | 'SELL'; qty: number; since: number },
+  skewMs = 2000,
+): { ids: string[]; unreadable: number } {
   const txn = want.side === 'BUY' ? 'B' : 'S';
-  const hits = rows.filter(o => {
-    if (String(o.trdSym ?? '').trim() !== want.symbol) return false;
-    if (String(o.trnsTp ?? '').trim().toUpperCase() !== txn) return false;
-    if (Math.round(Number(o.qty ?? 0)) !== want.qty) return false;
+  const ids: string[] = [];
+  let unreadable = 0;
+  for (const o of rows) {
+    if (String(o.trdSym ?? '').trim() !== want.symbol) continue;
+    if (String(o.trnsTp ?? '').trim().toUpperCase() !== txn) continue;
+    if (Math.round(Number(o.qty ?? 0)) !== want.qty) continue;
     const st = classifyKotakStatus(String(o.ordSt ?? '').trim().toUpperCase().split(/\s+/).join(' '), Number(o.fldQty) || 0, Number(o.qty) || 0);
-    if (st === 'REJECTED' || st === 'CANCELLED') return false;
+    if (st === 'REJECTED' || st === 'CANCELLED') continue;
     const ts = parseKotakTime(o.ordEntTm ?? o.ordDtTm ?? o.ordTm ?? o.exCfmTm);
-    return ts != null && ts >= want.since - skewMs;
-  });
-  return hits.length === 1 ? String(hits[0].nOrdNo ?? '') || null : null;
+    if (ts == null) unreadable++;
+    else if (ts >= want.since - skewMs) ids.push(String(o.nOrdNo ?? ''));
+  }
+  return { ids, unreadable };
 }
 
 /** One Kotak holding, in the shape the equity and covered-call desks read. */

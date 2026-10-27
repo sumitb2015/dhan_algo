@@ -41,6 +41,9 @@ per write; the page drops a view older than the one on screen). It is re-read on
    `dhan-terminal-position-ownership` already covered a non-JSON 5xx and timeouts.)
 5. **UNKNOWN slices are skipped by the watcher** — including their bracket. The user resolves them (`resolve` action). So
    anything that turns a slice UNKNOWN also removes its SL protection: do it only when an order may genuinely be live.
+   Exception: a REAL Kotak NSE/BSE entry UNKNOWN from a send with no reply carries `verifyAfter`; `verifyUnknownEntries` reads the
+   order book after 60 s (`kotakOrderCandidates`, `unknownEntryVerdict`): one match -> `working`, none -> `cancelled`, else it stays
+   UNKNOWN. Never resends or re-arms. (2026-10-27: a 10 s Kotak timeout left a never-booked order UNKNOWN; MCX excluded — Kotak qty x100.)
 6. **Exit sizing is `exitQtyFor(own, side, book, inGrace)`:** broker read failed -> own; inside `FILL_GRACE_MS` -> own; no row ->
    0 ("closed outside the ladder"); else min(own, what the broker still shows in that direction). `reconcileDown` only clamps
    DOWN, outside the grace, comparing the ledger's whole ownership of a book row (slices AND pair legs) with the broker.

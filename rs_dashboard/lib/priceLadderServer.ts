@@ -10,7 +10,7 @@ import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
 import { buildKotakOrderPayload } from '@/lib/kotakOrderPayload';
 import { kotakDerivativeBySymbol } from '@/lib/kotakContracts';
 import { kotakGet, kotakGetShared, kotakPost, kotakRows, kotakLimits, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
-import { shapeKotakFunds, shapeKotakOrderStatus, shapeKotakPosition } from '@/lib/kotakShape';
+import { shapeKotakFunds, shapeKotakOrderStatus, shapeKotakPosition, kotakOrderCandidates } from '@/lib/kotakShape';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { kiteGet, kiteDelete, isZerodhaTokenValid } from '@/lib/zerodhaToken';
 import { placeZerodhaOrder } from '@/lib/zerodhaPlaceOrder';
@@ -19,7 +19,7 @@ import { zerodhaLotCapError } from '@/lib/zerodhaOrderRules';
 import { cachedZerodhaContract, slicesFor } from '@/lib/zerodhaContracts';
 import { pacedMarginCall } from '@/lib/ultimateScannerDhan';
 import {
-  EXIT_RETRY_MS, FILL_GRACE_MS, SETTLE_TIMEOUT_MS, SPOT_STALE_MS,
+  EXIT_RETRY_MS, FILL_GRACE_MS, SETTLE_TIMEOUT_MS, SPOT_STALE_MS, UNKNOWN_VERIFY_RETRY_MS, unknownEntryVerifyAt, unknownEntryVerdict,
   bias, bracketLevels, emptyLadderState, exitQtyFor, netAgainstOpposite, isLive, outcomeOnThrow, istDay, pushEvent,
   rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, legTag, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS, mcxUnitError,
   type Job, type LadderOrderHow, type LadderBroker, type LadderContract, type LadderSide, type LadderSlice, type LadderState,
@@ -1088,7 +1088,10 @@ export function afterSend(s: LadderState, id: string, r: PlaceOutcome, which: 'e
     return patchSlice(s, id, which === 'entry' ? { state: 'working', orderId: r.orderId } : { state: 'exiting', exitOrderId: r.orderId });
   }
   if (r.status === 'unknown') {
-    return pushEvent(patchSlice(s, id, { state: 'unknown', note: r.error }), ev('error', `${which === 'entry' ? 'Entry' : 'Exit'} UNKNOWN — ${r.error}`, id));
+    const x = s.slices.find(y => y.id === id);
+    // A Kotak entry that got no answer is looked up in the order book a minute later (verifyUnknownEntries).
+    const verifyAfter = which === 'entry' && x ? unknownEntryVerifyAt(x, Date.now()) : undefined;
+    return pushEvent(patchSlice(s, id, { state: 'unknown', note: r.error, ...(verifyAfter ? { verifyAfter } : {}) }), ev('error', `${which === 'entry' ? 'Entry' : 'Exit'} UNKNOWN — ${r.error}${verifyAfter ? ' — checking the order book in 60s' : ''}`, id));
   }
   if (which === 'entry') return pushEvent(patchSlice(s, id, { state: 'rejected', note: r.error }), ev('error', `Entry rejected: ${r.error}`, id));
   return pushEvent(patchSlice(s, id, x => ({ state: 'open', exitRetryAt: Date.now() + EXIT_RETRY_MS, exitWanted: keepWanted(x) })), ev('error', `Exit rejected: ${r.error} — retrying in 15s`, id));
@@ -1216,6 +1219,54 @@ async function guardCancel(x: LadderSlice): Promise<void> {
   }
 }
 
+const lastVerify = new Map<string, number>();
+let verifying = false;
+
+/**
+ * Settle UNKNOWN Kotak entries from the order book once their wait is over, so a send that never reached Kotak does not
+ * need the user. One matching order -> the slice is `working` under that id (the normal settle takes it from there);
+ * none (book read fine) -> cancelled, nothing opened; anything else, or an unreadable book -> stays UNKNOWN for the user.
+ * Never resends and never re-arms: the level has already been crossed and the price may have moved.
+ */
+async function verifyUnknownEntries(s: LadderState): Promise<void> {
+  if (verifying) return;
+  verifying = true;
+  try { await verifyDue(s); } finally { verifying = false; }
+}
+
+async function verifyDue(s: LadderState): Promise<void> {
+  const now = Date.now();
+  const due = s.slices.filter(x => x.state === 'unknown' && x.verifyAfter && now >= x.verifyAfter && x.sentAt
+    && !jobsInFlight.has(x.id) && now - (lastVerify.get(x.id) ?? 0) >= UNKNOWN_VERIFY_RETRY_MS);
+  if (!due.length || !isKotakTokenValid()) return;
+  let book: Record<string, unknown>[];
+  try { book = kotakRows(await kotakGet(KOTAK_PATHS.orderBook)); } catch (err) {
+    for (const x of due) lastVerify.set(x.id, now);
+    if (warnOnce('unknown-verify-book', 60_000)) console.error(`${TAG} order book unreadable while checking an UNKNOWN entry:`, (err as Error).message);
+    return;
+  }
+  for (const x of due) {
+    lastVerify.set(x.id, now);
+    const verdict = unknownEntryVerdict(kotakOrderCandidates(book, {
+      symbol: String(x.contract.tradingSymbol), side: x.side, qty: x.qty, since: x.sentAt!,
+    }));
+    if (verdict.kind === 'unsure') continue;
+    try {
+      await updateLadderState(st => {
+        const cur = st.slices.find(y => y.id === x.id);
+        if (!cur || cur.state !== 'unknown' || !cur.verifyAfter) return st;
+        const next = verdict.kind === 'found'
+          ? patchSlice(st, x.id, { state: 'working', orderId: verdict.orderId, verifyAfter: undefined, note: 'Found in the Kotak order book' })
+          : patchSlice(st, x.id, { state: 'cancelled', verifyAfter: undefined, note: 'Checked the Kotak order book: nothing opened' });
+        return pushEvent(next, verdict.kind === 'found'
+          ? ev('warn', `UNKNOWN entry found in the Kotak order book (${verdict.orderId}) — now tracked`, x.id)
+          : ev('warn', 'UNKNOWN entry: Kotak order book shows no such order after 60s — nothing opened, not re-armed', x.id));
+      });
+    } catch (err) { console.error(`${TAG} could not record the order-book check for ${x.id}:`, err); }
+    lastVerify.delete(x.id);
+  }
+}
+
 let reconciling = false;
 
 async function tick(): Promise<void> {
@@ -1226,6 +1277,8 @@ async function tick(): Promise<void> {
     if (warnOnce('unreadable', 60_000)) console.error(`${TAG}`, (err as Error).message);
     return;
   }
+  // A Kotak entry the order book can settle is settled here; its read never holds up the stops below.
+  if (s.slices.some(x => x.state === 'unknown' && x.verifyAfter)) void verifyUnknownEntries(s).catch(err => console.error(`${TAG} unknown-entry check failed:`, err));
   // UNKNOWN slices wait for the user and need nothing from the watcher; everything else live does.
   const live = s.slices.filter(x => isLive(x) && x.state !== 'unknown');
   const livePairs = (s.pairs ?? []).filter(isPairLive);

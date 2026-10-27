@@ -36,6 +36,10 @@ export const SPOT_STALE_MS = 5_000;
 export const FILL_GRACE_MS = 20_000;
 /** An order whose status never settles within this window becomes 'unknown' (held, never resent). */
 export const SETTLE_TIMEOUT_MS = 60_000;
+/** An UNKNOWN Kotak entry waits this long (a late-booked order has landed by then) before the order book settles it. */
+export const UNKNOWN_VERIFY_MS = 60_000;
+/** Between two order-book reads for the same UNKNOWN entry (one failed read must not become a read per tick). */
+export const UNKNOWN_VERIFY_RETRY_MS = 10_000;
 /** A rejected automatic exit is retried no sooner than this. */
 export const EXIT_RETRY_MS = 15_000;
 /** XY levels farther than this fraction from spot are refused (a mistyped or mis-scrolled level). */
@@ -199,6 +203,8 @@ export interface LadderSlice {
   // order tracking
   orderId?: string;
   sentAt?: number;
+  /** REAL Kotak entry that came back UNKNOWN: from this time the watcher reads the order book to settle it by itself. */
+  verifyAfter?: number;
   // position
   filledQty?: number;
   avg?: number;
@@ -497,6 +503,30 @@ export function settleOrder(st: { orderStatus: string; filledQty: number; averag
     return filled > 0 ? { kind: 'filled', filledQty: filled, avg, final: true } : { kind: 'dead', reason: st.reason || status };
   }
   return { kind: 'wait', filledQty: filled };
+}
+
+/**
+ * When the watcher may settle an UNKNOWN entry from the order book (`verifyAfter`), or undefined when it may not. Only a
+ * REAL Kotak entry on an NSE/BSE F&O contract qualifies: the order book is matched on symbol, side and quantity, and MCX
+ * quantities are scaled differently by Kotak (x100 vs Dhan), so a quantity match there would be a guess.
+ */
+export function unknownEntryVerifyAt(x: Pick<LadderSlice, 'broker' | 'mode' | 'contract' | 'filledQty'>, now: number): number | undefined {
+  if (x.broker !== 'kotak' || x.mode !== 'real' || Number(x.filledQty) > 0) return undefined;
+  if (x.contract.exchangeSegment === 'MCX_COMM' || isMcxUnderlying(x.contract.underlying) || !x.contract.tradingSymbol) return undefined;
+  return now + UNKNOWN_VERIFY_MS;
+}
+
+export type UnknownEntryVerdict = { kind: 'found'; orderId: string } | { kind: 'absent' } | { kind: 'unsure' };
+
+/**
+ * What the order book says about an UNKNOWN entry. `found`: exactly one matching live-looking order since the send, so the
+ * slice is simply `working` under that id. `absent`: the book was read and holds none (a rejected or cancelled match
+ * counts as none: nothing opened). `unsure`: two matches, or a matching row whose time cannot be read - the user decides.
+ */
+export function unknownEntryVerdict(c: { ids: readonly string[]; unreadable: number }): UnknownEntryVerdict {
+  if (c.ids.length === 1 && c.ids[0] && c.unreadable === 0) return { kind: 'found', orderId: c.ids[0] };
+  if (c.ids.length === 0 && c.unreadable === 0) return { kind: 'absent' };
+  return { kind: 'unsure' };
 }
 
 /**

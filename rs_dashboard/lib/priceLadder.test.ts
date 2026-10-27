@@ -685,3 +685,26 @@ test('futures: legTag and the lot unit (Dhan lots, mult 10; Kotak futures refuse
   assert.equal(mcxUnitError('dhan', fut, 1), null);
   assert.match(mcxUnitError('kotak', fut, 1) ?? '', /barrels/);
 });
+
+import { unknownEntryVerifyAt, unknownEntryVerdict, UNKNOWN_VERIFY_MS } from './priceLadder.ts';
+test('unknownEntryVerifyAt: only a REAL Kotak NSE/BSE F&O entry is settled from the order book', () => {
+  const kc = { ...contract, tradingSymbol: 'NIFTY26OCT23200CE' };
+  const ok = { broker: 'kotak' as const, mode: 'real' as const, contract: kc };
+  assert.equal(unknownEntryVerifyAt(ok, 1000), 1000 + UNKNOWN_VERIFY_MS);
+  assert.equal(unknownEntryVerifyAt({ ...ok, broker: 'dhan' }, 1000), undefined);
+  assert.equal(unknownEntryVerifyAt({ ...ok, broker: 'zerodha' }, 1000), undefined);
+  assert.equal(unknownEntryVerifyAt({ ...ok, mode: 'sim' }, 1000), undefined);
+  assert.equal(unknownEntryVerifyAt({ ...ok, filledQty: 65 }, 1000), undefined);                       // an UNKNOWN exit: a position exists
+  assert.equal(unknownEntryVerifyAt({ ...ok, contract: { ...kc, tradingSymbol: undefined } }, 1000), undefined);
+  assert.equal(unknownEntryVerifyAt({ ...ok, contract: { ...kc, exchangeSegment: 'MCX_COMM' } }, 1000), undefined);  // Kotak MCX quantity is scaled
+  assert.equal(unknownEntryVerifyAt({ ...ok, contract: { ...kc, underlying: 'CRUDEOILM' } }, 1000), undefined);
+});
+
+test('unknownEntryVerdict: absent only when the book holds no match and no unreadable match', () => {
+  assert.deepEqual(unknownEntryVerdict({ ids: [], unreadable: 0 }), { kind: 'absent' });
+  assert.deepEqual(unknownEntryVerdict({ ids: ['9'], unreadable: 0 }), { kind: 'found', orderId: '9' });
+  assert.deepEqual(unknownEntryVerdict({ ids: ['9', '10'], unreadable: 0 }), { kind: 'unsure' });      // two candidates
+  assert.deepEqual(unknownEntryVerdict({ ids: [], unreadable: 1 }), { kind: 'unsure' });               // a row we cannot date
+  assert.deepEqual(unknownEntryVerdict({ ids: ['9'], unreadable: 1 }), { kind: 'unsure' });
+  assert.deepEqual(unknownEntryVerdict({ ids: [''], unreadable: 0 }), { kind: 'unsure' });             // matched but no order number
+});

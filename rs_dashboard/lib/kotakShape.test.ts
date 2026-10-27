@@ -188,3 +188,15 @@ test('shapeKotakPosition carries lotSz as lotSize (same units as the quantities)
   assert.strictEqual(shapeKotakPosition({ ...row, lotSz: '0' }).lotSize, undefined);
   assert.strictEqual(shapeKotakPosition({ ...row, lotSz: 'x' }).lotSize, undefined);
 });
+
+import { kotakOrderCandidates } from './kotakShape.ts';
+test('kotakOrderCandidates separates readable matches from matching rows whose time cannot be read', () => {
+  const since = Date.parse('2026-10-27T13:15:39+05:30');
+  const row = { nOrdNo: '1', trdSym: 'NIFTY26OCT22800CE', trnsTp: 'S', qty: 65, ordSt: 'open', ordEntTm: '27-Oct-2026 13:15:41' };
+  const want = { symbol: 'NIFTY26OCT22800CE', side: 'SELL' as const, qty: 65, since };
+  assert.deepStrictEqual(kotakOrderCandidates([row], want), { ids: ['1'], unreadable: 0 });
+  assert.deepStrictEqual(kotakOrderCandidates([], want), { ids: [], unreadable: 0 });
+  assert.deepStrictEqual(kotakOrderCandidates([{ ...row, ordEntTm: 'n/a' }], want), { ids: [], unreadable: 1 });
+  assert.deepStrictEqual(kotakOrderCandidates([{ ...row, ordSt: 'rejected' }, { ...row, ordEntTm: '27-Oct-2026 13:00:00' }], want), { ids: [], unreadable: 0 });
+  assert.deepStrictEqual(kotakOrderCandidates([row, { ...row, nOrdNo: '2' }], want).ids, ['1', '2']);
+});

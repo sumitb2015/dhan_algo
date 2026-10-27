@@ -131,6 +131,11 @@ day, brings back everything live: open positions (NRML carries; MIS is squared o
 UNKNOWN orders to resolve, pairs, settings, and the MTM guard levels (OFF). The armed XY levels and the REAL arm are
 one-day things and lapse with the day.
 
+**Kotak entry with no reply.** If Kotak does not answer a REAL entry (NSE/BSE F&O, not MCX), the slice shows UNKNOWN and
+the ladder reads the Kotak order book 60 s later: no matching order -> "nothing opened" (not re-armed, the price has moved on);
+exactly one -> tracked as a normal working order; two matches, an order whose time cannot be read, or an unreadable book ->
+it stays UNKNOWN for you. Exits, Dhan and Zerodha are never settled this way.
+
 Everything the ledger is about to forget is saved first, in `debug/price_ladder_archive_<YYYY-MM-DD>.json` (one file per
 IST day, kept forever, not in git): at the first write of a new day the whole previous day's ledger (every slice and
 pair — closed, cancelled, rejected, open — the event log and the guards as they were), and on **Clear** the rows it
