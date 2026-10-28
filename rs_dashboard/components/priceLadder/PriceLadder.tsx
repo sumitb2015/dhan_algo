@@ -1219,6 +1219,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const onAdjust = (w: LadderWidget, delta: 1 | -1, pair = mode === 'pair') => {
     if (mode === 'basket') { toast.info('Use the 25 / 50 / 75 / Exit buttons to change a basket\'s lots'); return; }
     if (pair) {
+      if (w.adjust === 'order') {
+        // An armed pair (levels not fired): change its lots in place; × cancels it.
+        const lots = w.lots + delta;
+        if (lots < 1) { toast.info('One lot is the minimum — use × to cancel'); return; }
+        if (lots > MAX_LADDER_LOTS) { toast.warning(`${MAX_LADDER_LOTS} lots is the cap`); return; }
+        void post({ action: 'pair', op: 'lots', id: w.ids[0], lots });
+        return;
+      }
       if (w.adjust !== 'position') return;
       // − exits one lot of both legs (only reduces: never confirmed); + adds one to both at market — an opening order,
       // so the first REAL one this page load asks first.

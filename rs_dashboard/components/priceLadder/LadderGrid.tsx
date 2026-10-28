@@ -33,6 +33,8 @@ export interface LadderWidget {
   drag?: 'entry' | 'tgt' | 'sl';
   /** MCX (Dhan qty in lots): barrels per lot, so the badge can show barrels. Absent = qty is already in units. */
   mult?: number;
+  /** MCX on a broker whose qty is already barrels (Kotak): the badge labels it, so 20 reads as 2 lots, not 20 lots. */
+  bbl?: boolean;
   /** A trailing SL's distance behind the best level (continuous trail); the marker shows it with − / + to change it. */
   trail?: number;
 }
@@ -40,12 +42,16 @@ export interface LadderWidget {
 /** An open position's entry on the ladder's axis: drawn as a tinted row with a side / qty / fill tag in the Price column. */
 export interface EntryMark { y: number; side: LadderSide; qty: number; avg?: number; /** Open P&L in rupees; null = no price yet, absent = not shown. */ pnl?: number | null }
 
+/** Kotak MCX quantity is already barrels (no `mult`): flag it so the badge says bbl. Dhan / Zerodha carry `mult` instead. */
+const barrelsFlag = (c: { mult?: number; exchangeSegment?: string }) => (!c.mult && c.exchangeSegment === 'MCX_COMM' ? { bbl: true } : {});
+
 const opposite = (s: LadderSide): LadderSide => (s === 'BUY' ? 'SELL' : 'BUY');
 
 /** Widgets for the slices of the contract on screen, on the ladder's own axis (index levels in XY, premium in plain). */
 export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderWidget[] {
   // Every slice on screen is one contract, so one multiplier.
   const contractMult = slices.find(s => s.contract.mult)?.contract.mult;
+  const bbl = barrelsFlag(slices[0]?.contract ?? {});
   const groups = new Map<string, LadderWidget>();
   const newest = new Map<string, number>();
   const add = (w: Omit<LadderWidget, 'key'>, at: number) => {
@@ -53,7 +59,7 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
     // + / − / drag controls from the open ones).
     const key = `${w.kind}|${w.column}|${w.price}|${w.planned ? 'p' : ''}|${w.adjust ?? 'none'}|${w.adjust === 'order' ? w.ids[0] : ''}`;
     const g = groups.get(key);
-    if (!g) { groups.set(key, { ...w, key, ...(contractMult ? { mult: contractMult } : {}) }); newest.set(key, at); return; }
+    if (!g) { groups.set(key, { ...w, key, ...(contractMult ? { mult: contractMult } : {}), ...bbl }); newest.set(key, at); return; }
     // One exit level shared by several slices: one widget with their total quantity, newest slice first.
     g.qty += w.qty; g.lots += w.lots;
     if (at >= (newest.get(key) ?? 0)) { g.ids = [...w.ids, ...g.ids]; newest.set(key, at); } else g.ids = [...g.ids, ...w.ids];
@@ -104,8 +110,7 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
 
 /**
  * Widgets for the pairs on screen, on the combined-premium axis: an armed entry (× cancels, drag moves) with its planned
- * target / SL, and an open pair's position plus target / SL (drag; a trailing SL shows − / +). No + / − lots on a pair
- * in Phase 1: exit it from the pair table.
+ * target / SL, and an open pair's position plus target / SL (drag; a trailing SL shows − / +). + / − on an armed entry changes its lots; an open pair's + / − adds / exits a lot.
  */
 export function pairWidgetsFor(pairs: LadderPair[]): LadderWidget[] {
   const out: LadderWidget[] = [];
@@ -123,12 +128,12 @@ export function pairWidgetsFor(pairs: LadderPair[]): LadderWidget[] {
   for (const p of pairs) {
     const lotSize = p.legs.ce.contract.lotSize;
     const mult = p.legs.ce.contract.mult;
-    const common = { qty: p.qty, lots: p.lots, ids: [p.id], ...(mult ? { mult } : {}) };
+    const common = { qty: p.qty, lots: p.lots, ids: [p.id], ...(mult ? { mult } : {}), ...barrelsFlag(p.legs.ce.contract) };
     const exitCol = opposite(p.side);
     const trail = p.bracket?.trailPts ? { trail: p.bracket.trailPts } : {};
     const slLabel = p.bracket?.trailPts ? 'Trailing SL' : 'SL';
     if (p.state === 'armed' && p.entryLevel) {
-      out.push({ ...common, key: `pe|${p.id}`, price: p.entryLevel, column: p.side, kind: 'entry', label: p.orderType === 'SL' ? 'Pair breakout entry' : 'Pair entry', cancellable: true, drag: 'entry' });
+      out.push({ ...common, key: `pe|${p.id}`, price: p.entryLevel, column: p.side, kind: 'entry', label: p.orderType === 'SL' ? 'Pair breakout entry' : 'Pair entry', cancellable: true, adjust: 'order', drag: 'entry' });
       if (p.bracket) {
         const lv = bracketLevels(pairBias(p.side), p.entryLevel, p.bracket);
         if (lv.tgtY != null) out.push({ ...common, key: `pt|${p.id}`, price: lv.tgtY, column: exitCol, kind: 'tgt', label: 'Target', planned: true, drag: 'tgt' });
@@ -161,7 +166,7 @@ export function basketWidgetsFor(baskets: LadderBasket[]): LadderWidget[] {
   for (const b of baskets) {
     const lotSize = b.legs[0].contract.lotSize;
     const mult = b.legs[0].contract.mult;
-    const common = { qty: b.lots * lotSize, lots: b.lots, ids: [b.id], ...(mult ? { mult } : {}) };
+    const common = { qty: b.lots * lotSize, lots: b.lots, ids: [b.id], ...(mult ? { mult } : {}), ...barrelsFlag(b.legs[0].contract) };
     const exitCol = opposite(b.side);
     const trail = b.bracket?.trailPts ? { trail: b.bracket.trailPts } : {};
     const slLabel = b.bracket?.trailPts ? 'Trailing SL' : 'SL';
@@ -244,8 +249,8 @@ function InnerPriceWidget({ w, decimals, tick, onTrail }: {
 function QtyBadge({ w }: { w: LadderWidget }) {
   const lots = `${w.lots} lot${w.lots === 1 ? '' : 's'}`;
   return (
-    <span className={`px-2 py-0.5 rounded font-mono font-bold text-xs whitespace-nowrap ${QTY_TONE[w.column]}`} title={w.mult ? `${lots} = ${w.qty * w.mult} barrels` : lots}>
-      {w.mult ? `${w.qty * w.mult} bbl` : w.qty}
+    <span className={`px-2 py-0.5 rounded font-mono font-bold text-xs whitespace-nowrap ${QTY_TONE[w.column]}`} title={w.mult ? `${lots} = ${w.qty * w.mult} barrels` : w.bbl ? `${lots} = ${w.qty} barrels` : lots}>
+      {w.mult ? `${w.qty * w.mult} bbl` : w.bbl ? `${w.qty} bbl · ${lots}` : w.qty}
     </span>
   );
 }

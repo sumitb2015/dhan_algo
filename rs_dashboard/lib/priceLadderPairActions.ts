@@ -500,6 +500,42 @@ async function roll(b: Record<string, unknown>, id: string): Promise<NextRespons
   return ok(r.state);
 }
 
+/**
+ * The + / − on an ARMED pair (levels not fired yet): change its lots in place. Only an armed pair: once it fires both
+ * legs are being sent for the old size. More lots is a bigger opening order, so the same holding cap and (REAL) funds
+ * check as arming apply, and the cap is re-checked inside the lock.
+ */
+async function setArmedLots(b: Record<string, unknown>, id: string): Promise<NextResponse> {
+  const lots = capLots(b.lots);
+  if (lots == null) return bad('Lots must be a whole number from 1 to 20');
+  const st0 = readLadderState();
+  const p = (st0.pairs ?? []).find(y => y.id === id);
+  if (!p) return bad('Unknown pair', 404);
+  if (p.state !== 'armed') return bad('Only an armed pair can change its lots — it has already fired', 409);
+  const qty = lots * p.legs.ce.contract.lotSize;
+  if (lots > p.lots) {
+    for (const k of LEG_KEYS) {
+      const c = p.legs[k].contract;
+      const held = lotsOnContract(st0, c.securityId, p.broker, p.mode, p.side, p.id);
+      if (held + lots > MAX_LADDER_LOTS) return bad(`The ladder already holds or has armed ${held} lots of ${c.strike}${c.opt} — the cap is ${MAX_LADDER_LOTS}`);
+    }
+    if (p.mode === 'real') {
+      const prices = await loadPrices([], [p.legs.ce.contract, p.legs.pe.contract]);
+      const blocked = await realPairBlocked(p.broker, p.legs.ce.contract.underlying, { ce: p.legs.ce.contract, pe: p.legs.pe.contract }, p.side, qty, p.product, prices.ltps);
+      if (blocked) return bad(blocked);
+    }
+  }
+  let capped = false;
+  const r = await guarded(id, y => y.state === 'armed', st => {
+    const cur = (st.pairs ?? []).find(y => y.id === id)!;
+    if (lots > cur.lots && LEG_KEYS.some(k => lotsOnContract(st, cur.legs[k].contract.securityId, cur.broker, cur.mode, cur.side, cur.id) + lots > MAX_LADDER_LOTS)) { capped = true; return st; }
+    return pushEvent(patchPair(st, id, { lots, qty }), ev('info', `${pairName(cur)}: lots changed to ${lots}`, id));
+  });
+  if (capped) return bad(`That would take a leg past the ${MAX_LADDER_LOTS}-lot cap`);
+  if (!r.applied) return bad('Too late — the pair has just fired or is gone; check the pair list', 409);
+  return ok(r.state);
+}
+
 /** `{ action: 'pair', op, ... }` */
 export async function pairAction(b: Record<string, unknown>): Promise<NextResponse> {
   const op = String(b.op ?? '');
@@ -528,6 +564,8 @@ export async function pairAction(b: Record<string, unknown>): Promise<NextRespon
       if (!n) return bad('Nothing armed to cancel', 409);
       return ok(s, { cancelled: n });
     }
+    case 'lots':
+      return setArmedLots(b, id);
     case 'add':
       return addLot(id);
     case 'roll':

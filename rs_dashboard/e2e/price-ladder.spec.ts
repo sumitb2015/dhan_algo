@@ -18,7 +18,7 @@ const lastTradingDay = () => {
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const SPOT = 23200;
 
-async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** One open SIM short iron condor (2 lots) on the mocked strikes. */ openBasket?: boolean; /** The synthetic future's market: tight books around the last prices, a stale CE last trade, or no depth at all (default). */ synBook?: 'tight' | 'stale'; /** N armed (not yet fired) pairs on the two legs the Pair ladder shows. */ armedPairs?: number; /** One armed pair on OTHER strikes (23300 CE / 23100 PE) than the Pair ladder shows. */ offPair?: boolean; /** Give the chain open interest on 23200 so the XY ladder draws OI bars. */ oi?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
+async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** One open SIM short iron condor (2 lots) on the mocked strikes. */ openBasket?: boolean; /** The synthetic future's market: tight books around the last prices, a stale CE last trade, or no depth at all (default). */ synBook?: 'tight' | 'stale'; /** Combined-premium level of the first armed pair (default 250). */ armedPairLevel?: number; /** N armed (not yet fired) pairs on the two legs the Pair ladder shows. */ armedPairs?: number; /** One armed pair on OTHER strikes (23300 CE / 23100 PE) than the Pair ladder shows. */ offPair?: boolean; /** Give the chain open interest on 23200 so the XY ladder draws OI bars. */ oi?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
   const clock = opts.staleAt ? new Date(`${lastTradingDay()}T${opts.staleAt}:00+05:30`).getTime() : null;
   let armed = !!opts.liveArmed;   // POST action 'live' flips it, as the server does
   const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[], closes: [] as Record<string, unknown>[] };
@@ -45,7 +45,7 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
     const c = (securityId: string, opt: 'CE' | 'PE') => ({ underlying: 'NIFTY', expiry: '2026-10-27', strike: 23200, opt, securityId, lotSize: 65, exchangeSegment: 'NSE_FNO' });
     state.pairs = Array.from({ length: opts.armedPairs }, (_, i) => ({
       id: `ap${i}`, broker: 'dhan', mode: 'sim', structure: 'straddle', side: i % 2 ? 'BUY' : 'SELL', lots: 1, qty: 65, product: 'MIS', state: 'armed',
-      legs: { ce: { contract: c('111', 'CE') }, pe: { contract: c('222', 'PE') } }, createdAt: Date.now() + i, updatedAt: Date.now(), entryLevel: 250 + i, entryDir: 'above', seenSafe: true,
+      legs: { ce: { contract: c('111', 'CE') }, pe: { contract: c('222', 'PE') } }, createdAt: Date.now() + i, updatedAt: Date.now(), entryLevel: (opts.armedPairLevel ?? 250) + i, entryDir: 'above', seenSafe: true,
     })) as unknown as LadderState['pairs'];
   }
   if (opts.offPair) {
@@ -149,6 +149,7 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
         } as LadderSlice);
       }
       if (body.action === 'pair' && body.op === 'cancelAll') state.pairs = (state.pairs ?? []).map(x => ((body.ids as string[]).includes(x.id) && x.state === 'armed' ? { ...x, state: 'cancelled' as const } : x));
+      if (body.action === 'pair' && body.op === 'lots') state.pairs = (state.pairs ?? []).map(x => (x.id === body.id ? { ...x, lots: Number(body.lots), qty: Number(body.lots) * 65 } : x));
       if (body.action === 'cancel') state.slices = state.slices.map(x => (x.id === body.id ? { ...x, state: 'cancelled' } : x));
       if (body.action === 'lots') state.slices = state.slices.map(x => (x.id === body.id ? { ...x, lots: Number(body.lots), qty: Number(body.lots) * 65 } : x));
       if (body.action === 'modify') state.slices = state.slices.map(x => (x.id === body.id ? { ...x, entryLevel: Number(body.level) } : x));
@@ -1019,4 +1020,16 @@ test('Exit all: only pending levels (no position) offers to cancel them, not to 
   await dialog.getByRole('checkbox').uncheck();
   await expect(dialog.getByRole('button', { name: 'Cancel pending only' })).toBeDisabled(); // nothing left to do
   expect(seen.posts).toEqual([]);
+});
+
+test('An armed pair has + / − lots: + posts the new lot count, − stops at 1', async ({ page }) => {
+  const seen = await install(page, { armedPairs: 1, armedPairLevel: 223 });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Pair', exact: true }).click();
+  await page.getByRole('button', { name: /^Minus one lot: Pair entry/ }).click(); // already 1 lot: nothing is sent
+  await page.getByRole('button', { name: /^Plus one lot: Pair entry/ }).click();
+  await expect.poll(() => seen.posts.filter(b => b.op === 'lots').length).toBe(1);
+  expect(seen.posts.find(b => b.op === 'lots')).toMatchObject({ action: 'pair', op: 'lots', id: 'ap0', lots: 2 });
+  expect(seen.blocked).toEqual([]);
 });
