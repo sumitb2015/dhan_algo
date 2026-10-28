@@ -52,6 +52,7 @@ debug/*.jsonl
 debug/*.png
 debug/*.js
 debug/*.bak_*
+debug/*.bak
 debug/backups/
 debug/screenshots/
 # Per-strategy run logs. The patterns above are single-level, so they never

@@ -3367,11 +3367,13 @@ class DhanHelper:
             full_df = pd.concat(dfs, ignore_index=True)
             
             # Save to disk
-            full_df.to_csv(self._master_list_path, index=False)
+            tmp_path = f"{self._master_list_path}.tmp"
+            full_df.to_csv(tmp_path, index=False)
+            os.replace(tmp_path, self._master_list_path)
             logger.info(f"Saved compact master list to {self._master_list_path} ({len(full_df)} records)")
             
             # Reload in memory
-            self._load_master_list()
+            self._load_master_list(reload=True)
             return True
             
         except Exception as e:
