@@ -21,6 +21,7 @@ by the dashboard's /api/live-indices POST {action:"stop"} endpoint).
 """
 import sys
 import os
+import atexit
 import io
 import json
 import time
@@ -142,10 +143,67 @@ def read_interval(default: float = 20.0) -> float:
 
 
 def atomic_write(path: str, data: dict):
-    tmp = path + '.tmp'
-    with open(tmp, 'w') as f:
-        json.dump(data, f)
-    os.replace(tmp, path)
+    # The temp name carries the pid. A fixed `<path>.tmp` let two bridges share it: one os.replace consumed the
+    # other's file and the loser died with FileNotFoundError (41 times in live_indices_ws.log).
+    tmp = f'{path}.{os.getpid()}.tmp'
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(data, f)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+# One bridge at a time. The dashboard's start route only refuses a second start once the status reads RUNNING, and a fresh
+# bridge stays in STARTING for many seconds (login, 26 lookups, up to 10 s waiting for the hub), so six pages mounting
+# together could start several. A status-file check cannot close that race (both read before either writes); an O_EXCL
+# lock file can.
+LOCK_FILE = os.path.join(DEBUG_DIR, 'live_indices_bridge.lock')
+LOCK_FRESH_SEC = 5.0  # a lock with no pid yet is its creator mid-write, not a stale lock
+
+
+def acquire_instance_lock() -> int | None:
+    """None when this process now holds the lock; otherwise the pid of the live bridge that does (0 = pid not written yet)."""
+    for _ in range(3):
+        try:
+            fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                with open(LOCK_FILE) as f:
+                    text = f.read().strip()
+                age = time.time() - os.path.getmtime(LOCK_FILE)
+            except OSError:
+                continue  # removed between our attempts: try to take it
+            if text.isdigit():
+                pid = int(text)
+                if pid != os.getpid() and hub_client.is_pid_running(pid):
+                    return pid
+            elif age < LOCK_FRESH_SEC:
+                return 0
+            try:
+                os.remove(LOCK_FILE)  # dead owner or abandoned empty file
+            except OSError:
+                pass
+            continue
+        with os.fdopen(fd, 'w') as f:
+            f.write(str(os.getpid()))
+        return None
+    return 0  # lost the race three times running to other starters: let them have it
+
+
+def release_instance_lock():
+    """Remove the lock only if it is ours: a refused bridge must never delete the running one's lock."""
+    try:
+        with open(LOCK_FILE) as f:
+            if f.read().strip() != str(os.getpid()):
+                return
+        os.remove(LOCK_FILE)
+    except OSError:
+        pass
 
 
 def write_status(status: str, subscribed: int = 0, started_at: str = ''):
@@ -362,6 +420,13 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(DEBUG_DIR, exist_ok=True)
+    # Before ANY status write: a refused bridge must not overwrite the running one's status file (its `finally`
+    # writes STOPPED, which would make the start route think nothing is running and invite a third bridge).
+    other = acquire_instance_lock()
+    if other is not None:
+        print(f'[live_indices_ws] another bridge is already running (pid {other}) - exiting', flush=True)
+        sys.exit(3)
+    atexit.register(release_instance_lock)
     started_at = datetime.now().isoformat()
     write_status('STARTING', started_at=started_at)
     print('[live_indices_ws] Starting...', flush=True)
