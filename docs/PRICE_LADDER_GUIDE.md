@@ -70,6 +70,20 @@ cutoff must be 13:00-15:39 (the session closes 15:40; the last minute is left so
 asks first, because it would square off open MIS positions on the next tick. Code: `lib/priceLadderCutoff.ts`,
 `sessionFor()` in `lib/priceLadder.ts`.
 
+## Exit all (every ladder at once)
+
+The red **Exit all** button in the top header (shown once, with a count of open positions) exits every open position in
+**every ladder**: both panes, every broker, SIM and REAL, single slices, pairs and baskets. It asks first: the dialog lists
+the count per broker and mode, and a ticked-by-default box also cancels the ladders' armed levels and resting entry orders so
+nothing re-enters after the exit. It does **only what each ladder's own Exit does**: it marks the positions "exit wanted" and
+the server watcher sends the orders, each sized against the broker's own book with the usual guards. No REAL arm is needed
+(an exit). The browser sends only `{action:'exitAll', signature, cancelPending}`: never a side, quantity or contract. The
+signature is the plan the dialog showed; if a position opened or closed since, the server refuses (409) and you review again.
+An item with an UNKNOWN order status is listed and left alone (resolve it first), and an entry being sent at that moment is
+reported, not included: press Exit all again once it settles. **Not covered:** positions on the broker that no ladder opened
+(use the Positions window or the global Exit All), other pages' pending orders, and running Python strategies.
+Code: `lib/priceLadderExitAll.ts` (the plan), the `exitAll` case in `app/api/price-ladder/state/route.ts`.
+
 ## Closing from the positions window
 
 The Positions tab of the books window has a **Close** column: 25 / 50 / 75 % (whole lots, rounded down) or **Close** (all) per

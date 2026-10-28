@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { buildLadderView, resolveContract } from '@/lib/priceLadderView';
 import { pairAction } from '@/lib/priceLadderPairActions';
 import { basketAction } from '@/lib/priceLadderBasketActions';
-import { isPairLive, lotsOnContract } from '@/lib/priceLadderPair';
+import { isPairLive, lotsOnContract, patchPair } from '@/lib/priceLadderPair';
+import { planExitAll } from '@/lib/priceLadderExitAll';
 import {
   readLadderState, updateLadderState, startPriceLadderLoop, loadPrices, afterSend, cancelAtBroker,
   brokerSessionOk, availableFunds, dhanSellMargin, withJob, commitIf, safePlace, openedPatch, LADDER_UNDERLYINGS,
@@ -15,7 +16,7 @@ import {
 } from '@/lib/priceLadder';
 import { carryRuntime, cleanGuard, guardKey, guardLabel } from '@/lib/priceLadderGuard';
 import { setCutoffsFromBody } from '@/lib/priceLadderCutoff';
-import { isBasketLive } from '@/lib/priceLadderBasket';
+import { isBasketLive, patchBasket } from '@/lib/priceLadderBasket';
 
 // The Price Ladder's ledger (debug/price_ladder_state.json) and its actions. Real-money endpoint: every check that can
 // refuse an order runs here, server-side — lot cap, level sanity, the contract resolved from the brokers' own masters
@@ -503,6 +504,56 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           `Cancel all: ${n} level(s) cancelled${atBroker.length ? `, ${atBroker.length - failed.length} broker cancel(s) sent` : ''}${failed.length ? `, failed for ${failed.join(', ')}` : ''}`)));
         if (failed.length) return NextResponse.json({ success: false, error: `Cancel failed for order(s) ${failed.join(', ')}`, data: { state: s } });
         return NextResponse.json({ success: true, data: { state: s } });
+      }
+
+      case 'exitAll': {
+        // Every ladder at once (both panes, every broker, SIM and REAL): mark each open position for exit, exactly as the
+        // per-ladder Exit does, and the watcher sends the orders, each sized against the broker's own book. Needs no REAL arm
+        // (exits never do). `signature` is the plan the user saw in the confirm dialog: if a position opened or closed since,
+        // nothing is done and the dialog is shown again. With `cancelPending`, armed levels and resting entry orders are
+        // cancelled too (as cancelAll does), so nothing re-enters right after. UNKNOWN slices are never touched.
+        const cancelPending = body.cancelPending === true;
+        const signature = typeof body.signature === 'string' ? body.signature : '';
+        let changed = false;
+        const out = { marked: 0, cancelled: 0, unknown: 0, inFlight: 0 };
+        const atBroker: LadderSlice[] = [];
+        const s0 = await updateLadderState(st => {
+          const plan = planExitAll(st);
+          if (plan.signature !== signature) { changed = true; return st; }
+          out.unknown = plan.unknown;
+          out.inFlight = plan.inFlight;
+          out.marked = plan.sliceIds.length + plan.pairIds.length + plan.basketIds.length;
+          let next = st;
+          for (const sid of plan.sliceIds) next = patchSlice(next, sid, { exitWanted: 'Manual exit' });
+          for (const pid of plan.pairIds) next = patchPair(next, pid, { exitWanted: 'Manual exit' });
+          for (const kid of plan.basketIds) next = patchBasket(next, kid, { exitWanted: 'Manual exit' });
+          if (cancelPending) {
+            const byId = new Map(st.slices.map(x => [x.id, x]));
+            for (const sid of plan.cancelSliceIds) {
+              const x = byId.get(sid);
+              if (!x) continue;
+              if (x.state === 'working' && x.mode === 'real') { if (x.orderId) atBroker.push(x); continue; } // a REAL resting order: cancelled at the broker below
+              next = patchSlice(next, sid, { state: 'cancelled', note: 'Cancelled by you (exit all)' });
+              out.cancelled++;
+            }
+            for (const pid of plan.cancelPairIds) { next = patchPair(next, pid, { state: 'cancelled', note: 'Cancelled by you (exit all)' }); out.cancelled++; }
+            for (const kid of plan.cancelBasketIds) { next = patchBasket(next, kid, { state: 'cancelled', note: 'Cancelled by you (exit all)' }); out.cancelled++; }
+          }
+          if (!out.marked && !out.cancelled && !atBroker.length) return st;
+          return pushEvent(next, ev('info', `Exit all: ${out.marked} position(s) marked for exit${cancelPending ? `, ${out.cancelled + atBroker.length} pending level(s)/order(s) cancelled` : ''}`));
+        });
+        if (changed) return bad('The ladders changed since you opened this — review the list and try again', 409);
+        if (!out.marked && !out.cancelled && !atBroker.length) return bad('Nothing to exit', 409);
+        const failed: string[] = [];
+        for (const x of atBroker) {
+          try { await cancelAtBroker(x.broker, x.orderId!); } catch { failed.push(x.orderId!); }
+        }
+        const s = failed.length
+          ? await updateLadderState(st => pushEvent(st, ev('error', `Exit all: broker cancel failed for order(s) ${failed.join(', ')}`)))
+          : s0;
+        const cancelledAll = out.cancelled + atBroker.length - failed.length;
+        if (failed.length) return NextResponse.json({ success: false, error: `Positions are being exited, but cancelling order(s) ${failed.join(', ')} failed — cancel them in Orders`, data: { state: s, ...out, cancelled: cancelledAll } });
+        return NextResponse.json({ success: true, data: { state: s, ...out, cancelled: cancelledAll } });
       }
 
       case 'lots': {

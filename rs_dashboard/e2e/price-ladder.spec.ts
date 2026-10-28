@@ -946,3 +946,77 @@ test('Synthetic future: a last trade outside its own market shows the paused ban
   await page.getByRole('button', { name: 'Synthetic', exact: true }).click();
   await expect(page.getByText(/Synthetic price paused — CE last price 120 is outside its market 150–151/)).toBeVisible();
 });
+
+// ---- Exit all (every ladder at once) ----------------------------------------------------------------------------------
+// The button only marks positions for exit (the server watcher sends the orders), and everything here runs against the in-browser
+// fake ledger: a request outside /api/price-ladder/state is refused (599) and fails the test, so no order route can be reached.
+const exitAllButton = (page: Page) => page.getByRole('button', { name: /Exit all positions in all ladders/ });
+
+test('Exit all: one button for every ladder, disabled while nothing is open', async ({ page }) => {
+  const seen = await install(page);
+  await page.goto('/price-ladder');
+  await expect(page.getByLabel('Underlying')).toHaveCount(2); // two ladders open
+  await expect(exitAllButton(page)).toHaveCount(1);            // ... and still one Exit all
+  await expect(exitAllButton(page)).toBeDisabled();
+  expect(seen.posts).toEqual([]);
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Exit all: the dialog lists what will be exited and Cancel sends nothing', async ({ page }) => {
+  const seen = await install(page, { openAll: true });
+  await page.goto('/price-ladder');
+  await expect(exitAllButton(page)).toBeEnabled();
+  await expect(exitAllButton(page)).toHaveAccessibleName(/\(3 open\)/); // two slices and one pair
+  await exitAllButton(page).click();
+  const dialog = page.getByRole('dialog', { name: /Exit all positions in all ladders/ });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('list', { name: 'What will be exited' })).toContainText('Dhan');
+  await expect(dialog.getByRole('list', { name: 'What will be exited' })).toContainText('3 positions');
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(seen.posts.filter(b => b.action === 'exitAll')).toEqual([]);
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Exit all: confirming sends one exitAll with the plan signature and cancel-pending on', async ({ page }) => {
+  const seen = await install(page, { openLong: true, armedPairs: 2 });
+  await page.goto('/price-ladder');
+  await exitAllButton(page).click();
+  const dialog = page.getByRole('dialog', { name: /Exit all positions in all ladders/ });
+  await expect(dialog.getByRole('checkbox')).toBeChecked(); // 2 armed pairs are pending: offered, on by default
+  await expect(dialog).toContainText('Also cancel 2 armed level(s)');
+  await dialog.getByRole('button', { name: 'Exit all 1 position' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.action === 'exitAll').length).toBe(1);
+  const body = seen.posts.find(b => b.action === 'exitAll')!;
+  expect(body).toMatchObject({ action: 'exitAll', cancelPending: true });
+  expect(typeof body.signature).toBe('string');
+  expect((body.signature as string).length).toBeGreaterThan(0);
+  // The browser sends no side, quantity, contract or order of its own: the server derives the exits from its ledger.
+  expect(Object.keys(body).sort()).toEqual(['action', 'cancelPending', 'signature']);
+  await expect(dialog).toHaveCount(0);
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Exit all: unticking "also cancel" sends cancelPending false', async ({ page }) => {
+  const seen = await install(page, { openLong: true, armedPairs: 2 });
+  await page.goto('/price-ladder');
+  await exitAllButton(page).click();
+  const dialog = page.getByRole('dialog', { name: /Exit all positions in all ladders/ });
+  await dialog.getByRole('checkbox').uncheck();
+  await dialog.getByRole('button', { name: 'Exit all 1 position' }).click();
+  await expect.poll(() => seen.posts.filter(b => b.action === 'exitAll').length).toBe(1);
+  expect(seen.posts.find(b => b.action === 'exitAll')).toMatchObject({ cancelPending: false });
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Exit all: only pending levels (no position) offers to cancel them, not to exit', async ({ page }) => {
+  const seen = await install(page, { armedPairs: 1 });
+  await page.goto('/price-ladder');
+  await expect(exitAllButton(page)).toBeEnabled();
+  await exitAllButton(page).click();
+  const dialog = page.getByRole('dialog', { name: /Exit all positions in all ladders/ });
+  await expect(dialog.getByRole('button', { name: 'Cancel pending only' })).toBeVisible();
+  await dialog.getByRole('checkbox').uncheck();
+  await expect(dialog.getByRole('button', { name: 'Cancel pending only' })).toBeDisabled(); // nothing left to do
+  expect(seen.posts).toEqual([]);
+});

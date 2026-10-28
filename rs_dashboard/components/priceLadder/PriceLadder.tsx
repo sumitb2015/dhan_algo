@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { loadDefaults, saveDefaults, clearDefaults, resolveDefaults, LADDER_UNDERLYINGS, type LadderDefaults } from '@/lib/priceLadderDefaults';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu';
-import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2, Volume2, VolumeX } from 'lucide-react';
+import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2, Volume2, VolumeX, OctagonX } from 'lucide-react';
 import { toast } from 'sonner';
 import { MCX_LOT_MULTIPLIER, scaleBrokerPnl } from '@/lib/positionPnl';
 import { oiRowsFor, maxOi, type OiStrike } from '@/lib/priceLadderOi';
@@ -22,6 +22,7 @@ import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STE
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
 import { guardKey, scopeMtm } from '@/lib/priceLadderGuard';
+import { planExitAll, type ExitAllPlan } from '@/lib/priceLadderExitAll';
 import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { chimeFor } from '@/lib/priceLadderChime';
@@ -366,6 +367,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // `setting` confirmation (its own title and button; it never switches the REAL-order confirmation off).
   const [confirm, setConfirm] = useState<null | { text: string; run: () => void; setting?: { title: string; button: string } }>(null);
   const [armModal, setArmModal] = useState(false);
+  // Exit all (every ladder at once). The plan is frozen when the dialog opens, so what is confirmed is what was read; the server
+  // rebuilds it under the ledger lock and refuses if anything changed in between.
+  const [exitAllSnap, setExitAllSnap] = useState<ExitAllPlan | null>(null);
+  const [exitAllCancel, setExitAllCancel] = useState(true);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [dismissedBlock, setDismissedBlock] = useState<string | null>(null);   // the pause reason the user closed; a different reason shows again
   const [savedDefaults, setSavedDefaults] = useState<LadderDefaults>({});
@@ -1328,6 +1333,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const offBaskets = paneBaskets.filter(b => isBasketLive(b) && !myBaskets.some(y => y.id === b.id));
   // Positions held (not armed levels): a contract + side group with filled lots, and a pair that has a leg on.
   const openPositions = openPositionCount(paneSlices, panePairs, paneBaskets);
+  // Everything every ladder holds, for the header's Exit all (the ledger the page holds is the whole file, both panes and every broker).
+  const exitAllPlan = useMemo(() => (data ? planExitAll(data.state) : null), [data]);
 
   // Switch the page to a slice's contract (Active Trades chip, orders list). Moving into REAL re-arms the first-click
   // confirmation, exactly like the SIM/REAL switch.
@@ -1387,6 +1394,16 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot on first data, guarded by autoFocusedRef
     selectContract({ contract: latest.contract, broker: latest.broker });
   }, [data, real, selectContract, second]);
+
+  // Always visible (it sits in the top row, not in the foldable controls): an emergency exit must never be one click behind a chevron.
+  const exitAllEl = !second && (<button type="button" disabled={busy || !exitAllPlan || (exitAllPlan.positions === 0 && exitAllPlan.cancelSliceIds.length + exitAllPlan.cancelPairIds.length + exitAllPlan.cancelBasketIds.length === 0)}
+        onClick={() => { if (!data) return; setExitAllCancel(true); setExitAllSnap(planExitAll(data.state)); }}
+        aria-label={`Exit all positions in all ladders (${exitAllPlan?.positions ?? 0} open)`}
+        title="Exit every open position in every ladder (both panes, every broker, SIM and REAL) in one go. Asks first; optionally cancels armed levels and resting orders too"
+        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-bold border border-red-500/50 bg-red-500/10 text-red-300 hover:bg-red-500/20 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${FOCUS_RING}`}>
+        <OctagonX className="w-3.5 h-3.5" aria-hidden="true" /> Exit all
+        {(exitAllPlan?.positions ?? 0) > 0 && <span className="px-1 rounded bg-red-500/25 font-mono text-[10px]">{exitAllPlan?.positions}</span>}
+      </button>);
 
   // The broker / SIM-REAL / arm / data / chain / settings / add-ladder buttons. With ONE ladder they sit in the top row beside
   // the index chips (right-aligned, same order); with two, each ladder keeps them in its own title row.
@@ -1465,6 +1482,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             ? `${BROKER_LABELS[broker]} P&L minus charges — charges unavailable${charges.note ? `: ${charges.note}` : ''}`
             : `${BROKER_LABELS[broker]} P&L after estimated charges of ₹${Math.round(charges.total).toLocaleString('en-IN')} on ${charges.orders} executed order(s) today (brokerage ₹${charges.brokerage}/order${charges.breakdown ? ` · STT/CTT ₹${Math.round(charges.breakdown.stt)} · exchange ₹${Math.round(charges.breakdown.exchange)} · GST ₹${Math.round(charges.breakdown.gst)} · stamp ₹${Math.round(charges.breakdown.stamp)} · SEBI ₹${Math.round(charges.breakdown.sebi)}` : ''}). An estimate from rate tables, not your contract note.`} />}
         {showAccount && acct.note && <span className="text-amber-300 truncate max-w-[18rem]" title={acct.note}>{acct.note}</span>}
+        {exitAllEl}
         {/* The standard header buttons (theme, alerts, settings, Sync Data, Update, Disconnect): at the top right of the page, in the always-visible top row. Side by side that is ladder 2's row; alone, ladder 1's. */}
         {(dual ? second : true) && <div className="ml-auto"><NavBar /></div>}
         {!second && !dual && headControls && <div>{headControls}</div>}
@@ -2038,6 +2056,53 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           </div>
         </div>
       )}
+      {exitAllSnap && (() => {
+        const snap = exitAllSnap;
+        const pendingN = snap.cancelSliceIds.length + snap.cancelPairIds.length + snap.cancelBasketIds.length;
+        const confirm = async () => {
+          const ok = await post({ action: 'exitAll', signature: snap.signature, cancelPending: exitAllCancel });
+          if (ok) { toast.success(`Exiting ${snap.positions} position(s)${exitAllCancel && pendingN ? ` and cancelling ${pendingN} pending` : ''} — watch the exits settle`); setExitAllSnap(null); }
+        };
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 p-4" role="dialog" aria-modal="true" aria-labelledby="exit-all-title">
+            <div className="w-full max-w-lg rounded-lg border border-red-500/40 bg-zinc-900 p-4 flex flex-col gap-3">
+              <p id="exit-all-title" className="text-sm font-bold text-white">Exit all positions in all ladders?</p>
+              <p className="text-xs text-zinc-300">Each position below is exited at MARKET, sized against the broker&apos;s own book. REAL exits go to the broker; SIM exits close paper positions.</p>
+              <ul className="flex flex-col gap-1" aria-label="What will be exited">
+                {snap.groups.map(g => (
+                  <li key={`${g.broker}|${g.mode}`} className="flex items-center justify-between gap-2 rounded border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs">
+                    <span className="flex items-center gap-2">
+                      <span className="font-bold text-zinc-100">{BROKER_LABELS[g.broker]}</span>
+                      <span className={`px-1.5 py-px rounded text-[10px] font-bold ${g.mode === 'real' ? 'bg-red-500/20 text-red-300' : 'bg-zinc-700 text-zinc-300'}`}>{g.mode === 'real' ? 'REAL' : 'SIM'}</span>
+                    </span>
+                    <span className="font-mono text-zinc-200">{g.positions} position{g.positions === 1 ? '' : 's'}{g.pending ? ` · ${g.pending} pending` : ''}</span>
+                  </li>
+                ))}
+              </ul>
+              {pendingN > 0 && (
+                <label className="flex items-start gap-2 text-xs text-zinc-200 cursor-pointer">
+                  <input type="checkbox" checked={exitAllCancel} onChange={e => setExitAllCancel(e.target.checked)} className="mt-0.5" />
+                  <span>Also cancel {pendingN} armed level(s) and resting order(s), so nothing re-enters after the exit.</span>
+                </label>
+              )}
+              {snap.unknown > 0 && (
+                <p className="text-xs text-amber-300 flex items-start gap-1.5"><AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden="true" />{snap.unknown} item(s) have an UNKNOWN order status and are not touched: check Orders / Positions and resolve each one.</p>
+              )}
+              {snap.inFlight > 0 && (
+                <p className="text-xs text-amber-300 flex items-start gap-1.5"><AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" aria-hidden="true" />{snap.inFlight} entry order(s) are being sent right now and are not included: press Exit all again once they settle.</p>
+              )}
+              {snap.alreadyExiting > 0 && <p className="text-[11px] text-zinc-400">{snap.alreadyExiting} already exiting: left as they are.</p>}
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={() => setExitAllSnap(null)} className={`px-3 py-1.5 rounded-md border border-zinc-700 text-xs text-zinc-300 ${FOCUS_RING}`}>Cancel</button>
+                <button type="button" disabled={busy || (snap.positions === 0 && !(exitAllCancel && pendingN))} onClick={() => void confirm()}
+                  className={`px-3 py-1.5 rounded-md bg-red-600 text-xs font-bold text-oncolor disabled:opacity-50 ${FOCUS_RING}`}>
+                  {snap.positions > 0 ? `Exit all ${snap.positions} position${snap.positions === 1 ? '' : 's'}` : 'Cancel pending only'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
       {armModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-oncolor-dark/70 p-4" role="dialog" aria-modal="true">
           <div className="w-full max-w-md rounded-lg border border-zinc-700 bg-zinc-900 p-4 flex flex-col gap-3">
