@@ -34,9 +34,7 @@ export interface BrokerPortfolio {
   cashBalance: number | null;
   /** Delivery holdings at market value, when the route reads them itself (Kotak: stocks + mutual funds). Dhan's come from /api/portfolio-holdings. */
   holdingsValue: number | null;
-  /** Broker-extended credit counted inside availableBalance but not owned cash (Kotak AdhocMargin). */
-  adhocMargin: number | null;
-  /** Cash the account actually owns: available margin minus pledged collateral, ad-hoc credit and pending pay-in. */
+  /** Cash the account actually owns: available margin minus pledged collateral. */
   ownCash: number | null;
   openPositions: number;
   closedPositions: number;
@@ -112,7 +110,6 @@ function emptyBroker(broker: Broker, connected: boolean, error?: string): Broker
     collateralAmount: null,
     cashBalance: null,
     holdingsValue: null,
-    adhocMargin: null,
     ownCash: null,
     openPositions: 0,
     closedPositions: 0,
@@ -319,13 +316,8 @@ async function loadKotak(): Promise<BrokerPortfolio> {
     out.totalBalance = f.availableBalance + f.utilizedAmount;
     out.cashBalance = f.cashBalance;
     out.collateralAmount = f.collateralAmount > 0 ? f.collateralAmount : null;
-    // `Net` already includes credit the broker extends (AdhocMargin) and a pending pay-in; neither is cash the
-    // account owns, so they are left out of ownCash (and so out of the portfolio valuation).
-    const raw = (limitsRes.value ?? {}) as Record<string, unknown>;
-    const adhoc = num(raw.AdhocMargin ?? raw.adhocMargin);
-    const payIn = num(raw.RmsPayInAmt);
-    out.adhocMargin = adhoc > 0 ? adhoc : null;
-    out.ownCash = Math.max(0, f.availableBalance - f.collateralAmount - adhoc - payIn);
+    // Kotak files deposited funds under AdhocMargin / RmsPayInAmt inside `Net`; all of it is the account's cash.
+    out.ownCash = f.cashBalance;
   } else {
     out.error = `funds: ${String(limitsRes.reason).slice(0, 120)}`;
   }

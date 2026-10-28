@@ -1178,15 +1178,6 @@ function BrokerAccountCard({
               </>
             )}
 
-            {b.adhocMargin !== null && (
-              <>
-                <dt className="text-zinc-500">Broker Ad-hoc Credit</dt>
-                <dd className="text-right tabular-nums text-zinc-400">
-                  {fmtINRCompact(b.adhocMargin)}
-                </dd>
-              </>
-            )}
-
             {b.collateralAmount !== null && (
               <>
                 <dt className="text-zinc-500">Collateral Margin</dt>
