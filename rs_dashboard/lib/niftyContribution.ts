@@ -137,6 +137,41 @@ export function computeContributions(
   };
 }
 
+export interface WaterfallBar {
+  symbol: string;
+  name: string;
+  /** This stock's own points (the net total for the closing bar). */
+  points: number;
+  /** Running total before and after this bar. */
+  start: number;
+  end: number;
+  /** [low, high] of the floating bar, whichever way it moves, so a bar can straddle zero. */
+  range: [number, number];
+  kind: 'pull' | 'drag' | 'net';
+}
+
+/**
+ * Running total over `rows` in the order given (computeContributions sorts biggest puller first), closed by a
+ * NET bar from zero. Pullers climb to the total pulled, draggers then fall to the net, so the last running
+ * total IS `net` and the closing bar cannot disagree with the headline.
+ */
+export function buildWaterfall(rows: ContributionRow[]): WaterfallBar[] {
+  if (rows.length === 0) return [];
+  const bars: WaterfallBar[] = [];
+  let total = 0;
+  for (const r of rows) {
+    const start = total;
+    total += r.points;
+    bars.push({
+      symbol: r.symbol, name: r.name, points: r.points, start, end: total,
+      range: [Math.min(start, total), Math.max(start, total)],
+      kind: r.points >= 0 ? 'pull' : 'drag',
+    });
+  }
+  bars.push({ symbol: 'NET', name: 'Net contribution', points: total, start: 0, end: total, range: [Math.min(0, total), Math.max(0, total)], kind: 'net' });
+  return bars;
+}
+
 /** Seed file: `symbol,name,weight_pct,ref_price,as_of`. Rows that do not parse to positive numbers are dropped. */
 export function parseWeightsCsv(text: string): { rows: SeedRow[]; asOf: string | null } {
   const lines = text.split(/\r?\n/).filter((l) => l.trim());

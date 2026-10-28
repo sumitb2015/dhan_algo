@@ -8,7 +8,7 @@ import { DASH, PctPill, TD, TH, type SortDir } from '@/components/LiveTickerPane
 import { cn } from '@/lib/utils';
 import { ageText } from '@/components/us-markets/format';
 import { inr, istDate } from '@/components/india-markets/format';
-import type { ContributionResult, ContributionRow } from '@/lib/niftyContribution';
+import { buildWaterfall, type ContributionResult, type ContributionRow, type WaterfallBar } from '@/lib/niftyContribution';
 
 const POLL_MS = 2000;
 
@@ -65,13 +65,28 @@ function BarTooltip({ active, payload }: { active?: boolean; payload?: Array<{ p
   );
 }
 
+function WaterfallTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: WaterfallBar }> }) {
+  const b = active ? payload?.[0]?.payload : undefined;
+  if (!b) return null;
+  return (
+    <div style={{ background: 'var(--chart-tooltip-bg)', border: '1px solid var(--chart-tooltip-border)', color: 'var(--chart-tooltip-text)', borderRadius: 8, padding: '6px 10px', fontSize: 11 }}>
+      <div className="font-bold">{b.symbol} {b.kind !== 'net' && <span className="font-normal">{b.name}</span>}</div>
+      {b.kind === 'net'
+        ? <div className="font-mono">Net {pts(b.end)} pts</div>
+        : <div className="font-mono">{pts(b.points)} pts · running total {pts(b.start)} → {pts(b.end)}</div>}
+    </div>
+  );
+}
+
 type SortKey = 'points' | 'symbol' | 'changePct' | 'weightPct' | 'ltp';
+type View = 'stock' | 'cumulative';
 
 export default function NiftyContribution() {
   const [data, setData] = useState<Resp | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [view, setView] = useState<View>('stock');
   const [topN, setTopN] = useState<10 | 15 | 0>(10); // 0 = all
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'points', dir: 'desc' });
   const seq = useRef(0);
@@ -124,6 +139,9 @@ export default function NiftyContribution() {
     if (topN === 0) return res.rows;
     return [...res.pullers.slice(0, topN), ...res.draggers.slice(0, topN).reverse()];
   }, [res, topN]);
+
+  // Only worth building while its tab is open: the page re-renders on every 2 s poll.
+  const waterfall = useMemo(() => (view === 'cumulative' && res ? buildWaterfall(res.rows) : []), [view, res]);
 
   const tableRows = useMemo(() => {
     if (!res) return [];
@@ -245,18 +263,52 @@ export default function NiftyContribution() {
 
             <section className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3" aria-label="Contribution by stock">
               <div className="flex items-center justify-between gap-2 mb-2">
-                <h2 className="text-xs font-bold text-zinc-100">Points by stock</h2>
-                <div className="inline-flex rounded-md border border-zinc-700 overflow-hidden" role="group" aria-label="How many stocks to chart">
-                  {([[10, 'Top 10'], [15, 'Top 15'], [0, 'All']] as const).map(([n, label]) => (
-                    <button key={n} onClick={() => setTopN(n)} aria-pressed={topN === n}
-                      className={cn('px-2.5 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60',
-                        topN === n ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200')}>
+                <div className="inline-flex rounded-md border border-zinc-700 overflow-hidden" role="tablist" aria-label="Chart view">
+                  {([['stock', 'By stock'], ['cumulative', 'Cumulative']] as const).map(([v, label]) => (
+                    <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)}
+                      className={cn('px-3 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60',
+                        view === v ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200')}>
                       {label}
                     </button>
                   ))}
                 </div>
+                {view === 'stock' ? (
+                  <div className="inline-flex rounded-md border border-zinc-700 overflow-hidden" role="group" aria-label="How many stocks to chart">
+                    {([[10, 'Top 10'], [15, 'Top 15'], [0, 'All']] as const).map(([n, label]) => (
+                      <button key={n} onClick={() => setTopN(n)} aria-pressed={topN === n}
+                        className={cn('px-2.5 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60',
+                          topN === n ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200')}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-zinc-500">All {res.rows.length} stocks, biggest puller first - the running total climbs to {pts(res.positiveSum)} then falls to the net {pts(res.net)}.</p>
+                )}
               </div>
-              {chartRows.length === 0 ? (
+              {view === 'cumulative' ? (
+                waterfall.length === 0 ? (
+                  <p className="py-10 text-center text-xs text-zinc-500">No priced stocks yet - start the stocks feed.</p>
+                ) : (
+                  <div style={{ height: 380 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={waterfall} margin={{ top: 8, right: 16, bottom: 4, left: 8 }}>
+                        <XAxis dataKey="symbol" interval={0} angle={-60} textAnchor="end" height={72} tick={{ fontSize: 10 }} />
+                        <YAxis tickFormatter={(v: number) => pts(v, 0)} />
+                        <Tooltip content={<WaterfallTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
+                        <ReferenceLine y={0} stroke="var(--chart-axis)" />
+                        <Bar dataKey="range" isAnimationActive={false}>
+                          {waterfall.map(b => (
+                            // The closing NET bar takes its sign's colour like every other bar; the outline is what marks it as the total.
+                            <Cell key={b.symbol} fill={b.points >= 0 ? 'var(--chart-pos)' : 'var(--chart-neg)'}
+                              stroke={b.kind === 'net' ? 'var(--chart-tick)' : 'none'} strokeWidth={b.kind === 'net' ? 2 : 0} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )
+              ) : chartRows.length === 0 ? (
                 <p className="py-10 text-center text-xs text-zinc-500">No priced stocks yet - start the stocks feed.</p>
               ) : (
                 <div style={{ height: chartRows.length * 22 + 36 }}>

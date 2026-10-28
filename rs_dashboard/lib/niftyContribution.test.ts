@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeContributions, parseWeightsCsv, type SeedRow } from './niftyContribution.ts';
+import { buildWaterfall, computeContributions, parseWeightsCsv, type SeedRow } from './niftyContribution.ts';
 
 // Hand-built 3-stock "index": q = weight / refPrice = 0.5, 0.15, 0.4, so the divisor-free index is
 // sum(q * price). prev = 100, today = 100.7 -> a 1000-point index closes at 1007 (+7).
@@ -98,6 +98,41 @@ test('concentration: one heavyweight carrying the move is narrow', () => {
   assert.equal(r.concentration, 'narrow');
   const even = computeContributions(seed, Object.fromEntries(seed.map((s) => [s.symbol, { ltp: 101, prevClose: 100 }])), { prevClose: 1000, ltp: 1010, change: 10 });
   assert.equal(even.concentration, 'broad');
+});
+
+test('waterfall climbs through the pullers, falls through the draggers and closes on the net', () => {
+  const r = computeContributions(SEED, {
+    A: { ltp: 102, prevClose: 100 },
+    B: { ltp: 198, prevClose: 200 },
+    C: { ltp: 50, prevClose: 50 },
+  }, NIFTY);
+  const bars = buildWaterfall(r.rows);
+  assert.deepEqual(bars.map((b) => b.symbol), ['A', 'C', 'B', 'NET']);
+  assert.equal(bars[0].start, 0);
+  assert.ok(Math.abs(bars[0].end - 10) < 1e-9); // A: 0 -> +10
+  assert.ok(Math.abs(bars[2].start - 10) < 1e-9 && Math.abs(bars[2].end - 7) < 1e-9); // B: 10 -> 7
+  assert.deepEqual(bars[2].range, [bars[2].end, bars[2].start]); // [low, high] whichever way it moves
+  const net = bars[3];
+  assert.equal(net.kind, 'net');
+  assert.equal(net.start, 0);
+  assert.ok(Math.abs(net.end - r.net) < 1e-9);
+  assert.deepEqual(bars.slice(0, 3).map((b) => b.kind), ['pull', 'pull', 'drag']);
+});
+
+test('waterfall peaks at the total pulled and keeps floating bars across zero', () => {
+  const seed: SeedRow[] = [
+    { symbol: 'P', name: 'P', weightPct: 50, refPrice: 100 },
+    { symbol: 'D', name: 'D', weightPct: 50, refPrice: 100 },
+  ];
+  const r = computeContributions(seed, {
+    P: { ltp: 101, prevClose: 100 },
+    D: { ltp: 96, prevClose: 100 },
+  }, { prevClose: 1000, ltp: 975, change: -25 });
+  const bars = buildWaterfall(r.rows);
+  assert.ok(Math.abs(Math.max(...bars.map((b) => b.end)) - r.positiveSum) < 1e-9);
+  const d = bars.find((b) => b.symbol === 'D')!; // starts above zero, ends below it
+  assert.ok(d.range[0] < 0 && d.range[1] > 0);
+  assert.deepEqual(buildWaterfall([]), []);
 });
 
 test('parseWeightsCsv reads the seed file and rejects bad rows', () => {

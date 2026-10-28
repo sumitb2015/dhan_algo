@@ -66,9 +66,22 @@ test('shows the headline tiles and every stock, biggest puller first', async ({ 
   await expect(page.getByText('DATA:')).toBeVisible();
 });
 
+test('the Cumulative tab draws the waterfall closing on a NET bar, and By stock brings the toggle back', async ({ page }) => {
+  await open(page, payload());
+  await expect(page.getByRole('group', { name: 'How many stocks to chart' })).toBeVisible();
+  await page.getByRole('tab', { name: 'Cumulative' }).click();
+  await expect(page.getByRole('tab', { name: 'Cumulative' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('svg text', { hasText: /^NET$/ })).toBeVisible();
+  await expect(page.locator('svg text', { hasText: /^LT$/ }).first()).toBeVisible();
+  await expect(page.getByText(/running total climbs to \+53\.00 then falls to the net -13\.35/)).toBeVisible();
+  await expect(page.getByRole('group', { name: 'How many stocks to chart' })).toHaveCount(0);
+  await page.getByRole('tab', { name: 'By stock' }).click();
+  await expect(page.getByRole('group', { name: 'How many stocks to chart' })).toBeVisible();
+});
+
 test('sorting by weight reorders the table', async ({ page }) => {
   await open(page, payload());
-  await page.getByRole('columnheader', { name: /Weight/ }).click();
+  await page.locator('th', { hasText: 'Weight' }).click();
   await expect(page.locator('tbody tr').first()).toContainText('HDFCBANK');
 });
 
