@@ -34,7 +34,7 @@ export interface BrokerPortfolio {
   cashBalance: number | null;
   /** Delivery holdings at market value, when the route reads them itself (Kotak: stocks + mutual funds). Dhan's come from /api/portfolio-holdings. */
   holdingsValue: number | null;
-  /** Cash the account actually owns: available margin minus pledged collateral. */
+  /** Cash the account actually owns: available margin minus pledged collateral (Dhan) or margin granted against pledged holdings (Kotak). */
   ownCash: number | null;
   openPositions: number;
   closedPositions: number;
@@ -316,8 +316,10 @@ async function loadKotak(): Promise<BrokerPortfolio> {
     out.totalBalance = f.availableBalance + f.utilizedAmount;
     out.cashBalance = f.cashBalance;
     out.collateralAmount = f.collateralAmount > 0 ? f.collateralAmount : null;
-    // Kotak files deposited funds under AdhocMargin / RmsPayInAmt inside `Net`; all of it is the account's cash.
-    out.ownCash = f.cashBalance;
+    // AdhocMargin is the margin Kotak grants against pledged holdings (mutual funds), not cash. The deposited funds
+    // are the rest of `Net` (RmsPayInAmt + CollateralValue - MarginUsed), so net them out of it.
+    const adhoc = num((limitsRes.value as Record<string, unknown> | null)?.AdhocMargin);
+    out.ownCash = Math.max(0, f.availableBalance - adhoc);
   } else {
     out.error = `funds: ${String(limitsRes.reason).slice(0, 120)}`;
   }
