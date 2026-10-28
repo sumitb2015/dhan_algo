@@ -2,13 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Loader2, Play, Scale, Square } from 'lucide-react';
-import { Bar, BarChart, Cell, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Bar, BarChart, Cell, LabelList, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import NavBar from '@/components/NavBar';
 import { DASH, PctPill, TD, TH, type SortDir } from '@/components/LiveTickerPanel';
 import { cn } from '@/lib/utils';
 import { ageText } from '@/components/us-markets/format';
 import { inr, istDate } from '@/components/india-markets/format';
-import { buildWaterfall, type ContributionResult, type ContributionRow, type WaterfallBar } from '@/lib/niftyContribution';
+import { buildTotals, type ContributionResult, type ContributionRow, type TotalBar } from '@/lib/niftyContribution';
 
 const POLL_MS = 2000;
 
@@ -65,16 +65,27 @@ function BarTooltip({ active, payload }: { active?: boolean; payload?: Array<{ p
   );
 }
 
-function WaterfallTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: WaterfallBar }> }) {
+function TotalsTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: TotalBar }> }) {
   const b = active ? payload?.[0]?.payload : undefined;
   if (!b) return null;
   return (
     <div style={{ background: 'var(--chart-tooltip-bg)', border: '1px solid var(--chart-tooltip-border)', color: 'var(--chart-tooltip-text)', borderRadius: 8, padding: '6px 10px', fontSize: 11 }}>
-      <div className="font-bold">{b.symbol} {b.kind !== 'net' && <span className="font-normal">{b.name}</span>}</div>
-      {b.kind === 'net'
-        ? <div className="font-mono">Net {pts(b.end)} pts</div>
-        : <div className="font-mono">{pts(b.points)} pts · running total {pts(b.start)} → {pts(b.end)}</div>}
+      <div className="font-bold">{b.label} <span className="font-normal font-mono">{pts(b.value)} pts · {b.count} stock{b.count === 1 ? '' : 's'}</span></div>
+      {b.top.map(t => <div key={t.symbol} className="font-mono">{t.symbol} {pts(t.points)}</div>)}
     </div>
+  );
+}
+
+/** The bar's own value, printed past its tip (above a green bar, below a red one). Heights can be negative for a negative value. */
+function TotalLabel({ x, y, width, height, value }: { x?: unknown; y?: unknown; width?: unknown; height?: unknown; value?: unknown }) {
+  const [px, py, w, h, v] = [x, y, width, height, value].map(Number);
+  if (![px, py, w, h, v].every(Number.isFinite)) return null;
+  const top = Math.min(py, py + h), bottom = Math.max(py, py + h);
+  return (
+    <text x={px + w / 2} y={v >= 0 ? top - 8 : bottom + 18} textAnchor="middle" fontSize={16} fontWeight={700} fontFamily="ui-monospace, monospace"
+      fill={v >= 0 ? 'var(--chart-pos)' : 'var(--chart-neg)'}>
+      {pts(v)}
+    </text>
   );
 }
 
@@ -141,7 +152,7 @@ export default function NiftyContribution() {
   }, [res, topN]);
 
   // Only worth building while its tab is open: the page re-renders on every 2 s poll.
-  const waterfall = useMemo(() => (view === 'cumulative' && res ? buildWaterfall(res.rows) : []), [view, res]);
+  const totals = useMemo(() => (view === 'cumulative' && res ? buildTotals(res) : []), [view, res]);
 
   const tableRows = useMemo(() => {
     if (!res) return [];
@@ -283,30 +294,38 @@ export default function NiftyContribution() {
                     ))}
                   </div>
                 ) : (
-                  <p className="text-[11px] text-zinc-500">All {res.rows.length} stocks, biggest puller first - the running total climbs to {pts(res.positiveSum)} then falls to the net {pts(res.net)}.</p>
+                  <p className="text-[11px] text-zinc-500">Everything the green side added, everything the red side took away, and what is left.</p>
                 )}
               </div>
               {view === 'cumulative' ? (
-                waterfall.length === 0 ? (
+                totals.length === 0 ? (
                   <p className="py-10 text-center text-xs text-zinc-500">No priced stocks yet - start the stocks feed.</p>
                 ) : (
-                  <div style={{ height: 380 }}>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={waterfall} margin={{ top: 8, right: 16, bottom: 4, left: 8 }}>
-                        <XAxis dataKey="symbol" interval={0} angle={-60} textAnchor="end" height={72} tick={{ fontSize: 10 }} />
-                        <YAxis tickFormatter={(v: number) => pts(v, 0)} />
-                        <Tooltip content={<WaterfallTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
-                        <ReferenceLine y={0} stroke="var(--chart-axis)" />
-                        <Bar dataKey="range" isAnimationActive={false}>
-                          {waterfall.map(b => (
-                            // The closing NET bar takes its sign's colour like every other bar; the outline is what marks it as the total.
-                            <Cell key={b.symbol} fill={b.points >= 0 ? 'var(--chart-pos)' : 'var(--chart-neg)'}
-                              stroke={b.kind === 'net' ? 'var(--chart-tick)' : 'none'} strokeWidth={b.kind === 'net' ? 2 : 0} />
-                          ))}
-                        </Bar>
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
+                  <>
+                    <div style={{ height: 340 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={totals} margin={{ top: 28, right: 24, bottom: 8, left: 8 }}>
+                          <XAxis dataKey="label" tickFormatter={(l: string) => (l === 'Net' ? 'Net' : `${l} (${totals.find(t => t.label === l)?.count ?? 0})`)} tick={{ fontSize: 12 }} />
+                          {/* Axis hidden (every bar prints its own value). 25% headroom each way so a value printed past a bar's tip never meets the x labels. */}
+                          <YAxis hide domain={[(min: number) => Math.min(min, 0) * 1.25, (max: number) => Math.max(max, 0) * 1.25]} />
+                          <Tooltip content={<TotalsTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
+                          <ReferenceLine y={0} stroke="var(--chart-axis)" />
+                          <Bar dataKey="value" isAnimationActive={false} barSize={110}>
+                            {totals.map(t => <Cell key={t.kind} fill={t.value >= 0 ? 'var(--chart-pos)' : 'var(--chart-neg)'} />)}
+                            <LabelList dataKey="value" content={TotalLabel} />
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="grid sm:grid-cols-2 gap-2 mt-1 text-[11px] font-mono">
+                      {totals.filter(t => t.kind !== 'net').map(t => (
+                        <p key={t.kind} className="text-zinc-400">
+                          <span className={cn('font-bold', t.kind === 'pull' ? 'text-emerald-400' : 'text-red-400')}>{t.kind === 'pull' ? 'Top pullers' : 'Top draggers'}</span>
+                          {' '}{t.top.map(x => `${x.symbol} ${pts(x.points)}`).join(' · ') || '—'}
+                        </p>
+                      ))}
+                    </div>
+                  </>
                 )
               ) : chartRows.length === 0 ? (
                 <p className="py-10 text-center text-xs text-zinc-500">No priced stocks yet - start the stocks feed.</p>

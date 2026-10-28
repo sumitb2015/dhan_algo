@@ -66,14 +66,19 @@ test('shows the headline tiles and every stock, biggest puller first', async ({ 
   await expect(page.getByText('DATA:')).toBeVisible();
 });
 
-test('the Cumulative tab draws the waterfall closing on a NET bar, and By stock brings the toggle back', async ({ page }) => {
+test('the Cumulative tab shows the green total, the red total and the net with their values, and By stock brings the toggle back', async ({ page }) => {
   await open(page, payload());
   await expect(page.getByRole('group', { name: 'How many stocks to chart' })).toBeVisible();
   await page.getByRole('tab', { name: 'Cumulative' }).click();
   await expect(page.getByRole('tab', { name: 'Cumulative' })).toHaveAttribute('aria-selected', 'true');
-  await expect(page.locator('svg text', { hasText: /^NET$/ })).toBeVisible();
-  await expect(page.locator('svg text', { hasText: /^LT$/ }).first()).toBeVisible();
-  await expect(page.getByText(/running total climbs to \+53\.00 then falls to the net -13\.35/)).toBeVisible();
+  // Values are printed on the bars; the labels carry the stock counts. Fixture: +53.00 pulled (2), -66.35 dragged (3), net -13.35.
+  await expect(page.locator('svg text', { hasText: /^\+53\.00$/ })).toBeVisible();
+  await expect(page.locator('svg text', { hasText: /^-66\.35$/ })).toBeVisible();
+  await expect(page.locator('svg text', { hasText: /^-13\.35$/ })).toBeVisible();
+  await expect(page.locator('svg text', { hasText: 'Pullers (2)' })).toBeVisible();
+  await expect(page.locator('svg text', { hasText: 'Draggers (3)' })).toBeVisible();
+  await expect(page.getByText(/Top pullers\s+LT \+45\.46/)).toBeVisible();
+  await expect(page.getByText(/Top draggers\s+INFY -40\.39/)).toBeVisible();
   await expect(page.getByRole('group', { name: 'How many stocks to chart' })).toHaveCount(0);
   await page.getByRole('tab', { name: 'By stock' }).click();
   await expect(page.getByRole('group', { name: 'How many stocks to chart' })).toBeVisible();
