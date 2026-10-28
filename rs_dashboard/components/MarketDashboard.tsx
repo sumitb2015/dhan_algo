@@ -1047,6 +1047,17 @@ function MoverTable({
 
 // ─── Broker Capital & Exposure Card ───────────────────────────────────────────
 
+/**
+ * What the account is worth: owned cash + holdings. Margin is not added on top of holdings — pledged collateral and
+ * broker credit (Kotak ad-hoc margin) sit inside the margin base and would count the same assets twice. Collateral
+ * is the floor for holdings, since a broker's holdings list can omit pledged units (Dhan omits mutual funds).
+ */
+function brokerNetWorth(b: BrokerPortfolio, dhanHoldings: number | null): number | null {
+  if (b.ownCash === null) return null;
+  const holdings = b.holdingsValue ?? dhanHoldings ?? 0;
+  return b.ownCash + Math.max(holdings, b.collateralAmount ?? 0);
+}
+
 function BrokerAccountCard({
   b,
   holdingsValue,
@@ -1055,8 +1066,7 @@ function BrokerAccountCard({
   holdingsValue: number | null;
 }) {
   const isConnected = b.connected && !b.error;
-  const portfolioValue =
-    b.totalBalance === null ? null : b.totalBalance + (holdingsValue ?? 0);
+  const portfolioValue = brokerNetWorth(b, holdingsValue);
 
   const marginUtilPercent =
     b.totalBalance && b.totalBalance > 0 && b.utilizedMargin !== null
@@ -1139,6 +1149,11 @@ function BrokerAccountCard({
               {fmtINRCompact(portfolioValue)}
             </dd>
 
+            <dt className="text-zinc-500">Own Cash</dt>
+            <dd className="text-right tabular-nums text-zinc-200">
+              {fmtINRCompact(b.ownCash)}
+            </dd>
+
             <dt className="text-zinc-500">Available Margin</dt>
             <dd className="text-right tabular-nums text-zinc-200">
               {fmtINRCompact(b.availableBalance)}
@@ -1159,6 +1174,15 @@ function BrokerAccountCard({
                 <dt className="text-zinc-500">Delivery Holdings</dt>
                 <dd className="text-right tabular-nums text-zinc-300">
                   {fmtINRCompact(holdingsValue)}
+                </dd>
+              </>
+            )}
+
+            {b.adhocMargin !== null && (
+              <>
+                <dt className="text-zinc-500">Broker Ad-hoc Credit</dt>
+                <dd className="text-right tabular-nums text-zinc-400">
+                  {fmtINRCompact(b.adhocMargin)}
                 </dd>
               </>
             )}
@@ -1984,8 +2008,9 @@ export default function MarketDashboard() {
   ).filter((b): b is BrokerPortfolio => b !== null);
 
   const totals = portfolio?.totals;
-  const portfolioValue =
-    totals ? totals.totalBalance + (holdingsValue ?? 0) : null;
+  const portfolioValue = brokers.length
+    ? brokers.reduce((sum, b) => sum + (brokerNetWorth(b, b.broker === 'dhan' ? holdingsValue : null) ?? 0), 0)
+    : null;
 
   const connectedCount = brokers.filter(b => b.connected && !b.error).length;
   const dataDate = movers?.dataDate ?? '—';
@@ -2160,7 +2185,7 @@ export default function MarketDashboard() {
                   animate={
                     portfolioValue !== null ? { raw: portfolioValue, format: fmtINRCompact } : undefined
                   }
-                  sub={holdingsValue !== null ? `incl. ${fmtINRCompact(holdingsValue)} delivery` : 'margin base'}
+                  sub="cash + holdings, margin not double-counted"
                   tone="accent"
                 />
                 <StatTile
@@ -2244,7 +2269,7 @@ export default function MarketDashboard() {
                       <BrokerAccountCard
                         key={b.broker}
                         b={b}
-                        holdingsValue={b.broker === 'dhan' ? holdingsValue : null}
+                        holdingsValue={b.broker === 'dhan' ? holdingsValue : b.holdingsValue}
                       />
                     ))}
                   </div>

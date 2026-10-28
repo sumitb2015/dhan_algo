@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { dhanGet } from '@/lib/dhanToken';
 import { kiteGet, isZerodhaTokenValid } from '@/lib/zerodhaToken';
-import { kotakGetShared, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
+import { kotakGet, kotakGetShared, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { isDhanTokenValid } from '@/lib/session';
 import { shapeZerodhaPosition } from '@/lib/zerodhaShape';
 import { shapeKotakPosition, shapeKotakFunds } from '@/lib/kotakShape';
@@ -32,6 +32,12 @@ export interface BrokerPortfolio {
   collateralAmount: number | null;
   /** Spendable cash, when the broker distinguishes it from collateral. */
   cashBalance: number | null;
+  /** Delivery holdings at market value, when the route reads them itself (Kotak: stocks + mutual funds). Dhan's come from /api/portfolio-holdings. */
+  holdingsValue: number | null;
+  /** Broker-extended credit counted inside availableBalance but not owned cash (Kotak AdhocMargin). */
+  adhocMargin: number | null;
+  /** Cash the account actually owns: available margin minus pledged collateral, ad-hoc credit and pending pay-in. */
+  ownCash: number | null;
   openPositions: number;
   closedPositions: number;
   /**
@@ -105,6 +111,9 @@ function emptyBroker(broker: Broker, connected: boolean, error?: string): Broker
     totalBalance: null,
     collateralAmount: null,
     cashBalance: null,
+    holdingsValue: null,
+    adhocMargin: null,
+    ownCash: null,
     openPositions: 0,
     closedPositions: 0,
     unpricedPositions: 0,
@@ -237,6 +246,7 @@ async function loadDhan(): Promise<BrokerPortfolio> {
     out.totalBalance = out.availableBalance + out.utilizedMargin;
     const collateral = Number(f.collateralAmount);
     if (Number.isFinite(collateral) && collateral > 0) out.collateralAmount = collateral;
+    out.ownCash = Math.max(0, out.availableBalance - (out.collateralAmount ?? 0));
   } else {
     out.error = `funds: ${String(fundsRes.reason).slice(0, 120)}`;
   }
@@ -276,6 +286,7 @@ async function loadZerodha(): Promise<BrokerPortfolio> {
     if (Number.isFinite(cash)) out.cashBalance = cash;
     const collateral = Number(m.equity?.available?.collateral);
     if (Number.isFinite(collateral) && collateral > 0) out.collateralAmount = collateral;
+    out.ownCash = out.cashBalance;
   } else {
     out.error = `funds: ${String(marginsRes.reason).slice(0, 120)}`;
   }
@@ -295,9 +306,10 @@ async function loadKotak(): Promise<BrokerPortfolio> {
   if (!isKotakTokenValid()) return emptyBroker('kotak', false, 'No valid Kotak session');
   const out = emptyBroker('kotak', true);
 
-  const [limitsRes, posRes] = await Promise.allSettled([
+  const [limitsRes, posRes, holdRes] = await Promise.allSettled([
     getCachedFunds('kotak', () => kotakLimits()),
     getCachedPositions('kotak', () => kotakGetShared(KOTAK_PATHS.positions)),
+    kotakGet(KOTAK_PATHS.holdings),
   ]);
 
   if (limitsRes.status === 'fulfilled') {
@@ -307,8 +319,25 @@ async function loadKotak(): Promise<BrokerPortfolio> {
     out.totalBalance = f.availableBalance + f.utilizedAmount;
     out.cashBalance = f.cashBalance;
     out.collateralAmount = f.collateralAmount > 0 ? f.collateralAmount : null;
+    // `Net` already includes credit the broker extends (AdhocMargin) and a pending pay-in; neither is cash the
+    // account owns, so they are left out of ownCash (and so out of the portfolio valuation).
+    const raw = (limitsRes.value ?? {}) as Record<string, unknown>;
+    const adhoc = num(raw.AdhocMargin ?? raw.adhocMargin);
+    const payIn = num(raw.RmsPayInAmt);
+    out.adhocMargin = adhoc > 0 ? adhoc : null;
+    out.ownCash = Math.max(0, f.availableBalance - f.collateralAmount - adhoc - payIn);
   } else {
     out.error = `funds: ${String(limitsRes.reason).slice(0, 120)}`;
+  }
+
+  // Holdings include mutual funds (empty `symbol`, which shapeKotakHolding drops), so value them straight from the rows.
+  if (holdRes.status === 'fulfilled') {
+    out.holdingsValue = kotakRows(holdRes.value).reduce((sum, h) => {
+      const mkt = Number(h.mktValue);
+      return sum + (Number.isFinite(mkt) ? mkt : num(h.quantity) * num(h.closingPrice));
+    }, 0);
+  } else {
+    out.error = [out.error, `holdings: ${String(holdRes.reason).slice(0, 120)}`].filter(Boolean).join(' · ');
   }
 
   if (posRes.status === 'fulfilled') {
