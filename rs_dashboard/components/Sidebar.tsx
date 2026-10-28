@@ -54,6 +54,7 @@ const NAV_GROUPS = [
       { href: '/fii-dii', label: 'FII / DII Activity', desc: 'Daily FII/DII cash-market flows and F&O participant-wise open interest from NSE' },
       { href: '/market-pulse', label: 'Market Pulse', desc: 'Dhan live headlines with sentiment, exchange-ranked movers & company fundamentals' },
       { href: '/india-markets', label: 'India Markets', desc: 'Nifty 500 dashboard: broad & sectoral indices, NSE industries, heatmap and movers (watch-only)' },
+      { href: '/nifty-contribution', label: 'Nifty Contribution', desc: 'Index points each Nifty 50 stock is adding or removing live: pullers, draggers and how broad the move is (watch-only)' },
       { href: '/us-markets', label: 'US Markets', desc: 'US indices, GICS sectors, AI stack heatmap and a watchlist from Dhan\'s Global Stocks feed (watch-only)' },
       { href: '/rrg', label: 'RRG', desc: 'Relative Rotation Graphs & sector trends' },
       { href: '/normalized', label: 'Charts', desc: 'Multi-asset normalized charts comparisons' },
