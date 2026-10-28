@@ -46,12 +46,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     let row = await readRow();
     if (row === undefined) return bad(`Could not read the ${NAME[broker]} positions — nothing was sent`, 502);
     if (!row || row.net === 0) return bad('That position is flat at the broker — refresh');
-    // The ladder's own exit may be on the wire: a second one off the same book would flip the position.
-    const synLeg = synLegOwner(readLadderState(), broker, key);
-    if (synLeg) return bad(`Not sent: ${synLeg}`, 409);
-    const inFlight = ladderExitInFlight(readLadderState(), broker, key);
-    if (inFlight) return bad(`Not sent: ${inFlight} — wait for it to settle, then refresh`, 409);
-
     const symbol = row.symbol;
     const mcx = row.exchange === 'MCX_COMM' || /^mcx/i.test(row.exchange) || row.exchange === 'MCX';
     // Kotak / Zerodha MCX quantity units are not confirmed against live fills (docs/PRICE_LADDER_GUIDE.md): not from here.
@@ -74,6 +68,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const plan = planClose(row.net, lotSize, pct);
     if (typeof plan === 'string') return bad(plan);
     const { side, qty } = plan;
+    // Checked last, after the slow reads above, so the ladder's own exit cannot start in the gap before this send.
+    // The ladder's own exit may be on the wire: a second one off the same book would flip the position.
+    const synLeg = synLegOwner(readLadderState(), broker, key);
+    if (synLeg) return bad(`Not sent: ${synLeg}`, 409);
+    const inFlight = ladderExitInFlight(readLadderState(), broker, key);
+    if (inFlight) return bad(`Not sent: ${inFlight} — wait for it to settle, then refresh`, 409);
     const what = `${NAME[broker]} ${symbol} ${product} ${pct}% — ${side} ${qty}`;
 
     let outcome: { status: 'placed'; orderId: string } | { status: 'rejected' | 'unknown'; error: string };
