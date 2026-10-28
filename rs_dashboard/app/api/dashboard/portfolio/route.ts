@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+import { PROJECT_ROOT } from '@/lib/pyExec';
 import { NextResponse, type NextRequest } from 'next/server';
 import { dhanGet } from '@/lib/dhanToken';
 import { kiteGet, isZerodhaTokenValid } from '@/lib/zerodhaToken';
@@ -34,6 +37,11 @@ export interface BrokerPortfolio {
   cashBalance: number | null;
   /** Delivery holdings at market value, when the route reads them itself (Kotak: stocks + mutual funds). Dhan's come from /api/portfolio-holdings. */
   holdingsValue: number | null;
+  /**
+   * Holdings Dhan's API does not return (mutual funds, US stocks), typed in by hand in debug/dhan_manual_holdings.json.
+   * Dhan's /holdings lists exchange-traded securities only and no MF endpoint exists (probed 2026-10-28), so this goes stale.
+   */
+  manualHoldings: { value: number; asOf: string } | null;
   /** Cash the account actually owns: available margin minus pledged collateral (Dhan) or margin granted against pledged holdings (Kotak). */
   ownCash: number | null;
   openPositions: number;
@@ -110,6 +118,7 @@ function emptyBroker(broker: Broker, connected: boolean, error?: string): Broker
     collateralAmount: null,
     cashBalance: null,
     holdingsValue: null,
+    manualHoldings: null,
     ownCash: null,
     openPositions: 0,
     closedPositions: 0,
@@ -226,9 +235,20 @@ function summarize(broker: Broker, rows: Record<string, unknown>[]): {
   return { positions, openPositions, closedPositions, unpricedPositions, unrealizedPnl, realizedPnl };
 }
 
+function readManualDhanHoldings(): BrokerPortfolio['manualHoldings'] {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'debug', 'dhan_manual_holdings.json'), 'utf8'));
+    const value = num(j.mutualFunds) + num(j.usStocks);
+    return value > 0 ? { value, asOf: String(j.asOf ?? '') } : null;
+  } catch {
+    return null;
+  }
+}
+
 async function loadDhan(): Promise<BrokerPortfolio> {
   if (!isDhanTokenValid()) return emptyBroker('dhan', false, 'No valid Dhan session');
   const out = emptyBroker('dhan', true);
+  out.manualHoldings = readManualDhanHoldings();
 
   const [fundsRes, posRes] = await Promise.allSettled([
     getCachedFunds('dhan', () => dhanGet('/fundlimit')),

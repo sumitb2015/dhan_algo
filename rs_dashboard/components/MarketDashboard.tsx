@@ -1054,7 +1054,7 @@ function MoverTable({
  */
 function brokerNetWorth(b: BrokerPortfolio, dhanHoldings: number | null): number | null {
   if (b.ownCash === null) return null;
-  const holdings = b.holdingsValue ?? dhanHoldings ?? 0;
+  const holdings = (b.holdingsValue ?? dhanHoldings ?? 0) + (b.manualHoldings?.value ?? 0);
   return b.ownCash + Math.max(holdings, b.collateralAmount ?? 0);
 }
 
@@ -1174,6 +1174,17 @@ function BrokerAccountCard({
                 <dt className="text-zinc-500">Delivery Holdings</dt>
                 <dd className="text-right tabular-nums text-zinc-300">
                   {fmtINRCompact(holdingsValue)}
+                </dd>
+              </>
+            )}
+
+            {b.manualHoldings && (
+              <>
+                <dt className="text-zinc-500" title="Mutual funds / US stocks Dhan's API does not return, entered by hand">
+                  MF + US (manual, {b.manualHoldings.asOf})
+                </dt>
+                <dd className="text-right tabular-nums text-zinc-300">
+                  {fmtINRCompact(b.manualHoldings.value)}
                 </dd>
               </>
             )}
