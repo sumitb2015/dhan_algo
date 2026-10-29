@@ -66,6 +66,10 @@ export default function StraddlePnfPage() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [recenter, setRecenter] = useState(0);
+  // Re-center reloads at the current ATM and then resets every chart's zoom/pan to the centre; the flag waits for that load to land.
+  const [viewTick, setViewTick] = useState(0);
+  const recenterViewRef = useRef(false);
+  const recenterNow = () => { recenterViewRef.current = true; setRecenter(n => n + 1); };
   const [log, setLog] = useState<LogEntry[]>([]);
   const [logOpen, setLogOpen] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -152,6 +156,7 @@ export default function StraddlePnfPage() {
       }
       if (reset) { loadedAtmRef.current = j.atm; rebaselineRef.current = true; } // history never alerts
       setRows(next);
+      if (recenterViewRef.current) { recenterViewRef.current = false; setViewTick(n => n + 1); }
       setLoaded({ expiry: futuresMode ? 'futures' : expiry, expiries: j.expiries, atm: j.atm, strikes: j.strikes, dataDate: j.dataDate, errors: j.errors ?? {} });
       setLoadError(null);
     } catch (e) {
@@ -355,11 +360,11 @@ export default function StraddlePnfPage() {
             ATM
             <input aria-label="ATM" type="text" inputMode="numeric" value={atmInput}
                    onChange={e => setAtmInput(e.target.value)}
-                   onKeyDown={e => { if (e.key === 'Enter') setRecenter(n => n + 1); }}
+                   onKeyDown={e => { if (e.key === 'Enter') recenterNow(); }}
                    placeholder="auto"
                    className="h-7 w-20 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-xs text-zinc-200" />
           </label>}
-          {!futuresMode && <button type="button" onClick={() => { setAtmInput('auto'); setRecenter(n => n + 1); }}
+          {!futuresMode && <button type="button" onClick={() => { setAtmInput('auto'); recenterNow(); }}
                   className="h-7 px-2 rounded-md border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-300 hover:bg-zinc-800">
             Auto
           </button>}
@@ -367,7 +372,7 @@ export default function StraddlePnfPage() {
             <button type="button" aria-pressed={overlay === 'vwap'} onClick={() => pickOverlay('vwap')} className={seg(overlay === 'vwap')}>VWAP</button>
             <button type="button" aria-pressed={overlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(overlay === 'sma')}>SMA 10</button>
           </div>
-          <button type="button" onClick={() => setRecenter(n => n + 1)} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800">
+          <button type="button" onClick={() => recenterNow()} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800">
             <LocateFixed className="w-3.5 h-3.5" aria-hidden="true" /> Re-center
           </button>
           <button type="button" aria-label="Alert log" aria-pressed={logOpen} onClick={() => setLogOpen(o => !o)} className={`${iconBtn} relative`}>
@@ -407,6 +412,7 @@ export default function StraddlePnfPage() {
                 boxPct={settings.boxPct}
                 reversal={settings.reversal}
                 fill
+                resetTick={viewTick}
                 error={loaded?.errors[String(strike)]}
               />
             );

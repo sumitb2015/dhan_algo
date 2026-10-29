@@ -30,6 +30,8 @@ export type PnfPanelProps = {
   fill?: boolean;
   /** False for a futures chart: there are no CE / PE legs to show. */
   legs?: boolean;
+  /** Bump to reset zoom and centre the chart on its newest column and latest price (the header's Re-center button). */
+  resetTick?: number;
 };
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
@@ -57,7 +59,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, legs = true, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, legs = true, resetTick = 0, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -99,7 +101,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   // TradingView-style controls (same as the options charts): wheel zooms around the cursor, drag pans freely, double-click or the
   // round-arrow button fits the chart back to the newest column, and − / + zoom around the view centre. No scrollbars.
   const pendingRef = useRef<{ left: number; top: number } | 'reset' | null>(null);
-  const [resetTick, setResetTick] = useState(0);
+  const [scrollTick, setScrollTick] = useState(0);
   const zoomBy = (factor: number, ax?: number, ay?: number) => {
     const el = wrapRef.current;
     const next = Math.min(6, Math.max(0.3, +(zoom * factor).toFixed(3)));
@@ -114,21 +116,29 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     stickRef.current = false;
     setZoom(next);
   };
-  const resetView = () => { pendingRef.current = 'reset'; stickRef.current = true; setZoom(1); setResetTick(n => n + 1); };
+  const resetView = () => { pendingRef.current = 'reset'; stickRef.current = false; setZoom(1); setScrollTick(n => n + 1); };
   useLayoutEffect(() => {
     const el = wrapRef.current;
     const pending = pendingRef.current;
     if (!el || !pending) return;
     pendingRef.current = null;
     if (pending === 'reset') {
-      el.scrollLeft = stickLeft(el);
+      // Centre the newest column (the plot is the view minus the pinned axis) and the latest price.
+      el.scrollLeft = Math.max(0, xOf(columns.length - 0.5) - (el.clientWidth - AXIS_W) / 2);
       if (lastY !== null && box > 0) el.scrollTop = Math.max(0, yOf(lastY) - el.clientHeight / 2);
     } else {
       el.scrollLeft = pending.left;
       el.scrollTop = pending.top;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [zoom, resetTick]);
+  }, [zoom, scrollTick]);
+  const seenReset = useRef(resetTick);
+  useEffect(() => {
+    if (seenReset.current === resetTick) return;   // mount (and StrictMode's second mount) is not a reset request
+    seenReset.current = resetTick;
+    resetView();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resetTick]);
   const zoomRef = useRef(zoomBy);
   zoomRef.current = zoomBy;
   useEffect(() => {
@@ -339,7 +349,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         )}
       </div>
       <div data-testid="pnf-zoom" data-zoom={zoom} className="absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1 z-10">
-        {([['Zoom out', '−', () => zoomBy(0.7)], ['Reset zoom and pan to the newest column', '↺', resetView], ['Zoom in', '+', () => zoomBy(1 / 0.7)]] as const).map(([label, glyph, run]) => (
+        {([['Zoom out', '−', () => zoomBy(0.7)], ['Reset zoom and centre the chart', '↺', resetView], ['Zoom in', '+', () => zoomBy(1 / 0.7)]] as const).map(([label, glyph, run]) => (
           <button key={label} type="button" onClick={run} title={label} aria-label={label === 'Zoom out' || label === 'Zoom in' ? label : 'Fit chart to panel'}
                   className="flex items-center justify-center w-6 h-6 rounded-full text-xs bg-zinc-900 border border-zinc-700 text-zinc-100 hover:bg-zinc-800">{glyph}</button>
         ))}

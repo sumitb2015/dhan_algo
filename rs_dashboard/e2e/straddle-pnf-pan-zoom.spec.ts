@@ -75,3 +75,29 @@ test('CRUDEOILM charts the upcoming futures, not straddles', async ({ page }) =>
   await expect(page.getByLabel('Expiry')).toHaveCount(0);
   await expect(page.getByLabel('ATM', { exact: true })).toHaveCount(0);
 });
+
+test('Re-center resets zoom and puts the newest column in the middle of the chart', async ({ page }) => {
+  await page.route('**/api/**', async route => {
+    const p = new URL(route.request().url()).pathname;
+    if (p === '/api/straddle-pnf') return json(route, { success: true, atm: ATM, strikes: [ATM - 200, ATM, ATM + 200], errors: {}, dataDate: '2026-10-23', bars: { [ATM]: bars } });
+    if (p === '/api/options/expiries') return json(route, { success: true, data: ['2099-01-06'] });
+    if (route.request().method() === 'GET') return json(route, { success: true });
+    return route.fulfill({ status: 599, body: 'blocked' });
+  });
+  await page.goto('/straddle-pnf');
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
+  const sc = panel.getByTestId('pnf-scroll');
+  await expect(panel.getByTestId('pnf-grid')).toBeAttached();
+  const b = (await sc.boundingBox())!;
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.wheel(0, -300);                                           // zoom in…
+  await expect(panel.getByTestId('pnf-zoom')).not.toHaveAttribute('data-zoom', '1');
+  await page.mouse.down(); await page.mouse.move(b.x + 100, b.y + 100, { steps: 6 }); await page.mouse.up();   // …and pan away
+  await page.getByRole('button', { name: 'Re-center' }).click();
+  await expect(panel.getByTestId('pnf-zoom')).toHaveAttribute('data-zoom', '1');
+  // the newest glyph now sits near the horizontal middle of the plot (the view minus the pinned axis)
+  await expect.poll(async () => {
+    const g = (await panel.locator('svg path, svg circle').last().boundingBox())!;
+    return Math.abs(g.x + g.width / 2 - (b.x + (b.width - 58) / 2));
+  }).toBeLessThan(30);
+});
