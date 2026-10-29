@@ -30,6 +30,10 @@ const FLASH_MS = 4000;
 const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
 const OVERLAY_KEY = 'straddle-pnf-overlay';
+const CHARTS_KEY = 'straddle-pnf-charts';
+
+// Which of the three straddle panels show for 1 / 2 / 3 charts (1 = the middle one, ATM by default). All three keep loading so alerts keep running.
+const VISIBLE: Record<1 | 2 | 3, number[]> = { 1: [1], 2: [0, 1], 3: [0, 1, 2] };
 
 const minuteOf = (t: number) => Math.floor(t / 60) * 60;
 const fmt = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -47,6 +51,7 @@ export default function StraddlePnfPage() {
   const [expiry, setExpiry] = useState('');
   const [atmInput, setAtmInput] = useState('auto');
   const [overlay, setOverlay] = useState<Overlay>('vwap');
+  const [chartCount, setChartCount] = useState<1 | 2 | 3>(3);
   const [settings, setSettings] = useState<PnfSettings>(DEFAULT_SETTINGS);
   const [offsets, setOffsets] = useState<Offsets>(DEFAULT_OFFSETS);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
@@ -82,6 +87,8 @@ export default function StraddlePnfPage() {
     const stored = readSettings(readPref(SETTINGS_KEY));
     setSettings(stored);
     setOffsets(readOffsets(readPref(OFFSETS_KEY)));
+    const savedCount = Number(readPref(CHARTS_KEY));
+    if (savedCount === 1 || savedCount === 2 || savedCount === 3) setChartCount(savedCount);
     rebaselineRef.current = true;
     if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
     try {
@@ -315,6 +322,12 @@ export default function StraddlePnfPage() {
             <button type="button" aria-pressed={overlay === 'vwap'} onClick={() => pickOverlay('vwap')} className={seg(overlay === 'vwap')}>VWAP</button>
             <button type="button" aria-pressed={overlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(overlay === 'sma')}>SMA 10</button>
           </div>
+          <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Charts shown">
+            {([1, 2, 3] as const).map(n => (
+              <button key={n} type="button" aria-pressed={chartCount === n} aria-label={`${n} chart${n > 1 ? 's' : ''}`}
+                      onClick={() => { setChartCount(n); savePref(CHARTS_KEY, String(n)); }} className={seg(chartCount === n)}>{n}</button>
+            ))}
+          </div>
           <button type="button" onClick={() => setRecenter(n => n + 1)} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800">
             <LocateFixed className="w-3.5 h-3.5" aria-hidden="true" /> Re-center
           </button>
@@ -334,8 +347,9 @@ export default function StraddlePnfPage() {
       <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 py-4">
         {loadError && <p role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{loadError}</p>}
         {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} /></div>}
-        <div className="flex-1 min-h-0 grid grid-cols-3 gap-3" style={{ gridTemplateRows: 'minmax(0, 1fr)' }}>
+        <div className="flex-1 min-h-0 grid gap-3" style={{ gridTemplateColumns: `repeat(${chartCount}, minmax(0, 1fr))`, gridTemplateRows: 'minmax(0, 1fr)' }}>
           {strikes.map((strike, i) => {
+            if (!VISIBLE[chartCount].includes(i)) return null;
             const row = rows[String(strike)];
             const last = row?.bars[row.bars.length - 1];
             return (
