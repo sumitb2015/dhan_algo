@@ -297,17 +297,23 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
               </defs>
               <rect data-testid="pnf-grid" x={0} y={0} width={plotW} height={contentH} fill={`url(#${gridId})`} />
 
-              {/* session dividers */}
-              {vis.map((c, j) => {
-                const prev = columns[first + j - 1];
-                if (!prev || prev.session === c.session) return null;
-                return (
-                  <g key={`d${j}`}>
-                    <line x1={xOf(j)} x2={xOf(j)} y1={padY + PAD_TOP - 6} y2={contentH} className="stroke-zinc-600" strokeDasharray="2 3" />
-                    <text x={xOf(j) + 3} y={padY + PAD_TOP - 9} className="fill-zinc-500 font-mono" fontSize={9}>{sessionLabel(c.session)}</text>
-                  </g>
-                );
-              })}
+              {/* session dividers; a date is written only where it has room, so narrow sessions never print over each other */}
+              {(() => {
+                let lastLabelX = -Infinity;
+                return vis.map((c, j) => {
+                  const prev = columns[first + j - 1];
+                  if (prev && prev.session === c.session) return null;   // the first column opens the first session, which is labelled too
+                  const x = xOf(j);
+                  const label = x - lastLabelX >= 64;
+                  if (label) lastLabelX = x;
+                  return (
+                    <g key={`d${j}`}>
+                      <line x1={x} x2={x} y1={padY + PAD_TOP - 6} y2={contentH} className="stroke-zinc-600" strokeDasharray="2 3" />
+                      {label && <text x={x + 3} y={padY + PAD_TOP - 9} className="fill-zinc-500 font-mono" fontSize={9}>{sessionLabel(c.session)}</text>}
+                    </g>
+                  );
+                });
+              })()}
 
               {/* X / O glyphs */}
               {vis.map((c, j) =>

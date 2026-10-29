@@ -9,7 +9,7 @@ import { sessionOf, type Bar } from '@/lib/straddlePnf';
 const FUTURES_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'futures_pnf_candles.py');
 const PRICE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'price_pnf_candles.py');
 
-const SESSIONS = 3;
+const SESSIONS = 10;
 const CACHE_TTL = 20_000;
 const cache = new Map<string, { ts: number; body: unknown }>();
 
