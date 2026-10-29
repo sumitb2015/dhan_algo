@@ -611,6 +611,31 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       case 'modify': {
         const x = readLadderState().slices.find(y => y.id === id);
         if (!x) return bad('Unknown order');
+        if (x.kind === 'plain' && x.state === 'working' && x.mode === 'sim') {
+          // A SIM resting order moved in place (same id): the same rules as a click, against the option's own price.
+          const c = x.contract;
+          const level = snapToStep(Number(body.level), tickOf(c));
+          const ltp = (await loadPrices([spotKey(c)], [c])).ltps[c.securityId] ?? 0;
+          if (!(level > 0) || !(ltp > 0)) return bad('No live option price to check the new level against');
+          const zones: LadderZones = body.zones === 'anywhere' ? 'anywhere' : 'classic';
+          const v = classifyClick({ mode: 'plain', opt: c.opt, side: x.side, level, ref: ltp, orderType: x.orderType ?? 'LIMIT', zones });
+          if (!v.ok) return bad(v.error);
+          let stopLimit: number | null = null;
+          if (v.kind === 'stop' && zones === 'anywhere') {
+            const buf = cleanBufferPct(body.slBufferPct ?? DEFAULT_SL_BUFFER_PCT);
+            if (buf == null) return bad(`SL limit buffer must be ${MIN_SL_BUFFER_PCT}-${MAX_SL_BUFFER_PCT}%`);
+            stopLimit = stopLimitPrice(x.side, level, buf, tickOf(c));
+            if (stopLimit == null) return bad('Could not price the SL-limit — pick another level or buffer');
+          }
+          const orderType: ClickType = v.kind === 'stop' ? 'SL' : zones === 'anywhere' ? 'LIMIT' : (x.orderType ?? 'LIMIT');
+          const r = await guarded(id, y => y.state === 'working' && y.mode === 'sim', st => pushEvent(
+            patchSlice(st, id, v.kind === 'limit'
+              ? { orderType, limitPrice: level, triggerPrice: undefined, stopLimitPrice: undefined }
+              : { orderType, triggerPrice: level, limitPrice: undefined, stopLimitPrice: stopLimit ?? undefined }),
+            ev('info', `SIM order moved to ${level}`, id)));
+          if (!r.applied) return bad('Too late — it has just filled or been cancelled', 409);
+          return NextResponse.json({ success: true, data: { state: r.state } });
+        }
         const prices = await loadPrices([spotKey(x.contract)], []);
         const sp = prices.spots[spotKey(x.contract)];
         if (!sp || !spotFresh(sp.at, Date.now())) return bad('No fresh spot to check the level against');

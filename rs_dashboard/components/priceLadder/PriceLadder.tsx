@@ -945,6 +945,11 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   }, [refPrice, tick]);
 
   const slices = useMemo(() => data?.state.slices ?? [], [data?.state.slices]);
+  const replacing = useRef(new Set<string>());
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const slicesRef = useRef(slices);
+  slicesRef.current = slices;
   // The position block, its P&L and Exit follow the page's SIM/REAL switch: paper and real slices never net together.
   const pageMode = real ? 'real' : 'sim';
   // Ladder markers follow the SIM/REAL switch too: a paper level must never look like a real one on the ladder.
@@ -1209,8 +1214,63 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       void post({ action: 'pair', op: 'modify', id: ids[0], ...(what === 'entry' ? { level: price } : what === 'tgt' ? { tgtY: price } : { slY: price }) }).then(done);
       return;
     }
+    if (mode === 'plain' && what === 'entry') {
+      const rs = slicesRef.current.find(x => x.id === ids[0]);
+      if (rs && rs.kind === 'plain' && rs.state === 'working') {
+        if (rs.mode === 'real') {
+          // Cancel + re-place of real money: confirmed every time, not once per page load.
+          setConfirm({ text: `Move this REAL resting order to ${price}: it is CANCELLED and placed again at the new price`, run: () => void replaceRealOrder(rs, rs.lots, price) });
+          return;
+        }
+        const anywhere = !!rs.stopLimitPrice || (rs.orderType ?? 'LIMIT') === 'LIMIT';
+        void post({ action: 'modify', id: rs.id, level: price, ...(anywhere ? { zones: 'anywhere', slBufferPct } : {}) })
+          .then(ok => { if (ok) toast.success(`Order moved to ${price}`); });
+      } else toast.info('That order is no longer resting — nothing was moved');
+      return;
+    }
     void post({ action: 'modify', id: ids[0], ...(what === 'entry' ? { level: price } : { ids, ...(what === 'tgt' ? { tgtY: price } : { slY: price }) }) })
       .then(ok => { if (ok) toast.success(`${what === 'entry' ? 'Entry' : what === 'tgt' ? 'Target' : 'SL'} moved to ${price}`); });
+  };
+
+  // REAL resting order, new lots: cancel at the broker, wait until the watcher has settled the slice as cancelled, then arm
+  // the same price again. If it filled (or the cancel never confirms) nothing new is sent.
+  const replaceRealOrder = async (rs0: LadderSlice, lots: number, newLevel?: number) => {
+    // One replace per order at a time (a second click / drag / stale confirm would otherwise re-place it twice), and
+    // always on the order as it is NOW: a confirm dialog or a slow click may hold a snapshot that has since filled.
+    if (replacing.current.has(rs0.id)) { toast.info('This order is already being changed'); return; }
+    const rs = slicesRef.current.find(x => x.id === rs0.id);
+    if (!rs || rs.state !== 'working') { toast.info('That order is no longer resting — nothing was changed'); return; }
+    replacing.current.add(rs.id);
+    try { await replaceOrderInner(rs, lots, newLevel); } finally { replacing.current.delete(rs.id); }
+  };
+  const replaceOrderInner = async (rs: LadderSlice, lots: number, newLevel?: number) => {
+    const c = rs.contract;
+    const oldLevel = rs.limitPrice ?? rs.triggerPrice;
+    const level = newLevel ?? oldLevel;
+    if (!level || !oldLevel) return;
+    const anywhere = !!rs.stopLimitPrice || (rs.orderType ?? 'LIMIT') === 'LIMIT';
+    {
+      // Same rules as a click, checked BEFORE the cancel (also for a lots change: the price may have crossed the level),
+      // so a refused price never loses the order.
+      const v = classifyClick({ mode: 'plain', opt: c.opt, side: rs.side, level, ref: optLtp, orderType: rs.orderType ?? 'LIMIT', zones: anywhere ? 'anywhere' : 'classic' });
+      if (!optLtp || !v.ok) { toast.error(v.ok ? 'No live price to check the new level against' : v.error); return; }
+    }
+    if (!(await post({ action: 'cancel', id: rs.id }))) return;
+    let st: string | undefined;
+    for (let i = 0; i < 24; i++) {
+      await new Promise(r => setTimeout(r, 500));
+      if (!alive.current) return;
+      st = slicesRef.current.find(x => x.id === rs.id)?.state;
+      if (st !== 'working') break;
+    }
+    if (st !== 'cancelled') { toast.warning(st === 'working' || st == null ? 'Cancel not confirmed yet — nothing new was placed. Check Orders.' : `Order is ${st} — nothing new was placed`); return; }
+    const buf = rs.stopLimitPrice && rs.triggerPrice ? Math.round(Math.abs(rs.stopLimitPrice - rs.triggerPrice) / rs.triggerPrice * 1000) / 10
+      : newLevel != null && anywhere ? slBufferPct : null;
+    void post({
+      action: 'arm', kind: 'plain', broker: rs.broker, mode: rs.mode, underlying: c.underlying, expiry: c.expiry, strike: c.strike, opt: c.opt,
+      side: rs.side, lots, product: rs.product, orderType: rs.orderType ?? 'LIMIT', level,
+      ...(buf != null || anywhere ? { zones: 'anywhere', slBufferPct: buf ?? slBufferPct } : {}), ...(rs.pane === 2 ? { pane: 2 } : {}),
+    }).then(ok => { if (ok) toast.success(`${rs.mode === 'real' ? 'REAL' : 'SIM'} order re-placed at ${level} for ${lots} lot${lots === 1 ? '' : 's'}`); });
   };
 
   // The + / − on a ladder widget. An unfilled order changes its lots in place (− stops at 1 lot: × cancels). An open
@@ -1245,6 +1305,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       const lots = w.lots + delta;
       if (lots < 1) { toast.info('One lot is the minimum — use × to cancel'); return; }
       if (lots > MAX_LADDER_LOTS) { toast.warning(`${MAX_LADDER_LOTS} lots is the cap`); return; }
+      const rs = slicesRef.current.find(x => x.id === w.ids[0]);
+      if (rs && rs.mode === 'real' && rs.state === 'working') {
+        // A REAL order is resting at the broker: cancel it, and only once the cancel is confirmed place it again.
+        const go = () => void replaceRealOrder(rs, lots);
+        setConfirm({ text: `Change this REAL resting order to ${lots} lot${lots === 1 ? '' : 's'}: it is CANCELLED and placed again at the same price (it loses its queue place)`, run: go });
+        return;
+        return;
+      }
       void post({ action: 'lots', id: w.ids[0], lots });
       return;
     }

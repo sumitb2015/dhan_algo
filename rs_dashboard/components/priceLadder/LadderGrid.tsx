@@ -30,6 +30,8 @@ export interface LadderWidget {
   /** + / − on an unfilled order (change its lots) or on an open position (add a lot / exit a lot). */
   adjust?: 'order' | 'position';
   cancellable?: boolean;
+  /** A REAL resting order: +/− and drag cancel it at the broker and place it again. */
+  realOrder?: boolean;
   drag?: 'entry' | 'tgt' | 'sl';
   /** MCX (Dhan qty in lots): barrels per lot, so the badge can show barrels. Absent = qty is already in units. */
   mult?: number;
@@ -99,7 +101,7 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
     }
     if (mode === 'plain' && s.kind === 'plain' && s.state === 'working') {
       const p = s.limitPrice ?? s.triggerPrice;
-      if (p) add({ price: p, column: s.side, kind: 'entry', label: s.orderType === 'SL' ? 'SL order' : 'Limit order', qty: s.qty, lots: s.lots, ids: [s.id], cancellable: true, ...(s.mode === 'sim' ? { adjust: 'order' as const } : {}) }, 0);
+      if (p) add({ price: p, column: s.side, kind: 'entry', label: s.orderType === 'SL' ? 'SL order' : 'Limit order', qty: s.qty, lots: s.lots, ids: [s.id], cancellable: true, adjust: 'order' as const, drag: 'entry' as const, ...(s.mode === 'real' ? { realOrder: true } : {}) }, 0);
     }
     if (mode === 'plain' && (s.state === 'open' || s.state === 'exiting') && s.avg && held > 0) {
       add({ price: s.avg, column: s.side, kind: 'pos', label: 'Position', qty: held, lots: heldLots, ids: [s.id], ...(live ? { adjust: 'position' as const } : {}) }, s.openedAt ?? 0);
@@ -262,8 +264,8 @@ function OuterControlWidget({ w, onAdjust, onCancel }: {
 }) {
   const stop = (e: React.SyntheticEvent) => e.stopPropagation();
   const what = `${w.label} ${w.column} ${w.lots} lot${w.lots === 1 ? '' : 's'} at ${w.price}`;
-  const plusTitle = w.adjust === 'position' ? 'Add 1 lot to the position at market' : 'One more lot on this order';
-  const minusTitle = w.adjust === 'position' ? 'Exit 1 lot at market' : 'One lot fewer on this order';
+  const plusTitle = w.adjust === 'position' ? 'Add 1 lot to the position at market' : (w.realOrder ? 'One more lot — cancels this REAL order and places it again' : 'One more lot on this order');
+  const minusTitle = w.adjust === 'position' ? 'Exit 1 lot at market' : (w.realOrder ? 'One lot fewer — cancels this REAL order and places it again' : 'One lot fewer on this order');
 
   return (
     <div
