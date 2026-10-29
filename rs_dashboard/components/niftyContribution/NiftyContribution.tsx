@@ -1,8 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Loader2, Play, Scale, Square } from 'lucide-react';
-import { Bar, BarChart, Cell, LabelList, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { AlertTriangle, ChevronDown, Loader2, Play, Scale, Square, X } from 'lucide-react';
+import { Bar, BarChart, CartesianGrid, Cell, LabelList, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import NavBar from '@/components/NavBar';
 import { DASH, PctPill, TD, TH, type SortDir } from '@/components/LiveTickerPanel';
 import { cn } from '@/lib/utils';
@@ -11,6 +11,17 @@ import { inr, istDate } from '@/components/india-markets/format';
 import { buildTotals, type ContributionResult, type ContributionRow, type TotalBar } from '@/lib/niftyContribution';
 
 const POLL_MS = 2000;
+const SAMPLE_MS = 10_000;       // one history point per 10 s, however fast the poll
+const HISTORY_KEY = 'niftyContribHistory:';
+const LINE_VARS = ['--chart-1', '--chart-2', '--chart-3', '--chart-4', '--chart-5'];
+const LINE_DASH = ['', '6 3', '2 3'];
+
+/** One moment of the session: the net total and every priced stock's points. Built client-side from the 2 s poll. */
+interface Sample { t: number; net: number; p: Record<string, number> }
+
+const lineColor = (i: number) => `var(${LINE_VARS[i % LINE_VARS.length]})`;
+const lineDash = (i: number) => LINE_DASH[Math.floor(i / LINE_VARS.length) % LINE_DASH.length] || undefined;
+const istTime = (t: number) => new Date(t).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
 
 type FeedState = 'live' | 'starting' | 'stale' | 'stopped';
 interface FeedInfo { state: FeedState; updatedAt: number | null; ageMs: number | null }
@@ -77,6 +88,21 @@ function TotalsTooltip({ active, payload }: { active?: boolean; payload?: Array<
 }
 
 /** The bar's own value, printed past its tip (above a green bar, below a red one). Heights can be negative for a negative value. */
+function TimelineTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ dataKey?: string | number; value?: number; color?: string }>; label?: number }) {
+  if (!active || !payload?.length || label == null) return null;
+  const rows = [...payload].filter(p => typeof p.value === 'number').sort((a, b) => (b.value as number) - (a.value as number));
+  return (
+    <div style={{ background: 'var(--chart-tooltip-bg)', border: '1px solid var(--chart-tooltip-border)', color: 'var(--chart-tooltip-text)', borderRadius: 8, padding: '6px 10px', fontSize: 11 }}>
+      <div className="font-bold mb-0.5">{istTime(label)} IST</div>
+      {rows.map(p => (
+        <div key={String(p.dataKey)} className="font-mono flex justify-between gap-4">
+          <span style={{ color: p.color }}>{p.dataKey === 'net' ? 'NET' : String(p.dataKey)}</span><span>{pts(p.value as number)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function TotalLabel({ x, y, width, height, value }: { x?: unknown; y?: unknown; width?: unknown; height?: unknown; value?: unknown }) {
   const [px, py, w, h, v] = [x, y, width, height, value].map(Number);
   if (![px, py, w, h, v].every(Number.isFinite)) return null;
@@ -103,7 +129,7 @@ function StockLabel({ x, y, width, height, value }: { x?: unknown; y?: unknown; 
 }
 
 type SortKey ='points' | 'symbol' | 'changePct' | 'weightPct' | 'ltp';
-type View = 'stock' | 'cumulative';
+type View = 'stock' | 'cumulative' | 'timeline';
 
 export default function NiftyContribution() {
   const [data, setData] = useState<Resp | null>(null);
@@ -113,6 +139,13 @@ export default function NiftyContribution() {
   const [view, setView] = useState<View>('stock');
   const [topN, setTopN] = useState<10 | 15 | 0>(10); // 0 = all
   const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: 'points', dir: 'desc' });
+  const [history, setHistory] = useState<Sample[]>([]);
+  const [picked, setPicked] = useState<Set<string>>(() => new Set()); // stock overlays on the timeline; none until the user adds some
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [showNet, setShowNet] = useState(true);
+  const lastSample = useRef(0);
   const seq = useRef(0);
 
   const load = useCallback(async () => {
@@ -152,6 +185,65 @@ export default function NiftyContribution() {
   };
 
   const res = data?.result;
+
+  // Restore today's history (the tab may have been reloaded). Storage can be blocked or full: the chart still works from memory.
+  useEffect(() => {
+    const id = setTimeout(() => {
+      try {
+        const raw = localStorage.getItem(HISTORY_KEY + istDate(Date.now()));
+        const h = raw ? JSON.parse(raw) as Sample[] : [];
+        if (Array.isArray(h) && h.length) { lastSample.current = h[h.length - 1].t; setHistory(h); }
+      } catch { /* ignore */ }
+    }, 0);
+    return () => clearTimeout(id);
+  }, []);
+
+  // Record a point per SAMPLE_MS while the stock feed is live; a stale feed would only repeat the same quotes.
+  useEffect(() => {
+    if (!data || data.feeds.stocks.state !== 'live' || data.result.rows.length === 0) return;
+    const t = data.serverTime;
+    if (t - lastSample.current < SAMPLE_MS) return;
+    lastSample.current = t;
+    const p: Record<string, number> = {};
+    for (const r of data.result.rows) p[r.symbol] = Math.round(r.points * 100) / 100;
+    const sample: Sample = { t, net: Math.round(data.result.net * 100) / 100, p };
+    setHistory(h => {
+      const next = [...h, sample];
+      try { localStorage.setItem(HISTORY_KEY + istDate(t), JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    });
+  }, [data]);
+
+  const clearHistory = () => {
+    lastSample.current = 0;
+    setHistory([]);
+    try { localStorage.removeItem(HISTORY_KEY + istDate(Date.now())); } catch { /* ignore */ }
+  };
+
+  const togglePick = (sym: string) => setPicked(prev => {
+    const n = new Set(prev);
+    if (n.has(sym)) n.delete(sym); else n.add(sym);
+    return n;
+  });
+  const setGroup = (rows: ContributionRow[], on: boolean) => setPicked(prev => {
+    const n = new Set(prev);
+    for (const r of rows) { if (on) n.add(r.symbol); else n.delete(r.symbol); }
+    return n;
+  });
+
+  // Close the stock menu on an outside click or Escape.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDown = (e: MouseEvent) => { if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenuOpen(false); };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [menuOpen]);
+  const lineSymbols = useMemo(() => (res ? [...res.pullers, ...res.draggers].map(r => r.symbol).filter(s => picked.has(s)) : []), [res, picked]);
+  // Colour follows the stock's place in the full chip order, so it does not change when others are toggled.
+  const chipOrder = useMemo(() => (res ? [...res.pullers, ...res.draggers].map(r => r.symbol) : []), [res]);
+  const timelineData = useMemo(() => (view === 'timeline' ? history.map(h => ({ t: h.t, net: h.net, ...h.p })) : []), [view, history]);
   const stocksFeed = data?.feeds.stocks;
   const indexFeed = data?.feeds.indices;
   const live = stocksFeed?.state === 'live' && indexFeed?.state === 'live';
@@ -312,7 +404,7 @@ export default function NiftyContribution() {
             <section className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-3" aria-label="Contribution by stock">
               <div className="flex items-center justify-between gap-2 mb-2">
                 <div className="inline-flex rounded-md border border-zinc-700 overflow-hidden" role="tablist" aria-label="Chart view">
-                  {([['stock', 'By stock'], ['cumulative', 'Cumulative']] as const).map(([v, label]) => (
+                  {([['stock', 'By stock'], ['cumulative', 'Cumulative'], ['timeline', 'Over time']] as const).map(([v, label]) => (
                     <button key={v} role="tab" aria-selected={view === v} onClick={() => setView(v)}
                       className={cn('px-3 py-1 text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60',
                         view === v ? 'bg-zinc-700 text-white' : 'bg-zinc-900 text-zinc-400 hover:text-zinc-200')}>
@@ -330,11 +422,99 @@ export default function NiftyContribution() {
                       </button>
                     ))}
                   </div>
+                ) : view === 'timeline' ? (
+                  <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+                    <span>{history.length} point{history.length === 1 ? '' : 's'} today</span>
+                    <button onClick={clearHistory} disabled={history.length === 0}
+                      className="px-2 py-1 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-300 font-bold hover:text-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60">
+                      Clear
+                    </button>
+                  </div>
                 ) : (
                   <p className="text-[11px] text-zinc-500">Everything the green side added, everything the red side took away, and what is left.</p>
                 )}
               </div>
-              {view === 'cumulative' ? (
+              {view === 'timeline' ? (
+                <>
+                  <div className="flex flex-wrap items-center gap-1.5 mb-2" role="group" aria-label="Lines to show">
+                    <button onClick={() => setShowNet(v => !v)} aria-pressed={showNet}
+                      className={cn('px-2 py-0.5 rounded border text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60',
+                        showNet ? 'bg-zinc-700 text-white border-zinc-500' : 'bg-zinc-900 text-zinc-500 border-zinc-700')}>
+                      NET
+                    </button>
+                    <div className="relative" ref={menuRef}>
+                      <button onClick={() => setMenuOpen(o => !o)} aria-haspopup="listbox" aria-expanded={menuOpen}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-300 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60">
+                        Add stocks{picked.size > 0 ? ` (${picked.size})` : ''}
+                        <ChevronDown className="h-3 w-3" aria-hidden="true" />
+                      </button>
+                      {menuOpen && (
+                        <div className="absolute left-0 top-full mt-1 z-20 w-72 rounded-lg border border-zinc-700 bg-zinc-900 shadow-lg">
+                          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search stock" aria-label="Search stocks" autoFocus
+                            className="w-full rounded-t-lg border-b border-zinc-700 bg-zinc-900 px-2 py-1.5 text-xs text-zinc-100 placeholder:text-zinc-500 focus:outline-none" />
+                          <div className="max-h-72 overflow-y-auto py-1" role="listbox" aria-multiselectable="true">
+                            {([['Pullers', res.pullers, 'text-emerald-400'], ['Draggers', res.draggers, 'text-red-400']] as const).map(([name, rows, cls]) => {
+                              const q = query.trim().toLowerCase();
+                              const shown = q ? rows.filter(r => r.symbol.toLowerCase().includes(q) || r.name.toLowerCase().includes(q)) : rows;
+                              if (shown.length === 0) return null;
+                              return (
+                                <div key={name}>
+                                  <div className="flex items-center gap-2 px-2 py-1">
+                                    <span className={cn('text-[10px] font-bold uppercase tracking-wider', cls)}>{name} ({shown.length})</span>
+                                    <button onClick={() => setGroup(shown, true)} className="text-[10px] text-zinc-400 hover:text-white underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60">all</button>
+                                    <button onClick={() => setGroup(shown, false)} className="text-[10px] text-zinc-400 hover:text-white underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60">none</button>
+                                  </div>
+                                  {shown.map(r => {
+                                    const on = picked.has(r.symbol);
+                                    return (
+                                      <label key={r.symbol} role="option" aria-selected={on} className="flex items-center gap-2 px-2 py-1 text-xs cursor-pointer hover:bg-zinc-800">
+                                        <input type="checkbox" checked={on} onChange={() => togglePick(r.symbol)} className="accent-emerald-500" />
+                                        <span className="font-mono font-bold text-zinc-100">{r.symbol}</span>
+                                        <span className="truncate text-zinc-500 flex-1">{r.name}</span>
+                                        <span className={cn('font-mono', signCls(r.points))}>{pts(r.points)}</span>
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    {lineSymbols.map(sym => (
+                      <button key={sym} onClick={() => togglePick(sym)} aria-label={`Remove ${sym}`} title={`Remove ${sym}`}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-zinc-500 bg-zinc-800 text-[11px] font-mono text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60">
+                        <span className="inline-block w-2 h-2 rounded-full" style={{ background: lineColor(chipOrder.indexOf(sym)) }} />
+                        {sym}
+                        <X className="h-3 w-3 text-zinc-400" aria-hidden="true" />
+                      </button>
+                    ))}
+                  </div>
+                  {history.length < 2 ? (
+                    <p className="py-10 text-center text-xs text-zinc-500" style={{ minHeight: 380 }}>
+                      {live ? 'Collecting points - the line appears after a couple of samples (one every 10 s while this page is open).' : 'History is recorded only while both feeds are live and this page is open.'}
+                    </p>
+                  ) : (
+                    <div style={{ height: 380 }}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={timelineData} margin={{ top: 8, right: 24, bottom: 4, left: 8 }}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="t" type="number" scale="time" domain={['dataMin', 'dataMax']} tickFormatter={istTime} tick={{ fontSize: 11 }} />
+                          <YAxis tickFormatter={(v: number) => pts(v, 0)} tick={{ fontSize: 11 }} width={48} />
+                          <Tooltip content={<TimelineTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1, strokeDasharray: '4 4' }} />
+                          <ReferenceLine y={0} stroke="var(--chart-axis)" />
+                          {lineSymbols.map(sym => {
+                            const i = chipOrder.indexOf(sym);
+                            return <Line key={sym} type="monotone" dataKey={sym} stroke={lineColor(i)} strokeDasharray={lineDash(i)} strokeWidth={1.5} dot={false} connectNulls isAnimationActive={false} />;
+                          })}
+                          {showNet && <Line type="monotone" dataKey="net" stroke="var(--chart-tooltip-text)" strokeWidth={3} dot={false} isAnimationActive={false} />}
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
+                </>
+              ) : view === 'cumulative' ? (
                 totals.length === 0 ? (
                   <p className="py-10 text-center text-xs text-zinc-500">No priced stocks yet - start the stocks feed.</p>
                 ) : (
