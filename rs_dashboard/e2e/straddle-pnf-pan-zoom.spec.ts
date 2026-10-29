@@ -1,28 +1,43 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { json, signIn } from './support';
 
-// Straddle P&F: mouse drag pans and the wheel zooms, even on a chart that already fits its panel.
-const ATM = 25000;
+// Point & Figure (/straddle-pnf): chart controls (drag pan, wheel zoom, Re-center), the CRUDEOILM future and the index / stock search.
+const KEY = 25000;
 const NOW_MIN = Math.floor(Date.now() / 60_000) * 60;
-const bars = [0, 5, 2, 0, 3, 7, 4].map((l, i, a) => {
-  const s = 100 + l * 0.5;
-  return { t: NOW_MIN - 120 - (a.length - 1 - i) * 60, ce: s / 2, pe: s / 2, straddle: s, vol: 10 };
+const series = (base: number, step = 0.5) => [0, 5, 2, 0, 3, 7, 4].map((l, i, a) => {
+  const s = base + l * step;
+  return { t: NOW_MIN - 120 - (a.length - 1 - i) * 60, ce: s, pe: 0, straddle: s, vol: 10 };
 });
 
 test.beforeEach(async ({ context }) => { await signIn(context); });
 
-test('drag pans and wheel zooms a chart that fits the panel', async ({ page }) => {
+/** Answers every /api call; `seen` collects the history queries so a test can check what the page asked for. */
+async function mockApi(page: Page, seen: string[] = []) {
   await page.route('**/api/**', async route => {
-    const p = new URL(route.request().url()).pathname;
-    if (p === '/api/straddle-pnf') return json(route, { success: true, atm: ATM, strikes: [ATM - 200, ATM, ATM + 200], errors: {}, dataDate: '2026-10-23', bars: { [ATM]: bars } });
-    if (p === '/api/options/expiries') return json(route, { success: true, data: ['2099-01-06', '2099-01-13'] });
+    const u = new URL(route.request().url());
+    if (u.pathname === '/api/straddle-pnf/search') {
+      const q = (u.searchParams.get('q') ?? '').toUpperCase();
+      return json(route, { success: true, results: q.startsWith('REL') ? [{ kind: 'equity', symbol: 'RELIANCE', name: 'RELIANCE INDUSTRIES LIMITED' }] : [{ kind: 'index', symbol: 'NIFTY', name: 'Nifty 50' }] });
+    }
+    if (u.pathname === '/api/straddle-pnf') {
+      seen.push(u.search);
+      if (u.searchParams.get('underlying') === 'CRUDEOILM') {
+        return json(route, { success: true, mode: 'futures', atm: 0, strikes: [20261119], errors: {}, dataDate: '2026-10-23', expiries: { 20261119: '2026-11-19' }, bars: { 20261119: series(9600, 20) } });
+      }
+      if (u.searchParams.get('symbol') === 'RELIANCE') {
+        return json(route, { success: true, mode: 'price', atm: 0, strikes: [0], name: 'RELIANCE INDUSTRIES LIMITED', errors: {}, dataDate: '2026-10-23', bars: { 0: series(1200, 2) } });
+      }
+      return json(route, { success: true, mode: 'price', atm: 0, strikes: [KEY], name: 'Nifty 50', errors: {}, dataDate: '2026-10-23', bars: { [KEY]: series(100) } });
+    }
     if (route.request().method() === 'GET') return json(route, { success: true });
     return route.fulfill({ status: 599, body: 'blocked' });
   });
+}
+
+test('drag pans and wheel zooms a chart that fits the panel', async ({ page }) => {
+  await mockApi(page);
   await page.goto('/straddle-pnf');
-  await expect(page.getByLabel('ATM', { exact: true })).toHaveCount(0);   // no strike controls: the ATM straddle is automatic
-  await expect(page.getByRole('group', { name: 'Strike offsets' })).toHaveCount(0);
-  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${KEY}"]`);
   const sc = panel.getByTestId('pnf-scroll');
   await expect(panel.getByTestId('pnf-grid')).toBeAttached();
   const pos = () => sc.evaluate(el => ({ l: el.scrollLeft, t: el.scrollTop, sw: el.scrollWidth, cw: el.clientWidth, sh: el.scrollHeight, ch: el.clientHeight }));
@@ -55,38 +70,23 @@ test('drag pans and wheel zooms a chart that fits the panel', async ({ page }) =
   await expect(panel.getByTestId('pnf-zoom')).toHaveAttribute('data-zoom', '1');
 });
 
-test('CRUDEOILM charts the upcoming futures, not straddles', async ({ page }) => {
-  const mk = (base: number) => [0, 3, 1, 4, 2].map((l, i, a) => ({ t: NOW_MIN - 120 - (a.length - 1 - i) * 60, ce: base + l * 20, pe: 0, straddle: base + l * 20, vol: 10 }));
-  await page.route('**/api/**', async route => {
-    const u = new URL(route.request().url());
-    if (u.pathname === '/api/straddle-pnf') {
-      if (u.searchParams.get('underlying') !== 'CRUDEOILM') return json(route, { success: true, atm: ATM, strikes: [ATM - 200, ATM, ATM + 200], errors: {}, dataDate: '2026-10-23', bars: { [ATM]: bars } });
-      return json(route, { success: true, mode: 'futures', atm: 0, strikes: [20261119], errors: {}, dataDate: '2026-10-23',
-        expiries: { 20261119: '2026-11-19' }, bars: { 20261119: mk(9600) } });
-    }
-    if (u.pathname === '/api/options/expiries') return json(route, { success: true, data: ['2099-01-06'] });
-    if (route.request().method() === 'GET') return json(route, { success: true });
-    return route.fulfill({ status: 599, body: 'blocked' });
-  });
+test('the CRUDEOILM button charts the nearest future', async ({ page }) => {
+  const seen: string[] = [];
+  await mockApi(page, seen);
   await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('vs open');   // hydrated: a click before that is lost
   await page.getByRole('button', { name: 'CRUDEOILM' }).click();
-  const panels = page.getByTestId('pnf-panel');
-  await expect(panels).toHaveCount(1);
-  await expect(page.getByText('Nov 2026 futures')).toBeVisible();   // the nearest month, named in the page subtitle (no card header)
+  await expect(page.getByTestId('pnf-panel')).toHaveCount(1);
+  await expect(page.getByText('CRUDEOILM Nov 2026').first()).toBeVisible();     // the contract month, in the page subtitle
   await expect(page.getByTestId('pnf-header-summary')).not.toContainText('CE ');
   await expect(page.getByLabel('Expiry')).toHaveCount(0);
+  expect(seen.some(s => s.includes('underlying=CRUDEOILM'))).toBe(true);
 });
 
 test('Re-center resets zoom and puts the newest column in the middle of the chart', async ({ page }) => {
-  await page.route('**/api/**', async route => {
-    const p = new URL(route.request().url()).pathname;
-    if (p === '/api/straddle-pnf') return json(route, { success: true, atm: ATM, strikes: [ATM - 200, ATM, ATM + 200], errors: {}, dataDate: '2026-10-23', bars: { [ATM]: bars } });
-    if (p === '/api/options/expiries') return json(route, { success: true, data: ['2099-01-06'] });
-    if (route.request().method() === 'GET') return json(route, { success: true });
-    return route.fulfill({ status: 599, body: 'blocked' });
-  });
+  await mockApi(page);
   await page.goto('/straddle-pnf');
-  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${KEY}"]`);
   const sc = panel.getByTestId('pnf-scroll');
   await expect(panel.getByTestId('pnf-grid')).toBeAttached();
   const b = (await sc.boundingBox())!;
@@ -103,34 +103,18 @@ test('Re-center resets zoom and puts the newest column in the middle of the char
   }).toBeLessThan(30);
 });
 
-test('the search box charts an index or a stock by its plain price', async ({ page }) => {
-  const pnf: string[] = [];
-  const mk = (base: number) => [0, 3, 1, 4, 2].map((l, i, a) => ({ t: NOW_MIN - 120 - (a.length - 1 - i) * 60, ce: base + l, pe: 0, straddle: base + l, vol: 10 }));
-  await page.route('**/api/**', async route => {
-    const u = new URL(route.request().url());
-    if (u.pathname === '/api/straddle-pnf/search') {
-      const q = (u.searchParams.get('q') ?? '').toUpperCase();
-      return json(route, { success: true, results: q.startsWith('REL') ? [{ kind: 'equity', symbol: 'RELIANCE', name: 'RELIANCE INDUSTRIES LIMITED' }] : [{ kind: 'index', symbol: 'NIFTY', name: 'Nifty 50' }] });
-    }
-    if (u.pathname === '/api/straddle-pnf') {
-      pnf.push(u.search);
-      if (u.searchParams.get('mode') === 'price') return json(route, { success: true, mode: 'price', atm: 0, strikes: [0], name: 'RELIANCE INDUSTRIES LIMITED', errors: {}, dataDate: '2026-10-23', bars: { 0: mk(1200) } });
-      return json(route, { success: true, atm: ATM, strikes: [ATM - 200, ATM, ATM + 200], errors: {}, dataDate: '2026-10-23', bars: { [ATM]: bars } });
-    }
-    if (u.pathname === '/api/options/expiries') return json(route, { success: true, data: ['2099-01-06'] });
-    if (route.request().method() === 'GET') return json(route, { success: true });
-    return route.fulfill({ status: 599, body: 'blocked' });
-  });
+test('the search box charts a stock by its plain price, and NIFTY goes back to the index', async ({ page }) => {
+  const seen: string[] = [];
+  await mockApi(page, seen);
   await page.goto('/straddle-pnf');
-  await expect(page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`)).toBeAttached();
-  const box = page.getByRole('combobox', { name: 'Search index or stock' });
-  await box.fill('rel');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('vs open');
+  await page.getByRole('combobox', { name: 'Search index or stock' }).fill('rel');
   await page.getByRole('option', { name: /RELIANCE/ }).click();
-  await expect(page.getByText('RELIANCE INDUSTRIES LIMITED')).toBeVisible();          // subtitle carries the company name
+  await expect(page.getByText('RELIANCE INDUSTRIES LIMITED').first()).toBeVisible();
   await expect(page.getByTestId('pnf-panel')).toHaveCount(1);
-  await expect(page.getByLabel('Expiry')).toHaveCount(0);                              // no straddle controls for a plain price
-  expect(pnf.some(s => s.includes('mode=price') && s.includes('kind=equity') && s.includes('symbol=RELIANCE'))).toBe(true);
-  await page.getByRole('button', { name: 'NIFTY', exact: true }).click();              // back to the NIFTY straddle
-  await expect(page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`)).toBeAttached();
-  await expect(page.getByLabel('Expiry')).toHaveCount(1);
+  expect(seen.some(s => s.includes('mode=price') && s.includes('kind=equity') && s.includes('symbol=RELIANCE'))).toBe(true);
+  await page.reload();                                                         // the pick is remembered
+  await expect(page.getByText('RELIANCE INDUSTRIES LIMITED').first()).toBeVisible();
+  await page.getByRole('button', { name: 'NIFTY', exact: true }).click();
+  await expect(page.getByText('Nifty 50').first()).toBeVisible();
 });

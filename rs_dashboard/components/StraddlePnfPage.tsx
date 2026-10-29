@@ -7,45 +7,35 @@ import NavBar from './NavBar';
 import DataChip from './DataChip';
 import PnfPanel from './straddlePnf/PnfPanel';
 import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
-import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
+import SymbolSearch from './straddlePnf/SymbolSearch';
+import SettingsControls from './straddlePnf/SettingsControls';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/alertSound';
 import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
-import { foldTick, newSignalsAfter, nextWatermark, capLog } from '@/lib/straddlePnfLive';
-import { historyQuery, tickAcceptable } from '@/lib/straddlePnfLoad';
-import SymbolSearch from './straddlePnf/SymbolSearch';
+import { newSignalsAfter, nextWatermark, capLog } from '@/lib/straddlePnfLive';
+import { DEFAULT_SETTINGS, SETTINGS_KEY, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import type { PnfPick } from '@/lib/straddlePnfSearch';
-import SettingsControls from './straddlePnf/SettingsControls';
-import { DEFAULT_OFFSETS, PNF_UNDERLYINGS, isPnfUnderlying, offsetLabel, type Offsets, type PnfUnderlying } from '@/lib/straddlePnfStrikes';
-import { DEFAULT_SETTINGS, offsetsKeyFor, SETTINGS_KEY, readOffsets, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
-import { pickExpiries, type PnfExpiry } from '@/lib/straddlePnfExpiries';
 import type { Bar } from '@/lib/straddlePnf';
 
-// Straddle Point & Figure: ONE chart — the NIFTY ATM straddle or the nearest CRUDEOILM future (default ATM-200 / ATM / ATM+200, offsets editable), signals only — this page places no orders.
+// Point & Figure of ONE price series, signals only (this page places no orders): an NSE index or stock picked in the search box
+// (default the NIFTY index), or the nearest CRUDEOILM future. There are no options here. Bars come from the history API and the page
+// re-fetches them every 30 s; signals are only ever evaluated on CLOSED one-minute bars, so the poll never delays one.
 
-type Row = { bars: Bar[]; openT: number | null };
-type Loaded = { expiries?: Record<string, string>; expiry: string; atm: number; strikes: number[]; dataDate: string | null; errors: Record<string, string> };
+type Target = { kind: 'index' | 'equity' | 'futures'; symbol: string; name: string };
+type Loaded = { key: number; dataDate: string | null; error?: string; expiry?: string };
 
-const STALE_MS = 60_000;
-const POLL_FALLBACK_MS = 60_000;
+const DEFAULT_TARGET: Target = { kind: 'index', symbol: 'NIFTY', name: 'Nifty 50' };
+const FUTURES_TARGET: Target = { kind: 'futures', symbol: 'CRUDEOILM', name: 'CRUDEOILM futures' };
+const POLL_MS = 30_000;
+const FRESH_S = 180;
 const FLASH_MS = 4000;
 const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
 const OVERLAY_KEY = 'straddle-pnf-overlay';
-const UNDERLYING_KEY = 'straddle-pnf-underlying';
-
-// One chart is shown: the ATM straddle (index 1 of the three loaded) or, for futures, the nearest contract (index 0). The other loaded
-// strikes feed nothing visible and never alert.
-const shownIndex = (futures: boolean) => (futures ? 0 : 1);
-
-// CRUDEOILM charts the upcoming monthly futures instead of straddles: no strikes, expiry choice, offsets or ATM; the server keys each
-// contract by its expiry (YYYYMMDD) where the NIFTY mode uses a strike. There is no live feed for these, so the page polls history.
-const FUTURES_POLL_MS = 30_000;
-const FUTURES_FRESH_S = 180;
+const TARGET_KEY = 'straddle-pnf-target';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const minuteOf = (t: number) => Math.floor(t / 60) * 60;
-const fmt = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 
 function readPref(key: string): string | null {
@@ -54,64 +44,56 @@ function readPref(key: string): string | null {
 function savePref(key: string, value: string) {
   try { localStorage.setItem(key, value); } catch { /* private window / blocked storage: the page works without it */ }
 }
+function readTarget(raw: string | null): Target {
+  try {
+    const t = raw ? JSON.parse(raw) : null;
+    if (t && (t.kind === 'index' || t.kind === 'equity' || t.kind === 'futures') && /^[A-Z0-9&-]{1,20}$/.test(t.symbol)) {
+      return { kind: t.kind, symbol: t.symbol, name: typeof t.name === 'string' ? t.name : t.symbol };
+    }
+  } catch { /* corrupt: default */ }
+  return DEFAULT_TARGET;
+}
+const apiQuery = (t: Target) => (t.kind === 'futures' ? `underlying=${t.symbol}` : `mode=price&kind=${t.kind}&symbol=${encodeURIComponent(t.symbol)}`);
 
 export default function StraddlePnfPage() {
-  const [expiries, setExpiries] = useState<PnfExpiry[]>([]);
-  const [expiry, setExpiry] = useState('');
-  const [atmInput, setAtmInput] = useState('auto');
   const [overlay, setOverlay] = useState<Overlay>('vwap');
-  const [underlying, setUnderlying] = useState<PnfUnderlying>('NIFTY');
+  const [target, setTarget] = useState<Target>(DEFAULT_TARGET);
+  const [name, setName] = useState<string | null>(null); // the full name the server resolved for the chosen symbol
   const [settings, setSettings] = useState<PnfSettings>(DEFAULT_SETTINGS);
-  const [offsets, setOffsets] = useState<Offsets>(DEFAULT_OFFSETS);
+  const [bars, setBars] = useState<Bar[]>([]);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
-  const [rows, setRows] = useState<Record<string, Row>>({});
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [recenter, setRecenter] = useState(0);
-  // Re-center reloads at the current ATM and then resets every chart's zoom/pan to the centre; the flag waits for that load to land.
+  // Re-center reloads and then resets the chart's zoom/pan to the centre; the flag waits for that load to land.
   const [viewTick, setViewTick] = useState(0);
   const recenterViewRef = useRef(false);
   const recenterNow = () => { recenterViewRef.current = true; setRecenter(n => n + 1); };
   const [log, setLog] = useState<LogEntry[]>([]);
   const [logOpen, setLogOpen] = useState(false);
   const [muted, setMuted] = useState(false);
-  const [flash, setFlash] = useState<Record<string, 'buy' | 'sell'>>({});
+  const [flash, setFlash] = useState<'buy' | 'sell' | null>(null);
   const [now, setNow] = useState(0);
-  const [fallback, setFallback] = useState<{ spot: number | null; future: number | null }>({ spot: null, future: null });
+  // The chart's price/summary strip is drawn into the top header (PnfPanel `headerSlot`) instead of a card header above the chart.
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
 
   const { leaderRef } = useTabLeader('straddle-pnf');
   const mutedRef = useRef(false);
   const reqRef = useRef(0);
-  const lastTickRef = useRef<string | null>(null);
-  // Per strike: the last closed bar already evaluated for alerts. Alerts are keyed on bar time, never on column numbers.
-  const watermarkRef = useRef<Record<string, number>>({});
-  const loadedAtmRef = useRef<number | null>(null);
-  // The next alert evaluation is a re-baseline (history loaded / charts redrawn with other settings): move the watermarks to the new
-  // charts' last closed bar and alert on nothing, so old signals can never fire as new ones.
+  // The last closed bar already evaluated for alerts. Alerts are keyed on bar time, never on column numbers.
+  const watermarkRef = useRef(0);
+  // The next alert evaluation is a re-baseline (history loaded / chart redrawn with other settings): move the watermark to the new
+  // chart's last closed bar and alert on nothing, so old signals can never fire as new ones.
   const rebaselineRef = useRef(false);
   const logLoadedRef = useRef(false);
-
-  // A search-box pick charts the plain price of an index / stock; otherwise NIFTY charts the ATM straddle and CRUDEOILM its nearest future.
-  const [priceSel, setPriceSel] = useState<PnfPick | null>(null);
-  const [priceName, setPriceName] = useState<string | null>(null); // the full company name the server resolved
-  const futuresMode = underlying === 'CRUDEOILM' && !priceSel;
-  const plainMode = futuresMode || priceSel !== null;
-  // The chart's price/summary strip is drawn into the top header (PnfPanel `headerSlot`) instead of a card header above the chart.
-  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
-  const { liveQuotes } = useLiveOptionsWS(plainMode ? '' : expiry, 'dhan', ['dhan'], underlying);
 
   // ── preferences, sound unlock, clock ────────────────────────────────────
   useEffect(() => installAlertSoundUnlock(), []);
   useEffect(() => {
     if (readPref(OVERLAY_KEY) === 'sma') setOverlay('sma');
-    const stored = readSettings(readPref(SETTINGS_KEY));
-    setSettings(stored);
-    const savedUnderlying = readPref(UNDERLYING_KEY) ?? 'NIFTY';
-    const savedPick = /^PRICE:(index|equity):([A-Z0-9&-]{1,20})$/.exec(savedUnderlying);
-    if (savedPick) setPriceSel({ kind: savedPick[1] as PnfPick['kind'], symbol: savedPick[2], name: savedPick[2] });
-    const u = isPnfUnderlying(savedUnderlying) ? savedUnderlying : 'NIFTY';
-    setUnderlying(u);
-    setOffsets(readOffsets(readPref(offsetsKeyFor(u))));
+    setSettings(readSettings(readPref(SETTINGS_KEY)));
+    const saved = readTarget(readPref(TARGET_KEY));
+    setTarget(t => (t.kind === saved.kind && t.symbol === saved.symbol ? t : saved));
     rebaselineRef.current = true;
     if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
     try {
@@ -126,201 +108,99 @@ export default function StraddlePnfPage() {
   }, []);
   useEffect(() => { if (logLoadedRef.current) savePref(LOG_KEY, JSON.stringify(log)); }, [log]);
 
-  // ── expiries ────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (plainMode) return;
-    let cancelled = false;
-    fetch(`/api/options/expiries?underlying=${underlying}`)
-      .then(r => r.json())
-      .then((j: { success?: boolean; data?: string[] }) => {
-        if (cancelled || !j.success || !Array.isArray(j.data)) return;
-        const picked = pickExpiries(j.data, istToday());
-        setExpiries(picked);
-        setExpiry(prev => prev || picked[0]?.value || '');
-      })
-      .catch(() => { if (!cancelled) setLoadError('Could not load expiries'); });
-    return () => { cancelled = true; };
-  }, [underlying, plainMode]);
-
-  // ── history load. reset = new expiry / Re-center (new strikes, alerts restart); otherwise a quiet refresh ──
+  // ── history load. reset = new instrument / Re-center (alerts restart); otherwise a quiet refresh ──
   const load = useCallback(async (reset: boolean) => {
-    if (!expiry && !plainMode) return;
     const id = ++reqRef.current;
     if (reset) { setLoading(true); setLoadError(null); }
     try {
-      const res = await fetch(`/api/straddle-pnf?${priceSel ? `mode=price&kind=${priceSel.kind}&symbol=${encodeURIComponent(priceSel.symbol)}` : plainMode ? `underlying=${underlying}` : historyQuery(expiry, reset, loadedAtmRef.current, atmInput, offsets, underlying)}`);
+      const res = await fetch(`/api/straddle-pnf?${apiQuery(target)}`);
       const j = await res.json() as {
-        success?: boolean; error?: string; name?: string; atm: number; strikes: number[]; dataDate: string | null; expiries?: Record<string, string>;
-        bars: Record<string, Bar[]>; errors: Record<string, string>;
+        success?: boolean; error?: string; strikes: number[]; dataDate: string | null; name?: string;
+        expiries?: Record<string, string>; bars: Record<string, Bar[]>; errors: Record<string, string>;
       };
       if (id !== reqRef.current) return; // a newer request owns the screen
-      if (!j.success) throw new Error(j.error ?? 'Failed to load straddle history');
-      const nowMin = minuteOf(Date.now() / 1000);
-      const next: Record<string, Row> = {};
-      for (const strike of j.strikes) {
-        const k = String(strike);
-        const bars = j.bars[k] ?? [];
-        const last = bars[bars.length - 1];
-        const open = last && last.t >= nowMin ? last.t : null; // the minute still forming is not closed yet
-        next[k] = { bars, openT: open };
-      }
-      if (reset) { loadedAtmRef.current = j.atm; rebaselineRef.current = true; } // history never alerts
-      setRows(next);
-      if (priceSel && j.name) setPriceName(j.name);
+      if (!j.success) throw new Error(j.error ?? 'Failed to load price history');
+      const key = j.strikes[0] ?? 0;
+      if (reset) rebaselineRef.current = true; // history never alerts
       if (recenterViewRef.current) { recenterViewRef.current = false; setViewTick(n => n + 1); }
-      setLoaded({ expiry: plainMode ? (priceSel ? 'price' : 'futures') : expiry, expiries: j.expiries, atm: j.atm, strikes: j.strikes, dataDate: j.dataDate, errors: j.errors ?? {} });
+      setBars(j.bars[String(key)] ?? []);
+      setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], expiry: j.expiries?.[String(key)] });
+      if (j.name) setName(j.name);
       setLoadError(null);
     } catch (e) {
       if (id !== reqRef.current) return;
-      setLoadError(e instanceof Error ? e.message : 'Failed to load straddle history');
+      setLoadError(e instanceof Error ? e.message : 'Failed to load price history');
     } finally {
       if (id === reqRef.current) setLoading(false);
     }
-  }, [expiry, atmInput, offsets, underlying, plainMode, priceSel]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target.kind, target.symbol]);
 
   useEffect(() => { void load(true); }, [load, recenter]);
-
-  const liveFresh = useMemo(() => {
-    if (plainMode) return false;
-    if (!liveQuotes?.updated_at || now === 0) return false;
-    const t = Date.parse(liveQuotes.updated_at);
-    return Number.isFinite(t) && now - t < STALE_MS && Object.keys(liveQuotes.strikes ?? {}).length > 0;
-  }, [liveQuotes, now, plainMode]);
-
-  // Bridge down or stale: fall back to polling the history API so the charts keep moving.
   useEffect(() => {
-    if (liveFresh || (!expiry && !plainMode)) return;
-    const id = setInterval(() => { void load(false); }, plainMode ? FUTURES_POLL_MS : POLL_FALLBACK_MS);
+    const id = setInterval(() => { void load(false); }, POLL_MS);
     return () => clearInterval(id);
-  }, [liveFresh, expiry, load, plainMode]);
+  }, [load]);
 
-  // Index and futures price for the header: the live feed when it is fresh, otherwise the option-chain route (rate-limited, polled slowly).
-  useEffect(() => {
-    if (plainMode || liveFresh || !expiry) return;
-    let cancelled = false;
-    const pull = () => fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}`)
-      .then(r => r.json())
-      .then((j: { data?: { spot?: number; future_price?: number } }) => {
-        if (cancelled) return;
-        setFallback({ spot: Number(j.data?.spot) > 0 ? Number(j.data?.spot) : null, future: Number(j.data?.future_price) > 0 ? Number(j.data?.future_price) : null });
-      })
-      .catch(() => { /* header shows a dash; the charts do not depend on it */ });
-    void pull();
-    const id = setInterval(pull, 20_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [liveFresh, expiry, underlying, plainMode]);
-  const nearBars = plainMode ? rows[String(loaded?.strikes[0])]?.bars : undefined;
-  const headerSpot = plainMode ? (nearBars?.length ? nearBars[nearBars.length - 1].straddle : null) : liveFresh && liveQuotes?.spot ? liveQuotes.spot : fallback.spot;
-  const headerFuture = plainMode ? null : liveFresh && liveQuotes?.future?.ltp ? liveQuotes.future.ltp : fallback.future;
-
-  // ── live ticks → open bar ───────────────────────────────────────────────
-  useEffect(() => {
-    if (!liveQuotes?.updated_at || !loaded || liveQuotes.updated_at === lastTickRef.current) return;
-    // Never fold a tick into history of a different expiry (a switch is still loading) — it would jump a closed bar between contracts.
-    if (!tickAcceptable(expiry, loaded.expiry, liveQuotes.expiry)) return;
-    const t = Date.parse(liveQuotes.updated_at) / 1000; // the tick's own time, so a slow render never mis-buckets a minute
-    if (!Number.isFinite(t)) return;
-    lastTickRef.current = liveQuotes.updated_at;
-    const quotes = Object.values(liveQuotes.strikes ?? {});
-    setRows(prev => {
-      let changed = false;
-      const next = { ...prev };
-      for (const strike of loaded.strikes) {
-        const q = quotes.find(s => Number(s.strike) === strike);
-        const row = prev[String(strike)];
-        if (!q || !row) continue;
-        const cumVol = Number(q.ce?.volume) + Number(q.pe?.volume); // the bridge's cumulative day volume, same units as history
-        const res = foldTick(row.bars, { t, ce: Number(q.ce?.ltp), pe: Number(q.pe?.ltp), cumVol: Number.isFinite(cumVol) ? cumVol : undefined });
-        if (res.bars === row.bars) continue;
-        changed = true;
-        next[String(strike)] = { bars: res.bars, openT: res.bars[res.bars.length - 1].t };
-      }
-      return changed ? next : prev;
-    });
-  }, [liveQuotes, loaded, expiry]);
-
-  // A chart's name: the strike for a straddle, the contract month for a futures chart.
-  const nameOf = (strike: number) => {
-    if (priceSel) return `${priceSel.symbol} ${priceSel.kind === 'index' ? 'index' : 'stock'}`;
-    if (!plainMode) return `${strike} straddle`;
-    const iso = loaded?.expiries?.[String(strike)];
-    return iso ? `CRUDEOILM ${MONTHS[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)} futures` : 'CRUDEOILM futures';
-  };
-  const barsFresh = (strike: number) => {
-    const bars = rows[String(strike)]?.bars;
-    const lastT = bars?.length ? bars[bars.length - 1].t : 0;
-    return now > 0 && lastT > 0 && now / 1000 - lastT < FUTURES_FRESH_S;
-  };
-  // ── panel models: CLOSED bars only, so a signal never repaints ──────────
-  const strikes = useMemo(() => loaded?.strikes ?? [0, 0, 0], [loaded]);
-  const models = useMemo(() => strikes.map(strike => {
-    const row = rows[String(strike)];
-    const bars = row?.bars ?? [];
-    const forming = row?.openT != null && bars[bars.length - 1]?.t === row.openT;
+  // ── panel model: CLOSED bars only, so a signal never repaints ───────────
+  const model = useMemo(() => {
+    const last = bars[bars.length - 1];
+    const forming = last !== undefined && last.t >= minuteOf(now / 1000) && now > 0; // the minute still forming is not closed yet
     return buildPanelModel(forming ? bars.slice(0, -1) : bars, overlay, settings);
-  }), [rows, strikes, overlay, settings]);
+  }, [bars, overlay, settings, now]);
+
+  // A chart's name for the alert log: the symbol, with the contract month for a future.
+  const label = useMemo(() => {
+    if (target.kind !== 'futures') return target.symbol;
+    const iso = loaded?.expiry;
+    return iso ? `${target.symbol} ${MONTHS[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)}` : target.symbol;
+  }, [target, loaded]);
 
   // ── alerts: new signals on newly closed bars, once each ─────────────────
   useEffect(() => {
     if (!loaded) return;
     const rebaseline = rebaselineRef.current;
     rebaselineRef.current = false;
-    const fresh: LogEntry[] = [];
-    loaded.strikes.forEach((strike, i) => {
-      const k = String(strike);
-      if (rebaseline) { watermarkRef.current[k] = models[i].lastBarT ?? watermarkRef.current[k] ?? 0; return; }
-      if (i !== shownIndex(plainMode)) return;                         // a chart that is not on screen never alerts
-      const wm = watermarkRef.current[k] ?? models[i].lastBarT ?? 0; // a strike with no watermark never alerts on what is already there
-      for (const s of newSignalsAfter(models[i].signals, wm)) {
-        fresh.push({ id: `${strike}:${loaded.expiry}:${s.kind}:${s.t}`, t: s.t, strike, ...(plainMode ? { label: nameOf(strike) } : {}), kind: s.kind, price: s.price, belowVwap: s.belowVwap });
-      }
-      watermarkRef.current[k] = nextWatermark(wm, models[i].lastBarT);
-    });
+    if (rebaseline) { watermarkRef.current = model.lastBarT ?? watermarkRef.current; return; }
+    const wm = watermarkRef.current || model.lastBarT || 0;
+    const fresh: LogEntry[] = newSignalsAfter(model.signals, wm).map(s => ({
+      id: `${target.kind}:${target.symbol}:${s.kind}:${s.t}`, t: s.t, strike: loaded.key, label, kind: s.kind, price: s.price, belowVwap: s.belowVwap,
+    }));
+    watermarkRef.current = nextWatermark(wm, model.lastBarT);
     if (!fresh.length) return;
     setLog(prev => fresh.filter(e => !prev.some(p => p.id === e.id)).reduce((l, e) => capLog(l, e), prev));
     for (const e of fresh) {
       const sell = e.kind === 'DOUBLE_BOTTOM_SELL';
-      const title = `${nameOf(e.strike)} · ${sell ? 'Double bottom SELL' : 'Double top BUY'} @ ${e.price.toFixed(2)}`;
+      const title = `${label} · ${sell ? 'Double bottom SELL' : 'Double top BUY'} @ ${e.price.toFixed(2)}`;
       if (sell) toast.error(title, { description: e.belowVwap ? 'Below VWAP — entry zone' : undefined });
       else toast.success(title);
-      setFlash(f => ({ ...f, [e.strike]: sell ? 'sell' : 'buy' }));
-      setTimeout(() => setFlash(f => { const rest = { ...f }; delete rest[e.strike]; return rest; }), FLASH_MS);
+      setFlash(sell ? 'sell' : 'buy');
+      setTimeout(() => setFlash(null), FLASH_MS);
     }
     // Sound only in the leader tab, so two open tabs never double-ring; the toast and log still show everywhere.
     if (leaderRef.current && !mutedRef.current) {
       const last = fresh[fresh.length - 1];
       if (last.kind === 'DOUBLE_BOTTOM_SELL') playEntryChime(); else playExitChime();
     }
-  }, [models, loaded, leaderRef, plainMode]);
+  }, [model, loaded, leaderRef, label, target]);
 
-  const clearScreen = () => {
-    // Everything on screen belongs to the old instrument: drop it so no tick, alert or refresh crosses over.
+  const lastBarT = bars.length ? bars[bars.length - 1].t : 0;
+  const stale = now === 0 || !lastBarT || now / 1000 - lastBarT > FRESH_S;
+
+  const choose = (next: Target) => {
+    if (next.kind === target.kind && next.symbol === target.symbol) return;
+    savePref(TARGET_KEY, JSON.stringify(next));
+    // Everything on screen belongs to the old instrument: drop it so no refresh or alert crosses over.
     reqRef.current++;
-    loadedAtmRef.current = null;
-    watermarkRef.current = {};
-    lastTickRef.current = null;
+    watermarkRef.current = 0;
     rebaselineRef.current = true;
-    setLoaded(null); setRows({}); setExpiries([]); setExpiry(''); setAtmInput('auto'); setFallback({ spot: null, future: null });
-    setLoading(true); setLoadError(null);
+    setLoaded(null); setBars([]); setLoading(true); setLoadError(null); setName(null);
+    setTarget(next);
   };
-  const pickPrice = (p: PnfPick) => {
-    if (priceSel?.kind === p.kind && priceSel.symbol === p.symbol) return;
-    savePref(UNDERLYING_KEY, `PRICE:${p.kind}:${p.symbol}`);
-    clearScreen();
-    setPriceName(p.name);
-    setPriceSel(p);
-  };
-  const pickUnderlying = (u: PnfUnderlying) => {
-    if (u === underlying && !priceSel) return;
-    savePref(UNDERLYING_KEY, u);
-    setPriceSel(null);
-    clearScreen();
-    setOffsets(readOffsets(readPref(offsetsKeyFor(u))));
-    setUnderlying(u);
-  };
+  const pickSearch = (p: PnfPick) => choose({ kind: p.kind, symbol: p.symbol, name: p.name });
   const pickOverlay = (o: Overlay) => { setOverlay(o); savePref(OVERLAY_KEY, o); };
   const applySettings = (next: PnfSettings) => {
-    rebaselineRef.current = true;     // the charts are about to be redrawn from the same data: that must not alert
+    rebaselineRef.current = true;     // the chart is about to be redrawn from the same data: that must not alert
     setSettings(next);
     savePref(SETTINGS_KEY, serializeSettings(next));
   };
@@ -335,6 +215,9 @@ export default function StraddlePnfPage() {
   const seg = (active: boolean) =>
     `px-2.5 py-1 text-[11px] font-bold rounded-md transition-colors ${active ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`;
   const iconBtn = 'inline-flex items-center justify-center h-7 w-7 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white hover:bg-zinc-800';
+  const isNifty = target.kind === 'index' && target.symbol === 'NIFTY';
+  const isCrude = target.kind === 'futures';
+  const live = bars.length ? { ce: bars[bars.length - 1].ce, pe: 0 } : null;
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950 text-white">
@@ -344,43 +227,28 @@ export default function StraddlePnfPage() {
             <ChartScatter className="w-4 h-4 text-emerald-400" aria-hidden="true" />
           </div>
           <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {priceSel ? priceSel.symbol : underlying}</p>
-            <h1 className="text-sm font-bold text-white tracking-tight leading-none">Straddle Point &amp; Figure</h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">{settings.interval}-min · {settings.boxPct}% box · {settings.reversal}-box reversal · signals only{priceSel ? ` · ${priceName ?? priceSel.name}` : futuresMode && loaded?.strikes[0] ? ` · ${nameOf(loaded.strikes[0]).replace('CRUDEOILM ', '')}` : ''}</p>
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {target.symbol}</p>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none">Point &amp; Figure</h1>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">
+              {settings.interval}-min · {settings.boxPct}% box · {settings.reversal}-box reversal · signals only · {isCrude ? label : name ?? target.name}
+            </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
           <div ref={setHeaderSlot} data-testid="pnf-header-summary" className="flex items-center min-w-0" />
-          {!plainMode && <span data-testid="pnf-spot" className="text-xs font-mono text-zinc-300">
-            Nifty <b className="text-white">{headerSpot ? fmt(headerSpot) : '—'}</b>
-          </span>}
-          {!plainMode && <span data-testid="pnf-future" className="text-xs font-mono text-zinc-300">
-            Fut <b className="text-white">{headerFuture ? fmt(headerFuture) : '—'}</b>
-          </span>}
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
-          <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Underlying">
-            {PNF_UNDERLYINGS.map(u => (
-              <button key={u} type="button" aria-pressed={!priceSel && underlying === u} onClick={() => pickUnderlying(u)} className={seg(!priceSel && underlying === u)}>
-                {u === 'NIFTY' ? 'NIFTY' : 'CRUDEOILM'}
-              </button>
-            ))}
+          <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Instrument">
+            <button type="button" aria-pressed={isNifty} onClick={() => choose(DEFAULT_TARGET)} className={seg(isNifty)}>NIFTY</button>
+            <button type="button" aria-pressed={isCrude} onClick={() => choose(FUTURES_TARGET)} className={seg(isCrude)}>CRUDEOILM</button>
           </div>
-          <SymbolSearch active={priceSel} onPick={pickPrice} />
-          {!plainMode && <select
-            aria-label="Expiry"
-            value={expiry}
-            onChange={e => setExpiry(e.target.value)}
-            className="h-7 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-xs text-zinc-200"
-          >
-            {expiries.map(e => <option key={e.value} value={e.value}>{e.label}</option>)}
-          </select>}
+          <SymbolSearch active={target.kind === 'futures' || isNifty ? null : { kind: target.kind, symbol: target.symbol, name: target.name }} onPick={pickSearch} />
           <SettingsControls settings={settings} onChange={applySettings} />
           <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
             <button type="button" aria-pressed={overlay === 'vwap'} onClick={() => pickOverlay('vwap')} className={seg(overlay === 'vwap')}>VWAP</button>
             <button type="button" aria-pressed={overlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(overlay === 'sma')}>SMA 10</button>
           </div>
-          <button type="button" onClick={() => recenterNow()} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800">
+          <button type="button" onClick={recenterNow} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800">
             <LocateFixed className="w-3.5 h-3.5" aria-hidden="true" /> Re-center
           </button>
           <button type="button" aria-label="Alert log" aria-pressed={logOpen} onClick={() => setLogOpen(o => !o)} className={`${iconBtn} relative`}>
@@ -400,32 +268,24 @@ export default function StraddlePnfPage() {
         {loadError && <p role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{loadError}</p>}
         {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} /></div>}
         <div className="flex-1 min-h-0 grid gap-3" style={{ gridTemplateColumns: 'minmax(0, 1fr)', gridTemplateRows: 'minmax(0, 1fr)' }}>
-          {strikes.map((strike, i) => {
-            if (i !== shownIndex(plainMode)) return null;
-            const row = rows[String(strike)];
-            const last = row?.bars[row.bars.length - 1];
-            return (
-              <PnfPanel
-                key={i}
-                title={plainMode ? nameOf(strike) : `${offsetLabel(loaded ? loaded.strikes[i] - loaded.atm : offsets[i])} · ${strike || '—'} straddle`}
-                strike={strike}
-                model={models[i]}
-                live={last ? { ce: last.ce, pe: last.pe } : null}
-                overlay={overlay}
-                stale={plainMode ? !barsFresh(strike) : !liveFresh}
-                legs={!plainMode}
-                flash={flash[strike] ?? null}
-                loading={loading && !row}
-                interval={settings.interval}
-                boxPct={settings.boxPct}
-                reversal={settings.reversal}
-                fill
-                resetTick={viewTick}
-                headerSlot={headerSlot}
-                error={loaded?.errors[String(strike)]}
-              />
-            );
-          })}
+          <PnfPanel
+            title={`${label} price chart`}
+            strike={loaded?.key ?? 0}
+            model={model}
+            live={live}
+            overlay={overlay}
+            stale={stale}
+            legs={false}
+            flash={flash}
+            loading={loading && bars.length === 0}
+            interval={settings.interval}
+            boxPct={settings.boxPct}
+            reversal={settings.reversal}
+            fill
+            resetTick={viewTick}
+            headerSlot={headerSlot}
+            error={loaded?.error}
+          />
         </div>
       </div>
     </div>

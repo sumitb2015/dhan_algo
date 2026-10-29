@@ -1,8 +1,8 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { json, signIn, type Call } from './support';
 
-// Straddle P&F (/straddle-pnf): three straddle charts, expiry list, VWAP/SMA toggle, history-vs-live alerting, DATA chip.
-// Every /api/* call is answered here; any non-GET this mock does not handle is refused with 599 and fails the test.
+// Point & Figure (/straddle-pnf): one price chart (index / stock / CRUDEOILM future), VWAP/SMA toggle, history-vs-new-bar alerting, DATA chip.
+// There are no options on this page. Every /api/* call is answered here; any non-GET this mock does not handle is refused with 599 and fails the test.
 // The page places no orders, so there is no order route to mock.
 
 const ATM = 25000;
@@ -19,7 +19,7 @@ const PATH_QUIET = [0, 1, 2];
 const NOW_MIN = Math.floor(Date.now() / 60_000) * 60; // current minute, epoch seconds
 
 interface Mock {
-  /** 0 = no ticks yet, 1 = a tick in minute M (bar forming), 2 = a tick in minute M+1 (bar M closes). */
+  /** 0/1 = the history as loaded; 2 = a later refresh in which one more closed bar has broken the chart's first O bottom. */
   phase: 0 | 1 | 2;
   blocked: Call[];
   /** Give the ATM strike a long, wide history (many columns) instead of the short one. */
@@ -59,30 +59,11 @@ function history(levels: number[]) {
   });
 }
 
-function quotes(phase: Mock['phase']) {
-  const updated = phase === 2 ? NOW_MIN + 65 : NOW_MIN + 5;
-  const strikes: Record<string, unknown> = {};
-  if (phase > 0) {
-    for (const k of STRIKES) {
-      const half = priceAt(-1) / 2; // every chart ticks at level -1
-      strikes[String(k)] = { strike: k, ce: { ltp: half, oi: 1000, volume: 500 }, pe: { ltp: half, oi: 900, volume: 400 } };
-    }
-  }
-  return {
-    updated_at: new Date(updated * 1000).toISOString(), underlying: 'NIFTY', expiry: upcomingTuesdays(1)[0], spot: 25012.3, atm: ATM,
-    straddle_premium: 190, strikes, future: { ltp: 25050.1 },
-  };
-}
-
-function upcomingTuesdays(n: number): string[] {
-  const out: string[] = [];
-  const d = new Date();
-  d.setUTCHours(0, 0, 0, 0);
-  while (out.length < n) {
-    d.setUTCDate(d.getUTCDate() + 1);
-    if (d.getUTCDay() === 2) out.push(d.toISOString().slice(0, 10));
-  }
-  return out;
+/** Phase 2: one more CLOSED bar (a minute after the last one) that breaks the chart's first O bottom; the older bars keep their times. */
+function withBreak(bars: ReturnType<typeof history>, on: boolean) {
+  if (!on) return bars;
+  const s = priceAt(-1);
+  return [...bars, { t: bars[bars.length - 1].t + 60, ce: s, pe: 0, straddle: s, vol: 10 }];
 }
 
 async function install(page: Page, m: Mock) {
@@ -93,14 +74,10 @@ async function install(page: Page, m: Mock) {
     const method = req.method();
 
     if (p === '/api/straddle-pnf' && method === 'GET') {
-      return json(route, {
-        success: true, atm: ATM, strikes: STRIKES, errors: {}, dataDate: '2026-10-23',
-        bars: { [STRIKES[0]]: history(PATH_WITH_BREAK), [STRIKES[1]]: m.fixedHistory ? fixedHistory() : m.longHistory ? longHistory() : history(PATH_BEFORE_BREAK) },
-      });
+      // The page keys its one series by the first entry of `strikes`; this mock reuses the old ATM number so the locators stay stable.
+      const series = m.fixedHistory ? fixedHistory() : m.longHistory ? longHistory() : withBreak(history(PATH_BEFORE_BREAK), m.phase >= 2);
+      return json(route, { success: true, mode: 'price', atm: 0, strikes: [ATM], name: 'Nifty 50', errors: {}, dataDate: '2026-10-23', bars: { [ATM]: series } });
     }
-    if (p === '/api/options/expiries') return json(route, { success: true, data: upcomingTuesdays(10) });
-    if (p === '/api/options/live' && method === 'GET') return json(route, { success: true, status: { status: 'RUNNING' }, quotes: quotes(m.phase) });
-    if (p === '/api/options/live' && method === 'POST') return json(route, { success: true });
     if (method === 'GET') return json(route, { success: true });
 
     m.blocked.push({ method, path: p, search: u.search, body: null });
@@ -110,31 +87,20 @@ async function install(page: Page, m: Mock) {
 
 test.beforeEach(async ({ context }) => { await signIn(context); });
 
-test('one straddle panel (ATM) fills the page with the DATA chip, spot and future price', async ({ page }) => {
+test('one price chart fills the page with the DATA chip and no options controls', async ({ page }) => {
   const m: Mock = { phase: 1, blocked: [] };
   await install(page, m);
   await page.goto('/straddle-pnf');
 
   const panels = page.getByTestId('pnf-panel');
   await expect(panels).toHaveCount(1);
-  await expect(panels.nth(0)).toHaveAttribute('data-strike', String(ATM));
   const box = (await panels.nth(0).boundingBox())!;
   expect(box.width).toBeGreaterThan(900);                       // the one chart takes the whole width
-
   await expect(page.getByText('DATA: 2026-10-23')).toBeVisible();
-  await expect(page.getByTestId('pnf-spot')).toContainText('25,012.30');
-  await expect(page.getByTestId('pnf-future')).toContainText('25,050.10');
+  await expect(page.getByLabel('Expiry')).toHaveCount(0);       // no options: no expiry, strikes, offsets or ATM
+  await expect(page.getByLabel('ATM', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Strike offsets' })).toHaveCount(0);
   expect(m.blocked).toEqual([]);
-});
-
-test('the expiry dropdown offers at most four expiries', async ({ page }) => {
-  await install(page, { phase: 0, blocked: [] });
-  await page.goto('/straddle-pnf');
-  const options = page.getByLabel('Expiry').locator('option');
-  await expect(options.first()).toBeAttached();
-  const n = await options.count();
-  expect(n).toBeGreaterThan(0);
-  expect(n).toBeLessThanOrEqual(4);
 });
 
 test('the VWAP / SMA toggle switches the overlay legend', async ({ page }) => {
@@ -148,8 +114,9 @@ test('the VWAP / SMA toggle switches the overlay legend', async ({ page }) => {
   await expect(legend).toHaveText(/VWAP/);
 });
 
-test('a double bottom in history is marked but never alerts; a live one alerts once', async ({ page }) => {
+test('a double bottom in history is marked but never alerts; a newly closed one alerts once', async ({ page }) => {
   const m: Mock = { phase: 0, blocked: [] };
+  await page.clock.install();
   await install(page, m);
   await page.goto('/straddle-pnf');
 
@@ -158,16 +125,17 @@ test('a double bottom in history is marked but never alerts; a live one alerts o
   await page.getByRole('button', { name: 'Alert log' }).click();
   await expect(page.getByTestId('pnf-log-row')).toHaveCount(0);
 
-  m.phase = 1; // bar M is forming: still nothing closed, still no alert
-  await page.waitForTimeout(600);
+  await page.clock.fastForward(31_000);       // a quiet refresh with nothing new: still no alert
+  await page.waitForTimeout(300);
   await expect(page.getByTestId('pnf-log-row')).toHaveCount(0);
 
-  m.phase = 2; // minute M+1 arrives: bar M closes and breaks the ATM chart's first O bottom
+  m.phase = 2;                                // the next refresh has one more closed bar that breaks the first O bottom
+  await page.clock.fastForward(31_000);
   await expect(page.getByTestId('pnf-log-row')).toHaveCount(1);
-  await expect(page.getByTestId('pnf-log-row').first()).toContainText(String(ATM));
   await expect(mid.locator('[data-testid="pnf-signal"][data-kind="DOUBLE_BOTTOM_SELL"]')).toHaveCount(1);
 
-  await page.waitForTimeout(600); // more polls of the same quote must not add a second entry
+  await page.clock.fastForward(31_000);       // another refresh of the same bars must not add a second entry
+  await page.waitForTimeout(300);
   await expect(page.getByTestId('pnf-log-row')).toHaveCount(1);
   expect(m.blocked).toEqual([]);
 });
@@ -269,8 +237,8 @@ test('the box % applies on Enter, an invalid entry is refused and reverts, and t
 test('the chosen interval and box % are remembered after a reload', async ({ page }) => {
   await install(page, { phase: 0, blocked: [] });
   await page.goto('/straddle-pnf');
-  // Wait until the page is live: the expiry list loads after hydration, and a control changed before then is reset by hydration.
-  await expect(page.getByLabel('Expiry').locator('option').first()).toBeAttached();
+  // Wait until the page is live: the chart's header summary only exists after hydration, and a control changed before then is reset by it.
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('vs open');
   await page.getByLabel('Interval').selectOption('5');
   await page.getByLabel('Box %').fill('0.75');
   await page.getByLabel('Box %').press('Enter');
@@ -302,7 +270,7 @@ test('changing the interval or the box % redraws the charts but never fires an a
 test('the charts fit the window even though the header wraps, and opening the alert log does not push them down', async ({ page }) => {
   await install(page, { phase: 0, blocked: [] });
   await page.goto('/straddle-pnf');
-  await expect(page.getByLabel('Expiry').locator('option').first()).toBeAttached();
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('vs open');
   const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
   const before = (await panel.boundingBox())!;
   const vh = page.viewportSize()!.height;
@@ -330,6 +298,6 @@ test('the reversal control defaults to 3 boxes, changes how often columns turn, 
   await page.waitForTimeout(400);
   await expect(page.getByTestId('pnf-log-row')).toHaveCount(0);        // redrawing never alerts
   await page.reload();
-  await expect(page.getByLabel('Expiry').locator('option').first()).toBeAttached();
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('vs open');
   await expect(page.getByLabel('Reversal')).toHaveValue('2');
 });
