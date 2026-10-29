@@ -2,11 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { PROJECT_ROOT, runPythonJson, dedupe, spaced } from '@/lib/pyExec';
 import { DEFAULT_OFFSETS, isPnfUnderlying, parseAtmParam, parseOffsetsParam, roundToStep, strikesFor } from '@/lib/straddlePnfStrikes';
+import { findEquity } from '@/lib/equityMaster';
+import { isIndexSymbol, isSymbol } from '@/lib/straddlePnfSearch';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
 
 // Read-only market-data route for the Straddle P&F page: no order code lives here.
 const BARS_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'straddle_pnf_candles.py');
 const FUTURES_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'futures_pnf_candles.py');
+const PRICE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'price_pnf_candles.py');
 const SPOT_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 
 const SESSIONS = 3;
@@ -21,6 +24,7 @@ export async function GET(request: NextRequest) {
   const underlying = (searchParams.get('underlying') ?? 'NIFTY').toUpperCase();
   const expiry = searchParams.get('expiry') ?? '';
   const atmParam = parseAtmParam(searchParams.get('atm'));
+  if (searchParams.get('mode') === 'price') return priceResponse(searchParams.get('kind') ?? '', (searchParams.get('symbol') ?? '').toUpperCase());
 
   if (!isPnfUnderlying(underlying)) {
     return NextResponse.json({ success: false, error: 'Only NIFTY and CRUDEOILM are supported' }, { status: 400 });
@@ -113,6 +117,29 @@ async function futuresResponse(underlying: string) {
       strikes: keys.map(Number), expiries, bars, errors: out.errors ?? {},
       dataDate: lastT ? sessionOf(lastT) : null,
     };
+    if (Object.keys(bars).length) cache.set(key, { ts: Date.now(), body });
+    return NextResponse.json(body);
+  } catch (e) {
+    return NextResponse.json({ success: false, error: `Script error: ${(e as Error).message}` }, { status: 500 });
+  }
+}
+
+/** The plain price of an NSE index or cash equity (the search box's picks). The symbol must be a known index or an NSE cash-equity row. */
+async function priceResponse(kind: string, symbol: string) {
+  const known = kind === 'index' ? isIndexSymbol(symbol) : kind === 'equity' && isSymbol(symbol) && findEquity(symbol) !== null;
+  if (!known) return NextResponse.json({ success: false, error: `Unknown ${kind || 'instrument'} "${symbol}"` }, { status: 400 });
+  const key = `price:${kind}:${symbol}`;
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.ts < CACHE_TTL) return NextResponse.json(hit.body);
+  try {
+    const out = await dedupe(`straddle-pnf:${key}`, () =>
+      runPythonJson<{ error?: string; bars?: Record<string, Bar[]>; name?: string; errors?: Record<string, string> }>(
+        PRICE_SCRIPT, ['--kind', kind, '--symbol', symbol, '--sessions', String(SESSIONS)], 90_000),
+    );
+    if (out.error) return NextResponse.json({ success: false, error: out.error }, { status: 500 });
+    const bars = out.bars ?? {};
+    const lastT = Math.max(0, ...Object.values(bars).map(b => (b.length ? b[b.length - 1].t : 0)));
+    const body = { success: true, mode: 'price', atm: 0, strikes: [0], name: out.name ?? symbol, bars, errors: out.errors ?? {}, dataDate: lastT ? sessionOf(lastT) : null };
     if (Object.keys(bars).length) cache.set(key, { ts: Date.now(), body });
     return NextResponse.json(body);
   } catch (e) {

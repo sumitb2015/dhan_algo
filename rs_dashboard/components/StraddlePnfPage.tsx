@@ -13,7 +13,9 @@ import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/al
 import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
 import { foldTick, newSignalsAfter, nextWatermark, capLog } from '@/lib/straddlePnfLive';
 import { historyQuery, tickAcceptable } from '@/lib/straddlePnfLoad';
-import SettingsControls, { OffsetControls } from './straddlePnf/SettingsControls';
+import SymbolSearch from './straddlePnf/SymbolSearch';
+import type { PnfPick } from '@/lib/straddlePnfSearch';
+import SettingsControls from './straddlePnf/SettingsControls';
 import { DEFAULT_OFFSETS, PNF_UNDERLYINGS, isPnfUnderlying, offsetLabel, type Offsets, type PnfUnderlying } from '@/lib/straddlePnfStrikes';
 import { DEFAULT_SETTINGS, offsetsKeyFor, SETTINGS_KEY, readOffsets, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import { pickExpiries, type PnfExpiry } from '@/lib/straddlePnfExpiries';
@@ -89,10 +91,14 @@ export default function StraddlePnfPage() {
   const rebaselineRef = useRef(false);
   const logLoadedRef = useRef(false);
 
-  const futuresMode = underlying === 'CRUDEOILM';
+  // A search-box pick charts the plain price of an index / stock; otherwise NIFTY charts the ATM straddle and CRUDEOILM its nearest future.
+  const [priceSel, setPriceSel] = useState<PnfPick | null>(null);
+  const [priceName, setPriceName] = useState<string | null>(null); // the full company name the server resolved
+  const futuresMode = underlying === 'CRUDEOILM' && !priceSel;
+  const plainMode = futuresMode || priceSel !== null;
   // The chart's price/summary strip is drawn into the top header (PnfPanel `headerSlot`) instead of a card header above the chart.
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
-  const { liveQuotes } = useLiveOptionsWS(futuresMode ? '' : expiry, 'dhan', ['dhan'], underlying);
+  const { liveQuotes } = useLiveOptionsWS(plainMode ? '' : expiry, 'dhan', ['dhan'], underlying);
 
   // ── preferences, sound unlock, clock ────────────────────────────────────
   useEffect(() => installAlertSoundUnlock(), []);
@@ -101,6 +107,8 @@ export default function StraddlePnfPage() {
     const stored = readSettings(readPref(SETTINGS_KEY));
     setSettings(stored);
     const savedUnderlying = readPref(UNDERLYING_KEY) ?? 'NIFTY';
+    const savedPick = /^PRICE:(index|equity):([A-Z0-9&-]{1,20})$/.exec(savedUnderlying);
+    if (savedPick) setPriceSel({ kind: savedPick[1] as PnfPick['kind'], symbol: savedPick[2], name: savedPick[2] });
     const u = isPnfUnderlying(savedUnderlying) ? savedUnderlying : 'NIFTY';
     setUnderlying(u);
     setOffsets(readOffsets(readPref(offsetsKeyFor(u))));
@@ -120,7 +128,7 @@ export default function StraddlePnfPage() {
 
   // ── expiries ────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (futuresMode) return;
+    if (plainMode) return;
     let cancelled = false;
     fetch(`/api/options/expiries?underlying=${underlying}`)
       .then(r => r.json())
@@ -132,17 +140,17 @@ export default function StraddlePnfPage() {
       })
       .catch(() => { if (!cancelled) setLoadError('Could not load expiries'); });
     return () => { cancelled = true; };
-  }, [underlying, futuresMode]);
+  }, [underlying, plainMode]);
 
   // ── history load. reset = new expiry / Re-center (new strikes, alerts restart); otherwise a quiet refresh ──
   const load = useCallback(async (reset: boolean) => {
-    if (!expiry && !futuresMode) return;
+    if (!expiry && !plainMode) return;
     const id = ++reqRef.current;
     if (reset) { setLoading(true); setLoadError(null); }
     try {
-      const res = await fetch(`/api/straddle-pnf?${futuresMode ? `underlying=${underlying}` : historyQuery(expiry, reset, loadedAtmRef.current, atmInput, offsets, underlying)}`);
+      const res = await fetch(`/api/straddle-pnf?${priceSel ? `mode=price&kind=${priceSel.kind}&symbol=${encodeURIComponent(priceSel.symbol)}` : plainMode ? `underlying=${underlying}` : historyQuery(expiry, reset, loadedAtmRef.current, atmInput, offsets, underlying)}`);
       const j = await res.json() as {
-        success?: boolean; error?: string; atm: number; strikes: number[]; dataDate: string | null; expiries?: Record<string, string>;
+        success?: boolean; error?: string; name?: string; atm: number; strikes: number[]; dataDate: string | null; expiries?: Record<string, string>;
         bars: Record<string, Bar[]>; errors: Record<string, string>;
       };
       if (id !== reqRef.current) return; // a newer request owns the screen
@@ -158,8 +166,9 @@ export default function StraddlePnfPage() {
       }
       if (reset) { loadedAtmRef.current = j.atm; rebaselineRef.current = true; } // history never alerts
       setRows(next);
+      if (priceSel && j.name) setPriceName(j.name);
       if (recenterViewRef.current) { recenterViewRef.current = false; setViewTick(n => n + 1); }
-      setLoaded({ expiry: futuresMode ? 'futures' : expiry, expiries: j.expiries, atm: j.atm, strikes: j.strikes, dataDate: j.dataDate, errors: j.errors ?? {} });
+      setLoaded({ expiry: plainMode ? (priceSel ? 'price' : 'futures') : expiry, expiries: j.expiries, atm: j.atm, strikes: j.strikes, dataDate: j.dataDate, errors: j.errors ?? {} });
       setLoadError(null);
     } catch (e) {
       if (id !== reqRef.current) return;
@@ -167,27 +176,27 @@ export default function StraddlePnfPage() {
     } finally {
       if (id === reqRef.current) setLoading(false);
     }
-  }, [expiry, atmInput, offsets, underlying, futuresMode]);
+  }, [expiry, atmInput, offsets, underlying, plainMode, priceSel]);
 
   useEffect(() => { void load(true); }, [load, recenter]);
 
   const liveFresh = useMemo(() => {
-    if (futuresMode) return false;
+    if (plainMode) return false;
     if (!liveQuotes?.updated_at || now === 0) return false;
     const t = Date.parse(liveQuotes.updated_at);
     return Number.isFinite(t) && now - t < STALE_MS && Object.keys(liveQuotes.strikes ?? {}).length > 0;
-  }, [liveQuotes, now, futuresMode]);
+  }, [liveQuotes, now, plainMode]);
 
   // Bridge down or stale: fall back to polling the history API so the charts keep moving.
   useEffect(() => {
-    if (liveFresh || (!expiry && !futuresMode)) return;
-    const id = setInterval(() => { void load(false); }, futuresMode ? FUTURES_POLL_MS : POLL_FALLBACK_MS);
+    if (liveFresh || (!expiry && !plainMode)) return;
+    const id = setInterval(() => { void load(false); }, plainMode ? FUTURES_POLL_MS : POLL_FALLBACK_MS);
     return () => clearInterval(id);
-  }, [liveFresh, expiry, load, futuresMode]);
+  }, [liveFresh, expiry, load, plainMode]);
 
   // Index and futures price for the header: the live feed when it is fresh, otherwise the option-chain route (rate-limited, polled slowly).
   useEffect(() => {
-    if (futuresMode || liveFresh || !expiry) return;
+    if (plainMode || liveFresh || !expiry) return;
     let cancelled = false;
     const pull = () => fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}`)
       .then(r => r.json())
@@ -199,10 +208,10 @@ export default function StraddlePnfPage() {
     void pull();
     const id = setInterval(pull, 20_000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [liveFresh, expiry, underlying, futuresMode]);
-  const nearBars = futuresMode ? rows[String(loaded?.strikes[0])]?.bars : undefined;
-  const headerSpot = futuresMode ? (nearBars?.length ? nearBars[nearBars.length - 1].straddle : null) : liveFresh && liveQuotes?.spot ? liveQuotes.spot : fallback.spot;
-  const headerFuture = futuresMode ? null : liveFresh && liveQuotes?.future?.ltp ? liveQuotes.future.ltp : fallback.future;
+  }, [liveFresh, expiry, underlying, plainMode]);
+  const nearBars = plainMode ? rows[String(loaded?.strikes[0])]?.bars : undefined;
+  const headerSpot = plainMode ? (nearBars?.length ? nearBars[nearBars.length - 1].straddle : null) : liveFresh && liveQuotes?.spot ? liveQuotes.spot : fallback.spot;
+  const headerFuture = plainMode ? null : liveFresh && liveQuotes?.future?.ltp ? liveQuotes.future.ltp : fallback.future;
 
   // ── live ticks → open bar ───────────────────────────────────────────────
   useEffect(() => {
@@ -230,6 +239,18 @@ export default function StraddlePnfPage() {
     });
   }, [liveQuotes, loaded, expiry]);
 
+  // A chart's name: the strike for a straddle, the contract month for a futures chart.
+  const nameOf = (strike: number) => {
+    if (priceSel) return `${priceSel.symbol} ${priceSel.kind === 'index' ? 'index' : 'stock'}`;
+    if (!plainMode) return `${strike} straddle`;
+    const iso = loaded?.expiries?.[String(strike)];
+    return iso ? `CRUDEOILM ${MONTHS[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)} futures` : 'CRUDEOILM futures';
+  };
+  const barsFresh = (strike: number) => {
+    const bars = rows[String(strike)]?.bars;
+    const lastT = bars?.length ? bars[bars.length - 1].t : 0;
+    return now > 0 && lastT > 0 && now / 1000 - lastT < FUTURES_FRESH_S;
+  };
   // ── panel models: CLOSED bars only, so a signal never repaints ──────────
   const strikes = useMemo(() => loaded?.strikes ?? [0, 0, 0], [loaded]);
   const models = useMemo(() => strikes.map(strike => {
@@ -248,10 +269,10 @@ export default function StraddlePnfPage() {
     loaded.strikes.forEach((strike, i) => {
       const k = String(strike);
       if (rebaseline) { watermarkRef.current[k] = models[i].lastBarT ?? watermarkRef.current[k] ?? 0; return; }
-      if (i !== shownIndex(futuresMode)) return;                         // a chart that is not on screen never alerts
+      if (i !== shownIndex(plainMode)) return;                         // a chart that is not on screen never alerts
       const wm = watermarkRef.current[k] ?? models[i].lastBarT ?? 0; // a strike with no watermark never alerts on what is already there
       for (const s of newSignalsAfter(models[i].signals, wm)) {
-        fresh.push({ id: `${strike}:${loaded.expiry}:${s.kind}:${s.t}`, t: s.t, strike, ...(futuresMode ? { label: nameOf(strike) } : {}), kind: s.kind, price: s.price, belowVwap: s.belowVwap });
+        fresh.push({ id: `${strike}:${loaded.expiry}:${s.kind}:${s.t}`, t: s.t, strike, ...(plainMode ? { label: nameOf(strike) } : {}), kind: s.kind, price: s.price, belowVwap: s.belowVwap });
       }
       watermarkRef.current[k] = nextWatermark(wm, models[i].lastBarT);
     });
@@ -270,12 +291,10 @@ export default function StraddlePnfPage() {
       const last = fresh[fresh.length - 1];
       if (last.kind === 'DOUBLE_BOTTOM_SELL') playEntryChime(); else playExitChime();
     }
-  }, [models, loaded, leaderRef, futuresMode]);
+  }, [models, loaded, leaderRef, plainMode]);
 
-  const pickUnderlying = (u: PnfUnderlying) => {
-    if (u === underlying) return;
-    savePref(UNDERLYING_KEY, u);
-    // Everything on screen belongs to the old contract: drop it so no tick, alert or refresh crosses over.
+  const clearScreen = () => {
+    // Everything on screen belongs to the old instrument: drop it so no tick, alert or refresh crosses over.
     reqRef.current++;
     loadedAtmRef.current = null;
     watermarkRef.current = {};
@@ -283,6 +302,19 @@ export default function StraddlePnfPage() {
     rebaselineRef.current = true;
     setLoaded(null); setRows({}); setExpiries([]); setExpiry(''); setAtmInput('auto'); setFallback({ spot: null, future: null });
     setLoading(true); setLoadError(null);
+  };
+  const pickPrice = (p: PnfPick) => {
+    if (priceSel?.kind === p.kind && priceSel.symbol === p.symbol) return;
+    savePref(UNDERLYING_KEY, `PRICE:${p.kind}:${p.symbol}`);
+    clearScreen();
+    setPriceName(p.name);
+    setPriceSel(p);
+  };
+  const pickUnderlying = (u: PnfUnderlying) => {
+    if (u === underlying && !priceSel) return;
+    savePref(UNDERLYING_KEY, u);
+    setPriceSel(null);
+    clearScreen();
     setOffsets(readOffsets(readPref(offsetsKeyFor(u))));
     setUnderlying(u);
   };
@@ -292,10 +324,6 @@ export default function StraddlePnfPage() {
     setSettings(next);
     savePref(SETTINGS_KEY, serializeSettings(next));
   };
-  const applyOffsets = (next: Offsets) => {
-    setOffsets(next);                 // changes `load`, which reloads with reset and re-baselines alerts
-    savePref(offsetsKeyFor(underlying), JSON.stringify(next));
-  };
   const toggleMute = () => {
     const next = !muted;
     setMuted(next);
@@ -303,17 +331,6 @@ export default function StraddlePnfPage() {
     savePref(SOUND_KEY, next ? '0' : '1');
   };
 
-  // A chart's name: the strike for a straddle, the contract month for a futures chart.
-  const nameOf = (strike: number) => {
-    if (!futuresMode) return `${strike} straddle`;
-    const iso = loaded?.expiries?.[String(strike)];
-    return iso ? `CRUDEOILM ${MONTHS[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)} futures` : 'CRUDEOILM futures';
-  };
-  const barsFresh = (strike: number) => {
-    const bars = rows[String(strike)]?.bars;
-    const lastT = bars?.length ? bars[bars.length - 1].t : 0;
-    return now > 0 && lastT > 0 && now / 1000 - lastT < FUTURES_FRESH_S;
-  };
   const today = istToday();
   const seg = (active: boolean) =>
     `px-2.5 py-1 text-[11px] font-bold rounded-md transition-colors ${active ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`;
@@ -327,29 +344,30 @@ export default function StraddlePnfPage() {
             <ChartScatter className="w-4 h-4 text-emerald-400" aria-hidden="true" />
           </div>
           <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {underlying}</p>
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {priceSel ? priceSel.symbol : underlying}</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">Straddle Point &amp; Figure</h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">{settings.interval}-min · {settings.boxPct}% box · {settings.reversal}-box reversal · signals only{futuresMode && loaded?.strikes[0] ? ` · ${nameOf(loaded.strikes[0]).replace('CRUDEOILM ', '')}` : ''}</p>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">{settings.interval}-min · {settings.boxPct}% box · {settings.reversal}-box reversal · signals only{priceSel ? ` · ${priceName ?? priceSel.name}` : futuresMode && loaded?.strikes[0] ? ` · ${nameOf(loaded.strikes[0]).replace('CRUDEOILM ', '')}` : ''}</p>
           </div>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
           <div ref={setHeaderSlot} data-testid="pnf-header-summary" className="flex items-center min-w-0" />
-          {!futuresMode && <span data-testid="pnf-spot" className="text-xs font-mono text-zinc-300">
+          {!plainMode && <span data-testid="pnf-spot" className="text-xs font-mono text-zinc-300">
             Nifty <b className="text-white">{headerSpot ? fmt(headerSpot) : '—'}</b>
           </span>}
-          {!futuresMode && <span data-testid="pnf-future" className="text-xs font-mono text-zinc-300">
+          {!plainMode && <span data-testid="pnf-future" className="text-xs font-mono text-zinc-300">
             Fut <b className="text-white">{headerFuture ? fmt(headerFuture) : '—'}</b>
           </span>}
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
           <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Underlying">
             {PNF_UNDERLYINGS.map(u => (
-              <button key={u} type="button" aria-pressed={underlying === u} onClick={() => pickUnderlying(u)} className={seg(underlying === u)}>
+              <button key={u} type="button" aria-pressed={!priceSel && underlying === u} onClick={() => pickUnderlying(u)} className={seg(!priceSel && underlying === u)}>
                 {u === 'NIFTY' ? 'NIFTY' : 'CRUDEOILM'}
               </button>
             ))}
           </div>
-          {!futuresMode && <select
+          <SymbolSearch active={priceSel} onPick={pickPrice} />
+          {!plainMode && <select
             aria-label="Expiry"
             value={expiry}
             onChange={e => setExpiry(e.target.value)}
@@ -358,19 +376,6 @@ export default function StraddlePnfPage() {
             {expiries.map(e => <option key={e.value} value={e.value}>{e.label}</option>)}
           </select>}
           <SettingsControls settings={settings} onChange={applySettings} />
-          {!futuresMode && <OffsetControls offsets={offsets} onChange={applyOffsets} />}
-          {!futuresMode && <label className="flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-zinc-500">
-            ATM
-            <input aria-label="ATM" type="text" inputMode="numeric" value={atmInput}
-                   onChange={e => setAtmInput(e.target.value)}
-                   onKeyDown={e => { if (e.key === 'Enter') recenterNow(); }}
-                   placeholder="auto"
-                   className="h-7 w-20 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-xs text-zinc-200" />
-          </label>}
-          {!futuresMode && <button type="button" onClick={() => { setAtmInput('auto'); recenterNow(); }}
-                  className="h-7 px-2 rounded-md border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-300 hover:bg-zinc-800">
-            Auto
-          </button>}
           <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
             <button type="button" aria-pressed={overlay === 'vwap'} onClick={() => pickOverlay('vwap')} className={seg(overlay === 'vwap')}>VWAP</button>
             <button type="button" aria-pressed={overlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(overlay === 'sma')}>SMA 10</button>
@@ -396,19 +401,19 @@ export default function StraddlePnfPage() {
         {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} /></div>}
         <div className="flex-1 min-h-0 grid gap-3" style={{ gridTemplateColumns: 'minmax(0, 1fr)', gridTemplateRows: 'minmax(0, 1fr)' }}>
           {strikes.map((strike, i) => {
-            if (i !== shownIndex(futuresMode)) return null;
+            if (i !== shownIndex(plainMode)) return null;
             const row = rows[String(strike)];
             const last = row?.bars[row.bars.length - 1];
             return (
               <PnfPanel
                 key={i}
-                title={futuresMode ? nameOf(strike) : `${offsetLabel(loaded ? loaded.strikes[i] - loaded.atm : offsets[i])} · ${strike || '—'} straddle`}
+                title={plainMode ? nameOf(strike) : `${offsetLabel(loaded ? loaded.strikes[i] - loaded.atm : offsets[i])} · ${strike || '—'} straddle`}
                 strike={strike}
                 model={models[i]}
                 live={last ? { ce: last.ce, pe: last.pe } : null}
                 overlay={overlay}
-                stale={futuresMode ? !barsFresh(strike) : !liveFresh}
-                legs={!futuresMode}
+                stale={plainMode ? !barsFresh(strike) : !liveFresh}
+                legs={!plainMode}
                 flash={flash[strike] ?? null}
                 loading={loading && !row}
                 interval={settings.interval}

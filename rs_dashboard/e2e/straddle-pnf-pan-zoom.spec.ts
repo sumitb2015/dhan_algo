@@ -20,6 +20,8 @@ test('drag pans and wheel zooms a chart that fits the panel', async ({ page }) =
     return route.fulfill({ status: 599, body: 'blocked' });
   });
   await page.goto('/straddle-pnf');
+  await expect(page.getByLabel('ATM', { exact: true })).toHaveCount(0);   // no strike controls: the ATM straddle is automatic
+  await expect(page.getByRole('group', { name: 'Strike offsets' })).toHaveCount(0);
   const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
   const sc = panel.getByTestId('pnf-scroll');
   await expect(panel.getByTestId('pnf-grid')).toBeAttached();
@@ -73,7 +75,6 @@ test('CRUDEOILM charts the upcoming futures, not straddles', async ({ page }) =>
   await expect(page.getByText('Nov 2026 futures')).toBeVisible();   // the nearest month, named in the page subtitle (no card header)
   await expect(page.getByTestId('pnf-header-summary')).not.toContainText('CE ');
   await expect(page.getByLabel('Expiry')).toHaveCount(0);
-  await expect(page.getByLabel('ATM', { exact: true })).toHaveCount(0);
 });
 
 test('Re-center resets zoom and puts the newest column in the middle of the chart', async ({ page }) => {
@@ -100,4 +101,36 @@ test('Re-center resets zoom and puts the newest column in the middle of the char
     const g = (await panel.locator('svg path, svg circle').last().boundingBox())!;
     return Math.abs(g.x + g.width / 2 - (b.x + (b.width - 58) / 2));
   }).toBeLessThan(30);
+});
+
+test('the search box charts an index or a stock by its plain price', async ({ page }) => {
+  const pnf: string[] = [];
+  const mk = (base: number) => [0, 3, 1, 4, 2].map((l, i, a) => ({ t: NOW_MIN - 120 - (a.length - 1 - i) * 60, ce: base + l, pe: 0, straddle: base + l, vol: 10 }));
+  await page.route('**/api/**', async route => {
+    const u = new URL(route.request().url());
+    if (u.pathname === '/api/straddle-pnf/search') {
+      const q = (u.searchParams.get('q') ?? '').toUpperCase();
+      return json(route, { success: true, results: q.startsWith('REL') ? [{ kind: 'equity', symbol: 'RELIANCE', name: 'RELIANCE INDUSTRIES LIMITED' }] : [{ kind: 'index', symbol: 'NIFTY', name: 'Nifty 50' }] });
+    }
+    if (u.pathname === '/api/straddle-pnf') {
+      pnf.push(u.search);
+      if (u.searchParams.get('mode') === 'price') return json(route, { success: true, mode: 'price', atm: 0, strikes: [0], name: 'RELIANCE INDUSTRIES LIMITED', errors: {}, dataDate: '2026-10-23', bars: { 0: mk(1200) } });
+      return json(route, { success: true, atm: ATM, strikes: [ATM - 200, ATM, ATM + 200], errors: {}, dataDate: '2026-10-23', bars: { [ATM]: bars } });
+    }
+    if (u.pathname === '/api/options/expiries') return json(route, { success: true, data: ['2099-01-06'] });
+    if (route.request().method() === 'GET') return json(route, { success: true });
+    return route.fulfill({ status: 599, body: 'blocked' });
+  });
+  await page.goto('/straddle-pnf');
+  await expect(page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`)).toBeAttached();
+  const box = page.getByRole('combobox', { name: 'Search index or stock' });
+  await box.fill('rel');
+  await page.getByRole('option', { name: /RELIANCE/ }).click();
+  await expect(page.getByText('RELIANCE INDUSTRIES LIMITED')).toBeVisible();          // subtitle carries the company name
+  await expect(page.getByTestId('pnf-panel')).toHaveCount(1);
+  await expect(page.getByLabel('Expiry')).toHaveCount(0);                              // no straddle controls for a plain price
+  expect(pnf.some(s => s.includes('mode=price') && s.includes('kind=equity') && s.includes('symbol=RELIANCE'))).toBe(true);
+  await page.getByRole('button', { name: 'NIFTY', exact: true }).click();              // back to the NIFTY straddle
+  await expect(page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`)).toBeAttached();
+  await expect(page.getByLabel('Expiry')).toHaveCount(1);
 });

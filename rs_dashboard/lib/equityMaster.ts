@@ -63,3 +63,17 @@ export function findEquity(symbol: string): EquityInfo | null {
 export function findEquityById(securityId: string): EquityInfo | null {
   return load().byId.get(String(securityId)) ?? null;
 }
+
+/** Cash equities whose symbol starts with, or whose name contains, `query` (symbol-prefix matches first), at most `limit`. */
+export function searchEquities(query: string, limit = 8): EquityInfo[] {
+  const q = query.trim().toUpperCase();
+  if (!q) return [];
+  const prefix: EquityInfo[] = [];
+  const inName: EquityInfo[] = [];
+  for (const e of load().bySymbol.values()) {
+    if (e.symbol.startsWith(q)) prefix.push(e);
+    else if (e.name.toUpperCase().includes(q)) inName.push(e);
+  }
+  prefix.sort((a, b) => a.symbol.length - b.symbol.length || a.symbol.localeCompare(b.symbol));
+  return [...prefix, ...inName].slice(0, limit);
+}
