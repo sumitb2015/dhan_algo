@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Overlay, PanelModel } from '@/lib/straddlePnfModel';
 import { layoutPanel, AXIS_W, PAD_TOP } from '@/lib/straddlePnfLayout';
 
@@ -65,9 +65,10 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   const changePct = change !== null && model.sessionOpen ? (change / model.sessionOpen) * 100 : null;
   const lastSignal = signals.length ? signals[signals.length - 1] : null;
 
-  const L = layoutPanel(columns, box, liveValue, width, HEIGHT);
-  const { cell, yMin, yMax, plotW, contentW, contentH, offsetX } = L;
-  const yOf = (p: number) => PAD_TOP + ((yMax - p) / box) * cell;
+  const [zoom, setZoom] = useState(1);
+  const L = layoutPanel(columns, box, liveValue, width, HEIGHT, zoom, true);
+  const { cell, yMin, yMax, plotW, contentW, contentH, offsetX, padY } = L;
+  const yOf = (p: number) => padY + PAD_TOP + ((yMax - p) / box) * cell;
   const xOf = (j: number) => offsetX + j * cell;
   const vis = columns;
   const first = 0;
@@ -90,6 +91,55 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [columns.length, contentW, contentH, strike]);
+
+  // TradingView-style controls (same as the options charts): wheel zooms around the cursor, drag pans freely, double-click or the
+  // round-arrow button fits the chart back to the newest column, and − / + zoom around the view centre. No scrollbars.
+  const pendingRef = useRef<{ left: number; top: number } | 'reset' | null>(null);
+  const [resetTick, setResetTick] = useState(0);
+  const zoomBy = (factor: number, ax?: number, ay?: number) => {
+    const el = wrapRef.current;
+    const next = Math.min(6, Math.max(0.3, +(zoom * factor).toFixed(3)));
+    if (!el || next === zoom) return;
+    const x = ax ?? el.clientWidth / 2;
+    const y = ay ?? el.clientHeight / 2;
+    // The column and price under the anchor stay under it: read them off the current layout, place them on the next one.
+    const L2 = layoutPanel(columns, box, liveValue, width, HEIGHT, next, true);
+    const j = (el.scrollLeft + x - offsetX) / cell;
+    const u = (el.scrollTop + y - padY - PAD_TOP) / cell;
+    pendingRef.current = { left: L2.offsetX + j * L2.cell - x, top: L2.padY + PAD_TOP + u * L2.cell - y };
+    stickRef.current = false;
+    setZoom(next);
+  };
+  const resetView = () => { pendingRef.current = 'reset'; stickRef.current = true; setZoom(1); setResetTick(n => n + 1); };
+  useLayoutEffect(() => {
+    const el = wrapRef.current;
+    const pending = pendingRef.current;
+    if (!el || !pending) return;
+    pendingRef.current = null;
+    if (pending === 'reset') {
+      el.scrollLeft = el.scrollWidth;
+      if (lastY !== null && box > 0) el.scrollTop = Math.max(0, yOf(lastY) - el.clientHeight / 2);
+    } else {
+      el.scrollLeft = pending.left;
+      el.scrollTop = pending.top;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoom, resetTick]);
+  const zoomRef = useRef(zoomBy);
+  zoomRef.current = zoomBy;
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      zoomRef.current(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - r.left, e.clientY - r.top);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [wrapRef]);
+  const dragRef = useRef<{ x: number; y: number; l: number; t: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
 
   const lastEntryId = [...signals].reverse().find(g => g.kind === 'DOUBLE_BOTTOM_SELL' && g.belowVwap)?.id;
   const ring = flash === 'buy' ? 'ring-2 ring-emerald-400' : flash === 'sell' ? 'ring-2 ring-red-400' : '';
@@ -145,14 +195,31 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         </div>
       </div>
 
+      <div className={`relative ${fill ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
       <div
         ref={wrapRef}
         data-testid="pnf-scroll"
         role="region"
         aria-label={`${title} chart, scrollable`}
         tabIndex={0}
+        onPointerDown={e => {
+          if (e.button !== 0) return;
+          const el = e.currentTarget;
+          dragRef.current = { x: e.clientX, y: e.clientY, l: el.scrollLeft, t: el.scrollTop };
+          el.setPointerCapture(e.pointerId);
+          setDragging(true);
+        }}
+        onPointerMove={e => {
+          const d = dragRef.current;
+          if (!d) return;
+          e.currentTarget.scrollLeft = d.l - (e.clientX - d.x);
+          e.currentTarget.scrollTop = d.t - (e.clientY - d.y);
+        }}
+        onPointerUp={() => { dragRef.current = null; setDragging(false); }}
+        onPointerCancel={() => { dragRef.current = null; setDragging(false); }}
+        onDoubleClick={resetView}
         onScroll={e => { const el = e.currentTarget; stickRef.current = el.scrollLeft + el.clientWidth >= el.scrollWidth - 30; }}
-        className={`relative overflow-auto ${fill ? 'flex-1 min-h-0' : ''}`}
+        className={`relative overflow-auto select-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${dragging ? 'cursor-grabbing' : 'cursor-grab'} ${fill ? 'flex-1 min-h-0' : ''}`}
         style={fill ? { minHeight: 200 } : { height: 'calc(100vh - 215px)', minHeight: MIN_HEIGHT }}
       >
         {error ? (
@@ -177,8 +244,8 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                 if (!prev || prev.session === c.session) return null;
                 return (
                   <g key={`d${j}`}>
-                    <line x1={xOf(j)} x2={xOf(j)} y1={PAD_TOP - 6} y2={contentH} className="stroke-zinc-600" strokeDasharray="2 3" />
-                    <text x={xOf(j) + 3} y={PAD_TOP - 9} className="fill-zinc-500 font-mono" fontSize={9}>{sessionLabel(c.session)}</text>
+                    <line x1={xOf(j)} x2={xOf(j)} y1={padY + PAD_TOP - 6} y2={contentH} className="stroke-zinc-600" strokeDasharray="2 3" />
+                    <text x={xOf(j) + 3} y={padY + PAD_TOP - 9} className="fill-zinc-500 font-mono" fontSize={9}>{sessionLabel(c.session)}</text>
                   </g>
                 );
               })}
@@ -266,6 +333,13 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
             </svg>
           </div>
         )}
+      </div>
+      <div data-testid="pnf-zoom" data-zoom={zoom} className="absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1 z-10">
+        {([['Zoom out', '−', () => zoomBy(0.7)], ['Reset zoom and pan to the newest column', '↺', resetView], ['Zoom in', '+', () => zoomBy(1 / 0.7)]] as const).map(([label, glyph, run]) => (
+          <button key={label} type="button" onClick={run} title={label} aria-label={label === 'Zoom out' || label === 'Zoom in' ? label : 'Fit chart to panel'}
+                  className="flex items-center justify-center w-6 h-6 rounded-full text-xs bg-zinc-900 border border-zinc-700 text-zinc-100 hover:bg-zinc-800">{glyph}</button>
+        ))}
+      </div>
       </div>
     </section>
   );
