@@ -365,7 +365,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [realAck, setRealAck] = useState(false);         // first REAL click this page load asks first
   // A REAL order's first-click confirmation (confirming it lets later clicks this page load straight through), or a
   // `setting` confirmation (its own title and button; it never switches the REAL-order confirmation off).
-  const [confirm, setConfirm] = useState<null | { text: string; run: () => void; setting?: { title: string; button: string } }>(null);
+  const [confirm, setConfirm] = useState<null | { text: string; run: () => void; always?: boolean; setting?: { title: string; button: string } }>(null);
   const [armModal, setArmModal] = useState(false);
   // Exit all (every ladder at once). The plan is frozen when the dialog opens, so what is confirmed is what was read; the server
   // rebuilds it under the ledger lock and refuses if anything changed in between.
@@ -1223,7 +1223,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       if (rs && rs.kind === 'plain' && rs.state === 'working') {
         if (rs.mode === 'real') {
           // Cancel + re-place of real money: confirmed every time, not once per page load.
-          setConfirm({ text: `Move this REAL resting order to ${price}: it is CANCELLED and placed again at the new price`, run: () => void replaceRealOrder(rs, rs.lots, price) });
+          setConfirm({ text: `Move this REAL resting order to ${price}: it is CANCELLED and placed again at the new price`, run: () => void replaceRealOrder(rs, rs.lots, price), always: true });
           return;
         }
         const anywhere = !!rs.stopLimitPrice || (rs.orderType ?? 'LIMIT') === 'LIMIT';
@@ -1337,7 +1337,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       if (rs && rs.mode === 'real' && rs.state === 'working') {
         // A REAL order is resting at the broker: cancel it, and only once the cancel is confirmed place it again.
         const go = () => void replaceRealOrder(rs, lots);
-        setConfirm({ text: `Change this REAL resting order to ${lots} lot${lots === 1 ? '' : 's'}: it is CANCELLED and placed again at the same price (it loses its queue place)`, run: go });
+        // Asked once per page load like every other REAL click, not on each + / −.
+        if (!realAck) setConfirm({ text: `Change this REAL resting order to ${lots} lot${lots === 1 ? '' : 's'}: it is CANCELLED and placed again at the same price (it loses its queue place)`, run: go });
+        else go();
         return;
       }
       void post({ action: 'lots', id: w.ids[0], lots });
@@ -2151,7 +2153,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
           <div className="w-full max-w-md rounded-lg border border-zinc-700 bg-zinc-900 p-4 flex flex-col gap-3">
             <p className="text-sm font-bold text-white">{confirm.setting ? confirm.setting.title : 'Place a REAL-money order?'}</p>
             <p className="text-xs text-zinc-300">{confirm.setting ? confirm.text : `${confirm.text} on ${BROKER_LABELS[broker]}.`}</p>
-            {!confirm.setting && <p className="text-[11px] text-zinc-500">Further clicks on this page load go straight through.</p>}
+            {!confirm.setting && <p className="text-[11px] text-zinc-500">{confirm.always ? 'This one is asked every time.' : 'Further clicks on this page load go straight through.'}</p>}
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setConfirm(null)} className="px-3 py-1.5 rounded-md border border-zinc-700 text-xs text-zinc-300">Cancel</button>
               <button type="button" onClick={() => { const c = confirm; setConfirm(null); if (!c.setting) setRealAck(true); c.run(); }} className="px-3 py-1.5 rounded-md bg-red-600 text-xs font-bold text-oncolor">{confirm.setting ? confirm.setting.button : 'Place REAL order'}</button>
