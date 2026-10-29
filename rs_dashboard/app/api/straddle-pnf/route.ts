@@ -6,12 +6,14 @@ import { sessionOf, type Bar } from '@/lib/straddlePnf';
 
 // Read-only market-data route for the Straddle P&F page: no order code lives here.
 const BARS_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'straddle_pnf_candles.py');
+const FUTURES_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'futures_pnf_candles.py');
 const SPOT_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 
 const SESSIONS = 3;
 const CACHE_TTL = 20_000;
 const cache = new Map<string, { ts: number; body: unknown }>();
 
+interface FuturesScriptOut { error?: string; bars?: Record<string, Bar[]>; expiries?: Record<string, string>; errors?: Record<string, string> }
 interface BarsScriptOut { error?: string; bars?: Record<string, Bar[]>; errors?: Record<string, string> }
 
 export async function GET(request: NextRequest) {
@@ -23,6 +25,7 @@ export async function GET(request: NextRequest) {
   if (!isPnfUnderlying(underlying)) {
     return NextResponse.json({ success: false, error: 'Only NIFTY and CRUDEOILM are supported' }, { status: 400 });
   }
+  if (underlying === 'CRUDEOILM') return futuresResponse(underlying);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) {
     return NextResponse.json({ success: false, error: 'expiry must be YYYY-MM-DD' }, { status: 400 });
   }
@@ -79,6 +82,35 @@ export async function GET(request: NextRequest) {
       strikes,
       bars,
       errors: out.errors ?? {},
+      dataDate: lastT ? sessionOf(lastT) : null,
+    };
+    if (Object.keys(bars).length) cache.set(key, { ts: Date.now(), body });
+    return NextResponse.json(body);
+  } catch (e) {
+    return NextResponse.json({ success: false, error: `Script error: ${(e as Error).message}` }, { status: 500 });
+  }
+}
+
+/**
+ * CRUDEOILM charts the upcoming monthly FUTURES, one chart per contract (no strikes, no expiry choice). Each contract is keyed by its
+ * expiry as YYYYMMDD, which the page uses wherever the straddle mode uses a strike; `expiries` maps that key back to the date.
+ */
+async function futuresResponse(underlying: string) {
+  const key = `futures:${underlying}`;
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.ts < CACHE_TTL) return NextResponse.json(hit.body);
+  try {
+    const out = await dedupe(`straddle-pnf:${key}`, () =>
+      runPythonJson<FuturesScriptOut>(FUTURES_SCRIPT, ['--underlying', underlying, '--contracts', '3', '--sessions', String(SESSIONS)], 90_000),
+    );
+    if (out.error) return NextResponse.json({ success: false, error: out.error }, { status: 500 });
+    const bars = out.bars ?? {};
+    const expiries = out.expiries ?? {};
+    const keys = Object.keys(expiries).sort();
+    const lastT = Math.max(0, ...Object.values(bars).map(b => (b.length ? b[b.length - 1].t : 0)));
+    const body = {
+      success: true, mode: 'futures', atm: 0,
+      strikes: keys.map(Number), expiries, bars, errors: out.errors ?? {},
       dataDate: lastT ? sessionOf(lastT) : null,
     };
     if (Object.keys(bars).length) cache.set(key, { ts: Date.now(), body });

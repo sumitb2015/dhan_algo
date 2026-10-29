@@ -28,6 +28,8 @@ export type PnfPanelProps = {
   reversal?: number;
   /** Fill the height of the parent (a flex/grid cell) instead of the live page's fixed viewport-based height. */
   fill?: boolean;
+  /** False for a futures chart: there are no CE / PE legs to show. */
+  legs?: boolean;
 };
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
@@ -55,7 +57,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, legs = true, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -176,7 +178,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
           </div>
         </div>
         <p className="text-[10px] font-mono text-zinc-400 mt-1 truncate">
-          CE {live ? fmt(live.ce) : '—'} · PE {live ? fmt(live.pe) : '—'} ·{' '}
+          {legs && <>CE {live ? fmt(live.ce) : '—'} · PE {live ? fmt(live.pe) : '—'} ·{' '}</>}
           <span data-testid="pnf-overlay-legend" className={overlay === 'vwap' ? 'text-amber-300' : 'text-zinc-300'}>
             {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : ''}
           </span>

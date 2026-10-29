@@ -5,6 +5,8 @@ export type LogEntry = {
   /** Epoch seconds of the bar that broke the previous top / bottom. */
   t: number;
   strike: number;
+  /** Chart name for a futures chart (the strike field then holds the contract's YYYYMMDD key). */
+  label?: string;
   kind: 'DOUBLE_TOP_BUY' | 'DOUBLE_BOTTOM_SELL';
   price: number;
   belowVwap: boolean;
@@ -29,7 +31,7 @@ export default function AlertLog({ entries }: { entries: LogEntry[] }) {
             return (
               <li key={e.id} data-testid="pnf-log-row" className="flex items-center gap-2 px-3 py-1.5 text-xs font-mono">
                 <span className="text-zinc-400">{hhmmss(e.t)}</span>
-                <span className="text-zinc-200">{e.strike}</span>
+                <span className="text-zinc-200">{e.label ?? e.strike}</span>
                 <span className={sell ? 'text-red-400 font-bold' : 'text-emerald-400 font-bold'}>{sell ? 'DB sell' : 'DT buy'}</span>
                 {sell && e.belowVwap && <span className="text-[10px] text-amber-300">entry zone</span>}
                 <span className="ml-auto text-zinc-300">{e.price.toFixed(2)}</span>
