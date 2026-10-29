@@ -66,6 +66,14 @@ export async function kotakOptionContract(
   return { tradingsymbol: hit.tradingsymbol, lotSize: hit.lot_size, segment: hit.exchange_segment || 'nse_fo', tick: hit.tick ?? null };
 }
 
+/** The Kotak future for (underlying, expiry YYYY-MM-DD), or null when Kotak does not list it. */
+export async function kotakFutureContract(underlying: string, expiry: string): Promise<KotakOptionContract | null> {
+  const rows = await optionRows(underlying);
+  const hit = rows.find(r => r.instrument_type === 'FUT' && r.expiry === expiry);
+  if (!hit || !(hit.lot_size > 0)) return null;
+  return { tradingsymbol: hit.tradingsymbol, lotSize: hit.lot_size, segment: hit.exchange_segment || 'mcx_fo', tick: hit.tick ?? null };
+}
+
 const EQUITY_FILE = path.join(PROJECT_ROOT, 'debug', 'kotak_nse_cm_equity.json');
 
 /** The Kotak NSE cash contract for a plain symbol (RELIANCE -> RELIANCE-EQ), or null. */

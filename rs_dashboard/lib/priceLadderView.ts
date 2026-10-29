@@ -1,7 +1,7 @@
 import { getDhanStrikeLookup } from '@/lib/dhanStrikeLookup';
 import { getDhanFutures } from '@/lib/dhanFuturesLookup';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
-import { kotakOptionContract } from '@/lib/kotakContracts';
+import { kotakOptionContract, kotakFutureContract } from '@/lib/kotakContracts';
 import { zerodhaOptionContract } from '@/lib/zerodhaContracts';
 import { readLadderState, loadPrices, dhanSegmentFor, watcherTickAt, WATCHER_QUIET_MS, LADDER_UNDERLYINGS } from '@/lib/priceLadderServer';
 import {
@@ -52,22 +52,33 @@ export async function resolveContract(broker: LadderBroker, u: string, expiry: s
 }
 
 /**
- * A futures contract (MCX, Dhan only): its XY axis is its own price. Kotak / Zerodha futures quantity units and
- * positions are unconfirmed, so they are refused rather than guessed (the options' mcxUnitError discipline).
+ * A futures contract (MCX, Dhan and Kotak): its XY axis is its own price. Kotak / Zerodha futures quantity units and
+ * positions are unconfirmed, so Zerodha is refused rather than guessed (the options' mcxUnitError discipline).
  */
 async function resolveFuture(broker: LadderBroker, u: string, expiry: string): Promise<LadderContract | string> {
   if (!isMcxUnderlying(u)) return `${u} futures are not offered on the ladder`;
-  if (broker !== 'dhan') return `${u} futures trade on Dhan only (${broker} futures units are unconfirmed)`;
+  if (broker === 'zerodha') return `${u} futures trade on Dhan and Kotak only (Zerodha futures units are unconfirmed)`;
   const mult = MCX_LOT_MULTIPLIER[u];
   if (!(mult > 1)) return `${u}: no MCX lot multiplier — refused`;
   const list = await getDhanFutures(u);
   const f = list?.find(x => x.expiry === expiry);
   if (!f) return `${u} futures ${expiry} is not in Dhan's master list`;
   if (f.lotSize !== 1) return `${u}: unexpected futures lot size ${f.lotSize} — refused`;
-  return {
+  const c: LadderContract = {
     underlying: u, expiry, strike: 0, opt: 'FUT', securityId: f.securityId, lotSize: 1, exchangeSegment: 'MCX_COMM', mult, ...(f.tick > 0 ? { tick: f.tick } : {}),
     ref: { securityId: f.securityId, segment: 'MCX_COMM', expiry },
   };
+  if (broker === 'kotak') {
+    // Dhan's id prices the contract; Kotak's own master names it and counts BARRELS (lot 10): qty is barrels, so no `mult`.
+    const k = await kotakFutureContract(u, expiry);
+    if (!k) return `Kotak does not list ${u} futures ${expiry}`;
+    if (k.lotSize !== mult) return `${u}: unexpected Kotak lot size ${k.lotSize} — refused`;
+    c.tradingSymbol = k.tradingsymbol;
+    c.lotSize = k.lotSize;
+    delete c.mult;
+    if (k.tick) c.tick = k.tick;
+  }
+  return c;
 }
 
 /** The ladder state, the page's XY axis and contract prices, for one selection (`underlying` / `expiry` / `strike` / `opt`). */

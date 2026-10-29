@@ -384,10 +384,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [strike, setStrike] = useState<number | null>(null);
   // Ladder 1 starts on the ATM call, ladder 2 on the ATM put (the strike defaults to ATM once the chain loads).
   const [opt, setOpt] = useState<OptType>(second ? 'PE' : 'CE');
-  // Futures (MCX, Dhan only) are the same selection with opt 'FUT': no strike, so `strike` holds FUT_STRIKE (truthy, never sent as a strike).
+  // Futures (MCX, Dhan and Kotak) are the same selection with opt 'FUT': no strike, so `strike` holds FUT_STRIKE (truthy, never sent as a strike).
   const isFut = opt === 'FUT';
-  // Futures trade on Dhan only (the server refuses them elsewhere): leave Future when the account moves off Dhan.
-  useEffect(() => { if (opt === 'FUT' && brokerLoaded && broker !== 'dhan') { setOpt('CE'); setStrike(null); setExpiry(''); setExpiries([]); } }, [opt, broker, brokerLoaded]);  // eslint-disable-line react-hooks/set-state-in-effect
+  // Futures trade on Dhan and Kotak (the server refuses Zerodha): leave Future when the account moves to Zerodha.
+  useEffect(() => { if (opt === 'FUT' && brokerLoaded && broker === 'zerodha') { setOpt('CE'); setStrike(null); setExpiry(''); setExpiries([]); } }, [opt, broker, brokerLoaded]);  // eslint-disable-line react-hooks/set-state-in-effect
   const [product, setProduct] = useState<'NRML' | 'MIS'>('MIS');
   const [orderType, setOrderType] = useState<ClickType>('LIMIT');
   // Classic: fixed limit zones (the other side needs Order Type SL). Anywhere: both columns at every level, the side of
@@ -1904,7 +1904,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               )}
               {((mode !== 'pair' && mode !== 'basket') || syn) && (
                 <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Option</span>
-                  <Seg compact value={(syn ? 'SYN' : opt) as OptType | 'SYN'} options={(mcx ? (broker === 'dhan' ? ['CE', 'PE', 'FUT'] : ['CE', 'PE']) : ['CE', 'PE', 'SYN']) as readonly (OptType | 'SYN')[]} labels={{ CE: 'Call', PE: 'Put', FUT: 'Future', SYN: 'Synthetic' }} onChange={chooseOpt} />
+                  <Seg compact value={(syn ? 'SYN' : opt) as OptType | 'SYN'} options={(mcx ? (broker !== 'zerodha' ? ['CE', 'PE', 'FUT'] : ['CE', 'PE']) : ['CE', 'PE', 'SYN']) as readonly (OptType | 'SYN')[]} labels={{ CE: 'Call', PE: 'Put', FUT: 'Future', SYN: 'Synthetic' }} onChange={chooseOpt} />
                 </div>
               )}
               {mode === 'pair' && (

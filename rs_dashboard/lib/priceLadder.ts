@@ -14,7 +14,7 @@ import type { LadderBasket } from './priceLadderBasket.ts';
 export type LadderMode = 'xy' | 'plain';
 export type LadderBroker = 'dhan' | 'kotak' | 'zerodha';
 export type LadderSide = 'BUY' | 'SELL';
-/** CE / PE: an option. FUT: the futures contract itself (MCX CRUDEOILM, Dhan only) — strike 0, its XY axis is its own price. */
+/** CE / PE: an option. FUT: the futures contract itself (MCX CRUDEOILM, Dhan and Kotak) — strike 0, its XY axis is its own price. */
 export type OptType = 'CE' | 'PE' | 'FUT';
 export type LadderProduct = 'NRML' | 'MIS';
 export type ClickType = 'LIMIT' | 'SL';

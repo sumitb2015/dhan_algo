@@ -170,11 +170,11 @@ running and logs a red "Trade archive failed" event instead of stopping. There i
   cancels go through the shared order-rate lane (8/s).
 - The MTM guard makes no REST calls at all — it reads the same WebSocket prices.
 
-## CRUDEOILM futures (Dhan only)
+## CRUDEOILM futures (Dhan and Kotak)
 
-For CRUDEOILM the **Option** row has a third choice, **Future**: the Expiry list becomes the listed futures months (Dhan's master list), the Strike row disappears, and the ladder trades that futures contract itself. Index and Plain ladders both work on the futures price (tick 1, steps 1 / 5 / 10 / 25); a BUY gains as the price rises, a SELL as it falls. Bracket target / SL / trail are in futures points. Pair and Basket are options-only and switch back to Index. Margin is checked on both sides with Dhan's margin calculator (a future pays no premium). Orders are in lots (one lot = 10 barrels, P&L x10), like the options.
+For CRUDEOILM the **Option** row has a third choice, **Future**: the Expiry list becomes the listed futures months (Dhan's master list), the Strike row disappears, and the ladder trades that futures contract itself. Index and Plain ladders both work on the futures price (tick 1, steps 1 / 5 / 10 / 25); a BUY gains as the price rises, a SELL as it falls. Bracket target / SL / trail are in futures points. Pair and Basket are options-only and switch back to Index. Margin is checked on both sides with Dhan's margin calculator (a future pays no premium). Orders are in lots on Dhan (one lot = 10 barrels, P&L x10) and in barrels on Kotak (10 per lot), like the options.
 
-Kotak and Zerodha futures are **refused** (their futures quantity units and positions are not confirmed against live fills); the contract does not resolve for them. Unconfirmed (2026-10-26): live fills and the position window's close on a CRUDEOILM future. Confirm with one SIM trade, then a 1-lot REAL one.
+Kotak futures (enabled 2026-10-29, SIM and REAL) are priced from Dhan's feed and ordered on Kotak's own `CRUDEOILM<DDMMMYY>FUT` symbol in **barrels** (lot 10, like Kotak's options); the positions-window Close stays refused for Kotak MCX. Zerodha futures are **refused** (units not confirmed against live fills). Unconfirmed against live fills: Dhan (since 2026-10-26) and Kotak (since 2026-10-29), plus the position window's close on a CRUDEOILM future. A futures month Dhan lists but Kotak does not is refused when picked ("Kotak does not list …"). Confirm with one SIM trade, then a 1-lot REAL one.
 
 ## Synthetic future (NIFTY / BANKNIFTY / SENSEX)
 
