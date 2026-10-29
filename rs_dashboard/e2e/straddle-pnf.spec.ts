@@ -22,7 +22,7 @@ interface Mock {
   /** 0 = no ticks yet, 1 = a tick in minute M (bar forming), 2 = a tick in minute M+1 (bar M closes). */
   phase: 0 | 1 | 2;
   blocked: Call[];
-  /** Give the +200 strike a long, wide history (many columns) instead of the short quiet one. */
+  /** Give the ATM strike a long, wide history (many columns) instead of the short one. */
   longHistory?: boolean;
   /** Give the ATM strike a history at fixed IST times (Fri 23 Oct from 09:15) whose 1-minute chart has a double bottom that the 5-minute chart does not. */
   fixedHistory?: boolean;
@@ -95,7 +95,7 @@ async function install(page: Page, m: Mock) {
     if (p === '/api/straddle-pnf' && method === 'GET') {
       return json(route, {
         success: true, atm: ATM, strikes: STRIKES, errors: {}, dataDate: '2026-10-23',
-        bars: { [STRIKES[0]]: history(PATH_WITH_BREAK), [STRIKES[1]]: m.fixedHistory ? fixedHistory() : history(PATH_BEFORE_BREAK), [STRIKES[2]]: m.longHistory ? longHistory() : history(PATH_QUIET) },
+        bars: { [STRIKES[0]]: history(PATH_WITH_BREAK), [STRIKES[1]]: m.fixedHistory ? fixedHistory() : m.longHistory ? longHistory() : history(PATH_BEFORE_BREAK) },
       });
     }
     if (p === '/api/options/expiries') return json(route, { success: true, data: upcomingTuesdays(10) });
@@ -110,21 +110,16 @@ async function install(page: Page, m: Mock) {
 
 test.beforeEach(async ({ context }) => { await signIn(context); });
 
-test('three straddle panels sit side by side with the DATA chip, spot and future price', async ({ page }) => {
+test('one straddle panel (ATM) fills the page with the DATA chip, spot and future price', async ({ page }) => {
   const m: Mock = { phase: 1, blocked: [] };
   await install(page, m);
   await page.goto('/straddle-pnf');
 
   const panels = page.getByTestId('pnf-panel');
-  await expect(panels).toHaveCount(3);
-  const boxes = await Promise.all([0, 1, 2].map(i => panels.nth(i).boundingBox()));
-  for (const b of boxes) expect(b).not.toBeNull();
-  expect(Math.abs(boxes[0]!.y - boxes[1]!.y)).toBeLessThan(4);
-  expect(Math.abs(boxes[1]!.y - boxes[2]!.y)).toBeLessThan(4);
-  expect(boxes[1]!.x).toBeGreaterThan(boxes[0]!.x + boxes[0]!.width - 2);
-  expect(boxes[2]!.x).toBeGreaterThan(boxes[1]!.x + boxes[1]!.width - 2);
-  await expect(panels.nth(0)).toHaveAttribute('data-strike', String(STRIKES[0]));
-  await expect(panels.nth(1)).toHaveAttribute('data-strike', String(STRIKES[1]));
+  await expect(panels).toHaveCount(1);
+  await expect(panels.nth(0)).toHaveAttribute('data-strike', String(ATM));
+  const box = (await panels.nth(0).boundingBox())!;
+  expect(box.width).toBeGreaterThan(900);                       // the one chart takes the whole width
 
   await expect(page.getByText('DATA: 2026-10-23')).toBeVisible();
   await expect(page.getByTestId('pnf-spot')).toContainText('25,012.30');
@@ -158,9 +153,7 @@ test('a double bottom in history is marked but never alerts; a live one alerts o
   await install(page, m);
   await page.goto('/straddle-pnf');
 
-  const first = page.locator('[data-testid="pnf-panel"][data-strike="24800"]');
   const mid = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
-  await expect(first.locator('[data-testid="pnf-signal"][data-kind="DOUBLE_BOTTOM_SELL"]')).toHaveCount(1);
   await expect(mid.locator('[data-testid="pnf-signal"]')).toHaveCount(1); // only the history double top buy
   await page.getByRole('button', { name: 'Alert log' }).click();
   await expect(page.getByTestId('pnf-log-row')).toHaveCount(0);
@@ -201,7 +194,7 @@ test('the chart shows a box grid', async ({ page }) => {
 test('a long history is never clipped: the chart scrolls, opens on the newest column, and the axis stays put while panning', async ({ page }) => {
   await install(page, { phase: 0, blocked: [], longHistory: true });
   await page.goto('/straddle-pnf');
-  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM + 200}"]`);
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
   const scroller = panel.getByTestId('pnf-scroll');
   await expect(scroller).toBeAttached();
   const dims = () => scroller.evaluate(el => ({ sw: el.scrollWidth, cw: el.clientWidth, sl: el.scrollLeft }));
@@ -215,16 +208,12 @@ test('a long history is never clipped: the chart scrolls, opens on the newest co
   expect(Math.abs(after.x - before.x)).toBeLessThan(2);                                       // the price axis did not move
 });
 
-test('each panel header shows the change versus the session open and the latest signal', async ({ page }) => {
+test('the panel header shows the change versus the session open and the latest signal', async ({ page }) => {
   await install(page, { phase: 0, blocked: [] });
   await page.goto('/straddle-pnf');
-  const sell = page.locator('[data-testid="pnf-panel"][data-strike="24800"]');   // history ends on a double bottom, 100.00 -> 99.50
-  await expect(sell.getByTestId('pnf-vs-open')).toHaveText(/-0\.50 \(-0\.50%\) vs open/);
-  await expect(sell.getByTestId('pnf-last-signal')).toContainText('DB sell');
-  const buy = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);   // latest signal is a double top
-  await expect(buy.getByTestId('pnf-last-signal')).toContainText('DT buy');
-  const quiet = page.locator('[data-testid="pnf-panel"][data-strike="25200"]');  // no signal at all: no chip
-  await expect(quiet.getByTestId('pnf-last-signal')).toHaveCount(0);
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);   // latest signal is a double top
+  await expect(panel.getByTestId('pnf-vs-open')).toHaveText(/vs open/);
+  await expect(panel.getByTestId('pnf-last-signal')).toContainText('DT buy');
 });
 
 // ── interval and box size ─────────────────────────────────────────────────────
@@ -242,7 +231,7 @@ test('the interval and box % controls default to 1 minute / 0.5% and say so in t
 test('changing the interval regroups the bars: fewer columns, and the header says 5-min', async ({ page }) => {
   await install(page, { phase: 0, blocked: [], longHistory: true });
   await page.goto('/straddle-pnf');
-  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM + 200}"]`);
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
   await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
   const one = await cols(panel);
   await page.getByLabel('Interval').selectOption('15');
@@ -254,7 +243,7 @@ test('changing the interval regroups the bars: fewer columns, and the header say
 test('the box % applies on Enter, an invalid entry is refused and reverts, and the header follows', async ({ page }) => {
   await install(page, { phase: 0, blocked: [], longHistory: true });
   await page.goto('/straddle-pnf');
-  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM + 200}"]`);
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
   await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
   const boxOf = async () => Number(((await panel.getByTestId('pnf-box-info').textContent()) ?? '').match(/Box ([\d.]+)/)?.[1]);
   const half = await boxOf();
@@ -328,7 +317,7 @@ test('the charts fit the window even though the header wraps, and opening the al
 test('the reversal control defaults to 3 boxes, changes how often columns turn, persists, and never alerts for old signals', async ({ page }) => {
   await install(page, { phase: 0, blocked: [], longHistory: true });
   await page.goto('/straddle-pnf');
-  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM + 200}"]`);
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
   await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
   await expect(page.getByLabel('Reversal')).toHaveValue('3');
   await expect(page.getByLabel('Reversal').locator('option')).toHaveText(['1-box', '2-box', '3-box', '4-box', '5-box']);

@@ -55,32 +55,23 @@ test('drag pans and wheel zooms a chart that fits the panel', async ({ page }) =
 
 test('CRUDEOILM charts the upcoming futures, not straddles', async ({ page }) => {
   const mk = (base: number) => [0, 3, 1, 4, 2].map((l, i, a) => ({ t: NOW_MIN - 120 - (a.length - 1 - i) * 60, ce: base + l * 20, pe: 0, straddle: base + l * 20, vol: 10 }));
-  let futuresCalls = 0;
   await page.route('**/api/**', async route => {
     const u = new URL(route.request().url());
     if (u.pathname === '/api/straddle-pnf') {
       if (u.searchParams.get('underlying') !== 'CRUDEOILM') return json(route, { success: true, atm: ATM, strikes: [ATM - 200, ATM, ATM + 200], errors: {}, dataDate: '2026-10-23', bars: { [ATM]: bars } });
-      futuresCalls++;
-      return json(route, { success: true, mode: 'futures', atm: 0, strikes: [20261119, 20261218, 20270119], errors: {}, dataDate: '2026-10-23',
-        expiries: { 20261119: '2026-11-19', 20261218: '2026-12-18', 20270119: '2027-01-19' },
-        bars: { 20261119: mk(9600), 20261218: mk(9500), 20270119: mk(9400) } });
+      return json(route, { success: true, mode: 'futures', atm: 0, strikes: [20261119], errors: {}, dataDate: '2026-10-23',
+        expiries: { 20261119: '2026-11-19' }, bars: { 20261119: mk(9600) } });
     }
     if (u.pathname === '/api/options/expiries') return json(route, { success: true, data: ['2099-01-06'] });
     if (route.request().method() === 'GET') return json(route, { success: true });
     return route.fulfill({ status: 599, body: 'blocked' });
   });
-  await page.addInitScript(() => localStorage.setItem('straddle-pnf-charts', '3'));
   await page.goto('/straddle-pnf');
   await page.getByRole('button', { name: 'CRUDEOILM' }).click();
   const panels = page.getByTestId('pnf-panel');
-  await expect(panels).toHaveCount(3);
-  await expect(panels.nth(0)).toContainText('CRUDEOILM Nov 2026 futures');
-  await expect(panels.nth(2)).toContainText('CRUDEOILM Jan 2027 futures');
+  await expect(panels).toHaveCount(1);
+  await expect(panels.nth(0)).toContainText('CRUDEOILM Nov 2026 futures');   // the nearest month
   await expect(panels.nth(0)).not.toContainText('CE ');
   await expect(page.getByLabel('Expiry')).toHaveCount(0);
   await expect(page.getByLabel('ATM', { exact: true })).toHaveCount(0);
-  expect(futuresCalls).toBeGreaterThan(0);
-  await page.getByRole('button', { name: '1 chart' }).click();
-  await expect(panels).toHaveCount(1);
-  await expect(panels.nth(0)).toContainText('Nov 2026');          // one chart = the nearest month
 });

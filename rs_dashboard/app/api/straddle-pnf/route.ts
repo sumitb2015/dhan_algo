@@ -92,7 +92,7 @@ export async function GET(request: NextRequest) {
 }
 
 /**
- * CRUDEOILM charts the upcoming monthly FUTURES, one chart per contract (no strikes, no expiry choice). Each contract is keyed by its
+ * CRUDEOILM charts the nearest monthly FUTURES contract (no strikes, no expiry choice). Each contract is keyed by its
  * expiry as YYYYMMDD, which the page uses wherever the straddle mode uses a strike; `expiries` maps that key back to the date.
  */
 async function futuresResponse(underlying: string) {
@@ -101,7 +101,7 @@ async function futuresResponse(underlying: string) {
   if (hit && Date.now() - hit.ts < CACHE_TTL) return NextResponse.json(hit.body);
   try {
     const out = await dedupe(`straddle-pnf:${key}`, () =>
-      runPythonJson<FuturesScriptOut>(FUTURES_SCRIPT, ['--underlying', underlying, '--contracts', '3', '--sessions', String(SESSIONS)], 90_000),
+      runPythonJson<FuturesScriptOut>(FUTURES_SCRIPT, ['--underlying', underlying, '--contracts', '1', '--sessions', String(SESSIONS)], 90_000),
     );
     if (out.error) return NextResponse.json({ success: false, error: out.error }, { status: 500 });
     const bars = out.bars ?? {};
