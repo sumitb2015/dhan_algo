@@ -6,8 +6,9 @@ import { DEFAULT_OFFSETS } from './straddlePnfStrikes.ts';
  * Query for /api/straddle-pnf. If user specifies a numeric ATM, that strike is pinned; otherwise only a fresh load or
  * Re-center picks a new ATM from spot ('auto'), while quiet refreshes keep the loaded strike.
  */
-export function historyQuery(expiry: string, reset: boolean, loadedAtm: number | null, userAtm?: string, offsets?: readonly number[]): string {
-  const q = baseQuery(expiry, reset, loadedAtm, userAtm);
+export function historyQuery(expiry: string, reset: boolean, loadedAtm: number | null, userAtm?: string, offsets?: readonly number[], underlying = 'NIFTY'): string {
+  const base = baseQuery(expiry, reset, loadedAtm, userAtm);
+  const q = underlying === 'NIFTY' ? base : `${base}&underlying=${underlying}`;
   const isDefault = !offsets || DEFAULT_OFFSETS.every((o, i) => offsets[i] === o);
   return isDefault ? q : `${q}&offsets=${offsets.join(',')}`;
 }

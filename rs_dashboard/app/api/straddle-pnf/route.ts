@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import { PROJECT_ROOT, runPythonJson, dedupe, spaced } from '@/lib/pyExec';
-import { DEFAULT_OFFSETS, parseAtmParam, parseOffsetsParam, roundToStep, strikesFor } from '@/lib/straddlePnfStrikes';
+import { DEFAULT_OFFSETS, isPnfUnderlying, parseAtmParam, parseOffsetsParam, roundToStep, strikesFor } from '@/lib/straddlePnfStrikes';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
 
 // Read-only market-data route for the Straddle P&F page: no order code lives here.
@@ -20,8 +20,8 @@ export async function GET(request: NextRequest) {
   const expiry = searchParams.get('expiry') ?? '';
   const atmParam = parseAtmParam(searchParams.get('atm'));
 
-  if (underlying !== 'NIFTY') {
-    return NextResponse.json({ success: false, error: 'Only NIFTY is supported for now' }, { status: 400 });
+  if (!isPnfUnderlying(underlying)) {
+    return NextResponse.json({ success: false, error: 'Only NIFTY and CRUDEOILM are supported' }, { status: 400 });
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(expiry)) {
     return NextResponse.json({ success: false, error: 'expiry must be YYYY-MM-DD' }, { status: 400 });

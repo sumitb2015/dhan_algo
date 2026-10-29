@@ -1,4 +1,10 @@
-// Strike maths for the Straddle P&F page (NIFTY: 50-point strikes, charts at ATM-200 / ATM / ATM+200).
+// Strike maths for the Straddle P&F page (50-point strikes, charts at ATM-200 / ATM / ATM+200 by default).
+
+/** Underlyings the page can chart. CRUDEOILM options are on MCX; its ATM comes from the nearest future (options_data_fetch.py ltp). */
+export const PNF_UNDERLYINGS = ['NIFTY', 'CRUDEOILM'] as const;
+export type PnfUnderlying = (typeof PNF_UNDERLYINGS)[number];
+export const isPnfUnderlying = (u: string): u is PnfUnderlying => (PNF_UNDERLYINGS as readonly string[]).includes(u);
+
 
 export const STRIKE_STEP = 50;
 export const STRIKE_OFFSET = 200;

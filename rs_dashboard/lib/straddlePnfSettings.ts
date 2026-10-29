@@ -44,6 +44,8 @@ export function serializeSettings(s: PnfSettings): string {
 
 /** localStorage key for the three chart offsets from ATM. */
 export const OFFSETS_KEY = 'straddle-pnf-offsets';
+/** Offsets are remembered per underlying; NIFTY keeps the original key. */
+export const offsetsKeyFor = (underlying: string) => (underlying === 'NIFTY' ? OFFSETS_KEY : `${OFFSETS_KEY}-${underlying.toLowerCase()}`);
 
 /** Stored offsets, or the defaults when missing or invalid. */
 export function readOffsets(raw: string | null): Offsets {

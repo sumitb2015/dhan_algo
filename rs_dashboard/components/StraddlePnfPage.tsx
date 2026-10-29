@@ -14,12 +14,12 @@ import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
 import { foldTick, newSignalsAfter, nextWatermark, capLog } from '@/lib/straddlePnfLive';
 import { historyQuery, tickAcceptable } from '@/lib/straddlePnfLoad';
 import SettingsControls, { OffsetControls } from './straddlePnf/SettingsControls';
-import { DEFAULT_OFFSETS, offsetLabel, type Offsets } from '@/lib/straddlePnfStrikes';
-import { DEFAULT_SETTINGS, OFFSETS_KEY, SETTINGS_KEY, readOffsets, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
+import { DEFAULT_OFFSETS, PNF_UNDERLYINGS, isPnfUnderlying, offsetLabel, type Offsets, type PnfUnderlying } from '@/lib/straddlePnfStrikes';
+import { DEFAULT_SETTINGS, offsetsKeyFor, SETTINGS_KEY, readOffsets, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import { pickExpiries, type PnfExpiry } from '@/lib/straddlePnfExpiries';
 import type { Bar } from '@/lib/straddlePnf';
 
-// Straddle Point & Figure: three NIFTY straddle charts (default ATM-200 / ATM / ATM+200, offsets editable), signals only — this page places no orders.
+// Straddle Point & Figure: three straddle charts (NIFTY or CRUDEOILM) (default ATM-200 / ATM / ATM+200, offsets editable), signals only — this page places no orders.
 
 type Row = { bars: Bar[]; openT: number | null };
 type Loaded = { expiry: string; atm: number; strikes: number[]; dataDate: string | null; errors: Record<string, string> };
@@ -31,6 +31,7 @@ const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
 const OVERLAY_KEY = 'straddle-pnf-overlay';
 const CHARTS_KEY = 'straddle-pnf-charts';
+const UNDERLYING_KEY = 'straddle-pnf-underlying';
 
 // Which of the three straddle panels show for 1 / 2 / 3 charts (1 = the middle one, ATM by default). All three keep loading so alerts keep running.
 const VISIBLE: Record<1 | 2 | 3, number[]> = { 1: [1], 2: [0, 1], 3: [0, 1, 2] };
@@ -51,6 +52,7 @@ export default function StraddlePnfPage() {
   const [expiry, setExpiry] = useState('');
   const [atmInput, setAtmInput] = useState('auto');
   const [overlay, setOverlay] = useState<Overlay>('vwap');
+  const [underlying, setUnderlying] = useState<PnfUnderlying>('NIFTY');
   const [chartCount, setChartCount] = useState<1 | 2 | 3>(3);
   const [settings, setSettings] = useState<PnfSettings>(DEFAULT_SETTINGS);
   const [offsets, setOffsets] = useState<Offsets>(DEFAULT_OFFSETS);
@@ -78,7 +80,7 @@ export default function StraddlePnfPage() {
   const rebaselineRef = useRef(false);
   const logLoadedRef = useRef(false);
 
-  const { liveQuotes } = useLiveOptionsWS(expiry, 'dhan', ['dhan'], 'NIFTY');
+  const { liveQuotes } = useLiveOptionsWS(expiry, 'dhan', ['dhan'], underlying);
 
   // ── preferences, sound unlock, clock ────────────────────────────────────
   useEffect(() => installAlertSoundUnlock(), []);
@@ -86,7 +88,10 @@ export default function StraddlePnfPage() {
     if (readPref(OVERLAY_KEY) === 'sma') setOverlay('sma');
     const stored = readSettings(readPref(SETTINGS_KEY));
     setSettings(stored);
-    setOffsets(readOffsets(readPref(OFFSETS_KEY)));
+    const savedUnderlying = readPref(UNDERLYING_KEY) ?? 'NIFTY';
+    const u = isPnfUnderlying(savedUnderlying) ? savedUnderlying : 'NIFTY';
+    setUnderlying(u);
+    setOffsets(readOffsets(readPref(offsetsKeyFor(u))));
     const savedCount = Number(readPref(CHARTS_KEY));
     if (savedCount === 1 || savedCount === 2 || savedCount === 3) setChartCount(savedCount);
     rebaselineRef.current = true;
@@ -106,7 +111,7 @@ export default function StraddlePnfPage() {
   // ── expiries ────────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/options/expiries?underlying=NIFTY')
+    fetch(`/api/options/expiries?underlying=${underlying}`)
       .then(r => r.json())
       .then((j: { success?: boolean; data?: string[] }) => {
         if (cancelled || !j.success || !Array.isArray(j.data)) return;
@@ -116,7 +121,7 @@ export default function StraddlePnfPage() {
       })
       .catch(() => { if (!cancelled) setLoadError('Could not load expiries'); });
     return () => { cancelled = true; };
-  }, []);
+  }, [underlying]);
 
   // ── history load. reset = new expiry / Re-center (new strikes, alerts restart); otherwise a quiet refresh ──
   const load = useCallback(async (reset: boolean) => {
@@ -124,7 +129,7 @@ export default function StraddlePnfPage() {
     const id = ++reqRef.current;
     if (reset) { setLoading(true); setLoadError(null); }
     try {
-      const res = await fetch(`/api/straddle-pnf?${historyQuery(expiry, reset, loadedAtmRef.current, atmInput, offsets)}`);
+      const res = await fetch(`/api/straddle-pnf?${historyQuery(expiry, reset, loadedAtmRef.current, atmInput, offsets, underlying)}`);
       const j = await res.json() as {
         success?: boolean; error?: string; atm: number; strikes: number[]; dataDate: string | null;
         bars: Record<string, Bar[]>; errors: Record<string, string>;
@@ -150,7 +155,7 @@ export default function StraddlePnfPage() {
     } finally {
       if (id === reqRef.current) setLoading(false);
     }
-  }, [expiry, atmInput, offsets]);
+  }, [expiry, atmInput, offsets, underlying]);
 
   useEffect(() => { void load(true); }, [load, recenter]);
 
@@ -171,7 +176,7 @@ export default function StraddlePnfPage() {
   useEffect(() => {
     if (liveFresh || !expiry) return;
     let cancelled = false;
-    const pull = () => fetch(`/api/options/chain?underlying=NIFTY&expiry=${expiry}`)
+    const pull = () => fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}`)
       .then(r => r.json())
       .then((j: { data?: { spot?: number; future_price?: number } }) => {
         if (cancelled) return;
@@ -181,7 +186,7 @@ export default function StraddlePnfPage() {
     void pull();
     const id = setInterval(pull, 20_000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [liveFresh, expiry]);
+  }, [liveFresh, expiry, underlying]);
   const headerSpot = liveFresh && liveQuotes?.spot ? liveQuotes.spot : fallback.spot;
   const headerFuture = liveFresh && liveQuotes?.future?.ltp ? liveQuotes.future.ltp : fallback.future;
 
@@ -252,6 +257,20 @@ export default function StraddlePnfPage() {
     }
   }, [models, loaded, leaderRef]);
 
+  const pickUnderlying = (u: PnfUnderlying) => {
+    if (u === underlying) return;
+    savePref(UNDERLYING_KEY, u);
+    // Everything on screen belongs to the old contract: drop it so no tick, alert or refresh crosses over.
+    reqRef.current++;
+    loadedAtmRef.current = null;
+    watermarkRef.current = {};
+    lastTickRef.current = null;
+    rebaselineRef.current = true;
+    setLoaded(null); setRows({}); setExpiries([]); setExpiry(''); setAtmInput('auto'); setFallback({ spot: null, future: null });
+    setLoading(true); setLoadError(null);
+    setOffsets(readOffsets(readPref(offsetsKeyFor(u))));
+    setUnderlying(u);
+  };
   const pickOverlay = (o: Overlay) => { setOverlay(o); savePref(OVERLAY_KEY, o); };
   const applySettings = (next: PnfSettings) => {
     rebaselineRef.current = true;     // the charts are about to be redrawn from the same data: that must not alert
@@ -260,7 +279,7 @@ export default function StraddlePnfPage() {
   };
   const applyOffsets = (next: Offsets) => {
     setOffsets(next);                 // changes `load`, which reloads with reset and re-baselines alerts
-    savePref(OFFSETS_KEY, JSON.stringify(next));
+    savePref(offsetsKeyFor(underlying), JSON.stringify(next));
   };
   const toggleMute = () => {
     const next = !muted;
@@ -282,7 +301,7 @@ export default function StraddlePnfPage() {
             <ChartScatter className="w-4 h-4 text-emerald-400" aria-hidden="true" />
           </div>
           <div>
-            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · NIFTY</p>
+            <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {underlying}</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">Straddle Point &amp; Figure</h1>
             <p className="text-[10px] text-zinc-500 font-medium mt-1">{settings.interval}-min · {settings.boxPct}% box · {settings.reversal}-box reversal · signals only</p>
           </div>
@@ -290,12 +309,19 @@ export default function StraddlePnfPage() {
 
         <div className="flex items-center gap-2 flex-wrap">
           <span data-testid="pnf-spot" className="text-xs font-mono text-zinc-300">
-            Nifty <b className="text-white">{headerSpot ? fmt(headerSpot) : '—'}</b>
+            {underlying === 'NIFTY' ? 'Nifty' : 'Crude'} <b className="text-white">{headerSpot ? fmt(headerSpot) : '—'}</b>
           </span>
           <span data-testid="pnf-future" className="text-xs font-mono text-zinc-300">
             Fut <b className="text-white">{headerFuture ? fmt(headerFuture) : '—'}</b>
           </span>
           <span className="w-px h-5 bg-zinc-800 shrink-0" />
+          <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Underlying">
+            {PNF_UNDERLYINGS.map(u => (
+              <button key={u} type="button" aria-pressed={underlying === u} onClick={() => pickUnderlying(u)} className={seg(underlying === u)}>
+                {u === 'NIFTY' ? 'NIFTY' : 'CRUDEOILM'}
+              </button>
+            ))}
+          </div>
           <select
             aria-label="Expiry"
             value={expiry}
