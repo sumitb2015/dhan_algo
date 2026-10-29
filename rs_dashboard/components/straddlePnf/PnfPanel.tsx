@@ -335,16 +335,11 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                 const x2 = xOf(g.col) + cell + 6;
                 const cx = xOf(g.col) + cell / 2;
                 const strokeCls = sell ? 'stroke-red-400' : 'stroke-emerald-400';
-                const fillCls = sell ? 'fill-red-400' : 'fill-emerald-400';
                 return (
                   <g key={g.id} data-testid="pnf-signal" data-kind={g.kind} data-col={g.col} data-entry={entry ? '1' : '0'}>
                     {/* The horizontal support/resistance level line */}
                     <line x1={x1} x2={x2} y1={y} y2={y} strokeWidth={entry ? 2.5 : 1.8} strokeDasharray={entry ? undefined : '4 2'}
                           className={strokeCls} strokeLinecap="round" />
-                    {/* Circle marker at the breakout/breakdown level */}
-                    <circle cx={cx} cy={y} r={Math.max(3, s * 0.9)} className={`${fillCls} opacity-25`} />
-                    <circle cx={cx} cy={y} r={Math.max(3, s * 0.9)} fill="none" strokeWidth={1.5} className={strokeCls} />
-                    <circle cx={cx} cy={y} r={1.5} className={fillCls} />
                     {g.id === lastEntryId && (
                       <g>
                         <rect x={cx - 16} y={y + 8} width={32} height={12} rx={2} className="fill-red-500/20 stroke stroke-red-500/40" />
