@@ -90,6 +90,8 @@ export default function StraddlePnfPage() {
   const logLoadedRef = useRef(false);
 
   const futuresMode = underlying === 'CRUDEOILM';
+  // The chart's price/summary strip is drawn into the top header (PnfPanel `headerSlot`) instead of a card header above the chart.
+  const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
   const { liveQuotes } = useLiveOptionsWS(futuresMode ? '' : expiry, 'dhan', ['dhan'], underlying);
 
   // ── preferences, sound unlock, clock ────────────────────────────────────
@@ -327,14 +329,15 @@ export default function StraddlePnfPage() {
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {underlying}</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">Straddle Point &amp; Figure</h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">{settings.interval}-min · {settings.boxPct}% box · {settings.reversal}-box reversal · signals only</p>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">{settings.interval}-min · {settings.boxPct}% box · {settings.reversal}-box reversal · signals only{futuresMode && loaded?.strikes[0] ? ` · ${nameOf(loaded.strikes[0]).replace('CRUDEOILM ', '')}` : ''}</p>
           </div>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          <span data-testid="pnf-spot" className="text-xs font-mono text-zinc-300">
-            {futuresMode ? 'CRUDEOILM' : 'Nifty'} <b className="text-white">{headerSpot ? fmt(headerSpot) : '—'}</b>
-          </span>
+          <div ref={setHeaderSlot} data-testid="pnf-header-summary" className="flex items-center min-w-0" />
+          {!futuresMode && <span data-testid="pnf-spot" className="text-xs font-mono text-zinc-300">
+            Nifty <b className="text-white">{headerSpot ? fmt(headerSpot) : '—'}</b>
+          </span>}
           {!futuresMode && <span data-testid="pnf-future" className="text-xs font-mono text-zinc-300">
             Fut <b className="text-white">{headerFuture ? fmt(headerFuture) : '—'}</b>
           </span>}
@@ -413,6 +416,7 @@ export default function StraddlePnfPage() {
                 reversal={settings.reversal}
                 fill
                 resetTick={viewTick}
+                headerSlot={headerSlot}
                 error={loaded?.errors[String(strike)]}
               />
             );

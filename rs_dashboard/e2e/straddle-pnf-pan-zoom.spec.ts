@@ -70,8 +70,8 @@ test('CRUDEOILM charts the upcoming futures, not straddles', async ({ page }) =>
   await page.getByRole('button', { name: 'CRUDEOILM' }).click();
   const panels = page.getByTestId('pnf-panel');
   await expect(panels).toHaveCount(1);
-  await expect(panels.nth(0)).toContainText('CRUDEOILM Nov 2026 futures');   // the nearest month
-  await expect(panels.nth(0)).not.toContainText('CE ');
+  await expect(page.getByText('Nov 2026 futures')).toBeVisible();   // the nearest month, named in the page subtitle (no card header)
+  await expect(page.getByTestId('pnf-header-summary')).not.toContainText('CE ');
   await expect(page.getByLabel('Expiry')).toHaveCount(0);
   await expect(page.getByLabel('ATM', { exact: true })).toHaveCount(0);
 });

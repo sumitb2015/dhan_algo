@@ -1,5 +1,6 @@
 'use client';
 
+import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Overlay, PanelModel } from '@/lib/straddlePnfModel';
 import { layoutPanel, AXIS_W, PAD_TOP } from '@/lib/straddlePnfLayout';
@@ -32,6 +33,8 @@ export type PnfPanelProps = {
   legs?: boolean;
   /** Bump to reset zoom and centre the chart on its newest column and latest price (the header's Re-center button). */
   resetTick?: number;
+  /** When set, the title/price/summary strip is drawn there (the page's top header) in one compact row, and not above the chart. */
+  headerSlot?: HTMLElement | null;
 };
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
@@ -59,7 +62,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, legs = true, resetTick = 0, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -172,6 +175,36 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
       data-strike={strike}
       className={`min-w-0 rounded-lg border border-zinc-800 bg-zinc-900 flex flex-col ${fill ? 'h-full min-h-0' : ''} ${ring}`}
     >
+      {headerSlot ? createPortal(
+        <div className="flex items-center gap-3 min-w-0" aria-label={`${title} summary`}>
+          {stale && <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">Stale</span>}
+          <span className="text-lg font-bold font-mono text-white leading-none">{liveValue !== null ? fmt(liveValue) : '—'}</span>
+          {change !== null && changePct !== null && (
+            <span data-testid="pnf-vs-open" className={`text-[10px] font-mono ${change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {signed(change)} ({signed(changePct)}%) vs open
+            </span>
+          )}
+          <span className="text-[10px] font-mono text-zinc-400 truncate">
+            {legs && <>CE {live ? fmt(live.ce) : '—'} · PE {live ? fmt(live.pe) : '—'} ·{' '}</>}
+            <span data-testid="pnf-overlay-legend" className={overlay === 'vwap' ? 'text-amber-300' : 'text-zinc-300'}>
+              {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : ''}
+            </span>
+          </span>
+          <span data-testid="pnf-box-info" className="text-[10px] font-mono text-zinc-500 truncate">
+            {box > 0 ? `Box ${box.toFixed(2)} (${boxPct}% of ${model.anchor.toFixed(2)}) · ${reversal}-box · ${columns.length} cols` : 'Box —'}
+          </span>
+          {lastSignal && (
+            <span data-testid="pnf-last-signal"
+                  className={`shrink-0 text-[10px] font-bold font-mono px-1.5 py-0.5 rounded border ${
+                    lastSignal.kind === 'DOUBLE_BOTTOM_SELL'
+                      ? 'text-red-400 border-red-500/30 bg-red-500/10'
+                      : 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'}`}>
+              {lastSignal.kind === 'DOUBLE_BOTTOM_SELL' ? '▼ DB sell' : '▲ DT buy'} {hhmm(lastSignal.t)}
+            </span>
+          )}
+        </div>,
+        headerSlot,
+      ) : (
       <div className="px-3 pt-2 pb-1 border-b border-zinc-800">
         <div className="flex items-baseline justify-between gap-2">
           <h2 className="text-xs font-bold text-zinc-100 truncate">{title}</h2>
@@ -208,6 +241,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
           )}
         </div>
       </div>
+      )}
 
       <div className={`relative ${fill ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
       <div
