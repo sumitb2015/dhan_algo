@@ -89,7 +89,20 @@ function TotalLabel({ x, y, width, height, value }: { x?: unknown; y?: unknown; 
   );
 }
 
-type SortKey = 'points' | 'symbol' | 'changePct' | 'weightPct' | 'ltp';
+/** A horizontal bar's contribution, printed just past its tip (right of a green bar, left of a red one). */
+function StockLabel({ x, y, width, height, value }: { x?: unknown; y?: unknown; width?: unknown; height?: unknown; value?: unknown }) {
+  const [px, py, w, h, v] = [x, y, width, height, value].map(Number);
+  if (![px, py, w, h, v].every(Number.isFinite)) return null;
+  const tip = v >= 0 ? Math.max(px, px + w) : Math.min(px, px + w);
+  return (
+    <text x={v >= 0 ? tip + 5 : tip - 5} y={py + h / 2} dy={4} textAnchor={v >= 0 ? 'start' : 'end'} fontSize={11} fontWeight={700}
+      fontFamily="ui-monospace, monospace" fill={v >= 0 ? 'var(--chart-pos)' : 'var(--chart-neg)'}>
+      {pts(v)}
+    </text>
+  );
+}
+
+type SortKey ='points' | 'symbol' | 'changePct' | 'weightPct' | 'ltp';
 type View = 'stock' | 'cumulative';
 
 export default function NiftyContribution() {
@@ -150,6 +163,22 @@ export default function NiftyContribution() {
     if (topN === 0) return res.rows;
     return [...res.pullers.slice(0, topN), ...res.draggers.slice(0, topN).reverse()];
   }, [res, topN]);
+
+  // X-axis extent only ever widens (per Top-N choice), so the zero line stays put across live ticks.
+  const axisRef = useRef<{ topN: number; lo: number; hi: number }>({ topN, lo: 0, hi: 0 });
+  const axisDomain = useMemo<[number, number]>(() => {
+    const a = axisRef.current;
+    if (a.topN !== topN) { a.topN = topN; a.lo = 0; a.hi = 0; }
+    let lo = 0, hi = 0;
+    for (const r of chartRows) { lo = Math.min(lo, r.points); hi = Math.max(hi, r.points); }
+    const step = Math.max(5, Math.ceil(Math.max(hi, -lo) / 4 / 5) * 5);
+    const pad = (v: number) => Math.sign(v) * (Math.ceil(Math.abs(v) / step) * step + step * 0.6);
+    a.lo = Math.min(a.lo, lo === 0 ? 0 : pad(lo));
+    a.hi = Math.max(a.hi, hi === 0 ? 0 : pad(hi));
+    return [a.lo, a.hi];
+  }, [chartRows, topN]);
+
+  const maxAbsPts = useMemo(() => Math.max(0.01, ...(res?.rows ?? []).map(r => Math.abs(r.points))), [res]);
 
   // Only worth building while its tab is open: the page re-renders on every 2 s poll.
   const totals = useMemo(() => (view === 'cumulative' && res ? buildTotals(res) : []), [view, res]);
@@ -260,7 +289,10 @@ export default function NiftyContribution() {
                 value={data.nifty ? inr(data.nifty.ltp) : DASH}
                 sub={data.nifty ? <span className={signCls(data.nifty.change)}>{pts(data.nifty.change)} ({pts(data.nifty.changePct)}%)</span> : 'no index quote'} />
               <Tile label="Net contribution" value={`${pts(res.net)} pts`} valueCls={signCls(res.net)}
-                sub={res.residual != null ? `index diff ${pts(res.residual)}` : 'no index to reconcile'}
+                sub={<>
+                  <span className="text-emerald-400">{res.pullers.length} up</span> · <span className="text-red-400">{res.draggers.length} down</span>
+                  {res.residual != null ? ` · index diff ${pts(res.residual)}` : ' · no index to reconcile'}
+                </>}
                 title="Sum of every stock's points. The 'index diff' is this sum minus the index's own move." />
               <Tile label={`Pullers (${res.pullers.length})`} value={`${pts(res.positiveSum)} pts`} valueCls="text-emerald-400" />
               <Tile label={`Draggers (${res.draggers.length})`} value={`${pts(res.negativeSum)} pts`} valueCls="text-red-400" />
@@ -307,7 +339,7 @@ export default function NiftyContribution() {
                         <BarChart data={totals} margin={{ top: 28, right: 24, bottom: 8, left: 8 }}>
                           <XAxis dataKey="label" tickFormatter={(l: string) => (l === 'Net' ? 'Net' : `${l} (${totals.find(t => t.label === l)?.count ?? 0})`)} tick={{ fontSize: 12 }} />
                           {/* Axis hidden (every bar prints its own value). 25% headroom each way so a value printed past a bar's tip never meets the x labels. */}
-                          <YAxis hide domain={[(min: number) => Math.min(min, 0) * 1.25, (max: number) => Math.max(max, 0) * 1.25]} />
+                          <YAxis hide domain={[(min: number) => (Math.min(min, 0) < 0 ? Math.min(min, 0) * 1.25 - 12 : 0), (max: number) => Math.max(max, 0) * 1.25]} />
                           <Tooltip content={<TotalsTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                           <ReferenceLine y={0} stroke="var(--chart-axis)" />
                           <Bar dataKey="value" isAnimationActive={false} barSize={110}>
@@ -333,12 +365,13 @@ export default function NiftyContribution() {
                 <div style={{ height: chartRows.length * 22 + 36 }}>
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart data={chartRows} layout="vertical" margin={{ top: 4, right: 24, bottom: 4, left: 8 }}>
-                      <XAxis type="number" tickFormatter={(v: number) => pts(v, 0)} />
+                      <XAxis type="number" domain={axisDomain} allowDataOverflow tickFormatter={(v: number) => pts(v, 0)} />
                       <YAxis type="category" dataKey="symbol" width={92} interval={0} tick={{ fontSize: 11 }} />
                       <Tooltip content={<BarTooltip />} cursor={{ fill: 'var(--chart-cursor-fill)', opacity: 0.5 }} />
                       <ReferenceLine x={0} stroke="var(--chart-axis)" />
                       <Bar dataKey="points" isAnimationActive={false} barSize={14}>
                         {chartRows.map(r => <Cell key={r.symbol} fill={r.points >= 0 ? 'var(--chart-pos)' : 'var(--chart-neg)'} />)}
+                        <LabelList dataKey="points" content={StockLabel} />
                       </Bar>
                     </BarChart>
                   </ResponsiveContainer>
@@ -366,7 +399,12 @@ export default function NiftyContribution() {
                       <TD right className="text-zinc-300">{inr(r.ltp)}</TD>
                       <TD right><PctPill v={r.changePct} /></TD>
                       <TD right className="text-zinc-300">{r.weightPct.toFixed(2)}%</TD>
-                      <TD right className={cn('font-bold', signCls(r.points))}>{pts(r.points)}</TD>
+                      <TD right className="font-bold">
+                        <span className="text-white inline-block min-w-[4.5rem] rounded px-1.5 py-0.5"
+                          style={{ background: `color-mix(in srgb, ${r.points >= 0 ? 'var(--chart-pos)' : 'var(--chart-neg)'} ${Math.round(8 + 50 * Math.min(1, Math.abs(r.points) / maxAbsPts))}%, transparent)` }}>
+                          {pts(r.points)}
+                        </span>
+                      </TD>
                     </tr>
                   ))}
                 </tbody>
