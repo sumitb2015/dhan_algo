@@ -500,7 +500,10 @@ export function settleOrder(st: { orderStatus: string; filledQty: number; averag
   const avg = Number(st.averageTradedPrice) || 0;
   if (status === 'TRADED') return { kind: 'filled', filledQty: filled || st.quantity, avg, final: true };
   if (status === 'REJECTED' || status === 'CANCELLED' || status === 'EXPIRED') {
-    return filled > 0 ? { kind: 'filled', filledQty: filled, avg, final: true } : { kind: 'dead', reason: st.reason || status };
+    if (filled > 0) return { kind: 'filled', filledQty: filled, avg, final: true };
+    // Kotak fills its rejection-reason field with '--' on an order that was simply cancelled; that is no reason.
+    const why = /^[\s\-–—.]*$|^(NA|N\/A|NULL|NONE)$/i.test(String(st.reason ?? '').trim()) ? '' : String(st.reason).trim();
+    return { kind: 'dead', reason: status === 'CANCELLED' ? (why ? `CANCELLED: ${why}` : status) : (why || status) };
   }
   return { kind: 'wait', filledQty: filled };
 }

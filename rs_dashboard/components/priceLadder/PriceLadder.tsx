@@ -1028,8 +1028,11 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const liveArmed = !!data?.liveArmed;
   const realBlocked = real && !liveArmed;
 
+  // How the last failed post failed: only 'refused' (the server said no, nothing was sent) is safe to follow with a resend.
+  const lastFail = useRef<'refused' | 'unknown' | 'busy' | null>(null);
   const post = useCallback(async (body: Record<string, unknown>): Promise<boolean> => {
-    if (busyRef.current) return false;
+    lastFail.current = null;
+    if (busyRef.current) { lastFail.current = 'busy'; return false; }
     busyRef.current = true; setBusy(true);
     try {
       const r = await fetch('/api/price-ladder/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -1040,10 +1043,11 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         const st = j.data.state;
         setData(d => (d && !(st.date === d.state.date && (st.rev ?? 0) < (d.state.rev ?? 0)) ? { ...d, state: st } : d));
       }
-      if (j.unknown) { toast.error(`Order status UNKNOWN — check Positions/Orders before doing anything else. ${j.error ?? ''}`); return false; }
-      if (!j.success) { toast.error(j.error ?? `Request failed (${r.status})`); return false; }
+      if (j.unknown) { lastFail.current = 'unknown'; toast.error(`Order status UNKNOWN — check Positions/Orders before doing anything else. ${j.error ?? ''}`); return false; }
+      if (!j.success) { lastFail.current = 'refused'; toast.error(j.error ?? `Request failed (${r.status})`); return false; }
       return true;
     } catch {
+      lastFail.current = 'unknown';
       toast.error('No reply from the server — the request may or may not have gone through. Check the orders list.');
       return false;
     } finally {
@@ -1266,11 +1270,17 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     if (st !== 'cancelled') { toast.warning(st === 'working' || st == null ? 'Cancel not confirmed yet — nothing new was placed. Check Orders.' : `Order is ${st} — nothing new was placed`); return; }
     const buf = rs.stopLimitPrice && rs.triggerPrice ? Math.round(Math.abs(rs.stopLimitPrice - rs.triggerPrice) / rs.triggerPrice * 1000) / 10
       : newLevel != null && anywhere ? slBufferPct : null;
-    void post({
+    const armBody = (lv: number, n: number) => ({
       action: 'arm', kind: 'plain', broker: rs.broker, mode: rs.mode, underlying: c.underlying, expiry: c.expiry, strike: c.strike, opt: c.opt,
-      side: rs.side, lots, product: rs.product, orderType: rs.orderType ?? 'LIMIT', level,
+      side: rs.side, lots: n, product: rs.product, orderType: rs.orderType ?? 'LIMIT', level: lv,
       ...(buf != null || anywhere ? { zones: 'anywhere', slBufferPct: buf ?? slBufferPct } : {}), ...(rs.pane === 2 ? { pane: 2 } : {}),
-    }).then(ok => { if (ok) toast.success(`${rs.mode === 'real' ? 'REAL' : 'SIM'} order re-placed at ${level} for ${lots} lot${lots === 1 ? '' : 's'}`); });
+    });
+    if (await post(armBody(level, lots))) { toast.success(`${rs.mode === 'real' ? 'REAL' : 'SIM'} order re-placed at ${level} for ${lots} lot${lots === 1 ? '' : 's'}`); return; }
+    // The old order is already cancelled. If the server clearly REFUSED the new one (price crossed the market meanwhile, a cap,
+    // funds), put the original back rather than leave the user with nothing. Never after an unknown outcome: that order may be live.
+    if (lastFail.current !== 'refused' || (level === oldLevel && lots === rs.lots)) return;
+    if (await post(armBody(oldLevel, rs.lots))) toast.warning(`The new order was refused, so the original (${rs.lots} lot${rs.lots === 1 ? '' : 's'} at ${oldLevel}) was placed again`);
+    else toast.error(`The original order (${rs.lots} lot${rs.lots === 1 ? '' : 's'} at ${oldLevel}) could not be placed again either — it is cancelled, check Orders`);
   };
 
   // The + / − on a ladder widget. An unfilled order changes its lots in place (− stops at 1 lot: × cancels). An open
@@ -1328,7 +1338,6 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         // A REAL order is resting at the broker: cancel it, and only once the cancel is confirmed place it again.
         const go = () => void replaceRealOrder(rs, lots);
         setConfirm({ text: `Change this REAL resting order to ${lots} lot${lots === 1 ? '' : 's'}: it is CANCELLED and placed again at the same price (it loses its queue place)`, run: go });
-        return;
         return;
       }
       void post({ action: 'lots', id: w.ids[0], lots });

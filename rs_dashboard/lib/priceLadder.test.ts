@@ -120,6 +120,13 @@ test('spotFresh pauses on an old or missing spot', () => {
   assert.equal(spotFresh(null, 1), false);
 });
 
+test('settleOrder: Kotak\'s "--" reason on a cancelled order is a cancel, not a rejection', () => {
+  const base = { filledQty: 0, averageTradedPrice: 0, quantity: 65 };
+  assert.deepEqual(settleOrder({ ...base, orderStatus: 'CANCELLED', reason: '--' }), { kind: 'dead', reason: 'CANCELLED' });
+  assert.deepEqual(settleOrder({ ...base, orderStatus: 'REJECTED', reason: '--' }), { kind: 'dead', reason: 'REJECTED' });
+  assert.deepEqual(settleOrder({ ...base, orderStatus: 'REJECTED', reason: 'RMS:Margin' }), { kind: 'dead', reason: 'RMS:Margin' });
+});
+
 test('settleOrder: TRADED fills, a cancel after a partial counts what filled, PENDING waits', () => {
   assert.deepEqual(settleOrder({ orderStatus: 'TRADED', filledQty: 65, averageTradedPrice: 12.5, quantity: 65 }), { kind: 'filled', filledQty: 65, avg: 12.5, final: true });
   assert.deepEqual(settleOrder({ orderStatus: 'CANCELLED', filledQty: 0, averageTradedPrice: 0, quantity: 65 }), { kind: 'dead', reason: 'CANCELLED' });
