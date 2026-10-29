@@ -189,6 +189,11 @@ export default function NiftyContribution() {
     const m = dir === 'asc' ? 1 : -1;
     return [...res.rows].sort((a, b) => key === 'symbol' ? m * a.symbol.localeCompare(b.symbol) : m * (a[key] - b[key]));
   }, [res, sort]);
+  // Running total of Points down the rows as currently sorted (default sort: how the pullers build up, then the draggers give back).
+  const cumPoints = useMemo(() => {
+    let run = 0;
+    return tableRows.map(r => (run += r.points));
+  }, [tableRows]);
   const sortBy = (key: SortKey) => setSort(s => ({ key, dir: s.key === key && s.dir === 'desc' ? 'asc' : 'desc' }));
   const dirOf = (key: SortKey) => (sort.key === key ? sort.dir : null);
 
@@ -389,6 +394,7 @@ export default function NiftyContribution() {
                     <TH right sortDir={dirOf('changePct')} onClick={() => sortBy('changePct')}>Chg %</TH>
                     <TH right sortDir={dirOf('weightPct')} onClick={() => sortBy('weightPct')}>Weight</TH>
                     <TH right sortDir={dirOf('points')} onClick={() => sortBy('points')}>Points</TH>
+                    <TH right>Cumulative</TH>
                   </tr>
                 </thead>
                 <tbody>
@@ -405,6 +411,7 @@ export default function NiftyContribution() {
                           {pts(r.points)}
                         </span>
                       </TD>
+                      <TD right className={`font-bold ${cumPoints[i] >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{pts(cumPoints[i])}</TD>
                     </tr>
                   ))}
                 </tbody>
