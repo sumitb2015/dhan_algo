@@ -165,6 +165,16 @@ export function pairWidgetsFor(pairs: LadderPair[]): LadderWidget[] {
  */
 export function basketWidgetsFor(baskets: LadderBasket[]): LadderWidget[] {
   const out: LadderWidget[] = [];
+  // Open baskets on one level (a '+1 lot' shares its parent's levels) draw as ONE widget with their total, newest id first.
+  const merged = new Map<string, LadderWidget>();
+  const newest = new Map<string, number>();
+  const addOpen = (w: LadderWidget, at: number) => {
+    const k = `${w.kind}|${w.column}|${w.price}`;
+    const g = merged.get(k);
+    if (!g) { merged.set(k, { ...w, key: `bo|${k}` }); newest.set(k, at); return; }
+    g.qty += w.qty; g.lots += w.lots;
+    if (at >= (newest.get(k) ?? 0)) { g.ids = [...w.ids, ...g.ids]; newest.set(k, at); } else g.ids = [...g.ids, ...w.ids];
+  };
   for (const b of baskets) {
     const lotSize = b.legs[0].contract.lotSize;
     const mult = b.legs[0].contract.mult;
@@ -173,22 +183,26 @@ export function basketWidgetsFor(baskets: LadderBasket[]): LadderWidget[] {
     const trail = b.bracket?.trailPts ? { trail: b.bracket.trailPts } : {};
     const slLabel = b.bracket?.trailPts ? 'Trailing SL' : 'SL';
     if (b.state === 'armed' && b.entryLevel) {
-      out.push({ ...common, key: `be|${b.id}`, price: b.entryLevel, column: b.side, kind: 'entry', label: b.orderType === 'SL' ? 'Basket breakout entry' : 'Basket entry', cancellable: true, drag: 'entry' });
+      out.push({ ...common, key: `be|${b.id}`, price: b.entryLevel, column: b.side, kind: 'entry', label: b.orderType === 'SL' ? 'Basket breakout entry' : 'Basket entry', cancellable: true, adjust: 'order', drag: 'entry' });
       if (b.bracket) {
         const lv = bracketLevels(pairBias(b.side), b.entryLevel, b.bracket);
         if (lv.tgtY != null) out.push({ ...common, key: `bt|${b.id}`, price: lv.tgtY, column: exitCol, kind: 'tgt', label: 'Target', planned: true, drag: 'tgt' });
         out.push({ ...common, key: `bs|${b.id}`, price: lv.slY, column: exitCol, kind: 'sl', label: slLabel, planned: true, drag: 'sl', ...trail });
       }
     }
-    if ((b.state === 'open' || b.state === 'exiting' || b.state === 'unknown') && b.entryY != null) {
-      out.push({ ...common, key: `bp|${b.id}`, price: b.entryY, column: b.side, kind: 'pos', label: b.state === 'open' ? 'Basket position' : `Basket position (${b.state})` });
-      if (b.state === 'open') {
-        if (b.tgtY != null) out.push({ ...common, key: `bpt|${b.id}`, price: b.tgtY, column: exitCol, kind: 'tgt', label: 'Target', drag: 'tgt' });
-        if (b.slY != null) out.push({ ...common, key: `bps|${b.id}`, price: b.slY, column: exitCol, kind: 'sl', label: slLabel, drag: 'sl', ...trail });
-      }
+    if ((b.state === 'exiting' || b.state === 'unknown') && b.entryY != null) {
+      out.push({ ...common, key: `bp|${b.id}`, price: b.entryY, column: b.side, kind: 'pos', label: `Basket position (${b.state})` });
+    }
+    if (b.state === 'open' && b.entryY != null) {
+      // + adds a lot (SIM), − exits a lot; both act on every basket merged into the widget.
+      const live = { ...common, adjust: 'position' as const };
+      const at = b.openedAt ?? b.createdAt;
+      addOpen({ ...live, key: '', price: b.entryY, column: b.side, kind: 'pos', label: 'Basket position' }, at);
+      if (b.tgtY != null) addOpen({ ...live, key: '', price: b.tgtY, column: exitCol, kind: 'tgt', label: 'Target', drag: 'tgt' }, at);
+      if (b.slY != null) addOpen({ ...live, key: '', price: b.slY, column: exitCol, kind: 'sl', label: slLabel, drag: 'sl', ...trail }, at);
     }
   }
-  return out;
+  return [...out, ...merged.values()];
 }
 
 const QTY_TONE: Record<LadderSide, string> = {

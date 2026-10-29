@@ -284,11 +284,15 @@ async function modify(body: Record<string, unknown>, id: string): Promise<NextRe
     const slY = body.slY == null ? b.slY : Number(body.slY);
     if (tgtY != null && !(tgtY > 0 && (bs > 0 ? tgtY > c : tgtY < c))) return bad('Target must be on the profit side of the net premium');
     if (slY != null && !(slY > 0 && (bs > 0 ? slY < c : slY > c))) return bad('SL must be on the loss side of the net premium');
+    // A widget can stand for several baskets (a '+1 lot' joins its parent's levels): move them all together.
+    const ids = new Set(Array.isArray(body.ids) && body.ids.length ? body.ids.map(String).slice(0, 50) : [id]);
     const r = await guarded(id, y => y.state === 'open' && !!y.bracket, st => {
       const patch: Partial<LadderBasket> = {};
       if (body.tgtY != null) patch.tgtY = tgtY;
       if (body.slY != null) Object.assign(patch, { slY, slY0: slY, trailFrom: c, peakY: c });
-      return pushEvent(patchBasket(st, id, patch), ev('info', `Basket bracket moved: TGT ${tgtY ?? '—'} / SL ${slY}`, id));
+      let next = st;
+      for (const y of st.baskets ?? []) if (ids.has(y.id) && y.state === 'open' && y.bracket && y.legs[0].contract.securityId === b.legs[0].contract.securityId) next = patchBasket(next, y.id, patch);
+      return pushEvent(next, ev('info', `Basket bracket moved: TGT ${tgtY ?? '—'} / SL ${slY}`, id));
     });
     if (!r.applied) return bad('It is closed — not modified', 409);
     return ok(r.state);
@@ -356,6 +360,69 @@ async function resolve(body: Record<string, unknown>, id: string): Promise<NextR
   return ok(r.state);
 }
 
+
+/**
+ * The + / - on a basket widget's lots. ARMED (nothing sent yet): change the lots in place, with the caps and (REAL) the
+ * funds check re-run for the new size, the caps again inside the lock. OPEN: `+` adds one lot as a new basket on the same
+ * target / SL — SIM only for now (a REAL add is a hedge-first order job: use Buy / Sell Market); `-` is the page's
+ * exitShare, never confirmed because it only reduces.
+ */
+async function lotsOp(body: Record<string, unknown>, id: string): Promise<NextResponse> {
+  const b = (readLadderState().baskets ?? []).find(y => y.id === id);
+  if (!b) return bad('Unknown basket');
+  const contracts = b.legs.map(l => l.contract);
+  if (b.state === 'armed') {
+    const lots = capLots(body.lots);
+    if (lots == null) return bad('Lots must be a whole number from 1 to 20');
+    if (b.mode === 'real' && lots > MAX_REAL_BASKET_LOTS) return bad(`REAL baskets are limited to ${MAX_REAL_BASKET_LOTS} lots for now`);
+    const others = (st: LadderState): LadderState => ({ ...st, baskets: (st.baskets ?? []).filter(y => y.id !== id) });
+    const u = b.legs[0].contract.underlying;
+    const synCap = (st: LadderState) => (b.kind === 'syn' ? synTotalCap(others(st), { broker: b.broker, mode: b.mode, u, lots }) : null);
+    const pre = overCap(others(readLadderState()), b.broker, b.mode, b.legs, lots) ?? synCap(readLadderState());
+    if (pre) return bad(pre);
+    if (b.mode === 'real' && lots > b.lots) {
+      const prices = await loadPrices([], contracts);
+      const blocked = await realBasketBlocked(b.broker, u, b.legs, lots, b.product, prices.ltps);
+      if (blocked) return bad(blocked);
+    }
+    let err: string | null = null;
+    const r = await guarded(id, y => y.state === 'armed', st => {
+      err = overCap(others(st), b.broker, b.mode, b.legs, lots) ?? synCap(st);
+      if (err) return st;
+      return pushEvent(patchBasket(st, id, { lots }), ev('info', `Basket lots changed to ${lots}`, id));
+    });
+    if (err) return bad(err);
+    if (!r.applied) return bad('Too late — it has just fired; use + on the position instead', 409);
+    return ok(r.state);
+  }
+  if (b.state !== 'open') return bad(`Cannot change the lots of a basket that is ${b.state}`, 409);
+  if (b.mode === 'real') return bad('Adding a lot to an open REAL basket is not supported yet — use Buy / Sell Market');
+  if (new Set(contracts.map(c => c.expiry)).size > 1) return bad('A calendar / diagonal basket cannot add a lot — use Buy / Sell Market');
+  const net = await liveNet(b);
+  if (net == null) return bad(b.kind === 'syn' ? 'No fresh, consistent price for both legs and the index' : 'No live price for every leg');
+  const prices = await loadPrices([], contracts);
+  if (contracts.some(c => !(prices.ltps[c.securityId] > 0))) return bad('No live price for every leg');
+  const now = Date.now();
+  const clone: LadderBasket = {
+    ...b, id: newLadderId('pb'), lots: 1, createdAt: now, updatedAt: now, openedAt: now, entryY: b.entryY ?? net, bookedPnl: undefined, note: 'Added one lot',
+    exitWanted: undefined, exitReason: undefined, closedAt: undefined,
+    legs: b.legs.map(l => {
+      const q = basketLegQty(1, l.ratio, l.contract.lotSize);
+      return { key: l.key, side: l.side, ratio: l.ratio, contract: l.contract, avg: prices.ltps[l.contract.securityId], held: q, filledQty: q, entry: 'filled' as const };
+    }),
+  };
+  let err: string | null = null;
+  const s = await updateLadderState(st => {
+    const cur = (st.baskets ?? []).find(y => y.id === id);
+    if (!cur || cur.state !== 'open' || cur.exitWanted) { err = 'That basket is no longer open'; return st; }
+    err = overCap(st, b.broker, 'sim', b.legs, 1) ?? null;
+    if (err) return st;
+    return pushEvent({ ...st, baskets: [...(st.baskets ?? []), clone] }, ev('info', `SIM +1 lot ${basketName(b)} at net ${net.toFixed(2)}`, clone.id));
+  });
+  if (err) return bad(err, 409);
+  return ok(s, { id: clone.id });
+}
+
 export async function basketAction(b: Record<string, unknown>): Promise<NextResponse> {
   const op = String(b.op ?? '');
   const id = typeof b.id === 'string' ? b.id : '';
@@ -394,14 +461,16 @@ export async function basketAction(b: Record<string, unknown>): Promise<NextResp
       if (!ids.length) return bad('ids required');
       let err = '', lots = 0;
       const s = await updateLadderState(st => {
-        const r = applyBasketShare(st, ids, Number(b.pct), Date.now(), () => newLadderId('pb'));
+        const r = applyBasketShare(st, ids, Number(b.pct), Date.now(), () => newLadderId('pb'), b.lots == null ? undefined : Number(b.lots));
         if (typeof r === 'string') { err = r; return st; }
         lots = r.lots;
-        return pushEvent(r.next, ev('info', `Basket exit ${Number(b.pct)}% requested (${r.lots} lot(s))`, ids[0]));
+        return pushEvent(r.next, ev('info', `Basket exit ${b.lots == null ? `${Number(b.pct)}%` : `${r.lots} lot(s)`} requested (${r.lots} lot(s))`, ids[0]));
       });
       if (err) return bad(err, 409);
       return ok(s, { lots });
     }
+    case 'lots':
+      return lotsOp(b, id);
     case 'resolve':
       return resolve(b, id);
     case 'modify':

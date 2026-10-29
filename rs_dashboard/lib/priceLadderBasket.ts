@@ -563,19 +563,22 @@ export function splitBasketLots(b: LadderBasket, k: number, newId: string, now: 
  * The 25 / 50 / 75 / Exit buttons: exit a share of the open baskets on the shown legs. 100 = every open basket exits; below
  * that `pct` of the total lots, rounded down, goes oldest first, a basket larger than what is left shedding that many lots.
  */
-export function applyBasketShare(st: LadderState, ids: readonly string[], pct: number, now: number, newId: () => string): { next: LadderState; lots: number } | string {
-  if (![25, 50, 75, 100].includes(pct)) return 'pct must be 25, 50, 75 or 100';
+export function applyBasketShare(st: LadderState, ids: readonly string[], pct: number, now: number, newId: () => string, lotsWanted?: number): { next: LadderState; lots: number } | string {
+  // `lotsWanted` = an exact number of whole lots (the widget's −); otherwise a share of the open lots.
+  if (lotsWanted == null && ![25, 50, 75, 100].includes(pct)) return 'pct must be 25, 50, 75 or 100';
+  if (lotsWanted != null && !(Number.isInteger(lotsWanted) && lotsWanted >= 1)) return 'lots must be a whole number of 1 or more';
   const want = new Set(ids);
   // A broken basket (a leg closed outside the ladder) can only exit whole: its legs no longer hold their full quantities.
   const cands = (st.baskets ?? []).filter(b => want.has(b.id) && (b.state === 'open' || (pct === 100 && b.state === 'broken')) && !b.exitWanted).sort((a, b) => (a.openedAt ?? 0) - (b.openedAt ?? 0));
   if (!cands.length) return 'Nothing is open to exit';
   const total = cands.reduce((a, b) => a + b.lots, 0);
   let next = st;
-  if (pct === 100) {
+  if (lotsWanted != null && lotsWanted > total) return `Only ${total} lot(s) open`;
+  if (lotsWanted == null && pct === 100 || lotsWanted === total) {
     for (const b of cands) next = patchBasket(next, b.id, { exitWanted: 'Manual exit' }, now);
     return { next, lots: total };
   }
-  let left = Math.floor((total * pct) / 100);
+  let left = lotsWanted ?? Math.floor((total * pct) / 100);
   if (left < 1) return `${pct}% of ${total} lot(s) is less than one lot — pick a larger share`;
   const out = left;
   for (const b of cands) {

@@ -17,7 +17,7 @@ import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { computePivots, pivotChips, PIVOT_FORMULAS } from '@/lib/pivotLevels';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, basketWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { BasketLegsModal } from '@/components/priceLadder/BasketLegsModal';
-import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_PREFIX, SYN_PAUSED_NOTE, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
+import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_PREFIX, SYN_PAUSED_NOTE, MAX_REAL_BASKET_LOTS, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
 import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, sumPairPnl, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
@@ -1207,7 +1207,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const onMove = (ids: string[], what: 'entry' | 'tgt' | 'sl', price: number) => {
     const done = (ok: boolean) => { if (ok) toast.success(`${what === 'entry' ? 'Entry' : what === 'tgt' ? 'Target' : 'SL'} moved to ${price}`); };
     if (mode === 'basket') {
-      void post({ action: 'basket', op: 'modify', id: ids[0], ...(what === 'entry' ? { level: price } : what === 'tgt' ? { tgtY: price } : { slY: price }) }).then(done);
+      void post({ action: 'basket', op: 'modify', id: ids[0], ids, ...(what === 'entry' ? { level: price } : what === 'tgt' ? { tgtY: price } : { slY: price }) }).then(done);
       return;
     }
     if (mode === 'pair') {
@@ -1277,7 +1277,25 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // position: − exits one lot at market (never confirmed — it only reduces), + adds one lot at market under the same
   // target / SL — an opening order, so on REAL the first one this page load asks first, like a ladder click.
   const onAdjust = (w: LadderWidget, delta: 1 | -1, pair = mode === 'pair') => {
-    if (mode === 'basket') { toast.info('Use the 25 / 50 / 75 / Exit buttons to change a basket\'s lots'); return; }
+    if (mode === 'basket') {
+      if (w.adjust === 'order') {
+        // An armed basket (nothing sent yet): lots change in place, caps and funds re-checked on the server.
+        const lots = w.lots + delta;
+        if (lots < 1) { toast.info('One lot is the minimum — use × to cancel'); return; }
+        if (lots > MAX_LADDER_LOTS) { toast.warning(`${MAX_LADDER_LOTS} lots is the cap`); return; }
+        if (real && lots > MAX_REAL_BASKET_LOTS) { toast.warning(`REAL baskets are limited to ${MAX_REAL_BASKET_LOTS} lots for now`); return; }
+        void post({ action: 'basket', op: 'lots', id: w.ids[0], lots });
+        return;
+      }
+      if (w.adjust !== 'position') return;
+      // − exits exactly one lot at market (only reduces: never confirmed; the last lot exits the whole basket). + adds one lot (SIM; the server refuses REAL).
+      if (delta < 0) {
+        void post({ action: 'basket', op: 'exitShare', ids: w.ids, lots: 1 }).then(ok => { if (ok) toast.success('Exiting 1 lot'); });
+        return;
+      }
+      void post({ action: 'basket', op: 'lots', id: w.ids[0] }).then(ok => { if (ok) toast.success('Added 1 lot at market'); });
+      return;
+    }
     if (pair) {
       if (w.adjust === 'order') {
         // An armed pair (levels not fired): change its lots in place; × cancels it.
