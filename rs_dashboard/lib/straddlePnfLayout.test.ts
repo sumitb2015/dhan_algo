@@ -49,3 +49,18 @@ test('no columns still gives a usable layout', () => {
   assert.equal(l.plotW, 600 - AXIS_W);
   assert.ok(Number.isFinite(l.cell));
 });
+
+test('a small chart grows to fill the panel: the cell is limited by the view height, not by a small fixed maximum', () => {
+  const columns = Array.from({ length: 18 }, (_, i) => col(100 + (i % 3) * BOX, 108 + (i % 3) * BOX));
+  const l = layoutPanel(columns, BOX, null, 1500, 560);
+  assert.ok(l.cell > 14);
+  assert.ok(l.cell <= MAX_CELL);
+  assert.ok(PAD_TOP + l.rows * l.cell <= 560);               // all rows fit the height at the fitted size
+});
+
+test('a chart with many columns is narrowed to fit the width before it scrolls, never below the minimum', () => {
+  const columns = Array.from({ length: 60 }, (_, i) => col(100 + (i % 3) * BOX, 108 + (i % 3) * BOX));
+  const l = layoutPanel(columns, BOX, null, 700, 560);
+  assert.ok((60 + 3) * l.cell <= 700 - AXIS_W + l.cell);     // the columns (plus a little room) fit the plot width
+  assert.ok(l.cell >= MIN_CELL);
+});

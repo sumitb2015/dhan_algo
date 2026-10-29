@@ -79,24 +79,33 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   const xOf = (j: number) => offsetX + j * cell;
   const vis = columns;
   const first = 0;
-  const s = cell * 0.34;
+  const s = cell * 0.36;                       // glyph half-size
+  const stroke = Math.max(1.2, Math.min(2.4, cell * 0.075)); // keeps X / O legible when zoomed, not heavy when small
   const gridId = `pnf-grid-${strike}`;
   const gridY = columns.length ? ((yOf(columns[0].low) % cell) + cell) % cell : 0; // a cell edge, so grid lines run along the box edges
 
   // Open on the newest column, centred on the latest price; keep following the newest column unless the user has panned away.
   const scrollRef = wrapRef;
+  // Vertical start: when the whole price range fits the view, centre that block; otherwise centre the latest price.
+  const topFor = (el: HTMLElement) => {
+    const dataH = PAD_TOP + (L.rows) * cell;
+    if (dataH <= el.clientHeight) return Math.max(0, padY - (el.clientHeight - dataH) / 2);
+    return Math.max(0, yOf(lastY as number) - el.clientHeight / 2);
+  };
   const stickRef = useRef(true);
   // The scroll position where the newest column sits against the axis (the empty room right of it is only for dragging).
   const stickLeft = (el: HTMLElement) => Math.max(0, el.scrollWidth - el.clientWidth - padR);
+  // Until the user zooms or drags, the vertical position follows the layout (it changes when the panel is measured and as the range grows).
+  const touchedRef = useRef(false);
   const centeredFor = useRef<number | null>(null);
   const lastY = liveValue ?? (columns.length ? (columns[columns.length - 1].low + columns[columns.length - 1].high) / 2 : null);
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || columns.length === 0) return;
     if (stickRef.current) el.scrollLeft = stickLeft(el);
-    if (centeredFor.current !== strike && lastY !== null && box > 0) {
-      el.scrollTop = Math.max(0, yOf(lastY) - el.clientHeight / 2);
-      centeredFor.current = strike;
+    if (centeredFor.current !== strike) { touchedRef.current = false; centeredFor.current = strike; }
+    if (!touchedRef.current && lastY !== null && box > 0) {
+      el.scrollTop = topFor(el);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [columns.length, contentW, contentH, strike]);
@@ -117,9 +126,10 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     const u = (el.scrollTop + y - padY - PAD_TOP) / cell;
     pendingRef.current = { left: L2.offsetX + j * L2.cell - x, top: L2.padY + PAD_TOP + u * L2.cell - y };
     stickRef.current = false;
+    touchedRef.current = true;
     setZoom(next);
   };
-  const resetView = () => { pendingRef.current = 'reset'; stickRef.current = false; setZoom(1); setScrollTick(n => n + 1); };
+  const resetView = () => { touchedRef.current = false; pendingRef.current = 'reset'; stickRef.current = false; setZoom(1); setScrollTick(n => n + 1); };
   useLayoutEffect(() => {
     const el = wrapRef.current;
     const pending = pendingRef.current;
@@ -128,7 +138,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     if (pending === 'reset') {
       // Centre the newest column (the plot is the view minus the pinned axis) and the latest price.
       el.scrollLeft = Math.max(0, xOf(columns.length - 0.5) - (el.clientWidth - AXIS_W) / 2);
-      if (lastY !== null && box > 0) el.scrollTop = Math.max(0, yOf(lastY) - el.clientHeight / 2);
+      if (lastY !== null && box > 0) el.scrollTop = topFor(el);
     } else {
       el.scrollLeft = pending.left;
       el.scrollTop = pending.top;
@@ -252,6 +262,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         tabIndex={0}
         onPointerDown={e => {
           if (e.button !== 0) return;
+          touchedRef.current = true;
           const el = e.currentTarget;
           dragRef.current = { x: e.clientX, y: e.clientY, l: el.scrollLeft, t: el.scrollTop };
           el.setPointerCapture(e.pointerId);
@@ -305,9 +316,9 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                   const cy = yOf(c.low + (k + 0.5) * box);
                   return c.dir === 'X' ? (
                     <path key={`${j}-${k}`} d={`M${cx - s} ${cy - s}L${cx + s} ${cy + s}M${cx + s} ${cy - s}L${cx - s} ${cy + s}`}
-                          className="stroke-emerald-400" strokeWidth={1.4} fill="none" />
+                          className="stroke-emerald-400" strokeWidth={stroke} strokeLinecap="round" fill="none" />
                   ) : (
-                    <circle key={`${j}-${k}`} cx={cx} cy={cy} r={s} className="stroke-red-400" strokeWidth={1.4} fill="none" />
+                    <circle key={`${j}-${k}`} cx={cx} cy={cy} r={s} className="stroke-red-400" strokeWidth={stroke} fill="none" />
                   );
                 }),
               )}
@@ -361,7 +372,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
               <g data-testid="pnf-axis">
                 {Array.from({ length: Math.floor((yMax - yMin) / box) + 1 }, (_, i) => i)
                   .filter(i => i % tickEvery === 0)
-                  .filter(i => liveValue === null || Math.abs(yOf(yMin + i * box) - yOf(liveValue)) > 10)
+                  .filter(i => liveValue === null || Math.abs(yOf(yMin + i * box) - yOf(liveValue)) > 13)
                   .map(i => {
                     const p = yMin + i * box;
                     return <text key={`t${i}`} x={6} y={yOf(p) + 3} className="fill-zinc-500 font-mono" fontSize={9}>{fmt(p)}</text>;

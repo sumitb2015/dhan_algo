@@ -4,7 +4,9 @@
 export const AXIS_W = 58;
 export const PAD_TOP = 22;
 export const MIN_CELL = 8;
-export const MAX_CELL = 14;
+export const MAX_CELL = 28;
+/** Columns of breathing room (left of the oldest, right of the newest) the width fit leaves, so a fitted chart is not jammed against the edges. */
+const FIT_COLUMN_SLACK = 3;
 export const ZOOM_MIN_CELL = 3;
 export const ZOOM_MAX_CELL = 48;
 
@@ -27,8 +29,9 @@ export type PanelLayout = {
 };
 
 /**
- * All columns are laid out (the panel scrolls; nothing is clipped). The cell size follows the full price range, bounded to
- * [MIN_CELL, MAX_CELL]: a wider range than fits makes the chart scroll vertically rather than shrink the glyphs to dots.
+ * All columns are laid out (the panel scrolls; nothing is clipped). The cell size is the largest square that fits BOTH the full price
+ * range and every column in the view, bounded to [MIN_CELL, MAX_CELL]: a range or history too big for MIN_CELL makes the chart scroll
+ * rather than shrink the glyphs to dots, and a small chart grows to fill the panel instead of sitting in a corner.
  */
 export function layoutPanel(
   columns: { low: number; high: number }[],
@@ -48,7 +51,9 @@ export function layoutPanel(
   const yMin = hasRange ? Math.min(...lows) - box : 0;
   const yMax = hasRange ? Math.max(...highs) + 2 * box : 0;
   const rows = hasRange ? Math.ceil((yMax - yMin) / box) + 1 : 1;
-  const fitted = Math.max(MIN_CELL, Math.min(MAX_CELL, Math.floor((viewH - PAD_TOP) / rows)));
+  const fitH = Math.floor((viewH - PAD_TOP) / rows);
+  const fitCellW = columns.length ? Math.floor((viewW - AXIS_W) / (columns.length + FIT_COLUMN_SLACK)) : MAX_CELL;
+  const fitted = Math.max(MIN_CELL, Math.min(MAX_CELL, fitH, fitCellW));
   const cell = zoom === 1 ? fitted : Math.max(ZOOM_MIN_CELL, Math.min(ZOOM_MAX_CELL, Math.round(fitted * zoom)));
 
   const minPlotW = Math.max(cell, viewW - AXIS_W);
