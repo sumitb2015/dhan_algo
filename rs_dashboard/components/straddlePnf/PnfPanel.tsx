@@ -67,7 +67,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
 
   const [zoom, setZoom] = useState(1);
   const L = layoutPanel(columns, box, liveValue, width, HEIGHT, zoom, true);
-  const { cell, yMin, yMax, plotW, contentW, contentH, offsetX, padY } = L;
+  const { cell, yMin, yMax, plotW, contentW, contentH, offsetX, padY, padR } = L;
   const yOf = (p: number) => padY + PAD_TOP + ((yMax - p) / box) * cell;
   const xOf = (j: number) => offsetX + j * cell;
   const vis = columns;
@@ -79,12 +79,14 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   // Open on the newest column, centred on the latest price; keep following the newest column unless the user has panned away.
   const scrollRef = wrapRef;
   const stickRef = useRef(true);
+  // The scroll position where the newest column sits against the axis (the empty room right of it is only for dragging).
+  const stickLeft = (el: HTMLElement) => Math.max(0, el.scrollWidth - el.clientWidth - padR);
   const centeredFor = useRef<number | null>(null);
   const lastY = liveValue ?? (columns.length ? (columns[columns.length - 1].low + columns[columns.length - 1].high) / 2 : null);
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || columns.length === 0) return;
-    if (stickRef.current) el.scrollLeft = el.scrollWidth;
+    if (stickRef.current) el.scrollLeft = stickLeft(el);
     if (centeredFor.current !== strike && lastY !== null && box > 0) {
       el.scrollTop = Math.max(0, yOf(lastY) - el.clientHeight / 2);
       centeredFor.current = strike;
@@ -117,7 +119,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     if (!el || !pending) return;
     pendingRef.current = null;
     if (pending === 'reset') {
-      el.scrollLeft = el.scrollWidth;
+      el.scrollLeft = stickLeft(el);
       if (lastY !== null && box > 0) el.scrollTop = Math.max(0, yOf(lastY) - el.clientHeight / 2);
     } else {
       el.scrollLeft = pending.left;
@@ -218,7 +220,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         onPointerUp={() => { dragRef.current = null; setDragging(false); }}
         onPointerCancel={() => { dragRef.current = null; setDragging(false); }}
         onDoubleClick={resetView}
-        onScroll={e => { const el = e.currentTarget; stickRef.current = el.scrollLeft + el.clientWidth >= el.scrollWidth - 30; }}
+        onScroll={e => { const el = e.currentTarget; stickRef.current = el.scrollLeft >= stickLeft(el) - 30; }}
         className={`relative overflow-auto select-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${dragging ? 'cursor-grabbing' : 'cursor-grab'} ${fill ? 'flex-1 min-h-0' : ''}`}
         style={fill ? { minHeight: 200 } : { height: 'calc(100vh - 215px)', minHeight: MIN_HEIGHT }}
       >

@@ -22,6 +22,8 @@ export type PanelLayout = {
   offsetX: number;
   /** Empty scroll room above/below the price rows, so the chart can be dragged off-centre even when it fits the view. */
   padY: number;
+  /** Empty scroll room between the newest column and the price axis, so the chart can be dragged left of the axis. */
+  padR: number;
 };
 
 /**
@@ -56,10 +58,11 @@ export function layoutPanel(
   const fitW = Math.max(minPlotW, colsW);
   return {
     cell, yMin, yMax, rows,
-    plotW: fitW + padX,
-    contentW: fitW + padX + AXIS_W,
+    plotW: fitW + padX + padX,
+    contentW: fitW + padX + padX + AXIS_W,
     contentH: Math.max(viewH, PAD_TOP + rows * cell + 8) + 2 * padY,
     offsetX: Math.max(0, fitW - colsW) + padX,
     padY,
+    padR: padX,
   };
 }

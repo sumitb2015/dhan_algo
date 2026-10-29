@@ -38,6 +38,14 @@ test('drag pans and wheel zooms a chart that fits the panel', async ({ page }) =
   expect(p1.l).toBeLessThan(p0.l - 50);
   expect(p1.t).not.toBe(p0.t);
 
+  // Drag the chart to the left, away from the price axis: the newest column must be able to leave the right margin.
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx - 300, cy, { steps: 8 });
+  await page.mouse.up();
+  const p2 = await pos();
+  expect(p2.l).toBeGreaterThan(p0.l + 50);            // past the position where the newest column touches the axis
+
   await page.mouse.move(cx, cy);
   await page.mouse.wheel(0, -300);
   await expect(panel.getByTestId('pnf-zoom')).not.toHaveAttribute('data-zoom', '1');

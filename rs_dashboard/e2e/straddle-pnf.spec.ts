@@ -207,7 +207,7 @@ test('a long history is never clipped: the chart scrolls, opens on the newest co
   const dims = () => scroller.evaluate(el => ({ sw: el.scrollWidth, cw: el.clientWidth, sl: el.scrollLeft }));
   await expect.poll(async () => (await dims()).sw).toBeGreaterThan((await dims()).cw + 100); // wider than the view: nothing dropped
   const start = await dims();
-  expect(start.sl + start.cw).toBeGreaterThanOrEqual(start.sw - 40);                          // opens at the newest column
+  expect(start.sl + start.cw).toBeGreaterThanOrEqual(start.sw - start.cw / 2 - 40);            // opens at the newest column (half a view of drag room lies right of it)
   const before = (await panel.getByTestId('pnf-axis').boundingBox())!;
   await scroller.evaluate(el => { el.scrollLeft = 0; });
   expect((await dims()).sl).toBe(0);                                                          // the oldest columns are reachable
