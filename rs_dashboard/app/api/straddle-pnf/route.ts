@@ -5,6 +5,7 @@ import { findEquity } from '@/lib/equityMaster';
 import { isIndexSymbol, isSymbol } from '@/lib/straddlePnfSearch';
 import { resolveFuture, resolveOption, type Contract } from '@/lib/pnfContracts';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
+import type { PnfLegInput } from '@/lib/pnfOrderLogic';
 
 // Read-only market-data route for the Point & Figure page: an NSE index or stock price, or an F&O contract (a future, one option,
 // or a CE + PE straddle). No order code lives here. Contracts are resolved server-side from master_list.csv: the browser names
@@ -39,7 +40,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({ success: false, error: 'Use mode=price&kind=index|equity&symbol=… or mode=contract&kind=futures|options&underlying=…&expiry=…' }, { status: 400 });
 }
 
-async function run(key: string, args: string[], fallbackName: string) {
+async function run(key: string, args: string[], fallbackName: string, contracts?: PnfLegInput[]) {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.ts < CACHE_TTL) return NextResponse.json(hit.body);
   try {
@@ -49,7 +50,9 @@ async function run(key: string, args: string[], fallbackName: string) {
     const lastT = Math.max(0, ...Object.values(bars).map(b => (b.length ? b[b.length - 1].t : 0)));
     const instruments = out.instruments ?? (out.instrument ? [out.instrument] : []);
     const body = {
-      success: true, atm: 0, strikes: [0], name: out.name ?? fallbackName, instrument: instruments[0] ?? null, instruments, bars,
+      success: true, atm: 0, strikes: [0], name: out.name ?? fallbackName, instrument: instruments[0] ?? null, instruments,
+      contracts: contracts ?? instruments.map(i => ({ segment: i.segment, securityId: i.security_id, instrument: 'EQUITY', displayName: fallbackName, lot: 1, expiry: '' })),
+      bars,
       errors: out.errors ?? {}, dataDate: lastT ? sessionOf(lastT) : null,
     };
     if (Object.keys(bars).length) remember(key, body);
@@ -63,7 +66,11 @@ async function run(key: string, args: string[], fallbackName: string) {
 async function priceResponse(kind: string, symbol: string) {
   const known = kind === 'index' ? isIndexSymbol(symbol) : kind === 'equity' && isSymbol(symbol) && findEquity(symbol) !== null;
   if (!known) return NextResponse.json({ success: false, error: `Unknown ${kind || 'instrument'} "${symbol}"` }, { status: 400 });
-  return run(`price:${kind}:${symbol}`, ['--kind', kind, '--symbol', symbol], symbol);
+  const eq = kind === 'equity' ? findEquity(symbol) : null;
+  const contracts: PnfLegInput[] | undefined = eq
+    ? [{ segment: 'NSE_EQ', securityId: eq.securityId, instrument: 'EQUITY', displayName: eq.name, lot: 1, expiry: '' }]
+    : undefined;
+  return run(`price:${kind}:${symbol}`, ['--kind', kind, '--symbol', symbol], symbol, contracts);
 }
 
 /** A future (one leg), one option (one leg) or a CE + PE straddle (two legs, CE first) on one strike. */
@@ -96,5 +103,5 @@ async function contractResponse(p: URLSearchParams) {
     name = type === 'STRADDLE' ? `${legs[0].displayName.replace(/ CALL$/, '')} STRADDLE` : legs[0].displayName;
   }
   const legArg = legs.map(l => `${l.segment}:${l.securityId}:${l.instrument}`).join(',');
-  return run(`contract:${legArg}`, ['--kind', 'contract', '--legs', legArg, '--name', name], name);
+  return run(`contract:${legArg}`, ['--kind', 'contract', '--legs', legArg, '--name', name], name, legs);
 }

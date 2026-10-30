@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, ChartScatter, LocateFixed, Volume2, VolumeX, type LucideIcon } from 'lucide-react';
+import { Bell, ChartScatter, LocateFixed, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from './NavBar';
 import DataChip from './DataChip';
@@ -9,6 +9,7 @@ import PnfPanel from './straddlePnf/PnfPanel';
 import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
 import InstrumentBar from './straddlePnf/InstrumentBar';
 import SettingsControls, { SmaPeriodInput } from './straddlePnf/SettingsControls';
+import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/alertSound';
@@ -24,13 +25,14 @@ import { sessionOf, type Bar } from '@/lib/straddlePnf';
 import {
   DEFAULT_TARGETS, SEGMENTS, alertId, isComplete, parseTarget, readTargets, targetKey, targetLabel, targetQuery, type Segment, type Target,
 } from '@/lib/pnfTarget';
+import type { PnfLegInput } from '@/lib/pnfOrderLogic';
 
-// Point & Figure of ONE price series, signals only (this page places no orders), picked with Index | Equity | Futures | Options:
+// Point & Figure of ONE price series with 1-click execution trade bar, picked with Index | Equity | Futures | Options:
 // an NSE index or stock, a future, one option, or a CE + PE straddle. Bars come from the history API and the page re-fetches them
 // every 30 s; signals are only ever evaluated on CLOSED one-minute bars, so the poll never delays one.
 
 type Instrument = { segment: string; security_id: string };
-type Loaded = { key: number; dataDate: string | null; error?: string; instruments: Instrument[] };
+type Loaded = { key: number; dataDate: string | null; error?: string; instruments: Instrument[]; contracts?: PnfLegInput[] };
 type LiveLeg = { quote: (NonNullable<LegQuote> & { prevClose: number | null }) | null; last: { ltp: number; prevClose: number | null } | null };
 
 const POLL_MS = 30_000;
@@ -40,6 +42,7 @@ const FLASH_MS = 4000;
 const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
 const OVERLAY_KEY = 'straddle-pnf-overlay';
+const TRADE_OPEN_KEY = 'straddle-pnf-trade-open';
 /** The last pick in each segment, and which segment is open. `straddle-pnf-target` (one target) is the pre-switch key, read once. */
 const TARGETS_KEY = 'straddle-pnf-targets';
 const SEGMENT_KEY = 'straddle-pnf-segment';
@@ -61,7 +64,7 @@ function IconButton({ icon: Icon, label, onClick, pressed, badge }: { icon: Luci
       <TooltipTrigger
         onClick={onClick}
         render={<button type="button" aria-label={label} aria-pressed={pressed}
-                        className="relative inline-flex items-center justify-center h-7 w-7 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:bg-zinc-800" />}
+                        className={`relative inline-flex items-center justify-center h-7 w-7 rounded-md border transition-colors ${pressed ? 'border-amber-500/50 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20' : 'border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:bg-zinc-800'}`} />}
       >
         <Icon className="w-3.5 h-3.5" aria-hidden="true" />
         {badge ? <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-emerald-500 text-oncolor text-[9px] font-bold leading-4 text-center">{badge}</span> : null}
@@ -92,6 +95,7 @@ export default function StraddlePnfPage() {
   const recenterNow = () => { recenterViewRef.current = true; setRecenter(n => n + 1); };
   const [log, setLog] = useState<LogEntry[]>([]);
   const [logOpen, setLogOpen] = useState(false);
+  const [tradeOpen, setTradeOpen] = useState(true);
   const [muted, setMuted] = useState(false);
   const [flash, setFlash] = useState<'buy' | 'sell' | null>(null);
   const [now, setNow] = useState(0);
@@ -131,6 +135,7 @@ export default function StraddlePnfPage() {
     setTarget(t => (targetKey(t) === targetKey(targets[open]) ? t : targets[open]));
     rebaselineRef.current = true;
     if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
+    if (readPref(TRADE_OPEN_KEY) === '0') setTradeOpen(false);
     try {
       const raw = readPref(LOG_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
@@ -154,7 +159,7 @@ export default function StraddlePnfPage() {
       const res = await fetch(`/api/straddle-pnf?${targetQuery(target)}`);
       const j = await res.json() as {
         success?: boolean; error?: string; strikes: number[]; dataDate: string | null; name?: string; instruments?: Instrument[];
-        instrument?: Instrument | null; bars: Record<string, Bar[]>; errors: Record<string, string>;
+        instrument?: Instrument | null; bars: Record<string, Bar[]>; errors: Record<string, string>; contracts?: PnfLegInput[];
       };
       if (id !== reqRef.current) return; // a newer request owns the screen
       if (!j.success) throw new Error(j.error ?? 'Failed to load price history');
@@ -166,7 +171,7 @@ export default function StraddlePnfPage() {
       const instruments = j.instruments ?? (j.instrument ? [j.instrument] : []);
       setBars(prev => mergeHistory(hist, prev, tk, instruments.length < 2));
       setHistVersion(v => v + 1);
-      setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], instruments });
+      setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], instruments, contracts: j.contracts });
       if (j.name) setName(j.name);
       setLoadError(null);
     } catch (e) {
@@ -305,6 +310,13 @@ export default function StraddlePnfPage() {
     mutedRef.current = next;
     savePref(SOUND_KEY, next ? '0' : '1');
   };
+  const toggleTradeOpen = () => {
+    setTradeOpen(prev => {
+      const next = !prev;
+      savePref(TRADE_OPEN_KEY, next ? '1' : '0');
+      return next;
+    });
+  };
 
   const today = istToday();
   const seg = (active: boolean) =>
@@ -373,9 +385,23 @@ export default function StraddlePnfPage() {
             <IconButton icon={LocateFixed} label="Re-center" onClick={recenterNow} />
             <IconButton icon={Bell} label="Alert log" onClick={() => setLogOpen(o => !o)} pressed={logOpen} badge={log.length} />
             <IconButton icon={muted ? VolumeX : Volume2} label={muted ? 'Unmute alert sound' : 'Mute alert sound'} onClick={toggleMute} pressed={muted} />
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+            <IconButton icon={Zap} label={tradeOpen ? 'Hide trade desk' : 'Show trade desk'} onClick={toggleTradeOpen} pressed={tradeOpen} />
           </div>
         </div>
       </header>
+
+      {/* interactive 1-click execution trade bar */}
+      {tradeOpen && (
+        <div className="shrink-0">
+          <PnfTradeBar
+            target={target}
+            legs={loaded?.contracts ?? []}
+            live={live}
+            onSwitchTarget={choose}
+          />
+        </div>
+      )}
 
       <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 py-4">
         {loadError && <p role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{loadError}</p>}
