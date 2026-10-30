@@ -14,9 +14,11 @@ export interface HeaderPnlMarginProps {
   broker: Broker;
   mode?: 'PAPER' | 'REAL';
   paperPnl?: number;
+  /** How the paper figure is made up (trade bar + AUTO), for the chip's tooltip. */
+  paperNote?: string;
 }
 
-export default function HeaderPnlMargin({ broker, mode = 'PAPER', paperPnl = 0 }: HeaderPnlMarginProps) {
+export default function HeaderPnlMargin({ broker, mode = 'PAPER', paperPnl = 0, paperNote }: HeaderPnlMarginProps) {
   // Each value is tagged with the broker it was read from, so a switch never shows the old account's figures under the new name.
   const [funds, setFunds] = useState<{ broker: Broker; available: number | null; error?: string } | null>(null);
   const [book, setBook] = useState<{ broker: Broker; pnl: Book | null; error?: string } | null>(null);
@@ -70,7 +72,7 @@ export default function HeaderPnlMargin({ broker, mode = 'PAPER', paperPnl = 0 }
     ? 'bg-zinc-900 border-zinc-800 text-zinc-300'
     : pnl > 0 ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'bg-red-500/10 border-red-500/30 text-red-400';
   const pnlTitle = !real
-    ? `Simulated paper P&L: ${fmtInr(paperPnl, true)}`
+    ? `Simulated paper P&L today: ${fmtInr(paperPnl, true)}${paperNote ? ` — ${paperNote}` : ''}`
     : b?.error ? `${BROKER_LABELS[broker]} positions: ${b.error}`
     : b?.pnl ? `${BROKER_LABELS[broker]} day P&L: realised ${fmtInr(b.pnl.realised, true)}, unrealised ${fmtInr(b.pnl.unrealised, true)}`
       + (unpriced ? ` — ${unpriced} open leg${unpriced > 1 ? 's' : ''} without a live price (their unrealised P&L is not included)` : '')

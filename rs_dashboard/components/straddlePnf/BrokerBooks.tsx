@@ -7,7 +7,7 @@ import {
   daySummary, newestFirst, toOrderRow, toPositionRow, toTradeRow, type OrderRow, type OrderState, type PositionRow, type TradeRow,
 } from '@/lib/pnfBooks';
 import { targetLabel } from '@/lib/pnfTarget';
-import type { AutoRow } from '@/lib/pnfAutoLedger';
+import { autoDaySummary, rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
 
 // Positions, order book, trade book and the day's P&L for the page header's broker, docked at the bottom of the page.
 // Read-only: no order, cancel or exit is sent from here. Collapsed it is one strip (tabs + Day P&L) and reads only the
@@ -49,9 +49,11 @@ export interface BrokerBooksProps {
   onOpenChange: (open: boolean) => void;
   /** Today's AUTO rows (both charts, both modes), from the AUTO ledger. */
   autoRows?: AutoRow[];
+  /** The live price of a contract shown on a chart (by targetKey), for marking open AUTO rows; null when no chart shows it. */
+  autoPrice?: (targetKey: string) => number | null;
 }
 
-export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [] }: BrokerBooksProps) {
+export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [], autoPrice = () => null }: BrokerBooksProps) {
   const [tab, setTab] = useState<Tab>('positions');
   const [positions, setPositions] = useState<BookState<PositionRow>>(null);
   const [orders, setOrders] = useState<BookState<OrderRow>>(null);
@@ -82,14 +84,21 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [] 
   const trdRows = trd ? newestFirst(trd.rows) : [];
   const summary = daySummary(pos?.rows ?? [], ord?.rows ?? [], trd?.rows ?? []);
 
+  // Paper AUTO trades never reach the broker: they are shown beside the broker's books, marked as simulated.
+  const day = autoRows[0]?.day ?? '';
+  const autoPaper = autoDaySummary(autoRows, day, 'PAPER', autoPrice);
+  const autoReal = autoDaySummary(autoRows, day, 'REAL', autoPrice);
+  const paperOpen = autoRows.filter(r => r.mode === 'PAPER' && r.state === 'open');
+  const hasPaper = autoRows.some(r => r.mode === 'PAPER');
+  const mtm = (r: AutoRow) => { const px = autoPrice(r.targetKey); return r.state === 'open' && px !== null && px > 0 ? rowPnl(r.side, r.entryPrice, px, r.unitsPerPoint) : null; };
+  const autoPnl = autoPaper.total + autoReal.total;
   const tabs: { id: Tab; label: string; count?: number }[] = [
-    { id: 'positions', label: 'Positions', count: pos ? summary.open : undefined },
+    { id: 'positions', label: 'Positions', count: pos || paperOpen.length ? (pos ? summary.open : 0) + paperOpen.length : undefined },
     { id: 'orders', label: 'Order Book', count: ord ? summary.orders.total : undefined },
     { id: 'trades', label: 'Trade Book', count: trd ? summary.trades : undefined },
     { id: 'pnl', label: 'P&L' },
     { id: 'auto', label: 'AUTO', count: autoRows.length || undefined },
   ];
-  const autoPnl = autoRows.reduce((s, r) => s + (r.state === 'closed' ? r.pnl ?? 0 : 0), 0);
   const book = tab === 'positions' ? pos : tab === 'orders' ? ord : tab === 'trades' ? trd : pos;
   /** A tab click opens the panel on that tab; clicking the tab already shown collapses it. */
   const pick = (t: Tab) => {
@@ -110,6 +119,10 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [] 
         </div>
         <span className="text-[11px] font-bold text-zinc-300">{BROKER_LABELS[broker]}</span>
         <span className="ml-auto flex items-center gap-3 text-[11px] font-mono">
+          {hasPaper && (
+            <span className="text-zinc-400" title="Simulated AUTO trades today: booked + open at the chart price">AUTO paper <span data-testid="pnf-books-auto-paper" className={`font-bold ${tone(autoPaper.total)}`}>{inr(autoPaper.total)}</span>
+              {autoPaper.unpriced > 0 && <span className="text-amber-400"> *</span>}</span>
+          )}
           <span className="text-zinc-400">Day P&L <span data-testid="pnf-books-total" className={`font-bold ${tone(pos ? summary.total : null)}`}>{pos ? inr(summary.total) : '—'}</span>
             {summary.unpriced > 0 && <span className="text-amber-400" title={`${summary.unpriced} open leg(s) without a live price: their unrealised P&L is not included`}> *</span>}</span>
           {open && <span className="text-zinc-500">read-only · refreshes every 5 s</span>}
@@ -134,16 +147,51 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [] 
                 <td className="px-2 py-1 text-right">{r.lots}</td>
                 <td className="px-2 py-1 text-right">{fmt(r.entryPrice)}</td>
                 <td className="px-2 py-1 text-right">{r.exitPrice === undefined ? '—' : fmt(r.exitPrice)}</td>
-                <td className={`px-2 py-1 text-right font-bold ${tone(r.pnl ?? null)}`}>{r.pnl === undefined ? '—' : inr(r.pnl)}</td>
+                <td className={`px-2 py-1 text-right font-bold ${tone(r.pnl ?? mtm(r))}`} title={r.state === 'open' ? 'Open: marked at the chart price' : undefined}>
+                  {r.pnl !== undefined ? inr(r.pnl) : mtm(r) !== null ? inr(mtm(r)) : '—'}</td>
                 <td className="px-2 py-1" title={r.note}>{r.state === 'closed' ? r.reason ?? 'closed' : r.state}</td>
               </tr>
             ))}
             {autoRows.length ? (
-              <tr><td colSpan={8} className="px-2 py-1 text-right text-zinc-400">Closed AUTO P&L today (REAL at decision prices)</td>
+              <tr><td colSpan={8} className="px-2 py-1 text-right text-zinc-400">AUTO P&L today, booked + open (REAL at decision prices)</td>
                 <td className={`px-2 py-1 text-right font-bold ${tone(autoPnl)}`}>{inr(autoPnl)}</td><td /></tr>
             ) : null}
           </Table>
-        ) : book?.error ? (
+        ) : <>
+        {tab === 'positions' && paperOpen.length > 0 && (
+          <div data-testid="pnf-books-auto-positions" className="border-b border-zinc-800">
+            <p className="px-2 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-violet-300">AUTO · paper (simulated, not at the broker)</p>
+            <Table empty="" head={['Instrument', 'Chart', 'Net', 'Entry', 'LTP', 'Unrealised']} right={[2, 3, 4, 5]}>
+              {paperOpen.map(r => {
+                const px = autoPrice(r.targetKey);
+                const net = (r.side === 'BUY' ? 1 : -1) * (r.legs[0]?.units ?? r.lots);
+                return (
+                  <tr key={r.id} className="border-b border-zinc-800/60">
+                    <td className="px-2 py-1 font-sans text-zinc-100">{targetLabel(r.target)}</td>
+                    <td className="px-2 py-1">C{r.chart}</td>
+                    <td className={`px-2 py-1 text-right font-bold ${net > 0 ? 'text-emerald-400' : 'text-red-400'}`}>{net} <span className="text-zinc-500 font-normal">({r.lots}L)</span></td>
+                    <td className="px-2 py-1 text-right">{fmt(r.entryPrice)}</td>
+                    <td className="px-2 py-1 text-right">{fmt(px)}</td>
+                    <td className={`px-2 py-1 text-right font-bold ${tone(mtm(r))}`} title={px === null ? 'No chart shows this contract: no live price' : undefined}>{inr(mtm(r))}</td>
+                  </tr>
+                );
+              })}
+            </Table>
+          </div>
+        )}
+        {tab === 'pnl' && hasPaper && (
+          <div data-testid="pnf-books-auto-pnl" className="flex items-center gap-2 px-3 pt-3">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-violet-300 w-28 shrink-0">AUTO · paper</span>
+            <div className="grid grid-cols-4 gap-2 w-[36rem]">
+              <Stat label="AUTO P&L" value={inr(autoPaper.total) + (autoPaper.unpriced ? ' *' : '')} cls={tone(autoPaper.total)} big
+                    title={autoPaper.unpriced ? `${autoPaper.unpriced} open AUTO trade(s) on a contract no chart shows: not marked` : undefined} />
+              <Stat label="Booked / open" value={`${inr(autoPaper.realised)} / ${inr(autoPaper.unrealised)}`} />
+              <Stat label="Trades open / closed" value={`${autoPaper.open} / ${autoPaper.closed}`} />
+              <Stat label="Won / lost" value={`${autoPaper.wins} / ${autoPaper.losses}`} />
+            </div>
+          </div>
+        )}
+        {tab === 'positions' || tab === 'pnl' || tab === 'orders' || tab === 'trades' ? (book?.error ? (
           <p role="alert" className="m-3 text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">
             {BROKER_LABELS[broker]} {tab === 'pnl' ? 'positions' : tab}: {book.error}
           </p>
@@ -225,7 +273,8 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [] 
               </Table>
             </div>
           </div>
-        )}
+        )) : null}
+        </>}
       </div>}
     </section>
   );

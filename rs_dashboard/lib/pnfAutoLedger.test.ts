@@ -85,3 +85,30 @@ test('resetPaper drops PAPER rows only; dayStats counts one day and one mode', (
   assert.deepEqual(l.rows.map(r => r.id), ['r2']);
   assert.deepEqual(parseLedger('junk'), EMPTY_LEDGER);
 });
+
+test('autoDaySummary: booked P&L of closed rows plus open rows marked at the chart price, one day and one mode', async () => {
+  const { autoDaySummary } = await import('./pnfAutoLedger.ts');
+  let l = run(EMPTY_LEDGER, { op: 'open', row: row() });
+  l = run(l, { op: 'close', id: 'r1', exitT: 2, exitPrice: 90, reason: 'reversal' });            // +650
+  l = run(l, { op: 'open', row: row({ id: 'r2', side: 'BUY', entryPrice: 50 }) });               // open long, marked below
+  l = run(l, { op: 'open', row: row({ id: 'r3', chart: 2, target: { kind: 'futures', symbol: 'CRUDEOILM', name: 'CRUDEOILM', expiry: '2026-11-19' } }) });
+  const price = (k: string) => (k.startsWith('futures|NIFTY') ? 52 : null);
+  const s = autoDaySummary(l.rows, '2026-10-30', 'PAPER', price);
+  assert.equal(s.realised, 650);
+  assert.equal(s.unrealised, (52 - 50) * 65);
+  assert.equal(s.total, 650 + 130);
+  assert.deepEqual([s.open, s.closed, s.wins, s.losses, s.unpriced], [2, 1, 1, 0, 1]);
+  assert.equal(autoDaySummary(l.rows, '2026-10-30', 'REAL', price).total, 0);
+  assert.equal(autoDaySummary(l.rows, '2026-10-31', 'PAPER', price).closed, 0, 'another day counts nothing');
+});
+
+test('autoMarkers: entry on the signal bar, exit on the reversal bar (or the bar before the decision on older rows)', async () => {
+  const { autoMarkers } = await import('./pnfAutoLedger.ts');
+  let l = run(EMPTY_LEDGER, { op: 'open', row: row({ entryBarT: 1920, entryT: 1985 }) });
+  l = run(l, { op: 'close', id: 'r1', exitT: 2105, exitPrice: 90, reason: 'reversal', exitBarT: 2040 });
+  l = run(l, { op: 'open', row: row({ id: 'r2', entryBarT: 2160, entryT: 2222, side: 'BUY' }) });
+  l = run(l, { op: 'close', id: 'r2', exitT: 2290, exitPrice: 95, reason: 'reversal' });           // no exitBarT: older row
+  const m = autoMarkers(l.rows, 'futures|NIFTY|2026-11-24||');
+  assert.deepEqual(m.map(x => [x.action, x.t]), [['SELL', 1920], ['BUY', 2040], ['BUY', 2160], ['SELL', 2280 - 60]]);
+  assert.deepEqual(autoMarkers(l.rows, 'futures|CRUDEOILM|2026-11-19||'), []);
+});

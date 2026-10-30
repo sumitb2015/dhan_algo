@@ -36,6 +36,8 @@ export interface AutoRow {
   entryPrice: number;
   state: AutoRowState;
   exitT?: number;
+  /** Time of the bar that triggered the exit (the reversal column's first bar), for the chart marker; absent on older rows. */
+  exitBarT?: number;
   exitPrice?: number;
   reason?: string;
   pnl?: number;
@@ -64,7 +66,7 @@ export type AutoOp =
   | { op: 'beginExit'; id: string; t: number }
   | { op: 'abortExit'; id: string; note: string }
   | { op: 'markUnknown'; id: string; note: string }
-  | { op: 'close'; id: string; exitT: number; exitPrice: number; reason: string; note?: string }
+  | { op: 'close'; id: string; exitT: number; exitPrice: number; reason: string; note?: string; exitBarT?: number }
   | { op: 'resolve'; id: string; as: 'open' | 'flat'; exitPrice?: number; t: number }
   | { op: 'log'; chart: 1 | 2; t: number; text: string }
   | { op: 'resetPaper' };
@@ -129,7 +131,10 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       if (r.state !== (r.mode === 'REAL' ? 'exiting' : 'open')) return { ok: false, status: 409, error: `Row is ${r.state}` };
       if (!finite(op.exitPrice) || !finite(op.exitT)) return { ok: false, status: 400, error: 'Invalid exit' };
       const rows = [...led.rows];
-      rows[i] = { ...r, state: 'closed', exitT: op.exitT, exitPrice: op.exitPrice, reason: op.reason, pnl: rowPnl(r.side, r.entryPrice, op.exitPrice, r.unitsPerPoint), note: op.note ?? r.note };
+      rows[i] = {
+        ...r, state: 'closed', exitT: op.exitT, exitPrice: op.exitPrice, reason: op.reason, pnl: rowPnl(r.side, r.entryPrice, op.exitPrice, r.unitsPerPoint),
+        note: op.note ?? r.note, ...(finite(op.exitBarT) ? { exitBarT: op.exitBarT } : {}),
+      };
       return bump(rows);
     }
     case 'resolve': {
@@ -166,6 +171,55 @@ export function dayStats(led: AutoLedger, day: string, mode: AutoMode): Record<1
     if (r.day !== day || r.mode !== mode) continue;
     out[r.chart].trades++;
     if (r.state === 'closed') out[r.chart].pnl += r.pnl ?? 0;
+  }
+  return out;
+}
+
+export interface AutoDaySummary {
+  realised: number; unrealised: number; total: number;
+  /** Open rows with no live price: their unrealised P&L is unknown (not counted as 0 silently: shown with a marker). */
+  unpriced: number; open: number; closed: number; wins: number; losses: number;
+}
+
+/**
+ * One mode's AUTO P&L for an IST day: closed rows' booked P&L plus open rows marked at `priceOf(targetKey)` (the price of
+ * a chart showing that contract, or null when no chart shows it).
+ */
+export function autoDaySummary(rows: AutoRow[], day: string, mode: AutoMode, priceOf: (targetKey: string) => number | null): AutoDaySummary {
+  const s: AutoDaySummary = { realised: 0, unrealised: 0, total: 0, unpriced: 0, open: 0, closed: 0, wins: 0, losses: 0 };
+  for (const r of rows) {
+    if (r.day !== day || r.mode !== mode) continue;
+    if (r.state === 'closed') {
+      const p = r.pnl ?? 0;
+      s.realised += p; s.closed++;
+      if (p > 0) s.wins++; else if (p < 0) s.losses++;
+    } else if (r.state === 'open') {
+      s.open++;
+      const px = priceOf(r.targetKey);
+      if (px === null || !(px > 0)) s.unpriced++;
+      else s.unrealised += rowPnl(r.side, r.entryPrice, px, r.unitsPerPoint);
+    }
+  }
+  s.total = s.realised + s.unrealised;
+  return s;
+}
+
+/**
+ * The chart markers of AUTO rows for one contract, drawn from the ledger: the entry on its SIGNAL bar, the exit on the bar that
+ * triggered it (the reversal column's first bar). Never at the decision time: that is the minute after, often already in
+ * the next column, which put a SELL on an X column. A row without `exitBarT` (older rows) uses the bar that closed just before
+ * its exit was decided.
+ */
+export function autoMarkers(rows: AutoRow[], tk: string): { id: string; t: number; action: 'BUY' | 'SELL'; price: number; lots: number; mode: AutoMode }[] {
+  const out: { id: string; t: number; action: 'BUY' | 'SELL'; price: number; lots: number; mode: AutoMode }[] = [];
+  for (const r of rows) {
+    if (r.targetKey !== tk || r.state === 'entering' || r.state === 'unknownEntry') continue;
+    if (r.state === 'closed' && r.reason === 'refused') continue;          // never opened
+    out.push({ id: `${r.id}:in`, t: r.entryBarT, action: r.side, price: r.entryPrice, lots: r.lots, mode: r.mode });
+    if (r.state === 'closed' && r.reason !== 'resolved' && r.exitPrice !== undefined && r.exitT !== undefined) {
+      const t = r.exitBarT ?? Math.floor(r.exitT / 60) * 60 - 60;
+      out.push({ id: `${r.id}:out`, t, action: r.side === 'BUY' ? 'SELL' : 'BUY', price: r.exitPrice, lots: r.lots, mode: r.mode });
+    }
   }
   return out;
 }

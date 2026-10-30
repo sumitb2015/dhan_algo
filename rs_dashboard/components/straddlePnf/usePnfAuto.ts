@@ -182,11 +182,12 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
     if (rejectsRef.current >= MAX_REJECTS) haltNow(`${MAX_REJECTS} entries in a row were refused`);
   };
 
-  const exit = async (r: AutoRow, reason: string, px: number | null) => {
+  /** `barT`: the bar that triggered the exit (the reversal column's first bar), for the chart marker. */
+  const exit = async (r: AutoRow, reason: string, px: number | null, barT?: number) => {
     const exitPx = px ?? r.entryPrice;                         // only an EOD exit can run without a price (E5)
     const side = r.side === 'BUY' ? 'SELL' : 'BUY';
     if (r.mode === 'PAPER') {
-      const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason });
+      const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason, exitBarT: barT });
       if (c.ok) onEvent({ chart, kind: 'exit', side, price: exitPx, target: r.target, mode: r.mode, lots: r.lots, text: `AUTO C${chart} [PAPER] exit (${reason}) @ ${exitPx.toFixed(2)}` });
       return;
     }
@@ -201,7 +202,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
       return;
     }
     if (j.outcome === 'placed' || j.outcome === 'flat') {
-      const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason, note: j.outcome === 'flat' ? 'already flat at the broker' : undefined });
+      const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason, exitBarT: barT, note: j.outcome === 'flat' ? 'already flat at the broker' : undefined });
       if (!c.ok) { haltNow(`exit sent but the ledger refused it (${c.error})`); return; }
       onEvent({ chart, kind: 'exit', side, price: exitPx, target: r.target, mode: r.mode, lots: r.lots, text: `AUTO C${chart} [REAL] exit (${reason}) @ ~${exitPx.toFixed(2)}${j.outcome === 'flat' ? ' - already flat at the broker' : ''}` });
       return;
@@ -230,7 +231,8 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
         if (d.action !== 'exit') { setNote('holding'); return; }
         if (d.reason === 'reversal' && price === null) { setNote('reversal seen, waiting for a price'); return; }
         busyRef.current = true;
-        try { await exit(row, d.reason, price); } finally { busyRef.current = false; }
+        const barT = d.reason === 'reversal' && d.col !== undefined ? model.columnTimes[d.col]?.start : undefined;
+        try { await exit(row, d.reason, price, barT); } finally { busyRef.current = false; }
         return;
       }
       if (!arm.on || haltRef.current) return;

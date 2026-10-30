@@ -105,6 +105,11 @@ test('PAPER: arms on chart 1, enters SELL on the double bottom that closes after
   // The Price Ladder's entry chime (two rising sine tones); the signal itself stays silent on an armed chart
   await expect.poll(tones).toContain('sine:784');
   expect((await tones()).some(t => t.startsWith('triangle:')), 'no signal chime on an armed chart').toBe(false);
+  // The open paper trade is in the strip's Positions, marked at the chart price (not at the broker)
+  const books = page.getByTestId('pnf-books');
+  await books.getByRole('tab', { name: /Positions/ }).click();
+  await expect(books.getByTestId('pnf-books-auto-positions')).toContainText('NIFTY FUT');
+  await expect(books.getByTestId('pnf-books-auto-positions')).toContainText('-65');
   await page.waitForTimeout(2500);
   expect(orders.length, 'the same signal is never entered twice').toBe(1);
 
@@ -115,12 +120,23 @@ test('PAPER: arms on chart 1, enters SELL on the double bottom that closes after
   expect(state.ledger.rows[0]).toMatchObject({ reason: 'reversal', side: 'SELL', exitPrice: 100 });
   expect(Math.round(state.ledger.rows[0].pnl!)).toBe(-46);                      // (99.3 - 100) x 65
   expect(orders.length, 'a paper exit sends nothing').toBe(1);
+  // Markers sit on the signal's own column (the O column that broke below: col 2) and the reversal X column (col 3),
+  // never on the column that happened to be forming when AUTO acted.
+  const panel1 = page.getByTestId('pnf-panel').nth(0);
+  await expect(panel1.locator('[data-testid="pnf-trade-marker"][data-action="SELL"]')).toHaveAttribute('data-col', '2');
+  await expect(panel1.locator('[data-testid="pnf-trade-marker"][data-action="BUY"]')).toHaveAttribute('data-col', '3');
   await expect(page.getByTestId('pnf-auto-status-1')).not.toContainText('SHORT');
   await expect.poll(tones, { message: 'the exit chime (two falling sine tones)' }).toContain('sine:698');
 
-  // The AUTO tab in the bottom strip lists it
-  await page.getByTestId('pnf-books').getByRole('tab', { name: /AUTO/ }).click();
-  await expect(page.getByTestId('pnf-books').locator('tbody tr').first()).toContainText('reversal');
+  // Its P&L shows in the header's PAPER P&L chip, the strip, the P&L tab and the AUTO tab
+  await expect(page.getByTestId('header-pnl-margin')).toContainText('-₹46');
+  await expect(books.getByTestId('pnf-books-auto-paper')).toHaveText('-₹46');
+  await expect(books.getByTestId('pnf-books-auto-positions')).toHaveCount(0);   // closed: no longer an open position
+  await books.getByRole('tab', { name: 'P&L' }).click();
+  await expect(books.getByTestId('pnf-books-auto-pnl')).toContainText('-₹46');
+  await expect(books.getByTestId('pnf-books-auto-pnl')).toContainText('0 / 1');   // open / closed
+  await books.getByRole('tab', { name: /AUTO/ }).click();
+  await expect(books.locator('tbody tr').first()).toContainText('reversal');
 });
 
 test('REAL: arming takes a second click; entry is reserved then confirmed; the exit sends exitOwn with AUTO\'s own units', async ({ page }) => {

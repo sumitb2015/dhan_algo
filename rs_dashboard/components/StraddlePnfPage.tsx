@@ -33,6 +33,7 @@ import {
 import { usePnfFeed, type PnfFeed } from './straddlePnf/usePnfFeed';
 import { usePnfAlerts } from './straddlePnf/usePnfAlerts';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent } from './straddlePnf/usePnfAuto';
+import { autoDaySummary, autoMarkers } from '@/lib/pnfAutoLedger';
 import AutoControls from './straddlePnf/AutoControls';
 
 // Point & Figure with a 1-click execution trade bar, picked with Index | Equity | Futures | Options: an NSE index or stock, a
@@ -119,7 +120,8 @@ const readMarkers = (key: string): PnfExecutionMarker[] => {
     const raw = sessionStorage.getItem(`${MARKERS_KEY}${key}`);
     const parsed = raw ? JSON.parse(raw) as PnfExecutionMarker[] : [];
     // A marker carries only its time and price: each chart finds its own column from its own box size. Older ones drop theirs.
-    return Array.isArray(parsed) ? parsed.map(m => ({ ...m, col: undefined })) : [];
+    // AUTO markers once saved here (ids `auto-…`, placed at the decision time) are now drawn from the ledger instead.
+    return Array.isArray(parsed) ? parsed.filter(m => !String(m.id).startsWith('auto-')).map(m => ({ ...m, col: undefined })) : [];
   } catch { return []; }
 };
 
@@ -277,14 +279,11 @@ function StraddlePnfPage() {
     else if (e.kind === 'info') toast.warning(e.text);
     else {
       (e.kind === 'entry' && e.side === 'SELL' ? toast.error : toast.success)(e.text);
-      if (e.target && e.side && e.price) {
-        const t = Math.floor(nowSec());
-        handleTradeExecuted({ id: `auto-${t}-${e.chart}-${e.kind}`, t, action: e.side, price: e.price, lots: e.lots ?? 1, mode: e.mode ?? 'PAPER', estimate: e.mode === 'REAL' }, e.target);
-      }
+      // The chart markers of AUTO trades come from the ledger (autoMarkers): on the signal bar, not at the decision time.
     }
     // Only the leader tab runs AUTO, so only it rings: entry (rising), exit (falling), a refusal or a halt (warn buzz).
     if (leaderRef.current && !mutedRef.current) playPnfChime(pnfChimeFor({ kind: 'auto', type: e.kind }));
-  }, [handleTradeExecuted, leaderRef]);
+  }, [leaderRef]);
   const disarm = useCallback((c: ChartId) => setAutoArm(a => (a[c].on ? { ...a, [c]: DISARMED } : a)), []);
   const priceOf = (f: PnfFeed) => (f.live ? f.live.ce + f.live.pe : null);
   const auto1 = usePnfAuto({
@@ -298,6 +297,10 @@ function StraddlePnfPage() {
     onEvent: onAutoEvent, onDisarm: () => disarm(2),
   });
   const autoOf = (c: ChartId) => (c === 2 ? auto2 : auto1);
+  // An open AUTO row is marked at the price of a chart showing its contract (null when neither chart does).
+  const autoPrice = (k: string) => (k === targetKey(target1) ? priceOf(feed1) : dual && k === targetKey(target2) ? priceOf(feed2) : null);
+  const autoToday = autoLedger.rows.filter(r => r.day === istToday());
+  const autoPaper = autoDaySummary(autoToday, istToday(), 'PAPER', autoPrice);
   // Signals depend on the instrument and the box settings: while a chart is armed or holds an AUTO position, they are frozen.
   const locked = (c: ChartId) => autoArm[c].on || !!autoOf(c).row;
   const activeLocked = locked(active);
@@ -395,7 +398,8 @@ function StraddlePnfPage() {
       scrip: dual ? `${feed.scrip} (${boxText(st)})` : feed.scrip,
       feedPrevClose: feed.trustedPrevClose,
       sessionTag: feed.sessionTag,
-      tradeMarkers: markers[targetKey(target)] ?? [],
+      // Manual trade-bar markers (this browser session) + AUTO trades from the ledger, on their signal / reversal bars.
+      tradeMarkers: [...(markers[targetKey(target)] ?? []), ...autoMarkers(autoToday, targetKey(target)).map(m => ({ ...m, estimate: m.mode === 'REAL' }))],
       error: feed.loaded?.error ?? (feed.complete ? undefined : contractError[c] ?? undefined),
       active: active === c,
       onActivate: dual ? () => activate(c) : undefined,
@@ -438,7 +442,8 @@ function StraddlePnfPage() {
               <HeaderIndexChips />
               <span className="w-px h-5 bg-zinc-800 shrink-0" />
               <BrokerPicker value={broker} onChange={setBroker} brokers={BROKERS} />
-              <HeaderPnlMargin broker={broker} mode={tradeMode} paperPnl={paperPnl} />
+              <HeaderPnlMargin broker={broker} mode={tradeMode} paperPnl={paperPnl + autoPaper.total}
+                               paperNote={autoToday.some(r => r.mode === 'PAPER') ? `trade bar ${Math.round(paperPnl)} + AUTO ${Math.round(autoPaper.total)} (booked ${Math.round(autoPaper.realised)}, open ${Math.round(autoPaper.unrealised)})` : undefined} />
             </div>
           </div>
           <div className="order-3 2xl:order-4 ml-auto flex items-center gap-2 shrink-0">
@@ -564,7 +569,7 @@ function StraddlePnfPage() {
           )}
         </div>
       </div>
-      <BrokerBooks broker={broker} open={booksOpen} onOpenChange={changeBooksOpen} autoRows={autoLedger.rows.filter(r => r.day === today)} />
+      <BrokerBooks broker={broker} open={booksOpen} onOpenChange={changeBooksOpen} autoRows={autoToday} autoPrice={autoPrice} />
     </div>
   );
 }
