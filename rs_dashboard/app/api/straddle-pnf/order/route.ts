@@ -18,7 +18,7 @@ export { MAX_PNF_LOTS, type PnfOrderBody, type PnfLegInput };
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
     const body = (await req.json()) as PnfOrderBody;
-    const { broker = 'dhan', mode = 'PAPER', action, productType = 'INTRADAY' } = body;
+    const { broker = 'dhan', mode = 'PAPER', action, productType = 'INTRADAY', legs } = body;
 
     const validation = validatePnfOrder(body);
     if (!validation.valid) {

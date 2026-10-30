@@ -46,12 +46,12 @@ export function hhmmToTimeString(hhmm: number): string {
 /** Read price ladder settings from debug/price_ladder_settings.json with fallback to defaults. */
 export function readLadderSettings(): PriceLadderSettings {
   try {
-    if (fs.existsSync(SETTINGS_FILE)) {
-      const stat = fs.statSync(SETTINGS_FILE);
+    if (fs.existsSync(/*turbopackIgnore: true*/ SETTINGS_FILE)) {
+      const stat = fs.statSync(/*turbopackIgnore: true*/ SETTINGS_FILE);
       if (cachedSettings && cachedMtime === stat.mtimeMs) {
         return cachedSettings;
       }
-      const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) as Partial<PriceLadderSettings>;
+      const raw = JSON.parse(fs.readFileSync(/*turbopackIgnore: true*/ SETTINGS_FILE, 'utf8')) as Partial<PriceLadderSettings>;
       const mcxTime = typeof raw.mcxAutoExitTime === 'string' && timeStringToHhmm(raw.mcxAutoExitTime) != null
         ? raw.mcxAutoExitTime
         : DEFAULT_PRICE_LADDER_SETTINGS.mcxAutoExitTime;
@@ -89,12 +89,12 @@ export function writeLadderSettings(patch: Partial<PriceLadderSettings>): PriceL
 
   try {
     const dir = path.dirname(SETTINGS_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(/*turbopackIgnore: true*/ dir)) fs.mkdirSync(/*turbopackIgnore: true*/ dir, { recursive: true });
     const tmp = `${SETTINGS_FILE}.tmp.${Date.now()}`;
-    fs.writeFileSync(tmp, JSON.stringify(next, null, 2), 'utf8');
-    fs.renameSync(tmp, SETTINGS_FILE);
+    fs.writeFileSync(/*turbopackIgnore: true*/ tmp, JSON.stringify(next, null, 2), 'utf8');
+    fs.renameSync(/*turbopackIgnore: true*/ tmp, /*turbopackIgnore: true*/ SETTINGS_FILE);
     cachedSettings = next;
-    cachedMtime = fs.statSync(SETTINGS_FILE).mtimeMs;
+    cachedMtime = fs.statSync(/*turbopackIgnore: true*/ SETTINGS_FILE).mtimeMs;
   } catch (err) {
     console.error('[price-ladder-settings] failed to save settings:', err);
   }
