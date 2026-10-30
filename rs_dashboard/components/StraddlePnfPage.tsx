@@ -18,7 +18,7 @@ import {
   type LegQuote, type Market, type Tick,
 } from '@/lib/straddlePnfLive';
 import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
-import { DEFAULT_SETTINGS, SETTINGS_KEY, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
+import { DEFAULT_SETTINGS, SETTINGS_KEY, boxText, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
 import {
   DEFAULT_TARGETS, SEGMENTS, isComplete, parseTarget, readTargets, targetKey, targetLabel, targetQuery, type Segment, type Target,
@@ -314,7 +314,7 @@ export default function StraddlePnfPage() {
               <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {segLabel}</p>
               <h1 className="text-sm font-bold text-white tracking-tight leading-none">Point &amp; Figure</h1>
               <p className="text-[10px] text-zinc-500 font-medium mt-1">
-                {settings.interval}-min · {settings.boxPct}% box · {settings.reversal}-box reversal · signals only · {fno ? label : name ?? target.name}
+                {settings.interval}-min · {boxText(settings)} · {settings.reversal}-box reversal · signals only · {fno ? label : name ?? target.name}
               </p>
             </div>
           </div>

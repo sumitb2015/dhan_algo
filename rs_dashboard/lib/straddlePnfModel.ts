@@ -3,13 +3,17 @@
 // interval first; the box size is a percentage of the first price.
 import { buildPnf, detectSignals, exitTags, sessionOf, vwap, type Bar, type PnfColumn, type PnfSignal } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
+import { MIN_BOX_PCT, type BoxMode } from './straddlePnfSettings.ts';
 
 export type Overlay = 'vwap' | 'sma';
 
 export type PanelModel = {
   box: number;
-  /** The price the box percentage was taken from (first usable close of the loaded history). */
+  /** The price the grid is anchored on: the first usable close (box in %), or that price rounded to a whole box (box in points). */
   anchor: number;
+  /** How the box was set, and for points whether it was raised to the MIN_BOX_PCT floor (a smaller box would draw a vast chart). */
+  boxMode: BoxMode;
+  boxClamped: boolean;
   columns: PnfColumn[];
   signals: PnfSignal[];
   exits: { col: number; bar: number }[];
@@ -147,6 +151,9 @@ export type PanelOptions = {
   interval?: number;
   /** Box size as a percentage of the first price (default 0.5). */
   boxPct?: number;
+  /** 'pts' sizes the box in price points (`boxPts`) instead of `boxPct`. */
+  boxMode?: BoxMode;
+  boxPts?: number;
   /** Boxes against the column needed to reverse it (default 3). */
   reversal?: number;
   /** Boxes in the SMA overlay (default SMA_PERIOD): it averages P&F box values, not bar closes. */
@@ -174,7 +181,14 @@ export function buildPanelModel(closedBars: Bar[], overlay: Overlay, opts: Panel
   const { bars, endIdx } = resample(closedBars, interval, opts.sessionCloseMin);
   const vw = endIdx.map(i => vw1[i]);
   const firstPrice = closedBars.find(b => b.straddle > 0)?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
-  const { anchor, box, columns } = buildPnf(bars, boxPct, opts.reversal ?? 3, firstPrice);
+  // Box in points: never below MIN_BOX_PCT of the price (0.05 points on NIFTY would be ~460 boxes per 1% move), and the grid is
+  // anchored on a whole multiple of the box so the rows land on round prices (a 50-point box: ... 22,950, 23,000 ...).
+  const ptsAsked = opts.boxMode === 'pts' && (opts.boxPts ?? 0) > 0 ? (opts.boxPts as number) : null;
+  const minBox = firstPrice ? (firstPrice * MIN_BOX_PCT) / 100 : 0;
+  const boxSize = ptsAsked !== null && firstPrice ? Math.max(ptsAsked, minBox) : undefined;
+  const boxClamped = ptsAsked !== null && !!firstPrice && ptsAsked < minBox;
+  const anchorPrice = boxSize && firstPrice ? Math.round(firstPrice / boxSize) * boxSize || firstPrice : firstPrice;
+  const { anchor, box, columns } = buildPnf(bars, boxPct, opts.reversal ?? 3, anchorPrice, boxSize);
   const smaPeriod = opts.smaPeriod ?? SMA_PERIOD;
   const boxSma = boxSmaOf(columns, box, smaPeriod);
   const vwapAvailable = opts.volume !== false && closedBars.some(b => b.vol > 0);
@@ -189,12 +203,14 @@ export function buildPanelModel(closedBars: Bar[], overlay: Overlay, opts: Panel
   // Same grid and box, with the forming 1-min bar and the unfinished chart bar included. A forming price that would add more
   // than MAX_UNCONFIRMED_BOXES is treated as a bad tick and shows nothing unconfirmed: one wild print must not draw (and lay
   // out) hundreds of thousands of glyphs.
-  const live = buildPnf(resample(withForming, interval, opts.sessionCloseMin, true).bars, boxPct, opts.reversal ?? 3, firstPrice).columns;
+  const live = buildPnf(resample(withForming, interval, opts.sessionCloseMin, true).bars, boxPct, opts.reversal ?? 3, anchorPrice, boxSize).columns;
   const extra = unconfirmedBoxes(columns, live, box).reduce((n, u) => n + u.ks.length, 0);
   const liveColumns = extra > MAX_UNCONFIRMED_BOXES ? columns : live;
   return {
     box,
     anchor,
+    boxMode: ptsAsked !== null ? 'pts' : 'pct',
+    boxClamped,
     columns,
     signals: detectSignals(columns, bars, reference),
     exits: exitTags(columns, bars, reference),

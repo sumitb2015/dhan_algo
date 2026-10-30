@@ -109,6 +109,11 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   const change = liveValue !== null && changeBase ? liveValue - changeBase : null;
   const changePct = change !== null && changeBase ? (change / changeBase) * 100 : null;
   const lastSignal = signals.length ? signals[signals.length - 1] : null;
+  // How the box was set: a % of the first price, or price points (raised to the 0.05% floor when the points were too small).
+  const boxNote = model.boxMode === 'pts' ? (model.boxClamped ? 'points, raised to 0.05% of price' : 'points') : `${boxPct}% of ${fmt(model.anchor)}`;
+  const boxTitle = model.boxMode === 'pts'
+    ? `Box ${box.toFixed(2)} points${model.boxClamped ? ' (the points set were below 0.05% of the price, so the box was raised to that floor)' : ''}; rows sit on multiples of the box`
+    : `Box ${box.toFixed(2)} = ${boxPct}% of the first price ${fmt(model.anchor)}`;
   const sessionsInfo = model.sessions.length
     ? ` · ${model.sessions.length} sessions (${shortDate(model.sessions[0])} – ${shortDate(model.sessions[model.sessions.length - 1])})` : '';
 
@@ -322,12 +327,11 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
               {overlayNow !== null && <span className="font-semibold text-zinc-100">{` ${fmt(overlayNow)}`}</span>}
               {smaWaiting && <span className="text-zinc-500">{` needs ${model.smaPeriod} boxes (${totalBoxes} so far)`}</span>}
             </span>
-            <span data-testid="pnf-box-info" className="flex items-center gap-3 min-w-0 text-zinc-400 truncate"
-                  title={box > 0 ? `Box ${box.toFixed(2)} = ${boxPct}% of the first price ${fmt(model.anchor)}` : undefined}>
+            <span data-testid="pnf-box-info" className="flex items-center gap-3 min-w-0 text-zinc-400 truncate" title={box > 0 ? boxTitle : undefined}>
               {box > 0 ? (
                 <>
                   <span className="shrink-0">Box <span className="font-semibold text-zinc-100">{box.toFixed(2)}</span>{' '}
-                    <span className="text-zinc-500">({boxPct}% of {fmt(model.anchor)})</span></span>
+                    <span className={model.boxClamped ? 'text-amber-400' : 'text-zinc-500'}>({boxNote})</span></span>
                   <span className="shrink-0"><span className="font-semibold text-zinc-100">{reversal}-box</span> rev</span>
                   <span className="shrink-0"><span className="font-semibold text-zinc-100">{columns.length}</span> cols</span>
                   {model.sessions.length > 0 && (
@@ -375,7 +379,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         </p>
         <div className="mt-0.5 flex items-center justify-between gap-2">
           <p data-testid="pnf-box-info" className="text-[10px] font-mono text-zinc-500 truncate">
-            {box > 0 ? `Box ${box.toFixed(2)} (${boxPct}% of ${model.anchor.toFixed(2)}) · ${reversal}-box · ${columns.length} cols${sessionsInfo}` : 'Box —'}
+            {box > 0 ? `Box ${box.toFixed(2)} (${boxNote}) · ${reversal}-box · ${columns.length} cols${sessionsInfo}` : 'Box —'}
           </p>
           {lastSignal && (
             <span data-testid="pnf-last-signal"
@@ -429,7 +433,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         ) : loading ? (
           <p className="p-3 text-xs text-zinc-400">Loading…</p>
         ) : liveCols.length === 0 ? (
-          <p className="p-3 text-xs text-zinc-400">{`Building chart — the first column needs a ${boxPct}% move${interval > 1 ? ` on closed ${interval}-minute bars` : ''}.`}</p>
+          <p className="p-3 text-xs text-zinc-400">{`Building chart — the first column needs a ${model.boxMode === 'pts' ? 'one-box' : `${boxPct}%`} move${interval > 1 ? ` on closed ${interval}-minute bars` : ''}.`}</p>
         ) : (
           <div className="flex" style={{ width: contentW, height: contentH }}>
             <svg width={plotW} height={contentH} className="block shrink-0" role="img" aria-label={`${title} point and figure chart`}>

@@ -144,6 +144,10 @@ test('the VWAP / SMA toggle switches the overlay legend (a traded instrument), a
   await period.blur();
   await expect(period).toHaveValue('2');
   await expect(page.getByRole('button', { name: 'Decrease SMA period' })).toBeDisabled();   // 2 is the minimum
+  await period.fill('40');                                          // a half-typed draft is discarded by a step
+  await page.getByRole('button', { name: 'Increase SMA period' }).click();
+  await expect(period).toHaveValue('3');                            // stepped from the applied 2, not from 40
+  await page.getByRole('button', { name: 'Decrease SMA period' }).click();
   await page.getByRole('button', { name: 'Increase SMA period' }).click();
   await expect(period).toHaveValue('3');
   await expect(legend).toHaveText(/SMA 3/);
@@ -366,4 +370,45 @@ test('the chart has a crosshair: lines snapped to the column and box under the p
   await expect(panel.getByTestId('pnf-crosshair-readout')).toContainText(/box/);
   await page.mouse.move(5, 5);                                       // off the chart
   await expect(panel.getByTestId('pnf-crosshair')).toHaveCount(0);
+});
+
+test('the box can be set in points: the unit toggle swaps the input, Enter applies it, and % mode keeps its own value', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [] });
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Box unit' }).getByRole('button', { name: 'pts' }).click();
+  const pts = page.getByLabel('Box points');
+  await expect(pts).toHaveValue('10');                                            // the default points value
+  await pts.fill('2');
+  await expect(page.getByTestId('pnf-box-info')).not.toContainText('Box 2.00');  // typing alone changes nothing
+  await pts.press('Enter');
+  await expect(page.getByTestId('pnf-box-info')).toContainText('Box 2.00 (points)');
+  await expect(page.getByText('1-min · 2-pt box · 3-box reversal')).toBeVisible();
+  await pts.fill('-3');                                                           // invalid: reverts on commit
+  await pts.blur();
+  await expect(pts).toHaveValue('2');
+  await page.getByRole('group', { name: 'Box unit' }).getByRole('button', { name: '%' }).click();
+  await expect(page.getByLabel('Box %')).toHaveValue('0.5');
+  await expect(page.getByTestId('pnf-box-info')).toContainText('(0.5% of');
+  await page.reload();                                                            // both values and the mode persist
+  await expect(page.getByLabel('Box %')).toHaveValue('0.5');
+  await page.getByRole('group', { name: 'Box unit' }).getByRole('button', { name: 'pts' }).click();
+  await expect(page.getByLabel('Box points')).toHaveValue('2');
+});
+
+test('the box − / + buttons step to the next round size and apply at once, in either unit', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [] });
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('button', { name: 'Increase box size' }).click();
+  await expect(page.getByLabel('Box %')).toHaveValue('0.75');
+  await expect(page.getByTestId('pnf-box-info')).toContainText('(0.75% of');
+  await page.getByRole('button', { name: 'Decrease box size' }).click();
+  await page.getByRole('button', { name: 'Decrease box size' }).click();
+  await expect(page.getByLabel('Box %')).toHaveValue('0.4');
+  await page.getByRole('group', { name: 'Box unit' }).getByRole('button', { name: 'pts' }).click();
+  await page.getByLabel('Box points').fill('37');                                 // a half-typed draft is discarded by a step
+  await page.getByRole('button', { name: 'Increase box size' }).click();
+  await expect(page.getByLabel('Box points')).toHaveValue('20');                   // stepped from the applied 10, not from 37
+  await expect(page.getByTestId('pnf-box-info')).toContainText('Box 20.00 (points)');
 });

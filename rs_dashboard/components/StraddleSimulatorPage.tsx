@@ -8,7 +8,7 @@ import DataChip from './DataChip';
 import PnfPanel from './straddlePnf/PnfPanel';
 import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
 import SettingsControls, { SmaPeriodInput } from './straddlePnf/SettingsControls';
-import { DEFAULT_SETTINGS, SETTINGS_KEY, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
+import { DEFAULT_SETTINGS, SETTINGS_KEY, boxText, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
 import { newSignalsAfter, nextWatermark, capLog } from '@/lib/straddlePnfLive';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
@@ -234,7 +234,7 @@ export default function StraddleSimulatorPage() {
           <div>
             <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · NIFTY replay</p>
             <h1 className="text-sm font-bold text-white tracking-tight leading-none">Straddle Simulator</h1>
-            <p className="text-[10px] text-zinc-500 font-medium mt-1">Replay past sessions · {settings.interval}-min · {settings.boxPct}% box · {settings.reversal}-box reversal · signals only</p>
+            <p className="text-[10px] text-zinc-500 font-medium mt-1">Replay past sessions · {settings.interval}-min · {boxText(settings)} · {settings.reversal}-box reversal · signals only</p>
           </div>
         </div>
 

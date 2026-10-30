@@ -253,3 +253,22 @@ test('a wild forming price (a bad tick) draws no unconfirmed boxes instead of th
   assert.deepEqual(unconfirmedBoxes(wild.columns, wild.liveColumns, wild.box), []);
   assert.equal(wild.liveColumns, wild.columns);
 });
+
+// ── box in points ─────────────────────────────────────────────────────────────
+test('box in points: a fixed box, and the grid anchored on a whole multiple of it (round row prices)', () => {
+  const b = [100.3, 102.4, 104.6, 101.2].map((p, i) => ({ t: BASE_T + i * 60, ce: p, pe: 0, straddle: p, vol: 1 }));
+  const m = buildPanelModel(b, 'vwap', { boxMode: 'pts', boxPts: 1 });
+  assert.equal(m.box, 1);
+  assert.equal(m.anchor, 100);                                  // 100.3 rounded to the 1-point grid
+  assert.equal(m.boxMode, 'pts');
+  assert.equal(m.boxClamped, false);
+  assert.equal(m.columns[0].high, 100 + 4.5);                   // X up to the 104 row (top edge 104.5)
+});
+
+test('a points box below 0.05% of the price is raised to that floor and reported', () => {
+  const b = bars([0, 5, 2]);                                    // around 100
+  const m = buildPanelModel(b, 'vwap', { boxMode: 'pts', boxPts: 0.01 });
+  assert.ok(Math.abs(m.box - 0.05) < 1e-9);                     // 0.05% of 100
+  assert.equal(m.boxClamped, true);
+  assert.equal(buildPanelModel(b, 'vwap', { boxMode: 'pct', boxPct: 0.5 }).boxMode, 'pct');
+});

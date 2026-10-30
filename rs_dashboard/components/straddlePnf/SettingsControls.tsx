@@ -4,7 +4,8 @@ import { useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
 import { INTERVALS, type Interval } from '@/lib/straddlePnfInterval';
 import {
-  MAX_BOX_PCT, MIN_BOX_PCT, MAX_SMA_PERIOD, MIN_SMA_PERIOD, REVERSALS, parseBoxPct, parseSmaPeriod, type PnfSettings, type Reversal,
+  MAX_BOX_PCT, MIN_BOX_PCT, MAX_BOX_PTS, MIN_BOX_PTS, MAX_SMA_PERIOD, MIN_SMA_PERIOD, REVERSALS, parseBoxPct, parseBoxPts, parseSmaPeriod, stepBox,
+  type PnfSettings, type Reversal,
 } from '@/lib/straddlePnfSettings';
 
 // Bar interval, box size, reversal and the SMA period: shared by the live page and the simulator so they behave identically.
@@ -38,6 +39,13 @@ function CommitInput({ value, parse, onCommit, label, title, inputMode, width }:
   );
 }
 
+/**
+ * On a stepper button: keep focus in the text box, so pressing the button does not blur it and commit a half-typed draft first.
+ * The step then starts from the applied value and the re-keyed box drops the draft (dhan-commit-on-blur: steppers never step
+ * from a draft).
+ */
+const keepFocus = (e: React.MouseEvent) => e.preventDefault();
+
 const STEP_BTN = 'inline-flex items-center justify-center h-7 w-6 border border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800 hover:text-white disabled:opacity-40 disabled:pointer-events-none';
 
 /**
@@ -55,14 +63,14 @@ export function SmaPeriodInput({ settings, onChange }: { settings: PnfSettings; 
       <span>Period</span>
       <div className="inline-flex items-center">
         <button type="button" aria-label="Decrease SMA period" title="Decrease the SMA period by 1 (Shift: 10)" disabled={p <= MIN_SMA_PERIOD}
-                onClick={e => step(-1, e.shiftKey)} className={`${STEP_BTN} rounded-l-md border-r-0`}>
+                onMouseDown={keepFocus} onClick={e => step(-1, e.shiftKey)} className={`${STEP_BTN} rounded-l-md border-r-0`}>
           <Minus className="w-3 h-3" aria-hidden="true" />
         </button>
         <CommitInput key={p} value={p} parse={parseSmaPeriod} label="SMA period" inputMode="numeric" width="w-12 rounded-none text-center"
                      title={`SMA period in P&F boxes (${MIN_SMA_PERIOD}-${MAX_SMA_PERIOD}): it averages box values, not candle closes; press Enter to apply`}
                      onCommit={n => onChange({ ...settings, smaPeriod: n })} />
         <button type="button" aria-label="Increase SMA period" title="Increase the SMA period by 1 (Shift: 10)" disabled={p >= MAX_SMA_PERIOD}
-                onClick={e => step(1, e.shiftKey)} className={`${STEP_BTN} rounded-r-md border-l-0`}>
+                onMouseDown={keepFocus} onClick={e => step(1, e.shiftKey)} className={`${STEP_BTN} rounded-r-md border-l-0`}>
           <Plus className="w-3 h-3" aria-hidden="true" />
         </button>
       </div>
@@ -71,6 +79,8 @@ export function SmaPeriodInput({ settings, onChange }: { settings: PnfSettings; 
 }
 
 export default function SettingsControls({ settings, onChange }: { settings: PnfSettings; onChange: (next: PnfSettings) => void }) {
+  const boxValue = settings.boxMode === 'pct' ? settings.boxPct : settings.boxPts;
+  const setBox = (n: number) => { if (n !== boxValue) onChange(settings.boxMode === 'pct' ? { ...settings, boxPct: n } : { ...settings, boxPts: n }); };
   return (
     <>
       <label className={LABEL}>
@@ -80,12 +90,38 @@ export default function SettingsControls({ settings, onChange }: { settings: Pnf
           {INTERVALS.map(n => <option key={n} value={n}>{n} min</option>)}
         </select>
       </label>
-      <label className={LABEL}>
-        Box %
-        <CommitInput key={settings.boxPct} value={settings.boxPct} parse={parseBoxPct} label="Box %" inputMode="decimal" width="w-16"
-                     title={`Box size as a % of the first price (${MIN_BOX_PCT}-${MAX_BOX_PCT}); press Enter to apply`}
-                     onCommit={n => onChange({ ...settings, boxPct: n })} />
-      </label>
+      {/* Box size as a % of the first price or as fixed price points; each mode keeps its own value. */}
+      <div className={LABEL}>
+        <span>Box</span>
+        <div className="inline-flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-800 bg-zinc-900" role="group" aria-label="Box unit">
+          {(['pct', 'pts'] as const).map(m => (
+            <button key={m} type="button" aria-pressed={settings.boxMode === m} onClick={() => settings.boxMode !== m && onChange({ ...settings, boxMode: m })}
+                    className={`px-1.5 h-5 rounded text-[10px] font-bold normal-case tracking-normal ${settings.boxMode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-100'}`}>
+              {m === 'pct' ? '%' : 'pts'}
+            </button>
+          ))}
+        </div>
+        <div className="inline-flex items-center">
+          {/* − / + step to the next round size and apply at once, from the applied value (a half-typed draft is discarded). */}
+          <button type="button" aria-label="Decrease box size" title="Smaller box (next round size)" disabled={stepBox(settings.boxMode, boxValue, -1) === boxValue}
+                  onMouseDown={keepFocus} onClick={() => setBox(stepBox(settings.boxMode, boxValue, -1))} className={`${STEP_BTN} rounded-l-md border-r-0`}>
+            <Minus className="w-3 h-3" aria-hidden="true" />
+          </button>
+          {settings.boxMode === 'pct' ? (
+            <CommitInput key={`pct:${settings.boxPct}`} value={settings.boxPct} parse={parseBoxPct} label="Box %" inputMode="decimal" width="w-14 rounded-none text-center"
+                         title={`Box size as a % of the first price (${MIN_BOX_PCT}-${MAX_BOX_PCT}); press Enter to apply`}
+                         onCommit={setBox} />
+          ) : (
+            <CommitInput key={`pts:${settings.boxPts}`} value={settings.boxPts} parse={parseBoxPts} label="Box points" inputMode="decimal" width="w-14 rounded-none text-center"
+                         title={`Box size in price points (${MIN_BOX_PTS}-${MAX_BOX_PTS.toLocaleString('en-IN')}); never below ${MIN_BOX_PCT}% of the price; press Enter to apply`}
+                         onCommit={setBox} />
+          )}
+          <button type="button" aria-label="Increase box size" title="Bigger box (next round size)" disabled={stepBox(settings.boxMode, boxValue, 1) === boxValue}
+                  onMouseDown={keepFocus} onClick={() => setBox(stepBox(settings.boxMode, boxValue, 1))} className={`${STEP_BTN} rounded-r-md border-l-0`}>
+            <Plus className="w-3 h-3" aria-hidden="true" />
+          </button>
+        </div>
+      </div>
       <label className={LABEL}>
         Reversal
         <select aria-label="Reversal" value={settings.reversal} className={`${FIELD} border-zinc-700`}
