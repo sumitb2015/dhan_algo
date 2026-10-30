@@ -12,9 +12,9 @@ import SettingsControls, { SmaPeriodInput } from './straddlePnf/SettingsControls
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/alertSound';
-import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
+import { buildConfirmedModel, withLive, type Overlay } from '@/lib/straddlePnfModel';
 import {
-  foldTick, newSignalsAfter, nextWatermark, capLog, inSession, mergeHistory, feedCloseTrusted, istMinuteOfDay, legsTick, SESSION_MIN,
+  foldTick, newSignalsAfter, nextWatermark, capLog, inSession, mergeHistory, feedCloseTrusted, istMinuteOfDay, isWildTick, legsTick, sessionWindow,
   type LegQuote, type Market, type Tick,
 } from '@/lib/straddlePnfLive';
 import { HeaderIndexChips } from '@/components/triplestraddle/HeaderIndexChips';
@@ -22,7 +22,7 @@ import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
 import { DEFAULT_SETTINGS, SETTINGS_KEY, boxText, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
 import {
-  DEFAULT_TARGETS, SEGMENTS, isComplete, parseTarget, readTargets, targetKey, targetLabel, targetQuery, type Segment, type Target,
+  DEFAULT_TARGETS, SEGMENTS, alertId, isComplete, parseTarget, readTargets, targetKey, targetLabel, targetQuery, type Segment, type Target,
 } from '@/lib/pnfTarget';
 
 // Point & Figure of ONE price series, signals only (this page places no orders), picked with Index | Equity | Futures | Options:
@@ -79,6 +79,10 @@ export default function StraddlePnfPage() {
   const [settings, setSettings] = useState<PnfSettings>(DEFAULT_SETTINGS);
   const [bars, setBars] = useState<Bar[]>([]);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
+  // Bumped on every history load: the confirmed chart is rebuilt then (the API may have revised closed bars), and when a bar closes.
+  const [histVersion, setHistVersion] = useState(0);
+  // The contract pickers' error (e.g. an underlying with no live futures): shown in the chart instead of an endless "Loading…".
+  const [contractError, setContractError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [recenter, setRecenter] = useState(0);
@@ -93,6 +97,8 @@ export default function StraddlePnfPage() {
   const [now, setNow] = useState(0);
   // The newest WebSocket price; kept so a history refresh (which replaces the bars) can lay it back on top.
   const tickRef = useRef<Tick | null>(null);
+  // The last bar's close, for the live poll's bad-tick check (kept in a ref so the poll interval need not restart per tick).
+  const lastCloseRef = useRef<number | undefined>(undefined);
   const [feedPrevClose, setFeedPrevClose] = useState<number | null>(null);
   // A feed price outside the trading session (NSE pre-open, post-close): shown in the header, never folded into a chart bar.
   const [outQuote, setOutQuote] = useState<{ ce: number; pe: number; t: number } | null>(null);
@@ -159,6 +165,7 @@ export default function StraddlePnfPage() {
       const tk = tickRef.current;
       const instruments = j.instruments ?? (j.instrument ? [j.instrument] : []);
       setBars(prev => mergeHistory(hist, prev, tk, instruments.length < 2));
+      setHistVersion(v => v + 1);
       setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], instruments });
       if (j.name) setName(j.name);
       setLoadError(null);
@@ -199,6 +206,8 @@ export default function StraddlePnfPage() {
         setFeedPrevClose(closes.every(c => c !== null) ? closes.reduce((a, c) => a + (c as number), 0) : null);
         const tick = legsTick(legs.map(l => l.quote));
         if (!tick) { setOutQuote(null); return; }
+        // A print 10x away from the last bar is a bad tick, not a move: it never reaches the chart (the next history load has the truth).
+        if (isWildTick(lastCloseRef.current, tick.ce + tick.pe)) return;
         // Pre-open values are indicative, not trades, and the history API has no bars for them: header only.
         if (!inSession(tick.t, market)) { setOutQuote({ ce: tick.ce, pe: tick.pe, t: tick.t }); return; }
         setOutQuote(null);
@@ -213,16 +222,26 @@ export default function StraddlePnfPage() {
 
   // ── panel model: CLOSED bars only, so a signal never repaints ───────────
   // An index's feed "volume" is its constituents' turnover, not traded volume: no VWAP, the box SMA stands in for it.
-  const vwapAllowed = target.kind !== 'index';
+  // An index's feed "volume" is its constituents' turnover, not traded volume: no VWAP. Whatever the instrument, the button follows
+  // the model once bars are in (bars without volume, e.g. an illiquid option, get the box SMA too), so the toggle never
+  // contradicts the chart.
+  const indexNoVwap = target.kind === 'index';
+  const last = bars[bars.length - 1];
+  const formingBar = last !== undefined && now > 0 && last.t >= minuteOf(now / 1000) ? last : undefined;   // the minute still forming
+  const closed = formingBar ? bars.slice(0, -1) : bars;
+  const closedLast = closed[closed.length - 1];
+  // The confirmed chart depends only on the closed bars, so it is rebuilt when a bar closes or history reloads, not on every tick.
+  const closedKey = `${closed.length}:${closed[0]?.t ?? 0}:${closedLast?.t ?? 0}:${closedLast?.straddle ?? 0}:${histVersion}`;
+  const sessionClose = sessionWindow(market, now / 1000)[1];
+  const confirmed = useMemo(
+    () => buildConfirmedModel(closed, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [closedKey, overlay, settings, sessionClose, indexNoVwap],
+  );
+  const model = useMemo(() => withLive(confirmed, formingBar), [confirmed, formingBar]);
+  useEffect(() => { lastCloseRef.current = last?.straddle; });
+  const vwapAllowed = !indexNoVwap && (closed.length === 0 || model.vwapAvailable);
   const shownOverlay: Overlay = vwapAllowed ? overlay : 'sma';
-  const model = useMemo(() => {
-    const last = bars[bars.length - 1];
-    const forming = last !== undefined && last.t >= minuteOf(now / 1000) && now > 0; // the minute still forming is not closed yet
-    return buildPanelModel(forming ? bars.slice(0, -1) : bars, overlay, {
-      ...settings, sessionCloseMin: SESSION_MIN[market][1], forming: forming ? last : undefined,
-      volume: vwapAllowed,
-    });
-  }, [bars, overlay, settings, now, market, vwapAllowed]);
 
   // A chart's name for the alert log and the header's scrip: the symbol (with its full name for an index / stock), or the contract.
   const label = targetLabel(target);
@@ -237,7 +256,7 @@ export default function StraddlePnfPage() {
     if (rebaseline) { watermarkRef.current = model.lastBarT ?? watermarkRef.current; return; }
     const wm = watermarkRef.current || model.lastBarT || 0;
     const fresh: LogEntry[] = newSignalsAfter(model.signals, wm).map(s => ({
-      id: `${target.kind}:${target.symbol}:${s.kind}:${s.t}`, t: s.t, strike: loaded.key, label, kind: s.kind, price: s.price, belowVwap: s.belowVwap,
+      id: alertId(target, s.kind, s.t), t: s.t, strike: loaded.key, label, kind: s.kind, price: s.price, belowVwap: s.belowVwap,
     }));
     watermarkRef.current = nextWatermark(wm, model.lastBarT);
     if (!fresh.length) return;
@@ -294,7 +313,7 @@ export default function StraddlePnfPage() {
   const lastBar = bars[bars.length - 1];
   const live = outQuote ? { ce: outQuote.ce, pe: outQuote.pe } : lastBar ? { ce: lastBar.ce, pe: lastBar.pe } : null;
   const segLabel = SEGMENTS.find(x => x.id === target.kind)?.label ?? '';
-  const sessionTag = outQuote ? (istMinuteOfDay(outQuote.t) < SESSION_MIN[market][0] ? 'Pre-open' : 'Post-close') : null;
+  const sessionTag = outQuote ? (istMinuteOfDay(outQuote.t) < sessionWindow(market, outQuote.t)[0] ? 'Pre-open' : 'Post-close') : null;
   // The feed's previous close is the official one (a stock's closing price is not its last 1-min close), but only until the bell.
   const tradingDay = market === 'NSE' ? isNseTradingDay(istDateIso(now)) : true;
   // Before today's first price the header shows the last session's close, measured (from history) against the session before it.
@@ -321,7 +340,7 @@ export default function StraddlePnfPage() {
           </div>
           <span className="hidden 2xl:block w-px h-8 bg-zinc-800 shrink-0 2xl:order-2" />
           <div className="order-4 basis-full 2xl:order-3 2xl:basis-0 2xl:flex-1 min-w-0 flex items-center gap-x-4 gap-y-2 flex-wrap">
-            <InstrumentBar target={target} onSegment={pickSegment} onPick={choose} />
+            <InstrumentBar target={target} onSegment={pickSegment} onPick={choose} onError={setContractError} />
             {/* Nifty and India VIX vs the previous close: the shared indices WebSocket bridge's snapshot, started on mount. */}
             <div className="ml-auto shrink-0"><HeaderIndexChips /></div>
           </div>
@@ -343,7 +362,9 @@ export default function StraddlePnfPage() {
               {/* An index has no traded volume, so no VWAP: the button is disabled and the SMA is drawn (the saved choice is kept for
                   stocks, futures and options). */}
               <button type="button" aria-pressed={shownOverlay === 'vwap'} onClick={() => pickOverlay('vwap')} disabled={!vwapAllowed}
-                      title={vwapAllowed ? undefined : 'An index has no traded volume, so there is no VWAP: the SMA of the P&F boxes is used'}
+                      title={vwapAllowed ? undefined : indexNoVwap
+                        ? 'An index has no traded volume, so there is no VWAP: the SMA of the P&F boxes is used'
+                        : 'These bars carry no volume, so there is no VWAP: the SMA of the P&F boxes is used'}
                       className={`${seg(shownOverlay === 'vwap')} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-zinc-400`}>VWAP</button>
               <button type="button" aria-pressed={shownOverlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(shownOverlay === 'sma')}>SMA {settings.smaPeriod}</button>
             </div>
@@ -379,7 +400,7 @@ export default function StraddlePnfPage() {
             scrip={scrip}
             feedPrevClose={trustedPrevClose}
             sessionTag={sessionTag}
-            error={loaded?.error}
+            error={loaded?.error ?? (complete ? undefined : contractError ?? undefined)}
           />
         </div>
       </div>

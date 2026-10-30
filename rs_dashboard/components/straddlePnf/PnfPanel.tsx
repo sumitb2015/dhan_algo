@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
 import { Minus, Plus, RotateCcw } from 'lucide-react';
 import { layoutPanel, AXIS_W, PAD_TOP } from '@/lib/straddlePnfLayout';
+import { MIN_BOX_PTS_PCT } from '@/lib/straddlePnfSettings';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 // One straddle P&F chart: X (green) / O (red) glyphs on a visible box grid, VWAP or SMA line, a bar at the level every double
@@ -19,6 +20,7 @@ export type PnfPanelProps = {
   model: PanelModel;
   /** Live straddle price (open minute), or null before the first tick. */
   live: { ce: number; pe: number } | null;
+  /** The overlay the page asked for; the panel draws and labels `model.overlayKind` (an index or a no-volume series gets the SMA). */
   overlay: Overlay;
   stale: boolean;
   /** Set for a few seconds after a signal fires on this chart. */
@@ -90,13 +92,13 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
   // An index has no volume: its "VWAP" is a plain cumulative average, and says so.
   // The line actually drawn: an instrument without traded volume (an index) always gets the box SMA, whatever was asked.
-  const kind = model.vwapAvailable ? overlay : model.overlayKind;
+  const kind = model.overlayKind;
   const overlayLabel = kind === 'vwap' ? 'VWAP' : `SMA ${model.smaPeriod}`;
   const overlayNow = model.overlayNow;
   // The SMA averages P&F boxes: say so when there are not enough of them yet, rather than show no line and no reason.
@@ -110,9 +112,9 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   const changePct = change !== null && changeBase ? (change / changeBase) * 100 : null;
   const lastSignal = signals.length ? signals[signals.length - 1] : null;
   // How the box was set: a % of the first price, or price points (raised to the 0.05% floor when the points were too small).
-  const boxNote = model.boxMode === 'pts' ? (model.boxClamped ? 'points, raised to 0.05% of price' : 'points') : `${boxPct}% of ${fmt(model.anchor)}`;
+  const boxNote = model.boxMode === 'pts' ? (model.boxClamped ? `points, raised to ${MIN_BOX_PTS_PCT}% of price` : 'points') : `${boxPct}% of ${fmt(model.anchor)}`;
   const boxTitle = model.boxMode === 'pts'
-    ? `Box ${box.toFixed(2)} points${model.boxClamped ? ' (the points set were below 0.05% of the price, so the box was raised to that floor)' : ''}; rows sit on multiples of the box`
+    ? `Box ${box.toFixed(2)} points${model.boxClamped ? ' (the points set were below ${MIN_BOX_PTS_PCT}% of the price, so the box was raised to that floor)' : ''}; rows sit on multiples of the box`
     : `Box ${box.toFixed(2)} = ${boxPct}% of the first price ${fmt(model.anchor)}`;
   const sessionsInfo = model.sessions.length
     ? ` · ${model.sessions.length} sessions (${shortDate(model.sessions[0])} – ${shortDate(model.sessions[model.sessions.length - 1])})` : '';

@@ -20,16 +20,28 @@ const STEP = 'inline-flex items-center justify-center h-7 w-6 border border-zinc
 const SIDES: { id: OptSide; label: string }[] = [{ id: 'CE', label: 'CE' }, { id: 'PE', label: 'PE' }, { id: 'STRADDLE', label: 'CE+PE' }];
 const fmtStrike = (k: number) => k.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
-export default function InstrumentBar({ target, onSegment, onPick }: {
+/** The strike in `strikes` nearest `k` (the first of two equally near). */
+const nearest = (strikes: number[], k: number) => strikes.reduce((best, x) => (Math.abs(x - k) < Math.abs(best - k) ? x : best), strikes[0]);
+
+export default function InstrumentBar({ target, onSegment, onPick, onError }: {
   target: Target;
   onSegment: (s: Segment) => void;
   onPick: (t: Target) => void;
+  /** The contract list's error for the current pick (null when fine or not a futures / options pick): the page shows it in the chart. */
+  onError?: (msg: string | null) => void;
 }) {
   const fno = target.kind === 'futures' || target.kind === 'options';
   const [list, setContracts] = useState<Contracts | null>(null);
   const of = `${target.kind}|${target.symbol}`;
   const contracts = list && list.of === of ? list : null;
-  const [error, setError] = useState<string | null>(null);
+  // Tagged like the list, so an error from an underlying the user has left is never shown (or reported) for the new pick.
+  const [err, setError] = useState<{ of: string; msg: string } | null>(null);
+  // The strike held before an expiry change: the new expiry gets the listed strike nearest it (not ATM).
+  const keepStrikeRef = useRef<number | null>(null);
+  const error = fno && err && err.of === of ? err.msg : null;
+  const errorRef = useRef(onError);
+  useEffect(() => { errorRef.current = onError; });
+  useEffect(() => { errorRef.current?.(error); }, [error]);
   const reqRef = useRef(0);
   const pickRef = useRef(onPick);
   useEffect(() => { pickRef.current = onPick; });
@@ -44,11 +56,12 @@ export default function InstrumentBar({ target, onSegment, onPick }: {
       .then(r => r.json())
       .then((j: Omit<Contracts, 'of'> & { success?: boolean; error?: string }) => {
         if (id !== reqRef.current) return;                   // a newer pick owns the pickers
-        if (!j.success) { setContracts(null); setError(j.error ?? 'No contracts'); return; }
-        setContracts({ ...j, of: `${target.kind}|${target.symbol}` });
+        const tag = `${target.kind}|${target.symbol}`;
+        if (!j.success) { setContracts(null); setError({ of: tag, msg: j.error ?? 'No contracts' }); return; }
+        setContracts({ ...j, of: tag });
         setError(null);
       })
-      .catch(() => { if (id === reqRef.current) setError('Could not load the contract list'); });
+      .catch(() => { if (id === reqRef.current) setError({ of: `${target.kind}|${target.symbol}`, msg: 'Could not load the contract list' }); });
   }, [fno, target.kind, target.symbol, optExpiry]);
 
   // Complete the target from the list: the nearest expiry when none (or a lapsed one) is set, then the ATM strike.
@@ -60,8 +73,10 @@ export default function InstrumentBar({ target, onSegment, onPick }: {
     }
     if (target.kind === 'options' && contracts.expiry === target.expiry && contracts.strikes?.length) {
       if (!target.strike || !contracts.strikes.includes(target.strike)) {
-        const atm = contracts.atm ?? contracts.strikes[Math.floor(contracts.strikes.length / 2)];
-        pickRef.current({ ...target, strike: atm, side: target.side ?? 'CE' });
+        const kept = keepStrikeRef.current;
+        keepStrikeRef.current = null;
+        const strike = kept !== null ? nearest(contracts.strikes, kept) : contracts.atm ?? contracts.strikes[Math.floor(contracts.strikes.length / 2)];
+        pickRef.current({ ...target, strike, side: target.side ?? 'CE' });
       }
     }
   }, [fno, contracts, target]);
@@ -92,14 +107,19 @@ export default function InstrumentBar({ target, onSegment, onPick }: {
 
       {target.kind !== 'index' && (
         <SymbolSearch segment={target.kind} active={{ kind: target.kind, symbol: target.symbol, name: target.name }}
-                      onPick={p => onPick(target.kind === 'equity'
+                      onPick={p => { keepStrikeRef.current = null; onPick(target.kind === 'equity'
                         ? { kind: 'equity', symbol: p.symbol, name: p.name }
-                        : { kind: target.kind, symbol: p.symbol, name: p.name, ...(target.kind === 'options' ? { side: target.side ?? 'CE' } : {}) })} />
+                        : { kind: target.kind, symbol: p.symbol, name: p.name, ...(target.kind === 'options' ? { side: target.side ?? 'CE' } : {}) }); }} />
       )}
 
       {fno && contracts && contracts.expiries.length > 0 && (
         <select aria-label="Expiry" value={target.expiry ?? ''} className={SELECT}
-                onChange={e => onPick({ ...target, expiry: e.target.value })}>
+                onChange={e => {
+                  // An option's strike may not exist on the new expiry: drop it (nothing loads until the new strikes arrive) and keep
+                  // the old one to pick the nearest listed strike then.
+                  if (target.kind === 'options') { keepStrikeRef.current = target.strike ?? null; onPick({ ...target, expiry: e.target.value, strike: undefined }); }
+                  else onPick({ ...target, expiry: e.target.value });
+                }}>
           {contracts.expiries.map(x => <option key={x} value={x}>{expiryLabel(x)}</option>)}
         </select>
       )}

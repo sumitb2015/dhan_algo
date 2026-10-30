@@ -81,6 +81,12 @@ export function targetQuery(t: Target): string {
 /** A stable identity for "is this the same chart": a change of any field is a new instrument. */
 export const targetKey = (t: Target) => [t.kind, t.symbol, t.expiry ?? '', t.strike ?? '', t.side ?? ''].join('|');
 
+/**
+ * The alert log's id for a signal: the whole contract (expiry, strike, side), the signal kind and its bar time, so two strikes, CE vs
+ * PE, or two expiries signalling on the same bar are two entries, while the same signal seen twice is one.
+ */
+export const alertId = (t: Target, kind: string, barT: number) => `${targetKey(t)}:${kind}:${barT}`;
+
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 /** "2026-11-03" -> "03 Nov 26". */
 export const expiryLabel = (iso: string) => `${iso.slice(8, 10)} ${MONTHS[Number(iso.slice(5, 7)) - 1]} ${iso.slice(2, 4)}`;

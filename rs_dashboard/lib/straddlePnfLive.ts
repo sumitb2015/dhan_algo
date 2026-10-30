@@ -1,5 +1,6 @@
 // Live-tick helpers for the Straddle P&F page. Pure: time arrives in the arguments, nothing here reads a clock.
 import type { Bar, PnfSignal } from './straddlePnf.ts';
+import { mcxSession } from './mcxSession.ts';
 
 /** `cumVol` is the bridge's cumulative day volume for both legs (CE + PE), the same units as the history bars' per-minute volume. */
 export type Tick = { t: number; ce: number; pe: number; cumVol?: number };
@@ -52,6 +53,16 @@ export type LegQuote = { ltp: number; changedMs: number; volume: number | null }
  * two legs (a straddle, CE first) only make a tick once BOTH have a live price, at the later of the two changes, so a half-known
  * straddle never prints. Volume is summed only when both legs report it.
  */
+/** A live price more than this factor away from the last bar (either way) is a bad print, not a move: it is never charted. */
+export const WILD_TICK_FACTOR = 10;
+
+/** True when `price` is a bad print against the last bar's close: >= WILD_TICK_FACTOR x or <= 1 / WILD_TICK_FACTOR of it. */
+export function isWildTick(lastClose: number | undefined, price: number): boolean {
+  if (!(lastClose && lastClose > 0) || !(price > 0)) return false;
+  const r = price / lastClose;
+  return r >= WILD_TICK_FACTOR || r <= 1 / WILD_TICK_FACTOR;
+}
+
 export function legsTick(legs: LegQuote[]): Tick | null {
   if (legs.length === 1) {
     const q = legs[0];
@@ -64,12 +75,23 @@ export function legsTick(legs: LegQuote[]): Tick | null {
   return { t: Math.max(c.changedMs, p.changedMs) / 1000, ce: c.ltp, pe: p.ltp, cumVol: vol };
 }
 
-/** Trading hours, IST minutes of the day [open, close): NSE cash/index, MCX (winter close 23:55, so it also covers the 23:30 summer close). */
 export type Market = 'NSE' | 'MCX';
-export const SESSION_MIN: Record<Market, readonly [number, number]> = { NSE: [9 * 60 + 15, 15 * 60 + 30], MCX: [9 * 60, 23 * 60 + 55] };
 
 const IST_OFFSET_S = 5.5 * 3600;
 export const istMinuteOfDay = (t: number) => Math.floor(((t + IST_OFFSET_S) % 86_400) / 60);
+const istIso = (t: number) => new Date((t + IST_OFFSET_S) * 1000).toISOString().slice(0, 10);
+const hhmmToMin = (hhmm: number) => Math.floor(hhmm / 100) * 60 + (hhmm % 100);
+
+/**
+ * The trading session on the IST date of `t`, as IST minutes of the day [open, close). NSE: 09:15-15:30. MCX: from mcxSession
+ * (lib/mcxSession.ts) — 23:30 close while the US is on daylight saving, 23:55 otherwise, holidays and half days from its
+ * calendar; a closed day is an empty window [0, 0).
+ */
+export function sessionWindow(market: Market, t: number): readonly [number, number] {
+  if (market === 'NSE') return [9 * 60 + 15, 15 * 60 + 30];
+  const s = mcxSession(istIso(t));
+  return s.open >= s.close ? [0, 0] : [hhmmToMin(s.open), hhmmToMin(s.close)];
+}
 
 /**
  * True inside the market's continuous session. The NSE pre-open (09:00-09:08) streams indicative index values that are not
@@ -77,7 +99,7 @@ export const istMinuteOfDay = (t: number) => Math.floor(((t + IST_OFFSET_S) % 86
  */
 export function inSession(t: number, market: Market): boolean {
   const m = istMinuteOfDay(t);
-  const [open, close] = SESSION_MIN[market];
+  const [open, close] = sessionWindow(market, t);
   return m >= open && m < close;
 }
 
@@ -89,7 +111,7 @@ export function inSession(t: number, market: Market): boolean {
  */
 export function feedCloseTrusted(t: number, market: Market, tradingDay: boolean): boolean {
   const weekday = new Date((t + IST_OFFSET_S) * 1000).getUTCDay();
-  return tradingDay && weekday >= 1 && weekday <= 5 && istMinuteOfDay(t) < SESSION_MIN[market][1];
+  return tradingDay && weekday >= 1 && weekday <= 5 && istMinuteOfDay(t) < sessionWindow(market, t)[1];
 }
 
 /**

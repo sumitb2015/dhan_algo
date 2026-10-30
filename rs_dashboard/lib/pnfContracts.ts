@@ -67,27 +67,58 @@ export function parseFnoRows(text: string, todayIso: string): FnoRow[] {
   return out;
 }
 
-type Index = { mtime: number; day: string; rows: FnoRow[] };
+/** NSE spot index ids (IDX_I) by symbol, from the master's `NSE,I,…,INDEX` rows. Pure. */
+export function parseIndexIds(text: string): Map<string, string> {
+  const lines = text.split('\n');
+  const head = lines[0].replace(/\r$/, '').split(',');
+  const iId = head.indexOf('SECURITY_ID'), iInst = head.indexOf('INSTRUMENT'), iU = head.indexOf('UNDERLYING_SYMBOL');
+  const out = new Map<string, string>();
+  for (let n = 1; n < lines.length; n++) {
+    const line = lines[n];
+    if (!line.startsWith('NSE,I,')) continue;
+    const f = line.split(',');
+    if (f[iInst] === 'INDEX' && f[iU] && !out.has(f[iU])) out.set(f[iU], f[iId]);
+  }
+  return out;
+}
+
+type Index = { mtime: number; day: string; rows: FnoRow[]; indexIds: Map<string, string> };
 let cache: Index | null = null;
 
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 
-function rows(): FnoRow[] {
+function load(): Index {
   const mtime = fs.statSync(MASTER).mtimeMs;
   const day = istToday();
-  if (cache && cache.mtime === mtime && cache.day === day) return cache.rows;
-  cache = { mtime, day, rows: parseFnoRows(fs.readFileSync(MASTER, 'utf8'), day) };
-  return cache.rows;
+  if (cache && cache.mtime === mtime && cache.day === day) return cache;
+  const text = fs.readFileSync(MASTER, 'utf8');
+  cache = { mtime, day, rows: parseFnoRows(text, day), indexIds: parseIndexIds(text) };
+  return cache;
+}
+const rows = () => load().rows;
+
+/** The distinct underlyings of each kind, computed once per parsed row set (a search keystroke must not rescan every F&O row). */
+type Und = { symbol: string; exch: 'NSE' | 'MCX'; instrument: string };
+const undCache = new WeakMap<FnoRow[], Record<FnoKind, Und[]>>();
+function underlyingsOf(from: FnoRow[]): Record<FnoKind, Und[]> {
+  const hit = undCache.get(from);
+  if (hit) return hit;
+  const pick = (kind: FnoKind) => {
+    const seen = new Map<string, Und>();
+    for (const r of from) if (ofKind(r, kind) && !seen.has(r.underlying)) seen.set(r.underlying, { symbol: r.underlying, exch: r.exch, instrument: r.instrument });
+    return [...seen.values()];
+  };
+  const out = { futures: pick('futures'), options: pick('options') };
+  undCache.set(from, out);
+  return out;
 }
 
 const ofKind = (r: FnoRow, kind: FnoKind) => (kind === 'futures' ? r.optType === null : r.optType !== null);
 
 /** Underlyings with live contracts of `kind`, matching `q` (prefix first), index/MCX names before stocks of the same rank. */
-export function fnoUnderlyings(kind: FnoKind, q: string, limit = 10, from: FnoRow[] = rows()): { symbol: string; exch: 'NSE' | 'MCX'; instrument: string }[] {
+export function fnoUnderlyings(kind: FnoKind, q: string, limit = 10, from: FnoRow[] = rows()): Und[] {
   const query = q.trim().toUpperCase();
-  const seen = new Map<string, { symbol: string; exch: 'NSE' | 'MCX'; instrument: string }>();
-  for (const r of from) if (ofKind(r, kind) && !seen.has(r.underlying)) seen.set(r.underlying, { symbol: r.underlying, exch: r.exch, instrument: r.instrument });
-  const all = [...seen.values()];
+  const all = underlyingsOf(from)[kind];
   const rank = (s: string) => (s.startsWith(query) ? 0 : s.includes(query) ? 1 : 2);
   return all.filter(u => !query || rank(u.symbol) < 2)
     .sort((a, b) => rank(a.symbol) - rank(b.symbol) || a.symbol.length - b.symbol.length || a.symbol.localeCompare(b.symbol))
@@ -133,13 +164,19 @@ export function resolveOption(underlying: string, expiry: string, strike: number
   return r ? toContract(r) : null;
 }
 
-/** Where the underlying's spot price comes from, for the ATM default: an NSE index, an NSE stock or (MCX) its nearest future. */
-export function spotSourceKind(underlying: string, from: FnoRow[] = rows()): 'index' | 'equity' | 'mcx' | null {
+/**
+ * Where the underlying's spot price comes from, for the ATM default: an NSE index (its IDX_I id from the master's INDEX rows), an
+ * NSE stock, or its nearest future — MCX commodities, and NSE index F&O whose index has no INDEX row (e.g. NIFTYFPI).
+ */
+export function spotSourceKind(underlying: string, from: FnoRow[] = rows(), indexIds: Map<string, string> = load().indexIds): 'index' | 'equity' | 'future' | null {
   const r = from.find(x => x.underlying === underlying);
   if (!r) return null;
-  if (r.exch === 'MCX') return 'mcx';
-  return r.instrument.endsWith('IDX') ? 'index' : 'equity';
+  if (r.exch === 'MCX') return 'future';
+  if (!r.instrument.endsWith('IDX')) return 'equity';
+  return indexIds.has(underlying) ? 'index' : 'future';
 }
 
-/** NSE spot index ids (IDX_I), from master_list.csv INDEX rows. */
-export const INDEX_SPOT_IDS: Record<string, string> = { NIFTY: '13', BANKNIFTY: '25', FINNIFTY: '27', NIFTYNXT50: '38', MIDCPNIFTY: '442' };
+/** The NSE spot index id (IDX_I) for an index underlying, from the master's INDEX rows; null when it has none. */
+export function indexSpotId(underlying: string, indexIds: Map<string, string> = load().indexIds): string | null {
+  return indexIds.get(underlying) ?? null;
+}

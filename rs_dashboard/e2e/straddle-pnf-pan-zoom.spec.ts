@@ -18,12 +18,19 @@ async function mockApi(page: Page, seen: string[] = []) {
     if (u.pathname === '/api/straddle-pnf/search') {
       const q = (u.searchParams.get('q') ?? '').toUpperCase();
       const seg = u.searchParams.get('segment');
-      if (seg === 'futures' || seg === 'options') return json(route, { success: true, results: [{ kind: seg, symbol: 'CRUDEOILM', name: 'MCX commodity' }] });
+      if (seg === 'futures' || seg === 'options') {
+        return json(route, { success: true, results: [q.startsWith('NOP') ? { kind: seg, symbol: 'NOPE', name: 'NSE stock' } : { kind: seg, symbol: 'CRUDEOILM', name: 'MCX commodity' }] });
+      }
+      if (q.startsWith('ZER')) return json(route, { success: true, results: [{ kind: 'equity', symbol: 'ZEROVOL', name: 'ZERO VOLUME LTD' }] });
       return json(route, { success: true, results: q.startsWith('REL') ? [{ kind: 'equity', symbol: 'RELIANCE', name: 'RELIANCE INDUSTRIES LIMITED' }] : [] });
     }
     if (u.pathname === '/api/straddle-pnf/contracts') {
       seen.push(`contracts?${u.searchParams}`);
       const crude = u.searchParams.get('underlying') === 'CRUDEOILM';
+      if (u.searchParams.get('underlying') === 'NOPE') return json(route, { success: false, error: 'NOPE has no live futures' }, 404);
+      if (u.searchParams.get('kind') === 'options' && u.searchParams.get('expiry') === '2026-11-10') {
+        return json(route, { success: true, expiries: ['2026-11-03', '2026-11-10'], expiry: '2026-11-10', strikes: [22800, 23100, 23400], spot: 23390, atm: 23400 });
+      }
       if (u.searchParams.get('kind') === 'futures') return json(route, { success: true, expiries: crude ? ['2026-11-19', '2026-12-17'] : ['2026-11-24', '2026-12-29'] });
       return json(route, { success: true, expiries: ['2026-11-03', '2026-11-10'], expiry: u.searchParams.get('expiry') ?? '2026-11-03', strikes: [22900, 22950, 23000, 23050, 23100], spot: 23010, atm: 23000 });
     }
@@ -35,6 +42,9 @@ async function mockApi(page: Page, seen: string[] = []) {
         const bars = series(straddle ? 300 : 150, 2).map(b => (straddle ? { ...b, ce: b.straddle / 2, pe: b.straddle / 2 } : b));
         return json(route, { success: true, atm: 0, strikes: [KEY], name, errors: {}, dataDate: '2026-10-23', bars: { [KEY]: bars },
           instruments: straddle ? [{ segment: 'NSE_FNO', security_id: '1' }, { segment: 'NSE_FNO', security_id: '2' }] : [{ segment: 'NSE_FNO', security_id: '1' }] });
+      }
+      if (u.searchParams.get('symbol') === 'ZEROVOL') {
+        return json(route, { success: true, mode: 'price', atm: 0, strikes: [0], name: 'ZERO VOLUME LTD', errors: {}, dataDate: '2026-10-23', bars: { 0: series(500, 2).map(b => ({ ...b, vol: 0 })) } });
       }
       if (u.searchParams.get('symbol') === 'RELIANCE') {
         return json(route, { success: true, mode: 'price', atm: 0, strikes: [0], name: 'RELIANCE INDUSTRIES LIMITED', errors: {}, dataDate: '2026-10-23', bars: { 0: series(1200, 2) } });
@@ -175,4 +185,46 @@ test('at 1280px the header stays tidy with the Options pickers open: no sideways
   expect(header.height).toBeLessThan(240);   // 220 + the Nifty / VIX chips, which take a line of their own while the Options pickers fill this width
   const chart = (await page.getByTestId('pnf-scroll').boundingBox())!;
   expect(chart.height).toBeGreaterThan(450);
+});
+
+test('changing an option expiry keeps the nearest listed strike (not ATM) and never asks for the old strike on the new expiry', async ({ page }) => {
+  const seen: string[] = [];
+  await mockApi(page, seen);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Options' }).click();
+  await expect(page.getByLabel('Strike price')).toHaveValue('23000');
+  await page.getByRole('button', { name: 'Higher strike' }).click();
+  await expect(page.getByLabel('Strike price')).toHaveValue('23050');
+  await page.getByLabel('Expiry').selectOption('2026-11-10');                    // lists 22,800 / 23,100 / 23,400 (ATM 23,400)
+  await expect(page.getByLabel('Strike price')).toHaveValue('23100');            // nearest to 23,050
+  await expect.poll(() => seen.some(s => s.includes('expiry=2026-11-10') && s.includes('strike=23100'))).toBe(true);
+  expect(seen.some(s => s.includes('mode=contract') && s.includes('expiry=2026-11-10') && s.includes('strike=23050'))).toBe(false);
+});
+
+test('a failed contract lookup shows its error in the chart (no endless Loading), and it clears on another segment', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await page.getByRole('combobox', { name: 'Search futures underlying' }).fill('nop');
+  await page.getByRole('option', { name: /NOPE/ }).click();
+  await expect(page.getByTestId('pnf-instrument-bar').getByRole('alert')).toHaveText('NOPE has no live futures');
+  await expect(page.getByTestId('pnf-scroll')).toContainText('NOPE has no live futures');
+  await expect(page.getByTestId('pnf-scroll')).not.toContainText('Loading');
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Index' }).click();
+  await expect(page.getByTestId('pnf-instrument-bar').getByRole('alert')).toHaveCount(0);
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+});
+
+test('a stock whose bars carry no volume gets the box SMA and a disabled VWAP button (the toggle never contradicts the chart)', async ({ page }) => {
+  await mockApi(page);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Equity' }).click();
+  await page.getByRole('combobox', { name: 'Search stock' }).fill('zer');
+  await page.getByRole('option', { name: /ZEROVOL/ }).click();
+  await expect(page.getByText('ZERO VOLUME LTD').first()).toBeVisible();
+  await expect(page.getByRole('button', { name: 'VWAP' })).toBeDisabled();
+  await expect(page.getByTestId('pnf-overlay-legend').first()).toHaveText(/SMA/);
 });

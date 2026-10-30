@@ -140,15 +140,6 @@ export function vwap(bars: Bar[]): (number | null)[] {
   });
 }
 
-export function sma(values: number[], n = 10): (number | null)[] {
-  let sum = 0;
-  return values.map((v, i) => {
-    sum += v;
-    if (i >= n) sum -= values[i - n];
-    return i >= n - 1 ? sum / n : null;
-  });
-}
-
 /** For each green X column: the first bar inside it that trades above VWAP (the video's exit cue). */
 export function exitTags(columns: PnfColumn[], bars: Bar[], vwapSeries: (number | null)[]): { col: number; bar: number }[] {
   const tags: { col: number; bar: number }[] = [];

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPanelModel, boxSmaByBar, unconfirmedBoxes, MAX_UNCONFIRMED_BOXES } from './straddlePnfModel.ts';
+import { buildConfirmedModel, buildPanelModel, boxSmaByBar, unconfirmedBoxes, withLive, MAX_UNCONFIRMED_BOXES } from './straddlePnfModel.ts';
 import { vwap, type Bar } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
 
@@ -265,10 +265,24 @@ test('box in points: a fixed box, and the grid anchored on a whole multiple of i
   assert.equal(m.columns[0].high, 100 + 4.5);                   // X up to the 104 row (top edge 104.5)
 });
 
-test('a points box below 0.05% of the price is raised to that floor and reported', () => {
+test('a points box below the 0.01% safety floor is raised to it and reported; a sensible box (10 points on NIFTY) is honoured', () => {
   const b = bars([0, 5, 2]);                                    // around 100
-  const m = buildPanelModel(b, 'vwap', { boxMode: 'pts', boxPts: 0.01 });
-  assert.ok(Math.abs(m.box - 0.05) < 1e-9);                     // 0.05% of 100
+  const m = buildPanelModel(b, 'vwap', { boxMode: 'pts', boxPts: 0.001 });
+  assert.ok(Math.abs(m.box - 0.01) < 1e-9);                     // 0.01% of 100
   assert.equal(m.boxClamped, true);
+  const nifty = [22900, 22950, 23010, 22940].map((p, i) => ({ t: BASE_T + i * 60, ce: p, pe: 0, straddle: p, vol: 1 }));
+  const n = buildPanelModel(nifty, 'vwap', { boxMode: 'pts', boxPts: 10 });
+  assert.equal(n.box, 10);
+  assert.equal(n.boxClamped, false);
+  assert.equal(n.anchor, 22900);
   assert.equal(buildPanelModel(b, 'vwap', { boxMode: 'pct', boxPct: 0.5 }).boxMode, 'pct');
+});
+
+test('withLive on the confirmed model gives the same result as building it in one go, and skips the live build when nothing forms', () => {
+  const closed = bars([0, 4]);
+  const forming = { ...bars([0, 4, 6])[2] };
+  const c = buildConfirmedModel(closed, 'vwap', {});
+  assert.deepEqual(withLive(c, forming), buildPanelModel(closed, 'vwap', { forming }));
+  assert.equal(withLive(c).liveColumns, c.columns);             // 1-minute chart, no forming bar: the confirmed columns as they are
+  assert.equal('build' in withLive(c, forming), false);
 });

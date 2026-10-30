@@ -3,7 +3,7 @@
 // interval first; the box size is a percentage of the first price.
 import { buildPnf, detectSignals, exitTags, sessionOf, vwap, type Bar, type PnfColumn, type PnfSignal } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
-import { MIN_BOX_PCT, type BoxMode } from './straddlePnfSettings.ts';
+import { MIN_BOX_PTS_PCT, type BoxMode } from './straddlePnfSettings.ts';
 
 export type Overlay = 'vwap' | 'sma';
 
@@ -11,7 +11,7 @@ export type PanelModel = {
   box: number;
   /** The price the grid is anchored on: the first usable close (box in %), or that price rounded to a whole box (box in points). */
   anchor: number;
-  /** How the box was set, and for points whether it was raised to the MIN_BOX_PCT floor (a smaller box would draw a vast chart). */
+  /** How the box was set, and for points whether it was raised to the MIN_BOX_PTS_PCT safety floor (a tinier box would draw a vast chart). */
   boxMode: BoxMode;
   boxClamped: boolean;
   columns: PnfColumn[];
@@ -172,23 +172,30 @@ export type PanelOptions = {
   forming?: Bar;
 };
 
-export function buildPanelModel(closedBars: Bar[], overlay: Overlay, opts: PanelOptions = {}): PanelModel {
+/** Everything that depends only on the CLOSED bars: rebuilt when a bar closes (or history reloads), not on every live tick. */
+export type ConfirmedModel = Omit<PanelModel, 'liveColumns' | 'sessionOpen' | 'prevClose' | 'sessions'> & {
+  /** What withLive needs to build the forming bar's boxes on the same grid. */
+  build: { closedBars: Bar[]; interval: number; boxPct: number; reversal: number; anchorPrice?: number; boxSize?: number; sessionCloseMin?: number };
+};
+
+export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: PanelOptions = {}): ConfirmedModel {
   const interval = opts.interval ?? 1;
   const boxPct = (opts.boxPct ?? 0.5) / 100;
+  const reversal = opts.reversal ?? 3;
   // VWAP is computed on the 1-minute bars (signals' belowVwap and the exit cue need it whichever line is drawn) and read at each
   // chart bar's last minute, so it does not drift with the interval. Without traded volume the box SMA stands in for it (below).
   const vw1 = vwap(closedBars);
   const { bars, endIdx } = resample(closedBars, interval, opts.sessionCloseMin);
   const vw = endIdx.map(i => vw1[i]);
   const firstPrice = closedBars.find(b => b.straddle > 0)?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
-  // Box in points: never below MIN_BOX_PCT of the price (0.05 points on NIFTY would be ~460 boxes per 1% move), and the grid is
-  // anchored on a whole multiple of the box so the rows land on round prices (a 50-point box: ... 22,950, 23,000 ...).
+  // Box in points: never below MIN_BOX_PTS_PCT of the price (a safety floor: 0.001 points on NIFTY would be millions of boxes),
+  // and the grid is anchored on a whole multiple of the box so the rows land on round prices (a 50-point box: ... 22,950, 23,000 ...).
   const ptsAsked = opts.boxMode === 'pts' && (opts.boxPts ?? 0) > 0 ? (opts.boxPts as number) : null;
-  const minBox = firstPrice ? (firstPrice * MIN_BOX_PCT) / 100 : 0;
+  const minBox = firstPrice ? (firstPrice * MIN_BOX_PTS_PCT) / 100 : 0;
   const boxSize = ptsAsked !== null && firstPrice ? Math.max(ptsAsked, minBox) : undefined;
   const boxClamped = ptsAsked !== null && !!firstPrice && ptsAsked < minBox;
   const anchorPrice = boxSize && firstPrice ? Math.round(firstPrice / boxSize) * boxSize || firstPrice : firstPrice;
-  const { anchor, box, columns } = buildPnf(bars, boxPct, opts.reversal ?? 3, anchorPrice, boxSize);
+  const { anchor, box, columns } = buildPnf(bars, boxPct, reversal, anchorPrice, boxSize);
   const smaPeriod = opts.smaPeriod ?? SMA_PERIOD;
   const boxSma = boxSmaOf(columns, box, smaPeriod);
   const vwapAvailable = opts.volume !== false && closedBars.some(b => b.vol > 0);
@@ -199,13 +206,6 @@ export function buildPanelModel(closedBars: Bar[], overlay: Overlay, opts: Panel
   // VWAP moves every minute, so the header reads the 1-minute series. The SMA is a P&F average: it only moves when a box is drawn.
   const overlayLine = overlayKind === 'vwap' ? columns.map(c => vw[c.endBar]) : boxSma;
   const overlayNow = overlayKind === 'vwap' ? (vw1.length ? vw1[vw1.length - 1] : null) : (boxSma.length ? boxSma[boxSma.length - 1] : null);
-  const withForming = opts.forming ? [...closedBars, opts.forming] : closedBars;
-  // Same grid and box, with the forming 1-min bar and the unfinished chart bar included. A forming price that would add more
-  // than MAX_UNCONFIRMED_BOXES is treated as a bad tick and shows nothing unconfirmed: one wild print must not draw (and lay
-  // out) hundreds of thousands of glyphs.
-  const live = buildPnf(resample(withForming, interval, opts.sessionCloseMin, true).bars, boxPct, opts.reversal ?? 3, anchorPrice, boxSize).columns;
-  const extra = unconfirmedBoxes(columns, live, box).reduce((n, u) => n + u.ks.length, 0);
-  const liveColumns = extra > MAX_UNCONFIRMED_BOXES ? columns : live;
   return {
     box,
     anchor,
@@ -220,11 +220,40 @@ export function buildPanelModel(closedBars: Bar[], overlay: Overlay, opts: Panel
     overlayKind,
     smaPeriod,
     lastBarT: bars.length ? bars[bars.length - 1].t : null,
-    sessionOpen: sessionOpenOf(withForming),
-    prevClose: prevCloseOf(withForming),
     sessionMarks: sessionMarksOf(columns, bars),
     columnTimes: columns.map(c => ({ start: bars[c.startBar].t, end: bars[c.endBar].t })),
+    build: { closedBars, interval, boxPct, reversal, anchorPrice, boxSize, sessionCloseMin: opts.sessionCloseMin },
+  };
+}
+
+/**
+ * The confirmed model plus what the forming 1-min bar adds: unconfirmed boxes (built on the same grid), today's open / previous
+ * close and the session list. A forming price that would add more than MAX_UNCONFIRMED_BOXES is a bad tick: it is rejected from
+ * its distance to the last close BEFORE anything is built, so one wild print costs nothing and draws nothing.
+ */
+export function withLive(c: ConfirmedModel, forming?: Bar): PanelModel {
+  const { closedBars, interval, boxPct, reversal, anchorPrice, boxSize, sessionCloseMin } = c.build;
+  const withForming = forming ? [...closedBars, forming] : closedBars;
+  const lastClose = closedBars.length ? closedBars[closedBars.length - 1].straddle : null;
+  const wild = !!forming && lastClose !== null && c.box > 0 && Math.abs(forming.straddle - lastClose) / c.box > MAX_UNCONFIRMED_BOXES;
+  let liveColumns = c.columns;
+  // Nothing can be unconfirmed on a 1-minute chart with no forming bar (on a longer interval the unfinished chart bar can be).
+  if (!wild && (forming || interval > 1)) {
+    const live = buildPnf(resample(withForming, interval, sessionCloseMin, true).bars, boxPct, reversal, anchorPrice, boxSize).columns;
+    const extra = unconfirmedBoxes(c.columns, live, c.box).reduce((n, u) => n + u.ks.length, 0);
+    if (extra <= MAX_UNCONFIRMED_BOXES) liveColumns = live;
+  }
+  const { build: _build, ...confirmed } = c;
+  void _build;
+  return {
+    ...confirmed,
+    sessionOpen: sessionOpenOf(withForming),
+    prevClose: prevCloseOf(withForming),
     sessions: [...new Set(withForming.map(b => sessionOf(b.t)))],
     liveColumns,
   };
+}
+
+export function buildPanelModel(closedBars: Bar[], overlay: Overlay, opts: PanelOptions = {}): PanelModel {
+  return withLive(buildConfirmedModel(closedBars, overlay, opts), opts.forming);
 }

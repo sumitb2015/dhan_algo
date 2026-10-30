@@ -2,24 +2,27 @@ import { NextRequest, NextResponse } from 'next/server';
 import { findEquity } from '@/lib/equityMaster';
 import { fetchLtp } from '@/lib/dhanEquityQuote';
 import { isSymbol } from '@/lib/straddlePnfSearch';
-import { INDEX_SPOT_IDS, atmStrike, expiriesFor, hasUnderlying, resolveFuture, spotSourceKind, strikesFor } from '@/lib/pnfContracts';
+import { atmStrike, expiriesFor, hasUnderlying, indexSpotId, resolveFuture, spotSourceKind, strikesFor } from '@/lib/pnfContracts';
 
 // Contract choices for the Point & Figure page's Futures / Options pickers, from master_list.csv (read-only, no orders):
 // the live expiries; for options also the strikes that have both a CE and a PE, the underlying's spot and the ATM strike.
-// The spot comes from Dhan (index / stock / nearest MCX future) through the shared quote lane; without it ATM is the middle strike.
+// The spot comes from Dhan (index / stock / nearest future) through the shared quote lane; without it ATM is the middle strike.
 
 async function spotOf(underlying: string): Promise<number | null> {
   try {
     const kind = spotSourceKind(underlying);
-    if (kind === 'index') return INDEX_SPOT_IDS[underlying] ? await fetchLtp('IDX_I', INDEX_SPOT_IDS[underlying]) : null;
+    if (kind === 'index') {
+      const id = indexSpotId(underlying);
+      return id ? await fetchLtp('IDX_I', id) : null;
+    }
     if (kind === 'equity') {
       const eq = findEquity(underlying);
       return eq ? await fetchLtp('NSE_EQ', eq.securityId) : null;
     }
-    if (kind === 'mcx') {
+    if (kind === 'future') {
       const near = expiriesFor('futures', underlying)[0];
       const fut = near ? resolveFuture(underlying, near) : null;
-      return fut ? await fetchLtp('MCX_COMM', fut.securityId) : null;
+      return fut ? await fetchLtp(fut.segment, fut.securityId) : null;
     }
   } catch { /* no quote (rate limit, session): ATM falls back to the middle strike */ }
   return null;

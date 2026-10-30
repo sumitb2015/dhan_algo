@@ -1,4 +1,4 @@
-"""scripts/tools/futures_pnf_candles.py: futures candles -> straddle-shaped bars, and the upcoming-contract pick.
+"""scripts/tools/futures_pnf_candles.py: candles -> straddle-shaped bars.
 
 Pure-function test: no Dhan session, no network (the script imports the broker SDK only inside main()).
 """
@@ -53,19 +53,6 @@ class ToBars(unittest.TestCase):
 
     def test_empty_frame(self):
         self.assertEqual(self.m.to_bars(pd.DataFrame(), 3), [])
-
-
-class UpcomingContracts(unittest.TestCase):
-    def test_skips_expired_and_other_underlyings_soonest_first(self):
-        m = _load()
-        master = pd.DataFrame({
-            "EXCH_ID": ["MCX", "MCX", "MCX", "MCX", "NSE"],
-            "INSTRUMENT": ["FUTCOM"] * 4 + ["FUTIDX"],
-            "UNDERLYING_SYMBOL": ["CRUDEOILM", "CRUDEOILM", "CRUDEOILM", "CRUDEOIL", "CRUDEOILM"],
-            "SM_EXPIRY_DATE": ["2026-10-19 23:30:00", "2026-12-21", "2026-11-19", "2026-11-19", "2026-11-19"],
-            "SECURITY_ID": [1, 3, 2, 9, 8],
-        })
-        self.assertEqual(m.upcoming_contracts(master, "CRUDEOILM", "2026-10-29", 3), [("2026-11-19", "2"), ("2026-12-21", "3")])
 
 
 if __name__ == "__main__":

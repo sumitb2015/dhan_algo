@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
 import { INTERVALS, type Interval } from '@/lib/straddlePnfInterval';
 import {
-  MAX_BOX_PCT, MIN_BOX_PCT, MAX_BOX_PTS, MIN_BOX_PTS, MAX_SMA_PERIOD, MIN_SMA_PERIOD, REVERSALS, parseBoxPct, parseBoxPts, parseSmaPeriod, stepBox,
+  MAX_BOX_PCT, MIN_BOX_PCT, MAX_BOX_PTS, MIN_BOX_PTS, MIN_BOX_PTS_PCT, MAX_SMA_PERIOD, MIN_SMA_PERIOD, REVERSALS, parseBoxPct, parseBoxPts, parseSmaPeriod, stepBox,
   type PnfSettings, type Reversal,
 } from '@/lib/straddlePnfSettings';
 
@@ -113,7 +113,7 @@ export default function SettingsControls({ settings, onChange }: { settings: Pnf
                          onCommit={setBox} />
           ) : (
             <CommitInput key={`pts:${settings.boxPts}`} value={settings.boxPts} parse={parseBoxPts} label="Box points" inputMode="decimal" width="w-14 rounded-none text-center"
-                         title={`Box size in price points (${MIN_BOX_PTS}-${MAX_BOX_PTS.toLocaleString('en-IN')}); never below ${MIN_BOX_PCT}% of the price; press Enter to apply`}
+                         title={`Box size in price points (${MIN_BOX_PTS}-${MAX_BOX_PTS.toLocaleString('en-IN')}); never below ${MIN_BOX_PTS_PCT}% of the price; press Enter to apply`}
                          onCommit={setBox} />
           )}
           <button type="button" aria-label="Increase box size" title="Bigger box (next round size)" disabled={stepBox(settings.boxMode, boxValue, 1) === boxValue}

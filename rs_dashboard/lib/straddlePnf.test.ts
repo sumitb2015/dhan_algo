@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPnf, detectSignals, vwap, sma, exitTags, sessionOf, type Bar } from './straddlePnf.ts';
+import { buildPnf, detectSignals, vwap, exitTags, sessionOf, type Bar } from './straddlePnf.ts';
 
 const BASE_T = Date.UTC(2026, 9, 23, 3, 45) / 1000; // 2026-10-23 09:15 IST
 const A = 100;
@@ -102,13 +102,6 @@ test('vwap is continuous across sessions: a point & figure chart has no time axi
   assert.equal(out[0], 100);
   assert.equal(out[1], 107.5);
   assert.equal(out[2], (100 * 10 + 110 * 30 + 200 * 10) / 50); // not 200: day 1 still counts
-});
-
-test('sma(10) is null for the first nine values', () => {
-  const out = sma([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], 10);
-  assert.deepEqual(out.slice(0, 9), Array(9).fill(null));
-  assert.equal(out[9], 5.5);
-  assert.equal(out[10], 6.5);
 });
 
 test('bars with a zero straddle are skipped: no column and no NaN box', () => {

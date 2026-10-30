@@ -236,10 +236,10 @@ test('the panel header shows the change versus the session open and the latest s
 });
 
 test('the header price follows the WebSocket bridge, asked for the history\'s own instrument', async ({ page }) => {
-  const m: Mock = { phase: 0, blocked: [], liveLtp: 123456.78, liveCalls: [] };
+  const m: Mock = { phase: 0, blocked: [], liveLtp: 105.75, liveCalls: [] };
   await install(page, m);
   await page.goto('/straddle-pnf');
-  await expect(page.getByTestId('pnf-header-summary')).toContainText('1,23,456.78');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('105.75');
   expect(m.liveCalls?.[0]).toBe('?ids=IDX_I:13');
 });
 

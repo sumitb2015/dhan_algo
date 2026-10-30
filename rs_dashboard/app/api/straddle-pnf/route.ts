@@ -14,7 +14,17 @@ const PRICE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'price_pnf_cand
 /** Completed sessions of history; the scripts add today's bars on top, so the chart always has 10 full days behind it. */
 const SESSIONS = 10;
 const CACHE_TTL = 20_000;
+/** Every contract (underlying x expiry x strike x side) is its own key, so the cache is pruned on write and capped. */
+const CACHE_MAX = 40;
 const cache = new Map<string, { ts: number; body: unknown }>();
+
+function remember(key: string, body: unknown) {
+  const now = Date.now();
+  for (const [k, v] of cache) if (now - v.ts >= CACHE_TTL) cache.delete(k);
+  cache.delete(key);                                   // re-insert at the end: Map order = age
+  cache.set(key, { ts: now, body });
+  while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value as string);
+}
 
 interface Instrument { segment: string; security_id: string }
 interface ScriptOut { error?: string; instrument?: Instrument; instruments?: Instrument[]; bars?: Record<string, Bar[]>; name?: string; errors?: Record<string, string> }
@@ -42,7 +52,7 @@ async function run(key: string, args: string[], fallbackName: string) {
       success: true, atm: 0, strikes: [0], name: out.name ?? fallbackName, instrument: instruments[0] ?? null, instruments, bars,
       errors: out.errors ?? {}, dataDate: lastT ? sessionOf(lastT) : null,
     };
-    if (Object.keys(bars).length) cache.set(key, { ts: Date.now(), body });
+    if (Object.keys(bars).length) remember(key, body);
     return NextResponse.json(body);
   } catch (e) {
     return NextResponse.json({ success: false, error: `Script error: ${(e as Error).message}` }, { status: 500 });

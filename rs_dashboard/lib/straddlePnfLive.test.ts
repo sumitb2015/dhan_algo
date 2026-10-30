@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { foldTick, newSignalsAfter, nextWatermark, capLog, inSession, feedCloseTrusted, mergeHistory, legsTick } from './straddlePnfLive.ts';
+import { foldTick, newSignalsAfter, nextWatermark, capLog, inSession, feedCloseTrusted, mergeHistory, legsTick, isWildTick } from './straddlePnfLive.ts';
 import { vwap, type Bar, type PnfSignal } from './straddlePnf.ts';
 
 const T0 = Date.UTC(2026, 9, 23, 3, 45) / 1000; // 09:15 IST, a minute start
@@ -144,15 +144,21 @@ test('a plain-price tick (pe 0) folds only in single mode, in the open minute an
 // ── trading session, feed previous close, history merge ─────────────────────
 const IST = (h: number, m: number, day = 23) => Date.UTC(2026, 9, day, h, m) / 1000 - 5.5 * 3600; // Fri 23 Oct 2026, IST wall clock
 
-test('inSession: the NSE pre-open and post-close are outside, 09:15 to 15:29 inside; MCX runs 09:00 to 23:54', () => {
+test('inSession: the NSE pre-open and post-close are outside, 09:15 to 15:29 inside; MCX follows its US-DST close and holidays', () => {
   assert.equal(inSession(IST(9, 0), 'NSE'), false);
   assert.equal(inSession(IST(9, 7), 'NSE'), false);
   assert.equal(inSession(IST(9, 15), 'NSE'), true);
   assert.equal(inSession(IST(15, 29), 'NSE'), true);
   assert.equal(inSession(IST(15, 30), 'NSE'), false);
   assert.equal(inSession(IST(9, 0), 'MCX'), true);
-  assert.equal(inSession(IST(23, 54), 'MCX'), true);
-  assert.equal(inSession(IST(23, 55), 'MCX'), false);
+  // 23 Oct 2026: the US is still on daylight saving, so MCX closes at 23:30
+  assert.equal(inSession(IST(23, 29), 'MCX'), true);
+  assert.equal(inSession(IST(23, 30), 'MCX'), false);
+  // 6 Nov 2026: US DST over (1 Nov), MCX closes at 23:55
+  assert.equal(inSession(Date.UTC(2026, 10, 6, 23, 54) / 1000 - 5.5 * 3600, 'MCX'), true);
+  assert.equal(inSession(Date.UTC(2026, 10, 6, 23, 55) / 1000 - 5.5 * 3600, 'MCX'), false);
+  // 2 Oct 2026 (Gandhi Jayanti) is an MCX holiday: closed all day
+  assert.equal(inSession(IST(11, 0, 2), 'MCX'), false);
 });
 
 test('feedCloseTrusted: before the bell on a trading weekday only (the close flips to today\'s at the bell)', () => {
@@ -163,6 +169,8 @@ test('feedCloseTrusted: before the bell on a trading weekday only (the close fli
   assert.equal(feedCloseTrusted(IST(10, 0, 24), 'NSE', true), false); // Saturday
   assert.equal(feedCloseTrusted(IST(20, 0), 'MCX', true), true);
   assert.equal(feedCloseTrusted(IST(23, 55), 'MCX', true), false);
+  assert.equal(feedCloseTrusted(IST(23, 40), 'MCX', true), false);   // after the 23:30 summer close the close has flipped
+  assert.equal(feedCloseTrusted(IST(11, 0, 2), 'MCX', true), false);  // MCX holiday
 });
 
 test('mergeHistory keeps live-built bars newer than the API\'s last bar, then folds the latest tick', () => {
@@ -182,4 +190,12 @@ test('legsTick: one leg is a plain price; a straddle needs both legs, at the lat
   assert.deepEqual(legsTick([{ ltp: 100, changedMs: 5000, volume: 10 }, { ltp: 80, changedMs: 7000, volume: null }]), { t: 7, ce: 100, pe: 80, cumVol: undefined });
   assert.equal(legsTick([{ ltp: 100, changedMs: 5000, volume: 10 }, null]), null);   // half a straddle never prints
   assert.equal(legsTick([]), null);
+});
+
+test('isWildTick: a print 10x away from the last close is a bad tick; ordinary and large-but-real moves are not', () => {
+  assert.equal(isWildTick(100, 1000), true);
+  assert.equal(isWildTick(100, 10), true);
+  assert.equal(isWildTick(100, 400), false);              // an expiry-day option can quadruple
+  assert.equal(isWildTick(100, 101), false);
+  assert.equal(isWildTick(undefined, 1000), false);       // nothing to compare against
 });

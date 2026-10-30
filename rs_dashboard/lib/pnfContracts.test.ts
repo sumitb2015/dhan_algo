@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { atmStrike, expiriesFor, fnoUnderlyings, hasUnderlying, parseFnoRows, resolveFuture, resolveOption, spotSourceKind, strikesFor } from './pnfContracts.ts';
+import { atmStrike, expiriesFor, fnoUnderlyings, hasUnderlying, indexSpotId, parseFnoRows, parseIndexIds, resolveFuture, resolveOption, spotSourceKind, strikesFor } from './pnfContracts.ts';
 
 const HEAD = 'EXCH_ID,SEGMENT,SECURITY_ID,ISIN,INSTRUMENT,UNDERLYING_SECURITY_ID,UNDERLYING_SYMBOL,SYMBOL_NAME,DISPLAY_NAME,INSTRUMENT_TYPE,SERIES,LOT_SIZE,SM_EXPIRY_DATE,STRIKE_PRICE,OPTION_TYPE,TICK_SIZE';
 const row = (ex: string, seg: string, id: string, inst: string, u: string, disp: string, lot: number, exp: string, k: number, ot: string) =>
@@ -57,9 +57,13 @@ test('ATM is the nearest listed strike, the middle one without a spot', () => {
   assert.equal(atmStrike([], 23000), null);
 });
 
-test('the spot source follows the underlying', () => {
-  assert.equal(spotSourceKind('NIFTY', R), 'index');
-  assert.equal(spotSourceKind('RELIANCE', R), 'equity');
-  assert.equal(spotSourceKind('CRUDEOILM', R), 'mcx');
-  assert.equal(spotSourceKind('NOPE', R), null);
+test('the spot source follows the underlying; an index without an INDEX row (or MCX) takes its nearest future', () => {
+  const ids = parseIndexIds([HEAD, 'NSE,I,13,NA,INDEX,13.0,NIFTY,NIFTY,NIFTY 50,INDEX,NA,1,,0,,5', 'NSE,E,2885,X,EQUITY,,RELIANCE,R,R,ES,EQ,1,,0,,5'].join('\n'));
+  assert.deepEqual([...ids], [['NIFTY', '13']]);
+  assert.equal(indexSpotId('NIFTY', ids), '13');
+  assert.equal(spotSourceKind('NIFTY', R, ids), 'index');
+  assert.equal(spotSourceKind('NIFTY', R, new Map()), 'future');    // e.g. NIFTYFPI: F&O listed, no spot index row
+  assert.equal(spotSourceKind('RELIANCE', R, ids), 'equity');
+  assert.equal(spotSourceKind('CRUDEOILM', R, ids), 'future');
+  assert.equal(spotSourceKind('NOPE', R, ids), null);
 });

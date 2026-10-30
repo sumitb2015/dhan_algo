@@ -34,7 +34,12 @@ export function parseSmaPeriod(text: string): number | null {
 export const MIN_BOX_PCT = 0.05;
 export const MAX_BOX_PCT = 5;
 
-/** Box size limits in price points. The chart still never uses a box below MIN_BOX_PCT of the price (see buildPanelModel). */
+/**
+ * Box size limits in price points. The chart never uses a points box below MIN_BOX_PTS_PCT of the price (a safety floor, see
+ * buildConfirmedModel): low enough that any sensible points box is honoured (2.5 points on NIFTY, 0.05 on a ₹100 option), high
+ * enough that a typo cannot draw millions of boxes.
+ */
+export const MIN_BOX_PTS_PCT = 0.01;
 export const MIN_BOX_PTS = 0.01;
 export const MAX_BOX_PTS = 100_000;
 

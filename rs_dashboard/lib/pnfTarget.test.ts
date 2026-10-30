@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_TARGETS, isComplete, parseTarget, readTargets, targetKey, targetLabel, targetQuery } from './pnfTarget.ts';
+import { DEFAULT_TARGETS, alertId, isComplete, parseTarget, readTargets, targetKey, targetLabel, targetQuery } from './pnfTarget.ts';
 
 test('parseTarget keeps valid fields per segment and drops the rest', () => {
   assert.deepEqual(parseTarget({ kind: 'index', symbol: 'NIFTY', name: 'Nifty 50', expiry: '2026-11-03' }), { kind: 'index', symbol: 'NIFTY', name: 'Nifty 50' });
@@ -35,4 +35,14 @@ test('labels and identity', () => {
   assert.equal(targetLabel({ kind: 'options', symbol: 'NIFTY', name: '', expiry: '2026-11-03', strike: 23000, side: 'STRADDLE' }), 'NIFTY 23000 CE+PE 03 Nov 26');
   assert.equal(targetLabel(DEFAULT_TARGETS.index), 'NIFTY');
   assert.notEqual(targetKey({ ...DEFAULT_TARGETS.options, strike: 1 }), targetKey({ ...DEFAULT_TARGETS.options, strike: 2 }));
+});
+
+test('alertId tells contracts apart: two strikes, CE vs PE, or two expiries on the same bar are different entries', () => {
+  const ce = { kind: 'options' as const, symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-03', strike: 23000, side: 'CE' as const };
+  const t = 1793334840;
+  const ids = [ce, { ...ce, strike: 23050 }, { ...ce, side: 'PE' as const }, { ...ce, side: 'STRADDLE' as const }, { ...ce, expiry: '2026-11-10' }]
+    .map(x => alertId(x, 'DOUBLE_BOTTOM_SELL', t));
+  assert.equal(new Set(ids).size, ids.length);
+  assert.equal(alertId(ce, 'DOUBLE_BOTTOM_SELL', t), alertId({ ...ce }, 'DOUBLE_BOTTOM_SELL', t));   // the same signal is one entry
+  assert.notEqual(alertId(ce, 'DOUBLE_BOTTOM_SELL', t), alertId(ce, 'DOUBLE_TOP_BUY', t));
 });
