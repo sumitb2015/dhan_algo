@@ -30,6 +30,8 @@ export interface PnfTradeBarProps {
   onTradeExecuted?: (marker: PnfExecutionMarker, target: Target) => void;
   /** A REAL marker's price once the broker reports the traded price (it starts at the live price, marked as an estimate). */
   onMarkerPrice?: (id: string, price: number) => void;
+  /** A manual order's outcome, for the page's trade chimes (entry / exit / warn, lib/pnfChime.ts). */
+  onSound?: (outcome: string | undefined, close: boolean) => void;
 }
 
 type LegInfo = { label: string; side: string; lot: number; unitsPerLot: number | null; key: string | null; lotUnits: number | null };
@@ -44,7 +46,7 @@ const inr = (n: number) => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLo
 const pnlTone = (n: number | null) => (n == null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
 
 export default function PnfTradeBar({
-  target, live, broker, mode, onModeChange, onPnlChange, onSwitchTarget, onTradeExecuted, onMarkerPrice,
+  target, live, broker, mode, onModeChange, onPnlChange, onSwitchTarget, onTradeExecuted, onMarkerPrice, onSound,
 }: PnfTradeBarProps) {
   const [productPick, setProduct] = useState<PnfProduct>('INTRADAY');
   const [lotsPick, setLots] = useState(1);
@@ -177,7 +179,8 @@ export default function PnfTradeBar({
     return true;
   };
 
-  const reportReply = (j: OrderReply, what: string): boolean => {
+  const reportReply = (j: OrderReply, what: string, close: boolean): boolean => {
+    onSound?.(j.outcome, close);
     const msg = j.message ?? j.error ?? 'Unknown error';
     if (j.outcome === 'placed') { toast.success(`[${BROKER_LABELS[broker].toUpperCase()}] ${what}. ${msg}`); return true; }
     if (j.outcome === 'partial') toast.error(msg, { duration: Infinity });
@@ -189,23 +192,27 @@ export default function PnfTradeBar({
 
   const executeOrder = async (action: PnfAction) => {
     if (isIndex || !ready || busy) return;
+    // An order against the open position reduces it: it sounds like an exit, not a new trade.
+    const reduces = !!position && position.side !== 'MIXED' && (position.side === 'LONG') === (action === 'SELL');
     setBusy(true);
     try {
       if (mode === 'PAPER') {
         const j = await post({ action, lots, product });
-        if (!j.success) { toast.error(`Order failed: ${j.error ?? 'Unknown error'}`); return; }
+        if (!j.success) { onSound?.('rejected', reduces); toast.error(`Order failed: ${j.error ?? 'Unknown error'}`); return; }
         const delta = cur!.legs.map(() => (action === 'BUY' ? lots : -lots));
-        if (!paperFill(delta)) return;
+        if (!paperFill(delta)) { onSound?.('rejected', reduces); return; }
+        onSound?.('placed', reduces);
         toast.success(`[PAPER] ${action} ${lots} ${isEquity ? 'sh' : `lot${lots > 1 ? 's' : ''}`} ${product}`);
         marker(action, lots, false);
         return;
       }
       const j = await post({ action, lots, product });
-      if (reportReply(j, `${action} ${lots} ${isEquity ? 'sh' : `lot${lots > 1 ? 's' : ''}`} ${product}`)) {
+      if (reportReply(j, `${action} ${lots} ${isEquity ? 'sh' : `lot${lots > 1 ? 's' : ''}`} ${product}`, reduces)) {
         const id = marker(action, lots, true);
         void settleMarker(id, j.legs ?? []);
       }
     } catch (err) {
+      onSound?.('unknown', reduces);
       toast.warning(`Order status unknown - check Orders/Positions before retrying (${(err as Error).message})`, { duration: Infinity });
     } finally {
       setBusy(false);
@@ -219,19 +226,21 @@ export default function PnfTradeBar({
     try {
       if (mode === 'PAPER') {
         const delta = paperLegs.map(l => -l.lots);
-        if (!paperFill(delta)) return;
+        if (!paperFill(delta)) { onSound?.('rejected', true); return; }
         const action: PnfAction = paperLegs[0].lots > 0 ? 'SELL' : 'BUY';
+        onSound?.('placed', true);
         toast.success('[PAPER] position squared off');
         marker(action, Math.max(...paperLegs.map(l => Math.abs(l.lots))), false);
         return;
       }
       const j = await post({ close: true });
-      if (reportReply(j, 'Square off')) {
+      if (reportReply(j, 'Square off', true)) {
         const legs = j.legs ?? [];
         const id = marker(legs[0]?.side ?? 'SELL', r && 'lots' in r ? Math.max(...r.lots.map(Math.abs)) : 0, true);
         void settleMarker(id, legs);
       }
     } catch (err) {
+      onSound?.('unknown', true);
       toast.warning(`Close status unknown - check Orders/Positions before retrying (${(err as Error).message})`, { duration: Infinity });
     } finally {
       setBusy(false);

@@ -309,6 +309,30 @@ test('Positions, order book, trade book and P&L panel for the header broker (rea
   expect(placedOrders.length).toBe(0);
 });
 
+test('manual trade-bar orders ring the Price Ladder chimes: entry on BUY, exit on SQUARE OFF', async ({ page }) => {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __tones: string[]; AudioContext: unknown };
+    w.__tones = [];
+    const param = () => ({ value: 0, setValueAtTime() {}, exponentialRampToValueAtTime() {} });
+    w.AudioContext = class {
+      state = 'running'; currentTime = 0; destination = {};
+      resume() { return Promise.resolve(); }
+      createGain() { return { gain: param(), connect() {} }; }
+      createOscillator() { const o = { type: 'sine', connect() {}, start() { w.__tones.push(`${o.type}:${o.frequency.value}`); }, stop() {}, frequency: param() }; return o; }
+    };
+  });
+  const tones = () => page.evaluate(() => (window as unknown as { __tones: string[] }).__tones.slice());
+  await installTradeMock(page);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await page.getByRole('button', { name: 'BUY MARKET' }).click();
+  await expect.poll(tones).toContain('sine:784');                              // entry: two rising tones
+  await page.waitForTimeout(1600);                                              // one chime per 1.5 s
+  await page.getByRole('button', { name: 'SQUARE OFF' }).click();
+  await expect.poll(tones).toContain('sine:698');                              // exit: two falling tones
+});
+
 test('the trade bar trades the ACTIVE chart', async ({ page }) => {
   const { placedOrders } = await installTradeMock(page);
   await page.goto('/straddle-pnf');

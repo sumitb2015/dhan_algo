@@ -17,7 +17,8 @@ import { withSavedBroker } from '@/hooks/withSavedBroker';
 import { BrokerPicker } from './BrokerPicker';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useTabLeader } from '@/hooks/useTabLeader';
-import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/alertSound';
+import { installAlertSoundUnlock } from '@/lib/alertSound';
+import { pnfChimeFor, playPnfChime, type PnfSoundEvent } from '@/lib/pnfChime';
 import { buildConfirmedModel, withLive, type Overlay } from '@/lib/straddlePnfModel';
 import { capLog, sessionWindow } from '@/lib/straddlePnfLive';
 import { HeaderIndexChips } from '@/components/triplestraddle/HeaderIndexChips';
@@ -234,12 +235,12 @@ function StraddlePnfPage() {
       setFlash(f => ({ ...f, [chart]: sell ? 'sell' : 'buy' }));
       setTimeout(() => setFlash(f => ({ ...f, [chart]: null })), FLASH_MS);
     }
-    // Sound only in the leader tab, so two open tabs never double-ring; the toast and log still show everywhere.
-    if (leaderRef.current && !mutedRef.current) {
-      const last = fresh[fresh.length - 1];
-      if (last.kind === 'DOUBLE_BOTTOM_SELL') playEntryChime(); else playExitChime();
-    }
+    // Sound only in the leader tab, so two open tabs never double-ring; the toast and log still show everywhere. A signal is not a
+    // trade: the neutral alert chime, or none when AUTO is armed on that chart (the trade it takes rings instead).
+    if (leaderRef.current) chime({ kind: 'signal', autoArmed: autoArm[chart].on });
   };
+  /** The Price Ladder's chime set (lib/pnfChime.ts), behind the page's mute. */
+  const chime = (e: PnfSoundEvent) => { if (!mutedRef.current) playPnfChime(pnfChimeFor(e)); };
   const tk1 = targetKey(target1), tk2 = targetKey(target2);
   usePnfAlerts({
     model: c1.model, ready: Boolean(feed1.loaded), chart: 1, target: target1, label: dual ? `${feed1.label} · C1` : feed1.label,
@@ -280,8 +281,9 @@ function StraddlePnfPage() {
         const t = Math.floor(nowSec());
         handleTradeExecuted({ id: `auto-${t}-${e.chart}-${e.kind}`, t, action: e.side, price: e.price, lots: e.lots ?? 1, mode: e.mode ?? 'PAPER', estimate: e.mode === 'REAL' }, e.target);
       }
-      if (leaderRef.current && !mutedRef.current) { if (e.kind === 'entry') playEntryChime(); else playExitChime(); }
     }
+    // Only the leader tab runs AUTO, so only it rings: entry (rising), exit (falling), a refusal or a halt (warn buzz).
+    if (leaderRef.current && !mutedRef.current) playPnfChime(pnfChimeFor({ kind: 'auto', type: e.kind }));
   }, [handleTradeExecuted, leaderRef]);
   const disarm = useCallback((c: ChartId) => setAutoArm(a => (a[c].on ? { ...a, [c]: DISARMED } : a)), []);
   const priceOf = (f: PnfFeed) => (f.live ? f.live.ce + f.live.pe : null);
@@ -534,6 +536,7 @@ function StraddlePnfPage() {
             onSwitchTarget={choose}
             onTradeExecuted={handleTradeExecuted}
             onMarkerPrice={handleMarkerPrice}
+            onSound={(outcome, close) => chime({ kind: 'manual', outcome, close })}
           />
         </div>
       )}

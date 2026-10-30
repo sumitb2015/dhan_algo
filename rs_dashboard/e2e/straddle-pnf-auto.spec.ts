@@ -9,6 +9,25 @@ import { EMPTY_LEDGER, applyAutoOp, type AutoLedger, type AutoOp } from '../lib/
 const ist = (hh: number, mm: number, ss = 0) => Date.UTC(2026, 9, 30, hh, mm, ss) - 5.5 * 3600_000;   // Fri 30 Oct 2026, ms
 type Body = { mode?: string; broker?: string; action?: string; lots?: number; source?: string; close?: boolean; exitOwn?: { side: string; units: number[] }; target?: { kind: string } };
 
+/** A fake AudioContext that records every tone the page plays as `type:Hz` (lib/alertSound.ts chimes). */
+async function recordTones(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __tones: string[]; AudioContext: unknown };
+    w.__tones = [];
+    const param = () => ({ value: 0, setValueAtTime() {}, exponentialRampToValueAtTime() {} });
+    w.AudioContext = class {
+      state = 'running'; currentTime = 0; destination = {};
+      resume() { return Promise.resolve(); }
+      createGain() { return { gain: param(), connect() {} }; }
+      createOscillator() {
+        const o = { type: 'sine', connect() {}, start() { w.__tones.push(`${o.type}:${o.frequency.value}`); }, stop() {}, frequency: param() };
+        return o;
+      }
+    };
+  });
+  return async () => page.evaluate(() => (window as unknown as { __tones: string[] }).__tones.slice());
+}
+
 async function install(page: Page, opts: { reply?: (b: Body) => Record<string, unknown> } = {}) {
   const orders: Body[] = [];
   const state = { ledger: EMPTY_LEDGER as AutoLedger, tick: { ltp: 99.3, at: ist(10, 30, 10) } };
@@ -69,6 +88,7 @@ test.beforeEach(async ({ context }) => { await signIn(context); });
 
 test('PAPER: arms on chart 1, enters SELL on the double bottom that closes after arming, exits on the first X column', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
+  const tones = await recordTones(page);
   const { orders, state } = await install(page);
   await openFuture(page);
   const auto = page.getByTestId('pnf-auto-1');
@@ -82,6 +102,9 @@ test('PAPER: arms on chart 1, enters SELL on the double bottom that closes after
   await expect.poll(() => orders.length, { timeout: 15_000 }).toBe(1);
   expect(orders[0]).toMatchObject({ mode: 'PAPER', action: 'SELL', lots: 1, source: 'auto', target: { kind: 'futures' } });
   await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 1L @ 99.30');
+  // The Price Ladder's entry chime (two rising sine tones); the signal itself stays silent on an armed chart
+  await expect.poll(tones).toContain('sine:784');
+  expect((await tones()).some(t => t.startsWith('triangle:')), 'no signal chime on an armed chart').toBe(false);
   await page.waitForTimeout(2500);
   expect(orders.length, 'the same signal is never entered twice').toBe(1);
 
@@ -93,6 +116,7 @@ test('PAPER: arms on chart 1, enters SELL on the double bottom that closes after
   expect(Math.round(state.ledger.rows[0].pnl!)).toBe(-46);                      // (99.3 - 100) x 65
   expect(orders.length, 'a paper exit sends nothing').toBe(1);
   await expect(page.getByTestId('pnf-auto-status-1')).not.toContainText('SHORT');
+  await expect.poll(tones, { message: 'the exit chime (two falling sine tones)' }).toContain('sine:698');
 
   // The AUTO tab in the bottom strip lists it
   await page.getByTestId('pnf-books').getByRole('tab', { name: /AUTO/ }).click();
@@ -126,6 +150,7 @@ test('REAL: arming takes a second click; entry is reserved then confirmed; the e
 
 test('REAL: an unknown entry outcome halts the chart, is never resent, and waits for the user', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
+  const tones = await recordTones(page);
   const { orders, state } = await install(page, { reply: () => ({ success: false, outcome: 'unknown', message: 'Status unknown' }) });
   await openFuture(page);
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
@@ -136,6 +161,7 @@ test('REAL: an unknown entry outcome halts the chart, is never resent, and waits
   await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('unknownEntry');
   await expect(auto).toHaveAttribute('data-armed', 'false');                    // halted
   await expect(page.getByTestId('pnf-auto-status-1')).toContainText('UNRESOLVED');
+  await expect.poll(tones, { message: 'the warn buzz' }).toContain('square:330');
   await page.waitForTimeout(3000);
   expect(orders.length).toBe(1);
   // The user checks the broker: nothing was opened
