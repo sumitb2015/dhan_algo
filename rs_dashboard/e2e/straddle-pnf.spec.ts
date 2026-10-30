@@ -90,6 +90,11 @@ async function install(page: Page, m: Mock) {
     if (p === '/api/straddle-pnf/contracts' && method === 'GET') {
       return json(route, { success: true, expiries: ['2026-11-24'] });
     }
+    // The header's Nifty / India VIX chips: the bridge start (a POST, never an order) and the indices poll.
+    if (p === '/api/live-indices' && method === 'POST') return json(route, { success: true });
+    if (p === '/api/scalper/top-indices') {
+      return json(route, { success: true, updated_at: new Date().toISOString(), quotes: { NIFTY: { ltp: 24123.45, change_pct: 0.42 }, VIX: { ltp: 13.21, change_pct: -1.5 } } });
+    }
     if (method === 'GET') return json(route, { success: true });
 
     m.blocked.push({ method, path: p, search: u.search, body: null });
@@ -236,6 +241,14 @@ test('the header price follows the WebSocket bridge, asked for the history\'s ow
   await page.goto('/straddle-pnf');
   await expect(page.getByTestId('pnf-header-summary')).toContainText('1,23,456.78');
   expect(m.liveCalls?.[0]).toBe('?ids=IDX_I:13');
+});
+
+test('the header shows Nifty and India VIX with their % change from the indices bridge', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [] });
+  await page.goto('/straddle-pnf');
+  await expect(page.locator('header')).toContainText('24,123.45');
+  await expect(page.locator('header')).toContainText('13.21');
+  await expect(page.locator('header')).toContainText('0.42');
 });
 
 // ── interval and box size ─────────────────────────────────────────────────────

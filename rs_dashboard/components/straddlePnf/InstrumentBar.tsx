@@ -129,9 +129,6 @@ export default function InstrumentBar({ target, onSegment, onPick }: {
         </div>
       )}
 
-      {target.kind === 'options' && contracts?.spot ? (
-        <span className="text-[11px] font-mono text-zinc-400">spot <span className="font-semibold text-zinc-200">{fmtStrike(contracts.spot)}</span></span>
-      ) : null}
       {error && <span role="alert" className="text-[11px] text-red-400">{error}</span>}
     </div>
   );

@@ -41,6 +41,11 @@ async function mockApi(page: Page, seen: string[] = []) {
       }
       return json(route, { success: true, mode: 'price', atm: 0, strikes: [KEY], name: 'Nifty 50', errors: {}, dataDate: '2026-10-23', bars: { [KEY]: series(100) } });
     }
+    // The header's Nifty / India VIX chips: the bridge start (a POST, never an order) and the indices poll.
+    if (u.pathname === '/api/live-indices' && route.request().method() === 'POST') return json(route, { success: true });
+    if (u.pathname === '/api/scalper/top-indices') {
+      return json(route, { success: true, updated_at: new Date().toISOString(), quotes: { NIFTY: { ltp: 24123.45, change_pct: 0.42 }, VIX: { ltp: 13.21, change_pct: -1.5 } } });
+    }
     if (route.request().method() === 'GET') return json(route, { success: true });
     return route.fulfill({ status: 599, body: 'blocked' });
   });
@@ -167,7 +172,7 @@ test('at 1280px the header stays tidy with the Options pickers open: no sideways
   await expect(page.getByLabel('Strike price')).toHaveValue('23000');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   const header = (await page.locator('header').first().boundingBox())!;
-  expect(header.height).toBeLessThan(220);
+  expect(header.height).toBeLessThan(240);   // 220 + the Nifty / VIX chips, which take a line of their own while the Options pickers fill this width
   const chart = (await page.getByTestId('pnf-scroll').boundingBox())!;
   expect(chart.height).toBeGreaterThan(450);
 });

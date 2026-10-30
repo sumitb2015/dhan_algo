@@ -17,6 +17,7 @@ import {
   foldTick, newSignalsAfter, nextWatermark, capLog, inSession, mergeHistory, feedCloseTrusted, istMinuteOfDay, legsTick, SESSION_MIN,
   type LegQuote, type Market, type Tick,
 } from '@/lib/straddlePnfLive';
+import { HeaderIndexChips } from '@/components/triplestraddle/HeaderIndexChips';
 import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
 import { DEFAULT_SETTINGS, SETTINGS_KEY, boxText, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
@@ -319,8 +320,10 @@ export default function StraddlePnfPage() {
             </div>
           </div>
           <span className="hidden 2xl:block w-px h-8 bg-zinc-800 shrink-0 2xl:order-2" />
-          <div className="order-4 basis-full 2xl:order-3 2xl:basis-0 2xl:flex-1 min-w-0">
+          <div className="order-4 basis-full 2xl:order-3 2xl:basis-0 2xl:flex-1 min-w-0 flex items-center gap-x-4 gap-y-2 flex-wrap">
             <InstrumentBar target={target} onSegment={pickSegment} onPick={choose} />
+            {/* Nifty and India VIX vs the previous close: the shared indices WebSocket bridge's snapshot, started on mount. */}
+            <div className="ml-auto shrink-0"><HeaderIndexChips /></div>
           </div>
           <div className="order-3 2xl:order-4 ml-auto flex items-center gap-2 shrink-0">
             <DataChip date={loaded?.dataDate} lastSession={Boolean(loaded?.dataDate) && loaded?.dataDate !== today} />
