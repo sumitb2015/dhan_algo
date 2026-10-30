@@ -1,7 +1,7 @@
 'use client';
 
 import { createPortal } from 'react-dom';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
 import { Minus, Plus, RotateCcw } from 'lucide-react';
 import { layoutPanel, AXIS_W, PAD_TOP } from '@/lib/straddlePnfLayout';
@@ -231,7 +231,40 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     return { price, y: yOf(price), col, x: col !== null ? xOf(col) + cell / 2 : hover.overAxis ? null : hover.x };
   })();
   const markAt = new Map(model.sessionMarks.map(m => [`${m.col}:${m.k}`, m.session]));
+  // Glyph geometry as path strings, rebuilt only when the chart or its layout changes (not on a crosshair move).
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  const xGlyph = (cx: number, cy: number) => `M${r1(cx - s)} ${r1(cy - s)}L${r1(cx + s)} ${r1(cy + s)}M${r1(cx + s)} ${r1(cy - s)}L${r1(cx - s)} ${r1(cy + s)}`;
+  const oGlyph = (cx: number, cy: number) => `M${r1(cx - s)} ${r1(cy)}a${r1(s)} ${r1(s)} 0 1 0 ${r1(2 * s)} 0a${r1(s)} ${r1(s)} 0 1 0 ${r1(-2 * s)} 0`;
+  const glyphs = useMemo(() => {
+    let x = '', o = '';
+    const marks: { col: number; k: number; cx: number; cy: number; dir: 'X' | 'O'; session: string }[] = [];
+    columns.forEach((c, j) => {
+      const cx = xOf(j) + cell / 2;
+      for (let k = 0; k < c.boxes; k++) {
+        const cy = yOf(c.low + (k + 0.5) * box);
+        const session = markAt.get(`${j}:${k}`);
+        if (session) marks.push({ col: j, k, cx, cy, dir: c.dir, session });
+        else if (c.dir === 'X') x += xGlyph(cx, cy);
+        else o += oGlyph(cx, cy);
+      }
+    });
+    return { x, o, marks };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columns, model.sessionMarks, box, cell, offsetX, yMax, padY, s]);
   const unconfirmed = unconfirmedBoxes(columns, liveCols, box);
+  const unconfirmedPaths = useMemo(() => {
+    let x = '', o = '', n = 0;
+    for (const { col, ks } of unconfirmed) {
+      const lc = liveCols[col];
+      for (const k of ks) {
+        n++;
+        if (lc.dir === 'X') x += xGlyph(xOf(col) + cell / 2, yOf(lc.low + (k + 0.5) * box));
+        else o += oGlyph(xOf(col) + cell / 2, yOf(lc.low + (k + 0.5) * box));
+      }
+    }
+    return { x, o, n };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveCols, columns, box, cell, offsetX, yMax, padY, s]);
 
   const lastEntryId = [...signals].reverse().find(g => g.kind === 'DOUBLE_BOTTOM_SELL' && g.belowVwap)?.id;
   const ring = flash === 'buy' ? 'ring-2 ring-emerald-400' : flash === 'sell' ? 'ring-2 ring-red-400' : '';
@@ -425,46 +458,33 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                 });
               })()}
 
-              {/* X / O glyphs. The first box each session drew shows the day of the month instead (the classic P&F month
-                  marker, by day): every loaded session that moved the chart is visible, not only those that opened a column. */}
-              {vis.map((c, j) =>
-                Array.from({ length: c.boxes }, (_, k) => {
-                  const cx = xOf(j) + cell / 2;
-                  const cy = yOf(c.low + (k + 0.5) * box);
-                  const mark = markAt.get(`${j}:${k}`);
-                  if (mark) return (
-                    <text key={`${j}-${k}`} data-testid="pnf-session-mark" x={cx} y={cy} textAnchor="middle" dominantBaseline="central"
-                          className={`${c.dir === 'X' ? 'fill-emerald-400' : 'fill-red-400'} font-mono font-bold`}
-                          fontSize={Math.max(7, Math.min(16, cell * 0.55))}>
-                      <title>{`${sessionLabel(mark)}: first box of the session`}</title>
-                      {Number(mark.slice(8, 10))}
-                    </text>
-                  );
-                  return c.dir === 'X' ? (
-                    <path key={`${j}-${k}`} d={`M${cx - s} ${cy - s}L${cx + s} ${cy + s}M${cx + s} ${cy - s}L${cx - s} ${cy + s}`}
-                          className="stroke-emerald-400" strokeWidth={stroke} strokeLinecap="round" fill="none" />
-                  ) : (
-                    <circle key={`${j}-${k}`} cx={cx} cy={cy} r={s} className="stroke-red-400" strokeWidth={stroke} fill="none" />
-                  );
-                }),
+              {/* X / O glyphs: every X in one path and every O in another (a chart can hold tens of thousands of boxes; one element
+                  each made every crosshair move and live tick re-render them all). The first box each session drew shows the day of
+                  the month instead (the classic P&F month marker, by day). */}
+              <path data-testid="pnf-glyphs-x" d={glyphs.x} className="stroke-emerald-400" strokeWidth={stroke} strokeLinecap="round" fill="none" />
+              <path data-testid="pnf-glyphs-o" d={glyphs.o} className="stroke-red-400" strokeWidth={stroke} fill="none" />
+              {glyphs.marks.map(m => (
+                <text key={`${m.col}-${m.k}`} data-testid="pnf-session-mark" x={m.cx} y={m.cy} textAnchor="middle" dominantBaseline="central"
+                      className={`${m.dir === 'X' ? 'fill-emerald-400' : 'fill-red-400'} font-mono font-bold`}
+                      fontSize={Math.max(7, Math.min(16, cell * 0.55))}>
+                  <title>{`${sessionLabel(m.session)}: first box of the session`}</title>
+                  {Number(m.session.slice(8, 10))}
+                </text>
+              ))}
+              {/* the newest confirmed column's cells: a hook for tests and nothing else */}
+              {columns.length > 0 && (
+                <rect data-testid="pnf-newest" x={xOf(columns.length - 1)} y={yOf(columns[columns.length - 1].high)} width={cell}
+                      height={(columns[columns.length - 1].boxes) * cell} fill="none" pointerEvents="none" />
               )}
 
               {/* Unconfirmed boxes: what the bar still forming would add if it closed now, dimmed. They move with the price and can
                   disappear; signals, the SMA and the date marks never use them. */}
-              {unconfirmed.map(({ col, ks }) => {
-                const lc = liveCols[col];
-                const cx = xOf(col) + cell / 2;
-                return ks.map(k => {
-                  const cy = yOf(lc.low + (k + 0.5) * box);
-                  return lc.dir === 'X' ? (
-                    <path key={`u${col}-${k}`} data-testid="pnf-unconfirmed" d={`M${cx - s} ${cy - s}L${cx + s} ${cy + s}M${cx + s} ${cy - s}L${cx - s} ${cy + s}`}
-                          className="stroke-emerald-400" opacity={0.35} strokeWidth={stroke} strokeLinecap="round" fill="none" />
-                  ) : (
-                    <circle key={`u${col}-${k}`} data-testid="pnf-unconfirmed" cx={cx} cy={cy} r={s}
-                            className="stroke-red-400" opacity={0.35} strokeWidth={stroke} fill="none" />
-                  );
-                });
-              })}
+              {unconfirmedPaths.n > 0 && (
+                <g data-testid="pnf-unconfirmed" data-count={unconfirmedPaths.n} opacity={0.35}>
+                  <path d={unconfirmedPaths.x} className="stroke-emerald-400" strokeWidth={stroke} strokeLinecap="round" fill="none" />
+                  <path d={unconfirmedPaths.o} className="stroke-red-400" strokeWidth={stroke} fill="none" />
+                </g>
+              )}
 
               {/* VWAP / SMA: one continuous line across the loaded sessions */}
               {overlayPts && (

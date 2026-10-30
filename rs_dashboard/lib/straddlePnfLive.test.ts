@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { foldTick, newSignalsAfter, nextWatermark, capLog, inSession, feedCloseTrusted, mergeHistory } from './straddlePnfLive.ts';
+import { foldTick, newSignalsAfter, nextWatermark, capLog, inSession, feedCloseTrusted, mergeHistory, legsTick } from './straddlePnfLive.ts';
 import { vwap, type Bar, type PnfSignal } from './straddlePnf.ts';
 
 const T0 = Date.UTC(2026, 9, 23, 3, 45) / 1000; // 09:15 IST, a minute start
@@ -173,4 +173,13 @@ test('mergeHistory keeps live-built bars newer than the API\'s last bar, then fo
   assert.deepEqual(out.map(b => b.straddle), [100, 101, 102, 103.5]); // API wins where it has the minute
   assert.deepEqual(mergeHistory([], onScreen, null), []);
   assert.deepEqual(mergeHistory(hist, [], null).map(b => b.straddle), [100, 101]);
+});
+
+test('legsTick: one leg is a plain price; a straddle needs both legs, at the later change, volume summed only when both have it', () => {
+  assert.deepEqual(legsTick([{ ltp: 101, changedMs: 5000, volume: 7 }]), { t: 5, ce: 101, pe: 0, cumVol: 7 });
+  assert.equal(legsTick([null]), null);
+  assert.deepEqual(legsTick([{ ltp: 100, changedMs: 5000, volume: 10 }, { ltp: 80, changedMs: 7000, volume: 4 }]), { t: 7, ce: 100, pe: 80, cumVol: 14 });
+  assert.deepEqual(legsTick([{ ltp: 100, changedMs: 5000, volume: 10 }, { ltp: 80, changedMs: 7000, volume: null }]), { t: 7, ce: 100, pe: 80, cumVol: undefined });
+  assert.equal(legsTick([{ ltp: 100, changedMs: 5000, volume: 10 }, null]), null);   // half a straddle never prints
+  assert.equal(legsTick([]), null);
 });

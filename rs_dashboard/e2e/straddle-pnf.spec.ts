@@ -1,7 +1,7 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { json, signIn, type Call } from './support';
 
-// Point & Figure (/straddle-pnf): one price chart (index / stock / CRUDEOILM future), VWAP/SMA toggle, history-vs-new-bar alerting, DATA chip.
+// Point & Figure (/straddle-pnf): one price chart (index / stock / future / option), VWAP/SMA toggle, history-vs-new-bar alerting, DATA chip.
 // There are no options on this page. Every /api/* call is answered here; any non-GET this mock does not handle is refused with 599 and fails the test.
 // The page places no orders, so there is no order route to mock.
 
@@ -85,7 +85,10 @@ async function install(page: Page, m: Mock) {
     if (p === '/api/straddle-pnf/live' && method === 'GET') {
       m.liveCalls?.push(u.search);
       const q = m.liveLtp ? { ltp: m.liveLtp, changedMs: Date.now(), prevClose: null, volume: null } : null;
-      return json(route, { success: true, bridge: true, hub: true, quote: q, last: null });
+      return json(route, { success: true, bridge: true, hub: true, quote: q, last: null, legs: [{ quote: q, last: null }] });
+    }
+    if (p === '/api/straddle-pnf/contracts' && method === 'GET') {
+      return json(route, { success: true, expiries: ['2026-11-24'] });
     }
     if (method === 'GET') return json(route, { success: true });
 
@@ -126,7 +129,7 @@ test('the VWAP / SMA toggle switches the overlay legend (a traded instrument), a
   await page.goto('/straddle-pnf');
   const legend = page.getByTestId('pnf-overlay-legend').first();
   await expect(legend).toHaveText(/SMA 50/);                        // hydrated on the NIFTY index
-  await page.getByRole('button', { name: 'CRUDEOILM' }).click();    // a future trades volume: VWAP is allowed
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();   // a future trades volume: VWAP is allowed
   await expect(page.getByRole('button', { name: 'VWAP' })).toBeEnabled();
   await expect(legend).toHaveText(/VWAP/);
   await page.getByRole('button', { name: 'SMA 50' }).click();      // the default period
@@ -186,7 +189,7 @@ test('the price axis sits at the right edge of each panel and the newest column 
   const p = (await panel.boundingBox())!;
   const axis = (await panel.getByTestId('pnf-axis').boundingBox())!;
   expect(p.x + p.width - (axis.x + axis.width)).toBeLessThan(32); // labels (left-aligned in the 66px axis) end near the panel's right edge
-  const lastGlyph = panel.getByRole('img', { name: /point and figure chart/ }).locator('path, circle').last(); // not the zoom icons
+  const lastGlyph = panel.getByTestId('pnf-newest');
   const g = (await lastGlyph.boundingBox())!;
   expect(axis.x - (g.x + g.width)).toBeLessThan(40);               // newest column hugs the axis, no empty gap
 });
@@ -228,7 +231,7 @@ test('the header price follows the WebSocket bridge, asked for the history\'s ow
   await install(page, m);
   await page.goto('/straddle-pnf');
   await expect(page.getByTestId('pnf-header-summary')).toContainText('1,23,456.78');
-  expect(m.liveCalls?.[0]).toBe('?segment=IDX_I&id=13');
+  expect(m.liveCalls?.[0]).toBe('?ids=IDX_I:13');
 });
 
 // ── interval and box size ─────────────────────────────────────────────────────
@@ -355,7 +358,7 @@ test('the chart has a crosshair: lines snapped to the column and box under the p
   const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
   const sc = panel.getByTestId('pnf-scroll');
   await expect(sc).toHaveClass(/cursor-crosshair/);
-  const glyph = panel.getByRole('img', { name: /point and figure chart/ }).locator('path, circle').last();
+  const glyph = panel.getByTestId('pnf-newest');
   const g = (await glyph.boundingBox())!;
   await page.mouse.move(g.x + g.width / 2, g.y + g.height / 2);
   await expect(panel.getByTestId('pnf-crosshair')).toBeAttached();

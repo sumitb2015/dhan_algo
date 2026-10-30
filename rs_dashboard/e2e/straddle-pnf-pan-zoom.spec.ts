@@ -1,7 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { json, signIn } from './support';
 
-// Point & Figure (/straddle-pnf): chart controls (drag pan, wheel zoom, Re-center), the CRUDEOILM future and the index / stock search.
+// Point & Figure (/straddle-pnf): chart controls (drag pan, wheel zoom, Re-center) and the Index | Equity | Futures | Options picker.
 const KEY = 25000;
 const NOW_MIN = Math.floor(Date.now() / 60_000) * 60;
 const series = (base: number, step = 0.5) => [0, 5, 2, 0, 3, 7, 4].map((l, i, a) => {
@@ -17,12 +17,24 @@ async function mockApi(page: Page, seen: string[] = []) {
     const u = new URL(route.request().url());
     if (u.pathname === '/api/straddle-pnf/search') {
       const q = (u.searchParams.get('q') ?? '').toUpperCase();
-      return json(route, { success: true, results: q.startsWith('REL') ? [{ kind: 'equity', symbol: 'RELIANCE', name: 'RELIANCE INDUSTRIES LIMITED' }] : [{ kind: 'index', symbol: 'NIFTY', name: 'Nifty 50' }] });
+      const seg = u.searchParams.get('segment');
+      if (seg === 'futures' || seg === 'options') return json(route, { success: true, results: [{ kind: seg, symbol: 'CRUDEOILM', name: 'MCX commodity' }] });
+      return json(route, { success: true, results: q.startsWith('REL') ? [{ kind: 'equity', symbol: 'RELIANCE', name: 'RELIANCE INDUSTRIES LIMITED' }] : [] });
+    }
+    if (u.pathname === '/api/straddle-pnf/contracts') {
+      seen.push(`contracts?${u.searchParams}`);
+      const crude = u.searchParams.get('underlying') === 'CRUDEOILM';
+      if (u.searchParams.get('kind') === 'futures') return json(route, { success: true, expiries: crude ? ['2026-11-19', '2026-12-17'] : ['2026-11-24', '2026-12-29'] });
+      return json(route, { success: true, expiries: ['2026-11-03', '2026-11-10'], expiry: u.searchParams.get('expiry') ?? '2026-11-03', strikes: [22900, 22950, 23000, 23050, 23100], spot: 23010, atm: 23000 });
     }
     if (u.pathname === '/api/straddle-pnf') {
       seen.push(u.search);
-      if (u.searchParams.get('underlying') === 'CRUDEOILM') {
-        return json(route, { success: true, mode: 'futures', atm: 0, strikes: [20261119], errors: {}, dataDate: '2026-10-23', expiries: { 20261119: '2026-11-19' }, bars: { 20261119: series(9600, 20) } });
+      if (u.searchParams.get('mode') === 'contract') {
+        const straddle = u.searchParams.get('type') === 'STRADDLE';
+        const name = u.searchParams.get('kind') === 'futures' ? `${u.searchParams.get('underlying')} NOV FUT` : 'NIFTY 03 NOV 23000 CALL';
+        const bars = series(straddle ? 300 : 150, 2).map(b => (straddle ? { ...b, ce: b.straddle / 2, pe: b.straddle / 2 } : b));
+        return json(route, { success: true, atm: 0, strikes: [KEY], name, errors: {}, dataDate: '2026-10-23', bars: { [KEY]: bars },
+          instruments: straddle ? [{ segment: 'NSE_FNO', security_id: '1' }, { segment: 'NSE_FNO', security_id: '2' }] : [{ segment: 'NSE_FNO', security_id: '1' }] });
       }
       if (u.searchParams.get('symbol') === 'RELIANCE') {
         return json(route, { success: true, mode: 'price', atm: 0, strikes: [0], name: 'RELIANCE INDUSTRIES LIMITED', errors: {}, dataDate: '2026-10-23', bars: { 0: series(1200, 2) } });
@@ -70,17 +82,43 @@ test('drag pans and wheel zooms a chart that fits the panel', async ({ page }) =
   await expect(panel.getByTestId('pnf-zoom')).toHaveAttribute('data-zoom', '1');
 });
 
-test('the CRUDEOILM button charts the nearest future', async ({ page }) => {
+test('the Futures segment charts the near-month future, and the search box switches the underlying', async ({ page }) => {
   const seen: string[] = [];
   await mockApi(page, seen);
   await page.goto('/straddle-pnf');
   await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);   // hydrated: a click before that is lost
-  await page.getByRole('button', { name: 'CRUDEOILM' }).click();
-  await expect(page.getByTestId('pnf-panel')).toHaveCount(1);
-  await expect(page.getByText('CRUDEOILM Nov 2026').first()).toBeVisible();     // the contract month, in the page subtitle
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await expect(page.getByLabel('Expiry')).toHaveValue('2026-11-24');                              // the nearest expiry is filled in
+  await expect.poll(() => seen.some(s => s.includes('mode=contract') && s.includes('kind=futures') && s.includes('underlying=NIFTY') && s.includes('expiry=2026-11-24'))).toBe(true);
+  await page.getByRole('combobox', { name: 'Search futures underlying' }).fill('cru');
+  await page.getByRole('option', { name: /CRUDEOILM/ }).click();
+  await expect(page.getByLabel('Expiry')).toHaveValue('2026-11-19');
+  await expect.poll(() => seen.some(s => s.includes('kind=futures') && s.includes('underlying=CRUDEOILM') && s.includes('expiry=2026-11-19'))).toBe(true);
   await expect(page.getByTestId('pnf-header-summary')).not.toContainText('CE ');
-  await expect(page.getByLabel('Expiry')).toHaveCount(0);
-  expect(seen.some(s => s.includes('underlying=CRUDEOILM'))).toBe(true);
+  await expect(page.getByLabel('Strike price')).toHaveCount(0);
+});
+
+test('the Options segment picks the nearest expiry and ATM, steps the strike and switches CE / PE / CE+PE', async ({ page }) => {
+  const seen: string[] = [];
+  await mockApi(page, seen);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Options' }).click();
+  const strike = page.getByLabel('Strike price');
+  await expect(page.getByLabel('Expiry')).toHaveValue('2026-11-03');
+  await expect(strike).toHaveValue('23000');                                                       // ATM
+  await expect(page.getByRole('button', { name: 'CE', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect.poll(() => seen.some(s => s.includes('kind=options') && s.includes('strike=23000') && s.includes('type=CE'))).toBe(true);
+  await page.getByRole('button', { name: 'Higher strike' }).click();
+  await expect(strike).toHaveValue('23050');
+  await expect.poll(() => seen.some(s => s.includes('strike=23050') && s.includes('type=CE'))).toBe(true);
+  await page.getByRole('button', { name: 'CE+PE' }).click();
+  await expect.poll(() => seen.some(s => s.includes('strike=23050') && s.includes('type=STRADDLE'))).toBe(true);
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('CE ');                      // a straddle shows both legs
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('PE ');
+  await page.reload();                                                                             // the pick is remembered
+  await expect(page.getByLabel('Strike price')).toHaveValue('23050');
+  await expect(page.getByRole('button', { name: 'CE+PE' })).toHaveAttribute('aria-pressed', 'true');
 });
 
 test('Re-center resets zoom and puts the newest column in the middle of the chart', async ({ page }) => {
@@ -98,23 +136,38 @@ test('Re-center resets zoom and puts the newest column in the middle of the char
   await expect(panel.getByTestId('pnf-zoom')).toHaveAttribute('data-zoom', '1');
   // the newest glyph now sits near the horizontal middle of the plot (the view minus the pinned axis)
   await expect.poll(async () => {
-    const g = (await panel.getByRole('img', { name: /point and figure chart/ }).locator('path, circle').last().boundingBox())!;
+    const g = (await panel.getByTestId('pnf-newest').boundingBox())!;
     return Math.abs(g.x + g.width / 2 - (b.x + (b.width - 66) / 2));   // 66 = AXIS_W
   }).toBeLessThan(30);
 });
 
-test('the search box charts a stock by its plain price, and NIFTY goes back to the index', async ({ page }) => {
+test('the Equity segment charts a stock by its plain price, and Index goes back to NIFTY', async ({ page }) => {
   const seen: string[] = [];
   await mockApi(page, seen);
   await page.goto('/straddle-pnf');
   await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
-  await page.getByRole('combobox', { name: 'Search index or stock' }).fill('rel');
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Equity' }).click();
+  await page.getByRole('combobox', { name: 'Search stock' }).fill('rel');
   await page.getByRole('option', { name: /RELIANCE/ }).click();
   await expect(page.getByText('RELIANCE INDUSTRIES LIMITED').first()).toBeVisible();
   await expect(page.getByTestId('pnf-panel')).toHaveCount(1);
   expect(seen.some(s => s.includes('mode=price') && s.includes('kind=equity') && s.includes('symbol=RELIANCE'))).toBe(true);
   await page.reload();                                                         // the pick is remembered
   await expect(page.getByText('RELIANCE INDUSTRIES LIMITED').first()).toBeVisible();
-  await page.getByRole('button', { name: 'NIFTY', exact: true }).click();
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Index' }).click();
   await expect(page.getByText('Nifty 50').first()).toBeVisible();
+});
+
+test('at 1280px the header stays tidy with the Options pickers open: no sideways scroll, and the chart keeps most of the height', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await mockApi(page);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Options' }).click();
+  await expect(page.getByLabel('Strike price')).toHaveValue('23000');
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const header = (await page.locator('header').first().boundingBox())!;
+  expect(header.height).toBeLessThan(220);
+  const chart = (await page.getByTestId('pnf-scroll').boundingBox())!;
+  expect(chart.height).toBeGreaterThan(450);
 });

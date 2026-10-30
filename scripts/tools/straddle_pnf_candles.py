@@ -48,8 +48,11 @@ def _leg(df: pd.DataFrame) -> pd.DataFrame:
     return out.drop_duplicates("t", keep="last")
 
 
-def merge_legs(ce_df: pd.DataFrame, pe_df: pd.DataFrame, sessions: int) -> list:
-    """Inner-join CE and PE bars on timestamp, keep the last `sessions` IST dates, drop rows with a zero leg."""
+def merge_legs(ce_df: pd.DataFrame, pe_df: pd.DataFrame, sessions: int, today=None) -> list:
+    """Inner-join CE and PE bars on timestamp, keep the last `sessions` IST dates, drop rows with a zero leg.
+
+    With `today` (an IST date), `sessions` counts completed sessions and today's bars are kept on top (as in
+    futures_pnf_candles.to_bars)."""
     ce, pe = _leg(ce_df), _leg(pe_df)
     if ce.empty or pe.empty:
         return []
@@ -58,7 +61,9 @@ def merge_legs(ce_df: pd.DataFrame, pe_df: pd.DataFrame, sessions: int) -> list:
     if m.empty:
         return []
     day = m["t"].map(lambda t: datetime.fromtimestamp(int(t), _IST).date())
-    keep = sorted(day.unique())[-sessions:]
+    days = sorted(day.unique())
+    past = [d for d in days if today is None or d < today]
+    keep = past[-sessions:] + [d for d in days if today is not None and d == today]
     m = m[day.isin(keep)]
     return [
         {

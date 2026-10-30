@@ -43,6 +43,11 @@ class MergeLegs(unittest.TestCase):
         days = sorted({datetime.fromtimestamp(r["t"], _IST).day for r in rows})
         self.assertEqual(days, [21, 22, 23])
 
+    def test_with_today_sessions_are_completed_days_and_today_comes_on_top(self):
+        today = datetime(2026, 10, 23, tzinfo=_IST).date()
+        rows = self.m.merge_legs(self.ce, self.pe, 2, today=today)
+        self.assertEqual(sorted({datetime.fromtimestamp(r["t"], _IST).day for r in rows}), [21, 22, 23])
+
     def test_straddle_and_volume_are_leg_sums(self):
         rows = self.m.merge_legs(self.ce, self.pe, 3)
         first = rows[0]

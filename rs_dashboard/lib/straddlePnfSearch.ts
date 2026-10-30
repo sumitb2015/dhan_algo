@@ -1,7 +1,8 @@
 // Instrument choices for the Straddle P&F search box: the NSE indices that have intraday bars, then NSE cash equities.
 // Pure matching lives here so it is testable; the equity list comes from the route.
 
-export type PnfPick = { kind: 'index' | 'equity'; symbol: string; name: string };
+/** A search result: an index or a stock to chart directly, or an F&O underlying (its contract is picked next). */
+export type PnfPick = { kind: 'index' | 'equity' | 'futures' | 'options'; symbol: string; name: string };
 
 export const PNF_INDICES: PnfPick[] = [
   { kind: 'index', symbol: 'NIFTY', name: 'Nifty 50' },

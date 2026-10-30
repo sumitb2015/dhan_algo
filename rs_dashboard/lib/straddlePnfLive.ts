@@ -45,6 +45,25 @@ export function foldTick(bars: Bar[], tick: Tick, single = false): { bars: Bar[]
   return { bars: [...bars.slice(0, -1), next], closedIndex: null };
 }
 
+export type LegQuote = { ltp: number; changedMs: number; volume: number | null } | null;
+
+/**
+ * The live route's leg quotes -> one chart tick. One leg (an index, stock, future or single option) is carried as `ce` with `pe` 0;
+ * two legs (a straddle, CE first) only make a tick once BOTH have a live price, at the later of the two changes, so a half-known
+ * straddle never prints. Volume is summed only when both legs report it.
+ */
+export function legsTick(legs: LegQuote[]): Tick | null {
+  if (legs.length === 1) {
+    const q = legs[0];
+    return q && q.ltp > 0 ? { t: q.changedMs / 1000, ce: q.ltp, pe: 0, cumVol: q.volume ?? undefined } : null;
+  }
+  if (legs.length !== 2) return null;
+  const [c, p] = legs;
+  if (!c || !p || !(c.ltp > 0) || !(p.ltp > 0)) return null;
+  const vol = c.volume !== null && p.volume !== null ? c.volume + p.volume : undefined;
+  return { t: Math.max(c.changedMs, p.changedMs) / 1000, ce: c.ltp, pe: p.ltp, cumVol: vol };
+}
+
 /** Trading hours, IST minutes of the day [open, close): NSE cash/index, MCX (winter close 23:55, so it also covers the 23:30 summer close). */
 export type Market = 'NSE' | 'MCX';
 export const SESSION_MIN: Record<Market, readonly [number, number]> = { NSE: [9 * 60 + 15, 15 * 60 + 30], MCX: [9 * 60, 23 * 60 + 55] };

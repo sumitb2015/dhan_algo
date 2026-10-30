@@ -4,9 +4,13 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { Search } from 'lucide-react';
 import type { PnfPick } from '@/lib/straddlePnfSearch';
 
-// Search box for the Straddle P&F page: type a symbol or company name, pick an index or NSE equity to chart its price.
+// Search box for the Point & Figure page, scoped to a segment: an NSE stock to chart, or an F&O underlying (its contract is then
+// picked beside it). Type a symbol or company name; results come from master_list.csv on the server.
 
-export default function SymbolSearch({ active, onPick }: { active: PnfPick | null; onPick: (p: PnfPick) => void }) {
+const LABEL: Record<'equity' | 'futures' | 'options', string> = { equity: 'Search stock', futures: 'Search futures underlying', options: 'Search options underlying' };
+const TAG: Record<PnfPick['kind'], string> = { index: 'Index', equity: 'Stock', futures: 'FUT', options: 'OPT' };
+
+export default function SymbolSearch({ segment, active, onPick }: { segment: 'equity' | 'futures' | 'options'; active: PnfPick | null; onPick: (p: PnfPick) => void }) {
   const [text, setText] = useState('');
   const [results, setResults] = useState<PnfPick[]>([]);
   const [open, setOpen] = useState(false);
@@ -20,7 +24,7 @@ export default function SymbolSearch({ active, onPick }: { active: PnfPick | nul
     if (!q) return;   // an empty box shows no list (render gates on text), so stale results are never visible or pickable
     const id = ++reqRef.current;
     const t = setTimeout(() => {
-      fetch(`/api/straddle-pnf/search?q=${encodeURIComponent(q)}`)
+      fetch(`/api/straddle-pnf/search?q=${encodeURIComponent(q)}&segment=${segment}`)
         .then(r => r.json())
         .then((j: { success?: boolean; results?: PnfPick[]; error?: string }) => {
           if (id !== reqRef.current) return;               // a newer keystroke owns the list
@@ -31,7 +35,7 @@ export default function SymbolSearch({ active, onPick }: { active: PnfPick | nul
         .catch(() => { if (id === reqRef.current) setError('Search failed'); });
     }, 200);
     return () => clearTimeout(t);
-  }, [text]);
+  }, [text, segment]);
 
   const pick = (p: PnfPick) => { onPick(p); setText(''); setResults([]); setOpen(false); };
 
@@ -40,9 +44,9 @@ export default function SymbolSearch({ active, onPick }: { active: PnfPick | nul
       <label className="relative flex items-center">
         <Search className="absolute left-2 w-3.5 h-3.5 text-zinc-500 pointer-events-none" aria-hidden="true" />
         <input
-          type="text" role="combobox" aria-label="Search index or stock" aria-expanded={open && results.length > 0}
+          type="text" role="combobox" aria-label={LABEL[segment]} aria-expanded={open && results.length > 0}
           aria-controls={listId} aria-autocomplete="list" autoComplete="off" spellCheck={false}
-          value={text} placeholder={active ? `${active.symbol} · search…` : 'Search index / stock'}
+          value={text} placeholder={active ? active.symbol : LABEL[segment]}
           onChange={e => { setText(e.target.value); setOpen(true); }}
           onFocus={() => setOpen(true)}
           onBlur={() => setTimeout(() => setOpen(false), 120)}  // lets a click on a result land first
@@ -52,7 +56,7 @@ export default function SymbolSearch({ active, onPick }: { active: PnfPick | nul
             else if (e.key === 'Enter' && text.trim() && results[hi]) { e.preventDefault(); pick(results[hi]); }
             else if (e.key === 'Escape') { setOpen(false); setText(''); }
           }}
-          className={`h-7 w-48 rounded-md border bg-zinc-900 pl-7 pr-2 text-xs text-zinc-200 placeholder:text-zinc-500 ${active ? 'border-emerald-500/50' : 'border-zinc-700'}`}
+          className="h-7 w-40 rounded-md border border-zinc-700 bg-zinc-900 pl-7 pr-2 text-xs font-semibold text-zinc-100 placeholder:text-zinc-200 placeholder:font-semibold focus:placeholder:text-zinc-500"
         />
       </label>
       {open && text.trim() && (
@@ -66,7 +70,7 @@ export default function SymbolSearch({ active, onPick }: { active: PnfPick | nul
                 className={`flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer ${i === hi ? 'bg-zinc-800' : ''}`}>
               <span className="font-mono font-bold text-zinc-100 shrink-0">{r.symbol}</span>
               <span className="truncate text-zinc-400">{r.name}</span>
-              <span className="ml-auto shrink-0 text-[10px] font-bold uppercase tracking-wider text-zinc-500">{r.kind === 'index' ? 'Index' : 'Stock'}</span>
+              <span className="ml-auto shrink-0 text-[10px] font-bold uppercase tracking-wider text-zinc-500">{TAG[r.kind]}</span>
             </li>
           ))}
         </ul>

@@ -15,7 +15,7 @@ const START_LOCK = path.join(DEBUG_DIR, 'pnf_ws_start.lock');
 const LOG_FILE = path.join(DEBUG_DIR, 'pnf_ws.log');
 const SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'pnf_ws.py');
 
-const SEGMENTS = new Set(['IDX_I', 'NSE_EQ', 'MCX_COMM']);
+const SEGMENTS = new Set(['IDX_I', 'NSE_EQ', 'NSE_FNO', 'MCX_COMM']);
 /** The bridge ignores a wanted file 60 s old: the page polls every second, so this is rewritten well inside that. */
 const REWRITE_MS = 15_000;
 const FILE_STALE_MS = 3_000;
@@ -56,19 +56,39 @@ function startBridge(): void {
   }
 }
 
+type Q = { ltp: number; changed_ms: number | null; prev_close?: number; volume?: number };
+
+/** One instrument's read-back: `quote` once its price has CHANGED since the bridge started asking, `last` as soon as it has one. */
+function readBack(q: Q | undefined) {
+  // A price counts only once its content has CHANGED since the bridge started asking: the hub replays the last packet on subscribe.
+  const live = q && Number(q.ltp) > 0 && q.changed_ms ? q : null;
+  return {
+    quote: live ? { ltp: live.ltp, changedMs: live.changed_ms, prevClose: live.prev_close ?? null, volume: live.volume ?? null } : null,
+    // The last known price even before it has ticked, for a header that would otherwise be empty.
+    last: q && Number(q.ltp) > 0 ? { ltp: q.ltp, prevClose: q.prev_close ?? null } : null,
+  };
+}
+
+/** `ids=SEG:ID[,SEG:ID]` (a straddle's two legs) or the single `segment=&id=` form. */
+function parseInstruments(p: URLSearchParams): [string, string][] | null {
+  const raw = p.get('ids');
+  const pairs = raw ? raw.split(',').map(x => x.split(':')) : [[p.get('segment') ?? '', p.get('id') ?? '']];
+  if (pairs.length < 1 || pairs.length > 2) return null;
+  for (const pair of pairs) if (pair.length !== 2 || !SEGMENTS.has(pair[0]) || !/^\d{1,9}$/.test(pair[1])) return null;
+  return pairs as [string, string][];
+}
+
 export async function GET(request: NextRequest) {
-  const { searchParams } = new URL(request.url);
-  const segment = searchParams.get('segment') ?? '';
-  const id = searchParams.get('id') ?? '';
-  if (!SEGMENTS.has(segment) || !/^\d{1,9}$/.test(id)) {
-    return NextResponse.json({ success: false, error: 'Use segment=IDX_I|NSE_EQ|MCX_COMM&id=<security id>' }, { status: 400 });
+  const instruments = parseInstruments(new URL(request.url).searchParams);
+  if (!instruments) {
+    return NextResponse.json({ success: false, error: 'Use ids=SEG:ID[,SEG:ID] or segment=IDX_I|NSE_EQ|NSE_FNO|MCX_COMM&id=<security id>' }, { status: 400 });
   }
-  const key = `${segment}:${id}`;
+  const key = instruments.map(([s, i]) => `${s}:${i}`).join(',');
   const now = Date.now();
   try {
     fs.mkdirSync(DEBUG_DIR, { recursive: true });
     if (key !== state.key || now - state.writtenAt >= REWRITE_MS) {
-      writeJsonAtomic(WANTED_FILE, { pid: process.pid, updated_ms: now, instruments: [[segment, id]] });
+      writeJsonAtomic(WANTED_FILE, { pid: process.pid, updated_ms: now, instruments });
       state.key = key; state.writtenAt = now;
     }
   } catch (err) {
@@ -79,13 +99,7 @@ export async function GET(request: NextRequest) {
 
   const f = readJson(QUOTES_FILE);
   const fresh = !!f && now - Number(f.updated_ms) <= FILE_STALE_MS && f.hub_alive !== false;
-  const q = fresh ? (f!.quotes as Record<string, { ltp: number; changed_ms: number | null; prev_close?: number; volume?: number }> | undefined)?.[key] : undefined;
-  // A price counts only once its content has CHANGED since the bridge started asking: the hub replays the last packet on subscribe.
-  const live = q && Number(q.ltp) > 0 && q.changed_ms ? q : null;
-  return NextResponse.json({
-    success: true, bridge: running, hub: fresh,
-    quote: live ? { ltp: live.ltp, changedMs: live.changed_ms, prevClose: live.prev_close ?? null, volume: live.volume ?? null } : null,
-    // The last known price even before it has ticked, for a header that would otherwise be empty.
-    last: q && Number(q.ltp) > 0 ? { ltp: q.ltp, prevClose: q.prev_close ?? null } : null,
-  });
+  const book = fresh ? (f!.quotes as Record<string, Q> | undefined) : undefined;
+  const legs = instruments.map(([s, i]) => readBack(book?.[`${s}:${i}`]));
+  return NextResponse.json({ success: true, bridge: running, hub: fresh, ...legs[0], legs });
 }

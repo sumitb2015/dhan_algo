@@ -35,8 +35,8 @@ STATUS_FILE = os.path.join(DEBUG_DIR, 'pnf_ws_status.json')
 STOP_TRIGGER = os.path.join(DEBUG_DIR, 'pnf_ws_stop.trigger')
 
 CONSUMER = 'pnf'
-# Dhan marketfeed segment codes (price_ladder_ws.py / live_options_ws.py use the same): index, NSE cash, MCX.
-SEGMENTS = {'IDX_I': 0, 'NSE_EQ': 1, 'MCX_COMM': 5}
+# Dhan marketfeed segment codes (price_ladder_ws.py / live_options_ws.py use the same): index, NSE cash, NSE F&O, MCX.
+SEGMENTS = {'IDX_I': 0, 'NSE_EQ': 1, 'NSE_FNO': 2, 'MCX_COMM': 5}
 FEED_QUOTE = 17          # Quote packets: an MCX contract sends nothing in Full mode while shut
 LOOP_SEC = 0.25
 WRITE_SEC = 0.5
