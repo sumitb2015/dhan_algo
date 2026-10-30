@@ -39,6 +39,10 @@ export interface ScalperOrder {
   averagePrice?: number;
   /** Quantity traded so far (Kotak reports it per order; lets a part-filled cancel be sized). */
   filledQty?: number;
+  /** The broker's own product code (MIS / NRML / CNC), when the row carries one. */
+  productType?: string;
+  /** Rejection / status message, when the row carries one. */
+  reason?: string;
 }
 
 export interface ScalperTrade {
@@ -50,6 +54,8 @@ export interface ScalperTrade {
   /** Broker order / fill ids — let MultiLegFocus tell its own trades from outside ones. */
   orderId?: string;
   tradeId?: string;
+  /** The broker's own product code (MIS / NRML / CNC), when the row carries one. */
+  productType?: string;
 }
 
 export function shapeZerodhaPosition(p: Record<string, any>): ScalperPosition {
@@ -107,6 +113,8 @@ export function shapeZerodhaOrder(o: Record<string, any>): ScalperOrder {
     createTime: String(o.order_timestamp ?? ''),
     averagePrice: Number(o.average_price) || 0,
     filledQty: Number(o.filled_quantity) || 0,
+    ...(o.product ? { productType: String(o.product) } : {}),
+    ...(o.status_message ? { reason: String(o.status_message) } : {}),
   };
 }
 
@@ -117,6 +125,7 @@ export function shapeZerodhaTrade(t: Record<string, any>): ScalperTrade {
     tradedQuantity: Number(t.quantity) || 0,
     tradedPrice: Number(t.average_price) || 0,
     createTime: String(t.fill_timestamp ?? ''),
+    ...(t.product ? { productType: String(t.product) } : {}),
     ...(t.order_id != null ? { orderId: String(t.order_id) } : {}),
     ...(t.trade_id != null ? { tradeId: String(t.trade_id) } : {}),
   };

@@ -80,7 +80,16 @@ async function installTradeMock(page: Page, opts: { realNet?: number } = {}) {
       return json(route, { positions: net ? [{ securityId: '54321', tradingSymbol: 'NIFTY-Nov2026-FUT', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY', netQty: net, realizedProfit: 0, unrealizedProfit: 1300, lastTradedPrice: 103.5 }] : [], positionsError: null });
     }
     if (p === '/api/scalper/orders' && method === 'GET') {
-      return json(route, { success: true, data: { orderStatus: 'TRADED', filledQty: 130, averageTradedPrice: 103.25 } });
+      if (u.searchParams.get('orderId')) return json(route, { success: true, data: { orderStatus: 'TRADED', filledQty: 130, averageTradedPrice: 103.25 } });
+      return json(route, { success: true, data: [
+        { orderId: 'O1', createTime: '2026-10-30 10:00:00', tradingSymbol: 'NIFTY-Nov2026-FUT', transactionType: 'BUY', quantity: 130, filledQty: 130, price: 0, averageTradedPrice: 103.25, orderType: 'MARKET', productType: 'INTRADAY', orderStatus: 'TRADED' },
+        { orderId: 'O2', createTime: '2026-10-30 10:05:00', tradingSymbol: 'NIFTY-Nov2026-25000-CE', transactionType: 'SELL', quantity: 65, filledQty: 0, price: 0, orderType: 'MARKET', productType: 'INTRADAY', orderStatus: 'REJECTED', omsErrorDescription: 'Insufficient margin' },
+      ] });
+    }
+    if (p === '/api/scalper/trades' && method === 'GET') {
+      return json(route, { success: true, data: [
+        { orderId: 'O1', exchangeTradeId: 'T1', exchangeTime: '2026-10-30 10:00:01', tradingSymbol: 'NIFTY-Nov2026-FUT', transactionType: 'BUY', tradedQuantity: 130, tradedPrice: 103.25, productType: 'INTRADAY' },
+      ] });
     }
 
     if (p.includes('/api/scalper') && p.endsWith('/funds')) {
@@ -258,3 +267,37 @@ test('Header displays available margin and live P&L chips', async ({ page }) => 
   await expect(marginChip.getByText(/PAPER P&L/i)).toBeVisible();
 });
 
+
+test('Positions, order book, trade book and P&L panel for the header broker (read-only)', async ({ page }) => {
+  const { placedOrders } = await installTradeMock(page, { realNet: 130 });
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-books')).toHaveCount(0);           // closed by default
+  await page.getByRole('button', { name: /Show positions, orders, trades & P&L/ }).click();
+  const books = page.getByTestId('pnf-books');
+  await expect(books).toBeVisible();
+
+  // Positions: the broker row with its P&L
+  await expect(books.getByText('NIFTY-Nov2026-FUT')).toBeVisible();
+  await expect(books.getByRole('cell', { name: '130', exact: true })).toBeVisible();
+  await expect(books.getByTestId('pnf-books-total')).toHaveText('+₹1,300');
+
+  // Order book: newest first, the rejection reason shown
+  await books.getByRole('tab', { name: /Order Book/ }).click();
+  await expect(books.locator('tbody tr').first()).toContainText('REJECTED');
+  await expect(books.getByText('Insufficient margin')).toBeVisible();
+
+  // Trade book
+  await books.getByRole('tab', { name: /Trade Book/ }).click();
+  await expect(books.locator('tbody tr')).toHaveCount(1);
+  await expect(books.locator('tbody tr').first()).toContainText('103.25');
+
+  // P&L summary
+  await books.getByRole('tab', { name: 'P&L' }).click();
+  await expect(books.getByTestId('pnf-books-pnl')).toContainText('Rejected/cxl');
+  await expect(books.getByTestId('pnf-books-pnl')).toContainText('1 / 0');
+
+  // the panel stays open across a reload, and it never sends anything
+  await page.reload();
+  await expect(page.getByTestId('pnf-books')).toBeVisible();
+  expect(placedOrders.length).toBe(0);
+});

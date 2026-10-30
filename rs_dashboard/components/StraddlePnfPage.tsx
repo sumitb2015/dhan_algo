@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, ChartScatter, LocateFixed, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
+import { Bell, ChartScatter, ClipboardList, LocateFixed, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from './NavBar';
 import DataChip from './DataChip';
@@ -10,6 +10,7 @@ import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
 import InstrumentBar from './straddlePnf/InstrumentBar';
 import SettingsControls, { SmaPeriodInput } from './straddlePnf/SettingsControls';
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
+import BrokerBooks from './straddlePnf/BrokerBooks';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
 import { BROKERS, useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { withSavedBroker } from '@/hooks/withSavedBroker';
@@ -49,6 +50,8 @@ const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
 const OVERLAY_KEY = 'straddle-pnf-overlay';
 const TRADE_OPEN_KEY = 'straddle-pnf-trade-open';
+/** Positions / order book / trade book / P&L panel under the charts: closed by default (it takes chart height). */
+const BOOKS_OPEN_KEY = 'straddle-pnf-books-open';
 /** The last pick in each segment, and which segment is open. `straddle-pnf-target` (one target) is the pre-switch key, read once. */
 const TARGETS_KEY = 'straddle-pnf-targets';
 const SEGMENT_KEY = 'straddle-pnf-segment';
@@ -105,6 +108,7 @@ function StraddlePnfPage() {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [logOpen, setLogOpen] = useState(false);
   const [tradeOpen, setTradeOpen] = useState(true);
+  const [booksOpen, setBooksOpen] = useState(false);
   // ONE broker for the whole page: the header picker sets it (saved dashboard-wide, like the scalpers), and the trade bar and the
   // Margin / P&L chips read it from here, so the chips always show the account orders go to.
   const { broker, setBroker } = useBrokerSelector();
@@ -153,6 +157,7 @@ function StraddlePnfPage() {
     rebaselineRef.current = true;
     if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
     if (readPref(TRADE_OPEN_KEY) === '0') setTradeOpen(false);
+    if (readPref(BOOKS_OPEN_KEY) === '1') setBooksOpen(true);
     try {
       const raw = readPref(LOG_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
@@ -369,6 +374,13 @@ function StraddlePnfPage() {
     mutedRef.current = next;
     savePref(SOUND_KEY, next ? '0' : '1');
   };
+  const toggleBooksOpen = () => {
+    setBooksOpen(prev => {
+      const next = !prev;
+      savePref(BOOKS_OPEN_KEY, next ? '1' : '0');
+      return next;
+    });
+  };
   const toggleTradeOpen = () => {
     setTradeOpen(prev => {
       const next = !prev;
@@ -420,6 +432,7 @@ function StraddlePnfPage() {
               <span className="w-px h-5 bg-zinc-800 shrink-0" />
               <BrokerPicker value={broker} onChange={setBroker} brokers={BROKERS} />
               <HeaderPnlMargin broker={broker} mode={tradeMode} paperPnl={paperPnl} />
+              <IconButton icon={ClipboardList} label={booksOpen ? 'Hide positions & orders' : 'Show positions, orders, trades & P&L'} onClick={toggleBooksOpen} pressed={booksOpen} />
             </div>
           </div>
           <div className="order-3 2xl:order-4 ml-auto flex items-center gap-2 shrink-0">
@@ -588,6 +601,7 @@ function StraddlePnfPage() {
             />
           )}
         </div>
+        {booksOpen && <BrokerBooks broker={broker} />}
       </div>
     </div>
   );

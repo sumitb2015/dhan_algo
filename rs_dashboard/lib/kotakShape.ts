@@ -104,6 +104,8 @@ export function shapeKotakOrder(o: Record<string, any>): ScalperOrder {
     averagePrice: Number(o.avgPrc) || 0,
     // Only when the row carries it: an absent field must read as UNKNOWN (null downstream), never as "nothing filled".
     ...(o.fldQty != null && o.fldQty !== '' ? { filledQty: Number(o.fldQty) || 0 } : {}),
+    ...(o.prod ?? o.prd ? { productType: String(o.prod ?? o.prd) } : {}),
+    ...(o.rejRsn ? { reason: String(o.rejRsn) } : {}),
   };
 }
 
@@ -156,6 +158,7 @@ export function shapeKotakTrade(t: Record<string, any>): ScalperTrade {
     tradedQuantity: Number(t.fldQty ?? t.qty) || 0,
     tradedPrice: Number(t.avgPrc ?? t.prc) || 0,
     createTime: String(t.flTm ?? t.exTm ?? t.trdTm ?? t.ordEntTm ?? t.ordDtTm ?? t.createTime ?? ''),
+    ...(t.prod ?? t.prd ? { productType: String(t.prod ?? t.prd) } : {}),
     ...(t.nOrdNo != null ? { orderId: String(t.nOrdNo) } : {}),
     ...(t.flId != null ? { tradeId: String(t.flId) } : {}),
   };
