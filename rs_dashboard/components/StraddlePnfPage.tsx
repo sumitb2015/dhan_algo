@@ -11,7 +11,9 @@ import InstrumentBar from './straddlePnf/InstrumentBar';
 import SettingsControls, { SmaPeriodInput } from './straddlePnf/SettingsControls';
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
-import { useBrokerSelector } from '@/hooks/useBrokerSelector';
+import { BROKERS, useBrokerSelector } from '@/hooks/useBrokerSelector';
+import { withSavedBroker } from '@/hooks/withSavedBroker';
+import { BrokerPicker } from './BrokerPicker';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/alertSound';
@@ -30,14 +32,13 @@ import { sessionOf, type Bar, type PnfExecutionMarker } from '@/lib/straddlePnf'
 import {
   DEFAULT_TARGETS, SEGMENTS, alertId, isComplete, parseTarget, readTargets, targetKey, targetLabel, targetQuery, type Segment, type Target,
 } from '@/lib/pnfTarget';
-import type { PnfLegInput } from '@/lib/pnfOrderLogic';
 
 // Point & Figure of ONE price series with 1-click execution trade bar, picked with Index | Equity | Futures | Options:
 // an NSE index or stock, a future, one option, or a CE + PE straddle. Bars come from the history API and the page re-fetches them
 // every 30 s; signals are only ever evaluated on CLOSED one-minute bars, so the poll never delays one.
 
 type Instrument = { segment: string; security_id: string };
-type Loaded = { key: number; dataDate: string | null; error?: string; instruments: Instrument[]; contracts?: PnfLegInput[] };
+type Loaded = { key: number; dataDate: string | null; error?: string; instruments: Instrument[] };
 type LiveLeg = { quote: (NonNullable<LegQuote> & { prevClose: number | null }) | null; last: { ltp: number; prevClose: number | null } | null };
 
 const POLL_MS = 30_000;
@@ -79,7 +80,7 @@ function IconButton({ icon: Icon, label, onClick, pressed, badge }: { icon: Luci
   );
 }
 
-export default function StraddlePnfPage() {
+function StraddlePnfPage() {
   const [chartView, setChartView] = useState<'1' | '2'>('2');
   const [activeChartTab, setActiveChartTab] = useState<1 | 2>(1);
   const [overlay, setOverlay] = useState<Overlay>('vwap');
@@ -104,7 +105,9 @@ export default function StraddlePnfPage() {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [logOpen, setLogOpen] = useState(false);
   const [tradeOpen, setTradeOpen] = useState(true);
-  const { broker } = useBrokerSelector();
+  // ONE broker for the whole page: the header picker sets it (saved dashboard-wide, like the scalpers), and the trade bar and the
+  // Margin / P&L chips read it from here, so the chips always show the account orders go to.
+  const { broker, setBroker } = useBrokerSelector();
   const [tradeMode, setTradeMode] = useState<'PAPER' | 'REAL'>('PAPER');
   const [paperPnl, setPaperPnl] = useState(0);
   const [muted, setMuted] = useState(false);
@@ -150,8 +153,6 @@ export default function StraddlePnfPage() {
     rebaselineRef.current = true;
     if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
     if (readPref(TRADE_OPEN_KEY) === '0') setTradeOpen(false);
-    const savedMode = readPref('straddle-pnf-trade-mode') as 'PAPER' | 'REAL' | null;
-    if (savedMode === 'PAPER' || savedMode === 'REAL') setTradeMode(savedMode);
     try {
       const raw = readPref(LOG_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
@@ -175,7 +176,7 @@ export default function StraddlePnfPage() {
       const res = await fetch(`/api/straddle-pnf?${targetQuery(target)}`);
       const j = await res.json() as {
         success?: boolean; error?: string; strikes: number[]; dataDate: string | null; name?: string; instruments?: Instrument[];
-        instrument?: Instrument | null; bars: Record<string, Bar[]>; errors: Record<string, string>; contracts?: PnfLegInput[];
+        instrument?: Instrument | null; bars: Record<string, Bar[]>; errors: Record<string, string>;
       };
       if (id !== reqRef.current) return; // a newer request owns the screen
       if (!j.success) throw new Error(j.error ?? 'Failed to load price history');
@@ -187,7 +188,7 @@ export default function StraddlePnfPage() {
       const instruments = j.instruments ?? (j.instrument ? [j.instrument] : []);
       setBars(prev => mergeHistory(hist, prev, tk, instruments.length < 2));
       setHistVersion(v => v + 1);
-      setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], instruments, contracts: j.contracts });
+      setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], instruments });
       if (j.name) setName(j.name);
       setLoadError(null);
     } catch (e) {
@@ -275,25 +276,28 @@ export default function StraddlePnfPage() {
   // ── trade execution markers on the chart ──────────────────────────────────
   const [tradeMarkers, setTradeMarkers] = useState<PnfExecutionMarker[]>([]);
   const storageKey = `straddle-pnf-markers-${targetKey(target)}`;
+  // A marker carries only its time and price: each chart finds its own column from its own box size (two charts with
+  // different boxes have different columns), so no column index is stored. Older saved markers drop theirs.
   useEffect(() => {
     try {
       const raw = sessionStorage.getItem(storageKey);
-      if (raw) setTradeMarkers(JSON.parse(raw));
-      else setTradeMarkers([]);
+      const parsed = raw ? JSON.parse(raw) as PnfExecutionMarker[] : [];
+      setTradeMarkers(Array.isArray(parsed) ? parsed.map(m => ({ ...m, col: undefined })) : []);
     } catch {
       setTradeMarkers([]);
     }
   }, [storageKey]);
 
-  const handleTradeExecuted = useCallback((m: PnfExecutionMarker) => {
+  const saveMarkers = useCallback((update: (prev: PnfExecutionMarker[]) => PnfExecutionMarker[]) => {
     setTradeMarkers(prev => {
-      const activeCols = model.liveColumns.length >= model.columns.length ? model.liveColumns : model.columns;
-      const col = m.col ?? (activeCols.length ? activeCols.length - 1 : 0);
-      const next = [...prev, { ...m, col }];
+      const next = update(prev);
       try { sessionStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* ignore */ }
       return next;
     });
-  }, [model.columns.length, model.liveColumns.length, storageKey]);
+  }, [storageKey]);
+  const handleTradeExecuted = useCallback((m: PnfExecutionMarker) => saveMarkers(prev => [...prev, m]), [saveMarkers]);
+  const handleMarkerPrice = useCallback((id: string, price: number) =>
+    saveMarkers(prev => prev.map(m => (m.id === id ? { ...m, price, estimate: false } : m))), [saveMarkers]);
 
   // A chart's name for the alert log and the header's scrip: the symbol (with its full name for an index / stock), or the contract.
   const label = targetLabel(target);
@@ -413,6 +417,8 @@ export default function StraddlePnfPage() {
             {/* Nifty and India VIX vs the previous close: the shared indices WebSocket bridge's snapshot, started on mount. */}
             <div className="ml-auto shrink-0 flex items-center gap-2">
               <HeaderIndexChips />
+              <span className="w-px h-5 bg-zinc-800 shrink-0" />
+              <BrokerPicker value={broker} onChange={setBroker} brokers={BROKERS} />
               <HeaderPnlMargin broker={broker} mode={tradeMode} paperPnl={paperPnl} />
             </div>
           </div>
@@ -438,7 +444,7 @@ export default function StraddlePnfPage() {
                 onClick={() => toggleChartView('1')}
                 className={seg(chartView === '1')}
               >
-                1 Chart
+                1
               </button>
               <button
                 type="button"
@@ -448,7 +454,7 @@ export default function StraddlePnfPage() {
                 onClick={() => toggleChartView('2')}
                 className={seg(chartView === '2')}
               >
-                2 Charts
+                2
               </button>
             </div>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
@@ -460,18 +466,20 @@ export default function StraddlePnfPage() {
                   <button
                     type="button"
                     aria-pressed={activeChartTab === 1}
+                    aria-label={`Edit Chart 1 settings (${boxText(settings)})`}
                     onClick={() => setActiveChartTab(1)}
                     className={`px-2 h-6 rounded text-[11px] font-bold transition-colors ${activeChartTab === 1 ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
                   >
-                    Chart 1 ({boxText(settings)})
+                    C1 · {boxText(settings).replace(/ box$/, '')}
                   </button>
                   <button
                     type="button"
                     aria-pressed={activeChartTab === 2}
+                    aria-label={`Edit Chart 2 settings (${boxText(settings2)})`}
                     onClick={() => setActiveChartTab(2)}
                     className={`px-2 h-6 rounded text-[11px] font-bold transition-colors ${activeChartTab === 2 ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
                   >
-                    Chart 2 ({boxText(settings2)})
+                    C2 · {boxText(settings2).replace(/ box$/, '')}
                   </button>
                 </div>
                 <span className="w-px h-5 bg-zinc-800 shrink-0" />
@@ -512,13 +520,14 @@ export default function StraddlePnfPage() {
         <div className="shrink-0">
           <PnfTradeBar
             target={target}
-            legs={loaded?.contracts ?? []}
             live={live}
+            broker={broker}
             mode={tradeMode}
             onModeChange={setTradeMode}
             onPnlChange={setPaperPnl}
             onSwitchTarget={choose}
             onTradeExecuted={handleTradeExecuted}
+            onMarkerPrice={handleMarkerPrice}
           />
         </div>
       )}
@@ -531,7 +540,7 @@ export default function StraddlePnfPage() {
           style={{ gridTemplateRows: 'minmax(0, 1fr)' }}
         >
           <PnfPanel
-            title={`${label} · ${boxText(settings)}${chartView === '2' ? ' (Chart 1)' : ''}`}
+            title={chartView === '2' ? `Chart 1 · ${boxText(settings)}` : `${label} · ${boxText(settings)}`}
             strike={loaded?.key ?? 0}
             model={model}
             live={live}
@@ -556,7 +565,7 @@ export default function StraddlePnfPage() {
 
           {chartView === '2' && (
             <PnfPanel
-              title={`${label} · ${boxText(settings2)} (Chart 2)`}
+              title={`Chart 2 · ${boxText(settings2)}`}
               strike={loaded?.key ? -loaded.key : -1}
               model={model2}
               live={live}
@@ -583,3 +592,6 @@ export default function StraddlePnfPage() {
     </div>
   );
 }
+
+// The first render must already be on the saved broker, or a page saved on Kotak / Zerodha reads the Dhan account on mount.
+export default withSavedBroker(StraddlePnfPage);

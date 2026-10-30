@@ -9,7 +9,7 @@ import { FTS_KOTAK_MAX_ORDER_LOTS } from './focusToolUnderlyings.ts';
  *  (its MAX_LOTS_PER_ORDER = 100); 'bds' = Breakdown Scalper (20 lots, its MAX_LOTS_PER_TRADE); 'alab' = Algo Lab entries (20 lots, same);
  *  'fts' = Focus Tool opens (its orders are sliced under this on the page); 'pl' = Price Ladder opens (20 lots, its
  *  MAX_LADDER_LOTS). */
-export const SOURCE_LOT_CAPS: Record<string, number> = { as: 100, bds: 20, alab: 20, fts: FTS_KOTAK_MAX_ORDER_LOTS, pl: 20 };
+export const SOURCE_LOT_CAPS: Record<string, number> = { as: 100, bds: 20, alab: 20, fts: FTS_KOTAK_MAX_ORDER_LOTS, pl: 20, pnf: 20 };
 
 /** NSE/BSE options and futures tick at 0.05; used only when the instrument cache has no tick for the contract. */
 export const DEFAULT_FO_TICK = 0.05;

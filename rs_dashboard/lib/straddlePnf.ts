@@ -49,6 +49,8 @@ export type PnfExecutionMarker = {
   col?: number;
   lots: number;
   mode: 'PAPER' | 'REAL';
+  /** REAL: the live price at the click, until the broker reports the traded price. */
+  estimate?: boolean;
 };
 
 const IST_OFFSET_S = 5.5 * 3600;

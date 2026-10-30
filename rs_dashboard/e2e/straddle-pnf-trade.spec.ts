@@ -20,8 +20,11 @@ function mockHistory() {
   ];
 }
 
-async function installTradeMock(page: Page) {
-  const placedOrders: Array<{ mode: string; broker: string; action: string; lots: number }> = [];
+type OrderBody = { mode: string; broker: string; action?: string; lots?: number; product?: string; close?: boolean; target?: { kind: string }; legs?: unknown };
+
+/** `realNet`: the Dhan book's net quantity on the future (units, lot 65) that the REAL position poll returns. */
+async function installTradeMock(page: Page, opts: { realNet?: number } = {}) {
+  const placedOrders: OrderBody[] = [];
 
   await page.route('**/api/**', async (route: Route) => {
     const req = route.request();
@@ -39,9 +42,6 @@ async function installTradeMock(page: Page) {
         strikes: [ATM],
         name: isIndex ? 'Nifty 50' : 'NIFTY FUT 24 Nov 26',
         instrument: { segment: isIndex ? 'IDX_I' : 'NSE_FNO', security_id: isIndex ? '13' : '54321' },
-        contracts: isIndex ? [] : [
-          { segment: 'NSE_FNO', securityId: '54321', instrument: 'FUTIDX', displayName: 'NIFTY 24 Nov FUT', lot: 65, expiry: '2026-11-24' },
-        ],
         errors: {},
         dataDate: '2026-10-23',
         bars: { [ATM]: mockHistory() },
@@ -57,22 +57,34 @@ async function installTradeMock(page: Page) {
       return json(route, { success: true, expiries: ['2026-11-24'] });
     }
 
-    if (p === '/api/straddle-pnf/order' && method === 'POST') {
-      const body = req.postDataJSON() as { mode: string; broker: string; action: string; lots: number };
-      placedOrders.push(body);
+    // What one lot is on the selected broker (server-resolved).
+    if (p === '/api/straddle-pnf/order' && method === 'GET') {
       return json(route, {
-        success: true,
-        mode: body.mode,
-        broker: body.broker,
-        orders: [{ symbol: 'NIFTY 24 Nov FUT', status: 'placed', orderId: 'ORD-12345' }],
+        success: true, unsupported: null,
+        legs: [{ label: 'NIFTY NOV FUT', side: 'FUT', segment: 'NSE_FNO', lot: 65, unitsPerLot: 65, key: '54321', lotUnits: 65 }],
       });
+    }
+
+    if (p === '/api/straddle-pnf/order' && method === 'POST') {
+      const body = req.postDataJSON() as OrderBody;
+      placedOrders.push(body);
+      const side = body.close ? 'SELL' : body.action;
+      return json(route, {
+        success: true, mode: body.mode, broker: body.broker, outcome: 'placed', message: 'Sent.',
+        legs: [{ label: 'NIFTY NOV FUT', side, qty: body.close ? Math.abs(opts.realNet ?? 0) : (body.lots ?? 0) * 65, product: 'INTRADAY', status: 'placed', orderId: 'ORD-12345' }],
+      });
+    }
+
+    if (p === '/api/scalper/poll' && method === 'GET') {
+      const net = opts.realNet ?? 0;
+      return json(route, { positions: net ? [{ securityId: '54321', tradingSymbol: 'NIFTY-Nov2026-FUT', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY', netQty: net, realizedProfit: 0, unrealizedProfit: 1300, lastTradedPrice: 103.5 }] : [], positionsError: null });
+    }
+    if (p === '/api/scalper/orders' && method === 'GET') {
+      return json(route, { success: true, data: { orderStatus: 'TRADED', filledQty: 130, averageTradedPrice: 103.25 } });
     }
 
     if (p.includes('/api/scalper') && p.endsWith('/funds')) {
       return json(route, { success: true, data: { availabelBalance: 154200, utilizedAmount: 45000 } });
-    }
-    if (p.includes('/api/scalper') && p.endsWith('/positions')) {
-      return json(route, { success: true, data: [] });
     }
 
     if (p === '/api/live-indices' && method === 'POST') return json(route, { success: true });
@@ -81,7 +93,8 @@ async function installTradeMock(page: Page) {
     }
 
     if (method === 'GET') return json(route, { success: true });
-    return route.fulfill({ status: 200, body: JSON.stringify({ success: true }) });
+    // Anything else that is not a GET is refused: these tests must never reach a real order route.
+    return route.fulfill({ status: 599, body: JSON.stringify({ success: false, error: `unmocked ${method} ${p}` }) });
   });
 
   return { placedOrders };
@@ -136,36 +149,63 @@ test('Index shows non-tradable note; switching to Futures enables 1-click tradin
   // Click BUY MARKET in PAPER mode
   await buyBtn.click();
 
-  // Order API was called
-  expect(placedOrders.length).toBe(1);
+  // The order names only the chart target, side and lots: no contract, security id or lot size from the browser
+  await expect.poll(() => placedOrders.length).toBe(1);
   expect(placedOrders[0].mode).toBe('PAPER');
   expect(placedOrders[0].action).toBe('BUY');
   expect(placedOrders[0].lots).toBe(1);
+  expect(placedOrders[0].target?.kind).toBe('futures');
+  expect(placedOrders[0].legs).toBeUndefined();
 
-  // Position updates to LONG 1 lots and shows SQUARE OFF
-  await expect(page.getByText(/LONG 1 lots/i)).toBeVisible();
+  await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 1 lot');
 
-  // Execution marker appears on the P&F chart box for the BUY order (both charts in dual mode)
+  // One BUY marker on each chart (two charts)
   const markers = page.getByTestId('pnf-trade-marker');
   await expect(markers).toHaveCount(2);
   await expect(markers.first()).toHaveAttribute('data-action', 'BUY');
   await expect(markers.first().getByText('B', { exact: true })).toBeVisible();
 
-  const squareOffBtn = page.getByRole('button', { name: 'SQUARE OFF' });
-  await expect(squareOffBtn).toBeVisible();
-
-  // Clicking SQUARE OFF dispatches a SELL order to flatten position
-  await squareOffBtn.click();
-  expect(placedOrders.length).toBe(2);
-  expect(placedOrders[1].action).toBe('SELL');
-
-  // Both BUY and SELL execution markers now appear on the chart
-  await expect(markers).toHaveCount(2);
-  await expect(markers.nth(1)).toHaveAttribute('data-action', 'SELL');
-  await expect(markers.nth(1).getByText('S', { exact: true })).toBeVisible();
-
-  // Position returns to FLAT
+  // A paper square-off is sized from the paper ledger and sends nothing
+  await page.getByRole('button', { name: 'SQUARE OFF' }).click();
   await expect(page.getByText('FLAT')).toBeVisible();
+  expect(placedOrders.length).toBe(1);
+
+  // BUY and SELL markers on both charts
+  await expect(markers).toHaveCount(4);
+  await expect(page.locator('[data-testid="pnf-trade-marker"][data-action="SELL"]')).toHaveCount(2);
+});
+
+test('REAL is never remembered: a reload starts in PAPER', async ({ page }) => {
+  await installTradeMock(page);
+  await page.goto('/straddle-pnf');
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  const modes = page.getByRole('group', { name: 'Execution mode' });
+  await modes.getByRole('button', { name: 'REAL' }).click();
+  await expect(page.getByTestId('header-pnl-margin').getByText('P&L', { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByTestId('header-pnl-margin').getByText(/PAPER P&L/)).toBeVisible();
+});
+
+test('REAL square off reads the broker position and sends only close:true (the server sizes it)', async ({ page }) => {
+  const { placedOrders } = await installTradeMock(page, { realNet: 130 });
+  await page.goto('/straddle-pnf');
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+
+  // 130 units at a 65 lot = 2 lots, whatever the Lots box says
+  await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 2 lots');
+  await page.getByRole('button', { name: '5L' }).click();
+  await page.getByRole('button', { name: 'SQUARE OFF' }).click();
+
+  await expect.poll(() => placedOrders.length).toBe(1);
+  expect(placedOrders[0]).toMatchObject({ mode: 'REAL', broker: 'dhan', close: true });
+  expect(placedOrders[0].lots).toBeUndefined();
+  expect(placedOrders[0].action).toBeUndefined();
+
+  // The marker moves from the live estimate to the traded price the broker reports
+  const marker = page.getByTestId('pnf-trade-marker').first();
+  await expect(marker).toHaveAttribute('data-action', 'SELL');
+  await expect(marker).toHaveAttribute('data-price', '103.25');
 });
 
 test('Lot sizing controls: preset buttons and commit-on-blur protection', async ({ page }) => {
@@ -214,7 +254,7 @@ test('Header displays available margin and live P&L chips', async ({ page }) => 
   await page.getByRole('button', { name: 'BUY MARKET' }).click();
 
   // Active paper position updates and live price (103.5 vs 103 entry) updates P&L chip
-  await expect(page.getByText(/LONG 1 lots/i)).toBeVisible();
+  await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 1 lot');
   await expect(marginChip.getByText(/PAPER P&L/i)).toBeVisible();
 });
 

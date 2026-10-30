@@ -362,7 +362,38 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         headerSlot,
       ) : null}
 
-      {(!headerSlot || showHeader) && (
+      {showHeader && (
+      // Two charts side by side: one line per card (the page header already carries the scrip, legs and session facts).
+      <div className="px-3 py-1.5 border-b border-zinc-800 flex items-center gap-2 min-w-0 text-[10px] font-mono">
+        <h2 className="text-xs font-bold text-zinc-100 truncate shrink min-w-0 font-sans">{title}</h2>
+        <span data-testid="pnf-overlay-legend" className={`shrink-0 ${kind === 'vwap' ? 'text-amber-300' : 'text-sky-300'}`}>
+          {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : smaWaiting ? ` needs ${model.smaPeriod}` : ''}
+        </span>
+        <span data-testid="pnf-box-info" className="text-zinc-500 truncate min-w-0" title={box > 0 ? boxTitle : undefined}>
+          {box > 0 ? `Box ${box.toFixed(2)} (${boxNote}) · ${reversal}-box · ${columns.length} cols` : 'Box —'}
+        </span>
+        <span className="ml-auto flex items-center gap-2 shrink-0">
+          {lastSignal && (
+            <span data-testid="pnf-last-signal"
+                  className={`font-bold px-1.5 py-0.5 rounded border ${
+                    lastSignal.kind === 'DOUBLE_BOTTOM_SELL'
+                      ? 'text-red-400 border-red-500/30 bg-red-500/10'
+                      : 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'}`}>
+              {lastSignal.kind === 'DOUBLE_BOTTOM_SELL' ? '▼ DB' : '▲ DT'} {hhmm(lastSignal.t)}
+            </span>
+          )}
+          {sessionTag
+            ? <span data-testid="pnf-session-tag" className="font-bold uppercase tracking-wider text-sky-300">{sessionTag}</span>
+            : stale && <span className="font-bold uppercase tracking-wider text-amber-300">Stale</span>}
+          <span className="text-sm font-bold text-white">{liveValue !== null ? fmt(liveValue) : '—'}</span>
+          {change !== null && changePct !== null && (
+            <span data-testid="pnf-vs-open" className={change >= 0 ? 'text-emerald-400' : 'text-red-400'}>{signed(changePct)}%</span>
+          )}
+        </span>
+      </div>
+      )}
+
+      {!headerSlot && !showHeader && (
       <div className="px-3 pt-2 pb-1 border-b border-zinc-800">
         <div className="flex items-baseline justify-between gap-2">
           <h2 className="text-xs font-bold text-zinc-100 truncate">{title}</h2>
@@ -621,7 +652,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                           {isBuy ? 'B' : 'S'}
                         </text>
 
-                        <title>{`${m.action} ${m.lots} lot${m.lots > 1 ? 's' : ''} @ ${m.price.toFixed(2)} [${m.mode}]`}</title>
+                        <title>{`${m.action} ${m.lots} lot${m.lots > 1 ? 's' : ''} @ ${m.estimate ? '~' : ''}${m.price.toFixed(2)} [${m.mode}]${m.estimate ? ' (live price at the click; traded price not reported yet)' : ''}`}</title>
                       </g>
                     );
                   });

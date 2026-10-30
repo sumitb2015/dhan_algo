@@ -1,228 +1,161 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { placeDhanOrder } from '@/lib/dhanPlaceOrder';
 import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
+import { buildKotakOrderPayload } from '@/lib/kotakOrderPayload';
 import { placeZerodhaOrderSliced } from '@/lib/zerodhaPlaceOrder';
-import { slicesFor, zerodhaOptionContract } from '@/lib/zerodhaContracts';
-import { kotakOptionContract, kotakFutureContract, kotakEquityContract } from '@/lib/kotakContracts';
+import { slicesFor } from '@/lib/zerodhaContracts';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { brokerPositionRows, brokerSessionOk } from '@/lib/priceLadderServer';
+import { CloseGuard } from '@/lib/priceLadderClose';
+import { parseTarget, isComplete, targetKey } from '@/lib/pnfTarget';
+import { brokerLegs, resolvePnfLegs, type PnfBrokerLeg } from '@/lib/pnfOrderServer';
 import {
-  MAX_PNF_LOTS,
-  validatePnfOrder,
-  calculateLegQty,
-  buildPaperFills,
-  type PnfOrderBody,
-  type PnfLegInput,
+  MAX_PNF_LOTS, brokerProduct, needsRollback, orderQty, parsePnfOrder, planLegClose, sendOutcome,
+  type LegResult, type PnfAction, type PnfBroker,
 } from '@/lib/pnfOrderLogic';
 
-export { MAX_PNF_LOTS, type PnfOrderBody, type PnfLegInput };
+// The Point & Figure trade bar's orders. Real money: the browser names only the chart's target, the side and the lots.
+// Contracts, lot sizes and segments are resolved here (lib/pnfOrderServer.ts); a close is sized from the broker's own
+// book read now (every non-flat row of the contract, its own product, opposite side), so it can only reduce a position.
+// GET tells the trade bar what one lot is and whether the selected broker can trade the chart at all.
 
-function parseLegMeta(leg: PnfLegInput) {
-  const u = leg.underlying ?? leg.displayName?.split(' ')[0] ?? '';
-  const expiry = leg.expiry ?? '';
-  let strike = leg.strike;
-  let optType = leg.optionType;
+const NAME: Record<PnfBroker, string> = { dhan: 'Dhan', kotak: 'Kotak', zerodha: 'Zerodha' };
+const bad = (error: string, status = 400) => NextResponse.json({ success: false, error }, { status });
+type G = { __pnfOrderGuard?: CloseGuard; __pnfOrderBusy?: Set<string> };
+const closeGuard: CloseGuard = ((globalThis as G).__pnfOrderGuard ??= new CloseGuard());
+/** One order per broker + chart at a time: a second click while the first is on the wire is refused, not queued. */
+const busy: Set<string> = ((globalThis as G).__pnfOrderBusy ??= new Set());
 
-  if ((!strike || !optType) && leg.displayName) {
-    const m = leg.displayName.match(/(\d{4,6})\s+(CALL|PUT|CE|PE)/i);
-    if (m) {
-      strike = Number(m[1]);
-      optType = /CALL|CE/i.test(m[2]) ? 'CE' : 'PE';
-    }
-  }
-
-  const isOption = optType === 'CE' || optType === 'PE' || /CALL|PUT|CE|PE/i.test(leg.displayName ?? '');
-  const isFuture = leg.instrument?.startsWith('FUT') || /FUT/i.test(leg.displayName ?? '');
-  const isEquity = leg.instrument === 'EQUITY' || leg.segment === 'NSE_EQ';
-
-  return { underlying: u, expiry, strike, optType, isOption, isFuture, isEquity };
+export async function GET(req: NextRequest): Promise<NextResponse> {
+  const p = req.nextUrl.searchParams;
+  const broker = p.get('broker');
+  if (broker !== 'dhan' && broker !== 'kotak' && broker !== 'zerodha') return bad('broker must be dhan, kotak or zerodha');
+  let raw: unknown = null;
+  try { raw = JSON.parse(p.get('target') ?? 'null'); } catch { /* invalid */ }
+  const target = parseTarget(raw);
+  if (!target || !isComplete(target)) return bad('A complete chart target is required');
+  if (target.kind === 'index') return NextResponse.json({ success: true, legs: [], unsupported: 'An index cannot be traded directly' });
+  const legs = resolvePnfLegs(target);
+  if (typeof legs === 'string') return bad(legs);
+  const onBroker = await brokerLegs(broker, target, legs).catch((e: Error) => `Contract lookup failed: ${e.message}`);
+  return NextResponse.json({
+    success: true,
+    legs: legs.map((l, i) => ({
+      label: l.label, side: l.side, segment: l.segment, lot: l.lot, unitsPerLot: l.unitsPerLot,
+      key: typeof onBroker === 'string' ? null : onBroker[i].key,
+      lotUnits: typeof onBroker === 'string' ? null : onBroker[i].lotUnits,
+    })),
+    unsupported: typeof onBroker === 'string' ? onBroker : null,
+  });
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
-  try {
-    const body = (await req.json()) as PnfOrderBody;
-    const { broker = 'dhan', mode = 'PAPER', action, productType = 'INTRADAY', legs } = body;
+  let body: unknown;
+  try { body = await req.json(); } catch { return bad('Invalid JSON'); }
+  const order = parsePnfOrder(body);
+  if (typeof order === 'string') return bad(order);
+  const { broker, mode, target, close } = order;
+  const legs = resolvePnfLegs(target);
+  if (typeof legs === 'string') return bad(legs);
 
-    const validation = validatePnfOrder(body);
-    if (!validation.valid) {
-      return NextResponse.json({ success: false, error: validation.error }, { status: 400 });
-    }
-    const lotsNum = validation.lotsNum;
-
-    // ── PAPER TRADING ──────────────────────────────────────────────────────────
-    if (mode === 'PAPER') {
-      const fills = buildPaperFills(legs, action, lotsNum, broker);
-      return NextResponse.json({
-        success: true,
-        mode: 'PAPER',
-        message: `Paper ${action} ${lotsNum} lot${lotsNum > 1 ? 's' : ''} executed`,
-        fills,
-      });
-    }
-
-    // ── REAL TRADING: DHAN ─────────────────────────────────────────────────────
-    if (broker === 'dhan') {
-      const results = [];
-      for (let i = 0; i < legs.length; i++) {
-        const leg = legs[i];
-        const qty = calculateLegQty(leg, lotsNum, 'dhan');
-
-        const res = await placeDhanOrder({
-          securityId: String(leg.securityId),
-          quantity: qty,
-          side: action,
-          orderType: 'MARKET',
-          exchangeSegment: leg.segment,
-          productType: leg.segment === 'NSE_EQ' && productType === 'CNC' ? 'CNC' : productType === 'MARGIN' ? 'MARGIN' : 'INTRADAY',
-          source: 'pnf',
-        });
-
-        if (res.status === 'invalid' || res.status === 'rejected') {
-          return NextResponse.json({ success: false, error: `${leg.displayName ?? leg.securityId}: ${res.error}` }, { status: 400 });
-        }
-        results.push({
-          securityId: leg.securityId,
-          orderId: res.status === 'placed' ? res.orderId : undefined,
-          status: res.status,
-          error: 'error' in res ? res.error : undefined,
-        });
-      }
-      invalidateBrokerCache('dhan');
-      return NextResponse.json({
-        success: true,
-        mode: 'REAL',
-        broker: 'dhan',
-        orders: results,
-      });
-    }
-
-    // ── REAL TRADING: KOTAK ────────────────────────────────────────────────────
-    if (broker === 'kotak') {
-      const results = [];
-      for (const leg of legs) {
-        const meta = parseLegMeta(leg);
-        let tradingsymbol = leg.tradingSymbol ?? '';
-        let exchangeSegment = leg.segment === 'MCX_COMM' ? 'mcx_fo' : leg.segment === 'BSE_FNO' ? 'bse_fo' : 'nse_fo';
-        let lotSize = leg.lot ?? 1;
-
-        if (meta.isOption && meta.underlying && meta.expiry && meta.strike && meta.optType) {
-          const c = await kotakOptionContract(meta.underlying, meta.expiry, meta.strike, meta.optType);
-          if (!c) {
-            return NextResponse.json({
-              success: false,
-              error: `Kotak does not list option ${meta.underlying} ${meta.expiry} ${meta.strike} ${meta.optType}`,
-            }, { status: 400 });
-          }
-          tradingsymbol = c.tradingsymbol;
-          exchangeSegment = c.segment;
-          lotSize = c.lotSize;
-        } else if (meta.isFuture && meta.underlying && meta.expiry) {
-          const c = await kotakFutureContract(meta.underlying, meta.expiry);
-          if (!c) {
-            return NextResponse.json({
-              success: false,
-              error: `Kotak does not list future ${meta.underlying} ${meta.expiry}`,
-            }, { status: 400 });
-          }
-          tradingsymbol = c.tradingsymbol;
-          exchangeSegment = c.segment;
-          lotSize = c.lotSize;
-        } else if (meta.isEquity) {
-          const c = await kotakEquityContract(meta.underlying || leg.displayName || leg.securityId);
-          if (!c) {
-            return NextResponse.json({
-              success: false,
-              error: `Kotak does not list equity ${meta.underlying || leg.displayName}`,
-            }, { status: 400 });
-          }
-          tradingsymbol = c.tradingsymbol;
-          exchangeSegment = 'nse_cm';
-          lotSize = 1;
-        }
-
-        if (!tradingsymbol) {
-          tradingsymbol = leg.tradingSymbol ?? leg.displayName ?? leg.securityId;
-        }
-
-        const qty = calculateLegQty({ ...leg, lot: lotSize }, lotsNum, 'kotak');
-        const res = await placeKotakOrder({
-          es: exchangeSegment,
-          pc: productType === 'MARGIN' ? 'NRML' : productType === 'CNC' ? 'CNC' : 'MIS',
-          pr: '0',
-          pt: 'MKT',
-          qt: String(qty),
-          rt: 'DAY',
-          ts: tradingsymbol,
-          tt: action === 'BUY' ? 'B' : 'S',
-          am: 'NO',
-          dq: '0',
-          mp: '0',
-          pf: 'N',
-          tp: '0',
-        });
-
-        if (res.status === 'rejected') {
-          return NextResponse.json({ success: false, error: `${tradingsymbol}: ${res.error}` }, { status: 400 });
-        }
-        results.push({ symbol: tradingsymbol, orderId: res.status === 'placed' ? res.orderId : undefined, status: res.status });
-      }
-      invalidateBrokerCache('kotak');
-      return NextResponse.json({ success: true, mode: 'REAL', broker: 'kotak', orders: results });
-    }
-
-    // ── REAL TRADING: ZERODHA ──────────────────────────────────────────────────
-    if (broker === 'zerodha') {
-      const results = [];
-      for (const leg of legs) {
-        const meta = parseLegMeta(leg);
-        let tradingsymbol = leg.tradingSymbol ?? '';
-        let exchange: 'NFO' | 'BFO' | 'MCX' | 'NSE' = leg.segment === 'MCX_COMM' ? 'MCX' : leg.segment === 'BSE_FNO' ? 'BFO' : 'NFO';
-        let lotSize = leg.lot ?? 1;
-
-        if (meta.isOption && meta.underlying && meta.expiry && meta.strike && meta.optType) {
-          const c = await zerodhaOptionContract(meta.underlying, meta.expiry, meta.strike, meta.optType);
-          if (!c) {
-            return NextResponse.json({
-              success: false,
-              error: `Zerodha does not list option ${meta.underlying} ${meta.expiry} ${meta.strike} ${meta.optType}`,
-            }, { status: 400 });
-          }
-          tradingsymbol = c.tradingsymbol;
-          exchange = c.exchange;
-          lotSize = c.lotSize;
-        } else if (meta.isEquity) {
-          tradingsymbol = meta.underlying || leg.displayName || leg.securityId;
-          exchange = 'NSE';
-          lotSize = 1;
-        }
-
-        if (!tradingsymbol) {
-          tradingsymbol = leg.tradingSymbol ?? leg.displayName ?? leg.securityId;
-        }
-
-        const qty = calculateLegQty({ ...leg, lot: lotSize }, lotsNum, 'zerodha');
-        const slices = slicesFor(String(tradingsymbol), qty);
-        const res = await placeZerodhaOrderSliced({
-          tradingsymbol,
-          transaction_type: action,
-          order_type: 'MARKET',
-          quantity: qty,
-          exchange,
-          product: productType === 'MARGIN' ? 'NRML' : productType === 'CNC' ? 'CNC' : 'MIS',
-          validity: 'DAY',
-          market_protection: -1,
-        }, slices);
-
-        if (res.status === 'rejected') {
-          return NextResponse.json({ success: false, error: `${tradingsymbol}: ${res.error}` }, { status: 400 });
-        }
-        results.push({ symbol: tradingsymbol, orderId: res.status === 'placed' ? res.orderId : undefined, status: res.status });
-      }
-      invalidateBrokerCache('zerodha');
-      return NextResponse.json({ success: true, mode: 'REAL', broker: 'zerodha', orders: results });
-    }
-
-    return NextResponse.json({ success: false, error: `Unsupported broker: ${broker}` }, { status: 400 });
-  } catch (err) {
-    return NextResponse.json({ success: false, error: `Execution error: ${(err as Error).message}` }, { status: 500 });
+  // ── PAPER: nothing is sent; the trade bar keeps its own ledger. Sized with Dhan's master lot.
+  if (mode === 'PAPER') {
+    if (close) return bad('A paper close is sized by the trade bar ledger - send the lots to reverse');
+    return NextResponse.json({
+      success: true, mode, outcome: 'placed',
+      legs: legs.map(l => ({ label: l.label, side: order.action, qty: order.lots * l.lot, product: order.product, status: 'placed' })),
+    });
   }
+
+  if (!brokerSessionOk(broker)) return bad(`${NAME[broker]} session is not logged in - nothing was sent`, 403);
+  const onBroker = await brokerLegs(broker, target, legs).catch((e: Error) => `Contract lookup failed: ${e.message}`);
+  if (typeof onBroker === 'string') return bad(`${onBroker}. Nothing was sent.`);
+
+  const gkey = `${broker}|${targetKey(target)}`;
+  if (busy.has(gkey)) return bad('An order for this chart is already being sent - wait for it', 409);
+  if (close && !closeGuard.tryStart(gkey, Date.now())) return bad('A close for this chart was just sent - wait a few seconds for the broker book to update', 409);
+  busy.add(gkey);
+  let sent = false;
+  try {
+    const results: LegResult[] = [];
+    if (close) {
+      const rows = await brokerPositionRows(broker);
+      if (!rows) return bad(`Could not read the ${NAME[broker]} positions - nothing was sent`, 502);
+      const plans = onBroker.map(l => ({ leg: l, orders: planLegClose(l.key, rows) }));
+      if (plans.every(p => p.orders.length === 0)) return bad(`No open ${NAME[broker]} position on this chart's contract - nothing was sent`);
+      sent = true;
+      for (const { leg, orders } of plans) {
+        for (const o of orders) results.push(await send(broker, leg, o.side, o.qty, o.product, false));
+      }
+    } else {
+      const product = brokerProduct(order.product, broker);
+      // Sized here from the server's own lot, so this only guards a lot lookup gone wrong. Checked for every leg before any is sent.
+      if (onBroker.some(l => !(l.lotUnits > 0) || (l.segment !== 'NSE_EQ' && order.lots > MAX_PNF_LOTS))) return bad('Order size check failed - nothing was sent', 500);
+      sent = true;
+      for (const leg of onBroker) {
+        const qty = orderQty(order.lots, leg.lotUnits);
+        const r = await send(broker, leg, order.action, qty, product, true);
+        results.push(r);
+        if (r.status !== 'placed') break;                     // never send PE after CE failed or went unknown
+      }
+      for (let i = results.length; i < onBroker.length; i++) {
+        results.push({ label: onBroker[i].label, side: order.action, qty: orderQty(order.lots, onBroker[i].lotUnits), product, status: 'skipped' });
+      }
+      if (needsRollback(results.slice(0, 2), false)) {
+        const first = results[0];
+        const back = await send(broker, onBroker[0], first.side === 'BUY' ? 'SELL' : 'BUY', first.qty, first.product, false);
+        results.push({ ...back, label: `${back.label} (reversal)` });
+      }
+    }
+    invalidateBrokerCache(broker);
+    const reversal = results.find(r => r.label.endsWith('(reversal)'));
+    // CE went in, PE was refused and CE was taken back out: nothing is left open (two fills were paid for).
+    const outcome = reversal?.status === 'placed' ? 'reversed' : sendOutcome(results.filter(r => r !== reversal));
+    return NextResponse.json({ success: outcome === 'placed', mode, broker, outcome, legs: results, message: describe(outcome, results) },
+      { status: outcome === 'unknown' ? 504 : 200 });
+  } catch (err) {
+    console.error('[straddle-pnf] order failed:', err);
+    return bad(`${sent ? 'Order status unknown - check Orders/Positions before retrying' : 'Nothing was sent'}: ${(err as Error).message}`, sent ? 504 : 500);
+  } finally {
+    busy.delete(gkey);
+    if (close) closeGuard.finish(gkey, Date.now(), sent);
+  }
+}
+
+/** One order, never throwing: a throw after the request may have gone out is UNKNOWN, not a clean failure. */
+async function send(broker: PnfBroker, leg: PnfBrokerLeg, side: PnfAction, qty: number, product: string, open: boolean): Promise<LegResult> {
+  const base = { label: leg.label, side, qty, product };
+  try {
+    if (broker === 'dhan') {
+      const r = await placeDhanOrder({ securityId: leg.key, quantity: qty, side, orderType: 'MARKET', exchangeSegment: leg.exchange, productType: product, source: 'pnf' });
+      if (r.status === 'placed') return { ...base, status: 'placed', orderId: r.orderId };
+      return { ...base, status: r.status === 'unknown' ? 'unknown' : 'rejected', error: r.error };
+    }
+    if (broker === 'kotak') {
+      const built = buildKotakOrderPayload(
+        { tradingsymbol: leg.key, quantity: qty, side, exchange: leg.exchange, product, orderType: 'MARKET', source: open && leg.capLot ? 'pnf' : undefined },
+        { lotSize: leg.capLot, tick: null },
+      );
+      if ('error' in built) return { ...base, status: 'rejected', error: built.error };
+      const r = await placeKotakOrder(built.payload);
+      return r.status === 'placed' ? { ...base, status: 'placed', orderId: r.orderId } : { ...base, status: r.status, error: r.error };
+    }
+    const r = await placeZerodhaOrderSliced({
+      tradingsymbol: leg.key, exchange: leg.exchange, transaction_type: side, order_type: 'MARKET', quantity: qty,
+      product, validity: 'DAY', market_protection: -1,
+    }, leg.segment === 'NSE_EQ' ? [qty] : slicesFor(leg.key, qty));
+    return r.status === 'placed' ? { ...base, status: 'placed', orderId: r.orderId } : { ...base, status: r.status, error: r.error };
+  } catch (err) {
+    return { ...base, status: 'unknown', error: `No clean reply: ${(err as Error).message}` };
+  }
+}
+
+function describe(outcome: string, results: LegResult[]): string {
+  const line = (r: LegResult) => `${r.label} ${r.side} ${r.qty} ${r.product}: ${r.status}${r.error ? ` (${r.error})` : ''}`;
+  const head = outcome === 'placed' ? 'Sent'
+    : outcome === 'unknown' ? 'Status unknown - check Orders/Positions before retrying'
+    : outcome === 'partial' ? 'PARTIAL - a leg is open alone, check Positions'
+    : outcome === 'reversed' ? 'Second leg refused - the first leg was reversed, nothing is left open'
+    : 'Not sent';
+  return `${head}. ${results.map(line).join('; ')}`;
 }

@@ -370,6 +370,10 @@ test('the reversal control defaults to 3 boxes, changes how often columns turn, 
   await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
   await expect(page.getByLabel('Reversal')).toHaveValue('3');
   await expect(page.getByLabel('Reversal').locator('option')).toHaveText(['1-box', '2-box', '3-box', '4-box', '5-box']);
+  // longHistory moves in 0.5% steps: at the 0.1% default every move is 5 boxes, so 2-box and 3-box draw the same columns
+  await page.getByLabel('Box %').fill('0.5');
+  await page.getByLabel('Box %').press('Enter');
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('3-box');
   const three = await cols(panel);
   await page.getByRole('button', { name: 'Alert log' }).click();
   await page.getByLabel('Reversal').selectOption('2');
