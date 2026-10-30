@@ -271,10 +271,13 @@ test('Header displays available margin and live P&L chips', async ({ page }) => 
 test('Positions, order book, trade book and P&L panel for the header broker (read-only)', async ({ page }) => {
   const { placedOrders } = await installTradeMock(page, { realNet: 130 });
   await page.goto('/straddle-pnf');
-  await expect(page.getByTestId('pnf-books')).toHaveCount(0);           // closed by default
-  await page.getByRole('button', { name: /Show positions, orders, trades & P&L/ }).click();
+  // docked at the bottom, collapsed: just the strip with the day's P&L, no table
   const books = page.getByTestId('pnf-books');
-  await expect(books).toBeVisible();
+  await expect(books).toHaveAttribute('data-open', 'false');
+  await expect(books.getByTestId('pnf-books-total')).toHaveText('+₹1,300');
+  await expect(books.locator('table')).toHaveCount(0);
+  await books.getByRole('tab', { name: /Positions/ }).click();             // a tab click expands it on that tab
+  await expect(books).toHaveAttribute('data-open', 'true');
 
   // Positions: the broker row with its P&L
   await expect(books.getByText('NIFTY-Nov2026-FUT')).toBeVisible();
@@ -296,8 +299,12 @@ test('Positions, order book, trade book and P&L panel for the header broker (rea
   await expect(books.getByTestId('pnf-books-pnl')).toContainText('Rejected/cxl');
   await expect(books.getByTestId('pnf-books-pnl')).toContainText('1 / 0');
 
-  // the panel stays open across a reload, and it never sends anything
+  // the expanded state survives a reload; clicking the shown tab collapses it; it never sends anything
   await page.reload();
-  await expect(page.getByTestId('pnf-books')).toBeVisible();
+  await expect(books).toHaveAttribute('data-open', 'true');
+  await books.getByRole('tab', { name: /Positions/ }).click();             // the tab shown after a reload
+  await expect(books).toHaveAttribute('data-open', 'false');
+  await books.getByRole('button', { name: 'Expand positions & orders' }).click();
+  await expect(books).toHaveAttribute('data-open', 'true');
   expect(placedOrders.length).toBe(0);
 });

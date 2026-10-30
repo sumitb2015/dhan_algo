@@ -260,7 +260,7 @@ export default function PnfTradeBar({
   );
 
   return (
-    <div data-testid="pnf-trade-bar" className="flex items-center gap-x-4 gap-y-2 flex-wrap px-6 py-2 bg-zinc-900/70 border-b border-zinc-800 text-xs">
+    <div data-testid="pnf-trade-bar" className="flex items-center gap-x-4 gap-y-2 flex-wrap px-6 py-1 bg-zinc-900/70 border-b border-zinc-800 text-xs">
       {/* 1. Broker & Trading Mode */}
       <div className="flex items-center gap-2">
         {/* the broker is picked in the page header; the bar names it so the order target is never in doubt */}

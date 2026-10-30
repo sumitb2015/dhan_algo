@@ -1,14 +1,16 @@
 'use client';
 
 import { useEffect, useState, type ReactNode } from 'react';
+import { ChevronDown, ChevronUp } from 'lucide-react';
 import { BROKER_LABELS, scalperRoute, type Broker } from '@/hooks/useBrokerSelector';
 import {
   daySummary, newestFirst, toOrderRow, toPositionRow, toTradeRow, type OrderRow, type OrderState, type PositionRow, type TradeRow,
 } from '@/lib/pnfBooks';
 
-// Positions, order book, trade book and the day's P&L for the page header's broker. Read-only: no order, cancel or exit
-// is sent from here. Every book is read every 5 s while the panel is open and tagged with its broker, so switching
-// accounts never shows the old account's rows under the new name.
+// Positions, order book, trade book and the day's P&L for the page header's broker, docked at the bottom of the page.
+// Read-only: no order, cancel or exit is sent from here. Collapsed it is one strip (tabs + Day P&L) and reads only the
+// positions; expanded it grows to fit its rows (up to a cap) and reads all three books. Every read is every 5 s and tagged
+// with its broker, so switching accounts never shows the old account's rows under the new name.
 
 type Tab = 'positions' | 'orders' | 'trades' | 'pnl';
 type BookState<T> = { broker: Broker; rows: T[]; error?: string } | null;
@@ -38,7 +40,14 @@ async function readBook<T>(url: string, pick: (j: Record<string, unknown>) => un
   }
 }
 
-export default function BrokerBooks({ broker }: { broker: Broker }) {
+export interface BrokerBooksProps {
+  broker: Broker;
+  /** Expanded (the page remembers it); collapsed shows only the strip. */
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+
+export default function BrokerBooks({ broker, open, onOpenChange }: BrokerBooksProps) {
   const [tab, setTab] = useState<Tab>('positions');
   const [positions, setPositions] = useState<BookState<PositionRow>>(null);
   const [orders, setOrders] = useState<BookState<OrderRow>>(null);
@@ -49,18 +58,18 @@ export default function BrokerBooks({ broker }: { broker: Broker }) {
     const read = async () => {
       const [p, o, t] = await Promise.all([
         readBook(`${scalperRoute(broker, 'poll')}?only=positions`, j => (j.positionsError ? null : j.positions), toPositionRow),
-        readBook(scalperRoute(broker, 'orders'), j => (j.success === false ? null : j.data), toOrderRow),
-        readBook(scalperRoute(broker, 'trades'), j => (j.success === false ? null : j.data), toTradeRow),
+        open ? readBook(scalperRoute(broker, 'orders'), j => (j.success === false ? null : j.data), toOrderRow) : null,
+        open ? readBook(scalperRoute(broker, 'trades'), j => (j.success === false ? null : j.data), toTradeRow) : null,
       ]);
       if (dead) return;
       setPositions({ broker, ...p });
-      setOrders({ broker, ...o });
-      setTrades({ broker, ...t });
+      if (o) setOrders({ broker, ...o });
+      if (t) setTrades({ broker, ...t });
     };
     void read();
     const id = setInterval(read, POLL_MS);
     return () => { dead = true; clearInterval(id); };
-  }, [broker]);
+  }, [broker, open]);
 
   const mine = <T,>(b: BookState<T>) => (b && b.broker === broker ? b : null);
   const pos = mine(positions), ord = mine(orders), trd = mine(trades);
@@ -76,14 +85,19 @@ export default function BrokerBooks({ broker }: { broker: Broker }) {
     { id: 'pnl', label: 'P&L' },
   ];
   const book = tab === 'positions' ? pos : tab === 'orders' ? ord : tab === 'trades' ? trd : pos;
+  /** A tab click opens the panel on that tab; clicking the tab already shown collapses it. */
+  const pick = (t: Tab) => {
+    if (open && t === tab) onOpenChange(false);
+    else { setTab(t); if (!open) onOpenChange(true); }
+  };
 
   return (
-    <section data-testid="pnf-books" className="shrink-0 rounded-lg border border-zinc-800 bg-zinc-900 flex flex-col h-64 min-h-0">
-      <div className="flex items-center gap-2 px-2 py-1.5 border-b border-zinc-800">
-        <div role="tablist" aria-label="Account books" className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-950">
+    <section data-testid="pnf-books" data-open={open} className="shrink-0 border-t border-zinc-800 bg-zinc-900 flex flex-col">
+      <div className={`flex items-center gap-2 px-4 h-6 ${open ? 'border-b border-zinc-800' : ''}`}>
+        <div role="tablist" aria-label="Account books" className="inline-flex items-center gap-0.5">
           {tabs.map(t => (
-            <button key={t.id} type="button" role="tab" aria-selected={tab === t.id} onClick={() => setTab(t.id)}
-                    className={`px-2.5 h-6 rounded text-[11px] font-bold transition-colors ${tab === t.id ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}>
+            <button key={t.id} type="button" role="tab" aria-selected={open && tab === t.id} onClick={() => pick(t.id)}
+                    className={`px-2 h-5 rounded text-[11px] font-bold transition-colors ${open && tab === t.id ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}>
               {t.label}{t.count !== undefined && <span className="ml-1 font-mono text-zinc-400">{t.count}</span>}
             </button>
           ))}
@@ -92,11 +106,16 @@ export default function BrokerBooks({ broker }: { broker: Broker }) {
         <span className="ml-auto flex items-center gap-3 text-[11px] font-mono">
           <span className="text-zinc-400">Day P&L <span data-testid="pnf-books-total" className={`font-bold ${tone(pos ? summary.total : null)}`}>{pos ? inr(summary.total) : '—'}</span>
             {summary.unpriced > 0 && <span className="text-amber-400" title={`${summary.unpriced} open leg(s) without a live price: their unrealised P&L is not included`}> *</span>}</span>
-          <span className="text-zinc-500">read-only · refreshes every 5 s</span>
+          {open && <span className="text-zinc-500">read-only · refreshes every 5 s</span>}
+          <button type="button" onClick={() => onOpenChange(!open)} aria-label={open ? 'Collapse positions & orders' : 'Expand positions & orders'}
+                  aria-expanded={open}
+                  className="inline-flex items-center justify-center h-5 w-5 rounded border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:bg-zinc-800">
+            {open ? <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" /> : <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />}
+          </button>
         </span>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-auto">
+      {open && <div className="max-h-72 overflow-auto">
         {book?.error ? (
           <p role="alert" className="m-3 text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">
             {BROKER_LABELS[broker]} {tab === 'pnl' ? 'positions' : tab}: {book.error}
@@ -180,7 +199,7 @@ export default function BrokerBooks({ broker }: { broker: Broker }) {
             </div>
           </div>
         )}
-      </div>
+      </div>}
     </section>
   );
 }

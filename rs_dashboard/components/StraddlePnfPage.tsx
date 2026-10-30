@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, ChartScatter, ClipboardList, LocateFixed, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
+import { Bell, ChartScatter, LocateFixed, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from './NavBar';
 import DataChip from './DataChip';
@@ -50,7 +50,7 @@ const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
 const OVERLAY_KEY = 'straddle-pnf-overlay';
 const TRADE_OPEN_KEY = 'straddle-pnf-trade-open';
-/** Positions / order book / trade book / P&L panel under the charts: closed by default (it takes chart height). */
+/** The positions / order book / trade book / P&L strip at the bottom: collapsed by default (expanded it takes chart height). */
 const BOOKS_OPEN_KEY = 'straddle-pnf-books-open';
 /** The last pick in each segment, and which segment is open. `straddle-pnf-target` (one target) is the pre-switch key, read once. */
 const TARGETS_KEY = 'straddle-pnf-targets';
@@ -374,12 +374,9 @@ function StraddlePnfPage() {
     mutedRef.current = next;
     savePref(SOUND_KEY, next ? '0' : '1');
   };
-  const toggleBooksOpen = () => {
-    setBooksOpen(prev => {
-      const next = !prev;
-      savePref(BOOKS_OPEN_KEY, next ? '1' : '0');
-      return next;
-    });
+  const changeBooksOpen = (next: boolean) => {
+    setBooksOpen(next);
+    savePref(BOOKS_OPEN_KEY, next ? '1' : '0');
   };
   const toggleTradeOpen = () => {
     setTradeOpen(prev => {
@@ -432,7 +429,6 @@ function StraddlePnfPage() {
               <span className="w-px h-5 bg-zinc-800 shrink-0" />
               <BrokerPicker value={broker} onChange={setBroker} brokers={BROKERS} />
               <HeaderPnlMargin broker={broker} mode={tradeMode} paperPnl={paperPnl} />
-              <IconButton icon={ClipboardList} label={booksOpen ? 'Hide positions & orders' : 'Show positions, orders, trades & P&L'} onClick={toggleBooksOpen} pressed={booksOpen} />
             </div>
           </div>
           <div className="order-3 2xl:order-4 ml-auto flex items-center gap-2 shrink-0">
@@ -545,7 +541,7 @@ function StraddlePnfPage() {
         </div>
       )}
 
-      <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 py-4">
+      <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 pt-2 pb-2">
         {loadError && <p role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{loadError}</p>}
         {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={settings.interval} /></div>}
         <div
@@ -601,8 +597,8 @@ function StraddlePnfPage() {
             />
           )}
         </div>
-        {booksOpen && <BrokerBooks broker={broker} />}
       </div>
+      <BrokerBooks broker={broker} open={booksOpen} onOpenChange={changeBooksOpen} />
     </div>
   );
 }
