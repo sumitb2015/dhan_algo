@@ -1,6 +1,6 @@
 import path from 'path';
 import fs from 'fs';
-import { runPythonJson } from './pyExec';
+import { runPythonJson } from './pyExec.ts';
 
 // Direct Kotak Neo REST from Node, mirroring lib/zerodhaToken.ts.
 //
@@ -30,6 +30,8 @@ export const KOTAK_UNAUTHORIZED = 100008;
 /** Session token is malformed/invalid — same recovery path as KOTAK_UNAUTHORIZED.
  *  Confirmed empirically: a corrupted token comes back as this code, not 100008. */
 export const KOTAK_INVALID_SESSION = 100010;
+/** Session token rejected by neo-login-check-api ("invalid session token"). */
+export const KOTAK_INVALID_SESSION_TOKEN = 100022;
 
 // REST paths, from the SDK's PROD_URL table.
 export const KOTAK_PATHS = {
@@ -159,13 +161,18 @@ function reloginKotak(): Promise<boolean> {
 }
 
 /** True for any Kotak response signaling a dead session (expired or malformed token). */
-function isSessionDead(json: Record<string, unknown>): boolean {
+export function isSessionDead(json: Record<string, unknown>): boolean {
   // stCode can live at either depth — mirrors lib/kotak/responses.py's
   // st_code() on the Python side. Checking only the top level would silently
   // skip the relogin-retry for any response shaped like {"data": {"stCode": ...}}.
   const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
   const code = json.stCode ?? data.stCode;
-  return code === KOTAK_UNAUTHORIZED || code === KOTAK_INVALID_SESSION;
+  if (code === KOTAK_UNAUTHORIZED || code === KOTAK_INVALID_SESSION || code === KOTAK_INVALID_SESSION_TOKEN) {
+    return true;
+  }
+  const msg = String(json.errMsg ?? json.emsg ?? data.errMsg ?? data.emsg ?? '');
+  const stat = String(json.stat ?? '');
+  return /invalid\s*session|unauthorized|session\s*expired|token\s*expired/i.test(msg) || stat === 'error in neo-login-check-api';
 }
 
 function kotakUrl(apiPath: string): string {

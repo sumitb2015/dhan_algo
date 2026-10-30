@@ -29,6 +29,8 @@ UNAUTHORIZED_STCODE = 100008
 # UNAUTHORIZED_STCODE. Confirmed empirically: a corrupted token comes back as
 # this code, not 100008 (see rs_dashboard/lib/kotakToken.ts's twin constant).
 INVALID_SESSION_STCODE = 100010
+# Session token rejected by neo-login-check-api ("invalid session token").
+INVALID_SESSION_TOKEN_STCODE = 100022
 # Illiquid strike rejecting a MARKET order: "Last Traded Price (LTP) not
 # available for this instrument. Please try placing a limit order".
 NO_LTP_STCODE = 1041
@@ -54,7 +56,13 @@ def st_code(res) -> Optional[int]:
 
 def is_unauthorized(res) -> bool:
     """Is the session dead (expired or malformed token)? Callers should re-login rather than retry."""
-    return st_code(res) in (UNAUTHORIZED_STCODE, INVALID_SESSION_STCODE)
+    if st_code(res) in (UNAUTHORIZED_STCODE, INVALID_SESSION_STCODE, INVALID_SESSION_TOKEN_STCODE):
+        return True
+    if not isinstance(res, dict):
+        return False
+    msg = str(error_message(res) or '').lower()
+    stat = str(res.get('stat', '')).lower()
+    return 'invalid session' in msg or 'unauthorized' in msg or 'session expired' in msg or stat == 'error in neo-login-check-api'
 
 
 def error_message(res) -> Optional[str]:
