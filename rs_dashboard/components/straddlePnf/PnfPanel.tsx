@@ -376,13 +376,14 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
 
       {showHeader && (
       // Two charts side by side: one line per card (the page header already carries the scrip, legs and session facts).
-      <div className="px-3 py-1 border-b border-zinc-800 flex items-center gap-2 min-w-0 text-[10px] font-mono">
-        <h2 className="text-xs font-bold text-zinc-100 truncate shrink min-w-0 font-sans" title={title}>{title}</h2>
+      <div className="px-3 py-1 border-b border-zinc-800 flex items-center gap-2 min-w-0 overflow-hidden text-[10px] font-mono">
+        {/* The instrument name keeps its room; the VWAP / box detail is what truncates first. */}
+        <h2 className="text-xs font-bold text-zinc-100 truncate shrink-0 max-w-[34%] font-sans" title={title}>{title}</h2>
         {autoSlot}
-        <span data-testid="pnf-overlay-legend" className={`shrink-0 ${kind === 'vwap' ? 'text-amber-300' : 'text-sky-300'}`}>
+        <span data-testid="pnf-overlay-legend" className={`min-w-0 truncate ${kind === 'vwap' ? 'text-amber-300' : 'text-sky-300'}`}>
           {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : smaWaiting ? ` needs ${model.smaPeriod}` : ''}
         </span>
-        <span data-testid="pnf-box-info" className="text-zinc-500 truncate min-w-0" title={box > 0 ? boxTitle : undefined}>
+        <span data-testid="pnf-box-info" className="text-zinc-500 truncate min-w-0 flex-1" title={box > 0 ? boxTitle : undefined}>
           {box > 0 ? `Box ${box.toFixed(2)} (${boxNote}) · ${reversal}-box · ${columns.length} cols` : 'Box —'}
         </span>
         <span className="ml-auto flex items-center gap-2 shrink-0">

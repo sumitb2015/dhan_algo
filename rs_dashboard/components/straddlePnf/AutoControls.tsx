@@ -65,7 +65,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
   const unresolved = row && row.state !== 'open';
 
   return (
-    <span data-testid={`pnf-auto-${chart}`} data-armed={armed} className="flex items-center gap-1.5 shrink-0 font-sans">
+    <span data-testid={`pnf-auto-${chart}`} data-armed={armed} className="flex items-center gap-1.5 min-w-0 shrink font-sans">
       <button type="button" onClick={toggle} disabled={!!disabledReason && !armed} aria-pressed={armed}
               aria-label={armed ? `Stop AUTO on chart ${chart}` : `Start AUTO on chart ${chart}`}
               title={disabledReason ?? (armed ? `AUTO ${mode}: double-bottom SELL / double-top BUY, exit on the first column reversal` : 'Trade this chart automatically')}
@@ -77,6 +77,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
         {armed && <span className={`w-1.5 h-1.5 rounded-full ${mode === 'REAL' ? 'bg-red-400' : 'bg-violet-400'} animate-pulse`} aria-hidden="true" />}
       </button>
       <span className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950" title={locked ? 'Stop AUTO (and close its position) to change lots' : 'Lots per AUTO trade'}>
+        <span className="pl-1 text-[10px] font-bold text-zinc-500" aria-hidden="true">L</span>
         <button type="button" aria-label={`Fewer AUTO lots on chart ${chart}`} disabled={locked || lots <= 1} onClick={() => onLots(lots - 1)}
                 className="w-4 h-5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">−</button>
         <input aria-label={`AUTO lots on chart ${chart}`} value={draft} disabled={locked}
@@ -91,7 +92,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
         <button type="button" aria-label={`More AUTO lots on chart ${chart}`} disabled={locked || lots >= MAX_LOTS} onClick={() => onLots(lots + 1)}
                 className="w-4 h-5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">+</button>
       </span>
-      <span data-testid={`pnf-auto-status-${chart}`} className="font-mono text-[10px] truncate max-w-[16rem]" title={halt ?? note}>
+      <span data-testid={`pnf-auto-status-${chart}`} className="font-mono text-[10px] truncate min-w-0 max-w-[13rem]" title={halt ?? note}>
         {unresolved ? (
           (row.state === 'entering' || row.state === 'exiting') && !needsResolve(row, nowMs)
             ? <span className="text-amber-400">{row.state === 'entering' ? 'ENTERING…' : 'EXITING…'}</span>

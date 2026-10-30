@@ -76,6 +76,22 @@ function readPref(key: string): string | null {
 function savePref(key: string, value: string) {
   try { localStorage.setItem(key, value); } catch { /* private window / blocked storage: the page works without it */ }
 }
+/**
+ * True at `px` wide and up (follows the window). The header places the Nifty / VIX chips by it: they fit beside the title only on a
+ * wide screen, and they are rendered once (they start the indices bridge), so CSS alone cannot move them between rows.
+ */
+function useMinWidth(px: number): boolean {
+  const [wide, setWide] = useState(false);
+  useEffect(() => {
+    const mql = window.matchMedia(`(min-width: ${px}px)`);
+    const onChange = () => setWide(mql.matches);
+    onChange();
+    mql.addEventListener('change', onChange);
+    return () => mql.removeEventListener('change', onChange);
+  }, [px]);
+  return wide;
+}
+
 /** A small icon-only header button with a tooltip (the label is also its accessible name). */
 function IconButton({ icon: Icon, label, onClick, pressed, badge }: { icon: LucideIcon; label: string; onClick: () => void; pressed?: boolean; badge?: number }) {
   return (
@@ -166,6 +182,7 @@ function StraddlePnfPage() {
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
 
   const { leaderRef } = useTabLeader('straddle-pnf');
+  const wideHeader = useMinWidth(1400);
   const mutedRef = useRef(false);
   const logLoadedRef = useRef(false);
 
@@ -425,41 +442,42 @@ function StraddlePnfPage() {
   return (
     <div className="flex flex-col h-screen bg-zinc-950 text-white">
       <header className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
-        {/* row 1: what is charted. Below 2xl the instrument bar drops to its own full-width line under the title, so its pickers
-            stay on one line instead of being squeezed between the title and the NavBar. */}
-        <div className="flex items-center gap-x-4 gap-y-2 flex-wrap px-6 pt-3 pb-2.5">
-          <div className="order-1 flex items-center gap-3 shrink-0">
+        {/* row 1: identity, data date and navigation. */}
+        <div className="flex items-center gap-x-4 gap-y-2 flex-wrap px-6 pt-3 pb-2">
+          <div className="flex items-center gap-3 shrink-0 min-w-0">
             <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
               <ChartScatter className="w-4 h-4 text-emerald-400" aria-hidden="true" />
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {segLabel}</p>
               <h1 className="text-sm font-bold text-white tracking-tight leading-none">Point &amp; Figure</h1>
-              <p className="text-[10px] text-zinc-500 font-medium mt-1">
-                {`${dual ? `Chart ${active} · ` : ''}${activeSettings.interval}-min · ${boxText(activeSettings)} · ${activeSettings.reversal}-box reversal · signals only · ${activeFno ? activeFeed.label : activeFeed.name ?? activeTarget.name}`}
+              <p className="text-[10px] text-zinc-500 font-medium mt-1 truncate">
+                {`${dual ? `Chart ${active} · ` : ''}${activeSettings.interval}-min · ${boxText(activeSettings)} · ${activeSettings.reversal}-box reversal · ${activeFno ? activeFeed.label : activeFeed.name ?? activeTarget.name}`}
               </p>
             </div>
           </div>
-          <span className="hidden 2xl:block w-px h-8 bg-zinc-800 shrink-0 2xl:order-2" />
-          <div className="order-4 basis-full 2xl:order-3 2xl:basis-0 2xl:flex-1 min-w-0 flex items-center gap-x-4 gap-y-2 flex-wrap">
-            {/* Remounted per chart, so one chart's contract lists never show on the other. */}
-            <fieldset disabled={activeLocked} className="contents" title={activeLocked ? `Chart ${active} is running AUTO` : undefined}>
-            <InstrumentBar key={active} target={activeTarget} onSegment={pickSegment} onPick={choose}
-                           onError={msg => setContractError(e => (e[active] === msg ? e : { ...e, [active]: msg }))} />
-            </fieldset>
-            {/* Nifty and India VIX vs the previous close: the shared indices WebSocket bridge's snapshot, started on mount. */}
-            <div className="ml-auto shrink-0 flex items-center gap-2">
-              <HeaderIndexChips />
-              <span className="w-px h-5 bg-zinc-800 shrink-0" />
-              <BrokerPicker value={broker} onChange={setBroker} brokers={BROKERS} />
-              <HeaderPnlMargin broker={broker} mode={tradeMode} paperPnl={paperPnl + autoPaper.total}
-                               paperNote={autoToday.some(r => r.mode === 'PAPER') ? `trade bar ${Math.round(paperPnl)} + AUTO ${Math.round(autoPaper.total)} (booked ${Math.round(autoPaper.realised)}, open ${Math.round(autoPaper.unrealised)})` : undefined} />
-            </div>
-          </div>
-          <div className="order-3 2xl:order-4 ml-auto flex items-center gap-2 shrink-0">
+          {/* Nifty and India VIX vs the previous close: market context, beside the data date on a wide screen. */}
+          <div className="ml-auto flex items-center gap-2 shrink-0">
+            {wideHeader && <><HeaderIndexChips /><span className="w-px h-5 bg-zinc-800 shrink-0" /></>}
             <DataChip date={activeFeed.loaded?.dataDate} lastSession={Boolean(activeFeed.loaded?.dataDate) && activeFeed.loaded?.dataDate !== today} />
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <NavBar />
+          </div>
+        </div>
+
+        {/* row 2: WHAT the active chart shows (left) and the market / account it trades on (right), at every width. */}
+        <div className="flex items-center gap-x-4 gap-y-2 flex-wrap px-6 pb-2.5">
+          {/* Remounted per chart, so one chart's contract lists never show on the other. */}
+          <fieldset disabled={activeLocked} className="contents" title={activeLocked ? `Chart ${active} is running AUTO` : undefined}>
+            <InstrumentBar key={active} target={activeTarget} onSegment={pickSegment} onPick={choose}
+                           onError={msg => setContractError(e => (e[active] === msg ? e : { ...e, [active]: msg }))} />
+          </fieldset>
+          {/* The account the trade bar and AUTO trade on (and, on a narrower screen, the Nifty / VIX chips). */}
+          <div className="ml-auto shrink-0 flex items-center gap-2">
+            {!wideHeader && <><HeaderIndexChips /><span className="w-px h-5 bg-zinc-800 shrink-0" /></>}
+            <BrokerPicker value={broker} onChange={setBroker} brokers={BROKERS} />
+            <HeaderPnlMargin broker={broker} mode={tradeMode} paperPnl={paperPnl + autoPaper.total}
+                             paperNote={autoToday.some(r => r.mode === 'PAPER') ? `trade bar ${Math.round(paperPnl)} + AUTO ${Math.round(autoPaper.total)} (booked ${Math.round(autoPaper.realised)}, open ${Math.round(autoPaper.unrealised)})` : undefined} />
           </div>
         </div>
 
@@ -552,6 +570,7 @@ function StraddlePnfPage() {
             onTradeExecuted={handleTradeExecuted}
             onMarkerPrice={handleMarkerPrice}
             onSound={(outcome, close) => chime({ kind: 'manual', outcome, close })}
+            tradesLabel={dual ? `C${active} · ${activeFeed.label}` : undefined}
           />
         </div>
       )}

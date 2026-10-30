@@ -30,6 +30,8 @@ export interface PnfTradeBarProps {
   onTradeExecuted?: (marker: PnfExecutionMarker, target: Target) => void;
   /** A REAL marker's price once the broker reports the traded price (it starts at the live price, marked as an estimate). */
   onMarkerPrice?: (id: string, price: number) => void;
+  /** Which chart the bar trades ("C2 · NIFTY 23000 CE+PE 03 Nov 26"): two charts can show two instruments, the bar follows the active one. */
+  tradesLabel?: string;
   /** A manual order's outcome, for the page's trade chimes (entry / exit / warn, lib/pnfChime.ts). */
   onSound?: (outcome: string | undefined, close: boolean) => void;
 }
@@ -46,7 +48,7 @@ const inr = (n: number) => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLo
 const pnlTone = (n: number | null) => (n == null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
 
 export default function PnfTradeBar({
-  target, live, broker, mode, onModeChange, onPnlChange, onSwitchTarget, onTradeExecuted, onMarkerPrice, onSound,
+  target, live, broker, mode, onModeChange, onPnlChange, onSwitchTarget, onTradeExecuted, onMarkerPrice, onSound, tradesLabel,
 }: PnfTradeBarProps) {
   const [productPick, setProduct] = useState<PnfProduct>('INTRADAY');
   const [lotsPick, setLots] = useState(1);
@@ -275,6 +277,12 @@ export default function PnfTradeBar({
       <div className="flex items-center gap-2">
         {/* the broker is picked in the page header; the bar names it so the order target is never in doubt */}
         <span data-testid="pnf-trade-broker" className="text-[11px] font-bold text-zinc-300">{BROKER_LABELS[broker]}</span>
+        {tradesLabel && (
+          <span data-testid="pnf-trade-target" title={`Orders from this bar go to ${tradesLabel}`}
+                className="max-w-[18rem] truncate rounded border border-amber-500/40 bg-amber-500/10 px-1.5 h-6 inline-flex items-center text-[11px] font-bold text-amber-300">
+            {tradesLabel}
+          </span>
+        )}
         <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-950" role="group" aria-label="Execution mode">
           <button type="button" className={pill(mode === 'PAPER')} onClick={() => onModeChange('PAPER')} title="Simulate orders without placing real trades">
             PAPER

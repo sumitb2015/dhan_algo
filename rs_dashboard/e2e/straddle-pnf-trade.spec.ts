@@ -361,6 +361,7 @@ test('the trade bar trades the ACTIVE chart', async ({ page }) => {
   // Chart 2 on the future: the bar now trades it
   await page.getByRole('group', { name: 'Active chart' }).getByRole('button', { name: /^Chart 2/ }).click();
   await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await expect(page.getByTestId('pnf-trade-target')).toContainText('C2');            // the bar names the chart it trades
   await page.getByRole('button', { name: 'BUY MARKET' }).click();
   await expect.poll(() => placedOrders.length).toBe(1);
   expect(placedOrders[0].target?.kind).toBe('futures');
@@ -370,5 +371,6 @@ test('the trade bar trades the ACTIVE chart', async ({ page }) => {
 
   // Back on chart 1 the bar is the index again
   await page.getByRole('group', { name: 'Active chart' }).getByRole('button', { name: /^Chart 1/ }).click();
+  await expect(page.getByTestId('pnf-trade-target')).toContainText('C1');
   await expect(page.getByText(/Index spot is non-tradable directly/i)).toBeVisible();
 });
