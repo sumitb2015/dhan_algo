@@ -142,6 +142,13 @@ test('Index shows non-tradable note; switching to Futures enables 1-click tradin
 
   // Position updates to LONG 1 lots and shows SQUARE OFF
   await expect(page.getByText(/LONG 1 lots/i)).toBeVisible();
+
+  // Execution marker appears on the P&F chart box for the BUY order
+  const markers = page.getByTestId('pnf-trade-marker');
+  await expect(markers).toHaveCount(1);
+  await expect(markers.first()).toHaveAttribute('data-action', 'BUY');
+  await expect(markers.first().getByText('B', { exact: true })).toBeVisible();
+
   const squareOffBtn = page.getByRole('button', { name: 'SQUARE OFF' });
   await expect(squareOffBtn).toBeVisible();
 
@@ -149,6 +156,11 @@ test('Index shows non-tradable note; switching to Futures enables 1-click tradin
   await squareOffBtn.click();
   expect(placedOrders.length).toBe(2);
   expect(placedOrders[1].action).toBe('SELL');
+
+  // Both BUY and SELL execution markers now appear on the chart
+  await expect(markers).toHaveCount(2);
+  await expect(markers.nth(1)).toHaveAttribute('data-action', 'SELL');
+  await expect(markers.nth(1).getByText('S', { exact: true })).toBeVisible();
 
   // Position returns to FLAT
   await expect(page.getByText('FLAT')).toBeVisible();

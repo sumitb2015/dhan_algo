@@ -23,7 +23,7 @@ import {
 import { HeaderIndexChips } from '@/components/triplestraddle/HeaderIndexChips';
 import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
 import { DEFAULT_SETTINGS, SETTINGS_KEY, boxText, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
-import { sessionOf, type Bar } from '@/lib/straddlePnf';
+import { sessionOf, type Bar, type PnfExecutionMarker } from '@/lib/straddlePnf';
 import {
   DEFAULT_TARGETS, SEGMENTS, alertId, isComplete, parseTarget, readTargets, targetKey, targetLabel, targetQuery, type Segment, type Target,
 } from '@/lib/pnfTarget';
@@ -255,6 +255,29 @@ export default function StraddlePnfPage() {
   const vwapAllowed = !indexNoVwap && (closed.length === 0 || model.vwapAvailable);
   const shownOverlay: Overlay = vwapAllowed ? overlay : 'sma';
 
+  // ── trade execution markers on the chart ──────────────────────────────────
+  const [tradeMarkers, setTradeMarkers] = useState<PnfExecutionMarker[]>([]);
+  const storageKey = `straddle-pnf-markers-${targetKey(target)}`;
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(storageKey);
+      if (raw) setTradeMarkers(JSON.parse(raw));
+      else setTradeMarkers([]);
+    } catch {
+      setTradeMarkers([]);
+    }
+  }, [storageKey]);
+
+  const handleTradeExecuted = useCallback((m: PnfExecutionMarker) => {
+    setTradeMarkers(prev => {
+      const activeCols = model.liveColumns.length >= model.columns.length ? model.liveColumns : model.columns;
+      const col = m.col ?? (activeCols.length ? activeCols.length - 1 : 0);
+      const next = [...prev, { ...m, col }];
+      try { sessionStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    });
+  }, [model.columns.length, model.liveColumns.length, storageKey]);
+
   // A chart's name for the alert log and the header's scrip: the symbol (with its full name for an index / stock), or the contract.
   const label = targetLabel(target);
   const fno = target.kind === 'futures' || target.kind === 'options';
@@ -412,6 +435,7 @@ export default function StraddlePnfPage() {
             onModeChange={setTradeMode}
             onPnlChange={setPaperPnl}
             onSwitchTarget={choose}
+            onTradeExecuted={handleTradeExecuted}
           />
         </div>
       )}
@@ -439,6 +463,7 @@ export default function StraddlePnfPage() {
             scrip={scrip}
             feedPrevClose={trustedPrevClose}
             sessionTag={sessionTag}
+            tradeMarkers={tradeMarkers}
             error={loaded?.error ?? (complete ? undefined : contractError ?? undefined)}
           />
         </div>

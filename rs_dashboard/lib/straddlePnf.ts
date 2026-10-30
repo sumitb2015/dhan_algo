@@ -41,6 +41,16 @@ export type PnfSignal = {
   belowVwap: boolean;
 };
 
+export type PnfExecutionMarker = {
+  id: string;
+  t: number;
+  action: 'BUY' | 'SELL';
+  price: number;
+  col?: number;
+  lots: number;
+  mode: 'PAPER' | 'REAL';
+};
+
 const IST_OFFSET_S = 5.5 * 3600;
 const EPS = 1e-9;
 

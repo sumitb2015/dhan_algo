@@ -3,6 +3,7 @@
 import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
+import type { PnfExecutionMarker } from '@/lib/straddlePnf';
 import { Minus, Plus, RotateCcw } from 'lucide-react';
 import { layoutPanel, AXIS_W, PAD_TOP } from '@/lib/straddlePnfLayout';
 import { MIN_BOX_PTS_PCT } from '@/lib/straddlePnfSettings';
@@ -48,6 +49,8 @@ export type PnfPanelProps = {
   feedPrevClose?: number | null;
   /** Set when the live price is a feed value outside the trading session ("Pre-open" / "Post-close"), not a chart bar. */
   sessionTag?: string | null;
+  /** Executed trades on this chart to mark on the boxes. */
+  tradeMarkers?: PnfExecutionMarker[];
 };
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
@@ -92,7 +95,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -532,6 +535,94 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                   </g>
                 );
               })}
+
+              {/* trade execution markers on the box */}
+              {tradeMarkers && tradeMarkers.length > 0 && (() => {
+                const groups = new Map<string, Array<{ marker: PnfExecutionMarker; colIdx: number; boxPrice: number; idx: number }>>();
+
+                tradeMarkers.forEach((m, idx) => {
+                  let colIdx = m.col;
+                  if (colIdx === undefined || colIdx < 0 || colIdx >= liveCols.length) {
+                    if (model.columnTimes && model.columnTimes.length > 0) {
+                      const found = model.columnTimes.findIndex(ct => m.t >= ct.start && m.t <= ct.end);
+                      if (found !== -1) colIdx = found;
+                      else if (m.t > model.columnTimes[model.columnTimes.length - 1].end) colIdx = liveCols.length - 1;
+                      else colIdx = 0;
+                    } else {
+                      colIdx = Math.max(0, liveCols.length - 1);
+                    }
+                  }
+
+                  const boxK = box > 0 ? Math.round((m.price - model.anchor) / box) : 0;
+                  const boxPrice = model.anchor + boxK * box;
+                  const key = `${colIdx}:${boxK}`;
+                  if (!groups.has(key)) groups.set(key, []);
+                  groups.get(key)!.push({ marker: m, colIdx, boxPrice, idx });
+                });
+
+                return Array.from(groups.values()).flatMap(group => {
+                  const total = group.length;
+                  const r = Math.max(5.5, Math.min(10, cell * 0.4));
+                  const fontSize = Math.max(7, Math.min(11, r * 1.1));
+
+                  return group.map(({ marker: m, colIdx, boxPrice, idx }, groupIdx) => {
+                    const baseCx = xOf(colIdx) + cell / 2;
+                    const shift = total > 1 ? (groupIdx - (total - 1) / 2) * (r * 1.5) : 0;
+                    const cx = baseCx + shift;
+                    const cy = yOf(boxPrice);
+                    const isBuy = m.action === 'BUY';
+
+                    return (
+                      <g
+                        key={m.id || `marker-${idx}`}
+                        data-testid="pnf-trade-marker"
+                        data-action={m.action}
+                        data-price={m.price}
+                        data-col={colIdx}
+                        className="select-none pointer-events-auto"
+                      >
+                        {/* Directional pip pointer */}
+                        {isBuy ? (
+                          <polygon
+                            points={`${cx},${cy - r - 4} ${cx - 3.5},${cy - r} ${cx + 3.5},${cy - r}`}
+                            className="fill-emerald-400 stroke-zinc-950"
+                            strokeWidth={1}
+                          />
+                        ) : (
+                          <polygon
+                            points={`${cx},${cy + r + 4} ${cx - 3.5},${cy + r} ${cx + 3.5},${cy + r}`}
+                            className="fill-red-400 stroke-zinc-950"
+                            strokeWidth={1}
+                          />
+                        )}
+
+                        {/* Badge circle */}
+                        <circle
+                          cx={cx}
+                          cy={cy}
+                          r={r}
+                          className={isBuy ? 'fill-emerald-500 stroke-zinc-950' : 'fill-red-500 stroke-zinc-950'}
+                          strokeWidth={1.5}
+                        />
+
+                        {/* Action initial */}
+                        <text
+                          x={cx}
+                          y={cy + 0.5}
+                          textAnchor="middle"
+                          dominantBaseline="central"
+                          className={isBuy ? 'fill-zinc-950 font-mono font-black' : 'fill-white font-mono font-black'}
+                          fontSize={fontSize}
+                        >
+                          {isBuy ? 'B' : 'S'}
+                        </text>
+
+                        <title>{`${m.action} ${m.lots} lot${m.lots > 1 ? 's' : ''} @ ${m.price.toFixed(2)} [${m.mode}]`}</title>
+                      </g>
+                    );
+                  });
+                });
+              })()}
 
               {/* live price line */}
               {liveValue !== null && (

@@ -6,6 +6,7 @@ import { Loader2, ArrowUpRight, ArrowDownRight, XCircle } from 'lucide-react';
 import { useBrokerSelector, BROKER_LABELS, BROKERS, scalperRoute } from '@/hooks/useBrokerSelector';
 import { MAX_PNF_LOTS, type PnfLegInput } from '@/lib/pnfOrderLogic';
 import type { Target } from '@/lib/pnfTarget';
+import type { PnfExecutionMarker } from '@/lib/straddlePnf';
 
 export interface PnfTradeBarProps {
   target: Target;
@@ -15,6 +16,7 @@ export interface PnfTradeBarProps {
   onModeChange?: (mode: 'PAPER' | 'REAL') => void;
   onPnlChange?: (pnl: number) => void;
   onSwitchTarget?: (target: Target) => void;
+  onTradeExecuted?: (marker: PnfExecutionMarker) => void;
 }
 
 const inr = (n: number) => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
@@ -28,6 +30,7 @@ export default function PnfTradeBar({
   onModeChange,
   onPnlChange,
   onSwitchTarget,
+  onTradeExecuted,
 }: PnfTradeBarProps) {
   const { broker, setBroker } = useBrokerSelector();
   const [internalMode, setInternalMode] = useState<'PAPER' | 'REAL'>('PAPER');
@@ -186,6 +189,15 @@ export default function PnfTradeBar({
       } else {
         toast.success(`[${BROKER_LABELS[broker].toUpperCase()}] ${action} ${lots} ${isEquity ? 'shares' : 'lot' + (lots > 1 ? 's' : '')} placed at market`);
       }
+
+      onTradeExecuted?.({
+        id: idempotencyKey,
+        t: Math.floor(Date.now() / 1000),
+        action,
+        price: currentLivePrice,
+        lots,
+        mode,
+      });
     } catch (err) {
       toast.error(`Order error: ${(err as Error).message}`);
     } finally {
