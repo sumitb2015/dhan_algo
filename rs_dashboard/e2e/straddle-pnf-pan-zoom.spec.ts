@@ -213,3 +213,51 @@ test('a stock whose bars carry no volume gets the box SMA and a disabled VWAP bu
   await expect(page.getByRole('button', { name: 'VWAP' })).toBeDisabled();
   await expect(page.getByTestId('pnf-overlay-legend').first()).toHaveText(/SMA/);
 });
+
+test('two charts: each has its own scrip and box size, the controls act on the active chart, and a reload restores all of it', async ({ page }) => {
+  const seen: string[] = [];
+  await mockApi(page, seen);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  const panels = page.getByTestId('pnf-panel');
+  await expect(panels).toHaveCount(2);
+  await expect(panels.nth(0)).toHaveAttribute('data-active', 'true');
+
+  // Chart 2 becomes active and gets its own instrument; chart 1 keeps the index
+  await page.getByRole('group', { name: 'Active chart' }).getByRole('button', { name: /^Chart 2/ }).click();
+  await expect(panels.nth(1)).toHaveAttribute('data-active', 'true');
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await page.getByRole('combobox', { name: 'Search futures underlying' }).fill('cru');
+  await page.getByRole('option', { name: /CRUDEOILM/ }).click();
+  await expect(page.getByLabel('Expiry')).toHaveValue('2026-11-19');
+  await expect.poll(() => seen.some(s => s.includes('underlying=CRUDEOILM') && s.includes('expiry=2026-11-19'))).toBe(true);
+  await expect(panels.nth(1).locator('h2')).toContainText('CRUDEOILM');
+  await expect(panels.nth(0).locator('h2')).toContainText('NIFTY');
+
+  // A box size typed now changes chart 2 only
+  await page.getByLabel('Box %').fill('0.5');
+  await page.getByLabel('Box %').press('Enter');
+  await expect(panels.nth(1).locator('h2')).toContainText('0.5% box');
+  await expect(panels.nth(0).locator('h2')).toContainText('0.1% box');
+
+  // Pressing on chart 1 makes it active again: the instrument bar shows its Index pick
+  await panels.nth(0).getByTestId('pnf-scroll').click({ position: { x: 40, y: 40 } });
+  await expect(panels.nth(0)).toHaveAttribute('data-active', 'true');
+  await expect(page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Index' })).toHaveAttribute('aria-pressed', 'true');
+
+  // Reload: both scrips, both box sizes and the active chart come back
+  await page.reload();
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await expect(panels.nth(1).locator('h2')).toContainText('CRUDEOILM');
+  await expect(panels.nth(1).locator('h2')).toContainText('0.5% box');
+  await expect(panels.nth(0).locator('h2')).toContainText('NIFTY');
+  await expect(panels.nth(0).locator('h2')).toContainText('0.1% box');
+  await expect(panels.nth(0)).toHaveAttribute('data-active', 'true');
+
+  // One-chart view stops chart 2's requests
+  await page.getByRole('button', { name: '1 Chart View' }).click();
+  await expect(panels).toHaveCount(1);
+  const before = seen.filter(s => s.includes('CRUDEOILM')).length;
+  await page.waitForTimeout(1500);
+  expect(seen.filter(s => s.includes('CRUDEOILM') && !s.startsWith('contracts')).length).toBeLessThanOrEqual(before);
+});

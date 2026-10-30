@@ -19,32 +19,24 @@ import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/alertSound';
 import { buildConfirmedModel, withLive, type Overlay } from '@/lib/straddlePnfModel';
-import {
-  foldTick, newSignalsAfter, nextWatermark, capLog, inSession, mergeHistory, feedCloseTrusted, istMinuteOfDay, isWildTick, legsTick, sessionWindow,
-  type LegQuote, type Market, type Tick,
-} from '@/lib/straddlePnfLive';
+import { capLog, sessionWindow } from '@/lib/straddlePnfLive';
 import { HeaderIndexChips } from '@/components/triplestraddle/HeaderIndexChips';
-import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
 import {
-  DEFAULT_SETTINGS, DEFAULT_CHART1_SETTINGS, DEFAULT_CHART2_SETTINGS, SETTINGS_KEY, SETTINGS_KEY_2, CHART_VIEW_KEY,
+  DEFAULT_CHART1_SETTINGS, DEFAULT_CHART2_SETTINGS, SETTINGS_KEY, SETTINGS_KEY_2, CHART_VIEW_KEY,
   boxText, readSettings, serializeSettings, type PnfSettings,
 } from '@/lib/straddlePnfSettings';
-import { sessionOf, type Bar, type PnfExecutionMarker } from '@/lib/straddlePnf';
+import type { PnfExecutionMarker } from '@/lib/straddlePnf';
 import {
-  DEFAULT_TARGETS, SEGMENTS, alertId, isComplete, parseTarget, readTargets, targetKey, targetLabel, targetQuery, type Segment, type Target,
+  DEFAULT_TARGETS, SEGMENTS, parseActiveChart, parseTarget, restoreChart, targetKey, type ChartPicks, type Segment, type Target,
 } from '@/lib/pnfTarget';
+import { usePnfFeed, type PnfFeed } from './straddlePnf/usePnfFeed';
+import { usePnfAlerts } from './straddlePnf/usePnfAlerts';
 
-// Point & Figure of ONE price series with 1-click execution trade bar, picked with Index | Equity | Futures | Options:
-// an NSE index or stock, a future, one option, or a CE + PE straddle. Bars come from the history API and the page re-fetches them
-// every 30 s; signals are only ever evaluated on CLOSED one-minute bars, so the poll never delays one.
+// Point & Figure with a 1-click execution trade bar, picked with Index | Equity | Futures | Options: an NSE index or stock, a
+// future, one option, or a CE + PE straddle. Two charts can show two different instruments with their own box settings; the
+// ACTIVE chart is the one the header controls and the trade bar act on. Each chart's bars come from the history API (re-fetched
+// every 30 s, usePnfFeed); signals are only ever evaluated on CLOSED one-minute bars, so the poll never delays one.
 
-type Instrument = { segment: string; security_id: string };
-type Loaded = { key: number; dataDate: string | null; error?: string; instruments: Instrument[] };
-type LiveLeg = { quote: (NonNullable<LegQuote> & { prevClose: number | null }) | null; last: { ltp: number; prevClose: number | null } | null };
-
-const POLL_MS = 30_000;
-const LIVE_MS = 1_000;   // how often the page reads the WebSocket bridge's latest price (the bridge itself is push, from the shared hub)
-const FRESH_S = 180;
 const FLASH_MS = 4000;
 const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
@@ -55,6 +47,13 @@ const BOOKS_OPEN_KEY = 'straddle-pnf-books-open';
 /** The last pick in each segment, and which segment is open. `straddle-pnf-target` (one target) is the pre-switch key, read once. */
 const TARGETS_KEY = 'straddle-pnf-targets';
 const SEGMENT_KEY = 'straddle-pnf-segment';
+/** Chart 2's own picks (its first visit copies chart 1), and which chart the controls act on. */
+const TARGETS_KEY_2 = 'straddle-pnf-targets-2';
+const SEGMENT_KEY_2 = 'straddle-pnf-segment-2';
+const ACTIVE_CHART_KEY = 'straddle-pnf-active-chart';
+const MARKERS_KEY = 'straddle-pnf-markers-';
+
+type ChartId = 1 | 2;
 const LEGACY_TARGET_KEY = 'straddle-pnf-target';
 
 const minuteOf = (t: number) => Math.floor(t / 60) * 60;
@@ -83,25 +82,56 @@ function IconButton({ icon: Icon, label, onClick, pressed, badge }: { icon: Luci
   );
 }
 
+/** One chart's P&F model: CLOSED bars only (so a signal never repaints), with the forming minute laid on top. */
+function useChartModel(feed: PnfFeed, target: Target, settings: PnfSettings, overlay: Overlay, now: number) {
+  // An index's feed "volume" is its constituents' turnover, not traded volume: no VWAP. Whatever the instrument, the button follows
+  // the model once bars are in (bars without volume, e.g. an illiquid option, get the box SMA too), so the toggle never
+  // contradicts the chart.
+  const indexNoVwap = target.kind === 'index';
+  const bars = feed.bars;
+  const last = bars[bars.length - 1];
+  const formingBar = last !== undefined && now > 0 && last.t >= minuteOf(now / 1000) ? last : undefined;   // the minute still forming
+  const closed = formingBar ? bars.slice(0, -1) : bars;
+  const closedLast = closed[closed.length - 1];
+  // The confirmed chart depends only on the closed bars, so it is rebuilt when a bar closes or history reloads, not on every tick.
+  const closedKey = `${closed.length}:${closed[0]?.t ?? 0}:${closedLast?.t ?? 0}:${closedLast?.straddle ?? 0}:${feed.histVersion}`;
+  const sessionClose = sessionWindow(feed.market, now / 1000)[1];
+  const confirmed = useMemo(
+    () => buildConfirmedModel(closed, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [closedKey, overlay, settings, sessionClose, indexNoVwap],
+  );
+  const model = useMemo(() => withLive(confirmed, formingBar), [confirmed, formingBar]);
+  const vwapAllowed = !indexNoVwap && (closed.length === 0 || model.vwapAvailable);
+  return { model, indexNoVwap, vwapAllowed };
+}
+
+const readMarkers = (key: string): PnfExecutionMarker[] => {
+  try {
+    const raw = sessionStorage.getItem(`${MARKERS_KEY}${key}`);
+    const parsed = raw ? JSON.parse(raw) as PnfExecutionMarker[] : [];
+    // A marker carries only its time and price: each chart finds its own column from its own box size. Older ones drop theirs.
+    return Array.isArray(parsed) ? parsed.map(m => ({ ...m, col: undefined })) : [];
+  } catch { return []; }
+};
+
 function StraddlePnfPage() {
   const [chartView, setChartView] = useState<'1' | '2'>('2');
-  const [activeChartTab, setActiveChartTab] = useState<1 | 2>(1);
+  // Two charts: the one the header controls (instrument, box settings, price strip) and the trade bar act on.
+  const [activeChart, setActiveChart] = useState<ChartId>(1);
   const [overlay, setOverlay] = useState<Overlay>('vwap');
-  const [target, setTarget] = useState<Target>(DEFAULT_TARGETS.index);
-  const targetsRef = useRef<Record<Segment, Target>>({ ...DEFAULT_TARGETS });
-  const [name, setName] = useState<string | null>(null); // the full name the server resolved for the chosen symbol
+  const [target1, setTarget1] = useState<Target>(DEFAULT_TARGETS.index);
+  const [target2, setTarget2] = useState<Target>(DEFAULT_TARGETS.index);
+  // Each chart's last pick per segment (so switching segments brings it back) and its open segment.
+  const picksRef = useRef<Record<ChartId, ChartPicks>>({ 1: { targets: { ...DEFAULT_TARGETS }, open: 'index' }, 2: { targets: { ...DEFAULT_TARGETS }, open: 'index' } });
+  // No chart loads before the saved picks are read, so the default instrument is never fetched just to be replaced.
+  const [prefsReady, setPrefsReady] = useState(false);
   const [settings, setSettings] = useState<PnfSettings>(DEFAULT_CHART1_SETTINGS);
   const [settings2, setSettings2] = useState<PnfSettings>(DEFAULT_CHART2_SETTINGS);
-  const [bars, setBars] = useState<Bar[]>([]);
-  const [loaded, setLoaded] = useState<Loaded | null>(null);
-  // Bumped on every history load: the confirmed chart is rebuilt then (the API may have revised closed bars), and when a bar closes.
-  const [histVersion, setHistVersion] = useState(0);
-  // The contract pickers' error (e.g. an underlying with no live futures): shown in the chart instead of an endless "Loading…".
-  const [contractError, setContractError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  // The contract pickers' error (e.g. an underlying with no live futures): shown in that chart instead of an endless "Loading…".
+  const [contractError, setContractError] = useState<Record<ChartId, string | null>>({ 1: null, 2: null });
   const [recenter, setRecenter] = useState(0);
-  // Re-center reloads and then resets the chart's zoom/pan to the centre; the flag waits for that load to land.
+  // Re-center reloads and then resets the charts' zoom/pan to the centre; the flag waits for that load to land.
   const [viewTick, setViewTick] = useState(0);
   const recenterViewRef = useRef(false);
   const recenterNow = () => { recenterViewRef.current = true; setRecenter(n => n + 1); };
@@ -115,26 +145,13 @@ function StraddlePnfPage() {
   const [tradeMode, setTradeMode] = useState<'PAPER' | 'REAL'>('PAPER');
   const [paperPnl, setPaperPnl] = useState(0);
   const [muted, setMuted] = useState(false);
-  const [flash, setFlash] = useState<'buy' | 'sell' | null>(null);
+  const [flash, setFlash] = useState<Record<ChartId, 'buy' | 'sell' | null>>({ 1: null, 2: null });
   const [now, setNow] = useState(0);
-  // The newest WebSocket price; kept so a history refresh (which replaces the bars) can lay it back on top.
-  const tickRef = useRef<Tick | null>(null);
-  // The last bar's close, for the live poll's bad-tick check (kept in a ref so the poll interval need not restart per tick).
-  const lastCloseRef = useRef<number | undefined>(undefined);
-  const [feedPrevClose, setFeedPrevClose] = useState<number | null>(null);
-  // A feed price outside the trading session (NSE pre-open, post-close): shown in the header, never folded into a chart bar.
-  const [outQuote, setOutQuote] = useState<{ ce: number; pe: number; t: number } | null>(null);
-  // The chart's price/summary strip is drawn into the top header (PnfPanel `headerSlot`) instead of a card header above the chart.
+  // The active chart's price/summary strip is drawn into the top header (PnfPanel `headerSlot`).
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
 
   const { leaderRef } = useTabLeader('straddle-pnf');
   const mutedRef = useRef(false);
-  const reqRef = useRef(0);
-  // The last closed bar already evaluated for alerts. Alerts are keyed on bar time, never on column numbers.
-  const watermarkRef = useRef(0);
-  // The next alert evaluation is a re-baseline (history loaded / chart redrawn with other settings): move the watermark to the new
-  // chart's last closed bar and alert on nothing, so old signals can never fire as new ones.
-  const rebaselineRef = useRef(false);
   const logLoadedRef = useRef(false);
 
   // ── preferences, sound unlock, clock ────────────────────────────────────
@@ -147,14 +164,19 @@ function StraddlePnfPage() {
     if (savedView === '1' || savedView === '2') setChartView(savedView);
     setSettings(readSettings(readPref(SETTINGS_KEY), DEFAULT_CHART1_SETTINGS));
     setSettings2(readSettings(readPref(SETTINGS_KEY_2), DEFAULT_CHART2_SETTINGS));
-    const targets = readTargets(readPref(TARGETS_KEY));
+    const raw1 = readPref(TARGETS_KEY);
+    const p1 = restoreChart(raw1, readPref(SEGMENT_KEY));
     const legacy = parseTarget((() => { try { return JSON.parse(readPref(LEGACY_TARGET_KEY) ?? 'null'); } catch { return null; } })());
-    if (legacy && !readPref(TARGETS_KEY)) targets[legacy.kind] = legacy;   // one-time carry-over from the single-target key
-    targetsRef.current = targets;
-    const seg = readPref(SEGMENT_KEY) as Segment | null;
-    const open = seg && SEGMENTS.some(x => x.id === seg) ? seg : legacy?.kind ?? 'index';
-    setTarget(t => (targetKey(t) === targetKey(targets[open]) ? t : targets[open]));
-    rebaselineRef.current = true;
+    if (legacy && !raw1) { p1.targets[legacy.kind] = legacy; if (!readPref(SEGMENT_KEY)) p1.open = legacy.kind; }   // one-time carry-over
+    const raw2 = readPref(TARGETS_KEY_2);
+    const p2 = restoreChart(raw2, readPref(SEGMENT_KEY_2), p1);
+    // Chart 2's first visit copies chart 1 once and saves it, so it never follows later chart-1 picks by accident.
+    if (raw2 === null) { savePref(TARGETS_KEY_2, JSON.stringify(p2.targets)); savePref(SEGMENT_KEY_2, p2.open); }
+    picksRef.current = { 1: p1, 2: p2 };
+    setTarget1(p1.targets[p1.open]);
+    setTarget2(p2.targets[p2.open]);
+    setActiveChart(parseActiveChart(readPref(ACTIVE_CHART_KEY)));
+    setPrefsReady(true);
     if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
     if (readPref(TRADE_OPEN_KEY) === '0') setTradeOpen(false);
     if (readPref(BOOKS_OPEN_KEY) === '1') setBooksOpen(true);
@@ -170,199 +192,100 @@ function StraddlePnfPage() {
   }, []);
   useEffect(() => { if (logLoadedRef.current) savePref(LOG_KEY, JSON.stringify(log)); }, [log]);
 
-  // ── history load. reset = new instrument / Re-center (alerts restart); otherwise a quiet refresh ──
-  const complete = isComplete(target);
-  const tKey = targetKey(target);   // any field changing is a new instrument
-  const load = useCallback(async (reset: boolean) => {
-    if (!complete) return;                // a future / option waits for its contract (the pickers fill it in)
-    const id = ++reqRef.current;
-    if (reset) { setLoading(true); setLoadError(null); }
-    try {
-      const res = await fetch(`/api/straddle-pnf?${targetQuery(target)}`);
-      const j = await res.json() as {
-        success?: boolean; error?: string; strikes: number[]; dataDate: string | null; name?: string; instruments?: Instrument[];
-        instrument?: Instrument | null; bars: Record<string, Bar[]>; errors: Record<string, string>;
-      };
-      if (id !== reqRef.current) return; // a newer request owns the screen
-      if (!j.success) throw new Error(j.error ?? 'Failed to load price history');
-      const key = j.strikes[0] ?? 0;
-      if (reset) rebaselineRef.current = true; // history never alerts
-      if (recenterViewRef.current) { recenterViewRef.current = false; setViewTick(n => n + 1); }
-      const hist = j.bars[String(key)] ?? [];
-      const tk = tickRef.current;
-      const instruments = j.instruments ?? (j.instrument ? [j.instrument] : []);
-      setBars(prev => mergeHistory(hist, prev, tk, instruments.length < 2));
-      setHistVersion(v => v + 1);
-      setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], instruments });
-      if (j.name) setName(j.name);
-      setLoadError(null);
-    } catch (e) {
-      if (id !== reqRef.current) return;
-      setLoadError(e instanceof Error ? e.message : 'Failed to load price history');
-    } finally {
-      if (id === reqRef.current) setLoading(false);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tKey, complete]);
+  // ── the two charts: each its own instrument, history, live price, model and alerts ──
+  const dual = chartView === '2';
+  const active: ChartId = dual && activeChart === 2 ? 2 : 1;
+  const feed1 = usePnfFeed(prefsReady ? target1 : null, recenter, now);
+  const feed2 = usePnfFeed(prefsReady && dual ? target2 : null, recenter, now);
+  const c1 = useChartModel(feed1, target1, settings, overlay, now);
+  const c2 = useChartModel(feed2, target2, settings2, overlay, now);
+  const activeTarget = active === 2 ? target2 : target1;
+  const activeFeed = active === 2 ? feed2 : feed1;
+  const activeSettings = active === 2 ? settings2 : settings;
+  const activeChartModel = active === 2 ? c2 : c1;
 
-  // The load is the effect's job (instrument changed / Re-center); its loading flag is set synchronously on purpose.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { void load(true); }, [load, recenter]);
+  // Re-center: reset the zoom once the reload has landed.
   useEffect(() => {
-    const id = setInterval(() => { void load(false); }, POLL_MS);
-    return () => clearInterval(id);
-  }, [load]);
+    if (!recenterViewRef.current) return;
+    recenterViewRef.current = false;
+    setViewTick(n => n + 1);
+  }, [feed1.epoch, feed2.epoch]);
 
-  // ── live price over the WebSocket bridge → the open bar ─────────────────
-  const instruments = loaded?.instruments ?? [];
-  const ids = instruments.map(i => `${i.segment}:${i.security_id}`).join(',');
-  const single = instruments.length < 2;
-  // The session clock follows the contract: MCX for a commodity future / option, NSE otherwise.
-  const market: Market = instruments[0]?.segment === 'MCX_COMM' ? 'MCX' : 'NSE';
-  useEffect(() => {
-    if (!ids) return;
-    let dead = false;
-    const poll = async () => {
-      try {
-        const res = await fetch(`/api/straddle-pnf/live?ids=${ids}`);
-        const j = await res.json() as { success?: boolean; legs?: LiveLeg[] };
-        if (dead || !j.success || !j.legs) return;
-        const legs = j.legs;
-        // A straddle's previous close is the sum of both legs', and only when both have one.
-        const closes = legs.map(l => l.quote?.prevClose ?? l.last?.prevClose ?? null);
-        setFeedPrevClose(closes.every(c => c !== null) ? closes.reduce((a, c) => a + (c as number), 0) : null);
-        const tick = legsTick(legs.map(l => l.quote));
-        if (!tick) { setOutQuote(null); return; }
-        // A print 10x away from the last bar is a bad tick, not a move: it never reaches the chart (the next history load has the truth).
-        if (isWildTick(lastCloseRef.current, tick.ce + tick.pe)) return;
-        // Pre-open values are indicative, not trades, and the history API has no bars for them: header only.
-        if (!inSession(tick.t, market)) { setOutQuote({ ce: tick.ce, pe: tick.pe, t: tick.t }); return; }
-        setOutQuote(null);
-        tickRef.current = tick;
-        setBars(prev => (prev.length ? foldTick(prev, tick, single).bars : prev));
-      } catch { /* the header keeps the last price and shows Stale until the next read lands */ }
-    };
-    void poll();
-    const id = setInterval(() => { void poll(); }, LIVE_MS);
-    return () => { dead = true; clearInterval(id); };
-  }, [ids, market, single]);
-
-  // ── panel model: CLOSED bars only, so a signal never repaints ───────────
-  // An index's feed "volume" is its constituents' turnover, not traded volume: no VWAP, the box SMA stands in for it.
-  // An index's feed "volume" is its constituents' turnover, not traded volume: no VWAP. Whatever the instrument, the button follows
-  // the model once bars are in (bars without volume, e.g. an illiquid option, get the box SMA too), so the toggle never
-  // contradicts the chart.
-  const indexNoVwap = target.kind === 'index';
-  const last = bars[bars.length - 1];
-  const formingBar = last !== undefined && now > 0 && last.t >= minuteOf(now / 1000) ? last : undefined;   // the minute still forming
-  const closed = formingBar ? bars.slice(0, -1) : bars;
-  const closedLast = closed[closed.length - 1];
-  // The confirmed chart depends only on the closed bars, so it is rebuilt when a bar closes or history reloads, not on every tick.
-  const closedKey = `${closed.length}:${closed[0]?.t ?? 0}:${closedLast?.t ?? 0}:${closedLast?.straddle ?? 0}:${histVersion}`;
-  const sessionClose = sessionWindow(market, now / 1000)[1];
-  const confirmed = useMemo(
-    () => buildConfirmedModel(closed, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [closedKey, overlay, settings, sessionClose, indexNoVwap],
-  );
-  const model = useMemo(() => withLive(confirmed, formingBar), [confirmed, formingBar]);
-
-  const confirmed2 = useMemo(
-    () => buildConfirmedModel(closed, overlay, { ...settings2, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [closedKey, overlay, settings2, sessionClose, indexNoVwap],
-  );
-  const model2 = useMemo(() => withLive(confirmed2, formingBar), [confirmed2, formingBar]);
-
-  useEffect(() => { lastCloseRef.current = last?.straddle; });
-  const vwapAllowed = !indexNoVwap && (closed.length === 0 || model.vwapAvailable);
-  const shownOverlay: Overlay = vwapAllowed ? overlay : 'sma';
-
-  // ── trade execution markers on the chart ──────────────────────────────────
-  const [tradeMarkers, setTradeMarkers] = useState<PnfExecutionMarker[]>([]);
-  const storageKey = `straddle-pnf-markers-${targetKey(target)}`;
-  // A marker carries only its time and price: each chart finds its own column from its own box size (two charts with
-  // different boxes have different columns), so no column index is stored. Older saved markers drop theirs.
-  useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem(storageKey);
-      const parsed = raw ? JSON.parse(raw) as PnfExecutionMarker[] : [];
-      setTradeMarkers(Array.isArray(parsed) ? parsed.map(m => ({ ...m, col: undefined })) : []);
-    } catch {
-      setTradeMarkers([]);
-    }
-  }, [storageKey]);
-
-  const saveMarkers = useCallback((update: (prev: PnfExecutionMarker[]) => PnfExecutionMarker[]) => {
-    setTradeMarkers(prev => {
-      const next = update(prev);
-      try { sessionStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* ignore */ }
-      return next;
-    });
-  }, [storageKey]);
-  const handleTradeExecuted = useCallback((m: PnfExecutionMarker) => saveMarkers(prev => [...prev, m]), [saveMarkers]);
-  const handleMarkerPrice = useCallback((id: string, price: number) =>
-    saveMarkers(prev => prev.map(m => (m.id === id ? { ...m, price, estimate: false } : m))), [saveMarkers]);
-
-  // A chart's name for the alert log and the header's scrip: the symbol (with its full name for an index / stock), or the contract.
-  const label = targetLabel(target);
-  const fno = target.kind === 'futures' || target.kind === 'options';
-  const scrip = fno ? label : name && name !== target.symbol ? `${target.symbol} · ${name}` : target.symbol;
-
-  // ── alerts: new signals on newly closed bars, once each ─────────────────
-  useEffect(() => {
-    if (!loaded) return;
-    const rebaseline = rebaselineRef.current;
-    rebaselineRef.current = false;
-    if (rebaseline) { watermarkRef.current = model.lastBarT ?? watermarkRef.current; return; }
-    const wm = watermarkRef.current || model.lastBarT || 0;
-    const fresh: LogEntry[] = newSignalsAfter(model.signals, wm).map(s => ({
-      id: alertId(target, s.kind, s.t), t: s.t, strike: loaded.key, label, kind: s.kind, price: s.price, belowVwap: s.belowVwap,
-    }));
-    watermarkRef.current = nextWatermark(wm, model.lastBarT);
-    if (!fresh.length) return;
+  // ── alerts: new signals on newly closed bars, once each, per chart ───────
+  const onFresh = (fresh: LogEntry[], chart: ChartId) => {
+    const m = chart === 2 ? c2.model : c1.model;
     setLog(prev => fresh.filter(e => !prev.some(p => p.id === e.id)).reduce((l, e) => capLog(l, e), prev));
     for (const e of fresh) {
       const sell = e.kind === 'DOUBLE_BOTTOM_SELL';
-      const title = `${label} · ${sell ? 'Double bottom SELL' : 'Double top BUY'} @ ${e.price.toFixed(2)}`;
-      if (sell) toast.error(title, { description: e.belowVwap ? `Below ${model.vwapAvailable ? 'VWAP' : `SMA ${model.smaPeriod}`} — short entry zone` : undefined });
+      const title = `${e.label} · ${sell ? 'Double bottom SELL' : 'Double top BUY'} @ ${e.price.toFixed(2)}`;
+      if (sell) toast.error(title, { description: e.belowVwap ? `Below ${m.vwapAvailable ? 'VWAP' : `SMA ${m.smaPeriod}`} — short entry zone` : undefined });
       else toast.success(title);
-      setFlash(sell ? 'sell' : 'buy');
-      setTimeout(() => setFlash(null), FLASH_MS);
+      setFlash(f => ({ ...f, [chart]: sell ? 'sell' : 'buy' }));
+      setTimeout(() => setFlash(f => ({ ...f, [chart]: null })), FLASH_MS);
     }
     // Sound only in the leader tab, so two open tabs never double-ring; the toast and log still show everywhere.
     if (leaderRef.current && !mutedRef.current) {
       const last = fresh[fresh.length - 1];
       if (last.kind === 'DOUBLE_BOTTOM_SELL') playEntryChime(); else playExitChime();
     }
-  }, [model, loaded, leaderRef, label, target]);
+  };
+  const tk1 = targetKey(target1), tk2 = targetKey(target2);
+  usePnfAlerts({
+    model: c1.model, ready: Boolean(feed1.loaded), chart: 1, target: target1, label: dual ? `${feed1.label} · C1` : feed1.label,
+    strike: feed1.loaded?.key ?? 0, drawKey: `${tk1}|${feed1.epoch}|${serializeSettings(settings)}`, onFresh,
+  });
+  usePnfAlerts({
+    model: c2.model, ready: dual && Boolean(feed2.loaded), chart: 2, target: target2, label: `${feed2.label} · C2`,
+    strike: feed2.loaded?.key ?? 0, drawKey: `${tk2}|${feed2.epoch}|${serializeSettings(settings2)}|${dual}`, onFresh,
+  });
 
-  const lastBarT = bars.length ? bars[bars.length - 1].t : 0;
-  const stale = now === 0 || !lastBarT || now / 1000 - lastBarT > FRESH_S;
+  // ── trade execution markers, per instrument (a chart shows its own instrument's) ──
+  const [markers, setMarkers] = useState<Record<string, PnfExecutionMarker[]>>({});
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMarkers(prev => {
+      let next = prev;
+      for (const k of [tk1, tk2]) if (!(k in next)) next = { ...next, [k]: readMarkers(k) };
+      return next;
+    });
+  }, [tk1, tk2]);
+  const saveMarkers = useCallback((key: string, update: (prev: PnfExecutionMarker[]) => PnfExecutionMarker[]) => {
+    setMarkers(prev => {
+      const list = update(prev[key] ?? readMarkers(key));
+      try { sessionStorage.setItem(`${MARKERS_KEY}${key}`, JSON.stringify(list)); } catch { /* ignore */ }
+      return { ...prev, [key]: list };
+    });
+  }, []);
+  const handleTradeExecuted = useCallback((m: PnfExecutionMarker, t: Target) => saveMarkers(targetKey(t), prev => [...prev, m]), [saveMarkers]);
+  // Arrives seconds after the order: found by id in the store as it is THEN (never a list captured at the click).
+  const handleMarkerPrice = useCallback((id: string, price: number) => {
+    setMarkers(prev => {
+      let next = prev;
+      for (const [key, list] of Object.entries(prev)) {
+        if (!list.some(m => m.id === id)) continue;
+        const updated = list.map(m => (m.id === id ? { ...m, price, estimate: false } : m));
+        try { sessionStorage.setItem(`${MARKERS_KEY}${key}`, JSON.stringify(updated)); } catch { /* ignore */ }
+        next = { ...next, [key]: updated };
+      }
+      return next;
+    });
+  }, []);
 
+  // ── picking: every control acts on the active chart ──────────────────────
   const choose = (next: Target) => {
-    targetsRef.current = { ...targetsRef.current, [next.kind]: next };
-    savePref(TARGETS_KEY, JSON.stringify(targetsRef.current));
-    savePref(SEGMENT_KEY, next.kind);
-    if (targetKey(next) === targetKey(target)) return;
-    // Everything on screen belongs to the old instrument: drop it so no refresh or alert crosses over.
-    reqRef.current++;
-    watermarkRef.current = 0;
-    rebaselineRef.current = true;
-    tickRef.current = null; setFeedPrevClose(null); setOutQuote(null);
-    setLoaded(null); setBars([]); setLoading(true); setLoadError(null); setName(null);
-    setTarget(next);
+    const c = active;
+    const picks = picksRef.current[c];
+    picksRef.current = { ...picksRef.current, [c]: { targets: { ...picks.targets, [next.kind]: next }, open: next.kind } };
+    savePref(c === 1 ? TARGETS_KEY : TARGETS_KEY_2, JSON.stringify(picksRef.current[c].targets));
+    savePref(c === 1 ? SEGMENT_KEY : SEGMENT_KEY_2, next.kind);
+    (c === 1 ? setTarget1 : setTarget2)(t => (targetKey(t) === targetKey(next) ? t : next));
   };
-  const pickSegment = (s: Segment) => { if (s !== target.kind) choose(targetsRef.current[s]); };
+  const pickSegment = (s: Segment) => { if (s !== activeTarget.kind) choose(picksRef.current[active].targets[s]); };
+  const activate = (c: ChartId) => { setActiveChart(c); savePref(ACTIVE_CHART_KEY, String(c)); };
   const pickOverlay = (o: Overlay) => { setOverlay(o); savePref(OVERLAY_KEY, o); };
-  const applySettings1 = (next: PnfSettings) => {
-    rebaselineRef.current = true;     // the chart is about to be redrawn from the same data: that must not alert
-    setSettings(next);
-    savePref(SETTINGS_KEY, serializeSettings(next));
-  };
-  const applySettings2 = (next: PnfSettings) => {
-    setSettings2(next);
-    savePref(SETTINGS_KEY_2, serializeSettings(next));
+  const applySettings = (next: PnfSettings) => {
+    if (active === 2) { setSettings2(next); savePref(SETTINGS_KEY_2, serializeSettings(next)); }
+    else { setSettings(next); savePref(SETTINGS_KEY, serializeSettings(next)); }
   };
   const toggleChartView = (v: '1' | '2') => {
     setChartView(v);
@@ -389,16 +312,38 @@ function StraddlePnfPage() {
   const today = istToday();
   const seg = (active: boolean) =>
     `px-2.5 h-6 text-[11px] font-bold rounded-md transition-colors ${active ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-100'}`;
-  const isStraddle = target.kind === 'options' && target.side === 'STRADDLE';
-  const lastBar = bars[bars.length - 1];
-  const live = outQuote ? { ce: outQuote.ce, pe: outQuote.pe } : lastBar ? { ce: lastBar.ce, pe: lastBar.pe } : null;
-  const segLabel = SEGMENTS.find(x => x.id === target.kind)?.label ?? '';
-  const sessionTag = outQuote ? (istMinuteOfDay(outQuote.t) < sessionWindow(market, outQuote.t)[0] ? 'Pre-open' : 'Post-close') : null;
-  // The feed's previous close is the official one (a stock's closing price is not its last 1-min close), but only until the bell.
-  const tradingDay = market === 'NSE' ? isNseTradingDay(istDateIso(now)) : true;
-  // Before today's first price the header shows the last session's close, measured (from history) against the session before it.
-  const priceToday = (outQuote ? sessionOf(outQuote.t) : bars.length ? sessionOf(bars[bars.length - 1].t) : null) === istDateIso(now);
-  const trustedPrevClose = now > 0 && priceToday && feedCloseTrusted(now / 1000, market, tradingDay) ? feedPrevClose : null;
+  const segLabel = SEGMENTS.find(x => x.id === activeTarget.kind)?.label ?? '';
+  const activeFno = activeTarget.kind === 'futures' || activeTarget.kind === 'options';
+  const shownOverlay: Overlay = activeChartModel.vwapAllowed ? overlay : 'sma';
+  const boxShort = (s: PnfSettings) => boxText(s).replace(/ box$/, '');
+  const loadErrors = [feed1.loadError && (dual ? `Chart 1: ${feed1.loadError}` : feed1.loadError), dual && feed2.loadError && `Chart 2: ${feed2.loadError}`].filter(Boolean);
+  const chartProps = (c: ChartId) => {
+    const feed = c === 2 ? feed2 : feed1;
+    const target = c === 2 ? target2 : target1;
+    const st = c === 2 ? settings2 : settings;
+    return {
+      model: (c === 2 ? c2 : c1).model,
+      live: feed.live,
+      overlay,
+      stale: feed.stale,
+      legs: target.kind === 'options' && target.side === 'STRADDLE',
+      flash: flash[c],
+      loading: (feed.loading || !feed.complete) && feed.bars.length === 0,
+      interval: st.interval,
+      boxPct: st.boxPct,
+      reversal: st.reversal,
+      resetTick: viewTick,
+      headerSlot: active === c ? headerSlot : null,
+      showHeader: dual,
+      scrip: dual ? `${feed.scrip} (${boxText(st)})` : feed.scrip,
+      feedPrevClose: feed.trustedPrevClose,
+      sessionTag: feed.sessionTag,
+      tradeMarkers: markers[targetKey(target)] ?? [],
+      error: feed.loaded?.error ?? (feed.complete ? undefined : contractError[c] ?? undefined),
+      active: active === c,
+      onActivate: dual ? () => activate(c) : undefined,
+    };
+  };
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950 text-white">
@@ -414,15 +359,15 @@ function StraddlePnfPage() {
               <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {segLabel}</p>
               <h1 className="text-sm font-bold text-white tracking-tight leading-none">Point &amp; Figure</h1>
               <p className="text-[10px] text-zinc-500 font-medium mt-1">
-                {chartView === '2'
-                  ? `${settings.interval}-min · ${boxText(settings)} (C1) · ${boxText(settings2)} (C2) · ${settings.reversal}-box reversal · signals only · ${fno ? label : name ?? target.name}`
-                  : `${settings.interval}-min · ${boxText(settings)} · ${settings.reversal}-box reversal · signals only · ${fno ? label : name ?? target.name}`}
+                {`${dual ? `Chart ${active} · ` : ''}${activeSettings.interval}-min · ${boxText(activeSettings)} · ${activeSettings.reversal}-box reversal · signals only · ${activeFno ? activeFeed.label : activeFeed.name ?? activeTarget.name}`}
               </p>
             </div>
           </div>
           <span className="hidden 2xl:block w-px h-8 bg-zinc-800 shrink-0 2xl:order-2" />
           <div className="order-4 basis-full 2xl:order-3 2xl:basis-0 2xl:flex-1 min-w-0 flex items-center gap-x-4 gap-y-2 flex-wrap">
-            <InstrumentBar target={target} onSegment={pickSegment} onPick={choose} onError={setContractError} />
+            {/* Remounted per chart, so one chart's contract lists never show on the other. */}
+            <InstrumentBar key={active} target={activeTarget} onSegment={pickSegment} onPick={choose}
+                           onError={msg => setContractError(e => (e[active] === msg ? e : { ...e, [active]: msg }))} />
             {/* Nifty and India VIX vs the previous close: the shared indices WebSocket bridge's snapshot, started on mount. */}
             <div className="ml-auto shrink-0 flex items-center gap-2">
               <HeaderIndexChips />
@@ -432,7 +377,7 @@ function StraddlePnfPage() {
             </div>
           </div>
           <div className="order-3 2xl:order-4 ml-auto flex items-center gap-2 shrink-0">
-            <DataChip date={loaded?.dataDate} lastSession={Boolean(loaded?.dataDate) && loaded?.dataDate !== today} />
+            <DataChip date={activeFeed.loaded?.dataDate} lastSession={Boolean(activeFeed.loaded?.dataDate) && activeFeed.loaded?.dataDate !== today} />
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <NavBar />
           </div>
@@ -468,52 +413,41 @@ function StraddlePnfPage() {
             </div>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
 
-            {/* When dual chart is active, allow switching which chart settings to edit */}
-            {chartView === '2' && (
+            {/* Two charts: which one the instrument bar, the settings and the trade bar act on (clicking a chart does the same) */}
+            {dual && (
               <>
-                <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-950" role="group" aria-label="Select chart settings">
-                  <button
-                    type="button"
-                    aria-pressed={activeChartTab === 1}
-                    aria-label={`Edit Chart 1 settings (${boxText(settings)})`}
-                    onClick={() => setActiveChartTab(1)}
-                    className={`px-2 h-6 rounded text-[11px] font-bold transition-colors ${activeChartTab === 1 ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
-                  >
-                    C1 · {boxText(settings).replace(/ box$/, '')}
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={activeChartTab === 2}
-                    aria-label={`Edit Chart 2 settings (${boxText(settings2)})`}
-                    onClick={() => setActiveChartTab(2)}
-                    className={`px-2 h-6 rounded text-[11px] font-bold transition-colors ${activeChartTab === 2 ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
-                  >
-                    C2 · {boxText(settings2).replace(/ box$/, '')}
-                  </button>
+                <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-950" role="group" aria-label="Active chart">
+                  {([1, 2] as const).map(c => (
+                    <button
+                      key={c}
+                      type="button"
+                      aria-pressed={active === c}
+                      aria-label={`Chart ${c} (${boxShort(c === 2 ? settings2 : settings)})`}
+                      title={`Chart ${c}: ${(c === 2 ? feed2 : feed1).label} · ${boxText(c === 2 ? settings2 : settings)}`}
+                      onClick={() => activate(c)}
+                      className={`px-2 h-6 rounded text-[11px] font-bold transition-colors ${active === c ? 'bg-amber-500/15 text-amber-300' : 'text-zinc-400 hover:text-zinc-200'}`}
+                    >
+                      C{c} · {boxShort(c === 2 ? settings2 : settings)}
+                    </button>
+                  ))}
                 </div>
                 <span className="w-px h-5 bg-zinc-800 shrink-0" />
               </>
             )}
 
-            <SettingsControls
-              settings={activeChartTab === 2 && chartView === '2' ? settings2 : settings}
-              onChange={activeChartTab === 2 && chartView === '2' ? applySettings2 : applySettings1}
-            />
+            <SettingsControls settings={activeSettings} onChange={applySettings} />
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
               {/* An index has no traded volume, so no VWAP: the button is disabled and the SMA is drawn (the saved choice is kept for
                   stocks, futures and options). */}
-              <button type="button" aria-pressed={shownOverlay === 'vwap'} onClick={() => pickOverlay('vwap')} disabled={!vwapAllowed}
-                      title={vwapAllowed ? undefined : indexNoVwap
+              <button type="button" aria-pressed={shownOverlay === 'vwap'} onClick={() => pickOverlay('vwap')} disabled={!activeChartModel.vwapAllowed}
+                      title={activeChartModel.vwapAllowed ? undefined : activeChartModel.indexNoVwap
                         ? 'An index has no traded volume, so there is no VWAP: the SMA of the P&F boxes is used'
                         : 'These bars carry no volume, so there is no VWAP: the SMA of the P&F boxes is used'}
                       className={`${seg(shownOverlay === 'vwap')} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-zinc-400`}>VWAP</button>
-              <button type="button" aria-pressed={shownOverlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(shownOverlay === 'sma')}>SMA {(activeChartTab === 2 && chartView === '2' ? settings2 : settings).smaPeriod}</button>
+              <button type="button" aria-pressed={shownOverlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(shownOverlay === 'sma')}>SMA {activeSettings.smaPeriod}</button>
             </div>
-            <SmaPeriodInput
-              settings={activeChartTab === 2 && chartView === '2' ? settings2 : settings}
-              onChange={activeChartTab === 2 && chartView === '2' ? applySettings2 : applySettings1}
-            />
+            <SmaPeriodInput settings={activeSettings} onChange={applySettings} />
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <IconButton icon={LocateFixed} label="Re-center" onClick={recenterNow} />
             <IconButton icon={Bell} label="Alert log" onClick={() => setLogOpen(o => !o)} pressed={logOpen} badge={log.length} />
@@ -528,8 +462,8 @@ function StraddlePnfPage() {
       {tradeOpen && (
         <div className="shrink-0">
           <PnfTradeBar
-            target={target}
-            live={live}
+            target={activeTarget}
+            live={activeFeed.live}
             broker={broker}
             mode={tradeMode}
             onModeChange={setTradeMode}
@@ -542,58 +476,24 @@ function StraddlePnfPage() {
       )}
 
       <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 pt-2 pb-2">
-        {loadError && <p role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{loadError}</p>}
-        {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={settings.interval} /></div>}
+        {loadErrors.map(e => <p key={e as string} role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{e}</p>)}
+        {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={activeSettings.interval} /></div>}
         <div
-          className={`flex-1 min-h-0 grid gap-3 ${chartView === '2' ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}
+          className={`flex-1 min-h-0 grid gap-3 ${dual ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}
           style={{ gridTemplateRows: 'minmax(0, 1fr)' }}
         >
           <PnfPanel
-            title={chartView === '2' ? `Chart 1 · ${boxText(settings)}` : `${label} · ${boxText(settings)}`}
-            strike={loaded?.key ?? 0}
-            model={model}
-            live={live}
-            overlay={overlay}
-            stale={stale}
-            legs={isStraddle}
-            flash={flash}
-            loading={(loading || !complete) && bars.length === 0}
-            interval={settings.interval}
-            boxPct={settings.boxPct}
-            reversal={settings.reversal}
+            title={dual ? `C1 · ${feed1.label} · ${boxText(settings)}` : `${feed1.label} · ${boxText(settings)}`}
+            strike={feed1.loaded?.key ?? 0}
             fill
-            resetTick={viewTick}
-            headerSlot={headerSlot}
-            showHeader={chartView === '2'}
-            scrip={scrip}
-            feedPrevClose={trustedPrevClose}
-            sessionTag={sessionTag}
-            tradeMarkers={tradeMarkers}
-            error={loaded?.error ?? (complete ? undefined : contractError ?? undefined)}
+            {...chartProps(1)}
           />
-
-          {chartView === '2' && (
+          {dual && (
             <PnfPanel
-              title={`Chart 2 · ${boxText(settings2)}`}
-              strike={loaded?.key ? -loaded.key : -1}
-              model={model2}
-              live={live}
-              overlay={overlay}
-              stale={stale}
-              legs={isStraddle}
-              flash={flash}
-              loading={(loading || !complete) && bars.length === 0}
-              interval={settings2.interval}
-              boxPct={settings2.boxPct}
-              reversal={settings2.reversal}
+              title={`C2 · ${feed2.label} · ${boxText(settings2)}`}
+              strike={feed2.loaded?.key ? -feed2.loaded.key : -1}
               fill
-              resetTick={viewTick}
-              showHeader
-              scrip={`${scrip} (${boxText(settings2)})`}
-              feedPrevClose={trustedPrevClose}
-              sessionTag={sessionTag}
-              tradeMarkers={tradeMarkers}
-              error={loaded?.error ?? (complete ? undefined : contractError ?? undefined)}
+              {...chartProps(2)}
             />
           )}
         </div>

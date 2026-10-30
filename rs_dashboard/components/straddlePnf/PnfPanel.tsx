@@ -53,6 +53,10 @@ export type PnfPanelProps = {
   tradeMarkers?: PnfExecutionMarker[];
   /** Render the card header inside the panel even when headerSlot is provided. */
   showHeader?: boolean;
+  /** Two charts: this is the chart the header controls and the trade bar act on (drawn with a highlight ring). */
+  active?: boolean;
+  /** Two charts: a press anywhere on this chart makes it the active one. */
+  onActivate?: () => void;
 };
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
@@ -97,7 +101,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -297,7 +301,9 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     <section
       data-testid="pnf-panel"
       data-strike={strike}
-      className={`min-w-0 rounded-lg border border-zinc-800 bg-zinc-900 flex flex-col ${fill ? 'h-full min-h-0' : ''} ${ring}`}
+      data-active={onActivate ? active : undefined}
+      onPointerDownCapture={onActivate && !active ? onActivate : undefined}
+      className={`min-w-0 rounded-lg border bg-zinc-900 flex flex-col ${active && onActivate ? 'border-amber-500/60' : 'border-zinc-800'} ${fill ? 'h-full min-h-0' : ''} ${ring}`}
     >
       {headerSlot ? createPortal(
         <div className="flex items-center gap-3 min-w-0" aria-label={`${title} summary`}>

@@ -168,9 +168,9 @@ test('Index shows non-tradable note; switching to Futures enables 1-click tradin
 
   await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 1 lot');
 
-  // One BUY marker on each chart (two charts)
+  // The BUY marker is on the chart that traded (chart 2 still shows the index)
   const markers = page.getByTestId('pnf-trade-marker');
-  await expect(markers).toHaveCount(2);
+  await expect(markers).toHaveCount(1);
   await expect(markers.first()).toHaveAttribute('data-action', 'BUY');
   await expect(markers.first().getByText('B', { exact: true })).toBeVisible();
 
@@ -179,9 +179,9 @@ test('Index shows non-tradable note; switching to Futures enables 1-click tradin
   await expect(page.getByText('FLAT')).toBeVisible();
   expect(placedOrders.length).toBe(1);
 
-  // BUY and SELL markers on both charts
-  await expect(markers).toHaveCount(4);
-  await expect(page.locator('[data-testid="pnf-trade-marker"][data-action="SELL"]')).toHaveCount(2);
+  // BUY and SELL markers on the traded chart
+  await expect(markers).toHaveCount(2);
+  await expect(page.locator('[data-testid="pnf-trade-marker"][data-action="SELL"]')).toHaveCount(1);
 });
 
 test('REAL is never remembered: a reload starts in PAPER', async ({ page }) => {
@@ -307,4 +307,25 @@ test('Positions, order book, trade book and P&L panel for the header broker (rea
   await books.getByRole('button', { name: 'Expand positions & orders' }).click();
   await expect(books).toHaveAttribute('data-open', 'true');
   expect(placedOrders.length).toBe(0);
+});
+
+test('the trade bar trades the ACTIVE chart', async ({ page }) => {
+  const { placedOrders } = await installTradeMock(page);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await expect(page.getByText(/Index spot is non-tradable directly/i)).toBeVisible();       // chart 1: the index
+
+  // Chart 2 on the future: the bar now trades it
+  await page.getByRole('group', { name: 'Active chart' }).getByRole('button', { name: /^Chart 2/ }).click();
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await page.getByRole('button', { name: 'BUY MARKET' }).click();
+  await expect.poll(() => placedOrders.length).toBe(1);
+  expect(placedOrders[0].target?.kind).toBe('futures');
+  // The marker lands on chart 2 only
+  await expect(page.getByTestId('pnf-panel').nth(1).getByTestId('pnf-trade-marker')).toHaveCount(1);
+  await expect(page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-trade-marker')).toHaveCount(0);
+
+  // Back on chart 1 the bar is the index again
+  await page.getByRole('group', { name: 'Active chart' }).getByRole('button', { name: /^Chart 1/ }).click();
+  await expect(page.getByText(/Index spot is non-tradable directly/i)).toBeVisible();
 });

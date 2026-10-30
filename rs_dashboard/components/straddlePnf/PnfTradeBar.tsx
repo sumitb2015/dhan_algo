@@ -26,7 +26,8 @@ export interface PnfTradeBarProps {
   onModeChange: (mode: 'PAPER' | 'REAL') => void;
   onPnlChange?: (pnl: number) => void;
   onSwitchTarget?: (target: Target) => void;
-  onTradeExecuted?: (marker: PnfExecutionMarker) => void;
+  /** `target` is the chart target at the click, so a chart switch while the order is out never files it under another scrip. */
+  onTradeExecuted?: (marker: PnfExecutionMarker, target: Target) => void;
   /** A REAL marker's price once the broker reports the traded price (it starts at the live price, marked as an estimate). */
   onMarkerPrice?: (id: string, price: number) => void;
 }
@@ -149,7 +150,7 @@ export default function PnfTradeBar({
   const marker = (action: PnfAction, n: number, estimate: boolean) => {
     const px = prices.reduce<number>((s, p) => s + (p ?? 0), 0);
     const m: PnfExecutionMarker = { ...stamp(), action, price: px, lots: n, mode, estimate };
-    onTradeExecuted?.(m);
+    onTradeExecuted?.(m, target);
     return m.id;
   };
 

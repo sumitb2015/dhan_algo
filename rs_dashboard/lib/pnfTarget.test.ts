@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_TARGETS, alertId, isComplete, parseTarget, readTargets, targetKey, targetLabel, targetQuery } from './pnfTarget.ts';
+import { DEFAULT_TARGETS, alertId, isComplete, parseActiveChart, parseTarget, readTargets, restoreChart, targetKey, targetLabel, targetQuery } from './pnfTarget.ts';
 
 test('parseTarget keeps valid fields per segment and drops the rest', () => {
   assert.deepEqual(parseTarget({ kind: 'index', symbol: 'NIFTY', name: 'Nifty 50', expiry: '2026-11-03' }), { kind: 'index', symbol: 'NIFTY', name: 'Nifty 50' });
@@ -45,4 +45,22 @@ test('alertId tells contracts apart: two strikes, CE vs PE, or two expiries on t
   assert.equal(new Set(ids).size, ids.length);
   assert.equal(alertId(ce, 'DOUBLE_BOTTOM_SELL', t), alertId({ ...ce }, 'DOUBLE_BOTTOM_SELL', t));   // the same signal is one entry
   assert.notEqual(alertId(ce, 'DOUBLE_BOTTOM_SELL', t), alertId(ce, 'DOUBLE_TOP_BUY', t));
+});
+
+test('restoreChart: saved picks and open segment; chart 2 first visit copies chart 1; junk falls back', () => {
+  const chart1 = restoreChart(JSON.stringify({ futures: { kind: 'futures', symbol: 'CRUDEOILM', name: 'CRUDEOILM', expiry: '2026-11-18' } }), 'futures');
+  assert.equal(chart1.open, 'futures');
+  assert.equal(chart1.targets.futures.symbol, 'CRUDEOILM');
+  assert.deepEqual(chart1.targets.index, DEFAULT_TARGETS.index);
+  const chart2First = restoreChart(null, null, chart1);
+  assert.equal(chart2First.open, 'futures');
+  assert.equal(chart2First.targets.futures.symbol, 'CRUDEOILM');
+  assert.notEqual(chart2First.targets, chart1.targets, 'a copy, so editing chart 2 never edits chart 1');
+  const chart2Saved = restoreChart(JSON.stringify({ equity: { kind: 'equity', symbol: 'TCS', name: 'TCS' } }), 'equity', chart1);
+  assert.equal(chart2Saved.targets.equity.symbol, 'TCS');
+  assert.equal(chart2Saved.targets.futures.symbol, 'NIFTY', 'saved picks never borrow chart 1');
+  assert.equal(restoreChart('{bad', 'bond').open, 'index');
+  assert.equal(parseActiveChart('2'), 2);
+  assert.equal(parseActiveChart('x'), 1);
+  assert.equal(parseActiveChart(null), 1);
 });

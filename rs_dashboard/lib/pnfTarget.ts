@@ -100,3 +100,19 @@ export function targetLabel(t: Target): string {
   }
   return t.symbol;
 }
+
+export type ChartPicks = { targets: Record<Segment, Target>; open: Segment };
+
+/**
+ * One chart's saved picks: the last target per segment and the segment it had open. A chart with nothing saved yet
+ * starts from `fallback` (chart 2's first visit copies chart 1), else from the defaults on the Index segment.
+ */
+export function restoreChart(rawTargets: string | null, rawSegment: string | null, fallback?: ChartPicks): ChartPicks {
+  if (rawTargets === null && fallback) return { targets: { ...fallback.targets }, open: fallback.open };
+  const targets = readTargets(rawTargets);
+  const open = SEGMENTS.some(s => s.id === rawSegment) ? (rawSegment as Segment) : fallback?.open ?? 'index';
+  return { targets, open };
+}
+
+/** The saved active chart: 2 only when it says so. */
+export const parseActiveChart = (raw: string | null): 1 | 2 => (raw === '2' ? 2 : 1);
