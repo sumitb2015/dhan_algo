@@ -13,6 +13,7 @@ export interface PnfLegInput {
   expiry?: string;
   strike?: number;
   optionType?: 'CE' | 'PE';
+  underlying?: string;
 }
 
 export interface PnfOrderBody {

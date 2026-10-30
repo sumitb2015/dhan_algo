@@ -81,12 +81,12 @@ async function contractResponse(p: URLSearchParams) {
   if ((kind !== 'futures' && kind !== 'options') || !isSymbol(underlying) || !DATE_RE.test(expiry)) {
     return NextResponse.json({ success: false, error: 'Use kind=futures|options, an underlying symbol and expiry=YYYY-MM-DD' }, { status: 400 });
   }
-  let legs: Contract[];
+  let legs: (Contract & { underlying?: string; strike?: number; optionType?: 'CE' | 'PE' })[];
   let name: string;
   if (kind === 'futures') {
     const f = resolveFuture(underlying, expiry);
     if (!f) return NextResponse.json({ success: false, error: `No ${underlying} future expiring ${expiry}` }, { status: 400 });
-    legs = [f];
+    legs = [{ ...f, underlying, expiry }];
     name = f.displayName;
   } else {
     const strike = Number(p.get('strike'));
@@ -99,7 +99,7 @@ async function contractResponse(p: URLSearchParams) {
     if (found.some(c => c === null)) {
       return NextResponse.json({ success: false, error: `No ${underlying} ${strike} ${type === 'STRADDLE' ? 'CE + PE' : type} expiring ${expiry}` }, { status: 400 });
     }
-    legs = found as Contract[];
+    legs = found.map((c, i) => ({ ...c!, underlying, expiry, strike, optionType: sides[i] }));
     name = type === 'STRADDLE' ? `${legs[0].displayName.replace(/ CALL$/, '')} STRADDLE` : legs[0].displayName;
   }
   const legArg = legs.map(l => `${l.segment}:${l.securityId}:${l.instrument}`).join(',');
