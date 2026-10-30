@@ -36,6 +36,13 @@ export interface PnfOrderRequest {
   action: PnfAction;
   lots: number;
   product: PnfProduct;
+  /** 'auto' = the AUTO engine (its own correlation tag / Kotak per-source cap); absent = the trade bar. */
+  source: 'bar' | 'auto';
+  /**
+   * AUTO's exit: close only what AUTO opened — per leg `units` (the ledger's own quantity), capped by what the broker still
+   * shows in that direction under the intraday product (planOwnExit). REAL only; never sized from the Lots box.
+   */
+  exitOwn: { side: PnfAction; units: number[] } | null;
 }
 
 export const lotCap = (t: Target) => (t.kind === 'equity' ? MAX_PNF_SHARES : MAX_PNF_LOTS);
@@ -52,7 +59,16 @@ export function parsePnfOrder(body: unknown): PnfOrderRequest | string {
   if (!target || !isComplete(target)) return 'A complete chart target (instrument, expiry, strike, side) is required';
   if (target.kind === 'index') return 'An index cannot be traded directly - pick its future or an option';
   const close = b.close === true;
-  if (close) return { broker, mode, target, close, action: 'SELL', lots: 0, product: 'INTRADAY' };
+  const source = b.source === 'auto' ? 'auto' : 'bar';
+  if (close) return { broker, mode, target, close, action: 'SELL', lots: 0, product: 'INTRADAY', source, exitOwn: null };
+  if (b.exitOwn !== undefined) {
+    const x = b.exitOwn as { side?: unknown; units?: unknown };
+    if (mode !== 'REAL') return 'exitOwn is a REAL-mode exit (paper exits never reach the broker)';
+    if (x?.side !== 'BUY' && x?.side !== 'SELL') return 'exitOwn.side must be BUY or SELL';
+    const units = Array.isArray(x.units) ? x.units : [];
+    if (units.length < 1 || units.length > 2 || !units.every(u => Number.isInteger(u) && (u as number) > 0)) return 'exitOwn.units must be 1-2 positive whole quantities';
+    return { broker, mode, target, close: false, action: x.side, lots: 0, product: 'INTRADAY', source, exitOwn: { side: x.side, units: units as number[] } };
+  }
 
   const action = b.action;
   if (action !== 'BUY' && action !== 'SELL') return 'action must be BUY or SELL';
@@ -64,7 +80,7 @@ export function parsePnfOrder(body: unknown): PnfOrderRequest | string {
   const product = b.product;
   const allowed: PnfProduct[] = target.kind === 'equity' ? ['INTRADAY', 'CNC'] : ['INTRADAY', 'MARGIN'];
   if (!allowed.includes(product as PnfProduct)) return `product must be ${allowed.join(' or ')} for this instrument`;
-  return { broker, mode, target, close, action, lots, product: product as PnfProduct };
+  return { broker, mode, target, close, action, lots, product: product as PnfProduct, source, exitOwn: null };
 }
 
 export const brokerProduct = (p: PnfProduct, broker: PnfBroker): string =>
@@ -85,7 +101,8 @@ export function planLegClose(key: string, rows: BookRow[]): { side: PnfAction; q
     .map(r => ({ side: r.net > 0 ? 'SELL' as const : 'BUY' as const, qty: Math.abs(r.net), product: r.product }));
 }
 
-export type LegStatus = 'placed' | 'rejected' | 'unknown' | 'skipped';
+/** `flat`: an AUTO exit found nothing of its own left at the broker (closed elsewhere), so nothing was sent. */
+export type LegStatus = 'placed' | 'rejected' | 'unknown' | 'skipped' | 'flat';
 export interface LegResult {
   label: string; side: PnfAction; qty: number; product: string; status: LegStatus; orderId?: string; error?: string;
 }
@@ -97,11 +114,25 @@ export interface LegResult {
 export const needsRollback = (results: LegResult[], close: boolean): boolean =>
   !close && results.length === 2 && results[0].status === 'placed' && results[1].status === 'rejected';
 
+/**
+ * AUTO's exit for one leg: the intraday row of that contract in the direction being closed (a BUY closes a short, net < 0),
+ * quantity min(own units, |net|). 0 = nothing of it left at the broker. Other products, and the other direction, are never
+ * touched: two charts or a manual trade on the same contract keep what is theirs.
+ */
+export function planOwnExit(key: string, rows: BookRow[], side: PnfAction, units: number, broker: PnfBroker): { qty: number; product: string } {
+  const product = brokerProduct('INTRADAY', broker);
+  const net = rows.filter(r => r.key === key && r.product === product).reduce((s, r) => s + (Number(r.net) || 0), 0);
+  const open = side === 'BUY' ? Math.max(0, -net) : Math.max(0, net);
+  return { qty: Math.min(units, open), product };
+}
+
 /** One word for a send: every leg placed, none, some (a leg is live alone), or an outcome the broker did not confirm. */
-export function sendOutcome(results: LegResult[]): 'placed' | 'rejected' | 'partial' | 'unknown' {
+export function sendOutcome(results: LegResult[]): 'placed' | 'rejected' | 'partial' | 'unknown' | 'flat' {
   if (results.some(r => r.status === 'unknown')) return 'unknown';
-  const placed = results.filter(r => r.status === 'placed').length;
-  if (placed === results.length) return 'placed';
+  const sent = results.filter(r => r.status !== 'flat');
+  if (!sent.length) return results.length ? 'flat' : 'rejected';
+  const placed = sent.filter(r => r.status === 'placed').length;
+  if (placed === sent.length) return 'placed';
   return placed === 0 ? 'rejected' : 'partial';
 }
 

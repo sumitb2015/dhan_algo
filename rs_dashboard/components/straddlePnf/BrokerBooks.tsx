@@ -6,13 +6,15 @@ import { BROKER_LABELS, scalperRoute, type Broker } from '@/hooks/useBrokerSelec
 import {
   daySummary, newestFirst, toOrderRow, toPositionRow, toTradeRow, type OrderRow, type OrderState, type PositionRow, type TradeRow,
 } from '@/lib/pnfBooks';
+import { targetLabel } from '@/lib/pnfTarget';
+import type { AutoRow } from '@/lib/pnfAutoLedger';
 
 // Positions, order book, trade book and the day's P&L for the page header's broker, docked at the bottom of the page.
 // Read-only: no order, cancel or exit is sent from here. Collapsed it is one strip (tabs + Day P&L) and reads only the
 // positions; expanded it grows to fit its rows (up to a cap) and reads all three books. Every read is every 5 s and tagged
 // with its broker, so switching accounts never shows the old account's rows under the new name.
 
-type Tab = 'positions' | 'orders' | 'trades' | 'pnl';
+type Tab = 'positions' | 'orders' | 'trades' | 'pnl' | 'auto';
 type BookState<T> = { broker: Broker; rows: T[]; error?: string } | null;
 
 const POLL_MS = 5_000;
@@ -45,9 +47,11 @@ export interface BrokerBooksProps {
   /** Expanded (the page remembers it); collapsed shows only the strip. */
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Today's AUTO rows (both charts, both modes), from the AUTO ledger. */
+  autoRows?: AutoRow[];
 }
 
-export default function BrokerBooks({ broker, open, onOpenChange }: BrokerBooksProps) {
+export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [] }: BrokerBooksProps) {
   const [tab, setTab] = useState<Tab>('positions');
   const [positions, setPositions] = useState<BookState<PositionRow>>(null);
   const [orders, setOrders] = useState<BookState<OrderRow>>(null);
@@ -83,7 +87,9 @@ export default function BrokerBooks({ broker, open, onOpenChange }: BrokerBooksP
     { id: 'orders', label: 'Order Book', count: ord ? summary.orders.total : undefined },
     { id: 'trades', label: 'Trade Book', count: trd ? summary.trades : undefined },
     { id: 'pnl', label: 'P&L' },
+    { id: 'auto', label: 'AUTO', count: autoRows.length || undefined },
   ];
+  const autoPnl = autoRows.reduce((s, r) => s + (r.state === 'closed' ? r.pnl ?? 0 : 0), 0);
   const book = tab === 'positions' ? pos : tab === 'orders' ? ord : tab === 'trades' ? trd : pos;
   /** A tab click opens the panel on that tab; clicking the tab already shown collapses it. */
   const pick = (t: Tab) => {
@@ -116,7 +122,28 @@ export default function BrokerBooks({ broker, open, onOpenChange }: BrokerBooksP
       </div>
 
       {open && <div className="max-h-72 overflow-auto">
-        {book?.error ? (
+        {tab === 'auto' ? (
+          <Table empty="No AUTO trades today" head={['Time', 'Chart', 'Instrument', 'Mode', 'Side', 'Lots', 'Entry', 'Exit', 'P&L', 'State']} right={[5, 6, 7, 8]}>
+            {[...autoRows].reverse().map(r => (
+              <tr key={r.id} className="border-b border-zinc-800/60">
+                <td className="px-2 py-1 text-zinc-400">{new Date(r.entryT * 1000).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}</td>
+                <td className="px-2 py-1">C{r.chart}</td>
+                <td className="px-2 py-1 font-sans text-zinc-100">{targetLabel(r.target)}</td>
+                <td className={`px-2 py-1 font-bold ${r.mode === 'REAL' ? 'text-red-400' : 'text-zinc-400'}`}>{r.mode}</td>
+                <td className={`px-2 py-1 font-bold ${sideTone(r.side)}`}>{r.side}</td>
+                <td className="px-2 py-1 text-right">{r.lots}</td>
+                <td className="px-2 py-1 text-right">{fmt(r.entryPrice)}</td>
+                <td className="px-2 py-1 text-right">{r.exitPrice === undefined ? '—' : fmt(r.exitPrice)}</td>
+                <td className={`px-2 py-1 text-right font-bold ${tone(r.pnl ?? null)}`}>{r.pnl === undefined ? '—' : inr(r.pnl)}</td>
+                <td className="px-2 py-1" title={r.note}>{r.state === 'closed' ? r.reason ?? 'closed' : r.state}</td>
+              </tr>
+            ))}
+            {autoRows.length ? (
+              <tr><td colSpan={8} className="px-2 py-1 text-right text-zinc-400">Closed AUTO P&L today (REAL at decision prices)</td>
+                <td className={`px-2 py-1 text-right font-bold ${tone(autoPnl)}`}>{inr(autoPnl)}</td><td /></tr>
+            ) : null}
+          </Table>
+        ) : book?.error ? (
           <p role="alert" className="m-3 text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">
             {BROKER_LABELS[broker]} {tab === 'pnl' ? 'positions' : tab}: {book.error}
           </p>
@@ -213,7 +240,7 @@ function Table({ head, right, empty, children }: { head: string[]; right: number
         </tr>
       </thead>
       <tbody>
-        {children.length ? children : <tr><td colSpan={head.length} className="px-2 py-4 text-center text-zinc-500 font-sans">{empty}</td></tr>}
+        {children.flat().some(Boolean) ? children : <tr><td colSpan={head.length} className="px-2 py-4 text-center text-zinc-500 font-sans">{empty}</td></tr>}
       </tbody>
     </table>
   );

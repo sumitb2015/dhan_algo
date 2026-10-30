@@ -10,7 +10,7 @@ import { CloseGuard } from '@/lib/priceLadderClose';
 import { parseTarget, isComplete, targetKey } from '@/lib/pnfTarget';
 import { brokerLegs, resolvePnfLegs, type PnfBrokerLeg } from '@/lib/pnfOrderServer';
 import {
-  MAX_PNF_LOTS, brokerProduct, needsRollback, orderQty, parsePnfOrder, planLegClose, sendOutcome,
+  MAX_PNF_LOTS, brokerProduct, needsRollback, orderQty, parsePnfOrder, planLegClose, planOwnExit, sendOutcome,
   type LegResult, type PnfAction, type PnfBroker,
 } from '@/lib/pnfOrderLogic';
 
@@ -54,13 +54,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try { body = await req.json(); } catch { return bad('Invalid JSON'); }
   const order = parsePnfOrder(body);
   if (typeof order === 'string') return bad(order);
-  const { broker, mode, target, close } = order;
+  const { broker, mode, target, close, exitOwn } = order;
+  const tag = order.source === 'auto' ? 'pnfa' : 'pnf';
   const legs = resolvePnfLegs(target);
   if (typeof legs === 'string') return bad(legs);
 
   // ── PAPER: nothing is sent; the trade bar keeps its own ledger. Sized with Dhan's master lot.
   if (mode === 'PAPER') {
     if (close) return bad('A paper close is sized by the trade bar ledger - send the lots to reverse');
+    if (order.lots < 1) return bad('A paper order needs lots');
     return NextResponse.json({
       success: true, mode, outcome: 'placed',
       legs: legs.map(l => ({ label: l.label, side: order.action, qty: order.lots * l.lot, product: order.product, status: 'placed' })),
@@ -73,19 +75,31 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   const gkey = `${broker}|${targetKey(target)}`;
   if (busy.has(gkey)) return bad('An order for this chart is already being sent - wait for it', 409);
-  if (close && !closeGuard.tryStart(gkey, Date.now())) return bad('A close for this chart was just sent - wait a few seconds for the broker book to update', 409);
+  const closing = close || exitOwn !== null;
+  if (closing && !closeGuard.tryStart(gkey, Date.now())) return bad('A close for this chart was just sent - wait a few seconds for the broker book to update', 409);
   busy.add(gkey);
   let sent = false;
   try {
     const results: LegResult[] = [];
-    if (close) {
+    if (exitOwn) {
+      // AUTO's exit: only what AUTO opened (the ledger's units), capped by the broker's intraday row in that direction.
+      if (exitOwn.units.length !== onBroker.length) return bad('exitOwn.units must name every leg of this chart - nothing was sent');
+      const rows = await brokerPositionRows(broker);
+      if (!rows) return bad(`Could not read the ${NAME[broker]} positions - nothing was sent`, 502);
+      const plans = onBroker.map((l, i) => ({ leg: l, ...planOwnExit(l.key, rows, exitOwn.side, exitOwn.units[i], broker) }));
+      sent = plans.some(p => p.qty > 0);
+      for (const p of plans) {
+        results.push(p.qty > 0 ? await send(broker, p.leg, exitOwn.side, p.qty, p.product, false, tag)
+          : { label: p.leg.label, side: exitOwn.side, qty: 0, product: p.product, status: 'flat' });
+      }
+    } else if (close) {
       const rows = await brokerPositionRows(broker);
       if (!rows) return bad(`Could not read the ${NAME[broker]} positions - nothing was sent`, 502);
       const plans = onBroker.map(l => ({ leg: l, orders: planLegClose(l.key, rows) }));
       if (plans.every(p => p.orders.length === 0)) return bad(`No open ${NAME[broker]} position on this chart's contract - nothing was sent`);
       sent = true;
       for (const { leg, orders } of plans) {
-        for (const o of orders) results.push(await send(broker, leg, o.side, o.qty, o.product, false));
+        for (const o of orders) results.push(await send(broker, leg, o.side, o.qty, o.product, false, tag));
       }
     } else {
       const product = brokerProduct(order.product, broker);
@@ -94,7 +108,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       sent = true;
       for (const leg of onBroker) {
         const qty = orderQty(order.lots, leg.lotUnits);
-        const r = await send(broker, leg, order.action, qty, product, true);
+        const r = await send(broker, leg, order.action, qty, product, true, tag);
         results.push(r);
         if (r.status !== 'placed') break;                     // never send PE after CE failed or went unknown
       }
@@ -103,7 +117,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
       if (needsRollback(results.slice(0, 2), false)) {
         const first = results[0];
-        const back = await send(broker, onBroker[0], first.side === 'BUY' ? 'SELL' : 'BUY', first.qty, first.product, false);
+        const back = await send(broker, onBroker[0], first.side === 'BUY' ? 'SELL' : 'BUY', first.qty, first.product, false, tag);
         results.push({ ...back, label: `${back.label} (reversal)` });
       }
     }
@@ -111,29 +125,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const reversal = results.find(r => r.label.endsWith('(reversal)'));
     // CE went in, PE was refused and CE was taken back out: nothing is left open (two fills were paid for).
     const outcome = reversal?.status === 'placed' ? 'reversed' : sendOutcome(results.filter(r => r !== reversal));
-    return NextResponse.json({ success: outcome === 'placed', mode, broker, outcome, legs: results, message: describe(outcome, results) },
+    return NextResponse.json({ success: outcome === 'placed' || outcome === 'flat', mode, broker, outcome, legs: results, message: describe(outcome, results) },
       { status: outcome === 'unknown' ? 504 : 200 });
   } catch (err) {
     console.error('[straddle-pnf] order failed:', err);
     return bad(`${sent ? 'Order status unknown - check Orders/Positions before retrying' : 'Nothing was sent'}: ${(err as Error).message}`, sent ? 504 : 500);
   } finally {
     busy.delete(gkey);
-    if (close) closeGuard.finish(gkey, Date.now(), sent);
+    if (closing) closeGuard.finish(gkey, Date.now(), sent);
   }
 }
 
 /** One order, never throwing: a throw after the request may have gone out is UNKNOWN, not a clean failure. */
-async function send(broker: PnfBroker, leg: PnfBrokerLeg, side: PnfAction, qty: number, product: string, open: boolean): Promise<LegResult> {
+async function send(broker: PnfBroker, leg: PnfBrokerLeg, side: PnfAction, qty: number, product: string, open: boolean, tag: string): Promise<LegResult> {
   const base = { label: leg.label, side, qty, product };
   try {
     if (broker === 'dhan') {
-      const r = await placeDhanOrder({ securityId: leg.key, quantity: qty, side, orderType: 'MARKET', exchangeSegment: leg.exchange, productType: product, source: 'pnf' });
+      const r = await placeDhanOrder({ securityId: leg.key, quantity: qty, side, orderType: 'MARKET', exchangeSegment: leg.exchange, productType: product, source: tag });
       if (r.status === 'placed') return { ...base, status: 'placed', orderId: r.orderId };
       return { ...base, status: r.status === 'unknown' ? 'unknown' : 'rejected', error: r.error };
     }
     if (broker === 'kotak') {
       const built = buildKotakOrderPayload(
-        { tradingsymbol: leg.key, quantity: qty, side, exchange: leg.exchange, product, orderType: 'MARKET', source: open && leg.capLot ? 'pnf' : undefined },
+        { tradingsymbol: leg.key, quantity: qty, side, exchange: leg.exchange, product, orderType: 'MARKET', source: open && leg.capLot ? tag : undefined },
         { lotSize: leg.capLot, tick: null },
       );
       if ('error' in built) return { ...base, status: 'rejected', error: built.error };
@@ -156,6 +170,7 @@ function describe(outcome: string, results: LegResult[]): string {
     : outcome === 'unknown' ? 'Status unknown - check Orders/Positions before retrying'
     : outcome === 'partial' ? 'PARTIAL - a leg is open alone, check Positions'
     : outcome === 'reversed' ? 'Second leg refused - the first leg was reversed, nothing is left open'
+    : outcome === 'flat' ? 'Nothing of this position is left at the broker - nothing was sent'
     : 'Not sent';
   return `${head}. ${results.map(line).join('; ')}`;
 }

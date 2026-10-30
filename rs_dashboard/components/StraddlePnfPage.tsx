@@ -31,6 +31,8 @@ import {
 } from '@/lib/pnfTarget';
 import { usePnfFeed, type PnfFeed } from './straddlePnf/usePnfFeed';
 import { usePnfAlerts } from './straddlePnf/usePnfAlerts';
+import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent } from './straddlePnf/usePnfAuto';
+import AutoControls from './straddlePnf/AutoControls';
 
 // Point & Figure with a 1-click execution trade bar, picked with Index | Equity | Futures | Options: an NSE index or stock, a
 // future, one option, or a CE + PE straddle. Two charts can show two different instruments with their own box settings; the
@@ -52,11 +54,16 @@ const TARGETS_KEY_2 = 'straddle-pnf-targets-2';
 const SEGMENT_KEY_2 = 'straddle-pnf-segment-2';
 const ACTIVE_CHART_KEY = 'straddle-pnf-active-chart';
 const MARKERS_KEY = 'straddle-pnf-markers-';
+/** AUTO lots per chart (AUTO itself is never remembered: it is armed per page load). */
+const AUTO_LOTS_KEY = 'straddle-pnf-auto-lots-';
+const DISARMED: AutoArm = { on: false, mode: 'PAPER', watermarkT: 0 };
 
 type ChartId = 1 | 2;
 const LEGACY_TARGET_KEY = 'straddle-pnf-target';
 
 const minuteOf = (t: number) => Math.floor(t / 60) * 60;
+/** Wall clock in epoch seconds, for event handlers (module scope: never called during render). */
+const nowSec = () => Date.now() / 1000;
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 
 function readPref(key: string): string | null {
@@ -139,6 +146,8 @@ function StraddlePnfPage() {
   const [logOpen, setLogOpen] = useState(false);
   const [tradeOpen, setTradeOpen] = useState(true);
   const [booksOpen, setBooksOpen] = useState(false);
+  const [autoArm, setAutoArm] = useState<Record<ChartId, AutoArm>>({ 1: DISARMED, 2: DISARMED });
+  const [autoLots, setAutoLots] = useState<Record<ChartId, number>>({ 1: 1, 2: 1 });
   // ONE broker for the whole page: the header picker sets it (saved dashboard-wide, like the scalpers), and the trade bar and the
   // Margin / P&L chips read it from here, so the chips always show the account orders go to.
   const { broker, setBroker } = useBrokerSelector();
@@ -180,6 +189,8 @@ function StraddlePnfPage() {
     if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
     if (readPref(TRADE_OPEN_KEY) === '0') setTradeOpen(false);
     if (readPref(BOOKS_OPEN_KEY) === '1') setBooksOpen(true);
+    const lotsOf = (c: ChartId) => { const n = Number(readPref(`${AUTO_LOTS_KEY}${c}`)); return Number.isInteger(n) && n >= 1 && n <= 20 ? n : 1; };
+    setAutoLots({ 1: lotsOf(1), 2: lotsOf(2) });
     try {
       const raw = readPref(LOG_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
@@ -257,6 +268,48 @@ function StraddlePnfPage() {
     });
   }, []);
   const handleTradeExecuted = useCallback((m: PnfExecutionMarker, t: Target) => saveMarkers(targetKey(t), prev => [...prev, m]), [saveMarkers]);
+
+  // ── AUTO: each chart trades its own scrip (double-bottom SELL / double-top BUY, exit on the first column reversal) ──
+  const { ledger: autoLedger, post: autoPost } = usePnfAutoLedger();
+  const onAutoEvent = useCallback((e: AutoEvent) => {
+    if (e.kind === 'halt') toast.error(e.text, { duration: Infinity });
+    else if (e.kind === 'info') toast.warning(e.text);
+    else {
+      (e.kind === 'entry' && e.side === 'SELL' ? toast.error : toast.success)(e.text);
+      if (e.target && e.side && e.price) {
+        const t = Math.floor(nowSec());
+        handleTradeExecuted({ id: `auto-${t}-${e.chart}-${e.kind}`, t, action: e.side, price: e.price, lots: e.lots ?? 1, mode: e.mode ?? 'PAPER', estimate: e.mode === 'REAL' }, e.target);
+      }
+      if (leaderRef.current && !mutedRef.current) { if (e.kind === 'entry') playEntryChime(); else playExitChime(); }
+    }
+  }, [handleTradeExecuted, leaderRef]);
+  const disarm = useCallback((c: ChartId) => setAutoArm(a => (a[c].on ? { ...a, [c]: DISARMED } : a)), []);
+  const priceOf = (f: PnfFeed) => (f.live ? f.live.ce + f.live.pe : null);
+  const auto1 = usePnfAuto({
+    chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: c1.model, price: priceOf(feed1), stale: feed1.stale,
+    market: feed1.market, complete: feed1.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
+    onEvent: onAutoEvent, onDisarm: () => disarm(1),
+  });
+  const auto2 = usePnfAuto({
+    chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: c2.model, price: priceOf(feed2), stale: feed2.stale,
+    market: feed2.market, complete: feed2.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
+    onEvent: onAutoEvent, onDisarm: () => disarm(2),
+  });
+  const autoOf = (c: ChartId) => (c === 2 ? auto2 : auto1);
+  // Signals depend on the instrument and the box settings: while a chart is armed or holds an AUTO position, they are frozen.
+  const locked = (c: ChartId) => autoArm[c].on || !!autoOf(c).row;
+  const activeLocked = locked(active);
+  const armChart = (c: ChartId, on: boolean) => {
+    const m = (c === 2 ? c2 : c1).model;
+    setAutoArm(a => ({ ...a, [c]: on ? { on: true, mode: tradeMode, watermarkT: m.lastBarT ?? Math.floor(nowSec()) } : DISARMED }));
+    void autoPost({ op: 'log', chart: c, t: nowSec(), text: on ? `AUTO armed (${tradeMode}, ${autoLots[c]} lot)` : 'AUTO stopped' });
+  };
+  const setLotsFor = (c: ChartId, n: number) => { setAutoLots(l => ({ ...l, [c]: n })); savePref(`${AUTO_LOTS_KEY}${c}`, String(n)); };
+  // The page mode is the mode AUTO trades in: switching it disarms both charts (arming REAL is always an explicit step).
+  const changeTradeMode = (m: 'PAPER' | 'REAL') => {
+    if (m !== tradeMode) setAutoArm(a => ({ 1: a[1].on ? DISARMED : a[1], 2: a[2].on ? DISARMED : a[2] }));
+    setTradeMode(m);
+  };
   // Arrives seconds after the order: found by id in the store as it is THEN (never a list captured at the click).
   const handleMarkerPrice = useCallback((id: string, price: number) => {
     setMarkers(prev => {
@@ -274,6 +327,7 @@ function StraddlePnfPage() {
   // ── picking: every control acts on the active chart ──────────────────────
   const choose = (next: Target) => {
     const c = active;
+    if (locked(c)) { toast.warning(`Chart ${c} is running AUTO: stop it (and let its position close) to change the instrument`); return; }
     const picks = picksRef.current[c];
     picksRef.current = { ...picksRef.current, [c]: { targets: { ...picks.targets, [next.kind]: next }, open: next.kind } };
     savePref(c === 1 ? TARGETS_KEY : TARGETS_KEY_2, JSON.stringify(picksRef.current[c].targets));
@@ -288,6 +342,7 @@ function StraddlePnfPage() {
     else { setSettings(next); savePref(SETTINGS_KEY, serializeSettings(next)); }
   };
   const toggleChartView = (v: '1' | '2') => {
+    if (v === '1' && locked(2)) { toast.warning('Chart 2 is running AUTO: stop it (and let its position close) before hiding it'); return; }
     setChartView(v);
     savePref(CHART_VIEW_KEY, v);
   };
@@ -342,6 +397,12 @@ function StraddlePnfPage() {
       error: feed.loaded?.error ?? (feed.complete ? undefined : contractError[c] ?? undefined),
       active: active === c,
       onActivate: dual ? () => activate(c) : undefined,
+      autoSlot: (
+        <AutoControls chart={c} armed={autoArm[c].on} mode={tradeMode} lots={autoLots[c]} onLots={n => setLotsFor(c, n)}
+                      onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} halt={autoOf(c).halt}
+                      onResolve={autoOf(c).resolve} nowMs={now}
+                      disabledReason={target.kind === 'index' ? 'No AUTO on an index: chart its future or an option' : null} />
+      ),
     };
   };
 
@@ -366,8 +427,10 @@ function StraddlePnfPage() {
           <span className="hidden 2xl:block w-px h-8 bg-zinc-800 shrink-0 2xl:order-2" />
           <div className="order-4 basis-full 2xl:order-3 2xl:basis-0 2xl:flex-1 min-w-0 flex items-center gap-x-4 gap-y-2 flex-wrap">
             {/* Remounted per chart, so one chart's contract lists never show on the other. */}
+            <fieldset disabled={activeLocked} className="contents" title={activeLocked ? `Chart ${active} is running AUTO` : undefined}>
             <InstrumentBar key={active} target={activeTarget} onSegment={pickSegment} onPick={choose}
                            onError={msg => setContractError(e => (e[active] === msg ? e : { ...e, [active]: msg }))} />
+            </fieldset>
             {/* Nifty and India VIX vs the previous close: the shared indices WebSocket bridge's snapshot, started on mount. */}
             <div className="ml-auto shrink-0 flex items-center gap-2">
               <HeaderIndexChips />
@@ -435,7 +498,7 @@ function StraddlePnfPage() {
               </>
             )}
 
-            <SettingsControls settings={activeSettings} onChange={applySettings} />
+            <fieldset disabled={activeLocked} className="contents"><SettingsControls settings={activeSettings} onChange={applySettings} /></fieldset>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
               {/* An index has no traded volume, so no VWAP: the button is disabled and the SMA is drawn (the saved choice is kept for
@@ -447,7 +510,7 @@ function StraddlePnfPage() {
                       className={`${seg(shownOverlay === 'vwap')} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-zinc-400`}>VWAP</button>
               <button type="button" aria-pressed={shownOverlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(shownOverlay === 'sma')}>SMA {activeSettings.smaPeriod}</button>
             </div>
-            <SmaPeriodInput settings={activeSettings} onChange={applySettings} />
+            <fieldset disabled={activeLocked} className="contents"><SmaPeriodInput settings={activeSettings} onChange={applySettings} /></fieldset>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <IconButton icon={LocateFixed} label="Re-center" onClick={recenterNow} />
             <IconButton icon={Bell} label="Alert log" onClick={() => setLogOpen(o => !o)} pressed={logOpen} badge={log.length} />
@@ -466,7 +529,7 @@ function StraddlePnfPage() {
             live={activeFeed.live}
             broker={broker}
             mode={tradeMode}
-            onModeChange={setTradeMode}
+            onModeChange={changeTradeMode}
             onPnlChange={setPaperPnl}
             onSwitchTarget={choose}
             onTradeExecuted={handleTradeExecuted}
@@ -498,7 +561,7 @@ function StraddlePnfPage() {
           )}
         </div>
       </div>
-      <BrokerBooks broker={broker} open={booksOpen} onOpenChange={changeBooksOpen} />
+      <BrokerBooks broker={broker} open={booksOpen} onOpenChange={changeBooksOpen} autoRows={autoLedger.rows.filter(r => r.day === today)} />
     </div>
   );
 }

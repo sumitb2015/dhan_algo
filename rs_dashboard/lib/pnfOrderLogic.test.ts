@@ -105,3 +105,34 @@ test('describePosition: lots, a matched straddle, mixed legs, flat', () => {
   assert.deepEqual(describePosition([25], ['EQ'], true), { side: 'LONG', text: 'LONG 25 sh' });
   assert.equal(describePosition([0, 0], ['CE', 'PE'], false), null);
 });
+
+test('AUTO exitOwn: parsed only in REAL, positive units, 1-2 legs', async () => {
+  const { parsePnfOrder } = await import('./pnfOrderLogic.ts');
+  const base = { broker: 'dhan', mode: 'REAL', target: fut, source: 'auto' };
+  const ok = parsePnfOrder({ ...base, exitOwn: { side: 'BUY', units: [65] } });
+  assert.ok(typeof ok !== 'string' && ok.exitOwn?.side === 'BUY' && ok.source === 'auto');
+  assert.match(String(parsePnfOrder({ ...base, mode: 'PAPER', exitOwn: { side: 'BUY', units: [65] } })), /REAL/);
+  assert.match(String(parsePnfOrder({ ...base, exitOwn: { side: 'BUY', units: [0] } })), /units/);
+  assert.match(String(parsePnfOrder({ ...base, exitOwn: { side: 'X', units: [65] } })), /side/);
+});
+
+test('planOwnExit: own units capped by the intraday row in the closing direction; other products / directions untouched', async () => {
+  const { planOwnExit } = await import('./pnfOrderLogic.ts');
+  const rows = [
+    { key: '111', product: 'INTRADAY', net: -130 },   // two AUTO charts short the same future: 2 lots
+    { key: '111', product: 'MARGIN', net: -65 },      // a manual NRML short: never AUTO's
+  ];
+  assert.deepEqual(planOwnExit('111', rows, 'BUY', 65, 'dhan'), { qty: 65, product: 'INTRADAY' });
+  assert.deepEqual(planOwnExit('111', rows, 'BUY', 500, 'dhan'), { qty: 130, product: 'INTRADAY' }, 'capped by the broker');
+  assert.equal(planOwnExit('111', rows, 'SELL', 65, 'dhan').qty, 0, 'a SELL would open a new short, not close one');
+  assert.equal(planOwnExit('111', [{ key: '111', product: 'MIS', net: 75 }], 'SELL', 75, 'kotak').qty, 75);
+  assert.equal(planOwnExit('222', rows, 'BUY', 65, 'dhan').qty, 0);
+});
+
+test('sendOutcome: an AUTO exit that finds every leg already flat is "flat", not a failure', async () => {
+  const { sendOutcome } = await import('./pnfOrderLogic.ts');
+  const l = (status: 'placed' | 'flat' | 'rejected') => ({ label: 'x', side: 'BUY' as const, qty: 1, product: 'INTRADAY', status });
+  assert.equal(sendOutcome([l('flat'), l('flat')]), 'flat');
+  assert.equal(sendOutcome([l('placed'), l('flat')]), 'placed');
+  assert.equal(sendOutcome([l('rejected'), l('flat')]), 'rejected');
+});

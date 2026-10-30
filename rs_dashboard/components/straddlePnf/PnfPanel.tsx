@@ -57,6 +57,8 @@ export type PnfPanelProps = {
   active?: boolean;
   /** Two charts: a press anywhere on this chart makes it the active one. */
   onActivate?: () => void;
+  /** This chart's AUTO controls: in the card header (two charts) or a slim bar above the chart (one chart). */
+  autoSlot?: React.ReactNode;
 };
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
@@ -101,7 +103,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -371,7 +373,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
       {showHeader && (
       // Two charts side by side: one line per card (the page header already carries the scrip, legs and session facts).
       <div className="px-3 py-1 border-b border-zinc-800 flex items-center gap-2 min-w-0 text-[10px] font-mono">
-        <h2 className="text-xs font-bold text-zinc-100 truncate shrink min-w-0 font-sans">{title}</h2>
+        <h2 className="text-xs font-bold text-zinc-100 truncate shrink min-w-0 font-sans" title={title}>{title}</h2>
+        {autoSlot}
         <span data-testid="pnf-overlay-legend" className={`shrink-0 ${kind === 'vwap' ? 'text-amber-300' : 'text-sky-300'}`}>
           {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : smaWaiting ? ` needs ${model.smaPeriod}` : ''}
         </span>
@@ -397,6 +400,10 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
           )}
         </span>
       </div>
+      )}
+
+      {autoSlot && headerSlot && !showHeader && (
+        <div className="px-3 py-1 border-b border-zinc-800 flex items-center gap-2 min-w-0 text-[10px]">{autoSlot}</div>
       )}
 
       {!headerSlot && !showHeader && (
