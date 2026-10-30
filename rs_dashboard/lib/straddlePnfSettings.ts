@@ -15,8 +15,12 @@ export type PnfSettings = { interval: Interval; boxMode: BoxMode; boxPct: number
 
 /** localStorage key shared by the live page and the simulator, so both show the chart the same way. */
 export const SETTINGS_KEY = 'straddle-pnf-settings';
+export const SETTINGS_KEY_2 = 'straddle-pnf-settings-2';
+export const CHART_VIEW_KEY = 'straddle-pnf-chart-view';
 
 export const DEFAULT_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct', boxPct: 0.5, boxPts: 10, reversal: 3, smaPeriod: 50 };
+export const DEFAULT_CHART1_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct', boxPct: 0.1, boxPts: 10, reversal: 3, smaPeriod: 50 };
+export const DEFAULT_CHART2_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct', boxPct: 1, boxPts: 100, reversal: 3, smaPeriod: 50 };
 /** SMA period limits, in P&F boxes (a small box over 10 sessions draws a few hundred to a few thousand boxes). */
 export const MIN_SMA_PERIOD = 2;
 export const MAX_SMA_PERIOD = 500;
@@ -82,19 +86,19 @@ export function parseBoxPct(text: string): number | null {
 }
 
 /** Stored settings, field by field falling back to the defaults for anything missing, mistyped or out of range. */
-export function readSettings(raw: string | null): PnfSettings {
+export function readSettings(raw: string | null, fallback: PnfSettings = DEFAULT_SETTINGS): PnfSettings {
   let parsed: unknown = null;
   try { parsed = raw ? JSON.parse(raw) : null; } catch { parsed = null; }
   const o = (parsed && typeof parsed === 'object' ? parsed : {}) as Record<string, unknown>;
   const interval = typeof o.interval === 'number' && (INTERVALS as readonly number[]).includes(o.interval)
-    ? (o.interval as Interval) : DEFAULT_SETTINGS.interval;
+    ? (o.interval as Interval) : fallback.interval;
   const boxPct = typeof o.boxPct === 'number' && Number.isFinite(o.boxPct) && o.boxPct >= MIN_BOX_PCT && o.boxPct <= MAX_BOX_PCT
-    ? o.boxPct : DEFAULT_SETTINGS.boxPct;
+    ? o.boxPct : fallback.boxPct;
   const reversal = typeof o.reversal === 'number' && (REVERSALS as readonly number[]).includes(o.reversal)
-    ? (o.reversal as Reversal) : DEFAULT_SETTINGS.reversal;
-  const smaPeriod = typeof o.smaPeriod === 'number' && smaPeriodOk(o.smaPeriod) ? o.smaPeriod : DEFAULT_SETTINGS.smaPeriod;
-  const boxMode: BoxMode = o.boxMode === 'pts' ? 'pts' : 'pct';
-  const boxPts = typeof o.boxPts === 'number' && boxPtsOk(o.boxPts) ? o.boxPts : DEFAULT_SETTINGS.boxPts;
+    ? (o.reversal as Reversal) : fallback.reversal;
+  const smaPeriod = typeof o.smaPeriod === 'number' && smaPeriodOk(o.smaPeriod) ? o.smaPeriod : fallback.smaPeriod;
+  const boxMode: BoxMode = o.boxMode === 'pts' ? 'pts' : fallback.boxMode;
+  const boxPts = typeof o.boxPts === 'number' && boxPtsOk(o.boxPts) ? o.boxPts : fallback.boxPts;
   return { interval, boxMode, boxPct, boxPts, reversal, smaPeriod };
 }
 

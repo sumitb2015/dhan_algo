@@ -51,6 +51,8 @@ export type PnfPanelProps = {
   sessionTag?: string | null;
   /** Executed trades on this chart to mark on the boxes. */
   tradeMarkers?: PnfExecutionMarker[];
+  /** Render the card header inside the panel even when headerSlot is provided. */
+  showHeader?: boolean;
 };
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
@@ -95,7 +97,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -358,7 +360,9 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
           )}
         </div>,
         headerSlot,
-      ) : (
+      ) : null}
+
+      {(!headerSlot || showHeader) && (
       <div className="px-3 pt-2 pb-1 border-b border-zinc-800">
         <div className="flex items-baseline justify-between gap-2">
           <h2 className="text-xs font-bold text-zinc-100 truncate">{title}</h2>

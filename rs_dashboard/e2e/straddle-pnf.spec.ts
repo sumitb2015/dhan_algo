@@ -104,17 +104,32 @@ async function install(page: Page, m: Mock) {
 
 test.beforeEach(async ({ context }) => { await signIn(context); });
 
-test('one price chart fills the page with the DATA chip and no options controls', async ({ page }) => {
+test('dual chart view by default, can toggle to one chart and back', async ({ page }) => {
   const m: Mock = { phase: 1, blocked: [] };
   await install(page, m);
   await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
 
+  // Default is 2 chart view
   const panels = page.getByTestId('pnf-panel');
+  await expect(panels).toHaveCount(2);
+
+  // First chart defaults to 0.1% box, second chart defaults to 1% box
+  await expect(panels.nth(0)).toContainText('0.1% box');
+  await expect(panels.nth(1)).toContainText('1% box');
+
+  // Toggle to 1 Chart view
+  await page.getByRole('button', { name: '1 Chart View' }).click();
   await expect(panels).toHaveCount(1);
   const box = (await panels.nth(0).boundingBox())!;
-  expect(box.width).toBeGreaterThan(900);                       // the one chart takes the whole width
+  expect(box.width).toBeGreaterThan(900); // single chart takes full width
+
+  // Toggle back to 2 Charts view
+  await page.getByRole('button', { name: '2 Charts View' }).click();
+  await expect(panels).toHaveCount(2);
+
   await expect(page.getByText('DATA: 2026-10-23')).toBeVisible();
-  await expect(page.getByLabel('Expiry')).toHaveCount(0);       // no options: no expiry, strikes, offsets or ATM
+  await expect(page.getByLabel('Expiry')).toHaveCount(0); // no options: no expiry, strikes, offsets or ATM
   await expect(page.getByLabel('ATM', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('group', { name: 'Strike offsets' })).toHaveCount(0);
   expect(m.blocked).toEqual([]);
@@ -229,10 +244,9 @@ test('a long history is never clipped: the chart scrolls, opens on the newest co
 test('the panel header shows the change versus the session open and the latest signal', async ({ page }) => {
   await install(page, { phase: 0, blocked: [] });
   await page.goto('/straddle-pnf');
-  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);   // latest signal is a double top
-  await expect(page.getByTestId('pnf-vs-open')).toHaveText(/vs (prev close|open)/);
-  await expect(page.getByTestId('pnf-scrip')).toHaveText(/\S/); // the price is never shown without its scrip
-  await expect(page.getByTestId('pnf-last-signal')).toContainText('DT buy');
+  await expect(page.getByTestId('pnf-vs-open').first()).toHaveText(/vs (prev close|open)/);
+  await expect(page.getByTestId('pnf-scrip').first()).toHaveText(/\S/); // the price is never shown without its scrip
+  await expect(page.getByTestId('pnf-last-signal').first()).toContainText('DT buy');
 });
 
 test('the header price follows the WebSocket bridge, asked for the history\'s own instrument', async ({ page }) => {
@@ -252,25 +266,25 @@ test('the header shows Nifty and India VIX with their % change from the indices 
 });
 
 // ── interval and box size ─────────────────────────────────────────────────────
-const cols = async (panel: ReturnType<Page['locator']>) => Number(((await panel.page().getByTestId('pnf-box-info').textContent()) ?? '').match(/(\d+) cols/)?.[1]);
+const cols = async (panel: ReturnType<Page['locator']>) => Number(((await panel.getByTestId('pnf-box-info').textContent()) ?? '').match(/(\d+) cols/)?.[1]);
 
-test('the interval and box % controls default to 1 minute / 0.5% and say so in the header', async ({ page }) => {
+test('the interval and box % controls default to 1 minute / 0.1% and say so in the header', async ({ page }) => {
   await install(page, { phase: 0, blocked: [] });
   await page.goto('/straddle-pnf');
   await expect(page.getByLabel('Interval')).toHaveValue('1');
-  await expect(page.getByLabel('Box %')).toHaveValue('0.5');
-  await expect(page.getByText('1-min · 0.5% box · 3-box reversal')).toBeVisible();
-  await expect(page.getByTestId('pnf-box-info').first()).toContainText('(0.5% of');
+  await expect(page.getByLabel('Box %')).toHaveValue('0.1');
+  await expect(page.getByText(/1-min · 0.1% box/)).toBeVisible();
+  await expect(page.getByTestId('pnf-box-info').first()).toContainText('(0.1% of');
 });
 
 test('changing the interval regroups the bars: fewer columns, and the header says 5-min', async ({ page }) => {
   await install(page, { phase: 0, blocked: [], longHistory: true });
   await page.goto('/straddle-pnf');
   const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
-  await expect(page.getByTestId('pnf-box-info')).toContainText('cols');
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
   const one = await cols(panel);
   await page.getByLabel('Interval').selectOption('15');
-  await expect(page.getByText('15-min · 0.5% box · 3-box reversal')).toBeVisible();
+  await expect(page.getByText(/15-min · 0.1% box/)).toBeVisible();
   await expect.poll(async () => cols(panel)).toBeLessThan(one);
   await expect(page.getByLabel('Interval').locator('option')).toHaveText(['1 min', '3 min', '5 min', '15 min']);
 });
@@ -279,26 +293,26 @@ test('the box % applies on Enter, an invalid entry is refused and reverts, and t
   await install(page, { phase: 0, blocked: [], longHistory: true });
   await page.goto('/straddle-pnf');
   const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
-  await expect(page.getByTestId('pnf-box-info')).toContainText('cols');
-  const boxOf = async () => Number(((await page.getByTestId('pnf-box-info').textContent()) ?? '').match(/Box ([\d.]+)/)?.[1]);
-  const half = await boxOf();
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
+  const boxOf = async () => Number(((await panel.getByTestId('pnf-box-info').textContent()) ?? '').match(/Box ([\d.]+)/)?.[1]);
+  const baseBox = await boxOf();
 
   const input = page.getByLabel('Box %');
-  await input.fill('1');
-  await expect(page.getByTestId('pnf-box-info')).toContainText('(0.5% of');           // typing alone changes nothing
+  await input.fill('0.2');
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('(0.1% of');           // typing alone changes nothing
   await input.press('Enter');
-  await expect(page.getByTestId('pnf-box-info')).toContainText('(1% of');
-  expect(Math.abs((await boxOf()) / half - 2)).toBeLessThan(0.05);                      // twice the box
-  await expect(page.getByText('1-min · 1% box · 3-box reversal')).toBeVisible();
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('(0.2% of');
+  expect(Math.abs((await boxOf()) / baseBox - 2)).toBeLessThan(0.05);                      // twice the box
+  await expect(page.getByText(/1-min · 0.2% box/)).toBeVisible();
 
   await input.fill('abc');
   await expect(input).toHaveAttribute('aria-invalid', 'true');
   await input.blur();
-  await expect(input).toHaveValue('1');                                                  // reverted to the last valid value
+  await expect(input).toHaveValue('0.2');                                                  // reverted to the last valid value
   await input.fill('99');
   await input.blur();
-  await expect(input).toHaveValue('1');                                                  // out of range (0.05-5) is refused too
-  await expect(page.getByTestId('pnf-box-info')).toContainText('(1% of');
+  await expect(input).toHaveValue('0.2');                                                  // out of range (0.05-5) is refused too
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('(0.2% of');
 });
 
 test('the chosen interval and box % are remembered after a reload', async ({ page }) => {
@@ -309,11 +323,11 @@ test('the chosen interval and box % are remembered after a reload', async ({ pag
   await page.getByLabel('Interval').selectOption('5');
   await page.getByLabel('Box %').fill('0.75');
   await page.getByLabel('Box %').press('Enter');
-  await expect(page.getByText('5-min · 0.75% box · 3-box reversal')).toBeVisible();
+  await expect(page.getByText(/5-min · 0.75% box/)).toBeVisible();
   await page.reload();
   await expect(page.getByLabel('Interval')).toHaveValue('5');
   await expect(page.getByLabel('Box %')).toHaveValue('0.75');
-  await expect(page.getByText('5-min · 0.75% box · 3-box reversal')).toBeVisible();
+  await expect(page.getByText(/5-min · 0.75% box/)).toBeVisible();
 });
 
 test('changing the interval or the box % redraws the charts but never fires an alert for old signals', async ({ page }) => {
@@ -353,14 +367,14 @@ test('the reversal control defaults to 3 boxes, changes how often columns turn, 
   await install(page, { phase: 0, blocked: [], longHistory: true });
   await page.goto('/straddle-pnf');
   const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
-  await expect(page.getByTestId('pnf-box-info')).toContainText('cols');
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
   await expect(page.getByLabel('Reversal')).toHaveValue('3');
   await expect(page.getByLabel('Reversal').locator('option')).toHaveText(['1-box', '2-box', '3-box', '4-box', '5-box']);
   const three = await cols(panel);
   await page.getByRole('button', { name: 'Alert log' }).click();
   await page.getByLabel('Reversal').selectOption('2');
-  await expect(page.getByText('1-min · 0.5% box · 2-box reversal')).toBeVisible();
-  await expect(page.getByTestId('pnf-box-info')).toContainText('2-box');
+  await expect(page.getByText(/2-box reversal/)).toBeVisible();
+  await expect(panel.getByTestId('pnf-box-info')).toContainText('2-box');
   await expect.poll(async () => cols(panel)).toBeGreaterThan(three);   // a smaller reversal turns the column more often
   await page.waitForTimeout(400);
   await expect(page.getByTestId('pnf-log-row')).toHaveCount(0);        // redrawing never alerts
@@ -393,18 +407,18 @@ test('the box can be set in points: the unit toggle swaps the input, Enter appli
   const pts = page.getByLabel('Box points');
   await expect(pts).toHaveValue('10');                                            // the default points value
   await pts.fill('2');
-  await expect(page.getByTestId('pnf-box-info')).not.toContainText('Box 2.00');  // typing alone changes nothing
+  await expect(page.getByTestId('pnf-box-info').first()).not.toContainText('Box 2.00');  // typing alone changes nothing
   await pts.press('Enter');
-  await expect(page.getByTestId('pnf-box-info')).toContainText('Box 2.00 (points)');
-  await expect(page.getByText('1-min · 2-pt box · 3-box reversal')).toBeVisible();
+  await expect(page.getByTestId('pnf-box-info').first()).toContainText('Box 2.00 (points)');
+  await expect(page.getByText(/1-min · 2-pt box/)).toBeVisible();
   await pts.fill('-3');                                                           // invalid: reverts on commit
   await pts.blur();
   await expect(pts).toHaveValue('2');
   await page.getByRole('group', { name: 'Box unit' }).getByRole('button', { name: '%' }).click();
-  await expect(page.getByLabel('Box %')).toHaveValue('0.5');
-  await expect(page.getByTestId('pnf-box-info')).toContainText('(0.5% of');
+  await expect(page.getByLabel('Box %')).toHaveValue('0.1');
+  await expect(page.getByTestId('pnf-box-info').first()).toContainText('(0.1% of');
   await page.reload();                                                            // both values and the mode persist
-  await expect(page.getByLabel('Box %')).toHaveValue('0.5');
+  await expect(page.getByLabel('Box %')).toHaveValue('0.1');
   await page.getByRole('group', { name: 'Box unit' }).getByRole('button', { name: 'pts' }).click();
   await expect(page.getByLabel('Box points')).toHaveValue('2');
 });
@@ -414,14 +428,14 @@ test('the box − / + buttons step to the next round size and apply at once, in 
   await page.goto('/straddle-pnf');
   await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
   await page.getByRole('button', { name: 'Increase box size' }).click();
-  await expect(page.getByLabel('Box %')).toHaveValue('0.75');
-  await expect(page.getByTestId('pnf-box-info')).toContainText('(0.75% of');
+  await expect(page.getByLabel('Box %')).toHaveValue('0.15');
+  await expect(page.getByTestId('pnf-box-info').first()).toContainText('(0.15% of');
   await page.getByRole('button', { name: 'Decrease box size' }).click();
   await page.getByRole('button', { name: 'Decrease box size' }).click();
-  await expect(page.getByLabel('Box %')).toHaveValue('0.4');
+  await expect(page.getByLabel('Box %')).toHaveValue('0.05');
   await page.getByRole('group', { name: 'Box unit' }).getByRole('button', { name: 'pts' }).click();
   await page.getByLabel('Box points').fill('37');                                 // a half-typed draft is discarded by a step
   await page.getByRole('button', { name: 'Increase box size' }).click();
   await expect(page.getByLabel('Box points')).toHaveValue('20');                   // stepped from the applied 10, not from 37
-  await expect(page.getByTestId('pnf-box-info')).toContainText('Box 20.00 (points)');
+  await expect(page.getByTestId('pnf-box-info').first()).toContainText('Box 20.00 (points)');
 });

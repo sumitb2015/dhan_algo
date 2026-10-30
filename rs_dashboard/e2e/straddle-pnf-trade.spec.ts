@@ -92,6 +92,7 @@ test.beforeEach(async ({ context }) => { await signIn(context); });
 test('P&F trade bar is toggled by Zap button and remembers open state', async ({ page }) => {
   await installTradeMock(page);
   await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
 
   // Trade bar is open by default
   const tradeBar = page.getByTestId('pnf-trade-bar');
@@ -114,6 +115,7 @@ test('P&F trade bar is toggled by Zap button and remembers open state', async ({
 test('Index shows non-tradable note; switching to Futures enables 1-click trading', async ({ page }) => {
   const { placedOrders } = await installTradeMock(page);
   await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
 
   // On Index, it warns non-tradable
   await expect(page.getByText(/Index spot is non-tradable directly/i)).toBeVisible();
@@ -143,9 +145,9 @@ test('Index shows non-tradable note; switching to Futures enables 1-click tradin
   // Position updates to LONG 1 lots and shows SQUARE OFF
   await expect(page.getByText(/LONG 1 lots/i)).toBeVisible();
 
-  // Execution marker appears on the P&F chart box for the BUY order
+  // Execution marker appears on the P&F chart box for the BUY order (both charts in dual mode)
   const markers = page.getByTestId('pnf-trade-marker');
-  await expect(markers).toHaveCount(1);
+  await expect(markers).toHaveCount(2);
   await expect(markers.first()).toHaveAttribute('data-action', 'BUY');
   await expect(markers.first().getByText('B', { exact: true })).toBeVisible();
 

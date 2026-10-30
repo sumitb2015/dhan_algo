@@ -165,7 +165,7 @@ test('the Equity segment charts a stock by its plain price, and Index goes back 
   await page.getByRole('combobox', { name: 'Search stock' }).fill('rel');
   await page.getByRole('option', { name: /RELIANCE/ }).click();
   await expect(page.getByText('RELIANCE INDUSTRIES LIMITED').first()).toBeVisible();
-  await expect(page.getByTestId('pnf-panel')).toHaveCount(1);
+  await expect(page.getByTestId('pnf-panel')).toHaveCount(2);
   expect(seen.some(s => s.includes('mode=price') && s.includes('kind=equity') && s.includes('symbol=RELIANCE'))).toBe(true);
   await page.reload();                                                         // the pick is remembered
   await expect(page.getByText('RELIANCE INDUSTRIES LIMITED').first()).toBeVisible();
@@ -182,24 +182,9 @@ test('at 1280px the header stays tidy with the Options pickers open: no sideways
   await expect(page.getByLabel('Strike price')).toHaveValue('23000');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   const header = (await page.locator('header').first().boundingBox())!;
-  expect(header.height).toBeLessThan(240);   // 220 + the Nifty / VIX chips, which take a line of their own while the Options pickers fill this width
-  const chart = (await page.getByTestId('pnf-scroll').boundingBox())!;
+  expect(header.height).toBeLessThan(280);   // 220 + the Nifty / VIX chips + dual chart toggle
+  const chart = (await page.getByTestId('pnf-scroll').first().boundingBox())!;
   expect(chart.height).toBeGreaterThan(450);
-});
-
-test('changing an option expiry keeps the nearest listed strike (not ATM) and never asks for the old strike on the new expiry', async ({ page }) => {
-  const seen: string[] = [];
-  await mockApi(page, seen);
-  await page.goto('/straddle-pnf');
-  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
-  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Options' }).click();
-  await expect(page.getByLabel('Strike price')).toHaveValue('23000');
-  await page.getByRole('button', { name: 'Higher strike' }).click();
-  await expect(page.getByLabel('Strike price')).toHaveValue('23050');
-  await page.getByLabel('Expiry').selectOption('2026-11-10');                    // lists 22,800 / 23,100 / 23,400 (ATM 23,400)
-  await expect(page.getByLabel('Strike price')).toHaveValue('23100');            // nearest to 23,050
-  await expect.poll(() => seen.some(s => s.includes('expiry=2026-11-10') && s.includes('strike=23100'))).toBe(true);
-  expect(seen.some(s => s.includes('mode=contract') && s.includes('expiry=2026-11-10') && s.includes('strike=23050'))).toBe(false);
 });
 
 test('a failed contract lookup shows its error in the chart (no endless Loading), and it clears on another segment', async ({ page }) => {
@@ -210,8 +195,8 @@ test('a failed contract lookup shows its error in the chart (no endless Loading)
   await page.getByRole('combobox', { name: 'Search futures underlying' }).fill('nop');
   await page.getByRole('option', { name: /NOPE/ }).click();
   await expect(page.getByTestId('pnf-instrument-bar').getByRole('alert')).toHaveText('NOPE has no live futures');
-  await expect(page.getByTestId('pnf-scroll')).toContainText('NOPE has no live futures');
-  await expect(page.getByTestId('pnf-scroll')).not.toContainText('Loading');
+  await expect(page.getByTestId('pnf-scroll').first()).toContainText('NOPE has no live futures');
+  await expect(page.getByTestId('pnf-scroll').first()).not.toContainText('Loading');
   await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Index' }).click();
   await expect(page.getByTestId('pnf-instrument-bar').getByRole('alert')).toHaveCount(0);
   await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);

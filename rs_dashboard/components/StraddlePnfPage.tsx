@@ -22,7 +22,10 @@ import {
 } from '@/lib/straddlePnfLive';
 import { HeaderIndexChips } from '@/components/triplestraddle/HeaderIndexChips';
 import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
-import { DEFAULT_SETTINGS, SETTINGS_KEY, boxText, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
+import {
+  DEFAULT_SETTINGS, DEFAULT_CHART1_SETTINGS, DEFAULT_CHART2_SETTINGS, SETTINGS_KEY, SETTINGS_KEY_2, CHART_VIEW_KEY,
+  boxText, readSettings, serializeSettings, type PnfSettings,
+} from '@/lib/straddlePnfSettings';
 import { sessionOf, type Bar, type PnfExecutionMarker } from '@/lib/straddlePnf';
 import {
   DEFAULT_TARGETS, SEGMENTS, alertId, isComplete, parseTarget, readTargets, targetKey, targetLabel, targetQuery, type Segment, type Target,
@@ -77,11 +80,14 @@ function IconButton({ icon: Icon, label, onClick, pressed, badge }: { icon: Luci
 }
 
 export default function StraddlePnfPage() {
+  const [chartView, setChartView] = useState<'1' | '2'>('2');
+  const [activeChartTab, setActiveChartTab] = useState<1 | 2>(1);
   const [overlay, setOverlay] = useState<Overlay>('vwap');
   const [target, setTarget] = useState<Target>(DEFAULT_TARGETS.index);
   const targetsRef = useRef<Record<Segment, Target>>({ ...DEFAULT_TARGETS });
   const [name, setName] = useState<string | null>(null); // the full name the server resolved for the chosen symbol
-  const [settings, setSettings] = useState<PnfSettings>(DEFAULT_SETTINGS);
+  const [settings, setSettings] = useState<PnfSettings>(DEFAULT_CHART1_SETTINGS);
+  const [settings2, setSettings2] = useState<PnfSettings>(DEFAULT_CHART2_SETTINGS);
   const [bars, setBars] = useState<Bar[]>([]);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   // Bumped on every history load: the confirmed chart is rebuilt then (the API may have revised closed bars), and when a bar closes.
@@ -130,7 +136,10 @@ export default function StraddlePnfPage() {
     // Saved preferences are read after mount, not in useState initialisers: localStorage does not exist on the server render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (readPref(OVERLAY_KEY) === 'sma') setOverlay('sma');
-    setSettings(readSettings(readPref(SETTINGS_KEY)));
+    const savedView = readPref(CHART_VIEW_KEY);
+    if (savedView === '1' || savedView === '2') setChartView(savedView);
+    setSettings(readSettings(readPref(SETTINGS_KEY), DEFAULT_CHART1_SETTINGS));
+    setSettings2(readSettings(readPref(SETTINGS_KEY_2), DEFAULT_CHART2_SETTINGS));
     const targets = readTargets(readPref(TARGETS_KEY));
     const legacy = parseTarget((() => { try { return JSON.parse(readPref(LEGACY_TARGET_KEY) ?? 'null'); } catch { return null; } })());
     if (legacy && !readPref(TARGETS_KEY)) targets[legacy.kind] = legacy;   // one-time carry-over from the single-target key
@@ -251,6 +260,14 @@ export default function StraddlePnfPage() {
     [closedKey, overlay, settings, sessionClose, indexNoVwap],
   );
   const model = useMemo(() => withLive(confirmed, formingBar), [confirmed, formingBar]);
+
+  const confirmed2 = useMemo(
+    () => buildConfirmedModel(closed, overlay, { ...settings2, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [closedKey, overlay, settings2, sessionClose, indexNoVwap],
+  );
+  const model2 = useMemo(() => withLive(confirmed2, formingBar), [confirmed2, formingBar]);
+
   useEffect(() => { lastCloseRef.current = last?.straddle; });
   const vwapAllowed = !indexNoVwap && (closed.length === 0 || model.vwapAvailable);
   const shownOverlay: Overlay = vwapAllowed ? overlay : 'sma';
@@ -329,10 +346,18 @@ export default function StraddlePnfPage() {
   };
   const pickSegment = (s: Segment) => { if (s !== target.kind) choose(targetsRef.current[s]); };
   const pickOverlay = (o: Overlay) => { setOverlay(o); savePref(OVERLAY_KEY, o); };
-  const applySettings = (next: PnfSettings) => {
+  const applySettings1 = (next: PnfSettings) => {
     rebaselineRef.current = true;     // the chart is about to be redrawn from the same data: that must not alert
     setSettings(next);
     savePref(SETTINGS_KEY, serializeSettings(next));
+  };
+  const applySettings2 = (next: PnfSettings) => {
+    setSettings2(next);
+    savePref(SETTINGS_KEY_2, serializeSettings(next));
+  };
+  const toggleChartView = (v: '1' | '2') => {
+    setChartView(v);
+    savePref(CHART_VIEW_KEY, v);
   };
   const toggleMute = () => {
     const next = !muted;
@@ -376,7 +401,9 @@ export default function StraddlePnfPage() {
               <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {segLabel}</p>
               <h1 className="text-sm font-bold text-white tracking-tight leading-none">Point &amp; Figure</h1>
               <p className="text-[10px] text-zinc-500 font-medium mt-1">
-                {settings.interval}-min · {boxText(settings)} · {settings.reversal}-box reversal · signals only · {fno ? label : name ?? target.name}
+                {chartView === '2'
+                  ? `${settings.interval}-min · ${boxText(settings)} (C1) · ${boxText(settings2)} (C2) · ${settings.reversal}-box reversal · signals only · ${fno ? label : name ?? target.name}`
+                  : `${settings.interval}-min · ${boxText(settings)} · ${settings.reversal}-box reversal · signals only · ${fno ? label : name ?? target.name}`}
               </p>
             </div>
           </div>
@@ -401,7 +428,60 @@ export default function StraddlePnfPage() {
         <div className="flex items-center gap-x-3 gap-y-2 flex-wrap px-6 py-2 border-t border-zinc-800 bg-zinc-900/40">
           <div ref={setHeaderSlot} data-testid="pnf-header-summary" className="flex items-center grow basis-[560px] min-w-0 overflow-hidden" />
           <div className="flex items-center gap-2 flex-wrap ml-auto" role="group" aria-label="Chart settings">
-            <SettingsControls settings={settings} onChange={applySettings} />
+            {/* 1 Chart vs 2 Charts view toggle */}
+            <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Chart view">
+              <button
+                type="button"
+                aria-label="1 Chart View"
+                title="Single chart view"
+                aria-pressed={chartView === '1'}
+                onClick={() => toggleChartView('1')}
+                className={seg(chartView === '1')}
+              >
+                1 Chart
+              </button>
+              <button
+                type="button"
+                aria-label="2 Charts View"
+                title="Dual chart view (0.1% & 1%)"
+                aria-pressed={chartView === '2'}
+                onClick={() => toggleChartView('2')}
+                className={seg(chartView === '2')}
+              >
+                2 Charts
+              </button>
+            </div>
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+
+            {/* When dual chart is active, allow switching which chart settings to edit */}
+            {chartView === '2' && (
+              <>
+                <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-950" role="group" aria-label="Select chart settings">
+                  <button
+                    type="button"
+                    aria-pressed={activeChartTab === 1}
+                    onClick={() => setActiveChartTab(1)}
+                    className={`px-2 h-6 rounded text-[11px] font-bold transition-colors ${activeChartTab === 1 ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
+                  >
+                    Chart 1 ({boxText(settings)})
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={activeChartTab === 2}
+                    onClick={() => setActiveChartTab(2)}
+                    className={`px-2 h-6 rounded text-[11px] font-bold transition-colors ${activeChartTab === 2 ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}
+                  >
+                    Chart 2 ({boxText(settings2)})
+                  </button>
+                </div>
+                <span className="w-px h-5 bg-zinc-800 shrink-0" />
+              </>
+            )}
+
+            <SettingsControls
+              settings={activeChartTab === 2 && chartView === '2' ? settings2 : settings}
+              onChange={activeChartTab === 2 && chartView === '2' ? applySettings2 : applySettings1}
+            />
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
               {/* An index has no traded volume, so no VWAP: the button is disabled and the SMA is drawn (the saved choice is kept for
@@ -411,9 +491,12 @@ export default function StraddlePnfPage() {
                         ? 'An index has no traded volume, so there is no VWAP: the SMA of the P&F boxes is used'
                         : 'These bars carry no volume, so there is no VWAP: the SMA of the P&F boxes is used'}
                       className={`${seg(shownOverlay === 'vwap')} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-zinc-400`}>VWAP</button>
-              <button type="button" aria-pressed={shownOverlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(shownOverlay === 'sma')}>SMA {settings.smaPeriod}</button>
+              <button type="button" aria-pressed={shownOverlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(shownOverlay === 'sma')}>SMA {(activeChartTab === 2 && chartView === '2' ? settings2 : settings).smaPeriod}</button>
             </div>
-            <SmaPeriodInput settings={settings} onChange={applySettings} />
+            <SmaPeriodInput
+              settings={activeChartTab === 2 && chartView === '2' ? settings2 : settings}
+              onChange={activeChartTab === 2 && chartView === '2' ? applySettings2 : applySettings1}
+            />
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <IconButton icon={LocateFixed} label="Re-center" onClick={recenterNow} />
             <IconButton icon={Bell} label="Alert log" onClick={() => setLogOpen(o => !o)} pressed={logOpen} badge={log.length} />
@@ -443,9 +526,12 @@ export default function StraddlePnfPage() {
       <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 py-4">
         {loadError && <p role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{loadError}</p>}
         {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={settings.interval} /></div>}
-        <div className="flex-1 min-h-0 grid gap-3" style={{ gridTemplateColumns: 'minmax(0, 1fr)', gridTemplateRows: 'minmax(0, 1fr)' }}>
+        <div
+          className={`flex-1 min-h-0 grid gap-3 ${chartView === '2' ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}
+          style={{ gridTemplateRows: 'minmax(0, 1fr)' }}
+        >
           <PnfPanel
-            title={`${label} price chart`}
+            title={`${label} · ${boxText(settings)}${chartView === '2' ? ' (Chart 1)' : ''}`}
             strike={loaded?.key ?? 0}
             model={model}
             live={live}
@@ -460,12 +546,38 @@ export default function StraddlePnfPage() {
             fill
             resetTick={viewTick}
             headerSlot={headerSlot}
+            showHeader={chartView === '2'}
             scrip={scrip}
             feedPrevClose={trustedPrevClose}
             sessionTag={sessionTag}
             tradeMarkers={tradeMarkers}
             error={loaded?.error ?? (complete ? undefined : contractError ?? undefined)}
           />
+
+          {chartView === '2' && (
+            <PnfPanel
+              title={`${label} · ${boxText(settings2)} (Chart 2)`}
+              strike={loaded?.key ? -loaded.key : -1}
+              model={model2}
+              live={live}
+              overlay={overlay}
+              stale={stale}
+              legs={isStraddle}
+              flash={flash}
+              loading={(loading || !complete) && bars.length === 0}
+              interval={settings2.interval}
+              boxPct={settings2.boxPct}
+              reversal={settings2.reversal}
+              fill
+              resetTick={viewTick}
+              showHeader
+              scrip={`${scrip} (${boxText(settings2)})`}
+              feedPrevClose={trustedPrevClose}
+              sessionTag={sessionTag}
+              tradeMarkers={tradeMarkers}
+              error={loaded?.error ?? (complete ? undefined : contractError ?? undefined)}
+            />
+          )}
         </div>
       </div>
     </div>
