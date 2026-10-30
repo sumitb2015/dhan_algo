@@ -64,3 +64,15 @@ test('a chart with many columns is narrowed to fit the width before it scrolls, 
   assert.ok((60 + 3) * l.cell <= 700 - AXIS_W + l.cell);     // the columns (plus a little room) fit the plot width
   assert.ok(l.cell >= MIN_CELL);
 });
+
+test('a live price outside the columns widens the range by whole boxes, so the axis stays on the cell edges', () => {
+  const box = 0.5;
+  const cols = [col(100.25, 102.25)];                        // cell edges: 100.25 + k * 0.5
+  for (const live of [99.13, 103.9, 101.1]) {
+    const l = layoutPanel(cols, box, live, 800, 500);
+    const offset = ((((l.yMin - 100.25) / box) % 1) + 1) % 1;
+    assert.ok(offset < 1e-6 || offset > 1 - 1e-6, `yMin ${l.yMin} is off the grid for live ${live}`);
+    assert.ok(l.yMin <= live - box + 1e-9 && l.yMax >= live + 2 * box - 1e-9);
+    assert.ok(Math.abs((l.yMax - l.yMin) / box - Math.round((l.yMax - l.yMin) / box)) < 1e-6);
+  }
+});

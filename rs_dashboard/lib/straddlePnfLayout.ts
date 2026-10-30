@@ -1,10 +1,12 @@
 // Geometry of one Straddle P&F panel. Pure so the sizing rules (no dropped columns, minimum glyph size, axis pinned right)
 // are tested instead of living inside the SVG component.
 
-export const AXIS_W = 58;
+/** Fits a 10px mono label up to "1,25,000" (labels drop decimals once a box is 10 or more) and a "25,935.00" live tag. */
+export const AXIS_W = 66;
 export const PAD_TOP = 22;
 export const MIN_CELL = 8;
-export const MAX_CELL = 28;
+/** 28 left a 13-column chart filling an eighth of a wide panel; zoom still goes to ZOOM_MAX_CELL. */
+export const MAX_CELL = 40;
 /** Columns of breathing room (left of the oldest, right of the newest) the width fit leaves, so a fitted chart is not jammed against the edges. */
 const FIT_COLUMN_SLACK = 3;
 export const ZOOM_MIN_CELL = 3;
@@ -44,13 +46,17 @@ export function layoutPanel(
   /** Add half a view of empty scroll room on every side so mouse-drag can move a chart that already fits. Off = fit-to-view, no scroll. */
   slack = false,
 ): PanelLayout {
-  const lows = columns.map(c => c.low);
-  const highs = columns.map(c => c.high);
-  if (liveValue !== null) { lows.push(liveValue); highs.push(liveValue); }
-  const hasRange = box > 0 && lows.length > 0;
-  const yMin = hasRange ? Math.min(...lows) - box : 0;
-  const yMax = hasRange ? Math.max(...highs) + 2 * box : 0;
-  const rows = hasRange ? Math.ceil((yMax - yMin) / box) + 1 : 1;
+  // The range is built from the columns' cell edges and widened only by WHOLE boxes for the live price, so yMin stays on a cell
+  // edge and the axis labels (yMin + (i + 0.5) * box, the box centres) stay level with the rows.
+  let yMin = 0, yMax = 0;
+  const hasRange = box > 0 && (columns.length > 0 || liveValue !== null);
+  if (hasRange) {
+    yMin = columns.length ? Math.min(...columns.map(c => c.low)) - box : (liveValue as number) - box;
+    yMax = columns.length ? Math.max(...columns.map(c => c.high)) + 2 * box : (liveValue as number) + 2 * box;
+    if (liveValue !== null && liveValue - box < yMin) yMin -= Math.ceil((yMin - (liveValue - box)) / box - 1e-6) * box;
+    if (liveValue !== null && liveValue + 2 * box > yMax) yMax += Math.ceil((liveValue + 2 * box - yMax) / box - 1e-6) * box;
+  }
+  const rows = hasRange ? Math.ceil((yMax - yMin) / box - 1e-6) + 1 : 1;
   const fitH = Math.floor((viewH - PAD_TOP) / rows);
   const fitCellW = columns.length ? Math.floor((viewW - AXIS_W) / (columns.length + FIT_COLUMN_SLACK)) : MAX_CELL;
   const fitted = Math.max(MIN_CELL, Math.min(MAX_CELL, fitH, fitCellW));

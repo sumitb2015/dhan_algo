@@ -27,6 +27,8 @@ export type PnfColumn = {
   session: string;
   /** First bar where this column passed the previous same-direction column's extreme (X above its top, O below its bottom); null if it never did. */
   breakBar: number | null;
+  /** For each glyph, bottom to top (k = 0 is the lowest box): the index of the bar that drew it. */
+  boxBars: number[];
 };
 
 export type PnfSignal = {
@@ -46,7 +48,13 @@ export function sessionOf(t: number): string {
   return new Date((t + IST_OFFSET_S) * 1000).toISOString().slice(0, 10);
 }
 
-type Work = { dir: 'X' | 'O'; lo: number; hi: number; startBar: number; endBar: number; breakBar: number | null };
+/** `drawn` maps each box label to the bar that first plotted it. */
+type Work = { dir: 'X' | 'O'; lo: number; hi: number; startBar: number; endBar: number; breakBar: number | null; drawn: Map<number, number> };
+
+const drawnRange = (from: number, to: number, bar: number, into = new Map<number, number>()) => {
+  for (let k = from; k <= to; k++) if (!into.has(k)) into.set(k, bar);
+  return into;
+};
 
 /**
  * `anchorPrice` overrides the price the grid and the box are anchored on (default: the first usable close). The page passes the
@@ -72,19 +80,19 @@ export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3, anchorPrice?
     const down = Math.ceil(x - EPS);  // lowest label the close has reached from above
     const cur = work[work.length - 1];
     if (!cur) {
-      if (up >= 1) work.push({ dir: 'X', lo: 1, hi: up, startBar: i, endBar: i, breakBar: null });
-      else if (down <= -1) work.push({ dir: 'O', lo: down, hi: -1, startBar: i, endBar: i, breakBar: null });
+      if (up >= 1) work.push({ dir: 'X', lo: 1, hi: up, startBar: i, endBar: i, breakBar: null, drawn: drawnRange(1, up, i) });
+      else if (down <= -1) work.push({ dir: 'O', lo: down, hi: -1, startBar: i, endBar: i, breakBar: null, drawn: drawnRange(down, -1, i) });
       return;
     }
     if (cur.dir === 'X') {
-      if (up > cur.hi) { cur.hi = up; cur.endBar = i; markBreak(cur, i); }
+      if (up > cur.hi) { drawnRange(cur.hi + 1, up, i, cur.drawn); cur.hi = up; cur.endBar = i; markBreak(cur, i); }
       else if (down <= cur.hi - reversal) {
-        work.push({ dir: 'O', lo: down, hi: cur.hi - 1, startBar: i, endBar: i, breakBar: null });
+        work.push({ dir: 'O', lo: down, hi: cur.hi - 1, startBar: i, endBar: i, breakBar: null, drawn: drawnRange(down, cur.hi - 1, i) });
         markBreak(work[work.length - 1], i);
       }
-    } else if (down < cur.lo) { cur.lo = down; cur.endBar = i; markBreak(cur, i); }
+    } else if (down < cur.lo) { drawnRange(down, cur.lo - 1, i, cur.drawn); cur.lo = down; cur.endBar = i; markBreak(cur, i); }
     else if (up >= cur.lo + reversal) {
-      work.push({ dir: 'X', lo: cur.lo + 1, hi: up, startBar: i, endBar: i, breakBar: null });
+      work.push({ dir: 'X', lo: cur.lo + 1, hi: up, startBar: i, endBar: i, breakBar: null, drawn: drawnRange(cur.lo + 1, up, i) });
       markBreak(work[work.length - 1], i);
     }
   });
@@ -98,6 +106,7 @@ export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3, anchorPrice?
     endBar: c.endBar,
     session: sessionOf(bars[c.startBar].t),
     breakBar: c.breakBar,
+    boxBars: Array.from({ length: c.hi - c.lo + 1 }, (_, k) => c.drawn.get(c.lo + k) as number),
   }));
   return { anchor, box, columns };
 }

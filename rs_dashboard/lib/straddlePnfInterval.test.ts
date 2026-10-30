@@ -8,6 +8,16 @@ const DAY2 = Date.UTC(2026, 9, 23, 3, 45) / 1000; // Fri 23 Oct 09:15 IST
 const minutes = (start: number, n: number, price = (i: number) => 100 + i): Bar[] =>
   Array.from({ length: n }, (_, i) => ({ t: start + i * 60, ce: price(i) / 2, pe: price(i) / 2, straddle: price(i), vol: 10 }));
 
+test('a short last bucket at the session close is a bar once it holds the closing minute (MCX 23:55)', () => {
+  const lastBucket = Date.UTC(2026, 9, 22, 18, 15) / 1000;  // 23:45 IST, the start of the final 15-minute bucket
+  const b = minutes(lastBucket, 10);                         // 23:45 .. 23:54, then the bell
+  assert.equal(resample(b, 15).bars.length, 0);              // without the close it waits for a later bucket
+  const r = resample(b, 15, 23 * 60 + 55);
+  assert.equal(r.bars.length, 1);
+  assert.equal(r.bars[0].straddle, 109);
+  assert.equal(resample(b.slice(0, 9), 15, 23 * 60 + 55).bars.length, 0); // 23:53 is not the closing minute yet
+});
+
 test('the offered intervals divide the 375-minute session evenly', () => {
   assert.deepEqual([...INTERVALS], [1, 3, 5, 15]);
   for (const n of INTERVALS) assert.equal(375 % n, 0);

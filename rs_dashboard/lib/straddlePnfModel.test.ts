@@ -120,3 +120,51 @@ test('prevClose is the last close of the session before the most recent one, nul
   assert.equal(buildPanelModel(d1, 'vwap').prevClose, null);
   assert.equal(buildPanelModel([], 'vwap').prevClose, null);
 });
+
+test('a forming first bar of a new session moves "today": prevClose is yesterday\'s close, not the day before\'s', () => {
+  const DAY = 86_400;
+  const mk = (l: number, t: number) => ({ t, ce: priceAt(l), pe: 0, straddle: priceAt(l), vol: 10 });
+  const d1 = [mk(0, BASE_T), mk(2, BASE_T + 60)];
+  const d2 = [mk(3, BASE_T + DAY), mk(4, BASE_T + DAY + 60)];
+  const forming = mk(6, BASE_T + 2 * DAY);
+  assert.equal(buildPanelModel([...d1, ...d2], 'vwap').prevClose, priceAt(2));
+  const m = buildPanelModel([...d1, ...d2], 'vwap', { forming });
+  assert.equal(m.prevClose, priceAt(4));
+  assert.equal(m.sessionOpen, priceAt(6));
+});
+
+test('overlayNow is the VWAP at the last closed minute, not at the last column\'s extension', () => {
+  const b = bars([0, 1.2, 2.2, 2.4, 2.3, 2.2, 2.25, 2.35, 2.2, 2.3, 2.25, 2.4]).map((x, i) => ({ ...x, vol: i < 3 ? 1 : 1000 }));
+  const m = buildPanelModel(b, 'vwap');
+  const v = vwap(b);
+  assert.equal(m.overlayNow, v[v.length - 1]);
+  assert.notEqual(m.overlayNow, m.overlay[m.overlay.length - 1]);
+});
+
+test('vwapIsAverage is set only when no bar carried volume (an index)', () => {
+  assert.equal(buildPanelModel(bars(PATH), 'vwap').vwapIsAverage, false);
+  assert.equal(buildPanelModel(bars(PATH).map(x => ({ ...x, vol: 0 })), 'vwap').vwapIsAverage, true);
+});
+
+test('boxBars records the bar that drew each box, bottom to top', () => {
+  const b = bars([0, 2, 4, 1]);                  // X boxes 1-2 at bar 1, 3-4 at bar 2, then an O from 3 down to 1 at bar 3
+  const m = buildPanelModel(b, 'vwap');
+  assert.deepEqual(m.columns[0].boxBars, [1, 1, 2, 2]);
+  assert.deepEqual(m.columns[1].boxBars, [3, 3, 3]);
+});
+
+test('sessionMarks: the first box each session drew, even inside a column opened by an earlier session', () => {
+  const DAY = 86_400;
+  const mk = (l: number, t: number) => ({ t, ce: priceAt(l), pe: 0, straddle: priceAt(l), vol: 10 });
+  // day 1 opens an X column to box 3; day 2 only extends it to box 5; day 3 reverses down to box 2
+  const b = [mk(0, BASE_T), mk(3, BASE_T + 60), mk(5, BASE_T + DAY), mk(2, BASE_T + 2 * DAY)];
+  const m = buildPanelModel(b, 'vwap');
+  const days = [BASE_T, BASE_T + DAY, BASE_T + 2 * DAY].map(t => new Date((t + 19800) * 1000).toISOString().slice(0, 10));
+  assert.deepEqual(m.sessionMarks, [
+    { col: 0, k: 0, session: days[0] },          // box 1, the lowest X
+    { col: 0, k: 3, session: days[1] },          // box 4: day 2 drew boxes 4-5 in day 1's column
+    { col: 1, k: 2, session: days[2] },          // the O column is drawn top-down: its top box (4) comes first
+  ]);
+  assert.deepEqual(m.sessions, days);
+  assert.deepEqual(m.columnTimes[0], { start: b[1].t, end: b[2].t });
+});

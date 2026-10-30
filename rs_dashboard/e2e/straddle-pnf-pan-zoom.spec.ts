@@ -98,8 +98,8 @@ test('Re-center resets zoom and puts the newest column in the middle of the char
   await expect(panel.getByTestId('pnf-zoom')).toHaveAttribute('data-zoom', '1');
   // the newest glyph now sits near the horizontal middle of the plot (the view minus the pinned axis)
   await expect.poll(async () => {
-    const g = (await panel.locator('svg path, svg circle').last().boundingBox())!;
-    return Math.abs(g.x + g.width / 2 - (b.x + (b.width - 58) / 2));
+    const g = (await panel.getByRole('img', { name: /point and figure chart/ }).locator('path, circle').last().boundingBox())!;
+    return Math.abs(g.x + g.width / 2 - (b.x + (b.width - 66) / 2));   // 66 = AXIS_W
   }).toBeLessThan(30);
 });
 

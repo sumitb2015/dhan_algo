@@ -3,7 +3,9 @@
 import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { Overlay, PanelModel } from '@/lib/straddlePnfModel';
+import { Minus, Plus, RotateCcw } from 'lucide-react';
 import { layoutPanel, AXIS_W, PAD_TOP } from '@/lib/straddlePnfLayout';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 // One straddle P&F chart: X (green) / O (red) glyphs on a visible box grid, VWAP or SMA10 line, a bar at the level every double
 // top / double bottom broke, date dividers where a new session starts and a tag at the live price. Every column is drawn: the
@@ -37,8 +39,13 @@ export type PnfPanelProps = {
   headerSlot?: HTMLElement | null;
   /** The instrument's name for the header strip (the strip is shown without a card header, so the price needs a scrip beside it). */
   scrip?: string;
-  /** Previous close from the live feed: the change's base when the loaded history holds no earlier session. */
+  /**
+   * Previous close from the live feed, passed only while it can be trusted (before the bell, price from today): the change's
+   * base when set; otherwise the last close of the previous session in the loaded history.
+   */
   feedPrevClose?: number | null;
+  /** Set when the live price is a feed value outside the trading session ("Pre-open" / "Post-close"), not a chart bar. */
+  sessionTag?: string | null;
 };
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
@@ -55,9 +62,26 @@ function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
   return [ref, size.w, size.h];
 }
 
-const fmt = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmt = (n: number, digits = 2) => n.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const signed = (n: number) => `${n >= 0 ? '+' : '-'}${Math.abs(n).toFixed(2)}`;
 const hhmm = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString().slice(11, 16);
+const sessionOfT = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString().slice(0, 10);
+const shortDate = (iso: string) => sessionLabel(iso).slice(4);
+
+function ZoomButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        onClick={onClick}
+        render={<button type="button" aria-label={label}
+                        className="flex items-center justify-center w-6 h-6 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-100 hover:bg-zinc-800" />}
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent>{label === 'Fit chart to panel' ? 'Fit chart to panel (or double-click the chart)' : label}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 function sessionLabel(iso: string): string {
   const d = new Date(`${iso}T00:00:00Z`);
@@ -66,19 +90,23 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
-  const overlayLabel = overlay === 'vwap' ? 'VWAP' : 'SMA 10';
-  const overlayNow = [...model.overlay].reverse().find(v => v !== null) ?? null;
-  // Change is measured from yesterday's close; with no earlier session loaded it uses the feed's previous close, then the session open.
-  const prevClose = model.prevClose ?? feedPrevClose;
+  // An index has no volume: its "VWAP" is a plain cumulative average, and says so.
+  const vwapLabel = model.vwapIsAverage ? 'Avg' : 'VWAP';
+  const overlayLabel = overlay === 'vwap' ? vwapLabel : 'SMA 10';
+  const overlayNow = model.overlayNow;
+  // Change is measured from the previous close: the feed's (official) while trusted, else the history's, then the session open.
+  const prevClose = feedPrevClose ?? model.prevClose;
   const changeBase = prevClose ?? model.sessionOpen;
   const changeLabel = prevClose ? 'vs prev close' : 'vs open';
   const change = liveValue !== null && changeBase ? liveValue - changeBase : null;
   const changePct = change !== null && changeBase ? (change / changeBase) * 100 : null;
   const lastSignal = signals.length ? signals[signals.length - 1] : null;
+  const sessionsInfo = model.sessions.length
+    ? ` · ${model.sessions.length} sessions (${shortDate(model.sessions[0])} – ${shortDate(model.sessions[model.sessions.length - 1])})` : '';
 
   const [zoom, setZoom] = useState(1);
   const L = layoutPanel(columns, box, liveValue, width, HEIGHT, zoom, true);
@@ -158,10 +186,9 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     if (seenReset.current === resetTick) return;   // mount (and StrictMode's second mount) is not a reset request
     seenReset.current = resetTick;
     resetView();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetTick]);
   const zoomRef = useRef(zoomBy);
-  zoomRef.current = zoomBy;
+  useLayoutEffect(() => { zoomRef.current = zoomBy; });
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -176,6 +203,28 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   const dragRef = useRef<{ x: number; y: number; l: number; t: number } | null>(null);
   const [dragging, setDragging] = useState(false);
 
+  // Crosshair: the pointer in content coordinates, snapped to the column (vertical) and to the box row (horizontal) under it.
+  // P&F prices are discrete, so the price tag names the box the pointer is in, not a price between two boxes.
+  const [hover, setHover] = useState<{ x: number; y: number; overAxis: boolean } | null>(null);
+  const trackHover = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType === 'touch') return;
+    const el = e.currentTarget;
+    const r = el.getBoundingClientRect();
+    const vx = e.clientX - r.left;
+    setHover({ x: vx + el.scrollLeft, y: e.clientY - r.top + el.scrollTop, overAxis: vx > el.clientWidth - AXIS_W });
+  };
+  const rowTop = padY + PAD_TOP;
+  const cross = (() => {
+    if (!hover || dragging || box <= 0 || !columns.length) return null;
+    const row = Math.floor((hover.y - rowTop) / cell);
+    if (row < 0 || row >= L.rows) return null;
+    const price = yMax - (row + 0.5) * box;                      // yMax is a cell edge: this is the row's box price
+    const j = Math.floor((hover.x - offsetX) / cell);
+    const col = !hover.overAxis && j >= 0 && j < columns.length ? j : null;
+    return { price, y: yOf(price), col, x: col !== null ? xOf(col) + cell / 2 : hover.overAxis ? null : hover.x };
+  })();
+  const markAt = new Map(model.sessionMarks.map(m => [`${m.col}:${m.k}`, m.session]));
+
   const lastEntryId = [...signals].reverse().find(g => g.kind === 'DOUBLE_BOTTOM_SELL' && g.belowVwap)?.id;
   const ring = flash === 'buy' ? 'ring-2 ring-emerald-400' : flash === 'sell' ? 'ring-2 ring-red-400' : '';
 
@@ -186,6 +235,10 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     .join(' ');
 
   const tickEvery = Math.max(1, Math.round(((yMax - yMin) / box) / 9));
+  // Axis labels name the box centres (the price each row of X / O stands for). Whole rupees once a box is 10 or more: the
+  // paise are noise at that size and a six-figure price still fits the axis.
+  const axisDigits = box >= 10 ? 0 : 2;
+  const liveDigits = liveValue !== null && liveValue >= 100_000 ? 0 : 2;
 
   return (
     <section
@@ -197,7 +250,9 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         <div className="flex items-center gap-3 min-w-0" aria-label={`${title} summary`}>
           <div className="flex items-baseline gap-2 shrink-0">
             <span data-testid="pnf-scrip" className="text-xs font-bold tracking-tight text-zinc-100">{scrip ?? title}</span>
-            {stale && <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">Stale</span>}
+            {sessionTag
+              ? <span data-testid="pnf-session-tag" className="text-[10px] font-bold uppercase tracking-wider text-sky-300">{sessionTag}</span>
+              : stale && <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">Stale</span>}
             <span className="text-lg font-bold font-mono text-white leading-none">{liveValue !== null ? fmt(liveValue) : '—'}</span>
             {change !== null && changePct !== null && (
               <span data-testid="pnf-vs-open" className={`text-[11px] font-bold font-mono ${change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -213,7 +268,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
             </span>
           </span>
           <span data-testid="pnf-box-info" className="text-[10px] font-mono text-zinc-500 truncate">
-            {box > 0 ? `Box ${box.toFixed(2)} (${boxPct}% of ${model.anchor.toFixed(2)}) · ${reversal}-box · ${columns.length} cols` : 'Box —'}
+            {box > 0 ? `Box ${box.toFixed(2)} (${boxPct}% of ${model.anchor.toFixed(2)}) · ${reversal}-box · ${columns.length} cols${sessionsInfo}` : 'Box —'}
           </span>
           {lastSignal && (
             <span data-testid="pnf-last-signal"
@@ -231,12 +286,14 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         <div className="flex items-baseline justify-between gap-2">
           <h2 className="text-xs font-bold text-zinc-100 truncate">{title}</h2>
           <div className="flex items-center gap-2">
-            {stale && <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">Stale</span>}
+            {sessionTag
+              ? <span data-testid="pnf-session-tag" className="text-[10px] font-bold uppercase tracking-wider text-sky-300">{sessionTag}</span>
+              : stale && <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">Stale</span>}
             <div className="flex flex-col items-end">
               <span className="text-lg font-bold font-mono text-white leading-none">{liveValue !== null ? fmt(liveValue) : '—'}</span>
               {change !== null && changePct !== null && (
                 <span data-testid="pnf-vs-open" className={`mt-0.5 text-[10px] font-mono ${change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {signed(change)} ({signed(changePct)}%) vs open
+                  {signed(change)} ({signed(changePct)}%) {changeLabel}
                 </span>
               )}
             </div>
@@ -250,7 +307,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         </p>
         <div className="mt-0.5 flex items-center justify-between gap-2">
           <p data-testid="pnf-box-info" className="text-[10px] font-mono text-zinc-500 truncate">
-            {box > 0 ? `Box ${box.toFixed(2)} (${boxPct}% of ${model.anchor.toFixed(2)}) · ${reversal}-box · ${columns.length} cols` : 'Box —'}
+            {box > 0 ? `Box ${box.toFixed(2)} (${boxPct}% of ${model.anchor.toFixed(2)}) · ${reversal}-box · ${columns.length} cols${sessionsInfo}` : 'Box —'}
           </p>
           {lastSignal && (
             <span data-testid="pnf-last-signal"
@@ -282,15 +339,21 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         }}
         onPointerMove={e => {
           const d = dragRef.current;
-          if (!d) return;
+          if (!d) { trackHover(e); return; }
           e.currentTarget.scrollLeft = d.l - (e.clientX - d.x);
           e.currentTarget.scrollTop = d.t - (e.clientY - d.y);
         }}
-        onPointerUp={() => { dragRef.current = null; setDragging(false); }}
+        onPointerUp={e => {
+          // Whether the chart keeps following the newest column is decided by the user's drag only. A scroll event cannot decide it:
+          // the browser also scrolls on its own when the panel is resized (a window opening clamps scrollLeft), which used to
+          // unstick a chart nobody had touched and leave it opened on the oldest column.
+          if (dragRef.current) { const el = e.currentTarget; stickRef.current = el.scrollLeft >= stickLeft(el) - 30; }
+          dragRef.current = null; setDragging(false); trackHover(e);
+        }}
         onPointerCancel={() => { dragRef.current = null; setDragging(false); }}
+        onPointerLeave={() => setHover(null)}
         onDoubleClick={resetView}
-        onScroll={e => { const el = e.currentTarget; stickRef.current = el.scrollLeft >= stickLeft(el) - 30; }}
-        className={`relative overflow-auto select-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${dragging ? 'cursor-grabbing' : 'cursor-grab'} ${fill ? 'flex-1 min-h-0' : ''}`}
+        className={`relative overflow-auto select-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${dragging ? 'cursor-grabbing' : 'cursor-crosshair'} ${fill ? 'flex-1 min-h-0' : ''}`}
         style={fill ? { minHeight: 200 } : { height: 'calc(100vh - 215px)', minHeight: MIN_HEIGHT }}
       >
         {error ? (
@@ -321,17 +384,27 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                   return (
                     <g key={`d${j}`}>
                       <line x1={x} x2={x} y1={padY + PAD_TOP - 6} y2={contentH} className="stroke-zinc-600" strokeDasharray="2 3" />
-                      {label && <text x={x + 3} y={padY + PAD_TOP - 9} className="fill-zinc-500 font-mono" fontSize={9}>{sessionLabel(c.session)}</text>}
+                      {label && <text x={x + 3} y={padY + PAD_TOP - 9} className="fill-zinc-400 font-mono" fontSize={10}>{sessionLabel(c.session)}</text>}
                     </g>
                   );
                 });
               })()}
 
-              {/* X / O glyphs */}
+              {/* X / O glyphs. The first box each session drew shows the day of the month instead (the classic P&F month
+                  marker, by day): every loaded session that moved the chart is visible, not only those that opened a column. */}
               {vis.map((c, j) =>
                 Array.from({ length: c.boxes }, (_, k) => {
                   const cx = xOf(j) + cell / 2;
                   const cy = yOf(c.low + (k + 0.5) * box);
+                  const mark = markAt.get(`${j}:${k}`);
+                  if (mark) return (
+                    <text key={`${j}-${k}`} data-testid="pnf-session-mark" x={cx} y={cy} textAnchor="middle" dominantBaseline="central"
+                          className={`${c.dir === 'X' ? 'fill-emerald-400' : 'fill-red-400'} font-mono font-bold`}
+                          fontSize={Math.max(7, Math.min(16, cell * 0.55))}>
+                      <title>{`${sessionLabel(mark)}: first box of the session`}</title>
+                      {Number(mark.slice(8, 10))}
+                    </text>
+                  );
                   return c.dir === 'X' ? (
                     <path key={`${j}-${k}`} d={`M${cx - s} ${cy - s}L${cx + s} ${cy + s}M${cx + s} ${cy - s}L${cx - s} ${cy + s}`}
                           className="stroke-emerald-400" strokeWidth={stroke} strokeLinecap="round" fill="none" />
@@ -347,14 +420,14 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                           className={overlay === 'vwap' ? 'stroke-amber-300' : 'stroke-zinc-500'} />
               )}
 
-              {/* exit cue: first bar of a green X column trading above VWAP */}
+              {/* short cover cue (the short-side rule): first bar of a green X column trading above VWAP */}
               {exits.length > 0 && (
                 <text data-testid="pnf-exit" x={xOf(exits[exits.length - 1].col) + cell / 2} y={yOf(columns[exits[exits.length - 1].col].high) - 4}
-                      textAnchor="middle" className="fill-emerald-400 font-mono" fontSize={8}>EXIT</text>
+                      textAnchor="middle" className="fill-emerald-400 font-mono font-bold" fontSize={9}>COVER</text>
               )}
 
               {/* double top buy / double bottom sell: a horizontal support/resistance line across from the previous swing extreme
-                  to the breaking column, with a circle marker at the breakout/breakdown level */}
+                  to the breaking column */}
               {signals.map(g => {
                 const sell = g.kind === 'DOUBLE_BOTTOM_SELL';
                 const entry = sell && g.belowVwap;
@@ -362,7 +435,10 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                 const y = yOf(levelPrice);
                 const x1 = xOf(g.col - 2);
                 const x2 = xOf(g.col) + cell + 6;
-                const cx = xOf(g.col) + cell / 2;
+                // The short-entry tag sits under the level where columns col-2 and col-1 meet: col-2's lowest O is ON the level and
+                // col-1 (an X column) starts a box above it, so below the line there is empty grid. Under the breaking column it
+                // would cover that column's Os.
+                const tagX = xOf(g.col - 1);
                 const strokeCls = sell ? 'stroke-red-400' : 'stroke-emerald-400';
                 return (
                   <g key={g.id} data-testid="pnf-signal" data-kind={g.kind} data-col={g.col} data-entry={entry ? '1' : '0'}>
@@ -371,8 +447,8 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                           className={strokeCls} strokeLinecap="round" />
                     {g.id === lastEntryId && (
                       <g>
-                        <rect x={cx - 16} y={y + 8} width={32} height={12} rx={2} className="fill-red-500/20 stroke stroke-red-500/40" />
-                        <text x={cx} y={y + 17} textAnchor="middle" className="fill-red-400 font-mono font-bold" fontSize={8}>ENTRY</text>
+                        <rect x={tagX - 18} y={y + 4} width={36} height={13} rx={2} className="fill-red-500/20 stroke-red-500/40" />
+                        <text x={tagX} y={y + 14} textAnchor="middle" className="fill-red-400 font-mono font-bold" fontSize={9}>SHORT</text>
                       </g>
                     )}
                   </g>
@@ -381,36 +457,66 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
 
               {/* live price line */}
               {liveValue !== null && (
-                <line x1={0} x2={plotW} y1={yOf(liveValue)} y2={yOf(liveValue)} className="stroke-zinc-500" strokeDasharray="3 3" />
+                <line x1={0} x2={plotW} y1={yOf(liveValue)} y2={yOf(liveValue)} className="stroke-zinc-400" strokeDasharray="3 3" />
+              )}
+
+              {/* crosshair */}
+              {cross && (
+                <g data-testid="pnf-crosshair" pointerEvents="none">
+                  <line x1={0} x2={plotW} y1={cross.y} y2={cross.y} className="stroke-zinc-500" strokeWidth={1} strokeDasharray="4 3" />
+                  {cross.x !== null && (
+                    <line x1={cross.x} x2={cross.x} y1={0} y2={contentH} className="stroke-zinc-500" strokeWidth={1} strokeDasharray="4 3" />
+                  )}
+                </g>
               )}
             </svg>
 
             {/* price axis: sticky, so it stays at the panel's right edge while the chart is panned */}
             <svg width={AXIS_W} height={contentH} className="block shrink-0 sticky right-0 bg-zinc-900" aria-hidden="true">
               <g data-testid="pnf-axis">
-                {Array.from({ length: Math.floor((yMax - yMin) / box) + 1 }, (_, i) => i)
+                {Array.from({ length: Math.round((yMax - yMin) / box) }, (_, i) => i)
                   .filter(i => i % tickEvery === 0)
-                  .filter(i => liveValue === null || Math.abs(yOf(yMin + i * box) - yOf(liveValue)) > 13)
+                  .filter(i => liveValue === null || Math.abs(yOf(yMin + (i + 0.5) * box) - yOf(liveValue)) > 14)
                   .map(i => {
-                    const p = yMin + i * box;
-                    return <text key={`t${i}`} x={6} y={yOf(p) + 3} className="fill-zinc-500 font-mono" fontSize={9}>{fmt(p)}</text>;
+                    const p = yMin + (i + 0.5) * box;   // yMin is a cell edge, so this is a box centre
+                    return <text key={`t${i}`} x={6} y={yOf(p) + 3.5} className="fill-zinc-400 font-mono" fontSize={10}>{fmt(p, axisDigits)}</text>;
                   })}
               </g>
+              {/* live price tag: the brightest-text / page-ground token pair, so it flips with the theme and is never mistaken for
+                  the amber VWAP line */}
               {liveValue !== null && (
                 <g>
-                  <rect x={2} y={yOf(liveValue) - 7} width={AXIS_W - 4} height={14} rx={2} className="fill-amber-300" />
-                  <text x={6} y={yOf(liveValue) + 3} className="fill-black font-mono" fontSize={9} fontWeight={700}>{fmt(liveValue)}</text>
+                  <rect x={2} y={yOf(liveValue) - 8} width={AXIS_W - 4} height={16} rx={2} className="fill-zinc-100" />
+                  <text x={6} y={yOf(liveValue) + 3.5} className="fill-black font-mono" fontSize={10} fontWeight={700}>{fmt(liveValue, liveDigits)}</text>
+                </g>
+              )}
+              {cross && (
+                <g data-testid="pnf-crosshair-price">
+                  <rect x={2} y={cross.y - 8} width={AXIS_W - 4} height={16} rx={2} className="fill-zinc-700" />
+                  <text x={6} y={cross.y + 3.5} className="fill-zinc-100 font-mono" fontSize={10} fontWeight={700}>{fmt(cross.price, axisDigits)}</text>
                 </g>
               )}
             </svg>
           </div>
         )}
       </div>
+      {cross && cross.col !== null && (() => {
+        const c = columns[cross.col];
+        const t = model.columnTimes[cross.col];
+        return (
+          <div data-testid="pnf-crosshair-readout"
+               className="pointer-events-none absolute top-1.5 left-2 z-10 flex items-center gap-2 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] font-mono text-zinc-300">
+            <span className={`font-bold ${c.dir === 'X' ? 'text-emerald-400' : 'text-red-400'}`}>{c.dir === 'X' ? 'X up' : 'O down'}</span>
+            <span>{c.boxes} box{c.boxes === 1 ? '' : 'es'}</span>
+            <span className="text-zinc-100">{fmt(c.low + box / 2, axisDigits)} – {fmt(c.high - box / 2, axisDigits)}</span>
+            <span className="text-zinc-400">{sessionLabel(sessionOfT(t.start))} {hhmm(t.start)} → {sessionOfT(t.end) !== sessionOfT(t.start) ? `${sessionLabel(sessionOfT(t.end))} ` : ''}{hhmm(t.end)}</span>
+          </div>
+        );
+      })()}
       <div data-testid="pnf-zoom" data-zoom={zoom} className="absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1 z-10">
-        {([['Zoom out', '−', () => zoomBy(0.7)], ['Reset zoom and centre the chart', '↺', resetView], ['Zoom in', '+', () => zoomBy(1 / 0.7)]] as const).map(([label, glyph, run]) => (
-          <button key={label} type="button" onClick={run} title={label} aria-label={label === 'Zoom out' || label === 'Zoom in' ? label : 'Fit chart to panel'}
-                  className="flex items-center justify-center w-6 h-6 rounded-full text-xs bg-zinc-900 border border-zinc-700 text-zinc-100 hover:bg-zinc-800">{glyph}</button>
-        ))}
+        <ZoomButton label="Zoom out" onClick={() => zoomBy(0.7)}><Minus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        <ZoomButton label="Fit chart to panel" onClick={() => resetView()}><RotateCcw className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        <ZoomButton label="Zoom in" onClick={() => zoomBy(1 / 0.7)}><Plus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
       </div>
       </div>
     </section>

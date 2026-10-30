@@ -12,10 +12,14 @@ import SettingsControls from './straddlePnf/SettingsControls';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/alertSound';
 import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
-import { foldTick, newSignalsAfter, nextWatermark, capLog, type Tick } from '@/lib/straddlePnfLive';
+import {
+  foldTick, newSignalsAfter, nextWatermark, capLog, inSession, mergeHistory, feedCloseTrusted, istMinuteOfDay, SESSION_MIN,
+  type Market, type Tick,
+} from '@/lib/straddlePnfLive';
+import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
 import { DEFAULT_SETTINGS, SETTINGS_KEY, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import type { PnfPick } from '@/lib/straddlePnfSearch';
-import type { Bar } from '@/lib/straddlePnf';
+import { sessionOf, type Bar } from '@/lib/straddlePnf';
 
 // Point & Figure of ONE price series, signals only (this page places no orders): an NSE index or stock picked in the search box
 // (default the NIFTY index), or the nearest CRUDEOILM future. There are no options here. Bars come from the history API and the page
@@ -80,6 +84,8 @@ export default function StraddlePnfPage() {
   // The newest WebSocket price; kept so a history refresh (which replaces the bars) can lay it back on top.
   const tickRef = useRef<Tick | null>(null);
   const [feedPrevClose, setFeedPrevClose] = useState<number | null>(null);
+  // A feed price outside the trading session (NSE pre-open, post-close): shown in the header, never folded into a chart bar.
+  const [outQuote, setOutQuote] = useState<{ ltp: number; t: number } | null>(null);
   // The chart's price/summary strip is drawn into the top header (PnfPanel `headerSlot`) instead of a card header above the chart.
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
 
@@ -96,6 +102,8 @@ export default function StraddlePnfPage() {
   // ── preferences, sound unlock, clock ────────────────────────────────────
   useEffect(() => installAlertSoundUnlock(), []);
   useEffect(() => {
+    // Saved preferences are read after mount, not in useState initialisers: localStorage does not exist on the server render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (readPref(OVERLAY_KEY) === 'sma') setOverlay('sma');
     setSettings(readSettings(readPref(SETTINGS_KEY)));
     const saved = readTarget(readPref(TARGET_KEY));
@@ -131,7 +139,7 @@ export default function StraddlePnfPage() {
       if (recenterViewRef.current) { recenterViewRef.current = false; setViewTick(n => n + 1); }
       const hist = j.bars[String(key)] ?? [];
       const tk = tickRef.current;
-      setBars(tk && hist.length && tk.t >= hist[hist.length - 1].t ? foldTick(hist, tk, true).bars : hist);
+      setBars(prev => mergeHistory(hist, prev, tk, true));
       setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], expiry: j.expiries?.[String(key)], instrument: j.instrument ?? undefined });
       if (j.name) setName(j.name);
       setLoadError(null);
@@ -144,6 +152,8 @@ export default function StraddlePnfPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target.kind, target.symbol]);
 
+  // The load is the effect's job (instrument changed / Re-center); its loading flag is set synchronously on purpose.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void load(true); }, [load, recenter]);
   useEffect(() => {
     const id = setInterval(() => { void load(false); }, POLL_MS);
@@ -152,6 +162,7 @@ export default function StraddlePnfPage() {
 
   // ── live price over the WebSocket bridge → the open bar ─────────────────
   const inst = loaded?.instrument;
+  const market: Market = target.kind === 'futures' ? 'MCX' : 'NSE';
   useEffect(() => {
     if (!inst) return;
     let dead = false;
@@ -162,8 +173,12 @@ export default function StraddlePnfPage() {
         if (dead || !j.success) return;
         setFeedPrevClose(j.quote?.prevClose ?? j.last?.prevClose ?? null);
         const q = j.quote;
-        if (!q) return;
-        const tick: Tick = { t: q.changedMs / 1000, ce: q.ltp, pe: 0, cumVol: q.volume ?? undefined };
+        if (!q) { setOutQuote(null); return; }
+        const t = q.changedMs / 1000;
+        // Pre-open values are indicative, not trades, and the history API has no bars for them: header only.
+        if (!inSession(t, market)) { setOutQuote({ ltp: q.ltp, t }); return; }
+        setOutQuote(null);
+        const tick: Tick = { t, ce: q.ltp, pe: 0, cumVol: q.volume ?? undefined };
         tickRef.current = tick;
         setBars(prev => (prev.length ? foldTick(prev, tick, true).bars : prev));
       } catch { /* the header keeps the last price and shows Stale until the next read lands */ }
@@ -171,14 +186,16 @@ export default function StraddlePnfPage() {
     void poll();
     const id = setInterval(() => { void poll(); }, LIVE_MS);
     return () => { dead = true; clearInterval(id); };
-  }, [inst?.segment, inst?.security_id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [inst?.segment, inst?.security_id, market]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── panel model: CLOSED bars only, so a signal never repaints ───────────
   const model = useMemo(() => {
     const last = bars[bars.length - 1];
     const forming = last !== undefined && last.t >= minuteOf(now / 1000) && now > 0; // the minute still forming is not closed yet
-    return buildPanelModel(forming ? bars.slice(0, -1) : bars, overlay, settings);
-  }, [bars, overlay, settings, now]);
+    return buildPanelModel(forming ? bars.slice(0, -1) : bars, overlay, {
+      ...settings, sessionCloseMin: SESSION_MIN[market][1], forming: forming ? last : undefined,
+    });
+  }, [bars, overlay, settings, now, market]);
 
   // A chart's name for the alert log: the symbol, with the contract month for a future.
   const label = useMemo(() => {
@@ -206,7 +223,7 @@ export default function StraddlePnfPage() {
     for (const e of fresh) {
       const sell = e.kind === 'DOUBLE_BOTTOM_SELL';
       const title = `${label} · ${sell ? 'Double bottom SELL' : 'Double top BUY'} @ ${e.price.toFixed(2)}`;
-      if (sell) toast.error(title, { description: e.belowVwap ? 'Below VWAP — entry zone' : undefined });
+      if (sell) toast.error(title, { description: e.belowVwap ? `Below ${model.vwapIsAverage ? 'average' : 'VWAP'} — short entry zone` : undefined });
       else toast.success(title);
       setFlash(sell ? 'sell' : 'buy');
       setTimeout(() => setFlash(null), FLASH_MS);
@@ -228,7 +245,7 @@ export default function StraddlePnfPage() {
     reqRef.current++;
     watermarkRef.current = 0;
     rebaselineRef.current = true;
-    tickRef.current = null; setFeedPrevClose(null);
+    tickRef.current = null; setFeedPrevClose(null); setOutQuote(null);
     setLoaded(null); setBars([]); setLoading(true); setLoadError(null); setName(null);
     setTarget(next);
   };
@@ -252,7 +269,13 @@ export default function StraddlePnfPage() {
   const iconBtn = 'inline-flex items-center justify-center h-7 w-7 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white hover:bg-zinc-800';
   const isNifty = target.kind === 'index' && target.symbol === 'NIFTY';
   const isCrude = target.kind === 'futures';
-  const live = bars.length ? { ce: bars[bars.length - 1].ce, pe: 0 } : null;
+  const live = outQuote ? { ce: outQuote.ltp, pe: 0 } : bars.length ? { ce: bars[bars.length - 1].ce, pe: 0 } : null;
+  const sessionTag = outQuote ? (istMinuteOfDay(outQuote.t) < SESSION_MIN[market][0] ? 'Pre-open' : 'Post-close') : null;
+  // The feed's previous close is the official one (a stock's closing price is not its last 1-min close), but only until the bell.
+  const tradingDay = market === 'NSE' ? isNseTradingDay(istDateIso(now)) : true;
+  // Before today's first price the header shows the last session's close, measured (from history) against the session before it.
+  const priceToday = (outQuote ? sessionOf(outQuote.t) : bars.length ? sessionOf(bars[bars.length - 1].t) : null) === istDateIso(now);
+  const trustedPrevClose = now > 0 && priceToday && feedCloseTrusted(now / 1000, market, tradingDay) ? feedPrevClose : null;
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950 text-white">
@@ -301,7 +324,7 @@ export default function StraddlePnfPage() {
 
       <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 py-4">
         {loadError && <p role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{loadError}</p>}
-        {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} /></div>}
+        {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={settings.interval} /></div>}
         <div className="flex-1 min-h-0 grid gap-3" style={{ gridTemplateColumns: 'minmax(0, 1fr)', gridTemplateRows: 'minmax(0, 1fr)' }}>
           <PnfPanel
             title={`${label} price chart`}
@@ -320,7 +343,8 @@ export default function StraddlePnfPage() {
             resetTick={viewTick}
             headerSlot={headerSlot}
             scrip={scrip}
-            feedPrevClose={feedPrevClose}
+            feedPrevClose={trustedPrevClose}
+            sessionTag={sessionTag}
             error={loaded?.error}
           />
         </div>

@@ -27,14 +27,19 @@ from straddle_pnf_candles import _leg  # noqa: E402  (same timestamp/close/volum
 _IST = timezone(timedelta(hours=5, minutes=30))
 
 
-def to_bars(df: pd.DataFrame, sessions: int) -> list:
-    """Futures candles -> straddle-shaped bars for the last `sessions` IST dates; rows with a zero close are dropped."""
+def to_bars(df: pd.DataFrame, sessions: int, today=None) -> list:
+    """Futures candles -> straddle-shaped bars for the last `sessions` IST dates; rows with a zero close are dropped.
+
+    With `today` (an IST date), `sessions` counts completed sessions only and today's bars are kept on top, so the chart always
+    has `sessions` full days of history however early in the day it is opened."""
     leg = _leg(df)
     leg = leg[leg["close"] > 0].sort_values("t")
     if leg.empty:
         return []
     day = leg["t"].map(lambda t: datetime.fromtimestamp(int(t), _IST).date())
-    keep = sorted(day.unique())[-sessions:]
+    days = sorted(day.unique())
+    past = [d for d in days if today is None or d < today]
+    keep = past[-sessions:] + [d for d in days if today is not None and d == today]
     leg = leg[day.isin(keep)]
     return [
         {"t": int(r.t), "ce": round(float(r.close), 2), "pe": 0, "straddle": round(float(r.close), 2), "vol": int(r.vol)}
@@ -56,7 +61,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--underlying", default="CRUDEOILM")
     parser.add_argument("--contracts", type=int, default=3)
-    parser.add_argument("--sessions", type=int, default=3)
+    parser.add_argument("--sessions", type=int, default=3, help="completed sessions of history; today's bars come on top")
     args = parser.parse_args()
 
     # Broker SDK imports live here so the pure helpers above stay importable (and testable) without them.
@@ -84,7 +89,7 @@ def main():
         expiries[key] = expiry
         try:
             df = _fetch_leg(helper, sid, from_date, to_date, "1", exchange_segment="MCX_COMM", instrument_type="FUTCOM")
-            rows = to_bars(df, args.sessions)
+            rows = to_bars(df, args.sessions, today=datetime.now(_IST).date())
             if rows:
                 bars[key] = rows
             else:

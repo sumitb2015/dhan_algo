@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { foldTick, newSignalsAfter, nextWatermark, capLog } from './straddlePnfLive.ts';
+import { foldTick, newSignalsAfter, nextWatermark, capLog, inSession, feedCloseTrusted, mergeHistory } from './straddlePnfLive.ts';
 import { vwap, type Bar, type PnfSignal } from './straddlePnf.ts';
 
 const T0 = Date.UTC(2026, 9, 23, 3, 45) / 1000; // 09:15 IST, a minute start
@@ -139,4 +139,38 @@ test('a plain-price tick (pe 0) folds only in single mode, in the open minute an
   assert.equal(next.bars.length, 2);
   assert.equal(next.closedIndex, 0);
   assert.equal(next.bars[1].straddle, 102);
+});
+
+// ── trading session, feed previous close, history merge ─────────────────────
+const IST = (h: number, m: number, day = 23) => Date.UTC(2026, 9, day, h, m) / 1000 - 5.5 * 3600; // Fri 23 Oct 2026, IST wall clock
+
+test('inSession: the NSE pre-open and post-close are outside, 09:15 to 15:29 inside; MCX runs 09:00 to 23:54', () => {
+  assert.equal(inSession(IST(9, 0), 'NSE'), false);
+  assert.equal(inSession(IST(9, 7), 'NSE'), false);
+  assert.equal(inSession(IST(9, 15), 'NSE'), true);
+  assert.equal(inSession(IST(15, 29), 'NSE'), true);
+  assert.equal(inSession(IST(15, 30), 'NSE'), false);
+  assert.equal(inSession(IST(9, 0), 'MCX'), true);
+  assert.equal(inSession(IST(23, 54), 'MCX'), true);
+  assert.equal(inSession(IST(23, 55), 'MCX'), false);
+});
+
+test('feedCloseTrusted: before the bell on a trading weekday only (the close flips to today\'s at the bell)', () => {
+  assert.equal(feedCloseTrusted(IST(8, 30), 'NSE', true), true);   // pre-market: close === ltp is genuine, not a flip
+  assert.equal(feedCloseTrusted(IST(15, 29), 'NSE', true), true);
+  assert.equal(feedCloseTrusted(IST(15, 30), 'NSE', true), false);
+  assert.equal(feedCloseTrusted(IST(10, 0), 'NSE', false), false); // holiday: still the last session's flipped close
+  assert.equal(feedCloseTrusted(IST(10, 0, 24), 'NSE', true), false); // Saturday
+  assert.equal(feedCloseTrusted(IST(20, 0), 'MCX', true), true);
+  assert.equal(feedCloseTrusted(IST(23, 55), 'MCX', true), false);
+});
+
+test('mergeHistory keeps live-built bars newer than the API\'s last bar, then folds the latest tick', () => {
+  const p = (i: number, v: number): Bar => ({ t: T0 + i * 60, ce: v, pe: 0, straddle: v, vol: 1 });
+  const hist = [p(0, 100), p(1, 101)];
+  const onScreen = [p(0, 100), p(1, 101.5), p(2, 102), p(3, 103)];  // minutes 2 and 3 came from ticks; the API lags
+  const out = mergeHistory(hist, onScreen, { t: T0 + 3 * 60 + 20, ce: 103.5, pe: 0 }, true);
+  assert.deepEqual(out.map(b => b.straddle), [100, 101, 102, 103.5]); // API wins where it has the minute
+  assert.deepEqual(mergeHistory([], onScreen, null), []);
+  assert.deepEqual(mergeHistory(hist, [], null).map(b => b.straddle), [100, 101]);
 });

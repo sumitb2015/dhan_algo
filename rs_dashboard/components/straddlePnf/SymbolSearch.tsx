@@ -17,7 +17,7 @@ export default function SymbolSearch({ active, onPick }: { active: PnfPick | nul
 
   useEffect(() => {
     const q = text.trim();
-    if (!q) { setResults([]); setError(null); return; }
+    if (!q) return;   // an empty box shows no list (render gates on text), so stale results are never visible or pickable
     const id = ++reqRef.current;
     const t = setTimeout(() => {
       fetch(`/api/straddle-pnf/search?q=${encodeURIComponent(q)}`)
@@ -49,7 +49,7 @@ export default function SymbolSearch({ active, onPick }: { active: PnfPick | nul
           onKeyDown={e => {
             if (e.key === 'ArrowDown') { e.preventDefault(); setHi(h => Math.min(results.length - 1, h + 1)); }
             else if (e.key === 'ArrowUp') { e.preventDefault(); setHi(h => Math.max(0, h - 1)); }
-            else if (e.key === 'Enter' && results[hi]) { e.preventDefault(); pick(results[hi]); }
+            else if (e.key === 'Enter' && text.trim() && results[hi]) { e.preventDefault(); pick(results[hi]); }
             else if (e.key === 'Escape') { setOpen(false); setText(''); }
           }}
           className={`h-7 w-48 rounded-md border bg-zinc-900 pl-7 pr-2 text-xs text-zinc-200 placeholder:text-zinc-500 ${active ? 'border-emerald-500/50' : 'border-zinc-700'}`}

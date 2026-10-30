@@ -156,8 +156,8 @@ test('the price axis sits at the right edge of each panel and the newest column 
   await expect(panel.getByTestId('pnf-axis')).toBeAttached();
   const p = (await panel.boundingBox())!;
   const axis = (await panel.getByTestId('pnf-axis').boundingBox())!;
-  expect(p.x + p.width - (axis.x + axis.width)).toBeLessThan(24); // labels end at the panel's right edge
-  const lastGlyph = panel.locator('svg path, svg circle').last();
+  expect(p.x + p.width - (axis.x + axis.width)).toBeLessThan(32); // labels (left-aligned in the 66px axis) end near the panel's right edge
+  const lastGlyph = panel.getByRole('img', { name: /point and figure chart/ }).locator('path, circle').last(); // not the zoom icons
   const g = (await lastGlyph.boundingBox())!;
   expect(axis.x - (g.x + g.width)).toBeLessThan(40);               // newest column hugs the axis, no empty gap
 });
@@ -318,4 +318,20 @@ test('the reversal control defaults to 3 boxes, changes how often columns turn, 
   await page.reload();
   await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
   await expect(page.getByLabel('Reversal')).toHaveValue('2');
+});
+
+test('the chart has a crosshair: lines snapped to the column and box under the pointer, a price tag and a column readout', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [] });
+  await page.goto('/straddle-pnf');
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
+  const sc = panel.getByTestId('pnf-scroll');
+  await expect(sc).toHaveClass(/cursor-crosshair/);
+  const glyph = panel.getByRole('img', { name: /point and figure chart/ }).locator('path, circle').last();
+  const g = (await glyph.boundingBox())!;
+  await page.mouse.move(g.x + g.width / 2, g.y + g.height / 2);
+  await expect(panel.getByTestId('pnf-crosshair')).toBeAttached();
+  await expect(panel.getByTestId('pnf-crosshair-price')).toBeAttached();
+  await expect(panel.getByTestId('pnf-crosshair-readout')).toContainText(/box/);
+  await page.mouse.move(5, 5);                                       // off the chart
+  await expect(panel.getByTestId('pnf-crosshair')).toHaveCount(0);
 });

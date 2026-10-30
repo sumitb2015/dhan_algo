@@ -43,6 +43,14 @@ class ToBars(unittest.TestCase):
         bars = self.m.to_bars(pd.DataFrame(rows, columns=["start_Time", "close", "volume"]), 2)
         self.assertEqual([b["straddle"] for b in bars], [9022.0, 9023.0])
 
+    def test_with_today_the_sessions_are_completed_days_and_today_comes_on_top(self):
+        rows = [(_epoch(d, 9, 0), 9000.0 + d, 1) for d in (20, 21, 22, 23)]
+        df = pd.DataFrame(rows, columns=["start_Time", "close", "volume"])
+        today = datetime(2026, 10, 23, tzinfo=_IST).date()
+        self.assertEqual([b["straddle"] for b in self.m.to_bars(df, 2, today=today)], [9021.0, 9022.0, 9023.0])
+        before_open = datetime(2026, 10, 24, tzinfo=_IST).date()   # no bars for "today" yet: just the last two sessions
+        self.assertEqual([b["straddle"] for b in self.m.to_bars(df, 2, today=before_open)], [9022.0, 9023.0])
+
     def test_empty_frame(self):
         self.assertEqual(self.m.to_bars(pd.DataFrame(), 3), [])
 

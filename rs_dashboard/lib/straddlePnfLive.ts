@@ -45,6 +45,46 @@ export function foldTick(bars: Bar[], tick: Tick, single = false): { bars: Bar[]
   return { bars: [...bars.slice(0, -1), next], closedIndex: null };
 }
 
+/** Trading hours, IST minutes of the day [open, close): NSE cash/index, MCX (winter close 23:55, so it also covers the 23:30 summer close). */
+export type Market = 'NSE' | 'MCX';
+export const SESSION_MIN: Record<Market, readonly [number, number]> = { NSE: [9 * 60 + 15, 15 * 60 + 30], MCX: [9 * 60, 23 * 60 + 55] };
+
+const IST_OFFSET_S = 5.5 * 3600;
+export const istMinuteOfDay = (t: number) => Math.floor(((t + IST_OFFSET_S) % 86_400) / 60);
+
+/**
+ * True inside the market's continuous session. The NSE pre-open (09:00-09:08) streams indicative index values that are not
+ * trades, and the history API has no bars for them: a tick outside the session must never become a chart bar.
+ */
+export function inSession(t: number, market: Market): boolean {
+  const m = istMinuteOfDay(t);
+  const [open, close] = SESSION_MIN[market];
+  return m >= open && m < close;
+}
+
+/**
+ * Whether the feed's previous close (the Quote packet's `close`) can be trusted at `t`. It holds the previous session's close
+ * until the closing bell, then flips to today's close (equal to the LTP: a false 0.00%), and stays flipped over a weekend or a
+ * holiday. So: a trading day (`tradingDay`, the caller's exchange calendar), a weekday, and before the market's close.
+ * Gated on time, never on close === ltp, which is the genuine state before the open.
+ */
+export function feedCloseTrusted(t: number, market: Market, tradingDay: boolean): boolean {
+  const weekday = new Date((t + IST_OFFSET_S) * 1000).getUTCDay();
+  return tradingDay && weekday >= 1 && weekday <= 5 && istMinuteOfDay(t) < SESSION_MIN[market][1];
+}
+
+/**
+ * A history refresh laid over the bars on screen: the API's bars, then any bars built from live ticks that are newer than the
+ * API's last bar (the API can lag a minute or two; dropping them would un-paint closed boxes until it catches up), then the
+ * latest tick folded on top.
+ */
+export function mergeHistory(hist: Bar[], onScreen: Bar[], tick: Tick | null, single = false): Bar[] {
+  if (!hist.length) return hist;
+  const lastT = hist[hist.length - 1].t;
+  const merged = [...hist, ...onScreen.filter(b => b.t > lastT)];
+  return tick && tick.t >= lastT ? foldTick(merged, tick, single).bars : merged;
+}
+
 /**
  * Signals worth alerting on: those whose breaking bar is newer than the watermark (the last closed bar already evaluated).
  * Keyed on bar time, not on column numbers, so a re-built chart (the history window moving on, tick bars swapped for API
