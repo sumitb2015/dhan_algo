@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
 import type { PnfExecutionMarker } from '@/lib/straddlePnf';
-import { Minus, Plus, RotateCcw } from 'lucide-react';
+import { MapPin, MapPinOff, Minus, Plus, RotateCcw } from 'lucide-react';
 import { layoutPanel, AXIS_W, PAD_TOP } from '@/lib/straddlePnfLayout';
 import { MIN_BOX_PTS_PCT } from '@/lib/straddlePnfSettings';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -59,6 +59,10 @@ export type PnfPanelProps = {
   onActivate?: () => void;
   /** This chart's AUTO controls: in the card header (two charts) or a slim bar above the chart (one chart). */
   autoSlot?: React.ReactNode;
+  /** False = the B / S trade markers are hidden (the trades themselves are untouched). */
+  markersShown?: boolean;
+  /** Shows a hide / show-markers button beside the zoom buttons. */
+  onToggleMarkers?: () => void;
 };
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
@@ -81,12 +85,12 @@ const hhmm = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString().slic
 const sessionOfT = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString().slice(0, 10);
 const shortDate = (iso: string) => sessionLabel(iso).slice(4);
 
-function ZoomButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
+function ZoomButton({ label, onClick, children, pressed }: { label: string; onClick: () => void; children: React.ReactNode; pressed?: boolean }) {
   return (
     <Tooltip>
       <TooltipTrigger
         onClick={onClick}
-        render={<button type="button" aria-label={label}
+        render={<button type="button" aria-label={label} aria-pressed={pressed}
                         className="flex items-center justify-center w-6 h-6 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-100 hover:bg-zinc-800" />}
       >
         {children}
@@ -103,7 +107,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -585,7 +589,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               })}
 
               {/* trade execution markers on the box */}
-              {tradeMarkers && tradeMarkers.length > 0 && (() => {
+              {markersShown && tradeMarkers && tradeMarkers.length > 0 && (() => {
                 const groups = new Map<string, Array<{ marker: PnfExecutionMarker; colIdx: number; boxPrice: number; idx: number }>>();
 
                 tradeMarkers.forEach((m, idx) => {
@@ -734,6 +738,11 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         <ZoomButton label="Zoom out" onClick={() => zoomBy(0.7)}><Minus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Fit chart to panel" onClick={() => resetView()}><RotateCcw className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Zoom in" onClick={() => zoomBy(1 / 0.7)}><Plus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        {onToggleMarkers && (tradeMarkers?.length || !markersShown) ? (
+          <ZoomButton label={markersShown ? 'Hide buy / sell markers' : 'Show buy / sell markers'} onClick={onToggleMarkers} pressed={!markersShown}>
+            {markersShown ? <MapPinOff className="w-3 h-3" aria-hidden="true" /> : <MapPin className="w-3 h-3" aria-hidden="true" />}
+          </ZoomButton>
+        ) : null}
       </div>
       </div>
     </section>

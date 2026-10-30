@@ -309,6 +309,25 @@ test('Positions, order book, trade book and P&L panel for the header broker (rea
   expect(placedOrders.length).toBe(0);
 });
 
+test('the buy / sell markers can be hidden per chart, and the choice survives a reload', async ({ page }) => {
+  await installTradeMock(page);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await page.getByRole('button', { name: 'BUY MARKET' }).click();
+  const chart1 = page.getByTestId('pnf-panel').nth(0);
+  await expect(chart1.getByTestId('pnf-trade-marker')).toHaveCount(1);
+  await expect(page.getByTestId('pnf-panel').nth(1).getByRole('button', { name: /buy \/ sell markers/ })).toHaveCount(0);   // no markers there
+
+  await chart1.getByRole('button', { name: 'Hide buy / sell markers' }).click();
+  await expect(chart1.getByTestId('pnf-trade-marker')).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await expect(chart1.getByTestId('pnf-trade-marker')).toHaveCount(0);
+  await chart1.getByRole('button', { name: 'Show buy / sell markers' }).click();
+  await expect(chart1.getByTestId('pnf-trade-marker')).toHaveCount(1);
+});
+
 test('manual trade-bar orders ring the Price Ladder chimes: entry on BUY, exit on SQUARE OFF', async ({ page }) => {
   await page.addInitScript(() => {
     const w = window as unknown as { __tones: string[]; AudioContext: unknown };

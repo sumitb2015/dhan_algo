@@ -58,6 +58,8 @@ const ACTIVE_CHART_KEY = 'straddle-pnf-active-chart';
 const MARKERS_KEY = 'straddle-pnf-markers-';
 /** AUTO lots per chart (AUTO itself is never remembered: it is armed per page load). */
 const AUTO_LOTS_KEY = 'straddle-pnf-auto-lots-';
+/** Per chart: '0' = the B / S trade markers are hidden. */
+const MARKERS_SHOWN_KEY = 'straddle-pnf-markers-shown-';
 const DISARMED: AutoArm = { on: false, mode: 'PAPER', watermarkT: 0 };
 
 type ChartId = 1 | 2;
@@ -151,6 +153,7 @@ function StraddlePnfPage() {
   const [booksOpen, setBooksOpen] = useState(false);
   const [autoArm, setAutoArm] = useState<Record<ChartId, AutoArm>>({ 1: DISARMED, 2: DISARMED });
   const [autoLots, setAutoLots] = useState<Record<ChartId, number>>({ 1: 1, 2: 1 });
+  const [markersShown, setMarkersShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
   // ONE broker for the whole page: the header picker sets it (saved dashboard-wide, like the scalpers), and the trade bar and the
   // Margin / P&L chips read it from here, so the chips always show the account orders go to.
   const { broker, setBroker } = useBrokerSelector();
@@ -194,6 +197,7 @@ function StraddlePnfPage() {
     if (readPref(BOOKS_OPEN_KEY) === '1') setBooksOpen(true);
     const lotsOf = (c: ChartId) => { const n = Number(readPref(`${AUTO_LOTS_KEY}${c}`)); return Number.isInteger(n) && n >= 1 && n <= 20 ? n : 1; };
     setAutoLots({ 1: lotsOf(1), 2: lotsOf(2) });
+    setMarkersShown({ 1: readPref(`${MARKERS_SHOWN_KEY}1`) !== '0', 2: readPref(`${MARKERS_SHOWN_KEY}2`) !== '0' });
     try {
       const raw = readPref(LOG_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
@@ -403,6 +407,12 @@ function StraddlePnfPage() {
       error: feed.loaded?.error ?? (feed.complete ? undefined : contractError[c] ?? undefined),
       active: active === c,
       onActivate: dual ? () => activate(c) : undefined,
+      markersShown: markersShown[c],
+      onToggleMarkers: () => {
+        const next = !markersShown[c];
+        savePref(`${MARKERS_SHOWN_KEY}${c}`, next ? '1' : '0');
+        setMarkersShown(m => ({ ...m, [c]: next }));
+      },
       autoSlot: (
         <AutoControls chart={c} armed={autoArm[c].on} mode={tradeMode} lots={autoLots[c]} onLots={n => setLotsFor(c, n)}
                       onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} halt={autoOf(c).halt}
