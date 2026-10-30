@@ -112,13 +112,42 @@ test('one price chart fills the page with the DATA chip and no options controls'
   expect(m.blocked).toEqual([]);
 });
 
-test('the VWAP / SMA toggle switches the overlay legend', async ({ page }) => {
+test('an index has no VWAP (no traded volume): the button is disabled and the box SMA is drawn', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [] });
+  await page.goto('/straddle-pnf');                                 // NIFTY index by default
+  const legend = page.getByTestId('pnf-overlay-legend').first();
+  await expect(legend).toHaveText(/SMA 50/);
+  await expect(page.getByRole('button', { name: 'VWAP' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'SMA 50' })).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('the VWAP / SMA toggle switches the overlay legend (a traded instrument), and the SMA period is configurable', async ({ page }) => {
   await install(page, { phase: 0, blocked: [] });
   await page.goto('/straddle-pnf');
   const legend = page.getByTestId('pnf-overlay-legend').first();
+  await expect(legend).toHaveText(/SMA 50/);                        // hydrated on the NIFTY index
+  await page.getByRole('button', { name: 'CRUDEOILM' }).click();    // a future trades volume: VWAP is allowed
+  await expect(page.getByRole('button', { name: 'VWAP' })).toBeEnabled();
   await expect(legend).toHaveText(/VWAP/);
-  await page.getByRole('button', { name: 'SMA 10' }).click();
-  await expect(legend).toHaveText(/SMA 10/);
+  await page.getByRole('button', { name: 'SMA 50' }).click();      // the default period
+  await expect(legend).toHaveText(/SMA 50/);
+  const period = page.getByLabel('SMA period', { exact: true });
+  await period.fill('2');                                           // typing alone changes nothing
+  await expect(legend).toHaveText(/SMA 50/);
+  await period.press('Enter');
+  await expect(legend).toHaveText(/SMA 2/);
+  await expect(page.getByRole('button', { name: 'SMA 2' })).toBeVisible();
+  await period.fill('1');                                           // out of range: reverts on commit
+  await period.blur();
+  await expect(period).toHaveValue('2');
+  await expect(page.getByRole('button', { name: 'Decrease SMA period' })).toBeDisabled();   // 2 is the minimum
+  await page.getByRole('button', { name: 'Increase SMA period' }).click();
+  await expect(period).toHaveValue('3');
+  await expect(legend).toHaveText(/SMA 3/);
+  await page.getByRole('button', { name: 'Increase SMA period' }).click({ modifiers: ['Shift'] });
+  await expect(period).toHaveValue('13');
+  await page.getByRole('button', { name: 'Decrease SMA period' }).click();
+  await expect(legend).toHaveText(/SMA 12/);
   await page.getByRole('button', { name: 'VWAP' }).click();
   await expect(legend).toHaveText(/VWAP/);
 });

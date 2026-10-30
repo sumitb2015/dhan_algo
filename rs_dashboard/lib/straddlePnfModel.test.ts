@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPanelModel } from './straddlePnfModel.ts';
+import { buildPanelModel, boxSmaByBar, unconfirmedBoxes, MAX_UNCONFIRMED_BOXES } from './straddlePnfModel.ts';
 import { vwap, type Bar } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
 
@@ -21,15 +21,34 @@ test('model carries columns, signals, exit tags and a per-column overlay', () =>
   assert.deepEqual(m.overlay, m.columns.map(c => v[c.endBar]));
 });
 
-test('the sma overlay is null until ten bars exist, and vwap still drives the signals', () => {
-  const m = buildPanelModel(bars(PATH), 'sma');
-  assert.deepEqual(m.overlay, [null, null, null, null]);
+test('the SMA averages P&F boxes, not bar closes: null until the period has enough boxes, and vwap still drives the signals', () => {
+  // PATH draws X 1-5 (5 boxes), O 4-0 (5), X 1-7 (7), O 6..-1 (8): 25 boxes in all
+  const m = buildPanelModel(bars(PATH), 'sma', { smaPeriod: 11 });
+  assert.deepEqual(m.overlay.map(v => v !== null), [false, false, true, true]);   // 5, 10, 17, 25 boxes so far
   assert.equal(m.signals.length, 2);
+  assert.deepEqual(buildPanelModel(bars(PATH), 'sma', { smaPeriod: 26 }).overlay, [null, null, null, null]);
 });
 
-test('the sma overlay has values once ten bars exist', () => {
-  const m = buildPanelModel(bars([0, 5, 2, 0, 3, 7, 4, -1, -2, -3, -4, -5]), 'sma');
-  assert.ok(m.overlay[m.overlay.length - 1] !== null);
+test('box SMA: box values in drawing order (X bottom-up, O top-down), read at each column\'s last box', () => {
+  const m = buildPanelModel(bars(PATH), 'sma', { smaPeriod: 3 });
+  // column 1 (X 1-5) ends on boxes 3, 4, 5; column 2 (O 4-0) ends on 2, 1, 0; column 4 (O 6..-1) ends on 1, 0, -1
+  assert.ok(Math.abs((m.overlay[0] as number) - priceAt(4)) < 1e-9);
+  assert.ok(Math.abs((m.overlay[1] as number) - priceAt(1)) < 1e-9);
+  assert.ok(Math.abs((m.overlay[3] as number) - priceAt(0)) < 1e-9);
+  assert.equal(m.overlayNow, m.overlay[3]);
+});
+
+test('box SMA ignores time: the same boxes reached by more bars give the same line', () => {
+  const slow = bars([0, 1, 2, 3, 4, 5, 5, 5, 4, 3, 2]);   // extra and flat bars, same boxes as the fast path
+  const fast = bars([0, 5, 2]);
+  assert.deepEqual(buildPanelModel(slow, 'sma', { smaPeriod: 4 }).overlay, buildPanelModel(fast, 'sma', { smaPeriod: 4 }).overlay);
+});
+
+test('the SMA period defaults to 50 and follows the option; the model reports it for the label', () => {
+  const d = buildPanelModel(bars(PATH), 'sma');
+  assert.equal(d.smaPeriod, 50);
+  assert.equal(d.overlayNow, null);                            // 25 boxes < 50
+  assert.equal(buildPanelModel(bars(PATH), 'sma', { smaPeriod: 3 }).smaPeriod, 3);
 });
 
 test('the model reports the time of its last closed bar for the alert watermark', () => {
@@ -141,9 +160,38 @@ test('overlayNow is the VWAP at the last closed minute, not at the last column\'
   assert.notEqual(m.overlayNow, m.overlay[m.overlay.length - 1]);
 });
 
-test('vwapIsAverage is set only when no bar carried volume (an index)', () => {
-  assert.equal(buildPanelModel(bars(PATH), 'vwap').vwapIsAverage, false);
-  assert.equal(buildPanelModel(bars(PATH).map(x => ({ ...x, vol: 0 })), 'vwap').vwapIsAverage, true);
+test('without traded volume (an index, or no bar with volume) there is no VWAP: the box SMA is drawn whatever was asked', () => {
+  const withVol = buildPanelModel(bars(PATH), 'vwap');
+  assert.equal(withVol.vwapAvailable, true);
+  assert.equal(withVol.overlayKind, 'vwap');
+  const index = buildPanelModel(bars(PATH), 'vwap', { volume: false, smaPeriod: 3 });
+  assert.equal(index.vwapAvailable, false);
+  assert.equal(index.overlayKind, 'sma');
+  assert.deepEqual(index.overlay, buildPanelModel(bars(PATH), 'sma', { smaPeriod: 3 }).overlay);
+  const zeroVol = buildPanelModel(bars(PATH).map(x => ({ ...x, vol: 0 })), 'vwap');
+  assert.equal(zeroVol.vwapAvailable, false);
+  assert.equal(zeroVol.overlayKind, 'sma');
+});
+
+test('without volume the short-entry zone and the cover cue are measured against the box SMA at the break, not VWAP', () => {
+  // PATH: X 1-5, O 4-0, X 1-7, O 6..-1. The double bottom breaks at the last bar, at box -1.
+  const priceVolume = buildPanelModel(bars(PATH), 'vwap');
+  const index3 = buildPanelModel(bars(PATH), 'vwap', { volume: false, smaPeriod: 3 });
+  const sell = (m: typeof index3) => m.signals.find(g => g.kind === 'DOUBLE_BOTTOM_SELL')!;
+  assert.ok(sell(index3));
+  // SMA 3 of the last three boxes drawn by the breaking bar (1, 0, -1) is box 0; the break price is box -1: below it
+  assert.equal(sell(index3).belowVwap, true);
+  // too few boxes for the SMA at the break (25 < 26): no reference, so not "below"
+  assert.equal(sell(buildPanelModel(bars(PATH), 'vwap', { volume: false, smaPeriod: 26 })).belowVwap, false);
+  assert.equal(sell(priceVolume).kind, 'DOUBLE_BOTTOM_SELL');
+});
+
+test('boxSmaByBar: each bar sees only the boxes drawn by it', () => {
+  const m = buildPanelModel(bars([0, 4, 6]), 'sma', { smaPeriod: 2 });   // bar 1 draws boxes 1-4, bar 2 draws 5-6
+  const series = boxSmaByBar(m.columns, m.box, 2, 3);
+  assert.equal(series[0], null);
+  assert.ok(Math.abs((series[1] as number) - priceAt(3.5)) < 1e-9);       // boxes 3 and 4
+  assert.ok(Math.abs((series[2] as number) - priceAt(5.5)) < 1e-9);       // boxes 5 and 6
 });
 
 test('boxBars records the bar that drew each box, bottom to top', () => {
@@ -167,4 +215,41 @@ test('sessionMarks: the first box each session drew, even inside a column opened
   ]);
   assert.deepEqual(m.sessions, days);
   assert.deepEqual(m.columnTimes[0], { start: b[1].t, end: b[2].t });
+});
+
+// ── unconfirmed boxes (the forming bar) ───────────────────────────────────────
+test('a forming bar that extends the last column adds unconfirmed boxes on top of it; confirmed columns are unchanged', () => {
+  const closed = bars([0, 4]);                                  // X 1-4
+  const forming = { ...bars([0, 4, 6])[2] };                    // the open minute is at box 6
+  const m = buildPanelModel(closed, 'vwap', { forming });
+  assert.equal(m.columns[0].boxes, 4);
+  assert.equal(m.liveColumns[0].boxes, 6);
+  assert.deepEqual(unconfirmedBoxes(m.columns, m.liveColumns, m.box), [{ col: 0, ks: [4, 5] }]);   // boxes 5 and 6
+  assert.equal(m.signals.length, 0);
+});
+
+test('a forming bar that reverses draws an unconfirmed column; without a forming bar there is nothing unconfirmed', () => {
+  const closed = bars([0, 5]);
+  const forming = { ...bars([0, 5, 1])[2] };                    // 4 boxes down: a 3-box reversal, not closed yet
+  const m = buildPanelModel(closed, 'vwap', { forming });
+  assert.equal(m.columns.length, 1);
+  assert.equal(m.liveColumns.length, 2);
+  assert.deepEqual(unconfirmedBoxes(m.columns, m.liveColumns, m.box), [{ col: 1, ks: [0, 1, 2, 3] }]);   // O 4 down to 1
+  const plain = buildPanelModel(closed, 'vwap');
+  assert.deepEqual(unconfirmedBoxes(plain.columns, plain.liveColumns, plain.box), []);
+});
+
+test('on a 5-minute chart the unfinished 5-minute bar is unconfirmed even with no forming 1-min bar', () => {
+  const b = bars([0, 1, 1, 1, 1, 2, 2, 6]);                    // bucket 1 = minutes 0-4, bucket 2 = minutes 5-7 (unfinished)
+  const m = buildPanelModel(b, 'vwap', { interval: 5 });
+  assert.ok(unconfirmedBoxes(m.columns, m.liveColumns, m.box).length > 0);
+});
+
+test('a wild forming price (a bad tick) draws no unconfirmed boxes instead of thousands', () => {
+  const closed = bars([0, 4]);
+  const ok = buildPanelModel(closed, 'vwap', { forming: { ...bars([0, 4, 4 + MAX_UNCONFIRMED_BOXES])[2] } });
+  assert.equal(unconfirmedBoxes(ok.columns, ok.liveColumns, ok.box).reduce((n, u) => n + u.ks.length, 0), MAX_UNCONFIRMED_BOXES);
+  const wild = buildPanelModel(closed, 'vwap', { forming: { ...bars([0, 4, 5 + MAX_UNCONFIRMED_BOXES])[2] } });
+  assert.deepEqual(unconfirmedBoxes(wild.columns, wild.liveColumns, wild.box), []);
+  assert.equal(wild.liveColumns, wild.columns);
 });

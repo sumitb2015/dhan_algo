@@ -7,7 +7,7 @@ import NavBar from './NavBar';
 import DataChip from './DataChip';
 import PnfPanel from './straddlePnf/PnfPanel';
 import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
-import SettingsControls from './straddlePnf/SettingsControls';
+import SettingsControls, { SmaPeriodInput } from './straddlePnf/SettingsControls';
 import { DEFAULT_SETTINGS, SETTINGS_KEY, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
 import { newSignalsAfter, nextWatermark, capLog } from '@/lib/straddlePnfLive';
@@ -314,8 +314,9 @@ export default function StraddleSimulatorPage() {
           <SettingsControls settings={settings} onChange={applySettings} />
           <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-950" role="group" aria-label="Overlay">
             <button type="button" aria-pressed={overlay === 'vwap'} onClick={() => setOverlay('vwap')} className={seg(overlay === 'vwap')}>VWAP</button>
-            <button type="button" aria-pressed={overlay === 'sma'} onClick={() => setOverlay('sma')} className={seg(overlay === 'sma')}>SMA 10</button>
+            <button type="button" aria-pressed={overlay === 'sma'} onClick={() => setOverlay('sma')} className={seg(overlay === 'sma')}>SMA {settings.smaPeriod}</button>
           </div>
+          <SmaPeriodInput settings={settings} onChange={applySettings} />
           <button type="button" aria-label="Alert log" aria-pressed={logOpen} onClick={() => setLogOpen(o => !o)} className={`${iconBtn} relative`}>
             <Bell className="w-3.5 h-3.5" aria-hidden="true" />
             {log.length > 0 && <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 rounded-full bg-emerald-500 text-oncolor text-[9px] font-bold leading-4 text-center">{log.length}</span>}

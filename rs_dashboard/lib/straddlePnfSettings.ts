@@ -6,12 +6,26 @@ import { INTERVALS, type Interval } from './straddlePnfInterval.ts';
 export const REVERSALS = [1, 2, 3, 4, 5] as const;
 export type Reversal = (typeof REVERSALS)[number];
 
-export type PnfSettings = { interval: Interval; boxPct: number; reversal: Reversal };
+/** `smaPeriod`: P&F boxes in the SMA overlay line (an average of box values, not of bar closes). */
+export type PnfSettings = { interval: Interval; boxPct: number; reversal: Reversal; smaPeriod: number };
 
 /** localStorage key shared by the live page and the simulator, so both show the chart the same way. */
 export const SETTINGS_KEY = 'straddle-pnf-settings';
 
-export const DEFAULT_SETTINGS: PnfSettings = { interval: 1, boxPct: 0.5, reversal: 3 };
+export const DEFAULT_SETTINGS: PnfSettings = { interval: 1, boxPct: 0.5, reversal: 3, smaPeriod: 50 };
+/** SMA period limits, in P&F boxes (a small box over 10 sessions draws a few hundred to a few thousand boxes). */
+export const MIN_SMA_PERIOD = 2;
+export const MAX_SMA_PERIOD = 500;
+
+const smaPeriodOk = (n: number) => Number.isInteger(n) && n >= MIN_SMA_PERIOD && n <= MAX_SMA_PERIOD;
+
+/** " 50 " -> 50; a whole number inside [MIN_SMA_PERIOD, MAX_SMA_PERIOD]; anything else -> null. */
+export function parseSmaPeriod(text: string): number | null {
+  const t = text.trim();
+  if (!/^\d+$/.test(t)) return null;
+  const n = Number(t);
+  return smaPeriodOk(n) ? n : null;
+}
 /** Box size limits, in % of the first price: below the minimum the chart turns into thousands of boxes, above the maximum it is a single column. */
 export const MIN_BOX_PCT = 0.05;
 export const MAX_BOX_PCT = 5;
@@ -35,7 +49,8 @@ export function readSettings(raw: string | null): PnfSettings {
     ? o.boxPct : DEFAULT_SETTINGS.boxPct;
   const reversal = typeof o.reversal === 'number' && (REVERSALS as readonly number[]).includes(o.reversal)
     ? (o.reversal as Reversal) : DEFAULT_SETTINGS.reversal;
-  return { interval, boxPct, reversal };
+  const smaPeriod = typeof o.smaPeriod === 'number' && smaPeriodOk(o.smaPeriod) ? o.smaPeriod : DEFAULT_SETTINGS.smaPeriod;
+  return { interval, boxPct, reversal, smaPeriod };
 }
 
 export function serializeSettings(s: PnfSettings): string {

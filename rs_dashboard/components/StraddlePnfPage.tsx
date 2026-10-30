@@ -8,7 +8,7 @@ import DataChip from './DataChip';
 import PnfPanel from './straddlePnf/PnfPanel';
 import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
 import SymbolSearch from './straddlePnf/SymbolSearch';
-import SettingsControls from './straddlePnf/SettingsControls';
+import SettingsControls, { SmaPeriodInput } from './straddlePnf/SettingsControls';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/alertSound';
 import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
@@ -189,13 +189,17 @@ export default function StraddlePnfPage() {
   }, [inst?.segment, inst?.security_id, market]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── panel model: CLOSED bars only, so a signal never repaints ───────────
+  // An index's feed "volume" is its constituents' turnover, not traded volume: no VWAP, the box SMA stands in for it.
+  const vwapAllowed = target.kind !== 'index';
+  const shownOverlay: Overlay = vwapAllowed ? overlay : 'sma';
   const model = useMemo(() => {
     const last = bars[bars.length - 1];
     const forming = last !== undefined && last.t >= minuteOf(now / 1000) && now > 0; // the minute still forming is not closed yet
     return buildPanelModel(forming ? bars.slice(0, -1) : bars, overlay, {
       ...settings, sessionCloseMin: SESSION_MIN[market][1], forming: forming ? last : undefined,
+      volume: vwapAllowed,
     });
-  }, [bars, overlay, settings, now, market]);
+  }, [bars, overlay, settings, now, market, vwapAllowed]);
 
   // A chart's name for the alert log: the symbol, with the contract month for a future.
   const label = useMemo(() => {
@@ -223,7 +227,7 @@ export default function StraddlePnfPage() {
     for (const e of fresh) {
       const sell = e.kind === 'DOUBLE_BOTTOM_SELL';
       const title = `${label} · ${sell ? 'Double bottom SELL' : 'Double top BUY'} @ ${e.price.toFixed(2)}`;
-      if (sell) toast.error(title, { description: e.belowVwap ? `Below ${model.vwapIsAverage ? 'average' : 'VWAP'} — short entry zone` : undefined });
+      if (sell) toast.error(title, { description: e.belowVwap ? `Below ${model.vwapAvailable ? 'VWAP' : `SMA ${model.smaPeriod}`} — short entry zone` : undefined });
       else toast.success(title);
       setFlash(sell ? 'sell' : 'buy');
       setTimeout(() => setFlash(null), FLASH_MS);
@@ -303,9 +307,14 @@ export default function StraddlePnfPage() {
           <SymbolSearch active={target.kind === 'futures' || isNifty ? null : { kind: target.kind, symbol: target.symbol, name: target.name }} onPick={pickSearch} />
           <SettingsControls settings={settings} onChange={applySettings} />
           <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
-            <button type="button" aria-pressed={overlay === 'vwap'} onClick={() => pickOverlay('vwap')} className={seg(overlay === 'vwap')}>VWAP</button>
-            <button type="button" aria-pressed={overlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(overlay === 'sma')}>SMA 10</button>
+            {/* An index has no traded volume, so no VWAP: the button is disabled and the SMA is drawn (the saved choice is kept for
+                stocks and futures). */}
+            <button type="button" aria-pressed={shownOverlay === 'vwap'} onClick={() => pickOverlay('vwap')} disabled={!vwapAllowed}
+                    title={vwapAllowed ? undefined : 'An index has no traded volume, so there is no VWAP: the SMA of the P&F boxes is used'}
+                    className={`${seg(shownOverlay === 'vwap')} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-zinc-400`}>VWAP</button>
+            <button type="button" aria-pressed={shownOverlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(shownOverlay === 'sma')}>SMA {settings.smaPeriod}</button>
           </div>
+          <SmaPeriodInput settings={settings} onChange={applySettings} />
           <button type="button" onClick={recenterNow} className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800">
             <LocateFixed className="w-3.5 h-3.5" aria-hidden="true" /> Re-center
           </button>

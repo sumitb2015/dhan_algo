@@ -2,12 +2,12 @@
 
 import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { Overlay, PanelModel } from '@/lib/straddlePnfModel';
+import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
 import { Minus, Plus, RotateCcw } from 'lucide-react';
 import { layoutPanel, AXIS_W, PAD_TOP } from '@/lib/straddlePnfLayout';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
-// One straddle P&F chart: X (green) / O (red) glyphs on a visible box grid, VWAP or SMA10 line, a bar at the level every double
+// One straddle P&F chart: X (green) / O (red) glyphs on a visible box grid, VWAP or SMA line, a bar at the level every double
 // top / double bottom broke, date dividers where a new session starts and a tag at the live price. Every column is drawn: the
 // chart scrolls (it opens on the newest column) and the price axis stays pinned to the right edge while you pan.
 
@@ -95,9 +95,13 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
   // An index has no volume: its "VWAP" is a plain cumulative average, and says so.
-  const vwapLabel = model.vwapIsAverage ? 'Avg' : 'VWAP';
-  const overlayLabel = overlay === 'vwap' ? vwapLabel : 'SMA 10';
+  // The line actually drawn: an instrument without traded volume (an index) always gets the box SMA, whatever was asked.
+  const kind = model.vwapAvailable ? overlay : model.overlayKind;
+  const overlayLabel = kind === 'vwap' ? 'VWAP' : `SMA ${model.smaPeriod}`;
   const overlayNow = model.overlayNow;
+  // The SMA averages P&F boxes: say so when there are not enough of them yet, rather than show no line and no reason.
+  const totalBoxes = columns.reduce((n, c) => n + c.boxes, 0);
+  const smaWaiting = kind === 'sma' && overlayNow === null && columns.length > 0;
   // Change is measured from the previous close: the feed's (official) while trusted, else the history's, then the session open.
   const prevClose = feedPrevClose ?? model.prevClose;
   const changeBase = prevClose ?? model.sessionOpen;
@@ -109,7 +113,10 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     ? ` · ${model.sessions.length} sessions (${shortDate(model.sessions[0])} – ${shortDate(model.sessions[model.sessions.length - 1])})` : '';
 
   const [zoom, setZoom] = useState(1);
-  const L = layoutPanel(columns, box, liveValue, width, HEIGHT, zoom, true);
+  // Laid out with the unconfirmed boxes too (the live columns are the confirmed ones plus what the forming bar adds), so a
+  // new unconfirmed column gets its own cell instead of sliding under the pinned axis.
+  const liveCols = model.liveColumns.length >= columns.length ? model.liveColumns : columns;
+  const L = layoutPanel(liveCols, box, liveValue, width, HEIGHT, zoom, true);
   const { cell, yMin, yMax, plotW, contentW, contentH, offsetX, padY, padR } = L;
   const yOf = (p: number) => padY + PAD_TOP + ((yMax - p) / box) * cell;
   const xOf = (j: number) => offsetX + j * cell;
@@ -118,7 +125,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   const s = cell * 0.36;                       // glyph half-size
   const stroke = Math.max(1.2, Math.min(2.4, cell * 0.075)); // keeps X / O legible when zoomed, not heavy when small
   const gridId = `pnf-grid-${strike}`;
-  const gridY = columns.length ? ((yOf(columns[0].low) % cell) + cell) % cell : 0; // a cell edge, so grid lines run along the box edges
+  const gridY = liveCols.length ? ((yOf(liveCols[0].low) % cell) + cell) % cell : 0; // a cell edge, so grid lines run along the box edges
 
   // Open on the newest column, centred on the latest price; keep following the newest column unless the user has panned away.
   const scrollRef = wrapRef;
@@ -134,17 +141,17 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   // Until the user zooms or drags, the vertical position follows the layout (it changes when the panel is measured and as the range grows).
   const touchedRef = useRef(false);
   const centeredFor = useRef<number | null>(null);
-  const lastY = liveValue ?? (columns.length ? (columns[columns.length - 1].low + columns[columns.length - 1].high) / 2 : null);
+  const lastY = liveValue ?? (liveCols.length ? (liveCols[liveCols.length - 1].low + liveCols[liveCols.length - 1].high) / 2 : null);
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el || columns.length === 0) return;
+    if (!el || liveCols.length === 0) return;
     if (stickRef.current) el.scrollLeft = stickLeft(el);
     if (centeredFor.current !== strike) { touchedRef.current = false; centeredFor.current = strike; }
     if (!touchedRef.current && lastY !== null && box > 0) {
       el.scrollTop = topFor(el);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [columns.length, contentW, contentH, strike]);
+  }, [liveCols.length, contentW, contentH, strike]);
 
   // TradingView-style controls (same as the options charts): wheel zooms around the cursor, drag pans freely, double-click or the
   // round-arrow button fits the chart back to the newest column, and − / + zoom around the view centre. No scrollbars.
@@ -157,7 +164,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     const x = ax ?? el.clientWidth / 2;
     const y = ay ?? el.clientHeight / 2;
     // The column and price under the anchor stay under it: read them off the current layout, place them on the next one.
-    const L2 = layoutPanel(columns, box, liveValue, width, HEIGHT, next, true);
+    const L2 = layoutPanel(liveCols, box, liveValue, width, HEIGHT, next, true);
     const j = (el.scrollLeft + x - offsetX) / cell;
     const u = (el.scrollTop + y - padY - PAD_TOP) / cell;
     pendingRef.current = { left: L2.offsetX + j * L2.cell - x, top: L2.padY + PAD_TOP + u * L2.cell - y };
@@ -173,7 +180,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     pendingRef.current = null;
     if (pending === 'reset') {
       // Centre the newest column (the plot is the view minus the pinned axis) and the latest price.
-      el.scrollLeft = Math.max(0, xOf(columns.length - 0.5) - (el.clientWidth - AXIS_W) / 2);
+      el.scrollLeft = Math.max(0, xOf(liveCols.length - 0.5) - (el.clientWidth - AXIS_W) / 2);
       if (lastY !== null && box > 0) el.scrollTop = topFor(el);
     } else {
       el.scrollLeft = pending.left;
@@ -215,7 +222,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
   };
   const rowTop = padY + PAD_TOP;
   const cross = (() => {
-    if (!hover || dragging || box <= 0 || !columns.length) return null;
+    if (!hover || dragging || box <= 0 || !liveCols.length) return null;
     const row = Math.floor((hover.y - rowTop) / cell);
     if (row < 0 || row >= L.rows) return null;
     const price = yMax - (row + 0.5) * box;                      // yMax is a cell edge: this is the row's box price
@@ -224,6 +231,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     return { price, y: yOf(price), col, x: col !== null ? xOf(col) + cell / 2 : hover.overAxis ? null : hover.x };
   })();
   const markAt = new Map(model.sessionMarks.map(m => [`${m.col}:${m.k}`, m.session]));
+  const unconfirmed = unconfirmedBoxes(columns, liveCols, box);
 
   const lastEntryId = [...signals].reverse().find(g => g.kind === 'DOUBLE_BOTTOM_SELL' && g.belowVwap)?.id;
   const ring = flash === 'buy' ? 'ring-2 ring-emerald-400' : flash === 'sell' ? 'ring-2 ring-red-400' : '';
@@ -248,31 +256,58 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     >
       {headerSlot ? createPortal(
         <div className="flex items-center gap-3 min-w-0" aria-label={`${title} summary`}>
-          <div className="flex items-baseline gap-2 shrink-0">
-            <span data-testid="pnf-scrip" className="text-xs font-bold tracking-tight text-zinc-100">{scrip ?? title}</span>
-            {sessionTag
-              ? <span data-testid="pnf-session-tag" className="text-[10px] font-bold uppercase tracking-wider text-sky-300">{sessionTag}</span>
-              : stale && <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">Stale</span>}
-            <span className="text-lg font-bold font-mono text-white leading-none">{liveValue !== null ? fmt(liveValue) : '—'}</span>
+          {/* price block: scrip, live price, change pill */}
+          <div className="flex items-center gap-2.5 shrink-0">
+            <div className="flex flex-col leading-none">
+              <span data-testid="pnf-scrip" className="text-[13px] font-bold tracking-tight text-white">{scrip ?? title}</span>
+              {sessionTag
+                ? <span data-testid="pnf-session-tag" className="mt-1 text-[10px] font-bold uppercase tracking-wider text-sky-300">{sessionTag}</span>
+                : stale && <span className="mt-1 text-[10px] font-bold uppercase tracking-wider text-amber-300">Stale</span>}
+            </div>
+            <span className="text-xl font-bold font-mono tabular-nums text-white leading-none">{liveValue !== null ? fmt(liveValue) : '—'}</span>
             {change !== null && changePct !== null && (
-              <span data-testid="pnf-vs-open" className={`text-[11px] font-bold font-mono ${change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                {signed(change)} ({signed(changePct)}%) <span className="font-medium text-zinc-500">{changeLabel}</span>
+              <span data-testid="pnf-vs-open" className="flex items-center gap-1.5">
+                <span className={`px-1.5 py-0.5 rounded border text-xs font-bold font-mono tabular-nums ${change >= 0
+                  ? 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10' : 'text-red-400 border-red-500/30 bg-red-500/10'}`}>
+                  {signed(change)} ({signed(changePct)}%)
+                </span>
+                <span className="text-[11px] font-medium text-zinc-400">{changeLabel}</span>
               </span>
             )}
           </div>
-          <span className="w-px h-4 bg-zinc-800 shrink-0" />
-          <span className="text-[10px] font-mono text-zinc-400 truncate">
-            {legs && <>CE {live ? fmt(live.ce) : '—'} · PE {live ? fmt(live.pe) : '—'} ·{' '}</>}
-            <span data-testid="pnf-overlay-legend" className={overlay === 'vwap' ? 'text-amber-300' : 'text-zinc-300'}>
-              {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : ''}
+          <span className="w-px h-6 bg-zinc-700 shrink-0" />
+          {/* chart facts: muted label, bright value */}
+          <div className="flex items-center gap-3 min-w-0 text-xs font-mono tabular-nums">
+            {legs && (
+              <span className="shrink-0 text-zinc-400">
+                CE <span className="font-semibold text-zinc-100">{live ? fmt(live.ce) : '—'}</span>{' '}
+                PE <span className="font-semibold text-zinc-100">{live ? fmt(live.pe) : '—'}</span>
+              </span>
+            )}
+            <span data-testid="pnf-overlay-legend" className="shrink-0">
+              <span className={`font-bold ${kind === 'vwap' ? 'text-amber-400' : 'text-sky-400'}`}>{overlayLabel}</span>
+              {overlayNow !== null && <span className="font-semibold text-zinc-100">{` ${fmt(overlayNow)}`}</span>}
+              {smaWaiting && <span className="text-zinc-500">{` needs ${model.smaPeriod} boxes (${totalBoxes} so far)`}</span>}
             </span>
-          </span>
-          <span data-testid="pnf-box-info" className="text-[10px] font-mono text-zinc-500 truncate">
-            {box > 0 ? `Box ${box.toFixed(2)} (${boxPct}% of ${model.anchor.toFixed(2)}) · ${reversal}-box · ${columns.length} cols${sessionsInfo}` : 'Box —'}
-          </span>
+            <span data-testid="pnf-box-info" className="flex items-center gap-3 min-w-0 text-zinc-400 truncate"
+                  title={box > 0 ? `Box ${box.toFixed(2)} = ${boxPct}% of the first price ${fmt(model.anchor)}` : undefined}>
+              {box > 0 ? (
+                <>
+                  <span className="shrink-0">Box <span className="font-semibold text-zinc-100">{box.toFixed(2)}</span>{' '}
+                    <span className="text-zinc-500">({boxPct}% of {fmt(model.anchor)})</span></span>
+                  <span className="shrink-0"><span className="font-semibold text-zinc-100">{reversal}-box</span> rev</span>
+                  <span className="shrink-0"><span className="font-semibold text-zinc-100">{columns.length}</span> cols</span>
+                  {model.sessions.length > 0 && (
+                    <span className="truncate"><span className="font-semibold text-zinc-100">{model.sessions.length}</span> sessions{' '}
+                      <span className="text-zinc-500">({shortDate(model.sessions[0])} – {shortDate(model.sessions[model.sessions.length - 1])})</span></span>
+                  )}
+                </>
+              ) : 'Box —'}
+            </span>
+          </div>
           {lastSignal && (
             <span data-testid="pnf-last-signal"
-                  className={`shrink-0 text-[10px] font-bold font-mono px-1.5 py-0.5 rounded border ${
+                  className={`shrink-0 text-[11px] font-bold font-mono px-2 py-0.5 rounded border ${
                     lastSignal.kind === 'DOUBLE_BOTTOM_SELL'
                       ? 'text-red-400 border-red-500/30 bg-red-500/10'
                       : 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'}`}>
@@ -301,8 +336,8 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
         </div>
         <p className="text-[10px] font-mono text-zinc-400 mt-1 truncate">
           {legs && <>CE {live ? fmt(live.ce) : '—'} · PE {live ? fmt(live.pe) : '—'} ·{' '}</>}
-          <span data-testid="pnf-overlay-legend" className={overlay === 'vwap' ? 'text-amber-300' : 'text-zinc-300'}>
-            {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : ''}
+          <span data-testid="pnf-overlay-legend" className={kind === 'vwap' ? 'text-amber-300' : 'text-sky-300'}>
+            {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : smaWaiting ? ` needs ${model.smaPeriod} boxes (${totalBoxes} so far)` : ''}
           </span>
         </p>
         <div className="mt-0.5 flex items-center justify-between gap-2">
@@ -360,7 +395,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
           <p className="p-3 text-xs text-red-400">{error}</p>
         ) : loading ? (
           <p className="p-3 text-xs text-zinc-400">Loading…</p>
-        ) : columns.length === 0 ? (
+        ) : liveCols.length === 0 ? (
           <p className="p-3 text-xs text-zinc-400">{`Building chart — the first column needs a ${boxPct}% move${interval > 1 ? ` on closed ${interval}-minute bars` : ''}.`}</p>
         ) : (
           <div className="flex" style={{ width: contentW, height: contentH }}>
@@ -414,10 +449,27 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
                 }),
               )}
 
-              {/* VWAP / SMA10: one continuous line across the loaded sessions */}
+              {/* Unconfirmed boxes: what the bar still forming would add if it closed now, dimmed. They move with the price and can
+                  disappear; signals, the SMA and the date marks never use them. */}
+              {unconfirmed.map(({ col, ks }) => {
+                const lc = liveCols[col];
+                const cx = xOf(col) + cell / 2;
+                return ks.map(k => {
+                  const cy = yOf(lc.low + (k + 0.5) * box);
+                  return lc.dir === 'X' ? (
+                    <path key={`u${col}-${k}`} data-testid="pnf-unconfirmed" d={`M${cx - s} ${cy - s}L${cx + s} ${cy + s}M${cx + s} ${cy - s}L${cx - s} ${cy + s}`}
+                          className="stroke-emerald-400" opacity={0.35} strokeWidth={stroke} strokeLinecap="round" fill="none" />
+                  ) : (
+                    <circle key={`u${col}-${k}`} data-testid="pnf-unconfirmed" cx={cx} cy={cy} r={s}
+                            className="stroke-red-400" opacity={0.35} strokeWidth={stroke} fill="none" />
+                  );
+                });
+              })}
+
+              {/* VWAP / SMA: one continuous line across the loaded sessions */}
               {overlayPts && (
                 <polyline points={overlayPts} fill="none" strokeWidth={1.8}
-                          className={overlay === 'vwap' ? 'stroke-amber-300' : 'stroke-zinc-500'} />
+                          className={kind === 'vwap' ? 'stroke-amber-300' : 'stroke-sky-400'} />
               )}
 
               {/* short cover cue (the short-side rule): first bar of a green X column trading above VWAP */}
