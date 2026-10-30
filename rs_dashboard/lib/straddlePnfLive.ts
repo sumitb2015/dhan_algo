@@ -9,14 +9,15 @@ const minuteOf = (t: number) => Math.floor(t / 60) * 60;
 /**
  * Folds a CE+PE tick into the 1-min bars. A tick inside the open minute updates that bar's close; a tick in a later minute
  * appends a bar and reports the index of the bar that just closed (the only moment signals may be evaluated).
- * Ticks with a missing leg and ticks from an earlier minute are ignored.
+ * Ticks with a missing leg (unless `single`) and ticks from an earlier minute are ignored.
  *
  * Volume: a bar's volume is the growth of the cumulative figure since its baseline, so VWAP keeps weighting live bars.
  * A history bar still forming keeps the volume it already has and gains the growth on top; a counter that goes backwards
  * (bridge restart) re-baselines instead of producing a negative or lost volume.
  */
-export function foldTick(bars: Bar[], tick: Tick): { bars: Bar[]; closedIndex: number | null } {
-  if (!(tick.ce > 0) || !(tick.pe > 0)) return { bars, closedIndex: null };
+export function foldTick(bars: Bar[], tick: Tick, single = false): { bars: Bar[]; closedIndex: number | null } {
+  // `single`: a plain price (index / stock / future) is carried as ce with pe 0, the shape the history bars already have.
+  if (!(tick.ce > 0) || (!single && !(tick.pe > 0))) return { bars, closedIndex: null };
   const t = minuteOf(tick.t);
   const cv = Number.isFinite(tick.cumVol) && (tick.cumVol as number) >= 0 ? (tick.cumVol as number) : null;
   const last = bars[bars.length - 1];

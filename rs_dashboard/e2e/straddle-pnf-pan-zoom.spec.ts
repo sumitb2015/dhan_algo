@@ -74,7 +74,7 @@ test('the CRUDEOILM button charts the nearest future', async ({ page }) => {
   const seen: string[] = [];
   await mockApi(page, seen);
   await page.goto('/straddle-pnf');
-  await expect(page.getByTestId('pnf-header-summary')).toContainText('vs open');   // hydrated: a click before that is lost
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);   // hydrated: a click before that is lost
   await page.getByRole('button', { name: 'CRUDEOILM' }).click();
   await expect(page.getByTestId('pnf-panel')).toHaveCount(1);
   await expect(page.getByText('CRUDEOILM Nov 2026').first()).toBeVisible();     // the contract month, in the page subtitle
@@ -107,7 +107,7 @@ test('the search box charts a stock by its plain price, and NIFTY goes back to t
   const seen: string[] = [];
   await mockApi(page, seen);
   await page.goto('/straddle-pnf');
-  await expect(page.getByTestId('pnf-header-summary')).toContainText('vs open');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
   await page.getByRole('combobox', { name: 'Search index or stock' }).fill('rel');
   await page.getByRole('option', { name: /RELIANCE/ }).click();
   await expect(page.getByText('RELIANCE INDUSTRIES LIMITED').first()).toBeVisible();

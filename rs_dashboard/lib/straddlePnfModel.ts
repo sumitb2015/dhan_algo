@@ -19,6 +19,8 @@ export type PanelModel = {
   lastBarT: number | null;
   /** First usable close of the most recent session in the bars: the "open" the header's change is measured against. */
   sessionOpen: number | null;
+  /** Last close of the session before the most recent one in the bars: what the header's % change is measured against. */
+  prevClose: number | null;
 };
 
 export const SMA_PERIOD = 10;
@@ -28,6 +30,15 @@ function sessionOpenOf(bars: Bar[]): number | null {
   const session = sessionOf(bars[bars.length - 1].t);
   const first = bars.find(b => b.straddle > 0 && sessionOf(b.t) === session);
   return first ? first.straddle : null;
+}
+
+function prevCloseOf(bars: Bar[]): number | null {
+  if (!bars.length) return null;
+  const session = sessionOf(bars[bars.length - 1].t);
+  for (let i = bars.length - 1; i >= 0; i--) {
+    if (bars[i].straddle > 0 && sessionOf(bars[i].t) !== session) return bars[i].straddle;
+  }
+  return null;
 }
 
 export type PanelOptions = {
@@ -58,6 +69,7 @@ export function buildPanelModel(closedBars: Bar[], overlay: Overlay, opts: Panel
     exits: exitTags(columns, bars, vw),
     overlay: columns.map(c => line[c.endBar]),
     lastBarT: bars.length ? bars[bars.length - 1].t : null,
-    sessionOpen: sessionOpenOf(bars),
+    sessionOpen: sessionOpenOf(closedBars),
+    prevClose: prevCloseOf(closedBars),
   };
 }

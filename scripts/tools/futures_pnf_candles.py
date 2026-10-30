@@ -93,7 +93,7 @@ def main():
             errors[key] = str(exc)
         time.sleep(0.4)  # Dhan data API is rate limited
 
-    print(json.dumps({"bars": bars, "expiries": expiries, "errors": errors}))
+    print(json.dumps({"bars": bars, "expiries": expiries, "instrument": {"segment": "MCX_COMM", "security_id": contracts[0][1]}, "errors": errors}))
 
 
 if __name__ == "__main__":

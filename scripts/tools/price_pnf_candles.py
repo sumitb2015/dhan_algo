@@ -75,7 +75,7 @@ def main():
     df = _fetch_leg(helper, sid, from_date, today.strftime("%Y-%m-%d"), "1", exchange_segment=segment, instrument_type=instrument)
     rows = to_bars(df, args.sessions)
     errors = {} if rows else {"0": "no intraday bars"}
-    print(json.dumps({"bars": {"0": rows} if rows else {}, "name": name, "errors": errors}))
+    print(json.dumps({"bars": {"0": rows} if rows else {}, "name": name, "instrument": {"segment": segment, "security_id": sid}, "errors": errors}))
 
 
 if __name__ == "__main__":

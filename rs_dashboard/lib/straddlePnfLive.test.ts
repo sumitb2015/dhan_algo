@@ -128,3 +128,15 @@ test('VWAP keeps moving with live bars once they carry volume', () => {
   const v = vwap(bars);
   assert.ok(Math.abs((v[1] as number) - (100 * 1000 + 120 * 3000) / 4000) < 1e-9);
 });
+
+test('a plain-price tick (pe 0) folds only in single mode, in the open minute and into a new one', () => {
+  const bars = [bar(0, 100, 0)];
+  assert.equal(foldTick(bars, { t: T0 + 10, ce: 101, pe: 0 }).bars, bars); // straddle mode needs both legs
+  const same = foldTick(bars, { t: T0 + 10, ce: 101, pe: 0 }, true);
+  assert.equal(same.bars[0].straddle, 101);
+  assert.equal(same.closedIndex, null);
+  const next = foldTick(same.bars, { t: T0 + 65, ce: 102, pe: 0 }, true);
+  assert.equal(next.bars.length, 2);
+  assert.equal(next.closedIndex, 0);
+  assert.equal(next.bars[1].straddle, 102);
+});

@@ -26,6 +26,10 @@ interface Mock {
   longHistory?: boolean;
   /** Give the ATM strike a history at fixed IST times (Fri 23 Oct from 09:15) whose 1-minute chart has a double bottom that the 5-minute chart does not. */
   fixedHistory?: boolean;
+  /** The WebSocket bridge's latest price (null = the bridge has not ticked). The page must show it, not the history's last close. */
+  liveLtp?: number | null;
+  /** Every `/api/straddle-pnf/live` request, to prove the page asks the bridge for the history's instrument. */
+  liveCalls?: string[];
 }
 
 // 12 minutes from 09:15 IST. 1-minute chart: double top at minute 5, double bottom at minute 7. 5-minute chart (closes at minutes 4 and 9): X 1..3 then a reversal, no signal.
@@ -76,7 +80,12 @@ async function install(page: Page, m: Mock) {
     if (p === '/api/straddle-pnf' && method === 'GET') {
       // The page keys its one series by the first entry of `strikes`; this mock reuses the old ATM number so the locators stay stable.
       const series = m.fixedHistory ? fixedHistory() : m.longHistory ? longHistory() : withBreak(history(PATH_BEFORE_BREAK), m.phase >= 2);
-      return json(route, { success: true, mode: 'price', atm: 0, strikes: [ATM], name: 'Nifty 50', errors: {}, dataDate: '2026-10-23', bars: { [ATM]: series } });
+      return json(route, { success: true, mode: 'price', atm: 0, strikes: [ATM], name: 'Nifty 50', instrument: { segment: 'IDX_I', security_id: '13' }, errors: {}, dataDate: '2026-10-23', bars: { [ATM]: series } });
+    }
+    if (p === '/api/straddle-pnf/live' && method === 'GET') {
+      m.liveCalls?.push(u.search);
+      const q = m.liveLtp ? { ltp: m.liveLtp, changedMs: Date.now(), prevClose: null, volume: null } : null;
+      return json(route, { success: true, bridge: true, hub: true, quote: q, last: null });
     }
     if (method === 'GET') return json(route, { success: true });
 
@@ -180,8 +189,17 @@ test('the panel header shows the change versus the session open and the latest s
   await install(page, { phase: 0, blocked: [] });
   await page.goto('/straddle-pnf');
   const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);   // latest signal is a double top
-  await expect(page.getByTestId('pnf-vs-open')).toHaveText(/vs open/);
+  await expect(page.getByTestId('pnf-vs-open')).toHaveText(/vs (prev close|open)/);
+  await expect(page.getByTestId('pnf-scrip')).toHaveText(/\S/); // the price is never shown without its scrip
   await expect(page.getByTestId('pnf-last-signal')).toContainText('DT buy');
+});
+
+test('the header price follows the WebSocket bridge, asked for the history\'s own instrument', async ({ page }) => {
+  const m: Mock = { phase: 0, blocked: [], liveLtp: 123456.78, liveCalls: [] };
+  await install(page, m);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('1,23,456.78');
+  expect(m.liveCalls?.[0]).toBe('?segment=IDX_I&id=13');
 });
 
 // ── interval and box size ─────────────────────────────────────────────────────
@@ -238,7 +256,7 @@ test('the chosen interval and box % are remembered after a reload', async ({ pag
   await install(page, { phase: 0, blocked: [] });
   await page.goto('/straddle-pnf');
   // Wait until the page is live: the chart's header summary only exists after hydration, and a control changed before then is reset by it.
-  await expect(page.getByTestId('pnf-header-summary')).toContainText('vs open');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
   await page.getByLabel('Interval').selectOption('5');
   await page.getByLabel('Box %').fill('0.75');
   await page.getByLabel('Box %').press('Enter');
@@ -270,7 +288,7 @@ test('changing the interval or the box % redraws the charts but never fires an a
 test('the charts fit the window even though the header wraps, and opening the alert log does not push them down', async ({ page }) => {
   await install(page, { phase: 0, blocked: [] });
   await page.goto('/straddle-pnf');
-  await expect(page.getByTestId('pnf-header-summary')).toContainText('vs open');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
   const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
   const before = (await panel.boundingBox())!;
   const vh = page.viewportSize()!.height;
@@ -298,6 +316,6 @@ test('the reversal control defaults to 3 boxes, changes how often columns turn, 
   await page.waitForTimeout(400);
   await expect(page.getByTestId('pnf-log-row')).toHaveCount(0);        // redrawing never alerts
   await page.reload();
-  await expect(page.getByTestId('pnf-header-summary')).toContainText('vs open');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
   await expect(page.getByLabel('Reversal')).toHaveValue('2');
 });

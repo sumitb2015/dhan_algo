@@ -35,6 +35,10 @@ export type PnfPanelProps = {
   resetTick?: number;
   /** When set, the title/price/summary strip is drawn there (the page's top header) in one compact row, and not above the chart. */
   headerSlot?: HTMLElement | null;
+  /** The instrument's name for the header strip (the strip is shown without a card header, so the price needs a scrip beside it). */
+  scrip?: string;
+  /** Previous close from the live feed: the change's base when the loaded history holds no earlier session. */
+  feedPrevClose?: number | null;
 };
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
@@ -62,14 +66,18 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, overlay, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, interval = 1, boxPct = 0.5, reversal = 3 }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
   const overlayLabel = overlay === 'vwap' ? 'VWAP' : 'SMA 10';
   const overlayNow = [...model.overlay].reverse().find(v => v !== null) ?? null;
-  const change = liveValue !== null && model.sessionOpen ? liveValue - model.sessionOpen : null;
-  const changePct = change !== null && model.sessionOpen ? (change / model.sessionOpen) * 100 : null;
+  // Change is measured from yesterday's close; with no earlier session loaded it uses the feed's previous close, then the session open.
+  const prevClose = model.prevClose ?? feedPrevClose;
+  const changeBase = prevClose ?? model.sessionOpen;
+  const changeLabel = prevClose ? 'vs prev close' : 'vs open';
+  const change = liveValue !== null && changeBase ? liveValue - changeBase : null;
+  const changePct = change !== null && changeBase ? (change / changeBase) * 100 : null;
   const lastSignal = signals.length ? signals[signals.length - 1] : null;
 
   const [zoom, setZoom] = useState(1);
@@ -187,13 +195,17 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
     >
       {headerSlot ? createPortal(
         <div className="flex items-center gap-3 min-w-0" aria-label={`${title} summary`}>
-          {stale && <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">Stale</span>}
-          <span className="text-lg font-bold font-mono text-white leading-none">{liveValue !== null ? fmt(liveValue) : '—'}</span>
-          {change !== null && changePct !== null && (
-            <span data-testid="pnf-vs-open" className={`text-[10px] font-mono ${change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {signed(change)} ({signed(changePct)}%) vs open
-            </span>
-          )}
+          <div className="flex items-baseline gap-2 shrink-0">
+            <span data-testid="pnf-scrip" className="text-xs font-bold tracking-tight text-zinc-100">{scrip ?? title}</span>
+            {stale && <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300">Stale</span>}
+            <span className="text-lg font-bold font-mono text-white leading-none">{liveValue !== null ? fmt(liveValue) : '—'}</span>
+            {change !== null && changePct !== null && (
+              <span data-testid="pnf-vs-open" className={`text-[11px] font-bold font-mono ${change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {signed(change)} ({signed(changePct)}%) <span className="font-medium text-zinc-500">{changeLabel}</span>
+              </span>
+            )}
+          </div>
+          <span className="w-px h-4 bg-zinc-800 shrink-0" />
           <span className="text-[10px] font-mono text-zinc-400 truncate">
             {legs && <>CE {live ? fmt(live.ce) : '—'} · PE {live ? fmt(live.pe) : '—'} ·{' '}</>}
             <span data-testid="pnf-overlay-legend" className={overlay === 'vwap' ? 'text-amber-300' : 'text-zinc-300'}>

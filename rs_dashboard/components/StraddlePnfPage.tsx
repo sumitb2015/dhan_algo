@@ -12,7 +12,7 @@ import SettingsControls from './straddlePnf/SettingsControls';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/alertSound';
 import { buildPanelModel, type Overlay } from '@/lib/straddlePnfModel';
-import { newSignalsAfter, nextWatermark, capLog } from '@/lib/straddlePnfLive';
+import { foldTick, newSignalsAfter, nextWatermark, capLog, type Tick } from '@/lib/straddlePnfLive';
 import { DEFAULT_SETTINGS, SETTINGS_KEY, readSettings, serializeSettings, type PnfSettings } from '@/lib/straddlePnfSettings';
 import type { PnfPick } from '@/lib/straddlePnfSearch';
 import type { Bar } from '@/lib/straddlePnf';
@@ -22,11 +22,14 @@ import type { Bar } from '@/lib/straddlePnf';
 // re-fetches them every 30 s; signals are only ever evaluated on CLOSED one-minute bars, so the poll never delays one.
 
 type Target = { kind: 'index' | 'equity' | 'futures'; symbol: string; name: string };
-type Loaded = { key: number; dataDate: string | null; error?: string; expiry?: string };
+type Instrument = { segment: string; security_id: string };
+type Loaded = { key: number; dataDate: string | null; error?: string; expiry?: string; instrument?: Instrument };
+type LiveQuote = { ltp: number; changedMs: number; prevClose: number | null; volume: number | null };
 
 const DEFAULT_TARGET: Target = { kind: 'index', symbol: 'NIFTY', name: 'Nifty 50' };
 const FUTURES_TARGET: Target = { kind: 'futures', symbol: 'CRUDEOILM', name: 'CRUDEOILM futures' };
 const POLL_MS = 30_000;
+const LIVE_MS = 1_000;   // how often the page reads the WebSocket bridge's latest price (the bridge itself is push, from the shared hub)
 const FRESH_S = 180;
 const FLASH_MS = 4000;
 const LOG_KEY = 'straddle-pnf-log';
@@ -74,6 +77,9 @@ export default function StraddlePnfPage() {
   const [muted, setMuted] = useState(false);
   const [flash, setFlash] = useState<'buy' | 'sell' | null>(null);
   const [now, setNow] = useState(0);
+  // The newest WebSocket price; kept so a history refresh (which replaces the bars) can lay it back on top.
+  const tickRef = useRef<Tick | null>(null);
+  const [feedPrevClose, setFeedPrevClose] = useState<number | null>(null);
   // The chart's price/summary strip is drawn into the top header (PnfPanel `headerSlot`) instead of a card header above the chart.
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
 
@@ -115,7 +121,7 @@ export default function StraddlePnfPage() {
     try {
       const res = await fetch(`/api/straddle-pnf?${apiQuery(target)}`);
       const j = await res.json() as {
-        success?: boolean; error?: string; strikes: number[]; dataDate: string | null; name?: string;
+        success?: boolean; error?: string; strikes: number[]; dataDate: string | null; name?: string; instrument?: Instrument | null;
         expiries?: Record<string, string>; bars: Record<string, Bar[]>; errors: Record<string, string>;
       };
       if (id !== reqRef.current) return; // a newer request owns the screen
@@ -123,8 +129,10 @@ export default function StraddlePnfPage() {
       const key = j.strikes[0] ?? 0;
       if (reset) rebaselineRef.current = true; // history never alerts
       if (recenterViewRef.current) { recenterViewRef.current = false; setViewTick(n => n + 1); }
-      setBars(j.bars[String(key)] ?? []);
-      setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], expiry: j.expiries?.[String(key)] });
+      const hist = j.bars[String(key)] ?? [];
+      const tk = tickRef.current;
+      setBars(tk && hist.length && tk.t >= hist[hist.length - 1].t ? foldTick(hist, tk, true).bars : hist);
+      setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], expiry: j.expiries?.[String(key)], instrument: j.instrument ?? undefined });
       if (j.name) setName(j.name);
       setLoadError(null);
     } catch (e) {
@@ -142,6 +150,29 @@ export default function StraddlePnfPage() {
     return () => clearInterval(id);
   }, [load]);
 
+  // ── live price over the WebSocket bridge → the open bar ─────────────────
+  const inst = loaded?.instrument;
+  useEffect(() => {
+    if (!inst) return;
+    let dead = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/straddle-pnf/live?segment=${inst.segment}&id=${inst.security_id}`);
+        const j = await res.json() as { success?: boolean; quote?: LiveQuote | null; last?: { prevClose: number | null } | null };
+        if (dead || !j.success) return;
+        setFeedPrevClose(j.quote?.prevClose ?? j.last?.prevClose ?? null);
+        const q = j.quote;
+        if (!q) return;
+        const tick: Tick = { t: q.changedMs / 1000, ce: q.ltp, pe: 0, cumVol: q.volume ?? undefined };
+        tickRef.current = tick;
+        setBars(prev => (prev.length ? foldTick(prev, tick, true).bars : prev));
+      } catch { /* the header keeps the last price and shows Stale until the next read lands */ }
+    };
+    void poll();
+    const id = setInterval(() => { void poll(); }, LIVE_MS);
+    return () => { dead = true; clearInterval(id); };
+  }, [inst?.segment, inst?.security_id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── panel model: CLOSED bars only, so a signal never repaints ───────────
   const model = useMemo(() => {
     const last = bars[bars.length - 1];
@@ -155,6 +186,9 @@ export default function StraddlePnfPage() {
     const iso = loaded?.expiry;
     return iso ? `${target.symbol} ${MONTHS[Number(iso.slice(5, 7)) - 1]} ${iso.slice(0, 4)}` : target.symbol;
   }, [target, loaded]);
+
+  // The header's scrip: the symbol, with the contract month for a future and the resolved full name for an index / stock.
+  const scrip = target.kind === 'futures' ? label : name && name !== target.symbol ? `${target.symbol} · ${name}` : target.symbol;
 
   // ── alerts: new signals on newly closed bars, once each ─────────────────
   useEffect(() => {
@@ -194,6 +228,7 @@ export default function StraddlePnfPage() {
     reqRef.current++;
     watermarkRef.current = 0;
     rebaselineRef.current = true;
+    tickRef.current = null; setFeedPrevClose(null);
     setLoaded(null); setBars([]); setLoading(true); setLoadError(null); setName(null);
     setTarget(next);
   };
@@ -284,6 +319,8 @@ export default function StraddlePnfPage() {
             fill
             resetTick={viewTick}
             headerSlot={headerSlot}
+            scrip={scrip}
+            feedPrevClose={feedPrevClose}
             error={loaded?.error}
           />
         </div>

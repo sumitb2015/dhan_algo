@@ -111,3 +111,12 @@ test('the reversal setting sets how many boxes against the column it takes to re
   assert.equal(buildPanelModel(b, 'vwap').columns.length, 1); // default stays 3
   assert.equal(buildPanelModel(bars([0, 5, 4]), 'vwap', { reversal: 1 }).columns.length, 2);
 });
+
+test('prevClose is the last close of the session before the most recent one, null with a single session', () => {
+  const DAY = 86_400;
+  const d1 = [0, 5].map((l, i) => ({ t: BASE_T + i * 60, ce: priceAt(l) / 2, pe: priceAt(l) / 2, straddle: priceAt(l), vol: 10 }));
+  const d2 = [3, 4, 6].map((l, i) => ({ t: BASE_T + DAY + i * 60, ce: priceAt(l) / 2, pe: priceAt(l) / 2, straddle: priceAt(l), vol: 10 }));
+  assert.equal(buildPanelModel([...d1, ...d2], 'vwap').prevClose, priceAt(5));
+  assert.equal(buildPanelModel(d1, 'vwap').prevClose, null);
+  assert.equal(buildPanelModel([], 'vwap').prevClose, null);
+});
