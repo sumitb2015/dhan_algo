@@ -112,3 +112,11 @@ test('autoMarkers: entry on the signal bar, exit on the reversal bar (or the bar
   assert.deepEqual(m.map(x => [x.action, x.t]), [['SELL', 1920], ['BUY', 2040], ['BUY', 2160], ['SELL', 2280 - 60]]);
   assert.deepEqual(autoMarkers(l.rows, 'futures|CRUDEOILM|2026-11-19||'), []);
 });
+
+test('autoMarkers sit on the confirmed boxes when the row has them (REAL books the live price, the marker stays on the box)', async () => {
+  const { autoMarkers } = await import('./pnfAutoLedger.ts');
+  let l = run(EMPTY_LEDGER, { op: 'open', row: row({ entryPrice: 100.4, entryBox: 100 }) });
+  l = run(l, { op: 'close', id: 'r1', exitT: 2105, exitPrice: 103.2, exitBox: 103, reason: 'reversal', exitBarT: 2040 });
+  assert.deepEqual(autoMarkers(l.rows, 'futures|NIFTY|2026-11-24||').map(m => m.price), [100, 103]);
+  assert.equal(l.rows[0].exitBox, 103);
+});

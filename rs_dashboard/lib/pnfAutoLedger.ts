@@ -32,13 +32,20 @@ export interface AutoRow {
   entryT: number;
   /** Time of the bar whose signal opened it: the reversal is looked for after this. */
   entryBarT: number;
-  /** The chart's price at the decision (REAL: an estimate of the fill). */
+  /**
+   * PAPER: the confirmed box the signal bar reached (where the trade is booked). REAL: the chart's live price at the decision
+   * (an estimate of the market fill).
+   */
   entryPrice: number;
+  /** The confirmed box the signal reached: where the chart marker sits (REAL books the live price, this is still the box). */
+  entryBox?: number;
   state: AutoRowState;
   exitT?: number;
   /** Time of the bar that triggered the exit (the reversal column's first bar), for the chart marker; absent on older rows. */
   exitBarT?: number;
   exitPrice?: number;
+  /** The confirmed box the reversal reached (none for an EOD exit): where the exit marker sits. */
+  exitBox?: number;
   reason?: string;
   pnl?: number;
   note?: string;
@@ -66,7 +73,7 @@ export type AutoOp =
   | { op: 'beginExit'; id: string; t: number }
   | { op: 'abortExit'; id: string; note: string }
   | { op: 'markUnknown'; id: string; note: string }
-  | { op: 'close'; id: string; exitT: number; exitPrice: number; reason: string; note?: string; exitBarT?: number }
+  | { op: 'close'; id: string; exitT: number; exitPrice: number; reason: string; note?: string; exitBarT?: number; exitBox?: number }
   | { op: 'resolve'; id: string; as: 'open' | 'flat'; exitPrice?: number; t: number }
   | { op: 'log'; chart: 1 | 2; t: number; text: string }
   | { op: 'resetPaper' };
@@ -133,7 +140,7 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       const rows = [...led.rows];
       rows[i] = {
         ...r, state: 'closed', exitT: op.exitT, exitPrice: op.exitPrice, reason: op.reason, pnl: rowPnl(r.side, r.entryPrice, op.exitPrice, r.unitsPerPoint),
-        note: op.note ?? r.note, ...(finite(op.exitBarT) ? { exitBarT: op.exitBarT } : {}),
+        note: op.note ?? r.note, ...(finite(op.exitBarT) ? { exitBarT: op.exitBarT } : {}), ...(finite(op.exitBox) ? { exitBox: op.exitBox } : {}),
       };
       return bump(rows);
     }
@@ -205,7 +212,8 @@ export function autoDaySummary(rows: AutoRow[], day: string, mode: AutoMode, pri
 }
 
 /**
- * The chart markers of AUTO rows for one contract, drawn from the ledger: the entry on its SIGNAL bar, the exit on the bar that
+ * The chart markers of AUTO rows for one contract, drawn from the ledger on their confirmed boxes (entryBox / exitBox; older
+ * rows fall back to the booked price): the entry on its SIGNAL bar, the exit on the bar that
  * triggered it (the reversal column's first bar). Never at the decision time: that is the minute after, often already in
  * the next column, which put a SELL on an X column. A row without `exitBarT` (older rows) uses the bar that closed just before
  * its exit was decided.
@@ -215,10 +223,10 @@ export function autoMarkers(rows: AutoRow[], tk: string): { id: string; t: numbe
   for (const r of rows) {
     if (r.targetKey !== tk || r.state === 'entering' || r.state === 'unknownEntry') continue;
     if (r.state === 'closed' && r.reason === 'refused') continue;          // never opened
-    out.push({ id: `${r.id}:in`, t: r.entryBarT, action: r.side, price: r.entryPrice, lots: r.lots, mode: r.mode });
+    out.push({ id: `${r.id}:in`, t: r.entryBarT, action: r.side, price: r.entryBox ?? r.entryPrice, lots: r.lots, mode: r.mode });
     if (r.state === 'closed' && r.reason !== 'resolved' && r.exitPrice !== undefined && r.exitT !== undefined) {
       const t = r.exitBarT ?? Math.floor(r.exitT / 60) * 60 - 60;
-      out.push({ id: `${r.id}:out`, t, action: r.side === 'BUY' ? 'SELL' : 'BUY', price: r.exitPrice, lots: r.lots, mode: r.mode });
+      out.push({ id: `${r.id}:out`, t, action: r.side === 'BUY' ? 'SELL' : 'BUY', price: r.exitBox ?? r.exitPrice, lots: r.lots, mode: r.mode });
     }
   }
   return out;

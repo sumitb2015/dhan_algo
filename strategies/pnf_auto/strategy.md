@@ -20,6 +20,7 @@ Evaluated every second on the chart's **closed-bar** model only (the forming min
 | Sessions | NSE: entries 09:15-15:00, flat at 15:15, NSE holidays from `lib/nseHolidays`. MCX: entries until close − 30 min, flat at close − 10 min (`lib/mcxSession`) |
 | Index charts | No AUTO (an index is not tradable) |
 | Size | Lots per chart, default **1**, 1-20; product INTRADAY (MIS) |
+| Prices | Every entry and exit is tied to a **confirmed box**: the entry to the deepest box the signal bar drew (the O column's lowest box at the break for a SELL, the X column's highest for a BUY), the exit to the box the reversal column reached on its first bar (`boxPriceAt`). PAPER books those box prices; REAL books the live price at the decision (a market fill) and keeps the boxes for its markers. An EOD exit has no box event: it books the live price |
 
 ## Orders (`app/api/straddle-pnf/order`)
 - Entry: the same server-resolved order as the trade bar (`source: 'auto'` → Dhan correlation tag `pnfa`, Kotak per-source
@@ -43,6 +44,7 @@ the order out) is offered for the same resolution.
   instrument and box settings are locked, and chart 2 cannot be hidden.
 
 ## Known gaps
-- No backtest / replay; P&L is at **decision prices** (the chart price at the decision), not broker fills.
+- No backtest / replay. PAPER P&L is box-to-box; REAL P&L is at **decision prices** (the chart price at the decision), not
+  broker fills, so on a small box REAL can differ from PAPER by the boxes the price moved before the order.
 - Two charts on the same contract net at the broker; each exits only its own units, capped by what the broker still shows.
 - The whole-position SQUARE OFF in the trade bar closes AUTO's units too; AUTO then finds the leg flat and books it closed.

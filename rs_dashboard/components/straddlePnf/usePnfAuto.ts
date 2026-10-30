@@ -134,7 +134,9 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
     } catch { return null; }                                  // no clean reply: UNKNOWN, never a failure
   };
 
-  const enter = async (side: 'BUY' | 'SELL', signalT: number, px: number) => {
+  /** `livePx`: the chart's price now; `box`: the confirmed box the signal bar reached (PAPER books it; REAL books the live price). */
+  const enter = async (side: 'BUY' | 'SELL', signalT: number, livePx: number, box: number | null) => {
+    const px = arm.mode === 'PAPER' && box !== null ? box : livePx;
     const cur = info && info.key === infoKey ? info : null;
     if (!cur || !cur.legs.length) { setNote('waiting for the contract lookup'); return; }
     if (arm.mode === 'REAL' && cur.unsupported) { haltNow(cur.unsupported); return; }
@@ -144,6 +146,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
     const base = {
       id, day: istDateIso(Date.now()), chart, target, mode: arm.mode, broker, side, lots, unitsPerPoint,
       legs: cur.legs.map(l => ({ label: l.label, key: l.key, units: (l.lotUnits ?? l.lot) * lots })), entryT: nowS, entryBarT: signalT, entryPrice: px,
+      ...(box !== null ? { entryBox: box } : {}),
     };
     if (arm.mode === 'PAPER') {
       const j = await sendOrder({ broker, mode: 'PAPER', target, action: side, lots, product: 'INTRADAY' });
@@ -183,11 +186,14 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
   };
 
   /** `barT`: the bar that triggered the exit (the reversal column's first bar), for the chart marker. */
-  const exit = async (r: AutoRow, reason: string, px: number | null, barT?: number) => {
-    const exitPx = px ?? r.entryPrice;                         // only an EOD exit can run without a price (E5)
+  const exit = async (r: AutoRow, reason: string, px: number | null, barT?: number, box?: number | null) => {
+    // PAPER books the confirmed box the reversal reached; REAL (and an EOD exit, which has no box) the live price. Only an EOD
+    // exit can run without a price (E5): it books the entry price then.
+    const exitPx = r.mode === 'PAPER' && box != null ? box : px ?? r.entryPrice;
+    const boxField = box != null ? { exitBox: box } : {};
     const side = r.side === 'BUY' ? 'SELL' : 'BUY';
     if (r.mode === 'PAPER') {
-      const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason, exitBarT: barT });
+      const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason, exitBarT: barT, ...boxField });
       if (c.ok) onEvent({ chart, kind: 'exit', side, price: exitPx, target: r.target, mode: r.mode, lots: r.lots, text: `AUTO C${chart} [PAPER] exit (${reason}) @ ${exitPx.toFixed(2)}` });
       return;
     }
@@ -202,7 +208,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
       return;
     }
     if (j.outcome === 'placed' || j.outcome === 'flat') {
-      const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason, exitBarT: barT, note: j.outcome === 'flat' ? 'already flat at the broker' : undefined });
+      const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason, exitBarT: barT, ...boxField, note: j.outcome === 'flat' ? 'already flat at the broker' : undefined });
       if (!c.ok) { haltNow(`exit sent but the ledger refused it (${c.error})`); return; }
       onEvent({ chart, kind: 'exit', side, price: exitPx, target: r.target, mode: r.mode, lots: r.lots, text: `AUTO C${chart} [REAL] exit (${reason}) @ ~${exitPx.toFixed(2)}${j.outcome === 'flat' ? ' - already flat at the broker' : ''}` });
       return;
@@ -222,7 +228,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
         if (row.state !== 'open') { setNote(row.state === 'entering' || row.state === 'exiting' ? `${row.state}…` : 'unresolved - check the broker'); return; }
         if (row.targetKey !== tk) {
           // The chart was switched away from its position: only the EOD exit can still run (no model for that contract here).
-          const d = decideAuto({ model: { signals: [], columns: [], columnTimes: [], lastBarT: null }, position: { side: row.side, entryBarT: row.entryBarT }, watermarkT: 0, nowS, market });
+          const d = decideAuto({ model: { box: 0, signals: [], columns: [], columnTimes: [], lastBarT: null }, position: { side: row.side, entryBarT: row.entryBarT }, watermarkT: 0, nowS, market });
           setNote('position on another contract: watching the EOD exit only');
           if (d.action === 'exit' && d.reason === 'eod') { busyRef.current = true; try { await exit(row, 'eod', null); } finally { busyRef.current = false; } }
           return;
@@ -232,7 +238,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
         if (d.reason === 'reversal' && price === null) { setNote('reversal seen, waiting for a price'); return; }
         busyRef.current = true;
         const barT = d.reason === 'reversal' && d.col !== undefined ? model.columnTimes[d.col]?.start : undefined;
-        try { await exit(row, d.reason, price, barT); } finally { busyRef.current = false; }
+        try { await exit(row, d.reason, price, barT, d.boxPrice); } finally { busyRef.current = false; }
         return;
       }
       if (!arm.on || haltRef.current) return;
@@ -243,7 +249,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
       if (d.action !== 'enter') { setNote(d.action === 'none' ? d.why : ''); return; }
       watermarkRef.current = d.signal.t;                       // handled: this signal is never entered again
       busyRef.current = true;
-      try { await enter(d.side, d.signal.t, price); } finally { busyRef.current = false; }
+      try { await enter(d.side, d.signal.t, price, d.boxPrice); } finally { busyRef.current = false; }
     };
   });
   useEffect(() => {
