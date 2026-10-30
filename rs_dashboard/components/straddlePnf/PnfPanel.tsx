@@ -399,7 +399,7 @@ export default function PnfPanel({ title, strike, model, live, overlay, stale, f
               {liveValue !== null && (
                 <g>
                   <rect x={2} y={yOf(liveValue) - 7} width={AXIS_W - 4} height={14} rx={2} className="fill-amber-300" />
-                  <text x={6} y={yOf(liveValue) + 3} className="fill-oncolor-dark font-mono" fontSize={9} fontWeight={700}>{fmt(liveValue)}</text>
+                  <text x={6} y={yOf(liveValue) + 3} className="fill-black font-mono" fontSize={9} fontWeight={700}>{fmt(liveValue)}</text>
                 </g>
               )}
             </svg>
