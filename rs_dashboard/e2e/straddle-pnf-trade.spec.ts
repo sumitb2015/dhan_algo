@@ -68,6 +68,13 @@ async function installTradeMock(page: Page) {
       });
     }
 
+    if (p.includes('/api/scalper') && p.endsWith('/funds')) {
+      return json(route, { success: true, data: { availabelBalance: 154200, utilizedAmount: 45000 } });
+    }
+    if (p.includes('/api/scalper') && p.endsWith('/positions')) {
+      return json(route, { success: true, data: [] });
+    }
+
     if (p === '/api/live-indices' && method === 'POST') return json(route, { success: true });
     if (p === '/api/scalper/top-indices') {
       return json(route, { success: true, quotes: { NIFTY: { ltp: 24123.45, change_pct: 0.42 }, VIX: { ltp: 13.21, change_pct: -1.5 } } });
@@ -173,3 +180,27 @@ test('Lot sizing controls: preset buttons and commit-on-blur protection', async 
   // MAX_PNF_LOTS is 20
   await expect(lotInput).toHaveValue('20');
 });
+
+test('Header displays available margin and live P&L chips', async ({ page }) => {
+  await installTradeMock(page);
+  await page.goto('/straddle-pnf');
+
+  // Header Margin chip shows formatted available margin
+  const marginChip = page.getByTestId('header-pnl-margin');
+  await expect(marginChip).toBeVisible();
+  await expect(marginChip.getByText('Margin')).toBeVisible();
+  await expect(marginChip.getByText('₹1.54L')).toBeVisible();
+
+  // Header P&L chip starts at ₹0
+  await expect(marginChip.getByText(/PAPER P&L/i)).toBeVisible();
+  await expect(marginChip.getByText('₹0')).toBeVisible();
+
+  // Switch to Futures and place a PAPER BUY order
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await page.getByRole('button', { name: 'BUY MARKET' }).click();
+
+  // Active paper position updates and live price (103.5 vs 103 entry) updates P&L chip
+  await expect(page.getByText(/LONG 1 lots/i)).toBeVisible();
+  await expect(marginChip.getByText(/PAPER P&L/i)).toBeVisible();
+});
+

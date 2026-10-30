@@ -11,15 +11,27 @@ export interface PnfTradeBarProps {
   target: Target;
   legs: PnfLegInput[];
   live: { ce: number; pe: number } | null;
+  mode?: 'PAPER' | 'REAL';
+  onModeChange?: (mode: 'PAPER' | 'REAL') => void;
+  onPnlChange?: (pnl: number) => void;
   onSwitchTarget?: (target: Target) => void;
 }
 
 const inr = (n: number) => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 const pnlTone = (n: number | null) => (n == null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
 
-export default function PnfTradeBar({ target, legs, live, onSwitchTarget }: PnfTradeBarProps) {
+export default function PnfTradeBar({
+  target,
+  legs,
+  live,
+  mode: propMode,
+  onModeChange,
+  onPnlChange,
+  onSwitchTarget,
+}: PnfTradeBarProps) {
   const { broker, setBroker } = useBrokerSelector();
-  const [mode, setMode] = useState<'PAPER' | 'REAL'>('PAPER');
+  const [internalMode, setInternalMode] = useState<'PAPER' | 'REAL'>('PAPER');
+  const mode = propMode ?? internalMode;
   const [product, setProduct] = useState<'INTRADAY' | 'MARGIN' | 'CNC'>('INTRADAY');
   const [lots, setLots] = useState(1);
   const [lotsDraft, setLotsDraft] = useState('1');
@@ -29,13 +41,17 @@ export default function PnfTradeBar({ target, legs, live, onSwitchTarget }: PnfT
   useEffect(() => {
     try {
       const saved = localStorage.getItem('straddle-pnf-trade-mode') as 'PAPER' | 'REAL' | null;
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      if (saved === 'PAPER' || saved === 'REAL') setMode(saved);
+      if (saved === 'PAPER' || saved === 'REAL') {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setInternalMode(saved);
+        onModeChange?.(saved);
+      }
     } catch { /* storage unavailable */ }
-  }, []);
+  }, [onModeChange]);
 
   const toggleMode = (m: 'PAPER' | 'REAL') => {
-    setMode(m);
+    setInternalMode(m);
+    onModeChange?.(m);
     try { localStorage.setItem('straddle-pnf-trade-mode', m); } catch { /* ignore */ }
   };
 
@@ -113,6 +129,10 @@ export default function PnfTradeBar({ target, legs, live, onSwitchTarget }: PnfT
       unrealizedProfit: totalPnl,
     };
   }, [brokerPositions, paperPositions, mode, isIndex, legs, live]);
+
+  useEffect(() => {
+    onPnlChange?.(activePosition?.unrealizedProfit ?? 0);
+  }, [activePosition?.unrealizedProfit, onPnlChange]);
 
   // ── Order Dispatch ────────────────────────────────────────────────────────
   const executeOrder = async (action: 'BUY' | 'SELL') => {

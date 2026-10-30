@@ -10,6 +10,8 @@ import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
 import InstrumentBar from './straddlePnf/InstrumentBar';
 import SettingsControls, { SmaPeriodInput } from './straddlePnf/SettingsControls';
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
+import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
+import { useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/alertSound';
@@ -96,6 +98,9 @@ export default function StraddlePnfPage() {
   const [log, setLog] = useState<LogEntry[]>([]);
   const [logOpen, setLogOpen] = useState(false);
   const [tradeOpen, setTradeOpen] = useState(true);
+  const { broker } = useBrokerSelector();
+  const [tradeMode, setTradeMode] = useState<'PAPER' | 'REAL'>('PAPER');
+  const [paperPnl, setPaperPnl] = useState(0);
   const [muted, setMuted] = useState(false);
   const [flash, setFlash] = useState<'buy' | 'sell' | null>(null);
   const [now, setNow] = useState(0);
@@ -136,6 +141,8 @@ export default function StraddlePnfPage() {
     rebaselineRef.current = true;
     if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
     if (readPref(TRADE_OPEN_KEY) === '0') setTradeOpen(false);
+    const savedMode = readPref('straddle-pnf-trade-mode') as 'PAPER' | 'REAL' | null;
+    if (savedMode === 'PAPER' || savedMode === 'REAL') setTradeMode(savedMode);
     try {
       const raw = readPref(LOG_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
@@ -354,7 +361,10 @@ export default function StraddlePnfPage() {
           <div className="order-4 basis-full 2xl:order-3 2xl:basis-0 2xl:flex-1 min-w-0 flex items-center gap-x-4 gap-y-2 flex-wrap">
             <InstrumentBar target={target} onSegment={pickSegment} onPick={choose} onError={setContractError} />
             {/* Nifty and India VIX vs the previous close: the shared indices WebSocket bridge's snapshot, started on mount. */}
-            <div className="ml-auto shrink-0"><HeaderIndexChips /></div>
+            <div className="ml-auto shrink-0 flex items-center gap-2">
+              <HeaderIndexChips />
+              <HeaderPnlMargin broker={broker} mode={tradeMode} paperPnl={paperPnl} />
+            </div>
           </div>
           <div className="order-3 2xl:order-4 ml-auto flex items-center gap-2 shrink-0">
             <DataChip date={loaded?.dataDate} lastSession={Boolean(loaded?.dataDate) && loaded?.dataDate !== today} />
@@ -398,6 +408,9 @@ export default function StraddlePnfPage() {
             target={target}
             legs={loaded?.contracts ?? []}
             live={live}
+            mode={tradeMode}
+            onModeChange={setTradeMode}
+            onPnlChange={setPaperPnl}
             onSwitchTarget={choose}
           />
         </div>
