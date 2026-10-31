@@ -10,14 +10,17 @@ import { EMPTY_RESTING, applyRestingOp, type RestingLedger, type RestingOp } fro
 const ist = (hh: number, mm: number, ss = 0) => Date.UTC(2026, 9, 30, hh, mm, ss) - 5.5 * 3600_000;
 type Body = { mode?: string; action?: string; lots?: number; orderType?: string; price?: number; trigger?: number; brokerOp?: { op: string; orderId: string } };
 
-async function install(page: Page, opts: { ledger?: RestingLedger } = {}) {
+async function install(page: Page, opts: { ledger?: RestingLedger; levels?: number[] } = {}) {
   const orders: Body[] = [];
   const state = {
     ledger: (opts.ledger ?? EMPTY_RESTING) as RestingLedger, tick: { ltp: 99.33, at: ist(10, 30, 10) }, book: [] as Record<string, unknown>[],
     /** Set: the next resting placement gets no clean reply (the route's 504 / UNKNOWN). */
     unknownNext: false,
   };
-  const bars = [100, 99.5, 100].map((p, i) => ({ t: ist(10, 27 + i) / 1000, ce: p, pe: 0, straddle: p, vol: 10 }));
+  // `levels`: box labels around 100 with a 0.1 box (the page's default 0.1% box), one 1-minute bar each, ending before the pinned clock.
+  const bars = opts.levels
+    ? opts.levels.map((l, i) => { const p = Number((100 + l * 0.1).toFixed(2)); return { t: ist(10, 20 + i) / 1000, ce: p, pe: 0, straddle: p, vol: 10 }; })
+    : [100, 99.5, 100].map((p, i) => ({ t: ist(10, 27 + i) / 1000, ce: p, pe: 0, straddle: p, vol: 10 }));
   await page.route('**/api/**', async (route: Route) => {
     const req = route.request();
     const u = new URL(req.url());
@@ -507,4 +510,35 @@ test('Bracket: an exit whose outcome is unknown does not cancel the sibling exit
   await page.waitForTimeout(3500);
   expect(state.ledger.rows.find(r => r.role === 'sl')?.state).toBe('unknown');
   expect(state.ledger.rows.find(r => r.role === 'target')?.state).toBe('working');
+});
+
+test('Triangle: a 4-column squeeze that breaks up is drawn with its entry / stop / target; hide and the minimum-columns button work', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page, { levels: [0, 10, 3, 9, 5, 10] });
+  state.tick = { ltp: 101, at: ist(10, 30, 15) };
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await expect(page.getByLabel('Expiry')).toHaveValue('2026-11-24');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('101.00');
+  const panel = page.getByTestId('pnf-panel').nth(0);
+  const tri = panel.getByTestId('pnf-triangle');
+  await expect(tri).toHaveCount(1);
+  await expect(tri).toHaveAttribute('data-state', 'up');
+  await expect(tri).toHaveAttribute('data-cols', '4');
+  await expect(tri).toContainText('Entry');
+  await expect(tri).toContainText('Stop');
+  await expect(tri).toContainText('Target');
+  // minimum columns: 3 -> 4 still shows it, 5 hides it, 6 -> 3 shows it again
+  await panel.getByRole('button', { name: /Triangles need at least 3 columns/ }).click();
+  await expect(tri).toHaveCount(1);
+  await panel.getByRole('button', { name: /Triangles need at least 4 columns/ }).click();
+  await expect(tri).toHaveCount(0);
+  await panel.getByRole('button', { name: /Triangles need at least 5 columns/ }).click();
+  await panel.getByRole('button', { name: /Triangles need at least 6 columns/ }).click();
+  await expect(tri).toHaveCount(1);
+  await panel.getByRole('button', { name: 'Hide triangles' }).click();
+  await expect(tri).toHaveCount(0);
+  await panel.getByRole('button', { name: 'Show triangles' }).click();
+  await expect(tri).toHaveCount(1);
 });

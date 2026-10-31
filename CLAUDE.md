@@ -167,6 +167,7 @@ docs/
   PIVOT_DETECTION.md           # lib/pivots.py — swing high/low detection + confirmation lag
   RS_STRATEGY_GUIDE.md         # User guide for /rs-strategy: rules, filters, every column, Buy/Sell ticket safety rules
   PRICE_LADDER_GUIDE.md        # User guide for /price-ladder: XY/Plain/Pair ladders, cutoffs, MTM guard, positions-window close, price sources
+  PNF_TRIANGLE.md              # User guide for the P&F triangle (squeeze) pattern: nested columns, entry / stop / vertical-count target, alerts; not traded by AUTO
   GEX_OI_GUIDE.md              # User guide for /options/gex: gamma-weighted OI, walls, gamma flip, regime, the video's strangle checklist and risk rules
 scripts/
   downloader/               # Historical data downloaders + refresh_dashboard_data.py / fetch_today_quotes.py

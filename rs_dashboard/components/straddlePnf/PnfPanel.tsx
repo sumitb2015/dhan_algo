@@ -65,8 +65,15 @@ export type PnfPanelProps = {
   onToggleMarkers?: () => void;
   /** The ladder-style B / S rail beside the price axis (absent: no rail, e.g. an index chart). */
   rail?: PnfRail;
+  /** Nested-column triangles of this chart (lib/pnfTriangle.ts), whether they are drawn, and the fewest columns that count. */
+  triangles?: PnfTriangle[];
+  triShown?: boolean;
+  triMin?: number;
+  onToggleTri?: () => void;
+  onCycleTriMin?: () => void;
 };
 
+import type { PnfTriangle } from '@/lib/pnfTriangle';
 import type { LadderPosition } from '@/lib/pnfLadderPosition';
 
 /** A resting order drawn on the chart (its line, its tag, and its handle in the rail). */
@@ -290,7 +297,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -811,6 +818,51 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                       textAnchor="middle" className="fill-emerald-400 font-mono font-bold" fontSize={9}>COVER</text>
               )}
 
+              {/* triangles: the converging lines, a tag, and the two trigger levels (buy above / sell below); after a breakout the
+                  entry, stop and vertical-count target of the pattern's trade */}
+              {triShown && triangles.slice(-8).map(t => {
+                const first = columns[t.startCol];
+                if (!first) return null;
+                let lastX = -1, lastO = -1;
+                for (let i = t.startCol; i <= t.endCol; i++) { if (columns[i].dir === 'X') lastX = i; else lastO = i; }
+                if (lastX < 0 || lastO < 0) return null;
+                const tone = t.state === 'up' ? 'emerald' : t.state === 'down' ? 'red' : t.state === 'forming' ? 'amber' : 'zinc';
+                const stroke = tone === 'emerald' ? 'stroke-emerald-400' : tone === 'red' ? 'stroke-red-400' : tone === 'amber' ? 'stroke-amber-400' : 'stroke-zinc-400';
+                const fillTxt = tone === 'emerald' ? 'fill-emerald-400' : tone === 'red' ? 'fill-red-400' : tone === 'amber' ? 'fill-amber-400' : 'fill-zinc-400';
+                const xStart = xOf(t.startCol) + cell / 2;
+                const xLevels = xOf(t.endCol) + cell / 2;
+                const xEnd = Math.min(plotW, xOf(t.breakout ? t.breakout.col : t.endCol + 1) + cell * 6);
+                const b = t.breakout;
+                const lvl = (price: number, label: string, cls: string, dash: string) => {
+                  const y = yOf(price);
+                  return (
+                    <g key={label}>
+                      <line x1={xLevels} x2={xEnd} y1={y} y2={y} strokeWidth={1.25} strokeDasharray={dash} className={cls} />
+                      <text x={xEnd - 4} y={y - 3} textAnchor="end" className={`${fillTxt} font-mono`} fontSize={10} fontWeight={700}>{`${label} ${fmt(price, axisDigits)}`}</text>
+                    </g>
+                  );
+                };
+                return (
+                  <g key={`tri${t.startCol}`} data-testid="pnf-triangle" data-state={t.state} data-cols={t.nCols} pointerEvents="none">
+                    <line x1={xStart} x2={xOf(lastX) + cell / 2} y1={yOf(first.high)} y2={yOf(columns[lastX].high)} strokeWidth={1.5} strokeDasharray="1 4" strokeLinecap="round" className={stroke} />
+                    <line x1={xStart} x2={xOf(lastO) + cell / 2} y1={yOf(first.low)} y2={yOf(columns[lastO].low)} strokeWidth={1.5} strokeDasharray="1 4" strokeLinecap="round" className={stroke} />
+                    <text x={xStart} y={yOf(first.high) - 6} className={`${fillTxt} font-mono`} fontSize={10} fontWeight={700}>{`△${t.nCols}${t.state === 'forming' ? ' forming' : ''}`}</text>
+                    {!b ? (
+                      <>
+                        {lvl(t.buyAbove, 'Buy above', 'stroke-emerald-400', '5 3')}
+                        {lvl(t.sellBelow, 'Sell below', 'stroke-red-400', '5 3')}
+                      </>
+                    ) : (
+                      <>
+                        {lvl(b.entry, `${b.side === 'UP' ? '▲' : '▼'} Entry`, stroke, '')}
+                        {lvl(b.stop, 'Stop', 'stroke-red-400', '5 3')}
+                        {lvl(b.target, `Target · RR 1:${b.rr.toFixed(1)}`, 'stroke-emerald-400', '1 4')}
+                      </>
+                    )}
+                  </g>
+                );
+              })}
+
               {/* double top buy / double bottom sell: a horizontal support/resistance line across from the previous swing extreme
                   to the breaking column */}
               {signals.map(g => {
@@ -1058,6 +1110,16 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         <ZoomButton label="Zoom out" onClick={() => zoomBy(0.7)}><Minus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Fit chart to panel" onClick={() => resetView()}><RotateCcw className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Zoom in" onClick={() => zoomBy(1 / 0.7)}><Plus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        {onToggleTri && (
+          <ZoomButton label={triShown ? 'Hide triangles' : 'Show triangles'} onClick={onToggleTri} pressed={!triShown}>
+            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{triShown ? '△' : '▽'}</span>
+          </ZoomButton>
+        )}
+        {onCycleTriMin && triShown && (
+          <ZoomButton label={`Triangles need at least ${triMin} columns (click for ${triMin >= 6 ? 3 : triMin + 1})`} onClick={onCycleTriMin}>
+            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{`△${triMin}`}</span>
+          </ZoomButton>
+        )}
         {rail?.onToggleLines && (
           <ZoomButton label={rail.linesShown !== false ? 'Hide order and position lines' : 'Show order and position lines'} onClick={rail.onToggleLines} pressed={rail.linesShown === false}>
             {rail.linesShown !== false ? <EyeOff className="w-3 h-3" aria-hidden="true" /> : <Eye className="w-3 h-3" aria-hidden="true" />}

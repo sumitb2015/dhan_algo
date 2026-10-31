@@ -32,6 +32,7 @@ import {
 } from '@/lib/pnfTarget';
 import { usePnfFeed, type PnfFeed } from './straddlePnf/usePnfFeed';
 import { usePnfAlerts } from './straddlePnf/usePnfAlerts';
+import { detectTriangles } from '@/lib/pnfTriangle';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent } from './straddlePnf/usePnfAuto';
 import { autoDaySummary, autoMarkers } from '@/lib/pnfAutoLedger';
 import AutoControls from './straddlePnf/AutoControls';
@@ -68,6 +69,8 @@ const AUTO_LOTS_KEY = 'straddle-pnf-auto-lots-';
 /** Per chart: '0' = the B / S trade markers are hidden. */
 const MARKERS_SHOWN_KEY = 'straddle-pnf-markers-shown-';
 const LINES_SHOWN_KEY = 'straddle-pnf-lines-shown-';
+const TRI_SHOW_KEY = 'straddle-pnf-tri-show-';
+const TRI_MIN_KEY = 'straddle-pnf-tri-min-';
 const STYLE_KEY = 'straddle-pnf-order-style';
 const TAG_LEFT_KEY = 'straddle-pnf-tag-left-';
 const DISARMED: AutoArm = { on: false, mode: 'PAPER', watermarkT: 0 };
@@ -181,6 +184,9 @@ function StraddlePnfPage() {
   const [autoLots, setAutoLots] = useState<Record<ChartId, number>>({ 1: 1, 2: 1 });
   // Single | Bracket | Cover for the next entry (trade bar and chart rail), with its points; remembered, never armed silently.
   const [orderStyle, setOrderStyle] = useState<StyleState>(DEFAULT_STYLE);
+  // Triangles (nested-column squeezes): drawn or not, and the fewest nested columns that count (3-6), per chart, remembered.
+  const [triShown, setTriShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
+  const [triMin, setTriMin] = useState<Record<ChartId, number>>({ 1: 3, 2: 3 });
   const [markersShown, setMarkersShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
   // Order / position lines on the chart (like Kite's price lines) can be hidden, and their tags aligned left or right.
   const [linesShown, setLinesShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
@@ -236,6 +242,9 @@ function StraddlePnfPage() {
     setAutoLots({ 1: lotsOf(1), 2: lotsOf(2) });
     setMarkersShown({ 1: readPref(`${MARKERS_SHOWN_KEY}1`) !== '0', 2: readPref(`${MARKERS_SHOWN_KEY}2`) !== '0' });
     try { const raw = readPref(STYLE_KEY); if (raw) { const j = JSON.parse(raw); setOrderStyle({ style: j.style === 'Bracket' || j.style === 'Cover' ? j.style : 'Single', tgt: String(j.tgt ?? ''), sl: String(j.sl ?? ''), trail: String(j.trail ?? ''), trailOn: j.trailOn === true }); } } catch { /* keep Single */ }
+    const minOf = (c: ChartId) => { const n = Number(readPref(`${TRI_MIN_KEY}${c}`)); return Number.isInteger(n) && n >= 3 && n <= 6 ? n : 3; };
+    setTriMin({ 1: minOf(1), 2: minOf(2) });
+    setTriShown({ 1: readPref(`${TRI_SHOW_KEY}1`) !== '0', 2: readPref(`${TRI_SHOW_KEY}2`) !== '0' });
     setLinesShown({ 1: readPref(`${LINES_SHOWN_KEY}1`) !== '0', 2: readPref(`${LINES_SHOWN_KEY}2`) !== '0' });
     setTagLeft({ 1: readPref(`${TAG_LEFT_KEY}1`) === '1', 2: readPref(`${TAG_LEFT_KEY}2`) === '1' });
     try {
@@ -274,6 +283,14 @@ function StraddlePnfPage() {
     const m = chart === 2 ? c2.model : c1.model;
     setLog(prev => fresh.filter(e => !prev.some(p => p.id === e.id)).reduce((l, e) => capLog(l, e), prev));
     for (const e of fresh) {
+      if (e.kind === 'TRIANGLE_UP' || e.kind === 'TRIANGLE_DOWN') {
+        const dn = e.kind === 'TRIANGLE_DOWN';
+        const t = `${e.label} · △ ${dn ? 'breakdown' : 'breakout'} @ ${e.price.toFixed(2)}`;
+        if (dn) toast.error(t, { description: e.detail }); else toast.success(t, { description: e.detail });
+        setFlash(f => ({ ...f, [chart]: dn ? 'sell' : 'buy' }));
+        setTimeout(() => setFlash(f => ({ ...f, [chart]: null })), FLASH_MS);
+        continue;
+      }
       const sell = e.kind === 'DOUBLE_BOTTOM_SELL';
       const title = `${e.label} · ${sell ? 'Double bottom SELL' : 'Double top BUY'} @ ${e.price.toFixed(2)}`;
       if (sell) toast.error(title, { description: e.belowVwap ? `Below ${m.vwapAvailable ? 'VWAP' : `SMA ${m.smaPeriod}`} — short entry zone` : undefined });
@@ -288,13 +305,16 @@ function StraddlePnfPage() {
   /** The Price Ladder's chime set (lib/pnfChime.ts), behind the page's mute. */
   const chime = (e: PnfSoundEvent) => { if (!mutedRef.current) playPnfChime(pnfChimeFor(e)); };
   const tk1 = targetKey(target1), tk2 = targetKey(target2);
+  // Triangles of each chart's CLOSED columns (lib/pnfTriangle.ts). Kept apart from model.signals, which AUTO trades.
+  const tri1 = useMemo(() => detectTriangles(c1.model.columns, c1.model.signals, c1.model.box, settings.reversal, triMin[1]), [c1.model, settings.reversal, triMin]);
+  const tri2 = useMemo(() => detectTriangles(c2.model.columns, c2.model.signals, c2.model.box, settings2.reversal, triMin[2]), [c2.model, settings2.reversal, triMin]);
   usePnfAlerts({
     model: c1.model, ready: Boolean(feed1.loaded), chart: 1, target: target1, label: dual ? `${feed1.label} · C1` : feed1.label,
-    strike: feed1.loaded?.key ?? 0, drawKey: `${tk1}|${feed1.epoch}|${serializeSettings(settings)}`, onFresh,
+    strike: feed1.loaded?.key ?? 0, drawKey: `${tk1}|${feed1.epoch}|${serializeSettings(settings)}`, onFresh, triangles: tri1,
   });
   usePnfAlerts({
     model: c2.model, ready: dual && Boolean(feed2.loaded), chart: 2, target: target2, label: `${feed2.label} · C2`,
-    strike: feed2.loaded?.key ?? 0, drawKey: `${tk2}|${feed2.epoch}|${serializeSettings(settings2)}|${dual}`, onFresh,
+    strike: feed2.loaded?.key ?? 0, drawKey: `${tk2}|${feed2.epoch}|${serializeSettings(settings2)}|${dual}`, onFresh, triangles: tri2,
   });
 
   // ── trade execution markers, per instrument (a chart shows its own instrument's) ──
@@ -565,6 +585,11 @@ function StraddlePnfPage() {
       active: active === c,
       onActivate: dual ? () => activate(c) : undefined,
       markersShown: markersShown[c],
+      triangles: c === 2 ? tri2 : tri1,
+      triShown: triShown[c],
+      triMin: triMin[c],
+      onToggleTri: () => { const next = !triShown[c]; savePref(`${TRI_SHOW_KEY}${c}`, next ? '1' : '0'); setTriShown(v => ({ ...v, [c]: next })); },
+      onCycleTriMin: () => { const next = triMin[c] >= 6 ? 3 : triMin[c] + 1; savePref(`${TRI_MIN_KEY}${c}`, String(next)); setTriMin(v => ({ ...v, [c]: next })); },
       rail: railFor(c),
       onToggleMarkers: () => {
         const next = !markersShown[c];
