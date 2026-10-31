@@ -7,6 +7,8 @@ test('cleanBracketSpec: Single has none; Bracket needs SL and target; Cover only
   assert.deepEqual(cleanBracketSpec('Bracket', 10, 5), { style: 'Bracket', tgtPts: 10, slPts: 5 });
   assert.deepEqual(cleanBracketSpec('Cover', '', 5), { style: 'Cover', tgtPts: 0, slPts: 5 });
   assert.deepEqual(cleanBracketSpec('Bracket', 10, 5, 3), { style: 'Bracket', tgtPts: 10, slPts: 5, trailPts: 3 });
+  assert.equal(typeof cleanBracketSpec('Bracket', 10, 5, ''), 'string', 'Trail ticked but blank is refused');
+  assert.deepEqual(cleanBracketSpec('Bracket', 10, 5, undefined), { style: 'Bracket', tgtPts: 10, slPts: 5 });
   for (const bad of [cleanBracketSpec('Bracket', 0, 5), cleanBracketSpec('Bracket', 10, ''), cleanBracketSpec('Cover', 0, -1), cleanBracketSpec('Bracket', 10, 5, 0)]) assert.equal(typeof bad, 'string');
 });
 

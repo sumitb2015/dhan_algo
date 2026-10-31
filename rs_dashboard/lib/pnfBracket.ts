@@ -19,7 +19,8 @@ export function cleanBracketSpec(style: OrderStyle, tgtPts: unknown, slPts: unkn
     if (!(tgt > 0) || !Number.isFinite(tgt)) return 'Set the target points (a positive number) for a Bracket order';
   }
   const spec: BracketSpec = { style, tgtPts: tgt, slPts: sl };
-  if (trailPts !== undefined && trailPts !== '' && trailPts !== null) {
+  // undefined = the Trail box is not ticked. Ticked but blank / zero is refused, never silently dropped.
+  if (trailPts !== undefined && trailPts !== null) {
     const t = Number(trailPts);
     if (!(t > 0) || !Number.isFinite(t)) return 'Trail points must be a positive number';
     spec.trailPts = t;
