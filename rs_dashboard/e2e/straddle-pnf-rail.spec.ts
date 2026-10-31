@@ -10,17 +10,14 @@ import { EMPTY_RESTING, applyRestingOp, type RestingLedger, type RestingOp } fro
 const ist = (hh: number, mm: number, ss = 0) => Date.UTC(2026, 9, 30, hh, mm, ss) - 5.5 * 3600_000;
 type Body = { mode?: string; action?: string; lots?: number; orderType?: string; price?: number; trigger?: number; brokerOp?: { op: string; orderId: string } };
 
-async function install(page: Page, opts: { prevSession?: boolean; ledger?: RestingLedger } = {}) {
+async function install(page: Page, opts: { ledger?: RestingLedger } = {}) {
   const orders: Body[] = [];
   const state = {
     ledger: (opts.ledger ?? EMPTY_RESTING) as RestingLedger, tick: { ltp: 99.33, at: ist(10, 30, 10) }, book: [] as Record<string, unknown>[],
     /** Set: the next resting placement gets no clean reply (the route's 504 / UNKNOWN). */
     unknownNext: false,
   };
-  const today = [100, 99.5, 100].map((p, i) => ({ t: ist(10, 27 + i) / 1000, ce: p, pe: 0, straddle: p, vol: 10 }));
-  // Yesterday (29 Oct): closes 99.8 .. 100.6, last 100.2 -> CPR levels exist only when there is an earlier session.
-  const yday = [99.8, 100.6, 100, 100.2].map((p, i) => ({ t: (Date.UTC(2026, 9, 29, 4, 0 + i * 10)) / 1000, ce: p, pe: 0, straddle: p, vol: 10 }));
-  const bars = opts.prevSession ? [...yday, ...today] : today;
+  const bars = [100, 99.5, 100].map((p, i) => ({ t: ist(10, 27 + i) / 1000, ce: p, pe: 0, straddle: p, vol: 10 }));
   await page.route('**/api/**', async (route: Route) => {
     const req = route.request();
     const u = new URL(req.url());
@@ -373,32 +370,7 @@ test('PAPER: order and position lines can be hidden (the orders bar keeps listin
   await expect(panel.getByTestId('pnf-order-line')).toHaveCount(1);
 });
 
-test('CPR: previous-session CPR lines are drawn on a futures chart, with switches to hide / show CPR, pivots and PDH / PDL', async ({ page }) => {
-  await page.clock.setFixedTime(ist(10, 30, 20));
-  await install(page, { prevSession: true });
-  await openFuture(page);
-  const panel = page.getByTestId('pnf-panel').nth(0);
-  // H 100.6, L 99.8, C 100.2 -> P 100.20, R1 100.60, S1 99.80 (CPR on by default; pivots and PD are off)
-  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="p"]')).toContainText('P 100.20');
-  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="tc"]')).toContainText('TC 100.20');
-  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="r1"]')).toHaveCount(0);
-  await panel.getByRole('button', { name: /Show pivots/ }).click();
-  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="r1"]')).toHaveCount(1);
-  await panel.getByRole('button', { name: /Show previous day high/ }).click();
-  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="pdh"]')).toContainText('PDH 100.60');
-  await panel.getByRole('button', { name: 'Hide CPR' }).click();
-  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="p"]')).toHaveCount(0);
-  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="pdh"]')).toHaveCount(1);
-});
 
-test('CPR: a straddle chart has no CPR lines or switches', async ({ page }) => {
-  await page.clock.setFixedTime(ist(10, 30, 20));
-  await install(page, { prevSession: true });
-  await page.goto('/straddle-pnf');
-  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
-  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Options' }).click();
-  await expect(page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-levels')).toHaveCount(0);
-});
 
 test('Bracket (PAPER): the entry that fills arms a stop-loss and a target at points from its fill; the target fills and the stop is cancelled', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));

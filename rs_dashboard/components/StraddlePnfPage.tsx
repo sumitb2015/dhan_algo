@@ -39,8 +39,6 @@ import { usePnfPositions } from './straddlePnf/usePnfPositions';
 import { usePnfGuard } from './straddlePnf/usePnfGuard';
 import PnfOrderStyle, { DEFAULT_STYLE, type StyleState } from './straddlePnf/PnfOrderStyle';
 import { cleanBracketSpec } from '@/lib/pnfBracket';
-import { computePivots, pivotChips } from '@/lib/pivotLevels';
-import { prevSessionHlc } from '@/lib/pnfCpr';
 import { useChartLegs, usePnfResting, type RailChart, type RestingEvent } from './straddlePnf/usePnfResting';
 import { applyPaperFill, FLAT_LEG, type PaperLeg, type PnfProduct } from '@/lib/pnfOrderLogic';
 import { needsResolve, type RestingRow } from '@/lib/pnfRestingLedger';
@@ -70,7 +68,6 @@ const AUTO_LOTS_KEY = 'straddle-pnf-auto-lots-';
 /** Per chart: '0' = the B / S trade markers are hidden. */
 const MARKERS_SHOWN_KEY = 'straddle-pnf-markers-shown-';
 const LINES_SHOWN_KEY = 'straddle-pnf-lines-shown-';
-const LEVELS_SHOW_KEY = 'straddle-pnf-levels-show';
 const STYLE_KEY = 'straddle-pnf-order-style';
 const TAG_LEFT_KEY = 'straddle-pnf-tag-left-';
 const DISARMED: AutoArm = { on: false, mode: 'PAPER', watermarkT: 0 };
@@ -182,8 +179,6 @@ function StraddlePnfPage() {
   const [booksOpen, setBooksOpen] = useState(false);
   const [autoArm, setAutoArm] = useState<Record<ChartId, AutoArm>>({ 1: DISARMED, 2: DISARMED });
   const [autoLots, setAutoLots] = useState<Record<ChartId, number>>({ 1: 1, 2: 1 });
-  // Previous-session levels on the charts: CPR (P / TC / BC), pivots (R1-R4 / S1-S4) and the previous day's high / low / close.
-  const [levelsShow, setLevelsShow] = useState<{ cpr: boolean; pivots: boolean; pd: boolean }>({ cpr: true, pivots: false, pd: false });
   // Single | Bracket | Cover for the next entry (trade bar and chart rail), with its points; remembered, never armed silently.
   const [orderStyle, setOrderStyle] = useState<StyleState>(DEFAULT_STYLE);
   const [markersShown, setMarkersShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
@@ -240,7 +235,6 @@ function StraddlePnfPage() {
     const lotsOf = (c: ChartId) => { const n = Number(readPref(`${AUTO_LOTS_KEY}${c}`)); return Number.isInteger(n) && n >= 1 && n <= 20 ? n : 1; };
     setAutoLots({ 1: lotsOf(1), 2: lotsOf(2) });
     setMarkersShown({ 1: readPref(`${MARKERS_SHOWN_KEY}1`) !== '0', 2: readPref(`${MARKERS_SHOWN_KEY}2`) !== '0' });
-    try { const raw = readPref(LEVELS_SHOW_KEY); if (raw) { const j = JSON.parse(raw); setLevelsShow({ cpr: j.cpr !== false, pivots: j.pivots === true, pd: j.pd === true }); } } catch { /* keep the defaults */ }
     try { const raw = readPref(STYLE_KEY); if (raw) { const j = JSON.parse(raw); setOrderStyle({ style: j.style === 'Bracket' || j.style === 'Cover' ? j.style : 'Single', tgt: String(j.tgt ?? ''), sl: String(j.sl ?? ''), trail: String(j.trail ?? ''), trailOn: j.trailOn === true }); } } catch { /* keep Single */ }
     setLinesShown({ 1: readPref(`${LINES_SHOWN_KEY}1`) !== '0', 2: readPref(`${LINES_SHOWN_KEY}2`) !== '0' });
     setTagLeft({ 1: readPref(`${TAG_LEFT_KEY}1`) === '1', 2: readPref(`${TAG_LEFT_KEY}2`) === '1' });
@@ -414,20 +408,6 @@ function StraddlePnfPage() {
     scope: `${broker}:${tradeMode}`, leaderRef, exitChart,
     onEvent: (c, kind, text) => { if (kind === 'warn') { toast.warning(text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); } else toast(text); void c; },
   });
-  const levelsFor = (c: ChartId) => {
-    const target = c === 2 ? target2 : target1;
-    // No CPR on a straddle: the combined CE + PE premium has no meaningful central pivot range.
-    if (target.kind === 'options' && target.side === 'STRADDLE') return undefined;
-    const prev = prevSessionHlc((c === 2 ? feed2 : feed1).bars, istToday());
-    const set = prev ? computePivots(prev.high, prev.low, prev.close, 'classic') : null;
-    if (!prev || !set) return undefined;
-    const lines: { key: string; label: string; price: number; tone: 'cpr' | 'r' | 's' | 'pd' }[] = pivotChips(set, levelsShow).map(ch => ({ key: ch.key, label: ch.label, price: ch.price, tone: ch.group }));
-    if (levelsShow.pd) lines.push({ key: 'pdh', label: 'PDH', price: prev.high, tone: 'pd' }, { key: 'pdl', label: 'PDL', price: prev.low, tone: 'pd' }, { key: 'pdc', label: 'PDC', price: prev.close, tone: 'pd' });
-    return {
-      lines, band: levelsShow.cpr ? { tc: set.tc, bc: set.bc } : null, show: levelsShow, session: prev.session,
-      onToggle: (k: 'cpr' | 'pivots' | 'pd') => { const next = { ...levelsShow, [k]: !levelsShow[k] }; savePref(LEVELS_SHOW_KEY, JSON.stringify(next)); setLevelsShow(next); },
-    };
-  };
   const railFor = (c: ChartId) => {
     const rc = railCharts.find(x => x.chart === c);
     if (!rc) return undefined;
@@ -586,7 +566,6 @@ function StraddlePnfPage() {
       onActivate: dual ? () => activate(c) : undefined,
       markersShown: markersShown[c],
       rail: railFor(c),
-      levels: levelsFor(c),
       onToggleMarkers: () => {
         const next = !markersShown[c];
         savePref(`${MARKERS_SHOWN_KEY}${c}`, next ? '1' : '0');

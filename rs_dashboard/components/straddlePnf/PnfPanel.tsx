@@ -65,21 +65,9 @@ export type PnfPanelProps = {
   onToggleMarkers?: () => void;
   /** The ladder-style B / S rail beside the price axis (absent: no rail, e.g. an index chart). */
   rail?: PnfRail;
-  /** Previous-session CPR / pivot / PDH-PDL lines and their show / hide switches (absent: no levels, e.g. a straddle). */
-  levels?: PnfLevels;
 };
 
 import type { LadderPosition } from '@/lib/pnfLadderPosition';
-
-export type PnfLevels = {
-  lines: { key: string; label: string; price: number; tone: 'cpr' | 'r' | 's' | 'pd' }[];
-  /** The CPR band (TC to BC), drawn as a tinted strip. */
-  band: { tc: number; bc: number } | null;
-  show: { cpr: boolean; pivots: boolean; pd: boolean };
-  session: string;
-  onToggle: (k: 'cpr' | 'pivots' | 'pd') => void;
-};
-const LEVEL_TONE: Record<'cpr' | 'r' | 's' | 'pd', string> = { cpr: 'stroke-violet-400 fill-violet-400', r: 'stroke-red-300 fill-red-300', s: 'stroke-emerald-300 fill-emerald-300', pd: 'stroke-amber-400 fill-amber-400' };
 
 /** A resting order drawn on the chart (its line, its tag, and its handle in the rail). */
 export type RailOrder = {
@@ -302,7 +290,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, levels }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -918,27 +906,6 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 });
               })()}
 
-              {/* previous-session levels: the CPR band, then a dotted line + label per level (those inside the drawn price range) */}
-              {levels && (() => {
-                const inRange = (p: number) => p >= yMin && p <= yMax;
-                return (
-                  <g data-testid="pnf-levels" pointerEvents="none">
-                    {levels.band && inRange(levels.band.tc) && inRange(levels.band.bc) && (
-                      <rect x={0} y={yOf(levels.band.tc)} width={plotW} height={Math.max(1, yOf(levels.band.bc) - yOf(levels.band.tc))} className="fill-violet-500/10" />
-                    )}
-                    {levels.lines.filter(l => inRange(l.price)).map(l => {
-                      const y = yOf(l.price);
-                      return (
-                        <g key={l.key} data-level={l.key}>
-                          <line x1={0} x2={plotW} y1={y} y2={y} strokeWidth={1} strokeDasharray="2 4" className={LEVEL_TONE[l.tone]} opacity={0.8} />
-                          <text x={Math.max(4, viewLeft + 4)} y={y - 3} fontSize={10} fontWeight={700} className={`${LEVEL_TONE[l.tone]} font-mono`} stroke="none">{`${l.label} ${fmt(l.price, 2)}`}</text>
-                        </g>
-                      );
-                    })}
-                  </g>
-                );
-              })()}
-
               {/* what a click on the rail row under the pointer would place: the side, the kind and the price */}
               {rail && railHot && !railDrag && (() => {
                 const y = yOf(railHot.p);
@@ -1068,12 +1035,6 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         <ZoomButton label="Zoom out" onClick={() => zoomBy(0.7)}><Minus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Fit chart to panel" onClick={() => resetView()}><RotateCcw className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Zoom in" onClick={() => zoomBy(1 / 0.7)}><Plus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
-        {levels && (['cpr', 'pivots', 'pd'] as const).map(k => (
-          <ZoomButton key={k} label={`${levels.show[k] ? 'Hide' : 'Show'} ${k === 'cpr' ? 'CPR' : k === 'pivots' ? 'pivots (R1-R4, S1-S4)' : 'previous day high / low / close'}`}
-                      onClick={() => levels.onToggle(k)} pressed={levels.show[k]}>
-            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{k === 'cpr' ? 'CPR' : k === 'pivots' ? 'R/S' : 'PD'}</span>
-          </ZoomButton>
-        ))}
         {rail?.onToggleLines && (
           <ZoomButton label={rail.linesShown !== false ? 'Hide order and position lines' : 'Show order and position lines'} onClick={rail.onToggleLines} pressed={rail.linesShown === false}>
             {rail.linesShown !== false ? <EyeOff className="w-3 h-3" aria-hidden="true" /> : <Eye className="w-3 h-3" aria-hidden="true" />}
