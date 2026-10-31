@@ -50,6 +50,8 @@ export type PnfPanelProps = {
   feedPrevClose?: number | null;
   /** Set when the live price is a feed value outside the trading session ("Pre-open" / "Post-close"), not a chart bar. */
   sessionTag?: string | null;
+  /** False (stocks: a column spans days) = no dashed vertical line at each session start and no date strip along the top. */
+  sessionLines?: boolean;
   /** Executed trades on this chart to mark on the boxes. */
   tradeMarkers?: PnfExecutionMarker[];
   /** Render the card header inside the panel even when headerSlot is provided. */
@@ -133,6 +135,9 @@ function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
 
 const fmt = (n: number, digits = 2) => n.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
 const signed = (n: number) => `${n >= 0 ? '+' : '-'}${Math.abs(n).toFixed(2)}`;
+/** The column tooltip's end: date with year, and the time only when it means something (a daily close sits at 15:29). */
+const dateYear = (iso: string) => `${sessionLabel(iso)} ${iso.slice(0, 4)}`;
+const timeIfAny = (t: number) => { const h = hhmm(t); return h === '15:29' ? '' : ` ${h}`; };
 const hhmm = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString().slice(11, 16);
 const sessionOfT = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString().slice(0, 10);
 const shortDate = (iso: string) => sessionLabel(iso).slice(4);
@@ -298,7 +303,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, sessionLines = true, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -728,7 +733,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         ) : (
           <>
           {/* The session names stay at the top of the view while the chart scrolls down (sticky, zero height so the chart does not move). */}
-          <div className="sticky top-0 z-20 h-0 pointer-events-none" style={{ width: plotW }} aria-hidden="true" data-testid="pnf-session-strip">
+          {sessionLines && <div className="sticky top-0 z-20 h-0 pointer-events-none" style={{ width: plotW }} aria-hidden="true" data-testid="pnf-session-strip">
             <svg width={plotW} height={18} className="block">
               {(() => {
                 let lastLabelX = -Infinity;
@@ -748,7 +753,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 });
               })()}
             </svg>
-          </div>
+          </div>}
           <div className="flex" style={{ width: contentW + (rail ? RAIL_W : 0), height: contentH }}>
             <svg width={plotW} height={contentH} className="block shrink-0" role="img" aria-label={`${title} point and figure chart`}>
               <defs>
@@ -760,13 +765,11 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
 
               {/* session dividers; a date is written only where it has room, so narrow sessions never print over each other */}
               {(() => {
-                let lastLabelX = -Infinity;
                 return vis.map((c, j) => {
                   const prev = columns[first + j - 1];
                   if (prev && prev.session === c.session) return null;   // the first column opens the first session, which is labelled too
                   const x = xOf(j);
-                  const label = x - lastLabelX >= 64;
-                  if (label) lastLabelX = x;
+                  if (!sessionLines) return null;
                   return (
                     <g key={`d${j}`}>
                       <line x1={x} x2={x} y1={padY + PAD_TOP - 6} y2={contentH} className="stroke-zinc-600" strokeDasharray="2 3" />
@@ -1090,7 +1093,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
             <span className={`font-bold ${c.dir === 'X' ? 'text-emerald-400' : 'text-red-400'}`}>{c.dir === 'X' ? 'X up' : 'O down'}</span>
             <span>{c.boxes} box{c.boxes === 1 ? '' : 'es'}</span>
             <span className="text-zinc-100">{fmt(c.low + box / 2, axisDigits)} – {fmt(c.high - box / 2, axisDigits)}</span>
-            <span className="text-zinc-400">{sessionLabel(sessionOfT(t.start))} {hhmm(t.start)} → {sessionOfT(t.end) !== sessionOfT(t.start) ? `${sessionLabel(sessionOfT(t.end))} ` : ''}{hhmm(t.end)}</span>
+            <span className="text-zinc-400">{dateYear(sessionOfT(t.start))}{timeIfAny(t.start)}{t.end === t.start && !timeIfAny(t.end) ? '' : <> → {sessionOfT(t.end) !== sessionOfT(t.start) ? dateYear(sessionOfT(t.end)) : ''}{timeIfAny(t.end)}</>}</span>
           </div>
         );
       })()}

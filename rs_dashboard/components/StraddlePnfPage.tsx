@@ -141,9 +141,9 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   const closedKey = `${closed.length}:${closed[0]?.t ?? 0}:${closedLast?.t ?? 0}:${closedLast?.straddle ?? 0}:${feed.histVersion}`;
   const sessionClose = sessionWindow(feed.market, now / 1000)[1];
   const confirmed = useMemo(
-    () => buildConfirmedModel(closed, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap }),
+    () => buildConfirmedModel(closed, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [closedKey, overlay, settings, sessionClose, indexNoVwap],
+    [closedKey, overlay, settings, sessionClose, indexNoVwap, feed.loaded?.anchorT],
   );
   const model = useMemo(() => withLive(confirmed, formingBar), [confirmed, formingBar]);
   const vwapAllowed = !indexNoVwap && (closed.length === 0 || model.vwapAvailable);
@@ -583,6 +583,7 @@ function StraddlePnfPage() {
       scrip: dual ? `${feed.scrip} (${boxText(st)})` : feed.scrip,
       feedPrevClose: feed.trustedPrevClose,
       sessionTag: feed.sessionTag,
+      sessionLines: target.kind !== 'equity',
       // Manual trade-bar markers (this browser session) + AUTO trades from the ledger, on their signal / reversal bars.
       tradeMarkers: [...(markers[targetKey(target)] ?? []), ...autoMarkers(autoToday, targetKey(target)).map(m => ({ ...m, estimate: m.mode === 'REAL' }))],
       error: feed.loaded?.error ?? (feed.complete ? undefined : contractError[c] ?? undefined),

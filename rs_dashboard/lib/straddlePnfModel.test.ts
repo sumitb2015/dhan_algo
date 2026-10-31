@@ -286,3 +286,14 @@ test('withLive on the confirmed model gives the same result as building it in on
   assert.equal(withLive(c).liveColumns, c.columns);             // 1-minute chart, no forming bar: the confirmed columns as they are
   assert.equal('build' in withLive(c, forming), false);
 });
+
+test('anchorT measures the box on the first bar at or after it, not on an older daily close far from today\'s price', () => {
+  const T0 = Date.UTC(2026, 5, 8, 3, 45) / 1000;
+  const bars: Bar[] = [
+    { t: T0 - 86_400 * 500, ce: 41, pe: 0, straddle: 41, vol: 1 },
+    { t: T0, ce: 1000, pe: 0, straddle: 1000, vol: 1 },
+    { t: T0 + 60, ce: 1001, pe: 0, straddle: 1001, vol: 1 },
+  ];
+  assert.ok(Math.abs(buildConfirmedModel(bars, 'sma', { boxPct: 5 }).box - 2.05) < 1e-9);
+  assert.equal(buildConfirmedModel(bars, 'sma', { boxPct: 5, anchorT: T0 }).box, 50);
+});

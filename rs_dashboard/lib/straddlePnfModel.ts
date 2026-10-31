@@ -166,6 +166,11 @@ export type PanelOptions = {
   /** IST minute of the day the session closes (MCX 23:55 does not divide into 3 / 15-minute buckets): see resample. */
   sessionCloseMin?: number;
   /**
+   * Epoch of the first bar the box size is measured on. A stock's history starts years back with daily closes at a fraction of today's
+   * price; its box is a percentage of the first 1-minute price instead. Default: the first bar.
+   */
+  anchorT?: number;
+  /**
    * The 1-min bar still forming, left out of the chart. It still decides which session is "today" for the header's open and
    * previous close: without it the first minute of a session would measure the change against the close two sessions back.
    */
@@ -187,7 +192,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   const vw1 = vwap(closedBars);
   const { bars, endIdx } = resample(closedBars, interval, opts.sessionCloseMin);
   const vw = endIdx.map(i => vw1[i]);
-  const firstPrice = closedBars.find(b => b.straddle > 0)?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
+  const firstPrice = (closedBars.find(b => b.straddle > 0 && (opts.anchorT === undefined || b.t >= opts.anchorT)) ?? closedBars.find(b => b.straddle > 0))?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
   // Box in points: never below MIN_BOX_PTS_PCT of the price (a safety floor: 0.001 points on NIFTY would be millions of boxes),
   // and the grid is anchored on a whole multiple of the box so the rows land on round prices (a 50-point box: ... 22,950, 23,000 ...).
   const ptsAsked = opts.boxMode === 'pts' && (opts.boxPts ?? 0) > 0 ? (opts.boxPts as number) : null;

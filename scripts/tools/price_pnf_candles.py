@@ -187,12 +187,15 @@ def main():
         from_date = min(api_from, today).strftime("%Y-%m-%d")
     df = _fetch_leg(helper, sid, from_date, to_date, "1", exchange_segment=segment, instrument_type=instrument)
     df = stitch_history(stored, df)
+    anchor_t = None
     if args.kind == "equity" and not df.empty:
         first_t = int(_to_epoch_seconds(df[next(c for c in ("start_Time", "timestamp", "time", "date") if c in df.columns)]).min())
+        anchor_t = first_t  # the box size is a % of the price here, not of a daily close years earlier
         df = stitch_history(load_daily_before(symbol, first_t), df)
     rows = to_bars(df, args.sessions, today=today_ist)
     errors = {} if rows else {"0": "no intraday bars"}
-    print(json.dumps({"bars": {"0": rows} if rows else {}, "name": name, "instrument": {"segment": segment, "security_id": sid}, "errors": errors}))
+    print(json.dumps({"bars": {"0": rows} if rows else {}, "name": name, "instrument": {"segment": segment, "security_id": sid}, "errors": errors,
+                      **({"anchor_t": anchor_t} if anchor_t else {})}))
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ import { isComplete, targetKey, targetLabel, targetQuery, type Target } from '@/
 // drops everything of the old one before loading, so no refresh, tick or alert crosses over. `target` null = idle.
 
 export type Instrument = { segment: string; security_id: string };
-export type Loaded = { key: number; dataDate: string | null; error?: string; instruments: Instrument[] };
+export type Loaded = { key: number; dataDate: string | null; error?: string; instruments: Instrument[]; anchorT: number | null };
 type LiveLeg = { quote: (NonNullable<LegQuote> & { prevClose: number | null }) | null; last: { ltp: number; prevClose: number | null } | null };
 
 const POLL_MS = 30_000;
@@ -60,7 +60,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
       const res = await fetch(`/api/straddle-pnf?${targetQuery(target)}`);
       const j = await res.json() as {
         success?: boolean; error?: string; strikes: number[]; dataDate: string | null; name?: string; instruments?: Instrument[];
-        instrument?: Instrument | null; bars: Record<string, Bar[]>; errors: Record<string, string>;
+        instrument?: Instrument | null; anchorT?: number | null; bars: Record<string, Bar[]>; errors: Record<string, string>;
       };
       if (id !== reqRef.current) return; // a newer request owns the screen
       if (!j.success) throw new Error(j.error ?? 'Failed to load price history');
@@ -71,7 +71,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
       setBars(prev => mergeHistory(hist, prev, tk, instruments.length < 2));
       setHistVersion(v => v + 1);
       if (reset) setEpoch(n => n + 1);
-      setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], instruments });
+      setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], instruments, anchorT: j.anchorT ?? null });
       if (j.name) setName(j.name);
       setLoadError(null);
     } catch (e) {
