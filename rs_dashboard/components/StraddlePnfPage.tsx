@@ -35,6 +35,9 @@ import { usePnfAlerts } from './straddlePnf/usePnfAlerts';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent } from './straddlePnf/usePnfAuto';
 import { autoDaySummary, autoMarkers } from '@/lib/pnfAutoLedger';
 import AutoControls from './straddlePnf/AutoControls';
+import { useChartLegs, usePnfResting, type RailChart, type RestingEvent } from './straddlePnf/usePnfResting';
+import { applyPaperFill, FLAT_LEG, type PaperLeg, type PnfProduct } from '@/lib/pnfOrderLogic';
+import { needsResolve, type RestingRow } from '@/lib/pnfRestingLedger';
 
 // Point & Figure with a 1-click execution trade bar, picked with Index | Equity | Futures | Options: an NSE index or stock, a
 // future, one option, or a CE + PE straddle. Two charts can show two different instruments with their own box settings; the
@@ -307,6 +310,65 @@ function StraddlePnfPage() {
   }, [leaderRef]);
   const disarm = useCallback((c: ChartId) => setAutoArm(a => (a[c].on ? { ...a, [c]: DISARMED } : a)), []);
   const priceOf = (f: PnfFeed) => (f.live ? f.live.ce + f.live.pe : null);
+
+  // ── resting LIMIT / SL-limit orders from each chart's B / S rail (ladder-style) ──
+  // The paper ledger lives here (not in the trade bar) so a rail fill and a trade-bar order build one paper position.
+  const [paper, setPaper] = useState<Record<string, PaperLeg[]>>({});
+  const [sizing, setSizing] = useState<{ lots: number; product: PnfProduct }>({ lots: 1, product: 'INTRADAY' });
+  const onSizing = useCallback((s: { lots: number; product: PnfProduct }) => {
+    setSizing(prev => (prev.lots === s.lots && prev.product === s.product ? prev : s));
+  }, []);
+  const legs1 = useChartLegs(broker, target1, targetKey(target1), prefsReady && target1.kind !== 'index' && feed1.complete);
+  const legs2 = useChartLegs(broker, target2, targetKey(target2), prefsReady && dual && target2.kind !== 'index' && feed2.complete);
+  const railChartOf = (c: ChartId): RailChart | null => {
+    const target = c === 2 ? target2 : target1;
+    const feed = c === 2 ? feed2 : feed1;
+    const legs = c === 2 ? legs2 : legs1;
+    if (target.kind === 'index' || !legs || (c === 2 && !dual)) return null;
+    const straddle = target.kind === 'options' && target.side === 'STRADDLE';
+    return {
+      chart: c, target, targetKey: targetKey(target), price: priceOf(feed), stale: feed.stale, straddle, tick: legs.tick, unitsPerLot: legs.unitsPerLot,
+      legPrices: !feed.live ? [null] : straddle ? [feed.live.ce, feed.live.pe] : [feed.live.ce + feed.live.pe],
+    };
+  };
+  const railCharts = ([1, 2] as const).map(railChartOf).filter((x): x is RailChart => x !== null);
+  const onRestingEvent = (e: RestingEvent) => {
+    if (e.kind === 'warn') { toast.warning(e.text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); return; }
+    if (e.kind === 'info') { toast(e.text); return; }
+    toast.success(e.text);
+    chime({ kind: 'manual', outcome: 'placed', close: false });
+    if (e.target && e.side && e.price) {
+      const t = Math.floor(nowSec());
+      handleTradeExecuted({ id: e.id ?? `rail-${t}-${e.chart}`, t, action: e.side, price: e.price, lots: e.lots ?? 1, mode: e.mode ?? 'PAPER', estimate: e.estimate ?? false }, e.target);
+    }
+  };
+  const onPaperFill = (row: RestingRow, legPrices: number[]) => {
+    const unitsOf = (i: number) => (row.legUnits?.[i] ?? row.unitsPerPoint) / Math.max(1, row.lots);
+    const delta = row.side === 'BUY' ? row.lots : -row.lots;
+    setPaper(prev => {
+      const legs = prev[row.targetKey] ?? legPrices.map(() => FLAT_LEG);
+      return { ...prev, [row.targetKey]: legs.map((l, i) => applyPaperFill(l, delta, legPrices[i] ?? 0, unitsOf(i))) };
+    });
+  };
+  const resting = usePnfResting({
+    charts: railCharts, broker, mode: tradeMode, lots: sizing.lots, product: sizing.product, leaderRef, onEvent: onRestingEvent, onPaperFill,
+  });
+  const railFor = (c: ChartId) => {
+    const rc = railCharts.find(x => x.chart === c);
+    if (!rc) return undefined;
+    const rows = resting.openFor(rc.targetKey);
+    const byId = (id: string) => rows.find(r => r.id === id);
+    const now = nowSec();
+    return {
+      orders: rows.map(r => ({
+        id: r.id, side: r.side, kind: r.kind, level: r.level, price: r.price, trigger: r.trigger, lots: r.lots, state: r.state, mode: r.mode,
+        resolvable: needsResolve(r, now),
+      })),
+      onPlace: (side: 'BUY' | 'SELL', level: number) => { void resting.place(rc, side, level); },
+      onModify: (id: string, level: number) => { const r = byId(id); if (r) void resting.modify(r, level); },
+      onCancel: (id: string) => { const r = byId(id); if (r) void resting.cancel(r); },
+    };
+  };
   const auto1 = usePnfAuto({
     chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: c1.model, price: priceOf(feed1), stale: feed1.stale,
     market: feed1.market, complete: feed1.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
@@ -425,6 +487,7 @@ function StraddlePnfPage() {
       active: active === c,
       onActivate: dual ? () => activate(c) : undefined,
       markersShown: markersShown[c],
+      rail: railFor(c),
       onToggleMarkers: () => {
         const next = !markersShown[c];
         savePref(`${MARKERS_SHOWN_KEY}${c}`, next ? '1' : '0');
@@ -571,6 +634,9 @@ function StraddlePnfPage() {
             onMarkerPrice={handleMarkerPrice}
             onSound={(outcome, close) => chime({ kind: 'manual', outcome, close })}
             tradesLabel={dual ? `C${active} · ${activeFeed.label}` : undefined}
+            paper={paper}
+            setPaper={setPaper}
+            onSizing={onSizing}
           />
         </div>
       )}

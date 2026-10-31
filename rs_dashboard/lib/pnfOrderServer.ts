@@ -3,6 +3,7 @@ import { resolveFuture, resolveOption } from '@/lib/pnfContracts';
 import { kotakEquityContract, kotakFutureContract, kotakOptionContract } from '@/lib/kotakContracts';
 import { zerodhaOptionContract } from '@/lib/zerodhaContracts';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
+import { derivativeTick } from '@/lib/derivativeTick';
 import type { Target } from '@/lib/pnfTarget';
 import type { PnfBroker } from '@/lib/pnfOrderLogic';
 
@@ -21,6 +22,8 @@ export interface PnfLeg {
   lot: number;
   /** Rupees per point per lot: the exchange lot on NSE, barrels per lot on MCX (null when the MCX multiplier is unknown). */
   unitsPerLot: number | null;
+  /** The exchange tick in rupees (master_list TICK_SIZE is in paise); null when the master has none. */
+  tick: number | null;
 }
 
 export interface PnfBrokerLeg extends PnfLeg {
@@ -39,7 +42,7 @@ export function resolvePnfLegs(t: Target): PnfLeg[] | string {
   if (t.kind === 'equity') {
     const e = findEquity(t.symbol);
     if (!e) return `Unknown NSE stock ${t.symbol}`;
-    return [{ label: t.symbol, side: 'EQ', segment: 'NSE_EQ', securityId: e.securityId, lot: 1, unitsPerLot: 1 }];
+    return [{ label: t.symbol, side: 'EQ', segment: 'NSE_EQ', securityId: e.securityId, lot: 1, unitsPerLot: 1, tick: e.tick > 0 ? e.tick : null }];
   }
   if (t.kind === 'futures' && t.expiry) {
     const f = resolveFuture(t.symbol, t.expiry);
@@ -64,6 +67,7 @@ function legOf(c: { segment: 'NSE_FNO' | 'MCX_COMM'; securityId: string; display
   return {
     label: c.displayName, side, segment: c.segment, securityId: c.securityId, lot: mcx ? 1 : c.lot,
     unitsPerLot: mcx ? (MCX_LOT_MULTIPLIER[underlying] ?? null) : c.lot,
+    tick: derivativeTick(c.securityId, c.segment),
   };
 }
 

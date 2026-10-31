@@ -5,7 +5,7 @@ import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 
 const DONE = new Set(['COMPLETE', 'CANCELLED', 'CANCELED', 'REJECTED']);
 
-export type ModifyResult = { ok: true; data: unknown } | { ok: false; status: number; error: string };
+export type ModifyResult = { ok: true; data: unknown; price: number } | { ok: false; status: number; error: string };
 
 /**
  * Re-price / re-size a resting Zerodha LIMIT order. The order is read first: its own symbol sets the tick the price snaps to,
@@ -27,12 +27,13 @@ export async function modifyZerodhaLimitOrder(input: { orderId?: unknown; price?
   if (String(order.order_type).toUpperCase() !== 'LIMIT') {
     return { ok: false, status: 400, error: `Only a resting LIMIT order can be modified (this one is ${order.order_type})` };
   }
+  const snapped = zerodhaSnapPrice(newPrice, cachedZerodhaContract(String(order.tradingsymbol)));
   const data = await kitePut(`/orders/regular/${encodeURIComponent(id)}`, {
     quantity: qty,
-    price: zerodhaSnapPrice(newPrice, cachedZerodhaContract(String(order.tradingsymbol))),
+    price: snapped,
     order_type: 'LIMIT',
     validity: 'DAY',
   });
   invalidateBrokerCache('zerodha');
-  return { ok: true, data };
+  return { ok: true, data, price: Number(snapped) };
 }

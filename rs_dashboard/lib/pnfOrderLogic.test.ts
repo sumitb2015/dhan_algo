@@ -136,3 +136,29 @@ test('sendOutcome: an AUTO exit that finds every leg already flat is "flat", not
   assert.equal(sendOutcome([l('placed'), l('flat')]), 'placed');
   assert.equal(sendOutcome([l('rejected'), l('flat')]), 'rejected');
 });
+
+test('resting orders: LIMIT / SL parse with their prices; an SL-limit limit on the far side of its trigger', async () => {
+  const { parsePnfOrder, checkRestingPrices, inBand } = await import('./pnfOrderLogic.ts');
+  const base = { broker: 'dhan', mode: 'REAL', target: fut, action: 'BUY', lots: 1, product: 'INTRADAY' };
+  const lim = parsePnfOrder({ ...base, orderType: 'LIMIT', price: 23050 });
+  assert.ok(typeof lim !== 'string' && lim.orderType === 'LIMIT' && lim.price === 23050);
+  const sl = parsePnfOrder({ ...base, orderType: 'SL', trigger: 23150, price: 23160 });
+  assert.ok(typeof sl !== 'string' && sl.trigger === 23150);
+  assert.match(String(parsePnfOrder({ ...base, orderType: 'SL', trigger: 23150, price: 23140 })), /at or above/);
+  assert.match(String(parsePnfOrder({ ...base, orderType: 'LIMIT', price: -1 })), /positive/);
+  assert.match(String(parsePnfOrder({ ...base, orderType: 'STOP' })), /orderType/);
+  assert.equal(typeof checkRestingPrices('SELL', 'SL', 99, 100), 'object');
+  assert.equal(inBand(120, 100), true);
+  assert.equal(inBand(121, 100), false);
+  assert.equal(inBand(100, 0), false, 'no live price: refused');
+});
+
+test('brokerOp modify / cancel: REAL only, a sane order id, modify needs prices', async () => {
+  const { parsePnfOrder } = await import('./pnfOrderLogic.ts');
+  const base = { broker: 'kotak', mode: 'REAL', target: fut, action: 'BUY', lots: 1, product: 'INTRADAY' };
+  const c = parsePnfOrder({ ...base, brokerOp: { op: 'cancel', orderId: '2510301234' } });
+  assert.ok(typeof c !== 'string' && c.brokerOp?.op === 'cancel');
+  assert.match(String(parsePnfOrder({ ...base, brokerOp: { op: 'modify', orderId: '1' } })), /prices/);
+  assert.match(String(parsePnfOrder({ ...base, brokerOp: { op: 'cancel', orderId: '../x' } })), /orderId/);
+  assert.match(String(parsePnfOrder({ ...base, mode: 'PAPER', brokerOp: { op: 'cancel', orderId: '1' } })), /REAL/);
+});

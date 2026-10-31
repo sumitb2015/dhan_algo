@@ -1,0 +1,263 @@
+import { test, expect, type Page, type Route } from '@playwright/test';
+import { json, signIn } from './support';
+import { EMPTY_RESTING, applyRestingOp, type RestingLedger, type RestingOp } from '../lib/pnfRestingLedger';
+
+// The ladder-style B / S rail on a P&F chart: click a box row to rest a LIMIT / SL-limit, × cancels, PAPER fills when the
+// live price reaches it, REAL single-leg orders go to the broker as LIMIT / SL and fill from the broker's order book.
+// Everything is mocked in the browser (the resting ledger with the real applyRestingOp, the order route as a recorder), so
+// no file is written and no order can leave. The page clock is pinned to an NSE trading morning.
+
+const ist = (hh: number, mm: number, ss = 0) => Date.UTC(2026, 9, 30, hh, mm, ss) - 5.5 * 3600_000;
+type Body = { mode?: string; action?: string; lots?: number; orderType?: string; price?: number; trigger?: number; brokerOp?: { op: string; orderId: string } };
+
+async function install(page: Page) {
+  const orders: Body[] = [];
+  const state = {
+    ledger: EMPTY_RESTING as RestingLedger, tick: { ltp: 99.33, at: ist(10, 30, 10) }, book: [] as Record<string, unknown>[],
+    /** Set: the next resting placement gets no clean reply (the route's 504 / UNKNOWN). */
+    unknownNext: false,
+  };
+  const bars = [100, 99.5, 100].map((p, i) => ({ t: ist(10, 27 + i) / 1000, ce: p, pe: 0, straddle: p, vol: 10 }));
+  await page.route('**/api/**', async (route: Route) => {
+    const req = route.request();
+    const u = new URL(req.url());
+    const p = u.pathname;
+    const method = req.method();
+    if (p === '/api/straddle-pnf/contracts') {
+      if (u.searchParams.get('kind') === 'options') return json(route, { success: true, expiries: ['2026-11-03'], expiry: '2026-11-03', strikes: [23000], spot: 23000, atm: 23000 });
+      return json(route, { success: true, expiries: ['2026-11-24'] });
+    }
+    if (p === '/api/straddle-pnf' && method === 'GET') {
+      const fut = u.searchParams.get('mode') === 'contract';
+      const straddle = u.searchParams.get('type') === 'STRADDLE';
+      return json(route, {
+        success: true, atm: 0, strikes: [0], name: straddle ? 'NIFTY 23000 STRADDLE' : fut ? 'NIFTY NOV FUT' : 'Nifty 50', errors: {}, dataDate: '2026-10-30',
+        instruments: straddle ? [{ segment: 'NSE_FNO', security_id: '1' }, { segment: 'NSE_FNO', security_id: '2' }] : [{ segment: fut ? 'NSE_FNO' : 'IDX_I', security_id: fut ? '54321' : '13' }],
+        bars: { 0: straddle ? bars.map(b => ({ ...b, ce: b.straddle / 2, pe: b.straddle / 2 })) : bars },
+      });
+    }
+    if (p === '/api/straddle-pnf/live') {
+      const two = (u.searchParams.get('ids') ?? '').includes(',');
+      const q = (ltp: number) => ({ quote: { ltp, changedMs: state.tick.at, volume: 100, prevClose: 49 }, last: null });
+      return json(route, { success: true, legs: two ? [q(state.tick.ltp / 2), q(state.tick.ltp / 2)] : [q(state.tick.ltp)] });
+    }
+    if (p === '/api/straddle-pnf/order' && method === 'GET') {
+      return json(route, { success: true, unsupported: null, legs: [{ label: 'NIFTY NOV FUT', side: 'FUT', segment: 'NSE_FNO', lot: 65, unitsPerLot: 65, key: '54321', lotUnits: 65, tick: 0.05 }] });
+    }
+    if (p === '/api/straddle-pnf/order' && method === 'POST') {
+      const b = req.postDataJSON() as Body;
+      orders.push(b);
+      if (b.brokerOp) return json(route, { success: true, outcome: 'placed', price: b.price, trigger: b.trigger });
+      if ((b.orderType === 'LIMIT' || b.orderType === 'SL') && state.unknownNext) {
+        state.unknownNext = false;
+        return json(route, { success: false, outcome: 'unknown', error: 'Order status unknown - check the order book' }, 504);
+      }
+      if (b.orderType === 'LIMIT' || b.orderType === 'SL') return json(route, { success: true, outcome: 'placed', orderId: `B-${orders.length}`, price: b.price, trigger: b.trigger });
+      return json(route, { success: true, outcome: 'placed', legs: [{ label: 'NIFTY NOV FUT', side: b.action, qty: (b.lots ?? 1) * 65, product: 'INTRADAY', status: 'placed' }] });
+    }
+    if (p === '/api/straddle-pnf/resting') {
+      if (method === 'GET') return json(route, { success: true, ledger: state.ledger });
+      const r = applyRestingOp(state.ledger, req.postDataJSON() as RestingOp);
+      if (!r.ok) return json(route, { success: false, error: r.error, ledger: state.ledger }, r.status);
+      state.ledger = r.ledger;
+      return json(route, { success: true, ledger: state.ledger });
+    }
+    if (p === '/api/scalper/orders') return json(route, { success: true, data: state.book });
+    if (p === '/api/straddle-pnf/auto') return json(route, { success: true, ledger: { rev: 0, rows: [], log: [] } });
+    if (p.endsWith('/funds')) return json(route, { success: true, data: { availabelBalance: 100000 } });
+    if (p === '/api/scalper/poll') return json(route, { positions: [], positionsError: null });
+    if (p === '/api/live-indices' && method === 'POST') return json(route, { success: true });
+    if (method === 'GET') return json(route, { success: true });
+    return route.fulfill({ status: 599, body: `unmocked ${method} ${p}` });
+  });
+  return { orders, state };
+}
+
+async function openFuture(page: Page) {
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await expect(page.getByLabel('Expiry')).toHaveValue('2026-11-24');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('99.33');
+}
+
+/** The rail cell of chart 1 for `side` whose box price is nearest `price`. */
+async function cell(page: Page, side: 'BUY' | 'SELL', price: number) {
+  const cells = page.getByTestId('pnf-panel').nth(0).locator(`[data-testid="pnf-rail-cell"][data-side="${side}"]`);
+  await expect(cells.first()).toBeAttached();
+  const levels = await cells.evaluateAll(els => els.map(e => Number(e.getAttribute('data-level'))));
+  let best = 0;
+  levels.forEach((l, i) => { if (Math.abs(l - price) < Math.abs(levels[best] - price)) best = i; });
+  return { el: cells.nth(best), level: levels[best] };
+}
+
+test.beforeEach(async ({ context }) => { await signIn(context); });
+
+test('PAPER: B below the price rests a LIMIT, the price falling through fills it into the paper position', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await openFuture(page);
+  const { el, level } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+  expect(state.ledger.rows[0]).toMatchObject({ side: 'BUY', kind: 'limit', mode: 'PAPER', venue: 'page', lots: 1 });
+  expect(state.ledger.rows[0].level).toBeCloseTo(level, 6);
+  const line = page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-order-line');
+  await expect(line).toHaveAttribute('data-kind', 'limit');
+  expect(orders.length, 'a paper order never reaches the order route').toBe(0);
+
+  state.tick = { ltp: level - 0.2, at: ist(10, 30, 15) };
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 10_000 }).toBe('filled');
+  await expect(line).toHaveCount(0);
+  await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 1 lot');
+});
+
+test('PAPER: B above the price is an SL-limit (trigger and a limit past it); × cancels it', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  const { el } = await cell(page, 'BUY', 99.85);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+  const r = state.ledger.rows[0];
+  expect(r.kind).toBe('stop');
+  expect(r.trigger).toBeGreaterThan(99.33);
+  expect(r.price).toBeGreaterThan(r.trigger!);
+  await page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-order-cancel').dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('cancelled');
+  await expect(page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-order-line')).toHaveCount(0);
+});
+
+test('REAL single leg: asks once, sends a LIMIT at the box price to the broker, and fills from the broker order book', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await openFuture(page);
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  let asked = 0;
+  page.on('dialog', d => { asked++; void d.accept(); });
+  const { el, level } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+  expect(asked).toBe(1);
+  expect(orders[0]).toMatchObject({ mode: 'REAL', action: 'BUY', lots: 1, orderType: 'LIMIT' });
+  expect(orders[0].price).toBeLessThanOrEqual(level + 1e-9);                       // never pays more than the box
+  expect(state.ledger.rows[0]).toMatchObject({ venue: 'broker', brokerOrderId: 'B-1' });
+
+  // A second order does not ask again (once per page load)
+  const s2 = await cell(page, 'SELL', 99.85);
+  await s2.el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => orders.length).toBe(2);
+  expect(asked).toBe(1);
+  expect(orders[1]).toMatchObject({ action: 'SELL', orderType: 'LIMIT' });
+  await expect.poll(() => state.ledger.rows[1]?.brokerOrderId).toBe('B-2');
+
+  // The broker's book reports the first one TRADED (the second stays working)
+  state.book = [{ orderId: 'B-1', orderStatus: 'TRADED', quantity: 65, filledQty: 65, averageTradedPrice: 99, tradingSymbol: 'NIFTY-Nov2026-FUT', transactionType: 'BUY' }];
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 10_000 }).toBe('filled');
+  expect(state.ledger.rows[0].fillPrice).toBe(99);
+  expect(state.ledger.rows[1].state).toBe('working');
+});
+
+test('an index chart has no rail', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  await install(page);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await expect(page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-rail')).toHaveCount(0);
+});
+
+test('drag an order to another box moves it (a page order: modified in place)', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  const { el } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+  const before = state.ledger.rows[0].level;
+  const handle = page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-rail-order');
+  await handle.evaluate(e => e.scrollIntoView({ block: 'center' }));                        // the chart scrolls vertically
+  const box = (await handle.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + 60, { steps: 6 });     // down = a lower box
+  await page.mouse.up();
+  await expect.poll(() => state.ledger.rows[0]?.level).toBeLessThan(before);
+  expect(state.ledger.rows[0].state).toBe('working');
+});
+
+test('REAL straddle: a page-held level, sent as both legs at MARKET once when the combined price reaches it', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Options' }).click();
+  await page.getByRole('button', { name: 'CE+PE' }).first().click();
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('99.33');
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  page.on('dialog', d => { void d.accept(); });
+  const { el, level } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+  expect(state.ledger.rows[0]).toMatchObject({ venue: 'page', mode: 'REAL', kind: 'limit' });
+  expect(orders.length, 'nothing goes to the broker until the level is reached').toBe(0);
+
+  state.tick = { ltp: level - 0.2, at: ist(10, 30, 15) };
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 10_000 }).toBe('filled');
+  expect(orders.length).toBe(1);
+  expect(orders[0]).toMatchObject({ mode: 'REAL', action: 'BUY', lots: 1 });
+  expect(orders[0].orderType, 'both legs at MARKET (the route sends CE then PE)').toBeUndefined();
+  await page.waitForTimeout(2500);
+  expect(orders.length, 'fired once').toBe(1);
+});
+
+test('REAL single leg with no clean reply: UNKNOWN on the chart, never resent; ? settles it after a confirm', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await openFuture(page);
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  const dialogs: string[] = [];
+  page.on('dialog', d => { dialogs.push(d.message()); void d.accept(); });
+  state.unknownNext = true;
+  const { el } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('unknown');
+  const panel = page.getByTestId('pnf-panel').nth(0);
+  await expect(panel.getByTestId('pnf-order-line')).toHaveAttribute('data-state', 'unknown');
+  await expect(panel.getByTestId('pnf-order-cancel')).toHaveCount(0);
+  await page.waitForTimeout(2500);
+  expect(orders.length, 'an unknown order is never resent').toBe(1);
+
+  await panel.getByTestId('pnf-order-resolve').dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('cancelled');
+  expect(dialogs.at(-1)).toMatch(/outcome is unknown/);
+  expect(orders.length, 'settling places and cancels nothing at the broker').toBe(1);
+  await expect(panel.getByTestId('pnf-order-line')).toHaveCount(0);
+});
+
+test('REAL straddle: a level the price reaches on a STALE feed does not fire; it fires once the feed is fresh', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Options' }).click();
+  await page.getByRole('button', { name: 'CE+PE' }).first().click();
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('99.33');
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  page.on('dialog', d => { void d.accept(); });
+  const { el, level } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+
+  // Ten minutes on with no newer print: the price that "reached" the level is old.
+  // The page re-reads its clock every 5 s: let it see the new time before the price moves.
+  await page.clock.setFixedTime(ist(10, 40, 30));
+  await page.waitForTimeout(6000);
+  state.tick = { ltp: level - 0.2, at: ist(10, 30, 15) };
+  await page.waitForTimeout(4000);
+  expect(orders.length, 'nothing fires on a stale price').toBe(0);
+  expect(state.ledger.rows[0].state).toBe('working');
+
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 10_000 }).toBe('filled');
+  expect(orders.length).toBe(1);
+});

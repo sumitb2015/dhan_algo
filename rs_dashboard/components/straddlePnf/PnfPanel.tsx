@@ -63,7 +63,28 @@ export type PnfPanelProps = {
   markersShown?: boolean;
   /** Shows a hide / show-markers button beside the zoom buttons. */
   onToggleMarkers?: () => void;
+  /** The ladder-style B / S rail beside the price axis (absent: no rail, e.g. an index chart). */
+  rail?: PnfRail;
 };
+
+/** A resting order drawn on the chart (its line, its tag, and its handle in the rail). */
+export type RailOrder = {
+  id: string; side: 'BUY' | 'SELL'; kind: 'limit' | 'stop'; level: number; price: number; trigger?: number; lots: number;
+  /** working: draggable / cancellable. Anything else (sending, firing, unknown) is drawn but locked. */
+  state: string; mode: 'PAPER' | 'REAL';
+  /** Its outcome is unknown (or its send never finished): a ? on the tag lets the user settle it (onCancel asks first). */
+  resolvable?: boolean;
+};
+export type PnfRail = {
+  orders: RailOrder[];
+  /** A click on a box row: the box price. */
+  onPlace: (side: 'BUY' | 'SELL', level: number) => void;
+  onModify: (id: string, level: number) => void;
+  onCancel: (id: string) => void;
+};
+
+/** Width of the B / S rail (two columns) between the chart and its price axis. */
+export const RAIL_W = 30;
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -84,6 +105,92 @@ const signed = (n: number) => `${n >= 0 ? '+' : '-'}${Math.abs(n).toFixed(2)}`;
 const hhmm = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString().slice(11, 16);
 const sessionOfT = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString().slice(0, 10);
 const shortDate = (iso: string) => sessionLabel(iso).slice(4);
+
+type RailDrag = { id: string; level: number; start: number } | null;
+
+/**
+ * The B / S rail: a Buy and a Sell cell on every box row over the whole chart height (the padding above and below the data
+ * too, on the chart's own box grid, so an order can rest beyond where the price has been), plus a handle per resting order.
+ * Cells act on pointer-down (the chart's drag-to-pan captures the pointer, which would swallow a click). A handle is dragged
+ * to another box (commit on release); the drag lives in a ref because pointer events arrive before React re-renders.
+ */
+function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, axisDigits, onDrag }: {
+  rail: PnfRail; box: number; cell: number; yMax: number; yMin: number; padY: number; contentH: number;
+  yOf: (p: number) => number; liveValue: number | null; axisDigits: number; onDrag: (d: RailDrag) => void;
+}) {
+  const dragRef = useRef<RailDrag>(null);
+  const [drag, setDragState] = useState<RailDrag>(null);
+  const setDrag = (d: RailDrag) => { dragRef.current = d; setDragState(d); onDrag(d); };
+  const priceAtY = (y: number) => yMax - ((y - padY - PAD_TOP) / cell) * box;
+  const iLo = Math.floor((priceAtY(contentH) - yMin) / box);
+  const iHi = Math.ceil((priceAtY(0) - yMin) / box) - 1;
+  const levelAt = (y: number) => yMin + (Math.max(iLo, Math.min(iHi, Math.floor((priceAtY(y) - yMin) / box))) + 0.5) * box;
+  const kindAt = (side: 'BUY' | 'SELL', p: number) => (liveValue === null ? '' : (side === 'BUY') === (p < liveValue) ? 'LIMIT' : 'SL-limit');
+  return (
+    <svg data-testid="pnf-rail" width={RAIL_W} height={contentH} className="block shrink-0 sticky bg-zinc-950 border-l border-zinc-800" style={{ right: AXIS_W }}>
+      {/* two tinted columns over the whole height, so the rail reads as a rail wherever the chart is scrolled to */}
+      <rect x={0} y={0} width={RAIL_W / 2} height={contentH} className="fill-emerald-500/10" pointerEvents="none" />
+      <rect x={RAIL_W / 2} y={0} width={RAIL_W / 2} height={contentH} className="fill-red-500/10" pointerEvents="none" />
+      <line x1={RAIL_W / 2} x2={RAIL_W / 2} y1={0} y2={contentH} className="stroke-zinc-700" pointerEvents="none" />
+      {Array.from({ length: Math.max(0, iHi - iLo + 1) }, (_, n) => {
+        const p = yMin + (iLo + n + 0.5) * box;
+        if (!(p > 0)) return null;
+        const y = yOf(p);
+        return (
+          <g key={n}>
+            <line x1={0} x2={RAIL_W} y1={y + cell / 2} y2={y + cell / 2} className="stroke-zinc-800" pointerEvents="none" />
+            {cell >= 11 && (
+              <>
+                <text x={RAIL_W / 4} y={y + 3} textAnchor="middle" className="fill-emerald-500" fontSize={8} fontWeight={700} pointerEvents="none">B</text>
+                <text x={(RAIL_W * 3) / 4} y={y + 3} textAnchor="middle" className="fill-red-500" fontSize={8} fontWeight={700} pointerEvents="none">S</text>
+              </>
+            )}
+            {(['BUY', 'SELL'] as const).map(side => (
+              <rect key={side} data-testid="pnf-rail-cell" data-side={side} data-level={p}
+                    x={side === 'BUY' ? 1 : RAIL_W / 2} y={y - cell / 2} width={RAIL_W / 2 - 1} height={Math.max(1, cell)}
+                    className={`cursor-pointer fill-transparent ${side === 'BUY' ? 'hover:fill-emerald-500/30' : 'hover:fill-red-500/30'}`}
+                    onPointerDown={e => { e.stopPropagation(); if (e.button === 0) rail.onPlace(side, p); }}>
+                <title>{`${side} ${kindAt(side, p)} at ${fmt(p, axisDigits)}`}</title>
+              </rect>
+            ))}
+          </g>
+        );
+      })}
+      {rail.orders.map(o => {
+        const y = yOf(drag?.id === o.id ? drag.level : o.level);
+        const buy = o.side === 'BUY';
+        const movable = o.state === 'working';
+        return (
+          <g key={o.id} data-testid="pnf-rail-order" data-id={o.id} className={movable ? 'cursor-ns-resize' : 'cursor-not-allowed'}
+             onPointerDown={e => {
+               e.stopPropagation();
+               if (!movable || e.button !== 0) return;
+               (e.currentTarget as Element).setPointerCapture(e.pointerId);
+               setDrag({ id: o.id, level: o.level, start: o.level });
+             }}
+             onPointerMove={e => {
+               const d = dragRef.current;
+               const svg = (e.currentTarget as SVGGElement).ownerSVGElement;
+               if (d?.id !== o.id || !svg) return;
+               const next = levelAt(e.clientY - svg.getBoundingClientRect().top);
+               if (Math.abs(next - d.level) > box / 4) setDrag({ ...d, level: next });
+             }}
+             onPointerUp={() => {
+               const d = dragRef.current;
+               if (d?.id !== o.id) return;
+               setDrag(null);
+               if (Math.abs(d.level - d.start) > box / 4) rail.onModify(o.id, d.level);
+             }}
+             onPointerCancel={() => setDrag(null)}>
+            <rect x={buy ? 1 : RAIL_W / 2} y={y - 7} width={RAIL_W / 2 - 1} height={14} rx={2} className={buy ? 'fill-emerald-500' : 'fill-red-500'} opacity={movable ? 1 : 0.5} />
+            <text x={(buy ? 1 : RAIL_W / 2) + 4} y={y + 3.5} className="fill-oncolor" fontSize={9} fontWeight={800} pointerEvents="none">{buy ? 'B' : 'S'}</text>
+            <title>{`${o.side} ${o.kind === 'limit' ? 'LIMIT' : 'SL-limit'} ${o.lots}L at ${fmt(o.level, 2)}${movable ? ' — drag to move' : ` (${o.state})`}`}</title>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
 
 function ZoomButton({ label, onClick, children, pressed }: { label: string; onClick: () => void; children: React.ReactNode; pressed?: boolean }) {
   return (
@@ -107,7 +214,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -138,7 +245,9 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   // Laid out with the unconfirmed boxes too (the live columns are the confirmed ones plus what the forming bar adds), so a
   // new unconfirmed column gets its own cell instead of sliding under the pinned axis.
   const liveCols = model.liveColumns.length >= columns.length ? model.liveColumns : columns;
-  const L = layoutPanel(liveCols, box, liveValue, width, HEIGHT, zoom, true);
+  // The rail takes its width from the chart, so the newest column still sits next to the axis.
+  const viewW = rail ? Math.max(120, width - RAIL_W) : width;
+  const L = layoutPanel(liveCols, box, liveValue, viewW, HEIGHT, zoom, true);
   const { cell, yMin, yMax, plotW, contentW, contentH, offsetX, padY, padR } = L;
   const yOf = (p: number) => padY + PAD_TOP + ((yMax - p) / box) * cell;
   const xOf = (j: number) => offsetX + j * cell;
@@ -157,6 +266,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     if (dataH <= el.clientHeight) return Math.max(0, padY - (el.clientHeight - dataH) / 2);
     return Math.max(0, yOf(lastY as number) - el.clientHeight / 2);
   };
+  // The scroller's visible plot edge in content coordinates: the order tags sit there, not at the content's far end (blank padding).
+  const [viewRight, setViewRight] = useState<number | null>(null);
   const stickRef = useRef(true);
   // The scroll position where the newest column sits against the axis (the empty room right of it is only for dragging).
   const stickLeft = (el: HTMLElement) => Math.max(0, el.scrollWidth - el.clientWidth - padR);
@@ -168,6 +279,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     const el = scrollRef.current;
     if (!el || liveCols.length === 0) return;
     if (stickRef.current) el.scrollLeft = stickLeft(el);
+    setViewRight(Math.round(el.scrollLeft + el.clientWidth - AXIS_W - (rail ? RAIL_W : 0)));
     if (centeredFor.current !== strike) { touchedRef.current = false; centeredFor.current = strike; }
     if (!touchedRef.current && lastY !== null && box > 0) {
       el.scrollTop = topFor(el);
@@ -186,7 +298,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     const x = ax ?? el.clientWidth / 2;
     const y = ay ?? el.clientHeight / 2;
     // The column and price under the anchor stay under it: read them off the current layout, place them on the next one.
-    const L2 = layoutPanel(liveCols, box, liveValue, width, HEIGHT, next, true);
+    const L2 = layoutPanel(liveCols, box, liveValue, viewW, HEIGHT, next, true);
     const j = (el.scrollLeft + x - offsetX) / cell;
     const u = (el.scrollTop + y - padY - PAD_TOP) / cell;
     pendingRef.current = { left: L2.offsetX + j * L2.cell - x, top: L2.padY + PAD_TOP + u * L2.cell - y };
@@ -235,12 +347,15 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   // Crosshair: the pointer in content coordinates, snapped to the column (vertical) and to the box row (horizontal) under it.
   // P&F prices are discrete, so the price tag names the box the pointer is in, not a price between two boxes.
   const [hover, setHover] = useState<{ x: number; y: number; overAxis: boolean } | null>(null);
+  // A rail order being dragged to another box: its preview level (committed on release).
+  const [railDrag, setRailDrag] = useState<{ id: string; level: number; start: number } | null>(null);
+
   const trackHover = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.pointerType === 'touch') return;
     const el = e.currentTarget;
     const r = el.getBoundingClientRect();
     const vx = e.clientX - r.left;
-    setHover({ x: vx + el.scrollLeft, y: e.clientY - r.top + el.scrollTop, overAxis: vx > el.clientWidth - AXIS_W });
+    setHover({ x: vx + el.scrollLeft, y: e.clientY - r.top + el.scrollTop, overAxis: vx > el.clientWidth - AXIS_W - (rail ? RAIL_W : 0) });
   };
   const rowTop = padY + PAD_TOP;
   const cross = (() => {
@@ -483,6 +598,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         onPointerCancel={() => { dragRef.current = null; setDragging(false); }}
         onPointerLeave={() => setHover(null)}
         onDoubleClick={resetView}
+        onScroll={e => { const el = e.currentTarget; const v = Math.round(el.scrollLeft + el.clientWidth - AXIS_W - (rail ? RAIL_W : 0)); setViewRight(prev => (prev === v ? prev : v)); }}
         className={`relative overflow-auto select-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${dragging ? 'cursor-grabbing' : 'cursor-crosshair'} ${fill ? 'flex-1 min-h-0' : ''}`}
         style={fill ? { minHeight: 200 } : { height: 'calc(100vh - 215px)', minHeight: MIN_HEIGHT }}
       >
@@ -493,7 +609,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         ) : liveCols.length === 0 ? (
           <p className="p-3 text-xs text-zinc-400">{`Building chart — the first column needs a ${model.boxMode === 'pts' ? 'one-box' : `${boxPct}%`} move${interval > 1 ? ` on closed ${interval}-minute bars` : ''}.`}</p>
         ) : (
-          <div className="flex" style={{ width: contentW, height: contentH }}>
+          <div className="flex" style={{ width: contentW + (rail ? RAIL_W : 0), height: contentH }}>
             <svg width={plotW} height={contentH} className="block shrink-0" role="img" aria-label={`${title} point and figure chart`}>
               <defs>
                 <pattern id={gridId} x={offsetX} y={gridY} width={cell} height={cell} patternUnits="userSpaceOnUse">
@@ -677,6 +793,33 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 });
               })()}
 
+              {/* resting orders: a line across the chart at the level, and a tag by the newest columns (× cancels) */}
+              {rail && rail.orders.map(o => {
+                const level = railDrag?.id === o.id ? railDrag.level : o.level;
+                const y = yOf(level);
+                const buy = o.side === 'BUY';
+                const text = `${o.mode === 'PAPER' ? 'P ' : ''}${o.side} ${o.kind === 'limit' ? 'LMT' : 'SL'} ${o.lots}L ${o.kind === 'stop' && o.trigger !== undefined ? `${fmt(o.trigger, 2)}→` : ''}${fmt(railDrag?.id === o.id ? level : o.price, 2)}${o.state === 'working' ? '' : ` ${o.state.toUpperCase()}`}`;
+                const w = text.length * 6 + 22;
+                const x = Math.max(4, Math.min(plotW, viewRight ?? plotW) - w - 6);
+                const live = o.state === 'working';
+                return (
+                  <g key={o.id} data-testid="pnf-order-line" data-side={o.side} data-kind={o.kind} data-state={o.state}>
+                    <line x1={0} x2={plotW} y1={y} y2={y} strokeWidth={1} strokeDasharray={o.mode === 'PAPER' ? '2 3' : '6 3'}
+                          className={buy ? 'stroke-emerald-400' : 'stroke-red-400'} />
+                    <rect x={x} y={y - 8} width={w} height={16} rx={3} className={buy ? 'fill-emerald-600' : 'fill-red-600'} opacity={live ? 1 : 0.55} />
+                    <text x={x + 5} y={y + 3.5} className="fill-oncolor font-mono" fontSize={10} fontWeight={700}>{text}</text>
+                    {(live || o.resolvable) && (
+                      <g data-testid={live ? 'pnf-order-cancel' : 'pnf-order-resolve'} role="button"
+                         aria-label={`${live ? 'Cancel' : 'Settle (outcome unknown)'} ${o.side} ${o.kind === 'limit' ? 'limit' : 'SL-limit'} at ${fmt(o.level, 2)}`}
+                         className="cursor-pointer" onPointerDown={e => { e.stopPropagation(); rail.onCancel(o.id); }}>
+                        <rect x={x + w - 15} y={y - 6} width={12} height={12} rx={2} className="fill-oncolor-dark/30" />
+                        <text x={x + w - (live ? 12 : 13)} y={y + 3.5} className="fill-oncolor" fontSize={10} fontWeight={700}>{live ? '×' : '?'}</text>
+                      </g>
+                    )}
+                  </g>
+                );
+              })}
+
               {/* live price line */}
               {liveValue !== null && (
                 <line x1={0} x2={plotW} y1={yOf(liveValue)} y2={yOf(liveValue)} className="stroke-zinc-400" strokeDasharray="3 3" />
@@ -692,6 +835,12 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 </g>
               )}
             </svg>
+
+            {/* the B / S rail (the ladder's columns): click a box row to rest an order there; drag an order's handle to move it */}
+            {rail && (
+              <RailSvg rail={rail} box={box} cell={cell} yMax={yMax} yMin={yMin} padY={padY} contentH={contentH} yOf={yOf}
+                       liveValue={liveValue} axisDigits={axisDigits} onDrag={setRailDrag} />
+            )}
 
             {/* price axis: sticky, so it stays at the panel's right edge while the chart is panned */}
             <svg width={AXIS_W} height={contentH} className="block shrink-0 sticky right-0 bg-zinc-900" aria-hidden="true">

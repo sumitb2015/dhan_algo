@@ -43,6 +43,32 @@ export interface PnfOrderRequest {
    * shows in that direction under the intraday product (planOwnExit). REAL only; never sized from the Lots box.
    */
   exitOwn: { side: PnfAction; units: number[] } | null;
+  /** MARKET (default), or a resting LIMIT / SL-limit from the chart's B / S rail (single-leg charts, REAL at the broker). */
+  orderType: 'MARKET' | 'LIMIT' | 'SL';
+  /** LIMIT: the limit; SL: the limit once triggered. */
+  price?: number;
+  /** SL only. */
+  trigger?: number;
+  /** Modify / cancel a resting order this page placed (REAL, single leg). */
+  brokerOp: { op: 'modify' | 'cancel'; orderId: string } | null;
+}
+
+const ORDER_ID_RE = /^[A-Za-z0-9-]{1,40}$/;
+
+/** A resting order's prices: positive, and an SL-limit's limit on the far side of its trigger (BUY >= trigger, SELL <=). */
+export function checkRestingPrices(side: PnfAction, orderType: 'LIMIT' | 'SL', price: unknown, trigger: unknown): { price: number; trigger?: number } | string {
+  const p = Number(price);
+  if (!Number.isFinite(p) || p <= 0) return 'price must be a positive number';
+  if (orderType === 'LIMIT') return { price: p };
+  const t = Number(trigger);
+  if (!Number.isFinite(t) || t <= 0) return 'an SL-limit needs a positive trigger';
+  if (side === 'BUY' ? p < t : p > t) return `a ${side} SL-limit's limit must be ${side === 'BUY' ? 'at or above' : 'at or below'} its trigger`;
+  return { price: p, trigger: t };
+}
+
+/** The fat-finger band: a resting price further than `maxPct` from the live price is refused (rejected, never clamped). */
+export function inBand(price: number, ltp: number, maxPct = 20): boolean {
+  return ltp > 0 && price > 0 && Math.abs(price - ltp) / ltp * 100 <= maxPct;
 }
 
 export const lotCap = (t: Target) => (t.kind === 'equity' ? MAX_PNF_SHARES : MAX_PNF_LOTS);
@@ -60,14 +86,15 @@ export function parsePnfOrder(body: unknown): PnfOrderRequest | string {
   if (target.kind === 'index') return 'An index cannot be traded directly - pick its future or an option';
   const close = b.close === true;
   const source = b.source === 'auto' ? 'auto' : 'bar';
-  if (close) return { broker, mode, target, close, action: 'SELL', lots: 0, product: 'INTRADAY', source, exitOwn: null };
+  const base = { orderType: 'MARKET' as const, brokerOp: null };
+  if (close) return { broker, mode, target, close, action: 'SELL', lots: 0, product: 'INTRADAY', source, exitOwn: null, ...base };
   if (b.exitOwn !== undefined) {
     const x = b.exitOwn as { side?: unknown; units?: unknown };
     if (mode !== 'REAL') return 'exitOwn is a REAL-mode exit (paper exits never reach the broker)';
     if (x?.side !== 'BUY' && x?.side !== 'SELL') return 'exitOwn.side must be BUY or SELL';
     const units = Array.isArray(x.units) ? x.units : [];
     if (units.length < 1 || units.length > 2 || !units.every(u => Number.isInteger(u) && (u as number) > 0)) return 'exitOwn.units must be 1-2 positive whole quantities';
-    return { broker, mode, target, close: false, action: x.side, lots: 0, product: 'INTRADAY', source, exitOwn: { side: x.side, units: units as number[] } };
+    return { broker, mode, target, close: false, action: x.side, lots: 0, product: 'INTRADAY', source, exitOwn: { side: x.side, units: units as number[] }, ...base };
   }
 
   const action = b.action;
@@ -80,7 +107,23 @@ export function parsePnfOrder(body: unknown): PnfOrderRequest | string {
   const product = b.product;
   const allowed: PnfProduct[] = target.kind === 'equity' ? ['INTRADAY', 'CNC'] : ['INTRADAY', 'MARGIN'];
   if (!allowed.includes(product as PnfProduct)) return `product must be ${allowed.join(' or ')} for this instrument`;
-  return { broker, mode, target, close, action, lots, product: product as PnfProduct, source, exitOwn: null };
+  const orderType = b.orderType === undefined || b.orderType === 'MARKET' ? 'MARKET' : b.orderType;
+  if (orderType !== 'MARKET' && orderType !== 'LIMIT' && orderType !== 'SL') return 'orderType must be MARKET, LIMIT or SL';
+  let brokerOp: PnfOrderRequest['brokerOp'] = null;
+  if (b.brokerOp !== undefined) {
+    const x = b.brokerOp as { op?: unknown; orderId?: unknown };
+    if (x?.op !== 'modify' && x?.op !== 'cancel') return 'brokerOp.op must be modify or cancel';
+    if (typeof x.orderId !== 'string' || !ORDER_ID_RE.test(x.orderId)) return 'brokerOp.orderId is invalid';
+    if (mode !== 'REAL') return 'Only a REAL resting order is at the broker';
+    brokerOp = { op: x.op, orderId: x.orderId };
+  }
+  if (orderType === 'MARKET') {
+    if (brokerOp?.op === 'modify') return 'A modify needs the new LIMIT / SL prices';
+    return { broker, mode, target, close, action, lots, product: product as PnfProduct, source, exitOwn: null, orderType, brokerOp };
+  }
+  const prices = checkRestingPrices(action, orderType, b.price, b.trigger);
+  if (typeof prices === 'string') return prices;
+  return { broker, mode, target, close, action, lots, product: product as PnfProduct, source, exitOwn: null, orderType, ...prices, brokerOp };
 }
 
 export const brokerProduct = (p: PnfProduct, broker: PnfBroker): string =>

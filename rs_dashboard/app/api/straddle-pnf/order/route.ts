@@ -5,12 +5,19 @@ import { buildKotakOrderPayload } from '@/lib/kotakOrderPayload';
 import { placeZerodhaOrderSliced } from '@/lib/zerodhaPlaceOrder';
 import { slicesFor } from '@/lib/zerodhaContracts';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
+import { dhanDelete, dhanPut } from '@/lib/dhanToken';
+import { kotakPost, KOTAK_PATHS, KotakRejectedError } from '@/lib/kotakToken';
+import { openBrokerOrders, ownedBrokerOrder } from '@/lib/pnfRestingServer';
+import { kiteDelete } from '@/lib/zerodhaToken';
+import { modifyZerodhaLimitOrder } from '@/lib/zerodhaModifyOrder';
+import { fetchLtp, type LtpSegment } from '@/lib/dhanEquityQuote';
+import { snapToTick } from '@/lib/pnfResting';
 import { brokerPositionRows, brokerSessionOk } from '@/lib/priceLadderServer';
 import { CloseGuard } from '@/lib/priceLadderClose';
 import { parseTarget, isComplete, targetKey } from '@/lib/pnfTarget';
 import { brokerLegs, resolvePnfLegs, type PnfBrokerLeg } from '@/lib/pnfOrderServer';
 import {
-  MAX_PNF_LOTS, brokerProduct, needsRollback, orderQty, parsePnfOrder, planLegClose, planOwnExit, sendOutcome,
+  MAX_PNF_LOTS, brokerProduct, checkRestingPrices, inBand, lotCap, needsRollback, orderQty, parsePnfOrder, planLegClose, planOwnExit, sendOutcome,
   type LegResult, type PnfAction, type PnfBroker,
 } from '@/lib/pnfOrderLogic';
 
@@ -41,7 +48,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   return NextResponse.json({
     success: true,
     legs: legs.map((l, i) => ({
-      label: l.label, side: l.side, segment: l.segment, lot: l.lot, unitsPerLot: l.unitsPerLot,
+      label: l.label, side: l.side, segment: l.segment, lot: l.lot, unitsPerLot: l.unitsPerLot, tick: l.tick,
       key: typeof onBroker === 'string' ? null : onBroker[i].key,
       lotUnits: typeof onBroker === 'string' ? null : onBroker[i].lotUnits,
     })),
@@ -72,6 +79,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (!brokerSessionOk(broker)) return bad(`${NAME[broker]} session is not logged in - nothing was sent`, 403);
   const onBroker = await brokerLegs(broker, target, legs).catch((e: Error) => `Contract lookup failed: ${e.message}`);
   if (typeof onBroker === 'string') return bad(`${onBroker}. Nothing was sent.`);
+
+  // ── Resting LIMIT / SL-limit orders from the chart's B / S rail (single leg, at the broker), and their modify / cancel.
+  if (order.orderType !== 'MARKET' || order.brokerOp) return resting(order, onBroker);
 
   const gkey = `${broker}|${targetKey(target)}`;
   if (busy.has(gkey)) return bad('An order for this chart is already being sent - wait for it', 409);
@@ -125,7 +135,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const reversal = results.find(r => r.label.endsWith('(reversal)'));
     // CE went in, PE was refused and CE was taken back out: nothing is left open (two fills were paid for).
     const outcome = reversal?.status === 'placed' ? 'reversed' : sendOutcome(results.filter(r => r !== reversal));
-    return NextResponse.json({ success: outcome === 'placed' || outcome === 'flat', mode, broker, outcome, legs: results, message: describe(outcome, results) },
+    const stillResting = closing ? openBrokerOrders(broker, targetKey(target)) : 0;
+    const note = stillResting > 0 ? ` NOTE: ${stillResting} resting order(s) still open on this chart - cancel them or they can re-open the position.` : '';
+    return NextResponse.json({ success: outcome === 'placed' || outcome === 'flat', mode, broker, outcome, legs: results, message: describe(outcome, results) + note, stillResting },
       { status: outcome === 'unknown' ? 504 : 200 });
   } catch (err) {
     console.error('[straddle-pnf] order failed:', err);
@@ -136,27 +148,126 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
 }
 
+type How = { type: 'MARKET' } | { type: 'LIMIT'; price: number } | { type: 'SL'; price: number; trigger: number };
+
+/**
+ * A resting order: placed at the broker on a single-leg chart (a straddle's level is held by the page and sent at MARKET),
+ * or a modify / cancel of one this page placed. Prices are snapped to the contract tick, re-checked, and refused outside the
+ * ±20 % band around the live Dhan price (fail closed when there is none).
+ */
+async function resting(order: Exclude<ReturnType<typeof parsePnfOrder>, string>, legs: PnfBrokerLeg[]): Promise<NextResponse> {
+  const { broker } = order;
+  if (legs.length !== 1) return bad('A resting order goes on a single-leg chart: a straddle level is held by the page and sent at MARKET');
+  const leg = legs[0];
+  const gkey = `${broker}|${targetKey(order.target)}`;      // the MARKET orders' key too: a rail order and a close never overlap
+  if (busy.has(gkey)) return bad('An order for this chart is already being sent - wait for it', 409);
+  busy.add(gkey);
+  try {
+    const qty = orderQty(order.lots, leg.lotUnits);
+    // Only an order this page placed for this chart, still working in its ledger: never an id the request merely names.
+    if (order.brokerOp && !ownedBrokerOrder(broker, targetKey(order.target), order.brokerOp.orderId)) {
+      return bad('That order is not a working resting order of this chart - nothing was changed', 403);
+    }
+    if (order.brokerOp?.op === 'cancel') return cancelAt(broker, order.brokerOp.orderId);
+    if (order.orderType === 'MARKET' || !(order.price && order.price > 0)) return bad('A resting order needs LIMIT / SL prices');
+    if (!(order.lots >= 1 && order.lots <= lotCap(order.target)) || !(leg.lotUnits > 0)) return bad('Order size check failed - nothing was sent');
+    // One resting order per rail click: an order Kite would cut at the freeze quantity is refused, never sliced.
+    if (broker === 'zerodha' && leg.segment !== 'NSE_EQ' && slicesFor(leg.key, qty).length > 1) return bad(`${qty} is above the exchange freeze quantity for one resting order - use fewer lots`);
+    const tick = leg.tick && leg.tick > 0 ? leg.tick : 0.05;
+    const price = snapToTick(order.price, tick, 'nearest');
+    const trigger = order.trigger ? snapToTick(order.trigger, tick, 'nearest') : undefined;
+    const checked = checkRestingPrices(order.action, order.orderType, price, trigger);
+    if (typeof checked === 'string') return bad(`${checked} (after snapping to the ${tick} tick)`);
+    const ltp = await fetchLtp(leg.segment as LtpSegment, leg.securityId).catch(() => 0);
+    if (!inBand(price, ltp) || (trigger !== undefined && !inBand(trigger, ltp))) {
+      return bad(ltp > 0 ? `Price is more than 20% from the live ${ltp} - nothing was sent` : 'No live price to check the order against - nothing was sent');
+    }
+    const how: How = order.orderType === 'LIMIT' ? { type: 'LIMIT', price } : { type: 'SL', price, trigger: trigger! };
+    if (order.brokerOp?.op === 'modify') return modifyAt(broker, order.brokerOp.orderId, qty, how);
+    const r = await send(broker, leg, order.action, qty, brokerProduct(order.product, broker), true, order.source === 'auto' ? 'pnfa' : 'pnf', how);
+    invalidateBrokerCache(broker);
+    return NextResponse.json({
+      success: r.status === 'placed', outcome: r.status, orderId: r.orderId, price, trigger, legs: [r],
+      message: r.status === 'placed' ? `${order.action} ${order.orderType === 'LIMIT' ? 'LIMIT' : 'SL-limit'} ${qty} @ ${trigger ? `${trigger} → ` : ''}${price} placed` : r.error,
+    }, { status: r.status === 'unknown' ? 504 : 200 });
+  } finally {
+    busy.delete(gkey);
+  }
+}
+
+/** Modify a resting order. A throw after the request may have gone out is UNKNOWN (the order book tells the truth). */
+async function modifyAt(broker: PnfBroker, orderId: string, qty: number, how: Exclude<How, { type: 'MARKET' }>): Promise<NextResponse> {
+  const trigger = how.type === 'SL' ? how.trigger : 0;
+  let applied = how.price;
+  try {
+    if (broker === 'dhan') {
+      await dhanPut(`/orders/${orderId}`, {
+        orderId, orderType: how.type === 'SL' ? 'STOP_LOSS' : 'LIMIT', legName: 'ENTRY_LEG', quantity: qty,
+        price: Number(how.price.toFixed(2)), disclosedQuantity: 0, triggerPrice: trigger, validity: 'DAY',
+      });
+    } else if (broker === 'kotak') {
+      await kotakPost(KOTAK_PATHS.modifyOrder, {
+        no: orderId, pr: how.price.toFixed(2), pt: how.type === 'SL' ? 'SL' : 'L', qt: String(qty), vd: 'DAY', tp: String(trigger),
+        dq: '0', mp: '0', am: 'NO', os: 'NEOTRADEAPI',
+      });
+    } else {
+      // Kite's limit-modify helper only: an SL-limit is cancelled and placed again from the page.
+      if (how.type === 'SL') return bad('Zerodha SL-limit orders cannot be moved here - cancel it and place a new one');
+      const r = await modifyZerodhaLimitOrder({ orderId, price: how.price, quantity: qty });
+      if (!r.ok) return NextResponse.json({ success: false, outcome: 'rejected', error: r.error }, { status: 200 });
+      applied = r.price;                                      // the price Kite holds after snapping to the contract's own tick
+    }
+    invalidateBrokerCache(broker);
+    return NextResponse.json({ success: true, outcome: 'placed', price: applied, trigger: how.type === 'SL' ? how.trigger : undefined });
+  } catch (e) {
+    if (e instanceof KotakRejectedError) return NextResponse.json({ success: false, outcome: 'rejected', error: `Kotak refused the modify: ${e.message}` });
+    return NextResponse.json({ success: false, outcome: 'unknown', error: `Modify status unknown - check the order book: ${(e as Error).message}` }, { status: 504 });
+  }
+}
+
+async function cancelAt(broker: PnfBroker, orderId: string): Promise<NextResponse> {
+  try {
+    if (broker === 'dhan') await dhanDelete(`/orders/${orderId}`);
+    else if (broker === 'kotak') await kotakPost(KOTAK_PATHS.cancelOrder, { on: orderId, am: 'NO' });
+    else await kiteDelete(`/orders/regular/${encodeURIComponent(orderId)}`);
+    invalidateBrokerCache(broker);
+    return NextResponse.json({ success: true, outcome: 'placed' });
+  } catch (e) {
+    if (e instanceof KotakRejectedError) return NextResponse.json({ success: false, outcome: 'rejected', error: `Kotak refused the cancel: ${e.message}` });
+    return NextResponse.json({ success: false, outcome: 'unknown', error: `Cancel status unknown - check the order book: ${(e as Error).message}` }, { status: 504 });
+  }
+}
+
 /** One order, never throwing: a throw after the request may have gone out is UNKNOWN, not a clean failure. */
-async function send(broker: PnfBroker, leg: PnfBrokerLeg, side: PnfAction, qty: number, product: string, open: boolean, tag: string): Promise<LegResult> {
+async function send(broker: PnfBroker, leg: PnfBrokerLeg, side: PnfAction, qty: number, product: string, open: boolean, tag: string, how: How = { type: 'MARKET' }): Promise<LegResult> {
   const base = { label: leg.label, side, qty, product };
   try {
     if (broker === 'dhan') {
-      const r = await placeDhanOrder({ securityId: leg.key, quantity: qty, side, orderType: 'MARKET', exchangeSegment: leg.exchange, productType: product, source: tag });
+      const r = await placeDhanOrder({
+        securityId: leg.key, quantity: qty, side, exchangeSegment: leg.exchange, productType: product, source: tag,
+        orderType: how.type === 'MARKET' ? 'MARKET' : how.type === 'LIMIT' ? 'LIMIT' : 'STOP_LOSS',
+        ...(how.type !== 'MARKET' ? { price: how.price } : {}), ...(how.type === 'SL' ? { triggerPrice: how.trigger } : {}),
+      });
       if (r.status === 'placed') return { ...base, status: 'placed', orderId: r.orderId };
       return { ...base, status: r.status === 'unknown' ? 'unknown' : 'rejected', error: r.error };
     }
     if (broker === 'kotak') {
       const built = buildKotakOrderPayload(
-        { tradingsymbol: leg.key, quantity: qty, side, exchange: leg.exchange, product, orderType: 'MARKET', source: open && leg.capLot ? tag : undefined },
-        { lotSize: leg.capLot, tick: null },
+        {
+          tradingsymbol: leg.key, quantity: qty, side, exchange: leg.exchange, product, source: open && leg.capLot ? tag : undefined,
+          orderType: how.type === 'MARKET' ? 'MARKET' : how.type === 'LIMIT' ? 'LIMIT' : 'SL',
+          ...(how.type !== 'MARKET' ? { price: how.price } : {}), ...(how.type === 'SL' ? { triggerPrice: how.trigger } : {}),
+        },
+        { lotSize: leg.capLot, tick: how.type === 'MARKET' ? null : leg.tick },
       );
       if ('error' in built) return { ...base, status: 'rejected', error: built.error };
       const r = await placeKotakOrder(built.payload);
       return r.status === 'placed' ? { ...base, status: 'placed', orderId: r.orderId } : { ...base, status: r.status, error: r.error };
     }
     const r = await placeZerodhaOrderSliced({
-      tradingsymbol: leg.key, exchange: leg.exchange, transaction_type: side, order_type: 'MARKET', quantity: qty,
-      product, validity: 'DAY', market_protection: -1,
+      tradingsymbol: leg.key, exchange: leg.exchange, transaction_type: side, quantity: qty, product, validity: 'DAY',
+      ...(how.type === 'MARKET' ? { order_type: 'MARKET', market_protection: -1 }
+        : how.type === 'LIMIT' ? { order_type: 'LIMIT', price: how.price } : { order_type: 'SL', price: how.price, trigger_price: how.trigger }),
     }, leg.segment === 'NSE_EQ' ? [qty] : slicesFor(leg.key, qty));
     return r.status === 'placed' ? { ...base, status: 'placed', orderId: r.orderId } : { ...base, status: r.status, error: r.error };
   } catch (err) {

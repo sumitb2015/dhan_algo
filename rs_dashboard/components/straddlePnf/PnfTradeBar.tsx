@@ -32,6 +32,11 @@ export interface PnfTradeBarProps {
   onMarkerPrice?: (id: string, price: number) => void;
   /** Which chart the bar trades ("C2 · NIFTY 23000 CE+PE 03 Nov 26"): two charts can show two instruments, the bar follows the active one. */
   tradesLabel?: string;
+  /** The paper ledger per chart (targetKey), owned by the page so resting orders on the rail fill into the same position. */
+  paper: Record<string, PaperLeg[]>;
+  setPaper: React.Dispatch<React.SetStateAction<Record<string, PaperLeg[]>>>;
+  /** The bar's current lots / product, for the rail's orders. */
+  onSizing?: (s: { lots: number; product: PnfProduct }) => void;
   /** A manual order's outcome, for the page's trade chimes (entry / exit / warn, lib/pnfChime.ts). */
   onSound?: (outcome: string | undefined, close: boolean) => void;
 }
@@ -48,7 +53,7 @@ const inr = (n: number) => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLo
 const pnlTone = (n: number | null) => (n == null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
 
 export default function PnfTradeBar({
-  target, live, broker, mode, onModeChange, onPnlChange, onSwitchTarget, onTradeExecuted, onMarkerPrice, onSound, tradesLabel,
+  target, live, broker, mode, onModeChange, onPnlChange, onSwitchTarget, onTradeExecuted, onMarkerPrice, onSound, tradesLabel, paper, setPaper, onSizing,
 }: PnfTradeBarProps) {
   const [productPick, setProduct] = useState<PnfProduct>('INTRADAY');
   const [lotsPick, setLots] = useState(1);
@@ -57,7 +62,6 @@ export default function PnfTradeBar({
   const [info, setInfo] = useState<Info | null>(null);
   const [real, setReal] = useState<Real | null>(null);
   /** Paper legs per chart (targetKey), kept for the page's life so switching charts and back keeps them. */
-  const [paper, setPaper] = useState<Record<string, PaperLeg[]>>({});
   const memoRef = useRef<TradedSliceMemo>(new Map());
 
   const isStraddle = target.kind === 'options' && target.side === 'STRADDLE';
@@ -69,6 +73,7 @@ export default function PnfTradeBar({
   // Derived, never stored: a cap or product that does not fit the current instrument falls back without an effect.
   const lots = Math.min(lotsPick, cap);
   const product: PnfProduct = isEquity ? (productPick === 'MARGIN' ? 'INTRADAY' : productPick) : productPick === 'CNC' ? 'INTRADAY' : productPick;
+  useEffect(() => { onSizing?.({ lots, product }); }, [lots, product, onSizing]);
 
   // What one lot is, and whether this broker can trade the chart (server-resolved; the browser never names a contract).
   useEffect(() => {
