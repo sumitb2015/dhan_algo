@@ -8,7 +8,7 @@ import DataChip from './DataChip';
 import PnfPanel from './straddlePnf/PnfPanel';
 import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
 import InstrumentBar from './straddlePnf/InstrumentBar';
-import { effectiveInterval, intervalLabel } from '@/lib/straddlePnfInterval';
+import { effectiveInterval, hasLongIntervals, intervalLabel } from '@/lib/straddlePnfInterval';
 import SettingsControls, { SmaPeriodInput } from './straddlePnf/SettingsControls';
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import BrokerBooks from './straddlePnf/BrokerBooks';
@@ -128,7 +128,7 @@ function IconButton({ icon: Icon, label, onClick, pressed, badge }: { icon: Luci
 /** One chart's P&F model: CLOSED bars only (so a signal never repaints), with the forming minute laid on top. */
 function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, overlay: Overlay, now: number) {
   // A long interval picked on a stock does not carry over to an instrument that has no such history.
-  const interval = effectiveInterval(rawSettings.interval, target.kind === 'equity');
+  const interval = effectiveInterval(rawSettings.interval, hasLongIntervals(target.kind));
   const settings = useMemo(() => (interval === rawSettings.interval ? rawSettings : { ...rawSettings, interval }), [rawSettings, interval]);
   // An index's feed "volume" is its constituents' turnover, not traded volume: no VWAP. Whatever the instrument, the button follows
   // the model once bars are in (bars without volume, e.g. an illiquid option, get the box SMA too), so the toggle never
@@ -587,7 +587,7 @@ function StraddlePnfPage() {
       legs: target.kind === 'options' && target.side === 'STRADDLE',
       flash: flash[c],
       loading: (feed.loading || !feed.complete) && feed.bars.length === 0,
-      interval: effectiveInterval(st.interval, target.kind === 'equity'),
+      interval: effectiveInterval(st.interval, hasLongIntervals(target.kind)),
       boxPct: st.boxPct,
       reversal: st.reversal,
       resetTick: viewTick,
@@ -596,7 +596,9 @@ function StraddlePnfPage() {
       scrip: dual ? `${feed.scrip} (${boxText(st)})` : feed.scrip,
       feedPrevClose: feed.trustedPrevClose,
       sessionTag: feed.sessionTag,
-      sessionLines: target.kind !== 'equity',
+      sessionLines: target.kind !== 'equity' && target.kind !== 'index',
+      timeAxis: target.kind === 'index',
+      sessionDividers: target.kind !== 'equity' && target.kind !== 'index',
       // Manual trade-bar markers (this browser session) + AUTO trades from the ledger, on their signal / reversal bars.
       tradeMarkers: [...(markers[targetKey(target)] ?? []), ...autoMarkers(autoToday, targetKey(target)).map(m => ({ ...m, estimate: m.mode === 'REAL' }))],
       error: feed.loaded?.error ?? (feed.complete ? undefined : contractError[c] ?? undefined),
@@ -639,7 +641,7 @@ function StraddlePnfPage() {
                 {tradeMode === 'REAL' && <span data-testid="pnf-real-banner" className="px-1.5 py-0.5 rounded bg-red-600 text-oncolor text-[11px] font-bold tracking-wide">LIVE · REAL MONEY</span>}
               </h1>
               <p className="text-[10px] text-zinc-500 font-medium mt-1 truncate">
-                {`${dual ? `Chart ${active} · ` : ''}${intervalLabel(effectiveInterval(activeSettings.interval, activeTarget.kind === 'equity'))} · ${boxText(activeSettings)} · ${activeSettings.reversal}-box reversal · ${activeFno ? activeFeed.label : activeFeed.name ?? activeTarget.name}`}
+                {`${dual ? `Chart ${active} · ` : ''}${intervalLabel(effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind)))} · ${boxText(activeSettings)} · ${activeSettings.reversal}-box reversal · ${activeFno ? activeFeed.label : activeFeed.name ?? activeTarget.name}`}
               </p>
             </div>
           </div>
@@ -720,7 +722,7 @@ function StraddlePnfPage() {
               </>
             )}
 
-            <fieldset disabled={activeLocked} className="contents"><SettingsControls settings={activeSettings} onChange={applySettings} equity={activeTarget.kind === 'equity'} /></fieldset>
+            <fieldset disabled={activeLocked} className="contents"><SettingsControls settings={activeSettings} onChange={applySettings} equity={hasLongIntervals(activeTarget.kind)} /></fieldset>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
               {/* An index has no traded volume, so no VWAP: the button is disabled and the SMA is drawn (the saved choice is kept for
@@ -779,7 +781,7 @@ function StraddlePnfPage() {
 
       <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 pt-2 pb-2">
         {loadErrors.map(e => <p key={e as string} role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{e}</p>)}
-        {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={effectiveInterval(activeSettings.interval, activeTarget.kind === 'equity')} /></div>}
+        {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind))} /></div>}
         <PnfOrderStyle
             value={orderStyle} onChange={changeStyle}
             guardOn={[1, 2].some(n => guards.guardOf(n).on)}

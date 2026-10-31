@@ -5,6 +5,7 @@ import { findEquity } from '@/lib/equityMaster';
 import { isIndexSymbol, isSymbol } from '@/lib/straddlePnfSearch';
 import { resolveFuture, resolveOption, type Contract } from '@/lib/pnfContracts';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
+import { tailSessions } from '@/lib/pnfTail';
 import type { PnfLegInput } from '@/lib/pnfOrderLogic';
 
 // Read-only market-data route for the Point & Figure page: an NSE index or stock price, or an F&O contract (a future, one option,
@@ -18,9 +19,11 @@ const SESSIONS = 10;
 const EQUITY_SESSIONS = 8000;
 /** A future / option / straddle shows every session the API still serves (the script caps the window at ~85 days): TradingView shows a contract from its first day. */
 const CONTRACT_SESSIONS = 200;
+/** An NSE index: two years of 1-minute bars (stored file, then the API), and one daily close per day before that (2019 on) for the 1d / 1w / 1M charts. */
+const INDEX_SESSIONS = 4000;
 const CACHE_TTL = 20_000;
 /** Every contract (underlying x expiry x strike x side) is its own key, so the cache is pruned on write and capped. */
-const CACHE_MAX = 40;
+const CACHE_MAX = 12;
 const cache = new Map<string, { ts: number; body: unknown }>();
 
 function remember(key: string, body: unknown) {
@@ -39,14 +42,22 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const mode = searchParams.get('mode');
-  if (mode === 'price') return priceResponse(searchParams.get('kind') ?? '', (searchParams.get('symbol') ?? '').toUpperCase());
-  if (mode === 'contract') return contractResponse(searchParams);
+  const tail = Math.min(30, Math.max(0, Math.floor(Number(searchParams.get('tail')) || 0)));
+  if (mode === 'price') return priceResponse(searchParams.get('kind') ?? '', (searchParams.get('symbol') ?? '').toUpperCase(), tail);
+  if (mode === 'contract') return contractResponse(searchParams, tail);
   return NextResponse.json({ success: false, error: 'Use mode=price&kind=index|equity&symbol=… or mode=contract&kind=futures|options&underlying=…&expiry=…' }, { status: 400 });
 }
 
-async function run(key: string, args: string[], fallbackName: string, contracts?: PnfLegInput[], sessions = SESSIONS) {
+/** The 30 s refresh asks for `tail` sessions only (`&tail=3`); the first load takes the whole history. */
+function forTail(body: Record<string, unknown>, tail: number): Record<string, unknown> {
+  if (!(tail >= 1)) return body;
+  const bars = body.bars as Record<string, Bar[]>;
+  return { ...body, bars: Object.fromEntries(Object.entries(bars).map(([k, v]) => [k, tailSessions(v, tail)])), tail };
+}
+
+async function run(key: string, args: string[], fallbackName: string, contracts?: PnfLegInput[], sessions = SESSIONS, tail = 0) {
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.ts < CACHE_TTL) return NextResponse.json(hit.body);
+  if (hit && Date.now() - hit.ts < CACHE_TTL) return NextResponse.json(forTail(hit.body as Record<string, unknown>, tail));
   try {
     const out = await dedupe(`straddle-pnf:${key}`, () => runPythonJson<ScriptOut>(PRICE_SCRIPT, [...args, '--sessions', String(sessions)], 90_000));
     if (out.error) return NextResponse.json({ success: false, error: out.error }, { status: 500 });
@@ -60,25 +71,25 @@ async function run(key: string, args: string[], fallbackName: string, contracts?
       errors: out.errors ?? {}, anchorT: out.anchor_t ?? null, dataDate: lastT ? sessionOf(lastT) : null,
     };
     if (Object.keys(bars).length) remember(key, body);
-    return NextResponse.json(body);
+    return NextResponse.json(forTail(body, tail));
   } catch (e) {
     return NextResponse.json({ success: false, error: `Script error: ${(e as Error).message}` }, { status: 500 });
   }
 }
 
 /** The plain price of an NSE index or cash equity. The symbol must be a known index or an NSE cash-equity row. */
-async function priceResponse(kind: string, symbol: string) {
+async function priceResponse(kind: string, symbol: string, tail = 0) {
   const known = kind === 'index' ? isIndexSymbol(symbol) : kind === 'equity' && isSymbol(symbol) && findEquity(symbol) !== null;
   if (!known) return NextResponse.json({ success: false, error: `Unknown ${kind || 'instrument'} "${symbol}"` }, { status: 400 });
   const eq = kind === 'equity' ? findEquity(symbol) : null;
   const contracts: PnfLegInput[] | undefined = eq
     ? [{ segment: 'NSE_EQ', securityId: eq.securityId, instrument: 'EQUITY', displayName: eq.name, lot: 1, expiry: '' }]
     : undefined;
-  return run(`price:${kind}:${symbol}`, ['--kind', kind, '--symbol', symbol], symbol, contracts, kind === 'equity' ? EQUITY_SESSIONS : SESSIONS);
+  return run(`price:${kind}:${symbol}`, ['--kind', kind, '--symbol', symbol], symbol, contracts, kind === 'equity' ? EQUITY_SESSIONS : INDEX_SESSIONS, tail);
 }
 
 /** A future (one leg), one option (one leg) or a CE + PE straddle (two legs, CE first) on one strike. */
-async function contractResponse(p: URLSearchParams) {
+async function contractResponse(p: URLSearchParams, tail = 0) {
   const kind = p.get('kind');
   const underlying = (p.get('underlying') ?? '').toUpperCase();
   const expiry = p.get('expiry') ?? '';
@@ -107,5 +118,5 @@ async function contractResponse(p: URLSearchParams) {
     name = type === 'STRADDLE' ? `${legs[0].displayName.replace(/ CALL$/, '')} STRADDLE` : legs[0].displayName;
   }
   const legArg = legs.map(l => `${l.segment}:${l.securityId}:${l.instrument}`).join(',');
-  return run(`contract:${legArg}`, ['--kind', 'contract', '--legs', legArg, '--name', name], name, legs, CONTRACT_SESSIONS);
+  return run(`contract:${legArg}`, ['--kind', 'contract', '--legs', legArg, '--name', name], name, legs, CONTRACT_SESSIONS, tail);
 }

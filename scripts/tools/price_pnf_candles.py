@@ -35,6 +35,12 @@ _IST = timezone(timedelta(hours=5, minutes=30))
 # NSE index security ids (IDX_I segment): the same ones options_data_fetch.py uses for spot.
 INDEX_IDS = {"NIFTY": 13, "BANKNIFTY": 25, "FINNIFTY": 27}
 # Display names, matching the search box (rs_dashboard/lib/straddlePnfSearch.ts PNF_INDICES).
+# The stored 1-min file of an index under Intraday_Historical_Data/1min (the user keeps NIFTY only).
+INDEX_STORED = {"NIFTY": "NIFTY_50"}
+# The user's daily index file (2019 onward), used before the 1-min history starts so 1d / 1w / 1M charts reach back years.
+# 1-minute depth of an index chart; everything older is one daily close per day (see INDEX_DAILY).
+INDEX_MINUTE_DAYS = 730
+INDEX_DAILY = {"NIFTY": os.path.join(ROOT, "Historical Data", "NIFTY_50_Daily_5Y.csv")}
 INDEX_NAMES = {"NIFTY": "Nifty 50", "BANKNIFTY": "Nifty Bank", "FINNIFTY": "Nifty Financial Services"}
 _SERIES_RANK = {"EQ": 0, "BE": 1}
 
@@ -176,6 +182,31 @@ def snap_session_closes(bars: pd.DataFrame, daily: pd.DataFrame, tol: float = 0.
     return out
 
 
+def daily_bars_before(raw: pd.DataFrame, first_t: int) -> pd.DataFrame:
+    """Daily rows (naive date index, Close / Volume columns) before the day of epoch `first_t` (IST) as one 15:29 IST bar each,
+    in load_stored_1min's shape. An index's daily close is its 15:29 print, so the stamp is the session's last minute."""
+    empty = pd.DataFrame(columns=["start_Time", "close", "volume"])
+    if raw.empty:
+        return empty
+    first_day = pd.Timestamp(datetime.fromtimestamp(first_t, _IST).date())
+    rows = raw[(raw.index < first_day) & (pd.to_numeric(raw["Close"], errors="coerce") > 0)]
+    if rows.empty:
+        return empty
+    ist = (rows.index + pd.Timedelta(minutes=_DAILY_CLOSE_MIN)).tz_localize(_IST)
+    vol = pd.to_numeric(rows["Volume"], errors="coerce").fillna(0) if "Volume" in rows else 0
+    return pd.DataFrame({"start_Time": ((ist - pd.Timestamp(0, tz="UTC")) // pd.Timedelta(seconds=1)).astype("int64").to_numpy(),
+                         "close": pd.to_numeric(rows["Close"]).to_numpy(), "volume": vol.to_numpy() if hasattr(vol, "to_numpy") else vol})
+
+
+def load_index_daily_before(symbol: str, first_t: int, path: str = None) -> pd.DataFrame:
+    """The user's daily index CSV before the 1-min history starts, or an empty frame (an index with no file)."""
+    path = path or INDEX_DAILY.get(symbol, "")
+    if not path or not os.path.isfile(path):
+        return pd.DataFrame(columns=["start_Time", "close", "volume"])
+    raw = pd.read_csv(path, parse_dates=["Datetime"]).set_index("Datetime")
+    return daily_bars_before(raw, first_t)
+
+
 def load_daily_before(symbol: str, first_t: int, directory: str = DAILY_DIR, yahoo_dir: str = YAHOO_PRE_DIR,
                       fetch=fetch_yahoo_daily) -> pd.DataFrame:
     """Daily bars of `symbol` for every date before the day of epoch `first_t` (IST), one bar each at 15:29 IST, in the same
@@ -269,9 +300,13 @@ def main():
         (sid, name), segment, instrument = found, "NSE_EQ", "EQUITY"
 
     stored = pd.DataFrame()
-    if args.kind == "equity":
-        # Equity: show the whole stored history, with the API filling from the day after it ends (or the last ~85 days).
-        stored = load_stored_1min(symbol)
+    if args.kind in ("equity", "index"):
+        # Show the whole stored history (a stock's file, or the index's 1-min file), with the API filling from the day after it
+        # ends (or the last ~85 days). An index with no stored file (BANKNIFTY, FINNIFTY) is API-only.
+        stored = load_stored_1min(symbol if args.kind == "equity" else INDEX_STORED.get(symbol, ""))
+        if args.kind == "index" and not stored.empty:
+            floor = int((datetime.now(_IST) - timedelta(days=INDEX_MINUTE_DAYS)).timestamp())
+            stored = stored[stored["start_Time"] >= floor].reset_index(drop=True)
         api_from = today - timedelta(days=API_WINDOW_DAYS)
         if not stored.empty:
             last = datetime.fromtimestamp(int(stored["start_Time"].max()), _IST).date()
@@ -282,6 +317,10 @@ def main():
     if args.kind == "equity":
         df = snap_session_closes(df, read_daily_csv(symbol))
     anchor_t = None
+    if args.kind == "index" and not df.empty:
+        first_t = int(df["start_Time"].min())
+        anchor_t = first_t  # a % box is measured on the first 1-min price, not on a 2019 daily close
+        df = stitch_history(load_index_daily_before(symbol, first_t), df)
     if args.kind == "equity" and not df.empty:
         first_t = int(_to_epoch_seconds(df[next(c for c in ("start_Time", "timestamp", "time", "date") if c in df.columns)]).min())
         anchor_t = first_t  # the box size is a % of the price here, not of a daily close years earlier

@@ -2,8 +2,9 @@
 import type { Bar } from './straddlePnf.ts';
 
 /**
- * Offered intervals: each divides the 375-minute NSE session (09:15-15:30) evenly. MCX's 23:55 close does not divide into 3 or 15
- * minutes, so its last bucket is cut short: `sessionCloseMin` closes it at the bell instead of holding it until the next session.
+ * Offered intervals: each divides the 375-minute NSE cash / index session (09:15-15:30) evenly. A derivatives session is 385 minutes
+ * (09:15-15:40) and MCX's 23:55 close does not divide into 3 or 15 minutes, so the last bucket can be cut short: `sessionCloseMin`
+ * closes it at the bell instead of holding it until the next session.
  */
 export const INTERVALS = [1, 3, 5, 15] as const;
 /** Cash equities also chart on longer bars: 30 min, 1 h, 4 h, then calendar day / week / month (stored as minutes: 1 d = 1440). */
@@ -22,6 +23,8 @@ export function intervalLabel(n: number): string {
 
 /** The intervals an instrument offers, and the one actually used (a long interval chosen on a stock falls back to 1 min elsewhere). */
 export const intervalsFor = (equity: boolean): readonly Interval[] => (equity ? EQUITY_INTERVALS : INTERVALS);
+/** Stocks and indices have the longer 30 min – 1 month intervals (their history is long enough: daily closes before the 1-min data). */
+export const hasLongIntervals = (kind: string) => kind === 'equity' || kind === 'index';
 export const effectiveInterval = (interval: number, equity: boolean): Interval =>
   (intervalsFor(equity) as readonly number[]).includes(interval) ? (interval as Interval) : 1;
 

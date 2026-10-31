@@ -6,6 +6,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
 import type { PnfExecutionMarker } from '@/lib/straddlePnf';
 import { AlignLeft, AlignRight, Eye, EyeOff, MapPin, MapPinOff, Minus, Plus, RotateCcw, ChevronsLeftRight, ChevronsRightLeft } from 'lucide-react';
+import { timeAxisLabels, crosshairStamp } from '@/lib/straddlePnfTimeAxis';
 import { layoutPanel, AXIS_W, PAD_TOP, XSCALE_MIN, XSCALE_MAX } from '@/lib/straddlePnfLayout';
 import { MIN_BOX_PTS_PCT } from '@/lib/straddlePnfSettings';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -56,6 +57,10 @@ export type PnfPanelProps = {
   coverShown?: boolean;
   /** False (stocks: a column spans days) = no dashed vertical line at each session start and no date strip along the top. */
   sessionLines?: boolean;
+  /** False = no dashed vertical line at each session start, but the date strip along the top stays (an index: its dates are useful, the lines are clutter). */
+  sessionDividers?: boolean;
+  /** True draws a TradingView-style time axis along the bottom (days under their columns) and a date chip on the crosshair; for an index. */
+  timeAxis?: boolean;
   /** Executed trades on this chart to mark on the boxes. */
   tradeMarkers?: PnfExecutionMarker[];
   /** Render the card header inside the panel even when headerSlot is provided. */
@@ -307,7 +312,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, coverShown = false, sessionLines = true, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, coverShown = false, sessionLines = true, sessionDividers = true, timeAxis = false, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -479,6 +484,11 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     setHover({ x: vx + el.scrollLeft, y: e.clientY - r.top + el.scrollTop, overAxis: vx > el.clientWidth - AXIS_W - (rail ? RAIL_W : 0) });
   };
   const rowTop = padY + PAD_TOP;
+  const TIME_AXIS_H = 24;
+  const axisLabels = useMemo(
+    () => (timeAxis ? timeAxisLabels(model.columnTimes.map(t => t.start), model.columnTimes.map((_, j) => offsetX + j * colW + colW / 2)) : []),
+    [timeAxis, model.columnTimes, offsetX, colW],
+  );
   const cross = (() => {
     if (!hover || dragging || box <= 0 || !liveCols.length) return null;
     const row = Math.floor((hover.y - rowTop) / cell);
@@ -802,7 +812,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                   const prev = columns[first + j - 1];
                   if (prev && prev.session === c.session) return null;   // the first column opens the first session, which is labelled too
                   const x = xOf(j);
-                  if (!sessionLines) return null;
+                  if (!sessionLines || !sessionDividers) return null;
                   return (
                     <g key={`d${j}`}>
                       <line x1={x} x2={x} y1={padY + PAD_TOP - 6} y2={contentH} className="stroke-zinc-600" strokeDasharray="2 3" />
@@ -1129,6 +1139,31 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               )}
             </svg>
           </div>
+          {/* TradingView-style time axis: stays at the bottom of the view while the chart scrolls; days under their columns, and the
+              crosshair's date and time as a chip. */}
+          {timeAxis && (
+            <div className="sticky bottom-0 h-0 z-20 pointer-events-none" style={{ width: plotW }} aria-hidden="true" data-testid="pnf-time-axis">
+              <svg width={plotW} height={TIME_AXIS_H} className="block" style={{ transform: `translateY(-${TIME_AXIS_H}px)` }}>
+                <rect x={0} y={0} width={plotW} height={TIME_AXIS_H} className="fill-zinc-900" />
+                <line x1={0} x2={plotW} y1={0.5} y2={0.5} className="stroke-zinc-700" strokeWidth={1} />
+                {axisLabels.map((l, i) => (
+                  <text key={i} x={l.x} y={15} textAnchor="middle" fontSize={10} fontWeight={l.month ? 800 : 500}
+                        className={`font-mono ${l.month ? 'fill-zinc-200' : 'fill-zinc-400'}`}>{l.text}</text>
+                ))}
+                {cross && cross.col !== null && cross.x !== null && model.columnTimes[cross.col] && (() => {
+                  const text = crosshairStamp(model.columnTimes[cross.col].start);
+                  const w = text.length * 6.2 + 14;
+                  const x = Math.max(0, Math.min(plotW - w, cross.x - w / 2));
+                  return (
+                    <g data-testid="pnf-crosshair-time">
+                      <rect x={x} y={2} width={w} height={TIME_AXIS_H - 4} rx={3} className="fill-zinc-700" />
+                      <text x={x + w / 2} y={15.5} textAnchor="middle" fontSize={10} fontWeight={700} className="fill-zinc-100 font-mono">{text}</text>
+                    </g>
+                  );
+                })()}
+              </svg>
+            </div>
+          )}
           </>
         )}
       </div>
@@ -1145,7 +1180,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
           </div>
         );
       })()}
-      <div data-testid="pnf-zoom" data-zoom={zoom} className="absolute bottom-1.5 left-1/2 -translate-x-1/2 flex items-center gap-1 z-10">
+      <div data-testid="pnf-zoom" data-zoom={zoom} className={`absolute ${timeAxis ? 'bottom-8' : 'bottom-1.5'} left-1/2 -translate-x-1/2 flex items-center gap-1 z-10`}>
         <ZoomButton label="Zoom out" onClick={() => zoomBy(0.7)}><Minus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Fit chart to panel" onClick={() => resetView()}><RotateCcw className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Zoom in" onClick={() => zoomBy(1 / 0.7)}><Plus className="w-3 h-3" aria-hidden="true" /></ZoomButton>

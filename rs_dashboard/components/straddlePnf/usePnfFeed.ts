@@ -5,6 +5,7 @@ import {
   foldTick, inSession, mergeHistory, feedCloseTrusted, istMinuteOfDay, isWildTick, legsTick, sessionWindow,
   type LegQuote, type Market, type Tick,
 } from '@/lib/straddlePnfLive';
+import { mergeTail } from '@/lib/pnfTail';
 import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
 import { isComplete, targetKey, targetLabel, targetQuery, type Target } from '@/lib/pnfTarget';
@@ -18,6 +19,8 @@ export type Loaded = { key: number; dataDate: string | null; error?: string; ins
 type LiveLeg = { quote: (NonNullable<LegQuote> & { prevClose: number | null }) | null; last: { ltp: number; prevClose: number | null } | null };
 
 const POLL_MS = 30_000;
+/** Sessions the refresh of a long-history chart asks for (a holiday week and a bar revision both fit inside). */
+const TAIL_SESSIONS = 4;
 const LIVE_MS = 1_000;   // how often the chart reads the WebSocket bridge's latest price (the bridge itself is push, from the shared hub)
 const FRESH_S = 180;
 
@@ -39,6 +42,8 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
   // The last bar's close, for the live poll's bad-tick check (kept in a ref so the poll interval need not restart per tick).
   const lastCloseRef = useRef<number | undefined>(undefined);
   const reqRef = useRef(0);
+  // An index carries two years of 1-minute bars: the first load takes them all, the 30 s refresh only the last few sessions.
+  const fullRef = useRef(false);
 
   const complete = target !== null && isComplete(target);
   const tKey = target ? targetKey(target) : '';   // any field changing is a new instrument
@@ -47,6 +52,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
   useEffect(() => {
     reqRef.current++;
     tickRef.current = null;
+    fullRef.current = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setFeedPrevClose(null); setOutQuote(null); setLoaded(null); setBars([]); setName(null); setLoadError(null); setLoading(true);
   }, [tKey]);
@@ -57,7 +63,8 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
     const id = ++reqRef.current;
     if (reset) { setLoading(true); setLoadError(null); }
     try {
-      const res = await fetch(`/api/straddle-pnf?${targetQuery(target)}`);
+      const tail = !reset && fullRef.current && target.kind === 'index';
+      const res = await fetch(`/api/straddle-pnf?${targetQuery(target)}${tail ? `&tail=${TAIL_SESSIONS}` : ''}`);
       const j = await res.json() as {
         success?: boolean; error?: string; strikes: number[]; dataDate: string | null; name?: string; instruments?: Instrument[];
         instrument?: Instrument | null; anchorT?: number | null; bars: Record<string, Bar[]>; errors: Record<string, string>;
@@ -68,7 +75,8 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
       const hist = j.bars[String(key)] ?? [];
       const tk = tickRef.current;
       const instruments = j.instruments ?? (j.instrument ? [j.instrument] : []);
-      setBars(prev => mergeHistory(hist, prev, tk, instruments.length < 2));
+      if (!tail) fullRef.current = true;
+      setBars(prev => mergeHistory(tail ? mergeTail(prev, hist) : hist, prev, tk, instruments.length < 2));
       setHistVersion(v => v + 1);
       if (reset) setEpoch(n => n + 1);
       setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], instruments, anchorT: j.anchorT ?? null });
@@ -97,7 +105,8 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
   const ids = instruments.map(i => `${i.segment}:${i.security_id}`).join(',');
   const single = instruments.length < 2;
   // The session clock follows the contract: MCX for a commodity future / option, NSE otherwise.
-  const market: Market = instruments[0]?.segment === 'MCX_COMM' ? 'MCX' : 'NSE';
+  const seg = instruments[0]?.segment;
+  const market: Market = seg === 'MCX_COMM' ? 'MCX' : seg === 'NSE_FNO' ? 'NSE_FNO' : 'NSE';
   useEffect(() => {
     if (!ids) return;
     let dead = false;
@@ -133,7 +142,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
   const live = outQuote ? { ce: outQuote.ce, pe: outQuote.pe } : last ? { ce: last.ce, pe: last.pe } : null;
   const sessionTag = outQuote ? (istMinuteOfDay(outQuote.t) < sessionWindow(market, outQuote.t)[0] ? 'Pre-open' : 'Post-close') : null;
   // The feed's previous close is the official one (a stock's closing price is not its last 1-min close), but only until the bell.
-  const tradingDay = market === 'NSE' ? isNseTradingDay(istDateIso(now)) : true;
+  const tradingDay = market !== 'MCX' ? isNseTradingDay(istDateIso(now)) : true;
   // Before today's first price the header shows the last session's close, measured (from history) against the session before it.
   const priceToday = (outQuote ? sessionOf(outQuote.t) : last ? sessionOf(last.t) : null) === istDateIso(now);
   const trustedPrevClose = now > 0 && priceToday && feedCloseTrusted(now / 1000, market, tradingDay) ? feedPrevClose : null;

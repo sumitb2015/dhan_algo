@@ -130,5 +130,20 @@ class SnapCloses(unittest.TestCase):
         self.assertEqual(list(out["close"]), [1250.0, 1250.5, 1185.1, 500.0, 1300.0])   # only the LAST bar of a day; 10-26 differs 60%: kept; 10-27 has no CSV row: kept
 
 
+class IndexDaily(unittest.TestCase):
+    def test_daily_index_rows_before_the_first_minute_bar_become_1529_ist_closes(self):
+        import tempfile
+        m = _load()
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "NIFTY.csv")
+            with open(path, "w") as f:
+                f.write("Datetime,Open,High,Low,Close,Volume\n2024-09-18,1,1,1,25400.5,10\n2024-09-19,1,1,1,25415.8,0\n2024-09-20,1,1,1,25500,0\n")
+            first = int(pd.Timestamp("2024-09-20 09:15", tz="Asia/Kolkata").timestamp())
+            out = m.load_index_daily_before("NIFTY", first, path)
+            self.assertTrue(m.load_index_daily_before("NIFTY", first, os.path.join(d, "missing.csv")).empty)
+        self.assertEqual(list(out["close"]), [25400.5, 25415.8])
+        self.assertEqual(int(out["start_Time"].iloc[-1]), int(pd.Timestamp("2024-09-19 15:29", tz="Asia/Kolkata").timestamp()))
+
+
 if __name__ == "__main__":
     unittest.main()

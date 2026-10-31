@@ -144,12 +144,15 @@ test('a plain-price tick (pe 0) folds only in single mode, in the open minute an
 // ── trading session, feed previous close, history merge ─────────────────────
 const IST = (h: number, m: number, day = 23) => Date.UTC(2026, 9, day, h, m) / 1000 - 5.5 * 3600; // Fri 23 Oct 2026, IST wall clock
 
-test('inSession: the NSE pre-open and post-close are outside, 09:15 to 15:29 inside; MCX follows its US-DST close and holidays', () => {
+test('inSession: the NSE pre-open and post-close are outside, 09:15 to 15:29 inside (cash / index end 15:30, derivatives 15:40); MCX follows its US-DST close and holidays', () => {
   assert.equal(inSession(IST(9, 0), 'NSE'), false);
   assert.equal(inSession(IST(9, 7), 'NSE'), false);
   assert.equal(inSession(IST(9, 15), 'NSE'), true);
   assert.equal(inSession(IST(15, 29), 'NSE'), true);
   assert.equal(inSession(IST(15, 30), 'NSE'), false);
+  assert.equal(inSession(IST(15, 39), 'NSE_FNO'), true);   // futures and options trade until 15:40
+  assert.equal(inSession(IST(15, 40), 'NSE_FNO'), false);
+  assert.equal(inSession(IST(9, 7), 'NSE_FNO'), false);
   assert.equal(inSession(IST(9, 0), 'MCX'), true);
   // 23 Oct 2026: the US is still on daylight saving, so MCX closes at 23:30
   assert.equal(inSession(IST(23, 29), 'MCX'), true);
@@ -165,6 +168,8 @@ test('feedCloseTrusted: before the bell on a trading weekday only (the close fli
   assert.equal(feedCloseTrusted(IST(8, 30), 'NSE', true), true);   // pre-market: close === ltp is genuine, not a flip
   assert.equal(feedCloseTrusted(IST(15, 29), 'NSE', true), true);
   assert.equal(feedCloseTrusted(IST(15, 30), 'NSE', true), false);
+  assert.equal(feedCloseTrusted(IST(15, 39), 'NSE_FNO', true), true);
+  assert.equal(feedCloseTrusted(IST(15, 40), 'NSE_FNO', true), false);
   assert.equal(feedCloseTrusted(IST(10, 0), 'NSE', false), false); // holiday: still the last session's flipped close
   assert.equal(feedCloseTrusted(IST(10, 0, 24), 'NSE', true), false); // Saturday
   assert.equal(feedCloseTrusted(IST(20, 0), 'MCX', true), true);

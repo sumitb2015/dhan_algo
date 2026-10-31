@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { INTERVALS, resample } from './straddlePnfInterval.ts';
+import { INTERVALS, resample, hasLongIntervals, effectiveInterval } from './straddlePnfInterval.ts';
 import type { Bar } from './straddlePnf.ts';
 
 const DAY1 = Date.UTC(2026, 9, 22, 3, 45) / 1000; // Thu 22 Oct 09:15 IST
@@ -72,11 +72,14 @@ test('empty input gives no bars', () => {
   assert.deepEqual(resample([], 5), { bars: [], endIdx: [] });
 });
 
-test('30 min / 1 hr / 4 hr cut the 375-minute session, the last bucket ending at the 15:30 bell', () => {
+test('30 min / 1 hr / 4 hr cut the 375-minute cash session, the last bucket ending at the 15:30 bell (a derivatives day ends 15:40)', () => {
   const day = minutes(DAY1, 375);
   const close = 15 * 60 + 30;
   assert.equal(resample(day, 30, close).bars.length, 13);
   assert.equal(resample(day, 60, close).bars.length, 7);
+  const fno = minutes(DAY1, 385);
+  assert.equal(resample(fno, 30, 15 * 60 + 40).bars.length, 13);
+  assert.equal(resample(fno, 60, 15 * 60 + 40).bars.length, 7);
   assert.deepEqual(resample(day, 240, close).bars.map(x => x.t), [DAY1, DAY1 + 240 * 60]);
 });
 
@@ -90,4 +93,12 @@ test('day / week / month bars group by IST calendar, the open one stays forming'
   assert.equal(resample(bars, 10080, undefined, true).bars.length, 2);
   assert.equal(resample(bars, 43200, undefined, true).bars.length, 1);
   assert.equal(resample(bars, 43200).bars.length, 0);
+});
+
+test('stocks and indices offer the long intervals; a future / option falls back to 1 minute', () => {
+  assert.equal(hasLongIntervals('equity'), true);
+  assert.equal(hasLongIntervals('index'), true);
+  assert.equal(hasLongIntervals('options'), false);
+  assert.equal(effectiveInterval(10080, hasLongIntervals('index')), 10080);
+  assert.equal(effectiveInterval(10080, hasLongIntervals('futures')), 1);
 });

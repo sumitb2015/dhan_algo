@@ -5,11 +5,12 @@ description: Use when changing the Point & Figure chart UI — components/Stradd
 
 # P&F chart panel
 
-## Intervals are minutes, and equity gets more of them
+## Intervals are minutes, and equity and index get more of them
 
 `lib/straddlePnfInterval.ts`:
 - `INTERVALS = [1,3,5,15]` (everything); `EQUITY_INTERVALS` adds `30, 60, 240, 1440 (1 d), 10080 (1 w), 43200 (1 M)`. The `Interval` type is the **superset**, so `straddlePnfSettings.ts` parses/persists any of them.
 - Always label with `intervalLabel(n)` ("30 min", "4 hr", "1 day"…). Never write `${n}-min` — header, alert log, empty-state text and the e2e header test all use the label.
+- **Who gets the long list:** `hasLongIntervals(kind)` = equity or index (`lib/straddlePnfInterval.ts`); futures / options / straddles stay on 1/3/5/15. Every call site passes `hasLongIntervals(target.kind)` (never `kind === 'equity'`). The `equity` prop of `SettingsControls` is really "long intervals".
 - `intervalsFor(equity)` feeds the dropdown (`SettingsControls` takes `equity`); `effectiveInterval(interval, equity)` returns 1 when the chosen one is not offered. **Use it wherever the interval is consumed** (model build in `useChartModel`, panel props, header text, `AlertLog`), because a long interval picked on a stock persists in settings after the user switches the chart to an index.
 - `resample()`: n < 1440 buckets from the 09:15 open (30/60 give a short final bucket, 240 splits at 13:15, both closed by `sessionCloseMin`). n ≥ 1440 goes to `resampleCalendar()`: IST day / Monday-start week (`(istDay + 3) / 7`, 1970-01-01 was a Thursday) / calendar month, stamped with the bucket's first bar. A bucket is closed once a later one exists; the **last day** also closes when its last minute is `close - 1` (that is why daily-prefix bars sit at 15:29); the last week/month stays forming (dropped unless `keepForming`).
 - Tests: `lib/straddlePnfInterval.test.ts` (30/60/240 counts, day/week/month grouping). A 1-week chart on ~100 sessions has few columns — that is the data, not a bug.
@@ -18,7 +19,13 @@ description: Use when changing the Point & Figure chart UI — components/Stradd
 
 A stock column can span many days, so session dividers and the date strip mislead. `PnfPanel` takes `sessionLines` (default `true`); `StraddlePnfPage` passes `target.kind !== 'equity'`. It gates **both** the dashed vertical dividers and the sticky date strip (`data-testid="pnf-session-strip"`). Index / F&O charts keep both. The per-column day number inside the first box of a session was removed everywhere: the old code *skipped the X/O glyph* for that box and drew the number instead, so removing the text alone leaves holes — the glyph builder must draw the normal X/O for every box.
 
+`sessionDividers` (default `true`) gates **only the dashed lines**, so a chart can drop the lines and keep the date strip: the page passes `sessionLines: kind !== 'equity'` and `sessionDividers: kind !== 'equity' && kind !== 'index'`. Verified in the browser: Equity 0 lines / 0 strip, Index 0 lines / 1 strip, Options 21 lines / 1 strip.
+
 Column tooltip (`Mon 10 Apr 2023 → Mon 17 Apr 2023`): `dateYear()` always adds the year; `timeIfAny()` drops `15:29` (the daily-close stamp); a column that starts and ends on one daily close prints only the date. Real intraday times still show.
+
+## Index: TradingView-style bottom time axis
+
+A P&F chart has no time scale, so TradingView labels the *columns*: day numbers along the bottom with the month's name replacing the first label of each month (`17 25 Sep 7 11 … 28 Oct 6 8 … Nov`), and the crosshair shows a chip with the column's date and time (`15 Oct '26  11:18`). For `target.kind === 'index'` the page passes `timeAxis: true` and `sessionLines: false` (no top strip, no dividers) to `PnfPanel`. Pure logic in `lib/straddlePnfTimeAxis.ts` (`timeAxisLabels(times, xs, minGap = 44)` = one label at each new IST day's first column, month name on a new month; `crosshairStamp(t)` = `D Mon 'YY  HH:MM` in IST; tests in `straddlePnfTimeAxis.test.ts`). Drawn as a zero-height `sticky bottom-0` strip (`data-testid="pnf-time-axis"`, 24 px, translated up by its height) so it stays at the bottom while the chart scrolls vertically and scrolls sideways with the columns; the chip uses the hovered column's `columnTimes[col].start` at `cross.x`, clamped to the plot. The zoom buttons move to `bottom-8` when it is on. Equity has neither strip nor axis, options and futures keep the top strip + dividers.
 
 ## Horizontal-only zoom (column pitch)
 

@@ -75,7 +75,8 @@ export function legsTick(legs: LegQuote[]): Tick | null {
   return { t: Math.max(c.changedMs, p.changedMs) / 1000, ce: c.ltp, pe: p.ltp, cumVol: vol };
 }
 
-export type Market = 'NSE' | 'MCX';
+/** 'NSE' = cash and index (09:15-15:30); 'NSE_FNO' = futures and options (09:15-15:40); 'MCX' = commodities. */
+export type Market = 'NSE' | 'NSE_FNO' | 'MCX';
 
 const IST_OFFSET_S = 5.5 * 3600;
 export const istMinuteOfDay = (t: number) => Math.floor(((t + IST_OFFSET_S) % 86_400) / 60);
@@ -83,12 +84,14 @@ const istIso = (t: number) => new Date((t + IST_OFFSET_S) * 1000).toISOString().
 const hhmmToMin = (hhmm: number) => Math.floor(hhmm / 100) * 60 + (hhmm % 100);
 
 /**
- * The trading session on the IST date of `t`, as IST minutes of the day [open, close). NSE: 09:15-15:30. MCX: from mcxSession
+ * The trading session on the IST date of `t`, as IST minutes of the day [open, close). NSE cash and index: 09:15-15:30. NSE
+ * derivatives: 09:15-15:40 (futures and options trade ten minutes longer; their bars run to 15:39 with real volume). MCX: from mcxSession
  * (lib/mcxSession.ts) — 23:30 close while the US is on daylight saving, 23:55 otherwise, holidays and half days from its
  * calendar; a closed day is an empty window [0, 0).
  */
 export function sessionWindow(market: Market, t: number): readonly [number, number] {
   if (market === 'NSE') return [9 * 60 + 15, 15 * 60 + 30];
+  if (market === 'NSE_FNO') return [9 * 60 + 15, 15 * 60 + 40];
   const s = mcxSession(istIso(t));
   return s.open >= s.close ? [0, 0] : [hhmmToMin(s.open), hhmmToMin(s.close)];
 }

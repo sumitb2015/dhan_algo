@@ -42,10 +42,10 @@ export type AutoDecision =
 /** [entry cutoff, EOD exit] in IST minutes of the day for `market` at `t` (null when the market is shut that day). */
 export function autoWindow(market: Market, t: number): { open: number; entryCutoff: number; eodExit: number } | null {
   // NSE's session window is a clock window: weekends and holidays come from the shared calendar (MCX's own is in sessionWindow).
-  if (market === 'NSE' && !isNseTradingDay(istDateIso(t * 1000))) return null;
+  if (market !== 'MCX' && !isNseTradingDay(istDateIso(t * 1000))) return null;
   const [open, close] = sessionWindow(market, t);
   if (open >= close) return null;
-  if (market === 'NSE') return { open, entryCutoff: NSE_ENTRY_CUTOFF_MIN, eodExit: NSE_EOD_EXIT_MIN };
+  if (market !== 'MCX') return { open, entryCutoff: NSE_ENTRY_CUTOFF_MIN, eodExit: NSE_EOD_EXIT_MIN };
   return { open, entryCutoff: close - MCX_ENTRY_CUTOFF_BEFORE_CLOSE, eodExit: close - MCX_EOD_EXIT_BEFORE_CLOSE };
 }
 
