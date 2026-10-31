@@ -137,7 +137,9 @@ test('REAL single leg: asks once, sends a LIMIT at the box price to the broker, 
   await page.clock.setFixedTime(ist(10, 30, 20));
   const { orders, state } = await install(page);
   await openFuture(page);
+  page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  await page.getByTestId('pnf-rail-lock').first().click();   // REAL: the rail stays locked until it is unlocked
   let asked = 0;
   page.on('dialog', d => { asked++; void d.accept(); });
   const { el, level } = await cell(page, 'BUY', 99.05);
@@ -198,7 +200,9 @@ test('REAL straddle: a page-held level, sent as both legs at MARKET once when th
   await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Options' }).click();
   await page.getByRole('button', { name: 'CE+PE' }).first().click();
   await expect(page.getByTestId('pnf-header-summary')).toContainText('99.33');
+  page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  await page.getByTestId('pnf-rail-lock').first().click();   // REAL: the rail stays locked until it is unlocked
   page.on('dialog', d => { void d.accept(); });
   const { el, level } = await cell(page, 'BUY', 99.05);
   await el.dispatchEvent('pointerdown', { button: 0 });
@@ -219,7 +223,9 @@ test('REAL single leg with no clean reply: UNKNOWN on the chart, never resent; ?
   await page.clock.setFixedTime(ist(10, 30, 20));
   const { orders, state } = await install(page);
   await openFuture(page);
+  page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  await page.getByTestId('pnf-rail-lock').first().click();   // REAL: the rail stays locked until it is unlocked
   const dialogs: string[] = [];
   page.on('dialog', d => { dialogs.push(d.message()); void d.accept(); });
   state.unknownNext = true;
@@ -247,7 +253,9 @@ test('REAL straddle: a level the price reaches on a STALE feed does not fire; it
   await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Options' }).click();
   await page.getByRole('button', { name: 'CE+PE' }).first().click();
   await expect(page.getByTestId('pnf-header-summary')).toContainText('99.33');
+  page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  await page.getByTestId('pnf-rail-lock').first().click();   // REAL: the rail stays locked until it is unlocked
   page.on('dialog', d => { void d.accept(); });
   const { el, level } = await cell(page, 'BUY', 99.05);
   await el.dispatchEvent('pointerdown', { button: 0 });
@@ -265,4 +273,46 @@ test('REAL straddle: a level the price reaches on a STALE feed does not fire; it
   await page.clock.setFixedTime(ist(10, 30, 20));
   await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 10_000 }).toBe('filled');
   expect(orders.length).toBe(1);
+});
+
+test('REAL: a banner shows, the rail is locked until unlocked (clicks do nothing), and switching to REAL asks first', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await openFuture(page);
+  await expect(page.getByTestId('pnf-real-banner')).toHaveCount(0);
+  const real = page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' });
+  // Declining the confirm keeps PAPER.
+  page.once('dialog', d => { void d.dismiss(); });
+  await real.click();
+  await expect(page.getByTestId('pnf-real-banner')).toHaveCount(0);
+  page.once('dialog', d => { expect(d.message()).toMatch(/Switch to REAL/); void d.accept(); });
+  await real.click();
+  await expect(page.getByTestId('pnf-real-banner')).toBeVisible();
+  await expect(page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-rail-locked')).toBeVisible();
+  const { el } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await page.waitForTimeout(600);
+  expect(state.ledger.rows.length, 'a locked rail places nothing').toBe(0);
+  expect(orders.length).toBe(0);
+  await page.getByTestId('pnf-rail-lock').first().click();
+  await expect(page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-rail-locked')).toHaveCount(0);
+});
+
+test('PAPER: the orders bar lists resting orders and Cancel all (or Shift+C) clears them; the hover label names what a click places', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  const a = await cell(page, 'BUY', 99.05);
+  await a.el.hover();
+  await expect(page.getByTestId('pnf-rail-hover-label')).toContainText('BUY LMT @');
+  await a.el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(1);
+  const b = await cell(page, 'BUY', 98.75);
+  await b.el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(2);
+  const panel = page.getByTestId('pnf-panel').nth(0);
+  await expect(panel.getByTestId('pnf-orders-chip')).toHaveCount(2);
+  await panel.getByTestId('pnf-cancel-all').click();
+  await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(0);
+  await expect(panel.getByTestId('pnf-orders-chip')).toHaveCount(0);
 });

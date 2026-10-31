@@ -189,6 +189,7 @@ test('REAL is never remembered: a reload starts in PAPER', async ({ page }) => {
   await page.goto('/straddle-pnf');
   await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
   const modes = page.getByRole('group', { name: 'Execution mode' });
+  page.once('dialog', d => { void d.accept(); });
   await modes.getByRole('button', { name: 'REAL' }).click();
   await expect(page.getByTestId('header-pnl-margin').getByText('P&L', { exact: true })).toBeVisible();
   await page.reload();
@@ -199,6 +200,7 @@ test('REAL square off reads the broker position and sends only close:true (the s
   const { placedOrders } = await installTradeMock(page, { realNet: 130 });
   await page.goto('/straddle-pnf');
   await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
 
   // 130 units at a 65 lot = 2 lots, whatever the Lots box says

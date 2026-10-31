@@ -150,6 +150,7 @@ test('REAL: arming takes a second click; entry is reserved then confirmed; the e
   await page.clock.setFixedTime(ist(10, 30, 20));
   const { orders, state } = await install(page);
   await openFuture(page);
+  page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
   const auto = page.getByTestId('pnf-auto-1');
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
@@ -179,6 +180,7 @@ test('REAL: an unknown entry outcome halts the chart, is never resent, and waits
   const tones = await recordTones(page);
   const { orders, state } = await install(page, { reply: () => ({ success: false, outcome: 'unknown', message: 'Status unknown' }) });
   await openFuture(page);
+  page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
   const auto = page.getByTestId('pnf-auto-1');
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();

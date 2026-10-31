@@ -69,7 +69,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
       <button type="button" onClick={toggle} disabled={!!disabledReason && !armed} aria-pressed={armed}
               aria-label={armed ? `Stop AUTO on chart ${chart}` : `Start AUTO on chart ${chart}`}
               title={disabledReason ?? (armed ? `AUTO ${mode}: double-bottom SELL / double-top BUY, exit on the first column reversal` : 'Trade this chart automatically')}
-              className={`inline-flex items-center gap-1 h-5 px-1.5 rounded border text-[10px] font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${armed
+              className={`inline-flex items-center gap-1 h-6 px-2 rounded border text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${armed
                 ? mode === 'REAL' ? 'border-red-500/50 bg-red-500/15 text-red-300' : 'border-violet-500/50 bg-violet-500/15 text-violet-300'
                 : confirmReal ? 'border-red-500/60 bg-red-500/20 text-red-300' : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white'}`}>
         <Bot className="w-3 h-3" aria-hidden="true" />
@@ -77,9 +77,9 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
         {armed && <span className={`w-1.5 h-1.5 rounded-full ${mode === 'REAL' ? 'bg-red-400' : 'bg-violet-400'} animate-pulse`} aria-hidden="true" />}
       </button>
       <span className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950" title={locked ? 'Stop AUTO (and close its position) to change lots' : 'Lots per AUTO trade'}>
-        <span className="pl-1 text-[10px] font-bold text-zinc-500" aria-hidden="true">L</span>
+        <span className="pl-1 text-[11px] font-bold text-zinc-400" aria-hidden="true">L</span>
         <button type="button" aria-label={`Fewer AUTO lots on chart ${chart}`} disabled={locked || lots <= 1} onClick={() => onLots(lots - 1)}
-                className="w-4 h-5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">−</button>
+                className="w-5 h-6 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">−</button>
         <input aria-label={`AUTO lots on chart ${chart}`} value={draft} disabled={locked}
                onFocus={() => { focusedRef.current = true; }}
                onChange={e => setDraft(e.target.value)}
@@ -88,11 +88,11 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
                  if (e.key === 'Enter') { commit(e.currentTarget.value); e.currentTarget.blur(); }
                  if (e.key === 'Escape') { setDraft(String(lots)); e.currentTarget.blur(); }
                }}
-               className="w-6 h-5 text-center text-[10px] font-mono font-bold bg-transparent text-white focus:outline-none disabled:text-zinc-400" />
+               className="w-7 h-6 text-center text-[11px] font-mono font-bold bg-transparent text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 rounded disabled:text-zinc-400" />
         <button type="button" aria-label={`More AUTO lots on chart ${chart}`} disabled={locked || lots >= MAX_LOTS} onClick={() => onLots(lots + 1)}
-                className="w-4 h-5 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40">+</button>
+                className="w-5 h-6 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">+</button>
       </span>
-      <span data-testid={`pnf-auto-status-${chart}`} className="font-mono text-[10px] truncate min-w-0 max-w-[13rem]" title={halt ?? note}>
+      <span data-testid={`pnf-auto-status-${chart}`} className="font-mono text-[11px] truncate min-w-0 max-w-[13rem]" title={halt ?? note}>
         {unresolved ? (
           (row.state === 'entering' || row.state === 'exiting') && !needsResolve(row, nowMs)
             ? <span className="text-amber-400">{row.state === 'entering' ? 'ENTERING…' : 'EXITING…'}</span>
@@ -101,7 +101,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
           <span className={row.side === 'SELL' ? 'text-red-400' : 'text-emerald-400'}>
             {row.side === 'SELL' ? 'SHORT' : 'LONG'} {row.lots}L @ {row.entryPrice.toFixed(2)}
             {pnl !== null && <span className={`ml-1 font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{inr(pnl)}</span>}
-            {row.mode === 'PAPER' && <span className="ml-1 text-zinc-500">paper</span>}
+            {row.mode === 'PAPER' && <span className="ml-1 text-zinc-400">paper</span>}
           </span>
         ) : halt ? (
           <span className="text-red-400 font-bold">HALTED</span>
@@ -111,8 +111,8 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
       </span>
       {row && needsResolve(row, nowMs) && (
         <span className="flex items-center gap-1" title="Check the broker's Positions / Orders first, then tell AUTO what is there">
-          <button type="button" onClick={() => onResolve('open')} className="h-5 px-1.5 rounded border border-zinc-700 text-[10px] font-bold text-zinc-200 hover:bg-zinc-800">Is open</button>
-          <button type="button" onClick={() => onResolve('flat')} className="h-5 px-1.5 rounded border border-zinc-700 text-[10px] font-bold text-zinc-200 hover:bg-zinc-800">Is flat</button>
+          <button type="button" onClick={() => onResolve('open')} className="h-6 px-2 rounded border border-zinc-700 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800">Is open</button>
+          <button type="button" onClick={() => onResolve('flat')} className="h-6 px-2 rounded border border-zinc-700 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800">Is flat</button>
         </span>
       )}
     </span>

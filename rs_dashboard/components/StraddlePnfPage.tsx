@@ -178,6 +178,9 @@ function StraddlePnfPage() {
   // Margin / P&L chips read it from here, so the chips always show the account orders go to.
   const { broker, setBroker } = useBrokerSelector();
   const [tradeMode, setTradeMode] = useState<'PAPER' | 'REAL'>('PAPER');
+  // REAL: the chart rail ignores clicks until it is unlocked (never remembered; PAPER needs no lock).
+  const [railUnlocked, setRailUnlocked] = useState(false);
+  const railArmed = tradeMode === 'PAPER' || railUnlocked;
   const [paperPnl, setPaperPnl] = useState(0);
   const [muted, setMuted] = useState(false);
   const [flash, setFlash] = useState<Record<ChartId, 'buy' | 'sell' | null>>({ 1: null, 2: null });
@@ -363,11 +366,15 @@ function StraddlePnfPage() {
     const now = nowSec();
     return {
       position: positions[rc.targetKey] ?? null,
+      armed: railArmed,
+      lockable: tradeMode === 'REAL',
+      onToggleArm: () => setRailUnlocked(v => !v),
+      onCancelAll: () => { for (const r of rows) if (r.state === 'working') void resting.cancel(r); },
       orders: rows.map(r => ({
         id: r.id, side: r.side, kind: r.kind, level: r.level, price: r.price, trigger: r.trigger, lots: r.lots, state: r.state, mode: r.mode,
         resolvable: needsResolve(r, now),
       })),
-      onPlace: (side: 'BUY' | 'SELL', level: number) => { void resting.place(rc, side, level); },
+      onPlace: (side: 'BUY' | 'SELL', level: number) => { if (railArmed) void resting.place(rc, side, level); },
       onModify: (id: string, level: number) => { const r = byId(id); if (r) void resting.modify(r, level); },
       onCancel: (id: string) => { const r = byId(id); if (r) void resting.cancel(r); },
     };
@@ -398,7 +405,10 @@ function StraddlePnfPage() {
   const setLotsFor = (c: ChartId, n: number) => { setAutoLots(l => ({ ...l, [c]: n })); savePref(`${AUTO_LOTS_KEY}${c}`, String(n)); };
   // The page mode is the mode AUTO trades in: switching it disarms both charts (arming REAL is always an explicit step).
   const changeTradeMode = (m: 'PAPER' | 'REAL') => {
-    if (m !== tradeMode) setAutoArm(a => ({ 1: a[1].on ? DISARMED : a[1], 2: a[2].on ? DISARMED : a[2] }));
+    if (m === tradeMode) return;
+    if (m === 'REAL' && !window.confirm('Switch to REAL?\n\nOrders from the trade bar, the chart rail and AUTO will go to your broker with real money. The rail stays locked until you unlock it, and every page load starts in PAPER.')) return;
+    setAutoArm(a => ({ 1: a[1].on ? DISARMED : a[1], 2: a[2].on ? DISARMED : a[2] }));
+    setRailUnlocked(false);
     setTradeMode(m);
   };
   // Arrives seconds after the order: found by id in the store as it is THEN (never a list captured at the click).
@@ -506,7 +516,7 @@ function StraddlePnfPage() {
   };
 
   return (
-    <div className="flex flex-col h-screen bg-zinc-950 text-white">
+    <div className={`flex flex-col h-screen bg-zinc-950 text-white ${tradeMode === 'REAL' ? 'border-t-4 border-red-500' : ''}`} data-trade-mode={tradeMode}>
       <header className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
         {/* row 1: identity, data date and navigation. */}
         <div className="flex items-center gap-x-4 gap-y-2 flex-wrap px-6 pt-3 pb-2">
@@ -516,7 +526,10 @@ function StraddlePnfPage() {
             </div>
             <div className="min-w-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {segLabel}</p>
-              <h1 className="text-sm font-bold text-white tracking-tight leading-none">Point &amp; Figure</h1>
+              <h1 className="text-sm font-bold text-white tracking-tight leading-none flex items-center gap-2">
+                Point &amp; Figure
+                {tradeMode === 'REAL' && <span data-testid="pnf-real-banner" className="px-1.5 py-0.5 rounded bg-red-600 text-oncolor text-[11px] font-bold tracking-wide">LIVE · REAL MONEY</span>}
+              </h1>
               <p className="text-[10px] text-zinc-500 font-medium mt-1 truncate">
                 {`${dual ? `Chart ${active} · ` : ''}${activeSettings.interval}-min · ${boxText(activeSettings)} · ${activeSettings.reversal}-box reversal · ${activeFno ? activeFeed.label : activeFeed.name ?? activeTarget.name}`}
               </p>
@@ -547,7 +560,7 @@ function StraddlePnfPage() {
           </div>
         </div>
 
-        {/* row 2: the live price strip, then how the chart is drawn. The strip claims at least 560px and clips what does not fit, so
+        {/* row 3: the live price strip, then how the chart is drawn. The strip claims at least 560px and clips what does not fit, so
             on a narrow screen the settings move to the next line instead of sliding over the price. */}
         <div className="flex items-center gap-x-3 gap-y-2 flex-wrap px-6 py-2 border-t border-zinc-800 bg-zinc-900/40">
           <div ref={setHeaderSlot} data-testid="pnf-header-summary" className="flex items-center grow basis-[560px] min-w-0 overflow-hidden" />

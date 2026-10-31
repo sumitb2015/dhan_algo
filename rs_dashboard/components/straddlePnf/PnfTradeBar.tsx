@@ -333,7 +333,7 @@ export default function PnfTradeBar({
                   }
                   if (e.key === 'Escape') { setLotsDraft(String(lots)); (e.target as HTMLInputElement).blur(); }
                 }}
-                className="w-10 h-6 text-center text-xs font-mono font-bold bg-transparent text-white focus:outline-none"
+                className="w-10 h-6 text-center text-xs font-mono font-bold bg-transparent text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 rounded"
               />
               <button type="button" aria-label={`Increase ${isEquity ? 'quantity' : 'lots'}`}
                       className="w-6 h-6 flex items-center justify-center text-zinc-300 hover:bg-zinc-800 rounded-r" onClick={() => pickLots(lots + 1)}>
