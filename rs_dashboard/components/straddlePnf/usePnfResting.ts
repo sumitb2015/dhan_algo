@@ -52,7 +52,7 @@ async function postOrder(body: Record<string, unknown>): Promise<Reply | null> {
   } catch { return null; }                                    // no clean reply: UNKNOWN, never a failure
 }
 
-export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, onEvent, onPaperFill }: {
+export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, onEvent, onPaperFill, instant }: {
   charts: RailChart[];
   broker: Broker;
   mode: 'PAPER' | 'REAL';
@@ -62,6 +62,8 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
   onEvent: (e: RestingEvent) => void;
   /** A paper order filled: apply it to the paper ledger (per leg, signed lots) at these leg prices. */
   onPaperFill: (row: RestingRow, legPrices: number[]) => void;
+  /** Per chart: skip the REAL confirm on moving / cancelling a broker order (Kite's "Instant order placement"). */
+  instant: Record<number, boolean>;
 }) {
   const [ledger, setLedger] = useState<RestingLedger>(EMPTY_RESTING);
   const accept = useCallback((l: RestingLedger | undefined) => {
@@ -136,6 +138,7 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
     if (spec.kind !== row.kind) { toast.error(`Moving it across the price would turn it into ${spec.kind === 'limit' ? 'a LIMIT' : 'an SL-limit'} - cancel it and place a new one`); return; }
     if (row.venue === 'page') { const r = await post({ op: 'modify', id: row.id, level: spec.level, price: spec.price, trigger: spec.trigger }); if (!r.ok) toast.error(r.error ?? 'Not moved'); return; }
     if (!row.brokerOrderId) { toast.error('The order is still being placed - try again in a moment'); return; }
+    if (!instant[row.chart] && !window.confirm(`Move this REAL ${row.side} ${row.kind === 'limit' ? 'LIMIT' : 'SL-limit'} ${row.lots}L from ${row.level} to ${spec.level}?\n\nIt is changed at your broker. (Turn on Instant above the chart to skip this question.)`)) return;
     const j = await postOrder({
       broker: row.broker, mode: 'REAL', target: row.target, action: row.side, lots: row.lots, product: row.product,
       orderType: row.kind === 'limit' ? 'LIMIT' : 'SL', price: spec.price, trigger: spec.trigger, brokerOp: { op: 'modify', orderId: row.brokerOrderId },
@@ -159,6 +162,7 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
       return;
     }
     if (!row.brokerOrderId) { toast.error('The order is still being placed - try again in a moment'); return; }
+    if (!instant[row.chart] && !window.confirm(`Cancel this REAL ${row.side} ${row.kind === 'limit' ? 'LIMIT' : 'SL-limit'} ${row.lots}L at ${row.level}?\n\n(Turn on Instant above the chart to skip this question.)`)) return;
     const j = await postOrder({ broker: row.broker, mode: 'REAL', target: row.target, action: row.side, lots: row.lots, product: row.product, brokerOp: { op: 'cancel', orderId: row.brokerOrderId } });
     if (j?.outcome === 'placed') await post({ op: 'cancel', id: row.id, t: Date.now() / 1000 });
     else onEvent({ kind: 'warn', chart: row.chart, text: !j || j.outcome === 'unknown' ? 'Cancel status unknown - the order book will show it' : `Not cancelled: ${j.error ?? ''}` });

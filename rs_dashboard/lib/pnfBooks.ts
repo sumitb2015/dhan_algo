@@ -21,6 +21,8 @@ export function clockOf(v: unknown): string {
 }
 
 export interface PositionRow {
+  /** The broker's position key: Dhan's security id, else the trading symbol (Kotak / Zerodha have no numeric id). */
+  key: string;
   symbol: string; product: string; net: number; avg: number | null; ltp: number | null;
   realised: number | null; unrealised: number | null; open: boolean;
 }
@@ -33,7 +35,7 @@ export function toPositionRow(raw: Record<string, unknown>): PositionRow {
   const avg = net > 0 ? (buyAvg || cost) : net < 0 ? (sellAvg || cost) : null;
   const ltp = num(p.lastTradedPrice ?? p.ltp ?? p.lastPrice);
   return {
-    symbol: str(p.tradingSymbol), product: str(p.productType).toUpperCase(), net,
+    key: str(p.securityId) || str(p.tradingSymbol), symbol: str(p.tradingSymbol), product: str(p.productType).toUpperCase(), net,
     avg: avg && avg > 0 ? avg : null, ltp: ltp && ltp > 0 ? ltp : null,
     realised: num(p.realizedProfit), unrealised: net !== 0 && !(ltp && ltp > 0) ? null : num(p.unrealizedProfit), open: net !== 0,
   };
@@ -41,6 +43,8 @@ export function toPositionRow(raw: Record<string, unknown>): PositionRow {
 
 export type OrderState = 'done' | 'open' | 'rejected' | 'cancelled';
 export interface OrderRow {
+  /** Same key as PositionRow.key. */
+  key: string;
   id: string; time: string; symbol: string; side: 'BUY' | 'SELL' | ''; qty: number; filled: number | null;
   price: number | null; avg: number | null; type: string; product: string; status: string; state: OrderState; reason: string;
 }
@@ -61,19 +65,19 @@ export function toOrderRow(o: Record<string, unknown>): OrderRow {
   const status = str(o.orderStatus).toUpperCase();
   const price = num(o.price), avg = num(o.averageTradedPrice ?? o.averagePrice);
   return {
-    id: str(o.orderId), time: clockOf(o.createTime ?? o.updateTime), symbol: str(o.tradingSymbol), side: side(o.transactionType),
+    key: str(o.securityId) || str(o.tradingSymbol), id: str(o.orderId), time: clockOf(o.createTime ?? o.updateTime), symbol: str(o.tradingSymbol), side: side(o.transactionType),
     qty: num(o.quantity) ?? 0, filled: num(o.filledQty), price: price && price > 0 ? price : null, avg: avg && avg > 0 ? avg : null,
     type: str(o.orderType).toUpperCase(), product: str(o.productType).toUpperCase(), status, state: orderState(status),
     reason: str(o.omsErrorDescription ?? o.reason),
   };
 }
 
-export interface TradeRow { id: string; orderId: string; time: string; symbol: string; side: 'BUY' | 'SELL' | ''; qty: number; price: number | null; product: string }
+export interface TradeRow { key: string; id: string; orderId: string; time: string; symbol: string; side: 'BUY' | 'SELL' | ''; qty: number; price: number | null; product: string }
 
 export function toTradeRow(t: Record<string, unknown>): TradeRow {
   const price = num(t.tradedPrice);
   return {
-    id: str(t.exchangeTradeId ?? t.tradeId), orderId: str(t.orderId), time: clockOf(t.exchangeTime ?? t.createTime ?? t.updateTime),
+    key: str(t.securityId) || str(t.tradingSymbol), id: str(t.exchangeTradeId ?? t.tradeId), orderId: str(t.orderId), time: clockOf(t.exchangeTime ?? t.createTime ?? t.updateTime),
     symbol: str(t.tradingSymbol), side: side(t.transactionType), qty: num(t.tradedQuantity) ?? 0,
     price: price && price > 0 ? price : null, product: str(t.productType).toUpperCase(),
   };

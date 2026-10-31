@@ -64,6 +64,8 @@ const MARKERS_KEY = 'straddle-pnf-markers-';
 const AUTO_LOTS_KEY = 'straddle-pnf-auto-lots-';
 /** Per chart: '0' = the B / S trade markers are hidden. */
 const MARKERS_SHOWN_KEY = 'straddle-pnf-markers-shown-';
+const LINES_SHOWN_KEY = 'straddle-pnf-lines-shown-';
+const TAG_LEFT_KEY = 'straddle-pnf-tag-left-';
 const DISARMED: AutoArm = { on: false, mode: 'PAPER', watermarkT: 0 };
 
 type ChartId = 1 | 2;
@@ -174,6 +176,11 @@ function StraddlePnfPage() {
   const [autoArm, setAutoArm] = useState<Record<ChartId, AutoArm>>({ 1: DISARMED, 2: DISARMED });
   const [autoLots, setAutoLots] = useState<Record<ChartId, number>>({ 1: 1, 2: 1 });
   const [markersShown, setMarkersShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
+  // Order / position lines on the chart (like Kite's price lines) can be hidden, and their tags aligned left or right.
+  const [linesShown, setLinesShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
+  const [tagLeft, setTagLeft] = useState<Record<ChartId, boolean>>({ 1: false, 2: false });
+  // REAL: moving / cancelling a broker order asks first, unless Instant is on for that chart (never remembered).
+  const [instant, setInstant] = useState<Record<ChartId, boolean>>({ 1: false, 2: false });
   // ONE broker for the whole page: the header picker sets it (saved dashboard-wide, like the scalpers), and the trade bar and the
   // Margin / P&L chips read it from here, so the chips always show the account orders go to.
   const { broker, setBroker } = useBrokerSelector();
@@ -222,6 +229,8 @@ function StraddlePnfPage() {
     const lotsOf = (c: ChartId) => { const n = Number(readPref(`${AUTO_LOTS_KEY}${c}`)); return Number.isInteger(n) && n >= 1 && n <= 20 ? n : 1; };
     setAutoLots({ 1: lotsOf(1), 2: lotsOf(2) });
     setMarkersShown({ 1: readPref(`${MARKERS_SHOWN_KEY}1`) !== '0', 2: readPref(`${MARKERS_SHOWN_KEY}2`) !== '0' });
+    setLinesShown({ 1: readPref(`${LINES_SHOWN_KEY}1`) !== '0', 2: readPref(`${LINES_SHOWN_KEY}2`) !== '0' });
+    setTagLeft({ 1: readPref(`${TAG_LEFT_KEY}1`) === '1', 2: readPref(`${TAG_LEFT_KEY}2`) === '1' });
     try {
       const raw = readPref(LOG_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
@@ -356,7 +365,7 @@ function StraddlePnfPage() {
     });
   };
   const resting = usePnfResting({
-    charts: railCharts, broker, mode: tradeMode, lots: sizing.lots, product: sizing.product, leaderRef, onEvent: onRestingEvent, onPaperFill,
+    charts: railCharts, broker, mode: tradeMode, lots: sizing.lots, product: sizing.product, leaderRef, onEvent: onRestingEvent, onPaperFill, instant,
   });
   const railFor = (c: ChartId) => {
     const rc = railCharts.find(x => x.chart === c);
@@ -368,6 +377,12 @@ function StraddlePnfPage() {
       position: positions[rc.targetKey] ?? null,
       armed: railArmed,
       lockable: tradeMode === 'REAL',
+      instant: instant[c],
+      onToggleInstant: () => setInstant(v => ({ ...v, [c]: !v[c] })),
+      linesShown: linesShown[c],
+      onToggleLines: () => { const next = !linesShown[c]; savePref(`${LINES_SHOWN_KEY}${c}`, next ? '1' : '0'); setLinesShown(v => ({ ...v, [c]: next })); },
+      alignLeft: tagLeft[c],
+      onToggleAlign: () => { const next = !tagLeft[c]; savePref(`${TAG_LEFT_KEY}${c}`, next ? '1' : '0'); setTagLeft(v => ({ ...v, [c]: next })); },
       onToggleArm: () => setRailUnlocked(v => !v),
       onCancelAll: () => { for (const r of rows) if (r.state === 'working') void resting.cancel(r); },
       orders: rows.map(r => ({
@@ -409,6 +424,7 @@ function StraddlePnfPage() {
     if (m === 'REAL' && !window.confirm('Switch to REAL?\n\nOrders from the trade bar, the chart rail and AUTO will go to your broker with real money. The rail stays locked until you unlock it, and every page load starts in PAPER.')) return;
     setAutoArm(a => ({ 1: a[1].on ? DISARMED : a[1], 2: a[2].on ? DISARMED : a[2] }));
     setRailUnlocked(false);
+    setInstant({ 1: false, 2: false });
     setTradeMode(m);
   };
   // Arrives seconds after the order: found by id in the store as it is THEN (never a list captured at the click).
@@ -680,7 +696,8 @@ function StraddlePnfPage() {
           )}
         </div>
       </div>
-      <BrokerBooks broker={broker} open={booksOpen} onOpenChange={changeBooksOpen} autoRows={autoToday} autoPrice={autoPrice} />
+      <BrokerBooks broker={broker} open={booksOpen} onOpenChange={changeBooksOpen} autoRows={autoToday} autoPrice={autoPrice}
+        chartKeys={railCharts.find(c => c.chart === active)?.keys.filter(Boolean) ?? []} chartName={`C${active} · ${activeFeed.label}`} />
     </div>
   );
 }

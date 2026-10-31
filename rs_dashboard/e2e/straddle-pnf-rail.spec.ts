@@ -316,3 +316,56 @@ test('PAPER: the orders bar lists resting orders and Cancel all (or Shift+C) cle
   await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(0);
   await expect(panel.getByTestId('pnf-orders-chip')).toHaveCount(0);
 });
+
+test('REAL: cancelling a broker order asks first (declining keeps it); Instant skips the question', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await openFuture(page);
+  page.once('dialog', d => { void d.accept(); });
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  await page.getByTestId('pnf-rail-lock').first().click();
+  const msgs: string[] = [];
+  let answer = true;
+  page.on('dialog', d => { msgs.push(d.message()); void (answer ? d.accept() : d.dismiss()); });
+  for (const [px, n] of [[99.05, 1], [98.75, 2]] as const) {
+    const c = await cell(page, 'BUY', px);
+    await c.el.dispatchEvent('pointerdown', { button: 0 });
+    await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(n);
+  }
+  const panel = page.getByTestId('pnf-panel').nth(0);
+  const placedMsgs = msgs.length;
+  // Declining the cancel question leaves the order working and sends nothing.
+  answer = false;
+  await panel.getByTestId('pnf-orders-chip').first().getByRole('button').click();
+  await page.waitForTimeout(500);
+  expect(msgs.length).toBe(placedMsgs + 1);
+  expect(msgs.at(-1)).toMatch(/Cancel this REAL/);
+  expect(orders.some(o => o.brokerOp), 'declined: no cancel sent').toBe(false);
+  expect(state.ledger.rows.filter(r => r.state === 'working').length).toBe(2);
+  // Instant ON: the cancel goes straight out.
+  await panel.getByTestId('pnf-rail-instant').click();
+  await panel.getByTestId('pnf-orders-chip').first().getByRole('button').click();
+  await expect.poll(() => orders.filter(o => o.brokerOp?.op === 'cancel').length).toBe(1);
+  expect(msgs.length, 'Instant asks nothing').toBe(placedMsgs + 1);
+  await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(1);
+});
+
+test('PAPER: order and position lines can be hidden (the orders bar keeps listing them) and their tags aligned left', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  const { el } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+  const panel = page.getByTestId('pnf-panel').nth(0);
+  await expect(panel.getByTestId('pnf-order-line')).toHaveCount(1);
+  const right = await panel.getByTestId('pnf-order-line').locator('rect').first().evaluate(e => e.getBoundingClientRect().x);
+  await panel.getByRole('button', { name: 'Align order tags to the left' }).click();
+  const left = await panel.getByTestId('pnf-order-line').locator('rect').first().evaluate(e => e.getBoundingClientRect().x);
+  expect(left).toBeLessThan(right);
+  await panel.getByRole('button', { name: 'Hide order and position lines' }).click();
+  await expect(panel.getByTestId('pnf-order-line')).toHaveCount(0);
+  await expect(panel.getByTestId('pnf-orders-chip')).toHaveCount(1);
+  await panel.getByRole('button', { name: 'Show order and position lines' }).click();
+  await expect(panel.getByTestId('pnf-order-line')).toHaveCount(1);
+});

@@ -63,3 +63,10 @@ test('daySummary: P&L, worst symbol first, unpriced legs, order counts and turno
   assert.deepEqual(s.orders, { total: 4, done: 2, open: 1, rejected: 1, cancelled: 0 });
   assert.deepEqual([s.buyValue, s.sellValue, s.trades], [50, 70, 2]);
 });
+
+test('rows carry the broker key: Dhan security id, else the trading symbol (what "This chart" filters on)', () => {
+  assert.equal(toPositionRow({ securityId: '43211', tradingSymbol: 'NIFTY-Nov2026-25000-CE', netQty: 0 }).key, '43211');
+  assert.equal(toPositionRow({ tradingSymbol: 'NIFTY26NOV25000CE', netQty: 0 }).key, 'NIFTY26NOV25000CE');
+  assert.equal(toOrderRow({ securityId: '43211', orderId: '1' }).key, '43211');
+  assert.equal(toTradeRow({ tradingSymbol: 'X', tradedQuantity: 1 }).key, 'X');
+});

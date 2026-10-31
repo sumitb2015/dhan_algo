@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
 import type { PnfExecutionMarker } from '@/lib/straddlePnf';
-import { MapPin, MapPinOff, Minus, Plus, RotateCcw } from 'lucide-react';
+import { AlignLeft, AlignRight, Eye, EyeOff, MapPin, MapPinOff, Minus, Plus, RotateCcw } from 'lucide-react';
 import { layoutPanel, AXIS_W, PAD_TOP } from '@/lib/straddlePnfLayout';
 import { MIN_BOX_PTS_PCT } from '@/lib/straddlePnfSettings';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -90,6 +90,14 @@ export type PnfRail = {
   onToggleArm?: () => void;
   /** REAL mode: the lock toggle is shown (PAPER needs none). */
   lockable?: boolean;
+  /** REAL: moving / cancelling a broker order asks first unless Instant is on. */
+  instant?: boolean;
+  onToggleInstant?: () => void;
+  /** Show the order and position lines (Kite's price lines) / which edge their tags sit on. */
+  linesShown?: boolean;
+  onToggleLines?: () => void;
+  alignLeft?: boolean;
+  onToggleAlign?: () => void;
   /** Cancels every working order on this chart. */
   onCancelAll?: () => void;
 };
@@ -324,6 +332,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   };
   // The scroller's visible plot edge in content coordinates: the order tags sit there, not at the content's far end (blank padding).
   const [viewRight, setViewRight] = useState<number | null>(null);
+  const [viewLeft, setViewLeft] = useState(0);
   const stickRef = useRef(true);
   // The scroll position where the newest column sits against the axis (the empty room right of it is only for dragging).
   const stickLeft = (el: HTMLElement) => Math.max(0, el.scrollWidth - el.clientWidth - padR);
@@ -336,6 +345,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     if (!el || liveCols.length === 0) return;
     if (stickRef.current) el.scrollLeft = stickLeft(el);
     setViewRight(Math.round(el.scrollLeft + el.clientWidth - AXIS_W - (rail ? RAIL_W : 0)));
+    setViewLeft(Math.round(el.scrollLeft));
     if (centeredFor.current !== strike) { touchedRef.current = false; centeredFor.current = strike; }
     if (!touchedRef.current && lastY !== null && box > 0) {
       el.scrollTop = topFor(el);
@@ -635,6 +645,13 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               {rail.armed !== false ? 'UNLOCKED' : 'LOCKED'}
             </button>
           )}
+          {rail.lockable && rail.onToggleInstant && (
+            <button type="button" onClick={rail.onToggleInstant} aria-pressed={!!rail.instant} data-testid="pnf-rail-instant"
+                    title="Instant: moving or cancelling a REAL order skips the confirm question. Off by default."
+                    className={`h-6 px-2 rounded border text-[11px] font-bold ${FOCUS_RING} ${rail.instant ? 'border-amber-500/60 bg-amber-500/20 text-amber-400' : 'border-zinc-600 bg-zinc-800 text-zinc-200'}`}>
+              Instant {rail.instant ? 'ON' : 'OFF'}
+            </button>
+          )}
           {rail.orders.map(o => (
             <span key={o.id} data-testid="pnf-orders-chip"
                   className={`inline-flex items-center gap-1 h-6 pl-2 pr-1 rounded border text-[11px] font-mono font-bold bg-zinc-900 ${o.side === 'BUY' ? 'border-emerald-500/50 text-emerald-400' : 'border-red-500/50 text-red-400'}`}>
@@ -682,7 +699,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         onPointerCancel={() => { dragRef.current = null; setDragging(false); }}
         onPointerLeave={() => setHover(null)}
         onDoubleClick={resetView}
-        onScroll={e => { const el = e.currentTarget; const v = Math.round(el.scrollLeft + el.clientWidth - AXIS_W - (rail ? RAIL_W : 0)); setViewRight(prev => (prev === v ? prev : v)); }}
+        onScroll={e => { const el = e.currentTarget; const v = Math.round(el.scrollLeft + el.clientWidth - AXIS_W - (rail ? RAIL_W : 0)); setViewRight(prev => (prev === v ? prev : v)); setViewLeft(Math.round(el.scrollLeft)); }}
         className={`relative overflow-auto select-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${dragging ? 'cursor-grabbing' : 'cursor-crosshair'} ${fill ? 'flex-1 min-h-0' : ''}`}
         style={fill ? { minHeight: 200 } : { height: 'calc(100vh - 215px)', minHeight: MIN_HEIGHT }}
       >
@@ -893,14 +910,14 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               })()}
 
               {/* the open position: an entry line across the chart with its side, size, entry premium and live P&L */}
-              {rail?.position && rail.position.avg !== null && (() => {
+              {rail?.linesShown !== false && rail?.position && rail.position.avg !== null && (() => {
                 const pos = rail.position;
                 const lineY = yOf(pos.avg as number);
                 // The tag steps up a row when a resting order's tag would sit on top of it.
                 const y = rail.orders.some(o => Math.abs(yOf(o.level) - lineY) < 18) ? lineY - 18 : lineY;
                 const text = `${pos.side} ${pos.lots}L @ ${fmt(pos.avg as number, 2)}${pos.pnl === null ? '' : ` · ${rupees(pos.pnl)}`}`;
                 const w = text.length * 6.2 + 12;
-                const x = Math.max(4, Math.min(plotW, viewRight ?? plotW) - w - 6);
+                const x = rail.alignLeft ? Math.max(4, viewLeft + 6) : Math.max(4, Math.min(plotW, viewRight ?? plotW) - w - 6);
                 const up = pos.pnl !== null && pos.pnl >= 0;
                 return (
                   <g data-testid="pnf-position-line" data-side={pos.side} pointerEvents="none">
@@ -912,13 +929,13 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               })()}
 
               {/* resting orders: a line across the chart at the level, and a tag by the newest columns (× cancels) */}
-              {rail && rail.orders.map(o => {
+              {rail && rail.linesShown !== false && rail.orders.map(o => {
                 const level = railDrag?.id === o.id ? railDrag.level : o.level;
                 const y = yOf(level);
                 const buy = o.side === 'BUY';
                 const text = `${o.mode === 'PAPER' ? 'P ' : ''}${o.side} ${o.kind === 'limit' ? 'LMT' : 'SL'} ${o.lots}L ${o.kind === 'stop' && o.trigger !== undefined ? `${fmt(o.trigger, 2)}→` : ''}${fmt(railDrag?.id === o.id ? level : o.price, 2)}${o.state === 'working' ? '' : ` ${o.state.toUpperCase()}`}`;
                 const w = text.length * 6 + 22;
-                const x = Math.max(4, Math.min(plotW, viewRight ?? plotW) - w - 6);
+                const x = rail.alignLeft ? Math.max(4, viewLeft + 6) : Math.max(4, Math.min(plotW, viewRight ?? plotW) - w - 6);
                 const live = o.state === 'working';
                 return (
                   <g key={o.id} data-testid="pnf-order-line" data-side={o.side} data-kind={o.kind} data-state={o.state}>
@@ -1006,6 +1023,16 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         <ZoomButton label="Zoom out" onClick={() => zoomBy(0.7)}><Minus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Fit chart to panel" onClick={() => resetView()}><RotateCcw className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Zoom in" onClick={() => zoomBy(1 / 0.7)}><Plus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        {rail?.onToggleLines && (
+          <ZoomButton label={rail.linesShown !== false ? 'Hide order and position lines' : 'Show order and position lines'} onClick={rail.onToggleLines} pressed={rail.linesShown === false}>
+            {rail.linesShown !== false ? <EyeOff className="w-3 h-3" aria-hidden="true" /> : <Eye className="w-3 h-3" aria-hidden="true" />}
+          </ZoomButton>
+        )}
+        {rail?.onToggleAlign && rail.linesShown !== false && (
+          <ZoomButton label={rail.alignLeft ? 'Align order tags to the right' : 'Align order tags to the left'} onClick={rail.onToggleAlign} pressed={!!rail.alignLeft}>
+            {rail.alignLeft ? <AlignRight className="w-3 h-3" aria-hidden="true" /> : <AlignLeft className="w-3 h-3" aria-hidden="true" />}
+          </ZoomButton>
+        )}
         {onToggleMarkers && (tradeMarkers?.length || !markersShown) ? (
           <ZoomButton label={markersShown ? 'Hide buy / sell markers' : 'Show buy / sell markers'} onClick={onToggleMarkers} pressed={!markersShown}>
             {markersShown ? <MapPinOff className="w-3 h-3" aria-hidden="true" /> : <MapPin className="w-3 h-3" aria-hidden="true" />}

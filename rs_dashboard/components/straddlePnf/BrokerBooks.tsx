@@ -51,10 +51,16 @@ export interface BrokerBooksProps {
   autoRows?: AutoRow[];
   /** The live price of a contract shown on a chart (by targetKey), for marking open AUTO rows; null when no chart shows it. */
   autoPrice?: (targetKey: string) => number | null;
+  /** The active chart's contract keys (broker position keys) and name: the "This chart" filter narrows every book to them. */
+  chartKeys?: string[];
+  chartName?: string;
 }
 
-export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [], autoPrice = () => null }: BrokerBooksProps) {
+export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [], autoPrice = () => null, chartKeys = [], chartName = '' }: BrokerBooksProps) {
   const [tab, setTab] = useState<Tab>('positions');
+  // Narrows the three books to the active chart's contracts (Kite's chart panel: this chart's positions and orders).
+  const [onlyChart, setOnlyChart] = useState(false);
+  const scoped = onlyChart && chartKeys.length > 0;
   const [positions, setPositions] = useState<BookState<PositionRow>>(null);
   const [orders, setOrders] = useState<BookState<OrderRow>>(null);
   const [trades, setTrades] = useState<BookState<TradeRow>>(null);
@@ -79,10 +85,11 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [],
 
   const mine = <T,>(b: BookState<T>) => (b && b.broker === broker ? b : null);
   const pos = mine(positions), ord = mine(orders), trd = mine(trades);
-  const posRows = pos ? [...pos.rows].sort((a, b) => Number(b.open) - Number(a.open)) : [];
-  const ordRows = ord ? newestFirst(ord.rows) : [];
-  const trdRows = trd ? newestFirst(trd.rows) : [];
-  const summary = daySummary(pos?.rows ?? [], ord?.rows ?? [], trd?.rows ?? []);
+  const inScope = <T extends { key: string }>(rows: T[]) => (scoped ? rows.filter(r => chartKeys.includes(r.key)) : rows);
+  const posRows = pos ? [...inScope(pos.rows)].sort((a, b) => Number(b.open) - Number(a.open)) : [];
+  const ordRows = ord ? newestFirst(inScope(ord.rows)) : [];
+  const trdRows = trd ? newestFirst(inScope(trd.rows)) : [];
+  const summary = daySummary(pos ? inScope(pos.rows) : [], ord ? inScope(ord.rows) : [], trd ? inScope(trd.rows) : []);
 
   // Paper AUTO trades never reach the broker: they are shown beside the broker's books, marked as simulated.
   const day = autoRows[0]?.day ?? '';
@@ -118,14 +125,21 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [],
           ))}
         </div>
         <span className="text-[11px] font-bold text-zinc-300">{BROKER_LABELS[broker]}</span>
+        {chartKeys.length > 0 && (
+          <button type="button" data-testid="pnf-books-this-chart" aria-pressed={onlyChart} onClick={() => setOnlyChart(v => !v)}
+                  title={`Show only ${chartName || "the active chart's"} contracts in these books`}
+                  className={`px-2 h-5 rounded border text-[11px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 ${onlyChart ? 'border-violet-500/60 bg-violet-500/20 text-violet-300' : 'border-zinc-700 text-zinc-400 hover:text-zinc-200'}`}>
+            This chart
+          </button>
+        )}
         <span className="ml-auto flex items-center gap-3 text-[11px] font-mono">
           {hasPaper && (
             <span className="text-zinc-400" title="Simulated AUTO trades today: booked + open at the chart price">AUTO paper <span data-testid="pnf-books-auto-paper" className={`font-bold ${tone(autoPaper.total)}`}>{inr(autoPaper.total)}</span>
               {autoPaper.unpriced > 0 && <span className="text-amber-400"> *</span>}</span>
           )}
-          <span className="text-zinc-400">Day P&L <span data-testid="pnf-books-total" className={`font-bold ${tone(pos ? summary.total : null)}`}>{pos ? inr(summary.total) : '—'}</span>
+          <span className="text-zinc-400">{scoped ? 'Chart P&L' : 'Day P&L'} <span data-testid="pnf-books-total" className={`font-bold ${tone(pos ? summary.total : null)}`}>{pos ? inr(summary.total) : '—'}</span>
             {summary.unpriced > 0 && <span className="text-amber-400" title={`${summary.unpriced} open leg(s) without a live price: their unrealised P&L is not included`}> *</span>}</span>
-          {open && <span className="text-zinc-500">read-only · refreshes every 5 s</span>}
+          {open && <span className="text-zinc-400">read-only · refreshes every 5 s</span>}
           <button type="button" onClick={() => onOpenChange(!open)} aria-label={open ? 'Collapse positions & orders' : 'Expand positions & orders'}
                   aria-expanded={open}
                   className="inline-flex items-center justify-center h-5 w-5 rounded border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:bg-zinc-800">
