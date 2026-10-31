@@ -128,7 +128,7 @@ export type PnfRail = {
 };
 
 /** Width of the buy / sell rail (two columns, buy left and sell right) between the chart and its price axis. */
-export const RAIL_W = 76;
+export const RAIL_W = 120;
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -283,10 +283,32 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
                if (Math.abs(d.level - d.start) > box / 4) rail.onModify(o.id, d.level);
              }}
              onPointerCancel={() => setDrag(null)}>
-            <rect x={colX(o.side) + 1.5} y={y - 9} width={COL - 3} height={18} rx={o.kind === 'stop' ? 9 : 4}
-                  className={`${buy ? 'fill-emerald-500 stroke-emerald-200' : 'fill-red-500 stroke-red-200'}`} strokeWidth={1} opacity={movable ? 1 : 0.5} />
-            {movable && [-3, 0, 3].map(dy => <line key={dy} x1={colX(o.side) + 6} x2={colX(o.side) + 10} y1={y + dy} y2={y + dy} className="stroke-oncolor" strokeWidth={1} opacity={0.7} />)}
-            <text x={colX(o.side) + COL / 2 + (movable ? 4 : 0)} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={10} fontWeight={800} pointerEvents="none">{o.role === 'target' ? `TP ${o.lots}L` : o.kind === 'stop' ? `SL ${o.lots}L` : `${o.lots}L`}</text>
+            {(() => {
+              // The order's pill, as in the XY ladder: [-] size [+] [x] on an entry order (the size changes in place), size and [x] on a
+              // bracket exit; the body drags it to another box. Buttons act on pointer-down and stop it from starting a drag.
+              const x0 = colX(o.side) + 1.5;
+              const W = COL - 3;
+              const stepper = movable && !o.role && !!rail.onLots;
+              const label = o.role === 'target' ? `TP ${o.lots}L` : o.role === 'sl' ? `SL ${o.lots}L` : `${o.lots}L`;
+              const btn = (id: string, bx: number, glyph: string, label2: string, act: () => void) => (
+                <g key={id} data-testid={id} role="button" aria-label={label2} className="cursor-pointer"
+                   onPointerDown={e => { e.stopPropagation(); if (e.button === 0) act(); }}>
+                  <rect x={bx} y={y - 7} width={11} height={14} rx={3} className="fill-oncolor-dark/30" />
+                  <text x={bx + 5.5} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={11} fontWeight={800} pointerEvents="none">{glyph}</text>
+                </g>
+              );
+              const kindWord = o.kind === 'limit' ? 'limit' : 'SL-limit';
+              return (
+                <>
+                  <rect x={x0} y={y - 9} width={W} height={18} rx={o.kind === 'stop' ? 9 : 4}
+                        className={`${buy ? 'fill-emerald-500 stroke-emerald-200' : 'fill-red-500 stroke-red-200'}`} strokeWidth={1} opacity={movable ? 1 : 0.5} />
+                  {stepper && btn('pnf-rail-lots-down', x0 + 2, '−', `Remove a lot: ${o.side} ${kindWord} at ${fmt(o.level, 2)}`, () => rail.onLots!(o.id, -1))}
+                  <text x={stepper ? x0 + 23 : x0 + (movable ? 21 : W / 2)} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={10} fontWeight={800} pointerEvents="none">{label}</text>
+                  {stepper && btn('pnf-rail-lots-up', x0 + 33, '+', `Add a lot: ${o.side} ${kindWord} at ${fmt(o.level, 2)}`, () => rail.onLots!(o.id, 1))}
+                  {movable && btn('pnf-rail-cancel', x0 + W - 13, '×', `Cancel ${o.side} ${kindWord} at ${fmt(o.level, 2)}`, () => rail.onCancel(o.id))}
+                </>
+              );
+            })()}
             <title>{`${o.side} ${o.kind === 'limit' ? 'LIMIT' : 'SL-limit'} ${o.lots}L at ${fmt(o.level, 2)}${movable ? ' — drag to move' : ` (${o.state})`}`}</title>
           </g>
         );
@@ -704,7 +726,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
       )}
 
       <div className={`relative ${fill ? 'flex-1 min-h-0 flex flex-col' : ''}`}>
-      {rail && (rail.lockable || rail.orders.length > 0) && (
+      {rail && (rail.lockable || rail.orders.some(o => o.state !== 'working') || rail.orders.filter(o => o.state === 'working').length > 1) && (
         <div data-testid="pnf-orders-bar" className="absolute top-1 left-2 z-10 flex flex-wrap items-center gap-1 max-w-[70%] font-sans">
           {rail.lockable && (
             <button type="button" onClick={rail.onToggleArm} aria-pressed={rail.armed !== false} data-testid="pnf-rail-lock"
@@ -721,15 +743,11 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               Instant {rail.instant ? 'ON' : 'OFF'}
             </button>
           )}
-          {rail.orders.map(o => (
+          {/* working orders are in the ladder itself (their pill has the size, - / + and x); a chip stays only for an order that needs settling */}
+          {rail.orders.filter(o => o.state !== 'working').map(o => (
             <span key={o.id} data-testid="pnf-orders-chip"
                   className={`inline-flex items-center gap-1 h-6 pl-2 pr-1 rounded border text-[11px] font-mono font-bold bg-zinc-900 ${o.side === 'BUY' ? 'border-emerald-500/50 text-emerald-400' : 'border-red-500/50 text-red-400'}`}>
               {orderText(o)}
-              {rail.onLots && o.state === 'working' && !o.role && (['-', '+'] as const).map(sign => (
-                <button key={sign} type="button" onClick={() => rail.onLots!(o.id, sign === '+' ? 1 : -1)} data-testid={sign === '+' ? 'pnf-chip-lots-up' : 'pnf-chip-lots-down'}
-                        aria-label={`${sign === '+' ? 'Add' : 'Remove'} a lot: ${o.side} ${o.kind === 'limit' ? 'limit' : 'SL-limit'} at ${fmt(o.level, 2)}`}
-                        className={`w-5 h-5 rounded text-zinc-300 hover:bg-zinc-700 ${FOCUS_RING}`}>{sign === '-' ? '−' : '+'}</button>
-              ))}
               {(o.state === 'working' || o.resolvable) && (
                 <button type="button" onClick={() => rail.onCancel(o.id)} aria-label={`${o.state === 'working' ? 'Cancel' : 'Settle'} ${o.side} ${o.kind === 'limit' ? 'limit' : 'SL-limit'} at ${fmt(o.level, 2)}`}
                         className={`w-5 h-5 rounded text-zinc-300 hover:bg-zinc-700 ${FOCUS_RING}`}>×</button>
@@ -1065,8 +1083,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 const buy = o.side === 'BUY';
                 const text = orderText(o, railDrag?.id === o.id ? level : undefined);
                 const live = o.state === 'working';
-                const stepper = !!rail.onLots && live && !o.role;                                   // + / - on a working entry order only
-                const w = text.length * 6 + 22 + (stepper ? 30 : 0);
+                const w = text.length * 6 + 22;
                 const x = rail.alignLeft ? Math.max(4, viewLeft + 6) : Math.max(4, Math.min(plotW, viewRight ?? plotW) - w - 6);
                 return (
                   <g key={o.id} data-testid="pnf-order-line" data-side={o.side} data-kind={o.kind} data-state={o.state}>
@@ -1074,14 +1091,6 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                           className={buy ? 'stroke-emerald-400' : 'stroke-red-400'} />
                     <rect x={x} y={y - 8} width={w} height={16} rx={3} className={buy ? 'fill-emerald-600' : 'fill-red-600'} opacity={live ? 1 : 0.55} />
                     <text x={x + 5} y={y + 3.5} className="fill-oncolor font-mono" fontSize={10} fontWeight={700}>{text}</text>
-                    {stepper && (['-', '+'] as const).map((sign, k) => (
-                      <g key={sign} data-testid={sign === '+' ? 'pnf-order-lots-up' : 'pnf-order-lots-down'} role="button" className="cursor-pointer"
-                         aria-label={`${sign === '+' ? 'Add' : 'Remove'} a lot: ${o.side} ${o.kind === 'limit' ? 'limit' : 'SL-limit'} at ${fmt(o.level, 2)}`}
-                         onPointerDown={e => { e.stopPropagation(); rail.onLots!(o.id, sign === '+' ? 1 : -1); }}>
-                        <rect x={x + w - 45 + k * 15} y={y - 6} width={12} height={12} rx={2} className="fill-oncolor-dark/30" />
-                        <text x={x + w - 42.5 + k * 15} y={y + 3.5} className="fill-oncolor" fontSize={10} fontWeight={800}>{sign === '-' ? '−' : '+'}</text>
-                      </g>
-                    ))}
                     {(live || o.resolvable) && (
                       <g data-testid={live ? 'pnf-order-cancel' : 'pnf-order-resolve'} role="button"
                          aria-label={`${live ? 'Cancel' : 'Settle (outcome unknown)'} ${o.side} ${o.kind === 'limit' ? 'limit' : 'SL-limit'} at ${fmt(o.level, 2)}`}

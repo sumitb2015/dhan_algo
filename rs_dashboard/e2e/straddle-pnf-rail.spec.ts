@@ -120,26 +120,26 @@ test('PAPER: B below the price rests a LIMIT, the price falling through fills it
   await expect(panel.getByTestId('pnf-rail-pnl')).toContainText('₹');
 });
 
-test('PAPER: the order tag keeps "BUY LMT @ price" and its + / - change the lots of the working order', async ({ page }) => {
+test('PAPER: the order keeps "BUY LMT @ price" on the chart and its pill in the ladder has - / + for the lots', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
   const { orders, state } = await install(page);
   await openFuture(page);
   const { el, level } = await cell(page, 'BUY', 99.05);
   await el.dispatchEvent('pointerdown', { button: 0 });
   await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
-  const line = page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-order-line');
-  await expect(line).toContainText(`BUY LMT @ ${level.toFixed(2)} · 1L`);
-  await line.getByTestId('pnf-order-lots-up').dispatchEvent('pointerdown', { button: 0 });
+  const panel = page.getByTestId('pnf-panel').nth(0);
+  await expect(panel.getByTestId('pnf-order-line')).toContainText(`BUY LMT @ ${level.toFixed(2)} · 1L`);
+  const pill = panel.getByTestId('pnf-rail-order');
+  await expect(pill).toContainText('1L');
+  await pill.getByTestId('pnf-rail-lots-up').dispatchEvent('pointerdown', { button: 0 });
   await expect.poll(() => state.ledger.rows[0]?.lots).toBe(2);
-  await expect(line).toContainText('· 2L');
-  await line.getByTestId('pnf-order-lots-down').dispatchEvent('pointerdown', { button: 0 });
-  await line.getByTestId('pnf-order-lots-down').dispatchEvent('pointerdown', { button: 0 });
+  await expect(pill).toContainText('2L');
+  await expect(panel.getByTestId('pnf-order-line')).toContainText('· 2L');
+  await pill.getByTestId('pnf-rail-lots-down').dispatchEvent('pointerdown', { button: 0 });
+  await pill.getByTestId('pnf-rail-lots-down').dispatchEvent('pointerdown', { button: 0 });
   await expect.poll(() => state.ledger.rows[0]?.lots).toBe(1);        // never below one lot
-  // the orders bar chip has the same + / -, so the size can be changed with the order lines hidden too
-  const chip = page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-orders-chip');
-  await chip.getByTestId('pnf-chip-lots-up').click();
-  await expect.poll(() => state.ledger.rows[0]?.lots).toBe(2);
-  await expect(chip).toContainText('· 2L');
+  // a working order has no chip in the header: the ladder holds it
+  await expect(panel.getByTestId('pnf-orders-chip')).toHaveCount(0);
   expect(orders.length, 'a paper order never reaches the order route').toBe(0);
 });
 
@@ -337,10 +337,10 @@ test('PAPER: the orders bar lists resting orders and Cancel all (or Shift+C) cle
   await b.el.dispatchEvent('pointerdown', { button: 0 });
   await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(2);
   const panel = page.getByTestId('pnf-panel').nth(0);
-  await expect(panel.getByTestId('pnf-orders-chip')).toHaveCount(2);
+  await expect(panel.getByTestId('pnf-rail-order')).toHaveCount(2);
   await panel.getByTestId('pnf-cancel-all').click();
   await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(0);
-  await expect(panel.getByTestId('pnf-orders-chip')).toHaveCount(0);
+  await expect(panel.getByTestId('pnf-rail-order')).toHaveCount(0);
 });
 
 test('REAL: cancelling a broker order asks first (declining keeps it); Instant skips the question', async ({ page }) => {
@@ -362,7 +362,7 @@ test('REAL: cancelling a broker order asks first (declining keeps it); Instant s
   const placedMsgs = msgs.length;
   // Declining the cancel question leaves the order working and sends nothing.
   answer = false;
-  await panel.getByTestId('pnf-orders-chip').first().getByRole('button').click();
+  await panel.getByTestId('pnf-rail-order').first().getByTestId('pnf-rail-cancel').dispatchEvent('pointerdown', { button: 0 });
   await page.waitForTimeout(500);
   expect(msgs.length).toBe(placedMsgs + 1);
   expect(msgs.at(-1)).toMatch(/Cancel this REAL/);
@@ -370,7 +370,7 @@ test('REAL: cancelling a broker order asks first (declining keeps it); Instant s
   expect(state.ledger.rows.filter(r => r.state === 'working').length).toBe(2);
   // Instant ON: the cancel goes straight out.
   await panel.getByTestId('pnf-rail-instant').click();
-  await panel.getByTestId('pnf-orders-chip').first().getByRole('button').click();
+  await panel.getByTestId('pnf-rail-order').first().getByTestId('pnf-rail-cancel').dispatchEvent('pointerdown', { button: 0 });
   await expect.poll(() => orders.filter(o => o.brokerOp?.op === 'cancel').length).toBe(1);
   expect(msgs.length, 'Instant asks nothing').toBe(placedMsgs + 1);
   await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(1);
@@ -391,7 +391,7 @@ test('PAPER: order and position lines can be hidden (the orders bar keeps listin
   expect(left).toBeLessThan(right);
   await panel.getByRole('button', { name: 'Hide order and position lines' }).click();
   await expect(panel.getByTestId('pnf-order-line')).toHaveCount(0);
-  await expect(panel.getByTestId('pnf-orders-chip')).toHaveCount(1);
+  await expect(panel.getByTestId('pnf-rail-order')).toHaveCount(1);       // the order stays in the ladder with its lines hidden
   await panel.getByRole('button', { name: 'Show order and position lines' }).click();
   await expect(panel.getByTestId('pnf-order-line')).toHaveCount(1);
 });
