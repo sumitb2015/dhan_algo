@@ -62,9 +62,15 @@ export interface RestingRow {
 
 export interface RestingLedger { rev: number; rows: RestingRow[] }
 export const EMPTY_RESTING: RestingLedger = { rev: 0, rows: [] };
-/** Working orders per chart: a rail is a handful of levels, not a book. */
-export const MAX_WORKING_PER_CHART = 10;
+/** How many rows the file keeps. There is no limit on working orders; only FINISHED rows are ever dropped to stay under this. */
 const MAX_ROWS = 500;
+
+/** Trim to MAX_ROWS by dropping the oldest finished rows: a working / sending / firing / unknown order is never trimmed away. */
+export function trimRows(rows: RestingRow[]): RestingRow[] {
+  let extra = rows.length - MAX_ROWS;
+  if (extra <= 0) return rows;
+  return rows.filter(r => (extra > 0 && !isOpenOrder(r) ? (extra--, false) : true));
+}
 
 export const isOpenOrder = (r: RestingRow) => r.state === 'sending' || r.state === 'working' || r.state === 'firing' || r.state === 'unknown';
 
@@ -113,7 +119,7 @@ export function parseResting(raw: unknown): RestingLedger {
 type Result = { ok: true; ledger: RestingLedger } | { ok: false; status: number; error: string };
 
 export function applyRestingOp(led: RestingLedger, op: RestingOp): Result {
-  const bump = (rows: RestingRow[]): Result => ({ ok: true, ledger: { rev: led.rev + 1, rows: rows.slice(-MAX_ROWS) } });
+  const bump = (rows: RestingRow[]): Result => ({ ok: true, ledger: { rev: led.rev + 1, rows: trimRows(rows) } });
   const at = (id: string) => led.rows.findIndex(r => r.id === id);
   const set = (i: number, patch: Partial<RestingRow>) => { const rows = [...led.rows]; rows[i] = { ...led.rows[i], ...patch }; return bump(rows); };
   const need = (i: number, states: RestingState[]): Result | null => {
@@ -137,8 +143,6 @@ export function applyRestingOp(led: RestingLedger, op: RestingOp): Result {
       if (![r.level, r.price, r.unitsPerPoint, r.t].every(finite) || !(r.price > 0) || !r.id) return { ok: false, status: 400, error: 'Invalid order' };
       if (r.kind === 'stop' && !(finite(r.trigger) && r.trigger > 0)) return { ok: false, status: 400, error: 'An SL-limit needs a trigger' };
       if (led.rows.some(x => x.id === r.id)) return { ok: false, status: 409, error: 'Order already exists' };
-      const working = led.rows.filter(x => x.chart === r.chart && isOpenOrder(x)).length;
-      if (working >= MAX_WORKING_PER_CHART) return { ok: false, status: 409, error: `Chart ${r.chart} already has ${MAX_WORKING_PER_CHART} working orders` };
       const sending = r.mode === 'REAL' && r.venue === 'broker';
       return bump([...led.rows, { ...r, target, targetKey: targetKey(target), state: sending ? 'sending' : 'working', ...(sending ? { pendingSince: r.t } : {}) }]);
     }

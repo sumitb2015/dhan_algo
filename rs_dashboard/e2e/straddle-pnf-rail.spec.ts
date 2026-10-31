@@ -118,6 +118,7 @@ test('PAPER: B below the price rests a LIMIT, the price falling through fills it
   await expect(panel.getByTestId('pnf-position-line')).toHaveAttribute('data-side', 'LONG');
   await expect(panel.getByTestId('pnf-position-line')).toContainText('LONG 1L @');
   await expect(panel.getByTestId('pnf-rail-pnl')).toContainText('₹');
+  await expect(panel.getByTestId('pnf-rail-pnl')).toContainText('LONG 1L');          // side and size; the entry price is in the PRICE column, the P&L in the other one
 });
 
 test('PAPER: the order keeps "BUY LMT @ price" on the chart and its pill in the ladder has - / + for the lots', async ({ page }) => {
@@ -131,6 +132,8 @@ test('PAPER: the order keeps "BUY LMT @ price" on the chart and its pill in the 
   await expect(panel.getByTestId('pnf-order-line')).toContainText(`BUY LMT @ ${level.toFixed(2)} · 1L`);
   const pill = panel.getByTestId('pnf-rail-order');
   await expect(pill).toContainText('1L');
+  // the price the order is placed at is in the ladder too, on the same row
+  await expect(panel.getByTestId('pnf-rail-order-price')).toContainText(level.toFixed(2));
   await pill.getByTestId('pnf-rail-lots-up').dispatchEvent('pointerdown', { button: 0 });
   await expect.poll(() => state.ledger.rows[0]?.lots).toBe(2);
   await expect(pill).toContainText('2L');

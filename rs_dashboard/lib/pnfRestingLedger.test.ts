@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  EMPTY_RESTING, MAX_WORKING_PER_CHART, STALE_PENDING_S, applyRestingOp, needsResolve, rollDay, type RestingLedger, type RestingOp,
+  EMPTY_RESTING, STALE_PENDING_S, applyRestingOp, needsResolve, rollDay, trimRows, type RestingLedger, type RestingOp,
 } from './pnfRestingLedger.ts';
 
 const fut = { kind: 'futures', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24' } as const;
@@ -61,10 +61,18 @@ test('validation and the per-chart cap', () => {
   refused(EMPTY_RESTING, { op: 'create', row: row({ mode: 'PAPER', venue: 'broker' }) });
   refused(EMPTY_RESTING, { op: 'create', row: row({ kind: 'stop' }) });          // no trigger
   refused(EMPTY_RESTING, { op: 'create', row: row({ lots: 0 }) });
+});
+
+test('there is no limit on working orders per chart; a full file drops only finished rows, never a working one', () => {
   let l = EMPTY_RESTING;
-  for (let i = 0; i < MAX_WORKING_PER_CHART; i++) l = run(l, { op: 'create', row: row({ id: `o${i}` }) });
-  refused(l, { op: 'create', row: row({ id: 'extra' }) });
-  assert.ok(applyRestingOp(l, { op: 'create', row: row({ id: 'other', chart: 2 }) }).ok);
+  for (let i = 0; i < 40; i++) l = run(l, { op: 'create', row: row({ id: `o${i}`, level: 100 + i, price: 100 + i }) });
+  assert.equal(l.rows.filter(r => r.state === 'working').length, 40);
+  // 520 rows, the oldest 30 finished: trimming to 500 removes exactly the 20 oldest finished rows and keeps every working one
+  const rows = Array.from({ length: 520 }, (_, i) => ({ ...(row({ id: `r${i}` }) as object), state: i < 30 ? 'cancelled' : 'working' })) as unknown as Parameters<typeof trimRows>[0];
+  const kept = trimRows(rows);
+  assert.equal(kept.length, 500);
+  assert.equal(kept.filter(r => r.state === 'working').length, 490);
+  assert.equal(kept[0].id, 'r20');
 });
 
 test('equity is sized in shares: more than 20 is fine there, not on a future', () => {
