@@ -50,6 +50,8 @@ export type PnfPanelProps = {
   feedPrevClose?: number | null;
   /** Set when the live price is a feed value outside the trading session ("Pre-open" / "Post-close"), not a chart bar. */
   sessionTag?: string | null;
+  /** False hides the VWAP / SMA line and its legend; the signals and exit cues still use it. */
+  overlayShown?: boolean;
   /** False (stocks: a column spans days) = no dashed vertical line at each session start and no date strip along the top. */
   sessionLines?: boolean;
   /** Executed trades on this chart to mark on the boxes. */
@@ -303,7 +305,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, sessionLines = true, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, sessionLines = true, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -519,7 +521,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const lastEntryId = [...signals].reverse().find(g => g.kind === 'DOUBLE_BOTTOM_SELL' && g.belowVwap)?.id;
   const ring = flash === 'buy' ? 'ring-2 ring-emerald-400' : flash === 'sell' ? 'ring-2 ring-red-400' : '';
 
-  const overlayPts = vis
+  const overlayPts = !overlayShown ? '' : vis
     .map((c, j) => ({ v: model.overlay[first + j], x: xOf(j) + colW / 2 }))
     .filter(p => p.v !== null)
     .map(p => `${p.x},${yOf(p.v as number)}`)
@@ -569,11 +571,13 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 PE <span className="font-semibold text-zinc-100">{live ? fmt(live.pe) : '—'}</span>
               </span>
             )}
-            <span data-testid="pnf-overlay-legend" className="shrink-0">
-              <span className={`font-bold ${kind === 'vwap' ? 'text-amber-400' : 'text-sky-400'}`}>{overlayLabel}</span>
-              {overlayNow !== null && <span className="font-semibold text-zinc-100">{` ${fmt(overlayNow)}`}</span>}
-              {smaWaiting && <span className="text-zinc-500">{` needs ${model.smaPeriod} boxes (${totalBoxes} so far)`}</span>}
-            </span>
+            {overlayShown && (
+              <span data-testid="pnf-overlay-legend" className="shrink-0">
+                <span className={`font-bold ${kind === 'vwap' ? 'text-amber-400' : 'text-sky-400'}`}>{overlayLabel}</span>
+                {overlayNow !== null && <span className="font-semibold text-zinc-100">{` ${fmt(overlayNow)}`}</span>}
+                {smaWaiting && <span className="text-zinc-500">{` needs ${model.smaPeriod} boxes (${totalBoxes} so far)`}</span>}
+              </span>
+            )}
             <span data-testid="pnf-box-info" className="flex items-center gap-3 min-w-0 text-zinc-400 truncate" title={box > 0 ? boxTitle : undefined}>
               {box > 0 ? (
                 <>
@@ -608,9 +612,11 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         {/* The instrument name keeps its room; the VWAP / box detail is what truncates first. */}
         <h2 className="text-xs font-bold text-zinc-100 truncate shrink-0 max-w-[34%] font-sans" title={title}>{title}</h2>
         {autoSlot}
-        <span data-testid="pnf-overlay-legend" className={`min-w-0 truncate ${kind === 'vwap' ? 'text-amber-300' : 'text-sky-300'}`}>
-          {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : smaWaiting ? ` needs ${model.smaPeriod}` : ''}
-        </span>
+        {overlayShown && (
+          <span data-testid="pnf-overlay-legend" className={`min-w-0 truncate ${kind === 'vwap' ? 'text-amber-300' : 'text-sky-300'}`}>
+            {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : smaWaiting ? ` needs ${model.smaPeriod}` : ''}
+          </span>
+        )}
         <span data-testid="pnf-box-info" className="text-zinc-500 truncate min-w-0 flex-1" title={box > 0 ? boxTitle : undefined}>
           {box > 0 ? `Box ${box.toFixed(2)} (${boxNote}) · ${reversal}-box · ${columns.length} cols` : 'Box —'}
         </span>

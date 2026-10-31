@@ -30,6 +30,10 @@ The wheel and the − / + buttons zoom **uniformly** (`zoom` scales the square `
 
 The sticky right axis `<svg data-testid="pnf-axis-drag">` has its own pointer handlers: down → `stopPropagation()` (otherwise the wrapper starts a pan), `setPointerCapture`, remember `{y, zoom}`; move → `zoomRef.current(Math.exp((startY - clientY) * 0.01) * startZoom / zoomNowRef.current)`. Drag up = zoom in. Two refs matter: `zoomRef` always holds the latest `zoomBy` closure, and `zoomNowRef` the latest zoom — `zoomBy(factor)` multiplies the *current* zoom, so pass a factor relative to it, not an absolute target, or fast drags compound against a stale value. Zoom is clamped to 0.3–6 inside `zoomBy`. Double-click fits (bubbles to the wrapper). It also marks `touchedRef` so the chart stops auto-following the newest column.
 
+## Hiding the VWAP / SMA line
+
+`overlayShown` (page state, `straddle-pnf-overlay-shown`, `'0'` = hidden) is a **display switch only**: `PnfPanel`'s `overlayShown` prop drops the polyline and both legends, while `model.overlay` / `buildConfirmedModel`'s `reference` are still computed — the signals' `belowVwap`, the cover cue and the SMA waiting state read them. An eye button in the Overlay group toggles it; picking VWAP or SMA again shows the line (and stores `'1'`). Never gate the model on it.
+
 ## Triangles (squeeze) — `lib/pnfTriangle.ts`, guide `docs/PNF_TRIANGLE.md`
 
 A triangle is a maximal run of >= N (3-6, the `△N` button, remembered per chart) columns each **nested** in the previous (`b.low >= a.low`, `b.high <= a.high`, strictly shorter). Entry = one box past the last column's glyph, stop = the opposite trigger, target = vertical count (breakout column boxes x reversal x box). Rules: **triangles are NOT signals** — kept out of `model.signals` because `lib/pnfAuto.ts` maps every signal kind to BUY / SELL, so AUTO would trade them; only confirmed (closed-bar) columns are used so one never repaints; a breakout already on the chart at load or after a settings change does not alert (like every other signal). Not implemented: the video's Adaptive-RSI trend filter and 750-stock scanner.

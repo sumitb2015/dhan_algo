@@ -235,7 +235,7 @@ def main():
     helper = DhanHelper(dhan)
 
     today = date.today()
-    from_date = (today - timedelta(days=args.sessions * 3 + 4)).strftime("%Y-%m-%d")
+    from_date = (today - timedelta(days=min(args.sessions * 3 + 4, API_WINDOW_DAYS))).strftime("%Y-%m-%d")
     to_date = today.strftime("%Y-%m-%d")
     today_ist = datetime.now(_IST).date()
 

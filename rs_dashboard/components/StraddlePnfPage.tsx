@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, ChartScatter, LocateFixed, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
+import { Bell, ChartScatter, Eye, EyeOff, LocateFixed, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from './NavBar';
 import DataChip from './DataChip';
@@ -54,6 +54,7 @@ const FLASH_MS = 4000;
 const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
 const OVERLAY_KEY = 'straddle-pnf-overlay';
+const OVERLAY_SHOWN_KEY = 'straddle-pnf-overlay-shown';
 const TRADE_OPEN_KEY = 'straddle-pnf-trade-open';
 /** The positions / order book / trade book / P&L strip at the bottom: collapsed by default (expanded it takes chart height). */
 const BOOKS_OPEN_KEY = 'straddle-pnf-books-open';
@@ -165,6 +166,8 @@ function StraddlePnfPage() {
   // Two charts: the one the header controls (instrument, box settings, price strip) and the trade bar act on.
   const [activeChart, setActiveChart] = useState<ChartId>(1);
   const [overlay, setOverlay] = useState<Overlay>('vwap');
+  // Whether the VWAP / SMA line is drawn at all: a display switch only, the signals still measure against it.
+  const [overlayShown, setOverlayShown] = useState(true);
   const [target1, setTarget1] = useState<Target>(DEFAULT_TARGETS.index);
   const [target2, setTarget2] = useState<Target>(DEFAULT_TARGETS.index);
   // Each chart's last pick per segment (so switching segments brings it back) and its open segment.
@@ -222,6 +225,7 @@ function StraddlePnfPage() {
     // Saved preferences are read after mount, not in useState initialisers: localStorage does not exist on the server render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (readPref(OVERLAY_KEY) === 'sma') setOverlay('sma');
+    if (readPref(OVERLAY_SHOWN_KEY) === '0') setOverlayShown(false);
     const savedView = readPref(CHART_VIEW_KEY);
     if (savedView === '1' || savedView === '2') setChartView(savedView);
     setSettings(readSettings(readPref(SETTINGS_KEY), DEFAULT_CHART1_SETTINGS));
@@ -526,7 +530,9 @@ function StraddlePnfPage() {
   };
   const pickSegment = (s: Segment) => { if (s !== activeTarget.kind) choose(picksRef.current[active].targets[s]); };
   const activate = (c: ChartId) => { setActiveChart(c); savePref(ACTIVE_CHART_KEY, String(c)); };
-  const pickOverlay = (o: Overlay) => { setOverlay(o); savePref(OVERLAY_KEY, o); };
+  // Picking VWAP or SMA also shows the line again; the eye button hides / shows it without changing the choice.
+  const pickOverlay = (o: Overlay) => { setOverlay(o); savePref(OVERLAY_KEY, o); setOverlayShown(true); savePref(OVERLAY_SHOWN_KEY, '1'); };
+  const toggleOverlayShown = () => { const next = !overlayShown; setOverlayShown(next); savePref(OVERLAY_SHOWN_KEY, next ? '1' : '0'); };
   const applySettings = (next: PnfSettings) => {
     if (active === 2) { setSettings2(next); savePref(SETTINGS_KEY_2, serializeSettings(next)); }
     else { setSettings(next); savePref(SETTINGS_KEY, serializeSettings(next)); }
@@ -570,6 +576,7 @@ function StraddlePnfPage() {
       model: (c === 2 ? c2 : c1).model,
       live: feed.live,
       overlay,
+      overlayShown,
       stale: feed.stale,
       legs: target.kind === 'options' && target.side === 'STRADDLE',
       flash: flash[c],
@@ -712,12 +719,16 @@ function StraddlePnfPage() {
             <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
               {/* An index has no traded volume, so no VWAP: the button is disabled and the SMA is drawn (the saved choice is kept for
                   stocks, futures and options). */}
-              <button type="button" aria-pressed={shownOverlay === 'vwap'} onClick={() => pickOverlay('vwap')} disabled={!activeChartModel.vwapAllowed}
+              <button type="button" aria-pressed={overlayShown && shownOverlay === 'vwap'} onClick={() => pickOverlay('vwap')} disabled={!activeChartModel.vwapAllowed}
                       title={activeChartModel.vwapAllowed ? undefined : activeChartModel.indexNoVwap
                         ? 'An index has no traded volume, so there is no VWAP: the SMA of the P&F boxes is used'
                         : 'These bars carry no volume, so there is no VWAP: the SMA of the P&F boxes is used'}
-                      className={`${seg(shownOverlay === 'vwap')} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-zinc-400`}>VWAP</button>
-              <button type="button" aria-pressed={shownOverlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(shownOverlay === 'sma')}>SMA {activeSettings.smaPeriod}</button>
+                      className={`${seg(overlayShown && shownOverlay === 'vwap')} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-zinc-400`}>VWAP</button>
+              <button type="button" aria-pressed={overlayShown && shownOverlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(overlayShown && shownOverlay === 'sma')}>SMA {activeSettings.smaPeriod}</button>
+              <button type="button" aria-pressed={!overlayShown} aria-label={overlayShown ? 'Hide the VWAP / SMA line' : 'Show the VWAP / SMA line'} title={overlayShown ? 'Hide the VWAP / SMA line' : 'Show the VWAP / SMA line'}
+                      onClick={toggleOverlayShown} className={`${seg(!overlayShown)} inline-flex items-center`}>
+                {overlayShown ? <Eye className="w-3.5 h-3.5" aria-hidden="true" /> : <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />}
+              </button>
             </div>
             <fieldset disabled={activeLocked} className="contents"><SmaPeriodInput settings={activeSettings} onChange={applySettings} /></fieldset>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />

@@ -16,6 +16,8 @@ const PRICE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'price_pnf_cand
 const SESSIONS = 10;
 /** Cash equities show every stored session (the script stitches the downloaded 1-min history to the live API window). */
 const EQUITY_SESSIONS = 8000;
+/** A future / option / straddle shows every session the API still serves (the script caps the window at ~85 days): TradingView shows a contract from its first day. */
+const CONTRACT_SESSIONS = 200;
 const CACHE_TTL = 20_000;
 /** Every contract (underlying x expiry x strike x side) is its own key, so the cache is pruned on write and capped. */
 const CACHE_MAX = 40;
@@ -105,5 +107,5 @@ async function contractResponse(p: URLSearchParams) {
     name = type === 'STRADDLE' ? `${legs[0].displayName.replace(/ CALL$/, '')} STRADDLE` : legs[0].displayName;
   }
   const legArg = legs.map(l => `${l.segment}:${l.securityId}:${l.instrument}`).join(',');
-  return run(`contract:${legArg}`, ['--kind', 'contract', '--legs', legArg, '--name', name], name, legs);
+  return run(`contract:${legArg}`, ['--kind', 'contract', '--legs', legArg, '--name', name], name, legs, CONTRACT_SESSIONS);
 }
