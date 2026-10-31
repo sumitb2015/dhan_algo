@@ -10,10 +10,10 @@ import { EMPTY_RESTING, applyRestingOp, type RestingLedger, type RestingOp } fro
 const ist = (hh: number, mm: number, ss = 0) => Date.UTC(2026, 9, 30, hh, mm, ss) - 5.5 * 3600_000;
 type Body = { mode?: string; action?: string; lots?: number; orderType?: string; price?: number; trigger?: number; brokerOp?: { op: string; orderId: string } };
 
-async function install(page: Page, opts: { prevSession?: boolean } = {}) {
+async function install(page: Page, opts: { prevSession?: boolean; ledger?: RestingLedger } = {}) {
   const orders: Body[] = [];
   const state = {
-    ledger: EMPTY_RESTING as RestingLedger, tick: { ltp: 99.33, at: ist(10, 30, 10) }, book: [] as Record<string, unknown>[],
+    ledger: (opts.ledger ?? EMPTY_RESTING) as RestingLedger, tick: { ltp: 99.33, at: ist(10, 30, 10) }, book: [] as Record<string, unknown>[],
     /** Set: the next resting placement gets no clean reply (the route's 504 / UNKNOWN). */
     unknownNext: false,
   };
@@ -496,4 +496,43 @@ test('MTM guard (PAPER): switched on while flat, it measures from the position t
   await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 1 lot');       // 0 move: no trip
   state.tick = { ltp: level - 0.2 - 10, at: ist(10, 30, 17) };                              // -10 pts x 65 = Rs 650 past the Rs 500 stop
   await expect(page.getByTestId('pnf-trade-position')).toHaveCount(0, { timeout: 10_000 });
+});
+
+/** A ledger with a bracket's two exit rows (group g) built by the real ledger rules. */
+function bracketLedger(over: { mode: 'PAPER' | 'REAL'; ageS: number; slState?: 'unknown' }): RestingLedger {
+  const nowS = ist(10, 30, 20) / 1000;
+  const fut = { kind: 'futures', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24' } as const;
+  const base = { day: '2026-10-30', chart: 1 as const, target: fut, broker: 'kotak', mode: over.mode, venue: 'page' as const, lots: 1, product: 'INTRADAY', unitsPerPoint: 65, t: nowS - over.ageS, group: 'g1' };
+  let led = EMPTY_RESTING;
+  for (const row of [
+    { ...base, id: 'g1-sl', side: 'SELL' as const, kind: 'stop' as const, level: 90, price: 1, trigger: 90, role: 'sl' as const },
+    { ...base, id: 'g1-target', side: 'SELL' as const, kind: 'limit' as const, level: 110, price: 110, role: 'target' as const },
+  ]) {
+    const r = applyRestingOp(led, { op: 'create', row });
+    if (!r.ok) throw new Error(r.error);
+    led = r.ledger;
+  }
+  if (over.slState === 'unknown') {
+    const r = applyRestingOp(led, { op: 'markUnknown', id: 'g1-sl', note: 'no reply' });
+    if (!r.ok) throw new Error(r.error);
+    led = r.ledger;
+  }
+  return led;
+}
+
+test('Bracket: REAL exits are left alone when the page is in PAPER (a mode flip never cancels the other side\'s stops)', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page, { ledger: bracketLedger({ mode: 'REAL', ageS: 300 }) });
+  await openFuture(page);                                             // the page is in PAPER, no position: a PAPER-judged sweep would cancel them
+  await page.waitForTimeout(3500);
+  expect(state.ledger.rows.map(r => r.state)).toEqual(['working', 'working']);
+});
+
+test('Bracket: an exit whose outcome is unknown does not cancel the sibling exit (only a confirmed fill does)', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page, { ledger: bracketLedger({ mode: 'PAPER', ageS: 0, slState: 'unknown' }) });
+  await openFuture(page);
+  await page.waitForTimeout(3500);
+  expect(state.ledger.rows.find(r => r.role === 'sl')?.state).toBe('unknown');
+  expect(state.ledger.rows.find(r => r.role === 'target')?.state).toBe('working');
 });
