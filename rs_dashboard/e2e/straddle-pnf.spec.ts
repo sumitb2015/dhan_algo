@@ -443,3 +443,24 @@ test('the box − / + buttons step to the next round size and apply at once, in 
   await expect(page.getByLabel('Box points')).toHaveValue('20');                   // stepped from the applied 10, not from 37
   await expect(page.getByTestId('pnf-box-info').first()).toContainText('Box 20.00 (points)');
 });
+
+test('the session names stay at the top of the chart while it is scrolled down', async ({ page }) => {
+  await install(page, { phase: 0, blocked: [], longHistory: true });
+  await page.goto('/straddle-pnf');
+  const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
+  const scroller = panel.getByTestId('pnf-scroll');
+  await expect(scroller).toBeAttached();
+  const strip = panel.getByTestId('pnf-session-strip');
+  await expect(strip).toBeAttached();
+  const labels = strip.locator('text');
+  await expect.poll(async () => labels.count()).toBeGreaterThan(0);
+  // wherever the chart is scrolled vertically, the strip stays at the top edge of the view
+  const top = async () => (await strip.boundingBox())!.y - (await scroller.boundingBox())!.y;
+  const t0 = await top();
+  const room = await scroller.evaluate(el => el.scrollHeight - el.clientHeight);
+  if (room > 40) {
+    await scroller.evaluate(el => { el.scrollTop = el.scrollHeight; });
+    expect(Math.abs((await top()) - t0)).toBeLessThan(2);
+  }
+  expect(Math.abs(t0)).toBeLessThan(2);
+});

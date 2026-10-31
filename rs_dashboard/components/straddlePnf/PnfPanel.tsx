@@ -722,6 +722,29 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         ) : liveCols.length === 0 ? (
           <p className="p-3 text-xs text-zinc-400">{`Building chart — the first column needs a ${model.boxMode === 'pts' ? 'one-box' : `${boxPct}%`} move${interval > 1 ? ` on closed ${interval}-minute bars` : ''}.`}</p>
         ) : (
+          <>
+          {/* The session names stay at the top of the view while the chart scrolls down (sticky, zero height so the chart does not move). */}
+          <div className="sticky top-0 z-20 h-0 pointer-events-none" style={{ width: plotW }} aria-hidden="true" data-testid="pnf-session-strip">
+            <svg width={plotW} height={18} className="block">
+              {(() => {
+                let lastLabelX = -Infinity;
+                return vis.map((c, j) => {
+                  const prev = columns[first + j - 1];
+                  if (prev && prev.session === c.session) return null;
+                  const x = xOf(j);
+                  if (x - lastLabelX < 64) return null;
+                  lastLabelX = x;
+                  const text = sessionLabel(c.session);
+                  return (
+                    <g key={`s${j}`}>
+                      <rect x={x + 1} y={2} width={text.length * 6 + 8} height={14} rx={3} className="fill-zinc-900" opacity={0.9} />
+                      <text x={x + 5} y={12.5} className="fill-zinc-300 font-mono" fontSize={10}>{text}</text>
+                    </g>
+                  );
+                });
+              })()}
+            </svg>
+          </div>
           <div className="flex" style={{ width: contentW + (rail ? RAIL_W : 0), height: contentH }}>
             <svg width={plotW} height={contentH} className="block shrink-0" role="img" aria-label={`${title} point and figure chart`}>
               <defs>
@@ -743,7 +766,6 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                   return (
                     <g key={`d${j}`}>
                       <line x1={x} x2={x} y1={padY + PAD_TOP - 6} y2={contentH} className="stroke-zinc-600" strokeDasharray="2 3" />
-                      {label && <text x={x + 3} y={padY + PAD_TOP - 9} className="fill-zinc-400 font-mono" fontSize={10}>{sessionLabel(c.session)}</text>}
                     </g>
                   );
                 });
@@ -1016,6 +1038,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               )}
             </svg>
           </div>
+          </>
         )}
       </div>
       {cross && cross.col !== null && (() => {
