@@ -67,6 +67,8 @@ export type PnfPanelProps = {
   rail?: PnfRail;
 };
 
+import type { LadderPosition } from '@/lib/pnfLadderPosition';
+
 /** A resting order drawn on the chart (its line, its tag, and its handle in the rail). */
 export type RailOrder = {
   id: string; side: 'BUY' | 'SELL'; kind: 'limit' | 'stop'; level: number; price: number; trigger?: number; lots: number;
@@ -77,6 +79,8 @@ export type RailOrder = {
 };
 export type PnfRail = {
   orders: RailOrder[];
+  /** The chart's open position: its entry line, and its live P&L chip on the rail (like the XY ladder's entry row). */
+  position?: LadderPosition | null;
   /** A click on a box row: the box price. */
   onPlace: (side: 'BUY' | 'SELL', level: number) => void;
   onModify: (id: string, level: number) => void;
@@ -107,6 +111,8 @@ const sessionOfT = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString(
 const shortDate = (iso: string) => sessionLabel(iso).slice(4);
 
 type RailDrag = { id: string; level: number; start: number } | null;
+
+const rupees = (n: number) => `${n >= 0 ? '+' : '−'}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 
 /**
  * The buy / sell rail: a Buy and a Sell cell on every box row over the whole chart height (the padding above and below the data
@@ -165,6 +171,20 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
           <g pointerEvents="none" data-testid="pnf-rail-hover">
             <rect x={colX(hot.side) + 1} y={y - h / 2} width={COL - 2} height={h} rx={3} className={buy ? 'fill-emerald-500/60 stroke-emerald-300' : 'fill-red-500/60 stroke-red-300'} strokeWidth={1} />
             <text x={colX(hot.side) + COL / 2} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={10} fontWeight={800}>{kind === 'LIMIT' ? 'LMT' : kind === 'SL-limit' ? 'SL' : '+'}</text>
+          </g>
+        );
+      })()}
+      {/* the open position: its live P&L on the entry row, like the XY ladder */}
+      {(() => {
+        const pos = rail.position;
+        if (!pos || pos.avg === null) return null;
+        const y = yOf(pos.avg);
+        if (y < 0 || y > contentH) return null;
+        const tone = pos.pnl === null ? 'fill-zinc-700 stroke-zinc-500' : pos.pnl >= 0 ? 'fill-emerald-600 stroke-emerald-300' : 'fill-red-600 stroke-red-300';
+        return (
+          <g pointerEvents="none" data-testid="pnf-rail-pnl">
+            <rect x={1} y={y - 9} width={RAIL_W - 2} height={18} rx={4} className={tone} strokeWidth={1} />
+            <text x={RAIL_W / 2} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={10} fontWeight={800}>{pos.pnl === null ? '—' : rupees(pos.pnl)}</text>
           </g>
         );
       })()}
@@ -805,6 +825,23 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                     );
                   });
                 });
+              })()}
+
+              {/* the open position: an entry line across the chart with its side, size, entry premium and live P&L */}
+              {rail?.position && rail.position.avg !== null && (() => {
+                const pos = rail.position;
+                const y = yOf(pos.avg as number);
+                const text = `${pos.side} ${pos.lots}L @ ${fmt(pos.avg as number, 2)}${pos.pnl === null ? '' : ` · ${rupees(pos.pnl)}`}`;
+                const w = text.length * 6.2 + 12;
+                const x = Math.max(4, Math.min(plotW, viewRight ?? plotW) - w - 6);
+                const up = pos.pnl !== null && pos.pnl >= 0;
+                return (
+                  <g data-testid="pnf-position-line" data-side={pos.side} pointerEvents="none">
+                    <line x1={0} x2={plotW} y1={y} y2={y} strokeWidth={1.25} strokeDasharray="1 3" strokeLinecap="round" className={pos.pnl === null ? 'stroke-zinc-400' : up ? 'stroke-emerald-300' : 'stroke-red-300'} />
+                    <rect x={x} y={y - 8} width={w} height={16} rx={3} className={pos.pnl === null ? 'fill-zinc-700' : up ? 'fill-emerald-700' : 'fill-red-700'} />
+                    <text x={x + 6} y={y + 3.5} className="fill-oncolor font-mono" fontSize={10} fontWeight={700}>{text}</text>
+                  </g>
+                );
               })()}
 
               {/* resting orders: a line across the chart at the level, and a tag by the newest columns (× cancels) */}

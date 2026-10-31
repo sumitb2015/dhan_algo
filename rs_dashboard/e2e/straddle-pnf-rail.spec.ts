@@ -110,6 +110,11 @@ test('PAPER: B below the price rests a LIMIT, the price falling through fills it
   await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 10_000 }).toBe('filled');
   await expect(line).toHaveCount(0);
   await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 1 lot');
+  // The ladder shows the position too: an entry line with side / size / premium, and its live P&L chip on the rail.
+  const panel = page.getByTestId('pnf-panel').nth(0);
+  await expect(panel.getByTestId('pnf-position-line')).toHaveAttribute('data-side', 'LONG');
+  await expect(panel.getByTestId('pnf-position-line')).toContainText('LONG 1L @');
+  await expect(panel.getByTestId('pnf-rail-pnl')).toContainText('₹');
 });
 
 test('PAPER: B above the price is an SL-limit (trigger and a limit past it); × cancels it', async ({ page }) => {

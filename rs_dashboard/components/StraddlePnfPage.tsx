@@ -35,6 +35,7 @@ import { usePnfAlerts } from './straddlePnf/usePnfAlerts';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent } from './straddlePnf/usePnfAuto';
 import { autoDaySummary, autoMarkers } from '@/lib/pnfAutoLedger';
 import AutoControls from './straddlePnf/AutoControls';
+import { usePnfPositions } from './straddlePnf/usePnfPositions';
 import { useChartLegs, usePnfResting, type RailChart, type RestingEvent } from './straddlePnf/usePnfResting';
 import { applyPaperFill, FLAT_LEG, type PaperLeg, type PnfProduct } from '@/lib/pnfOrderLogic';
 import { needsResolve, type RestingRow } from '@/lib/pnfRestingLedger';
@@ -327,11 +328,12 @@ function StraddlePnfPage() {
     if (target.kind === 'index' || !legs || (c === 2 && !dual)) return null;
     const straddle = target.kind === 'options' && target.side === 'STRADDLE';
     return {
-      chart: c, target, targetKey: targetKey(target), price: priceOf(feed), stale: feed.stale, straddle, tick: legs.tick, unitsPerLot: legs.unitsPerLot,
+      chart: c, target, targetKey: targetKey(target), price: priceOf(feed), stale: feed.stale, straddle, tick: legs.tick, unitsPerLot: legs.unitsPerLot, keys: legs.keys, lotUnits: legs.lotUnits,
       legPrices: !feed.live ? [null] : straddle ? [feed.live.ce, feed.live.pe] : [feed.live.ce + feed.live.pe],
     };
   };
   const railCharts = ([1, 2] as const).map(railChartOf).filter((x): x is RailChart => x !== null);
+  const positions = usePnfPositions({ charts: railCharts, broker, mode: tradeMode, paper });
   const onRestingEvent = (e: RestingEvent) => {
     if (e.kind === 'warn') { toast.warning(e.text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); return; }
     if (e.kind === 'info') { toast(e.text); return; }
@@ -360,6 +362,7 @@ function StraddlePnfPage() {
     const byId = (id: string) => rows.find(r => r.id === id);
     const now = nowSec();
     return {
+      position: positions[rc.targetKey] ?? null,
       orders: rows.map(r => ({
         id: r.id, side: r.side, kind: r.kind, level: r.level, price: r.price, trigger: r.trigger, lots: r.lots, state: r.state, mode: r.mode,
         resolvable: needsResolve(r, now),
