@@ -55,6 +55,7 @@ const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
 const OVERLAY_KEY = 'straddle-pnf-overlay';
 const OVERLAY_SHOWN_KEY = 'straddle-pnf-overlay-shown';
+const COVER_SHOWN_KEY = 'straddle-pnf-cover-shown';
 const TRADE_OPEN_KEY = 'straddle-pnf-trade-open';
 /** The positions / order book / trade book / P&L strip at the bottom: collapsed by default (expanded it takes chart height). */
 const BOOKS_OPEN_KEY = 'straddle-pnf-books-open';
@@ -168,6 +169,8 @@ function StraddlePnfPage() {
   const [overlay, setOverlay] = useState<Overlay>('vwap');
   // Whether the VWAP / SMA line is drawn at all: a display switch only, the signals still measure against it.
   const [overlayShown, setOverlayShown] = useState(true);
+  // The COVER tag is a short-side hint nothing trades on: hidden unless switched on.
+  const [coverShown, setCoverShown] = useState(false);
   const [target1, setTarget1] = useState<Target>(DEFAULT_TARGETS.index);
   const [target2, setTarget2] = useState<Target>(DEFAULT_TARGETS.index);
   // Each chart's last pick per segment (so switching segments brings it back) and its open segment.
@@ -226,6 +229,7 @@ function StraddlePnfPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (readPref(OVERLAY_KEY) === 'sma') setOverlay('sma');
     if (readPref(OVERLAY_SHOWN_KEY) === '0') setOverlayShown(false);
+    if (readPref(COVER_SHOWN_KEY) === '1') setCoverShown(true);
     const savedView = readPref(CHART_VIEW_KEY);
     if (savedView === '1' || savedView === '2') setChartView(savedView);
     setSettings(readSettings(readPref(SETTINGS_KEY), DEFAULT_CHART1_SETTINGS));
@@ -532,6 +536,7 @@ function StraddlePnfPage() {
   const activate = (c: ChartId) => { setActiveChart(c); savePref(ACTIVE_CHART_KEY, String(c)); };
   // Picking VWAP or SMA also shows the line again; the eye button hides / shows it without changing the choice.
   const pickOverlay = (o: Overlay) => { setOverlay(o); savePref(OVERLAY_KEY, o); setOverlayShown(true); savePref(OVERLAY_SHOWN_KEY, '1'); };
+  const toggleCoverShown = () => { const next = !coverShown; setCoverShown(next); savePref(COVER_SHOWN_KEY, next ? '1' : '0'); };
   const toggleOverlayShown = () => { const next = !overlayShown; setOverlayShown(next); savePref(OVERLAY_SHOWN_KEY, next ? '1' : '0'); };
   const applySettings = (next: PnfSettings) => {
     if (active === 2) { setSettings2(next); savePref(SETTINGS_KEY_2, serializeSettings(next)); }
@@ -577,6 +582,7 @@ function StraddlePnfPage() {
       live: feed.live,
       overlay,
       overlayShown,
+      coverShown,
       stale: feed.stale,
       legs: target.kind === 'options' && target.side === 'STRADDLE',
       flash: flash[c],
@@ -729,6 +735,8 @@ function StraddlePnfPage() {
                       onClick={toggleOverlayShown} className={`${seg(!overlayShown)} inline-flex items-center`}>
                 {overlayShown ? <Eye className="w-3.5 h-3.5" aria-hidden="true" /> : <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />}
               </button>
+              <button type="button" aria-pressed={coverShown} title="Show the COVER tag: where an X column first trades above the VWAP / SMA (a hint for covering a short; nothing trades on it)"
+                      onClick={toggleCoverShown} className={seg(coverShown)}>Cover tag</button>
             </div>
             <fieldset disabled={activeLocked} className="contents"><SmaPeriodInput settings={activeSettings} onChange={applySettings} /></fieldset>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />

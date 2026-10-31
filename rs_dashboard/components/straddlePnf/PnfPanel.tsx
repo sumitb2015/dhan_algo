@@ -52,6 +52,8 @@ export type PnfPanelProps = {
   sessionTag?: string | null;
   /** False hides the VWAP / SMA line and its legend; the signals and exit cues still use it. */
   overlayShown?: boolean;
+  /** True draws the COVER tag (a short-side cue: first bar of an X column above VWAP). Off by default; nothing trades on it. */
+  coverShown?: boolean;
   /** False (stocks: a column spans days) = no dashed vertical line at each session start and no date strip along the top. */
   sessionLines?: boolean;
   /** Executed trades on this chart to mark on the boxes. */
@@ -305,7 +307,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, sessionLines = true, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, coverShown = false, sessionLines = true, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -835,7 +837,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               )}
 
               {/* short cover cue (the short-side rule): first bar of a green X column trading above VWAP */}
-              {exits.length > 0 && (
+              {coverShown && exits.length > 0 && (
                 <text data-testid="pnf-exit" x={xOf(exits[exits.length - 1].col) + colW / 2} y={yOf(columns[exits[exits.length - 1].col].high) - 4}
                       textAnchor="middle" className="fill-emerald-400 font-mono font-bold" fontSize={9}>COVER</text>
               )}
