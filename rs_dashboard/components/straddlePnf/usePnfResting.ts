@@ -373,7 +373,11 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
   const cancelAllFor = async (targetKeyOf: string) => {
     for (const r of ledgerRef.current.rows) if (r.targetKey === targetKeyOf && r.state === 'working') await cancel(r, true);
   };
-  return { ledger, place, modify, changeLots, cancel, openFor, armBracket, cancelBracketsFor, cancelAllFor };
+  /** Every working order on every chart (the header's Cancel all orders): broker orders are cancelled at the broker, page-held ones in the ledger. */
+  const cancelEverything = async () => {
+    for (const r of ledgerRef.current.rows) if (r.state === 'working') await cancel(r, true);
+  };
+  return { ledger, place, modify, changeLots, cancel, openFor, armBracket, cancelBracketsFor, cancelAllFor, cancelEverything };
 }
 
 /** A chart's contract as the server resolves it (the order route's GET): its tick and rupees per point per lot, per leg. */

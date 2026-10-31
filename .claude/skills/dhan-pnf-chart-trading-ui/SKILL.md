@@ -18,6 +18,7 @@ Laid out like the XY ladder: **BUY | PRICE | SELL**, `RAIL_SIDE_W = 96` + `RAIL_
 - **Moving or cancelling a REAL broker order asks first**; a per-chart **Instant** switch skips the question — default off, **never remembered**, reset on any mode change. Keep that: a remembered "don't ask" is how a wrong-account order gets placed.
 - PAPER orders are labelled `[PAPER]`; a REAL fill from a level is `estimate` until Positions confirms.
 
+- **Header `Cancel all orders (n)`** (`data-testid="pnf-cancel-every-order"`, `usePnfResting.cancelEverything`): cancels every working order on **both charts** — entries and stop / target exits; disabled at 0. PAPER orders and page-held levels cancel at once; if any order rests at a REAL broker (`venue === 'broker'`) it asks once and says how many, then cancels them at the broker (each through `cancel(row, true)`, so no per-order question; an unclear reply is reported per order, never assumed). The per-chart `Cancel all` (Shift+C) in the orders bar stays.
 ## Orders bar, lines, books
 
 - **Orders bar above each chart** lists the chart's resting orders with `×` per row and **Cancel all (Shift+C)** — works from the focused chart region (`onKeyDown`, only when a working order exists).

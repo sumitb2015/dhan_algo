@@ -146,6 +146,25 @@ test('PAPER: the order keeps "BUY LMT @ price" on the chart and its pill in the 
   expect(orders.length, 'a paper order never reaches the order route').toBe(0);
 });
 
+test('the header has Cancel all orders: it cancels every working order (bracket exits too) and is disabled when there are none', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  const header = page.getByTestId('pnf-cancel-every-order');
+  await expect(header).toBeDisabled();
+  await page.getByTestId('pnf-style-bracket').click();
+  await page.getByLabel('Target points').fill('0.5');
+  await page.getByLabel('SL points').fill('0.4');
+  await page.getByLabel('SL points').press('Enter');
+  const a = await cell(page, 'BUY', 99.05); await a.el.dispatchEvent('pointerdown', { button: 0 });
+  const b = await cell(page, 'BUY', 98.85); await b.el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(2);
+  await expect(header).toContainText('(2)');
+  await header.click();                                                       // PAPER only: nothing to confirm
+  await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(0);
+  await expect(header).toBeDisabled();
+});
+
 test('PAPER: B above the price is an SL-limit (trigger and a limit past it); × cancels it', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
   const { state } = await install(page);

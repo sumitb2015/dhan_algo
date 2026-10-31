@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, ChartScatter, Eye, EyeOff, Flag, LocateFixed, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
+import { Bell, ChartScatter, Eye, EyeOff, Flag, LocateFixed, XCircle, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from './NavBar';
 import DataChip from './DataChip';
@@ -410,6 +410,15 @@ function StraddlePnfPage() {
   const resting = usePnfResting({
     charts: railCharts, broker, mode: tradeMode, lots: sizing.lots, product: sizing.product, leaderRef, onEvent: onRestingEvent, onPaperFill, instant, positions, positionsLoaded: positionsInfo.loaded,
   });
+  // Header: cancel every working order on both charts (stop-loss / target exits included). REAL broker orders ask once first.
+  const workingRows = resting.ledger.rows.filter(r => r.state === 'working');
+  const cancelEveryOrder = () => {
+    if (!workingRows.length) return;
+    const real = workingRows.filter(r => r.venue === 'broker').length;
+    // PAPER orders and page-held levels cancel at once; only orders resting at a REAL broker ask first
+    if (real && !window.confirm(`Cancel ${workingRows.length} working order${workingRows.length === 1 ? '' : 's'} on every chart?\n\n${real} REAL order${real === 1 ? ' rests' : 's rest'} at your broker and will be cancelled there.`)) return;
+    void resting.cancelEverything();
+  };
   // MTM guard (page-held, per chart): on a trip, cancel the chart's orders and bracket exits, then square its position off.
   const exitChart = async (c: ChartId, reason: string) => {
     const rc = railCharts.find(x => x.chart === c);
@@ -752,6 +761,12 @@ function StraddlePnfPage() {
             </div>
             <fieldset disabled={activeLocked} className="contents"><SmaPeriodInput settings={activeSettings} onChange={applySettings} /></fieldset>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
+            <button type="button" data-testid="pnf-cancel-every-order" onClick={cancelEveryOrder} disabled={workingRows.length === 0}
+                    aria-label={`Cancel all orders (${workingRows.length} working)`} title={workingRows.length ? `Cancel all ${workingRows.length} working orders on every chart` : 'No working orders'}
+                    className="inline-flex items-center gap-1 h-7 px-2 rounded-md border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:text-white hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">
+              <XCircle className="w-3.5 h-3.5" aria-hidden="true" />
+              Cancel all orders{workingRows.length ? ` (${workingRows.length})` : ''}
+            </button>
             <IconButton icon={LocateFixed} label="Re-center" onClick={recenterNow} />
             <IconButton icon={Bell} label="Alert log" onClick={() => setLogOpen(o => !o)} pressed={logOpen} badge={log.length} />
             <IconButton icon={muted ? VolumeX : Volume2} label={muted ? 'Unmute alert sound' : 'Mute alert sound'} onClick={toggleMute} pressed={muted} />
