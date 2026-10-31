@@ -35,6 +35,12 @@ Invariants that came out of the review (`a99cb45d`, `37f7c6e4`):
 - Unique ids (`newOrderId` adds a random suffix — two clicks in one millisecond, or a pinned test clock, repeated the time-only id). Zerodha modify stores the snapped price; Kotak MARKET orders keep no tick.
 - A REAL fill from a level is only an **estimate** (the page knows the price it fired at, not the traded one): the event carries `estimate: true` until Positions shows the fill.
 
+## Order label and + / - lots
+
+A placed order's tag and its orders-bar chip read **`[P ]BUY SL @ 220.50 · 1L`** (`orderText`): the same words as the hover label (`BUY SL @ 220.50`), so the price an order was placed at stays on the chart. An SL-limit names its **trigger** (the clicked level); the limit it carries once triggered is in the tooltip. A bracket exit says `SL 1L @ …` / `TGT …` as before.
+
+`−` / `+` on a working **entry** order change its lots, in two places: the order tag on the chart and the chip in the orders bar (the chip stays when the order lines are hidden). Not shown for bracket exits (`role` set: they are sized from the position, `exitOwn`). `usePnfResting.changeLots(row, ±1)` → clamps to `1..lotCap(target)`; a **page** order (PAPER, or a REAL straddle level) changes in the ledger with the `lots` op (scales `unitsPerPoint` / `legUnits`; refused for a filled order, a group row, 0 or over-cap, in `pnfRestingLedger.ts`); a **REAL broker** order is modified at the broker first (confirm unless Instant; the same `brokerOp: modify` request with the new `lots`, price / trigger unchanged — the route's `modifyAt` already sends `quantity`) and the ledger follows only on `placed`; unknown = "Size change status unknown", never assumed. Zerodha SL-limit cannot be modified (cancel and re-place). Tests: `pnfRestingLedger.test.ts` (lots op), `e2e/straddle-pnf-rail.spec.ts` ("keeps BUY LMT @ price and its + / - change the lots").
+
 ## Bracket / Cover (`pnfBracket.ts`, `PnfOrderStyle.tsx`)
 
 Style Single | Bracket | Cover with target / SL / optional Trail in **points of the chart's own price** (a straddle's combined premium). The *entry that fills* arms page-held exit rows from the **fill price** (`planBracketChildren`); an unfilled Bracket / Cover places nothing, and missing/zero SL (or target for Bracket) is refused with a message (`cleanBracketSpec` — nothing guessed). Rules fixed in review:

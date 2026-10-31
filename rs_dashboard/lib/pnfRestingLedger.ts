@@ -92,6 +92,8 @@ export type RestingOp =
   | { op: 'create'; row: Omit<RestingRow, 'state' | 'targetKey' | 'pendingSince'> }
   | { op: 'placed'; id: string; brokerOrderId: string }
   | { op: 'modify'; id: string; level: number; price: number; trigger?: number }
+  /** Change the size of a working entry order (the + / - on its tag); a bracket exit is sized from the position, never from here. */
+  | { op: 'lots'; id: string; lots: number }
   | { op: 'trigger'; id: string }
   | { op: 'fire'; id: string; t: number }
   | { op: 'fill'; id: string; price: number; t: number; /** A broker order cancelled after a part fill: the lots that did fill. */ lots?: number }
@@ -150,6 +152,14 @@ export function applyRestingOp(led: RestingLedger, op: RestingOp): Result {
       if (![op.level, op.price].every(finite) || !(op.price > 0)) return { ok: false, status: 400, error: 'Invalid price' };
       if (led.rows[i].kind === 'stop' && !(finite(op.trigger) && op.trigger > 0)) return { ok: false, status: 400, error: 'An SL-limit needs a trigger' };
       return set(i, { level: op.level, price: op.price, ...(op.trigger !== undefined ? { trigger: op.trigger } : {}), triggered: false });
+    }
+    case 'lots': {
+      const i = at(op.id); const bad = need(i, ['working']); if (bad) return bad;
+      const r = led.rows[i];
+      if (r.group) return { ok: false, status: 409, error: 'A bracket exit is sized from the position' };
+      if (!Number.isInteger(op.lots) || op.lots < 1 || op.lots > lotCap(r.target)) return { ok: false, status: 400, error: `Lots must be a whole number from 1 to ${lotCap(r.target)}` };
+      const k = op.lots / r.lots;
+      return set(i, { lots: op.lots, unitsPerPoint: r.unitsPerPoint * k, ...(r.legUnits ? { legUnits: r.legUnits.map(u => u * k) } : {}) });
     }
     case 'trigger': {
       const i = at(op.id); const bad = need(i, ['working']); if (bad) return bad;

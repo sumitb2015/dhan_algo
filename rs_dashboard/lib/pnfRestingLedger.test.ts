@@ -108,3 +108,18 @@ test('a broker order cancelled after a part fill books the filled lots (and thei
   assert.equal(run(l, { op: 'fill', id: 'o1', price: 99.5, t: 9, lots: 10 }).rows[0].lots, 10);
   assert.equal(run(l, { op: 'fill', id: 'o1', price: 99.5, t: 9, lots: 2.5 }).rows[0].lots, 10);
 });
+
+test('lots: a working entry order is resized with its paper value scaled; a bracket exit, a filled order, 0 and an over-cap size are refused', () => {
+  let l = run(EMPTY_RESTING, { op: 'create', row: row({ unitsPerPoint: 65, legUnits: [65, 130] }) });
+  l = run(l, { op: 'lots', id: 'o1', lots: 3 });
+  assert.equal(l.rows[0].lots, 3);
+  assert.equal(l.rows[0].unitsPerPoint, 195);
+  assert.deepEqual(l.rows[0].legUnits, [195, 390]);
+  refused(l, { op: 'lots', id: 'o1', lots: 0 });
+  refused(l, { op: 'lots', id: 'o1', lots: 21 });                       // futures cap is 20 lots
+  refused(l, { op: 'lots', id: 'o1', lots: 1.5 });
+  const exit = run(EMPTY_RESTING, { op: 'create', row: row({ id: 'x1', group: 'g1', role: 'sl' }) });
+  refused(exit, { op: 'lots', id: 'x1', lots: 2 });
+  const filled = run(run(EMPTY_RESTING, { op: 'create', row: row() }), { op: 'fill', id: 'o1', price: 99, t: 2000 });
+  refused(filled, { op: 'lots', id: 'o1', lots: 2 });
+});

@@ -120,6 +120,29 @@ test('PAPER: B below the price rests a LIMIT, the price falling through fills it
   await expect(panel.getByTestId('pnf-rail-pnl')).toContainText('₹');
 });
 
+test('PAPER: the order tag keeps "BUY LMT @ price" and its + / - change the lots of the working order', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await openFuture(page);
+  const { el, level } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+  const line = page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-order-line');
+  await expect(line).toContainText(`BUY LMT @ ${level.toFixed(2)} · 1L`);
+  await line.getByTestId('pnf-order-lots-up').dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.lots).toBe(2);
+  await expect(line).toContainText('· 2L');
+  await line.getByTestId('pnf-order-lots-down').dispatchEvent('pointerdown', { button: 0 });
+  await line.getByTestId('pnf-order-lots-down').dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.lots).toBe(1);        // never below one lot
+  // the orders bar chip has the same + / -, so the size can be changed with the order lines hidden too
+  const chip = page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-orders-chip');
+  await chip.getByTestId('pnf-chip-lots-up').click();
+  await expect.poll(() => state.ledger.rows[0]?.lots).toBe(2);
+  await expect(chip).toContainText('· 2L');
+  expect(orders.length, 'a paper order never reaches the order route').toBe(0);
+});
+
 test('PAPER: B above the price is an SL-limit (trigger and a limit past it); × cancels it', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
   const { state } = await install(page);

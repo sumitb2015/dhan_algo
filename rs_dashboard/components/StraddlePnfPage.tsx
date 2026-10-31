@@ -473,6 +473,7 @@ function StraddlePnfPage() {
       },
       onModify: (id: string, level: number) => { const r = byId(id); if (r) void resting.modify(r, level); },
       onCancel: (id: string) => { const r = byId(id); if (r) void resting.cancel(r); },
+      onLots: (id: string, delta: number) => { const r = byId(id); if (r) void resting.changeLots(r, delta); },
     };
   };
   const auto1 = usePnfAuto({

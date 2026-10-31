@@ -6,6 +6,7 @@ import { scalperRoute, type Broker } from '@/hooks/useBrokerSelector';
 import { istDateIso } from '@/lib/nseHolidays';
 import { paperStep, planResting, reached, snapToTick, DEFAULT_BUFFER_PCT, type RestingSide } from '@/lib/pnfResting';
 import { EMPTY_RESTING, isOpenOrder, needsResolve, type RestingLedger, type RestingOp, type RestingRow } from '@/lib/pnfRestingLedger';
+import { lotCap } from '@/lib/pnfOrderLogic';
 import { toOrderRow } from '@/lib/pnfBooks';
 import { planBracketChildren, trailedStop, type BracketSpec } from '@/lib/pnfBracket';
 import type { LadderPosition } from '@/lib/pnfLadderPosition';
@@ -193,6 +194,26 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
     else onEvent({ kind: 'warn', chart: row.chart, text: !j || j.outcome === 'unknown' ? 'Move status unknown - the order book will show where it is' : `Not moved: ${j.error ?? j.message ?? ''}` });
   };
 
+  /** + / - on a working entry order's tag: a page-held order changes in the ledger, a REAL broker order is modified at the broker first. */
+  const changeLots = async (row: RestingRow, delta: number) => {
+    const c = charts.find(x => x.targetKey === row.targetKey);
+    if (row.group || row.state !== 'working') return;
+    const cap = lotCap(row.target);
+    const next = Math.max(1, Math.min(cap, row.lots + delta));
+    if (next === row.lots) { if (delta > 0) toast.error(`At most ${cap} ${row.target.kind === 'equity' ? 'shares' : 'lots'} per order`); return; }
+    if (row.venue === 'page') { const r = await post({ op: 'lots', id: row.id, lots: next }); if (!r.ok) toast.error(r.error ?? 'Not changed'); return; }
+    if (!row.brokerOrderId) { toast.error('The order is still being placed - try again in a moment'); return; }
+    if (row.broker === 'zerodha' && row.kind === 'stop') { toast.error('Zerodha SL-limit orders cannot be changed here - cancel it and place a new one'); return; }
+    if (!c) return;
+    if (!instant[row.chart] && !window.confirm(`Change this REAL ${row.side} ${row.kind === 'limit' ? 'LIMIT' : 'SL-limit'} from ${row.lots}L to ${next}L at ${row.level}?\n\nIt is modified at your broker. (Turn on Instant above the chart to skip this question.)`)) return;
+    const j = await postOrder({
+      broker: row.broker, mode: 'REAL', target: row.target, action: row.side, lots: next, product: row.product,
+      orderType: row.kind === 'limit' ? 'LIMIT' : 'SL', price: row.price, trigger: row.trigger, brokerOp: { op: 'modify', orderId: row.brokerOrderId },
+    });
+    if (j?.outcome === 'placed') await post({ op: 'lots', id: row.id, lots: next });
+    else onEvent({ kind: 'warn', chart: row.chart, text: !j || j.outcome === 'unknown' ? 'Size change status unknown - the order book will show it' : `Size not changed: ${j.error ?? j.message ?? ''}` });
+  };
+
   const cancel = async (row: RestingRow, force = false) => {
     if (row.venue === 'page' || row.state !== 'working') {
       if (row.state !== 'working') {
@@ -352,7 +373,7 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
   const cancelAllFor = async (targetKeyOf: string) => {
     for (const r of ledgerRef.current.rows) if (r.targetKey === targetKeyOf && r.state === 'working') await cancel(r, true);
   };
-  return { ledger, place, modify, cancel, openFor, armBracket, cancelBracketsFor, cancelAllFor };
+  return { ledger, place, modify, changeLots, cancel, openFor, armBracket, cancelBracketsFor, cancelAllFor };
 }
 
 /** A chart's contract as the server resolves it (the order route's GET): its tick and rupees per point per lot, per leg. */
