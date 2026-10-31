@@ -10,14 +10,13 @@ import { kotakPost, KOTAK_PATHS, KotakRejectedError } from '@/lib/kotakToken';
 import { openBrokerOrders, ownedBrokerOrder } from '@/lib/pnfRestingServer';
 import { kiteDelete } from '@/lib/zerodhaToken';
 import { modifyZerodhaLimitOrder } from '@/lib/zerodhaModifyOrder';
-import { fetchLtp, type LtpSegment } from '@/lib/dhanEquityQuote';
 import { snapToTick } from '@/lib/pnfResting';
 import { brokerPositionRows, brokerSessionOk } from '@/lib/priceLadderServer';
 import { CloseGuard } from '@/lib/priceLadderClose';
 import { parseTarget, isComplete, targetKey } from '@/lib/pnfTarget';
 import { brokerLegs, resolvePnfLegs, type PnfBrokerLeg } from '@/lib/pnfOrderServer';
 import {
-  MAX_PNF_LOTS, brokerProduct, checkRestingPrices, inBand, lotCap, needsRollback, orderQty, parsePnfOrder, planLegClose, planOwnExit, sendOutcome,
+  MAX_PNF_LOTS, brokerProduct, checkRestingPrices, lotCap, needsRollback, orderQty, parsePnfOrder, planLegClose, planOwnExit, sendOutcome,
   type LegResult, type PnfAction, type PnfBroker,
 } from '@/lib/pnfOrderLogic';
 
@@ -153,7 +152,7 @@ type How = { type: 'MARKET' } | { type: 'LIMIT'; price: number } | { type: 'SL';
 /**
  * A resting order: placed at the broker on a single-leg chart (a straddle's level is held by the page and sent at MARKET),
  * or a modify / cancel of one this page placed. Prices are snapped to the contract tick, re-checked, and refused outside the
- * ±20 % band around the live Dhan price (fail closed when there is none).
+ * side rules (no distance limit: an order may rest anywhere; the broker's own price band still applies).
  */
 async function resting(order: Exclude<ReturnType<typeof parsePnfOrder>, string>, legs: PnfBrokerLeg[]): Promise<NextResponse> {
   const { broker } = order;
@@ -178,10 +177,6 @@ async function resting(order: Exclude<ReturnType<typeof parsePnfOrder>, string>,
     const trigger = order.trigger ? snapToTick(order.trigger, tick, 'nearest') : undefined;
     const checked = checkRestingPrices(order.action, order.orderType, price, trigger);
     if (typeof checked === 'string') return bad(`${checked} (after snapping to the ${tick} tick)`);
-    const ltp = await fetchLtp(leg.segment as LtpSegment, leg.securityId).catch(() => 0);
-    if (!inBand(price, ltp) || (trigger !== undefined && !inBand(trigger, ltp))) {
-      return bad(ltp > 0 ? `Price is more than 20% from the live ${ltp} - nothing was sent` : 'No live price to check the order against - nothing was sent');
-    }
     const how: How = order.orderType === 'LIMIT' ? { type: 'LIMIT', price } : { type: 'SL', price, trigger: trigger! };
     if (order.brokerOp?.op === 'modify') return modifyAt(broker, order.brokerOp.orderId, qty, how);
     const r = await send(broker, leg, order.action, qty, brokerProduct(order.product, broker), true, order.source === 'auto' ? 'pnfa' : 'pnf', how);

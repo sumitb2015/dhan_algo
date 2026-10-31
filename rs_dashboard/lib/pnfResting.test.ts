@@ -22,9 +22,10 @@ test('planResting: the ladder rule - BUY below / SELL above = LIMIT, the other s
   assert.ok(!('error' in sellLow) && sellLow.kind === 'stop' && sellLow.trigger === 99.95 && sellLow.price < sellLow.trigger!);
 });
 
-test('planResting refuses the current price and a level far from it', () => {
+test('planResting refuses the current price, but puts no limit on how far away a level may be', () => {
   assert.ok('error' in planResting({ side: 'BUY', level: 101, ref: 101, tick: 0.05 }));
-  assert.ok('error' in planResting({ side: 'BUY', level: 70, ref: 101, tick: 0.05 }));
+  assert.ok(!('error' in planResting({ side: 'BUY', level: 70, ref: 101, tick: 0.05 })), 'a limit 30% below is fine');
+  assert.ok(!('error' in planResting({ side: 'SELL', level: 300, ref: 101, tick: 0.05 })), 'a far SL-limit is fine');
 });
 
 test('reached: limits on their side of the level, stops past it', () => {

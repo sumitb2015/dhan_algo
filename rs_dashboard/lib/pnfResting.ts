@@ -7,8 +7,6 @@ import { classifyClick, stopLimitPrice } from './priceLadder.ts';
 export type RestingSide = 'BUY' | 'SELL';
 export type RestingKind = 'limit' | 'stop';
 export const DEFAULT_BUFFER_PCT = 2;
-/** A limit or trigger further than this from the live price is refused (a fat-finger band; the server checks it again). */
-export const MAX_DISTANCE_PCT = 20;
 
 export interface RestingSpec {
   side: RestingSide;
@@ -37,7 +35,6 @@ export function snapToTick(v: number, tick: number, dir: 'up' | 'down' | 'neares
 export function planResting(p: { side: RestingSide; level: number; ref: number; tick: number; bufferPct?: number }): RestingSpec | { error: string } {
   const v = classifyClick({ mode: 'plain', opt: 'CE', side: p.side, level: p.level, ref: p.ref, orderType: 'SL', zones: 'anywhere' });
   if (!v.ok) return { error: v.error };
-  if (Math.abs(p.level - p.ref) / p.ref * 100 > MAX_DISTANCE_PCT) return { error: `That level is more than ${MAX_DISTANCE_PCT}% from the last price` };
   if (v.kind === 'limit') {
     const price = snapToTick(p.level, p.tick, p.side === 'BUY' ? 'down' : 'up');
     return price > 0 ? { side: p.side, kind: 'limit', level: p.level, price } : { error: 'Invalid price' };

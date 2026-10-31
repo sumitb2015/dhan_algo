@@ -83,8 +83,8 @@ export type PnfRail = {
   onCancel: (id: string) => void;
 };
 
-/** Width of the B / S rail (two columns) between the chart and its price axis. */
-export const RAIL_W = 30;
+/** Width of the buy / sell rail (two columns, buy left and sell right) between the chart and its price axis. */
+export const RAIL_W = 76;
 
 function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -109,7 +109,7 @@ const shortDate = (iso: string) => sessionLabel(iso).slice(4);
 type RailDrag = { id: string; level: number; start: number } | null;
 
 /**
- * The B / S rail: a Buy and a Sell cell on every box row over the whole chart height (the padding above and below the data
+ * The buy / sell rail: a Buy and a Sell cell on every box row over the whole chart height (the padding above and below the data
  * too, on the chart's own box grid, so an order can rest beyond where the price has been), plus a handle per resting order.
  * Cells act on pointer-down (the chart's drag-to-pan captures the pointer, which would swallow a click). A handle is dragged
  * to another box (commit on release); the drag lives in a ref because pointer events arrive before React re-renders.
@@ -126,12 +126,16 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
   const iHi = Math.ceil((priceAtY(0) - yMin) / box) - 1;
   const levelAt = (y: number) => yMin + (Math.max(iLo, Math.min(iHi, Math.floor((priceAtY(y) - yMin) / box))) + 0.5) * box;
   const kindAt = (side: 'BUY' | 'SELL', p: number) => (liveValue === null ? '' : (side === 'BUY') === (p < liveValue) ? 'LIMIT' : 'SL-limit');
+  const [hot, setHot] = useState<{ side: 'BUY' | 'SELL'; p: number } | null>(null);
+  const COL = RAIL_W / 2;
+  const colX = (side: 'BUY' | 'SELL') => (side === 'BUY' ? 0 : COL);
   return (
-    <svg data-testid="pnf-rail" width={RAIL_W} height={contentH} className="block shrink-0 sticky bg-zinc-950 border-l border-zinc-800" style={{ right: AXIS_W }}>
-      {/* two tinted columns over the whole height, so the rail reads as a rail wherever the chart is scrolled to */}
-      <rect x={0} y={0} width={RAIL_W / 2} height={contentH} className="fill-emerald-500/10" pointerEvents="none" />
-      <rect x={RAIL_W / 2} y={0} width={RAIL_W / 2} height={contentH} className="fill-red-500/10" pointerEvents="none" />
-      <line x1={RAIL_W / 2} x2={RAIL_W / 2} y1={0} y2={contentH} className="stroke-zinc-700" pointerEvents="none" />
+    <svg data-testid="pnf-rail" width={RAIL_W} height={contentH} className="block shrink-0 sticky bg-zinc-900 border-l border-zinc-700" style={{ right: AXIS_W }}
+         onPointerLeave={() => setHot(null)}>
+      {/* two tinted columns over the whole height (buy | sell), so the rail reads as a rail wherever the chart is scrolled to */}
+      <rect x={0} y={0} width={COL} height={contentH} className="fill-emerald-500/10" pointerEvents="none" />
+      <rect x={COL} y={0} width={COL} height={contentH} className="fill-red-500/10" pointerEvents="none" />
+      <line x1={COL} x2={COL} y1={0} y2={contentH} className="stroke-zinc-700" pointerEvents="none" />
       {Array.from({ length: Math.max(0, iHi - iLo + 1) }, (_, n) => {
         const p = yMin + (iLo + n + 0.5) * box;
         if (!(p > 0)) return null;
@@ -139,16 +143,11 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
         return (
           <g key={n}>
             <line x1={0} x2={RAIL_W} y1={y + cell / 2} y2={y + cell / 2} className="stroke-zinc-800" pointerEvents="none" />
-            {cell >= 11 && (
-              <>
-                <text x={RAIL_W / 4} y={y + 3} textAnchor="middle" className="fill-emerald-500" fontSize={8} fontWeight={700} pointerEvents="none">B</text>
-                <text x={(RAIL_W * 3) / 4} y={y + 3} textAnchor="middle" className="fill-red-500" fontSize={8} fontWeight={700} pointerEvents="none">S</text>
-              </>
-            )}
             {(['BUY', 'SELL'] as const).map(side => (
               <rect key={side} data-testid="pnf-rail-cell" data-side={side} data-level={p}
-                    x={side === 'BUY' ? 1 : RAIL_W / 2} y={y - cell / 2} width={RAIL_W / 2 - 1} height={Math.max(1, cell)}
-                    className={`cursor-pointer fill-transparent ${side === 'BUY' ? 'hover:fill-emerald-500/30' : 'hover:fill-red-500/30'}`}
+                    x={colX(side)} y={y - cell / 2} width={COL} height={Math.max(1, cell)}
+                    className="cursor-pointer fill-transparent"
+                    onPointerEnter={() => setHot({ side, p })}
                     onPointerDown={e => { e.stopPropagation(); if (e.button === 0) rail.onPlace(side, p); }}>
                 <title>{`${side} ${kindAt(side, p)} at ${fmt(p, axisDigits)}`}</title>
               </rect>
@@ -156,6 +155,19 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
           </g>
         );
       })}
+      {/* the row under the pointer: what a click there places, and at which price */}
+      {hot && !drag && (() => {
+        const y = yOf(hot.p);
+        const buy = hot.side === 'BUY';
+        const kind = kindAt(hot.side, hot.p);
+        const h = Math.max(cell, 16);
+        return (
+          <g pointerEvents="none" data-testid="pnf-rail-hover">
+            <rect x={colX(hot.side) + 1} y={y - h / 2} width={COL - 2} height={h} rx={3} className={buy ? 'fill-emerald-500/60 stroke-emerald-300' : 'fill-red-500/60 stroke-red-300'} strokeWidth={1} />
+            <text x={colX(hot.side) + COL / 2} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={10} fontWeight={800}>{kind === 'LIMIT' ? 'LMT' : kind === 'SL-limit' ? 'SL' : '+'}</text>
+          </g>
+        );
+      })()}
       {rail.orders.map(o => {
         const y = yOf(drag?.id === o.id ? drag.level : o.level);
         const buy = o.side === 'BUY';
@@ -182,8 +194,10 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
                if (Math.abs(d.level - d.start) > box / 4) rail.onModify(o.id, d.level);
              }}
              onPointerCancel={() => setDrag(null)}>
-            <rect x={buy ? 1 : RAIL_W / 2} y={y - 7} width={RAIL_W / 2 - 1} height={14} rx={2} className={buy ? 'fill-emerald-500' : 'fill-red-500'} opacity={movable ? 1 : 0.5} />
-            <text x={(buy ? 1 : RAIL_W / 2) + 4} y={y + 3.5} className="fill-oncolor" fontSize={9} fontWeight={800} pointerEvents="none">{buy ? 'B' : 'S'}</text>
+            <rect x={colX(o.side) + 1.5} y={y - 9} width={COL - 3} height={18} rx={4}
+                  className={`${buy ? 'fill-emerald-500 stroke-emerald-200' : 'fill-red-500 stroke-red-200'}`} strokeWidth={1} opacity={movable ? 1 : 0.5} />
+            {movable && [-3, 0, 3].map(dy => <line key={dy} x1={colX(o.side) + 6} x2={colX(o.side) + 10} y1={y + dy} y2={y + dy} className="stroke-oncolor" strokeWidth={1} opacity={0.7} />)}
+            <text x={colX(o.side) + COL / 2 + (movable ? 4 : 0)} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={10} fontWeight={800} pointerEvents="none">{`${o.lots}L`}</text>
             <title>{`${o.side} ${o.kind === 'limit' ? 'LIMIT' : 'SL-limit'} ${o.lots}L at ${fmt(o.level, 2)}${movable ? ' — drag to move' : ` (${o.state})`}`}</title>
           </g>
         );

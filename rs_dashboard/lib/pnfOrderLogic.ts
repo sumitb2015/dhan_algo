@@ -66,11 +66,6 @@ export function checkRestingPrices(side: PnfAction, orderType: 'LIMIT' | 'SL', p
   return { price: p, trigger: t };
 }
 
-/** The fat-finger band: a resting price further than `maxPct` from the live price is refused (rejected, never clamped). */
-export function inBand(price: number, ltp: number, maxPct = 20): boolean {
-  return ltp > 0 && price > 0 && Math.abs(price - ltp) / ltp * 100 <= maxPct;
-}
-
 export const lotCap = (t: Target) => (t.kind === 'equity' ? MAX_PNF_SHARES : MAX_PNF_LOTS);
 
 /** A request body -> a valid order request, or the reason it is refused. */

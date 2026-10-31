@@ -138,7 +138,7 @@ test('sendOutcome: an AUTO exit that finds every leg already flat is "flat", not
 });
 
 test('resting orders: LIMIT / SL parse with their prices; an SL-limit limit on the far side of its trigger', async () => {
-  const { parsePnfOrder, checkRestingPrices, inBand } = await import('./pnfOrderLogic.ts');
+  const { parsePnfOrder, checkRestingPrices } = await import('./pnfOrderLogic.ts');
   const base = { broker: 'dhan', mode: 'REAL', target: fut, action: 'BUY', lots: 1, product: 'INTRADAY' };
   const lim = parsePnfOrder({ ...base, orderType: 'LIMIT', price: 23050 });
   assert.ok(typeof lim !== 'string' && lim.orderType === 'LIMIT' && lim.price === 23050);
@@ -148,9 +148,6 @@ test('resting orders: LIMIT / SL parse with their prices; an SL-limit limit on t
   assert.match(String(parsePnfOrder({ ...base, orderType: 'LIMIT', price: -1 })), /positive/);
   assert.match(String(parsePnfOrder({ ...base, orderType: 'STOP' })), /orderType/);
   assert.equal(typeof checkRestingPrices('SELL', 'SL', 99, 100), 'object');
-  assert.equal(inBand(120, 100), true);
-  assert.equal(inBand(121, 100), false);
-  assert.equal(inBand(100, 0), false, 'no live price: refused');
 });
 
 test('brokerOp modify / cancel: REAL only, a sane order id, modify needs prices', async () => {
