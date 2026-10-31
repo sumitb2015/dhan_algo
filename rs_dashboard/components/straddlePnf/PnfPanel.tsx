@@ -1,5 +1,6 @@
 'use client';
 
+import { intervalLabel } from '@/lib/straddlePnfInterval';
 import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
@@ -453,27 +454,23 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     const col = !hover.overAxis && j >= 0 && j < columns.length ? j : null;
     return { price, y: yOf(price), col, x: col !== null ? xOf(col) + cell / 2 : hover.overAxis ? null : hover.x };
   })();
-  const markAt = new Map(model.sessionMarks.map(m => [`${m.col}:${m.k}`, m.session]));
   // Glyph geometry as path strings, rebuilt only when the chart or its layout changes (not on a crosshair move).
   const r1 = (v: number) => Math.round(v * 10) / 10;
   const xGlyph = (cx: number, cy: number) => `M${r1(cx - s)} ${r1(cy - s)}L${r1(cx + s)} ${r1(cy + s)}M${r1(cx + s)} ${r1(cy - s)}L${r1(cx - s)} ${r1(cy + s)}`;
   const oGlyph = (cx: number, cy: number) => `M${r1(cx - s)} ${r1(cy)}a${r1(s)} ${r1(s)} 0 1 0 ${r1(2 * s)} 0a${r1(s)} ${r1(s)} 0 1 0 ${r1(-2 * s)} 0`;
   const glyphs = useMemo(() => {
     let x = '', o = '';
-    const marks: { col: number; k: number; cx: number; cy: number; dir: 'X' | 'O'; session: string }[] = [];
     columns.forEach((c, j) => {
       const cx = xOf(j) + cell / 2;
       for (let k = 0; k < c.boxes; k++) {
         const cy = yOf(c.low + (k + 0.5) * box);
-        const session = markAt.get(`${j}:${k}`);
-        if (session) marks.push({ col: j, k, cx, cy, dir: c.dir, session });
-        else if (c.dir === 'X') x += xGlyph(cx, cy);
+        if (c.dir === 'X') x += xGlyph(cx, cy);
         else o += oGlyph(cx, cy);
       }
     });
-    return { x, o, marks };
+    return { x, o };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [columns, model.sessionMarks, box, cell, offsetX, yMax, padY, s]);
+  }, [columns, box, cell, offsetX, yMax, padY, s]);
   const unconfirmed = unconfirmedBoxes(columns, liveCols, box);
   const unconfirmedPaths = useMemo(() => {
     let x = '', o = '', n = 0;
@@ -727,7 +724,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         ) : loading ? (
           <p className="p-3 text-xs text-zinc-400">Loading…</p>
         ) : liveCols.length === 0 ? (
-          <p className="p-3 text-xs text-zinc-400">{`Building chart — the first column needs a ${model.boxMode === 'pts' ? 'one-box' : `${boxPct}%`} move${interval > 1 ? ` on closed ${interval}-minute bars` : ''}.`}</p>
+          <p className="p-3 text-xs text-zinc-400">{`Building chart — the first column needs a ${model.boxMode === 'pts' ? 'one-box' : `${boxPct}%`} move${interval > 1 ? ` on closed ${intervalLabel(interval)} bars` : ''}.`}</p>
         ) : (
           <>
           {/* The session names stay at the top of the view while the chart scrolls down (sticky, zero height so the chart does not move). */}
@@ -779,18 +776,9 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               })()}
 
               {/* X / O glyphs: every X in one path and every O in another (a chart can hold tens of thousands of boxes; one element
-                  each made every crosshair move and live tick re-render them all). The first box each session drew shows the day of
-                  the month instead (the classic P&F month marker, by day). */}
+                  each made every crosshair move and live tick re-render them all). The session dividers mark the days, so no day numbers. */}
               <path data-testid="pnf-glyphs-x" d={glyphs.x} className="stroke-emerald-400" strokeWidth={stroke} strokeLinecap="round" fill="none" />
               <path data-testid="pnf-glyphs-o" d={glyphs.o} className="stroke-red-400" strokeWidth={stroke} fill="none" />
-              {glyphs.marks.map(m => (
-                <text key={`${m.col}-${m.k}`} data-testid="pnf-session-mark" x={m.cx} y={m.cy} textAnchor="middle" dominantBaseline="central"
-                      className={`${m.dir === 'X' ? 'fill-emerald-400' : 'fill-red-400'} font-mono font-bold`}
-                      fontSize={Math.max(7, Math.min(16, cell * 0.55))}>
-                  <title>{`${sessionLabel(m.session)}: first box of the session`}</title>
-                  {Number(m.session.slice(8, 10))}
-                </text>
-              ))}
               {/* the newest confirmed column's cells: a hook for tests and nothing else */}
               {columns.length > 0 && (
                 <rect data-testid="pnf-newest" x={xOf(columns.length - 1)} y={yOf(columns[columns.length - 1].high)} width={cell}

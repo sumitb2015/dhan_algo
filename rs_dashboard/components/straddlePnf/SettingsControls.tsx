@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
-import { INTERVALS, type Interval } from '@/lib/straddlePnfInterval';
+import { intervalLabel, intervalsFor, type Interval } from '@/lib/straddlePnfInterval';
 import {
   MAX_BOX_PCT, MIN_BOX_PCT, MAX_BOX_PTS, MIN_BOX_PTS, MIN_BOX_PTS_PCT, MAX_SMA_PERIOD, MIN_SMA_PERIOD, REVERSALS, parseBoxPct, parseBoxPts, parseSmaPeriod, stepBox,
   type PnfSettings, type Reversal,
@@ -52,7 +52,7 @@ const STEP_BTN = 'inline-flex items-center justify-center h-7 w-6 border border-
  * The SMA overlay's period in P&F boxes, next to the VWAP / SMA toggle: − / + step it by 1 (Shift: 10), clamped to the allowed
  * range, and apply at once (a click is a finished value); the box between them is free-typed and commits on Enter / blur.
  */
-export function SmaPeriodInput({ settings, onChange }: { settings: PnfSettings; onChange: (next: PnfSettings) => void }) {
+export function SmaPeriodInput({ settings, onChange, equity = false }: { settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean }) {
   const p = settings.smaPeriod;
   const step = (dir: 1 | -1, big: boolean) => {
     const next = Math.min(MAX_SMA_PERIOD, Math.max(MIN_SMA_PERIOD, p + dir * (big ? 10 : 1)));
@@ -78,7 +78,7 @@ export function SmaPeriodInput({ settings, onChange }: { settings: PnfSettings; 
   );
 }
 
-export default function SettingsControls({ settings, onChange }: { settings: PnfSettings; onChange: (next: PnfSettings) => void }) {
+export default function SettingsControls({ settings, onChange, equity = false }: { settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean }) {
   const boxValue = settings.boxMode === 'pct' ? settings.boxPct : settings.boxPts;
   const setBox = (n: number) => { if (n !== boxValue) onChange(settings.boxMode === 'pct' ? { ...settings, boxPct: n } : { ...settings, boxPts: n }); };
   return (
@@ -87,7 +87,7 @@ export default function SettingsControls({ settings, onChange }: { settings: Pnf
         Interval
         <select aria-label="Interval" value={settings.interval} className={`${FIELD} border-zinc-700`}
                 onChange={e => onChange({ ...settings, interval: Number(e.target.value) as Interval })}>
-          {INTERVALS.map(n => <option key={n} value={n}>{n} min</option>)}
+          {intervalsFor(equity).map(n => <option key={n} value={n}>{intervalLabel(n)}</option>)}
         </select>
       </label>
       {/* Box size as a % of the first price or as fixed price points; each mode keeps its own value. */}

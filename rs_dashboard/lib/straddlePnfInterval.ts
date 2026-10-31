@@ -6,7 +6,24 @@ import type { Bar } from './straddlePnf.ts';
  * minutes, so its last bucket is cut short: `sessionCloseMin` closes it at the bell instead of holding it until the next session.
  */
 export const INTERVALS = [1, 3, 5, 15] as const;
-export type Interval = (typeof INTERVALS)[number];
+/** Cash equities also chart on longer bars: 30 min, 1 h, 4 h, then calendar day / week / month (stored as minutes: 1 d = 1440). */
+export const EQUITY_INTERVALS = [1, 3, 5, 15, 30, 60, 240, 1440, 10080, 43200] as const;
+export type Interval = (typeof EQUITY_INTERVALS)[number];
+
+export const DAY_MIN = 1440, WEEK_MIN = 10080, MONTH_MIN = 43200;
+
+export function intervalLabel(n: number): string {
+  if (n === DAY_MIN) return '1 day';
+  if (n === WEEK_MIN) return '1 week';
+  if (n === MONTH_MIN) return '1 month';
+  if (n >= 60 && n % 60 === 0) return `${n / 60} hr`;
+  return `${n} min`;
+}
+
+/** The intervals an instrument offers, and the one actually used (a long interval chosen on a stock falls back to 1 min elsewhere). */
+export const intervalsFor = (equity: boolean): readonly Interval[] => (equity ? EQUITY_INTERVALS : INTERVALS);
+export const effectiveInterval = (interval: number, equity: boolean): Interval =>
+  (intervalsFor(equity) as readonly number[]).includes(interval) ? (interval as Interval) : 1;
 
 const SESSION_OPEN_MIN = 9 * 60 + 15; // buckets start at the 09:15 open, like exchange charts
 const IST_OFFSET_S = 5.5 * 3600;
@@ -20,6 +37,7 @@ const IST_OFFSET_S = 5.5 * 3600;
  */
 export function resample(bars: Bar[], n: number, sessionCloseMin?: number, keepForming = false): { bars: Bar[]; endIdx: number[] } {
   if (n <= 1) return { bars, endIdx: bars.map((_, i) => i) };
+  if (n >= DAY_MIN) return resampleCalendar(bars, n, sessionCloseMin, keepForming);
 
   type Group = { key: string; start: number; count: number; vol: number; last: Bar; lastIdx: number; lastMinute: number };
   const groups: Group[] = [];
@@ -44,6 +62,37 @@ export function resample(bars: Bar[], n: number, sessionCloseMin?: number, keepF
 
   return {
     bars: groups.map(g => ({ t: g.start, ce: g.last.ce, pe: g.last.pe, straddle: g.last.straddle, vol: g.vol })),
+    endIdx: groups.map(g => g.lastIdx),
+  };
+}
+
+/** Days since 1970-01-01 (IST) -> bucket id: the day itself, its Monday-start week, or its calendar month. */
+function calendarKey(istDay: number, n: number): number {
+  if (n === DAY_MIN) return istDay;
+  if (n === WEEK_MIN) return Math.floor((istDay + 3) / 7); // 1970-01-01 was a Thursday: +3 puts weeks on Mondays
+  const d = new Date(istDay * 86_400_000);
+  return d.getUTCFullYear() * 12 + d.getUTCMonth();
+}
+
+/**
+ * Day / week / month bars: close of the bucket's last bar, summed volume, stamped with the bucket's first bar. A bucket is closed once
+ * a later one exists; the last day is also closed once its last minute is the session's (a week or month stays forming until the next opens).
+ */
+function resampleCalendar(bars: Bar[], n: number, sessionCloseMin = 15 * 60 + 30, keepForming = false): { bars: Bar[]; endIdx: number[] } {
+  type G = { key: number; first: number; vol: number; last: Bar; lastIdx: number; lastMinute: number };
+  const groups: G[] = [];
+  bars.forEach((b, i) => {
+    const ist = b.t + IST_OFFSET_S;
+    const key = calendarKey(Math.floor(ist / 86_400), n);
+    const minute = Math.floor((ist % 86_400) / 60);
+    const tail = groups[groups.length - 1];
+    if (tail && tail.key === key) { tail.vol += b.vol; tail.last = b; tail.lastIdx = i; tail.lastMinute = minute; }
+    else groups.push({ key, first: b.t, vol: b.vol, last: b, lastIdx: i, lastMinute: minute });
+  });
+  const tail = groups[groups.length - 1];
+  if (tail && !keepForming && !(n === DAY_MIN && tail.lastMinute >= sessionCloseMin - 1)) groups.pop();
+  return {
+    bars: groups.map(g => ({ t: g.first, ce: g.last.ce, pe: g.last.pe, straddle: g.last.straddle, vol: g.vol })),
     endIdx: groups.map(g => g.lastIdx),
   };
 }

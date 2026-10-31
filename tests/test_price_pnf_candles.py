@@ -47,5 +47,37 @@ class ParseLegs(unittest.TestCase):
                 m.parse_legs(bad)
 
 
+class StoredHistory(unittest.TestCase):
+    def test_stored_bars_are_ist_epoch_and_api_wins_on_overlap(self):
+        import tempfile
+        m = _load()
+        idx = pd.DatetimeIndex(["2026-06-08 09:15:00", "2026-06-08 09:16:00"], name="Datetime")
+        raw = pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": [10.0, 11.0], "Volume": [5.0, 6.0]}, index=idx)
+        with tempfile.TemporaryDirectory() as d:
+            raw.to_parquet(os.path.join(d, "ABC.parquet"))
+            stored = m.load_stored_1min("ABC", d)
+            self.assertTrue(m.load_stored_1min("NOPE", d).empty)
+        t0 = int(pd.Timestamp("2026-06-08 09:15:00", tz="Asia/Kolkata").timestamp())
+        self.assertEqual(list(stored["start_Time"]), [t0, t0 + 60])
+        fresh = pd.DataFrame({"start_Time": [t0 + 60, t0 + 120], "close": [99.0, 12.0], "volume": [1, 2]})
+        from straddle_pnf_candles import _leg
+        out = _leg(m.stitch_history(stored, fresh)).sort_values("t")
+        self.assertEqual(list(out["close"]), [10.0, 99.0, 12.0])
+
+
+class DailyPrefix(unittest.TestCase):
+    def test_only_days_before_the_first_minute_bar_at_1529_ist(self):
+        import tempfile
+        m = _load()
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "ABC_Daily_2Y.csv"), "w") as f:
+                f.write("Datetime,Open,High,Low,Close,Volume\n2026-06-04,1,1,1,10,100\n2026-06-05,1,1,1,0,0\n2026-06-08,1,1,1,12,200\n")
+            first = int(pd.Timestamp("2026-06-08 09:15:00", tz="Asia/Kolkata").timestamp())
+            out = m.load_daily_before("ABC", first, d)
+            self.assertTrue(m.load_daily_before("NOPE", first, d).empty)
+        self.assertEqual(list(out["close"]), [10.0])
+        self.assertEqual(int(out["start_Time"][0]), int(pd.Timestamp("2026-06-04 15:29:00", tz="Asia/Kolkata").timestamp()))
+
+
 if __name__ == "__main__":
     unittest.main()

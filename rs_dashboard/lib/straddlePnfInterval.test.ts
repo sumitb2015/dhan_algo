@@ -71,3 +71,23 @@ test('a full 375-minute session gives 125 / 75 / 25 bars at 3 / 5 / 15 minutes',
 test('empty input gives no bars', () => {
   assert.deepEqual(resample([], 5), { bars: [], endIdx: [] });
 });
+
+test('30 min / 1 hr / 4 hr cut the 375-minute session, the last bucket ending at the 15:30 bell', () => {
+  const day = minutes(DAY1, 375);
+  const close = 15 * 60 + 30;
+  assert.equal(resample(day, 30, close).bars.length, 13);
+  assert.equal(resample(day, 60, close).bars.length, 7);
+  assert.deepEqual(resample(day, 240, close).bars.map(x => x.t), [DAY1, DAY1 + 240 * 60]);
+});
+
+test('day / week / month bars group by IST calendar, the open one stays forming', () => {
+  const MON = Date.UTC(2026, 9, 26, 3, 45) / 1000; // Mon 26 Oct
+  const bars = [...minutes(DAY1, 375), ...minutes(DAY2, 375), ...minutes(MON, 375)];
+  assert.equal(resample(bars, 1440).bars.length, 3);                // each day closed at 15:29
+  const weeks = resample(bars, 10080);
+  assert.deepEqual(weeks.bars.map(x => x.t), [DAY1]);               // Thu+Fri; Monday's week is still forming
+  assert.equal(weeks.bars[0].vol, 7500);
+  assert.equal(resample(bars, 10080, undefined, true).bars.length, 2);
+  assert.equal(resample(bars, 43200, undefined, true).bars.length, 1);
+  assert.equal(resample(bars, 43200).bars.length, 0);
+});

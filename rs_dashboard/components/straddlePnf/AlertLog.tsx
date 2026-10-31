@@ -1,5 +1,7 @@
 'use client';
 
+import { intervalLabel } from '@/lib/straddlePnfInterval';
+
 export type LogEntry = {
   id: string;
   /** Epoch seconds of the bar that broke the previous top / bottom. */
@@ -25,7 +27,7 @@ export default function AlertLog({ entries, interval = 1 }: { entries: LogEntry[
         <span className="text-[10px] font-mono text-zinc-500">last {entries.length} of 30</span>
       </div>
       {entries.length === 0 ? (
-        <p className="px-3 py-3 text-xs text-zinc-400">No alerts yet. {`Signals fire when a ${interval}-min bar closes through the previous top or bottom.`}</p>
+        <p className="px-3 py-3 text-xs text-zinc-400">No alerts yet. {`Signals fire when a ${intervalLabel(interval)} bar closes through the previous top or bottom.`}</p>
       ) : (
         <ul className="max-h-72 overflow-y-auto divide-y divide-zinc-800">
           {entries.map(e => {

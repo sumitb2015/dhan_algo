@@ -14,6 +14,8 @@ const PRICE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'price_pnf_cand
 
 /** Completed sessions of history; the scripts add today's bars on top, so the chart always has 10 full days behind it. */
 const SESSIONS = 10;
+/** Cash equities show every stored session (the script stitches the downloaded 1-min history to the live API window). */
+const EQUITY_SESSIONS = 5000;
 const CACHE_TTL = 20_000;
 /** Every contract (underlying x expiry x strike x side) is its own key, so the cache is pruned on write and capped. */
 const CACHE_MAX = 40;
@@ -40,11 +42,11 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({ success: false, error: 'Use mode=price&kind=index|equity&symbol=… or mode=contract&kind=futures|options&underlying=…&expiry=…' }, { status: 400 });
 }
 
-async function run(key: string, args: string[], fallbackName: string, contracts?: PnfLegInput[]) {
+async function run(key: string, args: string[], fallbackName: string, contracts?: PnfLegInput[], sessions = SESSIONS) {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.ts < CACHE_TTL) return NextResponse.json(hit.body);
   try {
-    const out = await dedupe(`straddle-pnf:${key}`, () => runPythonJson<ScriptOut>(PRICE_SCRIPT, [...args, '--sessions', String(SESSIONS)], 90_000));
+    const out = await dedupe(`straddle-pnf:${key}`, () => runPythonJson<ScriptOut>(PRICE_SCRIPT, [...args, '--sessions', String(sessions)], 90_000));
     if (out.error) return NextResponse.json({ success: false, error: out.error }, { status: 500 });
     const bars = out.bars ?? {};
     const lastT = Math.max(0, ...Object.values(bars).map(b => (b.length ? b[b.length - 1].t : 0)));
@@ -70,7 +72,7 @@ async function priceResponse(kind: string, symbol: string) {
   const contracts: PnfLegInput[] | undefined = eq
     ? [{ segment: 'NSE_EQ', securityId: eq.securityId, instrument: 'EQUITY', displayName: eq.name, lot: 1, expiry: '' }]
     : undefined;
-  return run(`price:${kind}:${symbol}`, ['--kind', kind, '--symbol', symbol], symbol, contracts);
+  return run(`price:${kind}:${symbol}`, ['--kind', kind, '--symbol', symbol], symbol, contracts, kind === 'equity' ? EQUITY_SESSIONS : SESSIONS);
 }
 
 /** A future (one leg), one option (one leg) or a CE + PE straddle (two legs, CE first) on one strike. */
