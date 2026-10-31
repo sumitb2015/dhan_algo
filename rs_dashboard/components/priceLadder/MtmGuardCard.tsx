@@ -39,10 +39,13 @@ function Box({ label, value, onChange, step = 100 }: { label: string; value: str
   );
 }
 
-export function MtmGuardCard({ broker, real, ladderId = 1, mtm, guard, post }: {
+export function MtmGuardCard({ broker, real, ladderId = 1, mtm, guard, post, help, scopeName, tripNote }: {
   broker: string; real: boolean; ladderId?: 1 | 2; mtm: number | null; guard?: LadderGuard;
   post: (body: Record<string, unknown>) => Promise<boolean>;
+  /** Another page's wording (the P&F page's guard is held by its open tab, per chart). */
+  help?: string; scopeName?: string; tripNote?: string;
 }) {
+  const scope = scopeName ?? `Ladder ${ladderId}`;
   const [draft, setDraft] = useState<Draft>(() => toDraft(guard));
   const [dirty, setDirty] = useState(false);
   const on = !!guard?.on;
@@ -97,8 +100,8 @@ export function MtmGuardCard({ broker, real, ladderId = 1, mtm, guard, post }: {
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 flex flex-col gap-1.5 text-xs">
       <div className={row}>
-        <span className="flex items-center gap-1.5 text-[13px] font-semibold tracking-tight text-zinc-100"><ShieldCheck className="w-3.5 h-3.5 text-emerald-400" aria-hidden /> MTM guard <span className="inline-flex text-zinc-500" title={`${HELP} This guard covers only ladder ${ladderId} on ${broker} ${real ? 'REAL' : 'SIM'}.`} aria-label={HELP} role="img"><Info className="w-3 h-3" aria-hidden /></span></span>
-        <span className={`font-mono font-semibold ${mtm == null ? 'text-zinc-500' : mtm >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title={`Ladder ${ladderId}'s own P&L for this broker and mode`}>{mtm == null ? '—' : rs(mtm)}</span>
+        <span className="flex items-center gap-1.5 text-[13px] font-semibold tracking-tight text-zinc-100"><ShieldCheck className="w-3.5 h-3.5 text-emerald-400" aria-hidden /> MTM guard <span className="inline-flex text-zinc-500" title={help ?? `${HELP} This guard covers only ladder ${ladderId} on ${broker} ${real ? 'REAL' : 'SIM'}.`} aria-label={help ?? HELP} role="img"><Info className="w-3 h-3" aria-hidden /></span></span>
+        <span className={`font-mono font-semibold ${mtm == null ? 'text-zinc-500' : mtm >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title={`${scope}'s own P&L for this broker and mode`}>{mtm == null ? '—' : rs(mtm)}</span>
       </div>
       <div className={row}><span className={lab}>Target</span><Box label="MTM target in rupees" value={draft.target} onChange={set('target')} /></div>
       <div className={row}><span className={lab}>Stop-loss</span><Box label="MTM stop-loss in rupees" value={draft.stop} onChange={set('stop')} /></div>
@@ -131,7 +134,7 @@ export function MtmGuardCard({ broker, real, ladderId = 1, mtm, guard, post }: {
         <p className="text-[10px] text-amber-300">{confirmNow} — switching on exits everything straight away. Press Switch on again to confirm, or change the level.</p>
       )}
       {on && guard?.tripped && (
-        <p className="text-[10px] text-amber-300">Tripped: {guard.tripped}. Exiting — it stays on until every position and order of this broker and mode is closed (a rejected or held exit is retried; a long waits for its short).</p>
+        <p className="text-[10px] text-amber-300">Tripped: {guard.tripped}. {tripNote ?? 'Exiting — it stays on until every position and order of this broker and mode is closed (a rejected or held exit is retried; a long waits for its short).'}</p>
       )}
       {!on && guard?.firedReason && (
         <p className="text-[10px] text-amber-300">Fired: {guard.firedReason}. Everything was exited; switch on to guard again.</p>

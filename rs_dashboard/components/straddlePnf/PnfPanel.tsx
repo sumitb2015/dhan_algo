@@ -65,9 +65,21 @@ export type PnfPanelProps = {
   onToggleMarkers?: () => void;
   /** The ladder-style B / S rail beside the price axis (absent: no rail, e.g. an index chart). */
   rail?: PnfRail;
+  /** Previous-session CPR / pivot / PDH-PDL lines and their show / hide switches (absent: no levels, e.g. a straddle). */
+  levels?: PnfLevels;
 };
 
 import type { LadderPosition } from '@/lib/pnfLadderPosition';
+
+export type PnfLevels = {
+  lines: { key: string; label: string; price: number; tone: 'cpr' | 'r' | 's' | 'pd' }[];
+  /** The CPR band (TC to BC), drawn as a tinted strip. */
+  band: { tc: number; bc: number } | null;
+  show: { cpr: boolean; pivots: boolean; pd: boolean };
+  session: string;
+  onToggle: (k: 'cpr' | 'pivots' | 'pd') => void;
+};
+const LEVEL_TONE: Record<'cpr' | 'r' | 's' | 'pd', string> = { cpr: 'stroke-violet-400 fill-violet-400', r: 'stroke-red-300 fill-red-300', s: 'stroke-emerald-300 fill-emerald-300', pd: 'stroke-amber-400 fill-amber-400' };
 
 /** A resting order drawn on the chart (its line, its tag, and its handle in the rail). */
 export type RailOrder = {
@@ -76,6 +88,10 @@ export type RailOrder = {
   state: string; mode: 'PAPER' | 'REAL';
   /** Its outcome is unknown (or its send never finished): a ? on the tag lets the user settle it (onCancel asks first). */
   resolvable?: boolean;
+  /** A bracket exit (stop-loss / target) or the entry that carries a bracket / cover. */
+  role?: 'sl' | 'target';
+  trailPts?: number;
+  bracket?: 'Bracket' | 'Cover';
 };
 export type PnfRail = {
   orders: RailOrder[];
@@ -126,6 +142,14 @@ const sessionOfT = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString(
 const shortDate = (iso: string) => sessionLabel(iso).slice(4);
 
 const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950';
+
+/** One line naming a resting order: a bracket exit says SL / TGT and its level, an entry that carries a bracket says so. */
+function orderText(o: RailOrder, level?: number): string {
+  const p = o.mode === 'PAPER' ? 'P ' : '';
+  const st = o.state === 'working' ? '' : ` ${o.state.toUpperCase()}`;
+  if (o.role) return `${p}${o.role === 'sl' ? 'SL' : 'TGT'}${o.trailPts ? ' trail' : ''} ${o.lots}L @ ${fmt(level ?? (o.role === 'sl' ? o.trigger ?? o.level : o.level), 2)}${st}`;
+  return `${p}${o.side} ${o.kind === 'limit' ? 'LMT' : 'SL'} ${o.lots}L ${o.kind === 'stop' && o.trigger !== undefined ? `${fmt(o.trigger, 2)}→` : ''}${fmt(level ?? o.price, 2)}${o.bracket ? (o.bracket === 'Cover' ? ' +CVR' : ' +BKT') : ''}${st}`;
+}
 
 type RailDrag = { id: string; level: number; start: number } | null;
 
@@ -247,7 +271,7 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
             <rect x={colX(o.side) + 1.5} y={y - 9} width={COL - 3} height={18} rx={o.kind === 'stop' ? 9 : 4}
                   className={`${buy ? 'fill-emerald-500 stroke-emerald-200' : 'fill-red-500 stroke-red-200'}`} strokeWidth={1} opacity={movable ? 1 : 0.5} />
             {movable && [-3, 0, 3].map(dy => <line key={dy} x1={colX(o.side) + 6} x2={colX(o.side) + 10} y1={y + dy} y2={y + dy} className="stroke-oncolor" strokeWidth={1} opacity={0.7} />)}
-            <text x={colX(o.side) + COL / 2 + (movable ? 4 : 0)} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={10} fontWeight={800} pointerEvents="none">{o.kind === 'stop' ? `SL ${o.lots}L` : `${o.lots}L`}</text>
+            <text x={colX(o.side) + COL / 2 + (movable ? 4 : 0)} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={10} fontWeight={800} pointerEvents="none">{o.role === 'target' ? `TP ${o.lots}L` : o.kind === 'stop' ? `SL ${o.lots}L` : `${o.lots}L`}</text>
             <title>{`${o.side} ${o.kind === 'limit' ? 'LIMIT' : 'SL-limit'} ${o.lots}L at ${fmt(o.level, 2)}${movable ? ' — drag to move' : ` (${o.state})`}`}</title>
           </g>
         );
@@ -278,7 +302,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, levels }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   const liveValue = live ? live.ce + live.pe : null;
@@ -655,7 +679,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
           {rail.orders.map(o => (
             <span key={o.id} data-testid="pnf-orders-chip"
                   className={`inline-flex items-center gap-1 h-6 pl-2 pr-1 rounded border text-[11px] font-mono font-bold bg-zinc-900 ${o.side === 'BUY' ? 'border-emerald-500/50 text-emerald-400' : 'border-red-500/50 text-red-400'}`}>
-              {`${o.mode === 'PAPER' ? 'P ' : ''}${o.side === 'BUY' ? 'BUY' : 'SELL'} ${o.kind === 'limit' ? 'LMT' : 'SL'} ${o.lots}L ${o.kind === 'stop' && o.trigger !== undefined ? `${fmt(o.trigger, 2)}→` : ''}${fmt(o.price, 2)}${o.state === 'working' ? '' : ` ${o.state.toUpperCase()}`}`}
+              {orderText(o)}
               {(o.state === 'working' || o.resolvable) && (
                 <button type="button" onClick={() => rail.onCancel(o.id)} aria-label={`${o.state === 'working' ? 'Cancel' : 'Settle'} ${o.side} ${o.kind === 'limit' ? 'limit' : 'SL-limit'} at ${fmt(o.level, 2)}`}
                         className={`w-5 h-5 rounded text-zinc-300 hover:bg-zinc-700 ${FOCUS_RING}`}>×</button>
@@ -894,6 +918,27 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 });
               })()}
 
+              {/* previous-session levels: the CPR band, then a dotted line + label per level (those inside the drawn price range) */}
+              {levels && (() => {
+                const inRange = (p: number) => p >= yMin && p <= yMax;
+                return (
+                  <g data-testid="pnf-levels" pointerEvents="none">
+                    {levels.band && inRange(levels.band.tc) && inRange(levels.band.bc) && (
+                      <rect x={0} y={yOf(levels.band.tc)} width={plotW} height={Math.max(1, yOf(levels.band.bc) - yOf(levels.band.tc))} className="fill-violet-500/10" />
+                    )}
+                    {levels.lines.filter(l => inRange(l.price)).map(l => {
+                      const y = yOf(l.price);
+                      return (
+                        <g key={l.key} data-level={l.key}>
+                          <line x1={0} x2={plotW} y1={y} y2={y} strokeWidth={1} strokeDasharray="2 4" className={LEVEL_TONE[l.tone]} opacity={0.8} />
+                          <text x={Math.max(4, viewLeft + 4)} y={y - 3} fontSize={10} fontWeight={700} className={`${LEVEL_TONE[l.tone]} font-mono`} stroke="none">{`${l.label} ${fmt(l.price, 2)}`}</text>
+                        </g>
+                      );
+                    })}
+                  </g>
+                );
+              })()}
+
               {/* what a click on the rail row under the pointer would place: the side, the kind and the price */}
               {rail && railHot && !railDrag && (() => {
                 const y = yOf(railHot.p);
@@ -933,7 +978,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 const level = railDrag?.id === o.id ? railDrag.level : o.level;
                 const y = yOf(level);
                 const buy = o.side === 'BUY';
-                const text = `${o.mode === 'PAPER' ? 'P ' : ''}${o.side} ${o.kind === 'limit' ? 'LMT' : 'SL'} ${o.lots}L ${o.kind === 'stop' && o.trigger !== undefined ? `${fmt(o.trigger, 2)}→` : ''}${fmt(railDrag?.id === o.id ? level : o.price, 2)}${o.state === 'working' ? '' : ` ${o.state.toUpperCase()}`}`;
+                const text = orderText(o, railDrag?.id === o.id ? level : undefined);
                 const w = text.length * 6 + 22;
                 const x = rail.alignLeft ? Math.max(4, viewLeft + 6) : Math.max(4, Math.min(plotW, viewRight ?? plotW) - w - 6);
                 const live = o.state === 'working';
@@ -1023,6 +1068,12 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         <ZoomButton label="Zoom out" onClick={() => zoomBy(0.7)}><Minus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Fit chart to panel" onClick={() => resetView()}><RotateCcw className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Zoom in" onClick={() => zoomBy(1 / 0.7)}><Plus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        {levels && (['cpr', 'pivots', 'pd'] as const).map(k => (
+          <ZoomButton key={k} label={`${levels.show[k] ? 'Hide' : 'Show'} ${k === 'cpr' ? 'CPR' : k === 'pivots' ? 'pivots (R1-R4, S1-S4)' : 'previous day high / low / close'}`}
+                      onClick={() => levels.onToggle(k)} pressed={levels.show[k]}>
+            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{k === 'cpr' ? 'CPR' : k === 'pivots' ? 'R/S' : 'PD'}</span>
+          </ZoomButton>
+        ))}
         {rail?.onToggleLines && (
           <ZoomButton label={rail.linesShown !== false ? 'Hide order and position lines' : 'Show order and position lines'} onClick={rail.onToggleLines} pressed={rail.linesShown === false}>
             {rail.linesShown !== false ? <EyeOff className="w-3 h-3" aria-hidden="true" /> : <Eye className="w-3 h-3" aria-hidden="true" />}

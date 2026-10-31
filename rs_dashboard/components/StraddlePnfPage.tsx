@@ -36,6 +36,11 @@ import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent } from './st
 import { autoDaySummary, autoMarkers } from '@/lib/pnfAutoLedger';
 import AutoControls from './straddlePnf/AutoControls';
 import { usePnfPositions } from './straddlePnf/usePnfPositions';
+import { usePnfGuard } from './straddlePnf/usePnfGuard';
+import PnfOrderStyle, { DEFAULT_STYLE, type StyleState } from './straddlePnf/PnfOrderStyle';
+import { cleanBracketSpec } from '@/lib/pnfBracket';
+import { computePivots, pivotChips } from '@/lib/pivotLevels';
+import { prevSessionHlc } from '@/lib/pnfCpr';
 import { useChartLegs, usePnfResting, type RailChart, type RestingEvent } from './straddlePnf/usePnfResting';
 import { applyPaperFill, FLAT_LEG, type PaperLeg, type PnfProduct } from '@/lib/pnfOrderLogic';
 import { needsResolve, type RestingRow } from '@/lib/pnfRestingLedger';
@@ -65,6 +70,8 @@ const AUTO_LOTS_KEY = 'straddle-pnf-auto-lots-';
 /** Per chart: '0' = the B / S trade markers are hidden. */
 const MARKERS_SHOWN_KEY = 'straddle-pnf-markers-shown-';
 const LINES_SHOWN_KEY = 'straddle-pnf-lines-shown-';
+const LEVELS_SHOW_KEY = 'straddle-pnf-levels-show';
+const STYLE_KEY = 'straddle-pnf-order-style';
 const TAG_LEFT_KEY = 'straddle-pnf-tag-left-';
 const DISARMED: AutoArm = { on: false, mode: 'PAPER', watermarkT: 0 };
 
@@ -175,6 +182,10 @@ function StraddlePnfPage() {
   const [booksOpen, setBooksOpen] = useState(false);
   const [autoArm, setAutoArm] = useState<Record<ChartId, AutoArm>>({ 1: DISARMED, 2: DISARMED });
   const [autoLots, setAutoLots] = useState<Record<ChartId, number>>({ 1: 1, 2: 1 });
+  // Previous-session levels on the charts: CPR (P / TC / BC), pivots (R1-R4 / S1-S4) and the previous day's high / low / close.
+  const [levelsShow, setLevelsShow] = useState<{ cpr: boolean; pivots: boolean; pd: boolean }>({ cpr: true, pivots: false, pd: false });
+  // Single | Bracket | Cover for the next entry (trade bar and chart rail), with its points; remembered, never armed silently.
+  const [orderStyle, setOrderStyle] = useState<StyleState>(DEFAULT_STYLE);
   const [markersShown, setMarkersShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
   // Order / position lines on the chart (like Kite's price lines) can be hidden, and their tags aligned left or right.
   const [linesShown, setLinesShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
@@ -229,6 +240,8 @@ function StraddlePnfPage() {
     const lotsOf = (c: ChartId) => { const n = Number(readPref(`${AUTO_LOTS_KEY}${c}`)); return Number.isInteger(n) && n >= 1 && n <= 20 ? n : 1; };
     setAutoLots({ 1: lotsOf(1), 2: lotsOf(2) });
     setMarkersShown({ 1: readPref(`${MARKERS_SHOWN_KEY}1`) !== '0', 2: readPref(`${MARKERS_SHOWN_KEY}2`) !== '0' });
+    try { const raw = readPref(LEVELS_SHOW_KEY); if (raw) { const j = JSON.parse(raw); setLevelsShow({ cpr: j.cpr !== false, pivots: j.pivots === true, pd: j.pd === true }); } } catch { /* keep the defaults */ }
+    try { const raw = readPref(STYLE_KEY); if (raw) { const j = JSON.parse(raw); setOrderStyle({ style: j.style === 'Bracket' || j.style === 'Cover' ? j.style : 'Single', tgt: String(j.tgt ?? ''), sl: String(j.sl ?? ''), trail: String(j.trail ?? ''), trailOn: j.trailOn === true }); } } catch { /* keep Single */ }
     setLinesShown({ 1: readPref(`${LINES_SHOWN_KEY}1`) !== '0', 2: readPref(`${LINES_SHOWN_KEY}2`) !== '0' });
     setTagLeft({ 1: readPref(`${TAG_LEFT_KEY}1`) === '1', 2: readPref(`${TAG_LEFT_KEY}2`) === '1' });
     try {
@@ -345,7 +358,11 @@ function StraddlePnfPage() {
     };
   };
   const railCharts = ([1, 2] as const).map(railChartOf).filter((x): x is RailChart => x !== null);
-  const positions = usePnfPositions({ charts: railCharts, broker, mode: tradeMode, paper });
+  const positionsInfo = usePnfPositions({ charts: railCharts, broker, mode: tradeMode, paper });
+  const positions = positionsInfo.byKey;
+  const changeStyle = (s: StyleState) => { setOrderStyle(s); savePref(STYLE_KEY, JSON.stringify(s)); };
+  /** The next entry's bracket: a spec, null (Single), or why it is not ready (then nothing is sent). */
+  const bracketSpecNow = () => cleanBracketSpec(orderStyle.style, orderStyle.tgt, orderStyle.sl, orderStyle.trailOn ? orderStyle.trail : undefined);
   const onRestingEvent = (e: RestingEvent) => {
     if (e.kind === 'warn') { toast.warning(e.text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); return; }
     if (e.kind === 'info') { toast(e.text); return; }
@@ -365,8 +382,52 @@ function StraddlePnfPage() {
     });
   };
   const resting = usePnfResting({
-    charts: railCharts, broker, mode: tradeMode, lots: sizing.lots, product: sizing.product, leaderRef, onEvent: onRestingEvent, onPaperFill, instant,
+    charts: railCharts, broker, mode: tradeMode, lots: sizing.lots, product: sizing.product, leaderRef, onEvent: onRestingEvent, onPaperFill, instant, positions, positionsLoaded: positionsInfo.loaded,
   });
+  // MTM guard (page-held, per chart): on a trip, cancel the chart's orders and bracket exits, then square its position off.
+  const exitChart = async (c: ChartId, reason: string) => {
+    const rc = railCharts.find(x => x.chart === c);
+    if (!rc) return;
+    await resting.cancelAllFor(rc.targetKey);
+    if (tradeMode === 'PAPER') {
+      const legs = paper[rc.targetKey];
+      if (!legs?.some(l => l.lots !== 0) || rc.legPrices.some(p => p == null || p <= 0)) return;      // nothing open / no price yet: retried
+      const lotsOpen = Math.max(...legs.map(l => Math.abs(l.lots)));
+      const action = legs[0].lots > 0 ? 'SELL' : 'BUY';
+      setPaper(prev => {
+        const cur = prev[rc.targetKey];
+        return cur ? { ...prev, [rc.targetKey]: cur.map((l, i) => applyPaperFill(l, -l.lots, rc.legPrices[i] ?? 0, rc.unitsPerLot[i] ?? 1)) } : prev;
+      });
+      handleTradeExecuted({ id: `guard-${rc.chart}-${Math.floor(nowSec())}`, t: Math.floor(nowSec()), action, price: rc.price ?? 0, lots: lotsOpen, mode: 'PAPER', estimate: false }, rc.target);
+      chime({ kind: 'manual', outcome: 'placed', close: true });
+      return;
+    }
+    try {
+      const res = await fetch('/api/straddle-pnf/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ broker, mode: 'REAL', target: rc.target, close: true }) });
+      const j = await res.json() as { success?: boolean; error?: string; message?: string; outcome?: string };
+      if (j.success) { toast.success(`MTM guard squared off chart ${c}: ${reason}`); chime({ kind: 'manual', outcome: 'placed', close: true }); }
+      else if (res.status !== 409) toast.warning(`MTM guard exit: ${j.error ?? j.message ?? 'not confirmed'} - it is retried while the position is open`, { duration: 15_000 });
+    } catch { toast.warning('MTM guard exit: no clean reply - check Positions; it is retried', { duration: 15_000 }); }
+  };
+  const guards = usePnfGuard({
+    charts: railCharts.map(c => ({ chart: c.chart, targetKey: c.targetKey })), positions, positionsLoaded: positionsInfo.loaded,
+    scope: `${broker}:${tradeMode}`, leaderRef, exitChart,
+    onEvent: (c, kind, text) => { if (kind === 'warn') { toast.warning(text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); } else toast(text); void c; },
+  });
+  const levelsFor = (c: ChartId) => {
+    const target = c === 2 ? target2 : target1;
+    // No CPR on a straddle: the combined CE + PE premium has no meaningful central pivot range.
+    if (target.kind === 'options' && target.side === 'STRADDLE') return undefined;
+    const prev = prevSessionHlc((c === 2 ? feed2 : feed1).bars, istToday());
+    const set = prev ? computePivots(prev.high, prev.low, prev.close, 'classic') : null;
+    if (!prev || !set) return undefined;
+    const lines: { key: string; label: string; price: number; tone: 'cpr' | 'r' | 's' | 'pd' }[] = pivotChips(set, levelsShow).map(ch => ({ key: ch.key, label: ch.label, price: ch.price, tone: ch.group }));
+    if (levelsShow.pd) lines.push({ key: 'pdh', label: 'PDH', price: prev.high, tone: 'pd' }, { key: 'pdl', label: 'PDL', price: prev.low, tone: 'pd' }, { key: 'pdc', label: 'PDC', price: prev.close, tone: 'pd' });
+    return {
+      lines, band: levelsShow.cpr ? { tc: set.tc, bc: set.bc } : null, show: levelsShow, session: prev.session,
+      onToggle: (k: 'cpr' | 'pivots' | 'pd') => setLevelsShow(v => { const next = { ...v, [k]: !v[k] }; savePref(LEVELS_SHOW_KEY, JSON.stringify(next)); return next; }),
+    };
+  };
   const railFor = (c: ChartId) => {
     const rc = railCharts.find(x => x.chart === c);
     if (!rc) return undefined;
@@ -386,10 +447,15 @@ function StraddlePnfPage() {
       onToggleArm: () => setRailUnlocked(v => !v),
       onCancelAll: () => { for (const r of rows) if (r.state === 'working') void resting.cancel(r); },
       orders: rows.map(r => ({
-        id: r.id, side: r.side, kind: r.kind, level: r.level, price: r.price, trigger: r.trigger, lots: r.lots, state: r.state, mode: r.mode,
+        id: r.id, side: r.side, kind: r.kind, level: r.level, price: r.price, trigger: r.trigger, lots: r.lots, state: r.state, mode: r.mode, role: r.role, trailPts: r.trailPts, bracket: r.bracket?.style,
         resolvable: needsResolve(r, now),
       })),
-      onPlace: (side: 'BUY' | 'SELL', level: number) => { if (railArmed) void resting.place(rc, side, level); },
+      onPlace: (side: 'BUY' | 'SELL', level: number) => {
+        if (!railArmed) return;
+        const spec = bracketSpecNow();
+        if (typeof spec === 'string') { toast.error(spec); return; }            // Bracket / Cover not filled in: nothing is placed
+        void resting.place(rc, side, level, spec);
+      },
       onModify: (id: string, level: number) => { const r = byId(id); if (r) void resting.modify(r, level); },
       onCancel: (id: string) => { const r = byId(id); if (r) void resting.cancel(r); },
     };
@@ -517,6 +583,7 @@ function StraddlePnfPage() {
       onActivate: dual ? () => activate(c) : undefined,
       markersShown: markersShown[c],
       rail: railFor(c),
+      levels: levelsFor(c),
       onToggleMarkers: () => {
         const next = !markersShown[c];
         savePref(`${MARKERS_SHOWN_KEY}${c}`, next ? '1' : '0');
@@ -669,6 +736,12 @@ function StraddlePnfPage() {
             paper={paper}
             setPaper={setPaper}
             onSizing={onSizing}
+            bracketSpec={bracketSpecNow}
+            onEntered={e => {
+              const rc = railCharts.find(x => x.chart === active);
+              if (rc) void resting.armBracket({ chart: rc.chart, target: rc.target, targetKey: rc.targetKey, side: e.action, lots: e.lots, mode: e.mode, product: e.product, bracket: e.spec }, e.price);
+            }}
+            onSquaredOff={() => { const rc = railCharts.find(x => x.chart === active); if (rc) void resting.cancelBracketsFor(rc.targetKey); }}
           />
         </div>
       )}
@@ -676,6 +749,16 @@ function StraddlePnfPage() {
       <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 pt-2 pb-2">
         {loadErrors.map(e => <p key={e as string} role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{e}</p>)}
         {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={activeSettings.interval} /></div>}
+        <PnfOrderStyle
+            value={orderStyle} onChange={changeStyle}
+            guardOn={[1, 2].some(n => guards.guardOf(n).on)}
+            guard={(() => {
+              const rc = railCharts.find(x => x.chart === active);
+              if (!rc) return undefined;
+              const gc = { chart: rc.chart, targetKey: rc.targetKey };
+              return { broker: broker, real: tradeMode === 'REAL', chart: rc.chart, chartLabel: `Chart ${rc.chart} · ${rc.target.symbol}`, mtm: guards.mtmOf(gc), guard: guards.guardOf(rc.chart), post: guards.post(gc) };
+            })()}
+          />
         <div
           className={`flex-1 min-h-0 grid gap-3 ${dual ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}
           style={{ gridTemplateRows: 'minmax(0, 1fr)' }}

@@ -13,7 +13,7 @@ const POLL_MS = 5_000;
 
 export function usePnfPositions({ charts, broker, mode, paper }: {
   charts: RailChart[]; broker: Broker; mode: 'PAPER' | 'REAL'; paper: Record<string, PaperLeg[]>;
-}): Record<string, LadderPosition | null> {
+}): { byKey: Record<string, LadderPosition | null>; /** REAL: the broker book has been read at least once for this broker (PAPER: always). */ loaded: boolean } {
   const [rows, setRows] = useState<{ broker: string; rows: Array<Record<string, unknown>> } | null>(null);
   const sig = charts.map(c => c.keys.join(',')).join('|');
   useEffect(() => {
@@ -30,7 +30,7 @@ export function usePnfPositions({ charts, broker, mode, paper }: {
     return () => { dead = true; clearInterval(id); };
   }, [mode, broker, sig]);
 
-  return useMemo(() => {
+  const byKey = useMemo(() => {
     const out: Record<string, LadderPosition | null> = {};
     for (const c of charts) {
       if (mode === 'PAPER') {
@@ -45,4 +45,5 @@ export function usePnfPositions({ charts, broker, mode, paper }: {
     }
     return out;
   }, [charts, mode, paper, rows, broker]);
+  return { byKey, loaded: mode === 'PAPER' || (rows !== null && rows.broker === broker) };
 }

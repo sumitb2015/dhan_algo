@@ -10,14 +10,17 @@ import { EMPTY_RESTING, applyRestingOp, type RestingLedger, type RestingOp } fro
 const ist = (hh: number, mm: number, ss = 0) => Date.UTC(2026, 9, 30, hh, mm, ss) - 5.5 * 3600_000;
 type Body = { mode?: string; action?: string; lots?: number; orderType?: string; price?: number; trigger?: number; brokerOp?: { op: string; orderId: string } };
 
-async function install(page: Page) {
+async function install(page: Page, opts: { prevSession?: boolean } = {}) {
   const orders: Body[] = [];
   const state = {
     ledger: EMPTY_RESTING as RestingLedger, tick: { ltp: 99.33, at: ist(10, 30, 10) }, book: [] as Record<string, unknown>[],
     /** Set: the next resting placement gets no clean reply (the route's 504 / UNKNOWN). */
     unknownNext: false,
   };
-  const bars = [100, 99.5, 100].map((p, i) => ({ t: ist(10, 27 + i) / 1000, ce: p, pe: 0, straddle: p, vol: 10 }));
+  const today = [100, 99.5, 100].map((p, i) => ({ t: ist(10, 27 + i) / 1000, ce: p, pe: 0, straddle: p, vol: 10 }));
+  // Yesterday (29 Oct): closes 99.8 .. 100.6, last 100.2 -> CPR levels exist only when there is an earlier session.
+  const yday = [99.8, 100.6, 100, 100.2].map((p, i) => ({ t: (Date.UTC(2026, 9, 29, 4, 0 + i * 10)) / 1000, ce: p, pe: 0, straddle: p, vol: 10 }));
+  const bars = opts.prevSession ? [...yday, ...today] : today;
   await page.route('**/api/**', async (route: Route) => {
     const req = route.request();
     const u = new URL(req.url());
@@ -368,4 +371,91 @@ test('PAPER: order and position lines can be hidden (the orders bar keeps listin
   await expect(panel.getByTestId('pnf-orders-chip')).toHaveCount(1);
   await panel.getByRole('button', { name: 'Show order and position lines' }).click();
   await expect(panel.getByTestId('pnf-order-line')).toHaveCount(1);
+});
+
+test('CPR: previous-session CPR lines are drawn on a futures chart, with switches to hide / show CPR, pivots and PDH / PDL', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  await install(page, { prevSession: true });
+  await openFuture(page);
+  const panel = page.getByTestId('pnf-panel').nth(0);
+  // H 100.6, L 99.8, C 100.2 -> P 100.20, R1 100.60, S1 99.80 (CPR on by default; pivots and PD are off)
+  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="p"]')).toContainText('P 100.20');
+  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="tc"]')).toContainText('TC 100.20');
+  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="r1"]')).toHaveCount(0);
+  await panel.getByRole('button', { name: /Show pivots/ }).click();
+  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="r1"]')).toHaveCount(1);
+  await panel.getByRole('button', { name: /Show previous day high/ }).click();
+  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="pdh"]')).toContainText('PDH 100.60');
+  await panel.getByRole('button', { name: 'Hide CPR' }).click();
+  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="p"]')).toHaveCount(0);
+  await expect(panel.locator('[data-testid="pnf-levels"] [data-level="pdh"]')).toHaveCount(1);
+});
+
+test('CPR: a straddle chart has no CPR lines or switches', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  await install(page, { prevSession: true });
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Options' }).click();
+  await expect(page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-levels')).toHaveCount(0);
+});
+
+test('Bracket (PAPER): the entry that fills arms a stop-loss and a target at points from its fill; the target fills and the stop is cancelled', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  await page.getByTestId('pnf-style-bracket').click();
+  await page.getByLabel('Target points').fill('0.5');
+  await page.getByLabel('SL points').fill('0.4');
+  await page.getByLabel('SL points').press('Enter');
+  const { el, level } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+  expect(state.ledger.rows[0].bracket).toMatchObject({ style: 'Bracket', tgtPts: 0.5, slPts: 0.4 });
+  state.tick = { ltp: level - 0.2, at: ist(10, 30, 15) };
+  await expect.poll(() => state.ledger.rows.filter(r => r.group).length, { timeout: 10_000 }).toBe(2);
+  const fill = state.ledger.rows[0].fillPrice!;
+  const sl = state.ledger.rows.find(r => r.role === 'sl')!, tp = state.ledger.rows.find(r => r.role === 'target')!;
+  expect(sl.side).toBe('SELL'); expect(tp.side).toBe('SELL');
+  expect(sl.trigger!).toBeCloseTo(fill - 0.4, 1);
+  expect(tp.level).toBeCloseTo(fill + 0.5, 1);
+  state.tick = { ltp: fill + 0.6, at: ist(10, 30, 16) };
+  await expect.poll(() => state.ledger.rows.find(r => r.role === 'target')?.state, { timeout: 10_000 }).toBe('filled');
+  await expect.poll(() => state.ledger.rows.find(r => r.role === 'sl')?.state, { timeout: 10_000 }).toBe('cancelled');
+  await expect(page.getByTestId('pnf-trade-position')).toHaveCount(0);
+});
+
+test('Bracket: an unfilled Bracket / Cover places nothing (the stop-loss points are required)', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  await page.getByTestId('pnf-style-cover').click();
+  const { el } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await page.waitForTimeout(600);
+  expect(state.ledger.rows.length).toBe(0);
+});
+
+test('MTM guard (PAPER): a stop-loss on the chart P&L squares the position off and cancels its orders', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  const { el, level } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+  state.tick = { ltp: level - 0.2, at: ist(10, 30, 15) };
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 10_000 }).toBe('filled');
+  await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 1 lot');
+  // a resting order that the guard must cancel too
+  const far = await cell(page, 'BUY', level - 0.6);
+  await far.el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(1);
+  await page.getByTestId('pnf-guard-toggle').click();
+  await page.getByLabel('MTM stop-loss in rupees', { exact: true }).fill('50');
+  await page.getByRole('button', { name: 'Switch on' }).click();
+  await expect(page.getByTestId('pnf-guard-toggle')).toContainText('ON');
+  // 1 point on 65 units is Rs 65 of loss: past the Rs 50 stop
+  state.tick = { ltp: level - 0.2 - 1.2, at: ist(10, 30, 17) };
+  await expect(page.getByTestId('pnf-trade-position')).toHaveCount(0, { timeout: 10_000 });
+  await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(0);
 });

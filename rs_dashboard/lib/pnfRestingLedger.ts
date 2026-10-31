@@ -13,6 +13,7 @@
 import { parseTarget, targetKey, type Target } from './pnfTarget.ts';
 import { lotCap } from './pnfOrderLogic.ts';
 import type { RestingKind, RestingSide } from './pnfResting.ts';
+import type { BracketSpec } from './pnfBracket.ts';
 
 export type RestingMode = 'PAPER' | 'REAL';
 export type RestingState = 'sending' | 'working' | 'firing' | 'filled' | 'cancelled' | 'rejected' | 'unknown';
@@ -39,6 +40,12 @@ export interface RestingRow {
   product: string;
   /** Rupees per point for the whole order (paper P&L). */
   unitsPerPoint: number;
+  /** Bracket / Cover attached to an ENTRY order: when it fills, the exit rows below are created from its fill price. */
+  bracket?: BracketSpec;
+  /** An exit row of a bracket: the entry's id, its role, and (a stop) the trailing distance in points. Rows of one group cancel each other. */
+  group?: string;
+  role?: 'sl' | 'target';
+  trailPts?: number;
   /** Rupees per point for the whole order, per leg (a straddle's CE and PE can differ); absent on older rows. */
   legUnits?: number[];
   state: RestingState;

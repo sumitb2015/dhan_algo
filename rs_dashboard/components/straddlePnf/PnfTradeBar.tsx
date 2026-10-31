@@ -8,6 +8,7 @@ import {
   FLAT_LEG, applyPaperFill, describePosition, lotCap, paperPnl, type LegResult, type PaperLeg, type PnfAction, type PnfProduct,
 } from '@/lib/pnfOrderLogic';
 import { legPositions, type Book } from '@/lib/pnfAccount';
+import type { BracketSpec } from '@/lib/pnfBracket';
 import { fetchSliceTradedPrice, type TradedSliceMemo } from '@/lib/tradedPriceClient';
 import { targetKey, type Target } from '@/lib/pnfTarget';
 import type { PnfExecutionMarker } from '@/lib/straddlePnf';
@@ -37,6 +38,12 @@ export interface PnfTradeBarProps {
   setPaper: React.Dispatch<React.SetStateAction<Record<string, PaperLeg[]>>>;
   /** The bar's current lots / product, for the rail's orders. */
   onSizing?: (s: { lots: number; product: PnfProduct }) => void;
+  /** The Single / Bracket / Cover choice: a spec to attach to the next entry, null for Single, or why it is not ready (the order is then NOT sent). */
+  bracketSpec?: () => BracketSpec | null | string;
+  /** An entry order (not one that reduces the position) went through: the page arms its bracket exits. */
+  onEntered?: (e: { action: PnfAction; lots: number; price: number; mode: 'PAPER' | 'REAL'; product: PnfProduct; spec: BracketSpec }) => void;
+  /** A manual square off went through: the chart's bracket exits are cancelled. */
+  onSquaredOff?: () => void;
   /** A manual order's outcome, for the page's trade chimes (entry / exit / warn, lib/pnfChime.ts). */
   onSound?: (outcome: string | undefined, close: boolean) => void;
 }
@@ -53,7 +60,7 @@ const inr = (n: number) => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLo
 const pnlTone = (n: number | null) => (n == null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
 
 export default function PnfTradeBar({
-  target, live, broker, mode, onModeChange, onPnlChange, onSwitchTarget, onTradeExecuted, onMarkerPrice, onSound, tradesLabel, paper, setPaper, onSizing,
+  target, live, broker, mode, onModeChange, onPnlChange, onSwitchTarget, onTradeExecuted, onMarkerPrice, onSound, tradesLabel, paper, setPaper, onSizing, bracketSpec, onEntered, onSquaredOff,
 }: PnfTradeBarProps) {
   const [productPick, setProduct] = useState<PnfProduct>('INTRADAY');
   const [lotsPick, setLots] = useState(1);
@@ -201,6 +208,10 @@ export default function PnfTradeBar({
     if (isIndex || !ready || busy) return;
     // An order against the open position reduces it: it sounds like an exit, not a new trade.
     const reduces = !!position && position.side !== 'MIXED' && (position.side === 'LONG') === (action === 'SELL');
+    // Bracket / Cover chosen but not filled in: refuse, never send a plain order the user thought had exits.
+    const spec = reduces ? null : bracketSpec?.() ?? null;
+    if (typeof spec === 'string') { toast.error(spec); return; }
+    const entryPrice = live ? live.ce + live.pe : 0;
     setBusy(true);
     try {
       if (mode === 'PAPER') {
@@ -211,11 +222,13 @@ export default function PnfTradeBar({
         onSound?.('placed', reduces);
         toast.success(`[PAPER] ${action} ${lots} ${isEquity ? 'sh' : `lot${lots > 1 ? 's' : ''}`} ${product}`);
         marker(action, lots, false);
+        if (spec) onEntered?.({ action, lots, price: entryPrice, mode: 'PAPER', product, spec });
         return;
       }
       const j = await post({ action, lots, product });
       if (reportReply(j, `${action} ${lots} ${isEquity ? 'sh' : `lot${lots > 1 ? 's' : ''}`} ${product}`, reduces)) {
         const id = marker(action, lots, true);
+        if (spec) onEntered?.({ action, lots, price: entryPrice, mode: 'REAL', product, spec });
         void settleMarker(id, j.legs ?? []);
       }
     } catch (err) {
@@ -238,10 +251,12 @@ export default function PnfTradeBar({
         onSound?.('placed', true);
         toast.success('[PAPER] position squared off');
         marker(action, Math.max(...paperLegs.map(l => Math.abs(l.lots))), false);
+        onSquaredOff?.();
         return;
       }
       const j = await post({ close: true });
       if (reportReply(j, 'Square off', true)) {
+        onSquaredOff?.();
         const legs = j.legs ?? [];
         const id = marker(legs[0]?.side ?? 'SELL', r && 'lots' in r ? Math.max(...r.lots.map(Math.abs)) : 0, true);
         void settleMarker(id, legs);
