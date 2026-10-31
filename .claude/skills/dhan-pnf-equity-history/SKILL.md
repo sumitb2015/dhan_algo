@@ -37,6 +37,10 @@ The P&F box is a **percentage of the first price** (`straddlePnfModel.ts` `first
 
 Any new bar source that prepends coarser history must pass an anchor the same way — do not rely on "first bar".
 
+## Official closes: Dhan's 1-minute series ends at 15:14
+
+Dhan's intraday 1-min bars (stored parquet and API alike) stop at **15:14** and miss the closing auction, so the day's last 1-min close is not the exchange close (ADANIGREEN 2026-10-23: 1,200.4 vs official 1,185.1; mean |diff| 4.7, max 48 over 61 days). A 1-day / 1-week / 1-month chart built from it can move a box and hide short columns (this made the July–November section of a weekly ADANIGREEN chart disagree with TradingView). `snap_session_closes(bars, daily)` sets each IST day's **last** 1-min close to `Daily_Historical_Data_Fresh`'s close for that date, skipping a day with no CSV row (today) and any day whose official close is > 10 % from the bar's (a different price basis). `read_daily_csv()` is shared with `load_daily_before()`; `stitch_history()` now always returns the normalised `start_Time` (int64) / `close` / `volume` frame (an empty side used to turn the epoch column into objects → 1970 timestamps). The intraday charts are unaffected except for each session's final bar.
+
 ## Cost and caching
 
 - Equity payload is ~37–39k bars (a few MB) and the page re-fetches it every 30 s (`POLL_MS`); the route's 20 s cache (`CACHE_TTL`, max 40 keys) absorbs duplicate windows. If it feels heavy, send the old sessions once and refresh only the recent ones.

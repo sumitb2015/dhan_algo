@@ -118,5 +118,17 @@ class YahooPre2019(unittest.TestCase):
             self.assertEqual(len(out), 70)                           # CSV only
 
 
+class SnapCloses(unittest.TestCase):
+    def test_last_minute_of_a_session_takes_the_official_close_unless_the_basis_differs_or_the_day_is_missing(self):
+        m = _load()
+        t = lambda d, hm: int(pd.Timestamp(f"{d} {hm}", tz="Asia/Kolkata").timestamp())
+        bars = pd.DataFrame({
+            "start_Time": [t("2026-10-22", "15:13"), t("2026-10-22", "15:14"), t("2026-10-23", "15:14"), t("2026-10-26", "15:14"), t("2026-10-27", "15:14")],
+            "close": [1250.0, 1247.0, 1200.4, 500.0, 1300.0], "volume": [1, 1, 1, 1, 1]})
+        daily = pd.DataFrame({"Close": [1250.5, 1185.1, 1250.0]}, index=pd.DatetimeIndex(["2026-10-22", "2026-10-23", "2026-10-26"]))
+        out = m.snap_session_closes(bars, daily)
+        self.assertEqual(list(out["close"]), [1250.0, 1250.5, 1185.1, 500.0, 1300.0])   # only the LAST bar of a day; 10-26 differs 60%: kept; 10-27 has no CSV row: kept
+
+
 if __name__ == "__main__":
     unittest.main()

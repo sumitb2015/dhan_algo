@@ -146,6 +146,36 @@ def load_yahoo_pre(symbol: str, csv: pd.DataFrame, directory: str = YAHOO_PRE_DI
     return rebase_yahoo(yahoo, csv)
 
 
+def read_daily_csv(symbol: str, directory: str = DAILY_DIR) -> pd.DataFrame:
+    """Daily_Historical_Data_Fresh rows of `symbol` (naive date index, numeric OHLCV, Close > 0), or an empty frame."""
+    path = os.path.join(directory, f"{symbol}_Daily_2Y.csv")
+    if not os.path.isfile(path):
+        return pd.DataFrame()
+    raw = pd.read_csv(path, parse_dates=["Datetime"]).set_index("Datetime")
+    for c in ("Open", "High", "Low", "Close", "Volume"):
+        raw[c] = pd.to_numeric(raw[c], errors="coerce")
+    return raw[raw["Close"] > 0]
+
+
+def snap_session_closes(bars: pd.DataFrame, daily: pd.DataFrame, tol: float = 0.10) -> pd.DataFrame:
+    """Set each session's LAST 1-minute close to that day's official close from the daily CSV. Dhan's 1-min series ends at
+    15:14 and so misses the closing auction: a daily / weekly / monthly bar built from it differs from the exchange close by
+    a few points (ADANIGREEN: up to 48), enough to move a P&F box. A day with no CSV row (today), or whose official close is
+    more than `tol` from the bar's (a different price basis), keeps its own close."""
+    if bars.empty or daily.empty:
+        return bars
+    out = bars.copy()
+    day = (out["start_Time"].astype("int64") + 19800) // 86400          # IST calendar day number
+    official = {int((d - pd.Timestamp(0)).days): float(c) for d, c in daily["Close"].items()}
+    last = out.groupby(day)["start_Time"].idxmax()
+    for dn, idx in last.items():
+        c = official.get(int(dn))
+        cur = float(out.at[idx, "close"])
+        if c and cur > 0 and abs(c - cur) / c <= tol:
+            out.at[idx, "close"] = c
+    return out
+
+
 def load_daily_before(symbol: str, first_t: int, directory: str = DAILY_DIR, yahoo_dir: str = YAHOO_PRE_DIR,
                       fetch=fetch_yahoo_daily) -> pd.DataFrame:
     """Daily bars of `symbol` for every date before the day of epoch `first_t` (IST), one bar each at 15:29 IST, in the same
@@ -153,13 +183,9 @@ def load_daily_before(symbol: str, first_t: int, directory: str = DAILY_DIR, yah
     onward, cached under Historical Data/Yahoo_Daily_Pre2019 and rebased onto the CSV's price basis. They let the 1-day /
     1-week / 1-month charts reach back years before the 1-min history starts; an intraday chart sees one price per day."""
     empty = pd.DataFrame(columns=["start_Time", "close", "volume"])
-    path = os.path.join(directory, f"{symbol}_Daily_2Y.csv")
-    if not os.path.isfile(path):
+    raw = read_daily_csv(symbol, directory)
+    if raw.empty:
         return empty
-    raw = pd.read_csv(path, parse_dates=["Datetime"]).set_index("Datetime")
-    for c in ("Open", "High", "Low", "Close", "Volume"):
-        raw[c] = pd.to_numeric(raw[c], errors="coerce")
-    raw = raw[raw["Close"] > 0]
     allrows = pd.concat([load_yahoo_pre(symbol, raw, yahoo_dir, fetch), raw]) if not raw.empty else raw
     first_day = pd.Timestamp(datetime.fromtimestamp(first_t, _IST).date())
     allrows = allrows[allrows.index < first_day]
@@ -170,19 +196,22 @@ def load_daily_before(symbol: str, first_t: int, directory: str = DAILY_DIR, yah
                          "close": allrows["Close"].to_numpy(), "volume": allrows["Volume"].fillna(0).to_numpy()})
 
 
+def _normalise(frame: pd.DataFrame) -> pd.DataFrame:
+    """Any Dhan / stored frame as start_Time (epoch s) / close / volume."""
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=["start_Time", "close", "volume"])
+    ts = next((c for c in ("start_Time", "timestamp", "time", "date") if c in frame.columns), frame.columns[0])
+    cl = next((c for c in ("close", "Close", "c") if c in frame.columns), frame.columns[-1])
+    vl = next((c for c in ("volume", "Volume", "vol", "Vol") if c in frame.columns), None)
+    return pd.DataFrame({"start_Time": _to_epoch_seconds(frame[ts]), "close": frame[cl].to_numpy(),
+                         "volume": frame[vl].to_numpy() if vl else 0})
+
+
 def stitch_history(stored: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
     """Stored bars followed by API bars; where both hold a minute the API's wins (`_leg` keeps the last duplicate)."""
-    if stored.empty:
-        return fresh
-    if fresh is None or fresh.empty:
-        return stored
-    ts = next((c for c in ("start_Time", "timestamp", "time", "date") if c in fresh.columns), fresh.columns[0])
-    cl = next((c for c in ("close", "Close", "c") if c in fresh.columns), fresh.columns[-1])
-    vl = next((c for c in ("volume", "Volume", "vol", "Vol") if c in fresh.columns), None)
-    norm = pd.DataFrame({"start_Time": _to_epoch_seconds(fresh[ts]), "close": fresh[cl],
-                         "volume": fresh[vl] if vl else 0})
-
-    return pd.concat([stored, norm], ignore_index=True)
+    out = pd.concat([_normalise(stored), _normalise(fresh)], ignore_index=True)
+    out["start_Time"] = out["start_Time"].astype("int64")      # an empty side must not turn the epoch column into objects
+    return out
 
 
 def main():
@@ -250,6 +279,8 @@ def main():
         from_date = min(api_from, today).strftime("%Y-%m-%d")
     df = _fetch_leg(helper, sid, from_date, to_date, "1", exchange_segment=segment, instrument_type=instrument)
     df = stitch_history(stored, df)
+    if args.kind == "equity":
+        df = snap_session_closes(df, read_daily_csv(symbol))
     anchor_t = None
     if args.kind == "equity" and not df.empty:
         first_t = int(_to_epoch_seconds(df[next(c for c in ("start_Time", "timestamp", "time", "date") if c in df.columns)]).min())

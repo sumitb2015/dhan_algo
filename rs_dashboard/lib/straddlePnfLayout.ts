@@ -11,9 +11,14 @@ export const MAX_CELL = 40;
 const FIT_COLUMN_SLACK = 3;
 export const ZOOM_MIN_CELL = 3;
 export const ZOOM_MAX_CELL = 48;
+/** Horizontal-only zoom: the column pitch as a multiple of the cell (1 = square cells). */
+export const XSCALE_MIN = 0.25;
+export const XSCALE_MAX = 4;
 
 export type PanelLayout = {
   cell: number;
+  /** Pitch of one column: the cell times the horizontal scale (glyphs keep the cell size). */
+  colW: number;
   yMin: number;
   yMax: number;
   rows: number;
@@ -45,6 +50,8 @@ export function layoutPanel(
   zoom = 1,
   /** Add half a view of empty scroll room on every side so mouse-drag can move a chart that already fits. Off = fit-to-view, no scroll. */
   slack = false,
+  /** Horizontal-only zoom (column pitch = cell x xScale), independent of the vertical box size. */
+  xScale = 1,
 ): PanelLayout {
   // The range is built from the columns' cell edges and widened only by WHOLE boxes for the live price, so yMin stays on a cell
   // edge and the axis labels (yMin + (i + 0.5) * box, the box centres) stay level with the rows.
@@ -62,13 +69,14 @@ export function layoutPanel(
   const fitted = Math.max(MIN_CELL, Math.min(MAX_CELL, fitH, fitCellW));
   const cell = zoom === 1 ? fitted : Math.max(ZOOM_MIN_CELL, Math.min(ZOOM_MAX_CELL, Math.round(fitted * zoom)));
 
-  const minPlotW = Math.max(cell, viewW - AXIS_W);
-  const colsW = columns.length * cell;
+  const colW = xScale === 1 ? cell : Math.max(2, Math.round(cell * xScale));
+  const minPlotW = Math.max(colW, viewW - AXIS_W);
+  const colsW = columns.length * colW;
   const padY = slack ? Math.round(viewH / 2) : 0;
   const padX = slack ? Math.round(viewW / 2) : 0;
   const fitW = Math.max(minPlotW, colsW);
   return {
-    cell, yMin, yMax, rows,
+    cell, colW, yMin, yMax, rows,
     plotW: fitW + padX + padX,
     contentW: fitW + padX + padX + AXIS_W,
     contentH: Math.max(viewH, PAD_TOP + rows * cell + 8) + 2 * padY,

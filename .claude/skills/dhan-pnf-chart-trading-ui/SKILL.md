@@ -22,7 +22,7 @@ Sticky beside the price axis (`style={{ right: AXIS_W }}`), a **buy | sell** two
 ## Orders bar, lines, books
 
 - **Orders bar above each chart** lists the chart's resting orders with `×` per row and **Cancel all (Shift+C)** — works from the focused chart region (`onKeyDown`, only when a working order exists).
-- Toolbar beside the zoom buttons (same `ZoomButton`, `aria-pressed`): hide/show **order and position lines** (the orders bar keeps listing them), align tags **left/right** (remembered per chart), triangle toggles, marker toggle. Hiding lines must never hide the orders bar.
+- Toolbar beside the zoom buttons (same `ZoomButton`, `aria-pressed`): **Squeeze / Stretch columns** (horizontal zoom, also Shift + wheel; see `dhan-pnf-chart-panel`), hide/show **order and position lines** (the orders bar keeps listing them), align tags **left/right** (remembered per chart), triangle toggles, marker toggle. Hiding lines must never hide the orders bar.
 - Docked books get a **This chart** filter narrowing positions / orders / trades to the active chart's contracts — rows carry the broker key (`PositionRow.key` = Dhan security id, else trading symbol).
 - **Entry line + P&L chip** (`d43fcd5f`): dotted entry line with side, lots, entry premium and P&L, and a chip on the rail at the entry row with an **arrow** (not colour alone). `—` (null), not 0, for an unpriced leg.
 - **Style bar** (Single | Bracket | Cover + target / SL / trail points + `MtmGuardCard`) **floats over the chart's top padding** so it costs no chart height. Number boxes are drafts committed on blur / Enter (`dhan-commit-on-blur`); `PtsBox` resyncs from props with the render-time `seen` pattern, not an effect.

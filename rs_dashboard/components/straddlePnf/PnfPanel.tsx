@@ -5,8 +5,8 @@ import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
 import type { PnfExecutionMarker } from '@/lib/straddlePnf';
-import { AlignLeft, AlignRight, Eye, EyeOff, MapPin, MapPinOff, Minus, Plus, RotateCcw } from 'lucide-react';
-import { layoutPanel, AXIS_W, PAD_TOP } from '@/lib/straddlePnfLayout';
+import { AlignLeft, AlignRight, Eye, EyeOff, MapPin, MapPinOff, Minus, Plus, RotateCcw, ChevronsLeftRight, ChevronsRightLeft } from 'lucide-react';
+import { layoutPanel, AXIS_W, PAD_TOP, XSCALE_MIN, XSCALE_MAX } from '@/lib/straddlePnfLayout';
 import { MIN_BOX_PTS_PCT } from '@/lib/straddlePnfSettings';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
@@ -331,18 +331,22 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     ? ` · ${model.sessions.length} sessions (${shortDate(model.sessions[0])} – ${shortDate(model.sessions[model.sessions.length - 1])})` : '';
 
   const [zoom, setZoom] = useState(1);
+  const [xScale, setXScale] = useState(1);
   // Laid out with the unconfirmed boxes too (the live columns are the confirmed ones plus what the forming bar adds), so a
   // new unconfirmed column gets its own cell instead of sliding under the pinned axis.
   const liveCols = model.liveColumns.length >= columns.length ? model.liveColumns : columns;
   // The rail takes its width from the chart, so the newest column still sits next to the axis.
   const viewW = rail ? Math.max(120, width - RAIL_W) : width;
-  const L = layoutPanel(liveCols, box, liveValue, viewW, HEIGHT, zoom, true);
-  const { cell, yMin, yMax, plotW, contentW, contentH, offsetX, padY, padR } = L;
+  const L = layoutPanel(liveCols, box, liveValue, viewW, HEIGHT, zoom, true, xScale);
+  const { cell, colW, yMin, yMax, plotW, contentW, contentH, offsetX, padY, padR } = L;
   const yOf = (p: number) => padY + PAD_TOP + ((yMax - p) / box) * cell;
-  const xOf = (j: number) => offsetX + j * cell;
+  const xOf = (j: number) => offsetX + j * colW;
   const vis = columns;
   const first = 0;
-  const s = cell * 0.36;                       // glyph half-size
+  // Glyph half-size: tall by the box height, wide by the column pitch, so a horizontal stretch fills the gap between columns
+  // (O becomes an ellipse, X a wider cross) instead of leaving space - as in TradingView's P&F.
+  const sy = cell * 0.36;
+  const sx = Math.max(1, colW * 0.36);
   const stroke = Math.max(1.2, Math.min(2.4, cell * 0.075)); // keeps X / O legible when zoomed, not heavy when small
   const gridId = `pnf-grid-${strike}`;
   const gridY = liveCols.length ? ((yOf(liveCols[0].low) % cell) + cell) % cell : 0; // a cell edge, so grid lines run along the box edges
@@ -389,15 +393,28 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     const x = ax ?? el.clientWidth / 2;
     const y = ay ?? el.clientHeight / 2;
     // The column and price under the anchor stay under it: read them off the current layout, place them on the next one.
-    const L2 = layoutPanel(liveCols, box, liveValue, viewW, HEIGHT, next, true);
-    const j = (el.scrollLeft + x - offsetX) / cell;
+    const L2 = layoutPanel(liveCols, box, liveValue, viewW, HEIGHT, next, true, xScale);
+    const j = (el.scrollLeft + x - offsetX) / colW;
     const u = (el.scrollTop + y - padY - PAD_TOP) / cell;
-    pendingRef.current = { left: L2.offsetX + j * L2.cell - x, top: L2.padY + PAD_TOP + u * L2.cell - y };
+    pendingRef.current = { left: L2.offsetX + j * L2.colW - x, top: L2.padY + PAD_TOP + u * L2.cell - y };
     stickRef.current = false;
     touchedRef.current = true;
     setZoom(next);
   };
-  const resetView = () => { touchedRef.current = false; pendingRef.current = 'reset'; stickRef.current = false; setZoom(1); setScrollTick(n => n + 1); };
+  // Horizontal-only zoom: the columns move apart / together, the box height and the glyph size stay. The column under the anchor stays put.
+  const xZoomBy = (factor: number, ax?: number) => {
+    const el = wrapRef.current;
+    const next = Math.min(XSCALE_MAX, Math.max(XSCALE_MIN, +(xScale * factor).toFixed(3)));
+    if (!el || next === xScale) return;
+    const x = ax ?? el.clientWidth / 2;
+    const L2 = layoutPanel(liveCols, box, liveValue, viewW, HEIGHT, zoom, true, next);
+    const j = (el.scrollLeft + x - offsetX) / colW;
+    pendingRef.current = { left: L2.offsetX + j * L2.colW - x, top: el.scrollTop };
+    stickRef.current = false;
+    touchedRef.current = true;
+    setXScale(next);
+  };
+  const resetView = () => { touchedRef.current = false; pendingRef.current = 'reset'; stickRef.current = false; setZoom(1); setXScale(1); setScrollTick(n => n + 1); };
   useLayoutEffect(() => {
     const el = wrapRef.current;
     const pending = pendingRef.current;
@@ -412,7 +429,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
       el.scrollTop = pending.top;
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [zoom, scrollTick]);
+  }, [zoom, xScale, scrollTick]);
   const seenReset = useRef(resetTick);
   useEffect(() => {
     if (seenReset.current === resetTick) return;   // mount (and StrictMode's second mount) is not a reset request
@@ -420,7 +437,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     resetView();
   }, [resetTick]);
   const zoomRef = useRef(zoomBy);
-  useLayoutEffect(() => { zoomRef.current = zoomBy; });
+  const xZoomRef = useRef(xZoomBy);
+  useLayoutEffect(() => { zoomRef.current = zoomBy; xZoomRef.current = xZoomBy; });
   // Press on the price axis and drag: up zooms in, down zooms out (about the view centre), like a charting package's price scale.
   const zoomNowRef = useRef(zoom);
   useLayoutEffect(() => { zoomNowRef.current = zoom; });
@@ -431,7 +449,10 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const r = el.getBoundingClientRect();
-      zoomRef.current(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - r.left, e.clientY - r.top);
+      // Shift + wheel stretches / squeezes the columns only (browsers may report the shifted wheel as deltaX); the plain wheel zooms both ways.
+      const d = e.deltaY || e.deltaX;
+      if (e.shiftKey) xZoomRef.current(d < 0 ? 1.15 : 1 / 1.15, e.clientX - r.left);
+      else zoomRef.current(d < 0 ? 1.15 : 1 / 1.15, e.clientX - r.left, e.clientY - r.top);
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
@@ -459,18 +480,18 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     const row = Math.floor((hover.y - rowTop) / cell);
     if (row < 0 || row >= L.rows) return null;
     const price = yMax - (row + 0.5) * box;                      // yMax is a cell edge: this is the row's box price
-    const j = Math.floor((hover.x - offsetX) / cell);
+    const j = Math.floor((hover.x - offsetX) / colW);
     const col = !hover.overAxis && j >= 0 && j < columns.length ? j : null;
-    return { price, y: yOf(price), col, x: col !== null ? xOf(col) + cell / 2 : hover.overAxis ? null : hover.x };
+    return { price, y: yOf(price), col, x: col !== null ? xOf(col) + colW / 2 : hover.overAxis ? null : hover.x };
   })();
   // Glyph geometry as path strings, rebuilt only when the chart or its layout changes (not on a crosshair move).
   const r1 = (v: number) => Math.round(v * 10) / 10;
-  const xGlyph = (cx: number, cy: number) => `M${r1(cx - s)} ${r1(cy - s)}L${r1(cx + s)} ${r1(cy + s)}M${r1(cx + s)} ${r1(cy - s)}L${r1(cx - s)} ${r1(cy + s)}`;
-  const oGlyph = (cx: number, cy: number) => `M${r1(cx - s)} ${r1(cy)}a${r1(s)} ${r1(s)} 0 1 0 ${r1(2 * s)} 0a${r1(s)} ${r1(s)} 0 1 0 ${r1(-2 * s)} 0`;
+  const xGlyph = (cx: number, cy: number) => `M${r1(cx - sx)} ${r1(cy - sy)}L${r1(cx + sx)} ${r1(cy + sy)}M${r1(cx + sx)} ${r1(cy - sy)}L${r1(cx - sx)} ${r1(cy + sy)}`;
+  const oGlyph = (cx: number, cy: number) => `M${r1(cx - sx)} ${r1(cy)}a${r1(sx)} ${r1(sy)} 0 1 0 ${r1(2 * sx)} 0a${r1(sx)} ${r1(sy)} 0 1 0 ${r1(-2 * sx)} 0`;
   const glyphs = useMemo(() => {
     let x = '', o = '';
     columns.forEach((c, j) => {
-      const cx = xOf(j) + cell / 2;
+      const cx = xOf(j) + colW / 2;
       for (let k = 0; k < c.boxes; k++) {
         const cy = yOf(c.low + (k + 0.5) * box);
         if (c.dir === 'X') x += xGlyph(cx, cy);
@@ -479,7 +500,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     });
     return { x, o };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [columns, box, cell, offsetX, yMax, padY, s]);
+  }, [columns, box, cell, colW, offsetX, yMax, padY, sx, sy]);
   const unconfirmed = unconfirmedBoxes(columns, liveCols, box);
   const unconfirmedPaths = useMemo(() => {
     let x = '', o = '', n = 0;
@@ -487,19 +508,19 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
       const lc = liveCols[col];
       for (const k of ks) {
         n++;
-        if (lc.dir === 'X') x += xGlyph(xOf(col) + cell / 2, yOf(lc.low + (k + 0.5) * box));
-        else o += oGlyph(xOf(col) + cell / 2, yOf(lc.low + (k + 0.5) * box));
+        if (lc.dir === 'X') x += xGlyph(xOf(col) + colW / 2, yOf(lc.low + (k + 0.5) * box));
+        else o += oGlyph(xOf(col) + colW / 2, yOf(lc.low + (k + 0.5) * box));
       }
     }
     return { x, o, n };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveCols, columns, box, cell, offsetX, yMax, padY, s]);
+  }, [liveCols, columns, box, cell, colW, offsetX, yMax, padY, sx, sy]);
 
   const lastEntryId = [...signals].reverse().find(g => g.kind === 'DOUBLE_BOTTOM_SELL' && g.belowVwap)?.id;
   const ring = flash === 'buy' ? 'ring-2 ring-emerald-400' : flash === 'sell' ? 'ring-2 ring-red-400' : '';
 
   const overlayPts = vis
-    .map((c, j) => ({ v: model.overlay[first + j], x: xOf(j) + cell / 2 }))
+    .map((c, j) => ({ v: model.overlay[first + j], x: xOf(j) + colW / 2 }))
     .filter(p => p.v !== null)
     .map(p => `${p.x},${yOf(p.v as number)}`)
     .join(' ');
@@ -761,8 +782,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
           <div className="flex" style={{ width: contentW + (rail ? RAIL_W : 0), height: contentH }}>
             <svg width={plotW} height={contentH} className="block shrink-0" role="img" aria-label={`${title} point and figure chart`}>
               <defs>
-                <pattern id={gridId} x={offsetX} y={gridY} width={cell} height={cell} patternUnits="userSpaceOnUse">
-                  <path d={`M${cell} 0V${cell}M0 ${cell}H${cell}`} fill="none" strokeWidth={1} className="stroke-zinc-800" />
+                <pattern id={gridId} x={offsetX} y={gridY} width={colW} height={cell} patternUnits="userSpaceOnUse">
+                  <path d={`M${colW} 0V${cell}M0 ${cell}H${colW}`} fill="none" strokeWidth={1} className="stroke-zinc-800" />
                 </pattern>
               </defs>
               <rect data-testid="pnf-grid" x={0} y={0} width={plotW} height={contentH} fill={`url(#${gridId})`} />
@@ -788,7 +809,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               <path data-testid="pnf-glyphs-o" d={glyphs.o} className="stroke-red-400" strokeWidth={stroke} fill="none" />
               {/* the newest confirmed column's cells: a hook for tests and nothing else */}
               {columns.length > 0 && (
-                <rect data-testid="pnf-newest" x={xOf(columns.length - 1)} y={yOf(columns[columns.length - 1].high)} width={cell}
+                <rect data-testid="pnf-newest" x={xOf(columns.length - 1)} y={yOf(columns[columns.length - 1].high)} width={colW}
                       height={(columns[columns.length - 1].boxes) * cell} fill="none" pointerEvents="none" />
               )}
 
@@ -809,7 +830,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
 
               {/* short cover cue (the short-side rule): first bar of a green X column trading above VWAP */}
               {exits.length > 0 && (
-                <text data-testid="pnf-exit" x={xOf(exits[exits.length - 1].col) + cell / 2} y={yOf(columns[exits[exits.length - 1].col].high) - 4}
+                <text data-testid="pnf-exit" x={xOf(exits[exits.length - 1].col) + colW / 2} y={yOf(columns[exits[exits.length - 1].col].high) - 4}
                       textAnchor="middle" className="fill-emerald-400 font-mono font-bold" fontSize={9}>COVER</text>
               )}
 
@@ -824,9 +845,9 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 const tone = t.state === 'up' ? 'emerald' : t.state === 'down' ? 'red' : t.state === 'forming' ? 'amber' : 'zinc';
                 const stroke = tone === 'emerald' ? 'stroke-emerald-400' : tone === 'red' ? 'stroke-red-400' : tone === 'amber' ? 'stroke-amber-400' : 'stroke-zinc-400';
                 const fillTxt = tone === 'emerald' ? 'fill-emerald-400' : tone === 'red' ? 'fill-red-400' : tone === 'amber' ? 'fill-amber-400' : 'fill-zinc-400';
-                const xStart = xOf(t.startCol) + cell / 2;
-                const xLevels = xOf(t.endCol) + cell / 2;
-                const xEnd = Math.min(plotW, xOf(t.breakout ? t.breakout.col : t.endCol + 1) + cell * 6);
+                const xStart = xOf(t.startCol) + colW / 2;
+                const xLevels = xOf(t.endCol) + colW / 2;
+                const xEnd = Math.min(plotW, xOf(t.breakout ? t.breakout.col : t.endCol + 1) + colW * 6);
                 const b = t.breakout;
                 const lvl = (price: number, label: string, cls: string, dash: string) => {
                   const y = yOf(price);
@@ -839,8 +860,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 };
                 return (
                   <g key={`tri${t.startCol}`} data-testid="pnf-triangle" data-state={t.state} data-cols={t.nCols} pointerEvents="none">
-                    <line x1={xStart} x2={xOf(lastX) + cell / 2} y1={yOf(first.high)} y2={yOf(columns[lastX].high)} strokeWidth={1.5} strokeDasharray="1 4" strokeLinecap="round" className={stroke} />
-                    <line x1={xStart} x2={xOf(lastO) + cell / 2} y1={yOf(first.low)} y2={yOf(columns[lastO].low)} strokeWidth={1.5} strokeDasharray="1 4" strokeLinecap="round" className={stroke} />
+                    <line x1={xStart} x2={xOf(lastX) + colW / 2} y1={yOf(first.high)} y2={yOf(columns[lastX].high)} strokeWidth={1.5} strokeDasharray="1 4" strokeLinecap="round" className={stroke} />
+                    <line x1={xStart} x2={xOf(lastO) + colW / 2} y1={yOf(first.low)} y2={yOf(columns[lastO].low)} strokeWidth={1.5} strokeDasharray="1 4" strokeLinecap="round" className={stroke} />
                     <text x={xStart} y={yOf(first.high) - 6} className={`${fillTxt} font-mono`} fontSize={10} fontWeight={700}>{`△${t.nCols}${t.state === 'forming' ? ' forming' : ''}`}</text>
                     {!b ? (
                       <>
@@ -866,7 +887,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 const levelPrice = sell ? columns[g.col - 2].low : columns[g.col - 2].high;
                 const y = yOf(levelPrice);
                 const x1 = xOf(g.col - 2);
-                const x2 = xOf(g.col) + cell + 6;
+                const x2 = xOf(g.col) + colW + 6;
                 // The short-entry tag sits under the level where columns col-2 and col-1 meet: col-2's lowest O is ON the level and
                 // col-1 (an X column) starts a box above it, so below the line there is empty grid. Under the breaking column it
                 // would cover that column's Os.
@@ -917,7 +938,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                   const fontSize = Math.max(7, Math.min(11, r * 1.1));
 
                   return group.map(({ marker: m, colIdx, boxPrice, idx }, groupIdx) => {
-                    const baseCx = xOf(colIdx) + cell / 2;
+                    const baseCx = xOf(colIdx) + colW / 2;
                     const shift = total > 1 ? (groupIdx - (total - 1) / 2) * (r * 1.5) : 0;
                     const cx = baseCx + shift;
                     const cy = yOf(boxPrice);
@@ -1120,6 +1141,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         <ZoomButton label="Zoom out" onClick={() => zoomBy(0.7)}><Minus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Fit chart to panel" onClick={() => resetView()}><RotateCcw className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         <ZoomButton label="Zoom in" onClick={() => zoomBy(1 / 0.7)}><Plus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        <ZoomButton label="Squeeze columns (horizontal zoom out, Shift + wheel)" onClick={() => xZoomBy(0.7)}><ChevronsRightLeft className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        <ZoomButton label="Stretch columns (horizontal zoom in, Shift + wheel)" onClick={() => xZoomBy(1 / 0.7)}><ChevronsLeftRight className="w-3 h-3" aria-hidden="true" /></ZoomButton>
         {onToggleTri && (
           <ZoomButton label={triShown ? 'Hide triangles' : 'Show triangles'} onClick={onToggleTri} pressed={!triShown}>
             <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{triShown ? '△' : '▽'}</span>

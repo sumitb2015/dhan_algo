@@ -76,3 +76,15 @@ test('a live price outside the columns widens the range by whole boxes, so the a
     assert.ok(Math.abs((l.yMax - l.yMin) / box - Math.round((l.yMax - l.yMin) / box)) < 1e-6);
   }
 });
+
+test('xScale changes the column pitch only: the cell, the rows and the height stay, the width follows', () => {
+  const columns = [col(100, 110), col(95, 105), col(100, 112)];
+  const a = layoutPanel(columns, BOX, null, 1500, 560, 1, true, 1);
+  const wide = layoutPanel(columns, BOX, null, 1500, 560, 1, true, 2);
+  const narrow = layoutPanel(columns, BOX, null, 1500, 560, 1, true, 0.5);
+  assert.equal(a.colW, a.cell);
+  assert.equal(wide.cell, a.cell);
+  assert.equal(wide.contentH, a.contentH);
+  assert.equal(wide.colW, a.cell * 2);
+  assert.equal(narrow.colW, Math.round(a.cell * 0.5));
+});
