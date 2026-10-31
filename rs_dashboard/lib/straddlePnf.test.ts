@@ -196,3 +196,12 @@ test('an explicit anchor price sets the grid and the box instead of the first ba
   assert.equal(r.box, 0.5);
   assert.equal(buildPnf(bars).anchor, 104);   // without it: the first bar, as before
 });
+
+test('a grid anchored far from the first bar does not draw a column across the gap: the first column starts at the first bar', () => {
+  // history starts at 40; the grid is anchored on a later price of 1000 with a box of 10
+  const bars = [40, 41, 52, 53].map((c, i) => ({ t: i, ce: c, pe: 0, straddle: c, vol: 1 }));
+  const { columns } = buildPnf(bars, 0.01, 3, 1000);
+  assert.equal(columns[0].dir, 'X');
+  assert.ok(columns[0].low > 30 && columns[0].high < 70, `first column ${columns[0].low}-${columns[0].high} stays near the first bar`);
+  assert.equal(columns[0].boxes, 1);
+});

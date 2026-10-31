@@ -88,24 +88,86 @@ DAILY_DIR = os.path.join(ROOT, "Daily_Historical_Data_Fresh")
 _DAILY_CLOSE_MIN = 15 * 60 + 29  # a daily close sits on the session's last minute, so day bars close at the bell
 
 
-def load_daily_before(symbol: str, first_t: int, directory: str = DAILY_DIR) -> pd.DataFrame:
-    """Daily closes of `symbol` for every date before the day of epoch `first_t` (IST), one bar each at 15:29 IST, in the
-    same shape as load_stored_1min. They let the 1-day / 1-week / 1-month charts reach back years before the 1-min history
-    starts; an intraday chart sees them as one price per day. Raw CSV: not adjusted for splits."""
+YAHOO_PRE_DIR = os.path.join(ROOT, "Historical Data", "Yahoo_Daily_Pre2019")
+YAHOO_START = "2008-01-01"
+YAHOO_OVERLAP_DAYS = 90   # fetched past the CSV's first day so the two bases can be compared where both exist
+
+
+def fetch_yahoo_daily(symbol: str, start: str, end: str) -> pd.DataFrame:
+    """Daily OHLCV of an NSE stock from Yahoo Finance (split-adjusted, NOT dividend-adjusted), naive IST dates as the index;
+    an empty frame on any failure (no network, unknown ticker). Market data only."""
+    try:
+        import yfinance as yf
+        d = yf.Ticker(f"{symbol}.NS").history(start=start, end=end, interval="1d", auto_adjust=False, actions=False)
+    except Exception as exc:  # noqa: BLE001 - the chart simply has less history
+        print(f"yahoo {symbol}: {exc}", file=sys.stderr)
+        return pd.DataFrame()
+    if d is None or d.empty:
+        return pd.DataFrame()
+    d = d[["Open", "High", "Low", "Close", "Volume"]].copy()
+    d.index = pd.DatetimeIndex(d.index).tz_localize(None).normalize()
+    d.index.name = "Datetime"
+    return d[d["Close"] > 0]
+
+
+def rebase_yahoo(yahoo: pd.DataFrame, csv: pd.DataFrame) -> pd.DataFrame:
+    """Yahoo rows dated before the CSV starts, scaled onto the CSV's price basis. The scale is the median CSV / Yahoo close over
+    the first overlapping days (a constant, e.g. a small rights-issue factor, or 1.0). Refuses (empty) when there is too little
+    overlap or the ratio is not steady: two price bases must never be joined on a guess."""
+    if yahoo.empty or csv.empty:
+        return pd.DataFrame()
+    first = csv.index.min()
+    both = csv.join(yahoo[["Close"]], how="inner", rsuffix="_y").head(60)
+    if len(both) < 5:
+        return pd.DataFrame()
+    ratio = (both["Close"] / both["Close_y"]).replace([float("inf"), -float("inf")], pd.NA).dropna()
+    if len(ratio) < 5 or not (0.2 < ratio.median() < 5) or ratio.max() / ratio.min() > 1.05:
+        return pd.DataFrame()
+    k = float(ratio.median())
+    pre = yahoo[yahoo.index < first].copy()
+    pre[["Open", "High", "Low", "Close"]] = pre[["Open", "High", "Low", "Close"]] * k
+    return pre
+
+
+def load_yahoo_pre(symbol: str, csv: pd.DataFrame, directory: str = YAHOO_PRE_DIR, fetch=fetch_yahoo_daily) -> pd.DataFrame:
+    """Daily history from 2008 up to the CSV's first day, from the local cache or (once) Yahoo, rebased onto the CSV's basis."""
+    if csv.empty:
+        return pd.DataFrame()
+    path = os.path.join(directory, f"{symbol}.csv")
+    yahoo = pd.DataFrame()
+    if os.path.isfile(path):
+        yahoo = pd.read_csv(path, parse_dates=["Datetime"]).set_index("Datetime")
+    else:
+        end = (csv.index.min() + timedelta(days=YAHOO_OVERLAP_DAYS)).strftime("%Y-%m-%d")
+        yahoo = fetch(symbol, YAHOO_START, end)
+        if not yahoo.empty:
+            os.makedirs(directory, exist_ok=True)
+            yahoo.to_csv(path)
+    return rebase_yahoo(yahoo, csv)
+
+
+def load_daily_before(symbol: str, first_t: int, directory: str = DAILY_DIR, yahoo_dir: str = YAHOO_PRE_DIR,
+                      fetch=fetch_yahoo_daily) -> pd.DataFrame:
+    """Daily bars of `symbol` for every date before the day of epoch `first_t` (IST), one bar each at 15:29 IST, in the same
+    shape as load_stored_1min. Newest part: Daily_Historical_Data_Fresh (from 2019). Older part: Yahoo, 2008
+    onward, cached under Historical Data/Yahoo_Daily_Pre2019 and rebased onto the CSV's price basis. They let the 1-day /
+    1-week / 1-month charts reach back years before the 1-min history starts; an intraday chart sees one price per day."""
     empty = pd.DataFrame(columns=["start_Time", "close", "volume"])
     path = os.path.join(directory, f"{symbol}_Daily_2Y.csv")
     if not os.path.isfile(path):
         return empty
-    raw = pd.read_csv(path)
-    day = pd.to_datetime(raw["Datetime"], errors="coerce")
+    raw = pd.read_csv(path, parse_dates=["Datetime"]).set_index("Datetime")
+    for c in ("Open", "High", "Low", "Close", "Volume"):
+        raw[c] = pd.to_numeric(raw[c], errors="coerce")
+    raw = raw[raw["Close"] > 0]
+    allrows = pd.concat([load_yahoo_pre(symbol, raw, yahoo_dir, fetch), raw]) if not raw.empty else raw
     first_day = pd.Timestamp(datetime.fromtimestamp(first_t, _IST).date())
-    keep = day.notna() & (day < first_day) & (pd.to_numeric(raw["Close"], errors="coerce") > 0)
-    raw, day = raw[keep], day[keep]
-    if raw.empty:
+    allrows = allrows[allrows.index < first_day]
+    if allrows.empty:
         return empty
-    ist = (day + pd.Timedelta(minutes=_DAILY_CLOSE_MIN)).dt.tz_localize(_IST)
+    ist = (allrows.index + pd.Timedelta(minutes=_DAILY_CLOSE_MIN)).tz_localize(_IST)
     return pd.DataFrame({"start_Time": ((ist - pd.Timestamp(0, tz="UTC")) // pd.Timedelta(seconds=1)).astype("int64").to_numpy(),
-                         "close": pd.to_numeric(raw["Close"]).to_numpy(), "volume": pd.to_numeric(raw["Volume"], errors="coerce").fillna(0).to_numpy()})
+                         "close": allrows["Close"].to_numpy(), "volume": allrows["Volume"].fillna(0).to_numpy()})
 
 
 def stitch_history(stored: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
@@ -119,6 +181,7 @@ def stitch_history(stored: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
     vl = next((c for c in ("volume", "Volume", "vol", "Vol") if c in fresh.columns), None)
     norm = pd.DataFrame({"start_Time": _to_epoch_seconds(fresh[ts]), "close": fresh[cl],
                          "volume": fresh[vl] if vl else 0})
+
     return pd.concat([stored, norm], ignore_index=True)
 
 

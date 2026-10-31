@@ -52,7 +52,7 @@ const STEP_BTN = 'inline-flex items-center justify-center h-7 w-6 border border-
  * The SMA overlay's period in P&F boxes, next to the VWAP / SMA toggle: − / + step it by 1 (Shift: 10), clamped to the allowed
  * range, and apply at once (a click is a finished value); the box between them is free-typed and commits on Enter / blur.
  */
-export function SmaPeriodInput({ settings, onChange, equity = false }: { settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean }) {
+export function SmaPeriodInput({ settings, onChange }: { settings: PnfSettings; onChange: (next: PnfSettings) => void }) {
   const p = settings.smaPeriod;
   const step = (dir: 1 | -1, big: boolean) => {
     const next = Math.min(MAX_SMA_PERIOD, Math.max(MIN_SMA_PERIOD, p + dir * (big ? 10 : 1)));

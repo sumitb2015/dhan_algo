@@ -112,3 +112,8 @@ per write; the page drops a view older than the one on screen). It is re-read on
 ## Unconfirmed
 Sensex session close 15:40; CRUDEOILM fills and position units on Zerodha / Kotak; Dhan 5xx-with-body behaviour (the fix is
 defensive). Mark anything new here with the date and how to confirm.
+
+
+## Reused by the P&F page
+
+`/straddle-pnf` reuses this ladder's `classifyClick`, `stopLimitPrice`, `priceLadderGuard` (`cleanGuard` / `evalGuard` / `carryRuntime`) and `MtmGuardCard`. Changing any of them changes P&F charts too — run `lib/pnf*.test.ts` and `e2e/straddle-pnf-rail.spec.ts`; see `dhan-pnf-resting-orders`.

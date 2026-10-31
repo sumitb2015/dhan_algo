@@ -79,6 +79,9 @@ export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3, anchorPrice?
   const anchor = anchorPrice !== undefined && anchorPrice > 0 ? anchorPrice : first.straddle;
   const box = boxSize !== undefined && boxSize > 0 ? boxSize : anchor * boxPct;
   const work: Work[] = [];
+  // The grid is anchored on `anchor`, but the first column starts from the FIRST bar's own label: with a long history the anchor
+  // can be a recent price far from the first bar, and a column must not be drawn across that gap (it is 0 when they coincide).
+  const r0 = Math.round((first.straddle - anchor) / box);
 
   const markBreak = (c: Work, i: number) => {
     if (c.breakBar !== null || work.length < 3) return;
@@ -93,8 +96,8 @@ export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3, anchorPrice?
     const down = Math.ceil(x - EPS);  // lowest label the close has reached from above
     const cur = work[work.length - 1];
     if (!cur) {
-      if (up >= 1) work.push({ dir: 'X', lo: 1, hi: up, startBar: i, endBar: i, breakBar: null, drawn: drawnRange(1, up, i) });
-      else if (down <= -1) work.push({ dir: 'O', lo: down, hi: -1, startBar: i, endBar: i, breakBar: null, drawn: drawnRange(down, -1, i) });
+      if (up >= r0 + 1) work.push({ dir: 'X', lo: r0 + 1, hi: up, startBar: i, endBar: i, breakBar: null, drawn: drawnRange(r0 + 1, up, i) });
+      else if (down <= r0 - 1) work.push({ dir: 'O', lo: down, hi: r0 - 1, startBar: i, endBar: i, breakBar: null, drawn: drawnRange(down, r0 - 1, i) });
       return;
     }
     if (cur.dir === 'X') {

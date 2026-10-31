@@ -73,10 +73,49 @@ class DailyPrefix(unittest.TestCase):
             with open(os.path.join(d, "ABC_Daily_2Y.csv"), "w") as f:
                 f.write("Datetime,Open,High,Low,Close,Volume\n2026-06-04,1,1,1,10,100\n2026-06-05,1,1,1,0,0\n2026-06-08,1,1,1,12,200\n")
             first = int(pd.Timestamp("2026-06-08 09:15:00", tz="Asia/Kolkata").timestamp())
-            out = m.load_daily_before("ABC", first, d)
-            self.assertTrue(m.load_daily_before("NOPE", first, d).empty)
+            nofetch = lambda *a: pd.DataFrame()
+            out = m.load_daily_before("ABC", first, d, d, nofetch)
+            self.assertTrue(m.load_daily_before("NOPE", first, d, d, nofetch).empty)
         self.assertEqual(list(out["close"]), [10.0])
         self.assertEqual(int(out["start_Time"][0]), int(pd.Timestamp("2026-06-04 15:29:00", tz="Asia/Kolkata").timestamp()))
+
+
+class YahooPre2019(unittest.TestCase):
+    def _csv(self, d, rows):
+        with open(os.path.join(d, "ABC_Daily_2Y.csv"), "w") as f:
+            f.write("Datetime,Open,High,Low,Close,Volume\n" + "".join(f"{r}\n" for r in rows))
+
+    def test_older_yahoo_rows_join_the_csv_scaled_to_its_basis_and_are_cached(self):
+        import tempfile
+        m = _load()
+        dates = pd.bdate_range("2019-01-01", periods=70)
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as y:
+            self._csv(d, [f"{t.date()},100,102,98,100,10" for t in dates])
+            calls = []
+
+            def fetch(sym, start, end):
+                calls.append((sym, start, end))
+                idx = pd.bdate_range("2018-12-24", periods=70)   # 5 days before the CSV, then the overlap
+                return pd.DataFrame({"Open": 98.4, "High": 100.4, "Low": 96.4, "Close": 98.4, "Volume": 7.0}, index=pd.DatetimeIndex(idx, name="Datetime"))
+            first = int(pd.Timestamp("2019-06-01", tz="Asia/Kolkata").timestamp())
+            out = m.load_daily_before("ABC", first, d, y, fetch)
+            self.assertEqual(calls[0][1], "2008-01-01")
+            self.assertEqual(len(out), 70 + 6)                       # 6 Yahoo days (24-31 Dec) before the CSV starts, then the CSV
+            self.assertAlmostEqual(out["close"].iloc[0], 100.0, places=1)   # 98.4 x (100 / 98.4)
+            m.load_daily_before("ABC", first, d, y, fetch)
+            self.assertEqual(len(calls), 1)                          # second call reads the cache
+
+    def test_an_unsteady_ratio_refuses_to_join_two_price_bases(self):
+        import tempfile
+        m = _load()
+        dates = pd.bdate_range("2019-01-01", periods=70)
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as y:
+            self._csv(d, [f"{t.date()},100,102,98,100,10" for t in dates])
+            wobble = lambda sym, s, e: pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": [50 + 5 * (i % 7) for i in range(70)], "Volume": 1.0},
+                                                    index=pd.DatetimeIndex(pd.bdate_range("2018-12-24", periods=70), name="Datetime"))
+            first = int(pd.Timestamp("2019-06-01", tz="Asia/Kolkata").timestamp())
+            out = m.load_daily_before("ABC", first, d, y, wobble)
+            self.assertEqual(len(out), 70)                           # CSV only
 
 
 if __name__ == "__main__":

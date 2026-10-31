@@ -15,7 +15,7 @@ const PRICE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'price_pnf_cand
 /** Completed sessions of history; the scripts add today's bars on top, so the chart always has 10 full days behind it. */
 const SESSIONS = 10;
 /** Cash equities show every stored session (the script stitches the downloaded 1-min history to the live API window). */
-const EQUITY_SESSIONS = 5000;
+const EQUITY_SESSIONS = 8000;
 const CACHE_TTL = 20_000;
 /** Every contract (underlying x expiry x strike x side) is its own key, so the cache is pruned on write and capped. */
 const CACHE_MAX = 40;
