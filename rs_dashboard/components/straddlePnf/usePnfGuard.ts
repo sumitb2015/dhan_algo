@@ -16,7 +16,8 @@ const TICK_MS = 1_000;
 const RETRY_EXIT_S = 6;
 
 export interface GuardChart { chart: 1 | 2; targetKey: string }
-type Slot = { guard: LadderGuard; base: number };
+/** `base` is the chart's P&L when the guard was switched on, or null when it was flat then: captured when a position first appears. */
+type Slot = { guard: LadderGuard; base: number | null };
 
 const readLevels = (chart: number): LadderGuard => {
   try {
@@ -43,11 +44,17 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   onEvent: (chart: 1 | 2, kind: 'warn' | 'info', text: string) => void;
 }) {
   const [slots, setSlots] = useState<Record<number, Slot>>({});
+  const slotsRef = useRef(slots);
+  useEffect(() => { slotsRef.current = slots; });
   const scopeRef = useRef(scope);
+  const onEventRef = useRef(onEvent);
+  useEffect(() => { onEventRef.current = onEvent; });
   // Another broker or mode: nothing carries over (the levels stay, the switch goes off).
   useEffect(() => {
     if (scopeRef.current === scope) return;
     scopeRef.current = scope;
+    const lost = Object.entries(slotsRef.current).filter(([, sl]) => sl.guard.on && sl.guard.tripped).map(([c]) => Number(c) as 1 | 2);
+    for (const c of lost) onEventRef.current(c, 'warn', `MTM guard on chart ${c} was still exiting a position when the broker or mode changed: it stopped. Check Positions.`);
     setSlots({});
   }, [scope]);
 
@@ -55,7 +62,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   const mtmOf = (chart: GuardChart): number | null => {
     const s = slots[chart.chart];
     const pos = positions[chart.targetKey];
-    return s?.guard.on && pos && pos.pnl !== null ? pos.pnl - s.base : null;
+    return s?.guard.on && pos && pos.pnl !== null && s.base !== null ? pos.pnl - s.base : null;
   };
 
   /** The card's `post`: validates like the ladder's route does, then stores the guard (fresh runtime when switched on again). */
@@ -64,7 +71,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     const old = slots[chart.chart]?.guard;
     if (!on) {
       const g = old ?? readLevels(chart.chart);
-      setSlots(s => ({ ...s, [chart.chart]: { guard: { ...g, on: false, tripped: undefined, peak: undefined, floor: undefined }, base: 0 } }));
+      setSlots(s => ({ ...s, [chart.chart]: { guard: { ...g, on: false, tripped: undefined, peak: undefined, floor: undefined }, base: null } }));
       return true;
     }
     const cleaned = cleanGuard(body);
@@ -73,12 +80,10 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     if (pos && pos.pnl === null) { toast.error('No live price for this position yet - the guard cannot read its P&L'); return false; }
     const next = carryRuntime(cleaned, old);
     saveLevels(chart.chart, next);
-    setSlots(s => ({ ...s, [chart.chart]: { guard: next, base: old?.on ? s[chart.chart]?.base ?? 0 : pos?.pnl ?? 0 } }));
+    setSlots(s => ({ ...s, [chart.chart]: { guard: next, base: old?.on ? s[chart.chart]?.base ?? null : pos?.pnl ?? null } }));
     return true;
   };
 
-  const slotsRef = useRef(slots);
-  useEffect(() => { slotsRef.current = slots; });
   const exitedAt = useRef<Record<number, number>>({});
   const tickRef = useRef<() => void>(() => {});
   useEffect(() => {
@@ -95,8 +100,13 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
           if (pos) {
             if (nowS - (exitedAt.current[c.chart] ?? 0) > RETRY_EXIT_S) { exitedAt.current[c.chart] = nowS; void exitChart(c.chart, g.tripped); }
           } else if (positionsLoaded && nowS - (g.firedAt ?? nowS) > RETRY_EXIT_S) {
-            setSlots(s => ({ ...s, [c.chart]: { guard: { ...g, on: false, tripped: undefined, firedReason: g.tripped }, base: 0 } }));
+            setSlots(s => ({ ...s, [c.chart]: { guard: { ...g, on: false, tripped: undefined, firedReason: g.tripped }, base: null } }));
           }
+          continue;
+        }
+        // Flat when switched on: the first priced position sets the baseline (earlier realised P&L must not count).
+        if (slot.base === null) {
+          if (pos && pos.pnl !== null) { const b0 = pos.pnl; setSlots(s => ({ ...s, [c.chart]: { ...slot, base: b0 } })); }
           continue;
         }
         const mtm = pos && pos.pnl !== null ? pos.pnl - slot.base : null;

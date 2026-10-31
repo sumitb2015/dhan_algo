@@ -55,7 +55,8 @@ export function planBracketChildren(p: { side: RestingSide; entry: number; tick:
   const out: BracketChild[] = [{
     role: 'sl', side: exit, kind: 'stop', level: slLevel, trigger: slLevel,
     price: long ? Math.max(tick, slLevel * 0.01) : slLevel * 2,
-    ...(spec.trailPts ? { trailPts: spec.trailPts } : {}),
+    // A trail tighter than the stop would pull the stop up to the price on the first tick: it never trails closer than the SL distance.
+    ...(spec.trailPts ? { trailPts: Math.max(spec.trailPts, spec.slPts) } : {}),
   }];
   if (spec.style === 'Bracket') {
     const tgt = snapToTick(long ? entry + spec.tgtPts : entry - spec.tgtPts, tick, long ? 'down' : 'up');

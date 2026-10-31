@@ -24,7 +24,7 @@ test('planBracketChildren: Cover is the stop only; a stop wider than the price i
   const cover = planBracketChildren({ side: 'BUY', entry: 100, tick: 0.05, spec: { style: 'Cover', tgtPts: 0, slPts: 4, trailPts: 2 } });
   assert.ok(Array.isArray(cover));
   assert.equal(cover.length, 1);
-  assert.equal(cover[0].trailPts, 2);
+  assert.equal(cover[0].trailPts, 4, 'a trail tighter than the SL is held at the SL distance');
   assert.equal(typeof planBracketChildren({ side: 'BUY', entry: 3, tick: 0.05, spec: { style: 'Cover', tgtPts: 0, slPts: 5 } }), 'string');
 });
 

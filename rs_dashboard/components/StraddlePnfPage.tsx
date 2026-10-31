@@ -425,7 +425,7 @@ function StraddlePnfPage() {
     if (levelsShow.pd) lines.push({ key: 'pdh', label: 'PDH', price: prev.high, tone: 'pd' }, { key: 'pdl', label: 'PDL', price: prev.low, tone: 'pd' }, { key: 'pdc', label: 'PDC', price: prev.close, tone: 'pd' });
     return {
       lines, band: levelsShow.cpr ? { tc: set.tc, bc: set.bc } : null, show: levelsShow, session: prev.session,
-      onToggle: (k: 'cpr' | 'pivots' | 'pd') => setLevelsShow(v => { const next = { ...v, [k]: !v[k] }; savePref(LEVELS_SHOW_KEY, JSON.stringify(next)); return next; }),
+      onToggle: (k: 'cpr' | 'pivots' | 'pd') => { const next = { ...levelsShow, [k]: !levelsShow[k] }; savePref(LEVELS_SHOW_KEY, JSON.stringify(next)); setLevelsShow(next); },
     };
   };
   const railFor = (c: ChartId) => {
@@ -452,7 +452,10 @@ function StraddlePnfPage() {
       })),
       onPlace: (side: 'BUY' | 'SELL', level: number) => {
         if (!railArmed) return;
-        const spec = bracketSpecNow();
+        // An order against the open position reduces it: it never carries a bracket (the trade bar does the same).
+        const pos = positions[rc.targetKey];
+        const reduces = !!pos && pos.side !== 'MIXED' && (pos.side === 'LONG') === (side === 'SELL');
+        const spec = reduces ? null : bracketSpecNow();
         if (typeof spec === 'string') { toast.error(spec); return; }            // Bracket / Cover not filled in: nothing is placed
         void resting.place(rc, side, level, spec);
       },

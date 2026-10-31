@@ -459,3 +459,41 @@ test('MTM guard (PAPER): a stop-loss on the chart P&L squares the position off a
   await expect(page.getByTestId('pnf-trade-position')).toHaveCount(0, { timeout: 10_000 });
   await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(0);
 });
+
+test('Bracket: an order that reduces the open position carries no bracket, even with Bracket selected', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  const { el, level } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });            // Single: a plain long
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+  state.tick = { ltp: level - 0.2, at: ist(10, 30, 15) };
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 10_000 }).toBe('filled');
+  await page.getByTestId('pnf-style-bracket').click();
+  await page.getByLabel('Target points').fill('0.5');
+  await page.getByLabel('SL points').fill('0.4');
+  await page.getByLabel('SL points').press('Enter');
+  const up = await cell(page, 'SELL', level + 0.6);                // a take-profit SELL against the long
+  await up.el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows.length).toBe(2);
+  expect(state.ledger.rows[1].bracket, 'a reducing order has no bracket').toBeUndefined();
+});
+
+test('MTM guard (PAPER): switched on while flat, it measures from the position that opens afterwards and does not trip on a small move', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  await page.getByTestId('pnf-guard-toggle').click();
+  await page.getByLabel('MTM stop-loss in rupees', { exact: true }).fill('500');
+  await page.getByRole('button', { name: 'Switch on' }).click();
+  await expect(page.getByTestId('pnf-guard-toggle')).toContainText('ON');
+  const { el, level } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  state.tick = { ltp: level - 0.2, at: ist(10, 30, 15) };
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 10_000 }).toBe('filled');
+  await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 1 lot');
+  await page.waitForTimeout(2500);
+  await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 1 lot');       // 0 move: no trip
+  state.tick = { ltp: level - 0.2 - 10, at: ist(10, 30, 17) };                              // -10 pts x 65 = Rs 650 past the Rs 500 stop
+  await expect(page.getByTestId('pnf-trade-position')).toHaveCount(0, { timeout: 10_000 });
+});

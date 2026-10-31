@@ -227,8 +227,11 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
       for (const rows of groups.values()) {
         const working = rows.filter(r => r.state === 'working');
         if (!working.length) continue;
-        const spent = rows.some(r => r.state === 'filled' || r.state === 'firing' || r.state === 'unknown');
+        // Only a CONFIRMED exit cancels its sibling: a lost or partial reply (unknown) must not strip the position of its other exit.
+        const spent = rows.some(r => r.state === 'filled');
         const first = working[0];
+        // A PAPER group is judged against the paper ledger and a REAL one against the broker, so a mode flip never cancels the other side's exits.
+        if (first.mode !== mode || first.broker !== broker) continue;
         const tracked = charts.some(x => x.targetKey === first.targetKey);
         const flat = tracked && (first.mode === 'PAPER' || positionsLoaded) && !positions[first.targetKey] && nowS - Math.min(...rows.map(r => r.t)) > (first.mode === 'PAPER' ? 3 : 20);
         if (spent || flat) for (const r of working) await post({ op: 'cancel', id: r.id, t: nowS });

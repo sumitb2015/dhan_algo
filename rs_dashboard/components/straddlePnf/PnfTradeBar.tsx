@@ -171,17 +171,19 @@ export default function PnfTradeBar({
   };
 
   /** The traded price of a REAL send (a straddle's is CE + PE, each leg qty-weighted over its rows), then the marker moves to it. */
-  const settleMarker = async (id: string, legs: LegResult[]) => {
+  /** Looks up the traded price and updates the marker; resolves with that price (null when the broker never reported it). */
+  const settleMarker = async (id: string, legs: LegResult[]): Promise<number | null> => {
     const byLeg = new Map<string, { qty: number; value: number }>();
     for (const l of legs) {
-      if (l.status !== 'placed' || !l.orderId) return;
+      if (l.status !== 'placed' || !l.orderId) return null;
       const px = await fetchSliceTradedPrice(l.orderId, 'open', l.qty, memoRef.current, { broker });
-      if (px == null) return;                                   // never reported: the marker stays an estimate
+      if (px == null) return null;                              // never reported: the marker stays an estimate
       const cur = byLeg.get(l.label) ?? { qty: 0, value: 0 };
       byLeg.set(l.label, { qty: cur.qty + l.qty, value: cur.value + px * l.qty });
     }
     const price = [...byLeg.values()].reduce((s, v) => s + v.value / v.qty, 0);
     if (price > 0) onMarkerPrice?.(id, price);
+    return price > 0 ? price : null;
   };
 
   const paperFill = (deltaLots: number[]) => {
@@ -228,8 +230,8 @@ export default function PnfTradeBar({
       const j = await post({ action, lots, product });
       if (reportReply(j, `${action} ${lots} ${isEquity ? 'sh' : `lot${lots > 1 ? 's' : ''}`} ${product}`, reduces)) {
         const id = marker(action, lots, true);
-        if (spec) onEntered?.({ action, lots, price: entryPrice, mode: 'REAL', product, spec });
-        void settleMarker(id, j.legs ?? []);
+        // The bracket is anchored to the TRADED price once the broker reports it (the pre-order quote only if it never does).
+        void settleMarker(id, j.legs ?? []).then(px => { if (spec) onEntered?.({ action, lots, price: px ?? entryPrice, mode: 'REAL', product, spec }); });
       }
     } catch (err) {
       onSound?.('unknown', reduces);
