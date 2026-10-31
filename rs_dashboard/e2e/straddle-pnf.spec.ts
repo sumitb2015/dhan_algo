@@ -273,18 +273,18 @@ test('the interval and box % controls default to 1 minute / 0.1% and say so in t
   await page.goto('/straddle-pnf');
   await expect(page.getByLabel('Interval')).toHaveValue('1');
   await expect(page.getByLabel('Box %')).toHaveValue('0.1');
-  await expect(page.getByText(/1-min · 0.1% box/)).toBeVisible();
+  await expect(page.getByText(/1 min · 0.1% box/)).toBeVisible();
   await expect(page.getByTestId('pnf-box-info').first()).toContainText('(0.1% of');
 });
 
-test('changing the interval regroups the bars: fewer columns, and the header says 5-min', async ({ page }) => {
+test('changing the interval regroups the bars: fewer columns, and the header says 5 min', async ({ page }) => {
   await install(page, { phase: 0, blocked: [], longHistory: true });
   await page.goto('/straddle-pnf');
   const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
   await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
   const one = await cols(panel);
   await page.getByLabel('Interval').selectOption('15');
-  await expect(page.getByText(/15-min · 0.1% box/)).toBeVisible();
+  await expect(page.getByText(/15 min · 0.1% box/)).toBeVisible();
   await expect.poll(async () => cols(panel)).toBeLessThan(one);
   await expect(page.getByLabel('Interval').locator('option')).toHaveText(['1 min', '3 min', '5 min', '15 min']);
 });
@@ -303,7 +303,7 @@ test('the box % applies on Enter, an invalid entry is refused and reverts, and t
   await input.press('Enter');
   await expect(panel.getByTestId('pnf-box-info')).toContainText('(0.2% of');
   expect(Math.abs((await boxOf()) / baseBox - 2)).toBeLessThan(0.05);                      // twice the box
-  await expect(page.getByText(/1-min · 0.2% box/)).toBeVisible();
+  await expect(page.getByText(/1 min · 0.2% box/)).toBeVisible();
 
   await input.fill('abc');
   await expect(input).toHaveAttribute('aria-invalid', 'true');
@@ -323,11 +323,11 @@ test('the chosen interval and box % are remembered after a reload', async ({ pag
   await page.getByLabel('Interval').selectOption('5');
   await page.getByLabel('Box %').fill('0.75');
   await page.getByLabel('Box %').press('Enter');
-  await expect(page.getByText(/5-min · 0.75% box/)).toBeVisible();
+  await expect(page.getByText(/5 min · 0.75% box/)).toBeVisible();
   await page.reload();
   await expect(page.getByLabel('Interval')).toHaveValue('5');
   await expect(page.getByLabel('Box %')).toHaveValue('0.75');
-  await expect(page.getByText(/5-min · 0.75% box/)).toBeVisible();
+  await expect(page.getByText(/5 min · 0.75% box/)).toBeVisible();
 });
 
 test('changing the interval or the box % redraws the charts but never fires an alert for old signals', async ({ page }) => {
@@ -414,7 +414,7 @@ test('the box can be set in points: the unit toggle swaps the input, Enter appli
   await expect(page.getByTestId('pnf-box-info').first()).not.toContainText('Box 2.00');  // typing alone changes nothing
   await pts.press('Enter');
   await expect(page.getByTestId('pnf-box-info').first()).toContainText('Box 2.00 (points)');
-  await expect(page.getByText(/1-min · 2-pt box/)).toBeVisible();
+  await expect(page.getByText(/1 min · 2-pt box/)).toBeVisible();
   await pts.fill('-3');                                                           // invalid: reverts on commit
   await pts.blur();
   await expect(pts).toHaveValue('2');
