@@ -378,7 +378,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveCols.length, contentW, contentH, strike]);
 
-  // TradingView-style controls (same as the options charts): wheel zooms around the cursor, drag pans freely, double-click or the
+  // TradingView-style controls (same as the options charts): wheel zooms around the cursor, dragging the price axis zooms, drag pans freely, double-click or the
   // round-arrow button fits the chart back to the newest column, and − / + zoom around the view centre. No scrollbars.
   const pendingRef = useRef<{ left: number; top: number } | 'reset' | null>(null);
   const [scrollTick, setScrollTick] = useState(0);
@@ -421,6 +421,10 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   }, [resetTick]);
   const zoomRef = useRef(zoomBy);
   useLayoutEffect(() => { zoomRef.current = zoomBy; });
+  // Press on the price axis and drag: up zooms in, down zooms out (about the view centre), like a charting package's price scale.
+  const zoomNowRef = useRef(zoom);
+  useLayoutEffect(() => { zoomNowRef.current = zoom; });
+  const axisDragRef = useRef<{ y: number; z: number } | null>(null);
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -1055,7 +1059,22 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
             )}
 
             {/* price axis: sticky, so it stays at the panel's right edge while the chart is panned */}
-            <svg width={AXIS_W} height={contentH} className="block shrink-0 sticky right-0 bg-zinc-900" aria-hidden="true">
+            <svg width={AXIS_W} height={contentH} className="block shrink-0 sticky right-0 bg-zinc-900 cursor-ns-resize" data-testid="pnf-axis-drag"
+                 onPointerDown={e => {
+                   if (e.button !== 0) return;
+                   e.stopPropagation();                      // not a chart pan
+                   touchedRef.current = true;
+                   axisDragRef.current = { y: e.clientY, z: zoomNowRef.current };
+                   e.currentTarget.setPointerCapture(e.pointerId);
+                 }}
+                 onPointerMove={e => {
+                   const d = axisDragRef.current;
+                   if (!d) return;
+                   e.stopPropagation();
+                   zoomRef.current(Math.exp((d.y - e.clientY) * 0.01) * d.z / zoomNowRef.current);
+                 }}
+                 onPointerUp={() => { axisDragRef.current = null; }}
+                 onPointerCancel={() => { axisDragRef.current = null; }}>
               <g data-testid="pnf-axis">
                 {Array.from({ length: Math.round((yMax - yMin) / box) }, (_, i) => i)
                   .filter(i => i % tickEvery === 0)
