@@ -40,7 +40,7 @@ import AutoControls from './straddlePnf/AutoControls';
 import { usePnfPositions } from './straddlePnf/usePnfPositions';
 import { usePnfGuard } from './straddlePnf/usePnfGuard';
 import PnfOrderStyle, { DEFAULT_STYLE, type StyleState } from './straddlePnf/PnfOrderStyle';
-import { cleanBracketSpec } from '@/lib/pnfBracket';
+import { cleanBracketSpec, planBracketChildren } from '@/lib/pnfBracket';
 import { useChartLegs, usePnfResting, type RailChart, type RestingEvent } from './straddlePnf/usePnfResting';
 import { applyPaperFill, FLAT_LEG, type PaperLeg, type PnfProduct } from '@/lib/pnfOrderLogic';
 import { needsResolve, type RestingRow } from '@/lib/pnfRestingLedger';
@@ -461,6 +461,11 @@ function StraddlePnfPage() {
       orders: rows.map(r => ({
         id: r.id, side: r.side, kind: r.kind, level: r.level, price: r.price, trigger: r.trigger, lots: r.lots, state: r.state, mode: r.mode, role: r.role, trailPts: r.trailPts, bracket: r.bracket?.style,
         resolvable: needsResolve(r, now),
+        // What a Bracket / Cover entry will get when it fills, drawn dimmed in the ladder (the exits themselves are created at the fill)
+        ...(r.bracket && !r.group && r.state === 'working' ? (() => {
+          const kids = planBracketChildren({ side: r.side, entry: r.kind === 'stop' ? r.trigger ?? r.level : r.price, tick: rc.tick, spec: r.bracket });
+          return typeof kids === 'string' ? {} : { planned: kids.map(k => ({ role: k.role, level: k.level })) };
+        })() : {}),
       })),
       onPlace: (side: 'BUY' | 'SELL', level: number) => {
         if (!railArmed) return;

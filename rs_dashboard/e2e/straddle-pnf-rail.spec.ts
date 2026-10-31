@@ -413,8 +413,14 @@ test('Bracket (PAPER): the entry that fills arms a stop-loss and a target at poi
   await el.dispatchEvent('pointerdown', { button: 0 });
   await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
   expect(state.ledger.rows[0].bracket).toMatchObject({ style: 'Bracket', tgtPts: 0.5, slPts: 0.4 });
+  // the ladder shows where the stop-loss and target will go as soon as the entry is placed (dimmed); they become real orders at the fill
+  const planned = page.getByTestId('pnf-rail-planned');
+  await expect(planned).toHaveCount(2);
+  expect(Number(await planned.filter({ has: page.locator('text:has-text("SL")') }).first().getAttribute('data-level'))).toBeCloseTo(level - 0.4, 1);
+  expect(Number(await page.locator('[data-testid="pnf-rail-planned"][data-role="target"]').getAttribute('data-level'))).toBeCloseTo(level + 0.5, 1);
   state.tick = { ltp: level - 0.2, at: ist(10, 30, 15) };
   await expect.poll(() => state.ledger.rows.filter(r => r.group).length, { timeout: 10_000 }).toBe(2);
+  await expect(planned).toHaveCount(0);
   const fill = state.ledger.rows[0].fillPrice!;
   const sl = state.ledger.rows.find(r => r.role === 'sl')!, tp = state.ledger.rows.find(r => r.role === 'target')!;
   expect(sl.side).toBe('SELL'); expect(tp.side).toBe('SELL');

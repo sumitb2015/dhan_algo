@@ -142,7 +142,7 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
    */
   const armChildren = async (e: { id: string; chart: 1 | 2; target: Target; targetKey: string; side: RestingSide; lots: number; mode: 'PAPER' | 'REAL'; product: string; bracket: BracketSpec }, entry: number) => {
     const c = charts.find(x => x.targetKey === e.targetKey);
-    if (!c) return;
+    if (!c) { onEvent({ kind: 'warn', chart: e.chart, text: `${e.bracket.style} exits not placed: the chart's contract details are not loaded - the position is OPEN WITHOUT exits` }); return; }
     const kids = planBracketChildren({ side: e.side, entry, tick: c.tick, spec: e.bracket });
     if (typeof kids === 'string') { onEvent({ kind: 'warn', chart: e.chart, text: `Bracket not placed: ${kids} - the position is OPEN WITHOUT exits` }); return; }
     let failed = 0;

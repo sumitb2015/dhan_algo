@@ -99,6 +99,8 @@ export type RailOrder = {
   role?: 'sl' | 'target';
   trailPts?: number;
   bracket?: 'Bracket' | 'Cover';
+  /** A working Bracket / Cover entry: where its stop-loss and target will be placed once it fills (drawn dimmed in the ladder). */
+  planned?: { role: 'sl' | 'target'; level: number }[];
 };
 export type PnfRail = {
   orders: RailOrder[];
@@ -334,12 +336,26 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
              }}
              onPointerCancel={() => setDrag(null)}>
             <rect x={x0} y={y - 9} width={W} height={18} rx={o.kind === 'stop' ? 9 : 4} className={tone(o.side)} strokeWidth={1} opacity={movable ? 1 : 0.5} />
-            <text x={x0 + 14} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={9.5} fontWeight={800} pointerEvents="none">{word}</text>
-            {stepper && btn('pnf-rail-lots-down', x0 + 29, '−', `Remove a lot: ${o.side} ${kindWord} at ${fmt(o.level, 2)}`, () => rail.onLots!(o.id, -1))}
-            <text x={stepper ? x0 + 56 : x0 + 40} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={10} fontWeight={800} pointerEvents="none">{`${o.lots}L`}</text>
-            {stepper && btn('pnf-rail-lots-up', x0 + 64, '+', `Add a lot: ${o.side} ${kindWord} at ${fmt(o.level, 2)}`, () => rail.onLots!(o.id, 1))}
-            {movable && btn('pnf-rail-cancel', x0 + W - 14, '×', `Cancel ${o.side} ${kindWord} at ${fmt(o.level, 2)}`, () => rail.onCancel(o.id))}
+            {/* an entry order is `[-] 1L [+] [x]` (the chart's tag and the PRICE column say LMT / SL and the price); a bracket exit has no - / +,
+                so it keeps its word: `SL 1L [x]` / `TGT 1L [x]` */}
+            {stepper && btn('pnf-rail-lots-down', x0 + 9, '−', `Remove a lot: ${o.side} ${kindWord} at ${fmt(o.level, 2)}`, () => rail.onLots!(o.id, -1))}
+            <text x={stepper ? x0 + 36 : x0 + (W - 14) / 2} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={10} fontWeight={800} pointerEvents="none">{o.role ? `${word} ${o.lots}L` : `${o.lots}L`}</text>
+            {stepper && btn('pnf-rail-lots-up', x0 + 51, '+', `Add a lot: ${o.side} ${kindWord} at ${fmt(o.level, 2)}`, () => rail.onLots!(o.id, 1))}
+            {movable && btn('pnf-rail-cancel', x0 + (stepper ? 71 : W - 14), '×', `Cancel ${o.side} ${kindWord} at ${fmt(o.level, 2)}`, () => rail.onCancel(o.id))}
             <title>{`${o.side} ${kindWord} ${o.lots}L at ${fmt(o.kind === 'stop' ? o.trigger ?? o.level : o.price, axisDigits)}${movable ? ' — drag to move' : ` (${o.state})`}`}</title>
+          </g>
+        );
+      })}
+      {/* the exits a working Bracket / Cover entry will place when it fills: dimmed, dashed, in the exit side's column, price in PRICE */}
+      {rail.orders.flatMap(o => (o.planned ?? []).map(k => ({ o, k }))).map(({ o, k }) => {
+        const exitSide = o.side === 'BUY' ? 'SELL' : 'BUY';
+        const y = yOf(k.level);
+        if (y < 0 || y > contentH) return null;
+        const x0 = colX(exitSide) + 2;
+        return (
+          <g key={`plan-${o.id}-${k.role}`} data-testid="pnf-rail-planned" data-role={k.role} data-level={k.level} pointerEvents="none" opacity={0.7}>
+            <rect x={x0} y={y - 9} width={RAIL_SIDE_W - 4} height={18} rx={4} className="fill-zinc-800 stroke-zinc-400" strokeWidth={1} strokeDasharray="3 2" />
+            <text x={x0 + (RAIL_SIDE_W - 4) / 2} y={y + 3.5} textAnchor="middle" className={`font-mono ${k.role === 'sl' ? 'fill-red-300' : 'fill-emerald-300'}`} fontSize={10} fontWeight={800}>{`${k.role === 'sl' ? 'SL' : 'TGT'} ${fmt(k.level, axisDigits)}`}</text>
           </g>
         );
       })}
