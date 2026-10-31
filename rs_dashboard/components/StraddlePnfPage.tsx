@@ -40,7 +40,7 @@ import AutoControls from './straddlePnf/AutoControls';
 import { usePnfPositions } from './straddlePnf/usePnfPositions';
 import { usePnfGuard } from './straddlePnf/usePnfGuard';
 import PnfOrderStyle, { DEFAULT_STYLE, type StyleState } from './straddlePnf/PnfOrderStyle';
-import { cleanBracketSpec, planBracketChildren } from '@/lib/pnfBracket';
+import { cleanBracketSpec, planBracketChildren, type BracketSpec } from '@/lib/pnfBracket';
 import { useChartLegs, usePnfResting, type RailChart, type RestingEvent } from './straddlePnf/usePnfResting';
 import { applyPaperFill, FLAT_LEG, type PaperLeg, type PnfProduct } from '@/lib/pnfOrderLogic';
 import { needsResolve, type RestingRow } from '@/lib/pnfRestingLedger';
@@ -74,7 +74,8 @@ const MARKERS_SHOWN_KEY = 'straddle-pnf-markers-shown-';
 const LINES_SHOWN_KEY = 'straddle-pnf-lines-shown-';
 const TRI_SHOW_KEY = 'straddle-pnf-tri-show-';
 const TRI_MIN_KEY = 'straddle-pnf-tri-min-';
-const STYLE_KEY = 'straddle-pnf-order-style';
+// v2: the target / SL / trail numbers are P&F BOXES now; the old key held points and must not be re-read as boxes
+const STYLE_KEY = 'straddle-pnf-order-style-v2';
 const TAG_LEFT_KEY = 'straddle-pnf-tag-left-';
 const DISARMED: AutoArm = { on: false, mode: 'PAPER', watermarkT: 0 };
 
@@ -388,7 +389,15 @@ function StraddlePnfPage() {
   const positions = positionsInfo.byKey;
   const changeStyle = (s: StyleState) => { setOrderStyle(s); savePref(STYLE_KEY, JSON.stringify(s)); };
   /** The next entry's bracket: a spec, null (Single), or why it is not ready (then nothing is sent). */
-  const bracketSpecNow = () => cleanBracketSpec(orderStyle.style, orderStyle.tgt, orderStyle.sl, orderStyle.trailOn ? orderStyle.trail : undefined);
+  // The Style bar's numbers are P&F boxes of the chart the order goes to: they become price points with that chart's own box size.
+  const bracketSpecNow = (chart: ChartId = active): BracketSpec | null | string => {
+    if (orderStyle.style === 'Single') return null;
+    const box = (chart === 2 ? c2 : c1).model.box;
+    if (!(box > 0)) return 'The chart has no box size yet - wait for its data';
+    const pts = (v: string) => { const n = Number(v); return v.trim() !== '' && Number.isFinite(n) && n > 0 ? String(+(n * box).toFixed(6)) : v; };
+    const spec = cleanBracketSpec(orderStyle.style, pts(orderStyle.tgt), pts(orderStyle.sl), orderStyle.trailOn ? pts(orderStyle.trail) : undefined);
+    return typeof spec === 'string' ? spec.replace(/points/g, 'boxes') : spec;
+  };
   const onRestingEvent = (e: RestingEvent) => {
     if (e.kind === 'warn') { toast.warning(e.text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); return; }
     if (e.kind === 'info') { toast(e.text); return; }
@@ -481,7 +490,7 @@ function StraddlePnfPage() {
         // An order against the open position reduces it: it never carries a bracket (the trade bar does the same).
         const pos = positions[rc.targetKey];
         const reduces = !!pos && pos.side !== 'MIXED' && (pos.side === 'LONG') === (side === 'SELL');
-        const spec = reduces ? null : bracketSpecNow();
+        const spec = reduces ? null : bracketSpecNow(c);
         if (typeof spec === 'string') { toast.error(spec); return; }            // Bracket / Cover not filled in: nothing is placed
         void resting.place(rc, side, level, spec);
       },
@@ -808,7 +817,7 @@ function StraddlePnfPage() {
         {loadErrors.map(e => <p key={e as string} role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{e}</p>)}
         {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind))} /></div>}
         <PnfOrderStyle
-            value={orderStyle} onChange={changeStyle}
+            value={orderStyle} onChange={changeStyle} boxPts={activeChartModel.model.box}
             guardOn={[1, 2].some(n => guards.guardOf(n).on)}
             guard={(() => {
               const rc = railCharts.find(x => x.chart === active);

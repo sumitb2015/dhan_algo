@@ -153,9 +153,9 @@ test('the header has Cancel all orders: it cancels every working order (bracket 
   const header = page.getByTestId('pnf-cancel-every-order');
   await expect(header).toBeDisabled();
   await page.getByTestId('pnf-style-bracket').click();
-  await page.getByLabel('Target points').fill('0.5');
-  await page.getByLabel('SL points').fill('0.4');
-  await page.getByLabel('SL points').press('Enter');
+  await page.getByLabel('Target boxes').fill('5');
+  await page.getByLabel('SL boxes').fill('4');
+  await page.getByLabel('SL boxes').press('Enter');
   const a = await cell(page, 'BUY', 99.05); await a.el.dispatchEvent('pointerdown', { button: 0 });
   const b = await cell(page, 'BUY', 98.85); await b.el.dispatchEvent('pointerdown', { button: 0 });
   await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(2);
@@ -425,13 +425,16 @@ test('Bracket (PAPER): the entry that fills arms a stop-loss and a target at poi
   const { state } = await install(page);
   await openFuture(page);
   await page.getByTestId('pnf-style-bracket').click();
-  await page.getByLabel('Target points').fill('0.5');
-  await page.getByLabel('SL points').fill('0.4');
-  await page.getByLabel('SL points').press('Enter');
+  await page.getByLabel('Target boxes').fill('5');
+  await page.getByLabel('SL boxes').fill('4');
+  await page.getByLabel('SL boxes').press('Enter');
   const { el, level } = await cell(page, 'BUY', 99.05);
   await el.dispatchEvent('pointerdown', { button: 0 });
   await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
-  expect(state.ledger.rows[0].bracket).toMatchObject({ style: 'Bracket', tgtPts: 0.5, slPts: 0.4 });
+  // the Style bar is in P&F boxes: 5 / 4 boxes of this chart's ~0.10 box are stored as points
+  expect(state.ledger.rows[0].bracket).toMatchObject({ style: 'Bracket' });
+  expect(state.ledger.rows[0].bracket!.tgtPts).toBeCloseTo(0.5, 1);
+  expect(state.ledger.rows[0].bracket!.slPts).toBeCloseTo(0.4, 1);
   // the ladder shows where the stop-loss and target will go as soon as the entry is placed (dimmed); they become real orders at the fill
   const planned = page.getByTestId('pnf-rail-planned');
   await expect(planned).toHaveCount(2);
@@ -496,9 +499,9 @@ test('Bracket: an order that reduces the open position carries no bracket, even 
   state.tick = { ltp: level - 0.2, at: ist(10, 30, 15) };
   await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 10_000 }).toBe('filled');
   await page.getByTestId('pnf-style-bracket').click();
-  await page.getByLabel('Target points').fill('0.5');
-  await page.getByLabel('SL points').fill('0.4');
-  await page.getByLabel('SL points').press('Enter');
+  await page.getByLabel('Target boxes').fill('5');
+  await page.getByLabel('SL boxes').fill('4');
+  await page.getByLabel('SL boxes').press('Enter');
   const up = await cell(page, 'SELL', level + 0.6);                // a take-profit SELL against the long
   await up.el.dispatchEvent('pointerdown', { button: 0 });
   await expect.poll(() => state.ledger.rows.length).toBe(2);

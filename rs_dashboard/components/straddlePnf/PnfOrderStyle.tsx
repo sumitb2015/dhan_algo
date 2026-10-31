@@ -7,16 +7,16 @@ import type { OrderStyle } from '@/lib/pnfBracket';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
 
 // The order Style of the Price Ladder (Single | Bracket | Cover) and its MTM guard, for the P&F page. Bracket / Cover attach
-// stop-loss (and target) exits, in POINTS of the chart's own price, to every entry placed from the trade bar or the chart rail;
+// stop-loss (and target) exits, in P&F BOXES of the chart (the page converts them to points with the chart's own box size), to every entry placed from the trade bar or the chart rail;
 // they are held by this page (keep it open). It floats over the chart's top padding so it costs no chart height. Numbers are typed as drafts and committed on blur / Enter (dhan-commit-on-blur).
 
 export interface StyleState { style: OrderStyle; tgt: string; sl: string; trail: string; trailOn: boolean }
 export const DEFAULT_STYLE: StyleState = { style: 'Single', tgt: '', sl: '', trail: '', trailOn: false };
 
 const FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60';
-const HELP = 'Single: the order only. Bracket: when it fills, a stop-loss and a target are placed at these points from the fill price; whichever is hit first closes the position and cancels the other. Cover: the stop-loss only. Trail moves the stop with the price. The exits are held by THIS page (the open tab), not at the broker, and only ever reduce the position.';
+const HELP = 'Single: the order only. Bracket: when it fills, a stop-loss and a target are placed this many P&F boxes from the fill price; whichever is hit first closes the position and cancels the other. Cover: the stop-loss only. Trail moves the stop with the price. The exits are held by THIS page (the open tab), not at the broker, and only ever reduce the position.';
 
-function PtsBox({ label, value, onCommit, disabled }: { label: string; value: string; onCommit: (v: string) => void; disabled?: boolean }) {
+function BoxesBox({ label, value, onCommit, disabled, boxPts }: { label: string; value: string; onCommit: (v: string) => void; disabled?: boolean; boxPts?: number }) {
   const [draft, setDraft] = useState(value);
   const [seen, setSeen] = useState(value);
   if (seen !== value) { setSeen(value); setDraft(value); }
@@ -28,17 +28,20 @@ function PtsBox({ label, value, onCommit, disabled }: { label: string; value: st
   return (
     <label className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
       {label}
-      <input aria-label={`${label} points`} inputMode="decimal" placeholder="pts" value={draft} disabled={disabled}
+      <input aria-label={`${label} boxes`} inputMode="decimal" placeholder="boxes" value={draft} disabled={disabled}
              onChange={e => setDraft(e.target.value)}
              onBlur={e => commit(e.currentTarget.value)}
              onKeyDown={e => { if (e.key === 'Enter') { commit(e.currentTarget.value); e.currentTarget.blur(); } if (e.key === 'Escape') { setDraft(value); e.currentTarget.blur(); } }}
              className={`w-16 h-6 px-1.5 rounded bg-zinc-900 border border-zinc-700 text-xs font-mono text-zinc-100 placeholder:text-zinc-500 disabled:opacity-40 ${FOCUS}`} />
+      <span className="text-[10px] text-zinc-500">box{Number(value) === 1 ? '' : 'es'}{boxPts && Number(value) > 0 ? ` = ${(Number(value) * boxPts).toLocaleString('en-IN', { maximumFractionDigits: 2 })} pts` : ''}</span>
     </label>
   );
 }
 
-export default function PnfOrderStyle({ value, onChange, guard, guardOn }: {
+export default function PnfOrderStyle({ value, onChange, guard, guardOn, boxPts }: {
   value: StyleState;
+  /** The active chart's box size in price points (shown next to each box count as its point equivalent). */
+  boxPts?: number;
   onChange: (s: StyleState) => void;
   /** The active chart's MTM guard card inputs; absent when the chart cannot be traded (index). */
   guard?: { broker: string; real: boolean; chart: 1 | 2; chartLabel: string; mtm: number | null; guard?: LadderGuard; post: (body: Record<string, unknown>) => Promise<boolean> };
@@ -55,15 +58,15 @@ export default function PnfOrderStyle({ value, onChange, guard, guardOn }: {
       <div role="group" aria-label="Order style" className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-950">
         {(['Single', 'Bracket', 'Cover'] as const).map(seg)}
       </div>
-      {value.style === 'Bracket' && <PtsBox label="Target" value={value.tgt} onCommit={v => onChange({ ...value, tgt: v })} />}
-      {value.style !== 'Single' && <PtsBox label="SL" value={value.sl} onCommit={v => onChange({ ...value, sl: v })} />}
+      {value.style === 'Bracket' && <BoxesBox label="Target" value={value.tgt} boxPts={boxPts} onCommit={v => onChange({ ...value, tgt: v })} />}
+      {value.style !== 'Single' && <BoxesBox label="SL" value={value.sl} boxPts={boxPts} onCommit={v => onChange({ ...value, sl: v })} />}
       {value.style !== 'Single' && (
         <span className="inline-flex items-center gap-1.5">
           <label className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
             <input type="checkbox" checked={value.trailOn} onChange={e => onChange({ ...value, trailOn: e.target.checked })} className={`accent-violet-500 ${FOCUS}`} />
             Trail SL by
           </label>
-          {value.trailOn && <PtsBox label="Trail" value={value.trail} onCommit={v => onChange({ ...value, trail: v })} />}
+          {value.trailOn && <BoxesBox label="Trail" value={value.trail} boxPts={boxPts} onCommit={v => onChange({ ...value, trail: v })} />}
         </span>
       )}
 
