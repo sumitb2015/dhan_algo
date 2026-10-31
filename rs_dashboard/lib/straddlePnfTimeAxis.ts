@@ -9,35 +9,56 @@ const istParts = (t: number) => {
   return { y: d.getUTCFullYear(), m: d.getUTCMonth(), d: d.getUTCDate(), hh: d.getUTCHours(), mm: d.getUTCMinutes() };
 };
 
-export interface TimeAxisLabel { x: number; text: string; /** The month's name (drawn bolder) rather than a day number. */ month: boolean }
+export interface TimeAxisLabel { x: number; text: string; /** A month's or a year's name (drawn bolder) rather than a day number. */ major: boolean }
+
+/** How coarse the labels are: days for a chart of a few months, months for up to ~3 years, years beyond (TradingView's own steps). */
+export type AxisGranularity = 'day' | 'month' | 'year';
+export function granularityFor(firstT: number, lastT: number): AxisGranularity {
+  const days = (lastT - firstT) / 86_400;
+  return days <= 150 ? 'day' : days <= 3 * 366 ? 'month' : 'year';
+}
 
 /**
- * One label at the first column of each new IST day, kept at least `minGap` pixels apart; the first label of a month (and of the
- * chart) is the month's name, every other one the day of the month.
+ * One label at the first column of each new IST day / month / year (by granularity, default from the chart's span), kept at least
+ * `minGap` pixels apart. Days: the day number, the month's name on a month's first label. Months: the month's name, the year on
+ * January. Years: the year.
  */
-export function timeAxisLabels(times: number[], xs: number[], minGap = 44): TimeAxisLabel[] {
+export function timeAxisLabels(times: number[], xs: number[], minGap = 44, gran?: AxisGranularity): TimeAxisLabel[] {
   const out: TimeAxisLabel[] = [];
+  if (!times.length) return out;
+  const g = gran ?? granularityFor(times[0], times[times.length - 1]);
   let lastX = -Infinity;
-  let prevDay = '';
+  let prevKey = -1;
   let labelledMonth = -1;
   for (let i = 0; i < times.length; i++) {
     const p = istParts(times[i]);
-    const day = `${p.y}-${p.m}-${p.d}`;
-    if (day === prevDay) continue;
-    prevDay = day;
+    const key = g === 'day' ? p.y * 400 + p.m * 32 + p.d : g === 'month' ? p.y * 12 + p.m : p.y;
+    if (key === prevKey) continue;
+    prevKey = key;
     if (xs[i] - lastX < minGap) continue;
-    const monthKey = p.y * 12 + p.m;
-    const month = monthKey !== labelledMonth;
-    out.push({ x: xs[i], text: month ? MONTHS[p.m] : String(p.d), month });
-    labelledMonth = monthKey;
+    let text: string, major: boolean;
+    if (g === 'day') {
+      const monthKey = p.y * 12 + p.m;
+      major = monthKey !== labelledMonth;
+      text = major ? MONTHS[p.m] : String(p.d);
+      labelledMonth = monthKey;
+    } else if (g === 'month') {
+      major = p.m === 0;
+      text = major ? String(p.y) : MONTHS[p.m];
+    } else {
+      major = true;
+      text = String(p.y);
+    }
+    out.push({ x: xs[i], text, major });
     lastX = xs[i];
   }
   return out;
 }
 
-/** The crosshair's date chip: "15 Oct '26  11:18" (IST). */
-export function crosshairStamp(t: number): string {
+/** The crosshair's date chip: "15 Oct '26  11:18" (IST), or just "15 Oct '26" for a daily or longer bar (no time of day). */
+export function crosshairStamp(t: number, withTime = true): string {
   const p = istParts(t);
   const pad = (n: number) => String(n).padStart(2, '0');
-  return `${p.d} ${MONTHS[p.m]} '${pad(p.y % 100)}  ${pad(p.hh)}:${pad(p.mm)}`;
+  const date = `${p.d} ${MONTHS[p.m]} '${pad(p.y % 100)}`;
+  return withTime ? `${date}  ${pad(p.hh)}:${pad(p.mm)}` : date;
 }

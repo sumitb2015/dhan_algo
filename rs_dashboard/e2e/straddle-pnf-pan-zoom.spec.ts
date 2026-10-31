@@ -210,7 +210,7 @@ test('a stock whose bars carry no volume gets the box SMA and a disabled VWAP bu
   await page.getByRole('combobox', { name: 'Search stock' }).fill('zer');
   await page.getByRole('option', { name: /ZEROVOL/ }).click();
   await expect(page.getByText('ZERO VOLUME LTD').first()).toBeVisible();
-  await expect(page.getByRole('button', { name: 'VWAP' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'VWAP', exact: true })).toBeDisabled();
   await expect(page.getByTestId('pnf-overlay-legend').first()).toHaveText(/SMA/);
 });
 

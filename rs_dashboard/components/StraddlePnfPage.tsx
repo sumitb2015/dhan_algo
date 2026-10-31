@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, ChartScatter, Eye, EyeOff, LocateFixed, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
+import { Bell, ChartScatter, Eye, EyeOff, Flag, LocateFixed, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from './NavBar';
 import DataChip from './DataChip';
@@ -596,8 +596,9 @@ function StraddlePnfPage() {
       scrip: dual ? `${feed.scrip} (${boxText(st)})` : feed.scrip,
       feedPrevClose: feed.trustedPrevClose,
       sessionTag: feed.sessionTag,
-      sessionLines: target.kind !== 'equity' && target.kind !== 'index',
-      timeAxis: target.kind === 'index',
+      // Every instrument gets TradingView's bottom time axis and crosshair date chip, so no top date strip or dashed date lines.
+      sessionLines: false,
+      timeAxis: true,
       sessionDividers: target.kind !== 'equity' && target.kind !== 'index',
       // Manual trade-bar markers (this browser session) + AUTO trades from the ledger, on their signal / reversal bars.
       tradeMarkers: [...(markers[targetKey(target)] ?? []), ...autoMarkers(autoToday, targetKey(target)).map(m => ({ ...m, estimate: m.mode === 'REAL' }))],
@@ -737,8 +738,11 @@ function StraddlePnfPage() {
                       onClick={toggleOverlayShown} className={`${seg(!overlayShown)} inline-flex items-center`}>
                 {overlayShown ? <Eye className="w-3.5 h-3.5" aria-hidden="true" /> : <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />}
               </button>
-              <button type="button" aria-pressed={coverShown} title="Show the COVER tag: where an X column first trades above the VWAP / SMA (a hint for covering a short; nothing trades on it)"
-                      onClick={toggleCoverShown} className={seg(coverShown)}>Cover tag</button>
+              <button type="button" aria-pressed={coverShown} aria-label={coverShown ? 'Hide the COVER tag' : 'Show the COVER tag'}
+                      title="COVER tag: where an X column first trades above the VWAP / SMA (a hint for covering a short; nothing trades on it)"
+                      onClick={toggleCoverShown} className={`${seg(coverShown)} inline-flex items-center`}>
+                <Flag className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
             </div>
             <fieldset disabled={activeLocked} className="contents"><SmaPeriodInput settings={activeSettings} onChange={applySettings} /></fieldset>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />

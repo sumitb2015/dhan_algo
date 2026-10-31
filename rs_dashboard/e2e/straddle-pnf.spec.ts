@@ -140,7 +140,7 @@ test('an index has no VWAP (no traded volume): the button is disabled and the bo
   await page.goto('/straddle-pnf');                                 // NIFTY index by default
   const legend = page.getByTestId('pnf-overlay-legend').first();
   await expect(legend).toHaveText(/SMA 50/);
-  await expect(page.getByRole('button', { name: 'VWAP' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'VWAP', exact: true })).toBeDisabled();
   await expect(page.getByRole('button', { name: 'SMA 50' })).toHaveAttribute('aria-pressed', 'true');
 });
 
@@ -150,7 +150,7 @@ test('the VWAP / SMA toggle switches the overlay legend (a traded instrument), a
   const legend = page.getByTestId('pnf-overlay-legend').first();
   await expect(legend).toHaveText(/SMA 50/);                        // hydrated on the NIFTY index
   await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();   // a future trades volume: VWAP is allowed
-  await expect(page.getByRole('button', { name: 'VWAP' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: 'VWAP', exact: true })).toBeEnabled();
   await expect(legend).toHaveText(/VWAP/);
   await page.getByRole('button', { name: 'SMA 50' }).click();      // the default period
   await expect(legend).toHaveText(/SMA 50/);
@@ -175,7 +175,7 @@ test('the VWAP / SMA toggle switches the overlay legend (a traded instrument), a
   await expect(period).toHaveValue('13');
   await page.getByRole('button', { name: 'Decrease SMA period' }).click();
   await expect(legend).toHaveText(/SMA 12/);
-  await page.getByRole('button', { name: 'VWAP' }).click();
+  await page.getByRole('button', { name: 'VWAP', exact: true }).click();
   await expect(legend).toHaveText(/VWAP/);
 });
 
@@ -286,7 +286,7 @@ test('changing the interval regroups the bars: fewer columns, and the header say
   await page.getByLabel('Interval').selectOption('15');
   await expect(page.getByText(/15 min · 0.1% box/)).toBeVisible();
   await expect.poll(async () => cols(panel)).toBeLessThan(one);
-  await expect(page.getByLabel('Interval').locator('option')).toHaveText(['1 min', '3 min', '5 min', '15 min']);
+  await expect(page.getByLabel('Interval').locator('option')).toHaveText(['1 min', '3 min', '5 min', '15 min', '30 min', '1 hr', '4 hr', '1 day', '1 week', '1 month']);   // an index offers the long intervals too
 });
 
 test('the box % applies on Enter, an invalid entry is refused and reverts, and the header follows', async ({ page }) => {
@@ -444,23 +444,21 @@ test('the box − / + buttons step to the next round size and apply at once, in 
   await expect(page.getByTestId('pnf-box-info').first()).toContainText('Box 20.00 (points)');
 });
 
-test('the session names stay at the top of the chart while it is scrolled down', async ({ page }) => {
+test('the time axis stays at the bottom edge of the chart while it is scrolled down', async ({ page }) => {
   await install(page, { phase: 0, blocked: [], longHistory: true });
   await page.goto('/straddle-pnf');
   const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
   const scroller = panel.getByTestId('pnf-scroll');
   await expect(scroller).toBeAttached();
-  const strip = panel.getByTestId('pnf-session-strip');
-  await expect(strip).toBeAttached();
-  const labels = strip.locator('text');
-  await expect.poll(async () => labels.count()).toBeGreaterThan(0);
-  // wherever the chart is scrolled vertically, the strip stays at the top edge of the view
-  const top = async () => (await strip.boundingBox())!.y - (await scroller.boundingBox())!.y;
-  const t0 = await top();
+  const axis = panel.getByTestId('pnf-time-axis').locator('svg');
+  await expect(axis).toBeAttached();
+  await expect.poll(async () => axis.locator('text').count()).toBeGreaterThan(0);
+  // wherever the chart is scrolled vertically, the axis sits on the bottom edge of the view
+  const gap = async () => { const s = (await scroller.boundingBox())!; const a = (await axis.boundingBox())!; return (s.y + s.height) - (a.y + a.height); };
+  expect(Math.abs(await gap())).toBeLessThan(2);
   const room = await scroller.evaluate(el => el.scrollHeight - el.clientHeight);
   if (room > 40) {
-    await scroller.evaluate(el => { el.scrollTop = el.scrollHeight; });
-    expect(Math.abs((await top()) - t0)).toBeLessThan(2);
+    await scroller.evaluate(el => { el.scrollTop = 0; });
+    expect(Math.abs(await gap())).toBeLessThan(2);
   }
-  expect(Math.abs(t0)).toBeLessThan(2);
 });

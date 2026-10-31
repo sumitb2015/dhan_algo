@@ -1147,11 +1147,11 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 <rect x={0} y={0} width={plotW} height={TIME_AXIS_H} className="fill-zinc-900" />
                 <line x1={0} x2={plotW} y1={0.5} y2={0.5} className="stroke-zinc-700" strokeWidth={1} />
                 {axisLabels.map((l, i) => (
-                  <text key={i} x={l.x} y={15} textAnchor="middle" fontSize={10} fontWeight={l.month ? 800 : 500}
-                        className={`font-mono ${l.month ? 'fill-zinc-200' : 'fill-zinc-400'}`}>{l.text}</text>
+                  <text key={i} x={l.x} y={15} textAnchor="middle" fontSize={10} fontWeight={l.major ? 800 : 500}
+                        className={`font-mono ${l.major ? 'fill-zinc-200' : 'fill-zinc-400'}`}>{l.text}</text>
                 ))}
                 {cross && cross.col !== null && cross.x !== null && model.columnTimes[cross.col] && (() => {
-                  const text = crosshairStamp(model.columnTimes[cross.col].start);
+                  const text = crosshairStamp(model.columnTimes[cross.col].start, interval < 1440);
                   const w = text.length * 6.2 + 14;
                   const x = Math.max(0, Math.min(plotW - w, cross.x - w / 2));
                   return (
