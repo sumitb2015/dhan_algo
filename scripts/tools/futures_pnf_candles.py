@@ -33,7 +33,11 @@ def to_bars(df: pd.DataFrame, sessions: int, today=None) -> list:
     past = [d for d in days if today is None or d < today]
     keep = past[-sessions:] + [d for d in days if today is not None and d == today]
     leg = leg[day.isin(keep)]
-    return [
-        {"t": int(r.t), "ce": round(float(r.close), 2), "pe": 0, "straddle": round(float(r.close), 2), "vol": int(r.vol)}
-        for r in leg.itertuples(index=False)
-    ]
+    dc = leg["day_close"] if "day_close" in leg.columns else None
+    out = []
+    for i, r in enumerate(leg.itertuples(index=False)):
+        bar = {"t": int(r.t), "ce": round(float(r.close), 2), "pe": 0, "straddle": round(float(r.close), 2), "vol": int(r.vol)}
+        if dc is not None and pd.notna(dc.iloc[i]):
+            bar["dc"] = round(float(dc.iloc[i]), 2)    # the session's official close: day / week / month buckets close on it
+        out.append(bar)
+    return out

@@ -21,6 +21,11 @@ export const CHART_VIEW_KEY = 'straddle-pnf-chart-view';
 export const DEFAULT_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct', boxPct: 0.5, boxPts: 10, reversal: 3, smaPeriod: 50 };
 export const DEFAULT_CHART1_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct', boxPct: 0.1, boxPts: 10, reversal: 3, smaPeriod: 50 };
 export const DEFAULT_CHART2_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct', boxPct: 1, boxPts: 100, reversal: 3, smaPeriod: 50 };
+/**
+ * The Renko page (both charts): a 10-point box on 1-minute closes, TradingView's "Renko [Traditional, 10]" on NIFTY. The box is
+ * always in points there, and `reversal` is the N-brick confirmation its signals wait for (2), not a P&F reversal.
+ */
+export const DEFAULT_RENKO_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pts', boxPct: 0.1, boxPts: 10, reversal: 2, smaPeriod: 50 };
 /** SMA period limits, in P&F boxes (a small box over 10 sessions draws a few hundred to a few thousand boxes). */
 export const MIN_SMA_PERIOD = 2;
 export const MAX_SMA_PERIOD = 500;

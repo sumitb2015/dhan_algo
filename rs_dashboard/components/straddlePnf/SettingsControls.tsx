@@ -78,9 +78,14 @@ export function SmaPeriodInput({ settings, onChange }: { settings: PnfSettings; 
   );
 }
 
-export default function SettingsControls({ settings, onChange, equity = false }: { settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean }) {
-  const boxValue = settings.boxMode === 'pct' ? settings.boxPct : settings.boxPts;
-  const setBox = (n: number) => { if (n !== boxValue) onChange(settings.boxMode === 'pct' ? { ...settings, boxPct: n } : { ...settings, boxPts: n }); };
+/**
+ * `renko`: the box is in points only (no % toggle) and the Reversal select becomes "Confirm", the N bricks a Renko signal waits
+ * for after a reversal; it is stored in the same `reversal` field (1-5), so the settings parse and persist unchanged.
+ */
+export default function SettingsControls({ settings, onChange, equity = false, renko = false }: { settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean; renko?: boolean }) {
+  const boxMode = renko ? 'pts' : settings.boxMode;
+  const boxValue = boxMode === 'pct' ? settings.boxPct : settings.boxPts;
+  const setBox = (n: number) => { if (n !== boxValue) onChange(boxMode === 'pct' ? { ...settings, boxPct: n } : { ...settings, boxPts: n, ...(renko ? { boxMode: 'pts' as const } : {}) }); };
   return (
     <>
       <label className={LABEL}>
@@ -93,21 +98,21 @@ export default function SettingsControls({ settings, onChange, equity = false }:
       {/* Box size as a % of the first price or as fixed price points; each mode keeps its own value. */}
       <div className={LABEL}>
         <span>Box</span>
-        <div className="inline-flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-800 bg-zinc-900" role="group" aria-label="Box unit">
+        {!renko && <div className="inline-flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-800 bg-zinc-900" role="group" aria-label="Box unit">
           {(['pct', 'pts'] as const).map(m => (
             <button key={m} type="button" aria-pressed={settings.boxMode === m} onClick={() => settings.boxMode !== m && onChange({ ...settings, boxMode: m })}
                     className={`px-1.5 h-5 rounded text-[10px] font-bold normal-case tracking-normal ${settings.boxMode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-100'}`}>
               {m === 'pct' ? '%' : 'pts'}
             </button>
           ))}
-        </div>
+        </div>}
         <div className="inline-flex items-center">
           {/* − / + step to the next round size and apply at once, from the applied value (a half-typed draft is discarded). */}
-          <button type="button" aria-label="Decrease box size" title="Smaller box (next round size)" disabled={stepBox(settings.boxMode, boxValue, -1) === boxValue}
-                  onMouseDown={keepFocus} onClick={() => setBox(stepBox(settings.boxMode, boxValue, -1))} className={`${STEP_BTN} rounded-l-md border-r-0`}>
+          <button type="button" aria-label="Decrease box size" title="Smaller box (next round size)" disabled={stepBox(boxMode, boxValue, -1) === boxValue}
+                  onMouseDown={keepFocus} onClick={() => setBox(stepBox(boxMode, boxValue, -1))} className={`${STEP_BTN} rounded-l-md border-r-0`}>
             <Minus className="w-3 h-3" aria-hidden="true" />
           </button>
-          {settings.boxMode === 'pct' ? (
+          {boxMode === 'pct' ? (
             <CommitInput key={`pct:${settings.boxPct}`} value={settings.boxPct} parse={parseBoxPct} label="Box %" inputMode="decimal" width="w-14 rounded-none text-center"
                          title={`Box size as a % of the first price (${MIN_BOX_PCT}-${MAX_BOX_PCT}); press Enter to apply`}
                          onCommit={setBox} />
@@ -116,17 +121,17 @@ export default function SettingsControls({ settings, onChange, equity = false }:
                          title={`Box size in price points (${MIN_BOX_PTS}-${MAX_BOX_PTS.toLocaleString('en-IN')}); never below ${MIN_BOX_PTS_PCT}% of the price; press Enter to apply`}
                          onCommit={setBox} />
           )}
-          <button type="button" aria-label="Increase box size" title="Bigger box (next round size)" disabled={stepBox(settings.boxMode, boxValue, 1) === boxValue}
-                  onMouseDown={keepFocus} onClick={() => setBox(stepBox(settings.boxMode, boxValue, 1))} className={`${STEP_BTN} rounded-r-md border-l-0`}>
+          <button type="button" aria-label="Increase box size" title="Bigger box (next round size)" disabled={stepBox(boxMode, boxValue, 1) === boxValue}
+                  onMouseDown={keepFocus} onClick={() => setBox(stepBox(boxMode, boxValue, 1))} className={`${STEP_BTN} rounded-r-md border-l-0`}>
             <Plus className="w-3 h-3" aria-hidden="true" />
           </button>
         </div>
       </div>
-      <label className={LABEL}>
-        Reversal
-        <select aria-label="Reversal" value={settings.reversal} className={`${FIELD} border-zinc-700`}
+      <label className={LABEL} title={renko ? 'Bricks of the new colour a signal waits for after a reversal (a Renko reversal itself always takes 2 boxes)' : undefined}>
+        {renko ? 'Confirm' : 'Reversal'}
+        <select aria-label={renko ? 'Confirm bricks' : 'Reversal'} value={settings.reversal} className={`${FIELD} border-zinc-700`}
                 onChange={e => onChange({ ...settings, reversal: Number(e.target.value) as Reversal })}>
-          {REVERSALS.map(n => <option key={n} value={n}>{n}-box</option>)}
+          {REVERSALS.map(n => <option key={n} value={n}>{renko ? `${n} brick${n === 1 ? '' : 's'}` : `${n}-box`}</option>)}
         </select>
       </label>
     </>

@@ -4,7 +4,7 @@ import { intervalLabel } from '@/lib/straddlePnfInterval';
 import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
-import type { PnfExecutionMarker } from '@/lib/straddlePnf';
+import { isSellSignal, type PnfExecutionMarker } from '@/lib/straddlePnf';
 import { AlignLeft, AlignRight, Eye, EyeOff, MapPin, MapPinOff, Minus, Plus, RotateCcw, ChevronsLeftRight, ChevronsRightLeft } from 'lucide-react';
 import { layoutTags } from '@/lib/pnfTagLayout';
 import { timeAxisLabels, crosshairStamp } from '@/lib/straddlePnfTimeAxis';
@@ -17,6 +17,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 // chart scrolls (it opens on the newest column) and the price axis stays pinned to the right edge while you pan.
 
 const MIN_HEIGHT = 420;
+/** Columns are drawn in windows of this many (see `w0` / `w1` in the panel). */
+const WINDOW_CHUNK = 256;
 
 export type PnfPanelProps = {
   title: string;
@@ -152,7 +154,9 @@ function useSize(): [React.RefObject<HTMLDivElement | null>, number, number] {
   return [ref, size.w, size.h];
 }
 
-const fmt = (n: number, digits = 2) => n.toLocaleString('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+// One formatter per digit count: toLocaleString builds a new Intl formatter on every call, and the axis formats hundreds of labels a frame.
+const FMT: Record<number, Intl.NumberFormat> = {};
+const fmt = (n: number, digits = 2) => (FMT[digits] ??= new Intl.NumberFormat('en-IN', { minimumFractionDigits: digits, maximumFractionDigits: digits })).format(n);
 const signed = (n: number) => `${n >= 0 ? '+' : '-'}${Math.abs(n).toFixed(2)}`;
 /** The column tooltip's end: date with year, and the time only when it means something (a daily close sits at 15:29). */
 const dateYear = (iso: string) => `${sessionLabel(iso)} ${iso.slice(0, 4)}`;
@@ -160,6 +164,13 @@ const timeIfAny = (t: number) => { const h = hhmm(t); return h === '15:29' ? '' 
 const hhmm = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString().slice(11, 16);
 const sessionOfT = (t: number) => new Date((t + 5.5 * 3600) * 1000).toISOString().slice(0, 10);
 const shortDate = (iso: string) => sessionLabel(iso).slice(4);
+
+/** The newest-signal pill's text: P&F double top / bottom, or a Renko N-brick confirmation. */
+const signalPill = (kind: string, long: boolean) => {
+  const sell = isSellSignal(kind);
+  if (kind.startsWith('RENKO')) return sell ? '▼ Renko sell' : '▲ Renko buy';
+  return sell ? (long ? '▼ DB sell' : '▼ DB') : (long ? '▲ DT buy' : '▲ DT');
+};
 
 const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950';
 
@@ -190,8 +201,10 @@ const rupees = (n: number) => `${n >= 0 ? '+' : '−'}₹${Math.abs(Math.round(n
  * Cells act on pointer-down (the chart's drag-to-pan captures the pointer, which would swallow a click). A handle is dragged
  * to another box (commit on release); the drag lives in a ref because pointer events arrive before React re-renders.
  */
-function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, axisDigits, onDrag, onHot }: {
+function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, axisDigits, onDrag, onHot, visTop = 0, visBottom = contentH }: {
   rail: PnfRail; box: number; cell: number; yMax: number; yMin: number; padY: number; contentH: number;
+  /** The content y range worth drawing rows for (the view plus a margin); a long price history has thousands of rows. */
+  visTop?: number; visBottom?: number;
   yOf: (p: number) => number; liveValue: number | null; axisDigits: number; onDrag: (d: RailDrag) => void;
   onHot: (h: { side: 'BUY' | 'SELL'; p: number; kind: string } | null) => void;
 }) {
@@ -203,6 +216,8 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
   const iLo = Math.floor((priceAtY(contentH) - yMin) / box);
   const iHi = Math.ceil((priceAtY(0) - yMin) / box) - 1;
   const levelAt = (y: number) => yMin + (Math.max(iLo, Math.min(iHi, Math.floor((priceAtY(y) - yMin) / box))) + 0.5) * box;
+  const rLo = Math.max(iLo, Math.floor((priceAtY(Math.min(contentH, visBottom)) - yMin) / box));
+  const rHi = Math.min(iHi, Math.ceil((priceAtY(Math.max(0, visTop)) - yMin) / box));
   const kindAt = (side: 'BUY' | 'SELL', p: number) => (liveValue === null ? '' : (side === 'BUY') === (p < liveValue) ? 'LIMIT' : 'SL-limit');
   const [hot, setHotState] = useState<{ side: 'BUY' | 'SELL'; p: number } | null>(null);
   const setHot = (h: { side: 'BUY' | 'SELL'; p: number } | null) => { setHotState(h); onHot(h && armed ? { ...h, kind: kindAt(h.side, h.p) } : null); };
@@ -250,8 +265,8 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
       <rect x={colX('SELL')} y={0} width={RAIL_SIDE_W} height={contentH} className="fill-red-500/10" pointerEvents="none" />
       <line x1={PX} x2={PX} y1={0} y2={contentH} className="stroke-zinc-700" pointerEvents="none" />
       <line x1={PX + RAIL_PRICE_W} x2={PX + RAIL_PRICE_W} y1={0} y2={contentH} className="stroke-zinc-700" pointerEvents="none" />
-      {Array.from({ length: Math.max(0, iHi - iLo + 1) }, (_, n) => {
-        const idx = iLo + n;
+      {Array.from({ length: Math.max(0, rHi - rLo + 1) }, (_, n) => {
+        const idx = rLo + n;
         const p = yMin + (idx + 0.5) * box;
         if (!(p > 0)) return null;
         const y = yOf(p);
@@ -405,6 +420,10 @@ function sessionLabel(iso: string): string {
 export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, coverShown = false, sessionLines = true, sessionDividers = true, timeAxis = false, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
+  // Renko: every column is one filled brick on real price edges (lib/renko.ts); `reversal` holds the N-brick confirmation.
+  const renko = model.chart === 'renko';
+  const unitWord = renko ? 'bricks' : 'boxes';
+  const ruleText = renko ? `confirm ${reversal}` : `${reversal}-box`;
   const liveValue = live ? live.ce + live.pe : null;
   // An index has no volume: its "VWAP" is a plain cumulative average, and says so.
   // The line actually drawn: an instrument without traded volume (an index) always gets the box SMA, whatever was asked.
@@ -412,7 +431,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const overlayLabel = kind === 'vwap' ? 'VWAP' : `SMA ${model.smaPeriod}`;
   const overlayNow = model.overlayNow;
   // The SMA averages P&F boxes: say so when there are not enough of them yet, rather than show no line and no reason.
-  const totalBoxes = columns.reduce((n, c) => n + c.boxes, 0);
+  const totalBoxes = useMemo(() => columns.reduce((n, c) => n + c.boxes, 0), [columns]);
   const smaWaiting = kind === 'sma' && overlayNow === null && columns.length > 0;
   // Change is measured from the previous close: the feed's (official) while trusted, else the history's, then the session open.
   const prevClose = feedPrevClose ?? model.prevClose;
@@ -436,7 +455,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const liveCols = model.liveColumns.length >= columns.length ? model.liveColumns : columns;
   // The rail takes its width from the chart, so the newest column still sits next to the axis.
   const viewW = rail ? Math.max(120, width - RAIL_W) : width;
-  const L = layoutPanel(liveCols, box, liveValue, viewW, HEIGHT, zoom, true, xScale);
+  // Memoised: it scans every column for the price range, and the crosshair re-renders this panel on each mouse move.
+  const L = useMemo(() => layoutPanel(liveCols, box, liveValue, viewW, HEIGHT, zoom, true, xScale), [liveCols, box, liveValue, viewW, HEIGHT, zoom, xScale]);
   const { cell, colW, yMin, yMax, plotW, contentW, contentH, offsetX, padY, padR } = L;
   const yOf = (p: number) => padY + PAD_TOP + ((yMax - p) / box) * cell;
   const xOf = (j: number) => offsetX + j * colW;
@@ -461,6 +481,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   // The scroller's visible plot edge in content coordinates: the order tags sit there, not at the content's far end (blank padding).
   const [viewRight, setViewRight] = useState<number | null>(null);
   const [viewLeft, setViewLeft] = useState(0);
+  const [viewTop, setViewTop] = useState<number | null>(null);
   const stickRef = useRef(true);
   // The scroll position where the newest column sits against the axis (the empty room right of it is only for dragging).
   const stickLeft = (el: HTMLElement) => Math.max(0, el.scrollWidth - el.clientWidth - padR);
@@ -474,6 +495,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     if (stickRef.current) el.scrollLeft = stickLeft(el);
     setViewRight(Math.round(el.scrollLeft + el.clientWidth - AXIS_W - (rail ? RAIL_W : 0)));
     setViewLeft(Math.round(el.scrollLeft));
+    setViewTop(Math.round(el.scrollTop));
     if (centeredFor.current !== strike) { touchedRef.current = false; centeredFor.current = strike; }
     if (!touchedRef.current && lastY !== null && box > 0) {
       el.scrollTop = topFor(el);
@@ -576,8 +598,9 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const rowTop = padY + PAD_TOP;
   const TIME_AXIS_H = 24;
   const axisLabels = useMemo(
-    () => (timeAxis ? timeAxisLabels(model.columnTimes.map(t => t.start), model.columnTimes.map((_, j) => offsetX + j * colW + colW / 2)) : []),
-    [timeAxis, model.columnTimes, offsetX, colW],
+    // Renko gets TradingView's 1-minute Renko axis (days with times between them) whatever span the history covers.
+    () => (timeAxis ? timeAxisLabels(model.columnTimes.map(t => t.start), model.columnTimes.map((_, j) => offsetX + j * colW + colW / 2), 44, renko ? 'intraday' : undefined) : []),
+    [timeAxis, model.columnTimes, offsetX, colW, renko],
   );
   // Tags at the chart's right edge (resting orders, planned exits, the open position): tags whose levels are within a row or two of each
   // other are spread apart (and re-centred on their levels) so no two print over each other. The level lines stay at the true price.
@@ -604,19 +627,35 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const r1 = (v: number) => Math.round(v * 10) / 10;
   const xGlyph = (cx: number, cy: number) => `M${r1(cx - sx)} ${r1(cy - sy)}L${r1(cx + sx)} ${r1(cy + sy)}M${r1(cx + sx)} ${r1(cy - sy)}L${r1(cx - sx)} ${r1(cy + sy)}`;
   const oGlyph = (cx: number, cy: number) => `M${r1(cx - sx)} ${r1(cy)}a${r1(sx)} ${r1(sy)} 0 1 0 ${r1(2 * sx)} 0a${r1(sx)} ${r1(sy)} 0 1 0 ${r1(-2 * sx)} 0`;
+  // A Renko brick: a filled rectangle across the full column pitch and box height (adjacent bricks touch, as in TradingView).
+  const brick = (j: number, top: number) => `M${r1(xOf(j))} ${r1(yOf(top))}h${r1(colW)}v${r1(cell)}h${r1(-colW)}z`;
+  // Only the columns near the view are drawn: the visible ones plus one view width either side, in WINDOW_CHUNK steps so the
+  // paths are rebuilt when the view crosses a chunk, not on every scroll pixel. A Renko chart over years holds 50k-100k+ bricks;
+  // drawing every one made each crosshair move and pan repaint the whole history.
+  const viewPx = Math.max(1, width);
+  const leftPx = viewRight === null ? Math.max(0, contentW - 2 * viewPx) : viewLeft;   // before the first scroll: the newest columns
+  const w0 = Math.max(0, Math.floor(Math.floor((leftPx - viewPx - offsetX) / colW) / WINDOW_CHUNK) * WINDOW_CHUNK);
+  const w1 = Math.min(liveCols.length, (Math.floor(Math.max(0, Math.ceil((leftPx + 2 * viewPx - offsetX) / colW)) / WINDOW_CHUNK) + 1) * WINDOW_CHUNK);
+  const inWindow = (j: number) => j >= w0 && j < w1;
   const glyphs = useMemo(() => {
     let x = '', o = '';
-    columns.forEach((c, j) => {
+    const end = Math.min(w1, columns.length);
+    if (renko) {
+      for (let j = w0; j < end; j++) { const c = columns[j]; if (c.dir === 'X') x += brick(j, c.high); else o += brick(j, c.high); }
+      return { x, o };
+    }
+    for (let j = w0; j < end; j++) {
+      const c = columns[j];
       const cx = xOf(j) + colW / 2;
       for (let k = 0; k < c.boxes; k++) {
         const cy = yOf(c.low + (k + 0.5) * box);
         if (c.dir === 'X') x += xGlyph(cx, cy);
         else o += oGlyph(cx, cy);
       }
-    });
+    }
     return { x, o };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [columns, box, cell, colW, offsetX, yMax, padY, sx, sy]);
+  }, [renko, columns, box, cell, colW, offsetX, yMax, padY, sx, sy, w0, w1]);
   const unconfirmed = unconfirmedBoxes(columns, liveCols, box);
   const unconfirmedPaths = useMemo(() => {
     let x = '', o = '', n = 0;
@@ -624,28 +663,274 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
       const lc = liveCols[col];
       for (const k of ks) {
         n++;
+        if (renko) { const top = lc.low + (k + 1) * box; if (lc.dir === 'X') x += brick(col, top); else o += brick(col, top); continue; }
         if (lc.dir === 'X') x += xGlyph(xOf(col) + colW / 2, yOf(lc.low + (k + 0.5) * box));
         else o += oGlyph(xOf(col) + colW / 2, yOf(lc.low + (k + 0.5) * box));
       }
     }
     return { x, o, n };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveCols, columns, box, cell, colW, offsetX, yMax, padY, sx, sy]);
+  }, [renko, liveCols, columns, box, cell, colW, offsetX, yMax, padY, sx, sy]);
 
-  const lastEntryId = [...signals].reverse().find(g => g.kind === 'DOUBLE_BOTTOM_SELL' && g.belowVwap)?.id;
+  const lastEntryId = useMemo(() => { for (let i = signals.length - 1; i >= 0; i--) if (signals[i].kind === 'DOUBLE_BOTTOM_SELL' && signals[i].belowVwap) return signals[i].id; return undefined; }, [signals]);
   const ring = flash === 'buy' ? 'ring-2 ring-emerald-400' : flash === 'sell' ? 'ring-2 ring-red-400' : '';
 
-  const overlayPts = !overlayShown ? '' : vis
-    .map((c, j) => ({ v: model.overlay[first + j], x: xOf(j) + colW / 2 }))
+  const overlayPts = !overlayShown ? '' : vis.slice(w0, w1)
+    .map((c, k) => ({ v: model.overlay[first + w0 + k], x: xOf(w0 + k) + colW / 2 }))
     .filter(p => p.v !== null)
     .map(p => `${p.x},${yOf(p.v as number)}`)
     .join(' ');
 
-  const tickEvery = Math.max(1, Math.round(((yMax - yMin) / box) / 9));
+  // Renko: a label every ~40 px on a round multiple of the box (22,640 / 22,680 ...) like TradingView; its history spans years, so
+  // nine labels over the whole range would put them a thousand points apart. P&F: about nine labels over the range.
+  const minRows = Math.max(1, Math.ceil(40 / Math.max(1, cell)));
+  const renkoStep = [1, 2, 4, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000].find(n => n >= minRows) ?? minRows;
+  const tickEvery = renko ? renkoStep : Math.max(1, Math.round(((yMax - yMin) / box) / 9));
+  // Rows worth labelling: the view plus one view height above and below (all rows until the first scroll is known). A Renko chart
+  // over years spans thousands of rows; labelling all of them on every crosshair move cost ~1 s a frame.
+  const visTop = viewTop === null ? 0 : viewTop - HEIGHT;
+  const visBottom = viewTop === null ? contentH : viewTop + 2 * HEIGHT;
+  const rowAtY = (y: number) => (yMax - ((y - padY - PAD_TOP) / cell) * box - yMin) / box;   // row index (from yMin) at content y
+  const axisRows = Math.round((yMax - yMin) / box);
+  const axisFrom = Math.max(0, Math.floor(rowAtY(Math.min(contentH, visBottom))) - 1);
+  const axisTo = Math.min(axisRows, Math.ceil(rowAtY(Math.max(0, visTop))) + 1);
   // Axis labels name the box centres (the price each row of X / O stands for). Whole rupees once a box is 10 or more: the
   // paise are noise at that size and a six-figure price still fits the axis.
   const axisDigits = box >= 10 ? 0 : 2;
   const liveDigits = liveValue !== null && liveValue >= 100_000 ? 0 : 2;
+
+  // Everything drawn from the chart's data (glyphs / bricks, unconfirmed boxes, the overlay, signals, triangles, trade markers),
+  // built once per data / layout / window change. The crosshair is state in this component, so without this every mouse move
+  // re-created all of it (~1 s a frame on a long Renko chart in dev mode).
+  const chartLayer = useMemo(() => (
+    <>
+      {/* X / O glyphs: every X in one path and every O in another (a chart can hold tens of thousands of boxes; one element
+          each made every crosshair move and live tick re-render them all). The session dividers mark the days, so no day numbers. */}
+      {renko ? (
+        <>
+          {/* Renko bricks: up bricks in one path, down bricks in another; a hairline border only once a brick is wide enough */}
+          <path data-testid="pnf-bricks-up" d={glyphs.x} className="fill-teal-500 stroke-teal-700" strokeWidth={colW >= 4 ? 0.6 : 0} />
+          <path data-testid="pnf-bricks-down" d={glyphs.o} className="fill-red-500 stroke-red-700" strokeWidth={colW >= 4 ? 0.6 : 0} />
+        </>
+      ) : (
+        <>
+          <path data-testid="pnf-glyphs-x" d={glyphs.x} className="stroke-emerald-400" strokeWidth={stroke} strokeLinecap="round" fill="none" />
+          <path data-testid="pnf-glyphs-o" d={glyphs.o} className="stroke-red-400" strokeWidth={stroke} fill="none" />
+        </>
+      )}
+      {/* the newest confirmed column's cells: a hook for tests and nothing else */}
+      {columns.length > 0 && (
+        <rect data-testid="pnf-newest" x={xOf(columns.length - 1)} y={yOf(columns[columns.length - 1].high)} width={colW}
+              height={(columns[columns.length - 1].boxes) * cell} fill="none" pointerEvents="none" />
+      )}
+
+      {/* Unconfirmed boxes: what the bar still forming would add if it closed now, dimmed. They move with the price and can
+          disappear; signals, the SMA and the date marks never use them. */}
+      {unconfirmedPaths.n > 0 && (
+        <g data-testid="pnf-unconfirmed" data-count={unconfirmedPaths.n} opacity={0.35}>
+          {renko ? (
+            <>
+              <path d={unconfirmedPaths.x} className="fill-teal-500" />
+              <path d={unconfirmedPaths.o} className="fill-red-500" />
+            </>
+          ) : (
+            <>
+              <path d={unconfirmedPaths.x} className="stroke-emerald-400" strokeWidth={stroke} strokeLinecap="round" fill="none" />
+              <path d={unconfirmedPaths.o} className="stroke-red-400" strokeWidth={stroke} fill="none" />
+            </>
+          )}
+        </g>
+      )}
+
+      {/* VWAP / SMA: one continuous line across the loaded sessions */}
+      {overlayPts && (
+        <polyline points={overlayPts} fill="none" strokeWidth={1.8}
+                  className={kind === 'vwap' ? 'stroke-amber-300' : 'stroke-sky-400'} />
+      )}
+
+      {/* short cover cue (the short-side rule): first bar of a green X column trading above VWAP */}
+      {coverShown && exits.length > 0 && (
+        <text data-testid="pnf-exit" x={xOf(exits[exits.length - 1].col) + colW / 2} y={yOf(columns[exits[exits.length - 1].col].high) - 4}
+              textAnchor="middle" className="fill-emerald-400 font-mono font-bold" fontSize={9}>COVER</text>
+      )}
+
+      {/* triangles: the converging lines, a tag, and the two trigger levels (buy above / sell below); after a breakout the
+          entry, stop and vertical-count target of the pattern's trade */}
+      {triShown && triangles.slice(-8).map(t => {
+        const first = columns[t.startCol];
+        if (!first) return null;
+        let lastX = -1, lastO = -1;
+        for (let i = t.startCol; i <= t.endCol; i++) { if (columns[i].dir === 'X') lastX = i; else lastO = i; }
+        if (lastX < 0 || lastO < 0) return null;
+        const tone = t.state === 'up' ? 'emerald' : t.state === 'down' ? 'red' : t.state === 'forming' ? 'amber' : 'zinc';
+        const stroke = tone === 'emerald' ? 'stroke-emerald-400' : tone === 'red' ? 'stroke-red-400' : tone === 'amber' ? 'stroke-amber-400' : 'stroke-zinc-400';
+        const fillTxt = tone === 'emerald' ? 'fill-emerald-400' : tone === 'red' ? 'fill-red-400' : tone === 'amber' ? 'fill-amber-400' : 'fill-zinc-400';
+        const xStart = xOf(t.startCol) + colW / 2;
+        const xLevels = xOf(t.endCol) + colW / 2;
+        const xEnd = Math.min(plotW, xOf(t.breakout ? t.breakout.col : t.endCol + 1) + colW * 6);
+        const b = t.breakout;
+        const lvl = (price: number, label: string, cls: string, dash: string) => {
+          const y = yOf(price);
+          return (
+            <g key={label}>
+              <line x1={xLevels} x2={xEnd} y1={y} y2={y} strokeWidth={1.25} strokeDasharray={dash} className={cls} />
+              <text x={xEnd - 4} y={y - 3} textAnchor="end" className={`${fillTxt} font-mono`} fontSize={10} fontWeight={700}>{`${label} ${fmt(price, axisDigits)}`}</text>
+            </g>
+          );
+        };
+        return (
+          <g key={`tri${t.startCol}`} data-testid="pnf-triangle" data-state={t.state} data-cols={t.nCols} pointerEvents="none">
+            <line x1={xStart} x2={xOf(lastX) + colW / 2} y1={yOf(first.high)} y2={yOf(columns[lastX].high)} strokeWidth={1.5} strokeDasharray="1 4" strokeLinecap="round" className={stroke} />
+            <line x1={xStart} x2={xOf(lastO) + colW / 2} y1={yOf(first.low)} y2={yOf(columns[lastO].low)} strokeWidth={1.5} strokeDasharray="1 4" strokeLinecap="round" className={stroke} />
+            <text x={xStart} y={yOf(first.high) - 6} className={`${fillTxt} font-mono`} fontSize={10} fontWeight={700}>{`△${t.nCols}${t.state === 'forming' ? ' forming' : ''}`}</text>
+            {!b ? (
+              <>
+                {lvl(t.buyAbove, 'Buy above', 'stroke-emerald-400', '5 3')}
+                {lvl(t.sellBelow, 'Sell below', 'stroke-red-400', '5 3')}
+              </>
+            ) : (
+              <>
+                {lvl(b.entry, `${b.side === 'UP' ? '▲' : '▼'} Entry`, stroke, '')}
+                {lvl(b.stop, 'Stop', 'stroke-red-400', '5 3')}
+                {lvl(b.target, `Target · RR 1:${b.rr.toFixed(1)}`, 'stroke-emerald-400', '1 4')}
+              </>
+            )}
+          </g>
+        );
+      })}
+
+      {/* double top buy / double bottom sell: a horizontal support/resistance line across from the previous swing extreme
+          to the breaking column */}
+      {renko && signals.filter(g => inWindow(g.col)).map(g => {
+        // Renko N-brick confirmation: an arrow just past the confirming brick's close (below a SELL, above a BUY)
+        const sell = isSellSignal(g.kind);
+        const cx = xOf(g.col) + colW / 2;
+        const y = sell ? yOf(columns[g.col].low) + 3 : yOf(columns[g.col].high) - 3;
+        const d = sell ? `M${cx} ${y + 7}l-4 -7h8z` : `M${cx} ${y - 7}l-4 7h8z`;
+        return (
+          <path key={g.id} data-testid="pnf-signal" data-kind={g.kind} data-col={g.col} d={d}
+                className={sell ? 'fill-red-400' : 'fill-teal-300'} pointerEvents="none" />
+        );
+      })}
+      {!renko && signals.filter(g => inWindow(g.col)).map(g => {
+        const sell = g.kind === 'DOUBLE_BOTTOM_SELL';
+        const entry = sell && g.belowVwap;
+        const levelPrice = sell ? columns[g.col - 2].low : columns[g.col - 2].high;
+        const y = yOf(levelPrice);
+        const x1 = xOf(g.col - 2);
+        const x2 = xOf(g.col) + colW + 6;
+        // The short-entry tag sits under the level where columns col-2 and col-1 meet: col-2's lowest O is ON the level and
+        // col-1 (an X column) starts a box above it, so below the line there is empty grid. Under the breaking column it
+        // would cover that column's Os.
+        const tagX = xOf(g.col - 1);
+        const strokeCls = sell ? 'stroke-red-400' : 'stroke-emerald-400';
+        return (
+          <g key={g.id} data-testid="pnf-signal" data-kind={g.kind} data-col={g.col} data-entry={entry ? '1' : '0'}>
+            {/* The horizontal support/resistance level line */}
+            <line x1={x1} x2={x2} y1={y} y2={y} strokeWidth={entry ? 2.5 : 1.8} strokeDasharray={entry ? undefined : '4 2'}
+                  className={strokeCls} strokeLinecap="round" />
+            {g.id === lastEntryId && (
+              <g>
+                <rect x={tagX - 18} y={y + 4} width={36} height={13} rx={2} className="fill-red-500/20 stroke-red-500/40" />
+                <text x={tagX} y={y + 14} textAnchor="middle" className="fill-red-400 font-mono font-bold" fontSize={9}>SHORT</text>
+              </g>
+            )}
+          </g>
+        );
+      })}
+
+      {/* trade execution markers on the box */}
+      {markersShown && tradeMarkers && tradeMarkers.length > 0 && (() => {
+        const groups = new Map<string, Array<{ marker: PnfExecutionMarker; colIdx: number; boxPrice: number; idx: number }>>();
+
+        tradeMarkers.forEach((m, idx) => {
+          let colIdx = m.col;
+          if (colIdx === undefined || colIdx < 0 || colIdx >= liveCols.length) {
+            if (model.columnTimes && model.columnTimes.length > 0) {
+              const found = model.columnTimes.findIndex(ct => m.t >= ct.start && m.t <= ct.end);
+              if (found !== -1) colIdx = found;
+              else if (m.t > model.columnTimes[model.columnTimes.length - 1].end) colIdx = liveCols.length - 1;
+              else colIdx = 0;
+            } else {
+              colIdx = Math.max(0, liveCols.length - 1);
+            }
+          }
+
+          // P&F rows are centred on anchor + k * box; a Renko brick spans [k, k + 1) boxes, so its marker sits at the brick's middle
+          const boxK = box > 0 ? (renko ? Math.floor((m.price - model.anchor) / box) : Math.round((m.price - model.anchor) / box)) : 0;
+          const boxPrice = model.anchor + (renko ? boxK + 0.5 : boxK) * box;
+          const key = `${colIdx}:${boxK}`;
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key)!.push({ marker: m, colIdx, boxPrice, idx });
+        });
+
+        return Array.from(groups.values()).flatMap(group => {
+          const total = group.length;
+          const r = Math.max(5.5, Math.min(10, cell * 0.4));
+          const fontSize = Math.max(7, Math.min(11, r * 1.1));
+
+          return group.map(({ marker: m, colIdx, boxPrice, idx }, groupIdx) => {
+            const baseCx = xOf(colIdx) + colW / 2;
+            const shift = total > 1 ? (groupIdx - (total - 1) / 2) * (r * 1.5) : 0;
+            const cx = baseCx + shift;
+            const cy = yOf(boxPrice);
+            const isBuy = m.action === 'BUY';
+
+            return (
+              <g
+                key={m.id || `marker-${idx}`}
+                data-testid="pnf-trade-marker"
+                data-action={m.action}
+                data-price={m.price}
+                data-col={colIdx}
+                className="select-none pointer-events-auto"
+              >
+                {/* Directional pip pointer */}
+                {isBuy ? (
+                  <polygon
+                    points={`${cx},${cy - r - 4} ${cx - 3.5},${cy - r} ${cx + 3.5},${cy - r}`}
+                    className="fill-emerald-400 stroke-zinc-950"
+                    strokeWidth={1}
+                  />
+                ) : (
+                  <polygon
+                    points={`${cx},${cy + r + 4} ${cx - 3.5},${cy + r} ${cx + 3.5},${cy + r}`}
+                    className="fill-red-400 stroke-zinc-950"
+                    strokeWidth={1}
+                  />
+                )}
+
+                {/* Badge circle */}
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={r}
+                  className={isBuy ? 'fill-emerald-500 stroke-zinc-950' : 'fill-red-500 stroke-zinc-950'}
+                  strokeWidth={1.5}
+                />
+
+                {/* Action initial */}
+                <text
+                  x={cx}
+                  y={cy + 0.5}
+                  textAnchor="middle"
+                  dominantBaseline="central"
+                  className={isBuy ? 'fill-zinc-950 font-mono font-black' : 'fill-white font-mono font-black'}
+                  fontSize={fontSize}
+                >
+                  {isBuy ? 'B' : 'S'}
+                </text>
+
+                <title>{`${m.action} ${m.lots} lot${m.lots > 1 ? 's' : ''} @ ${m.estimate ? '~' : ''}${m.price.toFixed(2)} [${m.mode}]${m.estimate ? ' (live price at the click; traded price not reported yet)' : ''}`}</title>
+              </g>
+            );
+          });
+        });
+      })()}
+    </>
+  // xOf / yOf / inWindow are rebuilt every render from the layout values listed here
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [renko, glyphs, colW, columns, cell, offsetX, yMax, padY, box, unconfirmedPaths, overlayPts, kind, coverShown, exits, triShown, triangles, plotW, axisDigits, signals, w0, w1, lastEntryId, markersShown, tradeMarkers, model, liveCols, stroke]);
 
   return (
     <section
@@ -689,7 +974,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               <span data-testid="pnf-overlay-legend" className="shrink-0">
                 <span className={`font-bold ${kind === 'vwap' ? 'text-amber-400' : 'text-sky-400'}`}>{overlayLabel}</span>
                 {overlayNow !== null && <span className="font-semibold text-zinc-100">{` ${fmt(overlayNow)}`}</span>}
-                {smaWaiting && <span className="text-zinc-500">{` needs ${model.smaPeriod} boxes (${totalBoxes} so far)`}</span>}
+                {smaWaiting && <span className="text-zinc-500">{` needs ${model.smaPeriod} ${unitWord} (${totalBoxes} so far)`}</span>}
               </span>
             )}
             <span data-testid="pnf-box-info" className="flex items-center gap-3 min-w-0 text-zinc-400 truncate" title={box > 0 ? boxTitle : undefined}>
@@ -697,8 +982,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 <>
                   <span className="shrink-0">Box <span className="font-semibold text-zinc-100">{box.toFixed(2)}</span>{' '}
                     <span className={model.boxClamped ? 'text-amber-400' : 'text-zinc-500'}>({boxNote})</span></span>
-                  <span className="shrink-0"><span className="font-semibold text-zinc-100">{reversal}-box</span> rev</span>
-                  <span className="shrink-0"><span className="font-semibold text-zinc-100">{columns.length}</span> cols</span>
+                  <span className="shrink-0"><span className="font-semibold text-zinc-100">{ruleText}</span>{renko ? '' : ' rev'}</span>
+                  <span className="shrink-0"><span className="font-semibold text-zinc-100">{columns.length}</span> {renko ? 'bricks' : 'cols'}</span>
                   {model.sessions.length > 0 && (
                     <span className="truncate"><span className="font-semibold text-zinc-100">{model.sessions.length}</span> sessions{' '}
                       <span className="text-zinc-500">({shortDate(model.sessions[0])} – {shortDate(model.sessions[model.sessions.length - 1])})</span></span>
@@ -710,10 +995,10 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
           {lastSignal && (
             <span data-testid="pnf-last-signal"
                   className={`shrink-0 text-[11px] font-bold font-mono px-2 py-0.5 rounded border ${
-                    lastSignal.kind === 'DOUBLE_BOTTOM_SELL'
+                    isSellSignal(lastSignal.kind)
                       ? 'text-red-400 border-red-500/30 bg-red-500/10'
                       : 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'}`}>
-              {lastSignal.kind === 'DOUBLE_BOTTOM_SELL' ? '▼ DB sell' : '▲ DT buy'} {hhmm(lastSignal.t)}
+              {signalPill(lastSignal.kind, true)} {hhmm(lastSignal.t)}
             </span>
           )}
         </div>,
@@ -732,16 +1017,16 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
           </span>
         )}
         <span data-testid="pnf-box-info" className="text-zinc-500 truncate min-w-0 flex-1" title={box > 0 ? boxTitle : undefined}>
-          {box > 0 ? `Box ${box.toFixed(2)} (${boxNote}) · ${reversal}-box · ${columns.length} cols` : 'Box —'}
+          {box > 0 ? `Box ${box.toFixed(2)} (${boxNote}) · ${ruleText} · ${columns.length} ${renko ? 'bricks' : 'cols'}` : 'Box —'}
         </span>
         <span className="ml-auto flex items-center gap-2 shrink-0">
           {lastSignal && (
             <span data-testid="pnf-last-signal"
                   className={`font-bold px-1.5 py-0.5 rounded border ${
-                    lastSignal.kind === 'DOUBLE_BOTTOM_SELL'
+                    isSellSignal(lastSignal.kind)
                       ? 'text-red-400 border-red-500/30 bg-red-500/10'
                       : 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'}`}>
-              {lastSignal.kind === 'DOUBLE_BOTTOM_SELL' ? '▼ DB' : '▲ DT'} {hhmm(lastSignal.t)}
+              {signalPill(lastSignal.kind, false)} {hhmm(lastSignal.t)}
             </span>
           )}
           {sessionTag
@@ -780,20 +1065,20 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         <p className="text-[10px] font-mono text-zinc-400 mt-1 truncate">
           {legs && <>CE {live ? fmt(live.ce) : '—'} · PE {live ? fmt(live.pe) : '—'} ·{' '}</>}
           <span data-testid="pnf-overlay-legend" className={kind === 'vwap' ? 'text-amber-300' : 'text-sky-300'}>
-            {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : smaWaiting ? ` needs ${model.smaPeriod} boxes (${totalBoxes} so far)` : ''}
+            {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : smaWaiting ? ` needs ${model.smaPeriod} ${unitWord} (${totalBoxes} so far)` : ''}
           </span>
         </p>
         <div className="mt-0.5 flex items-center justify-between gap-2">
           <p data-testid="pnf-box-info" className="text-[10px] font-mono text-zinc-500 truncate">
-            {box > 0 ? `Box ${box.toFixed(2)} (${boxNote}) · ${reversal}-box · ${columns.length} cols${sessionsInfo}` : 'Box —'}
+            {box > 0 ? `Box ${box.toFixed(2)} (${boxNote}) · ${ruleText} · ${columns.length} ${renko ? 'bricks' : 'cols'}${sessionsInfo}` : 'Box —'}
           </p>
           {lastSignal && (
             <span data-testid="pnf-last-signal"
                   className={`shrink-0 text-[10px] font-bold font-mono px-1.5 py-0.5 rounded border ${
-                    lastSignal.kind === 'DOUBLE_BOTTOM_SELL'
+                    isSellSignal(lastSignal.kind)
                       ? 'text-red-400 border-red-500/30 bg-red-500/10'
                       : 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10'}`}>
-              {lastSignal.kind === 'DOUBLE_BOTTOM_SELL' ? '▼ DB sell' : '▲ DT buy'} {hhmm(lastSignal.t)}
+              {signalPill(lastSignal.kind, true)} {hhmm(lastSignal.t)}
             </span>
           )}
         </div>
@@ -866,7 +1151,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         onPointerCancel={() => { dragRef.current = null; setDragging(false); }}
         onPointerLeave={() => setHover(null)}
         onDoubleClick={resetView}
-        onScroll={e => { const el = e.currentTarget; const v = Math.round(el.scrollLeft + el.clientWidth - AXIS_W - (rail ? RAIL_W : 0)); setViewRight(prev => (prev === v ? prev : v)); setViewLeft(Math.round(el.scrollLeft)); }}
+        onScroll={e => { const el = e.currentTarget; const v = Math.round(el.scrollLeft + el.clientWidth - AXIS_W - (rail ? RAIL_W : 0)); setViewRight(prev => (prev === v ? prev : v)); setViewLeft(Math.round(el.scrollLeft)); setViewTop(Math.round(el.scrollTop)); }}
         className={`relative overflow-auto select-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${dragging ? 'cursor-grabbing' : 'cursor-crosshair'} ${fill ? 'flex-1 min-h-0' : ''}`}
         style={fill ? { minHeight: 200 } : { height: 'calc(100vh - 215px)', minHeight: MIN_HEIGHT }}
       >
@@ -875,7 +1160,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         ) : loading ? (
           <p className="p-3 text-xs text-zinc-400">Loading…</p>
         ) : liveCols.length === 0 ? (
-          <p className="p-3 text-xs text-zinc-400">{`Building chart — the first column needs a ${model.boxMode === 'pts' ? 'one-box' : `${boxPct}%`} move${interval > 1 ? ` on closed ${intervalLabel(interval)} bars` : ''}.`}</p>
+          <p className="p-3 text-xs text-zinc-400">{`Building chart — the first ${renko ? 'brick' : 'column'} needs a ${model.boxMode === 'pts' ? 'one-box' : `${boxPct}%`} move${interval > 1 ? ` on closed ${intervalLabel(interval)} bars` : ''}.`}</p>
         ) : (
           <>
           {/* The session names stay at the top of the view while the chart scrolls down (sticky, zero height so the chart does not move). */}
@@ -901,7 +1186,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
             </svg>
           </div>}
           <div className="flex" style={{ width: contentW + (rail ? RAIL_W : 0), height: contentH }}>
-            <svg width={plotW} height={contentH} className="block shrink-0" role="img" aria-label={`${title} point and figure chart`}>
+            <svg width={plotW} height={contentH} className="block shrink-0" role="img" aria-label={`${title} ${renko ? 'Renko' : 'point and figure'} chart`}>
               <defs>
                 <pattern id={gridId} x={offsetX} y={gridY} width={colW} height={cell} patternUnits="userSpaceOnUse">
                   <path d={`M${colW} 0V${cell}M0 ${cell}H${colW}`} fill="none" strokeWidth={1} className="stroke-zinc-800" />
@@ -910,12 +1195,12 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               <rect data-testid="pnf-grid" x={0} y={0} width={plotW} height={contentH} fill={`url(#${gridId})`} />
 
               {/* session dividers; a date is written only where it has room, so narrow sessions never print over each other */}
-              {(() => {
-                return vis.map((c, j) => {
+              {sessionLines && sessionDividers && (() => {
+                return vis.slice(w0, w1).map((c, k) => {
+                  const j = w0 + k;
                   const prev = columns[first + j - 1];
                   if (prev && prev.session === c.session) return null;   // the first column opens the first session, which is labelled too
                   const x = xOf(j);
-                  if (!sessionLines || !sessionDividers) return null;
                   return (
                     <g key={`d${j}`}>
                       <line x1={x} x2={x} y1={padY + PAD_TOP - 6} y2={contentH} className="stroke-zinc-600" strokeDasharray="2 3" />
@@ -924,198 +1209,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 });
               })()}
 
-              {/* X / O glyphs: every X in one path and every O in another (a chart can hold tens of thousands of boxes; one element
-                  each made every crosshair move and live tick re-render them all). The session dividers mark the days, so no day numbers. */}
-              <path data-testid="pnf-glyphs-x" d={glyphs.x} className="stroke-emerald-400" strokeWidth={stroke} strokeLinecap="round" fill="none" />
-              <path data-testid="pnf-glyphs-o" d={glyphs.o} className="stroke-red-400" strokeWidth={stroke} fill="none" />
-              {/* the newest confirmed column's cells: a hook for tests and nothing else */}
-              {columns.length > 0 && (
-                <rect data-testid="pnf-newest" x={xOf(columns.length - 1)} y={yOf(columns[columns.length - 1].high)} width={colW}
-                      height={(columns[columns.length - 1].boxes) * cell} fill="none" pointerEvents="none" />
-              )}
-
-              {/* Unconfirmed boxes: what the bar still forming would add if it closed now, dimmed. They move with the price and can
-                  disappear; signals, the SMA and the date marks never use them. */}
-              {unconfirmedPaths.n > 0 && (
-                <g data-testid="pnf-unconfirmed" data-count={unconfirmedPaths.n} opacity={0.35}>
-                  <path d={unconfirmedPaths.x} className="stroke-emerald-400" strokeWidth={stroke} strokeLinecap="round" fill="none" />
-                  <path d={unconfirmedPaths.o} className="stroke-red-400" strokeWidth={stroke} fill="none" />
-                </g>
-              )}
-
-              {/* VWAP / SMA: one continuous line across the loaded sessions */}
-              {overlayPts && (
-                <polyline points={overlayPts} fill="none" strokeWidth={1.8}
-                          className={kind === 'vwap' ? 'stroke-amber-300' : 'stroke-sky-400'} />
-              )}
-
-              {/* short cover cue (the short-side rule): first bar of a green X column trading above VWAP */}
-              {coverShown && exits.length > 0 && (
-                <text data-testid="pnf-exit" x={xOf(exits[exits.length - 1].col) + colW / 2} y={yOf(columns[exits[exits.length - 1].col].high) - 4}
-                      textAnchor="middle" className="fill-emerald-400 font-mono font-bold" fontSize={9}>COVER</text>
-              )}
-
-              {/* triangles: the converging lines, a tag, and the two trigger levels (buy above / sell below); after a breakout the
-                  entry, stop and vertical-count target of the pattern's trade */}
-              {triShown && triangles.slice(-8).map(t => {
-                const first = columns[t.startCol];
-                if (!first) return null;
-                let lastX = -1, lastO = -1;
-                for (let i = t.startCol; i <= t.endCol; i++) { if (columns[i].dir === 'X') lastX = i; else lastO = i; }
-                if (lastX < 0 || lastO < 0) return null;
-                const tone = t.state === 'up' ? 'emerald' : t.state === 'down' ? 'red' : t.state === 'forming' ? 'amber' : 'zinc';
-                const stroke = tone === 'emerald' ? 'stroke-emerald-400' : tone === 'red' ? 'stroke-red-400' : tone === 'amber' ? 'stroke-amber-400' : 'stroke-zinc-400';
-                const fillTxt = tone === 'emerald' ? 'fill-emerald-400' : tone === 'red' ? 'fill-red-400' : tone === 'amber' ? 'fill-amber-400' : 'fill-zinc-400';
-                const xStart = xOf(t.startCol) + colW / 2;
-                const xLevels = xOf(t.endCol) + colW / 2;
-                const xEnd = Math.min(plotW, xOf(t.breakout ? t.breakout.col : t.endCol + 1) + colW * 6);
-                const b = t.breakout;
-                const lvl = (price: number, label: string, cls: string, dash: string) => {
-                  const y = yOf(price);
-                  return (
-                    <g key={label}>
-                      <line x1={xLevels} x2={xEnd} y1={y} y2={y} strokeWidth={1.25} strokeDasharray={dash} className={cls} />
-                      <text x={xEnd - 4} y={y - 3} textAnchor="end" className={`${fillTxt} font-mono`} fontSize={10} fontWeight={700}>{`${label} ${fmt(price, axisDigits)}`}</text>
-                    </g>
-                  );
-                };
-                return (
-                  <g key={`tri${t.startCol}`} data-testid="pnf-triangle" data-state={t.state} data-cols={t.nCols} pointerEvents="none">
-                    <line x1={xStart} x2={xOf(lastX) + colW / 2} y1={yOf(first.high)} y2={yOf(columns[lastX].high)} strokeWidth={1.5} strokeDasharray="1 4" strokeLinecap="round" className={stroke} />
-                    <line x1={xStart} x2={xOf(lastO) + colW / 2} y1={yOf(first.low)} y2={yOf(columns[lastO].low)} strokeWidth={1.5} strokeDasharray="1 4" strokeLinecap="round" className={stroke} />
-                    <text x={xStart} y={yOf(first.high) - 6} className={`${fillTxt} font-mono`} fontSize={10} fontWeight={700}>{`△${t.nCols}${t.state === 'forming' ? ' forming' : ''}`}</text>
-                    {!b ? (
-                      <>
-                        {lvl(t.buyAbove, 'Buy above', 'stroke-emerald-400', '5 3')}
-                        {lvl(t.sellBelow, 'Sell below', 'stroke-red-400', '5 3')}
-                      </>
-                    ) : (
-                      <>
-                        {lvl(b.entry, `${b.side === 'UP' ? '▲' : '▼'} Entry`, stroke, '')}
-                        {lvl(b.stop, 'Stop', 'stroke-red-400', '5 3')}
-                        {lvl(b.target, `Target · RR 1:${b.rr.toFixed(1)}`, 'stroke-emerald-400', '1 4')}
-                      </>
-                    )}
-                  </g>
-                );
-              })}
-
-              {/* double top buy / double bottom sell: a horizontal support/resistance line across from the previous swing extreme
-                  to the breaking column */}
-              {signals.map(g => {
-                const sell = g.kind === 'DOUBLE_BOTTOM_SELL';
-                const entry = sell && g.belowVwap;
-                const levelPrice = sell ? columns[g.col - 2].low : columns[g.col - 2].high;
-                const y = yOf(levelPrice);
-                const x1 = xOf(g.col - 2);
-                const x2 = xOf(g.col) + colW + 6;
-                // The short-entry tag sits under the level where columns col-2 and col-1 meet: col-2's lowest O is ON the level and
-                // col-1 (an X column) starts a box above it, so below the line there is empty grid. Under the breaking column it
-                // would cover that column's Os.
-                const tagX = xOf(g.col - 1);
-                const strokeCls = sell ? 'stroke-red-400' : 'stroke-emerald-400';
-                return (
-                  <g key={g.id} data-testid="pnf-signal" data-kind={g.kind} data-col={g.col} data-entry={entry ? '1' : '0'}>
-                    {/* The horizontal support/resistance level line */}
-                    <line x1={x1} x2={x2} y1={y} y2={y} strokeWidth={entry ? 2.5 : 1.8} strokeDasharray={entry ? undefined : '4 2'}
-                          className={strokeCls} strokeLinecap="round" />
-                    {g.id === lastEntryId && (
-                      <g>
-                        <rect x={tagX - 18} y={y + 4} width={36} height={13} rx={2} className="fill-red-500/20 stroke-red-500/40" />
-                        <text x={tagX} y={y + 14} textAnchor="middle" className="fill-red-400 font-mono font-bold" fontSize={9}>SHORT</text>
-                      </g>
-                    )}
-                  </g>
-                );
-              })}
-
-              {/* trade execution markers on the box */}
-              {markersShown && tradeMarkers && tradeMarkers.length > 0 && (() => {
-                const groups = new Map<string, Array<{ marker: PnfExecutionMarker; colIdx: number; boxPrice: number; idx: number }>>();
-
-                tradeMarkers.forEach((m, idx) => {
-                  let colIdx = m.col;
-                  if (colIdx === undefined || colIdx < 0 || colIdx >= liveCols.length) {
-                    if (model.columnTimes && model.columnTimes.length > 0) {
-                      const found = model.columnTimes.findIndex(ct => m.t >= ct.start && m.t <= ct.end);
-                      if (found !== -1) colIdx = found;
-                      else if (m.t > model.columnTimes[model.columnTimes.length - 1].end) colIdx = liveCols.length - 1;
-                      else colIdx = 0;
-                    } else {
-                      colIdx = Math.max(0, liveCols.length - 1);
-                    }
-                  }
-
-                  const boxK = box > 0 ? Math.round((m.price - model.anchor) / box) : 0;
-                  const boxPrice = model.anchor + boxK * box;
-                  const key = `${colIdx}:${boxK}`;
-                  if (!groups.has(key)) groups.set(key, []);
-                  groups.get(key)!.push({ marker: m, colIdx, boxPrice, idx });
-                });
-
-                return Array.from(groups.values()).flatMap(group => {
-                  const total = group.length;
-                  const r = Math.max(5.5, Math.min(10, cell * 0.4));
-                  const fontSize = Math.max(7, Math.min(11, r * 1.1));
-
-                  return group.map(({ marker: m, colIdx, boxPrice, idx }, groupIdx) => {
-                    const baseCx = xOf(colIdx) + colW / 2;
-                    const shift = total > 1 ? (groupIdx - (total - 1) / 2) * (r * 1.5) : 0;
-                    const cx = baseCx + shift;
-                    const cy = yOf(boxPrice);
-                    const isBuy = m.action === 'BUY';
-
-                    return (
-                      <g
-                        key={m.id || `marker-${idx}`}
-                        data-testid="pnf-trade-marker"
-                        data-action={m.action}
-                        data-price={m.price}
-                        data-col={colIdx}
-                        className="select-none pointer-events-auto"
-                      >
-                        {/* Directional pip pointer */}
-                        {isBuy ? (
-                          <polygon
-                            points={`${cx},${cy - r - 4} ${cx - 3.5},${cy - r} ${cx + 3.5},${cy - r}`}
-                            className="fill-emerald-400 stroke-zinc-950"
-                            strokeWidth={1}
-                          />
-                        ) : (
-                          <polygon
-                            points={`${cx},${cy + r + 4} ${cx - 3.5},${cy + r} ${cx + 3.5},${cy + r}`}
-                            className="fill-red-400 stroke-zinc-950"
-                            strokeWidth={1}
-                          />
-                        )}
-
-                        {/* Badge circle */}
-                        <circle
-                          cx={cx}
-                          cy={cy}
-                          r={r}
-                          className={isBuy ? 'fill-emerald-500 stroke-zinc-950' : 'fill-red-500 stroke-zinc-950'}
-                          strokeWidth={1.5}
-                        />
-
-                        {/* Action initial */}
-                        <text
-                          x={cx}
-                          y={cy + 0.5}
-                          textAnchor="middle"
-                          dominantBaseline="central"
-                          className={isBuy ? 'fill-zinc-950 font-mono font-black' : 'fill-white font-mono font-black'}
-                          fontSize={fontSize}
-                        >
-                          {isBuy ? 'B' : 'S'}
-                        </text>
-
-                        <title>{`${m.action} ${m.lots} lot${m.lots > 1 ? 's' : ''} @ ${m.estimate ? '~' : ''}${m.price.toFixed(2)} [${m.mode}]${m.estimate ? ' (live price at the click; traded price not reported yet)' : ''}`}</title>
-                      </g>
-                    );
-                  });
-                });
-              })()}
+              {chartLayer}
 
               {/* what a click on the rail row under the pointer would place: the side, the kind and the price */}
               {rail && railHot && !railDrag && (() => {
@@ -1221,7 +1315,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
             {/* the B / S rail (the ladder's columns): click a box row to rest an order there; drag an order's handle to move it */}
             {rail && (
               <RailSvg rail={rail} box={box} cell={cell} yMax={yMax} yMin={yMin} padY={padY} contentH={contentH} yOf={yOf}
-                       liveValue={liveValue} axisDigits={axisDigits} onDrag={setRailDrag} onHot={setRailHot} />
+                       liveValue={liveValue} axisDigits={axisDigits} onDrag={setRailDrag} onHot={setRailHot} visTop={visTop} visBottom={visBottom} />
             )}
 
             {/* price axis: sticky, so it stays at the panel's right edge while the chart is panned */}
@@ -1242,11 +1336,12 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                  onPointerUp={() => { axisDragRef.current = null; }}
                  onPointerCancel={() => { axisDragRef.current = null; }}>
               <g data-testid="pnf-axis">
-                {Array.from({ length: Math.round((yMax - yMin) / box) }, (_, i) => i)
-                  .filter(i => i % tickEvery === 0)
-                  .filter(i => liveValue === null || Math.abs(yOf(yMin + (i + 0.5) * box) - yOf(liveValue)) > 14)
+                {Array.from({ length: Math.max(0, axisTo - axisFrom) }, (_, k) => axisFrom + k)
+                  .filter(i => (renko ? Math.round((yMin + i * box) / box) : i) % tickEvery === 0)
+                  .filter(i => liveValue === null || Math.abs(yOf(yMin + (i + (renko ? 0 : 0.5)) * box) - yOf(liveValue)) > 14)
                   .map(i => {
-                    const p = yMin + (i + 0.5) * box;   // yMin is a cell edge, so this is a box centre
+                    // yMin is a cell edge: P&F names the box centre, Renko the brick edge (its grid is on multiples of the box)
+                    const p = yMin + (i + (renko ? 0 : 0.5)) * box;
                     return <text key={`t${i}`} x={6} y={yOf(p) + 3.5} className="fill-zinc-400 font-mono" fontSize={10}>{fmt(p, axisDigits)}</text>;
                   })}
               </g>
@@ -1273,7 +1368,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               <svg width={plotW} height={TIME_AXIS_H} className="block" style={{ transform: `translateY(-${TIME_AXIS_H}px)` }}>
                 <rect x={0} y={0} width={plotW} height={TIME_AXIS_H} className="fill-zinc-900" />
                 <line x1={0} x2={plotW} y1={0.5} y2={0.5} className="stroke-zinc-700" strokeWidth={1} />
-                {axisLabels.map((l, i) => (
+                {axisLabels.filter(l => l.x >= xOf(w0) && l.x <= xOf(w1)).map((l, i) => (
                   <text key={i} x={l.x} y={15} textAnchor="middle" fontSize={10} fontWeight={l.major ? 800 : 500}
                         className={`font-mono ${l.major ? 'fill-zinc-200' : 'fill-zinc-400'}`}>{l.text}</text>
                 ))}
@@ -1300,9 +1395,18 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         return (
           <div data-testid="pnf-crosshair-readout"
                className="pointer-events-none absolute top-1.5 left-2 z-10 flex items-center gap-2 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[10px] font-mono text-zinc-300">
-            <span className={`font-bold ${c.dir === 'X' ? 'text-emerald-400' : 'text-red-400'}`}>{c.dir === 'X' ? 'X up' : 'O down'}</span>
-            <span>{c.boxes} box{c.boxes === 1 ? '' : 'es'}</span>
-            <span className="text-zinc-100">{fmt(c.low + box / 2, axisDigits)} – {fmt(c.high - box / 2, axisDigits)}</span>
+            {renko ? (
+              <>
+                <span className={`font-bold ${c.dir === 'X' ? 'text-teal-400' : 'text-red-400'}`}>{c.dir === 'X' ? 'Brick up' : 'Brick down'}</span>
+                <span className="text-zinc-100">O {fmt(c.dir === 'X' ? c.low : c.high, axisDigits)} → C {fmt(c.dir === 'X' ? c.high : c.low, axisDigits)}</span>
+              </>
+            ) : (
+              <>
+                <span className={`font-bold ${c.dir === 'X' ? 'text-emerald-400' : 'text-red-400'}`}>{c.dir === 'X' ? 'X up' : 'O down'}</span>
+                <span>{c.boxes} box{c.boxes === 1 ? '' : 'es'}</span>
+                <span className="text-zinc-100">{fmt(c.low + box / 2, axisDigits)} – {fmt(c.high - box / 2, axisDigits)}</span>
+              </>
+            )}
             <span className="text-zinc-400">{dateYear(sessionOfT(t.start))}{timeIfAny(t.start)}{t.end === t.start && !timeIfAny(t.end) ? '' : <> → {sessionOfT(t.end) !== sessionOfT(t.start) ? dateYear(sessionOfT(t.end)) : ''}{timeIfAny(t.end)}</>}</span>
           </div>
         );

@@ -117,6 +117,7 @@ const NAV_GROUPS = [
       { href: '/scalp-cockpit', label: 'Scalp Cockpit', desc: 'Tight multi-window scalping desk: Cumulative OI, Strikes OI slider, India VIX, collapsible Multi-Leg Focus trade desk & analysis windows' },
       { href: '/price-ladder', label: 'Price Ladder XY', desc: 'Trade an option on index levels — click a Nifty level to arm an entry with a bracket target/SL and trailing SL in index points; server-fired' },
       { href: '/straddle-pnf', label: 'Point & Figure', desc: 'Live Point & Figure chart of an NSE index, stock, future or option (CE, PE or CE+PE straddle; NSE and MCX), with VWAP or an SMA (period of your choice, default 50), double top / double bottom alerts and a 30-alert log — signals only' },
+      { href: '/renko', label: 'Renko', desc: 'Live Renko chart (TradingView Traditional box, 10 points by default) of an NSE index, stock, future or option — same instrument picker, trade bar, rail and AUTO as Point & Figure, with N-brick confirmation signals' },
       { href: '/straddle-simulator', label: 'Straddle Simulator', desc: 'Replay past NIFTY straddle sessions through the Straddle P&F engine at 1X / 50X / 100X / 200X — alerts, VWAP and the 30-alert log, signals only' },
       { href: '/focus-tool', label: 'Ultimate Scalper Terminal', desc: 'Straddles & strangles terminal — timed entry, level exits, real-money armed orders' },
       { href: '/cyber-scalper', label: 'Cyber Scalper (9/20 EMA)', desc: 'Futuristic 9/20 EMA & VWAP scalping terminal with live difference bias & big buy/sell order execution' },

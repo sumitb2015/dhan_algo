@@ -88,3 +88,10 @@ test('xScale changes the column pitch only: the cell, the rows and the height st
   assert.equal(wide.colW, a.cell * 2);
   assert.equal(narrow.colW, Math.round(a.cell * 0.5));
 });
+
+test('a very long chart (200k columns, e.g. Renko over years) lays out without overflowing the stack', () => {
+  const cols = Array.from({ length: 200_000 }, (_, i) => ({ low: 100 + (i % 50), high: 101 + (i % 50) }));
+  const L = layoutPanel(cols, 1, null, 1000, 600);
+  assert.equal(L.yMin, 99);
+  assert.equal(L.yMax, 152);
+});

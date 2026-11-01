@@ -35,7 +35,7 @@ function remember(key: string, body: unknown) {
 }
 
 interface Instrument { segment: string; security_id: string }
-interface ScriptOut { error?: string; instrument?: Instrument; instruments?: Instrument[]; bars?: Record<string, Bar[]>; name?: string; errors?: Record<string, string>; anchor_t?: number }
+interface ScriptOut { error?: string; instrument?: Instrument; instruments?: Instrument[]; bars?: Record<string, Bar[]>; name?: string; errors?: Record<string, string>; anchor_t?: number; cas?: boolean }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -69,6 +69,8 @@ async function run(key: string, args: string[], fallbackName: string, contracts?
       contracts: contracts ?? instruments.map(i => ({ segment: i.segment, securityId: i.security_id, instrument: 'EQUITY', displayName: fallbackName, lot: 1, expiry: '' })),
       bars,
       errors: out.errors ?? {}, anchorT: out.anchor_t ?? null, dataDate: lastT ? sessionOf(lastT) : null,
+      // a stock with derivatives: its continuous session ends at 15:15 and its close is set by NSE's Closing Auction Session
+      cas: out.cas === true,
     };
     if (Object.keys(bars).length) remember(key, body);
     return NextResponse.json(forTail(body, tail));

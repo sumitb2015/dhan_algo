@@ -45,6 +45,8 @@ def _leg(df: pd.DataFrame) -> pd.DataFrame:
         "close": pd.to_numeric(df[cl], errors="coerce").fillna(0.0),
         "vol": pd.to_numeric(df[vl], errors="coerce").fillna(0).astype("int64") if vl else 0,
     })
+    if "day_close" in df.columns:                      # an equity session's official close (price_pnf_candles.snap_session_closes)
+        out["day_close"] = pd.to_numeric(df["day_close"], errors="coerce").to_numpy()
     return out.drop_duplicates("t", keep="last")
 
 

@@ -95,7 +95,10 @@ function resampleCalendar(bars: Bar[], n: number, sessionCloseMin = 15 * 60 + 30
   const tail = groups[groups.length - 1];
   if (tail && !keepForming && !(n === DAY_MIN && tail.lastMinute >= sessionCloseMin - 1)) groups.pop();
   return {
-    bars: groups.map(g => ({ t: g.first, ce: g.last.ce, pe: g.last.pe, straddle: g.last.straddle, vol: g.vol })),
+    // A stock's day ends on its official close (`dc`, a single-leg series: ce carries the price too), not on its last minute.
+    bars: groups.map(g => (g.last.dc !== undefined
+      ? { t: g.first, ce: g.last.dc, pe: 0, straddle: g.last.dc, vol: g.vol }
+      : { t: g.first, ce: g.last.ce, pe: g.last.pe, straddle: g.last.straddle, vol: g.vol })),
     endIdx: groups.map(g => g.lastIdx),
   };
 }

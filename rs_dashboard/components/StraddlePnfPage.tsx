@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, ChartScatter, Eye, EyeOff, Flag, LocateFixed, XCircle, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
+import { Bell, Boxes, ChartScatter, Eye, EyeOff, Flag, LocateFixed, XCircle, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from './NavBar';
 import DataChip from './DataChip';
@@ -20,11 +20,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock } from '@/lib/alertSound';
 import { pnfChimeFor, playPnfChime, type PnfSoundEvent } from '@/lib/pnfChime';
-import { buildConfirmedModel, withLive, type Overlay } from '@/lib/straddlePnfModel';
+import { buildConfirmedModel, withLive, type ChartType, type Overlay } from '@/lib/straddlePnfModel';
 import { capLog, sessionWindow } from '@/lib/straddlePnfLive';
 import { HeaderIndexChips } from '@/components/triplestraddle/HeaderIndexChips';
 import {
-  DEFAULT_CHART1_SETTINGS, DEFAULT_CHART2_SETTINGS, SETTINGS_KEY, SETTINGS_KEY_2, CHART_VIEW_KEY,
+  DEFAULT_CHART1_SETTINGS, DEFAULT_CHART2_SETTINGS, DEFAULT_RENKO_SETTINGS, SETTINGS_KEY, SETTINGS_KEY_2, CHART_VIEW_KEY,
   boxText, readSettings, serializeSettings, type PnfSettings,
 } from '@/lib/straddlePnfSettings';
 import type { PnfExecutionMarker } from '@/lib/straddlePnf';
@@ -33,7 +33,9 @@ import {
 } from '@/lib/pnfTarget';
 import { usePnfFeed, type PnfFeed } from './straddlePnf/usePnfFeed';
 import { usePnfAlerts } from './straddlePnf/usePnfAlerts';
-import { detectTriangles } from '@/lib/pnfTriangle';
+import { detectTriangles, type PnfTriangle } from '@/lib/pnfTriangle';
+import { isSellSignal } from '@/lib/straddlePnf';
+import type { PnfScope } from '@/lib/pnfScope';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent } from './straddlePnf/usePnfAuto';
 import { autoDaySummary, autoMarkers } from '@/lib/pnfAutoLedger';
 import AutoControls from './straddlePnf/AutoControls';
@@ -45,6 +47,10 @@ import { useChartLegs, usePnfResting, type RailChart, type RestingEvent } from '
 import { applyPaperFill, FLAT_LEG, type PaperLeg, type PnfProduct } from '@/lib/pnfOrderLogic';
 import { needsResolve, type RestingRow } from '@/lib/pnfRestingLedger';
 
+// The same page draws Renko at /renko (`chart="renko"`): bricks instead of P&F columns (lib/renko.ts), N-brick confirmation
+// signals, and its own preferences (every `straddle-pnf-*` key becomes `renko-*`), AUTO and resting-order ledgers (lib/pnfScope.ts)
+// and leader tab, so the two pages can run side by side without touching each other's chart 1 / chart 2.
+//
 // Point & Figure with a 1-click execution trade bar, picked with Index | Equity | Futures | Options: an NSE index or stock, a
 // future, one option, or a CE + PE straddle. Two charts can show two different instruments with their own box settings; the
 // ACTIVE chart is the one the header controls and the trade bar act on. Each chart's bars come from the history API (re-fetched
@@ -87,6 +93,10 @@ const minuteOf = (t: number) => Math.floor(t / 60) * 60;
 const nowSec = () => Date.now() / 1000;
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 
+/** A preference key on this page: the P&F page keeps its original keys, the Renko page swaps the `straddle-pnf` prefix for `renko`. */
+const prefKey = (chart: ChartType, key: string) => (chart === 'renko' ? key.replace(/^straddle-pnf/, 'renko') : key);
+const NO_TRIANGLES: PnfTriangle[] = [];
+
 function readPref(key: string): string | null {
   try { return localStorage.getItem(key); } catch { return null; }
 }
@@ -127,7 +137,7 @@ function IconButton({ icon: Icon, label, onClick, pressed, badge }: { icon: Luci
 }
 
 /** One chart's P&F model: CLOSED bars only (so a signal never repaints), with the forming minute laid on top. */
-function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, overlay: Overlay, now: number) {
+function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, overlay: Overlay, now: number, chart: ChartType) {
   // A long interval picked on a stock does not carry over to an instrument that has no such history.
   const interval = effectiveInterval(rawSettings.interval, hasLongIntervals(target.kind));
   const settings = useMemo(() => (interval === rawSettings.interval ? rawSettings : { ...rawSettings, interval }), [rawSettings, interval]);
@@ -144,18 +154,18 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   const closedKey = `${closed.length}:${closed[0]?.t ?? 0}:${closedLast?.t ?? 0}:${closedLast?.straddle ?? 0}:${feed.histVersion}`;
   const sessionClose = sessionWindow(feed.market, now / 1000)[1];
   const confirmed = useMemo(
-    () => buildConfirmedModel(closed, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined }),
+    () => buildConfirmedModel(closed, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined, chart }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [closedKey, overlay, settings, sessionClose, indexNoVwap, feed.loaded?.anchorT],
+    [closedKey, overlay, settings, sessionClose, indexNoVwap, feed.loaded?.anchorT, chart],
   );
   const model = useMemo(() => withLive(confirmed, formingBar), [confirmed, formingBar]);
   const vwapAllowed = !indexNoVwap && (closed.length === 0 || model.vwapAvailable);
   return { model, indexNoVwap, vwapAllowed };
 }
 
-const readMarkers = (key: string): PnfExecutionMarker[] => {
+const readMarkers = (prefix: string, key: string): PnfExecutionMarker[] => {
   try {
-    const raw = sessionStorage.getItem(`${MARKERS_KEY}${key}`);
+    const raw = sessionStorage.getItem(`${prefix}${key}`);
     const parsed = raw ? JSON.parse(raw) as PnfExecutionMarker[] : [];
     // A marker carries only its time and price: each chart finds its own column from its own box size. Older ones drop theirs.
     // AUTO markers once saved here (ids `auto-…`, placed at the decision time) are now drawn from the ledger instead.
@@ -163,7 +173,14 @@ const readMarkers = (key: string): PnfExecutionMarker[] => {
   } catch { return []; }
 };
 
-function StraddlePnfPage() {
+function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
+  const renko = chart === 'renko';
+  const scope: PnfScope = renko ? 'renko' : 'pnf';
+  const readP = useCallback((key: string) => readPref(prefKey(chart, key)), [chart]);
+  const saveP = useCallback((key: string, value: string) => savePref(prefKey(chart, key), value), [chart]);
+  const markersPrefix = prefKey(chart, MARKERS_KEY);
+  const defaults1 = renko ? DEFAULT_RENKO_SETTINGS : DEFAULT_CHART1_SETTINGS;
+  const defaults2 = renko ? DEFAULT_RENKO_SETTINGS : DEFAULT_CHART2_SETTINGS;
   const [chartView, setChartView] = useState<'1' | '2'>('2');
   // Two charts: the one the header controls (instrument, box settings, price strip) and the trade bar act on.
   const [activeChart, setActiveChart] = useState<ChartId>(1);
@@ -178,8 +195,8 @@ function StraddlePnfPage() {
   const picksRef = useRef<Record<ChartId, ChartPicks>>({ 1: { targets: { ...DEFAULT_TARGETS }, open: 'index' }, 2: { targets: { ...DEFAULT_TARGETS }, open: 'index' } });
   // No chart loads before the saved picks are read, so the default instrument is never fetched just to be replaced.
   const [prefsReady, setPrefsReady] = useState(false);
-  const [settings, setSettings] = useState<PnfSettings>(DEFAULT_CHART1_SETTINGS);
-  const [settings2, setSettings2] = useState<PnfSettings>(DEFAULT_CHART2_SETTINGS);
+  const [settings, setSettings] = useState<PnfSettings>(defaults1);
+  const [settings2, setSettings2] = useState<PnfSettings>(defaults2);
   // The contract pickers' error (e.g. an underlying with no live futures): shown in that chart instead of an endless "Loading…".
   const [contractError, setContractError] = useState<Record<ChartId, string | null>>({ 1: null, 2: null });
   const [recenter, setRecenter] = useState(0);
@@ -218,7 +235,7 @@ function StraddlePnfPage() {
   // The active chart's price/summary strip is drawn into the top header (PnfPanel `headerSlot`).
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
 
-  const { leaderRef } = useTabLeader('straddle-pnf');
+  const { leaderRef } = useTabLeader(renko ? 'renko' : 'straddle-pnf');
   const wideHeader = useMinWidth(1400);
   const mutedRef = useRef(false);
   const logLoadedRef = useRef(false);
@@ -228,40 +245,40 @@ function StraddlePnfPage() {
   useEffect(() => {
     // Saved preferences are read after mount, not in useState initialisers: localStorage does not exist on the server render.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (readPref(OVERLAY_KEY) === 'sma') setOverlay('sma');
-    if (readPref(OVERLAY_SHOWN_KEY) === '0') setOverlayShown(false);
-    if (readPref(COVER_SHOWN_KEY) === '1') setCoverShown(true);
-    const savedView = readPref(CHART_VIEW_KEY);
+    if (readP(OVERLAY_KEY) === 'sma') setOverlay('sma');
+    if (readP(OVERLAY_SHOWN_KEY) === '0') setOverlayShown(false);
+    if (readP(COVER_SHOWN_KEY) === '1') setCoverShown(true);
+    const savedView = readP(CHART_VIEW_KEY);
     if (savedView === '1' || savedView === '2') setChartView(savedView);
-    setSettings(readSettings(readPref(SETTINGS_KEY), DEFAULT_CHART1_SETTINGS));
-    setSettings2(readSettings(readPref(SETTINGS_KEY_2), DEFAULT_CHART2_SETTINGS));
-    const raw1 = readPref(TARGETS_KEY);
-    const p1 = restoreChart(raw1, readPref(SEGMENT_KEY));
-    const legacy = parseTarget((() => { try { return JSON.parse(readPref(LEGACY_TARGET_KEY) ?? 'null'); } catch { return null; } })());
-    if (legacy && !raw1) { p1.targets[legacy.kind] = legacy; if (!readPref(SEGMENT_KEY)) p1.open = legacy.kind; }   // one-time carry-over
-    const raw2 = readPref(TARGETS_KEY_2);
-    const p2 = restoreChart(raw2, readPref(SEGMENT_KEY_2), p1);
+    setSettings(readSettings(readP(SETTINGS_KEY), defaults1));
+    setSettings2(readSettings(readP(SETTINGS_KEY_2), defaults2));
+    const raw1 = readP(TARGETS_KEY);
+    const p1 = restoreChart(raw1, readP(SEGMENT_KEY));
+    const legacy = parseTarget((() => { try { return JSON.parse(readP(LEGACY_TARGET_KEY) ?? 'null'); } catch { return null; } })());
+    if (legacy && !raw1) { p1.targets[legacy.kind] = legacy; if (!readP(SEGMENT_KEY)) p1.open = legacy.kind; }   // one-time carry-over
+    const raw2 = readP(TARGETS_KEY_2);
+    const p2 = restoreChart(raw2, readP(SEGMENT_KEY_2), p1);
     // Chart 2's first visit copies chart 1 once and saves it, so it never follows later chart-1 picks by accident.
-    if (raw2 === null) { savePref(TARGETS_KEY_2, JSON.stringify(p2.targets)); savePref(SEGMENT_KEY_2, p2.open); }
+    if (raw2 === null) { saveP(TARGETS_KEY_2, JSON.stringify(p2.targets)); saveP(SEGMENT_KEY_2, p2.open); }
     picksRef.current = { 1: p1, 2: p2 };
     setTarget1(p1.targets[p1.open]);
     setTarget2(p2.targets[p2.open]);
-    setActiveChart(parseActiveChart(readPref(ACTIVE_CHART_KEY)));
+    setActiveChart(parseActiveChart(readP(ACTIVE_CHART_KEY)));
     setPrefsReady(true);
-    if (readPref(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
-    if (readPref(TRADE_OPEN_KEY) === '0') setTradeOpen(false);
-    if (readPref(BOOKS_OPEN_KEY) === '1') setBooksOpen(true);
-    const lotsOf = (c: ChartId) => { const n = Number(readPref(`${AUTO_LOTS_KEY}${c}`)); return Number.isInteger(n) && n >= 1 && n <= 20 ? n : 1; };
+    if (readP(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
+    if (readP(TRADE_OPEN_KEY) === '0') setTradeOpen(false);
+    if (readP(BOOKS_OPEN_KEY) === '1') setBooksOpen(true);
+    const lotsOf = (c: ChartId) => { const n = Number(readP(`${AUTO_LOTS_KEY}${c}`)); return Number.isInteger(n) && n >= 1 && n <= 20 ? n : 1; };
     setAutoLots({ 1: lotsOf(1), 2: lotsOf(2) });
-    setMarkersShown({ 1: readPref(`${MARKERS_SHOWN_KEY}1`) !== '0', 2: readPref(`${MARKERS_SHOWN_KEY}2`) !== '0' });
-    try { const raw = readPref(STYLE_KEY); if (raw) { const j = JSON.parse(raw); setOrderStyle({ style: j.style === 'Bracket' || j.style === 'Cover' ? j.style : 'Single', tgt: String(j.tgt ?? ''), sl: String(j.sl ?? ''), trail: String(j.trail ?? ''), trailOn: j.trailOn === true }); } } catch { /* keep Single */ }
-    const minOf = (c: ChartId) => { const n = Number(readPref(`${TRI_MIN_KEY}${c}`)); return Number.isInteger(n) && n >= 3 && n <= 6 ? n : 3; };
+    setMarkersShown({ 1: readP(`${MARKERS_SHOWN_KEY}1`) !== '0', 2: readP(`${MARKERS_SHOWN_KEY}2`) !== '0' });
+    try { const raw = readP(STYLE_KEY); if (raw) { const j = JSON.parse(raw); setOrderStyle({ style: j.style === 'Bracket' || j.style === 'Cover' ? j.style : 'Single', tgt: String(j.tgt ?? ''), sl: String(j.sl ?? ''), trail: String(j.trail ?? ''), trailOn: j.trailOn === true }); } } catch { /* keep Single */ }
+    const minOf = (c: ChartId) => { const n = Number(readP(`${TRI_MIN_KEY}${c}`)); return Number.isInteger(n) && n >= 3 && n <= 6 ? n : 3; };
     setTriMin({ 1: minOf(1), 2: minOf(2) });
-    setTriShown({ 1: readPref(`${TRI_SHOW_KEY}1`) !== '0', 2: readPref(`${TRI_SHOW_KEY}2`) !== '0' });
-    setLinesShown({ 1: readPref(`${LINES_SHOWN_KEY}1`) !== '0', 2: readPref(`${LINES_SHOWN_KEY}2`) !== '0' });
-    setTagLeft({ 1: readPref(`${TAG_LEFT_KEY}1`) === '1', 2: readPref(`${TAG_LEFT_KEY}2`) === '1' });
+    setTriShown({ 1: readP(`${TRI_SHOW_KEY}1`) !== '0', 2: readP(`${TRI_SHOW_KEY}2`) !== '0' });
+    setLinesShown({ 1: readP(`${LINES_SHOWN_KEY}1`) !== '0', 2: readP(`${LINES_SHOWN_KEY}2`) !== '0' });
+    setTagLeft({ 1: readP(`${TAG_LEFT_KEY}1`) === '1', 2: readP(`${TAG_LEFT_KEY}2`) === '1' });
     try {
-      const raw = readPref(LOG_KEY);
+      const raw = readP(LOG_KEY);
       const parsed = raw ? JSON.parse(raw) : [];
       if (Array.isArray(parsed)) setLog(parsed.slice(0, 30));
     } catch { /* corrupt stored log: start empty */ }
@@ -269,16 +286,18 @@ function StraddlePnfPage() {
     setNow(Date.now());
     const id = setInterval(() => setNow(Date.now()), 5000);
     return () => clearInterval(id);
-  }, []);
-  useEffect(() => { if (logLoadedRef.current) savePref(LOG_KEY, JSON.stringify(log)); }, [log]);
+    // the chart type is fixed per page, so this still runs once
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chart]);
+  useEffect(() => { if (logLoadedRef.current) saveP(LOG_KEY, JSON.stringify(log)); }, [log, saveP]);
 
   // ── the two charts: each its own instrument, history, live price, model and alerts ──
   const dual = chartView === '2';
   const active: ChartId = dual && activeChart === 2 ? 2 : 1;
   const feed1 = usePnfFeed(prefsReady ? target1 : null, recenter, now);
   const feed2 = usePnfFeed(prefsReady && dual ? target2 : null, recenter, now);
-  const c1 = useChartModel(feed1, target1, settings, overlay, now);
-  const c2 = useChartModel(feed2, target2, settings2, overlay, now);
+  const c1 = useChartModel(feed1, target1, settings, overlay, now, chart);
+  const c2 = useChartModel(feed2, target2, settings2, overlay, now, chart);
   const activeTarget = active === 2 ? target2 : target1;
   const activeFeed = active === 2 ? feed2 : feed1;
   const activeSettings = active === 2 ? settings2 : settings;
@@ -304,8 +323,9 @@ function StraddlePnfPage() {
         setTimeout(() => setFlash(f => ({ ...f, [chart]: null })), FLASH_MS);
         continue;
       }
-      const sell = e.kind === 'DOUBLE_BOTTOM_SELL';
-      const title = `${e.label} · ${sell ? 'Double bottom SELL' : 'Double top BUY'} @ ${e.price.toFixed(2)}`;
+      const sell = isSellSignal(e.kind);
+      const what = renko ? `Renko ${sell ? 'SELL' : 'BUY'} (${(chart === 2 ? settings2 : settings).reversal} bricks)` : sell ? 'Double bottom SELL' : 'Double top BUY';
+      const title = `${e.label} · ${what} @ ${e.price.toFixed(2)}`;
       if (sell) toast.error(title, { description: e.belowVwap ? `Below ${m.vwapAvailable ? 'VWAP' : `SMA ${m.smaPeriod}`} — short entry zone` : undefined });
       else toast.success(title);
       setFlash(f => ({ ...f, [chart]: sell ? 'sell' : 'buy' }));
@@ -319,8 +339,9 @@ function StraddlePnfPage() {
   const chime = (e: PnfSoundEvent) => { if (!mutedRef.current) playPnfChime(pnfChimeFor(e)); };
   const tk1 = targetKey(target1), tk2 = targetKey(target2);
   // Triangles of each chart's CLOSED columns (lib/pnfTriangle.ts). Kept apart from model.signals, which AUTO trades.
-  const tri1 = useMemo(() => detectTriangles(c1.model.columns, c1.model.signals, c1.model.box, settings.reversal, triMin[1]), [c1.model, settings.reversal, triMin]);
-  const tri2 = useMemo(() => detectTriangles(c2.model.columns, c2.model.signals, c2.model.box, settings2.reversal, triMin[2]), [c2.model, settings2.reversal, triMin]);
+  // Triangles are a P&F pattern: a Renko chart has none.
+  const tri1 = useMemo(() => renko ? NO_TRIANGLES : detectTriangles(c1.model.columns, c1.model.signals, c1.model.box, settings.reversal, triMin[1]), [renko, c1.model, settings.reversal, triMin]);
+  const tri2 = useMemo(() => renko ? NO_TRIANGLES : detectTriangles(c2.model.columns, c2.model.signals, c2.model.box, settings2.reversal, triMin[2]), [renko, c2.model, settings2.reversal, triMin]);
   usePnfAlerts({
     model: c1.model, ready: Boolean(feed1.loaded), chart: 1, target: target1, label: dual ? `${feed1.label} · C1` : feed1.label,
     strike: feed1.loaded?.key ?? 0, drawKey: `${tk1}|${feed1.epoch}|${serializeSettings(settings)}`, onFresh, triangles: tri1,
@@ -336,21 +357,21 @@ function StraddlePnfPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setMarkers(prev => {
       let next = prev;
-      for (const k of [tk1, tk2]) if (!(k in next)) next = { ...next, [k]: readMarkers(k) };
+      for (const k of [tk1, tk2]) if (!(k in next)) next = { ...next, [k]: readMarkers(markersPrefix, k) };
       return next;
     });
-  }, [tk1, tk2]);
+  }, [tk1, tk2, markersPrefix]);
   const saveMarkers = useCallback((key: string, update: (prev: PnfExecutionMarker[]) => PnfExecutionMarker[]) => {
     setMarkers(prev => {
-      const list = update(prev[key] ?? readMarkers(key));
-      try { sessionStorage.setItem(`${MARKERS_KEY}${key}`, JSON.stringify(list)); } catch { /* ignore */ }
+      const list = update(prev[key] ?? readMarkers(markersPrefix, key));
+      try { sessionStorage.setItem(`${markersPrefix}${key}`, JSON.stringify(list)); } catch { /* ignore */ }
       return { ...prev, [key]: list };
     });
-  }, []);
+  }, [markersPrefix]);
   const handleTradeExecuted = useCallback((m: PnfExecutionMarker, t: Target) => saveMarkers(targetKey(t), prev => [...prev, m]), [saveMarkers]);
 
   // ── AUTO: each chart trades its own scrip (double-bottom SELL / double-top BUY, exit on the first column reversal) ──
-  const { ledger: autoLedger, post: autoPost } = usePnfAutoLedger();
+  const { ledger: autoLedger, post: autoPost } = usePnfAutoLedger(scope);
   const onAutoEvent = useCallback((e: AutoEvent) => {
     if (e.kind === 'halt') toast.error(e.text, { duration: Infinity });
     else if (e.kind === 'info') toast.warning(e.text);
@@ -387,7 +408,7 @@ function StraddlePnfPage() {
   const railCharts = ([1, 2] as const).map(railChartOf).filter((x): x is RailChart => x !== null);
   const positionsInfo = usePnfPositions({ charts: railCharts, broker, mode: tradeMode, paper });
   const positions = positionsInfo.byKey;
-  const changeStyle = (s: StyleState) => { setOrderStyle(s); savePref(STYLE_KEY, JSON.stringify(s)); };
+  const changeStyle = (s: StyleState) => { setOrderStyle(s); saveP(STYLE_KEY, JSON.stringify(s)); };
   /** The next entry's bracket: a spec, null (Single), or why it is not ready (then nothing is sent). */
   // The Style bar's numbers are P&F boxes of the chart the order goes to: they become price points with that chart's own box size.
   const bracketSpecNow = (chart: ChartId = active): BracketSpec | null | string => {
@@ -417,7 +438,7 @@ function StraddlePnfPage() {
     });
   };
   const resting = usePnfResting({
-    charts: railCharts, broker, mode: tradeMode, lots: sizing.lots, product: sizing.product, leaderRef, onEvent: onRestingEvent, onPaperFill, instant, positions, positionsLoaded: positionsInfo.loaded,
+    charts: railCharts, broker, mode: tradeMode, lots: sizing.lots, product: sizing.product, leaderRef, onEvent: onRestingEvent, onPaperFill, instant, positions, positionsLoaded: positionsInfo.loaded, scope,
   });
   // Header: cancel every working order on both charts (stop-loss / target exits included). REAL broker orders ask once first.
   const workingRows = resting.ledger.rows.filter(r => r.state === 'working');
@@ -447,7 +468,7 @@ function StraddlePnfPage() {
       return;
     }
     try {
-      const res = await fetch('/api/straddle-pnf/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ broker, mode: 'REAL', target: rc.target, close: true }) });
+      const res = await fetch('/api/straddle-pnf/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ broker, mode: 'REAL', target: rc.target, close: true, scope }) });
       const j = await res.json() as { success?: boolean; error?: string; message?: string; outcome?: string };
       if (j.success) { toast.success(`MTM guard squared off chart ${c}: ${reason}`); chime({ kind: 'manual', outcome: 'placed', close: true }); }
       else if (res.status !== 409) toast.warning(`MTM guard exit: ${j.error ?? j.message ?? 'not confirmed'} - it is retried while the position is open`, { duration: 15_000 });
@@ -455,7 +476,7 @@ function StraddlePnfPage() {
   };
   const guards = usePnfGuard({
     charts: railCharts.map(c => ({ chart: c.chart, targetKey: c.targetKey })), positions, positionsLoaded: positionsInfo.loaded,
-    scope: `${broker}:${tradeMode}`, leaderRef, exitChart,
+    scope: `${broker}:${tradeMode}`, leaderRef, exitChart, storeKey: prefKey(chart, 'straddle-pnf-guard-'),
     onEvent: (c, kind, text) => { if (kind === 'warn') { toast.warning(text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); } else toast(text); void c; },
   });
   const railFor = (c: ChartId) => {
@@ -471,9 +492,9 @@ function StraddlePnfPage() {
       instant: instant[c],
       onToggleInstant: () => setInstant(v => ({ ...v, [c]: !v[c] })),
       linesShown: linesShown[c],
-      onToggleLines: () => { const next = !linesShown[c]; savePref(`${LINES_SHOWN_KEY}${c}`, next ? '1' : '0'); setLinesShown(v => ({ ...v, [c]: next })); },
+      onToggleLines: () => { const next = !linesShown[c]; saveP(`${LINES_SHOWN_KEY}${c}`, next ? '1' : '0'); setLinesShown(v => ({ ...v, [c]: next })); },
       alignLeft: tagLeft[c],
-      onToggleAlign: () => { const next = !tagLeft[c]; savePref(`${TAG_LEFT_KEY}${c}`, next ? '1' : '0'); setTagLeft(v => ({ ...v, [c]: next })); },
+      onToggleAlign: () => { const next = !tagLeft[c]; saveP(`${TAG_LEFT_KEY}${c}`, next ? '1' : '0'); setTagLeft(v => ({ ...v, [c]: next })); },
       onToggleArm: () => setRailUnlocked(v => !v),
       onCancelAll: () => { for (const r of rows) if (r.state === 'working') void resting.cancel(r); },
       orders: rows.map(r => ({
@@ -503,12 +524,12 @@ function StraddlePnfPage() {
   const auto1 = usePnfAuto({
     chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: c1.model, price: priceOf(feed1), stale: feed1.stale,
     market: feed1.market, complete: feed1.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
-    onEvent: onAutoEvent, onDisarm: () => disarm(1),
+    onEvent: onAutoEvent, onDisarm: () => disarm(1), scope,
   });
   const auto2 = usePnfAuto({
     chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: c2.model, price: priceOf(feed2), stale: feed2.stale,
     market: feed2.market, complete: feed2.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
-    onEvent: onAutoEvent, onDisarm: () => disarm(2),
+    onEvent: onAutoEvent, onDisarm: () => disarm(2), scope,
   });
   const autoOf = (c: ChartId) => (c === 2 ? auto2 : auto1);
   // An open AUTO row is marked at the price of a chart showing its contract (null when neither chart does).
@@ -523,7 +544,7 @@ function StraddlePnfPage() {
     setAutoArm(a => ({ ...a, [c]: on ? { on: true, mode: tradeMode, watermarkT: m.lastBarT ?? Math.floor(nowSec()) } : DISARMED }));
     void autoPost({ op: 'log', chart: c, t: nowSec(), text: on ? `AUTO armed (${tradeMode}, ${autoLots[c]} lot)` : 'AUTO stopped' });
   };
-  const setLotsFor = (c: ChartId, n: number) => { setAutoLots(l => ({ ...l, [c]: n })); savePref(`${AUTO_LOTS_KEY}${c}`, String(n)); };
+  const setLotsFor = (c: ChartId, n: number) => { setAutoLots(l => ({ ...l, [c]: n })); saveP(`${AUTO_LOTS_KEY}${c}`, String(n)); };
   // The page mode is the mode AUTO trades in: switching it disarms both charts (arming REAL is always an explicit step).
   const changeTradeMode = (m: 'PAPER' | 'REAL') => {
     if (m === tradeMode) return;
@@ -540,12 +561,12 @@ function StraddlePnfPage() {
       for (const [key, list] of Object.entries(prev)) {
         if (!list.some(m => m.id === id)) continue;
         const updated = list.map(m => (m.id === id ? { ...m, price, estimate: false } : m));
-        try { sessionStorage.setItem(`${MARKERS_KEY}${key}`, JSON.stringify(updated)); } catch { /* ignore */ }
+        try { sessionStorage.setItem(`${markersPrefix}${key}`, JSON.stringify(updated)); } catch { /* ignore */ }
         next = { ...next, [key]: updated };
       }
       return next;
     });
-  }, []);
+  }, [markersPrefix]);
 
   // ── picking: every control acts on the active chart ──────────────────────
   const choose = (next: Target) => {
@@ -553,39 +574,39 @@ function StraddlePnfPage() {
     if (locked(c)) { toast.warning(`Chart ${c} is running AUTO: stop it (and let its position close) to change the instrument`); return; }
     const picks = picksRef.current[c];
     picksRef.current = { ...picksRef.current, [c]: { targets: { ...picks.targets, [next.kind]: next }, open: next.kind } };
-    savePref(c === 1 ? TARGETS_KEY : TARGETS_KEY_2, JSON.stringify(picksRef.current[c].targets));
-    savePref(c === 1 ? SEGMENT_KEY : SEGMENT_KEY_2, next.kind);
+    saveP(c === 1 ? TARGETS_KEY : TARGETS_KEY_2, JSON.stringify(picksRef.current[c].targets));
+    saveP(c === 1 ? SEGMENT_KEY : SEGMENT_KEY_2, next.kind);
     (c === 1 ? setTarget1 : setTarget2)(t => (targetKey(t) === targetKey(next) ? t : next));
   };
   const pickSegment = (s: Segment) => { if (s !== activeTarget.kind) choose(picksRef.current[active].targets[s]); };
-  const activate = (c: ChartId) => { setActiveChart(c); savePref(ACTIVE_CHART_KEY, String(c)); };
+  const activate = (c: ChartId) => { setActiveChart(c); saveP(ACTIVE_CHART_KEY, String(c)); };
   // Picking VWAP or SMA also shows the line again; the eye button hides / shows it without changing the choice.
-  const pickOverlay = (o: Overlay) => { setOverlay(o); savePref(OVERLAY_KEY, o); setOverlayShown(true); savePref(OVERLAY_SHOWN_KEY, '1'); };
-  const toggleCoverShown = () => { const next = !coverShown; setCoverShown(next); savePref(COVER_SHOWN_KEY, next ? '1' : '0'); };
-  const toggleOverlayShown = () => { const next = !overlayShown; setOverlayShown(next); savePref(OVERLAY_SHOWN_KEY, next ? '1' : '0'); };
+  const pickOverlay = (o: Overlay) => { setOverlay(o); saveP(OVERLAY_KEY, o); setOverlayShown(true); saveP(OVERLAY_SHOWN_KEY, '1'); };
+  const toggleCoverShown = () => { const next = !coverShown; setCoverShown(next); saveP(COVER_SHOWN_KEY, next ? '1' : '0'); };
+  const toggleOverlayShown = () => { const next = !overlayShown; setOverlayShown(next); saveP(OVERLAY_SHOWN_KEY, next ? '1' : '0'); };
   const applySettings = (next: PnfSettings) => {
-    if (active === 2) { setSettings2(next); savePref(SETTINGS_KEY_2, serializeSettings(next)); }
-    else { setSettings(next); savePref(SETTINGS_KEY, serializeSettings(next)); }
+    if (active === 2) { setSettings2(next); saveP(SETTINGS_KEY_2, serializeSettings(next)); }
+    else { setSettings(next); saveP(SETTINGS_KEY, serializeSettings(next)); }
   };
   const toggleChartView = (v: '1' | '2') => {
     if (v === '1' && locked(2)) { toast.warning('Chart 2 is running AUTO: stop it (and let its position close) before hiding it'); return; }
     setChartView(v);
-    savePref(CHART_VIEW_KEY, v);
+    saveP(CHART_VIEW_KEY, v);
   };
   const toggleMute = () => {
     const next = !muted;
     setMuted(next);
     mutedRef.current = next;
-    savePref(SOUND_KEY, next ? '0' : '1');
+    saveP(SOUND_KEY, next ? '0' : '1');
   };
   const changeBooksOpen = (next: boolean) => {
     setBooksOpen(next);
-    savePref(BOOKS_OPEN_KEY, next ? '1' : '0');
+    saveP(BOOKS_OPEN_KEY, next ? '1' : '0');
   };
   const toggleTradeOpen = () => {
     setTradeOpen(prev => {
       const next = !prev;
-      savePref(TRADE_OPEN_KEY, next ? '1' : '0');
+      saveP(TRADE_OPEN_KEY, next ? '1' : '0');
       return next;
     });
   };
@@ -634,18 +655,19 @@ function StraddlePnfPage() {
       triangles: c === 2 ? tri2 : tri1,
       triShown: triShown[c],
       triMin: triMin[c],
-      onToggleTri: () => { const next = !triShown[c]; savePref(`${TRI_SHOW_KEY}${c}`, next ? '1' : '0'); setTriShown(v => ({ ...v, [c]: next })); },
-      onCycleTriMin: () => { const next = triMin[c] >= 6 ? 3 : triMin[c] + 1; savePref(`${TRI_MIN_KEY}${c}`, String(next)); setTriMin(v => ({ ...v, [c]: next })); },
+      onToggleTri: renko ? undefined : () => { const next = !triShown[c]; saveP(`${TRI_SHOW_KEY}${c}`, next ? '1' : '0'); setTriShown(v => ({ ...v, [c]: next })); },
+      onCycleTriMin: renko ? undefined : () => { const next = triMin[c] >= 6 ? 3 : triMin[c] + 1; saveP(`${TRI_MIN_KEY}${c}`, String(next)); setTriMin(v => ({ ...v, [c]: next })); },
       rail: railFor(c),
       onToggleMarkers: () => {
         const next = !markersShown[c];
-        savePref(`${MARKERS_SHOWN_KEY}${c}`, next ? '1' : '0');
+        saveP(`${MARKERS_SHOWN_KEY}${c}`, next ? '1' : '0');
         setMarkersShown(m => ({ ...m, [c]: next }));
       },
       autoSlot: (
         <AutoControls chart={c} armed={autoArm[c].on} mode={tradeMode} lots={autoLots[c]} onLots={n => setLotsFor(c, n)}
                       onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} halt={autoOf(c).halt}
                       onResolve={autoOf(c).resolve} nowMs={now}
+                      rule={renko ? `Renko SELL / BUY after ${(c === 2 ? settings2 : settings).reversal} confirming bricks, exit on the first opposite brick` : undefined}
                       disabledReason={target.kind === 'index' ? 'No AUTO on an index: chart its future or an option' : null} />
       ),
     };
@@ -658,16 +680,16 @@ function StraddlePnfPage() {
         <div className="flex items-center gap-x-4 gap-y-2 flex-wrap px-6 pt-3 pb-2">
           <div className="flex items-center gap-3 shrink-0 min-w-0">
             <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
-              <ChartScatter className="w-4 h-4 text-emerald-400" aria-hidden="true" />
+              {renko ? <Boxes className="w-4 h-4 text-emerald-400" aria-hidden="true" /> : <ChartScatter className="w-4 h-4 text-emerald-400" aria-hidden="true" />}
             </div>
             <div className="min-w-0">
               <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {segLabel}</p>
               <h1 className="text-sm font-bold text-white tracking-tight leading-none flex items-center gap-2">
-                Point &amp; Figure
+                {renko ? 'Renko' : <>Point &amp; Figure</>}
                 {tradeMode === 'REAL' && <span data-testid="pnf-real-banner" className="px-1.5 py-0.5 rounded bg-red-600 text-oncolor text-[11px] font-bold tracking-wide">LIVE · REAL MONEY</span>}
               </h1>
               <p className="text-[10px] text-zinc-500 font-medium mt-1 truncate">
-                {`${dual ? `Chart ${active} · ` : ''}${intervalLabel(effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind)))} · ${boxText(activeSettings)} · ${activeSettings.reversal}-box reversal · ${activeFno ? activeFeed.label : activeFeed.name ?? activeTarget.name}`}
+                {`${dual ? `Chart ${active} · ` : ''}${intervalLabel(effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind)))} · ${boxText(activeSettings)} · ${renko ? `confirm ${activeSettings.reversal} brick${activeSettings.reversal === 1 ? '' : 's'}` : `${activeSettings.reversal}-box reversal`} · ${activeFno ? activeFeed.label : activeFeed.name ?? activeTarget.name}`}
               </p>
             </div>
           </div>
@@ -716,7 +738,7 @@ function StraddlePnfPage() {
               <button
                 type="button"
                 aria-label="2 Charts View"
-                title="Dual chart view (0.1% & 1%)"
+                title={renko ? 'Dual chart view' : 'Dual chart view (0.1% & 1%)'}
                 aria-pressed={chartView === '2'}
                 onClick={() => toggleChartView('2')}
                 className={seg(chartView === '2')}
@@ -748,26 +770,26 @@ function StraddlePnfPage() {
               </>
             )}
 
-            <fieldset disabled={activeLocked} className="contents"><SettingsControls settings={activeSettings} onChange={applySettings} equity={hasLongIntervals(activeTarget.kind)} /></fieldset>
+            <fieldset disabled={activeLocked} className="contents"><SettingsControls settings={activeSettings} onChange={applySettings} equity={hasLongIntervals(activeTarget.kind)} renko={renko} /></fieldset>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
               {/* An index has no traded volume, so no VWAP: the button is disabled and the SMA is drawn (the saved choice is kept for
                   stocks, futures and options). */}
               <button type="button" aria-pressed={overlayShown && shownOverlay === 'vwap'} onClick={() => pickOverlay('vwap')} disabled={!activeChartModel.vwapAllowed}
                       title={activeChartModel.vwapAllowed ? undefined : activeChartModel.indexNoVwap
-                        ? 'An index has no traded volume, so there is no VWAP: the SMA of the P&F boxes is used'
-                        : 'These bars carry no volume, so there is no VWAP: the SMA of the P&F boxes is used'}
+                        ? `An index has no traded volume, so there is no VWAP: the SMA of the ${renko ? 'brick closes' : 'P&F boxes'} is used`
+                        : `These bars carry no volume, so there is no VWAP: the SMA of the ${renko ? 'brick closes' : 'P&F boxes'} is used`}
                       className={`${seg(overlayShown && shownOverlay === 'vwap')} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-zinc-400`}>VWAP</button>
               <button type="button" aria-pressed={overlayShown && shownOverlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(overlayShown && shownOverlay === 'sma')}>SMA {activeSettings.smaPeriod}</button>
               <button type="button" aria-pressed={!overlayShown} aria-label={overlayShown ? 'Hide the VWAP / SMA line' : 'Show the VWAP / SMA line'} title={overlayShown ? 'Hide the VWAP / SMA line' : 'Show the VWAP / SMA line'}
                       onClick={toggleOverlayShown} className={`${seg(!overlayShown)} inline-flex items-center`}>
                 {overlayShown ? <Eye className="w-3.5 h-3.5" aria-hidden="true" /> : <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />}
               </button>
-              <button type="button" aria-pressed={coverShown} aria-label={coverShown ? 'Hide the COVER tag' : 'Show the COVER tag'}
+              {!renko && <button type="button" aria-pressed={coverShown} aria-label={coverShown ? 'Hide the COVER tag' : 'Show the COVER tag'}
                       title="COVER tag: where an X column first trades above the VWAP / SMA (a hint for covering a short; nothing trades on it)"
                       onClick={toggleCoverShown} className={`${seg(coverShown)} inline-flex items-center`}>
                 <Flag className="w-3.5 h-3.5" aria-hidden="true" />
-              </button>
+              </button>}
             </div>
             <fieldset disabled={activeLocked} className="contents"><SmaPeriodInput settings={activeSettings} onChange={applySettings} /></fieldset>
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
@@ -810,13 +832,14 @@ function StraddlePnfPage() {
               if (rc) void resting.armBracket({ chart: rc.chart, target: rc.target, targetKey: rc.targetKey, side: e.action, lots: e.lots, mode: e.mode, product: e.product, bracket: e.spec }, e.price);
             }}
             onSquaredOff={() => { const rc = railCharts.find(x => x.chart === active); if (rc) void resting.cancelBracketsFor(rc.targetKey); }}
+            scope={scope}
           />
         </div>
       )}
 
       <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 pt-2 pb-2">
         {loadErrors.map(e => <p key={e as string} role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{e}</p>)}
-        {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind))} /></div>}
+        {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind))} renko={renko} /></div>}
         <PnfOrderStyle
             value={orderStyle} onChange={changeStyle} boxPts={activeChartModel.model.box}
             guardOn={[1, 2].some(n => guards.guardOf(n).on)}

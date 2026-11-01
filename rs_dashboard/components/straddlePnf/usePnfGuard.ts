@@ -19,20 +19,20 @@ export interface GuardChart { chart: 1 | 2; targetKey: string }
 /** `base` is the chart's P&L when the guard was switched on, or null when it was flat then: captured when a position first appears. */
 type Slot = { guard: LadderGuard; base: number | null };
 
-const readLevels = (chart: number): LadderGuard => {
+const readLevels = (key: string, chart: number): LadderGuard => {
   try {
-    const raw = localStorage.getItem(`${KEY}${chart}`);
+    const raw = localStorage.getItem(`${key}${chart}`);
     const j = raw ? JSON.parse(raw) as Record<string, unknown> : {};
     const g: LadderGuard = { on: false };
     for (const f of FIELDS) { const n = Number(j[f]); if (Number.isFinite(n) && (n > 0 || (f === 'lockKeep' && n === 0))) g[f] = n; }
     return g;
   } catch { return { on: false }; }
 };
-const saveLevels = (chart: number, g: LadderGuard) => {
-  try { localStorage.setItem(`${KEY}${chart}`, JSON.stringify(Object.fromEntries(FIELDS.filter(f => g[f] != null).map(f => [f, g[f]])))); } catch { /* ignore */ }
+const saveLevels = (key: string, chart: number, g: LadderGuard) => {
+  try { localStorage.setItem(`${key}${chart}`, JSON.stringify(Object.fromEntries(FIELDS.filter(f => g[f] != null).map(f => [f, g[f]])))); } catch { /* ignore */ }
 };
 
-export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderRef, exitChart, onEvent }: {
+export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderRef, exitChart, onEvent, storeKey = KEY }: {
   charts: GuardChart[];
   positions: Record<string, LadderPosition | null>;
   positionsLoaded: boolean;
@@ -42,6 +42,8 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   /** Cancel the chart's resting orders and bracket exits, then square its position off. */
   exitChart: (chart: 1 | 2, reason: string) => Promise<void>;
   onEvent: (chart: 1 | 2, kind: 'warn' | 'info', text: string) => void;
+  /** localStorage prefix of the remembered levels (the Renko page keeps its own). */
+  storeKey?: string;
 }) {
   const [slots, setSlots] = useState<Record<number, Slot>>({});
   const slotsRef = useRef(slots);
@@ -58,7 +60,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     setSlots({});
   }, [scope]);
 
-  const levelsOf = useCallback((chart: number): LadderGuard => slots[chart]?.guard ?? readLevels(chart), [slots]);
+  const levelsOf = useCallback((chart: number): LadderGuard => slots[chart]?.guard ?? readLevels(storeKey, chart), [slots, storeKey]);
   const mtmOf = (chart: GuardChart): number | null => {
     const s = slots[chart.chart];
     const pos = positions[chart.targetKey];
@@ -70,7 +72,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     const on = body.on === true;
     const old = slots[chart.chart]?.guard;
     if (!on) {
-      const g = old ?? readLevels(chart.chart);
+      const g = old ?? readLevels(storeKey, chart.chart);
       setSlots(s => ({ ...s, [chart.chart]: { guard: { ...g, on: false, tripped: undefined, peak: undefined, floor: undefined }, base: null } }));
       return true;
     }
@@ -79,7 +81,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     const pos = positions[chart.targetKey];
     if (pos && pos.pnl === null) { toast.error('No live price for this position yet - the guard cannot read its P&L'); return false; }
     const next = carryRuntime(cleaned, old);
-    saveLevels(chart.chart, next);
+    saveLevels(storeKey, chart.chart, next);
     setSlots(s => ({ ...s, [chart.chart]: { guard: next, base: old?.on ? s[chart.chart]?.base ?? null : pos?.pnl ?? null } }));
     return true;
   };

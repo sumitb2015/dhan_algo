@@ -51,9 +51,24 @@ What Dhan's 1-min history returns per day (probed 2026-10-28..30):
 |---|---|---|---|
 | NSE index (IDX_I) | 375 | 15:29 | yes |
 | NSE F&O | 385 | 15:39 | yes |
-| NSE equity (NSE_EQ) | 360 | **15:14** | no: 15:15–15:29 missing |
+| NSE equity with derivatives (NSE_EQ, F&O stock) | 360 | **15:14** | yes, from 2026-08-03: continuous trading ends at 15:15 (Closing Auction Session) |
+| NSE equity without derivatives | 375 | 15:29 | yes |
 
-Only equity history is short (it ends 15 minutes early; the official close is patched in by `snap_session_closes`, below).
+**The 15:14 end is NSE's Closing Auction Session (CAS), not missing data.** SEBI circular of 16 Jan 2026, NSE/CMTR/73362 (18 Mar 2026), live from **3 Aug 2026**, phase 1 = stocks with derivatives:
+- Continuous trading stops at 15:15.
+- A 15:15–15:35 auction sets the official close (its equilibrium price, replacing the 30-minute VWAP; the fallback is the 15:00–15:15 VWAP).
+- During the auction NSE disseminates only indicative prices.
+
+Verified 2026-11-01:
+- **RELIANCE:** Dhan served 375-bar days up to 31 Jul and 360-bar days from 3 Aug.
+- **RPOWER** (no stock futures) still runs to 15:29.
+- **TradingView's 1-min chart has no auction bar either.** Adding the auction close as a 15:15 or 15:30 bar on every CAS day took RELIANCE's Renko diff since 3 Aug from 0 to 18 differences.
+
+So the chart must end each CAS day at 15:14 and carry the auction price only as the official close (`dc`, below). In the code:
+- **Script:** `price_pnf_candles.has_stock_futures()` (NSE `FUTSTK` rows by `UNDERLYING_SYMBOL`) sets `cas`.
+- **Route → feed:** passes it as `cas`, and `usePnfFeed` picks the market `'NSE_CAS'`.
+- **`lib/straddlePnfLive.ts`:** `sessionWindow('NSE_CAS')` is 09:15–15:15 from `CAS_START` (15:30 before), so `inSession` drops auction-time ticks (shown as Post-close), and `sessionCloseMin` closes today's last 30/60/240-min and daily bars at the 15:14 bar instead of the next morning.
+- **AUTO:** `lib/pnfAuto.ts` still uses its fixed 15:00 entry cutoff / 15:15 EOD exit for every NSE market.
 
 ## Index charts: two years of 1-minute bars, refreshed by tail
 
@@ -70,7 +85,9 @@ Depth does not change the recent columns: a P&F chart converges after its first 
 
 ## Official closes: Dhan's 1-minute series ends at 15:14
 
-Dhan's intraday 1-min bars (stored parquet and API alike) stop at **15:14** and miss the closing auction, so the day's last 1-min close is not the exchange close (ADANIGREEN 2026-10-23: 1,200.4 vs official 1,185.1; mean |diff| 4.7, max 48 over 61 days). A 1-day / 1-week / 1-month chart built from it can move a box and hide short columns (this made the July–November section of a weekly ADANIGREEN chart disagree with TradingView). `snap_session_closes(bars, daily)` sets each IST day's **last** 1-min close to `Daily_Historical_Data_Fresh`'s close for that date, skipping a day with no CSV row (today) and any day whose official close is > 10 % from the bar's (a different price basis). `read_daily_csv()` is shared with `load_daily_before()`; `stitch_history()` now always returns the normalised `start_Time` (int64) / `close` / `volume` frame (an empty side used to turn the epoch column into objects → 1970 timestamps). The intraday charts are unaffected except for each session's final bar.
+Dhan's intraday 1-min bars (stored parquet and API alike) stop at **15:14** and miss the closing auction, so the day's last 1-min close is not the exchange close (ADANIGREEN 2026-10-23: 1,200.4 vs official 1,185.1; mean |diff| 4.7, max 48 over 61 days). A 1-day / 1-week / 1-month chart built from it can move a box and hide short columns (this made the July–November section of a weekly ADANIGREEN chart disagree with TradingView). `snap_session_closes(bars, daily)` records `Daily_Historical_Data_Fresh`'s close for each IST day as `day_close` on that day's **last** 1-min bar (skipping a day with no CSV row (today) and any day whose official close is > 10 % from the bar's: a different price basis). It does **not** overwrite `close`: NSE's official close is a 30-minute average, not a trade, and writing it into the last minute made every 1-minute chart jump at each session end (on RELIANCE, ~30 Renko bricks there and back that TradingView's 1-min chart does not have; fixed 2026-11-01). `_normalise` / `_leg` carry `day_close` through the later stitches, `to_bars` emits it as `dc` on that bar, and only `resampleCalendar` (1 d / 1 w / 1 M buckets) and `prevCloseOf` use it (`lib/straddlePnfInterval.ts`, `lib/straddlePnfModel.ts`); 1-minute and intraday buckets keep the traded close. Any new step that rebuilds the frame must keep the column, or the daily charts silently lose the official close (the route then shows 0 bars with `dc`). `read_daily_csv()` is shared with `load_daily_before()`; `stitch_history()` always returns the normalised `start_Time` (int64) / `close` / `volume` (+ `day_close`) frame (an empty side used to turn the epoch column into objects → 1970 timestamps).
+
+**Not every day ends at 15:14.** Probed 2026-11-01 on RELIANCE: Dhan's API served full 375-bar days (to 15:29) for sessions up to late July and 360-bar days (to 15:14) for the last ~62 sessions. The API also served 1-min history back to **2026-03-11** (158 sessions), far more than the ~81 sessions `refresh_intraday_1min.py`'s docstring says; `--symbols X --days 235 --full` deepened RELIANCE's parquet to there.
 
 ## Cost and caching
 

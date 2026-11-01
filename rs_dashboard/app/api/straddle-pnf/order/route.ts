@@ -8,6 +8,7 @@ import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { dhanDelete, dhanPut } from '@/lib/dhanToken';
 import { kotakPost, KOTAK_PATHS, KotakRejectedError } from '@/lib/kotakToken';
 import { openBrokerOrders, ownedBrokerOrder } from '@/lib/pnfRestingServer';
+import { parseScope, type PnfScope } from '@/lib/pnfScope';
 import { kiteDelete } from '@/lib/zerodhaToken';
 import { modifyZerodhaLimitOrder } from '@/lib/zerodhaModifyOrder';
 import { snapToTick } from '@/lib/pnfResting';
@@ -60,6 +61,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   try { body = await req.json(); } catch { return bad('Invalid JSON'); }
   const order = parsePnfOrder(body);
   if (typeof order === 'string') return bad(order);
+  // Which page's resting-orders ledger owns this chart's broker orders (P&F or Renko): the ownership check and the close note read it.
+  const scope = parseScope((body as { scope?: unknown } | null)?.scope);
   const { broker, mode, target, close, exitOwn } = order;
   const tag = order.source === 'auto' ? 'pnfa' : 'pnf';
   const legs = resolvePnfLegs(target);
@@ -80,7 +83,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (typeof onBroker === 'string') return bad(`${onBroker}. Nothing was sent.`);
 
   // ── Resting LIMIT / SL-limit orders from the chart's B / S rail (single leg, at the broker), and their modify / cancel.
-  if (order.orderType !== 'MARKET' || order.brokerOp) return resting(order, onBroker);
+  if (order.orderType !== 'MARKET' || order.brokerOp) return resting(order, onBroker, scope);
 
   const gkey = `${broker}|${targetKey(target)}`;
   if (busy.has(gkey)) return bad('An order for this chart is already being sent - wait for it', 409);
@@ -134,7 +137,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const reversal = results.find(r => r.label.endsWith('(reversal)'));
     // CE went in, PE was refused and CE was taken back out: nothing is left open (two fills were paid for).
     const outcome = reversal?.status === 'placed' ? 'reversed' : sendOutcome(results.filter(r => r !== reversal));
-    const stillResting = closing ? openBrokerOrders(broker, targetKey(target)) : 0;
+    const stillResting = closing ? openBrokerOrders(scope, broker, targetKey(target)) : 0;
     const note = stillResting > 0 ? ` NOTE: ${stillResting} resting order(s) still open on this chart - cancel them or they can re-open the position.` : '';
     return NextResponse.json({ success: outcome === 'placed' || outcome === 'flat', mode, broker, outcome, legs: results, message: describe(outcome, results) + note, stillResting },
       { status: outcome === 'unknown' ? 504 : 200 });
@@ -154,7 +157,7 @@ type How = { type: 'MARKET' } | { type: 'LIMIT'; price: number } | { type: 'SL';
  * or a modify / cancel of one this page placed. Prices are snapped to the contract tick, re-checked, and refused outside the
  * side rules (no distance limit: an order may rest anywhere; the broker's own price band still applies).
  */
-async function resting(order: Exclude<ReturnType<typeof parsePnfOrder>, string>, legs: PnfBrokerLeg[]): Promise<NextResponse> {
+async function resting(order: Exclude<ReturnType<typeof parsePnfOrder>, string>, legs: PnfBrokerLeg[], scope: PnfScope): Promise<NextResponse> {
   const { broker } = order;
   if (legs.length !== 1) return bad('A resting order goes on a single-leg chart: a straddle level is held by the page and sent at MARKET');
   const leg = legs[0];
@@ -164,7 +167,7 @@ async function resting(order: Exclude<ReturnType<typeof parsePnfOrder>, string>,
   try {
     const qty = orderQty(order.lots, leg.lotUnits);
     // Only an order this page placed for this chart, still working in its ledger: never an id the request merely names.
-    if (order.brokerOp && !ownedBrokerOrder(broker, targetKey(order.target), order.brokerOp.orderId)) {
+    if (order.brokerOp && !ownedBrokerOrder(scope, broker, targetKey(order.target), order.brokerOp.orderId)) {
       return bad('That order is not a working resting order of this chart - nothing was changed', 403);
     }
     if (order.brokerOp?.op === 'cancel') return cancelAt(broker, order.brokerOp.orderId);

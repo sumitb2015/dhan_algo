@@ -6,7 +6,7 @@
 // Everything is read from the CLOSED-bar model (the page builds it without the forming minute), so a signal or a reversal
 // can never repaint. Shared by the live engine (components/straddlePnf/usePnfAuto.ts); spec in strategies/pnf_auto/strategy.md.
 import { istMinuteOfDay, sessionWindow, type Market } from './straddlePnfLive.ts';
-import type { PnfColumn, PnfSignal } from './straddlePnf.ts';
+import { isSellSignal, type PnfColumn, type PnfSignal } from './straddlePnf.ts';
 import { isNseTradingDay, istDateIso } from './nseHolidays.ts';
 
 export type AutoSide = 'BUY' | 'SELL';
@@ -20,6 +20,8 @@ export const MCX_EOD_EXIT_BEFORE_CLOSE = 10;
 export const MAX_SIGNAL_AGE_S = 180;
 
 export interface AutoModel {
+  /** 'renko': each column is one brick, and a brick's price is its close edge (not its centre). Default P&F. */
+  chart?: 'pnf' | 'renko';
   /** Box size in price (the grid: box k is centred on anchor + k * box). */
   box: number;
   signals: PnfSignal[];
@@ -54,11 +56,12 @@ export function autoWindow(market: Market, t: number): { open: number; entryCuto
  * highest box drawn by then for an X column, the lowest for an O column. Every box records the bar that drew it (`boxBars`),
  * so a box the column only reached later is never used. Null when the column drew nothing by then.
  */
-export function boxPriceAt(model: Pick<AutoModel, 'columns' | 'box'>, col: number, bar: number): number | null {
+export function boxPriceAt(model: Pick<AutoModel, 'columns' | 'box' | 'chart'>, col: number, bar: number): number | null {
   const c = model.columns[col];
   if (!c || !(model.box > 0)) return null;
   const drawn = c.boxBars.map((b, k) => (b <= bar ? k : -1)).filter(k => k >= 0);
   if (!drawn.length) return null;
+  if (model.chart === 'renko') return c.dir === 'X' ? c.high : c.low;     // a brick prints whole, at its close edge
   const k = c.dir === 'X' ? Math.max(...drawn) : Math.min(...drawn);
   return c.low + (k + 0.5) * model.box;                     // glyph k is centred half a box above the column's lower edge
 }
@@ -97,5 +100,5 @@ export function decideAuto({ model, position, watermarkT, nowS, market }: {
   if (!sig) return { action: 'none', why: 'waiting for a signal' };
   if (sig.t !== last) return { action: 'none', why: 'signal is not on the last closed bar' };
   if (nowS - sig.t > MAX_SIGNAL_AGE_S) return { action: 'none', why: 'signal too old' };
-  return { action: 'enter', side: sig.kind === 'DOUBLE_BOTTOM_SELL' ? 'SELL' : 'BUY', signal: sig, boxPrice: boxPriceAt(model, sig.col, sig.bar) };
+  return { action: 'enter', side: isSellSignal(sig.kind) ? 'SELL' : 'BUY', signal: sig, boxPrice: boxPriceAt(model, sig.col, sig.bar) };
 }

@@ -73,6 +73,13 @@ def resolve_equity(master: pd.DataFrame, symbol: str):
     return str(int(row["SECURITY_ID"])), str(row["SYMBOL_NAME"])
 
 
+def has_stock_futures(master: pd.DataFrame, symbol: str) -> bool:
+    """True when NSE lists stock futures on `symbol`. Since 2026-08-03 such a stock's continuous session ends at 15:15 and its
+    close is set by the Closing Auction Session (NSE/CMTR/73362, phase 1 = stocks with derivatives): the page stops building live
+    bars at 15:15 for it, as TradingView's 1-minute chart and Dhan's 1-minute history both end with the 15:14 bar."""
+    return bool(((master["EXCH_ID"] == "NSE") & (master["INSTRUMENT"] == "FUTSTK") & (master["UNDERLYING_SYMBOL"] == symbol)).any())
+
+
 STORED_DIR = os.path.join(ROOT, "Intraday_Historical_Data", "1min")
 # The Dhan intraday API serves at most ~90 days per request; stay inside it when stitching onto the stored history.
 API_WINDOW_DAYS = 85
@@ -164,13 +171,16 @@ def read_daily_csv(symbol: str, directory: str = DAILY_DIR) -> pd.DataFrame:
 
 
 def snap_session_closes(bars: pd.DataFrame, daily: pd.DataFrame, tol: float = 0.10) -> pd.DataFrame:
-    """Set each session's LAST 1-minute close to that day's official close from the daily CSV. Dhan's 1-min series ends at
-    15:14 and so misses the closing auction: a daily / weekly / monthly bar built from it differs from the exchange close by
-    a few points (ADANIGREEN: up to 48), enough to move a P&F box. A day with no CSV row (today), or whose official close is
-    more than `tol` from the bar's (a different price basis), keeps its own close."""
+    """Record each session's official close (daily CSV) as `day_close` on that session's LAST 1-minute bar. Dhan's 1-min series
+    can end at 15:14 and so misses the closing auction: a daily / weekly / monthly bar built from it differs from the exchange
+    close by a few points (ADANIGREEN: up to 48), enough to move a P&F box, so those buckets close on `day_close`. The bar's own
+    `close` is left alone: NSE's official close is a 30-minute average, not a trade, and writing it into the last minute made a
+    1-minute chart jump at every session end (a Renko brick there and back that TradingView's chart does not have). A day with
+    no CSV row (today), or whose official close is more than `tol` from the bar's (a different price basis), gets none."""
     if bars.empty or daily.empty:
         return bars
     out = bars.copy()
+    out["day_close"] = float("nan")
     day = (out["start_Time"].astype("int64") + 19800) // 86400          # IST calendar day number
     official = {int((d - pd.Timestamp(0)).days): float(c) for d, c in daily["Close"].items()}
     last = out.groupby(day)["start_Time"].idxmax()
@@ -178,7 +188,7 @@ def snap_session_closes(bars: pd.DataFrame, daily: pd.DataFrame, tol: float = 0.
         c = official.get(int(dn))
         cur = float(out.at[idx, "close"])
         if c and cur > 0 and abs(c - cur) / c <= tol:
-            out.at[idx, "close"] = c
+            out.at[idx, "day_close"] = c
     return out
 
 
@@ -234,8 +244,11 @@ def _normalise(frame: pd.DataFrame) -> pd.DataFrame:
     ts = next((c for c in ("start_Time", "timestamp", "time", "date") if c in frame.columns), frame.columns[0])
     cl = next((c for c in ("close", "Close", "c") if c in frame.columns), frame.columns[-1])
     vl = next((c for c in ("volume", "Volume", "vol", "Vol") if c in frame.columns), None)
-    return pd.DataFrame({"start_Time": _to_epoch_seconds(frame[ts]), "close": frame[cl].to_numpy(),
-                         "volume": frame[vl].to_numpy() if vl else 0})
+    out = pd.DataFrame({"start_Time": _to_epoch_seconds(frame[ts]), "close": frame[cl].to_numpy(),
+                        "volume": frame[vl].to_numpy() if vl else 0})
+    if "day_close" in frame.columns:                   # a session's official close (snap_session_closes) survives a later stitch
+        out["day_close"] = frame["day_close"].to_numpy()
+    return out
 
 
 def stitch_history(stored: pd.DataFrame, fresh: pd.DataFrame) -> pd.DataFrame:
@@ -299,6 +312,7 @@ def main():
             return
         (sid, name), segment, instrument = found, "NSE_EQ", "EQUITY"
 
+    cas = args.kind == "equity" and has_stock_futures(helper._load_master_list(), symbol)
     stored = pd.DataFrame()
     if args.kind in ("equity", "index"):
         # Show the whole stored history (a stock's file, or the index's 1-min file), with the API filling from the day after it
@@ -328,7 +342,7 @@ def main():
     rows = to_bars(df, args.sessions, today=today_ist)
     errors = {} if rows else {"0": "no intraday bars"}
     print(json.dumps({"bars": {"0": rows} if rows else {}, "name": name, "instrument": {"segment": segment, "security_id": sid}, "errors": errors,
-                      **({"anchor_t": anchor_t} if anchor_t else {})}))
+                      **({"anchor_t": anchor_t} if anchor_t else {}), **({"cas": True} if cas else {})}))
 
 
 if __name__ == "__main__":

@@ -12,6 +12,12 @@ export type Bar = {
   t: number; ce: number; pe: number; straddle: number; vol: number;
   /** Live bars only: the feed's cumulative day volume (CE + PE) at the latest tick, and its value when this bar's volume started counting. */
   cum?: number; cumBase?: number;
+  /**
+   * A stock session's official close, on that session's last 1-min bar only (the route's `dc`). It is NOT the bar's close: NSE's
+   * official close is a 30-minute average, not a trade. Day / week / month buckets close on it (resampleCalendar), and it is the
+   * previous close; 1-minute and intraday charts never see it.
+   */
+  dc?: number;
 };
 
 export type PnfColumn = {
@@ -33,7 +39,8 @@ export type PnfColumn = {
 
 export type PnfSignal = {
   id: string;
-  kind: 'DOUBLE_TOP_BUY' | 'DOUBLE_BOTTOM_SELL';
+  /** DOUBLE_* on a P&F chart, RENKO_* (N-brick confirmation, lib/renko.ts) on a Renko chart. */
+  kind: 'DOUBLE_TOP_BUY' | 'DOUBLE_BOTTOM_SELL' | 'RENKO_BUY' | 'RENKO_SELL';
   col: number;
   bar: number;
   t: number;
@@ -53,6 +60,9 @@ export type PnfExecutionMarker = {
   estimate?: boolean;
 };
 
+/** True for a short-entry signal (P&F double bottom or Renko SELL); every consumer maps kinds to a side through this. */
+export const isSellSignal = (kind: string) => kind === 'DOUBLE_BOTTOM_SELL' || kind === 'RENKO_SELL';
+
 const IST_OFFSET_S = 5.5 * 3600;
 const EPS = 1e-9;
 
@@ -69,28 +79,24 @@ const drawnRange = (from: number, to: number, bar: number, into = new Map<number
 };
 
 /**
- * `anchorPrice` overrides the price the grid and the box are anchored on (default: the first usable close). The page passes the
- * first 1-minute price so that changing the chart interval regroups the bars without moving the grid or resizing the box.
- * `boxSize`, when set, is the box in price points and replaces `boxPct` (the grid is still anchored on `anchorPrice`).
+ * Where a P&F build stopped, so the chart can be carried on over a few more bars (the bar still forming) without re-reading the
+ * whole history: the grid, the first column's starting label and the last three columns (the last is the one that can grow, and a
+ * break is measured against the same-direction column two back). `bars` = how many chart bars the build read.
  */
-export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3, anchorPrice?: number, boxSize?: number): { anchor: number; box: number; columns: PnfColumn[] } {
-  const first = bars.find(b => b.straddle > 0);
-  if (!first) return { anchor: 0, box: 0, columns: [] };
-  const anchor = anchorPrice !== undefined && anchorPrice > 0 ? anchorPrice : first.straddle;
-  const box = boxSize !== undefined && boxSize > 0 ? boxSize : anchor * boxPct;
-  const work: Work[] = [];
-  // The grid is anchored on `anchor`, but the first column starts from the FIRST bar's own label: with a long history the anchor
-  // can be a recent price far from the first bar, and a column must not be drawn across that gap (it is 0 when they coincide).
-  const r0 = Math.round((first.straddle - anchor) / box);
+export type PnfResume = { anchor: number; box: number; reversal: number; r0: number; tail: Work[]; bars: number };
 
+const cloneWork = (w: Work): Work => ({ ...w, drawn: new Map(w.drawn) });
+
+/** Feeds bars[i] for i in [from, to) into `work` (P&F close rules; see the file header). `at(i)` returns bar i. */
+function runPnf(work: Work[], at: (i: number) => Bar, from: number, to: number, anchor: number, box: number, reversal: number, r0: number) {
   const markBreak = (c: Work, i: number) => {
     if (c.breakBar !== null || work.length < 3) return;
     const prev = work[work.length - 3]; // same direction, two columns back (the last element is `c`)
     if (c.dir === 'X' ? c.hi > prev.hi : c.lo < prev.lo) c.breakBar = i;
   };
-
-  bars.forEach((b, i) => {
-    if (!(b.straddle > 0)) return;
+  for (let i = from; i < to; i++) {
+    const b = at(i);
+    if (!(b.straddle > 0)) continue;
     const x = (b.straddle - anchor) / box;
     const up = Math.floor(x + EPS);   // highest label the close has reached from below
     const down = Math.ceil(x - EPS);  // lowest label the close has reached from above
@@ -98,7 +104,7 @@ export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3, anchorPrice?
     if (!cur) {
       if (up >= r0 + 1) work.push({ dir: 'X', lo: r0 + 1, hi: up, startBar: i, endBar: i, breakBar: null, drawn: drawnRange(r0 + 1, up, i) });
       else if (down <= r0 - 1) work.push({ dir: 'O', lo: down, hi: r0 - 1, startBar: i, endBar: i, breakBar: null, drawn: drawnRange(down, r0 - 1, i) });
-      return;
+      continue;
     }
     if (cur.dir === 'X') {
       if (up > cur.hi) { drawnRange(cur.hi + 1, up, i, cur.drawn); cur.hi = up; cur.endBar = i; markBreak(cur, i); }
@@ -111,20 +117,55 @@ export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3, anchorPrice?
       work.push({ dir: 'X', lo: cur.lo + 1, hi: up, startBar: i, endBar: i, breakBar: null, drawn: drawnRange(cur.lo + 1, up, i) });
       markBreak(work[work.length - 1], i);
     }
-  });
+  }
+}
 
-  const columns = work.map<PnfColumn>(c => ({
-    dir: c.dir,
-    low: anchor + (c.lo - 0.5) * box,
-    high: anchor + (c.hi + 0.5) * box,
-    boxes: c.hi - c.lo + 1,
-    startBar: c.startBar,
-    endBar: c.endBar,
-    session: sessionOf(bars[c.startBar].t),
-    breakBar: c.breakBar,
-    boxBars: Array.from({ length: c.hi - c.lo + 1 }, (_, k) => c.drawn.get(c.lo + k) as number),
-  }));
-  return { anchor, box, columns };
+const toColumn = (c: Work, anchor: number, box: number, timeOf: (i: number) => number): PnfColumn => ({
+  dir: c.dir,
+  low: anchor + (c.lo - 0.5) * box,
+  high: anchor + (c.hi + 0.5) * box,
+  boxes: c.hi - c.lo + 1,
+  startBar: c.startBar,
+  endBar: c.endBar,
+  session: sessionOf(timeOf(c.startBar)),
+  breakBar: c.breakBar,
+  boxBars: Array.from({ length: c.hi - c.lo + 1 }, (_, k) => c.drawn.get(c.lo + k) as number),
+});
+
+/**
+ * `anchorPrice` overrides the price the grid and the box are anchored on (default: the first usable close). The page passes the
+ * first 1-minute price so that changing the chart interval regroups the bars without moving the grid or resizing the box.
+ * `boxSize`, when set, is the box in price points and replaces `boxPct` (the grid is still anchored on `anchorPrice`).
+ */
+export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3, anchorPrice?: number, boxSize?: number): { anchor: number; box: number; columns: PnfColumn[]; resume: PnfResume | null } {
+  const first = bars.find(b => b.straddle > 0);
+  if (!first) return { anchor: 0, box: 0, columns: [], resume: null };
+  const anchor = anchorPrice !== undefined && anchorPrice > 0 ? anchorPrice : first.straddle;
+  const box = boxSize !== undefined && boxSize > 0 ? boxSize : anchor * boxPct;
+  // The grid is anchored on `anchor`, but the first column starts from the FIRST bar's own label: with a long history the anchor
+  // can be a recent price far from the first bar, and a column must not be drawn across that gap (it is 0 when they coincide).
+  const r0 = Math.round((first.straddle - anchor) / box);
+  const work: Work[] = [];
+  runPnf(work, i => bars[i], 0, bars.length, anchor, box, reversal, r0);
+  const columns = work.map(c => toColumn(c, anchor, box, i => bars[i].t));
+  return { anchor, box, columns, resume: { anchor, box, reversal, r0, tail: work.slice(-3).map(cloneWork), bars: bars.length } };
+}
+
+/**
+ * The chart `buildPnf` would draw over `bars` + `more`, from the columns and resume state of `buildPnf(bars)`, reading only `more`
+ * (bar indexes continue after `bars`). Only the last column can grow and new ones follow it, so the earlier columns are reused as is.
+ * The live chart calls this on every tick; rebuilding from the whole history took ~0.4 s on two years of NIFTY minutes.
+ */
+export function extendPnf(columns: PnfColumn[], resume: PnfResume, more: Bar[]): PnfColumn[] {
+  if (!more.length) return columns;
+  const { anchor, box, reversal, r0, bars: n } = resume;
+  const work = resume.tail.map(cloneWork);
+  const kept = columns.length - work.length;
+  runPnf(work, i => more[i - n], n, n + more.length, anchor, box, reversal, r0);
+  const timeOf = (i: number) => (i >= n ? more[i - n].t : NaN);
+  // The resumed columns that started inside `bars` keep their own session (their start time is not in `more`).
+  const fresh = work.map((c, k) => (c.startBar < n && k < resume.tail.length ? { ...toColumn(c, anchor, box, () => 0), session: columns[kept + k].session } : toColumn(c, anchor, box, timeOf)));
+  return [...columns.slice(0, kept), ...fresh];
 }
 
 export function detectSignals(columns: PnfColumn[], bars: Bar[], vwapSeries: (number | null)[]): PnfSignal[] {

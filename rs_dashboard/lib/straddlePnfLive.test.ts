@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { foldTick, newSignalsAfter, nextWatermark, capLog, inSession, feedCloseTrusted, mergeHistory, legsTick, isWildTick } from './straddlePnfLive.ts';
+import { foldTick, newSignalsAfter, nextWatermark, capLog, inSession, sessionWindow, feedCloseTrusted, mergeHistory, legsTick, isWildTick } from './straddlePnfLive.ts';
 import { vwap, type Bar, type PnfSignal } from './straddlePnf.ts';
 
 const T0 = Date.UTC(2026, 9, 23, 3, 45) / 1000; // 09:15 IST, a minute start
@@ -203,4 +203,14 @@ test('isWildTick: a print 10x away from the last close is a bad tick; ordinary a
   assert.equal(isWildTick(100, 400), false);              // an expiry-day option can quadruple
   assert.equal(isWildTick(100, 101), false);
   assert.equal(isWildTick(undefined, 1000), false);       // nothing to compare against
+});
+
+test('a stock with derivatives (NSE_CAS) trades continuously until 15:15 from the Closing Auction Session start, 15:30 before', () => {
+  const at = (iso: string) => Date.parse(`${iso}+05:30`) / 1000;
+  assert.deepEqual(sessionWindow('NSE_CAS', at('2026-10-30T10:00:00')), [9 * 60 + 15, 15 * 60 + 15]);
+  assert.deepEqual(sessionWindow('NSE_CAS', at('2026-07-31T10:00:00')), [9 * 60 + 15, 15 * 60 + 30]);
+  assert.equal(inSession(at('2026-10-30T15:14:59'), 'NSE_CAS'), true);
+  assert.equal(inSession(at('2026-10-30T15:15:00'), 'NSE_CAS'), false);      // an auction tick never becomes a chart bar
+  assert.equal(inSession(at('2026-10-30T15:20:00'), 'NSE'), true);           // a stock without derivatives still trades
+  assert.equal(inSession(at('2026-07-31T15:20:00'), 'NSE_CAS'), true);
 });

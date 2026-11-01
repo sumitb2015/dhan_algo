@@ -13,6 +13,8 @@ const inr = (n: number) => `${n > 0 ? '+' : n < 0 ? '-' : ''}₹${Math.abs(Math.
 export interface AutoControlsProps {
   chart: 1 | 2;
   armed: boolean;
+  /** What AUTO trades on, for the button tooltip (default: the P&F double top / bottom rule). */
+  rule?: string;
   mode: 'PAPER' | 'REAL';
   disabledReason: string | null;
   lots: number;
@@ -33,7 +35,7 @@ export const needsResolve = (r: AutoRow, nowMs: number) =>
   r.state === 'unknownEntry' || r.state === 'unknownExit'
   || ((r.state === 'entering' || r.state === 'exiting') && nowMs - (r.pendingSince ?? r.entryT) * 1000 > STALE_PENDING_MS);
 
-export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, nowMs }: AutoControlsProps) {
+export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, nowMs, rule }: AutoControlsProps) {
   const [confirmReal, setConfirmReal] = useState(false);
   const [draft, setDraft] = useState(String(lots));
   const focusedRef = useRef(false);
@@ -68,7 +70,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
     <span data-testid={`pnf-auto-${chart}`} data-armed={armed} className="flex items-center gap-1.5 min-w-0 shrink font-sans">
       <button type="button" onClick={toggle} disabled={!!disabledReason && !armed} aria-pressed={armed}
               aria-label={armed ? `Stop AUTO on chart ${chart}` : `Start AUTO on chart ${chart}`}
-              title={disabledReason ?? (armed ? `AUTO ${mode}: double-bottom SELL / double-top BUY, exit on the first column reversal` : 'Trade this chart automatically')}
+              title={disabledReason ?? (armed ? `AUTO ${mode}: ${rule ?? 'double-bottom SELL / double-top BUY, exit on the first column reversal'}` : 'Trade this chart automatically')}
               className={`inline-flex items-center gap-1 h-6 px-2 rounded border text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${armed
                 ? mode === 'REAL' ? 'border-red-500/50 bg-red-500/15 text-red-300' : 'border-violet-500/50 bg-violet-500/15 text-violet-300'
                 : confirmReal ? 'border-red-500/60 bg-red-500/20 text-red-300' : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white'}`}>

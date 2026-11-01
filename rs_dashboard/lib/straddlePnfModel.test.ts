@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildConfirmedModel, buildPanelModel, boxSmaByBar, unconfirmedBoxes, withLive, MAX_UNCONFIRMED_BOXES } from './straddlePnfModel.ts';
-import { vwap, type Bar } from './straddlePnf.ts';
+import { buildPnf, vwap, type Bar, type PnfColumn } from './straddlePnf.ts';
+import { buildRenko } from './renko.ts';
 import { resample } from './straddlePnfInterval.ts';
 
 const BASE_T = Date.UTC(2026, 9, 23, 3, 45) / 1000;
@@ -296,4 +297,50 @@ test('anchorT measures the box on the first bar at or after it, not on an older 
   ];
   assert.ok(Math.abs(buildConfirmedModel(bars, 'sma', { boxPct: 5 }).box - 2.05) < 1e-9);
   assert.equal(buildConfirmedModel(bars, 'sma', { boxPct: 5, anchorT: T0 }).box, 50);
+});
+
+// withLive carries the confirmed build on over the bars after it (extendPnf / extendRenko) instead of rebuilding the history on
+// every tick. It must give exactly what a full rebuild over closed + forming bars gives, for every interval and chart type.
+test('withLive (incremental) matches a full rebuild: P&F and Renko, 1 / 3 / 15 / 60 min and 1 day, many random paths', () => {
+  let seed = 11;
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+  const fullLive = (closed: Bar[], forming: Bar | undefined, opts: Parameters<typeof buildConfirmedModel>[2]) => {
+    const all = forming ? [...closed, forming] : closed;
+    const c = buildConfirmedModel(closed, 'sma', opts);
+    const bars = resample(all, opts!.interval ?? 1, opts!.sessionCloseMin, true).bars;
+    return opts!.chart === 'renko'
+      ? buildRenko(bars, c.box, c.build.anchorPrice).columns
+      : buildPnf(bars, (opts!.boxPct ?? 0.5) / 100, opts!.reversal ?? 3, c.build.anchorPrice, c.build.boxSize).columns;
+  };
+  const strip = (cols: PnfColumn[]) => cols.map(c => [c.dir, +c.low.toFixed(6), +c.high.toFixed(6), c.boxes, c.startBar, c.endBar, c.session, c.breakBar, c.boxBars.join(',')].join('|'));
+  for (let run = 0; run < 40; run++) {
+    const start = Date.UTC(2026, 9, 26, 3, 45) / 1000;
+    let p = 100 + rnd() * 50;
+    const closed: Bar[] = [];
+    for (let d = 0; d < 3; d++) for (let m = 0; m < 375; m++) {
+      p = Math.max(1, p + (rnd() - 0.5) * 1.2);
+      closed.push({ t: start + d * 86_400 + m * 60, ce: p, pe: 0, straddle: +p.toFixed(2), vol: 1 });
+    }
+    const cut = 400 + Math.floor(rnd() * 700);                            // the "closed" history ends anywhere, mid-bucket too
+    const hist = closed.slice(0, cut);
+    const forming = rnd() < 0.8 ? { ...closed[cut], straddle: +(closed[cut].straddle + (rnd() - 0.5) * 6).toFixed(2) } : undefined;
+    for (const chart of ['pnf', 'renko'] as const) for (const interval of [1, 3, 15, 60, 1440]) {
+      const opts = { chart, interval, boxMode: 'pts' as const, boxPts: 0.5, reversal: chart === 'renko' ? 2 : 3, sessionCloseMin: 930, volume: false };
+      const got = withLive(buildConfirmedModel(hist, 'sma', opts), forming).liveColumns;
+      assert.deepEqual(strip(got), strip(fullLive(hist, forming, opts)), `run ${run} ${chart} ${interval} min`);
+    }
+  }
+});
+
+test('withLive: the session list, open and previous close follow the forming bar into a new session', () => {
+  const t0 = Date.UTC(2026, 9, 29, 3, 45) / 1000;
+  const closed: Bar[] = [
+    { t: t0, ce: 100, pe: 0, straddle: 100, vol: 1 },
+    { t: t0 + 60, ce: 101, pe: 0, straddle: 101, vol: 1, dc: 101.5 },
+  ];
+  const c = buildConfirmedModel(closed, 'sma', { interval: 1 });
+  const same = withLive(c, { t: t0 + 120, ce: 102, pe: 0, straddle: 102, vol: 1 });
+  assert.deepEqual([same.sessions, same.sessionOpen, same.prevClose], [['2026-10-29'], 100, null]);
+  const next = withLive(c, { t: t0 + 86_400, ce: 99, pe: 0, straddle: 99, vol: 1 });
+  assert.deepEqual([next.sessions, next.sessionOpen, next.prevClose], [['2026-10-29', '2026-10-30'], 99, 101.5]);
 });

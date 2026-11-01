@@ -9,6 +9,7 @@ import type { LegResult } from '@/lib/pnfOrderLogic';
 import type { Broker } from '@/hooks/useBrokerSelector';
 import type { Market } from '@/lib/straddlePnfLive';
 import type { PanelModel } from '@/lib/straddlePnfModel';
+import { scopeQuery, type PnfScope } from '@/lib/pnfScope';
 
 // The P&F AUTO engine for ONE chart (rules: lib/pnfAuto.ts; ledger: lib/pnfAutoLedger.ts; spec: strategies/pnf_auto/strategy.md).
 // Runs from the open page, in the leader tab only, on a stable 1 s tick. Entries need AUTO armed on this chart (armed per page
@@ -24,8 +25,8 @@ const EXIT_RETRY_MS = 10_000;
 type Reply = { success?: boolean; error?: string; outcome?: string; legs?: LegResult[]; message?: string };
 type LegInfo = { label: string; lot: number; unitsPerLot: number | null; key: string | null; lotUnits: number | null };
 
-/** The shared ledger: polled, and replaced only by a newer `rev` so a slow poll never rolls back an op's reply. */
-export function usePnfAutoLedger() {
+/** The shared ledger: polled, and replaced only by a newer `rev` so a slow poll never rolls back an op's reply. `scope`: whose ledger (P&F or Renko). */
+export function usePnfAutoLedger(scope: PnfScope = 'pnf') {
   const [ledger, setLedger] = useState<AutoLedger>(EMPTY_LEDGER);
   const accept = useCallback((l: AutoLedger | undefined) => {
     if (l) setLedger(prev => (l.rev > prev.rev || prev.rev === 0 ? l : prev));
@@ -34,24 +35,24 @@ export function usePnfAutoLedger() {
     let dead = false;
     const read = async () => {
       try {
-        const j = await (await fetch('/api/straddle-pnf/auto')).json() as { ledger?: AutoLedger };
+        const j = await (await fetch(`/api/straddle-pnf/auto${scopeQuery(scope)}`)).json() as { ledger?: AutoLedger };
         if (!dead) accept(j.ledger);
       } catch { /* the next poll retries */ }
     };
     void read();
     const id = setInterval(read, LEDGER_POLL_MS);
     return () => { dead = true; clearInterval(id); };
-  }, [accept]);
+  }, [accept, scope]);
   const post = useCallback(async (op: AutoOp): Promise<{ ok: boolean; error?: string; ledger?: AutoLedger }> => {
     try {
-      const res = await fetch('/api/straddle-pnf/auto', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(op) });
+      const res = await fetch(`/api/straddle-pnf/auto${scopeQuery(scope)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(op) });
       const j = await res.json() as { success?: boolean; error?: string; ledger?: AutoLedger };
       accept(j.ledger);
       return { ok: Boolean(j.success), error: j.error, ledger: j.ledger };
     } catch (e) {
       return { ok: false, error: (e as Error).message || 'Ledger unreachable' };
     }
-  }, [accept]);
+  }, [accept, scope]);
   return { ledger, post };
 }
 
@@ -59,7 +60,7 @@ export type AutoEvent = { chart: 1 | 2; kind: 'entry' | 'exit' | 'halt' | 'info'
 
 export interface AutoArm { on: boolean; mode: 'PAPER' | 'REAL'; watermarkT: number }
 
-export function usePnfAuto({ chart, arm, lots, target, model, price, stale, market, complete, broker, mode, leaderRef, ledger, post, onEvent, onDisarm }: {
+export function usePnfAuto({ chart, arm, lots, target, model, price, stale, market, complete, broker, mode, leaderRef, ledger, post, onEvent, onDisarm, scope = 'pnf' }: {
   chart: 1 | 2;
   arm: AutoArm;
   lots: number;
@@ -79,6 +80,8 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
   onEvent: (e: AutoEvent) => void;
   /** The engine switched AUTO off itself (a halt, or the page mode changed under it). */
   onDisarm: (why: string) => void;
+  /** The page whose ledgers these orders belong to (the order route reads its resting ledger for the close note). */
+  scope?: PnfScope;
 }) {
   const [note, setNote] = useState<string>('');
   const [halt, setHalt] = useState<string | null>(null);
@@ -129,7 +132,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
 
   const sendOrder = async (body: Record<string, unknown>): Promise<Reply | null> => {
     try {
-      const res = await fetch('/api/straddle-pnf/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'auto', ...body }) });
+      const res = await fetch('/api/straddle-pnf/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ source: 'auto', scope, ...body }) });
       return await res.json() as Reply;
     } catch { return null; }                                  // no clean reply: UNKNOWN, never a failure
   };

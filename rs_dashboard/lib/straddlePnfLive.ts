@@ -75,8 +75,18 @@ export function legsTick(legs: LegQuote[]): Tick | null {
   return { t: Math.max(c.changedMs, p.changedMs) / 1000, ce: c.ltp, pe: p.ltp, cumVol: vol };
 }
 
-/** 'NSE' = cash and index (09:15-15:30); 'NSE_FNO' = futures and options (09:15-15:40); 'MCX' = commodities. */
-export type Market = 'NSE' | 'NSE_FNO' | 'MCX';
+/**
+ * 'NSE' = cash and index (09:15-15:30); 'NSE_CAS' = a stock with derivatives, whose continuous session ends at 15:15 from
+ * CAS_START (NSE's Closing Auction Session sets its close; 15:30 before that date); 'NSE_FNO' = futures and options (09:15-15:40);
+ * 'MCX' = commodities.
+ */
+export type Market = 'NSE' | 'NSE_CAS' | 'NSE_FNO' | 'MCX';
+/**
+ * The first day of NSE's Closing Auction Session for stocks with derivatives (SEBI circular of 16 Jan 2026, NSE/CMTR/73362).
+ * From it, continuous trading in those stocks stops at 15:15 and the 15:15-15:35 auction trades nothing on the chart: TradingView's
+ * 1-minute bars and Dhan's 1-minute history both end at 15:14, and the auction price is only the official close.
+ */
+export const CAS_START = '2026-08-03';
 
 const IST_OFFSET_S = 5.5 * 3600;
 export const istMinuteOfDay = (t: number) => Math.floor(((t + IST_OFFSET_S) % 86_400) / 60);
@@ -91,6 +101,7 @@ const hhmmToMin = (hhmm: number) => Math.floor(hhmm / 100) * 60 + (hhmm % 100);
  */
 export function sessionWindow(market: Market, t: number): readonly [number, number] {
   if (market === 'NSE') return [9 * 60 + 15, 15 * 60 + 30];
+  if (market === 'NSE_CAS') return [9 * 60 + 15, istIso(t) >= CAS_START ? 15 * 60 + 15 : 15 * 60 + 30];
   if (market === 'NSE_FNO') return [9 * 60 + 15, 15 * 60 + 40];
   const s = mcxSession(istIso(t));
   return s.open >= s.close ? [0, 0] : [hhmmToMin(s.open), hhmmToMin(s.close)];

@@ -102,3 +102,25 @@ test('stocks and indices offer the long intervals; a future / option falls back 
   assert.equal(effectiveInterval(10080, hasLongIntervals('index')), 10080);
   assert.equal(effectiveInterval(10080, hasLongIntervals('futures')), 1);
 });
+
+test('a stock day closes on its official close (dc); 1-minute and intraday bars keep the traded close', () => {
+  const t0 = Date.UTC(2026, 9, 22, 3, 45) / 1000;                      // 22 Oct 09:15 IST
+  const d2 = t0 + 86_400;
+  const bars = [
+    { t: t0, ce: 100, pe: 0, straddle: 100, vol: 1 },
+    { t: t0 + 359 * 60, ce: 101, pe: 0, straddle: 101, vol: 1, dc: 103.5 },   // 15:14, the day's last minute
+    { t: d2, ce: 102, pe: 0, straddle: 102, vol: 1 },
+  ];
+  assert.deepEqual(resample(bars, 1440).bars.map(b => b.straddle), [103.5]);
+  assert.deepEqual(resample(bars, 1440, undefined, true).bars.map(b => b.straddle), [103.5, 102]);
+  assert.deepEqual(resample(bars, 15, undefined, true).bars.map(b => b.straddle), [100, 101, 102]);
+  assert.deepEqual(resample(bars, 1).bars.map(b => b.straddle), [100, 101, 102]);
+});
+
+test('on a CAS day (session close 15:15) the last 30-minute bar and the day close at the 15:14 bar, not the next morning', () => {
+  const t0 = Date.UTC(2026, 9, 30, 9, 30) / 1000;                       // 30 Oct 15:00 IST
+  const bars = Array.from({ length: 15 }, (_, i) => ({ t: t0 + i * 60, ce: 100 + i, pe: 0, straddle: 100 + i, vol: 1 }));
+  assert.deepEqual(resample(bars, 30, 15 * 60 + 15).bars.map(b => b.straddle), [114]);
+  assert.deepEqual(resample(bars, 30, 15 * 60 + 30).bars.map(b => b.straddle), []);      // a 15:30 close would still be waiting
+  assert.deepEqual(resample(bars, 1440, 15 * 60 + 15).bars.map(b => b.straddle), [114]);
+});

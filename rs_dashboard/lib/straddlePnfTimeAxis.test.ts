@@ -32,3 +32,12 @@ test('an empty chart has no labels; the crosshair chip reads like TradingView (d
   assert.equal(crosshairStamp(T(10, 15, 11, 18)), "15 Oct '26  11:18");
   assert.equal(crosshairStamp(T(10, 15, 11, 18), false), "15 Oct '26");
 });
+
+test('intraday (Renko): day labels at each new day, HH:MM times in the room between', () => {
+  const t0 = Date.UTC(2026, 9, 26, 3, 45) / 1000;      // 26 Oct 09:15 IST
+  const t1 = Date.UTC(2026, 9, 27, 3, 45) / 1000;      // 27 Oct 09:15 IST
+  const times = [t0, t0 + 60, t0 + 17 * 60, t0 + 46 * 60, t1, t1 + 5 * 60];
+  const xs = [0, 10, 70, 140, 210, 215];
+  const labels = timeAxisLabels(times, xs, 44, 'intraday').map(l => l.text);
+  assert.deepEqual(labels, ['Oct', '09:32', '10:01', '27']);
+});

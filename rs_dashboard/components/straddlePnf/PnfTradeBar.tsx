@@ -12,6 +12,7 @@ import type { BracketSpec } from '@/lib/pnfBracket';
 import { fetchSliceTradedPrice, type TradedSliceMemo } from '@/lib/tradedPriceClient';
 import { targetKey, type Target } from '@/lib/pnfTarget';
 import type { PnfExecutionMarker } from '@/lib/straddlePnf';
+import type { PnfScope } from '@/lib/pnfScope';
 
 // The P&F page's 1-click trade bar. It names only the chart's target, the side and the lots: the server resolves the
 // contract and lot size, and sizes a SQUARE OFF from the broker's own book (app/api/straddle-pnf/order). REAL is never
@@ -46,6 +47,8 @@ export interface PnfTradeBarProps {
   onSquaredOff?: () => void;
   /** A manual order's outcome, for the page's trade chimes (entry / exit / warn, lib/pnfChime.ts). */
   onSound?: (outcome: string | undefined, close: boolean) => void;
+  /** The page (P&F or Renko) whose resting ledger the order route checks for this chart's open orders. */
+  scope?: PnfScope;
 }
 
 type LegInfo = { label: string; side: string; lot: number; unitsPerLot: number | null; key: string | null; lotUnits: number | null };
@@ -60,7 +63,7 @@ const inr = (n: number) => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLo
 const pnlTone = (n: number | null) => (n == null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
 
 export default function PnfTradeBar({
-  target, live, broker, mode, onModeChange, onPnlChange, onSwitchTarget, onTradeExecuted, onMarkerPrice, onSound, tradesLabel, paper, setPaper, onSizing, bracketSpec, onEntered, onSquaredOff,
+  target, live, broker, mode, onModeChange, onPnlChange, onSwitchTarget, onTradeExecuted, onMarkerPrice, onSound, tradesLabel, paper, setPaper, onSizing, bracketSpec, onEntered, onSquaredOff, scope = 'pnf',
 }: PnfTradeBarProps) {
   const [productPick, setProduct] = useState<PnfProduct>('INTRADAY');
   const [lotsPick, setLots] = useState(1);
@@ -158,7 +161,7 @@ export default function PnfTradeBar({
   // ── Order dispatch ────────────────────────────────────────────────────────
   const post = async (body: Record<string, unknown>): Promise<OrderReply> => {
     const res = await fetch('/api/straddle-pnf/order', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ broker, mode, target, ...body }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ broker, mode, target, scope, ...body }),
     });
     return await res.json() as OrderReply;
   };

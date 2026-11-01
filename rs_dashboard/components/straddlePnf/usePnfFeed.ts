@@ -15,7 +15,7 @@ import { isComplete, targetKey, targetLabel, targetQuery, type Target } from '@/
 // drops everything of the old one before loading, so no refresh, tick or alert crosses over. `target` null = idle.
 
 export type Instrument = { segment: string; security_id: string };
-export type Loaded = { key: number; dataDate: string | null; error?: string; instruments: Instrument[]; anchorT: number | null };
+export type Loaded = { key: number; dataDate: string | null; error?: string; instruments: Instrument[]; anchorT: number | null; cas?: boolean };
 type LiveLeg = { quote: (NonNullable<LegQuote> & { prevClose: number | null }) | null; last: { ltp: number; prevClose: number | null } | null };
 
 const POLL_MS = 30_000;
@@ -67,7 +67,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
       const res = await fetch(`/api/straddle-pnf?${targetQuery(target)}${tail ? `&tail=${TAIL_SESSIONS}` : ''}`);
       const j = await res.json() as {
         success?: boolean; error?: string; strikes: number[]; dataDate: string | null; name?: string; instruments?: Instrument[];
-        instrument?: Instrument | null; anchorT?: number | null; bars: Record<string, Bar[]>; errors: Record<string, string>;
+        instrument?: Instrument | null; anchorT?: number | null; cas?: boolean; bars: Record<string, Bar[]>; errors: Record<string, string>;
       };
       if (id !== reqRef.current) return; // a newer request owns the screen
       if (!j.success) throw new Error(j.error ?? 'Failed to load price history');
@@ -79,7 +79,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
       setBars(prev => mergeHistory(tail ? mergeTail(prev, hist) : hist, prev, tk, instruments.length < 2));
       setHistVersion(v => v + 1);
       if (reset) setEpoch(n => n + 1);
-      setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], instruments, anchorT: j.anchorT ?? null });
+      setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], instruments, anchorT: j.anchorT ?? null, cas: j.cas === true });
       if (j.name) setName(j.name);
       setLoadError(null);
     } catch (e) {
@@ -104,9 +104,10 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
   const instruments = loaded?.instruments ?? [];
   const ids = instruments.map(i => `${i.segment}:${i.security_id}`).join(',');
   const single = instruments.length < 2;
-  // The session clock follows the contract: MCX for a commodity future / option, NSE otherwise.
+  // The session clock follows the contract: MCX for a commodity future / option, NSE otherwise; a stock with derivatives stops
+  // trading continuously at 15:15 (Closing Auction Session), so no live bar is built from its 15:15-15:30 ticks.
   const seg = instruments[0]?.segment;
-  const market: Market = seg === 'MCX_COMM' ? 'MCX' : seg === 'NSE_FNO' ? 'NSE_FNO' : 'NSE';
+  const market: Market = seg === 'MCX_COMM' ? 'MCX' : seg === 'NSE_FNO' ? 'NSE_FNO' : seg === 'NSE_EQ' && loaded?.cas ? 'NSE_CAS' : 'NSE';
   useEffect(() => {
     if (!ids) return;
     let dead = false;

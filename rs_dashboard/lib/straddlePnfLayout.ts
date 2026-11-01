@@ -58,8 +58,11 @@ export function layoutPanel(
   let yMin = 0, yMax = 0;
   const hasRange = box > 0 && (columns.length > 0 || liveValue !== null);
   if (hasRange) {
-    yMin = columns.length ? Math.min(...columns.map(c => c.low)) - box : (liveValue as number) - box;
-    yMax = columns.length ? Math.max(...columns.map(c => c.high)) + 2 * box : (liveValue as number) + 2 * box;
+    // A loop, not Math.min(...columns): spreading 100k+ columns (a Renko chart over years of history) overflows the call stack.
+    let lo = Infinity, hi = -Infinity;
+    for (const c of columns) { if (c.low < lo) lo = c.low; if (c.high > hi) hi = c.high; }
+    yMin = columns.length ? lo - box : (liveValue as number) - box;
+    yMax = columns.length ? hi + 2 * box : (liveValue as number) + 2 * box;
     if (liveValue !== null && liveValue - box < yMin) yMin -= Math.ceil((yMin - (liveValue - box)) / box - 1e-6) * box;
     if (liveValue !== null && liveValue + 2 * box > yMax) yMax += Math.ceil((liveValue + 2 * box - yMax) / box - 1e-6) * box;
   }

@@ -11,6 +11,7 @@ import { toOrderRow } from '@/lib/pnfBooks';
 import { planBracketChildren, trailedStop, type BracketSpec } from '@/lib/pnfBracket';
 import type { LadderPosition } from '@/lib/pnfLadderPosition';
 import type { Target } from '@/lib/pnfTarget';
+import { scopeQuery, type PnfScope } from '@/lib/pnfScope';
 
 // Resting LIMIT / SL-limit orders placed from the P&F charts' B / S rails (rules: lib/pnfResting.ts; ledger:
 // lib/pnfRestingLedger.ts). A REAL single-leg order rests at the broker: reserved in the ledger, sent, then followed in the
@@ -48,14 +49,15 @@ type Reply = { success?: boolean; error?: string; outcome?: string; orderId?: st
 /** A unique order id: the time alone repeats for two clicks in one millisecond (or under a pinned test clock). */
 const newOrderId = (chart: 1 | 2) => `pnfr-${chart}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-async function postOrder(body: Record<string, unknown>): Promise<Reply | null> {
+async function postOrder(scope: PnfScope, body: Record<string, unknown>): Promise<Reply | null> {
   try {
-    const res = await fetch('/api/straddle-pnf/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    // `scope` tells the order route which page's resting ledger owns a modify / cancel (P&F or Renko)
+    const res = await fetch('/api/straddle-pnf/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, scope }) });
     return await res.json() as Reply;
   } catch { return null; }                                    // no clean reply: UNKNOWN, never a failure
 }
 
-export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, onEvent, onPaperFill, instant, positions, positionsLoaded }: {
+export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, onEvent, onPaperFill, instant, positions, positionsLoaded, scope = 'pnf' }: {
   charts: RailChart[];
   broker: Broker;
   mode: 'PAPER' | 'REAL';
@@ -70,6 +72,8 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
   /** Each chart's open position (null = flat) and whether it has been read yet: a bracket whose position is gone is cancelled. */
   positions: Record<string, LadderPosition | null>;
   positionsLoaded: boolean;
+  /** Whose ledger (P&F or Renko page, lib/pnfScope.ts). */
+  scope?: PnfScope;
 }) {
   const [ledger, setLedger] = useState<RestingLedger>(EMPTY_RESTING);
   const accept = useCallback((l: RestingLedger | undefined) => {
@@ -77,24 +81,24 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
   }, []);
   const post = useCallback(async (op: RestingOp): Promise<{ ok: boolean; error?: string }> => {
     try {
-      const res = await fetch('/api/straddle-pnf/resting', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(op) });
+      const res = await fetch(`/api/straddle-pnf/resting${scopeQuery(scope)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(op) });
       const j = await res.json() as { success?: boolean; error?: string; ledger?: RestingLedger };
       accept(j.ledger);
       return { ok: !!j.success, error: j.error };
     } catch (e) { return { ok: false, error: (e as Error).message || 'Ledger unreachable' }; }
-  }, [accept]);
+  }, [accept, scope]);
   useEffect(() => {
     let dead = false;
     const read = async () => {
       try {
-        const j = await (await fetch('/api/straddle-pnf/resting')).json() as { ledger?: RestingLedger };
+        const j = await (await fetch(`/api/straddle-pnf/resting${scopeQuery(scope)}`)).json() as { ledger?: RestingLedger };
         if (!dead) accept(j.ledger);
       } catch { /* the next poll retries */ }
     };
     void read();
     const id = setInterval(read, LEDGER_POLL_MS);
     return () => { dead = true; clearInterval(id); };
-  }, [accept]);
+  }, [accept, scope]);
 
   const realAskedRef = useRef(false);
   const busyRef = useRef(new Set<string>());
@@ -120,7 +124,7 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
     if (!created.ok) { toast.error(`Not placed: ${created.error}`); return; }
     if (venue === 'page') { onEvent({ kind: 'info', chart: c.chart, text: `${mode === 'PAPER' ? '[PAPER] ' : '[REAL level] '}${what} resting on C${c.chart}` }); return; }
     // REAL at the broker: reserved above, now sent.
-    const j = await postOrder({ broker, mode: 'REAL', target: c.target, action: side, lots, product, orderType: spec.kind === 'limit' ? 'LIMIT' : 'SL', price: spec.price, trigger: spec.trigger });
+    const j = await postOrder(scope, { broker, mode: 'REAL', target: c.target, action: side, lots, product, orderType: spec.kind === 'limit' ? 'LIMIT' : 'SL', price: spec.price, trigger: spec.trigger });
     if (j?.outcome === 'placed' && j.orderId) {
       await post({ op: 'placed', id, brokerOrderId: j.orderId });
       if (j.price && (j.price !== spec.price || (j.trigger ?? spec.trigger) !== spec.trigger)) {
@@ -186,7 +190,7 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
     if (row.venue === 'page') { const r = await post({ op: 'modify', id: row.id, level: spec.level, price: spec.price, trigger: spec.trigger }); if (!r.ok) toast.error(r.error ?? 'Not moved'); return; }
     if (!row.brokerOrderId) { toast.error('The order is still being placed - try again in a moment'); return; }
     if (!instant[row.chart] && !window.confirm(`Move this REAL ${row.side} ${row.kind === 'limit' ? 'LIMIT' : 'SL-limit'} ${row.lots}L from ${row.level} to ${spec.level}?\n\nIt is changed at your broker. (Turn on Instant above the chart to skip this question.)`)) return;
-    const j = await postOrder({
+    const j = await postOrder(scope, {
       broker: row.broker, mode: 'REAL', target: row.target, action: row.side, lots: row.lots, product: row.product,
       orderType: row.kind === 'limit' ? 'LIMIT' : 'SL', price: spec.price, trigger: spec.trigger, brokerOp: { op: 'modify', orderId: row.brokerOrderId },
     });
@@ -206,7 +210,7 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
     if (row.broker === 'zerodha' && row.kind === 'stop') { toast.error('Zerodha SL-limit orders cannot be changed here - cancel it and place a new one'); return; }
     if (!c) return;
     if (!instant[row.chart] && !window.confirm(`Change this REAL ${row.side} ${row.kind === 'limit' ? 'LIMIT' : 'SL-limit'} from ${row.lots}L to ${next}L at ${row.level}?\n\nIt is modified at your broker. (Turn on Instant above the chart to skip this question.)`)) return;
-    const j = await postOrder({
+    const j = await postOrder(scope, {
       broker: row.broker, mode: 'REAL', target: row.target, action: row.side, lots: next, product: row.product,
       orderType: row.kind === 'limit' ? 'LIMIT' : 'SL', price: row.price, trigger: row.trigger, brokerOp: { op: 'modify', orderId: row.brokerOrderId },
     });
@@ -230,7 +234,7 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
     }
     if (!row.brokerOrderId) { toast.error('The order is still being placed - try again in a moment'); return; }
     if (!force && !instant[row.chart] && !window.confirm(`Cancel this REAL ${row.side} ${row.kind === 'limit' ? 'LIMIT' : 'SL-limit'} ${row.lots}L at ${row.level}?\n\n(Turn on Instant above the chart to skip this question.)`)) return;
-    const j = await postOrder({ broker: row.broker, mode: 'REAL', target: row.target, action: row.side, lots: row.lots, product: row.product, brokerOp: { op: 'cancel', orderId: row.brokerOrderId } });
+    const j = await postOrder(scope, { broker: row.broker, mode: 'REAL', target: row.target, action: row.side, lots: row.lots, product: row.product, brokerOp: { op: 'cancel', orderId: row.brokerOrderId } });
     if (j?.outcome === 'placed') await post({ op: 'cancel', id: row.id, t: Date.now() / 1000 });
     else onEvent({ kind: 'warn', chart: row.chart, text: !j || j.outcome === 'unknown' ? 'Cancel status unknown - the order book will show it' : `Not cancelled: ${j.error ?? ''}` });
   };
@@ -290,8 +294,8 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
           if (!fired.ok) continue;
           // A bracket exit only ever REDUCES: sized from what this page opened, clamped by the broker's own row (exitOwn).
           const j = row.group
-            ? await postOrder({ broker: row.broker, mode: 'REAL', target: row.target, exitOwn: { side: row.side, units: c.lotUnits.map(u => u * row.lots) }, product: row.product })
-            : await postOrder({ broker: row.broker, mode: 'REAL', target: row.target, action: row.side, lots: row.lots, product: row.product });
+            ? await postOrder(scope, { broker: row.broker, mode: 'REAL', target: row.target, exitOwn: { side: row.side, units: c.lotUnits.map(u => u * row.lots) }, product: row.product })
+            : await postOrder(scope, { broker: row.broker, mode: 'REAL', target: row.target, action: row.side, lots: row.lots, product: row.product });
           if (row.group && j?.outcome === 'flat') {
             await post({ op: 'resolve', id: row.id, as: 'cancelled', t: Date.now() / 1000 });
             onEvent({ kind: 'info', chart: row.chart, text: 'Bracket exit: nothing left to close at the broker' });

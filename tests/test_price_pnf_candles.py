@@ -127,7 +127,26 @@ class SnapCloses(unittest.TestCase):
             "close": [1250.0, 1247.0, 1200.4, 500.0, 1300.0], "volume": [1, 1, 1, 1, 1]})
         daily = pd.DataFrame({"Close": [1250.5, 1185.1, 1250.0]}, index=pd.DatetimeIndex(["2026-10-22", "2026-10-23", "2026-10-26"]))
         out = m.snap_session_closes(bars, daily)
-        self.assertEqual(list(out["close"]), [1250.0, 1250.5, 1185.1, 500.0, 1300.0])   # only the LAST bar of a day; 10-26 differs 60%: kept; 10-27 has no CSV row: kept
+        self.assertEqual(list(out["close"]), [1250.0, 1247.0, 1200.4, 500.0, 1300.0])   # the traded closes are never rewritten
+        dc = [None if pd.isna(v) else v for v in out["day_close"]]
+        self.assertEqual(dc, [None, 1250.5, 1185.1, None, None])   # only the LAST bar of a day; 10-26 differs 60%; 10-27 has no CSV row
+        # ...and it reaches the page as `dc` on that bar only
+        import futures_pnf_candles as f                     # _load() put scripts/tools on the path
+        rows = f.to_bars(out, 10)
+        self.assertEqual([r.get("dc") for r in rows], [None, 1250.5, 1185.1, None, None])
+        self.assertEqual([r["straddle"] for r in rows], [1250.0, 1247.0, 1200.4, 500.0, 1300.0])
+        # the daily prefix is stitched on AFTER the snap: the official closes must survive it
+        rows = f.to_bars(m.stitch_history(pd.DataFrame({"start_Time": [t("2026-10-21", "15:29")], "close": [1240.0], "volume": [1]}), out), 10)
+        self.assertEqual([r.get("dc") for r in rows], [None, None, 1250.5, 1185.1, None, None])
+
+
+class ClosingAuction(unittest.TestCase):
+    def test_a_stock_with_stock_futures_is_in_the_closing_auction_session(self):
+        m = _load()
+        master = pd.DataFrame({"EXCH_ID": ["NSE", "NSE", "NSE", "BSE"], "INSTRUMENT": ["EQUITY", "FUTSTK", "EQUITY", "FUTSTK"],
+                               "UNDERLYING_SYMBOL": ["RELIANCE", "RELIANCE", "SMALLCO", "SMALLCO"]})
+        self.assertTrue(m.has_stock_futures(master, "RELIANCE"))
+        self.assertFalse(m.has_stock_futures(master, "SMALLCO"))      # only a BSE future: not NSE's auction
 
 
 class IndexDaily(unittest.TestCase):
