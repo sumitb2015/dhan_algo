@@ -48,9 +48,9 @@ test('Renko draws bricks with a points box and N-brick confirmation, on its own 
   await expect.poll(async () => ((await panel.getByTestId('pnf-bricks-up').getAttribute('d')) ?? '').split('z').length - 1).toBe(6);
   expect(((await panel.getByTestId('pnf-bricks-down').getAttribute('d')) ?? '').split('z').length - 1).toBe(3);
   await expect(panel.getByTestId('pnf-glyphs-x')).toHaveCount(0);
-  // Settings: points only (no % / pts toggle), and Confirm instead of Reversal
+  // Settings: a points box by default (the % / pts toggle is there too), and Confirm instead of Reversal
   await expect(page.getByLabel('Box points')).toHaveValue('10');
-  await expect(page.getByRole('group', { name: 'Box unit' })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: 'Box unit' }).getByRole('button', { name: 'pts' })).toHaveAttribute('aria-pressed', 'true');
   await expect(page.getByLabel('Confirm bricks')).toHaveValue('2');
   await expect(page.getByLabel('Reversal')).toHaveCount(0);
   // 2-brick confirmation: SELL on the 2nd down brick, BUY on the 2nd up brick after it

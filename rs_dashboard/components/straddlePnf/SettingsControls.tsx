@@ -79,13 +79,13 @@ export function SmaPeriodInput({ settings, onChange }: { settings: PnfSettings; 
 }
 
 /**
- * `renko`: the box is in points only (no % toggle) and the Reversal select becomes "Confirm", the N bricks a Renko signal waits
+ * `renko`: the Reversal select becomes "Confirm", the N bricks a Renko signal waits
  * for after a reversal; it is stored in the same `reversal` field (1-5), so the settings parse and persist unchanged.
  */
 export default function SettingsControls({ settings, onChange, equity = false, renko = false }: { settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean; renko?: boolean }) {
-  const boxMode = renko ? 'pts' : settings.boxMode;
+  const boxMode = settings.boxMode;
   const boxValue = boxMode === 'pct' ? settings.boxPct : settings.boxPts;
-  const setBox = (n: number) => { if (n !== boxValue) onChange(boxMode === 'pct' ? { ...settings, boxPct: n } : { ...settings, boxPts: n, ...(renko ? { boxMode: 'pts' as const } : {}) }); };
+  const setBox = (n: number) => { if (n !== boxValue) onChange(boxMode === 'pct' ? { ...settings, boxPct: n } : { ...settings, boxPts: n }); };
   return (
     <>
       <label className={LABEL}>
@@ -98,14 +98,14 @@ export default function SettingsControls({ settings, onChange, equity = false, r
       {/* Box size as a % of the first price or as fixed price points; each mode keeps its own value. */}
       <div className={LABEL}>
         <span>Box</span>
-        {!renko && <div className="inline-flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-800 bg-zinc-900" role="group" aria-label="Box unit">
+        <div className="inline-flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-800 bg-zinc-900" role="group" aria-label="Box unit">
           {(['pct', 'pts'] as const).map(m => (
             <button key={m} type="button" aria-pressed={settings.boxMode === m} onClick={() => settings.boxMode !== m && onChange({ ...settings, boxMode: m })}
                     className={`px-1.5 h-5 rounded text-[10px] font-bold normal-case tracking-normal ${settings.boxMode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-100'}`}>
               {m === 'pct' ? '%' : 'pts'}
             </button>
           ))}
-        </div>}
+        </div>
         <div className="inline-flex items-center">
           {/* − / + step to the next round size and apply at once, from the applied value (a half-typed draft is discarded). */}
           <button type="button" aria-label="Decrease box size" title="Smaller box (next round size)" disabled={stepBox(boxMode, boxValue, -1) === boxValue}

@@ -166,7 +166,10 @@ export type PanelOptions = {
    * previous close: without it the first minute of a session would measure the change against the close two sessions back.
    */
   forming?: Bar;
-  /** 'renko': bricks instead of P&F columns; `reversal` is then the N-brick confirmation and the box is always `boxPts`. */
+  /**
+   * 'renko': bricks instead of P&F columns; `reversal` is then the N-brick confirmation. The box is in points or a % of the first
+   * 1-minute price like P&F's, and the bricks sit on multiples of it either way.
+   */
   chart?: ChartType;
 };
 
@@ -216,7 +219,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   const firstPrice = (closedBars.find(b => b.straddle > 0 && (opts.anchorT === undefined || b.t >= opts.anchorT)) ?? closedBars.find(b => b.straddle > 0))?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
   // Box in points: never below MIN_BOX_PTS_PCT of the price (a safety floor: 0.001 points on NIFTY would be millions of boxes),
   // and the grid is anchored on a whole multiple of the box so the rows land on round prices (a 50-point box: ... 22,950, 23,000 ...).
-  const ptsAsked = (renko || opts.boxMode === 'pts') && (opts.boxPts ?? 0) > 0 ? (opts.boxPts as number) : null;
+  const ptsAsked = opts.boxMode === 'pts' && (opts.boxPts ?? 0) > 0 ? (opts.boxPts as number) : null;
   const minBox = firstPrice ? (firstPrice * MIN_BOX_PTS_PCT) / 100 : 0;
   const boxSize = ptsAsked !== null && firstPrice ? Math.max(ptsAsked, minBox) : undefined;
   const boxClamped = ptsAsked !== null && !!firstPrice && ptsAsked < minBox;

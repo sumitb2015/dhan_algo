@@ -52,7 +52,7 @@ test('the SMA averages brick closes', () => {
 
 test('the model builds bricks in points and draws a forming bar\'s bricks as unconfirmed', () => {
   const closed = bars([22650, 22660, 22670]);
-  const c = buildConfirmedModel(closed, 'sma', { chart: 'renko', boxPts: 10, reversal: 2, volume: false });
+  const c = buildConfirmedModel(closed, 'sma', { chart: 'renko', boxMode: 'pts', boxPts: 10, reversal: 2, volume: false });
   assert.equal(c.chart, 'renko');
   assert.equal(c.box, 10);
   assert.equal(c.columns.length, 2);
@@ -65,7 +65,7 @@ test('the model builds bricks in points and draws a forming bar\'s bricks as unc
 
 test('AUTO books a Renko signal at the brick close and exits on the first opposite brick', () => {
   const closes = [22650, 22660, 22670, 22650, 22640, 22630, 22650];
-  const c = buildConfirmedModel(bars(closes), 'sma', { chart: 'renko', boxPts: 10, reversal: 2, volume: false });
+  const c = buildConfirmedModel(bars(closes), 'sma', { chart: 'renko', boxMode: 'pts', boxPts: 10, reversal: 2, volume: false });
   const sig = c.signals[c.signals.length - 1];
   assert.equal(sig.kind, 'RENKO_SELL');
   assert.equal(boxPriceAt(c, sig.col, sig.bar), 22640);
@@ -94,4 +94,14 @@ test('matches TradingView Renko [Traditional, 10] on NIFTY 1-min, brick for bric
   const ours = seq(false);
   assert.ok(ours.endsWith(f.tradingview.slice(f.tradingview.indexOf('D22560', 300)).join(' ')), 'the tail after 28 Oct 09:38 is identical');
   assert.ok(!ours.includes(tv));
+});
+
+test('a % box: the brick is that % of the first 1-minute price and the bricks sit on its multiples', () => {
+  const closed = bars([20000, 20000, 20025, 20040, 20065]);
+  const c = buildConfirmedModel(closed, 'sma', { chart: 'renko', boxMode: 'pct', boxPct: 0.1, boxPts: 10, reversal: 2, volume: false });
+  assert.equal(c.boxMode, 'pct');
+  assert.ok(Math.abs(c.box - 20) < 1e-9);                                // 0.1 % of 20,000, not the 10 points also stored
+  assert.deepEqual(c.columns.map(col => `${col.dir}${col.low}-${col.high}`), ['X20000-20020', 'X20020-20040', 'X20040-20060']);
+  const pts = buildConfirmedModel(closed, 'sma', { chart: 'renko', boxMode: 'pts', boxPct: 0.1, boxPts: 10, reversal: 2, volume: false });
+  assert.equal(pts.box, 10);
 });
