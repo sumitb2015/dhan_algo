@@ -67,3 +67,12 @@ A Renko chart with a small box over the index's daily-since-2019 + 1-min history
 - **The crosshair must not re-create the chart.** Hover is state in `PnfPanel`, so the data-drawn layer is one `useMemo` (`chartLayer`), and `layoutPanel`, `totalBoxes` and `lastEntryId` are memoised. Anything added to that layer that depends on new state must join its deps list.
 - `fmt` caches one `Intl.NumberFormat` per digit count; `toLocaleString` builds a new formatter per call.
 - Measuring: headless Playwright throttles `requestAnimationFrame` to ~1 fps, so frame timing reads ~1,000 ms regardless. Time a `pointermove` + two `setTimeout(0)`s and watch `longtask` entries instead. After the fixes: hover ~28 ms median in dev mode with CDP attached, 0 long tasks; pan ~0.3 ms.
+
+## Bar Replay (TradingView's "Bar replay", on P&F and Renko)
+
+Pure rules in `lib/pnfReplay.ts` (tests `pnfReplay.test.ts`), state in `components/straddlePnf/useReplay.ts`, controls in `ReplayBar.tsx`, page wiring in `StraddlePnfPage.tsx`, e2e `e2e/renko-replay.spec.ts`. Rules that keep it safe and fast:
+- **Two models per chart.** `c1` / `c2` stay LIVE and feed everything that trades or alerts (live AUTO, alerts, the resting-order engine, MTM guard). `r1` / `r2` (`useChartModel(..., replayT, true)`) only draw the charts and price practice trades. Never hand a replay model to `usePnfAuto`, `usePnfAlerts` or `railCharts`. Opening replay is refused while live AUTO is armed or holds a row.
+- **Practice trading is a separate `PracticeBook`.** It is in memory, priced at the replayed bar, and never calls `/api/straddle-pnf/order`, `/resting` or `/auto`. Practice AUTO runs the live `decideAuto` with `nowS = cursor + 60`. The e2e spec refuses every non-GET request.
+- **One step = one bar of the active chart's interval** (`nextStepT`, same clock buckets as `resample`, CAS / MCX day ends included). The cursor is a time, so both charts stay in sync.
+- **Speed:** each step calls `buildConfirmedModel(bars, ..., prev)`, which carries the previous build on over the new bars. That needs the bars to be the same objects (`barsUpTo` slices `feed.bars`). An equivalence test pins it to a full build. The page keeps `prev` in a ref (an allowed `react-hooks/refs` exception: the result is the same without it).
+- The book records the cursor it last processed (`book.at`); a new start point resets it, so each step crosses orders and runs AUTO exactly once.

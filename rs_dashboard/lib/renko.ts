@@ -45,10 +45,15 @@ export function buildRenko(bars: Bar[], box: number, anchorPrice?: number): { an
 
 /** The bricks `buildRenko` would draw over `bars` + `more`, from `buildRenko(bars)`'s bricks and resume state, reading only `more`. */
 export function extendRenko(columns: PnfColumn[], resume: RenkoResume, more: Bar[]): PnfColumn[] {
-  if (!more.length) return columns;
+  return continueRenko(columns, resume, more).columns;
+}
+
+/** extendRenko plus the resume state after `more`, so a build can be carried on step after step (bar replay, closed bars). */
+export function continueRenko(columns: PnfColumn[], resume: RenkoResume, more: Bar[]): { columns: PnfColumn[]; resume: RenkoResume } {
+  if (!more.length) return { columns, resume };
   const out = columns.slice();
-  runRenko(out, i => more[i - resume.bars], resume.bars, resume.bars + more.length, resume.box, resume.hi, resume.lo);
-  return out;
+  const { hi, lo } = runRenko(out, i => more[i - resume.bars], resume.bars, resume.bars + more.length, resume.box, resume.hi, resume.lo);
+  return { columns: out, resume: { box: resume.box, hi, lo, bars: resume.bars + more.length } };
 }
 
 /** A brick's close: its top when it is up, its bottom when it is down. */

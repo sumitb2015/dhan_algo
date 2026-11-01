@@ -86,6 +86,10 @@ export type PnfPanelProps = {
   triMin?: number;
   onToggleTri?: () => void;
   onCycleTriMin?: () => void;
+  /** Bar Replay is picking its start: a line follows the pointer and a click hands back that column's start time (no pan). */
+  replayPick?: (t: number) => void;
+  /** Bar Replay's start: a dashed line before the first column it revealed. */
+  replayStartT?: number | null;
 };
 
 import type { PnfTriangle } from '@/lib/pnfTriangle';
@@ -417,7 +421,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, coverShown = false, sessionLines = true, sessionDividers = true, timeAxis = false, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, coverShown = false, sessionLines = true, sessionDividers = true, timeAxis = false, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin, replayPick, replayStartT = null }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   // Renko: every column is one filled brick on real price edges (lib/renko.ts); `reversal` holds the N-brick confirmation.
@@ -1133,6 +1137,12 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         onKeyDown={e => { if (rail?.onCancelAll && e.shiftKey && e.key.toLowerCase() === 'c' && rail.orders.some(o => o.state === 'working')) { e.preventDefault(); rail.onCancelAll(); } }}
         onPointerDown={e => {
           if (e.button !== 0) return;
+          // Bar Replay: the click picks the start bar instead of panning
+          if (replayPick) {
+            const col = cross?.col;
+            if (col !== null && col !== undefined && model.columnTimes[col]) { e.preventDefault(); replayPick(model.columnTimes[col].start); }
+            return;
+          }
           touchedRef.current = true;
           const el = e.currentTarget;
           dragRef.current = { x: e.clientX, y: e.clientY, l: el.scrollLeft, t: el.scrollTop };
@@ -1303,6 +1313,25 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               {/* live price line */}
               {liveValue !== null && (
                 <line x1={0} x2={plotW} y1={yOf(liveValue)} y2={yOf(liveValue)} className="stroke-zinc-400" strokeDasharray="3 3" />
+              )}
+
+              {/* Bar Replay: where it started (before the first column it revealed), and while picking a start, the line under the pointer
+                  with everything to its right shaded (what the replay will reveal) */}
+              {replayStartT !== null && (() => {
+                // before the first column the replay revealed; until it reveals one, just after the newest column
+                const k = model.columnTimes.findIndex(ct => ct.start > replayStartT);
+                const j = k < 0 ? model.columnTimes.length : k;
+                return <line data-testid="pnf-replay-start" x1={xOf(j)} x2={xOf(j)} y1={0} y2={contentH} className="stroke-sky-400" strokeWidth={1.5} strokeDasharray="6 4" pointerEvents="none" />;
+              })()}
+              {replayPick && cross && cross.x !== null && cross.col !== null && (
+                <g data-testid="pnf-replay-pick-line" pointerEvents="none">
+                  <rect x={xOf(cross.col)} y={0} width={Math.max(0, plotW - xOf(cross.col))} height={contentH} className="fill-sky-500/10" />
+                  <line x1={xOf(cross.col)} x2={xOf(cross.col)} y1={0} y2={contentH} className="stroke-sky-400" strokeWidth={2} />
+                  <g transform={`translate(${xOf(cross.col) - 9}, ${(viewTop ?? 0) + 8})`}>
+                    <rect width={18} height={18} rx={3} className="fill-sky-500" />
+                    <text x={9} y={13} textAnchor="middle" fontSize={12} className="fill-oncolor" aria-hidden="true">✂</text>
+                  </g>
+                </g>
               )}
 
               {/* crosshair */}

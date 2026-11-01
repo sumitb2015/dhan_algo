@@ -344,3 +344,45 @@ test('withLive: the session list, open and previous close follow the forming bar
   const next = withLive(c, { t: t0 + 86_400, ce: 99, pe: 0, straddle: 99, vol: 1 });
   assert.deepEqual([next.sessions, next.sessionOpen, next.prevClose], [['2026-10-29', '2026-10-30'], 99, 101.5]);
 });
+
+// buildConfirmedModel(bars, ..., prev) carries prev's chart bars and columns on over the new bars (a closed bar, a replay step).
+// It must equal a build from scratch: columns, signals, the overlay, column times, the last bar — for P&F and Renko, every
+// interval, a jump of many bars and a chain of one-bar steps.
+test('buildConfirmedModel from a previous model equals a full build (P&F / Renko, 1 / 3 / 15 / 60 min / 1 day, jumps and steps)', () => {
+  let seed = 23;
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+  const view = (m: ReturnType<typeof buildConfirmedModel>) => JSON.stringify({
+    cols: m.columns.map(c => [c.dir, +c.low.toFixed(6), +c.high.toFixed(6), c.startBar, c.endBar, c.session, c.breakBar, c.boxBars.join(',')]),
+    sig: m.signals.map(s => [s.kind, s.col, s.bar, s.t, s.price, s.belowVwap]), ov: m.overlay.map(v => (v === null ? null : +v.toFixed(6))),
+    ct: m.columnTimes, last: m.lastBarT, ex: m.exits, box: m.box, anchor: m.anchor,
+  });
+  for (let run = 0; run < 15; run++) {
+    const start = Date.UTC(2026, 9, 26, 3, 45) / 1000;
+    let p = 100 + rnd() * 50;
+    const all: Bar[] = [];
+    for (let d = 0; d < 3; d++) for (let m = 0; m < 375; m++) {
+      p = Math.max(1, p + (rnd() - 0.5) * 1.2);
+      all.push({ t: start + d * 86_400 + m * 60, ce: p, pe: 0, straddle: +p.toFixed(2), vol: 1 + Math.floor(rnd() * 5) });
+    }
+    for (const chart of ['pnf', 'renko'] as const) for (const interval of [1, 3, 15, 60, 1440]) {
+      const opts = { chart, interval, boxMode: 'pts' as const, boxPts: 0.5, reversal: chart === 'renko' ? 2 : 3, sessionCloseMin: 930 };
+      const a = 200 + Math.floor(rnd() * 300), b = a + 1 + Math.floor(rnd() * 400);
+      const jumped = buildConfirmedModel(all.slice(0, b), 'vwap', opts, buildConfirmedModel(all.slice(0, a), 'vwap', opts));
+      assert.equal(view(jumped), view(buildConfirmedModel(all.slice(0, b), 'vwap', opts)), `run ${run} ${chart} ${interval} jump`);
+      let m = buildConfirmedModel(all.slice(0, a), 'sma', opts);
+      for (let k = a + 1; k <= a + 40; k++) m = buildConfirmedModel(all.slice(0, k), 'sma', opts, m);
+      assert.equal(view(m), view(buildConfirmedModel(all.slice(0, a + 40), 'sma', opts)), `run ${run} ${chart} ${interval} steps`);
+    }
+  }
+});
+
+test('buildConfirmedModel ignores a previous model that is not a prefix or was built with other settings', () => {
+  const t0 = Date.UTC(2026, 9, 26, 3, 45) / 1000;
+  const mk = (ps: number[]) => ps.map((v, i) => ({ t: t0 + i * 60, ce: v, pe: 0, straddle: v, vol: 1 }));
+  const other = buildConfirmedModel(mk([200, 201, 199]), 'sma', { boxMode: 'pts', boxPts: 0.5 });
+  const opts = { boxMode: 'pts' as const, boxPts: 0.5 };
+  const bars = mk([100, 101, 102, 99, 98]);
+  assert.deepEqual(buildConfirmedModel(bars, 'sma', opts, other).columns, buildConfirmedModel(bars, 'sma', opts).columns);
+  const wider = buildConfirmedModel(bars.slice(0, 3), 'sma', { boxMode: 'pts', boxPts: 1 });
+  assert.deepEqual(buildConfirmedModel(bars, 'sma', opts, wider).columns, buildConfirmedModel(bars, 'sma', opts).columns);
+});

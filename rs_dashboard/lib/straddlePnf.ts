@@ -157,7 +157,12 @@ export function buildPnf(bars: Bar[], boxPct = 0.005, reversal = 3, anchorPrice?
  * The live chart calls this on every tick; rebuilding from the whole history took ~0.4 s on two years of NIFTY minutes.
  */
 export function extendPnf(columns: PnfColumn[], resume: PnfResume, more: Bar[]): PnfColumn[] {
-  if (!more.length) return columns;
+  return continuePnf(columns, resume, more).columns;
+}
+
+/** extendPnf plus the resume state after `more`, so a build can be carried on step after step (bar replay, closed bars). */
+export function continuePnf(columns: PnfColumn[], resume: PnfResume, more: Bar[]): { columns: PnfColumn[]; resume: PnfResume } {
+  if (!more.length) return { columns, resume };
   const { anchor, box, reversal, r0, bars: n } = resume;
   const work = resume.tail.map(cloneWork);
   const kept = columns.length - work.length;
@@ -165,7 +170,7 @@ export function extendPnf(columns: PnfColumn[], resume: PnfResume, more: Bar[]):
   const timeOf = (i: number) => (i >= n ? more[i - n].t : NaN);
   // The resumed columns that started inside `bars` keep their own session (their start time is not in `more`).
   const fresh = work.map((c, k) => (c.startBar < n && k < resume.tail.length ? { ...toColumn(c, anchor, box, () => 0), session: columns[kept + k].session } : toColumn(c, anchor, box, timeOf)));
-  return [...columns.slice(0, kept), ...fresh];
+  return { columns: [...columns.slice(0, kept), ...fresh], resume: { anchor, box, reversal, r0, tail: work.slice(-3).map(cloneWork), bars: n + more.length } };
 }
 
 export function detectSignals(columns: PnfColumn[], bars: Bar[], vwapSeries: (number | null)[]): PnfSignal[] {

@@ -1,9 +1,9 @@
 // One chart panel's data: P&F columns, signals, exit cues and the overlay line, from CLOSED 1-min bars only
 // (a bar still forming must never feed a signal, or the marker would repaint). The 1-min bars are grouped into the chosen
 // interval first; the box size is a percentage of the first price.
-import { buildPnf, detectSignals, exitTags, extendPnf, sessionOf, vwap, type Bar, type PnfColumn, type PnfResume, type PnfSignal } from './straddlePnf.ts';
+import { buildPnf, continuePnf, detectSignals, exitTags, extendPnf, sessionOf, vwap, type Bar, type PnfColumn, type PnfResume, type PnfSignal } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
-import { buildRenko, extendRenko, renkoSignals, renkoSma, renkoSmaByBar, type RenkoResume } from './renko.ts';
+import { buildRenko, continueRenko, extendRenko, renkoSignals, renkoSma, renkoSmaByBar, type RenkoResume } from './renko.ts';
 import { MIN_BOX_PTS_PCT, type BoxMode } from './straddlePnfSettings.ts';
 
 export type Overlay = 'vwap' | 'sma';
@@ -180,6 +180,8 @@ export type ConfirmedModel = Omit<PanelModel, 'liveColumns' | 'sessionOpen' | 'p
     chart: ChartType; closedBars: Bar[]; interval: number; boxPct: number; reversal: number; anchorPrice?: number; boxSize?: number; sessionCloseMin?: number;
     /** Where the chart build stopped, and the index in closedBars of the last 1-min bar it read: a tick only feeds what follows. */
     resume: PnfResume | RenkoResume | null; lastEnd: number;
+    /** The chart bars built from closedBars and, for each, the index of its last 1-min bar (a later build appends to them). */
+    chartBars: Bar[]; chartEndIdx: number[];
     /** The closed bars' sessions, their last session's open and the close before it, computed once (not per tick). */
     closedSessions: string[]; closedOpen: number | null; closedPrev: number | null;
   };
@@ -205,7 +207,12 @@ function sessionFacts(bars: Bar[]): { sessions: string[]; open: number | null; p
   return { sessions, open, prev };
 }
 
-export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: PanelOptions = {}): ConfirmedModel {
+/**
+ * `prev`: a model built with the same chart settings on a prefix of `closedBars` (the same bars, then some more: a bar closed, or a
+ * replay stepped forward). The chart bars and columns are then carried on over the new bars only, instead of rebuilding years of
+ * history (80-150 ms on two years of NIFTY minutes); anything else rebuilds from scratch. The result is identical either way.
+ */
+export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: PanelOptions = {}, prev?: ConfirmedModel | null): ConfirmedModel {
   const interval = opts.interval ?? 1;
   const boxPct = (opts.boxPct ?? 0.5) / 100;
   const reversal = opts.reversal ?? 3;
@@ -214,8 +221,6 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   // VWAP is computed on the 1-minute bars (signals' belowVwap and the exit cue need it whichever line is drawn) and read at each
   // chart bar's last minute, so it does not drift with the interval. Without traded volume the box SMA stands in for it (below).
   const vw1 = vwap(closedBars);
-  const { bars, endIdx } = resample(closedBars, interval, opts.sessionCloseMin);
-  const vw = endIdx.map(i => vw1[i]);
   const firstPrice = (closedBars.find(b => b.straddle > 0 && (opts.anchorT === undefined || b.t >= opts.anchorT)) ?? closedBars.find(b => b.straddle > 0))?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
   // Box in points: never below MIN_BOX_PTS_PCT of the price (a safety floor: 0.001 points on NIFTY would be millions of boxes),
   // and the grid is anchored on a whole multiple of the box so the rows land on round prices (a 50-point box: ... 22,950, 23,000 ...).
@@ -224,7 +229,26 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   const boxSize = ptsAsked !== null && firstPrice ? Math.max(ptsAsked, minBox) : undefined;
   const boxClamped = ptsAsked !== null && !!firstPrice && ptsAsked < minBox;
   const anchorPrice = boxSize && firstPrice ? Math.round(firstPrice / boxSize) * boxSize || firstPrice : firstPrice;
-  const { anchor, box, columns, resume } = renko ? buildRenko(bars, boxSize ?? (firstPrice ?? 0) * boxPct, anchorPrice) : buildPnf(bars, boxPct, reversal, anchorPrice, boxSize);
+  const p = prev?.build;
+  const pb = p?.closedBars;
+  const reuse = !!p && !!pb && p.resume !== null && p.chart === chart && p.interval === interval && p.boxPct === boxPct && p.reversal === reversal
+    && p.anchorPrice === anchorPrice && p.boxSize === boxSize && p.sessionCloseMin === opts.sessionCloseMin
+    && pb.length > 0 && pb.length <= closedBars.length && pb[0] === closedBars[0] && pb[pb.length - 1] === closedBars[pb.length - 1];
+  let bars: Bar[], endIdx: number[], anchor: number, box: number, columns: PnfColumn[], resume: PnfResume | RenkoResume | null;
+  if (reuse) {
+    // The chart bars after prev's last one start at a bucket boundary (buckets are on the clock), so only they are resampled.
+    const from = p!.lastEnd + 1;
+    const tail = resample(closedBars.slice(from), interval, opts.sessionCloseMin);
+    bars = p!.chartBars.concat(tail.bars);
+    endIdx = p!.chartEndIdx.concat(tail.endIdx.map(i => i + from));
+    anchor = prev!.anchor; box = prev!.box;
+    const next = renko ? continueRenko(prev!.columns, p!.resume as RenkoResume, tail.bars) : continuePnf(prev!.columns, p!.resume as PnfResume, tail.bars);
+    columns = next.columns; resume = next.resume;
+  } else {
+    ({ bars, endIdx } = resample(closedBars, interval, opts.sessionCloseMin));
+    ({ anchor, box, columns, resume } = renko ? buildRenko(bars, boxSize ?? (firstPrice ?? 0) * boxPct, anchorPrice) : buildPnf(bars, boxPct, reversal, anchorPrice, boxSize));
+  }
+  const vw = endIdx.map(i => vw1[i]);
   const facts = sessionFacts(closedBars);
   const smaPeriod = opts.smaPeriod ?? SMA_PERIOD;
   // Renko's average is TradingView's: an SMA of brick closes. P&F's averages box values.
@@ -257,7 +281,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
     columnTimes: columns.map(c => ({ start: bars[c.startBar].t, end: bars[c.endBar].t })),
     build: {
       chart, closedBars, interval, boxPct, reversal, anchorPrice, boxSize, sessionCloseMin: opts.sessionCloseMin,
-      resume, lastEnd: endIdx.length ? endIdx[endIdx.length - 1] : -1,
+      resume, lastEnd: endIdx.length ? endIdx[endIdx.length - 1] : -1, chartBars: bars, chartEndIdx: endIdx,
       closedSessions: facts.sessions, closedOpen: facts.open, closedPrev: facts.prev,
     },
   };

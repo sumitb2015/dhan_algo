@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, Boxes, ChartScatter, Eye, EyeOff, Flag, LocateFixed, XCircle, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
+import { Bell, Bot, Boxes, ChartScatter, Eye, Rewind, EyeOff, Flag, LocateFixed, XCircle, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from './NavBar';
 import DataChip from './DataChip';
@@ -20,8 +20,16 @@ import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock } from '@/lib/alertSound';
 import { pnfChimeFor, playPnfChime, type PnfSoundEvent } from '@/lib/pnfChime';
-import { buildConfirmedModel, withLive, type ChartType, type Overlay } from '@/lib/straddlePnfModel';
+import { buildConfirmedModel, withLive, type ChartType, type ConfirmedModel, type Overlay } from '@/lib/straddlePnfModel';
 import { capLog, sessionWindow } from '@/lib/straddlePnfLive';
+import {
+  EMPTY_BOOK, barsUpTo, countUpTo, cursorBefore, firstAvailableT, nextStepT, openLots, practiceAutoArm, practiceAutoStep, practiceCancel, practiceCross,
+  practiceFill, practiceFlatten, practiceMove, practicePlace, practicePnl, randomStartT, type PracticeBook, type PracticeQuote,
+} from '@/lib/pnfReplay';
+import { paperPosition } from '@/lib/pnfLadderPosition';
+import { crosshairStamp } from '@/lib/straddlePnfTimeAxis';
+import { useReplay } from './straddlePnf/useReplay';
+import ReplayBar from './straddlePnf/ReplayBar';
 import { HeaderIndexChips } from '@/components/triplestraddle/HeaderIndexChips';
 import {
   DEFAULT_CHART1_SETTINGS, DEFAULT_CHART2_SETTINGS, DEFAULT_RENKO_SETTINGS, SETTINGS_KEY, SETTINGS_KEY_2, CHART_VIEW_KEY,
@@ -96,6 +104,7 @@ const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice
 /** A preference key on this page: the P&F page keeps its original keys, the Renko page swaps the `straddle-pnf` prefix for `renko`. */
 const prefKey = (chart: ChartType, key: string) => (chart === 'renko' ? key.replace(/^straddle-pnf/, 'renko') : key);
 const NO_TRIANGLES: PnfTriangle[] = [];
+const NO_BARS: PnfFeed['bars'] = [];
 
 function readPref(key: string): string | null {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -137,7 +146,7 @@ function IconButton({ icon: Icon, label, onClick, pressed, badge }: { icon: Luci
 }
 
 /** One chart's P&F model: CLOSED bars only (so a signal never repaints), with the forming minute laid on top. */
-function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, overlay: Overlay, now: number, chart: ChartType) {
+function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, overlay: Overlay, liveNow: number, chart: ChartType, replayT: number | null = null, replayOnly = false) {
   // A long interval picked on a stock does not carry over to an instrument that has no such history.
   const interval = effectiveInterval(rawSettings.interval, hasLongIntervals(target.kind));
   const settings = useMemo(() => (interval === rawSettings.interval ? rawSettings : { ...rawSettings, interval }), [rawSettings, interval]);
@@ -145,7 +154,10 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   // the model once bars are in (bars without volume, e.g. an illiquid option, get the box SMA too), so the toggle never
   // contradicts the chart.
   const indexNoVwap = target.kind === 'index';
-  const bars = feed.bars;
+  // Bar Replay: the chart as it stood at the cursor — its 1-min bars up to it, all closed (the clock sits a minute past the cursor).
+  // `replayOnly`: the replay copy of a chart, which builds nothing while no replay runs (the live copy draws the chart then).
+  const bars = useMemo(() => (replayT === null ? (replayOnly ? NO_BARS : feed.bars) : barsUpTo(feed.bars, replayT)), [feed.bars, replayT, replayOnly]);
+  const now = replayT === null ? liveNow : (replayT + 60) * 1000;
   const last = bars[bars.length - 1];
   const formingBar = last !== undefined && now > 0 && last.t >= minuteOf(now / 1000) ? last : undefined;   // the minute still forming
   const closed = formingBar ? bars.slice(0, -1) : bars;
@@ -153,14 +165,19 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   // The confirmed chart depends only on the closed bars, so it is rebuilt when a bar closes or history reloads, not on every tick.
   const closedKey = `${closed.length}:${closed[0]?.t ?? 0}:${closedLast?.t ?? 0}:${closedLast?.straddle ?? 0}:${feed.histVersion}`;
   const sessionClose = sessionWindow(feed.market, now / 1000)[1];
+  // The previous build is handed back in: a closed bar or a replay step then only carries the chart on over the new bars.
+  const prevRef = useRef<ConfirmedModel | null>(null);
   const confirmed = useMemo(
-    () => buildConfirmedModel(closed, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined, chart }),
+    // Reading the ref here is safe: `prev` only speeds the build up, the result is the same without it (straddlePnfModel.test.ts).
+    // eslint-disable-next-line react-hooks/refs
+    () => buildConfirmedModel(closed, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined, chart }, prevRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [closedKey, overlay, settings, sessionClose, indexNoVwap, feed.loaded?.anchorT, chart],
   );
+  useEffect(() => { prevRef.current = confirmed; }, [confirmed]);
   const model = useMemo(() => withLive(confirmed, formingBar), [confirmed, formingBar]);
   const vwapAllowed = !indexNoVwap && (closed.length === 0 || model.vwapAvailable);
-  return { model, indexNoVwap, vwapAllowed };
+  return { model, indexNoVwap, vwapAllowed, lastBar: closedLast ?? null };
 }
 
 const readMarkers = (prefix: string, key: string): PnfExecutionMarker[] => {
@@ -298,6 +315,20 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const feed2 = usePnfFeed(prefsReady && dual ? target2 : null, recenter, now);
   const c1 = useChartModel(feed1, target1, settings, overlay, now, chart);
   const c2 = useChartModel(feed2, target2, settings2, overlay, now, chart);
+
+  // ── Bar Replay (lib/pnfReplay.ts): both charts as they stood at one past moment, played forward one bar of the active chart's
+  // interval at a time. c1 / c2 stay LIVE and keep feeding everything that trades or alerts (AUTO, alerts, the rail's engine, the
+  // MTM guard); the replay copies r1 / r2 only draw the charts and price the practice book.
+  const intervalOf = (c: ChartId) => effectiveInterval((c === 2 ? settings2 : settings).interval, hasLongIntervals((c === 2 ? target2 : target1).kind));
+  const replay = useReplay({
+    storageKey: prefKey(chart, 'straddle-pnf-replay'),
+    charts: `${targetKey(target1)}|${dual ? targetKey(target2) : ''}`,
+    stepFrom: t => { const f = active === 2 ? feed2 : feed1; return nextStepT(f.bars, t, intervalOf(active), sessionWindow(f.market, t)[1] || undefined); },
+  });
+  const replayT = replay.replaying ? replay.cursorT : null;
+  const r1 = useChartModel(feed1, target1, settings, overlay, now, chart, replayT, true);
+  const r2 = useChartModel(feed2, target2, settings2, overlay, now, chart, replayT, true);
+  const shownOf = (c: ChartId) => (replayT === null ? (c === 2 ? c2 : c1) : (c === 2 ? r2 : r1));
   const activeTarget = active === 2 ? target2 : target1;
   const activeFeed = active === 2 ? feed2 : feed1;
   const activeSettings = active === 2 ? settings2 : settings;
@@ -341,6 +372,9 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // Triangles of each chart's CLOSED columns (lib/pnfTriangle.ts). Kept apart from model.signals, which AUTO trades.
   // Triangles are a P&F pattern: a Renko chart has none.
   const tri1 = useMemo(() => renko ? NO_TRIANGLES : detectTriangles(c1.model.columns, c1.model.signals, c1.model.box, settings.reversal, triMin[1]), [renko, c1.model, settings.reversal, triMin]);
+  // The replayed charts' own triangles (drawn while replaying; alerts keep using the live ones above).
+  const rtri1 = useMemo(() => (renko || replayT === null ? NO_TRIANGLES : detectTriangles(r1.model.columns, r1.model.signals, r1.model.box, settings.reversal, triMin[1])), [renko, replayT, r1.model, settings.reversal, triMin]);
+  const rtri2 = useMemo(() => (renko || replayT === null ? NO_TRIANGLES : detectTriangles(r2.model.columns, r2.model.signals, r2.model.box, settings2.reversal, triMin[2])), [renko, replayT, r2.model, settings2.reversal, triMin]);
   const tri2 = useMemo(() => renko ? NO_TRIANGLES : detectTriangles(c2.model.columns, c2.model.signals, c2.model.box, settings2.reversal, triMin[2]), [renko, c2.model, settings2.reversal, triMin]);
   usePnfAlerts({
     model: c1.model, ready: Boolean(feed1.loaded), chart: 1, target: target1, label: dual ? `${feed1.label} · C1` : feed1.label,
@@ -406,6 +440,59 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     };
   };
   const railCharts = ([1, 2] as const).map(railChartOf).filter((x): x is RailChart => x !== null);
+
+  // ── practice trading in replay: a book of its own at the replayed prices — never an order route, a ledger or a broker ──
+  const [book, setBook] = useState<PracticeBook>(EMPTY_BOOK);
+  const [practiceLots, setPracticeLots] = useState(1);
+  const quoteOf = (c: ChartId): PracticeQuote | null => {
+    if (replayT === null || (c === 2 && !dual)) return null;
+    const target = c === 2 ? target2 : target1;
+    const legs = c === 2 ? legs2 : legs1;
+    const bar = (c === 2 ? r2 : r1).lastBar;
+    if (!bar || target.kind === 'index' || !legs) return null;
+    const straddle = target.kind === 'options' && target.side === 'STRADDLE';
+    return { chart: c, targetKey: targetKey(target), t: replayT, price: bar.ce + bar.pe, legPrices: straddle ? [bar.ce, bar.pe] : [bar.ce + bar.pe], unitsPerLot: legs.unitsPerLot };
+  };
+  // Each new cursor: resting practice orders the replayed price reached fill, then practice AUTO decides on the replayed chart.
+  // The book records the cursor it was last advanced to, so each cursor is processed once (a start point is recorded unprocessed).
+  useEffect(() => {
+    if (replayT === null || book.at === replayT) return;
+    const steps = ([1, 2] as const).map(c => ({ q: quoteOf(c), model: (c === 2 ? r2 : r1).model, market: (c === 2 ? feed2 : feed1).market }));
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setBook(b => (b.at === replayT ? b : { ...steps.reduce((out, s) => (s.q ? practiceAutoStep(practiceCross(out, s.q), s.q, s.model, s.market) : out), b), at: replayT }));
+  // quoteOf reads r1 / r2 / the legs of this render: the models listed are the ones that change with the cursor
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replayT, book.at, r1.model, r2.model]);
+  /** A new start point: the book starts empty and the start itself fills nothing. */
+  const startReplayAt = (c: ChartId, t: number) => {
+    const bars = (c === 2 ? feed2 : feed1).bars;
+    const i = countUpTo(bars, t - 1);
+    if (i >= bars.length) { toast.warning('No bars after that time to replay'); return; }
+    const first = bars[i].t;
+    const cursor = cursorBefore(bars, first);
+    setBook({ ...EMPTY_BOOK, at: cursor });
+    replay.start(cursor, first);
+  };
+  const practiceQuotes = { [targetKey(target1)]: quoteOf(1) ?? undefined, ...(dual ? { [targetKey(target2)]: quoteOf(2) ?? undefined } : {}) };
+  const practiceRailFor = (c: ChartId) => {
+    const q = quoteOf(c);
+    if (!q) return undefined;
+    const tk = q.targetKey;
+    return {
+      position: paperPosition(book.legs[tk] ?? [], q.legPrices, q.unitsPerLot),
+      armed: true,
+      lockable: false,
+      linesShown: true,
+      orders: book.orders.filter(o => o.targetKey === tk).map(o => ({
+        id: o.id, side: o.side, kind: o.kind, level: o.level, price: o.level, trigger: o.kind === 'stop' ? o.level : undefined, lots: o.lots, state: 'working', mode: 'PAPER' as const,
+      })),
+      onPlace: (side: 'BUY' | 'SELL', level: number) => setBook(b => practicePlace(b, c, tk, side, level, practiceLots, q.price)),
+      onModify: (id: string, level: number) => setBook(b => practiceMove(b, id, level)),
+      onCancel: (id: string) => setBook(b => practiceCancel(b, id)),
+      onLots: (id: string, delta: number) => setBook(b => ({ ...b, orders: b.orders.map(o => (o.id === id ? { ...o, lots: Math.max(1, o.lots + delta) } : o)) })),
+      onCancelAll: () => setBook(b => ({ ...b, orders: b.orders.filter(o => o.targetKey !== tk) })),
+    };
+  };
   const positionsInfo = usePnfPositions({ charts: railCharts, broker, mode: tradeMode, paper });
   const positions = positionsInfo.byKey;
   const changeStyle = (s: StyleState) => { setOrderStyle(s); saveP(STYLE_KEY, JSON.stringify(s)); };
@@ -539,6 +626,13 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // Signals depend on the instrument and the box settings: while a chart is armed or holds an AUTO position, they are frozen.
   const locked = (c: ChartId) => autoArm[c].on || !!autoOf(c).row;
   const activeLocked = locked(active);
+  // Replay draws the past on the charts; a chart running live AUTO must keep showing what AUTO trades on, so it is stopped first.
+  const toggleReplay = () => {
+    if (replay.active) { replay.close(); return; }
+    const busy = ([1, 2] as const).filter(c => (c === 1 || dual) && locked(c));
+    if (busy.length) { toast.warning(`Chart ${busy.join(' and ')} is running AUTO: stop it (and let its position close) before replaying`); return; }
+    replay.open();
+  };
   const armChart = (c: ChartId, on: boolean) => {
     const m = (c === 2 ? c2 : c1).model;
     setAutoArm(a => ({ ...a, [c]: on ? { on: true, mode: tradeMode, watermarkT: m.lastBarT ?? Math.floor(nowSec()) } : DISARMED }));
@@ -623,15 +717,20 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const feed = c === 2 ? feed2 : feed1;
     const target = c === 2 ? target2 : target1;
     const st = c === 2 ? settings2 : settings;
+    // Replaying: the chart, its price, markers, rail and AUTO are the practice session's; nothing live is drawn on it.
+    const rp = replayT !== null;
+    const rbar = (c === 2 ? r2 : r1).lastBar;
+    const tk = targetKey(target);
+    const pAuto = book.auto[c];
     return {
-      model: (c === 2 ? c2 : c1).model,
-      live: feed.live,
+      model: shownOf(c).model,
+      live: rp ? (rbar ? { ce: rbar.ce, pe: rbar.pe } : null) : feed.live,
       overlay,
       overlayShown,
       coverShown,
-      stale: feed.stale,
+      stale: rp ? false : feed.stale,
       legs: target.kind === 'options' && target.side === 'STRADDLE',
-      flash: flash[c],
+      flash: rp ? null : flash[c],
       loading: (feed.loading || !feed.complete) && feed.bars.length === 0,
       interval: effectiveInterval(st.interval, hasLongIntervals(target.kind)),
       boxPct: st.boxPct,
@@ -640,30 +739,43 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       headerSlot: active === c ? headerSlot : null,
       showHeader: dual,
       scrip: dual ? `${feed.scrip} (${boxText(st)})` : feed.scrip,
-      feedPrevClose: feed.trustedPrevClose,
-      sessionTag: feed.sessionTag,
+      feedPrevClose: rp ? null : feed.trustedPrevClose,
+      sessionTag: rp ? `Replay · ${crosshairStamp(replayT)}` : replay.picking ? 'Replay · pick a bar' : feed.sessionTag,
+      replayPick: replay.picking ? (t: number) => startReplayAt(c, t) : undefined,
+      replayStartT: rp ? replay.startT : null,
       // Every instrument gets TradingView's bottom time axis and crosshair date chip, so no top date strip or dashed date lines.
       sessionLines: false,
       timeAxis: true,
       sessionDividers: target.kind !== 'equity' && target.kind !== 'index',
       // Manual trade-bar markers (this browser session) + AUTO trades from the ledger, on their signal / reversal bars.
-      tradeMarkers: [...(markers[targetKey(target)] ?? []), ...autoMarkers(autoToday, targetKey(target)).map(m => ({ ...m, estimate: m.mode === 'REAL' }))],
+      tradeMarkers: rp
+        ? book.trades.filter(x => x.targetKey === tk).map(x => ({ id: x.id, t: x.t, action: x.side, price: x.price, lots: x.lots, mode: 'PAPER' as const, estimate: false }))
+        : [...(markers[tk] ?? []), ...autoMarkers(autoToday, tk).map(m => ({ ...m, estimate: m.mode === 'REAL' }))],
       error: feed.loaded?.error ?? (feed.complete ? undefined : contractError[c] ?? undefined),
       active: active === c,
       onActivate: dual ? () => activate(c) : undefined,
       markersShown: markersShown[c],
-      triangles: c === 2 ? tri2 : tri1,
+      triangles: rp ? (c === 2 ? rtri2 : rtri1) : c === 2 ? tri2 : tri1,
       triShown: triShown[c],
       triMin: triMin[c],
       onToggleTri: renko ? undefined : () => { const next = !triShown[c]; saveP(`${TRI_SHOW_KEY}${c}`, next ? '1' : '0'); setTriShown(v => ({ ...v, [c]: next })); },
       onCycleTriMin: renko ? undefined : () => { const next = triMin[c] >= 6 ? 3 : triMin[c] + 1; saveP(`${TRI_MIN_KEY}${c}`, String(next)); setTriMin(v => ({ ...v, [c]: next })); },
-      rail: railFor(c),
+      rail: rp ? practiceRailFor(c) : railFor(c),
       onToggleMarkers: () => {
         const next = !markersShown[c];
         saveP(`${MARKERS_SHOWN_KEY}${c}`, next ? '1' : '0');
         setMarkersShown(m => ({ ...m, [c]: next }));
       },
-      autoSlot: (
+      autoSlot: rp ? (
+        // Practice AUTO: the live engine's rules on the replayed chart, filled in the practice book
+        <button type="button" data-testid={`pnf-practice-auto-${c}`} aria-pressed={!!pAuto?.on} disabled={target.kind === 'index'}
+                onClick={() => setBook(b => practiceAutoArm(b, c, !b.auto[c]?.on, replayT, autoLots[c]))}
+                title={target.kind === 'index' ? 'No AUTO on an index' : 'Practice AUTO on the replayed chart: same rules as live AUTO, filled in the practice book'}
+                className={`inline-flex items-center gap-1 h-6 px-2 rounded-md border text-[10px] font-bold uppercase tracking-wider disabled:opacity-40 ${pAuto?.on ? 'border-sky-500/50 bg-sky-500/15 text-sky-300' : 'border-zinc-700 text-zinc-400 hover:text-zinc-100'}`}>
+          <Bot className="w-3 h-3" aria-hidden="true" />{pAuto?.on ? 'Practice AUTO on' : 'Practice AUTO'}
+          {pAuto?.position && <span className={pAuto.position.side === 'BUY' ? 'text-emerald-300' : 'text-red-300'}>{pAuto.position.side === 'BUY' ? 'LONG' : 'SHORT'}</span>}
+        </button>
+      ) : (
         <AutoControls chart={c} armed={autoArm[c].on} mode={tradeMode} lots={autoLots[c]} onLots={n => setLotsFor(c, n)}
                       onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} halt={autoOf(c).halt}
                       onResolve={autoOf(c).resolve} nowMs={now}
@@ -799,6 +911,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
               <XCircle className="w-3.5 h-3.5" aria-hidden="true" />
               Cancel all orders{workingRows.length ? ` (${workingRows.length})` : ''}
             </button>
+            <IconButton icon={Rewind} label={replay.active ? 'Close bar replay' : 'Bar replay'} onClick={toggleReplay} pressed={replay.active} />
             <IconButton icon={LocateFixed} label="Re-center" onClick={recenterNow} />
             <IconButton icon={Bell} label="Alert log" onClick={() => setLogOpen(o => !o)} pressed={logOpen} badge={log.length} />
             <IconButton icon={muted ? VolumeX : Volume2} label={muted ? 'Unmute alert sound' : 'Mute alert sound'} onClick={toggleMute} pressed={muted} />
@@ -809,7 +922,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       </header>
 
       {/* interactive 1-click execution trade bar */}
-      {tradeOpen && (
+      {tradeOpen && !replay.active && (
         <div className="shrink-0">
           <PnfTradeBar
             target={activeTarget}
@@ -870,6 +983,49 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
           )}
         </div>
       </div>
+      {replay.active && (() => {
+        const q = quoteOf(active);
+        const tk = targetKey(activeTarget);
+        const lots = openLots(book, tk);
+        const avg = (book.legs[tk] ?? []).reduce((sum, l) => sum + l.avg, 0);
+        const activeBars = activeFeed.bars;
+        return (
+          <>
+            {tradeMode === 'REAL' && (
+              <p className="shrink-0 px-4 py-1 text-[11px] text-amber-300 bg-amber-500/10 border-t border-amber-500/30">
+                REAL mode stays on underneath: working orders ({workingRows.length}) and positions at your broker keep running on live prices while you practise.
+              </p>
+            )}
+            <ReplayBar
+              picking={replay.picking} cursorT={replay.cursorT} playing={replay.playing} speed={replay.speed} ended={replay.ended}
+              savedCursorT={replay.saved && !replay.replaying ? replay.saved.cursorT : null}
+              dataEndT={activeBars.length ? activeBars[activeBars.length - 1].t : null}
+              stepLabel={intervalLabel(intervalOf(active))}
+              onPickBar={replay.pick}
+              onSelectDate={t => startReplayAt(active, t)}
+              onFirst={() => { const t = firstAvailableT(activeBars, activeFeed.loaded?.anchorT); if (t !== null) startReplayAt(active, t); }}
+              onRandom={() => { const t = randomStartT(activeBars, Math.random, activeFeed.loaded?.anchorT); if (t !== null) startReplayAt(active, t); }}
+              onContinue={() => { setBook({ ...EMPTY_BOOK, at: replay.saved?.cursorT ?? null }); replay.resume(); }}
+              onTogglePlay={replay.togglePlay}
+              onStep={replay.step}
+              onSpeed={replay.setSpeed}
+              onRealtime={replay.close}
+              onClose={replay.close}
+              practice={{
+                blocked: activeTarget.kind === 'index' ? 'Index: practise on its future or an option' : !q && replay.replaying ? 'Loading the contract…' : null,
+                lots: practiceLots,
+                onLots: setPracticeLots,
+                onBuy: () => { if (q) setBook(b => practiceFill(b, q, 'BUY', practiceLots, 'manual')); },
+                onSell: () => { if (q) setBook(b => practiceFill(b, q, 'SELL', practiceLots, 'manual')); },
+                onFlatten: () => { if (q) setBook(b => practiceFlatten(b, q)); },
+                position: lots === 0 ? 'FLAT' : `${lots > 0 ? 'LONG' : 'SHORT'} ${Math.abs(lots)}L @ ${avg.toFixed(2)}`,
+                pnl: practicePnl(book, practiceQuotes),
+                trades: book.trades.length,
+              }}
+            />
+          </>
+        );
+      })()}
       <BrokerBooks broker={broker} open={booksOpen} onOpenChange={changeBooksOpen} autoRows={autoToday} autoPrice={autoPrice}
         chartKeys={railCharts.find(c => c.chart === active)?.keys.filter(Boolean) ?? []} chartName={`C${active} · ${activeFeed.label}`} />
     </div>
