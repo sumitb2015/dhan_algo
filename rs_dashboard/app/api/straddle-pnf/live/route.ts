@@ -4,6 +4,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
 import { writeJsonAtomic } from '@/lib/lockedJsonFile';
+import { noteWanted, type WantedMap, type WantedPair } from '@/lib/pnfWanted';
 
 // Live price for the Point & Figure page, from the WebSocket bridge scripts/tools/pnf_ws.py (a consumer of the shared Market Data
 // Hub: ONE Dhan connection). This route only asks the bridge for the page's instrument and reads its quotes file: read-only, no orders.
@@ -22,7 +23,8 @@ const FILE_STALE_MS = 3_000;
 const HEARTBEAT_STALE_MS = 10_000;
 const START_EVERY_MS = 30_000;
 
-const state = ((globalThis as { __pnfWs?: { key: string; writtenAt: number; startAt: number } }).__pnfWs ??= { key: '', writtenAt: 0, startAt: 0 });
+// `wanted`: every chart's instruments asked for in the last few seconds (lib/pnfWanted.ts); the bridge streams their union.
+const state = ((globalThis as { __pnfWs?: { key: string; writtenAt: number; startAt: number; wanted?: WantedMap } }).__pnfWs ??= { key: '', writtenAt: 0, startAt: 0 });
 
 function readJson(file: string): Record<string, unknown> | null {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>; } catch { return null; }
@@ -87,9 +89,12 @@ export async function GET(request: NextRequest) {
   const now = Date.now();
   try {
     fs.mkdirSync(DEBUG_DIR, { recursive: true });
-    if (key !== state.key || now - state.writtenAt >= REWRITE_MS) {
-      writeJsonAtomic(WANTED_FILE, { pid: process.pid, updated_ms: now, instruments });
-      state.key = key; state.writtenAt = now;
+    // The union of every chart polling this process, not just this one: two charts on different instruments (the dual view, a
+    // P&F and a Renko tab) must not replace each other in the bridge's subscription on alternate polls.
+    const union = noteWanted(state.wanted ??= new Map(), key, instruments as WantedPair[], now);
+    if (union.signature !== state.key || now - state.writtenAt >= REWRITE_MS) {
+      writeJsonAtomic(WANTED_FILE, { pid: process.pid, updated_ms: now, instruments: union.pairs });
+      state.key = union.signature; state.writtenAt = now;
     }
   } catch (err) {
     return NextResponse.json({ success: false, error: `could not ask the bridge: ${(err as Error).message}` }, { status: 500 });

@@ -847,7 +847,11 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
           let colIdx = m.col;
           if (colIdx === undefined || colIdx < 0 || colIdx >= liveCols.length) {
             if (model.columnTimes && model.columnTimes.length > 0) {
-              const found = model.columnTimes.findIndex(ct => m.t >= ct.start && m.t <= ct.end);
+              let found = model.columnTimes.findIndex(ct => m.t >= ct.start && m.t <= ct.end);
+              // One bar can print several Renko bricks: the marker goes on the one of them that holds its price.
+              for (let j = found; found !== -1 && j < liveCols.length && model.columnTimes[j] && m.t >= model.columnTimes[j].start && m.t <= model.columnTimes[j].end; j++) {
+                if (m.price >= liveCols[j].low - 1e-9 && m.price <= liveCols[j].high + 1e-9) { found = j; break; }
+              }
               if (found !== -1) colIdx = found;
               else if (m.t > model.columnTimes[model.columnTimes.length - 1].end) colIdx = liveCols.length - 1;
               else colIdx = 0;
