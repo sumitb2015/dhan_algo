@@ -373,11 +373,24 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
   const cancelAllFor = async (targetKeyOf: string) => {
     for (const r of ledgerRef.current.rows) if (r.targetKey === targetKeyOf && r.state === 'working') await cancel(r, true);
   };
+  /** Drag a planned stop-loss / target of a working Bracket / Cover entry to another box: the entry's stop / target distance follows. */
+  const movePlanned = async (row: RestingRow, role: 'sl' | 'target', level: number) => {
+    const c = charts.find(x => x.targetKey === row.targetKey);
+    if (!c || !row.bracket || row.group || row.state !== 'working') return;
+    const entry = row.kind === 'stop' ? row.trigger ?? row.level : row.price;
+    const long = row.side === 'BUY';
+    const lv = snapToTick(level, c.tick, 'nearest');
+    const away = long ? lv < entry : lv > entry;                        // the stop-loss sits on the losing side, the target on the winning side
+    if ((role === 'sl') !== away) { toast.error(role === 'sl' ? `A stop-loss must sit ${long ? 'below' : 'above'} the entry (${entry})` : `A target must sit ${long ? 'above' : 'below'} the entry (${entry})`); return; }
+    const pts = Math.max(c.tick, +Math.abs(lv - entry).toFixed(6));
+    const r = await post({ op: 'bracket', id: row.id, ...(role === 'sl' ? { slPts: pts } : { tgtPts: pts }) });
+    if (!r.ok) toast.error(r.error ?? 'Not moved');
+  };
   /** Every working order on every chart (the header's Cancel all orders): broker orders are cancelled at the broker, page-held ones in the ledger. */
   const cancelEverything = async () => {
     for (const r of ledgerRef.current.rows) if (r.state === 'working') await cancel(r, true);
   };
-  return { ledger, place, modify, changeLots, cancel, openFor, armBracket, cancelBracketsFor, cancelAllFor, cancelEverything };
+  return { ledger, place, modify, changeLots, cancel, openFor, armBracket, cancelBracketsFor, cancelAllFor, cancelEverything, movePlanned };
 }
 
 /** A chart's contract as the server resolves it (the order route's GET): its tick and rupees per point per lot, per leg. */

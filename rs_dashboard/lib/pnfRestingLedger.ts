@@ -100,6 +100,8 @@ export type RestingOp =
   | { op: 'modify'; id: string; level: number; price: number; trigger?: number }
   /** Change the size of a working entry order (the + / - on its tag); a bracket exit is sized from the position, never from here. */
   | { op: 'lots'; id: string; lots: number }
+  /** Move a working Bracket / Cover entry's planned exits (dragging them in the ladder): the stop / target distance in points. */
+  | { op: 'bracket'; id: string; slPts?: number; tgtPts?: number }
   | { op: 'trigger'; id: string }
   | { op: 'fire'; id: string; t: number }
   | { op: 'fill'; id: string; price: number; t: number; /** A broker order cancelled after a part fill: the lots that did fill. */ lots?: number }
@@ -164,6 +166,15 @@ export function applyRestingOp(led: RestingLedger, op: RestingOp): Result {
       if (!Number.isInteger(op.lots) || op.lots < 1 || op.lots > lotCap(r.target)) return { ok: false, status: 400, error: `Lots must be a whole number from 1 to ${lotCap(r.target)}` };
       const k = op.lots / r.lots;
       return set(i, { lots: op.lots, unitsPerPoint: r.unitsPerPoint * k, ...(r.legUnits ? { legUnits: r.legUnits.map(u => u * k) } : {}) });
+    }
+    case 'bracket': {
+      const i = at(op.id); const bad = need(i, ['working']); if (bad) return bad;
+      const r = led.rows[i];
+      if (r.group || !r.bracket) return { ok: false, status: 409, error: 'Only a working Bracket / Cover entry has planned exits to move' };
+      const ok = (v: number | undefined) => v === undefined || (finite(v) && v > 0);
+      if (!ok(op.slPts) || !ok(op.tgtPts)) return { ok: false, status: 400, error: 'The stop-loss and target distances must be positive' };
+      if (op.tgtPts !== undefined && r.bracket.style !== 'Bracket') return { ok: false, status: 409, error: 'A Cover has no target' };
+      return set(i, { bracket: { ...r.bracket, ...(op.slPts !== undefined ? { slPts: op.slPts } : {}), ...(op.tgtPts !== undefined ? { tgtPts: op.tgtPts } : {}) } });
     }
     case 'trigger': {
       const i = at(op.id); const bad = need(i, ['working']); if (bad) return bad;

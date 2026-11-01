@@ -454,6 +454,65 @@ test('Bracket (PAPER): the entry that fills arms a stop-loss and a target at poi
   await expect(page.getByTestId('pnf-trade-position')).toHaveCount(0);
 });
 
+test('Bracket: the planned stop-loss can be dragged in the ladder, and the tags of an exit pair and the position never overlap', async ({ page }) => {
+  await page.setViewportSize({ width: 1500, height: 800 });
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  await page.getByTestId('pnf-style-bracket').click();
+  await page.getByLabel('Target boxes').fill('1');
+  await page.getByLabel('SL boxes').fill('1');
+  await page.getByLabel('SL boxes').press('Enter');
+  const { el, level } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+  const panel = page.getByTestId('pnf-panel').nth(0);
+  // drag the planned stop-loss two boxes further away: the entry's stop distance grows
+  const slBefore = state.ledger.rows[0].bracket!.slPts;
+  const planned = panel.locator('[data-testid="pnf-rail-planned"][data-role="sl"]');
+  await planned.evaluate(e => e.scrollIntoView({ block: 'center' }));
+  const bb = (await planned.boundingBox())!;
+  const px = bb.x + bb.width - 30, py = bb.y + bb.height / 2;                       // inside the dashed pill, not the price column
+  await page.mouse.move(px, py);
+  await page.mouse.down();
+  await page.mouse.move(px, py + 40, { steps: 6 });                                  // down = a lower box = a wider stop for a BUY
+  await page.mouse.up();
+  await expect.poll(() => state.ledger.rows[0]?.bracket?.slPts ?? 0).toBeGreaterThan(slBefore);
+  // after the fill: target, position and stop-loss tags are one box apart, yet none prints over another
+  state.tick = { ltp: level - 0.2, at: ist(10, 30, 15) };
+  await expect.poll(() => state.ledger.rows.filter(r => r.group).length, { timeout: 10_000 }).toBe(2);
+  await expect(panel.getByTestId('pnf-position-line')).toBeVisible();
+  const ys = await panel.evaluate(root => [...root.querySelectorAll('[data-testid="pnf-order-line"] > rect, [data-testid="pnf-position-line"] > rect')]
+    .map(r => r.getBoundingClientRect()).map(b => Math.round(b.y)).sort((a, b) => a - b));
+  expect(ys.length).toBe(3);
+  for (let i = 1; i < ys.length; i++) expect(ys[i] - ys[i - 1], `tags ${ys}`).toBeGreaterThanOrEqual(16);
+});
+
+test('Bracket: a placed stop-loss exit can be dragged to another box in the ladder', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  await page.getByTestId('pnf-style-bracket').click();
+  await page.getByLabel('Target boxes').fill('4');
+  await page.getByLabel('SL boxes').fill('4');
+  await page.getByLabel('SL boxes').press('Enter');
+  const { el, level } = await cell(page, 'BUY', 99.05);
+  await el.dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('working');
+  state.tick = { ltp: level - 0.2, at: ist(10, 30, 15) };
+  await expect.poll(() => state.ledger.rows.filter(r => r.group).length, { timeout: 10_000 }).toBe(2);
+  const before = state.ledger.rows.find(r => r.role === 'sl')!.level;
+  const sl = page.getByTestId('pnf-panel').nth(0).locator('[data-testid="pnf-rail-order"]').filter({ hasText: 'SL 1L' });
+  await sl.evaluate(e => e.scrollIntoView({ block: 'center' }));
+  const bb = (await sl.boundingBox())!;
+  await page.mouse.move(bb.x + bb.width / 2 - 8, bb.y + bb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bb.x + bb.width / 2 - 8, bb.y + bb.height / 2 + 40, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(() => state.ledger.rows.find(r => r.role === 'sl')?.level ?? before).toBeLessThan(before);
+  expect(state.ledger.rows.find(r => r.role === 'sl')!.state).toBe('working');
+});
+
 test('Bracket: an unfilled Bracket / Cover places nothing (the stop-loss points are required)', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
   const { state } = await install(page);

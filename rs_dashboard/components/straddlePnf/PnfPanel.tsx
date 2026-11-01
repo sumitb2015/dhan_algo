@@ -6,6 +6,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
 import type { PnfExecutionMarker } from '@/lib/straddlePnf';
 import { AlignLeft, AlignRight, Eye, EyeOff, MapPin, MapPinOff, Minus, Plus, RotateCcw, ChevronsLeftRight, ChevronsRightLeft } from 'lucide-react';
+import { layoutTags } from '@/lib/pnfTagLayout';
 import { timeAxisLabels, crosshairStamp } from '@/lib/straddlePnfTimeAxis';
 import { layoutPanel, AXIS_W, PAD_TOP, XSCALE_MIN, XSCALE_MAX } from '@/lib/straddlePnfLayout';
 import { MIN_BOX_PTS_PCT } from '@/lib/straddlePnfSettings';
@@ -112,6 +113,8 @@ export type PnfRail = {
   onCancel: (id: string) => void;
   /** + / - on a working entry order's tag: change its lots by `delta`. */
   onLots?: (id: string, delta: number) => void;
+  /** A planned stop-loss / target of a working Bracket / Cover entry was dragged to another box in the ladder. */
+  onPlannedMove?: (id: string, role: 'sl' | 'target', level: number) => void;
   /** The rail takes clicks (always in PAPER; in REAL only once unlocked). */
   armed?: boolean;
   onToggleArm?: () => void;
@@ -213,6 +216,32 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
   const orderRows = new Map<string, RailOrder>();
   for (const o of rail.orders) orderRows.set((drag?.id === o.id ? drag.level : o.level).toFixed(6), o);
   const tone = (side: 'BUY' | 'SELL') => (side === 'BUY' ? 'fill-emerald-500 stroke-emerald-200' : 'fill-red-500 stroke-red-200');
+  // Dragging a pill (a resting order, or a planned stop / target) to another box: the level follows the pointer, the commit is on release.
+  // The drag lives in a ref because pointer events arrive before React re-renders; near the chart's top / bottom edge it scrolls.
+  const dragHandlers = (id: string, level: number, commit: (level: number) => void) => ({
+    onPointerDown: (e: React.PointerEvent) => {
+      e.stopPropagation();
+      if (e.button !== 0) return;
+      (e.currentTarget as Element).setPointerCapture(e.pointerId);
+      setDrag({ id, level, start: level });
+    },
+    onPointerMove: (e: React.PointerEvent) => {
+      const d = dragRef.current;
+      const svg = (e.currentTarget as SVGGElement).ownerSVGElement;
+      if (d?.id !== id || !svg) return;
+      const sc = svg.parentElement?.parentElement;
+      if (sc) { const r = sc.getBoundingClientRect(); if (e.clientY < r.top + 28) sc.scrollTop -= 14; else if (e.clientY > r.bottom - 28) sc.scrollTop += 14; }
+      const next = levelAt(e.clientY - svg.getBoundingClientRect().top);
+      if (Math.abs(next - d.level) > box / 4) setDrag({ ...d, level: next });
+    },
+    onPointerUp: () => {
+      const d = dragRef.current;
+      if (d?.id !== id) return;
+      setDrag(null);
+      if (Math.abs(d.level - d.start) > box / 4) commit(d.level);
+    },
+    onPointerCancel: () => setDrag(null),
+  });
   return (
     <svg data-testid="pnf-rail" width={RAIL_W} height={contentH} className="block shrink-0 sticky bg-zinc-900 border-l border-zinc-700" style={{ right: AXIS_W }}
          onPointerLeave={() => setHot(null)} opacity={armed ? 1 : 0.55}>
@@ -236,7 +265,7 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
             <line x1={0} x2={RAIL_W} y1={y + cell / 2} y2={y + cell / 2} className="stroke-zinc-800" pointerEvents="none" />
             {isEntry && <rect x={0} y={y - cell / 2} width={RAIL_W} height={cell} className="fill-blue-500/25" pointerEvents="none" />}
             {isLive && <rect x={PX} y={y - cell / 2} width={RAIL_PRICE_W} height={cell} className="fill-amber-500/30" pointerEvents="none" />}
-            {ord && <rect x={PX + 1} y={y - Math.max(cell, 14) / 2} width={RAIL_PRICE_W - 2} height={Math.max(cell, 14)} rx={3} className={ord.side === 'BUY' ? 'fill-emerald-600/70' : 'fill-red-600/70'} pointerEvents="none" />}
+            {ord && <rect x={PX + 1} y={y - Math.max(cell, 14) / 2} width={RAIL_PRICE_W - 2} height={Math.max(cell, 14)} rx={3} className={ord.role === 'target' || (!ord.role && ord.side === 'BUY') ? 'fill-emerald-600/70' : 'fill-red-600/70'} pointerEvents="none" />}
             {showPrice && (
               <text x={PX + RAIL_PRICE_W / 2} y={y + 3.5} textAnchor="middle" pointerEvents="none" {...(ord ? { 'data-testid': 'pnf-rail-order-price', 'data-id': ord.id } : {})}
                     className={`font-mono ${ord ? 'fill-oncolor' : isLive ? 'fill-amber-300' : isEntry ? 'fill-blue-300' : 'fill-zinc-400'}`}
@@ -312,30 +341,8 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
         );
         return (
           <g key={o.id} data-testid="pnf-rail-order" data-id={o.id} className={movable ? 'cursor-ns-resize' : 'cursor-not-allowed'}
-             onPointerDown={e => {
-               e.stopPropagation();
-               if (!movable || e.button !== 0) return;
-               (e.currentTarget as Element).setPointerCapture(e.pointerId);
-               setDrag({ id: o.id, level: o.level, start: o.level });
-             }}
-             onPointerMove={e => {
-               const d = dragRef.current;
-               const svg = (e.currentTarget as SVGGElement).ownerSVGElement;
-               if (d?.id !== o.id || !svg) return;
-               // Near the top / bottom edge of the chart: scroll it, so a level beyond the view can still be reached.
-               const sc = svg.parentElement?.parentElement;
-               if (sc) { const r = sc.getBoundingClientRect(); if (e.clientY < r.top + 28) sc.scrollTop -= 14; else if (e.clientY > r.bottom - 28) sc.scrollTop += 14; }
-               const next = levelAt(e.clientY - svg.getBoundingClientRect().top);
-               if (Math.abs(next - d.level) > box / 4) setDrag({ ...d, level: next });
-             }}
-             onPointerUp={() => {
-               const d = dragRef.current;
-               if (d?.id !== o.id) return;
-               setDrag(null);
-               if (Math.abs(d.level - d.start) > box / 4) rail.onModify(o.id, d.level);
-             }}
-             onPointerCancel={() => setDrag(null)}>
-            <rect x={x0} y={y - 9} width={W} height={18} rx={o.kind === 'stop' ? 9 : 4} className={tone(o.side)} strokeWidth={1} opacity={movable ? 1 : 0.5} />
+             {...(movable ? dragHandlers(o.id, o.level, lv => rail.onModify(o.id, lv)) : { onPointerDown: (e: React.PointerEvent) => e.stopPropagation() })}>
+            <rect x={x0} y={y - 9} width={W} height={18} rx={o.kind === 'stop' ? 9 : 4} className={o.role === 'target' ? 'fill-emerald-600 stroke-emerald-200' : o.role === 'sl' ? 'fill-red-600 stroke-red-200' : tone(o.side)} strokeWidth={1} opacity={movable ? 1 : 0.5} />
             {/* an entry order is `[-] 1L [+] [x]` (the chart's tag and the PRICE column say LMT / SL and the price); a bracket exit has no - / +,
                 so it keeps its word: `SL 1L [x]` / `TGT 1L [x]` */}
             {stepper && btn('pnf-rail-lots-down', x0 + 9, '−', `Remove a lot: ${o.side} ${kindWord} at ${fmt(o.level, 2)}`, () => rail.onLots!(o.id, -1))}
@@ -346,16 +353,26 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
           </g>
         );
       })}
-      {/* the exits a working Bracket / Cover entry will place when it fills: dimmed, dashed, in the exit side's column, price in PRICE */}
+      {/* the exits a working Bracket / Cover entry will place when it fills: dashed, in the exit side's column, drag to another box to
+          change the entry's stop / target distance. The price is in the PRICE column like any other level. */}
       {rail.orders.flatMap(o => (o.planned ?? []).map(k => ({ o, k }))).map(({ o, k }) => {
         const exitSide = o.side === 'BUY' ? 'SELL' : 'BUY';
-        const y = yOf(k.level);
+        const pid = `plan:${o.id}:${k.role}`;
+        const dragging = drag?.id === pid;
+        const level = dragging ? drag.level : k.level;
+        const y = yOf(level);
         if (y < 0 || y > contentH) return null;
         const x0 = colX(exitSide) + 2;
+        const sl = k.role === 'sl';
+        const movable = o.state === 'working' && !!rail.onPlannedMove;
         return (
-          <g key={`plan-${o.id}-${k.role}`} data-testid="pnf-rail-planned" data-role={k.role} data-level={k.level} pointerEvents="none" opacity={0.7}>
-            <rect x={x0} y={y - 9} width={RAIL_SIDE_W - 4} height={18} rx={4} className="fill-zinc-800 stroke-zinc-400" strokeWidth={1} strokeDasharray="3 2" />
-            <text x={x0 + (RAIL_SIDE_W - 4) / 2} y={y + 3.5} textAnchor="middle" className={`font-mono ${k.role === 'sl' ? 'fill-red-300' : 'fill-emerald-300'}`} fontSize={10} fontWeight={800}>{`${k.role === 'sl' ? 'SL' : 'TGT'} ${fmt(k.level, axisDigits)}`}</text>
+          <g key={pid} data-testid="pnf-rail-planned" data-role={k.role} data-level={level} data-entry={o.id} role="button" aria-label={`Planned ${sl ? 'stop-loss' : 'target'} at ${fmt(level, axisDigits)}`} className={movable ? 'cursor-ns-resize' : ''}
+             {...(movable ? dragHandlers(pid, k.level, lv => rail.onPlannedMove!(o.id, k.role, lv)) : {})}>
+            <rect x={PX + 1} y={y - Math.max(cell, 14) / 2} width={RAIL_PRICE_W - 2} height={Math.max(cell, 14)} rx={3} className={sl ? 'fill-red-500/25' : 'fill-emerald-500/25'} pointerEvents="none" />
+            <text x={PX + RAIL_PRICE_W / 2} y={y + 3.5} textAnchor="middle" className={`font-mono ${sl ? 'fill-red-400' : 'fill-emerald-400'}`} fontSize={10} fontWeight={800} pointerEvents="none">{fmt(level, axisDigits)}</text>
+            <rect x={x0} y={y - 9} width={RAIL_SIDE_W - 4} height={18} rx={4} className={sl ? 'fill-red-500/15 stroke-red-500' : 'fill-emerald-500/15 stroke-emerald-500'} strokeWidth={1.25} strokeDasharray="3 2" />
+            <text x={x0 + (RAIL_SIDE_W - 4) / 2} y={y + 3.5} textAnchor="middle" className={`font-mono ${sl ? 'fill-red-400' : 'fill-emerald-400'}`} fontSize={10.5} fontWeight={800} pointerEvents="none">{sl ? 'SL' : 'TGT'}</text>
+            <title>{`Planned ${sl ? 'stop-loss' : 'target'} at ${fmt(level, axisDigits)}${movable ? ' — drag to change it' : ''}`}</title>
           </g>
         );
       })}
@@ -562,6 +579,18 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     () => (timeAxis ? timeAxisLabels(model.columnTimes.map(t => t.start), model.columnTimes.map((_, j) => offsetX + j * colW + colW / 2)) : []),
     [timeAxis, model.columnTimes, offsetX, colW],
   );
+  // Tags at the chart's right edge (resting orders, planned exits, the open position): tags whose levels are within a row or two of each
+  // other are spread apart (and re-centred on their levels) so no two print over each other. The level lines stay at the true price.
+  const railTagY = (() => {
+    if (!rail || rail.linesShown === false) return new Map<string, number>();
+    const items: { key: string; y: number }[] = [];
+    for (const o of rail.orders) {
+      items.push({ key: `o:${o.id}`, y: yOf(railDrag?.id === o.id ? railDrag.level : o.level) });
+      for (const k of o.planned ?? []) items.push({ key: `p:${o.id}:${k.role}`, y: yOf(railDrag?.id === `plan:${o.id}:${k.role}` ? railDrag.level : k.level) });
+    }
+    if (rail.position && rail.position.avg !== null) items.push({ key: 'pos', y: yOf(rail.position.avg) });
+    return layoutTags(items, 18);
+  })();
   const cross = (() => {
     if (!hover || dragging || box <= 0 || !liveCols.length) return null;
     const row = Math.floor((hover.y - rowTop) / cell);
@@ -1107,8 +1136,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               {rail?.linesShown !== false && rail?.position && rail.position.avg !== null && (() => {
                 const pos = rail.position;
                 const lineY = yOf(pos.avg as number);
-                // The tag steps up a row when a resting order's tag would sit on top of it.
-                const y = rail.orders.some(o => Math.abs(yOf(o.level) - lineY) < 18) ? lineY - 18 : lineY;
+                const y = railTagY.get('pos') ?? lineY;
                 const text = `${pos.side} ${pos.lots}L @ ${fmt(pos.avg as number, 2)}${pos.pnl === null ? '' : ` · ${rupees(pos.pnl)}`}`;
                 const w = text.length * 6.2 + 12;
                 const x = rail.alignLeft ? Math.max(4, viewLeft + 6) : Math.max(4, Math.min(plotW, viewRight ?? plotW) - w - 6);
@@ -1122,29 +1150,54 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 );
               })()}
 
-              {/* resting orders: a line across the chart at the level, and a tag by the newest columns (× cancels) */}
+              {/* resting orders: a line across the chart at the level, and a tag by the newest columns (× cancels). An exit is green (target) or
+                  red (stop-loss) whichever side it sells on; tags that would overlap are spread apart (railTagY), the line stays at the level. */}
               {rail && rail.linesShown !== false && rail.orders.map(o => {
                 const level = railDrag?.id === o.id ? railDrag.level : o.level;
                 const y = yOf(level);
+                const ty = railTagY.get(`o:${o.id}`) ?? y;
                 const buy = o.side === 'BUY';
                 const text = orderText(o, railDrag?.id === o.id ? level : undefined);
-                const live = o.state === 'working';
                 const w = text.length * 6 + 22;
                 const x = rail.alignLeft ? Math.max(4, viewLeft + 6) : Math.max(4, Math.min(plotW, viewRight ?? plotW) - w - 6);
+                const live = o.state === 'working';
+                const tgt = o.role === 'target', sl = o.role === 'sl';
+                const lineCls = tgt ? 'stroke-emerald-400' : sl ? 'stroke-red-400' : buy ? 'stroke-emerald-400' : 'stroke-red-400';
+                const fillCls = tgt ? 'fill-emerald-700' : sl ? 'fill-red-600' : buy ? 'fill-emerald-600' : 'fill-red-600';
                 return (
-                  <g key={o.id} data-testid="pnf-order-line" data-side={o.side} data-kind={o.kind} data-state={o.state}>
-                    <line x1={0} x2={plotW} y1={y} y2={y} strokeWidth={1} strokeDasharray={o.mode === 'PAPER' ? '2 3' : '6 3'}
-                          className={buy ? 'stroke-emerald-400' : 'stroke-red-400'} />
-                    <rect x={x} y={y - 8} width={w} height={16} rx={3} className={buy ? 'fill-emerald-600' : 'fill-red-600'} opacity={live ? 1 : 0.55} />
-                    <text x={x + 5} y={y + 3.5} className="fill-oncolor font-mono" fontSize={10} fontWeight={700}>{text}</text>
+                  <g key={o.id} data-testid="pnf-order-line" data-side={o.side} data-kind={o.kind} data-state={o.state} data-role={o.role ?? ''}>
+                    <line x1={0} x2={plotW} y1={y} y2={y} strokeWidth={1} strokeDasharray={o.mode === 'PAPER' ? '2 3' : '6 3'} className={lineCls} />
+                    {Math.abs(ty - y) > 1 && <line x1={x} x2={x - 10} y1={ty} y2={y} strokeWidth={1} className={lineCls} />}
+                    <rect x={x} y={ty - 8} width={w} height={16} rx={3} className={fillCls} opacity={live ? 1 : 0.55} />
+                    <text x={x + 5} y={ty + 3.5} className="fill-oncolor font-mono" fontSize={10} fontWeight={700}>{text}</text>
                     {(live || o.resolvable) && (
                       <g data-testid={live ? 'pnf-order-cancel' : 'pnf-order-resolve'} role="button"
                          aria-label={`${live ? 'Cancel' : 'Settle (outcome unknown)'} ${o.side} ${o.kind === 'limit' ? 'limit' : 'SL-limit'} at ${fmt(o.level, 2)}`}
                          className="cursor-pointer" onPointerDown={e => { e.stopPropagation(); rail.onCancel(o.id); }}>
-                        <rect x={x + w - 15} y={y - 6} width={12} height={12} rx={2} className="fill-oncolor-dark/30" />
-                        <text x={x + w - (live ? 12 : 13)} y={y + 3.5} className="fill-oncolor" fontSize={10} fontWeight={700}>{live ? '×' : '?'}</text>
+                        <rect x={x + w - 15} y={ty - 6} width={12} height={12} rx={2} className="fill-oncolor-dark/30" />
+                        <text x={x + w - (live ? 12 : 13)} y={ty + 3.5} className="fill-oncolor" fontSize={10} fontWeight={700}>{live ? '×' : '?'}</text>
                       </g>
                     )}
+                    {/* the exits this entry will place at its fill: dotted, dim, with their own tag */}
+                    {(o.planned ?? []).map(k => {
+                      const lv = railDrag?.id === `plan:${o.id}:${k.role}` ? railDrag.level : k.level;
+                      const py = yOf(lv);
+                      const pty = railTagY.get(`p:${o.id}:${k.role}`) ?? py;
+                      const ptxt = `${k.role === 'sl' ? 'SL' : 'TGT'} @ ${fmt(lv, 2)} · planned`;
+                      const pw = ptxt.length * 6 + 12;
+                      const px = rail.alignLeft ? Math.max(4, viewLeft + 6) : Math.max(4, Math.min(plotW, viewRight ?? plotW) - pw - 6);
+                      const pc = k.role === 'sl' ? 'red' : 'emerald';
+                      return (
+                        <g key={k.role} data-testid="pnf-planned-line" data-role={k.role}>
+                          <line x1={0} x2={plotW} y1={py} y2={py} strokeWidth={1} strokeDasharray="1 4" opacity={0.75} className={pc === 'red' ? 'stroke-red-500' : 'stroke-emerald-500'} />
+                          {Math.abs(pty - py) > 1 && <line x1={px} x2={px - 10} y1={pty} y2={py} strokeWidth={1} className={pc === 'red' ? 'stroke-red-500' : 'stroke-emerald-500'} />}
+                          {/* an opaque page-coloured plate under the tint, so the grid does not run through the text */}
+                          <rect x={px} y={pty - 8} width={pw} height={16} rx={3} className="fill-zinc-900" />
+                          <rect x={px} y={pty - 8} width={pw} height={16} rx={3} className={pc === 'red' ? 'fill-red-500/15 stroke-red-500' : 'fill-emerald-500/15 stroke-emerald-500'} strokeWidth={1.25} strokeDasharray="3 2" />
+                          <text x={px + 6} y={pty + 3.5} className={`font-mono ${pc === 'red' ? 'fill-red-400' : 'fill-emerald-400'}`} fontSize={10} fontWeight={800}>{ptxt}</text>
+                        </g>
+                      );
+                    })}
                   </g>
                 );
               })}

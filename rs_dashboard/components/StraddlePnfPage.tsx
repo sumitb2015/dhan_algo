@@ -497,6 +497,7 @@ function StraddlePnfPage() {
       onModify: (id: string, level: number) => { const r = byId(id); if (r) void resting.modify(r, level); },
       onCancel: (id: string) => { const r = byId(id); if (r) void resting.cancel(r); },
       onLots: (id: string, delta: number) => { const r = byId(id); if (r) void resting.changeLots(r, delta); },
+      onPlannedMove: (id: string, role: 'sl' | 'target', level: number) => { const r = byId(id); if (r) void resting.movePlanned(r, role, level); },
     };
   };
   const auto1 = usePnfAuto({

@@ -131,3 +131,17 @@ test('lots: a working entry order is resized with its paper value scaled; a brac
   const filled = run(run(EMPTY_RESTING, { op: 'create', row: row() }), { op: 'fill', id: 'o1', price: 99, t: 2000 });
   refused(filled, { op: 'lots', id: 'o1', lots: 2 });
 });
+
+test('bracket: the planned stop / target distances of a working Bracket entry can be moved; a Cover has no target; exits and plain orders are refused', () => {
+  const br = { style: 'Bracket' as const, tgtPts: 0.5, slPts: 0.4 };
+  let l = run(EMPTY_RESTING, { op: 'create', row: row({ bracket: br }) });
+  l = run(l, { op: 'bracket', id: 'o1', slPts: 0.2, tgtPts: 0.9 });
+  assert.deepEqual(l.rows[0].bracket, { style: 'Bracket', tgtPts: 0.9, slPts: 0.2 });
+  refused(l, { op: 'bracket', id: 'o1', slPts: 0 });
+  refused(l, { op: 'bracket', id: 'o1', tgtPts: -1 });
+  const cover = run(EMPTY_RESTING, { op: 'create', row: row({ bracket: { style: 'Cover', tgtPts: 0, slPts: 0.4 } }) });
+  refused(cover, { op: 'bracket', id: 'o1', tgtPts: 1 });
+  assert.equal(run(cover, { op: 'bracket', id: 'o1', slPts: 0.3 }).rows[0].bracket?.slPts, 0.3);
+  refused(run(EMPTY_RESTING, { op: 'create', row: row() }), { op: 'bracket', id: 'o1', slPts: 1 });
+  refused(run(EMPTY_RESTING, { op: 'create', row: row({ id: 'x', group: 'g', role: 'sl' }) }), { op: 'bracket', id: 'x', slPts: 1 });
+});
