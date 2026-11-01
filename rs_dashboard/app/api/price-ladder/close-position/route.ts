@@ -10,7 +10,7 @@ import { resolveLotSize } from '@/lib/lotSize';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { brokerPositionRows, brokerSessionOk, updateLadderState, readLadderState, startPriceLadderLoop } from '@/lib/priceLadderServer';
 import { zerodhaLadderParams, pushEvent, ev, type LadderBroker } from '@/lib/priceLadder';
-import { planClose, isClosePct, CloseGuard, ladderExitInFlight, synLegOwner } from '@/lib/priceLadderClose';
+import { planClose, isClosePct, sharedCloseGuard, ladderExitInFlight, synLegOwner } from '@/lib/priceLadderClose';
 
 // Close all or part of a broker position from the Price Ladder's positions window. Real money, so the browser only names
 // the position (broker + contract key + product) and a share; the side, quantity and segment come from the broker's own
@@ -20,7 +20,8 @@ import { planClose, isClosePct, CloseGuard, ladderExitInFlight, synLegOwner } fr
 
 const NAME: Record<LadderBroker, string> = { dhan: 'Dhan', kotak: 'Kotak', zerodha: 'Zerodha' };
 const bad = (error: string, status = 400) => NextResponse.json({ success: false, error }, { status });
-const guard: CloseGuard = ((globalThis as { __priceLadderCloseGuard?: CloseGuard }).__priceLadderCloseGuard ??= new CloseGuard());
+// Shared with the watcher: it holds the ladder's own exit of a position while a close from here is in flight / cooling down.
+const guard = sharedCloseGuard();
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   startPriceLadderLoop();

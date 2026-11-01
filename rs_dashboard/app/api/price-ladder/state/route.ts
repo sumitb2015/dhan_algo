@@ -29,6 +29,7 @@ const tickOf = (c: Pick<LadderContract, 'opt' | 'tick'>) => (c.opt === 'FUT' ? (
 const parseBroker = (v: unknown): LadderBroker | null => (v === 'dhan' || v === 'kotak' || v === 'zerodha' ? v : null);
 const BROKER_NAME: Record<LadderBroker, string> = { dhan: 'Dhan', kotak: 'Kotak', zerodha: 'Zerodha' };
 const bad = (error: string, status = 400) => NextResponse.json({ success: false, error }, { status });
+const DISARMED = 'LIVE · REAL MONEY was switched off — nothing was sent';
 const newId = () => newLadderId('pl');
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
@@ -170,12 +171,15 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   if (b.kind === 'xy') {
     const slice: LadderSlice = { ...base, entryLevel: level, entryDir: verdict.dir, seenSafe: true, orderType, ...(zones === 'anywhere' ? { zones } : {}), ...(bracket ? { bracket } : {}) };
     const br = bracket ? ` · ${bracket.tgtPts > 0 ? `TGT ${bracket.tgtPts} / ` : 'Cover · '}SL ${bracket.slPts}${bracket.trailPts ? ` / trailing ${bracket.trailPts} behind` : ''} pts` : '';
-    let capped = false;
+    let capped = false, disarmed = false;
     const s = await updateLadderState(st => {
+      // Re-checked inside the lock: the REAL arm may have been switched off during the awaits above.
+      if (slice.mode === 'real' && !realArmed(st, istDay(now))) { disarmed = true; return st; }
       // Re-checked inside the lock: two clicks in flight must not both pass the read above.
       if (lotsHeld(st, slice) + lots > MAX_LADDER_LOTS) { capped = true; return st; }
       return pushEvent({ ...st, slices: [...st.slices, slice] }, ev('info', `Armed ${what} when ${u} ${verdict.dir === 'below' ? '≤' : '≥'} ${level}${br}`, slice.id));
     });
+    if (disarmed) return bad(DISARMED, 403);
     if (capped) return bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
     return NextResponse.json({ success: true, data: { id: slice.id, state: s } });
   }
@@ -188,8 +192,9 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   const kindLabel = verdict.kind === 'limit' ? 'LIMIT' : stopLimit ? 'SL-limit' : 'SL';
   const at = stopLimit ? `trigger ${level} → limit ${stopLimit.toFixed(2)}` : `@ ${level}`;
   // Re-checked inside the lock like the XY arm and the Market button: two clicks in flight must not both pass the read above.
-  let capped = false;
+  let capped = false, disarmed = false;
   const withPlain = (add: LadderSlice, log?: ReturnType<typeof ev>) => (st: LadderState): LadderState => {
+    if (add.mode === 'real' && !realArmed(st, istDay(now))) { disarmed = true; return st; }
     if (lotsHeld(st, add) + lots > MAX_LADDER_LOTS) { capped = true; return st; }
     const next = { ...st, slices: [...st.slices, add] };
     return log ? pushEvent(next, log) : next;
@@ -202,6 +207,7 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   }
   // REAL: checkpoint before the order (Triple Straddle rule) — if this write fails nothing is sent.
   await updateLadderState(withPlain({ ...plain, state: 'placing', sentAt: now }));
+  if (disarmed) return bad(DISARMED, 403);
   if (capped) return cappedReply();
   const r = await withJob(plain.id, () => safePlace(plain, b.side, qty, true, verdict.kind === 'limit'
     ? { type: 'LIMIT', price: level }
@@ -266,8 +272,10 @@ async function marketOrder(b: Record<string, unknown>): Promise<NextResponse> {
     if (blocked) return bad(blocked);
   }
   const what = `${mode === 'sim' ? 'SIM ' : ''}${side} ${lots} lot(s) ${u} ${legTag(c)} at MARKET`;
-  let capped = false;
+  let capped = false, disarmed = false;
   const withSlice = (st: LadderState): LadderState => {
+    // Re-checked inside the lock: the REAL arm may have been switched off during the awaits above.
+    if (mode === 'real' && !realArmed(st, istDay(now))) { disarmed = true; return st; }
     // Re-checked inside the lock: two clicks in flight must not both pass the read above.
     if (lotsHeld(st, child) + lots > MAX_LADDER_LOTS) { capped = true; return st; }
     return { ...st, slices: [...st.slices, child] };
@@ -279,6 +287,7 @@ async function marketOrder(b: Record<string, unknown>): Promise<NextResponse> {
   }
   // REAL: checkpoint before the order; the watcher settles its fill like any entry.
   await updateLadderState(withSlice);
+  if (disarmed) return bad(DISARMED, 403);
   if (capped) return bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
   const r = await withJob(child.id, () => safePlace(child, side, qty, true));
   const s = await commitIf(child.id, 'placing', st => pushEvent(afterSend(st, child.id, r, 'entry'), ev('info', `${what}: ${r.status}`, child.id)));
@@ -344,10 +353,14 @@ async function addLot(id: string): Promise<NextResponse> {
     return NextResponse.json({ success: true, data: { id: child.id, state: s } });
   }
   // REAL: checkpoint before the order; the watcher settles its fill like any entry.
+  let disarmed = false;
   await updateLadderState(st => {
+    // Re-checked inside the lock: the REAL arm may have been switched off during the awaits above.
+    if (!realArmed(st, istDay(now))) { disarmed = true; return st; }
     if (lotsHeld(st, child) + 1 > MAX_LADDER_LOTS) { capped = true; return st; }
     return { ...st, slices: [...st.slices, child] };
   });
+  if (disarmed) return bad(DISARMED, 403);
   if (capped) return bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
   const r = await withJob(child.id, () => safePlace(child, child.side, qty, true));
   const s = await commitIf(child.id, 'placing', st => pushEvent(afterSend(st, child.id, r, 'entry'), ev('info', `${what} at MARKET: ${r.status}`, child.id)));

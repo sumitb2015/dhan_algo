@@ -97,11 +97,19 @@ per write; the page drops a view older than the one on screen). It is re-read on
     (`priceLadder.ts`: same broker, contract, product, REAL, state `open`, opposite side, oldest first) and only the excess opens a
     slice. Without it the closing order showed as a new position for `FILL_GRACE_MS`, until `reconcileDown` cut it. Pair / basket
     legs are not netted this way. Gap: a partial close does not book the closed part's P&L (2026-10-26).
+17. **Two writers never size off one lagging row** (2026-11-01 review). (a) `reconcileDown` skips any row with a REAL entry on the
+    wire (`rowsWithEntryInFlight`, `lib/priceLadderReconcile.ts`: slice placing/working/UNKNOWN, pair/basket leg sent/UNKNOWN or
+    not yet sent, a roll's new strikes) and re-checks each cut at write time (holder qty unchanged, row still not in flight).
+    Otherwise an opposite close netted by the broker before its settle got cut as "closed outside", and the settle then opened the
+    fill as a phantom slice. (b) The positions-window route and the watcher share ONE `sharedCloseGuard()` (`priceLadderClose.ts`):
+    while a window close of a row is in flight or in its 8 s cooldown, slice / pair / basket exits on that row wait 3 s and size
+    again, and `inExitGrace` stops trusting the ledger once a window close went out after the position opened. A new exit path or a
+    new close route must use both. A part-filled resting entry carries `partFilled` / `partAvg` (MTM only; NOT `filledQty`).
 15. **`settings` lives in two places** (the settings file and `state.settings`; the state's wins, shallow). Change a cutoff only
     through `setCutoffsFromBody`.
 
 ## Tests
-- `node --test lib/priceLadder*.test.ts` (unit; ~150).
+- `node --test lib/priceLadder*.test.ts` (unit; ~240).
 - `E2E_PORT=3000 PW_CHROMIUM_PATH=/usr/bin/google-chrome npx playwright test e2e/price-ladder.spec.ts` when the dashboard is
   on :3000 (see CLAUDE.md: never let Playwright start a second `next dev`). The spec fakes `/api/price-ladder/state` in the
   browser, refuses the SSE stream and any unmocked non-GET (599); it cannot place an order. The close-position cases mock

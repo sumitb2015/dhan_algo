@@ -715,3 +715,14 @@ test('unknownEntryVerdict: absent only when the book holds no match and no unrea
   assert.deepEqual(unknownEntryVerdict({ ids: ['9'], unreadable: 1 }), { kind: 'unsure' });
   assert.deepEqual(unknownEntryVerdict({ ids: [''], unreadable: 0 }), { kind: 'unsure' });             // matched but no order number
 });
+
+test('settleOrder: a part-filled working order waits but reports what filled and its average', () => {
+  assert.deepEqual(settleOrder({ orderStatus: 'PART_TRADED', filledQty: 65, averageTradedPrice: 11.5, quantity: 130 }), { kind: 'wait', filledQty: 65, avg: 11.5 });
+});
+
+test('sliceNowPnl: a REAL resting entry part-filled counts its filled units; unfilled it counts nothing', () => {
+  const part = slice({ state: 'working', mode: 'real', partFilled: 65, partAvg: 10 });
+  assert.equal(sliceNowPnl(part, 12), 130);
+  assert.equal(sliceNowPnl(part, undefined), null);                    // held but unpriced: the total is unknown
+  assert.equal(sliceNowPnl(slice({ state: 'working', mode: 'real' }), 12), undefined);
+});

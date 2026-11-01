@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planClose, isClosePct, CloseGuard, CLOSE_COOLDOWN_MS, synLegOwner } from './priceLadderClose.ts';
+import { planClose, isClosePct, CloseGuard, CLOSE_COOLDOWN_MS, synLegOwner, inExitGrace } from './priceLadderClose.ts';
 
 test('planClose: a short is closed with a BUY, a long with a SELL, 100% sends |net| verbatim', () => {
   assert.deepEqual(planClose(-195, 65, 100), { side: 'BUY', qty: 195 });
@@ -69,4 +69,25 @@ test('synLegOwner: a leg of a live REAL synthetic is refused; SIM, closed and ot
   assert.match(synLegOwner(st([b({ state: 'placing' })]), 'dhan', '222') ?? '', /synthetic/);
   assert.equal(synLegOwner(st([b({ kind: undefined })]), 'dhan', '222'), null);      // an ordinary basket is the ladder's exit-in-flight rule's business
   assert.equal(synLegOwner(st([b({})]), 'kotak', '222'), null);
+});
+
+test('CloseGuard.holds: true while a close runs and through its cooldown; lastSentAt only after a send', () => {
+  const g = new CloseGuard();
+  assert.equal(g.holds('k', 1000), false);
+  g.tryStart('k', 1000);
+  assert.equal(g.holds('k', 1001), true);                                     // on the wire
+  assert.equal(g.lastSentAt('k'), null);
+  g.finish('k', 2000, true);
+  assert.equal(g.holds('k', 2000 + CLOSE_COOLDOWN_MS - 1), true);             // the book may still show it
+  assert.equal(g.holds('k', 2000 + CLOSE_COOLDOWN_MS), false);
+  assert.equal(g.lastSentAt('k'), 2000);
+  g.tryStart('n', 3000); g.finish('n', 3100, false);                           // refused before sending: no hold
+  assert.equal(g.holds('n', 3101), false);
+});
+
+test('inExitGrace: the fill grace trusts the ledger, except after a positions-window close of the row', () => {
+  assert.equal(inExitGrace(1000, 5000, 20_000, null), true);
+  assert.equal(inExitGrace(1000, 30_000, 20_000, null), false);
+  assert.equal(inExitGrace(1000, 5000, 20_000, 3000), false);                 // closed from the window after it opened
+  assert.equal(inExitGrace(4000, 5000, 20_000, 3000), true);                  // that close was before this fill
 });

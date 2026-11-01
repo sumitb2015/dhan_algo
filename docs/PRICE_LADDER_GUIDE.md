@@ -90,7 +90,9 @@ The Positions tab of the books window has a **Close** column: 25 / 50 / 75 % (wh
 row, MARKET, after a confirm. The browser sends only the broker, the contract key, the product and the share
 (`/api/price-ladder/close-position`); the server re-reads the broker's own book, derives the side and quantity, and the
 order can only reduce that position. No REAL arm is needed (an exit). One close per position at a time, then an 8 s cooldown
-while the book catches up. It is refused while the ladder itself is exiting that contract (a second exit would flip the position). Not supported from here: Kotak / Zerodha MCX (quantity units unconfirmed), non-F&O rows. A ladder
+while the book catches up. It is refused while the ladder itself is exiting that contract (a second exit would flip the position),
+and the reverse holds too: while a close from here is in flight or in its cooldown, the ladder's own exit of that position
+(bracket, MTM guard, square-off, Exit) waits and is sized again from the book a few seconds later. Not supported from here: Kotak / Zerodha MCX (quantity units unconfirmed), non-F&O rows. A ladder
 slice on the same contract is trimmed by the watcher's down-only reconcile once the book shows the change. Order-book
 edit / cancel stays view-only on this page.
 

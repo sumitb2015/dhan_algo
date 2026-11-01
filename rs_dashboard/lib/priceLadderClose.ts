@@ -46,6 +46,36 @@ export class CloseGuard {
     if (sent) this.last.set(key, now);
     for (const [k, at] of this.last) if (now - at > 60_000) this.last.delete(k);
   }
+  /** A close of this position is on the wire, or went out less than the cooldown ago (the book may not show it yet). */
+  holds(key: string, now: number): boolean {
+    if (this.busy.has(key)) return true;
+    const at = this.last.get(key);
+    return at != null && now - at < CLOSE_COOLDOWN_MS;
+  }
+  /** When the last close of this position went out (within the last minute), or null. */
+  lastSentAt(key: string): number | null {
+    return this.last.get(key) ?? null;
+  }
+}
+
+/**
+ * The one guard of this server process, shared by the positions-window route and the ladder's watcher: the watcher holds
+ * its own exit of a position while a window close of it is in flight or cooling down. Sized off the same lagging book,
+ * both exits went out and flipped the position (seen in review, 2026-11-01). Keyed `${broker}|${key}|${product}`, the
+ * key and product as the broker book spells them (Dhan: security id + INTRADAY / MARGIN).
+ */
+export const sharedCloseGuard = (): CloseGuard =>
+  ((globalThis as { __priceLadderCloseGuard?: CloseGuard }).__priceLadderCloseGuard ??= new CloseGuard());
+
+/**
+ * Units a ladder exit may send off the broker book. Inside the fill grace the book may not show a fresh fill yet, so the
+ * ladder trusts its own quantity — unless a positions-window close of that row went out after the position opened: then
+ * the book is the only truth (trusting the ledger there sent a second full exit).
+ */
+export function inExitGrace(openedAt: number | undefined, now: number, graceMs: number, windowCloseAt: number | null): boolean {
+  const opened = openedAt ?? 0;
+  if (windowCloseAt != null && windowCloseAt >= opened) return false;
+  return now - opened < graceMs;
 }
 
 /**

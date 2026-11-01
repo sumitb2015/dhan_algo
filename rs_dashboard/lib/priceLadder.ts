@@ -205,6 +205,10 @@ export interface LadderSlice {
   sentAt?: number;
   /** REAL Kotak entry that came back UNKNOWN: from this time the watcher reads the order book to settle it by itself. */
   verifyAfter?: number;
+  /** A REAL resting entry that has filled in part and still works: what has filled so far and its average. Kept apart from
+   *  filledQty (which means "a position this slice owns") so only the MTM reads it until the order settles. */
+  partFilled?: number;
+  partAvg?: number;
   // position
   filledQty?: number;
   avg?: number;
@@ -490,7 +494,7 @@ export function spotFresh(at: number | null | undefined, now: number): boolean {
 /** Settle an order from the broker's status. `wait` = still working; `filled` carries the traded qty/avg (a cancel
  *  or rejection after a partial fill counts as filled for what filled). */
 export type OrderSettle =
-  | { kind: 'wait'; filledQty: number }
+  | { kind: 'wait'; filledQty: number; avg: number }
   | { kind: 'filled'; filledQty: number; avg: number; final: boolean }
   | { kind: 'dead'; reason: string };
 
@@ -505,7 +509,7 @@ export function settleOrder(st: { orderStatus: string; filledQty: number; averag
     const why = /^[\s\-–—.]*$|^(NA|N\/A|NULL|NONE)$/i.test(String(st.reason ?? '').trim()) ? '' : String(st.reason).trim();
     return { kind: 'dead', reason: status === 'CANCELLED' ? (why ? `CANCELLED: ${why}` : status) : (why || status) };
   }
-  return { kind: 'wait', filledQty: filled };
+  return { kind: 'wait', filledQty: filled, avg };
 }
 
 /**
@@ -573,6 +577,8 @@ export function slicePnl(s: Pick<LadderSlice, 'side' | 'avg' | 'filledQty'> & { 
 export function sliceNowPnl(s: LadderSlice, ltp: number | null | undefined): number | null | undefined {
   if (s.state === 'closed') return slicePnl(s, s.exitAvg) ?? undefined;
   if (s.state === 'open' || s.state === 'exiting') return Number(s.filledQty) > 0 ? slicePnl(s, ltp) : undefined;
+  // A resting entry that has filled in part already holds those units: the MTM must see them before the order settles.
+  if (s.state === 'working' && Number(s.partFilled) > 0) return slicePnl({ ...s, filledQty: s.partFilled, avg: s.partAvg }, ltp);
   return undefined;
 }
 
