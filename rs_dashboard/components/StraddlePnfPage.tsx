@@ -23,7 +23,7 @@ import { pnfChimeFor, playPnfChime, type PnfSoundEvent } from '@/lib/pnfChime';
 import { buildConfirmedModel, withLive, type ChartType, type ConfirmedModel, type Overlay } from '@/lib/straddlePnfModel';
 import { capLog, sessionWindow } from '@/lib/straddlePnfLive';
 import {
-  EMPTY_BOOK, barsUpTo, countUpTo, cursorBefore, firstAvailableT, nextStepT, openLots, practiceAutoArm, practiceAutoStep, practiceCancel, practiceCross,
+  EMPTY_BOOK, countUpTo, cursorBefore, firstAvailableT, nextStepT, openLots, practiceAutoArm, practiceAutoStep, practiceCancel, practiceCross, practiceCrossBars,
   practiceFill, practiceFlatten, practiceMove, practicePlace, practicePnl, randomStartT, type PracticeBook, type PracticeQuote,
 } from '@/lib/pnfReplay';
 import { paperPosition } from '@/lib/pnfLadderPosition';
@@ -156,7 +156,17 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   const indexNoVwap = target.kind === 'index';
   // Bar Replay: the chart as it stood at the cursor — its 1-min bars up to it, all closed (the clock sits a minute past the cursor).
   // `replayOnly`: the replay copy of a chart, which builds nothing while no replay runs (the live copy draws the chart then).
-  const bars = useMemo(() => (replayT === null ? (replayOnly ? NO_BARS : feed.bars) : barsUpTo(feed.bars, replayT)), [feed.bars, replayT, replayOnly]);
+  // In replay the slice only changes when the bars up to the cursor do (a step, or a history reload swapping the bar objects),
+  // not on each live tick past the cursor, which would re-slice years of minutes about once a second.
+  const upTo = replayT === null ? 0 : countUpTo(feed.bars, replayT);
+  const sliceHead = replayT === null ? feed.bars : feed.bars[0];
+  const sliceTail = upTo > 0 ? feed.bars[upTo - 1] : null;
+  const live = replayT === null;
+  const bars = useMemo(
+    () => (live ? (replayOnly ? NO_BARS : feed.bars) : feed.bars.slice(0, upTo)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [sliceHead, sliceTail, upTo, live, replayOnly],
+  );
   const now = replayT === null ? liveNow : (replayT + 60) * 1000;
   const last = bars[bars.length - 1];
   const formingBar = last !== undefined && now > 0 && last.t >= minuteOf(now / 1000) ? last : undefined;   // the minute still forming
@@ -457,14 +467,27 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // The book records the cursor it was last advanced to, so each cursor is processed once (a start point is recorded unprocessed).
   useEffect(() => {
     if (replayT === null || book.at === replayT) return;
-    const steps = ([1, 2] as const).map(c => ({ q: quoteOf(c), model: (c === 2 ? r2 : r1).model, market: (c === 2 ? feed2 : feed1).market }));
+    const steps = ([1, 2] as const).map(c => ({ q: quoteOf(c), model: (c === 2 ? r2 : r1).model, market: (c === 2 ? feed2 : feed1).market, bars: (c === 2 ? feed2 : feed1).bars }));
+    const from = book.at;
+    // Resting orders see every minute the step revealed; AUTO decides once, on the chart bar that closed.
+    const advance = (b: PracticeBook) => steps.reduce((out, st) => {
+      if (!st.q) return out;
+      const q = st.q;
+      const crossed = from === null ? practiceCross(out, q) : practiceCrossBars(out, st.bars, from, replayT, bar => ({
+        ...q, t: bar.t, price: bar.ce + bar.pe, legPrices: q.legPrices.length === 2 ? [bar.ce, bar.pe] : [bar.ce + bar.pe],
+      }));
+      return practiceAutoStep(crossed, q, st.model, st.market);
+    }, b);
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setBook(b => (b.at === replayT ? b : { ...steps.reduce((out, s) => (s.q ? practiceAutoStep(practiceCross(out, s.q), s.q, s.model, s.market) : out), b), at: replayT }));
+    setBook(b => (b.at === replayT ? b : { ...advance(b), at: replayT }));
   // quoteOf reads r1 / r2 / the legs of this render: the models listed are the ones that change with the cursor
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [replayT, book.at, r1.model, r2.model]);
   /** A new start point: the book starts empty and the start itself fills nothing. */
   const startReplayAt = (c: ChartId, t: number) => {
+    // The same rule as opening Replay: a chart running live AUTO must keep showing what AUTO trades on
+    const busy = ([1, 2] as const).filter(x => (x === 1 || dual) && (autoArm[x].on || !!(x === 2 ? auto2 : auto1).row));
+    if (busy.length) { toast.warning(`Chart ${busy.join(' and ')} is running AUTO: stop it (and let its position close) before replaying`); return; }
     const bars = (c === 2 ? feed2 : feed1).bars;
     const i = countUpTo(bars, t - 1);
     if (i >= bars.length) { toast.warning('No bars after that time to replay'); return; }
@@ -537,13 +560,14 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     void resting.cancelEverything();
   };
   // MTM guard (page-held, per chart): on a trip, cancel the chart's orders and bracket exits, then square its position off.
-  const exitChart = async (c: ChartId, reason: string) => {
+  /** Resolves true when nothing of this chart's is left to exit (the guard is done), false / void while it should keep trying. */
+  const exitChart = async (c: ChartId, reason: string): Promise<boolean> => {
     const rc = railCharts.find(x => x.chart === c);
-    if (!rc) return;
+    if (!rc) return false;
     await resting.cancelAllFor(rc.targetKey);
     if (tradeMode === 'PAPER') {
       const legs = paper[rc.targetKey];
-      if (!legs?.some(l => l.lots !== 0) || rc.legPrices.some(p => p == null || p <= 0)) return;      // nothing open / no price yet: retried
+      if (!legs?.some(l => l.lots !== 0) || rc.legPrices.some(p => p == null || p <= 0)) return false;      // nothing open / no price yet: retried
       const lotsOpen = Math.max(...legs.map(l => Math.abs(l.lots)));
       const action = legs[0].lots > 0 ? 'SELL' : 'BUY';
       setPaper(prev => {
@@ -552,14 +576,17 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       });
       handleTradeExecuted({ id: `guard-${rc.chart}-${Math.floor(nowSec())}`, t: Math.floor(nowSec()), action, price: rc.price ?? 0, lots: lotsOpen, mode: 'PAPER', estimate: false }, rc.target);
       chime({ kind: 'manual', outcome: 'placed', close: true });
-      return;
+      return true;
     }
     try {
       const res = await fetch('/api/straddle-pnf/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ broker, mode: 'REAL', target: rc.target, close: true, scope }) });
       const j = await res.json() as { success?: boolean; error?: string; message?: string; outcome?: string };
+      // What is left on the contract is the other page's AUTO position: this chart has nothing more to exit
+      if (j.outcome === 'kept') { toast.info(`MTM guard on chart ${c}: ${j.message}`, { duration: 15_000 }); return true; }
       if (j.success) { toast.success(`MTM guard squared off chart ${c}: ${reason}`); chime({ kind: 'manual', outcome: 'placed', close: true }); }
       else if (res.status !== 409) toast.warning(`MTM guard exit: ${j.error ?? j.message ?? 'not confirmed'} - it is retried while the position is open`, { duration: 15_000 });
     } catch { toast.warning('MTM guard exit: no clean reply - check Positions; it is retried', { duration: 15_000 }); }
+    return false;
   };
   const guards = usePnfGuard({
     charts: railCharts.map(c => ({ chart: c.chart, targetKey: c.targetKey })), positions, positionsLoaded: positionsInfo.loaded,
@@ -780,7 +807,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
                       onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} halt={autoOf(c).halt}
                       onResolve={autoOf(c).resolve} nowMs={now}
                       rule={renko ? `Renko SELL / BUY after ${(c === 2 ? settings2 : settings).reversal} confirming bricks, exit on the first opposite brick` : undefined}
-                      disabledReason={target.kind === 'index' ? 'No AUTO on an index: chart its future or an option' : null} />
+                      disabledReason={target.kind === 'index' ? 'No AUTO on an index: chart its future or an option'
+                        : replay.active ? 'Bar replay is open: close it to arm live AUTO' : null} />
       ),
     };
   };

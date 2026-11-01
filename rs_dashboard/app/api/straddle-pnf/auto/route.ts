@@ -1,16 +1,15 @@
 import fs from 'fs';
-import path from 'path';
 import { NextRequest, NextResponse } from 'next/server';
 import { withFileLock, writeJsonAtomic } from '@/lib/lockedJsonFile';
 import { applyAutoOp, parseLedger, type AutoOp } from '@/lib/pnfAutoLedger';
-import { parseScope, type PnfScope } from '@/lib/pnfScope';
+import { parseScope } from '@/lib/pnfScope';
+import { autoFileFor } from '@/lib/pnfAutoServer';
 
 // The P&F AUTO ledger (debug/pnf_auto_state.json). GET returns it; POST applies ONE op (lib/pnfAutoLedger.ts applyAutoOp)
 // under a file lock, written atomically. The browser never writes the file whole. Places no orders. `?scope=renko` is the Renko
 // page's own ledger (debug/renko_auto_state.json, lib/pnfScope.ts): its chart 1 / 2 never share a row with the P&F page's.
 
-const DEBUG = path.join(path.resolve(process.cwd(), '..'), 'debug');
-const fileFor = (scope: PnfScope) => path.join(DEBUG, scope === 'renko' ? 'renko_auto_state.json' : 'pnf_auto_state.json');
+const fileFor = autoFileFor;
 
 function read(file: string) {
   try { return parseLedger(JSON.parse(fs.readFileSync(file, 'utf8'))); } catch { return parseLedger(null); }

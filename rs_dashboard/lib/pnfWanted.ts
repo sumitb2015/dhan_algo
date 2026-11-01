@@ -9,8 +9,12 @@ export type WantedPair = [string, string];
 /** key ("SEG:ID[,SEG:ID]") -> the pairs a chart asked for and when it last asked. */
 export type WantedMap = Map<string, { pairs: WantedPair[]; seenAt: number }>;
 
-/** A chart that has not polled for this long is closed (the page polls every second). */
-export const WANTED_KEEP_MS = 10_000;
+/**
+ * A chart that has not polled for this long is closed. The page polls every second, but Chrome throttles the timers of a tab
+ * hidden for a few minutes to about once a minute, and that tab can be the leader running AUTO / the rail: its instruments must
+ * outlive a throttled minute, or each other chart's poll would drop and re-subscribe them.
+ */
+export const WANTED_KEEP_MS = 75_000;
 /** More than this many distinct pairs is not a page's doing: the oldest asks are dropped first. */
 export const WANTED_MAX_PAIRS = 40;
 

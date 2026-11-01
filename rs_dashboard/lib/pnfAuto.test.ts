@@ -96,3 +96,10 @@ test('the entry and the reversal exit carry their confirmed box price', () => {
   const e = decideAuto({ model: m2, position: { side: 'SELL', entryBarT: ist(10, 30) }, watermarkT: 0, nowS: ist(10, 41), market: 'NSE' });
   assert.equal(e.action === 'exit' && e.boxPrice, 99);
 });
+
+test('a CAS stock (NSE_CAS) squares off at 15:10 from 3 Aug 2026, before continuous trading stops at 15:15; 15:15 before that date', () => {
+  const at = (iso: string) => Date.parse(`${iso}+05:30`) / 1000;
+  assert.deepEqual(autoWindow('NSE_CAS', at('2026-10-30T10:00:00')), { open: 9 * 60 + 15, entryCutoff: 15 * 60, eodExit: 15 * 60 + 10 });
+  assert.deepEqual(autoWindow('NSE_CAS', at('2026-07-31T10:00:00')), { open: 9 * 60 + 15, entryCutoff: 15 * 60, eodExit: 15 * 60 + 15 });
+  assert.equal(autoWindow('NSE', at('2026-10-30T10:00:00'))!.eodExit, 15 * 60 + 15);   // a stock without derivatives: unchanged
+});

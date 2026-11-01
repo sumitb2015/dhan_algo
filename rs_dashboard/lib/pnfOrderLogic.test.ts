@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MAX_PNF_LOTS, MAX_PNF_SHARES, FLAT_LEG, applyPaperFill, brokerProduct, describePosition, needsRollback, orderQty,
-  paperPnl, parsePnfOrder, planLegClose, sendOutcome, type LegResult,
+  paperPnl, parsePnfOrder, planLegClose, planLegCloseKeeping, sendOutcome, type LegResult,
 } from './pnfOrderLogic.ts';
 
 const fut = { kind: 'futures', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24' };
@@ -158,4 +158,15 @@ test('brokerOp modify / cancel: REAL only, a sane order id, modify needs prices'
   assert.match(String(parsePnfOrder({ ...base, brokerOp: { op: 'modify', orderId: '1' } })), /prices/);
   assert.match(String(parsePnfOrder({ ...base, brokerOp: { op: 'cancel', orderId: '../x' } })), /orderId/);
   assert.match(String(parsePnfOrder({ ...base, mode: 'PAPER', brokerOp: { op: 'cancel', orderId: '1' } })), /REAL/);
+});
+
+test('a close keeps the other page\'s AUTO quantity: only the rest of the intraday row is closed', () => {
+  const rows = [{ key: 'F', product: 'INTRADAY', net: -130 }, { key: 'F', product: 'MARGIN', net: 65 }];
+  // the other page's AUTO is short 65 of the -130 intraday row: close 65 of it; the MARGIN row is closed whole
+  assert.deepEqual(planLegCloseKeeping('F', rows, -65, 'dhan'), [{ side: 'BUY', qty: 65, product: 'INTRADAY' }, { side: 'SELL', qty: 65, product: 'MARGIN' }]);
+  // all of it is the other page's: nothing is closed on that row
+  assert.deepEqual(planLegCloseKeeping('F', [{ key: 'F', product: 'INTRADAY', net: -65 }], -65, 'dhan'), []);
+  // a reservation the other way (an AUTO long inside a net short) cannot be in this row: the whole row closes
+  assert.deepEqual(planLegCloseKeeping('F', [{ key: 'F', product: 'INTRADAY', net: -65 }], 65, 'dhan'), [{ side: 'BUY', qty: 65, product: 'INTRADAY' }]);
+  assert.deepEqual(planLegCloseKeeping('F', rows, 0, 'dhan'), planLegClose('F', rows));
 });

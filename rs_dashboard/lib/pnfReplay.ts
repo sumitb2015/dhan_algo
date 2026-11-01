@@ -7,7 +7,7 @@
 import type { Bar } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
 import { applyPaperFill, FLAT_LEG, paperPnl, type PaperLeg } from './pnfOrderLogic.ts';
-import { boxPriceAt, decideAuto, type AutoModel, type AutoPosition, type AutoSide } from './pnfAuto.ts';
+import { decideAuto, type AutoModel, type AutoPosition, type AutoSide } from './pnfAuto.ts';
 import type { Market } from './straddlePnfLive.ts';
 
 /** TradingView's replay speeds: chart-bar updates per second. */
@@ -152,6 +152,18 @@ export function practiceCross(book: PracticeBook, q: PracticeQuote): PracticeBoo
   return out;
 }
 
+/**
+ * One replay step for an instrument: its resting orders are crossed against EVERY 1-minute bar the step revealed (`fromT`, `toT`]
+ * (a 15-minute step that dipped through a limit fills it; a stop fills at the minute that crossed it), not only the step's last
+ * close. `quoteAt(bar)` turns a 1-minute bar into the instrument's quote at that minute.
+ */
+export function practiceCrossBars(book: PracticeBook, bars: Bar[], fromT: number, toT: number, quoteAt: (b: Bar) => PracticeQuote): PracticeBook {
+  if (!book.orders.length) return book;
+  let out = book;
+  for (let i = countUpTo(bars, fromT), end = countUpTo(bars, toT); i < end && out.orders.length; i++) out = practiceCross(out, quoteAt(bars[i]));
+  return out;
+}
+
 /** Realised + open P&L of every practice position, marked at `quotes` (by targetKey); a position without a quote counts realised only. */
 export function practicePnl(book: PracticeBook, quotes: Record<string, { legPrices: number[]; unitsPerLot: number[] } | undefined>): number {
   return Object.entries(book.legs).reduce((sum, [key, legs]) => {
@@ -183,8 +195,8 @@ export function practiceAutoStep(book: PracticeBook, q: PracticeQuote, model: Au
     return { ...filled, auto: { ...filled.auto, [q.chart]: { ...a, position: { side: d.side as AutoSide, entryBarT: d.signal.t }, watermarkT: d.signal.t } } };
   }
   if (d.action === 'exit' && a.position) {
-    const box = d.col !== undefined ? boxPriceAt(model, d.col, model.columns[d.col].startBar) : null;
-    const px = q.legPrices.length === 1 ? box ?? q.price : q.price;
+    // the reversal's own box / brick price, exactly as live AUTO books it (none for an EOD exit: the price at the cursor)
+    const px = q.legPrices.length === 1 ? d.boxPrice ?? q.price : q.price;
     const filled = practiceFill(book, q, a.position.side === 'SELL' ? 'BUY' : 'SELL', a.lots, 'auto', px);
     return { ...filled, auto: { ...filled.auto, [q.chart]: { ...a, position: null } } };
   }

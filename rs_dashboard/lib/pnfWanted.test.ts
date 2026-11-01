@@ -15,6 +15,7 @@ test('a straddle chart wants both legs; a chart that stops polling is dropped af
   const m: WantedMap = new Map();
   noteWanted(m, 'NSE_FNO:1,NSE_FNO:2', [['NSE_FNO', '1'], ['NSE_FNO', '2']], 0);
   assert.equal(noteWanted(m, 'IDX_I:13', [['IDX_I', '13']], 1).signature, 'IDX_I:13,NSE_FNO:1,NSE_FNO:2');
+  assert.equal(noteWanted(m, 'IDX_I:13', [['IDX_I', '13']], 61_000).signature, 'IDX_I:13,NSE_FNO:1,NSE_FNO:2');   // a throttled tab's minute
   assert.equal(noteWanted(m, 'IDX_I:13', [['IDX_I', '13']], WANTED_KEEP_MS + 5).signature, 'IDX_I:13');
 });
 

@@ -1,0 +1,19 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { reservedByAuto } from './pnfAutoServer.ts';
+import type { AutoLedger, AutoRow } from './pnfAutoLedger.ts';
+
+const row = (o: Partial<AutoRow>): AutoRow => ({
+  id: 'r', day: '2026-11-02', chart: 1, target: { kind: 'futures', symbol: 'NIFTY', name: 'NIFTY' } as AutoRow['target'], targetKey: 'F', mode: 'REAL',
+  broker: 'dhan', side: 'SELL', lots: 1, unitsPerPoint: 65, legs: [{ label: 'NIFTY FUT', key: '1', units: 65 }], entryT: 0, entryBarT: 0, entryPrice: 100,
+  state: 'open', ...o,
+});
+
+test('the other page\'s live REAL AUTO rows reserve their units, signed, per leg; closed / paper / other contracts do not', () => {
+  const led: AutoLedger = { rev: 1, log: [], rows: [
+    row({}), row({ id: 'b', side: 'BUY', legs: [{ label: 'x', key: '1', units: 65 }], state: 'unknownEntry' }),
+    row({ id: 'c', state: 'closed' }), row({ id: 'd', mode: 'PAPER' }), row({ id: 'e', targetKey: 'G' }), row({ id: 'f', broker: 'kotak' }),
+    row({ id: 'g', legs: [{ label: 'CE', key: '1', units: 65 }, { label: 'PE', key: '2', units: 65 }] }),
+  ] };
+  assert.deepEqual(reservedByAuto(led, 'dhan', 'F', 2), [-65, -65]);   // -65 (a) +65 (b, outcome still open) -65 (g); g's PE leg -65
+});

@@ -9,6 +9,7 @@ import { dhanDelete, dhanPut } from '@/lib/dhanToken';
 import { kotakPost, KOTAK_PATHS, KotakRejectedError } from '@/lib/kotakToken';
 import { openBrokerOrders, ownedBrokerOrder } from '@/lib/pnfRestingServer';
 import { parseScope, type PnfScope } from '@/lib/pnfScope';
+import { readAutoLedger, reservedByAuto } from '@/lib/pnfAutoServer';
 import { kiteDelete } from '@/lib/zerodhaToken';
 import { modifyZerodhaLimitOrder } from '@/lib/zerodhaModifyOrder';
 import { snapToTick } from '@/lib/pnfResting';
@@ -17,13 +18,14 @@ import { CloseGuard } from '@/lib/priceLadderClose';
 import { parseTarget, isComplete, targetKey } from '@/lib/pnfTarget';
 import { brokerLegs, resolvePnfLegs, type PnfBrokerLeg } from '@/lib/pnfOrderServer';
 import {
-  MAX_PNF_LOTS, brokerProduct, checkRestingPrices, lotCap, needsRollback, orderQty, parsePnfOrder, planLegClose, planOwnExit, sendOutcome,
+  MAX_PNF_LOTS, brokerProduct, checkRestingPrices, lotCap, needsRollback, orderQty, parsePnfOrder, planLegClose, planLegCloseKeeping, planOwnExit, sendOutcome,
   type LegResult, type PnfAction, type PnfBroker,
 } from '@/lib/pnfOrderLogic';
 
 // The Point & Figure trade bar's orders. Real money: the browser names only the chart's target, the side and the lots.
 // Contracts, lot sizes and segments are resolved here (lib/pnfOrderServer.ts); a close is sized from the broker's own
-// book read now (every non-flat row of the contract, its own product, opposite side), so it can only reduce a position.
+// book read now (every non-flat row of the contract, its own product, opposite side), so it can only reduce a position; the other
+// page's (P&F / Renko) live AUTO quantity on the contract is left in place.
 // GET tells the trade bar what one lot is and whether the selected broker can trade the chart at all.
 
 const NAME: Record<PnfBroker, string> = { dhan: 'Dhan', kotak: 'Kotak', zerodha: 'Zerodha' };
@@ -91,6 +93,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (closing && !closeGuard.tryStart(gkey, Date.now())) return bad('A close for this chart was just sent - wait a few seconds for the broker book to update', 409);
   busy.add(gkey);
   let sent = false;
+  let keptNote = '';
   try {
     const results: LegResult[] = [];
     if (exitOwn) {
@@ -107,8 +110,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     } else if (close) {
       const rows = await brokerPositionRows(broker);
       if (!rows) return bad(`Could not read the ${NAME[broker]} positions - nothing was sent`, 502);
-      const plans = onBroker.map(l => ({ leg: l, orders: planLegClose(l.key, rows) }));
-      if (plans.every(p => p.orders.length === 0)) return bad(`No open ${NAME[broker]} position on this chart's contract - nothing was sent`);
+      if (onBroker.every(l => planLegClose(l.key, rows).length === 0)) return bad(`No open ${NAME[broker]} position on this chart's contract - nothing was sent`);
+      // The OTHER page's live AUTO rows on this contract keep their quantity: P&F and Renko share the broker's netted position,
+      // and a square-off (or an MTM guard exit) on one page must not take the other page's AUTO position with it.
+      const other = scope === 'renko' ? 'pnf' : 'renko';
+      const reserved = reservedByAuto(readAutoLedger(other), broker, targetKey(target), onBroker.length);
+      const plans = onBroker.map((l, i) => ({ leg: l, orders: planLegCloseKeeping(l.key, rows, reserved[i], broker) }));
+      if (reserved.some(r => r !== 0)) keptNote = ` KEPT: ${reserved.map(Math.abs).join(' / ')} units on this contract belong to the ${other === 'renko' ? 'Renko' : 'Point & Figure'} page's AUTO and were not closed.`;
+      if (plans.every(p => p.orders.length === 0)) {
+        return NextResponse.json({
+          success: true, mode, broker, outcome: 'kept', legs: [],
+          message: `Nothing of this page's to close: the open quantity on this contract belongs to the ${other === 'renko' ? 'Renko' : 'Point & Figure'} page's AUTO and is kept`,
+        });
+      }
       sent = true;
       for (const { leg, orders } of plans) {
         for (const o of orders) results.push(await send(broker, leg, o.side, o.qty, o.product, false, tag));
@@ -137,8 +151,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const reversal = results.find(r => r.label.endsWith('(reversal)'));
     // CE went in, PE was refused and CE was taken back out: nothing is left open (two fills were paid for).
     const outcome = reversal?.status === 'placed' ? 'reversed' : sendOutcome(results.filter(r => r !== reversal));
-    const stillResting = closing ? openBrokerOrders(scope, broker, targetKey(target)) : 0;
-    const note = stillResting > 0 ? ` NOTE: ${stillResting} resting order(s) still open on this chart - cancel them or they can re-open the position.` : '';
+    // Both pages' resting broker orders on this contract (P&F and Renko keep separate ledgers but share the broker position):
+    // any of them can re-open the position just closed.
+    const stillResting = closing ? openBrokerOrders('pnf', broker, targetKey(target)) + openBrokerOrders('renko', broker, targetKey(target)) : 0;
+    const note = (stillResting > 0 ? ` NOTE: ${stillResting} resting order(s) still open on this chart - cancel them or they can re-open the position.` : '') + keptNote;
     return NextResponse.json({ success: outcome === 'placed' || outcome === 'flat', mode, broker, outcome, legs: results, message: describe(outcome, results) + note, stillResting },
       { status: outcome === 'unknown' ? 504 : 200 });
   } catch (err) {

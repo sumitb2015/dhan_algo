@@ -39,8 +39,11 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   /** broker + mode: a guard belongs to one account and mode, so changing either switches every guard off. */
   scope: string;
   leaderRef: React.RefObject<boolean>;
-  /** Cancel the chart's resting orders and bracket exits, then square its position off. */
-  exitChart: (chart: 1 | 2, reason: string) => Promise<void>;
+  /**
+   * Cancel the chart's resting orders and bracket exits, then square its position off. True = nothing of this chart's is left to
+   * exit (e.g. what remains on the contract is the other page's AUTO position), so the guard stops retrying.
+   */
+  exitChart: (chart: 1 | 2, reason: string) => Promise<boolean>;
   onEvent: (chart: 1 | 2, kind: 'warn' | 'info', text: string) => void;
   /** localStorage prefix of the remembered levels (the Renko page keeps its own). */
   storeKey?: string;
@@ -87,6 +90,11 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   };
 
   const exitedAt = useRef<Record<number, number>>({});
+  /** The guard has done its job (its exit left nothing of this chart's): switched off, the reason kept for the card. */
+  const finish = (chart: number, reason: string) => setSlots(s => {
+    const g = s[chart]?.guard;
+    return g ? { ...s, [chart]: { guard: { ...g, on: false, tripped: undefined, firedReason: reason }, base: null } } : s;
+  });
   const tickRef = useRef<() => void>(() => {});
   useEffect(() => {
     tickRef.current = () => {
@@ -100,7 +108,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
         if (g.tripped) {
           // Still holding: keep exiting (retried, never faster than every few seconds). Flat and read: the guard has done its job.
           if (pos) {
-            if (nowS - (exitedAt.current[c.chart] ?? 0) > RETRY_EXIT_S) { exitedAt.current[c.chart] = nowS; void exitChart(c.chart, g.tripped); }
+            if (nowS - (exitedAt.current[c.chart] ?? 0) > RETRY_EXIT_S) { exitedAt.current[c.chart] = nowS; void exitChart(c.chart, g.tripped).then(done => { if (done) finish(c.chart, g.tripped!); }); }
           } else if (positionsLoaded && nowS - (g.firedAt ?? nowS) > RETRY_EXIT_S) {
             setSlots(s => ({ ...s, [c.chart]: { guard: { ...g, on: false, tripped: undefined, firedReason: g.tripped }, base: null } }));
           }
@@ -117,7 +125,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
           exitedAt.current[c.chart] = nowS;
           setSlots(s => ({ ...s, [c.chart]: { guard: { ...r.guard, tripped: r.reason!, firedAt: nowS }, base: slot.base } }));
           onEvent(c.chart, 'warn', `MTM guard: ${r.reason} - exiting chart ${c.chart}`);
-          void exitChart(c.chart, r.reason);
+          void exitChart(c.chart, r.reason).then(done => { if (done) finish(c.chart, r.reason!); });
         } else if (r.guard !== g) {
           setSlots(s => ({ ...s, [c.chart]: { guard: r.guard, base: slot.base } }));
         }

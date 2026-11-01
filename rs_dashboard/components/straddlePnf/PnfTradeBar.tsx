@@ -202,6 +202,8 @@ export default function PnfTradeBar({
     onSound?.(j.outcome, close);
     const msg = j.message ?? j.error ?? 'Unknown error';
     if (j.outcome === 'placed') { toast.success(`[${BROKER_LABELS[broker].toUpperCase()}] ${what}. ${msg}`); return true; }
+    // a square-off that found only the other page's AUTO quantity on the contract: nothing was sent, nothing failed
+    if (j.outcome === 'kept') { toast.info(msg, { duration: 15_000 }); return false; }
     if (j.outcome === 'partial') toast.error(msg, { duration: Infinity });
     else if (j.outcome === 'unknown') toast.warning(msg, { duration: Infinity });
     else if (j.outcome === 'reversed') toast.warning(msg, { duration: 15_000 });

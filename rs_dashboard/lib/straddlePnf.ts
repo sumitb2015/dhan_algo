@@ -190,15 +190,26 @@ export function detectSignals(columns: PnfColumn[], bars: Bar[], vwapSeries: (nu
  * axis, and the previous days keep weighting it); cumulative mean while no volume has traded.
  */
 export function vwap(bars: Bar[]): (number | null)[] {
-  let sumPV = 0, sumV = 0, sumP = 0, n = 0;
-  let last: number | null = null;
-  return bars.map(b => {
+  return vwapFrom(bars, 0, VWAP_START).series;
+}
+
+/** The running sums behind vwap(), so a longer history can carry the series on instead of re-reading every bar. */
+export type VwapState = { sumPV: number; sumV: number; sumP: number; n: number; last: number | null };
+export const VWAP_START: VwapState = { sumPV: 0, sumV: 0, sumP: 0, n: 0, last: null };
+
+/** vwap() of bars[from..] continuing from `state` (the sums after bars[0..from)); returns that part of the series and the new sums. */
+export function vwapFrom(bars: Bar[], from: number, state: VwapState): { series: (number | null)[]; state: VwapState } {
+  let { sumPV, sumV, sumP, n, last } = state;
+  const series = new Array<number | null>(Math.max(0, bars.length - from));
+  for (let i = from; i < bars.length; i++) {
+    const b = bars[i];
     if (b.straddle > 0) {
       sumPV += b.straddle * b.vol; sumV += b.vol; sumP += b.straddle; n += 1;
       last = sumV > 0 ? sumPV / sumV : sumP / n;
     }
-    return last;
-  });
+    series[i - from] = last;
+  }
+  return { series, state: { sumPV, sumV, sumP, n, last } };
 }
 
 /** For each green X column: the first bar inside it that trades above VWAP (the video's exit cue). */

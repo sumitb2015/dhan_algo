@@ -1,7 +1,7 @@
 // One chart panel's data: P&F columns, signals, exit cues and the overlay line, from CLOSED 1-min bars only
 // (a bar still forming must never feed a signal, or the marker would repaint). The 1-min bars are grouped into the chosen
 // interval first; the box size is a percentage of the first price.
-import { buildPnf, continuePnf, detectSignals, exitTags, extendPnf, sessionOf, vwap, type Bar, type PnfColumn, type PnfResume, type PnfSignal } from './straddlePnf.ts';
+import { VWAP_START, buildPnf, continuePnf, detectSignals, exitTags, extendPnf, sessionOf, vwapFrom, type VwapState, type Bar, type PnfColumn, type PnfResume, type PnfSignal } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
 import { buildRenko, continueRenko, extendRenko, renkoSignals, renkoSma, renkoSmaByBar, type RenkoResume } from './renko.ts';
 import { MIN_BOX_PTS_PCT, type BoxMode } from './straddlePnfSettings.ts';
@@ -180,28 +180,39 @@ export type ConfirmedModel = Omit<PanelModel, 'liveColumns' | 'sessionOpen' | 'p
     chart: ChartType; closedBars: Bar[]; interval: number; boxPct: number; reversal: number; anchorPrice?: number; boxSize?: number; sessionCloseMin?: number;
     /** Where the chart build stopped, and the index in closedBars of the last 1-min bar it read: a tick only feeds what follows. */
     resume: PnfResume | RenkoResume | null; lastEnd: number;
+    /** The box asked for in points (null: a % box), for a chart whose box cannot be known before a first bar (withLive). */
+    ptsAsked: number | null;
     /** The chart bars built from closedBars and, for each, the index of its last 1-min bar (a later build appends to them). */
     chartBars: Bar[]; chartEndIdx: number[];
+    /** VWAP of every 1-min bar and its running sums, and VWAP at each chart bar: carried on by a longer history of the same bars. */
+    vw1: (number | null)[]; vwapState: VwapState; chartVw: (number | null)[];
     /** The closed bars' sessions, their last session's open and the close before it, computed once (not per tick). */
     closedSessions: string[]; closedOpen: number | null; closedPrev: number | null;
   };
 };
 
 /** Sessions (oldest first), the last session's first usable close, and the last usable close of the session before it (its official close `dc` when known). */
-function sessionFacts(bars: Bar[]): { sessions: string[]; open: number | null; prev: number | null } {
-  const sessions: string[] = [];
-  let lastDay = NaN;
-  for (const b of bars) {
-    const day = Math.floor((b.t + 19_800) / 86_400);                // one sessionOf (a Date + string) per day, not per bar
-    if (day !== lastDay) { sessions.push(sessionOf(b.t)); lastDay = day; }
+const dayOf = (t: number) => Math.floor((t + 19_800) / 86_400);     // IST calendar day number
+
+/**
+ * Sessions (oldest first), the last session's first usable close, and the last usable close of the session before it (its official
+ * close `dc` when known). `prevSessions` = the sessions of bars[0..from) (a shorter history of the same bars): only the rest is read.
+ */
+function sessionFacts(bars: Bar[], prevSessions: string[] | null = null, from = 0): { sessions: string[]; open: number | null; prev: number | null } {
+  const sessions = prevSessions && from > 0 ? prevSessions.slice() : [];
+  const start = prevSessions && from > 0 ? from : 0;
+  let lastDay = start > 0 ? dayOf(bars[start - 1].t) : NaN;
+  for (let i = start; i < bars.length; i++) {
+    const day = dayOf(bars[i].t);                                    // one sessionOf (a Date + string) per day, not per bar
+    if (day !== lastDay) { sessions.push(sessionOf(bars[i].t)); lastDay = day; }
   }
   if (!bars.length) return { sessions, open: null, prev: null };
-  const lastSession = sessions[sessions.length - 1];
+  const last = dayOf(bars[bars.length - 1].t);
   let open: number | null = null, prev: number | null = null;
   for (let i = bars.length - 1; i >= 0; i--) {
     const b = bars[i];
     if (!(b.straddle > 0)) continue;
-    if (sessionOf(b.t) === lastSession) open = b.straddle;
+    if (dayOf(b.t) === last) open = b.straddle;
     else { prev = b.dc ?? b.straddle; break; }
   }
   return { sessions, open, prev };
@@ -212,6 +223,19 @@ function sessionFacts(bars: Bar[]): { sessions: string[]; open: number | null; p
  * replay stepped forward). The chart bars and columns are then carried on over the new bars only, instead of rebuilding years of
  * history (80-150 ms on two years of NIFTY minutes); anything else rebuilds from scratch. The result is identical either way.
  */
+/**
+ * The box and the price the grid is anchored on, from the first usable price. Box in points: never below MIN_BOX_PTS_PCT of the
+ * price (a safety floor: 0.001 points on NIFTY would be millions of boxes), and the grid sits on a whole multiple of the box so the
+ * rows land on round prices (a 50-point box: ... 22,950, 23,000 ...). Box in %: that share of the first price.
+ */
+function gridFor(firstPrice: number | undefined, ptsAsked: number | null, boxPct: number) {
+  const minBox = firstPrice ? (firstPrice * MIN_BOX_PTS_PCT) / 100 : 0;
+  const boxSize = ptsAsked !== null && firstPrice ? Math.max(ptsAsked, minBox) : undefined;
+  const boxClamped = ptsAsked !== null && !!firstPrice && ptsAsked < minBox;
+  const anchorPrice = boxSize && firstPrice ? Math.round(firstPrice / boxSize) * boxSize || firstPrice : firstPrice;
+  return { boxSize, boxClamped, anchorPrice, box: boxSize ?? (firstPrice ?? 0) * boxPct };
+}
+
 export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: PanelOptions = {}, prev?: ConfirmedModel | null): ConfirmedModel {
   const interval = opts.interval ?? 1;
   const boxPct = (opts.boxPct ?? 0.5) / 100;
@@ -220,36 +244,45 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   const renko = chart === 'renko';
   // VWAP is computed on the 1-minute bars (signals' belowVwap and the exit cue need it whichever line is drawn) and read at each
   // chart bar's last minute, so it does not drift with the interval. Without traded volume the box SMA stands in for it (below).
-  const vw1 = vwap(closedBars);
-  const firstPrice = (closedBars.find(b => b.straddle > 0 && (opts.anchorT === undefined || b.t >= opts.anchorT)) ?? closedBars.find(b => b.straddle > 0))?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
-  // Box in points: never below MIN_BOX_PTS_PCT of the price (a safety floor: 0.001 points on NIFTY would be millions of boxes),
-  // and the grid is anchored on a whole multiple of the box so the rows land on round prices (a 50-point box: ... 22,950, 23,000 ...).
-  const ptsAsked = opts.boxMode === 'pts' && (opts.boxPts ?? 0) > 0 ? (opts.boxPts as number) : null;
-  const minBox = firstPrice ? (firstPrice * MIN_BOX_PTS_PCT) / 100 : 0;
-  const boxSize = ptsAsked !== null && firstPrice ? Math.max(ptsAsked, minBox) : undefined;
-  const boxClamped = ptsAsked !== null && !!firstPrice && ptsAsked < minBox;
-  const anchorPrice = boxSize && firstPrice ? Math.round(firstPrice / boxSize) * boxSize || firstPrice : firstPrice;
   const p = prev?.build;
   const pb = p?.closedBars;
-  const reuse = !!p && !!pb && p.resume !== null && p.chart === chart && p.interval === interval && p.boxPct === boxPct && p.reversal === reversal
-    && p.anchorPrice === anchorPrice && p.boxSize === boxSize && p.sessionCloseMin === opts.sessionCloseMin
-    && pb.length > 0 && pb.length <= closedBars.length && pb[0] === closedBars[0] && pb[pb.length - 1] === closedBars[pb.length - 1];
-  let bars: Bar[], endIdx: number[], anchor: number, box: number, columns: PnfColumn[], resume: PnfResume | RenkoResume | null;
+  // `prev` was built on the first pb.length of these very bars: VWAP and the session list carry on from it whatever the settings
+  const prefix = !!p && !!pb && pb.length > 0 && pb.length <= closedBars.length && pb[0] === closedBars[0] && pb[pb.length - 1] === closedBars[pb.length - 1];
+  let vw1: (number | null)[], vwapState: VwapState;
+  if (prefix) {
+    const more = vwapFrom(closedBars, pb!.length, p!.vwapState);
+    vw1 = more.series.length ? p!.vw1.concat(more.series) : p!.vw1; vwapState = more.state;
+  } else ({ series: vw1, state: vwapState } = vwapFrom(closedBars, 0, VWAP_START));
+  const firstPrice = (closedBars.find(b => b.straddle > 0 && (opts.anchorT === undefined || b.t >= opts.anchorT)) ?? closedBars.find(b => b.straddle > 0))?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
+  const ptsAsked = opts.boxMode === 'pts' && (opts.boxPts ?? 0) > 0 ? (opts.boxPts as number) : null;
+  const { boxSize, boxClamped, anchorPrice } = gridFor(firstPrice, ptsAsked, boxPct);
+  const reuse = prefix && p!.resume !== null && p!.chart === chart && p!.interval === interval && p!.boxPct === boxPct && p!.reversal === reversal
+    && p!.anchorPrice === anchorPrice && p!.boxSize === boxSize && p!.sessionCloseMin === opts.sessionCloseMin;
+  let bars: Bar[], endIdx: number[], anchor: number, box: number, columns: PnfColumn[], resume: PnfResume | RenkoResume | null, vw: (number | null)[];
   if (reuse) {
     // The chart bars after prev's last one start at a bucket boundary (buckets are on the clock), so only they are resampled.
     const from = p!.lastEnd + 1;
     const tail = resample(closedBars.slice(from), interval, opts.sessionCloseMin);
     bars = p!.chartBars.concat(tail.bars);
     endIdx = p!.chartEndIdx.concat(tail.endIdx.map(i => i + from));
+    vw = p!.chartVw.concat(tail.endIdx.map(i => vw1[i + from]));
     anchor = prev!.anchor; box = prev!.box;
     const next = renko ? continueRenko(prev!.columns, p!.resume as RenkoResume, tail.bars) : continuePnf(prev!.columns, p!.resume as PnfResume, tail.bars);
     columns = next.columns; resume = next.resume;
   } else {
     ({ bars, endIdx } = resample(closedBars, interval, opts.sessionCloseMin));
     ({ anchor, box, columns, resume } = renko ? buildRenko(bars, boxSize ?? (firstPrice ?? 0) * boxPct, anchorPrice) : buildPnf(bars, boxPct, reversal, anchorPrice, boxSize));
+    vw = endIdx.map(i => vw1[i]);
   }
-  const vw = endIdx.map(i => vw1[i]);
-  const facts = sessionFacts(closedBars);
+  const facts = sessionFacts(closedBars, prefix ? p!.closedSessions : null, prefix ? pb!.length : 0);
+  // Column times: the engine only ever changes the last few columns, so the earlier ones keep their times
+  let keep = 0;
+  if (reuse) {
+    const pc = prev!.columns;
+    keep = Math.max(0, Math.min(pc.length, columns.length) - 4);
+    while (keep < pc.length && keep < columns.length && columns[keep] === pc[keep]) keep++;
+  }
+  const columnTimes = (keep ? prev!.columnTimes.slice(0, keep) : []).concat(columns.slice(keep).map(c => ({ start: bars[c.startBar].t, end: bars[c.endBar].t })));
   const smaPeriod = opts.smaPeriod ?? SMA_PERIOD;
   // Renko's average is TradingView's: an SMA of brick closes. P&F's averages box values.
   const boxSma = renko ? renkoSma(columns, smaPeriod) : boxSmaOf(columns, box, smaPeriod);
@@ -278,10 +311,10 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
     smaPeriod,
     lastBarT: bars.length ? bars[bars.length - 1].t : null,
     sessionMarks: renko ? [] : sessionMarksOf(columns, bars),
-    columnTimes: columns.map(c => ({ start: bars[c.startBar].t, end: bars[c.endBar].t })),
+    columnTimes,
     build: {
       chart, closedBars, interval, boxPct, reversal, anchorPrice, boxSize, sessionCloseMin: opts.sessionCloseMin,
-      resume, lastEnd: endIdx.length ? endIdx[endIdx.length - 1] : -1, chartBars: bars, chartEndIdx: endIdx,
+      resume, lastEnd: endIdx.length ? endIdx[endIdx.length - 1] : -1, chartBars: bars, chartEndIdx: endIdx, ptsAsked, vw1, vwapState, chartVw: vw,
       closedSessions: facts.sessions, closedOpen: facts.open, closedPrev: facts.prev,
     },
   };
@@ -293,7 +326,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
  * its distance to the last close BEFORE anything is built, so one wild print costs nothing and draws nothing.
  */
 export function withLive(c: ConfirmedModel, forming?: Bar): PanelModel {
-  const { chart, closedBars, interval, boxPct, reversal, anchorPrice, boxSize, sessionCloseMin, resume, lastEnd } = c.build;
+  const { chart, closedBars, interval, boxPct, reversal, sessionCloseMin, resume, lastEnd } = c.build;
   const lastClose = closedBars.length ? closedBars[closedBars.length - 1].straddle : null;
   const wild = !!forming && lastClose !== null && c.box > 0 && Math.abs(forming.straddle - lastClose) / c.box > MAX_UNCONFIRMED_BOXES;
   let liveColumns = c.columns;
@@ -308,9 +341,13 @@ export function withLive(c: ConfirmedModel, forming?: Bar): PanelModel {
     let live: PnfColumn[];
     if (resume && chart === 'renko') live = extendRenko(c.columns, resume as RenkoResume, more);
     else if (resume) live = extendPnf(c.columns, resume as PnfResume, more);
-    else {                                                         // no usable bar yet: the history is tiny, build it whole
-      const liveBars = resample(forming ? [...closedBars, forming] : closedBars, interval, sessionCloseMin, true).bars;
-      live = (chart === 'renko' ? buildRenko(liveBars, c.box, anchorPrice) : buildPnf(liveBars, boxPct, reversal, anchorPrice, boxSize)).columns;
+    else {
+      // No usable closed bar yet (the history is tiny): build it whole, on the grid the first usable price gives (the confirmed
+      // build had no price to size the box from, so its box is 0 and its points box unknown).
+      const all = forming ? [...closedBars, forming] : closedBars;
+      const liveBars = resample(all, interval, sessionCloseMin, true).bars;
+      const g = gridFor(all.find(b => b.straddle > 0)?.straddle, c.build.ptsAsked, boxPct);
+      live = (chart === 'renko' ? buildRenko(liveBars, g.box, g.anchorPrice) : buildPnf(liveBars, boxPct, reversal, g.anchorPrice, g.boxSize)).columns;
     }
     const extra = unconfirmedBoxes(c.columns, live, c.box).reduce((n, u) => n + u.ks.length, 0);
     if (extra <= MAX_UNCONFIRMED_BOXES) liveColumns = live;

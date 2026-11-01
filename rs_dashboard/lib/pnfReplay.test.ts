@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   EMPTY_BOOK, REPLAY_SPEEDS, barsUpTo, countUpTo, cursorBefore, firstAvailableT, nextStepT, openLots, practiceAutoArm, practiceAutoStep,
-  practiceCancel, practiceCross, practiceFill, practiceFlatten, practicePlace, practicePnl, randomStartT, speedMs, type PracticeQuote,
+  practiceCancel, practiceCross, practiceCrossBars, practiceFill, practiceFlatten, practicePlace, practicePnl, randomStartT, speedMs, type PracticeQuote,
 } from './pnfReplay.ts';
 import { buildConfirmedModel } from './straddlePnfModel.ts';
 import type { Bar } from './straddlePnf.ts';
@@ -94,4 +94,13 @@ test('practice AUTO trades a replayed Renko 2-brick SELL at the brick close and 
   assert.deepEqual(b.trades.map(x => [x.side, +x.price.toFixed(2), x.reason]), [['SELL', 100, 'auto'], ['BUY', 100.2, 'auto']]);
   assert.equal(b.auto[1].position, null);
   assert.equal(Math.round(practicePnl(b, {})), -13);                    // (100.0 - 100.2) x 65
+});
+
+test('a step is crossed minute by minute: a dip inside a 15-minute bar fills the limit at its level', () => {
+  const ps = [101, 100.5, 99.2, 100.8, 103];                               // 10:00-10:04: dips through 99.5, closes 103
+  const bars: Bar[] = ps.map((p, i) => ({ t: day(0, 45 + i), ce: p, pe: 0, straddle: p, vol: 1 }));
+  let b = practicePlace(EMPTY_BOOK, 1, 'F', 'BUY', 99.5, 1, 101);
+  b = practiceCrossBars(b, bars, day(0, 45), day(0, 49), bar => quote(bar.straddle, bar.t));
+  assert.deepEqual(b.trades.map(t => [t.side, t.price, t.t]), [['BUY', 99.5, day(0, 47)]]);
+  assert.equal(practiceCross(practicePlace(EMPTY_BOOK, 1, 'F', 'BUY', 99.5, 1, 101), quote(103)).trades.length, 0);   // the close alone misses it
 });

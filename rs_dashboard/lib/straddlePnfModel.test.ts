@@ -386,3 +386,17 @@ test('buildConfirmedModel ignores a previous model that is not a prefix or was b
   const wider = buildConfirmedModel(bars.slice(0, 3), 'sma', { boxMode: 'pts', boxPts: 1 });
   assert.deepEqual(buildConfirmedModel(bars, 'sma', opts, wider).columns, buildConfirmedModel(bars, 'sma', opts).columns);
 });
+
+test('no usable closed bar yet: withLive builds on the grid the first live price gives (Renko gets a real box, points stay points)', () => {
+  const t0 = Date.UTC(2026, 9, 30, 3, 45) / 1000;
+  // the closed history has no usable price (a feed that printed zeros), so the confirmed build cannot size a box
+  const closed: Bar[] = [0, 0].map((p, i) => ({ t: t0 + i * 60, ce: p, pe: 0, straddle: p, vol: 1 }));
+  for (const chart of ['renko', 'pnf'] as const) {
+    const c = buildConfirmedModel(closed, 'sma', { chart, interval: 1, boxMode: 'pts', boxPts: 0.5, reversal: chart === 'renko' ? 2 : 3 });
+    assert.equal(c.box, 0);
+    const more: Bar[] = [100, 101.2].map((p, i) => ({ t: t0 + (2 + i) * 60, ce: p, pe: 0, straddle: p, vol: 1 }));
+    const live = withLive(buildConfirmedModel([...closed, more[0]], 'sma', { chart, interval: 1, boxMode: 'pts', boxPts: 0.5, reversal: chart === 'renko' ? 2 : 3 }), more[1]).liveColumns;
+    assert.ok(live.length > 0, `${chart}: the move from 100 to 101.2 is drawn`);
+    for (const col of live) assert.ok(Math.abs((col.high - col.low) / col.boxes - 0.5) < 1e-9, `${chart}: a 0.5-point box`);
+  }
+});

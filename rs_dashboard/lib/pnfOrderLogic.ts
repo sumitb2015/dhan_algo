@@ -139,6 +139,23 @@ export function planLegClose(key: string, rows: BookRow[]): { side: PnfAction; q
     .map(r => ({ side: r.net > 0 ? 'SELL' as const : 'BUY' as const, qty: Math.abs(r.net), product: r.product }));
 }
 
+/**
+ * A close that must leave another page's AUTO position alone (P&F and Renko trade the same broker account, and the broker nets
+ * every position by contract): the intraday row of the leg loses `reserved` (signed: + long, - short, AUTO's own units) before it
+ * is closed. Only a reservation in the row's own direction counts (an AUTO short cannot hide inside a net long). Other products
+ * are untouched by the reservation (AUTO trades intraday).
+ */
+export function planLegCloseKeeping(key: string, rows: BookRow[], reserved: number, broker: PnfBroker): { side: PnfAction; qty: number; product: string }[] {
+  const autoProduct = brokerProduct('INTRADAY', broker);
+  return planLegClose(key, rows).flatMap(o => {
+    if (o.product !== autoProduct || reserved === 0) return [o];
+    const net = o.side === 'SELL' ? o.qty : -o.qty;                  // closing a long sells
+    if (Math.sign(net) !== Math.sign(reserved)) return [o];
+    const qty = Math.abs(net) - Math.min(Math.abs(net), Math.abs(reserved));
+    return qty > 0 ? [{ ...o, qty }] : [];
+  });
+}
+
 /** `flat`: an AUTO exit found nothing of its own left at the broker (closed elsewhere), so nothing was sent. */
 export type LegStatus = 'placed' | 'rejected' | 'unknown' | 'skipped' | 'flat';
 export interface LegResult {
