@@ -158,3 +158,38 @@ test('replay: Select bar picks the clicked column as the start', async ({ page }
   expect(n).toBeLessThan(119);
   expect(blocked).toEqual([]);
 });
+
+test('replay keeps the room dragged open right of the newest brick: steps do not slide it back under the rail', async ({ page }) => {
+  const blocked: Call[] = [];
+  await install(page, blocked);
+  await page.goto('/renko');
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await expect.poll(() => bricks(page)).toBe(119);
+  await page.getByRole('button', { name: 'Bar replay' }).click();
+  const bar = page.getByTestId('pnf-replay-bar');
+  await bar.getByRole('button', { name: 'More ways to choose the start' }).click();
+  await page.getByRole('menuitem', { name: 'Select date…' }).click();
+  await page.getByLabel('Replay start date').fill('2026-10-30');
+  await page.getByLabel('Replay start time').fill('10:00');
+  await page.getByRole('button', { name: 'Start the replay at this time' }).click();
+  await expect.poll(() => bricks(page)).toBe(44);
+
+  const panel = page.getByTestId('pnf-panel').first();
+  const newestRight = async () => { const g = (await panel.getByTestId('pnf-newest').boundingBox())!; return g.x + g.width; };
+  const before = await newestRight();
+  // Drag the chart 150 px to the left: room opens right of the newest brick
+  const b = (await panel.getByTestId('pnf-scroll').boundingBox())!;
+  const cx = b.x + b.width / 3, cy = b.y + b.height / 2;
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx - 150, cy, { steps: 8 });
+  await page.mouse.up();
+  const dragged = await newestRight();
+  expect(before - dragged).toBeGreaterThan(100);
+
+  // Three steps = three new bricks; the chart follows them and keeps the room
+  for (let i = 0; i < 3; i++) await bar.getByRole('button', { name: 'Forward', exact: true }).click();
+  await expect.poll(() => bricks(page)).toBe(47);
+  await expect.poll(async () => Math.abs((await newestRight()) - dragged)).toBeLessThan(20);
+  expect(blocked).toEqual([]);
+});

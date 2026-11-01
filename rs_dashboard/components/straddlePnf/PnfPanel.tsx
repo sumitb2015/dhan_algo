@@ -487,8 +487,12 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const [viewLeft, setViewLeft] = useState(0);
   const [viewTop, setViewTop] = useState<number | null>(null);
   const stickRef = useRef(true);
+  // The empty room (in columns) the user dragged open right of the newest column: following keeps it, so new bricks
+  // do not slide back under the rail and the position tags.
+  const gapRef = useRef(0);
   // The scroll position where the newest column sits against the axis (the empty room right of it is only for dragging).
   const stickLeft = (el: HTMLElement) => Math.max(0, el.scrollWidth - el.clientWidth - padR);
+  const followLeft = (el: HTMLElement) => Math.min(el.scrollWidth - el.clientWidth, stickLeft(el) + gapRef.current * colW);
   // Until the user zooms or drags, the vertical position follows the layout (it changes when the panel is measured and as the range grows).
   const touchedRef = useRef(false);
   const centeredFor = useRef<number | null>(null);
@@ -496,7 +500,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || liveCols.length === 0) return;
-    if (stickRef.current) el.scrollLeft = stickLeft(el);
+    if (stickRef.current) el.scrollLeft = followLeft(el);
     setViewRight(Math.round(el.scrollLeft + el.clientWidth - AXIS_W - (rail ? RAIL_W : 0)));
     setViewLeft(Math.round(el.scrollLeft));
     setViewTop(Math.round(el.scrollTop));
@@ -539,7 +543,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     touchedRef.current = true;
     setXScale(next);
   };
-  const resetView = () => { touchedRef.current = false; pendingRef.current = 'reset'; stickRef.current = false; setZoom(1); setXScale(1); setScrollTick(n => n + 1); };
+  const resetView = () => { touchedRef.current = false; pendingRef.current = 'reset'; stickRef.current = false; gapRef.current = 0; setZoom(1); setXScale(1); setScrollTick(n => n + 1); };
   useLayoutEffect(() => {
     const el = wrapRef.current;
     const pending = pendingRef.current;
@@ -1159,7 +1163,12 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
           // Whether the chart keeps following the newest column is decided by the user's drag only. A scroll event cannot decide it:
           // the browser also scrolls on its own when the panel is resized (a window opening clamps scrollLeft), which used to
           // unstick a chart nobody had touched and leave it opened on the oldest column.
-          if (dragRef.current) { const el = e.currentTarget; stickRef.current = el.scrollLeft >= stickLeft(el) - 30; }
+          if (dragRef.current) {
+            const el = e.currentTarget;
+            const sl = stickLeft(el);
+            stickRef.current = el.scrollLeft >= sl - 30;
+            gapRef.current = stickRef.current ? Math.max(0, el.scrollLeft - sl) / colW : 0;
+          }
           dragRef.current = null; setDragging(false); trackHover(e);
         }}
         onPointerCancel={() => { dragRef.current = null; setDragging(false); }}
