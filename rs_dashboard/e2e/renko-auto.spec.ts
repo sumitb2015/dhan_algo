@@ -152,3 +152,20 @@ test('REAL: an unknown entry outcome halts the chart, is never resent, and waits
   await auto.getByRole('button', { name: 'Is flat' }).click();
   await expect.poll(() => state.ledger.rows[0]?.state).toBe('closed');
 });
+
+test('the forming bar\'s bricks are drawn unconfirmed (dimmed) like P&F boxes, and become real bricks once the bar closes', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));                      // the 10:30 bar is still forming at 99.95
+  await install(page);
+  await openFuture(page);
+  const panel = page.getByTestId('pnf-panel').first();
+  const count = async (id: string) => ((await panel.getByTestId(id).getAttribute('d')) ?? '').split('z').length - 1;
+  // confirmed: 3 up bricks (100.0-100.3); the forming 99.95 adds 2 down bricks, drawn dimmed and not counted as confirmed
+  await expect(panel.getByTestId('pnf-unconfirmed')).toHaveAttribute('data-count', '2');
+  await expect(panel.getByTestId('pnf-unconfirmed')).toHaveAttribute('opacity', '0.35');
+  expect(await count('pnf-bricks-up')).toBe(3);
+  expect(await count('pnf-bricks-down')).toBe(0);
+  // 10:31: the bar has closed, so the two bricks are confirmed and nothing is left unconfirmed
+  await page.clock.setFixedTime(ist(10, 31, 5));
+  await expect.poll(() => count('pnf-bricks-down'), { timeout: 15_000 }).toBe(2);
+  await expect(panel.getByTestId('pnf-unconfirmed')).toHaveCount(0);
+});
