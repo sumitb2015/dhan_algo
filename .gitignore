@@ -43,6 +43,7 @@ REORGANIZATION_SUMMARY.md
 debug/option_chain_cache/
 debug/*.txt
 debug/*.pid
+debug/*.lock
 debug/*.json
 debug/*.db
 debug/*.trigger
