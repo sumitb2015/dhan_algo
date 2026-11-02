@@ -40,12 +40,14 @@ export type PnfColumn = {
 export type PnfSignal = {
   id: string;
   /** DOUBLE_* on a P&F chart, RENKO_* (N-brick confirmation, lib/renko.ts) on a Renko chart. */
-  kind: 'DOUBLE_TOP_BUY' | 'DOUBLE_BOTTOM_SELL' | 'RENKO_BUY' | 'RENKO_SELL';
+  kind: 'DOUBLE_TOP_BUY' | 'DOUBLE_BOTTOM_SELL' | 'RENKO_BUY' | 'RENKO_SELL' | 'TWOBACK_BUY' | 'TWOBACK_SELL';
   col: number;
   bar: number;
   t: number;
   price: number;
   belowVwap: boolean;
+  /** Two-back signals only: the protective stop, one brick beyond the two-brick pullback. */
+  stop?: number;
 };
 
 export type PnfExecutionMarker = {
@@ -61,7 +63,7 @@ export type PnfExecutionMarker = {
 };
 
 /** True for a short-entry signal (P&F double bottom or Renko SELL); every consumer maps kinds to a side through this. */
-export const isSellSignal = (kind: string) => kind === 'DOUBLE_BOTTOM_SELL' || kind === 'RENKO_SELL';
+export const isSellSignal = (kind: string) => kind === 'DOUBLE_BOTTOM_SELL' || kind === 'RENKO_SELL' || kind === 'TWOBACK_SELL';
 
 const IST_OFFSET_S = 5.5 * 3600;
 const EPS = 1e-9;

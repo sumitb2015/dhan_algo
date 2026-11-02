@@ -48,3 +48,18 @@ the order out) is offered for the same resolution.
   broker fills, so on a small box REAL can differ from PAPER by the boxes the price moved before the order.
 - Two charts on the same contract net at the broker; each exits only its own units, capped by what the broker still shows.
 - The whole-position SQUARE OFF in the trade bar closes AUTO's units too; AUTO then finds the leg flat and books it closed.
+
+## Renko "Two-back" rule (`/renko`, per-chart rule picker next to AUTO)
+Source: Definedge's Renko pattern library (Two Back Bullish / Bearish: >=3 trend bricks, a correction of exactly two opposite
+bricks, then >=3 bricks in the trend direction). The stop-loss is from the strategy text supplied with the request; Definedge's
+page gives no stop or target. UNVALIDATED, same as the other AUTO rules.
+
+| Rule | Behaviour |
+|---|---|
+| Pattern (`twoBackSignals`, `lib/renko.ts`) | BUY: run of >=3 up bricks, then exactly 2 down bricks, then up bricks again; signal on the resumed brick that is the 3rd of the run **and** closes above the trend's last brick top (the swing high). SELL mirrors it |
+| Stop | BUY: one brick below the pullback's low. SELL: one brick above the pullback's high. Stored on the signal and the ledger row (`stop`) |
+| Exit | Live price touches the stop (PAPER books the stop level), or EOD. **No** first-opposite-brick exit and **no target**: a stop-based position rides the trend until stopped or flat at the cutoff |
+| Everything else | Same entry freshness, watermark, sessions, sizing, REAL arming and ledger rules as above |
+
+The rule is chosen per chart and locked while AUTO is armed or holds a position; it is not remembered across a reload.
+Two-back signals are computed on every Renko chart (`model.twoBack`) but are not drawn as chart markers; trades appear as AUTO markers.

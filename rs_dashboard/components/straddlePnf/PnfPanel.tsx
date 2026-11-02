@@ -176,6 +176,7 @@ const shortDate = (iso: string) => sessionLabel(iso).slice(4);
 /** The newest-signal pill's text: P&F double top / bottom, or a Renko N-brick confirmation. */
 const signalPill = (kind: string, long: boolean) => {
   const sell = isSellSignal(kind);
+  if (kind.startsWith('TWOBACK')) return sell ? '▼ Two-back sell' : '▲ Two-back buy';
   if (kind.startsWith('RENKO')) return sell ? '▼ Renko sell' : '▲ Renko buy';
   return sell ? (long ? '▼ DB sell' : '▼ DB') : (long ? '▲ DT buy' : '▲ DT');
 };

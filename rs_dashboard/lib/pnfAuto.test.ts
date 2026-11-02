@@ -103,3 +103,17 @@ test('a CAS stock (NSE_CAS) squares off at 15:10 from 3 Aug 2026, before continu
   assert.deepEqual(autoWindow('NSE_CAS', at('2026-07-31T10:00:00')), { open: 9 * 60 + 15, entryCutoff: 15 * 60, eodExit: 15 * 60 + 15 });
   assert.equal(autoWindow('NSE', at('2026-10-30T10:00:00'))!.eodExit, 15 * 60 + 15);   // a stock without derivatives: unchanged
 });
+
+test('a two-back position exits on its stop only: not on an opposite brick, and an EOD still flattens it', () => {
+  const m = model();                                              // has an O column after a 10:00 entry
+  const long = { side: 'BUY' as const, entryBarT: ist(10, 0), stop: 90 };
+  const hold = decideAuto({ model: m, position: long, watermarkT: 0, nowS: ist(10, 40), market: 'NSE', price: 95 });
+  assert.equal(hold.action, 'none', 'an opposite brick does not exit a stop position');
+  const hit = decideAuto({ model: m, position: long, watermarkT: 0, nowS: ist(10, 40), market: 'NSE', price: 90 });
+  assert.deepEqual(hit, { action: 'exit', reason: 'stop', boxPrice: 90 });
+  const noPx = decideAuto({ model: m, position: long, watermarkT: 0, nowS: ist(10, 40), market: 'NSE' });
+  assert.equal(noPx.action, 'none', 'no price, no stop decision');
+  const short = { side: 'SELL' as const, entryBarT: ist(10, 0), stop: 110 };
+  assert.equal(decideAuto({ model: m, position: short, watermarkT: 0, nowS: ist(10, 40), market: 'NSE', price: 111 }).action, 'exit');
+  assert.equal(decideAuto({ model: m, position: short, watermarkT: 0, nowS: ist(15, 16), market: 'NSE', price: 100 }).action, 'exit');
+});

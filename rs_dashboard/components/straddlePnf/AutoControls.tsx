@@ -10,6 +10,8 @@ import { rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
 const MAX_LOTS = 20;
 const inr = (n: number) => `${n > 0 ? '+' : n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 
+export type AutoRule = 'nbrick' | 'twoback';
+
 export interface AutoControlsProps {
   chart: 1 | 2;
   armed: boolean;
@@ -25,6 +27,9 @@ export interface AutoControlsProps {
   note: string;
   halt: string | null;
   onResolve: (as: 'open' | 'flat') => void;
+  /** Renko only: which pattern AUTO trades. Absent on P&F (one rule). Locked while armed or holding a position. */
+  autoRule?: AutoRule;
+  onAutoRule?: (r: AutoRule) => void;
   /** The page clock (ms), for spotting a stale reservation. */
   nowMs: number;
 }
@@ -35,7 +40,7 @@ export const needsResolve = (r: AutoRow, nowMs: number) =>
   r.state === 'unknownEntry' || r.state === 'unknownExit'
   || ((r.state === 'entering' || r.state === 'exiting') && nowMs - (r.pendingSince ?? r.entryT) * 1000 > STALE_PENDING_MS);
 
-export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, nowMs, rule }: AutoControlsProps) {
+export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, nowMs, rule, autoRule, onAutoRule }: AutoControlsProps) {
   const [confirmReal, setConfirmReal] = useState(false);
   const [draft, setDraft] = useState(String(lots));
   const focusedRef = useRef(false);
@@ -78,6 +83,14 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
         {confirmReal && !armed ? 'ARM REAL AUTO?' : 'AUTO'}
         {armed && <span className={`w-1.5 h-1.5 rounded-full ${mode === 'REAL' ? 'bg-red-400' : 'bg-violet-400'} animate-pulse`} aria-hidden="true" />}
       </button>
+      {autoRule && onAutoRule && (
+        <select aria-label={`AUTO rule on chart ${chart}`} value={autoRule} disabled={locked} onChange={e => onAutoRule(e.target.value as AutoRule)}
+                title={locked ? 'Stop AUTO (and close its position) to change the rule' : 'Which pattern AUTO trades'}
+                className="h-6 rounded border border-zinc-700 bg-zinc-950 px-1 text-[11px] font-bold text-zinc-200 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">
+          <option value="nbrick">N-brick</option>
+          <option value="twoback">Two-back</option>
+        </select>
+      )}
       <span className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950" title={locked ? 'Stop AUTO (and close its position) to change lots' : 'Lots per AUTO trade'}>
         <span className="pl-1 text-[11px] font-bold text-zinc-400" aria-hidden="true">L</span>
         <button type="button" aria-label={`Fewer AUTO lots on chart ${chart}`} disabled={locked || lots <= 1} onClick={() => onLots(lots - 1)}

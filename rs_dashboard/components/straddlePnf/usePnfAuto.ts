@@ -138,7 +138,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
   };
 
   /** `livePx`: the chart's price now; `box`: the confirmed box the signal bar reached (PAPER books it; REAL books the live price). */
-  const enter = async (side: 'BUY' | 'SELL', signalT: number, livePx: number, box: number | null) => {
+  const enter = async (side: 'BUY' | 'SELL', signalT: number, livePx: number, box: number | null, stop?: number) => {
     const px = arm.mode === 'PAPER' && box !== null ? box : livePx;
     const cur = info && info.key === infoKey ? info : null;
     if (!cur || !cur.legs.length) { setNote('waiting for the contract lookup'); return; }
@@ -150,6 +150,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
       id, day: istDateIso(Date.now()), chart, target, mode: arm.mode, broker, side, lots, unitsPerPoint,
       legs: cur.legs.map(l => ({ label: l.label, key: l.key, units: (l.lotUnits ?? l.lot) * lots })), entryT: nowS, entryBarT: signalT, entryPrice: px,
       ...(box !== null ? { entryBox: box } : {}),
+      ...(stop !== undefined ? { stop } : {}),
     };
     if (arm.mode === 'PAPER') {
       const j = await sendOrder({ broker, mode: 'PAPER', target, action: side, lots, product: 'INTRADAY' });
@@ -236,7 +237,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
           if (d.action === 'exit' && d.reason === 'eod') { busyRef.current = true; try { await exit(row, 'eod', null); } finally { busyRef.current = false; } }
           return;
         }
-        const d = decideAuto({ model, position: { side: row.side, entryBarT: row.entryBarT }, watermarkT: watermarkRef.current, nowS, market });
+        const d = decideAuto({ model, position: { side: row.side, entryBarT: row.entryBarT, stop: row.stop }, watermarkT: watermarkRef.current, nowS, market, price });
         if (d.action !== 'exit') { setNote('holding'); return; }
         if (d.reason === 'reversal' && price === null) { setNote('reversal seen, waiting for a price'); return; }
         busyRef.current = true;
@@ -252,7 +253,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
       if (d.action !== 'enter') { setNote(d.action === 'none' ? d.why : ''); return; }
       watermarkRef.current = d.signal.t;                       // handled: this signal is never entered again
       busyRef.current = true;
-      try { await enter(d.side, d.signal.t, price, d.boxPrice); } finally { busyRef.current = false; }
+      try { await enter(d.side, d.signal.t, price, d.boxPrice, d.signal.stop); } finally { busyRef.current = false; }
     };
   });
   useEffect(() => {

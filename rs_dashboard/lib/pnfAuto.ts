@@ -38,13 +38,19 @@ export interface AutoModel {
   lastBarT: number | null;
 }
 
-export interface AutoPosition { side: AutoSide; /** Time of the bar whose signal opened it. */ entryBarT: number }
+export interface AutoPosition {
+  side: AutoSide;
+  /** Time of the bar whose signal opened it. */
+  entryBarT: number;
+  /** Two-back positions: the protective stop. It replaces the first-opposite-brick exit (a two-brick pullback is part of the pattern). */
+  stop?: number;
+}
 
 export type AutoDecision =
   /** `boxPrice`: the confirmed box the signal bar reached (where the trade is booked on paper and drawn on the chart). */
   | { action: 'enter'; side: AutoSide; signal: PnfSignal; boxPrice: number | null }
   /** Reversal: `boxPrice` is the confirmed box the reversal column reached on its first bar. EOD has none (no box event). */
-  | { action: 'exit'; reason: 'reversal' | 'eod'; col?: number; boxPrice?: number | null }
+  | { action: 'exit'; reason: 'reversal' | 'eod' | 'stop'; col?: number; boxPrice?: number | null }
   | { action: 'none'; why: string };
 
 /** [entry cutoff, EOD exit] in IST minutes of the day for `market` at `t` (null when the market is shut that day). */
@@ -90,13 +96,19 @@ export function reversalColumn(model: AutoModel, pos: AutoPosition): number {
  * What the chart should do now. `watermarkT`: signals at or before it are never entered (it is set to the last closed bar when
  * AUTO is switched on, and to each handled signal's time). `nowS`: the decision time, epoch seconds.
  */
-export function decideAuto({ model, position, watermarkT, nowS, market }: {
+export function decideAuto({ model, position, watermarkT, nowS, market, price = null }: {
   model: AutoModel; position: AutoPosition | null; watermarkT: number; nowS: number; market: Market;
+  /** The chart's live price, for a stop (a position without a stop never reads it). */
+  price?: number | null;
 }): AutoDecision {
   const win = autoWindow(market, nowS);
   const minute = istMinuteOfDay(nowS);
   if (position) {
     if (win && minute >= win.eodExit) return { action: 'exit', reason: 'eod' };
+    if (position.stop !== undefined) {
+      const hit = price !== null && (position.side === 'BUY' ? price <= position.stop : price >= position.stop);
+      return hit ? { action: 'exit', reason: 'stop', boxPrice: position.stop } : { action: 'none', why: 'holding' };
+    }
     const col = reversalColumn(model, position);
     return col >= 0 ? { action: 'exit', reason: 'reversal', col, boxPrice: boxPriceAt(model, col, model.columns[col].startBar) } : { action: 'none', why: 'holding' };
   }

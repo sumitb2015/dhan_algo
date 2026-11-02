@@ -46,7 +46,7 @@ import { isSellSignal } from '@/lib/straddlePnf';
 import type { PnfScope } from '@/lib/pnfScope';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent } from './straddlePnf/usePnfAuto';
 import { autoDaySummary, autoMarkers } from '@/lib/pnfAutoLedger';
-import AutoControls from './straddlePnf/AutoControls';
+import AutoControls, { type AutoRule } from './straddlePnf/AutoControls';
 import { usePnfPositions } from './straddlePnf/usePnfPositions';
 import { usePnfGuard } from './straddlePnf/usePnfGuard';
 import PnfOrderStyle, { DEFAULT_STYLE, type StyleState } from './straddlePnf/PnfOrderStyle';
@@ -240,6 +240,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const [tradeOpen, setTradeOpen] = useState(true);
   const [booksOpen, setBooksOpen] = useState(false);
   const [autoArm, setAutoArm] = useState<Record<ChartId, AutoArm>>({ 1: DISARMED, 2: DISARMED });
+  const [autoRule, setAutoRule] = useState<Record<ChartId, AutoRule>>({ 1: 'nbrick', 2: 'nbrick' });
   const [autoLots, setAutoLots] = useState<Record<ChartId, number>>({ 1: 1, 2: 1 });
   // Single | Bracket | Cover for the next entry (trade bar and chart rail), with its points; remembered, never armed silently.
   const [orderStyle, setOrderStyle] = useState<StyleState>(DEFAULT_STYLE);
@@ -693,12 +694,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     };
   };
   const auto1 = usePnfAuto({
-    chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: c1.model, price: priceOf(feed1), stale: feed1.stale,
+    chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: autoRule[1] === 'twoback' ? { ...c1.model, signals: c1.model.twoBack } : c1.model, price: priceOf(feed1), stale: feed1.stale,
     market: feed1.market, complete: feed1.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
     onEvent: onAutoEvent, onDisarm: () => disarm(1), scope,
   });
   const auto2 = usePnfAuto({
-    chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: c2.model, price: priceOf(feed2), stale: feed2.stale,
+    chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: autoRule[2] === 'twoback' ? { ...c2.model, signals: c2.model.twoBack } : c2.model, price: priceOf(feed2), stale: feed2.stale,
     market: feed2.market, complete: feed2.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
     onEvent: onAutoEvent, onDisarm: () => disarm(2), scope,
   });
@@ -880,7 +881,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
         <AutoControls chart={c} armed={autoArm[c].on} mode={tradeMode} lots={autoLots[c]} onLots={n => setLotsFor(c, n)}
                       onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} halt={autoOf(c).halt}
                       onResolve={autoOf(c).resolve} nowMs={now}
-                      rule={renko ? `Renko SELL / BUY after ${(c === 2 ? settings2 : settings).reversal} confirming bricks, exit on the first opposite brick` : undefined}
+                      autoRule={renko ? autoRule[c] : undefined} onAutoRule={renko ? r => setAutoRule(a => ({ ...a, [c]: r })) : undefined}
+                      rule={renko && autoRule[c] === 'twoback' ? 'Two-back: 3+ bricks, 2-brick pullback, 3 bricks resume past the swing; stop one brick beyond the pullback' : renko ? `Renko SELL / BUY after ${(c === 2 ? settings2 : settings).reversal} confirming bricks, exit on the first opposite brick` : undefined}
                       disabledReason={target.kind === 'index' ? 'No AUTO on an index: chart its future or an option'
                         : replay.active ? 'Bar replay is open: close it to arm live AUTO' : null} />
       ),

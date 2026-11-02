@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRenko, brickClose, renkoSignals, renkoSma, renkoSupertrend } from './renko.ts';
+import { buildRenko, brickClose, renkoSignals, twoBackSignals, renkoSma, renkoSupertrend } from './renko.ts';
 import { buildConfirmedModel, withLive } from './straddlePnfModel.ts';
 import { boxPriceAt, decideAuto } from './pnfAuto.ts';
 import type { Bar } from './straddlePnf.ts';
@@ -129,4 +129,32 @@ test('the Renko model carries the Supertrend with its settings; P&F has none', (
   assert.deepEqual([m.stPeriod, m.stMult], [5, 2]);
   assert.equal(m.supertrend[m.supertrend.length - 1].dir, 1);
   assert.deepEqual(buildConfirmedModel(bars(closes), 'sma', { boxPct: 0.1 }).supertrend, []);
+});
+
+test('two-back BUY: 3+ up bricks, a 2-brick pullback, then the run resumes past the swing; stop one brick under the pullback', () => {
+  const closes = [22650, 22660, 22670, 22680, 22660, 22650, 22670, 22680, 22690, 22700];
+  const b = bars(closes);
+  const { columns } = buildRenko(b, 10);
+  assert.deepEqual(columns.map(c => `${c.dir}${c.low}-${c.high}`),
+    ['X22650-22660', 'X22660-22670', 'X22670-22680', 'O22660-22670', 'O22650-22660', 'X22660-22670', 'X22670-22680', 'X22680-22690', 'X22690-22700']);
+  const s = twoBackSignals(columns, b, new Array(b.length).fill(null), 10);
+  assert.equal(s.length, 1);
+  assert.equal(s[0].kind, 'TWOBACK_BUY');
+  assert.equal(s[0].col, 7, 'the third resumed brick that closes above the 22680 swing high');
+  assert.equal(s[0].stop, 22640, 'pullback low 22650 minus one brick');
+});
+
+test('two-back: a 1- or 3-brick pullback, or a short trend, is not the pattern', () => {
+  const none = (c: number[]) => { const b = bars(c); return twoBackSignals(buildRenko(b, 10).columns, b, new Array(b.length).fill(null), 10); };
+  assert.equal(none([22650, 22660, 22670, 22680, 22660, 22650, 22640, 22660, 22670, 22680, 22690]).length, 0, 'three-brick pullback');
+  assert.equal(none([22650, 22660, 22640, 22630, 22650, 22660, 22670]).length, 0, 'trend of only two bricks');
+});
+
+test('two-back SELL mirrors the BUY, with the stop one brick above the pullback high', () => {
+  const closes = [22700, 22690, 22680, 22670, 22690, 22700, 22680, 22670, 22660, 22650];
+  const b = bars(closes);
+  const s = twoBackSignals(buildRenko(b, 10).columns, b, new Array(b.length).fill(null), 10);
+  assert.equal(s.length, 1);
+  assert.equal(s[0].kind, 'TWOBACK_SELL');
+  assert.equal(s[0].stop, 22710, 'pullback high 22700 plus one brick');
 });

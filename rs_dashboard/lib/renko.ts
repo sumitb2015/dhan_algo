@@ -81,6 +81,43 @@ export function renkoSignals(columns: PnfColumn[], bars: Bar[], reference: (numb
   return out;
 }
 
+/**
+ * Two-back pattern. BUY: a trend of at least `trend` up bricks, a pullback of exactly two down bricks, then the up run resumes and
+ * the brick that makes it at least `trend` bricks long AND closes above the trend's swing high (its last brick's top) signals;
+ * the stop is one brick below the pullback's low. SELL is the mirror (stop one brick above the pullback's high). Fires once per
+ * pattern, on that brick. Each column is one brick, so a "run" is consecutive columns of one direction.
+ */
+export function twoBackSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number, trend = 3): PnfSignal[] {
+  const need = Math.max(1, Math.floor(trend));
+  const out: PnfSignal[] = [];
+  // runs[k] = { dir, first, last } over consecutive same-direction columns
+  const runs: { dir: 'X' | 'O'; first: number; last: number }[] = [];
+  columns.forEach((c, i) => {
+    const r = runs[runs.length - 1];
+    if (r && r.dir === c.dir) r.last = i; else runs.push({ dir: c.dir, first: i, last: i });
+  });
+  for (let k = 2; k < runs.length; k++) {
+    const resume = runs[k], pull = runs[k - 1], trendRun = runs[k - 2];
+    if (resume.dir !== trendRun.dir || pull.dir === resume.dir) continue;
+    if (pull.last - pull.first + 1 !== 2) continue;
+    if (trendRun.last - trendRun.first + 1 < need) continue;
+    const up = resume.dir === 'X';
+    const swing = up ? columns[trendRun.last].high : columns[trendRun.last].low;
+    // the first brick of the resumed run that is at least `need` long and has broken the swing
+    for (let i = resume.first + need - 1; i <= resume.last; i++) {
+      const c = columns[i];
+      if (up ? c.high <= swing : c.low >= swing) continue;
+      const pullEdge = up ? Math.min(...columns.slice(pull.first, pull.last + 1).map(x => x.low)) : Math.max(...columns.slice(pull.first, pull.last + 1).map(x => x.high));
+      const kind = up ? 'TWOBACK_BUY' : 'TWOBACK_SELL';
+      const price = brickClose(c);
+      const v = reference[c.startBar];
+      out.push({ id: `${kind}:${i}`, kind, col: i, bar: c.startBar, t: bars[c.startBar].t, price, belowVwap: v != null && price < v, stop: up ? pullEdge - box : pullEdge + box });
+      break;
+    }
+  }
+  return out;
+}
+
 /** SMA of brick closes, read at each brick (null until `period` bricks exist) — TradingView's moving average on a Renko chart. */
 export function renkoSma(columns: PnfColumn[], period: number): (number | null)[] {
   let sum = 0;
