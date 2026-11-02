@@ -544,10 +544,27 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     touchedRef.current = true;
     setZoom(next);
   };
+  // Vertical-only zoom (the price axis drag): the boxes grow / shrink in height while the column pitch stays, so xScale takes up
+  // the change in cell size. The price under the view centre stays put; the horizontal scroll does not move.
+  const yZoomBy = (factor: number) => {
+    const el = wrapRef.current;
+    const next = Math.min(6, Math.max(0.3, +(zoom * factor).toFixed(3)));
+    if (!el || next === zoom) return;
+    const y = el.clientHeight / 2;
+    const L2 = layoutPanel(liveCols, box, liveValue, viewW, HEIGHT, next, true, xScale);
+    const nextXScale = colW / L2.cell;   // layoutPanel rounds cell x xScale back to exactly colW
+    const u = (el.scrollTop + y - padY - PAD_TOP) / cell;
+    pendingRef.current = { left: el.scrollLeft, top: L2.padY + PAD_TOP + u * L2.cell - y };
+    stickRef.current = false;
+    touchedRef.current = true;
+    setZoom(next);
+    setXScale(nextXScale);
+  };
   // Horizontal-only zoom: the columns move apart / together, the box height and the glyph size stay. The column under the anchor stays put.
   const xZoomBy = (factor: number, ax?: number) => {
     const el = wrapRef.current;
-    const next = Math.min(XSCALE_MAX, Math.max(XSCALE_MIN, +(xScale * factor).toFixed(3)));
+    // A vertical zoom can leave xScale outside the range: it may still step back towards it, never further out.
+    const next = Math.min(Math.max(XSCALE_MAX, xScale), Math.max(Math.min(XSCALE_MIN, xScale), xScale * factor));
     if (!el || next === xScale) return;
     const x = ax ?? el.clientWidth / 2;
     const L2 = layoutPanel(liveCols, box, liveValue, viewW, HEIGHT, zoom, true, next);
@@ -581,8 +598,10 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   }, [resetTick]);
   const zoomRef = useRef(zoomBy);
   const xZoomRef = useRef(xZoomBy);
-  useLayoutEffect(() => { zoomRef.current = zoomBy; xZoomRef.current = xZoomBy; });
-  // Press on the price axis and drag: up zooms in, down zooms out (about the view centre), like a charting package's price scale.
+  const yZoomRef = useRef(yZoomBy);
+  useLayoutEffect(() => { zoomRef.current = zoomBy; xZoomRef.current = xZoomBy; yZoomRef.current = yZoomBy; });
+  // Press on the price axis and drag: up stretches the boxes taller, down squeezes them (about the view centre), like a charting
+  // package's price scale. Vertical only: the columns keep their width.
   const zoomNowRef = useRef(zoom);
   useLayoutEffect(() => { zoomNowRef.current = zoom; });
   const axisDragRef = useRef<{ y: number; z: number } | null>(null);
@@ -1410,7 +1429,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                    const d = axisDragRef.current;
                    if (!d) return;
                    e.stopPropagation();
-                   zoomRef.current(Math.exp((d.y - e.clientY) * 0.01) * d.z / zoomNowRef.current);
+                   yZoomRef.current(Math.exp((d.y - e.clientY) * 0.01) * d.z / zoomNowRef.current);
                  }}
                  onPointerUp={() => { axisDragRef.current = null; }}
                  onPointerCancel={() => { axisDragRef.current = null; }}>

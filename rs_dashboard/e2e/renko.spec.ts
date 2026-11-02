@@ -92,3 +92,46 @@ test('the Supertrend is drawn on the bricks, its period / multiplier apply on En
   await expect(panel.getByTestId('pnf-supertrend-up')).toHaveCount(1);
   expect(blocked).toEqual([]);
 });
+
+test('dragging the price axis zooms vertically only: the bricks grow taller, the columns keep their width', async ({ page }) => {
+  const blocked: Call[] = [];
+  await install(page, blocked, []);
+  await page.goto('/renko');
+  const panel = page.getByTestId('pnf-panel').first();
+  const newest = panel.getByTestId('pnf-newest');
+  await expect(newest).toHaveCount(1);
+  const size = async () => ({ w: Number(await newest.getAttribute('width')), h: Number(await newest.getAttribute('height')) });
+  const before = await size();
+  const axis = panel.getByTestId('pnf-axis-drag');
+  const box = (await axis.boundingBox())!;
+  const x = box.x + box.width / 2;
+  const y = box.y + Math.min(box.height, 600) / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x, y - 60, { steps: 6 });    // up: zoom in
+  await page.mouse.up();
+  await expect.poll(async () => (await size()).h).toBeGreaterThan(before.h);
+  expect((await size()).w).toBe(before.w);
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x, y + 150, { steps: 10 });  // down: zoom out past the start
+  await page.mouse.up();
+  await expect.poll(async () => (await size()).h).toBeLessThan(before.h);
+  expect((await size()).w).toBe(before.w);
+  expect(blocked).toEqual([]);
+});
+
+test('the order Style bar sits in the trade bar row, never over the charts', async ({ page }) => {
+  const blocked: Call[] = [];
+  await install(page, blocked, []);
+  await page.goto('/renko');
+  const style = page.getByTestId('pnf-style-bar');
+  await expect(style).toHaveCount(1);
+  await expect(page.getByTestId('pnf-trade-bar').getByTestId('pnf-style-bar')).toHaveCount(1);
+  const s = (await style.boundingBox())!;
+  for (const panel of await page.getByTestId('pnf-panel').all()) {
+    const p = (await panel.boundingBox())!;
+    expect(s.y + s.height).toBeLessThanOrEqual(p.y);   // wholly above every chart card
+  }
+  expect(blocked).toEqual([]);
+});

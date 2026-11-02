@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { toast } from 'sonner';
 import { Loader2, ArrowUpRight, ArrowDownRight, XCircle } from 'lucide-react';
 import { BROKER_LABELS, scalperRoute, type Broker } from '@/hooks/useBrokerSelector';
@@ -20,6 +20,8 @@ import type { PnfScope } from '@/lib/pnfScope';
 
 export interface PnfTradeBarProps {
   target: Target;
+  /** Drawn in the bar between the lots and the BUY / SELL buttons: the page's order Style (Single / Bracket / Cover) and MTM guard. */
+  styleSlot?: ReactNode;
   /** Live prices: a straddle's CE and PE, or one instrument's price split as ce + pe. */
   live: { ce: number; pe: number } | null;
   /** The account orders go to: the page header's broker picker owns it (one source for the bar and the Margin / P&L chips). */
@@ -63,7 +65,7 @@ const inr = (n: number) => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLo
 const pnlTone = (n: number | null) => (n == null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
 
 export default function PnfTradeBar({
-  target, live, broker, mode, onModeChange, onPnlChange, onSwitchTarget, onTradeExecuted, onMarkerPrice, onSound, tradesLabel, paper, setPaper, onSizing, bracketSpec, onEntered, onSquaredOff, scope = 'pnf',
+  target, live, broker, mode, onModeChange, onPnlChange, onSwitchTarget, onTradeExecuted, onMarkerPrice, onSound, tradesLabel, paper, setPaper, onSizing, bracketSpec, onEntered, onSquaredOff, scope = 'pnf', styleSlot = null,
 }: PnfTradeBarProps) {
   const [productPick, setProduct] = useState<PnfProduct>('INTRADAY');
   const [lotsPick, setLots] = useState(1);
@@ -375,6 +377,8 @@ export default function PnfTradeBar({
           </div>
         </div>
       )}
+
+      {styleSlot}
 
       {/* 3. Action Buttons */}
       <div className="flex items-center gap-2 ml-auto">

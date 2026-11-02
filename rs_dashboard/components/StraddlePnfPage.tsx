@@ -738,6 +738,21 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     });
   };
 
+  // Order Style (Single / Bracket / Cover) and MTM guard: in the trade bar's row while it is shown, else a row of its own above the
+  // charts (the chart rail still places orders with it). Never floated over the charts, where it hid their header lines.
+  const tradeBarShown = tradeOpen && !replay.active;
+  const styleBar = (
+    <PnfOrderStyle
+      value={orderStyle} onChange={changeStyle} boxPts={activeChartModel.model.box}
+      guardOn={[1, 2].some(n => guards.guardOf(n).on)}
+      guard={(() => {
+        const rc = railCharts.find(x => x.chart === active);
+        if (!rc) return undefined;
+        const gc = { chart: rc.chart, targetKey: rc.targetKey };
+        return { broker: broker, real: tradeMode === 'REAL', chart: rc.chart, chartLabel: `Chart ${rc.chart} · ${rc.target.symbol}`, mtm: guards.mtmOf(gc), guard: guards.guardOf(rc.chart), post: guards.post(gc) };
+      })()}
+    />
+  );
   const today = istToday();
   const seg = (active: boolean) =>
     `px-2.5 h-6 text-[11px] font-bold rounded-md transition-colors ${active ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-100'}`;
@@ -965,9 +980,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       </header>
 
       {/* interactive 1-click execution trade bar */}
-      {tradeOpen && !replay.active && (
+      {tradeBarShown && (
         <div className="shrink-0">
           <PnfTradeBar
+            styleSlot={styleBar}
             target={activeTarget}
             live={activeFeed.live}
             broker={broker}
@@ -996,16 +1012,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 pt-2 pb-2">
         {loadErrors.map(e => <p key={e as string} role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{e}</p>)}
         {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind))} renko={renko} /></div>}
-        <PnfOrderStyle
-            value={orderStyle} onChange={changeStyle} boxPts={activeChartModel.model.box}
-            guardOn={[1, 2].some(n => guards.guardOf(n).on)}
-            guard={(() => {
-              const rc = railCharts.find(x => x.chart === active);
-              if (!rc) return undefined;
-              const gc = { chart: rc.chart, targetKey: rc.targetKey };
-              return { broker: broker, real: tradeMode === 'REAL', chart: rc.chart, chartLabel: `Chart ${rc.chart} · ${rc.target.symbol}`, mtm: guards.mtmOf(gc), guard: guards.guardOf(rc.chart), post: guards.post(gc) };
-            })()}
-          />
+        {!tradeBarShown && <div className="shrink-0 self-center px-2 py-1 rounded-lg border border-zinc-800 bg-zinc-900">{styleBar}</div>}
         <div
           className={`flex-1 min-h-0 grid gap-3 ${dual ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}
           style={{ gridTemplateRows: 'minmax(0, 1fr)' }}
