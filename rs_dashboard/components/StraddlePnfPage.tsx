@@ -593,6 +593,57 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     } catch { toast.warning('MTM guard exit: no clean reply - check Positions; it is retried', { duration: 15_000 }); }
     return false;
   };
+  // + / − on the ladder's position chip: one lot more (+, the position's own side) or one lot less (−, the opposite side) at
+  // MARKET on that chart's contract. A plain order (no bracket), refused while the rail is locked, while AUTO holds the chart or
+  // while the previous click is still out; REAL asks first unless Instant is on. An unclear reply is never resent.
+  const adjustBusyRef = useRef<Record<number, boolean>>({});
+  const adjustSeqRef = useRef(0);   // marker ids: two clicks in one second must not share one
+  const adjustPosition = async (c: ChartId, dir: 1 | -1) => {
+    const rc = railCharts.find(x => x.chart === c);
+    const pos = rc ? positions[rc.targetKey] : null;
+    if (!rc || !pos || pos.side === 'MIXED' || !railArmed || adjustBusyRef.current[c]) return;
+    if (autoArm[c].on || autoOf(c).row) { toast.warning(`Chart ${c} is run by AUTO: stop it before changing its position by hand`); return; }
+    const action: 'BUY' | 'SELL' = (pos.side === 'LONG') === (dir === 1) ? 'BUY' : 'SELL';
+    const reduces = dir === -1;
+    const what = `${action} 1 lot at MARKET (${reduces ? 'reduce' : 'add to'} ${pos.side} ${pos.lots}L) on ${rc.target.symbol}`;
+    if (tradeMode === 'REAL' && !instant[c] && !window.confirm(`${what}?\n\nThis is a REAL order at your broker.`)) return;
+    const t = Math.floor(nowSec());
+    if (tradeMode === 'PAPER') {
+      if (rc.legPrices.some(p => p == null || p <= 0)) { toast.error('No live price yet - paper order not filled'); return; }
+      const delta = action === 'BUY' ? 1 : -1;
+      setPaper(prev => {
+        const legs = prev[rc.targetKey] ?? rc.legPrices.map(() => FLAT_LEG);
+        return { ...prev, [rc.targetKey]: legs.map((l, i) => applyPaperFill(l, delta, rc.legPrices[i] ?? 0, rc.unitsPerLot[i] ?? 1)) };
+      });
+      handleTradeExecuted({ id: `adj-${c}-${t}-${++adjustSeqRef.current}`, t, action, price: rc.price ?? 0, lots: 1, mode: 'PAPER', estimate: false }, rc.target);
+      chime({ kind: 'manual', outcome: 'placed', close: reduces });
+      toast.success(`[PAPER] ${what}`);
+      return;
+    }
+    adjustBusyRef.current[c] = true;
+    try {
+      const res = await fetch('/api/straddle-pnf/order', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ broker, mode: 'REAL', target: rc.target, action, lots: 1, product: sizing.product, scope }),
+      });
+      const j = await res.json() as { outcome?: string; error?: string; message?: string };
+      chime({ kind: 'manual', outcome: j.outcome, close: reduces });
+      const msg = j.message ?? j.error ?? 'Unknown error';
+      if (j.outcome === 'placed') {
+        toast.success(`[${broker.toUpperCase()}] ${what}. ${msg}`);
+        handleTradeExecuted({ id: `adj-${c}-${t}-${++adjustSeqRef.current}`, t, action, price: rc.price ?? 0, lots: 1, mode: 'REAL', estimate: true }, rc.target);
+      } else if (j.outcome === 'kept') toast.info(msg, { duration: 15_000 });
+      else if (j.outcome === 'partial') toast.error(msg, { duration: Infinity });
+      else if (j.outcome === 'unknown') toast.warning(`${msg} - check Orders/Positions before retrying`, { duration: Infinity });
+      else if (j.outcome === 'reversed') toast.warning(msg, { duration: 15_000 });
+      else toast.error(`Order failed: ${msg}`);
+    } catch (err) {
+      chime({ kind: 'manual', outcome: 'unknown', close: reduces });
+      toast.warning(`Order status unknown - check Orders/Positions before retrying (${(err as Error).message})`, { duration: Infinity });
+    } finally {
+      adjustBusyRef.current[c] = false;
+    }
+  };
   const guards = usePnfGuard({
     charts: railCharts.map(c => ({ chart: c.chart, targetKey: c.targetKey })), positions, positionsLoaded: positionsInfo.loaded,
     scope: `${broker}:${tradeMode}`, leaderRef, exitChart, storeKey: prefKey(chart, 'straddle-pnf-guard-'),
@@ -615,6 +666,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       alignLeft: tagLeft[c],
       onToggleAlign: () => { const next = !tagLeft[c]; saveP(`${TAG_LEFT_KEY}${c}`, next ? '1' : '0'); setTagLeft(v => ({ ...v, [c]: next })); },
       onToggleArm: () => setRailUnlocked(v => !v),
+      onPositionLots: (dir: 1 | -1) => { void adjustPosition(c, dir); },
       onCancelAll: () => { for (const r of rows) if (r.state === 'working') void resting.cancel(r); },
       orders: rows.map(r => ({
         id: r.id, side: r.side, kind: r.kind, level: r.level, price: r.price, trigger: r.trigger, lots: r.lots, state: r.state, mode: r.mode, role: r.role, trailPts: r.trailPts, bracket: r.bracket?.style,

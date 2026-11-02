@@ -16,6 +16,8 @@ async function install(page: Page, opts: { ledger?: RestingLedger; levels?: numb
     ledger: (opts.ledger ?? EMPTY_RESTING) as RestingLedger, tick: { ltp: 99.33, at: ist(10, 30, 10) }, book: [] as Record<string, unknown>[],
     /** Set: the next resting placement gets no clean reply (the route's 504 / UNKNOWN). */
     unknownNext: false,
+    /** The broker positions book /api/scalper/poll returns (REAL position on the ladder). */
+    positions: [] as Record<string, unknown>[],
   };
   // `levels`: box labels around 100 with a 0.1 box (the page's default 0.1% box), one 1-minute bar each, ending before the pinned clock.
   const bars = opts.levels
@@ -68,7 +70,7 @@ async function install(page: Page, opts: { ledger?: RestingLedger; levels?: numb
     if (p === '/api/scalper/orders') return json(route, { success: true, data: state.book });
     if (p === '/api/straddle-pnf/auto') return json(route, { success: true, ledger: { rev: 0, rows: [], log: [] } });
     if (p.endsWith('/funds')) return json(route, { success: true, data: { availabelBalance: 100000 } });
-    if (p === '/api/scalper/poll') return json(route, { positions: [], positionsError: null });
+    if (p === '/api/scalper/poll') return json(route, { positions: state.positions, positionsError: null });
     if (p === '/api/live-indices' && method === 'POST') return json(route, { success: true });
     if (method === 'GET') return json(route, { success: true });
     return route.fulfill({ status: 599, body: `unmocked ${method} ${p}` });
@@ -117,8 +119,9 @@ test('PAPER: B below the price rests a LIMIT, the price falling through fills it
   const panel = page.getByTestId('pnf-panel').nth(0);
   await expect(panel.getByTestId('pnf-position-line')).toHaveAttribute('data-side', 'LONG');
   await expect(panel.getByTestId('pnf-position-line')).toContainText('LONG 1L @');
-  await expect(panel.getByTestId('pnf-rail-pnl')).toContainText('₹');
-  await expect(panel.getByTestId('pnf-rail-pnl')).toContainText('LONG 1L');          // side and size; the entry price is in the PRICE column, the P&L in the other one
+  await expect(panel.getByTestId('pnf-position-line')).toContainText('₹');           // the live P&L is on the chart's position tag
+  await expect(panel.getByTestId('pnf-rail-pnl')).toContainText('LONG 1L');          // the rail: side and size; the entry price is in the PRICE column
+  expect(await panel.getByTestId('pnf-rail-pnl').locator('text').allTextContents()).not.toContain(expect.stringContaining('₹'));   // no second P&L box
 });
 
 test('PAPER: the order keeps "BUY LMT @ price" on the chart and its pill in the ladder has - / + for the lots', async ({ page }) => {
@@ -654,4 +657,45 @@ test('Triangle: a 4-column squeeze that breaks up is drawn with its entry / stop
   await expect(tri).toHaveCount(0);
   await panel.getByRole('button', { name: 'Show triangles' }).click();
   await expect(tri).toHaveCount(1);
+});
+
+test('PAPER: − / + on the ladder position chip take off / add one lot at market, without the order route', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders } = await install(page);
+  await openFuture(page);
+  await page.getByRole('button', { name: /BUY MARKET/ }).click();
+  await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 1 lot');
+  const panel = page.getByTestId('pnf-panel').nth(0);
+  const sent = orders.length;
+  await panel.getByTestId('pnf-rail-pos-up').dispatchEvent('pointerdown', { button: 0 });
+  await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 2 lots');
+  await expect(panel.getByTestId('pnf-rail-pnl')).toContainText('LONG 2L');
+  await panel.getByTestId('pnf-rail-pos-down').dispatchEvent('pointerdown', { button: 0 });
+  await expect(page.getByTestId('pnf-trade-position')).toHaveText('LONG 1 lot');
+  expect(orders.length, 'the paper +/- never reaches the order route').toBe(sent);
+});
+
+test('REAL: the position chip − / + appear only once the rail is unlocked, ask first, and send one MARKET lot each way', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  // SHORT 1 lot (65) of the future at the broker
+  state.positions = [{ securityId: '54321', tradingSymbol: 'NIFTY NOV FUT', netQty: -65, sellAvg: 100, buyAvg: 0, realizedProfit: 0, unrealizedProfit: 43.55, lastTradedPrice: 99.33 }];
+  await openFuture(page);
+  page.once('dialog', d => { void d.accept(); });
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  const panel = page.getByTestId('pnf-panel').nth(0);
+  await expect(panel.getByTestId('pnf-rail-pnl')).toContainText('SHORT 1L');
+  await expect(panel.getByTestId('pnf-rail-pos-up')).toHaveCount(0);           // locked: no buttons
+  await page.getByTestId('pnf-rail-lock').first().click();
+  const asked: string[] = [];
+  page.on('dialog', d => { asked.push(d.message()); void d.accept(); });
+  await panel.getByTestId('pnf-rail-pos-up').dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => orders.length).toBe(1);
+  expect(asked[0]).toContain('SELL 1 lot at MARKET (add to SHORT 1L)');
+  expect(orders[0]).toMatchObject({ mode: 'REAL', action: 'SELL', lots: 1 });
+  expect(orders[0].orderType).toBeUndefined();
+  await panel.getByTestId('pnf-rail-pos-down').dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => orders.length).toBe(2);
+  expect(asked[1]).toContain('BUY 1 lot at MARKET (reduce SHORT 1L)');
+  expect(orders[1]).toMatchObject({ mode: 'REAL', action: 'BUY', lots: 1 });
 });

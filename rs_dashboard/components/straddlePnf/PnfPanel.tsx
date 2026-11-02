@@ -121,6 +121,8 @@ export type PnfRail = {
   onCancel: (id: string) => void;
   /** + / - on a working entry order's tag: change its lots by `delta`. */
   onLots?: (id: string, delta: number) => void;
+  /** + / − on the open position's chip: one lot more (+) or less (−) at market. Shown only while the rail is armed. */
+  onPositionLots?: (dir: 1 | -1) => void;
   /** A planned stop-loss / target of a working Bracket / Cover entry was dragged to another box in the ladder. */
   onPlannedMove?: (id: string, role: 'sl' | 'target', level: number) => void;
   /** The rail takes clicks (always in PAPER; in REAL only once unlocked). */
@@ -325,22 +327,35 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
           <text x={RAIL_W / 2} y={16} textAnchor="middle" className="fill-zinc-200" fontSize={10} fontWeight={800}>LOCKED</text>
         </g>
       )}
-      {/* the open position: `LONG 1L` in its side's column, its live P&L in the other column (the entry price is in the PRICE column) */}
+      {/* the open position: `[−] LONG 1L [+]` in its side's column (the entry price is in the PRICE column; the live P&L is on the
+          chart's position tag and in this chip's tooltip, so the other column stays free for orders) */}
       {pos && entryRow !== null && (() => {
         const y = yOf(entryRow);
         if (y < 0 || y > contentH) return null;
         const long = pos.side === 'LONG';
-        const pnlTone = pos.pnl === null ? 'fill-zinc-700 stroke-zinc-500' : pos.pnl >= 0 ? 'fill-emerald-600 stroke-emerald-300' : 'fill-red-600 stroke-red-300';
         const sideCol = long ? 'BUY' : 'SELL';
-        const otherCol = long ? 'SELL' : 'BUY';
         const hh = Math.max(cell, 16);
+        const adjust = armed && pos.side !== 'MIXED' && !!rail.onPositionLots;
+        const x0 = colX(sideCol) + 2;
+        const W = RAIL_SIDE_W - 4;
+        const posBtn = (id: string, bx: number, glyph: string, label2: string, dir: 1 | -1) => (
+          <g key={id} data-testid={id} role="button" aria-label={label2} className="cursor-pointer"
+             onPointerDown={e => { e.stopPropagation(); if (e.button === 0) rail.onPositionLots!(dir); }}>
+            <rect x={bx} y={y - 7} width={14} height={14} rx={3} className="fill-oncolor-dark/30" />
+            <text x={bx + 7} y={y + 3.5} textAnchor="middle" className="fill-oncolor" fontSize={11} fontWeight={800} pointerEvents="none">{glyph}</text>
+            <title>{label2}</title>
+          </g>
+        );
         return (
-          <g pointerEvents="none" data-testid="pnf-rail-pnl">
-            <rect x={colX(sideCol) + 2} y={y - hh / 2} width={RAIL_SIDE_W - 4} height={hh} rx={3} className={long ? 'fill-emerald-700 stroke-emerald-300' : 'fill-red-700 stroke-red-300'} strokeWidth={1} />
-            <text x={colX(sideCol) + RAIL_SIDE_W / 2} y={y + 3.5} textAnchor="middle" className="fill-oncolor font-mono" fontSize={10} fontWeight={800}>{`${long ? 'LONG' : 'SHORT'} ${pos.lots}L`}</text>
-            <rect x={colX(otherCol) + 2} y={y - hh / 2} width={RAIL_SIDE_W - 4} height={hh} rx={3} className={pnlTone} strokeWidth={1} />
-            <text x={colX(otherCol) + RAIL_SIDE_W / 2} y={y + 3.5} textAnchor="middle" className="fill-oncolor font-mono" fontSize={10.5} fontWeight={800}>{pos.pnl === null ? 'P&L —' : `${pos.pnl >= 0 ? '▲' : '▼'} ${rupees(pos.pnl)}`}</text>
-            <title>{`${long ? 'LONG' : 'SHORT'} ${pos.lots}L @ ${fmt(pos.avg as number, axisDigits)}${pos.pnl === null ? '' : ` · P&L ${rupees(pos.pnl)}`}`}</title>
+          <g data-testid="pnf-rail-pnl">
+            <g pointerEvents="none">
+              <rect x={x0} y={y - hh / 2} width={W} height={hh} rx={3} className={long ? 'fill-emerald-700 stroke-emerald-300' : 'fill-red-700 stroke-red-300'} strokeWidth={1} />
+              <text x={x0 + W / 2} y={y + 3.5} textAnchor="middle" className="fill-oncolor font-mono" fontSize={10} fontWeight={800}>{`${long ? 'LONG' : 'SHORT'} ${pos.lots}L`}</text>
+              <title>{`${long ? 'LONG' : 'SHORT'} ${pos.lots}L @ ${fmt(pos.avg as number, axisDigits)}${pos.pnl === null ? '' : ` · P&L ${rupees(pos.pnl)}`}`}</title>
+            </g>
+            {/* `[−] SHORT 1L [+]`: one lot less / more at market, only while the rail takes clicks */}
+            {adjust && posBtn('pnf-rail-pos-down', x0 + 3, '−', `Remove a lot: ${long ? 'SELL' : 'BUY'} 1 lot at market`, -1)}
+            {adjust && posBtn('pnf-rail-pos-up', x0 + W - 17, '+', `Add a lot: ${long ? 'BUY' : 'SELL'} 1 lot at market`, 1)}
           </g>
         );
       })()}
