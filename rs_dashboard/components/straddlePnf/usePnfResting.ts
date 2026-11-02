@@ -179,7 +179,10 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
     if (!c || c.price === null) { toast.error('No live price for this chart - not moved'); return; }
     if (row.group) {
       // A bracket exit moves as it is: a stop's trigger or a target's limit follows the box, never re-classified against the price.
-      const lv = snapToTick(level, c.tick, 'nearest');
+      // Snapped like planResting: a stop past the level (never triggering before the price reaches it, e.g. a Renko % box's edge
+      // between two ticks), a limit never paying more than the level.
+      const buy = row.side === 'BUY';
+      const lv = snapToTick(level, c.tick, row.kind === 'stop' ? (buy ? 'up' : 'down') : (buy ? 'down' : 'up'));
       const r = await post({ op: 'modify', id: row.id, level: lv, price: row.kind === 'limit' ? lv : row.price, ...(row.kind === 'stop' ? { trigger: lv } : {}) });
       if (!r.ok) toast.error(r.error ?? 'Not moved');
       return;

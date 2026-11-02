@@ -209,8 +209,11 @@ const rupees = (n: number) => `${n >= 0 ? '+' : '−'}₹${Math.abs(Math.round(n
  * Cells act on pointer-down (the chart's drag-to-pan captures the pointer, which would swallow a click). A handle is dragged
  * to another box (commit on release); the drag lives in a ref because pointer events arrive before React re-renders.
  */
-function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, axisDigits, onDrag, onHot, visTop = 0, visBottom = contentH }: {
-  rail: PnfRail; box: number; cell: number; yMax: number; yMin: number; padY: number; contentH: number;
+function RailSvg({ rail, renko = false, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, axisDigits, onDrag, onHot, visTop = 0, visBottom = contentH }: {
+  rail: PnfRail;
+  /** Renko: a row is a brick EDGE (a multiple of the box), where a brick completes. P&F: a row is a box label (the cell centre). */
+  renko?: boolean;
+  box: number; cell: number; yMax: number; yMin: number; padY: number; contentH: number;
   /** The content y range worth drawing rows for (the view plus a margin); a long price history has thousands of rows. */
   visTop?: number; visBottom?: number;
   yOf: (p: number) => number; liveValue: number | null; axisDigits: number; onDrag: (d: RailDrag) => void;
@@ -223,7 +226,13 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
   const priceAtY = (y: number) => yMax - ((y - padY - PAD_TOP) / cell) * box;
   const iLo = Math.floor((priceAtY(contentH) - yMin) / box);
   const iHi = Math.ceil((priceAtY(0) - yMin) / box) - 1;
-  const levelAt = (y: number) => yMin + (Math.max(iLo, Math.min(iHi, Math.floor((priceAtY(y) - yMin) / box))) + 0.5) * box;
+  // A P&F box fills when the price reaches its label, the centre of its cell; a Renko brick only once the price reaches the next
+  // multiple of the box, so on Renko every row (and every order placed from it) sits on a brick edge, as the price axis does.
+  const half = renko ? 0 : 0.5;
+  const rowOf = (p: number) => (renko ? Math.round((p - yMin) / box) : Math.floor((p - yMin) / box));
+  // Renko rows are snapped onto the box grid itself (yMin is on it once a brick exists; before that it follows the live price).
+  const rowPrice = (idx: number) => (renko ? Math.round((yMin + idx * box) / box) * box : yMin + (idx + half) * box);
+  const levelAt = (y: number) => rowPrice(Math.max(iLo, Math.min(iHi, rowOf(priceAtY(y)))));
   const rLo = Math.max(iLo, Math.floor((priceAtY(Math.min(contentH, visBottom)) - yMin) / box));
   const rHi = Math.min(iHi, Math.ceil((priceAtY(Math.max(0, visTop)) - yMin) / box));
   const kindAt = (side: 'BUY' | 'SELL', p: number) => (liveValue === null ? '' : (side === 'BUY') === (p < liveValue) ? 'LIMIT' : 'SL-limit');
@@ -233,9 +242,9 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
   const PX = RAIL_SIDE_W;                                    // the PRICE column's left edge
   const rowsPerLabel = Math.max(1, Math.ceil(11 / Math.max(1, cell)));    // a price label needs ~11 px: every Nth row when rows are smaller
   // the box row the live price is in, and the rows that carry something worth naming (an order, the entry)
-  const liveRow = liveValue !== null && box > 0 ? yMin + (Math.floor((liveValue - yMin) / box) + 0.5) * box : null;
+  const liveRow = liveValue !== null && box > 0 ? rowPrice(rowOf(liveValue)) : null;
   const pos = rail.position && rail.position.avg !== null ? rail.position : null;
-  const entryRow = pos && pos.avg !== null && box > 0 ? yMin + (Math.floor((pos.avg - yMin) / box) + 0.5) * box : null;
+  const entryRow = pos && pos.avg !== null && box > 0 ? rowPrice(rowOf(pos.avg)) : null;
   const orderRows = new Map<string, RailOrder>();
   for (const o of rail.orders) orderRows.set((drag?.id === o.id ? drag.level : o.level).toFixed(6), o);
   const tone = (side: 'BUY' | 'SELL') => (side === 'BUY' ? 'fill-emerald-500 stroke-emerald-200' : 'fill-red-500 stroke-red-200');
@@ -275,7 +284,7 @@ function RailSvg({ rail, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, 
       <line x1={PX + RAIL_PRICE_W} x2={PX + RAIL_PRICE_W} y1={0} y2={contentH} className="stroke-zinc-700" pointerEvents="none" />
       {Array.from({ length: Math.max(0, rHi - rLo + 1) }, (_, n) => {
         const idx = rLo + n;
-        const p = yMin + (idx + 0.5) * box;
+        const p = rowPrice(idx);
         if (!(p > 0)) return null;
         const y = yOf(p);
         const isLive = liveRow !== null && Math.abs(p - liveRow) < box / 4;
@@ -1427,7 +1436,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
 
             {/* the B / S rail (the ladder's columns): click a box row to rest an order there; drag an order's handle to move it */}
             {rail && (
-              <RailSvg rail={rail} box={box} cell={cell} yMax={yMax} yMin={yMin} padY={padY} contentH={contentH} yOf={yOf}
+              <RailSvg rail={rail} renko={renko} box={box} cell={cell} yMax={yMax} yMin={yMin} padY={padY} contentH={contentH} yOf={yOf}
                        liveValue={liveValue} axisDigits={axisDigits} onDrag={setRailDrag} onHot={setRailHot} visTop={visTop} visBottom={visBottom} />
             )}
 

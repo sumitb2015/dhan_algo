@@ -169,3 +169,22 @@ test('the forming bar\'s bricks are drawn unconfirmed (dimmed) like P&F boxes, a
   await expect.poll(() => count('pnf-bricks-down'), { timeout: 15_000 }).toBe(2);
   await expect(panel.getByTestId('pnf-unconfirmed')).toHaveCount(0);
 });
+
+test('the ladder rows are brick edges (multiples of the box), so an order waits for the brick to complete', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  await install(page);
+  const placed: Record<string, unknown>[] = [];
+  page.on('request', r => { if (r.url().includes('/api/straddle-pnf/resting') && r.method() === 'POST') placed.push(r.postDataJSON() as Record<string, unknown>); });
+  await openFuture(page);
+  const cells = page.getByTestId('pnf-panel').nth(0).locator('[data-testid="pnf-rail-cell"][data-side="SELL"]');
+  await expect(cells.first()).toBeAttached();
+  const levels = await cells.evaluateAll(els => els.map(e => Number(e.getAttribute('data-level'))));
+  expect(levels.length).toBeGreaterThan(3);
+  for (const l of levels) expect(Math.abs(l / 0.1 - Math.round(l / 0.1)), `row ${l} is not on the 0.1 brick grid`).toBeLessThan(1e-6);
+  // a SELL below the price (99.95) is a stop: on the 99.90 edge, not the 99.85 / 99.95 box middle
+  const i = levels.reduce((b, l, k) => (Math.abs(l - 99.9) < Math.abs(levels[b] - 99.9) ? k : b), 0);
+  await cells.nth(i).dispatchEvent('pointerdown', { button: 0 });
+  await expect.poll(() => placed.length).toBeGreaterThan(0);
+  const row = (placed[0].row ?? placed[0]) as { level?: number };
+  expect(row.level).toBeCloseTo(99.9, 6);
+});
