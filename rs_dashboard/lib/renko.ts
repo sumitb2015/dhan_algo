@@ -82,15 +82,14 @@ export function renkoSignals(columns: PnfColumn[], bars: Bar[], reference: (numb
 }
 
 /**
- * Two-back pattern. BUY: a trend of at least `trend` up bricks, a pullback of exactly two down bricks, then the up run resumes and
- * the brick that makes it at least `trend` bricks long AND closes above the trend's swing high (its last brick's top) signals;
- * the stop is one brick below the pullback's low. SELL is the mirror (stop one brick above the pullback's high). Fires once per
- * pattern, on that brick. Each column is one brick, so a "run" is consecutive columns of one direction.
+ * The Definedge "back" continuation patterns on bricks (each column is one brick; a run is consecutive columns of one direction).
+ * BUY: a trend of at least `trend` up bricks, a pullback of exactly `pull` down bricks, then the up run resumes and the brick that
+ * makes it at least `resume` bricks long AND closes above the trend's swing high (its last brick's top) signals; the stop is one
+ * brick below the pullback's low. SELL is the mirror (stop one brick above the pullback's high). Fires once per pattern.
  */
-export function twoBackSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number, trend = 3): PnfSignal[] {
-  const need = Math.max(1, Math.floor(trend));
+function backSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number,
+  p: { trend: number; pull: number; resume: number; buy: PnfSignal['kind']; sell: PnfSignal['kind'] }): PnfSignal[] {
   const out: PnfSignal[] = [];
-  // runs[k] = { dir, first, last } over consecutive same-direction columns
   const runs: { dir: 'X' | 'O'; first: number; last: number }[] = [];
   columns.forEach((c, i) => {
     const r = runs[runs.length - 1];
@@ -99,16 +98,15 @@ export function twoBackSignals(columns: PnfColumn[], bars: Bar[], reference: (nu
   for (let k = 2; k < runs.length; k++) {
     const resume = runs[k], pull = runs[k - 1], trendRun = runs[k - 2];
     if (resume.dir !== trendRun.dir || pull.dir === resume.dir) continue;
-    if (pull.last - pull.first + 1 !== 2) continue;
-    if (trendRun.last - trendRun.first + 1 < need) continue;
+    if (pull.last - pull.first + 1 !== p.pull) continue;
+    if (trendRun.last - trendRun.first + 1 < p.trend) continue;
     const up = resume.dir === 'X';
     const swing = up ? columns[trendRun.last].high : columns[trendRun.last].low;
-    // the first brick of the resumed run that is at least `need` long and has broken the swing
-    for (let i = resume.first + need - 1; i <= resume.last; i++) {
+    for (let i = resume.first + p.resume - 1; i <= resume.last; i++) {
       const c = columns[i];
       if (up ? c.high <= swing : c.low >= swing) continue;
       const pullEdge = up ? Math.min(...columns.slice(pull.first, pull.last + 1).map(x => x.low)) : Math.max(...columns.slice(pull.first, pull.last + 1).map(x => x.high));
-      const kind = up ? 'TWOBACK_BUY' : 'TWOBACK_SELL';
+      const kind = up ? p.buy : p.sell;
       const price = brickClose(c);
       const v = reference[c.startBar];
       out.push({ id: `${kind}:${i}`, kind, col: i, bar: c.startBar, t: bars[c.startBar].t, price, belowVwap: v != null && price < v, stop: up ? pullEdge - box : pullEdge + box });
@@ -116,6 +114,17 @@ export function twoBackSignals(columns: PnfColumn[], bars: Bar[], reference: (nu
     }
   }
   return out;
+}
+
+/** Two-back: >=`trend` (3) bricks, a two-brick pullback, >=3 resuming bricks past the swing. */
+export function twoBackSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number, trend = 3): PnfSignal[] {
+  const need = Math.max(1, Math.floor(trend));
+  return backSignals(columns, bars, reference, box, { trend: need, pull: 2, resume: need, buy: 'TWOBACK_BUY', sell: 'TWOBACK_SELL' });
+}
+
+/** One-back: >=2 bricks, a ONE-brick pullback, then 2 resuming bricks that break the swing (a swing breakout). */
+export function oneBackSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number): PnfSignal[] {
+  return backSignals(columns, bars, reference, box, { trend: 2, pull: 1, resume: 2, buy: 'ONEBACK_BUY', sell: 'ONEBACK_SELL' });
 }
 
 /** SMA of brick closes, read at each brick (null until `period` bricks exist) — TradingView's moving average on a Renko chart. */

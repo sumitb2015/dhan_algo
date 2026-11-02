@@ -117,3 +117,11 @@ test('a two-back position exits on its stop only: not on an opposite brick, and 
   assert.equal(decideAuto({ model: m, position: short, watermarkT: 0, nowS: ist(10, 40), market: 'NSE', price: 111 }).action, 'exit');
   assert.equal(decideAuto({ model: m, position: short, watermarkT: 0, nowS: ist(15, 16), market: 'NSE', price: 100 }).action, 'exit');
 });
+
+test('a stop gapped through books the price, not the stop (long and short)', () => {
+  const m = model();
+  const long = decideAuto({ model: m, position: { side: 'BUY', entryBarT: ist(10, 0), stop: 90 }, watermarkT: 0, nowS: ist(10, 40), market: 'NSE', price: 85 });
+  assert.deepEqual(long, { action: 'exit', reason: 'stop', boxPrice: 85 });
+  const short = decideAuto({ model: m, position: { side: 'SELL', entryBarT: ist(10, 0), stop: 110 }, watermarkT: 0, nowS: ist(10, 40), market: 'NSE', price: 118 });
+  assert.deepEqual(short, { action: 'exit', reason: 'stop', boxPrice: 118 });
+});

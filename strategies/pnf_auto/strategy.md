@@ -63,3 +63,15 @@ page gives no stop or target. UNVALIDATED, same as the other AUTO rules.
 
 The rule is chosen per chart and locked while AUTO is armed or holds a position; it is not remembered across a reload.
 Two-back signals are computed on every Renko chart (`model.twoBack`) but are not drawn as chart markers; trades appear as AUTO markers.
+
+## Renko "One-back" rule (same picker)
+Source: Definedge Renko library (One Back Bullish / Bearish, from Prashant Shah's Renko book): >=2 bricks in the trend, not more
+than one opposite brick, then two bricks in the trend direction that trigger a swing breakout. Definedge gives no stop or target;
+the stop and exit are the Two-back ones. UNVALIDATED.
+
+| Rule | Behaviour |
+|---|---|
+| Pattern (`oneBackSignals`, `lib/renko.ts`) | BUY: run of >=2 up bricks, exactly 1 down brick, then up bricks; signal on the 2nd resumed brick **if it closes above the swing high** (the trend's last brick top). If the 2nd brick does not break it, the first resumed brick that does (still a run of >=2) signals. SELL mirrors |
+| Stop / exit | As Two-back: one brick beyond the 1-brick pullback; exit on the stop touch or EOD, no target |
+
+`twoBackSignals` and `oneBackSignals` share one detector (`backSignals`) parameterised by trend / pullback / resume lengths.

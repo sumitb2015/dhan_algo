@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRenko, brickClose, renkoSignals, twoBackSignals, renkoSma, renkoSupertrend } from './renko.ts';
+import { buildRenko, brickClose, renkoSignals, twoBackSignals, oneBackSignals, renkoSma, renkoSupertrend } from './renko.ts';
 import { buildConfirmedModel, withLive } from './straddlePnfModel.ts';
 import { boxPriceAt, decideAuto } from './pnfAuto.ts';
 import type { Bar } from './straddlePnf.ts';
@@ -157,4 +157,37 @@ test('two-back SELL mirrors the BUY, with the stop one brick above the pullback 
   assert.equal(s.length, 1);
   assert.equal(s[0].kind, 'TWOBACK_SELL');
   assert.equal(s[0].stop, 22710, 'pullback high 22700 plus one brick');
+});
+
+test('one-back BUY: 2+ up bricks, a ONE-brick pullback, 2 resuming bricks that break the swing; stop one brick under the pullback', () => {
+  const closes = [22650, 22660, 22670, 22650, 22670, 22680];
+  const b = bars(closes);
+  const { columns } = buildRenko(b, 10);
+  assert.deepEqual(columns.map(c => `${c.dir}${c.low}-${c.high}`), ['X22650-22660', 'X22660-22670', 'O22650-22660', 'X22660-22670', 'X22670-22680']);
+  const s = oneBackSignals(columns, b, new Array(b.length).fill(null), 10);
+  assert.equal(s.length, 1);
+  assert.equal(s[0].kind, 'ONEBACK_BUY');
+  assert.equal(s[0].col, 4);
+  assert.equal(s[0].stop, 22640);
+});
+
+test('one-back: a two-brick pullback or a single-brick trend is not the pattern; SELL mirrors', () => {
+  const run = (c: number[]) => { const b = bars(c); return oneBackSignals(buildRenko(b, 10).columns, b, new Array(b.length).fill(null), 10); };
+  assert.equal(run([22650, 22660, 22670, 22650, 22640, 22660, 22670, 22680]).length, 0, 'two-brick pullback');
+  assert.equal(run([22650, 22660, 22640, 22660, 22670]).length, 0, 'trend of one brick');
+  const s = run([22700, 22690, 22680, 22700, 22680, 22670]);
+  assert.equal(s.length, 1);
+  assert.equal(s[0].kind, 'ONEBACK_SELL');
+  assert.equal(s[0].stop, 22710);
+});
+
+test('the Renko model carries the two-back and one-back signals; P&F carries none', () => {
+  const two = bars([22650, 22660, 22670, 22680, 22660, 22650, 22670, 22680, 22690, 22700]);
+  const m = buildConfirmedModel(two, 'sma', { chart: 'renko', boxMode: 'pts', boxPts: 10, reversal: 2, volume: false });
+  assert.deepEqual(m.twoBack.map(s => s.kind), ['TWOBACK_BUY']);
+  const one = bars([22650, 22660, 22670, 22650, 22670, 22680]);
+  const m1 = buildConfirmedModel(one, 'sma', { chart: 'renko', boxMode: 'pts', boxPts: 10, reversal: 2, volume: false });
+  assert.deepEqual(m1.oneBack.map(s => s.kind), ['ONEBACK_BUY']);
+  const pnf = buildConfirmedModel(two, 'sma', { boxMode: 'pts', boxPts: 10, reversal: 3, volume: false });
+  assert.equal(pnf.twoBack.length + pnf.oneBack.length, 0);
 });

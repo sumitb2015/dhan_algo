@@ -10,7 +10,7 @@ import { rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
 const MAX_LOTS = 20;
 const inr = (n: number) => `${n > 0 ? '+' : n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 
-export type AutoRule = 'nbrick' | 'twoback';
+export type AutoRule = 'nbrick' | 'twoback' | 'oneback';
 
 export interface AutoControlsProps {
   chart: 1 | 2;
@@ -89,6 +89,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
                 className="h-6 rounded border border-zinc-700 bg-zinc-950 px-1 text-[11px] font-bold text-zinc-200 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">
           <option value="nbrick">N-brick</option>
           <option value="twoback">Two-back</option>
+          <option value="oneback">One-back</option>
         </select>
       )}
       <span className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950" title={locked ? 'Stop AUTO (and close its position) to change lots' : 'Lots per AUTO trade'}>
@@ -116,6 +117,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
           <span className={row.side === 'SELL' ? 'text-red-400' : 'text-emerald-400'}>
             {row.side === 'SELL' ? 'SHORT' : 'LONG'} {row.lots}L @ {row.entryPrice.toFixed(2)}
             {pnl !== null && <span className={`ml-1 font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{inr(pnl)}</span>}
+            {row.stop !== undefined && <span className="ml-1 text-zinc-400" title="Protective stop (one brick beyond the pullback)">SL {row.stop.toFixed(2)}</span>}
             {row.mode === 'PAPER' && <span className="ml-1 text-zinc-400">paper</span>}
           </span>
         ) : halt ? (

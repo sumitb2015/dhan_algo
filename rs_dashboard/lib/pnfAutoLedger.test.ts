@@ -120,3 +120,12 @@ test('autoMarkers sit on the confirmed boxes when the row has them (REAL books t
   assert.deepEqual(autoMarkers(l.rows, 'futures|NIFTY|2026-11-24||').map(m => m.price), [100, 103]);
   assert.equal(l.rows[0].exitBox, 103);
 });
+
+test('a stop must sit on the losing side of the entry: a short needs it above, a long below', () => {
+  const bad = (over: Record<string, unknown>) => { const r = applyAutoOp(EMPTY_LEDGER, { op: 'open', row: row(over) }); return !r.ok && r.status === 400; };
+  assert.ok(bad({ side: 'SELL', stop: 95 }));
+  assert.ok(bad({ side: 'BUY', stop: 105 }));
+  assert.ok(bad({ side: 'BUY', stop: Number.NaN }));
+  const l = run(EMPTY_LEDGER, { op: 'open', row: row({ side: 'BUY', stop: 90 }) });
+  assert.equal(l.rows[0].stop, 90);
+});

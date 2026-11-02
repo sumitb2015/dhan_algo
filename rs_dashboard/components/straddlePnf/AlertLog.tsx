@@ -9,7 +9,7 @@ export type LogEntry = {
   strike: number;
   /** Chart name for a futures chart (the strike field then holds the contract's YYYYMMDD key). */
   label?: string;
-  kind: 'DOUBLE_TOP_BUY' | 'DOUBLE_BOTTOM_SELL' | 'RENKO_BUY' | 'RENKO_SELL' | 'TWOBACK_BUY' | 'TWOBACK_SELL' | 'TRIANGLE_UP' | 'TRIANGLE_DOWN';
+  kind: 'DOUBLE_TOP_BUY' | 'DOUBLE_BOTTOM_SELL' | 'RENKO_BUY' | 'RENKO_SELL' | 'TWOBACK_BUY' | 'TWOBACK_SELL' | 'ONEBACK_BUY' | 'ONEBACK_SELL' | 'TRIANGLE_UP' | 'TRIANGLE_DOWN';
   price: number;
   belowVwap: boolean;
   /** A triangle breakout's stop / target / reward to risk. */
@@ -31,13 +31,13 @@ export default function AlertLog({ entries, interval = 1, renko = false }: { ent
       ) : (
         <ul className="max-h-72 overflow-y-auto divide-y divide-zinc-800">
           {entries.map(e => {
-            const sell = e.kind === 'DOUBLE_BOTTOM_SELL' || e.kind === 'RENKO_SELL' || e.kind === 'TWOBACK_SELL' || e.kind === 'TRIANGLE_DOWN';
+            const sell = e.kind === 'DOUBLE_BOTTOM_SELL' || e.kind === 'RENKO_SELL' || e.kind === 'TWOBACK_SELL' || e.kind === 'ONEBACK_SELL' || e.kind === 'TRIANGLE_DOWN';
             const tri = e.kind === 'TRIANGLE_UP' || e.kind === 'TRIANGLE_DOWN';
             return (
               <li key={e.id} data-testid="pnf-log-row" className="flex items-center gap-2 px-3 py-1.5 text-xs font-mono">
                 <span className="text-zinc-400">{hhmmss(e.t)}</span>
                 <span className="text-zinc-200">{e.label ?? e.strike}</span>
-                <span className={sell ? 'text-red-400 font-bold' : 'text-emerald-400 font-bold'}>{tri ? (sell ? '△ breakdown' : '△ breakout') : e.kind.startsWith('TWOBACK') ? (sell ? 'Two-back sell' : 'Two-back buy') : e.kind.startsWith('RENKO') ? (sell ? 'Renko sell' : 'Renko buy') : sell ? 'DB sell' : 'DT buy'}</span>
+                <span className={sell ? 'text-red-400 font-bold' : 'text-emerald-400 font-bold'}>{tri ? (sell ? '△ breakdown' : '△ breakout') : e.kind.startsWith('ONEBACK') ? (sell ? 'One-back sell' : 'One-back buy') : e.kind.startsWith('TWOBACK') ? (sell ? 'Two-back sell' : 'Two-back buy') : e.kind.startsWith('RENKO') ? (sell ? 'Renko sell' : 'Renko buy') : sell ? 'DB sell' : 'DT buy'}</span>
                 {tri && e.detail && <span className="text-[10px] text-zinc-400 truncate max-w-[14rem]" title={e.detail}>{e.detail}</span>}
                 {sell && e.belowVwap && <span className="text-[10px] text-amber-300">short zone</span>}
                 <span className="ml-auto text-zinc-300">{e.price.toFixed(2)}</span>

@@ -107,7 +107,8 @@ export function decideAuto({ model, position, watermarkT, nowS, market, price = 
     if (win && minute >= win.eodExit) return { action: 'exit', reason: 'eod' };
     if (position.stop !== undefined) {
       const hit = price !== null && (position.side === 'BUY' ? price <= position.stop : price >= position.stop);
-      return hit ? { action: 'exit', reason: 'stop', boxPrice: position.stop } : { action: 'none', why: 'holding' };
+      // A gap through the stop fills at the price, not the stop (PAPER books boxPrice, so it must not flatter the loss).
+      return hit ? { action: 'exit', reason: 'stop', boxPrice: position.side === 'BUY' ? Math.min(price!, position.stop) : Math.max(price!, position.stop) } : { action: 'none', why: 'holding' };
     }
     const col = reversalColumn(model, position);
     return col >= 0 ? { action: 'exit', reason: 'reversal', col, boxPrice: boxPriceAt(model, col, model.columns[col].startBar) } : { action: 'none', why: 'holding' };
