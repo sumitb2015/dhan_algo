@@ -40,7 +40,7 @@ export function usePnfPositions({ charts, broker, mode, paper }: {
         const bySymbol = broker !== 'dhan';
         const { lots, book } = legPositions(rows.rows, bySymbol, c.keys, c.lotUnits);
         const mine = rows.rows.filter(r => c.keys.includes(String((bySymbol ? r.tradingSymbol : r.securityId) ?? '')));
-        out[c.targetKey] = realPosition(mine, bySymbol, c.keys, lots, book);
+        out[c.targetKey] = realPosition(mine, bySymbol, c.keys, lots, book, { prices: c.legPrices, unitsPerLot: c.unitsPerLot });
       } else out[c.targetKey] = null;
     }
     return out;

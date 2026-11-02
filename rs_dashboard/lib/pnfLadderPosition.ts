@@ -37,18 +37,35 @@ export function paperPosition(legs: PaperLeg[], prices: (number | null)[], units
  * REAL: from the broker's positions book. `keys` are the chart's contracts (Dhan security id, or the trading symbol on Kotak /
  * Zerodha), `lots` the signed lots per leg (lib/pnfAccount legPositions). The entry premium is the broker's own buy / sell
  * average for the side the leg is open on.
+ *
+ * `chart`: the chart's own live leg prices and rupees per point per lot. Kotak's book carries no live price (lastTradedPrice 0),
+ * so the broker cannot value the open legs; the P&L is then the book's realised P&L plus each open leg valued at the chart's
+ * price against the broker's average. Without a price for every open leg it stays null (unknown, never a made-up 0).
  */
-export function realPosition(rows: Array<Record<string, unknown>>, bySymbol: boolean, keys: string[], lots: number[], book: ReturnType<typeof bookPnl>): LadderPosition | null {
+export function realPosition(
+  rows: Array<Record<string, unknown>>, bySymbol: boolean, keys: string[], lots: number[], book: ReturnType<typeof bookPnl>,
+  chart?: { prices: (number | null)[]; unitsPerLot: number[] },
+): LadderPosition | null {
   const side = sideOf(lots);
   if (!side) return null;
-  let avg: number | null = 0;
-  if (side === 'MIXED') avg = null;
-  else {
-    for (let i = 0; i < keys.length && avg !== null; i++) {
-      const mine = rows.filter(r => String((bySymbol ? r.tradingSymbol : r.securityId) ?? '') === keys[i]);
-      const a = Number(mine.find(r => (Number(r.netQty) || 0) !== 0)?.[lots[i] > 0 ? 'buyAvg' : 'sellAvg']);
-      avg = a > 0 ? avg + a : null;
-    }
+  // Each leg's broker average for the side it is open on (null: flat, or no average reported)
+  const legAvg = keys.map((k, i) => {
+    if (lots[i] === 0) return null;
+    const mine = rows.filter(r => String((bySymbol ? r.tradingSymbol : r.securityId) ?? '') === k);
+    const a = Number(mine.find(r => (Number(r.netQty) || 0) !== 0)?.[lots[i] > 0 ? 'buyAvg' : 'sellAvg']);
+    return a > 0 ? a : null;
+  });
+  const avg = side === 'MIXED' || legAvg.some((a, i) => lots[i] !== 0 && a === null) ? null : legAvg.reduce<number>((s, a) => s + (a ?? 0), 0);
+  let pnl: number | null = book.unpriced > 0 ? null : book.total;
+  if (pnl === null && chart) {
+    let open = 0, priced = true;
+    keys.forEach((_, i) => {
+      if (lots[i] === 0) return;
+      const px = chart.prices[i], a = legAvg[i], u = chart.unitsPerLot[i];
+      if (px != null && px > 0 && a !== null && u > 0) open += lots[i] * u * (px - a);
+      else priced = false;
+    });
+    if (priced) pnl = Math.round((book.realised + open) * 100) / 100;
   }
-  return { side, lots: Math.abs(lots[0]), avg, pnl: book.unpriced > 0 ? null : book.total };
+  return { side, lots: Math.abs(lots[0]), avg, pnl };
 }
