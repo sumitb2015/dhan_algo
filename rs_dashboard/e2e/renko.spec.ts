@@ -65,3 +65,30 @@ test('Renko draws bricks with a points box and N-brick confirmation, on its own 
   expect(ledgerCalls.every(c => c.endsWith('?scope=renko'))).toBe(true);
   expect(blocked).toEqual([]);
 });
+
+test('the Supertrend is drawn on the bricks, its period / multiplier apply on Enter, and the eye hides it', async ({ page }) => {
+  const blocked: Call[] = [];
+  await install(page, blocked, []);
+  await page.goto('/renko');
+  const panel = page.getByTestId('pnf-panel').first();
+  await expect.poll(async () => ((await panel.getByTestId('pnf-bricks-up').getAttribute('d')) ?? '').length).toBeGreaterThan(0);
+  // 9 bricks: the default ATR 10 has no value yet, and the legend says why
+  await expect(panel.getByTestId('pnf-supertrend-legend').first()).toContainText('ST 10,3 needs 11 bricks');
+  await expect(panel.getByTestId('pnf-supertrend-up')).toHaveCount(0);
+  const period = page.getByRole('textbox', { name: 'Supertrend period' });
+  await period.fill('3');
+  await period.press('Enter');
+  const mult = page.getByRole('textbox', { name: 'Supertrend multiplier' });
+  await mult.fill('1');
+  await mult.press('Enter');
+  await expect(panel.getByTestId('pnf-supertrend-legend').first()).toContainText('ST 3,1');
+  // the last run is up: the line ends below the bricks, in green
+  await expect(panel.getByTestId('pnf-supertrend-legend').first()).toContainText('▲');
+  await expect(panel.getByTestId('pnf-supertrend-up')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Hide the Supertrend' }).click();
+  await expect(panel.getByTestId('pnf-supertrend-up')).toHaveCount(0);
+  await expect(panel.getByTestId('pnf-supertrend-legend')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Show the Supertrend' }).click();
+  await expect(panel.getByTestId('pnf-supertrend-up')).toHaveCount(1);
+  expect(blocked).toEqual([]);
+});

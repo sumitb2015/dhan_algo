@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRenko, brickClose, renkoSignals, renkoSma } from './renko.ts';
+import { buildRenko, brickClose, renkoSignals, renkoSma, renkoSupertrend } from './renko.ts';
 import { buildConfirmedModel, withLive } from './straddlePnfModel.ts';
 import { boxPriceAt, decideAuto } from './pnfAuto.ts';
 import type { Bar } from './straddlePnf.ts';
@@ -104,4 +104,29 @@ test('a % box: the brick is that % of the first 1-minute price and the bricks si
   assert.deepEqual(c.columns.map(col => `${col.dir}${col.low}-${col.high}`), ['X20000-20020', 'X20020-20040', 'X20040-20060']);
   const pts = buildConfirmedModel(closed, 'sma', { chart: 'renko', boxMode: 'pts', boxPct: 0.1, boxPts: 10, reversal: 2, volume: false });
   assert.equal(pts.box, 10);
+});
+
+test('Supertrend on bricks: null while warming up, the line under an up run and above a down run, flipping on the reversal', () => {
+  // 15 up bricks, then a fall of 15 bricks (10-point box from 22,650)
+  const up = Array.from({ length: 16 }, (_, i) => 22650 + i * 10);
+  const down = Array.from({ length: 16 }, (_, i) => 22800 - (i + 2) * 10);
+  const { columns } = buildRenko(bars([...up, ...down]), 10);
+  const st = renkoSupertrend(columns, 3, 1);
+  assert.equal(st.length, columns.length);
+  assert.ok(st.slice(0, 3).every(p => p.line === null && p.dir === null));
+  const lastUp = columns.findIndex((c, j) => c.dir === 'X' && columns[j + 1]?.dir === 'O');
+  assert.equal(st[lastUp].dir, 1);
+  assert.ok((st[lastUp].line as number) < brickClose(columns[lastUp]));
+  const last = st[st.length - 1];
+  assert.equal(last.dir, -1);
+  assert.ok((last.line as number) > brickClose(columns[columns.length - 1]));
+});
+
+test('the Renko model carries the Supertrend with its settings; P&F has none', () => {
+  const closes = Array.from({ length: 40 }, (_, i) => 22650 + i * 10);
+  const m = buildConfirmedModel(bars(closes), 'sma', { chart: 'renko', boxMode: 'pts', boxPts: 10, stPeriod: 5, stMult: 2 });
+  assert.equal(m.supertrend.length, m.columns.length);
+  assert.deepEqual([m.stPeriod, m.stMult], [5, 2]);
+  assert.equal(m.supertrend[m.supertrend.length - 1].dir, 1);
+  assert.deepEqual(buildConfirmedModel(bars(closes), 'sma', { boxPct: 0.1 }).supertrend, []);
 });

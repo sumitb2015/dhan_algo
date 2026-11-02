@@ -6,6 +6,7 @@
 //
 // Each brick is handed back as a one-box PnfColumn (dir X = up, O = down; low / high = the brick's real edges), so the P&F panel,
 // its layout, crosshair, time axis, rail and AUTO's "first opposite column" reversal all work on bricks unchanged.
+import { supertrendSeries } from './indicators.ts';
 import { sessionOf, type Bar, type PnfColumn, type PnfSignal } from './straddlePnf.ts';
 
 const EPS = 1e-9;
@@ -88,6 +89,16 @@ export function renkoSma(columns: PnfColumn[], period: number): (number | null)[
     if (j >= period) sum -= brickClose(columns[j - period]);
     return j + 1 >= period ? sum / period : null;
   });
+}
+
+export type RenkoSupertrendPoint = { line: number | null; dir: 1 | -1 | null };
+
+/**
+ * Supertrend(period, mult) on the bricks, as TradingView draws it on a Renko chart: each brick is a bar (high / low = its edges,
+ * close = brickClose), so the ATR is one box on a run and two at a reversal. Read at each brick; null until `period` + 1 bricks exist.
+ */
+export function renkoSupertrend(columns: PnfColumn[], period: number, mult: number): RenkoSupertrendPoint[] {
+  return supertrendSeries(columns.map(c => ({ high: c.high, low: c.low, close: brickClose(c) })), period, mult);
 }
 
 /** The SMA of brick closes as it stood at each chart bar (a signal is compared with bricks printed up to its own bar only). */

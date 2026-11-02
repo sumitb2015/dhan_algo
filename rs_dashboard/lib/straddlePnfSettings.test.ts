@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_SETTINGS, MIN_BOX_PCT, MAX_BOX_PCT, REVERSALS, boxText, stepBox, BOX_PCT_STEPS, BOX_PTS_STEPS, parseBoxPct, parseBoxPts, parseSmaPeriod, readSettings, serializeSettings } from './straddlePnfSettings.ts';
+import { DEFAULT_SETTINGS, MIN_BOX_PCT, MAX_BOX_PCT, REVERSALS, boxText, stepBox, BOX_PCT_STEPS, BOX_PTS_STEPS, parseBoxPct, parseBoxPts, parseSmaPeriod, parseStMult, parseStPeriod, readSettings, serializeSettings } from './straddlePnfSettings.ts';
 
 test('defaults are the 1-minute / 0.5% / 3-box chart with an SMA 50 overlay', () => {
-  assert.deepEqual(DEFAULT_SETTINGS, { interval: 1, boxMode: 'pct', boxPct: 0.5, boxPts: 10, reversal: 3, smaPeriod: 50 });
+  assert.deepEqual(DEFAULT_SETTINGS, { interval: 1, boxMode: 'pct', boxPct: 0.5, boxPts: 10, reversal: 3, smaPeriod: 50, stPeriod: 10, stMult: 3 });
   assert.deepEqual([...REVERSALS], [1, 2, 3, 4, 5]);
 });
 
@@ -25,10 +25,10 @@ test('parseBoxPct rejects empty, non-numeric, zero, negative and out-of-range va
 test('readSettings falls back to the defaults for anything unusable', () => {
   assert.deepEqual(readSettings(null), DEFAULT_SETTINGS);
   assert.deepEqual(readSettings('not json'), DEFAULT_SETTINGS);
-  assert.deepEqual(readSettings('{"interval":7,"boxPct":0.5}'), { interval: 1, boxMode: 'pct', boxPct: 0.5, boxPts: 10, reversal: 3, smaPeriod: 50 });   // 7 is not an offered interval
-  assert.deepEqual(readSettings('{"interval":5,"boxPct":99}'), { interval: 5, boxMode: 'pct', boxPct: 0.5, boxPts: 10, reversal: 3, smaPeriod: 50 });    // out-of-range box falls back per field
+  assert.deepEqual(readSettings('{"interval":7,"boxPct":0.5}'), { interval: 1, boxMode: 'pct', boxPct: 0.5, boxPts: 10, reversal: 3, smaPeriod: 50, stPeriod: 10, stMult: 3 });   // 7 is not an offered interval
+  assert.deepEqual(readSettings('{"interval":5,"boxPct":99}'), { interval: 5, boxMode: 'pct', boxPct: 0.5, boxPts: 10, reversal: 3, smaPeriod: 50, stPeriod: 10, stMult: 3 });    // out-of-range box falls back per field
   assert.deepEqual(readSettings('{"interval":"5","boxPct":"1"}'), DEFAULT_SETTINGS);                           // wrong types
-  assert.deepEqual(readSettings('{"interval":5,"boxPct":1}'), { interval: 5, boxMode: 'pct', boxPct: 1, boxPts: 10, reversal: 3, smaPeriod: 50 });      // a file saved before reversal existed
+  assert.deepEqual(readSettings('{"interval":5,"boxPct":1}'), { interval: 5, boxMode: 'pct', boxPct: 1, boxPts: 10, reversal: 3, smaPeriod: 50, stPeriod: 10, stMult: 3 });      // a file saved before reversal existed
 });
 
 test('reversal must be one of the offered whole numbers of boxes, else it falls back to 3', () => {
@@ -38,7 +38,7 @@ test('reversal must be one of the offered whole numbers of boxes, else it falls 
 });
 
 test('settings round-trip through storage', () => {
-  assert.deepEqual(readSettings(serializeSettings({ interval: 15, boxMode: 'pct', boxPct: 1.25, boxPts: 10, reversal: 2, smaPeriod: 120 })), { interval: 15, boxMode: 'pct', boxPct: 1.25, boxPts: 10, reversal: 2, smaPeriod: 120 });
+  assert.deepEqual(readSettings(serializeSettings({ interval: 15, boxMode: 'pct', boxPct: 1.25, boxPts: 10, reversal: 2, smaPeriod: 120, stPeriod: 10, stMult: 3 })), { interval: 15, boxMode: 'pct', boxPct: 1.25, boxPts: 10, reversal: 2, smaPeriod: 120, stPeriod: 10, stMult: 3 });
 });
 
 test('parseSmaPeriod takes a whole number of bars inside the allowed range', () => {
@@ -89,4 +89,16 @@ test('stepBox moves along a ladder of round sizes, from any typed value, and sto
   assert.equal(stepBox('pts', 100000, 1), 100000);
   assert.ok(BOX_PCT_STEPS.every((v, i) => i === 0 || v > BOX_PCT_STEPS[i - 1]));
   assert.ok(BOX_PTS_STEPS.includes(0.25) && BOX_PTS_STEPS.includes(25) && BOX_PTS_STEPS.includes(50000));
+});
+
+test('Supertrend period and multiplier: parsed, range-checked and read back per field', () => {
+  assert.equal(parseStPeriod(' 14 '), 14);
+  for (const bad of ['0', '101', '7.5', '', 'x']) assert.equal(parseStPeriod(bad), null, bad);
+  assert.equal(parseStMult('2.5'), 2.5);
+  assert.equal(parseStMult('1,5'), 1.5);
+  assert.equal(parseStMult('3.04'), 3);
+  for (const bad of ['0.4', '10.5', '-1', 'abc', '']) assert.equal(parseStMult(bad), null, bad);
+  assert.deepEqual([readSettings('{"stPeriod":7,"stMult":2}').stPeriod, readSettings('{"stPeriod":7,"stMult":2}').stMult], [7, 2]);
+  assert.deepEqual([readSettings('{"stPeriod":0,"stMult":99}').stPeriod, readSettings('{"stPeriod":0,"stMult":99}').stMult], [10, 3]);  // out of range: defaults
+  assert.equal(readSettings('{"smaPeriod":20}').stPeriod, 10);   // saved before the Supertrend existed
 });

@@ -9,23 +9,24 @@ export type Reversal = (typeof REVERSALS)[number];
 /**
  * `boxMode`: the box size as a % of the first price (`boxPct`) or as fixed price points (`boxPts`); both values are kept so switching
  * back restores the last one. `smaPeriod`: P&F boxes in the SMA overlay line (an average of box values, not of bar closes).
+ * `stPeriod` / `stMult`: the Renko page's Supertrend (ATR period in bricks, band multiplier); the P&F page keeps them unused.
  */
 export type BoxMode = 'pct' | 'pts';
-export type PnfSettings = { interval: Interval; boxMode: BoxMode; boxPct: number; boxPts: number; reversal: Reversal; smaPeriod: number };
+export type PnfSettings = { interval: Interval; boxMode: BoxMode; boxPct: number; boxPts: number; reversal: Reversal; smaPeriod: number; stPeriod: number; stMult: number };
 
 /** localStorage key shared by the live page and the simulator, so both show the chart the same way. */
 export const SETTINGS_KEY = 'straddle-pnf-settings';
 export const SETTINGS_KEY_2 = 'straddle-pnf-settings-2';
 export const CHART_VIEW_KEY = 'straddle-pnf-chart-view';
 
-export const DEFAULT_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct', boxPct: 0.5, boxPts: 10, reversal: 3, smaPeriod: 50 };
-export const DEFAULT_CHART1_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct', boxPct: 0.1, boxPts: 10, reversal: 3, smaPeriod: 50 };
-export const DEFAULT_CHART2_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct', boxPct: 1, boxPts: 100, reversal: 3, smaPeriod: 50 };
+export const DEFAULT_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct', boxPct: 0.5, boxPts: 10, reversal: 3, smaPeriod: 50, stPeriod: 10, stMult: 3 };
+export const DEFAULT_CHART1_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct', boxPct: 0.1, boxPts: 10, reversal: 3, smaPeriod: 50, stPeriod: 10, stMult: 3 };
+export const DEFAULT_CHART2_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pct', boxPct: 1, boxPts: 100, reversal: 3, smaPeriod: 50, stPeriod: 10, stMult: 3 };
 /**
  * The Renko page (both charts): a 10-point box on 1-minute closes, TradingView's "Renko [Traditional, 10]" on NIFTY (the % box,
  * `boxPct`, is there too). `reversal` is the N-brick confirmation its signals wait for (2), not a P&F reversal.
  */
-export const DEFAULT_RENKO_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pts', boxPct: 0.1, boxPts: 10, reversal: 2, smaPeriod: 50 };
+export const DEFAULT_RENKO_SETTINGS: PnfSettings = { interval: 1, boxMode: 'pts', boxPct: 0.1, boxPts: 10, reversal: 2, smaPeriod: 50, stPeriod: 10, stMult: 3 };
 /** SMA period limits, in P&F boxes (a small box over 10 sessions draws a few hundred to a few thousand boxes). */
 export const MIN_SMA_PERIOD = 2;
 export const MAX_SMA_PERIOD = 500;
@@ -38,6 +39,30 @@ export function parseSmaPeriod(text: string): number | null {
   if (!/^\d+$/.test(t)) return null;
   const n = Number(t);
   return smaPeriodOk(n) ? n : null;
+}
+/** Supertrend limits: ATR period in bricks (whole number) and the band multiplier (0.1 steps). */
+export const MIN_ST_PERIOD = 1;
+export const MAX_ST_PERIOD = 100;
+export const MIN_ST_MULT = 0.5;
+export const MAX_ST_MULT = 10;
+
+const stPeriodOk = (n: number) => Number.isInteger(n) && n >= MIN_ST_PERIOD && n <= MAX_ST_PERIOD;
+const stMultOk = (n: number) => Number.isFinite(n) && n >= MIN_ST_MULT && n <= MAX_ST_MULT;
+
+/** " 10 " -> 10; a whole number inside [MIN_ST_PERIOD, MAX_ST_PERIOD]; anything else -> null. */
+export function parseStPeriod(text: string): number | null {
+  const t = text.trim();
+  if (!/^\d+$/.test(t)) return null;
+  const n = Number(t);
+  return stPeriodOk(n) ? n : null;
+}
+
+/** "3", " 2.5 " or "1,5" -> a multiplier inside [MIN_ST_MULT, MAX_ST_MULT], rounded to 0.1; anything else -> null. */
+export function parseStMult(text: string): number | null {
+  const t = text.trim().replace(',', '.');
+  if (!/^(\d+\.?\d*|\.\d+)$/.test(t)) return null;
+  const n = Math.round(Number(t) * 10) / 10;
+  return stMultOk(n) ? n : null;
 }
 /** Box size limits, in % of the first price: below the minimum the chart turns into thousands of boxes, above the maximum it is a single column. */
 export const MIN_BOX_PCT = 0.05;
@@ -104,7 +129,9 @@ export function readSettings(raw: string | null, fallback: PnfSettings = DEFAULT
   const smaPeriod = typeof o.smaPeriod === 'number' && smaPeriodOk(o.smaPeriod) ? o.smaPeriod : fallback.smaPeriod;
   const boxMode: BoxMode = o.boxMode === 'pts' ? 'pts' : fallback.boxMode;
   const boxPts = typeof o.boxPts === 'number' && boxPtsOk(o.boxPts) ? o.boxPts : fallback.boxPts;
-  return { interval, boxMode, boxPct, boxPts, reversal, smaPeriod };
+  const stPeriod = typeof o.stPeriod === 'number' && stPeriodOk(o.stPeriod) ? o.stPeriod : fallback.stPeriod;
+  const stMult = typeof o.stMult === 'number' && stMultOk(o.stMult) ? o.stMult : fallback.stMult;
+  return { interval, boxMode, boxPct, boxPts, reversal, smaPeriod, stPeriod, stMult };
 }
 
 export function serializeSettings(s: PnfSettings): string {

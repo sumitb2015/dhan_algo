@@ -9,7 +9,7 @@ import PnfPanel from './straddlePnf/PnfPanel';
 import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
 import InstrumentBar from './straddlePnf/InstrumentBar';
 import { effectiveInterval, hasLongIntervals, intervalLabel } from '@/lib/straddlePnfInterval';
-import SettingsControls, { SmaPeriodInput } from './straddlePnf/SettingsControls';
+import SettingsControls, { SmaPeriodInput, SupertrendControls } from './straddlePnf/SettingsControls';
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import BrokerBooks from './straddlePnf/BrokerBooks';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
@@ -69,6 +69,8 @@ const LOG_KEY = 'straddle-pnf-log';
 const SOUND_KEY = 'straddle-pnf-sound';
 const OVERLAY_KEY = 'straddle-pnf-overlay';
 const OVERLAY_SHOWN_KEY = 'straddle-pnf-overlay-shown';
+/** Renko only: whether the Supertrend line is drawn (shown unless switched off). */
+const ST_SHOWN_KEY = 'straddle-pnf-supertrend-shown';
 const COVER_SHOWN_KEY = 'straddle-pnf-cover-shown';
 const TRADE_OPEN_KEY = 'straddle-pnf-trade-open';
 /** The positions / order book / trade book / P&L strip at the bottom: collapsed by default (expanded it takes chart height). */
@@ -214,6 +216,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const [overlay, setOverlay] = useState<Overlay>('vwap');
   // Whether the VWAP / SMA line is drawn at all: a display switch only, the signals still measure against it.
   const [overlayShown, setOverlayShown] = useState(true);
+  // The Renko Supertrend line: a display switch only, nothing trades on it.
+  const [supertrendShown, setSupertrendShown] = useState(true);
   // The COVER tag is a short-side hint nothing trades on: hidden unless switched on.
   const [coverShown, setCoverShown] = useState(false);
   const [target1, setTarget1] = useState<Target>(DEFAULT_TARGETS.index);
@@ -274,6 +278,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (readP(OVERLAY_KEY) === 'sma') setOverlay('sma');
     if (readP(OVERLAY_SHOWN_KEY) === '0') setOverlayShown(false);
+    if (readP(ST_SHOWN_KEY) === '0') setSupertrendShown(false);
     if (readP(COVER_SHOWN_KEY) === '1') setCoverShown(true);
     const savedView = readP(CHART_VIEW_KEY);
     if (savedView === '1' || savedView === '2') setChartView(savedView);
@@ -704,6 +709,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // Picking VWAP or SMA also shows the line again; the eye button hides / shows it without changing the choice.
   const pickOverlay = (o: Overlay) => { setOverlay(o); saveP(OVERLAY_KEY, o); setOverlayShown(true); saveP(OVERLAY_SHOWN_KEY, '1'); };
   const toggleCoverShown = () => { const next = !coverShown; setCoverShown(next); saveP(COVER_SHOWN_KEY, next ? '1' : '0'); };
+  const toggleSupertrendShown = () => { const next = !supertrendShown; setSupertrendShown(next); saveP(ST_SHOWN_KEY, next ? '1' : '0'); };
   const toggleOverlayShown = () => { const next = !overlayShown; setOverlayShown(next); saveP(OVERLAY_SHOWN_KEY, next ? '1' : '0'); };
   const applySettings = (next: PnfSettings) => {
     if (active === 2) { setSettings2(next); saveP(SETTINGS_KEY_2, serializeSettings(next)); }
@@ -754,6 +760,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       live: rp ? (rbar ? { ce: rbar.ce, pe: rbar.pe } : null) : feed.live,
       overlay,
       overlayShown,
+      supertrendShown: renko && supertrendShown,
       coverShown,
       stale: rp ? false : feed.stale,
       legs: target.kind === 'options' && target.side === 'STRADDLE',
@@ -932,6 +939,14 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
               </button>}
             </div>
             <fieldset disabled={activeLocked} className="contents"><SmaPeriodInput settings={activeSettings} onChange={applySettings} /></fieldset>
+            {renko && (
+              <>
+                <span className="w-px h-5 bg-zinc-800 shrink-0" />
+                {/* Outside the AUTO lock: the Supertrend is drawn only, AUTO reads the bricks and signals, which it does not change. */}
+                <SupertrendControls settings={activeSettings} onChange={applySettings}
+                                    shown={supertrendShown} onToggleShown={toggleSupertrendShown} />
+              </>
+            )}
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <button type="button" data-testid="pnf-cancel-every-order" onClick={cancelEveryOrder} disabled={workingRows.length === 0}
                     aria-label={`Cancel all orders (${workingRows.length} working)`} title={workingRows.length ? `Cancel all ${workingRows.length} working orders on every chart` : 'No working orders'}

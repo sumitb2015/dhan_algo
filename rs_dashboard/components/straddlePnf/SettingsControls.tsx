@@ -1,10 +1,10 @@
 'use client';
 
 import { useState } from 'react';
-import { Minus, Plus } from 'lucide-react';
+import { Eye, EyeOff, Minus, Plus } from 'lucide-react';
 import { intervalLabel, intervalsFor, type Interval } from '@/lib/straddlePnfInterval';
 import {
-  MAX_BOX_PCT, MIN_BOX_PCT, MAX_BOX_PTS, MIN_BOX_PTS, MIN_BOX_PTS_PCT, MAX_SMA_PERIOD, MIN_SMA_PERIOD, REVERSALS, parseBoxPct, parseBoxPts, parseSmaPeriod, stepBox,
+  MAX_BOX_PCT, MIN_BOX_PCT, MAX_BOX_PTS, MIN_BOX_PTS, MIN_BOX_PTS_PCT, MAX_SMA_PERIOD, MIN_SMA_PERIOD, MAX_ST_MULT, MAX_ST_PERIOD, MIN_ST_MULT, MIN_ST_PERIOD, REVERSALS, parseBoxPct, parseBoxPts, parseSmaPeriod, parseStMult, parseStPeriod, stepBox,
   type PnfSettings, type Reversal,
 } from '@/lib/straddlePnfSettings';
 
@@ -71,6 +71,63 @@ export function SmaPeriodInput({ settings, onChange }: { settings: PnfSettings; 
                      onCommit={n => onChange({ ...settings, smaPeriod: n })} />
         <button type="button" aria-label="Increase SMA period" title="Increase the SMA period by 1 (Shift: 10)" disabled={p >= MAX_SMA_PERIOD}
                 onMouseDown={keepFocus} onClick={e => step(1, e.shiftKey)} className={`${STEP_BTN} rounded-r-md border-l-0`}>
+          <Plus className="w-3 h-3" aria-hidden="true" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The Renko Supertrend: an eye button shows / hides the line (a page preference), then the ATR period in bricks (− / + by 1, Shift: 5)
+ * and the band multiplier (− / + by 0.5); both free-typed boxes commit on Enter / blur. The settings are per chart.
+ */
+export function SupertrendControls({ settings, onChange, shown, onToggleShown }: {
+  settings: PnfSettings; onChange: (next: PnfSettings) => void; shown: boolean; onToggleShown: () => void;
+}) {
+  const p = settings.stPeriod;
+  const m = settings.stMult;
+  const stepPeriod = (dir: 1 | -1, big: boolean) => {
+    const next = Math.min(MAX_ST_PERIOD, Math.max(MIN_ST_PERIOD, p + dir * (big ? 5 : 1)));
+    if (next !== p) onChange({ ...settings, stPeriod: next });
+  };
+  const stepMult = (dir: 1 | -1) => {
+    const next = Math.min(MAX_ST_MULT, Math.max(MIN_ST_MULT, Math.round((m + dir * 0.5) * 10) / 10));
+    if (next !== m) onChange({ ...settings, stMult: next });
+  };
+  return (
+    <div className={LABEL} role="group" aria-label="Supertrend">
+      <button type="button" aria-pressed={shown} onClick={onToggleShown}
+              aria-label={shown ? 'Hide the Supertrend' : 'Show the Supertrend'} title={shown ? 'Hide the Supertrend line' : 'Show the Supertrend line'}
+              className={`inline-flex items-center gap-1 h-7 px-2 rounded-md border text-[10px] font-bold uppercase tracking-wider ${shown ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-100'}`}>
+        {shown ? <Eye className="w-3.5 h-3.5" aria-hidden="true" /> : <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />}
+        ST
+      </button>
+      <span>ATR</span>
+      <div className="inline-flex items-center">
+        <button type="button" aria-label="Decrease Supertrend period" title="Decrease the ATR period by 1 (Shift: 5)" disabled={p <= MIN_ST_PERIOD}
+                onMouseDown={keepFocus} onClick={e => stepPeriod(-1, e.shiftKey)} className={`${STEP_BTN} rounded-l-md border-r-0`}>
+          <Minus className="w-3 h-3" aria-hidden="true" />
+        </button>
+        <CommitInput key={p} value={p} parse={parseStPeriod} label="Supertrend period" inputMode="numeric" width="w-10 rounded-none text-center"
+                     title={`Supertrend ATR period in bricks (${MIN_ST_PERIOD}-${MAX_ST_PERIOD}); press Enter to apply`}
+                     onCommit={n => onChange({ ...settings, stPeriod: n })} />
+        <button type="button" aria-label="Increase Supertrend period" title="Increase the ATR period by 1 (Shift: 5)" disabled={p >= MAX_ST_PERIOD}
+                onMouseDown={keepFocus} onClick={e => stepPeriod(1, e.shiftKey)} className={`${STEP_BTN} rounded-r-md border-l-0`}>
+          <Plus className="w-3 h-3" aria-hidden="true" />
+        </button>
+      </div>
+      <span>×</span>
+      <div className="inline-flex items-center">
+        <button type="button" aria-label="Decrease Supertrend multiplier" title="Decrease the multiplier by 0.5" disabled={m <= MIN_ST_MULT}
+                onMouseDown={keepFocus} onClick={() => stepMult(-1)} className={`${STEP_BTN} rounded-l-md border-r-0`}>
+          <Minus className="w-3 h-3" aria-hidden="true" />
+        </button>
+        <CommitInput key={m} value={m} parse={parseStMult} label="Supertrend multiplier" inputMode="decimal" width="w-10 rounded-none text-center"
+                     title={`Supertrend band multiplier (${MIN_ST_MULT}-${MAX_ST_MULT}); press Enter to apply`}
+                     onCommit={n => onChange({ ...settings, stMult: n })} />
+        <button type="button" aria-label="Increase Supertrend multiplier" title="Increase the multiplier by 0.5" disabled={m >= MAX_ST_MULT}
+                onMouseDown={keepFocus} onClick={() => stepMult(1)} className={`${STEP_BTN} rounded-r-md border-l-0`}>
           <Plus className="w-3 h-3" aria-hidden="true" />
         </button>
       </div>

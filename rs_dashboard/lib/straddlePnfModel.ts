@@ -3,7 +3,7 @@
 // interval first; the box size is a percentage of the first price.
 import { VWAP_START, buildPnf, continuePnf, detectSignals, exitTags, extendPnf, sessionOf, vwapFrom, type VwapState, type Bar, type PnfColumn, type PnfResume, type PnfSignal } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
-import { buildRenko, continueRenko, extendRenko, renkoSignals, renkoSma, renkoSmaByBar, type RenkoResume } from './renko.ts';
+import { buildRenko, continueRenko, extendRenko, renkoSignals, renkoSma, renkoSmaByBar, renkoSupertrend, type RenkoResume, type RenkoSupertrendPoint } from './renko.ts';
 import { MIN_BOX_PTS_PCT, type BoxMode } from './straddlePnfSettings.ts';
 
 export type Overlay = 'vwap' | 'sma';
@@ -34,6 +34,13 @@ export type PanelModel = {
   overlayKind: Overlay;
   /** The SMA period the overlay was built with, for its label. */
   smaPeriod: number;
+  /**
+   * Renko only (empty on P&F): Supertrend(stPeriod, stMult) at each confirmed brick — the line and its direction (1 = up, the line
+   * below the bricks; -1 = down, above). Drawn only; no signal or AUTO rule reads it. Null until the ATR has stPeriod + 1 bricks.
+   */
+  supertrend: RenkoSupertrendPoint[];
+  stPeriod: number;
+  stMult: number;
   /** Time of the last closed bar the model was built from; the page's alert watermark follows it. */
   lastBarT: number | null;
   /** First usable close of the most recent session in the bars: the "open" the header's change is measured against. */
@@ -134,6 +141,9 @@ function sessionMarksOf(columns: PnfColumn[], bars: Bar[]): PanelModel['sessionM
 
 /** Default SMA period, in P&F boxes (the user can change it: PnfSettings.smaPeriod). */
 export const SMA_PERIOD = 50;
+/** Default Renko Supertrend (TradingView's default is 10, 3). */
+export const ST_PERIOD = 10;
+export const ST_MULT = 3;
 /** More unconfirmed boxes than this from one forming bar is a bad tick, not a move: none are drawn. */
 export const MAX_UNCONFIRMED_BOXES = 200;
 
@@ -149,6 +159,9 @@ export type PanelOptions = {
   reversal?: number;
   /** Boxes in the SMA overlay (default SMA_PERIOD): it averages P&F box values, not bar closes. */
   smaPeriod?: number;
+  /** Renko's Supertrend: ATR period in bricks and band multiplier (defaults ST_PERIOD / ST_MULT). */
+  stPeriod?: number;
+  stMult?: number;
   /**
    * False for an instrument whose feed volume is not traded volume (an index: Dhan reports its constituents' turnover). Then there
    * is no VWAP, and the box SMA takes its place as the line and as the signals' reference. Default true.
@@ -286,6 +299,9 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   const smaPeriod = opts.smaPeriod ?? SMA_PERIOD;
   // Renko's average is TradingView's: an SMA of brick closes. P&F's averages box values.
   const boxSma = renko ? renkoSma(columns, smaPeriod) : boxSmaOf(columns, box, smaPeriod);
+  const stPeriod = opts.stPeriod ?? ST_PERIOD;
+  const stMult = opts.stMult ?? ST_MULT;
+  const supertrend = renko ? renkoSupertrend(columns, stPeriod, stMult) : [];
   const vwapAvailable = opts.volume !== false && closedBars.some(b => b.vol > 0);
   const overlayKind: Overlay = vwapAvailable ? overlay : 'sma';
   // The reference the short-entry zone (below it) and the cover cue (above it) are measured against: VWAP when the instrument
@@ -309,6 +325,9 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
     vwapAvailable,
     overlayKind,
     smaPeriod,
+    supertrend,
+    stPeriod,
+    stMult,
     lastBarT: bars.length ? bars[bars.length - 1].t : null,
     sessionMarks: renko ? [] : sessionMarksOf(columns, bars),
     columnTimes,

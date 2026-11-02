@@ -56,6 +56,8 @@ export type PnfPanelProps = {
   sessionTag?: string | null;
   /** False hides the VWAP / SMA line and its legend; the signals and exit cues still use it. */
   overlayShown?: boolean;
+  /** True draws the Supertrend line and its legend (Renko only: `model.supertrend` is empty on P&F). Display only. */
+  supertrendShown?: boolean;
   /** True draws the COVER tag (a short-side cue: first bar of an X column above VWAP). Off by default; nothing trades on it. */
   coverShown?: boolean;
   /** False (stocks: a column spans days) = no dashed vertical line at each session start and no date strip along the top. */
@@ -421,7 +423,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, coverShown = false, sessionLines = true, sessionDividers = true, timeAxis = false, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin, replayPick, replayStartT = null }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, supertrendShown = false, coverShown = false, sessionLines = true, sessionDividers = true, timeAxis = false, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin, replayPick, replayStartT = null }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   // Renko: every column is one filled brick on real price edges (lib/renko.ts); `reversal` holds the N-brick confirmation.
@@ -437,6 +439,18 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   // The SMA averages P&F boxes: say so when there are not enough of them yet, rather than show no line and no reason.
   const totalBoxes = useMemo(() => columns.reduce((n, c) => n + c.boxes, 0), [columns]);
   const smaWaiting = kind === 'sma' && overlayNow === null && columns.length > 0;
+  // Supertrend (Renko): its value and direction at the newest confirmed brick, for the legend.
+  const stShown = supertrendShown && model.supertrend.length > 0;
+  const stNow = stShown ? model.supertrend[model.supertrend.length - 1] : null;
+  const stLabel = `ST ${model.stPeriod},${model.stMult}`;
+  const stLegend = stShown && (
+    <span data-testid="pnf-supertrend-legend" className="shrink-0" title={`Supertrend: ATR ${model.stPeriod} bricks × ${model.stMult}`}>
+      <span className={`font-bold ${stNow?.dir === -1 ? 'text-red-400' : 'text-emerald-400'}`}>{stLabel}</span>
+      {stNow?.line != null
+        ? <span className="font-semibold text-zinc-100">{` ${fmt(stNow.line)} ${stNow.dir === 1 ? '▲' : '▼'}`}</span>
+        : <span className="text-zinc-500">{` needs ${model.stPeriod + 1} bricks`}</span>}
+    </span>
+  );
   // Change is measured from the previous close: the feed's (official) while trusted, else the history's, then the session open.
   const prevClose = feedPrevClose ?? model.prevClose;
   const changeBase = prevClose ?? model.sessionOpen;
@@ -689,6 +703,22 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     .map(p => `${p.x},${yOf(p.v as number)}`)
     .join(' ');
 
+  // Supertrend: one path per direction through the brick centres; a flip starts a new segment on the other side, like TradingView.
+  const stPaths = useMemo(() => {
+    if (!supertrendShown || !model.supertrend.length) return { up: '', down: '' };
+    let up = '', down = '';
+    const st = model.supertrend;
+    for (let j = Math.max(0, w0); j < Math.min(w1, st.length); j++) {
+      const cur = st[j];
+      if (cur.line === null || cur.dir === null) continue;
+      const prev = j > 0 ? st[j - 1] : null;
+      const cont = !!prev && prev.line !== null && prev.dir === cur.dir && j > w0;
+      const seg = `${cont ? 'L' : 'M'}${offsetX + j * colW + colW / 2},${padY + PAD_TOP + ((yMax - cur.line) / box) * cell}`;
+      if (cur.dir === 1) up += seg; else down += seg;
+    }
+    return { up, down };
+  }, [supertrendShown, model.supertrend, w0, w1, offsetX, colW, padY, yMax, box, cell]);
+
   // Renko: a label every ~40 px on a round multiple of the box (22,640 / 22,680 ...) like TradingView; its history spans years, so
   // nine labels over the whole range would put them a thousand points apart. P&F: about nine labels over the range.
   const minRows = Math.max(1, Math.ceil(40 / Math.max(1, cell)));
@@ -755,6 +785,10 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         <polyline points={overlayPts} fill="none" strokeWidth={1.8}
                   className={kind === 'vwap' ? 'stroke-amber-300' : 'stroke-sky-400'} />
       )}
+
+      {/* Supertrend (Renko): green below the bricks in an up trend, red above them in a down trend */}
+      {stPaths.up && <path data-testid="pnf-supertrend-up" d={stPaths.up} fill="none" strokeWidth={1.6} className="stroke-emerald-500" />}
+      {stPaths.down && <path data-testid="pnf-supertrend-down" d={stPaths.down} fill="none" strokeWidth={1.6} className="stroke-red-500" />}
 
       {/* short cover cue (the short-side rule): first bar of a green X column trading above VWAP */}
       {coverShown && exits.length > 0 && (
@@ -942,7 +976,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     </>
   // xOf / yOf / inWindow are rebuilt every render from the layout values listed here
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [renko, glyphs, colW, columns, cell, offsetX, yMax, padY, box, unconfirmedPaths, overlayPts, kind, coverShown, exits, triShown, triangles, plotW, axisDigits, signals, w0, w1, lastEntryId, markersShown, tradeMarkers, model, liveCols, stroke]);
+  ), [renko, glyphs, colW, columns, cell, offsetX, yMax, padY, box, unconfirmedPaths, overlayPts, stPaths, kind, coverShown, exits, triShown, triangles, plotW, axisDigits, signals, w0, w1, lastEntryId, markersShown, tradeMarkers, model, liveCols, stroke]);
 
   return (
     <section
@@ -989,6 +1023,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 {smaWaiting && <span className="text-zinc-500">{` needs ${model.smaPeriod} ${unitWord} (${totalBoxes} so far)`}</span>}
               </span>
             )}
+            {stLegend}
             <span data-testid="pnf-box-info" className="flex items-center gap-3 min-w-0 text-zinc-400 truncate" title={box > 0 ? boxTitle : undefined}>
               {box > 0 ? (
                 <>
@@ -1028,6 +1063,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
             {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : smaWaiting ? ` needs ${model.smaPeriod}` : ''}
           </span>
         )}
+        {stLegend}
         <span data-testid="pnf-box-info" className="text-zinc-500 truncate min-w-0 flex-1" title={box > 0 ? boxTitle : undefined}>
           {box > 0 ? `Box ${box.toFixed(2)} (${boxNote}) · ${ruleText} · ${columns.length} ${renko ? 'bricks' : 'cols'}` : 'Box —'}
         </span>
@@ -1079,6 +1115,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
           <span data-testid="pnf-overlay-legend" className={kind === 'vwap' ? 'text-amber-300' : 'text-sky-300'}>
             {overlayLabel}{overlayNow !== null ? ` ${fmt(overlayNow)}` : smaWaiting ? ` needs ${model.smaPeriod} ${unitWord} (${totalBoxes} so far)` : ''}
           </span>
+          {stLegend && <> · {stLegend}</>}
         </p>
         <div className="mt-0.5 flex items-center justify-between gap-2">
           <p data-testid="pnf-box-info" className="text-[10px] font-mono text-zinc-500 truncate">
