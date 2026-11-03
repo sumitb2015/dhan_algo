@@ -68,13 +68,27 @@ export function checkRestingPrices(side: PnfAction, orderType: 'LIMIT' | 'SL', p
 
 export const lotCap = (t: Target) => (t.kind === 'equity' ? MAX_PNF_SHARES : MAX_PNF_LOTS);
 
-/** Lots per OPENING order on Zerodha MCX futures until a live fill confirms the quantity unit (see brokerLegs). Exits are not capped. */
-export const ZERODHA_MCX_MAX_LOTS = 1;
+/** Lots per OPENING order on Kotak / Zerodha MCX futures until a live fill confirms the quantity unit (see brokerLegs). Exits are not capped. */
+export const MCX_UNCONFIRMED_MAX_LOTS = 1;
 
-/** Why a Zerodha MCX opening order of `lots` is refused, or null. One rule for the order route (market, resting, modify) and for arming AUTO. */
-export function zerodhaMcxCapError(broker: PnfBroker, isMcx: boolean, lots: number): string | null {
-  if (broker !== 'zerodha' || !isMcx || lots <= ZERODHA_MCX_MAX_LOTS) return null;
-  return `Zerodha MCX futures are capped at ${ZERODHA_MCX_MAX_LOTS} lot per order until a live fill confirms the quantity unit - use ${ZERODHA_MCX_MAX_LOTS} lot`;
+/** Why a Kotak / Zerodha MCX opening order of `lots` is refused, or null. One rule for the order route (market, resting, modify) and for arming AUTO. */
+export function mcxUnconfirmedCapError(broker: PnfBroker, isMcx: boolean, lots: number): string | null {
+  if (broker === 'dhan' || !isMcx || lots <= MCX_UNCONFIRMED_MAX_LOTS) return null;
+  const name = broker === 'kotak' ? 'Kotak' : 'Zerodha';
+  return `${name} MCX futures are capped at ${MCX_UNCONFIRMED_MAX_LOTS} lot per order until a live fill confirms the quantity unit - use ${MCX_UNCONFIRMED_MAX_LOTS} lot`;
+}
+
+/** The only MCX shape Kotak / Zerodha may trade from this page: one future leg on a named expiry. Anything else (MCX options, a pair) is refused. Pure. */
+export function mcxShapeError(broker: PnfBroker, kind: string, hasExpiry: boolean, legCount: number): string | null {
+  if (broker === 'dhan' || (kind === 'futures' && hasExpiry && legCount === 1)) return null;
+  return `${broker === 'kotak' ? 'Kotak' : 'Zerodha'} MCX orders are not supported from this page - use Dhan`;
+}
+
+/** Why a Kotak MCX future cannot be ordered against a Dhan leg (Kotak counts barrels per lot, Dhan counts lots), or null. Pure. */
+export function kotakMcxFutureError(symbol: string, kotakLotSize: number, barrelsPerLot: number | null): string | null {
+  if (!(barrelsPerLot !== null && barrelsPerLot > 0)) return `No barrels-per-lot is configured for ${symbol} (MCX_LOT_MULTIPLIER), so its Kotak quantity cannot be sized - not sent`;
+  if (kotakLotSize === barrelsPerLot) return null;
+  return `Kotak lists ${symbol} with lot size ${kotakLotSize}, not the expected ${barrelsPerLot} barrels per lot - not sent`;
 }
 
 /** A request body -> a valid order request, or the reason it is refused. */

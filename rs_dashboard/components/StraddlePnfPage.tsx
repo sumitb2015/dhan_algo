@@ -52,7 +52,7 @@ import { usePnfGuard } from './straddlePnf/usePnfGuard';
 import PnfOrderStyle, { DEFAULT_STYLE, type StyleState } from './straddlePnf/PnfOrderStyle';
 import { cleanBracketSpec, planBracketChildren, type BracketSpec } from '@/lib/pnfBracket';
 import { useChartLegs, usePnfResting, type RailChart, type RestingEvent } from './straddlePnf/usePnfResting';
-import { applyPaperFill, FLAT_LEG, zerodhaMcxCapError, type PaperLeg, type PnfProduct } from '@/lib/pnfOrderLogic';
+import { applyPaperFill, FLAT_LEG, mcxUnconfirmedCapError, type PaperLeg, type PnfProduct } from '@/lib/pnfOrderLogic';
 import { needsResolve, type RestingRow } from '@/lib/pnfRestingLedger';
 
 // The same page draws Renko at /renko (`chart="renko"`): bricks instead of P&F columns (lib/renko.ts), N-brick confirmation
@@ -885,7 +885,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
                       rule={renko && autoRule[c] === 'trend' ? `Renko trend: SELL / BUY on every brick that completes ${(c === 2 ? settings2 : settings).reversal} same-colour brick(s), no reversal needed; exit on the first opposite brick, then re-enter the new direction` : renko && autoRule[c] === 'oneback' ? 'One-back: 2+ bricks, 1-brick pullback, 2 bricks resume past the swing; stop one brick beyond the pullback' : renko && autoRule[c] === 'twoback' ? 'Two-back: 3+ bricks, 2-brick pullback, 3 bricks resume past the swing; stop one brick beyond the pullback' : renko ? `Renko SELL / BUY after ${(c === 2 ? settings2 : settings).reversal} confirming bricks, exit on the first opposite brick` : undefined}
                       disabledReason={target.kind === 'index' ? 'No AUTO on an index: chart its future or an option'
                         : replay.active ? 'Bar replay is open: close it to arm live AUTO'
-                        : tradeMode === 'REAL' ? zerodhaMcxCapError(broker, feed.market === 'MCX' && target.kind === 'futures', autoLots[c]) : null} />
+                        : tradeMode === 'REAL' ? mcxUnconfirmedCapError(broker, feed.market === 'MCX' && target.kind === 'futures', autoLots[c]) : null} />
       ),
     };
   };

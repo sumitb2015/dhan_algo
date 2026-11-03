@@ -61,7 +61,7 @@ export function pickZerodhaFuture(rows: ZerodhaFutureRow[], expiry: string | nul
 /**
  * Whether Kite's row for an MCX future can be ordered from the P&F / Renko page: it must be on MCX and its lot size must equal the
  * Dhan leg's `expectedLot` (1, the order is in lots). NOTE the check is only as strong as that comparison: Dhan's MCX lot is 1 by
- * construction, so it proves the dump reads 1, NOT that Kite's order unit is lots - the 1-lot cap (`ZERODHA_MCX_MAX_LOTS`) is the
+ * construction, so it proves the dump reads 1, NOT that Kite's order unit is lots - the 1-lot cap (`MCX_UNCONFIRMED_MAX_LOTS`) is the
  * real safeguard until a live fill confirms it. Returns the refusal, or null. Pure.
  */
 export function zerodhaMcxFutureError(row: { tradingsymbol: string; lotSize: number; exchange: string }, expectedLot: number): string | null {

@@ -18,7 +18,7 @@ import { CloseGuard } from '@/lib/priceLadderClose';
 import { parseTarget, isComplete, targetKey } from '@/lib/pnfTarget';
 import { brokerLegs, resolvePnfLegs, type PnfBrokerLeg } from '@/lib/pnfOrderServer';
 import {
-  MAX_PNF_LOTS, brokerProduct, checkRestingPrices, lotCap, needsRollback, orderQty, parsePnfOrder, planLegClose, planLegCloseKeeping, planOwnExit, sendOutcome, zerodhaMcxCapError,
+  MAX_PNF_LOTS, brokerProduct, checkRestingPrices, lotCap, needsRollback, orderQty, parsePnfOrder, planLegClose, planLegCloseKeeping, planOwnExit, sendOutcome, mcxUnconfirmedCapError,
   type LegResult, type PnfAction, type PnfBroker,
 } from '@/lib/pnfOrderLogic';
 
@@ -131,7 +131,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const product = brokerProduct(order.product, broker);
       // Sized here from the server's own lot, so this only guards a lot lookup gone wrong. Checked for every leg before any is sent.
       if (onBroker.some(l => !(l.lotUnits > 0) || (l.segment !== 'NSE_EQ' && order.lots > MAX_PNF_LOTS))) return bad('Order size check failed - nothing was sent', 500);
-      const capped = zerodhaMcxCapError(broker, onBroker.some(l => l.segment === 'MCX_COMM'), order.lots);
+      const capped = mcxUnconfirmedCapError(broker, onBroker.some(l => l.segment === 'MCX_COMM'), order.lots);
       if (capped) return bad(`${capped} - nothing was sent`);
       sent = true;
       for (const leg of onBroker) {
@@ -191,7 +191,7 @@ async function resting(order: Exclude<ReturnType<typeof parsePnfOrder>, string>,
     if (order.brokerOp?.op === 'cancel') return cancelAt(broker, order.brokerOp.orderId);
     if (order.orderType === 'MARKET' || !(order.price && order.price > 0)) return bad('A resting order needs LIMIT / SL prices');
     if (!(order.lots >= 1 && order.lots <= lotCap(order.target)) || !(leg.lotUnits > 0)) return bad('Order size check failed - nothing was sent');
-    const capped = zerodhaMcxCapError(broker, leg.segment === 'MCX_COMM', order.lots);
+    const capped = mcxUnconfirmedCapError(broker, leg.segment === 'MCX_COMM', order.lots);
     if (capped) return bad(`${capped} - nothing was sent`);
     // One resting order per rail click: an order Kite would cut at the freeze quantity is refused, never sliced.
     if (broker === 'zerodha' && leg.segment !== 'NSE_EQ' && slicesFor(leg.key, qty).length > 1) return bad(`${qty} is above the exchange freeze quantity for one resting order - use fewer lots`);

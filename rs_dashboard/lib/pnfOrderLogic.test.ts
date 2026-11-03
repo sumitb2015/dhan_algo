@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MAX_PNF_LOTS, MAX_PNF_SHARES, FLAT_LEG, applyPaperFill, brokerProduct, describePosition, needsRollback, orderQty,
-  paperPnl, parsePnfOrder, planLegClose, planLegCloseKeeping, sendOutcome, zerodhaMcxCapError, ZERODHA_MCX_MAX_LOTS, type LegResult,
+  paperPnl, parsePnfOrder, planLegClose, planLegCloseKeeping, sendOutcome, mcxUnconfirmedCapError, MCX_UNCONFIRMED_MAX_LOTS, kotakMcxFutureError, mcxShapeError, type LegResult,
 } from './pnfOrderLogic.ts';
 
 const fut = { kind: 'futures', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24' };
@@ -171,11 +171,29 @@ test('a close keeps the other page\'s AUTO quantity: only the rest of the intrad
   assert.deepEqual(planLegCloseKeeping('F', rows, 0, 'dhan'), planLegClose('F', rows));
 });
 
-test('Zerodha MCX cap: only Zerodha + MCX + more than the cap is refused; the other brokers / segments are untouched', () => {
-  assert.equal(ZERODHA_MCX_MAX_LOTS, 1);
-  assert.equal(zerodhaMcxCapError('zerodha', true, 1), null);
-  assert.match(zerodhaMcxCapError('zerodha', true, 2) ?? '', /capped at 1 lot/);
-  assert.equal(zerodhaMcxCapError('dhan', true, 5), null);
-  assert.equal(zerodhaMcxCapError('kotak', true, 5), null);
-  assert.equal(zerodhaMcxCapError('zerodha', false, 5), null, 'NSE on Zerodha is not capped here');
+test('Kotak / Zerodha MCX cap: only those brokers + MCX + more than the cap is refused; the other brokers / segments are untouched', () => {
+  assert.equal(MCX_UNCONFIRMED_MAX_LOTS, 1);
+  assert.equal(mcxUnconfirmedCapError('zerodha', true, 1), null);
+  assert.match(mcxUnconfirmedCapError('zerodha', true, 2) ?? '', /capped at 1 lot/);
+  assert.equal(mcxUnconfirmedCapError('dhan', true, 5), null);
+  assert.match(mcxUnconfirmedCapError('kotak', true, 2) ?? '', /Kotak MCX futures are capped at 1 lot/);
+  assert.equal(mcxUnconfirmedCapError('kotak', true, 1), null);
+  assert.equal(mcxUnconfirmedCapError('zerodha', false, 5), null, 'NSE on Zerodha is not capped here');
+});
+
+test('Kotak MCX future: its lot size must equal the leg\'s barrels per lot (Kotak orders in barrels), unknown multiplier refused', () => {
+  assert.equal(kotakMcxFutureError('CRUDEOILM19NOV26FUT', 10, 10), null);
+  assert.match(kotakMcxFutureError('CRUDEOILM19NOV26FUT', 100, 10) ?? '', /lot size 100, not the expected 10/);
+  assert.match(kotakMcxFutureError('X', 10, null) ?? '', /No barrels-per-lot/);
+});
+
+test('MCX shape: Kotak / Zerodha get one future leg on an expiry only; options and pairs are refused, Dhan is unrestricted', () => {
+  assert.equal(mcxShapeError('kotak', 'futures', true, 1), null);
+  assert.equal(mcxShapeError('zerodha', 'futures', true, 1), null);
+  assert.match(mcxShapeError('kotak', 'options', true, 1) ?? '', /Kotak MCX orders are not supported/);
+  assert.match(mcxShapeError('zerodha', 'options', true, 2) ?? '', /Zerodha MCX orders are not supported/);
+  assert.match(mcxShapeError('kotak', 'futures', false, 1) ?? '', /not supported/, 'a future without an expiry');
+  assert.match(mcxShapeError('kotak', 'futures', true, 2) ?? '', /not supported/);
+  assert.equal(mcxShapeError('dhan', 'options', true, 2), null);
+  assert.match(kotakMcxFutureError('CRUDEOILM19NOV26FUT', 10, null) ?? '', /No barrels-per-lot is configured/);
 });

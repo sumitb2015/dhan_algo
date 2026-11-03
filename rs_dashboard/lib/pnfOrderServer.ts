@@ -6,7 +6,7 @@ import { zerodhaMcxFutureError } from '@/lib/zerodhaOrderRules';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { derivativeTick } from '@/lib/derivativeTick';
 import type { Target } from '@/lib/pnfTarget';
-import type { PnfBroker } from '@/lib/pnfOrderLogic';
+import { kotakMcxFutureError, mcxShapeError, type PnfBroker } from '@/lib/pnfOrderLogic';
 
 // Server-side contract resolution for the P&F trade bar. The browser names the chart's target; every security id,
 // trading symbol, segment and lot size used for an order is looked up here (Dhan's master_list.csv, then the broker's
@@ -82,7 +82,7 @@ export async function brokerLegs(broker: PnfBroker, t: Target, legs: PnfLeg[]): 
   const name = broker === 'kotak' ? 'Kotak' : 'Zerodha';
   // Zerodha MCX FUTURES (CRUDEOILM): Kite takes the order in LOTS (its dump reads lot_size 1) - the same unit as Dhan's MCX leg.
   // Only that one shape is allowed, on the exact expiry Kite lists, and a contract whose lot size is not the expected 1 is refused
-  // rather than guessed. UNCONFIRMED against live fills (the lot-size check cannot prove the unit): zerodhaMcxCapError caps opening orders at 1 lot.
+  // rather than guessed. UNCONFIRMED against live fills (the lot-size check cannot prove the unit): mcxUnconfirmedCapError caps opening orders at 1 lot.
   if (mcx && broker === 'zerodha' && t.kind === 'futures' && t.expiry && legs.length === 1 && legs[0].segment === 'MCX_COMM') {
     const c = await zerodhaFutureContract(t.symbol, t.expiry);
     if (!c) return `Zerodha does not list the ${t.symbol} future expiring ${t.expiry}`;
@@ -91,8 +91,12 @@ export async function brokerLegs(broker: PnfBroker, t: Target, legs: PnfLeg[]): 
     return [{ ...legs[0], key: c.tradingsymbol, exchange: 'MCX', lotUnits: c.lotSize, capLot: c.lotSize, tick: c.tick ?? legs[0].tick }];
   }
   // Kotak / Zerodha MCX quantity units are not confirmed against live fills (docs/PRICE_LADDER_GUIDE.md).
-  if (mcx) return `${name} MCX orders are not supported from this page - use Dhan`;
+  // Kotak MCX FUTURES (CRUDEOILM): Kotak's `qt` is absolute BARRELS (10 per lot) while Dhan's leg is in lots, so the Kotak lot size must
+  // equal the leg's barrels-per-lot (`unitsPerLot`, 10) - a real cross-check, unlike Zerodha's. Same shape as the Price Ladder. UNCONFIRMED
+  // against live fills. MCX options (and anything else on MCX) stay refused.
+  if (mcx) { const shape = mcxShapeError(broker, t.kind, !!t.expiry, legs.length); if (shape) return shape; }
   const out: PnfBrokerLeg[] = [];
+  const checkedMcx = new Set<PnfBrokerLeg>();     // Kotak MCX legs whose barrels-per-lot was cross-checked above
   for (const l of legs) {
     if (l.segment === 'NSE_EQ') {
       if (broker === 'kotak') {
@@ -108,7 +112,12 @@ export async function brokerLegs(broker: PnfBroker, t: Target, legs: PnfLeg[]): 
       if (broker === 'zerodha') return 'Zerodha NSE futures are not supported from this page - use Dhan or Kotak';
       const c = await kotakFutureContract(t.symbol, t.expiry);
       if (!c || !(c.lotSize > 0)) return `Kotak does not list the ${t.symbol} future expiring ${t.expiry}`;
-      out.push({ ...l, key: c.tradingsymbol, exchange: c.segment, lotUnits: c.lotSize, capLot: c.lotSize });
+      const refused = mcx ? kotakMcxFutureError(c.tradingsymbol, c.lotSize, l.unitsPerLot) : null;
+      if (refused) return refused;
+      // Kotak's own tick for an MCX future (the order is snapped to it); Dhan's stays for NSE futures.
+      const leg: PnfBrokerLeg = { ...l, key: c.tradingsymbol, exchange: c.segment, lotUnits: c.lotSize, capLot: c.lotSize, ...(mcx && c.tick ? { tick: c.tick } : {}) };
+      if (mcx) checkedMcx.add(leg);
+      out.push(leg);
       continue;
     }
     if (t.kind === 'options' && t.expiry && t.strike && (l.side === 'CE' || l.side === 'PE')) {
@@ -123,7 +132,8 @@ export async function brokerLegs(broker: PnfBroker, t: Target, legs: PnfLeg[]): 
     return `${name} cannot trade ${l.label} from this page`;
   }
   // A broker whose lot differs from the exchange lot would size the order off a different contract: refuse.
-  const off = out.find(l => l.segment !== 'NSE_EQ' && l.lotUnits !== l.lot);
+  // (Kotak MCX counts barrels, already checked against the leg's barrels-per-lot above.)
+  const off = out.find(l => l.segment !== 'NSE_EQ' && !checkedMcx.has(l) && l.lotUnits !== l.lot);
   if (off) return `${name} lot size ${off.lotUnits} differs from the exchange lot ${off.lot} for ${off.label} - not sent`;
   return out;
 }
