@@ -190,7 +190,8 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
   };
 
   /** `barT`: the bar that triggered the exit (the reversal column's first bar), for the chart marker. */
-  const exit = async (r: AutoRow, reason: string, px: number | null, barT?: number, box?: number | null) => {
+  /** True when the row was closed (PAPER ledger close, or a REAL exit the broker placed / found already flat). */
+  const exit = async (r: AutoRow, reason: string, px: number | null, barT?: number, box?: number | null): Promise<boolean> => {
     // PAPER books the confirmed box the reversal reached; REAL (and an EOD exit, which has no box) the live price. Only an EOD
     // exit can run without a price (E5): it books the entry price then.
     const exitPx = r.mode === 'PAPER' && box != null ? box : px ?? r.entryPrice;
@@ -199,27 +200,28 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
     if (r.mode === 'PAPER') {
       const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason, exitBarT: barT, ...boxField });
       if (c.ok) onEvent({ chart, kind: 'exit', side, price: exitPx, target: r.target, mode: r.mode, lots: r.lots, text: `AUTO C${chart} [PAPER] exit (${reason}) @ ${exitPx.toFixed(2)}` });
-      return;
+      return c.ok;
     }
-    if (Date.now() < exitRetryAtRef.current) return;
+    if (Date.now() < exitRetryAtRef.current) return false;
     const reserved = await post({ op: 'beginExit', id: r.id, t: Date.now() / 1000 });
-    if (!reserved.ok) { setNote(`ledger refused the exit: ${reserved.error}`); return; }
+    if (!reserved.ok) { setNote(`ledger refused the exit: ${reserved.error}`); return false; }
     // The broker it was opened on and the units AUTO owns, never the Lots box or the page broker.
     const j = await sendOrder({ broker: r.broker, mode: 'REAL', target: r.target, exitOwn: { side, units: r.legs.map(l => l.units) } });
     if (!j || j.outcome === 'unknown' || j.outcome === 'partial') {
       await post({ op: 'markUnknown', id: r.id, note: j?.message ?? 'no reply from the order route' });
       haltNow('exit outcome unknown - check Orders/Positions, then resolve it');
-      return;
+      return false;
     }
     if (j.outcome === 'placed' || j.outcome === 'flat') {
       const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason, exitBarT: barT, ...boxField, note: j.outcome === 'flat' ? 'already flat at the broker' : undefined });
-      if (!c.ok) { haltNow(`exit sent but the ledger refused it (${c.error})`); return; }
+      if (!c.ok) { haltNow(`exit sent but the ledger refused it (${c.error})`); return false; }
       onEvent({ chart, kind: 'exit', side, price: exitPx, target: r.target, mode: r.mode, lots: r.lots, text: `AUTO C${chart} [REAL] exit (${reason}) @ ~${exitPx.toFixed(2)}${j.outcome === 'flat' ? ' - already flat at the broker' : ''}` });
-      return;
+      return true;
     }
     await post({ op: 'abortExit', id: r.id, note: j.message ?? j.error ?? 'exit refused' });
     exitRetryAtRef.current = Date.now() + EXIT_RETRY_MS;
     onEvent({ chart, kind: 'info', text: `AUTO C${chart} exit refused, retrying: ${j.message ?? j.error ?? ''}` });
+    return false;
   };
 
   // E1: the tick is rebuilt every render and called through a ref from one stable interval.
@@ -267,15 +269,15 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
   };
 
   /**
-   * Manual exit of the open row, at the live price (PAPER: the ledger close; REAL: the same reserved exit as a rule exit). It also
+   * Manual (or MTM-guard) exit of the open row, at the live price (PAPER: the ledger close; REAL: the same reserved exit as a rule exit). It also
    * switches AUTO off: otherwise a state-based rule would re-enter on the next brick. Never runs on an unresolved row.
    */
-  const exitNow = async () => {
-    if (!row || row.state !== 'open' || busyRef.current) return;
+  const exitNow = async (why = 'manual'): Promise<boolean> => {
+    if (!row || row.state !== 'open' || busyRef.current) return false;
     busyRef.current = true;
     try {
-      onDisarm('manual exit');
-      await exit(row, 'manual', price);
+      onDisarm(`${why} exit`);
+      return await exit(row, why, price);
     } finally { busyRef.current = false; }
   };
 

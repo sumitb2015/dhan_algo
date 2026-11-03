@@ -188,3 +188,28 @@ test('the ladder rows are brick edges (multiples of the box), so an order waits 
   const row = (placed[0].row ?? placed[0]) as { level?: number };
   expect(row.level).toBeCloseTo(99.9, 6);
 });
+
+test('PAPER: the MTM guard watches AUTO\'s own position - a stop-loss closes the AUTO row (reason mtm guard) and switches AUTO off', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await openFuture(page);
+  const auto = page.getByTestId('pnf-auto-1');
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect(auto).toHaveAttribute('data-armed', 'true');
+  await page.clock.setFixedTime(ist(10, 31, 5));
+  await expect.poll(() => orders.length, { timeout: 15_000 }).toBe(1);
+  await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 1L @ 100.00');
+
+  await page.getByTestId('pnf-guard-toggle').click();
+  await page.getByLabel('MTM stop-loss in rupees', { exact: true }).fill('50');
+  await page.getByRole('button', { name: 'Switch on' }).click();
+  await expect(page.getByTestId('pnf-guard-toggle')).toContainText('ON');
+  await page.waitForTimeout(2500);                                      // the guard's baseline is set on its first priced tick
+  // +1 point against the short x 65 = Rs 65 of loss, past the Rs 50 stop (the forming bar prints no brick: the rule exit stays out)
+  state.tick = { ltp: 101.05, at: ist(10, 31, 20) };
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('closed');
+  expect(state.ledger.rows[0]).toMatchObject({ reason: 'mtm guard', side: 'SELL', mode: 'PAPER' });
+  expect(state.ledger.rows[0].exitPrice).toBeCloseTo(101.05, 6);
+  expect(orders.length, 'a paper exit sends nothing').toBe(1);
+  await expect(auto).toHaveAttribute('data-armed', 'false');
+});

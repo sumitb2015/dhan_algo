@@ -26,7 +26,7 @@ import {
   EMPTY_BOOK, countUpTo, cursorBefore, firstAvailableT, nextStepT, openLots, practiceAutoArm, practiceAutoStep, practiceCancel, practiceCross, practiceCrossBars,
   practiceFill, practiceFlatten, practiceMove, practicePlace, practicePnl, randomStartT, type PracticeBook, type PracticeQuote,
 } from '@/lib/pnfReplay';
-import { paperPosition } from '@/lib/pnfLadderPosition';
+import { paperPosition, type LadderPosition } from '@/lib/pnfLadderPosition';
 import { crosshairStamp } from '@/lib/straddlePnfTimeAxis';
 import { useReplay } from './straddlePnf/useReplay';
 import ReplayBar from './straddlePnf/ReplayBar';
@@ -45,7 +45,7 @@ import { detectTriangles, type PnfTriangle } from '@/lib/pnfTriangle';
 import { isSellSignal } from '@/lib/straddlePnf';
 import type { PnfScope } from '@/lib/pnfScope';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent } from './straddlePnf/usePnfAuto';
-import { autoDaySummary, autoMarkers } from '@/lib/pnfAutoLedger';
+import { autoDaySummary, autoMarkers, rowPnl } from '@/lib/pnfAutoLedger';
 import AutoControls, { type AutoRule } from './straddlePnf/AutoControls';
 import { usePnfPositions } from './straddlePnf/usePnfPositions';
 import { usePnfGuard } from './straddlePnf/usePnfGuard';
@@ -571,6 +571,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const rc = railCharts.find(x => x.chart === c);
     if (!rc) return false;
     await resting.cancelAllFor(rc.targetKey);
+    // AUTO's own position on this chart: closed through AUTO's own exit (a PAPER row lives in the AUTO ledger, not the paper book
+    // below; a REAL one exits only the units AUTO opened). It also switches AUTO off, so a trend rule cannot re-enter at once.
+    const ar = autoOf(c).row;
+    if (ar && ar.targetKey === rc.targetKey && ar.mode === tradeMode) return ar.state === 'open' ? autoOf(c).exitNow('mtm guard') : false;
     if (tradeMode === 'PAPER') {
       const legs = paper[rc.targetKey];
       if (!legs?.some(l => l.lots !== 0) || rc.legPrices.some(p => p == null || p <= 0)) return false;      // nothing open / no price yet: retried
@@ -645,8 +649,19 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       adjustBusyRef.current[c] = false;
     }
   };
+  // The guard watches AUTO's PAPER position too: it lives in the AUTO ledger, not the trade bar's paper book. A REAL AUTO position is
+  // already in the broker's book, which `positions` reads.
+  const guardPositions: Record<string, LadderPosition | null> = { ...positions };
+  if (tradeMode === 'PAPER') {
+    for (const rc of railCharts) {
+      const r = autoLedger.rows.find(x => x.mode === 'PAPER' && x.state === 'open' && x.chart === rc.chart && x.targetKey === rc.targetKey);
+      if (r && !guardPositions[rc.targetKey]) {
+        guardPositions[rc.targetKey] = { side: r.side === 'SELL' ? 'SHORT' : 'LONG', lots: r.lots, avg: r.entryPrice, pnl: rc.price != null && rc.price > 0 ? rowPnl(r.side, r.entryPrice, rc.price, r.unitsPerPoint) : null };
+      }
+    }
+  }
   const guards = usePnfGuard({
-    charts: railCharts.map(c => ({ chart: c.chart, targetKey: c.targetKey })), positions, positionsLoaded: positionsInfo.loaded,
+    charts: railCharts.map(c => ({ chart: c.chart, targetKey: c.targetKey })), positions: guardPositions, positionsLoaded: positionsInfo.loaded,
     scope: `${broker}:${tradeMode}`, leaderRef, exitChart, storeKey: prefKey(chart, 'straddle-pnf-guard-'),
     onEvent: (c, kind, text) => { if (kind === 'warn') { toast.warning(text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); } else toast(text); void c; },
   });
