@@ -543,6 +543,7 @@ test('MTM guard (PAPER): a stop-loss on the chart P&L squares the position off a
   await far.el.dispatchEvent('pointerdown', { button: 0 });
   await expect.poll(() => state.ledger.rows.filter(r => r.state === 'working').length).toBe(1);
   await page.getByTestId('pnf-guard-toggle').click();
+  await page.getByRole('button', { name: '₹ Rupees' }).click();            // the guard opens in Boxes (default 10 / 10): these levels are rupees
   await page.getByLabel('MTM stop-loss in rupees', { exact: true }).fill('50');
   await page.getByRole('button', { name: 'Switch on' }).click();
   await expect(page.getByTestId('pnf-guard-toggle')).toContainText('ON');
@@ -576,6 +577,7 @@ test('MTM guard (PAPER): switched on while flat, it measures from the position t
   const { state } = await install(page);
   await openFuture(page);
   await page.getByTestId('pnf-guard-toggle').click();
+  await page.getByRole('button', { name: '₹ Rupees' }).click();            // the guard opens in Boxes (default 10 / 10): these levels are rupees
   await page.getByLabel('MTM stop-loss in rupees', { exact: true }).fill('500');
   await page.getByRole('button', { name: 'Switch on' }).click();
   await expect(page.getByTestId('pnf-guard-toggle')).toContainText('ON');
