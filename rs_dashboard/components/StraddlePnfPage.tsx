@@ -12,6 +12,7 @@ import { effectiveInterval, hasLongIntervals, intervalLabel } from '@/lib/stradd
 import SettingsControls, { SmaPeriodInput, SupertrendControls } from './straddlePnf/SettingsControls';
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import BrokerBooks from './straddlePnf/BrokerBooks';
+import HeaderClock from './straddlePnf/HeaderClock';
 import { buildPaperTrades } from '@/lib/pnfPaperBook';
 import { rupeesPerBox } from '@/lib/pnfGuardBoxes';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
@@ -1010,6 +1011,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
           {/* Nifty and India VIX vs the previous close: market context, beside the data date on a wide screen. */}
           <div className="ml-auto flex items-center gap-2 shrink-0">
             {wideHeader && <><HeaderIndexChips /><span className="w-px h-5 bg-zinc-800 shrink-0" /></>}
+            <HeaderClock />
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <DataChip date={activeFeed.loaded?.dataDate} lastSession={Boolean(activeFeed.loaded?.dataDate) && activeFeed.loaded?.dataDate !== today} />
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <NavBar />
