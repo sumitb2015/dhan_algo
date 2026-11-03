@@ -17,6 +17,9 @@ import { scopeQuery, type PnfScope } from '@/lib/pnfScope';
 // in the ledger before they are sent and an unknown outcome is never resent: the chart halts and the user resolves it.
 
 const TICK_MS = 1_000;
+/** A gap this long between two ticks means the browser slowed the tab's timers. */
+const LAG_WARN_MS = 8_000;
+const LAG_WARN_EVERY_MS = 5 * 60_000;
 const LEDGER_POLL_MS = 3_000;
 const MAX_REJECTS = 3;
 /** A refused REAL exit is retried this often (the order route also holds a close cooldown). */
@@ -86,6 +89,8 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
   const [note, setNote] = useState<string>('');
   const [halt, setHalt] = useState<string | null>(null);
   const [info, setInfo] = useState<{ key: string; legs: LegInfo[]; unsupported: string | null } | null>(null);
+  const onEventRef = useRef(onEvent);
+  useEffect(() => { onEventRef.current = onEvent; });
   const busyRef = useRef(false);
   const haltRef = useRef<string | null>(null);
   const rejectsRef = useRef(0);
@@ -270,10 +275,27 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
       try { await enter(d.side, d.signal.t, price, d.boxPrice, d.signal.stop); } finally { busyRef.current = false; }
     };
   });
+  // A hidden tab has its timers slowed by the browser (about once a minute after a few minutes), and AUTO's entries, rule exits and the
+  // page's guard all run on this one timer. A gap far beyond the tick is said out loud (at most every 5 minutes), so a slowed tab is not
+  // mistaken for a working one; a REAL position still has the dashboard server's guard and end-of-day exit behind it.
+  const lastTickRef = useRef(0);
+  const lastLagWarnRef = useRef(0);
+  const armedOrOpenRef = useRef(false);
+  useEffect(() => { armedOrOpenRef.current = arm.on || !!row; });
   useEffect(() => {
-    const id = setInterval(() => { void tickRef.current(); }, TICK_MS);
+    lastTickRef.current = Date.now();
+    const id = setInterval(() => {
+      const now = Date.now();
+      const gap = now - lastTickRef.current;
+      lastTickRef.current = now;
+      if (leaderRef.current && armedOrOpenRef.current && gap > LAG_WARN_MS && now - lastLagWarnRef.current > LAG_WARN_EVERY_MS) {
+        lastLagWarnRef.current = now;
+        onEventRef.current({ chart, kind: 'info', text: `AUTO C${chart}: this tab's timers were slowed (${Math.round(gap / 1000)} s since the last check) - entries and exits ran late. Keep the tab in view; the server guard still protects a REAL position.` });
+      }
+      void tickRef.current();
+    }, TICK_MS);
     return () => clearInterval(id);
-  }, []);
+  }, [chart, leaderRef]);
 
   const resolve = (as: 'open' | 'flat') => {
     if (!row) return;

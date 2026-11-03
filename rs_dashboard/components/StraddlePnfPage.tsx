@@ -14,6 +14,7 @@ import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import BrokerBooks from './straddlePnf/BrokerBooks';
 import HeaderClock from './straddlePnf/HeaderClock';
 import { buildPaperTrades } from '@/lib/pnfPaperBook';
+import { decodeMarkers, encodeMarkers } from '@/lib/pnfMarkerStore';
 import { rupeesPerBox } from '@/lib/pnfGuardBoxes';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
 import { modelForRule, ruleText } from '@/lib/pnfAutoRule';
@@ -198,13 +199,7 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
 }
 
 const readMarkers = (prefix: string, key: string): PnfExecutionMarker[] => {
-  try {
-    const raw = sessionStorage.getItem(`${prefix}${key}`);
-    const parsed = raw ? JSON.parse(raw) as PnfExecutionMarker[] : [];
-    // A marker carries only its time and price: each chart finds its own column from its own box size. Older ones drop theirs.
-    // AUTO markers once saved here (ids `auto-…`, placed at the decision time) are now drawn from the ledger instead.
-    return Array.isArray(parsed) ? parsed.filter(m => !String(m.id).startsWith('auto-')).map(m => ({ ...m, col: undefined })) : [];
-  } catch { return []; }
+  try { return decodeMarkers(localStorage.getItem(`${prefix}${key}`), istToday()); } catch { return []; }
 };
 
 function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
@@ -419,7 +414,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const saveMarkers = useCallback((key: string, update: (prev: PnfExecutionMarker[]) => PnfExecutionMarker[]) => {
     setMarkers(prev => {
       const list = update(prev[key] ?? readMarkers(markersPrefix, key));
-      try { sessionStorage.setItem(`${markersPrefix}${key}`, JSON.stringify(list)); } catch { /* ignore */ }
+      try { localStorage.setItem(`${markersPrefix}${key}`, encodeMarkers(istToday(), list)); } catch { /* ignore */ }
       return { ...prev, [key]: list };
     });
   }, [markersPrefix]);
@@ -428,8 +423,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   useEffect(() => {
     const out: Record<string, PnfExecutionMarker[]> = {};
     try {
-      for (let i = 0; i < sessionStorage.length; i++) {
-        const k = sessionStorage.key(i);
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
         if (k?.startsWith(markersPrefix)) out[k.slice(markersPrefix.length)] = readMarkers(markersPrefix, k.slice(markersPrefix.length));
       }
     } catch { /* storage blocked: only the open charts' markers are listed */ }
@@ -846,7 +841,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       for (const [key, list] of Object.entries(prev)) {
         if (!list.some(m => m.id === id)) continue;
         const updated = list.map(m => (m.id === id ? { ...m, price, estimate: false } : m));
-        try { sessionStorage.setItem(`${markersPrefix}${key}`, JSON.stringify(updated)); } catch { /* ignore */ }
+        try { localStorage.setItem(`${markersPrefix}${key}`, encodeMarkers(istToday(), updated)); } catch { /* ignore */ }
         next = { ...next, [key]: updated };
       }
       return next;

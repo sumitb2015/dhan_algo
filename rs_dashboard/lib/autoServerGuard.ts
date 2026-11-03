@@ -5,6 +5,7 @@
 import { evalGuard, type LadderGuard } from './priceLadderGuard.ts';
 import { effectiveGuard, noteBoxes } from './pnfGuardBoxes.ts';
 import { rowPnl, type AutoRow } from './pnfAutoLedger.ts';
+import { planOwnExit, type BookRow, type PnfBroker } from './pnfOrderLogic.ts';
 
 /** The guard levels the page syncs to the server (the runtime fields - peak, floor, tripped - are the server's own). */
 export type GuardLevels = Pick<LadderGuard, 'target' | 'stop' | 'trailBy' | 'lockAt' | 'lockKeep' | 'lockStepEvery' | 'lockStepKeep' | 'targetBoxes' | 'stopBoxes'>;
@@ -61,3 +62,14 @@ export function chartPrice(ids: [string, string][], book: Record<string, { ltp: 
 
 /** Runtime keys are per scope + chart + row, so switching a chart's guard off can drop exactly its runtime. */
 export const runtimeKey = (scope: string, chart: number, rowId: string) => `${scope}:${chart}:${rowId}`;
+
+/**
+ * How many units of an open REAL row the broker still shows, summed over its legs (an exit closes at most this much: the row's own
+ * units, capped by the intraday book row in its direction). null when a leg has no broker key, i.e. it cannot be told. 0 means the broker
+ * is flat for this row: the position was closed outside AUTO (by hand, a square-off, the broker).
+ */
+export function ownHeldQty(row: Pick<AutoRow, 'side' | 'legs'>, book: BookRow[], broker: PnfBroker): number | null {
+  if (row.legs.length === 0 || row.legs.some(l => !l.key)) return null;
+  const closing = row.side === 'BUY' ? 'SELL' : 'BUY';
+  return row.legs.reduce((n, l) => n + planOwnExit(l.key as string, book, closing, l.units, broker).qty, 0);
+}

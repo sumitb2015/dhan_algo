@@ -126,6 +126,8 @@ sit without a stop. To cover that, the dashboard server runs an **exit-only watc
 - A trip is an ordinary ledger exit: it takes `beginExit`, sends the same own-units exit as the page, then records `close` /
   `markUnknown`. A rejected exit is retried every 10 s; after 5 failures in a row it stands down for a minute and says so. A ledger write that
   fails after the order went out is queued and retried. A row it closed shows `server guard: <rule>`; an open tab disarms AUTO on seeing it.
+- Every 30 s it checks each open REAL row (at least 90 s old) against the broker's book; a row the broker shows flat on two passes in a row is
+  closed as `flat at broker` (no order, no P&L booked): it was closed by hand, by a square-off or by the broker.
 - It also squares **every** open REAL AUTO row off at the end-of-day time, guard on or off (no price needed: it books the entry price if none is available, and says so). After the market's close it never sends orders, it only reports a row still open. With the guard OFF there is **no** server stop-loss.
 - It places **no entries**: a closed tab never trades, it only protects.
 
@@ -138,14 +140,16 @@ Only one tab per browser profile leads (Web Locks). A second browser or machine 
   button.
 - **Books (bottom strip).** *AUTO* tab: every AUTO row with entry, exit, P&L and state. *Trade Book* tab: a **Paper trades** section above the
   broker's trades, listing every simulated fill of the day (trade bar, rail, guard, AUTO entries and exits, newest first). Trade-bar paper
-  fills are kept in the browser session; AUTO ones come from the server ledger and survive a reload.
+  fills are kept in this browser for the day (localStorage, stamped with the IST date; another day's list is ignored); AUTO ones come from the
+  server ledger and survive a reload on any browser.
 - **Ledger files.** `debug/renko_auto_state.json` (Renko) and `debug/pnf_auto_state.json` (the P&F page). The two pages never share a row.
 
 ## 9. Known limits
 
 - **Not validated.** No backtest or replay. PAPER is more optimistic than REAL.
-- **The tab is the strategy.** The rules, entries and the opposite-brick exit need an open, leader tab (browsers may also slow the timers of a
-  hidden tab). Use the server watcher's guard as the backstop, and keep the guard ON.
+- **The tab is the strategy.** The rules, entries and the opposite-brick exit need an open, leader tab (browsers slow the timers of a
+  hidden tab). The page now says so out loud when a gap of 8 s+ opens between two checks while AUTO is armed or holds a position (at most
+  every 5 minutes). Use the server watcher's guard as the backstop, and keep the guard ON.
 - **Unconfirmed broker unit.** Zerodha MCX futures: no cap, but confirm with one 1-lot REAL trade and check Zerodha's Positions shows 1 lot (it needs
   the machine's IP added in the Kite developer console first). Kotak is confirmed (10 barrels per lot).
 - **Server watcher** has had no live test. Test it once: arm one REAL 1-lot trade with a tight rupee stop, close the tab, and confirm the

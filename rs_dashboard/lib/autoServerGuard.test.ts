@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chartPrice, guards, runtimeKey, stepRow, QUOTE_MAX_AGE_MS, type ServerGuardCfg } from './autoServerGuard.ts';
+import { chartPrice, guards, ownHeldQty, runtimeKey, stepRow, QUOTE_MAX_AGE_MS, type ServerGuardCfg } from './autoServerGuard.ts';
 import type { AutoRow } from './pnfAutoLedger.ts';
 
 const NOW = 1_000_000_000_000;
@@ -74,4 +74,17 @@ test('box levels with no box size are reported as unreadable (the watcher says s
 
 test('runtime keys are scoped to a chart so switching it off drops only its own', () => {
   assert.equal(runtimeKey('renko', 1, 'r9'), 'renko:1:r9');
+});
+
+test('ownHeldQty: what the broker still shows of a row (0 = closed outside AUTO), capped at the row\'s own units; unknown keys cannot be told', () => {
+  const r = row({ side: 'BUY', legs: [{ label: 'CRUDEOILM NOV FUT', key: 'CRUDEOILM19NOV26FUT', units: 20 }] });
+  const mis = (net: number) => [{ key: 'CRUDEOILM19NOV26FUT', product: 'MIS', net }];
+  assert.equal(ownHeldQty(r, mis(0), 'kotak'), 0, 'the broker is flat: the position was closed by hand / a square-off');
+  assert.equal(ownHeldQty(r, [], 'kotak'), 0, 'no row at all is flat too');
+  assert.equal(ownHeldQty(r, mis(20), 'kotak'), 20);
+  assert.equal(ownHeldQty(r, mis(50), 'kotak'), 20, 'a bigger net (a manual lot on top) is capped at the row\'s own 20');
+  assert.equal(ownHeldQty(r, mis(-20), 'kotak'), 0, 'a net in the other direction is not this row\'s');
+  assert.equal(ownHeldQty(r, [{ key: 'CRUDEOILM19NOV26FUT', product: 'NRML', net: 20 }], 'kotak'), 0, 'another product is not this row\'s');
+  assert.equal(ownHeldQty(row({ legs: [{ label: 'x', key: null, units: 20 }] }), mis(20), 'kotak'), null);
+  assert.equal(ownHeldQty(row({ legs: [] }), mis(20), 'kotak'), null);
 });

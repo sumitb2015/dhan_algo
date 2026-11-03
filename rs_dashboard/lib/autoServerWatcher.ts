@@ -11,7 +11,7 @@ import { brokerPositionRows, brokerSessionOk } from '@/lib/priceLadderServer';
 import { CloseGuard } from '@/lib/priceLadderClose';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { targetKey } from '@/lib/pnfTarget';
-import { chartPrice, guards, runtimeKey, stepRow, type RowRuntime, type ServerGuardCfg } from '@/lib/autoServerGuard';
+import { chartPrice, guards, ownHeldQty, runtimeKey, stepRow, type RowRuntime, type ServerGuardCfg } from '@/lib/autoServerGuard';
 import { autoWindow, rowMarket } from '@/lib/pnfAuto';
 import { istMinuteOfDay, sessionWindow } from '@/lib/straddlePnfLive';
 import { istDateIso } from '@/lib/nseHolidays';
@@ -189,10 +189,8 @@ async function reconcileFlat(): Promise<void> {
     const book = await brokerPositionRows(broker);
     if (!book) continue;                                           // an unreadable book is not a flat one
     for (const { scope, row } of items) {
-      const side = row.side === 'BUY' ? 'SELL' : 'BUY';
-      const held = row.legs.reduce((n, l, i) => n + (l.key ? planOwnExit(l.key, book, side, row.legs[i].units, broker).qty : 0), 0);
-      const unkeyed = row.legs.some(l => !l.key);
-      if (held > 0 || unkeyed) { flatPasses.delete(row.id); continue; }
+      const held = ownHeldQty(row, book, broker);
+      if (held !== 0) { flatPasses.delete(row.id); continue; }        // still held, or a leg's broker key is unknown: never reconciled
       const seen = (flatPasses.get(row.id) ?? 0) + 1;
       flatPasses.set(row.id, seen);
       if (seen < 2) continue;
