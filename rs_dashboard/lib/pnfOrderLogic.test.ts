@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MAX_PNF_LOTS, MAX_PNF_SHARES, FLAT_LEG, applyPaperFill, brokerProduct, describePosition, needsRollback, orderQty,
-  paperPnl, parsePnfOrder, planLegClose, planLegCloseKeeping, sendOutcome, mcxUnconfirmedCapError, MCX_UNCONFIRMED_MAX_LOTS, kotakMcxFutureError, mcxShapeError, type LegResult,
+  paperPnl, parsePnfOrder, planLegClose, planLegCloseKeeping, sendOutcome, kotakMcxFutureError, mcxShapeError, type LegResult,
 } from './pnfOrderLogic.ts';
 
 const fut = { kind: 'futures', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24' };
@@ -169,15 +169,6 @@ test('a close keeps the other page\'s AUTO quantity: only the rest of the intrad
   // a reservation the other way (an AUTO long inside a net short) cannot be in this row: the whole row closes
   assert.deepEqual(planLegCloseKeeping('F', [{ key: 'F', product: 'INTRADAY', net: -65 }], 65, 'dhan'), [{ side: 'BUY', qty: 65, product: 'INTRADAY' }]);
   assert.deepEqual(planLegCloseKeeping('F', rows, 0, 'dhan'), planLegClose('F', rows));
-});
-
-test('Zerodha MCX cap: only Zerodha + MCX + more than the cap is refused; the other brokers / segments are untouched', () => {
-  assert.equal(MCX_UNCONFIRMED_MAX_LOTS, 1);
-  assert.equal(mcxUnconfirmedCapError('zerodha', true, 1), null);
-  assert.match(mcxUnconfirmedCapError('zerodha', true, 2) ?? '', /capped at 1 lot/);
-  assert.equal(mcxUnconfirmedCapError('dhan', true, 5), null);
-  assert.equal(mcxUnconfirmedCapError('kotak', true, 5), null, 'Kotak was confirmed live on 2026-11-03: no unit cap');
-  assert.equal(mcxUnconfirmedCapError('zerodha', false, 5), null, 'NSE on Zerodha is not capped here');
 });
 
 test('Kotak MCX future: its lot size must equal the leg\'s barrels per lot (Kotak orders in barrels), unknown multiplier refused', () => {

@@ -82,7 +82,7 @@ export async function brokerLegs(broker: PnfBroker, t: Target, legs: PnfLeg[]): 
   const name = broker === 'kotak' ? 'Kotak' : 'Zerodha';
   // Zerodha MCX FUTURES (CRUDEOILM): Kite takes the order in LOTS (its dump reads lot_size 1) - the same unit as Dhan's MCX leg.
   // Only that one shape is allowed, on the exact expiry Kite lists, and a contract whose lot size is not the expected 1 is refused
-  // rather than guessed. UNCONFIRMED against live fills for ZERODHA (the lot-size check cannot prove the unit): mcxUnconfirmedCapError caps its opening orders at 1 lot. Kotak is confirmed (live 1-lot round trip 2026-11-03).
+  // rather than guessed. UNCONFIRMED against live fills (a test order was refused by Kite: no static IP is whitelisted for the app). A wrong unit cannot over-size an order: if Kite counted barrels, quantity 1 is below the 10-barrel lot and is rejected; a quantity of N lots is what is sent.
   if (mcx && broker === 'zerodha' && t.kind === 'futures' && t.expiry && legs.length === 1 && legs[0].segment === 'MCX_COMM') {
     const c = await zerodhaFutureContract(t.symbol, t.expiry);
     if (!c) return `Zerodha does not list the ${t.symbol} future expiring ${t.expiry}`;

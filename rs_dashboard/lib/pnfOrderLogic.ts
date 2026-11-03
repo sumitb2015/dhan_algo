@@ -68,19 +68,6 @@ export function checkRestingPrices(side: PnfAction, orderType: 'LIMIT' | 'SL', p
 
 export const lotCap = (t: Target) => (t.kind === 'equity' ? MAX_PNF_SHARES : MAX_PNF_LOTS);
 
-/**
- * Lots per OPENING order on ZERODHA MCX futures until a live fill confirms its quantity unit (see brokerLegs). Exits are not capped.
- * Kotak was confirmed on 2026-11-03 (a live 1-lot round trip: Kotak counts barrels, 10 per lot), so it has no unit cap; the page's own
- * ceilings (MAX_PNF_LOTS and Kotak's per-source lot cap) still apply to every broker.
- */
-export const MCX_UNCONFIRMED_MAX_LOTS = 1;
-
-/** Why a Zerodha MCX opening order of `lots` is refused, or null. One rule for the order route (market, resting, modify) and for arming AUTO. */
-export function mcxUnconfirmedCapError(broker: PnfBroker, isMcx: boolean, lots: number): string | null {
-  if (broker !== 'zerodha' || !isMcx || lots <= MCX_UNCONFIRMED_MAX_LOTS) return null;
-  return `Zerodha MCX futures are capped at ${MCX_UNCONFIRMED_MAX_LOTS} lot per order until a live fill confirms the quantity unit - use ${MCX_UNCONFIRMED_MAX_LOTS} lot`;
-}
-
 /** The only MCX shape Kotak / Zerodha may trade from this page: one future leg on a named expiry. Anything else (MCX options, a pair) is refused. Pure. */
 export function mcxShapeError(broker: PnfBroker, kind: string, hasExpiry: boolean, legCount: number): string | null {
   if (broker === 'dhan' || (kind === 'futures' && hasExpiry && legCount === 1)) return null;

@@ -56,7 +56,7 @@ import { usePnfGuard } from './straddlePnf/usePnfGuard';
 import PnfOrderStyle, { DEFAULT_STYLE, type StyleState } from './straddlePnf/PnfOrderStyle';
 import { cleanBracketSpec, planBracketChildren, type BracketSpec } from '@/lib/pnfBracket';
 import { useChartLegs, usePnfResting, type RailChart, type RestingEvent } from './straddlePnf/usePnfResting';
-import { applyPaperFill, FLAT_LEG, mcxUnconfirmedCapError, type PaperLeg, type PnfProduct } from '@/lib/pnfOrderLogic';
+import { applyPaperFill, FLAT_LEG, type PaperLeg, type PnfProduct } from '@/lib/pnfOrderLogic';
 import { needsResolve, type RestingRow } from '@/lib/pnfRestingLedger';
 
 // The same page draws Renko at /renko (`chart="renko"`): bricks instead of P&F columns (lib/renko.ts), N-brick confirmation
@@ -982,7 +982,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
                       rule={renko ? ruleText(autoRule[c], (c === 2 ? settings2 : settings).reversal) : undefined}
                       disabledReason={target.kind === 'index' ? 'No AUTO on an index: chart its future or an option'
                         : replay.active ? 'Bar replay is open: close it to arm live AUTO'
-                        : tradeMode === 'REAL' ? mcxUnconfirmedCapError(broker, feed.market === 'MCX' && target.kind === 'futures', autoLots[c]) : null} />
+                        : null} />
       ),
     };
   };
