@@ -46,8 +46,8 @@ the order out) is offered for the same resolution.
   instrument and box settings are locked, and chart 2 cannot be hidden.
 
 ## Known gaps
-- No backtest / replay. PAPER P&L is box-to-box; REAL P&L is at **decision prices** (the chart price at the decision), not
-  broker fills, so on a small box REAL can differ from PAPER by the boxes the price moved before the order.
+- No backtest / replay. PAPER P&L is box-to-box; REAL rows start at **decision prices** (the chart price at the decision) and are then re-priced to the broker's
+  average traded price once their orders are final (`fillPrice` op, 2026-11-04); until then, or if an order never reports final, the decision price stands.
 - Two charts on the same contract net at the broker; each exits only its own units, capped by what the broker still shows.
 - The whole-position SQUARE OFF in the trade bar closes AUTO's units too; AUTO then finds the leg flat and books it closed.
 

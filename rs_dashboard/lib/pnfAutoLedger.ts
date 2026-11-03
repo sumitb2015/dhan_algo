@@ -44,6 +44,17 @@ export interface AutoRow {
   entryPrice: number;
   /** The confirmed box the signal reached: where the chart marker sits (REAL books the live price, this is still the box). */
   entryBox?: number;
+  /**
+   * REAL fills. `entryPrice` / `exitPrice` start as the chart's price at the DECISION; once the broker reports the orders final, the
+   * `fillPrice` op replaces them with the broker's average traded price (summed over a straddle's legs), keeps the decision price in
+   * `entryDecision` / `exitDecision`, and recomputes `pnl`. The order ids are what lets any open tab do that, after a reload too.
+   */
+  entryOrderIds?: string[];
+  exitOrderIds?: string[];
+  entryFilled?: boolean;
+  exitFilled?: boolean;
+  entryDecision?: number;
+  exitDecision?: number;
   state: AutoRowState;
   exitT?: number;
   /** Time of the bar that triggered the exit (the reversal column's first bar), for the chart marker; absent on older rows. */
@@ -73,17 +84,23 @@ export const rowPnl = (side: 'BUY' | 'SELL', entry: number, exit: number, unitsP
 
 export type AutoOp =
   | { op: 'open'; row: Omit<AutoRow, 'state' | 'targetKey'> & { state?: 'open' | 'entering' } }
-  | { op: 'confirmEntry'; id: string; legs: AutoLeg[] }
+  | { op: 'confirmEntry'; id: string; legs: AutoLeg[]; orderIds?: string[] }
   | { op: 'voidEntry'; id: string; t: number; note: string }
   | { op: 'beginExit'; id: string; t: number }
   | { op: 'abortExit'; id: string; note: string }
   | { op: 'markUnknown'; id: string; note: string }
-  | { op: 'close'; id: string; exitT: number; exitPrice: number; reason: string; note?: string; exitBarT?: number; exitBox?: number }
+  | { op: 'close'; id: string; exitT: number; exitPrice: number; reason: string; note?: string; exitBarT?: number; exitBox?: number; orderIds?: string[] }
+  | { op: 'fillPrice'; id: string; which: 'entry' | 'exit'; price: number }
   | { op: 'resolve'; id: string; as: 'open' | 'flat'; exitPrice?: number; t: number }
   | { op: 'log'; chart: 1 | 2; t: number; text: string }
   | { op: 'resetPaper' };
 
 const finite = (n: unknown) => typeof n === 'number' && Number.isFinite(n);
+/** The order ids of an op: non-empty strings only, at most 8; undefined when none. */
+const cleanIds = (v: unknown): string[] | undefined => {
+  const ids = Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.length > 0 && x.length <= 40).slice(0, 8) : [];
+  return ids.length ? ids : undefined;
+};
 
 export function parseLedger(raw: unknown): AutoLedger {
   if (!raw || typeof raw !== 'object') return EMPTY_LEDGER;
@@ -130,7 +147,7 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       const rows = [...led.rows];
       if (op.op === 'confirmEntry') {
         if (!Array.isArray(op.legs) || !op.legs.length || !op.legs.every(l => Number.isInteger(l.units) && l.units > 0)) return { ok: false, status: 400, error: 'Invalid legs' };
-        rows[i] = { ...r, state: 'open', legs: op.legs };
+        rows[i] = { ...r, state: 'open', legs: op.legs, ...(cleanIds(op.orderIds) ? { entryOrderIds: cleanIds(op.orderIds) } : {}) };
       } else if (op.op === 'voidEntry') rows[i] = { ...r, state: 'closed', exitT: op.t, exitPrice: r.entryPrice, reason: 'refused', pnl: 0, note: op.note };
       else if (op.op === 'beginExit') rows[i] = { ...r, state: 'exiting', pendingSince: finite(op.t) ? op.t : r.entryT };
       else if (op.op === 'abortExit') rows[i] = { ...r, state: 'open', note: op.note };
@@ -148,7 +165,28 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       rows[i] = {
         ...r, state: 'closed', exitT: op.exitT, exitPrice: op.exitPrice, reason: op.reason, pnl: rowPnl(r.side, r.entryPrice, op.exitPrice, r.unitsPerPoint),
         note: op.note ?? r.note, ...(finite(op.exitBarT) ? { exitBarT: op.exitBarT } : {}), ...(finite(op.exitBox) ? { exitBox: op.exitBox } : {}),
+        ...(cleanIds(op.orderIds) ? { exitOrderIds: cleanIds(op.orderIds) } : {}),
       };
+      return bump(rows);
+    }
+    case 'fillPrice': {
+      // The broker's average traded price replaces a REAL row's decision price (idempotent: a price already filled stays).
+      const i = find(op.id);
+      if (i < 0) return { ok: false, status: 404, error: 'No such row' };
+      const r = led.rows[i];
+      if (r.mode !== 'REAL') return { ok: false, status: 409, error: 'Only a REAL row has broker fills' };
+      if (!finite(op.price) || !(op.price > 0)) return { ok: false, status: 400, error: 'Invalid fill price' };
+      const rows = [...led.rows];
+      if (op.which === 'entry') {
+        if (r.state === 'entering' || r.state === 'unknownEntry') return { ok: false, status: 409, error: `Row is ${r.state}` };
+        if (r.entryFilled) return { ok: true, ledger: led };
+        const next = { ...r, entryDecision: r.entryDecision ?? r.entryPrice, entryPrice: op.price, entryFilled: true };
+        rows[i] = r.state === 'closed' && r.exitPrice !== undefined ? { ...next, pnl: rowPnl(r.side, op.price, r.exitPrice, r.unitsPerPoint) } : next;
+      } else {
+        if (r.state !== 'closed' || r.exitPrice === undefined) return { ok: false, status: 409, error: `Row is ${r.state}` };
+        if (r.exitFilled) return { ok: true, ledger: led };
+        rows[i] = { ...r, exitDecision: r.exitDecision ?? r.exitPrice, exitPrice: op.price, exitFilled: true, pnl: rowPnl(r.side, r.entryPrice, op.price, r.unitsPerPoint) };
+      }
       return bump(rows);
     }
     case 'resolve': {

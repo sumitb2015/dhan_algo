@@ -64,8 +64,9 @@ Exits keep running for an open position even when AUTO is switched off.
 
 ## 5. Orders and brokers
 
-- **PAPER** sends nothing and books at the **brick edge** (the brick's close). **REAL** books the **live price** at the decision, an
-  estimate of the fill, so on a minute that prints several bricks REAL is worse than PAPER by the boxes moved.
+- **PAPER** sends nothing and books at the **brick edge** (the brick's close). **REAL** books the **live price** at the decision first, then **replaces it with the broker's average traded price** once the orders are final
+  (summed over a straddle's legs; the decision price is kept on the row as `entryDecision` / `exitDecision`) and recomputes the P&L. On a minute that prints
+  several bricks REAL is therefore worse than PAPER by the boxes the price moved before the order filled.
 - **Brokers.** Dhan, Kotak and Zerodha can trade CRUDEOILM futures from this page. Kotak orders in barrels (10 per lot), Dhan and Zerodha in
   lots. **There is no MCX unit cap.** Kotak is confirmed (a live 1-lot round trip on 2026-11-03: 10 barrels = 1 lot). Zerodha MCX is **not yet confirmed by a live fill** (Kite refused a test order from this machine: no static IP is whitelisted for the app), but a wrong unit cannot over-size an order. The page's own ceiling of 20 lots and Kotak's per-source lot cap (20) still apply. MCX options and NSE
   futures on Zerodha are refused. Prices always come from Dhan.
@@ -154,7 +155,9 @@ Only one tab per browser profile leads (Web Locks). A second browser or machine 
   the machine's IP added in the Kite developer console first). Kotak is confirmed (10 barrels per lot).
 - **Server watcher** has had no live test. Test it once: arm one REAL 1-lot trade with a tight rupee stop, close the tab, and confirm the
   ledger shows `server guard: ...` and the position is flat at the broker.
-- **REAL P&L** is at decision prices, not broker fills.
+- **REAL fills** are read back from the broker after an order is final (Dhan, Kotak and Zerodha order books). Until then, or if an order never reports final
+  (a partial fill, a rate limit), the row keeps its decision price and is retried a minute later; a trade made while no tab is open is settled by the next
+  tab you open. A Zerodha order split into slices is priced from its first slice only.
 - **Two charts on one contract** net at the broker; each exits only its own units.
 - **A whole-position SQUARE OFF** in the trade bar closes AUTO's units too; AUTO then finds the leg flat and books it closed.
 

@@ -140,7 +140,8 @@ async function exitRow(scope: PnfScope, row: AutoRow, reason: string, price: num
     const outcome = sendOutcome(results);
     if (outcome === 'placed' || outcome === 'flat') {
       attempts.delete(row.id);
-      await mustApply(scope, row.id, { op: 'close', id: row.id, exitT: t(), exitPrice: price, reason: `server guard: ${reason}`, note: outcome === 'flat' ? 'already flat at the broker' : undefined });
+      await mustApply(scope, row.id, { op: 'close', id: row.id, exitT: t(), exitPrice: price, reason: `server guard: ${reason}`, note: outcome === 'flat' ? 'already flat at the broker' : undefined,
+        orderIds: results.filter(r => r.status === 'placed' && r.orderId).map(r => String(r.orderId)) });   // a tab replaces the decision price with the fill
       await log(`server guard exited chart ${row.chart}: ${reason} @ ~${price.toFixed(2)}`);
     } else if (outcome === 'unknown' || outcome === 'partial') {
       await mustApply(scope, row.id, { op: 'markUnknown', id: row.id, note: `server guard exit: ${describe(outcome, results)}` });

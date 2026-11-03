@@ -10,6 +10,7 @@ import type { Broker } from '@/hooks/useBrokerSelector';
 import type { Market } from '@/lib/straddlePnfLive';
 import type { PanelModel } from '@/lib/straddlePnfModel';
 import { scopeQuery, type PnfScope } from '@/lib/pnfScope';
+import { fetchSliceTradedPrice } from '@/lib/tradedPriceClient';
 
 // The P&F AUTO engine for ONE chart (rules: lib/pnfAuto.ts; ledger: lib/pnfAutoLedger.ts; spec: strategies/pnf_auto/strategy.md).
 // Runs from the open page, in the leader tab only, on a stable 1 s tick. Entries need AUTO armed on this chart (armed per page
@@ -137,6 +138,41 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ledger, arm.on, arm.watermarkT]);
 
+  // REAL fills: a row's entry / exit price starts as the chart's price at the DECISION. Once the broker reports its orders final, the
+  // broker's average traded price (summed over a straddle's legs) replaces it and the P&L is recomputed (the `fillPrice` ledger op). Any
+  // leader tab does this from the order ids kept on the row, so it also happens after a reload or for an exit the server sent. An order
+  // that never reports final is left at its decision price and tried again a minute later.
+  const settlingRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    if (!leaderRef.current) return;
+    const todo: { r: AutoRow; which: 'entry' | 'exit' }[] = [];
+    for (const r of ledger.rows) {
+      if (r.chart !== chart || r.mode !== 'REAL') continue;
+      if (r.entryOrderIds?.length && !r.entryFilled && (r.state === 'open' || r.state === 'exiting' || r.state === 'closed')) todo.push({ r, which: 'entry' });
+      if (r.state === 'closed' && r.exitOrderIds?.length && !r.exitFilled) todo.push({ r, which: 'exit' });
+    }
+    for (const { r, which } of todo) {
+      const key = `${r.id}:${which}`;
+      if (Date.now() < (settlingRef.current.get(key) ?? 0)) continue;
+      settlingRef.current.set(key, Date.now() + 60_000);                       // in flight, or retried after a minute
+      void (async () => {
+        const ids = (which === 'entry' ? r.entryOrderIds : r.exitOrderIds) ?? [];
+        let total = 0;
+        for (const id of ids) {
+          const px = await fetchSliceTradedPrice(id, 'open', Math.max(1, r.legs[0]?.units ?? 1), new Map(), { broker: r.broker as Broker });
+          if (!(px !== null && px > 0)) return;                                // not final yet: left as the decision price
+          total += px;
+        }
+        if (total > 0) {
+          const res = await post({ op: 'fillPrice', id: r.id, which, price: Math.round(total * 100) / 100 });
+          if (res.ok) settlingRef.current.set(key, Number.POSITIVE_INFINITY);   // done for good
+        }
+      })();
+    }
+    // the ledger is the trigger
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ledger]);
+
   const haltNow = useCallback((why: string) => {
     haltRef.current = why;
     setHalt(why);
@@ -186,7 +222,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
     }
     if (j.outcome === 'placed') {
       const legs: AutoLeg[] = (j.legs ?? []).filter(l => l.status === 'placed').map((l, i) => ({ label: l.label, key: base.legs[i]?.key ?? null, units: l.qty }));
-      const ok = await post({ op: 'confirmEntry', id, legs });
+      const ok = await post({ op: 'confirmEntry', id, legs, orderIds: (j.legs ?? []).filter(l => l.status === 'placed' && l.orderId).map(l => String(l.orderId)) });
       if (!ok.ok) { haltNow(`order placed but the ledger refused it (${ok.error}) - check Positions`); return; }
       rejectsRef.current = 0;
       onEvent({ chart, kind: 'entry', side, price: px, target, mode: arm.mode, lots, text: `AUTO C${chart} [REAL] ${side} ${lots}L @ ~${px.toFixed(2)}` });
@@ -228,7 +264,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
       return false;
     }
     if (j.outcome === 'placed' || j.outcome === 'flat') {
-      const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason, exitBarT: barT, ...boxField, note: j.outcome === 'flat' ? 'already flat at the broker' : undefined });
+      const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason, exitBarT: barT, ...boxField, note: j.outcome === 'flat' ? 'already flat at the broker' : undefined, orderIds: (j.legs ?? []).filter(l => l.status === 'placed' && l.orderId).map(l => String(l.orderId)) });
       if (!c.ok) { haltNow(`exit sent but the ledger refused it (${c.error})`); return false; }
       onEvent({ chart, kind: 'exit', side, price: exitPx, target: r.target, mode: r.mode, lots: r.lots, text: `AUTO C${chart} [REAL] exit (${reason}) @ ~${exitPx.toFixed(2)}${j.outcome === 'flat' ? ' - already flat at the broker' : ''}` });
       return true;
