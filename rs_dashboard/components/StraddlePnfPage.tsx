@@ -880,7 +880,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       ) : (
         <AutoControls chart={c} armed={autoArm[c].on} mode={tradeMode} lots={autoLots[c]} onLots={n => setLotsFor(c, n)}
                       onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} halt={autoOf(c).halt}
-                      onResolve={autoOf(c).resolve} nowMs={now}
+                      onResolve={autoOf(c).resolve} onExit={() => { void autoOf(c).exitNow(); }} nowMs={now}
                       autoRule={renko ? autoRule[c] : undefined} onAutoRule={renko ? r => setAutoRule(a => ({ ...a, [c]: r })) : undefined}
                       rule={renko && autoRule[c] === 'trend' ? `Renko trend: SELL / BUY on every brick that completes ${(c === 2 ? settings2 : settings).reversal} same-colour brick(s), no reversal needed; exit on the first opposite brick, then re-enter the new direction` : renko && autoRule[c] === 'oneback' ? 'One-back: 2+ bricks, 1-brick pullback, 2 bricks resume past the swing; stop one brick beyond the pullback' : renko && autoRule[c] === 'twoback' ? 'Two-back: 3+ bricks, 2-brick pullback, 3 bricks resume past the swing; stop one brick beyond the pullback' : renko ? `Renko SELL / BUY after ${(c === 2 ? settings2 : settings).reversal} confirming bricks, exit on the first opposite brick` : undefined}
                       disabledReason={target.kind === 'index' ? 'No AUTO on an index: chart its future or an option'

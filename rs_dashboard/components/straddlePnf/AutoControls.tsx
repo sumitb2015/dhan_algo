@@ -27,6 +27,8 @@ export interface AutoControlsProps {
   note: string;
   halt: string | null;
   onResolve: (as: 'open' | 'flat') => void;
+  /** Close the open position now at the live price (and switch AUTO off). */
+  onExit?: () => void;
   /** Renko only: which pattern AUTO trades. Absent on P&F (one rule). Locked while armed or holding a position. */
   autoRule?: AutoRule;
   onAutoRule?: (r: AutoRule) => void;
@@ -40,8 +42,9 @@ export const needsResolve = (r: AutoRow, nowMs: number) =>
   r.state === 'unknownEntry' || r.state === 'unknownExit'
   || ((r.state === 'entering' || r.state === 'exiting') && nowMs - (r.pendingSince ?? r.entryT) * 1000 > STALE_PENDING_MS);
 
-export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, nowMs, rule, autoRule, onAutoRule }: AutoControlsProps) {
+export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule }: AutoControlsProps) {
   const [confirmReal, setConfirmReal] = useState(false);
+  const [confirmExit, setConfirmExit] = useState(false);
   const [draft, setDraft] = useState(String(lots));
   const focusedRef = useRef(false);
   useEffect(() => {
@@ -52,6 +55,19 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
     const id = setTimeout(() => setConfirmReal(false), 6_000);
     return () => clearTimeout(id);
   }, [confirmReal]);
+
+  useEffect(() => {
+    if (!confirmExit) return;
+    const id = setTimeout(() => setConfirmExit(false), 6_000);
+    return () => clearTimeout(id);
+  }, [confirmExit]);
+  const canExit = !!onExit && row?.state === 'open';
+  const clickExit = () => {
+    if (!onExit || !row) return;
+    if (row.mode === 'REAL' && !confirmExit) { setConfirmExit(true); return; }
+    setConfirmExit(false);
+    onExit();
+  };
 
   const locked = armed || !!row;
   const commit = (raw: string) => {
@@ -127,6 +143,14 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
           <span className="text-zinc-400">{note || 'waiting for a signal'}</span>
         ) : disabledReason ? <span className="text-zinc-500">{disabledReason}</span> : null}
       </span>
+      {canExit && (
+        <button type="button" data-testid={`pnf-auto-exit-${chart}`} onClick={clickExit}
+                aria-label={`Exit the AUTO position on chart ${chart} now`}
+                title={row?.mode === 'REAL' ? 'Close this REAL position at market now and switch AUTO off (click twice)' : 'Close this paper position at the live price and switch AUTO off'}
+                className={`h-6 px-2 rounded border text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 ${confirmExit ? 'border-red-500/60 bg-red-500/20 text-red-300' : 'border-zinc-700 text-zinc-200 hover:bg-zinc-800'}`}>
+          {confirmExit ? 'EXIT REAL?' : 'Exit'}
+        </button>
+      )}
       {row && needsResolve(row, nowMs) && (
         <span className="flex items-center gap-1" title="Check the broker's Positions / Orders first, then tell AUTO what is there">
           <button type="button" onClick={() => onResolve('open')} className="h-6 px-2 rounded border border-zinc-700 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800">Is open</button>

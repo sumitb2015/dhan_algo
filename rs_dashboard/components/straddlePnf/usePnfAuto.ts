@@ -266,5 +266,18 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
     void post({ op: 'resolve', id: row.id, as, exitPrice: price ?? undefined, t: Date.now() / 1000 });
   };
 
-  return { row, note, halt, resolve };
+  /**
+   * Manual exit of the open row, at the live price (PAPER: the ledger close; REAL: the same reserved exit as a rule exit). It also
+   * switches AUTO off: otherwise a state-based rule would re-enter on the next brick. Never runs on an unresolved row.
+   */
+  const exitNow = async () => {
+    if (!row || row.state !== 'open' || busyRef.current) return;
+    busyRef.current = true;
+    try {
+      onDisarm('manual exit');
+      await exit(row, 'manual', price);
+    } finally { busyRef.current = false; }
+  };
+
+  return { row, note, halt, resolve, exitNow };
 }
