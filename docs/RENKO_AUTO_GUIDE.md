@@ -67,7 +67,7 @@ Exits keep running for an open position even when AUTO is switched off.
 - **PAPER** sends nothing and books at the **brick edge** (the brick's close). **REAL** books the **live price** at the decision, an
   estimate of the fill, so on a minute that prints several bricks REAL is worse than PAPER by the boxes moved.
 - **Brokers.** Dhan, Kotak and Zerodha can trade CRUDEOILM futures from this page. Kotak orders in barrels (10 per lot), Dhan and Zerodha in
-  lots. **Kotak and Zerodha MCX are capped at 1 lot per opening order** until one live fill confirms the quantity unit. MCX options and NSE
+  lots. **Zerodha MCX is capped at 1 lot per opening order** until one live fill confirms its quantity unit. Kotak is confirmed (a live 1-lot round trip on 2026-11-03: 10 barrels = 1 lot) and has no unit cap; the page's own ceiling of 20 lots and Kotak's per-source lot cap (20) still apply. MCX options and NSE
   futures on Zerodha are refused. Prices always come from Dhan.
 - **Own units only.** An exit sends only the units AUTO opened (from the ledger), capped by what the broker still shows in that direction.
   A manual trade, or the other chart on the same contract, is never touched. The exit goes to the broker the position was opened on.
@@ -146,11 +146,11 @@ Only one tab per browser profile leads (Web Locks). A second browser or machine 
 - **Not validated.** No backtest or replay. PAPER is more optimistic than REAL.
 - **The tab is the strategy.** The rules, entries and the opposite-brick exit need an open, leader tab (browsers may also slow the timers of a
   hidden tab). Use the server watcher's guard as the backstop, and keep the guard ON.
-- **Unconfirmed broker units.** Kotak and Zerodha MCX futures: hence the 1-lot cap. Confirm with one 1-lot REAL trade and check the broker's
-  Positions (Kotak 10 barrels per lot; Zerodha 1 lot).
+- **Unconfirmed broker unit.** Zerodha MCX futures: hence its 1-lot cap. Confirm with one 1-lot REAL trade and check Zerodha's Positions shows 1 lot.
+  Kotak is confirmed (10 barrels per lot).
 - **Server watcher** has had no live test. Test it once: arm one REAL 1-lot trade with a tight rupee stop, close the tab, and confirm the
   ledger shows `server guard: ...` and the position is flat at the broker.
-- **The 1-lot cap** also blocks protective resting orders on a larger netted position (it should apply to opening orders only).
+- **Zerodha's 1-lot cap** also blocks protective resting orders on a larger netted position (it should apply to opening orders only).
 - **REAL P&L** is at decision prices, not broker fills.
 - **Two charts on one contract** net at the broker; each exits only its own units.
 - **A whole-position SQUARE OFF** in the trade bar closes AUTO's units too; AUTO then finds the leg flat and books it closed.
@@ -160,7 +160,7 @@ Only one tab per browser profile leads (Web Locks). A second browser or machine 
 | Symptom | Cause / fix |
 |---|---|
 | `Kotak MCX orders are not supported from this page` (older build) | The page is running an old production build. Rebuild and restart the dashboard. |
-| `Zerodha ... capped at 1 lot` / AUTO cannot arm above 1 lot | The unconfirmed-unit cap on Kotak / Zerodha MCX. Use 1 lot. |
+| `Zerodha ... capped at 1 lot` / AUTO cannot arm above 1 lot | The unconfirmed-unit cap on Zerodha MCX. Use 1 lot. |
 | Zerodha order fails | The Zerodha session expires daily at 06:00 IST; log in again (`scripts/tools/zerodha_autologin.py`). |
 | AUTO entered late / not at all | It only trades a signal on the newest closed bar, and only after arming. Arm before the move. |
 | Two S (or B) markers in a row | The trend rule flipped: exit of the old position, then entry of the new one. |

@@ -171,13 +171,12 @@ test('a close keeps the other page\'s AUTO quantity: only the rest of the intrad
   assert.deepEqual(planLegCloseKeeping('F', rows, 0, 'dhan'), planLegClose('F', rows));
 });
 
-test('Kotak / Zerodha MCX cap: only those brokers + MCX + more than the cap is refused; the other brokers / segments are untouched', () => {
+test('Zerodha MCX cap: only Zerodha + MCX + more than the cap is refused; the other brokers / segments are untouched', () => {
   assert.equal(MCX_UNCONFIRMED_MAX_LOTS, 1);
   assert.equal(mcxUnconfirmedCapError('zerodha', true, 1), null);
   assert.match(mcxUnconfirmedCapError('zerodha', true, 2) ?? '', /capped at 1 lot/);
   assert.equal(mcxUnconfirmedCapError('dhan', true, 5), null);
-  assert.match(mcxUnconfirmedCapError('kotak', true, 2) ?? '', /Kotak MCX futures are capped at 1 lot/);
-  assert.equal(mcxUnconfirmedCapError('kotak', true, 1), null);
+  assert.equal(mcxUnconfirmedCapError('kotak', true, 5), null, 'Kotak was confirmed live on 2026-11-03: no unit cap');
   assert.equal(mcxUnconfirmedCapError('zerodha', false, 5), null, 'NSE on Zerodha is not capped here');
 });
 
