@@ -23,6 +23,9 @@ export interface LadderGuard {
   /** …and for every further `lockStepEvery` of MTM, raise the locked profit by `lockStepKeep`. */
   lockStepEvery?: number;
   lockStepKeep?: number;
+  /** P&F / Renko page only: target / stop-loss in chart BOXES (price moves of the chart's box x lots x lot value), beside the rupee ones; the first reached exits. */
+  targetBoxes?: number;
+  stopBoxes?: number;
   // runtime
   peak?: number;
   floor?: number;
@@ -66,6 +69,7 @@ export function cleanGuard(b: Record<string, unknown>): LadderGuard | string {
     target: pos(b.target), stop: pos(b.stop), trailBy: pos(b.trailBy),
     lockAt: pos(b.lockAt), lockKeep: b.lockKeep === 0 || b.lockKeep === '0' ? 0 : pos(b.lockKeep),
     lockStepEvery: pos(b.lockStepEvery), lockStepKeep: pos(b.lockStepKeep),
+    targetBoxes: pos(b.targetBoxes), stopBoxes: pos(b.stopBoxes),
   };
   if ((g.lockAt != null) !== (g.lockKeep != null)) return 'Protect profit needs both "when MTM reaches" and "lock"';
   if (g.lockAt != null && g.lockKeep! >= g.lockAt) return 'The locked profit must be below the level that triggers it';
@@ -73,7 +77,7 @@ export function cleanGuard(b: Record<string, unknown>): LadderGuard | string {
   if (g.lockStepEvery != null && g.lockAt == null) return 'The lock step belongs to Protect profit — set its level first';
   if (g.lockStepKeep != null && g.lockStepEvery != null && g.lockStepKeep > g.lockStepEvery) return 'Raise the lock by no more than the step itself';
   if (g.target != null && g.lockAt != null && g.lockAt >= g.target) return 'Protect profit should trigger below the target';
-  if (g.on && g.target == null && g.stop == null && g.trailBy == null && g.lockAt == null) return 'Set a target, stop, trailing or protect-profit level first';
+  if (g.on && g.target == null && g.stop == null && g.targetBoxes == null && g.stopBoxes == null && g.trailBy == null && g.lockAt == null) return 'Set a target, stop, trailing or protect-profit level first';
   return g;
 }
 

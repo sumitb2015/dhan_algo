@@ -44,7 +44,7 @@ export default function PnfOrderStyle({ value, onChange, guard, guardOn, boxPts 
   boxPts?: number;
   onChange: (s: StyleState) => void;
   /** The active chart's MTM guard card inputs; absent when the chart cannot be traded (index). */
-  guard?: { broker: string; real: boolean; chart: 1 | 2; chartLabel: string; mtm: number | null; guard?: LadderGuard; post: (body: Record<string, unknown>) => Promise<boolean> };
+  guard?: { broker: string; real: boolean; chart: 1 | 2; chartLabel: string; mtm: number | null; rupeesPerBox?: number | null; guard?: LadderGuard; post: (body: Record<string, unknown>) => Promise<boolean> };
   guardOn: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -83,6 +83,7 @@ export default function PnfOrderStyle({ value, onChange, guard, guardOn, boxPts 
                 key={`${guard.broker}:${guard.real}:${guard.chart}`}
                 broker={guard.broker} real={guard.real} ladderId={guard.chart} mtm={guard.mtm} guard={guard.guard} post={guard.post}
                 scopeName={guard.chartLabel}
+                boxesLabel={boxPts ? `boxes of ${boxPts.toLocaleString('en-IN', { maximumFractionDigits: 4 })} pts` : 'boxes of the chart'} rupeesPerBox={guard.rupeesPerBox ?? null}
                 help={`Watches ${guard.chartLabel}'s P&L on ${guard.broker} ${guard.real ? 'REAL' : 'PAPER'}, measured from the moment you switch the guard on. When a rule trips, the resting orders and bracket exits of this chart are cancelled and its position is squared off. It is held by THIS page: it only works while the tab is open. The guard stays ON until you switch it off, and every new trade is measured from its own start. Levels are remembered; the guard starts OFF every page load.`}
                 tripNote="Exiting - it stays on until this chart's position is closed (an exit that did not go through is retried every few seconds)." />
             </div>

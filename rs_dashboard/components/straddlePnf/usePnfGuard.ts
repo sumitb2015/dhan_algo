@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { carryRuntime, cleanGuard, evalGuard, type LadderGuard } from '@/lib/priceLadderGuard';
+import { effectiveGuard, noteBoxes } from '@/lib/pnfGuardBoxes';
 import type { LadderPosition } from '@/lib/pnfLadderPosition';
 
 // The MTM guard of a P&F chart (same rules and card as the Price Ladder: target, stop-loss, trailing, Protect profit), held by
@@ -10,11 +11,11 @@ import type { LadderPosition } from '@/lib/pnfLadderPosition';
 // It runs only while the page is open (nothing here runs on the server). Levels are remembered; the guard starts OFF every load.
 // The P&L it watches is measured from the moment the guard was switched on, so earlier realised P&L never trips it.
 
-const FIELDS = ['target', 'stop', 'trailBy', 'lockAt', 'lockKeep', 'lockStepEvery', 'lockStepKeep'] as const;
+const FIELDS = ['target', 'stop', 'trailBy', 'lockAt', 'lockKeep', 'lockStepEvery', 'lockStepKeep', 'targetBoxes', 'stopBoxes'] as const;
 const KEY = 'straddle-pnf-guard-';
 const TICK_MS = 1_000;
-/** Target and stop-loss (Rs) a chart's guard starts with when the user has never saved levels for it. */
-export const DEFAULT_GUARD_RUPEES = 1_000;
+/** Target and stop-loss (in chart BOXES) a chart's guard starts with when the user has never saved levels for it. */
+export const DEFAULT_GUARD_BOXES = 10;
 const RETRY_EXIT_S = 6;
 /** How long a chart must read flat before the guard drops its baseline: a REAL book read can briefly miss a position (polled every 5 s). PAPER is local and exact. */
 const FLAT_RESET_S_REAL = 12;
@@ -27,7 +28,7 @@ const readLevels = (key: string, chart: number): LadderGuard => {
   try {
     const raw = localStorage.getItem(`${key}${chart}`);
     // Nothing ever saved for this chart: the defaults (what AUTO switches the guard on with). Saved levels - even a cleared field - win.
-    if (raw === null) return { on: false, target: DEFAULT_GUARD_RUPEES, stop: DEFAULT_GUARD_RUPEES };
+    if (raw === null) return { on: false, targetBoxes: DEFAULT_GUARD_BOXES, stopBoxes: DEFAULT_GUARD_BOXES };
     const j = JSON.parse(raw) as Record<string, unknown>;
     const g: LadderGuard = { on: false };
     for (const f of FIELDS) { const n = Number(j[f]); if (Number.isFinite(n) && (n > 0 || (f === 'lockKeep' && n === 0))) g[f] = n; }
@@ -38,7 +39,7 @@ const saveLevels = (key: string, chart: number, g: LadderGuard) => {
   try { localStorage.setItem(`${key}${chart}`, JSON.stringify(Object.fromEntries(FIELDS.filter(f => g[f] != null).map(f => [f, g[f]])))); } catch { /* ignore */ }
 };
 
-export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderRef, exitChart, onEvent, storeKey = KEY }: {
+export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderRef, exitChart, onEvent, rupeesPerBox, storeKey = KEY }: {
   charts: GuardChart[];
   positions: Record<string, LadderPosition | null>;
   positionsLoaded: boolean;
@@ -52,6 +53,8 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
    */
   exitChart: (chart: 1 | 2, reason: string) => Promise<boolean | 'kept'>;
   onEvent: (chart: 1 | 2, kind: 'warn' | 'info', text: string) => void;
+  /** What one chart box is worth in rupees on that chart's open position (null when unknown): turns the box target / stop into rupees. */
+  rupeesPerBox: (chart: 1 | 2) => number | null;
   /** localStorage prefix of the remembered levels (the Renko page keeps its own). */
   storeKey?: string;
 }) {
@@ -156,7 +159,12 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
           continue;
         }
         const mtm = pos && pos.pnl !== null ? pos.pnl - slot.base : null;
-        const r = evalGuard(g, mtm);
+        // Box levels become rupee levels at the position's current box value; the first level reached (rupees or boxes) exits.
+        const rpb = rupeesPerBox(c.chart);
+        const eff = effectiveGuard(g, rpb);
+        const er = evalGuard(eff, mtm);
+        // the runtime (peak / floor) is kept, the levels stay the user's own (not the folded ones)
+        const r = { guard: er.guard === eff ? g : { ...er.guard, target: g.target, stop: g.stop }, reason: er.reason ? noteBoxes(g, rpb, er.reason) : null };
         if (r.reason) {
           exitedAt.current[c.chart] = nowS;
           const trippedSlot = { guard: { ...r.guard, tripped: r.reason!, firedAt: nowS }, base: slot.base };
@@ -176,16 +184,16 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   }, []);
 
   /**
-   * AUTO was switched on for this chart: switch its guard on too, with the remembered levels (the 1000 / 1000 defaults when none were
+   * AUTO was switched on for this chart: switch its guard on too, with the remembered levels (the 10 / 10 box defaults when none were
    * ever saved, or when every rule was cleared). A guard already on is left alone.
    */
   const armDefault = async (chart: GuardChart): Promise<void> => {
     const cur = levelsOf(chart.chart);
     if (cur.on) return;
-    const none = cur.target == null && cur.stop == null && cur.trailBy == null && cur.lockAt == null;
-    const body = { ...cur, on: true, ...(none ? { target: DEFAULT_GUARD_RUPEES, stop: DEFAULT_GUARD_RUPEES } : {}) };
+    const none = cur.target == null && cur.stop == null && cur.targetBoxes == null && cur.stopBoxes == null && cur.trailBy == null && cur.lockAt == null;
+    const body = { ...cur, on: true, ...(none ? { targetBoxes: DEFAULT_GUARD_BOXES, stopBoxes: DEFAULT_GUARD_BOXES } : {}) };
     if (await post(chart)(body)) {
-      onEventRef.current(chart.chart, 'info', `MTM guard switched on with AUTO: target ${body.target != null ? `₹${body.target}` : '-'}, stop ₹${body.stop ?? '-'}. It stays on until you switch it off.`);
+      onEventRef.current(chart.chart, 'info', `MTM guard switched on with AUTO: target ${body.targetBoxes != null ? `${body.targetBoxes} boxes` : body.target != null ? `₹${body.target}` : '-'}, stop ${body.stopBoxes != null ? `${body.stopBoxes} boxes` : body.stop != null ? `₹${body.stop}` : '-'}. It stays on until you switch it off.`);
     } else {
       // post() already said why (no live price for an open position, an invalid level): AUTO is armed, its guard is not.
       onEventRef.current(chart.chart, 'warn', `AUTO is armed on chart ${chart.chart} WITHOUT its MTM guard - open the MTM Guard card and switch it on.`);

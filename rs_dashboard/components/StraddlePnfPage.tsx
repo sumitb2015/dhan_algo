@@ -13,6 +13,7 @@ import SettingsControls, { SmaPeriodInput, SupertrendControls } from './straddle
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import BrokerBooks from './straddlePnf/BrokerBooks';
 import { buildPaperTrades } from '@/lib/pnfPaperBook';
+import { rupeesPerBox } from '@/lib/pnfGuardBoxes';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
 import { BROKERS, useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { withSavedBroker } from '@/hooks/withSavedBroker';
@@ -674,9 +675,14 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       }
     }
   }
+  // What one box of a chart is worth on its open position (box points x lots x rupees per point per lot): the guard's box levels.
+  const boxRupees = (c: ChartId): number | null => {
+    const rc = railCharts.find(x => x.chart === c);
+    return rc ? rupeesPerBox((c === 2 ? c2 : c1).model.box, guardPositions[rc.targetKey]?.lots, rc.unitsPerLot[0]) : null;
+  };
   const guards = usePnfGuard({
     charts: railCharts.map(c => ({ chart: c.chart, targetKey: c.targetKey })), positions: guardPositions, positionsLoaded: positionsInfo.loaded,
-    scope: `${broker}:${tradeMode}`, leaderRef, exitChart, storeKey: prefKey(chart, 'straddle-pnf-guard-'),
+    scope: `${broker}:${tradeMode}`, leaderRef, exitChart, rupeesPerBox: boxRupees, storeKey: prefKey(chart, 'straddle-pnf-guard-'),
     onEvent: (c, kind, text) => { if (kind === 'warn') { toast.warning(text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); } else toast(text); void c; },
   });
   const railFor = (c: ChartId) => {
@@ -748,7 +754,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     replay.open();
   };
   const armChart = (c: ChartId, on: boolean) => {
-    // AUTO and its MTM guard go together: arming AUTO switches the chart's guard on with its saved levels (1000 / 1000 by default).
+    // AUTO and its MTM guard go together: arming AUTO switches the chart's guard on with its saved levels (10 boxes / 10 boxes by default).
     if (on) { const rc = railCharts.find(x => x.chart === c); if (rc) void guards.armDefault({ chart: rc.chart, targetKey: rc.targetKey }); }
     const m = (c === 2 ? c2 : c1).model;
     setAutoArm(a => ({ ...a, [c]: on ? { on: true, mode: tradeMode, watermarkT: m.lastBarT ?? Math.floor(nowSec()) } : DISARMED }));
@@ -833,7 +839,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
         const rc = railCharts.find(x => x.chart === active);
         if (!rc) return undefined;
         const gc = { chart: rc.chart, targetKey: rc.targetKey };
-        return { broker: broker, real: tradeMode === 'REAL', chart: rc.chart, chartLabel: `Chart ${rc.chart} · ${rc.target.symbol}`, mtm: guards.mtmOf(gc), guard: guards.guardOf(rc.chart), post: guards.post(gc) };
+        return { broker: broker, real: tradeMode === 'REAL', chart: rc.chart, chartLabel: `Chart ${rc.chart} · ${rc.target.symbol}`, mtm: guards.mtmOf(gc), rupeesPerBox: boxRupees(rc.chart), guard: guards.guardOf(rc.chart), post: guards.post(gc) };
       })()}
     />
   );
