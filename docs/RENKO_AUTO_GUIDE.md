@@ -112,7 +112,7 @@ One guard per chart, shown in the toolbar (**MTM Guard ON/OFF**) with its card.
 | Strategy rules, entries | yes | no |
 | Opposite-brick / Two-back stop exit | yes | no |
 | MTM guard | yes | **yes, for open REAL AUTO rows** |
-| End-of-day exit | yes | yes, for guarded REAL rows |
+| End-of-day exit | yes | **yes, for every open REAL AUTO row** (guard on or off) |
 
 The tab does all the trading. If it closes, sleeps or loses its network, **nothing in the left column runs**, and an N-brick position would
 sit without a stop. To cover that, the dashboard server runs an **exit-only watcher** (`lib/autoServerWatcher.ts`, started with the server):
@@ -126,7 +126,7 @@ sit without a stop. To cover that, the dashboard server runs an **exit-only watc
 - A trip is an ordinary ledger exit: it takes `beginExit`, sends the same own-units exit as the page, then records `close` /
   `markUnknown`. A rejected exit is retried every 10 s; after 5 failures in a row it stands down for a minute and says so. A ledger write that
   fails after the order went out is queued and retried. A row it closed shows `server guard: <rule>`; an open tab disarms AUTO on seeing it.
-- It also squares a guarded row off at the end-of-day time. With the guard OFF there is **no** server stop.
+- It also squares **every** open REAL AUTO row off at the end-of-day time, guard on or off (no price needed: it books the entry price if none is available, and says so). After the market's close it never sends orders, it only reports a row still open. With the guard OFF there is **no** server stop-loss.
 - It places **no entries**: a closed tab never trades, it only protects.
 
 Only one tab per browser profile leads (Web Locks). A second browser or machine is not covered and could run a second engine.

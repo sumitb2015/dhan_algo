@@ -89,7 +89,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
   const unresolved = row && row.state !== 'open';
 
   return (
-    <span data-testid={`pnf-auto-${chart}`} data-armed={armed} className="flex items-center gap-1.5 min-w-0 shrink font-sans">
+    <span data-testid={`pnf-auto-${chart}`} data-armed={armed} className="flex items-center gap-1.5 min-w-0 shrink font-sans [&_button]:scroll-mt-48 [&_input]:scroll-mt-48 [&_select]:scroll-mt-48">
       <button type="button" onClick={toggle} disabled={!!disabledReason && !armed} aria-pressed={armed}
               aria-label={armed ? `Stop AUTO on chart ${chart}` : `Start AUTO on chart ${chart}`}
               title={disabledReason ?? (armed ? `AUTO ${mode}: ${rule ?? 'double-bottom SELL / double-top BUY, exit on the first column reversal'}` : 'Trade this chart automatically')}

@@ -13,7 +13,7 @@ import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { targetKey } from '@/lib/pnfTarget';
 import { chartPrice, guards, runtimeKey, stepRow, type RowRuntime, type ServerGuardCfg } from '@/lib/autoServerGuard';
 import { autoWindow, rowMarket } from '@/lib/pnfAuto';
-import { istMinuteOfDay } from '@/lib/straddlePnfLive';
+import { istMinuteOfDay, sessionWindow } from '@/lib/straddlePnfLive';
 import { istDateIso } from '@/lib/nseHolidays';
 import type { AutoOp } from '@/lib/pnfAutoLedger';
 import type { AutoRow } from '@/lib/pnfAutoLedger';
@@ -175,29 +175,38 @@ async function tick(): Promise<void> {
   const loop = L[LOOP_KEY];
   if (!loop || loop.busy) return;
   if (pendingOps.size) await flushPending();
-  const file = readServerGuards();
-  if (!Object.values(file.cfg).some(c => c.on)) return;
   loop.busy = true;
   try {
+    const file = readServerGuards();
     const now = Date.now();
     const today = istDateIso(now);
-    const todo: { scope: PnfScope; row: AutoRow; cfg: ServerGuardCfg }[] = [];
+    const nowS = now / 1000;
+    const minute = istMinuteOfDay(nowS);
+    /** `cfg` set: the page's guard is synced for this row (stop-loss, target, ... enforced). Unset: the row only gets the end-of-day exit. */
+    const todo: { scope: PnfScope; row: AutoRow; cfg: ServerGuardCfg | undefined; win: { open: number; entryCutoff: number; eodExit: number } }[] = [];
     const liveRuntimeKeys = new Set<string>();
     for (const scope of SCOPES) {
       for (const row of readAutoLedger(scope).rows) {
-        if (row.mode === 'REAL' && row.state !== 'closed') liveRuntimeKeys.add(runtimeKey(scope, row.chart, row.id));
-        const cfg = file.cfg[keyOf(scope, row.chart)];
-        if (!guards(cfg, row)) continue;
+        if (row.mode !== 'REAL' || row.state === 'closed') continue;
+        liveRuntimeKeys.add(runtimeKey(scope, row.chart, row.id));
+        if (row.state !== 'open') continue;
+        const cfg = guards(file.cfg[keyOf(scope, row.chart)], row) ? file.cfg[keyOf(scope, row.chart)] : undefined;
         // A row from an earlier day is not priced against today's market: it is reported, never exited on a stale entry price.
-        if (row.day !== today) { await warn(scope, row, `chart ${row.chart}'s open row is from ${row.day}, not today - not guarded; check the broker and resolve it`); continue; }
-        todo.push({ scope, row, cfg });
+        if (row.day !== today) { if (cfg) await warn(scope, row, `chart ${row.chart}'s open row is from ${row.day}, not today - not guarded; check the broker and resolve it`); continue; }
+        const win = autoWindow(rowMarket(row), nowS);
+        if (!win || minute < win.open) continue;                      // shut today / before the open: nothing to act on
+        // After the close an exit cannot trade: say so (once in a while) instead of sending orders into a shut market every few seconds.
+        if (minute >= sessionWindow(rowMarket(row), nowS)[1]) { await warn(scope, row, `chart ${row.chart}'s position is still open after the market closed - not exited; check the broker and resolve it`); continue; }
+        // An unguarded row is only looked at once its end-of-day time is near (no price is asked for before that).
+        if (!cfg && minute < win.eodExit - 2) continue;
+        todo.push({ scope, row, cfg, win });
       }
     }
     // Runtime of rows that are over is dropped (the file would otherwise grow for ever).
     const stale = Object.keys(file.runtime).filter(k => !liveRuntimeKeys.has(k));
     if (stale.length) await update(f => ({ ...f, runtime: Object.fromEntries(Object.entries(f.runtime).filter(([k]) => liveRuntimeKeys.has(k))) }));
     if (todo.length === 0) return;
-    // Ask the bridge for every guarded row's contract (the page's own asks keep it running; with no page open this is what does).
+    // Ask the bridge for every watched row's contract (the page's own asks keep it running; with no page open this is what does).
     const pairs: { item: (typeof todo)[number]; ids: [string, string][] }[] = [];
     for (const item of todo) {
       const legs = resolvePnfLegs(item.row.target);
@@ -209,17 +218,15 @@ async function tick(): Promise<void> {
     ensureBridge(now);
     const { book } = readBridgeBook(now);
     for (const { item, ids } of pairs) {
-      const { scope, row, cfg } = item;
-      const win = autoWindow(rowMarket(row), now / 1000);
-      const minute = istMinuteOfDay(now / 1000);
-      // Outside the session there is no price worth acting on; at the end-of-day time the position is squared off like the tab would.
-      if (!win || minute < win.open) continue;
+      const { scope, row, cfg, win } = item;
       const price = chartPrice(ids, book, now);
       if (minute >= win.eodExit) {
-        if (price !== null) await exitRow(scope, row, 'end of day', price);
-        else await warn(scope, row, `end of day but no live price for chart ${row.chart} - the position is NOT squared off; close it by hand`);
+        // The end of day comes first and needs no price: the position must be flat before the broker's own square-off. With no price the
+        // exit is booked at the entry price (as the tab's own end-of-day exit does when it has none) and the ledger says so.
+        await exitRow(scope, row, price === null ? 'end of day (no live price)' : 'end of day', price ?? row.entryPrice);
         continue;
       }
+      if (!cfg) continue;
       if (price === null) { await warn(scope, row, `no live price for chart ${row.chart} - not watching until the bridge has one`); continue; }
       const cur = readServerGuards();
       const rtKey = runtimeKey(scope, row.chart, row.id);

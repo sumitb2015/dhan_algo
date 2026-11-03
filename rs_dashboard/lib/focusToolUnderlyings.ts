@@ -42,7 +42,7 @@ export const UNDERLYING_META: Record<FocusUnderlying, UnderlyingMeta> = {
   NIFTY:     { strikeStep: 50,  futLabel: 'NIFTY FUT',     segment: 'NSE_FNO', unitsPerLot: 1,  backstopHm: '15:17', entryMinHm: '09:16', entryMaxHm: '15:28', exitMinHm: '09:17', exitMaxHm: '15:29', nseCalendar: true },
   BANKNIFTY: { strikeStep: 100, futLabel: 'BANKNIFTY FUT', segment: 'NSE_FNO', unitsPerLot: 1,  backstopHm: '15:17', entryMinHm: '09:16', entryMaxHm: '15:28', exitMinHm: '09:17', exitMaxHm: '15:29', nseCalendar: true },
   SENSEX:    { strikeStep: 100, futLabel: 'SENSEX FUT',    segment: 'BSE_FNO', unitsPerLot: 1,  backstopHm: '15:17', entryMinHm: '09:16', entryMaxHm: '15:28', exitMinHm: '09:17', exitMaxHm: '15:29', nseCalendar: true },
-  // MCX evening session runs to 23:30 (23:55 in US-DST months); the backstop sits
+  // MCX evening session runs to 23:30 while the US is on daylight saving and to 23:55 otherwise; the backstop sits
   // well inside it so an intraday row is flat before the close either way.
   CRUDEOILM: { strikeStep: 50,  futLabel: 'CRUDEOILM FUT', segment: 'MCX_COMM', unitsPerLot: 10, backstopHm: '23:15', entryMinHm: '09:01', entryMaxHm: '23:10', exitMinHm: '09:02', exitMaxHm: '23:14', nseCalendar: false },
 };

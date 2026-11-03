@@ -1,5 +1,6 @@
 import { isMcxUnderlying } from './underlyings.ts';
 import { isNseTradingDay, istDateIso } from './nseHolidays.ts';
+import { mcxSession } from './mcxSession.ts';
 
 // NSE F&O session: 09:15-15:40 IST, Mon-Fri, except NSE holidays (SEBI's Close Auction Session pushed the F&O
 // close from 15:30 to 15:40; cash/equity's 15:30 close is separate and unaffected). Used
@@ -21,15 +22,16 @@ export function isNseCashLive(now: Date): boolean {
   return minutes >= 9 * 60 + 15 && minutes <= 15 * 60 + 30;
 }
 
-// MCX commodity session: 09:00-23:30 IST, Mon-Fri. Crude keeps trading for another 8 hours after
-// the NSE bell, so gating it on isNseLive() would drop its charts to the off-hours poll cadence
-// for most of its own session.
+// MCX commodity session, from lib/mcxSession.ts: 09:00 to 23:30 IST while the US is on daylight saving and to 23:55 otherwise
+// (holidays and half days included). Crude keeps trading for another 8 hours after the NSE bell, so gating it on isNseLive() would
+// drop its charts to the off-hours poll cadence for most of its own session.
 export function isMcxLive(now: Date): boolean {
   const ist = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
-  const day = ist.getDay();
-  if (day === 0 || day === 6) return false;
+  const s = mcxSession(istDateIso(now));
+  if (s.open >= s.close) return false;
+  const hm = (hhmm: number) => Math.floor(hhmm / 100) * 60 + (hhmm % 100);
   const minutes = ist.getHours() * 60 + ist.getMinutes();
-  return minutes >= 9 * 60 && minutes <= 23 * 60 + 30;
+  return minutes >= hm(s.open) && minutes <= hm(s.close);
 }
 
 /** Poll-cadence gate for the live options charts, per underlying. */

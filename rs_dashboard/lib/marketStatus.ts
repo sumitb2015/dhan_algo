@@ -1,6 +1,7 @@
 // Open/closed state and last-tick age for the /markets table's Status column.
 
 import { isNseTradingDay, istDateIso } from './nseHolidays.ts';
+import { mcxSession } from './mcxSession.ts';
 
 export type MarketState = 'live' | 'pre' | 'stale' | 'closed';
 
@@ -14,7 +15,10 @@ export function indianMarketState(nowMs: number, isMcx: boolean, feedStale: bool
   if (p.weekday === 'Sat' || p.weekday === 'Sun') return 'closed';
   if (!isMcx && !isNseTradingDay(istDateIso(nowMs))) return 'closed';
   const mins = Number(p.hour) * 60 + Number(p.minute);
-  const [open, close] = isMcx ? [9 * 60, 23 * 60 + 30] : [9 * 60 + 15, 15 * 60 + 30];
+  // MCX hours come from lib/mcxSession.ts (23:30 close while the US is on daylight saving, 23:55 otherwise; holidays; half days).
+  const hm = (hhmm: number) => Math.floor(hhmm / 100) * 60 + (hhmm % 100);
+  const mcx = isMcx ? mcxSession(istDateIso(nowMs)) : null;
+  const [open, close] = mcx ? [hm(mcx.open), hm(mcx.close)] : [9 * 60 + 15, 15 * 60 + 30];
   if (!isMcx && mins >= 9 * 60 && mins < open) return 'pre';
   if (mins < open || mins >= close) return 'closed';
   return feedStale ? 'stale' : 'live';
