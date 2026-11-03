@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MAX_PNF_LOTS, MAX_PNF_SHARES, FLAT_LEG, applyPaperFill, brokerProduct, describePosition, needsRollback, orderQty,
-  paperPnl, parsePnfOrder, planLegClose, planLegCloseKeeping, sendOutcome, type LegResult,
+  paperPnl, parsePnfOrder, planLegClose, planLegCloseKeeping, sendOutcome, zerodhaMcxCapError, ZERODHA_MCX_MAX_LOTS, type LegResult,
 } from './pnfOrderLogic.ts';
 
 const fut = { kind: 'futures', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24' };
@@ -169,4 +169,13 @@ test('a close keeps the other page\'s AUTO quantity: only the rest of the intrad
   // a reservation the other way (an AUTO long inside a net short) cannot be in this row: the whole row closes
   assert.deepEqual(planLegCloseKeeping('F', [{ key: 'F', product: 'INTRADAY', net: -65 }], 65, 'dhan'), [{ side: 'BUY', qty: 65, product: 'INTRADAY' }]);
   assert.deepEqual(planLegCloseKeeping('F', rows, 0, 'dhan'), planLegClose('F', rows));
+});
+
+test('Zerodha MCX cap: only Zerodha + MCX + more than the cap is refused; the other brokers / segments are untouched', () => {
+  assert.equal(ZERODHA_MCX_MAX_LOTS, 1);
+  assert.equal(zerodhaMcxCapError('zerodha', true, 1), null);
+  assert.match(zerodhaMcxCapError('zerodha', true, 2) ?? '', /capped at 1 lot/);
+  assert.equal(zerodhaMcxCapError('dhan', true, 5), null);
+  assert.equal(zerodhaMcxCapError('kotak', true, 5), null);
+  assert.equal(zerodhaMcxCapError('zerodha', false, 5), null, 'NSE on Zerodha is not capped here');
 });

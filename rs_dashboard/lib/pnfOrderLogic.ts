@@ -68,6 +68,15 @@ export function checkRestingPrices(side: PnfAction, orderType: 'LIMIT' | 'SL', p
 
 export const lotCap = (t: Target) => (t.kind === 'equity' ? MAX_PNF_SHARES : MAX_PNF_LOTS);
 
+/** Lots per OPENING order on Zerodha MCX futures until a live fill confirms the quantity unit (see brokerLegs). Exits are not capped. */
+export const ZERODHA_MCX_MAX_LOTS = 1;
+
+/** Why a Zerodha MCX opening order of `lots` is refused, or null. One rule for the order route (market, resting, modify) and for arming AUTO. */
+export function zerodhaMcxCapError(broker: PnfBroker, isMcx: boolean, lots: number): string | null {
+  if (broker !== 'zerodha' || !isMcx || lots <= ZERODHA_MCX_MAX_LOTS) return null;
+  return `Zerodha MCX futures are capped at ${ZERODHA_MCX_MAX_LOTS} lot per order until a live fill confirms the quantity unit - use ${ZERODHA_MCX_MAX_LOTS} lot`;
+}
+
 /** A request body -> a valid order request, or the reason it is refused. */
 export function parsePnfOrder(body: unknown): PnfOrderRequest | string {
   if (!body || typeof body !== 'object') return 'Invalid request';

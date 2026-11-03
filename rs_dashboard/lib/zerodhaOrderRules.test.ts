@@ -41,7 +41,7 @@ test('slices stay whole lots under the freeze quantity; unknown lot or underlyin
   assert.deepEqual(zerodhaOrderSlices(65, 'SENSEX', 20), [65]);
 });
 
-import { pickZerodhaFuture } from './zerodhaOrderRules.ts';
+import { pickZerodhaFuture, zerodhaMcxFutureError } from './zerodhaOrderRules.ts';
 const FUT_ROWS = [
   { tradingsymbol: 'CRUDEOILM26DECFUT', expiry: '2026-12-18', lot_size: 1 },
   { tradingsymbol: 'CRUDEOILM26OCTFUT', expiry: '2026-10-19', lot_size: 1 },
@@ -53,4 +53,11 @@ test('pickZerodhaFuture: nearest unexpired by default, the exact month when aske
   assert.equal(pickZerodhaFuture(FUT_ROWS, '2026-12-18', '2026-10-19')?.tradingsymbol, 'CRUDEOILM26DECFUT');
   assert.equal(pickZerodhaFuture(FUT_ROWS, '2026-11-18', '2026-10-19'), null);                          // never the nearest instead
   assert.equal(pickZerodhaFuture([], null, '2026-10-19'), null);
+});
+
+test('an MCX future is orderable only on MCX with the expected lot size; anything else is refused with the reason', () => {
+  const row = { tradingsymbol: 'CRUDEOILM26NOVFUT', lotSize: 1, exchange: 'MCX' };
+  assert.equal(zerodhaMcxFutureError(row, 1), null);
+  assert.match(zerodhaMcxFutureError({ ...row, lotSize: 10 }, 1) ?? '', /lot size 10 on MCX/);
+  assert.match(zerodhaMcxFutureError({ ...row, exchange: 'NFO' }, 1) ?? '', /on NFO/);
 });

@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
-import { zerodhaContractFromRows, zerodhaUnderlyingOf, zerodhaOrderSlices, type ZerodhaCachedContract, type ZerodhaContractInfo } from '@/lib/zerodhaOrderRules';
+import { zerodhaContractFromRows, zerodhaUnderlyingOf, zerodhaOrderSlices, pickZerodhaFuture, type ZerodhaFutureRow, type ZerodhaCachedContract, type ZerodhaContractInfo } from '@/lib/zerodhaOrderRules';
 
 /** Parsed cache files by path, re-read only when the file changes: every order and slice calls this, and the options file is large. */
 const rowsCache = new Map<string, { mtimeMs: number; rows: ZerodhaCachedContract[] }>();
@@ -74,4 +74,40 @@ export async function zerodhaOptionContract(underlying: string, expiry: string, 
     tradingsymbol: hit.tradingsymbol, lotSize: Number(hit.lot_size),
     tick: Number(hit.tick_size) > 0 ? Number(hit.tick_size) : null, exchange: underlying === 'SENSEX' ? 'BFO' : underlying in MCX_LOT_MULTIPLIER ? 'MCX' : 'NFO',
   };
+}
+
+/** Kite's own row for an MCX / NFO future (zerodha_<underlying>_futures.json). */
+export interface ZerodhaFutureContract { tradingsymbol: string; lotSize: number; tick: number | null; exchange: string }
+
+/** One background refresh at a time per underlying, and not again for an hour after an attempt (a dead session fails every time). */
+const FUTURES_RETRY_MS = 60 * 60 * 1000;
+const futuresAttempt = new Map<string, number>();
+function refreshFuturesInBackground(underlying: string): Promise<void> {
+  const last = futuresAttempt.get(underlying) ?? 0;
+  if (Date.now() - last < FUTURES_RETRY_MS) return Promise.resolve();
+  futuresAttempt.set(underlying, Date.now());
+  return dedupe(`zerodha-futures-cache:${underlying}`, () =>
+    runPythonJson<{ success: boolean; error?: string }>(CACHE_SCRIPT, ['--underlying', underlying, '--futures'], 60_000))
+    .then(() => undefined, () => undefined);   // a failed refresh keeps the file on disk
+}
+
+/**
+ * The Kite future for (underlying, expiry YYYY-MM-DD) from Kite's own dump (`zerodha_instruments_cache.py --futures`), or null when
+ * Kite does not list THAT expiry (never the nearest month). Instrument metadata only. An order path must not wait on a Python
+ * spawn (exits would stall behind a dead Kite session), so a stale file is used as it is and refreshed in the background, at most
+ * once an hour; only a MISSING file is awaited, because there is nothing to use.
+ */
+export async function zerodhaFutureContract(underlying: string, expiry: string): Promise<ZerodhaFutureContract | null> {
+  const file = path.join(PROJECT_ROOT, 'debug', `zerodha_${underlying.toLowerCase()}_futures.json`);
+  let mtime: number | null = null;
+  try { mtime = fs.statSync(file).mtimeMs; } catch { /* missing */ }
+  if (mtime === null) await refreshFuturesInBackground(underlying);
+  else if (Date.now() - mtime > CACHE_MAX_AGE_MS) void refreshFuturesInBackground(underlying);
+  const raw = cachedRows(file) as unknown;
+  if (!Array.isArray(raw)) return null;
+  // The dump's own shape, checked: a row without a string expiry / symbol would make the pick throw.
+  const rows = raw.filter((r): r is ZerodhaFutureRow => !!r && typeof r.tradingsymbol === 'string' && typeof r.expiry === 'string');
+  const row = pickZerodhaFuture(rows, expiry, '');
+  if (!row || !(row.lot_size && row.lot_size > 0) || !row.exchange) return null;
+  return { tradingsymbol: row.tradingsymbol, lotSize: row.lot_size, tick: row.tick_size && row.tick_size > 0 ? row.tick_size : null, exchange: row.exchange };
 }
