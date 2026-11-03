@@ -8,6 +8,7 @@ import {
 } from '@/lib/pnfBooks';
 import { targetLabel } from '@/lib/pnfTarget';
 import { autoDaySummary, rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
+import type { PaperTradeRow } from '@/lib/pnfPaperBook';
 
 // Positions, order book, trade book and the day's P&L for the page header's broker, docked at the bottom of the page.
 // Read-only: no order, cancel or exit is sent from here. Collapsed it is one strip (tabs + Day P&L) and reads only the
@@ -51,12 +52,14 @@ export interface BrokerBooksProps {
   autoRows?: AutoRow[];
   /** The live price of a contract shown on a chart (by targetKey), for marking open AUTO rows; null when no chart shows it. */
   autoPrice?: (targetKey: string) => number | null;
+  /** Today's simulated trades (trade bar, rail, guard and AUTO paper), shown in the Trade Book tab: paper never reaches the broker's book. */
+  paperTrades?: PaperTradeRow[];
   /** The active chart's contract keys (broker position keys) and name: the "This chart" filter narrows every book to them. */
   chartKeys?: string[];
   chartName?: string;
 }
 
-export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [], autoPrice = () => null, chartKeys = [], chartName = '' }: BrokerBooksProps) {
+export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [], autoPrice = () => null, paperTrades = [], chartKeys = [], chartName = '' }: BrokerBooksProps) {
   const [tab, setTab] = useState<Tab>('positions');
   // Narrows the three books to the active chart's contracts (Kite's chart panel: this chart's positions and orders).
   const [onlyChart, setOnlyChart] = useState(false);
@@ -102,7 +105,7 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [],
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: 'positions', label: 'Positions', count: pos || paperOpen.length ? (pos ? summary.open : 0) + paperOpen.length : undefined },
     { id: 'orders', label: 'Order Book', count: ord ? summary.orders.total : undefined },
-    { id: 'trades', label: 'Trade Book', count: trd ? summary.trades : undefined },
+    { id: 'trades', label: 'Trade Book', count: trd || paperTrades.length ? (trd ? summary.trades : 0) + paperTrades.length : undefined },
     { id: 'pnl', label: 'P&L' },
     { id: 'auto', label: 'AUTO', count: autoRows.length || undefined },
   ];
@@ -246,8 +249,30 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [],
               </tr>
             ))}
           </Table>
-        ) : tab === 'trades' ? (
-          <Table empty="No trades today" head={['Time', 'Symbol', 'Side', 'Product', 'Qty', 'Price', 'Value', 'Order']} right={[4, 5, 6]}>
+        ) : tab === 'trades' ? (<>
+          {paperTrades.length > 0 && (
+            <div data-testid="pnf-paper-trades">
+              <div className="px-2 py-1 text-[11px] font-bold text-zinc-300 bg-zinc-800/60 border-b border-zinc-800">
+                Paper trades <span className="font-mono text-zinc-400">{paperTrades.length}</span>
+                <span className="ml-2 font-normal text-zinc-400">simulated: never sent to a broker · all charts, newest first</span>
+              </div>
+              <Table empty="" head={['Time', 'Instrument', 'Source', 'Side', 'Lots', 'Price', 'Note']} right={[4, 5]}>
+                {paperTrades.map(t => (
+                  <tr key={t.id} data-testid="pnf-paper-trade" className="border-b border-zinc-800/60">
+                    <td className="px-2 py-1 text-zinc-400">{new Date(t.t * 1000).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}</td>
+                    <td className="px-2 py-1 font-sans text-zinc-100">{t.instrument}</td>
+                    <td className="px-2 py-1 text-zinc-400">{t.source}</td>
+                    <td className={`px-2 py-1 font-bold ${sideTone(t.side)}`}>{t.side}</td>
+                    <td className="px-2 py-1 text-right">{t.lots}</td>
+                    <td className="px-2 py-1 text-right">{fmt(t.price)}</td>
+                    <td className="px-2 py-1 font-sans text-zinc-400">{t.note || '—'}</td>
+                  </tr>
+                ))}
+              </Table>
+              <div className="px-2 py-1 text-[11px] font-bold text-zinc-300 bg-zinc-800/60 border-y border-zinc-800">{BROKER_LABELS[broker]} trade book</div>
+            </div>
+          )}
+          <Table empty="No broker trades today" head={['Time', 'Symbol', 'Side', 'Product', 'Qty', 'Price', 'Value', 'Order']} right={[4, 5, 6]}>
             {trdRows.map((t, i) => (
               <tr key={t.id || `${t.orderId}-${i}`} className="border-b border-zinc-800/60">
                 <td className="px-2 py-1 text-zinc-400">{t.time || '—'}</td>
@@ -261,7 +286,7 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [],
               </tr>
             ))}
           </Table>
-        ) : (
+        </>) : (
           <div data-testid="pnf-books-pnl" className="flex gap-4 p-3 min-h-0">
             <div className="grid grid-cols-4 gap-2 content-start shrink-0 w-[36rem]">
               <Stat label="Day P&L" value={inr(summary.total)} cls={tone(summary.total)} big />

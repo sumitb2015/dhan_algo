@@ -12,6 +12,7 @@ import { effectiveInterval, hasLongIntervals, intervalLabel } from '@/lib/stradd
 import SettingsControls, { SmaPeriodInput, SupertrendControls } from './straddlePnf/SettingsControls';
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import BrokerBooks from './straddlePnf/BrokerBooks';
+import { buildPaperTrades } from '@/lib/pnfPaperBook';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
 import { BROKERS, useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { withSavedBroker } from '@/hooks/withSavedBroker';
@@ -418,6 +419,19 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       return { ...prev, [key]: list };
     });
   }, [markersPrefix]);
+  // Every instrument's stored markers (the trade book lists the day's paper fills of all of them, not just the two charts' contracts).
+  const [storedMarkers, setStoredMarkers] = useState<Record<string, PnfExecutionMarker[]>>({});
+  useEffect(() => {
+    const out: Record<string, PnfExecutionMarker[]> = {};
+    try {
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const k = sessionStorage.key(i);
+        if (k?.startsWith(markersPrefix)) out[k.slice(markersPrefix.length)] = readMarkers(markersPrefix, k.slice(markersPrefix.length));
+      }
+    } catch { /* storage blocked: only the open charts' markers are listed */ }
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStoredMarkers(out);
+  }, [markers, markersPrefix]);
   const handleTradeExecuted = useCallback((m: PnfExecutionMarker, t: Target) => saveMarkers(targetKey(t), prev => [...prev, m]), [saveMarkers]);
 
   // ── AUTO: each chart trades its own scrip (double-bottom SELL / double-top BUY, exit on the first column reversal) ──
@@ -1147,6 +1161,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
         );
       })()}
       <BrokerBooks broker={broker} open={booksOpen} onOpenChange={changeBooksOpen} autoRows={autoToday} autoPrice={autoPrice}
+        paperTrades={buildPaperTrades({ ...storedMarkers, ...markers }, autoToday, istToday())}
         chartKeys={railCharts.find(c => c.chart === active)?.keys.filter(Boolean) ?? []} chartName={`C${active} · ${activeFeed.label}`} />
     </div>
   );
