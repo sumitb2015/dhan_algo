@@ -279,13 +279,14 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
   // page's guard all run on this one timer. A gap far beyond the tick is said out loud (at most every 5 minutes), so a slowed tab is not
   // mistaken for a working one; a REAL position still has the dashboard server's guard and end-of-day exit behind it.
   const lastTickRef = useRef(0);
-  const lastLagWarnRef = useRef(0);
+  const lastLagWarnRef = useRef(-Infinity);
   const armedOrOpenRef = useRef(false);
   useEffect(() => { armedOrOpenRef.current = arm.on || !!row; });
   useEffect(() => {
-    lastTickRef.current = Date.now();
+    // The monotonic clock (not Date.now): a wall-clock jump (a clock sync, a changed system time) is not a slowed timer.
+    lastTickRef.current = performance.now();
     const id = setInterval(() => {
-      const now = Date.now();
+      const now = performance.now();
       const gap = now - lastTickRef.current;
       lastTickRef.current = now;
       if (leaderRef.current && armedOrOpenRef.current && gap > LAG_WARN_MS && now - lastLagWarnRef.current > LAG_WARN_EVERY_MS) {

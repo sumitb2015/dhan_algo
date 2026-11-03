@@ -208,7 +208,7 @@ test('PAPER: the MTM guard watches AUTO\'s own position - a stop-loss closes the
   await expect(page.getByLabel('MTM stop-loss in boxes', { exact: true })).toHaveValue('10');
   await page.getByRole('button', { name: '₹ Rupees' }).click();
   await page.getByLabel('MTM stop-loss in rupees', { exact: true }).fill('50');
-  await page.getByRole('button', { name: 'Update' }).click();
+  await page.getByTestId('pnf-guard-card').getByRole('button', { name: 'Update', exact: true }).click();
   await page.waitForTimeout(2500);                                      // the guard's baseline is set on its first priced tick
   // +1 point against the short x 65 = Rs 65 of loss, past the Rs 50 stop (the forming bar prints no brick: the rule exit stays out)
   state.tick = { ltp: 101.05, at: ist(10, 31, 20) };
