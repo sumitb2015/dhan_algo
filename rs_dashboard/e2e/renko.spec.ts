@@ -29,6 +29,7 @@ async function install(page: Page, blocked: Call[], ledgerCalls: string[]) {
     }
     if (p === '/api/straddle-pnf/live' && method === 'GET') return json(route, { success: true, bridge: true, hub: true, quote: null, last: null, legs: [{ quote: null, last: null }] });
     if (p === '/api/live-indices' && method === 'POST') return json(route, { success: true });
+    if (p === '/api/straddle-pnf/server-guard') return json(route, { success: true, guards: {} });   // the page syncs its MTM guard to the server watcher
     if (method === 'GET') return json(route, { success: true });
     blocked.push({ method, path: p, search: u.search, body: null });
     return route.fulfill({ status: 599, body: 'blocked by e2e mock' });

@@ -31,6 +31,7 @@ async function install(page: Page, blocked: Call[]) {
     if (p === '/api/live-indices' && method === 'POST') return json(route, { success: true });   // the header's Nifty / VIX chips
     if (p.endsWith('/funds')) return json(route, { success: true, data: { availabelBalance: 100000 } });
     if (p === '/api/scalper/poll') return json(route, { positions: [], positionsError: null });
+    if (p === '/api/straddle-pnf/server-guard') return json(route, { success: true, guards: {} });   // the page syncs its MTM guard to the server watcher
     if (method === 'GET') return json(route, { success: true });
     blocked.push({ method, path: p, search: u.search, body: null });
     return route.fulfill({ status: 599, body: 'blocked by e2e mock' });

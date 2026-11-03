@@ -83,3 +83,25 @@ freshness as every rule (the brick must have formed on the newest closed bar; on
 N-brick (first opposite brick, no stop, no target). After that exit the reversal brick itself satisfies the entry for the other side
 (N = 1), so the chart flips straight into the new direction; with N >= 2 it waits for the Nth brick. Arming does not require a fresh
 reversal, so the first brick after arming mid-run enters. UNVALIDATED. `model.trend`, not drawn as chart markers.
+
+## Server-side exit watcher (added 2026-11-04)
+The tab runs AUTO, so a closed or sleeping tab used to leave an open REAL position with no stop. `lib/autoServerWatcher.ts` (started from
+`instrumentation.node.ts`, idle until a guard is synced) now enforces the page's MTM guard levels - target, **stop-loss**, trailing, protect
+profit, in rupees or boxes - on every open REAL AUTO row from the dashboard SERVER, with the tab closed. It places **no entries** and runs no
+strategy rules (the opposite-brick exit stays in the tab): exits and the guard only.
+- The page syncs each chart's guard (`POST /api/straddle-pnf/server-guard`, file `debug/auto_server_guards.json`: levels, broker, mode, box size).
+  A page reload adopts a guard the server still holds, so the card shows what is enforced.
+- A row is measured from its OWN entry price (`lib/autoServerGuard.ts`, tested); only rows of the synced broker and mode, REAL and `open`.
+- Prices: the same bridge as the page (`lib/pnfLiveBridge.ts`); no live price for a leg = the watcher pauses on that row and logs it.
+- A trip is a normal ledger exit: `beginExit` under the ledger lock (first taker owns the exit, so a page and the server cannot both send),
+  then the `exitOwn` order (`lib/pnfOrderExec.ts`, shared with the order route), then `close` / `markUnknown` / `abortExit`. An unknown outcome is
+  never resent. A closed row's reason is `server guard: <rule>`; an open tab disarms AUTO when it sees one.
+- Measured like the page's guard: from the entry price when the guard was on first, from the row's P&L at the moment it was switched on
+  otherwise. A row from an earlier day is reported, never exited. At the market's end-of-day time the watcher squares a guarded row off
+  too; with no live price (every leg must have ticked within 10 min) it pauses and logs.
+- A rejected exit is retried every 10 s, and after 5 failures the watcher stands down for a minute and says so. A ledger write that fails after
+  an order went out is queued and retried, never dropped. A page that switches its guard off stops an exit already queued.
+- A mode / broker switch removes a chart's server guard only when that chart holds no AUTO position; a server guard held for another broker or mode
+  than the page opened in is announced with a "Switch it off" button, never left enforcing unseen.
+- NOT covered: a tab-less re-entry never happens (no entries), the rule exit (opposite brick / Two-back stop) still needs the tab, and the
+  watcher only protects what the guard's levels describe - with the guard OFF there is no server stop.

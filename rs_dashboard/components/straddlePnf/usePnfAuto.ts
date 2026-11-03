@@ -122,6 +122,16 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
 
   const row: AutoRow | undefined = ledger.rows.find(r => r.chart === chart && isLive(r));
 
+  // The dashboard SERVER exited this chart's position (its MTM guard, with or without this tab): AUTO is switched off here too, or a trend
+  // rule would re-enter on the next brick. Only an exit after this arming counts (an older one must not disarm a fresh arming).
+  useEffect(() => {
+    if (!arm.on) return;
+    const hit = ledger.rows.find(r => r.chart === chart && r.mode === arm.mode && (r.exitT ?? r.pendingSince ?? 0) > arm.watermarkT
+      && ((r.state === 'closed' && (r.reason ?? '').startsWith('server guard')) || (r.state === 'unknownExit' && (r.note ?? '').startsWith('server guard'))));
+    if (hit) onDisarm(`the server guard exited chart ${chart}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ledger, arm.on, arm.watermarkT]);
+
   const haltNow = useCallback((why: string) => {
     haltRef.current = why;
     setHalt(why);

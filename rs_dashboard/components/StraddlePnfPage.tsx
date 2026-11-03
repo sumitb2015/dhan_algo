@@ -14,6 +14,7 @@ import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import BrokerBooks from './straddlePnf/BrokerBooks';
 import { buildPaperTrades } from '@/lib/pnfPaperBook';
 import { rupeesPerBox } from '@/lib/pnfGuardBoxes';
+import type { LadderGuard } from '@/lib/priceLadderGuard';
 import { modelForRule, ruleText } from '@/lib/pnfAutoRule';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
 import { BROKERS, useBrokerSelector } from '@/hooks/useBrokerSelector';
@@ -691,11 +692,59 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const rc = railCharts.find(x => x.chart === c);
     return rc ? rupeesPerBox((c === 2 ? c2 : c1).model.box, guardPositions[rc.targetKey]?.lots, rc.unitsPerLot[0]) : null;
   };
+  // The guard is also enforced by the dashboard SERVER on open REAL AUTO positions (lib/autoServerWatcher.ts), so a closed or sleeping tab
+  // does not leave one without its stop: every change of a chart's guard is synced to it.
+  const syncServerGuard = (c: 1 | 2, g: LadderGuard | null) => {
+    const boxPts = (c === 2 ? c2 : c1).model.box;
+    if (g && (g.targetBoxes != null || g.stopBoxes != null) && !(boxPts > 0)) {
+      toast.warning(`The server copy of chart ${c}'s guard was NOT updated: its box size is not known yet, so the box levels cannot be enforced with the tab closed. It updates once the chart has its box.`, { duration: 15_000 });
+      return;
+    }
+    const levels = g ? Object.fromEntries((['target', 'stop', 'trailBy', 'lockAt', 'lockKeep', 'lockStepEvery', 'lockStepKeep', 'targetBoxes', 'stopBoxes'] as const).filter(k => g[k] != null).map(k => [k, g[k]])) : undefined;
+    void fetch(`/api/straddle-pnf/server-guard?scope=${scope}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(g ? { chart: c, on: true, broker, mode: tradeMode, boxPts, levels } : { chart: c, on: false }),
+    }).catch(() => { /* the page's own guard still runs; the server copy is the backstop */ });
+  };
   const guards = usePnfGuard({
     charts: railCharts.map(c => ({ chart: c.chart, targetKey: c.targetKey })), positions: guardPositions, positionsLoaded: positionsInfo.loaded,
-    scope: `${broker}:${tradeMode}`, leaderRef, exitChart, rupeesPerBox: boxRupees, tradeKey: c => autoOf(c).row?.id ?? null, storeKey: prefKey(chart, 'straddle-pnf-guard-'),
+    scope: `${broker}:${tradeMode}`, leaderRef, exitChart, rupeesPerBox: boxRupees, tradeKey: c => autoOf(c).row?.id ?? null, syncServer: syncServerGuard, storeKey: prefKey(chart, 'straddle-pnf-guard-'),
     onEvent: (c, kind, text) => { if (kind === 'warn') { toast.warning(text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); } else toast(text); void c; },
   });
+  // A box-level guard is converted to rupees with the chart's box size: when that changes (or first becomes known), the server copy follows.
+  useEffect(() => {
+    for (const c of [1, 2] as const) {
+      const g = guards.guardOf(c);
+      if (g.on && (g.targetBoxes != null || g.stopBoxes != null)) syncServerGuard(c, g);
+    }
+    // only when a chart's box size changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [c1.model.box, c2.model.box]);
+  // A guard the server still holds (the tab was closed or reloaded with it on): the page picks it up, so what the server enforces is what the card shows.
+  const adoptedRef = useRef(false);
+  useEffect(() => {
+    if (adoptedRef.current) return;
+    adoptedRef.current = true;
+    void (async () => {
+      try {
+        const j = await (await fetch(`/api/straddle-pnf/server-guard?scope=${scope}`)).json() as { guards?: Record<string, { broker: string; mode: 'PAPER' | 'REAL'; levels: LadderGuard }> };
+        for (const [k, cfg] of Object.entries(j.guards ?? {})) {
+          const chartN = Number(k.split(':')[1]);
+          if (chartN !== 1 && chartN !== 2) continue;
+          if (cfg.broker === broker && cfg.mode === tradeMode) guards.adopt(chartN, cfg.levels);
+          else {
+            // Held for another broker / mode than this page opened in (a page always opens in PAPER): say so, never leave it enforcing unseen.
+            toast.warning(`The server is still guarding chart ${chartN}'s open ${cfg.mode} position on ${cfg.broker} (MTM guard with the tab closed). Switch the page to ${cfg.broker} ${cfg.mode} to see and edit it.`, {
+              duration: Infinity,
+              action: { label: 'Switch it off', onClick: () => { void fetch(`/api/straddle-pnf/server-guard?scope=${scope}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chart: chartN, on: false }) }); } },
+            });
+          }
+        }
+      } catch { /* none to adopt */ }
+    })();
+    // once per page load
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const railFor = (c: ChartId) => {
     const rc = railCharts.find(x => x.chart === c);
     if (!rc) return undefined;

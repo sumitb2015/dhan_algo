@@ -188,4 +188,9 @@ if (process.env.DASHBOARD_NO_BACKGROUND === '1') {
   import('./lib/priceLadderServer').then(m => m.startPriceLadderLoop()).catch(err => {
     console.warn('[price-ladder] could not start the watcher:', err);
   });
+  // P&F / Renko AUTO: enforces the page's MTM guard (stop-loss included) on open REAL AUTO positions with every tab closed.
+  // Idle (one file read every 2.5 s) until the page has synced a guard.
+  import('./lib/autoServerWatcher').then(m => m.startAutoServerLoop()).catch(err => {
+    console.warn('[auto-server-guard] could not start the watcher:', err);
+  });
 }

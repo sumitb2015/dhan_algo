@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { isLive, parseLedger, type AutoLedger } from './pnfAutoLedger.ts';
+import { applyAutoOp, isLive, parseLedger, type AutoLedger, type AutoOp } from './pnfAutoLedger.ts';
+import { withFileLock, writeJsonAtomic } from './lockedJsonFile.ts';
 import type { PnfScope } from './pnfScope.ts';
 
 // The P&F / Renko AUTO ledger files (debug/pnf_auto_state.json, debug/renko_auto_state.json), read by the ledger route and by the
@@ -25,4 +26,22 @@ export function reservedByAuto(ledger: AutoLedger, broker: string, targetKey: st
     r.legs.forEach((l, i) => { if (i < legs) out[i] += sign * (Number(l.units) || 0); });
   }
   return out;
+}
+
+/**
+ * One ledger op applied under the same file lock and atomic write as the ledger route (so the server watcher and a page can never
+ * overwrite each other; whoever takes a row's `beginExit` first owns that exit). Returns the op's own result.
+ */
+export async function applyAutoLedgerOp(scope: PnfScope, op: AutoOp): Promise<{ ok: true } | { ok: false; error: string }> {
+  const file = autoFileFor(scope);
+  try {
+    return await withFileLock(`${file}.lock`, 5_000, scope === 'renko' ? 'Renko AUTO ledger' : 'P&F AUTO ledger', () => {
+      const r = applyAutoOp(readAutoLedger(scope), op);
+      if (!r.ok) return { ok: false as const, error: r.error };
+      writeJsonAtomic(file, r.ledger);
+      return { ok: true as const };
+    });
+  } catch (e) {
+    return { ok: false, error: (e as Error).message };
+  }
 }

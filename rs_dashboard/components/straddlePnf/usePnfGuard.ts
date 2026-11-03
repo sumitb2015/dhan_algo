@@ -39,7 +39,7 @@ const saveLevels = (key: string, chart: number, g: LadderGuard) => {
   try { localStorage.setItem(`${key}${chart}`, JSON.stringify(Object.fromEntries(FIELDS.filter(f => g[f] != null).map(f => [f, g[f]])))); } catch { /* ignore */ }
 };
 
-export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderRef, exitChart, onEvent, rupeesPerBox, tradeKey, storeKey = KEY }: {
+export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderRef, exitChart, onEvent, rupeesPerBox, tradeKey, syncServer, storeKey = KEY }: {
   charts: GuardChart[];
   positions: Record<string, LadderPosition | null>;
   positionsLoaded: boolean;
@@ -57,6 +57,8 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   rupeesPerBox: (chart: 1 | 2) => number | null;
   /** The id of the AUTO trade open on this chart (null when none): a new id is a new trade, so the guard starts it from its own baseline. */
   tradeKey: (chart: 1 | 2) => string | null;
+  /** Tells the dashboard server about this chart's guard (null: switched off) so it can enforce it on open REAL AUTO positions with the tab closed. */
+  syncServer: (chart: 1 | 2, guard: LadderGuard | null) => void;
   /** localStorage prefix of the remembered levels (the Renko page keeps its own). */
   storeKey?: string;
 }) {
@@ -65,6 +67,9 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   useEffect(() => { slotsRef.current = slots; });
   const scopeRef = useRef(scope);
   const onEventRef = useRef(onEvent);
+  const syncServerRef = useRef(syncServer);
+  const tradeKeyRef = useRef(tradeKey);
+  useEffect(() => { syncServerRef.current = syncServer; tradeKeyRef.current = tradeKey; });
   useEffect(() => { onEventRef.current = onEvent; });
   // Another broker or mode: nothing carries over (the levels stay, the switch goes off).
   useEffect(() => {
@@ -73,6 +78,11 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     const lost = Object.entries(slotsRef.current).filter(([, sl]) => sl.guard.on && sl.guard.tripped).map(([c]) => Number(c) as 1 | 2);
     for (const c of lost) onEventRef.current(c, 'warn', `MTM guard on chart ${c} was still exiting a position when the broker or mode changed: it stopped. Check Positions.`);
     setSlots({});
+    // The server copy goes with the page's guard - EXCEPT for a chart that still holds an AUTO position: that REAL position keeps its
+    // server stop (the page's guard is off now, but a position must never be left without its stop by a mode or broker switch).
+    for (const c of [1, 2] as const) {
+      if (slotsRef.current[c]?.guard.on && tradeKeyRef.current(c) === null) syncServerRef.current(c, null);
+    }
   }, [scope]);
 
   const levelsOf = useCallback((chart: number): LadderGuard => slots[chart]?.guard ?? readLevels(storeKey, chart), [slots, storeKey]);
@@ -89,6 +99,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     if (!on) {
       const g = old ?? readLevels(storeKey, chart.chart);
       setSlots(s => ({ ...s, [chart.chart]: { guard: { ...g, on: false, tripped: undefined, peak: undefined, floor: undefined }, base: null } }));
+      syncServer(chart.chart, null);
       return true;
     }
     const cleaned = cleanGuard(body);
@@ -97,6 +108,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     if (pos && pos.pnl === null) { toast.error('No live price for this position yet - the guard cannot read its P&L'); return false; }
     const next = carryRuntime(cleaned, old);
     saveLevels(storeKey, chart.chart, next);
+    syncServer(chart.chart, next);
     setSlots(s => ({ ...s, [chart.chart]: { guard: next, base: old?.on ? s[chart.chart]?.base ?? null : pos ? pos.entryPnl ?? pos.pnl : null } }));
     return true;
   };
@@ -118,6 +130,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     const cur = slotsRef.current[chart]?.guard;
     if (!cur?.tripped || cur.firedAt !== at || settledTrip.current[chart] === at) return;
     settledTrip.current[chart] = at!;
+    if (!keepOn) syncServerRef.current(chart as 1 | 2, null);
     setSlots(s => {
       const g = s[chart]?.guard;
       if (!g || g.firedAt !== at) return s;
@@ -228,5 +241,11 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     }
   };
 
-  return { guardOf: levelsOf, mtmOf, post, armDefault };
+  /** A guard the server still holds from before a reload / a closed tab: switch it on here with its levels (the guard stays ON until the user stops it). */
+  const adopt = (chart: 1 | 2, levels: LadderGuard) => {
+    setSlots(s => (s[chart]?.guard.on ? s : { ...s, [chart]: { guard: { ...levels, on: true, tripped: undefined, peak: undefined, floor: undefined }, base: null } }));
+    saveLevels(storeKey, chart, levels);
+  };
+
+  return { guardOf: levelsOf, mtmOf, post, armDefault, adopt };
 }

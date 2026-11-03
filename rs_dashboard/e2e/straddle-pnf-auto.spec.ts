@@ -70,6 +70,7 @@ async function install(page: Page, opts: { reply?: (b: Body) => Record<string, u
     if (p.endsWith('/funds')) return json(route, { success: true, data: { availabelBalance: 100000 } });
     if (p === '/api/scalper/poll') return json(route, { positions: [], positionsError: null });
     if (p === '/api/live-indices' && method === 'POST') return json(route, { success: true });
+    if (p === '/api/straddle-pnf/server-guard') return json(route, { success: true, guards: {} });   // the page syncs its MTM guard to the server watcher
     if (method === 'GET') return json(route, { success: true });
     return route.fulfill({ status: 599, body: `unmocked ${method} ${p}` });
   });
