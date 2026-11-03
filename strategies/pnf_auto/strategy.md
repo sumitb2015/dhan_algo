@@ -1,5 +1,7 @@
 # P&F AUTO — double-bottom SELL / double-top BUY, exit on the first column reversal
 
+> User-facing guide for the Renko page (rules, guard, server watcher, limits): [docs/RENKO_AUTO_GUIDE.md](../../docs/RENKO_AUTO_GUIDE.md).
+
 > [!warning] UNVALIDATED
 > There is no backtest or replay of these rules yet. Run it in PAPER first. REAL is armed per page load with a second,
 > explicit click, and every REAL order is reserved in the ledger before it is sent.
