@@ -249,7 +249,9 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
           if (d.action === 'exit' && d.reason === 'eod') { busyRef.current = true; try { await exit(row, 'eod', null); } finally { busyRef.current = false; } }
           return;
         }
-        const d = decideAuto({ model, position: { side: row.side, entryBarT: row.entryBarT, stop: row.stop }, watermarkT: watermarkRef.current, nowS, market, price });
+        // The end-of-day time is the POSITION's market (saved on the row), never the chart's `market`: that reads 'NSE' until the history has
+        // loaded (a page reload, an instrument or setting change), which would flatten an MCX position at the NSE 15:15 straight away.
+        const d = decideAuto({ model, position: { side: row.side, entryBarT: row.entryBarT, stop: row.stop }, watermarkT: watermarkRef.current, nowS, market: rowMarket(row), price });
         if (d.action !== 'exit') { setNote('holding'); return; }
         if (d.reason === 'reversal' && price === null) { setNote('reversal seen, waiting for a price'); return; }
         busyRef.current = true;
