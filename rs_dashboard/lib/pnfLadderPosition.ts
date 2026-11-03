@@ -12,6 +12,8 @@ export interface LadderPosition {
   avg: number | null;
   /** Realised + open P&L in rupees on this chart's contracts; null when an open leg has no price. */
   pnl: number | null;
+  /** The P&L the position had when it opened, when that is known (an AUTO paper row: 0). The MTM guard measures from this, not from the first time it saw the position. */
+  entryPnl?: number;
 }
 
 function sideOf(lots: number[]): 'LONG' | 'SHORT' | 'MIXED' | null {

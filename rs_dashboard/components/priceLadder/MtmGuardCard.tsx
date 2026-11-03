@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { Info, ShieldCheck } from 'lucide-react';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
+import { effectiveGuard } from '@/lib/pnfGuardBoxes';
 
 // The MTM guard of one ladder + broker + SIM/REAL mode: target, stop-loss, trailing and Protect profit over the P&L of
 // the orders this ladder placed (the other ladder has its own). The server watcher enforces it (lib/priceLadderGuard.ts), so it works with this tab closed. Numbers are
@@ -21,7 +22,6 @@ type Draft = Record<Field, string>;
 const LABELS: Record<Field, string> = { target: 'Target', stop: 'Stop-loss', trailBy: 'Trail by', lockAt: 'When MTM reaches', lockKeep: 'Lock at least', lockStepEvery: 'Then every', lockStepKeep: 'raise lock by', targetBoxes: 'Target (boxes)', stopBoxes: 'Stop-loss (boxes)' };
 
 const toDraft = (g?: LadderGuard): Draft => Object.fromEntries(ALL_FIELDS.map(f => [f, g?.[f] != null ? String(g[f]) : ''])) as Draft;
-const lowest = (a?: number, b?: number) => (a === undefined ? b : b === undefined ? a : Math.min(a, b));
 const rs = (v: number) => `${v < 0 ? '−' : ''}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`;
 
 function Box({ label, value, onChange, step = 100, unit = '₹' }: { label: string; value: string; onChange: (v: string) => void; step?: number; unit?: string }) {
@@ -87,10 +87,10 @@ export function MtmGuardCard({ broker, real, ladderId = 1, mtm, guard, post, hel
   /** Already past one of its own levels? Then switching on exits everything on the next tick — say so first. */
   const alreadyPast = (v: Record<string, number | undefined>): string | null => {
     if (mtm == null) return null;
-    const tgt = lowest(v.target, v.targetBoxes != null && rupeesPerBox ? v.targetBoxes * rupeesPerBox : undefined);
-    const stp = lowest(v.stop, v.stopBoxes != null && rupeesPerBox ? v.stopBoxes * rupeesPerBox : undefined);
-    if (tgt != null && mtm >= tgt) return `MTM ${rs(mtm)} is already at or above the target`;
-    if (stp != null && mtm <= -stp) return `MTM ${rs(mtm)} is already at or below the stop-loss`;
+    // the same folding of box levels into rupees that the guard itself enforces
+    const eff = effectiveGuard({ on: true, ...v }, rupeesPerBox ?? null);
+    if (eff.target != null && mtm >= eff.target) return `MTM ${rs(mtm)} is already at or above the target`;
+    if (eff.stop != null && mtm <= -eff.stop) return `MTM ${rs(mtm)} is already at or below the stop-loss`;
     if (v.lockAt != null && v.lockKeep != null && v.lockKeep >= 0 && mtm >= v.lockAt && mtm <= v.lockKeep) return `MTM ${rs(mtm)} is already inside the locked profit`;
     return null;
   };

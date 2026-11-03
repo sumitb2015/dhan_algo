@@ -39,7 +39,7 @@ const saveLevels = (key: string, chart: number, g: LadderGuard) => {
   try { localStorage.setItem(`${key}${chart}`, JSON.stringify(Object.fromEntries(FIELDS.filter(f => g[f] != null).map(f => [f, g[f]])))); } catch { /* ignore */ }
 };
 
-export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderRef, exitChart, onEvent, rupeesPerBox, storeKey = KEY }: {
+export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderRef, exitChart, onEvent, rupeesPerBox, tradeKey, storeKey = KEY }: {
   charts: GuardChart[];
   positions: Record<string, LadderPosition | null>;
   positionsLoaded: boolean;
@@ -55,6 +55,8 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   onEvent: (chart: 1 | 2, kind: 'warn' | 'info', text: string) => void;
   /** What one chart box is worth in rupees on that chart's open position (null when unknown): turns the box target / stop into rupees. */
   rupeesPerBox: (chart: 1 | 2) => number | null;
+  /** The id of the AUTO trade open on this chart (null when none): a new id is a new trade, so the guard starts it from its own baseline. */
+  tradeKey: (chart: 1 | 2) => string | null;
   /** localStorage prefix of the remembered levels (the Renko page keeps its own). */
   storeKey?: string;
 }) {
@@ -95,7 +97,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     if (pos && pos.pnl === null) { toast.error('No live price for this position yet - the guard cannot read its P&L'); return false; }
     const next = carryRuntime(cleaned, old);
     saveLevels(storeKey, chart.chart, next);
-    setSlots(s => ({ ...s, [chart.chart]: { guard: next, base: old?.on ? s[chart.chart]?.base ?? null : pos?.pnl ?? null } }));
+    setSlots(s => ({ ...s, [chart.chart]: { guard: next, base: old?.on ? s[chart.chart]?.base ?? null : pos ? pos.entryPnl ?? pos.pnl : null } }));
     return true;
   };
 
@@ -103,6 +105,10 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   /** The `firedAt` of the last trip each chart settled, so a slow or repeated exit result settles a trip once and never touches the next trade. */
   const settledTrip = useRef<Record<number, number>>({});
   const flatSince = useRef<Record<number, number | null>>({});
+  /** Per chart: the AUTO trade id last seen, the last known box value (rupees) and whether the unreadable-box warning was given this trade. */
+  const lastTrade = useRef<Record<number, string | null>>({});
+  const lastRpb = useRef<Record<number, number>>({});
+  const warnedBox = useRef<Record<number, boolean>>({});
   /**
    * A trip is over (`at` = its fire time; a result for any other trip is ignored). `keepOn`: the guard has done its job for this trade
    * and STAYS ON until the user switches it off - the tripped state, peak and locked floor are cleared and the baseline dropped, so the
@@ -122,7 +128,9 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
       : `MTM guard fired (${reason}); what is left on the contract belongs to another page's AUTO, so the guard switched off.`);
   };
   const exitThen = (chart: number, reason: string, at: number | undefined) => {
-    void exitChart(chart as 1 | 2, reason).then(done => { if (done === 'kept') settle(chart, reason, at, false); else if (done) settle(chart, reason, at, true); });
+    // 'placed' is not 'done': the exit can still be rejected or part-filled, and re-baselining on what is left would forgive the loss
+    // already taken. The trip settles when the book reads flat (below); only a position that is not this chart's switches the guard off.
+    void exitChart(chart as 1 | 2, reason).then(done => { if (done === 'kept') settle(chart, reason, at, false); }).catch(() => { /* retried */ });
   };
   const tickRef = useRef<() => void>(() => {});
   useEffect(() => {
@@ -138,8 +146,20 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
           // Still holding: keep exiting (retried, never faster than every few seconds). Flat and read: the guard has done its job.
           if (pos) {
             if (nowS - (exitedAt.current[c.chart] ?? 0) > RETRY_EXIT_S) { exitedAt.current[c.chart] = nowS; exitThen(c.chart, g.tripped, g.firedAt); }
-          } else if (positionsLoaded && nowS - (g.firedAt ?? nowS) > RETRY_EXIT_S) settle(c.chart, g.tripped, g.firedAt, true);
+          } else if (positionsLoaded && nowS - (g.firedAt ?? nowS) >= (scope.endsWith(':REAL') ? RETRY_EXIT_S : 1)) settle(c.chart, g.tripped, g.firedAt, true);
           continue;
+        }
+        // A new AUTO trade (the trend rule exits and re-enters within a tick, so the book is never seen flat in between): it is measured
+        // from its own start, with its own best-so-far and locked floor.
+        const tk = tradeKey(c.chart);
+        if (!(c.chart in lastTrade.current)) lastTrade.current[c.chart] = tk;
+        else if (lastTrade.current[c.chart] !== tk) {
+          lastTrade.current[c.chart] = tk;
+          lastRpb.current[c.chart] = 0; warnedBox.current[c.chart] = false;
+          if (slot.base !== null || g.peak !== undefined || g.floor !== undefined) {
+            setSlots(s => ({ ...s, [c.chart]: { guard: { ...g, peak: undefined, floor: undefined }, base: null } }));
+            continue;
+          }
         }
         // Flat (the book read): the last trade is over, whoever closed it. Its baseline, peak and locked floor are dropped so the next
         // trade is measured from its own start; the guard itself stays ON. A REAL book must read flat for a while first (a poll can miss a
@@ -155,12 +175,20 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
         }
         // No baseline yet: the first priced position sets it (earlier realised P&L must not count).
         if (slot.base === null) {
-          if (pos && pos.pnl !== null) { const b0 = pos.pnl; setSlots(s => ({ ...s, [c.chart]: { ...slot, base: b0 } })); }
+          if (pos && pos.pnl !== null) { const b0 = pos.entryPnl ?? pos.pnl; setSlots(s => ({ ...s, [c.chart]: { ...slot, base: b0 } })); }
           continue;
         }
         const mtm = pos && pos.pnl !== null ? pos.pnl - slot.base : null;
         // Box levels become rupee levels at the position's current box value; the first level reached (rupees or boxes) exits.
-        const rpb = rupeesPerBox(c.chart);
+        // The box value is remembered from this trade's earlier ticks: a momentary gap (box still loading, lots read as 0) must not turn a
+        // box-only stop into no stop at all. Never known while a position is open: say so, once per trade.
+        const now = rupeesPerBox(c.chart);
+        if (now !== null && now > 0) lastRpb.current[c.chart] = now;
+        const rpb = now ?? (lastRpb.current[c.chart] > 0 ? lastRpb.current[c.chart] : null);
+        if (rpb === null && pos && (g.targetBoxes !== undefined || g.stopBoxes !== undefined) && !warnedBox.current[c.chart]) {
+          warnedBox.current[c.chart] = true;
+          onEventRef.current(c.chart, 'warn', 'MTM guard cannot read the box value of this position yet: its box target / stop are NOT enforced until it can. Use a rupee level if this persists.');
+        }
         const eff = effectiveGuard(g, rpb);
         const er = evalGuard(eff, mtm);
         // the runtime (peak / floor) is kept, the levels stay the user's own (not the folded ones)

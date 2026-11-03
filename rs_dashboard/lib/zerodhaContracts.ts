@@ -79,12 +79,13 @@ export async function zerodhaOptionContract(underlying: string, expiry: string, 
 /** Kite's own row for an MCX / NFO future (zerodha_<underlying>_futures.json). */
 export interface ZerodhaFutureContract { tradingsymbol: string; lotSize: number; tick: number | null; exchange: string }
 
-/** One background refresh at a time per underlying, and not again for an hour after an attempt (a dead session fails every time). */
+/** One background refresh at a time per underlying. After an attempt the next waits an hour when a file is on disk (a stale file still serves), but only 30 s when there is none (nothing can be ordered without it, and the user may have just logged in). */
 const FUTURES_RETRY_MS = 60 * 60 * 1000;
+const FUTURES_RETRY_MISSING_MS = 30 * 1000;
 const futuresAttempt = new Map<string, number>();
-function refreshFuturesInBackground(underlying: string): Promise<void> {
+function refreshFuturesInBackground(underlying: string, fileMissing: boolean): Promise<void> {
   const last = futuresAttempt.get(underlying) ?? 0;
-  if (Date.now() - last < FUTURES_RETRY_MS) return Promise.resolve();
+  if (Date.now() - last < (fileMissing ? FUTURES_RETRY_MISSING_MS : FUTURES_RETRY_MS)) return Promise.resolve();
   futuresAttempt.set(underlying, Date.now());
   return dedupe(`zerodha-futures-cache:${underlying}`, () =>
     runPythonJson<{ success: boolean; error?: string }>(CACHE_SCRIPT, ['--underlying', underlying, '--futures'], 60_000))
@@ -101,8 +102,8 @@ export async function zerodhaFutureContract(underlying: string, expiry: string):
   const file = path.join(PROJECT_ROOT, 'debug', `zerodha_${underlying.toLowerCase()}_futures.json`);
   let mtime: number | null = null;
   try { mtime = fs.statSync(file).mtimeMs; } catch { /* missing */ }
-  if (mtime === null) await refreshFuturesInBackground(underlying);
-  else if (Date.now() - mtime > CACHE_MAX_AGE_MS) void refreshFuturesInBackground(underlying);
+  if (mtime === null) await refreshFuturesInBackground(underlying, true);
+  else if (Date.now() - mtime > CACHE_MAX_AGE_MS) void refreshFuturesInBackground(underlying, false);
   const raw = cachedRows(file) as unknown;
   if (!Array.isArray(raw)) return null;
   // The dump's own shape, checked: a row without a string expiry / symbol would make the pick throw.

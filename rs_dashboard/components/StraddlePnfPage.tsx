@@ -14,6 +14,7 @@ import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import BrokerBooks from './straddlePnf/BrokerBooks';
 import { buildPaperTrades } from '@/lib/pnfPaperBook';
 import { rupeesPerBox } from '@/lib/pnfGuardBoxes';
+import { modelForRule, ruleText } from '@/lib/pnfAutoRule';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
 import { BROKERS, useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { withSavedBroker } from '@/hooks/withSavedBroker';
@@ -589,10 +590,20 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     // AUTO's own position on this chart: closed through AUTO's own exit (a PAPER row lives in the AUTO ledger, not the paper book
     // below; a REAL one exits only the units AUTO opened). It also switches AUTO off, so a trend rule cannot re-enter at once.
     const ar = autoOf(c).row;
-    if (ar && ar.targetKey === rc.targetKey && ar.mode === tradeMode) return ar.state === 'open' ? autoOf(c).exitNow('mtm guard') : false;
+    const aRow = ar && ar.targetKey === rc.targetKey && ar.mode === tradeMode ? ar : null;
+    if (aRow) {
+      // An AUTO row on another broker than the page's cannot be exited from here (the exit goes to the broker the row was opened on).
+      if (aRow.broker !== broker) { toast.warning(`MTM guard: chart ${c}'s AUTO position is on ${aRow.broker}, not ${broker} - switch the page back to exit it`, { duration: 15_000 }); return false; }
+      if (aRow.state !== 'open') return false;
+      const closed = await autoOf(c).exitNow('mtm guard');
+      // REAL: anything else on the contract (a manual lot) goes on the next retry, once the book shows what is left - an immediate close
+      // could repeat AUTO's own exit before the broker has booked it. PAPER is local and exact: it carries on below.
+      if (!closed || tradeMode === 'REAL') return false;
+    }
     if (tradeMode === 'PAPER') {
       const legs = paper[rc.targetKey];
-      if (!legs?.some(l => l.lots !== 0) || rc.legPrices.some(p => p == null || p <= 0)) return false;      // nothing open / no price yet: retried
+      if (!legs?.some(l => l.lots !== 0)) return aRow !== null;                                            // nothing else open (AUTO's row was the position)
+      if (rc.legPrices.some(p => p == null || p <= 0)) return false;                                       // no price yet: retried
       const lotsOpen = Math.max(...legs.map(l => Math.abs(l.lots)));
       const action = legs[0].lots > 0 ? 'SELL' : 'BUY';
       setPaper(prev => {
@@ -671,7 +682,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     for (const rc of railCharts) {
       const r = autoLedger.rows.find(x => x.mode === 'PAPER' && x.state === 'open' && x.chart === rc.chart && x.targetKey === rc.targetKey);
       if (r && !guardPositions[rc.targetKey]) {
-        guardPositions[rc.targetKey] = { side: r.side === 'SELL' ? 'SHORT' : 'LONG', lots: r.lots, avg: r.entryPrice, pnl: rc.price != null && rc.price > 0 ? rowPnl(r.side, r.entryPrice, rc.price, r.unitsPerPoint) : null };
+        guardPositions[rc.targetKey] = { side: r.side === 'SELL' ? 'SHORT' : 'LONG', lots: r.lots, avg: r.entryPrice, entryPnl: 0, pnl: rc.price != null && rc.price > 0 ? rowPnl(r.side, r.entryPrice, rc.price, r.unitsPerPoint) : null };
       }
     }
   }
@@ -682,7 +693,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   };
   const guards = usePnfGuard({
     charts: railCharts.map(c => ({ chart: c.chart, targetKey: c.targetKey })), positions: guardPositions, positionsLoaded: positionsInfo.loaded,
-    scope: `${broker}:${tradeMode}`, leaderRef, exitChart, rupeesPerBox: boxRupees, storeKey: prefKey(chart, 'straddle-pnf-guard-'),
+    scope: `${broker}:${tradeMode}`, leaderRef, exitChart, rupeesPerBox: boxRupees, tradeKey: c => autoOf(c).row?.id ?? null, storeKey: prefKey(chart, 'straddle-pnf-guard-'),
     onEvent: (c, kind, text) => { if (kind === 'warn') { toast.warning(text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); } else toast(text); void c; },
   });
   const railFor = (c: ChartId) => {
@@ -729,12 +740,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     };
   };
   const auto1 = usePnfAuto({
-    chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: autoRule[1] === 'trend' ? { ...c1.model, signals: c1.model.trend } : autoRule[1] === 'twoback' ? { ...c1.model, signals: c1.model.twoBack } : autoRule[1] === 'oneback' ? { ...c1.model, signals: c1.model.oneBack } : c1.model, price: priceOf(feed1), stale: feed1.stale,
+    chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: modelForRule(autoRule[1], c1.model), price: priceOf(feed1), stale: feed1.stale,
     market: feed1.market, complete: feed1.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
     onEvent: onAutoEvent, onDisarm: () => disarm(1), scope,
   });
   const auto2 = usePnfAuto({
-    chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: autoRule[2] === 'trend' ? { ...c2.model, signals: c2.model.trend } : autoRule[2] === 'twoback' ? { ...c2.model, signals: c2.model.twoBack } : autoRule[2] === 'oneback' ? { ...c2.model, signals: c2.model.oneBack } : c2.model, price: priceOf(feed2), stale: feed2.stale,
+    chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: modelForRule(autoRule[2], c2.model), price: priceOf(feed2), stale: feed2.stale,
     market: feed2.market, complete: feed2.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
     onEvent: onAutoEvent, onDisarm: () => disarm(2), scope,
   });
@@ -919,7 +930,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
                       onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} halt={autoOf(c).halt}
                       onResolve={autoOf(c).resolve} onExit={() => { void autoOf(c).exitNow(); }} nowMs={now}
                       autoRule={renko ? autoRule[c] : undefined} onAutoRule={renko ? r => setAutoRule(a => ({ ...a, [c]: r })) : undefined}
-                      rule={renko && autoRule[c] === 'trend' ? `Renko trend: SELL / BUY on every brick that completes ${(c === 2 ? settings2 : settings).reversal} same-colour brick(s), no reversal needed; exit on the first opposite brick, then re-enter the new direction` : renko && autoRule[c] === 'oneback' ? 'One-back: 2+ bricks, 1-brick pullback, 2 bricks resume past the swing; stop one brick beyond the pullback' : renko && autoRule[c] === 'twoback' ? 'Two-back: 3+ bricks, 2-brick pullback, 3 bricks resume past the swing; stop one brick beyond the pullback' : renko ? `Renko SELL / BUY after ${(c === 2 ? settings2 : settings).reversal} confirming bricks, exit on the first opposite brick` : undefined}
+                      rule={renko ? ruleText(autoRule[c], (c === 2 ? settings2 : settings).reversal) : undefined}
                       disabledReason={target.kind === 'index' ? 'No AUTO on an index: chart its future or an option'
                         : replay.active ? 'Bar replay is open: close it to arm live AUTO'
                         : tradeMode === 'REAL' ? mcxUnconfirmedCapError(broker, feed.market === 'MCX' && target.kind === 'futures', autoLots[c]) : null} />

@@ -10,7 +10,8 @@ import { rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
 const MAX_LOTS = 20;
 const inr = (n: number) => `${n > 0 ? '+' : n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 
-export type AutoRule = 'nbrick' | 'trend' | 'twoback' | 'oneback';
+export type { AutoRule } from '@/lib/pnfAutoRule';
+import type { AutoRule } from '@/lib/pnfAutoRule';
 
 export interface AutoControlsProps {
   chart: 1 | 2;

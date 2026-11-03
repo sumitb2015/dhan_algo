@@ -274,6 +274,8 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
    */
   const exitNow = async (why = 'manual'): Promise<boolean> => {
     if (!row || row.state !== 'open' || busyRef.current) return false;
+    // A close at the entry price would book a loss as flat: only the end-of-day exit may run without a price.
+    if (price === null) { setNote('exit waiting for a live price'); onEvent({ chart, kind: 'info', text: `AUTO C${chart} exit (${why}) is waiting for a live price` }); return false; }
     busyRef.current = true;
     try {
       onDisarm(`${why} exit`);
