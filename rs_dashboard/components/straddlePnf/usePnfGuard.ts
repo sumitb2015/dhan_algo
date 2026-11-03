@@ -13,7 +13,11 @@ import type { LadderPosition } from '@/lib/pnfLadderPosition';
 const FIELDS = ['target', 'stop', 'trailBy', 'lockAt', 'lockKeep', 'lockStepEvery', 'lockStepKeep'] as const;
 const KEY = 'straddle-pnf-guard-';
 const TICK_MS = 1_000;
+/** Target and stop-loss (Rs) a chart's guard starts with when the user has never saved levels for it. */
+export const DEFAULT_GUARD_RUPEES = 1_000;
 const RETRY_EXIT_S = 6;
+/** How long a chart must read flat before the guard drops its baseline: a REAL book read can briefly miss a position (polled every 5 s). PAPER is local and exact. */
+const FLAT_RESET_S_REAL = 12;
 
 export interface GuardChart { chart: 1 | 2; targetKey: string }
 /** `base` is the chart's P&L when the guard was switched on, or null when it was flat then: captured when a position first appears. */
@@ -22,7 +26,9 @@ type Slot = { guard: LadderGuard; base: number | null };
 const readLevels = (key: string, chart: number): LadderGuard => {
   try {
     const raw = localStorage.getItem(`${key}${chart}`);
-    const j = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+    // Nothing ever saved for this chart: the defaults (what AUTO switches the guard on with). Saved levels - even a cleared field - win.
+    if (raw === null) return { on: false, target: DEFAULT_GUARD_RUPEES, stop: DEFAULT_GUARD_RUPEES };
+    const j = JSON.parse(raw) as Record<string, unknown>;
     const g: LadderGuard = { on: false };
     for (const f of FIELDS) { const n = Number(j[f]); if (Number.isFinite(n) && (n > 0 || (f === 'lockKeep' && n === 0))) g[f] = n; }
     return g;
@@ -41,9 +47,10 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   leaderRef: React.RefObject<boolean>;
   /**
    * Cancel the chart's resting orders and bracket exits, then square its position off. True = nothing of this chart's is left to
-   * exit (e.g. what remains on the contract is the other page's AUTO position), so the guard stops retrying.
+   * exit, so the guard stops retrying. 'kept' = what remains on the contract is the other page's AUTO position: the guard has no
+   * position of its own to watch any more and switches off (it must never baseline on, or exit, a position it does not own).
    */
-  exitChart: (chart: 1 | 2, reason: string) => Promise<boolean>;
+  exitChart: (chart: 1 | 2, reason: string) => Promise<boolean | 'kept'>;
   onEvent: (chart: 1 | 2, kind: 'warn' | 'info', text: string) => void;
   /** localStorage prefix of the remembered levels (the Renko page keeps its own). */
   storeKey?: string;
@@ -90,11 +97,30 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   };
 
   const exitedAt = useRef<Record<number, number>>({});
-  /** The guard has done its job (its exit left nothing of this chart's): switched off, the reason kept for the card. */
-  const finish = (chart: number, reason: string) => setSlots(s => {
-    const g = s[chart]?.guard;
-    return g ? { ...s, [chart]: { guard: { ...g, on: false, tripped: undefined, firedReason: reason }, base: null } } : s;
-  });
+  /** The `firedAt` of the last trip each chart settled, so a slow or repeated exit result settles a trip once and never touches the next trade. */
+  const settledTrip = useRef<Record<number, number>>({});
+  const flatSince = useRef<Record<number, number | null>>({});
+  /**
+   * A trip is over (`at` = its fire time; a result for any other trip is ignored). `keepOn`: the guard has done its job for this trade
+   * and STAYS ON until the user switches it off - the tripped state, peak and locked floor are cleared and the baseline dropped, so the
+   * NEXT trade is measured from its own start. Not `keepOn` (an exit that left only another page's position): it switches OFF.
+   */
+  const settle = (chart: number, reason: string, at: number | undefined, keepOn: boolean) => {
+    const cur = slotsRef.current[chart]?.guard;
+    if (!cur?.tripped || cur.firedAt !== at || settledTrip.current[chart] === at) return;
+    settledTrip.current[chart] = at!;
+    setSlots(s => {
+      const g = s[chart]?.guard;
+      if (!g || g.firedAt !== at) return s;
+      return { ...s, [chart]: { guard: { ...g, on: keepOn, tripped: undefined, peak: undefined, floor: undefined, firedAt: undefined, firedReason: reason }, base: null } };
+    });
+    onEventRef.current(chart as 1 | 2, 'info', keepOn
+      ? `MTM guard fired (${reason}) and is still ON: it measures the next trade from its own start. Switch it off to stop guarding.`
+      : `MTM guard fired (${reason}); what is left on the contract belongs to another page's AUTO, so the guard switched off.`);
+  };
+  const exitThen = (chart: number, reason: string, at: number | undefined) => {
+    void exitChart(chart as 1 | 2, reason).then(done => { if (done === 'kept') settle(chart, reason, at, false); else if (done) settle(chart, reason, at, true); });
+  };
   const tickRef = useRef<() => void>(() => {});
   useEffect(() => {
     tickRef.current = () => {
@@ -108,13 +134,23 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
         if (g.tripped) {
           // Still holding: keep exiting (retried, never faster than every few seconds). Flat and read: the guard has done its job.
           if (pos) {
-            if (nowS - (exitedAt.current[c.chart] ?? 0) > RETRY_EXIT_S) { exitedAt.current[c.chart] = nowS; void exitChart(c.chart, g.tripped).then(done => { if (done) finish(c.chart, g.tripped!); }); }
-          } else if (positionsLoaded && nowS - (g.firedAt ?? nowS) > RETRY_EXIT_S) {
-            setSlots(s => ({ ...s, [c.chart]: { guard: { ...g, on: false, tripped: undefined, firedReason: g.tripped }, base: null } }));
-          }
+            if (nowS - (exitedAt.current[c.chart] ?? 0) > RETRY_EXIT_S) { exitedAt.current[c.chart] = nowS; exitThen(c.chart, g.tripped, g.firedAt); }
+          } else if (positionsLoaded && nowS - (g.firedAt ?? nowS) > RETRY_EXIT_S) settle(c.chart, g.tripped, g.firedAt, true);
           continue;
         }
-        // Flat when switched on: the first priced position sets the baseline (earlier realised P&L must not count).
+        // Flat (the book read): the last trade is over, whoever closed it. Its baseline, peak and locked floor are dropped so the next
+        // trade is measured from its own start; the guard itself stays ON. A REAL book must read flat for a while first (a poll can miss a
+        // position for a moment, and forgetting its loss then would delay the stop); PAPER is local and exact.
+        if (pos) flatSince.current[c.chart] = null;
+        else if (positionsLoaded) {
+          const since = (flatSince.current[c.chart] ??= nowS);
+          const wait = scope.endsWith(':REAL') ? FLAT_RESET_S_REAL : 0;
+          if (nowS - since >= wait && (slot.base !== null || g.peak !== undefined || g.floor !== undefined)) {
+            setSlots(s => ({ ...s, [c.chart]: { guard: { ...g, peak: undefined, floor: undefined }, base: null } }));
+            continue;
+          }
+        }
+        // No baseline yet: the first priced position sets it (earlier realised P&L must not count).
         if (slot.base === null) {
           if (pos && pos.pnl !== null) { const b0 = pos.pnl; setSlots(s => ({ ...s, [c.chart]: { ...slot, base: b0 } })); }
           continue;
@@ -123,9 +159,11 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
         const r = evalGuard(g, mtm);
         if (r.reason) {
           exitedAt.current[c.chart] = nowS;
-          setSlots(s => ({ ...s, [c.chart]: { guard: { ...r.guard, tripped: r.reason!, firedAt: nowS }, base: slot.base } }));
+          const trippedSlot = { guard: { ...r.guard, tripped: r.reason!, firedAt: nowS }, base: slot.base };
+          slotsRef.current = { ...slotsRef.current, [c.chart]: trippedSlot };      // settle() reads this: a PAPER exit can answer before the next render
+          setSlots(s => ({ ...s, [c.chart]: trippedSlot }));
           onEvent(c.chart, 'warn', `MTM guard: ${r.reason} - exiting chart ${c.chart}`);
-          void exitChart(c.chart, r.reason).then(done => { if (done) finish(c.chart, r.reason!); });
+          exitThen(c.chart, r.reason, nowS);
         } else if (r.guard !== g) {
           setSlots(s => ({ ...s, [c.chart]: { guard: r.guard, base: slot.base } }));
         }
@@ -137,5 +175,22 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     return () => clearInterval(id);
   }, []);
 
-  return { guardOf: levelsOf, mtmOf, post };
+  /**
+   * AUTO was switched on for this chart: switch its guard on too, with the remembered levels (the 1000 / 1000 defaults when none were
+   * ever saved, or when every rule was cleared). A guard already on is left alone.
+   */
+  const armDefault = async (chart: GuardChart): Promise<void> => {
+    const cur = levelsOf(chart.chart);
+    if (cur.on) return;
+    const none = cur.target == null && cur.stop == null && cur.trailBy == null && cur.lockAt == null;
+    const body = { ...cur, on: true, ...(none ? { target: DEFAULT_GUARD_RUPEES, stop: DEFAULT_GUARD_RUPEES } : {}) };
+    if (await post(chart)(body)) {
+      onEventRef.current(chart.chart, 'info', `MTM guard switched on with AUTO: target ${body.target != null ? `₹${body.target}` : '-'}, stop ₹${body.stop ?? '-'}. It stays on until you switch it off.`);
+    } else {
+      // post() already said why (no live price for an open position, an invalid level): AUTO is armed, its guard is not.
+      onEventRef.current(chart.chart, 'warn', `AUTO is armed on chart ${chart.chart} WITHOUT its MTM guard - open the MTM Guard card and switch it on.`);
+    }
+  };
+
+  return { guardOf: levelsOf, mtmOf, post, armDefault };
 }

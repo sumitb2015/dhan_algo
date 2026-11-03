@@ -581,7 +581,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   };
   // MTM guard (page-held, per chart): on a trip, cancel the chart's orders and bracket exits, then square its position off.
   /** Resolves true when nothing of this chart's is left to exit (the guard is done), false / void while it should keep trying. */
-  const exitChart = async (c: ChartId, reason: string): Promise<boolean> => {
+  const exitChart = async (c: ChartId, reason: string): Promise<boolean | 'kept'> => {
     const rc = railCharts.find(x => x.chart === c);
     if (!rc) return false;
     await resting.cancelAllFor(rc.targetKey);
@@ -606,7 +606,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       const res = await fetch('/api/straddle-pnf/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ broker, mode: 'REAL', target: rc.target, close: true, scope }) });
       const j = await res.json() as { success?: boolean; error?: string; message?: string; outcome?: string };
       // What is left on the contract is the other page's AUTO position: this chart has nothing more to exit
-      if (j.outcome === 'kept') { toast.info(`MTM guard on chart ${c}: ${j.message}`, { duration: 15_000 }); return true; }
+      if (j.outcome === 'kept') { toast.info(`MTM guard on chart ${c}: ${j.message}`, { duration: 15_000 }); return 'kept'; }
       if (j.success) { toast.success(`MTM guard squared off chart ${c}: ${reason}`); chime({ kind: 'manual', outcome: 'placed', close: true }); }
       else if (res.status !== 409) toast.warning(`MTM guard exit: ${j.error ?? j.message ?? 'not confirmed'} - it is retried while the position is open`, { duration: 15_000 });
     } catch { toast.warning('MTM guard exit: no clean reply - check Positions; it is retried', { duration: 15_000 }); }
@@ -748,6 +748,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     replay.open();
   };
   const armChart = (c: ChartId, on: boolean) => {
+    // AUTO and its MTM guard go together: arming AUTO switches the chart's guard on with its saved levels (1000 / 1000 by default).
+    if (on) { const rc = railCharts.find(x => x.chart === c); if (rc) void guards.armDefault({ chart: rc.chart, targetKey: rc.targetKey }); }
     const m = (c === 2 ? c2 : c1).model;
     setAutoArm(a => ({ ...a, [c]: on ? { on: true, mode: tradeMode, watermarkT: m.lastBarT ?? Math.floor(nowSec()) } : DISARMED }));
     void autoPost({ op: 'log', chart: c, t: nowSec(), text: on ? `AUTO armed (${tradeMode}, ${autoLots[c]} lot)` : 'AUTO stopped' });
