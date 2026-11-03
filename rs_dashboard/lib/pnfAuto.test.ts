@@ -64,7 +64,7 @@ test('end of day: flat at 15:15 on NSE (even with no reversal), and the MCX wind
   const short = { side: 'SELL' as const, entryBarT: ist(10, 30) };
   assert.deepEqual(decideAuto({ model: model(), position: short, watermarkT: 0, nowS: ist(15, 15), market: 'NSE' }), { action: 'exit', reason: 'eod' });
   const mcx = autoWindow('MCX', ist(12, 0));
-  assert.ok(mcx && mcx.eodExit > mcx.entryCutoff && mcx.entryCutoff > mcx.open);
+  assert.ok(mcx && mcx.eodExit >= mcx.entryCutoff && mcx.entryCutoff > mcx.open);
 });
 
 test('an NSE weekend: no entries, but an open position still exits on a reversal', () => {
@@ -104,8 +104,9 @@ test('a CAS stock (NSE_CAS) squares off at 15:10 from 3 Aug 2026, before continu
   assert.deepEqual(autoWindow('NSE_CAS', at('2026-10-30T10:00:00')), { open: 9 * 60 + 15, entryCutoff: 15 * 60, eodExit: 15 * 60 + 10 });
   assert.deepEqual(autoWindow('NSE_CAS', at('2026-07-31T10:00:00')), { open: 9 * 60 + 15, entryCutoff: 15 * 60 + 5, eodExit: 15 * 60 + 15 });
   assert.equal(autoWindow('NSE', at('2026-10-30T10:00:00'))!.eodExit, 15 * 60 + 15);   // a stock without derivatives: unchanged
-  // MCX on a 23:55 close (from 2 Nov 2026): exit 23:45, entries stop 10 minutes before it
-  assert.deepEqual(autoWindow('MCX', at('2026-11-03T12:00:00')), { open: 9 * 60, entryCutoff: 23 * 60 + 35, eodExit: 23 * 60 + 45 });
+  // MCX on a 23:55 close (from 2 Nov 2026): exit 23:45, entries stop 10 minutes before the CLOSE (23:45); a 23:30 close: 23:20 / 23:20
+  assert.deepEqual(autoWindow('MCX', at('2026-11-03T12:00:00')), { open: 9 * 60, entryCutoff: 23 * 60 + 45, eodExit: 23 * 60 + 45 });
+  assert.deepEqual(autoWindow('MCX', at('2026-10-30T12:00:00')), { open: 9 * 60, entryCutoff: 23 * 60 + 20, eodExit: 23 * 60 + 20 });
 });
 
 test('a two-back position exits on its stop only: not on an opposite brick, and an EOD still flattens it', () => {

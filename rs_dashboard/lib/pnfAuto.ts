@@ -15,8 +15,11 @@ export type AutoSide = 'BUY' | 'SELL';
 
 /** NSE: flat at 15:15. MCX: measured back from that day's close. */
 export const NSE_EOD_EXIT_MIN = 15 * 60 + 15;
-/** No new entry in the last 10 minutes before the end-of-day exit (NSE 15:05, MCX 23:35 on a 23:55 close), on every market. */
+/** NSE: no new entry in the last 10 minutes before the end-of-day exit (15:05). */
 export const ENTRY_CUTOFF_BEFORE_EOD = 10;
+/** MCX: no new entry in the last 10 minutes before the market's CLOSE (23:45 on a 23:55 close) - the same minute as the end-of-day exit, so a
+ *  trade taken in the last minute is squared off at once. Chosen by the user on 2026-11-03 (the exit is 10 minutes before the close). */
+export const MCX_ENTRY_CUTOFF_BEFORE_CLOSE = 10;
 /**
  * A stock with derivatives in NSE's Closing Auction Session (market 'NSE_CAS', from CAS_START): continuous trading stops at 15:15,
  * so the 15:15 exit would land in the auction (filled at the auction price around 15:35, or refused). It squares off 5 minutes
@@ -75,8 +78,7 @@ export function autoWindow(market: Market, t: number): { open: number; entryCuto
     const eodExit = market === 'NSE_CAS' && close <= NSE_EOD_EXIT_MIN ? close - CAS_EOD_EXIT_BEFORE_CLOSE : NSE_EOD_EXIT_MIN;
     return { open, entryCutoff: eodExit - ENTRY_CUTOFF_BEFORE_EOD, eodExit };
   }
-  const eodExit = close - MCX_EOD_EXIT_BEFORE_CLOSE;
-  return { open, entryCutoff: eodExit - ENTRY_CUTOFF_BEFORE_EOD, eodExit };
+  return { open, entryCutoff: close - MCX_ENTRY_CUTOFF_BEFORE_CLOSE, eodExit: close - MCX_EOD_EXIT_BEFORE_CLOSE };
 }
 
 /**

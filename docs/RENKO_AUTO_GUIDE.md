@@ -43,7 +43,7 @@ chart under the trend rule are a flip: the first is the exit of the old position
   one second after the bar closes. If the price runs several boxes inside the minute, AUTO does not enter until the bar closes.
 - **Arming ignores history.** Everything already on the chart when you arm is skipped; the first qualifying brick formed afterwards counts.
 - **Fresh signals only.** The signal must be on the newest closed bar and less than 3 minutes old. A missed signal is never chased.
-- **Session.** Only during the market session and before the entry cutoff, which is **10 minutes before the end-of-day exit** on every market: NSE 15:05 (a stock in the closing auction session: 15:00), MCX 23:35 on a 23:55 close (23:05 on a 23:30 close).
+- **Session.** Only during the market session and before the entry cutoff: **NSE 15:05** (10 minutes before the 15:15 exit; a stock in the closing auction session 15:00), **MCX 10 minutes before the market close** = 23:45 on a 23:55 close (23:20 on a 23:30 close), the same minute as the MCX square-off, so a trade taken in the last minute is squared off at once.
   Holidays and weekends count as closed.
 - **Feed.** Needs a live price and a fresh feed. A stale feed pauses entries.
 - **Refusals.** Three refused entries in a row halt the chart.
