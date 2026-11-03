@@ -8,6 +8,8 @@
 import { istMinuteOfDay, sessionWindow, type Market } from './straddlePnfLive.ts';
 import { isSellSignal, type PnfColumn, type PnfSignal } from './straddlePnf.ts';
 import { isNseTradingDay, istDateIso } from './nseHolidays.ts';
+import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
+import type { Target } from './pnfTarget.ts';
 
 export type AutoSide = 'BUY' | 'SELL';
 
@@ -52,6 +54,15 @@ export type AutoDecision =
   /** Reversal: `boxPrice` is the confirmed box the reversal column reached on its first bar. EOD has none (no box event). */
   | { action: 'exit'; reason: 'reversal' | 'eod' | 'stop'; col?: number; boxPrice?: number | null }
   | { action: 'none'; why: string };
+
+/**
+ * The market a row's contract trades in. Saved on the row when it opens; an older row without it is read off its contract (the MCX
+ * underlyings), never off the chart that happens to be on screen: the end-of-day time of a CRUDEOILM position is MCX's, whatever
+ * instrument the user has switched the chart to.
+ */
+export function rowMarket(row: { market?: Market; target: Pick<Target, 'symbol'> }): Market {
+  return row.market ?? (row.target.symbol.toUpperCase() in MCX_LOT_MULTIPLIER ? 'MCX' : 'NSE');
+}
 
 /** [entry cutoff, EOD exit] in IST minutes of the day for `market` at `t` (null when the market is shut that day). */
 export function autoWindow(market: Market, t: number): { open: number; entryCutoff: number; eodExit: number } | null {

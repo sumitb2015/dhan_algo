@@ -9,6 +9,7 @@
 //   open → exiting (beginExit) → closed (close) | open (abortExit: cleanly refused) | unknownExit (markUnknown)
 //   unknown* / a stale entering / exiting → open | closed by the user (resolve). PAPER rows open as `open` and close directly.
 import { parseTarget, targetKey, type Target } from './pnfTarget.ts';
+import type { Market } from './straddlePnfLive.ts';
 
 export type AutoMode = 'PAPER' | 'REAL';
 export type AutoRowState = 'entering' | 'open' | 'exiting' | 'closed' | 'unknownEntry' | 'unknownExit';
@@ -22,6 +23,8 @@ export interface AutoRow {
   chart: 1 | 2;
   target: Target;
   targetKey: string;
+  /** The market the contract trades in, saved at entry: its end-of-day exit time comes from this, not from whatever chart is on screen. */
+  market?: Market;
   mode: AutoMode;
   broker: string;
   side: 'BUY' | 'SELL';
@@ -105,6 +108,7 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       if (!Number.isInteger(r.lots) || r.lots < 1 || r.lots > 20) return { ok: false, status: 400, error: 'lots must be 1-20' };
       if (![r.entryT, r.entryBarT, r.entryPrice, r.unitsPerPoint].every(finite) || !r.id) return { ok: false, status: 400, error: 'Invalid row' };
       if (r.stop !== undefined && (!finite(r.stop) || (r.side === 'BUY' ? r.stop >= r.entryPrice : r.stop <= r.entryPrice))) return { ok: false, status: 400, error: 'stop must be beyond the entry, on the losing side' };
+      if (r.market !== undefined && !(['NSE', 'NSE_CAS', 'NSE_FNO', 'MCX'] as const).includes(r.market)) return { ok: false, status: 400, error: 'Invalid market' };
       if (led.rows.some(x => x.id === r.id)) return { ok: false, status: 409, error: 'Row already exists' };
       const live = led.rows.find(x => x.chart === r.chart && isLive(x));
       if (live) return { ok: false, status: 409, error: `Chart ${r.chart} already holds an AUTO position (${live.state})` };

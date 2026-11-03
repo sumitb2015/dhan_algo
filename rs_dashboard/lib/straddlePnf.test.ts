@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildPnf, detectSignals, vwap, exitTags, sessionOf, type Bar } from './straddlePnf.ts';
+import { buildPnf, detectSignals, vwap, exitTags, sessionOf, columnAtOrBefore, type Bar } from './straddlePnf.ts';
 
 const BASE_T = Date.UTC(2026, 9, 23, 3, 45) / 1000; // 2026-10-23 09:15 IST
 const A = 100;
@@ -204,4 +204,13 @@ test('a grid anchored far from the first bar does not draw a column across the g
   assert.equal(columns[0].dir, 'X');
   assert.ok(columns[0].low > 30 && columns[0].high < 70, `first column ${columns[0].low}-${columns[0].high} stays near the first bar`);
   assert.equal(columns[0].boxes, 1);
+});
+
+test('columnAtOrBefore: a bar with no column of its own belongs to the latest column that had started, never column 0', () => {
+  const cols = [{ start: 100, end: 160 }, { start: 160, end: 220 }, { start: 400, end: 460 }];   // 220-400: bars that printed no brick
+  assert.equal(columnAtOrBefore(cols, 300), 1);
+  assert.equal(columnAtOrBefore(cols, 160), 1);
+  assert.equal(columnAtOrBefore(cols, 460), 2);
+  assert.equal(columnAtOrBefore(cols, 50), 0, 'before the first column');
+  assert.equal(columnAtOrBefore([], 300), 0);
 });

@@ -226,3 +226,14 @@ export function exitTags(columns: PnfColumn[], bars: Bar[], vwapSeries: (number 
   });
   return tags;
 }
+
+/**
+ * The column a time with no column of its own belongs to: the latest column that had started by `t` (0 before the first). A Renko bar
+ * that printed no brick has no column, and a trade marker (a manual / guard exit books the bar before the decision) must sit on the
+ * brick it followed, not at column 0 at the far left. Pure.
+ */
+export function columnAtOrBefore(columnTimes: { start: number; end: number }[], t: number): number {
+  let k = 0;
+  for (let j = 0; j < columnTimes.length && columnTimes[j].start <= t; j++) k = j;
+  return k;
+}

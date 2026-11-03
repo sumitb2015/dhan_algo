@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { decideAuto } from '@/lib/pnfAuto';
+import { decideAuto, rowMarket } from '@/lib/pnfAuto';
 import { EMPTY_LEDGER, isLive, type AutoLedger, type AutoLeg, type AutoOp, type AutoRow } from '@/lib/pnfAutoLedger';
 import { istDateIso } from '@/lib/nseHolidays';
 import { targetKey, type Target } from '@/lib/pnfTarget';
@@ -147,7 +147,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
     const id = `pnfa-${chart}-${Date.now()}`;
     const nowS = Date.now() / 1000;
     const base = {
-      id, day: istDateIso(Date.now()), chart, target, mode: arm.mode, broker, side, lots, unitsPerPoint,
+      id, day: istDateIso(Date.now()), chart, target, market, mode: arm.mode, broker, side, lots, unitsPerPoint,
       legs: cur.legs.map(l => ({ label: l.label, key: l.key, units: (l.lotUnits ?? l.lot) * lots })), entryT: nowS, entryBarT: signalT, entryPrice: px,
       ...(box !== null ? { entryBox: box } : {}),
       ...(stop !== undefined ? { stop } : {}),
@@ -234,7 +234,7 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
         if (row.state !== 'open') { setNote(row.state === 'entering' || row.state === 'exiting' ? `${row.state}…` : 'unresolved - check the broker'); return; }
         if (row.targetKey !== tk) {
           // The chart was switched away from its position: only the EOD exit can still run (no model for that contract here).
-          const d = decideAuto({ model: { box: 0, signals: [], columns: [], columnTimes: [], lastBarT: null }, position: { side: row.side, entryBarT: row.entryBarT }, watermarkT: 0, nowS, market });
+          const d = decideAuto({ model: { box: 0, signals: [], columns: [], columnTimes: [], lastBarT: null }, position: { side: row.side, entryBarT: row.entryBarT }, watermarkT: 0, nowS, market: rowMarket(row) });
           setNote('position on another contract: watching the EOD exit only');
           if (d.action === 'exit' && d.reason === 'eod') { busyRef.current = true; try { await exit(row, 'eod', null); } finally { busyRef.current = false; } }
           return;

@@ -129,3 +129,10 @@ test('a stop must sit on the losing side of the entry: a short needs it above, a
   const l = run(EMPTY_LEDGER, { op: 'open', row: row({ side: 'BUY', stop: 90 }) });
   assert.equal(l.rows[0].stop, 90);
 });
+
+test('an AUTO row keeps its market; an unknown market is refused', () => {
+  const l = run(EMPTY_LEDGER, { op: 'open', row: row({ market: 'MCX' }) });
+  assert.equal(l.rows[0].market, 'MCX');
+  assert.ok(!applyAutoOp(EMPTY_LEDGER, { op: 'open', row: row({ market: 'LSE' }) } as AutoOp).ok);
+  assert.equal(run(EMPTY_LEDGER, { op: 'open', row: row() }).rows[0].market, undefined, 'older clients send none');
+});

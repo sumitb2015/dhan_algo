@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decideAuto, reversalColumn, autoWindow, boxPriceAt, type AutoModel } from './pnfAuto.ts';
+import { decideAuto, reversalColumn, autoWindow, boxPriceAt, rowMarket, type AutoModel } from './pnfAuto.ts';
 import type { PnfColumn, PnfSignal } from './straddlePnf.ts';
 
 // 2026-10-30 (a Friday, an NSE trading day) at IST hh:mm, as epoch seconds.
@@ -124,4 +124,16 @@ test('a stop gapped through books the price, not the stop (long and short)', () 
   assert.deepEqual(long, { action: 'exit', reason: 'stop', boxPrice: 85 });
   const short = decideAuto({ model: m, position: { side: 'SELL', entryBarT: ist(10, 0), stop: 110 }, watermarkT: 0, nowS: ist(10, 40), market: 'NSE', price: 118 });
   assert.deepEqual(short, { action: 'exit', reason: 'stop', boxPrice: 118 });
+});
+
+test('a row\'s end-of-day time comes from its own market, not the chart on screen: a CRUDEOILM long is not flattened at the NSE 15:15', () => {
+  const crude = { symbol: 'CRUDEOILM' };
+  assert.equal(rowMarket({ target: crude }), 'MCX', 'an older row without a saved market is read off its contract');
+  assert.equal(rowMarket({ market: 'NSE_CAS', target: crude }), 'NSE_CAS', 'a saved market wins');
+  assert.equal(rowMarket({ target: { symbol: 'NIFTY' } }), 'NSE');
+  const long = { side: 'BUY' as const, entryBarT: ist(21, 40) };
+  const at = ist(21, 47);                                              // 21:47 IST on a Friday: long past the NSE 15:15, hours before MCX's
+  const empty = model();
+  assert.deepEqual(decideAuto({ model: empty, position: long, watermarkT: 0, nowS: at, market: 'NSE' }), { action: 'exit', reason: 'eod' }, 'the wrong (NSE) market would have flattened it');
+  assert.equal(decideAuto({ model: empty, position: long, watermarkT: 0, nowS: at, market: rowMarket({ target: crude }) }).action, 'none');
 });

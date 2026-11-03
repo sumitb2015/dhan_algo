@@ -4,7 +4,7 @@ import { intervalLabel } from '@/lib/straddlePnfInterval';
 import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
-import { isSellSignal, type PnfExecutionMarker } from '@/lib/straddlePnf';
+import { columnAtOrBefore, isSellSignal, type PnfExecutionMarker } from '@/lib/straddlePnf';
 import { AlignLeft, AlignRight, Eye, EyeOff, MapPin, MapPinOff, Minus, Plus, RotateCcw, ChevronsLeftRight, ChevronsRightLeft } from 'lucide-react';
 import { layoutTags } from '@/lib/pnfTagLayout';
 import { timeAxisLabels, crosshairStamp } from '@/lib/straddlePnfTimeAxis';
@@ -941,7 +941,11 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               }
               if (found !== -1) colIdx = found;
               else if (m.t > model.columnTimes[model.columnTimes.length - 1].end) colIdx = liveCols.length - 1;
-              else colIdx = 0;
+              else {
+                // A bar between two columns printed no column of its own (a Renko bar that made no brick): the marker belongs to the
+                // latest column that had started by then, never to column 0 at the far left.
+                colIdx = Math.min(columnAtOrBefore(model.columnTimes, m.t), liveCols.length - 1);
+              }
             } else {
               colIdx = Math.max(0, liveCols.length - 1);
             }
