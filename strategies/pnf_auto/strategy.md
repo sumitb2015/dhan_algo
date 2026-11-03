@@ -75,3 +75,11 @@ the stop and exit are the Two-back ones. UNVALIDATED.
 | Stop / exit | As Two-back: one brick beyond the 1-brick pullback; exit on the stop touch or EOD, no target |
 
 `twoBackSignals` and `oneBackSignals` share one detector (`backSignals`) parameterised by trend / pullback / resume lengths.
+
+## Renko "N-brick (trend)" rule (same picker)
+A state-based variant of N-brick: no reversal is needed first. `trendSignals` (`lib/renko.ts`) signals on EVERY brick that is the latest
+of `Confirm` (N) consecutive same-colour bricks, so with N = 1 the next brick in a run you are already in is an entry. Same entry
+freshness as every rule (the brick must have formed on the newest closed bar; one that formed earlier is never chased), same exit as
+N-brick (first opposite brick, no stop, no target). After that exit the reversal brick itself satisfies the entry for the other side
+(N = 1), so the chart flips straight into the new direction; with N >= 2 it waits for the Nth brick. Arming does not require a fresh
+reversal, so the first brick after arming mid-run enters. UNVALIDATED. `model.trend`, not drawn as chart markers.

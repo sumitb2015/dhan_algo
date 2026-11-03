@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRenko, brickClose, renkoSignals, twoBackSignals, oneBackSignals, renkoSma, renkoSupertrend } from './renko.ts';
+import { buildRenko, brickClose, renkoSignals, trendSignals, twoBackSignals, oneBackSignals, renkoSma, renkoSupertrend } from './renko.ts';
 import { buildConfirmedModel, withLive } from './straddlePnfModel.ts';
 import { boxPriceAt, decideAuto } from './pnfAuto.ts';
 import type { Bar } from './straddlePnf.ts';
@@ -190,4 +190,14 @@ test('the Renko model carries the two-back and one-back signals; P&F carries non
   assert.deepEqual(m1.oneBack.map(s => s.kind), ['ONEBACK_BUY']);
   const pnf = buildConfirmedModel(two, 'sma', { boxMode: 'pts', boxPts: 10, reversal: 3, volume: false });
   assert.equal(pnf.twoBack.length + pnf.oneBack.length, 0);
+});
+
+test('trend N-brick: every brick of a run signals (no reversal needed), n = 2 skips the first brick of a run', () => {
+  const b = bars([22700, 22690, 22680, 22670, 22690, 22700]);
+  const { columns } = buildRenko(b, 10);
+  assert.deepEqual(columns.map(c => c.dir), ['O', 'O', 'O', 'X', 'X']);
+  const ref = new Array(b.length).fill(null);
+  assert.deepEqual(trendSignals(columns, b, ref, 1).map(s => `${s.kind}:${s.col}`), ['RENKO_SELL:0', 'RENKO_SELL:1', 'RENKO_SELL:2', 'RENKO_BUY:3', 'RENKO_BUY:4']);
+  assert.deepEqual(trendSignals(columns, b, ref, 2).map(s => `${s.kind}:${s.col}`), ['RENKO_SELL:1', 'RENKO_SELL:2', 'RENKO_BUY:4']);
+  assert.equal(new Set(trendSignals(columns, b, ref, 1).map(s => s.id)).size, 5);
 });

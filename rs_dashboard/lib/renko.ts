@@ -127,6 +127,26 @@ export function oneBackSignals(columns: PnfColumn[], bars: Bar[], reference: (nu
   return backSignals(columns, bars, reference, box, { trend: 2, pull: 1, resume: 2, buy: 'ONEBACK_BUY', sell: 'ONEBACK_SELL' });
 }
 
+/**
+ * Trend (state-based N-brick): a signal on EVERY brick that is the latest of `n` consecutive same-colour bricks, with no reversal
+ * needed first. With the chart already in a run, the next brick of that run signals; a reversal brick signals too (n = 1), which is
+ * the flip after an exit. AUTO still enters only on a brick that formed on the newest closed bar. Not drawn as chart markers.
+ */
+export function trendSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], n: number): PnfSignal[] {
+  const need = Math.max(1, Math.floor(n));
+  const out: PnfSignal[] = [];
+  let run = 0;
+  columns.forEach((c, col) => {
+    run = columns[col - 1] && columns[col - 1].dir === c.dir ? run + 1 : 1;
+    if (run < need) return;
+    const kind = c.dir === 'X' ? 'RENKO_BUY' : 'RENKO_SELL';
+    const price = brickClose(c);
+    const v = reference[c.startBar];
+    out.push({ id: `TREND_${kind}:${col}`, kind, col, bar: c.startBar, t: bars[c.startBar].t, price, belowVwap: v != null && price < v });
+  });
+  return out;
+}
+
 /** SMA of brick closes, read at each brick (null until `period` bricks exist) — TradingView's moving average on a Renko chart. */
 export function renkoSma(columns: PnfColumn[], period: number): (number | null)[] {
   let sum = 0;
