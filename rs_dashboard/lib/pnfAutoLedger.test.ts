@@ -141,24 +141,24 @@ test('REAL fills: the broker\'s average replaces the decision price, P&L is reco
   let l = run(EMPTY_LEDGER, { op: 'open', row: row({ mode: 'REAL', state: 'entering', side: 'BUY', entryPrice: 100, unitsPerPoint: 65 }) });
   l = run(l, { op: 'confirmEntry', id: 'r1', legs: [{ label: 'NIFTY NOV FUT', key: 'k', units: 65 }], orderIds: ['O1', '', 7 as unknown as string] });
   assert.deepEqual(l.rows[0].entryOrderIds, ['O1'], 'only real, non-empty ids are kept');
-  assert.ok(!applyAutoOp(l, { op: 'fillPrice', id: 'r1', which: 'exit', price: 99 }).ok, 'no exit fill while the row is open');
-  l = run(l, { op: 'fillPrice', id: 'r1', which: 'entry', price: 100.4 });          // bought a little worse than the 100 it decided on
+  assert.ok(!applyAutoOp(l, { op: 'fillPrice', id: 'r1', which: 'exit', price: 99, legCount: 1 }).ok, 'no exit fill while the row is open');
+  l = run(l, { op: 'fillPrice', id: 'r1', which: 'entry', price: 100.4, legCount: 1 });          // bought a little worse than the 100 it decided on
   assert.deepEqual([l.rows[0].entryPrice, l.rows[0].entryDecision, l.rows[0].entryFilled], [100.4, 100, true]);
   l = run(l, { op: 'beginExit', id: 'r1', t: 2000 });
   l = run(l, { op: 'close', id: 'r1', exitT: 3000, exitPrice: 110, reason: 'reversal', orderIds: ['O2'] });
   assert.equal(l.rows[0].pnl, (110 - 100.4) * 65, 'the close books against the FILLED entry');
   assert.deepEqual(l.rows[0].exitOrderIds, ['O2']);
-  l = run(l, { op: 'fillPrice', id: 'r1', which: 'exit', price: 109.7 });           // sold a little worse than the 110
+  l = run(l, { op: 'fillPrice', id: 'r1', which: 'exit', price: 109.7, legCount: 1 });           // sold a little worse than the 110
   assert.deepEqual([l.rows[0].exitPrice, l.rows[0].exitDecision, l.rows[0].exitFilled], [109.7, 110, true]);
   assert.ok(Math.abs(l.rows[0].pnl! - (109.7 - 100.4) * 65) < 1e-9);
   const rev = l.rev;
-  const again = run(l, { op: 'fillPrice', id: 'r1', which: 'exit', price: 50 });
+  const again = run(l, { op: 'fillPrice', id: 'r1', which: 'exit', price: 109.9, legCount: 1 });
   assert.equal(again.rows[0].exitPrice, 109.7, 'a price already filled stays');
   assert.equal(again.rev, rev, 'and nothing is written');
-  assert.ok(!applyAutoOp(l, { op: 'fillPrice', id: 'r1', which: 'entry', price: 0 }).ok);
-  assert.ok(!applyAutoOp(l, { op: 'fillPrice', id: 'nope', which: 'entry', price: 1 }).ok);
+  assert.ok(!applyAutoOp(l, { op: 'fillPrice', id: 'r1', which: 'entry', price: 0, legCount: 1 }).ok);
+  assert.ok(!applyAutoOp(l, { op: 'fillPrice', id: 'nope', which: 'entry', price: 1, legCount: 1 }).ok);
   const paper = run(EMPTY_LEDGER, { op: 'open', row: row({ id: 'p1' }) });
-  assert.ok(!applyAutoOp(paper, { op: 'fillPrice', id: 'p1', which: 'entry', price: 99 }).ok, 'PAPER has no broker fills');
+  assert.ok(!applyAutoOp(paper, { op: 'fillPrice', id: 'p1', which: 'entry', price: 99, legCount: 1 }).ok, 'PAPER has no broker fills');
 });
 
 test('a late entry fill re-prices an already closed row\'s P&L', () => {
@@ -167,6 +167,25 @@ test('a late entry fill re-prices an already closed row\'s P&L', () => {
   l = run(l, { op: 'beginExit', id: 'r1', t: 2 });
   l = run(l, { op: 'close', id: 'r1', exitT: 3, exitPrice: 95, reason: 'reversal' });
   assert.equal(l.rows[0].pnl, 50);
-  l = run(l, { op: 'fillPrice', id: 'r1', which: 'entry', price: 99 });              // the short really sold at 99
+  l = run(l, { op: 'fillPrice', id: 'r1', which: 'entry', price: 99, legCount: 1 });              // the short really sold at 99
   assert.equal(l.rows[0].pnl, 40);
+});
+
+test('fillPrice guards: the order count must match the legs, a price far from the decision is refused, rows closed without an AUTO order are not re-priced', () => {
+  const open2 = () => {
+    let l = run(EMPTY_LEDGER, { op: 'open', row: row({ mode: 'REAL', state: 'entering', side: 'SELL', entryPrice: 160, unitsPerPoint: 10 }) });
+    return run(l, { op: 'confirmEntry', id: 'r1', legs: [{ label: 'CE', key: 'c', units: 10 }, { label: 'PE', key: 'p', units: 10 }], orderIds: ['A', 'B'] });
+  };
+  const l = open2();
+  const oneLeg = applyAutoOp(l, { op: 'fillPrice', id: 'r1', which: 'entry', price: 80, legCount: 1 });
+  assert.ok(!oneLeg.ok && oneLeg.status === 409, 'a price from ONE of two legs is not the entry price (it would book 80 for a 160 straddle)');
+  const wild = applyAutoOp(l, { op: 'fillPrice', id: 'r1', which: 'entry', price: 80, legCount: 2 });
+  assert.ok(!wild.ok && wild.status === 422, 'a fill 50% from the decision price is a bad read, refused');
+  const ok = applyAutoOp(l, { op: 'fillPrice', id: 'r1', which: 'entry', price: 161.5, legCount: 2 });
+  assert.ok(ok.ok);
+  // flat at the broker / resolved: never re-priced
+  let f = run(l, { op: 'beginExit', id: 'r1', t: 5 });
+  f = run(f, { op: 'close', id: 'r1', exitT: 6, exitPrice: 160, reason: 'flat at broker' });
+  const late = applyAutoOp(f, { op: 'fillPrice', id: 'r1', which: 'entry', price: 161.5, legCount: 2 });
+  assert.ok(!late.ok && /flat at broker/.test(late.error), 'no fabricated P&L against a non-existent exit');
 });

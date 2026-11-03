@@ -26,6 +26,16 @@ export function finalAvgOf(r: OrderPriceRead | null | undefined): number {
   return FINAL.has(st) && r.filledQty > 0 ? r.avg : 0;
 }
 
+/**
+ * The average of an order that FULLY traded `qty`, or 0. Stricter than finalAvgOf: a part-filled order that was then cancelled (a
+ * market-protection cancel), or the first slice of a split order, reports a real average over only part of the quantity, and booking it as
+ * the price of the whole position would be wrong. Used where a ledger price is replaced by the fill.
+ */
+export function fullFillAvg(r: OrderPriceRead | null | undefined, qty: number): number {
+  if (!r || !(r.avg > 0) || String(r.status || '').toUpperCase() !== 'TRADED') return 0;
+  return r.filledQty >= qty ? r.avg : 0;
+}
+
 /** One network read of the order. Null = unreadable (rate limit, network). */
 export async function readOrderPrice(orderId: string, broker: 'dhan' | 'kotak' | 'zerodha' = 'dhan'): Promise<OrderPriceRead | null> {
   try {

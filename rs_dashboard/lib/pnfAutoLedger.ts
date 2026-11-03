@@ -73,6 +73,8 @@ export interface AutoLogEntry { t: number; chart: 1 | 2; text: string }
 export interface AutoLedger { rev: number; rows: AutoRow[]; log: AutoLogEntry[] }
 
 export const EMPTY_LEDGER: AutoLedger = { rev: 0, rows: [], log: [] };
+/** A broker fill further than this from the decision price is refused as a bad read (a leg missing, a wrong scale). */
+export const FILL_BAND = 0.2;
 const MAX_ROWS = 500;
 const MAX_LOG = 200;
 
@@ -90,7 +92,7 @@ export type AutoOp =
   | { op: 'abortExit'; id: string; note: string }
   | { op: 'markUnknown'; id: string; note: string }
   | { op: 'close'; id: string; exitT: number; exitPrice: number; reason: string; note?: string; exitBarT?: number; exitBox?: number; orderIds?: string[] }
-  | { op: 'fillPrice'; id: string; which: 'entry' | 'exit'; price: number }
+  | { op: 'fillPrice'; id: string; which: 'entry' | 'exit'; price: number; /** how many orders were summed: must be one per leg */ legCount: number }
   | { op: 'resolve'; id: string; as: 'open' | 'flat'; exitPrice?: number; t: number }
   | { op: 'log'; chart: 1 | 2; t: number; text: string }
   | { op: 'resetPaper' };
@@ -176,6 +178,13 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       const r = led.rows[i];
       if (r.mode !== 'REAL') return { ok: false, status: 409, error: 'Only a REAL row has broker fills' };
       if (!finite(op.price) || !(op.price > 0)) return { ok: false, status: 400, error: 'Invalid fill price' };
+      // A price summed over fewer orders than the row has legs (a leg that was already flat, a slice) is a fraction of the price, not the price.
+      if (op.legCount !== r.legs.length) return { ok: false, status: 409, error: `Fill covers ${op.legCount} order(s) but the row has ${r.legs.length} leg(s)` };
+      // A row closed without an AUTO order (flat at the broker, resolved by the user, refused) has no real exit to price against.
+      if (r.state === 'closed' && (r.reason === 'flat at broker' || r.reason === 'resolved' || r.reason === 'refused')) return { ok: false, status: 409, error: `Row was closed as ${r.reason}: nothing to re-price` };
+      // One wrong sum (a missing leg, a wrong scale, the wrong order) must not be locked in: a fill is within FILL_BAND of its decision price.
+      const ref = op.which === 'entry' ? (r.entryDecision ?? r.entryPrice) : (r.exitDecision ?? r.exitPrice);
+      if (finite(ref) && ref! > 0 && Math.abs(op.price / ref! - 1) > FILL_BAND) return { ok: false, status: 422, error: `Fill ${op.price} is more than ${FILL_BAND * 100}% from the decision price ${ref}` };
       const rows = [...led.rows];
       if (op.which === 'entry') {
         if (r.state === 'entering' || r.state === 'unknownEntry') return { ok: false, status: 409, error: `Row is ${r.state}` };

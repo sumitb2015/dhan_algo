@@ -10,7 +10,7 @@ import type { Broker } from '@/hooks/useBrokerSelector';
 import type { Market } from '@/lib/straddlePnfLive';
 import type { PanelModel } from '@/lib/straddlePnfModel';
 import { scopeQuery, type PnfScope } from '@/lib/pnfScope';
-import { fetchSliceTradedPrice } from '@/lib/tradedPriceClient';
+import { fullFillAvg, readOrderPrice } from '@/lib/tradedPriceClient';
 
 // The P&F AUTO engine for ONE chart (rules: lib/pnfAuto.ts; ledger: lib/pnfAutoLedger.ts; spec: strategies/pnf_auto/strategy.md).
 // Runs from the open page, in the leader tab only, on a stable 1 s tick. Entries need AUTO armed on this chart (armed per page
@@ -18,6 +18,9 @@ import { fetchSliceTradedPrice } from '@/lib/tradedPriceClient';
 // in the ledger before they are sent and an unknown outcome is never resent: the chart halts and the user resolves it.
 
 const TICK_MS = 1_000;
+/** A REAL fill that cannot be read after this many tries (a minute apart) stays at its decision price. */
+const SETTLE_MAX_TRIES = 5;
+const SETTLE_POLL_MS = 15_000;
 /** A gap this long between two ticks means the browser slowed the tab's timers. */
 const LAG_WARN_MS = 8_000;
 const LAG_WARN_EVERY_MS = 5 * 60_000;
@@ -138,40 +141,64 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ledger, arm.on, arm.watermarkT]);
 
-  // REAL fills: a row's entry / exit price starts as the chart's price at the DECISION. Once the broker reports its orders final, the
+  // REAL fills: a row's entry / exit price starts as the chart's price at the DECISION. Once the broker reports its orders FULLY traded, the
   // broker's average traded price (summed over a straddle's legs) replaces it and the P&L is recomputed (the `fillPrice` ledger op). Any
-  // leader tab does this from the order ids kept on the row, so it also happens after a reload or for an exit the server sent. An order
-  // that never reports final is left at its decision price and tried again a minute later.
+  // leader tab does this from the order ids kept on the row, so it also happens after a reload or for an exit the server sent.
+  // It only prices what it can price whole: one order per leg (a leg that was already flat has none), each fully traded for the leg's
+  // units (a partial fill, a cancelled remainder or the first slice of a split order is NOT the price of the position). Anything else
+  // keeps its decision price - shown with a `~` - after a few tries, and is said once in the ledger log.
   const settlingRef = useRef<Map<string, number>>(new Map());
+  const settleTriesRef = useRef<Map<string, number>>(new Map());
+  const settleRef = useRef<() => void>(() => {});
   useEffect(() => {
-    if (!leaderRef.current) return;
-    const todo: { r: AutoRow; which: 'entry' | 'exit' }[] = [];
-    for (const r of ledger.rows) {
-      if (r.chart !== chart || r.mode !== 'REAL') continue;
-      if (r.entryOrderIds?.length && !r.entryFilled && (r.state === 'open' || r.state === 'exiting' || r.state === 'closed')) todo.push({ r, which: 'entry' });
-      if (r.state === 'closed' && r.exitOrderIds?.length && !r.exitFilled) todo.push({ r, which: 'exit' });
-    }
-    for (const { r, which } of todo) {
-      const key = `${r.id}:${which}`;
-      if (Date.now() < (settlingRef.current.get(key) ?? 0)) continue;
-      settlingRef.current.set(key, Date.now() + 60_000);                       // in flight, or retried after a minute
-      void (async () => {
+    settleRef.current = () => {
+      if (!leaderRef.current) return;
+      const todo: { r: AutoRow; which: 'entry' | 'exit' }[] = [];
+      for (const r of ledger.rows) {
+        if (r.chart !== chart || r.mode !== 'REAL') continue;
+        // closed without an AUTO order (flat at the broker, resolved by hand, refused): no real exit to price against
+        if (r.state === 'closed' && (r.reason === 'flat at broker' || r.reason === 'resolved' || r.reason === 'refused')) continue;
+        if (r.entryOrderIds?.length && !r.entryFilled && (r.state === 'open' || r.state === 'exiting' || r.state === 'closed')) todo.push({ r, which: 'entry' });
+        if (r.state === 'closed' && r.exitOrderIds?.length && !r.exitFilled) todo.push({ r, which: 'exit' });
+      }
+      for (const { r, which } of todo) {
+        const key = `${r.id}:${which}`;
+        if (Date.now() < (settlingRef.current.get(key) ?? 0)) continue;
         const ids = (which === 'entry' ? r.entryOrderIds : r.exitOrderIds) ?? [];
-        let total = 0;
-        for (const id of ids) {
-          const px = await fetchSliceTradedPrice(id, 'open', Math.max(1, r.legs[0]?.units ?? 1), new Map(), { broker: r.broker as Broker });
-          if (!(px !== null && px > 0)) return;                                // not final yet: left as the decision price
-          total += px;
-        }
-        if (total > 0) {
-          const res = await post({ op: 'fillPrice', id: r.id, which, price: Math.round(total * 100) / 100 });
-          if (res.ok) settlingRef.current.set(key, Number.POSITIVE_INFINITY);   // done for good
-        }
-      })();
-    }
-    // the ledger is the trigger
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ledger]);
+        // one order per leg, or it is not the whole price: left at the decision price for good
+        if (ids.length !== r.legs.length) { settlingRef.current.set(key, Number.POSITIVE_INFINITY); continue; }
+        settlingRef.current.set(key, Date.now() + 60_000);                       // in flight, or retried after a minute
+        void (async () => {
+          const reads = await Promise.all(ids.map(async (id, k) => {
+            for (const wait of [800, 1500, 3000, 6000]) {
+              await new Promise(res => setTimeout(res, wait));
+              const px = fullFillAvg(await readOrderPrice(id, r.broker as Broker), r.legs[k].units);
+              if (px > 0) return px;
+            }
+            return 0;
+          }));
+          if (reads.every(px => px > 0)) {
+            const res = await post({ op: 'fillPrice', id: r.id, which, price: Math.round(reads.reduce((a, b) => a + b, 0) * 100) / 100, legCount: ids.length });
+            if (res.ok) { settlingRef.current.set(key, Number.POSITIVE_INFINITY); return; }           // done for good
+            // refused for good (a price outside the band, a row closed another way): the decision price stands
+            if (res.error && /more than|closed as|covers/.test(res.error)) settlingRef.current.set(key, Number.POSITIVE_INFINITY);
+          }
+          const tries = (settleTriesRef.current.get(key) ?? 0) + 1;
+          settleTriesRef.current.set(key, tries);
+          if (tries >= SETTLE_MAX_TRIES) {
+            settlingRef.current.set(key, Number.POSITIVE_INFINITY);
+            void post({ op: 'log', chart, t: Date.now() / 1000, text: `could not read the broker's ${which} fill (${ids.join(', ')}); the ${which} price stays at the decision price` });
+          }
+        })();
+      }
+    };
+  });
+  // on every ledger change, and on a timer so a tab that becomes the leader later (or a ledger that sits idle) still settles
+  useEffect(() => { settleRef.current(); }, [ledger]);
+  useEffect(() => {
+    const id = setInterval(() => settleRef.current(), SETTLE_POLL_MS);
+    return () => clearInterval(id);
+  }, []);
 
   const haltNow = useCallback((why: string) => {
     haltRef.current = why;

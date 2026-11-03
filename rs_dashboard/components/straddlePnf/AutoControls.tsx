@@ -133,7 +133,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
             : <span className="text-red-400 font-bold">UNRESOLVED</span>
         ) : open ? (
           <span className={row.side === 'SELL' ? 'text-red-400' : 'text-emerald-400'}>
-            {row.side === 'SELL' ? 'SHORT' : 'LONG'} {row.lots}L @ {row.entryPrice.toFixed(2)}
+            {row.side === 'SELL' ? 'SHORT' : 'LONG'} {row.lots}L @ <span title={row.mode === 'REAL' && !row.entryFilled ? 'The price AUTO decided at: not yet replaced by the broker\'s fill' : undefined}>{row.mode === 'REAL' && !row.entryFilled ? '~' : ''}{row.entryPrice.toFixed(2)}</span>
             {pnl !== null && <span className={`ml-1 font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{inr(pnl)}</span>}
             {row.stop !== undefined && <span className="ml-1 text-zinc-400" title="Protective stop (one brick beyond the pullback)">SL {row.stop.toFixed(2)}</span>}
             {row.mode === 'PAPER' && <span className="ml-1 text-zinc-400">paper</span>}

@@ -155,9 +155,11 @@ Only one tab per browser profile leads (Web Locks). A second browser or machine 
   the machine's IP added in the Kite developer console first). Kotak is confirmed (10 barrels per lot).
 - **Server watcher** has had no live test. Test it once: arm one REAL 1-lot trade with a tight rupee stop, close the tab, and confirm the
   ledger shows `server guard: ...` and the position is flat at the broker.
-- **REAL fills** are read back from the broker after an order is final (Dhan, Kotak and Zerodha order books). Until then, or if an order never reports final
-  (a partial fill, a rate limit), the row keeps its decision price and is retried a minute later; a trade made while no tab is open is settled by the next
-  tab you open. A Zerodha order split into slices is priced from its first slice only.
+- **REAL fills** are read back from the broker (Dhan, Kotak and Zerodha order books) once an order is **fully traded**, and only when the price is
+  whole: one order per leg, each filled for its leg's full units. A part-filled order, a cancelled remainder, a leg that was already flat, a Zerodha order
+  split into slices, a row closed as `flat at broker` / `resolved`, or a fill more than 20% from the decision price is **not** used: the row keeps its
+  decision price, shown with a `~` in the status line. Unreadable orders are tried 5 times (a minute apart) and then said once in the ledger log. Any
+  leader tab settles, on every ledger change and every 15 s, so a trade made while no tab was open is settled by the next tab you open.
 - **Two charts on one contract** net at the broker; each exits only its own units.
 - **A whole-position SQUARE OFF** in the trade bar closes AUTO's units too; AUTO then finds the leg flat and books it closed.
 
