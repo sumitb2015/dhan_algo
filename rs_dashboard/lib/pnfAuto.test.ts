@@ -36,11 +36,13 @@ test('never chases: a signal at or before the watermark, not on the last closed 
   assert.equal(decideAuto({ model: model(), position: null, watermarkT: 0, nowS: ist(10, 40), market: 'NSE' }).action, 'none');
 });
 
-test('no entry while a position is open, before the open, or after the 15:00 entry cutoff', () => {
+test('no entry while a position is open, before the open, or after the entry cutoff (10 minutes before the 15:15 exit = 15:05)', () => {
   const held = decideAuto({ model: model(), position: { side: 'BUY', entryBarT: ist(10, 30) }, watermarkT: 0, nowS: ist(10, 31), market: 'NSE' });
   assert.notEqual(held.action, 'enter');
-  const late = model({ lastBarT: ist(15, 0), signals: [sig('DOUBLE_BOTTOM_SELL', ist(15, 0))] });
-  assert.equal(decideAuto({ model: late, position: null, watermarkT: 0, nowS: ist(15, 1), market: 'NSE' }).action, 'none');
+  const late = model({ lastBarT: ist(15, 5), signals: [sig('DOUBLE_BOTTOM_SELL', ist(15, 5))] });
+  assert.equal(decideAuto({ model: late, position: null, watermarkT: 0, nowS: ist(15, 6), market: 'NSE' }).action, 'none');
+  const justBefore = model({ lastBarT: ist(15, 3), signals: [sig('DOUBLE_BOTTOM_SELL', ist(15, 3))] });
+  assert.equal(decideAuto({ model: justBefore, position: null, watermarkT: 0, nowS: ist(15, 4), market: 'NSE' }).action, 'enter', 'still allowed before 15:05');
   const early = model({ lastBarT: ist(9, 10), signals: [sig('DOUBLE_BOTTOM_SELL', ist(9, 10))] });
   assert.equal(decideAuto({ model: early, position: null, watermarkT: 0, nowS: ist(9, 11), market: 'NSE' }).action, 'none');
 });
@@ -100,8 +102,10 @@ test('the entry and the reversal exit carry their confirmed box price', () => {
 test('a CAS stock (NSE_CAS) squares off at 15:10 from 3 Aug 2026, before continuous trading stops at 15:15; 15:15 before that date', () => {
   const at = (iso: string) => Date.parse(`${iso}+05:30`) / 1000;
   assert.deepEqual(autoWindow('NSE_CAS', at('2026-10-30T10:00:00')), { open: 9 * 60 + 15, entryCutoff: 15 * 60, eodExit: 15 * 60 + 10 });
-  assert.deepEqual(autoWindow('NSE_CAS', at('2026-07-31T10:00:00')), { open: 9 * 60 + 15, entryCutoff: 15 * 60, eodExit: 15 * 60 + 15 });
+  assert.deepEqual(autoWindow('NSE_CAS', at('2026-07-31T10:00:00')), { open: 9 * 60 + 15, entryCutoff: 15 * 60 + 5, eodExit: 15 * 60 + 15 });
   assert.equal(autoWindow('NSE', at('2026-10-30T10:00:00'))!.eodExit, 15 * 60 + 15);   // a stock without derivatives: unchanged
+  // MCX on a 23:55 close (from 2 Nov 2026): exit 23:45, entries stop 10 minutes before it
+  assert.deepEqual(autoWindow('MCX', at('2026-11-03T12:00:00')), { open: 9 * 60, entryCutoff: 23 * 60 + 35, eodExit: 23 * 60 + 45 });
 });
 
 test('a two-back position exits on its stop only: not on an opposite brick, and an EOD still flattens it', () => {

@@ -13,16 +13,16 @@ import type { Target } from './pnfTarget.ts';
 
 export type AutoSide = 'BUY' | 'SELL';
 
-/** NSE: no new entry from 15:00, flat at 15:15. MCX: the same, measured back from that day's close. */
-export const NSE_ENTRY_CUTOFF_MIN = 15 * 60;
+/** NSE: flat at 15:15. MCX: measured back from that day's close. */
 export const NSE_EOD_EXIT_MIN = 15 * 60 + 15;
+/** No new entry in the last 10 minutes before the end-of-day exit (NSE 15:05, MCX 23:35 on a 23:55 close), on every market. */
+export const ENTRY_CUTOFF_BEFORE_EOD = 10;
 /**
  * A stock with derivatives in NSE's Closing Auction Session (market 'NSE_CAS', from CAS_START): continuous trading stops at 15:15,
  * so the 15:15 exit would land in the auction (filled at the auction price around 15:35, or refused). It squares off 5 minutes
- * before the continuous session ends instead; entries still stop at 15:00.
+ * before the continuous session ends instead; entries stop 10 minutes before that exit.
  */
 export const CAS_EOD_EXIT_BEFORE_CLOSE = 5;
-export const MCX_ENTRY_CUTOFF_BEFORE_CLOSE = 30;
 export const MCX_EOD_EXIT_BEFORE_CLOSE = 10;
 /** A signal older than this many seconds at decision time is stale (a reload or a late model): never entered. */
 export const MAX_SIGNAL_AGE_S = 180;
@@ -64,7 +64,7 @@ export function rowMarket(row: { market?: Market; target: Pick<Target, 'symbol'>
   return row.market ?? (row.target.symbol.toUpperCase() in MCX_LOT_MULTIPLIER ? 'MCX' : 'NSE');
 }
 
-/** [entry cutoff, EOD exit] in IST minutes of the day for `market` at `t` (null when the market is shut that day). */
+/** [open, entry cutoff, EOD exit] in IST minutes of the day for `market` at `t` (null when the market is shut that day). */
 export function autoWindow(market: Market, t: number): { open: number; entryCutoff: number; eodExit: number } | null {
   // NSE's session window is a clock window: weekends and holidays come from the shared calendar (MCX's own is in sessionWindow).
   if (market !== 'MCX' && !isNseTradingDay(istDateIso(t * 1000))) return null;
@@ -73,9 +73,10 @@ export function autoWindow(market: Market, t: number): { open: number; entryCuto
   if (market !== 'MCX') {
     // CAS stock: its session ends at 15:15 from CAS_START (15:30 before it, when the usual 15:15 exit still applies)
     const eodExit = market === 'NSE_CAS' && close <= NSE_EOD_EXIT_MIN ? close - CAS_EOD_EXIT_BEFORE_CLOSE : NSE_EOD_EXIT_MIN;
-    return { open, entryCutoff: Math.min(NSE_ENTRY_CUTOFF_MIN, eodExit), eodExit };
+    return { open, entryCutoff: eodExit - ENTRY_CUTOFF_BEFORE_EOD, eodExit };
   }
-  return { open, entryCutoff: close - MCX_ENTRY_CUTOFF_BEFORE_CLOSE, eodExit: close - MCX_EOD_EXIT_BEFORE_CLOSE };
+  const eodExit = close - MCX_EOD_EXIT_BEFORE_CLOSE;
+  return { open, entryCutoff: eodExit - ENTRY_CUTOFF_BEFORE_EOD, eodExit };
 }
 
 /**
