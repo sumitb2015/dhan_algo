@@ -734,7 +734,15 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
           if (chartN !== 1 && chartN !== 2) continue;
           if (cfg.broker === broker && cfg.mode === tradeMode) guards.adopt(chartN, cfg.levels);
           else {
-            // Held for another broker / mode than this page opened in (a page always opens in PAPER): say so, never leave it enforcing unseen.
+            // Held for another broker / mode than this page opened in (a page always opens in PAPER). It matters only while a REAL AUTO
+            // position is actually open on that chart: with none, the guard is just a saved setting for the next trade, not a live stop.
+            let liveRow = true;
+            try {
+              const l = await (await fetch(`/api/straddle-pnf/auto?scope=${scope}`)).json() as { ledger?: { rows?: { chart: number; mode: string; state: string }[] } };
+              liveRow = (l.ledger?.rows ?? []).some(r => r.chart === chartN && r.mode === 'REAL' && r.state !== 'closed');
+            } catch { /* unknown: warn */ }
+            if (!liveRow) continue;
+            // say so, never leave it enforcing unseen.
             toast.warning(`The server is still guarding chart ${chartN}'s open ${cfg.mode} position on ${cfg.broker} (MTM guard with the tab closed). Switch the page to ${cfg.broker} ${cfg.mode} to see and edit it.`, {
               duration: Infinity,
               action: { label: 'Switch it off', onClick: () => { void fetch(`/api/straddle-pnf/server-guard?scope=${scope}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chart: chartN, on: false }) }); } },

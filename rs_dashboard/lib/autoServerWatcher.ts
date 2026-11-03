@@ -158,6 +158,53 @@ async function exitRow(scope: PnfScope, row: AutoRow, reason: string, price: num
   }
 }
 
+// ── reconcile ─────────────────────────────────────────────────────────
+
+/**
+ * An open REAL row whose position the BROKER no longer shows (closed by hand in the broker's app, by the trade bar's square-off, or by the
+ * broker's own MIS square-off) stays `open` in the ledger: nothing in AUTO looks at the book until an exit is due. That stale row blocks
+ * its chart, keeps a server guard "protecting" nothing, and could later close a position it does not own. This closes it as flat once the
+ * broker book has read flat for two passes in a row. It places NO order and books no P&L (the broker's book has the truth).
+ */
+const RECONCILE_EVERY_MS = 30_000;
+const MIN_ROW_AGE_S = 90;
+let lastReconcile = 0;
+const flatPasses = new Map<string, number>();
+
+async function reconcileFlat(): Promise<void> {
+  if (Date.now() - lastReconcile < RECONCILE_EVERY_MS) return;
+  lastReconcile = Date.now();
+  const nowS = Date.now() / 1000;
+  const byBroker = new Map<string, { scope: PnfScope; row: AutoRow }[]>();
+  for (const scope of SCOPES) {
+    for (const row of readAutoLedger(scope).rows) {
+      if (row.mode !== 'REAL' || row.state !== 'open' || nowS - row.entryT < MIN_ROW_AGE_S) continue;
+      if (!byBroker.has(row.broker)) byBroker.set(row.broker, []);
+      byBroker.get(row.broker)!.push({ scope, row });
+    }
+  }
+  for (const [brokerName, items] of byBroker) {
+    const broker = brokerName as PnfBroker;
+    if (!brokerSessionOk(broker)) continue;
+    const book = await brokerPositionRows(broker);
+    if (!book) continue;                                           // an unreadable book is not a flat one
+    for (const { scope, row } of items) {
+      const side = row.side === 'BUY' ? 'SELL' : 'BUY';
+      const held = row.legs.reduce((n, l, i) => n + (l.key ? planOwnExit(l.key, book, side, row.legs[i].units, broker).qty : 0), 0);
+      const unkeyed = row.legs.some(l => !l.key);
+      if (held > 0 || unkeyed) { flatPasses.delete(row.id); continue; }
+      const seen = (flatPasses.get(row.id) ?? 0) + 1;
+      flatPasses.set(row.id, seen);
+      if (seen < 2) continue;
+      flatPasses.delete(row.id);
+      const began = await applyAutoLedgerOp(scope, { op: 'beginExit', id: row.id, t: nowS });
+      if (!began.ok) continue;                                     // a page or an exit got there first
+      await mustApply(scope, row.id, { op: 'close', id: row.id, exitT: nowS, exitPrice: row.entryPrice, reason: 'flat at broker', note: 'the broker shows no position for this row: closed outside AUTO (by hand, a square-off or the broker). No order sent; P&L is in the broker book.' });
+      await applyAutoLedgerOp(scope, { op: 'log', chart: row.chart, t: nowS, text: `server: chart ${row.chart}'s ${row.side} ${row.lots}L row is flat at the broker - ledger row closed (no order sent)` });
+    }
+  }
+}
+
 // ── loop ──────────────────────────────────────────────────────────────
 
 const L = globalThis as unknown as Record<string, { timer: ReturnType<typeof setInterval>; busy: boolean } | undefined>;
@@ -177,6 +224,7 @@ async function tick(): Promise<void> {
   if (pendingOps.size) await flushPending();
   loop.busy = true;
   try {
+    await reconcileFlat().catch(err => console.error('[auto-server-guard] reconcile failed:', err));
     const file = readServerGuards();
     const now = Date.now();
     const today = istDateIso(now);
