@@ -373,3 +373,31 @@ test('a stop in one tab switches AUTO off in the other tab too', async ({ page, 
   await expect.poll(() => state.ledger.arms?.['1']).toBeUndefined();
   await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'false', { timeout: 15_000 });
 });
+
+// Kotak's position book has no LTP: an open leg came back with lastTradedPrice 0 / unrealizedProfit 0, and the header's REAL P&L was the
+// realised part only (₹1.4k shown on a ₹2.7k day, 2026-11-04). The chart streams that contract's price, so the header prices the leg with it.
+test('Kotak REAL: the header P&L prices an open leg Kotak sends without a price from the chart\'s live price', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  await page.addInitScript(() => { try { localStorage.setItem('dhan_algo.selected_broker', 'kotak'); } catch { /* ignore */ } });
+  const polls: string[] = [];
+  await install(page);
+  await page.route('**/api/straddle-pnf/order**', route => route.request().method() === 'GET'
+    ? json(route, { success: true, unsupported: null, legs: [{ label: 'NIFTY NOV FUT', side: 'FUT', segment: 'NSE_FNO', lot: 65, unitsPerLot: 65, key: 'NIFTY24NOVFUT', lotUnits: 65 }] })
+    : route.fallback());
+  await page.route('**/api/scalper/kotak/poll**', route => {
+    polls.push(new URL(route.request().url()).search);
+    return json(route, { success: true, positionsError: null, positions: [
+      // short 65 from 100.50 (Kotak's own realised 300 on the closed part), no price on the open part
+      { tradingSymbol: 'NIFTY24NOVFUT', netQty: -65, buyQty: 130, sellQty: 195, buyAvg: 98.19, sellAvg: 100.5, lastTradedPrice: 0, realizedProfit: 300, unrealizedProfit: 0, productType: 'MIS' },
+    ] });
+  });
+  await page.route('**/api/scalper/kotak/funds**', route => json(route, { success: true, data: { availabelBalance: 100000 } }));
+  await openFuture(page);
+  page.once('dialog', d => { void d.accept(); });
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  const chip = page.getByTestId('header-pnl-margin');
+  // 300 realised + short 65 x (100.50 - 99.95) = 300 + 35.75
+  await expect(chip).toContainText('+₹336', { timeout: 15_000 });
+  await expect(chip.getByTestId('pnl-unpriced')).toHaveCount(0);
+  expect(polls.some(q => q.includes('ltp=1')), 'Kotak option legs are priced by the route').toBe(true);
+});

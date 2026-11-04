@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bookPnl, fmtFunds } from './pnfAccount.ts';
+import { bookPnl, fmtFunds, priceOpenRows } from './pnfAccount.ts';
 
 test('bookPnl sums realised and unrealised over every row, scaling MCX rows by the lot multiplier', () => {
   const nse = { tradingSymbol: 'NIFTY-Nov2026-23000-CE', exchangeSegment: 'NSE_FNO', netQty: -65, realizedProfit: 100, unrealizedProfit: 250, lastTradedPrice: 120 };
@@ -41,4 +41,35 @@ test('legPositions: the chart legs only, units to lots, every product summed, ma
   assert.equal(d.book.total, 120);
   const kotak = [{ tradingSymbol: 'NIFTY26N2425000CE', netQty: 75, realizedProfit: 0, unrealizedProfit: 0, lastTradedPrice: 10 }];
   assert.deepEqual(legPositions(kotak, true, ['NIFTY26N2425000CE', 'NIFTY26N2425000PE'], [75, 75]).lots, [1, 0]);
+});
+
+// Kotak's position book as it came back on 2026-11-04: open legs with no price (lastTradedPrice 0, unrealizedProfit 0).
+const kotakBook = () => [
+  { tradingSymbol: 'CRUDEOILM19NOV26FUT', netQty: -20, buyQty: 240, sellQty: 260, buyAvg: 9085.291666666666, sellAvg: 9087.923076923076, lastTradedPrice: 0, realizedProfit: 631.5384615384392, unrealizedProfit: 0 },
+  { tradingSymbol: 'NIFTY26NOV23750CE', netQty: 0, buyQty: 130, sellQty: 130, buyAvg: 365.45, sellAvg: 387.325, lastTradedPrice: 0, realizedProfit: 2843.75, unrealizedProfit: 0 },
+  { tradingSymbol: 'NIFTY26NOV23900CE', netQty: 0, buyQty: 325, sellQty: 325, buyAvg: 340.17, sellAvg: 331.23, lastTradedPrice: 0, realizedProfit: -2905.5, unrealizedProfit: 0 },
+  { tradingSymbol: 'NIFTY26NOV24000CE', netQty: -65, buyQty: 520, sellQty: 585, buyAvg: 237.3, sellAvg: 238.85555555555555, lastTradedPrice: 0, realizedProfit: 808.8888888888823, unrealizedProfit: 0 },
+];
+
+test('priceOpenRows: an unpriced Kotak book was realised-only (open legs counted as 0); the charts\' prices add their unrealised', () => {
+  const before = bookPnl(kotakBook());
+  assert.equal(before.unpriced, 2);
+  assert.equal(Math.round(before.total), 1379, 'the header showed realised only');
+  const prices = new Map([['CRUDEOILM19NOV26FUT', 9060], ['NIFTY26NOV24000CE', 225]]);
+  const after = bookPnl(priceOpenRows(kotakBook(), true, prices));
+  assert.equal(after.unpriced, 0);
+  // short 20 barrels from 9087.92 to 9060 = +558.46; short 65 from 238.86 to 225 = +900.61
+  assert.equal(Math.round(after.unrealised), Math.round(20 * (9087.923076923076 - 9060) + 65 * (238.85555555555555 - 225)));
+  assert.equal(Math.round(after.total), Math.round(before.realised + after.unrealised));
+});
+
+test('priceOpenRows: a leg no chart prices stays unpriced (never 0); a priced or flat row, or a Dhan id book, is left alone', () => {
+  const half = bookPnl(priceOpenRows(kotakBook(), true, new Map([['CRUDEOILM19NOV26FUT', 9060]])));
+  assert.equal(half.unpriced, 1);
+  const priced = [{ tradingSymbol: 'X', securityId: '7', netQty: 10, buyAvg: 100, sellAvg: 0, lastTradedPrice: 105, unrealizedProfit: 50 }];
+  assert.deepEqual(priceOpenRows(priced, true, new Map([['X', 200]])), priced, 'the broker\'s own price wins');
+  const own = [{ tradingSymbol: 'X', netQty: 10, buyAvg: 100, sellAvg: 0, lastTradedPrice: 0, unrealizedProfit: 2.05 }];
+  assert.deepEqual(priceOpenRows(own, true, new Map([['X', 104]])), own, 'a broker unrealised figure is never replaced');
+  const book = kotakBook();
+  assert.equal(priceOpenRows(book, true, new Map()), book, 'no prices: the same rows back');
 });

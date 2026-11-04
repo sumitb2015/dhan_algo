@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import { Wallet } from 'lucide-react';
 import { BROKER_LABELS, scalperRoute, type Broker } from '@/hooks/useBrokerSelector';
-import { bookPnl, fmtFunds, type Book } from '@/lib/pnfAccount';
+import { bookPnl, fmtFunds, priceOpenRows } from '@/lib/pnfAccount';
 import { fmtInr } from '@/lib/deltaDesk';
 
 // The P&F header's account chips for the broker picked in the header: available margin and P&L. Read-only: no order code.
@@ -16,12 +16,20 @@ export interface HeaderPnlMarginProps {
   paperPnl?: number;
   /** How the paper figure is made up (trade bar + AUTO), for the chip's tooltip. */
   paperNote?: string;
+  /**
+   * Live prices the page's charts already stream, keyed by the broker's trading symbol (fresh feeds only; not used for Dhan, whose book
+   * carries its own unrealised). Kotak's book has no LTP, so without them every open Kotak leg counted 0 and the chip showed realised P&L only.
+   */
+  prices?: ReadonlyMap<string, number>;
 }
 
-export default function HeaderPnlMargin({ broker, mode = 'PAPER', paperPnl = 0, paperNote }: HeaderPnlMarginProps) {
+const NO_PRICES: ReadonlyMap<string, number> = new Map();
+
+export default function HeaderPnlMargin({ broker, mode = 'PAPER', paperPnl = 0, paperNote, prices = NO_PRICES }: HeaderPnlMarginProps) {
   // Each value is tagged with the broker it was read from, so a switch never shows the old account's figures under the new name.
   const [funds, setFunds] = useState<{ broker: Broker; available: number | null; error?: string } | null>(null);
-  const [book, setBook] = useState<{ broker: Broker; pnl: Book | null; error?: string } | null>(null);
+  // The raw rows (priced at render time from `prices`, so the chip moves with the chart's ticks, not only every poll).
+  const [book, setBook] = useState<{ broker: Broker; rows: Array<Record<string, unknown>> | null; error?: string } | null>(null);
 
   // Available margin, every 30 s (a display chip: it must not compete with orders for the broker's request budget).
   useEffect(() => {
@@ -42,19 +50,20 @@ export default function HeaderPnlMargin({ broker, mode = 'PAPER', paperPnl = 0, 
     return () => { dead = true; clearInterval(id); };
   }, [broker]);
 
-  // Positions every 5 s, only in REAL mode (PAPER shows the page's own P&L). The poll route prices Kotak legs from the live chain.
+  // Positions every 10 s, only in REAL mode (PAPER shows the page's own P&L). Kotak's book carries no LTP: `ltp=1` has the route price its
+  // open OPTION legs from Dhan's chain; anything still unpriced (a Kotak future) takes the chart's live price below, else stays `*`.
   useEffect(() => {
     if (mode !== 'REAL') return;
     let dead = false;
     const read = async () => {
       try {
-        const res = await fetch(`${scalperRoute(broker, 'poll')}?only=positions`);
+        const res = await fetch(`${scalperRoute(broker, 'poll')}?only=positions${broker === 'kotak' ? '&ltp=1' : ''}`);
         const j = (await res.json()) as { positions?: Array<Record<string, unknown>>; positionsError?: string | null; error?: string };
         if (dead) return;
-        if (j.positionsError || !Array.isArray(j.positions)) setBook({ broker, pnl: null, error: j.positionsError ?? j.error ?? 'Positions unavailable' });
-        else setBook({ broker, pnl: bookPnl(j.positions) });
+        if (j.positionsError || !Array.isArray(j.positions)) setBook({ broker, rows: null, error: j.positionsError ?? j.error ?? 'Positions unavailable' });
+        else setBook({ broker, rows: j.positions });
       } catch {
-        if (!dead) setBook({ broker, pnl: null, error: 'Positions unavailable' });
+        if (!dead) setBook({ broker, rows: null, error: 'Positions unavailable' });
       }
     };
     void read();
@@ -63,7 +72,8 @@ export default function HeaderPnlMargin({ broker, mode = 'PAPER', paperPnl = 0, 
   }, [broker, mode]);
 
   const f = funds && funds.broker === broker ? funds : null;
-  const b = book && book.broker === broker ? book : null;
+  const bb = book && book.broker === broker ? book : null;
+  const b = bb ? { error: bb.error, pnl: bb.rows ? bookPnl(broker === 'dhan' ? bb.rows : priceOpenRows(bb.rows, true, prices)) : null } : null;
   const available = f?.available ?? null;
   const real = mode === 'REAL';
   const pnl: number | null = real ? b?.pnl?.total ?? null : paperPnl;

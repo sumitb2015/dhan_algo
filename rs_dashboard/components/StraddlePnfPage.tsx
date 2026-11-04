@@ -492,6 +492,13 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     };
   };
   const railCharts = ([1, 2] as const).map(railChartOf).filter((x): x is RailChart => x !== null);
+  // The header's account P&L prices open broker legs the book sends without a price (Kotak) from these: every chart leg's live price, by
+  // the broker's key, fresh feeds only (a stale price would show a wrong running P&L; the leg stays unpriced, marked *, instead).
+  const headerPrices = new Map<string, number>();
+  for (const rc of railCharts) {
+    if (rc.stale) continue;
+    rc.keys.forEach((k, i) => { const px = rc.legPrices[i]; if (k && px != null && px > 0 && !headerPrices.has(k)) headerPrices.set(k, px); });
+  }
 
   // ── practice trading in replay: a book of its own at the replayed prices — never an order route, a ledger or a broker ──
   const [book, setBook] = useState<PracticeBook>(EMPTY_BOOK);
@@ -1143,7 +1150,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
           <div className="ml-auto shrink-0 flex items-center gap-2">
             {!wideHeader && <><HeaderIndexChips /><span className="w-px h-5 bg-zinc-800 shrink-0" /></>}
             <BrokerPicker value={broker} onChange={setBroker} brokers={BROKERS} />
-            <HeaderPnlMargin broker={broker} mode={tradeMode} paperPnl={paperPnl + autoPaper.total}
+            <HeaderPnlMargin broker={broker} mode={tradeMode} paperPnl={paperPnl + autoPaper.total} prices={headerPrices}
                              paperNote={autoToday.some(r => r.mode === 'PAPER') ? `trade bar ${Math.round(paperPnl)} + AUTO ${Math.round(autoPaper.total)} (booked ${Math.round(autoPaper.realised)}, open ${Math.round(autoPaper.unrealised)})` : undefined} />
           </div>
         </div>

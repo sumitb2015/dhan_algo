@@ -30,6 +30,29 @@ export function bookPnl(rows: Array<Record<string, unknown>>): Book {
 }
 
 /**
+ * Fill in the open rows a broker sent WITHOUT a price (Kotak's position book has no LTP: every open leg comes back with
+ * lastTradedPrice 0 and unrealizedProfit 0, so the header's day P&L was realised only - ₹1.4k shown on a ₹2.7k day, 2026-11-04)
+ * from live prices the page already has: the charts' own feeds, keyed like the book (Kotak / Zerodha trading symbol, Dhan security
+ * id). Unrealised = netQty x (price - the average of the open side), in the broker's own units (Kotak quantities are units /
+ * barrels, so no lot multiplier). A row that already has a price or a broker unrealised figure, or has no usable average, is left as
+ * it is. Callers use it for Kotak / Zerodha books only: a Dhan row carries Dhan's own unrealised (in lots on MCX).
+ */
+export function priceOpenRows(rows: Array<Record<string, unknown>>, bySymbol: boolean, prices: ReadonlyMap<string, number>): Array<Record<string, unknown>> {
+  if (!prices.size) return rows;
+  return rows.map(r => {
+    const net = Number(r.netQty);
+    if (!Number.isFinite(net) || net === 0) return r;
+    if (Number(r.lastTradedPrice ?? r.ltp ?? r.lastPrice) > 0) return r;
+    const u = Number(r.unrealizedProfit);
+    if (Number.isFinite(u) && u !== 0) return r;                      // the broker priced it (Dhan: per lot on MCX, scaled later)
+    const px = prices.get(String((bySymbol ? r.tradingSymbol : r.securityId) ?? ''));
+    const avg = Number(net > 0 ? r.buyAvg : r.sellAvg);
+    if (!(px !== undefined && px > 0) || !(avg > 0)) return r;
+    return { ...r, lastTradedPrice: px, unrealizedProfit: Math.round(net * (px - avg) * 100) / 100 };
+  });
+}
+
+/**
  * The chart's own position out of a positions book: signed LOTS per leg (summed over every product the contract is held
  * under) and the P&L of just those rows. Rows match on Dhan's security id, or the trading symbol on Kotak / Zerodha
  * (they have no numeric id). `lotUnits` is the broker quantity of one lot, so units become lots.
