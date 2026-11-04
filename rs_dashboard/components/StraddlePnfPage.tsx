@@ -17,7 +17,7 @@ import { buildPaperTrades } from '@/lib/pnfPaperBook';
 import { decodeMarkers, encodeMarkers } from '@/lib/pnfMarkerStore';
 import { rupeesPerBox } from '@/lib/pnfGuardBoxes';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
-import { modelForRule, ruleText } from '@/lib/pnfAutoRule';
+import { AUTO_RULES, modelForRule, ruleText } from '@/lib/pnfAutoRule';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
 import { BROKERS, useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { withSavedBroker } from '@/hooks/withSavedBroker';
@@ -91,6 +91,7 @@ const ACTIVE_CHART_KEY = 'straddle-pnf-active-chart';
 const MARKERS_KEY = 'straddle-pnf-markers-';
 /** AUTO lots per chart (AUTO itself is never remembered: it is armed per page load). */
 const AUTO_LOTS_KEY = 'straddle-pnf-auto-lots-';
+const AUTO_RULE_KEY = 'straddle-pnf-auto-rule-';
 /** Per chart: '0' = the B / S trade markers are hidden. */
 const MARKERS_SHOWN_KEY = 'straddle-pnf-markers-shown-';
 const LINES_SHOWN_KEY = 'straddle-pnf-lines-shown-';
@@ -303,6 +304,9 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     if (readP(BOOKS_OPEN_KEY) === '1') setBooksOpen(true);
     const lotsOf = (c: ChartId) => { const n = Number(readP(`${AUTO_LOTS_KEY}${c}`)); return Number.isInteger(n) && n >= 1 && n <= 20 ? n : 1; };
     setAutoLots({ 1: lotsOf(1), 2: lotsOf(2) });
+    // The chosen AUTO rule is remembered per chart (AUTO itself never is): a reload must not put the default rule back under an open position.
+    const ruleOf = (c: ChartId): AutoRule => { const v = readP(`${AUTO_RULE_KEY}${c}`); return AUTO_RULES.includes(v as AutoRule) ? v as AutoRule : 'nbrick'; };
+    setAutoRule({ 1: ruleOf(1), 2: ruleOf(2) });
     setMarkersShown({ 1: readP(`${MARKERS_SHOWN_KEY}1`) !== '0', 2: readP(`${MARKERS_SHOWN_KEY}2`) !== '0' });
     try { const raw = readP(STYLE_KEY); if (raw) { const j = JSON.parse(raw); setOrderStyle({ style: j.style === 'Bracket' || j.style === 'Cover' ? j.style : 'Single', tgt: String(j.tgt ?? ''), sl: String(j.sl ?? ''), trail: String(j.trail ?? ''), trailOn: j.trailOn === true }); } } catch { /* keep Single */ }
     const minOf = (c: ChartId) => { const n = Number(readP(`${TRI_MIN_KEY}${c}`)); return Number.isInteger(n) && n >= 3 && n <= 6 ? n : 3; };
@@ -986,7 +990,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
         <AutoControls chart={c} armed={autoArm[c].on} mode={tradeMode} lots={autoLots[c]} onLots={n => setLotsFor(c, n)}
                       onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} halt={autoOf(c).halt}
                       onResolve={autoOf(c).resolve} onExit={() => { void autoOf(c).exitNow(); }} nowMs={now}
-                      autoRule={renko ? autoRule[c] : undefined} onAutoRule={renko ? r => setAutoRule(a => ({ ...a, [c]: r })) : undefined}
+                      autoRule={renko ? autoRule[c] : undefined} onAutoRule={renko ? r => { setAutoRule(a => ({ ...a, [c]: r })); saveP(`${AUTO_RULE_KEY}${c}`, r); } : undefined}
                       rule={renko ? ruleText(autoRule[c], (c === 2 ? settings2 : settings).reversal) : undefined}
                       disabledReason={target.kind === 'index' ? 'No AUTO on an index: chart its future or an option'
                         : replay.active ? 'Bar replay is open: close it to arm live AUTO'

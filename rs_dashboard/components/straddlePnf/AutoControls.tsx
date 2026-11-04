@@ -101,8 +101,8 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
         {armed && <span className={`w-1.5 h-1.5 rounded-full ${mode === 'REAL' ? 'bg-red-400' : 'bg-violet-400'} animate-pulse`} aria-hidden="true" />}
       </button>
       {autoRule && onAutoRule && (
-        <select aria-label={`AUTO rule on chart ${chart}`} value={autoRule} disabled={locked} onChange={e => onAutoRule(e.target.value as AutoRule)}
-                title={locked ? 'Stop AUTO (and close its position) to change the rule' : 'Which pattern AUTO trades'}
+        <select aria-label={`AUTO rule on chart ${chart}`} value={autoRule} disabled={armed} onChange={e => onAutoRule(e.target.value as AutoRule)}
+                title={armed ? 'Stop AUTO to change the rule' : row ? 'Which pattern AUTO trades next: the open position keeps the exit it was opened with' : 'Which pattern AUTO trades'}
                 className="h-6 rounded border border-zinc-700 bg-zinc-950 px-1 text-[11px] font-bold text-zinc-200 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">
           <option value="nbrick">N-brick</option>
           <option value="trend">N-brick (trend)</option>

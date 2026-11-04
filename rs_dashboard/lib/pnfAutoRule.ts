@@ -4,6 +4,7 @@
 import type { PnfSignal } from './straddlePnf.ts';
 
 export type AutoRule = 'nbrick' | 'trend' | 'twoback' | 'oneback' | 'supertrend';
+export const AUTO_RULES: readonly AutoRule[] = ['nbrick', 'trend', 'twoback', 'oneback', 'supertrend'];
 
 /** The chart model with `signals` replaced by the selected rule's signals (the engine reads `model.signals`). */
 export function modelForRule<M extends { signals: PnfSignal[]; trend: PnfSignal[]; twoBack: PnfSignal[]; oneBack: PnfSignal[]; stSignals: PnfSignal[] }>(rule: AutoRule, m: M): M {

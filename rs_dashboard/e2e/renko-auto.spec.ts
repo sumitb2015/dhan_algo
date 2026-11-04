@@ -234,3 +234,19 @@ test('Supertrend rule: it is selectable, and arming it locks the ATR / multiplie
   await expect(page.getByRole('button', { name: 'Increase Supertrend multiplier' })).toBeDisabled();
   await expect(page.getByRole('button', { name: /(Hide|Show) the Supertrend/ })).toBeEnabled();
 });
+
+test('the chosen AUTO rule is remembered per chart across a reload; it is locked only while AUTO is armed', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  await install(page);
+  await openFuture(page);
+  const rule = page.getByLabel('AUTO rule on chart 1');
+  await rule.selectOption('supertrend');
+  await page.reload();
+  await expect(page.getByLabel('AUTO rule on chart 1')).toHaveValue('supertrend');
+  await expect(page.getByLabel('AUTO rule on chart 1')).toBeEnabled();
+  // armed: locked
+  const auto = page.getByTestId('pnf-auto-1');
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect(auto).toHaveAttribute('data-armed', 'true');
+  await expect(page.getByLabel('AUTO rule on chart 1')).toBeDisabled();
+});
