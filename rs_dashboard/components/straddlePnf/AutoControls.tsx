@@ -104,11 +104,11 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
         <select aria-label={`AUTO rule on chart ${chart}`} value={autoRule} disabled={armed} onChange={e => onAutoRule(e.target.value as AutoRule)}
                 title={armed ? 'Stop AUTO to change the rule' : row ? 'Which pattern AUTO trades next: the open position keeps the exit it was opened with' : 'Which pattern AUTO trades'}
                 className="h-6 rounded border border-zinc-700 bg-zinc-950 px-1 text-[11px] font-bold text-zinc-200 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">
+          <option value="supertrend">Supertrend</option>
           <option value="nbrick">N-brick</option>
           <option value="trend">N-brick (trend)</option>
           <option value="twoback">Two-back</option>
           <option value="oneback">One-back</option>
-          <option value="supertrend">Supertrend</option>
         </select>
       )}
       <span className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950" title={locked ? 'Stop AUTO (and close its position) to change lots' : 'Lots per AUTO trade'}>

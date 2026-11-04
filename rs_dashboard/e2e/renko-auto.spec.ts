@@ -73,6 +73,7 @@ test.beforeEach(async ({ context }) => {
   await signIn(context);
   await context.addInitScript(() => {
     const st = JSON.stringify({ interval: 1, boxMode: 'pts', boxPct: 0.1, boxPts: 0.1, reversal: 2, smaPeriod: 50 });
+    try { for (const k of ['renko-auto-rule-1', 'renko-auto-rule-2']) if (!localStorage.getItem(k)) localStorage.setItem(k, 'nbrick'); } catch { /* ignore */ }   // the default rule is Supertrend: these older tests trade N-brick
     try { if (!localStorage.getItem('renko-settings')) { localStorage.setItem('renko-settings', st); localStorage.setItem('renko-settings-2', st); } } catch { /* ignore */ }
   });
 });
@@ -249,4 +250,13 @@ test('the chosen AUTO rule is remembered per chart across a reload; it is locked
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await expect(auto).toHaveAttribute('data-armed', 'true');
   await expect(page.getByLabel('AUTO rule on chart 1')).toBeDisabled();
+});
+
+test('a chart starts on the Supertrend rule when nothing is saved', async ({ page }) => {
+  await page.addInitScript(() => { try { localStorage.removeItem('renko-auto-rule-1'); localStorage.removeItem('renko-auto-rule-2'); } catch { /* ignore */ } });
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  await install(page);
+  await openFuture(page);
+  await expect(page.getByLabel('AUTO rule on chart 1')).toHaveValue('supertrend');
+  await expect(page.getByLabel('AUTO rule on chart 2')).toHaveValue('supertrend');
 });

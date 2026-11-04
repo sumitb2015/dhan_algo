@@ -17,7 +17,7 @@ import { buildPaperTrades } from '@/lib/pnfPaperBook';
 import { decodeMarkers, encodeMarkers } from '@/lib/pnfMarkerStore';
 import { rupeesPerBox } from '@/lib/pnfGuardBoxes';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
-import { AUTO_RULES, modelForRule, ruleText } from '@/lib/pnfAutoRule';
+import { AUTO_RULES, DEFAULT_AUTO_RULE, modelForRule, ruleText } from '@/lib/pnfAutoRule';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
 import { BROKERS, useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { withSavedBroker } from '@/hooks/withSavedBroker';
@@ -241,7 +241,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const [tradeOpen, setTradeOpen] = useState(true);
   const [booksOpen, setBooksOpen] = useState(false);
   const [autoArm, setAutoArm] = useState<Record<ChartId, AutoArm>>({ 1: DISARMED, 2: DISARMED });
-  const [autoRule, setAutoRule] = useState<Record<ChartId, AutoRule>>({ 1: 'nbrick', 2: 'nbrick' });
+  const [autoRule, setAutoRule] = useState<Record<ChartId, AutoRule>>({ 1: DEFAULT_AUTO_RULE, 2: DEFAULT_AUTO_RULE });
   const [autoLots, setAutoLots] = useState<Record<ChartId, number>>({ 1: 1, 2: 1 });
   // Single | Bracket | Cover for the next entry (trade bar and chart rail), with its points; remembered, never armed silently.
   const [orderStyle, setOrderStyle] = useState<StyleState>(DEFAULT_STYLE);
@@ -305,7 +305,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const lotsOf = (c: ChartId) => { const n = Number(readP(`${AUTO_LOTS_KEY}${c}`)); return Number.isInteger(n) && n >= 1 && n <= 20 ? n : 1; };
     setAutoLots({ 1: lotsOf(1), 2: lotsOf(2) });
     // The chosen AUTO rule is remembered per chart (AUTO itself never is): a reload must not put the default rule back under an open position.
-    const ruleOf = (c: ChartId): AutoRule => { const v = readP(`${AUTO_RULE_KEY}${c}`); return AUTO_RULES.includes(v as AutoRule) ? v as AutoRule : 'nbrick'; };
+    const ruleOf = (c: ChartId): AutoRule => { const v = readP(`${AUTO_RULE_KEY}${c}`); return AUTO_RULES.includes(v as AutoRule) ? v as AutoRule : DEFAULT_AUTO_RULE; };
     setAutoRule({ 1: ruleOf(1), 2: ruleOf(2) });
     setMarkersShown({ 1: readP(`${MARKERS_SHOWN_KEY}1`) !== '0', 2: readP(`${MARKERS_SHOWN_KEY}2`) !== '0' });
     try { const raw = readP(STYLE_KEY); if (raw) { const j = JSON.parse(raw); setOrderStyle({ style: j.style === 'Bracket' || j.style === 'Cover' ? j.style : 'Single', tgt: String(j.tgt ?? ''), sl: String(j.sl ?? ''), trail: String(j.trail ?? ''), trailOn: j.trailOn === true }); } } catch { /* keep Single */ }

@@ -25,7 +25,7 @@ position) first. AUTO is never remembered across a reload; open positions are.
 
 ## 2. The rules
 
-Pick one per chart from the dropdown next to AUTO. A "brick" is one Renko column; a run is consecutive bricks of one colour.
+Pick one per chart from the dropdown next to AUTO. A chart starts on **Supertrend** (the choice is then remembered per chart; the dropdown is locked only while AUTO is armed). A "brick" is one Renko column; a run is consecutive bricks of one colour.
 
 | Rule | Enters | Exits |
 |---|---|---|

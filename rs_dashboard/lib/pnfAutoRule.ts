@@ -4,6 +4,8 @@
 import type { PnfSignal } from './straddlePnf.ts';
 
 export type AutoRule = 'nbrick' | 'trend' | 'twoback' | 'oneback' | 'supertrend';
+/** What a chart starts with (and falls back to for an unreadable saved value). */
+export const DEFAULT_AUTO_RULE: AutoRule = 'supertrend';
 export const AUTO_RULES: readonly AutoRule[] = ['nbrick', 'trend', 'twoback', 'oneback', 'supertrend'];
 
 /** The chart model with `signals` replaced by the selected rule's signals (the engine reads `model.signals`). */
