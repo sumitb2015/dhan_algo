@@ -17,11 +17,13 @@ export function readAutoLedger(scope: PnfScope): AutoLedger {
 /**
  * What a page's live REAL AUTO rows hold on `targetKey` at `broker`, per leg, signed (+ long, - short), in broker units. Every
  * row that is not closed counts (entering / exiting / unknown included): while its outcome is open its quantity is reserved.
+ * `exceptChart`: leave that chart's rows out (this page's own ledger, read for the OTHER chart when chart N's MTM guard closes).
  */
-export function reservedByAuto(ledger: AutoLedger, broker: string, targetKey: string, legs: number): number[] {
+export function reservedByAuto(ledger: AutoLedger, broker: string, targetKey: string, legs: number, exceptChart?: 1 | 2): number[] {
   const out = new Array<number>(legs).fill(0);
   for (const r of ledger.rows) {
     if (!isLive(r) || r.mode !== 'REAL' || r.broker !== broker || r.targetKey !== targetKey) continue;
+    if (exceptChart !== undefined && r.chart === exceptChart) continue;       // the guarding chart's own row: it is the one being closed
     const sign = r.side === 'BUY' ? 1 : -1;
     r.legs.forEach((l, i) => { if (i < legs) out[i] += sign * (Number(l.units) || 0); });
   }

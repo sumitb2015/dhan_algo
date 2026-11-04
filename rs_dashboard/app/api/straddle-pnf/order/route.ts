@@ -111,13 +111,19 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // The OTHER page's live AUTO rows on this contract keep their quantity: P&F and Renko share the broker's netted position,
       // and a square-off (or an MTM guard exit) on one page must not take the other page's AUTO position with it.
       const other = scope === 'renko' ? 'pnf' : 'renko';
-      const reserved = reservedByAuto(readAutoLedger(other), broker, targetKey(target), onBroker.length);
+      const otherName = other === 'renko' ? 'Renko' : 'Point & Figure';
+      const fromOther = reservedByAuto(readAutoLedger(other), broker, targetKey(target), onBroker.length);
+      // Chart N's MTM guard: this page's OTHER chart's AUTO on the same contract is kept too (each chart guards its own trade).
+      const sibling = order.guardChart ? (order.guardChart === 1 ? 2 : 1) : null;
+      const fromSibling = order.guardChart ? reservedByAuto(readAutoLedger(scope), broker, targetKey(target), onBroker.length, order.guardChart) : onBroker.map(() => 0);
+      const reserved = fromOther.map((r, i) => r + fromSibling[i]);
       const plans = onBroker.map((l, i) => ({ leg: l, orders: planLegCloseKeeping(l.key, rows, reserved[i], broker) }));
-      if (reserved.some(r => r !== 0)) keptNote = ` KEPT: ${reserved.map(Math.abs).join(' / ')} units on this contract belong to the ${other === 'renko' ? 'Renko' : 'Point & Figure'} page's AUTO and were not closed.`;
+      const whose = [fromOther.some(r => r !== 0) ? `the ${otherName} page's AUTO` : '', fromSibling.some(r => r !== 0) ? `chart ${sibling}'s AUTO` : ''].filter(Boolean).join(' and ');
+      if (whose) keptNote = ` KEPT: ${reserved.map(Math.abs).join(' / ')} units on this contract belong to ${whose} and were not closed.`;
       if (plans.every(p => p.orders.length === 0)) {
         return NextResponse.json({
           success: true, mode, broker, outcome: 'kept', legs: [],
-          message: `Nothing of this page's to close: the open quantity on this contract belongs to the ${other === 'renko' ? 'Renko' : 'Point & Figure'} page's AUTO and is kept`,
+          message: `Nothing of this chart's to close: the open quantity on this contract belongs to ${whose} and is kept`,
         });
       }
       sent = true;

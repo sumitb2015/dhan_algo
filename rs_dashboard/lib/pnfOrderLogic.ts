@@ -43,6 +43,12 @@ export interface PnfOrderRequest {
    * shows in that direction under the intraday product (planOwnExit). REAL only; never sized from the Lots box.
    */
   exitOwn: { side: PnfAction; units: number[] } | null;
+  /**
+   * A close sent by chart N's MTM guard (`close: true` only): the page's OTHER chart's live AUTO units on the same contract are kept, as
+   * the other page's are. Without it the guard of one chart squared off the other chart's AUTO position when both traded one contract.
+   * A trade-bar SQUARE OFF (no guardChart) still closes the whole position, AUTO's units included.
+   */
+  guardChart?: 1 | 2;
   /** MARKET (default), or a resting LIMIT / SL-limit from the chart's B / S rail (single-leg charts, REAL at the broker). */
   orderType: 'MARKET' | 'LIMIT' | 'SL';
   /** LIMIT: the limit; SL: the limit once triggered. */
@@ -89,7 +95,11 @@ export function parsePnfOrder(body: unknown): PnfOrderRequest | string {
   const close = b.close === true;
   const source = b.source === 'auto' ? 'auto' : 'bar';
   const base = { orderType: 'MARKET' as const, brokerOp: null };
-  if (close) return { broker, mode, target, close, action: 'SELL', lots: 0, product: 'INTRADAY', source, exitOwn: null, ...base };
+  if (close) {
+    const guardChart = b.guardChart === 1 || b.guardChart === 2 ? b.guardChart : undefined;
+    if (b.guardChart !== undefined && guardChart === undefined) return 'guardChart must be 1 or 2';
+    return { broker, mode, target, close, action: 'SELL', lots: 0, product: 'INTRADAY', source, exitOwn: null, ...(guardChart ? { guardChart } : {}), ...base };
+  }
   if (b.exitOwn !== undefined) {
     const x = b.exitOwn as { side?: unknown; units?: unknown };
     if (mode !== 'REAL') return 'exitOwn is a REAL-mode exit (paper exits never reach the broker)';

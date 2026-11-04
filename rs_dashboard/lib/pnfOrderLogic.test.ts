@@ -181,3 +181,12 @@ test('Kotak MCX option legs use the same barrels-per-lot cross-check as futures'
   assert.equal(kotakMcxFutureError('CRUDEOILM17NOV265000CE', 10, 10), null);
   assert.match(kotakMcxFutureError('CRUDEOIL17NOV265000CE', 100, 10) ?? '', /not the expected 10/);
 });
+
+test('parsePnfOrder: a close may name the guarding chart (1 / 2) so the other chart\'s AUTO units are kept; anything else is refused', () => {
+  const fut = { kind: 'futures', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24' };
+  const c = parsePnfOrder({ broker: 'kotak', mode: 'REAL', target: fut, close: true, guardChart: 2 });
+  assert.ok(typeof c !== 'string' && c.close && c.guardChart === 2);
+  const bar = parsePnfOrder({ broker: 'kotak', mode: 'REAL', target: fut, close: true });
+  assert.ok(typeof bar !== 'string' && bar.guardChart === undefined, 'a trade-bar square off names no chart');
+  assert.equal(parsePnfOrder({ broker: 'kotak', mode: 'REAL', target: fut, close: true, guardChart: 3 }), 'guardChart must be 1 or 2');
+});

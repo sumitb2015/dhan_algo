@@ -17,3 +17,13 @@ test('the other page\'s live REAL AUTO rows reserve their units, signed, per leg
   ] };
   assert.deepEqual(reservedByAuto(led, 'dhan', 'F', 2), [-65, -65]);   // -65 (a) +65 (b, outcome still open) -65 (g); g's PE leg -65
 });
+
+test('exceptChart: chart N\'s MTM guard keeps only the OTHER chart\'s AUTO units of this page (its own row is the one being closed)', () => {
+  const led: AutoLedger = { rev: 1, log: [], rows: [
+    row({ id: 'c1', chart: 1, side: 'SELL' }),                    // chart 1 (the guarding chart): short 65
+    row({ id: 'c2', chart: 2, side: 'BUY', legs: [{ label: 'x', key: '1', units: 130 }] }),   // chart 2 on the same contract: long 130
+  ] };
+  assert.deepEqual(reservedByAuto(led, 'dhan', 'F', 1, 1), [130], 'chart 2\'s long is kept when chart 1 guards');
+  assert.deepEqual(reservedByAuto(led, 'dhan', 'F', 1, 2), [-65]);
+  assert.deepEqual(reservedByAuto(led, 'dhan', 'F', 1), [65], 'no exceptChart: every live row (the other page\'s ledger)');
+});

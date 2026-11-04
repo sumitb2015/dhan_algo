@@ -60,6 +60,9 @@ chart under the trend rule are a flip: the first is the exit of the old position
   Holidays and weekends count as closed.
 - **Feed.** Needs a live price and a fresh feed. A stale feed pauses entries.
 - **Refusals.** Three refused entries in a row halt the chart.
+- **Nothing sent yet.** If an entry fails before any order goes out (the contract lookup has not answered, the ledger is unreachable for a
+  moment - a dashboard restart), it is retried every second while the signal is still the newest closed bar's; a signal that ages out that
+  way is logged as `missed the … signal`.
 
 ## 4. When it exits
 
@@ -115,7 +118,9 @@ One guard per chart, shown in the toolbar (**MTM Guard ON/OFF**) with its card.
 - **When it trips.** It cancels the chart's resting orders, then exits AUTO's own position through AUTO (which also **switches AUTO off**, so
   the trend rule cannot re-enter), then anything else on the contract (a manual lot) on the next retry. It retries every 6 s and settles only
   when the book reads **flat**. After settling it **stays ON** and measures the next trade from its own start; the toast says so.
-  If what is left on the contract belongs to another page's AUTO, the guard switches off instead.
+  If what is left on the contract belongs to another AUTO position - the other page's, or this page's **other chart** on the same
+  contract - it is kept (the follow-up close sends `guardChart`) and the guard switches off instead. A trade-bar SQUARE OFF still closes
+  everything.
 - **Refusals.** It will not exit AUTO's row if the row is on a different broker than the page's, and it waits for a live price.
 - **Scope.** Switching broker or PAPER/REAL switches the page's guards off. The guard runs in the page: with the tab closed see section 7.
 

@@ -138,7 +138,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     });
     onEventRef.current(chart as 1 | 2, 'info', keepOn
       ? `MTM guard fired (${reason}) and is still ON: it measures the next trade from its own start. Switch it off to stop guarding.`
-      : `MTM guard fired (${reason}); what is left on the contract belongs to another page's AUTO, so the guard switched off.`);
+      : `MTM guard fired (${reason}); what is left on the contract belongs to another AUTO position (the other chart's or the other page's), so the guard switched off.`);
   };
   const exitThen = (chart: number, reason: string, at: number | undefined) => {
     // 'placed' is not 'done': the exit can still be rejected or part-filled, and re-baselining on what is left would forgive the loss

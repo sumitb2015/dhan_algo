@@ -642,9 +642,9 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       return true;
     }
     try {
-      const res = await fetch('/api/straddle-pnf/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ broker, mode: 'REAL', target: rc.target, close: true, scope }) });
+      const res = await fetch('/api/straddle-pnf/order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ broker, mode: 'REAL', target: rc.target, close: true, scope, guardChart: c }) });
       const j = await res.json() as { success?: boolean; error?: string; message?: string; outcome?: string };
-      // What is left on the contract is the other page's AUTO position: this chart has nothing more to exit
+      // What is left on the contract is another AUTO position (the other page's, or this page's other chart): this chart has nothing more to exit
       if (j.outcome === 'kept') { toast.info(`MTM guard on chart ${c}: ${j.message}`, { duration: 15_000 }); return 'kept'; }
       if (j.success) { toast.success(`MTM guard squared off chart ${c}: ${reason}`); chime({ kind: 'manual', outcome: 'placed', close: true }); }
       else if (res.status !== 409) toast.warning(`MTM guard exit: ${j.error ?? j.message ?? 'not confirmed'} - it is retried while the position is open`, { duration: 15_000 });

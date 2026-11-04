@@ -401,3 +401,28 @@ test('Kotak REAL: the header P&L prices an open leg Kotak sends without a price 
   await expect(chip.getByTestId('pnl-unpriced')).toHaveCount(0);
   expect(polls.some(q => q.includes('ltp=1')), 'Kotak option legs are priced by the route').toBe(true);
 });
+
+// The signal used to be marked handled BEFORE the entry ran: a ledger that could not be reached for a moment (a dashboard restart) lost
+// the entry for good. Nothing was sent then, so it is now retried while the signal is the newest closed bar's.
+test('an entry whose ledger write fails (nothing sent) is retried on the next tick while the signal is fresh', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  let refused = 0;
+  await page.route('**/api/straddle-pnf/auto**', async route => {
+    const req = route.request();
+    if (req.method() === 'GET') return json(route, { success: true, ledger: state.ledger });
+    const op = req.postDataJSON() as AutoOp;
+    if (op.op === 'open' && refused === 0) { refused++; return json(route, { success: false, error: 'ledger busy' }, 503); }
+    const r = applyAutoOp(state.ledger, op);
+    if (r.ok) state.ledger = r.ledger;
+    return json(route, { success: r.ok, error: r.ok ? undefined : r.error, ledger: state.ledger }, r.ok ? 200 : r.status);
+  });
+  await openFuture(page);
+  await page.getByTestId('pnf-auto-1').getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await page.clock.setFixedTime(ist(10, 31, 5));
+  await expect.poll(() => state.ledger.rows.length, { timeout: 15_000 }).toBe(1);
+  expect(refused).toBe(1);
+  expect(state.ledger.rows[0]).toMatchObject({ side: 'SELL', state: 'open', mode: 'PAPER' });
+  expect(orders.filter(o => o.action === 'SELL').length, 'the paper order route is asked again; nothing is doubled in the ledger').toBeGreaterThanOrEqual(1);
+  expect(state.ledger.log.some(l => /signal not entered yet: the ledger refused it/.test(l.text))).toBe(true);
+});

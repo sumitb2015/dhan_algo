@@ -108,6 +108,8 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
   const rejectsRef = useRef(0);
   const exitRetryAtRef = useRef(0);
   const watermarkRef = useRef(0);
+  /** A signal whose entry failed before anything was sent (retried while fresh), so a miss is logged once. */
+  const retryRef = useRef<{ id: string; side: 'BUY' | 'SELL'; why: string } | null>(null);
 
   const tk = targetKey(target);
   const infoKey = `${broker}|${tk}`;
@@ -143,11 +145,13 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
   // rule would re-enter on the next brick. Only an exit after this arming counts (an older one must not disarm a fresh arming).
   useEffect(() => {
     if (!arm.on) return;
-    const hit = ledger.rows.find(r => r.chart === chart && r.mode === arm.mode && (r.exitT ?? r.pendingSince ?? 0) > arm.watermarkT
+    // Measured from the ARMING (wall clock), not the watermark (a bar time a minute or more earlier): a guard exit just before arming is not this arming's.
+    const since = arm.armT ?? arm.watermarkT;
+    const hit = ledger.rows.find(r => r.chart === chart && r.mode === arm.mode && (r.exitT ?? r.pendingSince ?? 0) > since
       && ((r.state === 'closed' && (r.reason ?? '').startsWith('server guard')) || (r.state === 'unknownExit' && (r.note ?? '').startsWith('server guard'))));
     if (hit) onDisarm(`the server guard exited chart ${chart}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ledger, arm.on, arm.watermarkT]);
+  }, [ledger, arm.on, arm.watermarkT, arm.armT]);
 
   // REAL fills: a row's entry / exit price starts as the chart's price at the DECISION. Once the broker reports its orders FULLY traded, the
   // broker's average traded price (summed over a straddle's legs) replaces it and the P&L is recomputed (the `fillPrice` ledger op). Any
@@ -223,12 +227,17 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
     } catch { return null; }                                  // no clean reply: UNKNOWN, never a failure
   };
 
-  /** `livePx`: the chart's price now; `box`: the confirmed box the signal bar reached (PAPER books it; REAL books the live price). */
-  const enter = async (side: 'BUY' | 'SELL', signalT: number, livePx: number, box: number | null, stop?: number, exitBy?: 'supertrend') => {
+  /**
+   * `livePx`: the chart's price now; `box`: the confirmed box the signal bar reached (PAPER books it; REAL books the live price).
+   * Returns why NOTHING was sent when it may work on the next tick (no contract lookup yet, the ledger unreachable - a dashboard
+   * restart - or refusing the reservation): the tick then keeps the signal and tries again while it is still the newest closed bar's.
+   * null once the entry was taken, or sent, or refused for good (a REAL order that went out is never retried).
+   */
+  const enter = async (side: 'BUY' | 'SELL', signalT: number, livePx: number, box: number | null, stop?: number, exitBy?: 'supertrend'): Promise<string | null> => {
     const px = arm.mode === 'PAPER' && box !== null ? box : livePx;
     const cur = info && info.key === infoKey ? info : null;
-    if (!cur || !cur.legs.length) { setNote('waiting for the contract lookup'); return; }
-    if (arm.mode === 'REAL' && cur.unsupported) { haltNow(cur.unsupported); return; }
+    if (!cur || !cur.legs.length) { setNote('waiting for the contract lookup'); return 'the contract lookup has not answered'; }
+    if (arm.mode === 'REAL' && cur.unsupported) { haltNow(cur.unsupported); return null; }
     const unitsPerPoint = (cur.legs[0].unitsPerLot ?? cur.legs[0].lot) * lots;
     const id = `pnfa-${chart}-${Date.now()}`;
     const nowS = Date.now() / 1000;
@@ -241,39 +250,40 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
     };
     if (arm.mode === 'PAPER') {
       const j = await sendOrder({ broker, mode: 'PAPER', target, action: side, lots, product: 'INTRADAY' });
-      if (!j?.success) { setNote(`paper order refused: ${j?.error ?? 'no reply'}`); return; }
+      if (!j?.success) { setNote(`paper order refused: ${j?.error ?? 'no reply'}`); return `paper order refused (${j?.error ?? 'no reply'})`; }
       const r = await post({ op: 'open', row: base });
-      if (!r.ok) { setNote(`ledger refused: ${r.error}`); return; }
+      if (!r.ok) { setNote(`ledger refused: ${r.error}`); return `the ledger refused it (${r.error ?? 'unreachable'})`; }
       onEvent({ chart, kind: 'entry', side, price: px, target, mode: arm.mode, lots, text: `AUTO C${chart} [PAPER] ${side} ${lots}L @ ${px.toFixed(2)}` });
-      return;
+      return null;
     }
-    // REAL: reserve, send, then confirm / void / mark unknown.
+    // REAL: reserve, send, then confirm / void / mark unknown. A refused reservation sent nothing: it may be tried again.
     const reserved = await post({ op: 'open', row: { ...base, state: 'entering' } });
-    if (!reserved.ok) { setNote(`ledger refused the entry: ${reserved.error}`); return; }
+    if (!reserved.ok) { setNote(`ledger refused the entry: ${reserved.error}`); return `the ledger refused the reservation (${reserved.error ?? 'unreachable'})`; }
     const j = await sendOrder({ broker, mode: 'REAL', target, action: side, lots, product: 'INTRADAY' });
     if (!j || j.outcome === 'unknown') {
       await post({ op: 'markUnknown', id, note: j?.message ?? 'no reply from the order route' });
       haltNow('entry outcome unknown - check Orders/Positions, then resolve it');
-      return;
+      return null;
     }
     if (j.outcome === 'placed') {
       const legs: AutoLeg[] = (j.legs ?? []).filter(l => l.status === 'placed').map((l, i) => ({ label: l.label, key: base.legs[i]?.key ?? null, units: l.qty }));
       const ok = await post({ op: 'confirmEntry', id, legs, orderIds: (j.legs ?? []).filter(l => l.status === 'placed' && l.orderId).map(l => String(l.orderId)) });
-      if (!ok.ok) { haltNow(`order placed but the ledger refused it (${ok.error}) - check Positions`); return; }
+      if (!ok.ok) { haltNow(`order placed but the ledger refused it (${ok.error}) - check Positions`); return null; }
       rejectsRef.current = 0;
       onEvent({ chart, kind: 'entry', side, price: px, target, mode: arm.mode, lots, text: `AUTO C${chart} [REAL] ${side} ${lots}L @ ~${px.toFixed(2)}` });
-      return;
+      return null;
     }
     if (j.outcome === 'partial') {
       await post({ op: 'markUnknown', id, note: j.message ?? 'partial' });
       haltNow('only part of the straddle was placed - check Positions, then resolve it');
-      return;
+      return null;
     }
     // rejected / reversed: nothing is open.
     await post({ op: 'voidEntry', id, t: Date.now() / 1000, note: j.message ?? j.error ?? 'refused' });
     rejectsRef.current += 1;
     onEvent({ chart, kind: 'info', text: `AUTO C${chart} entry refused: ${j.message ?? j.error ?? ''}` });
     if (rejectsRef.current >= MAX_REJECTS) haltNow(`${MAX_REJECTS} entries in a row were refused`);
+    return null;
   };
 
   /** `barT`: the bar that triggered the exit (the reversal column's first bar), for the chart marker. */
@@ -318,6 +328,7 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
       if (!leaderRef.current || busyRef.current) return;
       const nowS = Date.now() / 1000;
       if (row) {
+        retryRef.current = null;                                 // a row exists: the signal being retried was taken (or reserved)
         if (row.state !== 'open') { setNote(row.state === 'entering' || row.state === 'exiting' ? `${row.state}…` : 'unresolved - check the broker'); return; }
         if (row.targetKey !== tk) {
           // The chart was switched away from its position: only the EOD exit can still run (no model for that contract here).
@@ -348,6 +359,14 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
       if (target.kind === 'index') { setNote('an index cannot be traded'); return; }
       if (!complete || stale || price === null) { setNote(stale ? 'feed stale: no entries' : 'waiting for a price'); return; }
       const d = decideAuto({ model, position: null, watermarkT: watermarkRef.current, nowS, market });
+      // A signal whose entry kept failing before anything was sent, and is no longer enterable (a newer bar closed, it aged out): said once.
+      const pending = retryRef.current;
+      if (pending && !(d.action === 'enter' && d.signal.id === pending.id)) {
+        retryRef.current = null;
+        const text = `missed the ${pending.side} signal: ${pending.why} until it was no longer the newest bar's - nothing was sent`;
+        onEvent({ chart, kind: 'info', text: `AUTO C${chart} ${text}` });
+        void post({ op: 'log', chart, t: nowS, text });
+      }
       if (d.action !== 'enter') {
         const held = d.action === 'none' ? ignoredByFilter(ruleModel, side, watermarkRef.current) : null;
         if (held) {
@@ -358,9 +377,19 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
         return;
       }
       ignoredRef.current = '';
-      watermarkRef.current = d.signal.t;                       // handled: this signal is never entered again
+      const before = watermarkRef.current;
+      watermarkRef.current = d.signal.t;                       // handled: this signal is never entered again...
       busyRef.current = true;
-      try { await enter(d.side, d.signal.t, price, d.boxPrice, d.signal.stop, d.signal.exitBy); } finally { busyRef.current = false; }
+      try {
+        const again = await enter(d.side, d.signal.t, price, d.boxPrice, d.signal.stop, d.signal.exitBy);
+        if (again === null) retryRef.current = null;
+        // ...unless nothing was sent and it may work next tick: the signal is kept (never across a new arming, which moved the watermark)
+        else if (watermarkRef.current === d.signal.t) {
+          watermarkRef.current = before;
+          if (retryRef.current?.id !== d.signal.id) void post({ op: 'log', chart, t: nowS, text: `${d.side} signal not entered yet: ${again} - retrying while it is fresh` });
+          retryRef.current = { id: d.signal.id, side: d.side, why: again };
+        }
+      } finally { busyRef.current = false; }
     };
   });
   // A hidden tab has its timers slowed by the browser (about once a minute after a few minutes), and AUTO's entries, rule exits and the
