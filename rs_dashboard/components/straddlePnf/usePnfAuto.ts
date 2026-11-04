@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { decideAuto, rowMarket } from '@/lib/pnfAuto';
+import { ignoredByFilter, SIDE_LABEL, withSide, type AutoSide } from '@/lib/pnfAutoRule';
+import { isSellSignal } from '@/lib/straddlePnf';
 import { EMPTY_LEDGER, isLive, type AutoLedger, type AutoLeg, type AutoOp, type AutoRow } from '@/lib/pnfAutoLedger';
 import { istDateIso } from '@/lib/nseHolidays';
 import { targetKey, type Target } from '@/lib/pnfTarget';
@@ -67,13 +69,15 @@ export type AutoEvent = { chart: 1 | 2; kind: 'entry' | 'exit' | 'halt' | 'info'
 
 export interface AutoArm { on: boolean; mode: 'PAPER' | 'REAL'; watermarkT: number }
 
-export function usePnfAuto({ chart, arm, lots, target, model, price, stale, market, complete, broker, mode, leaderRef, ledger, post, onEvent, onDisarm, scope = 'pnf' }: {
+export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 'both', price, stale, market, complete, broker, mode, leaderRef, ledger, post, onEvent, onDisarm, scope = 'pnf' }: {
   chart: 1 | 2;
   arm: AutoArm;
   lots: number;
   target: Target;
-  /** The chart's CLOSED-bar model (signals / columns never include the forming minute). */
+  /** The chart's CLOSED-bar model (signals / columns never include the forming minute), with the selected rule's signals. */
   model: PanelModel;
+  /** Which side AUTO may OPEN (default both). Applied here, so the status can say when it holds a signal back; exits are never filtered. */
+  side?: AutoSide;
   /** The chart's live price (a straddle's CE + PE), or null. */
   price: number | null;
   stale: boolean;
@@ -90,6 +94,9 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
   /** The page whose ledgers these orders belong to (the order route reads its resting ledger for the close note). */
   scope?: PnfScope;
 }) {
+  const model = withSide(ruleModel, side);                                  // entries read the allowed side's signals only
+  const ignoredRef = useRef<string>('');                                      // the kind of the last held-back signal that was logged
+  useEffect(() => { ignoredRef.current = ''; }, [arm.on, side]);
   const [note, setNote] = useState<string>('');
   const [halt, setHalt] = useState<string | null>(null);
   const [info, setInfo] = useState<{ key: string; legs: LegInfo[]; unsupported: string | null } | null>(null);
@@ -333,7 +340,16 @@ export function usePnfAuto({ chart, arm, lots, target, model, price, stale, mark
       if (target.kind === 'index') { setNote('an index cannot be traded'); return; }
       if (!complete || stale || price === null) { setNote(stale ? 'feed stale: no entries' : 'waiting for a price'); return; }
       const d = decideAuto({ model, position: null, watermarkT: watermarkRef.current, nowS, market });
-      if (d.action !== 'enter') { setNote(d.action === 'none' ? d.why : ''); return; }
+      if (d.action !== 'enter') {
+        const held = d.action === 'none' ? ignoredByFilter(ruleModel, side, watermarkRef.current) : null;
+        if (held) {
+          const what = `${isSellSignal(held.kind) ? 'SELL' : 'BUY'} signal ignored (${SIDE_LABEL[side]})`;
+          setNote(what);
+          if (ignoredRef.current !== held.kind) { ignoredRef.current = held.kind; void post({ op: 'log', chart, t: Date.now() / 1000, text: what }); }   // once per change of direction, not per brick
+        } else setNote(d.action === 'none' ? d.why : '');
+        return;
+      }
+      ignoredRef.current = '';
       watermarkRef.current = d.signal.t;                       // handled: this signal is never entered again
       busyRef.current = true;
       try { await enter(d.side, d.signal.t, price, d.boxPrice, d.signal.stop, d.signal.exitBy); } finally { busyRef.current = false; }

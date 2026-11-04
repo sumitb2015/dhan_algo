@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { modelForRule, ruleText, withSide, type AutoRule } from './pnfAutoRule.ts';
+import { ignoredByFilter, modelForRule, ruleText, withSide, type AutoRule } from './pnfAutoRule.ts';
 import type { PnfSignal } from './straddlePnf.ts';
 
 const sig = (id: string): PnfSignal => ({ id, kind: 'RENKO_BUY', col: 0, bar: 0, t: 0, price: 1, belowVwap: false });
@@ -31,4 +31,19 @@ test('withSide keeps only the allowed side\'s signals; both is the model itself;
   assert.deepEqual(withSide(model, 'buy').signals.map(s => s.id), ['b']);
   assert.deepEqual(withSide(model, 'sell').signals.map(s => s.id), ['s', 'p']);
   assert.equal(withSide(model, 'buy').other, 1);
+});
+
+test('ignoredByFilter names the fresh signal the filter holds back, and only that', () => {
+  const buy = { ...sig('b'), t: 100 };
+  const sell = { ...sig('s'), kind: 'RENKO_SELL' as const, t: 100 };
+  const older = { ...sig('o'), kind: 'RENKO_SELL' as const, t: 40 };
+  const m = (signals: PnfSignal[], lastBarT: number | null = 100) => ({ signals, lastBarT });
+  assert.equal(ignoredByFilter(m([sell]), 'buy', 0)?.id, 's', 'a SELL on the last bar under Buy only');
+  assert.equal(ignoredByFilter(m([buy]), 'sell', 0)?.id, 'b');
+  assert.equal(ignoredByFilter(m([sell]), 'both', 0), null, 'nothing is held back without a filter');
+  assert.equal(ignoredByFilter(m([sell]), 'sell', 0), null, 'an allowed signal is entered, not ignored');
+  assert.equal(ignoredByFilter(m([sell, buy]), 'buy', 0), null, 'an allowed signal on the same bar wins');
+  assert.equal(ignoredByFilter(m([older]), 'buy', 0), null, 'a signal that is not on the last bar is old news');
+  assert.equal(ignoredByFilter(m([sell]), 'buy', 100), null, 'at or before the watermark: already handled');
+  assert.equal(ignoredByFilter(m([sell], null), 'buy', 0), null);
 });

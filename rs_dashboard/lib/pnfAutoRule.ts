@@ -40,3 +40,17 @@ export function withSide<M extends { signals: PnfSignal[] }>(m: M, side: AutoSid
   if (side === 'both') return m;
   return { ...m, signals: m.signals.filter(s => (side === 'sell') === isSellSignal(s.kind)) };
 }
+
+export const SIDE_LABEL: Record<AutoSide, string> = { both: 'Buy + Sell', buy: 'Buy only', sell: 'Sell only' };
+
+/**
+ * The signal the side filter is holding back right now: the newest signal after `watermarkT`, on the last closed bar, for the side the
+ * filter does not allow - so the AUTO status can say "SELL signal ignored (Buy only)" instead of looking idle. Null when the filter is
+ * 'both', or nothing is being held back (the engine enters, or has no fresh signal).
+ */
+export function ignoredByFilter(m: { signals: PnfSignal[]; lastBarT: number | null }, side: AutoSide, watermarkT: number): PnfSignal | null {
+  if (side === 'both' || m.lastBarT === null) return null;
+  const allowed = withSide(m, side).signals;
+  if (allowed.some(s => s.t > watermarkT && s.t === m.lastBarT)) return null;
+  return [...m.signals].reverse().find(s => s.t > watermarkT && s.t === m.lastBarT) ?? null;
+}

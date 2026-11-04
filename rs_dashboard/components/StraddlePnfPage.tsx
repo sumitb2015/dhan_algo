@@ -17,7 +17,7 @@ import { buildPaperTrades } from '@/lib/pnfPaperBook';
 import { decodeMarkers, encodeMarkers } from '@/lib/pnfMarkerStore';
 import { rupeesPerBox } from '@/lib/pnfGuardBoxes';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
-import { AUTO_RULES, AUTO_SIDES, DEFAULT_AUTO_RULE, DEFAULT_AUTO_SIDE, modelForRule, ruleText, withSide, type AutoSide } from '@/lib/pnfAutoRule';
+import { AUTO_RULES, AUTO_SIDES, DEFAULT_AUTO_RULE, DEFAULT_AUTO_SIDE, SIDE_LABEL, modelForRule, ruleText, type AutoSide } from '@/lib/pnfAutoRule';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
 import { BROKERS, useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { withSavedBroker } from '@/hooks/withSavedBroker';
@@ -805,12 +805,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     };
   };
   const auto1 = usePnfAuto({
-    chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: withSide(renko /* the rules are Renko's: P&F has one signal set */ ? modelForRule(autoRule[1], c1.model) : c1.model, autoSide[1]), price: priceOf(feed1), stale: feed1.stale,
+    chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: renko /* the rules are Renko's: P&F has one signal set */ ? modelForRule(autoRule[1], c1.model) : c1.model, side: autoSide[1], price: priceOf(feed1), stale: feed1.stale,
     market: feed1.market, complete: feed1.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
     onEvent: onAutoEvent, onDisarm: () => disarm(1), scope,
   });
   const auto2 = usePnfAuto({
-    chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: withSide(renko ? modelForRule(autoRule[2], c2.model) : c2.model, autoSide[2]), price: priceOf(feed2), stale: feed2.stale,
+    chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: renko ? modelForRule(autoRule[2], c2.model) : c2.model, side: autoSide[2], price: priceOf(feed2), stale: feed2.stale,
     market: feed2.market, complete: feed2.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
     onEvent: onAutoEvent, onDisarm: () => disarm(2), scope,
   });
@@ -832,10 +832,11 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const armChart = (c: ChartId, on: boolean) => {
     // The MTM guard is the user's choice: arming AUTO leaves it as it is (OFF unless switched on from the MTM Guard card, whose levels start
     // at 10 boxes / 10 boxes). Said once, because the Supertrend / N-brick rules have no stop of their own.
+    if (on && autoSide[c] !== 'both') toast.info(`AUTO armed on chart ${c}: ${SIDE_LABEL[autoSide[c]].toUpperCase()} - signals for the other side are ignored (open positions still exit normally).`, { duration: 8_000 });
     if (on && tradeMode === 'REAL' && !guards.guardOf(c).on) toast.info(`AUTO armed on chart ${c} with the MTM guard OFF - switch it on from the MTM Guard card if you want a profit target / stop-loss.`, { duration: 10_000 });
     const m = (c === 2 ? c2 : c1).model;
     setAutoArm(a => ({ ...a, [c]: on ? { on: true, mode: tradeMode, watermarkT: m.lastBarT ?? Math.floor(nowSec()) } : DISARMED }));
-    void autoPost({ op: 'log', chart: c, t: nowSec(), text: on ? `AUTO armed (${tradeMode}, ${autoLots[c]} lot)` : 'AUTO stopped' });
+    void autoPost({ op: 'log', chart: c, t: nowSec(), text: on ? `AUTO armed (${tradeMode}, ${autoLots[c]} lot${autoSide[c] !== 'both' ? `, ${SIDE_LABEL[autoSide[c]]}` : ''})` : 'AUTO stopped' });
   };
   const setLotsFor = (c: ChartId, n: number) => { setAutoLots(l => ({ ...l, [c]: n })); saveP(`${AUTO_LOTS_KEY}${c}`, String(n)); };
   // The page mode is the mode AUTO trades in: switching it disarms both charts (arming REAL is always an explicit step).

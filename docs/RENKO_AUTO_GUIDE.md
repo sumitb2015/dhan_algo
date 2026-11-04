@@ -38,7 +38,7 @@ Pick one per chart from the dropdown next to AUTO. A chart starts on **Supertren
 
 N-brick, N-brick (trend) and Supertrend carry **no stop of their own**: the MTM guard is their loss limit. Two consecutive S (or B) markers on the
 
-**Side.** Next to the rule, **Buy + Sell** (default) / **Buy only** / **Sell only** limits what AUTO may *open*; a signal for the other side is ignored (a buy-only chart stays flat through a sell phase and enters on the next buy). Exits are never filtered: an open position always exits by its own rule, MTM guard or end of day. The choice is remembered per chart and locked only while AUTO is armed. On options, "Sell" means selling the option.
+**Side.** Next to the rule, **Buy + Sell** (default) / **Buy only** / **Sell only** limits what AUTO may *open*; a signal for the other side is ignored (a buy-only chart stays flat through a sell phase and enters on the next buy). The AUTO status line says `SELL signal ignored (Buy only)` while it holds one back (logged once per change of direction), and arming logs and toasts the side. Exits are never filtered: an open position always exits by its own rule, MTM guard or end of day. The choice is remembered per chart and locked only while AUTO is armed. On options, "Sell" means selling the option.
 chart under the trend rule are a flip: the first is the exit of the old position, the second the entry of the new one.
 
 ## 3. When it enters

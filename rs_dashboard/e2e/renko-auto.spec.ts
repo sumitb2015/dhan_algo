@@ -277,4 +277,18 @@ test('AUTO side: Buy only does not enter the SELL signal; the choice is remember
   await page.clock.setFixedTime(ist(10, 31, 5));                       // the 10:30 bar has closed: a SELL signal, which a buy-only chart ignores
   await page.waitForTimeout(4000);
   expect(orders.length, 'a buy-only chart never enters the SELL signal').toBe(0);
+  await expect(auto).toContainText('SELL signal ignored (Buy only)');          // said on the status line, not left looking idle
+});
+
+test('AUTO side: Sell only enters the SELL signal (the same data a Buy only chart ignores)', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders } = await install(page);
+  await openFuture(page);
+  await page.getByLabel('AUTO side on chart 1').selectOption('sell');
+  const auto = page.getByTestId('pnf-auto-1');
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect(auto).toHaveAttribute('data-armed', 'true');
+  await page.clock.setFixedTime(ist(10, 31, 5));
+  await expect.poll(() => orders.length, { timeout: 15_000 }).toBe(1);
+  expect(orders[0]).toMatchObject({ mode: 'PAPER', action: 'SELL', lots: 1, source: 'auto', scope: 'renko' });
 });
