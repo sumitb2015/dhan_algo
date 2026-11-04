@@ -181,6 +181,12 @@ export type PanelOptions = {
    */
   anchorT?: number;
   /**
+   * An option: a % box is measured on the first price of the LATEST session, not of the whole history. An option's history can start
+   * at a price several times today's (a 24000 CE listed months ago was 999 when it was deep in the money and is 284 now), and a box of
+   * 2% of 999 is 7% of the price actually being traded. The box then changes once a day, at the first bar of a new session.
+   */
+  boxOnRecent?: boolean;
+  /**
    * The 1-min bar still forming, left out of the chart. It still decides which session is "today" for the header's open and
    * previous close: without it the first minute of a session would measure the change against the close two sessions back.
    */
@@ -274,7 +280,15 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   } else ({ series: vw1, state: vwapState } = vwapFrom(closedBars, 0, VWAP_START));
   const firstPrice = (closedBars.find(b => b.straddle > 0 && (opts.anchorT === undefined || b.t >= opts.anchorT)) ?? closedBars.find(b => b.straddle > 0))?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
   const ptsAsked = opts.boxMode === 'pts' && (opts.boxPts ?? 0) > 0 ? (opts.boxPts as number) : null;
-  const { boxSize, boxClamped, anchorPrice } = gridFor(firstPrice, ptsAsked, boxPct);
+  const grid = gridFor(firstPrice, ptsAsked, boxPct);
+  const { boxClamped, anchorPrice } = grid;
+  let boxSize = grid.boxSize;
+  if (opts.boxOnRecent && ptsAsked === null && firstPrice) {
+    const istDay = (t: number) => Math.floor((t + 19800) / 86400);
+    const lastBar = closedBars[closedBars.length - 1];
+    const recent = lastBar ? closedBars.find(b => b.straddle > 0 && istDay(b.t) === istDay(lastBar.t)) : undefined;
+    if (recent) boxSize = recent.straddle * boxPct;
+  }
   const reuse = prefix && p!.resume !== null && p!.chart === chart && p!.interval === interval && p!.boxPct === boxPct && p!.reversal === reversal
     && p!.anchorPrice === anchorPrice && p!.boxSize === boxSize && p!.sessionCloseMin === opts.sessionCloseMin;
   let bars: Bar[], endIdx: number[], anchor: number, box: number, columns: PnfColumn[], resume: PnfResume | RenkoResume | null, vw: (number | null)[];

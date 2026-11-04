@@ -188,9 +188,9 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   const confirmed = useMemo(
     // Reading the ref here is safe: `prev` only speeds the build up, the result is the same without it (straddlePnfModel.test.ts).
     // eslint-disable-next-line react-hooks/refs
-    () => buildConfirmedModel(closed, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined, chart }, prevRef.current),
+    () => buildConfirmedModel(closed, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined, boxOnRecent: target.kind === 'options', chart }, prevRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [closedKey, overlay, settings, sessionClose, indexNoVwap, feed.loaded?.anchorT, chart],
+    [closedKey, overlay, settings, sessionClose, indexNoVwap, feed.loaded?.anchorT, target.kind, chart],
   );
   useEffect(() => { prevRef.current = confirmed; }, [confirmed]);
   const model = useMemo(() => withLive(confirmed, formingBar), [confirmed, formingBar]);

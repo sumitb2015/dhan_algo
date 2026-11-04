@@ -400,3 +400,24 @@ test('no usable closed bar yet: withLive builds on the grid the first live price
     for (const col of live) assert.ok(Math.abs((col.high - col.low) / col.boxes - 0.5) < 1e-9, `${chart}: a 0.5-point box`);
   }
 });
+
+test('option box: a % box is measured on the latest session, not on a history that started at several times today\'s price', () => {
+  const DAY = 86400;
+  const old = Array.from({ length: 5 }, (_, i) => ({ t: BASE_T - 40 * DAY + i * 60, ce: 500, pe: 0, straddle: 999.2, vol: 1 }));
+  const today = Array.from({ length: 5 }, (_, i) => ({ t: BASE_T + i * 60, ce: 143, pe: 0, straddle: 287 + i, vol: 1 }));
+  const all = [...old, ...today];
+  const first = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko' });
+  assert.ok(Math.abs(first.box - 0.02 * 999.2) < 1e-9, 'default: first price of the history');
+  const recent = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxOnRecent: true });
+  assert.ok(Math.abs(recent.box - 0.02 * 287) < 1e-9, 'option: first price of the latest session');
+  assert.equal(recent.boxMode, 'pct');
+  const pnf = buildConfirmedModel(all, 'vwap', { boxPct: 2, boxOnRecent: true });
+  assert.ok(Math.abs(pnf.box - 0.02 * 287) < 1e-9, 'P&F too');
+  // a box in points is untouched
+  const pts = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxOnRecent: true, boxMode: 'pts', boxPts: 5 });
+  assert.equal(pts.box, 5);
+  // the incremental build (a bar closed) lands on the same box as a rebuild
+  const prev = buildConfirmedModel(all.slice(0, -1), 'vwap', { boxPct: 2, chart: 'renko', boxOnRecent: true });
+  const next = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxOnRecent: true }, prev);
+  assert.equal(next.box, recent.box);
+});
