@@ -22,7 +22,16 @@ How the Renko page's automatic trading works: what it trades, when it enters and
 7. Leave the tab open (section 7 explains what keeps working if you do not).
 
 While AUTO is armed or holds a position, the rule, lots, instrument and box are locked. To change them, stop AUTO (and close its
-position) first. AUTO is never remembered across a reload; open positions are.
+position) first.
+
+**AUTO survives a reload.** The switch is saved with the AUTO ledger, so a reload, a dashboard rebuild or a second tab of the page puts
+it back on (a toast says *AUTO resumed on chart N*) as long as it is the same day, the chart shows the same contract and the page is on
+the same broker and mode. The page always opens in PAPER, so a REAL arming waits — the AUTO status reads *AUTO not resumed: … switch the
+page to REAL to resume* — and comes back on by itself once you switch the page to REAL. A stop, a halt, the MTM guard or the server guard
+switches AUTO off in every open tab, and the AUTO log says why (*AUTO switched off: …*).
+
+An open AUTO position on a chart whose AUTO is off shows **AUTO OFF · exit only**: it still exits by its rule, but nothing re-enters after
+it (before 2026-11-04 a reload did this silently — an exit with no re-entry).
 
 ## 2. The rules
 

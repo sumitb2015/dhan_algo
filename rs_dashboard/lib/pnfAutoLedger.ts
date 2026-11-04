@@ -72,7 +72,30 @@ export interface AutoRow {
 }
 
 export interface AutoLogEntry { t: number; chart: 1 | 2; text: string }
-export interface AutoLedger { rev: number; rows: AutoRow[]; log: AutoLogEntry[] }
+
+/**
+ * A chart's AUTO switch as last set by a page (arming is in the browser, but it is SAVED here): a reload, a rebuild or another tab of the
+ * same page reads it back and resumes AUTO (lib/pnfAutoArm.ts resumeArm decides when), and a stop in one tab disarms every tab. Before this
+ * a reload silently left AUTO off while its open position still exited by its rule - an exit with no re-entry (2026-11-04).
+ */
+export interface AutoArmRecord {
+  mode: AutoMode;
+  broker: string;
+  /** The chart's contract when it was armed: a different contract on screen is never resumed. */
+  targetKey: string;
+  /** IST date it was armed: an arm never carries into another day. */
+  day: string;
+  /** Epoch s of the arming (its identity: a tab follows a different `t` as a new arming). */
+  t: number;
+  /** The bar time signals had to be newer than when it was armed. */
+  watermarkT: number;
+  lots: number;
+  /** Renko AUTO rule / side filter it was armed with (restored with it; absent on the P&F page). */
+  rule?: string;
+  side?: string;
+}
+
+export interface AutoLedger { rev: number; rows: AutoRow[]; log: AutoLogEntry[]; arms?: Partial<Record<'1' | '2', AutoArmRecord>> }
 
 export const EMPTY_LEDGER: AutoLedger = { rev: 0, rows: [], log: [] };
 /** A broker fill further than this from the decision price is refused as a bad read (a leg missing, a wrong scale). */
@@ -97,6 +120,8 @@ export type AutoOp =
   | { op: 'fillPrice'; id: string; which: 'entry' | 'exit'; price: number; /** how many orders were summed: must be one per leg */ legCount: number }
   | { op: 'resolve'; id: string; as: 'open' | 'flat'; exitPrice?: number; t: number }
   | { op: 'log'; chart: 1 | 2; t: number; text: string }
+  /** Save (arm) or clear (null) a chart's AUTO switch, with the log line that says why - one op, so the two never disagree. */
+  | { op: 'setArm'; chart: 1 | 2; arm: AutoArmRecord | null; t: number; text: string }
   | { op: 'resetPaper' };
 
 const finite = (n: unknown) => typeof n === 'number' && Number.isFinite(n);
@@ -109,13 +134,27 @@ const cleanIds = (v: unknown): string[] | undefined => {
 export function parseLedger(raw: unknown): AutoLedger {
   if (!raw || typeof raw !== 'object') return EMPTY_LEDGER;
   const o = raw as Partial<AutoLedger>;
-  return { rev: finite(o.rev) ? o.rev! : 0, rows: Array.isArray(o.rows) ? o.rows : [], log: Array.isArray(o.log) ? o.log : [] };
+  const arms: Partial<Record<'1' | '2', AutoArmRecord>> = {};
+  if (o.arms && typeof o.arms === 'object') for (const k of ['1', '2'] as const) { const a = armOk((o.arms as Record<string, unknown>)[k]); if (a) arms[k] = a; }
+  return { rev: finite(o.rev) ? o.rev! : 0, rows: Array.isArray(o.rows) ? o.rows : [], log: Array.isArray(o.log) ? o.log : [], ...(Object.keys(arms).length ? { arms } : {}) };
+}
+
+/** A well-formed arm record, or null (a bad one is dropped: it can only ever mean "not armed"). */
+function armOk(v: unknown): AutoArmRecord | null {
+  if (!v || typeof v !== 'object') return null;
+  const a = v as Partial<AutoArmRecord>;
+  if (a.mode !== 'PAPER' && a.mode !== 'REAL') return null;
+  if (typeof a.broker !== 'string' || !a.broker || typeof a.targetKey !== 'string' || !a.targetKey || typeof a.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(a.day)) return null;
+  if (!finite(a.t) || !finite(a.watermarkT) || !Number.isInteger(a.lots) || a.lots! < 1 || a.lots! > 20) return null;
+  const str = (s: unknown) => (typeof s === 'string' && s.length > 0 && s.length <= 20 ? s : undefined);
+  const rule = str(a.rule), side = str(a.side);
+  return { mode: a.mode, broker: a.broker, targetKey: a.targetKey, day: a.day, t: a.t!, watermarkT: a.watermarkT!, lots: a.lots!, ...(rule ? { rule } : {}), ...(side ? { side } : {}) };
 }
 
 /** Apply one op. Returns the new ledger, or an error with an HTTP status (the file is left as it was). */
 export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: AutoLedger } | { ok: false; status: number; error: string } {
-  const bump = (rows: AutoRow[], log = led.log): { ok: true; ledger: AutoLedger } =>
-    ({ ok: true, ledger: { rev: led.rev + 1, rows: rows.slice(-MAX_ROWS), log: log.slice(-MAX_LOG) } });
+  const bump = (rows: AutoRow[], log = led.log, arms = led.arms): { ok: true; ledger: AutoLedger } =>
+    ({ ok: true, ledger: { rev: led.rev + 1, rows: rows.slice(-MAX_ROWS), log: log.slice(-MAX_LOG), ...(arms && Object.keys(arms).length ? { arms } : {}) } });
   const find = (id: string) => led.rows.findIndex(r => r.id === id);
 
   switch (op.op) {
@@ -220,6 +259,21 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
     case 'log':
       if (typeof op.text !== 'string' || !op.text) return { ok: false, status: 400, error: 'Empty log' };
       return bump(led.rows, [...led.log, { t: op.t, chart: op.chart, text: op.text.slice(0, 300) }]);
+    case 'setArm': {
+      if (op.chart !== 1 && op.chart !== 2) return { ok: false, status: 400, error: 'chart must be 1 or 2' };
+      if (typeof op.text !== 'string' || !op.text || !finite(op.t)) return { ok: false, status: 400, error: 'An arm change needs a time and a log line' };
+      const k = String(op.chart) as '1' | '2';
+      const arms = { ...(led.arms ?? {}) };
+      if (op.arm === null) {
+        if (!arms[k]) return { ok: true, ledger: led };                          // already off: nothing to log twice (every tab follows a stop)
+        delete arms[k];
+      } else {
+        const a = armOk(op.arm);
+        if (!a) return { ok: false, status: 400, error: 'Invalid arm' };
+        arms[k] = a;
+      }
+      return bump(led.rows, [...led.log, { t: op.t, chart: op.chart, text: op.text.slice(0, 300) }], arms);
+    }
     case 'resetPaper':
       // Live REAL rows are never touched; open PAPER rows go too (they own nothing at the broker).
       return bump(led.rows.filter(r => r.mode === 'REAL'));

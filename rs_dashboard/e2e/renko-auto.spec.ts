@@ -292,3 +292,84 @@ test('AUTO side: Sell only enters the SELL signal (the same data a Buy only char
   await expect.poll(() => orders.length, { timeout: 15_000 }).toBe(1);
   expect(orders[0]).toMatchObject({ mode: 'PAPER', action: 'SELL', lots: 1, source: 'auto', scope: 'renko' });
 });
+
+// The AUTO switch is saved in the ledger (`arms`): a reload resumes it. Before, a reload (13 dashboard rebuilds on 2026-11-04) left AUTO
+// silently off while its open position still exited on the flip - an exit with no re-entry.
+test('a reload resumes PAPER AUTO from the ledger; a stop clears it, and an open position with AUTO off says "exit only"', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await openFuture(page);
+  const auto = page.getByTestId('pnf-auto-1');
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect(auto).toHaveAttribute('data-armed', 'true');
+  await expect.poll(() => state.ledger.arms?.['1']?.mode).toBe('PAPER');
+  await page.clock.setFixedTime(ist(10, 31, 5));
+  await expect.poll(() => orders.length, { timeout: 15_000 }).toBe(1);
+
+  await page.reload();
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('99.95');
+  await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'true', { timeout: 15_000 });
+  await expect(page.getByText(/AUTO resumed on chart 1/)).toBeVisible();
+  await page.waitForTimeout(2500);
+  expect(orders.length, 'a resumed arming never re-enters the signal it already traded').toBe(1);
+
+  await page.getByTestId('pnf-auto-1').getByRole('button', { name: 'Stop AUTO on chart 1' }).click();
+  await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'false');
+  await expect.poll(() => state.ledger.arms?.['1']).toBeUndefined();
+  expect(state.ledger.log.at(-1)?.text).toBe('AUTO switched off: stopped by the user');
+  await expect(page.getByTestId('pnf-auto-off-1')).toContainText('AUTO OFF · exit only');
+
+  await page.reload();
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('99.95');
+  await page.waitForTimeout(2500);
+  await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'false');
+  await expect(page.getByText(/holds an AUTO SELL position but AUTO is OFF/)).toBeVisible();
+});
+
+test('a REAL arming does not resume in PAPER (every load starts in PAPER): it says so, and resumes once the page is switched to REAL', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  page.on('dialog', d => { void d.accept(); });
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  const auto = page.getByTestId('pnf-auto-1');
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect(auto).toHaveAttribute('data-armed', 'true');
+  await expect.poll(() => state.ledger.arms?.['1']?.mode).toBe('REAL');
+
+  await page.reload();
+  await expect(page.getByTestId('pnf-header-summary')).toContainText('99.95');
+  await expect(page.getByTestId('pnf-auto-resume-1')).toContainText('switch the page to REAL to resume', { timeout: 15_000 });
+  await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'false');
+  expect(state.ledger.arms?.['1']?.mode, 'the saved arming waits, it is not spent').toBe('REAL');
+
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'true', { timeout: 15_000 });
+});
+
+test('a stop in one tab switches AUTO off in the other tab too', async ({ page, context }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  await page.getByTestId('pnf-auto-1').getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect.poll(() => state.ledger.arms?.['1']?.mode).toBe('PAPER');
+
+  // A second tab of the same page: its own API mock, but the SAME ledger (a route registered later takes precedence).
+  const other = await context.newPage();
+  await other.clock.setFixedTime(ist(10, 30, 25));
+  await install(other);
+  await other.route('**/api/straddle-pnf/auto**', async route => {
+    const req = route.request();
+    if (req.method() === 'GET') return json(route, { success: true, ledger: state.ledger });
+    const r = applyAutoOp(state.ledger, req.postDataJSON() as AutoOp);
+    if (r.ok) state.ledger = r.ledger;
+    return json(route, { success: r.ok, ledger: state.ledger });
+  });
+  await other.goto('/renko');
+  await expect(other.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'true', { timeout: 15_000 });
+
+  await other.getByTestId('pnf-auto-1').getByRole('button', { name: 'Stop AUTO on chart 1' }).click();
+  await expect.poll(() => state.ledger.arms?.['1']).toBeUndefined();
+  await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'false', { timeout: 15_000 });
+});

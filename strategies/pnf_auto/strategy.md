@@ -3,8 +3,8 @@
 > User-facing guide for the Renko page (rules, guard, server watcher, limits): [docs/RENKO_AUTO_GUIDE.md](../../docs/RENKO_AUTO_GUIDE.md).
 
 > [!warning] UNVALIDATED
-> There is no backtest or replay of these rules yet. Run it in PAPER first. REAL is armed per page load with a second,
-> explicit click, and every REAL order is reserved in the ledger before it is sent.
+> There is no backtest or replay of these rules yet. Run it in PAPER first. REAL is armed with a second, explicit click
+> (a saved REAL arming resumes after a reload only once the page is switched to REAL), and every REAL order is reserved in the ledger before it is sent.
 
 Where: `/straddle-pnf`, one AUTO switch per chart (`components/straddlePnf/AutoControls.tsx`). Each chart trades the
 instrument it shows (future, single option, or a CE + PE straddle), with that chart's own box size and reversal.
@@ -40,7 +40,11 @@ the order out) is offered for the same resolution.
 
 ## Engine (`components/straddlePnf/usePnfAuto.ts`)
 - Runs in the open page, leader tab only, 1 s tick. Closing the page stops it (exits included) — it is not a server worker.
-- AUTO is never remembered across a reload; open rows are, and their exits keep running while AUTO is off.
+- The AUTO switch is saved in the ledger (`arms`, op `setArm`) and resumed after a reload / rebuild / in another tab by
+  `lib/pnfAutoArm.ts` `resumeArm`: same IST day, contract, broker and page mode (the page loads in PAPER, so a REAL arming waits for the
+  switch to REAL), never after a server-guard exit; the watermark is the newer of the arming's and the chart's last AUTO entry bar. Every
+  switch-off is a `setArm null` with its reason in the log, and every tab follows it. Open rows keep exiting while AUTO is off; such a row
+  shows *AUTO OFF · exit only* and its exit logs "no re-entry" (a silent reload-disarm caused missed flips on 2026-11-04).
 - Entries pause on a stale feed, a missing price, an unresolved contract; 3 refused entries in a row halt the chart.
 - Switching the page between PAPER and REAL disarms both charts. While a chart is armed or holds an AUTO position its
   instrument and box settings are locked, and chart 2 cannot be hidden.

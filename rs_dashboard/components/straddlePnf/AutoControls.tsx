@@ -4,8 +4,9 @@ import { useEffect, useRef, useState } from 'react';
 import { Bot } from 'lucide-react';
 import { rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
 
-// One chart's AUTO switch, lots and status (engine: ./usePnfAuto.ts). AUTO is armed per page load; in REAL mode arming takes a
-// second, explicit click. Lots commit on blur / Enter (dhan-commit-on-blur) and are locked while AUTO is armed or holds a position.
+// One chart's AUTO switch, lots and status (engine: ./usePnfAuto.ts). The switch is saved in the AUTO ledger and resumed after a reload in
+// the same mode (lib/pnfAutoArm.ts; the page always loads in PAPER, so a REAL arm resumes once the page is switched to REAL); in REAL mode
+// arming takes a second, explicit click. Lots commit on blur / Enter (dhan-commit-on-blur) and are locked while AUTO is armed or holds a position.
 
 const MAX_LOTS = 20;
 const inr = (n: number) => `${n > 0 ? '+' : n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
@@ -38,6 +39,8 @@ export interface AutoControlsProps {
   onAutoSide?: (s: AutoSide) => void;
   /** The page clock (ms), for spotting a stale reservation. */
   nowMs: number;
+  /** A saved arming that was NOT switched back on after a reload, and why (e.g. "switch the page to REAL to resume"). */
+  resumeNote?: string | null;
 }
 
 /** A row only the user can settle: an unknown outcome, or a reservation left over by a tab that died with the order out. */
@@ -46,7 +49,7 @@ export const needsResolve = (r: AutoRow, nowMs: number) =>
   r.state === 'unknownEntry' || r.state === 'unknownExit'
   || ((r.state === 'entering' || r.state === 'exiting') && nowMs - (r.pendingSince ?? r.entryT) * 1000 > STALE_PENDING_MS);
 
-export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule, autoSide, onAutoSide }: AutoControlsProps) {
+export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule, autoSide, onAutoSide, resumeNote }: AutoControlsProps) {
   const [confirmReal, setConfirmReal] = useState(false);
   const [confirmExit, setConfirmExit] = useState(false);
   const [draft, setDraft] = useState(String(lots));
@@ -150,12 +153,15 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
             {pnl !== null && <span className={`ml-1 font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{inr(pnl)}</span>}
             {row.stop !== undefined && <span className="ml-1 text-zinc-400" title="Protective stop (one brick beyond the pullback)">SL {row.stop.toFixed(2)}</span>}
             {row.mode === 'PAPER' && <span className="ml-1 text-zinc-400">paper</span>}
+            {!armed && <span data-testid={`pnf-auto-off-${chart}`} className="ml-1 px-1 rounded bg-amber-500/15 text-amber-300 font-bold"
+                             title={`AUTO is OFF on this chart${resumeNote ? ` (${resumeNote})` : ''}: this position still exits by its rule, but nothing re-enters after it. Arm AUTO to keep trading.`}>AUTO OFF · exit only</span>}
           </span>
         ) : halt ? (
           <span className="text-red-400 font-bold">HALTED</span>
         ) : armed ? (
           <span className="text-zinc-400">{note || 'waiting for a signal'}</span>
-        ) : disabledReason ? <span className="text-zinc-500">{disabledReason}</span> : null}
+        ) : disabledReason ? <span className="text-zinc-500">{disabledReason}</span>
+          : resumeNote ? <span data-testid={`pnf-auto-resume-${chart}`} className="text-amber-300">AUTO not resumed: {resumeNote}</span> : null}
       </span>
       {canExit && (
         <button type="button" data-testid={`pnf-auto-exit-${chart}`} onClick={clickExit}
