@@ -265,14 +265,30 @@ const sharedGets = new Map<string, { at: number; json?: Record<string, unknown>;
 // Order placement and an exit's position read are the only Kotak calls whose speed matters: display polls (books, P&L chips) yield to
 // them. While a priority window is open a display read is served from its last result, or waits for the window to end, instead of
 // spending the same per-second budget (a burst of polls right after an order is what produced stCode 100025 on the exit's own read).
-let priorityUntil = 0;
-export function kotakPriority(ms: number): void { priorityUntil = Math.max(priorityUntil, Date.now() + ms); }
+// Shared through globalThis: Next bundles each route separately, and the order routes, the server watcher and the poll route must all see
+// the same window and the same order lane.
+type KotakLane = { priorityUntil: number; nextOrderAt: number };
+const lane: KotakLane = ((globalThis as { __kotakLane?: KotakLane }).__kotakLane ??= { priorityUntil: 0, nextOrderAt: 0 });
+export function kotakPriority(ms: number): void { lane.priorityUntil = Math.max(lane.priorityUntil, Date.now() + ms); }
+
+/** Orders (place / modify / cancel) leave at least this far apart, whichever chart, page or watcher sends them. */
+export const KOTAK_ORDER_GAP_MS = 400;
+/**
+ * The wait before an order may be sent: each order takes the next free slot, `gap` after the previous one's slot, so two charts flipping
+ * in the same second go out 0.4 s apart instead of together (a burst of three order requests in 1-2 s produced an order Kotak never
+ * answered). Only the START of the requests is spaced - a slow reply never holds the next order back. Pure apart from `state`.
+ */
+export function reserveOrderSlot(state: { nextOrderAt: number }, now: number, gap = KOTAK_ORDER_GAP_MS): number {
+  const at = Math.max(now, state.nextOrderAt);
+  state.nextOrderAt = at + gap;
+  return at - now;
+}
 // The order and trade books are display reads (fills are confirmed through scalper/orders' own live read): they may be a few seconds old.
 const SLOW_BOOK_TTL_MS = 4_000;
 const ttlFor = (apiPath: string) => (apiPath === KOTAK_PATHS.orderBook || apiPath === KOTAK_PATHS.tradeBook ? SLOW_BOOK_TTL_MS : SHARED_GET_TTL_MS);
 
 export async function kotakGetShared(apiPath: string): Promise<Record<string, unknown>> {
-  const held = priorityUntil - Date.now();
+  const held = lane.priorityUntil - Date.now();
   if (held > 0) {
     const last = sharedGets.get(apiPath);
     if (last?.json) return last.json;
@@ -326,7 +342,12 @@ export async function kotakPost(
     return await res.json() as Record<string, unknown>;
   };
 
-  if (ORDER_WRITE_PATHS.has(apiPath)) { kotakPriority(2_000); sharedGets.clear(); }
+  if (ORDER_WRITE_PATHS.has(apiPath)) {
+    const wait = reserveOrderSlot(lane, Date.now());
+    kotakPriority(2_000 + wait);
+    sharedGets.clear();
+    if (wait > 0) await new Promise(res => setTimeout(res, wait));
+  }
   // Kotak rejects a request under a dead session outright rather than
   // silently accepting it (see reloginKotak's doc comment) — a retry after a
   // fresh login cannot double-place an order the first attempt never placed.
