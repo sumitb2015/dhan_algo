@@ -690,9 +690,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   };
   // The guard is also enforced by the dashboard SERVER on open REAL AUTO positions (lib/autoServerWatcher.ts), so a closed or sleeping tab
   // does not leave one without its stop: every change of a chart's guard is synced to it.
-  const syncServerGuard = (c: 1 | 2, g: LadderGuard | null) => {
+  const syncServerGuard = (c: 1 | 2, g: LadderGuard | null, quiet = false) => {
     const boxPts = (c === 2 ? c2 : c1).model.box;
     if (g && (g.targetBoxes != null || g.stopBoxes != null) && !(boxPts > 0)) {
+      // A box that merely became unknown (chart 2 switched off in single-chart view, or still loading) is not a user action: the server
+      // keeps the copy it already has, and the effect below re-syncs as soon as the box is known. Only a click on the card warns.
+      if (quiet) return;
       toast.warning(`The server copy of chart ${c}'s guard was NOT updated: its box size is not known yet, so the box levels cannot be enforced with the tab closed. It updates once the chart has its box.`, { duration: 15_000 });
       return;
     }
@@ -711,7 +714,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   useEffect(() => {
     for (const c of [1, 2] as const) {
       const g = guards.guardOf(c);
-      if (g.on && (g.targetBoxes != null || g.stopBoxes != null)) syncServerGuard(c, g);
+      if (g.on && (g.targetBoxes != null || g.stopBoxes != null)) syncServerGuard(c, g, true);
     }
     // only when a chart's box size changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
