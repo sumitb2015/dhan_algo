@@ -41,6 +41,8 @@ export interface AutoModel {
   columnTimes: { start: number; end: number }[];
   /** Time of the last closed bar the model was built from. */
   lastBarT: number | null;
+  /** Renko: the Supertrend at each column (dir 1 = up, -1 = down, null = not readable yet). Read only by a position with `exitBy: 'supertrend'`. */
+  supertrend?: { dir: 1 | -1 | null }[];
 }
 
 export interface AutoPosition {
@@ -49,6 +51,11 @@ export interface AutoPosition {
   entryBarT: number;
   /** Two-back positions: the protective stop. It replaces the first-opposite-brick exit (a two-brick pullback is part of the pattern). */
   stop?: number;
+  /**
+   * Supertrend-rule positions (saved on the ledger row, so it survives a reload whatever rule the page shows): the exit is the first column
+   * after the entry bar whose Supertrend direction is against the position, not the first opposite-colour brick.
+   */
+  exitBy?: 'supertrend';
 }
 
 export type AutoDecision =
@@ -99,9 +106,11 @@ export function boxPriceAt(model: Pick<AutoModel, 'columns' | 'box' | 'chart'>, 
 /** The first column opposite to `side` that started after the entry bar (the reversal), or -1. */
 export function reversalColumn(model: AutoModel, pos: AutoPosition): number {
   const want = pos.side === 'SELL' ? 'X' : 'O';
+  const against = pos.side === 'SELL' ? 1 : -1;                  // Supertrend rule: a short exits when the line turns up, a long when it turns down
   for (let i = 0; i < model.columns.length; i++) {
     const start = model.columnTimes[i]?.start;
-    if (start !== undefined && start > pos.entryBarT && model.columns[i].dir === want) return i;
+    if (start === undefined || !(start > pos.entryBarT)) continue;
+    if (pos.exitBy === 'supertrend' ? model.supertrend?.[i]?.dir === against : model.columns[i].dir === want) return i;
   }
   return -1;
 }

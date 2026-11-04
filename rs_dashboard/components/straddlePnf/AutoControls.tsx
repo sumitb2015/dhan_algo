@@ -108,6 +108,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
           <option value="trend">N-brick (trend)</option>
           <option value="twoback">Two-back</option>
           <option value="oneback">One-back</option>
+          <option value="supertrend">Supertrend</option>
         </select>
       )}
       <span className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950" title={locked ? 'Stop AUTO (and close its position) to change lots' : 'Lots per AUTO trade'}>

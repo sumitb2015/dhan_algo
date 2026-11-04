@@ -3,7 +3,7 @@
 // interval first; the box size is a percentage of the first price.
 import { VWAP_START, buildPnf, continuePnf, detectSignals, exitTags, extendPnf, sessionOf, vwapFrom, type VwapState, type Bar, type PnfColumn, type PnfResume, type PnfSignal } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
-import { buildRenko, continueRenko, extendRenko, renkoSignals, trendSignals, twoBackSignals, oneBackSignals, renkoSma, renkoSmaByBar, renkoSupertrend, type RenkoResume, type RenkoSupertrendPoint } from './renko.ts';
+import { buildRenko, continueRenko, extendRenko, renkoSignals, trendSignals, supertrendSignals, twoBackSignals, oneBackSignals, renkoSma, renkoSmaByBar, renkoSupertrend, type RenkoResume, type RenkoSupertrendPoint } from './renko.ts';
 import { MIN_BOX_PTS_PCT, type BoxMode } from './straddlePnfSettings.ts';
 
 export type Overlay = 'vwap' | 'sma';
@@ -22,6 +22,8 @@ export type PanelModel = {
   signals: PnfSignal[];
   /** Renko only (empty on P&F): state-based N-brick (every brick completing N same-colour bricks); AUTO's 'N-brick (trend)' rule. */
   trend: PnfSignal[];
+  /** Renko only (empty on P&F): BUY on every brick above the Supertrend line, SELL on every brick below it; AUTO's 'Supertrend' rule. */
+  stSignals: PnfSignal[];
   /** Renko only (empty on P&F): the two-back pattern signals (lib/renko.ts), which AUTO trades when its rule is 'Two-back'. */
   twoBack: PnfSignal[];
   /** Renko only (empty on P&F): the one-back pattern signals, which AUTO trades when its rule is 'One-back'. */
@@ -340,6 +342,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
     // Renko: N-brick confirmation (`reversal` holds N); no COVER cue and no session marks (they are P&F devices).
     signals: renko ? renkoSignals(columns, bars, reference, reversal) : detectSignals(columns, bars, reference),
     trend: renko ? trendSignals(columns, bars, reference, reversal) : [],
+    stSignals: renko ? supertrendSignals(columns, bars, reference, supertrend) : [],
     twoBack: renko ? twoBackSignals(columns, bars, reference, box) : [],
     oneBack: renko ? oneBackSignals(columns, bars, reference, box) : [],
     exits: renko ? [] : exitTags(columns, bars, reference),

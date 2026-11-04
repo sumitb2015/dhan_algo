@@ -189,3 +189,11 @@ test('fillPrice guards: the order count must match the legs, a price far from th
   const late = applyAutoOp(f, { op: 'fillPrice', id: 'r1', which: 'entry', price: 161.5, legCount: 2 });
   assert.ok(!late.ok && /flat at broker/.test(late.error), 'no fabricated P&L against a non-existent exit');
 });
+
+test('a Supertrend row keeps its exitBy (so a reload cannot change how it exits); any other value is refused', () => {
+  const l = run(EMPTY_LEDGER, { op: 'open', row: row({ exitBy: 'supertrend' }) });
+  assert.equal(l.rows[0].exitBy, 'supertrend');
+  assert.equal(run(EMPTY_LEDGER, { op: 'open', row: row() }).rows[0].exitBy, undefined);
+  const bad = applyAutoOp(EMPTY_LEDGER, { op: 'open', row: row({ exitBy: 'whatever' }) as never });
+  assert.ok(!bad.ok && bad.status === 400);
+});

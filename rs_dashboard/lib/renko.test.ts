@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRenko, brickClose, renkoSignals, trendSignals, twoBackSignals, oneBackSignals, renkoSma, renkoSupertrend } from './renko.ts';
+import { buildRenko, brickClose, supertrendSignals, renkoSignals, trendSignals, twoBackSignals, oneBackSignals, renkoSma, renkoSupertrend } from './renko.ts';
 import { buildConfirmedModel, withLive } from './straddlePnfModel.ts';
 import { boxPriceAt, decideAuto } from './pnfAuto.ts';
 import type { Bar } from './straddlePnf.ts';
@@ -200,4 +200,13 @@ test('trend N-brick: every brick of a run signals (no reversal needed), n = 2 sk
   assert.deepEqual(trendSignals(columns, b, ref, 1).map(s => `${s.kind}:${s.col}`), ['RENKO_SELL:0', 'RENKO_SELL:1', 'RENKO_SELL:2', 'RENKO_BUY:3', 'RENKO_BUY:4']);
   assert.deepEqual(trendSignals(columns, b, ref, 2).map(s => `${s.kind}:${s.col}`), ['RENKO_SELL:1', 'RENKO_SELL:2', 'RENKO_BUY:4']);
   assert.equal(new Set(trendSignals(columns, b, ref, 1).map(s => s.id)).size, 5);
+});
+
+test('supertrendSignals: BUY while the line direction is up, SELL while down, nothing while unreadable', () => {
+  const cols = [0, 1, 2, 3].map(i => ({ dir: 'X' as const, low: 100 + i, high: 101 + i, boxes: 1, startBar: i, endBar: i, session: 's', breakBar: null, boxBars: [] }));
+  const bars = cols.map((_, i) => ({ t: 1000 + i * 60, ce: 50, pe: 0, straddle: 100, vol: 1 }));
+  const st = [{ line: null, dir: null }, { line: 99, dir: 1 as const }, { line: 105, dir: -1 as const }, { line: 99, dir: 1 as const }];
+  const out = supertrendSignals(cols, bars, bars.map(() => null), st);
+  assert.deepEqual(out.map(s => [s.col, s.kind]), [[1, 'RENKO_BUY'], [2, 'RENKO_SELL'], [3, 'RENKO_BUY']]);
+  assert.ok(out.every(s => s.exitBy === 'supertrend'), 'every Supertrend signal marks its position to exit on the flip');
 });

@@ -48,6 +48,8 @@ export type PnfSignal = {
   belowVwap: boolean;
   /** Two-back / one-back signals only: the protective stop, one brick beyond the pullback. */
   stop?: number;
+  /** Supertrend-rule signals only: the position that signal opens exits when the Supertrend line flips, not on an opposite brick. */
+  exitBy?: 'supertrend';
 };
 
 export type PnfExecutionMarker = {

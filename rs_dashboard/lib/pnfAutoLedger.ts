@@ -37,6 +37,8 @@ export interface AutoRow {
   entryBarT: number;
   /** Two-back rows: the protective stop (one brick beyond the pullback); the exit is this level, not a reversal brick. */
   stop?: number;
+  /** Supertrend-rule rows: the exit is the Supertrend line flipping against the position (kept on the row so a reload cannot change it). */
+  exitBy?: 'supertrend';
   /**
    * PAPER: the confirmed box the signal bar reached (where the trade is booked). REAL: the chart's live price at the decision
    * (an estimate of the market fill).
@@ -127,6 +129,7 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       if (!Number.isInteger(r.lots) || r.lots < 1 || r.lots > 20) return { ok: false, status: 400, error: 'lots must be 1-20' };
       if (![r.entryT, r.entryBarT, r.entryPrice, r.unitsPerPoint].every(finite) || !r.id) return { ok: false, status: 400, error: 'Invalid row' };
       if (r.stop !== undefined && (!finite(r.stop) || (r.side === 'BUY' ? r.stop >= r.entryPrice : r.stop <= r.entryPrice))) return { ok: false, status: 400, error: 'stop must be beyond the entry, on the losing side' };
+      if (r.exitBy !== undefined && r.exitBy !== 'supertrend') return { ok: false, status: 400, error: 'Invalid exitBy' };
       if (r.market !== undefined && !(['NSE', 'NSE_CAS', 'NSE_FNO', 'MCX'] as const).includes(r.market)) return { ok: false, status: 400, error: 'Invalid market' };
       if (led.rows.some(x => x.id === r.id)) return { ok: false, status: 409, error: 'Row already exists' };
       const live = led.rows.find(x => x.chart === r.chart && isLive(x));

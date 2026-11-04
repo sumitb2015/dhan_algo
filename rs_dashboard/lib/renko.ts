@@ -147,6 +147,25 @@ export function trendSignals(columns: PnfColumn[], bars: Bar[], reference: (numb
   return out;
 }
 
+/**
+ * Supertrend rule: a signal on EVERY brick whose close is above the Supertrend line (direction up -> BUY) or below it (direction down
+ * -> SELL), so the chart is always in one state and AUTO holds that side until the line flips. A brick the ATR cannot read yet (null
+ * direction) signals nothing. AUTO enters only on a brick that formed on the newest closed bar and exits on the first brick of the
+ * opposite state (the signal's `exitBy`, which the row keeps, read by pnfAuto reversalColumn). Not drawn as chart markers.
+ */
+export function supertrendSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], st: RenkoSupertrendPoint[]): PnfSignal[] {
+  const out: PnfSignal[] = [];
+  columns.forEach((c, col) => {
+    const dir = st[col]?.dir;
+    if (dir !== 1 && dir !== -1) return;
+    const kind = dir === 1 ? 'RENKO_BUY' : 'RENKO_SELL';
+    const price = brickClose(c);
+    const v = reference[c.startBar];
+    out.push({ id: `ST_${kind}:${col}`, kind, col, bar: c.startBar, t: bars[c.startBar].t, price, belowVwap: v != null && price < v, exitBy: 'supertrend' });
+  });
+  return out;
+}
+
 /** SMA of brick closes, read at each brick (null until `period` bricks exist) — TradingView's moving average on a Renko chart. */
 export function renkoSma(columns: PnfColumn[], period: number): (number | null)[] {
   let sum = 0;

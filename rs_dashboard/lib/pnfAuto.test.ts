@@ -142,3 +142,21 @@ test('a row\'s end-of-day time comes from its own market, not the chart on scree
   assert.deepEqual(decideAuto({ model: empty, position: long, watermarkT: 0, nowS: at, market: 'NSE' }), { action: 'exit', reason: 'eod' }, 'the wrong (NSE) market would have flattened it');
   assert.equal(decideAuto({ model: empty, position: long, watermarkT: 0, nowS: at, market: rowMarket({ target: crude }) }).action, 'none');
 });
+
+test('Supertrend rule: a position exits when the line turns against it, not on an opposite-colour brick, whatever rule the page shows', () => {
+  // columns X, O, X, O at 10:00 / 10:10 / 10:20 / 10:30; the line is up until the 10:30 brick
+  const base = model();
+  const up = model({ supertrend: [{ dir: 1 }, { dir: 1 }, { dir: 1 }, { dir: -1 }] });
+  const plain = { side: 'BUY' as const, entryBarT: ist(10, 0) };
+  const byLine = { ...plain, exitBy: 'supertrend' as const };
+  assert.equal(reversalColumn(up, plain), 1, 'a row without exitBy still exits on the first O brick (the supertrend data is ignored)');
+  assert.equal(reversalColumn(up, byLine), 3, 'a Supertrend row exits only on the flip brick');
+  const short = { side: 'SELL' as const, exitBy: 'supertrend' as const, entryBarT: ist(10, 30) };
+  const longer = model({ supertrend: [{ dir: -1 }, { dir: -1 }, { dir: -1 }, { dir: -1 }, { dir: 1 }], columns: [...base.columns, col('X')], columnTimes: [...base.columnTimes, { start: ist(10, 40), end: ist(10, 41) }] });
+  assert.equal(reversalColumn(longer, short), 4);
+  // a column whose direction is not readable yet never exits; no supertrend data at all never exits either
+  assert.equal(reversalColumn(model({ supertrend: [{ dir: null }, { dir: null }, { dir: null }, { dir: null }] }), byLine), -1);
+  assert.equal(reversalColumn(base, byLine), -1);
+  const d = decideAuto({ model: up, position: byLine, watermarkT: 0, nowS: ist(10, 31), market: 'NSE' });
+  assert.equal(d.action === 'exit' && d.col, 3);
+});

@@ -82,8 +82,10 @@ export function SmaPeriodInput({ settings, onChange }: { settings: PnfSettings; 
  * The Renko Supertrend: an eye button shows / hides the line (a page preference), then the ATR period in bricks (− / + by 1, Shift: 5)
  * and the band multiplier (− / + by 0.5); both free-typed boxes commit on Enter / blur. The settings are per chart.
  */
-export function SupertrendControls({ settings, onChange, shown, onToggleShown }: {
+export function SupertrendControls({ settings, onChange, shown, onToggleShown, locked = false }: {
   settings: PnfSettings; onChange: (next: PnfSettings) => void; shown: boolean; onToggleShown: () => void;
+  /** AUTO trades the Supertrend on this chart: the ATR and multiplier cannot move under its position (the eye still works). */
+  locked?: boolean;
 }) {
   const p = settings.stPeriod;
   const m = settings.stMult;
@@ -103,6 +105,7 @@ export function SupertrendControls({ settings, onChange, shown, onToggleShown }:
         {shown ? <Eye className="w-3.5 h-3.5" aria-hidden="true" /> : <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />}
         ST
       </button>
+      <fieldset disabled={locked} className="contents" title={locked ? 'AUTO is trading the Supertrend: stop it (and close its position) to change the ATR or multiplier' : undefined}>
       <span>ATR</span>
       <div className="inline-flex items-center">
         <button type="button" aria-label="Decrease Supertrend period" title="Decrease the ATR period by 1 (Shift: 5)" disabled={p <= MIN_ST_PERIOD}
@@ -131,6 +134,7 @@ export function SupertrendControls({ settings, onChange, shown, onToggleShown }:
           <Plus className="w-3 h-3" aria-hidden="true" />
         </button>
       </div>
+      </fieldset>
     </div>
   );
 }

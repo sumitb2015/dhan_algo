@@ -33,8 +33,9 @@ Pick one per chart from the dropdown next to AUTO. A "brick" is one Renko column
 | **N-brick (trend)** | On **every** brick that completes N same-colour bricks, so with N = 1 the next brick of the run you are in. Arming mid-run enters on the next brick. | First opposite brick, and that brick is also an entry for the other side (N = 1): the chart **flips** straight into the new direction. No stop. |
 | **Two-back** | 3+ bricks, a 2-brick pullback, then the run resumes and a brick makes it 3 long and closes past the swing. | A stop one brick beyond the pullback, checked against the **live price** every second. No opposite-brick exit and no target. |
 | **One-back** | 2+ bricks, a 1-brick pullback, then 2 resuming bricks that break the swing. | The same kind of stop. |
+| **Supertrend** | BUY while a brick closes **above** the Supertrend line, SELL while it closes **below** it (the line's direction on the chart's ATR period x multiplier, the `ST` control). Arming mid-run enters on the next brick. | The first brick after the entry whose Supertrend direction is against the position (the line flips), and that brick is also the entry for the other side: the chart **flips**. No stop. |
 
-N-brick and N-brick (trend) carry **no stop of their own**: the MTM guard is their loss limit. Two consecutive S (or B) markers on the
+N-brick, N-brick (trend) and Supertrend carry **no stop of their own**: the MTM guard is their loss limit. Two consecutive S (or B) markers on the
 chart under the trend rule are a flip: the first is the exit of the old position, the second the entry of the new one.
 
 ## 3. When it enters

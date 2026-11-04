@@ -1119,8 +1119,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
             {renko && (
               <>
                 <span className="w-px h-5 bg-zinc-800 shrink-0" />
-                {/* Outside the AUTO lock: the Supertrend is drawn only, AUTO reads the bricks and signals, which it does not change. */}
+                {/* Outside the general AUTO lock (the line is only drawn for the other rules), but locked while AUTO trades it: armed with the
+                    Supertrend rule, or holding a Supertrend position (the row remembers it across a reload). */}
                 <SupertrendControls settings={activeSettings} onChange={applySettings}
+                                    locked={activeLocked && (autoRule[active] === 'supertrend' || autoOf(active).row?.exitBy === 'supertrend')}
                                     shown={supertrendShown} onToggleShown={toggleSupertrendShown} />
               </>
             )}

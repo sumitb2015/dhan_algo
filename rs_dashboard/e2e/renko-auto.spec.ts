@@ -218,3 +218,19 @@ test('PAPER: the MTM guard watches AUTO\'s own position - a stop-loss closes the
   expect(orders.length, 'a paper exit sends nothing').toBe(1);
   await expect(auto).toHaveAttribute('data-armed', 'false');
 });
+
+test('Supertrend rule: it is selectable, and arming it locks the ATR / multiplier (the eye still works) until AUTO is stopped', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  await install(page);
+  await openFuture(page);
+  const rule = page.getByLabel('AUTO rule on chart 1');
+  await expect(rule.locator('option[value="supertrend"]')).toHaveText('Supertrend');
+  await rule.selectOption('supertrend');
+  await expect(page.getByRole('button', { name: 'Increase Supertrend period' })).toBeEnabled();
+  const auto = page.getByTestId('pnf-auto-1');
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect(auto).toHaveAttribute('data-armed', 'true');
+  await expect(page.getByRole('button', { name: 'Increase Supertrend period' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Increase Supertrend multiplier' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: /(Hide|Show) the Supertrend/ })).toBeEnabled();
+});
