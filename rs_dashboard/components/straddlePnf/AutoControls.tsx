@@ -83,14 +83,22 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
     setDraft(String(next));
     if (next !== lots) onLots(next);
   };
+  const open = row?.state === 'open';
+  // Stopping REAL AUTO while it holds a position takes a second click: the position still exits on its rule, but nothing re-enters
+  // (2026-11-04: one click at 15:31 switched chart 1 off, its 15:39 reversal exited and the opposite side was never taken).
+  const stopNeedsConfirm = armed && mode === 'REAL' && open;
   const toggle = () => {
-    if (armed) { onArm(false); return; }
+    if (armed) {
+      if (stopNeedsConfirm && !confirmReal) { setConfirmReal(true); return; }
+      setConfirmReal(false);
+      onArm(false);
+      return;
+    }
     if (mode === 'REAL' && !confirmReal) { setConfirmReal(true); return; }
     setConfirmReal(false);
     onArm(true);
   };
 
-  const open = row?.state === 'open';
   const pnl = open && price !== null ? rowPnl(row.side, row.entryPrice, price, row.unitsPerPoint) : null;
   const unresolved = row && row.state !== 'open';
 
@@ -98,12 +106,13 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
     <span data-testid={`pnf-auto-${chart}`} data-armed={armed} className="flex items-center gap-1.5 shrink-0 font-sans [&_button]:scroll-mt-48 [&_input]:scroll-mt-48 [&_select]:scroll-mt-48">
       <button type="button" onClick={toggle} disabled={!!disabledReason && !armed} aria-pressed={armed}
               aria-label={armed ? `Stop AUTO on chart ${chart}` : `Start AUTO on chart ${chart}`}
-              title={disabledReason ?? (armed ? `AUTO ${mode}: ${rule ?? 'double-bottom SELL / double-top BUY, exit on the first column reversal'}` : 'Trade this chart automatically')}
+              title={disabledReason ?? (armed && confirmReal ? 'Click again to stop AUTO: the open position still exits on its rule, but nothing re-enters'
+                : armed ? `AUTO ${mode}: ${rule ?? 'double-bottom SELL / double-top BUY, exit on the first column reversal'}` : 'Trade this chart automatically')}
               className={`inline-flex items-center gap-1 h-6 px-2 rounded border text-[11px] font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${armed
-                ? mode === 'REAL' ? 'border-red-500/50 bg-red-500/15 text-red-300' : 'border-violet-500/50 bg-violet-500/15 text-violet-300'
+                ? confirmReal ? 'border-amber-500/60 bg-amber-500/20 text-amber-300' : mode === 'REAL' ? 'border-red-500/50 bg-red-500/15 text-red-300' : 'border-violet-500/50 bg-violet-500/15 text-violet-300'
                 : confirmReal ? 'border-red-500/60 bg-red-500/20 text-red-300' : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white'}`}>
         <Bot className="w-3 h-3" aria-hidden="true" />
-        {confirmReal && !armed ? 'ARM REAL AUTO?' : 'AUTO'}
+        {confirmReal ? (armed ? 'STOP AUTO? no re-entry' : 'ARM REAL AUTO?') : 'AUTO'}
         {armed && <span className={`w-1.5 h-1.5 rounded-full ${mode === 'REAL' ? 'bg-red-400' : 'bg-violet-400'} animate-pulse`} aria-hidden="true" />}
       </button>
       {autoRule && onAutoRule && (

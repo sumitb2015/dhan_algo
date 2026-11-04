@@ -31,7 +31,9 @@ page to REAL to resume* — and comes back on by itself once you switch the page
 switches AUTO off in every open tab, and the AUTO log says why (*AUTO switched off: …*).
 
 An open AUTO position on a chart whose AUTO is off shows **AUTO OFF · exit only**: it still exits by its rule, but nothing re-enters after
-it (before 2026-11-04 a reload did this silently — an exit with no re-entry).
+it (before 2026-11-04 a reload did this silently — an exit with no re-entry). For that reason, stopping **REAL** AUTO while it holds a
+position takes a second click: the first turns the button amber (`STOP AUTO? no re-entry`); click again within 6 s. Stopping never
+closes the position (use **Exit** for that).
 
 ## 2. The rules
 

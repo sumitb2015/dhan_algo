@@ -136,6 +136,32 @@ test('REAL: arming takes a second click; the entry is confirmed; the exit sends 
   expect(orders[1].close).toBeUndefined();
 });
 
+// 2026-11-04 15:31: one click switched REAL AUTO off with a position open; its 15:39 reversal exited and nothing re-entered.
+test('REAL: stopping AUTO while it holds a position takes a second click (no re-entry warning); the position stays open', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await openFuture(page);
+  page.once('dialog', d => { void d.accept(); });
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  const auto = page.getByTestId('pnf-auto-1');
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect(auto).toHaveAttribute('data-armed', 'true');
+  await page.clock.setFixedTime(ist(10, 31, 5));
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('open');
+
+  const stop = auto.getByRole('button', { name: 'Stop AUTO on chart 1' });
+  await stop.click();
+  await expect(auto).toContainText('STOP AUTO? no re-entry');
+  await expect(auto).toHaveAttribute('data-armed', 'true');
+  expect(state.ledger.arms?.['1']?.mode, 'the first click changes nothing').toBe('REAL');
+  await stop.click();
+  await expect(auto).toHaveAttribute('data-armed', 'false');
+  await expect.poll(() => state.ledger.arms?.['1']).toBeUndefined();
+  expect(state.ledger.rows[0].state, 'stopping AUTO never closes the position').toBe('open');
+  expect(orders.length).toBe(1);
+});
+
 test('REAL: an unknown entry outcome halts the chart, is never resent, and waits for the user', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
   const { orders, state } = await install(page, { reply: () => ({ success: false, outcome: 'unknown', message: 'Status unknown' }) });
