@@ -23,7 +23,7 @@ export default function HeaderPnlMargin({ broker, mode = 'PAPER', paperPnl = 0, 
   const [funds, setFunds] = useState<{ broker: Broker; available: number | null; error?: string } | null>(null);
   const [book, setBook] = useState<{ broker: Broker; pnl: Book | null; error?: string } | null>(null);
 
-  // Available margin, every 15 s.
+  // Available margin, every 30 s (a display chip: it must not compete with orders for the broker's request budget).
   useEffect(() => {
     let dead = false;
     const read = async () => {
@@ -38,7 +38,7 @@ export default function HeaderPnlMargin({ broker, mode = 'PAPER', paperPnl = 0, 
       }
     };
     void read();
-    const id = setInterval(read, 15_000);
+    const id = setInterval(read, 30_000);
     return () => { dead = true; clearInterval(id); };
   }, [broker]);
 
@@ -58,7 +58,7 @@ export default function HeaderPnlMargin({ broker, mode = 'PAPER', paperPnl = 0, 
       }
     };
     void read();
-    const id = setInterval(read, 5_000);
+    const id = setInterval(read, 10_000);
     return () => { dead = true; clearInterval(id); };
   }, [broker, mode]);
 

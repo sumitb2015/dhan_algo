@@ -9,7 +9,7 @@ import { reserveOrderSlot } from '@/lib/dhanOrderPacer';
 import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
 import { buildKotakOrderPayload } from '@/lib/kotakOrderPayload';
 import { kotakDerivativeBySymbol } from '@/lib/kotakContracts';
-import { kotakGet, kotakGetShared, kotakPost, kotakRows, kotakLimits, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
+import { kotakGet, kotakGetShared, kotakPriority, kotakPost, kotakRows, kotakLimits, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { shapeKotakFunds, shapeKotakOrderStatus, shapeKotakPosition, kotakOrderCandidates } from '@/lib/kotakShape';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { kiteGet, kiteDelete, isZerodhaTokenValid } from '@/lib/zerodhaToken';
@@ -538,6 +538,7 @@ export async function brokerPositionRows(broker: LadderBroker): Promise<BrokerPo
   // refused with "could not read the positions" left a REAL position open). Only a rate limit / timeout is retried, with growing waits.
   const waits = broker === 'kotak' ? [600, 1200, 2400] : [];
   for (let attempt = 0; ; attempt++) {
+    if (broker === 'kotak') kotakPriority(2_500);     // display polls hold off while this exit-sizing read (and each retry) runs
     try {
       return await readBrokerPositionRows(broker);
     } catch (err) {

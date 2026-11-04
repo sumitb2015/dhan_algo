@@ -18,7 +18,8 @@ import type { PaperTradeRow } from '@/lib/pnfPaperBook';
 type Tab = 'positions' | 'orders' | 'trades' | 'pnl' | 'auto';
 type BookState<T> = { broker: Broker; rows: T[]; error?: string } | null;
 
-const POLL_MS = 5_000;
+// A display panel: it yields to order placement and exits, which share the broker's per-second request budget.
+const POLL_MS = 10_000;
 const fmt = (n: number | null, d = 2) => (n === null ? '—' : n.toLocaleString('en-IN', { minimumFractionDigits: d, maximumFractionDigits: d }));
 const inr = (n: number | null) => (n === null ? '—' : `${n < 0 ? '-' : n > 0 ? '+' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`);
 const tone = (n: number | null) => (n === null || n === 0 ? 'text-zinc-300' : n > 0 ? 'text-emerald-400' : 'text-red-400');

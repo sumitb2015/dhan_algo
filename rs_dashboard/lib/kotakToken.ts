@@ -262,12 +262,27 @@ const RATE_LIMIT_COOLDOWN_MS = 3_000;
 const KOTAK_RATE_LIMIT = 100025;
 const sharedGets = new Map<string, { at: number; json?: Record<string, unknown>; err?: unknown; inflight?: Promise<Record<string, unknown>> }>();
 
+// Order placement and an exit's position read are the only Kotak calls whose speed matters: display polls (books, P&L chips) yield to
+// them. While a priority window is open a display read is served from its last result, or waits for the window to end, instead of
+// spending the same per-second budget (a burst of polls right after an order is what produced stCode 100025 on the exit's own read).
+let priorityUntil = 0;
+export function kotakPriority(ms: number): void { priorityUntil = Math.max(priorityUntil, Date.now() + ms); }
+// The order and trade books are display reads (fills are confirmed through scalper/orders' own live read): they may be a few seconds old.
+const SLOW_BOOK_TTL_MS = 4_000;
+const ttlFor = (apiPath: string) => (apiPath === KOTAK_PATHS.orderBook || apiPath === KOTAK_PATHS.tradeBook ? SLOW_BOOK_TTL_MS : SHARED_GET_TTL_MS);
+
 export async function kotakGetShared(apiPath: string): Promise<Record<string, unknown>> {
+  const held = priorityUntil - Date.now();
+  if (held > 0) {
+    const last = sharedGets.get(apiPath);
+    if (last?.json) return last.json;
+    await new Promise(res => setTimeout(res, held));
+  }
   const hit = sharedGets.get(apiPath);
   if (hit?.inflight) return hit.inflight;
   if (hit) {
     const age = Date.now() - hit.at;
-    if (hit.json && age < SHARED_GET_TTL_MS) return hit.json;
+    if (hit.json && age < ttlFor(apiPath)) return hit.json;
     if (hit.err && age < RATE_LIMIT_COOLDOWN_MS) throw hit.err;
   }
   const inflight = kotakGet(apiPath).then(
@@ -311,7 +326,7 @@ export async function kotakPost(
     return await res.json() as Record<string, unknown>;
   };
 
-  if (ORDER_WRITE_PATHS.has(apiPath)) sharedGets.clear();
+  if (ORDER_WRITE_PATHS.has(apiPath)) { kotakPriority(2_000); sharedGets.clear(); }
   // Kotak rejects a request under a dead session outright rather than
   // silently accepting it (see reloginKotak's doc comment) — a retry after a
   // fresh login cannot double-place an order the first attempt never placed.
