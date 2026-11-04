@@ -533,30 +533,44 @@ export interface BrokerPositionRow { key: string; symbol: string; product: strin
 
 /** The broker's live positions, one row per contract + product (summed), or null when the book is unreadable. Never cached. */
 export async function brokerPositionRows(broker: LadderBroker): Promise<BrokerPositionRow[] | null> {
-  try {
-    const rows = new Map<string, BrokerPositionRow>();
-    const add = (r: BrokerPositionRow) => {
-      const k = `${r.key}|${r.product}`;
-      const cur = rows.get(k);
-      if (cur) cur.net += r.net; else rows.set(k, r);
-    };
-    if (broker === 'dhan') {
-      const book = await dhanGet('/positions', 8000);
-      for (const p of (Array.isArray(book) ? book : []) as Record<string, unknown>[]) {
-        add({ key: String(p.securityId), symbol: String(p.tradingSymbol ?? ''), product: String(p.productType).toUpperCase(), net: Number(p.netQty) || 0, exchange: String(p.exchangeSegment ?? ''), lotSize: null });
-      }
-    } else {
-      const shaped = broker === 'zerodha'
-        ? ((await kiteGet('/portfolio/positions') as { net?: Record<string, unknown>[] } | null)?.net ?? []).map(shapeZerodhaPosition)
-        : kotakRows(await kotakGet(KOTAK_PATHS.positions)).map(shapeKotakPosition);
-      for (const p of shaped) {
-        add({ key: p.tradingSymbol, symbol: p.tradingSymbol, product: String(p.productType).toUpperCase(), net: Number(p.netQty) || 0, exchange: String(p.exchange ?? ''), lotSize: Number(p.lotSize) > 0 ? Number(p.lotSize) : null });
-      }
+  // Kotak answers stCode 100025 "rate limit exceeded" past a few requests a second, and the display polls, the funds read and the
+  // server watcher all share that budget: an exit that sizes off the book must outwait it, not give up on the first refusal (an exit
+  // refused with "could not read the positions" left a REAL position open). Only a rate limit / timeout is retried, with growing waits.
+  const waits = broker === 'kotak' ? [600, 1200, 2400] : [];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await readBrokerPositionRows(broker);
+    } catch (err) {
+      const msg = String((err as Error)?.message ?? err);
+      const transient = /100025|rate limit|timeout|timed out|aborted|fetch failed|ECONN|ETIMEDOUT/i.test(msg);
+      if (attempt < waits.length && transient) { await new Promise(res => setTimeout(res, waits[attempt])); continue; }
+      console.error(`[brokerPositionRows] ${broker} positions unreadable after ${attempt + 1} attempt(s): ${msg}`);
+      return null;
     }
-    return [...rows.values()];
-  } catch {
-    return null;
   }
+}
+
+async function readBrokerPositionRows(broker: LadderBroker): Promise<BrokerPositionRow[]> {
+  const rows = new Map<string, BrokerPositionRow>();
+  const add = (r: BrokerPositionRow) => {
+    const k = `${r.key}|${r.product}`;
+    const cur = rows.get(k);
+    if (cur) cur.net += r.net; else rows.set(k, r);
+  };
+  if (broker === 'dhan') {
+    const book = await dhanGet('/positions', 8000);
+    for (const p of (Array.isArray(book) ? book : []) as Record<string, unknown>[]) {
+      add({ key: String(p.securityId), symbol: String(p.tradingSymbol ?? ''), product: String(p.productType).toUpperCase(), net: Number(p.netQty) || 0, exchange: String(p.exchangeSegment ?? ''), lotSize: null });
+    }
+  } else {
+    const shaped = broker === 'zerodha'
+      ? ((await kiteGet('/portfolio/positions') as { net?: Record<string, unknown>[] } | null)?.net ?? []).map(shapeZerodhaPosition)
+      : kotakRows(await kotakGet(KOTAK_PATHS.positions)).map(shapeKotakPosition);
+    for (const p of shaped) {
+      add({ key: p.tradingSymbol, symbol: p.tradingSymbol, product: String(p.productType).toUpperCase(), net: Number(p.netQty) || 0, exchange: String(p.exchange ?? ''), lotSize: Number(p.lotSize) > 0 ? Number(p.lotSize) : null });
+    }
+  }
+  return [...rows.values()];
 }
 
 const rowKey = (broker: LadderBroker, c: LadderContract, product: string) => (bySymbol(broker)
