@@ -16,8 +16,9 @@ How the Renko page's automatic trading works: what it trades, when it enters and
 3. Choose the **broker** and **PAPER / REAL** (page-wide). A page always opens in PAPER; switching to REAL asks for confirmation.
 4. In the chart's **AUTO** controls choose the **rule** (see section 2) and the **lots** (`L` stepper).
 5. Click **AUTO**. In REAL the first click turns the button red (`ARM REAL AUTO?`); click again within 6 s.
-6. Arming also **switches that chart's MTM guard on** (section 6) with your saved levels, or 10 boxes target / 10 boxes stop if you have
-   never saved any. A toast says so. Check that **MTM Guard ON** shows in the toolbar.
+6. Arming does **not** switch the MTM guard on (section 6): it stays OFF until you open the MTM Guard card, set the levels (a chart with
+   nothing saved shows 10 boxes target / 10 boxes stop) and click **Switch on**. In REAL a toast reminds you it is off. Without it N-brick, trend
+   and Supertrend have **no loss limit** (only the end-of-day exit).
 7. Leave the tab open (section 7 explains what keeps working if you do not).
 
 While AUTO is armed or holds a position, the rule, lots, instrument and box are locked. To change them, stop AUTO (and close its
@@ -95,7 +96,7 @@ One guard per chart, shown in the toolbar (**MTM Guard ON/OFF**) with its card.
   at the position's current size, and the guard keeps the last known value if it is briefly unreadable. If the box value is never known
   while a position is open, the guard warns once that the box levels are **not** enforced.
 - **Defaults.** A chart with nothing saved starts in Boxes with **10 target / 10 stop**. Saved levels always win.
-- **Switching on.** Arming AUTO switches the guard on for that chart. You can also switch it on from the card for manual trades. Edit the
+- **Switching on.** Off by default, also while AUTO is armed: switch it on from the card (**Switch on**), for AUTO or for manual trades. Edit the
   levels while it is ON and click **Update**; typed values are not applied until you do. A guard already past a level asks before switching on.
 - **Baseline.** Measured from when the guard was switched on. For a PAPER AUTO position it starts from AUTO's **entry price**. A new AUTO
   trade (the trend rule flips within a tick) starts from its own baseline with a fresh best-so-far and locked floor. After a flat reading

@@ -202,14 +202,14 @@ test('PAPER: the MTM guard watches AUTO\'s own position - a stop-loss closes the
   await expect.poll(() => orders.length, { timeout: 15_000 }).toBe(1);
   await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 1L @ 100.00');
 
-  // arming AUTO switched the guard on with its defaults (target 10 boxes / stop 10 boxes): switch to rupees, tighten the stop and update
-  await expect(page.getByTestId('pnf-guard-toggle')).toContainText('ON');
+  // arming AUTO leaves the guard OFF; its card starts at target 10 boxes / stop 10 boxes: switch to rupees, set a tight stop and switch it on
+  await expect(page.getByTestId('pnf-guard-toggle')).not.toContainText('ON');
   await page.getByTestId('pnf-guard-toggle').click();
   await expect(page.getByLabel('MTM target in boxes', { exact: true })).toHaveValue('10');
   await expect(page.getByLabel('MTM stop-loss in boxes', { exact: true })).toHaveValue('10');
   await page.getByRole('button', { name: '₹ Rupees' }).click();
   await page.getByLabel('MTM stop-loss in rupees', { exact: true }).fill('50');
-  await page.getByTestId('pnf-guard-card').getByRole('button', { name: 'Update', exact: true }).click();
+  await page.getByTestId('pnf-guard-card').getByRole('button', { name: 'Switch on', exact: true }).click();
   await page.waitForTimeout(2500);                                      // the guard's baseline is set on its first priced tick
   // +1 point against the short x 65 = Rs 65 of loss, past the Rs 50 stop (the forming bar prints no brick: the rule exit stays out)
   state.tick = { ltp: 101.05, at: ist(10, 31, 20) };

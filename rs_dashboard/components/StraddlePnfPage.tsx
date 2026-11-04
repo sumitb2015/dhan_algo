@@ -826,8 +826,9 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     replay.open();
   };
   const armChart = (c: ChartId, on: boolean) => {
-    // AUTO and its MTM guard go together: arming AUTO switches the chart's guard on with its saved levels (10 boxes / 10 boxes by default).
-    if (on) { const rc = railCharts.find(x => x.chart === c); if (rc) void guards.armDefault({ chart: rc.chart, targetKey: rc.targetKey }); }
+    // The MTM guard is the user's choice: arming AUTO leaves it as it is (OFF unless switched on from the MTM Guard card, whose levels start
+    // at 10 boxes / 10 boxes). Said once, because the Supertrend / N-brick rules have no stop of their own.
+    if (on && tradeMode === 'REAL' && !guards.guardOf(c).on) toast.info(`AUTO armed on chart ${c} with the MTM guard OFF - switch it on from the MTM Guard card if you want a profit target / stop-loss.`, { duration: 10_000 });
     const m = (c === 2 ? c2 : c1).model;
     setAutoArm(a => ({ ...a, [c]: on ? { on: true, mode: tradeMode, watermarkT: m.lastBarT ?? Math.floor(nowSec()) } : DISARMED }));
     void autoPost({ op: 'log', chart: c, t: nowSec(), text: on ? `AUTO armed (${tradeMode}, ${autoLots[c]} lot)` : 'AUTO stopped' });

@@ -224,28 +224,11 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     return () => clearInterval(id);
   }, []);
 
-  /**
-   * AUTO was switched on for this chart: switch its guard on too, with the remembered levels (the 10 / 10 box defaults when none were
-   * ever saved, or when every rule was cleared). A guard already on is left alone.
-   */
-  const armDefault = async (chart: GuardChart): Promise<void> => {
-    const cur = levelsOf(chart.chart);
-    if (cur.on) return;
-    const none = cur.target == null && cur.stop == null && cur.targetBoxes == null && cur.stopBoxes == null && cur.trailBy == null && cur.lockAt == null;
-    const body = { ...cur, on: true, ...(none ? { targetBoxes: DEFAULT_GUARD_BOXES, stopBoxes: DEFAULT_GUARD_BOXES } : {}) };
-    if (await post(chart)(body)) {
-      onEventRef.current(chart.chart, 'info', `MTM guard switched on with AUTO: target ${body.targetBoxes != null ? `${body.targetBoxes} boxes` : body.target != null ? `₹${body.target}` : '-'}, stop ${body.stopBoxes != null ? `${body.stopBoxes} boxes` : body.stop != null ? `₹${body.stop}` : '-'}. It stays on until you switch it off.`);
-    } else {
-      // post() already said why (no live price for an open position, an invalid level): AUTO is armed, its guard is not.
-      onEventRef.current(chart.chart, 'warn', `AUTO is armed on chart ${chart.chart} WITHOUT its MTM guard - open the MTM Guard card and switch it on.`);
-    }
-  };
-
   /** A guard the server still holds from before a reload / a closed tab: switch it on here with its levels (the guard stays ON until the user stops it). */
   const adopt = (chart: 1 | 2, levels: LadderGuard) => {
     setSlots(s => (s[chart]?.guard.on ? s : { ...s, [chart]: { guard: { ...levels, on: true, tripped: undefined, peak: undefined, floor: undefined }, base: null } }));
     saveLevels(storeKey, chart, levels);
   };
 
-  return { guardOf: levelsOf, mtmOf, post, armDefault, adopt };
+  return { guardOf: levelsOf, mtmOf, post, adopt };
 }
