@@ -1,7 +1,7 @@
 // Which signals each Renko AUTO rule trades, and how the rule reads in the UI: one place for both charts, so a new rule cannot be
 // added to one chart's selection and missed on the other (a missed case would trade the plain N-brick signals under another name).
 // Pure (tested in lib/pnfAutoRule.test.ts).
-import type { PnfSignal } from './straddlePnf.ts';
+import { isSellSignal, type PnfSignal } from './straddlePnf.ts';
 
 export type AutoRule = 'nbrick' | 'trend' | 'twoback' | 'oneback' | 'supertrend';
 /** What a chart starts with (and falls back to for an unreadable saved value). */
@@ -28,4 +28,15 @@ export function ruleText(rule: AutoRule, confirm: number): string {
     case 'twoback': return 'Two-back: 3+ bricks, 2-brick pullback, 3 bricks resume past the swing; stop one brick beyond the pullback';
     case 'nbrick': return `Renko SELL / BUY after ${confirm} confirming bricks, exit on the first opposite brick`;
   }
+}
+
+/** Which side(s) AUTO may OPEN. Exits are never filtered: a position that is open always exits by its own rule. */
+export type AutoSide = 'both' | 'buy' | 'sell';
+export const AUTO_SIDES: readonly AutoSide[] = ['both', 'buy', 'sell'];
+export const DEFAULT_AUTO_SIDE: AutoSide = 'both';
+
+/** The model with only the allowed side's signals (the engine enters on `model.signals`); 'both' is the model itself. */
+export function withSide<M extends { signals: PnfSignal[] }>(m: M, side: AutoSide): M {
+  if (side === 'both') return m;
+  return { ...m, signals: m.signals.filter(s => (side === 'sell') === isSellSignal(s.kind)) };
 }

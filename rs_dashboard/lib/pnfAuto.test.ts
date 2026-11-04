@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { withSide } from './pnfAutoRule.ts';
 import { decideAuto, reversalColumn, autoWindow, boxPriceAt, rowMarket, type AutoModel } from './pnfAuto.ts';
 import type { PnfColumn, PnfSignal } from './straddlePnf.ts';
 
@@ -159,4 +160,17 @@ test('Supertrend rule: a position exits when the line turns against it, not on a
   assert.equal(reversalColumn(base, byLine), -1);
   const d = decideAuto({ model: up, position: byLine, watermarkT: 0, nowS: ist(10, 31), market: 'NSE' });
   assert.equal(d.action === 'exit' && d.col, 3);
+});
+
+test('side filter: a buy-only chart never enters the sell signal on the last bar, a sell-only chart does; exits ignore the filter', () => {
+  const m = model();                                                       // a double-bottom SELL on the last (10:30) bar
+  const entry = (side: 'both' | 'buy' | 'sell') => decideAuto({ model: withSide(m, side), position: null, watermarkT: ist(10, 25), nowS: ist(10, 31), market: 'NSE' });
+  assert.equal(entry('both').action, 'enter');
+  assert.equal(entry('sell').action, 'enter');
+  const buyOnly = entry('buy');
+  assert.equal(buyOnly.action, 'none');
+  // an open SELL position under a buy-only filter still exits on its reversal
+  const m2 = model({ columns: [...m.columns, col('X')], columnTimes: [...m.columnTimes, { start: ist(10, 40), end: ist(10, 41) }] });
+  const d = decideAuto({ model: withSide(m2, 'buy'), position: { side: 'SELL', entryBarT: ist(10, 30) }, watermarkT: 0, nowS: ist(10, 42), market: 'NSE' });
+  assert.equal(d.action === 'exit' && d.reason, 'reversal');
 });

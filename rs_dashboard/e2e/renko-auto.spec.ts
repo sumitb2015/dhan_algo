@@ -260,3 +260,21 @@ test('a chart starts on the Supertrend rule when nothing is saved', async ({ pag
   await expect(page.getByLabel('AUTO rule on chart 1')).toHaveValue('supertrend');
   await expect(page.getByLabel('AUTO rule on chart 2')).toHaveValue('supertrend');
 });
+
+test('AUTO side: Buy only does not enter the SELL signal; the choice is remembered across a reload and locked while armed', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders } = await install(page);
+  await openFuture(page);
+  const side = page.getByLabel('AUTO side on chart 1');
+  await expect(side).toHaveValue('both');
+  await side.selectOption('buy');
+  await page.reload();
+  await expect(page.getByLabel('AUTO side on chart 1')).toHaveValue('buy');
+  const auto = page.getByTestId('pnf-auto-1');
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect(auto).toHaveAttribute('data-armed', 'true');
+  await expect(page.getByLabel('AUTO side on chart 1')).toBeDisabled();
+  await page.clock.setFixedTime(ist(10, 31, 5));                       // the 10:30 bar has closed: a SELL signal, which a buy-only chart ignores
+  await page.waitForTimeout(4000);
+  expect(orders.length, 'a buy-only chart never enters the SELL signal').toBe(0);
+});

@@ -37,6 +37,8 @@ Pick one per chart from the dropdown next to AUTO. A chart starts on **Supertren
 | **Supertrend** | BUY while a brick closes **above** the Supertrend line, SELL while it closes **below** it (the line's direction on the chart's ATR period x multiplier, the `ST` control). Arming mid-run enters on the next brick. | The first brick after the entry whose Supertrend direction is against the position (the line flips), and that brick is also the entry for the other side: the chart **flips**. No stop. |
 
 N-brick, N-brick (trend) and Supertrend carry **no stop of their own**: the MTM guard is their loss limit. Two consecutive S (or B) markers on the
+
+**Side.** Next to the rule, **Buy + Sell** (default) / **Buy only** / **Sell only** limits what AUTO may *open*; a signal for the other side is ignored (a buy-only chart stays flat through a sell phase and enters on the next buy). Exits are never filtered: an open position always exits by its own rule, MTM guard or end of day. The choice is remembered per chart and locked only while AUTO is armed. On options, "Sell" means selling the option.
 chart under the trend rule are a flip: the first is the exit of the old position, the second the entry of the new one.
 
 ## 3. When it enters

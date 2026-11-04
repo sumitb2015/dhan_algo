@@ -11,7 +11,7 @@ const MAX_LOTS = 20;
 const inr = (n: number) => `${n > 0 ? '+' : n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 
 export type { AutoRule } from '@/lib/pnfAutoRule';
-import type { AutoRule } from '@/lib/pnfAutoRule';
+import type { AutoRule, AutoSide } from '@/lib/pnfAutoRule';
 
 export interface AutoControlsProps {
   chart: 1 | 2;
@@ -33,6 +33,9 @@ export interface AutoControlsProps {
   /** Renko only: which pattern AUTO trades. Absent on P&F (one rule). Locked while armed or holding a position. */
   autoRule?: AutoRule;
   onAutoRule?: (r: AutoRule) => void;
+  /** Which side AUTO may open: both, buy only or sell only. Exits are not filtered. Locked only while armed. */
+  autoSide?: AutoSide;
+  onAutoSide?: (s: AutoSide) => void;
   /** The page clock (ms), for spotting a stale reservation. */
   nowMs: number;
 }
@@ -43,7 +46,7 @@ export const needsResolve = (r: AutoRow, nowMs: number) =>
   r.state === 'unknownEntry' || r.state === 'unknownExit'
   || ((r.state === 'entering' || r.state === 'exiting') && nowMs - (r.pendingSince ?? r.entryT) * 1000 > STALE_PENDING_MS);
 
-export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule }: AutoControlsProps) {
+export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule, autoSide, onAutoSide }: AutoControlsProps) {
   const [confirmReal, setConfirmReal] = useState(false);
   const [confirmExit, setConfirmExit] = useState(false);
   const [draft, setDraft] = useState(String(lots));
@@ -109,6 +112,15 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
           <option value="trend">N-brick (trend)</option>
           <option value="twoback">Two-back</option>
           <option value="oneback">One-back</option>
+        </select>
+      )}
+      {autoSide && onAutoSide && (
+        <select aria-label={`AUTO side on chart ${chart}`} value={autoSide} disabled={armed} onChange={e => onAutoSide(e.target.value as AutoSide)}
+                title={armed ? 'Stop AUTO to change the side' : 'Which side AUTO may open. An open position always exits by its own rule, whatever you pick'}
+                className="h-6 rounded border border-zinc-700 bg-zinc-950 px-1 text-[11px] font-bold text-zinc-200 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">
+          <option value="both">Buy + Sell</option>
+          <option value="buy">Buy only</option>
+          <option value="sell">Sell only</option>
         </select>
       )}
       <span className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950" title={locked ? 'Stop AUTO (and close its position) to change lots' : 'Lots per AUTO trade'}>

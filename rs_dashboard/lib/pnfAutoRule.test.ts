@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { modelForRule, ruleText, type AutoRule } from './pnfAutoRule.ts';
+import { modelForRule, ruleText, withSide, type AutoRule } from './pnfAutoRule.ts';
 import type { PnfSignal } from './straddlePnf.ts';
 
 const sig = (id: string): PnfSignal => ({ id, kind: 'RENKO_BUY', col: 0, bar: 0, t: 0, price: 1, belowVwap: false });
@@ -21,4 +21,14 @@ test('every rule has its own description, naming N where it matters', () => {
   assert.equal(new Set(texts).size, 5);
   assert.match(ruleText('trend', 3), /completes 3 same-colour/);
   assert.match(ruleText('nbrick', 2), /after 2 confirming bricks/);
+});
+
+test('withSide keeps only the allowed side\'s signals; both is the model itself; exits are the engine\'s, not filtered here', () => {
+  const buy = sig('b'); const sell = { ...sig('s'), kind: 'RENKO_SELL' as const };
+  const pnfSell = { ...sig('p'), kind: 'DOUBLE_BOTTOM_SELL' as const };
+  const model = { signals: [buy, sell, pnfSell], other: 1 };
+  assert.equal(withSide(model, 'both'), model);
+  assert.deepEqual(withSide(model, 'buy').signals.map(s => s.id), ['b']);
+  assert.deepEqual(withSide(model, 'sell').signals.map(s => s.id), ['s', 'p']);
+  assert.equal(withSide(model, 'buy').other, 1);
 });
