@@ -58,7 +58,8 @@ DEFAULT_OPTION_TYPES = ('OPTIDX', 'OPTSTK')
 # why the options loop below skips them entirely on its own.
 SEGMENT_FUTURE_TYPES = {
     'mcx_fo': ('FUTCOM',),
-    'nse_fo': ('FUTIDX',),
+    'nse_fo': ('FUTIDX', 'FUTSTK'),
+    'bse_fo': ('IF',),   # BSE tags index futures 'IF' (options 'IO'); UNCONFIRMED against a live master - an unlisted future simply resolves to nothing
 }
 
 MASTER_DIR = os.path.join(ROOT, 'debug', 'kotak_master')

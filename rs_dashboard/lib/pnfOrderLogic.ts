@@ -68,12 +68,6 @@ export function checkRestingPrices(side: PnfAction, orderType: 'LIMIT' | 'SL', p
 
 export const lotCap = (t: Target) => (t.kind === 'equity' ? MAX_PNF_SHARES : MAX_PNF_LOTS);
 
-/** The only MCX shape Kotak / Zerodha may trade from this page: one future leg on a named expiry. Anything else (MCX options, a pair) is refused. Pure. */
-export function mcxShapeError(broker: PnfBroker, kind: string, hasExpiry: boolean, legCount: number): string | null {
-  if (broker === 'dhan' || (kind === 'futures' && hasExpiry && legCount === 1)) return null;
-  return `${broker === 'kotak' ? 'Kotak' : 'Zerodha'} MCX orders are not supported from this page - use Dhan`;
-}
-
 /** Why a Kotak MCX future cannot be ordered against a Dhan leg (Kotak counts barrels per lot, Dhan counts lots), or null. Pure. */
 export function kotakMcxFutureError(symbol: string, kotakLotSize: number, barrelsPerLot: number | null): string | null {
   if (!(barrelsPerLot !== null && barrelsPerLot > 0)) return `No barrels-per-lot is configured for ${symbol} (MCX_LOT_MULTIPLIER), so its Kotak quantity cannot be sized - not sent`;

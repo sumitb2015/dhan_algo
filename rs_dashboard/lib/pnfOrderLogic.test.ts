@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MAX_PNF_LOTS, MAX_PNF_SHARES, FLAT_LEG, applyPaperFill, brokerProduct, describePosition, needsRollback, orderQty,
-  paperPnl, parsePnfOrder, planLegClose, planLegCloseKeeping, sendOutcome, kotakMcxFutureError, mcxShapeError, type LegResult,
+  paperPnl, parsePnfOrder, planLegClose, planLegCloseKeeping, sendOutcome, kotakMcxFutureError, type LegResult,
 } from './pnfOrderLogic.ts';
 
 const fut = { kind: 'futures', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24' };
@@ -177,13 +177,7 @@ test('Kotak MCX future: its lot size must equal the leg\'s barrels per lot (Kota
   assert.match(kotakMcxFutureError('X', 10, null) ?? '', /No barrels-per-lot/);
 });
 
-test('MCX shape: Kotak / Zerodha get one future leg on an expiry only; options and pairs are refused, Dhan is unrestricted', () => {
-  assert.equal(mcxShapeError('kotak', 'futures', true, 1), null);
-  assert.equal(mcxShapeError('zerodha', 'futures', true, 1), null);
-  assert.match(mcxShapeError('kotak', 'options', true, 1) ?? '', /Kotak MCX orders are not supported/);
-  assert.match(mcxShapeError('zerodha', 'options', true, 2) ?? '', /Zerodha MCX orders are not supported/);
-  assert.match(mcxShapeError('kotak', 'futures', false, 1) ?? '', /not supported/, 'a future without an expiry');
-  assert.match(mcxShapeError('kotak', 'futures', true, 2) ?? '', /not supported/);
-  assert.equal(mcxShapeError('dhan', 'options', true, 2), null);
-  assert.match(kotakMcxFutureError('CRUDEOILM19NOV26FUT', 10, null) ?? '', /No barrels-per-lot is configured/);
+test('Kotak MCX option legs use the same barrels-per-lot cross-check as futures', () => {
+  assert.equal(kotakMcxFutureError('CRUDEOILM17NOV265000CE', 10, 10), null);
+  assert.match(kotakMcxFutureError('CRUDEOIL17NOV265000CE', 100, 10) ?? '', /not the expected 10/);
 });

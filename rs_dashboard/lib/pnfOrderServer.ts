@@ -6,7 +6,7 @@ import { zerodhaMcxFutureError } from '@/lib/zerodhaOrderRules';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { derivativeTick } from '@/lib/derivativeTick';
 import type { Target } from '@/lib/pnfTarget';
-import { kotakMcxFutureError, mcxShapeError, type PnfBroker } from '@/lib/pnfOrderLogic';
+import { kotakMcxFutureError, type PnfBroker } from '@/lib/pnfOrderLogic';
 
 // Server-side contract resolution for the P&F trade bar. The browser names the chart's target; every security id,
 // trading symbol, segment and lot size used for an order is looked up here (Dhan's master_list.csv, then the broker's
@@ -93,8 +93,7 @@ export async function brokerLegs(broker: PnfBroker, t: Target, legs: PnfLeg[]): 
   // Kotak / Zerodha MCX quantity units are not confirmed against live fills (docs/PRICE_LADDER_GUIDE.md).
   // Kotak MCX FUTURES (CRUDEOILM): Kotak's `qt` is absolute BARRELS (10 per lot) while Dhan's leg is in lots, so the Kotak lot size must
   // equal the leg's barrels-per-lot (`unitsPerLot`, 10) - a real cross-check, unlike Zerodha's. Same shape as the Price Ladder. UNCONFIRMED
-  // against live fills. MCX options (and anything else on MCX) stay refused.
-  if (mcx) { const shape = mcxShapeError(broker, t.kind, !!t.expiry, legs.length); if (shape) return shape; }
+  // against live fills. MCX OPTIONS (CE / PE / straddle) now go through the option branch below with the same unit cross-checks.
   const out: PnfBrokerLeg[] = [];
   const checkedMcx = new Set<PnfBrokerLeg>();     // Kotak MCX legs whose barrels-per-lot was cross-checked above
   for (const l of legs) {
@@ -109,7 +108,13 @@ export async function brokerLegs(broker: PnfBroker, t: Target, legs: PnfLeg[]): 
       continue;
     }
     if (t.kind === 'futures' && t.expiry) {
-      if (broker === 'zerodha') return 'Zerodha NSE futures are not supported from this page - use Dhan or Kotak';
+      if (broker === 'zerodha') {
+        // NSE / BSE future: Kite counts units like the exchange lot; the generic lot-size check below refuses a mismatch.
+        const z = await zerodhaFutureContract(t.symbol, t.expiry);
+        if (!z) return `Zerodha does not list the ${t.symbol} future expiring ${t.expiry}`;
+        out.push({ ...l, key: z.tradingsymbol, exchange: z.exchange, lotUnits: z.lotSize, capLot: z.lotSize, tick: z.tick ?? l.tick });
+        continue;
+      }
       const c = await kotakFutureContract(t.symbol, t.expiry);
       if (!c || !(c.lotSize > 0)) return `Kotak does not list the ${t.symbol} future expiring ${t.expiry}`;
       const refused = mcx ? kotakMcxFutureError(c.tradingsymbol, c.lotSize, l.unitsPerLot) : null;
@@ -126,6 +131,18 @@ export async function brokerLegs(broker: PnfBroker, t: Target, legs: PnfLeg[]): 
         : await zerodhaOptionContract(t.symbol, t.expiry, t.strike, l.side);
       if (!c || !(c.lotSize > 0)) return `${name} does not list ${t.symbol} ${t.strike} ${l.side} expiring ${t.expiry}`;
       const exchange = 'segment' in c ? c.segment : c.exchange;
+      if (mcx) {
+        // MCX option: the same unit cross-checks as an MCX future. Kotak counts barrels (lot size must equal the leg's barrels per lot);
+        // Zerodha counts lots (its dump must read the Dhan leg's lot of 1, on MCX). UNCONFIRMED against live option fills.
+        const refused = broker === 'kotak'
+          ? kotakMcxFutureError(c.tradingsymbol, c.lotSize, l.unitsPerLot)
+          : zerodhaMcxFutureError({ tradingsymbol: c.tradingsymbol, lotSize: c.lotSize, exchange }, l.lot);
+        if (refused) return refused;
+        const leg: PnfBrokerLeg = { ...l, key: c.tradingsymbol, exchange, lotUnits: c.lotSize, capLot: c.lotSize, ...(c.tick ? { tick: c.tick } : {}) };
+        if (broker === 'kotak') checkedMcx.add(leg);
+        out.push(leg);
+        continue;
+      }
       out.push({ ...l, key: c.tradingsymbol, exchange, lotUnits: c.lotSize, capLot: c.lotSize });
       continue;
     }
