@@ -742,7 +742,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
             if (!liveRow) continue;
             // say so, never leave it enforcing unseen.
             toast.warning(`The server is still guarding chart ${chartN}'s open ${cfg.mode} position on ${cfg.broker} (MTM guard with the tab closed). Switch the page to ${cfg.broker} ${cfg.mode} to see and edit it.`, {
-              duration: Infinity,
+              // Dismissable (X) and self-closing: the server keeps guarding either way, the toast only says so.
+              duration: 30_000, closeButton: true,
               action: { label: 'Switch it off', onClick: () => { void fetch(`/api/straddle-pnf/server-guard?scope=${scope}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chart: chartN, on: false }) }); } },
             });
           }
