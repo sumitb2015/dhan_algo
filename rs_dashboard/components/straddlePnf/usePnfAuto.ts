@@ -529,5 +529,7 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
     } finally { busyRef.current = false; }
   };
 
-  return { row, note, halt, resolve, exitNow };
+  // The open row's trailing SL level now, for the position line: computed on render (every tab, leader or not), only for its own contract.
+  const trailSl = row && row.state === 'open' && row.targetKey === tk ? trailLevel(model, { side: row.side, entryBarT: row.entryBarT, trail: trailOf(row) }) : null;
+  return { row, note, halt, resolve, exitNow, trailSl };
 }

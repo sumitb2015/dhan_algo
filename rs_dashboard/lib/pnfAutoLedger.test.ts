@@ -327,5 +327,6 @@ test('trailing SL: open accepts trailBoxes 1-20; the arm record keeps pyramid.tr
   const arm = { mode: 'PAPER', broker: 'dhan', targetKey: 'F', day: '2026-11-05', t: 1, watermarkT: 1, lots: 1 };
   const p = (pyramid: unknown) => parseLedger({ rev: 1, rows: [], log: [], arms: { 1: { ...arm, pyramid } } }).arms?.['1']?.pyramid;
   assert.deepEqual(p({ max: 5, every: 2, trail: 2 }), { max: 5, every: 2, trail: 2 });
-  assert.deepEqual(p({ max: 5, trail: 0 }), { max: 5 });
+  assert.deepEqual(p({ max: 5, trail: 0 }), { max: 5, trail: 0 }, 'armed with the trail off is kept as 0 (absent means armed before the setting)');
+  assert.deepEqual(p({ max: 5, trail: 21 }), { max: 5 });
 });

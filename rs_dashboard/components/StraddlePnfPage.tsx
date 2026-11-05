@@ -947,7 +947,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
           if (AUTO_SIDES.includes(rec.side as AutoSide)) { setAutoSide(a => ({ ...a, [c]: rec.side as AutoSide })); saveP(`${AUTO_SIDE_KEY}${c}`, rec.side!); }
           setAutoLots(l => ({ ...l, [c]: rec.lots })); saveP(`${AUTO_LOTS_KEY}${c}`, String(rec.lots));
           if (renko) {
-            const pyr: AutoPyramid = rec.pyramid ? { on: true, max: rec.pyramid.max, every: pyramidEveryOf(rec.pyramid.every), trailOn: rec.pyramid.trail !== undefined, trail: rec.pyramid.trail ?? autoPyr[c].trail }
+            const pyr: AutoPyramid = rec.pyramid ? { on: true, max: rec.pyramid.max, every: pyramidEveryOf(rec.pyramid.every), trailOn: rec.pyramid.trail !== 0, trail: rec.pyramid.trail || autoPyr[c].trail }   // trail absent: armed before the setting existed, so ON (its default)
               : { ...autoPyr[c], on: false };
             setAutoPyr(a => ({ ...a, [c]: pyr })); saveP(`${AUTO_PYR_KEY}${c}`, JSON.stringify(pyr));
           }
@@ -1017,7 +1017,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const rec = {
       mode: tradeMode, broker, targetKey: targetKey(tgt), day: istToday(), t, watermarkT, lots: autoLots[c],
       side: autoSide[c], ...(renko ? { rule: autoRule[c] } : {}),
-      ...(renko && autoPyr[c].on && autoPyr[c].max > autoLots[c] ? { pyramid: { max: autoPyr[c].max, ...(autoPyr[c].every > 1 ? { every: autoPyr[c].every } : {}), ...(autoPyr[c].trailOn ? { trail: autoPyr[c].trail } : {}) } } : {}),
+      ...(renko && autoPyr[c].on && autoPyr[c].max > autoLots[c] ? { pyramid: { max: autoPyr[c].max, ...(autoPyr[c].every > 1 ? { every: autoPyr[c].every } : {}), trail: autoPyr[c].trailOn ? autoPyr[c].trail : 0 } } : {}),
       ...(product === 'MARGIN' ? { product: 'MARGIN' as const } : {}),
     };
     const pyrText = (rec.pyramid ? `, +1L/${rec.pyramid.every ? `${rec.pyramid.every} bricks` : 'brick'} to ${rec.pyramid.max}L${rec.pyramid.trail ? `, trail ${rec.pyramid.trail} bx` : ''}` : '') + (product === 'MARGIN' ? ', NRML' : '');
@@ -1190,7 +1190,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       ) : (
         <AutoControls chart={c} armed={autoArm[c].on} mode={tradeMode} lots={autoLots[c]} onLots={n => setLotsFor(c, n)}
                       // eslint-disable-next-line react-hooks/refs -- armChart's refs are touched only when the button is clicked, never during render
-                      onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} halt={autoOf(c).halt}
+                      onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} trailSl={autoOf(c).trailSl} halt={autoOf(c).halt}
                       onResolve={autoOf(c).resolve} onExit={() => { void autoOf(c).exitNow(); }} nowMs={now} resumeNote={resumeNote[c]}
                       autoSide={autoSide[c]} onAutoSide={sd => { setAutoSide(a => ({ ...a, [c]: sd })); saveP(`${AUTO_SIDE_KEY}${c}`, sd); }}
                       pyramid={renko ? autoPyr[c] : undefined}

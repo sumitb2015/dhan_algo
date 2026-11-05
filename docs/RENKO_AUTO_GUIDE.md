@@ -131,8 +131,8 @@ Both are set before arming and locked while AUTO is armed. Saved per chart and o
   Bricks on an older bar (a sleeping tab) are never chased. No adds after the entry cutoff (15:05 NSE) or with a stale feed.
 - **Trailing SL after an add (`Trail SL [2] bx`, on by default):** once at least one lot has been added, AUTO exits the whole position
   on the first **closed brick** that is **N boxes back from the best brick since entry** (default 2, 1-20). It does not wait for the
-  Supertrend to turn, and it is checked before the Supertrend / opposite-brick rule (the end-of-day exit still comes first). The status line
-  shows the level: `· trail SL 8352.00`. It is set before arming (locked while armed) and saved on the row at entry, so a change only
+  Supertrend to turn, and it is checked before the Supertrend / opposite-brick rule (the end-of-day exit still comes first). The position line
+  shows the level once it is active: `LONG 5L (4+1) @ 8340.20 avg … SL 8352.00`. It is set before arming (locked while armed) and saved on the row at entry, so a change only
   affects the next trade. Switch it off with the `Trail SL` button. It runs in the open `/renko` tab, like the Supertrend exit; with the
   tab closed only the server's MTM guard and end-of-day exit protect the position.
 - Adds stop at **Max**. The cap is saved on the row at entry, and a new arming can only lower it.

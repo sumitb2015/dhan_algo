@@ -141,6 +141,7 @@ export interface AutoArmRecord {
   rule?: string;
   side?: string;
   /** Renko pyramid it was armed with: present = add one lot every `every` (absent = 1) new bricks, up to `max` total lots. */
+  /** `trail`: the trailing SL boxes it was armed with, 0 = armed with it OFF; absent = armed before the setting existed (resumed ON). */
   pyramid?: { max: number; every?: number; trail?: number };
   /** 'MARGIN' = armed to trade NRML; absent = MIS. */
   product?: 'MARGIN';
@@ -225,7 +226,7 @@ function armOk(v: unknown): AutoArmRecord | null {
   const pe = a.pyramid && typeof a.pyramid === 'object' ? (a.pyramid as { every?: unknown }).every : undefined;
   const everyOk = Number.isInteger(pe) && (pe as number) > 1 && (pe as number) <= PYRAMID_EVERY_MAX;
   const pt = a.pyramid && typeof a.pyramid === 'object' ? (a.pyramid as { trail?: unknown }).trail : undefined;
-  const trailOk = Number.isInteger(pt) && (pt as number) >= 1 && (pt as number) <= TRAIL_BOXES_MAX;
+  const trailOk = Number.isInteger(pt) && (pt as number) >= 0 && (pt as number) <= TRAIL_BOXES_MAX;   // 0 = armed with the trail off
   const pyramid = Number.isInteger(pm) && (pm as number) >= 1 && (pm as number) <= PYRAMID_HARD_MAX
     ? { max: pm as number, ...(everyOk ? { every: pe as number } : {}), ...(trailOk ? { trail: pt as number } : {}) } : undefined;
   return { mode: a.mode, broker: a.broker, targetKey: a.targetKey, day: a.day, t: a.t!, watermarkT: a.watermarkT!, lots: a.lots!, ...(rule ? { rule } : {}), ...(side ? { side } : {}), ...(pyramid ? { pyramid } : {}), ...(a.product === 'MARGIN' ? { product: 'MARGIN' as const } : {}) };

@@ -29,6 +29,8 @@ export interface AutoControlsProps {
   row: AutoRow | undefined;
   price: number | null;
   note: string;
+  /** The open position's trailing SL level (after a pyramid add), or null. */
+  trailSl?: number | null;
   halt: string | null;
   onResolve: (as: 'open' | 'flat' | 'added' | 'notAdded') => void;
   /** Renko only: add one lot per new best brick up to `max` total lots. Locked while armed. */
@@ -59,7 +61,7 @@ export const needsResolve = (r: AutoRow, nowMs: number) =>
   r.state === 'unknownEntry' || r.state === 'unknownExit' || r.state === 'unknownAdd'
   || ((r.state === 'entering' || r.state === 'exiting' || r.state === 'adding') && nowMs - (r.pendingSince ?? r.entryT) * 1000 > STALE_PENDING_MS);
 
-export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule, autoSide, onAutoSide, resumeNote, pyramid, onPyramid, product, onProduct, eodText }: AutoControlsProps) {
+export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, trailSl, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule, autoSide, onAutoSide, resumeNote, pyramid, onPyramid, product, onProduct, eodText }: AutoControlsProps) {
   const [confirmReal, setConfirmReal] = useState(false);
   const [confirmExit, setConfirmExit] = useState(false);
   const [draft, setDraft] = useState(String(lots));
@@ -283,6 +285,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
             {pnl !== null && <span className={`ml-1 font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{inr(pnl)}</span>}
             {row.stop !== undefined && <span className="ml-1 text-zinc-400" title="Protective stop (one brick beyond the pullback)">SL {row.stop.toFixed(2)}</span>}
             {row.mode === 'PAPER' && <span className="ml-1 text-zinc-400">paper</span>}
+            {trailSl != null && <span data-testid={`pnf-auto-trail-sl-${chart}`} className="ml-1 text-red-300" title="Trailing SL after an add: exits on a closed brick at this level">SL {trailSl.toFixed(2)}</span>}
             {row.product === 'MARGIN' && <span className="ml-1 text-zinc-400" title={eodText ?? 'Opened NRML'}>NRML</span>}
             {!armed && <span data-testid={`pnf-auto-off-${chart}`} className="ml-1 px-1 rounded bg-amber-500/15 text-amber-300 font-bold"
                              title={`AUTO is OFF on this chart${resumeNote ? ` (${resumeNote})` : ''}: this position still exits by its rule, but nothing re-enters after it. Arm AUTO to keep trading.`}>AUTO OFF · exit only</span>}
