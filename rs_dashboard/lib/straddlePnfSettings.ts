@@ -1,6 +1,6 @@
 // The Straddle P&F pages' user settings: bar interval, box size and reversal. Pure, so parsing and persistence rules are tested.
 import { DEFAULT_OFFSETS, parseOffsetsParam, type Offsets } from './straddlePnfStrikes.ts';
-import { EQUITY_INTERVALS, TICK_INTERVAL, type Interval } from './straddlePnfInterval.ts';
+import { EQUITY_INTERVALS, SEC10_INTERVAL, TICK_INTERVAL, type Interval } from './straddlePnfInterval.ts';
 
 /** Boxes against the column it takes to reverse it (the classic setting is 3). */
 export const REVERSALS = [1, 2, 3, 4, 5] as const;
@@ -120,8 +120,8 @@ export function readSettings(raw: string | null, fallback: PnfSettings = DEFAULT
   let parsed: unknown = null;
   try { parsed = raw ? JSON.parse(raw) : null; } catch { parsed = null; }
   const o = (parsed && typeof parsed === 'object' ? parsed : {}) as Record<string, unknown>;
-  // Tick (0) is kept as stored; the P&F page never offers it and effectiveInterval falls back to 1 min there.
-  const interval = typeof o.interval === 'number' && (o.interval === TICK_INTERVAL || (EQUITY_INTERVALS as readonly number[]).includes(o.interval))
+  // Tick (0) and 10 sec (-10) are kept as stored; the P&F page never offers it and effectiveInterval falls back to 1 min there.
+  const interval = typeof o.interval === 'number' && (o.interval === TICK_INTERVAL || o.interval === SEC10_INTERVAL || (EQUITY_INTERVALS as readonly number[]).includes(o.interval))
     ? (o.interval as Interval) : fallback.interval;
   const boxPct = typeof o.boxPct === 'number' && Number.isFinite(o.boxPct) && o.boxPct >= MIN_BOX_PCT && o.boxPct <= MAX_BOX_PCT
     ? o.boxPct : fallback.boxPct;

@@ -41,6 +41,7 @@ REORGANIZATION_SUMMARY.md
 
 # Runtime debug artifacts
 debug/option_chain_cache/
+debug/pnf_ticks/
 debug/*.txt
 debug/*.pid
 debug/*.lock

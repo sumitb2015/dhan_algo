@@ -67,9 +67,9 @@ chart under the trend rule are a flip: the first is the exit of the old position
   moment - a dashboard restart), it is retried every second while the signal is still the newest closed bar's; a signal that ages out that
   way is logged as `missed the … signal`.
 
-### Tick interval (instant bricks)
+### Tick and 10 sec intervals (live-price bricks)
 
-Pick **Tick** in the Interval list (Renko only). Bricks then come from the live price itself, not from bar closes:
+Pick **Tick** or **10 sec** in the Interval list (Renko only). Bricks then come from the live price itself, not from 1-minute closes:
 
 - **What it reads.** The price bridge (`scripts/tools/pnf_ws.py`) logs every price change it sees, sampled every 0.5 s, to
   `debug/pnf_ticks/<date>/<SEG>_<id>.jsonl`. The page reads that log every second. It is not every exchange trade: a spike that reverses
@@ -80,6 +80,12 @@ Pick **Tick** in the Interval list (Renko only). Bricks then come from the live 
   price (the log is served 0.4 s behind, the page polls each second). Expect more trades and whipsaws than on a minute chart; arming warns once.
 - **Before the log.** Ticks exist only from when the bridge started asking for the instrument. Earlier stretches, and any gap where the
   bridge was down, are drawn from the 1-minute closes. The minute still running is never drawn from a minute bar.
+- **10 sec** groups the same recorded prices into 10-second bars (the bar's last price), and a brick prints when its 10 s are over
+  (about 1.5-2 s after the boundary). A spike that reverses inside the 10 s prints nothing, so it whipsaws less than Tick and still
+  reacts far sooner than 1 min. Same log, same fallback to minute closes.
+- **Brick count after a reload.** On an index the 1-minute history is a rolling window whose start (`anchor_t`) moves with the clock, so
+  a full rebuild can differ by a few bricks at the far start of the chart (2024). Recent bricks are identical (checked 2026-11-05:
+  the last ~101k bricks and all of the day's matched); alerts and AUTO key on bar time, not brick number.
 - **Switching** the interval is locked while AUTO is armed or holds a position, as for every setting.
 - The bridge must be running the version with the tick log. After updating, restart it once while no AUTO is armed: write
   `debug/pnf_ws_stop.trigger` and an open P&F / Renko page starts the new one within about 30 s (prices pause until then).

@@ -6,7 +6,7 @@ import {
   type LegQuote, type Market, type Tick,
 } from '@/lib/straddlePnfLive';
 import { mergeTail } from '@/lib/pnfTail';
-import { foldTickRows, newTickBuild, spliceTicks, type TickBuild, type TickRow } from '@/lib/pnfTicks';
+import { bucketTickBars, foldTickRows, newTickBuild, spliceTicks, type SecBuild, type TickRow } from '@/lib/pnfTicks';
 import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
 import { isComplete, targetKey, targetLabel, targetQuery, type Target } from '@/lib/pnfTarget';
@@ -26,8 +26,11 @@ const LIVE_MS = 1_000;   // how often the chart reads the WebSocket bridge's lat
 const FRESH_S = 180;
 const TICKS_MS = 1_000;  // Renko Tick mode: how often the bridge's tick log is read (/api/straddle-pnf/ticks)
 
-/** `tick`: Renko Tick mode — the bridge's recorded prices replace the live minute fold (lib/pnfTicks.ts). */
-export function usePnfFeed(target: Target | null, recenter: number, now: number, tick = false) {
+/**
+ * `tickSec`: Renko Tick / N-second bars — the bridge's recorded prices replace the live minute fold (lib/pnfTicks.ts): 0 = one bar per
+ * recorded price, N = N-second bars; null = 1-minute bars.
+ */
+export function usePnfFeed(target: Target | null, recenter: number, now: number, tickSec: number | null = null) {
   const [bars, setBars] = useState<Bar[]>([]);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [name, setName] = useState<string | null>(null);   // the full name the server resolved for the chosen symbol
@@ -46,7 +49,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   const tickRef = useRef<Tick | null>(null);
   // The last bar's close, for the live poll's bad-tick check (kept in a ref so the poll interval need not restart per tick).
   const lastCloseRef = useRef<number | undefined>(undefined);
-  const tickMode = tick;
+  const tickMode = tickSec !== null;
   const reqRef = useRef(0);
   // An index carries two years of 1-minute bars: the first load takes them all, the 30 s refresh only the last few sessions.
   const fullRef = useRef(false);
@@ -145,16 +148,18 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
     return () => { dead = true; clearInterval(id); };
   }, [ids, market, single, tickMode]);
 
-  // ── Renko Tick mode: the bridge's tick log → one closed bar per recorded price ──
-  const [tickBuild, setTickBuild] = useState<TickBuild | null>(null);
+  // ── Renko Tick / N sec: the bridge's tick log → closed bars (one per recorded price, or N-second buckets) ──
+  const [tickBars, setTickBars] = useState<Bar[] | null>(null);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setTickBuild(null); setHeadTick(null);
+    setTickBars(null); setHeadTick(null);
     if (!tickMode || !ids) return;
     let dead = false;
     let since = 0;
     let day = '';
     let build = newTickBuild(instruments.length);
+    let sec: SecBuild | null = null;   // N-second buckets over build.bars (a closed bucket keeps its object: the chart carries on)
+    let shown: Bar[] | null = null;
     let busy = false;
     const poll = async () => {
       if (busy) return;            // a slow read is never overtaken by the next one (the cursor must move in order)
@@ -163,24 +168,26 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
         const res = await fetch(`/api/straddle-pnf/ticks?ids=${ids}&since=${since}`);
         const j = await res.json() as { success?: boolean; day?: string; upTo?: number; legs?: TickRow[][] };
         if (dead || !j.success || !j.legs || typeof j.upTo !== 'number') return;
-        if (j.day !== day) { day = j.day ?? ''; build = newTickBuild(instruments.length); }   // a new session's log
-        const next = foldTickRows(build, j.legs, market, lastCloseRef.current);
+        if (j.day !== day) { day = j.day ?? ''; build = newTickBuild(instruments.length); sec = null; }   // a new session's log
+        build = foldTickRows(build, j.legs, market, lastCloseRef.current);
         since = j.upTo;
-        if (next.bars !== build.bars) setTickBuild(next);
-        build = next;
+        // a bucket closes on the clock too (no later tick needed), so this runs on every read, new rows or not
+        if (tickSec) sec = bucketTickBars(sec, build.bars, tickSec, Date.now() / 1000);
+        const next = tickSec ? sec!.bars : build.bars;
+        if (next !== shown) { shown = next; setTickBars(next); }
       } catch { /* the next read carries on from the same cursor */ } finally { busy = false; }
     };
     void poll();
     const id = setInterval(() => { void poll(); }, TICKS_MS);
     return () => { dead = true; clearInterval(id); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ids, market, tickMode]);
+  }, [ids, market, tickMode, tickSec]);
 
-  // The chart's bars: in Tick mode the history's minutes with the recorded prices laid in (the running minute's bar left out).
+  // The chart's bars: in Tick / N-second mode the history's minutes with the recorded prices laid in (the running minute's bar left out).
   const nowMinute = Math.floor(now / 60_000);
   const chartBars = useMemo(
-    () => (tickMode ? spliceTicks(bars, tickBuild?.bars ?? [], nowMinute > 0 ? nowMinute * 60 : Infinity) : bars),
-    [tickMode, bars, tickBuild, nowMinute],
+    () => (tickMode ? spliceTicks(bars, tickBars ?? [], nowMinute > 0 ? nowMinute * 60 : Infinity) : bars),
+    [tickMode, bars, tickBars, nowMinute],
   );
 
   const last = chartBars[chartBars.length - 1];

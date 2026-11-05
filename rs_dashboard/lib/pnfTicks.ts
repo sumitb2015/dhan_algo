@@ -110,3 +110,32 @@ export function spliceTicks(hist: Bar[], ticks: Bar[], nowS = Infinity): Bar[] {
   while (j < ticks.length) out.push(ticks[j++]);
   return out;
 }
+
+/**
+ * Renko "10 sec": the tick bars grouped into N-second bars (start-stamped, last price, summed volume), built step by step so the bars
+ * already emitted are the same objects on the next call (the chart build then carries on instead of rebuilding). A bucket is emitted
+ * once it is over: a tick of a later bucket exists, or the clock is `graceS` past its end (the tick log is served up to ~1.5 s late).
+ */
+export type SecBuild = { sec: number; used: number; bars: Bar[] };
+
+export function bucketTickBars(prev: SecBuild | null, ticks: Bar[], sec: number, nowS: number, graceS = 2): SecBuild {
+  // a different series (new instrument, a new day's log) or bucket size: start again
+  let b: SecBuild = prev && prev.sec === sec && prev.used <= ticks.length && (prev.used === 0 || ticks.length > 0) ? prev : { sec, used: 0, bars: [] };
+  const startOf = (t: number) => Math.floor(t / sec) * sec;
+  let i = b.used;
+  const out: Bar[] = [];
+  while (i < ticks.length) {
+    const start = startOf(ticks[i].t);
+    let j = i;
+    let vol = 0;
+    while (j < ticks.length && startOf(ticks[j].t) === start) vol += ticks[j++].vol;
+    const over = j < ticks.length || nowS >= start + sec + graceS;
+    if (!over) break;                       // still filling: next call
+    const last = ticks[j - 1];
+    out.push({ t: start, ce: last.ce, pe: last.pe, straddle: last.straddle, vol });
+    i = j;
+  }
+  if (!out.length && i === b.used) return b;
+  b = { sec, used: i, bars: b.bars.concat(out) };
+  return b;
+}
