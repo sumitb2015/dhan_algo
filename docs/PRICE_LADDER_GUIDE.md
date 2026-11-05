@@ -18,11 +18,13 @@ orders and cancels armed REAL levels; exits always work). The arm lapses at the 
 - **Style** — Single (no exit rule), Bracket (target + SL in index points) or Cover (SL only). **Trail SL by** keeps the SL
   that many points behind the best level reached; it only moves in your favour.
   On the Index ladder the trailing SL is **one stop for the whole open position** on the contract (same side, product,
-  broker, SIM/REAL and ladder): lots added later (Market button, +1, another fill) join it, and the ladder shows one SL
-  marker with the total quantity. Ticking **Trail SL by** while a position is open puts the trail on all of it (the SL is
-  the tightest of the current SLs and price ± the distance); changing the distance re-applies it; unticking it switches
-  the trail off on the position — a stop that was only a trail (Single + trail) is removed, a Bracket/Cover keeps its
-  fixed SL. A slice armed with its own Bracket target keeps its own levels.
+  broker, SIM/REAL and ladder): lots added later with no stop of their own (Market button — even one sent while the price
+  was stale, +1, a Single fill) join it, and the ladder shows one SL marker with the total quantity. A fill armed with its
+  own stop (a Bracket, a Cover, or a trail at its own distance) keeps it. Ticking **Trail SL by** while a position is open
+  puts the trail on all of it (the SL is the tightest of the current SLs and price ± the distance; an older step-rule
+  trail keeps its rule); changing the distance re-applies it. Unticking it **asks first**: confirm to switch the trail off
+  on the open position — a stop that is only a trail (Single + trail) is removed, a Bracket/Cover keeps its fixed SL where
+  it is — or Cancel to change only new orders. The position table's trail **Off** does the same without the question.
 - Number boxes have up/down arrows (and ArrowUp/ArrowDown). Target / SL / trail step by 1 point; per-leg SL % by 5; the SL
   buffer by 0.1 (a fractional value steps from itself, so 2.5 → 3.5). The tick you pick is remembered per mode (Plain defaults to 1). An arrow run commits once, half a second after you stop.
 

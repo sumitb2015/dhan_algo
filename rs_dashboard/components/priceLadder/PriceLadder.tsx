@@ -27,7 +27,7 @@ import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { chimeFor } from '@/lib/priceLadderChime';
 import {
-  MAX_LADDER_LOTS, isTradedStrike, paneOf, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, atmStrikeOf, atmOffsetLabel, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick, onIndexAxis,
+  MAX_LADDER_LOTS, isTradedStrike, paneOf, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, atmStrikeOf, atmOffsetLabel, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick, isTrailOnly,
   type ClickType, type LadderZones, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
   type LadderContract,
 } from '@/lib/priceLadder';
@@ -1030,7 +1030,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
 
   // How the last failed post failed: only 'refused' (the server said no, nothing was sent) is safe to follow with a resend.
   const lastFail = useRef<'refused' | 'unknown' | 'busy' | null>(null);
-  const post = useCallback(async (body: Record<string, unknown>): Promise<boolean> => {
+  const post = useCallback(async (body: Record<string, unknown>, onData?: (d: Record<string, unknown>) => void): Promise<boolean> => {
     lastFail.current = null;
     if (busyRef.current) { lastFail.current = 'busy'; return false; }
     busyRef.current = true; setBusy(true);
@@ -1045,6 +1045,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       }
       if (j.unknown) { lastFail.current = 'unknown'; toast.error(`Order status UNKNOWN — check Positions/Orders before doing anything else. ${j.error ?? ''}`); return false; }
       if (!j.success) { lastFail.current = 'refused'; toast.error(j.error ?? `Request failed (${r.status})`); return false; }
+      if (onData && j.data) onData(j.data as Record<string, unknown>);
       return true;
     } catch {
       lastFail.current = 'unknown';
@@ -1080,20 +1081,28 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     if (real && !realAck) setConfirm({ text: what, run }); else run();
   }, [post, broker, real, realAck, underlying, expiry, strike, opt, lots, product, second]);
 
-  // The "Trail SL by" switch also acts on the position already open on this contract (this ladder, broker, SIM/REAL):
-  // ONE trailing SL for its whole executed quantity, or the trail off on all of it (a stop that was only a trail goes).
-  const openOnAxis = useMemo(() => mine.filter(s => s.state === 'open' && onIndexAxis(s) && (Number(s.filledQty) || 0) > 0
+  // The "Trail SL by" switch also acts on the position(s) already open on this contract (this ladder, broker, SIM/REAL):
+  // ON = one trailing SL for each position's whole executed quantity; OFF asks first (it can remove a stop), and Cancel
+  // leaves the open position as it is (only new orders change). One request covers every side / product.
+  const openOnAxis = useMemo(() => mine.filter(s => s.state === 'open' && (s.kind === 'xy' || !!s.market) && (Number(s.filledQty) || 0) > 0
     && (!dual || paneOf(s) === ladderId)), [mine, dual, ladderId]);
   const applyPositionTrail = useCallback((on: boolean, pts: number) => {
     if (mode !== 'xy' || !openOnAxis.length) return;
-    const heads = new Map<string, LadderSlice>();
-    for (const s of openOnAxis) { const k = `${s.side}|${s.product}`; if (!heads.has(k)) heads.set(k, s); }
-    for (const s of heads.values()) {
-      void post({ action: 'positionTrail', id: s.id, trailPts: on ? pts : 0 }).then(ok => {
-        if (ok) toast.success(on ? `Trailing SL ${pts} pts on the whole open ${s.side} position` : `Trailing SL off on the open ${s.side} position`);
-      });
-    }
-  }, [mode, openOnAxis, post]);
+    const run = () => void post({ action: 'positionTrail', id: openOnAxis[0].id, trailPts: on ? pts : 0 }, d => {
+      const n = Number(d.changed) || 0;
+      if (!n) toast.info(on ? 'Nothing to change on the open position' : 'The open position has no trailing SL');
+      else toast.success(on ? `Trailing SL ${pts} pts on the whole open position` : 'Trailing SL off on the open position');
+    }).then(ok => { if (!ok && lastFail.current === 'busy') toast.error('Another request was still running — the open position was not changed. Toggle Trail SL again.'); });
+    if (on) { run(); return; }
+    const trailing = openOnAxis.filter(s => (s.bracket?.trailPts ?? 0) > 0);
+    if (!trailing.length) return;
+    const qty = openOnAxis.reduce((a, s) => a + (Number(s.filledQty) || 0), 0);
+    const removes = trailing.some(s => isTrailOnly(s.bracket));
+    setConfirm({
+      text: `${removes ? 'A stop that is only a trailing SL is REMOVED — that quantity is then left with no SL. A bracket keeps its fixed SL. ' : 'Its SL stays where it is and stops trailing. '}Cancel = only new orders change.`,
+      run, setting: { title: `Switch the trailing SL off on the open ${pageMode.toUpperCase()} position (${qty})?`, button: removes ? 'Remove the trailing SL' : 'Stop trailing' },
+    });
+  }, [mode, openOnAxis, post, pageMode]);
 
   // Pair mode Buy / Sell Market: both legs at market now, no level and no bracket (exit from the pair widget or the MTM guard).
   const sendPairMarket = useCallback((side: LadderSide) => {
@@ -2401,6 +2410,7 @@ function TrailControl({ s, busy, post, fallback }: { s: LadderSlice; busy: boole
       <span className="text-amber-300 text-[11px]">{step ? 'Step' : 'Trail'}</span>
       <NumField label="Trailing SL distance in points" value={cur} min={0} width="w-14" onCommit={v => { if (v !== cur) void post({ action: 'trail', id: s.id, trailPts: v }); }} />
       <button type="button" disabled={busy} onClick={() => void post({ action: 'trail', id: s.id, trailPts: 0 })}
+        title={isTrailOnly(s.bracket) ? 'Switch the trail off — this stop is only a trailing SL, so it is removed' : 'Switch the trail off — the SL stays where it is'}
         className={`px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white ${FOCUS_RING}`}>
         Off
       </button>

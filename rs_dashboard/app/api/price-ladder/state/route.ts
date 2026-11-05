@@ -12,7 +12,7 @@ import {
   paneOf, sessionFor, spotKey, MAX_LADDER_LOTS, cleanBufferPct, stopLimitPrice, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, capLots, classifyClick, cleanBracket, istDay, istHhmm, levelSane, pushEvent, realArmed,
   snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev, newLadderId, parseTrailRequest, replanBracket, trailedBracket,
   type ClickType, type LadderZones, type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
-  isTradedStrike, legTag, FUT_TICK, onIndexAxis, positionMates, positionTrailPatches,
+  isTradedStrike, legTag, FUT_TICK, onIndexAxis, positionMates, positionTrailPatches, contractPositions, patchSlices, trailOffPatch, MIN_TRAIL_PTS,
 } from '@/lib/priceLadder';
 import { carryRuntime, cleanGuard, guardKey, guardLabel } from '@/lib/priceLadderGuard';
 import { setCutoffsFromBody } from '@/lib/priceLadderCutoff';
@@ -743,6 +743,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           const joined = (y: LadderSlice) => y.id === id || (mates.has(y.id) && !!y.bracket && y.slY === x.slY && y.tgtY === x.tgtY);
           let next = st;
           for (const y of st.slices.filter(joined)) {
+            // An explicit Off (not a − that reaches 0) removes a trail-only stop, as the panel switch does.
+            if (req.abs === 0) { next = patchSlice(next, y.id, trailOffPatch(y.bracket!)); n++; continue; }
             const bracket = trailedBracket(y.bracket!, { abs: trail, delta: null }, 1);
             next = patchSlice(next, y.id, { bracket, ...(y.state === 'open' && spotNow != null ? { peakY: spotNow } : {}) });
             n++;
@@ -754,34 +756,40 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
 
       case 'positionTrail': {
-        // The panel's "Trail SL by" switch on an open position: ONE trailing SL for every open slice of that position (the
-        // whole executed quantity), or the trail switched off on all of them (a stop that was only a trail goes with it).
-        const trailPts = Number(body.trailPts);
-        if (!(trailPts >= 0) || !Number.isFinite(trailPts)) return bad('trailPts must be 0 or more');
-        const t = trailPts > 0 ? Math.max(1, trailPts) : 0;
+        // The panel's "Trail SL by" on the open position(s) of this contract (this broker, mode and pane — every side /
+        // product, in ONE request): one trailing SL for each position's whole executed quantity, or the trail off on all of
+        // them. The page confirms an off first: it removes a trail-only stop.
+        const req = parseTrailRequest({ trailPts: body.trailPts });
+        if (typeof req === 'string') return bad(req);
+        if (req.abs == null) return bad('trailPts required');
+        const t = req.abs;
         const x0 = readLadderState().slices.find(y => y.id === id);
-        if (!x0 || x0.state !== 'open' || !onIndexAxis(x0)) return bad('That position is not open on the index ladder', 409);
+        if (!x0 || x0.state !== 'open' || !(x0.kind === 'xy' || x0.market)) return bad('That position is not open on the index ladder', 409);
         let spotNow = 0;
         if (t > 0) {
           const sp = (await loadPrices([spotKey(x0.contract)], [])).spots[spotKey(x0.contract)];
           if (!sp || !spotFresh(sp.at, Date.now())) return bad('No fresh price to start the trail from — try again in a moment');
           spotNow = sp.spot;
         }
-        let n = 0, qty = 0;
+        let changed = 0;
         const s = await updateLadderState(st => {
           const x = st.slices.find(y => y.id === id);
           if (!x || x.state !== 'open') return st;
-          const mates = positionMates(st.slices, x);
-          const patches = positionTrailPatches(mates, bias(x.contract.opt, x.side), spotNow, t);
-          if (!patches.size) return st;
           let next = st;
-          for (const [sid, p] of patches) { next = patchSlice(next, sid, p); n++; }
-          qty = mates.reduce((a, y) => a + (Number(y.filledQty) || 0), 0);
-          const slY = [...patches.values()][0].slY;
-          return pushEvent(next, ev('info', t > 0 ? `Trailing SL ${t} pts on the whole position (${qty} ${legTag(x.contract)}), SL ${slY}` : `Trailing SL off on the whole position (${qty} ${legTag(x.contract)})`, id));
+          for (const mates of contractPositions(st.slices, x)) {
+            const head = mates[0];
+            const patches = positionTrailPatches(mates, bias(head.contract.opt, head.side), spotNow, t);
+            if (!patches.size) continue;
+            changed += patches.size;
+            next = patchSlices(next, patches);
+            const qty = mates.reduce((a, y) => a + (Number(y.filledQty) || 0), 0);
+            next = pushEvent(next, ev('info', t > 0
+              ? `Trailing SL ${Math.max(MIN_TRAIL_PTS, t)} pts on the whole ${head.side} position (${qty} ${legTag(head.contract)}), SL ${[...patches.values()][0].slY}`
+              : `Trailing SL off on the ${head.side} position (${qty} ${legTag(head.contract)})`, head.id));
+          }
+          return next;
         });
-        if (!n) return NextResponse.json({ success: true, data: { state: s, changed: 0 } });
-        return NextResponse.json({ success: true, data: { state: s, changed: n, qty } });
+        return NextResponse.json({ success: true, data: { state: s, changed } });
       }
 
       case 'resolve': {

@@ -463,27 +463,52 @@ export function trailedBracket(br: LadderBracket, req: { abs: number | null; del
 export const onIndexAxis = (x: Pick<LadderSlice, 'kind' | 'market' | 'entryY'>): boolean =>
   x.kind === 'xy' || (!!x.market && x.entryY != null);
 
-/** A bracket that is only a trailing stop: no target and a running trail. Older records (no `trailOnly` flag) count when
- *  their SL distance is the trail distance, which is how Single + trail arms them. */
+/** A stop that is only a trailing SL (Single + trail, or a position-wide trail): switching its trail off removes it.
+ *  Only the `trailOnly` flag says so — an unflagged {tgt 0, sl = trail} may be a Cover whose fixed SL must stay. */
 export const isTrailOnly = (br: LadderBracket | undefined): boolean =>
-  !!br && br.tgtPts === 0 && (br.trailPts ?? 0) > 0 && (br.trailOnly === true || br.slPts === br.trailPts);
+  !!br && br.trailOnly === true && br.tgtPts === 0 && (br.trailPts ?? 0) > 0;
+
+/** An older step-rule trail (no `trailMode`): never changed to another rule under the user. */
+const isStepTrail = (br: LadderBracket | undefined): boolean => !!br && (br.trailPts ?? 0) > 0 && br.trailMode !== 'distance';
+
+/** The smallest trailing distance in index points: tighter would park the SL on the price. */
+export const MIN_TRAIL_PTS = 1;
 
 /**
  * The open slices that make up one position on the index axis: same broker, mode, contract, product, side and pane as
- * `x`, open, with an axis price. Their trailing SL is one stop for the whole executed quantity.
+ * `x`, open, XY or Market-button (a Market fill sent while the axis price was stale is included: it joins at the
+ * position's level). Their trailing SL is one stop for the whole executed quantity.
  */
 export function positionMates(slices: LadderSlice[], x: LadderSlice): LadderSlice[] {
-  return slices.filter(y => y.state === 'open' && onIndexAxis(y) && (Number(y.filledQty) || 0) > 0
+  return slices.filter(y => y.state === 'open' && (y.kind === 'xy' || !!y.market) && (Number(y.filledQty) || 0) > 0
     && y.broker === x.broker && y.mode === x.mode && y.side === x.side && y.product === x.product
     && y.contract.securityId === x.contract.securityId && y.contract.tradingSymbol === x.contract.tradingSymbol
     && (y.pane === 2 ? 2 : 1) === (x.pane === 2 ? 2 : 1));
 }
 
+/** Every position (one `positionMates` group per side / product) open on `x`'s contract, broker, mode and pane. */
+export function contractPositions(slices: LadderSlice[], x: LadderSlice): LadderSlice[][] {
+  const heads = new Map<string, LadderSlice>();
+  for (const y of slices) {
+    if (y.state !== 'open' || !(y.kind === 'xy' || y.market) || y.broker !== x.broker || y.mode !== x.mode
+      || y.contract.securityId !== x.contract.securityId || y.contract.tradingSymbol !== x.contract.tradingSymbol
+      || (y.pane === 2 ? 2 : 1) !== (x.pane === 2 ? 2 : 1)) continue;
+    const k = `${y.side}|${y.product}`;
+    if (!heads.has(k)) heads.set(k, y);
+  }
+  return [...heads.values()].map(h => positionMates(slices, h)).filter(g => g.length);
+}
+
+/** A Market slice with no axis price is placed at the position's (else `fallback`'s) level so its bracket can run. */
+const axisFill = (y: LadderSlice, mates: LadderSlice[], fallback: number | undefined): Partial<LadderSlice> =>
+  y.entryY != null ? {} : (() => { const at = mates.find(m => m.entryY != null)?.entryY ?? fallback; return at != null ? { entryY: at } : {}; })();
+
 /**
  * A trailing SL for a whole position (every open slice in `positionMates`), from the index level `spot` now.
- * `trailPts` > 0: every slice gets the trail; slices with no bracket get a trailing stop on its own; the SL is ONE level
- * for all of them — the tightest of their current SLs and `spot` - trail (switching on never loosens a stop).
- * `trailPts` 0: the trail is switched off; a stop that was only a trail is removed, a bracket's fixed SL is kept.
+ * `trailPts` > 0: every slice gets the trail — slices with no bracket a trailing stop on its own (flagged `trailOnly`), a
+ * bracket keeps its target and fixed SL distance — and the SL is ONE level for all of them: the tightest of their current
+ * SLs and `spot` -/+ trail (switching on never loosens a stop). An older step-rule trail is left on its own rule.
+ * `trailPts` 0: the trail is switched off; a trail-only stop is removed, a bracket keeps its fixed SL where it is.
  * Returns the patches by slice id (empty when there is nothing to change).
  */
 export function positionTrailPatches(mates: LadderSlice[], b: 1 | -1, spot: number, trailPts: number): Map<string, Partial<LadderSlice>> {
@@ -491,29 +516,37 @@ export function positionTrailPatches(mates: LadderSlice[], b: 1 | -1, spot: numb
   if (!mates.length) return out;
   if (trailPts > 0) {
     if (!(spot > 0)) return out;
+    const trail = Math.max(MIN_TRAIL_PTS, trailPts);
     const tight = (a: number, c: number) => (b > 0 ? Math.max(a, c) : Math.min(a, c));
-    let slY = Number((spot - b * trailPts).toFixed(2));
+    let slY = Number((spot - b * trail).toFixed(2));
     for (const y of mates) if (y.bracket && y.slY != null) slY = tight(slY, y.slY);
     for (const y of mates) {
+      if (isStepTrail(y.bracket)) continue;
       const bracket: LadderBracket = y.bracket && !isTrailOnly(y.bracket)
-        ? { ...y.bracket, trailPts, trailMode: 'distance' }
-        : { tgtPts: 0, slPts: trailPts, trailPts, trailMode: 'distance', trailOnly: true };
-      out.set(y.id, { bracket, slY, slY0: slY, peakY: spot, trailFrom: spot, ...(bracket.tgtPts > 0 ? {} : { tgtY: undefined }) });
+        ? { ...y.bracket, trailPts: trail, trailMode: 'distance' }
+        : { tgtPts: 0, slPts: trail, trailPts: trail, trailMode: 'distance', trailOnly: true };
+      out.set(y.id, { bracket, slY, slY0: slY, peakY: spot, trailFrom: spot, ...(bracket.tgtPts > 0 ? {} : { tgtY: undefined }), ...axisFill(y, mates, spot) });
     }
     return out;
   }
   for (const y of mates) {
-    if (!y.bracket) continue;
-    if (isTrailOnly(y.bracket)) out.set(y.id, { bracket: undefined, tgtY: undefined, slY: undefined, slY0: undefined, peakY: undefined, trailFrom: undefined });
-    else if ((y.bracket.trailPts ?? 0) > 0) out.set(y.id, { bracket: { tgtPts: y.bracket.tgtPts, slPts: y.bracket.slPts } });
+    if (!y.bracket || !((y.bracket.trailPts ?? 0) > 0)) continue;
+    out.set(y.id, trailOffPatch(y.bracket));
   }
   return out;
 }
 
+/** Switching a trail off: a trail-only stop is removed; any other bracket keeps its fixed SL (and target) where it is. */
+export function trailOffPatch(br: LadderBracket): Partial<LadderSlice> {
+  return isTrailOnly(br)
+    ? { bracket: undefined, tgtY: undefined, slY: undefined, slY0: undefined, peakY: undefined, trailFrom: undefined }
+    : { bracket: { tgtPts: br.tgtPts, slPts: br.slPts } };
+}
+
 /**
- * A slice that has just opened joins its position's trailing SL: when any slice of the position (`mates`, the new one
- * included) trails, every slice with no bracket or with a trail-only stop takes the trail's levels — the tightest
- * trailing SL among them — so one stop covers the whole executed quantity. Slices with their own target bracket keep it.
+ * A slice has just opened: one stop covers the whole executed quantity. When a slice of the position (`mates`, the new
+ * one included) has a continuous trail, every slice with NO stop takes the trail's levels (the tightest trailing SL among
+ * them). A slice armed with its own stop — a bracket, or a trail-only stop at its own distance — keeps it.
  */
 export function joinTrailPatches(mates: LadderSlice[], b: 1 | -1): Map<string, Partial<LadderSlice>> {
   const out = new Map<string, Partial<LadderSlice>>();
@@ -523,11 +556,17 @@ export function joinTrailPatches(mates: LadderSlice[], b: 1 | -1): Map<string, P
   const trail = lead.bracket!.trailPts!;
   const bracket: LadderBracket = { tgtPts: 0, slPts: trail, trailPts: trail, trailMode: 'distance', trailOnly: true };
   for (const y of mates) {
-    if (y.bracket && !isTrailOnly(y.bracket)) continue;
-    if (y.slY === lead.slY && y.bracket?.trailPts === trail && y.peakY === lead.peakY) continue;
-    out.set(y.id, { bracket, tgtY: undefined, slY: lead.slY, slY0: lead.slY0 ?? lead.slY, peakY: lead.peakY, trailFrom: lead.trailFrom });
+    if (y.bracket) continue;
+    out.set(y.id, { bracket, tgtY: undefined, slY: lead.slY, slY0: lead.slY0 ?? lead.slY, peakY: lead.peakY, trailFrom: lead.trailFrom, ...axisFill(y, mates, lead.peakY) });
   }
   return out;
+}
+
+/** Apply patches by slice id. */
+export function patchSlices(s: LadderState, patches: Map<string, Partial<LadderSlice>>): LadderState {
+  let next = s;
+  for (const [id, p] of patches) next = patchSlice(next, id, p);
+  return next;
 }
 
 /**
