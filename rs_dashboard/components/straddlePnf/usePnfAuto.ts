@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { autoProductOf, decideAdd, decideAuto, rowMarket, trailLevel, trailOf, type AutoProduct } from '@/lib/pnfAuto';
+import { autoProductOf, decideAdd, decideAuto, reentryBlockOf, rowMarket, trailLevel, trailOf, type AutoProduct } from '@/lib/pnfAuto';
 import { ignoredByFilter, SIDE_LABEL, withSide, type AutoSide } from '@/lib/pnfAutoRule';
 import { isSellSignal } from '@/lib/straddlePnf';
 import { EMPTY_LEDGER, isLive, PYRAMID_HARD_MAX, type AutoLedger, type AutoLeg, type AutoOp, type AutoRow } from '@/lib/pnfAutoLedger';
@@ -452,7 +452,10 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
       if (arm.mode !== mode) { onDisarm(`the page switched to ${mode}`); return; }
       if (target.kind === 'index') { setNote('an index cannot be traded'); return; }
       if (!complete || stale || price === null) { setNote(stale ? 'feed stale: no entries' : 'waiting for a price'); return; }
-      const d = decideAuto({ model, position: null, watermarkT: watermarkRef.current, nowS, market, product: target.kind === 'equity' ? 'INTRADAY' : autoProductOf(arm.product) });
+      // The chart's last trade, if the trailing SL closed it today on this contract in this mode: same-side entries wait for a new best brick.
+      const lastRow = [...ledger.rows].reverse().find(r => r.chart === chart);
+      const reentryBlock = lastRow && lastRow.targetKey === tk && lastRow.mode === arm.mode && lastRow.day === istDateIso(Date.now()) ? reentryBlockOf(lastRow, model) : undefined;
+      const d = decideAuto({ model, position: null, watermarkT: watermarkRef.current, nowS, market, product: target.kind === 'equity' ? 'INTRADAY' : autoProductOf(arm.product), reentryBlock });
       // A signal whose entry kept failing before anything was sent, and is no longer enterable (a newer bar closed, it aged out): said once.
       const pending = retryRef.current;
       if (pending && !(d.action === 'enter' && d.signal.id === pending.id)) {

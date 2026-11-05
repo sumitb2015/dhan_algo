@@ -167,6 +167,41 @@ export function trailLevel(model: AutoModel, pos: AutoPosition): number | null {
   return pos.side === 'SELL' ? best + pos.trail.boxes * model.box : best - pos.trail.boxes * model.box;
 }
 
+/**
+ * After a trailing-SL exit, no new entry on the SAME side until the trend resumes: a brick in that direction closes beyond the best brick
+ * close the trailed trade reached (the Supertrend rule signals on every brick while the line points one way, so without this AUTO bought
+ * the very pullback the trail had just exited, 2026-11-05). The opposite side enters as usual.
+ */
+export type ReentryBlock = { side: AutoSide; beyond: number; afterBarT: number };
+
+/** The block a closed row leaves behind: only a `trail` exit with its exit bar, else undefined. */
+export function reentryBlockOf(row: { side: AutoSide; state: string; reason?: string; entryBarT: number; exitBarT?: number; entryBox?: number; base?: { price: number }; entryPrice: number },
+  model: Pick<AutoModel, 'columns' | 'columnTimes'>): ReentryBlock | undefined {
+  if (row.state !== 'closed' || row.reason !== 'trail' || row.exitBarT === undefined) return undefined;
+  const sell = row.side === 'SELL';
+  const want = sell ? 'O' : 'X';
+  let best = row.entryBox ?? row.base?.price ?? row.entryPrice;
+  for (let i = 0; i < model.columns.length; i++) {
+    const start = model.columnTimes[i]?.start;
+    const c = model.columns[i];
+    if (start === undefined || !(start > row.entryBarT) || start > row.exitBarT || c.dir !== want) continue;
+    const close = c.dir === 'X' ? c.high : c.low;
+    if (sell ? close < best : close > best) best = close;
+  }
+  return { side: row.side, beyond: best, afterBarT: row.exitBarT };
+}
+
+/** The trend has resumed past the block: a brick after the exit bar, in the blocked direction, closed beyond its best. */
+export function reentryLifted(model: Pick<AutoModel, 'columns' | 'columnTimes'>, b: ReentryBlock): boolean {
+  const want = b.side === 'SELL' ? 'O' : 'X';
+  return model.columns.some((c, i) => {
+    const start = model.columnTimes[i]?.start;
+    if (start === undefined || !(start > b.afterBarT) || c.dir !== want) return false;
+    const close = c.dir === 'X' ? c.high : c.low;
+    return b.side === 'SELL' ? close < b.beyond - 1e-9 : close > b.beyond + 1e-9;
+  });
+}
+
 /** The first column opposite to `side` that started after the entry bar (the reversal), or -1. */
 export function reversalColumn(model: AutoModel, pos: AutoPosition): number {
   const want = pos.side === 'SELL' ? 'X' : 'O';
@@ -183,8 +218,10 @@ export function reversalColumn(model: AutoModel, pos: AutoPosition): number {
  * What the chart should do now. `watermarkT`: signals at or before it are never entered (it is set to the last closed bar when
  * AUTO is switched on, and to each handled signal's time). `nowS`: the decision time, epoch seconds.
  */
-export function decideAuto({ model, position, watermarkT, nowS, market, price = null, product = 'INTRADAY' }: {
+export function decideAuto({ model, position, watermarkT, nowS, market, price = null, product = 'INTRADAY', reentryBlock }: {
   model: AutoModel; position: AutoPosition | null; watermarkT: number; nowS: number; market: Market;
+  /** Left by the chart's last trade if it was exited by the trailing SL (reentryBlockOf): same-side entries wait for a new best brick. */
+  reentryBlock?: ReentryBlock;
   /** The open position's product (its end-of-day time), else the product a new entry would be sent with (its entry cutoff). */
   product?: AutoProduct;
   /** The chart's live price, for a stop (a position without a stop never reads it). */
@@ -214,6 +251,9 @@ export function decideAuto({ model, position, watermarkT, nowS, market, price = 
   if (!sig) return { action: 'none', why: 'waiting for a signal' };
   if (sig.t !== last) return { action: 'none', why: 'signal is not on the last closed bar' };
   if (nowS - sig.t > MAX_SIGNAL_AGE_S) return { action: 'none', why: 'signal too old' };
+  if (reentryBlock && (isSellSignal(sig.kind) ? 'SELL' : 'BUY') === reentryBlock.side && !reentryLifted(model, reentryBlock)) {
+    return { action: 'none', why: `trail exit: ${reentryBlock.side} waits for a brick beyond ${reentryBlock.beyond.toFixed(2)}` };
+  }
   return { action: 'enter', side: isSellSignal(sig.kind) ? 'SELL' : 'BUY', signal: sig, boxPrice: boxPriceAt(model, sig.col, sig.bar) };
 }
 

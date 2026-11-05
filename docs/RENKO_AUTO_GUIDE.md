@@ -136,6 +136,10 @@ Both are set before arming and locked while AUTO is armed. Saved per chart and o
   shows the level once it is active: `LONG 5L (4+1) @ 8340.20 avg … SL 8352.00`. It is set before arming (locked while armed) and saved on the row at entry, so a change only
   affects the next trade. Switch it off with the `Trail SL` button. It runs in the open `/renko` tab, like the Supertrend exit; with the
   tab closed only the server's MTM guard and end-of-day exit protect the position.
+- **After a Trail SL exit AUTO does not re-enter the same side on the pullback.** The Supertrend rule signals on every brick while the
+  line points one way, so it used to buy straight back on the exit brick. Now a same-side entry waits until a brick closes **beyond the
+  best brick** the trailed trade reached (the trend has resumed); the status says `trail exit: BUY waits for a brick beyond 8488.00`.
+  The opposite side still enters as soon as its signal comes. The wait lasts for the rest of the day on that contract, until the next trade.
 - Adds stop at **Max**. The cap is saved on the row at entry, and a new arming can only lower it.
 - The position exits as **one**: the exit rule, the MTM guard, the end of day and the Exit button all close every lot (exits send the row's total units).
   The next entry starts again at the base lots.

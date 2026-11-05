@@ -176,7 +176,7 @@ test('side filter: a buy-only chart never enters the sell signal on the last bar
 });
 
 // ── pyramid (decideAdd) ──
-import { decideAdd, pyramidEveryOf, PYRAMID_EVERY_MAX, trailLevel, trailOf } from './pnfAuto.ts';
+import { decideAdd, pyramidEveryOf, PYRAMID_EVERY_MAX, reentryBlockOf, trailLevel, trailOf } from './pnfAuto.ts';
 
 /** A Renko short entered on the 10:00 brick (close 100); bricks of box 1 after it: [time, dir, close]. */
 function renkoModel(bricks: [number, 'X' | 'O', number][], lastBarT: number): AutoModel {
@@ -283,6 +283,33 @@ test('pyramid trailing SL: none before an add; after one, a closed brick N boxes
   const up: [number, 'X' | 'O', number][] = [[ist(10, 1), 'X', 102], [ist(10, 2), 'X', 103], [ist(10, 3), 'X', 104], [ist(10, 4), 'O', 102]];
   const d = decideAuto({ model: renkoModel(up, ist(10, 4)), position: { side: 'BUY', entryBarT: ist(10, 0), trail: trailOf({ entryPrice: 101, entryBox: 101, ...added }) }, watermarkT: 0, nowS: ist(10, 5), market: 'NSE' });
   assert.deepEqual(d, { action: 'exit', reason: 'trail', col: 4, boxPrice: 102 });
+});
+
+test('after a trailing-SL exit the same side waits for a brick beyond the trade best; the opposite side enters as usual', () => {
+  // a long from the 101 brick: up to 104, trailed out on the 10:04 brick at 102; Supertrend still up, so every brick is a BUY signal
+  const bricks: [number, 'X' | 'O', number][] = [[ist(10, 1), 'X', 102], [ist(10, 2), 'X', 103], [ist(10, 3), 'X', 104], [ist(10, 4), 'O', 102]];
+  const row = { side: 'BUY' as const, state: 'closed', reason: 'trail', entryBarT: ist(10, 0), exitBarT: ist(10, 4), entryBox: 101, entryPrice: 101 };
+  const block = reentryBlockOf(row, renkoModel(bricks, ist(10, 4)))!;
+  assert.deepEqual(block, { side: 'BUY', beyond: 104, afterBarT: ist(10, 4) });
+  const at = (b: [number, 'X' | 'O', number][], kind: PnfSignal['kind']) => {
+    const last = b[b.length - 1][0];
+    return decideAuto({ model: { ...renkoModel(b, last), signals: [sig(kind, last)] }, position: null, watermarkT: 0, nowS: last + 30, market: 'NSE', reentryBlock: block });
+  };
+  // the BUY signal on the exit brick itself (what re-bought 4 lots on 2026-11-05) and on a later 103 brick: held
+  assert.equal(at(bricks, 'RENKO_BUY').action, 'none');
+  const back103: [number, 'X' | 'O', number][] = [...bricks, [ist(10, 5), 'X', 103]];
+  assert.match((at(back103, 'RENKO_BUY') as { why: string }).why, /waits for a brick beyond 104/);
+  // a brick at 104 only equals the best: still held; 105 is beyond it: entered
+  assert.equal(at([...back103, [ist(10, 6), 'X', 104]], 'RENKO_BUY').action, 'none');
+  assert.equal(at([...back103, [ist(10, 6), 'X', 104], [ist(10, 7), 'X', 105]], 'RENKO_BUY').action, 'enter');
+  // the opposite side is not held
+  assert.equal(at(bricks, 'RENKO_SELL').action, 'enter');
+  // only a trail exit leaves a block
+  assert.equal(reentryBlockOf({ ...row, reason: 'reversal' }, renkoModel(bricks, ist(10, 4))), undefined);
+  assert.equal(reentryBlockOf({ ...row, state: 'open' }, renkoModel(bricks, ist(10, 4))), undefined);
+  // a short: best is the LOWEST brick close
+  const down: [number, 'X' | 'O', number][] = [[ist(10, 1), 'O', 99], [ist(10, 2), 'O', 97], [ist(10, 3), 'X', 99]];
+  assert.equal(reentryBlockOf({ ...row, side: 'SELL', entryBox: 100, entryPrice: 100, exitBarT: ist(10, 3) }, renkoModel(down, ist(10, 3)))!.beyond, 97);
 });
 
 test('NRML (MARGIN) squares off NSE at 15:35 (entries stop 15:25), pulled inside an earlier close; MIS keeps 15:15; MCX is the same for both', () => {

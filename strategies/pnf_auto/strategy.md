@@ -129,6 +129,10 @@ Opt-in per chart on `/renko` (not P&F, not Replay). User guide: `docs/RENKO_AUTO
   after that bar that closes `trailBoxes` boxes back from the best favourable brick close since entry (`trailExitColumn`). Checked after EOD and
   before the two-back stop / reversal / Supertrend. User chose closed-brick (not live price) and browser-tab only (not the server watcher).
   On the arm record as `pyramid.trail` (0 = armed with it off; absent = armed before the setting existed, resumed ON).
+- Re-entry after a trail exit (2026-11-05, user choice "new best brick"): the Supertrend rule signals on every brick, so a trail exit was
+  re-bought on the same brick (19:44:01 exit @ 8482, 19:44:02 BUY 4L @ 8485, REAL). `reentryBlockOf(lastRow, model)` (last row of the chart,
+  closed by `trail`, same contract / mode / day) → `decideAuto({ reentryBlock })` holds same-side signals until `reentryLifted`: a brick after
+  the exit bar closes strictly beyond the trade's best brick close. Opposite side unaffected. Rejected: Supertrend-flip-only, N-brick cooldown.
 - Review fixes (2026-11-05): the server's `exitRow` sizes from the row re-read after `beginExit` (never the tick snapshot); `reservedByAuto`
   counts a pending add's units; a stuck add (> 60 s) is exited by the server with `beginExit withPendingAdd` (confirmed + pending units capped
   by the broker, `close.pendingAdded` settles it; `abortExit` restores the add state), except when a sibling live REAL row holds the same
