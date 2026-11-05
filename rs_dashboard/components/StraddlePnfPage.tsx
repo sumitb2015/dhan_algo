@@ -54,7 +54,7 @@ import type { PnfScope } from '@/lib/pnfScope';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent, type AutoPyramid } from './straddlePnf/usePnfAuto';
 import { autoDaySummary, autoMarkers, holdsPosition, PYRAMID_HARD_MAX, rowPnl } from '@/lib/pnfAutoLedger';
 import AutoControls, { type AutoRule } from './straddlePnf/AutoControls';
-import { AUTO_PRODUCT_LABEL, autoProductOf, autoWindow, rowMarket, type AutoProduct } from '@/lib/pnfAuto';
+import { AUTO_PRODUCT_LABEL, autoProductOf, autoWindow, pyramidEveryOf, rowMarket, type AutoProduct } from '@/lib/pnfAuto';
 import { guardLevelsText, syncGuardFromServer, type ServerGuardView } from '@/lib/pnfServerGuardView';
 import { usePnfPositions } from './straddlePnf/usePnfPositions';
 import { usePnfGuard } from './straddlePnf/usePnfGuard';
@@ -96,16 +96,16 @@ const MARKERS_KEY = 'straddle-pnf-markers-';
 const AUTO_LOTS_KEY = 'straddle-pnf-auto-lots-';
 const AUTO_RULE_KEY = 'straddle-pnf-auto-rule-';
 const AUTO_SIDE_KEY = 'straddle-pnf-auto-side-';
-/** Renko pyramid (add a lot per new best brick) per chart: JSON {on, max}. */
+/** Renko pyramid (add a lot every N new bricks) per chart: JSON {on, max, every}. */
 const AUTO_PYR_KEY = 'straddle-pnf-auto-pyr-';
 /** The product AUTO opens with per chart: 'MARGIN' (NRML) or MIS (anything else). */
 const AUTO_PROD_KEY = 'straddle-pnf-auto-prod-';
-const DEFAULT_PYRAMID: AutoPyramid = { on: false, max: 10 };
+const DEFAULT_PYRAMID: AutoPyramid = { on: false, max: 10, every: 1 };
 const parsePyramid = (raw: string | null): AutoPyramid => {
   try {
     const j = JSON.parse(raw ?? 'null') as Partial<AutoPyramid> | null;
     if (!j) return DEFAULT_PYRAMID;
-    return { on: j.on === true, max: Number.isInteger(j.max) && j.max! >= 1 && j.max! <= PYRAMID_HARD_MAX ? j.max! : DEFAULT_PYRAMID.max };
+    return { on: j.on === true, max: Number.isInteger(j.max) && j.max! >= 1 && j.max! <= PYRAMID_HARD_MAX ? j.max! : DEFAULT_PYRAMID.max, every: pyramidEveryOf(j.every) };
   } catch { return DEFAULT_PYRAMID; }
 };
 /** Per chart: '0' = the B / S trade markers are hidden. */
@@ -946,7 +946,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
           if (AUTO_SIDES.includes(rec.side as AutoSide)) { setAutoSide(a => ({ ...a, [c]: rec.side as AutoSide })); saveP(`${AUTO_SIDE_KEY}${c}`, rec.side!); }
           setAutoLots(l => ({ ...l, [c]: rec.lots })); saveP(`${AUTO_LOTS_KEY}${c}`, String(rec.lots));
           if (renko) {
-            const pyr: AutoPyramid = rec.pyramid ? { on: true, max: rec.pyramid.max } : { ...DEFAULT_PYRAMID, max: autoPyr[c].max };
+            const pyr: AutoPyramid = rec.pyramid ? { on: true, max: rec.pyramid.max, every: pyramidEveryOf(rec.pyramid.every) } : { ...DEFAULT_PYRAMID, max: autoPyr[c].max, every: autoPyr[c].every };
             setAutoPyr(a => ({ ...a, [c]: pyr })); saveP(`${AUTO_PYR_KEY}${c}`, JSON.stringify(pyr));
           }
           const prod = autoProductOf(rec.product);
@@ -1015,10 +1015,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const rec = {
       mode: tradeMode, broker, targetKey: targetKey(tgt), day: istToday(), t, watermarkT, lots: autoLots[c],
       side: autoSide[c], ...(renko ? { rule: autoRule[c] } : {}),
-      ...(renko && autoPyr[c].on && autoPyr[c].max > autoLots[c] ? { pyramid: { max: autoPyr[c].max } } : {}),
+      ...(renko && autoPyr[c].on && autoPyr[c].max > autoLots[c] ? { pyramid: { max: autoPyr[c].max, ...(autoPyr[c].every > 1 ? { every: autoPyr[c].every } : {}) } } : {}),
       ...(product === 'MARGIN' ? { product: 'MARGIN' as const } : {}),
     };
-    const pyrText = (rec.pyramid ? `, +1L/brick to ${rec.pyramid.max}L` : '') + (product === 'MARGIN' ? ', NRML' : '');
+    const pyrText = (rec.pyramid ? `, +1L/${rec.pyramid.every ? `${rec.pyramid.every} bricks` : 'brick'} to ${rec.pyramid.max}L` : '') + (product === 'MARGIN' ? ', NRML' : '');
     if (renko && autoPyr[c].on && !rec.pyramid) toast.warning(`Chart ${c}: adds are on but Max (${autoPyr[c].max}) is not above the base lots (${autoLots[c]}) - no lots will be added`, { duration: 10_000 });
     void autoPost({ op: 'setArm', chart: c, arm: rec, t, text: `AUTO armed (${tradeMode}, ${autoLots[c]} lot${autoSide[c] !== 'both' ? `, ${SIDE_LABEL[autoSide[c]]}` : ''}${pyrText})` }).then(r => {
       if (r.ok) {

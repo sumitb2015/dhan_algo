@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Bot } from 'lucide-react';
 import { holdsPosition, PYRAMID_HARD_MAX, rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
 import type { AutoProduct } from '@/lib/pnfOrderLogic';
+import { PYRAMID_EVERY_MAX } from '@/lib/pnfAuto';
 
 // One chart's AUTO switch, lots and status (engine: ./usePnfAuto.ts). The switch is saved in the AUTO ledger and resumed after a reload in
 // the same mode (lib/pnfAutoArm.ts; the page always loads in PAPER, so a REAL arm resumes once the page is switched to REAL); in REAL mode
@@ -31,8 +32,8 @@ export interface AutoControlsProps {
   halt: string | null;
   onResolve: (as: 'open' | 'flat' | 'added' | 'notAdded') => void;
   /** Renko only: add one lot per new best brick up to `max` total lots. Locked while armed. */
-  pyramid?: { on: boolean; max: number };
-  onPyramid?: (p: { on: boolean; max: number }) => void;
+  pyramid?: { on: boolean; max: number; every: number };
+  onPyramid?: (p: { on: boolean; max: number; every: number }) => void;
   /** Close the open position now at the live price (and switch AUTO off). */
   onExit?: () => void;
   /** Renko only: which pattern AUTO trades. Absent on P&F (one rule). Locked while armed or holding a position. */
@@ -70,6 +71,18 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
   useEffect(() => {
     if (!maxFocusedRef.current) setMaxDraft(String(pyramid?.max ?? 10));
   }, [pyramid?.max]);
+  const [everyDraft, setEveryDraft] = useState(String(pyramid?.every ?? 1));
+  const everyFocusedRef = useRef(false);
+  useEffect(() => {
+    if (!everyFocusedRef.current) setEveryDraft(String(pyramid?.every ?? 1));
+  }, [pyramid?.every]);
+  const commitEvery = (raw: string) => {
+    if (!pyramid || !onPyramid) return;
+    const n = parseInt(raw, 10);
+    const next = Number.isInteger(n) ? Math.max(1, Math.min(PYRAMID_EVERY_MAX, n)) : pyramid.every;
+    setEveryDraft(String(next));
+    if (next !== pyramid.every) onPyramid({ ...pyramid, every: next });
+  };
   const commitMax = (raw: string) => {
     if (!pyramid || !onPyramid) return;
     const n = parseInt(raw, 10);
@@ -190,15 +203,27 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
       </span>
       {pyramid && onPyramid && (
         <span className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950"
-              title={armed ? 'Stop AUTO to change adds' : 'Add one lot each time a brick closes beyond the best level since entry (at most one lot per bar), up to Max total lots. The next entry starts again at the base lots.'}>
+              title={armed ? 'Stop AUTO to change adds' : 'Add one lot every N bricks the position moves in its favour (N bricks past the last add, or past the entry brick for the first add; only on a new best brick, at most one lot per bar), up to Max total lots. The next entry starts again at the base lots.'}>
           <button type="button" data-testid={`pnf-auto-pyr-${chart}`} aria-pressed={pyramid.on} disabled={armed}
-                  aria-label={`${pyramid.on ? 'Stop adding' : 'Add'} one lot per new best brick on chart ${chart}`}
+                  aria-label={`${pyramid.on ? 'Stop adding' : 'Add'} one lot every ${pyramid.every} new brick${pyramid.every > 1 ? 's' : ''} on chart ${chart}`}
                   onClick={() => onPyramid({ ...pyramid, on: !pyramid.on })}
                   className={`h-6 px-1.5 rounded-l text-[11px] font-bold disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 ${pyramid.on ? 'bg-violet-500/20 text-violet-300' : 'text-zinc-400 hover:text-white'}`}>
-            +1L/brick
+            {pyramid.on ? '+1L /' : pyramid.every > 1 ? `+1L/${pyramid.every} br` : '+1L/brick'}
           </button>
           {pyramid.on && (
             <>
+              <input aria-label={`Bricks between AUTO adds on chart ${chart}`} data-testid={`pnf-auto-pyr-every-${chart}`} value={everyDraft} disabled={armed}
+                     title={`Add a lot every N bricks (1-${PYRAMID_EVERY_MAX}); 1 = every new best brick. Enter or click away to apply`}
+                     inputMode="numeric"
+                     onFocus={() => { everyFocusedRef.current = true; }}
+                     onChange={e => setEveryDraft(e.target.value)}
+                     onBlur={e => { everyFocusedRef.current = false; if (cancelBlurRef.current) { cancelBlurRef.current = false; return; } commitEvery(e.currentTarget.value); }}
+                     onKeyDown={e => {
+                       if (e.key === 'Enter') { commitEvery(e.currentTarget.value); e.currentTarget.blur(); }
+                       if (e.key === 'Escape') { setEveryDraft(String(pyramid.every)); cancelBlurRef.current = true; e.currentTarget.blur(); }
+                     }}
+                     className="w-7 h-6 text-center text-[11px] font-mono font-bold bg-transparent text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 rounded disabled:text-zinc-400" />
+              <span className="text-[11px] font-bold text-zinc-400" aria-hidden="true">br</span>
               <span className="pl-1 text-[11px] font-bold text-zinc-400" aria-hidden="true">Max</span>
               <input aria-label={`Maximum AUTO lots with adds on chart ${chart}`} data-testid={`pnf-auto-pyr-max-${chart}`} value={maxDraft} disabled={armed}
                      onFocus={() => { maxFocusedRef.current = true; }}

@@ -173,12 +173,18 @@ export function decideAuto({ model, position, watermarkT, nowS, market, price = 
  * the position's direction that closes beyond the best brick close reached since the entry (the entry brick's close to start with). A
  * pullback that only re-covers ground never adds; at most one lot per bar however many bricks it printed; a bar older than the newest
  * closed one is never chased (a tab that slept skips those bricks). Capped by `maxLots` (the row's own cap, saved at entry).
+ * `row.pyramidEvery` (N, default 1, saved at entry): the new best close must also be at least N boxes beyond the last add's brick (the entry
+ * brick before the first add), so a lot is added every N bricks of progress. N = 1 is the original one-lot-per-new-best-brick rule.
  */
+/** Pyramid "every N bricks" limits (N = 1: a lot on every new best brick). */
+export const PYRAMID_EVERY_MAX = 50;
+export const pyramidEveryOf = (n: unknown): number => (Number.isInteger(n) && (n as number) >= 1 && (n as number) <= PYRAMID_EVERY_MAX ? (n as number) : 1);
+
 export type AddDecision = { add: true; barT: number; box: number } | { add: false; why: string };
 
 export function decideAdd({ model, row, nowS, market, maxLots }: {
   model: AutoModel;
-  row: { side: AutoSide; entryBarT: number; entryPrice: number; entryBox?: number; lots: number; adds?: { barT: number }[]; base?: { price: number }; product?: AutoProduct };
+  row: { side: AutoSide; entryBarT: number; entryPrice: number; entryBox?: number; lots: number; adds?: { barT: number; box?: number }[]; base?: { price: number }; product?: AutoProduct; pyramidEvery?: number };
   nowS: number; market: Market; maxLots: number;
 }): AddDecision {
   if (model.chart !== 'renko') return { add: false, why: 'not a Renko chart' };
@@ -204,5 +210,12 @@ export function decideAdd({ model, row, nowS, market, maxLots }: {
     else if (start < last && better(close, best)) best = close;
   }
   if (reach === null || !better(reach, best)) return { add: false, why: 'no new best brick on the newest bar' };
+  const every = pyramidEveryOf(row.pyramidEvery);
+  if (every > 1) {
+    const lastAddBox = [...(row.adds ?? [])].reverse().find(a => Number.isFinite(a.box))?.box;
+    const from = lastAddBox ?? row.entryBox ?? row.base?.price ?? row.entryPrice;
+    const moved = (row.side === 'SELL' ? from - reach : reach - from) / model.box;
+    if (!(model.box > 0) || moved < every - 1e-6) return { add: false, why: `waiting for ${every} bricks past the last add` };
+  }
   return { add: true, barT: last, box: reach };
 }

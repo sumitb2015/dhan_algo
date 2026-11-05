@@ -76,8 +76,8 @@ export interface AutoArm {
   product?: AutoProduct;
 }
 
-/** Pyramid (Renko): add one lot per new best brick while a position is open, up to `max` total lots (lib/pnfAuto.ts decideAdd). */
-export interface AutoPyramid { on: boolean; max: number }
+/** Pyramid (Renko): add one lot every `every` new bricks while a position is open, up to `max` total lots (lib/pnfAuto.ts decideAdd). */
+export interface AutoPyramid { on: boolean; max: number; every: number }
 
 export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 'both', pyramid, price, stale, market, complete, broker, mode, leaderRef, ledger, post, onEvent, onDisarm, scope = 'pnf' }: {
   chart: 1 | 2;
@@ -268,7 +268,7 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
       ...(box !== null ? { entryBox: box } : {}),
       ...(stop !== undefined ? { stop } : {}),
       ...(exitBy ? { exitBy } : {}),
-      ...(pyramid?.on && pyramid.max > lots ? { pyramidMax: Math.min(pyramid.max, PYRAMID_HARD_MAX) } : {}),
+      ...(pyramid?.on && pyramid.max > lots ? { pyramidMax: Math.min(pyramid.max, PYRAMID_HARD_MAX), ...(pyramid.every > 1 ? { pyramidEvery: pyramid.every } : {}) } : {}),
     };
     if (arm.mode === 'PAPER') {
       const j = await sendOrder({ broker, mode: 'PAPER', target, action: side, lots, product });
@@ -423,7 +423,7 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
               try { await addLot(row, a.barT, a.box, price); } finally { busyRef.current = false; }
               return;
             }
-            setNote(a.add || a.why === 'no new best brick on the newest bar' || a.why === 'already added on this bar' ? `holding ${row.lots}L (adds to ${Math.min(row.pyramidMax, pyramid.max)}L)` : `holding ${row.lots}L (${a.why})`);
+            setNote(a.add || a.why === 'no new best brick on the newest bar' || a.why === 'already added on this bar' || a.why.startsWith('waiting for') ? `holding ${row.lots}L (+1L/${row.pyramidEvery ?? 1} br to ${Math.min(row.pyramidMax, pyramid.max)}L)` : `holding ${row.lots}L (${a.why})`);
             return;
           }
           setNote(arm.on ? 'holding' : 'holding - AUTO is OFF: it will exit by its rule, not re-enter');

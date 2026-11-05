@@ -15,6 +15,7 @@ import { parseTarget, targetKey, type Target } from './pnfTarget.ts';
 import { MAX_PNF_LOTS } from './pnfOrderLogic.ts';
 import type { Market } from './straddlePnfLive.ts';
 import type { AutoProduct } from './pnfOrderLogic.ts';
+import { PYRAMID_EVERY_MAX } from './pnfAuto.ts';
 
 export type AutoMode = 'PAPER' | 'REAL';
 export type AutoRowState = 'entering' | 'open' | 'exiting' | 'closed' | 'unknownEntry' | 'unknownExit' | 'adding' | 'unknownAdd';
@@ -108,6 +109,8 @@ export interface AutoRow {
   preExitState?: 'adding' | 'unknownAdd';
   /** Pyramid: the cap on total lots, saved at entry (absent = no adds for this row). */
   pyramidMax?: number;
+  /** Pyramid: add a lot every this many bricks of progress past the last add (saved at entry; absent = 1, every new best brick). */
+  pyramidEvery?: number;
   /** Pyramid: the first tranche, saved by the first add (entryPrice then becomes the average). */
   base?: { lots: number; unitsPerPoint: number; price: number; legUnits: number[] };
   adds?: AutoAdd[];
@@ -135,8 +138,8 @@ export interface AutoArmRecord {
   /** Renko AUTO rule / side filter it was armed with (restored with it; absent on the P&F page). */
   rule?: string;
   side?: string;
-  /** Renko pyramid it was armed with: present = add one lot per new best brick up to `max` total lots. */
-  pyramid?: { max: number };
+  /** Renko pyramid it was armed with: present = add one lot every `every` (absent = 1) new bricks, up to `max` total lots. */
+  pyramid?: { max: number; every?: number };
   /** 'MARGIN' = armed to trade NRML; absent = MIS. */
   product?: 'MARGIN';
 }
@@ -217,7 +220,9 @@ function armOk(v: unknown): AutoArmRecord | null {
   const str = (s: unknown) => (typeof s === 'string' && s.length > 0 && s.length <= 20 ? s : undefined);
   const rule = str(a.rule), side = str(a.side);
   const pm = a.pyramid && typeof a.pyramid === 'object' ? (a.pyramid as { max?: unknown }).max : undefined;
-  const pyramid = Number.isInteger(pm) && (pm as number) >= 1 && (pm as number) <= PYRAMID_HARD_MAX ? { max: pm as number } : undefined;
+  const pe = a.pyramid && typeof a.pyramid === 'object' ? (a.pyramid as { every?: unknown }).every : undefined;
+  const everyOk = Number.isInteger(pe) && (pe as number) > 1 && (pe as number) <= PYRAMID_EVERY_MAX;
+  const pyramid = Number.isInteger(pm) && (pm as number) >= 1 && (pm as number) <= PYRAMID_HARD_MAX ? { max: pm as number, ...(everyOk ? { every: pe as number } : {}) } : undefined;
   return { mode: a.mode, broker: a.broker, targetKey: a.targetKey, day: a.day, t: a.t!, watermarkT: a.watermarkT!, lots: a.lots!, ...(rule ? { rule } : {}), ...(side ? { side } : {}), ...(pyramid ? { pyramid } : {}), ...(a.product === 'MARGIN' ? { product: 'MARGIN' as const } : {}) };
 }
 
@@ -277,6 +282,7 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       if (r.product !== undefined && r.product !== 'INTRADAY' && r.product !== 'MARGIN') return { ok: false, status: 400, error: 'product must be INTRADAY or MARGIN' };
       if (r.product === 'MARGIN' && target.kind === 'equity') return { ok: false, status: 400, error: 'A stock is traded MIS by AUTO (NRML is for futures and options)' };
       if (r.pyramidMax !== undefined && (!Number.isInteger(r.pyramidMax) || r.pyramidMax < r.lots || r.pyramidMax > PYRAMID_HARD_MAX)) return { ok: false, status: 400, error: `pyramidMax must be ${r.lots}-${PYRAMID_HARD_MAX}` };
+      if (r.pyramidEvery !== undefined && (!Number.isInteger(r.pyramidEvery) || r.pyramidEvery < 1 || r.pyramidEvery > PYRAMID_EVERY_MAX)) return { ok: false, status: 400, error: `pyramidEvery must be 1-${PYRAMID_EVERY_MAX}` };
       if (r.base !== undefined || r.adds !== undefined) return { ok: false, status: 400, error: 'A new row has no adds' };
       if (led.rows.some(x => x.id === r.id)) return { ok: false, status: 409, error: 'Row already exists' };
       const live = led.rows.find(x => x.chart === r.chart && isLive(x));

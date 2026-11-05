@@ -115,14 +115,18 @@ In priority order:
 
 Exits keep running for an open position even when AUTO is switched off.
 
-### Adding lots on new best bricks (`+1L/brick`)
+### Adding lots as the trade moves (`+1L / N br`)
 
-Optional, per chart, Renko only: the **`+1L/brick`** switch next to the AUTO lots box, with a **Max** box (total lots, default 10, at most 20).
+Optional, per chart, Renko only: the **`+1L/brick`** switch next to the AUTO lots box. Once on it shows **`+1L / [N] br · Max [M]`**:
+**N** = bricks between adds (default 1, at most 50), **Max** = total lots (default 10, at most 20).
 Both are set before arming and locked while AUTO is armed. Saved per chart and on the AUTO arming, so a reload resumes them.
 
 - While a position is open and AUTO is armed, AUTO adds **one lot** when the newest closed bar prints a brick in the position's direction that
   closes **beyond the best brick close since the entry** (a short: a new lower brick; a long: a new higher brick). The entry brick's close is
   the starting level.
+- **Every N bricks:** with N above 1 the new best brick must also be at least **N bricks past the last add** (past the entry brick for the
+  first add). A short entered on the 100 brick with N = 2 and a 1-point box adds at 98, then at 96, 94 ... A bar that jumps several bricks
+  counts all of them, but still adds one lot. N is saved on the row at entry, so changing it later does not affect an open position.
 - A pullback that only gets back to a level already reached adds nothing. **At most one lot per bar**, however many bricks it printed.
   Bricks on an older bar (a sleeping tab) are never chased. No adds after the entry cutoff (15:05 NSE) or with a stale feed.
 - Adds stop at **Max**. The cap is saved on the row at entry, and a new arming can only lower it.

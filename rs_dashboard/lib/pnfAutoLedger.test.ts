@@ -305,3 +305,18 @@ test('a row keeps the product it was opened with; NRML is refused on a stock; th
   assert.equal(parseLedger({ rev: 1, rows: [], log: [], arms: { 1: { ...arm, product: 'MARGIN' }, 2: { ...arm, product: 'X' } } }).arms?.['1']?.product, 'MARGIN');
   assert.equal(parseLedger({ rev: 1, rows: [], log: [], arms: { 2: { ...arm, product: 'X' } } }).arms?.['2']?.product, undefined);
 });
+
+test('pyramid every N: open accepts pyramidEvery 1-50 and refuses anything else', () => {
+  const l = run(EMPTY_LEDGER, { op: 'open', row: row({ pyramidMax: 4, pyramidEvery: 3 }) });
+  assert.equal(l.rows[0].pyramidEvery, 3);
+  for (const bad of [0, 51, 2.5]) assert.ok(!applyAutoOp(EMPTY_LEDGER, { op: 'open', row: row({ pyramidMax: 4, pyramidEvery: bad }) } as AutoOp).ok, String(bad));
+});
+
+test('the arm record keeps the pyramid every-N (2-50); 1 or a bad value is dropped', () => {
+  const arm = { mode: 'PAPER', broker: 'dhan', targetKey: 'F', day: '2026-11-05', t: 1, watermarkT: 1, lots: 1 };
+  const p = (pyramid: unknown) => parseLedger({ rev: 1, rows: [], log: [], arms: { 1: { ...arm, pyramid } } }).arms?.['1']?.pyramid;
+  assert.deepEqual(p({ max: 5, every: 3 }), { max: 5, every: 3 });
+  assert.deepEqual(p({ max: 5, every: 1 }), { max: 5 });
+  assert.deepEqual(p({ max: 5, every: 99 }), { max: 5 });
+  assert.deepEqual(p({ max: 5 }), { max: 5 });
+});

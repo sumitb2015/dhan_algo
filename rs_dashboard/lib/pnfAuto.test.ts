@@ -176,7 +176,7 @@ test('side filter: a buy-only chart never enters the sell signal on the last bar
 });
 
 // ── pyramid (decideAdd) ──
-import { decideAdd } from './pnfAuto.ts';
+import { decideAdd, pyramidEveryOf, PYRAMID_EVERY_MAX } from './pnfAuto.ts';
 
 /** A Renko short entered on the 10:00 brick (close 100); bricks of box 1 after it: [time, dir, close]. */
 function renkoModel(bricks: [number, 'X' | 'O', number][], lastBarT: number): AutoModel {
@@ -232,6 +232,27 @@ test('pyramid: without an entry brick the starting level is the FIRST tranche pr
   // with no bricks before the newest bar, a 99.5 brick beats the base 100 but not the 99 average: it adds (base is the reference)
   const first = renkoModel([[ist(10, 4), 'O', 99.5]], ist(10, 4));
   assert.equal(decideAdd({ model: first, row: { ...row, adds: [] }, nowS: ist(10, 5), market: 'NSE', maxLots: 10 }).add, true);
+});
+
+test('pyramid every N bricks: the first add waits N bricks past the entry brick, the next N bricks past the last add', () => {
+  // a short entered on the 100 brick, every 2 bricks
+  const one = renkoModel([[ist(10, 5), 'O', 99]], ist(10, 5));
+  assert.deepEqual(decideAdd({ model: one, row: shortRow({ pyramidEvery: 2 }), nowS: ist(10, 6), market: 'NSE', maxLots: 10 }),
+    { add: false, why: 'waiting for 2 bricks past the last add' });
+  const two = renkoModel([[ist(10, 5), 'O', 99], [ist(10, 6), 'O', 98]], ist(10, 6));
+  assert.deepEqual(decideAdd({ model: two, row: shortRow({ pyramidEvery: 2 }), nowS: ist(10, 7), market: 'NSE', maxLots: 10 }), { add: true, barT: ist(10, 6), box: 98 });
+  // added at 98: 97 is one brick past it (no add), 96 is two (adds)
+  const added = shortRow({ pyramidEvery: 2, adds: [{ barT: ist(10, 6), box: 98 }] });
+  const three = renkoModel([[ist(10, 5), 'O', 99], [ist(10, 6), 'O', 98], [ist(10, 7), 'O', 97]], ist(10, 7));
+  assert.equal(decideAdd({ model: three, row: added, nowS: ist(10, 8), market: 'NSE', maxLots: 10 }).add, false);
+  const four = renkoModel([[ist(10, 5), 'O', 99], [ist(10, 6), 'O', 98], [ist(10, 7), 'O', 97], [ist(10, 8), 'O', 96]], ist(10, 8));
+  assert.deepEqual(decideAdd({ model: four, row: added, nowS: ist(10, 9), market: 'NSE', maxLots: 10 }), { add: true, barT: ist(10, 8), box: 96 });
+  // one bar printing both bricks counts: a long, every 3, one bar jumps 3 bricks past the entry
+  const jump = renkoModel([[ist(10, 5), 'X', 102], [ist(10, 5), 'X', 103], [ist(10, 5), 'X', 104]], ist(10, 5));
+  assert.equal(decideAdd({ model: jump, row: shortRow({ side: 'BUY', entryBox: 101, entryPrice: 101, pyramidEvery: 3 }), nowS: ist(10, 6), market: 'NSE', maxLots: 10 }).add, true);
+  // N = 1 (or absent / invalid) is the every-new-best-brick rule
+  assert.equal(decideAdd({ model: one, row: shortRow({ pyramidEvery: 1 }), nowS: ist(10, 6), market: 'NSE', maxLots: 10 }).add, true);
+  assert.equal(pyramidEveryOf(0), 1); assert.equal(pyramidEveryOf(2.5), 1); assert.equal(pyramidEveryOf(3), 3); assert.equal(pyramidEveryOf(PYRAMID_EVERY_MAX + 1), 1);
 });
 
 test('NRML (MARGIN) squares off NSE at 15:35 (entries stop 15:25), pulled inside an earlier close; MIS keeps 15:15; MCX is the same for both', () => {
