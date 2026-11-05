@@ -66,6 +66,8 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   const slotsRef = useRef(slots);
   useEffect(() => { slotsRef.current = slots; });
   const scopeRef = useRef(scope);
+  /** When this page last changed a chart's guard (switched it, edited it, a trip settled it off): a server poll older than that is not pulled. */
+  const localAt = useRef<Record<number, number>>({});
   const onEventRef = useRef(onEvent);
   const syncServerRef = useRef(syncServer);
   const tradeKeyRef = useRef(tradeKey);
@@ -96,6 +98,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   const post = (chart: GuardChart) => async (body: Record<string, unknown>): Promise<boolean> => {
     const on = body.on === true;
     const old = slots[chart.chart]?.guard;
+    localAt.current[chart.chart] = Date.now();
     if (!on) {
       const g = old ?? readLevels(storeKey, chart.chart);
       setSlots(s => ({ ...s, [chart.chart]: { guard: { ...g, on: false, tripped: undefined, peak: undefined, floor: undefined }, base: null } }));
@@ -130,7 +133,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     const cur = slotsRef.current[chart]?.guard;
     if (!cur?.tripped || cur.firedAt !== at || settledTrip.current[chart] === at) return;
     settledTrip.current[chart] = at!;
-    if (!keepOn) syncServerRef.current(chart as 1 | 2, null);
+    if (!keepOn) { localAt.current[chart] = Date.now(); syncServerRef.current(chart as 1 | 2, null); }
     setSlots(s => {
       const g = s[chart]?.guard;
       if (!g || g.firedAt !== at) return s;
@@ -224,11 +227,32 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     return () => clearInterval(id);
   }, []);
 
-  /** A guard the server still holds from before a reload / a closed tab: switch it on here with its levels (the guard stays ON until the user stops it). */
+  /**
+   * The server holds this chart's guard (from before a reload, another tab, or this page in another mode): switch it on here with the
+   * server's levels, or take its levels when the card is already on (its runtime - peak, floor, a trip in progress, the baseline - is kept).
+   */
   const adopt = (chart: 1 | 2, levels: LadderGuard) => {
-    setSlots(s => (s[chart]?.guard.on ? s : { ...s, [chart]: { guard: { ...levels, on: true, tripped: undefined, peak: undefined, floor: undefined }, base: null } }));
+    setSlots(s => {
+      const cur = s[chart];
+      const clean = Object.fromEntries(FIELDS.filter(f => levels[f] != null).map(f => [f, levels[f]])) as Partial<LadderGuard>;
+      if (cur?.guard.on) {
+        const kept = Object.fromEntries(Object.entries(cur.guard).filter(([k]) => !(FIELDS as readonly string[]).includes(k)));
+        return { ...s, [chart]: { guard: { ...kept, ...clean, on: true } as LadderGuard, base: cur.base } };
+      }
+      return { ...s, [chart]: { guard: { ...clean, on: true }, base: null } };
+    });
     saveLevels(storeKey, chart, levels);
   };
+  /** The server copy this page had seen was removed elsewhere (another tab switched it off): switch the card off here too, without a sync. */
+  const release = (chart: 1 | 2) => {
+    setSlots(s => {
+      const cur = s[chart];
+      if (!cur?.guard.on) return s;
+      if (cur.guard.tripped) return s;                     // an exit in progress finishes first; its settle switches it off
+      return { ...s, [chart]: { guard: { ...cur.guard, on: false, peak: undefined, floor: undefined }, base: null } };
+    });
+  };
+  const localChangedAt = (chart: 1 | 2) => localAt.current[chart] ?? 0;
 
-  return { guardOf: levelsOf, mtmOf, post, adopt };
+  return { guardOf: levelsOf, mtmOf, post, adopt, release, localChangedAt };
 }

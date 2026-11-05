@@ -38,7 +38,7 @@ function BoxesBox({ label, value, onCommit, disabled, boxPts }: { label: string;
   );
 }
 
-export default function PnfOrderStyle({ value, onChange, guard, guardOn, boxPts }: {
+export default function PnfOrderStyle({ value, onChange, guard, guardOn, boxPts, serverGuards }: {
   value: StyleState;
   /** The active chart's box size in price points (shown next to each box count as its point equivalent). */
   boxPts?: number;
@@ -46,6 +46,11 @@ export default function PnfOrderStyle({ value, onChange, guard, guardOn, boxPts 
   /** The active chart's MTM guard card inputs; absent when the chart cannot be traded (index). */
   guard?: { broker: string; real: boolean; chart: 1 | 2; chartLabel: string; mtm: number | null; rupeesPerBox?: number | null; guard?: LadderGuard; post: (body: Record<string, unknown>) => Promise<boolean> };
   guardOn: boolean;
+  /**
+   * Every MTM guard the dashboard SERVER holds for this page (it exits open REAL AUTO positions by them, tab open or not), any broker /
+   * mode: always shown, so a guard is never enforced unseen. `mine`: for the page's own broker and mode (the card shows it too).
+   */
+  serverGuards?: { chart: 1 | 2; mine: boolean; text: string }[];
 }) {
   const [open, setOpen] = useState(false);
   const seg = (s: OrderStyle) => (
@@ -77,6 +82,19 @@ export default function PnfOrderStyle({ value, onChange, guard, guardOn, boxPts 
             <ShieldCheck className="w-3.5 h-3.5" aria-hidden="true" />
             MTM Guard {guardOn ? 'ON' : 'OFF'}
           </button>
+          {serverGuards && (
+            <span data-testid="pnf-server-guards" className="ml-1.5 inline-flex items-center gap-1 align-middle"
+                  title="MTM guards held by the dashboard SERVER: it squares off open REAL AUTO positions by them even with this tab closed. One for another broker or mode (amber) is not shown on the card until the page is switched to it.">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Server</span>
+              {serverGuards.length === 0
+                ? <span className="px-1.5 h-5 inline-flex items-center rounded border border-zinc-700 text-[10px] font-bold text-zinc-400">OFF</span>
+                : serverGuards.map(g => (
+                  <span key={g.chart} className={`px-1.5 h-5 inline-flex items-center rounded border text-[10px] font-mono font-bold ${g.mine ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300' : 'border-amber-500/50 bg-amber-500/15 text-amber-300'}`}>
+                    {g.text}
+                  </span>
+                ))}
+            </span>
+          )}
           {open && (
             <div data-testid="pnf-guard-card" className="absolute right-0 top-full mt-1 z-50 w-72 rounded-lg bg-zinc-900 border border-zinc-700 shadow-xl">
               <MtmGuardCard

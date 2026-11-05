@@ -202,8 +202,12 @@ The tab does all the trading. If it closes, sleeps or loses its network, **nothi
 sit without a stop. To cover that, the dashboard server runs an **exit-only watcher** (`lib/autoServerWatcher.ts`, started with the server):
 
 - The page syncs each chart's guard to the server every time you switch it on, update it or switch it off (`debug/auto_server_guards.json`).
-  After a reload the page adopts a guard the server still holds, so the card shows what is enforced. A server guard held for another broker /
-  mode than the page opened in (a page opens in PAPER) is announced with a **Switch it off** button, never left enforcing unseen.
+  The page re-reads the server every 3 s and always lists what it holds beside the MTM Guard button (**Server**: `OFF`, or one chip per
+  chart with its levels; amber = held for another broker / mode than the page's). For the page's own broker and mode the card follows the
+  server: a server guard switches the card ON with its levels, and one switched off elsewhere (another tab) switches it OFF here. A guard for
+  another broker / mode is shown on the card once you switch the page to it, and is also announced with a **Switch it off** button while a
+  REAL AUTO position is open on that chart. (Before 2026-11-05 the page read the server once per load, which loads in PAPER, so a REAL
+  guard could exit trades while the card said OFF.)
 - It guards only **REAL, open** rows of the synced broker and mode, from the row's entry price (or from the row's P&L when you switched the
   guard on late), using the same bridge prices as the page. Every leg must have ticked within 10 minutes, otherwise it pauses on that row and
   logs it. A row from an earlier day is reported, never exited.

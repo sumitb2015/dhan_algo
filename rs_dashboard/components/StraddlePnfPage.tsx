@@ -55,6 +55,7 @@ import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent, type AutoPy
 import { autoDaySummary, autoMarkers, holdsPosition, PYRAMID_HARD_MAX, rowPnl } from '@/lib/pnfAutoLedger';
 import AutoControls, { type AutoRule } from './straddlePnf/AutoControls';
 import { AUTO_PRODUCT_LABEL, autoProductOf, autoWindow, rowMarket, type AutoProduct } from '@/lib/pnfAuto';
+import { guardLevelsText, syncGuardFromServer, type ServerGuardView } from '@/lib/pnfServerGuardView';
 import { usePnfPositions } from './straddlePnf/usePnfPositions';
 import { usePnfGuard } from './straddlePnf/usePnfGuard';
 import PnfOrderStyle, { DEFAULT_STYLE, type StyleState } from './straddlePnf/PnfOrderStyle';
@@ -779,40 +780,59 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // the server kept exiting REAL AUTO trades by it (2026-11-05).
   const adoptSeqRef = useRef(0);
   const adoptWarnedRef = useRef<Set<string>>(new Set());
+  const guardsRef = useRef(guards);
+  useEffect(() => { guardsRef.current = guards; });
+  /** Every guard the server holds for this page, any broker / mode: always listed beside the MTM Guard button. */
+  const [serverGuards, setServerGuards] = useState<{ chart: 1 | 2; view: ServerGuardView }[]>([]);
   useEffect(() => {
     const seq = ++adoptSeqRef.current;
-    void (async () => {
+    // Which charts had a server copy for THIS broker + mode on the previous poll (a copy that disappears switches the card off).
+    const wasOn: Record<1 | 2, boolean> = { 1: false, 2: false };
+    let dead = false;
+    const poll = async () => {
       try {
-        const j = await (await fetch(`/api/straddle-pnf/server-guard?scope=${scope}`)).json() as { guards?: Record<string, { broker: string; mode: 'PAPER' | 'REAL'; levels: LadderGuard }> };
-        if (seq !== adoptSeqRef.current) return;                     // the broker / mode changed again meanwhile: that newer check decides
+        const j = await (await fetch(`/api/straddle-pnf/server-guard?scope=${scope}`)).json() as { guards?: Record<string, ServerGuardView> };
+        if (dead || seq !== adoptSeqRef.current) return;             // the broker / mode changed meanwhile: that newer poll decides
+        const byChart: Partial<Record<1 | 2, ServerGuardView>> = {};
         for (const [k, cfg] of Object.entries(j.guards ?? {})) {
           const chartN = Number(k.split(':')[1]);
-          if (chartN !== 1 && chartN !== 2) continue;
-          if (cfg.broker === broker && cfg.mode === tradeMode) guards.adopt(chartN, cfg.levels);
-          else {
-            const warnKey = `${chartN}:${cfg.broker}:${cfg.mode}`;
-            if (adoptWarnedRef.current.has(warnKey)) continue;
-            // Held for another broker / mode than this page opened in (a page always opens in PAPER). It matters only while a REAL AUTO
-            // position is actually open on that chart: with none, the guard is just a saved setting for the next trade, not a live stop.
-            let liveRow = true;
-            try {
-              const l = await (await fetch(`/api/straddle-pnf/auto?scope=${scope}`)).json() as { ledger?: { rows?: { chart: number; mode: string; state: string }[] } };
-              liveRow = (l.ledger?.rows ?? []).some(r => r.chart === chartN && r.mode === 'REAL' && r.state !== 'closed');
-            } catch { /* unknown: warn */ }
-            if (!liveRow) continue;
-            adoptWarnedRef.current.add(warnKey);
-            // say so, never leave it enforcing unseen.
-            toast.warning(`The server is still guarding chart ${chartN}'s open ${cfg.mode} position on ${cfg.broker} (MTM guard with the tab closed). Switch the page to ${cfg.broker} ${cfg.mode} to see and edit it.`, {
-              // Dismissable (X) and self-closing: the server keeps guarding either way, the toast only says so.
-              duration: 30_000, closeButton: true,
-              action: { label: 'Switch it off', onClick: () => { void fetch(`/api/straddle-pnf/server-guard?scope=${scope}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chart: chartN, on: false }) }); } },
-            });
-          }
+          if (chartN === 1 || chartN === 2) byChart[chartN] = { broker: cfg.broker, mode: cfg.mode, levels: cfg.levels ?? {} };
         }
-      } catch { /* none to adopt */ }
-    })();
-    // guards.adopt is a fresh function each render; the check is keyed on what the page trades as
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+        const list = ([1, 2] as const).filter(c => byChart[c]).map(c => ({ chart: c, view: byChart[c]! }));
+        setServerGuards(prev => (JSON.stringify(prev) === JSON.stringify(list) ? prev : list));
+        const g = guardsRef.current;
+        for (const c of [1, 2] as const) {
+          const server = byChart[c];
+          const d = syncGuardFromServer({
+            card: g.guardOf(c), server, broker, mode: tradeMode, wasOnServer: wasOn[c],
+            recentLocalChange: Date.now() - g.localChangedAt(c) < 6_000,
+          });
+          const mine = !!server && server.broker === broker && server.mode === tradeMode;
+          if (Date.now() - g.localChangedAt(c) >= 6_000) wasOn[c] = mine;
+          if (d.action === 'adopt') g.adopt(c, { on: true, ...d.levels });
+          if (d.action === 'release' && !g.guardOf(c).tripped) { g.release(c); toast.info(`MTM guard on chart ${c} was switched off on the server (another tab): it is OFF here too.`, { duration: 10_000 }); }
+          if (!server || mine) continue;
+          const warnKey = `${c}:${server.broker}:${server.mode}`;
+          if (adoptWarnedRef.current.has(warnKey)) continue;
+          // Held for another broker / mode than the page's. It is always listed beside the MTM Guard button; it is also said out loud while a
+          // REAL AUTO position is actually open on that chart (then it is a live stop the card here does not show).
+          let liveRow = true;
+          try {
+            const l = await (await fetch(`/api/straddle-pnf/auto?scope=${scope}`)).json() as { ledger?: { rows?: { chart: number; mode: string; state: string }[] } };
+            liveRow = (l.ledger?.rows ?? []).some(r => r.chart === c && r.mode === 'REAL' && r.state !== 'closed');
+          } catch { /* unknown: warn */ }
+          if (!liveRow || dead) continue;
+          adoptWarnedRef.current.add(warnKey);
+          toast.warning(`The server is still guarding chart ${c}'s open ${server.mode} position on ${server.broker} (MTM guard with the tab closed). Switch the page to ${server.broker} ${server.mode} to see and edit it.`, {
+            duration: 30_000, closeButton: true,
+            action: { label: 'Switch it off', onClick: () => { void fetch(`/api/straddle-pnf/server-guard?scope=${scope}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chart: c, on: false }) }); } },
+          });
+        }
+      } catch { /* the next poll retries */ }
+    };
+    void poll();
+    const id = setInterval(() => { void poll(); }, 3_000);
+    return () => { dead = true; clearInterval(id); };
   }, [scope, broker, tradeMode]);
   const railFor = (c: ChartId) => {
     const rc = railCharts.find(x => x.chart === c);
@@ -1082,6 +1102,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     <PnfOrderStyle
       value={orderStyle} onChange={changeStyle} boxPts={activeChartModel.model.box}
       guardOn={[1, 2].some(n => guards.guardOf(n).on)}
+      serverGuards={serverGuards.map(({ chart: c, view }) => ({
+        chart: c, mine: view.broker === broker && view.mode === tradeMode,
+        text: `C${c}${view.broker === broker && view.mode === tradeMode ? '' : ` ${view.broker} ${view.mode}`} ${guardLevelsText(view.levels)}`,
+      }))}
       guard={(() => {
         const rc = railCharts.find(x => x.chart === active);
         if (!rc) return undefined;
