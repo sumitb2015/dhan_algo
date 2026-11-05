@@ -460,6 +460,9 @@ test('PAPER pyramid: +1L/brick adds one lot per bar on a new best brick, up to M
   const auto = page.getByTestId('pnf-auto-1');
   await auto.getByTestId('pnf-auto-pyr-1').click();
   const max = auto.getByTestId('pnf-auto-pyr-max-1');
+  await max.fill('7');
+  await max.press('Escape');                                            // Escape cancels the edit: Max stays at its default
+  await expect(max).toHaveValue('10');
   await max.fill('3');
   await max.press('Enter');
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();

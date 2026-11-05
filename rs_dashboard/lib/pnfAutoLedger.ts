@@ -12,6 +12,7 @@
 //   'added' | 'notAdded'). PAPER adds in one step (addPaper). `entryPrice` is the AVERAGE entry and lots / unitsPerPoint / legs the
 //   TOTALS, so every P&L reader (rowPnl) and every exit (sized by legs[].units) covers the whole position.
 import { parseTarget, targetKey, type Target } from './pnfTarget.ts';
+import { MAX_PNF_LOTS } from './pnfOrderLogic.ts';
 import type { Market } from './straddlePnfLive.ts';
 
 export type AutoMode = 'PAPER' | 'REAL';
@@ -94,6 +95,11 @@ export interface AutoRow {
   note?: string;
   /** When the REAL entry / exit was reserved (entering / exiting): a reservation much older than an order takes is stale. */
   pendingSince?: number;
+  /**
+   * Pyramid: an exit begun while an add was unresolved (`beginExit` with `withPendingAdd`, the server's stuck-add exit). The state the row
+   * goes back to on `abortExit`; `close` then settles the pending add from `pendingAdded`.
+   */
+  preExitState?: 'adding' | 'unknownAdd';
   /** Pyramid: the cap on total lots, saved at entry (absent = no adds for this row). */
   pyramidMax?: number;
   /** Pyramid: the first tranche, saved by the first add (entryPrice then becomes the average). */
@@ -138,6 +144,15 @@ const MAX_LOG = 200;
 /** A row still owning a position at the broker (or possibly owning one): it blocks a new entry on that chart. */
 export const isLive = (r: AutoRow) => r.state !== 'closed';
 
+/** An open position (a pyramid add on the wire or unresolved included): its confirmed units are held and it has a live P&L. */
+export const holdsPosition = (r: Pick<AutoRow, 'state'>) => r.state === 'open' || r.state === 'adding' || r.state === 'unknownAdd';
+
+/** The units per leg of the row's unresolved add (zero when none): reserved like the row's own units while the outcome is open. */
+export const pendingAddUnits = (r: Pick<AutoRow, 'adds' | 'legs'>): number[] => {
+  const p = (r.adds ?? []).find(a => a.status === 'pending');
+  return r.legs.map((_, k) => (p ? p.units[k] ?? 0 : 0));
+};
+
 export const rowPnl = (side: 'BUY' | 'SELL', entry: number, exit: number, unitsPerPoint: number) =>
   (side === 'BUY' ? exit - entry : entry - exit) * unitsPerPoint;
 
@@ -145,10 +160,15 @@ export type AutoOp =
   | { op: 'open'; row: Omit<AutoRow, 'state' | 'targetKey'> & { state?: 'open' | 'entering' } }
   | { op: 'confirmEntry'; id: string; legs: AutoLeg[]; orderIds?: string[] }
   | { op: 'voidEntry'; id: string; t: number; note: string }
-  | { op: 'beginExit'; id: string; t: number }
+  /**
+   * `withPendingAdd`: an exit of a row whose add is unresolved (adding / unknownAdd) - the confirmed units plus the pending add's, capped by
+   * what the broker shows (the server's exit for a stuck add, so the confirmed lots are never left without a guard or end-of-day exit).
+   */
+  | { op: 'beginExit'; id: string; t: number; withPendingAdd?: boolean }
   | { op: 'abortExit'; id: string; note: string }
   | { op: 'markUnknown'; id: string; note: string }
-  | { op: 'close'; id: string; exitT: number; exitPrice: number; reason: string; note?: string; exitBarT?: number; exitBox?: number; orderIds?: string[] }
+  /** `pendingAdded`: a row exited with a pending add - whether the exit found the added lot at the broker (it is then counted at its decision price). */
+  | { op: 'close'; id: string; exitT: number; exitPrice: number; reason: string; note?: string; exitBarT?: number; exitBox?: number; orderIds?: string[]; pendingAdded?: boolean }
   | { op: 'fillPrice'; id: string; which: 'entry' | 'exit' | 'add'; price: number; /** how many orders were summed: must be one per leg */ legCount: number; /** which === 'add' */ addId?: string }
   | { op: 'resolve'; id: string; as: 'open' | 'flat' | 'added' | 'notAdded'; exitPrice?: number; t: number }
   /** Pyramid: reserve a REAL add (open → adding) before its order is sent. */
@@ -185,7 +205,7 @@ function armOk(v: unknown): AutoArmRecord | null {
   const a = v as Partial<AutoArmRecord>;
   if (a.mode !== 'PAPER' && a.mode !== 'REAL') return null;
   if (typeof a.broker !== 'string' || !a.broker || typeof a.targetKey !== 'string' || !a.targetKey || typeof a.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(a.day)) return null;
-  if (!finite(a.t) || !finite(a.watermarkT) || !Number.isInteger(a.lots) || a.lots! < 1 || a.lots! > 20) return null;
+  if (!finite(a.t) || !finite(a.watermarkT) || !Number.isInteger(a.lots) || a.lots! < 1 || a.lots! > MAX_PNF_LOTS) return null;
   const str = (s: unknown) => (typeof s === 'string' && s.length > 0 && s.length <= 20 ? s : undefined);
   const rule = str(a.rule), side = str(a.side);
   const pm = a.pyramid && typeof a.pyramid === 'object' ? (a.pyramid as { max?: unknown }).max : undefined;
@@ -193,8 +213,8 @@ function armOk(v: unknown): AutoArmRecord | null {
   return { mode: a.mode, broker: a.broker, targetKey: a.targetKey, day: a.day, t: a.t!, watermarkT: a.watermarkT!, lots: a.lots!, ...(rule ? { rule } : {}), ...(side ? { side } : {}), ...(pyramid ? { pyramid } : {}) };
 }
 
-/** Hard cap on a pyramided position's total lots (the order route's own per-order cap is the same number). */
-export const PYRAMID_HARD_MAX = 20;
+/** Hard cap on an AUTO row's lots, pyramid adds included: the order route's own lot cap (one source for the ledger, the page and the UI). */
+export const PYRAMID_HARD_MAX = MAX_PNF_LOTS;
 
 /** A row's first tranche: saved on the row by its first add, read off the row before that. */
 export const baseOf = (r: AutoRow): NonNullable<AutoRow['base']> =>
@@ -241,7 +261,7 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       if (r.chart !== 1 && r.chart !== 2) return { ok: false, status: 400, error: 'chart must be 1 or 2' };
       if (r.side !== 'BUY' && r.side !== 'SELL') return { ok: false, status: 400, error: 'side must be BUY or SELL' };
       if (r.mode !== 'PAPER' && r.mode !== 'REAL') return { ok: false, status: 400, error: 'mode must be PAPER or REAL' };
-      if (!Number.isInteger(r.lots) || r.lots < 1 || r.lots > 20) return { ok: false, status: 400, error: 'lots must be 1-20' };
+      if (!Number.isInteger(r.lots) || r.lots < 1 || r.lots > MAX_PNF_LOTS) return { ok: false, status: 400, error: `lots must be 1-${MAX_PNF_LOTS}` };
       if (![r.entryT, r.entryBarT, r.entryPrice, r.unitsPerPoint].every(finite) || !r.id) return { ok: false, status: 400, error: 'Invalid row' };
       if (r.stop !== undefined && (!finite(r.stop) || (r.side === 'BUY' ? r.stop >= r.entryPrice : r.stop <= r.entryPrice))) return { ok: false, status: 400, error: 'stop must be beyond the entry, on the losing side' };
       if (r.exitBy !== undefined && r.exitBy !== 'supertrend') return { ok: false, status: 400, error: 'Invalid exitBy' };
@@ -263,7 +283,8 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       if (i < 0) return { ok: false, status: 404, error: 'No such row' };
       const r = led.rows[i];
       const need: Record<string, AutoRowState[]> = {
-        confirmEntry: ['entering'], voidEntry: ['entering'], beginExit: ['open'], abortExit: ['exiting'], markUnknown: ['entering', 'exiting', 'adding'],
+        confirmEntry: ['entering'], voidEntry: ['entering'], beginExit: op.op === 'beginExit' && op.withPendingAdd ? ['adding', 'unknownAdd'] : ['open'],
+        abortExit: ['exiting'], markUnknown: ['entering', 'exiting', 'adding'],
       };
       if (!need[op.op].includes(r.state)) return { ok: false, status: 409, error: `Row is ${r.state}` };
       const rows = [...led.rows];
@@ -271,8 +292,10 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
         if (!Array.isArray(op.legs) || !op.legs.length || !op.legs.every(l => Number.isInteger(l.units) && l.units > 0)) return { ok: false, status: 400, error: 'Invalid legs' };
         rows[i] = { ...r, state: 'open', legs: op.legs, ...(cleanIds(op.orderIds) ? { entryOrderIds: cleanIds(op.orderIds) } : {}) };
       } else if (op.op === 'voidEntry') rows[i] = { ...r, state: 'closed', exitT: op.t, exitPrice: r.entryPrice, reason: 'refused', pnl: 0, note: op.note };
-      else if (op.op === 'beginExit') rows[i] = { ...r, state: 'exiting', pendingSince: finite(op.t) ? op.t : r.entryT };
-      else if (op.op === 'abortExit') rows[i] = { ...r, state: 'open', note: op.note };
+      else if (op.op === 'beginExit') {
+        const pre = r.state === 'adding' || r.state === 'unknownAdd' ? r.state : undefined;
+        rows[i] = { ...r, state: 'exiting', pendingSince: finite(op.t) ? op.t : r.entryT, ...(pre ? { preExitState: pre } : {}) };
+      } else if (op.op === 'abortExit') rows[i] = { ...r, state: r.preExitState ?? 'open', preExitState: undefined, note: op.note };
       else rows[i] = { ...r, state: r.state === 'entering' ? 'unknownEntry' : r.state === 'adding' ? 'unknownAdd' : 'unknownExit', note: op.note };
       return bump(rows);
     }
@@ -323,8 +346,13 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       if (r.state !== (r.mode === 'REAL' ? 'exiting' : 'open')) return { ok: false, status: 409, error: `Row is ${r.state}` };
       if (!finite(op.exitPrice) || !finite(op.exitT)) return { ok: false, status: 400, error: 'Invalid exit' };
       const rows = [...led.rows];
+      // An exit begun with an unresolved add settles it: the added lot was found at the broker (counted) or it was not (dropped).
+      const pending = (r.adds ?? []).some(a => a.status === 'pending');
+      const settled = pending
+        ? { ...withTranches(r, baseOf(r), (r.adds ?? []).filter(a => a.status === 'done' || op.pendingAdded === true).map(a => (a.status === 'pending' ? { ...a, status: 'done' as const } : a))), preExitState: undefined }
+        : r;
       rows[i] = {
-        ...r, state: 'closed', exitT: op.exitT, exitPrice: op.exitPrice, reason: op.reason, pnl: rowPnl(r.side, r.entryPrice, op.exitPrice, r.unitsPerPoint),
+        ...settled, state: 'closed', exitT: op.exitT, exitPrice: op.exitPrice, reason: op.reason, pnl: rowPnl(r.side, settled.entryPrice, op.exitPrice, settled.unitsPerPoint),
         note: op.note ?? r.note, ...(finite(op.exitBarT) ? { exitBarT: op.exitBarT } : {}), ...(finite(op.exitBox) ? { exitBox: op.exitBox } : {}),
         ...(cleanIds(op.orderIds) ? { exitOrderIds: cleanIds(op.orderIds) } : {}),
       };
@@ -396,7 +424,7 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
         } else rows[i] = { ...next, state: 'open', note: `resolved by the user: add ${op.as === 'added' ? 'went through' : 'did not happen'}` };
         return bump(rows);
       }
-      if (op.as === 'open') rows[i] = { ...r, state: 'open', note: 'resolved by the user: open' };
+      if (op.as === 'open') rows[i] = { ...r, state: r.preExitState ?? 'open', preExitState: undefined, note: 'resolved by the user: open' };
       else {
         const px = finite(op.exitPrice) ? op.exitPrice! : r.entryPrice;
         const neverOpened = r.state === 'unknownEntry' || r.state === 'entering';
@@ -459,7 +487,7 @@ export function autoDaySummary(rows: AutoRow[], day: string, mode: AutoMode, pri
       const p = r.pnl ?? 0;
       s.realised += p; s.closed++;
       if (p > 0) s.wins++; else if (p < 0) s.losses++;
-    } else if (r.state === 'open' || r.state === 'adding' || r.state === 'unknownAdd') {
+    } else if (holdsPosition(r)) {
       s.open++;
       const px = priceOf(r.targetKey);
       if (px === null || !(px > 0)) s.unpriced++;

@@ -159,7 +159,7 @@ export type AddDecision = { add: true; barT: number; box: number } | { add: fals
 
 export function decideAdd({ model, row, nowS, market, maxLots }: {
   model: AutoModel;
-  row: { side: AutoSide; entryBarT: number; entryPrice: number; entryBox?: number; lots: number; adds?: { barT: number }[] };
+  row: { side: AutoSide; entryBarT: number; entryPrice: number; entryBox?: number; lots: number; adds?: { barT: number }[]; base?: { price: number } };
   nowS: number; market: Market; maxLots: number;
 }): AddDecision {
   if (model.chart !== 'renko') return { add: false, why: 'not a Renko chart' };
@@ -173,7 +173,8 @@ export function decideAdd({ model, row, nowS, market, maxLots }: {
   if (row.adds?.some(a => a.barT === last)) return { add: false, why: 'already added on this bar' };
   const want = row.side === 'SELL' ? 'O' : 'X';
   const better = (a: number, b: number) => (row.side === 'SELL' ? a < b : a > b);
-  let best = row.entryBox ?? row.entryPrice;
+  // the entry brick; without one, the FIRST tranche's price (entryPrice is the average once lots were added)
+  let best = row.entryBox ?? row.base?.price ?? row.entryPrice;
   let reach: number | null = null;                              // the furthest new-best close the newest bar printed
   for (let i = 0; i < model.columns.length; i++) {
     const start = model.columnTimes[i]?.start;

@@ -30,6 +30,8 @@ const LEDGER_POLL_MS = 3_000;
 const MAX_REJECTS = 3;
 /** A refused REAL exit is retried this often (the order route also holds a close cooldown). */
 const EXIT_RETRY_MS = 10_000;
+/** A pyramid add that failed before anything was sent is retried this many times on its bar. */
+const ADD_MAX_TRIES = 3;
 
 type Reply = { success?: boolean; error?: string; outcome?: string; legs?: LegResult[]; message?: string };
 type LegInfo = { label: string; lot: number; unitsPerLot: number | null; key: string | null; lotUnits: number | null };
@@ -113,8 +115,11 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
   const rejectsRef = useRef(0);
   const exitRetryAtRef = useRef(0);
   const watermarkRef = useRef(0);
-  /** The bar an add was last tried on: one try per bar, so a refused add is never resent on every tick. */
-  const addTriedRef = useRef<number | null>(null);
+  /**
+   * Adds tried on a bar. An order that went out (or a definite refusal) spends the bar; a failure before anything was sent (ledger
+   * unreachable, contract lookup pending) is retried on the next ticks, at most ADD_MAX_TRIES times, while the bar is the newest.
+   */
+  const addTriesRef = useRef<{ barT: number; n: number; spent: boolean } | null>(null);
   /** A signal whose entry failed before anything was sent (retried while fresh), so a miss is logged once. */
   const retryRef = useRef<{ id: string; side: 'BUY' | 'SELL'; why: string } | null>(null);
 
@@ -339,18 +344,27 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
    * waits for the user (never resent). `barT` is tried once: a refused add waits for the next new best brick.
    */
   const addLot = async (r: AutoRow, barT: number, box: number, livePx: number): Promise<void> => {
-    addTriedRef.current = barT;
+    const tries = addTriesRef.current?.barT === barT ? addTriesRef.current : { barT, n: 0, spent: false };
+    tries.n += 1;
+    addTriesRef.current = tries;
+    const spend = () => { tries.spent = true; };
     const id = `add-${Date.now()}`;
     const t = Date.now() / 1000;
     const total = r.lots + 1;
     if (r.mode === 'PAPER') {
       const res = await post({ op: 'addPaper', id: r.id, add: { id, t, barT, box, lots: 1, price: box } });
-      if (!res.ok) { setNote(`add refused: ${res.error}`); return; }
+      if (!res.ok) { setNote(`add refused: ${res.error}`); return; }      // nothing booked: retried while the bar is fresh
+      spend();
       onEvent({ chart, kind: 'entry', side: r.side, price: box, target: r.target, mode: r.mode, lots: 1, text: `AUTO C${chart} [PAPER] add 1L @ ${box.toFixed(2)} → ${total}L` });
       return;
     }
+    // The checks an entry makes before it sends: the contract lookup for THIS broker and contract, and REAL support for it.
+    const cur = info && info.key === infoKey ? info : null;
+    if (!cur || !cur.legs.length) { setNote('add waiting for the contract lookup'); return; }
+    if (cur.unsupported) { spend(); haltNow(cur.unsupported); return; }
     const reserved = await post({ op: 'beginAdd', id: r.id, add: { id, t, barT, box, lots: 1, price: livePx } });
     if (!reserved.ok) { setNote(`ledger refused the add: ${reserved.error}`); return; }
+    spend();                                                          // reserved: whatever happens next, this bar's add is never sent again
     const j = await sendOrder({ broker: r.broker, mode: 'REAL', target: r.target, action: r.side, lots: 1, product: 'INTRADAY' });
     if (!j || j.outcome === 'unknown' || j.outcome === 'partial') {
       await post({ op: 'markUnknown', id: r.id, note: `add: ${j?.message ?? 'no reply from the order route'}` });
@@ -394,9 +408,12 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
         const d = decideAuto({ model, position: { side: row.side, entryBarT: row.entryBarT, stop: row.stop, exitBy: row.exitBy }, watermarkT: watermarkRef.current, nowS, market: rowMarket(row), price });
         if (d.action !== 'exit') {
           // Pyramid: only while armed in the row's own mode, with adds still switched on, a fresh price and no halt.
-          if (arm.on && arm.mode === row.mode && pyramid?.on && row.pyramidMax && !haltRef.current && !stale && price !== null) {
+          // `complete`: the chart's history is fully loaded (a partial model would miss the best brick so far and add after a pullback).
+          // The row's broker must be the page's: the contract lookup and the order route are the page broker's.
+          if (arm.on && arm.mode === row.mode && pyramid?.on && row.pyramidMax && !haltRef.current && !stale && price !== null && complete && row.broker === broker) {
             const a = decideAdd({ model, row, nowS, market: rowMarket(row), maxLots: Math.min(row.pyramidMax, pyramid.max, PYRAMID_HARD_MAX) });
-            if (a.add && addTriedRef.current !== a.barT) {
+            const tried = a.add && addTriesRef.current?.barT === a.barT ? addTriesRef.current : null;
+            if (a.add && !(tried && (tried.spent || tried.n >= ADD_MAX_TRIES))) {
               busyRef.current = true;
               try { await addLot(row, a.barT, a.box, price); } finally { busyRef.current = false; }
               return;

@@ -27,3 +27,11 @@ test('exceptChart: chart N\'s MTM guard keeps only the OTHER chart\'s AUTO units
   assert.deepEqual(reservedByAuto(led, 'dhan', 'F', 1, 2), [-65]);
   assert.deepEqual(reservedByAuto(led, 'dhan', 'F', 1), [65], 'no exceptChart: every live row (the other page\'s ledger)');
 });
+
+test('a pyramid add whose outcome is open (adding / unknownAdd) reserves its units too: the lot may be live at the broker', () => {
+  const pending = { id: 'a1', t: 1, barT: 1, lots: 1, units: [65], unitsPerPoint: 65, price: 99, status: 'pending' as const };
+  const led: AutoLedger = { rev: 1, log: [], rows: [row({ state: 'unknownAdd', adds: [pending] }), row({ id: 'b', chart: 2, state: 'adding', adds: [pending] })] };
+  assert.deepEqual(reservedByAuto(led, 'dhan', 'F', 1), [-260]);
+  const done: AutoLedger = { rev: 1, log: [], rows: [row({ lots: 2, legs: [{ label: 'x', key: '1', units: 130 }], adds: [{ ...pending, status: 'done' }] })] };
+  assert.deepEqual(reservedByAuto(done, 'dhan', 'F', 1), [-130], 'a confirmed add is already in the legs: not counted twice');
+});

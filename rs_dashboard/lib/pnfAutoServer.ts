@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { applyAutoOp, isLive, parseLedger, type AutoLedger, type AutoOp } from './pnfAutoLedger.ts';
+import { applyAutoOp, isLive, parseLedger, pendingAddUnits, type AutoLedger, type AutoOp } from './pnfAutoLedger.ts';
 import { withFileLock, writeJsonAtomic } from './lockedJsonFile.ts';
 import type { PnfScope } from './pnfScope.ts';
 
@@ -25,7 +25,9 @@ export function reservedByAuto(ledger: AutoLedger, broker: string, targetKey: st
     if (!isLive(r) || r.mode !== 'REAL' || r.broker !== broker || r.targetKey !== targetKey) continue;
     if (exceptChart !== undefined && r.chart === exceptChart) continue;       // the guarding chart's own row: it is the one being closed
     const sign = r.side === 'BUY' ? 1 : -1;
-    r.legs.forEach((l, i) => { if (i < legs) out[i] += sign * (Number(l.units) || 0); });
+    // a pyramid add whose outcome is open may be live at the broker: its units are reserved too
+    const pend = pendingAddUnits(r);
+    r.legs.forEach((l, i) => { if (i < legs) out[i] += sign * ((Number(l.units) || 0) + (pend[i] || 0)); });
   }
   return out;
 }

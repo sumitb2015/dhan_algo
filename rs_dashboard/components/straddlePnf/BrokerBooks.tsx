@@ -7,7 +7,7 @@ import {
   daySummary, newestFirst, toOrderRow, toPositionRow, toTradeRow, type OrderRow, type OrderState, type PositionRow, type TradeRow,
 } from '@/lib/pnfBooks';
 import { targetLabel } from '@/lib/pnfTarget';
-import { autoDaySummary, rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
+import { autoDaySummary, holdsPosition, rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
 import type { PaperTradeRow } from '@/lib/pnfPaperBook';
 
 // Positions, order book, trade book and the day's P&L for the page header's broker, docked at the bottom of the page.
@@ -101,7 +101,7 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [],
   const autoReal = autoDaySummary(autoRows, day, 'REAL', autoPrice);
   const paperOpen = autoRows.filter(r => r.mode === 'PAPER' && r.state === 'open');
   const hasPaper = autoRows.some(r => r.mode === 'PAPER');
-  const mtm = (r: AutoRow) => { const px = autoPrice(r.targetKey); return r.state === 'open' && px !== null && px > 0 ? rowPnl(r.side, r.entryPrice, px, r.unitsPerPoint) : null; };
+  const mtm = (r: AutoRow) => { const px = autoPrice(r.targetKey); return holdsPosition(r) && px !== null && px > 0 ? rowPnl(r.side, r.entryPrice, px, r.unitsPerPoint) : null; };
   const autoPnl = autoPaper.total + autoReal.total;
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: 'positions', label: 'Positions', count: pos || paperOpen.length ? (pos ? summary.open : 0) + paperOpen.length : undefined },

@@ -98,3 +98,8 @@ test('a pyramid add at the market price leaves the guard\'s MTM unchanged (avera
   assert.ok(Math.abs(stepRow(r1, cfg(), 8990, {}).mtm - before) < 1e-6);
   assert.ok(Math.abs(stepRow(r1, cfg(), 8980, {}).mtm - 300) < 1e-6);         // 20 x 10 + 10 x 10
 });
+
+test('a row with a pyramid add on the wire or unresolved is still guarded (its confirmed lots are held)', () => {
+  assert.equal(guards(cfg(), row({ state: 'adding' })), true);
+  assert.equal(guards(cfg(), row({ state: 'unknownAdd' })), true);
+});

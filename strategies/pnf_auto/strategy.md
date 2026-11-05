@@ -122,4 +122,8 @@ Opt-in per chart on `/renko` (not P&F, not Replay). User guide: `docs/RENKO_AUTO
   `adding`) → `confirmAdd` (must match the reserved units exactly) | `voidAdd` | `markUnknown` (→ `unknownAdd`) → `resolve added|notAdded|flat`.
   PAPER: `addPaper`. `beginExit` needs `open`, so an exit waits for an add on the wire. `fillPrice which:'add'` re-prices one tranche, and the entry fill re-prices `base`.
 - Decision 2026-11-05 (user): new-best-brick only (no re-adding after a pullback), user-set Max, at most one lot per bar.
+- Review fixes (2026-11-05): the server's `exitRow` sizes from the row re-read after `beginExit` (never the tick snapshot); `reservedByAuto`
+  counts a pending add's units; a stuck add (> 60 s) is exited by the server with `beginExit withPendingAdd` (confirmed + pending units capped
+  by the broker, `close.pendingAdded` settles it; `abortExit` restores the add state), except when a sibling live REAL row holds the same
+  contract at that broker. Adds need `complete` history and the page broker, run the entry's contract checks, and retry a not-sent failure up to 3 times per bar.
 

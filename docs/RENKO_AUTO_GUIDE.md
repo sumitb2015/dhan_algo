@@ -99,8 +99,14 @@ Both are set before arming and locked while AUTO is armed. Saved per chart and o
 - PAPER books each add at its brick close. REAL reserves the add (`adding`), sends one lot in the position's direction on the broker the row was
   opened on, then confirms it. The broker's fill replaces the decision price for that lot once read. A refused add waits for the next
   new best brick. An add with an unclear outcome (no reply, a partial fill, or placed units that do not match) halts the chart and is **never resent**:
-  check the broker, then click **Add went through**, **Add did not happen** or **Is flat**. Until then the row cannot be exited by the
-  guard or the end-of-day watcher (the server logs a warning after 60 s).
+  check the broker, then click **Add went through**, **Add did not happen** or **Is flat**. While the add is unresolved, its lot's units
+  stay reserved (a close from the other chart or page cannot take them), and the page's own exits wait.
+- **A stuck add (unresolved for over a minute, e.g. the tab died after reserving it) does not leave the position unprotected.** The server
+  guard and end-of-day exit still close it: the confirmed lots plus the pending lot, capped by what the broker actually shows. The close
+  records whether the added lot was there. If another AUTO row holds the same contract on that broker, the cap cannot tell the two rows apart,
+  so the server only warns and the row waits for you.
+- Adds wait for the chart's history to finish loading, and run only when the row's broker is the page's broker. A failure before anything was sent
+  is retried up to 3 times on its bar. An add whose order went out is never retried.
 
 ## 5. Orders and brokers
 

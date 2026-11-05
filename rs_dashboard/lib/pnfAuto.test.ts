@@ -223,3 +223,13 @@ test('pyramid: one add per bar however many bricks it printed; never on an older
   // a P&F chart never adds
   assert.equal(decideAdd({ model: { ...renkoModel([[ist(10, 5), 'O', 99]], ist(10, 5)), chart: 'pnf' }, row: shortRow(), nowS: ist(10, 6), market: 'NSE', maxLots: 10 }).add, false);
 });
+
+test('pyramid: without an entry brick the starting level is the FIRST tranche price, not the average entry', () => {
+  // a short opened at 100 (no box), bricks since entry down to 97: a 98 brick on the newest bar is no new best
+  const m = renkoModel([[ist(10, 1), 'O', 97], [ist(10, 2), 'X', 99], [ist(10, 4), 'O', 98]], ist(10, 4));
+  const row = { side: 'SELL' as const, entryBarT: ist(10, 0), entryPrice: 99, lots: 2, base: { price: 100 }, adds: [{ barT: ist(10, 1) }] };
+  assert.equal(decideAdd({ model: m, row, nowS: ist(10, 5), market: 'NSE', maxLots: 10 }).add, false);
+  // with no bricks before the newest bar, a 99.5 brick beats the base 100 but not the 99 average: it adds (base is the reference)
+  const first = renkoModel([[ist(10, 4), 'O', 99.5]], ist(10, 4));
+  assert.equal(decideAdd({ model: first, row: { ...row, adds: [] }, nowS: ist(10, 5), market: 'NSE', maxLots: 10 }).add, true);
+});

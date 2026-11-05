@@ -52,7 +52,7 @@ import { detectTriangles, type PnfTriangle } from '@/lib/pnfTriangle';
 import { isSellSignal } from '@/lib/straddlePnf';
 import type { PnfScope } from '@/lib/pnfScope';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent, type AutoPyramid } from './straddlePnf/usePnfAuto';
-import { autoDaySummary, autoMarkers, rowPnl } from '@/lib/pnfAutoLedger';
+import { autoDaySummary, autoMarkers, PYRAMID_HARD_MAX, rowPnl } from '@/lib/pnfAutoLedger';
 import AutoControls, { type AutoRule } from './straddlePnf/AutoControls';
 import { usePnfPositions } from './straddlePnf/usePnfPositions';
 import { usePnfGuard } from './straddlePnf/usePnfGuard';
@@ -101,7 +101,7 @@ const parsePyramid = (raw: string | null): AutoPyramid => {
   try {
     const j = JSON.parse(raw ?? 'null') as Partial<AutoPyramid> | null;
     if (!j) return DEFAULT_PYRAMID;
-    return { on: j.on === true, max: Number.isInteger(j.max) && j.max! >= 1 && j.max! <= 20 ? j.max! : DEFAULT_PYRAMID.max };
+    return { on: j.on === true, max: Number.isInteger(j.max) && j.max! >= 1 && j.max! <= PYRAMID_HARD_MAX ? j.max! : DEFAULT_PYRAMID.max };
   } catch { return DEFAULT_PYRAMID; }
 };
 /** Per chart: '0' = the B / S trade markers are hidden. */

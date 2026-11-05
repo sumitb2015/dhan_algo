@@ -15,7 +15,7 @@ import { chartPrice, guards, ownHeldQty, runtimeKey, stepRow, type RowRuntime, t
 import { autoWindow, rowMarket } from '@/lib/pnfAuto';
 import { istMinuteOfDay, sessionWindow } from '@/lib/straddlePnfLive';
 import { istDateIso } from '@/lib/nseHolidays';
-import type { AutoOp } from '@/lib/pnfAutoLedger';
+import { pendingAddUnits, type AutoOp } from '@/lib/pnfAutoLedger';
 import type { AutoRow } from '@/lib/pnfAutoLedger';
 import type { PnfScope } from '@/lib/pnfScope';
 import type { WantedPair } from '@/lib/pnfWanted';
@@ -95,15 +95,23 @@ async function mustApply(scope: PnfScope, rowId: string, op: AutoOp): Promise<vo
   if (!r.ok) { pendingOps.set(rowId, { scope, op, tries: 0 }); console.error(`[auto-server-guard] could not record ${op.op} for ${rowId} (${r.error}); it is retried`); }
 }
 
-/** Exits the row's own units, like the order route's `exitOwn`. Never resends an unknown outcome. */
-async function exitRow(scope: PnfScope, row: AutoRow, reason: string, price: number): Promise<void> {
+/**
+ * Exits the row's own units, like the order route's `exitOwn`. Never resends an unknown outcome. `withPendingAdd`: the row has a stuck
+ * pyramid add (adding / unknownAdd, see tick): the exit covers the confirmed units plus the pending add's, capped by what the broker shows,
+ * and the close records whether the added lot was there.
+ */
+async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: number, withPendingAdd = false): Promise<void> {
+  let row = snap;
   const t = () => Date.now() / 1000;
   const log = (text: string) => applyAutoLedgerOp(scope, { op: 'log', chart: row.chart, t: t(), text });
   const att = attempts.get(row.id) ?? { n: 0, nextAt: 0 };
   if (Date.now() < att.nextAt) return;
   // Whoever takes beginExit first owns this exit: a page that got there first (or a refusal) means the server stands down.
-  const began = await applyAutoLedgerOp(scope, { op: 'beginExit', id: row.id, t: t() });
+  const began = await applyAutoLedgerOp(scope, { op: 'beginExit', id: row.id, t: t(), ...(withPendingAdd ? { withPendingAdd: true } : {}) });
   if (!began.ok) return;
+  // Sized from the row AS RESERVED, never the tick's snapshot: a pyramid add confirmed by a tab since the tick read the ledger changed its units
+  // (an exit sized off the snapshot would close the row and leave the added lot at the broker with no row).
+  const fresh = readAutoLedger(scope).rows.find(r => r.id === snap.id && r.state === 'exiting');
   const abort = async (why: string) => {
     await applyAutoLedgerOp(scope, { op: 'abortExit', id: row.id, note: why });
     const n = att.n + 1;
@@ -112,6 +120,9 @@ async function exitRow(scope: PnfScope, row: AutoRow, reason: string, price: num
       ? `exit failed ${n} times (${why}) - standing down for a minute; close the position by hand if it matters`
       : `exit not sent (${why}); retrying in ${EXIT_RETRY_MS / 1000} s`);
   };
+  if (!fresh) return void await abort('could not re-read the reserved row');
+  row = fresh;
+  const pend = withPendingAdd ? pendingAddUnits(row) : row.legs.map(() => 0);
   const broker = row.broker as PnfBroker;
   const busy = (g.__pnfOrderBusy ??= new Set());
   const closeGuard = (g.__pnfOrderGuard ??= new CloseGuard());
@@ -130,7 +141,9 @@ async function exitRow(scope: PnfScope, row: AutoRow, reason: string, price: num
     const rows = await brokerPositionRows(broker);
     if (!rows) return void await abort(`could not read the ${broker} positions`);
     const side = row.side === 'BUY' ? 'SELL' : 'BUY';
-    const plans = onBroker.map((l, i) => ({ leg: l, ...planOwnExit(l.key, rows, side, row.legs[i].units, broker) }));
+    const plans = onBroker.map((l, i) => ({ leg: l, ...planOwnExit(l.key, rows, side, row.legs[i].units + (pend[i] ?? 0), broker) }));
+    // the broker held more than the confirmed units: the stuck add's lot was there (planOwnExit caps by the broker's own quantity)
+    const pendingAdded = withPendingAdd ? plans.some((p, i) => p.qty > row.legs[i].units) : undefined;
     const results: LegResult[] = [];
     sent = plans.some(p => p.qty > 0);
     for (const p of plans) {
@@ -141,7 +154,8 @@ async function exitRow(scope: PnfScope, row: AutoRow, reason: string, price: num
     if (outcome === 'placed' || outcome === 'flat') {
       attempts.delete(row.id);
       await mustApply(scope, row.id, { op: 'close', id: row.id, exitT: t(), exitPrice: price, reason: `server guard: ${reason}`, note: outcome === 'flat' ? 'already flat at the broker' : undefined,
-        orderIds: results.filter(r => r.status === 'placed' && r.orderId).map(r => String(r.orderId)) });   // a tab replaces the decision price with the fill
+        orderIds: results.filter(r => r.status === 'placed' && r.orderId).map(r => String(r.orderId)), ...(pendingAdded !== undefined ? { pendingAdded } : {}) });   // a tab replaces the decision price with the fill
+      if (pendingAdded !== undefined) await log(`server: chart ${row.chart}'s unresolved added lot was ${pendingAdded ? 'found at the broker and exited with the position' : 'not at the broker (dropped)'}`);
       await log(`server guard exited chart ${row.chart}: ${reason} @ ~${price.toFixed(2)}`);
     } else if (outcome === 'unknown' || outcome === 'partial') {
       await mustApply(scope, row.id, { op: 'markUnknown', id: row.id, note: `server guard exit: ${describe(outcome, results)}` });
@@ -230,17 +244,24 @@ async function tick(): Promise<void> {
     const nowS = now / 1000;
     const minute = istMinuteOfDay(nowS);
     /** `cfg` set: the page's guard is synced for this row (stop-loss, target, ... enforced). Unset: the row only gets the end-of-day exit. */
-    const todo: { scope: PnfScope; row: AutoRow; cfg: ServerGuardCfg | undefined; win: { open: number; entryCutoff: number; eodExit: number } }[] = [];
+    const todo: { scope: PnfScope; row: AutoRow; cfg: ServerGuardCfg | undefined; win: { open: number; entryCutoff: number; eodExit: number }; stuckAdd: boolean }[] = [];
+    const allLive = SCOPES.flatMap(sc => readAutoLedger(sc).rows.filter(r => r.mode === 'REAL' && r.state !== 'closed'));
+    const hasSibling = (row: AutoRow) => allLive.some(r => r.id !== row.id && r.broker === row.broker && r.targetKey === row.targetKey);
     const liveRuntimeKeys = new Set<string>();
     for (const scope of SCOPES) {
       for (const row of readAutoLedger(scope).rows) {
         if (row.mode !== 'REAL' || row.state === 'closed') continue;
         liveRuntimeKeys.add(runtimeKey(scope, row.chart, row.id));
-        // A pyramid add stuck on the wire: the row cannot be exited (guard or end of day) until the user says whether the lot was added.
-        if ((row.state === 'adding' || row.state === 'unknownAdd') && nowS - (row.pendingSince ?? row.entryT) > 60) {
-          await warn(scope, row, `chart ${row.chart}'s added lot has an unclear outcome - no guard or end-of-day exit until it is resolved on the page (check the broker)`);
+        // A pyramid add stuck on the wire for a minute (the tab died after reserving it, or its outcome is unknown). Its confirmed lots must
+        // keep their guard and end-of-day exit: the server exits them with the pending lot, capped by what the broker shows. That cap can only
+        // be trusted when no other live REAL AUTO row holds the same contract at that broker (it would take that row's units).
+        const stuckAdd = (row.state === 'adding' || row.state === 'unknownAdd') && nowS - (row.pendingSince ?? row.entryT) > 60;
+        if (stuckAdd && hasSibling(row)) {
+          await warn(scope, row, `chart ${row.chart}'s added lot has an unclear outcome and another AUTO row holds the same contract - no guard or end-of-day exit until it is resolved on the page (check the broker)`);
+          continue;
         }
-        if (row.state !== 'open') continue;
+        if (stuckAdd) await warn(scope, row, `chart ${row.chart}'s added lot has an unclear outcome - resolve it on the page; the guard and end-of-day exit still cover the position`);
+        if (row.state !== 'open' && !stuckAdd) continue;
         const cfg = guards(file.cfg[keyOf(scope, row.chart)], row) ? file.cfg[keyOf(scope, row.chart)] : undefined;
         // A row from an earlier day is not priced against today's market: it is reported, never exited on a stale entry price.
         if (row.day !== today) { if (cfg) await warn(scope, row, `chart ${row.chart}'s open row is from ${row.day}, not today - not guarded; check the broker and resolve it`); continue; }
@@ -250,7 +271,7 @@ async function tick(): Promise<void> {
         if (minute >= sessionWindow(rowMarket(row), nowS)[1]) { await warn(scope, row, `chart ${row.chart}'s position is still open after the market closed - not exited; check the broker and resolve it`); continue; }
         // An unguarded row is only looked at once its end-of-day time is near (no price is asked for before that).
         if (!cfg && minute < win.eodExit - 2) continue;
-        todo.push({ scope, row, cfg, win });
+        todo.push({ scope, row, cfg, win, stuckAdd });
       }
     }
     // Runtime of rows that are over is dropped (the file would otherwise grow for ever).
@@ -269,12 +290,12 @@ async function tick(): Promise<void> {
     ensureBridge(now);
     const { book } = readBridgeBook(now);
     for (const { item, ids } of pairs) {
-      const { scope, row, cfg, win } = item;
+      const { scope, row, cfg, win, stuckAdd } = item;
       const price = chartPrice(ids, book, now);
       if (minute >= win.eodExit) {
         // The end of day comes first and needs no price: the position must be flat before the broker's own square-off. With no price the
         // exit is booked at the entry price (as the tab's own end-of-day exit does when it has none) and the ledger says so.
-        await exitRow(scope, row, price === null ? 'end of day (no live price)' : 'end of day', price ?? row.entryPrice);
+        await exitRow(scope, row, price === null ? 'end of day (no live price)' : 'end of day', price ?? row.entryPrice, stuckAdd);
         continue;
       }
       if (!cfg) continue;
@@ -290,7 +311,7 @@ async function tick(): Promise<void> {
       if (!step.reason) continue;
       // The guard may have been switched off while this tick was working: act on the config as it is NOW.
       if (!guards(readServerGuards().cfg[keyOf(scope, row.chart)], row)) continue;
-      await exitRow(scope, row, step.reason, price);
+      await exitRow(scope, row, step.reason, price, stuckAdd);
     }
   } catch (err) {
     console.error('[auto-server-guard] tick failed:', err);

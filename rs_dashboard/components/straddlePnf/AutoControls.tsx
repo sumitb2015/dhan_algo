@@ -2,13 +2,13 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Bot } from 'lucide-react';
-import { rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
+import { holdsPosition, PYRAMID_HARD_MAX, rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
 
 // One chart's AUTO switch, lots and status (engine: ./usePnfAuto.ts). The switch is saved in the AUTO ledger and resumed after a reload in
 // the same mode (lib/pnfAutoArm.ts; the page always loads in PAPER, so a REAL arm resumes once the page is switched to REAL); in REAL mode
 // arming takes a second, explicit click. Lots commit on blur / Enter (dhan-commit-on-blur) and are locked while AUTO is armed or holds a position.
 
-const MAX_LOTS = 20;
+const MAX_LOTS = PYRAMID_HARD_MAX;                     // the ledger's lot limit (one source for the lots box, Max and the ledger)
 const inr = (n: number) => `${n > 0 ? '+' : n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 
 export type { AutoRule } from '@/lib/pnfAutoRule';
@@ -57,6 +57,8 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
   const [confirmExit, setConfirmExit] = useState(false);
   const [draft, setDraft] = useState(String(lots));
   const focusedRef = useRef(false);
+  /** Escape cancels: the blur it triggers must not commit the typed text (onBlur runs synchronously inside blur()). */
+  const cancelBlurRef = useRef(false);
   const [maxDraft, setMaxDraft] = useState(String(pyramid?.max ?? 10));
   const maxFocusedRef = useRef(false);
   useEffect(() => {
@@ -114,7 +116,8 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
     onArm(true);
   };
 
-  const pnl = open && price !== null ? rowPnl(row.side, row.entryPrice, price, row.unitsPerPoint) : null;
+  // confirmed units' P&L: also while a pyramid add is on the wire or unresolved (the position is held all along)
+  const pnl = row && holdsPosition(row) && price !== null ? rowPnl(row.side, row.entryPrice, price, row.unitsPerPoint) : null;
   const unresolved = row && row.state !== 'open';
 
   return (
@@ -157,10 +160,10 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
         <input aria-label={`AUTO lots on chart ${chart}`} value={draft} disabled={locked}
                onFocus={() => { focusedRef.current = true; }}
                onChange={e => setDraft(e.target.value)}
-               onBlur={e => { focusedRef.current = false; commit(e.currentTarget.value); }}
+               onBlur={e => { focusedRef.current = false; if (cancelBlurRef.current) { cancelBlurRef.current = false; return; } commit(e.currentTarget.value); }}
                onKeyDown={e => {
                  if (e.key === 'Enter') { commit(e.currentTarget.value); e.currentTarget.blur(); }
-                 if (e.key === 'Escape') { setDraft(String(lots)); e.currentTarget.blur(); }
+                 if (e.key === 'Escape') { setDraft(String(lots)); cancelBlurRef.current = true; e.currentTarget.blur(); }
                }}
                className="w-7 h-6 text-center text-[11px] font-mono font-bold bg-transparent text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 rounded disabled:text-zinc-400" />
         <button type="button" aria-label={`More AUTO lots on chart ${chart}`} disabled={locked || lots >= MAX_LOTS} onClick={() => onLots(lots + 1)}
@@ -181,10 +184,10 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
               <input aria-label={`Maximum AUTO lots with adds on chart ${chart}`} data-testid={`pnf-auto-pyr-max-${chart}`} value={maxDraft} disabled={armed}
                      onFocus={() => { maxFocusedRef.current = true; }}
                      onChange={e => setMaxDraft(e.target.value)}
-                     onBlur={e => { maxFocusedRef.current = false; commitMax(e.currentTarget.value); }}
+                     onBlur={e => { maxFocusedRef.current = false; if (cancelBlurRef.current) { cancelBlurRef.current = false; return; } commitMax(e.currentTarget.value); }}
                      onKeyDown={e => {
                        if (e.key === 'Enter') { commitMax(e.currentTarget.value); e.currentTarget.blur(); }
-                       if (e.key === 'Escape') { setMaxDraft(String(pyramid.max)); e.currentTarget.blur(); }
+                       if (e.key === 'Escape') { setMaxDraft(String(pyramid.max)); cancelBlurRef.current = true; e.currentTarget.blur(); }
                      }}
                      className="w-7 h-6 text-center text-[11px] font-mono font-bold bg-transparent text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 rounded disabled:text-zinc-400" />
             </>
@@ -192,11 +195,12 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
         </span>
       )}
       <span data-testid={`pnf-auto-status-${chart}`} className="font-mono text-[11px] truncate min-w-0 max-w-[13rem]" title={halt ?? note}>
-        {unresolved ? (
-          (row.state === 'entering' || row.state === 'exiting' || row.state === 'adding') && !needsResolve(row, nowMs)
-            ? <span className="text-amber-400">{row.state === 'entering' ? 'ENTERING…' : row.state === 'adding' ? 'ADDING…' : 'EXITING…'}</span>
-            : <span className="text-red-400 font-bold">UNRESOLVED</span>
-        ) : open ? (
+        {unresolved ? (<>
+          {(row.state === 'entering' || row.state === 'exiting' || row.state === 'adding') && !needsResolve(row, nowMs)
+            ? <span className="text-amber-400">{row.state === 'entering' ? 'ENTERING…' : row.state === 'adding' ? `ADDING… ${row.lots}L` : 'EXITING…'}</span>
+            : <span className="text-red-400 font-bold">UNRESOLVED{row.state === 'adding' || row.state === 'unknownAdd' ? ` ADD · ${row.lots}L held` : ''}</span>}
+          {pnl !== null && <span className={`ml-1 font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{inr(pnl)}</span>}
+        </>) : open ? (
           <span className={row.side === 'SELL' ? 'text-red-400' : 'text-emerald-400'}>
             {row.side === 'SELL' ? 'SHORT' : 'LONG'} {row.lots}L{row.base && row.lots > row.base.lots ? <span className="text-zinc-400" title="Base lots + lots added on new best bricks"> ({row.base.lots}+{row.lots - row.base.lots})</span> : null} @ <span title={row.mode === 'REAL' && (!row.entryFilled || row.adds?.some(a => a.status === 'done' && !a.filled)) ? 'The price AUTO decided at: not yet replaced by the broker\'s fill' : undefined}>{row.mode === 'REAL' && (!row.entryFilled || row.adds?.some(a => a.status === 'done' && !a.filled)) ? '~' : ''}{row.entryPrice.toFixed(2)}</span>{row.base && row.lots > row.base.lots ? <span className="text-zinc-400"> avg</span> : null}
             {pnl !== null && <span className={`ml-1 font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{inr(pnl)}</span>}

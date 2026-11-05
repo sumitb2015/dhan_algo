@@ -273,3 +273,24 @@ test('pyramid REAL fills: an add fill and the entry fill each re-price their own
   assert.ok(Math.abs(l.rows[0].entryPrice - 99.5) < 1e-9);
   assert.ok(!applyAutoOp(l, { op: 'fillPrice', id: 'r1', which: 'add', addId: 'nope', price: 97, legCount: 1 }).ok);
 });
+
+test('pyramid stuck add: beginExit withPendingAdd (only from adding / unknownAdd), abort restores the add state, close settles the add', () => {
+  let l = run(EMPTY_LEDGER, { op: 'open', row: row({ mode: 'REAL', state: 'entering', pyramidMax: 5 }) });
+  l = run(l, { op: 'confirmEntry', id: 'r1', legs: [{ label: 'F', key: '111', units: 65 }] });
+  const adding = run(l, { op: 'beginAdd', id: 'r1', add: addOf('a1', 1020, 98) });
+  assert.ok(!applyAutoOp(adding, { op: 'beginExit', id: 'r1', t: 1 }).ok, 'a plain exit still waits');
+  assert.ok(!applyAutoOp(l, { op: 'beginExit', id: 'r1', t: 1, withPendingAdd: true }).ok, 'withPendingAdd needs an unresolved add');
+  const ex = run(adding, { op: 'beginExit', id: 'r1', t: 1, withPendingAdd: true });
+  assert.equal(ex.rows[0].state, 'exiting');
+  assert.equal(run(ex, { op: 'abortExit', id: 'r1', note: 'refused' }).rows[0].state, 'adding');
+  const found = run(ex, { op: 'close', id: 'r1', exitT: 2, exitPrice: 95, reason: 'server guard: stop', pendingAdded: true });
+  assert.equal(found.rows[0].lots, 2);
+  assert.ok(Math.abs(found.rows[0].pnl! - ((100 - 95) * 65 + (98 - 95) * 65)) < 1e-6);
+  const gone = run(ex, { op: 'close', id: 'r1', exitT: 2, exitPrice: 95, reason: 'server guard: stop', pendingAdded: false });
+  assert.equal(gone.rows[0].lots, 1);
+  assert.equal(gone.rows[0].adds?.length, 0);
+  assert.equal(gone.rows[0].pnl, 325);
+  // an unknown exit resolved as still open goes back to the unresolved add, not to open
+  const unk = run(ex, { op: 'markUnknown', id: 'r1', note: 'timeout' });
+  assert.equal(run(unk, { op: 'resolve', id: 'r1', as: 'open', t: 3 }).rows[0].state, 'adding');
+});

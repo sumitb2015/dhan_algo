@@ -4,7 +4,7 @@
 // (its P&L is 0 at entry), so no baseline has to survive a restart. Pure (tested in lib/autoServerGuard.test.ts).
 import { evalGuard, type LadderGuard } from './priceLadderGuard.ts';
 import { effectiveGuard, noteBoxes } from './pnfGuardBoxes.ts';
-import { rowPnl, type AutoRow } from './pnfAutoLedger.ts';
+import { holdsPosition, rowPnl, type AutoRow } from './pnfAutoLedger.ts';
 import { planOwnExit, type BookRow, type PnfBroker } from './pnfOrderLogic.ts';
 
 /** The guard levels the page syncs to the server (the runtime fields - peak, floor, tripped - are the server's own). */
@@ -26,7 +26,7 @@ export interface RowRuntime { peak?: number; floor?: number; base?: number }
 
 /** Does this config guard this row? */
 export const guards = (cfg: ServerGuardCfg | undefined, row: Pick<AutoRow, 'broker' | 'mode' | 'state'>): cfg is ServerGuardCfg =>
-  !!cfg && cfg.on && row.state === 'open' && row.mode === 'REAL' && cfg.mode === 'REAL' && cfg.broker === row.broker;
+  !!cfg && cfg.on && holdsPosition(row) && row.mode === 'REAL' && cfg.mode === 'REAL' && cfg.broker === row.broker;
 
 /**
  * One reading. `price`: the chart's live price (a straddle: CE + PE). The MTM is measured like the page's guard: from the entry price
