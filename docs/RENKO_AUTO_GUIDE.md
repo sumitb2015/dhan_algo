@@ -74,9 +74,9 @@ chart under the trend rule are a flip: the first is the exit of the old position
   moment - a dashboard restart), it is retried every second while the signal is still the newest closed bar's; a signal that ages out that
   way is logged as `missed the … signal`.
 
-### Tick and 10 sec intervals (live-price bricks)
+### Tick and 10 / 20 / 30 sec intervals (live-price bricks)
 
-Pick **Tick** or **10 sec** in the Interval list (Renko only). Bricks then come from the live price itself, not from 1-minute closes:
+Pick **Tick**, **10 sec**, **20 sec** or **30 sec** in the Interval list (Renko only). Bricks then come from the live price itself, not from 1-minute closes:
 
 - **What it reads.** The price bridge (`scripts/tools/pnf_ws.py`) logs every price change it sees, sampled every 0.5 s, to
   `debug/pnf_ticks/<date>/<SEG>_<id>.jsonl`. The page reads that log every second. It is not every exchange trade: a spike that reverses
@@ -94,6 +94,7 @@ Pick **Tick** or **10 sec** in the Interval list (Renko only). Bricks then come 
 - **10 sec** groups the same recorded prices into 10-second bars (the bar's last price), and a brick prints when its 10 s are over
   (about 0.5-1.5 s after the boundary, once the log has been served past it). A spike that reverses inside the 10 s prints nothing, so it whipsaws less than Tick and still
   reacts far sooner than 1 min. Same log, same fallback to minute closes.
+- **20 sec** and **30 sec** work the same way with 20- and 30-second bars: fewer whipsaws than 10 sec, slower to react.
 - **Brick count after a reload.** On an index the 1-minute history is a rolling window whose start (`anchor_t`) moves with the clock, so
   a full rebuild can differ by a few bricks at the far start of the chart (2024). Recent bricks are identical (checked 2026-11-05:
   the last ~101k bricks and all of the day's matched); alerts and AUTO key on bar time, not brick number.

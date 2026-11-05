@@ -117,7 +117,7 @@ test('AUTO enters on a brick the moment a tick prints it, and exits on the first
 });
 
 test('10 sec is offered on Renko only, after Tick, and survives storage', () => {
-  assert.deepEqual(intervalsFor(false, true).slice(0, 3), [TICK_INTERVAL, SEC10_INTERVAL, 1]);
+  assert.deepEqual(intervalsFor(false, true).slice(0, 2), [TICK_INTERVAL, SEC10_INTERVAL]);
   assert.ok(!intervalsFor(true).includes(SEC10_INTERVAL));
   assert.equal(effectiveInterval(-10, false), 1);
   assert.equal(intervalLabel(-10), '10 sec');
@@ -125,6 +125,25 @@ test('10 sec is offered on Renko only, after Tick, and survives storage', () => 
   assert.equal(tickBucketSec(-10), 10);
   assert.equal(tickBucketSec(0), 0);
   assert.equal(readSettings(serializeSettings({ ...DEFAULT_RENKO_SETTINGS, interval: SEC10_INTERVAL }), DEFAULT_RENKO_SETTINGS).interval, -10);
+});
+
+test('20 sec and 30 sec: offered on Renko only after 10 sec, labelled, bucketed by their size, and survive storage', () => {
+  assert.deepEqual(intervalsFor(false, true).slice(0, 5), [TICK_INTERVAL, -10, -20, -30, 1]);
+  assert.deepEqual(intervalsFor(true, true).slice(0, 5), [TICK_INTERVAL, -10, -20, -30, 1]);
+  for (const n of [-20, -30]) {
+    assert.ok(!intervalsFor(false).includes(n as never) && !intervalsFor(true).includes(n as never));
+    assert.equal(effectiveInterval(n, false), 1, 'P&F falls back to 1 min');
+    assert.equal(effectiveInterval(n, false, true), n);
+    assert.equal(intervalLabel(n), `${-n} sec`);
+    assert.ok(isTickInterval(n));
+    assert.equal(tickBucketSec(n), -n);
+    assert.equal(readSettings(serializeSettings({ ...DEFAULT_RENKO_SETTINGS, interval: n as never }), DEFAULT_RENKO_SETTINGS).interval, n);
+  }
+  assert.equal(readSettings(serializeSettings({ ...DEFAULT_RENKO_SETTINGS, interval: -15 as never }), DEFAULT_RENKO_SETTINGS).interval, DEFAULT_RENKO_SETTINGS.interval, 'an unlisted size is not kept');
+  // 30 s buckets: three ticks in 0-29 s make one bar (last price, summed volume); the 30 s tick closes it
+  const t = (sec: number, px: number) => ({ t: sec, ce: px, pe: 0, straddle: px, vol: 1 });
+  const b = bucketTickBars(null, [t(1020, 1), t(1030, 2), t(1049, 3), t(1050, 4)], 30, 0);
+  assert.deepEqual(b.bars.map(x => [x.t, x.straddle, x.vol]), [[1020, 3, 3]]);
 });
 
 test('10 sec buckets: last price, summed volume, start-stamped; emitted once over, never rewritten', () => {

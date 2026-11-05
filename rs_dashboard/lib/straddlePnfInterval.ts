@@ -14,9 +14,13 @@ export const EQUITY_INTERVALS = [1, 3, 5, 15, 30, 60, 240, 1440, 10080, 43200] a
  * closed), so a brick prints the moment a box is crossed and alerts / AUTO act on it at once. Stored as interval 0.
  */
 export const TICK_INTERVAL = 0 as const;
-/** Renko only: "10 sec" — the same recorded prices grouped into 10-second bars, a brick printing when its 10 s are over. Stored as -10. */
+/**
+ * Renko only: "10 / 20 / 30 sec" — the same recorded prices grouped into N-second bars, a brick printing when its N seconds are over.
+ * Stored as -N.
+ */
 export const SEC10_INTERVAL = -10 as const;
-export type Interval = (typeof EQUITY_INTERVALS)[number] | typeof TICK_INTERVAL | typeof SEC10_INTERVAL;
+export const SEC_INTERVALS = [SEC10_INTERVAL, -20, -30] as const;
+export type Interval = (typeof EQUITY_INTERVALS)[number] | typeof TICK_INTERVAL | (typeof SEC_INTERVALS)[number];
 /** Built from the bridge's tick log (Tick or N seconds) rather than from 1-minute bars. */
 export const isTickInterval = (n: number) => n <= 0;
 /** The bucket size in seconds of a tick-built interval: 0 for Tick (one bar per recorded price). */
@@ -37,11 +41,11 @@ export function intervalLabel(n: number): string {
 /** The intervals an instrument offers, and the one actually used (a long interval chosen on a stock falls back to 1 min elsewhere). */
 export const intervalsFor = (equity: boolean, renko = false): readonly Interval[] => {
   const base: readonly Interval[] = equity ? EQUITY_INTERVALS : INTERVALS;
-  return renko ? [TICK_INTERVAL, SEC10_INTERVAL, ...base] : base;
+  return renko ? [TICK_INTERVAL, ...SEC_INTERVALS, ...base] : base;
 };
 /** Stocks and indices have the longer 30 min – 1 month intervals (their history is long enough: daily closes before the 1-min data). */
 export const hasLongIntervals = (kind: string) => kind === 'equity' || kind === 'index';
-/** Tick (0) and 10 sec (-10) only on a Renko chart; anything not offered falls back to 1 min. */
+/** Tick (0) and 10 / 20 / 30 sec (-10 / -20 / -30) only on a Renko chart; anything not offered falls back to 1 min. */
 export const effectiveInterval = (interval: number, equity: boolean, renko = false): Interval =>
   (intervalsFor(equity, renko) as readonly number[]).includes(interval) ? (interval as Interval) : 1;
 
