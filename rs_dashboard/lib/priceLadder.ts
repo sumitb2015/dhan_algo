@@ -168,7 +168,11 @@ export function parseSpotKey(k: string): { segment: string; securityId: string }
  * mode it is the older step rule (`trailPts` of SL per full `trailPts` of favourable move) — kept for brackets armed
  * before continuous trailing existed, so a live stop never changes rule under the user.
  */
-export interface LadderBracket { tgtPts: number; slPts: number; trailPts?: number; trailMode?: 'distance' }
+export interface LadderBracket {
+  tgtPts: number; slPts: number; trailPts?: number; trailMode?: 'distance';
+  /** A trailing stop on its own (Single style + trail, or a position-wide trail): switching the trail off removes it. */
+  trailOnly?: true;
+}
 
 export interface LadderSlice {
   id: string;
@@ -383,7 +387,8 @@ export function cleanBracket(raw: unknown): LadderBracket | null {
   const tgt = Number(r.tgtPts), sl = Number(r.slPts), trail = Number(r.trailPts ?? 0);
   if (!(tgt >= 0) || !(sl > 0) || !Number.isFinite(tgt) || !Number.isFinite(sl)) return null;
   if (!(trail >= 0) || !Number.isFinite(trail)) return null;
-  return trail > 0 ? { tgtPts: tgt, slPts: sl, trailPts: trail, trailMode: 'distance' } : { tgtPts: tgt, slPts: sl };
+  if (trail > 0) return { tgtPts: tgt, slPts: sl, trailPts: trail, trailMode: 'distance', ...(r.trailOnly === true && tgt === 0 ? { trailOnly: true as const } : {}) };
+  return { tgtPts: tgt, slPts: sl };
 }
 
 /** One tick of an armed XY entry: fires only on a real cross from the safe side (Focus Tool's latch, buffer 0). */
@@ -451,6 +456,78 @@ export function trailedBracket(br: LadderBracket, req: { abs: number | null; del
   const next0 = req.abs != null ? req.abs : Math.max(0, Number((cur + (req.delta ?? 0)).toFixed(2)));
   const trail = next0 > 0 ? Math.max(minPts, next0) : 0;
   return trail ? { ...br, trailPts: trail, trailMode: 'distance' } : { tgtPts: br.tgtPts, slPts: br.slPts };
+}
+
+/** An open slice drawn on the index axis, where an index-point bracket can run: an XY fill, or a Market-button fill
+ *  that recorded the axis price it was sent at. */
+export const onIndexAxis = (x: Pick<LadderSlice, 'kind' | 'market' | 'entryY'>): boolean =>
+  x.kind === 'xy' || (!!x.market && x.entryY != null);
+
+/** A bracket that is only a trailing stop: no target and a running trail. Older records (no `trailOnly` flag) count when
+ *  their SL distance is the trail distance, which is how Single + trail arms them. */
+export const isTrailOnly = (br: LadderBracket | undefined): boolean =>
+  !!br && br.tgtPts === 0 && (br.trailPts ?? 0) > 0 && (br.trailOnly === true || br.slPts === br.trailPts);
+
+/**
+ * The open slices that make up one position on the index axis: same broker, mode, contract, product, side and pane as
+ * `x`, open, with an axis price. Their trailing SL is one stop for the whole executed quantity.
+ */
+export function positionMates(slices: LadderSlice[], x: LadderSlice): LadderSlice[] {
+  return slices.filter(y => y.state === 'open' && onIndexAxis(y) && (Number(y.filledQty) || 0) > 0
+    && y.broker === x.broker && y.mode === x.mode && y.side === x.side && y.product === x.product
+    && y.contract.securityId === x.contract.securityId && y.contract.tradingSymbol === x.contract.tradingSymbol
+    && (y.pane === 2 ? 2 : 1) === (x.pane === 2 ? 2 : 1));
+}
+
+/**
+ * A trailing SL for a whole position (every open slice in `positionMates`), from the index level `spot` now.
+ * `trailPts` > 0: every slice gets the trail; slices with no bracket get a trailing stop on its own; the SL is ONE level
+ * for all of them — the tightest of their current SLs and `spot` - trail (switching on never loosens a stop).
+ * `trailPts` 0: the trail is switched off; a stop that was only a trail is removed, a bracket's fixed SL is kept.
+ * Returns the patches by slice id (empty when there is nothing to change).
+ */
+export function positionTrailPatches(mates: LadderSlice[], b: 1 | -1, spot: number, trailPts: number): Map<string, Partial<LadderSlice>> {
+  const out = new Map<string, Partial<LadderSlice>>();
+  if (!mates.length) return out;
+  if (trailPts > 0) {
+    if (!(spot > 0)) return out;
+    const tight = (a: number, c: number) => (b > 0 ? Math.max(a, c) : Math.min(a, c));
+    let slY = Number((spot - b * trailPts).toFixed(2));
+    for (const y of mates) if (y.bracket && y.slY != null) slY = tight(slY, y.slY);
+    for (const y of mates) {
+      const bracket: LadderBracket = y.bracket && !isTrailOnly(y.bracket)
+        ? { ...y.bracket, trailPts, trailMode: 'distance' }
+        : { tgtPts: 0, slPts: trailPts, trailPts, trailMode: 'distance', trailOnly: true };
+      out.set(y.id, { bracket, slY, slY0: slY, peakY: spot, trailFrom: spot, ...(bracket.tgtPts > 0 ? {} : { tgtY: undefined }) });
+    }
+    return out;
+  }
+  for (const y of mates) {
+    if (!y.bracket) continue;
+    if (isTrailOnly(y.bracket)) out.set(y.id, { bracket: undefined, tgtY: undefined, slY: undefined, slY0: undefined, peakY: undefined, trailFrom: undefined });
+    else if ((y.bracket.trailPts ?? 0) > 0) out.set(y.id, { bracket: { tgtPts: y.bracket.tgtPts, slPts: y.bracket.slPts } });
+  }
+  return out;
+}
+
+/**
+ * A slice that has just opened joins its position's trailing SL: when any slice of the position (`mates`, the new one
+ * included) trails, every slice with no bracket or with a trail-only stop takes the trail's levels — the tightest
+ * trailing SL among them — so one stop covers the whole executed quantity. Slices with their own target bracket keep it.
+ */
+export function joinTrailPatches(mates: LadderSlice[], b: 1 | -1): Map<string, Partial<LadderSlice>> {
+  const out = new Map<string, Partial<LadderSlice>>();
+  const trailing = mates.filter(y => (y.bracket?.trailPts ?? 0) > 0 && y.bracket?.trailMode === 'distance' && y.slY != null);
+  if (!trailing.length) return out;
+  const lead = trailing.reduce((a, c) => ((b > 0 ? c.slY! > a.slY! : c.slY! < a.slY!) ? c : a));
+  const trail = lead.bracket!.trailPts!;
+  const bracket: LadderBracket = { tgtPts: 0, slPts: trail, trailPts: trail, trailMode: 'distance', trailOnly: true };
+  for (const y of mates) {
+    if (y.bracket && !isTrailOnly(y.bracket)) continue;
+    if (y.slY === lead.slY && y.bracket?.trailPts === trail && y.peakY === lead.peakY) continue;
+    out.set(y.id, { bracket, tgtY: undefined, slY: lead.slY, slY0: lead.slY0 ?? lead.slY, peakY: lead.peakY, trailFrom: lead.trailFrom });
+  }
+  return out;
 }
 
 /**
@@ -878,7 +955,7 @@ export function planTick(
 
     if (x.state === 'open') {
       // 15:17 squares off intraday (MIS) only: NRML was chosen to be carried, and its bracket resumes at the next open.
-      const step = openExitStep(x, bias(x.contract.opt, x.side), x.kind === 'xy' && fresh ? spot : null, afterClose, at);
+      const step = openExitStep(x, bias(x.contract.opt, x.side), onIndexAxis(x) && fresh ? spot : null, afterClose, at);
       let reason = step.reason;
       const patch: Partial<LadderSlice> = step.patch;
       if (reason && x.exitRetryAt && now < x.exitRetryAt) reason = null;

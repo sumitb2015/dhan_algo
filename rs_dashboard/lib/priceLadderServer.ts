@@ -20,7 +20,7 @@ import { cachedZerodhaContract, slicesFor } from '@/lib/zerodhaContracts';
 import { pacedMarginCall } from '@/lib/ultimateScannerDhan';
 import {
   EXIT_RETRY_MS, FILL_GRACE_MS, SETTLE_TIMEOUT_MS, SPOT_STALE_MS, UNKNOWN_VERIFY_RETRY_MS, unknownEntryVerifyAt, unknownEntryVerdict,
-  bias, bracketLevels, emptyLadderState, exitQtyFor, netAgainstOpposite, isLive, outcomeOnThrow, istDay, pushEvent,
+  bias, bracketLevels, joinTrailPatches, positionMates, emptyLadderState, exitQtyFor, netAgainstOpposite, isLive, outcomeOnThrow, istDay, pushEvent,
   rollDay, settleOrder, spotFresh, planTick, patchSlice, ev, legTag, zerodhaLadderParams, spotKey, parseSpotKey, spotKeyUnderlying, isMcxUnderlying, MCX_LADDER_UNDERLYINGS, mcxUnitError,
   type Job, type LadderOrderHow, type LadderBroker, type LadderContract, type LadderSide, type LadderSlice, type LadderState,
 } from '@/lib/priceLadder';
@@ -1151,7 +1151,21 @@ export function openedPatch(s: LadderState, x: LadderSlice, qty: number, avg: nu
   }
   const label = x.mode === 'sim' ? 'SIM ' : '';
   const short = qty < x.qty ? ` (only ${qty} of ${x.qty})` : '';
-  return pushEvent(patchSlice(s, x.id, patch), ev('info', `${label}${x.side} ${legTag(x.contract)} filled ${qty}${short} @ ${avg ? avg.toFixed(2) : '?'}`, x.id));
+  const opened = pushEvent(patchSlice(s, x.id, patch), ev('info', `${label}${x.side} ${legTag(x.contract)} filled ${qty}${short} @ ${avg ? avg.toFixed(2) : '?'}`, x.id));
+  return joinPositionTrail(opened, x.id);
+}
+
+/** One trailing SL for the whole executed quantity: a fill joins its position's trail (or brings one to it). */
+function joinPositionTrail(s: LadderState, id: string): LadderState {
+  const x = s.slices.find(y => y.id === id);
+  if (!x || x.state !== 'open') return s;
+  const patches = joinTrailPatches(positionMates(s.slices, x), bias(x.contract.opt, x.side));
+  if (!patches.size) return s;
+  let next = s;
+  for (const [sid, p] of patches) next = patchSlice(next, sid, p);
+  const slY = [...patches.values()][0].slY;
+  const qty = positionMates(next.slices, x).filter(y => y.slY === slY).reduce((n, y) => n + (Number(y.filledQty) || 0), 0);
+  return pushEvent(next, ev('info', `Trailing SL now covers ${qty} ${legTag(x.contract)} (${patches.size} slice${patches.size === 1 ? '' : 's'} joined)`, id));
 }
 
 /** A manual exit stays wanted after a failed attempt (an automatic one re-fires from its own rule). */

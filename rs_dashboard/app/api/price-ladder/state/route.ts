@@ -12,7 +12,7 @@ import {
   paneOf, sessionFor, spotKey, MAX_LADDER_LOTS, cleanBufferPct, stopLimitPrice, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, capLots, classifyClick, cleanBracket, istDay, istHhmm, levelSane, pushEvent, realArmed,
   snapToStep, spotFresh, bias, TERMINAL, patchSlice, ev, newLadderId, parseTrailRequest, replanBracket, trailedBracket,
   type ClickType, type LadderZones, type LadderBroker, type LadderContract, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
-  isTradedStrike, legTag, FUT_TICK,
+  isTradedStrike, legTag, FUT_TICK, onIndexAxis, positionMates, positionTrailPatches,
 } from '@/lib/priceLadder';
 import { carryRuntime, cleanGuard, guardKey, guardLabel } from '@/lib/priceLadderGuard';
 import { setCutoffsFromBody } from '@/lib/priceLadderCutoff';
@@ -683,7 +683,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           if (!r.applied) return bad('Too late — it has just fired', 409);
           return NextResponse.json({ success: true, data: { state: r.state } });
         }
-        if (x.state === 'open' && x.kind === 'xy' && x.bracket) {
+        if (x.state === 'open' && onIndexAxis(x) && x.bracket) {
           // A widget can stand for several slices (a '+1 lot' joins its parent's levels): move them all together.
           const ids = Array.isArray(body.ids) && body.ids.length ? body.ids.map(String) : [id];
           const b = bias(x.contract.opt, x.side);
@@ -696,7 +696,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             let next = st;
             for (const sid of ids) {
               const y = next.slices.find(z => z.id === sid);
-              if (!y || y.state !== 'open' || y.kind !== 'xy' || !y.bracket || y.contract.securityId !== x.contract.securityId) continue;
+              if (!y || y.state !== 'open' || !onIndexAxis(y) || !y.bracket || y.contract.securityId !== x.contract.securityId) continue;
               const patch: Partial<LadderSlice> = {};
               if (body.tgtY != null) patch.tgtY = tgtY;
               // Only a moved SL restarts trailing (from the new SL, measured from here). A target-only move leaves the
@@ -739,9 +739,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           label = trail ? `Trailing SL ${trail} pts behind the best level` : 'Trailing off';
           // A '+1 lot' child shares its parent's target / SL: an open position's trail covers every open slice on those
           // same levels, so no lot is left on the old, wider stop.
-          const joined = (y: LadderSlice) => y.id === id || (x.state === 'open' && y.state === 'open' && !!y.bracket && y.kind === x.kind
-            && y.contract.securityId === x.contract.securityId && y.broker === x.broker && y.mode === x.mode && y.side === x.side
-            && y.slY === x.slY && y.tgtY === x.tgtY);
+          const mates = x.state === 'open' ? new Set(positionMates(st.slices, x).map(y => y.id)) : new Set<string>();
+          const joined = (y: LadderSlice) => y.id === id || (mates.has(y.id) && !!y.bracket && y.slY === x.slY && y.tgtY === x.tgtY);
           let next = st;
           for (const y of st.slices.filter(joined)) {
             const bracket = trailedBracket(y.bracket!, { abs: trail, delta: null }, 1);
@@ -752,6 +751,37 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         });
         if (!n) return bad('It is closed — trailing not changed', 409);
         return NextResponse.json({ success: true, data: { state: s } });
+      }
+
+      case 'positionTrail': {
+        // The panel's "Trail SL by" switch on an open position: ONE trailing SL for every open slice of that position (the
+        // whole executed quantity), or the trail switched off on all of them (a stop that was only a trail goes with it).
+        const trailPts = Number(body.trailPts);
+        if (!(trailPts >= 0) || !Number.isFinite(trailPts)) return bad('trailPts must be 0 or more');
+        const t = trailPts > 0 ? Math.max(1, trailPts) : 0;
+        const x0 = readLadderState().slices.find(y => y.id === id);
+        if (!x0 || x0.state !== 'open' || !onIndexAxis(x0)) return bad('That position is not open on the index ladder', 409);
+        let spotNow = 0;
+        if (t > 0) {
+          const sp = (await loadPrices([spotKey(x0.contract)], [])).spots[spotKey(x0.contract)];
+          if (!sp || !spotFresh(sp.at, Date.now())) return bad('No fresh price to start the trail from — try again in a moment');
+          spotNow = sp.spot;
+        }
+        let n = 0, qty = 0;
+        const s = await updateLadderState(st => {
+          const x = st.slices.find(y => y.id === id);
+          if (!x || x.state !== 'open') return st;
+          const mates = positionMates(st.slices, x);
+          const patches = positionTrailPatches(mates, bias(x.contract.opt, x.side), spotNow, t);
+          if (!patches.size) return st;
+          let next = st;
+          for (const [sid, p] of patches) { next = patchSlice(next, sid, p); n++; }
+          qty = mates.reduce((a, y) => a + (Number(y.filledQty) || 0), 0);
+          const slY = [...patches.values()][0].slY;
+          return pushEvent(next, ev('info', t > 0 ? `Trailing SL ${t} pts on the whole position (${qty} ${legTag(x.contract)}), SL ${slY}` : `Trailing SL off on the whole position (${qty} ${legTag(x.contract)})`, id));
+        });
+        if (!n) return NextResponse.json({ success: true, data: { state: s, changed: 0 } });
+        return NextResponse.json({ success: true, data: { state: s, changed: n, qty } });
       }
 
       case 'resolve': {

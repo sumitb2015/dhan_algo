@@ -27,7 +27,7 @@ import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { chimeFor } from '@/lib/priceLadderChime';
 import {
-  MAX_LADDER_LOTS, isTradedStrike, paneOf, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, atmStrikeOf, atmOffsetLabel, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick,
+  MAX_LADDER_LOTS, isTradedStrike, paneOf, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, atmStrikeOf, atmOffsetLabel, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick, onIndexAxis,
   type ClickType, type LadderZones, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
   type LadderContract,
 } from '@/lib/priceLadder';
@@ -1065,7 +1065,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       // Cover = SL only (tgtPts 0), as OptionX's Cover order; Bracket = target + SL.
       // Single + trail = a trailing stop on its own: SL only, starting at the trail distance.
       ...(mode === 'xy' && style !== 'Single' ? { bracket: { tgtPts: style === 'Cover' ? 0 : tgtPts, slPts, ...(trailOn ? { trailPts } : {}) } }
-        : mode === 'xy' && trailOn ? { bracket: { tgtPts: 0, slPts: trailPts, trailPts } } : {}),
+        : mode === 'xy' && trailOn ? { bracket: { tgtPts: 0, slPts: trailPts, trailPts, trailOnly: true } } : {}),
     }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${mode === 'xy' ? 'armed at' : 'placed at'} ${price}`); });
   }, [post, mode, broker, real, underlying, expiry, strike, opt, lots, product, orderType, zones, slBufferPct, style, tgtPts, slPts, trailOn, trailPts, second]);
 
@@ -1079,6 +1079,21 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     }).then(ok => { if (ok) toast.success(`${real ? 'REAL' : 'SIM'} ${side} ${lots} lot(s) ${underlying} ${tagOf(strike, opt)} sent at MARKET`); });
     if (real && !realAck) setConfirm({ text: what, run }); else run();
   }, [post, broker, real, realAck, underlying, expiry, strike, opt, lots, product, second]);
+
+  // The "Trail SL by" switch also acts on the position already open on this contract (this ladder, broker, SIM/REAL):
+  // ONE trailing SL for its whole executed quantity, or the trail off on all of it (a stop that was only a trail goes).
+  const openOnAxis = useMemo(() => mine.filter(s => s.state === 'open' && onIndexAxis(s) && (Number(s.filledQty) || 0) > 0
+    && (!dual || paneOf(s) === ladderId)), [mine, dual, ladderId]);
+  const applyPositionTrail = useCallback((on: boolean, pts: number) => {
+    if (mode !== 'xy' || !openOnAxis.length) return;
+    const heads = new Map<string, LadderSlice>();
+    for (const s of openOnAxis) { const k = `${s.side}|${s.product}`; if (!heads.has(k)) heads.set(k, s); }
+    for (const s of heads.values()) {
+      void post({ action: 'positionTrail', id: s.id, trailPts: on ? pts : 0 }).then(ok => {
+        if (ok) toast.success(on ? `Trailing SL ${pts} pts on the whole open ${s.side} position` : `Trailing SL off on the open ${s.side} position`);
+      });
+    }
+  }, [mode, openOnAxis, post]);
 
   // Pair mode Buy / Sell Market: both legs at market now, no level and no bracket (exit from the pair widget or the MTM guard).
   const sendPairMarket = useCallback((side: LadderSide) => {
@@ -1950,9 +1965,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                     {style !== 'Single' && <><span className="text-zinc-400 font-medium">SL pts</span><NumField compact label="Stop-loss points" value={slPts} onCommit={setSlPts} min={1} /></>}
                     {/* Every style: Single + trail = a trailing stop on its own (the SL starts at the trail distance). */}
                     <label className="flex items-center gap-1.5 text-zinc-400" title="Continuous trailing SL: the SL stays this many points behind the best level reached and moves with every new high / low — never back">
-                      <input type="checkbox" checked={trailOn} onChange={e => setTrailOn(e.target.checked)} /> Trail SL by
+                      <input type="checkbox" checked={trailOn} onChange={e => { setTrailOn(e.target.checked); applyPositionTrail(e.target.checked, trailPts); }} /> Trail SL by
                     </label>
-                    <NumField compact label="Trailing SL distance in points" value={trailPts} onCommit={setTrailPts} min={1} />
+                    <NumField compact label="Trailing SL distance in points" value={trailPts} onCommit={v => { setTrailPts(v); if (trailOn && v !== trailPts) applyPositionTrail(true, v); }} min={1} />
                   </div>
                 </>
               )}

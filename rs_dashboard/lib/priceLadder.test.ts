@@ -726,3 +726,51 @@ test('sliceNowPnl: a REAL resting entry part-filled counts its filled units; unf
   assert.equal(sliceNowPnl(part, undefined), null);                    // held but unpriced: the total is unknown
   assert.equal(sliceNowPnl(slice({ state: 'working', mode: 'real' }), 12), undefined);
 });
+
+test('position trail: one trailing SL covers every open slice of the position (2026-11-05)', async () => {
+  const { positionMates, positionTrailPatches, joinTrailPatches, isTrailOnly, onIndexAxis } = await import('./priceLadder.ts');
+  const c = { securityId: '9', tradingSymbol: 'CRUDEOILM19NOVFUT', strike: 0, opt: 'FUT', underlying: 'CRUDEOILM', lotSize: 1 };
+  const mk = (id: string, extra: object = {}) => ({
+    id, side: 'SELL', mode: 'real', broker: 'kotak', product: 'MIS', state: 'open', filledQty: 10, openedAt: 1, contract: c, kind: 'xy', entryY: 8525, ...extra,
+  }) as never as import('./priceLadder.ts').LadderSlice;
+  // The screenshot: an XY short with a Single + trail stop, and a Market short added later with no stop at all.
+  const xy = mk('a', { bracket: { tgtPts: 0, slPts: 25, trailPts: 25, trailMode: 'distance' }, slY: 8550, slY0: 8550, peakY: 8525 });
+  const mkt = mk('b', { kind: 'plain', market: true, entryY: 8535, filledQty: 20 });
+  const other = mk('c', { side: 'BUY' });
+  const noAxis = mk('d', { kind: 'plain', market: true, entryY: undefined });
+  assert.equal(onIndexAxis(noAxis), false);
+  const mates = positionMates([xy, mkt, other, noAxis], xy);
+  assert.deepEqual(mates.map(y => y.id), ['a', 'b']);
+  assert.equal(isTrailOnly(xy.bracket), true);
+
+  // A fill joins the existing trail: the Market slice takes the same SL level (one widget, 30 bbl).
+  const join = joinTrailPatches(mates, -1);
+  assert.deepEqual([...join.keys()], ['b']);
+  assert.equal(join.get('b')!.slY, 8550);
+  assert.equal(join.get('b')!.bracket!.trailPts, 25);
+  // A slice with its own target bracket keeps it.
+  const own = mk('e', { bracket: { tgtPts: 40, slPts: 20 }, slY: 8545, tgtY: 8485 });
+  assert.equal(joinTrailPatches([xy, own], -1).size, 0);
+
+  // Switching the trail on for the whole position: one level, the tightest of current SLs and spot + trail (a short).
+  const on = positionTrailPatches([xy, mkt], -1, 8528, 30);
+  assert.equal(on.size, 2);
+  assert.equal(on.get('a')!.slY, 8550);                 // 8528 + 30 = 8558 is looser than the 8550 already held
+  assert.equal(on.get('b')!.slY, 8550);
+  assert.equal(on.get('b')!.bracket!.trailOnly, true);
+  assert.equal(positionTrailPatches([mkt], -1, 8528, 30).get('b')!.slY, 8558);
+  assert.equal(positionTrailPatches([mkt], -1, 0, 30).size, 0);   // no price, no change
+
+  // Switching it off: a trail-only stop goes away; a bracket keeps its fixed SL.
+  const off = positionTrailPatches([xy, mkt, { ...own, bracket: { tgtPts: 40, slPts: 20, trailPts: 10, trailMode: 'distance' } } as never], -1, 0, 0);
+  assert.equal(off.get('a')!.bracket, undefined);
+  assert.equal(off.get('a')!.slY, undefined);
+  assert.equal(off.has('b'), false);
+  assert.deepEqual(off.get('e')!.bracket, { tgtPts: 40, slPts: 20 });
+});
+
+test('planTick: a Market slice with a trailing SL on the index axis is stopped out', async () => {
+  const { openExitStep } = await import('./priceLadder.ts');
+  const x = { product: 'MIS', bracket: { tgtPts: 0, slPts: 25, trailPts: 25, trailMode: 'distance' }, entryY: 8535, slY: 8550, slY0: 8550, peakY: 8525 } as never;
+  assert.match(openExitStep(x, -1, 8551, false, '23:25').reason ?? '', /SL 8550/);
+});
