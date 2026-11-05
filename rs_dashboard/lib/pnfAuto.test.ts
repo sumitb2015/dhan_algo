@@ -174,3 +174,52 @@ test('side filter: a buy-only chart never enters the sell signal on the last bar
   const d = decideAuto({ model: withSide(m2, 'buy'), position: { side: 'SELL', entryBarT: ist(10, 30) }, watermarkT: 0, nowS: ist(10, 42), market: 'NSE' });
   assert.equal(d.action === 'exit' && d.reason, 'reversal');
 });
+
+// ── pyramid (decideAdd) ──
+import { decideAdd } from './pnfAuto.ts';
+
+/** A Renko short entered on the 10:00 brick (close 100); bricks of box 1 after it: [time, dir, close]. */
+function renkoModel(bricks: [number, 'X' | 'O', number][], lastBarT: number): AutoModel {
+  const cols: PnfColumn[] = [{ ...col('O'), low: 100, high: 101 }];
+  const times = [{ start: ist(10, 0), end: ist(10, 0) }];
+  for (const [t, dir, close] of bricks) {
+    cols.push({ ...col(dir), low: dir === 'O' ? close : close - 1, high: dir === 'O' ? close + 1 : close });
+    times.push({ start: t, end: t });
+  }
+  return { chart: 'renko', box: 1, columns: cols, columnTimes: times, signals: [], lastBarT };
+}
+const shortRow = (over: Record<string, unknown> = {}) => ({ side: 'SELL' as const, entryBarT: ist(10, 0), entryPrice: 100, entryBox: 100, lots: 2, ...over });
+
+test('pyramid: a short adds on a new lower brick on the newest bar; a long on a new higher one', () => {
+  const m = renkoModel([[ist(10, 5), 'O', 99]], ist(10, 5));
+  const d = decideAdd({ model: m, row: shortRow(), nowS: ist(10, 6), market: 'NSE', maxLots: 10 });
+  assert.deepEqual(d, { add: true, barT: ist(10, 5), box: 99 });
+  const up = renkoModel([[ist(10, 5), 'X', 102]], ist(10, 5));
+  const b = decideAdd({ model: up, row: shortRow({ side: 'BUY', entryBox: 101, entryPrice: 101 }), nowS: ist(10, 6), market: 'NSE', maxLots: 10 });
+  assert.equal(b.add, true);
+});
+
+test('pyramid: a pullback that only re-covers ground never adds; a brick beyond the best does', () => {
+  // down to 97, pullback up to 99, then down to 98 on the newest bar: 98 is not beyond 97
+  const bricks: [number, 'X' | 'O', number][] = [[ist(10, 1), 'O', 99], [ist(10, 2), 'O', 98], [ist(10, 3), 'O', 97], [ist(10, 4), 'X', 99], [ist(10, 6), 'O', 98]];
+  assert.equal(decideAdd({ model: renkoModel(bricks, ist(10, 6)), row: shortRow(), nowS: ist(10, 7), market: 'NSE', maxLots: 10 }).add, false);
+  const more: [number, 'X' | 'O', number][] = [...bricks, [ist(10, 7), 'O', 97], [ist(10, 8), 'O', 96]];
+  const d = decideAdd({ model: renkoModel(more, ist(10, 8)), row: shortRow(), nowS: ist(10, 9), market: 'NSE', maxLots: 10 });
+  assert.deepEqual(d, { add: true, barT: ist(10, 8), box: 96 });
+});
+
+test('pyramid: one add per bar however many bricks it printed; never on an older bar; never past the cap or the cutoff', () => {
+  const two = renkoModel([[ist(10, 5), 'O', 99], [ist(10, 5), 'O', 98]], ist(10, 5));
+  const d = decideAdd({ model: two, row: shortRow(), nowS: ist(10, 6), market: 'NSE', maxLots: 10 });
+  assert.deepEqual(d, { add: true, barT: ist(10, 5), box: 98 });
+  assert.equal(decideAdd({ model: two, row: shortRow({ adds: [{ barT: ist(10, 5) }] }), nowS: ist(10, 6), market: 'NSE', maxLots: 10 }).add, false);
+  // the brick printed on 10:05 but the newest closed bar is 10:07 (the tab slept): not chased
+  const old = renkoModel([[ist(10, 5), 'O', 99]], ist(10, 7));
+  assert.equal(decideAdd({ model: old, row: shortRow(), nowS: ist(10, 8), market: 'NSE', maxLots: 10 }).add, false);
+  assert.equal(decideAdd({ model: renkoModel([[ist(10, 5), 'O', 99]], ist(10, 5)), row: shortRow({ lots: 3 }), nowS: ist(10, 6), market: 'NSE', maxLots: 3 }).add, false);
+  assert.equal(decideAdd({ model: renkoModel([[ist(10, 5), 'O', 99]], ist(10, 5)), row: shortRow(), nowS: ist(10, 15), market: 'NSE', maxLots: 10 }).add, false, 'stale');
+  const late = renkoModel([[ist(15, 6), 'O', 99]], ist(15, 6));
+  assert.equal(decideAdd({ model: late, row: shortRow(), nowS: ist(15, 7), market: 'NSE', maxLots: 10 }).add, false, 'after the 15:05 entry cutoff');
+  // a P&F chart never adds
+  assert.equal(decideAdd({ model: { ...renkoModel([[ist(10, 5), 'O', 99]], ist(10, 5)), chart: 'pnf' }, row: shortRow(), nowS: ist(10, 6), market: 'NSE', maxLots: 10 }).add, false);
+});

@@ -148,3 +148,41 @@ export function decideAuto({ model, position, watermarkT, nowS, market, price = 
   if (nowS - sig.t > MAX_SIGNAL_AGE_S) return { action: 'none', why: 'signal too old' };
   return { action: 'enter', side: isSellSignal(sig.kind) ? 'SELL' : 'BUY', signal: sig, boxPrice: boxPriceAt(model, sig.col, sig.bar) };
 }
+
+/**
+ * Pyramid (Renko only, opt-in per chart): while a position is open and AUTO armed, add ONE lot when the newest closed bar printed a brick in
+ * the position's direction that closes beyond the best brick close reached since the entry (the entry brick's close to start with). A
+ * pullback that only re-covers ground never adds; at most one lot per bar however many bricks it printed; a bar older than the newest
+ * closed one is never chased (a tab that slept skips those bricks). Capped by `maxLots` (the row's own cap, saved at entry).
+ */
+export type AddDecision = { add: true; barT: number; box: number } | { add: false; why: string };
+
+export function decideAdd({ model, row, nowS, market, maxLots }: {
+  model: AutoModel;
+  row: { side: AutoSide; entryBarT: number; entryPrice: number; entryBox?: number; lots: number; adds?: { barT: number }[] };
+  nowS: number; market: Market; maxLots: number;
+}): AddDecision {
+  if (model.chart !== 'renko') return { add: false, why: 'not a Renko chart' };
+  if (!(row.lots < maxLots)) return { add: false, why: 'at max lots' };
+  const win = autoWindow(market, nowS);
+  const minute = istMinuteOfDay(nowS);
+  if (!win || minute < win.open || minute >= win.entryCutoff) return { add: false, why: 'outside the entry window' };
+  const last = model.lastBarT;
+  if (last === null) return { add: false, why: 'no closed bars' };
+  if (nowS - last > MAX_SIGNAL_AGE_S) return { add: false, why: 'newest bar too old' };
+  if (row.adds?.some(a => a.barT === last)) return { add: false, why: 'already added on this bar' };
+  const want = row.side === 'SELL' ? 'O' : 'X';
+  const better = (a: number, b: number) => (row.side === 'SELL' ? a < b : a > b);
+  let best = row.entryBox ?? row.entryPrice;
+  let reach: number | null = null;                              // the furthest new-best close the newest bar printed
+  for (let i = 0; i < model.columns.length; i++) {
+    const start = model.columnTimes[i]?.start;
+    const c = model.columns[i];
+    if (start === undefined || !(start > row.entryBarT) || c.dir !== want) continue;
+    const close = c.dir === 'X' ? c.high : c.low;                 // a brick's close edge
+    if (start === last) { if (better(close, reach ?? best)) reach = close; }
+    else if (start < last && better(close, best)) best = close;
+  }
+  if (reach === null || !better(reach, best)) return { add: false, why: 'no new best brick on the newest bar' };
+  return { add: true, barT: last, box: reach };
+}

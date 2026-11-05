@@ -197,3 +197,79 @@ test('a Supertrend row keeps its exitBy (so a reload cannot change how it exits)
   const bad = applyAutoOp(EMPTY_LEDGER, { op: 'open', row: row({ exitBy: 'whatever' }) as never });
   assert.ok(!bad.ok && bad.status === 400);
 });
+
+// ── pyramid adds ──
+const addOf = (id: string, barT: number, price: number) => ({ id, t: barT + 30, barT, box: price, lots: 1, price });
+
+test('pyramid PAPER: addPaper grows lots / units / legs and averages the entry; close books P&L over every tranche', () => {
+  let l = run(EMPTY_LEDGER, { op: 'open', row: row({ lots: 2, unitsPerPoint: 130, legs: [{ label: 'F', key: null, units: 130 }], pyramidMax: 4 }) });
+  l = run(l, { op: 'addPaper', id: 'r1', add: addOf('a1', 1020, 97) });
+  const r = l.rows[0];
+  assert.equal(r.lots, 3);
+  assert.equal(r.unitsPerPoint, 195);
+  assert.equal(r.legs[0].units, 195);
+  assert.ok(Math.abs(r.entryPrice - (100 * 130 + 97 * 65) / 195) < 1e-9);
+  assert.deepEqual(r.base, { lots: 2, unitsPerPoint: 130, price: 100, legUnits: [130] });
+  l = run(l, { op: 'close', id: 'r1', exitT: 2000, exitPrice: 95, reason: 'reversal' });
+  assert.ok(Math.abs(l.rows[0].pnl! - ((100 - 95) * 130 + (97 - 95) * 65)) < 1e-6);
+});
+
+test('pyramid: cap, one add per bar, rows without pyramidMax and wrong-mode ops are refused', () => {
+  let l = run(EMPTY_LEDGER, { op: 'open', row: row({ pyramidMax: 2 }) });
+  l = run(l, { op: 'addPaper', id: 'r1', add: addOf('a1', 1020, 97) });
+  assert.ok(!applyAutoOp(l, { op: 'addPaper', id: 'r1', add: addOf('a2', 1080, 96) }).ok, 'past pyramidMax');
+  let m = run(EMPTY_LEDGER, { op: 'open', row: row({ pyramidMax: 5 }) });
+  m = run(m, { op: 'addPaper', id: 'r1', add: addOf('a1', 1020, 97) });
+  assert.ok(!applyAutoOp(m, { op: 'addPaper', id: 'r1', add: addOf('a2', 1020, 96) }).ok, 'same bar twice');
+  const plain = run(EMPTY_LEDGER, { op: 'open', row: row() });
+  assert.ok(!applyAutoOp(plain, { op: 'addPaper', id: 'r1', add: addOf('a1', 1020, 97) }).ok, 'no pyramidMax');
+  assert.ok(!applyAutoOp(plain, { op: 'beginAdd', id: 'r1', add: addOf('a1', 1020, 97) }).ok, 'beginAdd is REAL only');
+  assert.ok(!applyAutoOp(EMPTY_LEDGER, { op: 'open', row: row({ pyramidMax: 21 }) }).ok);
+  assert.ok(!applyAutoOp(EMPTY_LEDGER, { op: 'open', row: row({ lots: 3, pyramidMax: 2 }) }).ok);
+});
+
+test('pyramid REAL: beginAdd reserves (exit waits), confirmAdd needs exactly the reserved units, voidAdd drops it, unknown is resolved', () => {
+  let l = run(EMPTY_LEDGER, { op: 'open', row: row({ mode: 'REAL', state: 'entering', pyramidMax: 5 }) });
+  l = run(l, { op: 'confirmEntry', id: 'r1', legs: [{ label: 'F', key: '111', units: 65 }], orderIds: ['e1'] });
+  const adding = run(l, { op: 'beginAdd', id: 'r1', add: addOf('a1', 1020, 97) });
+  assert.equal(adding.rows[0].state, 'adding');
+  assert.equal(adding.rows[0].lots, 1, 'a pending add is not in the totals');
+  assert.ok(!applyAutoOp(adding, { op: 'beginExit', id: 'r1', t: 1 }).ok, 'no exit while an add is on the wire');
+  assert.ok(!applyAutoOp(adding, { op: 'beginAdd', id: 'r1', add: addOf('a2', 1080, 96) }).ok);
+  assert.ok(!applyAutoOp(adding, { op: 'confirmAdd', id: 'r1', units: [30] }).ok, 'a partial is not the add');
+  const done = run(adding, { op: 'confirmAdd', id: 'r1', units: [65], orderIds: ['x1'] });
+  assert.equal(done.rows[0].state, 'open');
+  assert.equal(done.rows[0].lots, 2);
+  assert.equal(done.rows[0].legs[0].units, 130);
+  assert.equal(done.rows[0].legs[0].key, '111');
+  assert.ok(Math.abs(done.rows[0].entryPrice - 98.5) < 1e-9);
+  const voided = run(adding, { op: 'voidAdd', id: 'r1', note: 'rejected' });
+  assert.equal(voided.rows[0].state, 'open');
+  assert.equal(voided.rows[0].adds?.length, 0);
+  assert.equal(voided.rows[0].lots, 1);
+  const unk = run(adding, { op: 'markUnknown', id: 'r1', note: 'timeout' });
+  assert.equal(unk.rows[0].state, 'unknownAdd');
+  assert.ok(!applyAutoOp(unk, { op: 'resolve', id: 'r1', as: 'open', t: 9 }).ok, 'an unknown add is resolved as added / not added');
+  const yes = run(unk, { op: 'resolve', id: 'r1', as: 'added', t: 9 });
+  assert.equal(yes.rows[0].state, 'open');
+  assert.equal(yes.rows[0].lots, 2);
+  const no = run(unk, { op: 'resolve', id: 'r1', as: 'notAdded', t: 9 });
+  assert.equal(no.rows[0].lots, 1);
+  assert.equal(no.rows[0].entryPrice, 100);
+});
+
+test('pyramid REAL fills: an add fill and the entry fill each re-price their own tranche and the average', () => {
+  let l = run(EMPTY_LEDGER, { op: 'open', row: row({ mode: 'REAL', state: 'entering', pyramidMax: 5 }) });
+  l = run(l, { op: 'confirmEntry', id: 'r1', legs: [{ label: 'F', key: '111', units: 65 }], orderIds: ['e1'] });
+  l = run(l, { op: 'beginAdd', id: 'r1', add: addOf('a1', 1020, 98) });
+  l = run(l, { op: 'confirmAdd', id: 'r1', units: [65], orderIds: ['x1'] });
+  l = run(l, { op: 'fillPrice', id: 'r1', which: 'add', addId: 'a1', price: 97, legCount: 1 });
+  assert.equal(l.rows[0].adds![0].price, 97);
+  assert.equal(l.rows[0].adds![0].decision, 98);
+  assert.ok(Math.abs(l.rows[0].entryPrice - 98.5) < 1e-9);
+  l = run(l, { op: 'fillPrice', id: 'r1', which: 'entry', price: 102, legCount: 1 });
+  assert.equal(l.rows[0].base!.price, 102);
+  assert.equal(l.rows[0].entryDecision, 100);
+  assert.ok(Math.abs(l.rows[0].entryPrice - 99.5) < 1e-9);
+  assert.ok(!applyAutoOp(l, { op: 'fillPrice', id: 'r1', which: 'add', addId: 'nope', price: 97, legCount: 1 }).ok);
+});

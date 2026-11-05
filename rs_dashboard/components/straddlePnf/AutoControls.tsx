@@ -28,7 +28,10 @@ export interface AutoControlsProps {
   price: number | null;
   note: string;
   halt: string | null;
-  onResolve: (as: 'open' | 'flat') => void;
+  onResolve: (as: 'open' | 'flat' | 'added' | 'notAdded') => void;
+  /** Renko only: add one lot per new best brick up to `max` total lots. Locked while armed. */
+  pyramid?: { on: boolean; max: number };
+  onPyramid?: (p: { on: boolean; max: number }) => void;
   /** Close the open position now at the live price (and switch AUTO off). */
   onExit?: () => void;
   /** Renko only: which pattern AUTO trades. Absent on P&F (one rule). Locked while armed or holding a position. */
@@ -46,14 +49,26 @@ export interface AutoControlsProps {
 /** A row only the user can settle: an unknown outcome, or a reservation left over by a tab that died with the order out. */
 const STALE_PENDING_MS = 60_000;
 export const needsResolve = (r: AutoRow, nowMs: number) =>
-  r.state === 'unknownEntry' || r.state === 'unknownExit'
-  || ((r.state === 'entering' || r.state === 'exiting') && nowMs - (r.pendingSince ?? r.entryT) * 1000 > STALE_PENDING_MS);
+  r.state === 'unknownEntry' || r.state === 'unknownExit' || r.state === 'unknownAdd'
+  || ((r.state === 'entering' || r.state === 'exiting' || r.state === 'adding') && nowMs - (r.pendingSince ?? r.entryT) * 1000 > STALE_PENDING_MS);
 
-export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule, autoSide, onAutoSide, resumeNote }: AutoControlsProps) {
+export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule, autoSide, onAutoSide, resumeNote, pyramid, onPyramid }: AutoControlsProps) {
   const [confirmReal, setConfirmReal] = useState(false);
   const [confirmExit, setConfirmExit] = useState(false);
   const [draft, setDraft] = useState(String(lots));
   const focusedRef = useRef(false);
+  const [maxDraft, setMaxDraft] = useState(String(pyramid?.max ?? 10));
+  const maxFocusedRef = useRef(false);
+  useEffect(() => {
+    if (!maxFocusedRef.current) setMaxDraft(String(pyramid?.max ?? 10));
+  }, [pyramid?.max]);
+  const commitMax = (raw: string) => {
+    if (!pyramid || !onPyramid) return;
+    const n = parseInt(raw, 10);
+    const next = Number.isInteger(n) ? Math.max(1, Math.min(MAX_LOTS, n)) : pyramid.max;
+    setMaxDraft(String(next));
+    if (next !== pyramid.max) onPyramid({ ...pyramid, max: next });
+  };
   useEffect(() => {
     if (!focusedRef.current) setDraft(String(lots));
   }, [lots]);
@@ -151,14 +166,39 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
         <button type="button" aria-label={`More AUTO lots on chart ${chart}`} disabled={locked || lots >= MAX_LOTS} onClick={() => onLots(lots + 1)}
                 className="w-5 h-6 text-zinc-300 hover:bg-zinc-800 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">+</button>
       </span>
+      {pyramid && onPyramid && (
+        <span className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950"
+              title={armed ? 'Stop AUTO to change adds' : 'Add one lot each time a brick closes beyond the best level since entry (at most one lot per bar), up to Max total lots. The next entry starts again at the base lots.'}>
+          <button type="button" data-testid={`pnf-auto-pyr-${chart}`} aria-pressed={pyramid.on} disabled={armed}
+                  aria-label={`${pyramid.on ? 'Stop adding' : 'Add'} one lot per new best brick on chart ${chart}`}
+                  onClick={() => onPyramid({ ...pyramid, on: !pyramid.on })}
+                  className={`h-6 px-1.5 rounded-l text-[11px] font-bold disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 ${pyramid.on ? 'bg-violet-500/20 text-violet-300' : 'text-zinc-400 hover:text-white'}`}>
+            +1L/brick
+          </button>
+          {pyramid.on && (
+            <>
+              <span className="pl-1 text-[11px] font-bold text-zinc-400" aria-hidden="true">Max</span>
+              <input aria-label={`Maximum AUTO lots with adds on chart ${chart}`} data-testid={`pnf-auto-pyr-max-${chart}`} value={maxDraft} disabled={armed}
+                     onFocus={() => { maxFocusedRef.current = true; }}
+                     onChange={e => setMaxDraft(e.target.value)}
+                     onBlur={e => { maxFocusedRef.current = false; commitMax(e.currentTarget.value); }}
+                     onKeyDown={e => {
+                       if (e.key === 'Enter') { commitMax(e.currentTarget.value); e.currentTarget.blur(); }
+                       if (e.key === 'Escape') { setMaxDraft(String(pyramid.max)); e.currentTarget.blur(); }
+                     }}
+                     className="w-7 h-6 text-center text-[11px] font-mono font-bold bg-transparent text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 rounded disabled:text-zinc-400" />
+            </>
+          )}
+        </span>
+      )}
       <span data-testid={`pnf-auto-status-${chart}`} className="font-mono text-[11px] truncate min-w-0 max-w-[13rem]" title={halt ?? note}>
         {unresolved ? (
-          (row.state === 'entering' || row.state === 'exiting') && !needsResolve(row, nowMs)
-            ? <span className="text-amber-400">{row.state === 'entering' ? 'ENTERING…' : 'EXITING…'}</span>
+          (row.state === 'entering' || row.state === 'exiting' || row.state === 'adding') && !needsResolve(row, nowMs)
+            ? <span className="text-amber-400">{row.state === 'entering' ? 'ENTERING…' : row.state === 'adding' ? 'ADDING…' : 'EXITING…'}</span>
             : <span className="text-red-400 font-bold">UNRESOLVED</span>
         ) : open ? (
           <span className={row.side === 'SELL' ? 'text-red-400' : 'text-emerald-400'}>
-            {row.side === 'SELL' ? 'SHORT' : 'LONG'} {row.lots}L @ <span title={row.mode === 'REAL' && !row.entryFilled ? 'The price AUTO decided at: not yet replaced by the broker\'s fill' : undefined}>{row.mode === 'REAL' && !row.entryFilled ? '~' : ''}{row.entryPrice.toFixed(2)}</span>
+            {row.side === 'SELL' ? 'SHORT' : 'LONG'} {row.lots}L{row.base && row.lots > row.base.lots ? <span className="text-zinc-400" title="Base lots + lots added on new best bricks"> ({row.base.lots}+{row.lots - row.base.lots})</span> : null} @ <span title={row.mode === 'REAL' && (!row.entryFilled || row.adds?.some(a => a.status === 'done' && !a.filled)) ? 'The price AUTO decided at: not yet replaced by the broker\'s fill' : undefined}>{row.mode === 'REAL' && (!row.entryFilled || row.adds?.some(a => a.status === 'done' && !a.filled)) ? '~' : ''}{row.entryPrice.toFixed(2)}</span>{row.base && row.lots > row.base.lots ? <span className="text-zinc-400"> avg</span> : null}
             {pnl !== null && <span className={`ml-1 font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{inr(pnl)}</span>}
             {row.stop !== undefined && <span className="ml-1 text-zinc-400" title="Protective stop (one brick beyond the pullback)">SL {row.stop.toFixed(2)}</span>}
             {row.mode === 'PAPER' && <span className="ml-1 text-zinc-400">paper</span>}
@@ -180,7 +220,13 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
           {confirmExit ? 'EXIT REAL?' : 'Exit'}
         </button>
       )}
-      {row && needsResolve(row, nowMs) && (
+      {row && needsResolve(row, nowMs) && (row.state === 'adding' || row.state === 'unknownAdd') ? (
+        <span className="flex items-center gap-1" title="An added lot's order outcome is unclear. Check the broker's Positions / Orders first, then tell AUTO whether the extra lot is there">
+          <button type="button" onClick={() => onResolve('added')} className="h-6 px-2 rounded border border-zinc-700 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">Add went through</button>
+          <button type="button" onClick={() => onResolve('notAdded')} className="h-6 px-2 rounded border border-zinc-700 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">Add did not happen</button>
+          <button type="button" onClick={() => onResolve('flat')} className="h-6 px-2 rounded border border-zinc-700 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">Is flat</button>
+        </span>
+      ) : row && needsResolve(row, nowMs) && (
         <span className="flex items-center gap-1" title="Check the broker's Positions / Orders first, then tell AUTO what is there">
           <button type="button" onClick={() => onResolve('open')} className="h-6 px-2 rounded border border-zinc-700 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800">Is open</button>
           <button type="button" onClick={() => onResolve('flat')} className="h-6 px-2 rounded border border-zinc-700 text-[11px] font-bold text-zinc-200 hover:bg-zinc-800">Is flat</button>

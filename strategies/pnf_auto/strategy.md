@@ -111,3 +111,15 @@ strategy rules (the opposite-brick exit stays in the tab): exits and the guard o
   than the page opened in is announced with a "Switch it off" button, never left enforcing unseen.
 - NOT covered: a tab-less re-entry never happens (no entries), the rule exit (opposite brick / Two-back stop) still needs the tab, and the
   watcher only protects what the guard's levels describe - with the guard OFF there is no server stop.
+
+## Renko pyramid: `+1L/brick` (added 2026-11-05)
+Opt-in per chart on `/renko` (not P&F, not Replay). User guide: `docs/RENKO_AUTO_GUIDE.md` §4 "Adding lots on new best bricks".
+- Rule `decideAdd` (`lib/pnfAuto.ts`, tested): one lot when the newest closed bar has a favourable brick closing beyond the best favourable
+  close since entry (starting from `entryBox`). One add per bar, never for an older bar, inside the entry window, up to `min(row.pyramidMax, page Max, 20)`.
+  Evaluated only when `decideAuto` says holding (an exit always wins), only while armed in the row's mode with the switch on.
+- Ledger: one row per position. `entryPrice` is the AVERAGE and `lots` / `unitsPerPoint` / `legs[].units` are TOTALS (`withTranches`), so every
+  P&L reader and every exit (`exitOwn` units) is unchanged. `base` = the first tranche and `adds[]` = the tranches. REAL: `beginAdd` (open →
+  `adding`) → `confirmAdd` (must match the reserved units exactly) | `voidAdd` | `markUnknown` (→ `unknownAdd`) → `resolve added|notAdded|flat`.
+  PAPER: `addPaper`. `beginExit` needs `open`, so an exit waits for an add on the wire. `fillPrice which:'add'` re-prices one tranche, and the entry fill re-prices `base`.
+- Decision 2026-11-05 (user): new-best-brick only (no re-adding after a pullback), user-set Max, at most one lot per bar.
+

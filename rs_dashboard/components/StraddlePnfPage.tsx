@@ -51,7 +51,7 @@ import { usePnfAlerts } from './straddlePnf/usePnfAlerts';
 import { detectTriangles, type PnfTriangle } from '@/lib/pnfTriangle';
 import { isSellSignal } from '@/lib/straddlePnf';
 import type { PnfScope } from '@/lib/pnfScope';
-import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent } from './straddlePnf/usePnfAuto';
+import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent, type AutoPyramid } from './straddlePnf/usePnfAuto';
 import { autoDaySummary, autoMarkers, rowPnl } from '@/lib/pnfAutoLedger';
 import AutoControls, { type AutoRule } from './straddlePnf/AutoControls';
 import { usePnfPositions } from './straddlePnf/usePnfPositions';
@@ -94,6 +94,16 @@ const MARKERS_KEY = 'straddle-pnf-markers-';
 const AUTO_LOTS_KEY = 'straddle-pnf-auto-lots-';
 const AUTO_RULE_KEY = 'straddle-pnf-auto-rule-';
 const AUTO_SIDE_KEY = 'straddle-pnf-auto-side-';
+/** Renko pyramid (add a lot per new best brick) per chart: JSON {on, max}. */
+const AUTO_PYR_KEY = 'straddle-pnf-auto-pyr-';
+const DEFAULT_PYRAMID: AutoPyramid = { on: false, max: 10 };
+const parsePyramid = (raw: string | null): AutoPyramid => {
+  try {
+    const j = JSON.parse(raw ?? 'null') as Partial<AutoPyramid> | null;
+    if (!j) return DEFAULT_PYRAMID;
+    return { on: j.on === true, max: Number.isInteger(j.max) && j.max! >= 1 && j.max! <= 20 ? j.max! : DEFAULT_PYRAMID.max };
+  } catch { return DEFAULT_PYRAMID; }
+};
 /** Per chart: '0' = the B / S trade markers are hidden. */
 const MARKERS_SHOWN_KEY = 'straddle-pnf-markers-shown-';
 const LINES_SHOWN_KEY = 'straddle-pnf-lines-shown-';
@@ -246,6 +256,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const [autoSide, setAutoSide] = useState<Record<ChartId, AutoSide>>({ 1: DEFAULT_AUTO_SIDE, 2: DEFAULT_AUTO_SIDE });
   const [autoRule, setAutoRule] = useState<Record<ChartId, AutoRule>>({ 1: DEFAULT_AUTO_RULE, 2: DEFAULT_AUTO_RULE });
   const [autoLots, setAutoLots] = useState<Record<ChartId, number>>({ 1: 1, 2: 1 });
+  const [autoPyr, setAutoPyr] = useState<Record<ChartId, AutoPyramid>>({ 1: DEFAULT_PYRAMID, 2: DEFAULT_PYRAMID });
   // Single | Bracket | Cover for the next entry (trade bar and chart rail), with its points; remembered, never armed silently.
   const [orderStyle, setOrderStyle] = useState<StyleState>(DEFAULT_STYLE);
   // Triangles (nested-column squeezes): drawn or not, and the fewest nested columns that count (3-6), per chart, remembered.
@@ -312,6 +323,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     setAutoRule({ 1: ruleOf(1), 2: ruleOf(2) });
     const sideOf = (c: ChartId): AutoSide => { const v = readP(`${AUTO_SIDE_KEY}${c}`); return AUTO_SIDES.includes(v as AutoSide) ? v as AutoSide : DEFAULT_AUTO_SIDE; };
     setAutoSide({ 1: sideOf(1), 2: sideOf(2) });
+    setAutoPyr({ 1: parsePyramid(readP(`${AUTO_PYR_KEY}1`)), 2: parsePyramid(readP(`${AUTO_PYR_KEY}2`)) });
     setMarkersShown({ 1: readP(`${MARKERS_SHOWN_KEY}1`) !== '0', 2: readP(`${MARKERS_SHOWN_KEY}2`) !== '0' });
     try { const raw = readP(STYLE_KEY); if (raw) { const j = JSON.parse(raw); setOrderStyle({ style: j.style === 'Bracket' || j.style === 'Cover' ? j.style : 'Single', tgt: String(j.tgt ?? ''), sl: String(j.sl ?? ''), trail: String(j.trail ?? ''), trailOn: j.trailOn === true }); } } catch { /* keep Single */ }
     const minOf = (c: ChartId) => { const n = Number(readP(`${TRI_MIN_KEY}${c}`)); return Number.isInteger(n) && n >= 3 && n <= 6 ? n : 3; };
@@ -827,12 +839,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     };
   };
   const auto1 = usePnfAuto({
-    chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: renko /* the rules are Renko's: P&F has one signal set */ ? modelForRule(autoRule[1], c1.model) : c1.model, side: autoSide[1], price: priceOf(feed1), stale: feed1.stale,
+    chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: renko /* the rules are Renko's: P&F has one signal set */ ? modelForRule(autoRule[1], c1.model) : c1.model, side: autoSide[1], pyramid: renko ? autoPyr[1] : undefined, price: priceOf(feed1), stale: feed1.stale,
     market: feed1.market, complete: feed1.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
     onEvent: onAutoEvent, onDisarm: why => disarm(1, why), scope,
   });
   const auto2 = usePnfAuto({
-    chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: renko ? modelForRule(autoRule[2], c2.model) : c2.model, side: autoSide[2], price: priceOf(feed2), stale: feed2.stale,
+    chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: renko ? modelForRule(autoRule[2], c2.model) : c2.model, side: autoSide[2], pyramid: renko ? autoPyr[2] : undefined, price: priceOf(feed2), stale: feed2.stale,
     market: feed2.market, complete: feed2.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
     onEvent: onAutoEvent, onDisarm: why => disarm(2, why), scope,
   });
@@ -881,6 +893,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
           if (renko && AUTO_RULES.includes(rec.rule as AutoRule)) { setAutoRule(a => ({ ...a, [c]: rec.rule as AutoRule })); saveP(`${AUTO_RULE_KEY}${c}`, rec.rule!); }
           if (AUTO_SIDES.includes(rec.side as AutoSide)) { setAutoSide(a => ({ ...a, [c]: rec.side as AutoSide })); saveP(`${AUTO_SIDE_KEY}${c}`, rec.side!); }
           setAutoLots(l => ({ ...l, [c]: rec.lots })); saveP(`${AUTO_LOTS_KEY}${c}`, String(rec.lots));
+          if (renko) {
+            const pyr: AutoPyramid = rec.pyramid ? { on: true, max: rec.pyramid.max } : { ...DEFAULT_PYRAMID, max: autoPyr[c].max };
+            setAutoPyr(a => ({ ...a, [c]: pyr })); saveP(`${AUTO_PYR_KEY}${c}`, JSON.stringify(pyr));
+          }
           armedHereRef.current[c] = true;
           setAutoArm(a => ({ ...a, [c]: { on: true, mode: rec.mode, watermarkT: v.watermarkT, armT: rec.t } }));
           toast.success(`AUTO resumed on chart ${c} (${rec.mode}, ${rec.lots} lot${rec.lots === 1 ? '' : 's'}) - it was armed before the reload`, { duration: 10_000 });
@@ -931,14 +947,17 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const rec = {
       mode: tradeMode, broker, targetKey: targetKey(c === 2 ? target2 : target1), day: istToday(), t, watermarkT, lots: autoLots[c],
       side: autoSide[c], ...(renko ? { rule: autoRule[c] } : {}),
+      ...(renko && autoPyr[c].on && autoPyr[c].max > autoLots[c] ? { pyramid: { max: autoPyr[c].max } } : {}),
     };
-    void autoPost({ op: 'setArm', chart: c, arm: rec, t, text: `AUTO armed (${tradeMode}, ${autoLots[c]} lot${autoSide[c] !== 'both' ? `, ${SIDE_LABEL[autoSide[c]]}` : ''})` }).then(r => {
+    const pyrText = rec.pyramid ? `, +1L/brick to ${rec.pyramid.max}L` : '';
+    if (renko && autoPyr[c].on && !rec.pyramid) toast.warning(`Chart ${c}: adds are on but Max (${autoPyr[c].max}) is not above the base lots (${autoLots[c]}) - no lots will be added`, { duration: 10_000 });
+    void autoPost({ op: 'setArm', chart: c, arm: rec, t, text: `AUTO armed (${tradeMode}, ${autoLots[c]} lot${autoSide[c] !== 'both' ? `, ${SIDE_LABEL[autoSide[c]]}` : ''}${pyrText})` }).then(r => {
       if (r.ok) {
         noteArmSaved(c, r.ledger?.rev);
         setAutoArm(a => (a[c].on && a[c].watermarkT === watermarkT && a[c].armT === undefined ? { ...a, [c]: { ...a[c], armT: t } } : a));
       } else toast.warning(`AUTO on chart ${c} is armed in this tab only (it could not be saved: ${r.error ?? 'no reply'}) - a reload will switch it off`, { duration: 15_000 });
     });
-  }, [autoSide, autoLots, autoRule, tradeMode, guards, disarm, c1, c2, noteArmedHere, noteArmSaved, broker, target1, target2, renko, autoPost]);
+  }, [autoSide, autoLots, autoRule, autoPyr, tradeMode, guards, disarm, c1, c2, noteArmedHere, noteArmSaved, broker, target1, target2, renko, autoPost]);
   const setLotsFor = (c: ChartId, n: number) => { setAutoLots(l => ({ ...l, [c]: n })); saveP(`${AUTO_LOTS_KEY}${c}`, String(n)); };
   // The page mode is the mode AUTO trades in: switching it disarms both charts (arming REAL is always an explicit step).
   const changeTradeMode = (m: 'PAPER' | 'REAL') => {
@@ -1099,6 +1118,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
                       onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} halt={autoOf(c).halt}
                       onResolve={autoOf(c).resolve} onExit={() => { void autoOf(c).exitNow(); }} nowMs={now} resumeNote={resumeNote[c]}
                       autoSide={autoSide[c]} onAutoSide={sd => { setAutoSide(a => ({ ...a, [c]: sd })); saveP(`${AUTO_SIDE_KEY}${c}`, sd); }}
+                      pyramid={renko ? autoPyr[c] : undefined}
+                      onPyramid={renko ? p => { setAutoPyr(a => ({ ...a, [c]: p })); saveP(`${AUTO_PYR_KEY}${c}`, JSON.stringify(p)); } : undefined}
                       autoRule={renko ? autoRule[c] : undefined} onAutoRule={renko ? r => { setAutoRule(a => ({ ...a, [c]: r })); saveP(`${AUTO_RULE_KEY}${c}`, r); } : undefined}
                       rule={renko ? ruleText(autoRule[c], (c === 2 ? settings2 : settings).reversal) : undefined}
                       disabledReason={target.kind === 'index' ? 'No AUTO on an index: chart its future or an option'

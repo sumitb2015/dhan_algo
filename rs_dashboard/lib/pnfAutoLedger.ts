@@ -8,13 +8,38 @@
 //   entering → open (confirmEntry) | closed (voidEntry: refused, nothing open) | unknownEntry (markUnknown)
 //   open → exiting (beginExit) → closed (close) | open (abortExit: cleanly refused) | unknownExit (markUnknown)
 //   unknown* / a stale entering / exiting → open | closed by the user (resolve). PAPER rows open as `open` and close directly.
+//   Pyramid adds (Renko, opt-in): open → adding (beginAdd) → open (confirmAdd | voidAdd) | unknownAdd (markUnknown) → open (resolve
+//   'added' | 'notAdded'). PAPER adds in one step (addPaper). `entryPrice` is the AVERAGE entry and lots / unitsPerPoint / legs the
+//   TOTALS, so every P&L reader (rowPnl) and every exit (sized by legs[].units) covers the whole position.
 import { parseTarget, targetKey, type Target } from './pnfTarget.ts';
 import type { Market } from './straddlePnfLive.ts';
 
 export type AutoMode = 'PAPER' | 'REAL';
-export type AutoRowState = 'entering' | 'open' | 'exiting' | 'closed' | 'unknownEntry' | 'unknownExit';
+export type AutoRowState = 'entering' | 'open' | 'exiting' | 'closed' | 'unknownEntry' | 'unknownExit' | 'adding' | 'unknownAdd';
 
 export interface AutoLeg { label: string; /** The broker's key (Dhan security id / trading symbol), REAL only. */ key: string | null; units: number }
+
+/** One pyramid add: a lot added to an open position on a new best brick (lib/pnfAuto.ts decideAdd). */
+export interface AutoAdd {
+  id: string;
+  /** Decision time (epoch s). */
+  t: number;
+  /** The bar whose brick triggered it (one add per bar). */
+  barT: number;
+  /** The brick close it was decided on (PAPER books it; the chart marker sits on it). */
+  box?: number;
+  lots: number;
+  /** Units added per leg, in the row's leg order. */
+  units: number[];
+  unitsPerPoint: number;
+  /** Booked price (REAL: the live price at the decision, replaced by the broker's fill once read). */
+  price: number;
+  decision?: number;
+  orderIds?: string[];
+  filled?: boolean;
+  /** 'pending' while its order is out (state adding / unknownAdd); confirmed adds are in the totals. */
+  status: 'pending' | 'done';
+}
 
 export interface AutoRow {
   id: string;
@@ -69,6 +94,11 @@ export interface AutoRow {
   note?: string;
   /** When the REAL entry / exit was reserved (entering / exiting): a reservation much older than an order takes is stale. */
   pendingSince?: number;
+  /** Pyramid: the cap on total lots, saved at entry (absent = no adds for this row). */
+  pyramidMax?: number;
+  /** Pyramid: the first tranche, saved by the first add (entryPrice then becomes the average). */
+  base?: { lots: number; unitsPerPoint: number; price: number; legUnits: number[] };
+  adds?: AutoAdd[];
 }
 
 export interface AutoLogEntry { t: number; chart: 1 | 2; text: string }
@@ -93,6 +123,8 @@ export interface AutoArmRecord {
   /** Renko AUTO rule / side filter it was armed with (restored with it; absent on the P&F page). */
   rule?: string;
   side?: string;
+  /** Renko pyramid it was armed with: present = add one lot per new best brick up to `max` total lots. */
+  pyramid?: { max: number };
 }
 
 export interface AutoLedger { rev: number; rows: AutoRow[]; log: AutoLogEntry[]; arms?: Partial<Record<'1' | '2', AutoArmRecord>> }
@@ -117,8 +149,16 @@ export type AutoOp =
   | { op: 'abortExit'; id: string; note: string }
   | { op: 'markUnknown'; id: string; note: string }
   | { op: 'close'; id: string; exitT: number; exitPrice: number; reason: string; note?: string; exitBarT?: number; exitBox?: number; orderIds?: string[] }
-  | { op: 'fillPrice'; id: string; which: 'entry' | 'exit'; price: number; /** how many orders were summed: must be one per leg */ legCount: number }
-  | { op: 'resolve'; id: string; as: 'open' | 'flat'; exitPrice?: number; t: number }
+  | { op: 'fillPrice'; id: string; which: 'entry' | 'exit' | 'add'; price: number; /** how many orders were summed: must be one per leg */ legCount: number; /** which === 'add' */ addId?: string }
+  | { op: 'resolve'; id: string; as: 'open' | 'flat' | 'added' | 'notAdded'; exitPrice?: number; t: number }
+  /** Pyramid: reserve a REAL add (open → adding) before its order is sent. */
+  | { op: 'beginAdd'; id: string; add: { id: string; t: number; barT: number; box?: number; lots: number; price: number } }
+  /** Pyramid: the add's order was placed; `units` per leg as placed. */
+  | { op: 'confirmAdd'; id: string; units: number[]; orderIds?: string[] }
+  /** Pyramid: the add was cleanly refused, nothing was opened. */
+  | { op: 'voidAdd'; id: string; note: string }
+  /** Pyramid, PAPER: add a lot at once (booked at the brick). */
+  | { op: 'addPaper'; id: string; add: { id: string; t: number; barT: number; box?: number; lots: number; price: number } }
   | { op: 'log'; chart: 1 | 2; t: number; text: string }
   /** Save (arm) or clear (null) a chart's AUTO switch, with the log line that says why - one op, so the two never disagree. */
   | { op: 'setArm'; chart: 1 | 2; arm: AutoArmRecord | null; t: number; text: string }
@@ -148,7 +188,43 @@ function armOk(v: unknown): AutoArmRecord | null {
   if (!finite(a.t) || !finite(a.watermarkT) || !Number.isInteger(a.lots) || a.lots! < 1 || a.lots! > 20) return null;
   const str = (s: unknown) => (typeof s === 'string' && s.length > 0 && s.length <= 20 ? s : undefined);
   const rule = str(a.rule), side = str(a.side);
-  return { mode: a.mode, broker: a.broker, targetKey: a.targetKey, day: a.day, t: a.t!, watermarkT: a.watermarkT!, lots: a.lots!, ...(rule ? { rule } : {}), ...(side ? { side } : {}) };
+  const pm = a.pyramid && typeof a.pyramid === 'object' ? (a.pyramid as { max?: unknown }).max : undefined;
+  const pyramid = Number.isInteger(pm) && (pm as number) >= 1 && (pm as number) <= PYRAMID_HARD_MAX ? { max: pm as number } : undefined;
+  return { mode: a.mode, broker: a.broker, targetKey: a.targetKey, day: a.day, t: a.t!, watermarkT: a.watermarkT!, lots: a.lots!, ...(rule ? { rule } : {}), ...(side ? { side } : {}), ...(pyramid ? { pyramid } : {}) };
+}
+
+/** Hard cap on a pyramided position's total lots (the order route's own per-order cap is the same number). */
+export const PYRAMID_HARD_MAX = 20;
+
+/** A row's first tranche: saved on the row by its first add, read off the row before that. */
+export const baseOf = (r: AutoRow): NonNullable<AutoRow['base']> =>
+  r.base ?? { lots: r.lots, unitsPerPoint: r.unitsPerPoint, price: r.entryPrice, legUnits: r.legs.map(l => l.units) };
+
+/** The row with its totals (lots, units per point, leg units) and AVERAGE entry price rebuilt from its first tranche and its confirmed adds. */
+export function withTranches(r: AutoRow, base: NonNullable<AutoRow['base']>, adds: AutoAdd[]): AutoRow {
+  const done = adds.filter(a => a.status === 'done');
+  const upp = base.unitsPerPoint + done.reduce((n, a) => n + a.unitsPerPoint, 0);
+  const avg = upp > 0 ? (base.price * base.unitsPerPoint + done.reduce((n, a) => n + a.price * a.unitsPerPoint, 0)) / upp : base.price;
+  return {
+    ...r, base, adds, lots: base.lots + done.reduce((n, a) => n + a.lots, 0), unitsPerPoint: upp, entryPrice: avg,
+    legs: r.legs.map((l, k) => ({ ...l, units: (base.legUnits[k] ?? 0) + done.reduce((n, a) => n + (a.units[k] ?? 0), 0) })),
+  };
+}
+
+/** A new add for `r` (expected units / rupees per point scaled from the first tranche's per-lot size), or why it is refused. */
+function newAdd(r: AutoRow, a: { id: string; t: number; barT: number; box?: number; lots: number; price: number }, status: AutoAdd['status']): AutoAdd | string {
+  if (!r.pyramidMax) return 'This row was not opened with adds on';
+  if (!a || typeof a.id !== 'string' || !a.id || ![a.t, a.barT, a.price].every(finite) || !(a.price > 0)) return 'Invalid add';
+  if (!Number.isInteger(a.lots) || a.lots < 1) return 'Invalid add lots';
+  if (r.lots + a.lots > Math.min(r.pyramidMax, PYRAMID_HARD_MAX)) return `Adding ${a.lots} would take the position past ${Math.min(r.pyramidMax, PYRAMID_HARD_MAX)} lots`;
+  if ((r.adds ?? []).some(x => x.barT === a.barT || x.id === a.id)) return 'Already added on this bar';
+  const base = baseOf(r);
+  if (!(base.lots > 0)) return 'Invalid row size';
+  const k = a.lots / base.lots;
+  return {
+    id: a.id, t: a.t, barT: a.barT, ...(finite(a.box) ? { box: a.box } : {}), lots: a.lots,
+    units: base.legUnits.map(u => Math.round(u * k)), unitsPerPoint: base.unitsPerPoint * k, price: a.price, status,
+  };
 }
 
 /** Apply one op. Returns the new ledger, or an error with an HTTP status (the file is left as it was). */
@@ -170,6 +246,8 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       if (r.stop !== undefined && (!finite(r.stop) || (r.side === 'BUY' ? r.stop >= r.entryPrice : r.stop <= r.entryPrice))) return { ok: false, status: 400, error: 'stop must be beyond the entry, on the losing side' };
       if (r.exitBy !== undefined && r.exitBy !== 'supertrend') return { ok: false, status: 400, error: 'Invalid exitBy' };
       if (r.market !== undefined && !(['NSE', 'NSE_CAS', 'NSE_FNO', 'MCX'] as const).includes(r.market)) return { ok: false, status: 400, error: 'Invalid market' };
+      if (r.pyramidMax !== undefined && (!Number.isInteger(r.pyramidMax) || r.pyramidMax < r.lots || r.pyramidMax > PYRAMID_HARD_MAX)) return { ok: false, status: 400, error: `pyramidMax must be ${r.lots}-${PYRAMID_HARD_MAX}` };
+      if (r.base !== undefined || r.adds !== undefined) return { ok: false, status: 400, error: 'A new row has no adds' };
       if (led.rows.some(x => x.id === r.id)) return { ok: false, status: 409, error: 'Row already exists' };
       const live = led.rows.find(x => x.chart === r.chart && isLive(x));
       if (live) return { ok: false, status: 409, error: `Chart ${r.chart} already holds an AUTO position (${live.state})` };
@@ -185,7 +263,7 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       if (i < 0) return { ok: false, status: 404, error: 'No such row' };
       const r = led.rows[i];
       const need: Record<string, AutoRowState[]> = {
-        confirmEntry: ['entering'], voidEntry: ['entering'], beginExit: ['open'], abortExit: ['exiting'], markUnknown: ['entering', 'exiting'],
+        confirmEntry: ['entering'], voidEntry: ['entering'], beginExit: ['open'], abortExit: ['exiting'], markUnknown: ['entering', 'exiting', 'adding'],
       };
       if (!need[op.op].includes(r.state)) return { ok: false, status: 409, error: `Row is ${r.state}` };
       const rows = [...led.rows];
@@ -195,7 +273,46 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       } else if (op.op === 'voidEntry') rows[i] = { ...r, state: 'closed', exitT: op.t, exitPrice: r.entryPrice, reason: 'refused', pnl: 0, note: op.note };
       else if (op.op === 'beginExit') rows[i] = { ...r, state: 'exiting', pendingSince: finite(op.t) ? op.t : r.entryT };
       else if (op.op === 'abortExit') rows[i] = { ...r, state: 'open', note: op.note };
-      else rows[i] = { ...r, state: r.state === 'entering' ? 'unknownEntry' : 'unknownExit', note: op.note };
+      else rows[i] = { ...r, state: r.state === 'entering' ? 'unknownEntry' : r.state === 'adding' ? 'unknownAdd' : 'unknownExit', note: op.note };
+      return bump(rows);
+    }
+    case 'beginAdd':
+    case 'addPaper': {
+      const i = find(op.id);
+      if (i < 0) return { ok: false, status: 404, error: 'No such row' };
+      const r = led.rows[i];
+      if (r.state !== 'open') return { ok: false, status: 409, error: `Row is ${r.state}` };
+      if (r.mode !== (op.op === 'addPaper' ? 'PAPER' : 'REAL')) return { ok: false, status: 409, error: `${op.op} is for a ${op.op === 'addPaper' ? 'PAPER' : 'REAL'} row` };
+      const add = newAdd(r, op.add, op.op === 'addPaper' ? 'done' : 'pending');
+      if (typeof add === 'string') return { ok: false, status: 409, error: add };
+      const rows = [...led.rows];
+      const base = baseOf(r);
+      const adds = [...(r.adds ?? []), add];
+      rows[i] = op.op === 'addPaper' ? withTranches(r, base, adds) : { ...r, base, adds, state: 'adding', pendingSince: add.t };
+      return bump(rows);
+    }
+    case 'confirmAdd':
+    case 'voidAdd': {
+      const i = find(op.id);
+      if (i < 0) return { ok: false, status: 404, error: 'No such row' };
+      const r = led.rows[i];
+      if (r.state !== 'adding') return { ok: false, status: 409, error: `Row is ${r.state}` };
+      const adds = r.adds ?? [];
+      const k = adds.findIndex(a => a.status === 'pending');
+      if (k < 0) return { ok: false, status: 409, error: 'No add is pending' };
+      const rows = [...led.rows];
+      if (op.op === 'voidAdd') {
+        rows[i] = { ...r, adds: adds.filter((_, j) => j !== k), state: 'open', pendingSince: undefined, note: op.note };
+        return bump(rows);
+      }
+      const want = adds[k].units;
+      // Exactly the units reserved, leg by leg: anything else (a partial, a leg missing) is not this add and must be resolved by the user.
+      if (!Array.isArray(op.units) || op.units.length !== want.length || op.units.some((u, j) => u !== want[j])) {
+        return { ok: false, status: 409, error: `Placed ${JSON.stringify(op.units)} but the add reserved ${JSON.stringify(want)}` };
+      }
+      const ids = cleanIds(op.orderIds);
+      const next = adds.map((a, j) => (j === k ? { ...a, status: 'done' as const, ...(ids ? { orderIds: ids } : {}) } : a));
+      rows[i] = { ...withTranches(r, baseOf(r), next), state: 'open', pendingSince: undefined };
       return bump(rows);
     }
     case 'close': {
@@ -225,14 +342,31 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       // A row closed without an AUTO order (flat at the broker, resolved by the user, refused) has no real exit to price against.
       if (r.state === 'closed' && (r.reason === 'flat at broker' || r.reason === 'resolved' || r.reason === 'refused')) return { ok: false, status: 409, error: `Row was closed as ${r.reason}: nothing to re-price` };
       // One wrong sum (a missing leg, a wrong scale, the wrong order) must not be locked in: a fill is within FILL_BAND of its decision price.
-      const ref = op.which === 'entry' ? (r.entryDecision ?? r.entryPrice) : (r.exitDecision ?? r.exitPrice);
+      if (op.which === 'add') {
+        const k = (r.adds ?? []).findIndex(a => a.id === op.addId);
+        if (k < 0) return { ok: false, status: 404, error: 'No such add' };
+        const a = r.adds![k];
+        if (a.status !== 'done') return { ok: false, status: 409, error: 'The add is not confirmed' };
+        if (a.filled) return { ok: true, ledger: led };
+        const aref = a.decision ?? a.price;
+        if (aref > 0 && Math.abs(op.price / aref - 1) > FILL_BAND) return { ok: false, status: 422, error: `Fill ${op.price} is more than ${FILL_BAND * 100}% from the decision price ${aref}` };
+        const adds = r.adds!.map((x, j) => (j === k ? { ...x, decision: x.decision ?? x.price, price: op.price, filled: true } : x));
+        const next = withTranches(r, baseOf(r), adds);
+        const rows = [...led.rows];
+        rows[i] = r.state === 'closed' && r.exitPrice !== undefined ? { ...next, pnl: rowPnl(r.side, next.entryPrice, r.exitPrice, next.unitsPerPoint) } : next;
+        return bump(rows);
+      }
+      // With adds, entryPrice is the average: the entry fill is the first tranche's.
+      const ref = op.which === 'entry' ? (r.entryDecision ?? (r.base ? r.base.price : r.entryPrice)) : (r.exitDecision ?? r.exitPrice);
       if (finite(ref) && ref! > 0 && Math.abs(op.price / ref! - 1) > FILL_BAND) return { ok: false, status: 422, error: `Fill ${op.price} is more than ${FILL_BAND * 100}% from the decision price ${ref}` };
       const rows = [...led.rows];
       if (op.which === 'entry') {
         if (r.state === 'entering' || r.state === 'unknownEntry') return { ok: false, status: 409, error: `Row is ${r.state}` };
         if (r.entryFilled) return { ok: true, ledger: led };
-        const next = { ...r, entryDecision: r.entryDecision ?? r.entryPrice, entryPrice: op.price, entryFilled: true };
-        rows[i] = r.state === 'closed' && r.exitPrice !== undefined ? { ...next, pnl: rowPnl(r.side, op.price, r.exitPrice, r.unitsPerPoint) } : next;
+        const next = r.base
+          ? withTranches({ ...r, entryDecision: r.entryDecision ?? r.base.price, entryFilled: true }, { ...r.base, price: op.price }, r.adds ?? [])
+          : { ...r, entryDecision: r.entryDecision ?? r.entryPrice, entryPrice: op.price, entryFilled: true };
+        rows[i] = r.state === 'closed' && r.exitPrice !== undefined ? { ...next, pnl: rowPnl(r.side, next.entryPrice, r.exitPrice, next.unitsPerPoint) } : next;
       } else {
         if (r.state !== 'closed' || r.exitPrice === undefined) return { ok: false, status: 409, error: `Row is ${r.state}` };
         if (r.exitFilled) return { ok: true, ledger: led };
@@ -248,6 +382,20 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       // A stale entering / exiting row (the tab died with the order on the wire) is resolved the same way as an unknown one.
       if (r.state === 'open' || r.state === 'closed') return { ok: false, status: 409, error: 'Only an unresolved row can be resolved' };
       const rows = [...led.rows];
+      const addState = r.state === 'adding' || r.state === 'unknownAdd';
+      if (addState !== (op.as === 'added' || op.as === 'notAdded') && !(addState && op.as === 'flat')) {
+        return { ok: false, status: 400, error: addState ? 'An unresolved add is resolved as added, not added or flat' : 'Resolve this row as open or flat' };
+      }
+      if (addState) {
+        // The add the user checked at the broker: it went through (counted, at its decision price) or it did not (dropped). Flat: dropped too.
+        const adds = (r.adds ?? []).filter(a => a.status === 'done' || op.as === 'added').map(a => (a.status === 'pending' ? { ...a, status: 'done' as const } : a));
+        const next = { ...withTranches(r, baseOf(r), adds), pendingSince: undefined };
+        if (op.as === 'flat') {
+          const px = finite(op.exitPrice) ? op.exitPrice! : next.entryPrice;
+          rows[i] = { ...next, state: 'closed', exitT: op.t, exitPrice: px, reason: 'resolved', pnl: rowPnl(r.side, next.entryPrice, px, next.unitsPerPoint), note: 'resolved by the user: flat' };
+        } else rows[i] = { ...next, state: 'open', note: `resolved by the user: add ${op.as === 'added' ? 'went through' : 'did not happen'}` };
+        return bump(rows);
+      }
       if (op.as === 'open') rows[i] = { ...r, state: 'open', note: 'resolved by the user: open' };
       else {
         const px = finite(op.exitPrice) ? op.exitPrice! : r.entryPrice;
@@ -311,7 +459,7 @@ export function autoDaySummary(rows: AutoRow[], day: string, mode: AutoMode, pri
       const p = r.pnl ?? 0;
       s.realised += p; s.closed++;
       if (p > 0) s.wins++; else if (p < 0) s.losses++;
-    } else if (r.state === 'open') {
+    } else if (r.state === 'open' || r.state === 'adding' || r.state === 'unknownAdd') {
       s.open++;
       const px = priceOf(r.targetKey);
       if (px === null || !(px > 0)) s.unpriced++;
@@ -334,7 +482,8 @@ export function autoMarkers(rows: AutoRow[], tk: string): { id: string; t: numbe
   for (const r of rows) {
     if (r.targetKey !== tk || r.state === 'entering' || r.state === 'unknownEntry') continue;
     if (r.state === 'closed' && r.reason === 'refused') continue;          // never opened
-    out.push({ id: `${r.id}:in`, t: r.entryBarT, action: r.side, price: r.entryBox ?? r.entryPrice, lots: r.lots, mode: r.mode });
+    out.push({ id: `${r.id}:in`, t: r.entryBarT, action: r.side, price: r.entryBox ?? (r.base ? r.base.price : r.entryPrice), lots: r.base ? r.base.lots : r.lots, mode: r.mode });
+    for (const a of r.adds ?? []) if (a.status === 'done') out.push({ id: `${r.id}:add:${a.id}`, t: a.barT, action: r.side, price: a.box ?? a.price, lots: a.lots, mode: r.mode });
     if (r.state === 'closed' && r.reason !== 'resolved' && r.exitPrice !== undefined && r.exitT !== undefined) {
       const t = r.exitBarT ?? Math.floor(r.exitT / 60) * 60 - 60;
       out.push({ id: `${r.id}:out`, t, action: r.side === 'BUY' ? 'SELL' : 'BUY', price: r.exitBox ?? r.exitPrice, lots: r.lots, mode: r.mode });

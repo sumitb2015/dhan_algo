@@ -80,6 +80,28 @@ In priority order:
 
 Exits keep running for an open position even when AUTO is switched off.
 
+### Adding lots on new best bricks (`+1L/brick`)
+
+Optional, per chart, Renko only: the **`+1L/brick`** switch next to the AUTO lots box, with a **Max** box (total lots, default 10, at most 20).
+Both are set before arming and locked while AUTO is armed. Saved per chart and on the AUTO arming, so a reload resumes them.
+
+- While a position is open and AUTO is armed, AUTO adds **one lot** when the newest closed bar prints a brick in the position's direction that
+  closes **beyond the best brick close since the entry** (a short: a new lower brick; a long: a new higher brick). The entry brick's close is
+  the starting level.
+- A pullback that only gets back to a level already reached adds nothing. **At most one lot per bar**, however many bricks it printed.
+  Bricks on an older bar (a sleeping tab) are never chased. No adds after the entry cutoff (15:05 NSE) or with a stale feed.
+- Adds stop at **Max**. The cap is saved on the row at entry, and a new arming can only lower it.
+- The position exits as **one**: the exit rule, the MTM guard, the end of day and the Exit button all close every lot (exits send the row's total units).
+  The next entry starts again at the base lots.
+- The row keeps one **average entry price** over all lots (status line: `SHORT 3L (1+2) @ 99.87 avg`), so its P&L and the MTM guard
+  cover the whole position. An add at the market price does not move the MTM. **Box levels of the MTM guard are worth more as lots are added**
+  (one box = box size x the current total size).
+- PAPER books each add at its brick close. REAL reserves the add (`adding`), sends one lot in the position's direction on the broker the row was
+  opened on, then confirms it. The broker's fill replaces the decision price for that lot once read. A refused add waits for the next
+  new best brick. An add with an unclear outcome (no reply, a partial fill, or placed units that do not match) halts the chart and is **never resent**:
+  check the broker, then click **Add went through**, **Add did not happen** or **Is flat**. Until then the row cannot be exited by the
+  guard or the end-of-day watcher (the server logs a warning after 60 s).
+
 ## 5. Orders and brokers
 
 - **PAPER** sends nothing and books at the **brick edge** (the brick's close). **REAL** books the **live price** at the decision first, then **replaces it with the broker's average traded price** once the orders are final

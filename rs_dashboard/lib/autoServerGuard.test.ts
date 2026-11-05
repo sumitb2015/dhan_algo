@@ -88,3 +88,13 @@ test('ownHeldQty: what the broker still shows of a row (0 = closed outside AUTO)
   assert.equal(ownHeldQty(row({ legs: [{ label: 'x', key: null, units: 20 }] }), mis(20), 'kotak'), null);
   assert.equal(ownHeldQty(row({ legs: [] }), mis(20), 'kotak'), null);
 });
+
+test('a pyramid add at the market price leaves the guard\'s MTM unchanged (average entry x total size)', async () => {
+  const { withTranches, baseOf } = await import('./pnfAutoLedger.ts');
+  const r0 = row({ lots: 1, unitsPerPoint: 10, legs: [{ label: 'F', key: '1', units: 10 }] });
+  const before = stepRow(r0, cfg(), 8990, {}).mtm;                              // short from 9000, now 8990: +100
+  const r1 = withTranches(r0, baseOf(r0), [{ id: 'a1', t: 1, barT: 1, lots: 1, units: [10], unitsPerPoint: 10, price: 8990, status: 'done' }]);
+  assert.equal(before, 100);
+  assert.ok(Math.abs(stepRow(r1, cfg(), 8990, {}).mtm - before) < 1e-6);
+  assert.ok(Math.abs(stepRow(r1, cfg(), 8980, {}).mtm - 300) < 1e-6);         // 20 x 10 + 10 x 10
+});

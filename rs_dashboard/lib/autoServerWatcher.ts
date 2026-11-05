@@ -236,6 +236,10 @@ async function tick(): Promise<void> {
       for (const row of readAutoLedger(scope).rows) {
         if (row.mode !== 'REAL' || row.state === 'closed') continue;
         liveRuntimeKeys.add(runtimeKey(scope, row.chart, row.id));
+        // A pyramid add stuck on the wire: the row cannot be exited (guard or end of day) until the user says whether the lot was added.
+        if ((row.state === 'adding' || row.state === 'unknownAdd') && nowS - (row.pendingSince ?? row.entryT) > 60) {
+          await warn(scope, row, `chart ${row.chart}'s added lot has an unclear outcome - no guard or end-of-day exit until it is resolved on the page (check the broker)`);
+        }
         if (row.state !== 'open') continue;
         const cfg = guards(file.cfg[keyOf(scope, row.chart)], row) ? file.cfg[keyOf(scope, row.chart)] : undefined;
         // A row from an earlier day is not priced against today's market: it is reported, never exited on a stale entry price.

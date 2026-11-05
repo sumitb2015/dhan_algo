@@ -452,3 +452,75 @@ test('an entry whose ledger write fails (nothing sent) is retried on the next ti
   expect(orders.filter(o => o.action === 'SELL').length, 'the paper order route is asked again; nothing is doubled in the ledger').toBeGreaterThanOrEqual(1);
   expect(state.ledger.log.some(l => /signal not entered yet: the ledger refused it/.test(l.text))).toBe(true);
 });
+
+test('PAPER pyramid: +1L/brick adds one lot per bar on a new best brick, up to Max, booked at the brick; the exit closes every lot', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await openFuture(page);
+  const auto = page.getByTestId('pnf-auto-1');
+  await auto.getByTestId('pnf-auto-pyr-1').click();
+  const max = auto.getByTestId('pnf-auto-pyr-max-1');
+  await max.fill('3');
+  await max.press('Enter');
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect(auto).toHaveAttribute('data-armed', 'true');
+  await expect(auto.getByTestId('pnf-auto-pyr-1')).toBeDisabled();
+
+  await page.clock.setFixedTime(ist(10, 31, 5));                       // SELL entered at 100.0
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('open');
+  expect(state.ledger.rows[0]).toMatchObject({ lots: 1, pyramidMax: 3 });
+
+  state.tick = { ltp: 99.85, at: ist(10, 31, 20) };                     // a new lower brick (99.9) on the 10:31 bar
+  await page.clock.setFixedTime(ist(10, 32, 5));
+  await expect.poll(() => state.ledger.rows[0]?.lots, { timeout: 15_000 }).toBe(2);
+  expect(state.ledger.rows[0].adds![0].price).toBeCloseTo(99.9, 6);
+
+  state.tick = { ltp: 99.65, at: ist(10, 32, 20) };                     // two new bricks on one bar: still one lot
+  await page.clock.setFixedTime(ist(10, 33, 5));
+  await expect.poll(() => state.ledger.rows[0]?.lots, { timeout: 15_000 }).toBe(3);
+  expect(state.ledger.rows[0].adds![1].price).toBeCloseTo(99.7, 6);
+  await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 3L (1+2)');
+
+  state.tick = { ltp: 99.45, at: ist(10, 33, 20) };                     // at Max: no more adds
+  await page.clock.setFixedTime(ist(10, 34, 5));
+  await page.waitForTimeout(2500);
+  expect(state.ledger.rows[0].lots).toBe(3);
+
+  state.tick = { ltp: 99.75, at: ist(10, 34, 20) };                     // the first up brick exits all 3 lots
+  await page.clock.setFixedTime(ist(10, 35, 5));
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('closed');
+  const r = state.ledger.rows[0];
+  expect(r.lots).toBe(3);
+  expect(r.unitsPerPoint).toBe(195);
+  // (100.0 + 99.9 + 99.7) - 3 x exit, x 65
+  expect(r.pnl).toBeCloseTo((100 + 99.9 + 99.7 - 3 * r.exitPrice!) * 65, 4);
+  expect(orders.every(o => o.mode === 'PAPER')).toBe(true);
+});
+
+test('REAL pyramid: the add is reserved then sent as 1 lot in the row\'s direction; the exit sends exitOwn with every lot\'s units', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { orders, state } = await install(page);
+  await openFuture(page);
+  page.once('dialog', d => { void d.accept(); });
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  const auto = page.getByTestId('pnf-auto-1');
+  await auto.getByTestId('pnf-auto-pyr-1').click();
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect(auto).toHaveAttribute('data-armed', 'true');
+
+  await page.clock.setFixedTime(ist(10, 31, 5));
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('open');
+  state.tick = { ltp: 99.85, at: ist(10, 31, 20) };
+  await page.clock.setFixedTime(ist(10, 32, 5));
+  await expect.poll(() => state.ledger.rows[0]?.lots, { timeout: 15_000 }).toBe(2);
+  expect(orders[1]).toMatchObject({ mode: 'REAL', action: 'SELL', lots: 1, source: 'auto', scope: 'renko' });
+  expect(state.ledger.rows[0].legs[0].units).toBe(130);
+  expect(state.ledger.rows[0].adds![0]).toMatchObject({ status: 'done', orderIds: ['O1'] });
+
+  state.tick = { ltp: 100.15, at: ist(10, 32, 20) };                     // a 2-box up brick (100.0-100.1): exit
+  await page.clock.setFixedTime(ist(10, 33, 5));
+  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('closed');
+  expect(orders[2]).toMatchObject({ mode: 'REAL', exitOwn: { side: 'BUY', units: [130] } });
+  expect(orders.length).toBe(3);
+});

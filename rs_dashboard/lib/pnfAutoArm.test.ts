@@ -62,3 +62,11 @@ test('resumeArm: an arm from another day, or one the server guard ended, is spen
   const older = resumeArm(rec, { ...ctx, rows: [row({ exitT: 800, reason: 'server guard: stop' })] });
   assert.equal(older.ok, true, 'a guard exit before the arming does not count');
 });
+
+test('an arm record keeps a valid Renko pyramid and drops a bad one', async () => {
+  const { parseLedger } = await import('./pnfAutoLedger.ts');
+  const arm = (pyramid: unknown) => ({ mode: 'PAPER', broker: 'dhan', targetKey: 'k', day: '2026-11-05', t: 1, watermarkT: 1, lots: 2, pyramid });
+  const ok = parseLedger({ rev: 1, rows: [], log: [], arms: { 1: arm({ max: 6 }), 2: arm({ max: 99 }) } });
+  assert.deepEqual(ok.arms?.['1']?.pyramid, { max: 6 });
+  assert.equal(ok.arms?.['2']?.pyramid, undefined);
+});

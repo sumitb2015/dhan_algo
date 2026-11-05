@@ -46,7 +46,10 @@ export function buildPaperTrades(markers: Record<string, PnfExecutionMarker[]>, 
     if (r.state === 'closed' && r.reason === 'refused') continue;            // never opened
     const label = targetLabel(r.target);
     if (istDateIso(r.entryT * 1000) === day) {
-      out.push({ id: `a:${r.id}:in`, t: r.entryT, instrument: label, source: 'AUTO', side: r.side, lots: r.lots, price: r.entryPrice, note: `C${r.chart} entry` });
+      out.push({ id: `a:${r.id}:in`, t: r.entryT, instrument: label, source: 'AUTO', side: r.side, lots: r.base ? r.base.lots : r.lots, price: r.base ? r.base.price : r.entryPrice, note: `C${r.chart} entry` });
+    }
+    for (const a of r.adds ?? []) {
+      if (a.status === 'done' && istDateIso(a.t * 1000) === day) out.push({ id: `a:${r.id}:add:${a.id}`, t: a.t, instrument: label, source: 'AUTO', side: r.side, lots: a.lots, price: a.price, note: `C${r.chart} add` });
     }
     if (r.state === 'closed' && r.reason !== 'resolved' && r.exitPrice !== undefined && r.exitT !== undefined && istDateIso(r.exitT * 1000) === day) {
       const pnl = r.pnl === undefined ? '' : ` · ${r.pnl < 0 ? '-' : r.pnl > 0 ? '+' : ''}₹${Math.abs(Math.round(r.pnl)).toLocaleString('en-IN')}`;
