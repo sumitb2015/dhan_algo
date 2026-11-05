@@ -133,6 +133,8 @@ Opt-in per chart on `/renko` (not P&F, not Replay). User guide: `docs/RENKO_AUTO
   re-bought on the same brick (19:44:01 exit @ 8482, 19:44:02 BUY 4L @ 8485, REAL). `reentryBlockOf(lastRow, model)` (last row of the chart,
   closed by `trail`, same contract / mode / day) → `decideAuto({ reentryBlock })` holds same-side signals until `reentryLifted`: a brick after
   the exit bar closes strictly beyond the trade's best brick close. Opposite side unaffected. Rejected: Supertrend-flip-only, N-brick cooldown.
+  Review fixes: an opposite-side signal after the exit bar (read from the rule model BEFORE the side filter) ends the wait; the day is the
+  exit's (`exitT`), not the entry's; the best is saved on the row at the exit (`trailBest`, close op) and used over a chart recompute.
 - Review fixes (2026-11-05): the server's `exitRow` sizes from the row re-read after `beginExit` (never the tick snapshot); `reservedByAuto`
   counts a pending add's units; a stuck add (> 60 s) is exited by the server with `beginExit withPendingAdd` (confirmed + pending units capped
   by the broker, `close.pendingAdded` settles it; `abortExit` restores the add state), except when a sibling live REAL row holds the same

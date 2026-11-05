@@ -330,3 +330,10 @@ test('trailing SL: open accepts trailBoxes 1-20; the arm record keeps pyramid.tr
   assert.deepEqual(p({ max: 5, trail: 0 }), { max: 5, trail: 0 }, 'armed with the trail off is kept as 0 (absent means armed before the setting)');
   assert.deepEqual(p({ max: 5, trail: 21 }), { max: 5 });
 });
+
+test('a trail exit keeps the trade best on the row (the re-entry level)', () => {
+  const l = run(EMPTY_LEDGER, { op: 'open', row: row({}) });
+  const c = run(l, { op: 'close', id: 'r1', exitT: 2000, exitPrice: 99, reason: 'trail', exitBarT: 1980, exitBox: 99, trailBest: 104 });
+  assert.equal(c.rows[0].trailBest, 104);
+  assert.equal(run(l, { op: 'close', id: 'r1', exitT: 2000, exitPrice: 99, reason: 'trail', trailBest: NaN }).rows[0].trailBest, undefined);
+});

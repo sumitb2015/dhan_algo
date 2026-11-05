@@ -176,7 +176,7 @@ test('side filter: a buy-only chart never enters the sell signal on the last bar
 });
 
 // ── pyramid (decideAdd) ──
-import { decideAdd, pyramidEveryOf, PYRAMID_EVERY_MAX, reentryBlockOf, trailLevel, trailOf } from './pnfAuto.ts';
+import { decideAdd, pyramidEveryOf, PYRAMID_EVERY_MAX, reentryBlockOf, trailBest, trailLevel, trailOf } from './pnfAuto.ts';
 
 /** A Renko short entered on the 10:00 brick (close 100); bricks of box 1 after it: [time, dir, close]. */
 function renkoModel(bricks: [number, 'X' | 'O', number][], lastBarT: number): AutoModel {
@@ -310,6 +310,22 @@ test('after a trailing-SL exit the same side waits for a brick beyond the trade 
   // a short: best is the LOWEST brick close
   const down: [number, 'X' | 'O', number][] = [[ist(10, 1), 'O', 99], [ist(10, 2), 'O', 97], [ist(10, 3), 'X', 99]];
   assert.equal(reentryBlockOf({ ...row, side: 'SELL', entryBox: 100, entryPrice: 100, exitBarT: ist(10, 3) }, renkoModel(down, ist(10, 3)))!.beyond, 97);
+});
+
+test('re-entry wait (review fixes): an opposite signal since the exit ends it; the saved trail best wins over the chart', () => {
+  const bricks: [number, 'X' | 'O', number][] = [[ist(10, 1), 'X', 102], [ist(10, 2), 'X', 103], [ist(10, 3), 'X', 104], [ist(10, 4), 'O', 102]];
+  const row = { side: 'BUY' as const, state: 'closed', reason: 'trail', entryBarT: ist(10, 0), exitBarT: ist(10, 4), entryBox: 101, entryPrice: 101 };
+  const m = renkoModel(bricks, ist(10, 6));
+  // the Supertrend turned down after the exit (a SELL signal, even one the Buy only filter ignores): a new uptrend is not held
+  assert.equal(reentryBlockOf(row, { ...m, signals: [sig('RENKO_SELL', ist(10, 5))] }), undefined);
+  // a SELL signal on or before the exit bar, or a BUY after it, does not end the wait
+  assert.ok(reentryBlockOf(row, { ...m, signals: [sig('RENKO_SELL', ist(10, 4)), sig('RENKO_BUY', ist(10, 5))] }));
+  // the best saved at the exit is used as is (a box change since cannot move it)
+  assert.equal(reentryBlockOf({ ...row, trailBest: 8488 }, m)!.beyond, 8488);
+  // trailBest: the best favourable close since entry, null without an active trail
+  const pos = { side: 'BUY' as const, entryBarT: ist(10, 0), trail: trailOf({ entryPrice: 101, entryBox: 101, trailBoxes: 2, adds: [{ barT: ist(10, 2) }] }) };
+  assert.equal(trailBest(renkoModel(bricks, ist(10, 4)), pos), 104);
+  assert.equal(trailBest(renkoModel(bricks, ist(10, 4)), { side: 'BUY', entryBarT: ist(10, 0) }), null);
 });
 
 test('NRML (MARGIN) squares off NSE at 15:35 (entries stop 15:25), pulled inside an earlier close; MIS keeps 15:15; MCX is the same for both', () => {

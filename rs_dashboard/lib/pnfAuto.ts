@@ -126,6 +126,12 @@ export function boxPriceAt(model: Pick<AutoModel, 'columns' | 'box' | 'chart'>, 
   return c.low + (k + 0.5) * model.box;                     // glyph k is centred half a box above the column's lower edge
 }
 
+/** The best favourable brick close since entry (the trailing SL's reference), or null. Saved on the row at a trail exit. */
+export function trailBest(model: AutoModel, pos: AutoPosition): number | null {
+  if (!pos.trail || model.chart !== 'renko' || !(model.box > 0)) return null;
+  return walkTrail(model, pos).best;
+}
+
 /** Trailing SL limits (boxes back from the best brick). */
 export const TRAIL_BOXES_MAX = 20;
 
@@ -175,20 +181,25 @@ export function trailLevel(model: AutoModel, pos: AutoPosition): number | null {
 export type ReentryBlock = { side: AutoSide; beyond: number; afterBarT: number };
 
 /** The block a closed row leaves behind: only a `trail` exit with its exit bar, else undefined. */
-export function reentryBlockOf(row: { side: AutoSide; state: string; reason?: string; entryBarT: number; exitBarT?: number; entryBox?: number; base?: { price: number }; entryPrice: number },
-  model: Pick<AutoModel, 'columns' | 'columnTimes'>): ReentryBlock | undefined {
+export function reentryBlockOf(row: { side: AutoSide; state: string; reason?: string; entryBarT: number; exitBarT?: number; trailBest?: number; entryBox?: number; base?: { price: number }; entryPrice: number },
+  model: Pick<AutoModel, 'columns' | 'columnTimes' | 'signals'>): ReentryBlock | undefined {
   if (row.state !== 'closed' || row.reason !== 'trail' || row.exitBarT === undefined) return undefined;
   const sell = row.side === 'SELL';
+  // An opposite-side signal since the exit (the trend turned): a later same-side signal starts a NEW trend, not the trailed one's
+  // pullback. `model` must carry the rule's signals of BOTH sides (before the Buy only / Sell only filter), or this is never seen.
+  const exitBarT = row.exitBarT;
+  if (model.signals.some(s => s.t > exitBarT && isSellSignal(s.kind) !== sell)) return undefined;
+  if (row.trailBest !== undefined && Number.isFinite(row.trailBest)) return { side: row.side, beyond: row.trailBest, afterBarT: exitBarT };
   const want = sell ? 'O' : 'X';
   let best = row.entryBox ?? row.base?.price ?? row.entryPrice;
   for (let i = 0; i < model.columns.length; i++) {
     const start = model.columnTimes[i]?.start;
     const c = model.columns[i];
-    if (start === undefined || !(start > row.entryBarT) || start > row.exitBarT || c.dir !== want) continue;
+    if (start === undefined || !(start > row.entryBarT) || start > exitBarT || c.dir !== want) continue;
     const close = c.dir === 'X' ? c.high : c.low;
     if (sell ? close < best : close > best) best = close;
   }
-  return { side: row.side, beyond: best, afterBarT: row.exitBarT };
+  return { side: row.side, beyond: best, afterBarT: exitBarT };
 }
 
 /** The trend has resumed past the block: a brick after the exit bar, in the blocked direction, closed beyond its best. */

@@ -139,7 +139,9 @@ Both are set before arming and locked while AUTO is armed. Saved per chart and o
 - **After a Trail SL exit AUTO does not re-enter the same side on the pullback.** The Supertrend rule signals on every brick while the
   line points one way, so it used to buy straight back on the exit brick. Now a same-side entry waits until a brick closes **beyond the
   best brick** the trailed trade reached (the trend has resumed); the status says `trail exit: BUY waits for a brick beyond 8488.00`.
-  The opposite side still enters as soon as its signal comes. The wait lasts for the rest of the day on that contract, until the next trade.
+  The opposite side still enters as soon as its signal comes. The wait also ends when an opposite signal prints after the exit (the trend
+  turned, even if `Buy only` / `Sell only` ignored it, so a fresh trend is traded), or at the next trade. Otherwise it lasts the rest of the day
+  on that contract. The level is the best brick saved at the exit, so changing the box afterwards does not move it.
 - Adds stop at **Max**. The cap is saved on the row at entry, and a new arming can only lower it.
 - The position exits as **one**: the exit rule, the MTM guard, the end of day and the Exit button all close every lot (exits send the row's total units).
   The next entry starts again at the base lots.

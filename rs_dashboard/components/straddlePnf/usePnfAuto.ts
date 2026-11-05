@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { autoProductOf, decideAdd, decideAuto, reentryBlockOf, rowMarket, trailLevel, trailOf, type AutoProduct } from '@/lib/pnfAuto';
+import { autoProductOf, decideAdd, decideAuto, reentryBlockOf, rowMarket, trailBest, trailLevel, trailOf, type AutoProduct } from '@/lib/pnfAuto';
 import { ignoredByFilter, SIDE_LABEL, withSide, type AutoSide } from '@/lib/pnfAutoRule';
 import { isSellSignal } from '@/lib/straddlePnf';
 import { EMPTY_LEDGER, isLive, PYRAMID_HARD_MAX, type AutoLedger, type AutoLeg, type AutoOp, type AutoRow } from '@/lib/pnfAutoLedger';
@@ -313,11 +313,11 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
 
   /** `barT`: the bar that triggered the exit (the reversal column's first bar), for the chart marker. */
   /** True when the row was closed (PAPER ledger close, or a REAL exit the broker placed / found already flat). */
-  const exit = async (r: AutoRow, reason: string, px: number | null, barT?: number, box?: number | null): Promise<boolean> => {
+  const exit = async (r: AutoRow, reason: string, px: number | null, barT?: number, box?: number | null, best?: number | null): Promise<boolean> => {
     // PAPER books the confirmed box the reversal reached; REAL (and an EOD exit, which has no box) the live price. Only an EOD
     // exit can run without a price (E5): it books the entry price then.
     const exitPx = r.mode === 'PAPER' && box != null ? box : px ?? r.entryPrice;
-    const boxField = box != null ? { exitBox: box } : {};
+    const boxField = { ...(box != null ? { exitBox: box } : {}), ...(best != null ? { trailBest: best } : {}) };
     const side = r.side === 'BUY' ? 'SELL' : 'BUY';
     if (r.mode === 'PAPER') {
       const c = await post({ op: 'close', id: r.id, exitT: Date.now() / 1000, exitPrice: exitPx, reason, exitBarT: barT, ...boxField });
@@ -439,7 +439,8 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
         busyRef.current = true;
         const barT = (d.reason === 'reversal' || d.reason === 'trail') && d.col !== undefined ? model.columnTimes[d.col]?.start : undefined;
         let closed = false;
-        try { closed = await exit(row, d.reason, price, barT, d.boxPrice); } finally { busyRef.current = false; }
+        const best = d.reason === 'trail' ? trailBest(model, position) : null;   // fixed on the row: the re-entry level after this exit
+        try { closed = await exit(row, d.reason, price, barT, d.boxPrice, best); } finally { busyRef.current = false; }
         // A rule exit with AUTO off (a reload, another tab, a halt) is the end of the trade: said out loud, so a missing re-entry is never silent.
         if (closed && !arm.on && d.reason !== 'eod') {
           const text = `exited (${d.reason}) while AUTO was OFF on this chart: no re-entry - arm AUTO to trade the next signal`;
@@ -453,8 +454,12 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
       if (target.kind === 'index') { setNote('an index cannot be traded'); return; }
       if (!complete || stale || price === null) { setNote(stale ? 'feed stale: no entries' : 'waiting for a price'); return; }
       // The chart's last trade, if the trailing SL closed it today on this contract in this mode: same-side entries wait for a new best brick.
+      // The EXIT's day (an NRML trade opened yesterday and trailed out today still blocks), and the rule's signals of both sides (an
+      // opposite signal the Buy only / Sell only filter ignores still ends the wait: the trend turned).
       const lastRow = [...ledger.rows].reverse().find(r => r.chart === chart);
-      const reentryBlock = lastRow && lastRow.targetKey === tk && lastRow.mode === arm.mode && lastRow.day === istDateIso(Date.now()) ? reentryBlockOf(lastRow, model) : undefined;
+      const today = istDateIso(Date.now());
+      const reentryBlock = lastRow && lastRow.targetKey === tk && lastRow.mode === arm.mode && lastRow.exitT !== undefined && istDateIso(lastRow.exitT * 1000) === today
+        ? reentryBlockOf(lastRow, ruleModel) : undefined;
       const d = decideAuto({ model, position: null, watermarkT: watermarkRef.current, nowS, market, product: target.kind === 'equity' ? 'INTRADAY' : autoProductOf(arm.product), reentryBlock });
       // A signal whose entry kept failing before anything was sent, and is no longer enterable (a newer bar closed, it aged out): said once.
       const pending = retryRef.current;

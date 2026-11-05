@@ -97,6 +97,8 @@ export interface AutoRow {
   exitPrice?: number;
   /** The confirmed box the reversal reached (none for an EOD exit): where the exit marker sits. */
   exitBox?: number;
+  /** A `trail` exit: the best brick close the trade reached (fixed at the exit, so a later box change cannot move the re-entry level). */
+  trailBest?: number;
   reason?: string;
   pnl?: number;
   note?: string;
@@ -182,7 +184,7 @@ export type AutoOp =
   | { op: 'abortExit'; id: string; note: string }
   | { op: 'markUnknown'; id: string; note: string }
   /** `pendingAdded`: a row exited with a pending add - whether the exit found the added lot at the broker (it is then counted at its decision price). */
-  | { op: 'close'; id: string; exitT: number; exitPrice: number; reason: string; note?: string; exitBarT?: number; exitBox?: number; orderIds?: string[]; pendingAdded?: boolean }
+  | { op: 'close'; id: string; exitT: number; exitPrice: number; reason: string; note?: string; exitBarT?: number; exitBox?: number; trailBest?: number; orderIds?: string[]; pendingAdded?: boolean }
   | { op: 'fillPrice'; id: string; which: 'entry' | 'exit' | 'add'; price: number; /** how many orders were summed: must be one per leg */ legCount: number; /** which === 'add' */ addId?: string }
   | { op: 'resolve'; id: string; as: 'open' | 'flat' | 'added' | 'notAdded'; exitPrice?: number; t: number }
   /** Pyramid: reserve a REAL add (open → adding) before its order is sent. */
@@ -377,6 +379,7 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       rows[i] = {
         ...settled, state: 'closed', exitT: op.exitT, exitPrice: op.exitPrice, reason: op.reason, pnl: rowPnl(r.side, settled.entryPrice, op.exitPrice, settled.unitsPerPoint),
         note: op.note ?? r.note, ...(finite(op.exitBarT) ? { exitBarT: op.exitBarT } : {}), ...(finite(op.exitBox) ? { exitBox: op.exitBox } : {}),
+        ...(finite(op.trailBest) ? { trailBest: op.trailBest } : {}),
         ...(cleanIds(op.orderIds) ? { exitOrderIds: cleanIds(op.orderIds) } : {}),
       };
       return bump(rows);
