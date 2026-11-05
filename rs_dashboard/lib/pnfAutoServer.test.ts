@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { reservedByAuto } from './pnfAutoServer.ts';
+import { exitingAutoProduct, reservedByAuto } from './pnfAutoServer.ts';
 import type { AutoLedger, AutoRow } from './pnfAutoLedger.ts';
 
 const row = (o: Partial<AutoRow>): AutoRow => ({
@@ -34,4 +34,19 @@ test('a pyramid add whose outcome is open (adding / unknownAdd) reserves its uni
   assert.deepEqual(reservedByAuto(led, 'dhan', 'F', 1), [-260]);
   const done: AutoLedger = { rev: 1, log: [], rows: [row({ lots: 2, legs: [{ label: 'x', key: '1', units: 130 }], adds: [{ ...pending, status: 'done' }] })] };
   assert.deepEqual(reservedByAuto(done, 'dhan', 'F', 1), [-130], 'a confirmed add is already in the legs: not counted twice');
+});
+
+test('reservedByAuto counts one product at a time (MIS rows for the MIS book row, NRML rows for the NRML one)', () => {
+  const led: AutoLedger = { rev: 1, log: [], rows: [row({}), row({ id: 'n', product: 'MARGIN', legs: [{ label: 'x', key: '1', units: 130 }] })] };
+  assert.deepEqual(reservedByAuto(led, 'dhan', 'F', 1), [-65]);
+  assert.deepEqual(reservedByAuto(led, 'dhan', 'F', 1, undefined, 'MARGIN'), [-130]);
+});
+
+test('exitingAutoProduct: the product of the row reserved for this exit comes from the ledger; none or a disagreement = null', () => {
+  const ex = (o: Partial<AutoRow>) => row({ state: 'exiting', ...o });
+  assert.equal(exitingAutoProduct({ rev: 1, log: [], rows: [ex({ product: 'MARGIN' })] }, 'dhan', 'F', 'BUY'), 'MARGIN', 'a short is closed by a BUY');
+  assert.equal(exitingAutoProduct({ rev: 1, log: [], rows: [ex({})] }, 'dhan', 'F', 'BUY'), 'INTRADAY');
+  assert.equal(exitingAutoProduct({ rev: 1, log: [], rows: [ex({ product: 'MARGIN' })] }, 'dhan', 'F', 'SELL'), null, 'wrong closing side');
+  assert.equal(exitingAutoProduct({ rev: 1, log: [], rows: [row({ product: 'MARGIN' })] }, 'dhan', 'F', 'BUY'), null, 'not reserved for an exit');
+  assert.equal(exitingAutoProduct({ rev: 1, log: [], rows: [ex({ product: 'MARGIN' }), ex({ id: 'm', chart: 2 })] }, 'dhan', 'F', 'BUY'), null, 'two rows disagree');
 });

@@ -12,7 +12,7 @@ import { CloseGuard } from '@/lib/priceLadderClose';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { targetKey } from '@/lib/pnfTarget';
 import { chartPrice, guards, ownHeldQty, runtimeKey, stepRow, type RowRuntime, type ServerGuardCfg } from '@/lib/autoServerGuard';
-import { autoWindow, rowMarket } from '@/lib/pnfAuto';
+import { autoProductOf, autoWindow, rowMarket } from '@/lib/pnfAuto';
 import { istMinuteOfDay, sessionWindow } from '@/lib/straddlePnfLive';
 import { istDateIso } from '@/lib/nseHolidays';
 import { pendingAddUnits, type AutoOp } from '@/lib/pnfAutoLedger';
@@ -100,7 +100,7 @@ async function mustApply(scope: PnfScope, rowId: string, op: AutoOp): Promise<vo
  * pyramid add (adding / unknownAdd, see tick): the exit covers the confirmed units plus the pending add's, capped by what the broker shows,
  * and the close records whether the added lot was there.
  */
-async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: number, withPendingAdd = false): Promise<void> {
+async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: number, withPendingAdd = false, eod = false): Promise<void> {
   let row = snap;
   const t = () => Date.now() / 1000;
   const log = (text: string) => applyAutoLedgerOp(scope, { op: 'log', chart: row.chart, t: t(), text });
@@ -115,8 +115,10 @@ async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: nu
   const abort = async (why: string) => {
     await applyAutoLedgerOp(scope, { op: 'abortExit', id: row.id, note: why });
     const n = att.n + 1;
-    attempts.set(row.id, { n: n >= MAX_ATTEMPTS ? 0 : n, nextAt: Date.now() + (n >= MAX_ATTEMPTS ? STAND_DOWN_MS : EXIT_RETRY_MS) });
-    await warn(scope, row, n >= MAX_ATTEMPTS
+    // The end-of-day exit never stands down: an NRML position has 5 minutes before the close and no broker square-off behind it.
+    const standDown = n >= MAX_ATTEMPTS && !eod;
+    attempts.set(row.id, { n: standDown ? 0 : n, nextAt: Date.now() + (standDown ? STAND_DOWN_MS : EXIT_RETRY_MS) });
+    await warn(scope, row, standDown
       ? `exit failed ${n} times (${why}) - standing down for a minute; close the position by hand if it matters`
       : `exit not sent (${why}); retrying in ${EXIT_RETRY_MS / 1000} s`);
   };
@@ -141,7 +143,7 @@ async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: nu
     const rows = await brokerPositionRows(broker);
     if (!rows) return void await abort(`could not read the ${broker} positions`);
     const side = row.side === 'BUY' ? 'SELL' : 'BUY';
-    const plans = onBroker.map((l, i) => ({ leg: l, ...planOwnExit(l.key, rows, side, row.legs[i].units + (pend[i] ?? 0), broker) }));
+    const plans = onBroker.map((l, i) => ({ leg: l, ...planOwnExit(l.key, rows, side, row.legs[i].units + (pend[i] ?? 0), broker, autoProductOf(row.product)) }));
     // the broker held more than the confirmed units: the stuck add's lot was there (planOwnExit caps by the broker's own quantity)
     const pendingAdded = withPendingAdd ? plans.some((p, i) => p.qty > row.legs[i].units) : undefined;
     const results: LegResult[] = [];
@@ -246,7 +248,8 @@ async function tick(): Promise<void> {
     /** `cfg` set: the page's guard is synced for this row (stop-loss, target, ... enforced). Unset: the row only gets the end-of-day exit. */
     const todo: { scope: PnfScope; row: AutoRow; cfg: ServerGuardCfg | undefined; win: { open: number; entryCutoff: number; eodExit: number }; stuckAdd: boolean }[] = [];
     const allLive = SCOPES.flatMap(sc => readAutoLedger(sc).rows.filter(r => r.mode === 'REAL' && r.state !== 'closed'));
-    const hasSibling = (row: AutoRow) => allLive.some(r => r.id !== row.id && r.broker === row.broker && r.targetKey === row.targetKey);
+    // Same contract, broker AND product: exits are capped by that product's broker row only, so an MIS row cannot take an NRML row's units.
+    const hasSibling = (row: AutoRow) => allLive.some(r => r.id !== row.id && r.broker === row.broker && r.targetKey === row.targetKey && autoProductOf(r.product) === autoProductOf(row.product));
     const liveRuntimeKeys = new Set<string>();
     for (const scope of SCOPES) {
       for (const row of readAutoLedger(scope).rows) {
@@ -264,8 +267,14 @@ async function tick(): Promise<void> {
         if (row.state !== 'open' && !stuckAdd) continue;
         const cfg = guards(file.cfg[keyOf(scope, row.chart)], row) ? file.cfg[keyOf(scope, row.chart)] : undefined;
         // A row from an earlier day is not priced against today's market: it is reported, never exited on a stale entry price.
-        if (row.day !== today) { if (cfg) await warn(scope, row, `chart ${row.chart}'s open row is from ${row.day}, not today - not guarded; check the broker and resolve it`); continue; }
-        const win = autoWindow(rowMarket(row), nowS);
+        // An NRML row whose end-of-day exit was missed is carried overnight with no broker square-off behind it: always said, guard or not.
+        if (row.day !== today) {
+          const text = `chart ${row.chart}'s ${autoProductOf(row.product) === 'MARGIN' ? 'NRML ' : ''}position from ${row.day} is STILL OPEN - AUTO does not exit an earlier day's row; close it at the broker and resolve it on the page`;
+          if (Date.now() - (lastWarned.get(`${scope}:${row.chart}:${text}`) ?? 0) >= WARN_REPEAT_MS) console.error(`[auto-server-guard] ${scope}: ${text}`);
+          await warn(scope, row, text);
+          continue;
+        }
+        const win = autoWindow(rowMarket(row), nowS, autoProductOf(row.product));
         if (!win || minute < win.open) continue;                      // shut today / before the open: nothing to act on
         // After the close an exit cannot trade: say so (once in a while) instead of sending orders into a shut market every few seconds.
         if (minute >= sessionWindow(rowMarket(row), nowS)[1]) { await warn(scope, row, `chart ${row.chart}'s position is still open after the market closed - not exited; check the broker and resolve it`); continue; }
@@ -295,7 +304,7 @@ async function tick(): Promise<void> {
       if (minute >= win.eodExit) {
         // The end of day comes first and needs no price: the position must be flat before the broker's own square-off. With no price the
         // exit is booked at the entry price (as the tab's own end-of-day exit does when it has none) and the ledger says so.
-        await exitRow(scope, row, price === null ? 'end of day (no live price)' : 'end of day', price ?? row.entryPrice, stuckAdd);
+        await exitRow(scope, row, price === null ? 'end of day (no live price)' : 'end of day', price ?? row.entryPrice, stuckAdd, true);
         continue;
       }
       if (!cfg) continue;

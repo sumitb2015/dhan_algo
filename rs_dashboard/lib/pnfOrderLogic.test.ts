@@ -190,3 +190,27 @@ test('parsePnfOrder: a close may name the guarding chart (1 / 2) so the other ch
   assert.ok(typeof bar !== 'string' && bar.guardChart === undefined, 'a trade-bar square off names no chart');
   assert.equal(parsePnfOrder({ broker: 'kotak', mode: 'REAL', target: fut, close: true, guardChart: 3 }), 'guardChart must be 1 or 2');
 });
+
+test('NRML AUTO rows: exitOwn carries the product, planOwnExit closes only that product, a square-off keeps NRML reservations out of the NRML row', async () => {
+  const { planOwnExit } = await import('./pnfOrderLogic.ts');
+  const rows = [{ key: '111', product: 'INTRADAY', net: -65 }, { key: '111', product: 'MARGIN', net: -130 }];
+  assert.deepEqual(planOwnExit('111', rows, 'BUY', 130, 'dhan', 'MARGIN'), { qty: 130, product: 'MARGIN' });
+  assert.deepEqual(planOwnExit('111', rows, 'BUY', 130, 'dhan'), { qty: 65, product: 'INTRADAY' }, 'MIS by default');
+  assert.deepEqual(planOwnExit('111', [{ key: '111', product: 'NRML', net: 20 }], 'SELL', 20, 'kotak', 'MARGIN'), { qty: 20, product: 'NRML' });
+  const x = parsePnfOrder({ broker: 'dhan', mode: 'REAL', target: fut, exitOwn: { side: 'BUY', units: [65], product: 'MARGIN' } });
+  assert.ok(typeof x !== 'string' && x.exitOwn?.product === 'MARGIN' && x.product === 'MARGIN');
+  const y = parsePnfOrder({ broker: 'dhan', mode: 'REAL', target: fut, exitOwn: { side: 'BUY', units: [65] } });
+  assert.ok(typeof y !== 'string' && y.exitOwn?.product === 'INTRADAY', 'an older tab without a product exits MIS');
+  assert.equal(typeof parsePnfOrder({ broker: 'dhan', mode: 'REAL', target: fut, exitOwn: { side: 'BUY', units: [65], product: 'CNC' } }), 'string');
+  assert.deepEqual(planLegCloseKeeping('111', rows, 0, 'dhan', -65), [{ side: 'BUY', qty: 65, product: 'INTRADAY' }, { side: 'BUY', qty: 65, product: 'MARGIN' }]);
+  assert.deepEqual(planLegCloseKeeping('111', rows, -65, 'dhan', -130), []);
+});
+
+test('a CNC stock bracket exits its CNC row (exitOwn.product CNC), never the MIS one; CNC is refused on F&O and NRML on a stock', async () => {
+  const { planOwnExit } = await import('./pnfOrderLogic.ts');
+  const x = parsePnfOrder({ broker: 'dhan', mode: 'REAL', target: eq, exitOwn: { side: 'SELL', units: [10], product: 'CNC' } });
+  assert.ok(typeof x !== 'string' && x.exitOwn?.product === 'CNC');
+  assert.deepEqual(planOwnExit('9', [{ key: '9', product: 'CNC', net: 10 }], 'SELL', 10, 'dhan', 'CNC'), { qty: 10, product: 'CNC' });
+  assert.equal(typeof parsePnfOrder({ broker: 'dhan', mode: 'REAL', target: eq, exitOwn: { side: 'SELL', units: [10], product: 'MARGIN' } }), 'string');
+  assert.equal(typeof parsePnfOrder({ broker: 'dhan', mode: 'REAL', target: fut, exitOwn: { side: 'SELL', units: [10], product: 'CNC' } }), 'string');
+});

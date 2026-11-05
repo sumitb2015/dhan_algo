@@ -3,6 +3,7 @@ import path from 'path';
 import { applyAutoOp, isLive, parseLedger, pendingAddUnits, type AutoLedger, type AutoOp } from './pnfAutoLedger.ts';
 import { withFileLock, writeJsonAtomic } from './lockedJsonFile.ts';
 import type { PnfScope } from './pnfScope.ts';
+import { autoProductOf, type AutoProduct } from './pnfOrderLogic.ts';
 
 // The P&F / Renko AUTO ledger files (debug/pnf_auto_state.json, debug/renko_auto_state.json), read by the ledger route and by the
 // order route, which keeps a close on one page from taking the quantity the OTHER page's AUTO holds on the same contract.
@@ -19,10 +20,11 @@ export function readAutoLedger(scope: PnfScope): AutoLedger {
  * row that is not closed counts (entering / exiting / unknown included): while its outcome is open its quantity is reserved.
  * `exceptChart`: leave that chart's rows out (this page's own ledger, read for the OTHER chart when chart N's MTM guard closes).
  */
-export function reservedByAuto(ledger: AutoLedger, broker: string, targetKey: string, legs: number, exceptChart?: 1 | 2): number[] {
+export function reservedByAuto(ledger: AutoLedger, broker: string, targetKey: string, legs: number, exceptChart?: 1 | 2, product: AutoProduct = 'INTRADAY'): number[] {
   const out = new Array<number>(legs).fill(0);
   for (const r of ledger.rows) {
     if (!isLive(r) || r.mode !== 'REAL' || r.broker !== broker || r.targetKey !== targetKey) continue;
+    if (autoProductOf(r.product) !== product) continue;   // each product's broker row keeps its own rows' units
     if (exceptChart !== undefined && r.chart === exceptChart) continue;       // the guarding chart's own row: it is the one being closed
     const sign = r.side === 'BUY' ? 1 : -1;
     // a pyramid add whose outcome is open may be live at the broker: its units are reserved too
@@ -30,6 +32,18 @@ export function reservedByAuto(ledger: AutoLedger, broker: string, targetKey: st
     r.legs.forEach((l, i) => { if (i < legs) out[i] += sign * ((Number(l.units) || 0) + (pend[i] || 0)); });
   }
   return out;
+}
+
+/**
+ * The product of the AUTO row an `exitOwn` order is closing, read from the ledger, never from the request: the REAL rows reserved for an
+ * exit (`exiting`) on this broker and contract whose closing side is `side`. null when there is none, or when such rows disagree (the
+ * request's own product is used then). A tab still running an older bundle sends no product, and would otherwise exit an NRML row as MIS.
+ */
+export function exitingAutoProduct(ledger: AutoLedger, broker: string, targetKey: string, side: 'BUY' | 'SELL'): AutoProduct | null {
+  const products = new Set(ledger.rows
+    .filter(r => r.mode === 'REAL' && r.state === 'exiting' && r.broker === broker && r.targetKey === targetKey && (r.side === 'BUY' ? 'SELL' : 'BUY') === side)
+    .map(r => autoProductOf(r.product)));
+  return products.size === 1 ? [...products][0] : null;
 }
 
 /**

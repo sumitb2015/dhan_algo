@@ -10,11 +10,21 @@ import { isSellSignal, type PnfColumn, type PnfSignal } from './straddlePnf.ts';
 import { isNseTradingDay, istDateIso } from './nseHolidays.ts';
 import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
 import type { Target } from './pnfTarget.ts';
+import { autoProductOf, type AutoProduct } from './pnfOrderLogic.ts';
 
 export type AutoSide = 'BUY' | 'SELL';
 
-/** NSE: flat at 15:15. MCX: measured back from that day's close. */
+/** NSE: an MIS (intraday) position is flat at 15:15. MCX: measured back from that day's close. */
 export const NSE_EOD_EXIT_MIN = 15 * 60 + 15;
+/**
+ * NSE: an NRML (carry-forward) position squares off at 15:35 (chosen by the user on 2026-11-05). F&O trades to 15:40, so this is inside the
+ * session; on a market that closes earlier it is pulled back to NRML_EOD_EXIT_BEFORE_CLOSE minutes before that close, so the exit is
+ * never sent into a shut market.
+ */
+export const NSE_NRML_EOD_EXIT_MIN = 15 * 60 + 35;
+export const NRML_EOD_EXIT_BEFORE_CLOSE = 5;
+export { autoProductOf, type AutoProduct };
+export const AUTO_PRODUCT_LABEL: Record<AutoProduct, string> = { INTRADAY: 'MIS', MARGIN: 'NRML' };
 /** NSE: no new entry in the last 10 minutes before the end-of-day exit (15:05). */
 export const ENTRY_CUTOFF_BEFORE_EOD = 10;
 /** MCX: no new entry in the last 10 minutes before the market's CLOSE (23:45 on a 23:55 close) - the same minute as the end-of-day exit, so a
@@ -74,12 +84,19 @@ export function rowMarket(row: { market?: Market; target: Pick<Target, 'symbol'>
   return row.market ?? (row.target.symbol.toUpperCase() in MCX_LOT_MULTIPLIER ? 'MCX' : 'NSE');
 }
 
-/** [open, entry cutoff, EOD exit] in IST minutes of the day for `market` at `t` (null when the market is shut that day). */
-export function autoWindow(market: Market, t: number): { open: number; entryCutoff: number; eodExit: number } | null {
+/**
+ * [open, entry cutoff, EOD exit] in IST minutes of the day for `market` at `t` (null when the market is shut that day). `product`: an NSE
+ * NRML position squares off later than an MIS one (NSE_NRML_EOD_EXIT_MIN); MCX is the same for both.
+ */
+export function autoWindow(market: Market, t: number, product: AutoProduct = 'INTRADAY'): { open: number; entryCutoff: number; eodExit: number } | null {
   // NSE's session window is a clock window: weekends and holidays come from the shared calendar (MCX's own is in sessionWindow).
   if (market !== 'MCX' && !isNseTradingDay(istDateIso(t * 1000))) return null;
   const [open, close] = sessionWindow(market, t);
   if (open >= close) return null;
+  if (market !== 'MCX' && product === 'MARGIN') {
+    const eodExit = Math.min(NSE_NRML_EOD_EXIT_MIN, close - NRML_EOD_EXIT_BEFORE_CLOSE);
+    return { open, entryCutoff: eodExit - ENTRY_CUTOFF_BEFORE_EOD, eodExit };
+  }
   if (market !== 'MCX') {
     // CAS stock: its session ends at 15:15 from CAS_START (15:30 before it, when the usual 15:15 exit still applies)
     const eodExit = market === 'NSE_CAS' && close <= NSE_EOD_EXIT_MIN ? close - CAS_EOD_EXIT_BEFORE_CLOSE : NSE_EOD_EXIT_MIN;
@@ -119,12 +136,14 @@ export function reversalColumn(model: AutoModel, pos: AutoPosition): number {
  * What the chart should do now. `watermarkT`: signals at or before it are never entered (it is set to the last closed bar when
  * AUTO is switched on, and to each handled signal's time). `nowS`: the decision time, epoch seconds.
  */
-export function decideAuto({ model, position, watermarkT, nowS, market, price = null }: {
+export function decideAuto({ model, position, watermarkT, nowS, market, price = null, product = 'INTRADAY' }: {
   model: AutoModel; position: AutoPosition | null; watermarkT: number; nowS: number; market: Market;
+  /** The open position's product (its end-of-day time), else the product a new entry would be sent with (its entry cutoff). */
+  product?: AutoProduct;
   /** The chart's live price, for a stop (a position without a stop never reads it). */
   price?: number | null;
 }): AutoDecision {
-  const win = autoWindow(market, nowS);
+  const win = autoWindow(market, nowS, product);
   const minute = istMinuteOfDay(nowS);
   if (position) {
     if (win && minute >= win.eodExit) return { action: 'exit', reason: 'eod' };
@@ -159,12 +178,12 @@ export type AddDecision = { add: true; barT: number; box: number } | { add: fals
 
 export function decideAdd({ model, row, nowS, market, maxLots }: {
   model: AutoModel;
-  row: { side: AutoSide; entryBarT: number; entryPrice: number; entryBox?: number; lots: number; adds?: { barT: number }[]; base?: { price: number } };
+  row: { side: AutoSide; entryBarT: number; entryPrice: number; entryBox?: number; lots: number; adds?: { barT: number }[]; base?: { price: number }; product?: AutoProduct };
   nowS: number; market: Market; maxLots: number;
 }): AddDecision {
   if (model.chart !== 'renko') return { add: false, why: 'not a Renko chart' };
   if (!(row.lots < maxLots)) return { add: false, why: 'at max lots' };
-  const win = autoWindow(market, nowS);
+  const win = autoWindow(market, nowS, autoProductOf(row.product));
   const minute = istMinuteOfDay(nowS);
   if (!win || minute < win.open || minute >= win.entryCutoff) return { add: false, why: 'outside the entry window' };
   const last = model.lastBarT;

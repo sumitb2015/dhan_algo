@@ -294,3 +294,14 @@ test('pyramid stuck add: beginExit withPendingAdd (only from adding / unknownAdd
   const unk = run(ex, { op: 'markUnknown', id: 'r1', note: 'timeout' });
   assert.equal(run(unk, { op: 'resolve', id: 'r1', as: 'open', t: 3 }).rows[0].state, 'adding');
 });
+
+test('a row keeps the product it was opened with; NRML is refused on a stock; the arm record keeps NRML', () => {
+  const l = run(EMPTY_LEDGER, { op: 'open', row: row({ product: 'MARGIN' }) } as AutoOp);
+  assert.equal(l.rows[0].product, 'MARGIN');
+  const eq = { kind: 'equity', symbol: 'RELIANCE', name: 'RELIANCE' };
+  assert.equal(applyAutoOp(EMPTY_LEDGER, { op: 'open', row: row({ target: eq, product: 'MARGIN' }) } as AutoOp).ok, false);
+  assert.equal(applyAutoOp(EMPTY_LEDGER, { op: 'open', row: row({ product: 'CNC' }) } as AutoOp).ok, false);
+  const arm = { mode: 'PAPER', broker: 'dhan', targetKey: 'F', day: '2026-11-05', t: 1, watermarkT: 1, lots: 1 };
+  assert.equal(parseLedger({ rev: 1, rows: [], log: [], arms: { 1: { ...arm, product: 'MARGIN' }, 2: { ...arm, product: 'X' } } }).arms?.['1']?.product, 'MARGIN');
+  assert.equal(parseLedger({ rev: 1, rows: [], log: [], arms: { 2: { ...arm, product: 'X' } } }).arms?.['2']?.product, undefined);
+});

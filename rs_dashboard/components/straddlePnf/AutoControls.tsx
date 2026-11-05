@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Bot } from 'lucide-react';
 import { holdsPosition, PYRAMID_HARD_MAX, rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
+import type { AutoProduct } from '@/lib/pnfOrderLogic';
 
 // One chart's AUTO switch, lots and status (engine: ./usePnfAuto.ts). The switch is saved in the AUTO ledger and resumed after a reload in
 // the same mode (lib/pnfAutoArm.ts; the page always loads in PAPER, so a REAL arm resumes once the page is switched to REAL); in REAL mode
@@ -44,6 +45,11 @@ export interface AutoControlsProps {
   nowMs: number;
   /** A saved arming that was NOT switched back on after a reload, and why (e.g. "switch the page to REAL to resume"). */
   resumeNote?: string | null;
+  /** The product new AUTO entries are sent with (MIS / NRML). Absent = MIS only (a stock). Locked while armed or holding a position. */
+  product?: AutoProduct;
+  onProduct?: (p: AutoProduct) => void;
+  /** Today's entry cutoff and square-off for this chart, e.g. "NRML: entries stop 15:25, squared off 15:35". */
+  eodText?: string | null;
 }
 
 /** A row only the user can settle: an unknown outcome, or a reservation left over by a tab that died with the order out. */
@@ -52,7 +58,7 @@ export const needsResolve = (r: AutoRow, nowMs: number) =>
   r.state === 'unknownEntry' || r.state === 'unknownExit' || r.state === 'unknownAdd'
   || ((r.state === 'entering' || r.state === 'exiting' || r.state === 'adding') && nowMs - (r.pendingSince ?? r.entryT) * 1000 > STALE_PENDING_MS);
 
-export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule, autoSide, onAutoSide, resumeNote, pyramid, onPyramid }: AutoControlsProps) {
+export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule, autoSide, onAutoSide, resumeNote, pyramid, onPyramid, product, onProduct, eodText }: AutoControlsProps) {
   const [confirmReal, setConfirmReal] = useState(false);
   const [confirmExit, setConfirmExit] = useState(false);
   const [draft, setDraft] = useState(String(lots));
@@ -153,6 +159,19 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
           <option value="sell">Sell only</option>
         </select>
       )}
+      {product && onProduct && (
+        <span role="group" aria-label={`AUTO product on chart ${chart}`} className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950"
+              title={`${locked ? 'Stop AUTO (and close its position) to change the product. ' : ''}MIS squares off at 15:15 on NSE, NRML at 15:35 (MCX: 10 minutes before its close for both).${eodText ? ` Now: ${eodText}.` : ''}`}>
+          {(['INTRADAY', 'MARGIN'] as const).map((p, i) => (
+            <button key={p} type="button" data-testid={`pnf-auto-prod-${p === 'MARGIN' ? 'nrml' : 'mis'}-${chart}`} aria-pressed={product === p} disabled={locked}
+                    aria-label={`AUTO trades ${p === 'MARGIN' ? 'NRML' : 'MIS'} on chart ${chart}`}
+                    onClick={() => onProduct(p)}
+                    className={`h-6 px-1.5 ${i === 0 ? 'rounded-l' : 'rounded-r'} text-[11px] font-bold disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 ${product === p ? 'bg-violet-500/20 text-violet-300' : 'text-zinc-400 hover:text-white'}`}>
+              {p === 'MARGIN' ? 'NRML' : 'MIS'}
+            </button>
+          ))}
+        </span>
+      )}
       <span className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950" title={locked ? 'Stop AUTO (and close its position) to change lots' : 'Lots per AUTO trade'}>
         <span className="pl-1 text-[11px] font-bold text-zinc-400" aria-hidden="true">L</span>
         <button type="button" aria-label={`Fewer AUTO lots on chart ${chart}`} disabled={locked || lots <= 1} onClick={() => onLots(lots - 1)}
@@ -206,6 +225,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
             {pnl !== null && <span className={`ml-1 font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{inr(pnl)}</span>}
             {row.stop !== undefined && <span className="ml-1 text-zinc-400" title="Protective stop (one brick beyond the pullback)">SL {row.stop.toFixed(2)}</span>}
             {row.mode === 'PAPER' && <span className="ml-1 text-zinc-400">paper</span>}
+            {row.product === 'MARGIN' && <span className="ml-1 text-zinc-400" title={eodText ?? 'Opened NRML'}>NRML</span>}
             {!armed && <span data-testid={`pnf-auto-off-${chart}`} className="ml-1 px-1 rounded bg-amber-500/15 text-amber-300 font-bold"
                              title={`AUTO is OFF on this chart${resumeNote ? ` (${resumeNote})` : ''}: this position still exits by its rule, but nothing re-enters after it. Arm AUTO to keep trading.`}>AUTO OFF · exit only</span>}
           </span>

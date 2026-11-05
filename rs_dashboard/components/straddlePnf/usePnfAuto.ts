@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { decideAdd, decideAuto, rowMarket } from '@/lib/pnfAuto';
+import { autoProductOf, decideAdd, decideAuto, rowMarket, type AutoProduct } from '@/lib/pnfAuto';
 import { ignoredByFilter, SIDE_LABEL, withSide, type AutoSide } from '@/lib/pnfAutoRule';
 import { isSellSignal } from '@/lib/straddlePnf';
 import { EMPTY_LEDGER, isLive, PYRAMID_HARD_MAX, type AutoLedger, type AutoLeg, type AutoOp, type AutoRow } from '@/lib/pnfAutoLedger';
@@ -70,7 +70,11 @@ export function usePnfAutoLedger(scope: PnfScope = 'pnf') {
 export type AutoEvent = { chart: 1 | 2; kind: 'entry' | 'exit' | 'halt' | 'info'; text: string; side?: 'BUY' | 'SELL'; price?: number; target?: Target; mode?: 'PAPER' | 'REAL'; lots?: number };
 
 /** `armT`: the saved arming this follows (lib/pnfAutoLedger.ts AutoArmRecord.t); absent when the save failed (this tab only). */
-export interface AutoArm { on: boolean; mode: 'PAPER' | 'REAL'; watermarkT: number; armT?: number }
+export interface AutoArm {
+  on: boolean; mode: 'PAPER' | 'REAL'; watermarkT: number; armT?: number;
+  /** The product new entries are sent with (MIS when absent); a row keeps the product it was opened with. */
+  product?: AutoProduct;
+}
 
 /** Pyramid (Renko): add one lot per new best brick while a position is open, up to `max` total lots (lib/pnfAuto.ts decideAdd). */
 export interface AutoPyramid { on: boolean; max: number }
@@ -257,8 +261,9 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
     const unitsPerPoint = (cur.legs[0].unitsPerLot ?? cur.legs[0].lot) * lots;
     const id = `pnfa-${chart}-${Date.now()}`;
     const nowS = Date.now() / 1000;
+    const product = target.kind === 'equity' ? 'INTRADAY' : autoProductOf(arm.product);   // a stock is MIS only
     const base = {
-      id, day: istDateIso(Date.now()), chart, target, market, mode: arm.mode, broker, side, lots, unitsPerPoint,
+      id, day: istDateIso(Date.now()), chart, target, market, ...(product === 'MARGIN' ? { product } : {}), mode: arm.mode, broker, side, lots, unitsPerPoint,
       legs: cur.legs.map(l => ({ label: l.label, key: l.key, units: (l.lotUnits ?? l.lot) * lots })), entryT: nowS, entryBarT: signalT, entryPrice: px,
       ...(box !== null ? { entryBox: box } : {}),
       ...(stop !== undefined ? { stop } : {}),
@@ -266,7 +271,7 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
       ...(pyramid?.on && pyramid.max > lots ? { pyramidMax: Math.min(pyramid.max, PYRAMID_HARD_MAX) } : {}),
     };
     if (arm.mode === 'PAPER') {
-      const j = await sendOrder({ broker, mode: 'PAPER', target, action: side, lots, product: 'INTRADAY' });
+      const j = await sendOrder({ broker, mode: 'PAPER', target, action: side, lots, product });
       if (!j?.success) { setNote(`paper order refused: ${j?.error ?? 'no reply'}`); return `paper order refused (${j?.error ?? 'no reply'})`; }
       const r = await post({ op: 'open', row: base });
       if (!r.ok) { setNote(`ledger refused: ${r.error}`); return `the ledger refused it (${r.error ?? 'unreachable'})`; }
@@ -276,7 +281,7 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
     // REAL: reserve, send, then confirm / void / mark unknown. A refused reservation sent nothing: it may be tried again.
     const reserved = await post({ op: 'open', row: { ...base, state: 'entering' } });
     if (!reserved.ok) { setNote(`ledger refused the entry: ${reserved.error}`); return `the ledger refused the reservation (${reserved.error ?? 'unreachable'})`; }
-    const j = await sendOrder({ broker, mode: 'REAL', target, action: side, lots, product: 'INTRADAY' });
+    const j = await sendOrder({ broker, mode: 'REAL', target, action: side, lots, product });
     if (!j || j.outcome === 'unknown') {
       await post({ op: 'markUnknown', id, note: j?.message ?? 'no reply from the order route' });
       haltNow('entry outcome unknown - check Orders/Positions, then resolve it');
@@ -320,7 +325,7 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
     const reserved = await post({ op: 'beginExit', id: r.id, t: Date.now() / 1000 });
     if (!reserved.ok) { setNote(`ledger refused the exit: ${reserved.error}`); return false; }
     // The broker it was opened on and the units AUTO owns, never the Lots box or the page broker.
-    const j = await sendOrder({ broker: r.broker, mode: 'REAL', target: r.target, exitOwn: { side, units: r.legs.map(l => l.units) } });
+    const j = await sendOrder({ broker: r.broker, mode: 'REAL', target: r.target, exitOwn: { side, units: r.legs.map(l => l.units), product: autoProductOf(r.product) } });
     if (!j || j.outcome === 'unknown' || j.outcome === 'partial') {
       await post({ op: 'markUnknown', id: r.id, note: j?.message ?? 'no reply from the order route' });
       haltNow('exit outcome unknown - check Orders/Positions, then resolve it');
@@ -365,7 +370,7 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
     const reserved = await post({ op: 'beginAdd', id: r.id, add: { id, t, barT, box, lots: 1, price: livePx } });
     if (!reserved.ok) { setNote(`ledger refused the add: ${reserved.error}`); return; }
     spend();                                                          // reserved: whatever happens next, this bar's add is never sent again
-    const j = await sendOrder({ broker: r.broker, mode: 'REAL', target: r.target, action: r.side, lots: 1, product: 'INTRADAY' });
+    const j = await sendOrder({ broker: r.broker, mode: 'REAL', target: r.target, action: r.side, lots: 1, product: autoProductOf(r.product) });
     if (!j || j.outcome === 'unknown' || j.outcome === 'partial') {
       await post({ op: 'markUnknown', id: r.id, note: `add: ${j?.message ?? 'no reply from the order route'}` });
       haltNow('add outcome unknown - check Orders/Positions, then resolve it');
@@ -398,14 +403,14 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
         if (row.state !== 'open') { setNote(row.state === 'entering' || row.state === 'exiting' || row.state === 'adding' ? `${row.state}…` : 'unresolved - check the broker'); return; }
         if (row.targetKey !== tk) {
           // The chart was switched away from its position: only the EOD exit can still run (no model for that contract here).
-          const d = decideAuto({ model: { box: 0, signals: [], columns: [], columnTimes: [], lastBarT: null }, position: { side: row.side, entryBarT: row.entryBarT }, watermarkT: 0, nowS, market: rowMarket(row) });
+          const d = decideAuto({ model: { box: 0, signals: [], columns: [], columnTimes: [], lastBarT: null }, position: { side: row.side, entryBarT: row.entryBarT }, watermarkT: 0, nowS, market: rowMarket(row), product: autoProductOf(row.product) });
           setNote('position on another contract: watching the EOD exit only');
           if (d.action === 'exit' && d.reason === 'eod') { busyRef.current = true; try { await exit(row, 'eod', null); } finally { busyRef.current = false; } }
           return;
         }
         // The end-of-day time is the POSITION's market (saved on the row), never the chart's `market`: that reads 'NSE' until the history has
         // loaded (a page reload, an instrument or setting change), which would flatten an MCX position at the NSE 15:15 straight away.
-        const d = decideAuto({ model, position: { side: row.side, entryBarT: row.entryBarT, stop: row.stop, exitBy: row.exitBy }, watermarkT: watermarkRef.current, nowS, market: rowMarket(row), price });
+        const d = decideAuto({ model, position: { side: row.side, entryBarT: row.entryBarT, stop: row.stop, exitBy: row.exitBy }, watermarkT: watermarkRef.current, nowS, market: rowMarket(row), price, product: autoProductOf(row.product) });
         if (d.action !== 'exit') {
           // Pyramid: only while armed in the row's own mode, with adds still switched on, a fresh price and no halt.
           // `complete`: the chart's history is fully loaded (a partial model would miss the best brick so far and add after a pullback).
@@ -441,7 +446,7 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
       if (arm.mode !== mode) { onDisarm(`the page switched to ${mode}`); return; }
       if (target.kind === 'index') { setNote('an index cannot be traded'); return; }
       if (!complete || stale || price === null) { setNote(stale ? 'feed stale: no entries' : 'waiting for a price'); return; }
-      const d = decideAuto({ model, position: null, watermarkT: watermarkRef.current, nowS, market });
+      const d = decideAuto({ model, position: null, watermarkT: watermarkRef.current, nowS, market, product: target.kind === 'equity' ? 'INTRADAY' : autoProductOf(arm.product) });
       // A signal whose entry kept failing before anything was sent, and is no longer enterable (a newer bar closed, it aged out): said once.
       const pending = retryRef.current;
       if (pending && !(d.action === 'enter' && d.signal.id === pending.id)) {

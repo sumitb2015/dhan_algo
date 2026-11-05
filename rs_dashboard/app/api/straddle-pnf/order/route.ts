@@ -6,7 +6,7 @@ import { dhanDelete, dhanPut } from '@/lib/dhanToken';
 import { kotakPost, KOTAK_PATHS, KotakRejectedError } from '@/lib/kotakToken';
 import { openBrokerOrders, ownedBrokerOrder } from '@/lib/pnfRestingServer';
 import { parseScope, type PnfScope } from '@/lib/pnfScope';
-import { readAutoLedger, reservedByAuto } from '@/lib/pnfAutoServer';
+import { exitingAutoProduct, readAutoLedger, reservedByAuto } from '@/lib/pnfAutoServer';
 import { kiteDelete } from '@/lib/zerodhaToken';
 import { modifyZerodhaLimitOrder } from '@/lib/zerodhaModifyOrder';
 import { snapToTick } from '@/lib/pnfResting';
@@ -15,7 +15,7 @@ import { CloseGuard } from '@/lib/priceLadderClose';
 import { parseTarget, isComplete, targetKey } from '@/lib/pnfTarget';
 import { brokerLegs, resolvePnfLegs, type PnfBrokerLeg } from '@/lib/pnfOrderServer';
 import {
-  MAX_PNF_LOTS, brokerProduct, checkRestingPrices, lotCap, needsRollback, orderQty, parsePnfOrder, planLegClose, planLegCloseKeeping, planOwnExit, sendOutcome,
+  MAX_PNF_LOTS, brokerProduct, checkRestingPrices, lotCap, needsRollback, orderQty, parsePnfOrder, planLegClose, planLegCloseKeeping, planOwnExit, sendOutcome, type AutoProduct,
   type LegResult, type PnfBroker,
 } from '@/lib/pnfOrderLogic';
 
@@ -98,7 +98,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       if (exitOwn.units.length !== onBroker.length) return bad('exitOwn.units must name every leg of this chart - nothing was sent');
       const rows = await brokerPositionRows(broker);
       if (!rows) return bad(`Could not read the ${NAME[broker]} positions - nothing was sent`, 502);
-      const plans = onBroker.map((l, i) => ({ leg: l, ...planOwnExit(l.key, rows, exitOwn.side, exitOwn.units[i], broker) }));
+      // AUTO: the product of the row being exited comes from the ledger (a tab on an older bundle sends none and would exit NRML as MIS)
+      const own = (order.source === 'auto' ? exitingAutoProduct(readAutoLedger(scope), broker, targetKey(target), exitOwn.side) : null) ?? exitOwn.product;
+      const plans = onBroker.map((l, i) => ({ leg: l, ...planOwnExit(l.key, rows, exitOwn.side, exitOwn.units[i], broker, own) }));
       sent = plans.some(p => p.qty > 0);
       for (const p of plans) {
         results.push(p.qty > 0 ? await send(broker, p.leg, exitOwn.side, p.qty, p.product, false, tag)
@@ -112,14 +114,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // and a square-off (or an MTM guard exit) on one page must not take the other page's AUTO position with it.
       const other = scope === 'renko' ? 'pnf' : 'renko';
       const otherName = other === 'renko' ? 'Renko' : 'Point & Figure';
-      const fromOther = reservedByAuto(readAutoLedger(other), broker, targetKey(target), onBroker.length);
-      // Chart N's MTM guard: this page's OTHER chart's AUTO on the same contract is kept too (each chart guards its own trade).
+      // Per product: MIS AUTO rows are kept out of the broker's MIS row, NRML AUTO rows out of its NRML row.
+      const otherLed = readAutoLedger(other), ownLed = readAutoLedger(scope);
+      const keep = (p: AutoProduct) => {
+        const fromOther = reservedByAuto(otherLed, broker, targetKey(target), onBroker.length, undefined, p);
+        // Chart N's MTM guard: this page's OTHER chart's AUTO on the same contract is kept too (each chart guards its own trade).
+        const fromSibling = order.guardChart ? reservedByAuto(ownLed, broker, targetKey(target), onBroker.length, order.guardChart, p) : onBroker.map(() => 0);
+        return { fromOther, fromSibling, reserved: fromOther.map((r, i) => r + fromSibling[i]) };
+      };
+      const mis = keep('INTRADAY'), nrml = keep('MARGIN');
       const sibling = order.guardChart ? (order.guardChart === 1 ? 2 : 1) : null;
-      const fromSibling = order.guardChart ? reservedByAuto(readAutoLedger(scope), broker, targetKey(target), onBroker.length, order.guardChart) : onBroker.map(() => 0);
-      const reserved = fromOther.map((r, i) => r + fromSibling[i]);
-      const plans = onBroker.map((l, i) => ({ leg: l, orders: planLegCloseKeeping(l.key, rows, reserved[i], broker) }));
-      const whose = [fromOther.some(r => r !== 0) ? `the ${otherName} page's AUTO` : '', fromSibling.some(r => r !== 0) ? `chart ${sibling}'s AUTO` : ''].filter(Boolean).join(' and ');
-      if (whose) keptNote = ` KEPT: ${reserved.map(Math.abs).join(' / ')} units on this contract belong to ${whose} and were not closed.`;
+      const plans = onBroker.map((l, i) => ({ leg: l, orders: planLegCloseKeeping(l.key, rows, mis.reserved[i], broker, nrml.reserved[i]) }));
+      // What was actually held back per leg: the full close minus the planned one (a reservation against the book row's direction keeps nothing)
+      const sumQty = (os: { qty: number }[]) => os.reduce((n, o) => n + o.qty, 0);
+      const kept = plans.map(p => sumQty(planLegClose(p.leg.key, rows)) - sumQty(p.orders));
+      const anyKept = kept.some(k => k > 0);
+      const fromOther = mis.fromOther.some(r => r !== 0) || nrml.fromOther.some(r => r !== 0);
+      const fromSibling = mis.fromSibling.some(r => r !== 0) || nrml.fromSibling.some(r => r !== 0);
+      const whose = anyKept ? [fromOther ? `the ${otherName} page's AUTO` : '', fromSibling ? `chart ${sibling}'s AUTO` : ''].filter(Boolean).join(' and ') : '';
+      if (whose) keptNote = ` KEPT: ${kept.join(' / ')} units on this contract belong to ${whose} and were not closed.`;
       if (plans.every(p => p.orders.length === 0)) {
         return NextResponse.json({
           success: true, mode, broker, outcome: 'kept', legs: [],

@@ -59,7 +59,14 @@ chart under the trend rule are a flip: the first is the exit of the old position
   On the **Tick** interval (below) every recorded price is a closed bar, so this becomes "about one to two seconds after the brick prints".
 - **Arming ignores history.** Everything already on the chart when you arm is skipped; the first qualifying brick formed afterwards counts.
 - **Fresh signals only.** The signal must be on the newest closed bar and less than 3 minutes old. A missed signal is never chased.
-- **Session.** Only during the market session and before the entry cutoff: **NSE 15:05** (10 minutes before the 15:15 exit; a stock in the closing auction session 15:00), **MCX 10 minutes before the market close** = 23:45 on a 23:55 close (23:20 on a 23:30 close), the same minute as the MCX square-off, so a trade taken in the last minute is squared off at once.
+- **Product (MIS / NRML).** Picked per chart beside the lots box, locked while armed or holding a position, and saved with the arm and on
+  the row. **MIS** (default) squares off NSE at 15:15; **NRML** squares off NSE at **15:35** (F&O trades until 15:40), entries until 15:25. On
+  a chart whose market closes earlier, NRML squares off 5 minutes before that close. MCX is the same for both. A stock is always MIS. Adds and
+  exits use the row's own product, never the switch's current setting. The switch's tooltip shows today's cutoff and square-off for the chart.
+  NRML has no broker square-off behind it: the server retries a refused end-of-day exit every 10 s until the close (it never stands down
+  then), and a position still open from an earlier day is never exited by AUTO. It raises a red alert on the page and in the AUTO log
+  instead, so close it at the broker and resolve it.
+- **Session.** Only during the market session and before the entry cutoff: **NSE 15:05** for MIS (10 minutes before the 15:15 exit; 15:25 for NRML; a stock in the closing auction session 15:00), **MCX 10 minutes before the market close** = 23:45 on a 23:55 close (23:20 on a 23:30 close), the same minute as the MCX square-off, so a trade taken in the last minute is squared off at once.
   Holidays and weekends count as closed.
 - **Feed.** Needs a live price and a fresh feed. A stale feed pauses entries.
 - **Refusals.** Three refused entries in a row halt the chart.
@@ -98,7 +105,7 @@ Pick **Tick** or **10 sec** in the Interval list (Renko only). Bricks then come 
 
 In priority order:
 
-1. **End of day.** NSE 15:15; MCX 10 minutes before the close; a cash stock in the closing auction 5 minutes before the continuous session
+1. **End of day.** NSE 15:15 (MIS) or 15:35 (NRML); MCX 10 minutes before the close; a cash stock in the closing auction 5 minutes before the continuous session
    ends. The time is the **position's own market** (saved on the row), never the market of whichever chart is on screen.
 2. **Stop** (Two-back / One-back). If the market gaps through, the fill is booked at the gapped price.
 3. **Opposite brick** (N-brick and trend).

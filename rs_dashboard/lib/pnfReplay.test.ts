@@ -104,3 +104,17 @@ test('a step is crossed minute by minute: a dip inside a 15-minute bar fills the
   assert.deepEqual(b.trades.map(t => [t.side, t.price, t.t]), [['BUY', 99.5, day(0, 47)]]);
   assert.equal(practiceCross(practicePlace(EMPTY_BOOK, 1, 'F', 'BUY', 99.5, 1, 101), quote(103)).trades.length, 0);   // the close alone misses it
 });
+
+test('practice AUTO follows the chart product: after 15:05 an NRML chart still enters (to 15:25), an MIS one does not', () => {
+  const t = (m: number) => day(4, 361 + m);                               // Fri 30 Oct 15:16 + m
+  const closes = [100, 100.3, 100.3, 100.3, 99.95, 100.25];
+  const bars: Bar[] = closes.map((p, i) => ({ t: t(i), ce: p, pe: 0, straddle: p, vol: 1 }));
+  const opts = { chart: 'renko' as const, boxMode: 'pts' as const, boxPts: 0.1, reversal: 2, volume: false };
+  const run = (product?: 'INTRADAY' | 'MARGIN') => {
+    let b = practiceAutoArm(EMPTY_BOOK, 1, true, t(3), 1);
+    for (let k = 4; k <= 5; k++) b = practiceAutoStep(b, { ...quote(closes[k], t(k)), t: t(k) }, buildConfirmedModel(bars.slice(0, k + 1), 'sma', opts), 'NSE_FNO', product);
+    return b.trades.length;
+  };
+  assert.equal(run(), 0, 'MIS (default): past its 15:05 entry cutoff');
+  assert.equal(run('MARGIN'), 2, 'NRML: entered at 15:20 and exited on the next brick');
+});

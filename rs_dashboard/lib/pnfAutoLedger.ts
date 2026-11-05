@@ -14,6 +14,7 @@
 import { parseTarget, targetKey, type Target } from './pnfTarget.ts';
 import { MAX_PNF_LOTS } from './pnfOrderLogic.ts';
 import type { Market } from './straddlePnfLive.ts';
+import type { AutoProduct } from './pnfOrderLogic.ts';
 
 export type AutoMode = 'PAPER' | 'REAL';
 export type AutoRowState = 'entering' | 'open' | 'exiting' | 'closed' | 'unknownEntry' | 'unknownExit' | 'adding' | 'unknownAdd';
@@ -51,6 +52,11 @@ export interface AutoRow {
   targetKey: string;
   /** The market the contract trades in, saved at entry: its end-of-day exit time comes from this, not from whatever chart is on screen. */
   market?: Market;
+  /**
+   * The product it was opened with: 'MARGIN' = NRML (NSE end-of-day exit 15:35, lib/pnfAuto.ts autoWindow); absent = 'INTRADAY' (MIS,
+   * 15:15). Adds and exits use the row's product, never the page's current choice.
+   */
+  product?: AutoProduct;
   mode: AutoMode;
   broker: string;
   side: 'BUY' | 'SELL';
@@ -131,6 +137,8 @@ export interface AutoArmRecord {
   side?: string;
   /** Renko pyramid it was armed with: present = add one lot per new best brick up to `max` total lots. */
   pyramid?: { max: number };
+  /** 'MARGIN' = armed to trade NRML; absent = MIS. */
+  product?: 'MARGIN';
 }
 
 export interface AutoLedger { rev: number; rows: AutoRow[]; log: AutoLogEntry[]; arms?: Partial<Record<'1' | '2', AutoArmRecord>> }
@@ -210,7 +218,7 @@ function armOk(v: unknown): AutoArmRecord | null {
   const rule = str(a.rule), side = str(a.side);
   const pm = a.pyramid && typeof a.pyramid === 'object' ? (a.pyramid as { max?: unknown }).max : undefined;
   const pyramid = Number.isInteger(pm) && (pm as number) >= 1 && (pm as number) <= PYRAMID_HARD_MAX ? { max: pm as number } : undefined;
-  return { mode: a.mode, broker: a.broker, targetKey: a.targetKey, day: a.day, t: a.t!, watermarkT: a.watermarkT!, lots: a.lots!, ...(rule ? { rule } : {}), ...(side ? { side } : {}), ...(pyramid ? { pyramid } : {}) };
+  return { mode: a.mode, broker: a.broker, targetKey: a.targetKey, day: a.day, t: a.t!, watermarkT: a.watermarkT!, lots: a.lots!, ...(rule ? { rule } : {}), ...(side ? { side } : {}), ...(pyramid ? { pyramid } : {}), ...(a.product === 'MARGIN' ? { product: 'MARGIN' as const } : {}) };
 }
 
 /** Hard cap on an AUTO row's lots, pyramid adds included: the order route's own lot cap (one source for the ledger, the page and the UI). */
@@ -266,6 +274,8 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       if (r.stop !== undefined && (!finite(r.stop) || (r.side === 'BUY' ? r.stop >= r.entryPrice : r.stop <= r.entryPrice))) return { ok: false, status: 400, error: 'stop must be beyond the entry, on the losing side' };
       if (r.exitBy !== undefined && r.exitBy !== 'supertrend') return { ok: false, status: 400, error: 'Invalid exitBy' };
       if (r.market !== undefined && !(['NSE', 'NSE_CAS', 'NSE_FNO', 'MCX'] as const).includes(r.market)) return { ok: false, status: 400, error: 'Invalid market' };
+      if (r.product !== undefined && r.product !== 'INTRADAY' && r.product !== 'MARGIN') return { ok: false, status: 400, error: 'product must be INTRADAY or MARGIN' };
+      if (r.product === 'MARGIN' && target.kind === 'equity') return { ok: false, status: 400, error: 'A stock is traded MIS by AUTO (NRML is for futures and options)' };
       if (r.pyramidMax !== undefined && (!Number.isInteger(r.pyramidMax) || r.pyramidMax < r.lots || r.pyramidMax > PYRAMID_HARD_MAX)) return { ok: false, status: 400, error: `pyramidMax must be ${r.lots}-${PYRAMID_HARD_MAX}` };
       if (r.base !== undefined || r.adds !== undefined) return { ok: false, status: 400, error: 'A new row has no adds' };
       if (led.rows.some(x => x.id === r.id)) return { ok: false, status: 409, error: 'Row already exists' };

@@ -13,6 +13,9 @@ export type PnfBroker = 'dhan' | 'kotak' | 'zerodha';
 export type PnfAction = 'BUY' | 'SELL';
 /** Dhan's product names; Kotak / Zerodha get MIS / NRML / CNC (brokerProduct). */
 export type PnfProduct = 'INTRADAY' | 'MARGIN' | 'CNC';
+/** The products AUTO trades: 'INTRADAY' (MIS, the default) or 'MARGIN' (NRML). Anything else (absent, an older row) reads as MIS. */
+export type AutoProduct = 'INTRADAY' | 'MARGIN';
+export const autoProductOf = (p: unknown): AutoProduct => (p === 'MARGIN' ? 'MARGIN' : 'INTRADAY');
 
 /** Display info for one leg of the history route's contract (kept for the chart page; never trusted for an order). */
 export interface PnfLegInput {
@@ -40,9 +43,10 @@ export interface PnfOrderRequest {
   source: 'bar' | 'auto';
   /**
    * AUTO's exit: close only what AUTO opened — per leg `units` (the ledger's own quantity), capped by what the broker still
-   * shows in that direction under the intraday product (planOwnExit). REAL only; never sized from the Lots box.
+   * shows in that direction under the row's own product (planOwnExit; 'INTRADAY' unless the row was opened NRML). REAL only; never
+   * sized from the Lots box.
    */
-  exitOwn: { side: PnfAction; units: number[] } | null;
+  exitOwn: { side: PnfAction; units: number[]; product: PnfProduct } | null;
   /**
    * A close sent by chart N's MTM guard (`close: true` only): the page's OTHER chart's live AUTO units on the same contract are kept, as
    * the other page's are. Without it the guard of one chart squared off the other chart's AUTO position when both traded one contract.
@@ -101,12 +105,16 @@ export function parsePnfOrder(body: unknown): PnfOrderRequest | string {
     return { broker, mode, target, close, action: 'SELL', lots: 0, product: 'INTRADAY', source, exitOwn: null, ...(guardChart ? { guardChart } : {}), ...base };
   }
   if (b.exitOwn !== undefined) {
-    const x = b.exitOwn as { side?: unknown; units?: unknown };
+    const x = b.exitOwn as { side?: unknown; units?: unknown; product?: unknown };
     if (mode !== 'REAL') return 'exitOwn is a REAL-mode exit (paper exits never reach the broker)';
     if (x?.side !== 'BUY' && x?.side !== 'SELL') return 'exitOwn.side must be BUY or SELL';
     const units = Array.isArray(x.units) ? x.units : [];
     if (units.length < 1 || units.length > 2 || !units.every(u => Number.isInteger(u) && (u as number) > 0)) return 'exitOwn.units must be 1-2 positive whole quantities';
-    return { broker, mode, target, close: false, action: x.side, lots: 0, product: 'INTRADAY', source, exitOwn: { side: x.side, units: units as number[] }, ...base };
+    // the position's own product: MIS / NRML for F&O, MIS / CNC for a stock (a CNC bracket's exit must close the CNC row)
+    const allowedOwn: PnfProduct[] = target.kind === 'equity' ? ['INTRADAY', 'CNC'] : ['INTRADAY', 'MARGIN'];
+    if (x.product !== undefined && !allowedOwn.includes(x.product as PnfProduct)) return `exitOwn.product must be ${allowedOwn.join(' or ')} for this instrument`;
+    const own = (x.product ?? 'INTRADAY') as PnfProduct;
+    return { broker, mode, target, close: false, action: x.side, lots: 0, product: own, source, exitOwn: { side: x.side, units: units as number[], product: own }, ...base };
   }
 
   const action = b.action;
@@ -158,17 +166,18 @@ export function planLegClose(key: string, rows: BookRow[]): { side: PnfAction; q
 
 /**
  * A close that must leave another page's AUTO position alone (P&F and Renko trade the same broker account, and the broker nets
- * every position by contract): the intraday row of the leg loses `reserved` (signed: + long, - short, AUTO's own units) before it
- * is closed. Only a reservation in the row's own direction counts (an AUTO short cannot hide inside a net long). Other products
- * are untouched by the reservation (AUTO trades intraday).
+ * every position by contract): the intraday row of the leg loses `reserved` (signed: + long, - short, AUTO's own MIS units) and the
+ * NRML row loses `reservedNrml` (AUTO rows opened NRML) before it is closed. Only a reservation in the row's own direction counts (an
+ * AUTO short cannot hide inside a net long). Any other product is untouched.
  */
-export function planLegCloseKeeping(key: string, rows: BookRow[], reserved: number, broker: PnfBroker): { side: PnfAction; qty: number; product: string }[] {
-  const autoProduct = brokerProduct('INTRADAY', broker);
+export function planLegCloseKeeping(key: string, rows: BookRow[], reserved: number, broker: PnfBroker, reservedNrml = 0): { side: PnfAction; qty: number; product: string }[] {
+  const mis = brokerProduct('INTRADAY', broker), nrml = brokerProduct('MARGIN', broker);
   return planLegClose(key, rows).flatMap(o => {
-    if (o.product !== autoProduct || reserved === 0) return [o];
+    const res = o.product === mis ? reserved : o.product === nrml ? reservedNrml : 0;
+    if (res === 0) return [o];
     const net = o.side === 'SELL' ? o.qty : -o.qty;                  // closing a long sells
-    if (Math.sign(net) !== Math.sign(reserved)) return [o];
-    const qty = Math.abs(net) - Math.min(Math.abs(net), Math.abs(reserved));
+    if (Math.sign(net) !== Math.sign(res)) return [o];
+    const qty = Math.abs(net) - Math.min(Math.abs(net), Math.abs(res));
     return qty > 0 ? [{ ...o, qty }] : [];
   });
 }
@@ -187,12 +196,12 @@ export const needsRollback = (results: LegResult[], close: boolean): boolean =>
   !close && results.length === 2 && results[0].status === 'placed' && results[1].status === 'rejected';
 
 /**
- * AUTO's exit for one leg: the intraday row of that contract in the direction being closed (a BUY closes a short, net < 0),
- * quantity min(own units, |net|). 0 = nothing of it left at the broker. Other products, and the other direction, are never
- * touched: two charts or a manual trade on the same contract keep what is theirs.
+ * AUTO's exit for one leg: the row of that contract under the AUTO row's own product (`own`: MIS unless it was opened NRML) in the
+ * direction being closed (a BUY closes a short, net < 0), quantity min(own units, |net|). 0 = nothing of it left at the broker. Other
+ * products, and the other direction, are never touched: two charts or a manual trade on the same contract keep what is theirs.
  */
-export function planOwnExit(key: string, rows: BookRow[], side: PnfAction, units: number, broker: PnfBroker): { qty: number; product: string } {
-  const product = brokerProduct('INTRADAY', broker);
+export function planOwnExit(key: string, rows: BookRow[], side: PnfAction, units: number, broker: PnfBroker, own: PnfProduct = 'INTRADAY'): { qty: number; product: string } {
+  const product = brokerProduct(own, broker);
   const net = rows.filter(r => r.key === key && r.product === product).reduce((s, r) => s + (Number(r.net) || 0), 0);
   const open = side === 'BUY' ? Math.max(0, -net) : Math.max(0, net);
   return { qty: Math.min(units, open), product };

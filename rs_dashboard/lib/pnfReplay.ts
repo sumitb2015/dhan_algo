@@ -7,7 +7,7 @@
 import type { Bar } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
 import { applyPaperFill, FLAT_LEG, paperPnl, type PaperLeg } from './pnfOrderLogic.ts';
-import { decideAuto, type AutoModel, type AutoPosition, type AutoSide } from './pnfAuto.ts';
+import { decideAuto, type AutoModel, type AutoPosition, type AutoProduct, type AutoSide } from './pnfAuto.ts';
 import type { Market } from './straddlePnfLive.ts';
 
 /** TradingView's replay speeds: chart-bar updates per second. */
@@ -185,10 +185,11 @@ export function practiceAutoArm(book: PracticeBook, chart: 1 | 2, on: boolean, c
  * One practice AUTO decision on a chart at the cursor: the live engine's own rules (decideAuto) with the replay clock, booked
  * at the confirmed box / brick a single-leg chart reached (as PAPER AUTO books live), or the legs' prices for a straddle.
  */
-export function practiceAutoStep(book: PracticeBook, q: PracticeQuote, model: AutoModel, market: Market): PracticeBook {
+export function practiceAutoStep(book: PracticeBook, q: PracticeQuote, model: AutoModel, market: Market, product: AutoProduct = 'INTRADAY'): PracticeBook {
   const a = book.auto[q.chart];
   if (!a || (!a.on && !a.position)) return book;
-  const d = decideAuto({ model, position: a.position, watermarkT: a.watermarkT, nowS: q.t + 60, market });
+  // `product`: the chart's MIS / NRML choice, so a replayed NRML day keeps entering to 15:25 and squares off at 15:35, as live AUTO would
+  const d = decideAuto({ model, position: a.position, watermarkT: a.watermarkT, nowS: q.t + 60, market, product });
   if (d.action === 'enter' && a.on) {
     const px = q.legPrices.length === 1 ? d.boxPrice ?? q.price : q.price;
     const filled = practiceFill(book, q, d.side, a.lots, 'auto', px);

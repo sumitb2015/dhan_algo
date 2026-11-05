@@ -297,7 +297,7 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
           if (!fired.ok) continue;
           // A bracket exit only ever REDUCES: sized from what this page opened, clamped by the broker's own row (exitOwn).
           const j = row.group
-            ? await postOrder(scope, { broker: row.broker, mode: 'REAL', target: row.target, exitOwn: { side: row.side, units: c.lotUnits.map(u => u * row.lots) }, product: row.product })
+            ? await postOrder(scope, { broker: row.broker, mode: 'REAL', target: row.target, exitOwn: { side: row.side, units: c.lotUnits.map(u => u * row.lots), product: row.product } })
             : await postOrder(scope, { broker: row.broker, mode: 'REAL', target: row.target, action: row.side, lots: row.lots, product: row.product });
           if (row.group && j?.outcome === 'flat') {
             await post({ op: 'resolve', id: row.id, as: 'cancelled', t: Date.now() / 1000 });

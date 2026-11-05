@@ -21,13 +21,13 @@ Evaluated every second on the chart's **closed-bar** model only (the forming min
 | After an exit | A later opposite signal may open the other side (never on the same tick as the exit) |
 | Sessions | Entry cutoff (changed 2026-11-03; it was 15:00 NSE / close − 30 min MCX): NSE 10 minutes before the end-of-day exit; MCX **10 minutes before the market close**, the same minute as its exit. NSE: entries 09:15-15:05, flat at 15:15 (a stock with derivatives from 2026-08-03, NSE's Closing Auction Session: flat at 15:10, entries until 15:00, before continuous trading stops at 15:15), NSE holidays from `lib/nseHolidays`. MCX: flat at close − 10 min and entries until close − 10 min (23:45 / 23:45 on a 23:55 close; `lib/mcxSession`) |
 | Index charts | No AUTO (an index is not tradable) |
-| Size | Lots per chart, default **1**, 1-20; product INTRADAY (MIS) |
+| Size | Lots per chart, default **1**, 1-20; product MIS (INTRADAY, default) or NRML (MARGIN), per chart, saved on the arm and the row. NRML: NSE flat at **15:35**, entries until 15:25 (5 min before an earlier close if the market has one); MCX unchanged; a stock is MIS only (added 2026-11-05) |
 | Prices | Every entry and exit is tied to a **confirmed box**: the entry to the deepest box the signal bar drew (the O column's lowest box at the break for a SELL, the X column's highest for a BUY), the exit to the box the reversal column reached on its first bar (`boxPriceAt`). PAPER books those box prices; REAL books the live price at the decision (a market fill) and keeps the boxes for its markers. An EOD exit has no box event: it books the live price |
 
 ## Orders (`app/api/straddle-pnf/order`)
 - Entry: the same server-resolved order as the trade bar (`source: 'auto'` → Dhan correlation tag `pnfa`, Kotak per-source
   lot cap `pnfa: 20`). A straddle sends CE then PE; if PE is refused, CE is reversed.
-- Exit: `exitOwn` — per leg the units AUTO owns (from the ledger), capped by the broker's INTRADAY / MIS row in the
+- Exit: `exitOwn` — per leg the units AUTO owns (from the ledger), capped by the broker's row of the row's own product (MIS, or NRML for an NRML row) in the
   direction being closed. Other products and other quantities on the same contract (a manual trade, the other chart) are
   never touched. A leg already flat at the broker is booked closed without an order.
 - The exit always goes to the broker the position was opened on.
