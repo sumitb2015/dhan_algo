@@ -24,7 +24,8 @@ const POLL_MS = 30_000;
 const TAIL_SESSIONS = 4;
 const LIVE_MS = 1_000;   // how often the chart reads the WebSocket bridge's latest price (the bridge itself is push, from the shared hub)
 const FRESH_S = 180;
-const TICKS_MS = 1_000;  // Renko Tick mode: how often the bridge's tick log is read (/api/straddle-pnf/ticks)
+const TICKS_MS = 1_000;
+const NO_BARS: Bar[] = [];  // Renko Tick mode: how often the bridge's tick log is read (/api/straddle-pnf/ticks)
 
 /**
  * `tickSec`: Renko Tick / N-second bars — the bridge's recorded prices replace the live minute fold (lib/pnfTicks.ts): 0 = one bar per
@@ -149,10 +150,16 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   }, [ids, market, single, tickMode]);
 
   // ── Renko Tick / N sec: the bridge's tick log → closed bars (one per recorded price, or N-second buckets) ──
+  // null until the first read of the log has landed: until then the chart has NO bars (not minute closes), so a restored AUTO or an
+  // alert can never act on a minute-close brick the tick chart does not have.
   const [tickBars, setTickBars] = useState<Bar[] | null>(null);
+  const [tickError, setTickError] = useState<string | null>(null);
+  // The history's last bar, read by the tick poll: its close is the bad-print reference and its legs the seed of a leg with no row yet.
+  const histLastRef = useRef<Bar | undefined>(undefined);
+  useEffect(() => { histLastRef.current = bars[bars.length - 1]; });
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setTickBars(null); setHeadTick(null);
+    setTickBars(null); setHeadTick(null); setTickError(null);
     if (!tickMode || !ids) return;
     let dead = false;
     let since = 0;
@@ -161,21 +168,28 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
     let sec: SecBuild | null = null;   // N-second buckets over build.bars (a closed bucket keeps its object: the chart carries on)
     let shown: Bar[] | null = null;
     let busy = false;
+    let fails = 0;
     const poll = async () => {
       if (busy) return;            // a slow read is never overtaken by the next one (the cursor must move in order)
       busy = true;
       try {
         const res = await fetch(`/api/straddle-pnf/ticks?ids=${ids}&since=${since}`);
-        const j = await res.json() as { success?: boolean; day?: string; upTo?: number; legs?: TickRow[][] };
-        if (dead || !j.success || !j.legs || typeof j.upTo !== 'number') return;
+        const j = await res.json() as { success?: boolean; error?: string; day?: string; upTo?: number; legs?: TickRow[][] };
+        if (dead) return;
+        if (!j.success || !j.legs || typeof j.upTo !== 'number') throw new Error(j.error ?? `tick log read failed (HTTP ${res.status})`);
         if (j.day !== day) { day = j.day ?? ''; build = newTickBuild(instruments.length); sec = null; }   // a new session's log
-        build = foldTickRows(build, j.legs, market, lastCloseRef.current);
+        const h = histLastRef.current;
+        build = foldTickRows(build, j.legs, market, h?.straddle, h ? [h.ce, h.pe] : undefined);
         since = j.upTo;
-        // a bucket closes on the clock too (no later tick needed), so this runs on every read, new rows or not
-        if (tickSec) sec = bucketTickBars(sec, build.bars, tickSec, Date.now() / 1000);
+        // A bucket closes once the route has served every row up to its end (upTo, the server's cut-off), new rows or not.
+        if (tickSec) sec = bucketTickBars(sec, build.bars, tickSec, j.upTo / 1000);
         const next = tickSec ? sec!.bars : build.bars;
         if (next !== shown) { shown = next; setTickBars(next); }
-      } catch { /* the next read carries on from the same cursor */ } finally { busy = false; }
+        if (fails) { fails = 0; setTickError(null); }
+      } catch (e) {
+        // the next read carries on from the same cursor; a log that keeps failing is said on the chart (it stops drawing new bricks)
+        if (!dead && ++fails === 5) setTickError(`Live tick log unavailable (${e instanceof Error ? e.message : 'read failed'}) - no new bricks until it recovers`);
+      } finally { busy = false; }
     };
     void poll();
     const id = setInterval(() => { void poll(); }, TICKS_MS);
@@ -183,10 +197,10 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ids, market, tickMode, tickSec]);
 
-  // The chart's bars: in Tick / N-second mode the history's minutes with the recorded prices laid in (the running minute's bar left out).
+  // The chart's bars: in Tick / N-second mode the history up to the tick log, then the recorded prices; none before the first read.
   const nowMinute = Math.floor(now / 60_000);
   const chartBars = useMemo(
-    () => (tickMode ? spliceTicks(bars, tickBars ?? [], nowMinute > 0 ? nowMinute * 60 : Infinity) : bars),
+    () => (!tickMode ? bars : tickBars === null ? NO_BARS : spliceTicks(bars, tickBars, nowMinute > 0 ? nowMinute * 60 : Infinity)),
     [tickMode, bars, tickBars, nowMinute],
   );
 
@@ -207,7 +221,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   const scrip = !target ? '' : fno ? label : name && name !== target.symbol ? `${target.symbol} · ${name}` : target.symbol;
 
   return {
-    bars: chartBars, loaded, name, loading, loadError, histVersion, epoch, market, complete, live, stale, sessionTag, trustedPrevClose, label, scrip,
+    bars: chartBars, loaded, name, loading, loadError: loadError ?? (tickMode ? tickError : null), histVersion, epoch, market, complete, live, stale, sessionTag, trustedPrevClose, label, scrip,
   };
 }
 

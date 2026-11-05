@@ -54,6 +54,14 @@ class TickLogTest(unittest.TestCase):
         self.assertEqual(len(self.rows(pnf_ws.ist_date(MS), 'IDX_I:13')), 1)
         self.assertEqual(len(self.rows(pnf_ws.ist_date(nxt), 'IDX_I:13')), 1)
 
+    def test_drop_closes_and_reopens_in_append(self):
+        self.log.append('NSE_FNO:1', MS, 100.5, 10)
+        self.log.drop('NSE_FNO:1')
+        self.assertNotIn('NSE_FNO:1', self.log.files)
+        self.assertTrue(self.log.append('NSE_FNO:1', MS + 1000, 100.5, 10))   # same tick after a drop is written again
+        self.log.flush()
+        self.assertEqual(len(self.rows(pnf_ws.ist_date(MS), 'NSE_FNO:1')), 2)
+
     def test_prune(self):
         for d in ('2025-10-20', '2025-10-31', '2025-11-04', 'notes'):
             os.makedirs(os.path.join(self.tmp, d))

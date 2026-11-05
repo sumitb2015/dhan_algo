@@ -164,6 +164,16 @@ class TickLog:
         self.last[key] = (ltp, vol)
         return True
 
+    def drop(self, key: str) -> None:
+        """Closes `key`'s file (no longer asked for); a later row re-opens it in append mode."""
+        f = self.files.pop(key, None)
+        self.last.pop(key, None)
+        if f is not None:
+            try:
+                f.close()
+            except OSError:
+                pass
+
     def flush(self) -> None:
         for f in self.files.values():
             try:
@@ -213,6 +223,9 @@ def main() -> None:
             for k in list(since):
                 if k not in keys:
                     since.pop(k, None); last_fp.pop(k, None); changed.pop(k, None)
+                    seg_name, sid = k.split(':', 1)
+                    name = next((n for n, code in SEGMENTS.items() if str(code) == seg_name), seg_name)
+                    tick_log.drop(f'{name}:{sid}')
             for k in keys:
                 since.setdefault(k, ms)
 

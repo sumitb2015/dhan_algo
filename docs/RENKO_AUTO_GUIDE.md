@@ -78,10 +78,14 @@ Pick **Tick** or **10 sec** in the Interval list (Renko only). Bricks then come 
   running minute on the 1 min interval. A reload or a second tab draws the same bricks from the log.
 - **Alerts and AUTO act at once.** Entries, the opposite-brick exit and `+1L/brick` adds all fire on the brick, about 1-2 s after the
   price (the log is served 0.4 s behind, the page polls each second). Expect more trades and whipsaws than on a minute chart; arming warns once.
-- **Before the log.** Ticks exist only from when the bridge started asking for the instrument. Earlier stretches, and any gap where the
-  bridge was down, are drawn from the 1-minute closes. The minute still running is never drawn from a minute bar.
+- **Before the log.** Ticks exist only from when the bridge started asking for the instrument. The stretch before that is drawn from
+  the 1-minute closes; from the first logged price on, only logged prices are used, so a later history refresh can never change a
+  brick alerts or AUTO already acted on. A bridge outage shows as a jump: bricks catch up on the next logged price. A straddle leg
+  that has not changed since logging began uses its last history price until its first logged one.
+- **Loading.** Until the first read of the log lands (about a second), the chart has no bars, so a reloaded page with AUTO armed
+  cannot act on a minute-close brick the tick chart does not have. A log that keeps failing is shown on the chart.
 - **10 sec** groups the same recorded prices into 10-second bars (the bar's last price), and a brick prints when its 10 s are over
-  (about 1.5-2 s after the boundary). A spike that reverses inside the 10 s prints nothing, so it whipsaws less than Tick and still
+  (about 0.5-1.5 s after the boundary, once the log has been served past it). A spike that reverses inside the 10 s prints nothing, so it whipsaws less than Tick and still
   reacts far sooner than 1 min. Same log, same fallback to minute closes.
 - **Brick count after a reload.** On an index the 1-minute history is a rolling window whose start (`anchor_t`) moves with the clock, so
   a full rebuild can differ by a few bricks at the far start of the chart (2024). Recent bricks are identical (checked 2026-11-05:

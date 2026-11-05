@@ -20,14 +20,15 @@ export type TickBuild = {
   /** Each leg's latest price and cumulative volume (null until it has one). */
   px: (number | null)[];
   cum: (number | null)[];
-  /** The summed cumulative volume at the last emitted bar, the base of the next bar's volume. */
+  /** The summed cumulative volume at the last emitted bar, the base of the next bar's volume, and how many legs it summed. */
   lastCum: number | null;
+  cumLegs: number;
   /** The ms of the last row folded in (rows at or before it are ignored, so a re-read never doubles a bar). */
   lastMs: number;
   bars: Bar[];
 };
 
-export const newTickBuild = (legs: number): TickBuild => ({ px: new Array(legs).fill(null), cum: new Array(legs).fill(null), lastCum: null, lastMs: 0, bars: [] });
+export const newTickBuild = (legs: number): TickBuild => ({ px: new Array(legs).fill(null), cum: new Array(legs).fill(null), lastCum: null, cumLegs: 0, lastMs: 0, bars: [] });
 
 const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
 
@@ -36,8 +37,11 @@ const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFi
  * time is inside the trading session; `straddle` = the legs' latest prices summed (a single instrument is carried as ce with pe 0,
  * the shape the history bars have). A price 10x away from the last bar is a bad print and is dropped (lib/straddlePnfLive.ts
  * isWildTick); `refClose` (the history's last close) is the reference before the first bar.
+ *
+ * `seed`: each leg's last known price from the history. The log only holds prices that CHANGED while the bridge was asking, so a
+ * straddle leg that has not moved since then has no row; its seed stands in until its first row (else no bar could be emitted).
  */
-export function foldTickRows(b: TickBuild, legs: TickRow[][], market: Market, refClose?: number): TickBuild {
+export function foldTickRows(b: TickBuild, legs: TickRow[][], market: Market, refClose?: number, seed?: (number | null | undefined)[]): TickBuild {
   const n = b.px.length;
   type Ev = { ms: number; leg: number; ltp: number; vol: number };
   const evs: Ev[] = [];
@@ -50,7 +54,8 @@ export function foldTickRows(b: TickBuild, legs: TickRow[][], market: Market, re
   if (!evs.length) return b;
   evs.sort((x, y) => x.ms - y.ms || x.leg - y.leg);
   const px = b.px.slice(), cum = b.cum.slice();
-  let lastCum = b.lastCum, lastMs = b.lastMs;
+  for (let k = 0; k < n; k++) if (px[k] === null && finite(seed?.[k]) && (seed![k] as number) > 0) px[k] = seed![k] as number;
+  let lastCum = b.lastCum, cumLegs = b.cumLegs, lastMs = b.lastMs;
   const out: Bar[] = [];
   let prevMs = b.lastMs;
   let last = b.bars[b.bars.length - 1]?.straddle ?? refClose;
@@ -64,64 +69,54 @@ export function foldTickRows(b: TickBuild, legs: TickRow[][], market: Market, re
     const straddle = ce + pe;
     if (isWildTick(last, straddle)) { for (let k = 0; k < n; k++) px[k] = was[k]; continue; }   // a bad print: as if it never came
     const sumCum = cum.reduce<number>((a, c) => a + (c ?? 0), 0);
+    const legsNow = cum.filter(c => c !== null).length;
     const gap = prevMs > 0 && ms - prevMs > TICK_GAP_MS;
     prevMs = ms;
-    // The first bar (and the first after a gap, or a counter that went backwards) only sets the base: the volume before it is in
-    // the history's minute bars.
-    const vol = lastCum === null || gap || sumCum < lastCum ? 0 : sumCum - lastCum;
-    lastCum = sumCum;
+    // The first bar (and the first after a gap, a counter that went backwards, or a leg's first volume figure joining the sum) only
+    // sets the base: the volume before it is in the history's minute bars.
+    const vol = lastCum === null || gap || sumCum < lastCum || legsNow !== cumLegs ? 0 : sumCum - lastCum;
+    lastCum = sumCum; cumLegs = legsNow;
     const t = ms / 1000;
     if (!inSession(t, market)) continue;
     out.push({ t, ce, pe, straddle, vol });
     last = straddle;
   }
-  return { px, cum, lastCum, lastMs, bars: out.length ? b.bars.concat(out) : b.bars };
+  return { px, cum, lastCum, cumLegs, lastMs, bars: out.length ? b.bars.concat(out) : b.bars };
 }
 
 const minuteOf = (t: number) => Math.floor(t / 60) * 60;
 
 /**
- * The history's 1-minute bars with the tick bars laid in: for each minute the ticks win when there are any, else the minute bar
- * stays (a stretch before the tick log started, or a bridge outage, is drawn from minute closes). Time-ordered. The history bars
- * before the first tick's minute are the same objects, so the chart build carries on instead of rebuilding.
- * `nowS`: a minute bar of the minute still running is left out (every Tick-mode bar is closed, and a forming minute's close would
- * print a brick the next tick could take back).
+ * The history's 1-minute bars up to the tick log, then the tick bars: history is used only BEFORE the first tick's minute (the
+ * stretch before the bridge started logging). From the first tick on the ticks own the chart, and a history bar is never laid in
+ * between them: its close can differ from the last logged price, so inserting one later would change bricks that alerts / AUTO
+ * already acted on. A bridge outage therefore shows as a jump, and the bricks catch up on the next logged price.
+ * The history bars kept are the same objects, so the chart build carries on instead of rebuilding.
+ * `nowS`: with no ticks yet, a minute bar of the minute still running is left out (every bar here is closed, and a forming
+ * minute's close would print a brick the next price could take back).
  */
 export function spliceTicks(hist: Bar[], ticks: Bar[], nowS = Infinity): Bar[] {
-  const open = Number.isFinite(nowS) ? minuteOf(nowS) : Infinity;
-  if (!ticks.length) {
-    let k = hist.length;
-    while (k > 0 && hist[k - 1].t >= open) k--;
-    return k === hist.length ? hist : hist.slice(0, k);
-  }
-  const first = minuteOf(ticks[0].t);
-  let lo = 0, hi = hist.length;
-  while (lo < hi) { const mid = (lo + hi) >> 1; if (hist[mid].t < first) lo = mid + 1; else hi = mid; }
-  const covered = new Set<number>();
-  for (const b of ticks) covered.add(minuteOf(b.t));
-  const out = hist.slice(0, lo);
-  let j = 0;
-  for (let i = lo; i < hist.length; i++) {
-    const h = hist[i];
-    if (covered.has(minuteOf(h.t)) || h.t >= open) continue;
-    while (j < ticks.length && ticks[j].t < h.t) out.push(ticks[j++]);
-    out.push(h);
-  }
-  while (j < ticks.length) out.push(ticks[j++]);
-  return out;
+  const cut = ticks.length ? minuteOf(ticks[0].t) : Number.isFinite(nowS) ? minuteOf(nowS) : Infinity;
+  let k = hist.length;
+  while (k > 0 && hist[k - 1].t >= cut) k--;
+  if (!ticks.length) return k === hist.length ? hist : hist.slice(0, k);
+  return hist.slice(0, k).concat(ticks);
 }
 
 /**
  * Renko "10 sec": the tick bars grouped into N-second bars (start-stamped, last price, summed volume), built step by step so the bars
  * already emitted are the same objects on the next call (the chart build then carries on instead of rebuilding). A bucket is emitted
- * once it is over: a tick of a later bucket exists, or the clock is `graceS` past its end (the tick log is served up to ~1.5 s late).
+ * once it is over: a tick of a later bucket exists, or `upToS` (the ticks route's `upTo`: every row up to it has been served) has
+ * reached its end. Judged on the server's cut-off, not the browser's clock, so a skewed clock cannot close a bucket early. A tick
+ * that still lands in a bucket already emitted is folded into the next one, so no two bars share a time.
  */
 export type SecBuild = { sec: number; used: number; bars: Bar[] };
 
-export function bucketTickBars(prev: SecBuild | null, ticks: Bar[], sec: number, nowS: number, graceS = 2): SecBuild {
+export function bucketTickBars(prev: SecBuild | null, ticks: Bar[], sec: number, upToS: number): SecBuild {
   // a different series (new instrument, a new day's log) or bucket size: start again
   let b: SecBuild = prev && prev.sec === sec && prev.used <= ticks.length && (prev.used === 0 || ticks.length > 0) ? prev : { sec, used: 0, bars: [] };
-  const startOf = (t: number) => Math.floor(t / sec) * sec;
+  const emitted = b.bars.length ? b.bars[b.bars.length - 1].t : -Infinity;
+  const startOf = (t: number) => Math.max(Math.floor(t / sec) * sec, emitted + sec);   // never back into an emitted bucket
   let i = b.used;
   const out: Bar[] = [];
   while (i < ticks.length) {
@@ -129,7 +124,7 @@ export function bucketTickBars(prev: SecBuild | null, ticks: Bar[], sec: number,
     let j = i;
     let vol = 0;
     while (j < ticks.length && startOf(ticks[j].t) === start) vol += ticks[j++].vol;
-    const over = j < ticks.length || nowS >= start + sec + graceS;
+    const over = j < ticks.length || upToS >= start + sec;
     if (!over) break;                       // still filling: next call
     const last = ticks[j - 1];
     out.push({ t: start, ce: last.ce, pe: last.pe, straddle: last.straddle, vol });

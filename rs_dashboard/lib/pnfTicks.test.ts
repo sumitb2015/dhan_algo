@@ -42,16 +42,37 @@ test('a bad print (10x away) and prices outside the session draw nothing', () =>
 
 const minute = (t: number, p: number): Bar => ({ t, ce: p, pe: 0, straddle: p, vol: 5 });
 
-test('splice: minute bars where there are no ticks, ticks where there are; the forming minute bar is left out', () => {
+test('splice: history only before the first tick\'s minute, then the ticks alone; with no ticks, the forming minute is left out', () => {
   const m = (k: number) => OPEN / 1000 + k * 60;
   const hist = [minute(m(0), 100), minute(m(1), 101), minute(m(2), 102), minute(m(3), 103), minute(m(4), 104)];
   const ticks = foldTickRows(newTickBuild(1), [[[(m(1) + 10) * 1000, 101.5, 0], [(m(3) + 5) * 1000, 103.5, 0]]], 'NSE').bars;
-  const out = spliceTicks(hist, ticks, m(4) + 30);   // minute 4 is still running
-  assert.deepEqual(out.map(b => b.straddle), [100, 101.5, 102, 103.5]);
+  const out = spliceTicks(hist, ticks, m(4) + 30);
+  // minute 2 (no tick in it: a quiet minute or an outage) is NOT laid in between the ticks: it could change bricks already acted on
+  assert.deepEqual(out.map(b => b.straddle), [100, 101.5, 103.5]);
   assert.equal(out[0], hist[0]);
   for (let i = 1; i < out.length; i++) assert.ok(out[i].t > out[i - 1].t);
+  // a history refresh later in the session changes nothing from the first tick on (no repaint)
+  const later = [...hist, minute(m(5), 99), minute(m(6), 98)];
+  assert.deepEqual(spliceTicks(later, ticks, m(7) + 1).map(b => b.straddle), [100, 101.5, 103.5]);
   // no ticks yet: just the closed minutes
   assert.deepEqual(spliceTicks(hist, [], m(4) + 30).map(b => b.straddle), [100, 101, 102, 103]);
+});
+
+test('a straddle leg with no row yet is seeded from the history, then follows its own rows', () => {
+  const ce: TickRow[] = [[at(1), 50, 0], [at(2), 51, 0]];
+  const b = foldTickRows(newTickBuild(2), [ce, []], 'NSE_FNO', 90, [49, 40]);
+  assert.deepEqual(b.bars.map(x => [x.ce, x.pe, x.straddle]), [[50, 40, 90], [51, 40, 91]]);
+  const b2 = foldTickRows(b, [[], [[at(3), 38, 0]]], 'NSE_FNO');
+  assert.deepEqual(b2.bars.slice(-1).map(x => [x.ce, x.pe]), [[51, 38]]);
+  // without a seed nothing can be drawn until both legs have a price
+  assert.equal(foldTickRows(newTickBuild(2), [ce, []], 'NSE_FNO').bars.length, 0);
+});
+
+test('a leg\'s first volume figure joining the sum sets the base instead of landing in one bar', () => {
+  const ce: TickRow[] = [[at(1), 50, 1000], [at(2), 51, 1010], [at(4), 52, 1020]];
+  const pe: TickRow[] = [[at(3), 40, 5_000_000]];
+  const b = foldTickRows(newTickBuild(2), [ce, pe], 'NSE_FNO', 90, [49, 41]);
+  assert.deepEqual(b.bars.map(x => x.vol), [0, 10, 0, 10]);
 });
 
 // ── Tick bars through the real chart build and AUTO's decision ──
@@ -110,19 +131,22 @@ test('10 sec buckets: last price, summed volume, start-stamped; emitted once ove
   const S0 = Date.UTC(2026, 9, 22, 4, 30) / 1000;       // 10:00:00 IST, on a 10 s boundary
   const tick = (s: number, p: number, vol = 1) => ({ t: S0 + s, ce: p, pe: 0, straddle: p, vol });
   const ticks = [tick(1, 100), tick(4.5, 103), tick(9.9, 101), tick(12, 105)];
-  // 10:00:12: the first bucket is over (a later tick exists); the second is still filling
+  // served up to 10:00:12: the first bucket is over (a later tick exists); the second is still filling
   let b = bucketTickBars(null, ticks, 10, S0 + 12.5);
   assert.deepEqual(b.bars, [{ t: S0, ce: 101, pe: 0, straddle: 101, vol: 3 }]);
   const first = b.bars[0];
-  // the second bucket closes on the clock (no later tick) once its end + grace has passed
-  assert.equal(bucketTickBars(b, ticks, 10, S0 + 21.9).bars.length, 1);
-  b = bucketTickBars(b, ticks, 10, S0 + 22);
+  // the second bucket closes once the route has served every row up to its end (no later tick needed)
+  assert.equal(bucketTickBars(b, ticks, 10, S0 + 19.9).bars.length, 1);
+  b = bucketTickBars(b, ticks, 10, S0 + 20);
   assert.deepEqual(b.bars.map(x => [x.t, x.straddle]), [[S0, 101], [S0 + 10, 105]]);
   assert.equal(b.bars[0], first);
   // nothing new: the same build back
   assert.equal(bucketTickBars(b, ticks, 10, S0 + 23), b);
   // a fresh tick series (new day / instrument) starts again
   assert.equal(bucketTickBars(b, [], 10, S0 + 30).bars.length, 0);
+  // a tick that still lands in an emitted bucket goes to the next one: no two bars share a time
+  const late = bucketTickBars(b, [...ticks, tick(19.5, 107)], 10, S0 + 40);
+  assert.deepEqual(late.bars.map(x => x.t), [S0, S0 + 10, S0 + 20]);
 });
 
 test('10 sec: a spike that reverses inside the bucket prints no brick; Tick prints it', () => {
