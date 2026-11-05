@@ -8,7 +8,7 @@ import DataChip from './DataChip';
 import PnfPanel from './straddlePnf/PnfPanel';
 import AlertLog, { type LogEntry } from './straddlePnf/AlertLog';
 import InstrumentBar from './straddlePnf/InstrumentBar';
-import { effectiveInterval, hasLongIntervals, intervalLabel } from '@/lib/straddlePnfInterval';
+import { effectiveInterval, hasLongIntervals, intervalLabel, TICK_INTERVAL } from '@/lib/straddlePnfInterval';
 import SettingsControls, { SmaPeriodInput, SupertrendControls } from './straddlePnf/SettingsControls';
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import BrokerBooks from './straddlePnf/BrokerBooks';
@@ -169,7 +169,7 @@ function IconButton({ icon: Icon, label, onClick, pressed, badge }: { icon: Luci
 /** One chart's P&F model: CLOSED bars only (so a signal never repaints), with the forming minute laid on top. */
 function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, overlay: Overlay, liveNow: number, chart: ChartType, replayT: number | null = null, replayOnly = false) {
   // A long interval picked on a stock does not carry over to an instrument that has no such history.
-  const interval = effectiveInterval(rawSettings.interval, hasLongIntervals(target.kind));
+  const interval = effectiveInterval(rawSettings.interval, hasLongIntervals(target.kind), chart === 'renko');
   const settings = useMemo(() => (interval === rawSettings.interval ? rawSettings : { ...rawSettings, interval }), [rawSettings, interval]);
   // An index's feed "volume" is its constituents' turnover, not traded volume: no VWAP. Whatever the instrument, the button follows
   // the model once bars are in (bars without volume, e.g. an illiquid option, get the box SMA too), so the toggle never
@@ -190,7 +190,8 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   );
   const now = replayT === null ? liveNow : (replayT + 60) * 1000;
   const last = bars[bars.length - 1];
-  const formingBar = last !== undefined && now > 0 && last.t >= minuteOf(now / 1000) ? last : undefined;   // the minute still forming
+  // the minute still forming; a Tick chart has none (every recorded price is a closed bar: lib/pnfTicks.ts)
+  const formingBar = interval !== TICK_INTERVAL && last !== undefined && now > 0 && last.t >= minuteOf(now / 1000) ? last : undefined;
   const closed = formingBar ? bars.slice(0, -1) : bars;
   const closedLast = closed[closed.length - 1];
   // The confirmed chart depends only on the closed bars, so it is rebuilt when a bar closes or history reloads, not on every tick.
@@ -348,15 +349,18 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // ── the two charts: each its own instrument, history, live price, model and alerts ──
   const dual = chartView === '2';
   const active: ChartId = dual && activeChart === 2 ? 2 : 1;
-  const feed1 = usePnfFeed(prefsReady ? target1 : null, recenter, now);
-  const feed2 = usePnfFeed(prefsReady && dual ? target2 : null, recenter, now);
+  // Renko Tick mode: the feed lays the bridge's recorded prices into the bars (lib/pnfTicks.ts)
+  const tick1 = renko && effectiveInterval(settings.interval, hasLongIntervals(target1.kind), true) === TICK_INTERVAL;
+  const tick2 = renko && effectiveInterval(settings2.interval, hasLongIntervals(target2.kind), true) === TICK_INTERVAL;
+  const feed1 = usePnfFeed(prefsReady ? target1 : null, recenter, now, tick1);
+  const feed2 = usePnfFeed(prefsReady && dual ? target2 : null, recenter, now, tick2);
   const c1 = useChartModel(feed1, target1, settings, overlay, now, chart);
   const c2 = useChartModel(feed2, target2, settings2, overlay, now, chart);
 
   // ── Bar Replay (lib/pnfReplay.ts): both charts as they stood at one past moment, played forward one bar of the active chart's
   // interval at a time. c1 / c2 stay LIVE and keep feeding everything that trades or alerts (AUTO, alerts, the rail's engine, the
   // MTM guard); the replay copies r1 / r2 only draw the charts and price the practice book.
-  const intervalOf = (c: ChartId) => effectiveInterval((c === 2 ? settings2 : settings).interval, hasLongIntervals((c === 2 ? target2 : target1).kind));
+  const intervalOf = (c: ChartId) => effectiveInterval((c === 2 ? settings2 : settings).interval, hasLongIntervals((c === 2 ? target2 : target1).kind), renko);
   const replay = useReplay({
     storageKey: prefKey(chart, 'straddle-pnf-replay'),
     charts: `${targetKey(target1)}|${dual ? targetKey(target2) : ''}`,
@@ -937,6 +941,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     // The MTM guard is the user's choice: arming AUTO leaves it as it is (OFF unless switched on from the MTM Guard card, whose levels start
     // at 10 boxes / 10 boxes). Said once, because the Supertrend / N-brick rules have no stop of their own.
     if (on && autoSide[c] !== 'both') toast.info(`AUTO armed on chart ${c}: ${SIDE_LABEL[autoSide[c]].toUpperCase()} - signals for the other side are ignored (open positions still exit normally).`, { duration: 8_000 });
+    // Tick mode: every brick the live price prints is a closed bar, so AUTO enters, exits and adds within a second or two of it.
+    if (on && (c === 2 ? tick2 : tick1)) toast.warning(`AUTO armed on a Tick chart ${c}: it acts on each brick the moment the live price prints it (not at a bar close) - expect more trades and whipsaws than on a minute chart.`, { duration: 12_000 });
     if (on && tradeMode === 'REAL' && !guards.guardOf(c).on) toast.info(`AUTO armed on chart ${c} with the MTM guard OFF - switch it on from the MTM Guard card if you want a profit target / stop-loss.`, { duration: 10_000 });
     if (!on) { disarm(c, 'stopped by the user'); return; }
     const m = (c === 2 ? c2 : c1).model;
@@ -957,7 +963,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
         setAutoArm(a => (a[c].on && a[c].watermarkT === watermarkT && a[c].armT === undefined ? { ...a, [c]: { ...a[c], armT: t } } : a));
       } else toast.warning(`AUTO on chart ${c} is armed in this tab only (it could not be saved: ${r.error ?? 'no reply'}) - a reload will switch it off`, { duration: 15_000 });
     });
-  }, [autoSide, autoLots, autoRule, autoPyr, tradeMode, guards, disarm, c1, c2, noteArmedHere, noteArmSaved, broker, target1, target2, renko, autoPost]);
+  }, [autoSide, autoLots, autoRule, autoPyr, tradeMode, guards, disarm, c1, c2, noteArmedHere, noteArmSaved, broker, target1, target2, renko, autoPost, tick1, tick2]);
   const setLotsFor = (c: ChartId, n: number) => { setAutoLots(l => ({ ...l, [c]: n })); saveP(`${AUTO_LOTS_KEY}${c}`, String(n)); };
   // The page mode is the mode AUTO trades in: switching it disarms both charts (arming REAL is always an explicit step).
   const changeTradeMode = (m: 'PAPER' | 'REAL') => {
@@ -1069,7 +1075,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       legs: target.kind === 'options' && target.side === 'STRADDLE',
       flash: rp ? null : flash[c],
       loading: (feed.loading || !feed.complete) && feed.bars.length === 0,
-      interval: effectiveInterval(st.interval, hasLongIntervals(target.kind)),
+      interval: effectiveInterval(st.interval, hasLongIntervals(target.kind), renko),
       boxPct: st.boxPct,
       reversal: st.reversal,
       resetTick: viewTick,
@@ -1145,7 +1151,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
                 {tradeMode === 'REAL' && <span data-testid="pnf-real-banner" className="px-1.5 py-0.5 rounded bg-red-600 text-oncolor text-[11px] font-bold tracking-wide">LIVE · REAL MONEY</span>}
               </h1>
               <p className="text-[10px] text-zinc-500 font-medium mt-1 truncate">
-                {`${dual ? `Chart ${active} · ` : ''}${intervalLabel(effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind)))} · ${boxText(activeSettings)} · ${renko ? `confirm ${activeSettings.reversal} brick${activeSettings.reversal === 1 ? '' : 's'}` : `${activeSettings.reversal}-box reversal`} · ${activeFno ? activeFeed.label : activeFeed.name ?? activeTarget.name}`}
+                {`${dual ? `Chart ${active} · ` : ''}${intervalLabel(effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind), renko))} · ${boxText(activeSettings)} · ${renko ? `confirm ${activeSettings.reversal} brick${activeSettings.reversal === 1 ? '' : 's'}` : `${activeSettings.reversal}-box reversal`} · ${activeFno ? activeFeed.label : activeFeed.name ?? activeTarget.name}`}
               </p>
             </div>
           </div>
@@ -1309,7 +1315,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
 
       <div className="relative flex-1 min-h-0 flex flex-col gap-3 px-4 pt-2 pb-2">
         {loadErrors.map(e => <p key={e as string} role="alert" className="text-xs text-red-400 border border-red-500/30 bg-red-500/10 rounded-md px-3 py-2">{e}</p>)}
-        {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind))} renko={renko} /></div>}
+        {logOpen && <div className="absolute right-4 top-2 z-40 w-96 shadow-xl"><AlertLog entries={log} interval={effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind), renko)} renko={renko} /></div>}
         {!tradeBarShown && <div className="shrink-0 self-center px-2 py-1 rounded-lg border border-zinc-800 bg-zinc-900">{styleBar}</div>}
         <div
           className={`flex-1 min-h-0 grid gap-3 ${dual ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}

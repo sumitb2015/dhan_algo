@@ -96,5 +96,7 @@ export function crosshairStamp(t: number, withTime = true): string {
   const p = istParts(t);
   const pad = (n: number) => String(n).padStart(2, '0');
   const date = `${p.d} ${MONTHS[p.m]} '${pad(p.y % 100)}`;
-  return withTime ? `${date}  ${pad(p.hh)}:${pad(p.mm)}` : date;
+  // a Tick-mode bar is stamped to the second: show it when it is not on the minute
+  const ss = Math.floor(t) % 60;
+  return withTime ? `${date}  ${pad(p.hh)}:${pad(p.mm)}${ss ? `:${pad(ss)}` : ''}` : date;
 }

@@ -1,11 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   foldTick, inSession, mergeHistory, feedCloseTrusted, istMinuteOfDay, isWildTick, legsTick, sessionWindow,
   type LegQuote, type Market, type Tick,
 } from '@/lib/straddlePnfLive';
 import { mergeTail } from '@/lib/pnfTail';
+import { foldTickRows, newTickBuild, spliceTicks, type TickBuild, type TickRow } from '@/lib/pnfTicks';
 import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
 import { isComplete, targetKey, targetLabel, targetQuery, type Target } from '@/lib/pnfTarget';
@@ -23,8 +24,10 @@ const POLL_MS = 30_000;
 const TAIL_SESSIONS = 4;
 const LIVE_MS = 1_000;   // how often the chart reads the WebSocket bridge's latest price (the bridge itself is push, from the shared hub)
 const FRESH_S = 180;
+const TICKS_MS = 1_000;  // Renko Tick mode: how often the bridge's tick log is read (/api/straddle-pnf/ticks)
 
-export function usePnfFeed(target: Target | null, recenter: number, now: number) {
+/** `tick`: Renko Tick mode — the bridge's recorded prices replace the live minute fold (lib/pnfTicks.ts). */
+export function usePnfFeed(target: Target | null, recenter: number, now: number, tick = false) {
   const [bars, setBars] = useState<Bar[]>([]);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [name, setName] = useState<string | null>(null);   // the full name the server resolved for the chosen symbol
@@ -37,10 +40,13 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
   const [feedPrevClose, setFeedPrevClose] = useState<number | null>(null);
   // A feed price outside the trading session (NSE pre-open, post-close): shown in the header, never folded into a chart bar.
   const [outQuote, setOutQuote] = useState<{ ce: number; pe: number; t: number } | null>(null);
+  // Tick mode only: the live route's latest in-session price, for the header.
+  const [headTick, setHeadTick] = useState<{ ce: number; pe: number } | null>(null);
   // The newest WebSocket price; kept so a history refresh (which replaces the bars) can lay it back on top.
   const tickRef = useRef<Tick | null>(null);
   // The last bar's close, for the live poll's bad-tick check (kept in a ref so the poll interval need not restart per tick).
   const lastCloseRef = useRef<number | undefined>(undefined);
+  const tickMode = tick;
   const reqRef = useRef(0);
   // An index carries two years of 1-minute bars: the first load takes them all, the 30 s refresh only the last few sessions.
   const fullRef = useRef(false);
@@ -127,6 +133,9 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
         // Pre-open values are indicative, not trades, and the history API has no bars for them: header only.
         if (!inSession(tick.t, market)) { setOutQuote({ ce: tick.ce, pe: tick.pe, t: tick.t }); return; }
         setOutQuote(null);
+        // Tick mode: the bars come from the tick log (below); a minute folded from this read would be drawn as a closed bar. The
+        // header still shows this read's price, which can be a moment ahead of the log.
+        if (tickMode) { setHeadTick({ ce: tick.ce, pe: tick.pe }); return; }
         tickRef.current = tick;
         setBars(prev => (prev.length ? foldTick(prev, tick, single).bars : prev));
       } catch { /* the header keeps the last price and shows Stale until the next read lands */ }
@@ -134,13 +143,51 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
     void poll();
     const id = setInterval(() => { void poll(); }, LIVE_MS);
     return () => { dead = true; clearInterval(id); };
-  }, [ids, market, single]);
+  }, [ids, market, single, tickMode]);
 
-  const last = bars[bars.length - 1];
+  // ── Renko Tick mode: the bridge's tick log → one closed bar per recorded price ──
+  const [tickBuild, setTickBuild] = useState<TickBuild | null>(null);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTickBuild(null); setHeadTick(null);
+    if (!tickMode || !ids) return;
+    let dead = false;
+    let since = 0;
+    let day = '';
+    let build = newTickBuild(instruments.length);
+    let busy = false;
+    const poll = async () => {
+      if (busy) return;            // a slow read is never overtaken by the next one (the cursor must move in order)
+      busy = true;
+      try {
+        const res = await fetch(`/api/straddle-pnf/ticks?ids=${ids}&since=${since}`);
+        const j = await res.json() as { success?: boolean; day?: string; upTo?: number; legs?: TickRow[][] };
+        if (dead || !j.success || !j.legs || typeof j.upTo !== 'number') return;
+        if (j.day !== day) { day = j.day ?? ''; build = newTickBuild(instruments.length); }   // a new session's log
+        const next = foldTickRows(build, j.legs, market, lastCloseRef.current);
+        since = j.upTo;
+        if (next.bars !== build.bars) setTickBuild(next);
+        build = next;
+      } catch { /* the next read carries on from the same cursor */ } finally { busy = false; }
+    };
+    void poll();
+    const id = setInterval(() => { void poll(); }, TICKS_MS);
+    return () => { dead = true; clearInterval(id); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ids, market, tickMode]);
+
+  // The chart's bars: in Tick mode the history's minutes with the recorded prices laid in (the running minute's bar left out).
+  const nowMinute = Math.floor(now / 60_000);
+  const chartBars = useMemo(
+    () => (tickMode ? spliceTicks(bars, tickBuild?.bars ?? [], nowMinute > 0 ? nowMinute * 60 : Infinity) : bars),
+    [tickMode, bars, tickBuild, nowMinute],
+  );
+
+  const last = chartBars[chartBars.length - 1];
   useEffect(() => { lastCloseRef.current = last?.straddle; });
 
   const stale = now === 0 || !last || now / 1000 - last.t > FRESH_S;
-  const live = outQuote ? { ce: outQuote.ce, pe: outQuote.pe } : last ? { ce: last.ce, pe: last.pe } : null;
+  const live = outQuote ? { ce: outQuote.ce, pe: outQuote.pe } : tickMode && headTick ? headTick : last ? { ce: last.ce, pe: last.pe } : null;
   const sessionTag = outQuote ? (istMinuteOfDay(outQuote.t) < sessionWindow(market, outQuote.t)[0] ? 'Pre-open' : 'Post-close') : null;
   // The feed's previous close is the official one (a stock's closing price is not its last 1-min close), but only until the bell.
   const tradingDay = market !== 'MCX' ? isNseTradingDay(istDateIso(now)) : true;
@@ -153,7 +200,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number)
   const scrip = !target ? '' : fno ? label : name && name !== target.symbol ? `${target.symbol} · ${name}` : target.symbol;
 
   return {
-    bars, loaded, name, loading, loadError, histVersion, epoch, market, complete, live, stale, sessionTag, trustedPrevClose, label, scrip,
+    bars: chartBars, loaded, name, loading, loadError, histVersion, epoch, market, complete, live, stale, sessionTag, trustedPrevClose, label, scrip,
   };
 }
 

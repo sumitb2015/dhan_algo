@@ -56,6 +56,7 @@ chart under the trend rule are a flip: the first is the exit of the old position
 
 - **Closed bars only.** A brick exists only after its 1-minute bar has closed, so a signal can never repaint. The order goes out about
   one second after the bar closes. If the price runs several boxes inside the minute, AUTO does not enter until the bar closes.
+  On the **Tick** interval (below) every recorded price is a closed bar, so this becomes "about one to two seconds after the brick prints".
 - **Arming ignores history.** Everything already on the chart when you arm is skipped; the first qualifying brick formed afterwards counts.
 - **Fresh signals only.** The signal must be on the newest closed bar and less than 3 minutes old. A missed signal is never chased.
 - **Session.** Only during the market session and before the entry cutoff: **NSE 15:05** (10 minutes before the 15:15 exit; a stock in the closing auction session 15:00), **MCX 10 minutes before the market close** = 23:45 on a 23:55 close (23:20 on a 23:30 close), the same minute as the MCX square-off, so a trade taken in the last minute is squared off at once.
@@ -65,6 +66,23 @@ chart under the trend rule are a flip: the first is the exit of the old position
 - **Nothing sent yet.** If an entry fails before any order goes out (the contract lookup has not answered, the ledger is unreachable for a
   moment - a dashboard restart), it is retried every second while the signal is still the newest closed bar's; a signal that ages out that
   way is logged as `missed the … signal`.
+
+### Tick interval (instant bricks)
+
+Pick **Tick** in the Interval list (Renko only). Bricks then come from the live price itself, not from bar closes:
+
+- **What it reads.** The price bridge (`scripts/tools/pnf_ws.py`) logs every price change it sees, sampled every 0.5 s, to
+  `debug/pnf_ticks/<date>/<SEG>_<id>.jsonl`. The page reads that log every second. It is not every exchange trade: a spike that reverses
+  inside half a second can be missed.
+- **Bricks are permanent.** A brick prints the moment a price crosses the box and never disappears, unlike the provisional bricks of the
+  running minute on the 1 min interval. A reload or a second tab draws the same bricks from the log.
+- **Alerts and AUTO act at once.** Entries, the opposite-brick exit and `+1L/brick` adds all fire on the brick, about 1-2 s after the
+  price (the log is served 0.4 s behind, the page polls each second). Expect more trades and whipsaws than on a minute chart; arming warns once.
+- **Before the log.** Ticks exist only from when the bridge started asking for the instrument. Earlier stretches, and any gap where the
+  bridge was down, are drawn from the 1-minute closes. The minute still running is never drawn from a minute bar.
+- **Switching** the interval is locked while AUTO is armed or holds a position, as for every setting.
+- The bridge must be running the version with the tick log. After updating, restart it once while no AUTO is armed: write
+  `debug/pnf_ws_stop.trigger` and an open P&F / Renko page starts the new one within about 30 s (prices pause until then).
 
 ## 4. When it exits
 
@@ -230,6 +248,7 @@ Only one tab per browser profile leads (Web Locks). A second browser or machine 
 
 | Area | Files |
 |---|---|
+| Tick interval | `scripts/tools/pnf_ws.py` (`TickLog`), `lib/pnfTicksServer.ts` + `app/api/straddle-pnf/ticks/route.ts` (log reader), `lib/pnfTicks.ts` (ticks to closed bars, splice with minute history), `components/straddlePnf/usePnfFeed.ts` |
 | Rules (pure, tested) | `rs_dashboard/lib/renko.ts` (`renkoSignals`, `trendSignals`, `twoBackSignals`, `oneBackSignals`), `lib/pnfAuto.ts` (`decideAuto`, windows), `lib/pnfAutoRule.ts` |
 | Engine (browser) | `components/straddlePnf/usePnfAuto.ts`, `AutoControls.tsx`, `components/StraddlePnfPage.tsx` |
 | Ledger | `lib/pnfAutoLedger.ts`, `lib/pnfAutoServer.ts`, `app/api/straddle-pnf/auto/route.ts` |

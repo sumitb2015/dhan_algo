@@ -149,11 +149,11 @@ export default function SettingsControls({ settings, onChange, equity = false, r
   const setBox = (n: number) => { if (n !== boxValue) onChange(boxMode === 'pct' ? { ...settings, boxPct: n } : { ...settings, boxPts: n }); };
   return (
     <>
-      <label className={LABEL}>
+      <label className={LABEL} title={renko ? 'Tick: a brick prints the moment the live price crosses a box (not when a bar closes); alerts and AUTO act on it at once' : undefined}>
         Interval
         <select aria-label="Interval" value={settings.interval} className={`${FIELD} border-zinc-700`}
                 onChange={e => onChange({ ...settings, interval: Number(e.target.value) as Interval })}>
-          {intervalsFor(equity).map(n => <option key={n} value={n}>{intervalLabel(n)}</option>)}
+          {intervalsFor(equity, renko).map(n => <option key={n} value={n}>{intervalLabel(n)}</option>)}
         </select>
       </label>
       {/* Box size as a % of the first price or as fixed price points; each mode keeps its own value. */}
