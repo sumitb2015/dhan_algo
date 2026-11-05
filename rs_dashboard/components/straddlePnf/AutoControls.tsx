@@ -208,7 +208,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
                   aria-label={`${pyramid.on ? 'Stop adding' : 'Add'} one lot every ${pyramid.every} new brick${pyramid.every > 1 ? 's' : ''} on chart ${chart}`}
                   onClick={() => onPyramid({ ...pyramid, on: !pyramid.on })}
                   className={`h-6 px-1.5 rounded-l text-[11px] font-bold disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 ${pyramid.on ? 'bg-violet-500/20 text-violet-300' : 'text-zinc-400 hover:text-white'}`}>
-            {pyramid.on ? '+1L /' : pyramid.every > 1 ? `+1L/${pyramid.every} br` : '+1L/brick'}
+            {pyramid.on ? '+1L every' : pyramid.every > 1 ? `+1L every ${pyramid.every} bricks` : '+1L every brick'}
           </button>
           {pyramid.on && (
             <>
@@ -223,7 +223,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
                        if (e.key === 'Escape') { setEveryDraft(String(pyramid.every)); cancelBlurRef.current = true; e.currentTarget.blur(); }
                      }}
                      className="w-7 h-6 text-center text-[11px] font-mono font-bold bg-transparent text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 rounded disabled:text-zinc-400" />
-              <span className="text-[11px] font-bold text-zinc-400" aria-hidden="true">br</span>
+              <span className="text-[11px] font-bold text-zinc-400" aria-hidden="true">{pyramid.every === 1 ? 'brick' : 'bricks'} ·</span>
               <span className="pl-1 text-[11px] font-bold text-zinc-400" aria-hidden="true">Max</span>
               <input aria-label={`Maximum AUTO lots with adds on chart ${chart}`} data-testid={`pnf-auto-pyr-max-${chart}`} value={maxDraft} disabled={armed}
                      onFocus={() => { maxFocusedRef.current = true; }}

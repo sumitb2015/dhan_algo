@@ -115,9 +115,9 @@ In priority order:
 
 Exits keep running for an open position even when AUTO is switched off.
 
-### Adding lots as the trade moves (`+1L / N br`)
+### Adding lots as the trade moves (`+1L every N bricks`)
 
-Optional, per chart, Renko only: the **`+1L/brick`** switch next to the AUTO lots box. Once on it shows **`+1L / [N] br · Max [M]`**:
+Optional, per chart, Renko only: the **`+1L every brick`** switch next to the AUTO lots box. Once on it shows **`+1L every [N] bricks · Max [M]`**:
 **N** = bricks between adds (default 1, at most 50), **Max** = total lots (default 10, at most 20).
 Both are set before arming and locked while AUTO is armed. Saved per chart and on the AUTO arming, so a reload resumes them.
 
