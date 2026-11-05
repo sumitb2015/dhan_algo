@@ -773,19 +773,25 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     // only when a chart's box size changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [c1.model.box, c2.model.box]);
-  // A guard the server still holds (the tab was closed or reloaded with it on): the page picks it up, so what the server enforces is what the card shows.
-  const adoptedRef = useRef(false);
+  // A guard the server holds (the tab was closed or reloaded with it on, or it was set in another broker / mode): the page picks it up
+  // whenever the page's broker or mode becomes the guard's, so what the server enforces is always what the card shows. Checked on load AND
+  // on every broker / mode change: a page loads in PAPER, so a once-per-load check skipped a REAL guard for good and the card read OFF while
+  // the server kept exiting REAL AUTO trades by it (2026-11-05).
+  const adoptSeqRef = useRef(0);
+  const adoptWarnedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
-    if (adoptedRef.current) return;
-    adoptedRef.current = true;
+    const seq = ++adoptSeqRef.current;
     void (async () => {
       try {
         const j = await (await fetch(`/api/straddle-pnf/server-guard?scope=${scope}`)).json() as { guards?: Record<string, { broker: string; mode: 'PAPER' | 'REAL'; levels: LadderGuard }> };
+        if (seq !== adoptSeqRef.current) return;                     // the broker / mode changed again meanwhile: that newer check decides
         for (const [k, cfg] of Object.entries(j.guards ?? {})) {
           const chartN = Number(k.split(':')[1]);
           if (chartN !== 1 && chartN !== 2) continue;
           if (cfg.broker === broker && cfg.mode === tradeMode) guards.adopt(chartN, cfg.levels);
           else {
+            const warnKey = `${chartN}:${cfg.broker}:${cfg.mode}`;
+            if (adoptWarnedRef.current.has(warnKey)) continue;
             // Held for another broker / mode than this page opened in (a page always opens in PAPER). It matters only while a REAL AUTO
             // position is actually open on that chart: with none, the guard is just a saved setting for the next trade, not a live stop.
             let liveRow = true;
@@ -794,6 +800,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
               liveRow = (l.ledger?.rows ?? []).some(r => r.chart === chartN && r.mode === 'REAL' && r.state !== 'closed');
             } catch { /* unknown: warn */ }
             if (!liveRow) continue;
+            adoptWarnedRef.current.add(warnKey);
             // say so, never leave it enforcing unseen.
             toast.warning(`The server is still guarding chart ${chartN}'s open ${cfg.mode} position on ${cfg.broker} (MTM guard with the tab closed). Switch the page to ${cfg.broker} ${cfg.mode} to see and edit it.`, {
               // Dismissable (X) and self-closing: the server keeps guarding either way, the toast only says so.
@@ -804,9 +811,9 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
         }
       } catch { /* none to adopt */ }
     })();
-    // once per page load
+    // guards.adopt is a fresh function each render; the check is keyed on what the page trades as
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [scope, broker, tradeMode]);
   const railFor = (c: ChartId) => {
     const rc = railCharts.find(x => x.chart === c);
     if (!rc) return undefined;
