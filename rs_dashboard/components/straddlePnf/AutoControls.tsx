@@ -154,7 +154,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
   const unresolved = row && row.state !== 'open';
 
   return (
-    <span data-testid={`pnf-auto-${chart}`} data-armed={armed} className="flex items-center gap-1.5 shrink-0 font-sans [&_button]:scroll-mt-48 [&_input]:scroll-mt-48 [&_select]:scroll-mt-48">
+    <span data-testid={`pnf-auto-${chart}`} data-armed={armed} className="flex flex-wrap items-center gap-x-1.5 gap-y-1 min-w-0 font-sans [&_button]:scroll-mt-48 [&_input]:scroll-mt-48 [&_select]:scroll-mt-48">
       <button type="button" onClick={toggle} disabled={!!disabledReason && !armed} aria-pressed={armed}
               aria-label={armed ? `Stop AUTO on chart ${chart}` : `Start AUTO on chart ${chart}`}
               title={disabledReason ?? (armed && confirmReal ? 'Click again to stop AUTO: the open position still exits on its rule, but nothing re-enters'
@@ -273,7 +273,8 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
           )}
         </span>
       )}
-      <span data-testid={`pnf-auto-status-${chart}`} className="font-mono text-[11px] truncate min-w-0 max-w-[13rem]" title={halt ?? note}>
+      {/* A held position (side, lots, price, P&L, trail SL) is shown whole; only a waiting note is truncated. */}
+      <span data-testid={`pnf-auto-status-${chart}`} className={`font-mono text-[11px] ${open || unresolved ? 'whitespace-nowrap' : 'truncate min-w-0 max-w-[13rem]'}`} title={halt ?? note}>
         {unresolved ? (<>
           {(row.state === 'entering' || row.state === 'exiting' || row.state === 'adding') && !needsResolve(row, nowMs)
             ? <span className="text-amber-400">{row.state === 'entering' ? 'ENTERING…' : row.state === 'adding' ? `ADDING… ${row.lots}L` : 'EXITING…'}</span>
