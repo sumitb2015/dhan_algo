@@ -176,7 +176,7 @@ test('side filter: a buy-only chart never enters the sell signal on the last bar
 });
 
 // ── pyramid (decideAdd) ──
-import { decideAdd, pyramidEveryOf, PYRAMID_EVERY_MAX } from './pnfAuto.ts';
+import { decideAdd, pyramidEveryOf, PYRAMID_EVERY_MAX, trailLevel, trailOf } from './pnfAuto.ts';
 
 /** A Renko short entered on the 10:00 brick (close 100); bricks of box 1 after it: [time, dir, close]. */
 function renkoModel(bricks: [number, 'X' | 'O', number][], lastBarT: number): AutoModel {
@@ -253,6 +253,36 @@ test('pyramid every N bricks: the first add waits N bricks past the entry brick,
   // N = 1 (or absent / invalid) is the every-new-best-brick rule
   assert.equal(decideAdd({ model: one, row: shortRow({ pyramidEvery: 1 }), nowS: ist(10, 6), market: 'NSE', maxLots: 10 }).add, true);
   assert.equal(pyramidEveryOf(0), 1); assert.equal(pyramidEveryOf(2.5), 1); assert.equal(pyramidEveryOf(3), 3); assert.equal(pyramidEveryOf(PYRAMID_EVERY_MAX + 1), 1);
+});
+
+test('pyramid trailing SL: none before an add; after one, a closed brick N boxes back from the best exits (before the Supertrend rule)', () => {
+  // a short entered on the 100 brick: down to 97 (added on the 10:02 brick at 98), then back up
+  const base: [number, 'X' | 'O', number][] = [[ist(10, 1), 'O', 99], [ist(10, 2), 'O', 98], [ist(10, 3), 'O', 97]];
+  const pos = (row: Record<string, unknown>) => ({ side: 'SELL' as const, entryBarT: ist(10, 0), exitBy: 'supertrend' as const, trail: trailOf({ entryPrice: 100, entryBox: 100, ...row }) });
+  const added = { trailBoxes: 2, adds: [{ barT: ist(10, 2) }] };
+  const dec = (bricks: [number, 'X' | 'O', number][], row: Record<string, unknown>) =>
+    decideAuto({ model: renkoModel(bricks, bricks[bricks.length - 1][0]), position: pos(row), watermarkT: 0, nowS: ist(10, 9), market: 'NSE' });
+  // 1 box back (98) holds; 2 boxes back (99) exits at that brick's close
+  assert.equal(dec([...base, [ist(10, 4), 'X', 98]], added).action, 'none');
+  const two = [...base, [ist(10, 4), 'X', 98], [ist(10, 5), 'X', 99]] as [number, 'X' | 'O', number][];
+  assert.deepEqual(dec(two, added), { action: 'exit', reason: 'trail', col: 5, boxPrice: 99 });
+  assert.equal(trailLevel(renkoModel(base, ist(10, 3)), pos(added)), 99);
+  // no add yet, or the trail switched off: the Supertrend rule (no direction data here) holds
+  assert.equal(dec(two, { trailBoxes: 2 }).action, 'none');
+  assert.equal(dec(two, { adds: [{ barT: ist(10, 2) }] }).action, 'none');
+  // N = 3 needs 3 boxes back
+  assert.equal(dec(two, { ...added, trailBoxes: 3 }).action, 'none');
+  assert.equal(dec([...two, [ist(10, 6), 'X', 100]], { ...added, trailBoxes: 3 }).action, 'exit');
+  // a pullback brick on (or before) the add's bar does not count
+  const early: [number, 'X' | 'O', number][] = [[ist(10, 1), 'O', 98], [ist(10, 1), 'X', 100], [ist(10, 2), 'O', 97]];
+  assert.equal(dec(early, { trailBoxes: 2, adds: [{ barT: ist(10, 2) }] }).action, 'none');
+  // EOD still comes first; a P&F model never trails
+  assert.deepEqual(decideAuto({ model: renkoModel(two, ist(10, 5)), position: pos(added), watermarkT: 0, nowS: ist(15, 16), market: 'NSE' }), { action: 'exit', reason: 'eod' });
+  assert.equal(decideAuto({ model: { ...renkoModel(two, ist(10, 5)), chart: 'pnf' }, position: pos(added), watermarkT: 0, nowS: ist(10, 9), market: 'NSE' }).action, 'none');
+  // a long: entry 101, best 104 after an add, a brick closing at 102 is 2 back
+  const up: [number, 'X' | 'O', number][] = [[ist(10, 1), 'X', 102], [ist(10, 2), 'X', 103], [ist(10, 3), 'X', 104], [ist(10, 4), 'O', 102]];
+  const d = decideAuto({ model: renkoModel(up, ist(10, 4)), position: { side: 'BUY', entryBarT: ist(10, 0), trail: trailOf({ entryPrice: 101, entryBox: 101, ...added }) }, watermarkT: 0, nowS: ist(10, 5), market: 'NSE' });
+  assert.deepEqual(d, { action: 'exit', reason: 'trail', col: 4, boxPrice: 102 });
 });
 
 test('NRML (MARGIN) squares off NSE at 15:35 (entries stop 15:25), pulled inside an earlier close; MIS keeps 15:15; MCX is the same for both', () => {

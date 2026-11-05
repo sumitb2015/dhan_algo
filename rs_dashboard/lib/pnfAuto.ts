@@ -66,13 +66,19 @@ export interface AutoPosition {
    * after the entry bar whose Supertrend direction is against the position, not the first opposite-colour brick.
    */
   exitBy?: 'supertrend';
+  /**
+   * Renko pyramid trailing SL (the row's `trailBoxes`, active once a lot was added): exit on the first closed brick after the first add's bar
+   * (`fromBarT`) that closes `boxes` boxes back from the best brick close since entry (`start` = the entry brick). Checked before the
+   * two-back stop and the reversal / Supertrend exit, so a big pyramided position does not wait for the Supertrend to turn.
+   */
+  trail?: { boxes: number; fromBarT: number; start: number };
 }
 
 export type AutoDecision =
   /** `boxPrice`: the confirmed box the signal bar reached (where the trade is booked on paper and drawn on the chart). */
   | { action: 'enter'; side: AutoSide; signal: PnfSignal; boxPrice: number | null }
   /** Reversal: `boxPrice` is the confirmed box the reversal column reached on its first bar. EOD has none (no box event). */
-  | { action: 'exit'; reason: 'reversal' | 'eod' | 'stop'; col?: number; boxPrice?: number | null }
+  | { action: 'exit'; reason: 'reversal' | 'eod' | 'stop' | 'trail'; col?: number; boxPrice?: number | null }
   | { action: 'none'; why: string };
 
 /**
@@ -120,6 +126,47 @@ export function boxPriceAt(model: Pick<AutoModel, 'columns' | 'box' | 'chart'>, 
   return c.low + (k + 0.5) * model.box;                     // glyph k is centred half a box above the column's lower edge
 }
 
+/** Trailing SL limits (boxes back from the best brick). */
+export const TRAIL_BOXES_MAX = 20;
+
+/** The trailing SL of a pyramided row: set once it has `trailBoxes` and at least one add, else undefined. */
+export function trailOf(row: { trailBoxes?: number; adds?: { barT: number }[]; entryBox?: number; base?: { price: number }; entryPrice: number }): AutoPosition['trail'] {
+  const b = row.trailBoxes;
+  if (!(Number.isInteger(b) && b! >= 1 && b! <= TRAIL_BOXES_MAX) || !row.adds?.length) return undefined;
+  return { boxes: b!, fromBarT: Math.min(...row.adds.map(a => a.barT)), start: row.entryBox ?? row.base?.price ?? row.entryPrice };
+}
+
+/** Walk a Renko position's bricks: the best favourable close so far, and the first trailing-SL brick (-1 = none). */
+function walkTrail(model: AutoModel, pos: AutoPosition): { best: number; col: number } {
+  const t = pos.trail!;
+  const sell = pos.side === 'SELL';
+  const want = sell ? 'O' : 'X';
+  let best = t.start;
+  for (let i = 0; i < model.columns.length; i++) {
+    const start = model.columnTimes[i]?.start;
+    const c = model.columns[i];
+    if (start === undefined || !(start > pos.entryBarT)) continue;
+    const close = c.dir === 'X' ? c.high : c.low;                       // a brick's close edge
+    if (c.dir === want) { if (sell ? close < best : close > best) best = close; continue; }
+    const back = (sell ? close - best : best - close) / model.box;
+    if (start > t.fromBarT && back >= t.boxes - 1e-6) return { best, col: i };
+  }
+  return { best, col: -1 };
+}
+
+/** The first closed brick that hits the trailing SL, or -1 (none, no trail, or not a Renko model). */
+export function trailExitColumn(model: AutoModel, pos: AutoPosition): number {
+  if (!pos.trail || model.chart !== 'renko' || !(model.box > 0)) return -1;
+  return walkTrail(model, pos).col;
+}
+
+/** The trailing SL level now (best brick close since entry, `boxes` boxes back), or null. For the status line. */
+export function trailLevel(model: AutoModel, pos: AutoPosition): number | null {
+  if (!pos.trail || model.chart !== 'renko' || !(model.box > 0)) return null;
+  const { best } = walkTrail(model, pos);
+  return pos.side === 'SELL' ? best + pos.trail.boxes * model.box : best - pos.trail.boxes * model.box;
+}
+
 /** The first column opposite to `side` that started after the entry bar (the reversal), or -1. */
 export function reversalColumn(model: AutoModel, pos: AutoPosition): number {
   const want = pos.side === 'SELL' ? 'X' : 'O';
@@ -147,6 +194,8 @@ export function decideAuto({ model, position, watermarkT, nowS, market, price = 
   const minute = istMinuteOfDay(nowS);
   if (position) {
     if (win && minute >= win.eodExit) return { action: 'exit', reason: 'eod' };
+    const tc = trailExitColumn(model, position);
+    if (tc >= 0) { const c = model.columns[tc]; return { action: 'exit', reason: 'trail', col: tc, boxPrice: c.dir === 'X' ? c.high : c.low }; }
     if (position.stop !== undefined) {
       const hit = price !== null && (position.side === 'BUY' ? price <= position.stop : price >= position.stop);
       // A gap through the stop fills at the price, not the stop (PAPER books boxPrice, so it must not flatter the loss).

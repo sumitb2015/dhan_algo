@@ -124,6 +124,11 @@ Opt-in per chart on `/renko` (not P&F, not Replay). User guide: `docs/RENKO_AUTO
 - Decision 2026-11-05 (user): new-best-brick only (no re-adding after a pullback), user-set Max, at most one lot per bar.
 - Every N bricks (2026-11-05, user request): `row.pyramidEvery` (1-50, saved at entry, absent = 1). The new best close must also be
   ≥ N boxes past the last add's `box` (the entry brick before the first add). N = 1 is the original rule. On the arm record as `pyramid.every`.
+- Trailing SL after an add (2026-11-05, user request; default ON, 2 boxes): `row.trailBoxes` (1-20, saved at entry, absent = off) →
+  `trailOf(row)` (active once `adds` is non-empty, from the first add's bar) → `decideAuto` exits with reason `trail` on the first closed brick
+  after that bar that closes `trailBoxes` boxes back from the best favourable brick close since entry (`trailExitColumn`). Checked after EOD and
+  before the two-back stop / reversal / Supertrend. User chose closed-brick (not live price) and browser-tab only (not the server watcher).
+  On the arm record as `pyramid.trail`.
 - Review fixes (2026-11-05): the server's `exitRow` sizes from the row re-read after `beginExit` (never the tick snapshot); `reservedByAuto`
   counts a pending add's units; a stuck add (> 60 s) is exited by the server with `beginExit withPendingAdd` (confirmed + pending units capped
   by the broker, `close.pendingAdded` settles it; `abortExit` restores the add state), except when a sibling live REAL row holds the same

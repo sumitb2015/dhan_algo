@@ -117,7 +117,7 @@ Exits keep running for an open position even when AUTO is switched off.
 
 ### Adding lots as the trade moves (`+1L every N bricks`)
 
-Optional, per chart, Renko only: the **`+1L every brick`** switch next to the AUTO lots box. Once on it shows **`+1L every [N] bricks · Max [M]`**:
+Optional, per chart, Renko only: the **`+1L every brick`** switch next to the AUTO lots box. Once on it shows **`+1L every [N] bricks · Max [M] · Trail SL [T] bx`**:
 **N** = bricks between adds (default 1, at most 50), **Max** = total lots (default 10, at most 20).
 Both are set before arming and locked while AUTO is armed. Saved per chart and on the AUTO arming, so a reload resumes them.
 
@@ -129,6 +129,12 @@ Both are set before arming and locked while AUTO is armed. Saved per chart and o
   counts all of them, but still adds one lot. N is saved on the row at entry, so changing it later does not affect an open position.
 - A pullback that only gets back to a level already reached adds nothing. **At most one lot per bar**, however many bricks it printed.
   Bricks on an older bar (a sleeping tab) are never chased. No adds after the entry cutoff (15:05 NSE) or with a stale feed.
+- **Trailing SL after an add (`Trail SL [2] bx`, on by default):** once at least one lot has been added, AUTO exits the whole position
+  on the first **closed brick** that is **N boxes back from the best brick since entry** (default 2, 1-20). It does not wait for the
+  Supertrend to turn, and it is checked before the Supertrend / opposite-brick rule (the end-of-day exit still comes first). The status line
+  shows the level: `· trail SL 8352.00`. It is set before arming (locked while armed) and saved on the row at entry, so a change only
+  affects the next trade. Switch it off with the `Trail SL` button. It runs in the open `/renko` tab, like the Supertrend exit; with the
+  tab closed only the server's MTM guard and end-of-day exit protect the position.
 - Adds stop at **Max**. The cap is saved on the row at entry, and a new arming can only lower it.
 - The position exits as **one**: the exit rule, the MTM guard, the end of day and the Exit button all close every lot (exits send the row's total units).
   The next entry starts again at the base lots.

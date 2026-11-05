@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { autoProductOf, decideAdd, decideAuto, rowMarket, type AutoProduct } from '@/lib/pnfAuto';
+import { autoProductOf, decideAdd, decideAuto, rowMarket, trailLevel, trailOf, type AutoProduct } from '@/lib/pnfAuto';
 import { ignoredByFilter, SIDE_LABEL, withSide, type AutoSide } from '@/lib/pnfAutoRule';
 import { isSellSignal } from '@/lib/straddlePnf';
 import { EMPTY_LEDGER, isLive, PYRAMID_HARD_MAX, type AutoLedger, type AutoLeg, type AutoOp, type AutoRow } from '@/lib/pnfAutoLedger';
@@ -76,8 +76,11 @@ export interface AutoArm {
   product?: AutoProduct;
 }
 
-/** Pyramid (Renko): add one lot every `every` new bricks while a position is open, up to `max` total lots (lib/pnfAuto.ts decideAdd). */
-export interface AutoPyramid { on: boolean; max: number; every: number }
+/**
+ * Pyramid (Renko): add one lot every `every` new bricks while a position is open, up to `max` total lots (lib/pnfAuto.ts decideAdd).
+ * `trailOn` / `trail`: once a lot was added, exit on a closed brick `trail` boxes back from the best brick (lib/pnfAuto.ts trailOf).
+ */
+export interface AutoPyramid { on: boolean; max: number; every: number; trailOn: boolean; trail: number }
 
 export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 'both', pyramid, price, stale, market, complete, broker, mode, leaderRef, ledger, post, onEvent, onDisarm, scope = 'pnf' }: {
   chart: 1 | 2;
@@ -268,7 +271,7 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
       ...(box !== null ? { entryBox: box } : {}),
       ...(stop !== undefined ? { stop } : {}),
       ...(exitBy ? { exitBy } : {}),
-      ...(pyramid?.on && pyramid.max > lots ? { pyramidMax: Math.min(pyramid.max, PYRAMID_HARD_MAX), ...(pyramid.every > 1 ? { pyramidEvery: pyramid.every } : {}) } : {}),
+      ...(pyramid?.on && pyramid.max > lots ? { pyramidMax: Math.min(pyramid.max, PYRAMID_HARD_MAX), ...(pyramid.every > 1 ? { pyramidEvery: pyramid.every } : {}), ...(pyramid.trailOn ? { trailBoxes: pyramid.trail } : {}) } : {}),
     };
     if (arm.mode === 'PAPER') {
       const j = await sendOrder({ broker, mode: 'PAPER', target, action: side, lots, product });
@@ -410,8 +413,11 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
         }
         // The end-of-day time is the POSITION's market (saved on the row), never the chart's `market`: that reads 'NSE' until the history has
         // loaded (a page reload, an instrument or setting change), which would flatten an MCX position at the NSE 15:15 straight away.
-        const d = decideAuto({ model, position: { side: row.side, entryBarT: row.entryBarT, stop: row.stop, exitBy: row.exitBy }, watermarkT: watermarkRef.current, nowS, market: rowMarket(row), price, product: autoProductOf(row.product) });
+        const position = { side: row.side, entryBarT: row.entryBarT, stop: row.stop, exitBy: row.exitBy, trail: trailOf(row) };
+        const d = decideAuto({ model, position, watermarkT: watermarkRef.current, nowS, market: rowMarket(row), price, product: autoProductOf(row.product) });
         if (d.action !== 'exit') {
+          const tl = trailLevel(model, position);
+          const trailTxt = tl !== null ? ` · trail SL ${tl.toFixed(2)}` : '';
           // Pyramid: only while armed in the row's own mode, with adds still switched on, a fresh price and no halt.
           // `complete`: the chart's history is fully loaded (a partial model would miss the best brick so far and add after a pullback).
           // The row's broker must be the page's: the contract lookup and the order route are the page broker's.
@@ -423,15 +429,15 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
               try { await addLot(row, a.barT, a.box, price); } finally { busyRef.current = false; }
               return;
             }
-            setNote(a.add || a.why === 'no new best brick on the newest bar' || a.why === 'already added on this bar' || a.why.startsWith('waiting for') ? `holding ${row.lots}L (+1L/${row.pyramidEvery ?? 1} br to ${Math.min(row.pyramidMax, pyramid.max)}L)` : `holding ${row.lots}L (${a.why})`);
+            setNote(a.add || a.why === 'no new best brick on the newest bar' || a.why === 'already added on this bar' || a.why.startsWith('waiting for') ? `holding ${row.lots}L (+1L/${row.pyramidEvery ?? 1} br to ${Math.min(row.pyramidMax, pyramid.max)}L)${trailTxt}` : `holding ${row.lots}L (${a.why})${trailTxt}`);
             return;
           }
-          setNote(arm.on ? 'holding' : 'holding - AUTO is OFF: it will exit by its rule, not re-enter');
+          setNote((arm.on ? 'holding' : 'holding - AUTO is OFF: it will exit by its rule, not re-enter') + trailTxt);
           return;
         }
-        if (d.reason === 'reversal' && price === null) { setNote('reversal seen, waiting for a price'); return; }
+        if ((d.reason === 'reversal' || d.reason === 'trail') && price === null) { setNote(`${d.reason} seen, waiting for a price`); return; }
         busyRef.current = true;
-        const barT = d.reason === 'reversal' && d.col !== undefined ? model.columnTimes[d.col]?.start : undefined;
+        const barT = (d.reason === 'reversal' || d.reason === 'trail') && d.col !== undefined ? model.columnTimes[d.col]?.start : undefined;
         let closed = false;
         try { closed = await exit(row, d.reason, price, barT, d.boxPrice); } finally { busyRef.current = false; }
         // A rule exit with AUTO off (a reload, another tab, a halt) is the end of the trade: said out loud, so a missing re-entry is never silent.

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Bot } from 'lucide-react';
 import { holdsPosition, PYRAMID_HARD_MAX, rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
 import type { AutoProduct } from '@/lib/pnfOrderLogic';
-import { PYRAMID_EVERY_MAX } from '@/lib/pnfAuto';
+import { PYRAMID_EVERY_MAX, TRAIL_BOXES_MAX } from '@/lib/pnfAuto';
 
 // One chart's AUTO switch, lots and status (engine: ./usePnfAuto.ts). The switch is saved in the AUTO ledger and resumed after a reload in
 // the same mode (lib/pnfAutoArm.ts; the page always loads in PAPER, so a REAL arm resumes once the page is switched to REAL); in REAL mode
@@ -32,8 +32,8 @@ export interface AutoControlsProps {
   halt: string | null;
   onResolve: (as: 'open' | 'flat' | 'added' | 'notAdded') => void;
   /** Renko only: add one lot per new best brick up to `max` total lots. Locked while armed. */
-  pyramid?: { on: boolean; max: number; every: number };
-  onPyramid?: (p: { on: boolean; max: number; every: number }) => void;
+  pyramid?: { on: boolean; max: number; every: number; trailOn: boolean; trail: number };
+  onPyramid?: (p: { on: boolean; max: number; every: number; trailOn: boolean; trail: number }) => void;
   /** Close the open position now at the live price (and switch AUTO off). */
   onExit?: () => void;
   /** Renko only: which pattern AUTO trades. Absent on P&F (one rule). Locked while armed or holding a position. */
@@ -82,6 +82,18 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
     const next = Number.isInteger(n) ? Math.max(1, Math.min(PYRAMID_EVERY_MAX, n)) : pyramid.every;
     setEveryDraft(String(next));
     if (next !== pyramid.every) onPyramid({ ...pyramid, every: next });
+  };
+  const [trailDraft, setTrailDraft] = useState(String(pyramid?.trail ?? 2));
+  const trailFocusedRef = useRef(false);
+  useEffect(() => {
+    if (!trailFocusedRef.current) setTrailDraft(String(pyramid?.trail ?? 2));
+  }, [pyramid?.trail]);
+  const commitTrail = (raw: string) => {
+    if (!pyramid || !onPyramid) return;
+    const n = parseInt(raw, 10);
+    const next = Number.isInteger(n) ? Math.max(1, Math.min(TRAIL_BOXES_MAX, n)) : pyramid.trail;
+    setTrailDraft(String(next));
+    if (next !== pyramid.trail) onPyramid({ ...pyramid, trail: next });
   };
   const commitMax = (raw: string) => {
     if (!pyramid || !onPyramid) return;
@@ -234,6 +246,27 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
                        if (e.key === 'Escape') { setMaxDraft(String(pyramid.max)); cancelBlurRef.current = true; e.currentTarget.blur(); }
                      }}
                      className="w-7 h-6 text-center text-[11px] font-mono font-bold bg-transparent text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 rounded disabled:text-zinc-400" />
+              <span className="text-[11px] font-bold text-zinc-400" aria-hidden="true">·</span>
+              <button type="button" data-testid={`pnf-auto-trail-${chart}`} aria-pressed={pyramid.trailOn} disabled={armed}
+                      aria-label={`${pyramid.trailOn ? 'Switch off' : 'Switch on'} the trailing stop after an add on chart ${chart}`}
+                      title={armed ? 'Stop AUTO to change the trailing SL' : 'Trailing SL after the first add: exit when a closed brick is N boxes back from the best brick since entry. Does not wait for the Supertrend. Runs in this tab (the server MTM guard and end-of-day exit still apply).'}
+                      onClick={() => onPyramid({ ...pyramid, trailOn: !pyramid.trailOn })}
+                      className={`h-6 px-1.5 ml-0.5 text-[11px] font-bold rounded disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 ${pyramid.trailOn ? 'bg-red-500/15 text-red-300' : 'text-zinc-400 hover:text-white'}`}>
+                Trail SL{pyramid.trailOn ? '' : ' off'}
+              </button>
+              {pyramid.trailOn && (<>
+                <input aria-label={`Trailing SL boxes after an add on chart ${chart}`} data-testid={`pnf-auto-trail-bx-${chart}`} value={trailDraft} disabled={armed}
+                       title={`Boxes back from the best brick (1-${TRAIL_BOXES_MAX}). Enter or click away to apply`} inputMode="numeric"
+                       onFocus={() => { trailFocusedRef.current = true; }}
+                       onChange={e => setTrailDraft(e.target.value)}
+                       onBlur={e => { trailFocusedRef.current = false; if (cancelBlurRef.current) { cancelBlurRef.current = false; return; } commitTrail(e.currentTarget.value); }}
+                       onKeyDown={e => {
+                         if (e.key === 'Enter') { commitTrail(e.currentTarget.value); e.currentTarget.blur(); }
+                         if (e.key === 'Escape') { setTrailDraft(String(pyramid.trail)); cancelBlurRef.current = true; e.currentTarget.blur(); }
+                       }}
+                       className="w-7 h-6 text-center text-[11px] font-mono font-bold bg-transparent text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 rounded disabled:text-zinc-400" />
+                <span className="pr-1 text-[11px] font-bold text-zinc-400" aria-hidden="true">bx</span>
+              </>)}
             </>
           )}
         </span>
