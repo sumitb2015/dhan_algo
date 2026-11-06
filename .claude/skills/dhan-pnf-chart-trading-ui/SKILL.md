@@ -55,3 +55,11 @@ The tags at the chart's right edge (resting orders, **planned exits**, the open 
 
 SVG classes follow the same token rules as HTML. The trap hit on 2026-11-01: a dimmed "planned" tag built as `fill-red-950` / `fill-emerald-950` (and `fill-red-900/70` price tints) with `fill-red-300` / `fill-emerald-200` text. Accent steps **200–400 flip** to dark values in white / beige mode while **500+ and the 900/950 steps do not**, so the text went dark-red on a dark-red plate: unreadable. The recipe that reads in all three themes (checked in Playwright screenshots with `localStorage['dhan-theme']` = light / beige / dark): a **tinted** plate from a non-flipping step (`fill-red-500/15` or `/25`, `stroke-red-500`, dashed for "planned") with **flipping** bold text (`fill-red-400` / `fill-emerald-400`), and for a *solid* pill a saturated fill (`fill-red-600`, `fill-emerald-600/700`) with `fill-oncolor` text. Never put `-300`/`-200` text on a `-900`/`-950` plate, never lower a whole group's `opacity` to mean "planned" (it dims the text too — use a dashed outline and a tint), and put an opaque `fill-zinc-900` plate under a tint when grid lines would otherwise run through the text. Level lines may use `opacity` on the `<line>` only.
 
+## Renko Scalper window (`ScalperWindow.tsx`, 2026-11-06)
+
+A floating second view of the trade bar's engine, which lives in `usePnfTrade` (one call at page level; `PnfTradeBar` only renders it)
+so the bar and the window can never disagree on lots or position. Rules it follows: REAL opens **locked**, and the unlock is keyed to
+chart + instrument + mode (`scalperUnlockKey`), never persisted; refused while AUTO arms or holds the chart; Reverse = confirmed
+server-sized close, *then* the entry (never one 2x order); hotkeys only inside the focused window and **ignored on `e.repeat`**;
+one order in flight (`inFlight` ref, synchronous, not the `busy` state). REAL P&L between polls is `liveRealPnl` (`lib/pnfOrderLogic.ts`).
+Covered by `e2e/renko-scalper.spec.ts`.

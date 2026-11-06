@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, Bot, Boxes, ChartScatter, Eye, Rewind, EyeOff, Flag, LocateFixed, XCircle, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
+import { Bell, Bot, Boxes, ChartScatter, Crosshair, Eye, Rewind, EyeOff, Flag, LocateFixed, XCircle, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from './NavBar';
 import DataChip from './DataChip';
@@ -11,6 +11,8 @@ import InstrumentBar from './straddlePnf/InstrumentBar';
 import { effectiveInterval, hasLongIntervals, intervalLabel, isTickInterval, tickBucketSec } from '@/lib/straddlePnfInterval';
 import SettingsControls, { SmaPeriodInput, SupertrendControls } from './straddlePnf/SettingsControls';
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
+import ScalperWindow, { type ScalperPos } from './straddlePnf/ScalperWindow';
+import { usePnfTrade } from './straddlePnf/usePnfTrade';
 import BrokerBooks from './straddlePnf/BrokerBooks';
 import HeaderClock from './straddlePnf/HeaderClock';
 import { buildPaperTrades } from '@/lib/pnfPaperBook';
@@ -81,6 +83,10 @@ const OVERLAY_SHOWN_KEY = 'straddle-pnf-overlay-shown';
 const ST_SHOWN_KEY = 'straddle-pnf-supertrend-shown';
 const COVER_SHOWN_KEY = 'straddle-pnf-cover-shown';
 const TRADE_OPEN_KEY = 'straddle-pnf-trade-open';
+// The Renko Scalper window: open / minimised and where it sits are remembered; its REAL unlock never is.
+const SCALPER_OPEN_KEY = 'straddle-pnf-scalper-open';
+const SCALPER_MIN_KEY = 'straddle-pnf-scalper-min';
+const SCALPER_POS_KEY = 'straddle-pnf-scalper-pos';
 /** The positions / order book / trade book / P&L strip at the bottom: collapsed by default (expanded it takes chart height). */
 const BOOKS_OPEN_KEY = 'straddle-pnf-books-open';
 /** The last pick in each segment, and which segment is open. `straddle-pnf-target` (one target) is the pre-switch key, read once. */
@@ -267,6 +273,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const [logOpen, setLogOpen] = useState(false);
   const [tradeOpen, setTradeOpen] = useState(true);
   const [booksOpen, setBooksOpen] = useState(false);
+  const [scalperOpen, setScalperOpen] = useState(false);
+  const [scalperMin, setScalperMin] = useState(false);
+  const [scalperPos, setScalperPos] = useState<ScalperPos | null>(null);
+  // REAL unlock of the Scalper, for ONE chart + instrument + mode: a chart switch, a new instrument or a mode change re-locks it
+  // (the key no longer matches). Never remembered.
+  const [scalperUnlockKey, setScalperUnlockKey] = useState<string | null>(null);
   const [autoArm, setAutoArm] = useState<Record<ChartId, AutoArm>>({ 1: DISARMED, 2: DISARMED });
   const [autoSide, setAutoSide] = useState<Record<ChartId, AutoSide>>({ 1: DEFAULT_AUTO_SIDE, 2: DEFAULT_AUTO_SIDE });
   const [autoRule, setAutoRule] = useState<Record<ChartId, AutoRule>>({ 1: DEFAULT_AUTO_RULE, 2: DEFAULT_AUTO_RULE });
@@ -332,6 +344,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     if (readP(SOUND_KEY) === '0') { setMuted(true); mutedRef.current = true; }
     if (readP(TRADE_OPEN_KEY) === '0') setTradeOpen(false);
     if (readP(BOOKS_OPEN_KEY) === '1') setBooksOpen(true);
+    if (readP(SCALPER_OPEN_KEY) === '1') setScalperOpen(true);
+    if (readP(SCALPER_MIN_KEY) === '1') setScalperMin(true);
+    try {
+      const p = JSON.parse(readP(SCALPER_POS_KEY) ?? 'null') as ScalperPos | null;
+      if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) setScalperPos({ x: p.x, y: p.y });
+    } catch { /* a bad saved spot: the window opens in its corner */ }
     const lotsOf = (c: ChartId) => { const n = Number(readP(`${AUTO_LOTS_KEY}${c}`)); return Number.isInteger(n) && n >= 1 && n <= 20 ? n : 1; };
     setAutoLots({ 1: lotsOf(1), 2: lotsOf(2) });
     // The chosen AUTO rule is remembered per chart (AUTO itself never is): a reload must not put the default rule back under an open position.
@@ -1041,6 +1059,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     if (m === 'REAL' && !window.confirm('Switch to REAL?\n\nOrders from the trade bar, the chart rail and AUTO will go to your broker with real money. The rail stays locked until you unlock it, and every page load starts in PAPER.')) return;
     for (const c of [1, 2] as const) if (autoArm[c].on && autoArm[c].mode !== m) disarm(c, `the page switched to ${m}`);
     setRailUnlocked(false);
+    setScalperUnlockKey(null);
     setInstant({ 1: false, 2: false });
     setTradeMode(m);
   };
@@ -1105,6 +1124,35 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // Order Style (Single / Bracket / Cover) and MTM guard: in the trade bar's row while it is shown, else a row of its own above the
   // charts (the chart rail still places orders with it). Never floated over the charts, where it hid their header lines.
   const tradeBarShown = tradeOpen && !replay.active;
+  // ONE order engine for the trade bar and the Scalper window: the same position, the same lots.
+  const trade = usePnfTrade({
+    target: activeTarget,
+    live: activeFeed.live,
+    broker,
+    mode: tradeMode,
+    onPnlChange: setPaperPnl,
+    onTradeExecuted: handleTradeExecuted,
+    onMarkerPrice: handleMarkerPrice,
+    onSound: (outcome, close) => chime({ kind: 'manual', outcome, close }),
+    paper,
+    setPaper,
+    onSizing,
+    bracketSpec: bracketSpecNow,
+    onEntered: e => {
+      const rc = railCharts.find(x => x.chart === active);
+      if (rc) void resting.armBracket({ chart: rc.chart, target: rc.target, targetKey: rc.targetKey, side: e.action, lots: e.lots, mode: e.mode, product: e.product, bracket: e.spec }, e.price);
+    },
+    onSquaredOff: () => { const rc = railCharts.find(x => x.chart === active); if (rc) void resting.cancelBracketsFor(rc.targetKey); },
+    scope,
+  });
+  const scalperShown = renko && scalperOpen && !replay.active && activeTarget.kind !== 'index';
+  const scalperKey = `${active}|${targetKey(activeTarget)}|${tradeMode}`;
+  const toggleScalper = () => {
+    const next = !scalperOpen;
+    setScalperOpen(next);
+    saveP(SCALPER_OPEN_KEY, next ? '1' : '0');
+    if (!next) setScalperUnlockKey(null);
+  };
   const styleBar = (
     <PnfOrderStyle
       value={orderStyle} onChange={changeStyle} boxPts={activeChartModel.model.box}
@@ -1358,6 +1406,9 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
             <IconButton icon={muted ? VolumeX : Volume2} label={muted ? 'Unmute alert sound' : 'Mute alert sound'} onClick={toggleMute} pressed={muted} />
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <IconButton icon={Zap} label={tradeOpen ? 'Hide trade desk' : 'Show trade desk'} onClick={toggleTradeOpen} pressed={tradeOpen} />
+            {renko && !replay.active && activeTarget.kind !== 'index' && (
+              <IconButton icon={Crosshair} label={scalperOpen ? 'Close scalper' : 'Scalper'} onClick={toggleScalper} pressed={scalperOpen} />
+            )}
           </div>
         </div>
       </header>
@@ -1366,28 +1417,14 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       {tradeBarShown && (
         <div className="shrink-0">
           <PnfTradeBar
+            trade={trade}
             styleSlot={styleBar}
             target={activeTarget}
-            live={activeFeed.live}
             broker={broker}
             mode={tradeMode}
             onModeChange={changeTradeMode}
-            onPnlChange={setPaperPnl}
             onSwitchTarget={choose}
-            onTradeExecuted={handleTradeExecuted}
-            onMarkerPrice={handleMarkerPrice}
-            onSound={(outcome, close) => chime({ kind: 'manual', outcome, close })}
             tradesLabel={dual ? `C${active} · ${activeFeed.label}` : undefined}
-            paper={paper}
-            setPaper={setPaper}
-            onSizing={onSizing}
-            bracketSpec={bracketSpecNow}
-            onEntered={e => {
-              const rc = railCharts.find(x => x.chart === active);
-              if (rc) void resting.armBracket({ chart: rc.chart, target: rc.target, targetKey: rc.targetKey, side: e.action, lots: e.lots, mode: e.mode, product: e.product, bracket: e.spec }, e.price);
-            }}
-            onSquaredOff={() => { const rc = railCharts.find(x => x.chart === active); if (rc) void resting.cancelBracketsFor(rc.targetKey); }}
-            scope={scope}
           />
         </div>
       )}
@@ -1459,6 +1496,24 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
           </>
         );
       })()}
+      {scalperShown && (
+        <ScalperWindow
+          trade={trade}
+          label={dual ? `C${active} · ${activeFeed.label}` : activeFeed.label}
+          broker={broker}
+          mode={tradeMode}
+          unlocked={scalperUnlockKey === scalperKey}
+          onUnlockedChange={v => setScalperUnlockKey(v ? scalperKey : null)}
+          blocked={locked(active) ? `Chart ${active} is run by AUTO - stop it to trade by hand` : null}
+          styleText={orderStyle.style === 'Single' ? 'Single (no exits)'
+            : `${orderStyle.style} · ${orderStyle.style === 'Bracket' ? `TGT ${orderStyle.tgt || '?'} · ` : ''}SL ${orderStyle.sl || '?'} boxes${orderStyle.trailOn ? ' · trail' : ''}`}
+          pos={scalperPos}
+          onMove={p => { setScalperPos(p); saveP(SCALPER_POS_KEY, JSON.stringify(p)); }}
+          minimized={scalperMin}
+          onMinimizedChange={v => { setScalperMin(v); saveP(SCALPER_MIN_KEY, v ? '1' : '0'); }}
+          onClose={toggleScalper}
+        />
+      )}
       <BrokerBooks broker={broker} open={booksOpen} onOpenChange={changeBooksOpen} autoRows={autoToday} autoPrice={autoPrice}
         paperTrades={buildPaperTrades({ ...storedMarkers, ...markers }, autoToday, istToday())}
         chartKeys={railCharts.find(c => c.chart === active)?.keys.filter(Boolean) ?? []} chartName={`C${active} · ${activeFeed.label}`} />

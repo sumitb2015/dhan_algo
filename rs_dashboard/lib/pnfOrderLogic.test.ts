@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MAX_PNF_LOTS, MAX_PNF_SHARES, FLAT_LEG, applyPaperFill, brokerProduct, describePosition, needsRollback, orderQty,
-  paperPnl, parsePnfOrder, planLegClose, planLegCloseKeeping, sendOutcome, kotakMcxFutureError, type LegResult,
+  liveRealPnl, paperPnl, parsePnfOrder, planLegClose, planLegCloseKeeping, sendOutcome, kotakMcxFutureError, type LegResult,
 } from './pnfOrderLogic.ts';
 
 const fut = { kind: 'futures', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24' };
@@ -213,4 +213,23 @@ test('a CNC stock bracket exits its CNC row (exitOwn.product CNC), never the MIS
   assert.deepEqual(planOwnExit('9', [{ key: '9', product: 'CNC', net: 10 }], 'SELL', 10, 'dhan', 'CNC'), { qty: 10, product: 'CNC' });
   assert.equal(typeof parsePnfOrder({ broker: 'dhan', mode: 'REAL', target: eq, exitOwn: { side: 'SELL', units: [10], product: 'MARGIN' } }), 'string');
   assert.equal(typeof parsePnfOrder({ broker: 'dhan', mode: 'REAL', target: fut, exitOwn: { side: 'SELL', units: [10], product: 'CNC' } }), 'string');
+});
+
+test('liveRealPnl: no move since the poll is the book total', () => {
+  assert.equal(liveRealPnl(1250, [2], [8524], [8524], [10]), 1250);
+});
+
+test('liveRealPnl: MCX lots x barrels per lot, long and short', () => {
+  assert.equal(liveRealPnl(0, [2], [8524], [8530], [10]), 6 * 2 * 10);
+  assert.equal(liveRealPnl(-100, [-1], [8524], [8530], [10]), -100 - 60);
+});
+
+test('liveRealPnl: a straddle sums both legs; a flat leg needs no price', () => {
+  assert.equal(liveRealPnl(0, [-1, -1], [100, 90], [98, 91], [65, 65]), (2 - 1) * 65);
+  assert.equal(liveRealPnl(50, [0, 1], [null, 90], [null, 92], [65, 65]), 50 + 2 * 65);
+});
+
+test('liveRealPnl: a missing price on an open leg falls back to the book total', () => {
+  assert.equal(liveRealPnl(300, [1, 1], [100, null], [101, 92], [65, 65]), 300);
+  assert.equal(liveRealPnl(300, [1], [100], [0], [65]), 300);
 });

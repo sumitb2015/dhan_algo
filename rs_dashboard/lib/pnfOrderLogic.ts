@@ -248,6 +248,22 @@ export function paperPnl(legs: PaperLeg[], prices: (number | null)[], unitsPerLo
   }, 0);
 }
 
+/**
+ * A REAL position's P&L between two broker polls: the book's total at the poll plus each leg's move since the poll, so the
+ * number follows every tick instead of jumping every 5 s. `unitsPerLot` is the server's (MCX: barrels per lot, never the
+ * broker's raw quantity). Any leg without a price at the poll or now leaves the book total as it is (no half-priced sum).
+ */
+export function liveRealPnl(bookTotal: number, lots: number[], atPoll: (number | null)[], now: (number | null)[], unitsPerLot: number[]): number {
+  let drift = 0;
+  for (let i = 0; i < lots.length; i++) {
+    if (!lots[i]) continue;
+    const a = atPoll[i], b = now[i];
+    if (a == null || b == null || !(a > 0) || !(b > 0)) return bookTotal;
+    drift += (b - a) * lots[i] * (unitsPerLot[i] ?? 1);
+  }
+  return bookTotal + drift;
+}
+
 // ── Position readout ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 const lotWord = (n: number, equity: boolean) => (equity ? `${n} sh` : `${n} lot${n === 1 ? '' : 's'}`);

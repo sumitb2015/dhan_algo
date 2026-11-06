@@ -283,6 +283,19 @@ The REAL guard watcher (`lib/autoServerWatcher.ts`, started with the server) wor
   broker's trades, listing every simulated fill of the day (trade bar, rail, guard, AUTO entries and exits, newest first). Trade-bar paper
   fills are kept in this browser for the day (localStorage, stamped with the IST date; another day's list is ignored); AUTO ones come from the
   server ledger and survive a reload on any browser.
+- **Scalper window (manual, not AUTO).** The crosshair button in the header (Renko only, not on an index or in a replay) opens a
+  floating window for hand trading the active chart: Buy / Sell at market, a lots stepper with 1L / 2L / 5L / 10L presets, **Reverse**
+  and **Close**, and the live P&L, with a coloured left edge (green profit, red loss). It is a second view of the trade bar: the same
+  order route, the same position, the same lots and the same order Style (a Bracket / Cover entry arms its exits as from the bar).
+  - **REAL opens locked**: one *Unlock to trade real money* click, then every order is one click. A mode change, another chart or
+    instrument, closing the window or a reload locks it again. It is refused while AUTO arms or holds the chart.
+  - **Reverse** closes the position (sized by the server from the broker book), and only after that close is confirmed sends the
+    same size the other way. An unclear close sends nothing more.
+  - **REAL P&L** is the broker book's (polled every 5 s) moved with every tick in between (`liveRealPnl`); an unpriced leg shows the
+    book figure as it is.
+  - **Keys** (only while the window has focus): B buy, S sell, X close, R reverse, up / down arrow lots. A held key (auto-repeat) never
+    sends a second order. Drag it by its header, minimise it to a pill; where it sits and whether it is open are remembered per
+    browser, the unlock never is.
 - **Ledger files.** `debug/renko_auto_state.json` (Renko) and `debug/pnf_auto_state.json` (the P&F page). The two pages never share a row.
 
 ## 9. Known limits
