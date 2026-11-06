@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { Info, ShieldCheck } from 'lucide-react';
+import { Info, Lock, ShieldCheck } from 'lucide-react';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
 import { effectiveGuard } from '@/lib/pnfGuardBoxes';
@@ -164,7 +164,13 @@ export function MtmGuardCard({ broker, real, ladderId = 1, mtm, guard, post, hel
       </div>
       {on && guard && !guard.tripped && (
         <p className="text-[10px] text-zinc-400 font-mono">
-          Guarding · best {guard.peak != null ? rs(guard.peak) : '—'}{guard.floor != null ? ` · locked ${rs(guard.floor)}` : ''}
+          Guarding · best {guard.peak != null ? rs(guard.peak) : '—'}
+        </p>
+      )}
+      {on && guard && !guard.tripped && guard.floor != null && (
+        <p role="status" className="flex items-center gap-1.5 rounded border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-300"
+           title="Protect profit is active: if MTM falls back to this amount, every position of this guard exits at market">
+          <Lock className="w-3 h-3 shrink-0" aria-hidden /> Profit locked: {rs(guard.floor)} — exits if MTM falls back to it
         </p>
       )}
       {confirmNow && (

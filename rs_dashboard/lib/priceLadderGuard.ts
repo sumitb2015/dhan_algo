@@ -96,6 +96,17 @@ export function lockFloor(g: LadderGuard, peak: number): number | null {
   return g.lockKeep + steps * (g.lockStepKeep ?? 0);
 }
 
+/** Marker the page looks for in the event log to tell the user (toast + chime) that profit was locked or the lock raised. */
+export const PROFIT_LOCKED = 'Profit locked';
+
+/** The event text when a reading locked profit for the first time or raised the lock, else null. */
+export function lockNotice(before: LadderGuard, after: LadderGuard, label: string): string | null {
+  if (after.floor == null || (before.floor != null && after.floor <= before.floor)) return null;
+  const rs = (v: number) => `₹${Math.round(v).toLocaleString('en-IN')}`;
+  const what = before.floor == null ? `${PROFIT_LOCKED} at ${rs(after.floor)}` : `${PROFIT_LOCKED}: raised to ${rs(after.floor)} (was ${rs(before.floor)})`;
+  return `MTM guard (${label}): ${what} — MTM reached ${rs(after.peak ?? after.floor)}; a fall back to ${rs(after.floor)} exits everything this ladder placed`;
+}
+
 /** "dhan REAL" for ladder 1, "ladder 2 · dhan REAL" for ladder 2: the scope as events and the page name it. */
 export const guardLabel = (sc: GuardScope) => `${sc.pane === 2 ? 'ladder 2 · ' : ''}${sc.broker} ${sc.mode.toUpperCase()}`;
 
@@ -160,6 +171,8 @@ export function applyGuards(s: LadderState, ltps: Record<string, number>, now: n
     const { mode } = sc;
     // A tripped guard keeps exiting what opens; otherwise read the rules.
     const r = g.tripped ? { guard: g, reason: g.tripped } : evalGuard(g, scopeMtm(next, sc, ltps));
+    const locked = lockNotice(g, r.guard, guardLabel(sc));
+    if (locked) next = pushEvent(next, ev('info', locked));
     if (!r.reason) {
       if (r.guard !== g) next = { ...next, guards: { ...next.guards, [key]: r.guard } };
       continue;

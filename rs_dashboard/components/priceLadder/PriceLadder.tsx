@@ -21,10 +21,10 @@ import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToPara
 import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, sumPairPnl, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
-import { guardKey, scopeMtm } from '@/lib/priceLadderGuard';
+import { PROFIT_LOCKED, guardKey, scopeMtm } from '@/lib/priceLadderGuard';
 import { planExitAll, type ExitAllPlan, type ExitAllScope } from '@/lib/priceLadderExitAll';
 import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
-import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
+import { installAlertSoundUnlock, playAlertChime, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { chimeFor } from '@/lib/priceLadderChime';
 import {
   MAX_LADDER_LOTS, isTradedStrike, paneOf, MCX_LADDER_UNDERLYINGS, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, stopLimitPrice, isMcxUnderlying, sessionFor, spotKeyUnderlying, istDay, istHhmm, isLive, atmStrikeOf, atmOffsetLabel, limitZone, ownNet, sliceNowPnl, sumSlicePnl, classifyClick, isTrailOnly,
@@ -843,6 +843,11 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     const chime = !second && soundOn ? chimeFor(fresh.map(e => e.msg)) : null;
     if (chime === 'warn') playWarnChime(); else if (chime === 'exit') playExitChime(); else if (chime === 'entry') playEntryChime();
     for (const e of fresh) if (e.level === 'error') toast.error(e.msg);
+    // The MTM guard locked profit (or raised the lock): say so once per page (both ladders see the same events).
+    if (!second) for (const e of fresh) if (e.msg.includes(PROFIT_LOCKED)) {
+      toast.success(e.msg, { duration: 10_000 });
+      if (soundOn) playAlertChime();
+    }
   }, [data?.state.events, second, soundOn]);
 
   const mcx = isMcxUnderlying(underlying);

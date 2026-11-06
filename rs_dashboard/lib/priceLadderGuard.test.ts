@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyGuards, carryRuntime, cleanGuard, evalGuard, guardKey, lockFloor, parseGuardKey, scopeMtm, type LadderGuard } from './priceLadderGuard.ts';
+import { applyGuards, carryRuntime, cleanGuard, evalGuard, guardKey, lockFloor, lockNotice, parseGuardKey, scopeMtm, type LadderGuard } from './priceLadderGuard.ts';
 import type { LadderState } from './priceLadder.ts';
 
 const g = (o: Partial<LadderGuard> = {}): LadderGuard => ({ on: true, ...o });
@@ -225,4 +225,20 @@ test('pairs are scoped by ladder too: an armed ladder 2 pair survives a ladder 1
   assert.equal(r.next.pairs![0].state, 'armed');
   const s1 = { ...s, pairs: [{ ...pair, pane: undefined }] as unknown as LadderState['pairs'] };
   assert.equal(applyGuards(s1, LTPS, 1).next.pairs![0].state, 'cancelled');
+});
+
+test('locking profit (and each raise of the lock) writes one event; a reading that changes nothing writes none', () => {
+  let s = state([slice({})], { 'dhan:sim': g({ lockAt: 500, lockKeep: 200, lockStepEvery: 200, lockStepKeep: 100 }) });
+  s = applyGuards(s, { 1: 104 }, 1).next;           // MTM 400: below the trigger
+  assert.equal(s.events.length, 0);
+  s = applyGuards(s, { 1: 106 }, 2).next;           // MTM 600: locks 200
+  assert.equal(s.events.length, 1);
+  assert.match(s.events[0].msg, /Profit locked at ₹200/);
+  s = applyGuards(s, { 1: 106 }, 3).next;           // same reading: nothing new
+  assert.equal(s.events.length, 1);
+  s = applyGuards(s, { 1: 108 }, 4).next;           // MTM 800: one step, lock raised to 300
+  assert.equal(s.events.length, 2);
+  assert.match(s.events[1].msg, /raised to ₹300 \(was ₹200\)/);
+  assert.equal(s.guards!['dhan:sim'].on, true);     // informing is not tripping
+  assert.equal(lockNotice(g({ floor: 300 }), g({ floor: 300 }), 'x'), null);
 });

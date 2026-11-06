@@ -134,7 +134,7 @@ Each new day the levels you saved are restored but the guard is OFF (its best MT
 | Target ₹ | Exit when MTM reaches this profit. |
 | Stop-loss ₹ | Exit when MTM falls to this loss. |
 | Trail by ₹ | Exit when MTM gives back this much from its best since the guard was switched on. The best starts at the MTM at that moment. |
-| Protect profit | Once MTM has touched **When MTM reaches ₹**, never give back below **Lock at least ₹** (0 = break-even). Optionally, for every further **+₹** of MTM the lock rises by **raise lock by ₹**. The lock only ever goes up. |
+| Protect profit | Once MTM has touched **When MTM reaches ₹**, never give back below **Lock at least ₹** (0 = break-even). Optionally, for every further **+₹** of MTM the lock rises by **raise lock by ₹**. The lock only ever goes up. When the lock is first set, and each time it rises, the server writes a **Profit locked** event (so it is logged with every tab closed); an open page shows it as a toast with a chime (the speaker button mutes the chime), and the guard card shows a green **Profit locked: ₹X** badge while it is active. |
 
 Example: trigger 1,000, lock 400, every +500 raise 250 → lock 400 at MTM 1,000, 650 at 1,500, 900 at 2,000.
 
