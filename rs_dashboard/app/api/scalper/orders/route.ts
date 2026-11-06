@@ -1,34 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { dhanGet, dhanPut, dhanDelete } from '@/lib/dhanToken';
-import { kotakGet, kotakPost, kotakRows, KOTAK_PATHS } from '@/lib/kotakToken';
-import { shapeKotakOrderStatus } from '@/lib/kotakShape';
-import { kiteGet, kiteDelete } from '@/lib/zerodhaToken';
-import { shapeZerodhaOrderStatus } from '@/lib/zerodhaShape';
+import { kotakPost, KOTAK_PATHS } from '@/lib/kotakToken';
+import { kiteDelete } from '@/lib/zerodhaToken';
+import { forgetZerodhaBook, readBrokerOrder } from '@/lib/brokerOrderStatus';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { modifyZerodhaLimitOrder } from '@/lib/zerodhaModifyOrder';
-
-// Kotak has no single-order endpoint, so every status read is a whole order-book call. Several confirm loops poll at
-// once (one per leg, ~2.5/s each): share one in-flight/just-finished read so they cost the broker one call per window.
-const KOTAK_BOOK_TTL_MS = 350;
-let kotakBook: { at: number; p: Promise<Record<string, unknown>[]> } | null = null;
-function sharedKotakOrderBook(): Promise<Record<string, unknown>[]> {
-  if (kotakBook && Date.now() - kotakBook.at < KOTAK_BOOK_TTL_MS) return kotakBook.p;
-  const p = kotakGet(KOTAK_PATHS.orderBook).then(kotakRows);
-  kotakBook = { at: Date.now(), p };
-  // A failed read must not be served to the next caller.
-  p.catch(() => { if (kotakBook?.p === p) kotakBook = null; });
-  return p;
-}
-
-// Same for Kite: one order-book read serves every confirm loop that polls inside the window.
-let zerodhaBook: { at: number; p: Promise<Record<string, unknown>[]> } | null = null;
-function sharedZerodhaOrderBook(): Promise<Record<string, unknown>[]> {
-  if (zerodhaBook && Date.now() - zerodhaBook.at < KOTAK_BOOK_TTL_MS) return zerodhaBook.p;
-  const p = kiteGet('/orders').then(r => (Array.isArray(r) ? r as Record<string, unknown>[] : []));
-  zerodhaBook = { at: Date.now(), p };
-  p.catch(() => { if (zerodhaBook?.p === p) zerodhaBook = null; });
-  return p;
-}
 
 // Direct Dhan REST call for fetching orders. With ?orderId= returns that one
 // order's live status (used to confirm a fill before counting a leg as placed).
@@ -40,40 +16,13 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       if (!/^[A-Za-z0-9-]+$/.test(orderId)) {
         return NextResponse.json({ success: false, error: 'Invalid orderId' }, { status: 400 });
       }
-      if (getBroker === 'kotak') {
-        // Kotak has no single-order endpoint: find it in the order book. Same payload as Dhan's below.
-        const book = await sharedKotakOrderBook();
-        const o = book.find(r => String(r.nOrdNo ?? r.orderId ?? '') === orderId);
-        if (!o) return NextResponse.json({ success: false, error: 'Order not found' }, { status: 404 });
-        return NextResponse.json({ success: true, data: shapeKotakOrderStatus(o, orderId) });
-      }
-      if (getBroker === 'zerodha') {
-        // Kite's per-order endpoint returns the whole history; the order book already carries the latest state.
-        const book = await sharedZerodhaOrderBook();
-        const o = book.find(r => String(r.order_id ?? '') === orderId);
-        if (!o) return NextResponse.json({ success: false, error: 'Order not found' }, { status: 404 });
-        return NextResponse.json({ success: true, data: shapeZerodhaOrderStatus(o, orderId) });
-      }
-      if (getBroker !== 'dhan') {
+      if (getBroker !== 'dhan' && getBroker !== 'kotak' && getBroker !== 'zerodha') {
         return NextResponse.json({ success: false, error: `Broker ${getBroker} order lookup not supported` }, { status: 400 });
       }
-      const raw = await dhanGet(`/orders/${orderId}`, 5_000);
-      // Dhan returns either the order object or a one-element array.
-      const o = (Array.isArray(raw) ? raw[0] : raw) as Record<string, unknown> | undefined;
-      if (!o || typeof o !== 'object') {
-        return NextResponse.json({ success: false, error: 'Order not found' }, { status: 404 });
-      }
-      return NextResponse.json({
-        success: true,
-        data: {
-          orderId: String(o.orderId ?? orderId),
-          orderStatus: String(o.orderStatus ?? '').toUpperCase(),
-          quantity: Number(o.quantity) || 0,
-          filledQty: Number(o.filledQty) || 0,
-          averageTradedPrice: Number(o.averageTradedPrice) || 0,
-          reason: String(o.omsErrorDescription ?? o.omsErrorCode ?? ''),
-        },
-      });
+      // lib/brokerOrderStatus.ts (Kotak / Kite from a shared order-book read): the same payload for every broker.
+      const o = await readBrokerOrder(orderId, getBroker);
+      if (!o) return NextResponse.json({ success: false, error: 'Order not found' }, { status: 404 });
+      return NextResponse.json({ success: true, data: o });
     }
     const data = await dhanGet('/orders');
     return NextResponse.json({ success: true, data: Array.isArray(data) ? data : [] });
@@ -141,7 +90,7 @@ export async function PATCH(req: NextRequest): Promise<NextResponse> {
 
     if (broker === 'zerodha') {
       const r = await modifyZerodhaLimitOrder({ orderId, price, quantity });
-      zerodhaBook = null;
+      forgetZerodhaBook();
       return r.ok ? NextResponse.json({ success: true, data: r.data }) : NextResponse.json({ success: false, error: r.error }, { status: r.status });
     }
 
@@ -178,7 +127,7 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
     if (broker === 'zerodha') {
       // The Focus Tool and every other Zerodha order are variety 'regular' (CO/BO are refused by the order route).
       const res = await kiteDelete(`/orders/regular/${encodeURIComponent(String(orderId))}`);
-      zerodhaBook = null;
+      forgetZerodhaBook();
       invalidateBrokerCache('zerodha');
       return NextResponse.json({ success: true, data: res });
     }

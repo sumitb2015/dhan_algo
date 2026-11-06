@@ -16,6 +16,7 @@ import { MAX_PNF_LOTS } from './pnfOrderLogic.ts';
 import type { Market } from './straddlePnfLive.ts';
 import type { AutoProduct } from './pnfOrderLogic.ts';
 import { PYRAMID_EVERY_MAX, TRAIL_BOXES_MAX } from './pnfAuto.ts';
+import { readSettings, type PnfSettings } from './straddlePnfSettings.ts';
 
 export type AutoMode = 'PAPER' | 'REAL';
 export type AutoRowState = 'entering' | 'open' | 'exiting' | 'closed' | 'unknownEntry' | 'unknownExit' | 'adding' | 'unknownAdd';
@@ -120,11 +121,20 @@ export interface AutoRow {
   adds?: AutoAdd[];
 }
 
-export interface AutoLogEntry { t: number; chart: 1 | 2; text: string }
+/** `kind`: an entry / exit / halt / info line the dashboard SERVER's engine wrote, which the page also toasts (absent on plain lines). */
+export type AutoLogKind = 'entry' | 'exit' | 'halt' | 'info';
+export interface AutoLogEntry { t: number; chart: 1 | 2; text: string; kind?: AutoLogKind }
+
+/**
+ * The chart the dashboard SERVER's AUTO engine (lib/pnfAutoEngine.ts) builds and trades, saved at arming: its target, its settings (locked
+ * on the page while armed) and the times its box is measured from (lib/straddlePnfModel.ts anchorT / boxBaseT), so the server's bricks
+ * are the page's. `volume`: false for an index (no VWAP).
+ */
+export interface ArmRun { target: Target; settings: PnfSettings; anchorT?: number; boxBaseT?: number; volume: boolean }
 
 /**
  * A chart's AUTO switch as last set by a page (arming is in the browser, but it is SAVED here): a reload, a rebuild or another tab of the
- * same page reads it back and resumes AUTO (lib/pnfAutoArm.ts resumeArm decides when), and a stop in one tab disarms every tab. Before this
+ * same page reads it back, the server engine trades from it (lib/pnfAutoEngine.ts), and a stop in one tab disarms every tab. Before this
  * a reload silently left AUTO off while its open position still exited by its rule - an exit with no re-entry (2026-11-04).
  */
 export interface AutoArmRecord {
@@ -147,6 +157,8 @@ export interface AutoArmRecord {
   pyramid?: { max: number; every?: number; trail?: number };
   /** 'MARGIN' = armed to trade NRML; absent = MIS. */
   product?: 'MARGIN';
+  /** What the server engine trades (absent on an arming saved before the server ran AUTO: the engine then disarms it). */
+  run?: ArmRun;
 }
 
 export interface AutoLedger { rev: number; rows: AutoRow[]; log: AutoLogEntry[]; arms?: Partial<Record<'1' | '2', AutoArmRecord>> }
@@ -205,7 +217,7 @@ export type AutoOp =
   | { op: 'voidAdd'; id: string; note: string }
   /** Pyramid, PAPER: add a lot at once (booked at the brick). */
   | { op: 'addPaper'; id: string; add: { id: string; t: number; barT: number; box?: number; lots: number; price: number } }
-  | { op: 'log'; chart: 1 | 2; t: number; text: string }
+  | { op: 'log'; chart: 1 | 2; t: number; text: string; kind?: AutoLogKind }
   /** Save (arm) or clear (null) a chart's AUTO switch, with the log line that says why - one op, so the two never disagree. */
   | { op: 'setArm'; chart: 1 | 2; arm: AutoArmRecord | null; t: number; text: string }
   | { op: 'resetPaper' };
@@ -241,7 +253,20 @@ function armOk(v: unknown): AutoArmRecord | null {
   const trailOk = Number.isInteger(pt) && (pt as number) >= 0 && (pt as number) <= TRAIL_BOXES_MAX;   // 0 = armed with the trail off
   const pyramid = Number.isInteger(pm) && (pm as number) >= 1 && (pm as number) <= PYRAMID_HARD_MAX
     ? { max: pm as number, ...(everyOk ? { every: pe as number } : {}), ...(trailOk ? { trail: pt as number } : {}) } : undefined;
-  return { mode: a.mode, broker: a.broker, targetKey: a.targetKey, day: a.day, t: a.t!, watermarkT: a.watermarkT!, lots: a.lots!, ...(rule ? { rule } : {}), ...(side ? { side } : {}), ...(pyramid ? { pyramid } : {}), ...(a.product === 'MARGIN' ? { product: 'MARGIN' as const } : {}) };
+  const run = runOk(a.run, a.targetKey);
+  return { mode: a.mode, broker: a.broker, targetKey: a.targetKey, day: a.day, t: a.t!, watermarkT: a.watermarkT!, lots: a.lots!, ...(rule ? { rule } : {}), ...(side ? { side } : {}), ...(pyramid ? { pyramid } : {}), ...(a.product === 'MARGIN' ? { product: 'MARGIN' as const } : {}), ...(run ? { run } : {}) };
+}
+
+/** A well-formed run snapshot whose target IS the arming's contract, or undefined. Settings out of range fall back per field (readSettings). */
+function runOk(v: unknown, armKey: string): ArmRun | undefined {
+  if (!v || typeof v !== 'object') return undefined;
+  const r = v as Partial<ArmRun>;
+  const target = parseTarget(r.target);
+  if (!target || targetKey(target) !== armKey || !r.settings || typeof r.settings !== 'object') return undefined;
+  const settings = readSettings(JSON.stringify(r.settings));
+  const time = (n: unknown) => (finite(n) && (n as number) > 0 ? (n as number) : undefined);
+  const anchorT = time(r.anchorT), boxBaseT = time(r.boxBaseT);
+  return { target, settings, ...(anchorT ? { anchorT } : {}), ...(boxBaseT ? { boxBaseT } : {}), volume: r.volume !== false };
 }
 
 /** Hard cap on an AUTO row's lots, pyramid adds included: the order route's own lot cap (one source for the ledger, the page and the UI). */
@@ -479,7 +504,7 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
     }
     case 'log':
       if (typeof op.text !== 'string' || !op.text) return { ok: false, status: 400, error: 'Empty log' };
-      return bump(led.rows, [...led.log, { t: op.t, chart: op.chart, text: op.text.slice(0, 300) }]);
+      return bump(led.rows, [...led.log, { t: op.t, chart: op.chart, text: op.text.slice(0, 300), ...(op.kind && (['entry', 'exit', 'halt', 'info'] as const).includes(op.kind) ? { kind: op.kind } : {}) }]);
     case 'setArm': {
       if (op.chart !== 1 && op.chart !== 2) return { ok: false, status: 400, error: 'chart must be 1 or 2' };
       if (typeof op.text !== 'string' || !op.text || !finite(op.t)) return { ok: false, status: 400, error: 'An arm change needs a time and a log line' };

@@ -47,7 +47,8 @@ export async function runPythonJson<T>(script: string, args: string[], timeoutMs
 
 // In-flight request dedup: concurrent requests for the same key share one
 // Python spawn instead of stacking processes.
-const inflight = new Map<string, Promise<unknown>>();
+// On globalThis so every module instance of this file (route bundles, the instrumentation hook) shares one map.
+const inflight = ((globalThis as unknown as { __pyInflight?: Map<string, Promise<unknown>> }).__pyInflight ??= new Map<string, Promise<unknown>>());
 
 export function dedupe<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const existing = inflight.get(key);

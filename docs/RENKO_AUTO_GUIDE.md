@@ -19,16 +19,14 @@ How the Renko page's automatic trading works: what it trades, when it enters and
 6. Arming does **not** switch the MTM guard on (section 6): it stays OFF until you open the MTM Guard card, set the levels (a chart with
    nothing saved shows 10 boxes target / 10 boxes stop) and click **Switch on**. In REAL a toast reminds you it is off. Without it N-brick, trend
    and Supertrend have **no loss limit** (only the end-of-day exit).
-7. Leave the tab open (section 7 explains what keeps working if you do not).
+7. You can close the tab: AUTO runs on the dashboard server while it is up (section 7).
 
 While AUTO is armed or holds a position, the rule, lots, instrument and box are locked. To change them, stop AUTO (and close its
 position) first.
 
-**AUTO survives a reload.** The switch is saved with the AUTO ledger, so a reload, a dashboard rebuild or a second tab of the page puts
-it back on (a toast says *AUTO resumed on chart N*) as long as it is the same day, the chart shows the same contract and the page is on
-the same broker and mode. The page always opens in PAPER, so a REAL arming waits — the AUTO status reads *AUTO not resumed: … switch the
-page to REAL to resume* — and comes back on by itself once you switch the page to REAL. A stop, a halt, the MTM guard or the server guard
-switches AUTO off in every open tab, and the AUTO log says why (*AUTO switched off: …*).
+**AUTO survives a reload and a closed tab.** The switch is saved with the AUTO ledger and the dashboard server trades from it, so every tab
+of the page shows it armed, with its rule, side, lots and adds, whatever the page's broker or mode. An arming never carries into another
+IST day. A stop, a halt, the MTM guard or the server guard switches AUTO off, and the AUTO log says why (*AUTO switched off: …*).
 
 An open AUTO position on a chart whose AUTO is off shows **AUTO OFF · exit only**: it still exits by its rule, but nothing re-enters after
 it (before 2026-11-04 a reload did this silently — an exit with no re-entry). For that reason, stopping **REAL** AUTO while it holds a
@@ -215,17 +213,41 @@ One guard per chart, shown in the toolbar (**MTM Guard ON/OFF**) with its card.
 
 ## 7. What runs where
 
-| | Browser tab (the leader tab) | Dashboard server |
-|---|---|---|
-| Strategy rules, entries | yes | no |
-| Opposite-brick / trailing SL exit | yes | no |
-| Two-back / One-back stop | yes | **yes, for open REAL AUTO rows** (guard on or off) |
-| MTM guard | yes | **yes, for open REAL AUTO rows** |
-| End-of-day exit | yes | **yes, for every open REAL AUTO row** (guard on or off) |
+**AUTO runs on the dashboard server, not in the browser** (since 2026-11-06). You can close every tab: as long as the dashboard
+(`next start`) is running, the armed charts keep trading. **AUTO stops when the dashboard stops.**
 
-The tab does all the trading. If it closes, sleeps or loses its network, **nothing in the left column runs**, and an N-brick position would
-sit without a stop. A Two-back / One-back REAL row keeps its stop: the server checks it against the bridge price every 2.5 s and records
-the exit as an ordinary `stop` (so an open tab stays armed, as after its own stop exit). To cover that, the dashboard server runs an **exit-only watcher** (`lib/autoServerWatcher.ts`, started with the server):
+| | Browser tab | Dashboard server |
+|---|---|---|
+| Strategy rules, entries, pyramid adds | no | **yes** - the AUTO engine (`lib/pnfAutoEngine.ts`) |
+| Opposite-brick / Supertrend / trailing SL exit | no | **yes** |
+| Two-back / One-back stop | no | **yes** (the engine, and the guard watcher for REAL rows) |
+| End-of-day exit | no | **yes** (PAPER and REAL; the guard watcher is a second REAL backstop) |
+| Reading back REAL fill prices | no | **yes** |
+| MTM guard | the page's guard, while a tab is open (PAPER and REAL) | **yes, for open REAL AUTO rows** (watcher below) |
+| Arm / disarm, settings, status, toasts | **yes** | - |
+
+How it works:
+
+- **Arming saves the chart.** The arm record in the ledger carries the chart's contract, its settings (locked while armed) and the times
+  its box is measured from (`run`, `lib/pnfAutoLedger.ts`). The server builds that chart itself, from the same history route, the same live
+  bridge prices and the same tick log as the page, and runs the same rules (`lib/pnfAutoChart.ts`). An arming saved by an older page (no
+  `run`) is switched off with a log line: reload the page and arm again.
+- **The page is the monitor.** It shows the engine's status line and halts, toasts (and, in the leader tab, chimes) every entry, exit,
+  refusal and halt the engine logs, and its Exit button (and the page's MTM guard) asks the server to exit. When the server cannot (it
+  does not run the engine, or has no fresh price for the position's contract), the page exits it itself through the same reserved exit.
+  If the dashboard process serving the page has not run the engine for 8 s (or is running it but its status stopped moving) the status
+  line says **SERVER ENGINE QUIET**; with nothing armed or open the engine is idle and writes no status. If the server's newest brick differs from the one on screen for two polls in a row the status
+  line says **SERVER SEES ▲/▼ brick @ hh:mm**: the server trades its own copy of the chart, and the two can differ by a brick for a moment
+  (history reload timing, the bridge clock).
+- **One engine per machine.** `debug/pnf_auto_engine.lock` names the process running it; a second dashboard on the same `debug/` folder
+  (a `next dev` beside `next start`) stands down while the first one beats (10 s).
+- **Restarts.** Everything the engine needs is in the ledger and in `debug/<scope>_auto_engine.json` (status, and the chart of an open
+  position whose arming was switched off). A REAL row left `entering` / `exiting` / `adding` for 2 minutes with nothing sending for it
+  (the dashboard stopped with the order on the wire) is marked UNKNOWN: check the broker, then resolve it. Nothing is ever resent.
+- **Page mode.** The page always loads in PAPER; a REAL arming keeps running on the server. Switching the page's mode switches off only
+  the armings of the other mode.
+
+The REAL guard watcher (`lib/autoServerWatcher.ts`, started with the server) works as before:
 
 - The page syncs each chart's guard to the server every time you switch it on, update it or switch it off (`debug/auto_server_guards.json`).
   The page re-reads the server every 3 s and always lists what it holds beside the MTM Guard button (**Server**: `OFF`, or one chip per
@@ -243,9 +265,7 @@ the exit as an ordinary `stop` (so an open tab stays armed, as after its own sto
 - Every 30 s it checks each open REAL row (at least 90 s old) against the broker's book; a row the broker shows flat on two passes in a row is
   closed as `flat at broker` (no order, no P&L booked): it was closed by hand, by a square-off or by the broker.
 - It also squares **every** open REAL AUTO row off at the end-of-day time, guard on or off (no price needed: it books the entry price if none is available, and says so). After the market's close it never sends orders, it only reports a row still open. With the guard OFF there is **no** server stop-loss.
-- It places **no entries**: a closed tab never trades, it only protects.
-
-Only one tab per browser profile leads (Web Locks). A second browser or machine is not covered and could run a second engine.
+- It places **no entries**: entries are the engine's.
 
 ## 8. What you see
 
@@ -268,9 +288,9 @@ Only one tab per browser profile leads (Web Locks). A second browser or machine 
 ## 9. Known limits
 
 - **Not validated.** No backtest or replay. PAPER is more optimistic than REAL.
-- **The tab is the strategy.** The rules, entries and the opposite-brick exit need an open, leader tab (browsers slow the timers of a
-  hidden tab). The page now says so out loud when a gap of 8 s+ opens between two checks while AUTO is armed or holds a position (at most
-  every 5 minutes). Use the server watcher's guard as the backstop, and keep the guard ON.
+- **The server is the strategy.** AUTO trades only while the dashboard server runs; a stopped server stops entries, rule exits and end of
+  day (the guard watcher stops with it). The server engine has had no live test yet: try it on PAPER, then one supervised REAL lot.
+- **PAPER MTM guard** still runs in the page: with every tab closed a PAPER row has its rule and end-of-day exits, but no rupee guard.
 - **Unconfirmed broker unit.** Zerodha MCX futures: no cap, but confirm with one 1-lot REAL trade and check Zerodha's Positions shows 1 lot (it needs
   the machine's IP added in the Kite developer console first). Kotak is confirmed (10 barrels per lot).
 - **Server watcher** has had no live test. Test it once: arm one REAL 1-lot trade with a tight rupee stop, close the tab, and confirm the
@@ -278,8 +298,8 @@ Only one tab per browser profile leads (Web Locks). A second browser or machine 
 - **REAL fills** are read back from the broker (Dhan, Kotak and Zerodha order books) once an order is **fully traded**, and only when the price is
   whole: one order per leg, each filled for its leg's full units. A part-filled order, a cancelled remainder, a leg that was already flat, a Zerodha order
   split into slices, a row closed as `flat at broker` / `resolved`, or a fill more than 20% from the decision price is **not** used: the row keeps its
-  decision price, shown with a `~` in the status line. Unreadable orders are tried 5 times (a minute apart) and then said once in the ledger log. Any
-  leader tab settles, on every ledger change and every 15 s, so a trade made while no tab was open is settled by the next tab you open.
+  decision price, shown with a `~` in the status line. Unreadable orders are tried 5 times (a minute apart) and then said once in the ledger log. The
+  server engine settles every 15 s, with or without a tab.
 - **Two charts on one contract** net at the broker; each exits only its own units.
 - **A whole-position SQUARE OFF** in the trade bar closes AUTO's units too; AUTO then finds the leg flat and books it closed.
 
@@ -306,7 +326,8 @@ Only one tab per browser profile leads (Web Locks). A second browser or machine 
 |---|---|
 | Tick interval | `scripts/tools/pnf_ws.py` (`TickLog`), `lib/pnfTicksServer.ts` + `app/api/straddle-pnf/ticks/route.ts` (log reader), `lib/pnfTicks.ts` (ticks to closed bars, splice with minute history), `components/straddlePnf/usePnfFeed.ts` |
 | Rules (pure, tested) | `rs_dashboard/lib/renko.ts` (`renkoSignals`, `trendSignals`, `twoBackSignals`, `oneBackSignals`), `lib/pnfAuto.ts` (`decideAuto`, windows), `lib/pnfAutoRule.ts` |
-| Engine (browser) | `components/straddlePnf/usePnfAuto.ts`, `AutoControls.tsx`, `components/StraddlePnfPage.tsx` |
+| Engine (server) | `lib/pnfAutoEngine.ts` (loop, lock, status file), `lib/pnfAutoChart.ts` (one chart's rules and orders), `lib/pnfServerFeed.ts`, `lib/pnfFeedCore.ts`, `lib/pnfHistory.ts`, `lib/pnfAutoOrders.ts`, `lib/brokerOrderStatus.ts`, `app/api/straddle-pnf/auto/exit/route.ts` |
+| Page (monitor) | `components/straddlePnf/usePnfAuto.ts`, `AutoControls.tsx`, `components/StraddlePnfPage.tsx` |
 | Ledger | `lib/pnfAutoLedger.ts`, `lib/pnfAutoServer.ts`, `app/api/straddle-pnf/auto/route.ts` |
 | Orders | `app/api/straddle-pnf/order/route.ts`, `lib/pnfOrderExec.ts`, `lib/pnfOrderServer.ts`, `lib/pnfOrderLogic.ts` |
 | MTM guard (page) | `components/straddlePnf/usePnfGuard.ts`, `components/priceLadder/MtmGuardCard.tsx`, `lib/priceLadderGuard.ts`, `lib/pnfGuardBoxes.ts` |

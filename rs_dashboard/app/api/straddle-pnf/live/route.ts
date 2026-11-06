@@ -1,20 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import type { WantedPair } from '@/lib/pnfWanted';
-import { askBridge, ensureBridge, readBridgeBook, SEGMENTS, type Q } from '@/lib/pnfLiveBridge';
+import { askBridge, ensureBridge, readBack, readBridgeBook, SEGMENTS } from '@/lib/pnfLiveBridge';
 
 // Live price for the Point & Figure page, from the WebSocket bridge scripts/tools/pnf_ws.py (lib/pnfLiveBridge.ts). This route only
 // asks the bridge for the page's instrument and reads its quotes file: read-only, no orders.
-
-/** One instrument's read-back: `quote` once its price has CHANGED since the bridge started asking, `last` as soon as it has one. */
-function readBack(q: Q | undefined) {
-  // A price counts only once its content has CHANGED since the bridge started asking: the hub replays the last packet on subscribe.
-  const live = q && Number(q.ltp) > 0 && q.changed_ms ? q : null;
-  return {
-    quote: live ? { ltp: live.ltp, changedMs: live.changed_ms, prevClose: live.prev_close ?? null, volume: live.volume ?? null } : null,
-    // The last known price even before it has ticked, for a header that would otherwise be empty.
-    last: q && Number(q.ltp) > 0 ? { ltp: q.ltp, prevClose: q.prev_close ?? null } : null,
-  };
-}
 
 /** `ids=SEG:ID[,SEG:ID]` (a straddle's two legs) or the single `segment=&id=` form. */
 function parseInstruments(p: URLSearchParams): [string, string][] | null {

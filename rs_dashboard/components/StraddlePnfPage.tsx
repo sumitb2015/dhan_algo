@@ -17,8 +17,7 @@ import { buildPaperTrades } from '@/lib/pnfPaperBook';
 import { decodeMarkers, encodeMarkers } from '@/lib/pnfMarkerStore';
 import { rupeesPerBox } from '@/lib/pnfGuardBoxes';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
-import { AUTO_RULES, AUTO_SIDES, DEFAULT_AUTO_RULE, DEFAULT_AUTO_SIDE, SIDE_LABEL, modelForRule, ruleText, type AutoSide } from '@/lib/pnfAutoRule';
-import { resumeArm } from '@/lib/pnfAutoArm';
+import { AUTO_RULES, AUTO_SIDES, DEFAULT_AUTO_RULE, DEFAULT_AUTO_SIDE, SIDE_LABEL, ruleText, type AutoSide } from '@/lib/pnfAutoRule';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
 import { BROKERS, useBrokerSelector } from '@/hooks/useBrokerSelector';
 import { withSavedBroker } from '@/hooks/withSavedBroker';
@@ -44,7 +43,7 @@ import {
 } from '@/lib/straddlePnfSettings';
 import type { PnfExecutionMarker } from '@/lib/straddlePnf';
 import {
-  DEFAULT_TARGETS, SEGMENTS, parseActiveChart, parseTarget, restoreChart, targetKey, type ChartPicks, type Segment, type Target,
+  DEFAULT_TARGETS, SEGMENTS, parseActiveChart, parseTarget, restoreChart, targetKey, targetLabel, type ChartPicks, type Segment, type Target,
 } from '@/lib/pnfTarget';
 import { usePnfFeed, type PnfFeed } from './straddlePnf/usePnfFeed';
 import { usePnfAlerts } from './straddlePnf/usePnfAlerts';
@@ -224,7 +223,7 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   useEffect(() => { prevRef.current = confirmed; }, [confirmed]);
   const model = useMemo(() => withLive(confirmed, formingBar), [confirmed, formingBar]);
   const vwapAllowed = !indexNoVwap && (closed.length === 0 || model.vwapAvailable);
-  return { model, indexNoVwap, vwapAllowed, lastBar: closedLast ?? null };
+  return { model, indexNoVwap, vwapAllowed, lastBar: closedLast ?? null, boxBaseT };
 }
 
 const readMarkers = (prefix: string, key: string): PnfExecutionMarker[] => {
@@ -478,7 +477,6 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const handleTradeExecuted = useCallback((m: PnfExecutionMarker, t: Target) => saveMarkers(targetKey(t), prev => [...prev, m]), [saveMarkers]);
 
   // ── AUTO: each chart trades its own scrip (double-bottom SELL / double-top BUY, exit on the first column reversal) ──
-  const { ledger: autoLedger, post: autoPost } = usePnfAutoLedger(scope);
   const onAutoEvent = useCallback((e: AutoEvent) => {
     if (e.kind === 'halt') toast.error(e.text, { duration: Infinity });
     else if (e.kind === 'info') toast.warning(e.text);
@@ -486,16 +484,17 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       (e.kind === 'entry' && e.side === 'SELL' ? toast.error : toast.success)(e.text);
       // The chart markers of AUTO trades come from the ledger (autoMarkers): on the signal bar, not at the decision time.
     }
-    // Only the leader tab runs AUTO, so only it rings: entry (rising), exit (falling), a refusal or a halt (warn buzz).
+    // AUTO runs on the dashboard server; only the leader tab rings for it: entry (rising), exit (falling), a refusal or a halt (warn buzz).
     if (leaderRef.current && !mutedRef.current) playPnfChime(pnfChimeFor({ kind: 'auto', type: e.kind }));
   }, [leaderRef]);
-  // The arm switch is SAVED in the AUTO ledger (`arms`): a reload / rebuild resumes it and every tab follows a stop (resume effect below).
-  // `armDoneRef`: the savings this tab has already used up (armed, resumed or stopped here) - one is never resumed twice, so a stop whose
-  // save failed can never come back on by itself.
+  // The server engine's entry / exit / halt lines become this page's toasts (and chimes), whether or not this tab was open for them.
+  const { ledger: autoLedger, post: autoPost, engine: autoEngine } = usePnfAutoLedger(scope, e => onAutoEvent({ chart: e.chart, kind: e.kind ?? 'info', text: `AUTO C${e.chart} ${e.text}` }));
+  // The arm switch is SAVED in the AUTO ledger (`arms`), and the dashboard server trades from it; every tab follows it (effect below).
+  // `armDoneRef`: the armings this tab has stopped (or seen stopped): one is never shown on again from a ledger that has not caught up
+  // with the stop yet (the effect below runs again before the stop's reply lands).
+  const armDoneRef = useRef<Set<number>>(new Set());
   const autoArmRef = useRef(autoArm);
   useEffect(() => { autoArmRef.current = autoArm; });
-  const armDoneRef = useRef<Set<number>>(new Set());
-  const armRevRef = useRef<Record<ChartId, number>>({ 1: Infinity, 2: Infinity });
   /** Every switch-off says why, in the ledger log (a silent one is how a missing re-entry went unexplained on 2026-11-04). */
   const disarm = useCallback((c: ChartId, why: string) => {
     const t = autoArmRef.current[c].armT;
@@ -888,17 +887,17 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       onPlannedMove: (id: string, role: 'sl' | 'target', level: number) => { const r = byId(id); if (r) void resting.movePlanned(r, role, level); },
     };
   };
-  const auto1 = usePnfAuto({
-    chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: renko /* the rules are Renko's: P&F has one signal set */ ? modelForRule(autoRule[1], c1.model) : c1.model, rule: renko ? autoRule[1] : undefined, side: autoSide[1], pyramid: renko ? autoPyr[1] : undefined, price: priceOf(feed1), stale: feed1.stale,
-    market: feed1.market, complete: feed1.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
-    onEvent: onAutoEvent, onDisarm: why => disarm(1, why), scope,
-  });
-  const auto2 = usePnfAuto({
-    chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: renko ? modelForRule(autoRule[2], c2.model) : c2.model, rule: renko ? autoRule[2] : undefined, side: autoSide[2], pyramid: renko ? autoPyr[2] : undefined, price: priceOf(feed2), stale: feed2.stale,
-    market: feed2.market, complete: feed2.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
-    onEvent: onAutoEvent, onDisarm: why => disarm(2, why), scope,
-  });
+  // AUTO runs on the dashboard server (lib/pnfAutoEngine.ts); these show what it does on each chart and ask it for a manual exit.
+  const auto1 = usePnfAuto({ chart: 1, target: target1, model: c1.model, price: priceOf(feed1), ledger: autoLedger, engine: autoEngine, post: autoPost, onEvent: onAutoEvent, onDisarm: why => disarm(1, why), scope, nowMs: now });
+  const auto2 = usePnfAuto({ chart: 2, target: target2, model: c2.model, price: priceOf(feed2), ledger: autoLedger, engine: autoEngine, post: autoPost, onEvent: onAutoEvent, onDisarm: why => disarm(2, why), scope, nowMs: now });
   const autoOf = (c: ChartId) => (c === 2 ? auto2 : auto1);
+  /** The AUTO status line: the server engine's own, plus the brick it trades on when that differs from this chart's, and a feed problem. */
+  const autoNote = (c: ChartId): string => {
+    const a = autoOf(c);
+    const hm = (t: number) => new Date((t + 19_800) * 1000).toISOString().slice(11, 16);
+    const brick = a.serverBrick ? ` · SERVER SEES ${a.serverBrick.dir === 'X' ? '▲' : '▼'} brick @ ${hm(a.serverBrick.barT)} (box ${a.serverBrick.box.toFixed(2)}, ${a.serverBrick.n} bricks)` : '';
+    return `${a.note}${brick}${a.feedError ? ` · server feed: ${a.feedError}` : ''}`;
+  };
   /** When chart c's AUTO squares off today (HH:MM IST): its open row's own product and market, else the product picked for the next entry. */
   const eodText = (c: ChartId): string | null => {
     const row = autoOf(c).row;
@@ -912,18 +911,14 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const hm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
     return `${AUTO_PRODUCT_LABEL[prod]}: entries stop ${hm(win.entryCutoff)}, squared off ${hm(win.eodExit)}`;
   };
-  // The saved AUTO switch (ledger `arms`, lib/pnfAutoArm.ts):
-  //  - armed here and the saving is gone or replaced (stopped / halted in another tab, the server guard): switched off here too, so a tab
-  //    that becomes the leader later can never trade an arming the user stopped elsewhere;
-  //  - not armed here and a saving exists (a reload, a rebuild, a second tab): resumed when the day, contract, broker and page mode match.
-  //    The page loads in PAPER, so a REAL saving waits, said in the AUTO status, until the user switches the page to REAL.
-  //  - an open AUTO position on a chart that is not armed (and will not resume) is said once: it exits by its rule, nothing re-enters.
+  // The saved AUTO switch (ledger `arms`) IS the switch: the dashboard server runs AUTO from it (lib/pnfAutoEngine.ts), with or without a tab.
+  //  - a saving exists: the chart shows armed, with the rule, side, lots, adds and product it was armed with (restored once per arming);
+  //  - armed here and the saving is gone or replaced (stopped in another tab, a halt, the server guard, the day rolled): shown off here too;
+  //  - an open AUTO position on a chart that is not armed is said once: it exits by its rule on the server, nothing re-enters.
   const [resumeNote, setResumeNote] = useState<Record<ChartId, string | null>>({ 1: null, 2: null });
   const offWarnedRef = useRef<Set<string>>(new Set());
-  /** Armed (or resumed) in this tab since it loaded: a stop here is the user's own, its status chip says the rest. */
-  const armedHereRef = useRef<Record<ChartId, boolean>>({ 1: false, 2: false });
+  const armRevRef = useRef<Record<ChartId, number>>({ 1: Infinity, 2: Infinity });
   /** armChart's bookkeeping (refs are only touched from callbacks, never during render). */
-  const noteArmedHere = useCallback((c: ChartId, t: number) => { armDoneRef.current.add(t); armedHereRef.current[c] = true; }, []);
   const noteArmSaved = useCallback((c: ChartId, rev: number | undefined) => { armRevRef.current[c] = rev ?? Infinity; }, []);
   const row1 = auto1.row, row2 = auto2.row;
   /* eslint-disable react-hooks/set-state-in-effect -- the effect follows the saved switch: arming / disarming IS its job */
@@ -933,26 +928,13 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     for (const c of [1, 2] as const) {
       const local = autoArm[c];
       const rec = autoLedger.arms?.[String(c) as '1' | '2'];
-      if (local.on) {
-        if (local.armT !== undefined && autoLedger.rev >= armRevRef.current[c] && rec?.t !== local.armT) {
-          armDoneRef.current.add(local.armT);
-          setAutoArm(a => (a[c].on && a[c].armT === local.armT ? { ...a, [c]: DISARMED } : a));
-          toast.info(`AUTO on chart ${c} was switched off in another tab (or by a halt / the server guard)`, { duration: 10_000 });
-        }
-        continue;
-      }
-      const row = c === 2 ? row2 : row1;
-      if (rec && !armDoneRef.current.has(rec.t)) {
-        const tgt = c === 2 ? target2 : target1;
-        const model = (c === 2 ? c2 : c1).model;
-        const feed = c === 2 ? feed2 : feed1;
-        if (c === 2 && !dual) { notes[c] = 'chart 2 is hidden: show both charts to resume'; continue; }
-        if (replay.active) { notes[c] = 'bar replay is open'; continue; }
-        const v = resumeArm(rec, { chart: c, today: istToday(), broker, targetKey: targetKey(tgt), mode: tradeMode, rows: autoLedger.rows });
-        if (v.ok) {
-          if (!feed.complete || model.lastBarT === null) { notes[c] = 'waiting for the chart to load'; continue; }
-          armDoneRef.current.add(rec.t);
-          armRevRef.current[c] = autoLedger.rev;
+      const tgt = c === 2 ? target2 : target1;
+      if (rec) {
+        if (rec.run && targetKey(rec.run.target) !== targetKey(tgt)) notes[c] = `AUTO trades ${targetLabel(rec.run.target)} on the server - this chart shows another contract`;
+        if (!local.on || local.armT !== rec.t) {
+          if (local.on && local.armT === undefined) continue;        // this tab's own arming, its save still on the wire
+          if (armDoneRef.current.has(rec.t)) continue;               // stopped here: the ledger has not caught up yet
+          armRevRef.current[c] = autoLedger.rev;                     // a later ledger without it switches it off here
           if (renko && AUTO_RULES.includes(rec.rule as AutoRule)) { setAutoRule(a => ({ ...a, [c]: rec.rule as AutoRule })); saveP(`${AUTO_RULE_KEY}${c}`, rec.rule!); }
           if (AUTO_SIDES.includes(rec.side as AutoSide)) { setAutoSide(a => ({ ...a, [c]: rec.side as AutoSide })); saveP(`${AUTO_SIDE_KEY}${c}`, rec.side!); }
           setAutoLots(l => ({ ...l, [c]: rec.lots })); saveP(`${AUTO_LOTS_KEY}${c}`, String(rec.lots));
@@ -963,27 +945,24 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
           }
           const prod = autoProductOf(rec.product);
           setAutoProd(a => ({ ...a, [c]: prod })); saveP(`${AUTO_PROD_KEY}${c}`, prod);
-          armedHereRef.current[c] = true;
-          setAutoArm(a => ({ ...a, [c]: { on: true, mode: rec.mode, watermarkT: v.watermarkT, armT: rec.t, product: prod } }));
-          toast.success(`AUTO resumed on chart ${c} (${rec.mode}, ${rec.lots} lot${rec.lots === 1 ? '' : 's'}, ${AUTO_PRODUCT_LABEL[prod]}) - it was armed before the reload`, { duration: 10_000 });
-          if (leaderRef.current) void autoPost({ op: 'log', chart: c, t: nowSec(), text: `AUTO resumed after a reload (${rec.mode}, ${rec.lots} lot)` });
-          continue;
+          setAutoArm(a => ({ ...a, [c]: { on: true, mode: rec.mode, watermarkT: rec.watermarkT, armT: rec.t, product: prod } }));
         }
-        if (v.wait) notes[c] = v.why;
-        else {
-          armDoneRef.current.add(rec.t);
-          void autoPost({ op: 'setArm', chart: c, arm: null, t: nowSec(), text: `saved AUTO not resumed: ${v.why}` });
-        }
+        continue;
       }
-      if (row?.state === 'open' && !armedHereRef.current[c] && !offWarnedRef.current.has(row.id) && !notes[c]) {
+      if (local.on && local.armT !== undefined && autoLedger.rev >= armRevRef.current[c]) {
+        armDoneRef.current.add(local.armT);
+        setAutoArm(a => (a[c].on && a[c].armT === local.armT ? { ...a, [c]: DISARMED } : a));
+        continue;
+      }
+      const row = c === 2 ? row2 : row1;
+      if (row?.state === 'open' && !local.on && !offWarnedRef.current.has(row.id)) {
         offWarnedRef.current.add(row.id);
-        toast.warning(`Chart ${c} holds an AUTO ${row.side} position but AUTO is OFF: it will exit by its rule and NOT re-enter. Arm AUTO to keep trading.`, { duration: 15_000 });
+        toast.warning(`Chart ${c} holds an AUTO ${row.side} position but AUTO is OFF: the server exits it by its rule and does NOT re-enter. Arm AUTO to keep trading.`, { duration: 15_000 });
       }
     }
     setResumeNote(prev => (prev[1] === notes[1] && prev[2] === notes[2] ? prev : notes));
-    // the charts' models are read for their last bar only
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoLedger, autoArm, prefsReady, tradeMode, broker, target1, target2, dual, replay.active, feed1.complete, feed2.complete, c1.model.lastBarT, c2.model.lastBarT, row1, row2]);
+  }, [autoLedger, autoArm, prefsReady, target1, target2, row1, row2]);
   /* eslint-enable react-hooks/set-state-in-effect */
   // An open AUTO row is marked at the price of a chart showing its contract (null when neither chart does).
   const autoPrice = (k: string) => (k === targetKey(target1) ? priceOf(feed1) : dual && k === targetKey(target2) ? priceOf(feed2) : null);
@@ -1022,9 +1001,18 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const watermarkT = m.lastBarT ?? Math.floor(t);
     const tgt = c === 2 ? target2 : target1;
     const product: AutoProduct = tgt.kind === 'equity' ? 'INTRADAY' : autoProd[c];      // a stock is MIS only
-    noteArmedHere(c, t);
+    const cm = c === 2 ? c2 : c1, feed = c === 2 ? feed2 : feed1;
+    if (!feed.complete || cm.model.lastBarT === null) { toast.warning(`Chart ${c} has not loaded yet - arm AUTO once its chart is drawn`); return; }
+    if (autoOf(c).quiet) toast.error(`The dashboard's AUTO engine is not running - AUTO on chart ${c} will not trade until the server is up`, { duration: 15_000 });
     setAutoArm(a => ({ ...a, [c]: { on: true, mode: tradeMode, watermarkT, armedAtS: t, product } }));       // armed at once; `armT` once the ledger has saved it
+    // The chart the SERVER builds and trades (lib/pnfAutoLedger.ts ArmRun): this chart's contract and settings (locked while armed) and the
+    // times its box is measured from, so the server's bricks are the ones on screen.
+    const run = {
+      target: tgt, settings: c === 2 ? settings2 : settings, volume: !cm.indexNoVwap,
+      ...(feed.loaded?.anchorT ? { anchorT: feed.loaded.anchorT } : {}), ...(cm.boxBaseT ? { boxBaseT: cm.boxBaseT } : {}),
+    };
     const rec = {
+      run,
       mode: tradeMode, broker, targetKey: targetKey(tgt), day: istToday(), t, watermarkT, lots: autoLots[c],
       side: autoSide[c], ...(renko ? { rule: autoRule[c] } : {}),
       ...(renko && autoPyr[c].on && autoPyr[c].max > autoLots[c] ? { pyramid: { max: autoPyr[c].max, ...(autoPyr[c].every > 1 ? { every: autoPyr[c].every } : {}), trail: autoPyr[c].trailOn ? autoPyr[c].trail : 0 } } : {}),
@@ -1036,15 +1024,22 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       if (r.ok) {
         noteArmSaved(c, r.ledger?.rev);
         setAutoArm(a => (a[c].on && a[c].watermarkT === watermarkT && a[c].armT === undefined ? { ...a, [c]: { ...a[c], armT: t } } : a));
-      } else toast.warning(`AUTO on chart ${c} is armed in this tab only (it could not be saved: ${r.error ?? 'no reply'}) - a reload will switch it off`, { duration: 15_000 });
+      } else {
+        // AUTO runs on the server from the saved arming: an arming that was not saved trades nothing.
+        setAutoArm(a => (a[c].on && a[c].watermarkT === watermarkT && a[c].armT === undefined ? { ...a, [c]: DISARMED } : a));
+        toast.error(`AUTO on chart ${c} was NOT armed: it could not be saved (${r.error ?? 'no reply'})`, { duration: 15_000 });
+      }
     });
-  }, [autoSide, autoLots, autoRule, autoPyr, autoProd, tradeMode, guards, disarm, c1, c2, noteArmedHere, noteArmSaved, broker, target1, target2, renko, autoPost, tick1, tick2, tickName1, tickName2]);
+    // autoOf reads auto1 / auto2 of this render (their `quiet` flag only)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSide, autoLots, autoRule, autoPyr, autoProd, tradeMode, guards, disarm, c1, c2, feed1, feed2, settings, settings2, noteArmSaved, broker, target1, target2, renko, autoPost, tick1, tick2, tickName1, tickName2]);
   const setLotsFor = (c: ChartId, n: number) => { setAutoLots(l => ({ ...l, [c]: n })); saveP(`${AUTO_LOTS_KEY}${c}`, String(n)); };
-  // The page mode is the mode AUTO trades in: switching it disarms both charts (arming REAL is always an explicit step).
+  // The page mode is the mode new AUTO armings trade in: switching it disarms the charts armed in the OTHER mode (arming REAL is always an
+  // explicit step). A REAL arming the server runs is left alone when the page (which always loads in PAPER) is switched to REAL.
   const changeTradeMode = (m: 'PAPER' | 'REAL') => {
     if (m === tradeMode) return;
     if (m === 'REAL' && !window.confirm('Switch to REAL?\n\nOrders from the trade bar, the chart rail and AUTO will go to your broker with real money. The rail stays locked until you unlock it, and every page load starts in PAPER.')) return;
-    for (const c of [1, 2] as const) if (autoArm[c].on) disarm(c, `the page switched to ${m}`);
+    for (const c of [1, 2] as const) if (autoArm[c].on && autoArm[c].mode !== m) disarm(c, `the page switched to ${m}`);
     setRailUnlocked(false);
     setInstant({ 1: false, 2: false });
     setTradeMode(m);
@@ -1202,7 +1197,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       ) : (
         <AutoControls chart={c} armed={autoArm[c].on} mode={tradeMode} lots={autoLots[c]} onLots={n => setLotsFor(c, n)}
                       // eslint-disable-next-line react-hooks/refs -- armChart's refs are touched only when the button is clicked, never during render
-                      onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoOf(c).note} trailSl={autoOf(c).trailSl} halt={autoOf(c).halt}
+                      onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoNote(c)} trailSl={autoOf(c).trailSl} halt={autoOf(c).halt}
                       onResolve={autoOf(c).resolve} onExit={() => { void autoOf(c).exitNow(); }} nowMs={now} resumeNote={resumeNote[c]}
                       autoSide={autoSide[c]} onAutoSide={sd => { setAutoSide(a => ({ ...a, [c]: sd })); saveP(`${AUTO_SIDE_KEY}${c}`, sd); }}
                       pyramid={renko ? autoPyr[c] : undefined}

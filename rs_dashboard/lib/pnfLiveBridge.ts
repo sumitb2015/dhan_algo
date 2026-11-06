@@ -86,3 +86,14 @@ export function readBridgeBook(now: number): { hub: boolean; book: Record<string
   const fresh = !!f && now - Number(f.updated_ms) <= FILE_STALE_MS && f.hub_alive !== false;
   return { hub: fresh, book: fresh ? (f!.quotes as Record<string, Q> | undefined) : undefined };
 }
+
+/** One instrument's read-back: `quote` once its price has CHANGED since the bridge started asking, `last` as soon as it has one. */
+export function readBack(q: Q | undefined) {
+  // A price counts only once its content has CHANGED since the bridge started asking: the hub replays the last packet on subscribe.
+  const live = q && Number(q.ltp) > 0 && q.changed_ms ? q : null;
+  return {
+    quote: live ? { ltp: live.ltp, changedMs: live.changed_ms!, prevClose: live.prev_close ?? null, volume: live.volume ?? null } : null,
+    // The last known price even before it has ticked, for a header that would otherwise be empty.
+    last: q && Number(q.ltp) > 0 ? { ltp: q.ltp, prevClose: q.prev_close ?? null } : null,
+  };
+}

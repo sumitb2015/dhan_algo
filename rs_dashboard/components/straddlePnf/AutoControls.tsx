@@ -7,7 +7,7 @@ import type { AutoProduct } from '@/lib/pnfOrderLogic';
 import { PYRAMID_EVERY_MAX, TRAIL_BOXES_MAX, TRAIL_BOXES_MIN } from '@/lib/pnfAuto';
 
 // One chart's AUTO switch, lots and status (engine: ./usePnfAuto.ts). The switch is saved in the AUTO ledger and resumed after a reload in
-// the same mode (lib/pnfAutoArm.ts; the page always loads in PAPER, so a REAL arm resumes once the page is switched to REAL); in REAL mode
+// the same mode (the dashboard server runs the saved arming, lib/pnfAutoEngine.ts); in REAL mode
 // arming takes a second, explicit click. Lots commit on blur / Enter (dhan-commit-on-blur) and are locked while AUTO is armed or holds a position.
 
 const MAX_LOTS = PYRAMID_HARD_MAX;                     // the ledger's lot limit (one source for the lots box, Max and the ledger)

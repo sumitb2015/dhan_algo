@@ -193,4 +193,9 @@ if (process.env.DASHBOARD_NO_BACKGROUND === '1') {
   import('./lib/autoServerWatcher').then(m => m.startAutoServerLoop()).catch(err => {
     console.warn('[auto-server-guard] could not start the watcher:', err);
   });
+  // P&F / Renko AUTO itself: entries, rule exits, pyramid adds and end of day for the armed charts, with every tab closed.
+  // Idle (two file reads a second) while nothing is armed or open.
+  import('./lib/pnfAutoEngine').then(m => m.startPnfAutoEngine()).catch(err => {
+    console.warn('[pnf-auto-engine] could not start the engine:', err);
+  });
 }

@@ -1,11 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resumeArm } from './pnfAutoArm.ts';
+import { armWatermark } from './pnfAutoArm.ts';
 import { applyAutoOp, EMPTY_LEDGER, parseLedger, type AutoArmRecord, type AutoRow } from './pnfAutoLedger.ts';
 
 const TK = 'futures|CRUDEOILM|2026-11-19||';
 const rec: AutoArmRecord = { mode: 'REAL', broker: 'kotak', targetKey: TK, day: '2026-11-04', t: 1000, watermarkT: 900, lots: 2, rule: 'supertrend', side: 'both' };
-const ctx = { chart: 1 as const, today: '2026-11-04', broker: 'kotak', targetKey: TK, mode: 'REAL' as const, rows: [] as AutoRow[] };
 const row = (o: Partial<AutoRow>): AutoRow => ({
   id: 'r', day: '2026-11-04', chart: 1, target: { kind: 'futures', symbol: 'CRUDEOILM', name: 'x', expiry: '2026-11-19' } as AutoRow['target'], targetKey: TK,
   mode: 'REAL', broker: 'kotak', side: 'SELL', lots: 2, unitsPerPoint: 20, legs: [], entryT: 1100, entryBarT: 1080, entryPrice: 9000, state: 'closed', ...o,
@@ -38,35 +37,9 @@ test('setArm refuses a bad record; parseLedger keeps a good saved switch and dro
   assert.equal(parseLedger({ rev: 1, rows: [], log: [] }).arms, undefined);
 });
 
-test('resumeArm: same day, contract, broker and mode resumes, with the watermark past the last AUTO entry since the arming', () => {
-  assert.deepEqual(resumeArm(rec, ctx), { ok: true, watermarkT: 900 });
-  const v = resumeArm(rec, { ...ctx, rows: [row({ entryT: 1100, entryBarT: 1080 }), row({ chart: 2, entryT: 1200, entryBarT: 1190 }), row({ entryT: 500, entryBarT: 5000 })] });
-  assert.deepEqual(v, { ok: true, watermarkT: 1080 }, 'only this chart, only entries after the arming');
-});
-
-test('resumeArm: the page loads in PAPER, so a REAL arm waits for the switch to REAL (and a broker / contract change waits too)', () => {
-  const p = resumeArm(rec, { ...ctx, mode: 'PAPER' });
-  assert.equal(p.ok, false);
-  assert.ok(!p.ok && p.wait && /switch the page to REAL/.test(p.why));
-  const b = resumeArm(rec, { ...ctx, broker: 'dhan' });
-  assert.ok(!b.ok && b.wait);
-  const k = resumeArm(rec, { ...ctx, targetKey: 'futures|CRUDEOILM|2026-12-17||' });
-  assert.ok(!k.ok && k.wait);
-});
-
-test('resumeArm: an arm from another day, or one the server guard ended, is spent', () => {
-  const d = resumeArm(rec, { ...ctx, today: '2026-11-05' });
-  assert.ok(!d.ok && !d.wait);
-  const g = resumeArm(rec, { ...ctx, rows: [row({ exitT: 1500, reason: 'server guard: stop' })] });
-  assert.ok(!g.ok && !g.wait);
-  const older = resumeArm(rec, { ...ctx, rows: [row({ exitT: 800, reason: 'server guard: stop' })] });
-  assert.equal(older.ok, true, 'a guard exit before the arming does not count');
-});
-
-test('an arm record keeps a valid Renko pyramid and drops a bad one', async () => {
-  const { parseLedger } = await import('./pnfAutoLedger.ts');
-  const arm = (pyramid: unknown) => ({ mode: 'PAPER', broker: 'dhan', targetKey: 'k', day: '2026-11-05', t: 1, watermarkT: 1, lots: 2, pyramid });
-  const ok = parseLedger({ rev: 1, rows: [], log: [], arms: { 1: arm({ max: 6 }), 2: arm({ max: 99 }) } });
-  assert.deepEqual(ok.arms?.['1']?.pyramid, { max: 6 });
-  assert.equal(ok.arms?.['2']?.pyramid, undefined);
+test('armWatermark: the arming\'s watermark, or past the last AUTO entry on this chart since the arming', () => {
+  assert.equal(armWatermark(rec, [], 1), 900);
+  const rows = [row({ entryT: 1100, entryBarT: 1080 }), row({ chart: 2, entryT: 1200, entryBarT: 1190 }), row({ entryT: 500, entryBarT: 5000 })];
+  assert.equal(armWatermark(rec, rows, 1), 1080, 'only this chart, only entries after the arming');
+  assert.equal(armWatermark(rec, rows, 2), 1190);
 });

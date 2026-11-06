@@ -369,3 +369,19 @@ test('review fixes: no REAL AUTO entry opposite a live REAL row on the same cont
   assert.ok(applyAutoOp(l, { op: 'open', row: row({ id: 'r2', chart: 2, mode: 'REAL', state: 'entering', side: 'SELL', broker: 'kotak' }) }).ok, 'another broker does not net');
   assert.ok(applyAutoOp(l, { op: 'open', row: row({ id: 'r2', chart: 2, side: 'SELL' }) }).ok, 'PAPER owns nothing at the broker');
 });
+
+test('an arming keeps the run snapshot the server engine trades, only for the armed contract; log lines keep a known kind', () => {
+  const key = 'futures|NIFTY|2026-11-24||';
+  const arm = { mode: 'PAPER' as const, broker: 'dhan', targetKey: key, day: '2026-10-30', t: 1000, watermarkT: 960, lots: 1 };
+  const settings = { interval: 1, boxMode: 'pts', boxPct: 0.1, boxPts: 10, reversal: 2, smaPeriod: 50, stPeriod: 10, stMult: 3 };
+  const withRun = run(EMPTY_LEDGER, { op: 'setArm', chart: 1, t: 1000, text: 'armed', arm: { ...arm, run: { target: fut, settings, boxBaseT: 900, volume: true } } as never });
+  assert.deepEqual(withRun.arms?.['1']?.run, { target: fut, settings, boxBaseT: 900, volume: true });
+  // a snapshot of another contract is dropped (the arming itself stays, the engine then refuses it)
+  const other = run(EMPTY_LEDGER, { op: 'setArm', chart: 1, t: 1000, text: 'armed', arm: { ...arm, run: { target: { ...fut, expiry: '2026-12-29' }, settings, volume: true } } as never });
+  assert.equal(other.arms?.['1']?.run, undefined);
+  // and the snapshot survives a read of the file
+  assert.deepEqual(parseLedger(JSON.parse(JSON.stringify(withRun))).arms?.['1']?.run?.settings, settings);
+  const logged = run(EMPTY_LEDGER, { op: 'log', chart: 1, t: 1, text: 'entered', kind: 'entry' });
+  assert.equal(logged.log[0].kind, 'entry');
+  assert.equal(run(EMPTY_LEDGER, { op: 'log', chart: 1, t: 1, text: 'x', kind: 'weird' as never }).log[0].kind, undefined);
+});

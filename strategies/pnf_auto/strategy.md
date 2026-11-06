@@ -38,15 +38,17 @@ An unknown outcome (no reply, 504, partial straddle) becomes `unknownEntry` / `u
 resent**; the user checks the broker and clicks *Is open* / *Is flat*. A reservation older than 60 s (the tab died with
 the order out) is offered for the same resolution.
 
-## Engine (`components/straddlePnf/usePnfAuto.ts`)
-- Runs in the open page, leader tab only, 1 s tick. Closing the page stops it (exits included) — it is not a server worker.
-- The AUTO switch is saved in the ledger (`arms`, op `setArm`) and resumed after a reload / rebuild / in another tab by
-  `lib/pnfAutoArm.ts` `resumeArm`: same IST day, contract, broker and page mode (the page loads in PAPER, so a REAL arming waits for the
-  switch to REAL), never after a server-guard exit; the watermark is the newer of the arming's and the chart's last AUTO entry bar. Every
-  switch-off is a `setArm null` with its reason in the log, and every tab follows it. Open rows keep exiting while AUTO is off; such a row
-  shows *AUTO OFF · exit only* and its exit logs "no re-entry" (a silent reload-disarm caused missed flips on 2026-11-04).
-- Entries pause on a stale feed, a missing price, an unresolved contract; 3 refused entries in a row halt the chart.
-- Switching the page between PAPER and REAL disarms both charts. While a chart is armed or holds an AUTO position its
+## Engine (`lib/pnfAutoEngine.ts` on the dashboard server, rules in `lib/pnfAutoChart.ts`)
+- Runs on the dashboard SERVER (since 2026-11-06), 1 s tick, with or without a tab; it stops when the dashboard stops. One process per
+  machine runs it (`debug/pnf_auto_engine.lock`). The page (`components/straddlePnf/usePnfAuto.ts`) only arms, disarms, shows the engine's
+  status (`debug/<scope>_auto_engine.json`) and asks it for manual / MTM-guard exits (`/api/straddle-pnf/auto/exit`).
+- The AUTO switch is the ledger's `arms` record (op `setArm`). Arming saves the chart the server builds (`run`: target, settings, `anchorT`,
+  `boxBaseT`, volume); an arming without one, or from another IST day, is switched off by the engine. Every switch-off is a `setArm null`
+  with its reason in the log, and every tab follows it. Open rows keep exiting by their rule while AUTO is off (the engine keeps the
+  arming's chart for them); their exit logs "no re-entry".
+- Entries pause on a stale feed, a missing price, an unresolved contract; 3 refused entries in a row halt the chart. A REAL row reserved
+  for 2 minutes with nothing sending for it (a restart mid-order) is marked unknown, never resent.
+- Switching the page between PAPER and REAL disarms the charts armed in the other mode. While a chart is armed or holds an AUTO position its
   instrument and box settings are locked, and chart 2 cannot be hidden.
 
 ## Known gaps
