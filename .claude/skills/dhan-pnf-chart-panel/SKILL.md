@@ -83,6 +83,13 @@ A Renko chart with a small box over the index's daily-since-2019 + 1-min history
   the SET of labels hidden behind the live tag changes; the rail is `memo`ed (`yOf` is a `useCallback`, its countdown memoised).
 - **Page props must keep identity between polls.** `tradeMarkers` is handed on by content (JSON key) and the pivot memo depends on
   `!!onTogglePivots`, not the closure: an inline array / closure as a memo dep re-ran the chart layer on every 2.5 s ledger poll.
+- **A tick re-renders the page; the price-independent parts must skip it.** The feed lives in the page (AUTO, alerts, resting
+  orders, guards, header P&L, trade bar and rail all read it), so it stays there. Instead: row 3's settings toolbar (`settingsBar`)
+  and the panel's zoom / toggle bar (`zoomBar`) are `useMemo` blocks keyed only on the primitives they show, with handlers from
+  `lib/useStableHandlers.ts` (stable identity, calls the latest closure). When editing either block, add every new value it reads
+  to its deps (exhaustive-deps is disabled there). `NavBar`, `HeaderClock` and `HeaderIndexChips` take no props and are `memo`ed.
+  The window end `w1` is capped at the live column count rounded UP to a chunk, so a forming brick that comes and goes does not
+  move the window. Measured 2026-11-06 (dev, 70 s at 1 tick/s): long tasks 159 → 18, blocked 12.3 s → 1.4 s, idle 77 → 85%.
 - Measuring the live path at night: `page.clock.install` at a session time, cut the history before it, and mock
   `/api/straddle-pnf/live` with a moving price (refuse every other non-GET). Categorise the CPU profile: in `next dev`, ~25-30%
   is React dev-only work (`jsxDEV`, `createTask`) that a production build does not do. Never `next start` a second server to

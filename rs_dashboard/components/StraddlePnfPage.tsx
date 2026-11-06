@@ -39,6 +39,7 @@ import { crosshairStamp } from '@/lib/straddlePnfTimeAxis';
 import { useReplay } from './straddlePnf/useReplay';
 import ReplayBar from './straddlePnf/ReplayBar';
 import { HeaderIndexChips } from '@/components/triplestraddle/HeaderIndexChips';
+import { useStableHandlers } from '@/lib/useStableHandlers';
 import {
   DEFAULT_CHART1_SETTINGS, DEFAULT_CHART2_SETTINGS, DEFAULT_RENKO_SETTINGS, SETTINGS_KEY, SETTINGS_KEY_2, CHART_VIEW_KEY,
   boxText, readSettings, serializeSettings, type PnfSettings,
@@ -1292,6 +1293,121 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     };
   };
 
+  // Row 3's chart settings: built from the values it shows, with stable handlers, so a live tick (which re-renders this page every
+  // second) does not rebuild the toolbar and its tooltips. Every value read below must be in the deps list.
+  const h = useStableHandlers({
+    toggleChartView, activate, applySettings, pickOverlay, toggleOverlayShown, toggleCoverShown, toggleSupertrendShown, cancelEveryOrder,
+    toggleReplay, recenterNow, toggleLog: () => setLogOpen(o => !o), toggleMute, toggleTradeOpen, toggleScalper,
+  });
+  const label1 = feed1.label, label2 = feed2.label;
+  const vwapAllowed = activeChartModel.vwapAllowed, indexNoVwap = activeChartModel.indexNoVwap;
+  const stLocked = activeLocked && (autoRule[active] === 'supertrend' || autoOf(active).row?.exitBy === 'supertrend');
+  const workingCount = workingRows.length, logCount = log.length;
+  const longIntervals = hasLongIntervals(activeTarget.kind);
+  const settingsBar = useMemo(() => (
+    <>
+            {/* 1 Chart vs 2 Charts view toggle */}
+            <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Chart view">
+              <button
+                type="button"
+                aria-label="1 Chart View"
+                title="Single chart view"
+                aria-pressed={chartView === '1'}
+                onClick={() => h.toggleChartView('1')}
+                className={seg(chartView === '1')}
+              >
+                1
+              </button>
+              <button
+                type="button"
+                aria-label="2 Charts View"
+                title={renko ? 'Dual chart view' : 'Dual chart view (0.1% & 1%)'}
+                aria-pressed={chartView === '2'}
+                onClick={() => h.toggleChartView('2')}
+                className={seg(chartView === '2')}
+              >
+                2
+              </button>
+            </div>
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+
+            {/* Two charts: which one the instrument bar, the settings and the trade bar act on (clicking a chart does the same) */}
+            {dual && (
+              <>
+                <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-950" role="group" aria-label="Active chart">
+                  {([1, 2] as const).map(c => (
+                    <button
+                      key={c}
+                      type="button"
+                      aria-pressed={active === c}
+                      aria-label={`Chart ${c} (${boxShort(c === 2 ? settings2 : settings)})`}
+                      title={`Chart ${c}: ${(c === 2 ? label2 : label1)} · ${boxText(c === 2 ? settings2 : settings)}`}
+                      onClick={() => h.activate(c)}
+                      className={`px-2 h-6 rounded text-[11px] font-bold transition-colors ${active === c ? 'bg-amber-500/15 text-amber-300' : 'text-zinc-400 hover:text-zinc-200'}`}
+                    >
+                      C{c} · {boxShort(c === 2 ? settings2 : settings)}
+                    </button>
+                  ))}
+                </div>
+                <span className="w-px h-5 bg-zinc-800 shrink-0" />
+              </>
+            )}
+
+            <fieldset disabled={activeLocked} className="contents"><SettingsControls settings={activeSettings} onChange={h.applySettings} equity={longIntervals} renko={renko} /></fieldset>
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+            <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
+              {/* An index has no traded volume, so no VWAP: the button is disabled and the SMA is drawn (the saved choice is kept for
+                  stocks, futures and options). */}
+              <button type="button" aria-pressed={overlayShown && shownOverlay === 'vwap'} onClick={() => h.pickOverlay('vwap')} disabled={!vwapAllowed}
+                      title={vwapAllowed ? undefined : indexNoVwap
+                        ? `An index has no traded volume, so there is no VWAP: the SMA of the ${renko ? 'brick closes' : 'P&F boxes'} is used`
+                        : `These bars carry no volume, so there is no VWAP: the SMA of the ${renko ? 'brick closes' : 'P&F boxes'} is used`}
+                      className={`${seg(overlayShown && shownOverlay === 'vwap')} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-zinc-400`}>VWAP</button>
+              <button type="button" aria-pressed={overlayShown && shownOverlay === 'sma'} onClick={() => h.pickOverlay('sma')} className={seg(overlayShown && shownOverlay === 'sma')}>SMA {activeSettings.smaPeriod}</button>
+              <button type="button" aria-pressed={!overlayShown} aria-label={overlayShown ? 'Hide the VWAP / SMA line' : 'Show the VWAP / SMA line'} title={overlayShown ? 'Hide the VWAP / SMA line' : 'Show the VWAP / SMA line'}
+                      onClick={h.toggleOverlayShown} className={`${seg(!overlayShown)} inline-flex items-center`}>
+                {overlayShown ? <Eye className="w-3.5 h-3.5" aria-hidden="true" /> : <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />}
+              </button>
+              {!renko && <button type="button" aria-pressed={coverShown} aria-label={coverShown ? 'Hide the COVER tag' : 'Show the COVER tag'}
+                      title="COVER tag: where an X column first trades above the VWAP / SMA (a hint for covering a short; nothing trades on it)"
+                      onClick={h.toggleCoverShown} className={`${seg(coverShown)} inline-flex items-center`}>
+                <Flag className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>}
+            </div>
+            <fieldset disabled={activeLocked} className="contents"><SmaPeriodInput settings={activeSettings} onChange={h.applySettings} /></fieldset>
+            {renko && (
+              <>
+                <span className="w-px h-5 bg-zinc-800 shrink-0" />
+                {/* Outside the general AUTO lock (the line is only drawn for the other rules), but locked while AUTO trades it: armed with the
+                    Supertrend rule, or holding a Supertrend position (the row remembers it across a reload). */}
+                <SupertrendControls settings={activeSettings} onChange={h.applySettings}
+                                    locked={stLocked}
+                                    shown={supertrendShown} onToggleShown={h.toggleSupertrendShown} />
+              </>
+            )}
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+            <button type="button" data-testid="pnf-cancel-every-order" onClick={h.cancelEveryOrder} disabled={workingCount === 0}
+                    aria-label={`Cancel all orders (${workingCount} working)`} title={workingCount ? `Cancel all ${workingCount} working orders on every chart` : 'No working orders'}
+                    className="inline-flex items-center gap-1 h-7 px-2 rounded-md border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:text-white hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">
+              <XCircle className="w-3.5 h-3.5" aria-hidden="true" />
+              Cancel all orders{workingCount ? ` (${workingCount})` : ''}
+            </button>
+            <IconButton icon={Rewind} label={replay.active ? 'Close bar replay' : 'Bar replay'} onClick={h.toggleReplay} pressed={replay.active} />
+            <IconButton icon={LocateFixed} label="Re-center" onClick={h.recenterNow} />
+            <IconButton icon={Bell} label="Alert log" onClick={h.toggleLog} pressed={logOpen} badge={logCount} />
+            <IconButton icon={muted ? VolumeX : Volume2} label={muted ? 'Unmute alert sound' : 'Mute alert sound'} onClick={h.toggleMute} pressed={muted} />
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+            <IconButton icon={Zap} label={tradeOpen ? 'Hide trade desk' : 'Show trade desk'} onClick={h.toggleTradeOpen} pressed={tradeOpen} />
+            {renko && !replay.active && activeTarget.kind !== 'index' && (
+              <IconButton icon={Crosshair} label={scalperOpen ? 'Close scalper' : 'Scalper'} onClick={h.toggleScalper} pressed={scalperOpen} />
+            )}
+    </>
+  // seg / boxShort are pure helpers rebuilt every render; h is stable
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [chartView, renko, dual, active, settings, settings2, label1, label2, activeLocked, activeSettings, longIntervals, overlayShown, shownOverlay,
+      vwapAllowed, indexNoVwap, coverShown, stLocked, supertrendShown, workingCount, replay.active, logOpen, logCount, muted, tradeOpen,
+      scalperOpen, activeTarget.kind]);
+
   return (
     <div className={`flex flex-col h-screen bg-zinc-950 text-white ${tradeMode === 'REAL' ? 'border-t-4 border-red-500' : ''}`} data-trade-mode={tradeMode}>
       <header className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
@@ -1344,101 +1460,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
         <div className="flex items-center gap-x-3 gap-y-2 flex-wrap px-6 py-2 border-t border-zinc-800 bg-zinc-900/40">
           <div ref={setHeaderSlot} data-testid="pnf-header-summary" className="flex items-center grow basis-[560px] min-w-0 overflow-hidden" />
           <div className="flex items-center gap-2 flex-wrap ml-auto" role="group" aria-label="Chart settings">
-            {/* 1 Chart vs 2 Charts view toggle */}
-            <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Chart view">
-              <button
-                type="button"
-                aria-label="1 Chart View"
-                title="Single chart view"
-                aria-pressed={chartView === '1'}
-                onClick={() => toggleChartView('1')}
-                className={seg(chartView === '1')}
-              >
-                1
-              </button>
-              <button
-                type="button"
-                aria-label="2 Charts View"
-                title={renko ? 'Dual chart view' : 'Dual chart view (0.1% & 1%)'}
-                aria-pressed={chartView === '2'}
-                onClick={() => toggleChartView('2')}
-                className={seg(chartView === '2')}
-              >
-                2
-              </button>
-            </div>
-            <span className="w-px h-5 bg-zinc-800 shrink-0" />
-
-            {/* Two charts: which one the instrument bar, the settings and the trade bar act on (clicking a chart does the same) */}
-            {dual && (
-              <>
-                <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-950" role="group" aria-label="Active chart">
-                  {([1, 2] as const).map(c => (
-                    <button
-                      key={c}
-                      type="button"
-                      aria-pressed={active === c}
-                      aria-label={`Chart ${c} (${boxShort(c === 2 ? settings2 : settings)})`}
-                      title={`Chart ${c}: ${(c === 2 ? feed2 : feed1).label} · ${boxText(c === 2 ? settings2 : settings)}`}
-                      onClick={() => activate(c)}
-                      className={`px-2 h-6 rounded text-[11px] font-bold transition-colors ${active === c ? 'bg-amber-500/15 text-amber-300' : 'text-zinc-400 hover:text-zinc-200'}`}
-                    >
-                      C{c} · {boxShort(c === 2 ? settings2 : settings)}
-                    </button>
-                  ))}
-                </div>
-                <span className="w-px h-5 bg-zinc-800 shrink-0" />
-              </>
-            )}
-
-            <fieldset disabled={activeLocked} className="contents"><SettingsControls settings={activeSettings} onChange={applySettings} equity={hasLongIntervals(activeTarget.kind)} renko={renko} /></fieldset>
-            <span className="w-px h-5 bg-zinc-800 shrink-0" />
-            <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Overlay">
-              {/* An index has no traded volume, so no VWAP: the button is disabled and the SMA is drawn (the saved choice is kept for
-                  stocks, futures and options). */}
-              <button type="button" aria-pressed={overlayShown && shownOverlay === 'vwap'} onClick={() => pickOverlay('vwap')} disabled={!activeChartModel.vwapAllowed}
-                      title={activeChartModel.vwapAllowed ? undefined : activeChartModel.indexNoVwap
-                        ? `An index has no traded volume, so there is no VWAP: the SMA of the ${renko ? 'brick closes' : 'P&F boxes'} is used`
-                        : `These bars carry no volume, so there is no VWAP: the SMA of the ${renko ? 'brick closes' : 'P&F boxes'} is used`}
-                      className={`${seg(overlayShown && shownOverlay === 'vwap')} disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-zinc-400`}>VWAP</button>
-              <button type="button" aria-pressed={overlayShown && shownOverlay === 'sma'} onClick={() => pickOverlay('sma')} className={seg(overlayShown && shownOverlay === 'sma')}>SMA {activeSettings.smaPeriod}</button>
-              <button type="button" aria-pressed={!overlayShown} aria-label={overlayShown ? 'Hide the VWAP / SMA line' : 'Show the VWAP / SMA line'} title={overlayShown ? 'Hide the VWAP / SMA line' : 'Show the VWAP / SMA line'}
-                      onClick={toggleOverlayShown} className={`${seg(!overlayShown)} inline-flex items-center`}>
-                {overlayShown ? <Eye className="w-3.5 h-3.5" aria-hidden="true" /> : <EyeOff className="w-3.5 h-3.5" aria-hidden="true" />}
-              </button>
-              {!renko && <button type="button" aria-pressed={coverShown} aria-label={coverShown ? 'Hide the COVER tag' : 'Show the COVER tag'}
-                      title="COVER tag: where an X column first trades above the VWAP / SMA (a hint for covering a short; nothing trades on it)"
-                      onClick={toggleCoverShown} className={`${seg(coverShown)} inline-flex items-center`}>
-                <Flag className="w-3.5 h-3.5" aria-hidden="true" />
-              </button>}
-            </div>
-            <fieldset disabled={activeLocked} className="contents"><SmaPeriodInput settings={activeSettings} onChange={applySettings} /></fieldset>
-            {renko && (
-              <>
-                <span className="w-px h-5 bg-zinc-800 shrink-0" />
-                {/* Outside the general AUTO lock (the line is only drawn for the other rules), but locked while AUTO trades it: armed with the
-                    Supertrend rule, or holding a Supertrend position (the row remembers it across a reload). */}
-                <SupertrendControls settings={activeSettings} onChange={applySettings}
-                                    locked={activeLocked && (autoRule[active] === 'supertrend' || autoOf(active).row?.exitBy === 'supertrend')}
-                                    shown={supertrendShown} onToggleShown={toggleSupertrendShown} />
-              </>
-            )}
-            <span className="w-px h-5 bg-zinc-800 shrink-0" />
-            <button type="button" data-testid="pnf-cancel-every-order" onClick={cancelEveryOrder} disabled={workingRows.length === 0}
-                    aria-label={`Cancel all orders (${workingRows.length} working)`} title={workingRows.length ? `Cancel all ${workingRows.length} working orders on every chart` : 'No working orders'}
-                    className="inline-flex items-center gap-1 h-7 px-2 rounded-md border border-zinc-700 bg-zinc-900 text-[11px] font-bold text-zinc-200 hover:text-white hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">
-              <XCircle className="w-3.5 h-3.5" aria-hidden="true" />
-              Cancel all orders{workingRows.length ? ` (${workingRows.length})` : ''}
-            </button>
-            <IconButton icon={Rewind} label={replay.active ? 'Close bar replay' : 'Bar replay'} onClick={toggleReplay} pressed={replay.active} />
-            <IconButton icon={LocateFixed} label="Re-center" onClick={recenterNow} />
-            <IconButton icon={Bell} label="Alert log" onClick={() => setLogOpen(o => !o)} pressed={logOpen} badge={log.length} />
-            <IconButton icon={muted ? VolumeX : Volume2} label={muted ? 'Unmute alert sound' : 'Mute alert sound'} onClick={toggleMute} pressed={muted} />
-            <span className="w-px h-5 bg-zinc-800 shrink-0" />
-            <IconButton icon={Zap} label={tradeOpen ? 'Hide trade desk' : 'Show trade desk'} onClick={toggleTradeOpen} pressed={tradeOpen} />
-            {renko && !replay.active && activeTarget.kind !== 'index' && (
-              <IconButton icon={Crosshair} label={scalperOpen ? 'Close scalper' : 'Scalper'} onClick={toggleScalper} pressed={scalperOpen} />
-            )}
+            {settingsBar}
           </div>
         </div>
       </header>

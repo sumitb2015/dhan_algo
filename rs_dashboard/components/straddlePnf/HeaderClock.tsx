@@ -1,11 +1,14 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { Clock } from 'lucide-react';
 
 // The current time (IST) in the page header, ticking every second: AUTO's entry window, the 15:15 / MCX end-of-day exits and the
 // closed-bar timing are all read against this clock. Rendered blank until mounted so the server and first client render agree.
-export default function HeaderClock() {
+// Takes no props and keeps its own clock: memo stops the page's per-tick re-renders reaching it.
+export default memo(HeaderClock);
+
+function HeaderClock() {
   const [t, setT] = useState<number | null>(null);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect

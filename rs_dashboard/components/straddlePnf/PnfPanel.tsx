@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
 import { renkoPivots } from '@/lib/renko';
+import { useStableHandlers } from '@/lib/useStableHandlers';
 import { columnAtOrBefore, isSellSignal, type PnfExecutionMarker } from '@/lib/straddlePnf';
 import { AlignLeft, AlignRight, Eye, EyeOff, MapPin, MapPinOff, Minus, Plus, RotateCcw, ChevronsLeftRight, ChevronsRightLeft } from 'lucide-react';
 import { layoutTags } from '@/lib/pnfTagLayout';
@@ -769,7 +770,9 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const viewPx = Math.max(1, width);
   const leftPx = viewRight === null ? Math.max(0, contentW - 2 * viewPx) : viewLeft;   // before the first scroll: the newest columns
   const w0 = Math.max(0, Math.floor(Math.floor((leftPx - viewPx - offsetX) / colW) / WINDOW_CHUNK) * WINDOW_CHUNK);
-  const w1 = Math.min(liveCols.length, (Math.floor(Math.max(0, Math.ceil((leftPx + 2 * viewPx - offsetX) / colW)) / WINDOW_CHUNK) + 1) * WINDOW_CHUNK);
+  // capped at the live column count rounded UP to a chunk: a forming brick that comes and goes on a tick then does not move the
+  // window (every use clamps to its own array) and rebuild every layer
+  const w1 = Math.min(Math.ceil(liveCols.length / WINDOW_CHUNK) * WINDOW_CHUNK, (Math.floor(Math.max(0, Math.ceil((leftPx + 2 * viewPx - offsetX) / colW)) / WINDOW_CHUNK) + 1) * WINDOW_CHUNK);
   const inWindow = (j: number) => j >= w0 && j < w1;
   // Renko pivot lines on confirmed bricks only (no flicker on the forming one): every level still holding, newest 6 a side, and
   // broken ones (faint, ending at the breaking brick) only near the view.
@@ -1164,6 +1167,62 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   // eslint-disable-next-line react-hooks/exhaustive-deps
   ), [renko, colW, columns, cell, offsetX, yMax, padY, box, overlayPts, stPaths, kind, coverShown, exits, triShown, triangles, pivotLines, plotW, axisDigits, signals, w0, w1, lastEntryId, markersShown, tradeMarkers, colTimes, anchorPx, liveShape]);
 
+  // The zoom / toggle buttons (each with a tooltip): rebuilt only when what they show changes, not on every live tick or crosshair
+  // move; their handlers are stable and call the latest ones.
+  const zh = useStableHandlers({
+    zoomBy: (f: number) => zoomBy(f), xZoomBy: (f: number) => xZoomBy(f), resetView: () => resetView(),
+    toggleTri: () => onToggleTri?.(), cycleTriMin: () => onCycleTriMin?.(), togglePivots: () => onTogglePivots?.(),
+    cyclePivotK: () => onCyclePivotStrength?.(), toggleLines: () => rail?.onToggleLines?.(), toggleAlign: () => rail?.onToggleAlign?.(),
+    toggleMarkers: () => onToggleMarkers?.(),
+  });
+  const hasTri = !!onToggleTri, hasTriMin = !!onCycleTriMin, hasPivots = !!onTogglePivots, hasPivotK = !!onCyclePivotStrength;
+  const hasLines = !!rail?.onToggleLines, hasAlign = !!rail?.onToggleAlign, hasMarkers = !!onToggleMarkers;
+  const linesOn = rail?.linesShown !== false, alignLeft = !!rail?.alignLeft, markerCount = tradeMarkers?.length ?? 0;
+  const zoomBar = useMemo(() => (
+    <>
+        <ZoomButton label="Zoom out" onClick={() => zh.zoomBy(0.7)}><Minus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        <ZoomButton label="Fit chart to panel" onClick={() => zh.resetView()}><RotateCcw className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        <ZoomButton label="Zoom in" onClick={() => zh.zoomBy(1 / 0.7)}><Plus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        <ZoomButton label="Squeeze columns (horizontal zoom out, Shift + wheel)" onClick={() => zh.xZoomBy(0.7)}><ChevronsRightLeft className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        <ZoomButton label="Stretch columns (horizontal zoom in, Shift + wheel)" onClick={() => zh.xZoomBy(1 / 0.7)}><ChevronsLeftRight className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        {hasTri && (
+          <ZoomButton label={triShown ? 'Hide triangles' : 'Show triangles'} onClick={zh.toggleTri} pressed={!triShown}>
+            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{triShown ? '△' : '▽'}</span>
+          </ZoomButton>
+        )}
+        {hasTriMin && triShown && (
+          <ZoomButton label={`Triangles need at least ${triMin} columns (click for ${triMin >= 6 ? 3 : triMin + 1})`} onClick={zh.cycleTriMin}>
+            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{`△${triMin}`}</span>
+          </ZoomButton>
+        )}
+        {hasPivots && (
+          <ZoomButton label={pivotsShown ? 'Hide pivot high / low lines' : 'Show pivot high / low lines'} onClick={zh.togglePivots} pressed={!pivotsShown}>
+            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">PV</span>
+          </ZoomButton>
+        )}
+        {hasPivotK && pivotsShown && (
+          <ZoomButton label={`Pivots need a ${pivotStrength}-brick swing each side (click for ${pivotStrength >= 3 ? 1 : pivotStrength + 1})`} onClick={zh.cyclePivotK}>
+            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{`P${pivotStrength}`}</span>
+          </ZoomButton>
+        )}
+        {hasLines && (
+          <ZoomButton label={linesOn ? 'Hide order and position lines' : 'Show order and position lines'} onClick={zh.toggleLines} pressed={!linesOn}>
+            {linesOn ? <EyeOff className="w-3 h-3" aria-hidden="true" /> : <Eye className="w-3 h-3" aria-hidden="true" />}
+          </ZoomButton>
+        )}
+        {hasAlign && linesOn && (
+          <ZoomButton label={alignLeft ? 'Align order tags to the right' : 'Align order tags to the left'} onClick={zh.toggleAlign} pressed={!!alignLeft}>
+            {alignLeft ? <AlignRight className="w-3 h-3" aria-hidden="true" /> : <AlignLeft className="w-3 h-3" aria-hidden="true" />}
+          </ZoomButton>
+        )}
+        {hasMarkers && (markerCount || !markersShown) ? (
+          <ZoomButton label={markersShown ? 'Hide buy / sell markers' : 'Show buy / sell markers'} onClick={zh.toggleMarkers} pressed={!markersShown}>
+            {markersShown ? <MapPinOff className="w-3 h-3" aria-hidden="true" /> : <MapPin className="w-3 h-3" aria-hidden="true" />}
+          </ZoomButton>
+        ) : null}
+    </>
+  ), [zh, hasTri, hasTriMin, hasPivots, hasPivotK, hasLines, hasAlign, hasMarkers, triShown, triMin, pivotsShown, pivotStrength, linesOn, alignLeft,
+      markerCount, markersShown]);
   return (
     <section
       data-testid="pnf-panel"
@@ -1672,46 +1731,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         );
       })()}
       <div data-testid="pnf-zoom" data-zoom={zoom} className={`absolute ${timeAxis ? 'bottom-8' : 'bottom-1.5'} left-1/2 -translate-x-1/2 flex items-center gap-1 z-10`}>
-        <ZoomButton label="Zoom out" onClick={() => zoomBy(0.7)}><Minus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
-        <ZoomButton label="Fit chart to panel" onClick={() => resetView()}><RotateCcw className="w-3 h-3" aria-hidden="true" /></ZoomButton>
-        <ZoomButton label="Zoom in" onClick={() => zoomBy(1 / 0.7)}><Plus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
-        <ZoomButton label="Squeeze columns (horizontal zoom out, Shift + wheel)" onClick={() => xZoomBy(0.7)}><ChevronsRightLeft className="w-3 h-3" aria-hidden="true" /></ZoomButton>
-        <ZoomButton label="Stretch columns (horizontal zoom in, Shift + wheel)" onClick={() => xZoomBy(1 / 0.7)}><ChevronsLeftRight className="w-3 h-3" aria-hidden="true" /></ZoomButton>
-        {onToggleTri && (
-          <ZoomButton label={triShown ? 'Hide triangles' : 'Show triangles'} onClick={onToggleTri} pressed={!triShown}>
-            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{triShown ? '△' : '▽'}</span>
-          </ZoomButton>
-        )}
-        {onCycleTriMin && triShown && (
-          <ZoomButton label={`Triangles need at least ${triMin} columns (click for ${triMin >= 6 ? 3 : triMin + 1})`} onClick={onCycleTriMin}>
-            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{`△${triMin}`}</span>
-          </ZoomButton>
-        )}
-        {onTogglePivots && (
-          <ZoomButton label={pivotsShown ? 'Hide pivot high / low lines' : 'Show pivot high / low lines'} onClick={onTogglePivots} pressed={!pivotsShown}>
-            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">PV</span>
-          </ZoomButton>
-        )}
-        {onCyclePivotStrength && pivotsShown && (
-          <ZoomButton label={`Pivots need a ${pivotStrength}-brick swing each side (click for ${pivotStrength >= 3 ? 1 : pivotStrength + 1})`} onClick={onCyclePivotStrength}>
-            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{`P${pivotStrength}`}</span>
-          </ZoomButton>
-        )}
-        {rail?.onToggleLines && (
-          <ZoomButton label={rail.linesShown !== false ? 'Hide order and position lines' : 'Show order and position lines'} onClick={rail.onToggleLines} pressed={rail.linesShown === false}>
-            {rail.linesShown !== false ? <EyeOff className="w-3 h-3" aria-hidden="true" /> : <Eye className="w-3 h-3" aria-hidden="true" />}
-          </ZoomButton>
-        )}
-        {rail?.onToggleAlign && rail.linesShown !== false && (
-          <ZoomButton label={rail.alignLeft ? 'Align order tags to the right' : 'Align order tags to the left'} onClick={rail.onToggleAlign} pressed={!!rail.alignLeft}>
-            {rail.alignLeft ? <AlignRight className="w-3 h-3" aria-hidden="true" /> : <AlignLeft className="w-3 h-3" aria-hidden="true" />}
-          </ZoomButton>
-        )}
-        {onToggleMarkers && (tradeMarkers?.length || !markersShown) ? (
-          <ZoomButton label={markersShown ? 'Hide buy / sell markers' : 'Show buy / sell markers'} onClick={onToggleMarkers} pressed={!markersShown}>
-            {markersShown ? <MapPinOff className="w-3 h-3" aria-hidden="true" /> : <MapPin className="w-3 h-3" aria-hidden="true" />}
-          </ZoomButton>
-        ) : null}
+        {zoomBar}
       </div>
       </div>
     </section>

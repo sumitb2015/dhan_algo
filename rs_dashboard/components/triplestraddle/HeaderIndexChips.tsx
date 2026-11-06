@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { memo, useEffect } from 'react';
 import { cn } from '@/lib/utils';
 import { useLiveTickerPoll, isStale, ageOf, ageLabel } from '@/lib/useLiveTickerPoll';
 import { PctPill, fmtPrice } from '@/components/LiveTickerPanel';
@@ -34,7 +34,10 @@ function Chip({ label, q, flash, dim }: { label: string; q?: Quote; flash?: 'up'
 
 /** Nifty 50 and India VIX with % change vs the previous close, for the page header. Same feed as the
  *  Advanced Scalper's Top Indices (/api/scalper/top-indices); greyed with an age badge when it goes stale. */
-export function HeaderIndexChips() {
+// Takes no props and polls on its own: memo stops a page's re-renders reaching it.
+export const HeaderIndexChips = memo(HeaderIndexChipsImpl);
+
+function HeaderIndexChipsImpl() {
   // Same idempotent start the Advanced Scalper does: the indices bridge feeds this route's NSE rows, and
   // without it the snapshot is yesterday's. Never stopped from here (other pages share it).
   useEffect(() => {

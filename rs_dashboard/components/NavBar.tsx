@@ -1,6 +1,6 @@
 'use client';
 import { useRouter } from 'next/navigation';
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import { Bell, DatabaseZap, GitPullRequest, LogOut, RefreshCw, Settings } from 'lucide-react';
 import { toast } from 'sonner';
 import { useRefreshStatus } from '@/lib/useRefreshStatus';
@@ -12,7 +12,10 @@ import UpdateAppPanel from './UpdateAppPanel';
 import SettingsPanel from './SettingsPanel';
 import ThemeToggle from './ThemeToggle';
 
-export default function NavBar() {
+// Takes no props: memo stops a page's own re-renders (a live chart ticks every second) re-rendering the whole nav and its panels.
+export default memo(NavBar);
+
+function NavBar() {
   const router = useRouter();
   const [syncPanelOpen, setSyncPanelOpen] = useState(false);
   const [updatePanelOpen, setUpdatePanelOpen] = useState(false);
