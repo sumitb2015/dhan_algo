@@ -541,10 +541,10 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const changePct = change !== null && changeBase ? (change / changeBase) * 100 : null;
   const lastSignal = signals.length ? signals[signals.length - 1] : null;
   // How the box was set: a % of the first price, or price points (raised to the 0.05% floor when the points were too small).
-  const boxNote = model.boxMode === 'pts' ? (model.boxClamped ? `points, raised to ${MIN_BOX_PTS_PCT}% of price` : 'points') : `${boxPct}% of ${fmt(model.anchor)}`;
+  const boxNote = model.boxMode === 'pts' ? (model.boxClamped ? `points, raised to ${MIN_BOX_PTS_PCT}% of price` : 'points') : `${boxPct}% of ${fmt(model.boxBase ?? model.anchor)}`;
   const boxTitle = model.boxMode === 'pts'
-    ? `Box ${box.toFixed(2)} points${model.boxClamped ? ' (the points set were below ${MIN_BOX_PTS_PCT}% of the price, so the box was raised to that floor)' : ''}; rows sit on multiples of the box`
-    : `Box ${box.toFixed(2)} = ${boxPct}% of the first price ${fmt(model.anchor)}`;
+    ? `Box ${box.toFixed(2)} points${model.boxClamped ? ` (the points set were below ${MIN_BOX_PTS_PCT}% of the price, so the box was raised to that floor)` : ''}; rows sit on multiples of the box`
+    : `Box ${box.toFixed(2)} = ${boxPct}% of ${fmt(model.boxBase ?? model.anchor)}${model.boxBaseT !== null ? `, the first price of ${shortDate(sessionOfT(model.boxBaseT))}` : ''} (held until the chart reloads)`;
   const sessionsInfo = model.sessions.length
     ? ` · ${model.sessions.length} sessions (${shortDate(model.sessions[0])} – ${shortDate(model.sessions[model.sessions.length - 1])})` : '';
 

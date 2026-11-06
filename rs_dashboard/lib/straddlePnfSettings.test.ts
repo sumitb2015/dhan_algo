@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_SETTINGS, MIN_BOX_PCT, MAX_BOX_PCT, REVERSALS, boxText, stepBox, BOX_PCT_STEPS, BOX_PTS_STEPS, parseBoxPct, parseBoxPts, parseSmaPeriod, parseStMult, parseStPeriod, readSettings, serializeSettings } from './straddlePnfSettings.ts';
+import { DEFAULT_SETTINGS, MIN_BOX_PCT, MIN_BOX_PTS, MAX_BOX_PCT, REVERSALS, boxText, stepBox, stepBoxBy, BOX_PCT_STEPS, BOX_PTS_STEPS, parseBoxPct, parseBoxPts, parseSmaPeriod, parseStMult, parseStPeriod, readSettings, serializeSettings } from './straddlePnfSettings.ts';
 
 test('defaults are the 1-minute / 0.5% / 3-box chart with an SMA 50 overlay', () => {
   assert.deepEqual(DEFAULT_SETTINGS, { interval: 1, boxMode: 'pct', boxPct: 0.5, boxPts: 10, reversal: 3, smaPeriod: 50, stPeriod: 10, stMult: 3 });
@@ -101,4 +101,22 @@ test('Supertrend period and multiplier: parsed, range-checked and read back per 
   assert.deepEqual([readSettings('{"stPeriod":7,"stMult":2}').stPeriod, readSettings('{"stPeriod":7,"stMult":2}').stMult], [7, 2]);
   assert.deepEqual([readSettings('{"stPeriod":0,"stMult":99}').stPeriod, readSettings('{"stPeriod":0,"stMult":99}').stMult], [10, 3]);  // out of range: defaults
   assert.equal(readSettings('{"smaPeriod":20}').stPeriod, 10);   // saved before the Supertrend existed
+});
+
+test('stepBoxBy (Renko) steps to the next multiple of 1 point or 0.5 %, with only the minimum below the first step', () => {
+  assert.equal(stepBoxBy('pts', 10, 1), 11);
+  assert.equal(stepBoxBy('pts', 10, -1), 9);
+  assert.equal(stepBoxBy('pts', 2.5, 1), 3);                    // a typed value steps onto the grid
+  assert.equal(stepBoxBy('pts', 2.5, -1), 2);
+  assert.equal(stepBoxBy('pts', 1, -1), MIN_BOX_PTS);
+  assert.equal(stepBoxBy('pts', MIN_BOX_PTS, 1), 1);
+  assert.equal(stepBoxBy('pct', 0.5, -1), MIN_BOX_PCT);          // the default 0.5 %: down to the floor, back up to 0.5
+  assert.equal(stepBoxBy('pct', MIN_BOX_PCT, 1), 0.5);
+  assert.equal(stepBoxBy('pct', 0.1, 1), 0.5);
+  assert.equal(stepBoxBy('pct', 0.5, 1), 1);
+  assert.equal(stepBoxBy('pct', 1.2, 1), 1.5);
+  assert.equal(stepBoxBy('pct', 1.2, -1), 1);
+  assert.equal(stepBoxBy('pct', 1.5, -1), 1);
+  assert.equal(stepBoxBy('pct', 4.8, 1), MAX_BOX_PCT);
+  assert.equal(stepBoxBy('pct', MAX_BOX_PCT, 1), MAX_BOX_PCT);
 });

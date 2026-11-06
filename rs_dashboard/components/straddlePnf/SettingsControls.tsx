@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { Eye, EyeOff, Minus, Plus } from 'lucide-react';
 import { intervalLabel, intervalsFor, type Interval } from '@/lib/straddlePnfInterval';
 import {
-  MAX_BOX_PCT, MIN_BOX_PCT, MAX_BOX_PTS, MIN_BOX_PTS, MIN_BOX_PTS_PCT, MAX_SMA_PERIOD, MIN_SMA_PERIOD, MAX_ST_MULT, MAX_ST_PERIOD, MIN_ST_MULT, MIN_ST_PERIOD, REVERSALS, parseBoxPct, parseBoxPts, parseSmaPeriod, parseStMult, parseStPeriod, stepBox,
+  MAX_BOX_PCT, MIN_BOX_PCT, MAX_BOX_PTS, MIN_BOX_PTS, MIN_BOX_PTS_PCT, MAX_SMA_PERIOD, MIN_SMA_PERIOD, MAX_ST_MULT, MAX_ST_PERIOD, MIN_ST_MULT, MIN_ST_PERIOD, REVERSALS, parseBoxPct, parseBoxPts, parseSmaPeriod, parseStMult, parseStPeriod, stepBox, stepBoxBy, RENKO_BOX_STEP,
   type PnfSettings, type Reversal,
 } from '@/lib/straddlePnfSettings';
 
@@ -146,6 +146,9 @@ export function SupertrendControls({ settings, onChange, shown, onToggleShown, l
 export default function SettingsControls({ settings, onChange, equity = false, renko = false }: { settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean; renko?: boolean }) {
   const boxMode = settings.boxMode;
   const boxValue = boxMode === 'pct' ? settings.boxPct : settings.boxPts;
+  // Renko steps by a fixed 1 point / 0.5 %; P&F along its ladder of round sizes.
+  const step = (dir: 1 | -1) => (renko ? stepBoxBy(boxMode, boxValue, dir) : stepBox(boxMode, boxValue, dir));
+  const stepUnit = boxMode === 'pct' ? `${RENKO_BOX_STEP.pct}%` : `${RENKO_BOX_STEP.pts} point`;
   const setBox = (n: number) => { if (n !== boxValue) onChange(boxMode === 'pct' ? { ...settings, boxPct: n } : { ...settings, boxPts: n }); };
   return (
     <>
@@ -168,9 +171,9 @@ export default function SettingsControls({ settings, onChange, equity = false, r
           ))}
         </div>
         <div className="inline-flex items-center">
-          {/* − / + step to the next round size and apply at once, from the applied value (a half-typed draft is discarded). */}
-          <button type="button" aria-label="Decrease box size" title="Smaller box (next round size)" disabled={stepBox(boxMode, boxValue, -1) === boxValue}
-                  onMouseDown={keepFocus} onClick={() => setBox(stepBox(boxMode, boxValue, -1))} className={`${STEP_BTN} rounded-l-md border-r-0`}>
+          {/* − / + step (Renko: 1 pt / 0.5 %; P&F: the next round size) and apply at once, from the applied value (a half-typed draft is discarded). */}
+          <button type="button" aria-label="Decrease box size" title={renko ? `Smaller box (−${stepUnit})` : 'Smaller box (next round size)'} disabled={step(-1) === boxValue}
+                  onMouseDown={keepFocus} onClick={() => setBox(step(-1))} className={`${STEP_BTN} rounded-l-md border-r-0`}>
             <Minus className="w-3 h-3" aria-hidden="true" />
           </button>
           {boxMode === 'pct' ? (
@@ -182,8 +185,8 @@ export default function SettingsControls({ settings, onChange, equity = false, r
                          title={`Box size in price points (${MIN_BOX_PTS}-${MAX_BOX_PTS.toLocaleString('en-IN')}); never below ${MIN_BOX_PTS_PCT}% of the price; press Enter to apply`}
                          onCommit={setBox} />
           )}
-          <button type="button" aria-label="Increase box size" title="Bigger box (next round size)" disabled={stepBox(boxMode, boxValue, 1) === boxValue}
-                  onMouseDown={keepFocus} onClick={() => setBox(stepBox(boxMode, boxValue, 1))} className={`${STEP_BTN} rounded-r-md border-l-0`}>
+          <button type="button" aria-label="Increase box size" title={renko ? `Bigger box (+${stepUnit})` : 'Bigger box (next round size)'} disabled={step(1) === boxValue}
+                  onMouseDown={keepFocus} onClick={() => setBox(step(1))} className={`${STEP_BTN} rounded-r-md border-l-0`}>
             <Plus className="w-3 h-3" aria-hidden="true" />
           </button>
         </div>

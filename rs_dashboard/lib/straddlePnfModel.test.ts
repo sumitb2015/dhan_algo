@@ -408,16 +408,24 @@ test('option box: a % box is measured on the latest session, not on a history th
   const all = [...old, ...today];
   const first = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko' });
   assert.ok(Math.abs(first.box - 0.02 * 999.2) < 1e-9, 'default: first price of the history');
-  const recent = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxOnRecent: true });
-  assert.ok(Math.abs(recent.box - 0.02 * 287) < 1e-9, 'option: first price of the latest session');
+  const recent = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxBaseT: BASE_T + 4 * 60 });
+  assert.ok(Math.abs(recent.box - 0.02 * 287) < 1e-9, 'first price of the session holding boxBaseT');
   assert.equal(recent.boxMode, 'pct');
-  const pnf = buildConfirmedModel(all, 'vwap', { boxPct: 2, boxOnRecent: true });
+  const pnf = buildConfirmedModel(all, 'vwap', { boxPct: 2, boxBaseT: BASE_T + 4 * 60 });
   assert.ok(Math.abs(pnf.box - 0.02 * 287) < 1e-9, 'P&F too');
   // a box in points is untouched
-  const pts = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxOnRecent: true, boxMode: 'pts', boxPts: 5 });
+  const pts = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxBaseT: BASE_T + 4 * 60, boxMode: 'pts', boxPts: 5 });
   assert.equal(pts.box, 5);
   // the incremental build (a bar closed) lands on the same box as a rebuild
-  const prev = buildConfirmedModel(all.slice(0, -1), 'vwap', { boxPct: 2, chart: 'renko', boxOnRecent: true });
-  const next = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxOnRecent: true }, prev);
+  const prev = buildConfirmedModel(all.slice(0, -1), 'vwap', { boxPct: 2, chart: 'renko', boxBaseT: BASE_T + 4 * 60 });
+  const next = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxBaseT: BASE_T + 4 * 60 }, prev);
   assert.equal(next.box, recent.box);
+  assert.equal(recent.boxBase, 287);
+  assert.equal(recent.boxBaseT, BASE_T);
+  // pinned on the old session (a chart loaded then, or a replay started then): its box holds after today's bars arrive
+  const pinned = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxBaseT: BASE_T - 40 * DAY + 4 * 60 });
+  assert.ok(Math.abs(pinned.box - 0.02 * 999.2) < 1e-9);
+  // nothing that early: the history's first price
+  assert.ok(Math.abs(buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxBaseT: 1 }).box - 0.02 * 999.2) < 1e-9);
+  assert.equal(pts.boxBase, null);
 });

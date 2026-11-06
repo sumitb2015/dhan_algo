@@ -104,6 +104,22 @@ export function stepBox(mode: BoxMode, value: number, dir: 1 | -1): number {
   return value;
 }
 
+/** The Renko page's − / + step: 1 point, or 0.5 %. */
+export const RENKO_BOX_STEP: Record<BoxMode, number> = { pts: 1, pct: 0.5 };
+
+/**
+ * The next multiple of the Renko step above (dir 1) or below (dir -1) `value`, so a typed 0.33 % steps to 0.5 / the floor and the
+ * buttons stay on round sizes. Below the first step there is only the mode's minimum (0.05 %, 0.01 points); the maximum caps it.
+ */
+export function stepBoxBy(mode: BoxMode, value: number, dir: 1 | -1): number {
+  const [min, max] = mode === 'pct' ? [MIN_BOX_PCT, MAX_BOX_PCT] : [MIN_BOX_PTS, MAX_BOX_PTS];
+  const unit = RENKO_BOX_STEP[mode];
+  const eps = 1e-9;
+  const k = dir === 1 ? Math.floor(value / unit + eps) + 1 : Math.ceil(value / unit - eps) - 1;
+  const next = Number((k * unit).toFixed(4));
+  return Math.min(max, Math.max(min, next));
+}
+
 /** The header's short description of the box: "0.5% box" or "50-pt box". */
 export const boxText = (s: Pick<PnfSettings, 'boxMode' | 'boxPct' | 'boxPts'>) => (s.boxMode === 'pts' ? `${s.boxPts}-pt box` : `${s.boxPct}% box`);
 

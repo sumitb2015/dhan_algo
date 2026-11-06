@@ -106,6 +106,20 @@ test('a % box: the brick is that % of the first 1-minute price and the bricks si
   assert.equal(pts.box, 10);
 });
 
+test('a % box is that % of the first price of the session holding boxBaseT, not of a years-old first price', () => {
+  const day = 86_400;
+  const old = bars([5000, 5010]);                                                  // a history starting years back
+  const today = bars([26000, 26030, 26060]).map(b => ({ ...b, t: b.t + 3000 * day }));
+  const lastT = today[today.length - 1].t;
+  const c = buildConfirmedModel([...old, ...today], 'sma', { chart: 'renko', boxMode: 'pct', boxPct: 0.1, reversal: 2, volume: false, boxBaseT: lastT });
+  assert.ok(Math.abs(c.box - 26) < 1e-9);                                         // 0.1 % of 26,000, not 5 points
+  assert.equal(c.boxBase, 26000);
+  const whole = buildConfirmedModel([...old, ...today], 'sma', { chart: 'renko', boxMode: 'pct', boxPct: 0.1, reversal: 2, volume: false });
+  assert.ok(Math.abs(whole.box - 5) < 1e-9);
+  assert.equal(whole.boxBase, 5000);
+  assert.equal(buildConfirmedModel(today, 'sma', { chart: 'renko', boxMode: 'pts', boxPts: 10, boxBaseT: lastT }).boxBase, null);
+});
+
 test('Supertrend on bricks: null while warming up, the line under an up run and above a down run, flipping on the reversal', () => {
   // 15 up bricks, then a fall of 15 bricks (10-point box from 22,650)
   const up = Array.from({ length: 16 }, (_, i) => 22650 + i * 10);

@@ -18,6 +18,9 @@ export type PanelModel = {
   /** How the box was set, and for points whether it was raised to the MIN_BOX_PTS_PCT safety floor (a tinier box would draw a vast chart). */
   boxMode: BoxMode;
   boxClamped: boolean;
+  /** A % box: the price it is that % of and that price's bar time (see PanelOptions.boxBaseT); null for a box in points. */
+  boxBase: number | null;
+  boxBaseT: number | null;
   columns: PnfColumn[];
   signals: PnfSignal[];
   /** Renko only (empty on P&F): state-based N-brick (every brick completing N same-colour bricks); AUTO's 'N-brick (trend)' rule. */
@@ -183,11 +186,13 @@ export type PanelOptions = {
    */
   anchorT?: number;
   /**
-   * An option: a % box is measured on the first price of the LATEST session, not of the whole history. An option's history can start
-   * at a price several times today's (a 24000 CE listed months ago was 999 when it was deep in the money and is 284 now), and a box of
-   * 2% of 999 is 7% of the price actually being traded. The box then changes once a day, at the first bar of a new session.
+   * A % box is measured on the first usable price of the IST session holding the last bar at or before `boxBaseT` (epoch s), not
+   * on the first price of the whole history. That history can start years back (0.1% of NIFTY's first loaded price was a box of a
+   * few points with NIFTY near 26,000) or, on an option, at several times today's price (a 24000 CE listed at 999, now 284). The
+   * page pins `boxBaseT` per load (its last bar then) and per replay (its start), so the box does not change while a chart runs
+   * past midnight or a replay crosses a session. Not set: the first price of the history (anchorT).
    */
-  boxOnRecent?: boolean;
+  boxBaseT?: number;
   /**
    * The 1-min bar still forming, left out of the chart. It still decides which session is "today" for the header's open and
    * previous close: without it the first minute of a session would measure the change against the close two sessions back.
@@ -251,6 +256,21 @@ function sessionFacts(bars: Bar[], prevSessions: string[] | null = null, from = 
  * history (80-150 ms on two years of NIFTY minutes); anything else rebuilds from scratch. The result is identical either way.
  */
 /**
+ * The first usable bar of the IST session holding the last bar at or before `t`; undefined when no bar is that early or the session
+ * has no usable price. A binary search plus that session's bars, not a scan of the whole history (it runs on every build).
+ */
+function sessionFirstBar(bars: Bar[], t: number): Bar | undefined {
+  let lo = 0, hi = bars.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (bars[mid].t <= t) lo = mid + 1; else hi = mid; }
+  if (lo === 0) return undefined;
+  const day = dayOf(bars[lo - 1].t);
+  let i = lo - 1;
+  while (i > 0 && dayOf(bars[i - 1].t) === day) i--;
+  for (; i < lo; i++) if (bars[i].straddle > 0) return bars[i];
+  return undefined;
+}
+
+/**
  * The box and the price the grid is anchored on, from the first usable price. Box in points: never below MIN_BOX_PTS_PCT of the
  * price (a safety floor: 0.001 points on NIFTY would be millions of boxes), and the grid sits on a whole multiple of the box so the
  * rows land on round prices (a 50-point box: ... 22,950, 23,000 ...). Box in %: that share of the first price.
@@ -280,16 +300,17 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
     const more = vwapFrom(closedBars, pb!.length, p!.vwapState);
     vw1 = more.series.length ? p!.vw1.concat(more.series) : p!.vw1; vwapState = more.state;
   } else ({ series: vw1, state: vwapState } = vwapFrom(closedBars, 0, VWAP_START));
-  const firstPrice = (closedBars.find(b => b.straddle > 0 && (opts.anchorT === undefined || b.t >= opts.anchorT)) ?? closedBars.find(b => b.straddle > 0))?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
+  const firstBar = closedBars.find(b => b.straddle > 0 && (opts.anchorT === undefined || b.t >= opts.anchorT)) ?? closedBars.find(b => b.straddle > 0);
+  const firstPrice = firstBar?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
   const ptsAsked = opts.boxMode === 'pts' && (opts.boxPts ?? 0) > 0 ? (opts.boxPts as number) : null;
   const grid = gridFor(firstPrice, ptsAsked, boxPct);
   const { boxClamped, anchorPrice } = grid;
   let boxSize = grid.boxSize;
-  if (opts.boxOnRecent && ptsAsked === null && firstPrice) {
-    const istDay = (t: number) => Math.floor((t + 19800) / 86400);
-    const lastBar = closedBars[closedBars.length - 1];
-    const recent = lastBar ? closedBars.find(b => b.straddle > 0 && istDay(b.t) === istDay(lastBar.t)) : undefined;
-    if (recent) boxSize = recent.straddle * boxPct;
+  let boxBase: number | null = null, boxBaseT: number | null = null;
+  if (ptsAsked === null && firstPrice) {
+    const b = opts.boxBaseT !== undefined ? sessionFirstBar(closedBars, opts.boxBaseT) : undefined;
+    if (b) { boxSize = b.straddle * boxPct; boxBase = b.straddle; boxBaseT = b.t; }
+    else { boxBase = firstPrice; boxBaseT = firstBar!.t; }
   }
   const reuse = prefix && p!.resume !== null && p!.chart === chart && p!.interval === interval && p!.boxPct === boxPct && p!.reversal === reversal
     && p!.anchorPrice === anchorPrice && p!.boxSize === boxSize && p!.sessionCloseMin === opts.sessionCloseMin;
@@ -338,6 +359,8 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
     anchor,
     boxMode: ptsAsked !== null ? 'pts' : 'pct',
     boxClamped,
+    boxBase,
+    boxBaseT,
     columns,
     // Renko: N-brick confirmation (`reversal` holds N); no COVER cue and no session marks (they are P&F devices).
     signals: renko ? renkoSignals(columns, bars, reference, reversal) : detectSignals(columns, bars, reference),
