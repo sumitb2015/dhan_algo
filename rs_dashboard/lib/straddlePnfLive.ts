@@ -1,6 +1,7 @@
 // Live-tick helpers for the Straddle P&F page. Pure: time arrives in the arguments, nothing here reads a clock.
 import type { Bar, PnfSignal } from './straddlePnf.ts';
 import { mcxSession } from './mcxSession.ts';
+import { isNseTradingDay } from './nseHolidays.ts';
 
 /** `cumVol` is the bridge's cumulative day volume for both legs (CE + PE), the same units as the history bars' per-minute volume. */
 export type Tick = { t: number; ce: number; pe: number; cumVol?: number };
@@ -105,6 +106,14 @@ export function sessionWindow(market: Market, t: number): readonly [number, numb
   if (market === 'NSE_FNO') return [9 * 60 + 15, 15 * 60 + 40];
   const s = mcxSession(istIso(t));
   return s.open >= s.close ? [0, 0] : [hhmmToMin(s.open), hhmmToMin(s.close)];
+}
+
+/**
+ * `sessionWindow` that also knows NSE's calendar: a weekend or NSE holiday is the empty window [0, 0) (MCX's calendar is already in
+ * its window). For a clock-driven display such as the ladder's bar-close countdown; the bar builders keep `sessionWindow`.
+ */
+export function tradingSession(market: Market, t: number): readonly [number, number] {
+  return market !== 'MCX' && !isNseTradingDay(istIso(t)) ? [0, 0] : sessionWindow(market, t);
 }
 
 /**

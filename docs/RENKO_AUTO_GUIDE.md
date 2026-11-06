@@ -252,6 +252,13 @@ Only one tab per browser profile leads (Web Locks). A second browser or machine 
 - **Chart markers.** B / S for AUTO entries and exits, drawn from the ledger. An exit on a bar that printed no brick sits on the latest brick.
 - **Status line** next to AUTO: `SHORT 5L @ 9,085.00 +₹X paper`, `waiting for a signal`, `HALTED`, `UNRESOLVED`, the stop level, and the **Exit**
   button.
+- **Bar-close countdown** on the ladder, under the live price (on an index chart, under the live tag on the price axis): the time left
+  in the bar now forming, e.g. `0:14` on a 20 sec chart. 10 / 20 / 30 sec bars close on the clock's :00 / :20 / :40 (or :00 / :10 ...);
+  minute bars count from the 09:15 open and the last one ends at the session close. It ticks on whole seconds, shows `0:00` in the bar's
+  last second and turns amber for the last 3. If an order or your entry is in the row just below the live price, it sits above the live
+  row instead; it never hides an order's price. Not shown on Tick, on day or longer bars, outside the session, on an NSE weekend or
+  holiday, while the feed is stale, or in a replay. Zero is when the bar closes, not when a brick prints: a brick still needs
+  the bar's close past the next box edge, and appears a second or two later, with the next price read.
 - **Books (bottom strip).** *AUTO* tab: every AUTO row with entry, exit, P&L and state. *Trade Book* tab: a **Paper trades** section above the
   broker's trades, listing every simulated fill of the day (trade bar, rail, guard, AUTO entries and exits, newest first). Trade-bar paper
   fills are kept in this browser for the day (localStorage, stamped with the IST date; another day's list is ignored); AUTO ones come from the
@@ -285,6 +292,7 @@ Only one tab per browser profile leads (Web Locks). A second browser or machine 
 | Zerodha order fails | The Zerodha session expires daily at 06:00 IST; log in again (`scripts/tools/zerodha_autologin.py`). |
 | AUTO entered late / not at all | It only trades a signal on the newest closed bar, and only after arming. Arm before the move. |
 | `red brick skipped: Supertrend line is up` (or green / down) | Supertrend rule: a brick against the line is a pullback, not an entry. A SELL needs a red brick with the line down, a BUY a green one with the line up. Logged once per brick and kept on the status line as `last: ...` until the next entry. On 10 / 20 / 30 sec only the bar's last price makes a brick: a dip inside the bar that recovers by its close prints nothing. |
+| The countdown hit 0:00 and no brick printed | The bar closed without its last price reaching the next box edge (see the row above). The countdown times the bar, not the brick. |
 | Two S (or B) markers in a row | The trend rule flipped: exit of the old position, then entry of the new one. |
 | `exit waiting for a live price` | The feed has no price for that chart; the exit (manual or guard) is retried. |
 | `MTM guard ... box value ... NOT enforced` | The chart's box size or the position's lot value is unknown. Use a rupee level or wait for the chart. |

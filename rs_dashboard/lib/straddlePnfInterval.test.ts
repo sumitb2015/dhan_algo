@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { INTERVALS, resample, hasLongIntervals, effectiveInterval } from './straddlePnfInterval.ts';
+import { INTERVALS, resample, hasLongIntervals, effectiveInterval, barCountdown, fmtCountdown } from './straddlePnfInterval.ts';
 import type { Bar } from './straddlePnf.ts';
 
 const DAY1 = Date.UTC(2026, 9, 22, 3, 45) / 1000; // Thu 22 Oct 09:15 IST
@@ -123,4 +123,22 @@ test('on a CAS day (session close 15:15) the last 30-minute bar and the day clos
   assert.deepEqual(resample(bars, 30, 15 * 60 + 15).bars.map(b => b.straddle), [114]);
   assert.deepEqual(resample(bars, 30, 15 * 60 + 30).bars.map(b => b.straddle), []);      // a 15:30 close would still be waiting
   assert.deepEqual(resample(bars, 1440, 15 * 60 + 15).bars.map(b => b.straddle), [114]);
+});
+
+test('barCountdown: seconds to the forming bar close, on the grids the bars are built on', () => {
+  const at = (h: number, m: number, s = 0) => Date.UTC(2026, 10, 6, h, m, s) / 1000 - 5.5 * 3600;   // IST wall time on 6 Nov
+  const fno = [9 * 60 + 15, 15 * 60 + 40] as const;
+  assert.deepEqual(barCountdown(-20, at(12, 7, 37), fno), { left: 3, total: 20 });
+  assert.deepEqual(barCountdown(-30, at(12, 7, 0), fno), { left: 30, total: 30 });
+  assert.deepEqual(barCountdown(3, at(9, 16, 30), fno), { left: 90, total: 180 });
+  assert.deepEqual(barCountdown(15, at(15, 33), fno), { left: 7 * 60, total: 10 * 60 });   // 15:30 bucket cut short at 15:40
+  assert.deepEqual(barCountdown(15, at(23, 50), [9 * 60, 23 * 60 + 55]), { left: 5 * 60, total: 10 * 60 }); // MCX 23:45 bucket
+  assert.equal(barCountdown(0, at(12, 0), fno), null);            // Tick: no bar
+  assert.equal(barCountdown(1440, at(12, 0), fno), null);         // a day
+  assert.equal(barCountdown(-20, at(16, 0), fno), null);          // after the close
+  assert.equal(barCountdown(-20, at(12, 0), null), null);
+  assert.deepEqual(barCountdown(-20, at(12, 7, 39) + 0.5, fno), { left: 0, total: 20 });       // the last second shows 0:00
+  assert.deepEqual(barCountdown(-20, at(12, 7, 30) + 0.5, fno), { left: 9, total: 20 });
+  assert.equal(fmtCountdown(14), '0:14');
+  assert.equal(fmtCountdown(3725), '1:02:05');
 });

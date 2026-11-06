@@ -225,6 +225,15 @@ test('an index chart has no rail', async ({ page }) => {
   await expect(page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-rail')).toHaveCount(0);
 });
 
+test('the ladder counts down to the forming bar close under the live price (1 min bar at 10:30:20: 0:40 left)', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  await install(page);
+  await openFuture(page);
+  const cd = page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-rail').getByTestId('pnf-bar-countdown');
+  await expect(cd).toHaveText('0:40');
+  await expect(cd).toHaveAttribute('aria-label', '1 min bar closes in 40 s');
+});
+
 test('drag an order to another box moves it (a page order: modified in place)', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
   const { state } = await install(page);

@@ -123,3 +123,32 @@ function resampleCalendar(bars: Bar[], n: number, sessionCloseMin = 15 * 60 + 30
     endIdx: groups.map(g => g.lastIdx),
   };
 }
+
+/**
+ * Seconds until the bar now forming closes, for the ladder's countdown: N-second bars on the epoch grid (as `bucketTickBars`
+ * builds them; IST's offset divides 10 / 20 / 30, so :00 / :20 / :40), N-minute bars from the 09:15 anchor cut short at the
+ * session close (as `resample`). Whole seconds rounded down, like a clock: `0:00` is the bar's last second. Null for Tick, a day or longer, outside `session` ([open, close] IST minutes) or with none.
+ */
+export function barCountdown(interval: number, nowS: number, session: readonly [number, number] | null | undefined): { left: number; total: number } | null {
+  if (!session || interval === TICK_INTERVAL || interval >= DAY_MIN) return null;
+  const [open, close] = session;
+  const ist = nowS + IST_OFFSET_S;
+  const minuteOfDay = (ist % 86_400) / 60;
+  if (!(close > open) || minuteOfDay < open || minuteOfDay >= close) return null;
+  if (interval < 0) {
+    const sec = -interval;
+    const end = Math.min((Math.floor(nowS / sec) + 1) * sec, nowS - (ist % 86_400) + close * 60);
+    return { left: Math.max(0, Math.floor(end - nowS)), total: sec };
+  }
+  const n = Math.max(1, interval);
+  const startMin = SESSION_OPEN_MIN + Math.floor((minuteOfDay - SESSION_OPEN_MIN) / n) * n;
+  const endMin = Math.min(startMin + n, close);
+  return { left: Math.max(0, Math.floor((endMin - minuteOfDay) * 60 + 1e-6)), total: (endMin - startMin) * 60 };
+}
+
+/** `m:ss`, or `h:mm:ss` from an hour up (the 1 h / 4 h bars). */
+export function fmtCountdown(left: number): string {
+  const s = Math.max(0, Math.floor(left));
+  const pad = (v: number) => String(v).padStart(2, '0');
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}` : `${Math.floor(s / 60)}:${pad(s % 60)}`;
+}

@@ -28,7 +28,7 @@ import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock } from '@/lib/alertSound';
 import { pnfChimeFor, playPnfChime, type PnfSoundEvent } from '@/lib/pnfChime';
 import { buildConfirmedModel, withLive, type ChartType, type ConfirmedModel, type Overlay } from '@/lib/straddlePnfModel';
-import { capLog, sessionWindow } from '@/lib/straddlePnfLive';
+import { capLog, sessionWindow, tradingSession } from '@/lib/straddlePnfLive';
 import {
   EMPTY_BOOK, countUpTo, cursorBefore, firstAvailableT, nextStepT, openLots, practiceAutoArm, practiceAutoStep, practiceCancel, practiceCross, practiceCrossBars,
   practiceFill, practiceFlatten, practiceMove, practicePlace, practicePnl, randomStartT, type PracticeBook, type PracticeQuote,
@@ -1145,6 +1145,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       flash: rp ? null : flash[c],
       loading: (feed.loading || !feed.complete) && feed.bars.length === 0,
       interval: effectiveInterval(st.interval, hasLongIntervals(target.kind), renko),
+      // the bar-close countdown under the live price; none in a replay (its bars are not on the clock) or on an NSE weekend / holiday
+      session: rp || !now ? null : tradingSession(feed.market, now / 1000),
       boxPct: st.boxPct,
       reversal: st.reversal,
       resetTick: viewTick,

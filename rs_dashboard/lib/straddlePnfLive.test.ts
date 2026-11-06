@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { foldTick, newSignalsAfter, nextWatermark, capLog, inSession, sessionWindow, feedCloseTrusted, mergeHistory, legsTick, isWildTick } from './straddlePnfLive.ts';
+import { foldTick, newSignalsAfter, nextWatermark, capLog, inSession, sessionWindow, tradingSession, feedCloseTrusted, mergeHistory, legsTick, isWildTick } from './straddlePnfLive.ts';
 import { vwap, type Bar, type PnfSignal } from './straddlePnf.ts';
 
 const T0 = Date.UTC(2026, 9, 23, 3, 45) / 1000; // 09:15 IST, a minute start
@@ -213,4 +213,12 @@ test('a stock with derivatives (NSE_CAS) trades continuously until 15:15 from th
   assert.equal(inSession(at('2026-10-30T15:15:00'), 'NSE_CAS'), false);      // an auction tick never becomes a chart bar
   assert.equal(inSession(at('2026-10-30T15:20:00'), 'NSE'), true);           // a stock without derivatives still trades
   assert.equal(inSession(at('2026-07-31T15:20:00'), 'NSE_CAS'), true);
+});
+
+test('tradingSession: NSE weekends and holidays are closed; a trading day keeps its window', () => {
+  const at = (iso: string) => Date.parse(`${iso}+05:30`) / 1000;
+  assert.deepEqual(tradingSession('NSE_FNO', at('2026-11-06T10:00:00')), [9 * 60 + 15, 15 * 60 + 40]);   // Fri
+  assert.deepEqual(tradingSession('NSE_FNO', at('2026-11-07T10:00:00')), [0, 0]);                       // Sat
+  assert.deepEqual(tradingSession('NSE', at('2026-11-08T10:00:00')), [0, 0]);                           // Sun
+  assert.deepEqual(tradingSession('NSE_FNO', at('2019-10-02T10:00:00')), [0, 0]);                       // Gandhi Jayanti (Wed)
 });

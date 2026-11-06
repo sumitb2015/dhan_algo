@@ -1,6 +1,6 @@
 'use client';
 
-import { intervalLabel } from '@/lib/straddlePnfInterval';
+import { intervalLabel, barCountdown, fmtCountdown, DAY_MIN } from '@/lib/straddlePnfInterval';
 import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
@@ -82,6 +82,8 @@ export type PnfPanelProps = {
   onToggleMarkers?: () => void;
   /** The ladder-style B / S rail beside the price axis (absent: no rail, e.g. an index chart). */
   rail?: PnfRail;
+  /** Today's session [open, close] in IST minutes: shows the countdown to the forming bar's close under the live price (null: none, e.g. in a replay). */
+  session?: readonly [number, number] | null;
   /** Nested-column triangles of this chart (lib/pnfTriangle.ts), whether they are drawn, and the fewest columns that count. */
   triangles?: PnfTriangle[];
   triShown?: boolean;
@@ -200,6 +202,44 @@ type RailDrag = { id: string; level: number; start: number } | null;
 const rupees = (n: number) => `${n >= 0 ? '+' : '−'}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 
 /**
+ * Time left in the bar now forming (bricks and boxes are built on closed bars only), ticking on whole seconds of the clock so the
+ * chip reaches 0:00 in the bar's last second. Null before mount (the server has no clock), without a session (a replay, a stale
+ * feed) and whenever `barCountdown` has none (Tick, a day or longer, outside the session). Only the caller re-renders each second.
+ */
+function useBarCountdown(interval: number, session: readonly [number, number] | null | undefined) {
+  const [now, setNow] = useState<number | null>(null);
+  const on = !!session && interval !== 0 && interval < DAY_MIN;   // Tick and day+ bars have no countdown: no timer
+  useEffect(() => {
+    if (!on) return;
+    let id: ReturnType<typeof setTimeout>;
+    const tick = () => { setNow(Date.now()); id = setTimeout(tick, 1005 - (Date.now() % 1000)); };
+    tick();
+    return () => clearTimeout(id);
+  }, [on]);
+  return now === null ? null : barCountdown(interval, now / 1000, session);
+}
+
+const COUNTDOWN_H = 14;
+
+/** The countdown chip: neutral, amber in the bar's last 3 seconds. */
+function CountdownChip({ cd, interval, x, y, w }: { cd: { left: number }; interval: number; x: number; y: number; w: number }) {
+  const hot = cd.left < 3;
+  return (
+    <g data-testid="pnf-bar-countdown" data-left={cd.left} role="timer" aria-label={`${intervalLabel(interval)} bar closes in ${cd.left} s`} pointerEvents="none">
+      <title>{`The ${intervalLabel(interval)} bar closes in ${fmtCountdown(cd.left)}: bricks and boxes are built on closed bars only`}</title>
+      <rect x={x} y={y} width={w} height={COUNTDOWN_H} rx={2} className={hot ? 'fill-amber-500/30 stroke-amber-400' : 'fill-zinc-800 stroke-zinc-600'} strokeWidth={1} />
+      <text x={x + w / 2} y={y + 10.5} textAnchor="middle" className={`font-mono ${hot ? 'fill-amber-300' : 'fill-zinc-200'}`} fontSize={10} fontWeight={700}>{fmtCountdown(cd.left)}</text>
+    </g>
+  );
+}
+
+/** The countdown on the price axis (a chart with no rail), under the live tag; the axis re-renders alone each second. */
+function AxisCountdown({ interval, session, y }: { interval: number; session: readonly [number, number] | null; y: number }) {
+  const cd = useBarCountdown(interval, session);
+  return cd ? <CountdownChip cd={cd} interval={interval} x={2} y={y} w={AXIS_W - 4} /> : null;
+}
+
+/**
  * The buy / sell ladder beside the price axis, laid out like the XY ladder: BUY | PRICE | SELL on every box row over the whole chart
  * height (the padding above and below the data too, on the chart's own box grid, so an order can rest beyond where the price has
  * been). A click in the BUY or SELL column places an order at that row's price; the PRICE column names every row (every Nth when the
@@ -211,8 +251,10 @@ const rupees = (n: number) => `${n >= 0 ? '+' : '−'}₹${Math.abs(Math.round(n
  * Cells act on pointer-down (the chart's drag-to-pan captures the pointer, which would swallow a click). A handle is dragged
  * to another box (commit on release); the drag lives in a ref because pointer events arrive before React re-renders.
  */
-function RailSvg({ rail, renko = false, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, axisDigits, onDrag, onHot, visTop = 0, visBottom = contentH }: {
+function RailSvg({ rail, renko = false, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, axisDigits, onDrag, onHot, visTop = 0, visBottom = contentH, countdown }: {
   rail: PnfRail;
+  /** The bar-close countdown under the live row (absent: none). */
+  countdown?: { interval: number; session: readonly [number, number] | null };
   /** Renko: a row is a brick EDGE (a multiple of the box), where a brick completes. P&F: a row is a box label (the cell centre). */
   renko?: boolean;
   box: number; cell: number; yMax: number; yMin: number; padY: number; contentH: number;
@@ -249,6 +291,17 @@ function RailSvg({ rail, renko = false, box, cell, yMax, yMin, padY, contentH, y
   const entryRow = pos && pos.avg !== null && box > 0 ? rowPrice(rowOf(pos.avg)) : null;
   const orderRows = new Map<string, RailOrder>();
   for (const o of rail.orders) orderRows.set((drag?.id === o.id ? drag.level : o.level).toFixed(6), o);
+  // The bar-close countdown sits under the live row, or above it when an order or the entry is in the way below. A plain price
+  // label it would cover is not drawn: the chip never hides the level a click would rest an order at, nor an order's or the entry's price.
+  const cd = useBarCountdown(countdown?.interval ?? 0, countdown?.session);
+  const liveY = liveRow !== null ? yOf(liveRow) : null;
+  const busyYs = [...orderRows.keys()].map(Number).concat(entryRow !== null ? [entryRow] : []).map(yOf);
+  const clearAt = (top: number) => !busyYs.some(y => y > top - 7 && y < top + COUNTDOWN_H + 7);
+  const cdGap = Math.max(cell / 2, 7) + 1;
+  const cdY = cd && liveY !== null
+    ? (clearAt(liveY + cdGap) || !clearAt(liveY - cdGap - COUNTDOWN_H) ? liveY + cdGap : liveY - cdGap - COUNTDOWN_H)
+    : null;
+  const underChip = (y: number) => cdY !== null && y > cdY - 5 && y < cdY + COUNTDOWN_H + 5;
   const tone = (side: 'BUY' | 'SELL') => (side === 'BUY' ? 'fill-emerald-500 stroke-emerald-200' : 'fill-red-500 stroke-red-200');
   // Dragging a pill (a resting order, or a planned stop / target) to another box: the level follows the pointer, the commit is on release.
   // The drag lives in a ref because pointer events arrive before React re-renders; near the chart's top / bottom edge it scrolls.
@@ -292,7 +345,7 @@ function RailSvg({ rail, renko = false, box, cell, yMax, yMin, padY, contentH, y
         const isLive = liveRow !== null && Math.abs(p - liveRow) < box / 4;
         const isEntry = entryRow !== null && Math.abs(p - entryRow) < box / 4;
         const ord = orderRows.get(p.toFixed(6)) ?? [...orderRows.entries()].find(([k]) => Math.abs(Number(k) - p) < box / 4)?.[1];
-        const showPrice = isLive || isEntry || !!ord || ((idx % rowsPerLabel) + rowsPerLabel) % rowsPerLabel === 0;
+        const showPrice = isLive || isEntry || !!ord || (((idx % rowsPerLabel) + rowsPerLabel) % rowsPerLabel === 0 && !underChip(y));
         const label = isLive && liveValue !== null ? fmt(liveValue, axisDigits) : fmt(p, axisDigits);
         return (
           <g key={n}>
@@ -338,6 +391,7 @@ function RailSvg({ rail, renko = false, box, cell, yMax, yMin, padY, contentH, y
           <text x={RAIL_W / 2} y={16} textAnchor="middle" className="fill-zinc-200" fontSize={10} fontWeight={800}>LOCKED</text>
         </g>
       )}
+      {cd && cdY !== null && <CountdownChip cd={cd} interval={countdown!.interval} x={PX + 2} y={cdY} w={RAIL_PRICE_W - 4} />}
       {/* the open position: `[−] LONG 1L [+]` in its side's column (the entry price is in the PRICE column; the live P&L is on the
           chart's position tag and in this chip's tooltip, so the other column stays free for orders) */}
       {pos && entryRow !== null && (() => {
@@ -449,7 +503,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, supertrendShown = false, coverShown = false, sessionLines = true, sessionDividers = true, timeAxis = false, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin, replayPick, replayStartT = null }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, supertrendShown = false, coverShown = false, sessionLines = true, sessionDividers = true, timeAxis = false, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, session = null, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin, replayPick, replayStartT = null }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   // Renko: every column is one filled brick on real price edges (lib/renko.ts); `reversal` holds the N-brick confirmation.
@@ -457,6 +511,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const unitWord = renko ? 'bricks' : 'boxes';
   const ruleText = renko ? `confirm ${reversal}` : `${reversal}-box`;
   const liveValue = live ? live.ce + live.pe : null;
+  // no bar-close countdown on a stale feed: the bars it times will not print until prices come back
+  const cdSession = stale ? null : session;
   // An index has no volume: its "VWAP" is a plain cumulative average, and says so.
   // The line actually drawn: an instrument without traded volume (an index) always gets the box SMA, whatever was asked.
   const kind = model.overlayKind;
@@ -1443,7 +1499,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
             {/* the B / S rail (the ladder's columns): click a box row to rest an order there; drag an order's handle to move it */}
             {rail && (
               <RailSvg rail={rail} renko={renko} box={box} cell={cell} yMax={yMax} yMin={yMin} padY={padY} contentH={contentH} yOf={yOf}
-                       liveValue={liveValue} axisDigits={axisDigits} onDrag={setRailDrag} onHot={setRailHot} visTop={visTop} visBottom={visBottom} />
+                       liveValue={liveValue} axisDigits={axisDigits} onDrag={setRailDrag} onHot={setRailHot} visTop={visTop} visBottom={visBottom}
+                       countdown={cdSession ? { interval, session: cdSession } : undefined} />
             )}
 
             {/* price axis: sticky, so it stays at the panel's right edge while the chart is panned */}
@@ -1480,6 +1537,10 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                   <rect x={2} y={yOf(liveValue) - 8} width={AXIS_W - 4} height={16} rx={2} className="fill-zinc-100" />
                   <text x={6} y={yOf(liveValue) + 3.5} className="fill-black font-mono" fontSize={10} fontWeight={700}>{fmt(liveValue, liveDigits)}</text>
                 </g>
+              )}
+              {/* no rail (an index chart): the bar-close countdown sits under the live tag on the axis instead */}
+              {!rail && cdSession && liveValue !== null && (
+                <AxisCountdown interval={interval} session={cdSession} y={yOf(liveValue) + 9} />
               )}
               {cross && (
                 <g data-testid="pnf-crosshair-price">
