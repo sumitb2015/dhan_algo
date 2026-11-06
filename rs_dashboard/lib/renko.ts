@@ -148,9 +148,10 @@ export function trendSignals(columns: PnfColumn[], bars: Bar[], reference: (numb
 }
 
 /**
- * Supertrend rule: a signal on EVERY brick whose close is above the Supertrend line (direction up -> BUY) or below it (direction down
- * -> SELL), so the chart is always in one state and AUTO holds that side until the line flips. A brick the ATR cannot read yet (null
- * direction) signals nothing. AUTO enters only on a brick that formed on the newest closed bar and exits on the first brick of the
+ * Supertrend rule: a BUY on every GREEN (up) brick while the Supertrend direction is up, a SELL on every RED (down) brick while it is down
+ * (2026-11-06, user request: a green pullback brick below the line is not a SELL entry, nor a red one above it a BUY). AUTO holds that side
+ * until the line flips; the flip brick is the new side's colour, so a flip still exits and re-enters on one brick. A brick the ATR cannot
+ * read yet (null direction) signals nothing. AUTO enters only on a brick that formed on the newest closed bar and exits on the first brick of the
  * opposite state (the signal's `exitBy`, which the row keeps, read by pnfAuto reversalColumn). Not drawn as chart markers.
  */
 export function supertrendSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], st: RenkoSupertrendPoint[]): PnfSignal[] {
@@ -158,6 +159,7 @@ export function supertrendSignals(columns: PnfColumn[], bars: Bar[], reference: 
   columns.forEach((c, col) => {
     const dir = st[col]?.dir;
     if (dir !== 1 && dir !== -1) return;
+    if (c.dir !== (dir === 1 ? 'X' : 'O')) return;                 // the brick's colour must agree with the line's side
     const kind = dir === 1 ? 'RENKO_BUY' : 'RENKO_SELL';
     const price = brickClose(c);
     const v = reference[c.startBar];

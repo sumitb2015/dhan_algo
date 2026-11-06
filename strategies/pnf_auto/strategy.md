@@ -155,3 +155,7 @@ Opt-in per chart on `/renko` (not P&F, not Replay). User guide: `docs/RENKO_AUTO
   prints bricks one way only, so the ones before the signal never beat the entry brick). No add on the entry bar itself.
 - Re-entry block after a trail exit reads the last TRADE on this contract and mode: a refused entry or another mode's row no longer ends it.
 - Rejected: moving the MCX entry cutoff earlier than its square-off minute (the user's 2026-11-03 choice stands).
+- Supertrend rule entries need the brick's colour to agree (2026-11-06, user request): BUY only on a green (X) brick with the line up, SELL
+  only on a red (O) brick with the line down (`supertrendSignals`). Before, every brick on the line's side signalled, so arming Sell only
+  with the line down entered on a green pullback brick. Exits are unchanged (the line flip, `exitBy: 'supertrend'`); the flip brick is the
+  new side's colour, so a flip still exits and re-enters on one brick.

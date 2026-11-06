@@ -202,11 +202,14 @@ test('trend N-brick: every brick of a run signals (no reversal needed), n = 2 sk
   assert.equal(new Set(trendSignals(columns, b, ref, 1).map(s => s.id)).size, 5);
 });
 
-test('supertrendSignals: BUY while the line direction is up, SELL while down, nothing while unreadable', () => {
-  const cols = [0, 1, 2, 3].map(i => ({ dir: 'X' as const, low: 100 + i, high: 101 + i, boxes: 1, startBar: i, endBar: i, session: 's', breakBar: null, boxBars: [] }));
+test('supertrendSignals: BUY on a green brick while the line is up, SELL on a red brick while down; nothing on the other colour or while unreadable', () => {
+  const dirs = ['X', 'X', 'O', 'X', 'X', 'O'] as const;
+  const cols = dirs.map((dir, i) => ({ dir, low: 100 + i, high: 101 + i, boxes: 1, startBar: i, endBar: i, session: 's', breakBar: null, boxBars: [] }));
   const bars = cols.map((_, i) => ({ t: 1000 + i * 60, ce: 50, pe: 0, straddle: 100, vol: 1 }));
-  const st = [{ line: null, dir: null }, { line: 99, dir: 1 as const }, { line: 105, dir: -1 as const }, { line: 99, dir: 1 as const }];
+  const st = [{ line: null, dir: null }, { line: 99, dir: 1 as const }, { line: 105, dir: -1 as const }, { line: 99, dir: 1 as const },
+    { line: 110, dir: -1 as const }, { line: 99, dir: 1 as const }];
   const out = supertrendSignals(cols, bars, bars.map(() => null), st);
+  // col 4: a green brick with the line down (a pullback) is no SELL; col 5: a red brick with the line up is no BUY
   assert.deepEqual(out.map(s => [s.col, s.kind]), [[1, 'RENKO_BUY'], [2, 'RENKO_SELL'], [3, 'RENKO_BUY']]);
   assert.ok(out.every(s => s.exitBy === 'supertrend'), 'every Supertrend signal marks its position to exit on the flip');
 });
