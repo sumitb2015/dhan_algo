@@ -1,4 +1,4 @@
-import type { LadderState, LadderBroker } from './priceLadder';
+import { paneOf, type LadderState, type LadderBroker } from './priceLadder.ts';
 
 // "Exit all" for the Price Ladder page: what one click would do across EVERY ladder (both panes, every broker, SIM and REAL).
 // Pure and shared: the confirm dialog previews it from the ledger the page already holds, and the server rebuilds it under
@@ -38,7 +38,13 @@ export interface ExitAllPlan {
   signature: string;
 }
 
-interface Row { id: string; state: string; broker: LadderBroker; mode: 'sim' | 'real'; exitWanted?: string }
+interface Row { id: string; state: string; broker: LadderBroker; mode: 'sim' | 'real'; exitWanted?: string; pane?: number }
+
+/** One ladder's own Exit all: only what that ladder lists (its broker and SIM/REAL mode; its pane when two are open). */
+export interface ExitAllScope { broker: LadderBroker; mode: 'sim' | 'real'; pane?: 1 | 2 }
+
+const inScope = (r: Row, scope?: ExitAllScope) => !scope
+  || (r.broker === scope.broker && r.mode === scope.mode && (scope.pane == null || paneOf(r) === scope.pane));
 
 /** FNV-1a: a short stable fingerprint of the id lists (not security, just "did anything change"). */
 function fingerprint(text: string): string {
@@ -47,7 +53,7 @@ function fingerprint(text: string): string {
   return h.toString(36);
 }
 
-export function planExitAll(st: LadderState): ExitAllPlan {
+export function planExitAll(st: LadderState, scope?: ExitAllScope): ExitAllPlan {
   const plan: ExitAllPlan = {
     sliceIds: [], pairIds: [], basketIds: [], cancelSliceIds: [], cancelPairIds: [], cancelBasketIds: [],
     positions: 0, unknown: 0, inFlight: 0, alreadyExiting: 0, groups: [], signature: '',
@@ -62,6 +68,7 @@ export function planExitAll(st: LadderState): ExitAllPlan {
   const held = new Set<string>(); // contract + broker + mode + side: "+1 lot" slices are one position
 
   const classify = (r: Row, exitStates: string[], cancelStates: string[], ids: string[], cancelIds: string[], countsAs: () => void) => {
+    if (!inScope(r, scope)) return;
     if (exitStates.includes(r.state)) {
       if (r.exitWanted) { plan.alreadyExiting++; return; }
       ids.push(r.id);

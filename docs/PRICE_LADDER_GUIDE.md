@@ -92,6 +92,14 @@ reported, not included: press Exit all again once it settles. **Not covered:** p
 (use the Positions window or the global Exit All), other pages' pending orders, and running Python strategies.
 Code: `lib/priceLadderExitAll.ts` (the plan), the `exitAll` case in `app/api/price-ladder/state/route.ts`.
 
+**One ladder's Exit all** (2026-11-06): each ladder's toolbar (next to Cancel all) has its own red **Exit all (N)**. One click,
+**no confirmation**: it exits every position that ladder lists — its broker and SIM/REAL mode, every contract (not only the one
+on screen), slices, pairs and baskets; its own pane when two ladders are open, every pane when one is — and cancels that
+ladder's armed levels and resting entries. Same mechanism as above (mark "exit wanted", the watcher sizes each exit against the
+broker book); the browser sends `{action:'exitAll', scope:{broker, mode, pane?}, cancelPending:true}` and the server rebuilds
+the same scope under the lock. There is no dialog, so there is no signature: it exits whatever the ladder holds at that moment.
+UNKNOWN items are still left alone.
+
 ## Closing from the positions window
 
 The Positions tab of the books window has a **Close** column: 25 / 50 / 75 % (whole lots, rounded down) or **Close** (all) per

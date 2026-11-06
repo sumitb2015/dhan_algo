@@ -22,7 +22,7 @@ import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STE
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
 import { guardKey, scopeMtm } from '@/lib/priceLadderGuard';
-import { planExitAll, type ExitAllPlan } from '@/lib/priceLadderExitAll';
+import { planExitAll, type ExitAllPlan, type ExitAllScope } from '@/lib/priceLadderExitAll';
 import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { chimeFor } from '@/lib/priceLadderChime';
@@ -1464,6 +1464,11 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const openPositions = openPositionCount(paneSlices, panePairs, paneBaskets);
   // Everything every ladder holds, for the header's Exit all (the ledger the page holds is the whole file, both panes and every broker).
   const exitAllPlan = useMemo(() => (data ? planExitAll(data.state) : null), [data]);
+  // This ladder's own Exit all (one click, no dialog): every position it lists on this broker and SIM/REAL, any contract, and its
+  // armed levels / resting entries so nothing re-enters. The server rebuilds the same scope under the lock and exits what is there.
+  const ladderExitScope = useMemo((): ExitAllScope => ({ broker, mode: pageMode, ...(dual ? { pane: ladderId } : {}) }), [broker, pageMode, dual, ladderId]);
+  const ladderExitPlan = useMemo(() => (data ? planExitAll(data.state, ladderExitScope) : null), [data, ladderExitScope]);
+  const ladderExitPending = ladderExitPlan ? ladderExitPlan.cancelSliceIds.length + ladderExitPlan.cancelPairIds.length + ladderExitPlan.cancelBasketIds.length : 0;
 
   // Switch the page to a slice's contract (Active Trades chip, orders list). Moving into REAL re-arms the first-click
   // confirmation, exactly like the SIM/REAL switch.
@@ -2050,6 +2055,18 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                 className="px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white disabled:opacity-40"
               >
                 Cancel all ({pendingHere})
+              </button>
+              <button
+                type="button" disabled={busy || !ladderExitPlan || (ladderExitPlan.positions === 0 && ladderExitPending === 0)}
+                onClick={() => void post({ action: 'exitAll', scope: ladderExitScope, cancelPending: true }, d => {
+                  const n = Number(d.marked ?? 0);
+                  toast.success(`Exiting ${n} position(s)${Number(d.cancelled ?? 0) ? `, ${d.cancelled} pending cancelled` : ''} — watch the exits settle`);
+                })}
+                aria-label={`Exit every position this ladder holds on ${BROKER_LABELS[broker]} ${real ? 'REAL' : 'SIM'} (${ladderExitPlan?.positions ?? 0} open) and cancel its pending levels`}
+                title={`Exit every position this ladder holds (${BROKER_LABELS[broker]} · ${real ? 'REAL' : 'SIM'}, every contract) at market now and cancel its armed levels / resting entries. No confirmation.${ladderExitPlan?.unknown ? ` ${ladderExitPlan.unknown} UNKNOWN order(s) are not touched — resolve them first.` : ''}`}
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border border-red-500/50 bg-red-500/10 font-semibold text-red-300 hover:bg-red-500/20 disabled:opacity-40 ${FOCUS_RING}`}
+              >
+                <OctagonX className="w-3.5 h-3.5" aria-hidden="true" /> Exit all ({ladderExitPlan?.positions ?? 0})
               </button>
               </div>
               {real && <span className="font-bold text-red-400" title="REAL orders">REAL</span>}

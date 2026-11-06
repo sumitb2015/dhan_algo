@@ -3,7 +3,7 @@ import { buildLadderView, resolveContract } from '@/lib/priceLadderView';
 import { pairAction } from '@/lib/priceLadderPairActions';
 import { basketAction } from '@/lib/priceLadderBasketActions';
 import { isPairLive, lotsOnContract, patchPair } from '@/lib/priceLadderPair';
-import { planExitAll } from '@/lib/priceLadderExitAll';
+import { planExitAll, type ExitAllScope } from '@/lib/priceLadderExitAll';
 import {
   readLadderState, updateLadderState, startPriceLadderLoop, loadPrices, afterSend, cancelAtBroker,
   brokerSessionOk, availableFunds, dhanSellMargin, withJob, commitIf, safePlace, openedPatch, LADDER_UNDERLYINGS,
@@ -525,14 +525,25 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         // (exits never do). `signature` is the plan the user saw in the confirm dialog: if a position opened or closed since,
         // nothing is done and the dialog is shown again. With `cancelPending`, armed levels and resting entry orders are
         // cancelled too (as cancelAll does), so nothing re-enters right after. UNKNOWN slices are never touched.
+        // With `scope` it is ONE ladder's own Exit all (its broker + SIM/REAL, and its pane when two are open): a one-click
+        // button with no dialog, so there is no preview to match and the server exits whatever that ladder holds right now.
         const cancelPending = body.cancelPending === true;
+        let scope: ExitAllScope | undefined;
+        if (body.scope != null) {
+          const sc = body.scope as Record<string, unknown>;
+          const sb = parseBroker(sc.broker);
+          const sm = sc.mode === 'sim' || sc.mode === 'real' ? sc.mode : null;
+          const sp = sc.pane == null ? undefined : sc.pane === 1 || sc.pane === 2 ? sc.pane : null;
+          if (!sb || !sm || sp === null) return bad('Bad exit-all scope');
+          scope = { broker: sb, mode: sm, pane: sp };
+        }
         const signature = typeof body.signature === 'string' ? body.signature : '';
         let changed = false;
         const out = { marked: 0, cancelled: 0, unknown: 0, inFlight: 0 };
         const atBroker: LadderSlice[] = [];
         const s0 = await updateLadderState(st => {
-          const plan = planExitAll(st);
-          if (plan.signature !== signature) { changed = true; return st; }
+          const plan = planExitAll(st, scope);
+          if (!scope && plan.signature !== signature) { changed = true; return st; }
           out.unknown = plan.unknown;
           out.inFlight = plan.inFlight;
           out.marked = plan.sliceIds.length + plan.pairIds.length + plan.basketIds.length;
@@ -553,7 +564,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             for (const kid of plan.cancelBasketIds) { next = patchBasket(next, kid, { state: 'cancelled', note: 'Cancelled by you (exit all)' }); out.cancelled++; }
           }
           if (!out.marked && !out.cancelled && !atBroker.length) return st;
-          return pushEvent(next, ev('info', `Exit all: ${out.marked} position(s) marked for exit${cancelPending ? `, ${out.cancelled + atBroker.length} pending level(s)/order(s) cancelled` : ''}`));
+          return pushEvent(next, ev('info', `${scope ? `Exit all (${BROKER_NAME[scope.broker]} ${scope.mode.toUpperCase()}${scope.pane ? `, ladder ${scope.pane}` : ''})` : 'Exit all'}: ${out.marked} position(s) marked for exit${cancelPending ? `, ${out.cancelled + atBroker.length} pending level(s)/order(s) cancelled` : ''}`));
         });
         if (changed) return bad('The ladders changed since you opened this — review the list and try again', 409);
         if (!out.marked && !out.cancelled && !atBroker.length) return bad('Nothing to exit', 409);

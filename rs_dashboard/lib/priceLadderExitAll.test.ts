@@ -93,3 +93,25 @@ test('an empty ledger plans nothing', () => {
   assert.equal(p.positions + p.unknown + p.inFlight + p.alreadyExiting, 0);
   assert.deepEqual(p.groups, []);
 });
+
+test('a scoped plan (one ladder\'s own Exit all) takes only its broker, mode and pane', () => {
+  const st = ledger(
+    [slice('a', 'open'), slice('b', 'open', { pane: 2 }), slice('c', 'open', { broker: 'kotak' }), slice('d', 'open', { mode: 'sim' }),
+      slice('e', 'armed'), slice('f', 'armed', { pane: 2 })],
+    [pair('p1', 'open'), pair('p2', 'open', { pane: 2 })],
+    [basket('k1', 'open', { mode: 'sim' })],
+  );
+  const one = planExitAll(st, { broker: 'dhan', mode: 'real', pane: 1 });
+  assert.deepEqual(one.sliceIds, ['a']);
+  assert.deepEqual(one.pairIds, ['p1']);
+  assert.deepEqual(one.basketIds, []);
+  assert.deepEqual(one.cancelSliceIds, ['e']);
+  const two = planExitAll(st, { broker: 'dhan', mode: 'real', pane: 2 });
+  assert.deepEqual(two.sliceIds, ['b']);
+  assert.deepEqual(two.cancelSliceIds, ['f']);
+  // One ladder open lists every pane, so its Exit all takes both.
+  const all = planExitAll(st, { broker: 'dhan', mode: 'real' });
+  assert.deepEqual(all.sliceIds.sort(), ['a', 'b']);
+  assert.deepEqual(all.pairIds.sort(), ['p1', 'p2']);
+  assert.equal(planExitAll(st, { broker: 'dhan', mode: 'sim' }).basketIds[0], 'k1');
+});
