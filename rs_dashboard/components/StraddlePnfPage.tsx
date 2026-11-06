@@ -1013,7 +1013,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const tgt = c === 2 ? target2 : target1;
     const product: AutoProduct = tgt.kind === 'equity' ? 'INTRADAY' : autoProd[c];      // a stock is MIS only
     noteArmedHere(c, t);
-    setAutoArm(a => ({ ...a, [c]: { on: true, mode: tradeMode, watermarkT, product } }));       // armed at once; `armT` once the ledger has saved it
+    setAutoArm(a => ({ ...a, [c]: { on: true, mode: tradeMode, watermarkT, armedAtS: t, product } }));       // armed at once; `armT` once the ledger has saved it
     const rec = {
       mode: tradeMode, broker, targetKey: targetKey(tgt), day: istToday(), t, watermarkT, lots: autoLots[c],
       side: autoSide[c], ...(renko ? { rule: autoRule[c] } : {}),

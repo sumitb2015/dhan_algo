@@ -72,6 +72,8 @@ export type AutoEvent = { chart: 1 | 2; kind: 'entry' | 'exit' | 'halt' | 'info'
 /** `armT`: the saved arming this follows (lib/pnfAutoLedger.ts AutoArmRecord.t); absent when the save failed (this tab only). */
 export interface AutoArm {
   on: boolean; mode: 'PAPER' | 'REAL'; watermarkT: number; armT?: number;
+  /** Wall-clock time (epoch s) this tab armed it, set at once (armT only lands once the ledger has saved the arming). */
+  armedAtS?: number;
   /** The product new entries are sent with (MIS when absent); a row keeps the product it was opened with. */
   product?: AutoProduct;
 }
@@ -164,13 +166,15 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
   // rule would re-enter on the next brick. Only an exit after this arming counts (an older one must not disarm a fresh arming).
   useEffect(() => {
     if (!arm.on) return;
-    // Measured from the ARMING (wall clock), not the watermark (a bar time a minute or more earlier): a guard exit just before arming is not this arming's.
-    const since = arm.armT ?? arm.watermarkT;
+    // Measured from the ARMING (wall clock), never the watermark: that is the last closed bar, which before the open is the previous
+    // session's, so yesterday's guard exits would disarm a fresh REAL arming in the same second (2026-11-06).
+    const since = arm.armT ?? arm.armedAtS;
+    if (since === undefined) return;
     const hit = ledger.rows.find(r => r.chart === chart && r.mode === arm.mode && (r.exitT ?? r.pendingSince ?? 0) > since
       && ((r.state === 'closed' && (r.reason ?? '').startsWith('server guard')) || (r.state === 'unknownExit' && (r.note ?? '').startsWith('server guard'))));
     if (hit) onDisarm(`the server guard exited chart ${chart}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ledger, arm.on, arm.watermarkT, arm.armT]);
+  }, [ledger, arm.on, arm.watermarkT, arm.armT, arm.armedAtS]);
 
   // REAL fills: a row's entry / exit price starts as the chart's price at the DECISION. Once the broker reports its orders FULLY traded, the
   // broker's average traded price (summed over a straddle's legs) replaces it and the P&L is recomputed (the `fillPrice` ledger op). Any
