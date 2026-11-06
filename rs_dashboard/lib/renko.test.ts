@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRenko, brickClose, supertrendSignals, renkoSignals, trendSignals, twoBackSignals, oneBackSignals, renkoSma, renkoSupertrend } from './renko.ts';
+import { buildRenko, brickClose, supertrendSignals, renkoSignals, trendSignals, twoBackSignals, oneBackSignals, renkoSma, renkoSupertrend, renkoPivots } from './renko.ts';
 import { buildConfirmedModel, withLive } from './straddlePnfModel.ts';
 import { boxPriceAt, decideAuto } from './pnfAuto.ts';
 import type { Bar } from './straddlePnf.ts';
@@ -226,4 +226,44 @@ test('supertrendSignals: BUY on a green brick while the line is up, SELL on a re
   // col 4: a green brick with the line down (a pullback) is no SELL; col 5: a red brick with the line up is no BUY
   assert.deepEqual(out.map(s => [s.col, s.kind]), [[1, 'RENKO_BUY'], [2, 'RENKO_SELL'], [3, 'RENKO_BUY']]);
   assert.ok(out.every(s => s.exitBy === 'supertrend'), 'every Supertrend signal marks its position to exit on the flip');
+});
+
+const piv = (closes: number[], k: number) =>
+  renkoPivots(buildRenko(bars(closes), 10).columns, k).map(p => `${p.kind}${p.price}@${p.col}${p.brokenCol === null ? '' : `x${p.brokenCol}`}${p.touches > 1 ? `*${p.touches}` : ''}`);
+
+test('pivots: a run and its reversal of `strength` bricks mark the run’s extreme; the first run and an open run do not', () => {
+  // up 3 (cols 0-2), down 3 (3-5), up 1 (6)
+  const closes = [22650, 22660, 22670, 22680, 22660, 22650, 22640, 22660];
+  assert.deepEqual(piv(closes, 1), ['H22680@2', 'L22640@5']);
+  assert.deepEqual(piv(closes, 2), ['H22680@2']);            // the 1-brick bounce has not confirmed the low
+  assert.deepEqual(piv(closes, 3), ['H22680@2']);
+  assert.deepEqual(piv(closes, 4), []);
+});
+
+test('pivots: a brick closing past a level breaks it, at that brick', () => {
+  // up to 22680, down to 22650, up to 22700
+  const closes = [22650, 22660, 22670, 22680, 22660, 22650, 22670, 22680, 22690, 22700];
+  const p = renkoPivots(buildRenko(bars(closes), 10).columns, 1);
+  const h = p.find(x => x.kind === 'H')!;
+  assert.equal(h.price, 22680);
+  assert.equal(h.brokenCol, 7);    // cols: X0 X1 X2 | O3 O4 | X5 X6 X7 — X7 tops at 22690
+  assert.equal(p.find(x => x.kind === 'L')!.brokenCol, null);
+});
+
+test('pivots: a second top at the same level joins the first; a higher one breaks it', () => {
+  // up to 22680, down 2, up to 22680 again, down 2, up through
+  const closes = [22650, 22660, 22670, 22680, 22660, 22650, 22670, 22680, 22660, 22650, 22670, 22680, 22690];
+  const p = renkoPivots(buildRenko(bars(closes), 10).columns, 2);
+  const highs = p.filter(x => x.kind === 'H');
+  assert.equal(highs.length, 1);
+  assert.equal(highs[0].touches, 2);
+  assert.equal(highs[0].col, 2);
+  assert.ok(highs[0].brokenCol !== null);
+});
+
+test('pivots: a 1-brick wiggle is ignored at strength 2', () => {
+  // up 3, down 1? (a reversal needs 2 boxes, so the 1-brick pullback is one O brick), up 3
+  const closes = [22650, 22660, 22670, 22680, 22660, 22670, 22680, 22690];
+  assert.deepEqual(piv(closes, 2), []);
+  assert.deepEqual(piv(closes, 1), ['H22680@2x5', 'L22660@3']);
 });

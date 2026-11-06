@@ -200,3 +200,44 @@ export function renkoSmaByBar(columns: PnfColumn[], period: number, nBars: numbe
   }
   return out;
 }
+
+/**
+ * A swing level: H = the top of an up run's last brick, L = the bottom of a down run's last brick. `col` is that brick,
+ * `brokenCol` the first later brick that closes beyond the level (null = still holding), `touches` how many swings stopped at
+ * this exact level before it broke (a second top at the same price joins the first instead of drawing another line).
+ */
+export type RenkoPivot = { kind: 'H' | 'L'; col: number; price: number; brokenCol: number | null; touches: number };
+
+/**
+ * Pivot highs / lows of a Renko chart, confirmed once the swing's own run and the move away from it are both
+ * `strength` bricks long (a Renko fractal: a pivot shows `strength` bricks late and never repaints). Display only; nothing trades on it. O(n): unbroken levels
+ * sit on one stack per side, and a new high can only be pushed above lower highs once they are broken.
+ */
+export function renkoPivots(columns: PnfColumn[], strength: number): RenkoPivot[] {
+  const k = Math.max(1, Math.floor(strength));
+  const out: RenkoPivot[] = [];
+  const highs: number[] = [], lows: number[] = [];   // indices into `out`, unbroken, innermost level on top
+  let runStart = 0, prevStart = -1;
+  for (let j = 0; j < columns.length; j++) {
+    const c = columns[j];
+    if (j > 0 && c.dir !== columns[j - 1].dir) { prevStart = runStart; runStart = j; }
+    // a brick closing beyond a level breaks it (and every level it passes)
+    if (c.dir === 'X') {
+      while (highs.length && c.high > out[highs[highs.length - 1]].price + EPS) out[highs.pop()!].brokenCol = j;
+    } else {
+      while (lows.length && c.low < out[lows[lows.length - 1]].price - EPS) out[lows.pop()!].brokenCol = j;
+    }
+    // the k-th brick of a reversal confirms the previous run's extreme when that run was k bricks too (a 1-brick wiggle marks
+    // neither end at k = 2); the very first run has nothing before it
+    if (j - runStart + 1 !== k || runStart === 0 || runStart - prevStart < k) continue;
+    const at = runStart - 1;
+    const kind = c.dir === 'O' ? 'H' : 'L';
+    const price = kind === 'H' ? columns[at].high : columns[at].low;
+    const stack = kind === 'H' ? highs : lows;
+    const top = stack.length ? out[stack[stack.length - 1]] : null;
+    if (top && Math.abs(top.price - price) < EPS) { top.touches += 1; continue; }
+    stack.push(out.length);
+    out.push({ kind, col: at, price, brokenCol: null, touches: 1 });
+  }
+  return out;
+}

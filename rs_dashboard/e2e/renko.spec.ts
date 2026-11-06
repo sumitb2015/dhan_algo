@@ -94,6 +94,25 @@ test('the Supertrend is drawn on the bricks, its period / multiplier apply on En
   expect(blocked).toEqual([]);
 });
 
+test('pivot high / low lines sit on the swing extremes, the strength cycles, and the PV button hides them', async ({ page }) => {
+  const blocked: Call[] = [];
+  await install(page, blocked, []);
+  await page.goto('/renko');
+  const panel = page.getByTestId('pnf-panel').first();
+  // up to 22680, down to 22640, up again: the top and the bottom hold (the last up brick only reaches 22680, not past it)
+  await expect(panel.locator('[data-testid="pnf-pivot"][data-kind="H"][data-broken="0"]')).toHaveCount(1);
+  await expect(panel.locator('[data-testid="pnf-pivot"][data-kind="L"][data-broken="0"]')).toHaveCount(1);
+  await expect(panel.getByTestId('pnf-pivot').first()).toContainText(/P[HL] 22,6[48]0/);
+  await page.getByRole('button', { name: /Pivots need a 2-brick swing/ }).first().click();
+  await expect(page.getByRole('button', { name: /Pivots need a 3-brick swing/ }).first()).toBeVisible();
+  await expect(panel.getByTestId('pnf-pivot')).toHaveCount(2);   // both runs are 3 bricks long
+  await page.getByRole('button', { name: 'Hide pivot high / low lines' }).first().click();
+  await expect(panel.getByTestId('pnf-pivot')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Show pivot high / low lines' }).first().click();
+  await expect(panel.getByTestId('pnf-pivot')).toHaveCount(2);
+  expect(blocked).toEqual([]);
+});
+
 test('dragging the price axis zooms vertically only: the bricks grow taller, the columns keep their width', async ({ page }) => {
   const blocked: Call[] = [];
   await install(page, blocked, []);

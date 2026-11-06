@@ -279,6 +279,12 @@ The REAL guard watcher (`lib/autoServerWatcher.ts`, started with the server) wor
   row instead; it never hides an order's price. Not shown on Tick, on day or longer bars, outside the session, on an NSE weekend or
   holiday, while the feed is stale, or in a replay. Zero is when the bar closes, not when a brick prints: a brick still needs
   the bar's close past the next box edge, and appears a second or two later, with the next price read.
+- **Pivot lines (display only; AUTO does not read them).** Red dashed lines at swing highs (`PH`), green at swing lows (`PL`). A pivot
+  high is the top of an up run's last brick; it counts once that run AND the down move after it are both at least **N** bricks (the
+  `P2` button cycles N through 1 / 2 / 3; 2 skips the one-brick wiggles). It therefore appears N bricks late and never moves after that.
+  A line runs right until a brick closes past it, then stops there and turns faint. Levels still holding are labelled beside the newest
+  brick (the newest 6 per side). A level two swings stopped at is drawn thicker and labelled `×2`. Only closed bricks count, so the forming
+  brick never makes a line flicker. `PV` shows or hides them. Both buttons are remembered per chart.
 - **Books (bottom strip).** *AUTO* tab: every AUTO row with entry, exit, P&L and state. *Trade Book* tab: a **Paper trades** section above the
   broker's trades, listing every simulated fill of the day (trade bar, rail, guard, AUTO entries and exits, newest first). Trade-bar paper
   fills are kept in this browser for the day (localStorage, stamped with the IST date; another day's list is ignored); AUTO ones come from the

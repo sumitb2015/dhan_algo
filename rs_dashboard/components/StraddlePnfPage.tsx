@@ -119,6 +119,8 @@ const MARKERS_SHOWN_KEY = 'straddle-pnf-markers-shown-';
 const LINES_SHOWN_KEY = 'straddle-pnf-lines-shown-';
 const TRI_SHOW_KEY = 'straddle-pnf-tri-show-';
 const TRI_MIN_KEY = 'straddle-pnf-tri-min-';
+const PIV_SHOW_KEY = 'straddle-pnf-piv-show-';
+const PIV_K_KEY = 'straddle-pnf-piv-k-';
 // v2: the target / SL / trail numbers are P&F BOXES now; the old key held points and must not be re-read as boxes
 const STYLE_KEY = 'straddle-pnf-order-style-v2';
 const TAG_LEFT_KEY = 'straddle-pnf-tag-left-';
@@ -290,6 +292,9 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // Triangles (nested-column squeezes): drawn or not, and the fewest nested columns that count (3-6), per chart, remembered.
   const [triShown, setTriShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
   const [triMin, setTriMin] = useState<Record<ChartId, number>>({ 1: 3, 2: 3 });
+  // Renko pivot high / low lines: drawn or not, and the swing each side needs in bricks (1-3), per chart, remembered.
+  const [pivShown, setPivShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
+  const [pivK, setPivK] = useState<Record<ChartId, number>>({ 1: 2, 2: 2 });
   const [markersShown, setMarkersShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
   // Order / position lines on the chart (like Kite's price lines) can be hidden, and their tags aligned left or right.
   const [linesShown, setLinesShown] = useState<Record<ChartId, boolean>>({ 1: true, 2: true });
@@ -364,6 +369,9 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const minOf = (c: ChartId) => { const n = Number(readP(`${TRI_MIN_KEY}${c}`)); return Number.isInteger(n) && n >= 3 && n <= 6 ? n : 3; };
     setTriMin({ 1: minOf(1), 2: minOf(2) });
     setTriShown({ 1: readP(`${TRI_SHOW_KEY}1`) !== '0', 2: readP(`${TRI_SHOW_KEY}2`) !== '0' });
+    const pivKOf = (c: ChartId) => { const n = Number(readP(`${PIV_K_KEY}${c}`)); return Number.isInteger(n) && n >= 1 && n <= 3 ? n : 2; };
+    setPivK({ 1: pivKOf(1), 2: pivKOf(2) });
+    setPivShown({ 1: readP(`${PIV_SHOW_KEY}1`) !== '0', 2: readP(`${PIV_SHOW_KEY}2`) !== '0' });
     setLinesShown({ 1: readP(`${LINES_SHOWN_KEY}1`) !== '0', 2: readP(`${LINES_SHOWN_KEY}2`) !== '0' });
     setTagLeft({ 1: readP(`${TAG_LEFT_KEY}1`) === '1', 2: readP(`${TAG_LEFT_KEY}2`) === '1' });
     try {
@@ -1227,6 +1235,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       triMin: triMin[c],
       onToggleTri: renko ? undefined : () => { const next = !triShown[c]; saveP(`${TRI_SHOW_KEY}${c}`, next ? '1' : '0'); setTriShown(v => ({ ...v, [c]: next })); },
       onCycleTriMin: renko ? undefined : () => { const next = triMin[c] >= 6 ? 3 : triMin[c] + 1; saveP(`${TRI_MIN_KEY}${c}`, String(next)); setTriMin(v => ({ ...v, [c]: next })); },
+      pivotsShown: pivShown[c],
+      pivotStrength: pivK[c],
+      onTogglePivots: renko ? () => { const next = !pivShown[c]; saveP(`${PIV_SHOW_KEY}${c}`, next ? '1' : '0'); setPivShown(v => ({ ...v, [c]: next })); } : undefined,
+      onCyclePivotStrength: renko ? () => { const next = pivK[c] >= 3 ? 1 : pivK[c] + 1; saveP(`${PIV_K_KEY}${c}`, String(next)); setPivK(v => ({ ...v, [c]: next })); } : undefined,
       rail: rp ? practiceRailFor(c) : railFor(c),
       onToggleMarkers: () => {
         const next = !markersShown[c];

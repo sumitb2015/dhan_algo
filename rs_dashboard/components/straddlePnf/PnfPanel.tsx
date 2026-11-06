@@ -4,6 +4,7 @@ import { intervalLabel, barCountdown, fmtCountdown, DAY_MIN } from '@/lib/stradd
 import { createPortal } from 'react-dom';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
+import { renkoPivots } from '@/lib/renko';
 import { columnAtOrBefore, isSellSignal, type PnfExecutionMarker } from '@/lib/straddlePnf';
 import { AlignLeft, AlignRight, Eye, EyeOff, MapPin, MapPinOff, Minus, Plus, RotateCcw, ChevronsLeftRight, ChevronsRightLeft } from 'lucide-react';
 import { layoutTags } from '@/lib/pnfTagLayout';
@@ -90,6 +91,11 @@ export type PnfPanelProps = {
   triMin?: number;
   onToggleTri?: () => void;
   onCycleTriMin?: () => void;
+  /** Renko pivot high / low lines (lib/renko.ts renkoPivots): drawn or not, the strength in bricks, and the two buttons. */
+  pivotsShown?: boolean;
+  pivotStrength?: number;
+  onTogglePivots?: () => void;
+  onCyclePivotStrength?: () => void;
   /** Bar Replay is picking its start: a line follows the pointer and a click hands back that column's start time (no pan). */
   replayPick?: (t: number) => void;
   /** Bar Replay's start: a dashed line before the first column it revealed. */
@@ -503,7 +509,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, supertrendShown = false, coverShown = false, sessionLines = true, sessionDividers = true, timeAxis = false, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, session = null, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin, replayPick, replayStartT = null }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, supertrendShown = false, coverShown = false, sessionLines = true, sessionDividers = true, timeAxis = false, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, session = null, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin, pivotsShown = true, pivotStrength = 2, onTogglePivots, onCyclePivotStrength, replayPick, replayStartT = null }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   // Renko: every column is one filled brick on real price edges (lib/renko.ts); `reversal` holds the N-brick confirmation.
@@ -760,6 +766,13 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const w0 = Math.max(0, Math.floor(Math.floor((leftPx - viewPx - offsetX) / colW) / WINDOW_CHUNK) * WINDOW_CHUNK);
   const w1 = Math.min(liveCols.length, (Math.floor(Math.max(0, Math.ceil((leftPx + 2 * viewPx - offsetX) / colW)) / WINDOW_CHUNK) + 1) * WINDOW_CHUNK);
   const inWindow = (j: number) => j >= w0 && j < w1;
+  // Renko pivot lines on confirmed bricks only (no flicker on the forming one): every level still holding, newest 6 a side, and
+  // broken ones (faint, ending at the breaking brick) only near the view.
+  const pivots = useMemo(() => (renko && pivotsShown && onTogglePivots ? renkoPivots(columns, pivotStrength) : []), [renko, pivotsShown, onTogglePivots, columns, pivotStrength]);
+  const pivotLines = useMemo(() => {
+    const held = (k: 'H' | 'L') => pivots.filter(p => p.kind === k && p.brokenCol === null).slice(-6);
+    return [...pivots.filter(p => p.brokenCol !== null && p.brokenCol >= w0 && p.col < w1), ...held('H'), ...held('L')];
+  }, [pivots, w0, w1]);
   const glyphs = useMemo(() => {
     let x = '', o = '';
     const end = Math.min(w1, columns.length);
@@ -896,6 +909,26 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         <text data-testid="pnf-exit" x={xOf(exits[exits.length - 1].col) + colW / 2} y={yOf(columns[exits[exits.length - 1].col].high) - 4}
               textAnchor="middle" className="fill-emerald-400 font-mono font-bold" fontSize={9}>COVER</text>
       )}
+
+      {/* Renko pivot highs / lows: from the swing brick to the brick that closes past it (or across the chart while it holds);
+          a level held by several swings is drawn thicker with its count */}
+      {pivotLines.map(p => {
+        const y = yOf(p.price);
+        const hi = p.kind === 'H';
+        const x1 = xOf(p.col) + colW / 2;
+        const x2 = p.brokenCol === null ? plotW : xOf(p.brokenCol) + colW / 2;
+        return (
+          <g key={`piv${p.kind}${p.col}`} data-testid="pnf-pivot" data-kind={p.kind} data-broken={p.brokenCol !== null ? '1' : '0'} pointerEvents="none">
+            <line x1={x1} x2={x2} y1={y} y2={y} strokeWidth={p.touches > 1 ? 1.75 : 1} strokeDasharray="4 3"
+                  opacity={p.brokenCol === null ? 0.9 : 0.35} className={hi ? 'stroke-red-400' : 'stroke-emerald-400'} />
+            {p.brokenCol === null && (
+              <text x={xOf(liveCols.length) + colW * 1.5} y={y + (hi ? -3 : 10)} className={`${hi ? 'fill-red-400' : 'fill-emerald-400'} font-mono`} fontSize={9} fontWeight={700}>
+                {`${hi ? 'PH' : 'PL'} ${fmt(p.price, axisDigits)}${p.touches > 1 ? ` ×${p.touches}` : ''}`}
+              </text>
+            )}
+          </g>
+        );
+      })}
 
       {/* triangles: the converging lines, a tag, and the two trigger levels (buy above / sell below); after a breakout the
           entry, stop and vertical-count target of the pattern's trade */}
@@ -1081,7 +1114,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     </>
   // xOf / yOf / inWindow are rebuilt every render from the layout values listed here
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [renko, glyphs, colW, columns, cell, offsetX, yMax, padY, box, unconfirmedPaths, overlayPts, stPaths, kind, coverShown, exits, triShown, triangles, plotW, axisDigits, signals, w0, w1, lastEntryId, markersShown, tradeMarkers, model, liveCols, stroke]);
+  ), [renko, glyphs, colW, columns, cell, offsetX, yMax, padY, box, unconfirmedPaths, overlayPts, stPaths, kind, coverShown, exits, triShown, triangles, pivotLines, plotW, axisDigits, signals, w0, w1, lastEntryId, markersShown, tradeMarkers, model, liveCols, stroke]);
 
   return (
     <section
@@ -1614,6 +1647,16 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         {onCycleTriMin && triShown && (
           <ZoomButton label={`Triangles need at least ${triMin} columns (click for ${triMin >= 6 ? 3 : triMin + 1})`} onClick={onCycleTriMin}>
             <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{`△${triMin}`}</span>
+          </ZoomButton>
+        )}
+        {onTogglePivots && (
+          <ZoomButton label={pivotsShown ? 'Hide pivot high / low lines' : 'Show pivot high / low lines'} onClick={onTogglePivots} pressed={!pivotsShown}>
+            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">PV</span>
+          </ZoomButton>
+        )}
+        {onCyclePivotStrength && pivotsShown && (
+          <ZoomButton label={`Pivots need a ${pivotStrength}-brick swing each side (click for ${pivotStrength >= 3 ? 1 : pivotStrength + 1})`} onClick={onCyclePivotStrength}>
+            <span className="text-[10px] font-bold leading-none px-0.5" aria-hidden="true">{`P${pivotStrength}`}</span>
           </ZoomButton>
         )}
         {rail?.onToggleLines && (
