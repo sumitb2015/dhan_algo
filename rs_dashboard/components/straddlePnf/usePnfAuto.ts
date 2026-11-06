@@ -10,7 +10,7 @@ import { ChartEngine, type AutoArm, type AutoEvent, type AutoPyramid, type Order
 import { readOrderPrice } from '@/lib/tradedPriceClient';
 import type { EngineFile } from '@/lib/pnfAutoEngine';
 
-type Heartbeat = { t: number; idle: boolean; pid: number };
+type Heartbeat = { t: number; idle: boolean; pid: number; started?: boolean; ticks?: number; owner?: boolean; error?: string | null };
 
 export type { AutoArm, AutoEvent, AutoPyramid };
 
@@ -171,6 +171,7 @@ export function usePnfAuto({ chart, target, model, price, ledger, engine, post, 
 
   // The open row's trailing SL level now, for the position line: only for its own contract.
   const trailSl = row && row.state === 'open' && row.targetKey === tk ? trailLevel(model, { side: row.side, entryBarT: row.entryBarT, trail: trailOf(row) }) : null;
-  const note = quiet ? 'SERVER ENGINE QUIET - AUTO is not running in this dashboard (is the server up, or is another dashboard process running it?)' : view?.note ?? '';
+  const quietWhy = !hb ? 'no reply from the dashboard' : hb.error ? `engine error: ${hb.error}` : hb.started === false ? 'the engine was never started in this dashboard process' : !hb.ticks ? 'the engine has not ticked yet' : hb.owner === false && !hb.idle ? 'another dashboard process holds the engine lock' : 'the engine has stopped ticking';
+  const note = quiet ? `SERVER ENGINE QUIET - AUTO is not trading: ${quietWhy}` : view?.note ?? '';
   return { row, note, halt: view?.halt ?? null, quiet, serverBrick, feedError: view?.feedError ?? null, resolve, exitNow, trailSl };
 }

@@ -80,10 +80,13 @@ type EngineState = {
   /** Nothing armed or open on the last tick: the engine files were not rewritten (the page reads `idle` from the route). */
   idle: boolean;
   saved: Partial<Record<PnfScope, EngineFile | null>>;
+  /** The last tick's failure (cleared by a good tick), and how many ticks have run: the route reports both, so a stuck engine says why. */
+  lastError?: string | null;
+  ticks?: number;
 };
 type G = { __pnfAutoEngine?: EngineState };
 const g = globalThis as G;
-const state = (g.__pnfAutoEngine ??= { timer: null, busy: false, charts: new Map(), owner: false, lastTickAt: 0, idle: true, saved: {} });
+const state: EngineState = (g.__pnfAutoEngine ??= { timer: null, busy: false, charts: new Map(), owner: false, lastTickAt: 0, idle: true, saved: {} });
 
 /** This process runs the engine: the lock is ours, free, or its owner has stopped beating. */
 function holdLock(nowMs: number): boolean {
@@ -146,7 +149,13 @@ function infoFor(rt: ChartRt, broker: PnfBroker, target: Target, nowMs: number):
   const key = `${broker}|${targetKey(target)}`;
   if (rt.info?.key === key && (rt.info.pending || rt.info.val !== null || nowMs < rt.info.retryAt)) return rt.info.val;
   if (target.kind === 'index') return null;
-  const legs = resolvePnfLegs(target);
+  let legs: ReturnType<typeof resolvePnfLegs>;
+  try { legs = resolvePnfLegs(target); } catch (e) {
+    // the contract master unreadable (master_list.csv missing / being rewritten): wait and try again, never stop the whole tick
+    rt.info = { key, val: null, pending: false, retryAt: nowMs + LOOKUP_RETRY_MS };
+    console.warn(`[pnf-auto-engine] contract lookup for ${key} failed (retried in a minute): ${(e as Error).message}`);
+    return null;
+  }
   if (typeof legs === 'string') { rt.info = { key, val: { legs: [], unsupported: legs }, pending: false, retryAt: 0 }; return rt.info.val; }
   const slot: NonNullable<ChartRt['info']> = { key, val: null, pending: true, retryAt: 0 };
   rt.info = slot;
@@ -276,6 +285,7 @@ async function stepChart(scope: PnfScope, chart: 1 | 2, ledger: AutoLedger, save
 async function tick(): Promise<void> {
   if (state.busy) return;
   state.busy = true;
+  state.ticks = (state.ticks ?? 0) + 1;
   try {
     const nowMs = Date.now();
     const ledgers = SCOPES.map(scope => ({ scope, ledger: readAutoLedger(scope) }));
@@ -286,7 +296,7 @@ async function tick(): Promise<void> {
     if (!work) {
       // going idle: the last views (an arming just switched off) are cleared once, so no page shows a stale status
       if (!state.idle && state.owner) for (const scope of SCOPES) { try { writeJsonAtomic(engineFileFor(scope), { v: 1, pid: process.pid, t: nowMs, charts: {} } satisfies EngineFile); } catch { /* next */ } }
-      state.lastTickAt = nowMs; state.idle = true;
+      state.lastTickAt = nowMs; state.idle = true; state.lastError = null;
       return;
     }
     if (!holdLock(nowMs)) return;
@@ -298,14 +308,22 @@ async function tick(): Promise<void> {
       const prev = saved[scope] !== undefined ? saved[scope] : (saved[scope] = readEngineFile(scope));
       const charts: EngineFile['charts'] = {};
       for (const chart of [1, 2] as const) {
-        const v = await stepChart(scope, chart, ledger, prev?.charts[String(chart) as '1' | '2'], nowMs);
-        if (v) charts[String(chart) as '1' | '2'] = v;
+        try {
+          const v = await stepChart(scope, chart, ledger, prev?.charts[String(chart) as '1' | '2'], nowMs);
+          if (v) charts[String(chart) as '1' | '2'] = v;
+        } catch (e) {
+          // one chart's failure never stops the other chart, the other page or the status file; it is shown on the chart
+          console.error(`[pnf-auto-engine] ${scope} chart ${chart} step failed:`, e);
+          charts[String(chart) as '1' | '2'] = { note: `engine error: ${(e as Error).message}`, halt: null, armT: null, lastBrick: null, targetKey: null, feedError: null };
+        }
       }
       await sweepOrphans(scope, ledger, nowMs / 1000);
       try { writeJsonAtomic(engineFileFor(scope), { v: 1, pid: process.pid, t: nowMs, charts } satisfies EngineFile); } catch { /* next tick */ }
     }
+    state.lastError = null;
   } catch (e) {
     console.error('[pnf-auto-engine] tick failed:', e);
+    state.lastError = `${(e as Error).message ?? e}`.slice(0, 300);
   } finally {
     state.busy = false;
   }
@@ -339,4 +357,6 @@ export function startPnfAutoEngine(): void {
 }
 
 /** This process's engine: its last tick (0 = never), and whether that tick found nothing to do (the engine files are then not rewritten). */
-export const engineHeartbeat = () => ({ t: state.lastTickAt, idle: state.idle, pid: process.pid });
+export const engineHeartbeat = () => ({
+  t: state.lastTickAt, idle: state.idle, pid: process.pid, started: !!state.timer, ticks: state.ticks ?? 0, owner: state.owner, error: state.lastError ?? null,
+});
