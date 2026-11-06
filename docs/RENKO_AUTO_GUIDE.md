@@ -284,6 +284,7 @@ Only one tab per browser profile leads (Web Locks). A second browser or machine 
 | `No IPs configured for this app` on a Zerodha order | Kite requires a static IP: add this machine's public IP in the Kite developer console. |
 | Zerodha order fails | The Zerodha session expires daily at 06:00 IST; log in again (`scripts/tools/zerodha_autologin.py`). |
 | AUTO entered late / not at all | It only trades a signal on the newest closed bar, and only after arming. Arm before the move. |
+| `red brick skipped: Supertrend line is up` (or green / down) | Supertrend rule: a brick against the line is a pullback, not an entry. A SELL needs a red brick with the line down, a BUY a green one with the line up. Logged once per brick and kept on the status line as `last: ...` until the next entry. On 10 / 20 / 30 sec only the bar's last price makes a brick: a dip inside the bar that recovers by its close prints nothing. |
 | Two S (or B) markers in a row | The trend rule flipped: exit of the old position, then entry of the new one. |
 | `exit waiting for a live price` | The feed has no price for that chart; the exit (manual or guard) is retried. |
 | `MTM guard ... box value ... NOT enforced` | The chart's box size or the position's lot value is unknown. Use a rupee level or wait for the chart. |

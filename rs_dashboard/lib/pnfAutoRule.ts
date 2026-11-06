@@ -54,3 +54,26 @@ export function ignoredByFilter(m: { signals: PnfSignal[]; lastBarT: number | nu
   if (allowed.some(s => s.t > watermarkT && s.t === m.lastBarT)) return null;
   return [...m.signals].reverse().find(s => s.t > watermarkT && s.t === m.lastBarT) ?? null;
 }
+
+/**
+ * Supertrend rule: why the brick(s) the newest closed bar printed did not enter, so the AUTO status can say "red brick skipped:
+ * Supertrend line is up" instead of a bare "waiting for a signal" (2026-11-06: a red pullback brick under a rising line looked like a
+ * stuck engine). Only bricks after `watermarkT` count (those formed since arming); the bar's LAST brick is the one explained. Null for
+ * any other rule, no brick on the newest closed bar, or a brick that is a signal (the engine enters it, or the side filter says so).
+ */
+export function skippedBrick(m: { columns: { dir: 'X' | 'O' }[]; columnTimes: { start: number }[]; supertrend?: { line: number | null; dir: 1 | -1 | null }[]; lastBarT: number | null },
+  rule: AutoRule, watermarkT: number): { key: string; text: string } | null {
+  if (rule !== 'supertrend' || m.lastBarT === null || !(m.lastBarT > watermarkT)) return null;
+  let i = m.columns.length - 1;
+  while (i >= 0 && (m.columnTimes[i]?.start ?? -Infinity) > m.lastBarT) i--;
+  if (i < 0 || m.columnTimes[i]?.start !== m.lastBarT) return null;
+  const colour = m.columns[i].dir === 'X' ? 'green' : 'red';
+  const st = m.supertrend?.[i];
+  if (!st || (st.dir !== 1 && st.dir !== -1)) return { key: `${i}:na`, text: `${colour} brick skipped: Supertrend not ready yet (too few bricks for its ATR)` };
+  if ((st.dir === 1) === (m.columns[i].dir === 'X')) return null;
+  const line = st.line !== null ? ` (${st.line.toFixed(2)})` : '';
+  return {
+    key: `${i}:${st.dir}`,
+    text: `${colour} brick skipped: Supertrend line is ${st.dir === 1 ? 'up' : 'down'}${line} - a ${st.dir === 1 ? 'SELL needs a red brick with the line down' : 'BUY needs a green brick with the line up'}`,
+  };
+}

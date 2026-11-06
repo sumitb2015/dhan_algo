@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { autoProductOf, decideAdd, decideAuto, reentryBlockOf, rowMarket, trailBest, trailLevel, trailOf, type AutoProduct } from '@/lib/pnfAuto';
-import { ignoredByFilter, SIDE_LABEL, withSide, type AutoSide } from '@/lib/pnfAutoRule';
+import { ignoredByFilter, skippedBrick, SIDE_LABEL, withSide, type AutoRule, type AutoSide } from '@/lib/pnfAutoRule';
 import { isSellSignal } from '@/lib/straddlePnf';
 import { EMPTY_LEDGER, isLive, PYRAMID_HARD_MAX, type AutoLedger, type AutoLeg, type AutoOp, type AutoRow } from '@/lib/pnfAutoLedger';
 import { istDateIso } from '@/lib/nseHolidays';
@@ -84,7 +84,7 @@ export interface AutoArm {
  */
 export interface AutoPyramid { on: boolean; max: number; every: number; trailOn: boolean; trail: number }
 
-export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 'both', pyramid, price, stale, market, complete, broker, mode, leaderRef, ledger, post, onEvent, onDisarm, scope = 'pnf' }: {
+export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, rule, side = 'both', pyramid, price, stale, market, complete, broker, mode, leaderRef, ledger, post, onEvent, onDisarm, scope = 'pnf' }: {
   chart: 1 | 2;
   /** Renko only: add a lot per new best brick (the row keeps its cap from entry; adds run only while armed with this on). */
   pyramid?: AutoPyramid;
@@ -93,6 +93,8 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
   target: Target;
   /** The chart's CLOSED-bar model (signals / columns never include the forming minute), with the selected rule's signals. */
   model: PanelModel;
+  /** Renko: the chart's AUTO rule, so the status can say why a brick did not enter (Supertrend: a brick against the line). */
+  rule?: AutoRule;
   /** Which side AUTO may OPEN (default both). Applied here, so the status can say when it holds a signal back; exits are never filtered. */
   side?: AutoSide;
   /** The chart's live price (a straddle's CE + PE), or null. */
@@ -114,6 +116,9 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
   const model = withSide(ruleModel, side);                                  // entries read the allowed side's signals only
   const ignoredRef = useRef<string>('');                                      // the kind of the last held-back signal that was logged
   useEffect(() => { ignoredRef.current = ''; }, [arm.on, side]);
+  // The last brick the Supertrend rule skipped (logged once per brick, and kept on the status line until a newer state replaces it).
+  const skippedRef = useRef<{ key: string; text: string } | null>(null);
+  useEffect(() => { skippedRef.current = null; }, [arm.on, arm.watermarkT, rule]);
   const [note, setNote] = useState<string>('');
   const [halt, setHalt] = useState<string | null>(null);
   const [info, setInfo] = useState<{ key: string; legs: LegInfo[]; unsupported: string | null } | null>(null);
@@ -489,10 +494,19 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
           const what = `${isSellSignal(held.kind) ? 'SELL' : 'BUY'} signal ignored (${SIDE_LABEL[side]})`;
           setNote(what);
           if (ignoredRef.current !== held.kind) { ignoredRef.current = held.kind; void post({ op: 'log', chart, t: Date.now() / 1000, text: what }); }   // once per change of direction, not per brick
-        } else setNote(d.action === 'none' ? d.why : '');
+        } else {
+          const waiting = d.action === 'none' && (d.why === 'waiting for a signal' || d.why === 'signal is not on the last closed bar');
+          const skip = waiting && rule ? skippedBrick(ruleModel, rule, watermarkRef.current) : null;
+          if (skip && skippedRef.current?.key !== skip.key) {
+            skippedRef.current = skip;
+            void post({ op: 'log', chart, t: Date.now() / 1000, text: skip.text });
+          }
+          setNote(waiting && skippedRef.current ? `waiting for a signal · last: ${skippedRef.current.text}` : d.action === 'none' ? d.why : '');
+        }
         return;
       }
       ignoredRef.current = '';
+      skippedRef.current = null;                               // an entry: an older skipped brick is no longer the news
       const before = watermarkRef.current;
       watermarkRef.current = d.signal.t;                       // handled: this signal is never entered again...
       busyRef.current = true;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ignoredByFilter, modelForRule, ruleText, withSide, type AutoRule } from './pnfAutoRule.ts';
+import { ignoredByFilter, modelForRule, ruleText, skippedBrick, withSide, type AutoRule } from './pnfAutoRule.ts';
 import type { PnfSignal } from './straddlePnf.ts';
 
 const sig = (id: string): PnfSignal => ({ id, kind: 'RENKO_BUY', col: 0, bar: 0, t: 0, price: 1, belowVwap: false });
@@ -46,4 +46,25 @@ test('ignoredByFilter names the fresh signal the filter holds back, and only tha
   assert.equal(ignoredByFilter(m([older]), 'buy', 0), null, 'a signal that is not on the last bar is old news');
   assert.equal(ignoredByFilter(m([sell]), 'buy', 100), null, 'at or before the watermark: already handled');
   assert.equal(ignoredByFilter(m([sell], null), 'buy', 0), null);
+});
+
+test('skippedBrick explains a Supertrend brick of the wrong colour on the newest closed bar, and nothing else', () => {
+  // 2026-11-06 chart 2: armed at 12:05:25 (watermark = bar 12:04:30), the 12:05:00 bar printed a red brick while the line was up at 73.75.
+  const m = {
+    columns: [{ dir: 'X' as const }, { dir: 'O' as const }],
+    columnTimes: [{ start: 100 }, { start: 130 }],
+    supertrend: [{ line: 73.75, dir: 1 as const }, { line: 73.75, dir: 1 as const }],
+    lastBarT: 130,
+  };
+  const s = skippedBrick(m, 'supertrend', 100);
+  assert.match(s?.text ?? '', /^red brick skipped: Supertrend line is up \(73\.75\)/);
+  assert.equal(skippedBrick(m, 'trend', 100), null, 'other rules are not explained here');
+  assert.equal(skippedBrick(m, 'supertrend', 130), null, 'a brick from before arming is not news');
+  assert.equal(skippedBrick({ ...m, lastBarT: 160 }, 'supertrend', 100), null, 'the newest closed bar printed no brick');
+  // the brick agrees with the line: it is a signal, so nothing to explain
+  assert.equal(skippedBrick({ ...m, supertrend: [m.supertrend[0], { line: 80, dir: -1 as const }] }, 'supertrend', 100), null);
+  assert.match(skippedBrick({ ...m, supertrend: [m.supertrend[0], { line: null, dir: null }] }, 'supertrend', 100)?.text ?? '', /not ready/);
+  // several bricks on one bar: the last one is explained
+  const two = { ...m, columns: [...m.columns, { dir: 'X' as const }], columnTimes: [...m.columnTimes, { start: 130 }], supertrend: [...m.supertrend, { line: 90, dir: -1 as const }] };
+  assert.match(skippedBrick(two, 'supertrend', 100)?.text ?? '', /^green brick skipped: Supertrend line is down \(90\.00\)/);
 });

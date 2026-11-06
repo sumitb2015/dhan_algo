@@ -879,12 +879,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     };
   };
   const auto1 = usePnfAuto({
-    chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: renko /* the rules are Renko's: P&F has one signal set */ ? modelForRule(autoRule[1], c1.model) : c1.model, side: autoSide[1], pyramid: renko ? autoPyr[1] : undefined, price: priceOf(feed1), stale: feed1.stale,
+    chart: 1, arm: autoArm[1], lots: autoLots[1], target: target1, model: renko /* the rules are Renko's: P&F has one signal set */ ? modelForRule(autoRule[1], c1.model) : c1.model, rule: renko ? autoRule[1] : undefined, side: autoSide[1], pyramid: renko ? autoPyr[1] : undefined, price: priceOf(feed1), stale: feed1.stale,
     market: feed1.market, complete: feed1.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
     onEvent: onAutoEvent, onDisarm: why => disarm(1, why), scope,
   });
   const auto2 = usePnfAuto({
-    chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: renko ? modelForRule(autoRule[2], c2.model) : c2.model, side: autoSide[2], pyramid: renko ? autoPyr[2] : undefined, price: priceOf(feed2), stale: feed2.stale,
+    chart: 2, arm: autoArm[2], lots: autoLots[2], target: target2, model: renko ? modelForRule(autoRule[2], c2.model) : c2.model, rule: renko ? autoRule[2] : undefined, side: autoSide[2], pyramid: renko ? autoPyr[2] : undefined, price: priceOf(feed2), stale: feed2.stale,
     market: feed2.market, complete: feed2.complete, broker, mode: tradeMode, leaderRef, ledger: autoLedger, post: autoPost,
     onEvent: onAutoEvent, onDisarm: why => disarm(2, why), scope,
   });
