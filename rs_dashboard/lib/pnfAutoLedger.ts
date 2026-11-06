@@ -160,6 +160,16 @@ const MAX_LOG = 200;
 /** A row still owning a position at the broker (or possibly owning one): it blocks a new entry on that chart. */
 export const isLive = (r: AutoRow) => r.state !== 'closed';
 
+/**
+ * The ledger keeps at most MAX_ROWS rows by dropping the OLDEST CLOSED ones. A live row is never dropped: a Tick-interval PAPER chart can
+ * close hundreds of trades a day, and a plain slice would forget the other chart's open REAL position (no exit, guard or end of day after).
+ */
+export function capRows(rows: AutoRow[], max = MAX_ROWS): AutoRow[] {
+  let drop = rows.length - max;
+  if (drop <= 0) return rows;
+  return rows.filter(r => (drop > 0 && !isLive(r) ? (drop--, false) : true));
+}
+
 /** An open position (a pyramid add on the wire or unresolved included): its confirmed units are held and it has a live P&L. */
 export const holdsPosition = (r: Pick<AutoRow, 'state'>) => r.state === 'open' || r.state === 'adding' || r.state === 'unknownAdd';
 
@@ -271,7 +281,7 @@ function newAdd(r: AutoRow, a: { id: string; t: number; barT: number; box?: numb
 /** Apply one op. Returns the new ledger, or an error with an HTTP status (the file is left as it was). */
 export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: AutoLedger } | { ok: false; status: number; error: string } {
   const bump = (rows: AutoRow[], log = led.log, arms = led.arms): { ok: true; ledger: AutoLedger } =>
-    ({ ok: true, ledger: { rev: led.rev + 1, rows: rows.slice(-MAX_ROWS), log: log.slice(-MAX_LOG), ...(arms && Object.keys(arms).length ? { arms } : {}) } });
+    ({ ok: true, ledger: { rev: led.rev + 1, rows: capRows(rows), log: log.slice(-MAX_LOG), ...(arms && Object.keys(arms).length ? { arms } : {}) } });
   const find = (id: string) => led.rows.findIndex(r => r.id === id);
 
   switch (op.op) {
@@ -297,6 +307,11 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       const live = led.rows.find(x => x.chart === r.chart && isLive(x));
       if (live) return { ok: false, status: 409, error: `Chart ${r.chart} already holds an AUTO position (${live.state})` };
       if (r.mode === 'REAL' && r.state !== 'entering') return { ok: false, status: 400, error: 'A REAL row is reserved as entering before its order is sent' };
+      // The broker nets a contract: a REAL long on one chart and a REAL short on the other would read flat at the broker (the reconcile
+      // would close both as flat) and each exit would open a position the other owns. One direction per contract and broker.
+      const tk = targetKey(target);
+      const against = r.mode === 'REAL' && led.rows.find(x => x.mode === 'REAL' && isLive(x) && x.broker === r.broker && x.targetKey === tk && x.side !== r.side);
+      if (against) return { ok: false, status: 409, error: `Chart ${against.chart} holds a REAL ${against.side} on this contract: an opposite AUTO position would net against it at the broker` };
       return bump([...led.rows, { ...r, target, targetKey: targetKey(target), state: r.mode === 'REAL' ? 'entering' : 'open', pendingSince: r.mode === 'REAL' ? r.entryT : undefined }]);
     }
     case 'confirmEntry':
@@ -315,6 +330,10 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       const rows = [...led.rows];
       if (op.op === 'confirmEntry') {
         if (!Array.isArray(op.legs) || !op.legs.length || !op.legs.every(l => Number.isInteger(l.units) && l.units > 0)) return { ok: false, status: 400, error: 'Invalid legs' };
+        // Exactly the units reserved, leg by leg (as confirmAdd): the row's P&L, guard and exits are sized off them.
+        if (op.legs.length !== r.legs.length || op.legs.some((l, j) => l.units !== r.legs[j].units)) {
+          return { ok: false, status: 409, error: `Placed ${JSON.stringify(op.legs.map(l => l.units))} but the entry reserved ${JSON.stringify(r.legs.map(l => l.units))}` };
+        }
         rows[i] = { ...r, state: 'open', legs: op.legs, ...(cleanIds(op.orderIds) ? { entryOrderIds: cleanIds(op.orderIds) } : {}) };
       } else if (op.op === 'voidEntry') rows[i] = { ...r, state: 'closed', exitT: op.t, exitPrice: r.entryPrice, reason: 'refused', pnl: 0, note: op.note };
       else if (op.op === 'beginExit') {

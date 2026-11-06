@@ -132,7 +132,11 @@ export function trailBest(model: AutoModel, pos: AutoPosition): number | null {
   return walkTrail(model, pos).best;
 }
 
-/** Trailing SL limits (boxes back from the best brick). */
+/**
+ * Trailing SL limits (boxes back from the best brick). The minimum is 2: the first opposite brick already closes 2 boxes below the best
+ * close (a Renko reversal needs a 2-box move), so 1 box was the same as 2. A row saved with 1 still reads (it behaves as 2).
+ */
+export const TRAIL_BOXES_MIN = 2;
 export const TRAIL_BOXES_MAX = 20;
 
 /** The trailing SL of a pyramided row: set once it has `trailBoxes` and at least one add, else undefined. */
@@ -151,7 +155,9 @@ function walkTrail(model: AutoModel, pos: AutoPosition): { best: number; col: nu
   for (let i = 0; i < model.columns.length; i++) {
     const start = model.columnTimes[i]?.start;
     const c = model.columns[i];
-    if (start === undefined || !(start > pos.entryBarT)) continue;
+    // the entry bar counts too: a bar prints bricks one way only, so its bricks before the signal never beat the entry brick, and the ones
+    // after it (a mid-bar Two-back signal) are the trade's own progress
+    if (start === undefined || start < pos.entryBarT) continue;
     const close = c.dir === 'X' ? c.high : c.low;                       // a brick's close edge
     if (c.dir === want) { if (sell ? close < best : close > best) best = close; continue; }
     const back = (sell ? close - best : best - close) / model.box;
@@ -195,7 +201,7 @@ export function reentryBlockOf(row: { side: AutoSide; state: string; reason?: st
   for (let i = 0; i < model.columns.length; i++) {
     const start = model.columnTimes[i]?.start;
     const c = model.columns[i];
-    if (start === undefined || !(start > row.entryBarT) || start > exitBarT || c.dir !== want) continue;
+    if (start === undefined || start < row.entryBarT || start > exitBarT || c.dir !== want) continue;
     const close = c.dir === 'X' ? c.high : c.low;
     if (sell ? close < best : close > best) best = close;
   }
@@ -211,6 +217,22 @@ export function reentryLifted(model: Pick<AutoModel, 'columns' | 'columnTimes'>,
     const close = c.dir === 'X' ? c.high : c.low;
     return b.side === 'SELL' ? close < b.beyond - 1e-9 : close > b.beyond + 1e-9;
   });
+}
+
+/**
+ * Renko: the first closed brick after the entry bar that closes at or beyond the stop, or -1. The stop is checked against the live price
+ * first; this is the backstop for a missing or stale price (a brick only prints from real prices, so it never fires early).
+ */
+export function stopBrickColumn(model: AutoModel, pos: AutoPosition): number {
+  if (pos.stop === undefined || model.chart !== 'renko') return -1;
+  for (let i = 0; i < model.columns.length; i++) {
+    const start = model.columnTimes[i]?.start;
+    const c = model.columns[i];
+    if (start === undefined || !(start > pos.entryBarT)) continue;
+    const close = c.dir === 'X' ? c.high : c.low;
+    if (pos.side === 'BUY' ? c.dir === 'O' && close <= pos.stop + 1e-9 : c.dir === 'X' && close >= pos.stop - 1e-9) return i;
+  }
+  return -1;
 }
 
 /** The first column opposite to `side` that started after the entry bar (the reversal), or -1. */
@@ -235,7 +257,8 @@ export function decideAuto({ model, position, watermarkT, nowS, market, price = 
   reentryBlock?: ReentryBlock;
   /** The open position's product (its end-of-day time), else the product a new entry would be sent with (its entry cutoff). */
   product?: AutoProduct;
-  /** The chart's live price, for a stop (a position without a stop never reads it). */
+  /** The chart's live price, for a stop (a position without a stop never reads it). Pass null when the feed is stale: a Renko stop then
+   *  falls back to closed bricks. */
   price?: number | null;
 }): AutoDecision {
   const win = autoWindow(market, nowS, product);
@@ -247,7 +270,11 @@ export function decideAuto({ model, position, watermarkT, nowS, market, price = 
     if (position.stop !== undefined) {
       const hit = price !== null && (position.side === 'BUY' ? price <= position.stop : price >= position.stop);
       // A gap through the stop fills at the price, not the stop (PAPER books boxPrice, so it must not flatter the loss).
-      return hit ? { action: 'exit', reason: 'stop', boxPrice: position.side === 'BUY' ? Math.min(price!, position.stop) : Math.max(price!, position.stop) } : { action: 'none', why: 'holding' };
+      if (hit) return { action: 'exit', reason: 'stop', boxPrice: position.side === 'BUY' ? Math.min(price!, position.stop) : Math.max(price!, position.stop) };
+      // No usable live price: a closed brick beyond the stop still exits, booked at that brick's close (never better than the stop).
+      const sc = price === null ? stopBrickColumn(model, position) : -1;
+      if (sc >= 0) { const c = model.columns[sc]; const close = c.dir === 'X' ? c.high : c.low; return { action: 'exit', reason: 'stop', col: sc, boxPrice: position.side === 'BUY' ? Math.min(close, position.stop) : Math.max(close, position.stop) }; }
+      return { action: 'none', why: 'holding' };
     }
     const col = reversalColumn(model, position);
     return col >= 0 ? { action: 'exit', reason: 'reversal', col, boxPrice: boxPriceAt(model, col, model.columns[col].startBar) } : { action: 'none', why: 'holding' };
@@ -304,10 +331,11 @@ export function decideAdd({ model, row, nowS, market, maxLots }: {
   for (let i = 0; i < model.columns.length; i++) {
     const start = model.columnTimes[i]?.start;
     const c = model.columns[i];
-    if (start === undefined || !(start > row.entryBarT) || c.dir !== want) continue;
+    if (start === undefined || start < row.entryBarT || c.dir !== want) continue;
     const close = c.dir === 'X' ? c.high : c.low;                 // a brick's close edge
-    if (start === last) { if (better(close, reach ?? best)) reach = close; }
-    else if (start < last && better(close, best)) best = close;
+    // the entry bar's bricks after the signal (a mid-bar entry) set the best; no add on the entry bar itself
+    if (start === last && start > row.entryBarT) { if (better(close, reach ?? best)) reach = close; }
+    else if (start < last || start === row.entryBarT) { if (better(close, best)) best = close; }
   }
   if (reach === null || !better(reach, best)) return { add: false, why: 'no new best brick on the newest bar' };
   const every = pyramidEveryOf(row.pyramidEvery);

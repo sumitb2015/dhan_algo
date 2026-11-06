@@ -297,7 +297,12 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
     if (j.outcome === 'placed') {
       const legs: AutoLeg[] = (j.legs ?? []).filter(l => l.status === 'placed').map((l, i) => ({ label: l.label, key: base.legs[i]?.key ?? null, units: l.qty }));
       const ok = await post({ op: 'confirmEntry', id, legs, orderIds: (j.legs ?? []).filter(l => l.status === 'placed' && l.orderId).map(l => String(l.orderId)) });
-      if (!ok.ok) { haltNow(`order placed but the ledger refused it (${ok.error}) - check Positions`); return null; }
+      if (!ok.ok) {
+        // placed, but not as reserved (other units, a leg missing): the row must not open on sizes the broker does not hold
+        await post({ op: 'markUnknown', id, note: `entry placed but not as reserved: ${ok.error}` });
+        haltNow(`order placed but the ledger refused it (${ok.error}) - check Positions, then resolve it`);
+        return null;
+      }
       rejectsRef.current = 0;
       onEvent({ chart, kind: 'entry', side, price: px, target, mode: arm.mode, lots, text: `AUTO C${chart} [REAL] ${side} ${lots}L @ ~${px.toFixed(2)}` });
       return null;
@@ -418,12 +423,14 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
         // The end-of-day time is the POSITION's market (saved on the row), never the chart's `market`: that reads 'NSE' until the history has
         // loaded (a page reload, an instrument or setting change), which would flatten an MCX position at the NSE 15:15 straight away.
         const position = { side: row.side, entryBarT: row.entryBarT, stop: row.stop, exitBy: row.exitBy, trail: trailOf(row) };
-        const d = decideAuto({ model, position, watermarkT: watermarkRef.current, nowS, market: rowMarket(row), price, product: autoProductOf(row.product) });
+        // A stale price never decides a stop (it may be minutes old): the Renko stop then reads closed bricks instead.
+        const d = decideAuto({ model, position, watermarkT: watermarkRef.current, nowS, market: rowMarket(row), price: stale ? null : price, product: autoProductOf(row.product) });
         if (d.action !== 'exit') {
           const tl = trailLevel(model, position);
           const trailTxt = tl !== null ? ` · trail SL ${tl.toFixed(2)}` : '';
           // Pyramid: only while armed in the row's own mode, with adds still switched on, a fresh price and no halt.
-          // `complete`: the chart's history is fully loaded (a partial model would miss the best brick so far and add after a pullback).
+          // `complete` only says the contract is fully picked; the bars stay empty until the whole history has loaded (usePnfFeed), so a
+          // partial model (one that would miss the best brick so far and add after a pullback) never reaches here.
           // The row's broker must be the page's: the contract lookup and the order route are the page broker's.
           if (arm.on && arm.mode === row.mode && pyramid?.on && row.pyramidMax && !haltRef.current && !stale && price !== null && complete && row.broker === broker) {
             const a = decideAdd({ model, row, nowS, market: rowMarket(row), maxLots: Math.min(row.pyramidMax, pyramid.max, PYRAMID_HARD_MAX) });
@@ -439,12 +446,14 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
           setNote((arm.on ? 'holding' : 'holding - AUTO is OFF: it will exit by its rule, not re-enter') + trailTxt);
           return;
         }
-        if ((d.reason === 'reversal' || d.reason === 'trail') && price === null) { setNote(`${d.reason} seen, waiting for a price`); return; }
+        // A stop seen on a brick with no fresh price is decided at that brick's close (REAL replaces it with the fill).
+        const exitPx = d.reason === 'stop' ? (stale ? null : price) ?? d.boxPrice ?? null : price;
+        if (d.reason !== 'eod' && exitPx === null) { setNote(`${d.reason} seen, waiting for a price`); return; }
         busyRef.current = true;
-        const barT = (d.reason === 'reversal' || d.reason === 'trail') && d.col !== undefined ? model.columnTimes[d.col]?.start : undefined;
+        const barT = d.reason !== 'eod' && d.col !== undefined ? model.columnTimes[d.col]?.start : undefined;
         let closed = false;
         const best = d.reason === 'trail' ? trailBest(model, position) : null;   // fixed on the row: the re-entry level after this exit
-        try { closed = await exit(row, d.reason, price, barT, d.boxPrice, best); } finally { busyRef.current = false; }
+        try { closed = await exit(row, d.reason, exitPx, barT, d.boxPrice, best); } finally { busyRef.current = false; }
         // A rule exit with AUTO off (a reload, another tab, a halt) is the end of the trade: said out loud, so a missing re-entry is never silent.
         if (closed && !arm.on && d.reason !== 'eod') {
           const text = `exited (${d.reason}) while AUTO was OFF on this chart: no re-entry - arm AUTO to trade the next signal`;
@@ -460,9 +469,10 @@ export function usePnfAuto({ chart, arm, lots, target, model: ruleModel, side = 
       // The chart's last trade, if the trailing SL closed it today on this contract in this mode: same-side entries wait for a new best brick.
       // The EXIT's day (an NRML trade opened yesterday and trailed out today still blocks), and the rule's signals of both sides (an
       // opposite signal the Buy only / Sell only filter ignores still ends the wait: the trend turned).
-      const lastRow = [...ledger.rows].reverse().find(r => r.chart === chart);
+      // The last TRADE on this contract in this mode: a refused entry (nothing opened) or another contract's / mode's row never ends the wait.
+      const lastRow = [...ledger.rows].reverse().find(r => r.chart === chart && r.targetKey === tk && r.mode === arm.mode && r.reason !== 'refused');
       const today = istDateIso(Date.now());
-      const reentryBlock = lastRow && lastRow.targetKey === tk && lastRow.mode === arm.mode && lastRow.exitT !== undefined && istDateIso(lastRow.exitT * 1000) === today
+      const reentryBlock = lastRow && lastRow.exitT !== undefined && istDateIso(lastRow.exitT * 1000) === today
         ? reentryBlockOf(lastRow, ruleModel) : undefined;
       const d = decideAuto({ model, position: null, watermarkT: watermarkRef.current, nowS, market, product: target.kind === 'equity' ? 'INTRADAY' : autoProductOf(arm.product), reentryBlock });
       // A signal whose entry kept failing before anything was sent, and is no longer enterable (a newer bar closed, it aged out): said once.

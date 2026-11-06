@@ -109,8 +109,11 @@ strategy rules (the opposite-brick exit stays in the tab): exits and the guard o
   an order went out is queued and retried, never dropped. A page that switches its guard off stops an exit already queued.
 - A mode / broker switch removes a chart's server guard only when that chart holds no AUTO position; a server guard held for another broker or mode
   than the page opened in is announced with a "Switch it off" button, never left enforcing unseen.
-- NOT covered: a tab-less re-entry never happens (no entries), the rule exit (opposite brick / Two-back stop) still needs the tab, and the
-  watcher only protects what the guard's levels describe - with the guard OFF there is no server stop.
+- Two-back / One-back stop (2026-11-06, review fix): the row's own `stop` is a plain price level, so the watcher enforces it on every open
+  REAL row of today, guard on or off (`stopHit`, bridge price). The close is recorded as reason `stop` (note "sent by the server watcher"),
+  not `server guard: …`, so an open tab does not disarm on it. Whoever takes `beginExit` first sends it.
+- NOT covered: a tab-less re-entry never happens (no entries), the opposite-brick / Supertrend / trailing-SL exits still need the tab, and
+  for those rules the watcher only protects what the guard's levels describe - with the guard OFF they have no server stop.
 
 ## Renko pyramid: `+1L/brick` (added 2026-11-05)
 Opt-in per chart on `/renko` (not P&F, not Replay). User guide: `docs/RENKO_AUTO_GUIDE.md` §4 "Adding lots on new best bricks".
@@ -124,7 +127,7 @@ Opt-in per chart on `/renko` (not P&F, not Replay). User guide: `docs/RENKO_AUTO
 - Decision 2026-11-05 (user): new-best-brick only (no re-adding after a pullback), user-set Max, at most one lot per bar.
 - Every N bricks (2026-11-05, user request): `row.pyramidEvery` (1-50, saved at entry, absent = 1). The new best close must also be
   ≥ N boxes past the last add's `box` (the entry brick before the first add). N = 1 is the original rule. On the arm record as `pyramid.every`.
-- Trailing SL after an add (2026-11-05, user request; default ON, 2 boxes): `row.trailBoxes` (1-20, saved at entry, absent = off) →
+- Trailing SL after an add (2026-11-05, user request; default ON, 2 boxes): `row.trailBoxes` (UI 2-20 since 2026-11-06: the first opposite brick already closes 2 boxes back, so 1 was the same as 2; the ledger still reads a saved 1; absent = off) →
   `trailOf(row)` (active once `adds` is non-empty, from the first add's bar) → `decideAuto` exits with reason `trail` on the first closed brick
   after that bar that closes `trailBoxes` boxes back from the best favourable brick close since entry (`trailExitColumn`). Checked after EOD and
   before the two-back stop / reversal / Supertrend. User chose closed-brick (not live price) and browser-tab only (not the server watcher).
@@ -140,3 +143,15 @@ Opt-in per chart on `/renko` (not P&F, not Replay). User guide: `docs/RENKO_AUTO
   by the broker, `close.pendingAdded` settles it; `abortExit` restores the add state), except when a sibling live REAL row holds the same
   contract at that broker. Adds need `complete` history and the page broker, run the entry's contract checks, and retry a not-sent failure up to 3 times per bar.
 
+## Review fixes (2026-11-06)
+- Ledger cap: `capRows` drops the oldest CLOSED rows past 500; a live row is never dropped (a plain slice could forget an open REAL row
+  once a Tick-interval PAPER chart closed 500 trades).
+- `confirmEntry` must match the reserved units leg by leg (as `confirmAdd`); a mismatch is marked `unknownEntry` and halts the chart.
+- `open` refuses a REAL row opposite a live REAL row on the same contract and broker (they net at the broker: the flat reconcile would close
+  both, and each exit would open the other's position). Same side and PAPER are allowed.
+- Renko stop with no usable price (null or stale feed): `stopBrickColumn` exits on the first closed brick beyond the stop, booked at the
+  brick close but never better than the stop.
+- Bricks on the entry bar after the signal brick count toward the trail best, the re-entry block's best and the pyramid start (one bar
+  prints bricks one way only, so the ones before the signal never beat the entry brick). No add on the entry bar itself.
+- Re-entry block after a trail exit reads the last TRADE on this contract and mode: a refused entry or another mode's row no longer ends it.
+- Rejected: moving the MCX entry cutoff earlier than its square-off minute (the user's 2026-11-03 choice stands).

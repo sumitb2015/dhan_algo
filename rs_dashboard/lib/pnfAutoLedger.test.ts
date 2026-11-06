@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EMPTY_LEDGER, applyAutoOp, dayStats, parseLedger, type AutoLedger, type AutoOp } from './pnfAutoLedger.ts';
+import { EMPTY_LEDGER, applyAutoOp, capRows, dayStats, parseLedger, type AutoLedger, type AutoOp, type AutoRow } from './pnfAutoLedger.ts';
 
 const fut = { kind: 'futures', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24' } as const;
 const row = (over: Record<string, unknown> = {}) => ({
@@ -162,7 +162,7 @@ test('REAL fills: the broker\'s average replaces the decision price, P&L is reco
 });
 
 test('a late entry fill re-prices an already closed row\'s P&L', () => {
-  let l = run(EMPTY_LEDGER, { op: 'open', row: row({ mode: 'REAL', state: 'entering', side: 'SELL', entryPrice: 100, unitsPerPoint: 10 }) });
+  let l = run(EMPTY_LEDGER, { op: 'open', row: row({ mode: 'REAL', state: 'entering', side: 'SELL', entryPrice: 100, unitsPerPoint: 10, legs: [{ label: 'x', key: 'k', units: 10 }] }) });
   l = run(l, { op: 'confirmEntry', id: 'r1', legs: [{ label: 'x', key: 'k', units: 10 }], orderIds: ['O1'] });
   l = run(l, { op: 'beginExit', id: 'r1', t: 2 });
   l = run(l, { op: 'close', id: 'r1', exitT: 3, exitPrice: 95, reason: 'reversal' });
@@ -173,7 +173,7 @@ test('a late entry fill re-prices an already closed row\'s P&L', () => {
 
 test('fillPrice guards: the order count must match the legs, a price far from the decision is refused, rows closed without an AUTO order are not re-priced', () => {
   const open2 = () => {
-    let l = run(EMPTY_LEDGER, { op: 'open', row: row({ mode: 'REAL', state: 'entering', side: 'SELL', entryPrice: 160, unitsPerPoint: 10 }) });
+    let l = run(EMPTY_LEDGER, { op: 'open', row: row({ mode: 'REAL', state: 'entering', side: 'SELL', entryPrice: 160, unitsPerPoint: 10, legs: [{ label: 'CE', key: 'c', units: 10 }, { label: 'PE', key: 'p', units: 10 }] }) });
     return run(l, { op: 'confirmEntry', id: 'r1', legs: [{ label: 'CE', key: 'c', units: 10 }, { label: 'PE', key: 'p', units: 10 }], orderIds: ['A', 'B'] });
   };
   const l = open2();
@@ -336,4 +336,36 @@ test('a trail exit keeps the trade best on the row (the re-entry level)', () => 
   const c = run(l, { op: 'close', id: 'r1', exitT: 2000, exitPrice: 99, reason: 'trail', exitBarT: 1980, exitBox: 99, trailBest: 104 });
   assert.equal(c.rows[0].trailBest, 104);
   assert.equal(run(l, { op: 'close', id: 'r1', exitT: 2000, exitPrice: 99, reason: 'trail', trailBest: NaN }).rows[0].trailBest, undefined);
+});
+
+test('review fixes: the row cap drops the oldest CLOSED rows, never a live one', () => {
+  let l = run(EMPTY_LEDGER, { op: 'open', row: row({ id: 'real', mode: 'REAL', state: 'entering' }) });
+  l = run(l, { op: 'confirmEntry', id: 'real', legs: [{ label: 'F', key: null, units: 65 }] });
+  for (let i = 0; i < 510; i++) {
+    l = run(l, { op: 'open', row: row({ id: `p${i}`, chart: 2 }) });
+    l = run(l, { op: 'close', id: `p${i}`, exitT: 2000, exitPrice: 99, reason: 'reversal' });
+  }
+  assert.equal(l.rows.length, 500);
+  assert.equal(l.rows.find(r => r.id === 'real')?.state, 'open');
+  assert.equal(l.rows[l.rows.length - 1].id, 'p509');
+  const rs = [{ id: 'a', state: 'closed' }, { id: 'b', state: 'open' }, { id: 'c', state: 'closed' }] as AutoRow[];
+  assert.deepEqual(capRows(rs, 2).map(r => r.id), ['b', 'c']);
+  assert.deepEqual(capRows(rs, 1).map(r => r.id), ['b']);
+});
+
+test('review fixes: confirmEntry must match the reserved units leg by leg', () => {
+  const l = run(EMPTY_LEDGER, { op: 'open', row: row({ mode: 'REAL', state: 'entering' }) });
+  const off = applyAutoOp(l, { op: 'confirmEntry', id: 'r1', legs: [{ label: 'F', key: null, units: 130 }] });
+  assert.ok(!off.ok && off.status === 409);
+  assert.ok(!applyAutoOp(l, { op: 'confirmEntry', id: 'r1', legs: [{ label: 'F', key: null, units: 65 }, { label: 'G', key: null, units: 65 }] }).ok);
+  assert.ok(applyAutoOp(l, { op: 'confirmEntry', id: 'r1', legs: [{ label: 'F', key: null, units: 65 }] }).ok);
+});
+
+test('review fixes: no REAL AUTO entry opposite a live REAL row on the same contract and broker (they would net at the broker)', () => {
+  const l = run(EMPTY_LEDGER, { op: 'open', row: row({ mode: 'REAL', state: 'entering', side: 'BUY' }) });
+  const opp = applyAutoOp(l, { op: 'open', row: row({ id: 'r2', chart: 2, mode: 'REAL', state: 'entering', side: 'SELL' }) });
+  assert.ok(!opp.ok && opp.status === 409);
+  assert.ok(applyAutoOp(l, { op: 'open', row: row({ id: 'r2', chart: 2, mode: 'REAL', state: 'entering', side: 'BUY' }) }).ok, 'the same side is fine');
+  assert.ok(applyAutoOp(l, { op: 'open', row: row({ id: 'r2', chart: 2, mode: 'REAL', state: 'entering', side: 'SELL', broker: 'kotak' }) }).ok, 'another broker does not net');
+  assert.ok(applyAutoOp(l, { op: 'open', row: row({ id: 'r2', chart: 2, side: 'SELL' }) }).ok, 'PAPER owns nothing at the broker');
 });

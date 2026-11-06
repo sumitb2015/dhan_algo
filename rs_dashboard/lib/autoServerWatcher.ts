@@ -11,7 +11,7 @@ import { brokerPositionRows, brokerSessionOk } from '@/lib/priceLadderServer';
 import { CloseGuard } from '@/lib/priceLadderClose';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { targetKey } from '@/lib/pnfTarget';
-import { chartPrice, guards, ownHeldQty, runtimeKey, stepRow, type RowRuntime, type ServerGuardCfg } from '@/lib/autoServerGuard';
+import { chartPrice, guards, ownHeldQty, runtimeKey, stepRow, stopHit, type RowRuntime, type ServerGuardCfg } from '@/lib/autoServerGuard';
 import { autoProductOf, autoWindow, rowMarket } from '@/lib/pnfAuto';
 import { istMinuteOfDay, sessionWindow } from '@/lib/straddlePnfLive';
 import { istDateIso } from '@/lib/nseHolidays';
@@ -100,7 +100,7 @@ async function mustApply(scope: PnfScope, rowId: string, op: AutoOp): Promise<vo
  * pyramid add (adding / unknownAdd, see tick): the exit covers the confirmed units plus the pending add's, capped by what the broker shows,
  * and the close records whether the added lot was there.
  */
-async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: number, withPendingAdd = false, eod = false): Promise<void> {
+async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: number, withPendingAdd = false, eod = false, rowReason?: string): Promise<void> {
   let row = snap;
   const t = () => Date.now() / 1000;
   const log = (text: string) => applyAutoLedgerOp(scope, { op: 'log', chart: row.chart, t: t(), text });
@@ -155,10 +155,11 @@ async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: nu
     const outcome = sendOutcome(results);
     if (outcome === 'placed' || outcome === 'flat') {
       attempts.delete(row.id);
-      await mustApply(scope, row.id, { op: 'close', id: row.id, exitT: t(), exitPrice: price, reason: `server guard: ${reason}`, note: outcome === 'flat' ? 'already flat at the broker' : undefined,
+      // `rowReason`: an exit that is the row's own rule (its stop), recorded as the page records it so an open tab does not read it as a guard trip
+      await mustApply(scope, row.id, { op: 'close', id: row.id, exitT: t(), exitPrice: price, reason: rowReason ?? `server guard: ${reason}`, note: outcome === 'flat' ? 'already flat at the broker' : rowReason ? 'sent by the server watcher' : undefined,
         orderIds: results.filter(r => r.status === 'placed' && r.orderId).map(r => String(r.orderId)), ...(pendingAdded !== undefined ? { pendingAdded } : {}) });   // a tab replaces the decision price with the fill
       if (pendingAdded !== undefined) await log(`server: chart ${row.chart}'s unresolved added lot was ${pendingAdded ? 'found at the broker and exited with the position' : 'not at the broker (dropped)'}`);
-      await log(`server guard exited chart ${row.chart}: ${reason} @ ~${price.toFixed(2)}`);
+      await log(`${rowReason ? 'server' : 'server guard'} exited chart ${row.chart}: ${reason} @ ~${price.toFixed(2)}`);
     } else if (outcome === 'unknown' || outcome === 'partial') {
       await mustApply(scope, row.id, { op: 'markUnknown', id: row.id, note: `server guard exit: ${describe(outcome, results)}` });
       await log('server guard exit outcome unknown - check Orders/Positions, then resolve it');
@@ -236,9 +237,9 @@ async function warn(scope: PnfScope, row: AutoRow, text: string): Promise<void> 
 async function tick(): Promise<void> {
   const loop = L[LOOP_KEY];
   if (!loop || loop.busy) return;
-  if (pendingOps.size) await flushPending();
   loop.busy = true;
   try {
+    if (pendingOps.size) await flushPending();                    // inside busy: two ticks never replay the same queued op
     await reconcileFlat().catch(err => console.error('[auto-server-guard] reconcile failed:', err));
     const file = readServerGuards();
     const now = Date.now();
@@ -278,8 +279,8 @@ async function tick(): Promise<void> {
         if (!win || minute < win.open) continue;                      // shut today / before the open: nothing to act on
         // After the close an exit cannot trade: say so (once in a while) instead of sending orders into a shut market every few seconds.
         if (minute >= sessionWindow(rowMarket(row), nowS)[1]) { await warn(scope, row, `chart ${row.chart}'s position is still open after the market closed - not exited; check the broker and resolve it`); continue; }
-        // An unguarded row is only looked at once its end-of-day time is near (no price is asked for before that).
-        if (!cfg && minute < win.eodExit - 2) continue;
+        // An unguarded row without a stop is only looked at once its end-of-day time is near (no price is asked for before that).
+        if (!cfg && row.stop === undefined && minute < win.eodExit - 2) continue;
         todo.push({ scope, row, cfg, win, stuckAdd });
       }
     }
@@ -307,8 +308,16 @@ async function tick(): Promise<void> {
         await exitRow(scope, row, price === null ? 'end of day (no live price)' : 'end of day', price ?? row.entryPrice, stuckAdd, true);
         continue;
       }
+      if (price === null) {
+        if (cfg || row.stop !== undefined) await warn(scope, row, `no live price for chart ${row.chart} - not watching until the bridge has one`);
+        continue;
+      }
+      // The row's own stop (Two-back / One-back) holds with or without a guard: the tab may be closed. The first to take beginExit sends it.
+      if (stopHit(row, price)) {
+        await exitRow(scope, row, `stop ${row.stop!.toFixed(2)} hit`, price, stuckAdd, false, 'stop');
+        continue;
+      }
       if (!cfg) continue;
-      if (price === null) { await warn(scope, row, `no live price for chart ${row.chart} - not watching until the bridge has one`); continue; }
       const cur = readServerGuards();
       const rtKey = runtimeKey(scope, row.chart, row.id);
       const step = stepRow(row, cfg, price, cur.runtime[rtKey] ?? {});

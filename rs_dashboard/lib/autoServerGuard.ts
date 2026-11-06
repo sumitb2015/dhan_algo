@@ -73,3 +73,12 @@ export function ownHeldQty(row: Pick<AutoRow, 'side' | 'legs' | 'product'>, book
   const closing = row.side === 'BUY' ? 'SELL' : 'BUY';
   return row.legs.reduce((n, l) => n + planOwnExit(l.key as string, book, closing, l.units, broker, autoProductOf(row.product)).qty, 0);
 }
+
+/**
+ * A Two-back / One-back row's protective stop against the live price (as the page's decideAuto: a long at or below it, a short at or
+ * above it). The stop is a plain price level saved on the row, so the server enforces it with the tab closed. False without a stop.
+ */
+export function stopHit(row: Pick<AutoRow, 'side' | 'stop'>, price: number | null): boolean {
+  if (row.stop === undefined || !Number.isFinite(row.stop) || price === null) return false;
+  return row.side === 'BUY' ? price <= row.stop : price >= row.stop;
+}

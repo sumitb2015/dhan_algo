@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chartPrice, guards, ownHeldQty, runtimeKey, stepRow, QUOTE_MAX_AGE_MS, type ServerGuardCfg } from './autoServerGuard.ts';
+import { chartPrice, guards, ownHeldQty, runtimeKey, stepRow, stopHit, QUOTE_MAX_AGE_MS, type ServerGuardCfg } from './autoServerGuard.ts';
 import type { AutoRow } from './pnfAutoLedger.ts';
 
 const NOW = 1_000_000_000_000;
@@ -102,4 +102,13 @@ test('a pyramid add at the market price leaves the guard\'s MTM unchanged (avera
 test('a row with a pyramid add on the wire or unresolved is still guarded (its confirmed lots are held)', () => {
   assert.equal(guards(cfg(), row({ state: 'adding' })), true);
   assert.equal(guards(cfg(), row({ state: 'unknownAdd' })), true);
+});
+
+test('stopHit: the row\'s own stop against the live price, a long at or below it, a short at or above it; none without a stop or a price', () => {
+  assert.equal(stopHit(row({ side: 'BUY', stop: 100 }), 100), true);
+  assert.equal(stopHit(row({ side: 'BUY', stop: 100 }), 100.5), false);
+  assert.equal(stopHit(row({ side: 'SELL', stop: 100 }), 100), true);
+  assert.equal(stopHit(row({ side: 'SELL', stop: 100 }), 99.5), false);
+  assert.equal(stopHit(row({ side: 'BUY' }), 1), false);
+  assert.equal(stopHit(row({ side: 'BUY', stop: 100 }), null), false);
 });

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Bot } from 'lucide-react';
 import { holdsPosition, PYRAMID_HARD_MAX, rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
 import type { AutoProduct } from '@/lib/pnfOrderLogic';
-import { PYRAMID_EVERY_MAX, TRAIL_BOXES_MAX } from '@/lib/pnfAuto';
+import { PYRAMID_EVERY_MAX, TRAIL_BOXES_MAX, TRAIL_BOXES_MIN } from '@/lib/pnfAuto';
 
 // One chart's AUTO switch, lots and status (engine: ./usePnfAuto.ts). The switch is saved in the AUTO ledger and resumed after a reload in
 // the same mode (lib/pnfAutoArm.ts; the page always loads in PAPER, so a REAL arm resumes once the page is switched to REAL); in REAL mode
@@ -93,7 +93,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
   const commitTrail = (raw: string) => {
     if (!pyramid || !onPyramid) return;
     const n = parseInt(raw, 10);
-    const next = Number.isInteger(n) ? Math.max(1, Math.min(TRAIL_BOXES_MAX, n)) : pyramid.trail;
+    const next = Number.isInteger(n) ? Math.max(TRAIL_BOXES_MIN, Math.min(TRAIL_BOXES_MAX, n)) : pyramid.trail;
     setTrailDraft(String(next));
     if (next !== pyramid.trail) onPyramid({ ...pyramid, trail: next });
   };
@@ -258,7 +258,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
               </button>
               {pyramid.trailOn && (<>
                 <input aria-label={`Trailing SL boxes after an add on chart ${chart}`} data-testid={`pnf-auto-trail-bx-${chart}`} value={trailDraft} disabled={armed}
-                       title={`Boxes back from the best brick (1-${TRAIL_BOXES_MAX}). Enter or click away to apply`} inputMode="numeric"
+                       title={`Boxes back from the best brick (${TRAIL_BOXES_MIN}-${TRAIL_BOXES_MAX}). 2 = the first opposite brick (a Renko reversal is a 2-box move). Enter or click away to apply`} inputMode="numeric"
                        onFocus={() => { trailFocusedRef.current = true; }}
                        onChange={e => setTrailDraft(e.target.value)}
                        onBlur={e => { trailFocusedRef.current = false; if (cancelBlurRef.current) { cancelBlurRef.current = false; return; } commitTrail(e.currentTarget.value); }}

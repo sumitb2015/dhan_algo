@@ -176,7 +176,7 @@ test('side filter: a buy-only chart never enters the sell signal on the last bar
 });
 
 // ── pyramid (decideAdd) ──
-import { decideAdd, pyramidEveryOf, PYRAMID_EVERY_MAX, reentryBlockOf, trailBest, trailLevel, trailOf } from './pnfAuto.ts';
+import { decideAdd, pyramidEveryOf, PYRAMID_EVERY_MAX, reentryBlockOf, stopBrickColumn, trailBest, trailLevel, trailOf } from './pnfAuto.ts';
 
 /** A Renko short entered on the 10:00 brick (close 100); bricks of box 1 after it: [time, dir, close]. */
 function renkoModel(bricks: [number, 'X' | 'O', number][], lastBarT: number): AutoModel {
@@ -354,4 +354,32 @@ test('decideAuto: an NRML position holds through 15:15 and exits at 15:35; an MI
   assert.equal(decideAuto({ model: sm, position: null, watermarkT: 0, nowS: at(15, 20) + 5, market: 'NSE_FNO', product: 'MARGIN' }).action, 'enter');
   const late = model({ signals: [sig('DOUBLE_TOP_BUY' as PnfSignal['kind'], at(15, 25))], lastBarT: at(15, 25) });
   assert.equal(decideAuto({ model: late, position: null, watermarkT: 0, nowS: at(15, 25) + 5, market: 'NSE_FNO', product: 'MARGIN' }).action, 'none', 'NRML: past 15:25');
+});
+
+test('review fixes: a Renko stop with no usable price exits on a closed brick beyond it, booked no better than the stop', () => {
+  // a long from 103 with its stop at 101: bricks fall to 102 then 100
+  const bricks: [number, 'X' | 'O', number][] = [[ist(10, 1), 'X', 103], [ist(10, 2), 'O', 102], [ist(10, 3), 'O', 100]];
+  const m = renkoModel(bricks, ist(10, 3));
+  const pos = { side: 'BUY' as const, entryBarT: ist(10, 1), stop: 101 };
+  assert.equal(stopBrickColumn(m, pos), 3);
+  assert.deepEqual(decideAuto({ model: m, position: pos, watermarkT: 0, nowS: ist(10, 4), market: 'NSE', price: null }), { action: 'exit', reason: 'stop', col: 3, boxPrice: 100 });
+  // a live price above the stop wins over the bricks; no brick past the stop yet: holding
+  assert.equal(decideAuto({ model: m, position: pos, watermarkT: 0, nowS: ist(10, 4), market: 'NSE', price: 101.5 }).action, 'none');
+  assert.equal(decideAuto({ model: renkoModel(bricks.slice(0, 2), ist(10, 2)), position: pos, watermarkT: 0, nowS: ist(10, 3), market: 'NSE', price: null }).action, 'none');
+  // a P&F model has no brick fallback
+  assert.equal(stopBrickColumn({ ...m, chart: 'pnf' }, pos), -1);
+});
+
+test('review fixes: bricks printed on the entry bar after the signal brick count toward the trail best and the pyramid start', () => {
+  // a long entered on the 102 brick of a 10:01 bar that went on to 104; best is 104, so a 102 brick later is 2 back
+  const bricks: [number, 'X' | 'O', number][] = [[ist(10, 1), 'X', 102], [ist(10, 1), 'X', 103], [ist(10, 1), 'X', 104], [ist(10, 3), 'X', 105], [ist(10, 4), 'O', 103]];
+  const m = renkoModel(bricks, ist(10, 4));
+  const pos = { side: 'BUY' as const, entryBarT: ist(10, 1), trail: trailOf({ entryPrice: 102, entryBox: 102, trailBoxes: 2, adds: [{ barT: ist(10, 3) }] }) };
+  assert.equal(trailBest(m, pos), 105);
+  // no add on 10:03's 104 when the entry bar already reached 104; 105 is a new best
+  const add = (b: typeof bricks, last: number) => decideAdd({ model: renkoModel(b, last), row: { side: 'BUY', entryBarT: ist(10, 1), entryPrice: 102, entryBox: 102, lots: 1 }, nowS: last + 30, market: 'NSE', maxLots: 5 });
+  assert.equal(add([...bricks.slice(0, 3), [ist(10, 3), 'X', 104]], ist(10, 3)).add, false);
+  assert.deepEqual(add(bricks.slice(0, 4), ist(10, 3)), { add: true, barT: ist(10, 3), box: 105 });
+  // never an add on the entry bar itself
+  assert.equal(add(bricks.slice(0, 3), ist(10, 1)).add, false);
 });

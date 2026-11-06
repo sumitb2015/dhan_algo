@@ -43,14 +43,14 @@ Pick one per chart from the dropdown next to AUTO. A chart starts on **Supertren
 |---|---|---|
 | **N-brick** | BUY / SELL on the Nth brick after a colour change (once per run). The chart's first run never signals. Mid-run, it waits for the next reversal. | First brick of the opposite colour after the entry. No stop. |
 | **N-brick (trend)** | On **every** brick that completes N same-colour bricks, so with N = 1 the next brick of the run you are in. Arming mid-run enters on the next brick. | First opposite brick, and that brick is also an entry for the other side (N = 1): the chart **flips** straight into the new direction. No stop. |
-| **Two-back** | 3+ bricks, a 2-brick pullback, then the run resumes and a brick makes it 3 long and closes past the swing. | A stop one brick beyond the pullback, checked against the **live price** every second. No opposite-brick exit and no target. |
+| **Two-back** | 3+ bricks, a 2-brick pullback, then the run resumes and a brick makes it 3 long and closes past the swing. | A stop one brick beyond the pullback, checked against the **live price** every second (by the tab, and by the server for a REAL row). With no fresh price, a closed brick beyond the stop exits at that brick's close. No opposite-brick exit and no target. |
 | **One-back** | 2+ bricks, a 1-brick pullback, then 2 resuming bricks that break the swing. | The same kind of stop. |
 | **Supertrend** | BUY while a brick closes **above** the Supertrend line, SELL while it closes **below** it (the line's direction on the chart's ATR period x multiplier, the `ST` control). Arming mid-run enters on the next brick. | The first brick after the entry whose Supertrend direction is against the position (the line flips), and that brick is also the entry for the other side: the chart **flips**. No stop. |
 
 N-brick, N-brick (trend) and Supertrend carry **no stop of their own**: the MTM guard is their loss limit. Two consecutive S (or B) markers on the
+chart under the trend rule are a flip: the first is the exit of the old position, the second the entry of the new one.
 
 **Side.** Next to the rule, **Buy + Sell** (default) / **Buy only** / **Sell only** limits what AUTO may *open*; a signal for the other side is ignored (a buy-only chart stays flat through a sell phase and enters on the next buy). The AUTO status line says `SELL signal ignored (Buy only)` while it holds one back (logged once per change of direction), and arming logs and toasts the side. Exits are never filtered: an open position always exits by its own rule, MTM guard or end of day. The choice is remembered per chart and locked only while AUTO is armed. On options, "Sell" means selling the option.
-chart under the trend rule are a flip: the first is the exit of the old position, the second the entry of the new one.
 
 ## 3. When it enters
 
@@ -70,6 +70,9 @@ chart under the trend rule are a flip: the first is the exit of the old position
   Holidays and weekends count as closed.
 - **Feed.** Needs a live price and a fresh feed. A stale feed pauses entries.
 - **Refusals.** Three refused entries in a row halt the chart.
+- **One direction per contract (REAL).** A REAL entry is refused while the other chart holds a REAL position on the opposite side of the
+  same contract on the same broker: the broker nets the two, so each exit would open a position the other owns. The entry is retried
+  while the signal is fresh, then logged as missed. The same side is allowed (each chart exits only its own units).
 - **Nothing sent yet.** If an entry fails before any order goes out (the contract lookup has not answered, the ledger is unreachable for a
   moment - a dashboard restart), it is retried every second while the signal is still the newest closed bar's; a signal that ages out that
   way is logged as `missed the … signal`.
@@ -131,7 +134,9 @@ Both are set before arming and locked while AUTO is armed. Saved per chart and o
 - A pullback that only gets back to a level already reached adds nothing. **At most one lot per bar**, however many bricks it printed.
   Bricks on an older bar (a sleeping tab) are never chased. No adds after the entry cutoff (15:05 NSE) or with a stale feed.
 - **Trailing SL after an add (`Trail SL [2] bx`, on by default):** once at least one lot has been added, AUTO exits the whole position
-  on the first **closed brick** that is **N boxes back from the best brick since entry** (default 2, 1-20). It does not wait for the
+  on the first **closed brick** that is **N boxes back from the best brick since entry** (default 2, 2-20; 2 is the first opposite brick,
+  because a Renko reversal is a 2-box move - a saved 1, which behaved the same, now reads as 2). Bricks the entry bar printed after the
+  signal brick count toward the best, and toward the first add's starting level. It does not wait for the
   Supertrend to turn, and it is checked before the Supertrend / opposite-brick rule (the end-of-day exit still comes first). The position line
   shows the level once it is active: `LONG 5L (4+1) @ 8340.20 avg … SL 8352.00`. It is set before arming (locked while armed) and saved on the row at entry, so a change only
   affects the next trade. Switch it off with the `Trail SL` button. It runs in the open `/renko` tab, like the Supertrend exit; with the
@@ -174,7 +179,9 @@ Both are set before arming and locked while AUTO is armed. Saved per chart and o
 
 ### Safety rules (the ledger)
 
-- One live AUTO row per chart. A REAL entry is **reserved before it is sent** (`entering`), an exit likewise (`exiting`).
+- One live AUTO row per chart. A REAL entry is **reserved before it is sent** (`entering`), an exit likewise (`exiting`). A placed entry
+  must match the reserved units leg by leg; anything else becomes `unknownEntry` and halts the chart.
+- The ledger keeps the last 500 rows by dropping the oldest **closed** ones; a live row is never dropped.
 - An order whose outcome is unknown (no reply, partial) becomes `unknownEntry` / `unknownExit`, halts the chart and is **never resent**.
   Check the broker, then click **Is open** or **Is flat**.
 - A reservation older than 60 s (the tab died with the order on the wire) is offered for the same resolution.
@@ -211,12 +218,14 @@ One guard per chart, shown in the toolbar (**MTM Guard ON/OFF**) with its card.
 | | Browser tab (the leader tab) | Dashboard server |
 |---|---|---|
 | Strategy rules, entries | yes | no |
-| Opposite-brick / Two-back stop exit | yes | no |
+| Opposite-brick / trailing SL exit | yes | no |
+| Two-back / One-back stop | yes | **yes, for open REAL AUTO rows** (guard on or off) |
 | MTM guard | yes | **yes, for open REAL AUTO rows** |
 | End-of-day exit | yes | **yes, for every open REAL AUTO row** (guard on or off) |
 
 The tab does all the trading. If it closes, sleeps or loses its network, **nothing in the left column runs**, and an N-brick position would
-sit without a stop. To cover that, the dashboard server runs an **exit-only watcher** (`lib/autoServerWatcher.ts`, started with the server):
+sit without a stop. A Two-back / One-back REAL row keeps its stop: the server checks it against the bridge price every 2.5 s and records
+the exit as an ordinary `stop` (so an open tab stays armed, as after its own stop exit). To cover that, the dashboard server runs an **exit-only watcher** (`lib/autoServerWatcher.ts`, started with the server):
 
 - The page syncs each chart's guard to the server every time you switch it on, update it or switch it off (`debug/auto_server_guards.json`).
   The page re-reads the server every 3 s and always lists what it holds beside the MTM Guard button (**Server**: `OFF`, or one chip per
@@ -227,7 +236,7 @@ sit without a stop. To cover that, the dashboard server runs an **exit-only watc
   guard could exit trades while the card said OFF.)
 - It guards only **REAL, open** rows of the synced broker and mode, from the row's entry price (or from the row's P&L when you switched the
   guard on late), using the same bridge prices as the page. Every leg must have ticked within 10 minutes, otherwise it pauses on that row and
-  logs it. A row from an earlier day is reported, never exited.
+  logs it. A row from an earlier day is reported, never exited. A Two-back / One-back row's own stop is enforced too, guard on or off.
 - A trip is an ordinary ledger exit: it takes `beginExit`, sends the same own-units exit as the page, then records `close` /
   `markUnknown`. A rejected exit is retried every 10 s; after 5 failures in a row it stands down for a minute and says so. A ledger write that
   fails after the order went out is queued and retried. A row it closed shows `server guard: <rule>`; an open tab disarms AUTO on seeing it.
