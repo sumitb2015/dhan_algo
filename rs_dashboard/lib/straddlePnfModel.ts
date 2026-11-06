@@ -3,7 +3,8 @@
 // interval first; the box size is a percentage of the first price.
 import { VWAP_START, buildPnf, continuePnf, detectSignals, exitTags, extendPnf, sessionOf, vwapFrom, type VwapState, type Bar, type PnfColumn, type PnfResume, type PnfSignal } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
-import { buildRenko, continueRenko, extendRenko, renkoSignals, trendSignals, supertrendSignals, twoBackSignals, oneBackSignals, renkoSma, renkoSmaByBar, renkoSupertrend, type RenkoResume, type RenkoSupertrendPoint } from './renko.ts';
+import { buildRenko, continueRenko, extendRenko, renkoSignals, trendSignals, supertrendSignals, twoBackSignals, oneBackSignals, renkoSmaResume, renkoSmaByBarFrom, renkoSupertrendResume, runStartOf, type RenkoResume, type RenkoSupertrendPoint } from './renko.ts';
+import type { SupertrendState } from './indicators.ts';
 import { MIN_BOX_PTS_PCT, type BoxMode } from './straddlePnfSettings.ts';
 
 export type Overlay = 'vwap' | 'sma';
@@ -220,8 +221,25 @@ export type ConfirmedModel = Omit<PanelModel, 'liveColumns' | 'sessionOpen' | 'p
     vw1: (number | null)[]; vwapState: VwapState; chartVw: (number | null)[];
     /** The closed bars' sessions, their last session's open and the close before it, computed once (not per tick). */
     closedSessions: string[]; closedOpen: number | null; closedPrev: number | null;
+    /** Whether any closed bar traded volume (no VWAP without it). */
+    hasVol: boolean;
+    /** Renko: what a build that only appended bricks carries on instead of re-reading every brick (null on P&F). */
+    renko: RenkoCarry | null;
   };
 };
+
+/** The Renko averages' running state and the settings they were built with (any change rebuilds them). */
+type RenkoCarry = {
+  smaPeriod: number; stPeriod: number; stMult: number; vwapAvailable: boolean; overlayKind: Overlay;
+  sma: (number | null)[]; smaSum: number; stState: SupertrendState | null; reference: (number | null)[];
+};
+
+/** Signals at or after column `from` replaced by `tail` (each list is in column order). */
+function spliceSignals(prev: PnfSignal[], from: number, tail: PnfSignal[]): PnfSignal[] {
+  let k = prev.length;
+  while (k > 0 && prev[k - 1].col >= from) k--;
+  return k === prev.length && !tail.length ? prev : prev.slice(0, k).concat(tail);
+}
 
 /** Sessions (oldest first), the last session's first usable close, and the last usable close of the session before it (its official close `dc` when known). */
 const dayOf = (t: number) => Math.floor((t + 19_800) / 86_400);     // IST calendar day number
@@ -340,19 +358,22 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   }
   const columnTimes = (keep ? prev!.columnTimes.slice(0, keep) : []).concat(columns.slice(keep).map(c => ({ start: bars[c.startBar].t, end: bars[c.endBar].t })));
   const smaPeriod = opts.smaPeriod ?? SMA_PERIOD;
-  // Renko's average is TradingView's: an SMA of brick closes. P&F's averages box values.
-  const boxSma = renko ? renkoSma(columns, smaPeriod) : boxSmaOf(columns, box, smaPeriod);
   const stPeriod = opts.stPeriod ?? ST_PERIOD;
   const stMult = opts.stMult ?? ST_MULT;
-  const supertrend = renko ? renkoSupertrend(columns, stPeriod, stMult) : [];
-  const vwapAvailable = opts.volume !== false && closedBars.some(b => b.vol > 0);
+  // whether any closed bar traded volume: a prefix build already knows it for its bars, so only the new ones are read
+  let hasVol = prefix && p!.hasVol;
+  for (let i = prefix ? pb!.length : 0; !hasVol && i < closedBars.length; i++) hasVol = closedBars[i].vol > 0;
+  const vwapAvailable = opts.volume !== false && hasVol;
   const overlayKind: Overlay = vwapAvailable ? overlay : 'sma';
+  const vwapNow = vw1.length ? vw1[vw1.length - 1] : null;
+  if (renko) return renkoModel();
+  const boxSma = boxSmaOf(columns, box, smaPeriod);
   // The reference the short-entry zone (below it) and the cover cue (above it) are measured against: VWAP when the instrument
   // trades volume, else the box SMA as it stood at each bar.
-  const reference = vwapAvailable ? vw : renko ? renkoSmaByBar(columns, smaPeriod, bars.length) : boxSmaByBar(columns, box, smaPeriod, bars.length);
+  const reference = vwapAvailable ? vw : boxSmaByBar(columns, box, smaPeriod, bars.length);
   // VWAP moves every minute, so the header reads the 1-minute series. The SMA is a P&F average: it only moves when a box is drawn.
   const overlayLine = overlayKind === 'vwap' ? columns.map(c => vw[c.endBar]) : boxSma;
-  const overlayNow = overlayKind === 'vwap' ? (vw1.length ? vw1[vw1.length - 1] : null) : (boxSma.length ? boxSma[boxSma.length - 1] : null);
+  const overlayNow = overlayKind === 'vwap' ? vwapNow : (boxSma.length ? boxSma[boxSma.length - 1] : null);
   return {
     chart,
     box,
@@ -363,29 +384,85 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
     boxBaseT,
     columns,
     // Renko: N-brick confirmation (`reversal` holds N); no COVER cue and no session marks (they are P&F devices).
-    signals: renko ? renkoSignals(columns, bars, reference, reversal) : detectSignals(columns, bars, reference),
-    trend: renko ? trendSignals(columns, bars, reference, reversal) : [],
-    stSignals: renko ? supertrendSignals(columns, bars, reference, supertrend) : [],
-    twoBack: renko ? twoBackSignals(columns, bars, reference, box) : [],
-    oneBack: renko ? oneBackSignals(columns, bars, reference, box) : [],
-    exits: renko ? [] : exitTags(columns, bars, reference),
+    signals: detectSignals(columns, bars, reference),
+    trend: [],
+    stSignals: [],
+    twoBack: [],
+    oneBack: [],
+    exits: exitTags(columns, bars, reference),
     overlay: overlayLine,
     overlayNow,
     vwapAvailable,
     overlayKind,
     smaPeriod,
-    supertrend,
+    supertrend: [],
     stPeriod,
     stMult,
     lastBarT: bars.length ? bars[bars.length - 1].t : null,
-    sessionMarks: renko ? [] : sessionMarksOf(columns, bars),
+    sessionMarks: sessionMarksOf(columns, bars),
     columnTimes,
-    build: {
+    build: buildState(null),
+  };
+
+  function buildState(renkoCarry: RenkoCarry | null): ConfirmedModel['build'] {
+    return {
       chart, closedBars, interval, boxPct, reversal, anchorPrice, boxSize, sessionCloseMin: opts.sessionCloseMin,
       resume, lastEnd: endIdx.length ? endIdx[endIdx.length - 1] : -1, chartBars: bars, chartEndIdx: endIdx, ptsAsked, vw1, vwapState, chartVw: vw,
-      closedSessions: facts.sessions, closedOpen: facts.open, closedPrev: facts.prev,
-    },
-  };
+      closedSessions: facts.sessions, closedOpen: facts.open, closedPrev: facts.prev, hasVol, renko: renkoCarry,
+    };
+  }
+
+  /**
+   * Renko only ever appends bricks, so after a build that carried prev's bricks on, every brick before prev's last run is final, and
+   * so is everything read from it: the SMA and Supertrend (carried on from their running state), the reference by bar, and every
+   * signal before that run. Only that run and the new bricks are read again (a bar close on years of bricks: ~1 ms, not 100-250).
+   */
+  function renkoModel(): ConfirmedModel {
+    const pr = reuse ? p!.renko : null;
+    const carry = pr !== null && pr.smaPeriod === smaPeriod && pr.stPeriod === stPeriod && pr.stMult === stMult && pr.vwapAvailable === vwapAvailable
+      && keep === prev!.columns.length;
+    const pm = carry ? prev! : null;
+    // Renko's average is TradingView's: an SMA of brick closes.
+    const smaCarry = renkoSmaResume(columns, smaPeriod, pm ? { sma: pr!.sma, sum: pr!.smaSum } : null);
+    const st = renkoSupertrendResume(columns, stPeriod, stMult, pm ? { out: pm.supertrend, state: pr!.stState } : null);
+    const reference = vwapAvailable ? vw : renkoSmaByBarFrom(columns, smaCarry.sma, bars.length, pm && !vwapAvailable ? pr!.reference : null);
+    const overlayLine = overlayKind === 'vwap'
+      ? (pm && pr!.overlayKind === 'vwap' ? pm.overlay.concat(columns.slice(pm.overlay.length).map(c => vw[c.endBar])) : columns.map(c => vw[c.endBar]))
+      : smaCarry.sma;
+    const overlayNow = overlayKind === 'vwap' ? vwapNow : (smaCarry.sma.length ? smaCarry.sma[smaCarry.sma.length - 1] : null);
+    // re-read from the first brick of prev's last (still open) run: a signal can only appear there or later
+    const from = pm && pm.columns.length ? runStartOf(columns, pm.columns.length - 1) : 0;
+    const sig = (old: PnfSignal[] | undefined, read: (from: number) => PnfSignal[]) => (pm && old ? spliceSignals(old, from, read(from)) : read(0));
+    return {
+      chart,
+      box,
+      anchor,
+      boxMode: ptsAsked !== null ? 'pts' : 'pct',
+      boxClamped,
+      boxBase,
+      boxBaseT,
+      columns,
+      // N-brick confirmation (`reversal` holds N); no COVER cue and no session marks (they are P&F devices).
+      signals: sig(pm?.signals, f => renkoSignals(columns, bars, reference, reversal, f)),
+      trend: sig(pm?.trend, f => trendSignals(columns, bars, reference, reversal, f)),
+      stSignals: sig(pm?.stSignals, f => supertrendSignals(columns, bars, reference, st.out, f)),
+      twoBack: sig(pm?.twoBack, f => twoBackSignals(columns, bars, reference, box, 3, f)),
+      oneBack: sig(pm?.oneBack, f => oneBackSignals(columns, bars, reference, box, f)),
+      exits: [],
+      overlay: overlayLine,
+      overlayNow,
+      vwapAvailable,
+      overlayKind,
+      smaPeriod,
+      supertrend: st.out,
+      stPeriod,
+      stMult,
+      lastBarT: bars.length ? bars[bars.length - 1].t : null,
+      sessionMarks: [],
+      columnTimes,
+      build: buildState({ smaPeriod, stPeriod, stMult, vwapAvailable, overlayKind, sma: smaCarry.sma, smaSum: smaCarry.sum, stState: st.state, reference: vwapAvailable ? [] : reference }),
+    };
+  }
 }
 
 /**

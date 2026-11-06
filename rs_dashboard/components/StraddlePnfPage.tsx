@@ -214,23 +214,24 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   const last = bars[bars.length - 1];
   // the minute still forming; a Tick / 10 sec chart has none (its bars are emitted only once closed: lib/pnfTicks.ts)
   const formingBar = !isTickInterval(interval) && last !== undefined && now > 0 && last.t >= minuteOf(now / 1000) ? last : undefined;
-  const closed = formingBar ? bars.slice(0, -1) : bars;
-  const closedLast = closed[closed.length - 1];
+  // The closed bars are sliced off only when the confirmed chart is rebuilt (a copy of years of minutes per tick otherwise).
+  const closedLen = formingBar ? bars.length - 1 : bars.length;
+  const closedLast = closedLen > 0 ? bars[closedLen - 1] : undefined;
   // The confirmed chart depends only on the closed bars, so it is rebuilt when a bar closes or history reloads, not on every tick.
-  const closedKey = `${closed.length}:${closed[0]?.t ?? 0}:${closedLast?.t ?? 0}:${closedLast?.straddle ?? 0}:${feed.histVersion}`;
+  const closedKey = `${closedLen}:${bars[0]?.t ?? 0}:${closedLast?.t ?? 0}:${closedLast?.straddle ?? 0}:${feed.histVersion}`;
   const sessionClose = sessionWindow(feed.market, now / 1000)[1];
   // The previous build is handed back in: a closed bar or a replay step then only carries the chart on over the new bars.
   const prevRef = useRef<ConfirmedModel | null>(null);
   const confirmed = useMemo(
     // Reading the ref here is safe: `prev` only speeds the build up, the result is the same without it (straddlePnfModel.test.ts).
     // eslint-disable-next-line react-hooks/refs
-    () => buildConfirmedModel(closed, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined, boxBaseT, chart }, prevRef.current),
+    () => buildConfirmedModel(closedLen < bars.length ? bars.slice(0, closedLen) : bars, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined, boxBaseT, chart }, prevRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [closedKey, overlay, settings, sessionClose, indexNoVwap, feed.loaded?.anchorT, boxBaseT, chart],
   );
   useEffect(() => { prevRef.current = confirmed; }, [confirmed]);
   const model = useMemo(() => withLive(confirmed, formingBar), [confirmed, formingBar]);
-  const vwapAllowed = !indexNoVwap && (closed.length === 0 || model.vwapAvailable);
+  const vwapAllowed = !indexNoVwap && (closedLen === 0 || model.vwapAvailable);
   return { model, indexNoVwap, vwapAllowed, lastBar: closedLast ?? null, boxBaseT };
 }
 
@@ -1003,6 +1004,26 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     }
   }, [autoLedger]);
   const autoToday = autoLedger.rows.filter(r => r.day === istToday());
+  // Each chart's execution markers: manual trade-bar markers (this browser session) + AUTO trades from the ledger, or the practice
+  // book's in a replay. Rebuilt on every page render (each 2.5 s ledger poll) but handed on by content, so an unchanged list keeps its
+  // identity and the panels do not redraw their whole chart layer (100-300 ms on a long Renko chart) for nothing.
+  const markersFor = (c: ChartId): PnfExecutionMarker[] => {
+    const tk = targetKey(c === 2 ? target2 : target1);
+    return replayT !== null
+      ? book.trades.filter(x => x.targetKey === tk).map(x => ({ id: x.id, t: x.t, action: x.side, price: x.price, lots: x.lots, mode: 'PAPER' as const, estimate: false }))
+      : [...(markers[tk] ?? []), ...autoMarkers(autoToday, tk).map(m => ({ ...m, estimate: m.mode === 'REAL' }))];
+  };
+  // the books' paper-trade list: only when the markers or the AUTO ledger change, not on every live tick
+  const paperTrades = useMemo(
+    () => buildPaperTrades({ ...storedMarkers, ...markers }, autoLedger.rows.filter(r => r.day === istToday()), istToday()),
+    [storedMarkers, markers, autoLedger.rows],
+  );
+  const tm1Raw = markersFor(1), tm2Raw = markersFor(2);
+  const tm1Key = JSON.stringify(tm1Raw), tm2Key = JSON.stringify(tm2Raw);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const tradeMarkers1 = useMemo(() => tm1Raw, [tm1Key]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const tradeMarkers2 = useMemo(() => tm2Raw, [tm2Key]);
   const autoPaper = autoDaySummary(autoToday, istToday(), 'PAPER', autoPrice);
   // Signals depend on the instrument and the box settings: while a chart is armed or holds an AUTO position, they are frozen.
   const locked = (c: ChartId) => autoArm[c].on || !!autoOf(c).row;
@@ -1192,7 +1213,6 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     // Replaying: the chart, its price, markers, rail and AUTO are the practice session's; nothing live is drawn on it.
     const rp = replayT !== null;
     const rbar = (c === 2 ? r2 : r1).lastBar;
-    const tk = targetKey(target);
     const pAuto = book.auto[c];
     return {
       model: shownOf(c).model,
@@ -1223,9 +1243,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       timeAxis: true,
       sessionDividers: target.kind !== 'equity' && target.kind !== 'index',
       // Manual trade-bar markers (this browser session) + AUTO trades from the ledger, on their signal / reversal bars.
-      tradeMarkers: rp
-        ? book.trades.filter(x => x.targetKey === tk).map(x => ({ id: x.id, t: x.t, action: x.side, price: x.price, lots: x.lots, mode: 'PAPER' as const, estimate: false }))
-        : [...(markers[tk] ?? []), ...autoMarkers(autoToday, tk).map(m => ({ ...m, estimate: m.mode === 'REAL' }))],
+      tradeMarkers: c === 2 ? tradeMarkers2 : tradeMarkers1,
       error: feed.loaded?.error ?? (feed.complete ? undefined : contractError[c] ?? undefined),
       active: active === c,
       onActivate: dual ? () => activate(c) : undefined,
@@ -1527,7 +1545,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
         />
       )}
       <BrokerBooks broker={broker} open={booksOpen} onOpenChange={changeBooksOpen} autoRows={autoToday} autoPrice={autoPrice}
-        paperTrades={buildPaperTrades({ ...storedMarkers, ...markers }, autoToday, istToday())}
+        paperTrades={paperTrades}
         chartKeys={railCharts.find(c => c.chart === active)?.keys.filter(Boolean) ?? []} chartName={`C${active} · ${activeFeed.label}`} />
     </div>
   );

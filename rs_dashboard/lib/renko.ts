@@ -6,7 +6,7 @@
 //
 // Each brick is handed back as a one-box PnfColumn (dir X = up, O = down; low / high = the brick's real edges), so the P&F panel,
 // its layout, crosshair, time axis, rail and AUTO's "first opposite column" reversal all work on bricks unchanged.
-import { supertrendSeries } from './indicators.ts';
+import { supertrendResume, type SupertrendState } from './indicators.ts';
 import { sessionOf, type Bar, type PnfColumn, type PnfSignal } from './straddlePnf.ts';
 
 const EPS = 1e-9;
@@ -64,20 +64,21 @@ export const brickClose = (c: PnfColumn) => (c.dir === 'X' ? c.high : c.low);
  * N-brick confirmation: a BUY on the brick that completes a run of `n` up bricks following a down brick, a SELL on the mirror.
  * The very first run of the chart has no opposite brick before it and never signals.
  */
-export function renkoSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], n: number): PnfSignal[] {
+export function renkoSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], n: number, from = 0): PnfSignal[] {
   const need = Math.max(1, Math.floor(n));
   const out: PnfSignal[] = [];
   let run = 0;
   let sawReversal = false;
-  columns.forEach((c, col) => {
+  for (let col = from; col < columns.length; col++) {
+    const c = columns[col];
     const prev = columns[col - 1];
     if (prev && prev.dir !== c.dir) { run = 1; sawReversal = true; } else run += 1;
-    if (!sawReversal || run !== need) return;
+    if (!sawReversal || run !== need) continue;
     const kind = c.dir === 'X' ? 'RENKO_BUY' : 'RENKO_SELL';
     const price = brickClose(c);
     const v = reference[c.startBar];
     out.push({ id: `${kind}:${col}`, kind, col, bar: c.startBar, t: bars[c.startBar].t, price, belowVwap: v != null && price < v });
-  });
+  }
   return out;
 }
 
@@ -88,15 +89,20 @@ export function renkoSignals(columns: PnfColumn[], bars: Bar[], reference: (numb
  * brick below the pullback's low. SELL is the mirror (stop one brick above the pullback's high). Fires once per pattern.
  */
 function backSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number,
-  p: { trend: number; pull: number; resume: number; buy: PnfSignal['kind']; sell: PnfSignal['kind'] }): PnfSignal[] {
+  p: { trend: number; pull: number; resume: number; buy: PnfSignal['kind']; sell: PnfSignal['kind'] }, from = 0): PnfSignal[] {
   const out: PnfSignal[] = [];
   const runs: { dir: 'X' | 'O'; first: number; last: number }[] = [];
-  columns.forEach((c, i) => {
+  // a pattern ending in the run that starts at `from` reads the two runs before it: start the run list there
+  let scan = from;
+  for (let back = 0; back < 2 && scan > 0; back++) scan = runStartOf(columns, scan - 1);
+  for (let i = scan; i < columns.length; i++) {
+    const c = columns[i];
     const r = runs[runs.length - 1];
     if (r && r.dir === c.dir) r.last = i; else runs.push({ dir: c.dir, first: i, last: i });
-  });
+  }
   for (let k = 2; k < runs.length; k++) {
     const resume = runs[k], pull = runs[k - 1], trendRun = runs[k - 2];
+    if (resume.first < from) continue;
     if (resume.dir !== trendRun.dir || pull.dir === resume.dir) continue;
     if (pull.last - pull.first + 1 !== p.pull) continue;
     if (trendRun.last - trendRun.first + 1 < p.trend) continue;
@@ -117,14 +123,14 @@ function backSignals(columns: PnfColumn[], bars: Bar[], reference: (number | nul
 }
 
 /** Two-back: >=`trend` (3) bricks, a two-brick pullback, >=3 resuming bricks past the swing. */
-export function twoBackSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number, trend = 3): PnfSignal[] {
+export function twoBackSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number, trend = 3, from = 0): PnfSignal[] {
   const need = Math.max(1, Math.floor(trend));
-  return backSignals(columns, bars, reference, box, { trend: need, pull: 2, resume: need, buy: 'TWOBACK_BUY', sell: 'TWOBACK_SELL' });
+  return backSignals(columns, bars, reference, box, { trend: need, pull: 2, resume: need, buy: 'TWOBACK_BUY', sell: 'TWOBACK_SELL' }, from);
 }
 
 /** One-back: >=2 bricks, a ONE-brick pullback, then 2 resuming bricks that break the swing (a swing breakout). */
-export function oneBackSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number): PnfSignal[] {
-  return backSignals(columns, bars, reference, box, { trend: 2, pull: 1, resume: 2, buy: 'ONEBACK_BUY', sell: 'ONEBACK_SELL' });
+export function oneBackSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number, from = 0): PnfSignal[] {
+  return backSignals(columns, bars, reference, box, { trend: 2, pull: 1, resume: 2, buy: 'ONEBACK_BUY', sell: 'ONEBACK_SELL' }, from);
 }
 
 /**
@@ -132,18 +138,19 @@ export function oneBackSignals(columns: PnfColumn[], bars: Bar[], reference: (nu
  * needed first. With the chart already in a run, the next brick of that run signals; a reversal brick signals too (n = 1), which is
  * the flip after an exit. AUTO still enters only on a brick that formed on the newest closed bar. Not drawn as chart markers.
  */
-export function trendSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], n: number): PnfSignal[] {
+export function trendSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], n: number, from = 0): PnfSignal[] {
   const need = Math.max(1, Math.floor(n));
   const out: PnfSignal[] = [];
   let run = 0;
-  columns.forEach((c, col) => {
+  for (let col = from; col < columns.length; col++) {
+    const c = columns[col];
     run = columns[col - 1] && columns[col - 1].dir === c.dir ? run + 1 : 1;
-    if (run < need) return;
+    if (run < need) continue;
     const kind = c.dir === 'X' ? 'RENKO_BUY' : 'RENKO_SELL';
     const price = brickClose(c);
     const v = reference[c.startBar];
     out.push({ id: `TREND_${kind}:${col}`, kind, col, bar: c.startBar, t: bars[c.startBar].t, price, belowVwap: v != null && price < v });
-  });
+  }
   return out;
 }
 
@@ -154,28 +161,37 @@ export function trendSignals(columns: PnfColumn[], bars: Bar[], reference: (numb
  * read yet (null direction) signals nothing. AUTO enters only on a brick that formed on the newest closed bar and exits on the first brick of the
  * opposite state (the signal's `exitBy`, which the row keeps, read by pnfAuto reversalColumn). Not drawn as chart markers.
  */
-export function supertrendSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], st: RenkoSupertrendPoint[]): PnfSignal[] {
+export function supertrendSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], st: RenkoSupertrendPoint[], from = 0): PnfSignal[] {
   const out: PnfSignal[] = [];
-  columns.forEach((c, col) => {
+  for (let col = from; col < columns.length; col++) {
+    const c = columns[col];
     const dir = st[col]?.dir;
-    if (dir !== 1 && dir !== -1) return;
-    if (c.dir !== (dir === 1 ? 'X' : 'O')) return;                 // the brick's colour must agree with the line's side
+    if (dir !== 1 && dir !== -1) continue;
+    if (c.dir !== (dir === 1 ? 'X' : 'O')) continue;               // the brick's colour must agree with the line's side
     const kind = dir === 1 ? 'RENKO_BUY' : 'RENKO_SELL';
     const price = brickClose(c);
     const v = reference[c.startBar];
     out.push({ id: `ST_${kind}:${col}`, kind, col, bar: c.startBar, t: bars[c.startBar].t, price, belowVwap: v != null && price < v, exitBy: 'supertrend' });
-  });
+  }
   return out;
 }
 
 /** SMA of brick closes, read at each brick (null until `period` bricks exist) — TradingView's moving average on a Renko chart. */
 export function renkoSma(columns: PnfColumn[], period: number): (number | null)[] {
-  let sum = 0;
-  return columns.map((c, j) => {
-    sum += brickClose(c);
+  return renkoSmaResume(columns, period, null).sma;
+}
+
+/** renkoSma carried on from an earlier run over a prefix of the same bricks (its running sum), reading only the new bricks. */
+export function renkoSmaResume(columns: PnfColumn[], period: number, prev: { sma: (number | null)[]; sum: number } | null): { sma: (number | null)[]; sum: number } {
+  const carry = prev !== null && prev.sma.length <= columns.length;
+  const sma = carry ? prev!.sma.slice() : [];
+  let sum = carry ? prev!.sum : 0;
+  for (let j = sma.length; j < columns.length; j++) {
+    sum += brickClose(columns[j]);
     if (j >= period) sum -= brickClose(columns[j - period]);
-    return j + 1 >= period ? sum / period : null;
-  });
+    sma.push(j + 1 >= period ? sum / period : null);
+  }
+  return { sma, sum };
 }
 
 export type RenkoSupertrendPoint = { line: number | null; dir: 1 | -1 | null };
@@ -185,20 +201,44 @@ export type RenkoSupertrendPoint = { line: number | null; dir: 1 | -1 | null };
  * close = brickClose), so the ATR is one box on a run and two at a reversal. Read at each brick; null until `period` + 1 bricks exist.
  */
 export function renkoSupertrend(columns: PnfColumn[], period: number, mult: number): RenkoSupertrendPoint[] {
-  return supertrendSeries(columns.map(c => ({ high: c.high, low: c.low, close: brickClose(c) })), period, mult);
+  return renkoSupertrendResume(columns, period, mult, null).out;
+}
+
+/** renkoSupertrend carried on from an earlier run over a prefix of the same bricks, reading only the new bricks. */
+export function renkoSupertrendResume(columns: PnfColumn[], period: number, mult: number,
+  prev: { out: RenkoSupertrendPoint[]; state: SupertrendState | null } | null): { out: RenkoSupertrendPoint[]; state: SupertrendState | null } {
+  return supertrendResume(columns.length, i => { const c = columns[i]; return { high: c.high, low: c.low, close: brickClose(c) }; }, period, mult, prev);
 }
 
 /** The SMA of brick closes as it stood at each chart bar (a signal is compared with bricks printed up to its own bar only). */
 export function renkoSmaByBar(columns: PnfColumn[], period: number, nBars: number): (number | null)[] {
-  const sma = renkoSma(columns, period);
-  const out: (number | null)[] = new Array(nBars).fill(null);
-  let j = 0;
-  let cur: number | null = null;
-  for (let i = 0; i < nBars; i++) {
+  return renkoSmaByBarFrom(columns, renkoSma(columns, period), nBars, null);
+}
+
+/**
+ * renkoSmaByBar from the bricks' SMA, carried on from `prev` (the series over the first prev.length bars, built when every brick
+ * printed so far had started by then: bricks are only ever appended, on new bars).
+ */
+export function renkoSmaByBarFrom(columns: PnfColumn[], sma: (number | null)[], nBars: number, prev: (number | null)[] | null): (number | null)[] {
+  const from = prev !== null && prev.length <= nBars ? prev.length : 0;
+  const out: (number | null)[] = from ? prev!.slice() : [];
+  // the first brick that starts on a bar not read yet (bricks are in bar order)
+  let lo = 0, hi = columns.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (columns[mid].startBar < from) lo = mid + 1; else hi = mid; }
+  let j = lo;
+  let cur: number | null = from ? out[from - 1] : null;
+  for (let i = from; i < nBars; i++) {
     while (j < columns.length && columns[j].startBar <= i) { cur = sma[j]; j++; }
-    out[i] = cur;
+    out.push(cur);
   }
   return out;
+}
+
+/** The first brick of the run (same-direction bricks) holding brick `j`. */
+export function runStartOf(columns: PnfColumn[], j: number): number {
+  let i = j;
+  while (i > 0 && columns[i - 1].dir === columns[i].dir) i--;
+  return i;
 }
 
 /**

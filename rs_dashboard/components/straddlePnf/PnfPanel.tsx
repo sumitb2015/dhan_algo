@@ -2,7 +2,7 @@
 
 import { intervalLabel, barCountdown, fmtCountdown, DAY_MIN } from '@/lib/straddlePnfInterval';
 import { createPortal } from 'react-dom';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
 import { renkoPivots } from '@/lib/renko';
 import { columnAtOrBefore, isSellSignal, type PnfExecutionMarker } from '@/lib/straddlePnf';
@@ -257,6 +257,9 @@ function AxisCountdown({ interval, session, y }: { interval: number; session: re
  * Cells act on pointer-down (the chart's drag-to-pan captures the pointer, which would swallow a click). A handle is dragged
  * to another box (commit on release); the drag lives in a ref because pointer events arrive before React re-renders.
  */
+// Memoised: the crosshair re-renders the panel on every mouse move, and the rail draws several elements per visible price row.
+const RailSvgMemo = memo(RailSvg);
+
 function RailSvg({ rail, renko = false, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, axisDigits, onDrag, onHot, visTop = 0, visBottom = contentH, countdown }: {
   rail: PnfRail;
   /** The bar-close countdown under the live row (absent: none). */
@@ -519,6 +522,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const liveValue = live ? live.ce + live.pe : null;
   // no bar-close countdown on a stale feed: the bars it times will not print until prices come back
   const cdSession = stale ? null : session;
+  const railCountdown = useMemo(() => (cdSession ? { interval, session: cdSession } : undefined), [cdSession, interval]);
   // An index has no volume: its "VWAP" is a plain cumulative average, and says so.
   // The line actually drawn: an instrument without traded volume (an index) always gets the box SMA, whatever was asked.
   const kind = model.overlayKind;
@@ -564,7 +568,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   // Memoised: it scans every column for the price range, and the crosshair re-renders this panel on each mouse move.
   const L = useMemo(() => layoutPanel(liveCols, box, liveValue, viewW, HEIGHT, zoom, true, xScale), [liveCols, box, liveValue, viewW, HEIGHT, zoom, xScale]);
   const { cell, colW, yMin, yMax, plotW, contentW, contentH, offsetX, padY, padR } = L;
-  const yOf = (p: number) => padY + PAD_TOP + ((yMax - p) / box) * cell;
+  // stable between crosshair moves, so the memoised rail does not re-render on each one
+  const yOf = useCallback((p: number) => padY + PAD_TOP + ((yMax - p) / box) * cell, [padY, yMax, box, cell]);
   const xOf = (j: number) => offsetX + j * colW;
   const vis = columns;
   const first = 0;
@@ -768,7 +773,9 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const inWindow = (j: number) => j >= w0 && j < w1;
   // Renko pivot lines on confirmed bricks only (no flicker on the forming one): every level still holding, newest 6 a side, and
   // broken ones (faint, ending at the breaking brick) only near the view.
-  const pivots = useMemo(() => (renko && pivotsShown && onTogglePivots ? renkoPivots(columns, pivotStrength) : []), [renko, pivotsShown, onTogglePivots, columns, pivotStrength]);
+  // (`onTogglePivots` is a new closure on every page render: depend on whether it is there, not on it)
+  const pivotsOn = renko && pivotsShown && !!onTogglePivots;
+  const pivots = useMemo(() => (pivotsOn ? renkoPivots(columns, pivotStrength) : []), [pivotsOn, columns, pivotStrength]);
   const pivotLines = useMemo(() => {
     const held = (k: 'H' | 'L') => pivots.filter(p => p.kind === k && p.brokenCol === null).slice(-6);
     return [...pivots.filter(p => p.brokenCol !== null && p.brokenCol >= w0 && p.col < w1), ...held('H'), ...held('L')];
@@ -793,7 +800,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renko, columns, box, cell, colW, offsetX, yMax, padY, sx, sy, w0, w1]);
   const unconfirmed = unconfirmedBoxes(columns, liveCols, box);
-  const unconfirmedPaths = useMemo(() => {
+  const unconfirmedRaw = useMemo(() => {
     let x = '', o = '', n = 0;
     for (const { col, ks } of unconfirmed) {
       const lc = liveCols[col];
@@ -807,15 +814,21 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     return { x, o, n };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [renko, liveCols, columns, box, cell, colW, offsetX, yMax, padY, sx, sy]);
+  // the same boxes on the next tick keep the same object, so the live layer is not rebuilt
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const unconfirmedPaths = useMemo(() => unconfirmedRaw, [unconfirmedRaw.x, unconfirmedRaw.o, unconfirmedRaw.n]);
 
   const lastEntryId = useMemo(() => { for (let i = signals.length - 1; i >= 0; i--) if (signals[i].kind === 'DOUBLE_BOTTOM_SELL' && signals[i].belowVwap) return signals[i].id; return undefined; }, [signals]);
   const ring = flash === 'buy' ? 'ring-2 ring-emerald-400' : flash === 'sell' ? 'ring-2 ring-red-400' : '';
 
-  const overlayPts = !overlayShown ? '' : vis.slice(w0, w1)
+  const overlayPts = useMemo(() => (!overlayShown ? '' : vis.slice(w0, w1)
     .map((c, k) => ({ v: model.overlay[first + w0 + k], x: xOf(w0 + k) + colW / 2 }))
     .filter(p => p.v !== null)
     .map(p => `${p.x},${yOf(p.v as number)}`)
-    .join(' ');
+    .join(' ')),
+  // xOf is rebuilt every render from offsetX / colW, listed here
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [overlayShown, vis, w0, w1, model.overlay, colW, offsetX, yOf]);
 
   // Supertrend: one path per direction through the brick centres; a flip starts a new segment on the other side, like TradingView.
   const stPaths = useMemo(() => {
@@ -850,11 +863,38 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   // paise are noise at that size and a six-figure price still fits the axis.
   const axisDigits = box >= 10 ? 0 : 2;
   const liveDigits = liveValue !== null && liveValue >= 100_000 ? 0 : 2;
+  // The axis labels, built when the rows, the scroll window or the live price move, not on each crosshair move.
+  // yMin is a cell edge: P&F names the box centre, Renko the brick edge (its grid is on multiples of the box)
+  const axisRowsShown = useMemo(() => Array.from({ length: Math.max(0, axisTo - axisFrom) }, (_, k) => axisFrom + k)
+    .filter(i => (renko ? Math.round((yMin + i * box) / box) : i) % tickEvery === 0)
+    .map(i => ({ i, p: yMin + (i + (renko ? 0 : 0.5)) * box })), [axisFrom, axisTo, renko, yMin, box, tickEvery]);
+  // a label within 14 px of the live price tag is hidden; keyed on WHICH labels that hides, so a live tick that moves the price
+  // within a row does not rebuild the axis
+  const liveY = liveValue === null ? null : yOf(liveValue);
+  const hiddenRows = liveY === null ? '' : axisRowsShown.filter(r => Math.abs(yOf(r.p) - liveY) <= 14).map(r => r.i).join(',');
+  const priceAxisText = useMemo(() => {
+    const hidden = new Set(hiddenRows ? hiddenRows.split(',').map(Number) : []);
+    return axisRowsShown.filter(r => !hidden.has(r.i)).map(({ i, p }) => (
+      <text key={`t${i}`} x={6} y={yOf(p) + 3.5} className="fill-zinc-400 font-mono" fontSize={10}>{fmt(p, axisDigits)}</text>
+    ));
+  }, [axisRowsShown, hiddenRows, yOf, axisDigits]);
+  const timeAxisText = useMemo(() => axisLabels.filter(l => l.x >= offsetX + w0 * colW && l.x <= offsetX + w1 * colW).map((l, i) => (
+    <text key={i} x={l.x} y={15} textAnchor="middle" fontSize={10} fontWeight={l.major ? 800 : 500}
+          className={`font-mono ${l.major ? 'fill-zinc-200' : 'fill-zinc-400'}`}>{l.text}</text>
+  )), [axisLabels, offsetX, w0, w1, colW]);
 
   // Everything drawn from the chart's data (glyphs / bricks, unconfirmed boxes, the overlay, signals, triangles, trade markers),
   // built once per data / layout / window change. The crosshair is state in this component, so without this every mouse move
   // re-created all of it (~1 s a frame on a long Renko chart in dev mode).
-  const chartLayer = useMemo(() => (
+  // The chart is drawn in three memoised layers, so a live tick only redraws what it moves: the confirmed glyphs / bricks; the
+  // unconfirmed boxes of the forming bar (the only layer a tick changes); and everything else drawn from the confirmed model, which
+  // sees the live columns only through their shape (count and last column's edges), not the array a tick re-creates.
+  const liveKey = `${liveCols.length}:${liveCols[liveCols.length - 1]?.low ?? ''}:${liveCols[liveCols.length - 1]?.high ?? ''}`;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const liveShape = useMemo(() => liveCols, [liveKey, columns]);
+  const colTimes = model.columnTimes;
+  const anchorPx = model.anchor;
+  const chartBase = useMemo(() => (
     <>
       {/* X / O glyphs: every X in one path and every O in another (a chart can hold tens of thousands of boxes; one element
           each made every crosshair move and live tick re-render them all). The session dividers mark the days, so no day numbers. */}
@@ -875,7 +915,12 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         <rect data-testid="pnf-newest" x={xOf(columns.length - 1)} y={yOf(columns[columns.length - 1].high)} width={colW}
               height={(columns[columns.length - 1].boxes) * cell} fill="none" pointerEvents="none" />
       )}
-
+    </>
+  // xOf / yOf / inWindow are rebuilt every render from the layout values listed here
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ), [renko, glyphs, colW, columns, cell, offsetX, yMax, padY, box, stroke]);
+  const liveLayer = useMemo(() => (
+    <>
       {/* Unconfirmed boxes: what the bar still forming would add if it closed now, dimmed. They move with the price and can
           disappear; signals, the SMA and the date marks never use them. */}
       {unconfirmedPaths.n > 0 && (
@@ -893,7 +938,10 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
           )}
         </g>
       )}
-
+    </>
+  ), [unconfirmedPaths, renko, stroke]);
+  const chartLayer = useMemo(() => (
+    <>
       {/* VWAP / SMA: one continuous line across the loaded sessions */}
       {overlayPts && (
         <polyline points={overlayPts} fill="none" strokeWidth={1.8}
@@ -922,7 +970,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
             <line x1={x1} x2={x2} y1={y} y2={y} strokeWidth={p.touches > 1 ? 1.75 : 1} strokeDasharray="4 3"
                   opacity={p.brokenCol === null ? 0.9 : 0.35} className={hi ? 'stroke-red-400' : 'stroke-emerald-400'} />
             {p.brokenCol === null && (
-              <text x={xOf(liveCols.length) + colW * 1.5} y={y + (hi ? -3 : 10)} className={`${hi ? 'fill-red-400' : 'fill-emerald-400'} font-mono`} fontSize={9} fontWeight={700}>
+              <text x={xOf(liveShape.length) + colW * 1.5} y={y + (hi ? -3 : 10)} className={`${hi ? 'fill-red-400' : 'fill-emerald-400'} font-mono`} fontSize={9} fontWeight={700}>
                 {`${hi ? 'PH' : 'PL'} ${fmt(p.price, axisDigits)}${p.touches > 1 ? ` ×${p.touches}` : ''}`}
               </text>
             )}
@@ -1021,28 +1069,28 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
 
         tradeMarkers.forEach((m, idx) => {
           let colIdx = m.col;
-          if (colIdx === undefined || colIdx < 0 || colIdx >= liveCols.length) {
-            if (model.columnTimes && model.columnTimes.length > 0) {
-              let found = model.columnTimes.findIndex(ct => m.t >= ct.start && m.t <= ct.end);
+          if (colIdx === undefined || colIdx < 0 || colIdx >= liveShape.length) {
+            if (colTimes && colTimes.length > 0) {
+              let found = colTimes.findIndex(ct => m.t >= ct.start && m.t <= ct.end);
               // One bar can print several Renko bricks: the marker goes on the one of them that holds its price.
-              for (let j = found; found !== -1 && j < liveCols.length && model.columnTimes[j] && m.t >= model.columnTimes[j].start && m.t <= model.columnTimes[j].end; j++) {
-                if (m.price >= liveCols[j].low - 1e-9 && m.price <= liveCols[j].high + 1e-9) { found = j; break; }
+              for (let j = found; found !== -1 && j < liveShape.length && colTimes[j] && m.t >= colTimes[j].start && m.t <= colTimes[j].end; j++) {
+                if (m.price >= liveShape[j].low - 1e-9 && m.price <= liveShape[j].high + 1e-9) { found = j; break; }
               }
               if (found !== -1) colIdx = found;
-              else if (m.t > model.columnTimes[model.columnTimes.length - 1].end) colIdx = liveCols.length - 1;
+              else if (m.t > colTimes[colTimes.length - 1].end) colIdx = liveShape.length - 1;
               else {
                 // A bar between two columns printed no column of its own (a Renko bar that made no brick): the marker belongs to the
                 // latest column that had started by then, never to column 0 at the far left.
-                colIdx = Math.min(columnAtOrBefore(model.columnTimes, m.t), liveCols.length - 1);
+                colIdx = Math.min(columnAtOrBefore(colTimes, m.t), liveShape.length - 1);
               }
             } else {
-              colIdx = Math.max(0, liveCols.length - 1);
+              colIdx = Math.max(0, liveShape.length - 1);
             }
           }
 
           // P&F rows are centred on anchor + k * box; a Renko brick spans [k, k + 1) boxes, so its marker sits at the brick's middle
-          const boxK = box > 0 ? (renko ? Math.floor((m.price - model.anchor) / box) : Math.round((m.price - model.anchor) / box)) : 0;
-          const boxPrice = model.anchor + (renko ? boxK + 0.5 : boxK) * box;
+          const boxK = box > 0 ? (renko ? Math.floor((m.price - anchorPx) / box) : Math.round((m.price - anchorPx) / box)) : 0;
+          const boxPrice = anchorPx + (renko ? boxK + 0.5 : boxK) * box;
           const key = `${colIdx}:${boxK}`;
           if (!groups.has(key)) groups.set(key, []);
           groups.get(key)!.push({ marker: m, colIdx, boxPrice, idx });
@@ -1114,7 +1162,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     </>
   // xOf / yOf / inWindow are rebuilt every render from the layout values listed here
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [renko, glyphs, colW, columns, cell, offsetX, yMax, padY, box, unconfirmedPaths, overlayPts, stPaths, kind, coverShown, exits, triShown, triangles, pivotLines, plotW, axisDigits, signals, w0, w1, lastEntryId, markersShown, tradeMarkers, model, liveCols, stroke]);
+  ), [renko, colW, columns, cell, offsetX, yMax, padY, box, overlayPts, stPaths, kind, coverShown, exits, triShown, triangles, pivotLines, plotW, axisDigits, signals, w0, w1, lastEntryId, markersShown, tradeMarkers, colTimes, anchorPx, liveShape]);
 
   return (
     <section
@@ -1407,6 +1455,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                 });
               })()}
 
+              {chartBase}
+              {liveLayer}
               {chartLayer}
 
               {/* what a click on the rail row under the pointer would place: the side, the kind and the price */}
@@ -1531,9 +1581,9 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
 
             {/* the B / S rail (the ladder's columns): click a box row to rest an order there; drag an order's handle to move it */}
             {rail && (
-              <RailSvg rail={rail} renko={renko} box={box} cell={cell} yMax={yMax} yMin={yMin} padY={padY} contentH={contentH} yOf={yOf}
+              <RailSvgMemo rail={rail} renko={renko} box={box} cell={cell} yMax={yMax} yMin={yMin} padY={padY} contentH={contentH} yOf={yOf}
                        liveValue={liveValue} axisDigits={axisDigits} onDrag={setRailDrag} onHot={setRailHot} visTop={visTop} visBottom={visBottom}
-                       countdown={cdSession ? { interval, session: cdSession } : undefined} />
+                       countdown={railCountdown} />
             )}
 
             {/* price axis: sticky, so it stays at the panel's right edge while the chart is panned */}
@@ -1553,16 +1603,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                  }}
                  onPointerUp={() => { axisDragRef.current = null; }}
                  onPointerCancel={() => { axisDragRef.current = null; }}>
-              <g data-testid="pnf-axis">
-                {Array.from({ length: Math.max(0, axisTo - axisFrom) }, (_, k) => axisFrom + k)
-                  .filter(i => (renko ? Math.round((yMin + i * box) / box) : i) % tickEvery === 0)
-                  .filter(i => liveValue === null || Math.abs(yOf(yMin + (i + (renko ? 0 : 0.5)) * box) - yOf(liveValue)) > 14)
-                  .map(i => {
-                    // yMin is a cell edge: P&F names the box centre, Renko the brick edge (its grid is on multiples of the box)
-                    const p = yMin + (i + (renko ? 0 : 0.5)) * box;
-                    return <text key={`t${i}`} x={6} y={yOf(p) + 3.5} className="fill-zinc-400 font-mono" fontSize={10}>{fmt(p, axisDigits)}</text>;
-                  })}
-              </g>
+              <g data-testid="pnf-axis">{priceAxisText}</g>
               {/* live price tag: the brightest-text / page-ground token pair, so it flips with the theme and is never mistaken for
                   the amber VWAP line */}
               {liveValue !== null && (
@@ -1590,10 +1631,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               <svg width={plotW} height={TIME_AXIS_H} className="block" style={{ transform: `translateY(-${TIME_AXIS_H}px)` }}>
                 <rect x={0} y={0} width={plotW} height={TIME_AXIS_H} className="fill-zinc-900" />
                 <line x1={0} x2={plotW} y1={0.5} y2={0.5} className="stroke-zinc-700" strokeWidth={1} />
-                {axisLabels.filter(l => l.x >= xOf(w0) && l.x <= xOf(w1)).map((l, i) => (
-                  <text key={i} x={l.x} y={15} textAnchor="middle" fontSize={10} fontWeight={l.major ? 800 : 500}
-                        className={`font-mono ${l.major ? 'fill-zinc-200' : 'fill-zinc-400'}`}>{l.text}</text>
-                ))}
+                {timeAxisText}
                 {cross && cross.col !== null && cross.x !== null && model.columnTimes[cross.col] && (() => {
                   const text = crosshairStamp(model.columnTimes[cross.col].start, interval < 1440);
                   const w = text.length * 6.2 + 14;

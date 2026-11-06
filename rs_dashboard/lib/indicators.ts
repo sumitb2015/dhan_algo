@@ -178,39 +178,58 @@ export function supertrendSeries(
   period = 10,
   mult = 3,
 ): { line: number | null; dir: 1 | -1 | null }[] {
-  const n = rows.length;
-  const out: { line: number | null; dir: 1 | -1 | null }[] = Array.from({ length: n }, () => ({ line: null, dir: null }));
-  if (n < period + 1) return out;
+  return supertrendResume(rows.length, i => rows[i], period, mult, null).out;
+}
 
-  const tr = new Array<number>(n).fill(0);
-  for (let i = 1; i < n; i++) {
-    tr[i] = Math.max(
-      rows[i].high - rows[i].low,
-      Math.abs(rows[i].high - rows[i - 1].close),
-      Math.abs(rows[i].low - rows[i - 1].close),
-    );
+/** Where a Supertrend run stopped: `next` is the first row not yet read; the RMA ATR, the trailing bands and the direction. */
+export type SupertrendState = { next: number; atr: number; upper: number; lower: number; dir: 1 | -1 };
+
+/**
+ * supertrendSeries over rows 0..n-1 read through `at`, carried on from `prev` (an earlier run over a prefix of the same rows) so
+ * only the rows after it are read. Same arithmetic in the same order, so the result equals a run from scratch exactly.
+ */
+export function supertrendResume(
+  n: number,
+  at: (i: number) => { high: number; low: number; close: number },
+  period: number,
+  mult: number,
+  prev: { out: { line: number | null; dir: 1 | -1 | null }[]; state: SupertrendState | null } | null,
+): { out: { line: number | null; dir: 1 | -1 | null }[]; state: SupertrendState | null } {
+  const carry = prev !== null && prev.state !== null && prev.out.length === prev.state.next && prev.state.next <= n;
+  const out: { line: number | null; dir: 1 | -1 | null }[] = carry ? prev!.out.slice() : [];
+  const from = carry ? prev!.state!.next : 0;
+  if (!carry) for (let i = 0; i < Math.min(n, period); i++) out.push({ line: null, dir: null });
+  if (n < period + 1) {
+    for (let i = out.length; i < n; i++) out.push({ line: null, dir: null });
+    return { out, state: null };
   }
-  let atr = 0;
-  for (let i = 1; i <= period; i++) atr += tr[i];
-  atr /= period;
-
-  let upper = 0, lower = 0, dir: 1 | -1 = 1;
-  for (let i = period; i < n; i++) {
-    if (i > period) atr = (atr * (period - 1) + tr[i]) / period;
-    const hl2 = (rows[i].high + rows[i].low) / 2;
+  const tr = (i: number) => {
+    const r = at(i), pr = at(i - 1);
+    return Math.max(r.high - r.low, Math.abs(r.high - pr.close), Math.abs(r.low - pr.close));
+  };
+  let atr = 0, upper = 0, lower = 0, dir: 1 | -1 = 1;
+  if (carry) ({ atr, upper, lower, dir } = prev!.state!);
+  else {
+    for (let i = 1; i <= period; i++) atr += tr(i);
+    atr /= period;
+  }
+  for (let i = Math.max(from, period); i < n; i++) {
+    if (i > period) atr = (atr * (period - 1) + tr(i)) / period;
+    const r = at(i);
+    const hl2 = (r.high + r.low) / 2;
     const bu = hl2 + mult * atr;
     const bl = hl2 - mult * atr;
     if (i === period) {
       upper = bu;
       lower = bl;
     } else {
-      const pc = rows[i - 1].close;
+      const pc = at(i - 1).close;
       upper = bu < upper || pc > upper ? bu : upper;
       lower = bl > lower || pc < lower ? bl : lower;
     }
-    if (rows[i].close > upper) dir = 1;
-    else if (rows[i].close < lower) dir = -1;
-    out[i] = { line: dir === 1 ? lower : upper, dir };
+    if (r.close > upper) dir = 1;
+    else if (r.close < lower) dir = -1;
+    out.push({ line: dir === 1 ? lower : upper, dir });
   }
-  return out;
+  return { out, state: { next: n, atr, upper, lower, dir } };
 }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildConfirmedModel, buildPanelModel, boxSmaByBar, unconfirmedBoxes, withLive, MAX_UNCONFIRMED_BOXES } from './straddlePnfModel.ts';
-import { buildPnf, vwap, type Bar, type PnfColumn } from './straddlePnf.ts';
+import { buildPnf, vwap, type Bar, type PnfColumn, type PnfSignal } from './straddlePnf.ts';
 import { buildRenko } from './renko.ts';
 import { resample } from './straddlePnfInterval.ts';
 
@@ -373,6 +373,45 @@ test('buildConfirmedModel from a previous model equals a full build (P&F / Renko
       for (let k = a + 1; k <= a + 40; k++) m = buildConfirmedModel(all.slice(0, k), 'sma', opts, m);
       assert.equal(view(m), view(buildConfirmedModel(all.slice(0, a + 40), 'sma', opts)), `run ${run} ${chart} ${interval} steps`);
     }
+  }
+});
+
+// Renko carries its SMA, Supertrend, by-bar reference and every signal family on from the previous build (only the open run and the
+// new bricks are read again). Every one of them must equal a full build exactly, for each confirm count, with and without volume.
+test('Renko from a previous model: SMA, Supertrend and all five signal families equal a full build', () => {
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+  const sig = (xs: PnfSignal[]) => xs.map(g => [g.id, g.kind, g.col, g.bar, g.t, g.price, g.belowVwap, g.stop ?? null, g.exitBy ?? null]);
+  const view = (m: ReturnType<typeof buildConfirmedModel>) => JSON.stringify({
+    n: m.columns.length, sig: sig(m.signals), tr: sig(m.trend), st: sig(m.stSignals), two: sig(m.twoBack), one: sig(m.oneBack),
+    line: m.supertrend, ov: m.overlay, now: m.overlayNow, kind: m.overlayKind, vw: m.vwapAvailable,
+  });
+  for (let run = 0; run < 12; run++) {
+    const start = Date.UTC(2026, 9, 26, 3, 45) / 1000;
+    let p = 100 + rnd() * 50;
+    const noVol = run % 3 === 0;
+    const all: Bar[] = [];
+    for (let d = 0; d < 2; d++) for (let m = 0; m < 375; m++) {
+      p = Math.max(1, p + (rnd() - 0.5) * 1.6);
+      all.push({ t: start + d * 86_400 + m * 60, ce: p, pe: 0, straddle: +p.toFixed(2), vol: noVol ? 0 : 1 + Math.floor(rnd() * 5) });
+    }
+    for (const reversal of [1, 2, 3]) for (const interval of [1, 3]) for (const overlay of ['vwap', 'sma'] as const) {
+      const opts = { chart: 'renko' as const, interval, boxMode: 'pts' as const, boxPts: 0.4, reversal, smaPeriod: 5, stPeriod: 4, stMult: 1.5, sessionCloseMin: 930 };
+      const a = 100 + Math.floor(rnd() * 200);
+      let m = buildConfirmedModel(all.slice(0, a), overlay, opts);
+      for (let k = a + 1; k <= a + 60; k++) {
+        m = buildConfirmedModel(all.slice(0, k), overlay, opts, m);
+        if (k % 20 === 0) assert.equal(view(m), view(buildConfirmedModel(all.slice(0, k), overlay, opts)), `run ${run} N${reversal} ${interval}m ${overlay} step ${k}`);
+      }
+      const jumped = buildConfirmedModel(all, overlay, opts, m);
+      assert.equal(view(jumped), view(buildConfirmedModel(all, overlay, opts)), `run ${run} N${reversal} ${interval}m ${overlay} jump`);
+      assert.ok(m.supertrend.some(x => x.dir !== null) && m.trend.length > 0, 'the series under test are populated');
+    }
+    // a settings change with a previous model rebuilds the averages (not carried on a different period)
+    const o1 = { chart: 'renko' as const, boxMode: 'pts' as const, boxPts: 0.4, reversal: 2, smaPeriod: 5, stPeriod: 4, stMult: 1.5 };
+    const o2 = { ...o1, smaPeriod: 9, stPeriod: 6 };
+    const prevM = buildConfirmedModel(all.slice(0, 300), 'sma', o1);
+    assert.equal(view(buildConfirmedModel(all.slice(0, 320), 'sma', o2, prevM)), view(buildConfirmedModel(all.slice(0, 320), 'sma', o2)));
   }
 });
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { foldTick, newSignalsAfter, nextWatermark, capLog, inSession, sessionWindow, tradingSession, feedCloseTrusted, mergeHistory, legsTick, isWildTick } from './straddlePnfLive.ts';
+import { foldTick, newSignalsAfter, nextWatermark, capLog, inSession, sessionWindow, tradingSession, feedCloseTrusted, mergeHistory, keepSameBars, legsTick, isWildTick } from './straddlePnfLive.ts';
 import { vwap, type Bar, type PnfSignal } from './straddlePnf.ts';
 
 const T0 = Date.UTC(2026, 9, 23, 3, 45) / 1000; // 09:15 IST, a minute start
@@ -221,4 +221,22 @@ test('tradingSession: NSE weekends and holidays are closed; a trading day keeps 
   assert.deepEqual(tradingSession('NSE_FNO', at('2026-11-07T10:00:00')), [0, 0]);                       // Sat
   assert.deepEqual(tradingSession('NSE', at('2026-11-08T10:00:00')), [0, 0]);                           // Sun
   assert.deepEqual(tradingSession('NSE_FNO', at('2019-10-02T10:00:00')), [0, 0]);                       // Gandhi Jayanti (Wed)
+});
+
+test('keepSameBars: a reload hands back the on-screen object for every unchanged bar, a new one for a revised bar', () => {
+  const T = 1_800_000_000;
+  const b = (i: number, c: number, extra: Partial<Bar> = {}): Bar => ({ t: T + i * 60, ce: c, pe: 0, straddle: c, vol: 0, ...extra });
+  const onScreen = [b(0, 100), b(1, 101), b(2, 102), b(3, 103, { cum: 5, cumBase: 1 })];
+  const reload = [b(1, 101), b(2, 102.5), b(3, 103), b(4, 104)];
+  const out = keepSameBars(reload, onScreen);
+  assert.equal(out[0], onScreen[1]);                 // unchanged: the same object
+  assert.notEqual(out[1], onScreen[2]);              // revised close
+  assert.notEqual(out[2], onScreen[3]);              // the live-built bar carries cum fields the API bar has not
+  assert.equal(out[3], reload[3]);                   // new minute
+  assert.deepEqual(out, reload);
+  assert.equal(keepSameBars(reload, []), reload);
+  // through mergeHistory: the merged prefix keeps the old objects, so the chart can carry its build on
+  const merged = mergeHistory(onScreen.slice(0, 3).map(x => ({ ...x })), onScreen, null, true);
+  assert.equal(merged[0], onScreen[0]);
+  assert.equal(merged[2], onScreen[2]);
 });

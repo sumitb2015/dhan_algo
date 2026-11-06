@@ -66,6 +66,27 @@ A Renko chart with a small box over the index's daily-since-2019 + 1-min history
 - **Draw only near the view.** `PnfPanel` derives a column window `[w0, w1)` (view ± one view width, `WINDOW_CHUNK = 256` steps) from `viewLeft` / `viewRight`, and a row window from `viewTop` (± one view height). Glyphs / bricks, signals, the overlay polyline, session dividers, the time-axis labels, the price-axis labels and the rail's rows only render inside them. A new per-column or per-row element must filter by `inWindow(j)` / the row window too.
 - **The crosshair must not re-create the chart.** Hover is state in `PnfPanel`, so the data-drawn layer is one `useMemo` (`chartLayer`), and `layoutPanel`, `totalBoxes` and `lastEntryId` are memoised. Anything added to that layer that depends on new state must join its deps list.
 - `fmt` caches one `Intl.NumberFormat` per digit count; `toLocaleString` builds a new formatter per call.
+- **A bar close must not re-read every brick (Renko).** Renko only appends bricks, so `buildConfirmedModel`'s carried-on build keeps
+  everything before prev's last (open) run: the SMA and Supertrend carry their running state (`renkoSmaResume`,
+  `renkoSupertrendResume` over `indicators.ts`'s `supertrendResume`, same arithmetic as `supertrendSeries`), the by-bar reference
+  carries on (`renkoSmaByBarFrom`), and each signal family re-reads only from `runStartOf(prev's last column)` (`from` argument,
+  `spliceSignals`). Measured 2026-11-06 on 186k NIFTY minutes: 47 → 9.5 ms (box 10), 266 → 24 ms (box 5). The strict equivalence
+  test (`straddlePnfModel.test.ts`, "Renko from a previous model…": all five families, Supertrend, SMA, N = 1/2/3, VWAP / SMA) fails
+  if the restart column is wrong — keep it passing when adding a signal family (give it a `from` and splice it the same way).
+- **The carried-on build needs the SAME bar objects.** A history reload hands back the on-screen object for every unchanged bar
+  (`keepSameBars` in `mergeHistory`); without it each 30 s refresh fell back to a full rebuild (100-280 ms per chart). A revised bar
+  is a new object and still rebuilds.
+- **A live tick redraws only the forming bar.** The chart is three memoised layers: `chartBase` (confirmed glyphs), `liveLayer`
+  (unconfirmed boxes, the only one a tick changes; `unconfirmedPaths` keeps its object while its strings are equal) and
+  `chartLayer` (everything else), which sees the live columns only through `liveShape` (count + last column's edges). Do not add
+  `model` or `liveCols` to `chartLayer`'s deps: `withLive` returns a new model every tick. The price-axis labels rebuild only when
+  the SET of labels hidden behind the live tag changes; the rail is `memo`ed (`yOf` is a `useCallback`, its countdown memoised).
+- **Page props must keep identity between polls.** `tradeMarkers` is handed on by content (JSON key) and the pivot memo depends on
+  `!!onTogglePivots`, not the closure: an inline array / closure as a memo dep re-ran the chart layer on every 2.5 s ledger poll.
+- Measuring the live path at night: `page.clock.install` at a session time, cut the history before it, and mock
+  `/api/straddle-pnf/live` with a moving price (refuse every other non-GET). Categorise the CPU profile: in `next dev`, ~25-30%
+  is React dev-only work (`jsxDEV`, `createTask`) that a production build does not do. Never `next start` a second server to
+  measure: `instrumentation.node.ts` starts the server AUTO engine and broker guards.
 - Measuring: headless Playwright throttles `requestAnimationFrame` to ~1 fps, so frame timing reads ~1,000 ms regardless. Time a `pointermove` + two `setTimeout(0)`s and watch `longtask` entries instead. After the fixes: hover ~28 ms median in dev mode with CDP attached, 0 long tasks; pan ~0.3 ms.
 
 ## Bar Replay (TradingView's "Bar replay", on P&F and Renko)

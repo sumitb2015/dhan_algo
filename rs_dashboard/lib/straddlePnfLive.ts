@@ -44,7 +44,9 @@ export function foldTick(bars: Bar[], tick: Tick, single = false): { bars: Bar[]
   }
   const next: Bar = { ...last, ce: tick.ce, pe: tick.pe, straddle, vol };
   if (cv !== null) { next.cum = cv; next.cumBase = cumBase; }
-  return { bars: [...bars.slice(0, -1), next], closedIndex: null };
+  const out = bars.slice();      // one copy, not two: a long history holds years of minutes
+  out[out.length - 1] = next;
+  return { bars: out, closedIndex: null };
 }
 
 export type LegQuote = { ltp: number; changedMs: number; volume: number | null } | null;
@@ -145,8 +147,29 @@ export function feedCloseTrusted(t: number, market: Market, tradingDay: boolean)
 export function mergeHistory(hist: Bar[], onScreen: Bar[], tick: Tick | null, single = false): Bar[] {
   if (!hist.length) return hist;
   const lastT = hist[hist.length - 1].t;
-  const merged = [...hist, ...onScreen.filter(b => b.t > lastT)];
+  const merged = [...keepSameBars(hist, onScreen), ...onScreen.filter(b => b.t > lastT)];
   return tick && tick.t >= lastT ? foldTick(merged, tick, single).bars : merged;
+}
+
+const sameBar = (a: Bar, b: Bar) => a.t === b.t && a.ce === b.ce && a.pe === b.pe && a.straddle === b.straddle && a.vol === b.vol
+  && a.dc === b.dc && a.cum === b.cum && a.cumBase === b.cumBase;
+
+/**
+ * `next` (a history reload) with every bar that equals the bar already on screen at the same minute replaced by that on-screen
+ * object. The chart build carries itself on only over the very same bar objects (straddlePnfModel's prefix check), so a 30 s refresh
+ * that revised nothing keeps it incremental instead of rebuilding years of bricks; a revised bar is a new object and still rebuilds.
+ */
+export function keepSameBars(next: Bar[], onScreen: Bar[]): Bar[] {
+  if (!onScreen.length) return next;
+  // both are in time order: find where `next` starts on screen, then walk them together
+  let lo = 0, hi = onScreen.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (onScreen[mid].t < next[0].t) lo = mid + 1; else hi = mid; }
+  const out = next.slice();
+  for (let i = 0, j = lo; i < out.length && j < onScreen.length; i++) {
+    while (j < onScreen.length && onScreen[j].t < out[i].t) j++;
+    if (j < onScreen.length && sameBar(out[i], onScreen[j])) out[i] = onScreen[j];
+  }
+  return out;
 }
 
 /**
