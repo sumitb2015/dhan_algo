@@ -62,6 +62,11 @@ export type PnfExecutionMarker = {
   mode: 'PAPER' | 'REAL';
   /** REAL: the live price at the click, until the broker reports the traded price. */
   estimate?: boolean;
+  /**
+   * Drawn on the chart only, never a trade of this instrument: a Renko INDEX chart's arrow for the option trade it sent (at the index price,
+   * in the chart's own direction). The option's own marker (at its fill) is what the paper trade book counts.
+   */
+  axis?: boolean;
 };
 
 /** True for a short-entry signal (P&F double bottom or Renko SELL); every consumer maps kinds to a side through this. */

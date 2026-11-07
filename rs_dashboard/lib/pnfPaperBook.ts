@@ -37,7 +37,7 @@ export function buildPaperTrades(markers: Record<string, PnfExecutionMarker[]>, 
   const out: PaperTradeRow[] = [];
   for (const [key, list] of Object.entries(markers)) {
     for (const m of list) {
-      if (m.mode !== 'PAPER' || !(m.price > 0) || istDateIso(m.t * 1000) !== day) continue;
+      if (m.mode !== 'PAPER' || m.axis || !(m.price > 0) || istDateIso(m.t * 1000) !== day) continue;   // an index chart's arrow is no trade
       out.push({ id: `m:${key}:${m.id}`, t: m.t, instrument: labelOfTargetKey(key), source: 'Trade bar', side: m.action, lots: m.lots, price: m.price, note: '' });
     }
   }

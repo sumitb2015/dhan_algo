@@ -22,21 +22,26 @@ export interface PnfTradeBarProps {
   onSwitchTarget?: (target: Target) => void;
   /** Which chart the bar trades ("C2 · NIFTY 23000 CE+PE 03 Nov 26"): two charts can show two instruments, the bar follows the active one. */
   tradesLabel?: string;
+  /** A Renko index chart that trades options: its map controls (IndexMapControls), drawn before the buttons. */
+  indexSlot?: ReactNode;
+  /** The map's legs as button hints ("BUY CE ATM"), for a mapped index chart. */
+  sideHints?: { BUY: string; SELL: string };
 }
 
 const inr = (n: number) => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 const pnlTone = (n: number | null) => (n == null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
 
-export default function PnfTradeBar({ trade, target, broker, mode, onModeChange, onSwitchTarget, tradesLabel, styleSlot = null }: PnfTradeBarProps) {
+export default function PnfTradeBar({ trade, target, broker, mode, onModeChange, onSwitchTarget, tradesLabel, styleSlot = null, indexSlot = null, sideHints }: PnfTradeBarProps) {
   const {
-    isIndex, isEquity, isStraddle, lots, lotsDraft, setLotsDraft, commitLots, pickLots, product, setProduct,
+    isIndex, mapped, isEquity, isStraddle, lots, lotsDraft, setLotsDraft, commitLots, pickLots, product, setProduct,
     busy, ready, unsupported, position, shownPnl, realError, executeOrder, executeSquareOff,
   } = trade;
 
   const pill = (active: boolean) =>
     `px-2 h-6 text-[11px] font-bold rounded transition-colors ${active ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`;
   const disabled = busy || !ready;
-  const squareTitle = mode === 'REAL'
+  const squareTitle = mapped ? `Closes the option this index chart holds${mode === 'REAL' ? ` (the whole ${BROKER_LABELS[broker]} position on that contract, every product)` : ''}`
+    : mode === 'REAL'
     ? `Closes the whole ${BROKER_LABELS[broker]} position on this contract (every product), including any opened from another page`
     : 'Closes the paper position';
 
@@ -47,8 +52,8 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
       <span>SQUARE OFF</span>
     </button>
   );
-  const actionButton = (action: PnfAction, label: string) => (
-    <button type="button" disabled={disabled} onClick={() => void executeOrder(action)}
+  const actionButton = (action: PnfAction, label: string, title?: string) => (
+    <button type="button" disabled={disabled} onClick={() => void executeOrder(action)} title={title} data-testid={`pnf-trade-${action.toLowerCase()}`}
             className={`flex items-center gap-1.5 px-3 h-7 rounded text-xs font-bold ${action === 'BUY' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'} text-oncolor disabled:opacity-50 disabled:cursor-not-allowed shadow transition-colors`}>
       {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : action === 'BUY' ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
       <span>{label}</span>
@@ -156,7 +161,13 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
         ) : (
           <>
             {unsupported && <span data-testid="pnf-trade-unsupported" className="text-[11px] text-amber-400 max-w-[22rem] truncate" title={unsupported}>{unsupported}</span>}
-            {isStraddle
+            {indexSlot}
+            {mapped && sideHints
+              ? <>
+                  {actionButton('BUY', `BULL · ${sideHints.BUY}`, `Bullish on ${target.symbol}: ${sideHints.BUY} at market (strike picked at the click). Holding the bearish leg: reduces / closes it.`)}
+                  {actionButton('SELL', `BEAR · ${sideHints.SELL}`, `Bearish on ${target.symbol}: ${sideHints.SELL} at market (strike picked at the click). Holding the bullish leg: reduces / closes it.`)}
+                </>
+              : isStraddle
               ? <>{actionButton('SELL', 'SHORT STRADDLE')}{actionButton('BUY', 'LONG STRADDLE')}</>
               : <>{actionButton('BUY', 'BUY MARKET')}{actionButton('SELL', 'SELL MARKET')}</>}
             {squareOff}

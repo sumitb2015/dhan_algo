@@ -29,6 +29,14 @@ test('trade-bar paper fills of every instrument are listed, REAL and other-day m
   assert.equal(rows[2].instrument, 'RELIANCE');
 });
 
+test('an index chart\'s arrow for a mapped option trade is not a paper trade; the option\'s own marker is', () => {
+  const rows = buildPaperTrades({
+    'index|NIFTY||||': [{ ...mk('ix', at(10, 0), 'BUY'), price: 25010, axis: true }],
+    'options|NIFTY|2026-11-11|25000|PE': [{ ...mk('op', at(10, 0), 'SELL'), price: 90 }],
+  }, [], DAY);
+  assert.deepEqual(rows.map(r => [r.instrument, r.side, r.price]), [['NIFTY 25000 PE 11 Nov 26', 'SELL', 90]]);
+});
+
 test('an AUTO paper row gives an entry at its decision time and an exit at the exit time, with the reason and P&L', () => {
   const open = buildPaperTrades({}, [row({})], DAY);
   assert.deepEqual(open.map(r => [r.side, r.price, r.note]), [['SELL', 9210, 'C1 entry']]);

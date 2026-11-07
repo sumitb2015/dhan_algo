@@ -87,7 +87,7 @@ test('PAPER: buy from the window, the P&L follows the price, lots are shared wit
   await win.getByTestId('scalper-buy').click();
   await expect.poll(() => placed.length).toBe(1);
   expect(placed[0]).toMatchObject({ mode: 'PAPER', action: 'BUY', lots: 2 });
-  await expect(win.getByTestId('scalper-position')).toHaveText('Long 2 lots');
+  await expect(win.getByTestId('scalper-position')).toHaveText(/^Long 2L/);
 
   // the price moves up 2 points: 2 lots x 65 x 2 = +₹260, green edge
   live.ltp = 105.5;
@@ -96,7 +96,7 @@ test('PAPER: buy from the window, the P&L follows the price, lots are shared wit
 
   // reverse: the paper close sends nothing, the new entry goes for the position's own size
   await win.getByTestId('scalper-reverse').click();
-  await expect(win.getByTestId('scalper-position')).toHaveText('Short 2 lots');
+  await expect(win.getByTestId('scalper-position')).toHaveText(/^Short 2L/);
   await expect.poll(() => placed.length).toBe(2);
   expect(placed[1]).toMatchObject({ mode: 'PAPER', action: 'SELL', lots: 2 });
 
@@ -135,7 +135,7 @@ test('REAL opens locked: nothing is sent until Unlock, and a mode change locks i
   expect(placed).toEqual([]);
 
   // the broker's 130 units at a 65 lot = Long 2 lots
-  await expect(win.getByTestId('scalper-position')).toHaveText('Long 2 lots');
+  await expect(win.getByTestId('scalper-position')).toHaveText(/^Long 2L/);
   await win.getByTestId('scalper-unlock').click();
   await win.getByTestId('scalper-close').click();
   await expect.poll(() => placed.length).toBe(1);

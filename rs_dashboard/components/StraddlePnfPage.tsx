@@ -12,6 +12,9 @@ import { effectiveInterval, hasLongIntervals, intervalLabel, isTickInterval, tic
 import SettingsControls, { SmaPeriodInput, SupertrendControls } from './straddlePnf/SettingsControls';
 import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import ScalperWindow, { type ScalperPos } from './straddlePnf/ScalperWindow';
+import IndexMapControls from './straddlePnf/IndexMapControls';
+import { useIndexHeld, useTradedLive } from './straddlePnf/useIndexHeld';
+import { DEFAULT_INDEX_MAP, legText, readIndexMap, type IndexMap } from '@/lib/pnfIndexMap';
 import { usePnfTrade } from './straddlePnf/usePnfTrade';
 import BrokerBooks from './straddlePnf/BrokerBooks';
 import HeaderClock from './straddlePnf/HeaderClock';
@@ -87,6 +90,8 @@ const TRADE_OPEN_KEY = 'straddle-pnf-trade-open';
 // The Renko Scalper window: open / minimised and where it sits are remembered; its REAL unlock never is.
 const SCALPER_OPEN_KEY = 'straddle-pnf-scalper-open';
 const SCALPER_MIN_KEY = 'straddle-pnf-scalper-min';
+/** Renko index chart -> option map, per chart (lib/pnfIndexMap.ts): `renko-index-map-1` / `-2`. */
+const INDEX_MAP_KEY = 'straddle-pnf-index-map-';
 const SCALPER_POS_KEY = 'straddle-pnf-scalper-pos';
 /** The positions / order book / trade book / P&L strip at the bottom: collapsed by default (expanded it takes chart height). */
 const BOOKS_OPEN_KEY = 'straddle-pnf-books-open';
@@ -279,6 +284,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const [booksOpen, setBooksOpen] = useState(false);
   const [scalperOpen, setScalperOpen] = useState(false);
   const [scalperMin, setScalperMin] = useState(false);
+  const [indexMap, setIndexMap] = useState<Record<ChartId, IndexMap>>({ 1: DEFAULT_INDEX_MAP, 2: DEFAULT_INDEX_MAP });
   const [scalperPos, setScalperPos] = useState<ScalperPos | null>(null);
   // REAL unlock of the Scalper, for ONE chart + instrument + mode: a chart switch, a new instrument or a mode change re-locks it
   // (the key no longer matches). Never remembered.
@@ -353,6 +359,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     if (readP(BOOKS_OPEN_KEY) === '1') setBooksOpen(true);
     if (readP(SCALPER_OPEN_KEY) === '1') setScalperOpen(true);
     if (readP(SCALPER_MIN_KEY) === '1') setScalperMin(true);
+    setIndexMap({ 1: readIndexMap(readP(`${INDEX_MAP_KEY}1`)), 2: readIndexMap(readP(`${INDEX_MAP_KEY}2`)) });
     try {
       const p = JSON.parse(readP(SCALPER_POS_KEY) ?? 'null') as ScalperPos | null;
       if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) setScalperPos({ x: p.x, y: p.y });
@@ -1154,6 +1161,14 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // Order Style (Single / Bracket / Cover) and MTM guard: in the trade bar's row while it is shown, else a row of its own above the
   // charts (the chart rail still places orders with it). Never floated over the charts, where it hid their header lines.
   const tradeBarShown = tradeOpen && !replay.active;
+  // Renko index chart -> options (lib/pnfIndexMap.ts): the index gives the direction, the map's CE / PE is traded. The held option is
+  // the server's REAL ledger (or page memory in PAPER), so Close / Reverse act on the contract actually opened, not the map's pick now.
+  const indexTradable = renko && activeTarget.kind === 'index';
+  const indexHeld = useIndexHeld({ enabled: indexTradable, scope, chart: active, indexKey: targetKey(activeTarget), broker, mode: tradeMode });
+  const tradedLive = useTradedLive(indexHeld.held?.ids ?? null);
+  const changeIndexMap = (c: ChartId, m: IndexMap) => { setIndexMap(v => ({ ...v, [c]: m })); saveP(`${INDEX_MAP_KEY}${c}`, JSON.stringify(m)); };
+  const activeMap = indexMap[active];
+  const indexSideHints = indexTradable ? { BUY: legText(activeMap.bull), SELL: legText(activeMap.bear) } : undefined;
   // ONE order engine for the trade bar and the Scalper window: the same position, the same lots.
   const trade = usePnfTrade({
     target: activeTarget,
@@ -1174,8 +1189,19 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     },
     onSquaredOff: () => { const rc = railCharts.find(x => x.chart === active); if (rc) void resting.cancelBracketsFor(rc.targetKey); },
     scope,
+    index: indexTradable ? {
+      chart: active, map: activeMap, held: indexHeld.held, heldLoading: indexHeld.loading, heldError: indexHeld.error, ops: indexHeld.ops,
+      tradedLtp: tradedLive.ltp,
+    } : undefined,
   });
-  const scalperShown = renko && scalperOpen && !replay.active && activeTarget.kind !== 'index';
+  const indexMapSlot = indexTradable ? (
+    <IndexMapControls symbol={activeTarget.symbol} map={activeMap} onChange={m => changeIndexMap(active, m)}
+                      spot={activeFeed.live ? activeFeed.live.ce + activeFeed.live.pe : null} held={indexHeld.held}
+                      disabled={locked(active)}
+                      ownLots={trade.ownLots}
+                      onSettle={as => { const h = indexHeld.held; if (h) void indexHeld.ops.resolve(h.id, as); }} />
+  ) : null;
+  const scalperShown = renko && scalperOpen && !replay.active && (activeTarget.kind !== 'index' || indexTradable);
   const scalperKey = `${active}|${targetKey(activeTarget)}|${tradeMode}`;
   const toggleScalper = () => {
     const next = !scalperOpen;
@@ -1398,7 +1424,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
             <IconButton icon={muted ? VolumeX : Volume2} label={muted ? 'Unmute alert sound' : 'Mute alert sound'} onClick={h.toggleMute} pressed={muted} />
             <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <IconButton icon={Zap} label={tradeOpen ? 'Hide trade desk' : 'Show trade desk'} onClick={h.toggleTradeOpen} pressed={tradeOpen} />
-            {renko && !replay.active && activeTarget.kind !== 'index' && (
+            {renko && !replay.active && (
+
               <IconButton icon={Crosshair} label={scalperOpen ? 'Close scalper' : 'Scalper'} onClick={h.toggleScalper} pressed={scalperOpen} />
             )}
     </>
@@ -1477,6 +1504,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
             onModeChange={changeTradeMode}
             onSwitchTarget={choose}
             tradesLabel={dual ? `C${active} · ${activeFeed.label}` : undefined}
+            indexSlot={indexMapSlot}
+            sideHints={indexSideHints}
           />
         </div>
       )}
@@ -1551,7 +1580,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       {scalperShown && (
         <ScalperWindow
           trade={trade}
-          label={dual ? `C${active} · ${activeFeed.label}` : activeFeed.label}
+          label={`${dual ? `C${active} · ` : ''}${activeFeed.label}${indexTradable && indexHeld.held ? ` → ${targetLabel(indexHeld.held.traded)}` : ''}`}
+          sideHints={indexSideHints}
           broker={broker}
           mode={tradeMode}
           unlocked={scalperUnlockKey === scalperKey}
