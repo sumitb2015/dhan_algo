@@ -14,7 +14,7 @@ import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import ScalperWindow, { type ScalperPos } from './straddlePnf/ScalperWindow';
 import IndexMapControls from './straddlePnf/IndexMapControls';
 import { useIndexHeld, useTradedLive } from './straddlePnf/useIndexHeld';
-import { DEFAULT_INDEX_MAP, legText, readIndexMap, type IndexMap } from '@/lib/pnfIndexMap';
+import { DEFAULT_INDEX_MAP, legShort, legText, readIndexMap, type IndexMap } from '@/lib/pnfIndexMap';
 import { usePnfTrade } from './straddlePnf/usePnfTrade';
 import BrokerBooks from './straddlePnf/BrokerBooks';
 import HeaderClock from './straddlePnf/HeaderClock';
@@ -1168,7 +1168,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const tradedLive = useTradedLive(indexHeld.held?.ids ?? null);
   const changeIndexMap = (c: ChartId, m: IndexMap) => { setIndexMap(v => ({ ...v, [c]: m })); saveP(`${INDEX_MAP_KEY}${c}`, JSON.stringify(m)); };
   const activeMap = indexMap[active];
-  const indexSideHints = indexTradable ? { BUY: legText(activeMap.bull), SELL: legText(activeMap.bear) } : undefined;
+  const indexSideHints = indexTradable ? { BUY: legShort(activeMap.bull), SELL: legShort(activeMap.bear) } : undefined;
+  const indexSideTitles = indexTradable ? { BUY: legText(activeMap.bull), SELL: legText(activeMap.bear) } : undefined;
+  /** No rail on an index chart yet, so no page-held exits: Bracket / Cover are off there (the bar shows Single). */
+  const INDEX_NO_BRACKETS = 'No Bracket / Cover on an index chart yet: no rail holds the exits for the option it trades. Exit by hand, or chart the option itself.';
   // ONE order engine for the trade bar and the Scalper window: the same position, the same lots.
   const trade = usePnfTrade({
     target: activeTarget,
@@ -1182,7 +1185,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     paper,
     setPaper,
     onSizing,
-    bracketSpec: bracketSpecNow,
+    bracketSpec: indexTradable ? () => null : bracketSpecNow,
     onEntered: e => {
       const rc = railCharts.find(x => x.chart === active);
       if (rc) void resting.armBracket({ chart: rc.chart, target: rc.target, targetKey: rc.targetKey, side: e.action, lots: e.lots, mode: e.mode, product: e.product, bracket: e.spec }, e.price);
@@ -1198,7 +1201,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     <IndexMapControls symbol={activeTarget.symbol} map={activeMap} onChange={m => changeIndexMap(active, m)}
                       spot={activeFeed.live ? activeFeed.live.ce + activeFeed.live.pe : null} held={indexHeld.held}
                       disabled={locked(active)}
-                      ownLots={trade.ownLots}
+                      ownLots={trade.ownLots} mismatch={trade.heldMismatch} onForget={trade.forgetHeld}
                       onSettle={as => { const h = indexHeld.held; if (h) void indexHeld.ops.resolve(h.id, as); }} />
   ) : null;
   const scalperShown = renko && scalperOpen && !replay.active && (activeTarget.kind !== 'index' || indexTradable);
@@ -1211,7 +1214,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   };
   const styleBar = (
     <PnfOrderStyle
-      value={orderStyle} onChange={changeStyle} boxPts={activeChartModel.model.box}
+      value={orderStyle} onChange={changeStyle} boxPts={activeChartModel.model.box} bracketsOff={indexTradable ? INDEX_NO_BRACKETS : undefined}
       guardOn={[1, 2].some(n => guards.guardOf(n).on)}
       serverGuards={serverGuards.map(({ chart: c, view }) => ({
         chart: c, mine: view.broker === broker && view.mode === tradeMode,
@@ -1506,6 +1509,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
             tradesLabel={dual ? `C${active} · ${activeFeed.label}` : undefined}
             indexSlot={indexMapSlot}
             sideHints={indexSideHints}
+            sideTitles={indexSideTitles}
           />
         </div>
       )}
@@ -1580,14 +1584,17 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       {scalperShown && (
         <ScalperWindow
           trade={trade}
-          label={`${dual ? `C${active} · ` : ''}${activeFeed.label}${indexTradable && indexHeld.held ? ` → ${targetLabel(indexHeld.held.traded)}` : ''}`}
+          label={dual ? `C${active} · ${activeFeed.label}` : activeFeed.label}
           sideHints={indexSideHints}
+          subtitle={!indexTradable ? null : indexHeld.held
+            ? `Holds ${indexHeld.held.dir === 'bull' ? 'BULL' : 'BEAR'} · ${indexHeld.held.action} ${targetLabel(indexHeld.held.traded)}`
+            : `Flat · Bull ${legText(activeMap.bull)} · Bear ${legText(activeMap.bear)}`}
           broker={broker}
           mode={tradeMode}
           unlocked={scalperUnlockKey === scalperKey}
           onUnlockedChange={v => setScalperUnlockKey(v ? scalperKey : null)}
           blocked={locked(active) ? `Chart ${active} is run by AUTO - stop it to trade by hand` : null}
-          styleText={orderStyle.style === 'Single' ? 'Single (no exits)'
+          styleText={orderStyle.style === 'Single' || indexTradable ? 'Single (no exits)'
             : `${orderStyle.style} · ${orderStyle.style === 'Bracket' ? `TGT ${orderStyle.tgt || '?'} · ` : ''}SL ${orderStyle.sl || '?'} boxes${orderStyle.trailOn ? ' · trail' : ''}`}
           pos={scalperPos}
           onMove={p => { setScalperPos(p); saveP(SCALPER_POS_KEY, JSON.stringify(p)); }}

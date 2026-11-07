@@ -3,6 +3,8 @@ import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { openBrokerOrders } from '@/lib/pnfRestingServer';
 import type { PnfScope } from '@/lib/pnfScope';
 import { exitingAutoProduct, readAutoLedger, reservedByAuto } from '@/lib/pnfAutoServer';
+import { reservedByIndexHeld } from '@/lib/pnfIndexHeld';
+import { readIndexHeld } from '@/lib/pnfIndexHeldServer';
 import { brokerPositionRows, brokerSessionOk } from '@/lib/priceLadderServer';
 import { CloseGuard } from '@/lib/priceLadderClose';
 import { targetKey } from '@/lib/pnfTarget';
@@ -84,11 +86,16 @@ export async function placePnfMarket(order: PnfOrder, scope: PnfScope): Promise<
       const otherName = other === 'renko' ? 'Renko' : 'Point & Figure';
       // Per product: MIS AUTO rows are kept out of the broker's MIS row, NRML AUTO rows out of its NRML row.
       const otherLed = readAutoLedger(other), ownLed = readAutoLedger(scope);
+      // A Renko / P&F INDEX chart's held option (lib/pnfIndexHeld.ts) is kept too: matched per leg by the option contract itself, so a
+      // straddle's CE leg keeps the units an index chart holds of that CE. An index chart never sends this close (it exits with exitOwn).
+      const heldLeds = [readIndexHeld('renko'), readIndexHeld('pnf')];
+      const legKeys = onBroker.map(l => (target.kind === 'options' && (l.side === 'CE' || l.side === 'PE') ? targetKey({ ...target, side: l.side }) : null));
       const keep = (p: AutoProduct) => {
         const fromOther = reservedByAuto(otherLed, broker, targetKey(target), onBroker.length, undefined, p);
         // Chart N's MTM guard: this page's OTHER chart's AUTO on the same contract is kept too (each chart guards its own trade).
         const fromSibling = order.guardChart ? reservedByAuto(ownLed, broker, targetKey(target), onBroker.length, order.guardChart, p) : onBroker.map(() => 0);
-        return { fromOther, fromSibling, reserved: fromOther.map((r, i) => r + fromSibling[i]) };
+        const fromIndex = legKeys.map(k => (k ? heldLeds.reduce((n, led) => n + reservedByIndexHeld(led, broker, k, p), 0) : 0));
+        return { fromOther, fromSibling, fromIndex, reserved: fromOther.map((r, i) => r + fromSibling[i] + fromIndex[i]) };
       };
       const mis = keep('INTRADAY'), nrml = keep('MARGIN');
       const sibling = order.guardChart ? (order.guardChart === 1 ? 2 : 1) : null;
@@ -99,7 +106,8 @@ export async function placePnfMarket(order: PnfOrder, scope: PnfScope): Promise<
       const anyKept = kept.some(k => k > 0);
       const fromOther = mis.fromOther.some(r => r !== 0) || nrml.fromOther.some(r => r !== 0);
       const fromSibling = mis.fromSibling.some(r => r !== 0) || nrml.fromSibling.some(r => r !== 0);
-      const whose = anyKept ? [fromOther ? `the ${otherName} page's AUTO` : '', fromSibling ? `chart ${sibling}'s AUTO` : ''].filter(Boolean).join(' and ') : '';
+      const fromIndex = mis.fromIndex.some(r => r !== 0) || nrml.fromIndex.some(r => r !== 0);
+      const whose = anyKept ? [fromOther ? `the ${otherName} page's AUTO` : '', fromSibling ? `chart ${sibling}'s AUTO` : '', fromIndex ? 'an index chart\'s held option' : ''].filter(Boolean).join(' and ') : '';
       if (whose) keptNote = ` KEPT: ${kept.join(' / ')} units on this contract belong to ${whose} and were not closed.`;
       if (plans.every(p => p.orders.length === 0)) {
         return reply({

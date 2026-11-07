@@ -46,6 +46,8 @@ export interface ScalperEngine {
   executeSquareOff: () => Promise<boolean>;
   /** Confirmed close first, then the same size the other way; never one 2x order. */
   executeReverse: () => Promise<boolean>;
+  /** What Close does when it is not "the whole position on this contract" (a mapped index chart closes only its own units). */
+  closeTitle?: string | null;
 }
 
 export interface ScalperWindowProps {
@@ -65,8 +67,10 @@ export interface ScalperWindowProps {
   minimized: boolean;
   onMinimizedChange: (v: boolean) => void;
   onClose: () => void;
-  /** A mapped index chart (Renko): Buy / Sell read Bull / Bear and name the option leg each one trades ("BUY CE ATM"). */
+  /** A mapped index chart (Renko): Buy / Sell read Bull / Bear and name the option leg each one trades ("BUY CE"). */
   sideHints?: { BUY: string; SELL: string };
+  /** A line under the header: what the window trades when the header's label is not the contract (the option an index chart holds). */
+  subtitle?: string | null;
 }
 
 const WIDTH = 272;
@@ -87,11 +91,11 @@ function clamp(p: ScalperPos, w: number, h: number): ScalperPos {
 }
 
 export default function ScalperWindow({
-  trade, label, broker, mode, unlocked, onUnlockedChange, blocked, styleText, pos, onMove, minimized, onMinimizedChange, onClose, sideHints,
+  trade, label, broker, mode, unlocked, onUnlockedChange, blocked, styleText, pos, onMove, minimized, onMinimizedChange, onClose, sideHints, subtitle,
 }: ScalperWindowProps) {
   const {
     isEquity, cap, lots, lotsDraft, setLotsDraft, commitLots, pickLots, busy, ready, unsupported, position, positionLots,
-    shownPnl, paperAvg, realError, prices, unitsPerLot, executeOrder, executeSquareOff, executeReverse,
+    shownPnl, paperAvg, realError, prices, unitsPerLot, executeOrder, executeSquareOff, executeReverse, closeTitle,
   } = trade;
   const rootRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState<ScalperPos | null>(null);
@@ -236,6 +240,9 @@ export default function ScalperWindow({
             <X className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
         </div>
+        {subtitle && (
+          <div data-testid="scalper-subtitle" className="px-2.5 pt-1.5 text-[11px] font-semibold text-zinc-300 truncate" title={subtitle}>{subtitle}</div>
+        )}
 
         <div className="p-2.5 flex flex-col gap-2">
           {/* Position · LTP on the left, P&L on the right: one line */}
@@ -323,7 +330,7 @@ export default function ScalperWindow({
                     <ArrowLeftRight className="w-3.5 h-3.5" aria-hidden="true" /> Reverse <kbd className="text-[10px] text-zinc-400">R</kbd>
                   </button>
                   <button type="button" data-testid="scalper-close" disabled={!canTrade} onClick={() => void executeSquareOff()} aria-keyshortcuts="X"
-                          title={mode === 'REAL' ? `Closes the whole ${BROKER_LABELS[broker]} position on this contract (every product)` : 'Closes the paper position'}
+                          title={closeTitle ?? (mode === 'REAL' ? `Closes the whole ${BROKER_LABELS[broker]} position on this contract (every product)` : 'Closes the paper position')}
                           className={`h-7 rounded-md bg-amber-600 hover:bg-amber-500 text-xs font-bold text-oncolor disabled:opacity-40 disabled:cursor-not-allowed inline-flex items-center justify-center gap-1.5 ${FOCUS}`}>
                     <XCircle className="w-3.5 h-3.5" aria-hidden="true" /> Close <kbd className="text-[10px]">X</kbd>
                   </button>

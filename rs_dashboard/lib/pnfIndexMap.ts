@@ -7,6 +7,7 @@
 // The strike is ATM +/- N at fire time (N > 0 = out of the money for both a CE and a PE), on the nearest or a chosen expiry.
 // Pure: no IO. The server resolves the contract (lib/pnfIndexTradeServer.ts); the browser only names the map.
 
+import { atmStrike } from './atmStrike.ts';
 import { bias as ladderBias } from './priceLadder.ts';
 import type { PnfAction } from './pnfOrderLogic.ts';
 import type { Target } from './pnfTarget.ts';
@@ -78,11 +79,14 @@ export function pickExpiry(map: IndexMap, expiries: string[]): string | null {
  */
 export function pickStrike(strikes: number[], spot: number | null, opt: 'CE' | 'PE', offset: number): number | null {
   if (!strikes.length || spot === null || !(spot > 0)) return null;
-  // the nearest listed strike, lower one on a tie (lib/pnfContracts.ts atmStrike's rule; not imported: that module reads the disk)
-  const atm = strikes.reduce((best, k) => (Math.abs(k - spot) < Math.abs(best - spot) ? k : best), strikes[0]);
+  const atm = atmStrike(strikes, spot);
+  if (atm === null) return null;
   const i = strikes.indexOf(atm) + (opt === 'CE' ? offset : -offset);
   return i >= 0 && i < strikes.length ? strikes[i] : null;
 }
+
+/** A button's short form: "BUY CE", "SELL PE +2", "BUY CE -1" (ATM is the default and is not said). */
+export const legShort = (leg: IndexMapLeg) => `${leg.action} ${leg.opt}${leg.offset === 0 ? '' : leg.offset > 0 ? ` +${leg.offset}` : ` ${leg.offset}`}`;
 
 /** "BUY CE ATM", "SELL PE +2 OTM", "BUY CE 1 ITM". */
 export function legText(leg: IndexMapLeg): string {

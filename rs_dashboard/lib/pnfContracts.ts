@@ -144,12 +144,7 @@ export function strikesFor(underlying: string, expiry: string, from: FnoRow[] = 
   return [...sides].filter(([, s]) => s.size === 2).map(([k]) => k).sort((a, b) => a - b);
 }
 
-/** The listed strike nearest `spot`; the middle strike when there is no usable spot. Null for an empty list. */
-export function atmStrike(strikes: number[], spot: number | null): number | null {
-  if (!strikes.length) return null;
-  if (spot === null || !(spot > 0)) return strikes[Math.floor((strikes.length - 1) / 2)];
-  return strikes.reduce((best, k) => (Math.abs(k - spot) < Math.abs(best - spot) ? k : best), strikes[0]);
-}
+export { atmStrike } from './atmStrike.ts';
 
 const toContract = (r: FnoRow): Contract =>
   ({ segment: r.segment, securityId: r.securityId, instrument: r.instrument, displayName: r.displayName, lot: r.lot, expiry: r.expiry });

@@ -29,18 +29,22 @@ export interface IndexMapControlsProps {
   onSettle?: (as: 'done' | 'none') => void;
   /** The held option's lots THIS chart opened (the broker's net may include another page's). */
   ownLots?: number;
+  /** The broker shows less of the held option than this chart opened (for 30 s+): said, with Forget. */
+  mismatch?: string | null;
+  /** Forget the held option (nothing is sent): the user checked Positions and it is gone. */
+  onForget?: () => void;
   /** AUTO runs the chart: the map is shown, not edited. */
   disabled?: boolean;
 }
 
-export default function IndexMapControls({ symbol, map, onChange, spot, held, onSettle, ownLots, disabled = false }: IndexMapControlsProps) {
+export default function IndexMapControls({ symbol, map, onChange, spot, held, onSettle, ownLots, mismatch, onForget, disabled = false }: IndexMapControlsProps) {
   const [chain, setChain] = useState<Chain | null>(null);
   const want = map.expiry === 'NEAREST' ? '' : map.expiry;
   useEffect(() => {
     let dead = false;
     void (async () => {
       try {
-        const q = new URLSearchParams({ kind: 'options', underlying: symbol, ...(want ? { expiry: want } : {}) });
+        const q = new URLSearchParams({ kind: 'options', underlying: symbol, nospot: '1', ...(want ? { expiry: want } : {}) });   // the chart's live price drives the preview
         const j = await (await fetch(`/api/straddle-pnf/contracts?${q}`)).json() as { success?: boolean; expiries?: string[]; expiry?: string; strikes?: number[] };
         if (!dead && j.success) setChain({ symbol, expiries: j.expiries ?? [], expiry: j.expiry ?? null, strikes: j.strikes ?? [] });
       } catch { /* the preview waits; the order is resolved server-side anyway */ }
@@ -113,7 +117,7 @@ export default function IndexMapControls({ symbol, map, onChange, spot, held, on
                 ? held.dir === 'bull' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400' : 'border-red-500/40 bg-red-500/10 text-red-400'
                 : 'border-amber-500/40 bg-amber-500/10 text-amber-400'}`}
               title="The contract this chart holds: Buy / Sell / Close / Reverse act on it until it is closed (a map change applies to the next entry)">
-          {held.dir === 'bull' ? 'BULL' : 'BEAR'} · {held.action} {targetLabel(held.traded)}{ownLots ? ` · ${ownLots}L` : ''}
+          {held.dir === 'bull' ? 'BULL' : 'BEAR'} · {held.action} {targetLabel(held.traded)}{ownLots ? ` · ${Number.isInteger(ownLots) ? ownLots : ownLots.toFixed(2)}L` : ''}
           {held.state !== 'open' && <> · {pendingText(held)} {held.state === 'unknown' ? 'UNKNOWN' : 'SENDING'}</>}
         </span>
       )}
@@ -122,6 +126,14 @@ export default function IndexMapControls({ symbol, map, onChange, spot, held, on
           Check Orders / Positions - did {pendingText(held)} go through?
           <button type="button" onClick={() => onSettle('done')} className={`px-1.5 h-6 rounded border border-zinc-700 bg-zinc-800 font-bold text-zinc-100 hover:bg-zinc-700 ${FOCUS}`}>It went through</button>
           <button type="button" onClick={() => onSettle('none')} className={`px-1.5 h-6 rounded border border-zinc-700 bg-zinc-800 font-bold text-zinc-100 hover:bg-zinc-700 ${FOCUS}`}>It did not</button>
+        </span>
+      )}
+      {held && held.state === 'open' && mismatch && onForget && (
+        <span data-testid="index-held-mismatch" className="inline-flex items-center gap-1 text-[11px] text-amber-400">
+          <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" />
+          <span className="max-w-[26rem] truncate" title={`${mismatch}. Another page may hold the same strike, so this is not proof the leg is gone - check Positions.`}>{mismatch}</span>
+          <button type="button" onClick={onForget} title="Forget the held option: nothing is sent, the next click picks a fresh ATM"
+                  className={`px-1.5 h-6 rounded border border-zinc-700 bg-zinc-800 font-bold text-zinc-100 hover:bg-zinc-700 ${FOCUS}`}>Forget</button>
         </span>
       )}
       <span data-testid="index-map-no-guard" className="inline-flex items-center gap-1 text-[11px] text-zinc-400"

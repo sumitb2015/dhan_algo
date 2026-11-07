@@ -125,6 +125,10 @@ test('PAPER: a bullish SELL PE map sells the PE on Buy; the bearish click closes
   await bull.getByRole('button', { name: 'PE' }).click();
   await bull.getByLabel('Bullish strike').selectOption('1');
   await expect(bar.getByTestId('index-map-bull-preview')).toHaveText('SELL 24950 PE');
+  // no rail on an index chart: Bracket / Cover are off and the bar shows Single
+  await expect(page.getByTestId('pnf-style-bracket')).toBeDisabled();
+  await expect(page.getByTestId('pnf-style-single')).toHaveAttribute('aria-pressed', 'true');
+  await expect(bar.getByTestId('pnf-trade-buy')).toContainText('BULL ▸ SELL PE +1');
 
   await bar.getByTestId('pnf-trade-buy').click();
   await expect.poll(() => placed.length).toBe(1);
@@ -150,7 +154,8 @@ test('PAPER: Reverse closes the held CE, then opens the bearish leg, resolved fr
 
   await page.getByRole('button', { name: 'Scalper', exact: true }).click();
   const win = page.getByTestId('scalper-window');
-  await expect(win.getByTestId('scalper-buy')).toContainText('BUY CE ATM');
+  await expect(win.getByTestId('scalper-buy')).toContainText('BUY CE');
+  await expect(win.getByTestId('scalper-subtitle')).toContainText('Holds BULL · BUY NIFTY 25000 CE');
   await expect(win.getByTestId('scalper-position')).toHaveText(/^Long 2L/);
   await win.getByTestId('scalper-reverse').click();
   await expect(bar.getByTestId('index-held')).toContainText('BEAR · BUY NIFTY 25000 PE');
@@ -166,6 +171,8 @@ test('REAL: an unknown entry holds the chart (no second order) until settled by 
   await bar.getByTestId('pnf-trade-buy').click();
   await expect.poll(() => placed.length).toBe(1);
   await expect(bar.getByTestId('index-held')).toContainText('UNKNOWN');
+  await expect(bar.getByTestId('pnf-trade-position')).toHaveText('UNKNOWN');      // never FLAT while the entry is unknown
+  await expect(bar.getByTestId('pnf-trade-unsupported')).toHaveCount(0);         // the chip and the settle prompt say it once
   expect(rows()[0].state).toBe('unknown');
   await expect(bar.getByTestId('pnf-trade-buy')).toBeDisabled();
   await expect(bar.getByTestId('pnf-trade-sell')).toBeDisabled();
@@ -220,16 +227,22 @@ test('REAL: the other side\'s click reduces only this chart\'s own lots, even wh
   await expect(bar.getByTestId('index-held')).toHaveCount(0);
 });
 
-test('REAL: an option the broker never shows (rejected after a placed reply) is forgotten 30 s later, without a re-render', async ({ page }) => {
+test('REAL: a held option the broker nets to 0 is never forgotten silently - after 30 s the bar says so and offers Forget', async ({ page }) => {
   test.setTimeout(120_000);
-  const { placed, held } = await installMock(page, { fillsOnBook: false });
+  // another page is SHORT 1 lot of the same CE: this chart's 1-lot long nets the broker row to 0, yet the long is still open
+  const { placed, held } = await installMock(page, { otherNet: { CE: -65 } });
   const bar = await openIndex(page);
   await goReal(page);
   await bar.getByTestId('pnf-trade-buy').click();
   await expect.poll(() => placed.length).toBe(1);
   await expect(bar.getByTestId('index-held')).toContainText('BULL');
+  await expect(bar.getByTestId('pnf-trade-position')).toContainText('LONG 1');    // this chart's own lot, not the broker's net 0
   await page.waitForTimeout(10_000);
-  expect(held.led.rows.length).toBe(1);                                          // not before the fill-lag grace
-  await expect.poll(() => held.led.rows.length, { timeout: 45_000 }).toBe(0);
+  await expect(bar.getByTestId('index-held-mismatch')).toHaveCount(0);           // not before the fill-lag grace
+  await expect(bar.getByTestId('index-held-mismatch')).toContainText('shows 0L long', { timeout: 40_000 });
+  expect(held.led.rows.length).toBe(1);                                          // never cleared on its own
+  await bar.getByTestId('index-held-mismatch').getByRole('button', { name: 'Forget' }).click();
   await expect(bar.getByTestId('index-held')).toHaveCount(0);
+  expect(held.led.rows.length).toBe(0);
+  expect(placed.length).toBe(1);                                                 // Forget sends nothing
 });

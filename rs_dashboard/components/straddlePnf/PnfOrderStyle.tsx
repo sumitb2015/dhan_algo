@@ -38,8 +38,13 @@ function BoxesBox({ label, value, onCommit, disabled, boxPts }: { label: string;
   );
 }
 
-export default function PnfOrderStyle({ value, onChange, guard, guardOn, boxPts, serverGuards }: {
+export default function PnfOrderStyle({ value: saved, onChange, guard, guardOn, boxPts, serverGuards, bracketsOff }: {
   value: StyleState;
+  /**
+   * Why Bracket / Cover cannot be used on the active chart (a Renko index chart trading options has no rail to hold the exits yet), or
+   * absent. The bar then shows Single, with Bracket / Cover disabled: the saved choice is kept for the other charts.
+   */
+  bracketsOff?: string;
   /** The active chart's box size in price points (shown next to each box count as its point equivalent). */
   boxPts?: number;
   onChange: (s: StyleState) => void;
@@ -53,10 +58,15 @@ export default function PnfOrderStyle({ value, onChange, guard, guardOn, boxPts,
   serverGuards?: { chart: 1 | 2; mine: boolean; text: string }[];
 }) {
   const [open, setOpen] = useState(false);
-  const seg = (s: OrderStyle) => (
-    <button key={s} type="button" aria-pressed={value.style === s} onClick={() => onChange({ ...value, style: s })} data-testid={`pnf-style-${s.toLowerCase()}`}
-            className={`px-2 h-6 text-[11px] font-bold rounded transition-colors ${FOCUS} ${value.style === s ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}>{s}</button>
-  );
+  const value: StyleState = bracketsOff ? { ...saved, style: 'Single' } : saved;
+  const seg = (s: OrderStyle) => {
+    const off = !!bracketsOff && s !== 'Single';
+    return (
+      <button key={s} type="button" aria-pressed={value.style === s} disabled={off} title={off ? bracketsOff : undefined}
+              onClick={() => onChange({ ...saved, style: s })} data-testid={`pnf-style-${s.toLowerCase()}`}
+              className={`px-2 h-6 text-[11px] font-bold rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${FOCUS} ${value.style === s ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}>{s}</button>
+    );
+  };
   return (
     <div data-testid="pnf-style-bar" className="flex items-center gap-2 flex-wrap">
       <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400" title={HELP}>Style</span>

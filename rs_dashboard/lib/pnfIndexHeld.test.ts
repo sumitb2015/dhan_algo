@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyHeldOp, emptyHeld, heldFor, parseHeld, pendingText, type HeldLedger, type HeldOp } from './pnfIndexHeld.ts';
+import { applyHeldOp, emptyHeld, heldFor, parseHeld, parseHeldOp, pendingText, reservedByIndexHeld, type HeldLedger, type HeldOp } from './pnfIndexHeld.ts';
 
 const CE = { kind: 'options' as const, symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-11', strike: 24100, side: 'CE' as const };
 const PE = { ...CE, side: 'PE' as const, strike: 24000 };
@@ -103,4 +103,29 @@ test('parseHeld drops rows that do not parse or whose state and quantities disag
   assert.equal(led.rev, 4);
   assert.deepEqual(led.rows.map(r => r.id), ['h1']);
   assert.deepEqual(parseHeld('junk'), emptyHeld());
+});
+
+test('reservedByIndexHeld: each index chart\'s own units on that contract, signed, in the close\'s product; an add in flight counts', () => {
+  const CEKEY = 'options|NIFTY|2026-11-11|24100|CE';
+  let led = opened();                                                            // chart 1: long 130 CE (MIS)
+  led = ok(led, { op: 'enter', row: { ...base, id: 'h2', chart: 2, action: 'SELL', dir: 'bear' }, units: 65, now: 1 });   // chart 2: short 65 pending
+  assert.equal(reservedByIndexHeld(led, 'dhan', CEKEY, 'INTRADAY'), 65, 'a pending entry may be live: it is reserved too (130 long - 65 short)');
+  led = ok(led, { op: 'confirm', id: 'h2', now: 2 });
+  assert.equal(reservedByIndexHeld(led, 'dhan', CEKEY, 'INTRADAY'), 65);
+  led = ok(led, { op: 'begin', id: 'h1', delta: 65, now: 3 });
+  assert.equal(reservedByIndexHeld(led, 'dhan', CEKEY, 'INTRADAY'), 130, 'the add in flight may be live: 195 long - 65 short');
+  assert.equal(reservedByIndexHeld(led, 'dhan', CEKEY, 'MARGIN'), 0);
+  assert.equal(reservedByIndexHeld(led, 'kotak', CEKEY, 'INTRADAY'), 0);
+  assert.equal(reservedByIndexHeld(led, 'dhan', 'options|NIFTY|2026-11-11|24100|PE', 'INTRADAY'), 0);
+});
+
+test('parseHeldOp: every field is checked; a mistyped settle answer is refused, never read as "it did not"', () => {
+  assert.deepEqual(parseHeldOp({ op: 'resolve', id: 'h1', as: 'done' }), { op: 'resolve', id: 'h1', as: 'done' });
+  assert.match(parseHeldOp({ op: 'resolve', id: 'h1', as: 'yes' }) as string, /done or none/);
+  assert.match(parseHeldOp({ op: 'unknown', id: 'h1', note: 5 }) as string, /note must be text/);
+  assert.match(parseHeldOp({ op: 'begin', id: 'h1', delta: 0 }) as string, /delta/);
+  assert.match(parseHeldOp({ op: 'enter', row: base, units: -1 }) as string, /units/);
+  assert.match(parseHeldOp({ op: 'drop', id: 'h1' }) as string, /op must be/);
+  assert.match(parseHeldOp({ op: 'confirm', id: '../x' }) as string, /id is invalid/);
+  assert.deepEqual(parseHeldOp({ op: 'confirm', id: 'h1', extra: 1 }), { op: 'confirm', id: 'h1' });
 });

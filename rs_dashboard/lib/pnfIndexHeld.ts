@@ -56,6 +56,9 @@ export type HeldOp =
   | { op: 'unknown'; id: string; note?: string; now: number }
   | { op: 'resolve'; id: string; as: 'done' | 'none'; now: number };
 
+/** An op as the browser sends it: the route stamps `now`. */
+export type HeldOpIn = HeldOp extends infer T ? T extends HeldOp ? Omit<T, 'now'> : never : never;
+
 export type HeldResult = { ok: true; ledger: HeldLedger; row?: HeldRow | null } | { ok: false; error: string; status: number };
 
 const ID_RE = /^[A-Za-z0-9:_-]{1,80}$/;
@@ -167,4 +170,50 @@ export function applyHeldOp(led: HeldLedger, op: HeldOp): HeldResult {
       return drop(cur.id);
   }
   return refuse('Unknown op', 400);
+}
+
+/**
+ * What the index charts' held options hold of ONE option contract (`legKey`, a single CE / PE target key) at `broker` under `product`,
+ * signed (+ long, - short), in broker units: a whole-contract close from another chart (a Square off or an MTM guard on a chart of that
+ * option, or of a straddle that has it as a leg) must keep it. Every row counts whatever its state; an add in flight (`pending` > 0) is
+ * reserved too, since it may be live at the broker.
+ */
+export function reservedByIndexHeld(led: HeldLedger, broker: string, legKey: string, product: HeldProduct): number {
+  let out = 0;
+  for (const r of led.rows) {
+    if (r.broker !== broker || r.product !== product || targetKey(r.traded) !== legKey) continue;
+    out += (r.action === 'BUY' ? 1 : -1) * (r.units + Math.max(0, r.pending));
+  }
+  return out;
+}
+
+const OPS = new Set(['enter', 'begin', 'confirm', 'void', 'clear', 'unknown', 'resolve']);
+/**
+ * A request body -> a valid op (without `now`, which the route stamps), or the reason it is refused. Nothing is passed through
+ * unchecked: a mistyped settle answer must never undo an order that went through.
+ */
+export function parseHeldOp(v: unknown): HeldOpIn | string {
+  if (!v || typeof v !== 'object') return 'Invalid op';
+  const o = v as Record<string, unknown>;
+  if (typeof o.op !== 'string' || !OPS.has(o.op)) return 'op must be enter, begin, confirm, void, clear, unknown or resolve';
+  if (o.op === 'enter') {
+    if (!o.row || typeof o.row !== 'object') return 'enter needs a row';
+    if (!qtyOk(o.units)) return 'units must be a positive whole quantity';
+    return { op: 'enter', row: o.row as NewRow, units: o.units };       // the row itself is parsed by applyHeldOp
+  }
+  if (typeof o.id !== 'string' || !ID_RE.test(o.id)) return 'id is invalid';
+  const id = o.id;
+  switch (o.op) {
+    case 'begin':
+      if (typeof o.delta !== 'number' || !Number.isInteger(o.delta) || o.delta === 0 || Math.abs(o.delta) > MAX_UNITS) return 'delta must be a non-zero whole quantity';
+      return { op: 'begin', id, delta: o.delta };
+    case 'unknown':
+      if (o.note !== undefined && typeof o.note !== 'string') return 'note must be text';
+      return { op: 'unknown', id, ...(typeof o.note === 'string' ? { note: o.note.slice(0, 200) } : {}) };
+    case 'resolve':
+      if (o.as !== 'done' && o.as !== 'none') return 'as must be done or none';
+      return { op: 'resolve', id, as: o.as };
+    default:
+      return { op: o.op as 'confirm' | 'void' | 'clear', id };
+  }
 }

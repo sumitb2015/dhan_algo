@@ -168,7 +168,15 @@ export function usePnfTrade({
   const sides = (cur?.legs ?? []).map(l => l.side);
 
   const r = real && real.key === infoKey ? real : null;
-  const positionLots: number[] = isIndex ? [] : mode === 'PAPER' ? paperLegs.map(l => l.lots) : r && 'lots' in r ? r.lots : [];
+  /** Broker quantity of one lot of the chart's contract: REAL the broker's own lot units, PAPER the exchange lot. */
+  const heldPerLot = cur?.legs[0] ? (mode === 'REAL' ? cur.legs[0].lotUnits ?? 0 : cur.legs[0].lot) : 0;
+  /** Mapped index chart: lots THIS chart holds of the held option (its ledger's own units), not the broker's net, which may include
+   *  another page's or strategy's lots of the same strike. */
+  const ownLots = held && held.units > 0 && heldPerLot > 0 ? held.units / heldPerLot : 0;
+  const brokerLots: number[] = r && 'lots' in r ? r.lots : [];
+  const positionLots: number[] = isIndex ? []
+    : mapped ? (ownLots > 0 ? [(held!.action === 'BUY' ? 1 : -1) * ownLots] : [])
+    : mode === 'PAPER' ? paperLegs.map(l => l.lots) : brokerLots;
   const position = isIndex ? null : positionLots.length ? describePosition(positionLots, sides, isEquity) : null;
   const shownPnl = mode === 'PAPER' ? (paperLegs.length ? paperTotal : null)
     : r && 'book' in r ? (r.book.unpriced > 0 ? r.book.total : liveRealPnl(r.book.total, r.lots, r.atPoll, prices, unitsPerLot)) : null;
@@ -186,7 +194,9 @@ export function usePnfTrade({
   };
   const pickLots = (n: number) => { const next = Math.max(1, Math.min(cap, n)); setLots(next); setLotsDraft(String(next)); };
 
-  const heldBlock = !mapped ? null : index.heldError ?? (held && held.state !== 'open'
+  // A failed ledger read does not block: the last read stays valid (a Close must never be refused over a missed poll). The page waits
+  // only for the FIRST read (heldLoading) and for an order that is not settled.
+  const heldBlock = !mapped ? null : (held && held.state !== 'open'
     ? `The last ${held.dir === 'bull' ? 'bullish' : 'bearish'} order is ${held.state === 'unknown' ? 'UNKNOWN' : 'still being sent'} - check Orders/Positions, then settle it`
     : null);
   const unsupported = heldBlock ?? (mode === 'REAL' ? cur?.unsupported ?? cur?.error ?? null : cur?.error ?? null);
@@ -212,18 +222,25 @@ export function usePnfTrade({
   /** Looks up the traded price of a REAL send (a straddle's is CE + PE, each leg qty-weighted over its rows) and moves the
    *  marker to it; resolves with that price (null when the broker never reported it). */
   const settleMarker = async (id: string, legs: LegResult[]): Promise<number | null> => {
+    const price = await tradedPriceOf(legs);                    // null = never reported: the marker stays an estimate
+    if (price) onMarkerPrice?.(id, price);
+    return price;
+  };
+
+  /** The traded price of a REAL send: each leg qty-weighted over its rows, summed over legs (a straddle's is CE + PE); null when the broker
+   *  never reports one. */
+  async function tradedPriceOf(legs: LegResult[]): Promise<number | null> {
     const byLeg = new Map<string, { qty: number; value: number }>();
     for (const l of legs) {
       if (l.status !== 'placed' || !l.orderId) return null;
       const px = await fetchSliceTradedPrice(l.orderId, 'open', l.qty, memoRef.current, { broker });
-      if (px == null) return null;                              // never reported: the marker stays an estimate
+      if (px == null) return null;
       const c = byLeg.get(l.label) ?? { qty: 0, value: 0 };
       byLeg.set(l.label, { qty: c.qty + l.qty, value: c.value + px * l.qty });
     }
-    const price = [...byLeg.values()].reduce((s, v) => s + v.value / v.qty, 0);
-    if (price > 0) onMarkerPrice?.(id, price);
+    const price = [...byLeg.values()].reduce((sum, v) => sum + v.value / v.qty, 0);
     return price > 0 ? price : null;
-  };
+  }
 
   /** `on`: another contract than the chart's (a mapped index entry: the option just resolved, at its quoted price). */
   const paperFill = (deltaLots: number[], on?: { key: string; prices: (number | null)[]; unitsPerLot: number[] }) => {
@@ -326,22 +343,8 @@ export function usePnfTrade({
   // net: another page or strategy may hold the same strike.
   /** Broker quantity of one lot: REAL the broker's own lot units, PAPER the exchange lot. */
   const perLotOf = (l?: { lot: number; lotUnits?: number | null }) => (l ? (mode === 'REAL' ? l.lotUnits ?? 0 : l.lot) : 0);
-  const heldPerLot = perLotOf(cur?.legs[0]);
-  /** Lots THIS chart holds of the held option (not the broker's net). */
-  const ownLots = held && heldPerLot > 0 ? Math.floor(held.units / heldPerLot) : 0;
   const optSide = (a: PnfAction): PnfAction => (a === 'BUY' ? 'SELL' : 'BUY');
 
-  /** The traded price of a REAL send (qty-weighted over its rows), or null when the broker never reports it. */
-  const tradedPriceOf = async (legs: LegResult[]): Promise<number | null> => {
-    let qty = 0, value = 0;
-    for (const l of legs) {
-      if (l.status !== 'placed' || !l.orderId) return null;
-      const px = await fetchSliceTradedPrice(l.orderId, 'open', l.qty, memoRef.current, { broker });
-      if (px == null) return null;
-      qty += l.qty; value += px * l.qty;
-    }
-    return qty > 0 ? value / qty : null;
-  };
   /**
    * Markers of a mapped order: one on the INDEX chart at the index price (the chart's own direction: a bullish open or a bearish close is
    * a BUY arrow; `axis`, so it is never counted as a paper trade), and one on the option at its fill - PAPER at the quoted premium, REAL
@@ -428,15 +431,23 @@ export function usePnfTrade({
     return true;
   };
 
-  /** `n` lots more (+) or fewer (-) of the held option: an add to it, or a reduce / close sized by the chart's own units. */
-  const changeHeld = async (n: number): Promise<boolean> => {
+  /** `deltaUnits` more (+) or fewer (-) of the held option, in broker units: an add to it, or a reduce / close of the chart's OWN units
+   *  (a close sends exactly `held.units`, so it never depends on a lot size that might have changed or not loaded). */
+  const changeHeld = async (deltaUnits: number): Promise<boolean> => {
     const ix = index!, h = held!;
-    const adding = n > 0;
-    const units = adding ? n * heldPerLot : Math.min(-n * heldPerLot, h.units);
-    if (!(units > 0)) { toast.error('The held option\'s lot size is not known yet - nothing was sent'); return false; }
-    const lotsN = Math.abs(n), closing = !adding && units >= h.units;
+    const adding = deltaUnits > 0;
+    const units = adding ? deltaUnits : Math.min(-deltaUnits, h.units);
+    const closing = !adding && units >= h.units;
+    // whole lots for the order / the paper book; a REAL close needs none (exitOwn is in units)
+    const lotsN = heldPerLot > 0 ? units / heldPerLot : 0;
+    const needLots = mode === 'PAPER' || adding;
+    if (!(units > 0) || (needLots && !(Number.isInteger(lotsN) && lotsN > 0))) {
+      toast.error(`The held option's lot size is not known (or ${units} is not whole lots) - nothing was sent. Check Positions; Forget the held option if it is gone.`, { duration: 15_000 });
+      return false;
+    }
     const side = adding ? h.action : optSide(h.action);
-    const what = `${closing ? 'Close' : adding ? 'Add' : 'Reduce'}: ${side} ${lotsN} lot${lotsN > 1 ? 's' : ''} ${targetLabel(h.traded)}`;
+    const size = lotsN > 0 ? `${lotsN} lot${lotsN > 1 ? 's' : ''}` : `${units} units`;
+    const what = `${closing ? 'Close' : adding ? 'Add' : 'Reduce'}: ${side} ${size} ${targetLabel(h.traded)}`;
     const px = prices[0];
     if (mode === 'PAPER' && !(px != null && px > 0)) { toast.error('No live price yet - paper order not filled'); return false; }
     const b = await ix.ops.begin(h.id, adding ? units : -units);
@@ -457,7 +468,7 @@ export function usePnfTrade({
       ? post({ action: side, lots: lotsN, product: h.product })
       : post({ exitOwn: { side, units: [units], product: h.product } })));
     if (!j) return false;
-    mappedMarkers(h.dir, adding, lotsN, { target: h.traded, action: side, legs: j.legs });
+    mappedMarkers(h.dir, adding, lotsN || 1, { target: h.traded, action: side, legs: j.legs });
     return true;
   };
 
@@ -467,30 +478,43 @@ export function usePnfTrade({
     const dir = dirOf(chartAction);
     if (!held) return enterMapped(dir, lots);
     if (held.state !== 'open') { toast.error('The last order on this chart is not settled - settle it on the bar first'); return false; }
-    if (held.dir === dir) return changeHeld(lots);
-    if (!(ownLots > 0)) { toast.error('The held option\'s lot size is not known yet - nothing was sent'); return false; }
-    return changeHeld(-Math.min(lots, ownLots));
+    if (!(heldPerLot > 0)) { toast.error('The held option\'s lot size is not known yet - nothing was sent'); return false; }
+    if (held.dir === dir) return changeHeld(lots * heldPerLot);
+    return changeHeld(-Math.min(lots * heldPerLot, held.units));
   };
   const mappedClose = async (): Promise<boolean> => {
-    if (!held || held.state !== 'open' || !(ownLots > 0)) return false;
-    return changeHeld(-ownLots);
+    if (!held || held.state !== 'open' || !(held.units > 0)) return false;
+    return changeHeld(-held.units);
   };
 
-  // A held option the broker shows flat (closed from another page, the broker's own square-off, an exchange rejection after a 'placed'
-  // reply) is forgotten, so the next click picks a fresh ATM. REAL: once the positions read has shown it flat for 30 s past the row's
-  // last change (a fill's lag) - a timer, so it fires even when nothing else re-renders the page. PAPER: at once.
+  // PAPER: the paper book IS this chart's own position - flat there means flat, forgotten at once.
+  // REAL: the broker nets every page's and strategy's quantity of a strike into one row, so a net below this chart's own units does not
+  // prove the leg is gone (another page may be short the same strike). Never forgotten silently: after 30 s past the row's last change
+  // (a fill's lag) the bar says what the broker shows and offers Forget. A timer, so it appears even when nothing else re-renders.
   const heldId = held?.state === 'open' ? held.id : null;
   const heldT = held?.t ?? 0;
-  const r0 = r && 'lots' in r ? r.lots : null;
-  const flatNow = mode === 'PAPER' ? paperLegs.length > 0 && paperLegs.every(l => l.lots === 0) : !!r0 && r0.length > 0 && r0.every(x => x === 0);
+  const paperFlat = mode === 'PAPER' && paperLegs.length > 0 && paperLegs.every(l => l.lots === 0);
   const clearRef = useRef(index?.ops.clear);
   useEffect(() => { clearRef.current = index?.ops.clear; });
   useEffect(() => {
-    if (!heldId || !flatNow) return;
-    const waitMs = mode === 'REAL' ? Math.max(0, (heldT + 30) * 1000 - Date.now()) : 0;
-    const id = setTimeout(() => { void clearRef.current?.(heldId); }, waitMs);
+    if (heldId && paperFlat) void clearRef.current?.(heldId);
+  }, [heldId, paperFlat]);
+  const brokerHeldLots = held && brokerLots.length ? brokerLots[0] * (held.action === 'BUY' ? 1 : -1) : null;
+  const brokerShort = mode === 'REAL' && !!heldId && ownLots > 0 && brokerHeldLots !== null && brokerHeldLots < ownLots - 1e-9;
+  const [shortShown, setShortShown] = useState<string | null>(null);
+  useEffect(() => {
+    if (!brokerShort || !heldId) return;
+    const waitMs = Math.max(0, (heldT + 30) * 1000 - Date.now());
+    const id = setTimeout(() => setShortShown(heldId), waitMs);
     return () => clearTimeout(id);
-  }, [heldId, flatNow, mode, heldT]);
+  }, [brokerShort, heldId, heldT]);
+  const fmtLots = (n: number) => `${Number.isInteger(n) ? n : n.toFixed(2)}L`;
+  /** The broker shows less of the held option than this chart opened (for 30 s+): what it shows, for the Forget prompt. */
+  const heldMismatch = brokerShort && shortShown === heldId && brokerHeldLots !== null
+    ? `${BROKER_LABELS[broker]} shows ${fmtLots(Math.max(0, brokerHeldLots))} ${held!.action === 'BUY' ? 'long' : 'short'} on this option (all pages and products); this chart opened ${fmtLots(ownLots)}`
+    : null;
+  /** Forget the held option (the user checked Positions: it is gone). Nothing is sent. */
+  const forgetHeld = () => { if (heldId) void index?.ops.clear(heldId); };
 
   const executeOrder = (action: PnfAction) => {
     if (mapped) return mappedReady ? exclusive(() => mappedOrder(action)) : Promise.resolve(false);
@@ -504,7 +528,8 @@ export function usePnfTrade({
       // close the held leg (own units), then open the OTHER side's leg (its own option, resolved now) with the same lots - only once the
       // close went through AND the ledger booked it (mappedClose is false otherwise)
       if (!held || held.state !== 'open' || !ready || !(ownLots > 0)) return false;
-      const n = Math.min(cap, ownLots), dir = held.dir;
+      const n = Math.min(cap, Math.floor(ownLots)), dir = held.dir;
+      if (!(n >= 1)) { toast.error('The held position is under one lot - Close it, then open the other side'); return false; }
       if (!(await mappedClose())) return false;
       return enterMapped(otherDir(dir), n);
     }
@@ -518,7 +543,13 @@ export function usePnfTrade({
   return {
     /** No trading on this chart: an index without a map (a mapped index chart trades, flat or not). */
     isIndex: isIndex && !mapped,
-    mapped, held, ownLots, isEquity, isStraddle, cap, lots, lotsDraft, setLotsDraft, commitLots, pickLots, product, setProduct,
+    mapped, held, ownLots, heldMismatch, forgetHeld,
+    /** A failed held-ledger read (trading goes on with the last read; said on the bar). */
+    heldWarning: mapped ? index.heldError : null,
+    /** What Close / Square off does on THIS chart (a mapped index chart closes only its own units), for the buttons' titles. */
+    closeTitle: mapped && held
+      ? `Closes the ${fmtLots(ownLots)} this chart opened of ${targetLabel(held.traded)} (${held.product === 'MARGIN' ? 'NRML' : 'MIS'} only)${mode === 'REAL' ? ` - any other page's or product's quantity on ${BROKER_LABELS[broker]} stays open` : ''}`
+      : null, isEquity, isStraddle, cap, lots, lotsDraft, setLotsDraft, commitLots, pickLots, product, setProduct,
     busy, ready: mapped ? mappedReady : ready, unsupported, position, positionLots, shownPnl, paperAvg, realError, prices,
     /** Units (shares / barrels / contracts) per lot of the first leg, for a "= 20 bbl" hint; null until the lookup answers. */
     unitsPerLot: unitsPerLot.length ? unitsPerLot[0] : null,

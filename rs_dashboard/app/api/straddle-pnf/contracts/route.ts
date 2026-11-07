@@ -44,7 +44,8 @@ export async function GET(request: NextRequest) {
     const asked = p.get('expiry');
     const expiry = asked && expiries.includes(asked) ? asked : expiries[0];
     const strikes = strikesFor(underlying, expiry);
-    const spot = await spotOf(underlying);
+    // `nospot=1`: the caller has its own live price (the Renko index map's strike preview) - no quote-lane slot spent on a spot it ignores
+    const spot = p.get('nospot') === '1' ? null : await spotOf(underlying);
     return NextResponse.json({ success: true, expiries, expiry, strikes, spot, atm: atmStrike(strikes, spot) });
   } catch (e) {
     return NextResponse.json({ success: false, error: `Could not read the contract list: ${(e as Error).message}` }, { status: 500 });

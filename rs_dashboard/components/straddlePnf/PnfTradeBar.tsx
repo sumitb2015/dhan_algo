@@ -24,37 +24,41 @@ export interface PnfTradeBarProps {
   tradesLabel?: string;
   /** A Renko index chart that trades options: its map controls (IndexMapControls), drawn before the buttons. */
   indexSlot?: ReactNode;
-  /** The map's legs as button hints ("BUY CE ATM"), for a mapped index chart. */
+  /** The map's legs as short button hints ("BUY CE", "SELL PE +2"), for a mapped index chart. */
   sideHints?: { BUY: string; SELL: string };
+  /** The same legs in full ("BUY CE ATM"), for the buttons' titles. */
+  sideTitles?: { BUY: string; SELL: string };
 }
 
 const inr = (n: number) => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 const pnlTone = (n: number | null) => (n == null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
 
-export default function PnfTradeBar({ trade, target, broker, mode, onModeChange, onSwitchTarget, tradesLabel, styleSlot = null, indexSlot = null, sideHints }: PnfTradeBarProps) {
+export default function PnfTradeBar({ trade, target, broker, mode, onModeChange, onSwitchTarget, tradesLabel, styleSlot = null, indexSlot = null, sideHints, sideTitles }: PnfTradeBarProps) {
   const {
-    isIndex, mapped, isEquity, isStraddle, lots, lotsDraft, setLotsDraft, commitLots, pickLots, product, setProduct,
+    isIndex, mapped, held, closeTitle, heldWarning, isEquity, isStraddle, lots, lotsDraft, setLotsDraft, commitLots, pickLots, product, setProduct,
     busy, ready, unsupported, position, shownPnl, realError, executeOrder, executeSquareOff,
   } = trade;
 
   const pill = (active: boolean) =>
     `px-2 h-6 text-[11px] font-bold rounded transition-colors ${active ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`;
   const disabled = busy || !ready;
-  const squareTitle = mapped ? `Closes the option this index chart holds${mode === 'REAL' ? ` (the whole ${BROKER_LABELS[broker]} position on that contract, every product)` : ''}`
+  // an unsettled order on a mapped chart is said by its chip and settle prompt; the bar does not repeat it
+  const heldPending = mapped && !!held && held.state !== 'open';
+  const squareTitle = closeTitle ? closeTitle
     : mode === 'REAL'
     ? `Closes the whole ${BROKER_LABELS[broker]} position on this contract (every product), including any opened from another page`
     : 'Closes the paper position';
 
   const squareOff = position && (
     <button type="button" disabled={busy} onClick={() => void executeSquareOff()} title={squareTitle}
-            className="flex items-center gap-1.5 px-3 h-7 rounded text-xs font-bold bg-amber-600 hover:bg-amber-500 text-oncolor disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
+            className="shrink-0 whitespace-nowrap flex items-center gap-1.5 px-3 h-7 rounded text-xs font-bold bg-amber-600 hover:bg-amber-500 text-oncolor disabled:opacity-50 disabled:cursor-not-allowed transition-colors">
       <XCircle className="w-3.5 h-3.5" />
       <span>SQUARE OFF</span>
     </button>
   );
   const actionButton = (action: PnfAction, label: string, title?: string) => (
     <button type="button" disabled={disabled} onClick={() => void executeOrder(action)} title={title} data-testid={`pnf-trade-${action.toLowerCase()}`}
-            className={`flex items-center gap-1.5 px-3 h-7 rounded text-xs font-bold ${action === 'BUY' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'} text-oncolor disabled:opacity-50 disabled:cursor-not-allowed shadow transition-colors`}>
+            className={`shrink-0 whitespace-nowrap flex items-center gap-1.5 px-3 h-7 rounded text-xs font-bold ${action === 'BUY' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'} text-oncolor disabled:opacity-50 disabled:cursor-not-allowed shadow transition-colors`}>
       {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : action === 'BUY' ? <ArrowUpRight className="w-3.5 h-3.5" /> : <ArrowDownRight className="w-3.5 h-3.5" />}
       <span>{label}</span>
     </button>
@@ -140,6 +144,9 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
 
       {styleSlot}
 
+      {/* 2b. A Renko index chart's option map: its own group, so it wraps as one block and never pushes the buttons apart */}
+      {indexSlot && <><span className="w-px h-5 bg-zinc-800 shrink-0" />{indexSlot}</>}
+
       {/* 3. Action Buttons */}
       <div className="flex items-center gap-2 ml-auto">
         {isIndex ? (
@@ -160,12 +167,12 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
           </div>
         ) : (
           <>
-            {unsupported && <span data-testid="pnf-trade-unsupported" className="text-[11px] text-amber-400 max-w-[22rem] truncate" title={unsupported}>{unsupported}</span>}
-            {indexSlot}
+            {heldWarning && <span className="text-[11px] text-amber-400 max-w-[16rem] truncate" title={`${heldWarning} - trading goes on with the last read held option`}>Ledger read failed</span>}
+            {unsupported && !heldPending && <span data-testid="pnf-trade-unsupported" className="text-[11px] text-amber-400 max-w-[22rem] truncate" title={unsupported}>{unsupported}</span>}
             {mapped && sideHints
               ? <>
-                  {actionButton('BUY', `BULL · ${sideHints.BUY}`, `Bullish on ${target.symbol}: ${sideHints.BUY} at market (strike picked at the click). Holding the bearish leg: reduces / closes it.`)}
-                  {actionButton('SELL', `BEAR · ${sideHints.SELL}`, `Bearish on ${target.symbol}: ${sideHints.SELL} at market (strike picked at the click). Holding the bullish leg: reduces / closes it.`)}
+                  {actionButton('BUY', `BULL ▸ ${sideHints.BUY}`, `Bullish on ${target.symbol}: ${sideTitles?.BUY ?? sideHints.BUY} at market (strike picked at the click). Holding the bearish leg: reduces / closes it.`)}
+                  {actionButton('SELL', `BEAR ▸ ${sideHints.SELL}`, `Bearish on ${target.symbol}: ${sideTitles?.SELL ?? sideHints.SELL} at market (strike picked at the click). Holding the bullish leg: reduces / closes it.`)}
                 </>
               : isStraddle
               ? <>{actionButton('SELL', 'SHORT STRADDLE')}{actionButton('BUY', 'LONG STRADDLE')}</>
@@ -176,8 +183,13 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
 
         {/* 4. Active Position & P&L readout */}
         {!isIndex && (
-          <div className="flex items-center gap-2 pl-3 border-l border-zinc-800 font-mono text-[11px]">
-            {realError ? (
+          <div className="shrink-0 whitespace-nowrap flex items-center gap-2 pl-3 border-l border-zinc-800 font-mono text-[11px]">
+            {heldPending ? (
+              <span data-testid="pnf-trade-position" className="px-1.5 py-0.5 rounded font-bold bg-amber-500/20 text-amber-400"
+                    title="The last order's outcome is not known yet: check Orders / Positions and settle it">
+                {held!.state === 'unknown' ? 'UNKNOWN' : 'SENDING'}
+              </span>
+            ) : realError ? (
               <span className="text-amber-400" title={realError}>POSITION ?</span>
             ) : position ? (
               <div className="flex items-center gap-2">
