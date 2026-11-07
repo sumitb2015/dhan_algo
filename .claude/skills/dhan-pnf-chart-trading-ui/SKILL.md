@@ -62,4 +62,4 @@ so the bar and the window can never disagree on lots or position. Rules it follo
 chart + instrument + mode (`scalperUnlockKey`), never persisted; refused while AUTO arms or holds the chart; Reverse = confirmed
 server-sized close, *then* the entry (never one 2x order); hotkeys only inside the focused window and **ignored on `e.repeat`**;
 one order in flight (`inFlight` ref, synchronous, not the `busy` state). REAL P&L between polls is `liveRealPnl` (`lib/pnfOrderLogic.ts`).
-Covered by `e2e/renko-scalper.spec.ts`.
+Covered by `e2e/renko-scalper.spec.ts`. Building one on another page: `dhan-floating-scalper-window`.
