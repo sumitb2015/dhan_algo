@@ -47,3 +47,20 @@ test('paperStep: a limit fills at its limit or better; an SL-limit triggers, the
   assert.deepEqual(paperStep({ ...stop, triggered: true }, 103), { fill: true, price: 103 });
   assert.deepEqual(paperStep({ side: 'SELL', kind: 'stop', trigger: 98, price: 96.05 }, 97.5), { fill: true, price: 97.5 });
 });
+
+test('an option ladder row snapped to the nearest 0.05 is exactly the price its LIMIT / SL-limit order is sent at', () => {
+  // brick edges of a % / Log % option chart are rarely on the tick (123.47, 245.37 ...): the row shows the snapped price
+  for (const level of [123.47, 123.43, 245.37, 99.999, 50.025, 7.1234]) {
+    const row = snapToTick(level, 0.05, 'nearest');
+    assert.ok(Math.abs(row / 0.05 - Math.round(row / 0.05)) < 1e-9, `${row} is on 0.05`);
+    for (const side of ['BUY', 'SELL'] as const) {
+      for (const ref of [row - 5, row + 5]) {                 // the live price below / above the row: a LIMIT one way, an SL-limit the other
+        const spec = planResting({ side, level: row, ref, tick: 0.05 });
+        assert.ok(!('error' in spec), `${side} at ${row}`);
+        if ('error' in spec) continue;
+        if (spec.kind === 'limit') assert.equal(spec.price, row, `${side} LIMIT at ${row}`);
+        else assert.equal(spec.trigger, row, `${side} SL-limit trigger at ${row}`);
+      }
+    }
+  }
+});

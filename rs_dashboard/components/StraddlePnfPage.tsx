@@ -1034,6 +1034,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       onToggleArm: () => setRailUnlocked(v => !v),
       onPositionLots: (dir: 1 | -1) => { void adjustPosition(c, dir); },
       onCancelAll: () => { for (const r of rows) if (r.state === 'working') void resting.cancel(r); },
+      // an option chart's ladder rows sit on its tick: the price shown on a row is the price its order is sent at
+      ...(rc.target.kind === 'options' && rc.tick > 0 ? { tick: rc.tick } : {}),
       orders: rows.map(r => ({
         id: r.id, side: r.side, kind: r.kind, level: r.level, price: r.price, trigger: r.trigger, lots: r.lots, state: r.state, mode: r.mode, role: r.role, trailPts: r.trailPts, bracket: r.bracket?.style,
         resolvable: needsResolve(r, now),

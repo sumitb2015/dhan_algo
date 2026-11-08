@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
 import { logIndex, logLevel, logRowEdges, renkoPivots, type LogGrid } from '@/lib/renko';
+import { snapToTick } from '@/lib/pnfResting';
 import { useStableHandlers } from '@/lib/useStableHandlers';
 import { columnAtOrBefore, isSellSignal, type PnfExecutionMarker } from '@/lib/straddlePnf';
 import { AlignLeft, AlignRight, Eye, EyeOff, MapPin, MapPinOff, Minus, Plus, RotateCcw, ChevronsLeftRight, ChevronsRightLeft } from 'lucide-react';
@@ -149,6 +150,11 @@ export type PnfRail = {
   onToggleAlign?: () => void;
   /** Cancels every working order on this chart. */
   onCancelAll?: () => void;
+  /**
+   * An option chart's tick (0.05): every ladder row is shown and placed at its brick level rounded to this tick - the exact price its
+   * LIMIT / SL-limit is sent at - so what is clicked is what goes to the broker. Absent: rows are the brick levels themselves.
+   */
+  tick?: number;
 };
 
 /** Width of the buy / sell rail (two columns, buy left and sell right) between the chart and its price axis. */
@@ -290,7 +296,10 @@ function RailSvg({ rail, renko = false, log = null, box, cell, yMax, yMin, padY,
   const kOf = (p: number) => logIndex(g!, Math.max(p, yMin > 0 ? yMin / 2 : 1e-6));
   const rowOf = (p: number) => (g ? Math.round(kOf(p)) : renko ? Math.round((p - yMin) / box) : Math.floor((p - yMin) / box));
   // Renko rows are snapped onto the box grid itself (yMin is on it once a brick exists; before that it follows the live price).
-  const rowPrice = (idx: number) => (g ? logLevel(g, idx) : renko ? Math.round((yMin + idx * box) / box) * box : yMin + (idx + half) * box);
+  const gridPrice = (idx: number) => (g ? logLevel(g, idx) : renko ? Math.round((yMin + idx * box) / box) * box : yMin + (idx + half) * box);
+  // An option chart: the row is that level on the 0.05 tick, the price its order is sent at (lib/pnfResting snapToTick leaves it there)
+  const tick = rail.tick !== undefined && rail.tick > 0 ? rail.tick : null;
+  const rowPrice = (idx: number) => (tick !== null ? snapToTick(gridPrice(idx), tick, 'nearest') : gridPrice(idx));
   const iLo = g ? Math.floor(kOf(priceAtY(contentH))) : iLoLin;
   const iHi = g ? Math.floor(kOf(priceAtY(0))) : iHiLin;
   const levelAt = (y: number) => rowPrice(Math.max(iLo, Math.min(iHi, rowOf(priceAtY(y)))));
@@ -374,7 +383,9 @@ function RailSvg({ rail, renko = false, log = null, box, cell, yMax, yMin, padY,
         const isLive = liveRow !== null && Math.abs(p - liveRow) < tolAt(p);
         const isEntry = entryRow !== null && Math.abs(p - entryRow) < tolAt(p);
         const ord = orderRows.get(p.toFixed(6)) ?? [...orderRows.entries()].find(([k]) => Math.abs(Number(k) - p) < tolAt(p))?.[1];
-        const showPrice = isLive || isEntry || !!ord || (((idx % rowsPerLabel) + rowsPerLabel) % rowsPerLabel === 0 && !underChip(y));
+        // a brick smaller than the tick puts two rows on one price: the label is shown once
+        const dupOfBelow = tick !== null && idx > rLo && rowPrice(idx - 1) === p;
+        const showPrice = isLive || isEntry || !!ord || (!dupOfBelow && ((idx % rowsPerLabel) + rowsPerLabel) % rowsPerLabel === 0 && !underChip(y));
         const label = isLive && liveValue !== null ? fmt(liveValue, axisDigits) : fmt(p, axisDigits);
         return (
           <g key={n}>
