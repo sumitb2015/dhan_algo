@@ -32,13 +32,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   if (typeof cleaned === 'string') return bad(cleaned);
   const levels = Object.fromEntries(LEVEL_KEYS.filter(k => cleaned[k] !== undefined).map(k => [k, cleaned[k]])) as GuardLevels;
   const boxPts = Number(b.boxPts);
-  // a Renko Log % chart's grid ratio (1 + P/100, P inside the settings' 0.05-5 %): its box levels are log steps from the entry
-  const boxLogR = Number(b.boxLogR);
-  const logOk = Number.isFinite(boxLogR) && boxLogR >= 1.0005 - 1e-12 && boxLogR <= 1.05 + 1e-12;
-  const cfg: ServerGuardCfg = {
-    on: true, broker: b.broker, mode: b.mode, levels, boxPts: Number.isFinite(boxPts) && boxPts > 0 ? boxPts : null,
-    ...(logOk ? { boxLogR } : {}), updatedMs: Date.now(),
-  };
+  const cfg: ServerGuardCfg = { on: true, broker: b.broker, mode: b.mode, levels, boxPts: Number.isFinite(boxPts) && boxPts > 0 ? boxPts : null, updatedMs: Date.now() };
   await setServerGuard(scope, chart, cfg);
   startAutoServerLoop();
   return NextResponse.json({ success: true, guard: cfg });

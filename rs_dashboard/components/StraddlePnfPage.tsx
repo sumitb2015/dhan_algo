@@ -22,7 +22,7 @@ import BrokerBooks from './straddlePnf/BrokerBooks';
 import HeaderClock from './straddlePnf/HeaderClock';
 import { buildPaperTrades } from '@/lib/pnfPaperBook';
 import { decodeMarkers, encodeMarkers } from '@/lib/pnfMarkerStore';
-import { logBoxValue, rupeesPerBox, type BoxValue } from '@/lib/pnfGuardBoxes';
+import { rupeesPerBox } from '@/lib/pnfGuardBoxes';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
 import { AUTO_RULES, AUTO_SIDES, DEFAULT_AUTO_RULE, DEFAULT_AUTO_SIDE, SIDE_LABEL, ruleText, type AutoSide } from '@/lib/pnfAutoRule';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
@@ -916,17 +916,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   }));
   for (const gc of indexGuardCharts) guardPositions[gc.targetKey] = indexGuardPos(gc.chart);
   // What one box of a chart is worth on its open position (box points x lots x rupees per point per lot): the guard's box levels.
-  // On a Renko Log % chart a box is a log step from the position's entry, worth more up than down (lib/pnfGuardBoxes logBoxValue).
-  const boxRupees = (c: ChartId): BoxValue | null => {
+  // A Renko Log % chart's box is the one it shows (P % of the LTP when the newest brick printed), so the guard's boxes follow it too.
+  const boxRupees = (c: ChartId): number | null => {
     const rc = railCharts.find(x => x.chart === c);
-    if (!rc) return null;
-    const m = (c === 2 ? c2 : c1).model;
-    const pos = guardPositions[rc.targetKey];
-    if (m.chart === 'renko' && m.log) {
-      if (!pos || pos.side === 'MIXED') return null;
-      return logBoxValue(pos.avg, pos.side, m.log.r, (pos.lots ?? 0) * (rc.unitsPerLot[0] ?? 0));
-    }
-    return rupeesPerBox(m.box, pos?.lots, rc.unitsPerLot[0]);
+    return rc ? rupeesPerBox((c === 2 ? c2 : c1).model.box, guardPositions[rc.targetKey]?.lots, rc.unitsPerLot[0]) : null;
   };
   // The guard is also enforced by the dashboard SERVER on open REAL AUTO positions (lib/autoServerWatcher.ts), so a closed or sleeping tab
   // does not leave one without its stop: every change of a chart's guard is synced to it.
@@ -934,10 +927,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     // an index chart's guard is rupees only (its box is an index move): no box size, no box levels go to the server
     const ixc = isIndexChart(c);
     const g = gIn && ixc ? rupeeLevels(gIn) : gIn;
-    const gm = (c === 2 ? c2 : c1).model;
-    const boxPts = ixc ? null : gm.box;
-    // a Log % chart: the server counts box levels as log steps from the row's entry (not boxPts), as this page does
-    const boxLogR = !ixc && gm.chart === 'renko' && gm.log ? gm.log.r : null;
+    const boxPts = ixc ? null : (c === 2 ? c2 : c1).model.box;
     if (g && (g.targetBoxes != null || g.stopBoxes != null) && !(boxPts != null && boxPts > 0)) {
       // A box that merely became unknown (chart 2 switched off in single-chart view, or still loading) is not a user action: the server
       // keeps the copy it already has, and the effect below re-syncs as soon as the box is known. Only a click on the card warns.
@@ -948,7 +938,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const levels = g ? Object.fromEntries((['target', 'stop', 'trailBy', 'lockAt', 'lockKeep', 'lockStepEvery', 'lockStepKeep', 'targetBoxes', 'stopBoxes'] as const).filter(k => g[k] != null).map(k => [k, g[k]])) : undefined;
     void fetch(`/api/straddle-pnf/server-guard?scope=${scope}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(g ? { chart: c, on: true, broker, mode: tradeMode, boxPts, ...(boxLogR ? { boxLogR } : {}), levels } : { chart: c, on: false }),
+      body: JSON.stringify(g ? { chart: c, on: true, broker, mode: tradeMode, boxPts, levels } : { chart: c, on: false }),
     }).catch(() => { /* the page's own guard still runs; the server copy is the backstop */ });
   };
   const guards = usePnfGuard({
@@ -962,10 +952,9 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       const g = guards.guardOf(c);
       if (g.on && (g.targetBoxes != null || g.stopBoxes != null)) syncServerGuard(c, g, true);
     }
-    // only when a chart's box size changes. A Log % chart's box follows every brick, but its guard counts log steps from the entry
-    // (the server gets the grid ratio, not the box), so there only a change of the Log % itself re-syncs.
+    // only when a chart's box size changes (a Log % chart's box follows the price brick by brick: the server copy follows it)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [c1.model.log ? c1.model.log.r : c1.model.box, c2.model.log ? c2.model.log.r : c2.model.box]);
+  }, [c1.model.box, c2.model.box]);
   // A guard the server holds (the tab was closed or reloaded with it on, or it was set in another broker / mode): the page picks it up
   // whenever the page's broker or mode becomes the guard's, so what the server enforces is always what the card shows. Checked on load AND
   // on every broker / mode change: a page loads in PAPER, so a once-per-load check skipped a REAL guard for good and the card read OFF while

@@ -5,7 +5,6 @@ import { ShieldCheck } from 'lucide-react';
 import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
 import type { OrderStyle } from '@/lib/pnfBracket';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
-import type { BoxValue } from '@/lib/pnfGuardBoxes';
 
 // The order Style of the Price Ladder (Single | Bracket | Cover) and its MTM guard, for the P&F page. Bracket / Cover attach
 // stop-loss (and target) exits, in P&F BOXES of the chart (the page converts them to points with the chart's own box size), to every entry placed from the trade bar or the chart rail;
@@ -55,7 +54,7 @@ export default function PnfOrderStyle({ value: saved, onChange, guard, guardOn, 
    * The active chart's MTM guard card inputs; absent when the chart cannot be traded. `index`: a Renko index chart trading its CE / PE
    * map - the guard watches that option's P&L, so it takes rupee levels only (a chart box is an index move, not the option's).
    */
-  guard?: { broker: string; real: boolean; chart: 1 | 2; chartLabel: string; mtm: number | null; rupeesPerBox?: BoxValue | null; guard?: LadderGuard; post: (body: Record<string, unknown>) => Promise<boolean>; index?: boolean };
+  guard?: { broker: string; real: boolean; chart: 1 | 2; chartLabel: string; mtm: number | null; rupeesPerBox?: number | null; guard?: LadderGuard; post: (body: Record<string, unknown>) => Promise<boolean>; index?: boolean };
   guardOn: boolean;
   /**
    * Every MTM guard the dashboard SERVER holds for this page (it exits open REAL AUTO positions by them, tab open or not), any broker /
@@ -117,7 +116,7 @@ export default function PnfOrderStyle({ value: saved, onChange, guard, guardOn, 
                 key={`${guard.broker}:${guard.real}:${guard.chart}:${guard.index ? 'ix' : 'c'}`}
                 broker={guard.broker} real={guard.real} ladderId={guard.chart} mtm={guard.mtm} guard={guard.guard} post={guard.post}
                 scopeName={guard.chartLabel}
-                boxesLabel={guard.index ? undefined : logPct !== null ? `log bricks of ${logPct}%, counted from the entry price` : boxPts ? `boxes of ${boxPts.toLocaleString('en-IN', { maximumFractionDigits: 4 })} pts` : 'boxes of the chart'} rupeesPerBox={guard.index ? null : guard.rupeesPerBox ?? null}
+                boxesLabel={guard.index ? undefined : boxPts ? `boxes of ${boxPts.toLocaleString('en-IN', { maximumFractionDigits: 4 })} pts` : 'boxes of the chart'} rupeesPerBox={guard.index ? null : guard.rupeesPerBox ?? null}
                 help={guard.index
                   ? `Watches the P&L of the option ${guard.chartLabel} trades on ${guard.broker} ${guard.real ? 'REAL' : 'PAPER'} - AUTO's option position plus the lots this chart opened from the trade bar / Scalper (its own units only, never another page's lots of the same strike) - measured from the moment you switch the guard on. Rupee levels only: a box of this chart is an index move, not the option's. When a rule trips, AUTO's option is exited and this chart's own units are closed. It is held by THIS page (the server also guards an open REAL AUTO position with the tab closed). The guard stays ON until you switch it off, and every new trade is measured from its own start. Levels are remembered; the guard starts OFF every page load.`
                   : `Watches ${guard.chartLabel}'s P&L on ${guard.broker} ${guard.real ? 'REAL' : 'PAPER'}, measured from the moment you switch the guard on. When a rule trips, the resting orders and bracket exits of this chart are cancelled and its position is squared off. It is held by THIS page: it only works while the tab is open. The guard stays ON until you switch it off, and every new trade is measured from its own start. Levels are remembered; the guard starts OFF every page load.`}

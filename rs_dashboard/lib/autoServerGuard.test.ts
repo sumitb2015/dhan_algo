@@ -126,13 +126,3 @@ test('an index chart\'s option row is guarded on the OPTION premium vs its entry
   assert.equal(boxes.reason, null, 'an index box is not a box of the option');
   assert.equal(boxes.boxesUnreadable, true, 'said, not silently enforced on the wrong unit');
 });
-
-test('a Log % chart guard counts its boxes as log steps from the row entry, the same as the page (fixed per trade, not per brick)', () => {
-  // a SELL at 9,000, 1 % log grid, Rs 50 a point: 2 boxes of loss = 9,000 x (1.01^2 - 1) = 180.9 pts = Rs 9,045
-  const c = cfg({ levels: { stopBoxes: 2 }, boxLogR: 1.01 });
-  const lossPts = 9000 * (1.01 ** 2 - 1);
-  assert.equal(stepRow(row(), c, 9000 + lossPts - 1, {}).reason, null);
-  assert.match(stepRow(row(), c, 9000 + lossPts + 0.01, {}).reason ?? '', /\(2 boxes\)/);
-  // the linear box (boxPts 5) is not used when the chart is Log %
-  assert.equal(stepRow(row(), c, 9010, {}).reason, null);
-});

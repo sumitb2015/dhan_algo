@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { carryRuntime, cleanGuard, evalGuard, type LadderGuard } from '@/lib/priceLadderGuard';
-import { effectiveGuard, noteBoxes, type BoxValue } from '@/lib/pnfGuardBoxes';
+import { effectiveGuard, noteBoxes } from '@/lib/pnfGuardBoxes';
 import type { LadderPosition } from '@/lib/pnfLadderPosition';
 import { rupeeLevels } from '@/lib/pnfIndexGuard';
 
@@ -64,8 +64,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   exitChart: (chart: 1 | 2, reason: string) => Promise<boolean | 'kept'>;
   onEvent: (chart: 1 | 2, kind: 'warn' | 'info', text: string) => void;
   /** What one chart box is worth in rupees on that chart's open position (null when unknown): turns the box target / stop into rupees. */
-  /** A box's rupee value on the chart's open position (per side on a Renko Log % chart), or null while unknown. */
-  rupeesPerBox: (chart: 1 | 2) => BoxValue | null;
+  rupeesPerBox: (chart: 1 | 2) => number | null;
   /** The id of the AUTO trade open on this chart (null when none): a new id is a new trade, so the guard starts it from its own baseline. */
   tradeKey: (chart: 1 | 2) => string | null;
   /** Tells the dashboard server about this chart's guard (null: switched off) so it can enforce it on open REAL AUTO positions with the tab closed. */
@@ -160,7 +159,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   const flatSince = useRef<Record<number, number | null>>({});
   /** Per chart: the AUTO trade id last seen, the last known box value (rupees) and whether the unreadable-box warning was given this trade. */
   const lastTrade = useRef<Record<number, string | null>>({});
-  const lastRpb = useRef<Record<number, BoxValue | 0>>({});
+  const lastRpb = useRef<Record<number, number>>({});
   const warnedBox = useRef<Record<number, boolean>>({});
   /**
    * A trip is over (`at` = its fire time; a result for any other trip is ignored). `keepOn`: the guard has done its job for this trade
@@ -238,9 +237,8 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
         // The box value is remembered from this trade's earlier ticks: a momentary gap (box still loading, lots read as 0) must not turn a
         // box-only stop into no stop at all. Never known while a position is open: say so, once per trade.
         const now = rupeesPerBox(c.chart);
-        if (now !== null && (typeof now !== 'number' || now > 0)) lastRpb.current[c.chart] = now;
-        const last = lastRpb.current[c.chart];
-        const rpb = now ?? (last && (typeof last !== 'number' || last > 0) ? last : null);
+        if (now !== null && now > 0) lastRpb.current[c.chart] = now;
+        const rpb = now ?? (lastRpb.current[c.chart] > 0 ? lastRpb.current[c.chart] : null);
         if (rpb === null && pos && (g.targetBoxes !== undefined || g.stopBoxes !== undefined) && !warnedBox.current[c.chart]) {
           warnedBox.current[c.chart] = true;
           onEventRef.current(c.chart, 'warn', 'MTM guard cannot read the box value of this position yet: its box target / stop are NOT enforced until it can. Use a rupee level if this persists.');
