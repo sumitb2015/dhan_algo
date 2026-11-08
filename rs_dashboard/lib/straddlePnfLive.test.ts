@@ -219,7 +219,7 @@ test('tradingSession: NSE weekends and holidays are closed; a trading day keeps 
   const at = (iso: string) => Date.parse(`${iso}+05:30`) / 1000;
   assert.deepEqual(tradingSession('NSE_FNO', at('2026-11-06T10:00:00')), [9 * 60 + 15, 15 * 60 + 40]);   // Fri
   assert.deepEqual(tradingSession('NSE_FNO', at('2026-11-07T10:00:00')), [0, 0]);                       // Sat
-  assert.deepEqual(tradingSession('NSE', at('2026-11-08T10:00:00')), [0, 0]);                           // Sun
+  assert.deepEqual(tradingSession('NSE', at('2026-11-15T10:00:00')), [0, 0]);                           // Sun
   assert.deepEqual(tradingSession('NSE_FNO', at('2019-10-02T10:00:00')), [0, 0]);                       // Gandhi Jayanti (Wed)
 });
 

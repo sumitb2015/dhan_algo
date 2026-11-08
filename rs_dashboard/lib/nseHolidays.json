@@ -143,6 +143,10 @@
       "2025-10-21",
       "2026-11-08"
     ],
+    "muhurat_windows_comment": "IST continuous-session window [open, close] of a Muhurat day that the exchange announced (NSE circular NSE/CMTR/76941, 2026-10-19: Sunday 2026-11-08 trades 14:20-15:30). Only a date listed here is a live trading day when it falls on a weekend; add the window when NSE announces it.",
+    "muhurat_windows": {
+      "2026-11-08": ["14:20", "15:30"]
+    },
     "saturday": [
       "2024-03-02",
       "2024-05-18"

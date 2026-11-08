@@ -13,6 +13,21 @@ export const NSE_HOLIDAYS: ReadonlySet<string> = new Set(Object.values(data.holi
 /** Diwali Muhurat sessions (one hour, not the regular 09:15-15:30 day). */
 export const NSE_MUHURAT_SESSIONS: ReadonlySet<string> = new Set(data.special_sessions.muhurat);
 
+/** IST [open, close] (HH:MM) of a Muhurat session whose timings NSE has announced; absent = not announced. */
+const MUHURAT_WINDOWS: Readonly<Record<string, readonly [string, string]>> = (data.special_sessions as unknown as { muhurat_windows?: Record<string, [string, string]> }).muhurat_windows ?? {};
+const hm = (s: string) => Number(s.slice(0, 2)) * 60 + Number(s.slice(3, 5));
+
+/** The announced Muhurat window of a date as minutes of the IST day [open, close], or null. */
+export function muhuratWindow(iso: string): readonly [number, number] | null {
+  const w = MUHURAT_WINDOWS[iso];
+  return w ? [hm(w[0]), hm(w[1])] : null;
+}
+
+/** A day an NSE session is held for live trading: a regular trading day, or a Muhurat session with announced timings (even on a weekend). */
+export function isNseSessionDay(iso: string): boolean {
+  return isNseTradingDay(iso) || muhuratWindow(iso) !== null;
+}
+
 const IST_DATE = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' });
 
 /** 'YYYY-MM-DD' for an instant, in IST. */

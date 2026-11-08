@@ -5,7 +5,7 @@ import { mergeHistory, feedCloseTrusted, istMinuteOfDay, sessionWindow, type Leg
 import { FEED_FRESH_S, foldLive, idsOf, liveRead, marketOf, type Instrument } from '@/lib/pnfFeedCore';
 import { mergeTail } from '@/lib/pnfTail';
 import { bucketTickBars, foldTickRows, newTickBuild, spliceTicks, type SecBuild, type TickRow } from '@/lib/pnfTicks';
-import { isNseTradingDay, istDateIso } from '@/lib/nseHolidays';
+import { isNseSessionDay, istDateIso } from '@/lib/nseHolidays';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
 import { isComplete, targetKey, targetLabel, targetQuery, type Target } from '@/lib/pnfTarget';
 
@@ -208,7 +208,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   const live = outQuote ? { ce: outQuote.ce, pe: outQuote.pe } : tickMode && headTick ? headTick : last ? { ce: last.ce, pe: last.pe } : null;
   const sessionTag = outQuote ? (istMinuteOfDay(outQuote.t) < sessionWindow(market, outQuote.t)[0] ? 'Pre-open' : 'Post-close') : null;
   // The feed's previous close is the official one (a stock's closing price is not its last 1-min close), but only until the bell.
-  const tradingDay = market !== 'MCX' ? isNseTradingDay(istDateIso(now)) : true;
+  const tradingDay = market !== 'MCX' ? isNseSessionDay(istDateIso(now)) : true;
   // Before today's first price the header shows the last session's close, measured (from history) against the session before it.
   const priceToday = (outQuote ? sessionOf(outQuote.t) : last ? sessionOf(last.t) : null) === istDateIso(now);
   const trustedPrevClose = now > 0 && priceToday && feedCloseTrusted(now / 1000, market, tradingDay) ? feedPrevClose : null;

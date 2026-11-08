@@ -1,7 +1,7 @@
 // Live-tick helpers for the Straddle P&F page. Pure: time arrives in the arguments, nothing here reads a clock.
 import type { Bar, PnfSignal } from './straddlePnf.ts';
 import { mcxSession } from './mcxSession.ts';
-import { isNseTradingDay } from './nseHolidays.ts';
+import { isNseSessionDay, muhuratWindow } from './nseHolidays.ts';
 
 /** `cumVol` is the bridge's cumulative day volume for both legs (CE + PE), the same units as the history bars' per-minute volume. */
 export type Tick = { t: number; ce: number; pe: number; cumVol?: number };
@@ -103,6 +103,13 @@ const hhmmToMin = (hhmm: number) => Math.floor(hhmm / 100) * 60 + (hhmm % 100);
  * calendar; a closed day is an empty window [0, 0).
  */
 export function sessionWindow(market: Market, t: number): readonly [number, number] {
+  // A Muhurat session is its announced hour(s), never the 09:15 day (an index / F&O / stock session; MCX has its own evening session).
+  const mw = market !== 'MCX' ? muhuratWindow(istIso(t)) : null;
+  if (mw) { const c = regularWindow(market, t)[1]; return [mw[0], Math.min(c, mw[1])]; }
+  return regularWindow(market, t);
+}
+
+function regularWindow(market: Market, t: number): readonly [number, number] {
   if (market === 'NSE') return [9 * 60 + 15, 15 * 60 + 30];
   if (market === 'NSE_CAS') return [9 * 60 + 15, istIso(t) >= CAS_START ? 15 * 60 + 15 : 15 * 60 + 30];
   if (market === 'NSE_FNO') return [9 * 60 + 15, 15 * 60 + 40];
@@ -115,7 +122,7 @@ export function sessionWindow(market: Market, t: number): readonly [number, numb
  * its window). For a clock-driven display such as the ladder's bar-close countdown; the bar builders keep `sessionWindow`.
  */
 export function tradingSession(market: Market, t: number): readonly [number, number] {
-  return market !== 'MCX' && !isNseTradingDay(istIso(t)) ? [0, 0] : sessionWindow(market, t);
+  return market !== 'MCX' && !isNseSessionDay(istIso(t)) ? [0, 0] : sessionWindow(market, t);
 }
 
 /**

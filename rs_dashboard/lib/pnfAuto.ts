@@ -7,7 +7,7 @@
 // can never repaint. Shared by the live engine (components/straddlePnf/usePnfAuto.ts); spec in strategies/pnf_auto/strategy.md.
 import { istMinuteOfDay, sessionWindow, type Market } from './straddlePnfLive.ts';
 import { isSellSignal, type PnfColumn, type PnfSignal } from './straddlePnf.ts';
-import { isNseTradingDay, istDateIso } from './nseHolidays.ts';
+import { isNseSessionDay, istDateIso } from './nseHolidays.ts';
 import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
 import type { Target } from './pnfTarget.ts';
 import { autoProductOf, type AutoProduct } from './pnfOrderLogic.ts';
@@ -96,7 +96,7 @@ export function rowMarket(row: { market?: Market; target: Pick<Target, 'symbol'>
  */
 export function autoWindow(market: Market, t: number, product: AutoProduct = 'INTRADAY'): { open: number; entryCutoff: number; eodExit: number } | null {
   // NSE's session window is a clock window: weekends and holidays come from the shared calendar (MCX's own is in sessionWindow).
-  if (market !== 'MCX' && !isNseTradingDay(istDateIso(t * 1000))) return null;
+  if (market !== 'MCX' && !isNseSessionDay(istDateIso(t * 1000))) return null;
   const [open, close] = sessionWindow(market, t);
   if (open >= close) return null;
   if (market !== 'MCX' && product === 'MARGIN') {
