@@ -65,7 +65,7 @@ chart under the trend rule are a flip: the first is the exit of the old position
   NRML has no broker square-off behind it: the server retries a refused end-of-day exit every 10 s until the close (it never stands down
   then), and a position still open from an earlier day is never exited by AUTO. It raises a red alert on the page and in the AUTO log
   instead, so close it at the broker and resolve it.
-- **Session.** Only during the market session and before the entry cutoff: **NSE 15:05** for MIS (10 minutes before the 15:15 exit; 15:25 for NRML; a stock in the closing auction session 15:00), **MCX 10 minutes before the market close** = 23:45 on a 23:55 close (23:20 on a 23:30 close), the same minute as the MCX square-off, so a trade taken in the last minute is squared off at once.
+- **Session.** Only during the market session and before the end-of-day exit: there is **no separate NSE entry cutoff** (removed 2026-11-08) - entries run until the exit minute itself (**15:15** MIS, 15:35 NRML, 15:10 for a stock in the closing auction session), so a trade taken in the last minutes is squared off almost at once. On a Muhurat day the session is its announced window (14:20-15:30 on 2026-11-08, `muhurat_windows` in `nseHolidays.json`). MCX: **MCX 10 minutes before the market close** = 23:45 on a 23:55 close (23:20 on a 23:30 close), the same minute as the MCX square-off, so a trade taken in the last minute is squared off at once.
   Holidays and weekends count as closed.
 - **Feed.** Needs a live price and a fresh feed. A stale feed pauses entries.
 - **Refusals.** Three refused entries in a row halt the chart.
@@ -131,7 +131,7 @@ Both are set before arming and locked while AUTO is armed. Saved per chart and o
   first add). A short entered on the 100 brick with N = 2 and a 1-point box adds at 98, then at 96, 94 ... A bar that jumps several bricks
   counts all of them, but still adds one lot. N is saved on the row at entry, so changing it later does not affect an open position.
 - A pullback that only gets back to a level already reached adds nothing. **At most one lot per bar**, however many bricks it printed.
-  Bricks on an older bar (a sleeping tab) are never chased. No adds after the entry cutoff (15:05 NSE) or with a stale feed.
+  Bricks on an older bar (a sleeping tab) are never chased. No adds after the entry cutoff (the exit minute, 15:15 NSE MIS) or with a stale feed.
 - **Trailing SL after an add (`Trail SL [2] bx`, on by default):** once at least one lot has been added, AUTO exits the whole position
   on the first **closed brick** that is **N boxes back from the best brick since entry** (default 2, 2-20; 2 is the first opposite brick,
   because a Renko reversal is a 2-box move - a saved 1, which behaved the same, now reads as 2). Bricks the entry bar printed after the

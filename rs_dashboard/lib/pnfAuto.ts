@@ -25,8 +25,8 @@ export const NSE_NRML_EOD_EXIT_MIN = 15 * 60 + 35;
 export const NRML_EOD_EXIT_BEFORE_CLOSE = 5;
 export { autoProductOf, type AutoProduct };
 export const AUTO_PRODUCT_LABEL: Record<AutoProduct, string> = { INTRADAY: 'MIS', MARGIN: 'NRML' };
-/** NSE: no new entry in the last 10 minutes before the end-of-day exit (15:05). */
-export const ENTRY_CUTOFF_BEFORE_EOD = 10;
+/** NSE: no separate entry cutoff - entries run until the end-of-day exit minute itself (was 10 minutes before it, removed 2026-11-08). */
+export const ENTRY_CUTOFF_BEFORE_EOD = 0;
 /** MCX: no new entry in the last 10 minutes before the market's CLOSE (23:45 on a 23:55 close) - the same minute as the end-of-day exit, so a
  *  trade taken in the last minute is squared off at once. Chosen by the user on 2026-11-03 (the exit is 10 minutes before the close). */
 export const MCX_ENTRY_CUTOFF_BEFORE_CLOSE = 10;

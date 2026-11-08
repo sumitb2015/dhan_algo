@@ -51,7 +51,7 @@ export interface AutoControlsProps {
   /** The product new AUTO entries are sent with (MIS / NRML). Absent = MIS only (a stock). Locked while armed or holding a position. */
   product?: AutoProduct;
   onProduct?: (p: AutoProduct) => void;
-  /** Today's entry cutoff and square-off for this chart, e.g. "NRML: entries stop 15:25, squared off 15:35". */
+  /** Today's entry cutoff and square-off for this chart, e.g. "NRML: entries stop 15:35, squared off 15:35". */
   eodText?: string | null;
 }
 
