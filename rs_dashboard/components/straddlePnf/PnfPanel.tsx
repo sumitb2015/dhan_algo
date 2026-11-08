@@ -540,7 +540,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   // Renko Log % (lib/renko.ts buildLogRenko): bricks of uneven height on a fixed log grid; `box` is then the brick at the latest close
   const logGrid = renko && model.log ? model.log : null;
   const logPct = logGrid ? +((logGrid.r - 1) * 100).toFixed(4) : null;
-  // `box` is a Log % chart's stable scale (lib/renko.ts logScaleBox); the header names the brick the latest close sits on instead
+  // `box` on a Log % chart is P % of the LTP when the newest brick printed (straddlePnfModel); the header also names the brick at the latest close
   const lastBrick = columns.length ? columns[columns.length - 1] : null;
   const brickNow = logGrid && lastBrick ? (lastBrick.dir === 'X' ? lastBrick.high : lastBrick.low) * (logGrid.r - 1) : null;
   const unitWord = renko ? 'bricks' : 'boxes';
@@ -578,12 +578,14 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const lastSignal = signals.length ? signals[signals.length - 1] : null;
   // How the box was set: a % of the first price, or price points (raised to the 0.05% floor when the points were too small).
   const boxHead = logPct !== null ? `Log ${logPct}%${brickNow !== null ? ` (brick now ${brickNow.toFixed(2)})` : ''}` : null;
-  const boxNote = logPct !== null ? `${logPct}% log${brickNow !== null ? `, brick now ${brickNow.toFixed(2)}` : ''}` : model.boxMode === 'pts' ? (model.boxClamped ? `points, raised to ${MIN_BOX_PTS_PCT}% of price` : 'points') : `${boxPct}% of ${fmt(model.boxBase ?? model.anchor)}`;
+  const boxNote = logPct !== null ? `${logPct}% log${brickNow !== null ? `, brick now ${brickNow.toFixed(2)}` : ''}` : model.boxMode === 'pts' ? (model.boxClamped ? `points, raised to ${MIN_BOX_PTS_PCT}% of price` : 'points') : `${boxPct}% of ${renko ? 'LTP ' : ''}${fmt(model.boxBase ?? model.anchor)}`;
   const boxTitle = logPct !== null
-    ? `Log % Renko: each brick is ${logPct}% of the previous brick's close (up x ${(1 + logPct / 100).toFixed(4)}, down / ${(1 + logPct / 100).toFixed(4)}) on a fixed log grid, so the bricks never redraw. Box ${box.toFixed(2)} is only the chart's scale (held over a 25% price band); MTM-guard and bracket boxes are log steps from the entry / fill`
+    ? `Log % Renko: each brick is ${logPct}% of the previous brick's close (up x ${(1 + logPct / 100).toFixed(4)}, down / ${(1 + logPct / 100).toFixed(4)}) on a fixed log grid, so the bricks never redraw. Box ${box.toFixed(2)} = ${logPct}% of the LTP ${fmt(model.boxBase ?? model.anchor)} when the newest brick printed (it follows the price brick by brick); MTM-guard and bracket boxes are log steps from the entry / fill`
     : model.boxMode === 'pts'
     ? `Box ${box.toFixed(2)} points${model.boxClamped ? ` (the points set were below ${MIN_BOX_PTS_PCT}% of the price, so the box was raised to that floor)` : ''}; rows sit on multiples of the box`
-    : `Box ${box.toFixed(2)} = ${boxPct}% of ${fmt(model.boxBase ?? model.anchor)}${model.boxBaseT !== null ? `, the first price of ${shortDate(sessionOfT(model.boxBaseT))}` : ''} (held until the chart reloads)`;
+    : renko
+      ? `Box ${box.toFixed(2)} = ${boxPct}% of ${fmt(model.boxBase ?? model.anchor)}, the last price when the chart loaded${model.boxBaseT !== null ? ` (${shortDate(sessionOfT(model.boxBaseT))} ${new Date((model.boxBaseT + 19_800) * 1000).toISOString().slice(11, 16)} IST)` : ''}, rounded to the tick like TradingView's Percentage (LTP); held until the chart reloads`
+      : `Box ${box.toFixed(2)} = ${boxPct}% of ${fmt(model.boxBase ?? model.anchor)}${model.boxBaseT !== null ? `, the first price of ${shortDate(sessionOfT(model.boxBaseT))}` : ''} (held until the chart reloads)`;
   const sessionsInfo = model.sessions.length
     ? ` · ${model.sessions.length} sessions (${shortDate(model.sessions[0])} – ${shortDate(model.sessions[model.sessions.length - 1])})` : '';
 

@@ -209,7 +209,7 @@ function modelFor(rt: ChartRt, scope: PnfScope, run: ArmRun, nowMs: number): { m
     const closed = forming ? bars.slice(0, -1) : bars;
     const confirmed = buildConfirmedModel(closed, 'vwap', {
       ...run.settings, interval, sessionCloseMin: sessionClose || undefined, volume: run.volume,
-      anchorT: run.anchorT ?? feed.anchorT ?? undefined, boxBaseT: run.boxBaseT, chart: renko ? 'renko' : 'pnf',
+      anchorT: run.anchorT ?? feed.anchorT ?? undefined, boxBaseT: run.boxBaseT, boxTick: run.boxTick, chart: renko ? 'renko' : 'pnf',
     }, rt.prev);
     rt.prev = confirmed;
     rt.model = withLive(confirmed);

@@ -106,14 +106,14 @@ test('a % box: the brick is that % of the first 1-minute price and the bricks si
   assert.equal(pts.box, 10);
 });
 
-test('a % box is that % of the first price of the session holding boxBaseT, not of a years-old first price', () => {
+test('a % box is that % of the LTP when the chart was pinned (the last close before boxBaseT), not of a years-old first price', () => {
   const day = 86_400;
   const old = bars([5000, 5010]);                                                  // a history starting years back
   const today = bars([26000, 26030, 26060]).map(b => ({ ...b, t: b.t + 3000 * day }));
   const lastT = today[today.length - 1].t;
   const c = buildConfirmedModel([...old, ...today], 'sma', { chart: 'renko', boxMode: 'pct', boxPct: 0.1, reversal: 2, volume: false, boxBaseT: lastT });
-  assert.ok(Math.abs(c.box - 26) < 1e-9);                                         // 0.1 % of 26,000, not 5 points
-  assert.equal(c.boxBase, 26000);
+  assert.ok(Math.abs(c.box - 26.03) < 1e-9);                                      // 0.1 % of 26,030 (the close before boxBaseT), not 5 points
+  assert.equal(c.boxBase, 26030);
   const whole = buildConfirmedModel([...old, ...today], 'sma', { chart: 'renko', boxMode: 'pct', boxPct: 0.1, reversal: 2, volume: false });
   assert.ok(Math.abs(whole.box - 5) < 1e-9);
   assert.equal(whole.boxBase, 5000);
@@ -266,4 +266,20 @@ test('pivots: a 1-brick wiggle is ignored at strength 2', () => {
   const closes = [22650, 22660, 22670, 22680, 22660, 22670, 22680, 22690];
   assert.deepEqual(piv(closes, 2), []);
   assert.deepEqual(piv(closes, 1), ['H22680@2x5', 'L22660@3']);
+});
+
+test('a Renko % box is rounded to the chart\'s minimum tick, as TradingView does; never below one tick; no tick = unrounded', () => {
+  const opt = bars([123.45, 124, 125]);
+  const lastT = opt[opt.length - 1].t;
+  // 0.5 % of 124 (the close before boxBaseT) = 0.62 -> 0.60 on a 0.05 tick
+  const c = buildConfirmedModel(opt, 'sma', { chart: 'renko', boxMode: 'pct', boxPct: 0.5, reversal: 2, volume: false, boxBaseT: lastT, boxTick: 0.05 });
+  assert.ok(Math.abs(c.box - 0.6) < 1e-9);
+  const tiny = buildConfirmedModel(opt, 'sma', { chart: 'renko', boxMode: 'pct', boxPct: 0.05, reversal: 2, volume: false, boxBaseT: lastT, boxTick: 0.5 });
+  assert.equal(tiny.box, 0.5, 'never below one tick');
+  const raw = buildConfirmedModel(opt, 'sma', { chart: 'renko', boxMode: 'pct', boxPct: 0.5, reversal: 2, volume: false, boxBaseT: lastT });
+  assert.ok(Math.abs(raw.box - 0.62) < 1e-9);
+  // a box in points and P&F ignore the tick
+  assert.equal(buildConfirmedModel(opt, 'sma', { chart: 'renko', boxMode: 'pts', boxPts: 1, reversal: 2, boxBaseT: lastT, boxTick: 0.05 }).box, 1);
+  const pnf = buildConfirmedModel(opt, 'sma', { boxPct: 0.5, boxBaseT: lastT, boxTick: 0.05 });
+  assert.ok(Math.abs(pnf.box - 0.005 * 123.45) < 1e-9);
 });

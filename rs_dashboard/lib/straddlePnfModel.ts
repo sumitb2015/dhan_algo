@@ -3,7 +3,7 @@
 // interval first; the box size is a percentage of the first price.
 import { VWAP_START, buildPnf, continuePnf, detectSignals, exitTags, extendPnf, sessionOf, vwapFrom, type VwapState, type Bar, type PnfColumn, type PnfResume, type PnfSignal } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
-import { buildRenko, buildLogRenko, logBrickBox, continueRenko, extendRenko, renkoSignals, trendSignals, supertrendSignals, twoBackSignals, oneBackSignals, renkoSmaResume, renkoSmaByBarFrom, renkoSupertrendResume, runStartOf, type RenkoResume, type RenkoSupertrendPoint, type LogGrid } from './renko.ts';
+import { buildRenko, buildLogRenko, continueRenko, extendRenko, renkoSignals, trendSignals, supertrendSignals, twoBackSignals, oneBackSignals, renkoSmaResume, renkoSmaByBarFrom, renkoSupertrendResume, runStartOf, type RenkoResume, type RenkoSupertrendPoint, type LogGrid } from './renko.ts';
 import type { SupertrendState } from './indicators.ts';
 import { DEFAULT_BOX_LOG, MIN_BOX_PTS_PCT, type BoxMode } from './straddlePnfSettings.ts';
 
@@ -175,6 +175,11 @@ export type PanelOptions = {
   boxPts?: number;
   /** Renko with boxMode 'log': the Log % brick (default DEFAULT_BOX_LOG). A P&F chart treats 'log' as 'pct'. */
   boxLog?: number;
+  /**
+   * Renko % box only: the chart's minimum tick. The box (P % of the LTP) is rounded to it, as TradingView's "Percentage (LTP)" does,
+   * and is never below one tick. Absent: not rounded.
+   */
+  boxTick?: number;
   /** Boxes against the column needed to reverse it (default 3). */
   reversal?: number;
   /** Boxes in the SMA overlay (default SMA_PERIOD): it averages P&F box values, not bar closes. */
@@ -287,6 +292,24 @@ function sessionFacts(bars: Bar[], prevSessions: string[] | null = null, from = 
  * The first usable bar of the IST session holding the last bar at or before `t`; undefined when no bar is that early or the session
  * has no usable price. A binary search plus that session's bars, not a scan of the whole history (it runs on every build).
  */
+/**
+ * The last usable bar strictly BEFORE `t` (epoch s): the LTP a Renko % box is measured on. The page pins `t` to its last bar at load
+ * (which can still be forming) or to a replay's start, so the bar used is always a closed one and the box does not move when the
+ * forming bar closes.
+ */
+function lastBarBefore(bars: Bar[], t: number): Bar | undefined {
+  let lo = 0, hi = bars.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (bars[mid].t < t) lo = mid + 1; else hi = mid; }
+  for (let i = lo - 1; i >= 0; i--) if (bars[i].straddle > 0) return bars[i];
+  return undefined;
+}
+
+/** A Renko % box rounded to the chart's minimum tick (TradingView), at least one tick; unrounded without a tick. */
+function roundBoxToTick(box: number, tick: number | undefined): number {
+  if (!(tick !== undefined && tick > 0) || !(box > 0)) return box;
+  return Math.max(1, Math.round(box / tick)) * tick;
+}
+
 function sessionFirstBar(bars: Bar[], t: number): Bar | undefined {
   let lo = 0, hi = bars.length;
   while (lo < hi) { const mid = (lo + hi) >> 1; if (bars[mid].t <= t) lo = mid + 1; else hi = mid; }
@@ -339,9 +362,14 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   let boxSize = grid.boxSize;
   let boxBase: number | null = null, boxBaseT: number | null = null;
   if (ptsAsked === null && logAsked === null && firstPrice) {
-    const b = opts.boxBaseT !== undefined ? sessionFirstBar(closedBars, opts.boxBaseT) : undefined;
-    if (b) { boxSize = b.straddle * boxPct; boxBase = b.straddle; boxBaseT = b.t; }
-    else { boxBase = firstPrice; boxBaseT = firstBar!.t; }
+    // Renko: TradingView's "Percentage (LTP)" - P % of the last price when the chart was pinned (boxBaseT), rounded to the tick.
+    // P&F: P % of the first price of the session holding boxBaseT.
+    const b = opts.boxBaseT === undefined ? undefined : renko ? lastBarBefore(closedBars, opts.boxBaseT) : sessionFirstBar(closedBars, opts.boxBaseT);
+    if (b) { boxSize = renko ? roundBoxToTick(b.straddle * boxPct, opts.boxTick) : b.straddle * boxPct; boxBase = b.straddle; boxBaseT = b.t; }
+    else {
+      boxBase = firstPrice; boxBaseT = firstBar!.t;
+      if (renko && opts.boxTick !== undefined) boxSize = roundBoxToTick(firstPrice * boxPct, opts.boxTick);
+    }
   }
   const reuse = prefix && p!.resume !== null && p!.chart === chart && p!.interval === interval && p!.boxPct === boxPct && p!.reversal === reversal
     && p!.anchorPrice === anchorPrice && p!.boxSize === boxSize && p!.sessionCloseMin === opts.sessionCloseMin && p!.logAsked === logAsked;
@@ -356,7 +384,6 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
     anchor = prev!.anchor; box = prev!.box;
     const next = renko ? continueRenko(prev!.columns, p!.resume as RenkoResume, tail.bars) : continuePnf(prev!.columns, p!.resume as PnfResume, tail.bars);
     columns = next.columns; resume = next.resume;
-    if (log) box = logBrickBox(columns, resume as RenkoResume);
   } else if (log) {
     ({ bars, endIdx } = resample(closedBars, interval, opts.sessionCloseMin));
     ({ anchor, box, columns, resume } = buildLogRenko(bars, logAsked!, log.base));
@@ -365,6 +392,13 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
     ({ bars, endIdx } = resample(closedBars, interval, opts.sessionCloseMin));
     ({ anchor, box, columns, resume } = renko ? buildRenko(bars, boxSize ?? (firstPrice ?? 0) * boxPct, anchorPrice) : buildPnf(bars, boxPct, reversal, anchorPrice, boxSize));
     vw = endIdx.map(i => vw1[i]);
+  }
+  // Log %: the box (the chart's scale and the size the header and guard read) is P % of the LTP when the newest brick printed - the
+  // close of the bar that printed it - so it follows the price brick by brick. Before any brick, P % of the first price. Bricks never use it.
+  if (log && firstPrice) {
+    const lc = columns[columns.length - 1];
+    const ltpBar = lc ? bars[lc.startBar] : firstBar!;
+    box = ltpBar.straddle * (log.r - 1); boxBase = ltpBar.straddle; boxBaseT = ltpBar.t;
   }
   const facts = sessionFacts(closedBars, prefix ? p!.closedSessions : null, prefix ? pb!.length : 0);
   // Column times: the engine only ever changes the last few columns, so the earlier ones keep their times

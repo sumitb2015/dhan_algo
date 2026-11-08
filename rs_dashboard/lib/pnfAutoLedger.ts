@@ -153,6 +153,8 @@ export interface AutoLogEntry { t: number; chart: 1 | 2; text: string; kind?: Au
  */
 export interface ArmRun {
   target: Target; settings: PnfSettings; anchorT?: number; boxBaseT?: number; volume: boolean;
+  /** The chart's minimum tick the page rounded a Renko % box to (straddlePnfModel PanelOptions.boxTick), so the server's box is the page's. */
+  boxTick?: number;
   /** A Renko INDEX chart: the bull / bear option map AUTO trades (frozen at arming; an index arming without one is refused). */
   indexMap?: IndexMap;
 }
@@ -319,10 +321,10 @@ function runOk(v: unknown, armKey: string): ArmRun | undefined {
   if (!target || targetKey(target) !== armKey || !r.settings || typeof r.settings !== 'object') return undefined;
   const settings = readSettings(JSON.stringify(r.settings));
   const time = (n: unknown) => (finite(n) && (n as number) > 0 ? (n as number) : undefined);
-  const anchorT = time(r.anchorT), boxBaseT = time(r.boxBaseT);
+  const anchorT = time(r.anchorT), boxBaseT = time(r.boxBaseT), boxTick = time(r.boxTick);
   const indexMap = target.kind === 'index' ? parseIndexMap(r.indexMap) : null;
   if (target.kind === 'index' && !indexMap) return undefined;             // an index chart trades options only through its map
-  return { target, settings, ...(anchorT ? { anchorT } : {}), ...(boxBaseT ? { boxBaseT } : {}), volume: r.volume !== false, ...(indexMap ? { indexMap } : {}) };
+  return { target, settings, ...(anchorT ? { anchorT } : {}), ...(boxBaseT ? { boxBaseT } : {}), ...(boxTick ? { boxTick } : {}), volume: r.volume !== false, ...(indexMap ? { indexMap } : {}) };
 }
 
 /** Hard cap on an AUTO row's lots, pyramid adds included: the order route's own lot cap (one source for the ledger, the page and the UI). */

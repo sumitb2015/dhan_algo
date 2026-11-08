@@ -37,20 +37,6 @@ export const logRowEdges = (g: LogGrid, k: number): [number, number] => [logLeve
 /** Where `price` sits on a log grid, in steps (continuous: level k is exactly k). The one place this is computed. */
 export const logIndex = (g: LogGrid, price: number) => Math.log(price / g.base) / Math.log(g.r);
 
-/** The price band (x 1.25) a Log % chart's scale box is held over: the box only changes when the price leaves it. */
-const LOG_SCALE_BAND = 1.25;
-
-/**
- * A Log % chart's `box`: one stable size for everything that needs a single scale (the panel's pixels per point, the wild-tick check,
- * the server's "same brick" check). It is the brick at the bottom of the 25 % price band holding `price`, so it does not change on
- * every brick (the chart would rescale and jump each time) but only when the price moves into another band. Counting bricks never
- * uses it: that is gridSteps / gridMove.
- */
-export function logScaleBox(g: LogGrid, price: number): number {
-  const m = Math.max(1, Math.round(Math.log(LOG_SCALE_BAND) / Math.log(g.r)));
-  const k = Math.floor((logIndex(g, price) + 1e-9) / m) * m;
-  return logLevel(g, k) * (g.r - 1);
-}
 
 /** Bricks between two prices: box steps on a linear grid, log steps on a log one (`g` is a model: its box and log grid). */
 export function gridSteps(g: { box: number; log?: LogGrid | null }, from: number, to: number): number {
@@ -125,15 +111,16 @@ function runLogRenko(columns: PnfColumn[], at: (i: number) => Bar, from: number,
   return { hi, lo };
 }
 
-/** The model's `box` on a Log % chart: logScaleBox at the latest brick close (the start level before any brick). */
+/** The brick at the latest brick close (the start level before any brick): buildLogRenko's `box`. */
 function logBoxAt(g: LogGrid, columns: PnfColumn[], startK: number): number {
   const c = columns[columns.length - 1];
-  return logScaleBox(g, c ? (c.dir === 'X' ? c.high : c.low) : logLevel(g, startK));
+  return (c ? (c.dir === 'X' ? c.high : c.low) : logLevel(g, startK)) * (g.r - 1);
 }
 
 /**
  * Log % Renko: each brick is `pct` % of the previous brick's close (up: C * (1 + pct/100), down: C / (1 + pct/100)), on the fixed grid
- * base * r^k. A reversal needs two steps, as on the Traditional chart. `box` is the chart's scale box (logScaleBox), not a brick count.
+ * base * r^k. A reversal needs two steps, as on the Traditional chart. `box` is the brick at the latest close (the page's model replaces it
+ * with the brick at the LTP, straddlePnfModel); counting bricks never uses it.
  */
 export function buildLogRenko(bars: Bar[], pct: number, base = 1): { anchor: number; box: number; columns: PnfColumn[]; resume: RenkoResume | null; log: LogGrid | null } {
   const first = bars.find(b => b.straddle > 0);
@@ -151,8 +138,6 @@ function continueLogRenko(columns: PnfColumn[], resume: RenkoResume, more: Bar[]
   return { columns: out, resume: { box: 0, hi, lo, bars: resume.bars + more.length, log: g } };
 }
 
-/** A Log % chart's model `box` (logScaleBox at its latest close), from its bricks and resume state. */
-export const logBrickBox = (columns: PnfColumn[], resume: RenkoResume): number => (resume.log ? logBoxAt(resume.log, columns, resume.hi) : resume.box);
 
 /** A brick's close: its top when it is up, its bottom when it is down. */
 export const brickClose = (c: PnfColumn) => (c.dir === 'X' ? c.high : c.low);

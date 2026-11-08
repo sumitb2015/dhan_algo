@@ -191,7 +191,7 @@ function IconButton({ icon: Icon, label, onClick, pressed, badge }: { icon: Luci
 }
 
 /** One chart's P&F model: CLOSED bars only (so a signal never repaints), with the forming minute laid on top. */
-function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, overlay: Overlay, liveNow: number, chart: ChartType, replayT: number | null = null, replayOnly = false, replayStartT: number | null = null) {
+function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, overlay: Overlay, liveNow: number, chart: ChartType, replayT: number | null = null, replayOnly = false, replayStartT: number | null = null, boxTick?: number) {
   // A long interval picked on a stock does not carry over to an instrument that has no such history.
   const interval = effectiveInterval(rawSettings.interval, hasLongIntervals(target.kind), chart === 'renko');
   const settings = useMemo(() => (interval === rawSettings.interval ? rawSettings : { ...rawSettings, interval }), [rawSettings, interval]);
@@ -237,9 +237,9 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   const confirmed = useMemo(
     // Reading the ref here is safe: `prev` only speeds the build up, the result is the same without it (straddlePnfModel.test.ts).
     // eslint-disable-next-line react-hooks/refs
-    () => buildConfirmedModel(closedLen < bars.length ? bars.slice(0, closedLen) : bars, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined, boxBaseT, chart }, prevRef.current),
+    () => buildConfirmedModel(closedLen < bars.length ? bars.slice(0, closedLen) : bars, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined, boxBaseT, chart, boxTick }, prevRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [closedKey, overlay, settings, sessionClose, indexNoVwap, feed.loaded?.anchorT, boxBaseT, chart],
+    [closedKey, overlay, settings, sessionClose, indexNoVwap, feed.loaded?.anchorT, boxBaseT, chart, boxTick],
   );
   useEffect(() => { prevRef.current = confirmed; }, [confirmed]);
   const model = useMemo(() => withLive(confirmed, formingBar), [confirmed, formingBar]);
@@ -416,8 +416,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const tick2 = tickSec(settings2, target2) !== null;
   const feed1 = usePnfFeed(prefsReady ? target1 : null, recenter, now, tickSec(settings, target1));
   const feed2 = usePnfFeed(prefsReady && dual ? target2 : null, recenter, now, tickSec(settings2, target2));
-  const c1 = useChartModel(feed1, target1, settings, overlay, now, chart);
-  const c2 = useChartModel(feed2, target2, settings2, overlay, now, chart);
+  // The contracts' order legs carry the chart's minimum tick: a Renko % box is rounded to it (TradingView "Percentage (LTP)").
+  const legs1 = useChartLegs(broker, target1, targetKey(target1), prefsReady && target1.kind !== 'index' && feed1.complete);
+  const legs2 = useChartLegs(broker, target2, targetKey(target2), prefsReady && dual && target2.kind !== 'index' && feed2.complete);
+  const minTick1 = legs1?.tick ?? undefined, minTick2 = legs2?.tick ?? undefined;
+  const c1 = useChartModel(feed1, target1, settings, overlay, now, chart, null, false, null, minTick1);
+  const c2 = useChartModel(feed2, target2, settings2, overlay, now, chart, null, false, null, minTick2);
 
   // ── Bar Replay (lib/pnfReplay.ts): both charts as they stood at one past moment, played forward one bar of the active chart's
   // interval at a time. c1 / c2 stay LIVE and keep feeding everything that trades or alerts (AUTO, alerts, the rail's engine, the
@@ -430,8 +434,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     stepFrom: t => { const f = active === 2 ? feed2 : feed1; return nextStepT(f.bars, t, intervalOf(active), sessionWindow(f.market, t)[1] || undefined); },
   });
   const replayT = replay.replaying ? replay.cursorT : null;
-  const r1 = useChartModel(feed1, target1, settings, overlay, now, chart, replayT, true, replay.startT);
-  const r2 = useChartModel(feed2, target2, settings2, overlay, now, chart, replayT, true, replay.startT);
+  const r1 = useChartModel(feed1, target1, settings, overlay, now, chart, replayT, true, replay.startT, minTick1);
+  const r2 = useChartModel(feed2, target2, settings2, overlay, now, chart, replayT, true, replay.startT, minTick2);
   const shownOf = (c: ChartId) => (replayT === null ? (c === 2 ? c2 : c1) : (c === 2 ? r2 : r1));
   const activeTarget = active === 2 ? target2 : target1;
   const activeFeed = active === 2 ? feed2 : feed1;
@@ -557,8 +561,6 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const onSizing = useCallback((s: { lots: number; product: PnfProduct }) => {
     setSizing(prev => (prev.lots === s.lots && prev.product === s.product ? prev : s));
   }, []);
-  const legs1 = useChartLegs(broker, target1, targetKey(target1), prefsReady && target1.kind !== 'index' && feed1.complete);
-  const legs2 = useChartLegs(broker, target2, targetKey(target2), prefsReady && dual && target2.kind !== 'index' && feed2.complete);
   const railChartOf = (c: ChartId): RailChart | null => {
     const target = c === 2 ? target2 : target1;
     const feed = c === 2 ? feed2 : feed1;
@@ -960,9 +962,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       const g = guards.guardOf(c);
       if (g.on && (g.targetBoxes != null || g.stopBoxes != null)) syncServerGuard(c, g, true);
     }
-    // only when a chart's box size (or its Log % grid) changes; a Log % chart's box is a stable scale, not the brick just printed
+    // only when a chart's box size changes. A Log % chart's box follows every brick, but its guard counts log steps from the entry
+    // (the server gets the grid ratio, not the box), so there only a change of the Log % itself re-syncs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [c1.model.box, c2.model.box, c1.model.log?.r, c2.model.log?.r]);
+  }, [c1.model.log ? c1.model.log.r : c1.model.box, c2.model.log ? c2.model.log.r : c2.model.box]);
   // A guard the server holds (the tab was closed or reloaded with it on, or it was set in another broker / mode): the page picks it up
   // whenever the page's broker or mode becomes the guard's, so what the server enforces is always what the card shows. Checked on load AND
   // on every broker / mode change: a page loads in PAPER, so a once-per-load check skipped a REAL guard for good and the card read OFF while
@@ -1214,6 +1217,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const run = {
       target: tgt, settings: c === 2 ? settings2 : settings, volume: !cm.indexNoVwap,
       ...(feed.loaded?.anchorT ? { anchorT: feed.loaded.anchorT } : {}), ...(cm.boxBaseT ? { boxBaseT: cm.boxBaseT } : {}),
+      ...((c === 2 ? minTick2 : minTick1) ? { boxTick: c === 2 ? minTick2 : minTick1 } : {}),
       ...(indexArm ? { indexMap: indexMap[c] } : {}),
     };
     const rec = {

@@ -2,7 +2,7 @@
 // in renko.test.ts, which must keep passing unchanged.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildLogRenko, continueRenko, gridMove, gridSteps, logIndex, logLevel, logRowEdges, logScaleBox, renkoPivots, twoBackSignals, oneBackSignals, type RenkoResume } from './renko.ts';
+import { buildLogRenko, continueRenko, gridMove, gridSteps, logIndex, logLevel, logRowEdges, renkoPivots, twoBackSignals, oneBackSignals, type RenkoResume } from './renko.ts';
 import { buildConfirmedModel, withLive } from './straddlePnfModel.ts';
 import type { Bar } from './straddlePnf.ts';
 
@@ -106,9 +106,8 @@ test('the model: a log box builds log bricks, model.box is the brick at the late
   assert.equal(c.boxMode, 'log');
   assert.deepEqual(c.log, { base: 1, r: 1.005 });
   assert.deepEqual(c.columns, buildLogRenko(bars(closes), 0.5).columns);
-  const last = c.columns[c.columns.length - 1];
-  const close = last.dir === 'X' ? last.high : last.low;
-  assert.ok(Math.abs(c.box - logScaleBox({ base: 1, r: 1.005 }, close)) < 1e-9);
+  // the box is P % of the LTP when the newest brick printed: the 26,400 close that printed the last brick
+  assert.ok(Math.abs(c.box - 26400 * 0.005) < 1e-9);
   // incremental (prev) reuse == full rebuild
   const head = buildConfirmedModel(bars(closes).slice(0, 4), 'sma', opts);
   const inc = buildConfirmedModel(bars(closes), 'sma', opts, head);
@@ -169,13 +168,8 @@ test('AUTO pyramid every N on a Log % chart waits N log steps past the entry bri
   assert.deepEqual(decideAdd({ model: two, row, nowS: ist(10, 7), market: 'NSE', maxLots: 10 }), { add: true, barT: ist(10, 6), box: lv(K0 - 2) });
 });
 
-test('logScaleBox: one stable size per 25 % price band (the chart does not rescale on every brick); logIndex inverts logLevel', () => {
+test('logIndex inverts logLevel', () => {
   const g = { base: 1, r: 1.001 };
-  const a = logScaleBox(g, 26000), b = logScaleBox(g, 26300), c = logScaleBox(g, 24000);
-  assert.equal(a, b, 'a 1 % move keeps the box');
-  assert.ok(a > 0 && Math.abs(a / (26000 * 0.001) - 1) < 0.25, 'within a band of the brick at that price');
-  assert.ok(Math.abs(logScaleBox(g, 26000 * 1.3) / a - 1.25) < 0.01, 'the next band up is 25 % bigger');
-  void c;
   for (const k of [-5, 0, 7, 10_234]) assert.ok(Math.abs(logIndex(g, logLevel(g, k)) - k) < 1e-6);
 });
 
@@ -186,4 +180,23 @@ test('order-ladder rows on a Log % chart tile the axis: each row ends exactly wh
     assert.equal(hi, logRowEdges(g, k + 1)[0]);
     assert.ok(lo < logLevel(g, k) && logLevel(g, k) < hi);
   }
+});
+
+test('Log % box = P % of the LTP when the newest brick printed: it changes on each new brick, not on bars that print none', () => {
+  const closes = [26000, 26100, 26300, 26500, 26200, 25900, 26400];
+  const b = bars(closes);
+  const opts = { chart: 'renko' as const, boxMode: 'log' as const, boxLog: 0.5, reversal: 2 as const, volume: false, boxBaseT: b[4].t };
+  const c = buildConfirmedModel(b, 'sma', opts);
+  assert.ok(Math.abs(c.box - 26400 * 0.005) < 1e-9);
+  assert.equal(c.boxBase, 26400);
+  assert.equal(c.boxBaseT, b[6].t);
+  // a bar that prints no brick leaves it alone
+  const quiet = bars([...closes, 26420]);
+  assert.equal(buildConfirmedModel(quiet, 'sma', opts, c).box, c.box);
+  // a new brick moves it, incrementally or rebuilt, and the bricks are untouched by it
+  const more = bars([...closes, 26420, 27000]);
+  const inc = buildConfirmedModel(more, 'sma', opts, c);
+  assert.ok(Math.abs(inc.box - 27000 * 0.005) < 1e-9);
+  assert.equal(buildConfirmedModel(more, 'sma', opts).box, inc.box);
+  assert.deepEqual(inc.columns, buildLogRenko(more, 0.5).columns);
 });

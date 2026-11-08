@@ -440,7 +440,7 @@ test('no usable closed bar yet: withLive builds on the grid the first live price
   }
 });
 
-test('option box: a % box is measured on the latest session, not on a history that started at several times today\'s price', () => {
+test('option box: a Renko % box is measured on the LTP at the pinned time (TradingView "Percentage (LTP)"), P&F on that session\'s first price', () => {
   const DAY = 86400;
   const old = Array.from({ length: 5 }, (_, i) => ({ t: BASE_T - 40 * DAY + i * 60, ce: 500, pe: 0, straddle: 999.2, vol: 1 }));
   const today = Array.from({ length: 5 }, (_, i) => ({ t: BASE_T + i * 60, ce: 143, pe: 0, straddle: 287 + i, vol: 1 }));
@@ -448,7 +448,7 @@ test('option box: a % box is measured on the latest session, not on a history th
   const first = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko' });
   assert.ok(Math.abs(first.box - 0.02 * 999.2) < 1e-9, 'default: first price of the history');
   const recent = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxBaseT: BASE_T + 4 * 60 });
-  assert.ok(Math.abs(recent.box - 0.02 * 287) < 1e-9, 'first price of the session holding boxBaseT');
+  assert.ok(Math.abs(recent.box - 0.02 * 290) < 1e-9, 'Renko: the close of the last bar before boxBaseT (the LTP when the chart loaded)');
   assert.equal(recent.boxMode, 'pct');
   const pnf = buildConfirmedModel(all, 'vwap', { boxPct: 2, boxBaseT: BASE_T + 4 * 60 });
   assert.ok(Math.abs(pnf.box - 0.02 * 287) < 1e-9, 'P&F too');
@@ -459,8 +459,9 @@ test('option box: a % box is measured on the latest session, not on a history th
   const prev = buildConfirmedModel(all.slice(0, -1), 'vwap', { boxPct: 2, chart: 'renko', boxBaseT: BASE_T + 4 * 60 });
   const next = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxBaseT: BASE_T + 4 * 60 }, prev);
   assert.equal(next.box, recent.box);
-  assert.equal(recent.boxBase, 287);
-  assert.equal(recent.boxBaseT, BASE_T);
+  assert.equal(recent.boxBase, 290);
+  assert.equal(recent.boxBaseT, BASE_T + 3 * 60);
+  assert.equal(pnf.boxBase, 287, 'P&F keeps the first price of the session holding boxBaseT');
   // pinned on the old session (a chart loaded then, or a replay started then): its box holds after today's bars arrive
   const pinned = buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxBaseT: BASE_T - 40 * DAY + 4 * 60 });
   assert.ok(Math.abs(pinned.box - 0.02 * 999.2) < 1e-9);
