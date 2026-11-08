@@ -92,6 +92,8 @@ const SCALPER_OPEN_KEY = 'straddle-pnf-scalper-open';
 const SCALPER_MIN_KEY = 'straddle-pnf-scalper-min';
 /** Renko index chart -> option map, per chart (lib/pnfIndexMap.ts): `renko-index-map-1` / `-2`. */
 const INDEX_MAP_KEY = 'straddle-pnf-index-map-';
+/** The option-map row folded away (renko-index-map-folded): '1' = folded. */
+const INDEX_MAP_FOLD_KEY = 'straddle-pnf-index-map-folded';
 const SCALPER_POS_KEY = 'straddle-pnf-scalper-pos';
 /** The positions / order book / trade book / P&L strip at the bottom: collapsed by default (expanded it takes chart height). */
 const BOOKS_OPEN_KEY = 'straddle-pnf-books-open';
@@ -285,6 +287,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const [scalperOpen, setScalperOpen] = useState(false);
   const [scalperMin, setScalperMin] = useState(false);
   const [indexMap, setIndexMap] = useState<Record<ChartId, IndexMap>>({ 1: DEFAULT_INDEX_MAP, 2: DEFAULT_INDEX_MAP });
+  const [mapFolded, setMapFolded] = useState(false);
   const [scalperPos, setScalperPos] = useState<ScalperPos | null>(null);
   // REAL unlock of the Scalper, for ONE chart + instrument + mode: a chart switch, a new instrument or a mode change re-locks it
   // (the key no longer matches). Never remembered.
@@ -360,6 +363,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     if (readP(SCALPER_OPEN_KEY) === '1') setScalperOpen(true);
     if (readP(SCALPER_MIN_KEY) === '1') setScalperMin(true);
     setIndexMap({ 1: readIndexMap(readP(`${INDEX_MAP_KEY}1`)), 2: readIndexMap(readP(`${INDEX_MAP_KEY}2`)) });
+    if (readP(INDEX_MAP_FOLD_KEY) === '1') setMapFolded(true);
     try {
       const p = JSON.parse(readP(SCALPER_POS_KEY) ?? 'null') as ScalperPos | null;
       if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) setScalperPos({ x: p.x, y: p.y });
@@ -1521,6 +1525,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
             indexSlot={indexMapSlot}
             sideHints={indexSideHints}
             sideTitles={indexSideTitles}
+            mapCollapsed={mapFolded}
+            onMapCollapsed={v => { setMapFolded(v); saveP(INDEX_MAP_FOLD_KEY, v ? '1' : '0'); }}
+            mapAttention={!!indexHeld.held && (indexHeld.held.state !== 'open' || !!trade.heldMismatch)}
+            mapSummary={indexSideTitles ? `Bull ${indexSideTitles.BUY} · Bear ${indexSideTitles.SELL} · ${activeMap.expiry === 'NEAREST' ? 'nearest expiry' : activeMap.expiry}` : undefined}
           />
         </div>
       )}

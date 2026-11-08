@@ -72,7 +72,7 @@ export default function IndexMapControls({ symbol, map, onChange, spot, held, on
     const p = preview(leg);
     return (
       <div className="flex items-center gap-1" role="group" aria-label={`${name} trade`} data-testid={`index-map-${d}`}>
-        <span className={`text-[11px] font-bold ${d === 'bull' ? 'text-emerald-400' : 'text-red-400'}`}>{d === 'bull' ? 'BULL' : 'BEAR'}</span>
+        <span className={`text-[10px] font-bold uppercase tracking-wider ${d === 'bull' ? 'text-emerald-400' : 'text-red-400'}`}>{d === 'bull' ? 'Bull' : 'Bear'}</span>
         <div className="inline-flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-800 bg-zinc-950">
           <button type="button" disabled={disabled} aria-pressed={leg.action === 'BUY'} className={toggle(leg.action === 'BUY', 'buy')} onClick={() => setLeg(d, { action: 'BUY' })}>BUY</button>
           <button type="button" disabled={disabled} aria-pressed={leg.action === 'SELL'} className={toggle(leg.action === 'SELL', 'sell')} onClick={() => setLeg(d, { action: 'SELL' })}>SELL</button>
@@ -89,7 +89,7 @@ export default function IndexMapControls({ symbol, map, onChange, spot, held, on
             return <option key={n} value={n} disabled={k === null && strikes.length > 0 && spot !== null && spot > 0}>{offsetText(n)}{k !== null ? ` · ${k}` : ''}</option>;
           })}
         </select>
-        <span className="text-[11px] font-mono text-zinc-400 tabular-nums" data-testid={`index-map-${d}-preview`}
+        <span className="sr-only" data-testid={`index-map-${d}-preview`}
               title={`${name} = ${legText(leg)} of ${symbol}; the strike is picked by the server at the click`}>
           {p ?? '—'}
         </span>
@@ -106,7 +106,7 @@ export default function IndexMapControls({ symbol, map, onChange, spot, held, on
     <div className="flex items-center gap-3 flex-wrap" data-testid="index-map">
       {legPicker('bull')}
       {legPicker('bear')}
-      <label className="flex items-center gap-1 text-[11px] text-zinc-400">
+      <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-400">
         Exp
         <select aria-label="Option expiry" disabled={disabled} value={map.expiry} onChange={e => onChange({ ...map, expiry: e.target.value })}
                 className={`h-6 rounded border border-zinc-800 bg-zinc-950 px-1 text-[11px] font-semibold text-zinc-200 ${FOCUS}`}>
@@ -142,7 +142,8 @@ export default function IndexMapControls({ symbol, map, onChange, spot, held, on
       )}
       <span data-testid="index-map-no-guard" className="inline-flex items-center gap-1 text-[11px] text-zinc-400"
             title="An index chart has no rail yet: no MTM guard, no Bracket / Cover and no resting levels watch the option it trades. Exit by hand (Close / the other side's button), or chart the option itself to use them.">
-        <Info className="w-3.5 h-3.5" aria-hidden="true" /> No MTM guard / brackets here - exits are manual
+        <Info className="w-3.5 h-3.5" aria-hidden="true" /><span className="hidden 2xl:inline">No MTM guard / brackets here - exits are manual</span>
+        <span className="sr-only 2xl:hidden">No MTM guard or brackets on an index chart</span>
       </span>
     </div>
   );

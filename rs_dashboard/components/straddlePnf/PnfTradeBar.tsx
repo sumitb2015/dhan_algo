@@ -1,7 +1,7 @@
 'use client';
 
 import type { ReactNode } from 'react';
-import { Loader2, ArrowUpRight, ArrowDownRight, XCircle } from 'lucide-react';
+import { Loader2, ArrowUpRight, ArrowDownRight, XCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import { BROKER_LABELS, type Broker } from '@/hooks/useBrokerSelector';
 import type { PnfAction } from '@/lib/pnfOrderLogic';
 import type { Target } from '@/lib/pnfTarget';
@@ -28,12 +28,23 @@ export interface PnfTradeBarProps {
   sideHints?: { BUY: string; SELL: string };
   /** The same legs in full ("BUY CE ATM"), for the buttons' titles. */
   sideTitles?: { BUY: string; SELL: string };
+  /**
+   * The option-map row can be folded away for chart space (remembered by the page). `mapAttention`: the held option needs the user (an
+   * unsettled order, the broker showing less than the chart opened): the row is then shown whatever the choice, since its prompts live there.
+   */
+  mapCollapsed?: boolean;
+  onMapCollapsed?: (collapsed: boolean) => void;
+  mapAttention?: boolean;
+  /** One line describing the map, for the folded toggle's title. */
+  mapSummary?: string;
 }
 
+/** The micro-label every control group on the page uses (Settings row, Style, Option map). */
+const LABEL = 'text-[10px] font-bold uppercase tracking-wider text-zinc-400';
 const inr = (n: number) => `${n < 0 ? '-' : ''}₹${Math.abs(Math.round(n)).toLocaleString('en-IN')}`;
 const pnlTone = (n: number | null) => (n == null || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-red-400');
 
-export default function PnfTradeBar({ trade, target, broker, mode, onModeChange, onSwitchTarget, tradesLabel, styleSlot = null, indexSlot = null, sideHints, sideTitles }: PnfTradeBarProps) {
+export default function PnfTradeBar({ trade, target, broker, mode, onModeChange, onSwitchTarget, tradesLabel, styleSlot = null, indexSlot = null, sideHints, sideTitles, mapCollapsed = false, onMapCollapsed, mapAttention = false, mapSummary }: PnfTradeBarProps) {
   const {
     isIndex, mapped, held, closeTitle, heldWarning, isEquity, isStraddle, lots, lotsDraft, setLotsDraft, commitLots, pickLots, product, setProduct,
     busy, ready, unsupported, position, shownPnl, realError, executeOrder, executeSquareOff,
@@ -65,7 +76,9 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
   );
 
   return (
-    <div data-testid="pnf-trade-bar" className="flex items-center gap-x-4 gap-y-2 flex-wrap px-6 py-1 bg-zinc-900/70 border-b border-zinc-800 text-xs">
+    <div data-testid="pnf-trade-bar" className="bg-zinc-900/70 border-b border-zinc-800 text-xs">
+    {/* Row 1: account, size, style | the order buttons and the position (the buttons never drop to a line of their own) */}
+    <div className="flex items-center gap-x-4 gap-y-1.5 flex-wrap px-6 py-1">
       {/* 1. Broker & Trading Mode */}
       <div className="flex items-center gap-2">
         {/* the broker is picked in the page header; the bar names it so the order target is never in doubt */}
@@ -102,7 +115,7 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
 
           {/* Sizing Input with commit-on-blur */}
           <div className="flex items-center gap-1.5">
-            <span className="text-zinc-400 text-[11px] font-medium">{isEquity ? 'Qty' : 'Lots'}:</span>
+            <span className={LABEL}>{isEquity ? 'Qty' : 'Lots'}</span>
             <div className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950">
               <button type="button" aria-label={`Decrease ${isEquity ? 'quantity' : 'lots'}`}
                       className="w-6 h-6 flex items-center justify-center text-zinc-300 hover:bg-zinc-800 rounded-l" onClick={() => pickLots(lots - 1)}>
@@ -129,8 +142,8 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
               </button>
             </div>
 
-            {/* Quick lot presets */}
-            <div className="flex items-center gap-1">
+            {/* Quick lot presets: wide screens only (below 1536 px they pushed the order buttons onto a second line; the stepper stays) */}
+            <div className="hidden 2xl:flex items-center gap-1">
               {(isEquity ? [10, 50, 100] : [1, 2, 5, 10]).map(n => (
                 <button key={n} type="button" onClick={() => pickLots(n)}
                         className={`px-1.5 h-6 rounded text-[10px] font-mono border ${lots === n ? 'border-zinc-500 bg-zinc-800 text-white' : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200'}`}>
@@ -144,8 +157,16 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
 
       {styleSlot}
 
-      {/* 2b. A Renko index chart's option map: its own group, so it wraps as one block and never pushes the buttons apart */}
-      {indexSlot && <><span className="w-px h-5 bg-zinc-800 shrink-0" />{indexSlot}</>}
+      {/* the option-map row's fold switch: it sits on this row so it is reachable whether the map row shows or not */}
+      {indexSlot && onMapCollapsed && (
+        <button type="button" data-testid="pnf-trade-map-toggle" aria-expanded={!mapCollapsed || mapAttention}
+                aria-label={mapCollapsed ? 'Show the option map' : 'Hide the option map'}
+                title={`${mapCollapsed ? 'Show' : 'Hide'} the option map${mapSummary ? ` (${mapSummary})` : ''}${mapAttention ? ' - shown while the held option needs you' : ''}`}
+                onClick={() => onMapCollapsed(!mapCollapsed)} disabled={mapAttention}
+                className="inline-flex items-center gap-1 h-6 px-2 rounded-md border border-zinc-700 bg-zinc-950 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:text-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">
+          Map {mapCollapsed && !mapAttention ? <ChevronDown className="w-3 h-3" aria-hidden="true" /> : <ChevronUp className="w-3 h-3" aria-hidden="true" />}
+        </button>
+      )}
 
       {/* 3. Action Buttons */}
       <div className="flex items-center gap-2 ml-auto">
@@ -205,6 +226,14 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
           </div>
         )}
       </div>
+    </div>
+    {/* Row 2 (a Renko index chart): the option map - what Bull / Bear trade - on a line of its own under the account row */}
+    {indexSlot && (!mapCollapsed || mapAttention) && (
+      <div data-testid="pnf-trade-map-row" className="flex items-center gap-3 px-6 py-1 border-t border-zinc-800/60">
+        <span className={`${LABEL} shrink-0 whitespace-nowrap`} title="What the Bull / Bear buttons and AUTO trade on this index chart">Option map</span>
+        {indexSlot}
+      </div>
+    )}
     </div>
   );
 }

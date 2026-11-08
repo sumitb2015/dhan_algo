@@ -279,3 +279,27 @@ test('AUTO on an index chart: arming saves the option map with the chart for the
   await expect(bear.getByRole('button', { name: 'BUY' })).toBeDisabled();
   expect(placed).toEqual([]);                                          // arming sends no order
 });
+
+test('the option-map row folds away (remembered), and comes back on its own while an order on it is unknown', async ({ page }) => {
+  await installMock(page, { orderOutcome: () => 'unknown' });
+  const bar = await openIndex(page);
+  const toggle = bar.getByTestId('pnf-trade-map-toggle');
+  await toggle.click();
+  await expect(bar.getByTestId('pnf-trade-map-row')).toHaveCount(0);
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  // the buttons keep working with the map folded (they trade the saved map)
+  await expect(bar.getByTestId('pnf-trade-buy')).toContainText('BULL ▸ BUY CE');
+  // remembered across a reload
+  await page.reload();
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Index' }).click();
+  await expect(bar.getByTestId('pnf-trade-map-toggle')).toHaveAttribute('aria-expanded', 'false');
+  await expect(bar.getByTestId('pnf-trade-map-row')).toHaveCount(0);
+  // an unknown REAL entry needs the settle buttons, which live on the map row: it is shown, and cannot be folded until settled
+  await goReal(page);
+  await bar.getByTestId('pnf-trade-buy').click();
+  await expect(bar.getByTestId('pnf-trade-map-row')).toBeVisible();
+  await expect(bar.getByTestId('index-held')).toContainText('UNKNOWN');
+  await expect(bar.getByTestId('pnf-trade-map-toggle')).toBeDisabled();
+  await bar.getByRole('button', { name: 'It did not' }).click();
+  await expect(bar.getByTestId('pnf-trade-map-row')).toHaveCount(0);           // settled: folded again, as the user left it
+});

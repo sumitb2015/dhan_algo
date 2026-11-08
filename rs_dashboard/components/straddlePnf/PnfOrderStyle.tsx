@@ -69,7 +69,7 @@ export default function PnfOrderStyle({ value: saved, onChange, guard, guardOn, 
   };
   return (
     <div data-testid="pnf-style-bar" className="flex items-center gap-2 flex-wrap">
-      <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400" title={HELP}>Style</span>
+      <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400" title={HELP}>Style</span>
       <div role="group" aria-label="Order style" className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-zinc-800 bg-zinc-950">
         {(['Single', 'Bracket', 'Cover'] as const).map(seg)}
       </div>
