@@ -194,8 +194,8 @@ trade bar shows a **map** with one row per direction.
   the index as its chart (signals, stops, trail and markers are index levels), while its order, exit and **P&L are the option's
   premium**. An entry with no option price yet waits while the signal is fresh. A PAPER exit with no option price waits too (the end of
   day still closes it, with its P&L shown as 0).
-- **Not on an index chart yet:** the MTM guard (the server's too: an index chart's AUTO row keeps only its stop and end-of-day exit),
-  Bracket / Cover (shown as Single), rail levels, pyramid adds and Practice AUTO.
+- **MTM guard (since 2026-11-08):** works on an index chart, on the **option's** P&L - see section 6, *Index charts*.
+- **Not on an index chart yet:** Bracket / Cover (shown as Single), rail levels, pyramid adds and Practice AUTO.
 
 ### Safety rules (the ledger)
 
@@ -232,6 +232,17 @@ One guard per chart, shown in the toolbar (**MTM Guard ON/OFF**) with its card.
   everything.
 - **Refusals.** It will not exit AUTO's row if the row is on a different broker than the page's, and it waits for a live price.
 - **Scope.** Switching broker or PAPER/REAL switches the page's guards off. The guard runs in the page: with the tab closed see section 7.
+- **Index charts (Renko, CE / PE map).** The guard watches the option the chart trades: AUTO's option row (premium against its entry
+  premium) plus the units **this chart** opened from the trade bar / Scalper - PAPER from the paper book, REAL as this chart's share of the
+  broker row (its own lots over the row's lots; another page's lots of the same strike are never counted or closed).
+  - **Rupees only.** A box of an index chart is an index move, not a move of the option's premium, so the card has no Boxes switch there and
+    no default levels: set a rupee target / stop / trail / Protect profit once. An index chart's levels are saved apart from the levels the
+    same chart uses on a contract. A chart switched between an index and a contract switches its guard off (said in a toast).
+  - **When it trips** it exits AUTO's option through AUTO (AUTO switches off) and closes the chart's own manual units through the held-option
+    ledger (reserved first, `exitOwn` on its own units, an unclear outcome is UNKNOWN and settled on the bar, never resent). It settles when
+    both ledgers read flat. Both charts are watched, whichever one is shown.
+  - **Server.** The guard synced for an index chart applies to its open REAL AUTO row with the tab closed too, on the option premium from the
+    price bridge (no premium = the guard waits; the row's own stop and end-of-day exit still hold). Manual units are guarded by the tab only.
 
 ## 7. What runs where
 

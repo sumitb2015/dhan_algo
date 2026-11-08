@@ -112,3 +112,17 @@ test('stopHit: the row\'s own stop against the live price, a long at or below it
   assert.equal(stopHit(row({ side: 'BUY' }), 1), false);
   assert.equal(stopHit(row({ side: 'BUY', stop: 100 }), null), false);
 });
+
+test('an index chart\'s option row is guarded on the OPTION premium vs its entry premium; box levels are never applied to it', () => {
+  // NIFTY index chart, bearish leg = BUY PE: 1 lot of 75 bought at 120. The mark passed is the PE premium, not the index.
+  const ix = row({
+    target: { kind: 'index', symbol: 'NIFTY', name: 'NIFTY' } as AutoRow['target'], side: 'SELL', lots: 1, unitsPerPoint: 75, entryPrice: 24000,
+    traded: { target: { kind: 'options', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-10', strike: 24000, side: 'PE' } as AutoRow['target'], targetKey: 'pe', action: 'BUY', ids: 'NSE_FNO:1', entryPremium: 120 },
+  });
+  assert.equal(stepRow(ix, cfg({ levels: { stop: 1500 } }), 101, {}).reason, null);                    // -1425
+  assert.match(stepRow(ix, cfg({ levels: { stop: 1500 } }), 100, {}).reason ?? '', /stop-loss/);       // -1500
+  assert.match(stepRow(ix, cfg({ levels: { target: 750 } }), 130, {}).reason ?? '', /target/);         // +750
+  const boxes = stepRow(ix, cfg({ levels: { stopBoxes: 1 }, boxPts: 5 }), 60, {});                     // -4500, a box level only
+  assert.equal(boxes.reason, null, 'an index box is not a box of the option');
+  assert.equal(boxes.boxesUnreadable, true, 'said, not silently enforced on the wrong unit');
+});

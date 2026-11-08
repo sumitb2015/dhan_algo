@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { carryRuntime, cleanGuard, evalGuard, type LadderGuard } from '@/lib/priceLadderGuard';
 import { effectiveGuard, noteBoxes } from '@/lib/pnfGuardBoxes';
 import type { LadderPosition } from '@/lib/pnfLadderPosition';
+import { rupeeLevels } from '@/lib/pnfIndexGuard';
 
 // The MTM guard of a P&F chart (same rules and card as the Price Ladder: target, stop-loss, trailing, Protect profit), held by
 // this page: it reads the chart's own P&L (paper ledger or broker book) and, when a rule trips, the leader tab exits that chart.
@@ -20,23 +21,32 @@ const RETRY_EXIT_S = 6;
 /** How long a chart must read flat before the guard drops its baseline: a REAL book read can briefly miss a position (polled every 5 s). PAPER is local and exact. */
 const FLAT_RESET_S_REAL = 12;
 
-export interface GuardChart { chart: 1 | 2; targetKey: string }
+export interface GuardChart {
+  chart: 1 | 2; targetKey: string;
+  /** A Renko INDEX chart (it trades CE / PE options): rupee levels only - a chart box is an index move, not the option's P&L - and levels saved apart from the chart's contract levels. */
+  rupeesOnly?: boolean;
+  /** This chart's position source has been read (default: `positionsLoaded`). An index chart's comes from the AUTO and held-option ledgers. */
+  loaded?: boolean;
+}
 /** `base` is the chart's P&L when the guard was switched on, or null when it was flat then: captured when a position first appears. */
 type Slot = { guard: LadderGuard; base: number | null };
 
-const readLevels = (key: string, chart: number): LadderGuard => {
+/** An index chart's levels are stored apart (`…ix1`): its rupee levels must not replace the box levels the chart uses on a contract. */
+const slotName = (chart: number, rupeesOnly: boolean) => `${rupeesOnly ? 'ix' : ''}${chart}`;
+const readLevels = (key: string, chart: number, rupeesOnly = false): LadderGuard => {
   try {
-    const raw = localStorage.getItem(`${key}${chart}`);
+    const raw = localStorage.getItem(`${key}${slotName(chart, rupeesOnly)}`);
     // Nothing ever saved for this chart: the defaults (what AUTO switches the guard on with). Saved levels - even a cleared field - win.
-    if (raw === null) return { on: false, targetBoxes: DEFAULT_GUARD_BOXES, stopBoxes: DEFAULT_GUARD_BOXES };
+    // An index chart has no default: its levels are rupees, which only the user can size.
+    if (raw === null) return rupeesOnly ? { on: false } : { on: false, targetBoxes: DEFAULT_GUARD_BOXES, stopBoxes: DEFAULT_GUARD_BOXES };
     const j = JSON.parse(raw) as Record<string, unknown>;
     const g: LadderGuard = { on: false };
     for (const f of FIELDS) { const n = Number(j[f]); if (Number.isFinite(n) && (n > 0 || (f === 'lockKeep' && n === 0))) g[f] = n; }
-    return g;
+    return rupeesOnly ? rupeeLevels(g) : g;
   } catch { return { on: false }; }
 };
-const saveLevels = (key: string, chart: number, g: LadderGuard) => {
-  try { localStorage.setItem(`${key}${chart}`, JSON.stringify(Object.fromEntries(FIELDS.filter(f => g[f] != null).map(f => [f, g[f]])))); } catch { /* ignore */ }
+const saveLevels = (key: string, chart: number, g: LadderGuard, rupeesOnly = false) => {
+  try { localStorage.setItem(`${key}${slotName(chart, rupeesOnly)}`, JSON.stringify(Object.fromEntries(FIELDS.filter(f => g[f] != null).map(f => [f, g[f]])))); } catch { /* ignore */ }
 };
 
 export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderRef, exitChart, onEvent, rupeesPerBox, tradeKey, syncServer, storeKey = KEY }: {
@@ -69,6 +79,9 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   /** When this page last changed a chart's guard (switched it, edited it, a trip settled it off): a server poll older than that is not pulled. */
   const localAt = useRef<Record<number, number>>({});
   const onEventRef = useRef(onEvent);
+  const chartsRef = useRef(charts);
+  useEffect(() => { chartsRef.current = charts; });
+  const rupeesOnlyOf = (chart: number) => !!chartsRef.current.find(c => c.chart === chart)?.rupeesOnly;
   const syncServerRef = useRef(syncServer);
   const tradeKeyRef = useRef(tradeKey);
   useEffect(() => { syncServerRef.current = syncServer; tradeKeyRef.current = tradeKey; });
@@ -86,8 +99,30 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
       if (slotsRef.current[c]?.guard.on && tradeKeyRef.current(c) === null) syncServerRef.current(c, null);
     }
   }, [scope]);
+  // A chart switched between an index (option P&L, rupee levels) and a contract (box levels): the guard it had was set for the other
+  // kind of position, so it switches off (said once). Its levels stay saved for when the chart is that kind again.
+  const kindSig = charts.map(c => `${c.chart}:${c.rupeesOnly ? 'ix' : 'c'}`).join('|');
+  const lastKind = useRef<Record<number, boolean>>({});
+  useEffect(() => {
+    for (const c of chartsRef.current) {
+      const ix = !!c.rupeesOnly, was = lastKind.current[c.chart];
+      lastKind.current[c.chart] = ix;
+      if (was === undefined || was === ix) continue;
+      const sl = slotsRef.current[c.chart];
+      if (!sl?.guard.on || sl.guard.tripped) continue;                  // off already, or an exit in progress that finishes first
+      localAt.current[c.chart] = Date.now();
+      setSlots(s => ({ ...s, [c.chart]: { guard: { ...readLevels(storeKey, c.chart, ix), on: false }, base: null } }));
+      if (tradeKeyRef.current(c.chart) === null) syncServerRef.current(c.chart, null);
+      onEventRef.current(c.chart, 'warn', `MTM guard on chart ${c.chart} switched off: the chart changed between an index and a contract. Set it again for this chart.`);
+    }
+  }, [kindSig, storeKey]);
 
-  const levelsOf = useCallback((chart: number): LadderGuard => slots[chart]?.guard ?? readLevels(storeKey, chart), [slots, storeKey]);
+  const ixSig = charts.filter(c => c.rupeesOnly).map(c => c.chart).join(',');
+  const levelsOf = useCallback((chart: number): LadderGuard => {
+    const ix = ixSig.split(',').includes(String(chart));
+    const g = slots[chart]?.guard ?? readLevels(storeKey, chart, ix);
+    return ix ? rupeeLevels(g) : g;
+  }, [slots, storeKey, ixSig]);
   const mtmOf = (chart: GuardChart): number | null => {
     const s = slots[chart.chart];
     const pos = positions[chart.targetKey];
@@ -99,18 +134,20 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     const on = body.on === true;
     const old = slots[chart.chart]?.guard;
     localAt.current[chart.chart] = Date.now();
+    const ix = !!chart.rupeesOnly;
     if (!on) {
-      const g = old ?? readLevels(storeKey, chart.chart);
+      const g = old ?? readLevels(storeKey, chart.chart, ix);
       setSlots(s => ({ ...s, [chart.chart]: { guard: { ...g, on: false, tripped: undefined, peak: undefined, floor: undefined }, base: null } }));
       syncServer(chart.chart, null);
       return true;
     }
-    const cleaned = cleanGuard(body);
+    // an index chart takes no box levels (the card does not offer them; anything else sending them is ignored, never read as index boxes)
+    const cleaned = cleanGuard(ix ? { ...body, targetBoxes: undefined, stopBoxes: undefined } : body);
     if (typeof cleaned === 'string') { toast.error(cleaned); return false; }
     const pos = positions[chart.targetKey];
     if (pos && pos.pnl === null) { toast.error('No live price for this position yet - the guard cannot read its P&L'); return false; }
     const next = carryRuntime(cleaned, old);
-    saveLevels(storeKey, chart.chart, next);
+    saveLevels(storeKey, chart.chart, next, ix);
     syncServer(chart.chart, next);
     setSlots(s => ({ ...s, [chart.chart]: { guard: next, base: old?.on ? s[chart.chart]?.base ?? null : pos ? pos.entryPnl ?? pos.pnl : null } }));
     return true;
@@ -157,12 +194,13 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
         const slot = slotsRef.current[c.chart];
         if (!slot?.guard.on) continue;
         const pos = positions[c.targetKey];
+        const loaded = c.loaded ?? positionsLoaded;
         const g = slot.guard;
         if (g.tripped) {
           // Still holding: keep exiting (retried, never faster than every few seconds). Flat and read: the guard has done its job.
           if (pos) {
             if (nowS - (exitedAt.current[c.chart] ?? 0) > RETRY_EXIT_S) { exitedAt.current[c.chart] = nowS; exitThen(c.chart, g.tripped, g.firedAt); }
-          } else if (positionsLoaded && nowS - (g.firedAt ?? nowS) >= (scope.endsWith(':REAL') ? RETRY_EXIT_S : 1)) settle(c.chart, g.tripped, g.firedAt, true);
+          } else if (loaded && nowS - (g.firedAt ?? nowS) >= (scope.endsWith(':REAL') ? RETRY_EXIT_S : 1)) settle(c.chart, g.tripped, g.firedAt, true);
           continue;
         }
         // A new AUTO trade (the trend rule exits and re-enters within a tick, so the book is never seen flat in between): it is measured
@@ -181,7 +219,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
         // trade is measured from its own start; the guard itself stays ON. A REAL book must read flat for a while first (a poll can miss a
         // position for a moment, and forgetting its loss then would delay the stop); PAPER is local and exact.
         if (pos) flatSince.current[c.chart] = null;
-        else if (positionsLoaded) {
+        else if (loaded) {
           const since = (flatSince.current[c.chart] ??= nowS);
           const wait = scope.endsWith(':REAL') ? FLAT_RESET_S_REAL : 0;
           if (nowS - since >= wait && (slot.base !== null || g.peak !== undefined || g.floor !== undefined)) {
@@ -231,7 +269,9 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
    * The server holds this chart's guard (from before a reload, another tab, or this page in another mode): switch it on here with the
    * server's levels, or take its levels when the card is already on (its runtime - peak, floor, a trip in progress, the baseline - is kept).
    */
-  const adopt = (chart: 1 | 2, levels: LadderGuard) => {
+  const adopt = (chart: 1 | 2, serverLevels: LadderGuard) => {
+    const ix = rupeesOnlyOf(chart);
+    const levels = ix ? rupeeLevels(serverLevels) : serverLevels;
     setSlots(s => {
       const cur = s[chart];
       const clean = Object.fromEntries(FIELDS.filter(f => levels[f] != null).map(f => [f, levels[f]])) as Partial<LadderGuard>;
@@ -241,7 +281,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
       }
       return { ...s, [chart]: { guard: { ...clean, on: true }, base: null } };
     });
-    saveLevels(storeKey, chart, levels);
+    saveLevels(storeKey, chart, levels, ix);
   };
   /** The server copy this page had seen was removed elsewhere (another tab switched it off): switch the card off here too, without a sync. */
   const release = (chart: 1 | 2) => {

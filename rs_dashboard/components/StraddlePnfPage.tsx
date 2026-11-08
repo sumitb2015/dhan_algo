@@ -14,6 +14,8 @@ import PnfTradeBar from './straddlePnf/PnfTradeBar';
 import ScalperWindow, { type ScalperPos } from './straddlePnf/ScalperWindow';
 import IndexMapControls from './straddlePnf/IndexMapControls';
 import { useIndexHeld, useTradedLive } from './straddlePnf/useIndexHeld';
+import { closeHeldForGuard } from './straddlePnf/indexGuardExit';
+import { autoIndexLeg, indexGuardPosition, ownMarkLeg, rupeeLevels, stepOwnMark, type OwnMark } from '@/lib/pnfIndexGuard';
 import { DEFAULT_INDEX_MAP, legShort, legText, readIndexMap, type IndexMap } from '@/lib/pnfIndexMap';
 import { usePnfTrade } from './straddlePnf/usePnfTrade';
 import BrokerBooks from './straddlePnf/BrokerBooks';
@@ -569,6 +571,43 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     };
   };
   const railCharts = ([1, 2] as const).map(railChartOf).filter((x): x is RailChart => x !== null);
+  // ── Renko index chart -> options: the option each index chart holds by hand (lib/pnfIndexHeld.ts). Read for BOTH charts, not only the
+  // active one: the MTM guard watches and exits an index chart's option whichever chart is shown.
+  const ixChart1 = renko && target1.kind === 'index';
+  const ixChart2 = renko && dual && target2.kind === 'index';
+  const isIndexChart = (c: ChartId) => (c === 2 ? ixChart2 : ixChart1);
+  const held1 = useIndexHeld({ enabled: ixChart1, scope, chart: 1, indexKey: targetKey(target1), broker, mode: tradeMode });
+  const held2 = useIndexHeld({ enabled: ixChart2, scope, chart: 2, indexKey: targetKey(target2), broker, mode: tradeMode });
+  const heldOf = (c: ChartId) => (c === 2 ? held2 : held1);
+  const heldLive1 = useTradedLive(held1.held?.ids ?? null), heldLive2 = useTradedLive(held2.held?.ids ?? null);
+  const heldLiveOf = (c: ChartId) => (c === 2 ? heldLive2 : heldLive1);
+  const heldLegs1 = useChartLegs(broker, held1.held?.traded ?? target1, held1.held ? targetKey(held1.held.traded) : '-', !!held1.held);
+  const heldLegs2 = useChartLegs(broker, held2.held?.traded ?? target2, held2.held ? targetKey(held2.held.traded) : '-', !!held2.held);
+  const heldLegsOf = (c: ChartId) => (c === 2 ? heldLegs2 : heldLegs1);
+  // Each index chart's OWN mark of the units it holds by hand (lib/pnfIndexGuard.ts stepOwnMark): changed only by that chart's own held
+  // units, filled at the option's live premium. Its MTM guard values these, never the option's paper book or broker row, which the other
+  // chart (holding the same strike), another page or a strategy can share - so neither chart's trades move the other chart's guard.
+  const [ownMarks, setOwnMarks] = useState<Record<ChartId, OwnMark | null>>({ 1: null, 2: null });
+  const perLotOf = (hl: ReturnType<typeof useChartLegs>) => (hl ? (tradeMode === 'REAL' ? hl.lotUnits[0] : hl.lot[0]) ?? null : null);
+  const markSig = ([1, 2] as const).map(c => {
+    const h = isIndexChart(c) ? heldOf(c).held : null, hl = heldLegsOf(c);
+    return `${h?.id ?? '-'}:${h?.units ?? 0}:${h?.action ?? ''}:${heldLiveOf(c).ltp ?? ''}:${perLotOf(hl) ?? ''}:${hl?.unitsPerLot[0] ?? ''}`;
+  }).join('|');
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the mark follows the held ledger and the live premium: that IS its job
+    setOwnMarks(prev => {
+      let changed = false;
+      const next = { ...prev };
+      for (const c of [1, 2] as const) {
+        const h = isIndexChart(c) ? heldOf(c).held : null, hl = heldLegsOf(c);
+        const m = stepOwnMark(prev[c], h, perLotOf(hl), heldLiveOf(c).ltp, hl?.unitsPerLot[0] ?? null);
+        if (m !== prev[c]) { next[c] = m; changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  // markSig describes every input read above
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [markSig, tradeMode]);
   // The header's account P&L prices open broker legs the book sends without a price (Kotak) from these: every chart leg's live price, by
   // the broker's key, fresh feeds only (a stale price would show a wrong running P&L; the leg stays unpriced, marked *, instead).
   const headerPrices = new Map<string, number>();
@@ -689,6 +728,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // MTM guard (page-held, per chart): on a trip, cancel the chart's orders and bracket exits, then square its position off.
   /** Resolves true when nothing of this chart's is left to exit (the guard is done), false / void while it should keep trying. */
   const exitChart = async (c: ChartId, reason: string): Promise<boolean | 'kept'> => {
+    if (isIndexChart(c)) return exitIndexChart(c);
     const rc = railCharts.find(x => x.chart === c);
     if (!rc) return false;
     await resting.cancelAllFor(rc.targetKey);
@@ -728,6 +768,52 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       else if (res.status !== 409) toast.warning(`MTM guard exit: ${j.error ?? j.message ?? 'not confirmed'} - it is retried while the position is open`, { duration: 15_000 });
     } catch { toast.warning('MTM guard exit: no clean reply - check Positions; it is retried', { duration: 15_000 }); }
     return false;
+  };
+  /**
+   * A Renko INDEX chart's guard exit: AUTO's option row through AUTO's own exit (it also switches AUTO off), and the option units this chart
+   * opened by hand through the held ledger (indexGuardExit.ts: its own units only). True when nothing of this chart's is left (PAPER);
+   * REAL is false until the ledgers read flat, which settles the trip (a reply is not a fill).
+   */
+  const guardHeldWarned = useRef<Record<number, string>>({});
+  const exitIndexChart = async (c: ChartId): Promise<boolean> => {
+    const tk = targetKey(c === 2 ? target2 : target1);
+    const ar = autoOf(c).row;
+    const aRow = ar && ar.targetKey === tk && ar.mode === tradeMode ? ar : null;
+    let autoLeft = false;
+    if (aRow) {
+      if (aRow.broker !== broker) { toast.warning(`MTM guard: chart ${c}'s AUTO position is on ${aRow.broker}, not ${broker} - switch the page back to exit it`, { duration: 15_000 }); return false; }
+      autoLeft = aRow.state !== 'open' || !(await autoOf(c).exitNow('mtm guard')) || tradeMode === 'REAL';
+    }
+    const h = heldOf(c).held;
+    let heldLeft = false;
+    if (h && h.units > 0) {
+      const hl = heldLegsOf(c);
+      const r = await closeHeldForGuard({
+        held: h, ops: heldOf(c).ops, broker, mode: tradeMode, scope, ltp: heldLiveOf(c).ltp, lot: hl?.lot[0] ?? null, unitsPerLot: hl?.unitsPerLot[0] ?? null,
+        paperClose: (key, delta, px, upl) => setPaper(prev => {
+          const legs = prev[key] ?? [FLAT_LEG];
+          return { ...prev, [key]: legs.map(l => applyPaperFill(l, delta, px, upl)) };
+        }),
+        marker: (t, action, price, lots, mode, estimate) => {
+          const now = Math.floor(nowSec());
+          handleTradeExecuted({ id: `guard-${c}-${now}-${action}`, t: now, action, price, lots, mode, estimate }, t);
+          // the index chart's own arrow, in its direction (a bullish leg's close is a SELL), drawn only (never a paper trade)
+          const spot = priceOf(c === 2 ? feed2 : feed1);
+          if (spot && spot > 0) handleTradeExecuted({ id: `guard-${c}-${now}-ix`, t: now, action: h.dir === 'bull' ? 'SELL' : 'BUY', price: spot, lots, mode, axis: true }, c === 2 ? target2 : target1);
+        },
+        say: (kind, text) => {
+          if (kind === 'success') { toast.success(text); chime({ kind: 'manual', outcome: 'placed', close: true }); }
+          else if (kind === 'warn') { toast.warning(text, { duration: Infinity }); chime({ kind: 'manual', outcome: 'unknown', close: true }); }
+          else toast.info(text, { duration: 15_000 });
+        },
+      });
+      heldLeft = r !== 'done';
+      if (typeof r === 'object') {
+        // retried every few seconds: said once per reason, not on every retry
+        if (guardHeldWarned.current[c] !== r.blocked) { guardHeldWarned.current[c] = r.blocked; toast.warning(`MTM guard on chart ${c} could not close its option: ${r.blocked}. It is retried.`, { duration: 15_000 }); }
+      } else delete guardHeldWarned.current[c];
+    }
+    return !autoLeft && !heldLeft;
   };
   // + / − on the ladder's position chip: one lot more (+, the position's own side) or one lot less (−, the opposite side) at
   // MARKET on that chart's contract. A plain order (no bracket), refused while the rail is locked, while AUTO holds the chart or
@@ -801,6 +887,25 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       }
     }
   }
+  // A Renko INDEX chart: its guard watches the OPTION it trades - AUTO's option row (premium vs entry premium) plus the units this chart
+  // opened by hand (its own mark, above). Keyed PER CHART (`ix1:<index key>`): both
+  // charts may show the same index, and each holds its own option position (a contract's position is shared; an index chart's is not).
+  const indexGuardPos = (c: ChartId): LadderPosition | null => {
+    const tk = targetKey(c === 2 ? target2 : target1);
+    const ar = autoLedger.rows.find(x => x.chart === c && x.mode === tradeMode && holdsPosition(x) && !!x.traded && x.targetKey === tk && (tradeMode === 'PAPER' || x.broker === broker));
+    const traded = c === 2 ? autoTraded2 : autoTraded1, opt = (c === 2 ? autoOpt2 : autoOpt1).ltp;
+    const aLeg = ar ? autoIndexLeg(ar, traded?.ids === ar.traded!.ids && opt != null && opt > 0 ? markPnl(ar, opt) : null) : null;
+    // the hand-held part: this chart's own mark, only while the ledger still holds the same row (a mark one render behind a close is not a position)
+    const h = heldOf(c).held, m = ownMarks[c];
+    const hLeg = h && h.units > 0 && m?.id === h.id ? ownMarkLeg(m, heldLiveOf(c).ltp, heldLegsOf(c)?.unitsPerLot[0] ?? null) : null;
+    return indexGuardPosition(aLeg, hLeg);
+  };
+  const indexGuardCharts = ([1, 2] as const).filter(isIndexChart).map(c => ({
+    chart: c, targetKey: `ix${c}:${targetKey(c === 2 ? target2 : target1)}`, rupeesOnly: true,
+    // flat is read off the AUTO and held-option ledgers (exact); REAL waits for the held ledger's first read
+    loaded: tradeMode === 'PAPER' || !heldOf(c).loading,
+  }));
+  for (const gc of indexGuardCharts) guardPositions[gc.targetKey] = indexGuardPos(gc.chart);
   // What one box of a chart is worth on its open position (box points x lots x rupees per point per lot): the guard's box levels.
   const boxRupees = (c: ChartId): number | null => {
     const rc = railCharts.find(x => x.chart === c);
@@ -808,9 +913,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   };
   // The guard is also enforced by the dashboard SERVER on open REAL AUTO positions (lib/autoServerWatcher.ts), so a closed or sleeping tab
   // does not leave one without its stop: every change of a chart's guard is synced to it.
-  const syncServerGuard = (c: 1 | 2, g: LadderGuard | null, quiet = false) => {
-    const boxPts = (c === 2 ? c2 : c1).model.box;
-    if (g && (g.targetBoxes != null || g.stopBoxes != null) && !(boxPts > 0)) {
+  const syncServerGuard = (c: 1 | 2, gIn: LadderGuard | null, quiet = false) => {
+    // an index chart's guard is rupees only (its box is an index move): no box size, no box levels go to the server
+    const ixc = isIndexChart(c);
+    const g = gIn && ixc ? rupeeLevels(gIn) : gIn;
+    const boxPts = ixc ? null : (c === 2 ? c2 : c1).model.box;
+    if (g && (g.targetBoxes != null || g.stopBoxes != null) && !(boxPts != null && boxPts > 0)) {
       // A box that merely became unknown (chart 2 switched off in single-chart view, or still loading) is not a user action: the server
       // keeps the copy it already has, and the effect below re-syncs as soon as the box is known. Only a click on the card warns.
       if (quiet) return;
@@ -824,7 +932,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     }).catch(() => { /* the page's own guard still runs; the server copy is the backstop */ });
   };
   const guards = usePnfGuard({
-    charts: railCharts.map(c => ({ chart: c.chart, targetKey: c.targetKey })), positions: guardPositions, positionsLoaded: positionsInfo.loaded,
+    charts: [...railCharts.map(c => ({ chart: c.chart, targetKey: c.targetKey })), ...indexGuardCharts], positions: guardPositions, positionsLoaded: positionsInfo.loaded,
     scope: `${broker}:${tradeMode}`, leaderRef, exitChart, rupeesPerBox: boxRupees, tradeKey: c => autoOf(c).row?.id ?? null, syncServer: syncServerGuard, storeKey: prefKey(chart, 'straddle-pnf-guard-'),
     onEvent: (c, kind, text) => { if (kind === 'warn') { toast.warning(text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); } else toast(text); void c; },
   });
@@ -1190,8 +1298,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // Renko index chart -> options (lib/pnfIndexMap.ts): the index gives the direction, the map's CE / PE is traded. The held option is
   // the server's REAL ledger (or page memory in PAPER), so Close / Reverse act on the contract actually opened, not the map's pick now.
   const indexTradable = renko && activeTarget.kind === 'index';
-  const indexHeld = useIndexHeld({ enabled: indexTradable, scope, chart: active, indexKey: targetKey(activeTarget), broker, mode: tradeMode });
-  const tradedLive = useTradedLive(indexHeld.held?.ids ?? null);
+  const indexHeld = heldOf(active);
+  const tradedLive = heldLiveOf(active);
   const changeIndexMap = (c: ChartId, m: IndexMap) => { setIndexMap(v => ({ ...v, [c]: m })); saveP(`${INDEX_MAP_KEY}${c}`, JSON.stringify(m)); };
   const activeMap = indexMap[active];
   const indexSideHints = indexTradable ? { BUY: legShort(activeMap.bull), SELL: legShort(activeMap.bear) } : undefined;
@@ -1247,6 +1355,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
         text: `C${c}${view.broker === broker && view.mode === tradeMode ? '' : ` ${view.broker} ${view.mode}`} ${guardLevelsText(view.levels)}`,
       }))}
       guard={(() => {
+        const ig = indexGuardCharts.find(x => x.chart === active);
+        if (ig) {
+          const h = indexHeld.held;
+          return { broker: broker, real: tradeMode === 'REAL', chart: ig.chart, index: true, chartLabel: `Chart ${ig.chart} · ${activeTarget.symbol}${h ? ` (${targetLabel(h.traded)})` : ' options'}`,
+            mtm: guards.mtmOf(ig), rupeesPerBox: null, guard: guards.guardOf(ig.chart), post: guards.post(ig) };
+        }
         const rc = railCharts.find(x => x.chart === active);
         if (!rc) return undefined;
         const gc = { chart: rc.chart, targetKey: rc.targetKey };

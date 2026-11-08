@@ -401,7 +401,7 @@ export function usePnfResting({ charts, broker, mode, lots, product, leaderRef, 
 }
 
 /** A chart's contract as the server resolves it (the order route's GET): its tick and rupees per point per lot, per leg. */
-export interface ChartLegs { tick: number; unitsPerLot: number[]; /** The broker's position keys and quantity per lot, per leg (the ladder's position read). */ keys: string[]; lotUnits: number[] }
+export interface ChartLegs { tick: number; unitsPerLot: number[]; /** The broker's position keys and quantity per lot, per leg (the ladder's position read). */ keys: string[]; lotUnits: number[]; /** The exchange lot per leg (a PAPER position's units per lot). */ lot: number[] }
 export function useChartLegs(broker: Broker, target: Target, targetKeyOf: string, enabled: boolean): ChartLegs | null {
   const [info, setInfo] = useState<(ChartLegs & { key: string }) | null>(null);
   const key = `${broker}|${targetKeyOf}`;
@@ -413,7 +413,7 @@ export function useChartLegs(broker: Broker, target: Target, targetKeyOf: string
         const j = await (await fetch(`/api/straddle-pnf/order?broker=${broker}&target=${encodeURIComponent(JSON.stringify(target))}`)).json() as
           { success?: boolean; unsupported?: string | null; legs?: { tick: number | null; lot: number; unitsPerLot: number | null; key?: string | null; lotUnits?: number | null }[] };
         if (dead || !j.success || !j.legs?.length) return;
-        setInfo({ key, tick: j.legs[0].tick && j.legs[0].tick > 0 ? j.legs[0].tick : 0.05, unitsPerLot: j.legs.map(l => l.unitsPerLot ?? l.lot),
+        setInfo({ key, tick: j.legs[0].tick && j.legs[0].tick > 0 ? j.legs[0].tick : 0.05, unitsPerLot: j.legs.map(l => l.unitsPerLot ?? l.lot), lot: j.legs.map(l => l.lot),
           keys: j.unsupported ? [] : j.legs.map(l => l.key ?? ''), lotUnits: j.unsupported ? [] : j.legs.map(l => l.lotUnits ?? 0) });
       } catch { /* the rail waits for it */ }
     })();
@@ -421,5 +421,5 @@ export function useChartLegs(broker: Broker, target: Target, targetKeyOf: string
     // target is fully described by its key
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, enabled]);
-  return info && info.key === key ? { tick: info.tick, unitsPerLot: info.unitsPerLot, keys: info.keys, lotUnits: info.lotUnits } : null;
+  return info && info.key === key ? { tick: info.tick, unitsPerLot: info.unitsPerLot, keys: info.keys, lotUnits: info.lotUnits, lot: info.lot } : null;
 }

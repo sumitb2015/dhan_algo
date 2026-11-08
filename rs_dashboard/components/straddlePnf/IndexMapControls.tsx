@@ -140,10 +140,10 @@ export default function IndexMapControls({ symbol, map, onChange, spot, held, on
                   className={`px-1.5 h-6 rounded border border-zinc-700 bg-zinc-800 font-bold text-zinc-100 hover:bg-zinc-700 ${FOCUS}`}>Forget</button>
         </span>
       )}
-      <span data-testid="index-map-no-guard" className="inline-flex items-center gap-1 text-[11px] text-zinc-400"
-            title="An index chart has no rail yet: no MTM guard, no Bracket / Cover and no resting levels watch the option it trades. Exit by hand (Close / the other side's button), or chart the option itself to use them.">
-        <Info className="w-3.5 h-3.5" aria-hidden="true" /><span className="hidden 2xl:inline">No MTM guard / brackets here - exits are manual</span>
-        <span className="sr-only 2xl:hidden">No MTM guard or brackets on an index chart</span>
+      <span data-testid="index-map-no-brackets" className="inline-flex items-center gap-1 text-[11px] text-zinc-400"
+            title="An index chart has no rail yet: no Bracket / Cover and no resting levels watch the option it trades. The MTM Guard does (rupee levels on the option's P&L). Chart the option itself for brackets and rail levels.">
+        <Info className="w-3.5 h-3.5" aria-hidden="true" /><span className="hidden 2xl:inline">No brackets here - MTM Guard in ₹</span>
+        <span className="sr-only 2xl:hidden">No brackets on an index chart; the MTM guard takes rupee levels</span>
       </span>
     </div>
   );

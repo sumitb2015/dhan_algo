@@ -4,7 +4,7 @@
 // (its P&L is 0 at entry), so no baseline has to survive a restart. Pure (tested in lib/autoServerGuard.test.ts).
 import { evalGuard, type LadderGuard } from './priceLadderGuard.ts';
 import { effectiveGuard, noteBoxes } from './pnfGuardBoxes.ts';
-import { closingSide, holdsPosition, rowPnl, type AutoRow } from './pnfAutoLedger.ts';
+import { closingSide, holdsPosition, markPnl, type AutoRow } from './pnfAutoLedger.ts';
 import { autoProductOf, planOwnExit, type BookRow, type PnfBroker } from './pnfOrderLogic.ts';
 
 /** The guard levels the page syncs to the server (the runtime fields - peak, floor, tripped - are the server's own). */
@@ -29,17 +29,18 @@ export const guards = (cfg: ServerGuardCfg | undefined, row: Pick<AutoRow, 'brok
   !!cfg && cfg.on && holdsPosition(row) && row.mode === 'REAL' && cfg.mode === 'REAL' && cfg.broker === row.broker;
 
 /**
- * One reading. `price`: the chart's live price (a straddle: CE + PE). The MTM is measured like the page's guard: from the entry price
+ * One reading. `price`: the chart's live price (a straddle: CE + PE) - for an index chart's option row (`traded`), the OPTION's premium:
+ * its P&L is the option's, and box levels are not applied to it (a chart box is an index move). The MTM is measured like the page's guard: from the entry price
  * when the guard was on before the position opened, from the P&L the row had when the guard was switched on otherwise (a position
  * already down 3000 when a Rs 1000 stop is set gets 1000 of further loss, not an instant exit). Returns the row's runtime (peak, floor,
  * that baseline) and, when a rule tripped, why.
  */
 export function stepRow(row: AutoRow, cfg: ServerGuardCfg, price: number, runtime: RowRuntime): { runtime: RowRuntime; mtm: number; reason: string | null; boxesUnreadable: boolean } {
-  const raw = rowPnl(row.side, row.entryPrice, price, row.unitsPerPoint);
+  const raw = markPnl(row, price);
   const base = runtime.base ?? (row.entryT * 1000 < cfg.updatedMs ? raw : 0);
   const mtm = raw - base;
   const g: LadderGuard = { on: true, ...cfg.levels, peak: runtime.peak, floor: runtime.floor };
-  const rpb = cfg.boxPts !== null && cfg.boxPts > 0 && row.unitsPerPoint > 0 ? cfg.boxPts * row.unitsPerPoint : null;
+  const rpb = !row.traded && cfg.boxPts !== null && cfg.boxPts > 0 && row.unitsPerPoint > 0 ? cfg.boxPts * row.unitsPerPoint : null;
   const r = evalGuard(effectiveGuard(g, rpb), mtm);
   const boxLevels = cfg.levels.targetBoxes !== undefined || cfg.levels.stopBoxes !== undefined;
   return { runtime: { peak: r.guard.peak, floor: r.guard.floor, base }, mtm, reason: r.reason ? noteBoxes(g, rpb, r.reason) : null, boxesUnreadable: boxLevels && rpb === null };

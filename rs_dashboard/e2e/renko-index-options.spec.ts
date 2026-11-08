@@ -99,7 +99,9 @@ async function installMock(page: Page, opts: { orderOutcome?: (b: OrderBody) => 
     }
     if (p === '/api/scalper/poll' && method === 'GET') {
       const positions = (['CE', 'PE'] as const).filter(o => book.net[o]).map(o => ({
-        securityId: ID[o], tradingSymbol: `NIFTY-${o}`, exchangeSegment: 'NSE_FNO', productType: 'INTRADAY', netQty: book.net[o], realizedProfit: 0, unrealizedProfit: 0, lastTradedPrice: premium[o],
+        securityId: ID[o], tradingSymbol: `NIFTY-${o}`, exchangeSegment: 'NSE_FNO', productType: 'INTRADAY', netQty: book.net[o], realizedProfit: 0,
+        // every lot of the row was opened at the starting premium (120 CE / 90 PE): its open P&L follows the live premium
+        buyAvg: o === 'CE' ? 120 : 90, sellAvg: o === 'CE' ? 120 : 90, unrealizedProfit: (premium[o] - (o === 'CE' ? 120 : 90)) * book.net[o], lastTradedPrice: premium[o],
       }));
       return json(route, { positions, positionsError: null });
     }
@@ -319,4 +321,101 @@ test('the chart-settings row folds to one button that says what the settings are
   await page.getByTestId('pnf-settings-toggle').click();
   await expect(page.getByRole('group', { name: 'Chart settings' })).toBeVisible();
   await expect(page.getByLabel('Interval')).toBeVisible();
+});
+
+/** Opens the MTM Guard card, sets rupee levels and switches it on. An index chart's card has no Boxes switch (rupees only). */
+async function guardOn(page: Page, levels: { stop?: string; target?: string }) {
+  await page.getByTestId('pnf-guard-toggle').click();
+  const card = page.getByTestId('pnf-guard-card');
+  await expect(card).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Boxes' })).toHaveCount(0);
+  await expect(card.getByRole('textbox', { name: 'MTM target in boxes' })).toHaveCount(0);
+  if (levels.stop) await card.getByRole('textbox', { name: 'MTM stop-loss in rupees' }).fill(levels.stop);
+  if (levels.target) await card.getByRole('textbox', { name: 'MTM target in rupees' }).fill(levels.target);
+  await card.getByRole('button', { name: 'Switch on' }).click();
+  await expect(page.getByTestId('pnf-guard-toggle')).toContainText('MTM Guard ON');
+  return card;
+}
+
+test('PAPER: the MTM guard on an index chart watches the held option\'s premium and closes it at the rupee stop', async ({ page }) => {
+  const { placed, premium, blocked } = await installMock(page);
+  const bar = await openIndex(page);
+  await bar.getByTestId('pnf-trade-buy').click();
+  await expect(bar.getByTestId('index-held')).toContainText('BULL · BUY NIFTY 25000 CE');
+  const card = await guardOn(page, { stop: '650' });                     // 10 points of a 65-unit lot
+  premium.CE = 112;                                                       // -520: inside the stop
+  await page.waitForTimeout(3_000);
+  await expect(bar.getByTestId('index-held')).toContainText('BULL');
+  premium.CE = 105;                                                       // -975: past the stop
+  await expect(bar.getByTestId('index-held')).toHaveCount(0, { timeout: 10_000 });
+  expect(placed.length).toBe(1);                                          // a paper close sends nothing
+  // it stays ON for the next trade, measured from its own start
+  await expect(page.getByTestId('pnf-guard-toggle')).toContainText('MTM Guard ON');
+  await expect(card).toBeVisible();
+  expect(blocked).toEqual([]);
+});
+
+test('REAL: the index chart\'s MTM guard closes only this chart\'s own option units at the rupee target, never another page\'s lots', async ({ page }) => {
+  // another page is long 4 lots (260) of the same CE: the guard values and closes only the 1 lot this chart opened
+  const { placed, premium, held, book } = await installMock(page, { otherNet: { CE: 260 } });
+  const bar = await openIndex(page);
+  await goReal(page);
+  await bar.getByTestId('pnf-trade-buy').click();
+  await expect(bar.getByTestId('index-held')).toContainText('BULL · BUY NIFTY 25000 CE 11 Nov 26 · 1L');
+  await expect(bar.getByTestId('pnf-trade-position')).toBeVisible({ timeout: 10_000 });
+  await guardOn(page, { target: '650' });
+  // +15 on 5 broker lots = 4875 for the row; this chart's share (1 of 5 lots) = 975 >= 650
+  premium.CE = 135;
+  await expect.poll(() => placed.length, { timeout: 20_000 }).toBe(2);
+  expect(placed[1]).toMatchObject({ mode: 'REAL', exitOwn: { side: 'SELL', units: [65], product: 'INTRADAY' }, target: { side: 'CE', strike: 25000 } });
+  expect(placed[1].close).toBeUndefined();
+  await expect.poll(() => held.led.rows.length).toBe(0);
+  expect(book.net.CE).toBe(260);                                          // the other page's lots are untouched
+  await page.waitForTimeout(8_000);
+  expect(placed.length).toBe(2);                                          // never re-sent
+});
+
+test('two index charts holding the SAME option have independent MTM guards: one chart\'s trades and trip never touch the other', async ({ page }) => {
+  const { placed, premium, blocked } = await installMock(page);
+  const bar = await openIndex(page);
+  const activate = (n: 1 | 2) => page.getByRole('group', { name: 'Active chart' }).getByRole('button', { name: new RegExp(`^Chart ${n}`) }).click();
+  const card = page.getByTestId('pnf-guard-card');
+  const toggle = page.getByTestId('pnf-guard-toggle');
+  // chart 1 buys the 25000 CE at 120
+  await bar.getByTestId('pnf-trade-buy').click();
+  await expect(bar.getByTestId('index-held')).toContainText('BULL · BUY NIFTY 25000 CE');
+  // chart 2 (also NIFTY) buys the SAME CE at 140: the option's paper book now mixes both charts' lots
+  await activate(2);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Index' }).click();
+  await expect(bar.getByTestId('index-held')).toHaveCount(0);           // chart 2 holds nothing of chart 1's
+  premium.CE = 140;
+  await page.waitForTimeout(1_500);
+  await bar.getByTestId('pnf-trade-buy').click();
+  await expect(bar.getByTestId('index-held')).toContainText('BULL · BUY NIFTY 25000 CE');
+  await guardOn(page, { stop: '5000' });                                  // chart 2's guard, measured from here (premium 140)
+  await toggle.click();
+  await activate(1);
+  await guardOn(page, { stop: '1000' });                                  // chart 1's guard, measured from here (premium 140)
+  await toggle.click();
+  // chart 2 ADDS a lot at 150 (a shared book's average and lots would move; chart 1's own lot must not see it)
+  premium.CE = 150;
+  await activate(2);
+  await page.waitForTimeout(1_500);
+  await bar.getByTestId('pnf-trade-buy').click();
+  await expect(bar.getByTestId('index-held')).toContainText('2L');
+  await activate(1);
+  await toggle.click();
+  await expect(card).toContainText('650');                                // chart 1: (150 - 140) x 65 on ITS one lot
+  await toggle.click();
+  // 124: chart 1 -1040 (past its 1000 stop); chart 2 (124-140)x65 + (124-150)x65 = -2730 (inside its 5000 stop): only chart 1 exits
+  premium.CE = 124;
+  await expect(bar.getByTestId('index-held')).toHaveCount(0, { timeout: 10_000 });
+  await activate(2);
+  await page.waitForTimeout(3_000);
+  await expect(bar.getByTestId('index-held')).toContainText('2L');        // chart 1's trip never closed chart 2's lots
+  await toggle.click();
+  await expect(card).toContainText('2,730');                              // chart 2's own MTM, its two lots only
+  await expect(card.getByRole('button', { name: 'Switch off' })).toBeVisible();   // and its guard is still ON
+  expect(placed.length).toBe(3);                                          // three paper orders sent for checks; paper closes send nothing
+  expect(blocked).toEqual([]);
 });

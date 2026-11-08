@@ -275,11 +275,9 @@ async function tick(): Promise<void> {
         }
         if (stuckAdd) await warn(scope, row, `chart ${row.chart}'s added lot has an unclear outcome - resolve it on the page; the guard and end-of-day exit still cover the position`);
         if (row.state !== 'open' && !stuckAdd) continue;
-        // An index chart's option row is not guarded by the chart's MTM levels (the page offers none on an index chart, and a guard synced
-        // for another contract would size its box levels off the wrong one): it keeps its stop and its end-of-day exit only.
-        const cfgRaw = guards(file.cfg[keyOf(scope, row.chart)], row) ? file.cfg[keyOf(scope, row.chart)] : undefined;
-        if (cfgRaw && row.traded) await warn(scope, row, `chart ${row.chart} is an index chart trading ${row.traded.target.strike} ${row.traded.target.side}: its MTM guard is not applied (stop and end of day only)`);
-        const cfg = row.traded ? undefined : cfgRaw;
+        // An index chart's option row is guarded on the OPTION's P&L (premium vs entry premium) by the chart's rupee levels; box levels are
+        // never applied to it (a box of the chart is an index move - stepRow ignores them for such a row, and the page syncs none).
+        const cfg = guards(file.cfg[keyOf(scope, row.chart)], row) ? file.cfg[keyOf(scope, row.chart)] : undefined;
         // A row from an earlier day is not priced against today's market: it is reported, never exited on a stale entry price.
         // An NRML row whose end-of-day exit was missed is carried overnight with no broker square-off behind it: always said, guard or not.
         if (row.day !== today) {
@@ -344,10 +342,15 @@ async function tick(): Promise<void> {
         continue;
       }
       if (!cfg) continue;
+      // the guard's mark: the chart's price, or an index chart's option premium (its P&L is the option's)
+      const mark = row.traded ? premium : price;
+      if (mark === null) { await warn(scope, row, `no live premium for chart ${row.chart}'s option ${row.traded!.target.strike} ${row.traded!.target.side} - its MTM guard waits for one (its stop and end-of-day exit still hold)`); continue; }
       const cur = readServerGuards();
       const rtKey = runtimeKey(scope, row.chart, row.id);
-      const step = stepRow(row, cfg, price, cur.runtime[rtKey] ?? {});
-      if (step.boxesUnreadable) await warn(scope, row, `chart ${row.chart}'s box levels cannot be read (no box size synced) - only its rupee levels are enforced`);
+      const step = stepRow(row, cfg, mark, cur.runtime[rtKey] ?? {});
+      if (step.boxesUnreadable) await warn(scope, row, row.traded
+        ? `chart ${row.chart} is an index chart: its box levels are not applied to the option it trades - only its rupee levels are enforced`
+        : `chart ${row.chart}'s box levels cannot be read (no box size synced) - only its rupee levels are enforced`);
       const rt = cur.runtime[rtKey];
       if (!rt || rt.peak !== step.runtime.peak || rt.floor !== step.runtime.floor || rt.base !== step.runtime.base) {
         await update(f => ({ ...f, runtime: { ...f.runtime, [rtKey]: step.runtime } }));
@@ -355,7 +358,7 @@ async function tick(): Promise<void> {
       if (!step.reason) continue;
       // The guard may have been switched off while this tick was working: act on the config as it is NOW.
       if (!guards(readServerGuards().cfg[keyOf(scope, row.chart)], row)) continue;
-      await exitRow(scope, row, step.reason, price, stuckAdd);
+      await exitRow(scope, row, step.reason, price, stuckAdd, false, undefined, premium);
     }
   } catch (err) {
     console.error('[auto-server-guard] tick failed:', err);
