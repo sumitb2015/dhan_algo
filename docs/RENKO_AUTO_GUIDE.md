@@ -65,7 +65,7 @@ chart under the trend rule are a flip: the first is the exit of the old position
   NRML has no broker square-off behind it: the server retries a refused end-of-day exit every 10 s until the close (it never stands down
   then), and a position still open from an earlier day is never exited by AUTO. It raises a red alert on the page and in the AUTO log
   instead, so close it at the broker and resolve it.
-- **Session.** Only during the market session and before the end-of-day exit: there is **no separate NSE entry cutoff** (removed 2026-11-08) - entries run until the exit minute itself (**15:15** MIS, 15:35 NRML, 15:10 for a stock in the closing auction session), so a trade taken in the last minutes is squared off almost at once. On a Muhurat day the session is its announced window (14:20-15:30 on 2026-11-08, `muhurat_windows` in `nseHolidays.json`). MCX: **MCX 10 minutes before the market close** = 23:45 on a 23:55 close (23:20 on a 23:30 close), the same minute as the MCX square-off, so a trade taken in the last minute is squared off at once.
+- **Session.** Only during the market session and before the end-of-day exit: there is **no separate NSE entry cutoff** (removed 2026-11-08) - entries run until the exit minute itself (NSE MIS: the session end, **15:30** - **AUTO's 15:15 square-off was removed 2026-11-08**, so the broker's own MIS auto square-off is what flattens it; NRML 15:35; a stock in the closing auction session 15:15), so a trade taken in the last minutes is squared off almost at once. On a Muhurat day the session is its announced window (14:20-15:30 on 2026-11-08, `muhurat_windows` in `nseHolidays.json`). MCX: **MCX 10 minutes before the market close** = 23:45 on a 23:55 close (23:20 on a 23:30 close), the same minute as the MCX square-off, so a trade taken in the last minute is squared off at once.
   Holidays and weekends count as closed.
 - **Feed.** Needs a live price and a fresh feed. A stale feed pauses entries.
 - **Refusals.** Three refused entries in a row halt the chart.
@@ -108,7 +108,7 @@ Pick **Tick**, **10 sec**, **20 sec** or **30 sec** in the Interval list (Renko 
 
 In priority order:
 
-1. **End of day.** NSE 15:15 (MIS) or 15:35 (NRML); MCX 10 minutes before the close; a cash stock in the closing auction 5 minutes before the continuous session
+1. **End of day.** NSE 15:30 session end (MIS; no 15:15 square-off) or 15:35 (NRML); MCX 10 minutes before the close; a cash stock in the closing auction 5 minutes before the continuous session
    ends. The time is the **position's own market** (saved on the row), never the market of whichever chart is on screen.
 2. **Stop** (Two-back / One-back). If the market gaps through, the fill is booked at the gapped price.
 3. **Opposite brick** (N-brick and trend).
