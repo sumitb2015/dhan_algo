@@ -105,9 +105,7 @@ export function autoWindow(market: Market, t: number, product: AutoProduct = 'IN
   }
   if (market !== 'MCX') {
     // CAS stock: its session ends at 15:15 from CAS_START (15:30 before it, when the usual 15:15 exit still applies)
-    // No early square-off (the 15:15 exit was removed 2026-11-08): MIS is left to run to the session's end (15:30, or a CAS stock's 15:15). The BROKER's own
-    // MIS auto square-off, which comes first, is then what flattens it; AUTO's reconcile books that row as flat at the broker.
-    const eodExit = Math.min(close, 15 * 60 + 30);
+    const eodExit = market === 'NSE_CAS' && close <= NSE_EOD_EXIT_MIN ? close - CAS_EOD_EXIT_BEFORE_CLOSE : NSE_EOD_EXIT_MIN;
     return { open, entryCutoff: eodExit - ENTRY_CUTOFF_BEFORE_EOD, eodExit };
   }
   return { open, entryCutoff: close - MCX_ENTRY_CUTOFF_BEFORE_CLOSE, eodExit: close - MCX_EOD_EXIT_BEFORE_CLOSE };

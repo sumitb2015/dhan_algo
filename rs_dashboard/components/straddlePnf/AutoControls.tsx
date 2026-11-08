@@ -189,7 +189,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
       )}
       {product && onProduct && (
         <span role="group" aria-label={`AUTO product on chart ${chart}`} className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950"
-              title={`${locked ? 'Stop AUTO (and close its position) to change the product. ' : ''}AUTO no longer squares MIS off early on NSE (the broker's own MIS square-off applies), NRML at 15:35 (MCX: 10 minutes before its close for both).${eodText ? ` Now: ${eodText}.` : ''}`}>
+              title={`${locked ? 'Stop AUTO (and close its position) to change the product. ' : ''}MIS squares off at 15:15 on NSE, NRML at 15:35 (MCX: 10 minutes before its close for both).${eodText ? ` Now: ${eodText}.` : ''}`}>
           {(['INTRADAY', 'MARGIN'] as const).map((p, i) => (
             <button key={p} type="button" data-testid={`pnf-auto-prod-${p === 'MARGIN' ? 'nrml' : 'mis'}-${chart}`} aria-pressed={product === p} disabled={locked}
                     aria-label={`AUTO trades ${p === 'MARGIN' ? 'NRML' : 'MIS'} on chart ${chart}`}

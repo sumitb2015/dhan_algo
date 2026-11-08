@@ -37,13 +37,13 @@ test('never chases: a signal at or before the watermark, not on the last closed 
   assert.equal(decideAuto({ model: model(), position: null, watermarkT: 0, nowS: ist(10, 40), market: 'NSE' }).action, 'none');
 });
 
-test('no entry while a position is open, before the open, or after the entry cutoff (no separate cutoff: the 15:30 session end)', () => {
+test('no entry while a position is open, before the open, or after the entry cutoff (no separate cutoff: the 15:15 exit minute itself)', () => {
   const held = decideAuto({ model: model(), position: { side: 'BUY', entryBarT: ist(10, 30) }, watermarkT: 0, nowS: ist(10, 31), market: 'NSE' });
   assert.notEqual(held.action, 'enter');
-  const late = model({ lastBarT: ist(15, 30), signals: [sig('DOUBLE_BOTTOM_SELL', ist(15, 30))] });
-  assert.equal(decideAuto({ model: late, position: null, watermarkT: 0, nowS: ist(15, 31), market: 'NSE' }).action, 'none');
+  const late = model({ lastBarT: ist(15, 15), signals: [sig('DOUBLE_BOTTOM_SELL', ist(15, 15))] });
+  assert.equal(decideAuto({ model: late, position: null, watermarkT: 0, nowS: ist(15, 16), market: 'NSE' }).action, 'none');
   const at1510 = model({ lastBarT: ist(15, 10), signals: [sig('DOUBLE_BOTTOM_SELL', ist(15, 10))] });
-  assert.equal(decideAuto({ model: at1510, position: null, watermarkT: 0, nowS: ist(15, 11), market: 'NSE' }).action, 'enter', 'entries run until the session end');
+  assert.equal(decideAuto({ model: at1510, position: null, watermarkT: 0, nowS: ist(15, 11), market: 'NSE' }).action, 'enter', 'entries run until the exit minute');
   const justBefore = model({ lastBarT: ist(15, 3), signals: [sig('DOUBLE_BOTTOM_SELL', ist(15, 3))] });
   assert.equal(decideAuto({ model: justBefore, position: null, watermarkT: 0, nowS: ist(15, 4), market: 'NSE' }).action, 'enter', 'still allowed well before the exit');
   const early = model({ lastBarT: ist(9, 10), signals: [sig('DOUBLE_BOTTOM_SELL', ist(9, 10))] });
@@ -63,9 +63,9 @@ test('a short exits on the first X column after its entry bar; a long on the fir
   assert.equal(reversalColumn(model(), long), 3, 'the O column started at 10:30 reverses a long from 10:22');
 });
 
-test('end of day: flat at the 15:30 session end on NSE (no 15:15 square-off since 2026-11-08) (even with no reversal), and the MCX window follows that day\'s close', () => {
+test('end of day: flat at 15:15 on NSE (even with no reversal), and the MCX window follows that day\'s close', () => {
   const short = { side: 'SELL' as const, entryBarT: ist(10, 30) };
-  assert.deepEqual(decideAuto({ model: model(), position: short, watermarkT: 0, nowS: ist(15, 30), market: 'NSE' }), { action: 'exit', reason: 'eod' });
+  assert.deepEqual(decideAuto({ model: model(), position: short, watermarkT: 0, nowS: ist(15, 15), market: 'NSE' }), { action: 'exit', reason: 'eod' });
   const mcx = autoWindow('MCX', ist(12, 0));
   assert.ok(mcx && mcx.eodExit >= mcx.entryCutoff && mcx.entryCutoff > mcx.open);
 });
@@ -102,11 +102,11 @@ test('the entry and the reversal exit carry their confirmed box price', () => {
   assert.equal(e.action === 'exit' && e.boxPrice, 99);
 });
 
-test('a CAS stock (NSE_CAS) runs to 15:15 (its continuous session) from 3 Aug 2026; 15:30 before that date', () => {
+test('a CAS stock (NSE_CAS) squares off at 15:10 from 3 Aug 2026, before continuous trading stops at 15:15; 15:15 before that date', () => {
   const at = (iso: string) => Date.parse(`${iso}+05:30`) / 1000;
-  assert.deepEqual(autoWindow('NSE_CAS', at('2026-10-30T10:00:00')), { open: 9 * 60 + 15, entryCutoff: 15 * 60 + 15, eodExit: 15 * 60 + 15 });
-  assert.deepEqual(autoWindow('NSE_CAS', at('2026-07-31T10:00:00')), { open: 9 * 60 + 15, entryCutoff: 15 * 60 + 30, eodExit: 15 * 60 + 30 });
-  assert.equal(autoWindow('NSE', at('2026-10-30T10:00:00'))!.eodExit, 15 * 60 + 30);   // a stock without derivatives: unchanged
+  assert.deepEqual(autoWindow('NSE_CAS', at('2026-10-30T10:00:00')), { open: 9 * 60 + 15, entryCutoff: 15 * 60 + 10, eodExit: 15 * 60 + 10 });
+  assert.deepEqual(autoWindow('NSE_CAS', at('2026-07-31T10:00:00')), { open: 9 * 60 + 15, entryCutoff: 15 * 60 + 15, eodExit: 15 * 60 + 15 });
+  assert.equal(autoWindow('NSE', at('2026-10-30T10:00:00'))!.eodExit, 15 * 60 + 15);   // a stock without derivatives: unchanged
   // MCX on a 23:55 close (from 2 Nov 2026): exit 23:45, entries stop 10 minutes before the CLOSE (23:45); a 23:30 close: 23:20 / 23:20
   assert.deepEqual(autoWindow('MCX', at('2026-11-03T12:00:00')), { open: 9 * 60, entryCutoff: 23 * 60 + 45, eodExit: 23 * 60 + 45 });
   assert.deepEqual(autoWindow('MCX', at('2026-10-30T12:00:00')), { open: 9 * 60, entryCutoff: 23 * 60 + 20, eodExit: 23 * 60 + 20 });
@@ -123,7 +123,7 @@ test('a two-back position exits on its stop only: not on an opposite brick, and 
   assert.equal(noPx.action, 'none', 'no price, no stop decision');
   const short = { side: 'SELL' as const, entryBarT: ist(10, 0), stop: 110 };
   assert.equal(decideAuto({ model: m, position: short, watermarkT: 0, nowS: ist(10, 40), market: 'NSE', price: 111 }).action, 'exit');
-  assert.equal(decideAuto({ model: m, position: short, watermarkT: 0, nowS: ist(15, 31), market: 'NSE', price: 100 }).action, 'exit');
+  assert.equal(decideAuto({ model: m, position: short, watermarkT: 0, nowS: ist(15, 16), market: 'NSE', price: 100 }).action, 'exit');
 });
 
 test('a stop gapped through books the price, not the stop (long and short)', () => {
@@ -220,8 +220,8 @@ test('pyramid: one add per bar however many bricks it printed; never on an older
   assert.equal(decideAdd({ model: old, row: shortRow(), nowS: ist(10, 8), market: 'NSE', maxLots: 10 }).add, false);
   assert.equal(decideAdd({ model: renkoModel([[ist(10, 5), 'O', 99]], ist(10, 5)), row: shortRow({ lots: 3 }), nowS: ist(10, 6), market: 'NSE', maxLots: 3 }).add, false);
   assert.equal(decideAdd({ model: renkoModel([[ist(10, 5), 'O', 99]], ist(10, 5)), row: shortRow(), nowS: ist(10, 15), market: 'NSE', maxLots: 10 }).add, false, 'stale');
-  const late = renkoModel([[ist(15, 30), 'O', 99]], ist(15, 30));
-  assert.equal(decideAdd({ model: late, row: shortRow(), nowS: ist(15, 31), market: 'NSE', maxLots: 10 }).add, false, 'at the 15:30 session end');
+  const late = renkoModel([[ist(15, 15), 'O', 99]], ist(15, 15));
+  assert.equal(decideAdd({ model: late, row: shortRow(), nowS: ist(15, 16), market: 'NSE', maxLots: 10 }).add, false, 'at the 15:15 exit minute');
   // a P&F chart never adds
   assert.equal(decideAdd({ model: { ...renkoModel([[ist(10, 5), 'O', 99]], ist(10, 5)), chart: 'pnf' }, row: shortRow(), nowS: ist(10, 6), market: 'NSE', maxLots: 10 }).add, false);
 });
@@ -279,7 +279,7 @@ test('pyramid trailing SL: none before an add; after one, a closed brick N boxes
   const early: [number, 'X' | 'O', number][] = [[ist(10, 1), 'O', 98], [ist(10, 1), 'X', 100], [ist(10, 2), 'O', 97]];
   assert.equal(dec(early, { trailBoxes: 2, adds: [{ barT: ist(10, 2) }] }).action, 'none');
   // EOD still comes first; a P&F model never trails
-  assert.deepEqual(decideAuto({ model: renkoModel(two, ist(10, 5)), position: pos(added), watermarkT: 0, nowS: ist(15, 31), market: 'NSE' }), { action: 'exit', reason: 'eod' });
+  assert.deepEqual(decideAuto({ model: renkoModel(two, ist(10, 5)), position: pos(added), watermarkT: 0, nowS: ist(15, 16), market: 'NSE' }), { action: 'exit', reason: 'eod' });
   assert.equal(decideAuto({ model: { ...renkoModel(two, ist(10, 5)), chart: 'pnf' }, position: pos(added), watermarkT: 0, nowS: ist(10, 9), market: 'NSE' }).action, 'none');
   // a long: entry 101, best 104 after an add, a brick closing at 102 is 2 back
   const up: [number, 'X' | 'O', number][] = [[ist(10, 1), 'X', 102], [ist(10, 2), 'X', 103], [ist(10, 3), 'X', 104], [ist(10, 4), 'O', 102]];
@@ -330,30 +330,30 @@ test('re-entry wait (review fixes): an opposite signal since the exit ends it; t
   assert.equal(trailBest(renkoModel(bricks, ist(10, 4)), { side: 'BUY', entryBarT: ist(10, 0) }), null);
 });
 
-test('NRML (MARGIN) squares off NSE at 15:35 (entries run to the exit), pulled inside an earlier close; MIS runs to the 15:30 session end; MCX is the same for both', () => {
+test('NRML (MARGIN) squares off NSE at 15:35 (entries run to the exit), pulled inside an earlier close; MIS keeps 15:15; MCX is the same for both', () => {
   const at = (iso: string) => Date.parse(`${iso}+05:30`) / 1000;
   const t = at('2026-10-30T10:00:00');
   assert.deepEqual(autoWindow('NSE_FNO', t, 'MARGIN'), { open: 9 * 60 + 15, entryCutoff: 15 * 60 + 35, eodExit: 15 * 60 + 35 });
-  assert.deepEqual(autoWindow('NSE_FNO', t, 'INTRADAY'), { open: 9 * 60 + 15, entryCutoff: 15 * 60 + 30, eodExit: 15 * 60 + 30 });
+  assert.deepEqual(autoWindow('NSE_FNO', t, 'INTRADAY'), { open: 9 * 60 + 15, entryCutoff: 15 * 60 + 15, eodExit: 15 * 60 + 15 });
   assert.deepEqual(autoWindow('NSE_FNO', t), autoWindow('NSE_FNO', t, 'INTRADAY'), 'MIS is the default');
   assert.equal(autoWindow('NSE', t, 'MARGIN')!.eodExit, 15 * 60 + 25, 'a 15:30 close: 5 minutes before it, never after the bell');
   assert.equal(autoWindow('NSE_CAS', t, 'MARGIN')!.eodExit, 15 * 60 + 10, 'a CAS stock: inside its 15:15 continuous session');
   assert.deepEqual(autoWindow('MCX', at('2026-11-03T12:00:00'), 'MARGIN'), autoWindow('MCX', at('2026-11-03T12:00:00'), 'INTRADAY'));
 });
 
-test('decideAuto: an NRML position holds through 15:15 and exits at 15:35; an MIS one exits at 15:30; NRML entries run to 15:35', () => {
+test('decideAuto: an NRML position holds through 15:15 and exits at 15:35; an MIS one exits at 15:15; NRML entries run to 15:35', () => {
   const at = (hh: number, mm: number) => Date.parse(`2026-10-30T${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00+05:30`) / 1000;
   const pos = { side: 'SELL' as const, entryBarT: at(14, 0) };
-  const m = model({ lastBarT: at(15, 29) });
-  assert.equal(decideAuto({ model: m, position: pos, watermarkT: 0, nowS: at(15, 30), market: 'NSE_FNO' }).action, 'exit');
-  assert.equal(decideAuto({ model: m, position: pos, watermarkT: 0, nowS: at(15, 30), market: 'NSE_FNO', product: 'MARGIN' }).action, 'none');
+  const m = model({ lastBarT: at(15, 14) });
+  assert.equal(decideAuto({ model: m, position: pos, watermarkT: 0, nowS: at(15, 15), market: 'NSE_FNO' }).action, 'exit');
+  assert.equal(decideAuto({ model: m, position: pos, watermarkT: 0, nowS: at(15, 15), market: 'NSE_FNO', product: 'MARGIN' }).action, 'none');
   assert.equal(decideAuto({ model: m, position: pos, watermarkT: 0, nowS: at(15, 34), market: 'NSE_FNO', product: 'MARGIN' }).action, 'none');
   const e = decideAuto({ model: m, position: pos, watermarkT: 0, nowS: at(15, 35), market: 'NSE_FNO', product: 'MARGIN' });
   assert.equal(e.action === 'exit' && e.reason, 'eod');
-  const s = sig('DOUBLE_TOP_BUY' as PnfSignal['kind'], at(15, 30));
-  const sm = model({ signals: [s], lastBarT: at(15, 30) });
-  assert.equal(decideAuto({ model: sm, position: null, watermarkT: 0, nowS: at(15, 30) + 5, market: 'NSE_FNO' }).action, 'none', 'MIS: past the 15:30 session end');
-  assert.equal(decideAuto({ model: sm, position: null, watermarkT: 0, nowS: at(15, 30) + 5, market: 'NSE_FNO', product: 'MARGIN' }).action, 'enter');
+  const s = sig('DOUBLE_TOP_BUY' as PnfSignal['kind'], at(15, 20));
+  const sm = model({ signals: [s], lastBarT: at(15, 20) });
+  assert.equal(decideAuto({ model: sm, position: null, watermarkT: 0, nowS: at(15, 20) + 5, market: 'NSE_FNO' }).action, 'none', 'MIS: past the 15:15 exit');
+  assert.equal(decideAuto({ model: sm, position: null, watermarkT: 0, nowS: at(15, 20) + 5, market: 'NSE_FNO', product: 'MARGIN' }).action, 'enter');
   const late = model({ signals: [sig('DOUBLE_TOP_BUY' as PnfSignal['kind'], at(15, 35))], lastBarT: at(15, 35) });
   assert.equal(decideAuto({ model: late, position: null, watermarkT: 0, nowS: at(15, 35) + 5, market: 'NSE_FNO', product: 'MARGIN' }).action, 'none', 'NRML: past 15:35');
 });
