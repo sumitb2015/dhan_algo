@@ -83,7 +83,11 @@ export default function IndexMapControls({ symbol, map, onChange, spot, held, on
         </div>
         <select aria-label={`${name} strike`} disabled={disabled} value={leg.offset} onChange={e => setLeg(d, { offset: Number(e.target.value) })}
                 className={`h-6 rounded border border-zinc-800 bg-zinc-950 px-1 text-[11px] font-semibold text-zinc-200 ${FOCUS}`}>
-          {OFFSETS.map(n => <option key={n} value={n}>{offsetText(n)}</option>)}
+          {/* each offset with the strike it picks at the current index price (the order re-picks it at the click) */}
+          {OFFSETS.map(n => {
+            const k = pickStrike(strikes, spot, leg.opt, n);
+            return <option key={n} value={n} disabled={k === null && strikes.length > 0 && spot !== null && spot > 0}>{offsetText(n)}{k !== null ? ` · ${k}` : ''}</option>;
+          })}
         </select>
         <span className="text-[11px] font-mono text-zinc-400 tabular-nums" data-testid={`index-map-${d}-preview`}
               title={`${name} = ${legText(leg)} of ${symbol}; the strike is picked by the server at the click`}>

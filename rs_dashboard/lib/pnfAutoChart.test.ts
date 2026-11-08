@@ -26,7 +26,7 @@ function model(extra: Partial<PanelModel> = {}): PanelModel {
 }
 
 /** An in-memory ledger behind the real ops, a scripted order route and a hand-moved clock. */
-function rig(replies: (OrderReply | null)[] = []) {
+function rig(replies: (OrderReply | null)[] = [], extra: Partial<ChartDeps> = {}) {
   let ledger: AutoLedger = EMPTY_LEDGER;
   let nowMs = (ist(10, 31) + 5) * 1000;
   const ops: AutoOp[] = [], orders: Record<string, unknown>[] = [], events: string[] = [], disarms: string[] = [];
@@ -44,6 +44,7 @@ function rig(replies: (OrderReply | null)[] = []) {
     disarm: why => disarms.push(why),
     nowMs: () => nowMs,
     sleep: async () => {},
+    ...extra,
   };
   const engine = new ChartEngine(1, deps);
   const inputs = (over: Partial<ChartInputs> = {}): ChartInputs => ({
@@ -150,4 +151,87 @@ test('the same arming with a newer watermark (a refused entry rebuilt after a re
     r.advance(60);
   }
   assert.match(r.engine.halt ?? '', /refused/);
+});
+
+// ── Renko INDEX chart -> option (lib/pnfIndexMap.ts) ───────────────────────────────────────────────────────────────────────
+const INDEX: Target = { kind: 'index', symbol: 'NIFTY', name: 'Nifty 50' };
+const CE: Target = { kind: 'options', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-03', strike: 25000, side: 'CE' };
+const MAP = { bull: { action: 'BUY' as const, opt: 'PE' as const, offset: 0 }, bear: { action: 'SELL' as const, opt: 'CE' as const, offset: 0 }, expiry: 'NEAREST' };
+/** A resolver for the bear leg (SELL CE 25000) and a premium source the test moves. */
+function indexRig(replies: (OrderReply | null)[], opts: { premium?: number | null; prem?: { v: number | null } } = {}) {
+  const dirs: string[] = [];
+  const prem = opts.prem ?? { v: 90 };
+  const r = rig(replies, {
+    resolveIndex: async (_b, _i, map, dir) => {
+      dirs.push(dir);
+      const leg = map[dir];
+      return { traded: { ...CE, side: leg.opt }, action: leg.action, ids: 'NSE_FNO:40001', premium: opts.premium === undefined ? 120 : opts.premium, unsupported: null,
+        legs: [{ label: 'NIFTY 25000 CE', lot: 65, unitsPerLot: 65, key: '40001', lotUnits: 65 }] };
+    },
+    premium: async () => prem.v,
+  });
+  const inputs = (over: Partial<ChartInputs> = {}) => r.inputs({ target: INDEX, info: null, indexMap: MAP, market: 'NSE', ...over });
+  return { ...r, inputs, dirs, prem };
+}
+const placedOpt = (side: 'BUY' | 'SELL', orderId = 'O1'): OrderReply => ({ success: true, outcome: 'placed', legs: [{ label: 'NIFTY 25000 CE', side, qty: 65, product: 'INTRADAY', status: 'placed', orderId }] });
+const reversal = () => model({ columns: [...model().columns, col('X', 103)], columnTimes: [...model().columnTimes, { start: ist(10, 40), end: ist(10, 41) }], lastBarT: ist(10, 41) });
+
+test('index chart, REAL: a bearish signal trades the map\'s bear leg (SELL CE) - the row keeps the index as its chart and carries the option', async () => {
+  const r = indexRig([placedOpt('SELL')]);
+  await r.engine.tick(r.inputs());
+  assert.deepEqual(r.dirs, ['bear']);
+  assert.equal(r.orders.length, 1);
+  assert.deepEqual([r.orders[0].action, (r.orders[0].target as Target).kind, (r.orders[0].target as Target).side], ['SELL', 'options', 'CE']);
+  const row = r.ledger().rows[0];
+  assert.equal(row.state, 'open');
+  assert.equal(row.target.kind, 'index', 'the chart: every brick rule reads the index');
+  assert.equal(row.side, 'SELL');
+  assert.deepEqual([row.traded?.action, row.traded?.targetKey, row.traded?.entryPremium], ['SELL', 'options|NIFTY|2026-11-03|25000|CE', 120]);
+  assert.equal(row.legs[0].units, 65);
+  assert.equal(row.pyramidMax, undefined, 'no adds on an option row');
+});
+
+test('index chart, REAL: the reversal exits the OPTION on its own closing side (BUY back the CE), sized by its own units', async () => {
+  const r = indexRig([placedOpt('SELL'), placedOpt('BUY', 'X1')]);
+  await r.engine.tick(r.inputs());
+  r.advance(600);
+  await r.engine.tick(r.inputs({ ledger: r.ledger(), model: reversal() }));
+  const exit = r.orders[1] as { target: Target; exitOwn: { side: string; units: number[] } };
+  assert.deepEqual([exit.target.kind, exit.target.side, exit.exitOwn.side, exit.exitOwn.units], ['options', 'CE', 'BUY', [65]]);
+  const row = r.ledger().rows[0];
+  assert.equal(row.state, 'closed');
+  assert.equal(row.traded?.exitPremium, 90);
+  assert.equal(row.pnl, (120 - 90) * 65, 'P&L on the premiums, on the option\'s own side');
+});
+
+test('index chart, PAPER: booked at the option premiums; a reversal with no option price waits (never booked at the index)', async () => {
+  const prem = { v: null as number | null };
+  const r = indexRig([{ success: true, outcome: 'placed', legs: [] }], { prem });
+  const paper = { arm: { on: true, mode: 'PAPER' as const, watermarkT: ist(10, 25), armT: ist(10, 0) } };
+  await r.engine.tick(r.inputs(paper));
+  assert.equal(r.ledger().rows[0].traded?.entryPremium, 120);
+  r.advance(600);
+  await r.engine.tick(r.inputs({ ...paper, ledger: r.ledger(), model: reversal() }));
+  assert.equal(r.ledger().rows[0].state, 'open', 'no option price: not closed');
+  assert.match(r.engine.note, /waiting for the option/);
+  prem.v = 140;
+  await r.engine.tick(r.inputs({ ...paper, ledger: r.ledger(), model: reversal() }));
+  const row = r.ledger().rows[0];
+  assert.equal(row.state, 'closed');
+  assert.equal(row.pnl, (120 - 140) * 65, 'a short CE that rose 20 loses 20 x 65');
+});
+
+test('index chart: no option price at the signal = nothing sent, retried while the signal is fresh', async () => {
+  const r = indexRig([placedOpt('SELL')], { premium: null });
+  await r.engine.tick(r.inputs());
+  assert.equal(r.orders.length, 0);
+  assert.equal(r.ledger().rows.length, 0);
+  assert.match(r.engine.note, /no price/);
+});
+
+test('index chart: an arming without a map never enters', async () => {
+  const r = indexRig([placedOpt('SELL')]);
+  await r.engine.tick(r.inputs({ indexMap: undefined }));
+  assert.equal(r.orders.length, 0);
+  assert.match(r.engine.note, /through its map/);
 });

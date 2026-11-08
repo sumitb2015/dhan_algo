@@ -57,7 +57,7 @@ import { detectTriangles, type PnfTriangle } from '@/lib/pnfTriangle';
 import { isSellSignal } from '@/lib/straddlePnf';
 import type { PnfScope } from '@/lib/pnfScope';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent, type AutoPyramid } from './straddlePnf/usePnfAuto';
-import { autoDaySummary, autoMarkers, holdsPosition, PYRAMID_HARD_MAX, rowPnl } from '@/lib/pnfAutoLedger';
+import { autoDaySummary, autoMarkers, holdsPosition, isLive, PYRAMID_HARD_MAX, rowPnl } from '@/lib/pnfAutoLedger';
 import AutoControls, { type AutoRule } from './straddlePnf/AutoControls';
 import { AUTO_PRODUCT_LABEL, autoProductOf, autoWindow, pyramidEveryOf, rowMarket, TRAIL_BOXES_MAX, TRAIL_BOXES_MIN, type AutoProduct } from '@/lib/pnfAuto';
 import { guardLevelsText, syncGuardFromServer, type ServerGuardView } from '@/lib/pnfServerGuardView';
@@ -1000,7 +1000,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   }, [autoLedger, autoArm, prefsReady, target1, target2, row1, row2]);
   /* eslint-enable react-hooks/set-state-in-effect */
   // An open AUTO row is marked at the price of a chart showing its contract (null when neither chart does).
-  const autoPrice = (k: string) => (k === targetKey(target1) ? priceOf(feed1) : dual && k === targetKey(target2) ? priceOf(feed2) : null);
+  // An index chart's AUTO row holds an OPTION: its premium is read here (the chart only has the index), for the row's P&L everywhere.
+  const autoTraded1 = autoLedger.rows.find(r => r.chart === 1 && isLive(r) && r.traded)?.traded ?? null;
+  const autoTraded2 = autoLedger.rows.find(r => r.chart === 2 && isLive(r) && r.traded)?.traded ?? null;
+  const autoOpt1 = useTradedLive(autoTraded1?.ids ?? null), autoOpt2 = useTradedLive(autoTraded2?.ids ?? null);
+  const autoPrice = (k: string) => (k === targetKey(target1) ? priceOf(feed1) : dual && k === targetKey(target2) ? priceOf(feed2)
+    : autoTraded1 && k === autoTraded1.targetKey ? autoOpt1.ltp : autoTraded2 && k === autoTraded2.targetKey ? autoOpt2.ltp : null);
   // An AUTO position still open from an earlier day (a missed end-of-day exit, e.g. an NRML row carried overnight): AUTO never exits an earlier
   // day's row, so it is said loudly, once per row per page load, and stays on screen until dismissed.
   const staleWarnedRef = useRef<Set<string>>(new Set());
@@ -1062,20 +1067,25 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     setAutoArm(a => ({ ...a, [c]: { on: true, mode: tradeMode, watermarkT, armedAtS: t, product } }));       // armed at once; `armT` once the ledger has saved it
     // The chart the SERVER builds and trades (lib/pnfAutoLedger.ts ArmRun): this chart's contract and settings (locked while armed) and the
     // times its box is measured from, so the server's bricks are the ones on screen.
+    // A Renko INDEX chart trades the CE / PE of its map: the map is frozen with the arming (the server picks the strike at each entry).
+    const indexArm = renko && tgt.kind === 'index';
+    if (indexArm && autoPyr[c].on) toast.info(`Chart ${c} is an index chart: AUTO trades its option map without pyramid adds`, { duration: 8_000 });
     const run = {
       target: tgt, settings: c === 2 ? settings2 : settings, volume: !cm.indexNoVwap,
       ...(feed.loaded?.anchorT ? { anchorT: feed.loaded.anchorT } : {}), ...(cm.boxBaseT ? { boxBaseT: cm.boxBaseT } : {}),
+      ...(indexArm ? { indexMap: indexMap[c] } : {}),
     };
     const rec = {
       run,
       mode: tradeMode, broker, targetKey: targetKey(tgt), day: istToday(), t, watermarkT, lots: autoLots[c],
       side: autoSide[c], ...(renko ? { rule: autoRule[c] } : {}),
-      ...(renko && autoPyr[c].on && autoPyr[c].max > autoLots[c] ? { pyramid: { max: autoPyr[c].max, ...(autoPyr[c].every > 1 ? { every: autoPyr[c].every } : {}), trail: autoPyr[c].trailOn ? autoPyr[c].trail : 0 } } : {}),
+      ...(renko && !indexArm && autoPyr[c].on && autoPyr[c].max > autoLots[c] ? { pyramid: { max: autoPyr[c].max, ...(autoPyr[c].every > 1 ? { every: autoPyr[c].every } : {}), trail: autoPyr[c].trailOn ? autoPyr[c].trail : 0 } } : {}),
       ...(product === 'MARGIN' ? { product: 'MARGIN' as const } : {}),
     };
     const pyrText = (rec.pyramid ? `, +1L/${rec.pyramid.every ? `${rec.pyramid.every} bricks` : 'brick'} to ${rec.pyramid.max}L${rec.pyramid.trail ? `, trail ${rec.pyramid.trail} bx` : ''}` : '') + (product === 'MARGIN' ? ', NRML' : '');
     if (renko && autoPyr[c].on && !rec.pyramid) toast.warning(`Chart ${c}: adds are on but Max (${autoPyr[c].max}) is not above the base lots (${autoLots[c]}) - no lots will be added`, { duration: 10_000 });
-    void autoPost({ op: 'setArm', chart: c, arm: rec, t, text: `AUTO armed (${tradeMode}, ${autoLots[c]} lot${autoSide[c] !== 'both' ? `, ${SIDE_LABEL[autoSide[c]]}` : ''}${pyrText})` }).then(r => {
+    const mapText = indexArm ? `, bull ${legText(indexMap[c].bull)} / bear ${legText(indexMap[c].bear)}` : '';
+    void autoPost({ op: 'setArm', chart: c, arm: rec, t, text: `AUTO armed (${tradeMode}, ${autoLots[c]} lot${autoSide[c] !== 'both' ? `, ${SIDE_LABEL[autoSide[c]]}` : ''}${pyrText}${mapText})` }).then(r => {
       if (r.ok) {
         noteArmSaved(c, r.ledger?.rev);
         setAutoArm(a => (a[c].on && a[c].watermarkT === watermarkT && a[c].armT === undefined ? { ...a, [c]: { ...a[c], armT: t } } : a));
@@ -1087,7 +1097,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     });
     // autoOf reads auto1 / auto2 of this render (their `quiet` flag only)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoSide, autoLots, autoRule, autoPyr, autoProd, tradeMode, guards, disarm, c1, c2, feed1, feed2, settings, settings2, noteArmSaved, broker, target1, target2, renko, autoPost, tick1, tick2, tickName1, tickName2]);
+  }, [autoSide, autoLots, autoRule, autoPyr, autoProd, tradeMode, guards, disarm, c1, c2, feed1, feed2, settings, settings2, noteArmSaved, broker, target1, target2, renko, autoPost, tick1, tick2, tickName1, tickName2, indexMap]);
   const setLotsFor = (c: ChartId, n: number) => { setAutoLots(l => ({ ...l, [c]: n })); saveP(`${AUTO_LOTS_KEY}${c}`, String(n)); };
   // The page mode is the mode new AUTO armings trade in: switching it disarms the charts armed in the OTHER mode (arming REAL is always an
   // explicit step). A REAL arming the server runs is left alone when the page (which always loads in PAPER) is switched to REAL.
@@ -1305,17 +1315,18 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       ) : (
         <AutoControls chart={c} armed={autoArm[c].on} mode={tradeMode} lots={autoLots[c]} onLots={n => setLotsFor(c, n)}
                       // eslint-disable-next-line react-hooks/refs -- armChart's refs are touched only when the button is clicked, never during render
-                      onArm={on => armChart(c, on)} row={autoOf(c).row} price={priceOf(feed)} note={autoNote(c)} trailSl={autoOf(c).trailSl} halt={autoOf(c).halt}
+                      onArm={on => armChart(c, on)} row={autoOf(c).row}
+                      price={autoOf(c).row?.traded ? autoPrice(autoOf(c).row!.traded!.targetKey) : priceOf(feed)} note={autoNote(c)} trailSl={autoOf(c).trailSl} halt={autoOf(c).halt}
                       onResolve={autoOf(c).resolve} onExit={() => { void autoOf(c).exitNow(); }} nowMs={now} resumeNote={resumeNote[c]}
                       autoSide={autoSide[c]} onAutoSide={sd => { setAutoSide(a => ({ ...a, [c]: sd })); saveP(`${AUTO_SIDE_KEY}${c}`, sd); }}
-                      pyramid={renko ? autoPyr[c] : undefined}
+                      pyramid={renko && target.kind !== 'index' ? autoPyr[c] : undefined}
                       product={target.kind === 'equity' ? undefined : autoProd[c]}
                       onProduct={target.kind === 'equity' ? undefined : p => { setAutoProd(a => ({ ...a, [c]: p })); saveP(`${AUTO_PROD_KEY}${c}`, p); }}
                       eodText={eodText(c)}
                       onPyramid={renko ? p => { setAutoPyr(a => ({ ...a, [c]: p })); saveP(`${AUTO_PYR_KEY}${c}`, JSON.stringify(p)); } : undefined}
                       autoRule={renko ? autoRule[c] : undefined} onAutoRule={renko ? r => { setAutoRule(a => ({ ...a, [c]: r })); saveP(`${AUTO_RULE_KEY}${c}`, r); } : undefined}
                       rule={renko ? ruleText(autoRule[c], (c === 2 ? settings2 : settings).reversal) : undefined}
-                      disabledReason={target.kind === 'index' ? 'No AUTO on an index: chart its future or an option'
+                      disabledReason={target.kind === 'index' && !renko ? 'No AUTO on an index: chart its future or an option'
                         : replay.active ? 'Bar replay is open: close it to arm live AUTO'
                         : null} />
       ),

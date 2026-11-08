@@ -11,6 +11,7 @@ import { brokerPositionRows, brokerSessionOk } from '@/lib/priceLadderServer';
 import { CloseGuard } from '@/lib/priceLadderClose';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { targetKey } from '@/lib/pnfTarget';
+import { indexSpotId } from '@/lib/pnfContracts';
 import { chartPrice, guards, ownHeldQty, runtimeKey, stepRow, stopHit, type RowRuntime, type ServerGuardCfg } from '@/lib/autoServerGuard';
 import { autoProductOf, autoWindow, rowMarket } from '@/lib/pnfAuto';
 import { istMinuteOfDay, sessionWindow } from '@/lib/straddlePnfLive';
@@ -100,7 +101,7 @@ async function mustApply(scope: PnfScope, rowId: string, op: AutoOp): Promise<vo
  * pyramid add (adding / unknownAdd, see tick): the exit covers the confirmed units plus the pending add's, capped by what the broker shows,
  * and the close records whether the added lot was there.
  */
-async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: number, withPendingAdd = false, eod = false, rowReason?: string): Promise<void> {
+async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: number, withPendingAdd = false, eod = false, rowReason?: string, premium?: number | null): Promise<void> {
   let row = snap;
   const t = () => Date.now() / 1000;
   const log = (text: string) => applyAutoLedgerOp(scope, { op: 'log', chart: row.chart, t: t(), text });
@@ -128,21 +129,23 @@ async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: nu
   const broker = row.broker as PnfBroker;
   const busy = (g.__pnfOrderBusy ??= new Set());
   const closeGuard = (g.__pnfOrderGuard ??= new CloseGuard());
-  const gkey = `${broker}|${targetKey(row.target)}`;
+  // An index chart's row exits its OPTION (the contract it holds), on the option's own closing side; `price` is the index's (its chart).
+  const contract = row.traded ? row.traded.target : row.target;
+  const gkey = `${broker}|${targetKey(contract)}`;
   if (busy.has(gkey)) return void await abort('an order for this chart is already being sent');
   if (!closeGuard.tryStart(gkey, Date.now())) return void await abort('a close for this chart was just sent');
   busy.add(gkey);
   let sent = false;
   try {
     if (!brokerSessionOk(broker)) return void await abort(`${broker} session is not logged in`);
-    const legs = resolvePnfLegs(row.target);
+    const legs = resolvePnfLegs(contract);
     if (typeof legs === 'string') return void await abort(legs);
-    const onBroker = await brokerLegs(broker, row.target, legs).catch((e: Error) => `Contract lookup failed: ${e.message}`);
+    const onBroker = await brokerLegs(broker, contract, legs).catch((e: Error) => `Contract lookup failed: ${e.message}`);
     if (typeof onBroker === 'string') return void await abort(onBroker);
     if (onBroker.length !== row.legs.length) return void await abort('the contract no longer matches the row');
     const rows = await brokerPositionRows(broker);
     if (!rows) return void await abort(`could not read the ${broker} positions`);
-    const side = row.side === 'BUY' ? 'SELL' : 'BUY';
+    const side = (row.traded?.action ?? row.side) === 'BUY' ? 'SELL' : 'BUY';
     const plans = onBroker.map((l, i) => ({ leg: l, ...planOwnExit(l.key, rows, side, row.legs[i].units + (pend[i] ?? 0), broker, autoProductOf(row.product)) }));
     // the broker held more than the confirmed units: the stuck add's lot was there (planOwnExit caps by the broker's own quantity)
     const pendingAdded = withPendingAdd ? plans.some((p, i) => p.qty > row.legs[i].units) : undefined;
@@ -157,7 +160,8 @@ async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: nu
       attempts.delete(row.id);
       // `rowReason`: an exit that is the row's own rule (its stop), recorded as the page records it so an open tab does not read it as a guard trip
       await mustApply(scope, row.id, { op: 'close', id: row.id, exitT: t(), exitPrice: price, reason: rowReason ?? `server guard: ${reason}`, note: outcome === 'flat' ? 'already flat at the broker' : rowReason ? 'sent by the server watcher' : undefined,
-        orderIds: results.filter(r => r.status === 'placed' && r.orderId).map(r => String(r.orderId)), ...(pendingAdded !== undefined ? { pendingAdded } : {}) });   // a tab replaces the decision price with the fill
+        orderIds: results.filter(r => r.status === 'placed' && r.orderId).map(r => String(r.orderId)), ...(pendingAdded !== undefined ? { pendingAdded } : {}),
+        ...(row.traded && premium && premium > 0 ? { exitPremium: premium } : {}) });   // a tab replaces the decision price with the fill
       if (pendingAdded !== undefined) await log(`server: chart ${row.chart}'s unresolved added lot was ${pendingAdded ? 'found at the broker and exited with the position' : 'not at the broker (dropped)'}`);
       await log(`${rowReason ? 'server' : 'server guard'} exited chart ${row.chart}: ${reason} @ ~${price.toFixed(2)}`);
     } else if (outcome === 'unknown' || outcome === 'partial') {
@@ -250,7 +254,9 @@ async function tick(): Promise<void> {
     const todo: { scope: PnfScope; row: AutoRow; cfg: ServerGuardCfg | undefined; win: { open: number; entryCutoff: number; eodExit: number }; stuckAdd: boolean }[] = [];
     const allLive = SCOPES.flatMap(sc => readAutoLedger(sc).rows.filter(r => r.mode === 'REAL' && r.state !== 'closed'));
     // Same contract, broker AND product: exits are capped by that product's broker row only, so an MIS row cannot take an NRML row's units.
-    const hasSibling = (row: AutoRow) => allLive.some(r => r.id !== row.id && r.broker === row.broker && r.targetKey === row.targetKey && autoProductOf(r.product) === autoProductOf(row.product));
+    // compared on the contract each row actually holds (an index chart's row: its option)
+    const held = (r: AutoRow) => r.traded?.targetKey ?? r.targetKey;
+    const hasSibling = (row: AutoRow) => allLive.some(r => r.id !== row.id && r.broker === row.broker && held(r) === held(row) && autoProductOf(r.product) === autoProductOf(row.product));
     const liveRuntimeKeys = new Set<string>();
     for (const scope of SCOPES) {
       for (const row of readAutoLedger(scope).rows) {
@@ -266,7 +272,11 @@ async function tick(): Promise<void> {
         }
         if (stuckAdd) await warn(scope, row, `chart ${row.chart}'s added lot has an unclear outcome - resolve it on the page; the guard and end-of-day exit still cover the position`);
         if (row.state !== 'open' && !stuckAdd) continue;
-        const cfg = guards(file.cfg[keyOf(scope, row.chart)], row) ? file.cfg[keyOf(scope, row.chart)] : undefined;
+        // An index chart's option row is not guarded by the chart's MTM levels (the page offers none on an index chart, and a guard synced
+        // for another contract would size its box levels off the wrong one): it keeps its stop and its end-of-day exit only.
+        const cfgRaw = guards(file.cfg[keyOf(scope, row.chart)], row) ? file.cfg[keyOf(scope, row.chart)] : undefined;
+        if (cfgRaw && row.traded) await warn(scope, row, `chart ${row.chart} is an index chart trading ${row.traded.target.strike} ${row.traded.target.side}: its MTM guard is not applied (stop and end of day only)`);
+        const cfg = row.traded ? undefined : cfgRaw;
         // A row from an earlier day is not priced against today's market: it is reported, never exited on a stale entry price.
         // An NRML row whose end-of-day exit was missed is carried overnight with no broker square-off behind it: always said, guard or not.
         if (row.day !== today) {
@@ -289,23 +299,36 @@ async function tick(): Promise<void> {
     if (stale.length) await update(f => ({ ...f, runtime: Object.fromEntries(Object.entries(f.runtime).filter(([k]) => liveRuntimeKeys.has(k))) }));
     if (todo.length === 0) return;
     // Ask the bridge for every watched row's contract (the page's own asks keep it running; with no page open this is what does).
-    const pairs: { item: (typeof todo)[number]; ids: [string, string][] }[] = [];
+    // `ids`: what the row's stop and guard are measured on (the chart's contract; an index chart's row: the INDEX). `optIds`: an index chart's
+    // row's option, for its exit premium.
+    const pairs: { item: (typeof todo)[number]; ids: [string, string][]; optIds: [string, string][] | null }[] = [];
     for (const item of todo) {
-      const legs = resolvePnfLegs(item.row.target);
-      if (typeof legs === 'string') { await warn(item.scope, item.row, `cannot resolve the contract (${legs}) - not watching`); continue; }
-      const ids = legs.map(l => [l.segment, l.securityId] as [string, string]);
-      pairs.push({ item, ids });
-      askBridge(`autoserver:${item.scope}:${item.row.chart}`, ids as WantedPair[], now);
+      const tr = item.row.traded;
+      let ids: [string, string][], optIds: [string, string][] | null = null;
+      if (tr) {
+        const spot = indexSpotId(item.row.target.symbol);
+        const m = /^(NSE_FNO|MCX_COMM):(\d{1,9})$/.exec(tr.ids);
+        if (!spot || !m) { await warn(item.scope, item.row, `cannot price the index or its option (${tr.ids}) - not watching`); continue; }
+        ids = [['IDX_I', spot]];
+        optIds = [[m[1], m[2]]];
+      } else {
+        const legs = resolvePnfLegs(item.row.target);
+        if (typeof legs === 'string') { await warn(item.scope, item.row, `cannot resolve the contract (${legs}) - not watching`); continue; }
+        ids = legs.map(l => [l.segment, l.securityId] as [string, string]);
+      }
+      pairs.push({ item, ids, optIds });
+      askBridge(`autoserver:${item.scope}:${item.row.chart}`, [...ids, ...(optIds ?? [])] as WantedPair[], now);
     }
     ensureBridge(now);
     const { book } = readBridgeBook(now);
-    for (const { item, ids } of pairs) {
+    for (const { item, ids, optIds } of pairs) {
       const { scope, row, cfg, win, stuckAdd } = item;
       const price = chartPrice(ids, book, now);
+      const premium = optIds ? chartPrice(optIds, book, now) : null;
       if (minute >= win.eodExit) {
         // The end of day comes first and needs no price: the position must be flat before the broker's own square-off. With no price the
         // exit is booked at the entry price (as the tab's own end-of-day exit does when it has none) and the ledger says so.
-        await exitRow(scope, row, price === null ? 'end of day (no live price)' : 'end of day', price ?? row.entryPrice, stuckAdd, true);
+        await exitRow(scope, row, price === null ? 'end of day (no live price)' : 'end of day', price ?? row.entryPrice, stuckAdd, true, undefined, premium);
         continue;
       }
       if (price === null) {
@@ -314,7 +337,7 @@ async function tick(): Promise<void> {
       }
       // The row's own stop (Two-back / One-back) holds with or without a guard: the tab may be closed. The first to take beginExit sends it.
       if (stopHit(row, price)) {
-        await exitRow(scope, row, `stop ${row.stop!.toFixed(2)} hit`, price, stuckAdd, false, 'stop');
+        await exitRow(scope, row, `stop ${row.stop!.toFixed(2)} hit`, price, stuckAdd, false, 'stop', premium);
         continue;
       }
       if (!cfg) continue;

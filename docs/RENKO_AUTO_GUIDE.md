@@ -11,7 +11,8 @@ How the Renko page's automatic trading works: what it trades, when it enters and
 
 ## 1. Quick start
 
-1. Open `/renko`. Pick the instrument for chart 1 (and optionally chart 2): a future or an option. An index cannot be traded.
+1. Open `/renko`. Pick the instrument for chart 1 (and optionally chart 2): a future, an option, or an **index that trades options**
+   (section 5a).
 2. Set the **Box** (brick size, in points) and **Confirm** (N, the number of bricks a signal waits for).
 3. Choose the **broker** and **PAPER / REAL** (page-wide). A page always opens in PAPER; switching to REAL asks for confirmation.
 4. In the chart's **AUTO** controls choose the **rule** (see section 2) and the **lots** (`L` stepper).
@@ -175,6 +176,27 @@ Both are set before arming and locked while AUTO is armed. Saved per chart and o
   A manual trade, or the other chart on the same contract, is never touched. The exit goes to the broker the position was opened on.
 - **Resting orders** from the chart rail are separate from AUTO.
 
+### 5a. An index chart trades options
+
+An index (e.g. NIFTY) has no contract of its own. On `/renko` its chart drives a **CE / PE** instead, as the Price Ladder's XY mode does: the
+trade bar shows a **map** with one row per direction.
+- **Bull** (Buy button, AUTO BUY signal) and **Bear** (Sell button, AUTO SELL signal) each pick BUY or SELL, CE or PE, and a strike offset
+  (ATM, `+N` = N strikes out of the money for either side, `-N` = in the money), plus **Exp** (Nearest, or a listed expiry). A ⚠ marks a
+  leg that gains on the other direction's move (allowed, but said).
+- The **strike is picked at the moment of the order** from a fresh index price on the server (never the middle of the list): a stale or
+  missing index price refuses the order.
+- **Manual (trade bar, Scalper):** flat, a click opens that direction's option; holding a leg, the same side adds to it and the other
+  side reduces it (the whole leg once the lots cover it); **Reverse** closes it, then opens the other direction's option. Every order is
+  reserved in a ledger first (`debug/renko_index_held.json`), and an unclear outcome blocks the chart until you settle it on the bar. Exits
+  close only what this chart opened. If the broker shows less than that for 30 s, the bar says so and offers **Forget**. It never forgets silently,
+  because another page may hold the same strike.
+- **AUTO:** arming saves the map with the chart, and the map is locked while armed. Each entry picks its option then. The row keeps
+  the index as its chart (signals, stops, trail and markers are index levels), while its order, exit and **P&L are the option's
+  premium**. An entry with no option price yet waits while the signal is fresh. A PAPER exit with no option price waits too (the end of
+  day still closes it, with its P&L shown as 0).
+- **Not on an index chart yet:** the MTM guard (the server's too: an index chart's AUTO row keeps only its stop and end-of-day exit),
+  Bracket / Cover (shown as Single), rail levels, pyramid adds and Practice AUTO.
+
 ### Safety rules (the ledger)
 
 - One live AUTO row per chart. A REAL entry is **reserved before it is sent** (`entering`), an exit likewise (`exiting`). A placed entry
@@ -289,7 +311,7 @@ The REAL guard watcher (`lib/autoServerWatcher.ts`, started with the server) wor
   broker's trades, listing every simulated fill of the day (trade bar, rail, guard, AUTO entries and exits, newest first). Trade-bar paper
   fills are kept in this browser for the day (localStorage, stamped with the IST date; another day's list is ignored); AUTO ones come from the
   server ledger and survive a reload on any browser.
-- **Scalper window (manual, not AUTO).** The crosshair button in the header (Renko only, not on an index or in a replay) opens a
+- **Scalper window (manual, not AUTO).** The crosshair button in the header (Renko only, not in a replay; on an index chart it trades the option map, section 5a) opens a
   floating window for hand trading the active chart: Buy / Sell at market, a lots stepper with 1L / 2L / 5L / 10L presets, **Reverse**
   and **Close**, and the live P&L, with a coloured left edge (green profit, red loss). It is a second view of the trade bar: the same
   order route, the same position, the same lots and the same order Style (a Bracket / Cover entry arms its exits as from the bar).

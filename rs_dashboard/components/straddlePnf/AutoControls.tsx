@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Bot } from 'lucide-react';
-import { holdsPosition, PYRAMID_HARD_MAX, rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
+import { holdsPosition, markPnl, PYRAMID_HARD_MAX, type AutoRow } from '@/lib/pnfAutoLedger';
 import type { AutoProduct } from '@/lib/pnfOrderLogic';
 import { PYRAMID_EVERY_MAX, TRAIL_BOXES_MAX, TRAIL_BOXES_MIN } from '@/lib/pnfAuto';
 
@@ -150,7 +150,8 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
   };
 
   // confirmed units' P&L: also while a pyramid add is on the wire or unresolved (the position is held all along)
-  const pnl = row && holdsPosition(row) && price !== null ? rowPnl(row.side, row.entryPrice, price, row.unitsPerPoint) : null;
+  // `price` is the price of the contract the row holds: an index chart's row is marked on its OPTION's premium
+  const pnl = row && holdsPosition(row) && price !== null ? markPnl(row, price) : null;
   const unresolved = row && row.state !== 'open';
 
   return (
@@ -282,7 +283,14 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
           {pnl !== null && <span className={`ml-1 font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{inr(pnl)}</span>}
         </>) : open ? (
           <span className={row.side === 'SELL' ? 'text-red-400' : 'text-emerald-400'}>
+            {row.traded ? (
+              // an index chart's row: the chart direction, then the option it holds and the premium it was bought / sold at
+              <span data-testid={`pnf-auto-traded-${chart}`} title={`Index ${row.side === 'BUY' ? 'bullish' : 'bearish'} at ${row.entryPrice.toFixed(2)}; holds the option`}>
+                {row.side === 'SELL' ? 'BEAR' : 'BULL'} · {row.traded.action} {row.lots}L {row.traded.target.strike} {row.traded.target.side} @ {row.mode === 'REAL' && !row.entryFilled ? '~' : ''}{row.traded.entryPremium.toFixed(2)}
+              </span>
+            ) : <>
             {row.side === 'SELL' ? 'SHORT' : 'LONG'} {row.lots}L{row.base && row.lots > row.base.lots ? <span className="text-zinc-400" title="Base lots + lots added on new best bricks"> ({row.base.lots}+{row.lots - row.base.lots})</span> : null} @ <span title={row.mode === 'REAL' && (!row.entryFilled || row.adds?.some(a => a.status === 'done' && !a.filled)) ? 'The price AUTO decided at: not yet replaced by the broker\'s fill' : undefined}>{row.mode === 'REAL' && (!row.entryFilled || row.adds?.some(a => a.status === 'done' && !a.filled)) ? '~' : ''}{row.entryPrice.toFixed(2)}</span>{row.base && row.lots > row.base.lots ? <span className="text-zinc-400"> avg</span> : null}
+            </>}
             {pnl !== null && <span className={`ml-1 font-bold ${pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{inr(pnl)}</span>}
             {row.stop !== undefined && <span className="ml-1 text-zinc-400" title="Protective stop (one brick beyond the pullback)">SL {row.stop.toFixed(2)}</span>}
             {row.mode === 'PAPER' && <span className="ml-1 text-zinc-400">paper</span>}

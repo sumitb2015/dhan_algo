@@ -19,6 +19,9 @@ import { sessionWindow } from '@/lib/straddlePnfLive';
 import { istDateIso } from '@/lib/nseHolidays';
 import { targetKey, type Target } from '@/lib/pnfTarget';
 import type { PnfScope } from '@/lib/pnfScope';
+import { premiumOf, resolveIndexTrade } from '@/lib/pnfIndexTradeServer';
+import { askBridge } from '@/lib/pnfLiveBridge';
+import type { WantedPair } from '@/lib/pnfWanted';
 
 // The P&F / Renko AUTO engine on the dashboard SERVER: it builds each armed chart from the saved arming (target + settings, lib/
 // pnfAutoLedger.ts ArmRun) and runs the AUTO rules on it (lib/pnfAutoChart.ts, the same engine the page used to run) with every tab
@@ -126,6 +129,12 @@ function depsFor(scope: PnfScope, chart: 1 | 2): ChartDeps {
     disarm: why => void applyAutoLedgerOp(scope, { op: 'setArm', chart, arm: null, t: Date.now() / 1000, text: `AUTO switched off: ${why}` }),
     nowMs: () => Date.now(),
     sleep: ms => new Promise(res => setTimeout(res, ms)),
+    // A Renko index chart: the option its map trades, resolved from the server's own index price; its premium is quoted too (P&L is in it).
+    resolveIndex: async (broker, index, map, dir) => {
+      const r = await resolveIndexTrade(broker, index, map, dir, true);
+      return typeof r === 'string' ? r : { traded: r.traded, action: r.action, ids: r.ids, premium: r.premium, unsupported: r.unsupported, legs: r.legs };
+    },
+    premium: ids => premiumOf(ids, `autoengine:${scope}:${chart}:opt`),
   };
 }
 
@@ -260,6 +269,12 @@ async function stepChart(scope: PnfScope, chart: 1 | 2, ledger: AutoLedger, save
   const renko = scope === 'renko';
   const rule = renko && AUTO_RULES.includes(rec?.rule as AutoRule) ? rec!.rule as AutoRule : renko ? DEFAULT_AUTO_RULE : undefined;
   const arm = arming(rec, row, ledger, chart);
+  // An index chart's open option row: its option is kept on the price bridge (its exit and P&L are priced on it, tab open or not).
+  const held = row?.traded;
+  if (held) {
+    const m = /^(NSE_FNO|MCX_COMM):(\d{1,9})$/.exec(held.ids);
+    if (m) { try { askBridge(`autoengine:${scope}:${chart}:opt`, [[m[1], m[2]]] as WantedPair[], nowMs); } catch { /* the exit quotes it */ } }
+  }
   if (rec && rt.engine.guardExitedSinceArm(ledger, arm)) {
     await applyAutoLedgerOp(scope, { op: 'setArm', chart, arm: null, t: nowMs / 1000, text: `AUTO switched off: the server guard exited chart ${chart}` });
   } else if (!rt.busy) {
@@ -267,6 +282,7 @@ async function stepChart(scope: PnfScope, chart: 1 | 2, ledger: AutoLedger, save
     const inputs = {
       arm, lots: rec?.lots ?? row?.lots ?? 1, target, model: renko && rule ? modelForRule(rule, model) : model, rule, side: (rec?.side ?? 'both') as AutoSide,
       pyramid: rec ? pyramidOf(rec) : undefined, price, stale, market, complete, broker, ledger, info: infoFor(rt, broker, target, nowMs),
+      ...(run?.indexMap ? { indexMap: run.indexMap } : {}),
     };
     // Each chart runs on its own: an order on the wire on one chart never holds the other chart (or the other page) back.
     void rt.engine.tick(inputs).catch(e => console.error(`[pnf-auto-engine] ${scope} chart ${chart}:`, e)).finally(() => { rt.busy = false; });

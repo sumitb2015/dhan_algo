@@ -144,6 +144,14 @@ export function usePnfAuto({ chart, target, model, price, ledger, engine, post, 
     disarm: why => onDisarmRef.current(why),
     nowMs: () => Date.now(),
     sleep: ms => new Promise(res => setTimeout(res, ms)),
+    // an index chart's row exits its option: priced from the same bridge the page reads (null when it has no price yet)
+    premium: async ids => {
+      try {
+        const j = await (await fetch(`/api/straddle-pnf/live?ids=${ids}`)).json() as { success?: boolean; legs?: { quote: { ltp: number } | null }[] };
+        const ltp = j.success ? j.legs?.[0]?.quote?.ltp : null;
+        return ltp && ltp > 0 ? ltp : null;
+      } catch { return null; }
+    },
   }));
 
   /**

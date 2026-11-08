@@ -1,6 +1,7 @@
 import { fetchLtp } from '@/lib/dhanEquityQuote';
 import { expiriesFor, hasUnderlying, indexSpotId, strikesFor } from '@/lib/pnfContracts';
-import { readBridgeBook, readBack } from '@/lib/pnfLiveBridge';
+import { askBridge, readBridgeBook, readBack } from '@/lib/pnfLiveBridge';
+import type { WantedPair } from '@/lib/pnfWanted';
 import { brokerLegs, resolvePnfLegs } from '@/lib/pnfOrderServer';
 import { mappedTarget, type IndexDir, type IndexMap } from '@/lib/pnfIndexMap';
 import type { PnfAction, PnfBroker } from '@/lib/pnfOrderLogic';
@@ -68,4 +69,16 @@ export async function resolveIndexTrade(broker: PnfBroker, index: Target, map: I
     unsupported: typeof onBroker === 'string' ? onBroker : null,
     spot: spot.price, spotSource: spot.source, premium,
   };
+}
+
+const IDS_RE = /^(NSE_FNO|MCX_COMM):(\d{1,9})$/;
+/**
+ * An option's price now (`SEG:ID`), for an index chart's AUTO row: the bridge's price when it ticked recently, else one Dhan quote through
+ * the shared lane. The option is also asked of the bridge (under `asker`), so its price keeps streaming while the row holds it.
+ */
+export async function premiumOf(ids: string, asker = `premium:${ids}`, now = Date.now()): Promise<number | null> {
+  const m = IDS_RE.exec(ids);
+  if (!m) return null;
+  try { askBridge(asker, [[m[1], m[2]]] as WantedPair[], now); } catch { /* the quote below still answers */ }
+  return (await priceOf(m[1] as 'NSE_FNO' | 'MCX_COMM', m[2], now))?.price ?? null;
 }

@@ -13,6 +13,13 @@ import { fullFillAvg, type OrderPriceRead } from './tradedPriceClient.ts';
 import type { LegResult, PnfBroker } from './pnfOrderLogic.ts';
 import type { Market } from './straddlePnfLive.ts';
 import type { PanelModel } from './straddlePnfModel.ts';
+import type { IndexDir, IndexMap } from './pnfIndexMap.ts';
+
+/** The option an index chart's entry trades, as the server resolved it (lib/pnfIndexTradeServer.ts resolveIndexTrade). */
+export type IndexResolved = {
+  traded: Target; action: 'BUY' | 'SELL'; ids: string; premium: number | null; unsupported: string | null;
+  legs: { label: string; lot: number; unitsPerLot: number | null; key: string | null; lotUnits: number | null }[];
+};
 
 /** A REAL fill that cannot be read after this many tries (a minute apart) stays at its decision price. */
 export const SETTLE_MAX_TRIES = 5;
@@ -57,6 +64,10 @@ export interface ChartDeps {
   disarm: (why: string) => void;
   nowMs: () => number;
   sleep: (ms: number) => Promise<void>;
+  /** An INDEX chart's entry: the option its map trades for `dir`, ATM +/- N from the server's live index price, or why there is none. */
+  resolveIndex?: (broker: PnfBroker, index: Target, map: IndexMap, dir: IndexDir) => Promise<IndexResolved | string>;
+  /** An option's price now (`SEG:ID`): the bridge when fresh, else one quote; null when none can be read. */
+  premium?: (ids: string) => Promise<number | null>;
 }
 
 /** What one tick reads: the chart as it is now. */
@@ -80,6 +91,8 @@ export interface ChartInputs {
   broker: PnfBroker;
   ledger: AutoLedger;
   info: ChartInfo;
+  /** A Renko INDEX chart: the bull / bear option map saved with the arming. An index chart without one never enters. */
+  indexMap?: IndexMap;
 }
 
 export class ChartEngine {
@@ -210,9 +223,21 @@ export class ChartEngine {
    * taken, or sent, or refused for good (a REAL order that went out is never retried).
    */
   private async enter(i: ChartInputs, side: 'BUY' | 'SELL', signalT: number, livePx: number, box: number | null, stop?: number, exitBy?: 'supertrend'): Promise<string | null> {
-    const { arm, info, lots, target, market, broker, pyramid } = i;
+    const { arm, lots, target, market, broker } = i;
     const chart = this.chart;
     const px = arm.mode === 'PAPER' && box !== null ? box : livePx;
+    // An INDEX chart trades the option its map names for this direction, picked now (ATM +/- N): the row keeps the index as its chart and
+    // carries the option as `traded`. Its P&L is the option's premium, so an entry needs that price (a missing one is retried while fresh).
+    let info = i.info, traded: AutoRow['traded'] | undefined, pyramid = i.pyramid;
+    if (target.kind === 'index') {
+      if (!i.indexMap || !this.deps.resolveIndex || !this.deps.premium) { this.note = 'no option map saved with this arming'; return null; }
+      const r = await this.deps.resolveIndex(broker, target, i.indexMap, side === 'BUY' ? 'bull' : 'bear').catch((e: Error) => `option lookup failed (${e.message})`);
+      if (typeof r === 'string') { this.note = r; return r; }
+      if (!(r.premium && r.premium > 0)) { this.note = `no price for ${r.traded.strike} ${r.traded.side} yet`; return `no price for the ${r.traded.strike} ${r.traded.side} option yet`; }
+      info = { legs: r.legs, unsupported: r.unsupported };
+      traded = { target: r.traded, targetKey: targetKey(r.traded), action: r.action, ids: r.ids, entryPremium: r.premium };
+      pyramid = undefined;                                       // an option row on an index chart has no adds
+    }
     if (!info || !info.legs.length) { this.note = 'waiting for the contract lookup'; return 'the contract lookup has not answered'; }
     if (arm.mode === 'REAL' && info.unsupported) { this.haltNow(info.unsupported); return null; }
     const unitsPerPoint = (info.legs[0].unitsPerLot ?? info.legs[0].lot) * lots;
@@ -226,21 +251,25 @@ export class ChartEngine {
       ...(box !== null ? { entryBox: box } : {}),
       ...(stop !== undefined ? { stop } : {}),
       ...(exitBy ? { exitBy } : {}),
+      ...(traded ? { traded } : {}),
       ...(pyramid?.on && pyramid.max > lots ? { pyramidMax: Math.min(pyramid.max, PYRAMID_HARD_MAX), ...(pyramid.every > 1 ? { pyramidEvery: pyramid.every } : {}), ...(pyramid.trailOn ? { trailBoxes: pyramid.trail } : {}) } : {}),
     };
     const post = this.deps.post;
+    // what is sent: the chart's own contract, or an index chart's option on the option's own side
+    const orderTarget = traded ? traded.target : target, orderSide = traded ? traded.action : side;
+    const what = traded ? ` → ${traded.action} ${traded.target.strike} ${traded.target.side} @ ${traded.entryPremium.toFixed(2)}` : '';
     if (arm.mode === 'PAPER') {
-      const j = await this.send({ broker, mode: 'PAPER', target, action: side, lots, product });
+      const j = await this.send({ broker, mode: 'PAPER', target: orderTarget, action: orderSide, lots, product });
       if (!j?.success) { this.note = `paper order refused: ${j?.error ?? 'no reply'}`; return `paper order refused (${j?.error ?? 'no reply'})`; }
       const r = await post({ op: 'open', row: base });
       if (!r.ok) { this.note = `ledger refused: ${r.error}`; return `the ledger refused it (${r.error ?? 'unreachable'})`; }
-      this.deps.event({ chart, kind: 'entry', side, price: px, target, mode: arm.mode, lots, text: `AUTO C${chart} [PAPER] ${side} ${lots}L @ ${px.toFixed(2)}` });
+      this.deps.event({ chart, kind: 'entry', side, price: px, target, mode: arm.mode, lots, text: `AUTO C${chart} [PAPER] ${side} ${lots}L @ ${px.toFixed(2)}${what}` });
       return null;
     }
     // REAL: reserve, send, then confirm / void / mark unknown. A refused reservation sent nothing: it may be tried again.
     const reserved = await post({ op: 'open', row: { ...base, state: 'entering' } });
     if (!reserved.ok) { this.note = `ledger refused the entry: ${reserved.error}`; return `the ledger refused the reservation (${reserved.error ?? 'unreachable'})`; }
-    const j = await this.send({ broker, mode: 'REAL', target, action: side, lots, product });
+    const j = await this.send({ broker, mode: 'REAL', target: orderTarget, action: orderSide, lots, product });
     if (!j || j.outcome === 'unknown') {
       await post({ op: 'markUnknown', id, note: j?.message ?? 'no reply from the order route' });
       this.haltNow('entry outcome unknown - check Orders/Positions, then resolve it');
@@ -256,7 +285,7 @@ export class ChartEngine {
         return null;
       }
       this.rejects = 0;
-      this.deps.event({ chart, kind: 'entry', side, price: px, target, mode: arm.mode, lots, text: `AUTO C${chart} [REAL] ${side} ${lots}L @ ~${px.toFixed(2)}` });
+      this.deps.event({ chart, kind: 'entry', side, price: px, target, mode: arm.mode, lots, text: `AUTO C${chart} [REAL] ${side} ${lots}L @ ~${px.toFixed(2)}${what}` });
       return null;
     }
     if (j.outcome === 'partial') {
@@ -283,25 +312,33 @@ export class ChartEngine {
     const exitPx = r.mode === 'PAPER' && box != null ? box : px ?? r.entryPrice;
     const boxField = { ...(box != null ? { exitBox: box } : {}), ...(best != null ? { trailBest: best } : {}) };
     const side = r.side === 'BUY' ? 'SELL' : 'BUY';
+    // An index chart's row exits its OPTION, on the option's own closing side, and books the option's price at the decision.
+    const contract = r.traded ? r.traded.target : r.target;
+    const exitSide = r.traded ? (r.traded.action === 'BUY' ? 'SELL' : 'BUY') : side;
+    const premium = r.traded && this.deps.premium ? await this.deps.premium(r.traded.ids).catch(() => null) : null;
+    const premField = premium && premium > 0 ? { exitPremium: premium } : {};
+    const premTxt = r.traded ? ` → ${exitSide} ${r.traded.target.strike} ${r.traded.target.side}${premium ? ` @ ${premium.toFixed(2)}` : ''}` : '';
     if (r.mode === 'PAPER') {
-      const c = await post({ op: 'close', id: r.id, exitT: this.nowS(), exitPrice: exitPx, reason, exitBarT: barT, ...boxField });
-      if (c.ok) this.deps.event({ chart, kind: 'exit', side, price: exitPx, target: r.target, mode: r.mode, lots: r.lots, text: `AUTO C${chart} [PAPER] exit (${reason}) @ ${exitPx.toFixed(2)}` });
+      // a paper exit is booked at the option's price: without one it waits (the end of day still closes, its P&L said unknown)
+      if (r.traded && !(premium && premium > 0) && reason !== 'eod') { this.note = `${reason} seen, waiting for the option's price`; return false; }
+      const c = await post({ op: 'close', id: r.id, exitT: this.nowS(), exitPrice: exitPx, reason, exitBarT: barT, ...boxField, ...premField });
+      if (c.ok) this.deps.event({ chart, kind: 'exit', side, price: exitPx, target: r.target, mode: r.mode, lots: r.lots, text: `AUTO C${chart} [PAPER] exit (${reason}) @ ${exitPx.toFixed(2)}${premTxt}` });
       return c.ok;
     }
     if (this.deps.nowMs() < this.exitRetryAt) return false;
     const reserved = await post({ op: 'beginExit', id: r.id, t: this.nowS() });
     if (!reserved.ok) { this.note = `ledger refused the exit: ${reserved.error}`; return false; }
     // The broker it was opened on and the units AUTO owns, never the Lots box or the page broker.
-    const j = await this.send({ broker: r.broker, mode: 'REAL', target: r.target, exitOwn: { side, units: r.legs.map(l => l.units), product: autoProductOf(r.product) } });
+    const j = await this.send({ broker: r.broker, mode: 'REAL', target: contract, exitOwn: { side: exitSide, units: r.legs.map(l => l.units), product: autoProductOf(r.product) } });
     if (!j || j.outcome === 'unknown' || j.outcome === 'partial') {
       await post({ op: 'markUnknown', id: r.id, note: j?.message ?? 'no reply from the order route' });
       this.haltNow('exit outcome unknown - check Orders/Positions, then resolve it');
       return false;
     }
     if (j.outcome === 'placed' || j.outcome === 'flat') {
-      const c = await post({ op: 'close', id: r.id, exitT: this.nowS(), exitPrice: exitPx, reason, exitBarT: barT, ...boxField, note: j.outcome === 'flat' ? 'already flat at the broker' : undefined, orderIds: (j.legs ?? []).filter(l => l.status === 'placed' && l.orderId).map(l => String(l.orderId)) });
+      const c = await post({ op: 'close', id: r.id, exitT: this.nowS(), exitPrice: exitPx, reason, exitBarT: barT, ...boxField, ...premField, note: j.outcome === 'flat' ? 'already flat at the broker' : undefined, orderIds: (j.legs ?? []).filter(l => l.status === 'placed' && l.orderId).map(l => String(l.orderId)) });
       if (!c.ok) { this.haltNow(`exit sent but the ledger refused it (${c.error})`); return false; }
-      this.deps.event({ chart, kind: 'exit', side, price: exitPx, target: r.target, mode: r.mode, lots: r.lots, text: `AUTO C${chart} [REAL] exit (${reason}) @ ~${exitPx.toFixed(2)}${j.outcome === 'flat' ? ' - already flat at the broker' : ''}` });
+      this.deps.event({ chart, kind: 'exit', side, price: exitPx, target: r.target, mode: r.mode, lots: r.lots, text: `AUTO C${chart} [REAL] exit (${reason}) @ ~${exitPx.toFixed(2)}${premTxt}${j.outcome === 'flat' ? ' - already flat at the broker' : ''}` });
       return true;
     }
     await post({ op: 'abortExit', id: r.id, note: j.message ?? j.error ?? 'exit refused' });
@@ -422,7 +459,7 @@ export class ChartEngine {
       return;
     }
     if (!arm.on || this.halt) return;
-    if (target.kind === 'index') { this.note = 'an index cannot be traded'; return; }
+    if (target.kind === 'index' && !i.indexMap) { this.note = 'an index chart trades options only through its map - arm it again from the page'; return; }
     if (!complete || stale || price === null) { this.note = stale ? 'feed stale: no entries' : 'waiting for a price'; return; }
     // The chart's last trade, if the trailing SL closed it today on this contract in this mode: same-side entries wait for a new best brick.
     // The EXIT's day (an NRML trade opened yesterday and trailed out today still blocks), and the rule's signals of both sides (an

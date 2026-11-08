@@ -44,16 +44,19 @@ export function buildPaperTrades(markers: Record<string, PnfExecutionMarker[]>, 
   for (const r of autoRows) {
     if (r.mode !== 'PAPER' || r.state === 'entering' || r.state === 'unknownEntry') continue;
     if (r.state === 'closed' && r.reason === 'refused') continue;            // never opened
-    const label = targetLabel(r.target);
+    // an index chart's row traded an OPTION: listed as that option, on its own side, at its premiums
+    const tr = r.traded;
+    const label = targetLabel(tr?.target ?? r.target);
+    const inSide = tr?.action ?? r.side, outSide = inSide === 'BUY' ? 'SELL' : 'BUY';
     if (istDateIso(r.entryT * 1000) === day) {
-      out.push({ id: `a:${r.id}:in`, t: r.entryT, instrument: label, source: 'AUTO', side: r.side, lots: r.base ? r.base.lots : r.lots, price: r.base ? r.base.price : r.entryPrice, note: `C${r.chart} entry` });
+      out.push({ id: `a:${r.id}:in`, t: r.entryT, instrument: label, source: 'AUTO', side: inSide, lots: r.base ? r.base.lots : r.lots, price: tr ? tr.entryPremium : r.base ? r.base.price : r.entryPrice, note: `C${r.chart} entry${tr ? ` (${r.side === 'BUY' ? 'bull' : 'bear'} on ${r.target.symbol})` : ''}` });
     }
     for (const a of r.adds ?? []) {
       if (a.status === 'done' && istDateIso(a.t * 1000) === day) out.push({ id: `a:${r.id}:add:${a.id}`, t: a.t, instrument: label, source: 'AUTO', side: r.side, lots: a.lots, price: a.price, note: `C${r.chart} add` });
     }
     if (r.state === 'closed' && r.reason !== 'resolved' && r.exitPrice !== undefined && r.exitT !== undefined && istDateIso(r.exitT * 1000) === day) {
       const pnl = r.pnl === undefined ? '' : ` · ${r.pnl < 0 ? '-' : r.pnl > 0 ? '+' : ''}₹${Math.abs(Math.round(r.pnl)).toLocaleString('en-IN')}`;
-      out.push({ id: `a:${r.id}:out`, t: r.exitT, instrument: label, source: 'AUTO', side: r.side === 'BUY' ? 'SELL' : 'BUY', lots: r.lots, price: r.exitPrice, note: `C${r.chart} exit (${r.reason ?? 'closed'})${pnl}` });
+      out.push({ id: `a:${r.id}:out`, t: r.exitT, instrument: label, source: 'AUTO', side: outSide, lots: r.lots, price: tr ? tr.exitPremium ?? 0 : r.exitPrice, note: `C${r.chart} exit (${r.reason ?? 'closed'})${pnl}${tr && tr.exitPremium === undefined ? ' - option price unknown' : ''}` });
     }
   }
   return out.sort((a, b) => b.t - a.t || a.id.localeCompare(b.id));

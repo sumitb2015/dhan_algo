@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { exitingAutoProduct, reservedByAuto } from './pnfAutoServer.ts';
+import { exitingAutoProduct, reservedByAuto, reservedByAutoTraded } from './pnfAutoServer.ts';
 import type { AutoLedger, AutoRow } from './pnfAutoLedger.ts';
 
 const row = (o: Partial<AutoRow>): AutoRow => ({
@@ -49,4 +49,18 @@ test('exitingAutoProduct: the product of the row reserved for this exit comes fr
   assert.equal(exitingAutoProduct({ rev: 1, log: [], rows: [ex({ product: 'MARGIN' })] }, 'dhan', 'F', 'SELL'), null, 'wrong closing side');
   assert.equal(exitingAutoProduct({ rev: 1, log: [], rows: [row({ product: 'MARGIN' })] }, 'dhan', 'F', 'BUY'), null, 'not reserved for an exit');
   assert.equal(exitingAutoProduct({ rev: 1, log: [], rows: [ex({ product: 'MARGIN' }), ex({ id: 'm', chart: 2 })] }, 'dhan', 'F', 'BUY'), null, 'two rows disagree');
+});
+
+test('an index chart\'s option row: kept per option leg by a close of that option, never by the chart\'s key; its exitOwn product is found on the option', () => {
+  const ce = { kind: 'options', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-03', strike: 25000, side: 'CE' } as AutoRow['target'];
+  const t = { target: ce, targetKey: 'options|NIFTY|2026-11-03|25000|CE', action: 'SELL' as const, ids: 'NSE_FNO:1', entryPremium: 120 };
+  const led: AutoLedger = { rev: 1, log: [], rows: [
+    row({ id: 'i', targetKey: 'index|NIFTY|||', side: 'BUY', traded: t, product: 'MARGIN' }),   // bullish chart, SHORT CE (NRML)
+  ] };
+  assert.deepEqual(reservedByAuto(led, 'dhan', 'index|NIFTY|||', 1), [0], 'not by the chart key');
+  assert.equal(reservedByAutoTraded(led, 'dhan', t.targetKey, 'MARGIN'), -65);
+  assert.equal(reservedByAutoTraded(led, 'dhan', t.targetKey, 'INTRADAY'), 0);
+  const exiting: AutoLedger = { ...led, rows: [{ ...led.rows[0], state: 'exiting' }] };
+  assert.equal(exitingAutoProduct(exiting, 'dhan', t.targetKey, 'BUY'), 'MARGIN', 'buying back the short CE');
+  assert.equal(exitingAutoProduct(exiting, 'dhan', t.targetKey, 'SELL'), null);
 });

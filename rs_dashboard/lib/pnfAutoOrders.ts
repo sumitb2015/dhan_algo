@@ -2,7 +2,7 @@ import { send, describe } from '@/lib/pnfOrderExec';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { openBrokerOrders } from '@/lib/pnfRestingServer';
 import type { PnfScope } from '@/lib/pnfScope';
-import { exitingAutoProduct, readAutoLedger, reservedByAuto } from '@/lib/pnfAutoServer';
+import { exitingAutoProduct, readAutoLedger, reservedByAuto, reservedByAutoTraded } from '@/lib/pnfAutoServer';
 import { reservedByIndexHeld } from '@/lib/pnfIndexHeld';
 import { readIndexHeld } from '@/lib/pnfIndexHeldServer';
 import { brokerPositionRows, brokerSessionOk } from '@/lib/priceLadderServer';
@@ -94,7 +94,9 @@ export async function placePnfMarket(order: PnfOrder, scope: PnfScope): Promise<
         const fromOther = reservedByAuto(otherLed, broker, targetKey(target), onBroker.length, undefined, p);
         // Chart N's MTM guard: this page's OTHER chart's AUTO on the same contract is kept too (each chart guards its own trade).
         const fromSibling = order.guardChart ? reservedByAuto(ownLed, broker, targetKey(target), onBroker.length, order.guardChart, p) : onBroker.map(() => 0);
-        const fromIndex = legKeys.map(k => (k ? heldLeds.reduce((n, led) => n + reservedByIndexHeld(led, broker, k, p), 0) : 0));
+        // ...and an index chart's AUTO option row (either page), matched on the option itself
+        const fromIndex = legKeys.map(k => (k ? heldLeds.reduce((n, led) => n + reservedByIndexHeld(led, broker, k, p), 0)
+          + reservedByAutoTraded(otherLed, broker, k, p) + reservedByAutoTraded(ownLed, broker, k, p) : 0));
         return { fromOther, fromSibling, fromIndex, reserved: fromOther.map((r, i) => r + fromSibling[i] + fromIndex[i]) };
       };
       const mis = keep('INTRADAY'), nrml = keep('MARGIN');
@@ -107,7 +109,7 @@ export async function placePnfMarket(order: PnfOrder, scope: PnfScope): Promise<
       const fromOther = mis.fromOther.some(r => r !== 0) || nrml.fromOther.some(r => r !== 0);
       const fromSibling = mis.fromSibling.some(r => r !== 0) || nrml.fromSibling.some(r => r !== 0);
       const fromIndex = mis.fromIndex.some(r => r !== 0) || nrml.fromIndex.some(r => r !== 0);
-      const whose = anyKept ? [fromOther ? `the ${otherName} page's AUTO` : '', fromSibling ? `chart ${sibling}'s AUTO` : '', fromIndex ? 'an index chart\'s held option' : ''].filter(Boolean).join(' and ') : '';
+      const whose = anyKept ? [fromOther ? `the ${otherName} page's AUTO` : '', fromSibling ? `chart ${sibling}'s AUTO` : '', fromIndex ? 'an index chart\'s option (held or AUTO)' : ''].filter(Boolean).join(' and ') : '';
       if (whose) keptNote = ` KEPT: ${kept.join(' / ')} units on this contract belong to ${whose} and were not closed.`;
       if (plans.every(p => p.orders.length === 0)) {
         return reply({

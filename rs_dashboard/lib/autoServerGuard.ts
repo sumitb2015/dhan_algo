@@ -68,9 +68,10 @@ export const runtimeKey = (scope: string, chart: number, rowId: string) => `${sc
  * units, capped by its own product's book row in its direction). null when a leg has no broker key, i.e. it cannot be told. 0 means the broker
  * is flat for this row: the position was closed outside AUTO (by hand, a square-off, the broker).
  */
-export function ownHeldQty(row: Pick<AutoRow, 'side' | 'legs' | 'product'>, book: BookRow[], broker: PnfBroker): number | null {
+export function ownHeldQty(row: Pick<AutoRow, 'side' | 'legs' | 'product' | 'traded'>, book: BookRow[], broker: PnfBroker): number | null {
   if (row.legs.length === 0 || row.legs.some(l => !l.key)) return null;
-  const closing = row.side === 'BUY' ? 'SELL' : 'BUY';
+  // an index chart's row holds its option on the OPTION's own side (a bearish SELL CE is a short)
+  const closing = (row.traded?.action ?? row.side) === 'BUY' ? 'SELL' : 'BUY';
   return row.legs.reduce((n, l) => n + planOwnExit(l.key as string, book, closing, l.units, broker, autoProductOf(row.product)).qty, 0);
 }
 

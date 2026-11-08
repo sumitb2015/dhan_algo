@@ -7,7 +7,7 @@ import {
   daySummary, newestFirst, toOrderRow, toPositionRow, toTradeRow, type OrderRow, type OrderState, type PositionRow, type TradeRow,
 } from '@/lib/pnfBooks';
 import { targetLabel } from '@/lib/pnfTarget';
-import { autoDaySummary, holdsPosition, rowPnl, type AutoRow } from '@/lib/pnfAutoLedger';
+import { autoDaySummary, holdsPosition, markPnl, pricedKey, type AutoRow } from '@/lib/pnfAutoLedger';
 import type { PaperTradeRow } from '@/lib/pnfPaperBook';
 
 // Positions, order book, trade book and the day's P&L for the page header's broker, docked at the bottom of the page.
@@ -101,7 +101,8 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [],
   const autoReal = autoDaySummary(autoRows, day, 'REAL', autoPrice);
   const paperOpen = autoRows.filter(r => r.mode === 'PAPER' && r.state === 'open');
   const hasPaper = autoRows.some(r => r.mode === 'PAPER');
-  const mtm = (r: AutoRow) => { const px = autoPrice(r.targetKey); return holdsPosition(r) && px !== null && px > 0 ? rowPnl(r.side, r.entryPrice, px, r.unitsPerPoint) : null; };
+  // an index chart's row is marked on its option (pricedKey / markPnl)
+  const mtm = (r: AutoRow) => { const px = autoPrice(pricedKey(r)); return holdsPosition(r) && px !== null && px > 0 ? markPnl(r, px) : null; };
   const autoPnl = autoPaper.total + autoReal.total;
   const tabs: { id: Tab; label: string; count?: number }[] = [
     { id: 'positions', label: 'Positions', count: pos || paperOpen.length ? (pos ? summary.open : 0) + paperOpen.length : undefined },
@@ -159,12 +160,14 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [],
               <tr key={r.id} className="border-b border-zinc-800/60">
                 <td className="px-2 py-1 text-zinc-400">{new Date(r.entryT * 1000).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}</td>
                 <td className="px-2 py-1">C{r.chart}</td>
-                <td className="px-2 py-1 font-sans text-zinc-100">{targetLabel(r.target)}</td>
+                {/* an index chart's row is listed as the OPTION it traded: its side and premiums (the index levels are in the title) */}
+                <td className="px-2 py-1 font-sans text-zinc-100" title={r.traded ? `Traded from the ${targetLabel(r.target)} index chart (${r.side === 'BUY' ? 'bullish' : 'bearish'}): index ${fmt(r.entryPrice)} → ${r.exitPrice === undefined ? '—' : fmt(r.exitPrice)}` : undefined}>
+                  {targetLabel(r.traded?.target ?? r.target)}{r.traded && <span className="text-zinc-500"> · via {r.target.symbol}</span>}</td>
                 <td className={`px-2 py-1 font-bold ${r.mode === 'REAL' ? 'text-red-400' : 'text-zinc-400'}`}>{r.mode}</td>
-                <td className={`px-2 py-1 font-bold ${sideTone(r.side)}`}>{r.side}</td>
+                <td className={`px-2 py-1 font-bold ${sideTone(r.traded?.action ?? r.side)}`}>{r.traded?.action ?? r.side}</td>
                 <td className="px-2 py-1 text-right">{r.lots}</td>
-                <td className="px-2 py-1 text-right">{fmt(r.entryPrice)}</td>
-                <td className="px-2 py-1 text-right">{r.exitPrice === undefined ? '—' : fmt(r.exitPrice)}</td>
+                <td className="px-2 py-1 text-right">{fmt(r.traded ? r.traded.entryPremium : r.entryPrice)}</td>
+                <td className="px-2 py-1 text-right">{r.traded ? (r.traded.exitPremium === undefined ? '—' : fmt(r.traded.exitPremium)) : r.exitPrice === undefined ? '—' : fmt(r.exitPrice)}</td>
                 <td className={`px-2 py-1 text-right font-bold ${tone(r.pnl ?? mtm(r))}`} title={r.state === 'open' ? 'Open: marked at the chart price' : undefined}>
                   {r.pnl !== undefined ? inr(r.pnl) : mtm(r) !== null ? inr(mtm(r)) : '—'}</td>
                 <td className="px-2 py-1" title={r.note}>{r.state === 'closed' ? r.reason ?? 'closed' : r.state}</td>
@@ -181,14 +184,14 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [],
             <p className="px-2 pt-1.5 pb-1 text-[10px] font-bold uppercase tracking-wider text-violet-300">AUTO · paper (simulated, not at the broker)</p>
             <Table empty="" head={['Instrument', 'Chart', 'Net', 'Entry', 'LTP', 'Unrealised']} right={[2, 3, 4, 5]}>
               {paperOpen.map(r => {
-                const px = autoPrice(r.targetKey);
-                const net = (r.side === 'BUY' ? 1 : -1) * (r.legs[0]?.units ?? r.lots);
+                const px = autoPrice(pricedKey(r));
+                const net = ((r.traded?.action ?? r.side) === 'BUY' ? 1 : -1) * (r.legs[0]?.units ?? r.lots);
                 return (
                   <tr key={r.id} className="border-b border-zinc-800/60">
-                    <td className="px-2 py-1 font-sans text-zinc-100">{targetLabel(r.target)}</td>
+                    <td className="px-2 py-1 font-sans text-zinc-100">{targetLabel(r.traded?.target ?? r.target)}{r.traded && <span className="text-zinc-500"> · via {r.target.symbol}</span>}</td>
                     <td className="px-2 py-1">C{r.chart}</td>
                     <td className={`px-2 py-1 text-right font-bold ${net > 0 ? 'text-emerald-400' : 'text-red-400'}`}>{net} <span className="text-zinc-500 font-normal">({r.lots}L)</span></td>
-                    <td className="px-2 py-1 text-right">{fmt(r.entryPrice)}</td>
+                    <td className="px-2 py-1 text-right">{fmt(r.traded ? r.traded.entryPremium : r.entryPrice)}</td>
                     <td className="px-2 py-1 text-right">{fmt(px)}</td>
                     <td className={`px-2 py-1 text-right font-bold ${tone(mtm(r))}`} title={px === null ? 'No chart shows this contract: no live price' : undefined}>{inr(mtm(r))}</td>
                   </tr>

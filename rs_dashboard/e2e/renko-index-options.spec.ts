@@ -1,6 +1,7 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { json, signIn } from './support';
 import { applyHeldOp, emptyHeld, type HeldLedger, type HeldOp } from '../lib/pnfIndexHeld';
+import { applyAutoOp, EMPTY_LEDGER, type AutoLedger, type AutoOp } from '../lib/pnfAutoLedger';
 
 // A Renko INDEX chart that trades options (lib/pnfIndexMap.ts): Buy = the map's bullish leg, Sell = its bearish leg, each resolved by the
 // server at the click; the held option is what Close / Reverse act on. Every broker-backed call is mocked, the held-option ledger too;
@@ -23,6 +24,8 @@ async function installMock(page: Page, opts: { orderOutcome?: (b: OrderBody) => 
   const book = { net: { CE: opts.otherNet?.CE ?? 0, PE: opts.otherNet?.PE ?? 0 } as Record<'CE' | 'PE', number> };
   // the REAL held-option ledger: the route's own pure rules (lib/pnfIndexHeld.ts), in memory
   const held: { led: HeldLedger } = { led: emptyHeld() };
+  // the AUTO ledger behind its real ops (the server engine is not running in this test: only the arming is checked)
+  const auto: { led: AutoLedger; ops: AutoOp[] } = { led: EMPTY_LEDGER, ops: [] };
   const premium = { CE: 120, PE: 90 };
   await page.route('**/api/**', async (route: Route) => {
     const req = route.request();
@@ -77,6 +80,15 @@ async function installMock(page: Page, opts: { orderOutcome?: (b: OrderBody) => 
         legs: [{ label: 'leg', side: body.action ?? 'SELL', qty: (body.lots ?? 1) * 65, product: 'INTRADAY', status: outcome, orderId: 'ORD-1' }],
       });
     }
+    if (p === '/api/straddle-pnf/auto') {
+      if (method === 'GET') return json(route, { success: true, ledger: auto.led, engine: null, heartbeat: { t: Date.now(), idle: true, pid: 1, started: true, ticks: 1, owner: true, error: null }, serverNow: Date.now() });
+      const op = req.postDataJSON() as AutoOp;
+      auto.ops.push(op);
+      const r = applyAutoOp(auto.led, op);
+      if (!r.ok) return json(route, { success: false, error: r.error, ledger: auto.led }, r.status);
+      auto.led = r.ledger;
+      return json(route, { success: true, ledger: r.ledger });
+    }
     if (p === '/api/straddle-pnf/index-held') {
       if (method === 'GET') return json(route, { success: true, ledger: held.led });
       const op = req.postDataJSON() as HeldOp;
@@ -98,7 +110,7 @@ async function installMock(page: Page, opts: { orderOutcome?: (b: OrderBody) => 
     blocked.push(`${method} ${p}`);
     return route.fulfill({ status: 599, body: JSON.stringify({ success: false, error: `unmocked ${method} ${p}` }) });
   });
-  return { placed, resolves, blocked, book, held, premium };
+  return { placed, resolves, blocked, book, held, premium, auto };
 }
 
 test.beforeEach(async ({ context }) => { await signIn(context); });
@@ -245,4 +257,25 @@ test('REAL: a held option the broker nets to 0 is never forgotten silently - aft
   await expect(bar.getByTestId('index-held')).toHaveCount(0);
   expect(held.led.rows.length).toBe(0);
   expect(placed.length).toBe(1);                                                 // Forget sends nothing
+});
+
+test('AUTO on an index chart: arming saves the option map with the chart for the server (no pyramid on an index chart)', async ({ page }) => {
+  const { auto, placed } = await installMock(page);
+  const bar = await openIndex(page);
+  const bear = bar.getByTestId('index-map-bear');
+  await bear.getByRole('button', { name: 'SELL' }).click();
+  await bear.getByRole('button', { name: 'CE' }).click();
+  const panel = page.getByTestId('pnf-auto-1');
+  const start = panel.getByRole('button', { name: 'Start AUTO on chart 1' });
+  await expect(start).toBeEnabled();
+  await start.click();
+  await expect.poll(() => auto.ops.filter(o => o.op === 'setArm').length).toBe(1);
+  const arm = (auto.ops.find(o => o.op === 'setArm') as Extract<AutoOp, { op: 'setArm' }>).arm!;
+  expect(arm.targetKey).toBe('index|NIFTY|||');
+  expect(arm.run?.indexMap).toMatchObject({ bull: { action: 'BUY', opt: 'CE', offset: 0 }, bear: { action: 'SELL', opt: 'CE', offset: 0 }, expiry: 'NEAREST' });
+  expect(arm.pyramid).toBeUndefined();
+  expect(auto.led.arms?.['1']?.run?.indexMap).toBeTruthy();           // the ledger kept it (an index run without a map is dropped)
+  // armed: the map is frozen (the server trades the map it was armed with)
+  await expect(bear.getByRole('button', { name: 'BUY' })).toBeDisabled();
+  expect(placed).toEqual([]);                                          // arming sends no order
 });

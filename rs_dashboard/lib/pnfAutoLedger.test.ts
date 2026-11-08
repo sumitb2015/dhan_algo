@@ -385,3 +385,72 @@ test('an arming keeps the run snapshot the server engine trades, only for the ar
   assert.equal(logged.log[0].kind, 'entry');
   assert.equal(run(EMPTY_LEDGER, { op: 'log', chart: 1, t: 1, text: 'x', kind: 'weird' as never }).log[0].kind, undefined);
 });
+
+// ── Renko INDEX chart -> option rows ──────────────────────────────────────────────────────────────────────────────────────
+const idx = { kind: 'index', symbol: 'NIFTY', name: 'Nifty 50' } as const;
+const ce = { kind: 'options', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-03', strike: 25000, side: 'CE' } as const;
+const traded = (over: Record<string, unknown> = {}) => ({ target: ce, targetKey: 'x', action: 'SELL', ids: 'NSE_FNO:40001', entryPremium: 120, ...over });
+const irow = (over: Record<string, unknown> = {}) => row({ target: idx, entryPrice: 25010, traded: traded(), ...over });
+
+test('index row: opens only with a valid option of the index; another chart\'s row never carries one; no pyramid', () => {
+  const l = run(EMPTY_LEDGER, { op: 'open', row: irow() });
+  assert.equal(l.rows[0].targetKey, 'index|NIFTY|||', 'the chart stays the index');
+  assert.equal(l.rows[0].traded?.targetKey, 'options|NIFTY|2026-11-03|25000|CE', 'the key is rebuilt from the target, never trusted');
+  const bad = (o: Record<string, unknown>) => applyAutoOp(EMPTY_LEDGER, { op: 'open', row: row(o) } as AutoOp);
+  assert.ok(!bad({ target: idx }).ok, 'an index row needs its option');
+  assert.ok(!bad({ target: idx, traded: traded({ target: { ...ce, symbol: 'BANKNIFTY' } }) }).ok, 'an option of another index');
+  assert.ok(!bad({ target: idx, traded: traded({ target: { ...ce, side: 'STRADDLE' } }) }).ok, 'a straddle');
+  assert.ok(!bad({ target: idx, traded: traded({ entryPremium: 0 }) }).ok, 'no premium: P&L could not be measured');
+  assert.ok(!bad({ target: idx, traded: traded({ ids: 'IDX_I:13' }) }).ok);
+  assert.ok(!bad({ traded: traded() }).ok, 'a future chart trades itself');
+  assert.ok(!bad({ target: idx, traded: traded(), pyramidMax: 3 }).ok, 'no adds on an option row');
+});
+
+test('index row: P&L is the OPTION\'s, on its own side (a short CE that fell 30 x 65 = +1950); no exit premium = 0, said in the note', () => {
+  let l = run(EMPTY_LEDGER, { op: 'open', row: irow() });
+  l = run(l, { op: 'close', id: 'r1', exitT: 2000, exitPrice: 24900, reason: 'reversal', exitPremium: 90 });
+  assert.equal(l.rows[0].pnl, 1950);
+  assert.equal(l.rows[0].exitPrice, 24900, 'the chart\'s exit level stays the index');
+  let m = run(EMPTY_LEDGER, { op: 'open', row: irow() });
+  m = run(m, { op: 'close', id: 'r1', exitT: 2000, exitPrice: 24900, reason: 'eod' });
+  assert.equal(m.rows[0].pnl, 0);
+  assert.match(m.rows[0].note ?? '', /no option price/);
+});
+
+test('index row, REAL fills: the broker\'s fills replace the PREMIUMS within the band, the index levels never move', () => {
+  let l = run(EMPTY_LEDGER, { op: 'open', row: irow({ mode: 'REAL', state: 'entering' }) });
+  l = run(l, { op: 'confirmEntry', id: 'r1', legs: [{ label: 'CE', key: '40001', units: 65 }] });
+  assert.ok(!applyAutoOp(l, { op: 'fillPrice', id: 'r1', which: 'entry', price: 25010, legCount: 1 }).ok, 'an index-scale price is refused (band)');
+  l = run(l, { op: 'fillPrice', id: 'r1', which: 'entry', price: 118, legCount: 1 });
+  assert.deepEqual([l.rows[0].traded?.entryPremium, l.rows[0].traded?.entryDecision, l.rows[0].entryPrice], [118, 120, 25010]);
+  l = run(l, { op: 'beginExit', id: 'r1', t: 1500 });
+  l = run(l, { op: 'close', id: 'r1', exitT: 2000, exitPrice: 24900, reason: 'reversal', exitPremium: 90 });
+  l = run(l, { op: 'fillPrice', id: 'r1', which: 'exit', price: 92, legCount: 1 });
+  assert.equal(l.rows[0].pnl, (118 - 92) * 65);
+});
+
+test('index row, REAL: one direction per OPTION and broker - compared on the option, not on the chart', () => {
+  const l = run(EMPTY_LEDGER, { op: 'open', row: irow({ mode: 'REAL', state: 'entering' }) });   // chart 1: short the CE
+  const longCe = applyAutoOp(l, { op: 'open', row: row({ id: 'r2', chart: 2, mode: 'REAL', state: 'entering', target: ce, side: 'BUY' }) });
+  assert.ok(!longCe.ok && /net against/.test(longCe.error), 'a CE chart going long the same CE nets against it');
+  assert.ok(applyAutoOp(l, { op: 'open', row: row({ id: 'r3', chart: 2, mode: 'REAL', state: 'entering', target: ce, side: 'SELL' }) }).ok);
+});
+
+test('an index arming is saved only with its option map', () => {
+  const settings = { interval: 1 };
+  const arm = (run: Record<string, unknown>) => ({ mode: 'PAPER', broker: 'dhan', targetKey: 'index|NIFTY|||', day: '2026-10-30', t: 1, watermarkT: 1, lots: 1, run });
+  const map = { bull: { action: 'BUY', opt: 'CE', offset: 0 }, bear: { action: 'BUY', opt: 'PE', offset: 0 }, expiry: 'NEAREST' };
+  const led = (r: Record<string, unknown>) => parseLedger({ rev: 1, rows: [], log: [], arms: { 1: arm(r) } });
+  assert.ok(led({ target: idx, settings, volume: false, indexMap: map }).arms?.['1']?.run?.indexMap);
+  assert.equal(led({ target: idx, settings, volume: false }).arms?.['1']?.run, undefined, 'no map: no run (the engine disarms it)');
+});
+
+test('index row, REAL: an exit booked with no option price takes the broker\'s exit fill, and the P&L follows', () => {
+  let l = run(EMPTY_LEDGER, { op: 'open', row: irow({ mode: 'REAL', state: 'entering' }) });
+  l = run(l, { op: 'confirmEntry', id: 'r1', legs: [{ label: 'CE', key: '40001', units: 65 }] });
+  l = run(l, { op: 'beginExit', id: 'r1', t: 1500 });
+  l = run(l, { op: 'close', id: 'r1', exitT: 2000, exitPrice: 24900, reason: 'eod' });
+  assert.equal(l.rows[0].pnl, 0);
+  l = run(l, { op: 'fillPrice', id: 'r1', which: 'exit', price: 95, legCount: 1 });
+  assert.equal(l.rows[0].pnl, (120 - 95) * 65);
+});

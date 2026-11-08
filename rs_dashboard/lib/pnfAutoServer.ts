@@ -23,7 +23,8 @@ export function readAutoLedger(scope: PnfScope): AutoLedger {
 export function reservedByAuto(ledger: AutoLedger, broker: string, targetKey: string, legs: number, exceptChart?: 1 | 2, product: AutoProduct = 'INTRADAY'): number[] {
   const out = new Array<number>(legs).fill(0);
   for (const r of ledger.rows) {
-    if (!isLive(r) || r.mode !== 'REAL' || r.broker !== broker || r.targetKey !== targetKey) continue;
+    // an index chart's row holds its OPTION, not the chart's contract: it is kept per leg by reservedByAutoTraded instead
+    if (!isLive(r) || r.mode !== 'REAL' || r.broker !== broker || r.traded || r.targetKey !== targetKey) continue;
     if (autoProductOf(r.product) !== product) continue;   // each product's broker row keeps its own rows' units
     if (exceptChart !== undefined && r.chart === exceptChart) continue;       // the guarding chart's own row: it is the one being closed
     const sign = r.side === 'BUY' ? 1 : -1;
@@ -35,13 +36,28 @@ export function reservedByAuto(ledger: AutoLedger, broker: string, targetKey: st
 }
 
 /**
+ * What a page's live REAL AUTO rows on an INDEX chart hold of ONE option contract (`legKey`, a single CE / PE target key), signed, in broker
+ * units: a whole-contract close of that option (or of a straddle that has it as a leg) keeps it, like the index charts' manual held option.
+ */
+export function reservedByAutoTraded(ledger: AutoLedger, broker: string, legKey: string, product: AutoProduct = 'INTRADAY'): number {
+  let out = 0;
+  for (const r of ledger.rows) {
+    if (!isLive(r) || r.mode !== 'REAL' || r.broker !== broker || r.traded?.targetKey !== legKey || autoProductOf(r.product) !== product) continue;
+    out += (r.traded.action === 'BUY' ? 1 : -1) * (Number(r.legs[0]?.units) || 0);
+  }
+  return out;
+}
+
+/**
  * The product of the AUTO row an `exitOwn` order is closing, read from the ledger, never from the request: the REAL rows reserved for an
  * exit (`exiting`) on this broker and contract whose closing side is `side`. null when there is none, or when such rows disagree (the
  * request's own product is used then). A tab still running an older bundle sends no product, and would otherwise exit an NRML row as MIS.
  */
 export function exitingAutoProduct(ledger: AutoLedger, broker: string, targetKey: string, side: 'BUY' | 'SELL'): AutoProduct | null {
+  // matched on the contract the row TRADES (an index chart's row: its option, on the option's own side)
   const products = new Set(ledger.rows
-    .filter(r => r.mode === 'REAL' && r.state === 'exiting' && r.broker === broker && r.targetKey === targetKey && (r.side === 'BUY' ? 'SELL' : 'BUY') === side)
+    .filter(r => r.mode === 'REAL' && r.state === 'exiting' && r.broker === broker && (r.traded?.targetKey ?? r.targetKey) === targetKey
+      && ((r.traded?.action ?? r.side) === 'BUY' ? 'SELL' : 'BUY') === side)
     .map(r => autoProductOf(r.product)));
   return products.size === 1 ? [...products][0] : null;
 }
