@@ -108,15 +108,19 @@ export function useTradedLive(ids: string | null): { ltp: number | null; changed
   const [q, setQ] = useState<{ ids: string; ltp: number | null; changedMs: number | null } | null>(null);
   useEffect(() => {
     if (!ids) return;
-    let dead = false;
+    let dead = false, fails = 0;
+    // A price that cannot be refreshed is dropped (null) after 3 failed polls: a PAPER fill or a P&L must never run on a frozen premium.
+    const miss = () => { if (++fails >= 3 && !dead) setQ(prev => (prev && prev.ids === ids ? { ids, ltp: null, changedMs: null } : prev)); };
     const poll = async () => {
       try {
         const res = await fetch(`/api/straddle-pnf/live?ids=${ids}`);
         const j = await res.json() as { success?: boolean; legs?: { quote: { ltp: number; changedMs: number } | null; last: { ltp: number } | null }[] };
-        if (dead || !j.success || !j.legs?.[0]) return;
+        if (dead) return;
+        if (!j.success || !j.legs?.[0]) return void miss();
         const l = j.legs[0];
+        fails = 0;
         setQ({ ids, ltp: l.quote?.ltp ?? l.last?.ltp ?? null, changedMs: l.quote?.changedMs ?? null });
-      } catch { /* keeps the last price */ }
+      } catch { miss(); }
     };
     void poll();
     const id = setInterval(poll, 1_000);

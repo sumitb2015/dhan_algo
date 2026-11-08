@@ -11,7 +11,7 @@
 //   Pyramid adds (Renko, opt-in): open → adding (beginAdd) → open (confirmAdd | voidAdd) | unknownAdd (markUnknown) → open (resolve
 //   'added' | 'notAdded'). PAPER adds in one step (addPaper). `entryPrice` is the AVERAGE entry and lots / unitsPerPoint / legs the
 //   TOTALS, so every P&L reader (rowPnl) and every exit (sized by legs[].units) covers the whole position.
-import { parseTarget, targetKey, type Target } from './pnfTarget.ts';
+import { parseTarget, targetKey, parseOptionIds, type Target } from './pnfTarget.ts';
 import { MAX_PNF_LOTS } from './pnfOrderLogic.ts';
 import type { Market } from './straddlePnfLive.ts';
 import type { AutoProduct } from './pnfOrderLogic.ts';
@@ -220,6 +220,11 @@ export const rowPnl = (side: 'BUY' | 'SELL', entry: number, exit: number, unitsP
   (side === 'BUY' ? exit - entry : entry - exit) * unitsPerPoint;
 
 /** The contract a row's P&L is priced on: the option an index chart traded, else the chart's own contract. */
+/** The side of the contract a row actually HOLDS (an index chart's row: its option's own side, not the chart's). The one accessor: read this, not `row.side`. */
+export const heldSide = (r: Pick<AutoRow, 'side' | 'traded'>): 'BUY' | 'SELL' => r.traded?.action ?? r.side;
+/** The side that closes it. */
+export const closingSide = (r: Pick<AutoRow, 'side' | 'traded'>): 'BUY' | 'SELL' => (heldSide(r) === 'BUY' ? 'SELL' : 'BUY');
+
 export const pricedKey = (r: Pick<AutoRow, 'targetKey' | 'traded'>) => r.traded?.targetKey ?? r.targetKey;
 
 /** An open row's P&L at `px`, the price of `pricedKey(r)` (an index chart's row: the option's premium, on the option's own side). */
@@ -230,7 +235,6 @@ export const markPnl = (r: Pick<AutoRow, 'side' | 'entryPrice' | 'unitsPerPoint'
 const closePnl = (r: AutoRow, exitPrice: number, exitPremium: number | undefined) =>
   r.traded ? (finite(exitPremium) ? rowPnl(r.traded.action, r.traded.entryPremium, exitPremium!, r.unitsPerPoint) : 0) : rowPnl(r.side, r.entryPrice, exitPrice, r.unitsPerPoint);
 
-const IDS_RE = /^(NSE_FNO|MCX_COMM):\d{1,9}$/;
 /** A valid `traded` for an index chart's row, or why not. */
 function tradedOk(index: Target, t: unknown): AutoTraded | string {
   if (!t || typeof t !== 'object') return 'An index chart\'s AUTO row needs the option it trades';
@@ -238,7 +242,7 @@ function tradedOk(index: Target, t: unknown): AutoTraded | string {
   const target = parseTarget(o.target);
   if (!target || !tradedOf(index, target)) return 'The traded option must be a CE / PE of the index';
   if (o.action !== 'BUY' && o.action !== 'SELL') return 'traded.action must be BUY or SELL';
-  if (typeof o.ids !== 'string' || !IDS_RE.test(o.ids)) return 'traded.ids is invalid';
+  if (typeof o.ids !== 'string' || !parseOptionIds(o.ids)) return 'traded.ids is invalid';
   if (!finite(o.entryPremium) || !(o.entryPremium! > 0)) return 'traded.entryPremium must be a positive price';
   return { target, targetKey: targetKey(target), action: o.action, ids: o.ids, entryPremium: o.entryPremium! };
 }
@@ -392,8 +396,8 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       // would close both as flat) and each exit would open a position the other owns. One direction per contract and broker.
       // Compared on the contract actually TRADED (an index chart's option), in that contract's own direction.
       const tk = traded ? traded.targetKey : targetKey(target);
-      const dirOf = (x: Pick<AutoRow, 'side' | 'traded'>) => x.traded?.action ?? x.side;
-      const myDir = traded ? traded.action : r.side;
+      const dirOf = heldSide;
+      const myDir = heldSide({ side: r.side, traded: traded ?? undefined });
       const against = r.mode === 'REAL' && led.rows.find(x => x.mode === 'REAL' && isLive(x) && x.broker === r.broker && pricedKey(x) === tk && dirOf(x) !== myDir);
       if (against) return { ok: false, status: 409, error: `Chart ${against.chart} holds a REAL ${dirOf(against)} on this contract: an opposite AUTO position would net against it at the broker` };
       return bump([...led.rows, { ...r, target, targetKey: targetKey(target), ...(traded ? { traded } : {}), state: r.mode === 'REAL' ? 'entering' : 'open', pendingSince: r.mode === 'REAL' ? r.entryT : undefined }]);
@@ -483,7 +487,7 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       rows[i] = {
         ...settled, state: 'closed', exitT: op.exitT, exitPrice: op.exitPrice, reason: op.reason, pnl: r.traded ? closePnl(settled, op.exitPrice, exitPremium) : rowPnl(r.side, settled.entryPrice, op.exitPrice, settled.unitsPerPoint),
         ...(r.traded ? { traded: { ...r.traded, ...(exitPremium !== undefined ? { exitPremium } : {}) } } : {}),
-        note: op.note ?? (r.traded && exitPremium === undefined ? 'no option price at the exit: P&L shown as 0 (see the broker book)' : r.note), ...(finite(op.exitBarT) ? { exitBarT: op.exitBarT } : {}), ...(finite(op.exitBox) ? { exitBox: op.exitBox } : {}),
+        note: [op.note ?? (r.traded && exitPremium === undefined ? undefined : r.note), r.traded && exitPremium === undefined ? 'no option price at the exit: P&L shown as 0 (see the broker book)' : undefined].filter(Boolean).join(' - ') || undefined, ...(finite(op.exitBarT) ? { exitBarT: op.exitBarT } : {}), ...(finite(op.exitBox) ? { exitBox: op.exitBox } : {}),
         ...(finite(op.trailBest) ? { trailBest: op.trailBest } : {}),
         ...(cleanIds(op.orderIds) ? { exitOrderIds: cleanIds(op.orderIds) } : {}),
       };

@@ -6,7 +6,7 @@
 import { autoProductOf, decideAdd, decideAuto, reentryBlockOf, rowMarket, trailBest, trailLevel, trailOf, type AutoProduct } from './pnfAuto.ts';
 import { ignoredByFilter, skippedBrick, SIDE_LABEL, withSide, type AutoRule, type AutoSide } from './pnfAutoRule.ts';
 import { isSellSignal } from './straddlePnf.ts';
-import { isLive, PYRAMID_HARD_MAX, type AutoLedger, type AutoLeg, type AutoOp, type AutoRow } from './pnfAutoLedger.ts';
+import { closingSide, isLive, PYRAMID_HARD_MAX, type AutoLedger, type AutoLeg, type AutoOp, type AutoRow } from './pnfAutoLedger.ts';
 import { istDateIso } from './nseHolidays.ts';
 import { targetKey, type Target } from './pnfTarget.ts';
 import { fullFillAvg, type OrderPriceRead } from './tradedPriceClient.ts';
@@ -95,11 +95,16 @@ export interface ChartInputs {
   indexMap?: IndexMap;
 }
 
+const RESOLVE_BACKOFF_MS = 10_000, RESOLVE_MAX_FAILS = 6;
+
 export class ChartEngine {
   note = '';
   halt: string | null = null;
   private busy = false;
   private rejects = 0;
+  /** An index chart's option lookup that failed: not asked again for a while (each ask is a spot + chain + option quote on the shared lane), and given up after a few. */
+  private resolveFails = 0;
+  private resolveRetryAt = 0;
   private exitRetryAt = 0;
   private watermark = 0;
   /**
@@ -137,7 +142,7 @@ export class ChartEngine {
     if (fresh || p.side !== side) this.ignored = '';
     if (fresh || p.rule !== rule) this.skipped = null;
     this.watermark = fresh ? arm.watermarkT : Math.max(this.watermark, arm.watermarkT);
-    if (fresh && arm.on) { this.halt = null; this.rejects = 0; }
+    if (fresh && arm.on) { this.halt = null; this.rejects = 0; this.resolveFails = 0; this.resolveRetryAt = 0; }
   }
 
   rowOf(ledger: AutoLedger): AutoRow | undefined { return ledger.rows.find(r => r.chart === this.chart && isLive(r)); }
@@ -231,11 +236,21 @@ export class ChartEngine {
     let info = i.info, traded: AutoRow['traded'] | undefined, pyramid = i.pyramid;
     if (target.kind === 'index') {
       if (!i.indexMap || !this.deps.resolveIndex || !this.deps.premium) { this.note = 'no option map saved with this arming'; return null; }
+      if (this.deps.nowMs() < this.resolveRetryAt) return this.note ?? 'waiting to retry the option lookup';
       const r = await this.deps.resolveIndex(broker, target, i.indexMap, side === 'BUY' ? 'bull' : 'bear').catch((e: Error) => `option lookup failed (${e.message})`);
-      if (typeof r === 'string') { this.note = r; return r; }
-      if (!(r.premium && r.premium > 0)) { this.note = `no price for ${r.traded.strike} ${r.traded.side} yet`; return `no price for the ${r.traded.strike} ${r.traded.side} option yet`; }
+      const why = typeof r === 'string' ? r : !(r.premium && r.premium > 0) ? `no price for the ${r.traded.strike} ${r.traded.side} option yet` : null;
+      if (why !== null) {
+        this.resolveFails += 1;
+        // a mapping that keeps failing (a strike that is not listed, an option with no quote) is not retried every tick: back off, then stop
+        if (this.resolveFails >= RESOLVE_MAX_FAILS) { this.resolveFails = 0; this.resolveRetryAt = 0; this.haltNow(`${why} - gave up after ${RESOLVE_MAX_FAILS} tries; check the option map`); return null; }
+        this.resolveRetryAt = this.deps.nowMs() + RESOLVE_BACKOFF_MS;
+        this.note = why;
+        return why;
+      }
+      this.resolveFails = 0; this.resolveRetryAt = 0;
+      if (typeof r === 'string') return null;
       info = { legs: r.legs, unsupported: r.unsupported };
-      traded = { target: r.traded, targetKey: targetKey(r.traded), action: r.action, ids: r.ids, entryPremium: r.premium };
+      traded = { target: r.traded, targetKey: targetKey(r.traded), action: r.action, ids: r.ids, entryPremium: r.premium as number };
       pyramid = undefined;                                       // an option row on an index chart has no adds
     }
     if (!info || !info.legs.length) { this.note = 'waiting for the contract lookup'; return 'the contract lookup has not answered'; }
@@ -314,7 +329,7 @@ export class ChartEngine {
     const side = r.side === 'BUY' ? 'SELL' : 'BUY';
     // An index chart's row exits its OPTION, on the option's own closing side, and books the option's price at the decision.
     const contract = r.traded ? r.traded.target : r.target;
-    const exitSide = r.traded ? (r.traded.action === 'BUY' ? 'SELL' : 'BUY') : side;
+    const exitSide = closingSide(r);
     const premium = r.traded && this.deps.premium ? await this.deps.premium(r.traded.ids).catch(() => null) : null;
     const premField = premium && premium > 0 ? { exitPremium: premium } : {};
     const premTxt = r.traded ? ` → ${exitSide} ${r.traded.target.strike} ${r.traded.target.side}${premium ? ` @ ${premium.toFixed(2)}` : ''}` : '';

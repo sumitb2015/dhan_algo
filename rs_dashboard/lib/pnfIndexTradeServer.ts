@@ -5,7 +5,7 @@ import type { WantedPair } from '@/lib/pnfWanted';
 import { brokerLegs, resolvePnfLegs } from '@/lib/pnfOrderServer';
 import { mappedTarget, type IndexDir, type IndexMap } from '@/lib/pnfIndexMap';
 import type { PnfAction, PnfBroker } from '@/lib/pnfOrderLogic';
-import type { Target } from '@/lib/pnfTarget';
+import { parseOptionIds, type Target } from '@/lib/pnfTarget';
 
 // Server side of the Renko index -> option mapping (lib/pnfIndexMap.ts): the index's spot, the ATM +/- N option of the mapped side, and
 // that option's legs on the broker. Read-only: no order is placed here. The order then goes through the ordinary order route with the
@@ -71,14 +71,13 @@ export async function resolveIndexTrade(broker: PnfBroker, index: Target, map: I
   };
 }
 
-const IDS_RE = /^(NSE_FNO|MCX_COMM):(\d{1,9})$/;
 /**
  * An option's price now (`SEG:ID`), for an index chart's AUTO row: the bridge's price when it ticked recently, else one Dhan quote through
  * the shared lane. The option is also asked of the bridge (under `asker`), so its price keeps streaming while the row holds it.
  */
 export async function premiumOf(ids: string, asker = `premium:${ids}`, now = Date.now()): Promise<number | null> {
-  const m = IDS_RE.exec(ids);
+  const m = parseOptionIds(ids);
   if (!m) return null;
-  try { askBridge(asker, [[m[1], m[2]]] as WantedPair[], now); } catch { /* the quote below still answers */ }
-  return (await priceOf(m[1] as 'NSE_FNO' | 'MCX_COMM', m[2], now))?.price ?? null;
+  try { askBridge(asker, [[m.segment, m.securityId]] as WantedPair[], now); } catch { /* the quote below still answers */ }
+  return (await priceOf(m.segment, m.securityId, now))?.price ?? null;
 }

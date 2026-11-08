@@ -7,7 +7,7 @@ import {
   daySummary, newestFirst, toOrderRow, toPositionRow, toTradeRow, type OrderRow, type OrderState, type PositionRow, type TradeRow,
 } from '@/lib/pnfBooks';
 import { targetLabel } from '@/lib/pnfTarget';
-import { autoDaySummary, holdsPosition, markPnl, pricedKey, type AutoRow } from '@/lib/pnfAutoLedger';
+import { autoDaySummary, heldSide, holdsPosition, markPnl, pricedKey, type AutoRow } from '@/lib/pnfAutoLedger';
 import type { PaperTradeRow } from '@/lib/pnfPaperBook';
 
 // Positions, order book, trade book and the day's P&L for the page header's broker, docked at the bottom of the page.
@@ -164,7 +164,7 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [],
                 <td className="px-2 py-1 font-sans text-zinc-100" title={r.traded ? `Traded from the ${targetLabel(r.target)} index chart (${r.side === 'BUY' ? 'bullish' : 'bearish'}): index ${fmt(r.entryPrice)} → ${r.exitPrice === undefined ? '—' : fmt(r.exitPrice)}` : undefined}>
                   {targetLabel(r.traded?.target ?? r.target)}{r.traded && <span className="text-zinc-500"> · via {r.target.symbol}</span>}</td>
                 <td className={`px-2 py-1 font-bold ${r.mode === 'REAL' ? 'text-red-400' : 'text-zinc-400'}`}>{r.mode}</td>
-                <td className={`px-2 py-1 font-bold ${sideTone(r.traded?.action ?? r.side)}`}>{r.traded?.action ?? r.side}</td>
+                <td className={`px-2 py-1 font-bold ${sideTone(heldSide(r))}`}>{heldSide(r)}</td>
                 <td className="px-2 py-1 text-right">{r.lots}</td>
                 <td className="px-2 py-1 text-right">{fmt(r.traded ? r.traded.entryPremium : r.entryPrice)}</td>
                 <td className="px-2 py-1 text-right">{r.traded ? (r.traded.exitPremium === undefined ? '—' : fmt(r.traded.exitPremium)) : r.exitPrice === undefined ? '—' : fmt(r.exitPrice)}</td>
@@ -185,7 +185,7 @@ export default function BrokerBooks({ broker, open, onOpenChange, autoRows = [],
             <Table empty="" head={['Instrument', 'Chart', 'Net', 'Entry', 'LTP', 'Unrealised']} right={[2, 3, 4, 5]}>
               {paperOpen.map(r => {
                 const px = autoPrice(pricedKey(r));
-                const net = ((r.traded?.action ?? r.side) === 'BUY' ? 1 : -1) * (r.legs[0]?.units ?? r.lots);
+                const net = (heldSide(r) === 'BUY' ? 1 : -1) * (r.legs[0]?.units ?? r.lots);
                 return (
                   <tr key={r.id} className="border-b border-zinc-800/60">
                     <td className="px-2 py-1 font-sans text-zinc-100">{targetLabel(r.traded?.target ?? r.target)}{r.traded && <span className="text-zinc-500"> · via {r.target.symbol}</span>}</td>

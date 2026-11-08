@@ -1,8 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { parseHeld, type HeldLedger } from '@/lib/pnfIndexHeld';
-import { PROJECT_ROOT } from '@/lib/pyExec';
-import type { PnfScope } from '@/lib/pnfScope';
+import { parseHeld, type HeldLedger } from './pnfIndexHeld.ts';
+import { PROJECT_ROOT } from './pyExec.ts';
+import type { PnfScope } from './pnfScope.ts';
 
 // The index charts' held-option ledger files (lib/pnfIndexHeld.ts): debug/renko_index_held.json and debug/pnf_index_held.json. Read by the
 // ledger route and by the order route, whose whole-contract close keeps the units an index chart holds of that contract.

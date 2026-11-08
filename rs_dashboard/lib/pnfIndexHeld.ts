@@ -9,7 +9,7 @@
 // or a doubled order. `confirm` books the pending quantity into `units`; `void` drops it (refused); an unclear reply is 'unknown' and is
 // settled by the user (`resolve` done / none), never resent. A row whose own quantity reaches 0 is removed.
 
-import { parseTarget, targetKey, type Target } from './pnfTarget.ts';
+import { parseTarget, targetKey, parseOptionIds, type Target } from './pnfTarget.ts';
 import { tradedOf, type IndexDir } from './pnfIndexMap.ts';
 import type { PnfAction, PnfBroker } from './pnfOrderLogic.ts';
 
@@ -62,7 +62,6 @@ export type HeldOpIn = HeldOp extends infer T ? T extends HeldOp ? Omit<T, 'now'
 export type HeldResult = { ok: true; ledger: HeldLedger; row?: HeldRow | null } | { ok: false; error: string; status: number };
 
 const ID_RE = /^[A-Za-z0-9:_-]{1,80}$/;
-const IDS_RE = /^(NSE_FNO|MCX_COMM):\d{1,9}$/;
 const MAX_ROWS = 50;
 /** No order from this page is this big (20 lots x the largest index lot): a quantity past it is a bug, refused. */
 const MAX_UNITS = 100_000;
@@ -80,7 +79,7 @@ function parseRow(v: unknown): HeldRow | null {
   if (o.action !== 'BUY' && o.action !== 'SELL') return null;
   if (o.product !== 'INTRADAY' && o.product !== 'MARGIN') return null;
   if (o.state !== 'sending' && o.state !== 'open' && o.state !== 'unknown') return null;
-  if (!traded || typeof o.ids !== 'string' || !IDS_RE.test(o.ids)) return null;
+  if (!traded || typeof o.ids !== 'string' || !parseOptionIds(o.ids)) return null;
   const index = o.indexKey.split('|');
   if (index[0] !== 'index' || !tradedOf({ symbol: index[1] ?? '' }, traded)) return null;
   const units = Number(o.units), pending = Number(o.pending);

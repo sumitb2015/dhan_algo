@@ -1,9 +1,11 @@
 import fs from 'fs';
 import path from 'path';
-import { applyAutoOp, isLive, parseLedger, pendingAddUnits, type AutoLedger, type AutoOp } from './pnfAutoLedger.ts';
+import { applyAutoOp, closingSide, isLive, parseLedger, pendingAddUnits, type AutoLedger, type AutoOp } from './pnfAutoLedger.ts';
 import { withFileLock, writeJsonAtomic } from './lockedJsonFile.ts';
 import type { PnfScope } from './pnfScope.ts';
 import { autoProductOf, type AutoProduct } from './pnfOrderLogic.ts';
+import { readIndexHeld } from './pnfIndexHeldServer.ts';
+import { targetKey as keyOfTarget } from './pnfTarget.ts';
 
 // The P&F / Renko AUTO ledger files (debug/pnf_auto_state.json, debug/renko_auto_state.json), read by the ledger route and by the
 // order route, which keeps a close on one page from taking the quantity the OTHER page's AUTO holds on the same contract.
@@ -57,7 +59,7 @@ export function exitingAutoProduct(ledger: AutoLedger, broker: string, targetKey
   // matched on the contract the row TRADES (an index chart's row: its option, on the option's own side)
   const products = new Set(ledger.rows
     .filter(r => r.mode === 'REAL' && r.state === 'exiting' && r.broker === broker && (r.traded?.targetKey ?? r.targetKey) === targetKey
-      && ((r.traded?.action ?? r.side) === 'BUY' ? 'SELL' : 'BUY') === side)
+      && closingSide(r) === side)
     .map(r => autoProductOf(r.product)));
   return products.size === 1 ? [...products][0] : null;
 }
@@ -70,6 +72,13 @@ export async function applyAutoLedgerOp(scope: PnfScope, op: AutoOp): Promise<{ 
   const file = autoFileFor(scope);
   try {
     return await withFileLock(`${file}.lock`, 5_000, scope === 'renko' ? 'Renko AUTO ledger' : 'P&F AUTO ledger', () => {
+      // A REAL option row on an index chart must not net against the OTHER ledger: the manual held option (renko_index_held.json) on the same
+      // option at the same broker, in the opposite direction, would be netted into one broker position that neither side's exit can size.
+      if (op.op === 'open' && op.row.mode === 'REAL' && op.row.traded) {
+        const t = op.row.traded;
+        const against = readIndexHeld(scope).rows.find(h => h.broker === op.row.broker && keyOfTarget(h.traded) === t.targetKey && h.action !== t.action && (h.units > 0 || h.pending !== 0));
+        if (against) return { ok: false as const, error: `Chart ${against.chart} holds a manual ${against.action} on this option: an opposite AUTO position would net against it at the broker` };
+      }
       const r = applyAutoOp(readAutoLedger(scope), op);
       if (!r.ok) return { ok: false as const, error: r.error };
       writeJsonAtomic(file, r.ledger);

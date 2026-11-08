@@ -57,7 +57,7 @@ import { detectTriangles, type PnfTriangle } from '@/lib/pnfTriangle';
 import { isSellSignal } from '@/lib/straddlePnf';
 import type { PnfScope } from '@/lib/pnfScope';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent, type AutoPyramid } from './straddlePnf/usePnfAuto';
-import { autoDaySummary, autoMarkers, holdsPosition, isLive, PYRAMID_HARD_MAX, rowPnl } from '@/lib/pnfAutoLedger';
+import { autoDaySummary, autoMarkers, holdsPosition, heldSide, isLive, markPnl, PYRAMID_HARD_MAX, rowPnl } from '@/lib/pnfAutoLedger';
 import AutoControls, { type AutoRule } from './straddlePnf/AutoControls';
 import { AUTO_PRODUCT_LABEL, autoProductOf, autoWindow, pyramidEveryOf, rowMarket, TRAIL_BOXES_MAX, TRAIL_BOXES_MIN, type AutoProduct } from '@/lib/pnfAuto';
 import { guardLevelsText, syncGuardFromServer, type ServerGuardView } from '@/lib/pnfServerGuardView';
@@ -780,6 +780,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       adjustBusyRef.current[c] = false;
     }
   };
+  // (hoisted above the guard: an index chart's PAPER row is marked on its option's premium, read here)
+  const autoTraded1 = autoLedger.rows.find(r => r.chart === 1 && isLive(r) && r.traded)?.traded ?? null;
+  const autoTraded2 = autoLedger.rows.find(r => r.chart === 2 && isLive(r) && r.traded)?.traded ?? null;
+  const autoOpt1 = useTradedLive(autoTraded1?.ids ?? null), autoOpt2 = useTradedLive(autoTraded2?.ids ?? null);
   // The guard watches AUTO's PAPER position too: it lives in the AUTO ledger, not the trade bar's paper book. A REAL AUTO position is
   // already in the broker's book, which `positions` reads.
   const guardPositions: Record<string, LadderPosition | null> = { ...positions };
@@ -787,7 +791,13 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     for (const rc of railCharts) {
       const r = autoLedger.rows.find(x => x.mode === 'PAPER' && x.state === 'open' && x.chart === rc.chart && x.targetKey === rc.targetKey);
       if (r && !guardPositions[rc.targetKey]) {
-        guardPositions[rc.targetKey] = { side: r.side === 'SELL' ? 'SHORT' : 'LONG', lots: r.lots, avg: r.entryPrice, entryPnl: 0, pnl: rc.price != null && rc.price > 0 ? rowPnl(r.side, r.entryPrice, rc.price, r.unitsPerPoint) : null };
+        // An index chart's row holds an OPTION: its side, entry and P&L are the option's (premium from the bridge), never the index's.
+        const opt = r.traded ? (rc.chart === 1 ? autoOpt1 : autoOpt2).ltp : null;
+        const side = heldSide(r);
+        guardPositions[rc.targetKey] = {
+          side: side === 'SELL' ? 'SHORT' : 'LONG', lots: r.lots, avg: r.traded ? r.traded.entryPremium : r.entryPrice, entryPnl: 0,
+          pnl: r.traded ? (opt != null && opt > 0 ? markPnl(r, opt) : null) : rc.price != null && rc.price > 0 ? rowPnl(r.side, r.entryPrice, rc.price, r.unitsPerPoint) : null,
+        };
       }
     }
   }
@@ -1009,9 +1019,6 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   /* eslint-enable react-hooks/set-state-in-effect */
   // An open AUTO row is marked at the price of a chart showing its contract (null when neither chart does).
   // An index chart's AUTO row holds an OPTION: its premium is read here (the chart only has the index), for the row's P&L everywhere.
-  const autoTraded1 = autoLedger.rows.find(r => r.chart === 1 && isLive(r) && r.traded)?.traded ?? null;
-  const autoTraded2 = autoLedger.rows.find(r => r.chart === 2 && isLive(r) && r.traded)?.traded ?? null;
-  const autoOpt1 = useTradedLive(autoTraded1?.ids ?? null), autoOpt2 = useTradedLive(autoTraded2?.ids ?? null);
   const autoPrice = (k: string) => (k === targetKey(target1) ? priceOf(feed1) : dual && k === targetKey(target2) ? priceOf(feed2)
     : autoTraded1 && k === autoTraded1.targetKey ? autoOpt1.ltp : autoTraded2 && k === autoTraded2.targetKey ? autoOpt2.ltp : null);
   // An AUTO position still open from an earlier day (a missed end-of-day exit, e.g. an NRML row carried overnight): AUTO never exits an earlier

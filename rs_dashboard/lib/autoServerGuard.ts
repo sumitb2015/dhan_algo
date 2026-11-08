@@ -4,7 +4,7 @@
 // (its P&L is 0 at entry), so no baseline has to survive a restart. Pure (tested in lib/autoServerGuard.test.ts).
 import { evalGuard, type LadderGuard } from './priceLadderGuard.ts';
 import { effectiveGuard, noteBoxes } from './pnfGuardBoxes.ts';
-import { holdsPosition, rowPnl, type AutoRow } from './pnfAutoLedger.ts';
+import { closingSide, holdsPosition, rowPnl, type AutoRow } from './pnfAutoLedger.ts';
 import { autoProductOf, planOwnExit, type BookRow, type PnfBroker } from './pnfOrderLogic.ts';
 
 /** The guard levels the page syncs to the server (the runtime fields - peak, floor, tripped - are the server's own). */
@@ -71,7 +71,7 @@ export const runtimeKey = (scope: string, chart: number, rowId: string) => `${sc
 export function ownHeldQty(row: Pick<AutoRow, 'side' | 'legs' | 'product' | 'traded'>, book: BookRow[], broker: PnfBroker): number | null {
   if (row.legs.length === 0 || row.legs.some(l => !l.key)) return null;
   // an index chart's row holds its option on the OPTION's own side (a bearish SELL CE is a short)
-  const closing = (row.traded?.action ?? row.side) === 'BUY' ? 'SELL' : 'BUY';
+  const closing = closingSide(row);
   return row.legs.reduce((n, l) => n + planOwnExit(l.key as string, book, closing, l.units, broker, autoProductOf(row.product)).qty, 0);
 }
 

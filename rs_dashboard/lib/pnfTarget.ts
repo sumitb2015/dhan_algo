@@ -116,3 +116,11 @@ export function restoreChart(rawTargets: string | null, rawSegment: string | nul
 
 /** The saved active chart: 2 only when it says so. */
 export const parseActiveChart = (raw: string | null): 1 | 2 => (raw === '2' ? 2 : 1);
+
+/** An option contract handle `SEG:ID` (an index chart's traded option). The ONE parser: a new segment (e.g. BSE_FNO) is added here only. */
+const OPTION_IDS_RE = /^(NSE_FNO|MCX_COMM):(\d{1,9})$/;
+export function parseOptionIds(ids: unknown): { segment: 'NSE_FNO' | 'MCX_COMM'; securityId: string } | null {
+  if (typeof ids !== 'string') return null;
+  const m = OPTION_IDS_RE.exec(ids);
+  return m ? { segment: m[1] as 'NSE_FNO' | 'MCX_COMM', securityId: m[2] } : null;
+}

@@ -178,8 +178,13 @@ export function usePnfTrade({
     : mapped ? (ownLots > 0 ? [(held!.action === 'BUY' ? 1 : -1) * ownLots] : [])
     : mode === 'PAPER' ? paperLegs.map(l => l.lots) : brokerLots;
   const position = isIndex ? null : positionLots.length ? describePosition(positionLots, sides, isEquity) : null;
+  const brokerPnl = r && 'book' in r ? (r.book.unpriced > 0 ? r.book.total : liveRealPnl(r.book.total, r.lots, r.atPoll, prices, unitsPerLot)) : null;
+  // A mapped chart owns only part of the broker's strike when another page / strategy holds lots of it: its P&L is that share
+  // (pro rata on lots - the broker's own average is shared), never the whole strike's.
+  const brokerAbsLots = brokerLots.reduce((s, l) => s + Math.abs(l), 0);
   const shownPnl = mode === 'PAPER' ? (paperLegs.length ? paperTotal : null)
-    : r && 'book' in r ? (r.book.unpriced > 0 ? r.book.total : liveRealPnl(r.book.total, r.lots, r.atPoll, prices, unitsPerLot)) : null;
+    : mapped ? (brokerPnl === null || ownLots <= 0 || brokerAbsLots <= 0 ? null : brokerPnl * Math.min(1, ownLots / brokerAbsLots))
+    : brokerPnl;
   /** Paper: the average entry per leg (summed for a straddle); REAL has no average in the book reply. */
   const paperAvg = mode === 'PAPER' && paperLegs.some(l => l.lots !== 0) ? paperLegs.reduce((s, l) => s + (l.lots ? l.avg : 0), 0) : null;
   const realError = mode === 'REAL' && r && 'error' in r ? r.error : null;
@@ -530,6 +535,8 @@ export function usePnfTrade({
       if (!held || held.state !== 'open' || !ready || !(ownLots > 0)) return false;
       const n = Math.min(cap, Math.floor(ownLots)), dir = held.dir;
       if (!(n >= 1)) { toast.error('The held position is under one lot - Close it, then open the other side'); return false; }
+      // a close sends every held unit, but the re-entry is whole lots: a partial lot would silently shrink the position, so it is refused up front
+      if (Math.abs(ownLots - n) > 1e-6 || n > cap) { toast.error(`The held position is ${fmtLots(ownLots)} (not whole lots, or above the ${cap}-lot cap) - Close it, then open the other side`); return false; }
       if (!(await mappedClose())) return false;
       return enterMapped(otherDir(dir), n);
     }

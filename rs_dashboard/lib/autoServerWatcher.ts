@@ -10,13 +10,14 @@ import { sendOutcome, planOwnExit, type LegResult, type PnfBroker } from '@/lib/
 import { brokerPositionRows, brokerSessionOk } from '@/lib/priceLadderServer';
 import { CloseGuard } from '@/lib/priceLadderClose';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
-import { targetKey } from '@/lib/pnfTarget';
+import { targetKey, parseOptionIds } from '@/lib/pnfTarget';
 import { indexSpotId } from '@/lib/pnfContracts';
+import { premiumOf } from '@/lib/pnfIndexTradeServer';
 import { chartPrice, guards, ownHeldQty, runtimeKey, stepRow, stopHit, type RowRuntime, type ServerGuardCfg } from '@/lib/autoServerGuard';
 import { autoProductOf, autoWindow, rowMarket } from '@/lib/pnfAuto';
 import { istMinuteOfDay, sessionWindow } from '@/lib/straddlePnfLive';
 import { istDateIso } from '@/lib/nseHolidays';
-import { pendingAddUnits, type AutoOp } from '@/lib/pnfAutoLedger';
+import { closingSide, pendingAddUnits, type AutoOp } from '@/lib/pnfAutoLedger';
 import type { AutoRow } from '@/lib/pnfAutoLedger';
 import type { PnfScope } from '@/lib/pnfScope';
 import type { WantedPair } from '@/lib/pnfWanted';
@@ -145,7 +146,7 @@ async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: nu
     if (onBroker.length !== row.legs.length) return void await abort('the contract no longer matches the row');
     const rows = await brokerPositionRows(broker);
     if (!rows) return void await abort(`could not read the ${broker} positions`);
-    const side = (row.traded?.action ?? row.side) === 'BUY' ? 'SELL' : 'BUY';
+    const side = closingSide(row);
     const plans = onBroker.map((l, i) => ({ leg: l, ...planOwnExit(l.key, rows, side, row.legs[i].units + (pend[i] ?? 0), broker, autoProductOf(row.product)) }));
     // the broker held more than the confirmed units: the stuck add's lot was there (planOwnExit caps by the broker's own quantity)
     const pendingAdded = withPendingAdd ? plans.some((p, i) => p.qty > row.legs[i].units) : undefined;
@@ -158,6 +159,8 @@ async function exitRow(scope: PnfScope, snap: AutoRow, reason: string, price: nu
     const outcome = sendOutcome(results);
     if (outcome === 'placed' || outcome === 'flat') {
       attempts.delete(row.id);
+      // No bridge tick for the option: ask for one Dhan quote now (as the engine's own exit does) so the row is not booked with an unknown P&L.
+      if (row.traded && !(premium && premium > 0)) premium = await premiumOf(row.traded.ids, `autoserver:exit:${row.id}`).catch(() => null);
       // `rowReason`: an exit that is the row's own rule (its stop), recorded as the page records it so an open tab does not read it as a guard trip
       await mustApply(scope, row.id, { op: 'close', id: row.id, exitT: t(), exitPrice: price, reason: rowReason ?? `server guard: ${reason}`, note: outcome === 'flat' ? 'already flat at the broker' : rowReason ? 'sent by the server watcher' : undefined,
         orderIds: results.filter(r => r.status === 'placed' && r.orderId).map(r => String(r.orderId)), ...(pendingAdded !== undefined ? { pendingAdded } : {}),
@@ -307,10 +310,10 @@ async function tick(): Promise<void> {
       let ids: [string, string][], optIds: [string, string][] | null = null;
       if (tr) {
         const spot = indexSpotId(item.row.target.symbol);
-        const m = /^(NSE_FNO|MCX_COMM):(\d{1,9})$/.exec(tr.ids);
+        const m = parseOptionIds(tr.ids);
         if (!spot || !m) { await warn(item.scope, item.row, `cannot price the index or its option (${tr.ids}) - not watching`); continue; }
         ids = [['IDX_I', spot]];
-        optIds = [[m[1], m[2]]];
+        optIds = [[m.segment, m.securityId]];
       } else {
         const legs = resolvePnfLegs(item.row.target);
         if (typeof legs === 'string') { await warn(item.scope, item.row, `cannot resolve the contract (${legs}) - not watching`); continue; }

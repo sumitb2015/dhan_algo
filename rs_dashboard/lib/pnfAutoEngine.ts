@@ -17,7 +17,7 @@ import { buildConfirmedModel, withLive, type ConfirmedModel, type PanelModel } f
 import { effectiveInterval, hasLongIntervals, isTickInterval, tickBucketSec } from '@/lib/straddlePnfInterval';
 import { sessionWindow } from '@/lib/straddlePnfLive';
 import { istDateIso } from '@/lib/nseHolidays';
-import { targetKey, type Target } from '@/lib/pnfTarget';
+import { targetKey, parseOptionIds, type Target } from '@/lib/pnfTarget';
 import type { PnfScope } from '@/lib/pnfScope';
 import { premiumOf, resolveIndexTrade } from '@/lib/pnfIndexTradeServer';
 import { askBridge } from '@/lib/pnfLiveBridge';
@@ -272,8 +272,8 @@ async function stepChart(scope: PnfScope, chart: 1 | 2, ledger: AutoLedger, save
   // An index chart's open option row: its option is kept on the price bridge (its exit and P&L are priced on it, tab open or not).
   const held = row?.traded;
   if (held) {
-    const m = /^(NSE_FNO|MCX_COMM):(\d{1,9})$/.exec(held.ids);
-    if (m) { try { askBridge(`autoengine:${scope}:${chart}:opt`, [[m[1], m[2]]] as WantedPair[], nowMs); } catch { /* the exit quotes it */ } }
+    const m = parseOptionIds(held.ids);
+    if (m) { try { askBridge(`autoengine:${scope}:${chart}:opt`, [[m.segment, m.securityId]] as WantedPair[], nowMs); } catch { /* the exit quotes it */ } }
   }
   if (rec && rt.engine.guardExitedSinceArm(ledger, arm)) {
     await applyAutoLedgerOp(scope, { op: 'setArm', chart, arm: null, t: nowMs / 1000, text: `AUTO switched off: the server guard exited chart ${chart}` });
