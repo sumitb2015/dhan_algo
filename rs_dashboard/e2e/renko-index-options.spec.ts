@@ -303,3 +303,20 @@ test('the option-map row folds away (remembered), and comes back on its own whil
   await bar.getByRole('button', { name: 'It did not' }).click();
   await expect(bar.getByTestId('pnf-trade-map-row')).toHaveCount(0);           // settled: folded again, as the user left it
 });
+
+test('the chart-settings row folds to one button that says what the settings are (remembered); unfolding brings the controls back', async ({ page }) => {
+  await installMock(page);
+  await openIndex(page);
+  const settings = page.getByRole('group', { name: 'Chart settings' });
+  await expect(settings).toBeVisible();
+  await page.getByTestId('pnf-settings-toggle').click();
+  await expect(settings).toHaveCount(0);
+  await expect(page.getByTestId('pnf-settings-summary')).toContainText('1 min');
+  await expect(page.getByTestId('pnf-settings-summary')).toContainText('box');
+  await page.reload();
+  await expect(page.getByTestId('pnf-settings-toggle')).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('group', { name: 'Chart settings' })).toHaveCount(0);
+  await page.getByTestId('pnf-settings-toggle').click();
+  await expect(page.getByRole('group', { name: 'Chart settings' })).toBeVisible();
+  await expect(page.getByLabel('Interval')).toBeVisible();
+});

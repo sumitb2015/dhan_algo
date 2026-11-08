@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bell, Bot, Boxes, ChartScatter, Crosshair, Eye, Rewind, EyeOff, Flag, LocateFixed, XCircle, Volume2, VolumeX, Zap, type LucideIcon } from 'lucide-react';
+import { Bell, Bot, Boxes, ChartScatter, Crosshair, Eye, Rewind, EyeOff, Flag, LocateFixed, XCircle, Volume2, VolumeX, Zap, ChevronDown, ChevronUp, SlidersHorizontal, type LucideIcon } from 'lucide-react';
 import { toast } from 'sonner';
 import NavBar from './NavBar';
 import DataChip from './DataChip';
@@ -92,6 +92,8 @@ const SCALPER_OPEN_KEY = 'straddle-pnf-scalper-open';
 const SCALPER_MIN_KEY = 'straddle-pnf-scalper-min';
 /** Renko index chart -> option map, per chart (lib/pnfIndexMap.ts): `renko-index-map-1` / `-2`. */
 const INDEX_MAP_KEY = 'straddle-pnf-index-map-';
+/** The chart-settings row folded away (renko-settings-folded / straddle-pnf-settings-folded): '1' = folded. */
+const SETTINGS_FOLD_KEY = 'straddle-pnf-settings-folded';
 /** The option-map row folded away (renko-index-map-folded): '1' = folded. */
 const INDEX_MAP_FOLD_KEY = 'straddle-pnf-index-map-folded';
 const SCALPER_POS_KEY = 'straddle-pnf-scalper-pos';
@@ -288,6 +290,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const [scalperMin, setScalperMin] = useState(false);
   const [indexMap, setIndexMap] = useState<Record<ChartId, IndexMap>>({ 1: DEFAULT_INDEX_MAP, 2: DEFAULT_INDEX_MAP });
   const [mapFolded, setMapFolded] = useState(false);
+  const [settingsFolded, setSettingsFolded] = useState(false);
   const [scalperPos, setScalperPos] = useState<ScalperPos | null>(null);
   // REAL unlock of the Scalper, for ONE chart + instrument + mode: a chart switch, a new instrument or a mode change re-locks it
   // (the key no longer matches). Never remembered.
@@ -364,6 +367,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     if (readP(SCALPER_MIN_KEY) === '1') setScalperMin(true);
     setIndexMap({ 1: readIndexMap(readP(`${INDEX_MAP_KEY}1`)), 2: readIndexMap(readP(`${INDEX_MAP_KEY}2`)) });
     if (readP(INDEX_MAP_FOLD_KEY) === '1') setMapFolded(true);
+    if (readP(SETTINGS_FOLD_KEY) === '1') setSettingsFolded(true);
     try {
       const p = JSON.parse(readP(SCALPER_POS_KEY) ?? 'null') as ScalperPos | null;
       if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) setScalperPos({ x: p.x, y: p.y });
@@ -1164,6 +1168,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     setBooksOpen(next);
     saveP(BOOKS_OPEN_KEY, next ? '1' : '0');
   };
+  const changeSettingsFolded = (v: boolean) => { setSettingsFolded(v); saveP(SETTINGS_FOLD_KEY, v ? '1' : '0'); };
   const toggleTradeOpen = () => {
     setTradeOpen(prev => {
       const next = !prev;
@@ -1504,9 +1509,33 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
             on a narrow screen the settings move to the next line instead of sliding over the price. */}
         <div className="flex items-center gap-x-3 gap-y-2 flex-wrap px-6 py-2 border-t border-zinc-800 bg-zinc-900/40">
           <div ref={setHeaderSlot} data-testid="pnf-header-summary" className="flex items-center grow basis-[560px] min-w-0 overflow-hidden" />
-          <div className="flex items-center gap-2 flex-wrap ml-auto" role="group" aria-label="Chart settings">
-            {settingsBar}
-          </div>
+          {/* The settings fold away to one button that says what they are, so the charts get the row back; the price strip stays. */}
+          {settingsFolded ? (
+            <button type="button" data-testid="pnf-settings-toggle" aria-expanded={false} onClick={() => changeSettingsFolded(false)}
+                    title="Show the chart settings (interval, box, confirm, overlays, replay, alerts, trade desk)"
+                    className="ml-auto shrink-0 inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-zinc-700 bg-zinc-950 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:text-white hover:border-zinc-500 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">
+              <SlidersHorizontal className="w-3.5 h-3.5" aria-hidden="true" />
+              Settings
+              <span data-testid="pnf-settings-summary" className="normal-case tracking-normal text-[11px] font-semibold text-zinc-200">
+                {`${dual ? `C${active} · ` : ''}${intervalLabel(effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind), renko))} · ${boxText(activeSettings)} · ${renko ? `confirm ${activeSettings.reversal}` : `${activeSettings.reversal}-box rev`}`}
+              </span>
+              <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" />
+            </button>
+          ) : (
+            <>
+              {/* the fold switch sits where the folded button does (end of the price line), never on a line of its own */}
+              <button type="button" data-testid="pnf-settings-toggle" aria-expanded onClick={() => changeSettingsFolded(true)}
+                      title="Hide the chart settings (they fold to one button)"
+                      className="shrink-0 inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border border-zinc-600 bg-zinc-700 text-[10px] font-bold uppercase tracking-wider text-white hover:bg-zinc-600 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">
+                <SlidersHorizontal className="w-3.5 h-3.5" aria-hidden="true" />
+                Settings
+                <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+              <div className="flex items-center gap-2 flex-wrap ml-auto" role="group" aria-label="Chart settings">
+                {settingsBar}
+              </div>
+            </>
+          )}
         </div>
       </header>
 

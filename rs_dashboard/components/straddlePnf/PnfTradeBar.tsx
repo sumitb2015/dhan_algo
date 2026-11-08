@@ -163,8 +163,20 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
                 aria-label={mapCollapsed ? 'Show the option map' : 'Hide the option map'}
                 title={`${mapCollapsed ? 'Show' : 'Hide'} the option map${mapSummary ? ` (${mapSummary})` : ''}${mapAttention ? ' - shown while the held option needs you' : ''}`}
                 onClick={() => onMapCollapsed(!mapCollapsed)} disabled={mapAttention}
-                className="inline-flex items-center gap-1 h-6 px-2 rounded-md border border-zinc-700 bg-zinc-950 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:text-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60">
-          Map {mapCollapsed && !mapAttention ? <ChevronDown className="w-3 h-3" aria-hidden="true" /> : <ChevronUp className="w-3 h-3" aria-hidden="true" />}
+                className={`inline-flex items-center gap-1.5 h-6 px-2 rounded-md border text-[10px] font-bold uppercase tracking-wider transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 ${mapCollapsed && !mapAttention
+                  ? 'border-zinc-700 bg-zinc-950 text-zinc-300 hover:text-white hover:border-zinc-500'
+                  : 'border-zinc-600 bg-zinc-700 text-white'}`}>
+          Map
+          {/* folded: the map it still trades, said on the button itself */}
+          {mapCollapsed && !mapAttention && sideHints && (
+            <span data-testid="pnf-trade-map-summary" className="inline-flex items-center gap-1.5 normal-case tracking-normal text-[11px]">
+              <span className="text-zinc-500">·</span>
+              <span className="text-emerald-400">Bull</span><span className="text-zinc-200">{sideHints.BUY}</span>
+              <span className="text-zinc-500">·</span>
+              <span className="text-red-400">Bear</span><span className="text-zinc-200">{sideHints.SELL}</span>
+            </span>
+          )}
+          {mapCollapsed && !mapAttention ? <ChevronDown className="w-3.5 h-3.5" aria-hidden="true" /> : <ChevronUp className="w-3.5 h-3.5" aria-hidden="true" />}
         </button>
       )}
 
