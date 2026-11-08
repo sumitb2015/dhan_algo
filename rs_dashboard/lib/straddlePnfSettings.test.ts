@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_SETTINGS, MIN_BOX_PCT, MIN_BOX_PTS, MAX_BOX_PCT, REVERSALS, boxText, stepBox, stepBoxBy, BOX_PCT_STEPS, BOX_PTS_STEPS, parseBoxPct, parseBoxPts, parseSmaPeriod, parseStMult, parseStPeriod, readSettings, serializeSettings } from './straddlePnfSettings.ts';
+import { DEFAULT_BOX_LOG, boxLogOf, DEFAULT_SETTINGS, MIN_BOX_PCT, MIN_BOX_PTS, MAX_BOX_PCT, REVERSALS, boxText, stepBox, stepBoxBy, BOX_PCT_STEPS, BOX_PTS_STEPS, parseBoxPct, parseBoxPts, parseSmaPeriod, parseStMult, parseStPeriod, readSettings, serializeSettings } from './straddlePnfSettings.ts';
 
 test('defaults are the 1-minute / 0.5% / 3-box chart with an SMA 50 overlay', () => {
   assert.deepEqual(DEFAULT_SETTINGS, { interval: 1, boxMode: 'pct', boxPct: 0.5, boxPts: 10, reversal: 3, smaPeriod: 50, stPeriod: 10, stMult: 3 });
@@ -119,4 +119,17 @@ test('stepBoxBy (Renko) steps to the next multiple of 1 point or 0.5 %, with onl
   assert.equal(stepBoxBy('pct', 1.5, -1), 1);
   assert.equal(stepBoxBy('pct', 4.8, 1), MAX_BOX_PCT);
   assert.equal(stepBoxBy('pct', MAX_BOX_PCT, 1), MAX_BOX_PCT);
+});
+
+test('Log % box: the mode and its % are stored and read back; a file without boxLog reads unchanged (default when used)', () => {
+  const s = readSettings('{"boxMode":"log","boxLog":0.25}');
+  assert.equal(s.boxMode, 'log');
+  assert.equal(s.boxLog, 0.25);
+  assert.deepEqual(readSettings(serializeSettings(s)), s);
+  assert.equal(readSettings('{"boxMode":"log"}').boxLog, undefined);
+  assert.equal(boxLogOf(readSettings('{"boxMode":"log"}')), DEFAULT_BOX_LOG);
+  for (const bad of ['0', '99', '"1"', 'null']) assert.equal(readSettings(`{"boxMode":"log","boxLog":${bad}}`).boxLog, undefined, bad);
+  assert.equal(boxText({ boxMode: 'log', boxPct: 0.5, boxPts: 10, boxLog: 1 }), '1% log box');
+  assert.equal(stepBoxBy('log', 0.1, 1), 0.15);
+  assert.equal(stepBoxBy('log', 0.05, -1), MIN_BOX_PCT);
 });

@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 import { Info, Lock, ShieldCheck } from 'lucide-react';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
-import { effectiveGuard } from '@/lib/pnfGuardBoxes';
+import { effectiveGuard, type BoxValue } from '@/lib/pnfGuardBoxes';
 
 // The MTM guard of one ladder + broker + SIM/REAL mode: target, stop-loss, trailing and Protect profit over the P&L of
 // the orders this ladder placed (the other ladder has its own). The server watcher enforces it (lib/priceLadderGuard.ts), so it works with this tab closed. Numbers are
@@ -51,7 +51,8 @@ export function MtmGuardCard({ broker, real, ladderId = 1, mtm, guard, post, hel
   /** P&F / Renko only: shows the target / stop-loss in BOXES rows; the text names the box ("boxes of 5 pts"). */
   boxesLabel?: string;
   /** What one box is worth in rupees for the open position (null: no position yet), to warn when a level is already past. */
-  rupeesPerBox?: number | null;
+  /** What a box is worth on the open position: one value, or per side on a Renko Log % chart (lib/pnfGuardBoxes BoxValue). */
+  rupeesPerBox?: BoxValue | null;
 }) {
   const FIELDS = boxesLabel ? ALL_FIELDS : RUPEE_FIELDS;
   const scope = scopeName ?? `Ladder ${ladderId}`;
@@ -139,7 +140,7 @@ export function MtmGuardCard({ broker, real, ladderId = 1, mtm, guard, post, hel
         <>
           <div className={row} title={`Exit when the position is up this many boxes (${boxesLabel})`}><span className={lab}>Target</span><Box label="MTM target in boxes" unit="box" step={1} value={draft.targetBoxes} onChange={set('targetBoxes')} /></div>
           <div className={row} title={`Exit when the position is down this many boxes (${boxesLabel})`}><span className={lab}>Stop-loss</span><Box label="MTM stop-loss in boxes" unit="box" step={1} value={draft.stopBoxes} onChange={set('stopBoxes')} /></div>
-          <p className="text-[10px] text-zinc-500">Boxes: {boxesLabel}. A box is worth {rupeesPerBox ? rs(rupeesPerBox) : '— (no position)'} on the open position.</p>
+          <p className="text-[10px] text-zinc-500">Boxes: {boxesLabel}. A box is worth {!rupeesPerBox ? '— (no position)' : typeof rupeesPerBox === 'number' ? rs(rupeesPerBox) : `${rs(rupeesPerBox.target(1))} in profit / ${rs(rupeesPerBox.stop(1))} in loss (log steps from the entry)`} on the open position.</p>
         </>
       )}
       <div className={row} title="Exit when MTM gives back this much from its best since the guard was switched on"><span className={lab}>Trail by</span><Box label="MTM trailing give-back in rupees" value={draft.trailBy} onChange={set('trailBy')} /></div>

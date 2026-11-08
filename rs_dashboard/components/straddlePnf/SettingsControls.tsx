@@ -4,8 +4,8 @@ import { useState } from 'react';
 import { Eye, EyeOff, Minus, Plus } from 'lucide-react';
 import { intervalLabel, intervalsFor, type Interval } from '@/lib/straddlePnfInterval';
 import {
-  MAX_BOX_PCT, MIN_BOX_PCT, MAX_BOX_PTS, MIN_BOX_PTS, MIN_BOX_PTS_PCT, MAX_SMA_PERIOD, MIN_SMA_PERIOD, MAX_ST_MULT, MAX_ST_PERIOD, MIN_ST_MULT, MIN_ST_PERIOD, REVERSALS, parseBoxPct, parseBoxPts, parseSmaPeriod, parseStMult, parseStPeriod, stepBox, stepBoxBy, RENKO_BOX_STEP,
-  type PnfSettings, type Reversal,
+  MAX_BOX_PCT, MIN_BOX_PCT, MAX_BOX_PTS, MIN_BOX_PTS, MIN_BOX_PTS_PCT, MAX_SMA_PERIOD, MIN_SMA_PERIOD, MAX_ST_MULT, MAX_ST_PERIOD, MIN_ST_MULT, MIN_ST_PERIOD, REVERSALS, parseBoxPct, parseBoxPts, parseSmaPeriod, parseStMult, parseStPeriod, stepBox, stepBoxBy, RENKO_BOX_STEP, boxLogOf,
+  type BoxMode, type PnfSettings, type Reversal,
 } from '@/lib/straddlePnfSettings';
 
 // Bar interval, box size, reversal and the SMA period: shared by the live page and the simulator so they behave identically.
@@ -144,12 +144,19 @@ export function SupertrendControls({ settings, onChange, shown, onToggleShown, l
  * for after a reversal; it is stored in the same `reversal` field (1-5), so the settings parse and persist unchanged.
  */
 export default function SettingsControls({ settings, onChange, equity = false, renko = false }: { settings: PnfSettings; onChange: (next: PnfSettings) => void; equity?: boolean; renko?: boolean }) {
-  const boxMode = settings.boxMode;
-  const boxValue = boxMode === 'pct' ? settings.boxPct : settings.boxPts;
+  // A Log % box is Renko only. A P&F page given 'log' (settings carried over from elsewhere) is shown, built (straddlePnfModel) and
+  // edited as its % box, so one unit button is always pressed and the value shown is the one in use.
+  const boxMode: BoxMode = !renko && settings.boxMode === 'log' ? 'pct' : settings.boxMode;
+  const logMode = renko && boxMode === 'log';
+  const boxValue = logMode ? boxLogOf(settings) : boxMode === 'pts' ? settings.boxPts : settings.boxPct;
   // Renko steps by a fixed 1 point / 0.5 %; P&F along its ladder of round sizes.
   const step = (dir: 1 | -1) => (renko ? stepBoxBy(boxMode, boxValue, dir) : stepBox(boxMode, boxValue, dir));
-  const stepUnit = boxMode === 'pct' ? `${RENKO_BOX_STEP.pct}%` : `${RENKO_BOX_STEP.pts} point`;
-  const setBox = (n: number) => { if (n !== boxValue) onChange(boxMode === 'pct' ? { ...settings, boxPct: n } : { ...settings, boxPts: n }); };
+  const stepUnit = logMode ? `${RENKO_BOX_STEP.log}%` : boxMode === 'pts' ? `${RENKO_BOX_STEP.pts} point` : `${RENKO_BOX_STEP.pct}%`;
+  const setBox = (n: number) => {
+    if (n === boxValue) return;
+    onChange(logMode ? { ...settings, boxLog: n } : boxMode === 'pts' ? { ...settings, boxPts: n } : { ...settings, boxPct: n });
+  };
+  const modes: BoxMode[] = renko ? ['pct', 'pts', 'log'] : ['pct', 'pts'];
   return (
     <>
       <label className={LABEL} title={renko ? 'Tick: a brick prints the moment the live price crosses a box; 10 / 20 / 30 sec: live prices in N-second bars (a spike that reverses inside N seconds prints nothing). Alerts and AUTO act on these bricks at once' : undefined}>
@@ -163,10 +170,11 @@ export default function SettingsControls({ settings, onChange, equity = false, r
       <div className={LABEL}>
         <span>Box</span>
         <div className="inline-flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-800 bg-zinc-900" role="group" aria-label="Box unit">
-          {(['pct', 'pts'] as const).map(m => (
-            <button key={m} type="button" aria-pressed={settings.boxMode === m} onClick={() => settings.boxMode !== m && onChange({ ...settings, boxMode: m })}
-                    className={`px-1.5 h-5 rounded text-[10px] font-bold normal-case tracking-normal ${settings.boxMode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-100'}`}>
-              {m === 'pct' ? '%' : 'pts'}
+          {modes.map(m => (
+            <button key={m} type="button" aria-pressed={boxMode === m} onClick={() => settings.boxMode !== m && onChange({ ...settings, boxMode: m })}
+                    title={m === 'log' ? 'Log %: each brick is this % of the previous brick\'s close (Definedge Log brick), on a fixed log grid that never redraws' : m === 'pct' ? 'Box as a % of the first price' : 'Box in price points'}
+                    className={`px-1.5 h-5 rounded text-[10px] font-bold normal-case tracking-normal ${boxMode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-100'}`}>
+              {m === 'pct' ? '%' : m === 'log' ? 'log%' : 'pts'}
             </button>
           ))}
         </div>
@@ -176,7 +184,11 @@ export default function SettingsControls({ settings, onChange, equity = false, r
                   onMouseDown={keepFocus} onClick={() => setBox(step(-1))} className={`${STEP_BTN} rounded-l-md border-r-0`}>
             <Minus className="w-3 h-3" aria-hidden="true" />
           </button>
-          {boxMode === 'pct' ? (
+          {logMode ? (
+            <CommitInput key={`log:${boxValue}`} value={boxValue} parse={parseBoxPct} label="Box log %" inputMode="decimal" width="w-14 rounded-none text-center"
+                         title={`Log % brick: each brick is this % of the previous brick's close (${MIN_BOX_PCT}-${MAX_BOX_PCT}); press Enter to apply`}
+                         onCommit={setBox} />
+          ) : boxMode !== 'pts' ? (
             <CommitInput key={`pct:${settings.boxPct}`} value={settings.boxPct} parse={parseBoxPct} label="Box %" inputMode="decimal" width="w-14 rounded-none text-center"
                          title={`Box size as a % of the first price (${MIN_BOX_PCT}-${MAX_BOX_PCT}); press Enter to apply`}
                          onCommit={setBox} />

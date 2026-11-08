@@ -3,7 +3,7 @@
 // the server repeats it so an open position is still protected with the tab closed. Each row is measured from its OWN entry price
 // (its P&L is 0 at entry), so no baseline has to survive a restart. Pure (tested in lib/autoServerGuard.test.ts).
 import { evalGuard, type LadderGuard } from './priceLadderGuard.ts';
-import { effectiveGuard, noteBoxes } from './pnfGuardBoxes.ts';
+import { effectiveGuard, logBoxValue, noteBoxes, type BoxValue } from './pnfGuardBoxes.ts';
 import { closingSide, holdsPosition, markPnl, type AutoRow } from './pnfAutoLedger.ts';
 import { autoProductOf, planOwnExit, type BookRow, type PnfBroker } from './pnfOrderLogic.ts';
 
@@ -18,6 +18,11 @@ export interface ServerGuardCfg {
   levels: GuardLevels;
   /** The chart's box size in price points, to turn box levels into rupees (box x the row's rupees per point). */
   boxPts: number | null;
+  /**
+   * A Renko Log % chart: its grid ratio (1 + P/100). Box levels are then N log steps from the row's entry price (pnfGuardBoxes
+   * logBoxValue), as the page counts them, and `boxPts` is not used for them. Absent / null on a points or % chart.
+   */
+  boxLogR?: number | null;
   updatedMs: number;
 }
 
@@ -40,7 +45,9 @@ export function stepRow(row: AutoRow, cfg: ServerGuardCfg, price: number, runtim
   const base = runtime.base ?? (row.entryT * 1000 < cfg.updatedMs ? raw : 0);
   const mtm = raw - base;
   const g: LadderGuard = { on: true, ...cfg.levels, peak: runtime.peak, floor: runtime.floor };
-  const rpb = !row.traded && cfg.boxPts !== null && cfg.boxPts > 0 && row.unitsPerPoint > 0 ? cfg.boxPts * row.unitsPerPoint : null;
+  const rpb: BoxValue | null = row.traded ? null
+    : cfg.boxLogR ? logBoxValue(row.entryPrice, row.side === 'BUY' ? 'LONG' : 'SHORT', cfg.boxLogR, row.unitsPerPoint)
+      : cfg.boxPts !== null && cfg.boxPts > 0 && row.unitsPerPoint > 0 ? cfg.boxPts * row.unitsPerPoint : null;
   const r = evalGuard(effectiveGuard(g, rpb), mtm);
   const boxLevels = cfg.levels.targetBoxes !== undefined || cfg.levels.stopBoxes !== undefined;
   return { runtime: { peak: r.guard.peak, floor: r.guard.floor, base }, mtm, reason: r.reason ? noteBoxes(g, rpb, r.reason) : null, boxesUnreadable: boxLevels && rpb === null };

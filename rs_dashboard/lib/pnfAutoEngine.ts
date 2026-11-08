@@ -1,3 +1,4 @@
+import type { ServerBrick } from './pnfServerBrick.ts';
 import fs from 'fs';
 import path from 'path';
 import { PROJECT_ROOT } from '@/lib/pyExec';
@@ -48,7 +49,8 @@ export interface EngineChartView {
   note: string;
   halt: string | null;
   armT: number | null;
-  lastBrick: { n: number; dir: 'X' | 'O'; barT: number; box: number } | null;
+  /** The server's newest brick (lib/pnfServerBrick.ts); its edges let the page tell the same brick from a build that started earlier. */
+  lastBrick: ServerBrick | null;
   /** The chart the engine is building (the arming's, or the last one while its position is open). */
   targetKey: string | null;
   feedError: string | null;
@@ -293,7 +295,7 @@ async function stepChart(scope: PnfScope, chart: 1 | 2, ledger: AutoLedger, save
   return {
     note: run ? rt.engine.note : 'no chart saved for this position: only the server guard and end of day exit it',
     halt: rt.engine.halt, armT: rec?.t ?? null,
-    lastBrick: lc ? { n: cols.length, dir: lc.dir, barT: model.columnTimes[cols.length - 1]?.start ?? 0, box: model.box } : null,
+    lastBrick: lc ? { n: cols.length, dir: lc.dir, barT: model.columnTimes[cols.length - 1]?.start ?? 0, box: model.box, low: lc.low, high: lc.high } : null,
     targetKey: run ? targetKey(run.target) : row ? row.targetKey : null, feedError, ...(run ? { run } : {}),
   };
 }

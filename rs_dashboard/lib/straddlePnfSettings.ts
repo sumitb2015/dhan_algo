@@ -11,8 +11,15 @@ export type Reversal = (typeof REVERSALS)[number];
  * back restores the last one. `smaPeriod`: P&F boxes in the SMA overlay line (an average of box values, not of bar closes).
  * `stPeriod` / `stMult`: the Renko page's Supertrend (ATR period in bricks, band multiplier); the P&F page keeps them unused.
  */
-export type BoxMode = 'pct' | 'pts';
-export type PnfSettings = { interval: Interval; boxMode: BoxMode; boxPct: number; boxPts: number; reversal: Reversal; smaPeriod: number; stPeriod: number; stMult: number };
+export type BoxMode = 'pct' | 'pts' | 'log';
+/**
+ * `boxLog` (Renko page only, boxMode 'log'): the Definedge Log % brick — each brick is this % of the previous brick's close, on a fixed
+ * log grid (lib/renko.ts buildLogRenko). Optional so settings saved before it existed read unchanged; absent = DEFAULT_BOX_LOG.
+ */
+export type PnfSettings = { interval: Interval; boxMode: BoxMode; boxPct: number; boxPts: number; boxLog?: number; reversal: Reversal; smaPeriod: number; stPeriod: number; stMult: number };
+/** The Log % brick when none is stored (Definedge suggests ~1 % for a stock's daily chart; an intraday index wants far less). */
+export const DEFAULT_BOX_LOG = 0.1;
+export const boxLogOf = (s: Pick<PnfSettings, 'boxLog'>) => s.boxLog ?? DEFAULT_BOX_LOG;
 
 /** localStorage key shared by the live page and the simulator, so both show the chart the same way. */
 export const SETTINGS_KEY = 'straddle-pnf-settings';
@@ -97,22 +104,22 @@ export const BOX_PTS_STEPS: number[] = (() => {
 
 /** The next ladder size above (dir 1) or below (dir -1) `value`; `value` itself at either end of the ladder. */
 export function stepBox(mode: BoxMode, value: number, dir: 1 | -1): number {
-  const ladder = mode === 'pct' ? BOX_PCT_STEPS : BOX_PTS_STEPS;
+  const ladder = mode === 'pts' ? BOX_PTS_STEPS : BOX_PCT_STEPS;
   const eps = 1e-9;
   if (dir === 1) return ladder.find(v => v > value + eps) ?? value;
   for (let i = ladder.length - 1; i >= 0; i--) if (ladder[i] < value - eps) return ladder[i];
   return value;
 }
 
-/** The Renko page's − / + step: 1 point, or 0.5 %. */
-export const RENKO_BOX_STEP: Record<BoxMode, number> = { pts: 1, pct: 0.5 };
+/** The Renko page's − / + step: 1 point, 0.5 %, or 0.05 % on a Log % brick. */
+export const RENKO_BOX_STEP: Record<BoxMode, number> = { pts: 1, pct: 0.5, log: 0.05 };
 
 /**
  * The next multiple of the Renko step above (dir 1) or below (dir -1) `value`, so a typed 0.33 % steps to 0.5 / the floor and the
  * buttons stay on round sizes. Below the first step there is only the mode's minimum (0.05 %, 0.01 points); the maximum caps it.
  */
 export function stepBoxBy(mode: BoxMode, value: number, dir: 1 | -1): number {
-  const [min, max] = mode === 'pct' ? [MIN_BOX_PCT, MAX_BOX_PCT] : [MIN_BOX_PTS, MAX_BOX_PTS];
+  const [min, max] = mode === 'pts' ? [MIN_BOX_PTS, MAX_BOX_PTS] : [MIN_BOX_PCT, MAX_BOX_PCT];
   const unit = RENKO_BOX_STEP[mode];
   const eps = 1e-9;
   const k = dir === 1 ? Math.floor(value / unit + eps) + 1 : Math.ceil(value / unit - eps) - 1;
@@ -121,7 +128,7 @@ export function stepBoxBy(mode: BoxMode, value: number, dir: 1 | -1): number {
 }
 
 /** The header's short description of the box: "0.5% box" or "50-pt box". */
-export const boxText = (s: Pick<PnfSettings, 'boxMode' | 'boxPct' | 'boxPts'>) => (s.boxMode === 'pts' ? `${s.boxPts}-pt box` : `${s.boxPct}% box`);
+export const boxText = (s: Pick<PnfSettings, 'boxMode' | 'boxPct' | 'boxPts' | 'boxLog'>) => (s.boxMode === 'pts' ? `${s.boxPts}-pt box` : s.boxMode === 'log' ? `${boxLogOf(s)}% log box` : `${s.boxPct}% box`);
 
 /** "0.5", "0.75%", " 1 " or "0,25" -> a number inside [MIN_BOX_PCT, MAX_BOX_PCT]; anything else -> null. */
 export function parseBoxPct(text: string): number | null {
@@ -144,11 +151,12 @@ export function readSettings(raw: string | null, fallback: PnfSettings = DEFAULT
   const reversal = typeof o.reversal === 'number' && (REVERSALS as readonly number[]).includes(o.reversal)
     ? (o.reversal as Reversal) : fallback.reversal;
   const smaPeriod = typeof o.smaPeriod === 'number' && smaPeriodOk(o.smaPeriod) ? o.smaPeriod : fallback.smaPeriod;
-  const boxMode: BoxMode = o.boxMode === 'pts' ? 'pts' : fallback.boxMode;
+  const boxMode: BoxMode = o.boxMode === 'pts' ? 'pts' : o.boxMode === 'log' ? 'log' : fallback.boxMode;
+  const boxLog = typeof o.boxLog === 'number' && Number.isFinite(o.boxLog) && o.boxLog >= MIN_BOX_PCT && o.boxLog <= MAX_BOX_PCT ? o.boxLog : fallback.boxLog;
   const boxPts = typeof o.boxPts === 'number' && boxPtsOk(o.boxPts) ? o.boxPts : fallback.boxPts;
   const stPeriod = typeof o.stPeriod === 'number' && stPeriodOk(o.stPeriod) ? o.stPeriod : fallback.stPeriod;
   const stMult = typeof o.stMult === 'number' && stMultOk(o.stMult) ? o.stMult : fallback.stMult;
-  return { interval, boxMode, boxPct, boxPts, reversal, smaPeriod, stPeriod, stMult };
+  return { interval, boxMode, boxPct, boxPts, ...(boxLog !== undefined ? { boxLog } : {}), reversal, smaPeriod, stPeriod, stMult };
 }
 
 export function serializeSettings(s: PnfSettings): string {

@@ -1,5 +1,6 @@
 'use client';
 
+import { serverBrickDiffers } from '@/lib/pnfServerBrick';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { trailLevel, trailOf } from '@/lib/pnfAuto';
 import { EMPTY_LEDGER, isLive, type AutoLedger, type AutoLogEntry, type AutoOp } from '@/lib/pnfAutoLedger';
@@ -113,7 +114,7 @@ export function usePnfAuto({ chart, target, model, price, ledger, engine, post, 
   const lc = model.columns.length ? model.columns[model.columns.length - 1] : null;
   const sb = view?.lastBrick ?? null;
   const differs = !!sb && view?.targetKey === tk && !!lc
-    && (sb.dir !== lc.dir || sb.n !== model.columns.length || sb.barT !== (model.columnTimes[model.columns.length - 1]?.start ?? 0) || Math.abs(sb.box - model.box) > 1e-9);
+    && serverBrickDiffers(sb, { last: lc, n: model.columns.length, barT: model.columnTimes[model.columns.length - 1]?.start ?? 0, box: model.box });
   const [seenDiff, setSeenDiff] = useState(0);
   const lastSigRef = useRef('');
   useEffect(() => {

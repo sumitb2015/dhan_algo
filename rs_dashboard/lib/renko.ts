@@ -11,8 +11,56 @@ import { sessionOf, type Bar, type PnfColumn, type PnfSignal } from './straddleP
 
 const EPS = 1e-9;
 
-/** Where a Renko build stopped (the last brick's top and bottom, in boxes), so it can carry on over more bars. `bars` = bars read. */
-export type RenkoResume = { box: number; hi: number; lo: number; bars: number };
+/**
+ * Where a Renko build stopped (the last brick's top and bottom, in boxes), so it can carry on over more bars. `bars` = bars read.
+ * `log`: a Log % build (buildLogRenko); hi / lo are then indices on its log grid and `box` is unused.
+ */
+export type RenkoResume = { box: number; hi: number; lo: number; bars: number; log?: LogGrid };
+
+/**
+ * A Log % grid (Definedge "Log" brick): levels at base * r^k, r = 1 + P/100. An up brick closes at C * r, a down brick at C / r, so
+ * every brick is P % of the brick before it and the levels never drift. The page anchors it at base 1: the grid is the same on
+ * every load, replay and the server engine whatever the history start (a Log chart never repaints).
+ */
+export type LogGrid = { base: number; r: number };
+
+/** Level k of a log grid. The same k always gives the same float, so equal levels compare equal. */
+export const logLevel = (g: LogGrid, k: number) => g.base * g.r ** k;
+
+/**
+ * The price band of order-ladder row k on a Log % chart: halfway (in log steps) to the level below, up to halfway to the level above.
+ * Row k's top is row k + 1's bottom exactly, so the rows tile the axis with no overlap (a click one row off would rest an order a
+ * brick away) and no dead gap, however unevenly the levels are spaced in pixels.
+ */
+export const logRowEdges = (g: LogGrid, k: number): [number, number] => [logLevel(g, k - 0.5), logLevel(g, k + 0.5)];
+
+/** Where `price` sits on a log grid, in steps (continuous: level k is exactly k). The one place this is computed. */
+export const logIndex = (g: LogGrid, price: number) => Math.log(price / g.base) / Math.log(g.r);
+
+/** The price band (x 1.25) a Log % chart's scale box is held over: the box only changes when the price leaves it. */
+const LOG_SCALE_BAND = 1.25;
+
+/**
+ * A Log % chart's `box`: one stable size for everything that needs a single scale (the panel's pixels per point, the wild-tick check,
+ * the server's "same brick" check). It is the brick at the bottom of the 25 % price band holding `price`, so it does not change on
+ * every brick (the chart would rescale and jump each time) but only when the price moves into another band. Counting bricks never
+ * uses it: that is gridSteps / gridMove.
+ */
+export function logScaleBox(g: LogGrid, price: number): number {
+  const m = Math.max(1, Math.round(Math.log(LOG_SCALE_BAND) / Math.log(g.r)));
+  const k = Math.floor((logIndex(g, price) + 1e-9) / m) * m;
+  return logLevel(g, k) * (g.r - 1);
+}
+
+/** Bricks between two prices: box steps on a linear grid, log steps on a log one (`g` is a model: its box and log grid). */
+export function gridSteps(g: { box: number; log?: LogGrid | null }, from: number, to: number): number {
+  return g.log ? Math.log(to / from) / Math.log(g.log.r) : (to - from) / g.box;
+}
+
+/** `price` moved `n` bricks (n < 0: down): n boxes on a linear grid, r^n on a log one. */
+export function gridMove(g: { box: number; log?: LogGrid | null }, price: number, n: number): number {
+  return g.log ? price * g.log.r ** n : price + n * g.box;
+}
 
 /** Feeds bars [from, to) through the Traditional rules, appending bricks to `columns`; returns the new hi / lo. */
 function runRenko(columns: PnfColumn[], at: (i: number) => Bar, from: number, to: number, box: number, hi0: number, lo0: number) {
@@ -52,10 +100,59 @@ export function extendRenko(columns: PnfColumn[], resume: RenkoResume, more: Bar
 /** extendRenko plus the resume state after `more`, so a build can be carried on step after step (bar replay, closed bars). */
 export function continueRenko(columns: PnfColumn[], resume: RenkoResume, more: Bar[]): { columns: PnfColumn[]; resume: RenkoResume } {
   if (!more.length) return { columns, resume };
+  if (resume.log) return continueLogRenko(columns, resume, more, resume.log);
   const out = columns.slice();
   const { hi, lo } = runRenko(out, i => more[i - resume.bars], resume.bars, resume.bars + more.length, resume.box, resume.hi, resume.lo);
   return { columns: out, resume: { box: resume.box, hi, lo, bars: resume.bars + more.length } };
 }
+
+/** runRenko on a log grid: the same Traditional rules in grid-index space (x = log_r(price / base)), edges from logLevel. */
+function runLogRenko(columns: PnfColumn[], at: (i: number) => Bar, from: number, to: number, g: LogGrid, hi0: number, lo0: number) {
+  let hi = hi0, lo = lo0;
+  const brick = (dir: 'X' | 'O', k: number, i: number) => {
+    columns.push({ dir, low: logLevel(g, k), high: logLevel(g, k + 1), boxes: 1, startBar: i, endBar: i, session: sessionOf(at(i).t), breakBar: null, boxBars: [i] });
+  };
+  for (let i = from; i < to; i++) {
+    const b = at(i);
+    if (!(b.straddle > 0)) continue;
+    const x = logIndex(g, b.straddle);
+    if (x >= hi + 1 - EPS) {
+      while (x >= hi + 1 - EPS) { brick('X', hi, i); lo = hi; hi += 1; }
+    } else if (x <= lo - 1 + EPS) {
+      while (x <= lo - 1 + EPS) { brick('O', lo - 1, i); hi = lo; lo -= 1; }
+    }
+  }
+  return { hi, lo };
+}
+
+/** The model's `box` on a Log % chart: logScaleBox at the latest brick close (the start level before any brick). */
+function logBoxAt(g: LogGrid, columns: PnfColumn[], startK: number): number {
+  const c = columns[columns.length - 1];
+  return logScaleBox(g, c ? (c.dir === 'X' ? c.high : c.low) : logLevel(g, startK));
+}
+
+/**
+ * Log % Renko: each brick is `pct` % of the previous brick's close (up: C * (1 + pct/100), down: C / (1 + pct/100)), on the fixed grid
+ * base * r^k. A reversal needs two steps, as on the Traditional chart. `box` is the chart's scale box (logScaleBox), not a brick count.
+ */
+export function buildLogRenko(bars: Bar[], pct: number, base = 1): { anchor: number; box: number; columns: PnfColumn[]; resume: RenkoResume | null; log: LogGrid | null } {
+  const first = bars.find(b => b.straddle > 0);
+  if (!first || !(pct > 0) || !(base > 0)) return { anchor: 0, box: 0, columns: [], resume: null, log: null };
+  const g: LogGrid = { base, r: 1 + pct / 100 };
+  const start = Math.round(logIndex(g, first.straddle));                        // the first bar's own grid level, in steps
+  const columns: PnfColumn[] = [];
+  const { hi, lo } = runLogRenko(columns, i => bars[i], 0, bars.length, g, start, start);
+  return { anchor: logLevel(g, start), box: logBoxAt(g, columns, start), columns, resume: { box: 0, hi, lo, bars: bars.length, log: g }, log: g };
+}
+
+function continueLogRenko(columns: PnfColumn[], resume: RenkoResume, more: Bar[], g: LogGrid): { columns: PnfColumn[]; resume: RenkoResume } {
+  const out = columns.slice();
+  const { hi, lo } = runLogRenko(out, i => more[i - resume.bars], resume.bars, resume.bars + more.length, g, resume.hi, resume.lo);
+  return { columns: out, resume: { box: 0, hi, lo, bars: resume.bars + more.length, log: g } };
+}
+
+/** A Log % chart's model `box` (logScaleBox at its latest close), from its bricks and resume state. */
+export const logBrickBox = (columns: PnfColumn[], resume: RenkoResume): number => (resume.log ? logBoxAt(resume.log, columns, resume.hi) : resume.box);
 
 /** A brick's close: its top when it is up, its bottom when it is down. */
 export const brickClose = (c: PnfColumn) => (c.dir === 'X' ? c.high : c.low);
@@ -89,7 +186,7 @@ export function renkoSignals(columns: PnfColumn[], bars: Bar[], reference: (numb
  * brick below the pullback's low. SELL is the mirror (stop one brick above the pullback's high). Fires once per pattern.
  */
 function backSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number,
-  p: { trend: number; pull: number; resume: number; buy: PnfSignal['kind']; sell: PnfSignal['kind'] }, from = 0): PnfSignal[] {
+  p: { trend: number; pull: number; resume: number; buy: PnfSignal['kind']; sell: PnfSignal['kind'] }, from = 0, log: LogGrid | null = null): PnfSignal[] {
   const out: PnfSignal[] = [];
   const runs: { dir: 'X' | 'O'; first: number; last: number }[] = [];
   // a pattern ending in the run that starts at `from` reads the two runs before it: start the run list there
@@ -115,7 +212,7 @@ function backSignals(columns: PnfColumn[], bars: Bar[], reference: (number | nul
       const kind = up ? p.buy : p.sell;
       const price = brickClose(c);
       const v = reference[c.startBar];
-      out.push({ id: `${kind}:${i}`, kind, col: i, bar: c.startBar, t: bars[c.startBar].t, price, belowVwap: v != null && price < v, stop: up ? pullEdge - box : pullEdge + box });
+      out.push({ id: `${kind}:${i}`, kind, col: i, bar: c.startBar, t: bars[c.startBar].t, price, belowVwap: v != null && price < v, stop: log ? gridMove({ box, log }, pullEdge, up ? -1 : 1) : up ? pullEdge - box : pullEdge + box });
       break;
     }
   }
@@ -123,14 +220,14 @@ function backSignals(columns: PnfColumn[], bars: Bar[], reference: (number | nul
 }
 
 /** Two-back: >=`trend` (3) bricks, a two-brick pullback, >=3 resuming bricks past the swing. */
-export function twoBackSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number, trend = 3, from = 0): PnfSignal[] {
+export function twoBackSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number, trend = 3, from = 0, log: LogGrid | null = null): PnfSignal[] {
   const need = Math.max(1, Math.floor(trend));
-  return backSignals(columns, bars, reference, box, { trend: need, pull: 2, resume: need, buy: 'TWOBACK_BUY', sell: 'TWOBACK_SELL' }, from);
+  return backSignals(columns, bars, reference, box, { trend: need, pull: 2, resume: need, buy: 'TWOBACK_BUY', sell: 'TWOBACK_SELL' }, from, log);
 }
 
 /** One-back: >=2 bricks, a ONE-brick pullback, then 2 resuming bricks that break the swing (a swing breakout). */
-export function oneBackSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number, from = 0): PnfSignal[] {
-  return backSignals(columns, bars, reference, box, { trend: 2, pull: 1, resume: 2, buy: 'ONEBACK_BUY', sell: 'ONEBACK_SELL' }, from);
+export function oneBackSignals(columns: PnfColumn[], bars: Bar[], reference: (number | null)[], box: number, from = 0, log: LogGrid | null = null): PnfSignal[] {
+  return backSignals(columns, bars, reference, box, { trend: 2, pull: 1, resume: 2, buy: 'ONEBACK_BUY', sell: 'ONEBACK_SELL' }, from, log);
 }
 
 /**

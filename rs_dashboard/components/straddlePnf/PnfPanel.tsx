@@ -4,7 +4,7 @@ import { intervalLabel, barCountdown, fmtCountdown, DAY_MIN } from '@/lib/stradd
 import { createPortal } from 'react-dom';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { unconfirmedBoxes, type Overlay, type PanelModel } from '@/lib/straddlePnfModel';
-import { renkoPivots } from '@/lib/renko';
+import { logIndex, logLevel, logRowEdges, renkoPivots, type LogGrid } from '@/lib/renko';
 import { useStableHandlers } from '@/lib/useStableHandlers';
 import { columnAtOrBefore, isSellSignal, type PnfExecutionMarker } from '@/lib/straddlePnf';
 import { AlignLeft, AlignRight, Eye, EyeOff, MapPin, MapPinOff, Minus, Plus, RotateCcw, ChevronsLeftRight, ChevronsRightLeft } from 'lucide-react';
@@ -261,12 +261,14 @@ function AxisCountdown({ interval, session, y }: { interval: number; session: re
 // Memoised: the crosshair re-renders the panel on every mouse move, and the rail draws several elements per visible price row.
 const RailSvgMemo = memo(RailSvg);
 
-function RailSvg({ rail, renko = false, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, axisDigits, onDrag, onHot, visTop = 0, visBottom = contentH, countdown }: {
+function RailSvg({ rail, renko = false, log = null, box, cell, yMax, yMin, padY, contentH, yOf, liveValue, axisDigits, onDrag, onHot, visTop = 0, visBottom = contentH, countdown }: {
   rail: PnfRail;
   /** The bar-close countdown under the live row (absent: none). */
   countdown?: { interval: number; session: readonly [number, number] | null };
   /** Renko: a row is a brick EDGE (a multiple of the box), where a brick completes. P&F: a row is a box label (the cell centre). */
   renko?: boolean;
+  /** Renko Log %: rows are the log grid's levels (brick edges of uneven height), not multiples of `box`. */
+  log?: LogGrid | null;
   box: number; cell: number; yMax: number; yMin: number; padY: number; contentH: number;
   /** The content y range worth drawing rows for (the view plus a margin); a long price history has thousands of rows. */
   visTop?: number; visBottom?: number;
@@ -278,17 +280,33 @@ function RailSvg({ rail, renko = false, box, cell, yMax, yMin, padY, contentH, y
   const [drag, setDragState] = useState<RailDrag>(null);
   const setDrag = (d: RailDrag) => { dragRef.current = d; setDragState(d); onDrag(d); };
   const priceAtY = (y: number) => yMax - ((y - padY - PAD_TOP) / cell) * box;
-  const iLo = Math.floor((priceAtY(contentH) - yMin) / box);
-  const iHi = Math.ceil((priceAtY(0) - yMin) / box) - 1;
+  const iLoLin = Math.floor((priceAtY(contentH) - yMin) / box);
+  const iHiLin = Math.ceil((priceAtY(0) - yMin) / box) - 1;
   // A P&F box fills when the price reaches its label, the centre of its cell; a Renko brick only once the price reaches the next
   // multiple of the box, so on Renko every row (and every order placed from it) sits on a brick edge, as the price axis does.
   const half = renko ? 0 : 0.5;
-  const rowOf = (p: number) => (renko ? Math.round((p - yMin) / box) : Math.floor((p - yMin) / box));
+  // Renko Log %: a row index is the log grid level k itself (absolute, not counted from yMin); rows below half the chart's low are not drawn
+  const g = renko && log ? log : null;
+  const kOf = (p: number) => logIndex(g!, Math.max(p, yMin > 0 ? yMin / 2 : 1e-6));
+  const rowOf = (p: number) => (g ? Math.round(kOf(p)) : renko ? Math.round((p - yMin) / box) : Math.floor((p - yMin) / box));
   // Renko rows are snapped onto the box grid itself (yMin is on it once a brick exists; before that it follows the live price).
-  const rowPrice = (idx: number) => (renko ? Math.round((yMin + idx * box) / box) * box : yMin + (idx + half) * box);
+  const rowPrice = (idx: number) => (g ? logLevel(g, idx) : renko ? Math.round((yMin + idx * box) / box) * box : yMin + (idx + half) * box);
+  const iLo = g ? Math.floor(kOf(priceAtY(contentH))) : iLoLin;
+  const iHi = g ? Math.floor(kOf(priceAtY(0))) : iHiLin;
   const levelAt = (y: number) => rowPrice(Math.max(iLo, Math.min(iHi, rowOf(priceAtY(y)))));
-  const rLo = Math.max(iLo, Math.floor((priceAtY(Math.min(contentH, visBottom)) - yMin) / box));
-  const rHi = Math.min(iHi, Math.ceil((priceAtY(Math.max(0, visTop)) - yMin) / box));
+  const rLo = Math.max(iLo, g ? Math.floor(kOf(priceAtY(Math.min(contentH, visBottom)))) : Math.floor((priceAtY(Math.min(contentH, visBottom)) - yMin) / box));
+  const rHi = Math.min(iHi, g ? Math.ceil(kOf(priceAtY(Math.max(0, visTop)))) : Math.ceil((priceAtY(Math.max(0, visTop)) - yMin) / box));
+  // A match within a quarter of the row: the box, or on a Log % chart a quarter of the brick at that price
+  const tolAt = (p: number) => (g ? (p * (g.r - 1)) / 4 : box / 4);
+  // A row's band on screen: `cell` px centred on its level, or on a Log % chart from halfway (in log steps) to the level below up to
+  // halfway to the level above. Log levels are not evenly spaced in pixels, so equal-height cells would overlap (a click one row off
+  // places the order a brick away) or leave dead gaps.
+  const rowBand = (idx: number, y: number): { top: number; h: number } => {
+    if (!g) return { top: y - cell / 2, h: Math.max(1, cell) };
+    const [lo, hi] = logRowEdges(g, idx);
+    const top = yOf(hi), bottom = yOf(lo);
+    return { top, h: Math.max(1, bottom - top) };
+  };
   const kindAt = (side: 'BUY' | 'SELL', p: number) => (liveValue === null ? '' : (side === 'BUY') === (p < liveValue) ? 'LIMIT' : 'SL-limit');
   const [hot, setHotState] = useState<{ side: 'BUY' | 'SELL'; p: number } | null>(null);
   const setHot = (h: { side: 'BUY' | 'SELL'; p: number } | null) => { setHotState(h); onHot(h && armed ? { ...h, kind: kindAt(h.side, h.p) } : null); };
@@ -329,13 +347,13 @@ function RailSvg({ rail, renko = false, box, cell, yMax, yMin, padY, contentH, y
       const sc = svg.parentElement?.parentElement;
       if (sc) { const r = sc.getBoundingClientRect(); if (e.clientY < r.top + 28) sc.scrollTop -= 14; else if (e.clientY > r.bottom - 28) sc.scrollTop += 14; }
       const next = levelAt(e.clientY - svg.getBoundingClientRect().top);
-      if (Math.abs(next - d.level) > box / 4) setDrag({ ...d, level: next });
+      if (Math.abs(next - d.level) > tolAt(d.level)) setDrag({ ...d, level: next });
     },
     onPointerUp: () => {
       const d = dragRef.current;
       if (d?.id !== id) return;
       setDrag(null);
-      if (Math.abs(d.level - d.start) > box / 4) commit(d.level);
+      if (Math.abs(d.level - d.start) > tolAt(d.start)) commit(d.level);
     },
     onPointerCancel: () => setDrag(null),
   });
@@ -352,16 +370,17 @@ function RailSvg({ rail, renko = false, box, cell, yMax, yMin, padY, contentH, y
         const p = rowPrice(idx);
         if (!(p > 0)) return null;
         const y = yOf(p);
-        const isLive = liveRow !== null && Math.abs(p - liveRow) < box / 4;
-        const isEntry = entryRow !== null && Math.abs(p - entryRow) < box / 4;
-        const ord = orderRows.get(p.toFixed(6)) ?? [...orderRows.entries()].find(([k]) => Math.abs(Number(k) - p) < box / 4)?.[1];
+        const band = rowBand(idx, y);
+        const isLive = liveRow !== null && Math.abs(p - liveRow) < tolAt(p);
+        const isEntry = entryRow !== null && Math.abs(p - entryRow) < tolAt(p);
+        const ord = orderRows.get(p.toFixed(6)) ?? [...orderRows.entries()].find(([k]) => Math.abs(Number(k) - p) < tolAt(p))?.[1];
         const showPrice = isLive || isEntry || !!ord || (((idx % rowsPerLabel) + rowsPerLabel) % rowsPerLabel === 0 && !underChip(y));
         const label = isLive && liveValue !== null ? fmt(liveValue, axisDigits) : fmt(p, axisDigits);
         return (
           <g key={n}>
             <line x1={0} x2={RAIL_W} y1={y + cell / 2} y2={y + cell / 2} className="stroke-zinc-800" pointerEvents="none" />
-            {isEntry && <rect x={0} y={y - cell / 2} width={RAIL_W} height={cell} className="fill-blue-500/25" pointerEvents="none" />}
-            {isLive && <rect x={PX} y={y - cell / 2} width={RAIL_PRICE_W} height={cell} className="fill-amber-500/30" pointerEvents="none" />}
+            {isEntry && <rect x={0} y={band.top} width={RAIL_W} height={band.h} className="fill-blue-500/25" pointerEvents="none" />}
+            {isLive && <rect x={PX} y={band.top} width={RAIL_PRICE_W} height={band.h} className="fill-amber-500/30" pointerEvents="none" />}
             {ord && <rect x={PX + 1} y={y - Math.max(cell, 14) / 2} width={RAIL_PRICE_W - 2} height={Math.max(cell, 14)} rx={3} className={ord.role === 'target' || (!ord.role && ord.side === 'BUY') ? 'fill-emerald-600/70' : 'fill-red-600/70'} pointerEvents="none" />}
             {showPrice && (
               <text x={PX + RAIL_PRICE_W / 2} y={y + 3.5} textAnchor="middle" pointerEvents="none" {...(ord ? { 'data-testid': 'pnf-rail-order-price', 'data-id': ord.id } : {})}
@@ -371,7 +390,7 @@ function RailSvg({ rail, renko = false, box, cell, yMax, yMin, padY, contentH, y
             {isLive && <circle cx={PX + 5} cy={y} r={2.5} className="fill-emerald-400" pointerEvents="none" />}
             {(['BUY', 'SELL'] as const).map(side => (
               <rect key={side} data-testid="pnf-rail-cell" data-side={side} data-level={p}
-                    x={colX(side)} y={y - cell / 2} width={RAIL_SIDE_W} height={Math.max(1, cell)}
+                    x={colX(side)} y={band.top} width={RAIL_SIDE_W} height={band.h}
                     className={armed ? 'cursor-pointer fill-transparent' : 'cursor-not-allowed fill-transparent'}
                     role="button" aria-label={`${side === 'BUY' ? 'Buy' : 'Sell'} ${kindAt(side, p) || 'order'} at ${fmt(p, axisDigits)}${armed ? '' : ' (rail locked)'}`} aria-disabled={!armed}
                     onPointerEnter={() => setHot({ side, p })}
@@ -518,6 +537,12 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const { columns, box, signals, exits } = model;
   // Renko: every column is one filled brick on real price edges (lib/renko.ts); `reversal` holds the N-brick confirmation.
   const renko = model.chart === 'renko';
+  // Renko Log % (lib/renko.ts buildLogRenko): bricks of uneven height on a fixed log grid; `box` is then the brick at the latest close
+  const logGrid = renko && model.log ? model.log : null;
+  const logPct = logGrid ? +((logGrid.r - 1) * 100).toFixed(4) : null;
+  // `box` is a Log % chart's stable scale (lib/renko.ts logScaleBox); the header names the brick the latest close sits on instead
+  const lastBrick = columns.length ? columns[columns.length - 1] : null;
+  const brickNow = logGrid && lastBrick ? (lastBrick.dir === 'X' ? lastBrick.high : lastBrick.low) * (logGrid.r - 1) : null;
   const unitWord = renko ? 'bricks' : 'boxes';
   const ruleText = renko ? `confirm ${reversal}` : `${reversal}-box`;
   const liveValue = live ? live.ce + live.pe : null;
@@ -552,8 +577,11 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const changePct = change !== null && changeBase ? (change / changeBase) * 100 : null;
   const lastSignal = signals.length ? signals[signals.length - 1] : null;
   // How the box was set: a % of the first price, or price points (raised to the 0.05% floor when the points were too small).
-  const boxNote = model.boxMode === 'pts' ? (model.boxClamped ? `points, raised to ${MIN_BOX_PTS_PCT}% of price` : 'points') : `${boxPct}% of ${fmt(model.boxBase ?? model.anchor)}`;
-  const boxTitle = model.boxMode === 'pts'
+  const boxHead = logPct !== null ? `Log ${logPct}%${brickNow !== null ? ` (brick now ${brickNow.toFixed(2)})` : ''}` : null;
+  const boxNote = logPct !== null ? `${logPct}% log${brickNow !== null ? `, brick now ${brickNow.toFixed(2)}` : ''}` : model.boxMode === 'pts' ? (model.boxClamped ? `points, raised to ${MIN_BOX_PTS_PCT}% of price` : 'points') : `${boxPct}% of ${fmt(model.boxBase ?? model.anchor)}`;
+  const boxTitle = logPct !== null
+    ? `Log % Renko: each brick is ${logPct}% of the previous brick's close (up x ${(1 + logPct / 100).toFixed(4)}, down / ${(1 + logPct / 100).toFixed(4)}) on a fixed log grid, so the bricks never redraw. Box ${box.toFixed(2)} is only the chart's scale (held over a 25% price band); MTM-guard and bracket boxes are log steps from the entry / fill`
+    : model.boxMode === 'pts'
     ? `Box ${box.toFixed(2)} points${model.boxClamped ? ` (the points set were below ${MIN_BOX_PTS_PCT}% of the price, so the box was raised to that floor)` : ''}; rows sit on multiples of the box`
     : `Box ${box.toFixed(2)} = ${boxPct}% of ${fmt(model.boxBase ?? model.anchor)}${model.boxBaseT !== null ? `, the first price of ${shortDate(sessionOfT(model.boxBaseT))}` : ''} (held until the chart reloads)`;
   const sessionsInfo = model.sessions.length
@@ -753,7 +781,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     if (!hover || dragging || box <= 0 || !liveCols.length) return null;
     const row = Math.floor((hover.y - rowTop) / cell);
     if (row < 0 || row >= L.rows) return null;
-    const price = yMax - (row + 0.5) * box;                      // yMax is a cell edge: this is the row's box price
+    // yMax is a cell edge: this is the row's box price (Log %: the price under the cursor, its rows are not cells)
+    const price = logGrid ? yMax - ((hover.y - rowTop) / cell) * box : yMax - (row + 0.5) * box;
     const j = Math.floor((hover.x - offsetX) / colW);
     const col = !hover.overAxis && j >= 0 && j < columns.length ? j : null;
     return { price, y: yOf(price), col, x: col !== null ? xOf(col) + colW / 2 : hover.overAxis ? null : hover.x };
@@ -763,7 +792,8 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const xGlyph = (cx: number, cy: number) => `M${r1(cx - sx)} ${r1(cy - sy)}L${r1(cx + sx)} ${r1(cy + sy)}M${r1(cx + sx)} ${r1(cy - sy)}L${r1(cx - sx)} ${r1(cy + sy)}`;
   const oGlyph = (cx: number, cy: number) => `M${r1(cx - sx)} ${r1(cy)}a${r1(sx)} ${r1(sy)} 0 1 0 ${r1(2 * sx)} 0a${r1(sx)} ${r1(sy)} 0 1 0 ${r1(-2 * sx)} 0`;
   // A Renko brick: a filled rectangle across the full column pitch and box height (adjacent bricks touch, as in TradingView).
-  const brick = (j: number, top: number) => `M${r1(xOf(j))} ${r1(yOf(top))}h${r1(colW)}v${r1(cell)}h${r1(-colW)}z`;
+  // A Log % brick passes its bottom: its height is its own price range, not one box.
+  const brick = (j: number, top: number, bottom?: number) => `M${r1(xOf(j))} ${r1(yOf(top))}h${r1(colW)}v${r1(bottom === undefined ? cell : yOf(bottom) - yOf(top))}h${r1(-colW)}z`;
   // Only the columns near the view are drawn: the visible ones plus one view width either side, in WINDOW_CHUNK steps so the
   // paths are rebuilt when the view crosses a chunk, not on every scroll pixel. A Renko chart over years holds 50k-100k+ bricks;
   // drawing every one made each crosshair move and pan repaint the whole history.
@@ -787,7 +817,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     let x = '', o = '';
     const end = Math.min(w1, columns.length);
     if (renko) {
-      for (let j = w0; j < end; j++) { const c = columns[j]; if (c.dir === 'X') x += brick(j, c.high); else o += brick(j, c.high); }
+      for (let j = w0; j < end; j++) { const c = columns[j]; const lo = logGrid ? c.low : undefined; if (c.dir === 'X') x += brick(j, c.high, lo); else o += brick(j, c.high, lo); }
       return { x, o };
     }
     for (let j = w0; j < end; j++) {
@@ -801,14 +831,15 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     }
     return { x, o };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renko, columns, box, cell, colW, offsetX, yMax, padY, sx, sy, w0, w1]);
-  const unconfirmed = unconfirmedBoxes(columns, liveCols, box);
+  }, [renko, logGrid, columns, box, cell, colW, offsetX, yMax, padY, sx, sy, w0, w1]);
+  const unconfirmed = unconfirmedBoxes(columns, liveCols, box, renko);   // the same rule withLive counts them with
   const unconfirmedRaw = useMemo(() => {
     let x = '', o = '', n = 0;
     for (const { col, ks } of unconfirmed) {
       const lc = liveCols[col];
       for (const k of ks) {
         n++;
+        if (renko && logGrid) { if (lc.dir === 'X') x += brick(col, lc.high, lc.low); else o += brick(col, lc.high, lc.low); continue; }
         if (renko) { const top = lc.low + (k + 1) * box; if (lc.dir === 'X') x += brick(col, top); else o += brick(col, top); continue; }
         if (lc.dir === 'X') x += xGlyph(xOf(col) + colW / 2, yOf(lc.low + (k + 0.5) * box));
         else o += oGlyph(xOf(col) + colW / 2, yOf(lc.low + (k + 0.5) * box));
@@ -816,7 +847,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     }
     return { x, o, n };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renko, liveCols, columns, box, cell, colW, offsetX, yMax, padY, sx, sy]);
+  }, [renko, logGrid, liveCols, columns, box, cell, colW, offsetX, yMax, padY, sx, sy]);
   // the same boxes on the next tick keep the same object, so the live layer is not rebuilt
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const unconfirmedPaths = useMemo(() => unconfirmedRaw, [unconfirmedRaw.x, unconfirmedRaw.o, unconfirmedRaw.n]);
@@ -868,9 +899,19 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const liveDigits = liveValue !== null && liveValue >= 100_000 ? 0 : 2;
   // The axis labels, built when the rows, the scroll window or the live price move, not on each crosshair move.
   // yMin is a cell edge: P&F names the box centre, Renko the brick edge (its grid is on multiples of the box)
-  const axisRowsShown = useMemo(() => Array.from({ length: Math.max(0, axisTo - axisFrom) }, (_, k) => axisFrom + k)
-    .filter(i => (renko ? Math.round((yMin + i * box) / box) : i) % tickEvery === 0)
-    .map(i => ({ i, p: yMin + (i + (renko ? 0 : 0.5)) * box })), [axisFrom, axisTo, renko, yMin, box, tickEvery]);
+  const axisRowsShown = useMemo(() => {
+    if (logGrid) {
+      // Log %: label the grid levels themselves (brick edges), every Nth level k, over the same price window
+      const kAt = (p: number) => logIndex(logGrid, Math.max(p, yMin > 0 ? yMin / 2 : 1e-6));
+      const kFrom = Math.floor(kAt(yMin + axisFrom * box)), kTo = Math.ceil(kAt(yMin + axisTo * box));
+      return Array.from({ length: Math.max(0, kTo - kFrom + 1) }, (_, n) => kFrom + n)
+        .filter(k => ((k % tickEvery) + tickEvery) % tickEvery === 0)
+        .map(k => ({ i: k, p: logLevel(logGrid, k) }));
+    }
+    return Array.from({ length: Math.max(0, axisTo - axisFrom) }, (_, k) => axisFrom + k)
+      .filter(i => (renko ? Math.round((yMin + i * box) / box) : i) % tickEvery === 0)
+      .map(i => ({ i, p: yMin + (i + (renko ? 0 : 0.5)) * box }));
+  }, [axisFrom, axisTo, renko, logGrid, yMin, box, tickEvery]);
   // a label within 14 px of the live price tag is hidden; keyed on WHICH labels that hides, so a live tick that moves the price
   // within a row does not rebuild the axis
   const liveY = liveValue === null ? null : yOf(liveValue);
@@ -1092,8 +1133,10 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
           }
 
           // P&F rows are centred on anchor + k * box; a Renko brick spans [k, k + 1) boxes, so its marker sits at the brick's middle
-          const boxK = box > 0 ? (renko ? Math.floor((m.price - anchorPx) / box) : Math.round((m.price - anchorPx) / box)) : 0;
-          const boxPrice = anchorPx + (renko ? boxK + 0.5 : boxK) * box;
+          // Log %: the brick of the log grid holding the price, the marker at its middle
+          const logK = logGrid && m.price > 0 ? Math.floor(logIndex(logGrid, m.price) + 1e-9) : null;
+          const boxK = logK !== null ? logK : box > 0 ? (renko ? Math.floor((m.price - anchorPx) / box) : Math.round((m.price - anchorPx) / box)) : 0;
+          const boxPrice = logK !== null ? (logLevel(logGrid!, logK) + logLevel(logGrid!, logK + 1)) / 2 : anchorPx + (renko ? boxK + 0.5 : boxK) * box;
           const key = `${colIdx}:${boxK}`;
           if (!groups.has(key)) groups.set(key, []);
           groups.get(key)!.push({ marker: m, colIdx, boxPrice, idx });
@@ -1165,7 +1208,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
     </>
   // xOf / yOf / inWindow are rebuilt every render from the layout values listed here
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ), [renko, colW, columns, cell, offsetX, yMax, padY, box, overlayPts, stPaths, kind, coverShown, exits, triShown, triangles, pivotLines, plotW, axisDigits, signals, w0, w1, lastEntryId, markersShown, tradeMarkers, colTimes, anchorPx, liveShape]);
+  ), [renko, colW, columns, cell, offsetX, yMax, padY, box, overlayPts, stPaths, kind, coverShown, exits, triShown, triangles, pivotLines, plotW, axisDigits, signals, w0, w1, lastEntryId, markersShown, tradeMarkers, colTimes, anchorPx, liveShape, logGrid]);
 
   // The zoom / toggle buttons (each with a tooltip): rebuilt only when what they show changes, not on every live tick or crosshair
   // move; their handlers are stable and call the latest ones.
@@ -1272,8 +1315,13 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
             <span data-testid="pnf-box-info" className="flex items-center gap-3 min-w-0 text-zinc-400 truncate" title={box > 0 ? boxTitle : undefined}>
               {box > 0 ? (
                 <>
-                  <span className="shrink-0">Box <span className="font-semibold text-zinc-100">{box.toFixed(2)}</span>{' '}
-                    <span className={model.boxClamped ? 'text-amber-400' : 'text-zinc-500'}>({boxNote})</span></span>
+                  {logPct !== null ? (
+                    <span className="shrink-0">Log <span className="font-semibold text-zinc-100">{logPct}%</span>{' '}
+                      {brickNow !== null && <span className="text-zinc-500">(brick now {brickNow.toFixed(2)})</span>}</span>
+                  ) : (
+                    <span className="shrink-0">Box <span className="font-semibold text-zinc-100">{box.toFixed(2)}</span>{' '}
+                      <span className={model.boxClamped ? 'text-amber-400' : 'text-zinc-500'}>({boxNote})</span></span>
+                  )}
                   <span className="shrink-0"><span className="font-semibold text-zinc-100">{ruleText}</span>{renko ? '' : ' rev'}</span>
                   <span className="shrink-0"><span className="font-semibold text-zinc-100">{columns.length}</span> {renko ? 'bricks' : 'cols'}</span>
                   {model.sessions.length > 0 && (
@@ -1310,7 +1358,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         )}
         {stLegend}
         <span data-testid="pnf-box-info" className="text-zinc-500 truncate min-w-0 flex-1" title={box > 0 ? boxTitle : undefined}>
-          {box > 0 ? `Box ${box.toFixed(2)} (${boxNote}) · ${ruleText} · ${columns.length} ${renko ? 'bricks' : 'cols'}` : 'Box —'}
+          {box > 0 ? `${boxHead ?? `Box ${box.toFixed(2)} (${boxNote})`} · ${ruleText} · ${columns.length} ${renko ? 'bricks' : 'cols'}` : 'Box —'}
         </span>
         <span className="ml-auto flex items-center gap-2 shrink-0">
           {lastSignal && (
@@ -1364,7 +1412,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         </p>
         <div className="mt-0.5 flex items-center justify-between gap-2">
           <p data-testid="pnf-box-info" className="text-[10px] font-mono text-zinc-500 truncate">
-            {box > 0 ? `Box ${box.toFixed(2)} (${boxNote}) · ${ruleText} · ${columns.length} ${renko ? 'bricks' : 'cols'}${sessionsInfo}` : 'Box —'}
+            {box > 0 ? `${boxHead ?? `Box ${box.toFixed(2)} (${boxNote})`} · ${ruleText} · ${columns.length} ${renko ? 'bricks' : 'cols'}${sessionsInfo}` : 'Box —'}
           </p>
           {lastSignal && (
             <span data-testid="pnf-last-signal"
@@ -1465,7 +1513,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
         ) : loading ? (
           <p className="p-3 text-xs text-zinc-400">Loading…</p>
         ) : liveCols.length === 0 ? (
-          <p className="p-3 text-xs text-zinc-400">{`Building chart — the first ${renko ? 'brick' : 'column'} needs a ${model.boxMode === 'pts' ? 'one-box' : `${boxPct}%`} move${interval > 1 ? ` on closed ${intervalLabel(interval)} bars` : ''}.`}</p>
+          <p className="p-3 text-xs text-zinc-400">{`Building chart — the first ${renko ? 'brick' : 'column'} needs a ${model.boxMode === 'pts' ? 'one-box' : logPct !== null ? `${logPct}% (log)` : `${boxPct}%`} move${interval > 1 ? ` on closed ${intervalLabel(interval)} bars` : ''}.`}</p>
         ) : (
           <>
           {/* The session names stay at the top of the view while the chart scrolls down (sticky, zero height so the chart does not move). */}
@@ -1640,7 +1688,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
 
             {/* the B / S rail (the ladder's columns): click a box row to rest an order there; drag an order's handle to move it */}
             {rail && (
-              <RailSvgMemo rail={rail} renko={renko} box={box} cell={cell} yMax={yMax} yMin={yMin} padY={padY} contentH={contentH} yOf={yOf}
+              <RailSvgMemo rail={rail} renko={renko} log={logGrid} box={box} cell={cell} yMax={yMax} yMin={yMin} padY={padY} contentH={contentH} yOf={yOf}
                        liveValue={liveValue} axisDigits={axisDigits} onDrag={setRailDrag} onHot={setRailHot} visTop={visTop} visBottom={visBottom}
                        countdown={railCountdown} />
             )}

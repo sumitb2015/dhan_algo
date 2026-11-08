@@ -67,6 +67,31 @@ test('Renko draws bricks with a points box and N-brick confirmation, on its own 
   expect(blocked).toEqual([]);
 });
 
+test('Log % box: the log% unit draws percentage-compounding bricks, and switching back to points restores the same chart', async ({ page }) => {
+  const blocked: Call[] = [];
+  await install(page, blocked, []);
+  await page.goto('/renko');
+  const panel = page.getByTestId('pnf-panel').first();
+  const count = async (id: string) => ((await panel.getByTestId(id).getAttribute('d')) ?? '').split('z').length - 1;
+  await expect.poll(() => count('pnf-bricks-up')).toBe(6);
+  const unit = page.getByRole('group', { name: 'Box unit' });
+  await unit.getByRole('button', { name: 'log%' }).click();
+  await expect(unit.getByRole('button', { name: 'log%' })).toHaveAttribute('aria-pressed', 'true');
+  const input = page.getByLabel('Box log %');
+  await expect(input).toHaveValue('0.1');
+  await input.fill('0.05');
+  await input.press('Enter');
+  // 22,640-22,680 is about 0.18 %: a handful of 0.05 % bricks (about 11.3 points each), not the 10-point chart's 9
+  await expect(page.getByTestId('pnf-box-info').first()).toContainText(/Log 0\.05%.*brick now/);
+  await expect.poll(async () => (await count('pnf-bricks-up')) + (await count('pnf-bricks-down'))).toBeGreaterThan(0);
+  expect((await count('pnf-bricks-up')) + (await count('pnf-bricks-down'))).toBeLessThan(9);
+  // back to points: the Traditional chart is exactly as before
+  await unit.getByRole('button', { name: 'pts' }).click();
+  await expect.poll(() => count('pnf-bricks-up')).toBe(6);
+  expect(await count('pnf-bricks-down')).toBe(3);
+  expect(blocked).toEqual([]);
+});
+
 test('the Supertrend is drawn on the bricks, its period / multiplier apply on Enter, and the eye hides it', async ({ page }) => {
   const blocked: Call[] = [];
   await install(page, blocked, []);

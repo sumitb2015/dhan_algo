@@ -22,7 +22,7 @@ import BrokerBooks from './straddlePnf/BrokerBooks';
 import HeaderClock from './straddlePnf/HeaderClock';
 import { buildPaperTrades } from '@/lib/pnfPaperBook';
 import { decodeMarkers, encodeMarkers } from '@/lib/pnfMarkerStore';
-import { rupeesPerBox } from '@/lib/pnfGuardBoxes';
+import { logBoxValue, rupeesPerBox, type BoxValue } from '@/lib/pnfGuardBoxes';
 import type { LadderGuard } from '@/lib/priceLadderGuard';
 import { AUTO_RULES, AUTO_SIDES, DEFAULT_AUTO_RULE, DEFAULT_AUTO_SIDE, SIDE_LABEL, ruleText, type AutoSide } from '@/lib/pnfAutoRule';
 import HeaderPnlMargin from './straddlePnf/HeaderPnlMargin';
@@ -687,12 +687,19 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const changeStyle = (s: StyleState) => { setOrderStyle(s); saveP(STYLE_KEY, JSON.stringify(s)); };
   /** The next entry's bracket: a spec, null (Single), or why it is not ready (then nothing is sent). */
   // The Style bar's numbers are P&F boxes of the chart the order goes to: they become price points with that chart's own box size.
-  const bracketSpecNow = (chart: ChartId = active): BracketSpec | null | string => {
+  // `side` / `entry`: the order's side and price. A Renko Log % chart needs both: its N boxes are N log steps from the fill, and an up
+  // step is bigger than a down one (target up for a BUY, down for a SELL; stop and trail the other way), exactly as AUTO's trail counts.
+  const bracketSpecNow = (chart: ChartId = active, side?: 'BUY' | 'SELL', entry?: number): BracketSpec | null | string => {
     if (orderStyle.style === 'Single') return null;
-    const box = (chart === 2 ? c2 : c1).model.box;
+    const m = (chart === 2 ? c2 : c1).model;
+    const box = m.box;
     if (!(box > 0)) return 'The chart has no box size yet - wait for its data';
-    const pts = (v: string) => { const n = Number(v); return v.trim() !== '' && Number.isFinite(n) && n > 0 ? String(+(n * box).toFixed(6)) : v; };
-    const spec = cleanBracketSpec(orderStyle.style, pts(orderStyle.tgt), pts(orderStyle.sl), orderStyle.trailOn ? pts(orderStyle.trail) : undefined);
+    const lg = m.chart === 'renko' ? m.log ?? null : null;
+    if (lg && !(side && entry && entry > 0)) return 'The order price is not known yet - a Log % bracket is measured from it';
+    const up = (n: number) => entry! * (lg!.r ** n - 1), down = (n: number) => entry! * (1 - lg!.r ** -n);
+    const toPts = (n: number, dir: 'profit' | 'loss') => (!lg ? n * box : (dir === 'profit') === (side === 'BUY') ? up(n) : down(n));
+    const pts = (v: string, dir: 'profit' | 'loss') => { const n = Number(v); return v.trim() !== '' && Number.isFinite(n) && n > 0 ? String(+toPts(n, dir).toFixed(6)) : v; };
+    const spec = cleanBracketSpec(orderStyle.style, pts(orderStyle.tgt, 'profit'), pts(orderStyle.sl, 'loss'), orderStyle.trailOn ? pts(orderStyle.trail, 'loss') : undefined);
     return typeof spec === 'string' ? spec.replace(/points/g, 'boxes') : spec;
   };
   const onRestingEvent = (e: RestingEvent) => {
@@ -907,9 +914,17 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   }));
   for (const gc of indexGuardCharts) guardPositions[gc.targetKey] = indexGuardPos(gc.chart);
   // What one box of a chart is worth on its open position (box points x lots x rupees per point per lot): the guard's box levels.
-  const boxRupees = (c: ChartId): number | null => {
+  // On a Renko Log % chart a box is a log step from the position's entry, worth more up than down (lib/pnfGuardBoxes logBoxValue).
+  const boxRupees = (c: ChartId): BoxValue | null => {
     const rc = railCharts.find(x => x.chart === c);
-    return rc ? rupeesPerBox((c === 2 ? c2 : c1).model.box, guardPositions[rc.targetKey]?.lots, rc.unitsPerLot[0]) : null;
+    if (!rc) return null;
+    const m = (c === 2 ? c2 : c1).model;
+    const pos = guardPositions[rc.targetKey];
+    if (m.chart === 'renko' && m.log) {
+      if (!pos || pos.side === 'MIXED') return null;
+      return logBoxValue(pos.avg, pos.side, m.log.r, (pos.lots ?? 0) * (rc.unitsPerLot[0] ?? 0));
+    }
+    return rupeesPerBox(m.box, pos?.lots, rc.unitsPerLot[0]);
   };
   // The guard is also enforced by the dashboard SERVER on open REAL AUTO positions (lib/autoServerWatcher.ts), so a closed or sleeping tab
   // does not leave one without its stop: every change of a chart's guard is synced to it.
@@ -917,7 +932,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     // an index chart's guard is rupees only (its box is an index move): no box size, no box levels go to the server
     const ixc = isIndexChart(c);
     const g = gIn && ixc ? rupeeLevels(gIn) : gIn;
-    const boxPts = ixc ? null : (c === 2 ? c2 : c1).model.box;
+    const gm = (c === 2 ? c2 : c1).model;
+    const boxPts = ixc ? null : gm.box;
+    // a Log % chart: the server counts box levels as log steps from the row's entry (not boxPts), as this page does
+    const boxLogR = !ixc && gm.chart === 'renko' && gm.log ? gm.log.r : null;
     if (g && (g.targetBoxes != null || g.stopBoxes != null) && !(boxPts != null && boxPts > 0)) {
       // A box that merely became unknown (chart 2 switched off in single-chart view, or still loading) is not a user action: the server
       // keeps the copy it already has, and the effect below re-syncs as soon as the box is known. Only a click on the card warns.
@@ -928,7 +946,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const levels = g ? Object.fromEntries((['target', 'stop', 'trailBy', 'lockAt', 'lockKeep', 'lockStepEvery', 'lockStepKeep', 'targetBoxes', 'stopBoxes'] as const).filter(k => g[k] != null).map(k => [k, g[k]])) : undefined;
     void fetch(`/api/straddle-pnf/server-guard?scope=${scope}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(g ? { chart: c, on: true, broker, mode: tradeMode, boxPts, levels } : { chart: c, on: false }),
+      body: JSON.stringify(g ? { chart: c, on: true, broker, mode: tradeMode, boxPts, ...(boxLogR ? { boxLogR } : {}), levels } : { chart: c, on: false }),
     }).catch(() => { /* the page's own guard still runs; the server copy is the backstop */ });
   };
   const guards = usePnfGuard({
@@ -942,9 +960,9 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       const g = guards.guardOf(c);
       if (g.on && (g.targetBoxes != null || g.stopBoxes != null)) syncServerGuard(c, g, true);
     }
-    // only when a chart's box size changes
+    // only when a chart's box size (or its Log % grid) changes; a Log % chart's box is a stable scale, not the brick just printed
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [c1.model.box, c2.model.box]);
+  }, [c1.model.box, c2.model.box, c1.model.log?.r, c2.model.log?.r]);
   // A guard the server holds (the tab was closed or reloaded with it on, or it was set in another broker / mode): the page picks it up
   // whenever the page's broker or mode becomes the guard's, so what the server enforces is always what the card shows. Checked on load AND
   // on every broker / mode change: a page loads in PAPER, so a once-per-load check skipped a REAL guard for good and the card read OFF while
@@ -1038,7 +1056,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
         // An order against the open position reduces it: it never carries a bracket (the trade bar does the same).
         const pos = positions[rc.targetKey];
         const reduces = !!pos && pos.side !== 'MIXED' && (pos.side === 'LONG') === (side === 'SELL');
-        const spec = reduces ? null : bracketSpecNow(c);
+        const spec = reduces ? null : bracketSpecNow(c, side, level);
         if (typeof spec === 'string') { toast.error(spec); return; }            // Bracket / Cover not filled in: nothing is placed
         void resting.place(rc, side, level, spec);
       },
@@ -1319,7 +1337,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     paper,
     setPaper,
     onSizing,
-    bracketSpec: indexTradable ? () => null : bracketSpecNow,
+    bracketSpec: indexTradable ? () => null : (side, entry) => bracketSpecNow(active, side, entry),
     onEntered: e => {
       const rc = railCharts.find(x => x.chart === active);
       if (rc) void resting.armBracket({ chart: rc.chart, target: rc.target, targetKey: rc.targetKey, side: e.action, lots: e.lots, mode: e.mode, product: e.product, bracket: e.spec }, e.price);
@@ -1348,7 +1366,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   };
   const styleBar = (
     <PnfOrderStyle
-      value={orderStyle} onChange={changeStyle} boxPts={activeChartModel.model.box} bracketsOff={indexTradable ? INDEX_NO_BRACKETS : undefined}
+      value={orderStyle} onChange={changeStyle} boxPts={activeChartModel.model.box} logPct={activeChartModel.model.chart === 'renko' && activeChartModel.model.log ? +((activeChartModel.model.log.r - 1) * 100).toFixed(4) : null} bracketsOff={indexTradable ? INDEX_NO_BRACKETS : undefined}
       guardOn={[1, 2].some(n => guards.guardOf(n).on)}
       serverGuards={serverGuards.map(({ chart: c, view }) => ({
         chart: c, mine: view.broker === broker && view.mode === tradeMode,

@@ -11,6 +11,7 @@ import { isNseSessionDay, istDateIso } from './nseHolidays.ts';
 import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
 import type { Target } from './pnfTarget.ts';
 import { autoProductOf, type AutoProduct } from './pnfOrderLogic.ts';
+import { gridMove, gridSteps, type LogGrid } from './renko.ts';
 
 export type AutoSide = 'BUY' | 'SELL';
 
@@ -43,8 +44,10 @@ export const MAX_SIGNAL_AGE_S = 180;
 export interface AutoModel {
   /** 'renko': each column is one brick, and a brick's price is its close edge (not its centre). Default P&F. */
   chart?: 'pnf' | 'renko';
-  /** Box size in price (the grid: box k is centred on anchor + k * box). */
+  /** Box size in price (the grid: box k is centred on anchor + k * box). On a Renko Log % chart: the brick size at the latest close. */
   box: number;
+  /** Renko Log %: the log grid; bricks are then counted in log steps (renko.ts gridSteps / gridMove), not in `box`. */
+  log?: LogGrid | null;
   signals: PnfSignal[];
   columns: PnfColumn[];
   /** Start / end time (epoch s) of each column, by index. */
@@ -160,7 +163,7 @@ function walkTrail(model: AutoModel, pos: AutoPosition): { best: number; col: nu
     if (start === undefined || start < pos.entryBarT) continue;
     const close = c.dir === 'X' ? c.high : c.low;                       // a brick's close edge
     if (c.dir === want) { if (sell ? close < best : close > best) best = close; continue; }
-    const back = (sell ? close - best : best - close) / model.box;
+    const back = sell ? gridSteps(model, best, close) : gridSteps(model, close, best);
     if (start > t.fromBarT && back >= t.boxes - 1e-6) return { best, col: i };
   }
   return { best, col: -1 };
@@ -176,7 +179,7 @@ export function trailExitColumn(model: AutoModel, pos: AutoPosition): number {
 export function trailLevel(model: AutoModel, pos: AutoPosition): number | null {
   if (!pos.trail || model.chart !== 'renko' || !(model.box > 0)) return null;
   const { best } = walkTrail(model, pos);
-  return pos.side === 'SELL' ? best + pos.trail.boxes * model.box : best - pos.trail.boxes * model.box;
+  return gridMove(model, best, pos.side === 'SELL' ? pos.trail.boxes : -pos.trail.boxes);
 }
 
 /**
@@ -342,7 +345,7 @@ export function decideAdd({ model, row, nowS, market, maxLots }: {
   if (every > 1) {
     const lastAddBox = [...(row.adds ?? [])].reverse().find(a => Number.isFinite(a.box))?.box;
     const from = lastAddBox ?? row.entryBox ?? row.base?.price ?? row.entryPrice;
-    const moved = (row.side === 'SELL' ? from - reach : reach - from) / model.box;
+    const moved = row.side === 'SELL' ? gridSteps(model, reach, from) : gridSteps(model, from, reach);
     if (!(model.box > 0) || moved < every - 1e-6) return { add: false, why: `waiting for ${every} bricks past the last add` };
   }
   return { add: true, barT: last, box: reach };

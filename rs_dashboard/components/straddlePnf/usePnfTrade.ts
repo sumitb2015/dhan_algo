@@ -39,7 +39,8 @@ export interface PnfTradeOptions {
   /** The current lots / product, for the rail's orders. */
   onSizing?: (s: { lots: number; product: PnfProduct }) => void;
   /** The Single / Bracket / Cover choice: a spec to attach to the next entry, null for Single, or why it is not ready (the order is then NOT sent). */
-  bracketSpec?: () => BracketSpec | null | string;
+  /** The next entry's bracket; `side` / `entry` = the order's side and expected price (a Renko Log % chart measures its boxes from it). */
+  bracketSpec?: (side?: PnfAction, entry?: number) => BracketSpec | null | string;
   /** An entry order (not one that reduces the position) went through: the page arms its bracket exits. */
   onEntered?: (e: { action: PnfAction; lots: number; price: number; mode: 'PAPER' | 'REAL'; product: PnfProduct; spec: BracketSpec }) => void;
   /** A manual square off went through: the chart's bracket exits are cancelled. */
@@ -284,9 +285,9 @@ export function usePnfTrade({
     // An order against the open position reduces it: it sounds like an exit, not a new trade.
     const reduces = !entry && !!position && position.side !== 'MIXED' && (position.side === 'LONG') === (action === 'SELL');
     // Bracket / Cover chosen but not filled in: refuse, never send a plain order the user thought had exits.
-    const spec = reduces ? null : bracketSpec?.() ?? null;
-    if (typeof spec === 'string') { toast.error(spec); return false; }
     const entryPrice = live ? live.ce + live.pe : 0;
+    const spec = reduces ? null : bracketSpec?.(action, entryPrice) ?? null;
+    if (typeof spec === 'string') { toast.error(spec); return false; }
     const what = `${action} ${n} ${isEquity ? 'sh' : `lot${n > 1 ? 's' : ''}`} ${product}`;
     try {
       if (mode === 'PAPER') {

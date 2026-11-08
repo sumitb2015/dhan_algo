@@ -3,9 +3,9 @@
 // interval first; the box size is a percentage of the first price.
 import { VWAP_START, buildPnf, continuePnf, detectSignals, exitTags, extendPnf, sessionOf, vwapFrom, type VwapState, type Bar, type PnfColumn, type PnfResume, type PnfSignal } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
-import { buildRenko, continueRenko, extendRenko, renkoSignals, trendSignals, supertrendSignals, twoBackSignals, oneBackSignals, renkoSmaResume, renkoSmaByBarFrom, renkoSupertrendResume, runStartOf, type RenkoResume, type RenkoSupertrendPoint } from './renko.ts';
+import { buildRenko, buildLogRenko, logBrickBox, continueRenko, extendRenko, renkoSignals, trendSignals, supertrendSignals, twoBackSignals, oneBackSignals, renkoSmaResume, renkoSmaByBarFrom, renkoSupertrendResume, runStartOf, type RenkoResume, type RenkoSupertrendPoint, type LogGrid } from './renko.ts';
 import type { SupertrendState } from './indicators.ts';
-import { MIN_BOX_PTS_PCT, type BoxMode } from './straddlePnfSettings.ts';
+import { DEFAULT_BOX_LOG, MIN_BOX_PTS_PCT, type BoxMode } from './straddlePnfSettings.ts';
 
 export type Overlay = 'vwap' | 'sma';
 /** Point & Figure, or Renko (lib/renko.ts: one brick per column, the box always in points). */
@@ -22,6 +22,11 @@ export type PanelModel = {
   /** A % box: the price it is that % of and that price's bar time (see PanelOptions.boxBaseT); null for a box in points. */
   boxBase: number | null;
   boxBaseT: number | null;
+  /**
+   * Renko Log % (boxMode 'log'): the fixed log grid the bricks sit on, and `box` is then the brick size at the latest close (bricks
+   * grow and shrink with price). Count or step bricks with renko.ts gridSteps / gridMove, never with `box`. Null / absent otherwise.
+   */
+  log?: LogGrid | null;
   columns: PnfColumn[];
   signals: PnfSignal[];
   /** Renko only (empty on P&F): state-based N-brick (every brick completing N same-colour bricks); AUTO's 'N-brick (trend)' rule. */
@@ -81,7 +86,7 @@ export type PanelModel = {
  * The unconfirmed boxes: for each column of `live`, the glyph indexes (bottom to top) the confirmed chart does not have. P&F only
  * ever extends its last column or adds columns, so earlier columns match and give nothing.
  */
-export function unconfirmedBoxes(confirmed: PnfColumn[], live: PnfColumn[], box: number): { col: number; ks: number[] }[] {
+export function unconfirmedBoxes(confirmed: PnfColumn[], live: PnfColumn[], box: number, brickMid = false): { col: number; ks: number[] }[] {
   const out: { col: number; ks: number[] }[] = [];
   // Only the last confirmed column can grow and new ones follow it, so the scan starts there (a chart can hold 100k columns and
   // this runs on every live tick and every crosshair move).
@@ -90,7 +95,8 @@ export function unconfirmedBoxes(confirmed: PnfColumn[], live: PnfColumn[], box:
     const c = confirmed[col];
     const ks = Array.from({ length: lc.boxes }, (_, k) => k).filter(k => {
       if (!c || c.dir !== lc.dir) return true;
-      const p = lc.low + (k + 0.5) * box;
+      // a Renko brick is one box: test its middle (on a Log % chart its size is not `box`)
+      const p = brickMid ? (lc.low + lc.high) / 2 : lc.low + (k + 0.5) * box;
       return p < c.low || p > c.high;
     });
     if (ks.length) out.push({ col, ks });
@@ -167,6 +173,8 @@ export type PanelOptions = {
   /** 'pts' sizes the box in price points (`boxPts`) instead of `boxPct`. */
   boxMode?: BoxMode;
   boxPts?: number;
+  /** Renko with boxMode 'log': the Log % brick (default DEFAULT_BOX_LOG). A P&F chart treats 'log' as 'pct'. */
+  boxLog?: number;
   /** Boxes against the column needed to reverse it (default 3). */
   reversal?: number;
   /** Boxes in the SMA overlay (default SMA_PERIOD): it averages P&F box values, not bar closes. */
@@ -215,6 +223,8 @@ export type ConfirmedModel = Omit<PanelModel, 'liveColumns' | 'sessionOpen' | 'p
     resume: PnfResume | RenkoResume | null; lastEnd: number;
     /** The box asked for in points (null: a % box), for a chart whose box cannot be known before a first bar (withLive). */
     ptsAsked: number | null;
+    /** Renko Log %: the brick % (null: not a Log % chart). */
+    logAsked: number | null;
     /** The chart bars built from closedBars and, for each, the index of its last 1-min bar (a later build appends to them). */
     chartBars: Bar[]; chartEndIdx: number[];
     /** VWAP of every 1-min bar and its running sums, and VWAP at each chart bar: carried on by a longer history of the same bars. */
@@ -321,17 +331,20 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   const firstBar = closedBars.find(b => b.straddle > 0 && (opts.anchorT === undefined || b.t >= opts.anchorT)) ?? closedBars.find(b => b.straddle > 0);
   const firstPrice = firstBar?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
   const ptsAsked = opts.boxMode === 'pts' && (opts.boxPts ?? 0) > 0 ? (opts.boxPts as number) : null;
+  // Log % is a Renko brick only; its grid is fixed (base 1), so boxBaseT / anchorT never move it (a Log chart does not repaint)
+  const logAsked = renko && opts.boxMode === 'log' ? (opts.boxLog !== undefined && opts.boxLog > 0 ? opts.boxLog : DEFAULT_BOX_LOG) : null;
+  const log: LogGrid | null = logAsked !== null ? { base: 1, r: 1 + logAsked / 100 } : null;
   const grid = gridFor(firstPrice, ptsAsked, boxPct);
   const { boxClamped, anchorPrice } = grid;
   let boxSize = grid.boxSize;
   let boxBase: number | null = null, boxBaseT: number | null = null;
-  if (ptsAsked === null && firstPrice) {
+  if (ptsAsked === null && logAsked === null && firstPrice) {
     const b = opts.boxBaseT !== undefined ? sessionFirstBar(closedBars, opts.boxBaseT) : undefined;
     if (b) { boxSize = b.straddle * boxPct; boxBase = b.straddle; boxBaseT = b.t; }
     else { boxBase = firstPrice; boxBaseT = firstBar!.t; }
   }
   const reuse = prefix && p!.resume !== null && p!.chart === chart && p!.interval === interval && p!.boxPct === boxPct && p!.reversal === reversal
-    && p!.anchorPrice === anchorPrice && p!.boxSize === boxSize && p!.sessionCloseMin === opts.sessionCloseMin;
+    && p!.anchorPrice === anchorPrice && p!.boxSize === boxSize && p!.sessionCloseMin === opts.sessionCloseMin && p!.logAsked === logAsked;
   let bars: Bar[], endIdx: number[], anchor: number, box: number, columns: PnfColumn[], resume: PnfResume | RenkoResume | null, vw: (number | null)[];
   if (reuse) {
     // The chart bars after prev's last one start at a bucket boundary (buckets are on the clock), so only they are resampled.
@@ -343,6 +356,11 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
     anchor = prev!.anchor; box = prev!.box;
     const next = renko ? continueRenko(prev!.columns, p!.resume as RenkoResume, tail.bars) : continuePnf(prev!.columns, p!.resume as PnfResume, tail.bars);
     columns = next.columns; resume = next.resume;
+    if (log) box = logBrickBox(columns, resume as RenkoResume);
+  } else if (log) {
+    ({ bars, endIdx } = resample(closedBars, interval, opts.sessionCloseMin));
+    ({ anchor, box, columns, resume } = buildLogRenko(bars, logAsked!, log.base));
+    vw = endIdx.map(i => vw1[i]);
   } else {
     ({ bars, endIdx } = resample(closedBars, interval, opts.sessionCloseMin));
     ({ anchor, box, columns, resume } = renko ? buildRenko(bars, boxSize ?? (firstPrice ?? 0) * boxPct, anchorPrice) : buildPnf(bars, boxPct, reversal, anchorPrice, boxSize));
@@ -382,6 +400,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
     boxClamped,
     boxBase,
     boxBaseT,
+    log: null,
     columns,
     // Renko: N-brick confirmation (`reversal` holds N); no COVER cue and no session marks (they are P&F devices).
     signals: detectSignals(columns, bars, reference),
@@ -407,7 +426,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   function buildState(renkoCarry: RenkoCarry | null): ConfirmedModel['build'] {
     return {
       chart, closedBars, interval, boxPct, reversal, anchorPrice, boxSize, sessionCloseMin: opts.sessionCloseMin,
-      resume, lastEnd: endIdx.length ? endIdx[endIdx.length - 1] : -1, chartBars: bars, chartEndIdx: endIdx, ptsAsked, vw1, vwapState, chartVw: vw,
+      resume, lastEnd: endIdx.length ? endIdx[endIdx.length - 1] : -1, chartBars: bars, chartEndIdx: endIdx, ptsAsked, logAsked, vw1, vwapState, chartVw: vw,
       closedSessions: facts.sessions, closedOpen: facts.open, closedPrev: facts.prev, hasVol, renko: renkoCarry,
     };
   }
@@ -437,17 +456,18 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
       chart,
       box,
       anchor,
-      boxMode: ptsAsked !== null ? 'pts' : 'pct',
+      boxMode: log ? 'log' : ptsAsked !== null ? 'pts' : 'pct',
       boxClamped,
       boxBase,
       boxBaseT,
+      log,
       columns,
       // N-brick confirmation (`reversal` holds N); no COVER cue and no session marks (they are P&F devices).
       signals: sig(pm?.signals, f => renkoSignals(columns, bars, reference, reversal, f)),
       trend: sig(pm?.trend, f => trendSignals(columns, bars, reference, reversal, f)),
       stSignals: sig(pm?.stSignals, f => supertrendSignals(columns, bars, reference, st.out, f)),
-      twoBack: sig(pm?.twoBack, f => twoBackSignals(columns, bars, reference, box, 3, f)),
-      oneBack: sig(pm?.oneBack, f => oneBackSignals(columns, bars, reference, box, f)),
+      twoBack: sig(pm?.twoBack, f => twoBackSignals(columns, bars, reference, box, 3, f, log)),
+      oneBack: sig(pm?.oneBack, f => oneBackSignals(columns, bars, reference, box, f, log)),
       exits: [],
       overlay: overlayLine,
       overlayNow,
@@ -492,9 +512,10 @@ export function withLive(c: ConfirmedModel, forming?: Bar): PanelModel {
       const all = forming ? [...closedBars, forming] : closedBars;
       const liveBars = resample(all, interval, sessionCloseMin, true).bars;
       const g = gridFor(all.find(b => b.straddle > 0)?.straddle, c.build.ptsAsked, boxPct);
-      live = (chart === 'renko' ? buildRenko(liveBars, g.box, g.anchorPrice) : buildPnf(liveBars, boxPct, reversal, g.anchorPrice, g.boxSize)).columns;
+      const { logAsked } = c.build;
+      live = (chart === 'renko' ? (logAsked !== null ? buildLogRenko(liveBars, logAsked) : buildRenko(liveBars, g.box, g.anchorPrice)) : buildPnf(liveBars, boxPct, reversal, g.anchorPrice, g.boxSize)).columns;
     }
-    const extra = unconfirmedBoxes(c.columns, live, c.box).reduce((n, u) => n + u.ks.length, 0);
+    const extra = unconfirmedBoxes(c.columns, live, c.box, chart === 'renko').reduce((n, u) => n + u.ks.length, 0);
     if (extra <= MAX_UNCONFIRMED_BOXES) liveColumns = live;
   }
   // Today's open / previous close / sessions: the closed bars' (computed once) unless the forming bar opens a new session.
