@@ -172,6 +172,56 @@ user which anchor they mean before changing a strike rule — "OTM 1" meant diff
   starts on an already-entered row. Ignored under Overall Momentum and in an overall re-entry cycle.
 - **Leg P&L %** next to ₹ in all views (`pnlPctOfPremium`, same avg and qty as the ₹ figure).
 
+## Index Start / Stop and re-entries (2026-11-09, `b5d3059a`)
+A stopped index (`group.enabled` false) refuses **every** RE on SL / Tgt (`reentryWindowClosed` → "index not started")
+while leg stops and targets keep running. A leg that stops out then stays flat and the **other leg is left naked**:
+this happened live on 2026-11-09 (vault `wiki/incidents/2026-11-09-focus-tool-stopped-index-naked-leg`). Rules:
+- **Stop is refused while any row on the index holds a position**, in `updateGroup` (toast, no "stop anyway") AND on the
+  server (`mergeFocusConfigWrite` drops `enabled:false`, returns `refusedGroupStops`). To stop new entries on a
+  held index, Disarm the row instead.
+- **Groups change only through `groupPatch`** (`{ underlying, patch }`, one index, only the changed fields). The page
+  strips `groups` from every save (`doSaveConfig`) and the server ignores a whole `groups` array. Before, every row
+  save carried the tab's copy of all four groups (last write wins), so a stale or second tab could switch an index off.
+  A new group setting must also go through `updateGroup`, never a whole-config save.
+- **Enter now / per-leg Re-enter on a stopped index** ask "Start <index> and enter now?" (`ensureIndexStarted`;
+  one prompt replaces the REAL-money confirm). Declining places nothing.
+- A **red banner with Start** shows whenever an index is stopped while rows hold positions (`stoppedHeldIndices`); this
+  can now only come from outside the page (old bundle, hand-edited file).
+- Start / Stop writes `index_started` / `index_stopped` to `debug/focus_tool_events.jsonl` (rowId `group:<U>`, with
+  `heldRows`).
+- A save that carried no rows (`groupPatch`, the risk bar) adopts the server's other fields but keeps this tab's rows
+  (`applyServerConfig(d, sentRows ?? [])`); rows sync on the 3 s re-read.
+- Still NOT guarded: a re-entry skipped for the row's own time rules (No re-entry after, exit time, monitoring stop),
+  an UNKNOWN-order hold, or a refused order leaves the leg flat with only the amber "NOT RE-ENTERED" banner. The risk bar
+  and the LIVE · REAL MONEY arm are still last-write-wins across tabs.
+- Proof: `e2e/focus-tool-index-stop.spec.ts`, `lib/focusToolRowsMerge.test.ts`.
+
+## Index-level ADD: margin gate and re-validation (2026-11-09, `b5d3059a`)
+An entry level on an OPEN leg adds lots. Sizing: `levelAddMarginGated(row, broker)` — Dhan NSE / BSE options (keyed off
+the row's own `fill.broker`, else the page broker), the SAME for SIM and REAL, so a SIM forward test adds what REAL would.
+Gated = capped at `MAX_LEVEL_ADD_LOTS`; otherwise also capped at the leg's own lots, shown on the leg line ("adds at most N").
+For a REAL gated add, in `driveLegEntries`:
+- The margin check (`checkAddMargin` → `checkOrderMarginGate`) runs **outside the row's busy hold**: leg stops and exits
+  skip a busy row, so a slow check used to hold back that row's stop-losses. `ADD_MARGIN_TIMEOUT_MS` (8 s) → block.
+- An **estimate-only** margin (`basketMarginSource: 'estimate'`, Dhan's calculator did not answer; it can be ₹0) blocks.
+- Then `placeEntry` re-reads the row and re-checks everything with **no await before `placeLeg`**: `legEntryClosedReason`
+  (status, index on, momentum, monitoring, exit time, cutoff), the level signature and lots unchanged, not fired today,
+  still a level leg, the leg still open (or still flat for an open), not exiting, and never more lots than the check
+  cleared. Any change → cancelled with a toast and the level re-arms for a fresh cross. Writing back the pre-await level
+  and lots used to revert an edit made during the check.
+- A margin block holds the level for 60 s for the setting in `blockedSig` (`addBlockSig`: level, dir, lots, leg lots,
+  Qty ×); editing any of them lifts it at once.
+- Functions called after an await go through `actionsRef.current` (`runRowAction`, `placeLeg`, `updateRow`) so they
+  read the current render's state, not the closure's.
+
+## Spot staleness for index levels (2026-11-09, `b5d3059a`)
+`spotFeedStale(u)`: a focus-WS spot is live; otherwise the poll's spot time `spotAt[u]` must be < `SPOT_STALE_MS` (30 s).
+`spotAt` is the quote's **own source time** — `/api/scalper/top-indices` stamps each quote with `at` (hub file
+`updated_at`, or when the REST call answered; a `lastGoodQuotes` fallback keeps its old `at`), never the poll's arrival
+time. A spot the poll never served (SENSEX is not on it) counts as **stale**: the chain's spot is a 30 s server-cached
+snapshot, so SENSEX levels pause unless the focus WS has its spot. `exitLevelStatus` says "not armed yet — waiting for a
+spot price" (never "armed") before the first spot arrives.
+
 ## Duplicate, presets, export / import (`a37d98df`)
 A row = RULES + RUNTIME (`ROW_RUNTIME_KEYS`: id, status, mode, fill, rev, counters, ladder, expiry). Copies carry rules
 only: a duplicate / imported row is always a flat **SIM draft**. Day prices (`PRESET_SKIP_KEYS`: spot H/L and the per-leg
@@ -185,12 +235,13 @@ name is refused — never evict.
   failed entry or by `armRow` (which also clears `fill`, the overall re-entry counters and `overallReMode`). A row can
   therefore read ARMED and flat yet never enter — Disarm→Arm was the only escape.
 - **Enter now** (row header, only when the row is flat): refuses if `busyRows`/`autoExitingRef` hold the row or an entry
-  started <15 s ago (`lastAutoEntryAtRef`), confirms for REAL rows, calls `armRow`, then **polls `schedulerRef` until the
+  started <15 s ago (`lastAutoEntryAtRef`), asks to start a stopped index (see "Index Start / Stop"), confirms for REAL
+  rows, calls `armRow`, then **polls `schedulerRef` until the
   row is `armed` with no fill** (≤3 s) before `autoEnterRow` — a fixed timer both double-entered (latch wiped mid-entry) and
   silently skipped (state not landed).
 - **Re-enter** (per flat leg, icon button replacing Exit): `placeLeg(row, leg, {reduce:false, lots: multipliedLots(row,
   legLots(row, leg))})` through `runRowAction`; **first clears that leg's `cePending`/`pePending`** (a waiting momentum /
-  range / cost re-entry would sell it again → doubled short). Confirm for REAL.
+  range / cost re-entry would sell it again → doubled short). Confirm for REAL; asks to start a stopped index first.
 - Both go through `placeLeg`'s own SIM / LIVE · REAL MONEY guard. Never bypass it.
 - `armRow` also toasts when the row's overall trail is invalid (`overallTrailInvalid`: "by" > "every" is ignored by
   `evaluateOverallExit`) so a silently disabled trail is not discovered mid-trade.
@@ -211,6 +262,10 @@ name is refused — never evict.
 
 ## Testing and verifying
 - `cd rs_dashboard && npx tsc --noEmit -p . && node --test lib/focusToolRules.test.ts lib/focusToolUnderlyings.test.ts lib/focusToolLegLots.test.ts lib/focusToolSimulated*.test.ts lib/focusToolPnl.test.ts` (`focusToolRules` + `focusToolUnderlyings` alone: 138 pass at 2026-10-09), plus `python -m pytest tests/test_focus_tool_parity.py` when a rule changed.
+- Browser specs (mocked, cannot place orders; run against :3000 per CLAUDE.md): `E2E_PORT=3000 npx playwright test
+  e2e/focus-tool-*.spec.ts` — broker, index-levels (incl. margin estimate / timeout / frozen spot), index-stop,
+  order-safety, unknown-order, zerodha (35 tests at 2026-11-09). The mock `e2e/focusToolMock.ts` has `margin`,
+  `marginSource`, `marginDelayMs`, `spotAt` and applies `groupPatch`. Groups in `config()` start STOPPED.
 - In the browser the dev data may contain a **real REAL-money row with an open position** and another tab may be the leader.
   Look, scroll, open menus; **do not click Exit / Enter now / Re-enter / + on a REAL row**. Prove behaviour on a SIM row.
 - A hot-reloaded page keeps old state: reload after changing prop wiring. Phantom 404s: see CLAUDE.md (stale Turbopack cache).
@@ -223,5 +278,8 @@ name is refused — never evict.
   (the `ceTrailSteps` / `ceScaleAt` / `ceFillEntry` pattern).
 - New order path → `placeLeg` only; sequential legs; a BOTH row that fills one leg is naked (the retry/toast in `autoEnterRow`).
 - New price consumer → read `focusWsQuotes` first and the chain second (`pick(ws, chain)`); never the chain alone for a stop.
+- New group (index) setting → through `updateGroup` / `groupPatch` only; never send `groups` in a save.
+- New code that awaits before an order → re-read the row from `schedulerRef` after the await and re-check it; never send
+  a snapshot taken before the await. Never await a network call inside `runRowAction` ahead of a stop-relevant window.
 - Past review findings worth remembering: latch + timer races, stale pending re-entries, blank-looking stored values, a
   per-row rule applied to ATM but not to the chain filter, fixed-delay "wait for state".

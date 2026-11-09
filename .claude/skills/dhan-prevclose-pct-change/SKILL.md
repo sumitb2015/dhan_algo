@@ -184,6 +184,15 @@ prior row as the real baseline (see `isCarryForwardPlaceholder()` in
 `TopMarketCapCharts.tsx` for the reference check) — don't just take `rows[-2]`
 unconditionally.
 
+## Rule 5: Each top-indices quote carries its own source time (`at`)
+`/api/scalper/top-indices` serves a row's last good value (`lastGoodQuotes`) when its source missed a poll, under a
+response `updated_at` that advances every poll. A consumer that judges freshness by the envelope (or by when the poll
+answered) sees a frozen row as live. Since 2026-11-09 (`b5d3059a`) every quote has `at` (ms): the hub file's
+`updated_at` for hub rows (kept through `repairFlippedHubRows`), the moment the REST call answered for the others, and
+the ORIGINAL `at` on a fallback row. Judge per-row staleness by `quote.at` (capped at now). The Focus Tool's index
+levels pause on it (`dhan-focus-tool`, "Spot staleness"). A new row source must set `at`; a fallback must not
+refresh it.
+
 ## Before You Ship
 - Does a new "vs previous close" panel source its data from Dhan only (Rule 1)?
 - Does any new close/flip guard gate on **time-of-day**, not on `close === ltp`
