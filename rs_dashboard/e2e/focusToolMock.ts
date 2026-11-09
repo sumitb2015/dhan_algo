@@ -82,6 +82,12 @@ export interface FocusMock {
   spot: number;
   /** Basket margin the Dhan pre-check route answers; null = the route fails (the add must then be refused). */
   margin: number | null;
+  /** The margin route's `basketMarginSource` ('estimate' = Dhan's calculator did not answer); omitted when unset. */
+  marginSource?: 'live' | 'estimate';
+  /** Hold the margin route's reply this long (ms) — a stalled Dhan margin call. */
+  marginDelayMs?: number;
+  /** The quote's own source time (`at`, ms) the top-indices poll reports; unset = no `at` (an older route). */
+  spotAt?: number;
 }
 
 export function newFocusMock(): FocusMock {
@@ -127,6 +133,9 @@ export async function installFocusMock(page: Page, m: FocusMock, savedBroker: 'd
       if (method === 'POST') {
         m.saves.push(body as FocusMock['saves'][number]);
         if (Array.isArray(body?.rows)) m.config = { ...m.config, rows: body.rows as unknown[] };
+        // Index Start / Stop arrives as a one-index patch (the real route ignores a whole groups array).
+        const gp = body?.groupPatch as { underlying: string; patch: Record<string, unknown> } | undefined;
+        if (gp) m.config = { ...m.config, groups: m.config.groups.map(g => (g.underlying === gp.underlying ? { ...g, ...gp.patch } : g)) };
         return json(route, { success: true, data: m.config, conflicts: [], refusedDeletes: [] });
       }
     }
@@ -137,11 +146,14 @@ export async function installFocusMock(page: Page, m: FocusMock, savedBroker: 'd
     }
     // Spot, so an ATM row resolves its strikes (23150).
     if (p === '/api/scalper/top-indices') {
-      return json(route, { success: true, updated_at: new Date().toISOString(), quotes: { 'NIFTY 50': { ltp: m.spot, change_pct: 0 } } });
+      return json(route, { success: true, updated_at: new Date().toISOString(),
+        quotes: { 'NIFTY 50': { ltp: m.spot, change_pct: 0, ...(m.spotAt != null ? { at: m.spotAt } : {}) } } });
     }
     // Dhan's pre-trade margin check (read-only; a failure answers the add's "could not verify").
     if (p === '/api/multi-leg-focus/margin' && method === 'POST') {
-      return m.margin == null ? json(route, { success: false, error: 'e2e' }) : json(route, { success: true, data: { basketMargin: m.margin } });
+      if (m.marginDelayMs) await new Promise(r => setTimeout(r, m.marginDelayMs));
+      return m.margin == null ? json(route, { success: false, error: 'e2e' })
+        : json(route, { success: true, data: { basketMargin: m.margin, ...(m.marginSource ? { basketMarginSource: m.marginSource } : {}) } });
     }
     if (p === '/api/options/expiries') return json(route, { success: true, data: [EXPIRY] });
     if (p === '/api/options/chain') {

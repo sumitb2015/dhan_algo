@@ -110,6 +110,10 @@ interface Quote {
   // "today" session yet to have a high/low.
   day_high: number | null;
   day_low: number | null;
+  /** When this row's price was produced at its source (ms): the hub file's `updated_at`, or the moment the REST call
+   *  answered. A row served from `lastGoodQuotes` keeps its original `at`, so a client can tell a frozen row apart
+   *  from a live one even though the response's own `updated_at` advances every poll. */
+  at?: number;
 }
 
 interface HubQuotesFile {
@@ -158,6 +162,7 @@ function fromHub(wanted: IndexDef[]): Record<string, Quote> {
       source: 'hub',
       day_high: high > 0 ? high : null,
       day_low: low > 0 ? low : null,
+      at: updatedMs,
     };
   }
   return out;
@@ -611,7 +616,7 @@ async function repairFlippedHubRows(quotes: Record<string, Quote>): Promise<void
     if (!q || q.source !== 'hub' || q.prev_close !== q.ltp) continue;
     const cacheKey = `${day}:${def.key}`;
     const hit = hubRepairCache.get(cacheKey);
-    if (hit) { quotes[def.key] = { ...hit, ltp: q.ltp, day_high: q.day_high, day_low: q.day_low }; continue; }
+    if (hit) { quotes[def.key] = { ...hit, ltp: q.ltp, day_high: q.day_high, day_low: q.day_low, at: q.at }; continue; }
     try {
       let fixed: Quote | null = null;
       if (weekend) {
@@ -621,7 +626,7 @@ async function repairFlippedHubRows(quotes: Record<string, Quote>): Promise<void
         const pc = await fetchLatestPrevClose(sid, segment, 'INDEX', day);
         if (pc) fixed = mkQuote(q.ltp, pc, 'hub+dhan-prevsession', q.day_high ?? 0, q.day_low ?? 0);
       }
-      if (fixed) { hubRepairCache.set(cacheKey, fixed); quotes[def.key] = fixed; }
+      if (fixed) { hubRepairCache.set(cacheKey, fixed); quotes[def.key] = { ...fixed, at: q.at }; }
     } catch { /* keep the hub row; change_pct 0 is the pre-existing state */ }
     await new Promise(r => setTimeout(r, HISTORICAL_STAGGER_MS));
   }
@@ -668,7 +673,8 @@ export async function GET() {
   for (const { key } of INDICES) {
     const fresh = quotes[key];
     if (fresh) {
-      lastGoodQuotes.set(key, fresh);
+      if (!Number.isFinite(fresh.at)) quotes[key] = { ...fresh, at: Date.now() };
+      lastGoodQuotes.set(key, quotes[key]);
     } else {
       const fallback = lastGoodQuotes.get(key);
       if (fallback) quotes[key] = fallback;

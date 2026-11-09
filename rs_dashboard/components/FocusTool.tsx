@@ -663,6 +663,15 @@ const UNKNOWN_ORDER_HOLD_MS = 60_000;
 const WS_STALE_MS = 8_000;
 /** The REST spot poll is older than this: index levels pause rather than act on a frozen price. */
 const SPOT_STALE_MS = 30_000;
+/** An index-level add's margin check that has not answered by then is a block (fail closed), not a wait. */
+const ADD_MARGIN_TIMEOUT_MS = 8_000;
+/** `p`, or `fallback` if it has not settled within `ms` (the late result is ignored). */
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>(resolve => {
+    const t = setTimeout(() => resolve(fallback), ms);
+    p.then(v => { clearTimeout(t); resolve(v); }, () => { clearTimeout(t); resolve(fallback); });
+  });
+}
 
 /**
  * The legs a row's VWAP series should cover, and the strikes to key it on.
@@ -1865,8 +1874,22 @@ function OverallSettingsControls({ row, onUpdate }: { row: FocusRow; onUpdate: (
  * blur/Enter); the direction is a select and commits at once. Blank level = off.
  */
 /** One leg's index entry / exit levels, compact, for that leg's own line (Pro sub-row, Table leg box). */
-function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE'; onUpdate: (patch: Partial<FocusRow>) => void }) {
+/**
+ * Whether an index-level ADD on this row is sized as margin-checked (capped only at MAX_LEVEL_ADD_LOTS) or capped at
+ * the leg's own lots. Only Dhan NSE / BSE index options have a pre-trade margin check. Keyed off the broker the row's
+ * position sits on (else the page broker), and the same for SIM and REAL, so a SIM forward test adds exactly what the
+ * REAL row would. A SIM row skips the check itself (it spends nothing); only the sizing is shared.
+ */
+function levelAddMarginGated(row: FocusRow, pageBroker: Broker): boolean {
+  const onBroker = (!isSimRow(row) && row.fill?.broker) || pageBroker;
+  return onBroker === 'dhan' && !isMcxUnderlying(row.underlying);
+}
+
+function LegIndexLevels({ row, leg, broker, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE'; broker: Broker; onUpdate: (patch: Partial<FocusRow>) => void }) {
   const momStatus = useContext(EntryMomContext);
+  // The same cap levelAddLots applies when the level fires.
+  const ownLots = legLots(row, leg);
+  const addCap = !levelAddMarginGated(row, broker) && ownLots >= 1 ? Math.min(MAX_LEVEL_ADD_LOTS, ownLots) : MAX_LEVEL_ADD_LOTS;
   const isCe = leg === 'CE';
   const en: FocusLegEntryLevel = (isCe ? row.ceEntryLevel : row.peEntryLevel) ?? { level: '', dir: isCe ? 'below' : 'above' };
   const ex: FocusLegLevel = (isCe ? row.ceExitLevel : row.peExitLevel) ?? { level: '', dir: isCe ? 'above' : 'below' };
@@ -1905,7 +1928,14 @@ function LegIndexLevels({ row, leg, onUpdate }: { row: FocusRow; leg: 'CE' | 'PE
         title={`Lots to close when the exit level fires, in the row's lot unit${rowQtyMultiplier(row) > 1 ? ` (Qty × ${rowQtyMultiplier(row)} applies: 1 closes ${rowQtyMultiplier(row)})` : ''}. Blank = close the whole ${leg} leg. Fewer than it holds closes that many and keeps the rest open; it fires again only after spot comes back and crosses the level again. A value that is not a whole number closes the whole leg`} />
       {levelLotsInvalid(en) && <span className="text-[11px] text-rose-400 font-semibold">entry lots: whole number ≥ 1 — level not used</span>}
       {legLevelOn(en) && !levelLotsInvalid(en) && rowOwnsLeg(row, leg) && levelLots(en) == null && <span className="text-[11px] text-amber-300 font-semibold">{leg} is open: set lots to add</span>}
-      {legLevelOn(en) && rowOwnsLeg(row, leg) && (levelLots(en) ?? 0) > MAX_LEVEL_ADD_LOTS && <span className="text-[11px] text-amber-300 font-semibold">max {MAX_LEVEL_ADD_LOTS} lots per add</span>}
+      {legLevelOn(en) && rowOwnsLeg(row, leg) && (levelLots(en) ?? 0) > addCap && (
+        <span className="text-[11px] text-amber-300 font-semibold"
+          title={addCap < MAX_LEVEL_ADD_LOTS
+            ? `No pre-trade margin check on this broker / exchange, so an add is capped at the ${leg} leg's own lots (${addCap})`
+            : `An add is capped at ${MAX_LEVEL_ADD_LOTS} lots per fire`}>
+          adds at most {addCap} lot(s){addCap < MAX_LEVEL_ADD_LOTS ? ' (the leg’s lots)' : ' per fire'}
+        </span>
+      )}
       {legLevelOn(en) && !rowOwnsLeg(row, leg) && (levelLots(en) ?? 0) > legLots(row, leg) && <span className="text-[11px] text-amber-300 font-semibold">opens at most {legLots(row, leg)} lot(s) (the leg&rsquo;s lots)</span>}
       {levelLotsInvalid(ex) && <span className="text-[11px] text-rose-400 font-semibold">exit lots: whole number ≥ 1 — closes all</span>}
       {entryLevelFiredToday(en, istToday()) && <span className="text-[11px] text-amber-300 font-semibold">entry used today — {rowOwnsLeg(row, leg) ? 'change the level to re-enable' : 'Arm to re-enable'}</span>}
@@ -3641,7 +3671,7 @@ function FocusTableRowImpl({
         </div>
         {legsOf(row).includes(leg) && (
           <div className="pt-1.5 border-t border-zinc-800/40">
-            <LegIndexLevels row={row} leg={leg} onUpdate={onUpdate} />
+            <LegIndexLevels row={row} leg={leg} broker={broker} onUpdate={onUpdate} />
           </div>
         )}
       </div>
@@ -4270,7 +4300,7 @@ function FocusProRowImpl({
               </>)}
               {inSide && (
                 <div className="ml-auto">
-                  <LegIndexLevels row={row} leg={leg} onUpdate={onUpdate} />
+                  <LegIndexLevels row={row} leg={leg} broker={broker} onUpdate={onUpdate} />
                 </div>
               )}
             </div>
@@ -5193,6 +5223,12 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   const confirmsInFlightRef = useRef<Map<string, number>>(new Map());
   // Rows left one-sided by an order the broker accepted and then rejected (margin, RMS): shown as a banner until the
   // user dismisses it or the row is no longer one-sided. A toast lasted 4 s, which is how a naked leg went unnoticed.
+  /** Indices that are stopped while rows on them hold positions (their re-entries are refused) — the banner. */
+  const stoppedHeldIndices = UNDERLYINGS.flatMap(u => {
+    if (config.groups.find(g => g.underlying === u)?.enabled) return [];
+    const n = config.rows.filter(r => r.underlying === u && !rowFlat(r)).length;
+    return n > 0 ? [{ u, n }] : [];
+  });
   const [nakedAlerts, setNakedAlerts] = useState<{ rowId: string; kind: 'entry' | 'add'; missing: ('CE' | 'PE')[]; at: number; text: string }[]>([]);
   // A stop closed a leg but the re-entry did NOT go out (index not started, a refusal, an unconfirmed order). The leg
   // stays flat until the user acts, so this is a persistent banner, not a 4 s toast (2026-10-19: two PE stops re-sold
@@ -5262,7 +5298,10 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     day: string; kind: 'range' | 'momentum' | 'level' | 'now'; strike: number; start: number; failed?: boolean;
     /** Index entry level: spot has been seen on the level's safe side since this gate started (a real cross) — for
      *  the setting in `levelSig`; an edit to the level / direction resets it. */
-    seenSafe?: boolean; levelSig?: string; blockedUntil?: number;
+    seenSafe?: boolean; levelSig?: string;
+    /** A margin-blocked add waits until `blockedUntil` — for the setting in `blockedSig` (level, direction, lots, the
+     *  leg's lots and Qty ×) only: an edit that could fix the block lifts it at once. */
+    blockedUntil?: number; blockedSig?: string;
     range?: { high: number; low: number }; rangeSince?: number; rangeNextTry?: number; rangeFetching?: boolean; rangeFailed?: boolean;
     /** Strike being rebuilt from the index's open at the range start (the tab was not open then). */
     strikeFetching?: boolean; strikeNextTry?: number; strikeSince?: number;
@@ -6135,22 +6174,30 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
       const raw = patch ?? {
         riskEnabled, targetRupees, stopRupees, stopSigned: true, trailEnabled, triggerRupees, lockRupees, liveRealMoney,
         trailKind: trailX.kind, trailEvery: trailX.every, trailBy: trailX.by,
-        groups: config.groups,
       };
       // Rows carry a rev bumped only for rows this tab changed (lib/revMerge.ts);
       // the server keeps the newer copy of each row, so this save can't roll
       // back a row another tab (or this tab's own later save) moved on.
       const sentRows = raw.rows ? stampItems(rowRevBookRef.current, 'r:', raw.rows) : undefined;
-      const body = sentRows ? { ...raw, rows: sentRows } : raw;
+      // Never send this tab's copy of the index groups: it may be stale, and it switched an index off behind the user's
+      // back. Groups change only through updateGroup's `groupPatch` (the server ignores a whole array anyway).
+      const { groups: _staleGroups, ...rawNoGroups } = raw;
+      void _staleGroups;
+      const body = sentRows ? { ...rawNoGroups, rows: sentRows } : rawNoGroups;
       const res = await fetch('/api/focus-tool/rows', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
-      const j = await res.json() as { success: boolean; data?: FocusToolConfig; error?: string; conflicts?: string[]; refusedDeletes?: string[] };
+      const j = await res.json() as { success: boolean; data?: FocusToolConfig; error?: string; conflicts?: string[]; refusedDeletes?: string[]; refusedGroupStops?: string[] };
       if (j.success && j.data) {
         noteItems(rowRevBookRef.current, 'r:', j.data.rows);
-        applyServerConfig(j.data, sentRows);
+        // A save that carried no rows (an index Start / Stop, the risk bar) must not replace this tab's rows wholesale
+        // with the server's: an edit made while it was in flight would be lost. Rows sync on the 3 s re-read instead.
+        applyServerConfig(j.data, sentRows ?? []);
         if (j.conflicts?.length) {
           addToast('error', 'Row changed elsewhere', `Kept the saved version of ${j.conflicts.length} row(s): another tab changed them first. Check those rows.`);
+        }
+        if (j.refusedGroupStops?.length) {
+          addToast('error', `${j.refusedGroupStops.join(', ')} not stopped`, 'It holds positions on the server — exit them first (a stopped index places no re-entry).');
         }
         if (j.refusedDeletes?.length) {
           addToast('error', 'Row not deleted', 'It still holds a position on the server — exit it first.');
@@ -6381,6 +6428,22 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   /** Open a flat row right now. Re-arms it first, which clears the one-entry latch and stale fill pin, then enters
    *  without waiting for the scheduler tick (and its entry-time/momentum gates). Orders still go through placeLeg's
    *  own SIM / LIVE · REAL MONEY guard. */
+  /**
+   * A manual entry on a STOPPED index used to go through, and then every RE on SL / Tgt of that position was refused
+   * ("index not started") — one leg stopped out and the other was left naked (2026-11-09). Ask to start the index
+   * with the entry. 'running' = it already was; 'started' = the user agreed and it is started now; 'cancel' = do nothing.
+   */
+  function ensureIndexStarted(row: FocusRow, what: string): 'running' | 'started' | 'cancel' {
+    const group = schedulerRef.current.config.groups.find(g => g.underlying === row.underlying);
+    if (group?.enabled) return 'running';
+    const ok = window.confirm(
+      `${row.underlying} is STOPPED. While it is stopped no re-entry is placed: if one leg stops out, the other is left `
+      + `on its own (naked).\n\nStart ${row.underlying} and ${what} now${isSimRow(row) ? ' (SIM)' : ' with REAL money'}?`);
+    if (!ok) return 'cancel';
+    updateGroup(row.underlying, { enabled: true });
+    return 'started';
+  }
+
   function enterRowNow(row: FocusRow) {
     if (!rowFlat(row)) { addToast('error', 'Cannot enter', 'This row still holds a position'); return; }
     // An entry the scheduler started a moment ago may not have stamped its first fill yet: re-arming now would wipe
@@ -6389,7 +6452,10 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
       addToast('error', 'Cannot enter', 'An order for this row is already in flight — wait a few seconds');
       return;
     }
-    if (!isSimRow(row) && !window.confirm(`Enter ${row.underlying} now with REAL money?`)) return;
+    const started = ensureIndexStarted(row, 'enter');
+    if (started === 'cancel') return;
+    // The Start prompt already said REAL money; ask once, not twice.
+    if (started === 'running' && !isSimRow(row) && !window.confirm(`Enter ${row.underlying} now with REAL money?`)) return;
     armRow(row.id);
     // Enter once the re-arm has landed in the scheduler's view of the row (status armed, old fill gone),
     // not after a fixed delay.
@@ -6410,7 +6476,9 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   /** Sell one flat leg again right now, at the row's lots and the leg's current strike. */
   function reenterLegNow(row: FocusRow, leg: 'CE' | 'PE') {
     if (rowOwnsLeg(row, leg)) { addToast('error', 'Cannot re-enter', `The ${leg} leg is still open`); return; }
-    if (!isSimRow(row) && !window.confirm(`Re-enter ${row.underlying} ${leg} now with REAL money?`)) return;
+    const started = ensureIndexStarted(row, `re-enter ${leg}`);
+    if (started === 'cancel') return;
+    if (started === 'running' && !isSimRow(row) && !window.confirm(`Re-enter ${row.underlying} ${leg} now with REAL money?`)) return;
     // A re-entry still waiting for this leg (momentum / range / cost) would sell it a second time when it
     // triggers, so this manual entry replaces it.
     const waiting = leg === 'CE' ? row.fill?.cePending : row.fill?.pePending;
@@ -8374,8 +8442,10 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   wsQuotesRef.current = focusWsQuotes;
   function spotFeedStale(u: FocusUnderlying): boolean {
     if ((wsQuotesRef.current?.[u]?.spot ?? 0) > 0) return false;
+    // Never served by the poll (SENSEX is not on it; or the poll has not answered yet): spot can only be the option
+    // chain's, a server-cached snapshot up to ~30 s old — stale for a level, so the level waits, visibly.
     const at = spotAtRef.current[u];
-    return at > 0 && Date.now() - at > SPOT_STALE_MS;
+    return !(at > 0) || Date.now() - at > SPOT_STALE_MS;
   }
 
   /**
@@ -9412,9 +9482,9 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
    * the added lots against the account's available funds. Fails closed — an unresolved contract, price, lot size,
    * margin or funds read blocks the add.
    */
-  /** Whether an index-level ADD on this row passes a margin check first: REAL Dhan rows on NSE / BSE options only. A SIM row spends nothing. */
+  /** Whether an index-level ADD on this row is margin-checked (Dhan NSE / BSE options) — see levelAddMarginGated. */
   function addMarginGated(row: FocusRow): boolean {
-    return isSimRow(row) || (broker === 'dhan' && !isMcxUnderlying(row.underlying));
+    return levelAddMarginGated(row, broker);
   }
 
   async function checkAddMargin(row: FocusRow, leg: 'CE' | 'PE', lots: number): Promise<{ ok: boolean; message: string }> {
@@ -9433,6 +9503,9 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
       underlying: u, expiry,
       legs: [{ id: `${leg}-add`, side: 'S', option: leg, strike, expiry, lots, quantity: lots * lotSize, price, securityId: String(securityId) }],
     });
+    // Fail closed means a number from Dhan's calculator: the route's fallback estimate (sum of per-leg figures, which
+    // can be 0 when those failed too) is a guess, and a guess must not clear an order that adds exposure.
+    if (r.ok && r.estimate) return { ok: false, message: 'Dhan’s margin calculator did not answer (only an estimate was available) — add blocked' };
     return { ok: r.ok, message: r.message };
   }
 
@@ -9909,6 +9982,22 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
    * opened after the range ended with no remembered strike cannot know which
    * strike was ATM at the entry time, so that leg is skipped, not guessed.
    */
+  /** Identity of a margin-blocked add's setting: an edit to any of these lifts the 60 s block at once. */
+  function addBlockSig(row: FocusRow, leg: 'CE' | 'PE', lv: FocusLegEntryLevel): string {
+    return `${levelSig(lv)}|${String(lv.lots ?? '').trim()}|${legLots(row, leg)}|${rowQtyMultiplier(row)}`;
+  }
+
+  /** Why this row's leg gates may no longer enter (null = they may). Also re-checked after any await before an order. */
+  function legEntryClosedReason(row: FocusRow, group: FocusIndexGroup | undefined, nowHm: string): string | null {
+    return (row.status !== 'armed' && row.status !== 'entered') ? `row is ${row.status}`
+      : !group?.enabled ? 'index stopped'
+      : entryMomentumOn(row) ? 'Overall Momentum turned on'
+      : monitoringStopped(row, nowHm) ? `monitoring stopped at ${row.stopMonitoringAfter}`
+      : (row.exitTime && nowHm >= row.exitTime) ? `past its exit time ${row.exitTime}`
+      : ((group?.product ?? 'INTRADAY') === 'INTRADAY' && nowHm >= UNDERLYING_META[row.underlying].backstopHm) ? `past ${UNDERLYING_META[row.underlying].backstopHm} intraday cutoff`
+      : null;
+  }
+
   function driveLegEntries(row: FocusRow, enterOk: boolean, nowHm: string) {
     const snap = schedulerRef.current;
     const u = row.underlying;
@@ -9917,13 +10006,7 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
     const group = snap.config.groups.find(g => g.underlying === u);
     const live = snap.rowLive[row.id] ?? EMPTY_ROW_LIVE;
     const spot = snap.spots[u] ?? 0;
-    const closedReason = (row.status !== 'armed' && row.status !== 'entered') ? `row is ${row.status}`
-      : !group?.enabled ? 'index stopped'
-      : entryMomentumOn(row) ? 'Overall Momentum turned on'
-      : monitoringStopped(row, nowHm) ? `monitoring stopped at ${row.stopMonitoringAfter}`
-      : (row.exitTime && nowHm >= row.exitTime) ? `past its exit time ${row.exitTime}`
-      : ((group?.product ?? 'INTRADAY') === 'INTRADAY' && nowHm >= UNDERLYING_META[row.underlying].backstopHm) ? `past ${UNDERLYING_META[row.underlying].backstopHm} intraday cutoff`
-      : null;
+    const closedReason = legEntryClosedReason(row, group, nowHm);
     let fired = false;   // one order per row per tick — busyRows reads this render's state
     // A BTST / Positional range leg makes the row's other legs wait for its range end too.
     const mdr = rowHasMultiDayRange(row);
@@ -10070,7 +10153,9 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
           marginGated: addMarginGated(row),
         });
         st.seenSafe = dec.seenSafe;
-        // A margin-blocked add waits a minute before it asks again, however spot wiggles around the level.
+        // A margin-blocked add waits a minute before it asks again, however spot wiggles around the level — unless the
+        // setting was edited since (smaller lots, another level), which lifts the block at once.
+        if (st.blockedUntil && st.blockedSig !== addBlockSig(row, leg, lv)) { st.blockedUntil = undefined; st.blockedSig = undefined; }
         if (st.blockedUntil && Date.now() < st.blockedUntil) { putMomStatus(key, `${leg}: add blocked by the margin check — retrying after a short pause`); continue; }
         if (!dec.fire) { putMomStatus(key, dec.status); continue; }
         // Sell the strike the row resolves to NOW, not the one noted when the gate started.
@@ -10083,86 +10168,141 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
       simMomFiringRef.current.add(key);
       fired = true;
       const armed = st;
-      runRowAction(row.id, async () => {
-        const fresh = schedulerRef.current.config.rows.find(r => r.id === row.id) ?? row;
-        // Once per day is reserved BEFORE the order goes out: a reload during the fill wait, or a late fill, must not
-        // leave the level free to sell this leg a second time today.
-        const freshLv = leg === 'CE' ? fresh.ceEntryLevel : fresh.peEntryLevel;
-        // An index-level entry may be set to sell fewer lots than the leg's own. Edited into something
-        // unusable since the cross was seen: refuse before anything is spent or sent.
-        // On a leg that is already open the level ADDS lots (explicit number only); on a flat leg it opens it.
-        const adding = kind === 'level' && rowOwnsLeg(fresh, leg);
-        const entryLots = kind !== 'level' ? legLots(row, leg)
-          : adding ? levelAddLots(freshLv, addMarginGated(fresh) ? undefined : legLots(fresh, leg)) : levelEntryLots(freshLv, legLots(row, leg));
-        if (entryLots == null) {
-          addToast('error', `${tag} ${adding ? 'add' : 'entry'} skipped`, `The ${leg} entry lots "${freshLv?.lots ?? ''}" is not a whole number of 1 or more — nothing was sent`);
-          return;
-        }
-        // An ADD puts on more exposure: REAL Dhan rows on NSE / BSE index options pass a fail-closed margin check first
-        // (unknown margin or funds blocks it). Checked before the day's trigger is spent; a blocked add waits for a
-        // fresh cross instead of being re-checked on every tick.
-        if (adding && !isSimRow(fresh) && addMarginGated(fresh)) {
-          const gate = await checkAddMargin(fresh, leg, multipliedLots(row, entryLots));
-          if (!gate.ok) {
-            armed.seenSafe = false;
-            armed.blockedUntil = Date.now() + 60_000;
-            logEvent('level_add_blocked', fresh, gate.message, { leg, lots: entryLots });
-            addToast('error', `${tag} add blocked`, `${gate.message} — nothing was sent. The level re-arms once spot crosses back and again.`);
-            return;
-          }
-        }
-        // The margin await above is a window in which the leg may have been stopped out or the row told to exit: an ADD
-        // decided on an open leg must not become a fresh short on a flat one.
-        if (adding) {
-          const cur = schedulerRef.current.config.rows.find(r => r.id === row.id);
-          const wantedAt = rowExitWantedRef.current.get(row.id);
-          if (!cur || !rowOwnsLeg(cur, leg) || autoExitingRef.current.has(row.id) || autoExitingLegRef.current.has(key)
-            || (wantedAt != null && Date.now() - wantedAt < 5_000)) {
-            armed.seenSafe = false;
-            addToast('error', `${tag} add cancelled`, `The ${leg} leg is no longer open (or the row is exiting) — nothing was sent`);
-            return;
-          }
-        }
-        if (kind === 'level' && freshLv) {
-          updateRow(row.id, leg === 'CE' ? { ceEntryLevel: { ...freshLv, firedOn: today } } : { peEntryLevel: { ...freshLv, firedOn: today } });
-        }
-        const sellLots = multipliedLots(row, entryLots);
-        addToast('success', `${tag} ${adding ? 'add' : 'entry'}`, trigger
-          ? `${trigger} — ${adding ? 'adding' : 'selling'} ${sellLots} lot(s) ${armed.strike} ${leg}`
-          : `Entry time reached — selling ${sellLots} lot(s) ${armed.strike} ${leg}`);
-        // The range it broke out of is the base of its ORB Range stop — handed
-        // to the ledger write that opens the leg (whenever the fill confirms).
-        const orb = kind === 'range' && rb && armed.range
-          ? { high: armed.range.high, low: armed.range.low, side: rb.side, on: rb.on } : null;
-        // An add goes in exactly like the + button: no strike override, so it lands on the strike the leg already holds.
-        const ok = await placeLeg(fresh, leg, { reduce: false, lots: sellLots, ...(adding ? {} : { strikeOverride: armed.strike }), orb });
-        if (ok) {
-          if (adding) {
-            // The leg was already open: an unfilled add is not a one-sided row, just an add that did not land.
-            const before = Number(leg === 'CE' ? fresh.fill?.ceQty : fresh.fill?.peQty) || 0;
-            if (!isSimRow(fresh)) {
-              void awaitLegSettled(row.id, leg, before).then(res => {
-                if (res === false) addToast('error', `${tag} add not filled`, `The ${sellLots}-lot add to ${armed.strike} ${leg} was accepted by the broker and then not filled (rejected — margin?). The leg is as it was.`);
-              });
+      // The setting the tick decided on. Anything that changes it before the order goes out (an edit, a stop, a
+      // disarm) cancels the order instead of being overwritten by this snapshot.
+      const decidedSig = kind === 'level' && lv ? levelSig(lv) : '';
+      const decidedLots = kind === 'level' && lv ? String(lv.lots ?? '').trim() : '';
+      const tickAdding = kind === 'level' && rowOwnsLeg(row, leg);
+
+      /** Re-arm the level for a fresh cross and say why nothing was sent. */
+      const cancelLevel = (title: string, why: string) => {
+        armed.seenSafe = false;
+        addToast('error', `${tag} ${title}`, `${why} — nothing was sent. The level re-arms once spot crosses back and again.`);
+      };
+
+      /** The order itself. Reads the row afresh and sends with NO await before placeLeg, so what is sent is exactly
+       *  the row as it stands now. `checkedUnits` = the lots × Qty × a margin check cleared (an ADD only). */
+      const placeEntry = async (checkedUnits?: number): Promise<void> => {
+        let ran = false;
+        await actionsRef.current.runRowAction(row.id, async () => {
+          ran = true;
+          const fresh = schedulerRef.current.config.rows.find(r => r.id === row.id);
+          if (!fresh) return;
+          const freshLv = leg === 'CE' ? fresh.ceEntryLevel : fresh.peEntryLevel;
+          // On a leg that is already open the level ADDS lots (explicit number only); on a flat leg it opens it.
+          const adding = kind === 'level' && rowOwnsLeg(fresh, leg);
+          if (kind === 'level') {
+            // Everything the tick checked, again: the row may have been disarmed, stopped, past its window, its level or
+            // lots edited, or the leg opened / closed in the meantime.
+            const freshGroup = schedulerRef.current.config.groups.find(g => g.underlying === u);
+            const closed = legEntryClosedReason(fresh, freshGroup, istHm());
+            if (closed) { cancelLevel(adding ? 'add cancelled' : 'entry cancelled', `The row can no longer enter (${closed})`); return; }
+            if (!freshLv || !legLevelOn(freshLv) || levelSig(freshLv) !== decidedSig || String(freshLv.lots ?? '').trim() !== decidedLots
+              || entryLevelFiredToday(freshLv, today) || legEntryKind(fresh, leg) !== 'level') {
+              cancelLevel(adding ? 'add cancelled' : 'entry cancelled', `The ${leg} index level was changed after it was crossed`);
+              return;
             }
-          } else {
-            checkEntryLegsFilled(fresh, [leg], legsOf(row), `${leg} entry`);
+            if (adding !== tickAdding) {
+              cancelLevel(adding ? 'add cancelled' : 'entry cancelled', `The ${leg} leg ${adding ? 'opened' : 'closed'} after the level was crossed`);
+              return;
+            }
           }
-          delete simMomRef.current[key];
-          const cur = schedulerRef.current.config.rows.find(r => r.id === row.id);
-          if (cur?.status === 'armed') updateRow(row.id, { status: 'entered' });
-        } else {
-          armed.failed = true;
-          const other: 'CE' | 'PE' = leg === 'CE' ? 'PE' : 'CE';
+          const entryLots = kind !== 'level' ? legLots(fresh, leg)
+            : adding ? levelAddLots(freshLv, addMarginGated(fresh) ? undefined : legLots(fresh, leg)) : levelEntryLots(freshLv, legLots(fresh, leg));
+          if (entryLots == null) {
+            addToast('error', `${tag} ${adding ? 'add' : 'entry'} skipped`, `The ${leg} entry lots "${freshLv?.lots ?? ''}" is not a whole number of 1 or more — nothing was sent`);
+            return;
+          }
+          const sellLots = multipliedLots(fresh, entryLots);
+          // A REAL margin-gated add must be covered by the check that cleared it: never send more than was checked.
+          if (adding && !isSimRow(fresh) && addMarginGated(fresh) && !(checkedUnits != null && sellLots <= checkedUnits)) {
+            cancelLevel('add cancelled', checkedUnits == null
+              ? 'The add was not margin-checked'
+              : `The add grew to ${sellLots} lot(s) after the margin check cleared ${checkedUnits}`);
+            return;
+          }
+          // An ADD decided on an open leg must not become a fresh short on a flat one.
           if (adding) {
-            addToast('error', `${tag} add not confirmed`, `The ${sellLots}-lot add to ${armed.strike} ${leg} was rejected or not confirmed. It may still fill — check the order book before adding by hand. Not retried.`);
-          } else
-          addToast('error', `${tag} entry failed`, legsOf(row).includes(other) && rowOwnsLeg(fresh, other)
-            ? `${other} is open but ${leg} was rejected — this row is one-sided. Place ${leg} manually if you want it.`
-            : `${leg} was rejected — not retried. Disarm and re-arm the row to try again.`);
-        }
-        await fetchPositionsNow();
-      }).finally(() => simMomFiringRef.current.delete(key));
+            const wantedAt = rowExitWantedRef.current.get(row.id);
+            if (autoExitingRef.current.has(row.id) || autoExitingLegRef.current.has(key)
+              || (wantedAt != null && Date.now() - wantedAt < 5_000)) {
+              cancelLevel('add cancelled', `The ${leg} leg is no longer open (or the row is exiting)`);
+              return;
+            }
+          }
+          // Once per day is reserved BEFORE the order goes out: a reload during the fill wait, or a late fill, must not
+          // leave the level free to sell this leg a second time today.
+          if (kind === 'level' && freshLv) {
+            actionsRef.current.updateRow(row.id, leg === 'CE' ? { ceEntryLevel: { ...freshLv, firedOn: today } } : { peEntryLevel: { ...freshLv, firedOn: today } });
+          }
+          addToast('success', `${tag} ${adding ? 'add' : 'entry'}`, trigger
+            ? `${trigger} — ${adding ? 'adding' : 'selling'} ${sellLots} lot(s) ${armed.strike} ${leg}`
+            : `Entry time reached — selling ${sellLots} lot(s) ${armed.strike} ${leg}`);
+          // The range it broke out of is the base of its ORB Range stop — handed
+          // to the ledger write that opens the leg (whenever the fill confirms).
+          const orb = kind === 'range' && rb && armed.range
+            ? { high: armed.range.high, low: armed.range.low, side: rb.side, on: rb.on } : null;
+          // An add goes in exactly like the + button: no strike override, so it lands on the strike the leg already holds.
+          const ok = await actionsRef.current.placeLeg(fresh, leg, { reduce: false, lots: sellLots, ...(adding ? {} : { strikeOverride: armed.strike }), orb });
+          if (ok) {
+            if (adding) {
+              // The leg was already open: an unfilled add is not a one-sided row, just an add that did not land.
+              const before = Number(leg === 'CE' ? fresh.fill?.ceQty : fresh.fill?.peQty) || 0;
+              if (!isSimRow(fresh)) {
+                void awaitLegSettled(row.id, leg, before).then(res => {
+                  if (res === false) addToast('error', `${tag} add not filled`, `The ${sellLots}-lot add to ${armed.strike} ${leg} was accepted by the broker and then not filled (rejected — margin?). The leg is as it was.`);
+                });
+              }
+            } else {
+              checkEntryLegsFilled(fresh, [leg], legsOf(fresh), `${leg} entry`);
+            }
+            delete simMomRef.current[key];
+            const cur = schedulerRef.current.config.rows.find(r => r.id === row.id);
+            if (cur?.status === 'armed') actionsRef.current.updateRow(row.id, { status: 'entered' });
+          } else {
+            armed.failed = true;
+            const other: 'CE' | 'PE' = leg === 'CE' ? 'PE' : 'CE';
+            if (adding) {
+              addToast('error', `${tag} add not confirmed`, `The ${sellLots}-lot add to ${armed.strike} ${leg} was rejected or not confirmed. It may still fill — check the order book before adding by hand. Not retried.`);
+            } else
+            addToast('error', `${tag} entry failed`, legsOf(fresh).includes(other) && rowOwnsLeg(fresh, other)
+              ? `${other} is open but ${leg} was rejected — this row is one-sided. Place ${leg} manually if you want it.`
+              : `${leg} was rejected — not retried. Disarm and re-arm the row to try again.`);
+          }
+          await fetchPositionsNow();
+        });
+        // Another action held the row when the margin check came back: nothing was sent; wait for a fresh cross.
+        if (!ran && checkedUnits != null) cancelLevel('add not sent', 'The row was busy with another order when the margin check finished');
+      };
+
+      // An ADD puts on more exposure: REAL Dhan rows on NSE / BSE index options pass a fail-closed margin check first
+      // (unknown margin or funds blocks it, and so does no answer within ADD_MARGIN_TIMEOUT_MS). It runs OUTSIDE the
+      // row's busy hold, so the row's stops and exits keep running while it waits; placeEntry then re-reads the row and
+      // re-checks everything before anything is sent. A blocked add waits for a fresh cross (or an edit) instead of being
+      // re-checked on every tick.
+      if (tickAdding && !isSimRow(row) && addMarginGated(row) && lv) {
+        const lotsNow = levelAddLots(lv, undefined);
+        if (lotsNow == null) { simMomFiringRef.current.delete(key); continue; }
+        const checkUnits = multipliedLots(row, lotsNow);
+        putMomStatus(key, `${leg}: level crossed — checking margin for the ${checkUnits}-lot add`);
+        const blockSig = addBlockSig(row, leg, lv);
+        void withTimeout(checkAddMargin(row, leg, checkUnits), ADD_MARGIN_TIMEOUT_MS,
+          { ok: false, message: `Margin check did not answer within ${ADD_MARGIN_TIMEOUT_MS / 1000} s — add blocked` })
+          .then(async gate => {
+            if (!gate.ok) {
+              armed.seenSafe = false;
+              armed.blockedUntil = Date.now() + 60_000;
+              armed.blockedSig = blockSig;
+              logEvent('level_add_blocked', row, gate.message, { leg, lots: checkUnits });
+              addToast('error', `${tag} add blocked`, `${gate.message} — nothing was sent. The level re-arms once spot crosses back and again (or at once if you change the lots or level).`);
+              return;
+            }
+            await placeEntry(checkUnits);
+          })
+          .finally(() => simMomFiringRef.current.delete(key));
+        continue;
+      }
+      void placeEntry().finally(() => simMomFiringRef.current.delete(key));
     }
   }
 
@@ -10234,8 +10374,8 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
   // versions — and with them a stale `lookups`/`lotSizes`/`rowLive` inside
   // placeLeg, which resolves the contract an order is actually sent for.
   // Going through a ref that every render refreshes keeps orders on current data.
-  const actionsRef = useRef({ updateRow, autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveLegEntries, rowHasLegEntryGate });
-  actionsRef.current = { updateRow, autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveLegEntries, rowHasLegEntryGate };
+  const actionsRef = useRef({ updateRow, autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveLegEntries, rowHasLegEntryGate, runRowAction });
+  actionsRef.current = { updateRow, autoEnterRow, autoExitRow, placeLeg, simQuote, checkPendingReentries, sweepUnconfirmedOrders, driveLegEntries, rowHasLegEntryGate, runRowAction };
 
   /**
    * The scheduler: everything time- or account-level driven, on a 1s tick.
@@ -10444,12 +10584,29 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
       return;
     }
 
-    setConfig(prev => {
-      const nextGroups = prev.groups.map(g => g.underlying === underlying ? { ...g, ...patch } : g);
-      const nextConfig = { ...prev, groups: nextGroups };
-      saveConfig(nextConfig);
-      return nextConfig;
-    });
+    // Stopping an index while it holds positions: its stops and targets keep running, but every RE on SL / Tgt is then
+    // refused ("index not started") — a stopped leg stays flat and the other leg is left NAKED (2026-11-09).
+    // Refused outright (no "stop anyway"); the server refuses it too.
+    if (patch.enabled === false && curGroup?.enabled) {
+      const held = schedulerRef.current.config.rows.filter(r => r.underlying === underlying && !rowFlat(r));
+      if (held.length) {
+        addToast('error', `${underlying} not stopped`, `${held.length} row(s) hold positions. A stopped index places no re-entry, so a leg `
+          + 'that stops out would leave the other leg naked. Exit those rows first, or Disarm a row to stop its new entries.');
+        return;
+      }
+    }
+    if (patch.enabled !== undefined && patch.enabled !== !!curGroup?.enabled) {
+      // Who switched an index on or off, and when — this was not logged before, so a mid-trade stop could not be traced.
+      postFocusEvent({
+        kind: patch.enabled ? 'index_started' : 'index_stopped', rowId: `group:${underlying}`, underlying,
+        reason: `${underlying} ${patch.enabled ? 'started' : 'stopped'} from this tab`,
+        heldRows: schedulerRef.current.config.rows.filter(r => r.underlying === underlying && !rowFlat(r)).map(r => r.id),
+      });
+    }
+
+    setConfig(prev => ({ ...prev, groups: prev.groups.map(g => g.underlying === underlying ? { ...g, ...patch } : g) }));
+    // Only this index and only the fields changed: the server ignores a whole `groups` array (lib/focusToolRowsMerge.ts).
+    void saveConfig({ groupPatch: { underlying, patch } });
   }
 
   /**
@@ -10687,6 +10844,28 @@ function FocusTool({ helpMarkdown }: { helpMarkdown?: string } = {}) {
                 className={cn('px-2 py-0.5 rounded border border-rose-400/50 text-rose-100 font-semibold hover:bg-rose-500/20 cursor-pointer', FOCUS_RING)}
               >
                 Checked — resume
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* An index that is STOPPED while its rows hold positions: every re-entry is refused, so a leg that stops out leaves
+          the other one naked. Stop is refused while positions are held, so this only shows for a state made elsewhere
+          (an old tab, a hand-edited file) — and then it must be impossible to miss. */}
+      {stoppedHeldIndices.length > 0 && (
+        <div role="alert" className="z-20 bg-rose-950/95 border-b border-rose-500/40 px-4 py-2 space-y-1.5">
+          {stoppedHeldIndices.map(({ u, n }) => (
+            <div key={u} className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs">
+              <span className="font-bold text-rose-200">{u} is STOPPED with {n} row(s) holding positions — re-entries are OFF</span>
+              <span className="text-zinc-300">A leg that stops out will NOT be re-entered and the other leg is left naked.</span>
+              <button
+                onClick={() => updateGroup(u, { enabled: true })}
+                aria-label={`Start ${u} so its re-entries run`}
+                title={`Start ${u}: re-entries (and armed rows' entries) run again`}
+                className={cn('px-2 py-0.5 rounded border border-rose-400/50 text-rose-100 font-semibold hover:bg-rose-500/20 cursor-pointer', FOCUS_RING)}
+              >
+                Start {u}
               </button>
             </div>
           ))}

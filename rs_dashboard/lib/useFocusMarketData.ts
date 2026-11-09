@@ -115,7 +115,7 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
     const fetchTopIndices = () => {
       fetch('/api/scalper/top-indices')
         .then(r => r.json())
-        .then((j: { success?: boolean; updated_at?: string; quotes?: Record<string, { ltp: number; change_pct: number | null }> }) => {
+        .then((j: { success?: boolean; updated_at?: string; quotes?: Record<string, { ltp: number; change_pct: number | null; at?: number }> }) => {
           if (!j.quotes) return;
           const q = j.quotes;
           const vix = q.VIX;
@@ -129,9 +129,19 @@ export function useFocusMarketData({ broker, watched, watchedKey, rows, groups }
           const KEY_MAP: Record<string, FocusUnderlying> = {
             'NIFTY 50': 'NIFTY', 'NIFTY': 'NIFTY', 'BANKNIFTY': 'BANKNIFTY', 'SENSEX': 'SENSEX', 'CRUDEOILM': 'CRUDEOILM',
           };
+          // Stamped with the quote's OWN source time (`at`: the bridge file's updated_at, or when the REST call answered),
+          // never the arrival time: the route keeps serving a row's last good value with a fresh envelope, so a frozen
+          // feed would otherwise look live for as long as the poll answers. Capped at now (clock skew must not make a
+          // quote look newer than it is). An older route without `at` falls back to the envelope's updated_at.
           const arrived = Date.now();
-          const seen = Object.entries(q).flatMap(([key, val]) => (KEY_MAP[key] && val?.ltp ? [KEY_MAP[key]] : []));
-          if (seen.length) setSpotAt(prev => ({ ...prev, ...Object.fromEntries(seen.map(u => [u, arrived])) }));
+          const envelopeAt = j.updated_at ? Date.parse(j.updated_at) : NaN;
+          const stamps = Object.entries(q).flatMap(([key, val]) => {
+            const u = KEY_MAP[key];
+            if (!u || !val?.ltp) return [];
+            const src = Number.isFinite(val.at) ? Number(val.at) : envelopeAt;
+            return [[u, Number.isFinite(src) ? Math.min(src, arrived) : arrived] as const];
+          });
+          if (stamps.length) setSpotAt(prev => ({ ...prev, ...Object.fromEntries(stamps) }));
           setSpotPrices(prev => {
             const next = { ...prev };
             for (const [key, val] of Object.entries(q)) {

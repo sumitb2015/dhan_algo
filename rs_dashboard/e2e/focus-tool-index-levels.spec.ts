@@ -113,3 +113,41 @@ test('dhan: an add whose margin cannot be verified is blocked — nothing is sen
   await expect(page.getByText(/add blocked/i).first()).toBeVisible({ timeout: 30_000 });
   expect(orders(m)).toEqual([]);
 });
+
+test('dhan: an add cleared only by the margin route\'s ESTIMATE is blocked — a guess never clears an add', async ({ page }) => {
+  open('dhan', 65, { ceEntryLevel: { dir: 'above', level: '23200', lots: '1' } });
+  m.margin = 0; m.marginSource = 'estimate';            // the fallback sum can be 0 when the per-leg figures failed too
+  await installFocusMock(page, m, 'dhan');
+  await openFocusTool(page, 'Exit CE leg');
+  await page.waitForTimeout(6_000);
+  m.spot = 23210;
+  await expect(page.getByText(/add blocked/i).first()).toBeVisible({ timeout: 30_000 });
+  expect(orders(m)).toEqual([]);
+});
+
+test('dhan: a margin check that does not answer blocks the add, and the leg\'s exit level still fires meanwhile', async ({ page }) => {
+  open('dhan', 65, {
+    ceEntryLevel: { dir: 'above', level: '23200', lots: '1' },
+    peExitLevel: { dir: 'above', level: '23205' },
+  });
+  m.margin = 100_000; m.marginDelayMs = 20_000;          // longer than the 8 s timeout
+  await installFocusMock(page, m, 'dhan');
+  await openFocusTool(page, 'Exit CE leg');
+  await page.waitForTimeout(6_000);                      // both levels see their safe side
+  m.spot = 23210;                                        // crosses the CE add AND the PE exit
+  // The PE exit is not held up by the add's pending margin check (it used to wait on the row's busy hold).
+  await expect.poll(() => orders(m).filter(o => sideOf(o) === 'B').length, { timeout: 7_000 }).toBe(1);
+  await expect(page.getByText(/did not answer within 8 s/i).first()).toBeVisible({ timeout: 20_000 });
+  expect(orders(m).filter(o => sideOf(o) === 'S')).toEqual([]);
+});
+
+test('a frozen spot (the poll keeps answering an old quote) pauses the levels — nothing fires on it', async ({ page }) => {
+  m.spotAt = Date.now() - 60_000;                        // the bridge's last price is a minute old
+  open('dhan', 65, { ceExitLevel: { dir: 'above', level: '23200' } });
+  await installFocusMock(page, m, 'dhan');
+  await openFocusTool(page, 'Exit CE leg');
+  await page.waitForTimeout(6_000);
+  m.spot = 23210;
+  await page.waitForTimeout(8_000);
+  expect(orders(m)).toEqual([]);
+});

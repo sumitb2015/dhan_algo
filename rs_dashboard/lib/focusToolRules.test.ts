@@ -1070,6 +1070,10 @@ test('exitLevelStatus: says whether an exit level is armed, waiting for a first 
   const up = { level: '22745', dir: 'above' as const };
   assert.equal(exitLevelStatus(levelFiredMark(up), up, 22750, 10), 'fired — re-arms once spot is back below 22735');
   assert.equal(exitLevelStatus(undefined, { level: '', dir: 'below' }, 22745, 10), '');
+  // No spot (reload before the first price, a feed with none) and no mark: NOT armed — it was shown "armed" before.
+  assert.equal(exitLevelStatus(undefined, dn, 0, 10), 'not armed yet — waiting for a spot price (arms on the first one above 22740)');
+  // ...but a mark saved earlier still counts with no spot (exitLevelStep fires on it at the next real price).
+  assert.equal(exitLevelStatus('below:22740', dn, 0, 10).startsWith('armed'), true);
 });
 
 test('entryLevelStep: the whole entry-level decision (flat open, add to an open leg, waiting, refusing)', () => {

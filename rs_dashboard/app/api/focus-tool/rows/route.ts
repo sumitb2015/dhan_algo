@@ -18,6 +18,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     let config = readFocusConfig();
     let conflicts: string[] = [];
     let refusedDeletes: string[] = [];
+    let refusedGroupStops: string[] = [];
 
     // Rows merge per row by rev (lib/focusToolRowsMerge.ts): a second or
     // stale tab can no longer roll back other rows' fill ledgers, and a save
@@ -26,10 +27,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     // last-write-wins, and only when the save carries them.
     // (A single-row `row` upsert used to live here; no caller sent it and, with no rev, it was always
     // reported as a conflict and dropped.)
-    ({ config, conflicts, refusedDeletes } = mergeFocusConfigWrite(config, body));
+    ({ config, conflicts, refusedDeletes, refusedGroupStops } = mergeFocusConfigWrite(config, body));
 
     writeFocusConfig(config);
-    return NextResponse.json({ success: true, data: config, conflicts, refusedDeletes });
+    return NextResponse.json({ success: true, data: config, conflicts, refusedDeletes, refusedGroupStops });
   } catch (err) {
     console.error('[/api/focus-tool/rows POST]', err);
     return NextResponse.json({ success: false, error: String(err) }, { status: 500 });

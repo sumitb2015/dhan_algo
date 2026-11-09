@@ -1735,7 +1735,11 @@ export function exitLevelStatus(mark: string | undefined, cfg: FocusLegLevel, sp
   }
   const step = exitLevelStep(mark, cfg, spot, buffer);
   if (mark === levelSig(cfg) || step.setMark) return `armed — ${acts} when spot ${cmp} ${v}`;
-  if (levelSide(cfg, spot) === 'trigger') return `not armed yet — spot is already ${cmp} ${v}; waiting for it to go back ${back} ${v}`;
+  const side = levelSide(cfg, spot);
+  if (side === 'trigger') return `not armed yet — spot is already ${cmp} ${v}; waiting for it to go back ${back} ${v}`;
+  // No spot yet (reload, or a feed with no price): nothing was marked, so it is NOT armed — it arms on the first
+  // price on the safe side. Saying "armed" here had the user trusting a stop that was not watching.
+  if (side == null) return `not armed yet — waiting for a spot price (arms on the first one ${back} ${v})`;
   return `armed — ${acts} when spot ${cmp} ${v}`;
 }
 

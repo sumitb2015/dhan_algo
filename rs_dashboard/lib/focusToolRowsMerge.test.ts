@@ -57,3 +57,31 @@ test('a save without stopSigned is a legacy loss magnitude and never becomes a p
   assert.strictEqual(signed.stopRupees, '3000');
   assert.strictEqual(mergeFocusConfigWrite(stored, { targetRupees: '1' }).config.stopRupees, '-3000');
 });
+
+test('index groups change only through an explicit groupPatch — a whole groups array (a stale tab) is ignored', () => {
+  const g = (underlying: 'NIFTY' | 'BANKNIFTY', enabled: boolean) =>
+    ({ underlying, enabled, atmBy: 'Spot', product: 'MARGIN', strikesOffset: 0, bookExit: false, spotHigh: '', spotLow: '' });
+  const stored = { ...cfg([]), groups: [g('NIFTY', true), g('BANKNIFTY', false)] } as unknown as Parameters<typeof mergeFocusConfigWrite>[0];
+  // A stale tab saves its rows with an old copy of the groups: NIFTY must stay started.
+  const stale = mergeFocusConfigWrite(stored, { rows: [], groups: [g('NIFTY', false), g('BANKNIFTY', false)] } as never);
+  assert.deepStrictEqual(stale.config.groups.map(x => x.enabled), [true, false]);
+  // A Stop click patches that one index only; the other keeps what is stored.
+  const stop = mergeFocusConfigWrite(stored, { groupPatch: { underlying: 'NIFTY', patch: { enabled: false } } });
+  assert.deepStrictEqual(stop.config.groups.map(x => x.enabled), [false, false]);
+  const start = mergeFocusConfigWrite(stop.config, { groupPatch: { underlying: 'BANKNIFTY', patch: { enabled: true, product: 'INTRADAY' } } });
+  assert.deepStrictEqual(start.config.groups.map(x => [x.underlying, x.enabled, x.product]), [['NIFTY', false, 'MARGIN'], ['BANKNIFTY', true, 'INTRADAY']]);
+});
+
+test('the server refuses to STOP an index while a row on it holds a position (the rest of the patch still applies)', () => {
+  const g = (underlying: 'NIFTY' | 'BANKNIFTY', enabled: boolean) =>
+    ({ underlying, enabled, atmBy: 'Spot', product: 'MARGIN', strikesOffset: 0, bookExit: false, spotHigh: '', spotLow: '' });
+  const held = { ...row('h', { fill: fill(65), rev: 1 }), underlying: 'NIFTY' } as FocusRow;
+  const stored = { ...cfg([held]), groups: [g('NIFTY', true), g('BANKNIFTY', true)] } as unknown as FocusToolConfig;
+  const r = mergeFocusConfigWrite(stored, { groupPatch: { underlying: 'NIFTY', patch: { enabled: false, atmBy: 'Fut' } } });
+  assert.deepStrictEqual(r.refusedGroupStops, ['NIFTY']);
+  assert.deepStrictEqual(r.config.groups.map(x => [x.underlying, x.enabled, x.atmBy]), [['NIFTY', true, 'Fut'], ['BANKNIFTY', true, 'Spot']]);
+  // An index holding nothing stops normally; Start is never refused.
+  const b = mergeFocusConfigWrite(stored, { groupPatch: { underlying: 'BANKNIFTY', patch: { enabled: false } } });
+  assert.deepStrictEqual(b.refusedGroupStops, []);
+  assert.deepStrictEqual(b.config.groups.map(x => x.enabled), [true, false]);
+});
