@@ -177,7 +177,7 @@ scripts/
   data_utils/               # Parquet conversion, resampling, indicator append
   tools/                    # `ls scripts/tools` for full list. Tick streamers live_{equity,indices,options,positions}_ws.py
                             # → debug/live_*_quotes.json (stop via debug/*_stop.trigger); crudeoil_oi_collector.py;
-                            # pnf_ws.py (P&F/Renko prices) also logs every price change to debug/pnf_ticks/<date>/ for Renko's Tick interval;
+                            # pnf_ws.py (P&F/Renko prices) also logs every price change to debug/pnf_ticks/<date>/ for Renko's Tick/N-sec intervals (only while asked for; NIFTY is kept asked all session by lib/pnfAlwaysRecord.ts);
                             # options_data_fetch.py (one-off fetches for API routes); get_portfolio_pnl.py
   testing/                  # WebSocket and data validation checks
 Historical Data/            # Index CSVs: NIFTY_50_Daily_5Y.csv, NIFTY_500_Daily.csv

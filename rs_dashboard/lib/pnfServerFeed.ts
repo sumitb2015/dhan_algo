@@ -4,7 +4,7 @@ import { forgetOtherDays, istDate, readTickFile, rowsBetween, SETTLE_MS, tickFil
 import { feedStale, foldLive, idsOf, liveRead, marketOf, type Instrument } from '@/lib/pnfFeedCore';
 import { mergeHistory, type LegQuote, type Market, type Tick } from '@/lib/straddlePnfLive';
 import { mergeTail } from '@/lib/pnfTail';
-import { bucketTickBars, foldTickRows, newTickBuild, spliceTicks, type SecBuild, type TickBuild } from '@/lib/pnfTicks';
+import { bucketTickBars, fillCutoff, foldTickRows, newTickBuild, spliceTicks, type SecBuild, type TickBuild } from '@/lib/pnfTicks';
 import { targetQuery, type Target } from '@/lib/pnfTarget';
 import type { WantedPair } from '@/lib/pnfWanted';
 import type { Bar } from '@/lib/straddlePnf';
@@ -44,6 +44,8 @@ export class ServerFeed {
   private tickBuild: TickBuild = newTickBuild(1);
   private secBuild: SecBuild | null = null;
   private tickBars: Bar[] | null = null;
+  /** fillCutoff at the first read of the day's log: gaps that had ended by then (and inside the history held then) are filled from history (spliceTicks). */
+  private tickFillTo = -Infinity;
 
   constructor(target: Target, tickSec: number | null, asker: string) {
     this.target = target; this.tickSec = tickSec; this.asker = asker;
@@ -64,7 +66,7 @@ export class ServerFeed {
       if (!j.success) throw new Error(j.error ?? `history load failed (HTTP ${r.status})`);
       const hist = j.bars?.[String(j.strikes?.[0] ?? 0)] ?? [];
       const instruments = j.instruments ?? [];
-      if (idsOf(instruments) !== idsOf(this.instruments)) { this.tickBuild = newTickBuild(instruments.length); this.secBuild = null; this.tickBars = null; this.tickSince = 0; this.tickDay = ''; }
+      if (idsOf(instruments) !== idsOf(this.instruments)) { this.tickBuild = newTickBuild(instruments.length); this.secBuild = null; this.tickBars = null; this.tickSince = 0; this.tickDay = ''; this.tickFillTo = -Infinity; }
       this.instruments = instruments;
       this.cas = j.cas === true;
       this.anchorT = j.anchorT ?? null;
@@ -104,7 +106,7 @@ export class ServerFeed {
     const upTo = nowMs - SETTLE_MS;
     const day = istDate(nowMs);
     forgetOtherDays(day);
-    if (day !== this.tickDay) { this.tickDay = day; this.tickSince = 0; this.tickBuild = newTickBuild(this.instruments.length); this.secBuild = null; }
+    if (day !== this.tickDay) { this.tickDay = day; this.tickSince = 0; this.tickBuild = newTickBuild(this.instruments.length); this.secBuild = null; this.tickFillTo = fillCutoff(upTo / 1000, this.bars[this.bars.length - 1]); }
     let legs;
     try { legs = this.instruments.map(i => rowsBetween(readTickFile(tickFile(day, i.segment, i.security_id)), this.tickSince, upTo)); } catch { return; }
     const h = this.bars[this.bars.length - 1];
@@ -125,7 +127,7 @@ export class ServerFeed {
   chartBars(nowMs: number): Bar[] {
     if (this.tickSec === null) return this.bars;
     if (this.tickBars === null) return [];
-    return spliceTicks(this.bars, this.tickBars, Math.floor(nowMs / 60_000) * 60);
+    return spliceTicks(this.bars, this.tickBars, Math.floor(nowMs / 60_000) * 60, this.tickFillTo);
   }
 
   /** The chart's live price (a straddle's CE + PE), the page's priceOf(feed). `bars`: this step's chartBars, when already built. */

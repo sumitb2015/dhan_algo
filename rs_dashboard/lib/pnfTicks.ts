@@ -94,13 +94,40 @@ const minuteOf = (t: number) => Math.floor(t / 60) * 60;
  * The history bars kept are the same objects, so the chart build carries on instead of rebuilding.
  * `nowS`: with no ticks yet, a minute bar of the minute still running is left out (every bar here is closed, and a forming
  * minute's close would print a brick the next price could take back).
+ *
+ * `fillUpTo` (seconds): the cut-off of the chart's FIRST read of the day's tick log. A gap in the log (> TICK_GAP_MS: nothing was
+ * recorded because no chart or server feed asked for the instrument) that had already ended by then is history, exactly like the
+ * stretch before the first tick: the 1-minute bars lying wholly inside it are laid in. A gap ending after it opened while this chart
+ * was running and stays a jump (filling it later would change bricks alerts / AUTO already acted on).
  */
-export function spliceTicks(hist: Bar[], ticks: Bar[], nowS = Infinity): Bar[] {
+/**
+ * The `fillUpTo` for spliceTicks, taken once at the chart's first read of the day's log: that read's cut-off (`upToS`), but no later
+ * than the end of the history the chart held then. Every minute inside a gap that ended by it was already in that history, so a
+ * later history refresh (Dhan's minute bars arrive 1-2 min late) can never lay a new bar into a gap that is already drawn.
+ * No history yet: nothing is filled.
+ */
+export const fillCutoff = (upToS: number, histLast: Bar | undefined): number => (histLast ? Math.min(upToS, histLast.t + 60) : -Infinity);
+
+export function spliceTicks(hist: Bar[], ticks: Bar[], nowS = Infinity, fillUpTo = -Infinity): Bar[] {
   const cut = ticks.length ? minuteOf(ticks[0].t) : Number.isFinite(nowS) ? minuteOf(nowS) : Infinity;
   let k = hist.length;
   while (k > 0 && hist[k - 1].t >= cut) k--;
   if (!ticks.length) return k === hist.length ? hist : hist.slice(0, k);
-  return hist.slice(0, k).concat(ticks);
+  if (ticks.length < 2 || fillUpTo < ticks[1].t) return hist.slice(0, k).concat(ticks);   // no gap can have ended by then
+  const gapS = TICK_GAP_MS / 1000;
+  const out = hist.slice(0, k);
+  out.push(ticks[0]);
+  let j = k;                                     // history cursor: gaps are visited in time order
+  for (let i = 1; i < ticks.length; i++) {
+    const a = ticks[i - 1].t, b = ticks[i].t;
+    if (b <= fillUpTo && b - a > gapS) {
+      let lo = j, hi = hist.length;              // first minute starting after `a`
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (hist[mid].t <= a) lo = mid + 1; else hi = mid; }
+      for (j = lo; j < hist.length && hist[j].t + 60 <= b; j++) out.push(hist[j]);
+    }
+    out.push(ticks[i]);
+  }
+  return out;
 }
 
 /**

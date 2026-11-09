@@ -198,4 +198,9 @@ if (process.env.DASHBOARD_NO_BACKGROUND === '1') {
   import('./lib/pnfAutoEngine').then(m => m.startPnfAutoEngine()).catch(err => {
     console.warn('[pnf-auto-engine] could not start the engine:', err);
   });
+  // Renko Tick / 10-30 sec: keeps NIFTY in the price bridge's tick log for the whole NSE session with every tab closed (those
+  // charts are built only from that log). Idle outside the session.
+  import('./lib/pnfAlwaysRecord').then(m => m.startPnfAlwaysRecord()).catch(err => {
+    console.warn('[pnf-always-record] could not start:', err);
+  });
 }

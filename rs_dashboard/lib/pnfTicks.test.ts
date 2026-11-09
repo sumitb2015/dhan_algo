@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bucketTickBars, foldTickRows, newTickBuild, spliceTicks, TICK_GAP_MS, type TickRow } from './pnfTicks.ts';
+import { bucketTickBars, fillCutoff, foldTickRows, newTickBuild, spliceTicks, TICK_GAP_MS, type TickRow } from './pnfTicks.ts';
 import type { Bar } from './straddlePnf.ts';
 
 const OPEN = Date.UTC(2026, 9, 22, 3, 45) * 1;     // Thu 22 Oct 09:15 IST, ms
@@ -56,6 +56,48 @@ test('splice: history only before the first tick\'s minute, then the ticks alone
   assert.deepEqual(spliceTicks(later, ticks, m(7) + 1).map(b => b.straddle), [100, 101.5, 103.5]);
   // no ticks yet: just the closed minutes
   assert.deepEqual(spliceTicks(hist, [], m(4) + 30).map(b => b.straddle), [100, 101, 102, 103]);
+});
+
+test('splice: a gap already in the log at the first read (fillUpTo) is filled with the history minutes wholly inside it', () => {
+  const m = (k: number) => OPEN / 1000 + k * 60;
+  const hist = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(k => minute(m(k), 100 + k));
+  // ticks in minute 1, then nothing until minute 5 (a 4-minute gap), then again 6 -> 9 (a gap ending after the first read)
+  const ticks = foldTickRows(newTickBuild(1), [[[(m(1) + 10) * 1000, 101.5, 0], [(m(5) + 5) * 1000, 105.5, 0], [(m(8) + 30) * 1000, 108.5, 0]]], 'NSE').bars;
+  const out = spliceTicks(hist, ticks, m(9) + 30, m(7));
+  // minutes 2, 3, 4 lie wholly between the 1:10 tick and the 5:05 tick; minute 1 and 5 hold a tick, so they stay out.
+  // The 5:05 -> 8:30 gap ended after the first read (fillUpTo = 7:00): it stays a jump, as before.
+  assert.deepEqual(out.map(b => b.straddle), [100, 101.5, 102, 103, 104, 105.5, 108.5]);
+  assert.equal(out[2], hist[2]);
+  for (let i = 1; i < out.length; i++) assert.ok(out[i].t > out[i - 1].t);
+  // without fillUpTo nothing changes
+  assert.deepEqual(spliceTicks(hist, ticks, m(9) + 30).map(b => b.straddle), [100, 101.5, 105.5, 108.5]);
+  // a short pause (under TICK_GAP_MS) is never filled
+  const close = foldTickRows(newTickBuild(1), [[[(m(1) + 50) * 1000, 101.5, 0], [(m(3) + 5) * 1000, 103.5, 0]]], 'NSE').bars;
+  assert.deepEqual(spliceTicks(hist, close, m(9), m(9)).map(b => b.straddle), [100, 101.5, 103.5]);
+});
+
+test('splice: N-second buckets fill the same way (a minute starting inside the bucket before the gap stays out)', () => {
+  const m = (k: number) => OPEN / 1000 + k * 60;
+  const hist = [0, 1, 2, 3, 4].map(k => minute(m(k), 100 + k));
+  const raw = foldTickRows(newTickBuild(1), [[[(m(0) + 40) * 1000, 100.4, 0], [(m(3) + 45) * 1000, 103.5, 0], [(m(4) + 10) * 1000, 104.1, 0]]], 'NSE').bars;
+  const secs = bucketTickBars(null, raw, 30, m(5)).bars;     // buckets 0:30, 3:30, 4:00
+  assert.deepEqual(spliceTicks(hist, secs, m(5), m(5)).map(b => b.straddle), [100.4, 101, 102, 103.5, 104.1]);
+});
+
+test('fillCutoff: a gap whose minutes were not all in the history at the first read is never filled later', () => {
+  const m = (k: number) => OPEN / 1000 + k * 60;
+  // first read at 6:30; Dhan's minutes lag, so the history then ends with minute 3 (closed at 4:00)
+  const histThen = [0, 1, 2, 3].map(k => minute(m(k), 100 + k));
+  const ticks = foldTickRows(newTickBuild(1), [[[(m(1) + 10) * 1000, 101.5, 0], [(m(5) + 5) * 1000, 105.5, 0]]], 'NSE').bars;
+  const cut = fillCutoff(m(6) + 30, histThen[histThen.length - 1]);
+  assert.equal(cut, m(4));
+  const first = spliceTicks(histThen, ticks, m(6) + 30, cut).map(b => b.straddle);
+  assert.deepEqual(first, [100, 101.5, 105.5]);       // the 1:10 -> 5:05 gap ended after the history did: a jump
+  const histLater = [0, 1, 2, 3, 4, 5, 6].map(k => minute(m(k), 100 + k));
+  assert.deepEqual(spliceTicks(histLater, ticks, m(7) + 30, cut).map(b => b.straddle), first);   // and stays one
+  // no history yet: nothing is filled; history ahead of the read: the read's cut-off
+  assert.equal(fillCutoff(m(6), undefined), -Infinity);
+  assert.equal(fillCutoff(m(6), minute(m(9), 1)), m(6));
 });
 
 test('a straddle leg with no row yet is seeded from the history, then follows its own rows', () => {

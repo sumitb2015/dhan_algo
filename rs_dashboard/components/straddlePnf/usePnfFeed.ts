@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { mergeHistory, feedCloseTrusted, istMinuteOfDay, sessionWindow, type LegQuote, type Market, type Tick } from '@/lib/straddlePnfLive';
 import { FEED_FRESH_S, foldLive, idsOf, liveRead, marketOf, type Instrument } from '@/lib/pnfFeedCore';
 import { mergeTail } from '@/lib/pnfTail';
-import { bucketTickBars, foldTickRows, newTickBuild, spliceTicks, type SecBuild, type TickRow } from '@/lib/pnfTicks';
+import { bucketTickBars, fillCutoff, foldTickRows, newTickBuild, spliceTicks, type SecBuild, type TickRow } from '@/lib/pnfTicks';
 import { isNseSessionDay, istDateIso } from '@/lib/nseHolidays';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
 import { isComplete, targetKey, targetLabel, targetQuery, type Target } from '@/lib/pnfTarget';
@@ -150,13 +150,15 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   // null until the first read of the log has landed: until then the chart has NO bars (not minute closes), so a restored AUTO or an
   // alert can never act on a minute-close brick the tick chart does not have.
   const [tickBars, setTickBars] = useState<Bar[] | null>(null);
+  // fillCutoff at the first read of the day's log: gaps in the log that had ended by then (and inside the history held then) are filled from history (spliceTicks).
+  const [tickFillTo, setTickFillTo] = useState(-Infinity);
   const [tickError, setTickError] = useState<string | null>(null);
   // The history's last bar, read by the tick poll: its close is the bad-print reference and its legs the seed of a leg with no row yet.
   const histLastRef = useRef<Bar | undefined>(undefined);
   useEffect(() => { histLastRef.current = bars[bars.length - 1]; });
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setTickBars(null); setHeadTick(null); setTickError(null);
+    setTickBars(null); setHeadTick(null); setTickError(null); setTickFillTo(-Infinity);
     if (!tickMode || !ids) return;
     let dead = false;
     let since = 0;
@@ -174,7 +176,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
         const j = await res.json() as { success?: boolean; error?: string; day?: string; upTo?: number; legs?: TickRow[][] };
         if (dead) return;
         if (!j.success || !j.legs || typeof j.upTo !== 'number') throw new Error(j.error ?? `tick log read failed (HTTP ${res.status})`);
-        if (j.day !== day) { day = j.day ?? ''; build = newTickBuild(instruments.length); sec = null; }   // a new session's log
+        if (j.day !== day) { day = j.day ?? ''; build = newTickBuild(instruments.length); sec = null; setTickFillTo(fillCutoff(j.upTo / 1000, histLastRef.current)); }   // a new session's log
         const h = histLastRef.current;
         build = foldTickRows(build, j.legs, market, h?.straddle, h ? [h.ce, h.pe] : undefined);
         since = j.upTo;
@@ -197,8 +199,8 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   // The chart's bars: in Tick / N-second mode the history up to the tick log, then the recorded prices; none before the first read.
   const nowMinute = Math.floor(now / 60_000);
   const chartBars = useMemo(
-    () => (!tickMode ? bars : tickBars === null ? NO_BARS : spliceTicks(bars, tickBars, nowMinute > 0 ? nowMinute * 60 : Infinity)),
-    [tickMode, bars, tickBars, nowMinute],
+    () => (!tickMode ? bars : tickBars === null ? NO_BARS : spliceTicks(bars, tickBars, nowMinute > 0 ? nowMinute * 60 : Infinity, tickFillTo)),
+    [tickMode, bars, tickBars, nowMinute, tickFillTo],
   );
 
   const last = chartBars[chartBars.length - 1];
