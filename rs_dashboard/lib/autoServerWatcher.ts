@@ -14,7 +14,7 @@ import { targetKey, parseOptionIds } from '@/lib/pnfTarget';
 import { indexSpotId } from '@/lib/pnfContracts';
 import { premiumOf } from '@/lib/pnfIndexTradeServer';
 import { chartPrice, guards, ownHeldQty, runtimeKey, stepRow, stopHit, type RowRuntime, type ServerGuardCfg } from '@/lib/autoServerGuard';
-import { autoProductOf, autoWindow, rowMarket } from '@/lib/pnfAuto';
+import { autoProductOf, autoWindow, carriesOvernight, rowMarket } from '@/lib/pnfAuto';
 import { istMinuteOfDay, sessionWindow } from '@/lib/straddlePnfLive';
 import { istDateIso } from '@/lib/nseHolidays';
 import { closingSide, pendingAddUnits, type AutoOp } from '@/lib/pnfAutoLedger';
@@ -280,7 +280,11 @@ async function tick(): Promise<void> {
         const cfg = guards(file.cfg[keyOf(scope, row.chart)], row) ? file.cfg[keyOf(scope, row.chart)] : undefined;
         // A row from an earlier day is not priced against today's market: it is reported, never exited on a stale entry price.
         // An NRML row whose end-of-day exit was missed is carried overnight with no broker square-off behind it: always said, guard or not.
-        if (row.day !== today) {
+        // An NRML NIFTY option row is carried overnight on purpose (carriesOvernight, judged at its entry): its stop and guard keep running
+        // on later days, and on its expiry day (`carry` false) it gets the NRML end-of-day exit like any other row.
+        const carried = carriesOvernight(row, row.entryT);
+        const carry = carriesOvernight(row, nowS);
+        if (row.day !== today && !carried) {
           const text = `chart ${row.chart}'s ${autoProductOf(row.product) === 'MARGIN' ? 'NRML ' : ''}position from ${row.day} is STILL OPEN - AUTO does not exit an earlier day's row; close it at the broker and resolve it on the page`;
           if (Date.now() - (lastWarned.get(`${scope}:${row.chart}:${text}`) ?? 0) >= WARN_REPEAT_MS) console.error(`[auto-server-guard] ${scope}: ${text}`);
           await warn(scope, row, text);
@@ -289,9 +293,9 @@ async function tick(): Promise<void> {
         const win = autoWindow(rowMarket(row), nowS, autoProductOf(row.product));
         if (!win || minute < win.open) continue;                      // shut today / before the open: nothing to act on
         // After the close an exit cannot trade: say so (once in a while) instead of sending orders into a shut market every few seconds.
-        if (minute >= sessionWindow(rowMarket(row), nowS)[1]) { await warn(scope, row, `chart ${row.chart}'s position is still open after the market closed - not exited; check the broker and resolve it`); continue; }
+        if (minute >= sessionWindow(rowMarket(row), nowS)[1]) { if (carry) continue; await warn(scope, row, `chart ${row.chart}'s position is still open after the market closed - not exited; check the broker and resolve it`); continue; }
         // An unguarded row without a stop is only looked at once its end-of-day time is near (no price is asked for before that).
-        if (!cfg && row.stop === undefined && minute < win.eodExit - 2) continue;
+        if (!cfg && row.stop === undefined && (carry || minute < win.eodExit - 2)) continue;
         todo.push({ scope, row, cfg, win, stuckAdd });
       }
     }
@@ -326,7 +330,7 @@ async function tick(): Promise<void> {
       const { scope, row, cfg, win, stuckAdd } = item;
       const price = chartPrice(ids, book, now);
       const premium = optIds ? chartPrice(optIds, book, now) : null;
-      if (minute >= win.eodExit) {
+      if (!carriesOvernight(row, nowS) && minute >= win.eodExit) {
         // The end of day comes first and needs no price: the position must be flat before the broker's own square-off. With no price the
         // exit is booked at the entry price (as the tab's own end-of-day exit does when it has none) and the ledger says so.
         await exitRow(scope, row, price === null ? 'end of day (no live price)' : 'end of day', price ?? row.entryPrice, stuckAdd, true, undefined, premium);

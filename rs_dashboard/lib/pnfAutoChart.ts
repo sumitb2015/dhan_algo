@@ -3,7 +3,7 @@
 // touches outside itself (the ledger, the order route, the broker's order book, the clock) comes in through ChartDeps. Entries need
 // AUTO armed on this chart; exits run for this chart's open row whatever the switch says. REAL orders are reserved in the ledger before
 // they are sent and an unknown outcome is never resent: the chart halts and the user resolves it.
-import { autoProductOf, decideAdd, decideAuto, reentryBlockOf, rowMarket, trailBest, trailLevel, trailOf, type AutoProduct } from './pnfAuto.ts';
+import { autoProductOf, carriesOvernight, decideAdd, decideAuto, reentryBlockOf, rowMarket, trailBest, trailLevel, trailOf, type AutoProduct } from './pnfAuto.ts';
 import { ignoredByFilter, skippedBrick, SIDE_LABEL, withSide, type AutoRule, type AutoSide } from './pnfAutoRule.ts';
 import { isSellSignal } from './straddlePnf.ts';
 import { closingSide, isLive, PYRAMID_HARD_MAX, type AutoLedger, type AutoLeg, type AutoOp, type AutoRow } from './pnfAutoLedger.ts';
@@ -428,8 +428,8 @@ export class ChartEngine {
       if (row.state !== 'open') { this.note = row.state === 'entering' || row.state === 'exiting' || row.state === 'adding' ? `${row.state}…` : 'unresolved - check the broker'; return; }
       if (row.targetKey !== tk) {
         // The chart was switched away from its position: only the EOD exit can still run (no model for that contract here).
-        const d = decideAuto({ model: { box: 0, signals: [], columns: [], columnTimes: [], lastBarT: null }, position: { side: row.side, entryBarT: row.entryBarT }, watermarkT: 0, nowS, market: rowMarket(row), product: autoProductOf(row.product) });
-        this.note = 'position on another contract: watching the EOD exit only';
+        const d = decideAuto({ model: { box: 0, signals: [], columns: [], columnTimes: [], lastBarT: null }, position: { side: row.side, entryBarT: row.entryBarT }, watermarkT: 0, nowS, market: rowMarket(row), product: autoProductOf(row.product), carry: carriesOvernight(row, nowS) });
+        this.note = carriesOvernight(row, nowS) ? 'position on another contract: held overnight (NRML NIFTY option), only the server guard watches it' : 'position on another contract: watching the EOD exit only';
         if (d.action === 'exit' && d.reason === 'eod') { this.busy = true; try { await this.exit(row, 'eod', null); } finally { this.busy = false; } }
         return;
       }
@@ -437,7 +437,7 @@ export class ChartEngine {
       // loaded, which would flatten an MCX position at the NSE 15:15 straight away.
       const position = { side: row.side, entryBarT: row.entryBarT, stop: row.stop, exitBy: row.exitBy, trail: trailOf(row) };
       // A stale price never decides a stop (it may be minutes old): the Renko stop then reads closed bricks instead.
-      const d = decideAuto({ model, position, watermarkT: this.watermark, nowS, market: rowMarket(row), price: stale ? null : price, product: autoProductOf(row.product) });
+      const d = decideAuto({ model, position, watermarkT: this.watermark, nowS, market: rowMarket(row), price: stale ? null : price, product: autoProductOf(row.product), carry: carriesOvernight(row, nowS) });
       if (d.action !== 'exit') {
         const tl = trailLevel(model, position);
         const trailTxt = tl !== null ? ` · trail SL ${tl.toFixed(2)}` : '';

@@ -85,6 +85,20 @@ export type AutoDecision =
   | { action: 'none'; why: string };
 
 /**
+ * An NRML (carry-forward) position in a NIFTY option is held overnight: AUTO sends no end-of-day exit for it (chosen by the user on
+ * 2026-11-09). Its rule exits, stop, trail and the server's MTM guard still run, on the following days too. MIS keeps the 15:15 exit
+ * (the broker squares MIS off itself); futures, other underlyings and stocks keep theirs. The contract is the one the row HOLDS: an
+ * index chart's row trades an option (`traded`). On the option's expiry day (`nowS`, IST) the NRML 15:35 exit applies again: a contract
+ * is never carried past its expiry.
+ */
+export function carriesOvernight(row: { product?: AutoProduct; target: Target; traded?: { target: Target } }, nowS: number): boolean {
+  if (autoProductOf(row.product) !== 'MARGIN') return false;
+  const held = row.traded?.target ?? row.target;
+  if (held.kind !== 'options' || held.symbol.toUpperCase() !== 'NIFTY') return false;
+  return !held.expiry || held.expiry > istDateIso(nowS * 1000);
+}
+
+/**
  * The market a row's contract trades in. Saved on the row when it opens; an older row without it is read off its contract (the MCX
  * underlyings), never off the chart that happens to be on screen: the end-of-day time of a CRUDEOILM position is MCX's, whatever
  * instrument the user has switched the chart to.
@@ -254,8 +268,10 @@ export function reversalColumn(model: AutoModel, pos: AutoPosition): number {
  * What the chart should do now. `watermarkT`: signals at or before it are never entered (it is set to the last closed bar when
  * AUTO is switched on, and to each handled signal's time). `nowS`: the decision time, epoch seconds.
  */
-export function decideAuto({ model, position, watermarkT, nowS, market, price = null, product = 'INTRADAY', reentryBlock }: {
+export function decideAuto({ model, position, watermarkT, nowS, market, price = null, product = 'INTRADAY', reentryBlock, carry = false }: {
   model: AutoModel; position: AutoPosition | null; watermarkT: number; nowS: number; market: Market;
+  /** The open position is carried overnight (carriesOvernight): no end-of-day exit. */
+  carry?: boolean;
   /** Left by the chart's last trade if it was exited by the trailing SL (reentryBlockOf): same-side entries wait for a new best brick. */
   reentryBlock?: ReentryBlock;
   /** The open position's product (its end-of-day time), else the product a new entry would be sent with (its entry cutoff). */
@@ -267,7 +283,7 @@ export function decideAuto({ model, position, watermarkT, nowS, market, price = 
   const win = autoWindow(market, nowS, product);
   const minute = istMinuteOfDay(nowS);
   if (position) {
-    if (win && minute >= win.eodExit) return { action: 'exit', reason: 'eod' };
+    if (win && !carry && minute >= win.eodExit) return { action: 'exit', reason: 'eod' };
     const tc = trailExitColumn(model, position);
     if (tc >= 0) { const c = model.columns[tc]; return { action: 'exit', reason: 'trail', col: tc, boxPrice: c.dir === 'X' ? c.high : c.low }; }
     if (position.stop !== undefined) {

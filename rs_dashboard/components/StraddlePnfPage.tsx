@@ -61,7 +61,7 @@ import type { PnfScope } from '@/lib/pnfScope';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent, type AutoPyramid } from './straddlePnf/usePnfAuto';
 import { autoDaySummary, autoMarkers, holdsPosition, heldSide, isLive, markPnl, PYRAMID_HARD_MAX, rowPnl } from '@/lib/pnfAutoLedger';
 import AutoControls, { type AutoRule } from './straddlePnf/AutoControls';
-import { AUTO_PRODUCT_LABEL, autoProductOf, autoWindow, pyramidEveryOf, rowMarket, TRAIL_BOXES_MAX, TRAIL_BOXES_MIN, type AutoProduct } from '@/lib/pnfAuto';
+import { AUTO_PRODUCT_LABEL, autoProductOf, autoWindow, carriesOvernight, pyramidEveryOf, rowMarket, TRAIL_BOXES_MAX, TRAIL_BOXES_MIN, type AutoProduct } from '@/lib/pnfAuto';
 import { guardLevelsText, syncGuardFromServer, type ServerGuardView } from '@/lib/pnfServerGuardView';
 import { usePnfPositions } from './straddlePnf/usePnfPositions';
 import { usePnfGuard } from './straddlePnf/usePnfGuard';
@@ -1082,7 +1082,9 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const win = autoWindow(row ? rowMarket(row) : feed.market, now / 1000, prod);
     if (!win) return null;
     const hm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-    return `${AUTO_PRODUCT_LABEL[prod]}: entries stop ${hm(win.entryCutoff)}, squared off ${hm(win.eodExit)}`;
+    // An NRML NIFTY option (the open row's contract, else what an index chart's map / an options chart would trade) is held overnight.
+    const carry = row ? carriesOvernight(row, now / 1000) : prod === 'MARGIN' && (tgt.kind === 'options' || tgt.kind === 'index') && tgt.symbol.toUpperCase() === 'NIFTY';
+    return `${AUTO_PRODUCT_LABEL[prod]}: entries stop ${hm(win.entryCutoff)}, ${carry ? 'NIFTY options held overnight (no end-of-day exit)' : `squared off ${hm(win.eodExit)}`}`;
   };
   // The saved AUTO switch (ledger `arms`) IS the switch: the dashboard server runs AUTO from it (lib/pnfAutoEngine.ts), with or without a tab.
   //  - a saving exists: the chart shows armed, with the rule, side, lots, adds and product it was armed with (restored once per arming);
@@ -1146,7 +1148,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const staleWarnedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     for (const r of autoLedger.rows) {
-      if (!holdsPosition(r) || r.day === istToday() || staleWarnedRef.current.has(r.id)) continue;
+      if (!holdsPosition(r) || r.day === istToday() || carriesOvernight(r, r.entryT) || staleWarnedRef.current.has(r.id)) continue;
       staleWarnedRef.current.add(r.id);
       toast.error(`AUTO chart ${r.chart} [${r.mode}${autoProductOf(r.product) === 'MARGIN' ? ' NRML' : ''}] ${r.side} ${r.lots}L from ${r.day} is STILL OPEN: its end-of-day exit was missed. Close it at the broker, then resolve it here.`, { duration: Infinity });
     }

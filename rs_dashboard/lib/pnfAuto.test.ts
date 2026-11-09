@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { withSide } from './pnfAutoRule.ts';
-import { decideAuto, reversalColumn, autoWindow, boxPriceAt, rowMarket, type AutoModel } from './pnfAuto.ts';
+import { decideAuto, reversalColumn, autoWindow, boxPriceAt, rowMarket, carriesOvernight, type AutoModel } from './pnfAuto.ts';
 import type { PnfColumn, PnfSignal } from './straddlePnf.ts';
 
 // 2026-10-30 (a Friday, an NSE trading day) at IST hh:mm, as epoch seconds.
@@ -384,4 +384,27 @@ test('review fixes: bricks printed on the entry bar after the signal brick count
   assert.deepEqual(add(bricks.slice(0, 4), ist(10, 3)), { add: true, barT: ist(10, 3), box: 105 });
   // never an add on the entry bar itself
   assert.equal(add(bricks.slice(0, 3), ist(10, 1)).add, false);
+});
+
+test('NRML NIFTY options carry overnight: no end-of-day exit (decided 2026-11-09); MIS and every other contract keep theirs', () => {
+  const opt = { kind: 'options' as const, symbol: 'NIFTY', name: 'NIFTY', side: 'CE' as const, expiry: '2026-11-03' };
+  const t = ist(10, 0);   // 2026-10-30
+  const idx = { kind: 'index' as const, symbol: 'NIFTY', name: 'Nifty 50' };
+  // an options chart, and an index chart's row that trades a NIFTY option
+  assert.equal(carriesOvernight({ product: 'MARGIN', target: opt }, t), true);
+  assert.equal(carriesOvernight({ product: 'MARGIN', target: idx, traded: { target: { ...opt, side: 'PE' } } }, t), true);
+  // MIS, a future, a BANKNIFTY option, an index row without an option: unchanged
+  assert.equal(carriesOvernight({ target: opt }, t), false);
+  assert.equal(carriesOvernight({ product: 'INTRADAY', target: opt }, t), false);
+  assert.equal(carriesOvernight({ product: 'MARGIN', target: { kind: 'futures', symbol: 'NIFTY', name: 'NIFTY' } }, t), false);
+  assert.equal(carriesOvernight({ product: 'MARGIN', target: { ...opt, symbol: 'BANKNIFTY' } }, t), false);
+  assert.equal(carriesOvernight({ product: 'MARGIN', target: idx }, t), false);
+  // never past its expiry: on the expiry day (and after) it squares off like any NRML row
+  assert.equal(carriesOvernight({ product: 'MARGIN', target: opt }, Date.parse('2026-11-03T10:00:00+05:30') / 1000), false);
+  assert.equal(carriesOvernight({ product: 'MARGIN', target: opt }, Date.parse('2026-11-02T15:40:00+05:30') / 1000), true);
+  // decideAuto: past 15:35 the carried position holds; its rule exits still apply
+  const short = { side: 'SELL' as const, entryBarT: ist(10, 0) };
+  assert.deepEqual(decideAuto({ model: model({ columns: [col('O')], columnTimes: [{ start: ist(10, 0), end: ist(10, 0) }], signals: [] }), position: short, watermarkT: 0, nowS: ist(15, 36), market: 'NSE', product: 'MARGIN', carry: true }), { action: 'none', why: 'holding' });
+  assert.deepEqual(decideAuto({ model: model({ columns: [col('O')], columnTimes: [{ start: ist(10, 0), end: ist(10, 0) }], signals: [] }), position: short, watermarkT: 0, nowS: ist(15, 36), market: 'NSE', product: 'MARGIN' }), { action: 'exit', reason: 'eod' });
+  assert.equal(decideAuto({ model: model(), position: short, watermarkT: 0, nowS: ist(15, 36), market: 'NSE', product: 'MARGIN', carry: true }).action, 'exit', 'the reversal still exits it');
 });

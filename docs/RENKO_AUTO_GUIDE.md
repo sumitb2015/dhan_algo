@@ -65,6 +65,11 @@ chart under the trend rule are a flip: the first is the exit of the old position
   NRML has no broker square-off behind it: the server retries a refused end-of-day exit every 10 s until the close (it never stands down
   then), and a position still open from an earlier day is never exited by AUTO. It raises a red alert on the page and in the AUTO log
   instead, so close it at the broker and resolve it.
+- **NRML NIFTY options are held overnight** (decided 2026-11-09). An NRML position in a NIFTY option (an options chart, or an index chart's
+  option map) gets **no end-of-day exit**: it is carried to the next session, where its stop, trail, opposite-brick / Supertrend exit and
+  the server MTM guard keep running (no "still open" alarm for it). On the option's **expiry day** the 15:35 NRML exit applies again, so a
+  contract is never carried past expiry. MIS NIFTY options keep 15:15; futures, other underlyings and stocks are unchanged
+  (`carriesOvernight` in `lib/pnfAuto.ts`). An overnight gap can trigger the exit at the next open, filled at the gapped price.
 - **Session.** Only during the market session and before the end-of-day exit: there is **no separate NSE entry cutoff** (removed 2026-11-08) - entries run until the exit minute itself (**15:15** MIS, 15:35 NRML, 15:10 for a stock in the closing auction session), so a trade taken in the last minutes is squared off almost at once. On a Muhurat day the session is its announced window (14:20-15:30 on 2026-11-08, `muhurat_windows` in `nseHolidays.json`). MCX: **MCX 10 minutes before the market close** = 23:45 on a 23:55 close (23:20 on a 23:30 close), the same minute as the MCX square-off, so a trade taken in the last minute is squared off at once.
   Holidays and weekends count as closed.
 - **Feed.** Needs a live price and a fresh feed. A stale feed pauses entries.
@@ -87,10 +92,17 @@ Pick **Tick**, **10 sec**, **20 sec** or **30 sec** in the Interval list (Renko 
   running minute on the 1 min interval. A reload or a second tab draws the same bricks from the log.
 - **Alerts and AUTO act at once.** Entries, the opposite-brick exit and `+1L/brick` adds all fire on the brick, about 1-2 s after the
   price (the log is served 0.4 s behind, the page polls each second). Expect more trades and whipsaws than on a minute chart; arming warns once.
-- **Before the log.** Ticks exist only from when the bridge started asking for the instrument. The stretch before that is drawn from
-  the 1-minute closes; from the first logged price on, only logged prices are used, so a later history refresh can never change a
-  brick alerts or AUTO already acted on. A bridge outage shows as a jump: bricks catch up on the next logged price. A straddle leg
-  that has not changed since logging began uses its last history price until its first logged one.
+- **What gets logged.** The bridge logs an instrument only while something asks for it: an open chart, an armed server AUTO, or, for
+  **NIFTY 50 only**, the dashboard server itself, which keeps NIFTY logged from 10 min before the NSE open to 2 min after the close on
+  every session day (`lib/pnfAlwaysRecord.ts`, started by `instrumentation.node.ts`; needs the dashboard running). Any other
+  instrument has holes in its log for the time no chart showed it.
+- **Before the log, and its holes.** The stretch before the first logged price is drawn from the 1-minute closes. A hole in the log
+  (no price for over 90 s) that had already ended when the chart first read the log, and whose minutes were already in the history
+  it held then, is treated the same way: the 1-minute bars lying wholly inside it are drawn. Any other hole (one that opens while the
+  chart is running, e.g. a bridge outage, or one that ended in the last minute or two before the history caught up) stays a jump and the bricks catch up on
+  the next logged price, so a later history refresh can never change a brick alerts or AUTO already acted on. Reloading the page
+  then fills that hole too, so a reload after an outage can differ from the tab that lived through it. A straddle leg that has not
+  changed since logging began uses its last history price until its first logged one.
 - **Loading.** Until the first read of the log lands (about a second), the chart has no bars, so a reloaded page with AUTO armed
   cannot act on a minute-close brick the tick chart does not have. A log that keeps failing is shown on the chart.
 - **10 sec** groups the same recorded prices into 10-second bars (the bar's last price), and a brick prints when its 10 s are over
@@ -108,7 +120,7 @@ Pick **Tick**, **10 sec**, **20 sec** or **30 sec** in the Interval list (Renko 
 
 In priority order:
 
-1. **End of day.** NSE 15:15 (MIS) or 15:35 (NRML); MCX 10 minutes before the close; a cash stock in the closing auction 5 minutes before the continuous session
+1. **End of day.** NSE 15:15 (MIS) or 15:35 (NRML; none for an NRML NIFTY option except on its expiry day); MCX 10 minutes before the close; a cash stock in the closing auction 5 minutes before the continuous session
    ends. The time is the **position's own market** (saved on the row), never the market of whichever chart is on screen.
 2. **Stop** (Two-back / One-back). If the market gaps through, the fill is booked at the gapped price.
 3. **Opposite brick** (N-brick and trend).
