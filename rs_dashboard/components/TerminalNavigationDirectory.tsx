@@ -205,6 +205,11 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         desc: 'Second-by-second OI velocity (PE vs CE buildup) detecting institutional sweeps',
       },
       {
+        name: 'Fresh Money Board',
+        href: '/options/fresh-money',
+        desc: 'Per-strike fresh share of volume (OI moved / volume) against a 14-day normal band',
+      },
+      {
         name: 'Strike OI Concentration Profile',
         href: '/nifty-oi-profile',
         desc: 'Strike-by-strike open interest walls, shifts, and pin levels',

@@ -73,6 +73,7 @@ const NAV_GROUPS = [
       { href: '/options/crudeoil', label: 'Crude Oil Options', desc: 'Max pain, PCR & live option chain for MCX Crude Oil' },
       { href: '/crude-inventories', label: 'Crude Inventories', desc: 'Weekly EIA crude/Cushing/product stocks vs the 5-year range, with API and consensus forecasts' },
       { href: '/options/unusual-activity', label: 'Unusual Flow', desc: 'Real-time unusual options volume/OI spikes & institutional turnover flow' },
+      { href: '/options/fresh-money', label: 'Fresh Money', desc: 'Per-strike share of volume opening/closing positions vs a 14-day normal' },
       { href: '/nifty-oi-profile', label: 'Nifty OI Profile', desc: 'Futures 5-min chart with 7-day 3-column OI & OI Change profile' },
       { href: '/trending-oi', label: 'Trending OI', desc: 'Chain-wide OI/LTP interval table with call/put diff, direction & sentiment' },
       { href: '/futures', label: 'Futures', desc: 'OI buildup & short/long coverage analysis' },
