@@ -10,17 +10,31 @@ export const WS_FILE_STALE_MS = 3_000;
 /** A subscription this old has had the hub's replay of the current last packet (the hub scans every 3 s). */
 export const WS_SETTLED_MS = 8_000;
 
-export interface WsPrice { ltp: number; changedMs: number | null; sinceMs: number }
+export interface WsPrice { ltp: number; changedMs: number | null; sinceMs: number; /** Dhan's raw `close` from the quote packet (see pickPrevClose). */ prevClose: number | null }
 
 export function usableQuote(
   file: { updated_ms?: unknown; hub_alive?: unknown; quotes?: unknown } | null, key: string, now: number,
 ): WsPrice | null {
   if (!file || !(now - Number(file.updated_ms) <= WS_FILE_STALE_MS) || file.hub_alive === false) return null;
-  const q = (file.quotes as Record<string, { ltp?: unknown; changed_ms?: unknown; since_ms?: unknown }> | undefined)?.[key];
+  const q = (file.quotes as Record<string, { ltp?: unknown; changed_ms?: unknown; since_ms?: unknown; prev_close?: unknown }> | undefined)?.[key];
   const ltp = Number(q?.ltp);
   if (!q || !(ltp > 0)) return null;
   const changedMs = q.changed_ms == null ? null : Number(q.changed_ms);
   const sinceMs = Number(q.since_ms);
   if (changedMs === null && !(now - sinceMs >= WS_SETTLED_MS)) return null;
-  return { ltp, changedMs, sinceMs };
+  const pc = Number(q.prev_close);
+  return { ltp, changedMs, sinceMs, prevClose: pc > 0 ? pc : null };
+}
+
+/**
+ * The previous close to show a % change against (dhan-prevclose-pct-change Rule 2). Dhan's quote `close` is the PREVIOUS
+ * session's close while a session runs, but flips to today's close at the bell, after which it equals the last price and
+ * would read as a false 0.00%. So: in session, trust it (and the caller caches it for the day); out of session, prefer the
+ * value cached in session today, else accept the raw one only when it differs from the last price; otherwise null ("–").
+ */
+export function pickPrevClose(ltp: number, rawPrev: number | null, inSession: boolean, cachedToday: number | null): number | null {
+  if (inSession) return rawPrev && rawPrev > 0 ? rawPrev : cachedToday;
+  if (cachedToday && cachedToday > 0) return cachedToday;
+  if (rawPrev && rawPrev > 0 && Math.abs(rawPrev - ltp) > 1e-9) return rawPrev;
+  return null;
 }

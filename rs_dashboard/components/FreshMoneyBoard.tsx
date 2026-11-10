@@ -11,6 +11,7 @@ import { FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKe
 import { usePageBroker } from './BrokerPicker';
 import CollectorControl from './freshMoney/CollectorControl';
 import FreshChart from './freshMoney/FreshChart';
+import PositionsOrders from './freshMoney/PositionsOrders';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
 const MCX_UNDERLYINGS: ReadonlySet<string> = new Set(['CRUDEOIL', 'CRUDEOILM']);
@@ -118,6 +119,35 @@ function BoardRowView({ row, max, normal, boxed, trade }: {
       <span className="pl-2 font-bold text-red-400">{c ? fmtOi(c.oiMoved) : '–'}</span>
       <span className="pl-1.5 text-zinc-300">{fmtPct(c?.fresh ?? null)}</span>
       <Bar side="call" value={c?.oiMoved ?? null} max={max} fresh={c?.fresh ?? null} normal={normal.calls} />
+    </div>
+  );
+}
+
+const inr = (v: number, d = 2) => v.toLocaleString('en-IN', { minimumFractionDigits: d, maximumFractionDigits: d });
+
+/** The chosen underlying's latest price and change vs the previous close (WebSocket; "–" when the previous close is
+ *  not known — never a flipped close shown as 0.00%). Without a live price, the board snapshot's spot, marked as such. */
+function PriceChip({ underlying, q, fallback }: { underlying: string; q: FreshMoneyLive | null; fallback: number | null }) {
+  const price = q?.spot ?? fallback;
+  if (price === null) return null;
+  const live = !!q?.spot;
+  const up = (q?.change ?? 0) > 0, down = (q?.change ?? 0) < 0;
+  const tone = up ? 'text-emerald-400' : down ? 'text-red-400' : 'text-zinc-300';
+  return (
+    <div
+      className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1"
+      title={live ? `Live from the Dhan WebSocket${q?.prevClose ? ` · previous close ${inr(q.prevClose)}` : ''}` : 'Last board snapshot (no live price yet)'}
+    >
+      <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">{q?.label ?? underlying}</span>
+      {live && <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />}
+      <span className="text-[14px] font-bold tabular-nums text-white">{inr(price)}</span>
+      {live && q?.change != null && q.changePct != null ? (
+        <span className={`text-[12px] font-bold tabular-nums ${tone}`}>
+          {up ? '+' : down ? '−' : ''}{inr(Math.abs(q.change))} ({up ? '+' : down ? '−' : ''}{Math.abs(q.changePct).toFixed(2)}%)
+        </span>
+      ) : (
+        <span className="text-[11px] text-zinc-500">{live ? 'chg –' : 'snapshot'}</span>
+      )}
     </div>
   );
 }
@@ -231,8 +261,9 @@ export default function FreshMoneyBoard() {
 
   // Live spot from the WebSocket (today's board only: a live price over an old session's OI would mislead). Falls back
   // to the board snapshot's spot when there is no fresh WebSocket price.
-  const [live, setLive] = useState<{ key: string; spot: number } | null>(null);
-  const liveKey = data?.isToday ? `${underlying}|${data.expiry}` : null;
+  // Polled whenever a board is shown (the header price); the board itself uses it only on today's board.
+  const [live, setLive] = useState<{ key: string; q: FreshMoneyLive } | null>(null);
+  const liveKey = data ? `${underlying}|${data.expiry}` : null;
   useEffect(() => {
     if (!liveKey) return;
     const [u, expiry] = liveKey.split('|');
@@ -245,14 +276,15 @@ export default function FreshMoneyBoard() {
         const r = await fetch(`/api/fresh-money/live?underlying=${u}&expiry=${expiry}`, { cache: 'no-store' });
         const j = (await r.json()) as FreshMoneyLive;
         if (!alive || n !== my) return;
-        setLive(j.spot && j.spot > 0 ? { key: liveKey, spot: j.spot } : null);
+        setLive({ key: liveKey, q: j });
       } catch { /* keep the last value; the next tick retries */ }
     };
     tick();
     const id = setInterval(tick, LIVE_POLL_MS);
     return () => { alive = false; clearInterval(id); };
   }, [liveKey]);
-  const liveSpot = live && live.key === liveKey ? live.spot : null;
+  const liveQ = live && live.key === liveKey ? live.q : null;
+  const liveSpot = data?.isToday && liveQ?.spot && liveQ.spot > 0 ? liveQ.spot : null;
   const spot = liveSpot ?? data?.spot ?? null;
 
   const boxedStrike = useMemo(() => {
@@ -333,7 +365,7 @@ export default function FreshMoneyBoard() {
             <p className="mb-0.5 text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400">Options · {underlying}</p>
             <h1 className="text-sm font-bold leading-none tracking-tight text-white">Fresh Money Board</h1>
             <p className="mt-1 text-[10px] font-medium text-zinc-500">
-              Share of each strike&apos;s volume that opened or closed positions, against a {historyLabel} normal
+              Share of each strike&apos;s volume that opened or closed positions{data && data.historyDays >= 5 ? `, against a ${historyLabel} normal` : ' · normal range after 5 days of data'}
             </p>
           </div>
         </div>
@@ -347,6 +379,7 @@ export default function FreshMoneyBoard() {
               </button>
             ))}
           </div>
+          <PriceChip underlying={underlying} q={liveQ} fallback={data?.spot ?? null} />
           {MCX_UNDERLYINGS.has(underlying) && <CollectorControl key={underlying} underlying={underlying} />}
           {data && (
             <span className="text-[10px] font-mono text-zinc-400">
@@ -465,6 +498,13 @@ export default function FreshMoneyBoard() {
               <FreshChart data={data} height={chartH} />
             </div>
           </div>
+        )}
+
+        {ts && (
+          <PositionsOrders
+            state={ts} armed={armed} inflight={inflight} onClose={sendClose}
+            canClose={p => (ts.sessions[p.underlying]?.gate ?? 'closed') !== 'closed' && !!ts.brokers?.[p.broker]}
+          />
         )}
       </div>
     </div>

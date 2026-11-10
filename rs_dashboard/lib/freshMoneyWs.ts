@@ -20,9 +20,9 @@ import { DEBUG_DIR } from '@/lib/ivSnapshotFiles';
 import { readJsonFile, writeJsonAtomic } from '@/lib/lockedJsonFile';
 import { bridgeRunning, startBridge } from '@/lib/bridgeSpawn';
 import { expiriesFor, resolveFuture, indexSpotId } from '@/lib/pnfContracts';
-import { usableQuote, WS_FILE_STALE_MS as FILE_STALE_MS, type WsPrice } from './freshMoneyWsQuote.ts';
+import { usableQuote, pickPrevClose, WS_FILE_STALE_MS as FILE_STALE_MS, type WsPrice } from './freshMoneyWsQuote.ts';
 
-export { usableQuote, type WsPrice };
+export { usableQuote, pickPrevClose, type WsPrice };
 
 const NAME = 'fresh_money';
 const WANTED_FILE = path.join(DEBUG_DIR, `${NAME}_ws_wanted_${process.pid}.json`);
@@ -90,12 +90,12 @@ const BSE_INDEX_IDS: Record<string, string> = { SENSEX: '51' };
  * expiring on or after the option — CRUDEOILM Nov-17 options sit on the Nov-19 future, dhan-crudeoil-trading), or the
  * NSE / BSE index. Null when the master list has no such contract.
  */
-export function spotInstrument(underlying: string, optionExpiry: string, mcx: boolean): { segment: WsSegment; securityId: string } | null {
+export function spotInstrument(underlying: string, optionExpiry: string, mcx: boolean): { segment: WsSegment; securityId: string; label: string } | null {
   if (mcx) {
     const exp = expiriesFor('futures', underlying).find(e => e >= optionExpiry);
     const fut = exp ? resolveFuture(underlying, exp) : null;
-    return fut ? { segment: 'MCX_COMM', securityId: fut.securityId } : null;
+    return fut ? { segment: 'MCX_COMM', securityId: fut.securityId, label: fut.displayName || `${underlying} FUT` } : null;
   }
   const id = indexSpotId(underlying) ?? BSE_INDEX_IDS[underlying];
-  return id ? { segment: 'IDX_I', securityId: id } : null;
+  return id ? { segment: 'IDX_I', securityId: id, label: underlying } : null;
 }
