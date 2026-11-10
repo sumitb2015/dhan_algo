@@ -34,6 +34,8 @@ export const SOURCE_QTY_CAPS: Record<string, number> = {
   fts: FTS_DHAN_MAX_ORDER_QTY,
   // 'pl' = Price Ladder: MAX_LADDER_LOTS (20) x 75 (the largest index lot seen), matching Kotak's 20-lot 'pl' cap.
   pl: 1500,
+  // 'fm' = Fresh Money board: FM_MAX_LOTS_PER_ORDER (20) x 75, the largest index lot seen.
+  fm: 1500,
 };
 
 /** The same backstop where Dhan's order quantity is LOTS (MCX_COMM), not units: 1500 there would mean 1500 lots. */
@@ -55,6 +57,9 @@ export interface DhanOrderInput {
   /** Short lowercase tag prefixed to the correlationId so a caller can tell
    *  its own orders apart in the order book (MultiLegFocus sends 'mlf'). */
   source?: string;
+  /** A caller-chosen correlationId (8-25 lowercase letters/digits), so a caller that keeps its own ledger can look an
+   *  UNKNOWN order up again later. Absent or malformed: one is generated as before. */
+  correlationId?: string;
 }
 
 export type DhanPlaceResult =
@@ -123,7 +128,9 @@ export async function placeDhanOrder(body: DhanOrderInput): Promise<DhanPlaceRes
   }
 
   const prefix = typeof body.source === 'string' && /^[a-z]{2,4}$/.test(body.source) ? body.source : 'wr';
-  const correlationId = `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const correlationId = typeof body.correlationId === 'string' && /^[a-z0-9]{8,25}$/.test(body.correlationId)
+    ? body.correlationId
+    : `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
   // Resolved outside the reconcile-on-failure try/catch below: a credentials
   // failure (missing/expired access_token.json — routine, since the token

@@ -1,0 +1,168 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  buildPositions, closeQty, contractHold, dueForCheck, effectiveState, nextCheckDelay, sessionGate, slices, stateFromBroker,
+  unconfirmedQty, SENDING_STALE_MS, UNKNOWN_HOLD_MS, PENDING_HOLD_MS, type FmOrder,
+} from './freshMoneyTrades.ts';
+
+let n = 0;
+const ord = (p: Partial<FmOrder>): FmOrder => ({
+  id: `o${++n}`, ts: n * 1000, underlying: 'NIFTY', expiry: '2026-11-17', strike: 25000, opt: 'CE', securityId: '111',
+  lot: 65, side: 'BUY', qty: 65, close: false, correlationId: `fm${n}aaaaaaa`, orderId: `X${n}`, state: 'filled',
+  filledQty: 65, avgPrice: 100, ...p,
+});
+
+test('long position: average cost and live P&L', () => {
+  const pos = buildPositions([ord({ avgPrice: 100 }), ord({ avgPrice: 110 })], { '111': 120 }, 1e6);
+  assert.equal(pos.length, 1);
+  assert.equal(pos[0].netQty, 130);
+  assert.equal(pos[0].avgPrice, 105);
+  assert.equal(pos[0].unrealised, 15 * 130);
+  assert.equal(pos[0].pnl, 15 * 130);
+});
+
+test('short then partial cover books realised P&L on the covered units', () => {
+  const pos = buildPositions([
+    ord({ side: 'SELL', qty: 130, filledQty: 130, avgPrice: 200 }),
+    ord({ side: 'BUY', qty: 65, filledQty: 65, avgPrice: 150 }),
+  ], { '111': 160 }, 1e6)[0];
+  assert.equal(pos.netQty, -65);
+  assert.equal(pos.realised, 50 * 65);
+  assert.equal(pos.avgPrice, 200);
+  assert.equal(pos.unrealised, (160 - 200) * -65);
+  assert.equal(pos.pnl, 50 * 65 + 40 * 65);
+});
+
+test('a reversal through flat opens the remainder at the reversing price', () => {
+  const pos = buildPositions([
+    ord({ side: 'BUY', qty: 65, filledQty: 65, avgPrice: 100 }),
+    ord({ side: 'SELL', qty: 195, filledQty: 195, avgPrice: 90 }),
+  ], {}, 1e6)[0];
+  assert.equal(pos.netQty, -130);
+  assert.equal(pos.realised, -10 * 65);
+  assert.equal(pos.avgPrice, 90);
+  assert.equal(pos.unrealised, null, 'no LTP: unknown, not 0');
+  assert.equal(pos.pnl, null);
+});
+
+test('unfilled, rejected and pending orders add no quantity', () => {
+  const pos = buildPositions([
+    ord({ state: 'rejected', filledQty: 0, avgPrice: null }),
+    ord({ state: 'pending', filledQty: 0, avgPrice: null }),
+  ], { '111': 50 }, 1e6)[0];
+  assert.equal(pos.netQty, 0);
+  assert.equal(pos.pnl, 0);
+});
+
+test('a fill with no price yet keeps the quantity and makes the basis unknown, never 0', () => {
+  const pos = buildPositions([ord({ avgPrice: 100 }), ord({ avgPrice: null })], { '111': 120 }, 1e6)[0];
+  assert.equal(pos.netQty, 130);
+  assert.equal(pos.avgPrice, null);
+  assert.equal(pos.pnl, null);
+});
+
+test('partial fill counts only the filled units', () => {
+  const pos = buildPositions([ord({ qty: 650, filledQty: 130, state: 'partial', avgPrice: 100 })], { '111': 101 }, 1e6)[0];
+  assert.equal(pos.netQty, 130);
+  assert.equal(pos.unrealised, 130);
+});
+
+test('broker statuses map to ledger states; filled only once quantity AND price are known', () => {
+  assert.equal(stateFromBroker('TRADED', 65, 65, 100), 'filled');
+  assert.equal(stateFromBroker('TRADED', 0, 65, 100), 'partial', 'TRADED with no filledQty must be read again');
+  assert.equal(stateFromBroker('TRADED', 65, 65, null), 'partial', 'TRADED before the price lands must be read again');
+  assert.equal(stateFromBroker('PART_TRADED', 10, 65, 100), 'partial');
+  assert.equal(stateFromBroker('REJECTED', 0, 65, null), 'rejected');
+  assert.equal(stateFromBroker('CANCELLED', 0, 65, null), 'cancelled');
+  assert.equal(stateFromBroker('CANCELLED', 30, 65, 101), 'filled');
+  assert.equal(stateFromBroker('CANCELLED', 30, 65, null), 'partial');
+  assert.equal(stateFromBroker('TRANSIT', 0, 65, null), 'pending');
+  assert.equal(stateFromBroker('PENDING', 0, 65, null), 'pending');
+});
+
+test('a stale sending record is unknown; unknown and pending orders hold the contract for a while', () => {
+  const now = 1_000_000;
+  const sending = ord({ ts: now - SENDING_STALE_MS - 1, state: 'sending', orderId: null, filledQty: 0, avgPrice: null });
+  assert.equal(effectiveState(sending, now), 'unknown');
+  assert.equal(contractHold([sending], '111', now), 'unknown');
+  assert.equal(contractHold([sending], '111', now + UNKNOWN_HOLD_MS), null);
+  assert.equal(contractHold([sending], '222', now), null);
+  const pending = ord({ ts: now - 1000, state: 'pending', filledQty: 0, avgPrice: null });
+  assert.equal(contractHold([pending], '111', now), 'pending');
+  assert.equal(contractHold([pending], '111', now + PENDING_HOLD_MS), null);
+});
+
+test('square-off is clamped down to the broker, never up or the wrong way', () => {
+  assert.equal(closeQty(130, null), 130);
+  assert.equal(closeQty(130, 260), 130);
+  assert.equal(closeQty(130, 65), 65);
+  assert.equal(closeQty(130, -65), 0);
+  assert.equal(closeQty(-130, -65), 65);
+  assert.equal(closeQty(-130, 0), 0);
+});
+
+test('large closes are sliced under the per-order lot cap', () => {
+  assert.deepEqual(slices(65 * 45, 65, 20), [1300, 1300, 325]);
+  assert.deepEqual(slices(65, 65, 20), [65]);
+});
+
+test('an unpriced opening fill keeps the round trip unknown after the position goes flat (never a firm +0)', () => {
+  const pos = buildPositions([
+    ord({ side: 'BUY', avgPrice: null }),
+    ord({ side: 'SELL', avgPrice: 120 }),
+  ], {}, 1e6)[0];
+  assert.equal(pos.netQty, 0);
+  assert.equal(pos.realised, null);
+  assert.equal(pos.pnl, null);
+  // A later, fully priced trade on the same contract does not make the day's booked figure known again.
+  const later = buildPositions([
+    ord({ side: 'BUY', avgPrice: null }), ord({ side: 'SELL', avgPrice: 120 }),
+    ord({ side: 'BUY', avgPrice: 100 }),
+  ], { '111': 110 }, 1e6)[0];
+  assert.equal(later.avgPrice, 100, 'the new open lot has a known basis');
+  assert.equal(later.unrealised, 650);
+  assert.equal(later.realised, null);
+  assert.equal(later.pnl, null);
+});
+
+test('a close at an unknown price makes booked P&L unknown', () => {
+  const pos = buildPositions([ord({ side: 'BUY', avgPrice: 100 }), ord({ side: 'SELL', avgPrice: null })], {}, 1e6)[0];
+  assert.equal(pos.netQty, 0);
+  assert.equal(pos.realised, null);
+});
+
+test('unconfirmed orders count toward exposure as if they fill', () => {
+  const now = 1_000_000;
+  const orders = [
+    ord({ ts: now - 120_000, side: 'SELL', qty: 1300, filledQty: 0, state: 'unknown', orderId: null, avgPrice: null }),
+    ord({ ts: now - 1_000, side: 'SELL', qty: 650, filledQty: 130, state: 'partial', avgPrice: 90 }),
+    ord({ ts: now - 1_000, side: 'BUY', qty: 65, filledQty: 65, state: 'filled', avgPrice: 90 }),
+    ord({ ts: now - 1_000, securityId: '999', side: 'BUY', qty: 65, filledQty: 0, state: 'pending', avgPrice: null }),
+  ];
+  assert.equal(unconfirmedQty(orders, '111', now), -(1300 + 520));
+  assert.equal(unconfirmedQty(orders, '999', now), 65);
+});
+
+test('order re-reads are due oldest first, capped, with backoff', () => {
+  const now = 1_000_000;
+  const a = ord({ id: 'a', ts: 1, state: 'unknown', orderId: null, filledQty: 0, avgPrice: null });
+  const b = ord({ id: 'b', ts: 2, state: 'pending', filledQty: 0, avgPrice: null });
+  const c = ord({ id: 'c', ts: 3, state: 'pending', filledQty: 0, avgPrice: null });
+  const done = ord({ id: 'd', ts: 0, state: 'filled' });
+  const next = new Map([['b', now + 5_000]]);
+  assert.deepEqual(dueForCheck([c, b, a, done], next, now, 2).map(o => o.id), ['a', 'c']);
+  assert.deepEqual(dueForCheck([c, b, a, done], new Map(), now, 10).map(o => o.id), ['a', 'b', 'c']);
+  assert.equal(nextCheckDelay(1), 4_000);
+  assert.equal(nextCheckDelay(20), 60_000);
+});
+
+test('session gate: opens 09:15-15:17 IST, closes only to 15:30, nothing on a holiday', () => {
+  const at = (h: number, m: number) => Date.UTC(2026, 10, 10, h, m) - 19_800_000;
+  assert.equal(sessionGate(at(9, 14), true), 'closed');
+  assert.equal(sessionGate(at(9, 15), true), 'open');
+  assert.equal(sessionGate(at(15, 16), true), 'open');
+  assert.equal(sessionGate(at(15, 17), true), 'close-only');
+  assert.equal(sessionGate(at(15, 29), true), 'close-only');
+  assert.equal(sessionGate(at(15, 30), true), 'closed');
+  assert.equal(sessionGate(at(11, 0), false), 'closed');
+});

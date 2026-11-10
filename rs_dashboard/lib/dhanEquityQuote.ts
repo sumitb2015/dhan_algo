@@ -34,3 +34,30 @@ export async function fetchLtp(segment: LtpSegment, securityId: string, noPrice 
 export async function fetchEquityLtp(securityId: string): Promise<number> {
   return fetchLtp('NSE_EQ', securityId, 'Dhan returned no price for this stock');
 }
+
+/** Last prices of several securities in one segment, in ONE quote call (same lane and dedupe as fetchLtp). Ids Dhan
+ *  returns no price for are left out; throws on a failed call (429 carries `status`). */
+export async function fetchLtps(segment: LtpSegment, securityIds: string[]): Promise<Record<string, number>> {
+  if (!securityIds.length) return {};
+  const ids = [...new Set(securityIds)].sort();
+  return dedupe(`ltps:${segment}:${ids.join(',')}`, () =>
+    pacedQuoteCall(async () => {
+      const { clientId, token } = getDhanCredentials();
+      const res = await fetch(LTP_URL, {
+        method: 'POST',
+        headers: { 'access-token': token, 'client-id': clientId, 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ [segment]: ids.map(Number) }),
+        signal: AbortSignal.timeout(6_000),
+      });
+      if (res.status === 429) throw Object.assign(new Error('Dhan quote rate limited (429)'), { status: 429 });
+      if (!res.ok) throw new Error(`Dhan LTP HTTP ${res.status}`);
+      const json = (await res.json()) as { data?: Record<string, Record<string, { last_price?: number }>> };
+      const out: Record<string, number> = {};
+      for (const [id, v] of Object.entries(json.data?.[segment] ?? {})) {
+        const p = Number(v?.last_price);
+        if (p > 0) out[id] = p;
+      }
+      return out;
+    }),
+  );
+}

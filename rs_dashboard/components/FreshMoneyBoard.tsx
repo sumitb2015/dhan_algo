@@ -8,14 +8,18 @@ import {
 import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
 import { fmtOi, fmtPct, intensity, type Intensity, type Range } from '@/lib/freshMoney';
+import type { FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
+import { TradeBar, TradeCell, useFreshMoneyTrades } from './freshMoney/trading';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
 type Underlying = (typeof UNDERLYINGS)[number];
 const POLL_MS = 30_000;
 const PREF_UNDERLYING = 'freshMoney.underlying';
-const PREF_CHART_H = 'freshMoney.chartHeight';
-const CHART_MIN_H = 120;
-const CHART_MAX_H = 520;
+const PREF_CHART_H = 'freshMoney.chartHeight.v2';
+const PREF_LOTS = 'freshMoney.lots';
+const CHART_DEFAULT_H = 340;
+const CHART_MIN_H = 160;
+const CHART_MAX_H = 760;
 const DAY_START = 9 * 60 + 15;
 const DAY_END = 15 * 60 + 30;
 
@@ -35,6 +39,20 @@ const BAR_CLASS: Record<'put' | 'call', Record<'fill' | 'outline', Record<Intens
 };
 
 const GRID = 'grid grid-cols-[minmax(0,1fr)_44px_76px_96px_76px_44px_minmax(0,1fr)] items-center';
+// With trading on, a cell each side of the strike holds B / S, the P&L chip and × (literal string for Tailwind).
+const GRID_TRADE = 'grid grid-cols-[minmax(0,1fr)_44px_76px_120px_80px_120px_76px_44px_minmax(0,1fr)] items-center';
+
+interface RowTrade {
+  put: FmPosition | undefined;
+  call: FmPosition | undefined;
+  showButtons: boolean;
+  canOrder: boolean;
+  canClose: boolean;
+  armed: boolean;
+  busy: (opt: OptType) => boolean;
+  order: (opt: OptType, side: TxnSide) => void;
+  close: (p: FmPosition) => void;
+}
 
 function readPref(key: string): string | null {
   try { return window.localStorage.getItem(key); } catch { return null; }
@@ -69,20 +87,35 @@ function Bar({ side, value, max, fresh, normal }: {
   );
 }
 
-function BoardRowView({ row, max, normal, boxed }: {
-  row: FreshMoneyRow; max: number; normal: FreshMoneyResponse['normal']; boxed: boolean;
+function BoardRowView({ row, max, normal, boxed, trade }: {
+  row: FreshMoneyRow; max: number; normal: FreshMoneyResponse['normal']; boxed: boolean; trade: RowTrade | null;
 }) {
   const p = row.put, c = row.call;
+  const cell = (side: 'put' | 'call') => {
+    if (!trade) return null;
+    const opt: OptType = side === 'put' ? 'PE' : 'CE';
+    const has = side === 'put' ? !!p : !!c;
+    return (
+      <TradeCell
+        side={side} opt={opt} strike={row.strike} pos={side === 'put' ? trade.put : trade.call}
+        showButtons={trade.showButtons && has} canOrder={trade.canOrder} canClose={trade.canClose} armed={trade.armed} busy={trade.busy(opt)}
+        onBuy={() => trade.order(opt, 'BUY')} onSell={() => trade.order(opt, 'SELL')}
+        onClose={() => { const pos = side === 'put' ? trade.put : trade.call; if (pos) trade.close(pos); }}
+      />
+    );
+  };
   return (
-    <div className={`${GRID} h-[21px] text-[13px] tabular-nums`}>
+    <div className={`${trade ? GRID_TRADE : GRID} h-[21px] text-[13px] tabular-nums`}>
       <Bar side="put" value={p?.oiMoved ?? null} max={max} fresh={p?.fresh ?? null} normal={normal.puts} />
       <span className="pr-1.5 text-right text-zinc-300">{fmtPct(p?.fresh ?? null)}</span>
       <span className="pr-2 text-right font-bold text-emerald-400">{p ? fmtOi(p.oiMoved) : '–'}</span>
+      {cell('put')}
       <span className="flex justify-center">
         <span className={`px-2 leading-[18px] ${boxed ? 'border border-sky-400 text-zinc-100' : 'border border-transparent text-zinc-300'}`}>
           {row.strike}
         </span>
       </span>
+      {cell('call')}
       <span className="pl-2 font-bold text-red-400">{c ? fmtOi(c.oiMoved) : '–'}</span>
       <span className="pl-1.5 text-zinc-300">{fmtPct(c?.fresh ?? null)}</span>
       <Bar side="call" value={c?.oiMoved ?? null} max={max} fresh={c?.fresh ?? null} normal={normal.calls} />
@@ -182,7 +215,11 @@ export default function FreshMoneyBoard() {
   const [data, setData] = useState<FreshMoneyResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [chartH, setChartH] = useState(190);
+  const [chartH, setChartH] = useState(CHART_DEFAULT_H);
+  // REAL-money arm: per page load, never persisted, dropped on an underlying switch.
+  const [armed, setArmed] = useState(false);
+  const [lots, setLots] = useState(1);
+  const trades = useFreshMoneyTrades();
   const [now, setNow] = useState(() => Date.now());
   const seq = useRef(0);
 
@@ -193,6 +230,8 @@ export default function FreshMoneyBoard() {
     if (u && (UNDERLYINGS as readonly string[]).includes(u)) setUnderlying(u as Underlying);
     const h = Number(readPref(PREF_CHART_H));
     if (Number.isFinite(h) && h >= CHART_MIN_H && h <= CHART_MAX_H) setChartH(h);
+    const l = Number(readPref(PREF_LOTS));
+    if (Number.isInteger(l) && l >= 1 && l <= 20) setLots(l);
   }, []);
 
   const load = useCallback(async (u: Underlying, signal?: AbortSignal) => {
@@ -224,6 +263,7 @@ export default function FreshMoneyBoard() {
     setLoading(true);
     setData(null);
     setError(null);
+    setArmed(false);
     setUnderlying(u);
     writePref(PREF_UNDERLYING, u);
   };
@@ -274,6 +314,41 @@ export default function FreshMoneyBoard() {
   })();
   const isStale = !!data?.isToday && staleMin >= 3 && nowIstMin >= DAY_START && nowIstMin <= DAY_END;
 
+  // ── trading ──
+  const ts = trades.state;
+  const tradable = !!ts?.tradable.includes(underlying);
+  const tradeExpiry = ts?.boardExpiry[underlying] ?? null;
+  // Orders only from a live board: today's snapshot, and the expiry the server will trade.
+  const session = ts?.session ?? 'closed';
+  const blocked = !data ? null
+    : session !== 'open' ? (ts?.sessionNote ?? null)
+    : !data.isToday ? "Trading opens when today's board is live (the IV snapshot collector has not written today)"
+      : isStale ? 'Board snapshot is stale — orders paused until the collector writes again'
+        : tradeExpiry !== data.expiry ? "The board's expiry is changing — wait for the next refresh"
+          : null;
+  const myPositions = useMemo(
+    () => (ts?.positions ?? []).filter(p => p.underlying === underlying && (!data || p.expiry === data.expiry)),
+    [ts, underlying, data],
+  );
+  const posByKey = useMemo(() => new Map(myPositions.map(p => [`${p.strike}:${p.opt}`, p] as const)), [myPositions]);
+  const tradeMode = armed || myPositions.length > 0;
+  const { order: sendOrder, close: sendClose, inflight } = trades;
+  const rowTrade = useCallback((strike: number): RowTrade | null => {
+    if (!tradeMode || !data) return null;
+    return {
+      put: posByKey.get(`${strike}:PE`),
+      call: posByKey.get(`${strike}:CE`),
+      showButtons: armed && tradable,
+      canOrder: armed && tradable && !blocked,
+      canClose: armed && session !== 'closed',
+      armed,
+      busy: opt => inflight.has(`${underlying}:${strike}:${opt}`),
+      order: (opt, side) => sendOrder({ underlying, expiry: data.expiry, strike, opt, side, lots }),
+      close: p => sendClose(p),
+    };
+  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, sendOrder, sendClose, lots]);
+  const setLotsPref = (n: number) => { setLots(n); writePref(PREF_LOTS, String(n)); };
+
   return (
     <div className="flex min-h-screen flex-col bg-zinc-950 text-white">
       <div className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 bg-zinc-950/95 px-6 py-3 backdrop-blur">
@@ -312,7 +387,7 @@ export default function FreshMoneyBoard() {
         </div>
       </div>
 
-      <div className="mx-auto flex w-full max-w-[1100px] flex-1 flex-col gap-3 px-6 py-5">
+      <div className={`mx-auto flex w-full ${tradeMode ? 'max-w-[1320px]' : 'max-w-[1100px]'} flex-1 flex-col gap-3 px-6 py-5`}>
         {isStale && (
           <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
             <AlertTriangle className="h-3.5 w-3.5" />
@@ -339,7 +414,13 @@ export default function FreshMoneyBoard() {
         )}
 
         {data && (
-          <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900">
+          <div className={`overflow-hidden rounded-lg border bg-zinc-900 ${armed ? 'border-red-500/50' : 'border-zinc-800'}`}>
+            {ts && (
+              <TradeBar
+                underlying={underlying} armed={armed} onArm={setArmed} lots={lots} onLots={setLotsPref}
+                maxLots={ts.maxLots} lotSize={data.lot} tradable={tradable} blocked={blocked} positions={myPositions}
+              />
+            )}
             <div className="px-4 pt-3">
               <div className="text-[15px] text-zinc-200">
                 Board fresh money:{' '}
@@ -358,10 +439,13 @@ export default function FreshMoneyBoard() {
               </div>
             </div>
 
-            <div className="px-4 pb-2 pt-2">
-              <div className={`${GRID} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
+            <div className="overflow-x-auto px-4 pb-2 pt-2">
+             <div className={tradeMode ? 'min-w-[980px]' : 'min-w-[720px]'}>
+              <div className={`${tradeMode ? GRID_TRADE : GRID} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
                 <span className="col-span-3 pr-2 text-right">PUTS: fresh · OI moved</span>
+                {tradeMode && <span className="pr-1 text-right text-zinc-500">PE trade</span>}
                 <span className="text-center">STRIKE</span>
+                {tradeMode && <span className="pl-1 text-zinc-500">CE trade</span>}
                 <span className="col-span-3 pl-2">CALLS: OI moved · fresh</span>
               </div>
               {data.rows.map((r, i) => {
@@ -369,11 +453,12 @@ export default function FreshMoneyBoard() {
                 const divider = data.spot !== null && next && r.strike > data.spot && next.strike <= data.spot;
                 return (
                   <React.Fragment key={r.strike}>
-                    <BoardRowView row={r} max={maxAbs} normal={data.normal} boxed={r.strike === boxedStrike} />
+                    <BoardRowView row={r} max={maxAbs} normal={data.normal} boxed={r.strike === boxedStrike} trade={rowTrade(r.strike)} />
                     {divider && <SpotDivider spot={data.spot!} />}
                   </React.Fragment>
                 );
               })}
+             </div>
             </div>
 
             <div
