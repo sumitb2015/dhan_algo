@@ -77,6 +77,11 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         hot: true,
       },
       {
+        name: 'Fresh Money Board',
+        href: '/options/fresh-money',
+        desc: 'Per-strike fresh share of volume (OI moved / volume) against a 14-day normal band',
+      },
+      {
         name: 'Cyber Scalper (9/20 EMA)',
         href: '/cyber-scalper',
         badge: 'NEW',
@@ -203,11 +208,6 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         href: '/trending-oi',
         badge: 'REALTIME',
         desc: 'Second-by-second OI velocity (PE vs CE buildup) detecting institutional sweeps',
-      },
-      {
-        name: 'Fresh Money Board',
-        href: '/options/fresh-money',
-        desc: 'Per-strike fresh share of volume (OI moved / volume) against a 14-day normal band',
       },
       {
         name: 'Strike OI Concentration Profile',

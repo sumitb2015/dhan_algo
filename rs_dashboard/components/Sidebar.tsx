@@ -73,7 +73,6 @@ const NAV_GROUPS = [
       { href: '/options/crudeoil', label: 'Crude Oil Options', desc: 'Max pain, PCR & live option chain for MCX Crude Oil' },
       { href: '/crude-inventories', label: 'Crude Inventories', desc: 'Weekly EIA crude/Cushing/product stocks vs the 5-year range, with API and consensus forecasts' },
       { href: '/options/unusual-activity', label: 'Unusual Flow', desc: 'Real-time unusual options volume/OI spikes & institutional turnover flow' },
-      { href: '/options/fresh-money', label: 'Fresh Money', desc: 'Per-strike share of volume opening/closing positions vs a 14-day normal' },
       { href: '/nifty-oi-profile', label: 'Nifty OI Profile', desc: 'Futures 5-min chart with 7-day 3-column OI & OI Change profile' },
       { href: '/trending-oi', label: 'Trending OI', desc: 'Chain-wide OI/LTP interval table with call/put diff, direction & sentiment' },
       { href: '/futures', label: 'Futures', desc: 'OI buildup & short/long coverage analysis' },
@@ -116,6 +115,7 @@ const NAV_GROUPS = [
     icon: Target,
     links: [
       { href: '/scalp-cockpit', label: 'Scalp Cockpit', desc: 'Tight multi-window scalping desk: Cumulative OI, Strikes OI slider, India VIX, collapsible Multi-Leg Focus trade desk & analysis windows' },
+      { href: '/options/fresh-money', label: 'Fresh Money', desc: 'Per-strike share of volume opening/closing positions vs a 14-day normal' },
       { href: '/price-ladder', label: 'Price Ladder XY', desc: 'Trade an option on index levels — click a Nifty level to arm an entry with a bracket target/SL and trailing SL in index points; server-fired' },
       { href: '/straddle-pnf', label: 'Point & Figure', desc: 'Live Point & Figure chart of an NSE index, stock, future or option (CE, PE or CE+PE straddle; NSE and MCX), with VWAP or an SMA (period of your choice, default 50), double top / double bottom alerts and a 30-alert log — signals only' },
       { href: '/renko', label: 'Renko', desc: 'Live Renko chart (TradingView Traditional box, 10 points by default) of an NSE index, stock, future or option — same instrument picker, trade bar, rail and AUTO as Point & Figure, with N-brick confirmation signals' },
