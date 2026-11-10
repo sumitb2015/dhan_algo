@@ -187,6 +187,21 @@ test('at 1280px the header stays tidy with the Options pickers open: no sideways
   expect(chart.height).toBeGreaterThan(450);
 });
 
+test('below 1400px the chart settings start folded when nothing is saved; an unfold is remembered across a reload', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await mockApi(page);
+  await page.goto('/straddle-pnf');
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  const toggle = page.getByTestId('pnf-settings-toggle');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByTestId('pnf-settings-summary')).toContainText('1 min');   // the folded button still says what is set
+  await toggle.click();
+  await expect(page.getByRole('group', { name: 'Chart settings' })).toBeVisible();
+  await page.reload();
+  await expect(page.getByTestId('pnf-header-summary')).toContainText(/vs (prev close|open)/);
+  await expect(page.getByTestId('pnf-settings-toggle')).toHaveAttribute('aria-expanded', 'true');
+});
+
 test('a failed contract lookup shows its error in the chart (no endless Loading), and it clears on another segment', async ({ page }) => {
   await mockApi(page);
   await page.goto('/straddle-pnf');

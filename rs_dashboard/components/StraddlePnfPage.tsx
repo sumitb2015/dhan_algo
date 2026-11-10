@@ -98,6 +98,8 @@ const SCALPER_MIN_KEY = 'straddle-pnf-scalper-min';
 const INDEX_MAP_KEY = 'straddle-pnf-index-map-';
 /** The chart-settings row folded away (renko-settings-folded / straddle-pnf-settings-folded): '1' = folded. */
 const SETTINGS_FOLD_KEY = 'straddle-pnf-settings-folded';
+/** From this width the Nifty / VIX chips sit in row 1, and the chart settings start unfolded (when nothing is saved). */
+const WIDE_HEADER_PX = 1400;
 /** The option-map row folded away (renko-index-map-folded): '1' = folded. */
 const INDEX_MAP_FOLD_KEY = 'straddle-pnf-index-map-folded';
 const SCALPER_POS_KEY = 'straddle-pnf-scalper-pos';
@@ -326,7 +328,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const [headerSlot, setHeaderSlot] = useState<HTMLElement | null>(null);
 
   const { leaderRef } = useTabLeader(renko ? 'renko' : 'straddle-pnf');
-  const wideHeader = useMinWidth(1400);
+  const wideHeader = useMinWidth(WIDE_HEADER_PX);
   const mutedRef = useRef(false);
   const logLoadedRef = useRef(false);
 
@@ -363,7 +365,10 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     if (readP(SCALPER_MIN_KEY) === '1') setScalperMin(true);
     setIndexMap({ 1: readIndexMap(readP(`${INDEX_MAP_KEY}1`)), 2: readIndexMap(readP(`${INDEX_MAP_KEY}2`)) });
     if (readP(INDEX_MAP_FOLD_KEY) === '1') setMapFolded(true);
-    if (readP(SETTINGS_FOLD_KEY) === '1') setSettingsFolded(true);
+    // Nothing saved: folded below the wide-header width, where the strip wraps to a second line and two header rows plus the panel
+    // titles leave the charts under 400px at 1280x800. A choice once made (either way) is kept at every width.
+    const savedFold = readP(SETTINGS_FOLD_KEY);
+    if (savedFold === '1' || (savedFold === null && window.innerWidth < WIDE_HEADER_PX)) setSettingsFolded(true);
     try {
       const p = JSON.parse(readP(SCALPER_POS_KEY) ?? 'null') as ScalperPos | null;
       if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) setScalperPos({ x: p.x, y: p.y });
