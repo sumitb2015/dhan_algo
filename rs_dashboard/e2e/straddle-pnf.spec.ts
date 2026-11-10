@@ -294,15 +294,18 @@ test('the box % applies on Enter, an invalid entry is refused and reverts, and t
   await page.goto('/straddle-pnf');
   const panel = page.locator(`[data-testid="pnf-panel"][data-strike="${ATM}"]`);
   await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
+  // The box is pct x the anchor price it names, shown to 2 decimals: compare against that, not a ratio of two rounded numbers
+  // (at an anchor near 115, 0.115 shows as 0.11 and 0.23 as 0.23 - a 9% "error" that is only the display).
   const boxOf = async () => Number(((await panel.getByTestId('pnf-box-info').textContent()) ?? '').match(/Box ([\d.]+)/)?.[1]);
-  const baseBox = await boxOf();
+  const anchorOf = async () => Number(((await panel.getByTestId('pnf-box-info').textContent()) ?? '').match(/% of ([\d,.]+)/)?.[1].replace(/,/g, ''));
+  expect(Math.abs((await boxOf()) - (await anchorOf()) * 0.001)).toBeLessThanOrEqual(0.0051);
 
   const input = page.getByLabel('Box %');
   await input.fill('0.2');
   await expect(panel.getByTestId('pnf-box-info')).toContainText('(0.1% of');           // typing alone changes nothing
   await input.press('Enter');
   await expect(panel.getByTestId('pnf-box-info')).toContainText('(0.2% of');
-  expect(Math.abs((await boxOf()) / baseBox - 2)).toBeLessThan(0.05);                      // twice the box
+  expect(Math.abs((await boxOf()) - (await anchorOf()) * 0.002)).toBeLessThanOrEqual(0.0051);   // twice the box, on the same anchor
   await expect(page.getByText(/1 min · 0.2% box/)).toBeVisible();
 
   await input.fill('abc');

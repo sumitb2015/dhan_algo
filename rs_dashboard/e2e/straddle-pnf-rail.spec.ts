@@ -230,7 +230,7 @@ test('the ladder counts down to the forming bar close under the live price (1 mi
   await install(page);
   await openFuture(page);
   const cd = page.getByTestId('pnf-panel').nth(0).getByTestId('pnf-rail').getByTestId('pnf-bar-countdown');
-  await expect(cd).toHaveText('0:40');
+  await expect(cd.locator('text')).toHaveText('0:40');                     // the chip's label (its <title> is the tooltip)
   await expect(cd).toHaveAttribute('aria-label', '1 min bar closes in 40 s');
 });
 
