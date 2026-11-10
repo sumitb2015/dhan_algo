@@ -37,7 +37,8 @@ export async function GET(request: NextRequest) {
   if (!u) return NextResponse.json({ success: false, error: 'underlying must be CRUDEOIL or CRUDEOILM' }, { status: 400 });
   const status = readJson(statusFile(u));
 
-  if (status && status.pid && status.status === 'RUNNING') {
+  // WAITING = started before the open (or an evening-only day) and alive: as good as running for Start/Stop.
+  if (status && status.pid && (status.status === 'RUNNING' || status.status === 'WAITING')) {
     if (!isPidRunning(Number(status.pid))) {
       status.status = 'STOPPED';
       status.reason = 'crashed';
@@ -69,7 +70,7 @@ export async function POST(request: NextRequest) {
   if (action === 'start') {
     // Prevent a duplicate collector
     const status = readJson(STATUS_FILE);
-    if (status && status.pid && status.status === 'RUNNING' && isPidRunning(Number(status.pid))) {
+    if (status && status.pid && (status.status === 'RUNNING' || status.status === 'WAITING') && isPidRunning(Number(status.pid))) {
       return NextResponse.json({ success: true, message: 'Collector already running', pid: status.pid });
     }
 

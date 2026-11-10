@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildPositions, closeQty, contractHold, dueForCheck, effectiveState, nextCheckDelay, sessionGate, slices, stateFromBroker,
-  unconfirmedQty, hhmmToMin, sessionMessage, NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, PENDING_HOLD_MS, type FmOrder,
+  unconfirmedQty, inFlightReducing, contractSettling, reconcileDownQty, UNCONFIRMED_COUNT_MS, RECONCILE_GRACE_MS, hhmmToMin, sessionMessage, NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, PENDING_HOLD_MS, type FmOrder,
 } from './freshMoneyTrades.ts';
 
 let n = 0;
@@ -204,4 +204,57 @@ test('records written before MCX support read as NSE with multiplier 1', () => {
   assert.equal(pos.segment, 'NSE_FNO');
   assert.equal(pos.mult, 1);
   assert.equal(pos.unrealised, 65);
+});
+
+test('a close already in flight is not sent twice (× sizes only what is left)', () => {
+  const now = 1_000_000;
+  const orders = [
+    ord({ ts: now - 300_000, side: 'BUY', qty: 130, filledQty: 130, avgPrice: 100 }),
+    // the first × went out; its confirmation is slow (still pending)
+    ord({ ts: now - 45_000, side: 'SELL', qty: 130, filledQty: 0, state: 'pending', avgPrice: null, close: true }),
+  ];
+  assert.equal(inFlightReducing(orders, '111', 130, now), 130);
+  // part confirmed: only the unfilled rest is in flight
+  orders[1] = { ...orders[1], filledQty: 65, state: 'partial', avgPrice: 101 };
+  assert.equal(inFlightReducing(orders, '111', 65, now), 65);
+  // an adding order on the same side is not a reduction
+  assert.equal(inFlightReducing([ord({ ts: now - 1000, side: 'BUY', state: 'pending', filledQty: 0, avgPrice: null })], '111', 130, now), 0);
+  // after the count window the broker clamp takes over
+  assert.equal(inFlightReducing(orders, '111', 65, now + UNCONFIRMED_COUNT_MS), 0);
+});
+
+test('unconfirmed exposure stops counting after the window (an UNKNOWN never resolved cannot block forever)', () => {
+  const now = 1_000_000;
+  const o = ord({ ts: now - 1_000, state: 'unknown', orderId: null, filledQty: 0, avgPrice: null });
+  assert.equal(unconfirmedQty([o], '111', now), 65);
+  assert.equal(unconfirmedQty([o], '111', now + UNCONFIRMED_COUNT_MS), 0);
+});
+
+test('down-only reconcile: reduce to what the broker holds, never up, never while settling', () => {
+  assert.equal(reconcileDownQty(130, 0, false), 130);       // auto square-off: all gone
+  assert.equal(reconcileDownQty(130, 65, false), 65);       // half closed elsewhere
+  assert.equal(reconcileDownQty(130, 260, false), 0);       // broker holds more (another desk): never adopt it
+  assert.equal(reconcileDownQty(-130, 65, false), 130);     // broker now long: our short is gone
+  assert.equal(reconcileDownQty(-130, -65, false), 65);
+  assert.equal(reconcileDownQty(130, null, false), 0);      // positions read failed
+  assert.equal(reconcileDownQty(130, 0, true), 0);          // settling
+  assert.equal(reconcileDownQty(0, 0, false), 0);
+});
+
+test('a contract is settling right after an order and while one is unconfirmed', () => {
+  const now = 1_000_000;
+  assert.equal(contractSettling([ord({ ts: now - 5_000 })], '111', now), true);
+  assert.equal(contractSettling([ord({ ts: now - RECONCILE_GRACE_MS - 1 })], '111', now), false);
+  assert.equal(contractSettling([ord({ ts: now - 60_000, state: 'pending', filledQty: 0, avgPrice: null })], '111', now), true);
+  assert.equal(contractSettling([ord({ ts: now - 60_000, state: 'pending', filledQty: 0, avgPrice: null })], '222', now), false);
+});
+
+test('an external (reconciled) close flattens the position and makes booked P&L unknown', () => {
+  const pos = buildPositions([
+    ord({ side: 'BUY', qty: 130, filledQty: 130, avgPrice: 100 }),
+    ord({ side: 'SELL', qty: 130, filledQty: 130, avgPrice: null, external: true, close: true, orderId: null }),
+  ], { '111': 120 }, 1e6)[0];
+  assert.equal(pos.netQty, 0);
+  assert.equal(pos.realised, null);
+  assert.equal(pos.pnl, null);
 });

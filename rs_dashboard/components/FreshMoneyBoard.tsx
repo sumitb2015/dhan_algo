@@ -9,7 +9,7 @@ import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
 import { fmtOi, fmtPct, intensity, type Intensity, type Range } from '@/lib/freshMoney';
 import type { FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
-import { TradeBar, TradeCell, useFreshMoneyTrades } from './freshMoney/trading';
+import { OffBoardPositions, TradeBar, TradeCell, useFreshMoneyTrades } from './freshMoney/trading';
 import CollectorControl from './freshMoney/CollectorControl';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
@@ -337,10 +337,19 @@ export default function FreshMoneyBoard() {
       : isStale ? 'Board snapshot is stale — orders paused until the collector writes again'
         : tradeExpiry !== data.expiry ? "The board's expiry is changing — wait for the next refresh"
           : null;
+  // This underlying's positions on every expiry: they all count in the bar's P&L.
+  const underlyingPositions = useMemo(() => (ts?.positions ?? []).filter(p => p.underlying === underlying), [ts, underlying]);
+  // On the board: the board's expiry AND a strike the board has a row for. Everything else that is still open is listed
+  // under the bar (with its own ×) — a position must never become invisible because spot moved or the expiry rolled.
+  const boardStrikes = useMemo(() => new Set((data?.rows ?? []).map(r => r.strike)), [data]);
   const myPositions = useMemo(
-    () => (ts?.positions ?? []).filter(p => p.underlying === underlying && (!data || p.expiry === data.expiry)),
-    [ts, underlying, data],
+    () => underlyingPositions.filter(p => !!data && p.expiry === data.expiry && boardStrikes.has(p.strike)),
+    [underlyingPositions, data, boardStrikes],
   );
+  const offBoard = useMemo(() => {
+    const on = new Set(myPositions.map(p => p.securityId));
+    return (ts?.positions ?? []).filter(p => p.netQty !== 0 && !on.has(p.securityId));
+  }, [ts, myPositions]);
   const posByKey = useMemo(() => new Map(myPositions.map(p => [`${p.strike}:${p.opt}`, p] as const)), [myPositions]);
   const tradeMode = armed || myPositions.length > 0;
   const { order: sendOrder, close: sendClose, inflight } = trades;
@@ -431,7 +440,13 @@ export default function FreshMoneyBoard() {
             {ts && (
               <TradeBar
                 underlying={underlying} armed={armed} onArm={setArmed} lots={lots} onLots={setLotsPref}
-                maxLots={ts.maxLots} lotSize={data.lot} mcxMult={data.mult} tradable={tradable} blocked={blocked} positions={myPositions}
+                maxLots={ts.maxLots} lotSize={data.lot} mcxMult={data.mult} tradable={tradable} blocked={blocked} positions={underlyingPositions}
+              />
+            )}
+            {ts && offBoard.length > 0 && (
+              <OffBoardPositions
+                positions={offBoard} armed={armed} inflight={inflight}
+                canClose={p => (ts.sessions[p.underlying]?.gate ?? 'closed') !== 'closed'} onClose={sendClose}
               />
             )}
             <div className="px-4 pt-3">

@@ -46,14 +46,18 @@ export default function CollectorControl({ underlying }: { underlying: string })
     }
   };
 
-  const running = status?.status === 'RUNNING';
-  const label = running
-    ? `Collector running${status?.last_update ? ` · ${status.last_update.slice(11)}` : ''}`
-    : `Collector stopped${status?.reason === 'crashed' ? ' (crashed)' : ''}`;
+  const waiting = status?.status === 'WAITING';
+  const running = status?.status === 'RUNNING' || waiting;
+  const why: Record<string, string> = { crashed: ' (crashed)', mcx_closed_today: ' (MCX closed today)', market_closed: ' (MCX closed for the day)' };
+  const label = waiting
+    ? 'Collector waiting for the MCX open'
+    : running
+      ? `Collector running${status?.last_update ? ` · ${status.last_update.slice(11)}` : ''}`
+      : `Collector stopped${why[status?.reason ?? ''] ?? ''}`;
 
   return (
     <div className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1">
-      <span className={`h-1.5 w-1.5 rounded-full ${running ? 'bg-emerald-400' : 'bg-zinc-500'}`} aria-hidden />
+      <span className={`h-1.5 w-1.5 rounded-full ${waiting ? 'bg-amber-400' : running ? 'bg-emerald-400' : 'bg-zinc-500'}`} aria-hidden />
       <span className="text-[10px] font-medium text-zinc-300" title={status?.error ?? undefined}>{label}</span>
       {busy ? <Loader2 className="h-3 w-3 animate-spin text-zinc-400" aria-label="Working" /> : running ? (
         <button type="button" onClick={() => act('stop')} aria-label={`Stop the ${underlying} OI collector`} title="Stop the collector"

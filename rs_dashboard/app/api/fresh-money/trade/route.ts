@@ -14,10 +14,12 @@ import { readBrokerOrder } from '@/lib/brokerOrderStatus';
 import { dhanGet } from '@/lib/dhanToken';
 import { fetchLtps } from '@/lib/dhanEquityQuote';
 import { dedupe } from '@/lib/pyExec';
-import { parseSnapshotCsv, latestExpiry } from '@/lib/freshMoney';
+import { parsedDay } from '@/lib/freshMoneyFiles';
+import { getCachedPositions } from '@/lib/brokerPositionsCache';
 import {
-  buildPositions, closeQty, contractHold, dueForCheck, effectiveState, hhmmToMin, nextCheckDelay, sessionGate, sessionMessage,
-  slices, stateFromBroker, unconfirmedQty, NSE_WINDOW,
+  buildPositions, closeQty, contractHold, contractSettling, dueForCheck, effectiveState, hhmmToMin, inFlightReducing,
+  nextCheckDelay, reconcileDownQty, sessionGate, sessionMessage, slices, stateFromBroker, unconfirmedQty, NSE_WINDOW,
+  SENDING_STALE_MS, UNKNOWN_HOLD_MS,
   FM_MAX_LOTS_PER_ORDER, FM_MAX_POSITION_LOTS,
   type FmLedger, type FmOrder, type FmPosition, type FmSegment, type OptType, type SessionGate, type TradeWindow, type TxnSide,
 } from '@/lib/freshMoneyTrades';
@@ -83,24 +85,21 @@ const mutate = <T>(fn: (l: FmLedger) => T): Promise<T> =>
 
 // ── board: the expiry and strikes the page is showing ─────────────────────────────────────────────────────────────
 
-const boardCache = new Map<string, { key: string; expiry: string; strikes: Set<number> }>();
+/** A board this many minutes behind the clock (while its market is open) is stale: no new positions from it. */
+const BOARD_STALE_MIN = 3;
 
-/** Today's board for `underlying`: its expiry and the strikes of the last snapshot. Null when there is none today. */
-async function todaysBoard(underlying: string): Promise<{ expiry: string; strikes: Set<number> } | null> {
+/** Today's live board for `underlying`: its expiry, the strikes of the last snapshot and that snapshot's time (IST
+ *  minutes). Null when there is none today, or when today's file is a 1-minute backfill (the board never shows those). */
+async function todaysBoard(underlying: string): Promise<{ expiry: string; strikes: Set<number>; lastMin: number } | null> {
   const file = resolveCsvPath(underlying, istToday(), true);
   if (!file) return null;
-  const st = await fs.promises.stat(file);
-  const key = `${st.mtimeMs}:${st.size}`;
-  const hit = boardCache.get(underlying);
-  if (hit && hit.key === key) return hit;
-  const snaps = parseSnapshotCsv(await fs.promises.readFile(file, 'utf8'));
-  const expiry = latestExpiry(snaps);
-  const last = [...snaps].reverse().find(s => s.expiry === expiry);
-  if (!last || expiry < istToday()) return null;
-  const entry = { key, expiry, strikes: new Set(last.strikes.keys()) };
-  boardCache.set(underlying, entry);
-  return entry;
+  const p = await parsedDay(file, true);
+  const last = p?.snaps?.[p.snaps.length - 1];
+  if (!p || !p.cumulative || !last || p.expiry < istToday()) return null;
+  return { expiry: p.expiry, strikes: new Set(last.strikes.keys()), lastMin: last.min };
 }
+
+const istMinuteNow = () => { const d = new Date(Date.now() + 19_800_000); return d.getUTCHours() * 60 + d.getUTCMinutes() + d.getUTCSeconds() / 60; };
 
 // ── broker reads ──────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -162,12 +161,22 @@ async function readOne(o: FmOrder): Promise<Partial<FmOrder> | null> {
   const s = await readBrokerOrder(o.orderId, 'dhan');
   if (!s) return null;
   const avgPrice = s.averageTradedPrice > 0 ? s.averageTradedPrice : null;
-  return {
-    filledQty: s.filledQty,
-    avgPrice,
-    state: stateFromBroker(s.orderStatus, s.filledQty, o.qty, avgPrice),
-    reason: s.reason || undefined,
-  };
+  const state = stateFromBroker(s.orderStatus, s.filledQty, o.qty, avgPrice);
+  // Nothing new: report it as such so the re-read backs off instead of polling every 2 s all day.
+  if (state === o.state && s.filledQty === o.filledQty && avgPrice === o.avgPrice) return null;
+  return { filledQty: s.filledQty, avgPrice, state, reason: s.reason || undefined };
+}
+
+/** When to read an unsettled order next. A record with no order id is looked up every 2 s from the moment it can be
+ *  UNKNOWN until its hold has run out (so a late booking is adopted before new orders on the contract are allowed),
+ *  then with backoff. Before that ('sending', not yet stale) there is nothing to look up. */
+function nextReadAt(o: FmOrder, now: number, attempts: number, changed: boolean): number {
+  if (!o.orderId) {
+    const staleAt = o.ts + SENDING_STALE_MS;
+    if (now < staleAt) return staleAt;
+    if (now < o.ts + UNKNOWN_HOLD_MS + 60_000) return now + 2_000;
+  }
+  return now + (changed ? 2_000 : nextCheckDelay(attempts));
 }
 
 /** Bring unsettled orders up to date: at most READS_PER_REFRESH due orders, oldest due first, with backoff. */
@@ -181,9 +190,9 @@ async function refreshOrders(): Promise<void> {
   for (const o of due) {
     let patch: Partial<FmOrder> | null = null;
     try { patch = await readOne(o); } catch { /* unreadable (429, network): back off */ }
-    const n = (attempts.get(o.id) ?? 0) + 1;
-    attempts.set(o.id, patch ? 0 : n);
-    nextAt.set(o.id, Date.now() + (patch ? 2_000 : nextCheckDelay(n)));
+    const n = patch ? 0 : (attempts.get(o.id) ?? 0) + 1;
+    attempts.set(o.id, n);
+    nextAt.set(o.id, nextReadAt({ ...o, ...(patch ?? {}) }, Date.now(), n, !!patch));
     if (patch) updates.set(o.id, patch);
   }
   if (!updates.size) return;
@@ -193,6 +202,54 @@ async function refreshOrders(): Promise<void> {
       if (u) Object.assign(o, u);
     }
   });
+}
+
+// ── down-only reconcile against the broker ───────────────────────────────────────────────────────────────────────
+
+const RECONCILE_GAP_MS = 5_000;
+let lastReconcile = 0;
+
+const intradayNet = (rows: unknown[], securityId: string): number => {
+  let net = 0;
+  for (const r of rows as Record<string, unknown>[]) {
+    if (String(r.securityId ?? '') === securityId && String(r.productType ?? '').toUpperCase() === 'INTRADAY') net += Number(r.netQty) || 0;
+  }
+  return net;
+};
+
+/**
+ * Write this page's positions DOWN to what Dhan still holds (Invariant 2): an MIS auto square-off or a close from
+ * another desk otherwise leaves a phantom position that is marked to market and counted toward the cap. The reduction
+ * is a synthetic `external` record with an unknown price (the day's booked P&L then reads unknown, never a guess).
+ * Skipped for a contract with an order in flight or placed in the last 20 s, and when the positions read fails.
+ * Reads the shared positions cache: this only corrects the ledger; close sizing reads the broker live.
+ */
+async function reconcileWithBroker(): Promise<void> {
+  const now = Date.now();
+  if (now - lastReconcile < RECONCILE_GAP_MS) return;
+  lastReconcile = now;
+  const ledger = loadLedger();
+  const open = buildPositions(ledger.orders, {}, now).filter(p => p.netQty !== 0 && !contractSettling(ledger.orders, p.securityId, now));
+  if (!open.length) return;
+  let rows: unknown;
+  try { rows = await getCachedPositions('dhan', () => dhanGet('/positions', 6_000)); } catch { return; }
+  if (!Array.isArray(rows)) return;
+  if (!open.some(p => reconcileDownQty(p.netQty, intradayNet(rows as unknown[], p.securityId), false) > 0)) return;
+  await mutate(l => {
+    // Re-decide against the ledger as it is inside the lock: an order may have been placed meanwhile.
+    const t = Date.now();
+    for (const p of buildPositions(l.orders, {}, t)) {
+      const drop = reconcileDownQty(p.netQty, intradayNet(rows as unknown[], p.securityId), contractSettling(l.orders, p.securityId, t));
+      if (drop <= 0) continue;
+      l.orders.push({
+        id: randomUUID(), ts: t, underlying: p.underlying, expiry: p.expiry, strike: p.strike, opt: p.opt,
+        securityId: p.securityId, segment: p.segment, lot: p.lot, mult: p.mult, side: p.netQty > 0 ? 'SELL' : 'BUY',
+        qty: drop, close: true, external: true, correlationId: 'external', orderId: null, state: 'filled',
+        filledQty: drop, avgPrice: null,
+        reason: 'Closed outside this page: Dhan no longer shows this quantity (MIS auto square-off or another desk)',
+      });
+    }
+  }).catch(() => {});
 }
 
 // ── GET: orders, positions ────────────────────────────────────────────────────────────────────────────────────────
@@ -211,6 +268,7 @@ export interface FreshMoneyTradeState {
 
 async function buildState(): Promise<FreshMoneyTradeState> {
   await refreshOrders().catch(() => {});
+  await reconcileWithBroker().catch(() => {});
   const ledger = loadLedger();
   const now = Date.now();
   const pre = buildPositions(ledger.orders, {}, now);
@@ -345,6 +403,10 @@ async function placeOrder(b: OrderBody): Promise<NextResponse> {
   if (!board) return reply({ success: false, error: `No ${underlying} board snapshot today — the IV snapshot collector must be running to trade from this page` }, 409);
   if (b.expiry !== board.expiry) return reply({ success: false, error: `The board's expiry is ${board.expiry} now — refresh before trading` }, 409);
   if (!board.strikes.has(strike)) return reply({ success: false, error: `${strike} is not on today's board` }, 400);
+  const behind = istMinuteNow() - board.lastMin;
+  if (behind > BOARD_STALE_MIN) {
+    return reply({ success: false, error: `The board's last snapshot is ${Math.floor(behind)} min old — is the collector running? No new positions from a stale board` }, 409);
+  }
 
   const mcx = isMcx(underlying);
   const c = resolveOption(underlying, board.expiry, strike, opt);
@@ -376,7 +438,13 @@ async function closePosition(b: OrderBody): Promise<NextResponse> {
         : 'An earlier order on this contract is still being confirmed — try again in a moment',
     }, 409);
   }
-  const qty = closeQty(pos.netQty, await brokerNet(securityId));
+  // Close only what is not already on its way out: a slow-to-confirm close must not be sent twice.
+  const inFlight = inFlightReducing(ledger.orders, securityId, pos.netQty, now);
+  const remaining = Math.max(0, Math.abs(pos.netQty) - inFlight);
+  if (remaining === 0) {
+    return reply({ success: false, error: 'A close for this position is already in flight (unconfirmed) — check Orders before sending another' }, 409);
+  }
+  const qty = closeQty(Math.sign(pos.netQty) * remaining, await brokerNet(securityId));
   if (qty <= 0) {
     return reply({ success: false, error: 'Dhan shows no INTRADAY position left in that direction — nothing was sent. It may have been closed elsewhere.' }, 409);
   }
@@ -411,7 +479,11 @@ export async function POST(req: NextRequest) {
   const now = Date.now();
   for (const [k, v] of idempotent) if (now - v.at > IDEMPOTENCY_TTL_MS) idempotent.delete(k);
   const prior = idempotent.get(key);
-  if (prior) return (await prior.result).clone();
+  if (prior) {
+    try { return (await prior.result).clone(); } catch (err) {
+      return reply({ success: false, error: `Order route error: ${String((err as Error).message ?? err)}`, unknown: true });
+    }
+  }
   const result = run();
   idempotent.set(key, { at: now, result });
   try {

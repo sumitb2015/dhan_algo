@@ -3,8 +3,9 @@ import fs from 'fs';
 import { listDates, resolveCsvPath } from '@/lib/ivSnapshotFiles';
 import { resolveLotSize } from '@/lib/lotSize';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
+import { parsedDay } from '@/lib/freshMoneyFiles';
 import {
-  parseSnapshotCsv, latestExpiry, summarizeDay, hasCumulativeVolume, boardFresh, sane, normalAt, bandFromHistory, buildBoardRows, strikeStep,
+  boardFresh, sane, normalAt, bandFromHistory, buildBoardRows, strikeStep,
   type DaySummary, type SidePair, type Range, type SeriesPoint, type BandPoint,
 } from '@/lib/freshMoney';
 
@@ -46,27 +47,6 @@ export interface FreshMoneyResponse {
   error?: string;
 }
 
-// Past days never change: memoise each day's summary by path + mtime + size.
-const dayCache = new Map<string, { key: string; summary: DaySummary | null }>();
-
-async function summaryFor(file: string): Promise<DaySummary | null> {
-  try {
-    const st = await fs.promises.stat(file);
-    const key = `${st.mtimeMs}:${st.size}`;
-    const hit = dayCache.get(file);
-    if (hit && hit.key === key) return hit.summary;
-    const text = await fs.promises.readFile(file, 'utf8');
-    const all = parseSnapshotCsv(text);
-    const snaps = parseSnapshotCsv(text, latestExpiry(all));
-    // A backfilled file with per-candle volume would skew the normal band; skip the day (cached as null).
-    const summary = hasCumulativeVolume(snaps) ? summarizeDay(snaps) : null;
-    dayCache.set(file, { key, summary });
-    return summary;
-  } catch {
-    return null;
-  }
-}
-
 // The shown day is re-read when the collector appends (mtime changes); polls in between reuse the result.
 const respCache = new Map<string, { key: string; body: FreshMoneyResponse }>();
 
@@ -86,7 +66,7 @@ export async function GET(req: NextRequest) {
   let shown = -1;
   for (let i = 0; i < allDates.length; i++) {
     const f = resolveCsvPath(underlying, allDates[i], true);
-    if (f && await summaryFor(f)) { shown = i; break; }
+    if (f && (await parsedDay(f, i === 0))?.cumulative) { shown = i; break; }
   }
   const dates = shown >= 0 ? allDates.slice(shown) : [];
   const date = dates[0];
@@ -116,20 +96,19 @@ export async function GET(req: NextRequest) {
   const cached = respCache.get(underlying);
   if (cached && cached.key === cacheKey) return NextResponse.json(cached.body);
 
-  const text = await fs.promises.readFile(file, 'utf8');
-  const all = parseSnapshotCsv(text);
-  const expiry = latestExpiry(all);
-  const snaps = parseSnapshotCsv(text, expiry);
+  const parsed = await parsedDay(file, true);
+  const snaps = parsed?.snaps ?? [];
+  const expiry = parsed?.expiry ?? '';
   const last = snaps[snaps.length - 1];
-  if (!last) {
+  if (!parsed || !last || !parsed.summary) {
     return NextResponse.json({ error: `The ${date} snapshot file has no rows yet` }, { status: 404 });
   }
 
-  const today = summarizeDay(snaps);
+  const today = parsed.summary;
   const history: DaySummary[] = [];
   for (const d of dates.slice(1, 1 + HISTORY_DAYS)) {
     const f = resolveCsvPath(underlying, d, true);
-    const s = f ? await summaryFor(f) : null;
+    const s = f ? (await parsedDay(f, false))?.summary ?? null : null;
     if (s) history.push(s);
   }
 

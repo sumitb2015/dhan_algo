@@ -61,11 +61,39 @@ def _nth_sunday(year: int, month: int, n: int) -> date:
     return date(year, month, 1 + (6 - first.weekday()) % 7 + (n - 1) * 7)
 
 
-def market_close(d: date) -> tuple:
-    """MCX evening close: 23:30 IST while the US is on DST (2nd Sunday of March to 1st Sunday of November), else 23:55.
-    Same rule as rs_dashboard/lib/mcxSession.ts."""
+_HOLIDAYS_FILE = os.path.join(ROOT, 'rs_dashboard', 'lib', 'mcxHolidays.json')
+
+
+def _mcx_holidays() -> dict:
+    """The dashboard's MCX holiday list (closed / evening_only / morning_only), so the collector and the trading gate
+    (rs_dashboard/lib/mcxSession.ts) agree. Missing/unreadable file: weekdays-only, like mcxSession for an unknown year."""
+    try:
+        with open(_HOLIDAYS_FILE, encoding='utf-8') as f:
+            data = json.load(f)
+        return {k: set(data.get(k, [])) for k in ('closed', 'evening_only', 'morning_only')}
+    except (OSError, ValueError):
+        return {'closed': set(), 'evening_only': set(), 'morning_only': set()}
+
+
+def market_session(d: date):
+    """(open, close) as (h, m) tuples for this IST date, or None when MCX is shut. Same rules as lib/mcxSession.ts:
+    weekends and holidays closed; evening-only days open at 17:00; morning-only days close at 17:00; the evening close
+    is 23:30 while the US is on DST (2nd Sunday of March to 1st Sunday of November), else 23:55."""
+    if d.weekday() >= 5:
+        return None
+    hol = _mcx_holidays()
+    iso = d.isoformat()
+    if iso in hol['closed']:
+        return None
     summer = _nth_sunday(d.year, 3, 2) < d <= _nth_sunday(d.year, 11, 1)
-    return (23, 30) if summer else (23, 55)
+    open_ = (17, 0) if iso in hol['evening_only'] else MARKET_OPEN
+    close = (17, 0) if iso in hol['morning_only'] else ((23, 30) if summer else (23, 55))
+    return open_, close
+
+
+def market_close(d: date) -> tuple:
+    sess = market_session(d)
+    return sess[1] if sess else MARKET_OPEN
 
 CSV_COLUMNS = [
     'timestamp', 'spot', 'expiry', 'strike',
@@ -85,8 +113,9 @@ def minutes_since_midnight(dt: datetime) -> int:
 
 
 def is_before_open(dt: datetime) -> bool:
-    open_mins = MARKET_OPEN[0] * 60 + MARKET_OPEN[1]
-    return minutes_since_midnight(dt) < open_mins
+    sess = market_session(dt.date())
+    open_ = sess[0] if sess else MARKET_OPEN
+    return minutes_since_midnight(dt) < open_[0] * 60 + open_[1]
 
 
 def is_after_close(dt: datetime) -> bool:
@@ -227,11 +256,23 @@ def main():
 
     # ── Wait for market open ──────────────────────────────────────────
     if not args.ignore_market_hours:
+        if market_session(ist_now().date()) is None:
+            log.info('MCX is closed today — exiting')
+            write_status(status='STOPPED', underlying=UNDERLYING, reason='mcx_closed_today')
+            return
+        if is_after_close(ist_now()):
+            log.info('MCX has closed for the day — exiting')
+            write_status(status='STOPPED', underlying=UNDERLYING, reason='market_closed')
+            return
+        # Say so at once: without a status the dashboard would show "stopped" and allow a second Start.
         while is_before_open(ist_now()):
-            now = ist_now()
-            wait_mins = (MARKET_OPEN[0] * 60 + MARKET_OPEN[1]) - minutes_since_midnight(now)
-            log.info('Market not open yet — sleeping %d min', wait_mins)
-            time.sleep(min(wait_mins * 60, 60))
+            write_status(status='WAITING', underlying=UNDERLYING, reason='waiting_for_open')
+            if os.path.exists(stop_trigger_path()):
+                os.remove(stop_trigger_path())
+                log.info('Stop trigger detected while waiting for the open — exiting')
+                write_status(status='STOPPED', underlying=UNDERLYING, reason='stop_trigger')
+                return
+            time.sleep(15)
 
     # ── Find active Crude Oil futures contract ─────────────────────────
     fut = _find_nearest_future(helper, UNDERLYING, exchange="MCX", instrument="FUTCOM")

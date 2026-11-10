@@ -31,6 +31,9 @@ export interface FmOrder {
   side: TxnSide;
   qty: number;                // order quantity as sent (units on NSE, lots on MCX)
   close: boolean;             // sent by the × (square off) button
+  /** Synthetic record from the down-only reconcile: the broker no longer holds this quantity (closed outside this
+   *  page, e.g. an MIS auto square-off). Never sent; its price is unknown, so the day's booked P&L reads unknown. */
+  external?: boolean;
   correlationId: string;
   orderId: string | null;
   state: OrderState;
@@ -69,6 +72,10 @@ export const UNKNOWN_HOLD_MS = 60_000;
 /** How long an acknowledged order may sit pending before it stops holding the contract (a MARKET order that has not
  *  traded by then is shown, but no longer blocks a deliberate next click). */
 export const PENDING_HOLD_MS = 30_000;
+/** Unconfirmed orders count toward exposure / in-flight closes for this long (then the broker clamp takes over). */
+export const UNCONFIRMED_COUNT_MS = 10 * 60_000;
+/** The broker's position book lags a fresh fill: do not reconcile a contract against it this soon after an order. */
+export const RECONCILE_GRACE_MS = 20_000;
 
 const TERMINAL: ReadonlySet<OrderState> = new Set(['filled', 'rejected', 'cancelled']);
 export const isTerminal = (s: OrderState) => TERMINAL.has(s);
@@ -93,15 +100,48 @@ export function stateFromBroker(orderStatus: string, filledQty: number, qty: num
 
 /** Signed units of this contract's orders that may still turn into position: UNKNOWN / sending / pending orders' unfilled
  *  remainder. Counted toward the position cap as if they fill (an UNKNOWN order may be live). */
-export function unconfirmedQty(orders: FmOrder[], securityId: string, now: number): number {
+export function unconfirmedQty(orders: FmOrder[], securityId: string, now: number, side?: TxnSide): number {
   let q = 0;
   for (const o of orders) {
-    if (o.securityId !== securityId) continue;
+    if (o.securityId !== securityId || (side && o.side !== side)) continue;
     const st = effectiveState(o, now);
     if (isTerminal(st)) continue;
+    // An order still unconfirmed after this long is very likely not live; the broker clamp and the down-only
+    // reconcile cover it from here, so it must not block closes or the cap for the rest of the day.
+    if (now - o.ts > UNCONFIRMED_COUNT_MS) continue;
     q += (o.side === 'BUY' ? 1 : -1) * Math.max(0, o.qty - Math.max(0, o.filledQty));
   }
   return q;
+}
+
+/** Quantity of orders already on their way to reduce this position (unconfirmed, opposite side). A × must close only
+ *  what is left, or a close whose confirmation is slow would be sent twice. */
+export function inFlightReducing(orders: FmOrder[], securityId: string, netQty: number, now: number): number {
+  if (netQty === 0) return 0;
+  return Math.abs(unconfirmedQty(orders, securityId, now, netQty > 0 ? 'SELL' : 'BUY'));
+}
+
+/** True while an order on this contract is unconfirmed (within UNCONFIRMED_COUNT_MS) or was placed very recently:
+ *  the broker's position book can lag, so a reconcile must wait. */
+export function contractSettling(orders: FmOrder[], securityId: string, now: number): boolean {
+  for (const o of orders) {
+    if (o.securityId !== securityId) continue;
+    if (now - o.ts < RECONCILE_GRACE_MS) return true;
+    if (!isTerminal(effectiveState(o, now)) && now - o.ts <= UNCONFIRMED_COUNT_MS) return true;
+  }
+  return false;
+}
+
+/**
+ * Down-only reconcile (dhan-terminal-position-ownership Invariant 2): how much of this page's position the broker no
+ * longer holds (an MIS auto square-off, a close from another desk). Never up: a larger broker position belongs to
+ * someone else. 0 while the contract is settling or the broker read failed (`brokerNet` null).
+ */
+export function reconcileDownQty(netQty: number, brokerNet: number | null, settling: boolean): number {
+  if (netQty === 0 || brokerNet === null || settling) return 0;
+  const own = Math.abs(netQty);
+  const broker = Math.sign(brokerNet) === Math.sign(netQty) ? Math.abs(brokerNet) : 0;
+  return broker < own ? own - broker : 0;
 }
 
 /** The order's state as readers must treat it now: a stale 'sending' is unknown. */

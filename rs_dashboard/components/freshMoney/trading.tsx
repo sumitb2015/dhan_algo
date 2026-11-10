@@ -268,3 +268,42 @@ export function TradeCell({
     <span className="flex items-center justify-start gap-1 pl-1">{buttons}{closeBtn}{chip}</span>
   );
 }
+
+// ── open positions the board is not showing ───────────────────────────────────────────────────────────────────────
+
+/** Positions this page holds that have no row on the current board (another underlying, a rolled expiry, or a strike
+ *  that left the window): listed with their P&L and × so none can drop out of sight. */
+export function OffBoardPositions({ positions, armed, inflight, canClose, onClose }: {
+  positions: FmPosition[];
+  armed: boolean;
+  inflight: ReadonlySet<string>;
+  canClose: (p: FmPosition) => boolean;
+  onClose: (p: FmPosition) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 px-4 py-1.5 text-[11px]">
+      <span className="text-zinc-400">Open, not on this board:</span>
+      {positions.map(p => {
+        const lots = p.lot > 0 ? Math.abs(p.netQty) / p.lot : 0;
+        const busy = inflight.has(`${p.underlying}:${p.strike}:${p.opt}`);
+        return (
+          <span key={p.securityId} className="flex items-center gap-1 rounded border border-zinc-800 bg-zinc-950/40 px-1.5 py-0.5 tabular-nums">
+            <span className="font-bold text-zinc-200">{p.underlying} {p.strike} {p.opt}</span>
+            <span className="text-zinc-500">{p.expiry}</span>
+            <span className="text-[10px] font-bold text-zinc-300">{p.netQty > 0 ? 'L' : 'S'}{lots}</span>
+            <span className={`font-bold ${pnlClass(p.pnl)}`}>{fmtRs(p.pnl)}</span>
+            {armed && (
+              busy ? <Loader2 className="h-3 w-3 animate-spin text-zinc-400" aria-label="Order in flight" /> : (
+                <button type="button" onClick={() => onClose(p)} disabled={!!p.busy || !canClose(p)}
+                  aria-label={`Close ${p.underlying} ${p.strike} ${p.opt} position`} title="Square off this page's position (MARKET)"
+                  className={`${FOCUS} flex h-4 w-4 items-center justify-center rounded text-zinc-400 hover:bg-zinc-700 hover:text-white disabled:opacity-40`}>
+                  <X className="h-3 w-3" />
+                </button>
+              )
+            )}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
