@@ -5,6 +5,7 @@ import { isPidRunning } from '@/lib/processCheck';
 import { readNifty500List } from '@/lib/dataLoader';
 import { readIndexConstituents } from '@/lib/indexConstituents';
 import { buildIndiaDashboard, buildIndiaRow, parseConstituentRows, type RawDailyQuote, type RawIndexQuote } from '@/lib/indiaMarkets';
+import { readJsonFile as readJson } from '@/lib/lockedJsonFile';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,10 +31,6 @@ function nifty500Meta(): Map<string, { company: string; industry: string }> {
     meta = { mtime, map };
     return map;
   } catch { return meta?.map ?? new Map(); }
-}
-
-function readJson<T>(file: string): T | null {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')) as T; } catch { return null; }
 }
 
 type FeedState = 'live' | 'starting' | 'stale' | 'stopped';

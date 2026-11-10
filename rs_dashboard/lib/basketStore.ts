@@ -1,17 +1,10 @@
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT } from '@/lib/pyExec';
+import { writeJsonAtomic } from '@/lib/lockedJsonFile';
 import type { SavedBasket } from './basketStorage';
 
 const STORE_FILE = path.join(PROJECT_ROOT, 'debug', 'saved_baskets.json');
-
-function writeJsonAtomic(file: string, data: unknown) {
-  const dir = path.dirname(file);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
-  fs.renameSync(tmp, file);
-}
 
 /** Reads the store, assigning a stable id (derived from name) to any legacy
  *  record saved before ids existed, and persisting that assignment back so
@@ -32,12 +25,12 @@ export function readBaskets(): SavedBasket[] {
     migrated = true;
     return { ...b, id: `bkt_legacy_${b.name}` };
   });
-  if (migrated) writeJsonAtomic(STORE_FILE, withIds);
+  if (migrated) writeJsonAtomic(STORE_FILE, withIds, { pretty: true });
   return withIds;
 }
 
 export function writeBaskets(baskets: SavedBasket[]): void {
-  writeJsonAtomic(STORE_FILE, baskets);
+  writeJsonAtomic(STORE_FILE, baskets, { pretty: true });
 }
 
 /** Upsert one basket by id — last-write-wins, matching multiLegFocusStore's

@@ -5,6 +5,7 @@ import net from 'net';
 import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
 import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
+import { readJsonFile as readJson } from '@/lib/lockedJsonFile';
 
 const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
 const BRIDGE_SCRIPT  = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_options_ws.py');
@@ -176,15 +177,6 @@ function acquireStartLock(lockPath: string): boolean {
 
 function releaseStartLock(lockPath: string): void {
   try { fs.unlinkSync(lockPath); } catch { /* already gone */ }
-}
-
-function readJson(file: string): unknown {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
 }
 
 /** Writes the stop trigger and waits (bounded, polling with a fresh PID check

@@ -1,6 +1,9 @@
 import { NextRequest } from 'next/server';
 import path from 'path';
-import fs from 'fs';
+import { readJsonFile } from '@/lib/lockedJsonFile';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped bridge/status files
+const readJson = (file: string) => readJsonFile<any>(file);
 
 export const dynamic = 'force-dynamic';
 
@@ -8,16 +11,6 @@ const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
 const HISTORY_FILE = path.join(DEBUG_DIR, 'live_indices_history.json');
 const STATUS_FILE  = path.join(DEBUG_DIR, 'live_indices_status.json');
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function readJson(file: string): any | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
-}
 
 export async function GET(request: NextRequest) {
   const encoder = new TextEncoder();

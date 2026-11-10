@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { istDate, readTickFile, rowsBetween } from './pnfTicksServer.ts';
+import { readTickFile, rowsBetween } from './pnfTicksServer.ts';
+import { istDateIso } from './nseHolidays.ts';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'pnf-ticks-'));
 
@@ -28,6 +29,6 @@ test('rowsBetween: after since, up to upTo (inclusive)', () => {
 });
 
 test('the log folder is the IST day', () => {
-  assert.equal(istDate(Date.UTC(2026, 10, 5, 18, 29)), '2026-11-05');   // 23:59 IST
-  assert.equal(istDate(Date.UTC(2026, 10, 5, 18, 31)), '2026-11-06');   // 00:01 IST
+  assert.equal(istDateIso(Date.UTC(2026, 10, 5, 18, 29)), '2026-11-05');   // 23:59 IST
+  assert.equal(istDateIso(Date.UTC(2026, 10, 5, 18, 31)), '2026-11-06');   // 00:01 IST
 });

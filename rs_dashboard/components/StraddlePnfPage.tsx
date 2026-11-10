@@ -70,6 +70,8 @@ import { cleanBracketSpec, planBracketChildren, type BracketSpec } from '@/lib/p
 import { useChartLegs, usePnfResting, type RailChart, type RestingEvent } from './straddlePnf/usePnfResting';
 import { applyPaperFill, FLAT_LEG, type PaperLeg, type PnfProduct } from '@/lib/pnfOrderLogic';
 import { needsResolve, type RestingRow } from '@/lib/pnfRestingLedger';
+import { istToday, minuteStart } from '@/lib/istTime';
+import { readPref, savePref } from '@/lib/localPref';
 
 // The same page draws Renko at /renko (`chart="renko"`): bricks instead of P&F columns (lib/renko.ts), N-brick confirmation
 // signals, and its own preferences (every `straddle-pnf-*` key becomes `renko-*`), AUTO and resting-order ledgers (lib/pnfScope.ts)
@@ -141,22 +143,14 @@ const DISARMED: AutoArm = { on: false, mode: 'PAPER', watermarkT: 0 };
 type ChartId = 1 | 2;
 const LEGACY_TARGET_KEY = 'straddle-pnf-target';
 
-const minuteOf = (t: number) => Math.floor(t / 60) * 60;
 /** Wall clock in epoch seconds, for event handlers (module scope: never called during render). */
 const nowSec = () => Date.now() / 1000;
-const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 
 /** A preference key on this page: the P&F page keeps its original keys, the Renko page swaps the `straddle-pnf` prefix for `renko`. */
 const prefKey = (chart: ChartType, key: string) => (chart === 'renko' ? key.replace(/^straddle-pnf/, 'renko') : key);
 const NO_TRIANGLES: PnfTriangle[] = [];
 const NO_BARS: PnfFeed['bars'] = [];
 
-function readPref(key: string): string | null {
-  try { return localStorage.getItem(key); } catch { return null; }
-}
-function savePref(key: string, value: string) {
-  try { localStorage.setItem(key, value); } catch { /* private window / blocked storage: the page works without it */ }
-}
 /**
  * True at `px` wide and up (follows the window). The header places the Nifty / VIX chips by it: they fit beside the title only on a
  * wide screen, and they are rendered once (they start the indices bridge), so CSS alone cannot move them between rows.
@@ -225,7 +219,7 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   const now = replayT === null ? liveNow : (replayT + 60) * 1000;
   const last = bars[bars.length - 1];
   // the minute still forming; a Tick / 10 sec chart has none (its bars are emitted only once closed: lib/pnfTicks.ts)
-  const formingBar = !isTickInterval(interval) && last !== undefined && now > 0 && last.t >= minuteOf(now / 1000) ? last : undefined;
+  const formingBar = !isTickInterval(interval) && last !== undefined && now > 0 && last.t >= minuteStart(now / 1000) ? last : undefined;
   // The closed bars are sliced off only when the confirmed chart is rebuilt (a copy of years of minutes per tick otherwise).
   const closedLen = formingBar ? bars.length - 1 : bars.length;
   const closedLast = closedLen > 0 ? bars[closedLen - 1] : undefined;

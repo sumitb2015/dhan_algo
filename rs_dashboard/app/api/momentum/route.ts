@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
-import fs from 'fs';
 import { isStrategyRunning, isValidInstanceId, stateKeyFor, DEBUG_DIR } from '@/lib/strategyRegistry';
+import { readJsonFile } from '@/lib/lockedJsonFile';
+
+const readJson = (file: string) => readJsonFile<Record<string, unknown>>(file);
 
 // Read-only view of the momentum portfolio. Two files back it:
 //   debug/<key>_state.json     — written every cycle by save_strategy_state()
@@ -28,14 +30,6 @@ interface Holding {
   rank: number | null;
   rank_at_entry: number;
   rank_strikes: number;
-}
-
-function readJson(file: string): Record<string, unknown> | null {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
 }
 
 /** Rebuild holdings from the durable portfolio file when no state file exists yet. */

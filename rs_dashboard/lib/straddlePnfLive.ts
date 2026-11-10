@@ -2,11 +2,11 @@
 import type { Bar, PnfSignal } from './straddlePnf.ts';
 import { mcxSession } from './mcxSession.ts';
 import { isNseSessionDay, muhuratWindow } from './nseHolidays.ts';
+import { IST_OFFSET_S, minuteStart } from './istTime.ts';
 
 /** `cumVol` is the bridge's cumulative day volume for both legs (CE + PE), the same units as the history bars' per-minute volume. */
 export type Tick = { t: number; ce: number; pe: number; cumVol?: number };
 
-const minuteOf = (t: number) => Math.floor(t / 60) * 60;
 
 /**
  * Folds a CE+PE tick into the 1-min bars. A tick inside the open minute updates that bar's close; a tick in a later minute
@@ -20,7 +20,7 @@ const minuteOf = (t: number) => Math.floor(t / 60) * 60;
 export function foldTick(bars: Bar[], tick: Tick, single = false): { bars: Bar[]; closedIndex: number | null } {
   // `single`: a plain price (index / stock / future) is carried as ce with pe 0, the shape the history bars already have.
   if (!(tick.ce > 0) || (!single && !(tick.pe > 0))) return { bars, closedIndex: null };
-  const t = minuteOf(tick.t);
+  const t = minuteStart(tick.t);
   const cv = Number.isFinite(tick.cumVol) && (tick.cumVol as number) >= 0 ? (tick.cumVol as number) : null;
   const last = bars[bars.length - 1];
   const straddle = tick.ce + tick.pe;
@@ -91,7 +91,6 @@ export type Market = 'NSE' | 'NSE_CAS' | 'NSE_FNO' | 'MCX';
  */
 export const CAS_START = '2026-08-03';
 
-const IST_OFFSET_S = 5.5 * 3600;
 export const istMinuteOfDay = (t: number) => Math.floor(((t + IST_OFFSET_S) % 86_400) / 60);
 const istIso = (t: number) => new Date((t + IST_OFFSET_S) * 1000).toISOString().slice(0, 10);
 const hhmmToMin = (hhmm: number) => Math.floor(hhmm / 100) * 60 + (hhmm % 100);

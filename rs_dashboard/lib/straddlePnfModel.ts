@@ -6,6 +6,7 @@ import { resample } from './straddlePnfInterval.ts';
 import { buildRenko, buildLogRenko, continueRenko, extendRenko, renkoSignals, trendSignals, supertrendSignals, twoBackSignals, oneBackSignals, renkoSmaResume, renkoSmaByBarFrom, renkoSupertrendResume, runStartOf, type RenkoResume, type RenkoSupertrendPoint, type LogGrid } from './renko.ts';
 import type { SupertrendState } from './indicators.ts';
 import { DEFAULT_BOX_LOG, MIN_BOX_PTS_PCT, type BoxMode } from './straddlePnfSettings.ts';
+import { istDayNumber } from './istTime.ts';
 
 export type Overlay = 'vwap' | 'sma';
 /** Point & Figure, or Renko (lib/renko.ts: one brick per column, the box always in points). */
@@ -257,7 +258,6 @@ function spliceSignals(prev: PnfSignal[], from: number, tail: PnfSignal[]): PnfS
 }
 
 /** Sessions (oldest first), the last session's first usable close, and the last usable close of the session before it (its official close `dc` when known). */
-const dayOf = (t: number) => Math.floor((t + 19_800) / 86_400);     // IST calendar day number
 
 /**
  * Sessions (oldest first), the last session's first usable close, and the last usable close of the session before it (its official
@@ -266,18 +266,18 @@ const dayOf = (t: number) => Math.floor((t + 19_800) / 86_400);     // IST calen
 function sessionFacts(bars: Bar[], prevSessions: string[] | null = null, from = 0): { sessions: string[]; open: number | null; prev: number | null } {
   const sessions = prevSessions && from > 0 ? prevSessions.slice() : [];
   const start = prevSessions && from > 0 ? from : 0;
-  let lastDay = start > 0 ? dayOf(bars[start - 1].t) : NaN;
+  let lastDay = start > 0 ? istDayNumber(bars[start - 1].t) : NaN;
   for (let i = start; i < bars.length; i++) {
-    const day = dayOf(bars[i].t);                                    // one sessionOf (a Date + string) per day, not per bar
+    const day = istDayNumber(bars[i].t);                                    // one sessionOf (a Date + string) per day, not per bar
     if (day !== lastDay) { sessions.push(sessionOf(bars[i].t)); lastDay = day; }
   }
   if (!bars.length) return { sessions, open: null, prev: null };
-  const last = dayOf(bars[bars.length - 1].t);
+  const last = istDayNumber(bars[bars.length - 1].t);
   let open: number | null = null, prev: number | null = null;
   for (let i = bars.length - 1; i >= 0; i--) {
     const b = bars[i];
     if (!(b.straddle > 0)) continue;
-    if (dayOf(b.t) === last) open = b.straddle;
+    if (istDayNumber(b.t) === last) open = b.straddle;
     else { prev = b.dc ?? b.straddle; break; }
   }
   return { sessions, open, prev };
@@ -314,9 +314,9 @@ function sessionFirstBar(bars: Bar[], t: number): Bar | undefined {
   let lo = 0, hi = bars.length;
   while (lo < hi) { const mid = (lo + hi) >> 1; if (bars[mid].t <= t) lo = mid + 1; else hi = mid; }
   if (lo === 0) return undefined;
-  const day = dayOf(bars[lo - 1].t);
+  const day = istDayNumber(bars[lo - 1].t);
   let i = lo - 1;
-  while (i > 0 && dayOf(bars[i - 1].t) === day) i--;
+  while (i > 0 && istDayNumber(bars[i - 1].t) === day) i--;
   for (; i < lo; i++) if (bars[i].straddle > 0) return bars[i];
   return undefined;
 }

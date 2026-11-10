@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT } from '@/lib/pyExec';
+import { writeJsonAtomic as writeJsonFileAtomic } from '@/lib/lockedJsonFile';
 
 const ROWS_FILE = path.join(PROJECT_ROOT, 'debug', 'focus_tool_rows.json');
 
@@ -843,12 +844,9 @@ export const DEFAULT_CONFIG: FocusToolConfig = {
 // ── I/O ───────────────────────────────────────────────────────────────────────
 
 /** Write JSON via a temp file + rename, so a reader never sees a half-written file. */
-export function writeJsonAtomic(file: string, data: unknown) {
-  const dir = path.dirname(file);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
-  fs.renameSync(tmp, file);
+/** Pretty-printed atomic write (lib/lockedJsonFile); kept as an export for this file's existing importers. */
+export function writeJsonAtomic(file: string, data: unknown): void {
+  writeJsonFileAtomic(file, data, { pretty: true });
 }
 
 /** A config saved before an underlying existed has no group for it; append the default so the page can always find one. */

@@ -81,6 +81,7 @@ import {
   buildExport, parseImport, rowFromImport, importExpiry, MAX_PRESETS, type FocusPreset,
 } from '@/lib/focusToolPresets';
 import { FocusPresetsContext, RowPresetMenuItems, RowPresetMenuButton, PresetsPanel, type FocusPresetsApi } from './FocusToolPresets';
+import { istToday } from '@/lib/istTime';
 
 // â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -267,11 +268,6 @@ function istHm(): string {
   return new Date().toLocaleTimeString('en-GB', {
     timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
   });
-}
-
-/** Today's calendar date in IST, 'YYYY-MM-DD'. */
-function istToday(): string {
-  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 }
 
 /** Whole days from today (IST) to `expiry`. The clock is read here so the pure

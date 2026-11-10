@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT } from '@/lib/pyExec';
+import { writeJsonAtomic } from '@/lib/lockedJsonFile';
 import type { WatchlistItem, ScannedStrategy } from './ultimateScannerTypes';
 
 const WATCHLIST_FILE = path.join(PROJECT_ROOT, 'debug', 'ultimate_scanner_watchlist.json');
@@ -8,14 +9,6 @@ const WATCHLIST_FILE = path.join(PROJECT_ROOT, 'debug', 'ultimate_scanner_watchl
 interface WatchlistStore {
   items: WatchlistItem[];
   lastUpdated: string;
-}
-
-function writeJsonAtomic(file: string, data: unknown) {
-  const dir = path.dirname(file);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
-  fs.renameSync(tmp, file);
 }
 
 export function readWatchlist(): WatchlistItem[] {
@@ -32,7 +25,7 @@ export function writeWatchlist(items: WatchlistItem[]): void {
   writeJsonAtomic(WATCHLIST_FILE, {
     items,
     lastUpdated: new Date().toISOString(),
-  });
+  }, { pretty: true });
 }
 
 // Serializes read-modify-write mutations against WATCHLIST_FILE so concurrent

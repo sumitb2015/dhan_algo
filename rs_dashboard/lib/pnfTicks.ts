@@ -9,6 +9,7 @@
 // always arrive together: a group of rows with one ms is one bar.
 import { inSession, isWildTick, type Market } from './straddlePnfLive.ts';
 import type { Bar } from './straddlePnf.ts';
+import { minuteStart } from './istTime.ts';
 
 /** One recorded price: [epoch ms, LTP, cumulative day volume (0 when the instrument has none)]. */
 export type TickRow = [number, number, number];
@@ -84,7 +85,6 @@ export function foldTickRows(b: TickBuild, legs: TickRow[][], market: Market, re
   return { px, cum, lastCum, cumLegs, lastMs, bars: out.length ? b.bars.concat(out) : b.bars };
 }
 
-const minuteOf = (t: number) => Math.floor(t / 60) * 60;
 
 /**
  * The history's 1-minute bars up to the tick log, then the tick bars: history is used only BEFORE the first tick's minute (the
@@ -109,7 +109,7 @@ const minuteOf = (t: number) => Math.floor(t / 60) * 60;
 export const fillCutoff = (upToS: number, histLast: Bar | undefined): number => (histLast ? Math.min(upToS, histLast.t + 60) : -Infinity);
 
 export function spliceTicks(hist: Bar[], ticks: Bar[], nowS = Infinity, fillUpTo = -Infinity): Bar[] {
-  const cut = ticks.length ? minuteOf(ticks[0].t) : Number.isFinite(nowS) ? minuteOf(nowS) : Infinity;
+  const cut = ticks.length ? minuteStart(ticks[0].t) : Number.isFinite(nowS) ? minuteStart(nowS) : Infinity;
   let k = hist.length;
   while (k > 0 && hist[k - 1].t >= cut) k--;
   if (!ticks.length) return k === hist.length ? hist : hist.slice(0, k);

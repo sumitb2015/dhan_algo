@@ -1,5 +1,6 @@
 // Groups the page's 1-minute straddle bars into N-minute bars for the chart. Pure, no clocks.
 import type { Bar } from './straddlePnf.ts';
+import { IST_OFFSET_S } from './istTime.ts';
 
 /**
  * Offered intervals: each divides the 375-minute NSE cash / index session (09:15-15:30) evenly. A derivatives session is 385 minutes
@@ -50,7 +51,6 @@ export const effectiveInterval = (interval: number, equity: boolean, renko = fal
   (intervalsFor(equity, renko) as readonly number[]).includes(interval) ? (interval as Interval) : 1;
 
 const SESSION_OPEN_MIN = 9 * 60 + 15; // buckets start at the 09:15 open, like exchange charts
-const IST_OFFSET_S = 5.5 * 3600;
 
 /**
  * An N-minute bar takes the close (CE, PE, straddle) of its last minute and the summed volume, and is stamped with its start

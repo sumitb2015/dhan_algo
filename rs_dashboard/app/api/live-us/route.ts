@@ -9,6 +9,7 @@ import {
 } from '@/lib/usStocks';
 import { getUsMaster, readUniverseFile, US_DEBUG_DIR, writeUniverseFile } from '@/lib/usStocksServer';
 import { resolveUniverse } from '@/lib/usUniverse';
+import { readJsonFile as readJson } from '@/lib/lockedJsonFile';
 
 export const dynamic = 'force-dynamic';
 
@@ -29,10 +30,6 @@ const STOP_TRIGGER = path.join(US_DEBUG_DIR, 'live_us_stop.trigger');
 const START_LOCK = path.join(US_DEBUG_DIR, 'live_us_start.lock');
 const TOKEN_FILE = path.join(PROJECT_ROOT, 'access_token.json');
 const LOCK_STALE_MS = 30_000;
-
-function readJson<T>(file: string): T | null {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')) as T; } catch { return null; }
-}
 
 function readWatchlist(): string[] {
   const w = readJson<{ ids?: unknown }>(WATCHLIST_FILE);

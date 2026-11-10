@@ -13,7 +13,6 @@ export const SETTLE_MS = 400;
 type Cached = { size: number; rest: string; rows: TickRow[] };
 const cache = ((globalThis as { __pnfTicks?: Map<string, Cached> }).__pnfTicks ??= new Map());
 
-export const istDate = (ms: number) => new Date(ms + 19_800_000).toISOString().slice(0, 10);
 export const tickFile = (day: string, seg: string, sid: string) => path.join(TICKS_DIR, day, `${seg}_${sid}.jsonl`);
 
 function parseLines(text: string, out: TickRow[]): void {

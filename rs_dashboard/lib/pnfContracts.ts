@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { istToday } from './istTime.ts';
 
 // F&O contracts for the Point & Figure page, from master_list.csv, resolved server-side: a security id is only ever looked up
 // here, never taken from the browser. NSE index/stock futures and options, MCX commodity futures and options; expired contracts
@@ -85,7 +86,6 @@ export function parseIndexIds(text: string): Map<string, string> {
 type Index = { mtime: number; day: string; rows: FnoRow[]; indexIds: Map<string, string> };
 let cache: Index | null = null;
 
-const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 
 function load(): Index {
   const mtime = fs.statSync(MASTER).mtimeMs;

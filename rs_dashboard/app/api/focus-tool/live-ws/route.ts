@@ -5,6 +5,7 @@ import net from 'net';
 import { spawn } from 'child_process';
 import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
 import { isPidRunning } from '@/lib/processCheck';
+import { readJsonFile as readJson } from '@/lib/lockedJsonFile';
 
 // Lifecycle for the Focus Tool's own live-quotes bridge (scripts/tools/focus_tool_ws.py).
 //
@@ -48,15 +49,6 @@ function acquireStartLock(): boolean {
 
 function releaseStartLock(): void {
   try { fs.unlinkSync(LOCK_FILE); } catch { /* already gone */ }
-}
-
-function readJson(file: string): unknown {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
 }
 
 async function findFreePort(startPort: number): Promise<number> {

@@ -9,6 +9,7 @@ import { resample } from './straddlePnfInterval.ts';
 import { applyPaperFill, FLAT_LEG, paperPnl, type PaperLeg } from './pnfOrderLogic.ts';
 import { decideAuto, type AutoModel, type AutoPosition, type AutoProduct, type AutoSide } from './pnfAuto.ts';
 import type { Market } from './straddlePnfLive.ts';
+import { istDayNumber } from './istTime.ts';
 
 /** TradingView's replay speeds: chart-bar updates per second. */
 export const REPLAY_SPEEDS = [
@@ -72,9 +73,9 @@ export function randomStartT(bars: Bar[], rnd: () => number, anchorT?: number | 
   const first = firstAvailableT(bars, anchorT);
   if (first === null) return null;
   const lo = countUpTo(bars, first - 1);
-  const lastDay = Math.floor((bars[bars.length - 1].t + 19_800) / 86_400);
+  const lastDay = istDayNumber(bars[bars.length - 1].t);
   let hi = bars.length;
-  while (hi > lo && Math.floor((bars[hi - 1].t + 19_800) / 86_400) === lastDay) hi--;
+  while (hi > lo && istDayNumber(bars[hi - 1].t) === lastDay) hi--;
   if (hi <= lo) return bars[lo].t;
   return bars[lo + Math.floor(rnd() * (hi - lo))].t;
 }

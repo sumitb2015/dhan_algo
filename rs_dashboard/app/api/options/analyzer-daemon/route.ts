@@ -5,6 +5,7 @@ import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
 import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
 import { ANALYTICS_UNDERLYINGS, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
+import { readJsonFile as readJson } from '@/lib/lockedJsonFile';
 
 const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
 const SCRIPT_PATH    = path.join(PROJECT_ROOT, 'scripts', 'tools', 'antigravity_options_analyzer.py');
@@ -21,15 +22,6 @@ interface DaemonStatus {
   lastSummary?: string;
   activeSuggestionsCount?: number;
   reason?: string;
-}
-
-function readJson<T>(file: string): T | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
-  } catch {
-    return null;
-  }
 }
 
 /** GET — return daemon status, cross-checked with process table */

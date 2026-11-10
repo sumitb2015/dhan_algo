@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { SEGMENTS } from '@/lib/pnfLiveBridge';
-import { forgetOtherDays, istDate, readTickFile, rowsBetween, SETTLE_MS, tickFile } from '@/lib/pnfTicksServer';
+import { istDateIso } from '@/lib/nseHolidays';
+import { forgetOtherDays, readTickFile, rowsBetween, SETTLE_MS, tickFile } from '@/lib/pnfTicksServer';
 
 // Renko Tick mode: today's recorded prices for one instrument or a straddle's two legs, from the price bridge's tick log
 // (lib/pnfTicksServer.ts). `since` = the `upTo` of the previous read (0 for the whole day). Read-only, no orders; the page's live
@@ -16,7 +17,7 @@ export async function GET(request: NextRequest) {
   const since = Number.isFinite(sinceRaw) && sinceRaw > 0 ? sinceRaw : 0;
   const now = Date.now();
   const upTo = now - SETTLE_MS;
-  const day = istDate(now);
+  const day = istDateIso(now);
   forgetOtherDays(day);
   try {
     const legs = pairs.map(([seg, sid]) => rowsBetween(readTickFile(tickFile(day, seg, sid)), since, upTo));

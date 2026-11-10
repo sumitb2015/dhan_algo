@@ -1,6 +1,6 @@
 import { loadPnfHistory } from '@/lib/pnfHistory';
 import { askBridge, ensureBridge, readBack, readBridgeBook } from '@/lib/pnfLiveBridge';
-import { forgetOtherDays, istDate, readTickFile, rowsBetween, SETTLE_MS, tickFile } from '@/lib/pnfTicksServer';
+import { forgetOtherDays, readTickFile, rowsBetween, SETTLE_MS, tickFile } from '@/lib/pnfTicksServer';
 import { feedStale, foldLive, idsOf, liveRead, marketOf, type Instrument } from '@/lib/pnfFeedCore';
 import { mergeHistory, type LegQuote, type Market, type Tick } from '@/lib/straddlePnfLive';
 import { mergeTail } from '@/lib/pnfTail';
@@ -8,6 +8,7 @@ import { bucketTickBars, fillCutoff, foldTickRows, newTickBuild, spliceTicks, ty
 import { targetQuery, type Target } from '@/lib/pnfTarget';
 import type { WantedPair } from '@/lib/pnfWanted';
 import type { Bar } from '@/lib/straddlePnf';
+import { istDateIso } from '@/lib/nseHolidays';
 
 // One chart's price series on the dashboard SERVER, for the AUTO engine (lib/pnfAutoEngine.ts) with every tab closed: the same history
 // (lib/pnfHistory.ts, shared cache with the page), the same live fold of the price bridge (lib/pnfFeedCore.ts) and the same Tick /
@@ -104,7 +105,7 @@ export class ServerFeed {
   private ticks(nowMs: number): void {
     if (this.tickSec === null || !this.instruments.length) return;
     const upTo = nowMs - SETTLE_MS;
-    const day = istDate(nowMs);
+    const day = istDateIso(nowMs);
     forgetOtherDays(day);
     if (day !== this.tickDay) { this.tickDay = day; this.tickSince = 0; this.tickBuild = newTickBuild(this.instruments.length); this.secBuild = null; this.tickFillTo = fillCutoff(upTo / 1000, this.bars[this.bars.length - 1]); }
     let legs;

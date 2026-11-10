@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { bridgeHealth, parseUsScripMaster, type BridgeHealth, type BridgeStatus, type RawUsQuote, type UsInstrument } from '@/lib/usStocks';
 import { isPidRunning } from '@/lib/processCheck';
+import { readJsonFile } from '@/lib/lockedJsonFile';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
@@ -93,10 +94,6 @@ export function writeUniverseFile(u: UniverseFile): void {
   const tmp = `${UNIVERSE_FILE}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify({ enabled: u.enabled, ids: u.ids, updated_at: Date.now() }));
   fs.renameSync(tmp, UNIVERSE_FILE);
-}
-
-function readJsonFile<T>(file: string): T | null {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')) as T; } catch { return null; }
 }
 
 export interface UsQuotesFile { updated_at?: number; connected?: boolean; market_status?: unknown; quotes?: Record<string, RawUsQuote> }

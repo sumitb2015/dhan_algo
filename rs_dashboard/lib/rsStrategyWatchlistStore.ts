@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT } from '@/lib/pyExec';
+import { writeJsonAtomic } from '@/lib/lockedJsonFile';
 import type { RsSignal } from './rsStrategyCore';
 
 export interface RsWatchlistItem {
@@ -20,14 +21,6 @@ interface WatchlistStore {
   lastUpdated: string;
 }
 
-function writeJsonAtomic(file: string, data: unknown): void {
-  const dir = path.dirname(file);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
-  fs.renameSync(tmp, file);
-}
-
 export function readRsWatchlist(): RsWatchlistItem[] {
   try {
     if (!fs.existsSync(WATCHLIST_FILE)) return [];
@@ -44,7 +37,7 @@ export function writeRsWatchlist(items: RsWatchlistItem[]): void {
   writeJsonAtomic(WATCHLIST_FILE, {
     items,
     lastUpdated: new Date().toISOString(),
-  });
+  }, { pretty: true });
 }
 
 // Serializes read-modify-write mutations against WATCHLIST_FILE to avoid concurrent write clobbering

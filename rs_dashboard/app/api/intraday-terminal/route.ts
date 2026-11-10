@@ -4,6 +4,7 @@ import fs from 'fs';
 import { isPidRunning } from '@/lib/processCheck';
 import type { TerminalOrder, TerminalPayload, TerminalState } from '@/lib/terminalTypes';
 import { STRATEGY_KEY } from '@/lib/terminalTypes';
+import { readJsonFile as readJson } from '@/lib/lockedJsonFile';
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
@@ -13,15 +14,6 @@ const MANIFEST = path.join(PROJECT_ROOT, 'Intraday_Historical_Data', 'manifest.j
 
 /** Orders kept in the response. The .jsonl is append-only and grows all day. */
 const MAX_ORDERS = 120;
-
-function readJson<T>(file: string): T | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Tail the append-only order log.

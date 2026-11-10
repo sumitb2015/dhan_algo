@@ -1,8 +1,8 @@
 // The bottom time axis of an index P&F chart, as TradingView draws it: a P&F chart has no time scale, so each label sits under the
 // column whose time it names, day numbers along the way with the month's name replacing the first label of a new month ("17 25
 // Sep 7 11 ... 28 Oct 6 8"). Pure (tested in lib/straddlePnfTimeAxis.test.ts); `times` are epoch seconds, `xs` pixel centres.
+import { IST_OFFSET_S } from './istTime.ts';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const IST_OFFSET_S = 5.5 * 3600;
 
 const istParts = (t: number) => {
   const d = new Date((t + IST_OFFSET_S) * 1000);

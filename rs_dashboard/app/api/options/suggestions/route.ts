@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
-import fs from 'fs';
 import { ANALYTICS_UNDERLYINGS, type AnalyticsUnderlying } from '@/lib/analyticsUnderlyings';
+import { readJsonFile as readJson } from '@/lib/lockedJsonFile';
 
 /**
  * Read-only source for the "Suggested Actions" panel on the positions-analytics
@@ -43,15 +43,6 @@ export interface SuggestionsFile {
   generatedAt: string;
   expiresAt: string;
   suggestions: Suggestion[];
-}
-
-function readJson(file: string): unknown {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
 }
 
 export async function GET(request: NextRequest) {

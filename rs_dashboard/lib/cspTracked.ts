@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT } from '@/lib/pyExec';
+import { writeJsonAtomic } from '@/lib/lockedJsonFile';
 
 const TRACKED_FILE = path.join(PROJECT_ROOT, 'debug', 'csp_tracked.json');
 
@@ -54,16 +55,8 @@ export function readTracked(): TrackedCsp[] {
 
 /** Write-then-rename: this file is re-read on every dashboard poll, and a torn
  *  read parses as "no positions". */
-function writeJsonAtomic(file: string, data: unknown) {
-  const dir = path.dirname(file);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
-  fs.renameSync(tmp, file);
-}
-
 export function writeTracked(rows: TrackedCsp[]) {
-  writeJsonAtomic(TRACKED_FILE, rows);
+  writeJsonAtomic(TRACKED_FILE, rows, { pretty: true });
 }
 
 const SYNC_FILE = path.join(PROJECT_ROOT, 'debug', 'csp_sync_cache.json');
@@ -100,7 +93,7 @@ export function readSyncCache(): SyncCache | null {
 }
 
 export function writeSyncCache(cache: SyncCache) {
-  writeJsonAtomic(SYNC_FILE, cache);
+  writeJsonAtomic(SYNC_FILE, cache, { pretty: true });
 }
 
 let _seq = 0;

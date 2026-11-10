@@ -16,6 +16,8 @@ import {
   SPEEDS, barsUpTo, clockLabel, msPerBar, timelineOf, validateSimParams, valueAt, type ExpiryInfo, type Speed,
 } from '@/lib/straddleSim';
 import { installAlertSoundUnlock, playEntryChime, playExitChime } from '@/lib/alertSound';
+import { istToday } from '@/lib/istTime';
+import { readPref, savePref } from '@/lib/localPref';
 
 // Straddle Simulator: replays past NIFTY straddle sessions through the same P&F engine as the live page. Signals only — no orders.
 // One replay step = one 1-min bar closing; at speed N a bar takes 60 s / N. The preload day (the session before From) is drawn
@@ -30,16 +32,9 @@ const TITLES = ['ATM −200', 'ATM', 'ATM +200'];
 const FLASH_MS = 4000;
 const SOUND_KEY = 'straddle-sim-sound';
 
-const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const istYesterday = () => new Date(Date.now() + 5.5 * 3600_000 - 86_400_000).toISOString().slice(0, 10);
 const fmt = (n: number) => n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-function readPref(key: string): string | null {
-  try { return localStorage.getItem(key); } catch { return null; }
-}
-function savePref(key: string, value: string) {
-  try { localStorage.setItem(key, value); } catch { /* storage blocked: the page works without it */ }
-}
 
 export default function StraddleSimulatorPage() {
   const [expiries, setExpiries] = useState<ExpiryInfo[]>([]);

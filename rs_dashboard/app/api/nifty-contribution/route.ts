@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
-import fs from 'fs';
 import path from 'path';
 import { isPidRunning } from '@/lib/processCheck';
 import { readNiftyWeights } from '@/lib/niftyWeights';
 import { computeContributions, type QuoteIn } from '@/lib/niftyContribution';
+import { readJsonFile as readJson } from '@/lib/lockedJsonFile';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,10 +20,6 @@ const STOCK_STATUS = path.join(DEBUG_DIR, 'daily_market_status.json');
 const INDEX_QUOTES = path.join(DEBUG_DIR, 'live_indices_quotes.json');
 const INDEX_STATUS = path.join(DEBUG_DIR, 'live_indices_status.json');
 const FRESH_MS = 15_000;
-
-function readJson<T>(file: string): T | null {
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')) as T; } catch { return null; }
-}
 
 type FeedState = 'live' | 'starting' | 'stale' | 'stopped';
 interface FeedInfo { state: FeedState; updatedAt: number | null; ageMs: number | null }

@@ -4,6 +4,10 @@ import fs from 'fs';
 import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
 import { PYTHON_EXE } from '@/lib/pyExec';
+import { readJsonFile } from '@/lib/lockedJsonFile';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped bridge/status files
+const readJson = (file: string) => readJsonFile<any>(file);
 
 const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
 const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
@@ -15,15 +19,6 @@ const SELECTION_FILE = path.join(DEBUG_DIR, 'live_indices_selection.json');
 const SETTINGS_FILE  = path.join(DEBUG_DIR, 'live_indices_settings.json');
 
 const DEFAULT_INTERVAL = 20; // seconds
-
-function readJson(file: string): any | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
-}
 
 /** GET — return history + bridge status + settings */
 export async function GET() {

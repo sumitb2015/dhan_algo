@@ -7,6 +7,7 @@ import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
 import { isPidRunning } from '@/lib/processCheck';
 import { NIFTY50_SYMBOLS } from '@/lib/nifty50';
 import { parseConstituentSymbols, readNifty500List } from '@/lib/dataLoader';
+import { readJsonFile as readJson } from '@/lib/lockedJsonFile';
 
 export const dynamic = 'force-dynamic';
 
@@ -43,15 +44,6 @@ function acquireStartLock(): boolean {
 
 function releaseStartLock(): void {
   try { fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ }
-}
-
-function readJson<T = unknown>(file: string): T | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf8')) as T;
-  } catch {
-    return null;
-  }
 }
 
 async function findFreePort(startPort: number): Promise<number> {

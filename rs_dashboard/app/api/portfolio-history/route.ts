@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
-import fs from 'fs';
 import path from 'path';
+import { readJsonFile } from '@/lib/lockedJsonFile';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped bridge/status files
+const readJsonSafe = (file: string) => readJsonFile<any>(file);
 
 const DEBUG_DIR = path.join(process.cwd(), '..', 'debug');
 const TRACKED_FILE = path.join(DEBUG_DIR, 'portfolio_value_history.json');
@@ -59,15 +62,6 @@ function fillMissingSplits(points: RawPoint[]): CombinedPoint[] {
       synthetic: p.synthetic,
     };
   });
-}
-
-function readJsonSafe(file: string): any | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf-8'));
-  } catch {
-    return null;
-  }
 }
 
 // GET-only: the historical reconstruction (Apr 1 → today, using real trade history) is generated

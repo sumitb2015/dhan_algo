@@ -4,6 +4,10 @@ import fs from 'fs';
 import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
 import { PYTHON_EXE } from '@/lib/pyExec';
+import { readJsonFile } from '@/lib/lockedJsonFile';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- untyped bridge/status files
+const readJson = (file: string) => readJsonFile<any>(file);
 
 const PROJECT_ROOT = path.resolve(process.cwd(), '..');
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
@@ -11,15 +15,6 @@ const BRIDGE_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'live_equity_w
 const QUOTES_FILE  = path.join(DEBUG_DIR, 'live_equity_quotes.json');
 const STATUS_FILE  = path.join(DEBUG_DIR, 'live_equity_status.json');
 const STOP_TRIGGER = path.join(DEBUG_DIR, 'live_equity_stop.trigger');
-
-function readJson(file: string): any | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
-}
 
 /** GET â€” return live quotes + bridge status */
 export async function GET() {

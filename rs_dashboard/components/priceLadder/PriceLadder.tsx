@@ -31,6 +31,7 @@ import {
   type ClickType, type LadderZones, type LadderBroker, type LadderMode, type LadderSide, type LadderSlice, type LadderState, type OptType,
   type LadderContract,
 } from '@/lib/priceLadder';
+import { readPrefOf, savePref } from '@/lib/localPref';
 
 // Price Ladder (/price-ladder). XY mode trades an option on the INDEX's levels (OptionX "Price Ladder XY"): click a
 // level to arm an entry, with a bracket target / SL / trailing SL in index points. The dashboard SERVER watches and
@@ -103,11 +104,6 @@ interface IndexQuote { ltp: number; prev_close: number; change_pct: number | nul
 /** How often an XY ladder re-reads the chain for its OI bars. */
 const OI_POLL_MS = 30_000;
 
-function readPref<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
-  try { const v = localStorage.getItem(key); if (v && (allowed as readonly string[]).includes(v)) return v as T; } catch { /* none */ }
-  return fallback;
-}
-function savePref(key: string, v: string) { try { localStorage.setItem(key, v); } catch { /* best effort */ } }
 
 /** A number box that commits on blur / Enter only (dhan-commit-on-blur), so a half-typed value never reaches a rule. */
 function NumField({ value, onCommit, min, max, step, label, width = 'w-16', compact }: {
@@ -395,7 +391,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const [zones, setZonesRaw] = useState<LadderZones>('classic');
   const setZones = (z: LadderZones) => { setZonesRaw(z); savePref(k('price-ladder-zones'), z); };
   /** The mode's tick: the one last chosen for it (remembered per mode), else its default. */
-  const tickFor = useCallback((m: PageMode) => Number(readPref(k(`price-ladder-tick-${m}`), TICKS_OF[m].map(String), String(MODE_TICK[m]))), [k]);
+  const tickFor = useCallback((m: PageMode) => Number(readPrefOf(k(`price-ladder-tick-${m}`), TICKS_OF[m].map(String), String(MODE_TICK[m]))), [k]);
   const chooseTick = (t: number, m: PageMode) => { setTick(t); savePref(k(`price-ladder-tick-${m}`), String(t)); };
   const [slBufferPct, setSlBufferPct] = useState(DEFAULT_SL_BUFFER_PCT);
   const [eventsOpen, setEventsOpen] = useState(false);
@@ -427,15 +423,15 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // Preferences (after mount: the first render must match the server HTML).
   useEffect(() => {
     /* eslint-disable react-hooks/set-state-in-effect */
-    const savedMode = readPref(k('price-ladder-mode'), ['xy', 'plain', 'pair', 'basket'] as const, 'xy');
+    const savedMode = readPrefOf(k('price-ladder-mode'), ['xy', 'plain', 'pair', 'basket'] as const, 'xy');
     setModeRaw(savedMode);
     // The tick belongs to the mode (setMode sets it on a click): a page reopened into Plain must not keep XY's 5.
     setTick(tickFor(savedMode));
-    setZonesRaw(readPref(k('price-ladder-zones'), ['classic', 'anywhere'] as const, 'classic'));
-    setEventsOpen(readPref(k('price-ladder-events-open'), ['0', '1'] as const, '0') === '1');
-    setSoundOn(readPref(k('price-ladder-sound'), ['0', '1'] as const, '1') === '1');
-    setOiOn(readPref(k('price-ladder-oi'), ['0', '1'] as const, '1') === '1');
-    setUnderlyingRaw(readPref(k('price-ladder-underlying'), UNDERLYINGS, 'NIFTY'));
+    setZonesRaw(readPrefOf(k('price-ladder-zones'), ['classic', 'anywhere'] as const, 'classic'));
+    setEventsOpen(readPrefOf(k('price-ladder-events-open'), ['0', '1'] as const, '0') === '1');
+    setSoundOn(readPrefOf(k('price-ladder-sound'), ['0', '1'] as const, '1') === '1');
+    setOiOn(readPrefOf(k('price-ladder-oi'), ['0', '1'] as const, '1') === '1');
+    setUnderlyingRaw(readPrefOf(k('price-ladder-underlying'), UNDERLYINGS, 'NIFTY'));
     // The user's saved defaults win over the last-used values above, field by field; an unset field keeps its old behaviour.
     const d = loadDefaults();
     setSavedDefaults(d);

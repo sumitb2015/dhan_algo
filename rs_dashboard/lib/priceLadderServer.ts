@@ -1,8 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { spawn } from 'child_process';
-import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
+import { PROJECT_ROOT } from '@/lib/pyExec';
 import { withFileLock, writeJsonAtomic } from '@/lib/lockedJsonFile';
+import { bridgeRunning, startBridge } from '@/lib/bridgeSpawn';
 import { getDhanCredentials, dhanGet, dhanDelete, dhanPost } from '@/lib/dhanToken';
 import { placeDhanOrder } from '@/lib/dhanPlaceOrder';
 import { reserveOrderSlot } from '@/lib/dhanOrderPacer';
@@ -271,41 +271,11 @@ function syncWs(memo: FileMemo): void {
     if (warnOnce('ws-wanted', 60_000)) console.warn(`${TAG} could not write the price bridge request:`, (err as Error).message);
     return;
   }
-  if (bridgeRunning(memo) || now - ws.startAt < WS_START_EVERY_MS) return;
+  const quotes = readJson(WS_QUOTES, memo);
+  if (bridgeRunning({ quotes, statusFile: WS_STATUS_FILE, fileStaleMs: WS_FILE_STALE_MS, heartbeatStaleMs: WS_HEARTBEAT_STALE_MS })) return;
+  if (now - ws.startAt < WS_START_EVERY_MS) return;
   ws.startAt = now;
-  startBridge();
-}
-
-function bridgeRunning(memo: FileMemo): boolean {
-  const q = readJson(WS_QUOTES, memo);
-  if (q && Date.now() - Number(q.updated_ms) <= WS_FILE_STALE_MS) return true;
-  try {
-    const st = JSON.parse(fs.readFileSync(WS_STATUS_FILE, 'utf8')) as { status?: string; heartbeat_ms?: number };
-    return st.status === 'RUNNING' && Date.now() - Number(st.heartbeat_ms) <= WS_HEARTBEAT_STALE_MS;
-  } catch { return false; }
-}
-
-/** Spawn the bridge once (O_EXCL lock, stolen after a minute); the bridge itself refuses to run twice. */
-function startBridge(): void {
-  try {
-    try {
-      fs.writeFileSync(WS_START_LOCK, String(process.pid), { flag: 'wx' });
-    } catch {
-      const age = Date.now() - fs.statSync(WS_START_LOCK).mtimeMs;
-      if (age < 60_000) return;                         // another process is starting it
-      fs.writeFileSync(WS_START_LOCK, String(process.pid));
-    }
-    const log = fs.openSync(WS_LOG, 'a');
-    const child = spawn(PYTHON_EXE, [WS_SCRIPT], { cwd: PROJECT_ROOT, detached: true, stdio: ['ignore', log, log], windowsHide: true });
-    child.on('error', err => console.warn(`${TAG} price bridge failed to start:`, err.message));
-    child.unref();
-    fs.closeSync(log);
-    // Released once the bridge has had time to write its heartbeat; a crash before then is retried 30 s later.
-    setTimeout(() => { try { fs.rmSync(WS_START_LOCK, { force: true }); } catch { /* best effort */ } }, 15_000).unref?.();
-    console.log(`${TAG} starting the price bridge (price_ladder_ws.py)`);
-  } catch (err) {
-    console.warn(`${TAG} could not start the price bridge:`, (err as Error).message);
-  }
+  startBridge({ script: WS_SCRIPT, lockFile: WS_START_LOCK, logFile: WS_LOG, tag: TAG });
 }
 
 /** A bridge quote, or null when the bridge is not running or does not have it. */

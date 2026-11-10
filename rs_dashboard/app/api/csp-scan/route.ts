@@ -4,21 +4,13 @@ import fs from 'fs';
 import { spawn } from 'child_process';
 import { PROJECT_ROOT, PYTHON_EXE } from '@/lib/pyExec';
 import { isPidRunning } from '@/lib/processCheck';
+import { readJsonFile as readJson } from '@/lib/lockedJsonFile';
 
 const DEBUG_DIR    = path.join(PROJECT_ROOT, 'debug');
 const SCRIPT       = path.join(PROJECT_ROOT, 'scripts', 'tools', 'csp_scanner.py');
 const STATUS_FILE  = path.join(DEBUG_DIR, 'csp_scan_status.json');
 const RESULTS_FILE = path.join(DEBUG_DIR, 'csp_scan_results.json');
 const STOP_FILE    = path.join(DEBUG_DIR, 'csp_scan_stop.trigger');
-
-function readJson<T>(file: string): T | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf-8')) as T;
-  } catch {
-    return null;
-  }
-}
 
 interface ScanStatus {
   pid: number | null;

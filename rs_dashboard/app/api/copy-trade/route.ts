@@ -4,6 +4,7 @@ import fs from 'fs';
 import { spawn } from 'child_process';
 import { isPidRunning } from '@/lib/processCheck';
 import { PYTHON_EXE } from '@/lib/pyExec';
+import { readJsonFile as readJson } from '@/lib/lockedJsonFile';
 
 const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
 const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
@@ -20,15 +21,6 @@ const HEARTBEAT_STALE_MS = 20_000;
 // Guards the window between spawn and the bridge writing STARTING (the bridge
 // also holds a process-wide named mutex, so this is belt-and-braces).
 let startInFlight = false;
-
-function readJson(file: string): unknown {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
-}
 
 /** GET — bridge status + recent replication activity log. */
 export async function GET(request: NextRequest) {

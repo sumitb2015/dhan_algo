@@ -7,6 +7,7 @@
 // boxes from the column's last label (3 boxes = 1.5% at the default 0.5% box), measured with the rounding of the new
 // direction, so a 2.1-box move never reverses. The first column starts once the close is a full box from the anchor
 // (X: labels 1..k, O: labels -1..k).
+import { IST_OFFSET_S } from './istTime.ts';
 
 export type Bar = {
   t: number; ce: number; pe: number; straddle: number; vol: number;
@@ -72,7 +73,6 @@ export type PnfExecutionMarker = {
 /** True for a short-entry signal (P&F double bottom or Renko SELL); every consumer maps kinds to a side through this. */
 export const isSellSignal = (kind: string) => kind === 'DOUBLE_BOTTOM_SELL' || kind === 'RENKO_SELL' || kind === 'TWOBACK_SELL' || kind === 'ONEBACK_SELL';
 
-const IST_OFFSET_S = 5.5 * 3600;
 const EPS = 1e-9;
 
 export function sessionOf(t: number): string {

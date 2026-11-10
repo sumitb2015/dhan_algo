@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { PROJECT_ROOT } from '@/lib/pyExec';
+import { writeJsonAtomic } from '@/lib/lockedJsonFile';
 
 import type { MultiLegBasket } from './multiLegFocus';
 import { appendToArchive, historyIdFor, mergeHistoryRecord, splitEarlierDayLegs, splitStaleClosed, type ArchivedBasket } from './multiLegArchive';
@@ -12,14 +13,6 @@ const ARCHIVE_FILE = path.join(PROJECT_ROOT, 'debug', 'multi_leg_baskets_archive
 
 interface Store {
   baskets: MultiLegBasket[];
-}
-
-function writeJsonAtomic(file: string, data: unknown) {
-  const dir = path.dirname(file);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
-  fs.renameSync(tmp, file);
 }
 
 /**
@@ -40,7 +33,7 @@ export function readBaskets(): MultiLegBasket[] {
 }
 
 export function writeBaskets(baskets: MultiLegBasket[]): void {
-  writeJsonAtomic(STORE_FILE, { baskets });
+  writeJsonAtomic(STORE_FILE, { baskets }, { pretty: true });
 }
 
 export function readArchive(): ArchivedBasket[] {
@@ -62,7 +55,7 @@ function readArchiveSafe(): ArchivedBasket[] {
 function archiveBaskets(retired: MultiLegBasket[]): void {
   if (retired.length === 0) return;
   const next = appendToArchive(readArchive(), retired, new Date().toISOString());
-  writeJsonAtomic(ARCHIVE_FILE, { baskets: next });
+  writeJsonAtomic(ARCHIVE_FILE, { baskets: next }, { pretty: true });
 }
 
 /** Upsert one basket — full-basket save or a smaller patch merged onto the
@@ -168,7 +161,7 @@ export function pruneStaleClosedBaskets(): MultiLegBasket[] {
       const records = splits.flatMap((s, i) => s.retired.length === 0 ? []
         : [mergeHistoryRecord(archive.find(a => a.id === historyIdFor(keep[i].id)), keep[i], s.retired, nowIso)]);
       const ids = new Set(records.map(r => r.id));
-      writeJsonAtomic(ARCHIVE_FILE, { baskets: [...archive.filter(a => !ids.has(a.id)), ...records] });
+      writeJsonAtomic(ARCHIVE_FILE, { baskets: [...archive.filter(a => !ids.has(a.id)), ...records] }, { pretty: true });
     }
   } catch (err) {
     // Keep them live rather than lose them; the page still loads.
