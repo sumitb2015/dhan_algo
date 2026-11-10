@@ -91,10 +91,11 @@ let isShuttingDown = false;
 
 /** Status/state files whose pid belongs to a long-lived process that is NOT a child of this server: the live WebSocket
  *  bridges (spawned detached, they keep every open page fed), the copy-trade bridge, the options-screener collector, the
+ *  MCX OI collectors (a restart would leave a gap in the Fresh Money crude boards' data), the
  *  focus-tool workers and — most important — live strategies (`*_state.json`), which may hold real positions. Restarting
  *  the dashboard must never kill these (it did: every restart dropped the live feeds and could stop a running strategy).
  *  Everything else with a pid (refresh/backfill/backtest/report jobs) is a short job tied to this server and is still cleaned up. */
-const SURVIVES_SHUTDOWN = /^(live_.+status.*|.+_state|copy_trade_status|options_screener_status|focus_tool_.+status.*)\.json$/;
+const SURVIVES_SHUTDOWN = /^(live_.+status.*|.+_state|copy_trade_status|options_screener_status|focus_tool_.+status.*|crudeoilm?_oi_collector_status)\.json$/;
 
 function cleanupAllProcesses() {
   if (isShuttingDown) return;
@@ -202,5 +203,10 @@ if (process.env.DASHBOARD_NO_BACKGROUND === '1') {
   // charts are built only from that log). Idle outside the session.
   import('./lib/pnfAlwaysRecord').then(m => m.startPnfAlwaysRecord()).catch(err => {
     console.warn('[pnf-always-record] could not start:', err);
+  });
+  // Fresh Money's CRUDEOIL / CRUDEOILM boards: start their OI collectors for each MCX session (holidays and hours from
+  // lib/mcxSession), so nobody has to press Start. A Stop on the page keeps one off for that day. Market data only.
+  import('./lib/crudeCollector').then(m => m.startCrudeCollectorScheduler()).catch(err => {
+    console.warn('[crude-collector] could not start the scheduler:', err);
   });
 }

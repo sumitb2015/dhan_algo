@@ -27,6 +27,8 @@ export interface BridgeSpawn {
   logFile: string;
   /** Console prefix, e.g. `[price-ladder]`. */
   tag: string;
+  /** Extra script arguments (the Fresh Money board runs price_ladder_ws.py with `--name fresh_money`). */
+  args?: string[];
 }
 
 /**
@@ -34,7 +36,7 @@ export interface BridgeSpawn {
  * has had time to write its heartbeat; a crash before then is retried by the caller's own start interval. The bridge itself
  * refuses to run twice.
  */
-export function startBridge({ script, lockFile, logFile, tag }: BridgeSpawn): void {
+export function startBridge({ script, lockFile, logFile, tag, args = [] }: BridgeSpawn): void {
   const name = script.split(/[\\/]/).pop();
   try {
     try {
@@ -44,7 +46,7 @@ export function startBridge({ script, lockFile, logFile, tag }: BridgeSpawn): vo
       fs.writeFileSync(lockFile, String(process.pid));
     }
     const log = fs.openSync(logFile, 'a');
-    const child = spawn(PYTHON_EXE, [script], { cwd: PROJECT_ROOT, detached: true, stdio: ['ignore', log, log], windowsHide: true });
+    const child = spawn(PYTHON_EXE, [script, ...args], { cwd: PROJECT_ROOT, detached: true, stdio: ['ignore', log, log], windowsHide: true });
     child.on('error', err => console.warn(`${tag} price bridge failed to start:`, err.message));
     child.unref();
     fs.closeSync(log);

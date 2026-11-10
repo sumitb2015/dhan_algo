@@ -1,98 +1,29 @@
 import { NextRequest, NextResponse } from 'next/server';
-import path from 'path';
-import fs from 'fs';
-import { spawn } from 'child_process';
-import { isPidRunning } from '@/lib/processCheck';
-import { PYTHON_EXE } from '@/lib/pyExec';
+import { collectorStatus, parseCrudeUnderlying, startCollector, stopCollector } from '@/lib/crudeCollector';
 
-const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
-const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
-const COLLECTOR      = path.join(PROJECT_ROOT, 'scripts', 'tools', 'crudeoil_oi_collector.py');
-// One collector per underlying, each with its own files (crudeoil_oi_* / crudeoilm_oi_*), so both can run at once.
-// Absent `underlying` = CRUDEOIL, the original behaviour.
-const UNDERLYINGS = new Set(['CRUDEOIL', 'CRUDEOILM']);
-const pick = (raw: unknown): string | null => {
-  const u = raw == null || raw === '' ? 'CRUDEOIL' : String(raw).toUpperCase();
-  return UNDERLYINGS.has(u) ? u : null;
-};
-const START_GRACE_MS = 20_000;
-const recentStarts = new Map<string, number>();
-const statusFile  = (u: string) => path.join(DEBUG_DIR, `${u.toLowerCase()}_oi_collector_status.json`);
-const stopTrigger = (u: string) => path.join(DEBUG_DIR, `${u.toLowerCase()}_oi_stop.trigger`);
+// Start / stop / status of the MCX OI collector, one per underlying (CRUDEOIL, CRUDEOILM; absent = CRUDEOIL, the original
+// behaviour). The logic lives in lib/crudeCollector.ts, shared with the server's auto-start scheduler: the dashboard
+// starts both collectors for the MCX session by itself; Stop keeps one off for the rest of the day, Start brings it back.
 
-interface CollectorStatus { pid?: number | string; status?: string; reason?: string; [k: string]: unknown }
-
-function readJson(file: string): CollectorStatus | null {
-  try {
-    if (!fs.existsSync(file)) return null;
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-/** GET — return collector status (PID cross-checked to detect crashes) */
+/** GET — collector status (PID cross-checked to detect crashes) */
 export async function GET(request: NextRequest) {
-  const u = pick(new URL(request.url).searchParams.get('underlying'));
+  const u = parseCrudeUnderlying(new URL(request.url).searchParams.get('underlying'));
   if (!u) return NextResponse.json({ success: false, error: 'underlying must be CRUDEOIL or CRUDEOILM' }, { status: 400 });
-  const status = readJson(statusFile(u));
-
-  // WAITING = started before the open (or an evening-only day) and alive: as good as running for Start/Stop.
-  if (status && status.pid && (status.status === 'RUNNING' || status.status === 'WAITING')) {
-    if (!isPidRunning(Number(status.pid))) {
-      status.status = 'STOPPED';
-      status.reason = 'crashed';
-    }
-  }
-
-  return NextResponse.json({
-    success: true,
-    status: status ?? { status: 'STOPPED' },
-  });
+  return NextResponse.json({ success: true, status: collectorStatus(u) });
 }
 
-/** POST — start or stop the OI snapshot collector */
+/** POST — {action: 'start' | 'stop', underlying} */
 export async function POST(request: NextRequest) {
-  const body = await request.json().catch(() => ({}));
-  const action: string = body.action ?? '';
-  const u = pick(body.underlying);
+  const body = await request.json().catch(() => ({})) as { action?: string; underlying?: string };
+  const u = parseCrudeUnderlying(body.underlying);
   if (!u) return NextResponse.json({ success: false, error: 'underlying must be CRUDEOIL or CRUDEOILM' }, { status: 400 });
-  const STATUS_FILE = statusFile(u);
-  const STOP_TRIGGER = stopTrigger(u);
-
-  if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
-
-  if (action === 'stop') {
-    fs.writeFileSync(STOP_TRIGGER, '');
-    return NextResponse.json({ success: true, message: 'Stop trigger written' });
+  if (body.action === 'stop') {
+    stopCollector(u);
+    return NextResponse.json({ success: true, message: 'Stop trigger written — it stays off for today unless started again' });
   }
-
-  if (action === 'start') {
-    // Prevent a duplicate collector
-    const status = readJson(STATUS_FILE);
-    if (status && status.pid && (status.status === 'RUNNING' || status.status === 'WAITING') && isPidRunning(Number(status.pid))) {
-      return NextResponse.json({ success: true, message: 'Collector already running', pid: status.pid });
-    }
-
-    // A collector needs a few seconds to write its first status: a second Start meanwhile must not spawn another.
-    const startedAt = recentStarts.get(u) ?? 0;
-    if (Date.now() - startedAt < START_GRACE_MS) {
-      return NextResponse.json({ success: true, message: 'Collector is starting' });
-    }
-    recentStarts.set(u, Date.now());
-
-    // Clear any stale stop trigger so the fresh process doesn't immediately exit
-    if (fs.existsSync(STOP_TRIGGER)) fs.unlinkSync(STOP_TRIGGER);
-
-    const child = spawn(PYTHON_EXE, [COLLECTOR, '--underlying', u], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-    });
-    child.unref();
-
-    return NextResponse.json({ success: true, message: 'Collector started', pid: child.pid });
+  if (body.action === 'start') {
+    const r = startCollector(u, true);
+    return NextResponse.json({ success: true, message: r.message, ...(r.pid ? { pid: r.pid } : {}) });
   }
-
   return NextResponse.json({ success: false, error: 'Unknown action' }, { status: 400 });
 }

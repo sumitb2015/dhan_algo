@@ -231,7 +231,7 @@ export function TradeBar({
 // ── per strike / side ─────────────────────────────────────────────────────────────────────────────────────────────
 
 export function TradeCell({
-  side, opt, strike, pos, showButtons, canOrder, canClose, busy, onBuy, onSell, onClose, armed,
+  side, opt, strike, pos, showButtons, canOrder, canClose, busy, onBuy, onSell, onClose, armed, ltpSource,
 }: {
   side: 'put' | 'call';
   opt: OptType;
@@ -242,6 +242,8 @@ export function TradeCell({
   canClose: boolean;
   busy: boolean;
   armed: boolean;
+  /** Where the position's LTP came from: the WebSocket ('ws') or the REST fallback. */
+  ltpSource?: 'ws' | 'rest';
   onBuy: () => void;
   onSell: () => void;
   onClose: () => void;
@@ -251,7 +253,7 @@ export function TradeCell({
   const unpriced = pos ? pos.realised === null || (held && pos.avgPrice === null) : false;
   const lotsHeld = pos && pos.lot > 0 ? Math.abs(pos.netQty) / pos.lot : 0;
   const title = pos
-    ? `${held ? `${pos.netQty > 0 ? 'Long' : 'Short'} ${lotsHeld} lot${lotsHeld === 1 ? '' : 's'} @ ${pos.avgPrice?.toFixed(2) ?? 'price pending'} · LTP ${pos.ltp?.toFixed(2) ?? '–'} · ` : ''}booked ${fmtRs(pos.realised)}${pos.realised === null ? ' (a fill price is still pending)' : ''}${pos.busy === 'unknown' ? ' · an order has UNKNOWN status' : ''}`
+    ? `${held ? `${pos.netQty > 0 ? 'Long' : 'Short'} ${lotsHeld} lot${lotsHeld === 1 ? '' : 's'} @ ${pos.avgPrice?.toFixed(2) ?? 'price pending'} · LTP ${pos.ltp?.toFixed(2) ?? '–'}${pos.ltp != null && ltpSource ? (ltpSource === 'ws' ? ' (live)' : ' (REST)') : ''} · ` : ''}booked ${fmtRs(pos.realised)}${pos.realised === null ? ' (a fill price is still pending)' : ''}${pos.busy === 'unknown' ? ' · an order has UNKNOWN status' : ''}`
     : '';
 
   const chip = showChip ? (

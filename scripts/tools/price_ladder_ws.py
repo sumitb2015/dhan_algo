@@ -21,6 +21,10 @@ reader decides freshness from these two stamps, never from the file's write time
 
 Started by the dashboard on demand (O_EXCL start lock); exits on debug/price_ladder_ws_stop.trigger or after
 IDLE_EXIT_SEC with nothing wanted. Read-only: no orders.
+
+`--name <consumer>` runs the same bridge for another page under its own hub registration and files
+(debug/<name>_ws_wanted_*.json -> debug/<name>_ws_quotes.json, <name>_ws_status.json, <name>_ws_stop.trigger), so the
+two never overwrite each other's wanted list. The Fresh Money board uses `--name fresh_money`. Default: price_ladder.
 """
 import glob
 import json
@@ -36,12 +40,20 @@ sys.path.insert(0, ROOT)
 from lib import market_hub_client as hub_client
 
 DEBUG_DIR = os.path.join(ROOT, 'debug')
-WANTED_GLOB = os.path.join(DEBUG_DIR, 'price_ladder_ws_wanted_*.json')
-QUOTES_FILE = os.path.join(DEBUG_DIR, 'price_ladder_ws_quotes.json')
-STATUS_FILE = os.path.join(DEBUG_DIR, 'price_ladder_ws_status.json')
-STOP_TRIGGER = os.path.join(DEBUG_DIR, 'price_ladder_ws_stop.trigger')
+def _consumer_name(argv) -> str:
+    """`--name x` (lowercase letters / underscore only, it becomes file names); anything else = price_ladder."""
+    if '--name' in argv:
+        i = argv.index('--name')
+        if i + 1 < len(argv) and argv[i + 1].replace('_', '').isalpha() and argv[i + 1].islower():
+            return argv[i + 1]
+    return 'price_ladder'
 
-CONSUMER = 'price_ladder'
+
+CONSUMER = _consumer_name(sys.argv[1:])
+WANTED_GLOB = os.path.join(DEBUG_DIR, f'{CONSUMER}_ws_wanted_*.json')
+QUOTES_FILE = os.path.join(DEBUG_DIR, f'{CONSUMER}_ws_quotes.json')
+STATUS_FILE = os.path.join(DEBUG_DIR, f'{CONSUMER}_ws_status.json')
+STOP_TRIGGER = os.path.join(DEBUG_DIR, f'{CONSUMER}_ws_stop.trigger')
 # Dhan marketfeed segment codes (live_options_ws.py uses the same).
 SEGMENTS = {'IDX_I': 0, 'NSE_FNO': 2, 'MCX_COMM': 5, 'BSE_FNO': 8}
 FEED_QUOTE = 17          # Quote packets: an MCX contract sends nothing in Full mode while shut (MCX_SNAPSHOT_NOTE)
@@ -125,10 +137,10 @@ def main() -> None:
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     os.makedirs(DEBUG_DIR, exist_ok=True)
     if another_bridge_alive():
-        print('[price_ladder_ws] another bridge is already running — exiting', flush=True)
+        print(f'[{CONSUMER}_ws] another bridge is already running — exiting', flush=True)
         return
     started = datetime.now().isoformat()
-    print(f'[price_ladder_ws] started pid={os.getpid()}', flush=True)
+    print(f'[{CONSUMER}_ws] started pid={os.getpid()}', flush=True)
 
     since: dict = {}          # key -> ms we started asking for it
     last_fp: dict = {}        # key -> tick fingerprint last seen while asked for
@@ -145,7 +157,7 @@ def main() -> None:
                     os.remove(STOP_TRIGGER)
                 except OSError:
                     pass
-                print('[price_ladder_ws] stop trigger — exiting', flush=True)
+                print(f'[{CONSUMER}_ws] stop trigger — exiting', flush=True)
                 break
 
             wanted, depth_wanted = read_wanted()
@@ -172,7 +184,7 @@ def main() -> None:
             if wanted:
                 idle_since = t
             elif t - idle_since > IDLE_EXIT_SEC:
-                print('[price_ladder_ws] nothing wanted for 10 min — exiting', flush=True)
+                print(f'[{CONSUMER}_ws] nothing wanted for 10 min — exiting', flush=True)
                 break
 
             if t - last_write >= WRITE_SEC:

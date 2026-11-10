@@ -2,16 +2,15 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BadgeIndianRupee, AlertTriangle } from 'lucide-react';
-import {
-  ComposedChart, Area, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-} from 'recharts';
 import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
+import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
 import { fmtOi, fmtPct, intensity, type Intensity, type Range } from '@/lib/freshMoney';
 import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades } from './freshMoney/trading';
 import { usePageBroker } from './BrokerPicker';
 import CollectorControl from './freshMoney/CollectorControl';
+import FreshChart from './freshMoney/FreshChart';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
 const MCX_UNDERLYINGS: ReadonlySet<string> = new Set(['CRUDEOIL', 'CRUDEOILM']);
@@ -20,14 +19,12 @@ const POLL_MS = 30_000;
 const PREF_UNDERLYING = 'freshMoney.underlying';
 const PREF_CHART_H = 'freshMoney.chartHeight.v2';
 const PREF_LOTS = 'freshMoney.lots';
+const LIVE_POLL_MS = 2_000;
 const CHART_DEFAULT_H = 340;
 const CHART_MIN_H = 160;
 const CHART_MAX_H = 760;
 /** Fallback chart span (NSE) until the board reply says which session it covers. */
 const NSE_DAY = { from: 9 * 60 + 15, to: 15 * 60 + 30 };
-
-const PUT_COLOR = 'var(--color-emerald-400)';
-const CALL_COLOR = 'var(--color-red-400)';
 
 // Literal class strings (Tailwind cannot see interpolated ones).
 const BAR_CLASS: Record<'put' | 'call', Record<'fill' | 'outline', Record<Intensity, string>>> = {
@@ -52,6 +49,7 @@ interface RowTrade {
   canOrder: boolean;
   canClose: boolean;
   armed: boolean;
+  ltpSource: Record<string, 'ws' | 'rest'>;
   busy: (opt: OptType) => boolean;
   order: (opt: OptType, side: TxnSide) => void;
   close: (p: FmPosition) => void;
@@ -64,9 +62,6 @@ function writePref(key: string, v: string) {
   try { window.localStorage.setItem(key, v); } catch { /* storage blocked */ }
 }
 
-function hhmm(m: number): string {
-  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-}
 
 function rangeText(r: Range | null): string {
   return r ? `${Math.round(r.lo * 100)}-${Math.round(r.hi * 100)}%` : '–';
@@ -101,7 +96,8 @@ function BoardRowView({ row, max, normal, boxed, trade }: {
     return (
       <TradeCell
         side={side} opt={opt} strike={row.strike} pos={side === 'put' ? trade.put : trade.call}
-        showButtons={trade.showButtons && has} canOrder={trade.canOrder} canClose={trade.canClose} armed={trade.armed} busy={trade.busy(opt)}
+        showButtons={trade.showButtons && has} canOrder={trade.canOrder} canClose={trade.canClose} armed={trade.armed}
+        ltpSource={(() => { const p = side === 'put' ? trade.put : trade.call; return p ? trade.ltpSource[p.priceId] : undefined; })()} busy={trade.busy(opt)}
         onBuy={() => trade.order(opt, 'BUY')} onSell={() => trade.order(opt, 'SELL')}
         onClose={() => { const pos = side === 'put' ? trade.put : trade.call; if (pos) trade.close(pos); }}
       />
@@ -126,95 +122,17 @@ function BoardRowView({ row, max, normal, boxed, trade }: {
   );
 }
 
-function SpotDivider({ spot }: { spot: number }) {
+function SpotDivider({ spot, live }: { spot: number; live: boolean }) {
   return (
-    <div className="relative flex h-[21px] items-center" aria-label={`Spot ${spot.toFixed(2)}`}>
+    <div className="relative flex h-[21px] items-center" aria-label={`Spot ${spot.toFixed(2)}${live ? ' (live)' : ' (last snapshot)'}`}>
       <div className="absolute inset-x-0 top-1/2 border-t border-dashed border-amber-400/70" />
-      <span className="relative mx-auto bg-zinc-900 px-1.5 text-[13px] font-bold tabular-nums text-amber-300">
+      <span
+        className="relative mx-auto flex items-center gap-1 bg-zinc-900 px-1.5 text-[13px] font-bold tabular-nums text-amber-300"
+        title={live ? 'Live price from the Dhan WebSocket' : 'Price from the last board snapshot (no live WebSocket price yet)'}
+      >
+        {live && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" aria-hidden />}
         {spot.toFixed(2)}
       </span>
-    </div>
-  );
-}
-
-interface ChartPoint {
-  m: number;
-  puts: number | null;
-  calls: number | null;
-  putBand: [number, number] | null;
-  callBand: [number, number] | null;
-}
-
-function ChartTooltip({ active, payload }: { active?: boolean; payload?: Array<{ payload: ChartPoint }> }) {
-  const d = payload?.[0]?.payload;
-  if (!active || !d) return null;
-  const band = (b: [number, number] | null) => (b ? `${b[0].toFixed(0)}-${b[1].toFixed(0)}%` : '–');
-  const v = (x: number | null) => (x === null ? '–' : `${x.toFixed(1)}%`);
-  return (
-    <div className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[11px] tabular-nums shadow-lg">
-      <div className="mb-1 font-bold text-zinc-200">{hhmm(d.m)}</div>
-      <div className="text-emerald-400">puts {v(d.puts)} <span className="text-zinc-500">normal {band(d.putBand)}</span></div>
-      <div className="text-red-400">calls {v(d.calls)} <span className="text-zinc-500">normal {band(d.callBand)}</span></div>
-    </div>
-  );
-}
-
-function FreshChart({ data, height, showBand }: { data: FreshMoneyResponse; height: number; showBand: boolean }) {
-  const points = useMemo<ChartPoint[]>(() => {
-    const s = new Map(data.series.map(p => [p.m, p] as const));
-    const b = new Map(data.band.map(p => [p.m, p] as const));
-    const out: ChartPoint[] = [];
-    for (let m = data.day.from; m <= data.day.to; m++) {
-      const sp = s.get(m), bp = showBand ? b.get(m) : undefined;
-      out.push({
-        m,
-        puts: sp?.puts != null ? sp.puts * 100 : null,
-        calls: sp?.calls != null ? sp.calls * 100 : null,
-        putBand: bp ? [bp.putLo * 100, bp.putHi * 100] : null,
-        callBand: bp ? [bp.callLo * 100, bp.callHi * 100] : null,
-      });
-    }
-    return out;
-  }, [data.series, data.band, data.day, showBand]);
-
-  const yMax = useMemo(() => {
-    let mx = 0;
-    for (const p of points) {
-      mx = Math.max(mx, p.puts ?? 0, p.calls ?? 0, p.putBand?.[1] ?? 0, p.callBand?.[1] ?? 0);
-    }
-    return Math.max(40, Math.ceil(mx / 20) * 20);
-  }, [points]);
-  const yTicks = useMemo(() => Array.from({ length: yMax / 20 + 1 }, (_, i) => i * 20), [yMax]);
-  // Hourly ticks on the session's own minute (09:15, 10:15 … on NSE; 09:00, 11:00 … every 2 h on MCX's long day).
-  const xTicks = useMemo(() => {
-    const step = data.day.to - data.day.from > 8 * 60 ? 120 : 60;
-    const out: number[] = [];
-    for (let m = data.day.from; m <= data.day.to; m += step) out.push(m);
-    return out;
-  }, [data.day]);
-
-  return (
-    <div style={{ height }}>
-      <ResponsiveContainer width="100%" height="100%">
-        <ComposedChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: -18 }}>
-          <CartesianGrid vertical={false} strokeDasharray="0" strokeOpacity={0.35} />
-          <XAxis dataKey="m" type="number" domain={[data.day.from, data.day.to]} ticks={xTicks} tickFormatter={hhmm}
-            tick={{ fontSize: 11 }} tickLine={false} />
-          <YAxis domain={[0, yMax]} ticks={yTicks} tickFormatter={(v: number) => `${v}%`} tick={{ fontSize: 11 }}
-            tickLine={false} axisLine={false} width={50} />
-          <Tooltip content={<ChartTooltip />} cursor={{ stroke: 'var(--chart-cursor-line)', strokeWidth: 1 }} />
-          {showBand && (
-            <>
-              <Area dataKey="putBand" stroke="none" fill={PUT_COLOR} fillOpacity={0.14} isAnimationActive={false}
-                connectNulls={false} activeDot={false} />
-              <Area dataKey="callBand" stroke="none" fill={CALL_COLOR} fillOpacity={0.14} isAnimationActive={false}
-                connectNulls={false} activeDot={false} />
-            </>
-          )}
-          <Line dataKey="calls" stroke={CALL_COLOR} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
-          <Line dataKey="puts" stroke={PUT_COLOR} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
-        </ComposedChart>
-      </ResponsiveContainer>
     </div>
   );
 }
@@ -311,12 +229,38 @@ export default function FreshMoneyBoard() {
     return mx;
   }, [data]);
 
+  // Live spot from the WebSocket (today's board only: a live price over an old session's OI would mislead). Falls back
+  // to the board snapshot's spot when there is no fresh WebSocket price.
+  const [live, setLive] = useState<{ key: string; spot: number } | null>(null);
+  const liveKey = data?.isToday ? `${underlying}|${data.expiry}` : null;
+  useEffect(() => {
+    if (!liveKey) return;
+    const [u, expiry] = liveKey.split('|');
+    let alive = true;
+    let my = 0;
+    const tick = async () => {
+      if (document.hidden) return;
+      const n = ++my;
+      try {
+        const r = await fetch(`/api/fresh-money/live?underlying=${u}&expiry=${expiry}`, { cache: 'no-store' });
+        const j = (await r.json()) as FreshMoneyLive;
+        if (!alive || n !== my) return;
+        setLive(j.spot && j.spot > 0 ? { key: liveKey, spot: j.spot } : null);
+      } catch { /* keep the last value; the next tick retries */ }
+    };
+    tick();
+    const id = setInterval(tick, LIVE_POLL_MS);
+    return () => { alive = false; clearInterval(id); };
+  }, [liveKey]);
+  const liveSpot = live && live.key === liveKey ? live.spot : null;
+  const spot = liveSpot ?? data?.spot ?? null;
+
   const boxedStrike = useMemo(() => {
-    if (!data?.spot || !data.rows.length) return null;
+    if (!spot || !data?.rows.length) return null;
     let best = data.rows[0].strike;
-    for (const r of data.rows) if (Math.abs(r.strike - data.spot) < Math.abs(best - data.spot)) best = r.strike;
+    for (const r of data.rows) if (Math.abs(r.strike - spot) < Math.abs(best - spot)) best = r.strike;
     return best;
-  }, [data]);
+  }, [data, spot]);
 
   const historyLabel = data ? `${Math.min(data.historyDays, 14)}d` : '14d';
   const hasNormal = !!(data?.normal.puts && data?.normal.calls);
@@ -369,12 +313,13 @@ export default function FreshMoneyBoard() {
       showButtons: armed && tradable,
       canOrder: armed && tradable && !blocked,
       canClose: armed && session !== 'closed',
+      ltpSource: ts?.ltpSource ?? {},
       armed,
       busy: opt => inflight.has(lockKey(broker, underlying, strike, opt)),
       order: (opt, side) => sendOrder({ broker, underlying, expiry: data.expiry, strike, opt, side, lots }),
       close: p => sendClose(p),
     };
-  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, lots]);
+  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, lots, ts]);
   const setLotsPref = (n: number) => { setLots(n); writePref(PREF_LOTS, String(n)); };
 
   return (
@@ -487,11 +432,11 @@ export default function FreshMoneyBoard() {
               </div>
               {data.rows.map((r, i) => {
                 const next = data.rows[i + 1];
-                const divider = data.spot !== null && next && r.strike > data.spot && next.strike <= data.spot;
+                const divider = spot !== null && next && r.strike > spot && next.strike <= spot;
                 return (
                   <React.Fragment key={r.strike}>
                     <BoardRowView row={r} max={maxAbs} normal={data.normal} boxed={r.strike === boxedStrike} trade={rowTrade(r.strike)} />
-                    {divider && <SpotDivider spot={data.spot!} />}
+                    {divider && <SpotDivider spot={spot!} live={liveSpot !== null} />}
                   </React.Fragment>
                 );
               })}
@@ -517,8 +462,7 @@ export default function FreshMoneyBoard() {
             </div>
 
             <div className="px-4 pb-3">
-              <div className="mb-1 text-[11.5px] text-zinc-400">Fresh money through the day · rolling 5 min</div>
-              <FreshChart data={data} height={chartH} showBand={data.band.length > 0} />
+              <FreshChart data={data} height={chartH} />
             </div>
           </div>
         )}

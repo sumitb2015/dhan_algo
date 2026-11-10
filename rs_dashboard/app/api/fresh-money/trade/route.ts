@@ -10,6 +10,7 @@ import { mcxSession } from '@/lib/mcxSession';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { resolveOption } from '@/lib/pnfContracts';
 import { fetchLtps } from '@/lib/dhanEquityQuote';
+import { wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
 import { dedupe } from '@/lib/pyExec';
 import { parsedDay } from '@/lib/freshMoneyFiles';
 import {
@@ -104,24 +105,40 @@ const istMinuteNow = () => { const d = new Date(Date.now() + 19_800_000); return
 
 // ── broker reads ──────────────────────────────────────────────────────────────────────────────────────────────────
 
-let ltpCache: { at: number; ids: string; data: Record<string, number> } | null = null;
+let restCache: { at: number; ids: string; data: Record<string, number> } | null = null;
 
-/** Last prices through the shared quote lane; the previous answer on a failed call, else {} (P&L shows unknown). */
-async function ltpsFor(items: { id: string; segment: FmSegment }[]): Promise<Record<string, number>> {
-  if (!items.length) return {};
-  const key = items.map(i => `${i.segment}:${i.id}`).sort().join(',');
-  if (ltpCache && ltpCache.ids === key && Date.now() - ltpCache.at < 1_500) return ltpCache.data;
-  try {
-    const data: Record<string, number> = {};
-    for (const seg of ['NSE_FNO', 'MCX_COMM'] as const) {
-      const ids = items.filter(i => i.segment === seg).map(i => i.id);
-      if (ids.length) Object.assign(data, await fetchLtps(seg, ids));
-    }
-    ltpCache = { at: Date.now(), ids: key, data };
-    return data;
-  } catch {
-    return ltpCache && ltpCache.ids === key ? ltpCache.data : {};
+/**
+ * Option LTPs for P&L: the WebSocket first (lib/freshMoneyWs.ts — asked for every open position, so its subscription is
+ * kept alive while the position is open), REST only for the ones without a usable WebSocket price yet (a fresh
+ * subscription, the bridge starting, the hub down). `source` says which one each price came from.
+ */
+async function ltpsFor(items: { id: string; segment: FmSegment }[]): Promise<{ ltps: Record<string, number>; source: Record<string, 'ws' | 'rest'> }> {
+  const ltps: Record<string, number> = {};
+  const source: Record<string, 'ws' | 'rest'> = {};
+  if (!items.length) { wsSync(); return { ltps, source }; }
+  const missing: { id: string; segment: FmSegment }[] = [];
+  for (const i of items) {
+    const q = wsPrice(wsWant(i.segment, i.id));
+    if (q) { ltps[i.id] = q.ltp; source[i.id] = 'ws'; } else missing.push(i);
   }
+  wsSync();
+  if (!missing.length) return { ltps, source };
+  const key = missing.map(i => `${i.segment}:${i.id}`).sort().join(',');
+  let rest: Record<string, number> = {};
+  if (restCache && restCache.ids === key && Date.now() - restCache.at < 1_500) rest = restCache.data;
+  else {
+    try {
+      for (const seg of ['NSE_FNO', 'MCX_COMM'] as const) {
+        const ids = missing.filter(i => i.segment === seg).map(i => i.id);
+        if (ids.length) Object.assign(rest, await fetchLtps(seg, ids));
+      }
+      restCache = { at: Date.now(), ids: key, data: rest };
+    } catch {
+      rest = restCache && restCache.ids === key ? restCache.data : {};
+    }
+  }
+  for (const i of missing) if (rest[i.id] > 0) { ltps[i.id] = rest[i.id]; source[i.id] = 'rest'; }
+  return { ltps, source };
 }
 
 // Per-order re-read schedule (backoff), so a few settled-late orders cannot hog the reads and none is starved.
@@ -218,6 +235,8 @@ export interface FreshMoneyTradeState {
   /** Per underlying: 'open' = new positions allowed, 'close-only' after the cutoff, 'closed' outside the session. */
   sessions: Record<string, { gate: SessionGate; note: string | null }>;
   boardExpiry: Record<string, string | null>;
+  /** Where each open position's LTP came from, by priceId: the WebSocket, or the REST fallback. */
+  ltpSource: Record<string, 'ws' | 'rest'>;
   /** Whether each broker's session is usable (token present and not expired). */
   brokers: Record<FmBroker, boolean>;
   positions: FmPosition[];
@@ -230,7 +249,7 @@ async function buildState(): Promise<FreshMoneyTradeState> {
   const ledger = loadLedger();
   const now = Date.now();
   const pre = buildPositions(ledger.orders, {}, now);
-  const ltps = await ltpsFor(pre.filter(p => p.netQty !== 0).map(p => ({ id: p.priceId, segment: p.segment })));
+  const { ltps, source: ltpSource } = await ltpsFor(pre.filter(p => p.netQty !== 0).map(p => ({ id: p.priceId, segment: p.segment })));
   const boardExpiry: Record<string, string | null> = {};
   for (const u of TRADABLE) boardExpiry[u] = (await todaysBoard(u).catch(() => null))?.expiry ?? null;
   const sessions: FreshMoneyTradeState['sessions'] = {};
@@ -242,6 +261,7 @@ async function buildState(): Promise<FreshMoneyTradeState> {
     maxPositionLots: FM_MAX_POSITION_LOTS,
     sessions,
     boardExpiry,
+    ltpSource,
     brokers: { dhan: brokerSessionOk('dhan'), kotak: brokerSessionOk('kotak'), zerodha: brokerSessionOk('zerodha') },
     positions: buildPositions(ledger.orders, ltps, now),
     orders: ledger.orders.slice(-40).reverse().map(o => ({ ...o, effState: effectiveState(o, now) })),
