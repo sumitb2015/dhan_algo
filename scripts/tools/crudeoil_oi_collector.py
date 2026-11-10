@@ -91,6 +91,23 @@ def market_session(d: date):
     return open_, close
 
 
+def fetch_futures_price(helper, futures_sid: int, tries: int, gap: float = 2.5) -> float:
+    """The futures LTP, retried a few times with a gap: Dhan's quote endpoint is rate limited per ACCOUNT (~1 req/s) and
+    shared with every other bridge and page, so a single call fails often (a failed call returns None, no exception).
+    0.0 when every try failed."""
+    for i in range(tries):
+        try:
+            price = helper.get_ltp(futures_sid, exchange="MCX", instrument="FUTCOM")
+        except Exception as exc:  # network / SDK error: same as no price
+            log.warning('Futures LTP attempt %d failed: %s', i + 1, exc)
+            price = None
+        if price and price > 0:
+            return float(price)
+        if i + 1 < tries:
+            time.sleep(gap)
+    return 0.0
+
+
 def market_close(d: date) -> tuple:
     sess = market_session(d)
     return sess[1] if sess else MARKET_OPEN
@@ -294,14 +311,11 @@ def main():
         log.info('Auto-selected options expiry: %s', expiry)
 
     # ── Lock ATM from futures price ───────────────────────────────────
-    spot = 0.0
-    ohlc_raw = helper.get_ohlc_data({"MCX_COMM": [futures_sid]})
-    spot = ohlc_raw.get("MCX_COMM", {}).get(str(futures_sid), {}).get("last_price") or 0.0
-    if not spot:
-        spot = helper.get_ltp(futures_sid, exchange="MCX", instrument="FUTCOM") or 0.0
-    
+    spot = fetch_futures_price(helper, futures_sid, tries=8)
     if spot <= 0:
-        log.error('Could not fetch futures price for Crude Oil spot reference')
+        log.error('Could not fetch the %s futures price after 8 tries - exiting', UNDERLYING)
+        # Say why instead of dying silently: the dashboard starts this detached with its output discarded.
+        write_status(status='STOPPED', underlying=UNDERLYING, reason='no_futures_price')
         sys.exit(1)
 
     atm     = round(spot / STRIKE_STEP) * STRIKE_STEP
@@ -323,6 +337,10 @@ def main():
 
     # ── Main loop ─────────────────────────────────────────────────────
     iteration = 0
+    # The futures price carried forward when an LTP call fails: the LAST GOOD one, never the price locked at startup
+    # (that wrote the startup price into every other snapshot, so the board's spot jumped back to it).
+    last_good_spot = float(spot)
+    last_good_at = time.time()
     consecutive_failures = 0
 
     while True:
@@ -342,8 +360,15 @@ def main():
         ts = now.strftime('%Y-%m-%d %H:%M:%S')
 
         try:
-            # Refresh futures spot each iteration
-            live_spot = helper.get_ltp(futures_sid, exchange="MCX", instrument="FUTCOM") or spot
+            # Refresh futures spot each iteration (same pattern as iv_snapshot_collector.py's last_good_spot)
+            fetched = fetch_futures_price(helper, futures_sid, tries=2, gap=1.5)
+            if fetched > 0:
+                last_good_spot = float(fetched)
+                last_good_at = time.time()
+            elif time.time() - last_good_at > 120:
+                log.warning('[%s] No fresh %s futures price for %ds - carrying %.2f forward',
+                            ts, UNDERLYING, int(time.time() - last_good_at), last_good_spot)
+            live_spot = last_good_spot
             chain_data = helper.get_option_chain(UNDERLYING, expiry, exchange_segment='MCX_COMM')
             oc = chain_data.get('oc', {}) if chain_data else {}
 

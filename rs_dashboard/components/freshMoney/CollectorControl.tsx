@@ -48,7 +48,7 @@ export default function CollectorControl({ underlying }: { underlying: string })
 
   const waiting = status?.status === 'WAITING';
   const running = status?.status === 'RUNNING' || waiting;
-  const why: Record<string, string> = { crashed: ' (crashed)', mcx_closed_today: ' (MCX closed today)', market_closed: ' (MCX closed for the day)' };
+  const why: Record<string, string> = { no_futures_price: ' (no futures price — try Start again)', crashed: ' (crashed)', mcx_closed_today: ' (MCX closed today)', market_closed: ' (MCX closed for the day)' };
   const label = waiting
     ? 'Collector waiting for the MCX open'
     : running
