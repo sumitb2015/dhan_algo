@@ -12,6 +12,7 @@
  */
 
 import React, { useMemo } from 'react';
+import CollapseToggle from './CollapseToggle';
 import { ArrowDownRight, ArrowRight, ArrowUpRight } from 'lucide-react';
 import {
   Area, CartesianGrid, ComposedChart, Line, ReferenceArea, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -88,7 +89,11 @@ function KeySwatch({ children, label }: { children: React.ReactNode; label: stri
   return <span className="inline-flex items-center gap-1">{children}<span>{label}</span></span>;
 }
 
-export default function FreshChart({ data, height }: { data: FreshMoneyResponse; height: number }) {
+export default function FreshChart({ data, height, collapsed = false, onToggle }: {
+  data: FreshMoneyResponse; height: number;
+  /** Collapsed: only the title, the Puts / Calls chips and the one-line reading stay. */
+  collapsed?: boolean; onToggle?: () => void;
+}) {
   const showBand = data.band.length > 0;
   const domain = useMemo(() => chartDomain(data.series, data.day), [data.series, data.day]);
   const points = useMemo(() => buildChartPoints(data.series, showBand ? data.band : [], domain), [data.series, data.band, showBand, domain]);
@@ -125,6 +130,7 @@ export default function FreshChart({ data, height }: { data: FreshMoneyResponse;
   return (
     <div>
       <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+        {onToggle && <CollapseToggle collapsed={collapsed} onToggle={onToggle} label="the new money chart" controls="fm-chart-body" />}
         <span className="text-[12.5px] font-bold text-zinc-200">New money share</span>
         <span className="text-[11px] text-zinc-500">rolling 5 min · % of each side&apos;s volume that opened or closed positions</span>
         <span className="ml-auto flex items-center gap-1.5">
@@ -133,9 +139,11 @@ export default function FreshChart({ data, height }: { data: FreshMoneyResponse;
           <SideChip name="Calls" dot="bg-red-400" r={reading?.calls ?? null} />
         </span>
       </div>
-      <p className="mb-2 min-h-[18px] text-[12px] text-zinc-300">
+      <p className={`${collapsed ? '' : 'mb-2 '}min-h-[18px] text-[12px] text-zinc-300`}>
         {reading ? reading.text : 'No readings yet today — the first appears 5 minutes after the collector starts.'}
       </p>
+      {!collapsed && (
+      <div id="fm-chart-body">
 
       <div style={{ height }}>
         <ResponsiveContainer width="100%" height="100%">
@@ -181,6 +189,8 @@ export default function FreshChart({ data, height }: { data: FreshMoneyResponse;
         existing holders (churn). Which way the money went, and at which strikes, is in the board above: filled bars building,
         outline bars leaving.
       </p>
+      </div>
+      )}
     </div>
   );
 }

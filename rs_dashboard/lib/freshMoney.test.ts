@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseSnapshotCsv, boardFresh, windowFresh, summarizeDay, percentile, normalAt, bandFromHistory,
-  buildBoardRows, intensity, fmtOi, fmtPct, strikeStep, hasCumulativeVolume, type DaySummary,
+  buildBoardRows, intensity, fmtOi, fmtOiAbs, fmtPct, strikeStep, hasCumulativeVolume, type DaySummary,
 } from './freshMoney.ts';
 
 const HEAD = 'timestamp,spot,expiry,strike,CE_LTP,CE_IV,CE_OI,CE_change_OI,CE_volume,PE_LTP,PE_IV,PE_OI,PE_change_OI,PE_volume';
@@ -145,4 +145,17 @@ test('per-candle (backfilled) volume is detected and impossible >100% shares are
   assert.ok(d.series.every(p => p.calls === null || p.calls <= 1));
   const cum = parseSnapshotCsv([HEAD, row('2026-11-10 09:15:00', 1, 1, 0, 10, 1, 0, 10), row('2026-11-10 09:16:00', 1, 1, 0, 20, 1, 0, 20)].join('\n'));
   assert.equal(hasCumulativeVolume(cum), true);
+});
+
+test('board rows carry total OI next to the change; unsigned OI formatting', () => {
+  const [snap] = parseSnapshotCsv([HEAD, row('2026-11-10 10:00:00', 22550, 750000, 5, 10, 120000, -5, 10)].join('\n'));
+  const rows = buildBoardRows(snap, 1);
+  const r = rows.find(x => x.strike === 22550)!;
+  assert.equal(r.call!.oi, 750000);
+  assert.equal(r.put!.oi, 120000);
+  assert.equal(rows.find(x => x.strike === 22650)!.put, null);   // on the grid, not collected
+  assert.equal(fmtOiAbs(750000), '7.5L');
+  assert.equal(fmtOiAbs(83718), '83,718');
+  assert.equal(fmtOiAbs(-134), '134');
+  assert.equal(fmtOiAbs(null), '–');
 });

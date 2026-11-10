@@ -8,6 +8,7 @@
  */
 
 import React, { useState } from 'react';
+import CollapseToggle from './CollapseToggle';
 import { Loader2, X } from 'lucide-react';
 import type { FreshMoneyTradeState } from '@/app/api/fresh-money/trade/route';
 import type { FmPosition } from '@/lib/freshMoneyTrades';
@@ -34,12 +35,15 @@ const STATE: Record<string, { label: string; cls: string }> = {
 
 type Order = FreshMoneyTradeState['orders'][number];
 
-export default function PositionsOrders({ state, armed, inflight, canClose, onClose }: {
+export default function PositionsOrders({ state, armed, inflight, canClose, onClose, collapsed = false, onToggle }: {
   state: FreshMoneyTradeState | null;
   armed: boolean;
   inflight: ReadonlySet<string>;
   canClose: (p: FmPosition) => boolean;
   onClose: (p: FmPosition) => void;
+  /** Collapsed: only the header row (tabs with counts, P&L totals) stays. */
+  collapsed?: boolean;
+  onToggle?: () => void;
 }) {
   const [tab, setTab] = useState<'positions' | 'orders'>('positions');
   const positions = [...(state?.positions ?? [])]
@@ -56,7 +60,7 @@ export default function PositionsOrders({ state, armed, inflight, canClose, onCl
   const tTotal = tOpen === null || tBooked === null ? null : tOpen + tBooked;
 
   const tabBtn = (id: 'positions' | 'orders', label: string, n: number) => (
-    <button type="button" role="tab" aria-selected={tab === id} onClick={() => setTab(id)}
+    <button type="button" role="tab" aria-selected={tab === id} onClick={() => { setTab(id); if (collapsed) onToggle?.(); }}
       className={`${FOCUS} rounded px-2.5 py-1 text-[12px] font-bold transition-colors ${tab === id ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}>
       {label} <span className="ml-0.5 rounded bg-zinc-800 px-1 text-[10px] text-zinc-300">{n}</span>
     </button>
@@ -64,7 +68,8 @@ export default function PositionsOrders({ state, armed, inflight, canClose, onCl
 
   return (
     <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900">
-      <div className="flex flex-wrap items-center gap-3 border-b border-zinc-800 px-4 py-2">
+      <div className={`flex flex-wrap items-center gap-3 px-4 py-2 ${collapsed ? '' : 'border-b border-zinc-800'}`}>
+        {onToggle && <CollapseToggle collapsed={collapsed} onToggle={onToggle} label="positions and orders" controls="fm-pos-body" />}
         <div role="tablist" aria-label="Positions and orders" className="flex rounded-md border border-zinc-800 bg-zinc-950/40 p-0.5">
           {tabBtn('positions', 'Positions', open)}
           {tabBtn('orders', 'Orders', orders.length)}
@@ -74,7 +79,7 @@ export default function PositionsOrders({ state, armed, inflight, canClose, onCl
             ? "This page's own positions, every broker and underlying (not the broker's pooled net)"
             : "Today's latest orders from this page"}
         </span>
-        {tab === 'positions' && (
+        {(tab === 'positions' || collapsed) && (
           <span className="ml-auto text-[12px] tabular-nums text-zinc-400">
             Open <span className={`font-bold ${pnlClass(tOpen)}`}>{fmtRs(tOpen)}</span>
             {' · '}Booked <span className={`font-bold ${pnlClass(tBooked)}`}>{fmtRs(tBooked)}</span>
@@ -83,7 +88,8 @@ export default function PositionsOrders({ state, armed, inflight, canClose, onCl
         )}
       </div>
 
-      <div className="max-h-[320px] overflow-auto">
+      {!collapsed && (
+      <div id="fm-pos-body" className="max-h-[320px] overflow-auto">
         {tab === 'positions' ? (
           positions.length === 0 ? (
             <p className="px-4 py-6 text-center text-[12px] text-zinc-500">No positions from this page today.</p>
@@ -174,6 +180,7 @@ export default function PositionsOrders({ state, armed, inflight, canClose, onCl
           </table>
         )}
       </div>
+      )}
     </div>
   );
 }

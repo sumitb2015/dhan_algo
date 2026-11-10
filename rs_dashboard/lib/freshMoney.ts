@@ -36,7 +36,8 @@ export interface BandPoint { m: number; putLo: number; putHi: number; callLo: nu
 
 export interface Range { lo: number; hi: number }
 
-export interface BoardSide { oiMoved: number | null; vol: number | null; fresh: number | null }
+/** `oi` = total open interest now; `oiMoved` = its change vs the previous close. */
+export interface BoardSide { oi: number | null; oiMoved: number | null; vol: number | null; fresh: number | null }
 
 export interface BoardRow { strike: number; put: BoardSide | null; call: BoardSide | null }
 
@@ -105,7 +106,7 @@ function sideFresh(s: SideSnap | undefined): BoardSide | null {
   const raw = s.chg !== null && s.vol !== null && s.vol > 0 ? Math.abs(s.chg) / s.vol : null;
   // Above 100% cannot happen (a trade moves OI by at most its size): a data fault, shown as unknown.
   const fresh = raw !== null && raw <= 1 ? raw : null;
-  return { oiMoved: s.chg, vol: s.vol, fresh };
+  return { oi: s.oi, oiMoved: s.chg, vol: s.vol, fresh };
 }
 
 /** Board-level fresh share of one snapshot: Σ|chg| / Σvol per side, over strikes that report both. */
@@ -294,6 +295,15 @@ export function fmtOi(n: number | null): string {
   if (a >= 1e7) return `${sign}${(a / 1e7).toFixed(1)}Cr`;
   if (a >= 1e5) return `${sign}${(a / 1e5).toFixed(1)}L`;
   return `${sign}${Math.round(a).toLocaleString('en-IN')}`;
+}
+
+/** Unsigned OI (a total, not a change): 8,371 below a lakh, 1.9L / 1.2Cr above. */
+export function fmtOiAbs(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return '–';
+  const a = Math.abs(n);
+  if (a >= 1e7) return `${(a / 1e7).toFixed(1)}Cr`;
+  if (a >= 1e5) return `${(a / 1e5).toFixed(1)}L`;
+  return Math.round(a).toLocaleString('en-IN');
 }
 
 export function fmtPct(f: number | null): string {

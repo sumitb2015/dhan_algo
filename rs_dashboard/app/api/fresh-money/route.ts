@@ -19,7 +19,7 @@ const MCX_DAY = { from: 9 * 60, to: 23 * 60 + 55 };
 const HISTORY_DAYS = 14;
 const WINGS = 12;
 
-export interface FreshMoneySide { oiMoved: number | null; fresh: number | null }
+export interface FreshMoneySide { oi: number | null; oiMoved: number | null; fresh: number | null }
 export interface FreshMoneyRow { strike: number; put: FreshMoneySide | null; call: FreshMoneySide | null }
 
 export interface FreshMoneyResponse {
@@ -115,8 +115,8 @@ export async function GET(req: NextRequest) {
   const toLots = (n: number | null) => (n === null ? null : lot ? n / lot : n);
   const rows: FreshMoneyRow[] = buildBoardRows(last, WINGS).map(r => ({
     strike: r.strike,
-    put: r.put ? { oiMoved: toLots(r.put.oiMoved), fresh: r.put.fresh } : null,
-    call: r.call ? { oiMoved: toLots(r.call.oiMoved), fresh: r.call.fresh } : null,
+    put: r.put ? { oi: toLots(r.put.oi), oiMoved: toLots(r.put.oiMoved), fresh: r.put.fresh } : null,
+    call: r.call ? { oi: toLots(r.call.oi), oiMoved: toLots(r.call.oiMoved), fresh: r.call.fresh } : null,
   }));
 
   const body: FreshMoneyResponse = {
