@@ -36,9 +36,10 @@ async function reconcile(tag: string): Promise<string | null> {
   return null;
 }
 
-/** `params` is Kite's own /orders/regular form body; a tag is added so an unclean reply can be reconciled. */
-export async function placeZerodhaOrder(params: Record<string, string | number>): Promise<ZerodhaPlaceResult> {
-  const tag = newOrderTag();
+/** `params` is Kite's own /orders/regular form body; a tag is added so an unclean reply can be reconciled. A caller that
+ *  keeps its own ledger may pass the tag (alphanumeric, <= 20 chars) so it can look an UNKNOWN order up again later. */
+export async function placeZerodhaOrder(params: Record<string, string | number>, ownTag?: string): Promise<ZerodhaPlaceResult> {
+  const tag = ownTag && /^[A-Za-z0-9]{1,20}$/.test(ownTag) ? ownTag : newOrderTag();
   try {
     const data = await kitePost('/orders/regular', { ...params, tag }) as { order_id?: unknown } | null;
     if (data?.order_id) return { status: 'placed', orderId: String(data.order_id), reconciled: false };

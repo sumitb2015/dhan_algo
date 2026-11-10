@@ -11,6 +11,7 @@
 export type OptType = 'CE' | 'PE';
 export type FmSegment = 'NSE_FNO' | 'MCX_COMM';
 export type TxnSide = 'BUY' | 'SELL';
+export type FmBroker = 'dhan' | 'kotak' | 'zerodha';
 /** sending = written before the request went out; pending = acknowledged, not yet (fully) traded; unknown = no clean
  *  reply and not found by correlationId — it MAY be live (Invariant 14). */
 export type OrderState = 'sending' | 'pending' | 'partial' | 'filled' | 'rejected' | 'cancelled' | 'unknown';
@@ -22,11 +23,16 @@ export interface FmOrder {
   expiry: string;
   strike: number;
   opt: OptType;
+  /** The broker's contract handle: Dhan's security id, or the Kotak / Zerodha trading symbol. */
   securityId: string;
+  /** Broker the order went to; absent on records written before broker choice = Dhan. */
+  broker?: FmBroker;
+  /** Dhan security id the LTP is read with (prices always come from Dhan). Absent = `securityId` (a Dhan order). */
+  priceId?: string;
   /** Order segment; absent on records written before MCX support = NSE_FNO. */
   segment?: FmSegment;
-  lot: number;                // order quantity per lot: the lot size on NSE, 1 on MCX (Dhan takes MCX qty in lots)
-  /** Rupee multiplier per unit of qty for P&L: 1 on NSE (qty is already units), barrels per lot on MCX. Absent = 1. */
+  lot: number;                // order quantity per lot, in the broker's unit: NSE lot size; MCX 1 (Dhan/Zerodha: lots) or barrels per lot (Kotak)
+  /** Rupee multiplier per unit of qty for P&L: 1 when qty is already units/barrels, barrels per lot when qty is MCX lots. */
   mult?: number;
   side: TxnSide;
   qty: number;                // order quantity as sent (units on NSE, lots on MCX)
@@ -45,7 +51,11 @@ export interface FmOrder {
 export interface FmLedger { date: string; orders: FmOrder[] }
 
 export interface FmPosition {
+  /** `broker|securityId`: Kotak and Zerodha trading symbols can coincide, so a contract is only unique per broker. */
+  key: string;
+  broker: FmBroker;
   securityId: string;
+  priceId: string;
   segment: FmSegment;
   mult: number;
   underlying: string;
@@ -77,6 +87,9 @@ export const UNCONFIRMED_COUNT_MS = 10 * 60_000;
 /** The broker's position book lags a fresh fill: do not reconcile a contract against it this soon after an order. */
 export const RECONCILE_GRACE_MS = 20_000;
 
+/** A position / contract key: the same contract on two brokers is two positions. */
+export const orderKey = (o: Pick<FmOrder, 'broker' | 'securityId'>) => `${o.broker ?? 'dhan'}|${o.securityId}`;
+
 const TERMINAL: ReadonlySet<OrderState> = new Set(['filled', 'rejected', 'cancelled']);
 export const isTerminal = (s: OrderState) => TERMINAL.has(s);
 
@@ -100,10 +113,10 @@ export function stateFromBroker(orderStatus: string, filledQty: number, qty: num
 
 /** Signed units of this contract's orders that may still turn into position: UNKNOWN / sending / pending orders' unfilled
  *  remainder. Counted toward the position cap as if they fill (an UNKNOWN order may be live). */
-export function unconfirmedQty(orders: FmOrder[], securityId: string, now: number, side?: TxnSide): number {
+export function unconfirmedQty(orders: FmOrder[], key: string, now: number, side?: TxnSide): number {
   let q = 0;
   for (const o of orders) {
-    if (o.securityId !== securityId || (side && o.side !== side)) continue;
+    if (orderKey(o) !== key || (side && o.side !== side)) continue;
     const st = effectiveState(o, now);
     if (isTerminal(st)) continue;
     // An order still unconfirmed after this long is very likely not live; the broker clamp and the down-only
@@ -116,16 +129,16 @@ export function unconfirmedQty(orders: FmOrder[], securityId: string, now: numbe
 
 /** Quantity of orders already on their way to reduce this position (unconfirmed, opposite side). A × must close only
  *  what is left, or a close whose confirmation is slow would be sent twice. */
-export function inFlightReducing(orders: FmOrder[], securityId: string, netQty: number, now: number): number {
+export function inFlightReducing(orders: FmOrder[], key: string, netQty: number, now: number): number {
   if (netQty === 0) return 0;
-  return Math.abs(unconfirmedQty(orders, securityId, now, netQty > 0 ? 'SELL' : 'BUY'));
+  return Math.abs(unconfirmedQty(orders, key, now, netQty > 0 ? 'SELL' : 'BUY'));
 }
 
 /** True while an order on this contract is unconfirmed (within UNCONFIRMED_COUNT_MS) or was placed very recently:
  *  the broker's position book can lag, so a reconcile must wait. */
-export function contractSettling(orders: FmOrder[], securityId: string, now: number): boolean {
+export function contractSettling(orders: FmOrder[], key: string, now: number): boolean {
   for (const o of orders) {
-    if (o.securityId !== securityId) continue;
+    if (orderKey(o) !== key) continue;
     if (now - o.ts < RECONCILE_GRACE_MS) return true;
     if (!isTerminal(effectiveState(o, now)) && now - o.ts <= UNCONFIRMED_COUNT_MS) return true;
   }
@@ -150,10 +163,10 @@ export function effectiveState(o: FmOrder, now: number): OrderState {
 }
 
 /** Why a new order on this contract must wait, or null. */
-export function contractHold(orders: FmOrder[], securityId: string, now: number): 'pending' | 'unknown' | null {
+export function contractHold(orders: FmOrder[], key: string, now: number): 'pending' | 'unknown' | null {
   let hold: 'pending' | 'unknown' | null = null;
   for (const o of orders) {
-    if (o.securityId !== securityId) continue;
+    if (orderKey(o) !== key) continue;
     const st = effectiveState(o, now);
     if (st === 'unknown' && now - o.ts < UNKNOWN_HOLD_MS) return 'unknown';
     if ((st === 'sending' || st === 'pending' || st === 'partial') && now - o.ts < PENDING_HOLD_MS) hold = 'pending';
@@ -170,16 +183,17 @@ export function buildPositions(orders: FmOrder[], ltps: Record<string, number>, 
   const acc = new Map<string, Acc>();
   const sorted = [...orders].sort((a, b) => a.ts - b.ts);
   for (const o of sorted) {
-    let a = acc.get(o.securityId);
+    const key = orderKey(o);
+    let a = acc.get(key);
     if (!a) {
       a = {
         avg: null, realised: 0, basisKnown: true, realisedKnown: true,
         pos: {
-          securityId: o.securityId, segment: o.segment ?? 'NSE_FNO', mult: o.mult && o.mult > 0 ? o.mult : 1, underlying: o.underlying, expiry: o.expiry, strike: o.strike, opt: o.opt, lot: o.lot,
+          key, broker: o.broker ?? 'dhan', securityId: o.securityId, priceId: o.priceId ?? o.securityId, segment: o.segment ?? 'NSE_FNO', mult: o.mult && o.mult > 0 ? o.mult : 1, underlying: o.underlying, expiry: o.expiry, strike: o.strike, opt: o.opt, lot: o.lot,
           netQty: 0, avgPrice: null, realised: 0, ltp: null, unrealised: null, pnl: null, busy: null,
         },
       };
-      acc.set(o.securityId, a);
+      acc.set(key, a);
     }
     const q = Math.max(0, Math.min(o.filledQty, o.qty));
     if (q <= 0) continue;
@@ -210,8 +224,8 @@ export function buildPositions(orders: FmOrder[], ltps: Record<string, number>, 
     const pos = a.pos;
     pos.avgPrice = pos.netQty !== 0 && a.basisKnown ? a.avg : null;
     pos.realised = a.realisedKnown ? a.realised : null;
-    pos.busy = contractHold(orders, pos.securityId, now);
-    const ltp = ltps[pos.securityId];
+    pos.busy = contractHold(orders, pos.key, now);
+    const ltp = ltps[pos.priceId];
     pos.ltp = ltp > 0 ? ltp : null;
     if (pos.netQty === 0) pos.unrealised = 0;
     else pos.unrealised = pos.ltp !== null && pos.avgPrice !== null ? (pos.ltp - pos.avgPrice) * pos.netQty * pos.mult : null;
@@ -277,4 +291,33 @@ export function sessionMessage(gate: SessionGate, window: TradeWindow | null, ma
   if (!window) return `${market} is closed today — no orders`;
   if (gate === 'closed') return `${market} closed — orders are taken ${fmtMin(window.open)}-${fmtMin(window.close)} IST`;
   return `After ${fmtMin(window.cutoff)} IST: closing only (×), no new positions`;
+}
+
+/**
+ * The order unit for a broker: `lot` = order quantity per lot, `mult` = rupees per point per unit of quantity.
+ *   Dhan    NSE: Dhan's lot size, mult 1        MCX: 1 (Dhan takes LOTS), mult = barrels per lot
+ *   Zerodha NSE: Kite's lot size, mult 1        MCX: Kite's lot_size must be 1 (LOTS), mult = barrels per lot
+ *   Kotak   NSE: Kotak's lot size, mult 1       MCX: Kotak's lot size must equal barrels per lot (BARRELS), mult 1
+ * The broker's own master must agree with Dhan's (NSE lot) or with the MCX table; anything else is refused, never
+ * guessed — a wrong unit sends an order 10-100x too big or too small (dhan-crudeoil-trading).
+ */
+export function brokerUnits(
+  broker: FmBroker, underlying: string, dhanLot: number, brokerLot: number | null, barrelsPerLot: number | null,
+): { lot: number; mult: number } | { error: string } {
+  const name = broker === 'kotak' ? 'Kotak' : broker === 'zerodha' ? 'Zerodha' : 'Dhan';
+  if (barrelsPerLot) {
+    if (broker === 'dhan') return { lot: 1, mult: barrelsPerLot };
+    if (broker === 'zerodha') {
+      return brokerLot === 1 ? { lot: 1, mult: barrelsPerLot }
+        : { error: `Zerodha lists ${underlying} with lot size ${brokerLot ?? 'unknown'} (expected 1: quantity in lots) — refused` };
+    }
+    return brokerLot === barrelsPerLot ? { lot: barrelsPerLot, mult: 1 }
+      : { error: `Kotak lists ${underlying} with lot size ${brokerLot ?? 'unknown'} (expected ${barrelsPerLot} barrels) — refused` };
+  }
+  if (!(dhanLot > 0)) return { error: `No lot size for ${underlying}` };
+  if (broker === 'dhan') return { lot: dhanLot, mult: 1 };
+  if (brokerLot !== dhanLot) {
+    return { error: `${name} lists ${underlying} with lot size ${brokerLot ?? 'unknown'}, Dhan with ${dhanLot} — refresh the ${name} instrument cache` };
+  }
+  return { lot: dhanLot, mult: 1 };
 }

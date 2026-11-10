@@ -14,7 +14,13 @@ import { toast } from 'sonner';
 import { Minus, Plus, X, ShieldAlert, Loader2 } from 'lucide-react';
 import { sendOrderRequest, UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import type { FreshMoneyTradeState } from '@/app/api/fresh-money/trade/route';
-import type { FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
+import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
+import { BrokerPicker } from '@/components/BrokerPicker';
+
+export const FM_BROKERS: readonly FmBroker[] = ['dhan', 'kotak', 'zerodha'];
+export const brokerLabel = (b: FmBroker) => (b === 'kotak' ? 'Kotak' : b === 'zerodha' ? 'Zerodha' : 'Dhan');
+/** In-flight lock key: one per broker + contract. */
+export const lockKey = (b: FmBroker, underlying: string, strike: number, opt: string) => `${b}:${underlying}:${strike}:${opt}`;
 
 const TRADE_URL = '/api/fresh-money/trade';
 const FAST_POLL_MS = 2_000;
@@ -35,7 +41,7 @@ const newKey = () => `fm-${typeof crypto !== 'undefined' && 'randomUUID' in cryp
 export interface TradeApi {
   state: FreshMoneyTradeState | null;
   inflight: ReadonlySet<string>;
-  order: (o: { underlying: string; expiry: string; strike: number; opt: OptType; side: TxnSide; lots: number }) => void;
+  order: (o: { broker: FmBroker; underlying: string; expiry: string; strike: number; opt: OptType; side: TxnSide; lots: number }) => void;
   close: (p: FmPosition) => void;
 }
 
@@ -82,7 +88,7 @@ export function useFreshMoneyTrades(): TradeApi {
         toast.warning(`${label}: PARTLY sent${outcome.kind === 'unknown' ? ' (rest UNKNOWN)' : ''}`, {
           description: `${outcome.error}${outcome.kind === 'unknown' ? ` ${UNKNOWN_ORDER_HINT}` : ''}`, duration: 20_000,
         });
-      } else if (outcome.kind === 'placed') toast.success(`${label} sent`, { description: `MARKET · INTRADAY · Dhan${typeof reply?.note === 'string' ? ` · ${reply.note}` : ''}` });
+      } else if (outcome.kind === 'placed') toast.success(`${label} sent`, { description: `MARKET · INTRADAY${typeof reply?.note === 'string' ? ` · ${reply.note}` : ''}` });
       else if (outcome.kind === 'unknown') toast.error(`${label}: status UNKNOWN`, { description: `${outcome.error} ${UNKNOWN_ORDER_HINT}`, duration: 20_000 });
       else toast.error(`${label} rejected`, { description: outcome.error, duration: 8_000 });
     } finally {
@@ -93,13 +99,13 @@ export function useFreshMoneyTrades(): TradeApi {
   }, [refresh]);
 
   const order: TradeApi['order'] = useCallback(o => {
-    const label = `${o.side} ${o.lots} lot${o.lots === 1 ? '' : 's'} ${o.underlying} ${o.strike} ${o.opt}`;
-    run(`${o.underlying}:${o.strike}:${o.opt}`, label, { action: 'order', ...o });
+    const label = `${o.side} ${o.lots} lot${o.lots === 1 ? '' : 's'} ${o.underlying} ${o.strike} ${o.opt} on ${brokerLabel(o.broker)}`;
+    run(lockKey(o.broker, o.underlying, o.strike, o.opt), label, { action: 'order', ...o });
   }, [run]);
 
   const close: TradeApi['close'] = useCallback(p => {
-    const label = `Close ${p.underlying} ${p.strike} ${p.opt}`;
-    run(`${p.underlying}:${p.strike}:${p.opt}`, label, { action: 'close', securityId: p.securityId });
+    const label = `Close ${p.underlying} ${p.strike} ${p.opt} on ${brokerLabel(p.broker)}`;
+    run(lockKey(p.broker, p.underlying, p.strike, p.opt), label, { action: 'close', key: p.key });
   }, [run]);
 
   return { state, inflight, order, close };
@@ -111,6 +117,7 @@ export function useFreshMoneyTrades(): TradeApi {
 // in the light theme, which would turn the armed button's white label and a short chip's profit rose.
 export function TradeBar({
   underlying, armed, onArm, lots, onLots, maxLots, lotSize, mcxMult, tradable, blocked, positions,
+  broker, onBroker, brokerReady, brokerSessions,
 }: {
   underlying: string;
   armed: boolean;
@@ -124,6 +131,11 @@ export function TradeBar({
   tradable: boolean;
   blocked: string | null;
   positions: FmPosition[];
+  broker: FmBroker;
+  onBroker: (b: FmBroker) => void;
+  /** False until the saved broker has been read (the first render is always Dhan): no arming before that. */
+  brokerReady: boolean;
+  brokerSessions: Record<FmBroker, boolean> | null;
 }) {
   const [draft, setDraft] = useState(String(lots));
   // Escape blurs the box; the blur must then NOT commit what was typed (the field still holds it at that moment).
@@ -149,10 +161,20 @@ export function TradeBar({
 
   return (
     <div className={`flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-4 py-2 ${armed ? 'border-red-500/40 bg-red-600/10' : 'border-zinc-800 bg-zinc-950/40'}`}>
+      {tradable && (
+        <div className="flex items-center gap-1.5">
+          <BrokerPicker<FmBroker> value={broker} onChange={onBroker} brokers={FM_BROKERS}
+            disabled={!brokerReady} disabledReason="Loading the saved broker…" />
+          {brokerSessions && !brokerSessions[broker] && (
+            <span className="text-[11px] font-bold text-amber-300">{brokerLabel(broker)} not logged in</span>
+          )}
+        </div>
+      )}
       {tradable ? (
         <button
           type="button"
           onClick={() => onArm(!armed)}
+          disabled={!brokerReady}
           aria-pressed={armed}
           className={`${FOCUS} flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider transition-colors ${
             armed
@@ -160,7 +182,7 @@ export function TradeBar({
               : 'border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-red-500/60 hover:text-red-300'}`}
         >
           <ShieldAlert className="h-3.5 w-3.5" />
-          {armed ? 'Live · real money — disarm' : 'Arm live trading'}
+          {armed ? `Live · real money · ${brokerLabel(broker)} — disarm` : `Arm live trading (${brokerLabel(broker)})`}
         </button>
       ) : (
         <span className="text-[11px] text-zinc-400">{underlying} board is watch-only (BSE contracts are not supported for trading here)</span>
@@ -233,7 +255,7 @@ export function TradeCell({
     : '';
 
   const chip = showChip ? (
-    <span title={title} className={`flex items-center gap-0.5 rounded px-1 text-[11px] font-bold tabular-nums leading-[16px] ${
+    <span title={title} className={`flex items-center gap-0.5 rounded px-1.5 text-[12px] font-bold tabular-nums leading-5 ${
       held ? (pos!.netQty > 0 ? 'bg-emerald-600/15' : 'bg-red-600/15') : 'bg-zinc-800'} ${pnlClass(pos!.pnl)}`}>
       {held && <span className="text-[9px] font-bold text-zinc-300">{pos!.netQty > 0 ? 'L' : 'S'}{lotsHeld}</span>}
       {fmtRs(pos!.pnl ?? (held ? null : pos!.realised))}
@@ -244,19 +266,22 @@ export function TradeCell({
   const closeBtn = held && armed ? (
     <button type="button" onClick={onClose} disabled={busy || !!pos!.busy || !canClose} aria-label={`Close ${strike} ${opt} position`}
       title="Square off this page's position (MARKET)"
-      className={`${FOCUS} flex h-4 w-4 items-center justify-center rounded text-zinc-400 hover:bg-zinc-700 hover:text-white disabled:opacity-40`}>
-      <X className="h-3 w-3" />
+      className={`${FOCUS} flex h-5 w-5 items-center justify-center rounded text-zinc-400 hover:bg-zinc-700 hover:text-white disabled:opacity-40`}>
+      <X className="h-3.5 w-3.5" />
     </button>
   ) : null;
 
   const buttons = showButtons ? (
-    <span className="flex items-center gap-0.5">
-      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" aria-label="Order in flight" /> : (
+    <span className="flex items-center gap-1">
+      {busy ? (
+        // Same footprint as the two buttons, so the row does not jump while an order is in flight.
+        <span className="flex h-5 w-[56px] items-center justify-center"><Loader2 className="h-4 w-4 animate-spin text-zinc-400" aria-label="Order in flight" /></span>
+      ) : (
         <>
           <button type="button" onClick={onBuy} disabled={!canOrder} aria-label={`Buy ${strike} ${opt}`} title={`BUY ${strike} ${opt} at market`}
-            className={`${FOCUS} h-4 w-4 rounded-sm bg-emerald-600 text-[10px] font-bold leading-4 text-oncolor hover:bg-emerald-500 disabled:opacity-30`}>B</button>
+            className={`${FOCUS} h-5 w-[26px] rounded bg-emerald-600 text-[11px] font-bold leading-5 text-oncolor shadow-sm transition-colors hover:bg-emerald-500 active:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-30`}>B</button>
           <button type="button" onClick={onSell} disabled={!canOrder} aria-label={`Sell ${strike} ${opt}`} title={`SELL ${strike} ${opt} at market`}
-            className={`${FOCUS} h-4 w-4 rounded-sm bg-red-600 text-[10px] font-bold leading-4 text-oncolor hover:bg-red-500 disabled:opacity-30`}>S</button>
+            className={`${FOCUS} h-5 w-[26px] rounded bg-red-600 text-[11px] font-bold leading-5 text-oncolor shadow-sm transition-colors hover:bg-red-500 active:bg-red-700 disabled:cursor-not-allowed disabled:opacity-30`}>S</button>
         </>
       )}
     </span>
@@ -285,9 +310,10 @@ export function OffBoardPositions({ positions, armed, inflight, canClose, onClos
       <span className="text-zinc-400">Open, not on this board:</span>
       {positions.map(p => {
         const lots = p.lot > 0 ? Math.abs(p.netQty) / p.lot : 0;
-        const busy = inflight.has(`${p.underlying}:${p.strike}:${p.opt}`);
+        const busy = inflight.has(lockKey(p.broker, p.underlying, p.strike, p.opt));
         return (
           <span key={p.securityId} className="flex items-center gap-1 rounded border border-zinc-800 bg-zinc-950/40 px-1.5 py-0.5 tabular-nums">
+            <span className="rounded bg-zinc-800 px-1 text-[9px] font-bold uppercase text-zinc-300">{brokerLabel(p.broker)}</span>
             <span className="font-bold text-zinc-200">{p.underlying} {p.strike} {p.opt}</span>
             <span className="text-zinc-500">{p.expiry}</span>
             <span className="text-[10px] font-bold text-zinc-300">{p.netQty > 0 ? 'L' : 'S'}{lots}</span>
@@ -295,7 +321,7 @@ export function OffBoardPositions({ positions, armed, inflight, canClose, onClos
             {armed && (
               busy ? <Loader2 className="h-3 w-3 animate-spin text-zinc-400" aria-label="Order in flight" /> : (
                 <button type="button" onClick={() => onClose(p)} disabled={!!p.busy || !canClose(p)}
-                  aria-label={`Close ${p.underlying} ${p.strike} ${p.opt} position`} title="Square off this page's position (MARKET)"
+                  aria-label={`Close ${p.underlying} ${p.strike} ${p.opt} position on ${brokerLabel(p.broker)}`} title="Square off this page's position (MARKET)"
                   className={`${FOCUS} flex h-4 w-4 items-center justify-center rounded text-zinc-400 hover:bg-zinc-700 hover:text-white disabled:opacity-40`}>
                   <X className="h-3 w-3" />
                 </button>

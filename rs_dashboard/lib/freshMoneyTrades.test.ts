@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildPositions, closeQty, contractHold, dueForCheck, effectiveState, nextCheckDelay, sessionGate, slices, stateFromBroker,
-  unconfirmedQty, inFlightReducing, contractSettling, reconcileDownQty, UNCONFIRMED_COUNT_MS, RECONCILE_GRACE_MS, hhmmToMin, sessionMessage, NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, PENDING_HOLD_MS, type FmOrder,
+  unconfirmedQty, brokerUnits, inFlightReducing, contractSettling, reconcileDownQty, UNCONFIRMED_COUNT_MS, RECONCILE_GRACE_MS, hhmmToMin, sessionMessage, NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, PENDING_HOLD_MS, type FmOrder,
 } from './freshMoneyTrades.ts';
 
 let n = 0;
@@ -84,12 +84,12 @@ test('a stale sending record is unknown; unknown and pending orders hold the con
   const now = 1_000_000;
   const sending = ord({ ts: now - SENDING_STALE_MS - 1, state: 'sending', orderId: null, filledQty: 0, avgPrice: null });
   assert.equal(effectiveState(sending, now), 'unknown');
-  assert.equal(contractHold([sending], '111', now), 'unknown');
-  assert.equal(contractHold([sending], '111', now + UNKNOWN_HOLD_MS), null);
-  assert.equal(contractHold([sending], '222', now), null);
+  assert.equal(contractHold([sending], 'dhan|111', now), 'unknown');
+  assert.equal(contractHold([sending], 'dhan|111', now + UNKNOWN_HOLD_MS), null);
+  assert.equal(contractHold([sending], 'dhan|222', now), null);
   const pending = ord({ ts: now - 1000, state: 'pending', filledQty: 0, avgPrice: null });
-  assert.equal(contractHold([pending], '111', now), 'pending');
-  assert.equal(contractHold([pending], '111', now + PENDING_HOLD_MS), null);
+  assert.equal(contractHold([pending], 'dhan|111', now), 'pending');
+  assert.equal(contractHold([pending], 'dhan|111', now + PENDING_HOLD_MS), null);
 });
 
 test('square-off is clamped down to the broker, never up or the wrong way', () => {
@@ -139,8 +139,8 @@ test('unconfirmed orders count toward exposure as if they fill', () => {
     ord({ ts: now - 1_000, side: 'BUY', qty: 65, filledQty: 65, state: 'filled', avgPrice: 90 }),
     ord({ ts: now - 1_000, securityId: '999', side: 'BUY', qty: 65, filledQty: 0, state: 'pending', avgPrice: null }),
   ];
-  assert.equal(unconfirmedQty(orders, '111', now), -(1300 + 520));
-  assert.equal(unconfirmedQty(orders, '999', now), 65);
+  assert.equal(unconfirmedQty(orders, 'dhan|111', now), -(1300 + 520));
+  assert.equal(unconfirmedQty(orders, 'dhan|999', now), 65);
 });
 
 test('order re-reads are due oldest first, capped, with backoff', () => {
@@ -213,21 +213,21 @@ test('a close already in flight is not sent twice (× sizes only what is left)',
     // the first × went out; its confirmation is slow (still pending)
     ord({ ts: now - 45_000, side: 'SELL', qty: 130, filledQty: 0, state: 'pending', avgPrice: null, close: true }),
   ];
-  assert.equal(inFlightReducing(orders, '111', 130, now), 130);
+  assert.equal(inFlightReducing(orders, 'dhan|111', 130, now), 130);
   // part confirmed: only the unfilled rest is in flight
   orders[1] = { ...orders[1], filledQty: 65, state: 'partial', avgPrice: 101 };
-  assert.equal(inFlightReducing(orders, '111', 65, now), 65);
+  assert.equal(inFlightReducing(orders, 'dhan|111', 65, now), 65);
   // an adding order on the same side is not a reduction
-  assert.equal(inFlightReducing([ord({ ts: now - 1000, side: 'BUY', state: 'pending', filledQty: 0, avgPrice: null })], '111', 130, now), 0);
+  assert.equal(inFlightReducing([ord({ ts: now - 1000, side: 'BUY', state: 'pending', filledQty: 0, avgPrice: null })], 'dhan|111', 130, now), 0);
   // after the count window the broker clamp takes over
-  assert.equal(inFlightReducing(orders, '111', 65, now + UNCONFIRMED_COUNT_MS), 0);
+  assert.equal(inFlightReducing(orders, 'dhan|111', 65, now + UNCONFIRMED_COUNT_MS), 0);
 });
 
 test('unconfirmed exposure stops counting after the window (an UNKNOWN never resolved cannot block forever)', () => {
   const now = 1_000_000;
   const o = ord({ ts: now - 1_000, state: 'unknown', orderId: null, filledQty: 0, avgPrice: null });
-  assert.equal(unconfirmedQty([o], '111', now), 65);
-  assert.equal(unconfirmedQty([o], '111', now + UNCONFIRMED_COUNT_MS), 0);
+  assert.equal(unconfirmedQty([o], 'dhan|111', now), 65);
+  assert.equal(unconfirmedQty([o], 'dhan|111', now + UNCONFIRMED_COUNT_MS), 0);
 });
 
 test('down-only reconcile: reduce to what the broker holds, never up, never while settling', () => {
@@ -243,10 +243,10 @@ test('down-only reconcile: reduce to what the broker holds, never up, never whil
 
 test('a contract is settling right after an order and while one is unconfirmed', () => {
   const now = 1_000_000;
-  assert.equal(contractSettling([ord({ ts: now - 5_000 })], '111', now), true);
-  assert.equal(contractSettling([ord({ ts: now - RECONCILE_GRACE_MS - 1 })], '111', now), false);
-  assert.equal(contractSettling([ord({ ts: now - 60_000, state: 'pending', filledQty: 0, avgPrice: null })], '111', now), true);
-  assert.equal(contractSettling([ord({ ts: now - 60_000, state: 'pending', filledQty: 0, avgPrice: null })], '222', now), false);
+  assert.equal(contractSettling([ord({ ts: now - 5_000 })], 'dhan|111', now), true);
+  assert.equal(contractSettling([ord({ ts: now - RECONCILE_GRACE_MS - 1 })], 'dhan|111', now), false);
+  assert.equal(contractSettling([ord({ ts: now - 60_000, state: 'pending', filledQty: 0, avgPrice: null })], 'dhan|111', now), true);
+  assert.equal(contractSettling([ord({ ts: now - 60_000, state: 'pending', filledQty: 0, avgPrice: null })], 'dhan|222', now), false);
 });
 
 test('an external (reconciled) close flattens the position and makes booked P&L unknown', () => {
@@ -257,4 +257,44 @@ test('an external (reconciled) close flattens the position and makes booked P&L 
   assert.equal(pos.netQty, 0);
   assert.equal(pos.realised, null);
   assert.equal(pos.pnl, null);
+});
+
+test('the same symbol on two brokers is two positions (Kotak and Zerodha symbols can coincide)', () => {
+  const k = { broker: 'kotak' as const, securityId: 'NIFTY25N1125000CE', priceId: '111' };
+  const z = { broker: 'zerodha' as const, securityId: 'NIFTY25N1125000CE', priceId: '111' };
+  const pos = buildPositions([
+    ord({ ...k, side: 'BUY', avgPrice: 100 }),
+    ord({ ...z, side: 'SELL', avgPrice: 100 }),
+  ], { '111': 110 }, 1e6);
+  assert.equal(pos.length, 2);
+  const pk = pos.find(p => p.broker === 'kotak')!;
+  const pz = pos.find(p => p.broker === 'zerodha')!;
+  assert.equal(pk.key, 'kotak|NIFTY25N1125000CE');
+  assert.equal(pk.unrealised, 650);          // priced from Dhan's LTP via priceId
+  assert.equal(pz.unrealised, -650);
+  const now = 2e6;
+  const pending = ord({ ...k, ts: now - 1000, state: 'pending', filledQty: 0, avgPrice: null });
+  assert.equal(contractHold([pending], 'kotak|NIFTY25N1125000CE', now), 'pending');
+  assert.equal(contractHold([pending], 'zerodha|NIFTY25N1125000CE', now), null);
+});
+
+test('Kotak MCX: quantity in barrels, multiplier 1, same rupees as Dhan lots x 10', () => {
+  const kotak = buildPositions([ord({ broker: 'kotak', securityId: 'CRUDEOILM17NOV268200CE', priceId: 'M1', segment: 'MCX_COMM', lot: 10, mult: 1, side: 'BUY', qty: 20, filledQty: 20, avgPrice: 100 })], { M1: 105 }, 1e6)[0];
+  const dhan = buildPositions([ord({ securityId: 'M1', segment: 'MCX_COMM', lot: 1, mult: 10, side: 'BUY', qty: 2, filledQty: 2, avgPrice: 100 })], { M1: 105 }, 1e6)[0];
+  assert.equal(kotak.unrealised, 100);
+  assert.equal(dhan.unrealised, 100);
+  assert.equal(kotak.netQty / kotak.lot, 2);   // 2 lots either way
+});
+
+test('broker order units follow each broker master, mismatches refused', () => {
+  assert.deepEqual(brokerUnits('dhan', 'NIFTY', 65, null, null), { lot: 65, mult: 1 });
+  assert.deepEqual(brokerUnits('kotak', 'NIFTY', 65, 65, null), { lot: 65, mult: 1 });
+  assert.ok('error' in brokerUnits('kotak', 'NIFTY', 65, 75, null));            // stale cache after a lot revision
+  assert.ok('error' in brokerUnits('zerodha', 'NIFTY', 65, null, null));        // contract unknown
+  assert.deepEqual(brokerUnits('dhan', 'CRUDEOILM', 1, null, 10), { lot: 1, mult: 10 });
+  assert.deepEqual(brokerUnits('zerodha', 'CRUDEOILM', 1, 1, 10), { lot: 1, mult: 10 });
+  assert.deepEqual(brokerUnits('kotak', 'CRUDEOILM', 1, 10, 10), { lot: 10, mult: 1 });
+  assert.deepEqual(brokerUnits('kotak', 'CRUDEOIL', 1, 100, 100), { lot: 100, mult: 1 });
+  assert.ok('error' in brokerUnits('kotak', 'CRUDEOIL', 1, 10, 100));          // would be 10x too small
+  assert.ok('error' in brokerUnits('zerodha', 'CRUDEOILM', 1, 10, 10));        // Kite in barrels? unit unclear
 });
