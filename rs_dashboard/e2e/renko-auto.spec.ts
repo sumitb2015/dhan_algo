@@ -1,10 +1,12 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
 import { json, signIn } from './support';
 import { EMPTY_LEDGER, applyAutoOp, type AutoLedger, type AutoOp } from '../lib/pnfAutoLedger';
+import { apply, autoExit, autoGet, engineView, newAutoServer, serverClose, serverEnter } from './autoServer';
 
-// Renko AUTO: an N-brick confirmation SELL (2 bricks, box 0.1) that closes after arming is entered once; the first up brick
-// exits. Everything is mocked in the browser (the ledger runs the real applyAutoOp, the order route records), so nothing is
-// written and no order can leave. Also proves the page uses ITS OWN ledger (?scope=renko) and tags its orders scope 'renko'.
+// Renko AUTO, the page's side: arming, what the page shows of the server's rows and status, Exit, the MTM guard, reload and tabs.
+// AUTO itself trades on the dashboard server since feaa01a5; ./autoServer.ts plays the server's part (why, and where the engine's own
+// rules are tested). Everything is mocked in the browser, so nothing is written and no order can leave. Also proves the page uses ITS
+// OWN ledger (?scope=renko).
 
 const ist = (hh: number, mm: number, ss = 0) => Date.UTC(2026, 9, 30, hh, mm, ss) - 5.5 * 3600_000;   // Fri 30 Oct 2026, ms
 type Body = { mode?: string; action?: string; lots?: number; source?: string; scope?: string; close?: boolean; exitOwn?: { side: string; units: number[] }; target?: { kind: string } };
@@ -15,6 +17,7 @@ async function install(page: Page, opts: { reply?: (b: Body) => Record<string, u
   // 10:26 100.0, 10:27 100.3 = three up bricks (100.0-100.3). The forming 10:30 bar at 99.95 prints two down bricks
   // (100.1-100.2, 100.0-100.1): the 2nd confirms a SELL, booked at its close 100.0.
   const state = { ledger: EMPTY_LEDGER as AutoLedger, tick: { ltp: 99.95, at: ist(10, 30, 10) } };
+  const server = newAutoServer();
   const bars = [100, 100.3, 100.3, 100.3].map((p, i) => ({ t: ist(10, 26 + i) / 1000, ce: p, pe: 0, straddle: p, vol: 10 }));
   await page.route('**/api/**', async (route: Route) => {
     const req = route.request();
@@ -42,10 +45,11 @@ async function install(page: Page, opts: { reply?: (b: Body) => Record<string, u
       const side = b.exitOwn ? b.exitOwn.side : b.action;
       return json(route, { success: true, outcome: 'placed', message: 'Sent.', legs: [{ label: 'NIFTY NOV FUT', side, qty: b.exitOwn ? b.exitOwn.units[0] : (b.lots ?? 1) * 65, product: 'INTRADAY', status: 'placed', orderId: 'O1' }] });
     }
+    if (p === '/api/straddle-pnf/auto/exit' && method === 'POST') return autoExit(route, state, server);
     if (p === '/api/straddle-pnf/auto' || p === '/api/straddle-pnf/resting') {
       ledgerCalls.push(`${method} ${p}${u.search}`);
       if (p === '/api/straddle-pnf/resting') return json(route, { success: true, ledger: { rev: 0, day: '2026-10-30', rows: [] } });
-      if (method === 'GET') return json(route, { success: true, ledger: state.ledger });
+      if (method === 'GET') return autoGet(route, state, server);
       const r = applyAutoOp(state.ledger, req.postDataJSON() as AutoOp);
       if (!r.ok) return json(route, { success: false, error: r.error, ledger: state.ledger }, r.status);
       state.ledger = r.ledger;
@@ -58,7 +62,7 @@ async function install(page: Page, opts: { reply?: (b: Body) => Record<string, u
     if (method === 'GET') return json(route, { success: true });
     return route.fulfill({ status: 599, body: `unmocked ${method} ${p}` });
   });
-  return { orders, state, ledgerCalls };
+  return { orders, state, ledgerCalls, server };
 }
 
 async function openFuture(page: Page) {
@@ -78,41 +82,40 @@ test.beforeEach(async ({ context }) => {
   });
 });
 
-test('PAPER: a 2-brick SELL that closes after arming is entered once at the brick close; the first up brick exits', async ({ page }) => {
+test('PAPER: arming saves the chart for the server; the server\'s entry and exit are shown on the chart; the page sends no order', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
   const { orders, state, ledgerCalls } = await install(page);
   await openFuture(page);
   const auto = page.getByTestId('pnf-auto-1');
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await expect(auto).toHaveAttribute('data-armed', 'true');
+  // what the server trades from: this chart's contract and settings, in PAPER, 1 lot, the N-brick rule
+  await expect.poll(() => state.ledger.arms?.['1']?.mode).toBe('PAPER');
+  const arm = state.ledger.arms!['1']!;
+  expect(arm).toMatchObject({ lots: 1, rule: 'nbrick', run: { target: { kind: 'futures' }, settings: { boxPts: 0.1, reversal: 2 } } });
 
-  await page.clock.setFixedTime(ist(10, 31, 5));                       // the 10:30 bar has closed
-  await expect.poll(() => orders.length, { timeout: 15_000 }).toBe(1);
-  expect(orders[0]).toMatchObject({ mode: 'PAPER', action: 'SELL', lots: 1, source: 'auto', scope: 'renko', target: { kind: 'futures' } });
-  await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 1L @ 100.00');
-  await page.waitForTimeout(2500);
-  expect(orders.length, 'the same signal is never entered twice').toBe(1);
-
-  state.tick = { ltp: 100.25, at: ist(10, 31, 20) };                    // one up brick (100.1-100.2)
-  await page.clock.setFixedTime(ist(10, 32, 5));
-  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('closed');
-  expect(state.ledger.rows[0]).toMatchObject({ reason: 'reversal', side: 'SELL' });
-  expect(state.ledger.rows[0].entryPrice).toBeCloseTo(100, 6);
-  expect(state.ledger.rows[0].exitPrice).toBeCloseTo(100.2, 6);
-  expect(Math.round(state.ledger.rows[0].pnl!)).toBe(-13);              // (100.0 - 100.2) x 65
-  expect(orders.length, 'a paper exit sends nothing').toBe(1);
-  // the confirming brick is column 4 (3 up, 2 down), the exit brick column 5
+  // 10:30 closes: the server enters SELL at the confirming brick (100.0, the 4th brick column)
+  await page.clock.setFixedTime(ist(10, 31, 5));
+  serverEnter(state, { side: 'SELL', box: 100, barT: ist(10, 30) / 1000 });
+  await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 1L @ 100.00', { timeout: 15_000 });
   const panel1 = page.getByTestId('pnf-panel').nth(0);
   await expect(panel1.locator('[data-testid="pnf-trade-marker"][data-action="SELL"]')).toHaveAttribute('data-col', '4');
-  await expect(panel1.locator('[data-testid="pnf-trade-marker"][data-action="BUY"]')).toHaveAttribute('data-col', '5');
+
+  // one up brick (100.1-100.2) on the 10:31 bar; the server exits on it: the exit marker sits on that brick (column 5)
+  state.tick = { ltp: 100.25, at: ist(10, 31, 20) };
+  await page.clock.setFixedTime(ist(10, 32, 5));
+  serverClose(state, { price: 100.2, box: 100.2, barT: ist(10, 31) / 1000, reason: 'reversal' });
+  await expect(panel1.locator('[data-testid="pnf-trade-marker"][data-action="BUY"]')).toHaveAttribute('data-col', '5', { timeout: 15_000 });
+  await expect(page.getByTestId('pnf-auto-status-1')).not.toContainText('SHORT');
+  expect(orders, 'the page never sends an AUTO order: the server does').toEqual([]);
   // Renko's own ledgers only: never the P&F page's files
   expect(ledgerCalls.length).toBeGreaterThan(0);
   expect(ledgerCalls.every(c => c.endsWith('?scope=renko')), ledgerCalls.join('\n')).toBe(true);
 });
 
-test('REAL: arming takes a second click; the entry is confirmed; the exit sends exitOwn with AUTO\'s own units, scope renko', async ({ page }) => {
+test('REAL: arming takes a second click; the server\'s REAL row is shown; Exit takes a second click and asks the server, scope renko', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
-  const { orders, state } = await install(page);
+  const { orders, state, server } = await install(page);
   await openFuture(page);
   page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
@@ -120,26 +123,29 @@ test('REAL: arming takes a second click; the entry is confirmed; the exit sends 
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await expect(auto).toHaveAttribute('data-armed', 'false');
   await expect(auto).toContainText('ARM REAL AUTO?');
+  expect(state.ledger.arms?.['1'], 'the first click saves nothing').toBeUndefined();
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await expect(auto).toHaveAttribute('data-armed', 'true');
+  await expect.poll(() => state.ledger.arms?.['1']?.mode).toBe('REAL');
 
   await page.clock.setFixedTime(ist(10, 31, 5));
-  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('open');
-  expect(orders[0]).toMatchObject({ mode: 'REAL', action: 'SELL', lots: 1, source: 'auto', scope: 'renko' });
-  expect(state.ledger.rows[0].entryPrice).toBe(99.95);                  // REAL books the live price
-  expect(state.ledger.rows[0].entryBox).toBeCloseTo(100, 6);            // the marker stays on the brick
-
-  state.tick = { ltp: 100.25, at: ist(10, 31, 20) };
-  await page.clock.setFixedTime(ist(10, 32, 5));
-  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('closed');
-  expect(orders[1]).toMatchObject({ mode: 'REAL', source: 'auto', scope: 'renko', exitOwn: { side: 'BUY', units: [65] } });
-  expect(orders[1].close).toBeUndefined();
+  serverEnter(state, { side: 'SELL', price: 99.95, box: 100, barT: ist(10, 30) / 1000 });
+  await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 1L', { timeout: 15_000 });
+  const exit = page.getByTestId('pnf-auto-exit-1');
+  await exit.click();
+  await expect(exit).toHaveText('EXIT REAL?');
+  expect(server.exits, 'the first click asks nothing').toEqual([]);
+  await exit.click();
+  await expect.poll(() => server.exits).toEqual([{ chart: 1, why: 'manual' }]);
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('closed');
+  await expect(auto).toHaveAttribute('data-armed', 'false', { timeout: 15_000 });
+  expect(orders, 'the exit is the server\'s: the page sends no order').toEqual([]);
 });
 
 // 2026-11-04 15:31: one click switched REAL AUTO off with a position open; its 15:39 reversal exited and nothing re-entered.
 test('REAL: stopping AUTO while it holds a position takes a second click (no re-entry warning); the position stays open', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
-  const { orders, state } = await install(page);
+  const { orders, state, server } = await install(page);
   await openFuture(page);
   page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
@@ -147,8 +153,10 @@ test('REAL: stopping AUTO while it holds a position takes a second click (no re-
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await expect(auto).toHaveAttribute('data-armed', 'true');
+  await expect.poll(() => state.ledger.arms?.['1']?.mode).toBe('REAL');
   await page.clock.setFixedTime(ist(10, 31, 5));
-  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('open');
+  serverEnter(state, { side: 'SELL', price: 99.95, box: 100, barT: ist(10, 30) / 1000 });
+  await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 1L', { timeout: 15_000 });
 
   const stop = auto.getByRole('button', { name: 'Stop AUTO on chart 1' });
   await stop.click();
@@ -159,26 +167,31 @@ test('REAL: stopping AUTO while it holds a position takes a second click (no re-
   await expect(auto).toHaveAttribute('data-armed', 'false');
   await expect.poll(() => state.ledger.arms?.['1']).toBeUndefined();
   expect(state.ledger.rows[0].state, 'stopping AUTO never closes the position').toBe('open');
-  expect(orders.length).toBe(1);
+  expect(server.exits).toEqual([]);
+  expect(orders).toEqual([]);
 });
 
-test('REAL: an unknown entry outcome halts the chart, is never resent, and waits for the user', async ({ page }) => {
+test('REAL: an entry the server marked unknown shows UNRESOLVED and the server\'s halt, and waits for the user to resolve it', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
-  const { orders, state } = await install(page, { reply: () => ({ success: false, outcome: 'unknown', message: 'Status unknown' }) });
+  const { orders, state, server } = await install(page);
   await openFuture(page);
   page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
   const auto = page.getByTestId('pnf-auto-1');
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect.poll(() => state.ledger.arms?.['1']?.mode).toBe('REAL');
+  // the server: the order route gave no clean reply - the row is UNKNOWN, the chart halts and is disarmed
   await page.clock.setFixedTime(ist(10, 31, 5));
-  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('unknownEntry');
-  await expect(auto).toHaveAttribute('data-armed', 'false');
+  serverEnter(state, { unknown: true, box: 100, barT: ist(10, 30) / 1000 });
+  apply(state, { op: 'setArm', chart: 1, arm: null, t: ist(10, 31, 5) / 1000, text: 'AUTO switched off: entry outcome unknown' });
+  server.view['1'] = engineView({ halt: 'entry outcome unknown - check Orders/Positions, then resolve it' });
+  await expect(auto).toHaveAttribute('data-armed', 'false', { timeout: 15_000 });
   await expect(page.getByTestId('pnf-auto-status-1')).toContainText('UNRESOLVED');
-  await page.waitForTimeout(3000);
-  expect(orders.length).toBe(1);
+  await expect(page.getByTestId('pnf-auto-status-1')).toHaveAttribute('title', /entry outcome unknown/);
   await auto.getByRole('button', { name: 'Is flat' }).click();
   await expect.poll(() => state.ledger.rows[0]?.state).toBe('closed');
+  expect(orders).toEqual([]);
 });
 
 test('the forming bar\'s bricks are drawn unconfirmed (dimmed) like P&F boxes, and become real bricks once the bar closes', async ({ page }) => {
@@ -217,16 +230,17 @@ test('the ladder rows are brick edges (multiples of the box), so an order waits 
   expect(row.level).toBeCloseTo(99.9, 6);
 });
 
-test('PAPER: the MTM guard watches AUTO\'s own position - a stop-loss closes the AUTO row (reason mtm guard) and switches AUTO off', async ({ page }) => {
+test('PAPER: the page\'s MTM guard watches AUTO\'s own position - a stop-loss asks the server to exit it (mtm guard) and AUTO goes off', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
-  const { orders, state } = await install(page);
+  const { orders, state, server } = await install(page);
   await openFuture(page);
   const auto = page.getByTestId('pnf-auto-1');
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await expect(auto).toHaveAttribute('data-armed', 'true');
+  await expect.poll(() => state.ledger.arms?.['1']?.mode).toBe('PAPER');
   await page.clock.setFixedTime(ist(10, 31, 5));
-  await expect.poll(() => orders.length, { timeout: 15_000 }).toBe(1);
-  await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 1L @ 100.00');
+  serverEnter(state, { side: 'SELL', box: 100, barT: ist(10, 30) / 1000 });
+  await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 1L @ 100.00', { timeout: 15_000 });
 
   // arming AUTO leaves the guard OFF; its card starts at target 10 boxes / stop 10 boxes: switch to rupees, set a tight stop and switch it on
   await expect(page.getByTestId('pnf-guard-toggle')).not.toContainText('ON');
@@ -237,13 +251,13 @@ test('PAPER: the MTM guard watches AUTO\'s own position - a stop-loss closes the
   await page.getByLabel('MTM stop-loss in rupees', { exact: true }).fill('50');
   await page.getByTestId('pnf-guard-card').getByRole('button', { name: 'Switch on', exact: true }).click();
   await page.waitForTimeout(2500);                                      // the guard's baseline is set on its first priced tick
-  // +1 point against the short x 65 = Rs 65 of loss, past the Rs 50 stop (the forming bar prints no brick: the rule exit stays out)
+  // +1 point against the short x 65 = Rs 65 of loss, past the Rs 50 stop
   state.tick = { ltp: 101.05, at: ist(10, 31, 20) };
-  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('closed');
+  await expect.poll(() => server.exits, { timeout: 15_000 }).toEqual([{ chart: 1, why: 'mtm guard' }]);
+  await expect.poll(() => state.ledger.rows[0]?.state).toBe('closed');
   expect(state.ledger.rows[0]).toMatchObject({ reason: 'mtm guard', side: 'SELL', mode: 'PAPER' });
-  expect(state.ledger.rows[0].exitPrice).toBeCloseTo(101.05, 6);
-  expect(orders.length, 'a paper exit sends nothing').toBe(1);
-  await expect(auto).toHaveAttribute('data-armed', 'false');
+  expect(orders, 'a paper exit sends nothing').toEqual([]);
+  await expect(auto).toHaveAttribute('data-armed', 'false', { timeout: 15_000 });
 });
 
 test('Supertrend rule: it is selectable, and arming it locks the ATR / multiplier (the eye still works) until AUTO is stopped', async ({ page }) => {
@@ -287,9 +301,9 @@ test('a chart starts on the Supertrend rule when nothing is saved', async ({ pag
   await expect(page.getByLabel('AUTO rule on chart 2')).toHaveValue('supertrend');
 });
 
-test('AUTO side: Buy only does not enter the SELL signal; the choice is remembered across a reload and locked while armed', async ({ page }) => {
+test('AUTO side: the choice is remembered across a reload, saved with the arming for the server, and locked while armed', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
-  const { orders } = await install(page);
+  const { state, server } = await install(page);
   await openFuture(page);
   const side = page.getByLabel('AUTO side on chart 1');
   await expect(side).toHaveValue('both');
@@ -300,23 +314,10 @@ test('AUTO side: Buy only does not enter the SELL signal; the choice is remember
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await expect(auto).toHaveAttribute('data-armed', 'true');
   await expect(page.getByLabel('AUTO side on chart 1')).toBeDisabled();
-  await page.clock.setFixedTime(ist(10, 31, 5));                       // the 10:30 bar has closed: a SELL signal, which a buy-only chart ignores
-  await page.waitForTimeout(4000);
-  expect(orders.length, 'a buy-only chart never enters the SELL signal').toBe(0);
-  await expect(auto).toContainText('SELL signal ignored (Buy only)');          // said on the status line, not left looking idle
-});
-
-test('AUTO side: Sell only enters the SELL signal (the same data a Buy only chart ignores)', async ({ page }) => {
-  await page.clock.setFixedTime(ist(10, 30, 20));
-  const { orders } = await install(page);
-  await openFuture(page);
-  await page.getByLabel('AUTO side on chart 1').selectOption('sell');
-  const auto = page.getByTestId('pnf-auto-1');
-  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
-  await expect(auto).toHaveAttribute('data-armed', 'true');
-  await page.clock.setFixedTime(ist(10, 31, 5));
-  await expect.poll(() => orders.length, { timeout: 15_000 }).toBe(1);
-  expect(orders[0]).toMatchObject({ mode: 'PAPER', action: 'SELL', lots: 1, source: 'auto', scope: 'renko' });
+  await expect.poll(() => state.ledger.arms?.['1']?.side).toBe('buy');          // the server filters the signals by it
+  // the server's status line is what the page shows (the engine says why it did not enter: lib/pnfAutoChart.test.ts)
+  server.view['1'] = engineView({ note: 'SELL signal ignored (Buy only)' });
+  await expect(auto).toContainText('SELL signal ignored (Buy only)', { timeout: 15_000 });
 });
 
 // The AUTO switch is saved in the ledger (`arms`): a reload resumes it. Before, a reload (13 dashboard rebuilds on 2026-11-04) left AUTO
@@ -329,15 +330,14 @@ test('a reload resumes PAPER AUTO from the ledger; a stop clears it, and an open
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await expect(auto).toHaveAttribute('data-armed', 'true');
   await expect.poll(() => state.ledger.arms?.['1']?.mode).toBe('PAPER');
+  const armT = state.ledger.arms!['1']!.t;
   await page.clock.setFixedTime(ist(10, 31, 5));
-  await expect.poll(() => orders.length, { timeout: 15_000 }).toBe(1);
+  serverEnter(state, { side: 'SELL', box: 100, barT: ist(10, 30) / 1000 });
 
   await page.reload();
   await expect(page.getByTestId('pnf-header-summary')).toContainText('99.95');
-  await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'true', { timeout: 15_000 });
-  await expect(page.getByText(/AUTO resumed on chart 1/)).toBeVisible();
-  await page.waitForTimeout(2500);
-  expect(orders.length, 'a resumed arming never re-enters the signal it already traded').toBe(1);
+  await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'true', { timeout: 15_000 });   // the page follows the saved switch
+  expect(state.ledger.arms?.['1']?.t, 'a reload follows the saved arming, it does not arm again').toBe(armT);
 
   await page.getByTestId('pnf-auto-1').getByRole('button', { name: 'Stop AUTO on chart 1' }).click();
   await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'false');
@@ -350,9 +350,10 @@ test('a reload resumes PAPER AUTO from the ledger; a stop clears it, and an open
   await page.waitForTimeout(2500);
   await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'false');
   await expect(page.getByText(/holds an AUTO SELL position but AUTO is OFF/)).toBeVisible();
+  expect(orders).toEqual([]);
 });
 
-test('a REAL arming does not resume in PAPER (every load starts in PAPER): it says so, and resumes once the page is switched to REAL', async ({ page }) => {
+test('a REAL arming survives a reload: the server keeps trading it, and the page (which loads in PAPER) shows it armed and unspent', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
   const { state } = await install(page);
   await openFuture(page);
@@ -363,15 +364,13 @@ test('a REAL arming does not resume in PAPER (every load starts in PAPER): it sa
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await expect(auto).toHaveAttribute('data-armed', 'true');
   await expect.poll(() => state.ledger.arms?.['1']?.mode).toBe('REAL');
+  const armT = state.ledger.arms!['1']!.t;
 
   await page.reload();
   await expect(page.getByTestId('pnf-header-summary')).toContainText('99.95');
-  await expect(page.getByTestId('pnf-auto-resume-1')).toContainText('switch the page to REAL to resume', { timeout: 15_000 });
-  await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'false');
-  expect(state.ledger.arms?.['1']?.mode, 'the saved arming waits, it is not spent').toBe('REAL');
-
-  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
   await expect(page.getByTestId('pnf-auto-1')).toHaveAttribute('data-armed', 'true', { timeout: 15_000 });
+  await page.waitForTimeout(3500);                                      // a ledger poll later: still the same arming, not re-saved or dropped
+  expect(state.ledger.arms?.['1']).toMatchObject({ mode: 'REAL', t: armT });
 });
 
 test('a stop in one tab switches AUTO off in the other tab too', async ({ page, context }) => {
@@ -428,34 +427,9 @@ test('Kotak REAL: the header P&L prices an open leg Kotak sends without a price 
   expect(polls.some(q => q.includes('ltp=1')), 'Kotak option legs are priced by the route').toBe(true);
 });
 
-// The signal used to be marked handled BEFORE the entry ran: a ledger that could not be reached for a moment (a dashboard restart) lost
-// the entry for good. Nothing was sent then, so it is now retried while the signal is the newest closed bar's.
-test('an entry whose ledger write fails (nothing sent) is retried on the next tick while the signal is fresh', async ({ page }) => {
+test('pyramid: the +1L/brick setting (Max commits on Enter, Escape cancels) is saved with the arming and locked; the server\'s adds show as lots', async ({ page }) => {
   await page.clock.setFixedTime(ist(10, 30, 20));
-  const { orders, state } = await install(page);
-  let refused = 0;
-  await page.route('**/api/straddle-pnf/auto**', async route => {
-    const req = route.request();
-    if (req.method() === 'GET') return json(route, { success: true, ledger: state.ledger });
-    const op = req.postDataJSON() as AutoOp;
-    if (op.op === 'open' && refused === 0) { refused++; return json(route, { success: false, error: 'ledger busy' }, 503); }
-    const r = applyAutoOp(state.ledger, op);
-    if (r.ok) state.ledger = r.ledger;
-    return json(route, { success: r.ok, error: r.ok ? undefined : r.error, ledger: state.ledger }, r.ok ? 200 : r.status);
-  });
-  await openFuture(page);
-  await page.getByTestId('pnf-auto-1').getByRole('button', { name: 'Start AUTO on chart 1' }).click();
-  await page.clock.setFixedTime(ist(10, 31, 5));
-  await expect.poll(() => state.ledger.rows.length, { timeout: 15_000 }).toBe(1);
-  expect(refused).toBe(1);
-  expect(state.ledger.rows[0]).toMatchObject({ side: 'SELL', state: 'open', mode: 'PAPER' });
-  expect(orders.filter(o => o.action === 'SELL').length, 'the paper order route is asked again; nothing is doubled in the ledger').toBeGreaterThanOrEqual(1);
-  expect(state.ledger.log.some(l => /signal not entered yet: the ledger refused it/.test(l.text))).toBe(true);
-});
-
-test('PAPER pyramid: +1L/brick adds one lot per bar on a new best brick, up to Max, booked at the brick; the exit closes every lot', async ({ page }) => {
-  await page.clock.setFixedTime(ist(10, 30, 20));
-  const { orders, state } = await install(page);
+  const { state } = await install(page);
   await openFuture(page);
   const auto = page.getByTestId('pnf-auto-1');
   await auto.getByTestId('pnf-auto-pyr-1').click();
@@ -468,62 +442,13 @@ test('PAPER pyramid: +1L/brick adds one lot per bar on a new best brick, up to M
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await expect(auto).toHaveAttribute('data-armed', 'true');
   await expect(auto.getByTestId('pnf-auto-pyr-1')).toBeDisabled();
+  await expect.poll(() => state.ledger.arms?.['1']?.pyramid?.max).toBe(3);   // what the server adds up to
 
-  await page.clock.setFixedTime(ist(10, 31, 5));                       // SELL entered at 100.0
-  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('open');
-  expect(state.ledger.rows[0]).toMatchObject({ lots: 1, pyramidMax: 3 });
-
-  state.tick = { ltp: 99.85, at: ist(10, 31, 20) };                     // a new lower brick (99.9) on the 10:31 bar
-  await page.clock.setFixedTime(ist(10, 32, 5));
-  await expect.poll(() => state.ledger.rows[0]?.lots, { timeout: 15_000 }).toBe(2);
-  expect(state.ledger.rows[0].adds![0].price).toBeCloseTo(99.9, 6);
-
-  state.tick = { ltp: 99.65, at: ist(10, 32, 20) };                     // two new bricks on one bar: still one lot
-  await page.clock.setFixedTime(ist(10, 33, 5));
-  await expect.poll(() => state.ledger.rows[0]?.lots, { timeout: 15_000 }).toBe(3);
-  expect(state.ledger.rows[0].adds![1].price).toBeCloseTo(99.7, 6);
-  await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 3L (1+2)');
-
-  state.tick = { ltp: 99.45, at: ist(10, 33, 20) };                     // at Max: no more adds
-  await page.clock.setFixedTime(ist(10, 34, 5));
-  await page.waitForTimeout(2500);
-  expect(state.ledger.rows[0].lots).toBe(3);
-
-  state.tick = { ltp: 99.75, at: ist(10, 34, 20) };                     // the first up brick exits all 3 lots
-  await page.clock.setFixedTime(ist(10, 35, 5));
-  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('closed');
-  const r = state.ledger.rows[0];
-  expect(r.lots).toBe(3);
-  expect(r.unitsPerPoint).toBe(195);
-  // (100.0 + 99.9 + 99.7) - 3 x exit, x 65
-  expect(r.pnl).toBeCloseTo((100 + 99.9 + 99.7 - 3 * r.exitPrice!) * 65, 4);
-  expect(orders.every(o => o.mode === 'PAPER')).toBe(true);
-});
-
-test('REAL pyramid: the add is reserved then sent as 1 lot in the row\'s direction; the exit sends exitOwn with every lot\'s units', async ({ page }) => {
-  await page.clock.setFixedTime(ist(10, 30, 20));
-  const { orders, state } = await install(page);
-  await openFuture(page);
-  page.once('dialog', d => { void d.accept(); });
-  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
-  const auto = page.getByTestId('pnf-auto-1');
-  await auto.getByTestId('pnf-auto-pyr-1').click();
-  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
-  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
-  await expect(auto).toHaveAttribute('data-armed', 'true');
-
+  // the server enters, then adds two lots (decideAdd / addLot are unit-tested): the page shows the position as 3 lots, 1 + 2 adds
   await page.clock.setFixedTime(ist(10, 31, 5));
-  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('open');
-  state.tick = { ltp: 99.85, at: ist(10, 31, 20) };
-  await page.clock.setFixedTime(ist(10, 32, 5));
-  await expect.poll(() => state.ledger.rows[0]?.lots, { timeout: 15_000 }).toBe(2);
-  expect(orders[1]).toMatchObject({ mode: 'REAL', action: 'SELL', lots: 1, source: 'auto', scope: 'renko' });
-  expect(state.ledger.rows[0].legs[0].units).toBe(130);
-  expect(state.ledger.rows[0].adds![0]).toMatchObject({ status: 'done', orderIds: ['O1'] });
-
-  state.tick = { ltp: 100.15, at: ist(10, 32, 20) };                     // a 2-box up brick (100.0-100.1): exit
-  await page.clock.setFixedTime(ist(10, 33, 5));
-  await expect.poll(() => state.ledger.rows[0]?.state, { timeout: 15_000 }).toBe('closed');
-  expect(orders[2]).toMatchObject({ mode: 'REAL', exitOwn: { side: 'BUY', units: [130] } });
-  expect(orders.length).toBe(3);
+  const id = serverEnter(state, { side: 'SELL', box: 100, barT: ist(10, 30) / 1000 });
+  apply(state, { op: 'addPaper', id, add: { id: 'a1', t: ist(10, 32, 5) / 1000, barT: ist(10, 31) / 1000, box: 99.9, lots: 1, price: 99.9 } });
+  apply(state, { op: 'addPaper', id, add: { id: 'a2', t: ist(10, 33, 5) / 1000, barT: ist(10, 32) / 1000, box: 99.7, lots: 1, price: 99.7 } });
+  await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 3L (1+2)', { timeout: 15_000 });
 });
+

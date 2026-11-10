@@ -52,7 +52,7 @@ function rig(replies: (OrderReply | null)[] = [], extra: Partial<ChartDeps> = {}
     market: 'NSE_FNO', complete: true, broker: 'dhan', ledger, info: { legs: [{ label: 'NIFTY FUT', lot: 75, unitsPerLot: 75, key: 'k', lotUnits: 75 }], unsupported: null },
     ...over,
   });
-  return { engine, inputs, ops, orders, events, disarms, ledger: () => ledger, advance: (s: number) => { nowMs += s * 1000; } };
+  return { engine, inputs, ops, orders, events, disarms, ledger: () => ledger, advance: (s: number) => { nowMs += s * 1000; }, at: (sec: number) => { nowMs = sec * 1000; } };
 }
 
 const placed = (orderId = 'O1'): OrderReply => ({ success: true, outcome: 'placed', legs: [{ label: 'NIFTY FUT', side: 'SELL', qty: 75, product: 'INTRADAY', status: 'placed', orderId }] });
@@ -234,4 +234,91 @@ test('index chart: an arming without a map never enters', async () => {
   await r.engine.tick(r.inputs({ indexMap: undefined }));
   assert.equal(r.orders.length, 0);
   assert.match(r.engine.note, /through its map/);
+});
+
+// ── paths the browser AUTO specs covered before AUTO moved to the server (feaa01a5, 2026-11-06) ──
+
+test('REAL entry whose ledger reservation fails sends nothing, and is retried on the next tick while the signal is fresh', async () => {
+  let failOpen = 1;
+  const r = rig([placed()]);
+  const inner = r.engine as unknown as { deps: ChartDeps };
+  const post = inner.deps.post;
+  inner.deps.post = async op => (op.op === 'open' && failOpen-- > 0 ? { ok: false, error: 'ledger unreachable' } : post(op));
+  await r.engine.tick(r.inputs());
+  assert.equal(r.orders.length, 0, 'nothing is sent without a reservation');
+  assert.equal(r.ledger().rows.length, 0);
+  r.advance(1);
+  await r.engine.tick(r.inputs({ ledger: r.ledger() }));
+  assert.equal(r.orders.length, 1, 'the same fresh signal is entered on the retry');
+  assert.equal(r.ledger().rows[0].state, 'open');
+});
+
+test('side filter at the engine: Buy only does not enter the SELL signal (and says so); Sell only enters it', async () => {
+  const buyOnly = rig([placed()]);
+  await buyOnly.engine.tick(buyOnly.inputs({ side: 'buy' }));
+  assert.equal(buyOnly.orders.length, 0);
+  assert.match(buyOnly.engine.note, /SELL signal ignored/);
+  const sellOnly = rig([placed()]);
+  await sellOnly.engine.tick(sellOnly.inputs({ side: 'sell' }));
+  assert.equal(sellOnly.orders.length, 1);
+  assert.equal(sellOnly.orders[0].action, 'SELL');
+});
+
+/** A Renko chart (box 1): an up brick at 10:20, then a down brick at 10:30 that is a SELL signal, then `bricks` = [bar time, dir, close]. */
+function renko(bricks: [number, 'X' | 'O', number][] = []): PanelModel {
+  const brick = (dir: 'X' | 'O', close: number): PnfColumn => ({ ...col(dir), low: dir === 'O' ? close : close - 1, high: dir === 'O' ? close + 1 : close });
+  const cols = [brick('X', 101), brick('O', 100), ...bricks.map(([, d, c]) => brick(d, c))];
+  const times = [ist(10, 20), ist(10, 30), ...bricks.map(([t]) => t)].map(t => ({ start: t, end: t }));
+  return model({ chart: 'renko', columns: cols, columnTimes: times, signals: [sig('DOUBLE_BOTTOM_SELL', ist(10, 30))], lastBarT: times[times.length - 1].start } as Partial<PanelModel>);
+}
+const PYR = { on: true, max: 3, every: 1, trailOn: false, trail: 2 };
+
+test('PAPER pyramid: one lot per bar on a new best brick, never twice on a bar, never past Max; the exit closes every lot', async () => {
+  const r = rig([{ success: true, outcome: 'placed', legs: [] }]);   // the paper entry's reply (PAPER adds and exits send nothing)
+  const paper = { arm: { on: true, mode: 'PAPER' as const, watermarkT: ist(10, 25), armT: ist(10, 0) }, pyramid: PYR };
+  r.at(ist(10, 31) + 5);
+  await r.engine.tick(r.inputs({ ...paper, model: renko() }));
+  assert.equal(r.ledger().rows[0].lots, 1);
+  // 10:32: two new lower bricks on one bar -> one add, booked at the bar's brick
+  const b1: [number, 'X' | 'O', number][] = [[ist(10, 32), 'O', 99], [ist(10, 32), 'O', 98]];
+  r.at(ist(10, 33) + 5);
+  await r.engine.tick(r.inputs({ ...paper, ledger: r.ledger(), model: renko(b1) }));
+  await r.engine.tick(r.inputs({ ...paper, ledger: r.ledger(), model: renko(b1) }));
+  assert.equal(r.ledger().rows[0].lots, 2, 'one add per bar');
+  // 10:34 a new best brick: the third lot (Max); 10:36 another: capped
+  const b2: [number, 'X' | 'O', number][] = [...b1, [ist(10, 34), 'O', 97]];
+  r.at(ist(10, 35) + 5);
+  await r.engine.tick(r.inputs({ ...paper, ledger: r.ledger(), model: renko(b2) }));
+  const b3: [number, 'X' | 'O', number][] = [...b2, [ist(10, 36), 'O', 96]];
+  r.at(ist(10, 37) + 5);
+  await r.engine.tick(r.inputs({ ...paper, ledger: r.ledger(), model: renko(b3) }));
+  assert.equal(r.ledger().rows[0].lots, 3, 'never past Max');
+  assert.equal(r.ops.filter(o => o.op === 'addPaper').length, 2);
+  assert.equal(r.orders.filter(o => o.mode === 'REAL').length, 0, 'PAPER sends nothing to a broker');
+  // 10:38 an up brick: the reversal closes the whole 3-lot position
+  r.at(ist(10, 39) + 5);
+  await r.engine.tick(r.inputs({ ...paper, ledger: r.ledger(), model: renko([...b3, [ist(10, 38), 'X', 97]]) }));
+  const row = r.ledger().rows[0];
+  assert.equal(row.state, 'closed');
+  assert.equal(row.lots, 3);
+  assert.equal(row.reason, 'reversal');
+});
+
+test('REAL pyramid: the add is reserved, sent as 1 lot on the row\'s side, confirmed; the exit sends exitOwn with every lot\'s units', async () => {
+  const r = rig([placed('E1'), placed('A1'), { success: true, outcome: 'placed', legs: [{ label: 'NIFTY FUT', side: 'BUY', qty: 150, product: 'INTRADAY', status: 'placed', orderId: 'X1' }] }]);
+  r.at(ist(10, 31) + 5);
+  await r.engine.tick(r.inputs({ pyramid: PYR, model: renko() }));
+  assert.equal(r.ledger().rows[0].state, 'open');
+  const b1: [number, 'X' | 'O', number][] = [[ist(10, 32), 'O', 99]];
+  r.at(ist(10, 33) + 5);
+  r.ops.length = 0;
+  await r.engine.tick(r.inputs({ pyramid: PYR, ledger: r.ledger(), model: renko(b1) }));
+  assert.deepEqual(r.ops.map(o => o.op), ['beginAdd', 'confirmAdd'], 'reserved before it is sent');
+  assert.deepEqual({ action: r.orders[1].action, lots: r.orders[1].lots, mode: r.orders[1].mode }, { action: 'SELL', lots: 1, mode: 'REAL' });
+  assert.equal(r.ledger().rows[0].lots, 2);
+  r.at(ist(10, 35) + 5);
+  await r.engine.tick(r.inputs({ pyramid: PYR, ledger: r.ledger(), model: renko([...b1, [ist(10, 34), 'X', 100]]) }));
+  const exit = r.orders[2] as { exitOwn?: { side: string; units: number[] } };
+  assert.deepEqual(exit.exitOwn && { side: exit.exitOwn.side, units: exit.exitOwn.units }, { side: 'BUY', units: [150] }, 'both lots, 2 x 75');
+  assert.equal(r.ledger().rows[0].state, 'closed');
 });
