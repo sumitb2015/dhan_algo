@@ -28,10 +28,22 @@ export function getPrefixesForUnderlying(underlying: string): string[] {
   return [`iv_snapshots_${u}_`];
 }
 
+/**
+ * Only this underlying's own files. getPrefixesForUnderlying lets CRUDEOILM fall back to CRUDEOIL's snapshots (a
+ * different contract: its OI and volume are not CRUDEOILM's), which is fine for IV Charts' history but wrong for a
+ * per-contract board or for deciding which contracts may be traded (the Fresh Money board passes strict).
+ */
+export function strictPrefixes(underlying: string): string[] {
+  const u = (underlying || 'NIFTY').toUpperCase();
+  if (u === 'CRUDEOIL') return ['crudeoil_oi_snapshots_', 'iv_snapshots_CRUDEOIL_'];
+  if (u === 'CRUDEOILM') return ['crudeoilm_oi_snapshots_', 'iv_snapshots_CRUDEOILM_'];
+  return getPrefixesForUnderlying(u);
+}
+
 /** Snapshot dates present on disk for this underlying, newest first. */
-export function listDates(underlying: string, fallbackToNifty = true): string[] {
+export function listDates(underlying: string, fallbackToNifty = true, strict = false): string[] {
   if (!fs.existsSync(DEBUG_DIR)) return [];
-  const prefixes = getPrefixesForUnderlying(underlying);
+  const prefixes = strict ? strictPrefixes(underlying) : getPrefixesForUnderlying(underlying);
   const files = fs.readdirSync(DEBUG_DIR);
   const dates = new Set<string>();
 
@@ -55,8 +67,8 @@ export function listDates(underlying: string, fallbackToNifty = true): string[] 
   return [...dates].sort((a, b) => b.localeCompare(a));
 }
 
-export function resolveCsvPath(underlying: string, date: string): string | null {
-  const prefixes = getPrefixesForUnderlying(underlying);
+export function resolveCsvPath(underlying: string, date: string, strict = false): string | null {
+  const prefixes = strict ? strictPrefixes(underlying) : getPrefixesForUnderlying(underlying);
   for (const prefix of prefixes) {
     const candidate = path.join(DEBUG_DIR, `${prefix}${date}.csv`);
     if (fs.existsSync(candidate)) {

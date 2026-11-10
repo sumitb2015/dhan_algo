@@ -110,7 +110,7 @@ export function useFreshMoneyTrades(): TradeApi {
 // Tints here are -600/NN on purpose: globals.css forces dark text inside any bg-red-500/NN or bg-emerald-500/NN element
 // in the light theme, which would turn the armed button's white label and a short chip's profit rose.
 export function TradeBar({
-  underlying, armed, onArm, lots, onLots, maxLots, lotSize, tradable, blocked, positions,
+  underlying, armed, onArm, lots, onLots, maxLots, lotSize, mcxMult, tradable, blocked, positions,
 }: {
   underlying: string;
   armed: boolean;
@@ -119,6 +119,8 @@ export function TradeBar({
   onLots: (n: number) => void;
   maxLots: number;
   lotSize: number | null;
+  /** Barrels per lot on MCX (order quantity there is lots); null on NSE. */
+  mcxMult: number | null;
   tradable: boolean;
   blocked: string | null;
   positions: FmPosition[];
@@ -188,7 +190,7 @@ export function TradeBar({
             <Plus className="h-3 w-3" />
           </button>
           <span className="text-[11px] tabular-nums text-zinc-500">
-            {lotSize ? `= ${(lots * lotSize).toLocaleString('en-IN')} qty` : ''} · max {maxLots} · MARKET · MIS
+            {mcxMult ? `= ${(lots * mcxMult).toLocaleString('en-IN')} bbl` : lotSize ? `= ${(lots * lotSize).toLocaleString('en-IN')} qty` : ''} · max {maxLots} · MARKET · MIS
           </span>
         </div>
       )}

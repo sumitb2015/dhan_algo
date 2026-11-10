@@ -8,10 +8,21 @@ import { PYTHON_EXE } from '@/lib/pyExec';
 const PROJECT_ROOT   = path.resolve(process.cwd(), '..');
 const DEBUG_DIR      = path.join(PROJECT_ROOT, 'debug');
 const COLLECTOR      = path.join(PROJECT_ROOT, 'scripts', 'tools', 'crudeoil_oi_collector.py');
-const STATUS_FILE    = path.join(DEBUG_DIR, 'crudeoil_oi_collector_status.json');
-const STOP_TRIGGER   = path.join(DEBUG_DIR, 'crudeoil_oi_stop.trigger');
+// One collector per underlying, each with its own files (crudeoil_oi_* / crudeoilm_oi_*), so both can run at once.
+// Absent `underlying` = CRUDEOIL, the original behaviour.
+const UNDERLYINGS = new Set(['CRUDEOIL', 'CRUDEOILM']);
+const pick = (raw: unknown): string | null => {
+  const u = raw == null || raw === '' ? 'CRUDEOIL' : String(raw).toUpperCase();
+  return UNDERLYINGS.has(u) ? u : null;
+};
+const START_GRACE_MS = 20_000;
+const recentStarts = new Map<string, number>();
+const statusFile  = (u: string) => path.join(DEBUG_DIR, `${u.toLowerCase()}_oi_collector_status.json`);
+const stopTrigger = (u: string) => path.join(DEBUG_DIR, `${u.toLowerCase()}_oi_stop.trigger`);
 
-function readJson(file: string): any | null {
+interface CollectorStatus { pid?: number | string; status?: string; reason?: string; [k: string]: unknown }
+
+function readJson(file: string): CollectorStatus | null {
   try {
     if (!fs.existsSync(file)) return null;
     return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -21,8 +32,10 @@ function readJson(file: string): any | null {
 }
 
 /** GET — return collector status (PID cross-checked to detect crashes) */
-export async function GET() {
-  const status = readJson(STATUS_FILE);
+export async function GET(request: NextRequest) {
+  const u = pick(new URL(request.url).searchParams.get('underlying'));
+  if (!u) return NextResponse.json({ success: false, error: 'underlying must be CRUDEOIL or CRUDEOILM' }, { status: 400 });
+  const status = readJson(statusFile(u));
 
   if (status && status.pid && status.status === 'RUNNING') {
     if (!isPidRunning(Number(status.pid))) {
@@ -41,6 +54,10 @@ export async function GET() {
 export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
   const action: string = body.action ?? '';
+  const u = pick(body.underlying);
+  if (!u) return NextResponse.json({ success: false, error: 'underlying must be CRUDEOIL or CRUDEOILM' }, { status: 400 });
+  const STATUS_FILE = statusFile(u);
+  const STOP_TRIGGER = stopTrigger(u);
 
   if (!fs.existsSync(DEBUG_DIR)) fs.mkdirSync(DEBUG_DIR, { recursive: true });
 
@@ -56,10 +73,17 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ success: true, message: 'Collector already running', pid: status.pid });
     }
 
+    // A collector needs a few seconds to write its first status: a second Start meanwhile must not spawn another.
+    const startedAt = recentStarts.get(u) ?? 0;
+    if (Date.now() - startedAt < START_GRACE_MS) {
+      return NextResponse.json({ success: true, message: 'Collector is starting' });
+    }
+    recentStarts.set(u, Date.now());
+
     // Clear any stale stop trigger so the fresh process doesn't immediately exit
     if (fs.existsSync(STOP_TRIGGER)) fs.unlinkSync(STOP_TRIGGER);
 
-    const child = spawn(PYTHON_EXE, [COLLECTOR], {
+    const child = spawn(PYTHON_EXE, [COLLECTOR, '--underlying', u], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,

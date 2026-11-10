@@ -2,14 +2,19 @@ import { NextRequest, NextResponse } from 'next/server';
 import fs from 'fs';
 import { listDates, resolveCsvPath } from '@/lib/ivSnapshotFiles';
 import { resolveLotSize } from '@/lib/lotSize';
+import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import {
-  parseSnapshotCsv, latestExpiry, summarizeDay, hasCumulativeVolume, boardFresh, normalAt, bandFromHistory, buildBoardRows, strikeStep,
+  parseSnapshotCsv, latestExpiry, summarizeDay, hasCumulativeVolume, boardFresh, sane, normalAt, bandFromHistory, buildBoardRows, strikeStep,
   type DaySummary, type SidePair, type Range, type SeriesPoint, type BandPoint,
 } from '@/lib/freshMoney';
 
-// Read-only: everything comes from the IV snapshot collector's CSVs in debug/ (no Dhan call except the cached
-// lot-size lookup). The collector covers these three underlyings.
-const UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'SENSEX']);
+// Read-only: everything comes from snapshot CSVs in debug/ (no Dhan call except the cached lot-size lookup). The IV
+// snapshot collector writes NIFTY / BANKNIFTY / SENSEX (starts with the dashboard); scripts/tools/crudeoil_oi_collector.py
+// writes CRUDEOIL / CRUDEOILM (started from the page). Each underlying reads ONLY its own files (strict prefixes).
+const UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM']);
+/** Session window (IST minutes) the chart and the normal band span. MCX runs to 23:30 / 23:55 (US DST). */
+const NSE_DAY = { from: 9 * 60 + 15, to: 15 * 60 + 30 };
+const MCX_DAY = { from: 9 * 60, to: 23 * 60 + 55 };
 const HISTORY_DAYS = 14;
 const WINGS = 12;
 
@@ -26,6 +31,12 @@ export interface FreshMoneyResponse {
   step: number;
   lot: number | null;
   oiUnit: 'lots' | 'units';
+  /** 'NSE' or 'MCX'. MCX OI/volume and order quantity are already in lots. */
+  market: 'NSE' | 'MCX';
+  /** Rupees per point per lot for MCX (barrels per lot); null on NSE, where `lot` is the units per lot. */
+  mult: number | null;
+  /** The chart's x-axis span, IST minutes. */
+  day: { from: number; to: number };
   rows: FreshMoneyRow[];
   board: SidePair;
   normal: { puts: Range | null; calls: Range | null };
@@ -69,15 +80,33 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: `unsupported underlying ${underlying}` }, { status: 400 });
   }
 
-  const dates = listDates(underlying, false);
+  const allDates = listDates(underlying, false, true);
+  // Show the newest day whose file the live collector wrote. A backfilled file (build_oi_snapshots.py from 1-minute
+  // candles) carries per-candle volume, so |ΔOI| / volume from it is meaningless (shares far above 100%): skip it.
+  let shown = -1;
+  for (let i = 0; i < allDates.length; i++) {
+    const f = resolveCsvPath(underlying, allDates[i], true);
+    if (f && await summaryFor(f)) { shown = i; break; }
+  }
+  const dates = shown >= 0 ? allDates.slice(shown) : [];
   const date = dates[0];
-  const file = date ? resolveCsvPath(underlying, date) : null;
+  const file = date ? resolveCsvPath(underlying, date, true) : null;
   if (!date || !file) {
-    return NextResponse.json({ error: 'No IV snapshot files on disk yet. The IV snapshot collector writes them while the dashboard runs in market hours.' }, { status: 404 });
+    const mcx = MCX_LOT_MULTIPLIER[underlying] !== undefined;
+    const onlyBackfill = allDates.length > 0;
+    return NextResponse.json({
+      error: mcx
+        ? `No live-collected ${underlying} snapshots yet${onlyBackfill ? ' (the files on disk are 1-minute backfills, whose per-candle volume cannot give a fresh share)' : ''}. Start the ${underlying} OI collector during MCX hours to build the board.`
+        : 'No IV snapshot files on disk yet. The IV snapshot collector writes them while the dashboard runs in market hours.',
+      needsCollector: mcx,
+    }, { status: 404 });
   }
 
-  let lot: number | null = null;
-  try { lot = await resolveLotSize(underlying); } catch { lot = null; }
+  const isMcx = MCX_LOT_MULTIPLIER[underlying] !== undefined;
+  // MCX: OI, volume and order quantity are already lots (master LOT_SIZE is 1) — never divide by a lot size.
+  let lot: number | null = isMcx ? 1 : null;
+  if (!isMcx) { try { lot = await resolveLotSize(underlying); } catch { lot = null; } }
+  const day = isMcx ? MCX_DAY : NSE_DAY;
 
   let st: fs.Stats;
   try { st = await fs.promises.stat(file); } catch {
@@ -99,7 +128,7 @@ export async function GET(req: NextRequest) {
   const today = summarizeDay(snaps);
   const history: DaySummary[] = [];
   for (const d of dates.slice(1, 1 + HISTORY_DAYS)) {
-    const f = resolveCsvPath(underlying, d);
+    const f = resolveCsvPath(underlying, d, true);
     const s = f ? await summaryFor(f) : null;
     if (s) history.push(s);
   }
@@ -121,11 +150,14 @@ export async function GET(req: NextRequest) {
     step: strikeStep([...last.strikes.keys()]),
     lot,
     oiUnit: lot ? 'lots' : 'units',
+    market: isMcx ? 'MCX' : 'NSE',
+    mult: isMcx ? MCX_LOT_MULTIPLIER[underlying] : null,
+    day,
     rows,
-    board: boardFresh(last),
+    board: sane(boardFresh(last)),
     normal: normalAt(history, Math.floor(last.min)),
     series: today.series,
-    band: bandFromHistory(history),
+    band: bandFromHistory(history, day.from, day.to),
     historyDays: history.length,
   };
   respCache.set(underlying, { key: cacheKey, body });

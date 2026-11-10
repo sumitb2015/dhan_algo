@@ -10,8 +10,10 @@ import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/ro
 import { fmtOi, fmtPct, intensity, type Intensity, type Range } from '@/lib/freshMoney';
 import type { FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { TradeBar, TradeCell, useFreshMoneyTrades } from './freshMoney/trading';
+import CollectorControl from './freshMoney/CollectorControl';
 
-const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX'] as const;
+const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
+const MCX_UNDERLYINGS: ReadonlySet<string> = new Set(['CRUDEOIL', 'CRUDEOILM']);
 type Underlying = (typeof UNDERLYINGS)[number];
 const POLL_MS = 30_000;
 const PREF_UNDERLYING = 'freshMoney.underlying';
@@ -20,8 +22,8 @@ const PREF_LOTS = 'freshMoney.lots';
 const CHART_DEFAULT_H = 340;
 const CHART_MIN_H = 160;
 const CHART_MAX_H = 760;
-const DAY_START = 9 * 60 + 15;
-const DAY_END = 15 * 60 + 30;
+/** Fallback chart span (NSE) until the board reply says which session it covers. */
+const NSE_DAY = { from: 9 * 60 + 15, to: 15 * 60 + 30 };
 
 const PUT_COLOR = 'var(--color-emerald-400)';
 const CALL_COLOR = 'var(--color-red-400)';
@@ -161,7 +163,7 @@ function FreshChart({ data, height, showBand }: { data: FreshMoneyResponse; heig
     const s = new Map(data.series.map(p => [p.m, p] as const));
     const b = new Map(data.band.map(p => [p.m, p] as const));
     const out: ChartPoint[] = [];
-    for (let m = DAY_START; m <= DAY_END; m++) {
+    for (let m = data.day.from; m <= data.day.to; m++) {
       const sp = s.get(m), bp = showBand ? b.get(m) : undefined;
       out.push({
         m,
@@ -172,7 +174,7 @@ function FreshChart({ data, height, showBand }: { data: FreshMoneyResponse; heig
       });
     }
     return out;
-  }, [data.series, data.band, showBand]);
+  }, [data.series, data.band, data.day, showBand]);
 
   const yMax = useMemo(() => {
     let mx = 0;
@@ -182,14 +184,20 @@ function FreshChart({ data, height, showBand }: { data: FreshMoneyResponse; heig
     return Math.max(40, Math.ceil(mx / 20) * 20);
   }, [points]);
   const yTicks = useMemo(() => Array.from({ length: yMax / 20 + 1 }, (_, i) => i * 20), [yMax]);
-  const xTicks = [555, 615, 675, 735, 795, 855, 915];
+  // Hourly ticks on the session's own minute (09:15, 10:15 … on NSE; 09:00, 11:00 … every 2 h on MCX's long day).
+  const xTicks = useMemo(() => {
+    const step = data.day.to - data.day.from > 8 * 60 ? 120 : 60;
+    const out: number[] = [];
+    for (let m = data.day.from; m <= data.day.to; m += step) out.push(m);
+    return out;
+  }, [data.day]);
 
   return (
     <div style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: -18 }}>
           <CartesianGrid vertical={false} strokeDasharray="0" strokeOpacity={0.35} />
-          <XAxis dataKey="m" type="number" domain={[DAY_START, DAY_END]} ticks={xTicks} tickFormatter={hhmm}
+          <XAxis dataKey="m" type="number" domain={[data.day.from, data.day.to]} ticks={xTicks} tickFormatter={hhmm}
             tick={{ fontSize: 11 }} tickLine={false} />
           <YAxis domain={[0, yMax]} ticks={yTicks} tickFormatter={(v: number) => `${v}%`} tick={{ fontSize: 11 }}
             tickLine={false} axisLine={false} width={50} />
@@ -312,17 +320,20 @@ export default function FreshMoneyBoard() {
     const d = new Date(now + 5.5 * 3600_000);
     return d.getUTCHours() * 60 + d.getUTCMinutes();
   })();
-  const isStale = !!data?.isToday && staleMin >= 3 && nowIstMin >= DAY_START && nowIstMin <= DAY_END;
+  const day = data?.day ?? NSE_DAY;
+  const isMcx = MCX_UNDERLYINGS.has(underlying);
+  const collectorName = isMcx ? `${underlying} OI collector` : 'IV snapshot collector';
+  const isStale = !!data?.isToday && staleMin >= 3 && nowIstMin >= day.from && nowIstMin <= day.to;
 
   // ── trading ──
   const ts = trades.state;
   const tradable = !!ts?.tradable.includes(underlying);
   const tradeExpiry = ts?.boardExpiry[underlying] ?? null;
   // Orders only from a live board: today's snapshot, and the expiry the server will trade.
-  const session = ts?.session ?? 'closed';
+  const session = ts?.sessions[underlying]?.gate ?? 'closed';
   const blocked = !data ? null
-    : session !== 'open' ? (ts?.sessionNote ?? null)
-    : !data.isToday ? "Trading opens when today's board is live (the IV snapshot collector has not written today)"
+    : session !== 'open' ? (ts?.sessions[underlying]?.note ?? null)
+    : !data.isToday ? `Trading opens when today's board is live (the ${collectorName} has not written today)`
       : isStale ? 'Board snapshot is stale — orders paused until the collector writes again'
         : tradeExpiry !== data.expiry ? "The board's expiry is changing — wait for the next refresh"
           : null;
@@ -374,6 +385,7 @@ export default function FreshMoneyBoard() {
               </button>
             ))}
           </div>
+          {MCX_UNDERLYINGS.has(underlying) && <CollectorControl key={underlying} underlying={underlying} />}
           {data && (
             <span className="text-[10px] font-mono text-zinc-400">
               {data.lastTs.slice(11)} · exp {data.expiry} · OI in {data.oiUnit}
@@ -391,13 +403,14 @@ export default function FreshMoneyBoard() {
         {isStale && (
           <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
             <AlertTriangle className="h-3.5 w-3.5" />
-            The IV snapshot collector has not written for {staleMin} min. The board shows its last snapshot.
+            The {collectorName} has not written for {staleMin} min. The board shows its last snapshot.
           </div>
         )}
         {data && !data.isToday && (
           <div className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-400">
             <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
-            No snapshot for today yet; showing {data.date}. The IV snapshot collector starts with the dashboard in market hours.
+            No snapshot for today yet; showing {data.date}.{' '}
+            {isMcx ? `Start the ${collectorName} (top right) during MCX hours.` : 'The IV snapshot collector starts with the dashboard in market hours.'}
           </div>
         )}
 
@@ -418,7 +431,7 @@ export default function FreshMoneyBoard() {
             {ts && (
               <TradeBar
                 underlying={underlying} armed={armed} onArm={setArmed} lots={lots} onLots={setLotsPref}
-                maxLots={ts.maxLots} lotSize={data.lot} tradable={tradable} blocked={blocked} positions={myPositions}
+                maxLots={ts.maxLots} lotSize={data.lot} mcxMult={data.mult} tradable={tradable} blocked={blocked} positions={myPositions}
               />
             )}
             <div className="px-4 pt-3">

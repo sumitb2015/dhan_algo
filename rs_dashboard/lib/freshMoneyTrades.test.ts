@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildPositions, closeQty, contractHold, dueForCheck, effectiveState, nextCheckDelay, sessionGate, slices, stateFromBroker,
-  unconfirmedQty, SENDING_STALE_MS, UNKNOWN_HOLD_MS, PENDING_HOLD_MS, type FmOrder,
+  unconfirmedQty, hhmmToMin, sessionMessage, NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, PENDING_HOLD_MS, type FmOrder,
 } from './freshMoneyTrades.ts';
 
 let n = 0;
@@ -156,13 +156,52 @@ test('order re-reads are due oldest first, capped, with backoff', () => {
   assert.equal(nextCheckDelay(20), 60_000);
 });
 
-test('session gate: opens 09:15-15:17 IST, closes only to 15:30, nothing on a holiday', () => {
+test('session gate: NSE opens 09:15-15:17 IST, closes only to 15:30, nothing on a holiday', () => {
   const at = (h: number, m: number) => Date.UTC(2026, 10, 10, h, m) - 19_800_000;
-  assert.equal(sessionGate(at(9, 14), true), 'closed');
-  assert.equal(sessionGate(at(9, 15), true), 'open');
-  assert.equal(sessionGate(at(15, 16), true), 'open');
-  assert.equal(sessionGate(at(15, 17), true), 'close-only');
-  assert.equal(sessionGate(at(15, 29), true), 'close-only');
-  assert.equal(sessionGate(at(15, 30), true), 'closed');
-  assert.equal(sessionGate(at(11, 0), false), 'closed');
+  assert.equal(sessionGate(at(9, 14), NSE_WINDOW), 'closed');
+  assert.equal(sessionGate(at(9, 15), NSE_WINDOW), 'open');
+  assert.equal(sessionGate(at(15, 16), NSE_WINDOW), 'open');
+  assert.equal(sessionGate(at(15, 17), NSE_WINDOW), 'close-only');
+  assert.equal(sessionGate(at(15, 29), NSE_WINDOW), 'close-only');
+  assert.equal(sessionGate(at(15, 30), NSE_WINDOW), 'closed');
+  assert.equal(sessionGate(at(11, 0), null), 'closed');
+  assert.match(sessionMessage('closed', null, 'NSE')!, /closed today/);
+  assert.equal(sessionMessage('open', NSE_WINDOW, 'NSE'), null);
+});
+
+test('session gate: an MCX window runs into the evening', () => {
+  const at = (h: number, m: number) => Date.UTC(2026, 10, 12, h, m) - 19_800_000;
+  const mcx = { open: hhmmToMin(900), cutoff: hhmmToMin(2340), close: hhmmToMin(2355) };
+  assert.equal(sessionGate(at(8, 59), mcx), 'closed');
+  assert.equal(sessionGate(at(9, 0), mcx), 'open');
+  assert.equal(sessionGate(at(18, 30), mcx), 'open');
+  assert.equal(sessionGate(at(23, 40), mcx), 'close-only');
+  assert.equal(sessionGate(at(23, 55), mcx), 'closed');
+  assert.equal(sessionMessage('close-only', mcx, 'MCX'), 'After 23:40 IST: closing only (×), no new positions');
+  assert.equal(sessionMessage('closed', mcx, 'MCX'), 'MCX closed — orders are taken 09:00-23:55 IST');
+});
+
+test('MCX P&L: quantity is lots, rupees scale by barrels per lot', () => {
+  const mcx = { segment: 'MCX_COMM' as const, securityId: 'C1', lot: 1, mult: 10 };
+  const pos = buildPositions([
+    ord({ ...mcx, side: 'SELL', qty: 3, filledQty: 3, avgPrice: 200 }),
+    ord({ ...mcx, side: 'BUY', qty: 1, filledQty: 1, avgPrice: 190 }),
+  ], { C1: 195 }, 1e6)[0];
+  assert.equal(pos.segment, 'MCX_COMM');
+  assert.equal(pos.netQty, -2);                    // 2 lots short
+  assert.equal(pos.realised, 10 * 1 * 10);          // 10 points x 1 lot x 10 barrels
+  assert.equal(pos.unrealised, (195 - 200) * -2 * 10);
+  // CRUDEOIL: 100 barrels per lot
+  const big = buildPositions([ord({ ...mcx, securityId: 'C2', mult: 100, side: 'BUY', qty: 1, filledQty: 1, avgPrice: 300 })], { C2: 304 }, 1e6)[0];
+  assert.equal(big.pnl, 400);
+});
+
+test('records written before MCX support read as NSE with multiplier 1', () => {
+  const o = ord({ avgPrice: 100 });
+  delete (o as Partial<FmOrder>).segment;
+  delete (o as Partial<FmOrder>).mult;
+  const pos = buildPositions([o], { '111': 101 }, 1e6)[0];
+  assert.equal(pos.segment, 'NSE_FNO');
+  assert.equal(pos.mult, 1);
+  assert.equal(pos.unrealised, 65);
 });

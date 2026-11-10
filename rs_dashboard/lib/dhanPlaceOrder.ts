@@ -42,6 +42,8 @@ export const SOURCE_QTY_CAPS: Record<string, number> = {
 export const SOURCE_QTY_CAPS_MCX: Record<string, number> = {
   // 'pl' = Price Ladder: MAX_LADDER_LOTS.
   pl: 20,
+  // 'fm' = Fresh Money board: FM_MAX_LOTS_PER_ORDER (20). Without it the NSE 1500 would apply: 1500 MCX lots.
+  fm: 20,
 };
 
 export interface DhanOrderInput {

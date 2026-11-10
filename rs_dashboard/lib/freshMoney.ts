@@ -102,7 +102,9 @@ export function latestExpiry(snaps: Snapshot[]): string {
 
 function sideFresh(s: SideSnap | undefined): BoardSide | null {
   if (!s) return null;
-  const fresh = s.chg !== null && s.vol !== null && s.vol > 0 ? Math.abs(s.chg) / s.vol : null;
+  const raw = s.chg !== null && s.vol !== null && s.vol > 0 ? Math.abs(s.chg) / s.vol : null;
+  // Above 100% cannot happen (a trade moves OI by at most its size): a data fault, shown as unknown.
+  const fresh = raw !== null && raw <= 1 ? raw : null;
   return { oiMoved: s.chg, vol: s.vol, fresh };
 }
 
@@ -160,7 +162,7 @@ export function hasCumulativeVolume(snaps: Snapshot[]): boolean {
 }
 
 /** A share above 100% cannot happen (a trade moves OI by at most its own size): it is a data fault. */
-function sane(p: SidePair): SidePair {
+export function sane(p: SidePair): SidePair {
   return {
     puts: p.puts !== null && p.puts <= 1 ? p.puts : null,
     calls: p.calls !== null && p.calls <= 1 ? p.calls : null,

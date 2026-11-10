@@ -9,6 +9,7 @@
  */
 
 export type OptType = 'CE' | 'PE';
+export type FmSegment = 'NSE_FNO' | 'MCX_COMM';
 export type TxnSide = 'BUY' | 'SELL';
 /** sending = written before the request went out; pending = acknowledged, not yet (fully) traded; unknown = no clean
  *  reply and not found by correlationId — it MAY be live (Invariant 14). */
@@ -22,9 +23,13 @@ export interface FmOrder {
   strike: number;
   opt: OptType;
   securityId: string;
-  lot: number;
+  /** Order segment; absent on records written before MCX support = NSE_FNO. */
+  segment?: FmSegment;
+  lot: number;                // order quantity per lot: the lot size on NSE, 1 on MCX (Dhan takes MCX qty in lots)
+  /** Rupee multiplier per unit of qty for P&L: 1 on NSE (qty is already units), barrels per lot on MCX. Absent = 1. */
+  mult?: number;
   side: TxnSide;
-  qty: number;                // units sent
+  qty: number;                // order quantity as sent (units on NSE, lots on MCX)
   close: boolean;             // sent by the × (square off) button
   correlationId: string;
   orderId: string | null;
@@ -38,12 +43,14 @@ export interface FmLedger { date: string; orders: FmOrder[] }
 
 export interface FmPosition {
   securityId: string;
+  segment: FmSegment;
+  mult: number;
   underlying: string;
   expiry: string;
   strike: number;
   opt: OptType;
   lot: number;
-  netQty: number;             // signed units: + long, - short
+  netQty: number;             // signed order quantity (units on NSE, lots on MCX): + long, - short
   avgPrice: number | null;    // basis of the open quantity; null = a fill's price is not known yet
   realised: number | null;    // rupees booked by reducing trades; null = a fill on either side had no price
   ltp: number | null;
@@ -128,7 +135,7 @@ export function buildPositions(orders: FmOrder[], ltps: Record<string, number>, 
       a = {
         avg: null, realised: 0, basisKnown: true, realisedKnown: true,
         pos: {
-          securityId: o.securityId, underlying: o.underlying, expiry: o.expiry, strike: o.strike, opt: o.opt, lot: o.lot,
+          securityId: o.securityId, segment: o.segment ?? 'NSE_FNO', mult: o.mult && o.mult > 0 ? o.mult : 1, underlying: o.underlying, expiry: o.expiry, strike: o.strike, opt: o.opt, lot: o.lot,
           netQty: 0, avgPrice: null, realised: 0, ltp: null, unrealised: null, pnl: null, busy: null,
         },
       };
@@ -142,7 +149,7 @@ export function buildPositions(orders: FmOrder[], ltps: Record<string, number>, 
     let left = q;
     if (p.netQty !== 0 && Math.sign(p.netQty) !== sgn) {
       const closeQ = Math.min(left, Math.abs(p.netQty));
-      if (px !== null && a.basisKnown && a.avg !== null) a.realised += (px - a.avg) * closeQ * Math.sign(p.netQty);
+      if (px !== null && a.basisKnown && a.avg !== null) a.realised += (px - a.avg) * closeQ * Math.sign(p.netQty) * p.mult;
       else a.realisedKnown = false;
       p.netQty += sgn * closeQ;
       left -= closeQ;
@@ -167,7 +174,7 @@ export function buildPositions(orders: FmOrder[], ltps: Record<string, number>, 
     const ltp = ltps[pos.securityId];
     pos.ltp = ltp > 0 ? ltp : null;
     if (pos.netQty === 0) pos.unrealised = 0;
-    else pos.unrealised = pos.ltp !== null && pos.avgPrice !== null ? (pos.ltp - pos.avgPrice) * pos.netQty : null;
+    else pos.unrealised = pos.ltp !== null && pos.avgPrice !== null ? (pos.ltp - pos.avgPrice) * pos.netQty * pos.mult : null;
     pos.pnl = pos.unrealised === null || pos.realised === null ? null : pos.realised + pos.unrealised;
     out.push(pos);
   }
@@ -204,24 +211,30 @@ export function dueForCheck(orders: FmOrder[], nextAt: ReadonlyMap<string, numbe
     .slice(0, limit);
 }
 
-/** Opening orders stop at the repo-wide 15:17 IST intraday cutoff; closes run to the 15:30 bell. */
-export const OPEN_FROM_MIN = 9 * 60 + 15;
-export const OPEN_CUTOFF_MIN = 15 * 60 + 17;
-export const CLOSE_UNTIL_MIN = 15 * 60 + 30;
+/** A trading day's window in IST minutes: new positions from `open` until `cutoff`, closes until `close`. */
+export interface TradeWindow { open: number; cutoff: number; close: number }
+
+/** NSE F&O: opens stop at the repo-wide 15:17 IST intraday cutoff; closes run to the 15:30 bell. */
+export const NSE_WINDOW: TradeWindow = { open: 9 * 60 + 15, cutoff: 15 * 60 + 17, close: 15 * 60 + 30 };
+
+/** hhmm (e.g. 2340) → minutes since midnight. */
+export const hhmmToMin = (hhmm: number) => Math.floor(hhmm / 100) * 60 + (hhmm % 100);
+const fmtMin = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 
 export type SessionGate = 'open' | 'close-only' | 'closed';
 
-/** What this page may send at `nowMs`, given whether today (IST) is an NSE trading day. */
-export function sessionGate(nowMs: number, tradingDay: boolean): SessionGate {
-  if (!tradingDay) return 'closed';
+/** What this page may send at `nowMs`. `window` null = no session today (weekend / holiday). */
+export function sessionGate(nowMs: number, window: TradeWindow | null): SessionGate {
+  if (!window) return 'closed';
   const d = new Date(nowMs + 19_800_000);
   const m = d.getUTCHours() * 60 + d.getUTCMinutes();
-  if (m < OPEN_FROM_MIN || m >= CLOSE_UNTIL_MIN) return 'closed';
-  return m < OPEN_CUTOFF_MIN ? 'open' : 'close-only';
+  if (m < window.open || m >= window.close) return 'closed';
+  return m < window.cutoff ? 'open' : 'close-only';
 }
 
-export function sessionMessage(gate: SessionGate): string | null {
-  if (gate === 'closed') return 'Market closed — orders are taken 09:15-15:30 IST on NSE trading days';
-  if (gate === 'close-only') return 'After 15:17 IST: closing only (×), no new positions';
-  return null;
+export function sessionMessage(gate: SessionGate, window: TradeWindow | null, market: string): string | null {
+  if (gate === 'open') return null;
+  if (!window) return `${market} is closed today — no orders`;
+  if (gate === 'closed') return `${market} closed — orders are taken ${fmtMin(window.open)}-${fmtMin(window.close)} IST`;
+  return `After ${fmtMin(window.cutoff)} IST: closing only (×), no new positions`;
 }

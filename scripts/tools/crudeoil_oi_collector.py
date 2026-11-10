@@ -1,11 +1,18 @@
 """
-Crude Oil Options OI Snapshot Collector — runs during MCX market hours (09:00 to 23:30 IST),
-polling the CRUDEOIL option chain every 30 seconds and writing a snapshot of ATM±10 strikes to a daily CSV file.
+Crude Oil Options OI Snapshot Collector — runs during MCX market hours (09:00 IST to the evening close: 23:30
+while the US is on daylight saving, 23:55 otherwise), polling the CRUDEOIL or CRUDEOILM option chain every 30 seconds
+and writing a snapshot of ATM±10 strikes to a daily CSV file.
 
 ATM is locked at startup based on the active near-month Futures contract price.
 
+Each underlying has its own files, so both can run at once:
+    CRUDEOIL : debug/crudeoil_oi_snapshots_<date>.csv,  crudeoil_oi_collector_status.json,  crudeoil_oi_stop.trigger
+    CRUDEOILM: debug/crudeoilm_oi_snapshots_<date>.csv, crudeoilm_oi_collector_status.json, crudeoilm_oi_stop.trigger
+OI and volume are in LOTS (Dhan reports MCX quantities in lots).
+
 Usage:
     python scripts/tools/crudeoil_oi_collector.py
+    python scripts/tools/crudeoil_oi_collector.py --underlying CRUDEOILM
     python scripts/tools/crudeoil_oi_collector.py --expiry 2026-07-16
     python scripts/tools/crudeoil_oi_collector.py --dry-run
 """
@@ -45,7 +52,20 @@ STRIKE_STEP = 100
 ATM_RANGE   = 10          # ATM ± 10 strikes = 21 total
 POLL_SEC    = 30
 MARKET_OPEN = (9, 0)      # MCX opens at 09:00
-MARKET_CLOSE = (23, 30)   # MCX closes at 23:30 (standard)
+UNDERLYINGS = ('CRUDEOIL', 'CRUDEOILM')
+UNDERLYING = 'CRUDEOIL'   # set from --underlying in main()
+
+
+def _nth_sunday(year: int, month: int, n: int) -> date:
+    first = date(year, month, 1)
+    return date(year, month, 1 + (6 - first.weekday()) % 7 + (n - 1) * 7)
+
+
+def market_close(d: date) -> tuple:
+    """MCX evening close: 23:30 IST while the US is on DST (2nd Sunday of March to 1st Sunday of November), else 23:55.
+    Same rule as rs_dashboard/lib/mcxSession.ts."""
+    summer = _nth_sunday(d.year, 3, 2) < d <= _nth_sunday(d.year, 11, 1)
+    return (23, 30) if summer else (23, 55)
 
 CSV_COLUMNS = [
     'timestamp', 'spot', 'expiry', 'strike',
@@ -70,22 +90,23 @@ def is_before_open(dt: datetime) -> bool:
 
 
 def is_after_close(dt: datetime) -> bool:
-    close_mins = MARKET_CLOSE[0] * 60 + MARKET_CLOSE[1]
+    close = market_close(dt.date())
+    close_mins = close[0] * 60 + close[1]
     return minutes_since_midnight(dt) >= close_mins
 
 
 def csv_path(today: date) -> str:
     debug_dir = os.path.join(ROOT, 'debug')
     os.makedirs(debug_dir, exist_ok=True)
-    return os.path.join(debug_dir, f'crudeoil_oi_snapshots_{today.isoformat()}.csv')
+    return os.path.join(debug_dir, f'{UNDERLYING.lower()}_oi_snapshots_{today.isoformat()}.csv')
 
 
 def stop_trigger_path() -> str:
-    return os.path.join(ROOT, 'debug', 'crudeoil_oi_stop.trigger')
+    return os.path.join(ROOT, 'debug', f'{UNDERLYING.lower()}_oi_stop.trigger')
 
 
 def status_file_path() -> str:
-    return os.path.join(ROOT, 'debug', 'crudeoil_oi_collector_status.json')
+    return os.path.join(ROOT, 'debug', f'{UNDERLYING.lower()}_oi_collector_status.json')
 
 
 def write_status(**fields) -> None:
@@ -189,10 +210,13 @@ def write_rows(path: str, rows: list, write_header: bool) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description='Crude Oil Options OI Snapshot Collector')
+    parser.add_argument('--underlying', default='CRUDEOIL', choices=UNDERLYINGS, help='CRUDEOIL (default) or CRUDEOILM')
     parser.add_argument('--expiry',     default='', help='Expiry date YYYY-MM-DD; auto-selects nearest if omitted')
     parser.add_argument('--dry-run',    action='store_true', help='Print rows to stdout, do not write CSV')
     parser.add_argument('--ignore-market-hours', action='store_true', help='Ignore market open/close times')
     args = parser.parse_args()
+    global UNDERLYING
+    UNDERLYING = args.underlying
 
     dhan = get_dhan_client()
     if not dhan:
@@ -210,9 +234,9 @@ def main():
             time.sleep(min(wait_mins * 60, 60))
 
     # ── Find active Crude Oil futures contract ─────────────────────────
-    fut = _find_nearest_future(helper, "CRUDEOIL", exchange="MCX", instrument="FUTCOM")
+    fut = _find_nearest_future(helper, UNDERLYING, exchange="MCX", instrument="FUTCOM")
     if not fut:
-        log.error('Could not find active CRUDEOIL future contract')
+        log.error('Could not find active %s future contract', UNDERLYING)
         sys.exit(1)
     
     futures_sid = int(fut["SECURITY_ID"])
@@ -244,7 +268,7 @@ def main():
     log.info('Futures Spot=%.2f  ATM=%d  strikes=%d–%d  expiry=%s',
              spot, atm, strikes[0], strikes[-1], expiry)
 
-    write_status(status='RUNNING', expiry=expiry, atm=atm, rows=0, last_update=None)
+    write_status(status='RUNNING', underlying=UNDERLYING, expiry=expiry, atm=atm, rows=0, last_update=None)
 
     # ── CSV setup ─────────────────────────────────────────────────────
     today    = date.today()
@@ -264,7 +288,7 @@ def main():
         now = ist_now()
 
         if not args.ignore_market_hours and is_after_close(now):
-            log.info('Market closed (23:30) — exiting')
+            log.info('Market closed (%02d:%02d) — exiting', *market_close(now.date()))
             write_status(status='STOPPED', expiry=expiry, atm=atm, reason='market_closed')
             break
 
@@ -279,7 +303,7 @@ def main():
         try:
             # Refresh futures spot each iteration
             live_spot = helper.get_ltp(futures_sid, exchange="MCX", instrument="FUTCOM") or spot
-            chain_data = helper.get_option_chain("CRUDEOIL", expiry, exchange_segment='MCX_COMM')
+            chain_data = helper.get_option_chain(UNDERLYING, expiry, exchange_segment='MCX_COMM')
             oc = chain_data.get('oc', {}) if chain_data else {}
 
             if not oc:

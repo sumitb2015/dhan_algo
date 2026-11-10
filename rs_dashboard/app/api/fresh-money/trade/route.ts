@@ -6,6 +6,8 @@ import { DEBUG_DIR, resolveCsvPath } from '@/lib/ivSnapshotFiles';
 import { withFileLock, readJsonFile, writeJsonAtomic } from '@/lib/lockedJsonFile';
 import { istToday } from '@/lib/istTime';
 import { isRegularSession } from '@/lib/nseHolidays';
+import { mcxSession } from '@/lib/mcxSession';
+import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { resolveOption } from '@/lib/pnfContracts';
 import { placeDhanOrder } from '@/lib/dhanPlaceOrder';
 import { readBrokerOrder } from '@/lib/brokerOrderStatus';
@@ -14,10 +16,10 @@ import { fetchLtps } from '@/lib/dhanEquityQuote';
 import { dedupe } from '@/lib/pyExec';
 import { parseSnapshotCsv, latestExpiry } from '@/lib/freshMoney';
 import {
-  buildPositions, closeQty, contractHold, dueForCheck, effectiveState, nextCheckDelay, sessionGate, sessionMessage, slices,
-  stateFromBroker, unconfirmedQty,
+  buildPositions, closeQty, contractHold, dueForCheck, effectiveState, hhmmToMin, nextCheckDelay, sessionGate, sessionMessage,
+  slices, stateFromBroker, unconfirmedQty, NSE_WINDOW,
   FM_MAX_LOTS_PER_ORDER, FM_MAX_POSITION_LOTS,
-  type FmLedger, type FmOrder, type FmPosition, type OptType, type SessionGate, type TxnSide,
+  type FmLedger, type FmOrder, type FmPosition, type FmSegment, type OptType, type SessionGate, type TradeWindow, type TxnSide,
 } from '@/lib/freshMoneyTrades';
 
 /**
@@ -26,7 +28,10 @@ import {
  * The browser sends only underlying, expiry, strike, CE/PE, BUY/SELL and lots. The contract (security id, lot) is
  * resolved here from master_list.csv, and only for a strike and expiry that today's board snapshot actually shows, so
  * the page can never trade something it is not displaying. Lots are capped per order and per position (unconfirmed
- * orders counted as if they fill). New positions only 09:15-15:17 IST on a regular NSE session; closes until 15:30.
+ * orders counted as if they fill). NSE: new positions 09:15-15:17 IST on a regular session, closes until 15:30.
+ * MCX (CRUDEOIL / CRUDEOILM): new positions from the open until the MIS auto-exit, closes until the close
+ * (lib/mcxSession.ts: 23:30 / 23:55 by US DST, MCX holidays). MCX order quantity is LOTS (Dhan), and P&L is
+ * multiplied by barrels per lot (MCX_LOT_MULTIPLIER) — dhan-crudeoil-trading.
  *
  * Ledger: debug/fresh_money_trades.json, this page's own orders (ownership + P&L basis). Every order is written as
  * 'sending' BEFORE it goes out, so a crash mid-send leaves an UNKNOWN record rather than nothing.
@@ -36,13 +41,24 @@ const LEDGER = path.join(DEBUG_DIR, 'fresh_money_trades.json');
 const LOCK = `${LEDGER}.lock`;
 const LOCK_STALE_MS = 15_000;
 /** SENSEX is BSE; the contract resolver covers NSE and MCX only, so its board is watch-only. */
-const TRADABLE = new Set(['NIFTY', 'BANKNIFTY']);
+const TRADABLE = new Set(['NIFTY', 'BANKNIFTY', 'CRUDEOIL', 'CRUDEOILM']);
+const isMcx = (u: string) => MCX_LOT_MULTIPLIER[u] !== undefined;
 const IDEMPOTENCY_TTL_MS = 60_000;
 /** Broker reads per refresh, and the least gap between refreshes (every tab's poll shares one refresh). */
 const READS_PER_REFRESH = 4;
 const REFRESH_GAP_MS = 2_000;
 
-const gateNow = (): SessionGate => sessionGate(Date.now(), isRegularSession(istToday()));
+/** Today's trading window for this underlying's market, or null when that market is shut today. */
+function windowFor(underlying: string): TradeWindow | null {
+  const today = istToday();
+  if (!isMcx(underlying)) return isRegularSession(today) ? NSE_WINDOW : null;
+  const m = mcxSession(today);
+  if (m.open >= m.close) return null;
+  return { open: hhmmToMin(m.open), cutoff: hhmmToMin(m.autoExit), close: hhmmToMin(m.close) };
+}
+const marketName = (u: string) => (isMcx(u) ? 'MCX' : 'NSE');
+const gateNow = (u: string): SessionGate => sessionGate(Date.now(), windowFor(u));
+const gateMessage = (u: string, gate: SessionGate) => sessionMessage(gate, windowFor(u), marketName(u));
 
 // ── ledger ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -71,7 +87,7 @@ const boardCache = new Map<string, { key: string; expiry: string; strikes: Set<n
 
 /** Today's board for `underlying`: its expiry and the strikes of the last snapshot. Null when there is none today. */
 async function todaysBoard(underlying: string): Promise<{ expiry: string; strikes: Set<number> } | null> {
-  const file = resolveCsvPath(underlying, istToday());
+  const file = resolveCsvPath(underlying, istToday(), true);
   if (!file) return null;
   const st = await fs.promises.stat(file);
   const key = `${st.mtimeMs}:${st.size}`;
@@ -91,12 +107,16 @@ async function todaysBoard(underlying: string): Promise<{ expiry: string; strike
 let ltpCache: { at: number; ids: string; data: Record<string, number> } | null = null;
 
 /** Last prices through the shared quote lane; the previous answer on a failed call, else {} (P&L shows unknown). */
-async function ltpsFor(ids: string[]): Promise<Record<string, number>> {
-  if (!ids.length) return {};
-  const key = [...ids].sort().join(',');
+async function ltpsFor(items: { id: string; segment: FmSegment }[]): Promise<Record<string, number>> {
+  if (!items.length) return {};
+  const key = items.map(i => `${i.segment}:${i.id}`).sort().join(',');
   if (ltpCache && ltpCache.ids === key && Date.now() - ltpCache.at < 1_500) return ltpCache.data;
   try {
-    const data = await fetchLtps('NSE_FNO', ids);
+    const data: Record<string, number> = {};
+    for (const seg of ['NSE_FNO', 'MCX_COMM'] as const) {
+      const ids = items.filter(i => i.segment === seg).map(i => i.id);
+      if (ids.length) Object.assign(data, await fetchLtps(seg, ids));
+    }
     ltpCache = { at: Date.now(), ids: key, data };
     return data;
   } catch {
@@ -182,9 +202,8 @@ export interface FreshMoneyTradeState {
   tradable: string[];
   maxLots: number;
   maxPositionLots: number;
-  /** 'open' = new positions allowed, 'close-only' after 15:17 IST, 'closed' outside the session. */
-  session: SessionGate;
-  sessionNote: string | null;
+  /** Per underlying: 'open' = new positions allowed, 'close-only' after the cutoff, 'closed' outside the session. */
+  sessions: Record<string, { gate: SessionGate; note: string | null }>;
   boardExpiry: Record<string, string | null>;
   positions: FmPosition[];
   orders: (FmOrder & { effState: string })[];
@@ -195,17 +214,17 @@ async function buildState(): Promise<FreshMoneyTradeState> {
   const ledger = loadLedger();
   const now = Date.now();
   const pre = buildPositions(ledger.orders, {}, now);
-  const ltps = await ltpsFor(pre.filter(p => p.netQty !== 0).map(p => p.securityId));
+  const ltps = await ltpsFor(pre.filter(p => p.netQty !== 0).map(p => ({ id: p.securityId, segment: p.segment })));
   const boardExpiry: Record<string, string | null> = {};
   for (const u of TRADABLE) boardExpiry[u] = (await todaysBoard(u).catch(() => null))?.expiry ?? null;
-  const session = gateNow();
+  const sessions: FreshMoneyTradeState['sessions'] = {};
+  for (const u of TRADABLE) { const g = gateNow(u); sessions[u] = { gate: g, note: gateMessage(u, g) }; }
   return {
     date: ledger.date,
     tradable: [...TRADABLE],
     maxLots: FM_MAX_LOTS_PER_ORDER,
     maxPositionLots: FM_MAX_POSITION_LOTS,
-    session,
-    sessionNote: sessionMessage(session),
+    sessions,
     boardExpiry,
     positions: buildPositions(ledger.orders, ltps, now),
     orders: ledger.orders.slice(-40).reverse().map(o => ({ ...o, effState: effectiveState(o, now) })),
@@ -241,8 +260,8 @@ type OrderBase = Omit<FmOrder, 'id' | 'ts' | 'correlationId' | 'orderId' | 'stat
  *  pass). The cap counts unconfirmed orders (UNKNOWN / in flight) as if they fill. */
 function precheck(l: FmLedger, base: OrderBase): string | null {
   const now = Date.now();
-  const gate = gateNow();
-  if (gate === 'closed' || (gate === 'close-only' && !base.close)) return sessionMessage(gate);
+  const gate = gateNow(base.underlying);
+  if (gate === 'closed' || (gate === 'close-only' && !base.close)) return gateMessage(base.underlying, gate);
   const hold = contractHold(l.orders, base.securityId, now);
   if (hold === 'unknown') return 'An earlier order on this contract has an UNKNOWN outcome — check Positions/Orders; new orders on it are held for a minute';
   if (hold === 'pending') return 'An earlier order on this contract is still being confirmed — try again in a moment';
@@ -277,7 +296,7 @@ async function sendOne(base: OrderBase, check = true): Promise<SendResult> {
 
   const r = await placeDhanOrder({
     securityId: base.securityId, quantity: base.qty, side: base.side, orderType: 'MARKET',
-    exchangeSegment: 'NSE_FNO', productType: 'INTRADAY', source: 'fm', correlationId,
+    exchangeSegment: base.segment ?? 'NSE_FNO', productType: 'INTRADAY', source: 'fm', correlationId,
   });
   const patch: Partial<FmOrder> =
     r.status === 'placed' ? { state: 'pending', orderId: r.orderId }
@@ -319,20 +338,24 @@ async function placeOrder(b: OrderBody): Promise<NextResponse> {
   if (!opt || !side || !Number.isFinite(strike)) return reply({ success: false, error: 'opt (CE/PE), side (BUY/SELL) and strike are required' }, 400);
   if (!Number.isInteger(lots) || lots <= 0) return reply({ success: false, error: 'Lots must be a positive integer' }, 400);
   if (lots > FM_MAX_LOTS_PER_ORDER) return reply({ success: false, error: `Max ${FM_MAX_LOTS_PER_ORDER} lots per order` }, 400);
-  const gate = gateNow();
-  if (gate !== 'open') return reply({ success: false, error: sessionMessage(gate)! }, 409);
+  const gate = gateNow(underlying);
+  if (gate !== 'open') return reply({ success: false, error: gateMessage(underlying, gate)! }, 409);
 
   const board = await todaysBoard(underlying).catch(() => null);
   if (!board) return reply({ success: false, error: `No ${underlying} board snapshot today — the IV snapshot collector must be running to trade from this page` }, 409);
   if (b.expiry !== board.expiry) return reply({ success: false, error: `The board's expiry is ${board.expiry} now — refresh before trading` }, 409);
   if (!board.strikes.has(strike)) return reply({ success: false, error: `${strike} is not on today's board` }, 400);
 
+  const mcx = isMcx(underlying);
   const c = resolveOption(underlying, board.expiry, strike, opt);
-  if (!c || c.segment !== 'NSE_FNO' || !(c.lot > 0)) return reply({ success: false, error: `No ${underlying} ${board.expiry} ${strike} ${opt} contract in the master list` }, 400);
-
+  if (!c || c.segment !== (mcx ? 'MCX_COMM' : 'NSE_FNO') || !(c.lot > 0)) {
+    return reply({ success: false, error: `No ${underlying} ${board.expiry} ${strike} ${opt} contract in the master list` }, 400);
+  }
+  // Dhan's MCX order quantity is LOTS whatever the master's LOT_SIZE says; P&L scales by barrels per lot.
+  const lot = mcx ? 1 : c.lot;
   return replyFor(await sendOne({
-    underlying, expiry: board.expiry, strike, opt, securityId: c.securityId, lot: c.lot,
-    side, qty: lots * c.lot, close: false,
+    underlying, expiry: board.expiry, strike, opt, securityId: c.securityId, segment: c.segment as FmSegment, lot,
+    mult: mcx ? MCX_LOT_MULTIPLIER[underlying] : 1, side, qty: lots * lot, close: false,
   }));
 }
 
@@ -342,8 +365,8 @@ async function closePosition(b: OrderBody): Promise<NextResponse> {
   const now = Date.now();
   const pos = buildPositions(ledger.orders, {}, now).find(p => p.securityId === securityId);
   if (!pos || pos.netQty === 0) return reply({ success: false, error: 'This page holds no open position on that contract' }, 400);
-  const gate = gateNow();
-  if (gate === 'closed') return reply({ success: false, error: sessionMessage(gate)! }, 409);
+  const gate = gateNow(pos.underlying);
+  if (gate === 'closed') return reply({ success: false, error: gateMessage(pos.underlying, gate)! }, 409);
   const hold = contractHold(ledger.orders, securityId, now);
   if (hold) {
     return reply({
@@ -364,8 +387,8 @@ async function closePosition(b: OrderBody): Promise<NextResponse> {
   for (let i = 0; i < parts.length; i++) {
     // Later slices skip the hold check: the previous slice is still 'pending' by design.
     const r = await sendOne({
-      underlying: pos.underlying, expiry: pos.expiry, strike: pos.strike, opt: pos.opt, securityId, lot: pos.lot,
-      side, qty: parts[i], close: true,
+      underlying: pos.underlying, expiry: pos.expiry, strike: pos.strike, opt: pos.opt, securityId, segment: pos.segment,
+      lot: pos.lot, mult: pos.mult, side, qty: parts[i], close: true,
     }, i === 0);
     if (r.kind === 'placed') { placedQty += parts[i]; lastId = r.orderId; continue; }
     // Never send the next slice around a refusal or an UNKNOWN; say exactly what did go out.
