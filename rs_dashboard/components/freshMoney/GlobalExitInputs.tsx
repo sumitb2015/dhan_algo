@@ -96,7 +96,7 @@ export function GlobalExitInputs({ global, total, onSet, saving, watcherAlive }:
   return (
     <div className="flex flex-wrap items-center gap-2"
       title="Total target / stop-loss in rupees on the combined P&L of every position on this page (booked + open). When either is reached the server closes ALL positions with MARKET orders, shorts first. Armed as soon as you commit a value; runs with the tab closed. Blank = off.">
-      <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-300">Total</span>
+      <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-300">Total · all brokers</span>
       <AmountInput label="Target" value={target} onCommit={t => onSet(t, sl)} disabled={saving} />
       <AmountInput label="SL" value={sl} onCommit={v => onSet(target, v)} disabled={saving} />
       {global && (

@@ -11,7 +11,7 @@ import React, { useState } from 'react';
 import CollapseToggle from './CollapseToggle';
 import { Loader2, Pencil, X } from 'lucide-react';
 import type { FreshMoneyTradeState } from '@/app/api/fresh-money/trade/route';
-import type { FmPosition } from '@/lib/freshMoneyTrades';
+import type { FmBroker, FmPosition } from '@/lib/freshMoneyTrades';
 import type { ExitSpec, FmExit } from '@/lib/freshMoneyExits';
 import { brokerLabel, fmtRs, lockKey } from './trading';
 import { EXIT_STATE_LABEL, ExitEditor, exitNeedsLook } from './ExitInputs';
@@ -51,8 +51,10 @@ function ExitCell({ x }: { x: FmExit | undefined }) {
   );
 }
 
-export default function PositionsOrders({ state, armed, inflight, canClose, onClose, onSetExit, collapsed = false, onToggle }: {
+export default function PositionsOrders({ state, broker, armed, inflight, canClose, onClose, onSetExit, collapsed = false, onToggle }: {
   state: FreshMoneyTradeState | null;
+  /** The page's selected broker: only its positions and orders are listed (others are counted in the header). */
+  broker: FmBroker;
   armed: boolean;
   inflight: ReadonlySet<string>;
   canClose: (p: FmPosition) => boolean;
@@ -68,9 +70,10 @@ export default function PositionsOrders({ state, armed, inflight, canClose, onCl
   const [saving, setSaving] = useState(false);
   const exits = state?.exits ?? {};
   const positions = [...(state?.positions ?? [])]
-    .filter(p => p.netQty !== 0 || p.realised !== 0)
+    .filter(p => p.broker === broker && (p.netQty !== 0 || p.realised !== 0))
     .sort((a, b) => Number(b.netQty !== 0) - Number(a.netQty !== 0) || a.underlying.localeCompare(b.underlying) || a.strike - b.strike);
-  const orders: Order[] = state?.orders ?? [];
+  const orders: Order[] = (state?.orders ?? []).filter(o => (o.broker ?? 'dhan') === broker);
+  const otherOpen = (state?.positions ?? []).filter(p => p.broker !== broker && p.netQty !== 0).length;
   const open = positions.filter(p => p.netQty !== 0).length;
 
   let tOpen: number | null = 0, tBooked: number | null = 0;
@@ -97,7 +100,7 @@ export default function PositionsOrders({ state, armed, inflight, canClose, onCl
         </div>
         <span className="text-[11px] text-zinc-500">
           {tab === 'positions'
-            ? "This page's own positions, every broker and underlying (not the broker's pooled net)"
+            ? `${brokerLabel(broker)} positions from this page, every underlying (not the broker's pooled net)${otherOpen ? ` · ${otherOpen} open on other brokers (shown under the trade bar)` : ''}`
             : "Today's latest orders from this page"}
         </span>
         {(tab === 'positions' || collapsed) && (

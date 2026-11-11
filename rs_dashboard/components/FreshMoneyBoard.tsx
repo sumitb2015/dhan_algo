@@ -622,7 +622,7 @@ export default function FreshMoneyBoard() {
 
         {ts && (
           <PositionsOrders
-            state={ts} armed={armed} inflight={inflight} onClose={sendClose} onSetExit={setExit}
+            state={ts} broker={broker} armed={armed} inflight={inflight} onClose={sendClose} onSetExit={setExit}
             collapsed={posCollapsed} onToggle={togglePos}
             canClose={p => (ts.sessions[p.underlying]?.gate ?? 'closed') !== 'closed' && !!ts.brokers?.[p.broker]}
           />
