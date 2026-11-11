@@ -16,7 +16,7 @@ import {
   BROKERS, brokerContract, brokerName, brokerNets, brokerSessionOk, newCorrelationId, readOrder, sendOrder,
 } from '@/lib/freshMoneyBrokers';
 import {
-  brokerUnits, buildPositions, closeCheck, closeQty, freshRestCache, contractHold, contractSettling, dueForCheck, effectiveState, hhmmToMin,
+  brokerUnits, buildPositions, closeCheck, closeQty, freshRestCache, contractHold, contractSettling, dueForCheck, effectiveState, hhmmToMin, isTerminal,
   inFlightReducing, nextCheckDelay, orderKey, reconcileDownQty, sessionGate, sessionMessage, slices, unconfirmedQty,
   NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, FM_MAX_LOTS_PER_ORDER, FM_MAX_POSITION_LOTS,
   type FmBroker, type FmLedger, type FmOrder, type FmPosition, type FmSegment, type OptType, type SessionGate,
@@ -59,6 +59,9 @@ export const TRADABLE: ReadonlySet<string> = new Set(['NIFTY', 'BANKNIFTY', 'CRU
 const isMcx = (u: string) => MCX_LOT_MULTIPLIER[u] !== undefined;
 /** Broker reads per refresh, and the least gap between refreshes (every tab's poll shares one refresh). */
 const READS_PER_REFRESH = 4;
+/** An order this young is read on a fast schedule (see nextReadAt / refreshOrders). */
+const YOUNG_ORDER_MS = 15_000;
+const YOUNG_REFRESH_GAP_MS = 400;
 const REFRESH_GAP_MS = 2_000;
 
 /** Today's trading window for this underlying's market, or null when that market is shut today. */
@@ -178,15 +181,21 @@ function nextReadAt(o: FmOrder, now: number, attempts: number, changed: boolean)
     if (now < staleAt) return staleAt;
     if (now < o.ts + UNKNOWN_HOLD_MS + 60_000) return now + 2_000;
   }
+  // A just-placed MARKET order usually fills within a second: read it again quickly so the strike shows the position
+  // at once (the 2 s / doubling schedule below is for orders that are slow to settle).
+  const young = now - o.ts < YOUNG_ORDER_MS;
+  if (young) return now + (changed ? 500 : Math.min(1_000, nextCheckDelay(attempts)));
   return now + (changed ? 2_000 : nextCheckDelay(attempts));
 }
 
 /** Bring unsettled orders up to date: at most READS_PER_REFRESH due orders, oldest due first, with backoff. */
 export async function refreshOrders(): Promise<void> {
   const now = Date.now();
-  if (now - shared.lastRefresh < REFRESH_GAP_MS) return;
-  shared.lastRefresh = now;
+  if (now - shared.lastRefresh < YOUNG_REFRESH_GAP_MS) return;
   const ledger = loadLedger();
+  const youngOpen = ledger.orders.some(o => !isTerminal(effectiveState(o, now)) && now - o.ts < YOUNG_ORDER_MS);
+  if (!youngOpen && now - shared.lastRefresh < REFRESH_GAP_MS) return;
+  shared.lastRefresh = now;
   const due = dueForCheck(ledger.orders, nextAt, now, READS_PER_REFRESH);
   const updates = new Map<string, Partial<FmOrder>>();
   for (const o of due) {
@@ -204,6 +213,7 @@ export async function refreshOrders(): Promise<void> {
       if (u) Object.assign(o, u);
     }
   });
+  shared.stateVersion++; // the route's GET cache must not serve the state from before this fill
 }
 
 // ── down-only reconcile against the broker ───────────────────────────────────────────────────────────────────────

@@ -107,6 +107,8 @@ export function useFreshMoneyTrades(): TradeApi {
       inflightRef.current.delete(lockKey);
       setInflight(new Set(inflightRef.current));
       refresh();
+      // A MARKET order normally fills within a second or two: look again soon instead of waiting for the next poll.
+      for (const ms of [600, 1300, 2200, 3500]) setTimeout(refresh, ms);
     }
   }, [refresh]);
 
