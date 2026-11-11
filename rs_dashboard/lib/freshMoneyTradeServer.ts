@@ -11,6 +11,7 @@ import { resolveOption } from '@/lib/pnfContracts';
 import { fetchLtps } from '@/lib/dhanEquityQuote';
 import { wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
 import { parsedDay } from '@/lib/freshMoneyFiles';
+import { globalOnce } from '@/lib/globalOnce';
 import {
   BROKERS, brokerContract, brokerName, brokerNets, brokerSessionOk, newCorrelationId, readOrder, sendOrder,
 } from '@/lib/freshMoneyBrokers';
@@ -112,7 +113,22 @@ const istMinuteNow = () => { const d = new Date(Date.now() + 19_800_000); return
 
 // ── broker reads ──────────────────────────────────────────────────────────────────────────────────────────────────
 
-let restCache: { at: number; ids: string; data: Record<string, number> } | null = null;
+/**
+ * Throttles and caches, ONE per server process: the trade route and the exit watcher are separate Next bundles, and with
+ * module-level state each kept its own clock — two Kotak positions reads per 15 s, two REST price caches, two order-read
+ * schedules (stCode 100025 "rate limit exceeded", 2026-11-11). lib/globalOnce.ts.
+ */
+interface ServerShared {
+  restCache: { at: number; ids: string; data: Record<string, number> } | null;
+  nextAt: Map<string, number>;
+  attempts: Map<string, number>;
+  lastRefresh: number;
+  lastReconcile: Map<FmBroker, number>;
+  stateVersion: number;
+}
+const shared = globalOnce<ServerShared>('__freshMoneyTradeServer', () => ({
+  restCache: null, nextAt: new Map(), attempts: new Map(), lastRefresh: 0, lastReconcile: new Map(), stateVersion: 0,
+}));
 
 /**
  * Option LTPs for P&L: the WebSocket first (lib/freshMoneyWs.ts — asked for every open position, so its subscription is
@@ -132,7 +148,7 @@ export async function ltpsFor(items: { id: string; segment: FmSegment }[]): Prom
   if (!missing.length) return { ltps, source };
   const key = missing.map(i => `${i.segment}:${i.id}`).sort().join(',');
   let rest: Record<string, number> = {};
-  const cached = freshRestCache(restCache, key, Date.now());
+  const cached = freshRestCache(shared.restCache, key, Date.now());
   if (cached) rest = cached;
   else {
     try {
@@ -140,9 +156,9 @@ export async function ltpsFor(items: { id: string; segment: FmSegment }[]): Prom
         const ids = missing.filter(i => i.segment === seg).map(i => i.id);
         if (ids.length) Object.assign(rest, await fetchLtps(seg, ids));
       }
-      restCache = { at: Date.now(), ids: key, data: rest };
+      shared.restCache = { at: Date.now(), ids: key, data: rest };
     } catch {
-      rest = freshRestCache(restCache, key, Date.now()) ?? {}; // no price rather than an old one
+      rest = freshRestCache(shared.restCache, key, Date.now()) ?? {}; // no price rather than an old one
     }
   }
   for (const i of missing) if (rest[i.id] > 0) { ltps[i.id] = rest[i.id]; source[i.id] = 'rest'; }
@@ -150,9 +166,7 @@ export async function ltpsFor(items: { id: string; segment: FmSegment }[]): Prom
 }
 
 // Per-order re-read schedule (backoff), so a few settled-late orders cannot hog the reads and none is starved.
-const nextAt = new Map<string, number>();
-const attempts = new Map<string, number>();
-let lastRefresh = 0;
+const { nextAt, attempts } = shared;
 
 /** When to read an unsettled order next. A record with no order id is looked up every 2 s from the moment it can be
  *  UNKNOWN until its hold has run out (so a late booking is adopted before new orders on the contract are allowed),
@@ -169,8 +183,8 @@ function nextReadAt(o: FmOrder, now: number, attempts: number, changed: boolean)
 /** Bring unsettled orders up to date: at most READS_PER_REFRESH due orders, oldest due first, with backoff. */
 export async function refreshOrders(): Promise<void> {
   const now = Date.now();
-  if (now - lastRefresh < REFRESH_GAP_MS) return;
-  lastRefresh = now;
+  if (now - shared.lastRefresh < REFRESH_GAP_MS) return;
+  shared.lastRefresh = now;
   const ledger = loadLedger();
   const due = dueForCheck(ledger.orders, nextAt, now, READS_PER_REFRESH);
   const updates = new Map<string, Partial<FmOrder>>();
@@ -195,7 +209,7 @@ export async function refreshOrders(): Promise<void> {
 
 /** Positions-book reads for the reconcile, per broker (Kotak's book is rate limited, so it is read less often). */
 const RECONCILE_GAP_MS: Record<FmBroker, number> = { dhan: 5_000, kotak: 15_000, zerodha: 10_000 };
-const lastReconcile = new Map<FmBroker, number>();
+const { lastReconcile } = shared;
 
 /**
  * Write this page's positions DOWN to what each broker still holds (Invariant 2): an MIS auto square-off or a close from
@@ -288,8 +302,7 @@ export async function buildState(): Promise<FreshMoneyTradeState> {
 }
 
 /** Set when an order was just recorded or answered: the route's GET cache must not serve the state from before it. */
-let stateVersion = 0;
-export const tradeStateVersion = () => stateVersion;
+export const tradeStateVersion = () => shared.stateVersion;
 
 // ── place / close ─────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -350,7 +363,7 @@ async function sendOne(base: OrderBase, check = true, stamp?: ExitDefaults): Pro
         : { state: 'rejected', reason: r.error };
   // If this write fails the record stays 'sending', reads as UNKNOWN after 30 s and is looked up again.
   await mutateLedger(l => { const o = l.orders.find(x => x.id === id); if (o) Object.assign(o, patch); }).catch(() => {});
-  stateVersion++;
+  shared.stateVersion++;
   if (r.status === 'placed') return { kind: 'placed', orderId: r.orderId, stamped };
   if (r.status === 'unknown') return { kind: 'unknown', error: r.error };
   return { kind: 'rejected', error: r.error, http: r.http ?? 200 };
@@ -448,7 +461,7 @@ export async function setExitCore(b: OrderBody): Promise<{ ok: true } | { ok: fa
       l.exits = exits;
       return null;
     });
-    stateVersion++;
+    shared.stateVersion++;
     return err ? { ok: false, error: err, http: 409 } : { ok: true };
   } catch (e) {
     return { ok: false, error: String((e as Error).message ?? e), http: 503 };

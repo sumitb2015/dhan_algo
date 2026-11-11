@@ -207,20 +207,21 @@ export class KotakRejectedError extends Error {
   constructor(message: string) { super(message); this.name = 'KotakRejectedError'; }
 }
 
-function raiseIfError(json: Record<string, unknown>): void {
+/** Throws on an error-shaped Kotak reply. `apiPath` only labels the log line (which call failed). Exported for tests. */
+export function raiseIfError(json: Record<string, unknown>, apiPath = '?'): void {
   if (json.stCode === KOTAK_NO_DATA) return;   // an empty book, not a failure
   if (json.error) {
     const errs = json.error;
     const message = Array.isArray(errs)
       ? errs.map(e => (e && typeof e === 'object' ? String((e as Record<string, unknown>).message ?? e) : String(e))).join('; ')
       : String(errs);
-    console.error('[kotakToken] request failed, full response:', JSON.stringify(json));
+    console.error(`[kotakToken] request failed (${apiPath}), full response:`, JSON.stringify(json));
     throw new KotakRejectedError(message);
   }
   const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
   const msg = json.errMsg ?? json.emsg ?? data.errMsg ?? data.emsg;
   if (msg) {
-    console.error('[kotakToken] request failed, full response:', JSON.stringify(json));
+    console.error(`[kotakToken] request failed (${apiPath}), full response:`, JSON.stringify(json));
     // Surface the stCode alongside the message — Kotak reuses the same
     // errMsg text ("Unauthorized", etc.) across genuinely different stCodes,
     // and the bare message alone isn't enough to tell them apart later.
@@ -228,7 +229,7 @@ function raiseIfError(json: Record<string, unknown>): void {
     throw new KotakRejectedError(code !== undefined ? `${String(msg)} (stCode ${code})` : String(msg));
   }
   if (json.stat === 'Not_Ok') {
-    console.error('[kotakToken] request failed, full response:', JSON.stringify(json));
+    console.error(`[kotakToken] request failed (${apiPath}), full response:`, JSON.stringify(json));
     throw new KotakRejectedError(`Kotak rejected the request (stCode ${json.stCode ?? '?'})`);
   }
 }
@@ -247,7 +248,7 @@ export async function kotakGet(apiPath: string, timeoutMs = 10_000): Promise<Rec
   if (isSessionDead(json) && await reloginKotak()) {
     json = await doRequest();
   }
-  raiseIfError(json);
+  raiseIfError(json, apiPath);
   return json;
 }
 
@@ -356,7 +357,7 @@ export async function kotakPost(
     json = await doRequest();
   }
   if (ORDER_WRITE_PATHS.has(apiPath)) sharedGets.clear();
-  raiseIfError(json);
+  raiseIfError(json, apiPath);
   return json;
 }
 

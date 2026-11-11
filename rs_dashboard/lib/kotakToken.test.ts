@@ -36,3 +36,12 @@ test('isSessionDead: false on normal business replies', () => {
   assert.strictEqual(isSessionDead({ stat: 'Ok', data: [] }), false);
   assert.strictEqual(isSessionDead({ stat: 'Not_Ok', stCode: 5203, errMsg: 'No Data' }), false);
 });
+
+test('a failed Kotak request logs WHICH path it was (rate-limit errors were untraceable)', async (t) => {
+  const { raiseIfError } = await import('./kotakToken.ts');
+  const logged: string[] = [];
+  t.mock.method(console, 'error', (...a: unknown[]) => { logged.push(a.map(String).join(' ')); });
+  assert.throws(() => raiseIfError({ stCode: 100025, errMsg: 'rate limit exceeded', stat: 'too many request received' }, '/quick/user/positions'),
+    /rate limit exceeded \(stCode 100025\)/);
+  assert.ok(logged.some(l => l.includes('/quick/user/positions') && l.includes('100025')), logged.join('\n'));
+});
