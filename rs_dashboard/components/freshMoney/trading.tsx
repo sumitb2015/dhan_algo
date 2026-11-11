@@ -312,9 +312,12 @@ export function TradeCell({
       {held && <span className="text-[9px] font-bold text-zinc-300">{pos!.netQty > 0 ? 'L' : 'S'}{lotsHeld}</span>}
       {fmtRs(pos!.pnl ?? (held ? null : pos!.realised))}
       {(pos!.busy === 'unknown' || unpriced) && <span className="text-amber-300">?</span>}
-      {held && exit && (exitNeedsLook(exit)
-        ? <span className="ml-0.5 text-[9px] font-bold text-amber-300">EXIT?</span>
-        : <span className="ml-0.5 text-[9px] font-bold text-zinc-400">T/SL</span>)}
+      {/* A dot, not text: the chip must fit its 150px trade column beside B / S and ×. Full levels are in the hover. */}
+      {held && exit && (
+        <span className={`ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${exitNeedsLook(exit) ? 'bg-amber-400' : 'bg-sky-400'}`}>
+          <span className="sr-only">{exitNeedsLook(exit) ? 'exit needs a look' : 'target / stop-loss set'}</span>
+        </span>
+      )}
     </span>
   ) : null;
 
