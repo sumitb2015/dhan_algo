@@ -205,6 +205,67 @@ def write_rows(path: str, rows: list, write_header: bool) -> None:
         writer.writerows(rows)
 
 
+SPOT_TRIES = 4
+SPOT_RETRY_WAIT_S = 1.5
+
+
+def spot_with_retry(fetch, tries=SPOT_TRIES, wait_s=SPOT_RETRY_WAIT_S, sleep=time.sleep) -> float:
+    """A spot price, retried: Dhan's quote API is ~1 req/s per account and answers an empty 'failure' when busy (a
+    dashboard restart makes a burst of quote calls exactly when this collector starts). 0.0 after `tries` failures."""
+    for i in range(tries):
+        try:
+            v = fetch()
+            if v and v > 0:
+                return float(v)
+        except Exception as e:  # noqa: BLE001 — a failed read is retried like an empty one
+            log.warning('Spot read failed (try %d/%d): %s', i + 1, tries, e)
+        if i < tries - 1:
+            sleep(wait_s)
+    return 0.0
+
+
+def init_underlying(helper, u, cfg, args, n_active, today, sleep=time.sleep, tries=SPOT_TRIES):
+    """Expiry, spot, ATM strike window and output paths for one index; None when the expiry or spot is not known yet
+    (the caller keeps it pending and tries again on a later cycle — an index is never dropped for the day)."""
+    exp = args.expiry if (n_active == 1 and args.expiry) else None
+    if not exp:
+        try:
+            exps = helper.get_expiry_list(under_security_id=cfg['chain_id'], under_exchange_segment=cfg['chain_seg'])
+            exp = exps[0] if exps else None
+        except Exception as e:  # noqa: BLE001
+            log.error('Failed to get expiry for %s: %s', u, e)
+            exp = None
+    if not exp:
+        log.warning('%s: no expiry yet — will retry', u)
+        return None
+    spot = spot_with_retry(lambda: helper.get_ltp(cfg['spot_id'], exchange='IDX_I', instrument='INDEX'),
+                           tries=tries, sleep=sleep)
+    if not spot or spot <= 0:
+        log.warning('%s: no spot price yet — will retry next cycle', u)
+        return None
+    step = cfg['step']
+    atm = int(round(spot / step) * step)
+    strikes = [atm + i * step for i in range(-ATM_RANGE, ATM_RANGE + 1)]
+    out_paths = get_csv_paths(today, u)
+    need_header = any(not os.path.exists(p) or os.path.getsize(p) == 0 for p in out_paths)
+    log.info('[%s] Spot=%.2f  ATM=%d  strikes=%d–%d  expiry=%s', u, spot, atm, strikes[0], strikes[-1], exp)
+    return {
+        'cfg': cfg, 'expiry': exp, 'spot': spot, 'last_good_spot': spot, 'atm': atm, 'strikes': strikes,
+        'out_paths': out_paths, 'need_header': need_header,
+    }
+
+
+def retry_pending(helper, pending, states, args, today, sleep=time.sleep):
+    """One more try (a single spot read each, so the poll is not stalled) for indexes that could not start yet;
+    those that start move from `pending` into `states`."""
+    for u in list(pending):
+        st = init_underlying(helper, u, TARGETS[u], args, len(pending) + len(states), today, sleep=sleep, tries=1)
+        if st:
+            states[u] = st
+            pending.remove(u)
+            log.info('%s joined the collection', u)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Multi-Underlying IV Snapshot Collector')
     parser.add_argument('--underlying', default='ALL', help='NIFTY, BANKNIFTY, SENSEX, or ALL')
@@ -249,60 +310,19 @@ def main():
             log.info('Market not open yet — sleeping %d min', wait_mins)
             time.sleep(min(wait_mins * 60, 60))
 
-    # Resolve expiries, spots, and strikes for each active underlying
+    # Resolve expiries, spots, and strikes for each active underlying. One that cannot start yet stays pending and is
+    # retried every cycle — it is never dropped for the day.
     today = date.today()
     underlying_states = {}
-
+    pending = []
     for u in active_underlyings:
-        cfg = TARGETS[u]
-        # Resolve expiry
-        exp = args.expiry if (len(active_underlyings) == 1 and args.expiry) else None
-        if not exp:
-            try:
-                exps = helper.get_expiry_list(under_security_id=cfg['chain_id'], under_exchange_segment=cfg['chain_seg'])
-                exp = exps[0] if exps else None
-            except Exception as e:
-                log.error('Failed to get expiry for %s: %s', u, e)
-                exp = None
-
-        if not exp:
-            log.warning('Skipping %s due to missing expiry', u)
-            continue
-
-        # Spot & ATM
-        try:
-            spot = helper.get_ltp(cfg['spot_id'], exchange='IDX_I', instrument='INDEX') or 0.0
-        except Exception as e:
-            log.error('Failed to get spot for %s: %s', u, e)
-            spot = 0.0
-
-        if not spot or spot <= 0:
-            log.warning('Skipping %s due to zero spot price', u)
-            continue
-
-        step = cfg['step']
-        atm = int(round(spot / step) * step)
-        strikes = [atm + i * step for i in range(-ATM_RANGE, ATM_RANGE + 1)]
-
-        out_paths = get_csv_paths(today, u)
-        need_header = any(not os.path.exists(p) or os.path.getsize(p) == 0 for p in out_paths)
-
-        underlying_states[u] = {
-            'cfg': cfg,
-            'expiry': exp,
-            'spot': spot,
-            'last_good_spot': spot,
-            'atm': atm,
-            'strikes': strikes,
-            'out_paths': out_paths,
-            'need_header': need_header,
-        }
-        log.info('[%s] Spot=%.2f  ATM=%d  strikes=%d–%d  expiry=%s',
-                 u, spot, atm, strikes[0], strikes[-1], exp)
-
-    if not underlying_states:
-        log.error('No underlying could be initialized — exiting')
-        sys.exit(1)
+        st = init_underlying(helper, u, TARGETS[u], args, len(active_underlyings), today)
+        if st:
+            underlying_states[u] = st
+        else:
+            pending.append(u)
+    if pending:
+        log.warning('Not started yet (retried every cycle): %s', pending)
 
     log.info('Starting snapshot collection for %s', list(underlying_states.keys()))
 
@@ -323,6 +343,9 @@ def main():
             break
 
         ts = now.strftime('%Y-%m-%d %H:%M:%S')
+
+        if pending:
+            retry_pending(helper, pending, underlying_states, args, today)
 
         for u, state in underlying_states.items():
             cfg = state['cfg']
@@ -364,7 +387,7 @@ def main():
             if fresh:
                 helper = fresh
 
-        time.sleep(max(5, POLL_SEC - (len(underlying_states) * 1.5)))
+        time.sleep(max(5, POLL_SEC - (max(1, len(underlying_states)) * 1.5)))
 
 
 if __name__ == '__main__':
