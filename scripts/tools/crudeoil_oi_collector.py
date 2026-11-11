@@ -174,11 +174,17 @@ def write_status(**fields) -> None:
 def extract_side(side: dict) -> dict:
     """Extract all useful fields from a CE or PE option side dict."""
     greeks = side.get('greeks', {}) or {}
+    oi = side.get('oi', '')
+    previous_oi = side.get('previous_oi')
+    # Change in OI only when both are numbers (as iv_snapshot_collector.py): a missing previous_oi read as 0 would
+    # put the whole OI on the Fresh Money board as "today's change". Blank = unknown.
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)  # noqa: E731
+    change_oi = oi - previous_oi if num(oi) and num(previous_oi) else ''
     return {
         'LTP':       side.get('last_price', ''),
         'IV':        side.get('implied_volatility') or greeks.get('iv', ''),
-        'OI':        side.get('oi', ''),
-        'change_OI': side.get('change_in_open_interest') or side.get('oi_change') or (float(side.get('oi', 0) or 0) - float(side.get('previous_oi', 0) or 0)),
+        'OI':        oi,
+        'change_OI': change_oi,
         'volume':    side.get('volume', ''),
         'bid':       side.get('top_bid_price') or side.get('bid_price', ''),
         'ask':       side.get('top_ask_price') or side.get('ask_price', ''),
