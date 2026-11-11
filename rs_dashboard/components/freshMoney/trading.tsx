@@ -16,6 +16,11 @@ import { sendOrderRequest, UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import type { FreshMoneyTradeState } from '@/app/api/fresh-money/trade/route';
 import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { BrokerPicker } from '@/components/BrokerPicker';
+import type { ExitSpec, FmExit } from '@/lib/freshMoneyExits';
+import { ExitSpecInput, exitLevelsText, exitNeedsLook } from './ExitInputs';
+
+/** The header's target / stop-loss defaults, stamped onto each position an order opens. */
+export interface ExitDefaultsUi { target: ExitSpec | null; sl: ExitSpec | null }
 
 export const FM_BROKERS: readonly FmBroker[] = ['dhan', 'kotak', 'zerodha'];
 export const brokerLabel = (b: FmBroker) => (b === 'kotak' ? 'Kotak' : b === 'zerodha' ? 'Zerodha' : 'Dhan');
@@ -41,8 +46,10 @@ const newKey = () => `fm-${typeof crypto !== 'undefined' && 'randomUUID' in cryp
 export interface TradeApi {
   state: FreshMoneyTradeState | null;
   inflight: ReadonlySet<string>;
-  order: (o: { broker: FmBroker; underlying: string; expiry: string; strike: number; opt: OptType; side: TxnSide; lots: number }) => void;
+  order: (o: { broker: FmBroker; underlying: string; expiry: string; strike: number; opt: OptType; side: TxnSide; lots: number; exitDefaults: ExitDefaultsUi }) => void;
   close: (p: FmPosition) => void;
+  /** Change or clear one position's target / stop-loss; resolves true when the server took it. */
+  setExit: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
 }
 
 export function useFreshMoneyTrades(): TradeApi {
@@ -108,7 +115,24 @@ export function useFreshMoneyTrades(): TradeApi {
     run(lockKey(p.broker, p.underlying, p.strike, p.opt), label, { action: 'close', key: p.key });
   }, [run]);
 
-  return { state, inflight, order, close };
+  const setExit: TradeApi['setExit'] = useCallback(async (key, target, sl) => {
+    try {
+      const res = await fetch(TRADE_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setExit', key, target, sl }),
+      });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (res.ok && j?.success) { toast.success(target || sl ? 'Target / SL saved' : 'Target / SL cleared'); return true; }
+      toast.error('Target / SL not saved', { description: j?.error ?? `HTTP ${res.status}` });
+      return false;
+    } catch (e) {
+      toast.error('Target / SL not saved', { description: String((e as Error).message ?? e) });
+      return false;
+    } finally {
+      refresh();
+    }
+  }, [refresh]);
+
+  return { state, inflight, order, close, setExit };
 }
 
 // ── ARM / lots / P&L bar ──────────────────────────────────────────────────────────────────────────────────────────
@@ -117,7 +141,7 @@ export function useFreshMoneyTrades(): TradeApi {
 // in the light theme, which would turn the armed button's white label and a short chip's profit rose.
 export function TradeBar({
   underlying, armed, onArm, lots, onLots, maxLots, lotSize, mcxMult, tradable, blocked, positions,
-  broker, onBroker, brokerReady, brokerSessions,
+  broker, onBroker, brokerReady, brokerSessions, exitDefaults, onExitDefaults, exitWatcher, hasExits,
 }: {
   underlying: string;
   armed: boolean;
@@ -136,6 +160,12 @@ export function TradeBar({
   /** False until the saved broker has been read (the first render is always Dhan): no arming before that. */
   brokerReady: boolean;
   brokerSessions: Record<FmBroker, boolean> | null;
+  exitDefaults: ExitDefaultsUi;
+  onExitDefaults: (d: ExitDefaultsUi) => void;
+  /** The server's exit watcher heartbeat; null = not known yet. */
+  exitWatcher: { alive: boolean } | null;
+  /** Any position (any underlying / broker) has a target / stop-loss record. */
+  hasExits: boolean;
 }) {
   const [draft, setDraft] = useState(String(lots));
   // Escape blurs the box; the blur must then NOT commit what was typed (the field still holds it at that moment).
@@ -217,6 +247,24 @@ export function TradeBar({
         </div>
       )}
 
+      {tradable && (
+        <div className="flex flex-wrap items-center gap-2" title="Stamped onto each position an order opens (adding lots keeps its levels). % of the fill price or premium points. Blank = off.">
+          <ExitSpecInput label="Target" value={exitDefaults.target} onCommit={t => onExitDefaults({ ...exitDefaults, target: t })} />
+          <ExitSpecInput label="SL" value={exitDefaults.sl} onCommit={v => onExitDefaults({ ...exitDefaults, sl: v })} />
+        </div>
+      )}
+      {exitWatcher && (exitWatcher.alive ? (
+        (hasExits || exitDefaults.target || exitDefaults.sl) && (
+          <span className="flex items-center gap-1 text-[11px] text-zinc-400" title="The dashboard server checks every position's target / stop-loss every 2 s, with or without this tab">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />Exits: watching
+          </span>
+        )
+      ) : hasExits && (
+        <span role="alert" className="rounded border border-red-500/50 bg-red-600/15 px-1.5 py-0.5 text-[11px] font-bold text-red-300">
+          Exits watcher STOPPED — levels are not being watched
+        </span>
+      ))}
+
       {blocked && tradable && <span className="text-[11px] text-amber-300">{blocked}</span>}
 
       <div className="ml-auto flex items-center gap-3 text-[12px] tabular-nums">
@@ -231,7 +279,7 @@ export function TradeBar({
 // ── per strike / side ─────────────────────────────────────────────────────────────────────────────────────────────
 
 export function TradeCell({
-  side, opt, strike, pos, showButtons, canOrder, canClose, busy, onBuy, onSell, onClose, armed, ltpSource,
+  side, opt, strike, pos, showButtons, canOrder, canClose, busy, onBuy, onSell, onClose, armed, ltpSource, exit,
 }: {
   side: 'put' | 'call';
   opt: OptType;
@@ -244,6 +292,8 @@ export function TradeCell({
   armed: boolean;
   /** Where the position's LTP came from: the WebSocket ('ws') or the REST fallback. */
   ltpSource?: 'ws' | 'rest';
+  /** This position's target / stop-loss record, if any. */
+  exit?: FmExit;
   onBuy: () => void;
   onSell: () => void;
   onClose: () => void;
@@ -253,7 +303,7 @@ export function TradeCell({
   const unpriced = pos ? pos.realised === null || (held && pos.avgPrice === null) : false;
   const lotsHeld = pos && pos.lot > 0 ? Math.abs(pos.netQty) / pos.lot : 0;
   const title = pos
-    ? `${held ? `${pos.netQty > 0 ? 'Long' : 'Short'} ${lotsHeld} lot${lotsHeld === 1 ? '' : 's'} @ ${pos.avgPrice?.toFixed(2) ?? 'price pending'} · LTP ${pos.ltp?.toFixed(2) ?? '–'}${pos.ltp != null && ltpSource ? (ltpSource === 'ws' ? ' (live)' : ' (REST)') : ''} · ` : ''}booked ${fmtRs(pos.realised)}${pos.realised === null ? ' (a fill price is still pending)' : ''}${pos.busy === 'unknown' ? ' · an order has UNKNOWN status' : ''}`
+    ? `${held ? `${pos.netQty > 0 ? 'Long' : 'Short'} ${lotsHeld} lot${lotsHeld === 1 ? '' : 's'} @ ${pos.avgPrice?.toFixed(2) ?? 'price pending'} · LTP ${pos.ltp?.toFixed(2) ?? '–'}${pos.ltp != null && ltpSource ? (ltpSource === 'ws' ? ' (live)' : ' (REST)') : ''} · ` : ''}booked ${fmtRs(pos.realised)}${pos.realised === null ? ' (a fill price is still pending)' : ''}${pos.busy === 'unknown' ? ' · an order has UNKNOWN status' : ''}${exit ? ` · ${exitLevelsText(exit)}` : ''}`
     : '';
 
   const chip = showChip ? (
@@ -262,6 +312,9 @@ export function TradeCell({
       {held && <span className="text-[9px] font-bold text-zinc-300">{pos!.netQty > 0 ? 'L' : 'S'}{lotsHeld}</span>}
       {fmtRs(pos!.pnl ?? (held ? null : pos!.realised))}
       {(pos!.busy === 'unknown' || unpriced) && <span className="text-amber-300">?</span>}
+      {held && exit && (exitNeedsLook(exit)
+        ? <span className="ml-0.5 text-[9px] font-bold text-amber-300">EXIT?</span>
+        : <span className="ml-0.5 text-[9px] font-bold text-zinc-400">T/SL</span>)}
     </span>
   ) : null;
 

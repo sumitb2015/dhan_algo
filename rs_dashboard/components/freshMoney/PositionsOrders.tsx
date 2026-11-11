@@ -9,10 +9,12 @@
 
 import React, { useState } from 'react';
 import CollapseToggle from './CollapseToggle';
-import { Loader2, X } from 'lucide-react';
+import { Loader2, Pencil, X } from 'lucide-react';
 import type { FreshMoneyTradeState } from '@/app/api/fresh-money/trade/route';
 import type { FmPosition } from '@/lib/freshMoneyTrades';
+import type { ExitSpec, FmExit } from '@/lib/freshMoneyExits';
 import { brokerLabel, fmtRs, lockKey } from './trading';
+import { EXIT_STATE_LABEL, ExitEditor, exitNeedsLook } from './ExitInputs';
 
 const FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70';
 const TH = 'px-2 py-1.5 text-left text-xs font-bold text-white';
@@ -35,17 +37,36 @@ const STATE: Record<string, { label: string; cls: string }> = {
 
 type Order = FreshMoneyTradeState['orders'][number];
 
-export default function PositionsOrders({ state, armed, inflight, canClose, onClose, collapsed = false, onToggle }: {
+function ExitCell({ x }: { x: FmExit | undefined }) {
+  if (!x) return <span className="text-zinc-500">–</span>;
+  const p = (n: number | null) => (n === null ? 'off' : n.toFixed(2));
+  const look = exitNeedsLook(x);
+  return (
+    <span className="flex flex-wrap items-center gap-1" title={x.note}>
+      {x.state !== 'waiting-fill' && <span className="text-zinc-200">{p(x.targetPx)} / {p(x.slPx)}</span>}
+      <span className={`rounded px-1 text-[10px] font-bold ${look ? 'bg-amber-600/20 text-amber-300' : x.state === 'watching' ? 'bg-emerald-600/15 text-emerald-400' : 'bg-zinc-800 text-zinc-300'}`}>
+        {EXIT_STATE_LABEL[x.state]}
+      </span>
+    </span>
+  );
+}
+
+export default function PositionsOrders({ state, armed, inflight, canClose, onClose, onSetExit, collapsed = false, onToggle }: {
   state: FreshMoneyTradeState | null;
   armed: boolean;
   inflight: ReadonlySet<string>;
   canClose: (p: FmPosition) => boolean;
   onClose: (p: FmPosition) => void;
+  /** Change or clear one position's target / stop-loss (armed page only). */
+  onSetExit: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
   /** Collapsed: only the header row (tabs with counts, P&L totals) stays. */
   collapsed?: boolean;
   onToggle?: () => void;
 }) {
   const [tab, setTab] = useState<'positions' | 'orders'>('positions');
+  const [editing, setEditing] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const exits = state?.exits ?? {};
   const positions = [...(state?.positions ?? [])]
     .filter(p => p.netQty !== 0 || p.realised !== 0)
     .sort((a, b) => Number(b.netQty !== 0) - Number(a.netQty !== 0) || a.underlying.localeCompare(b.underlying) || a.strike - b.strike);
@@ -94,13 +115,13 @@ export default function PositionsOrders({ state, armed, inflight, canClose, onCl
           positions.length === 0 ? (
             <p className="px-4 py-6 text-center text-[12px] text-zinc-500">No positions from this page today.</p>
           ) : (
-            <table className="w-full min-w-[860px] text-[12px]">
+            <table className="w-full min-w-[980px] text-[12px]">
               <thead className="sticky top-0 z-10 bg-zinc-800">
                 <tr>
                   <th className={TH}>Broker</th><th className={TH}>Contract</th><th className={TH}>Expiry</th>
                   <th className={TH}>Position</th><th className={`${TH} text-right`}>Avg</th><th className={`${TH} text-right`}>LTP</th>
                   <th className={`${TH} text-right`}>Open P&amp;L</th><th className={`${TH} text-right`}>Booked</th>
-                  <th className={`${TH} text-right`}>Total</th><th className={TH}><span className="sr-only">Close</span></th>
+                  <th className={`${TH} text-right`}>Total</th><th className={TH}>Target / SL</th><th className={TH}><span className="sr-only">Close</span></th>
                 </tr>
               </thead>
               <tbody>
@@ -108,8 +129,10 @@ export default function PositionsOrders({ state, armed, inflight, canClose, onCl
                   const lots = p.lot > 0 ? Math.abs(p.netQty) / p.lot : 0;
                   const busy = inflight.has(lockKey(p.broker, p.underlying, p.strike, p.opt));
                   const src = state?.ltpSource?.[p.priceId];
+                  const x = exits[p.key];
                   return (
-                    <tr key={p.key} className="border-t border-zinc-800 hover:bg-zinc-800/40">
+                    <React.Fragment key={p.key}>
+                    <tr className="border-t border-zinc-800 hover:bg-zinc-800/40">
                       <td className={TD}><span className="rounded bg-zinc-800 px-1 text-[10px] font-bold uppercase text-zinc-300">{brokerLabel(p.broker)}</span></td>
                       <td className={`${TD} font-bold text-zinc-200`}>{contract(p)}</td>
                       <td className={`${TD} text-zinc-400`}>{p.expiry}</td>
@@ -126,6 +149,19 @@ export default function PositionsOrders({ state, armed, inflight, canClose, onCl
                       <td className={`${TD} text-right font-bold ${pnlClass(p.unrealised)}`}>{p.netQty === 0 ? '–' : fmtRs(p.unrealised)}</td>
                       <td className={`${TD} text-right ${pnlClass(p.realised)}`}>{fmtRs(p.realised)}</td>
                       <td className={`${TD} text-right font-bold ${pnlClass(p.pnl)}`}>{fmtRs(p.pnl)}</td>
+                      <td className={TD}>
+                        <span className="flex items-center gap-1">
+                          <ExitCell x={x} />
+                          {p.netQty !== 0 && armed && (
+                            <button type="button" onClick={() => setEditing(editing === p.key ? null : p.key)} disabled={x?.state === 'firing'}
+                              aria-label={`Edit target and stop-loss of ${contract(p)} on ${brokerLabel(p.broker)}`} aria-expanded={editing === p.key}
+                              title="Change or clear this position's target / stop-loss"
+                              className={`${FOCUS} flex h-5 w-5 items-center justify-center rounded text-zinc-400 hover:bg-zinc-700 hover:text-white disabled:opacity-40`}>
+                              <Pencil className="h-3 w-3" />
+                            </button>
+                          )}
+                        </span>
+                      </td>
                       <td className={`${TD} w-8`}>
                         {p.netQty !== 0 && armed && (busy ? <Loader2 className="h-4 w-4 animate-spin text-zinc-400" aria-label="Order in flight" /> : (
                           <button type="button" onClick={() => onClose(p)} disabled={!!p.busy || !canClose(p)}
@@ -136,6 +172,16 @@ export default function PositionsOrders({ state, armed, inflight, canClose, onCl
                         ))}
                       </td>
                     </tr>
+                    {editing === p.key && armed && p.netQty !== 0 && (
+                      <tr className="border-t border-zinc-800 bg-zinc-950/40">
+                        <td colSpan={11}>
+                          <ExitEditor exit={x} avgPrice={p.avgPrice} ltp={p.ltp} dir={p.netQty > 0 ? 'long' : 'short'} saving={saving}
+                            onCancel={() => setEditing(null)}
+                            onSave={async (t, s) => { setSaving(true); const ok = await onSetExit(p.key, t, s); setSaving(false); if (ok) setEditing(null); }} />
+                        </td>
+                      </tr>
+                    )}
+                    </React.Fragment>
                   );
                 })}
               </tbody>
@@ -170,8 +216,8 @@ export default function PositionsOrders({ state, armed, inflight, canClose, onCl
                     <td className={TD}><span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${st.cls}`}>{st.label}</span></td>
                     <td className={`${TD} text-right text-zinc-300`}>{filledLots}/{lots}</td>
                     <td className={`${TD} text-right text-zinc-300`}>{px(o.avgPrice)}</td>
-                    <td className={`${TD} max-w-[320px] truncate text-zinc-400`} title={[o.reason, o.orderId ? `Order ${o.orderId}` : null].filter(Boolean).join(' · ')}>
-                      {o.effState === 'unknown' ? 'May be live — check Positions/Orders at the broker' : o.reason || (o.orderId ? `#${o.orderId}` : '')}
+                    <td className={`${TD} max-w-[320px] truncate text-zinc-400`} title={[o.trigger, o.reason, o.orderId ? `Order ${o.orderId}` : null].filter(Boolean).join(' · ')}>
+                      {o.effState === 'unknown' ? 'May be live — check Positions/Orders at the broker' : [o.trigger, o.reason].filter(Boolean).join(' · ') || (o.orderId ? `#${o.orderId}` : '')}
                     </td>
                   </tr>
                 );

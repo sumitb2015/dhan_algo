@@ -7,7 +7,8 @@ import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/ro
 import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
 import { BUILDUP_TEXT, fmtOi, fmtOiAbs, fmtPct, intensity, type Buildup, type Intensity, type Range } from '@/lib/freshMoney';
 import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
-import { FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades } from './freshMoney/trading';
+import { FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
+import { validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
 import { usePageBroker } from './BrokerPicker';
 import CollectorControl from './freshMoney/CollectorControl';
 import FreshChart from './freshMoney/FreshChart';
@@ -24,6 +25,11 @@ const PREF_CHART_COLLAPSED = 'freshMoney.chartCollapsed';
 const PREF_OI_MODE = 'freshMoney.oiMode';
 type OiMode = 'change' | 'total';
 const PREF_POS_COLLAPSED = 'freshMoney.positionsCollapsed';
+const PREF_EXIT_DEFAULTS = 'freshMoney.exitDefaults';
+const NO_EXITS: ExitDefaultsUi = { target: null, sl: null };
+
+/** A remembered spec, re-validated (a hand-edited or old value is dropped, never used). */
+const specOrNull = (v: unknown): ExitSpec | null => { const r = validateExitSpec(v); return r && !('error' in r) ? r : null; };
 const LIVE_POLL_MS = 2_000;
 const CHART_DEFAULT_H = 340;
 const CHART_MIN_H = 160;
@@ -55,6 +61,7 @@ interface RowTrade {
   canClose: boolean;
   armed: boolean;
   ltpSource: Record<string, 'ws' | 'rest'>;
+  exits: Record<string, FmExit>;
   busy: (opt: OptType) => boolean;
   order: (opt: OptType, side: TxnSide) => void;
   close: (p: FmPosition) => void;
@@ -122,6 +129,7 @@ function BoardRowView({ row, max, normal, boxed, trade, mode }: {
         side={side} opt={opt} strike={row.strike} pos={side === 'put' ? trade.put : trade.call}
         showButtons={trade.showButtons && has} canOrder={trade.canOrder} canClose={trade.canClose} armed={trade.armed}
         ltpSource={(() => { const p = side === 'put' ? trade.put : trade.call; return p ? trade.ltpSource[p.priceId] : undefined; })()} busy={trade.busy(opt)}
+        exit={(() => { const p = side === 'put' ? trade.put : trade.call; return p ? trade.exits[p.key] : undefined; })()}
         onBuy={() => trade.order(opt, 'BUY')} onSell={() => trade.order(opt, 'SELL')}
         onClose={() => { const pos = side === 'put' ? trade.put : trade.call; if (pos) trade.close(pos); }}
       />
@@ -203,6 +211,9 @@ export default function FreshMoneyBoard() {
   // Switching account disarms: an armed page must never quietly start sending to a different account.
   const setBroker = useCallback((b: FmBroker) => { setArmed(false); setBrokerRaw(b); }, [setBrokerRaw]);
   const [lots, setLots] = useState(1);
+  // Target / stop-loss stamped onto each new position (remembered per browser, like Lots).
+  const [exitDefaults, setExitDefaults] = useState<ExitDefaultsUi>(NO_EXITS);
+  const pickExitDefaults = (d: ExitDefaultsUi) => { setExitDefaults(d); writePref(PREF_EXIT_DEFAULTS, JSON.stringify(d)); };
   // Collapsed panels (remembered per browser).
   const [chartCollapsed, setChartCollapsed] = useState(false);
   const [posCollapsed, setPosCollapsed] = useState(false);
@@ -227,6 +238,10 @@ export default function FreshMoneyBoard() {
     setChartCollapsed(readPref(PREF_CHART_COLLAPSED) === '1');
     setPosCollapsed(readPref(PREF_POS_COLLAPSED) === '1');
     if (readPref(PREF_OI_MODE) === 'total') setOiMode('total');
+    try {
+      const d = JSON.parse(readPref(PREF_EXIT_DEFAULTS) ?? 'null') as { target?: unknown; sl?: unknown } | null;
+      if (d) setExitDefaults({ target: specOrNull(d.target), sl: specOrNull(d.sl) });
+    } catch { /* a bad saved value = no defaults */ }
   }, []);
 
   const load = useCallback(async (u: Underlying, signal?: AbortSignal) => {
@@ -371,7 +386,7 @@ export default function FreshMoneyBoard() {
   }, [ts, myPositions]);
   const posByKey = useMemo(() => new Map(myPositions.map(p => [`${p.strike}:${p.opt}`, p] as const)), [myPositions]);
   const tradeMode = armed || myPositions.length > 0;
-  const { order: sendOrder, close: sendClose, inflight } = trades;
+  const { order: sendOrder, close: sendClose, setExit, inflight } = trades;
   const rowTrade = useCallback((strike: number): RowTrade | null => {
     if (!tradeMode || !data) return null;
     return {
@@ -381,12 +396,13 @@ export default function FreshMoneyBoard() {
       canOrder: armed && tradable && !blocked,
       canClose: armed && session !== 'closed',
       ltpSource: ts?.ltpSource ?? {},
+      exits: ts?.exits ?? {},
       armed,
       busy: opt => inflight.has(lockKey(broker, underlying, strike, opt)),
-      order: (opt, side) => sendOrder({ broker, underlying, expiry: data.expiry, strike, opt, side, lots }),
+      order: (opt, side) => sendOrder({ broker, underlying, expiry: data.expiry, strike, opt, side, lots, exitDefaults }),
       close: p => sendClose(p),
     };
-  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, lots, ts]);
+  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, lots, ts, exitDefaults]);
   const setLotsPref = (n: number) => { setLots(n); writePref(PREF_LOTS, String(n)); };
 
   return (
@@ -463,6 +479,8 @@ export default function FreshMoneyBoard() {
                 underlying={underlying} armed={armed} onArm={setArmed} lots={lots} onLots={setLotsPref}
                 maxLots={ts.maxLots} lotSize={data.lot} mcxMult={data.mult} tradable={tradable} blocked={blocked} positions={underlyingPositions}
                 broker={broker} onBroker={setBroker} brokerReady={brokerReady} brokerSessions={ts.brokers ?? null}
+                exitDefaults={exitDefaults} onExitDefaults={pickExitDefaults}
+                exitWatcher={ts.exitWatcher ?? null} hasExits={Object.keys(ts.exits ?? {}).length > 0}
               />
             )}
             {ts && offBoard.length > 0 && (
@@ -560,7 +578,7 @@ export default function FreshMoneyBoard() {
 
         {ts && (
           <PositionsOrders
-            state={ts} armed={armed} inflight={inflight} onClose={sendClose}
+            state={ts} armed={armed} inflight={inflight} onClose={sendClose} onSetExit={setExit}
             collapsed={posCollapsed} onToggle={togglePos}
             canClose={p => (ts.sessions[p.underlying]?.gate ?? 'closed') !== 'closed' && !!ts.brokers?.[p.broker]}
           />
