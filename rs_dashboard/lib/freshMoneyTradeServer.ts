@@ -22,6 +22,7 @@ import {
   type FmBroker, type FmLedger, type FmOrder, type FmPosition, type FmSegment, type OptType, type SessionGate,
   type TradeWindow, type TxnSide,
 } from '@/lib/freshMoneyTrades';
+import { validateGlobalAmount, type FmGlobalExit } from './freshMoneyGlobalExit.ts';
 import {
   editExit, exitSummary, exitsOnOpen, parseExitDefaults, validateExitSpec, type CloseResult, type ExitDefaults, type FmExit,
 } from '@/lib/freshMoneyExits';
@@ -265,6 +266,8 @@ export interface FreshMoneyTradeState {
   orders: (FmOrder & { effState: string })[];
   /** Per-position target / stop-loss, by position key. */
   exits: Record<string, FmExit>;
+  /** The global (combined P&L, rupees) target / stop-loss, if one is set. */
+  global: FmGlobalExit | null;
   /** Whether the server's exit watcher is running (its heartbeat is fresh). */
   exitWatcher: { alive: boolean; at: number | null };
 }
@@ -297,6 +300,7 @@ export async function buildState(): Promise<FreshMoneyTradeState> {
     positions: buildPositions(ledger.orders, ltps, now),
     orders: ledger.orders.slice(-40).reverse().map(o => ({ ...o, effState: effectiveState(o, now) })),
     exits: ledger.exits ?? {},
+    global: ledger.global ?? null,
     exitWatcher: exitWatcherStatus(now),
   };
 }
@@ -391,6 +395,9 @@ export interface OrderBody {
   /** setExit: the position's new levels (null = off). */
   target?: unknown;
   sl?: unknown;
+  /** setGlobal: rupee amounts (null = off); both null = remove. */
+  globalTarget?: unknown;
+  globalSl?: unknown;
 }
 
 const refuse = (error: string, http: number): CloseResult => ({ kind: 'refused', error, http });
@@ -459,6 +466,26 @@ export async function setExitCore(b: OrderBody): Promise<{ ok: true } | { ok: fa
       const exits = { ...(l.exits ?? {}) };
       if (x) exits[key] = x; else delete exits[key];
       l.exits = exits;
+      return null;
+    });
+    shared.stateVersion++;
+    return err ? { ok: false, error: err, http: 409 } : { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e as Error).message ?? e), http: 503 };
+  }
+}
+
+/** The header's global target / stop-loss on the combined P&L, in rupees (both null = remove). Changes no order. */
+export async function setGlobalCore(b: OrderBody): Promise<{ ok: true } | { ok: false; error: string; http: number }> {
+  const target = validateGlobalAmount(b.globalTarget);
+  if (target && typeof target === 'object') return { ok: false, error: `Target: ${target.error}`, http: 400 };
+  const sl = validateGlobalAmount(b.globalSl);
+  if (sl && typeof sl === 'object') return { ok: false, error: `Stop-loss: ${sl.error}`, http: 400 };
+  try {
+    const err = await mutateLedger(l => {
+      if (l.global?.state === 'firing') return 'The global exit is being sent right now — try again in a moment';
+      if (target === null && sl === null) { delete l.global; return null; }
+      l.global = { target, sl, armedAt: Date.now(), state: 'watching' };
       return null;
     });
     shared.stateVersion++;

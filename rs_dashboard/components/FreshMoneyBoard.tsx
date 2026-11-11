@@ -518,6 +518,7 @@ export default function FreshMoneyBoard() {
                 broker={broker} onBroker={setBroker} brokerReady={brokerReady} brokerSessions={ts.brokers ?? null}
                 exitDefaults={exitDefaults} onExitDefaults={pickExitDefaults}
                 exitWatcher={ts.exitWatcher ?? null} hasExits={Object.keys(ts.exits ?? {}).length > 0}
+                globalExit={ts.global ?? null} allPositions={ts.positions} onSetGlobal={trades.setGlobal}
               />
             )}
             {ts && offBoard.length > 0 && (

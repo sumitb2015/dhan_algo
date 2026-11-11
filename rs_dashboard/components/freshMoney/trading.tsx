@@ -17,7 +17,10 @@ import type { FreshMoneyTradeState } from '@/app/api/fresh-money/trade/route';
 import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { BrokerPicker } from '@/components/BrokerPicker';
 import type { ExitSpec, FmExit } from '@/lib/freshMoneyExits';
+import type { FmGlobalExit } from '@/lib/freshMoneyGlobalExit';
 import { ExitSpecInput, exitLevelsText, exitNeedsLook } from './ExitInputs';
+import { GlobalExitInputs } from './GlobalExitInputs';
+import { totalPnl } from '@/lib/freshMoneyGlobalExit';
 
 /** The header's target / stop-loss defaults, stamped onto each position an order opens. */
 export interface ExitDefaultsUi { target: ExitSpec | null; sl: ExitSpec | null }
@@ -50,6 +53,8 @@ export interface TradeApi {
   close: (p: FmPosition) => void;
   /** Change or clear one position's target / stop-loss; resolves true when the server took it. */
   setExit: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
+  /** Set or clear the global (combined P&L, rupees) target / stop-loss; resolves true when the server took it. */
+  setGlobal: (target: number | null, sl: number | null) => Promise<boolean>;
 }
 
 export function useFreshMoneyTrades(): TradeApi {
@@ -132,7 +137,25 @@ export function useFreshMoneyTrades(): TradeApi {
     }
   }, [refresh]);
 
-  return { state, inflight, order, close, setExit };
+  const setGlobal: TradeApi['setGlobal'] = useCallback(async (target, sl) => {
+    try {
+      const res = await fetch(TRADE_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'setGlobal', globalTarget: target, globalSl: sl }),
+      });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (res.ok && j?.success) { toast.success(target || sl ? 'Total target / SL saved' : 'Total target / SL cleared'); return true; }
+      toast.error('Total target / SL not saved', { description: j?.error ?? `HTTP ${res.status}` });
+      return false;
+    } catch (e) {
+      toast.error('Total target / SL not saved', { description: String((e as Error).message ?? e) });
+      return false;
+    } finally {
+      refresh();
+    }
+  }, [refresh]);
+
+  return { state, inflight, order, close, setExit, setGlobal };
 }
 
 // ── ARM / lots / P&L bar ──────────────────────────────────────────────────────────────────────────────────────────
@@ -142,6 +165,7 @@ export function useFreshMoneyTrades(): TradeApi {
 export function TradeBar({
   underlying, armed, onArm, lots, onLots, maxLots, lotSize, mcxMult, tradable, blocked, positions,
   broker, onBroker, brokerReady, brokerSessions, exitDefaults, onExitDefaults, exitWatcher, hasExits,
+  globalExit, allPositions, onSetGlobal,
 }: {
   underlying: string;
   armed: boolean;
@@ -166,7 +190,12 @@ export function TradeBar({
   exitWatcher: { alive: boolean } | null;
   /** Any position (any underlying / broker) has a target / stop-loss record. */
   hasExits: boolean;
+  /** The global total target / stop-loss record and every position it covers (all underlyings and brokers). */
+  globalExit: FmGlobalExit | null;
+  allPositions: FmPosition[];
+  onSetGlobal: (target: number | null, sl: number | null) => Promise<boolean>;
 }) {
+  const [savingGlobal, setSavingGlobal] = useState(false);
   const [draft, setDraft] = useState(String(lots));
   // Escape blurs the box; the blur must then NOT commit what was typed (the field still holds it at that moment).
   const cancelBlur = useRef(false);
@@ -253,13 +282,18 @@ export function TradeBar({
           <ExitSpecInput label="SL" value={exitDefaults.sl} onCommit={v => onExitDefaults({ ...exitDefaults, sl: v })} />
         </div>
       )}
+      <GlobalExitInputs
+        global={globalExit} total={totalPnl(allPositions)} saving={savingGlobal}
+        watcherAlive={exitWatcher ? exitWatcher.alive : null}
+        onSet={(t, v) => { setSavingGlobal(true); onSetGlobal(t, v).finally(() => setSavingGlobal(false)); }}
+      />
       {exitWatcher && (exitWatcher.alive ? (
-        (hasExits || exitDefaults.target || exitDefaults.sl) && (
+        (hasExits || exitDefaults.target || exitDefaults.sl || globalExit?.state === 'watching') && (
           <span className="flex items-center gap-1 text-[11px] text-zinc-400" title="The dashboard server checks every position's target / stop-loss every 2 s, with or without this tab">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />Exits: watching
           </span>
         )
-      ) : hasExits && (
+      ) : (hasExits || globalExit?.state === 'watching') && (
         <span role="alert" className="rounded border border-red-500/50 bg-red-600/15 px-1.5 py-0.5 text-[11px] font-bold text-red-300">
           Exits watcher STOPPED — levels are not being watched
         </span>

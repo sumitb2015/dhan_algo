@@ -9,6 +9,8 @@ import { writeJsonAtomic } from '@/lib/lockedJsonFile';
 import { brokerSessionOk } from '@/lib/freshMoneyBrokers';
 import { runExitTick } from '@/lib/freshMoneyExitTick';
 import type { Streak } from '@/lib/freshMoneyExits';
+import type { FmPosition } from '@/lib/freshMoneyTrades';
+import { runGlobalTick } from '@/lib/freshMoneyGlobalTick';
 import {
   EXIT_WATCHER_FILE, closePositionCore, gateNow, loadLedger, ltpsFor, mutateLedger, reconcileWithBrokers, refreshOrders,
 } from '@/lib/freshMoneyTradeServer';
@@ -16,23 +18,26 @@ import {
 const TAG = '[fm-exit]';
 const TICK_MS = 2000;
 
-interface Holder { timer: ReturnType<typeof setInterval>; busy: boolean; streaks: Map<string, Streak> }
+interface Holder { timer: ReturnType<typeof setInterval>; busy: boolean; streaks: Map<string, Streak>; global: { cur: Streak | null } }
 const LOOP_KEY = '__freshMoneyExitLoop';
 
 async function tick(h: Holder): Promise<void> {
   try { writeJsonAtomic(EXIT_WATCHER_FILE, { pid: process.pid, at: Date.now() }); } catch { /* next tick retries */ }
-  await runExitTick({
+  const deps = {
     now: () => Date.now(),
     readLedger: loadLedger,
     mutate: mutateLedger,
-    prices: async items => (await ltpsFor(items)).ltps,
-    canExit: p => gateNow(p.underlying) !== 'closed' && brokerSessionOk(p.broker),
-    close: (key, reason) => closePositionCore(key, reason),
-    log: msg => console.log(`${TAG} ${msg}`),
+    prices: async (items: Parameters<typeof ltpsFor>[0]) => (await ltpsFor(items)).ltps,
+    canExit: (p: FmPosition) =>
+      gateNow(p.underlying) !== 'closed' && brokerSessionOk(p.broker),
+    close: (key: string, reason: string) => closePositionCore(key, reason),
+    log: (msg: string) => console.log(`${TAG} ${msg}`),
     // Order fills and the down-only reconcile, otherwise run only by the page's poll (paused in a hidden tab).
     // Both throttle themselves (2 s; 5 / 10 / 15 s per broker).
     refresh: async () => { await refreshOrders().catch(() => {}); await reconcileWithBrokers().catch(() => {}); },
-  }, h.streaks);
+  };
+  await runExitTick(deps, h.streaks);
+  await runGlobalTick(deps, (h.global ??= { cur: null })); // a loop started before this field existed (dev reload) lacks it
 }
 
 export function startFreshMoneyExitLoop(): void {
@@ -41,6 +46,7 @@ export function startFreshMoneyExitLoop(): void {
   const h: Holder = {
     busy: false,
     streaks: new Map(),
+    global: { cur: null },
     timer: setInterval(() => {
       if (h.busy) return;
       h.busy = true;
