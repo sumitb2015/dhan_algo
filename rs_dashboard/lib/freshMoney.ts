@@ -304,6 +304,12 @@ export function buildBoardRows(snap: Snapshot, wings = 12, prevClose: PrevCloses
   return rows;
 }
 
+/** Call total OI minus put total OI at one strike (+ = calls heavier, - = puts heavier); null when a side is unknown. */
+export function oiDelta(r: { call: { oi: number | null } | null; put: { oi: number | null } | null }): number | null {
+  const c = r.call?.oi, p = r.put?.oi;
+  return c == null || p == null || !Number.isFinite(c) || !Number.isFinite(p) ? null : c - p;
+}
+
 export type Intensity = 'low' | 'mid' | 'high';
 
 /** Below / inside / above the side's normal range. Without a range every bar is 'mid'. */

@@ -161,3 +161,17 @@ for (const bad of ['-5', '1e9', 'abc', '0']) {
     await expect(target).toHaveValue('30');
   });
 }
+
+test('Δ OI tab: call OI − put OI on the left, coloured by the heavier side; right panel empty', async ({ page }) => {
+  await install(page);
+  await page.getByRole('tab', { name: 'Δ OI' }).click();
+  await expect(page.getByText('Δ OI: calls − puts (total)')).toBeVisible();
+  // Every mocked strike: CE 3,000 − PE 4,000 = −1,000 (puts heavier → green).
+  const cell = page.getByText('-1,000', { exact: true }).first();
+  await expect(cell).toBeVisible();
+  await expect(cell).toHaveClass(/text-emerald-400/);
+  await expect(cell).toHaveAttribute('title', 'Call OI 3,000 − Put OI 4,000');
+  await expect(page.getByText('3,000', { exact: true })).toHaveCount(0);   // right panel empty
+  await page.reload();
+  await expect(page.getByRole('tab', { name: 'Δ OI' })).toHaveAttribute('aria-selected', 'true');
+});

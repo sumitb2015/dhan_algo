@@ -5,7 +5,7 @@ import { BadgeIndianRupee, AlertTriangle } from 'lucide-react';
 import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
 import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
-import { BUILDUP_TEXT, fmtOi, fmtOiAbs, fmtPct, intensity, type Buildup, type Intensity, type Range } from '@/lib/freshMoney';
+import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtPct, intensity, type Buildup, type Intensity, type Range } from '@/lib/freshMoney';
 import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
 import { validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
@@ -23,7 +23,7 @@ const PREF_CHART_H = 'freshMoney.chartHeight.v2';
 const PREF_LOTS = 'freshMoney.lots';
 const PREF_CHART_COLLAPSED = 'freshMoney.chartCollapsed';
 const PREF_OI_MODE = 'freshMoney.oiMode';
-type OiMode = 'change' | 'total';
+type OiMode = 'change' | 'total' | 'delta';
 const PREF_POS_COLLAPSED = 'freshMoney.positionsCollapsed';
 const PREF_EXIT_DEFAULTS = 'freshMoney.exitDefaults';
 const NO_EXITS: ExitDefaultsUi = { target: null, sl: null };
@@ -114,6 +114,17 @@ function Bar({ side, length, moved, max, fresh, normal, tag }: {
   );
 }
 
+/** Δ OI bar on the left panel: length = |Call OI − Put OI|, red when calls are heavier, green when puts are. */
+function DeltaBar({ delta, max }: { delta: number | null; max: number }) {
+  if (delta === null || delta === 0 || max <= 0) return <div />;
+  const w = Math.max(1.5, (Math.abs(delta) / max) * 100);
+  return (
+    <div className="flex h-full min-w-0 items-center justify-end">
+      <div className={`h-[15px] ${delta > 0 ? 'bg-red-500/60' : 'bg-emerald-500/55'}`} style={{ width: `${w}%` }} />
+    </div>
+  );
+}
+
 function BoardRowView({ row, max, normal, boxed, trade, mode }: {
   row: FreshMoneyRow; max: number; normal: FreshMoneyResponse['normal']; boxed: boolean; trade: RowTrade | null; mode: OiMode;
 }) {
@@ -135,11 +146,25 @@ function BoardRowView({ row, max, normal, boxed, trade, mode }: {
       />
     );
   };
+  const delta = mode === 'delta' ? oiDelta(row) : null;
   return (
     <div className={`${trade ? `${GRID_TRADE} h-[26px]` : `${GRID} h-[21px]`} text-[13px] tabular-nums`}>
-      <Bar side="put" length={shown(p)} moved={p?.oiMoved ?? null} max={max} fresh={p?.fresh ?? null} normal={normal.puts} tag={p?.buildup ?? null} />
-      <span className="pr-1.5 text-right text-zinc-300">{fmtPct(p?.fresh ?? null)}</span>
-      <span className="pr-2 text-right font-bold text-emerald-400">{label(p)}</span>
+      {mode === 'delta' ? (
+        <>
+          <DeltaBar delta={delta} max={max} />
+          <span />
+          <span className={`pr-2 text-right font-bold ${delta === null || delta === 0 ? 'text-zinc-300' : delta > 0 ? 'text-red-400' : 'text-emerald-400'}`}
+            title={delta === null ? undefined : `Call OI ${fmtOiAbs(c?.oi ?? null)} − Put OI ${fmtOiAbs(p?.oi ?? null)}`}>
+            {fmtOi(delta)}
+          </span>
+        </>
+      ) : (
+        <>
+          <Bar side="put" length={shown(p)} moved={p?.oiMoved ?? null} max={max} fresh={p?.fresh ?? null} normal={normal.puts} tag={p?.buildup ?? null} />
+          <span className="pr-1.5 text-right text-zinc-300">{fmtPct(p?.fresh ?? null)}</span>
+          <span className="pr-2 text-right font-bold text-emerald-400">{label(p)}</span>
+        </>
+      )}
       {cell('put')}
       <span className="flex justify-center">
         <span className={`px-2 leading-[18px] ${boxed ? 'border border-sky-400 text-zinc-100' : 'border border-transparent text-zinc-300'}`}>
@@ -147,9 +172,16 @@ function BoardRowView({ row, max, normal, boxed, trade, mode }: {
         </span>
       </span>
       {cell('call')}
-      <span className="pl-2 font-bold text-red-400">{label(c)}</span>
-      <span className="pl-1.5 text-zinc-300">{fmtPct(c?.fresh ?? null)}</span>
-      <Bar side="call" length={shown(c)} moved={c?.oiMoved ?? null} max={max} fresh={c?.fresh ?? null} normal={normal.calls} tag={c?.buildup ?? null} />
+      {mode === 'delta' ? (
+        // Δ OI tab: the right panel is left empty (the difference is on the left).
+        <><span /><span /><span /></>
+      ) : (
+        <>
+          <span className="pl-2 font-bold text-red-400">{label(c)}</span>
+          <span className="pl-1.5 text-zinc-300">{fmtPct(c?.fresh ?? null)}</span>
+          <Bar side="call" length={shown(c)} moved={c?.oiMoved ?? null} max={max} fresh={c?.fresh ?? null} normal={normal.calls} tag={c?.buildup ?? null} />
+        </>
+      )}
     </div>
   );
 }
@@ -237,7 +269,8 @@ export default function FreshMoneyBoard() {
     if (Number.isInteger(l) && l >= 1 && l <= 20) setLots(l);
     setChartCollapsed(readPref(PREF_CHART_COLLAPSED) === '1');
     setPosCollapsed(readPref(PREF_POS_COLLAPSED) === '1');
-    if (readPref(PREF_OI_MODE) === 'total') setOiMode('total');
+    const om = readPref(PREF_OI_MODE);
+    if (om === 'total' || om === 'delta') setOiMode(om);
     try {
       const d = JSON.parse(readPref(PREF_EXIT_DEFAULTS) ?? 'null') as { target?: unknown; sl?: unknown } | null;
       if (d) setExitDefaults({ target: specOrNull(d.target), sl: specOrNull(d.sl) });
@@ -304,6 +337,10 @@ export default function FreshMoneyBoard() {
 
   const maxAbs = useMemo(() => {
     let mx = 0;
+    if (oiMode === 'delta') {
+      for (const r of data?.rows ?? []) mx = Math.max(mx, Math.abs(oiDelta(r) ?? 0));
+      return mx;
+    }
     const v = (sd: FreshMoneyRow['put']) => Math.abs((oiMode === 'total' ? sd?.oi : sd?.oiMoved) ?? 0);
     for (const r of data?.rows ?? []) mx = Math.max(mx, v(r.put), v(r.call));
     return mx;
@@ -503,9 +540,10 @@ export default function FreshMoneyBoard() {
                 </span>
               </div>
               <div role="tablist" aria-label="Bars and numbers show" className="ml-auto flex rounded-md border border-zinc-800 bg-zinc-950/40 p-0.5">
-                {([['change', 'OI change'], ['total', 'Total OI']] as const).map(([m, name]) => (
+                {([['change', 'OI change'], ['total', 'Total OI'], ['delta', 'Δ OI']] as const).map(([m, name]) => (
                   <button key={m} type="button" role="tab" aria-selected={oiMode === m} onClick={() => pickOiMode(m)}
-                    title={m === 'change' ? "Today's change in open interest vs the previous close" : 'Open interest outstanding now'}
+                    title={m === 'change' ? "Today's change in open interest vs the previous close"
+                      : m === 'total' ? 'Open interest outstanding now' : 'Call OI − Put OI (total OI outstanding) at each strike'}
                     className={`rounded px-2.5 py-1 text-[11px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 ${
                       oiMode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}>
                     {name}
@@ -514,10 +552,15 @@ export default function FreshMoneyBoard() {
               </div>
               </div>
               <div className="mt-0.5 text-[11.5px] text-zinc-400">
-                {oiMode === 'total' ? 'Bar = total OI (shade and fill still from today\'s change)' : 'Bar = OI moved'} · % = fresh share of the strike&apos;s volume · light / mid / bright = below / about / above
-                normal · filled building, outline leaving
+                {oiMode === 'delta' ? (
+                  <>Bar = Call OI − Put OI (total OI, in {data.oiUnit}) · <span className="text-red-400">red = calls heavier</span> ·{' '}
+                    <span className="text-emerald-400">green = puts heavier</span></>
+                ) : (
+                  <>{oiMode === 'total' ? 'Bar = total OI (shade and fill still from today\'s change)' : 'Bar = OI moved'} · % = fresh share of the strike&apos;s volume · light / mid / bright = below / about / above
+                    normal · filled building, outline leaving</>
+                )}
               </div>
-              <div className="mt-0.5 text-[11px] text-zinc-500">
+              {oiMode !== 'delta' && <div className="mt-0.5 text-[11px] text-zinc-500">
                 {data.hasBuildup
                   ? <>Tags (option&apos;s own premium vs its previous close): <span className="font-bold text-zinc-300">LB</span> long buildup ·{' '}
                       <span className="font-bold text-zinc-300">SB</span> short buildup · <span className="font-bold text-zinc-300">SC</span> short covering ·{' '}
@@ -525,17 +568,17 @@ export default function FreshMoneyBoard() {
                   : data.isToday
                     ? 'Buildup tags (LB / SB / SC / LU) start once the collector records option previous closes — after its next restart.'
                     : 'No buildup tags for this day: option previous closes were not recorded for it.'}
-              </div>
+              </div>}
             </div>
 
             <div className="overflow-x-auto px-4 pb-2 pt-2">
              <div className={tradeMode ? 'min-w-[1040px]' : 'min-w-[720px]'}>
               <div className={`${tradeMode ? GRID_TRADE : GRID} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
-                <span className="col-span-3 pr-2 text-right">PUTS: fresh · {oiMode === 'total' ? 'total OI' : 'OI moved'}</span>
+                <span className="col-span-3 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: fresh · ${oiMode === 'total' ? 'total OI' : 'OI moved'}`}</span>
                 {tradeMode && <span className="pr-1 text-right text-zinc-400">PE trade</span>}
                 <span className="text-center">STRIKE</span>
                 {tradeMode && <span className="pl-1 text-zinc-400">CE trade</span>}
-                <span className="col-span-3 pl-2">CALLS: {oiMode === 'total' ? 'total OI' : 'OI moved'} · fresh</span>
+                <span className="col-span-3 pl-2">{oiMode === 'delta' ? '' : `CALLS: ${oiMode === 'total' ? 'total OI' : 'OI moved'} · fresh`}</span>
               </div>
               {data.rows.map((r, i) => {
                 const next = data.rows[i + 1];

@@ -181,3 +181,13 @@ test('board rows get buildup tags only where a previous close is known', () => {
   assert.equal(r.put!.buildup, null);    // no previous close for the put
   assert.equal(buildBoardRows(snap, 1).find(x => x.strike === 22550)!.call!.buildup, null);
 });
+
+test('delta OI: call total OI minus put total OI; unknown when either side is missing', async () => {
+  const { oiDelta } = await import('./freshMoney.ts');
+  const side = (oi: number | null) => ({ oi, oiMoved: 0, vol: 0, fresh: null, buildup: null });
+  assert.equal(oiDelta({ call: side(150000), put: side(31251) }), 118749);
+  assert.equal(oiDelta({ call: side(49071), put: side(110000) }), -60929);
+  assert.equal(oiDelta({ call: side(5), put: side(5) }), 0);
+  assert.equal(oiDelta({ call: null, put: side(5) }), null);
+  assert.equal(oiDelta({ call: side(5), put: side(null) }), null);
+});
