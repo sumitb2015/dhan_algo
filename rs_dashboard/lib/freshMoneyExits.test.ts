@@ -235,3 +235,18 @@ test('typed text: blank is off; anything else must be a valid number, never sile
     assert.ok(r !== null && 'error' in r, bad);
   }
 });
+
+test('stepper: ±1 in the current unit; off ↔ 1; capped at the limit', async () => {
+  const { stepExitSpec } = await import('./freshMoneyExits.ts');
+  assert.deepEqual(stepExitSpec(null, 'pct', 1), { value: 1, unit: 'pct' });          // + from off
+  assert.equal(stepExitSpec(null, 'pts', -1), null);                                   // − from off stays off
+  assert.deepEqual(stepExitSpec({ value: 10, unit: 'pts' }, 'pts', 1), { value: 11, unit: 'pts' });
+  assert.deepEqual(stepExitSpec({ value: 10, unit: 'pts' }, 'pts', -1), { value: 9, unit: 'pts' });
+  assert.equal(stepExitSpec({ value: 1, unit: 'pct' }, 'pct', -1), null);              // − from 1 = off
+  assert.equal(stepExitSpec({ value: 0.5, unit: 'pct' }, 'pct', -1), null);
+  assert.deepEqual(stepExitSpec({ value: 12.5, unit: 'pts' }, 'pts', 1), { value: 13.5, unit: 'pts' });
+  assert.deepEqual(stepExitSpec({ value: 1000, unit: 'pct' }, 'pct', 1), { value: 1000, unit: 'pct' });   // capped
+  assert.deepEqual(stepExitSpec({ value: 999.5, unit: 'pct' }, 'pct', 1), { value: 1000, unit: 'pct' });
+  assert.deepEqual(stepExitSpec({ value: 100000, unit: 'pts' }, 'pts', 1), { value: 100000, unit: 'pts' });
+  assert.deepEqual(stepExitSpec({ value: 0.1, unit: 'pts' }, 'pts', 1), { value: 1.1, unit: 'pts' });   // no float drift
+});

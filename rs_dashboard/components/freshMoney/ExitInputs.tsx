@@ -6,9 +6,10 @@
  * half-typed "5" of "50" never becomes a live level. Blank = off.
  */
 
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Minus, Plus } from 'lucide-react';
 import {
-  breached, fmtExitSpec, levelsFor, parseExitDraft, type ExitDir, type ExitSpec, type ExitUnit, type FmExit,
+  breached, fmtExitSpec, levelsFor, parseExitDraft, stepExitSpec, type ExitDir, type ExitSpec, type ExitUnit, type FmExit,
 } from '@/lib/freshMoneyExits';
 
 const FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70';
@@ -24,7 +25,8 @@ export const EXIT_STATE_LABEL: Record<FmExit['state'], string> = {
 };
 export const exitNeedsLook = (x: FmExit | undefined) => !!x && (x.state === 'unknown' || x.state === 'incomplete' || x.state === 'rejected');
 
-/** One level: number + % | pts. `onCommit` gets the new spec (null = off) only on blur / Enter / a unit click. */
+/** One level: − number + and % | pts. `onCommit` gets the new spec (null = off) on blur / Enter, a − / + click (±1 in the
+ *  current unit, from the committed value — typing in progress is discarded) or a unit click. */
 export function ExitSpecInput({ label, value, onCommit, disabled }: {
   label: string; value: ExitSpec | null; onCommit: (v: ExitSpec | null) => void; disabled?: boolean;
 }) {
@@ -32,6 +34,10 @@ export function ExitSpecInput({ label, value, onCommit, disabled }: {
   const [unit, setUnit] = useState<ExitUnit>(value?.unit ?? 'pct');
   const [error, setError] = useState<string | null>(null);
   const cancelBlur = useRef(false);
+  // The value just committed: a −/+ click blurs the box first, and that blur's commit must be what the step builds on
+  // (the `value` prop is still the older one inside the same click).
+  const latest = useRef<ExitSpec | null>(value);
+  useEffect(() => { latest.current = value; }, [value]);
   // Follow a change from outside (a restored preference, a Save elsewhere).
   const [shown, setShown] = useState(value);
   if (shown !== value) {
@@ -44,12 +50,25 @@ export function ExitSpecInput({ label, value, onCommit, disabled }: {
     const r = parseExitDraft(raw, u);
     if (r && 'error' in r) { setError(r.error); setDraft(value ? String(value.value) : ''); return; }
     setError(null);
+    latest.current = r;
     onCommit(r);
   };
+
+  const step = (dir: 1 | -1) => {
+    const next = stepExitSpec(latest.current, unit, dir);
+    latest.current = next;
+    setError(null);
+    setDraft(next ? String(next.value) : '');
+    onCommit(next);
+  };
+  const stepBtn = `${FOCUS} flex h-6 w-6 items-center justify-center rounded border border-zinc-700 bg-zinc-900 text-zinc-300 hover:text-white disabled:opacity-50`;
 
   return (
     <span className="flex items-center gap-1">
       <span className="text-[11px] text-zinc-400">{label}</span>
+      <button type="button" disabled={disabled} onClick={() => step(-1)} aria-label={`${label} one ${unit === 'pct' ? '%' : 'point'} lower`} className={stepBtn}>
+        <Minus className="h-3 w-3" />
+      </button>
       <input
         aria-label={`${label} value (blank = off)`}
         inputMode="decimal"
@@ -64,6 +83,9 @@ export function ExitSpecInput({ label, value, onCommit, disabled }: {
         }}
         className={`${FOCUS} h-6 w-14 rounded border border-zinc-700 bg-zinc-900 text-center text-[12px] font-bold tabular-nums text-white placeholder:font-normal placeholder:text-zinc-500 disabled:opacity-50`}
       />
+      <button type="button" disabled={disabled} onClick={() => step(1)} aria-label={`${label} one ${unit === 'pct' ? '%' : 'point'} higher`} className={stepBtn}>
+        <Plus className="h-3 w-3" />
+      </button>
       <span role="group" aria-label={`${label} unit`} className="flex rounded border border-zinc-700 bg-zinc-900 p-px">
         {(['pct', 'pts'] as const).map(u => (
           <button key={u} type="button" disabled={disabled} aria-pressed={unit === u}

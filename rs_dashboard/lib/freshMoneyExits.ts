@@ -65,6 +65,15 @@ export function breached(ltp: number, dir: ExitDir, lv: ExitLevels): 'target' | 
   return null;
 }
 
+/** The − / + buttons: ±1 in the current unit. + from off = 1; − from 1 (or below) = off; capped at the unit's limit. */
+export function stepExitSpec(cur: ExitSpec | null, unit: ExitUnit, dir: 1 | -1): ExitSpec | null {
+  if (!cur) return dir > 0 ? { value: 1, unit } : null;
+  const max = unit === 'pct' ? EXIT_MAX_PCT : EXIT_MAX_PTS;
+  const v = Math.round((cur.value + dir) * 100) / 100;
+  if (v < 1) return null;
+  return { value: Math.min(max, v), unit };
+}
+
 export function fmtExitSpec(s: ExitSpec | null): string {
   if (!s) return 'off';
   return s.unit === 'pct' ? `${s.value}%` : `${s.value} pts`;

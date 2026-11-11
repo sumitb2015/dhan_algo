@@ -175,3 +175,25 @@ test('Δ OI tab: call OI − put OI on the left, coloured by the heavier side; r
   await page.reload();
   await expect(page.getByRole('tab', { name: 'Δ OI' })).toHaveAttribute('aria-selected', 'true');
 });
+
+test('− / + step the header level by 1: off → 1 → 2, back to off; a typed value is stepped from', async ({ page }) => {
+  await install(page);
+  const target = page.getByLabel('Target value (blank = off)').first();
+  const plus = page.getByRole('button', { name: 'Target one % higher' }).first();
+  const minus = page.getByRole('button', { name: 'Target one % lower' }).first();
+  await plus.click();
+  await expect(target).toHaveValue('1');
+  await plus.click();
+  await expect(target).toHaveValue('2');
+  await minus.click();
+  await minus.click();
+  await expect(target).toHaveValue('');          // off
+  await target.fill('20');
+  await plus.click();                            // the blur commits 20 first; the step builds on it
+  await expect(target).toHaveValue('21');
+  await page.getByRole('group', { name: 'Target unit' }).first().getByRole('button', { name: 'pts' }).click();
+  await page.getByRole('button', { name: 'Target one point higher' }).first().click();
+  await expect(target).toHaveValue('22');
+  await page.reload();
+  await expect(page.getByLabel('Target value (blank = off)').first()).toHaveValue('22');
+});
