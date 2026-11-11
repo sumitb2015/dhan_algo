@@ -8,6 +8,8 @@
  * position's basis unknown rather than 0.
  */
 
+import type { FmExit } from './freshMoneyExits.ts';
+
 export type OptType = 'CE' | 'PE';
 export type FmSegment = 'NSE_FNO' | 'MCX_COMM';
 export type TxnSide = 'BUY' | 'SELL';
@@ -48,7 +50,8 @@ export interface FmOrder {
   reason?: string;
 }
 
-export interface FmLedger { date: string; orders: FmOrder[] }
+/** `exits`: per-position target / stop-loss, by position key (lib/freshMoneyExits.ts). */
+export interface FmLedger { date: string; orders: FmOrder[]; exits?: Record<string, FmExit> }
 
 export interface FmPosition {
   /** `broker|securityId`: Kotak and Zerodha trading symbols can coincide, so a contract is only unique per broker. */

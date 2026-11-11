@@ -53,3 +53,90 @@ test('format', () => {
   assert.equal(fmtExitSpec({ value: 20, unit: 'pts' }), '20 pts');
   assert.equal(fmtExitSpec(null), 'off');
 });
+
+// ── Task 2: exit record and per-tick decision ────────────────────────────────────────────────────────────────────
+import {
+  nextExitAction, exitAfterClose, CONFIRM_TICKS, STREAK_MAX_GAP_MS, FIRING_STALE_MS, REFUSED_RETRY_MS, type FmExit,
+} from './freshMoneyExits.ts';
+
+const X = (p: Partial<FmExit> = {}): FmExit => ({
+  key: 'dhan|1', openedAt: 0, dir: 'long', target: { value: 30, unit: 'pct' }, sl: { value: 20, unit: 'pct' },
+  basis: 100, targetPx: 130, slPx: 80, state: 'watching', ...p,
+});
+const LONG = { netQty: 65, avgPrice: 100 };
+
+test('constants pinned by the spec', () => {
+  assert.equal(CONFIRM_TICKS, 2);
+  assert.equal(STREAK_MAX_GAP_MS, 6000);
+  assert.equal(FIRING_STALE_MS, 60000);
+  assert.equal(REFUSED_RETRY_MS, 5000);
+});
+
+test('waiting-fill resolves once the average is known', () => {
+  const w = X({ state: 'waiting-fill', basis: null, targetPx: null, slPx: null });
+  assert.deepEqual(nextExitAction(w, LONG, false, 120, null, 0), { kind: 'resolve', basis: 100, levels: { targetPx: 130, slPx: 80 } });
+  assert.deepEqual(nextExitAction(w, { netQty: 65, avgPrice: null }, false, 120, null, 0), { kind: 'none' });
+});
+
+test('drop when flat or flipped, but never while the contract is settling', () => {
+  assert.deepEqual(nextExitAction(X(), { netQty: 0, avgPrice: null }, false, 100, null, 0), { kind: 'drop' });
+  assert.deepEqual(nextExitAction(X(), null, false, 100, null, 0), { kind: 'drop' });
+  assert.deepEqual(nextExitAction(X(), { netQty: 0, avgPrice: null }, true, 100, null, 0), { kind: 'none' });
+  assert.deepEqual(nextExitAction(X(), { netQty: -65, avgPrice: 100 }, false, 100, null, 0), { kind: 'drop' });
+  assert.deepEqual(nextExitAction(X({ state: 'waiting-fill', basis: null, targetPx: null, slPx: null }), null, true, null, null, 0), { kind: 'none' });
+});
+
+test('a breach fires on the second consecutive tick', () => {
+  const a = nextExitAction(X(), LONG, false, 131, null, 1000);
+  assert.deepEqual(a, { kind: 'streak', streak: { level: 'target', count: 1, at: 1000 } });
+  const b = nextExitAction(X(), LONG, false, 131, (a as { streak: never }).streak, 3000);
+  assert.deepEqual(b, { kind: 'fire', level: 'target' });
+});
+
+test('two breaches too far apart are not consecutive', () => {
+  const r = nextExitAction(X(), LONG, false, 131, { level: 'target', count: 1, at: 1000 }, 1000 + STREAK_MAX_GAP_MS + 1000);
+  assert.deepEqual(r, { kind: 'streak', streak: { level: 'target', count: 1, at: 8000 } });
+});
+
+test('a breach of the other level restarts the count', () => {
+  const r = nextExitAction(X(), LONG, false, 79, { level: 'target', count: 1, at: 1000 }, 3000);
+  assert.deepEqual(r, { kind: 'streak', streak: { level: 'sl', count: 1, at: 3000 } });
+});
+
+test('no price, a retry wait or no breach resets the count', () => {
+  const s = { level: 'target' as const, count: 1, at: 1000 };
+  assert.deepEqual(nextExitAction(X(), LONG, false, null, s, 3000), { kind: 'streak', streak: null });
+  assert.deepEqual(nextExitAction(X({ retryAt: 5000 }), LONG, false, 131, s, 3000), { kind: 'streak', streak: null });
+  assert.deepEqual(nextExitAction(X(), LONG, false, 110, s, 3000), { kind: 'streak', streak: null });
+});
+
+test('a firing record left behind by a restart becomes unknown, never resent', () => {
+  const f = X({ state: 'firing', firedAt: 0, firedBy: 'target' });
+  assert.equal(nextExitAction(f, LONG, false, 131, null, FIRING_STALE_MS + 1).kind, 'mark-unknown');
+  assert.deepEqual(nextExitAction(f, LONG, false, 131, null, 1000), { kind: 'none' });
+  assert.deepEqual(nextExitAction(f, { netQty: 0, avgPrice: null }, false, 131, null, 1000), { kind: 'none' });
+});
+
+test('after an exit is sent: flat drops it, still open is incomplete, settling waits', () => {
+  const s = X({ state: 'sent', firedBy: 'target', firedAt: 0 });
+  assert.deepEqual(nextExitAction(s, { netQty: 0, avgPrice: null }, false, 131, null, 1000), { kind: 'settle', to: 'drop' });
+  assert.deepEqual(nextExitAction(s, LONG, false, 131, null, 1000), { kind: 'settle', to: 'incomplete' });
+  assert.deepEqual(nextExitAction(s, LONG, true, 131, null, 1000), { kind: 'none' });
+});
+
+test('unknown and incomplete are left for the user', () => {
+  assert.deepEqual(nextExitAction(X({ state: 'unknown' }), LONG, false, 131, null, 1000), { kind: 'none' });
+  assert.deepEqual(nextExitAction(X({ state: 'incomplete' }), LONG, false, 131, null, 1000), { kind: 'none' });
+  assert.deepEqual(nextExitAction(X({ state: 'unknown' }), { netQty: 0, avgPrice: null }, false, 131, null, 1000), { kind: 'drop' });
+});
+
+test('close outcomes map to record states', () => {
+  assert.deepEqual(exitAfterClose({ kind: 'placed', orderId: 'X1' }, 'target', 500), { state: 'sent', firedBy: 'target', firedAt: 500 });
+  assert.deepEqual(exitAfterClose({ kind: 'refused', error: 'held', http: 409 }, 'sl', 500),
+    { state: 'watching', note: 'held', retryAt: 500 + REFUSED_RETRY_MS, firedBy: undefined, firedAt: undefined });
+  for (const r of [{ kind: 'unknown', error: 'timeout', partial: false }, { kind: 'partial', error: 'rest refused' }] as const) {
+    const p = exitAfterClose(r, 'sl', 500);
+    assert.equal(p.state, 'unknown');
+    assert.match(p.note ?? '', /^exit UNKNOWN — check the broker: /);
+  }
+});
