@@ -298,3 +298,29 @@ test('broker order units follow each broker master, mismatches refused', () => {
   assert.ok('error' in brokerUnits('kotak', 'CRUDEOIL', 1, 10, 100));          // would be 10x too small
   assert.ok('error' in brokerUnits('zerodha', 'CRUDEOILM', 1, 10, 10));        // Kite in barrels? unit unclear
 });
+
+test('a close is re-checked in the lock: never more than is open and not already on its way out', async () => {
+  const { closeCheck } = await import('./freshMoneyTrades.ts');
+  const key = 'dhan|111';
+  const long = ord({ id: 'L', ts: 1000, qty: 65, filledQty: 65 });
+  assert.equal(closeCheck([long], key, 'SELL', 65, 5000), null);
+  // A × already filled flat: a second close would open a naked short.
+  const filledClose = ord({ id: 'C', ts: 2000, side: 'SELL', close: true, qty: 65, filledQty: 65 });
+  assert.match(closeCheck([long, filledClose], key, 'SELL', 65, 5000) ?? '', /no longer open/);
+  // A × still in flight: only what is not already on its way out.
+  const pendingClose = ord({ id: 'P', ts: 4000, side: 'SELL', close: true, qty: 65, filledQty: 0, state: 'pending', avgPrice: null });
+  assert.match(closeCheck([long, pendingClose], key, 'SELL', 65, 5000) ?? '', /already on its way out/);
+  // Wrong direction: buying to "close" a long.
+  assert.match(closeCheck([long], key, 'BUY', 65, 5000) ?? '', /no longer open/);
+  assert.equal(closeCheck([long], key, 'SELL', 30, 5000), null);
+});
+
+test('a REST price cache is served only while fresh, also when the fetch fails', async () => {
+  const { freshRestCache, REST_CACHE_MS } = await import('./freshMoneyTrades.ts');
+  const cache = { at: 10_000, ids: 'MCX_COMM:111', data: { '111': 105 } };
+  assert.deepEqual(freshRestCache(cache, 'MCX_COMM:111', 10_000 + REST_CACHE_MS - 1), { '111': 105 });
+  assert.equal(freshRestCache(cache, 'MCX_COMM:111', 10_000 + REST_CACHE_MS + 1), null);   // stale: no price, never an old one
+  assert.equal(freshRestCache(cache, 'MCX_COMM:222', 10_001), null);
+  assert.equal(freshRestCache(null, 'MCX_COMM:111', 10_001), null);
+  assert.equal(REST_CACHE_MS, 1500);
+});

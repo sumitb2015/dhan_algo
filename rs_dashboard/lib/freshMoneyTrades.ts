@@ -327,3 +327,27 @@ export function brokerUnits(
   }
   return { lot: dhanLot, mult: 1 };
 }
+
+/**
+ * A close re-checked inside the ledger lock, just before it is recorded (the × and the exit watcher can race: one may
+ * fill while the other waits on the broker's positions read). The position must still be open in the direction this
+ * order closes, and `qty` may not exceed what is open minus what is already on its way out. Null = may send.
+ */
+export function closeCheck(orders: FmOrder[], key: string, side: TxnSide, qty: number, now: number): string | null {
+  const net = buildPositions(orders, {}, now).find(p => p.key === key)?.netQty ?? 0;
+  if (net === 0 || (side === 'SELL') !== (net > 0)) return 'This position is no longer open in that direction — nothing was sent';
+  const left = Math.abs(net) - inFlightReducing(orders, key, net, now);
+  if (qty > left) return `Only ${Math.max(0, left)} of it is not already on its way out — nothing was sent; check Orders`;
+  return null;
+}
+
+/** How long a REST LTP sample may be reused. */
+export const REST_CACHE_MS = 1500;
+
+/** The cached REST prices for exactly these ids while still fresh, else null. Used on the success path AND when a fetch
+ *  fails: an old sample served twice would satisfy the exit watcher's two-check rule on a price that is no longer there. */
+export function freshRestCache(
+  cache: { at: number; ids: string; data: Record<string, number> } | null, ids: string, now: number,
+): Record<string, number> | null {
+  return cache && cache.ids === ids && now - cache.at < REST_CACHE_MS ? cache.data : null;
+}

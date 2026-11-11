@@ -15,14 +15,14 @@ import {
   BROKERS, brokerContract, brokerName, brokerNets, brokerSessionOk, newCorrelationId, readOrder, sendOrder,
 } from '@/lib/freshMoneyBrokers';
 import {
-  brokerUnits, buildPositions, closeQty, contractHold, contractSettling, dueForCheck, effectiveState, hhmmToMin,
+  brokerUnits, buildPositions, closeCheck, closeQty, freshRestCache, contractHold, contractSettling, dueForCheck, effectiveState, hhmmToMin,
   inFlightReducing, nextCheckDelay, orderKey, reconcileDownQty, sessionGate, sessionMessage, slices, unconfirmedQty,
   NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, FM_MAX_LOTS_PER_ORDER, FM_MAX_POSITION_LOTS,
   type FmBroker, type FmLedger, type FmOrder, type FmPosition, type FmSegment, type OptType, type SessionGate,
   type TradeWindow, type TxnSide,
 } from '@/lib/freshMoneyTrades';
 import {
-  editExit, exitSummary, parseExitDefaults, stampExit, validateExitSpec, type CloseResult, type ExitDefaults, type FmExit,
+  editExit, exitSummary, exitsOnOpen, parseExitDefaults, validateExitSpec, type CloseResult, type ExitDefaults, type FmExit,
 } from '@/lib/freshMoneyExits';
 
 /**
@@ -132,7 +132,8 @@ export async function ltpsFor(items: { id: string; segment: FmSegment }[]): Prom
   if (!missing.length) return { ltps, source };
   const key = missing.map(i => `${i.segment}:${i.id}`).sort().join(',');
   let rest: Record<string, number> = {};
-  if (restCache && restCache.ids === key && Date.now() - restCache.at < 1_500) rest = restCache.data;
+  const cached = freshRestCache(restCache, key, Date.now());
+  if (cached) rest = cached;
   else {
     try {
       for (const seg of ['NSE_FNO', 'MCX_COMM'] as const) {
@@ -141,7 +142,7 @@ export async function ltpsFor(items: { id: string; segment: FmSegment }[]): Prom
       }
       restCache = { at: Date.now(), ids: key, data: rest };
     } catch {
-      rest = restCache && restCache.ids === key ? restCache.data : {};
+      rest = freshRestCache(restCache, key, Date.now()) ?? {}; // no price rather than an old one
     }
   }
   for (const i of missing) if (rest[i.id] > 0) { ltps[i.id] = rest[i.id]; source[i.id] = 'rest'; }
@@ -304,7 +305,7 @@ function precheck(l: FmLedger, base: OrderBase): string | null {
   const hold = contractHold(l.orders, key, now);
   if (hold === 'unknown') return 'An earlier order on this contract has an UNKNOWN outcome — check Positions/Orders; new orders on it are held for a minute';
   if (hold === 'pending') return 'An earlier order on this contract is still being confirmed — try again in a moment';
-  if (base.close) return null;
+  if (base.close) return closeCheck(l.orders, key, base.side, base.qty, now);
   const held = buildPositions(l.orders, {}, now).find(p => p.key === key)?.netQty ?? 0;
   const exposure = held + unconfirmedQty(l.orders, key, now);
   const after = exposure + (base.side === 'BUY' ? 1 : -1) * base.qty;
@@ -315,9 +316,9 @@ function precheck(l: FmLedger, base: OrderBase): string | null {
 }
 
 type SendResult = { kind: 'placed'; orderId: string; stamped?: boolean } | { kind: 'refused'; error: string; http: number }
-  | { kind: 'unknown'; error: string };
+  | { kind: 'rejected'; error: string; http: number } | { kind: 'unknown'; error: string };
 
-/** Check + record (one lock) → send → record the outcome. A broker rejection is `refused` (nothing was placed).
+/** Check + record (one lock) → send → record the outcome. A broker rejection is `rejected` (nothing was placed).
  *  `stamp`: an opening order's header target / stop-loss, written in the same lock when the contract is flat. */
 async function sendOne(base: OrderBase, check = true, stamp?: ExitDefaults): Promise<SendResult> {
   const id = randomUUID();
@@ -330,9 +331,11 @@ async function sendOne(base: OrderBase, check = true, stamp?: ExitDefaults): Pro
       if (why) return why;
       const now = Date.now();
       const key = orderKey(base);
-      const x = stamp && !base.close ? stampExit(l.orders, key, base.side, now, stamp) : null;
+      if (!base.close) {
+        const next = exitsOnOpen(l.exits, l.orders, key, base.side, now, stamp ?? { target: null, sl: null });
+        if (next !== (l.exits ?? {})) { l.exits = next; stamped = !!next[key]; }
+      }
       l.orders.push({ ...base, id, ts: now, correlationId, orderId: null, state: 'sending', filledQty: 0, avgPrice: null });
-      if (x) { l.exits = { ...(l.exits ?? {}), [key]: x }; stamped = true; }
       return null;
     });
   } catch (e) {
@@ -350,7 +353,7 @@ async function sendOne(base: OrderBase, check = true, stamp?: ExitDefaults): Pro
   stateVersion++;
   if (r.status === 'placed') return { kind: 'placed', orderId: r.orderId, stamped };
   if (r.status === 'unknown') return { kind: 'unknown', error: r.error };
-  return { kind: 'refused', error: r.error, http: r.http ?? 200 };
+  return { kind: 'rejected', error: r.error, http: r.http ?? 200 };
 }
 
 const asClose = (r: SendResult): CloseResult =>

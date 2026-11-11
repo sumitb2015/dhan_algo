@@ -8,7 +8,7 @@
 
 import React, { useRef, useState } from 'react';
 import {
-  breached, fmtExitSpec, levelsFor, validateExitSpec, type ExitDir, type ExitSpec, type ExitUnit, type FmExit,
+  breached, fmtExitSpec, levelsFor, parseExitDraft, type ExitDir, type ExitSpec, type ExitUnit, type FmExit,
 } from '@/lib/freshMoneyExits';
 
 const FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70';
@@ -20,8 +20,9 @@ export const EXIT_STATE_LABEL: Record<FmExit['state'], string> = {
   sent: 'exit sent',
   unknown: 'exit UNKNOWN',
   incomplete: 'exit incomplete',
+  rejected: 'exit REJECTED',
 };
-export const exitNeedsLook = (x: FmExit | undefined) => !!x && (x.state === 'unknown' || x.state === 'incomplete');
+export const exitNeedsLook = (x: FmExit | undefined) => !!x && (x.state === 'unknown' || x.state === 'incomplete' || x.state === 'rejected');
 
 /** One level: number + % | pts. `onCommit` gets the new spec (null = off) only on blur / Enter / a unit click. */
 export function ExitSpecInput({ label, value, onCommit, disabled }: {
@@ -40,8 +41,7 @@ export function ExitSpecInput({ label, value, onCommit, disabled }: {
   }
 
   const commit = (raw: string, u: ExitUnit) => {
-    const t = raw.trim();
-    const r = validateExitSpec(t === '' ? null : { value: Number(t), unit: u });
+    const r = parseExitDraft(raw, u);
     if (r && 'error' in r) { setError(r.error); setDraft(value ? String(value.value) : ''); return; }
     setError(null);
     onCommit(r);
@@ -56,7 +56,7 @@ export function ExitSpecInput({ label, value, onCommit, disabled }: {
         placeholder="off"
         value={draft}
         disabled={disabled}
-        onChange={e => setDraft(e.target.value.replace(/[^0-9.]/g, ''))}
+        onChange={e => setDraft(e.target.value)}
         onBlur={e => { if (cancelBlur.current) { cancelBlur.current = false; return; } commit(e.currentTarget.value, unit); }}
         onKeyDown={e => {
           if (e.key === 'Enter') { commit(e.currentTarget.value, unit); e.currentTarget.blur(); }

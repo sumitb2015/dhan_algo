@@ -22,6 +22,9 @@ export interface ExitTickDeps {
   canExit(p: FmPosition): boolean;
   close(key: string, reason: string): Promise<CloseResult>;
   log(msg: string): void;
+  /** Bring the ledger up to date with the brokers (order fills, down-only reconcile) — with no tab open nothing else
+   *  does, and a fill nobody confirms leaves a position unguarded. Called only while some record exists. */
+  refresh(): Promise<void>;
 }
 
 /** The record is still the one this tick decided on (no edit, fire or drop in between). */
@@ -31,6 +34,8 @@ const same = (a: FmExit | undefined, b: FmExit) =>
 const px = (n: number | null) => (n === null ? '–' : n.toFixed(2));
 
 export async function runExitTick(deps: ExitTickDeps, streaks: Map<string, Streak>): Promise<void> {
+  if (!Object.keys(deps.readLedger().exits ?? {}).length) { streaks.clear(); return; }
+  await deps.refresh().catch(err => deps.log(`broker refresh failed: ${String((err as Error)?.message ?? err)}`));
   const l = deps.readLedger();
   const exits = l.exits ?? {};
   const keys = Object.keys(exits);

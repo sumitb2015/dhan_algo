@@ -32,6 +32,15 @@ export function validateExitSpec(raw: unknown): ExitSpec | null | { error: strin
   return { value: v, unit };
 }
 
+/** What was typed in a level box: blank = off; anything else is validated exactly as typed (never rewritten, so "-5"
+ *  or "1e9" is refused rather than read as 5 or 19). */
+export function parseExitDraft(raw: string, unit: ExitUnit): ExitSpec | null | { error: string } {
+  const t = raw.trim();
+  if (t === '') return null;
+  if (!/^\d+(\.\d+)?$/.test(t)) return { error: 'Type a number above 0 (or leave blank for off)' };
+  return validateExitSpec({ value: Number(t), unit });
+}
+
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 /** How far a spec moves from the basis, in premium points. */
@@ -65,8 +74,9 @@ export function fmtExitSpec(s: ExitSpec | null): string {
 
 /** waiting-fill = stamped, the opening fill is not priced yet; watching = levels are prices, checked every tick;
  *  firing = the close is being sent (at most once); sent = the close went out; unknown = it may or may not be live
- *  (never resent); incomplete = the close settled but part of the position is still open (not watched). */
-export type ExitState = 'waiting-fill' | 'watching' | 'firing' | 'sent' | 'unknown' | 'incomplete';
+ *  (never resent); incomplete = the close settled but part of the position is still open (not watched); rejected = the
+ *  broker refused the close (not retried: a rejection repeats — edit to re-arm). */
+export type ExitState = 'waiting-fill' | 'watching' | 'firing' | 'sent' | 'unknown' | 'incomplete' | 'rejected';
 
 export interface FmExit {
   /** Position key `broker|contract` (lib/freshMoneyTrades.ts orderKey). */
@@ -90,10 +100,12 @@ export interface FmExit {
 /** Consecutive breaching ticks of one level (kept in the watcher's memory). */
 export interface Streak { level: 'target' | 'sl'; count: number; at: number }
 
-/** What the shared close path did. refused = nothing was sent; partial = some slices went out, the rest was refused. */
+/** What the shared close path did. refused = stopped by this page's own checks, nothing sent (hold, session, gate);
+ *  rejected = the broker refused the order; partial = some slices went out, the rest was not. */
 export type CloseResult =
   | { kind: 'placed'; orderId: string; note?: string }
   | { kind: 'refused'; error: string; http: number }
+  | { kind: 'rejected'; error: string; http: number }
   | { kind: 'unknown'; error: string; partial: boolean }
   | { kind: 'partial'; error: string };
 
@@ -149,6 +161,7 @@ export function nextExitAction(
 export function exitAfterClose(r: CloseResult, level: 'target' | 'sl', now: number): Partial<FmExit> {
   if (r.kind === 'placed') return { state: 'sent', firedBy: level, firedAt: now };
   if (r.kind === 'refused') return { state: 'watching', note: r.error, retryAt: now + REFUSED_RETRY_MS, firedBy: undefined, firedAt: undefined };
+  if (r.kind === 'rejected') return { state: 'rejected', note: `exit REJECTED by the broker: ${r.error} — edit to re-arm`, firedBy: level, firedAt: now };
   return { state: 'unknown', note: `exit UNKNOWN — check the broker: ${r.error}` };
 }
 
@@ -178,6 +191,25 @@ export function stampExit(orders: FmOrder[], key: string, side: TxnSide, now: nu
     key, openedAt: now, dir: side === 'BUY' ? 'long' : 'short', target: d.target, sl: d.sl,
     basis: null, targetPx: null, slPx: null, state: 'waiting-fill',
   };
+}
+
+/**
+ * The exit records after an opening order is recorded. On a flat contract with nothing unconfirmed this is a NEW
+ * position: any leftover record (from a position closed less than 20 s ago, before the watcher dropped it) is replaced
+ * by the header's stamp, or removed when the header is blank — old prices from an old basis must never guard it.
+ * Adding to an open position returns `exits` unchanged (the same object).
+ */
+export function exitsOnOpen(
+  exits: Record<string, FmExit> | undefined, orders: FmOrder[], key: string, side: TxnSide, now: number, d: ExitDefaults,
+): Record<string, FmExit> {
+  const cur = exits ?? {};
+  const held = buildPositions(orders, {}, now).find(p => p.key === key)?.netQty ?? 0;
+  if (held !== 0 || unconfirmedQty(orders, key, now) !== 0) return cur;
+  const next = { ...cur };
+  delete next[key];
+  const x = stampExit(orders, key, side, now, d);
+  if (x) next[key] = x;
+  return next;
 }
 
 /** A per-position edit from the Positions panel. Levels come from the position's CURRENT average; both null = remove. */

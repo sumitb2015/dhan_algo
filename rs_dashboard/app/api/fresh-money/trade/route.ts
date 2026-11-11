@@ -38,7 +38,7 @@ function replyFor(r: CloseResult): NextResponse {
   if (r.kind === 'placed') return reply({ success: true, order_id: r.orderId, ...(r.note ? { note: r.note } : {}) });
   if (r.kind === 'unknown') return reply({ success: false, unknown: true, ...(r.partial ? { partial: true } : {}), error: r.error });
   if (r.kind === 'partial') return reply({ success: false, partial: true, error: r.error });
-  return reply({ success: false, error: r.error }, r.http);
+  return reply({ success: false, error: r.error }, r.http); // refused / rejected: nothing was placed (unchanged reply)
 }
 
 export async function POST(req: NextRequest) {

@@ -197,3 +197,41 @@ test('edit a position: refused while firing or flat; both null removes; levels f
   assert.equal(u.state, 'watching');
   assert.equal(u.note, undefined);
 });
+
+test('a broker rejection stops the watcher on that position (no retry loop); a pre-send refusal still retries', () => {
+  const r = exitAfterClose({ kind: 'rejected', error: 'RMS: margin', http: 400 }, 'sl', 500);
+  assert.equal(r.state, 'rejected');
+  assert.match(r.note ?? '', /^exit REJECTED by the broker: RMS: margin/);
+  assert.deepEqual(nextExitAction(X({ state: 'rejected' }), LONG, false, 79, null, 1000), { kind: 'none' });
+  assert.deepEqual(nextExitAction(X({ state: 'rejected' }), { netQty: 0, avgPrice: null }, false, 79, null, 1000), { kind: 'drop' });
+  assert.equal(exitAfterClose({ kind: 'refused', error: 'held', http: 409 }, 'sl', 500).state, 'watching');
+});
+
+test('opening on a flat contract replaces any leftover record, even with blank defaults', async () => {
+  const { exitsOnOpen } = await import('./freshMoneyExits.ts');
+  const old = { [KEY]: X({ key: KEY, state: 'watching', targetPx: 130, slPx: 80 }) };
+  const flat = [ord4({}), ord4({ id: 'o2', ts: 2000, side: 'SELL', close: true })];
+  // Blank header: the old levels (from an old basis) must not apply to the new position.
+  assert.deepEqual(exitsOnOpen(old, flat, KEY, 'BUY', 5000, { target: null, sl: null }), {});
+  // Header set: a fresh stamp replaces the old record.
+  const fresh = exitsOnOpen(old, flat, KEY, 'BUY', 5000, { target: T30, sl: null });
+  assert.equal(fresh[KEY].state, 'waiting-fill');
+  assert.equal(fresh[KEY].openedAt, 5000);
+  // Adding to an open position keeps its record untouched.
+  assert.equal(exitsOnOpen(old, [ord4({})], KEY, 'BUY', 5000, { target: T30, sl: null }), old);
+  // Other keys are untouched.
+  const other = { ...old, 'dhan|999': X({ key: 'dhan|999' }) };
+  assert.ok(exitsOnOpen(other, flat, KEY, 'BUY', 5000, { target: null, sl: null })['dhan|999']);
+});
+
+test('typed text: blank is off; anything else must be a valid number, never silently rewritten', async () => {
+  const { parseExitDraft } = await import('./freshMoneyExits.ts');
+  assert.equal(parseExitDraft('', 'pct'), null);
+  assert.equal(parseExitDraft('   ', 'pts'), null);
+  assert.deepEqual(parseExitDraft(' 30 ', 'pct'), { value: 30, unit: 'pct' });
+  assert.deepEqual(parseExitDraft('12.5', 'pts'), { value: 12.5, unit: 'pts' });
+  for (const bad of ['-5', '1e9', 'abc', '0', '5000', '1.2.3']) {
+    const r = parseExitDraft(bad, 'pct');
+    assert.ok(r !== null && 'error' in r, bad);
+  }
+});

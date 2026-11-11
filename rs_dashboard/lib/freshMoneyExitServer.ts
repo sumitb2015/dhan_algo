@@ -10,7 +10,7 @@ import { brokerSessionOk } from '@/lib/freshMoneyBrokers';
 import { runExitTick } from '@/lib/freshMoneyExitTick';
 import type { Streak } from '@/lib/freshMoneyExits';
 import {
-  EXIT_WATCHER_FILE, closePositionCore, gateNow, loadLedger, ltpsFor, mutateLedger,
+  EXIT_WATCHER_FILE, closePositionCore, gateNow, loadLedger, ltpsFor, mutateLedger, reconcileWithBrokers, refreshOrders,
 } from '@/lib/freshMoneyTradeServer';
 
 const TAG = '[fm-exit]';
@@ -29,6 +29,9 @@ async function tick(h: Holder): Promise<void> {
     canExit: p => gateNow(p.underlying) !== 'closed' && brokerSessionOk(p.broker),
     close: (key, reason) => closePositionCore(key, reason),
     log: msg => console.log(`${TAG} ${msg}`),
+    // Order fills and the down-only reconcile, otherwise run only by the page's poll (paused in a hidden tab).
+    // Both throttle themselves (2 s; 5 / 10 / 15 s per broker).
+    refresh: async () => { await refreshOrders().catch(() => {}); await reconcileWithBrokers().catch(() => {}); },
   }, h.streaks);
 }
 

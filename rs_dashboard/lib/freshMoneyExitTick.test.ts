@@ -17,11 +17,12 @@ const watching = (p: Partial<FmExit> = {}): FmExit => ({
   basis: 100, targetPx: 130, slPx: 80, state: 'watching', ...p,
 });
 
-function harness(ledger: FmLedger, opts: { ltp?: number | null; close?: CloseResult; canExit?: boolean } = {}) {
+function harness(ledger: FmLedger, opts: { ltp?: number | null; close?: CloseResult; canExit?: boolean; refresh?: (l: FmLedger) => void } = {}) {
   let now = T0;
   let ltp = opts.ltp === undefined ? 131 : opts.ltp;
   const closes: { key: string; reason: string }[] = [];
   let priceCalls = 0;
+  let refreshes = 0;
   let closeResult: CloseResult = opts.close ?? { kind: 'placed', orderId: 'C1' };
   let beforeMutate: (() => void) | null = null;
   const deps: ExitTickDeps = {
@@ -32,6 +33,7 @@ function harness(ledger: FmLedger, opts: { ltp?: number | null; close?: CloseRes
     canExit: () => opts.canExit ?? true,
     close: async (key, reason) => { closes.push({ key, reason }); return closeResult; },
     log: () => {},
+    refresh: async () => { refreshes++; opts.refresh?.(ledger); },
   };
   const streaks = new Map<string, Streak>();
   return {
@@ -40,7 +42,7 @@ function harness(ledger: FmLedger, opts: { ltp?: number | null; close?: CloseRes
     setLtp: (v: number | null) => { ltp = v; },
     setClose: (r: CloseResult) => { closeResult = r; },
     onNextMutate: (f: () => void) => { beforeMutate = f; },
-    closes, ledger, priceCalls: () => priceCalls, now: () => now,
+    closes, ledger, priceCalls: () => priceCalls, refreshes: () => refreshes, now: () => now,
   };
 }
 
@@ -144,4 +146,22 @@ test('an edit between the read and the claim is not overwritten by a fire', asyn
   assert.equal(h.closes.length, 0);
   assert.equal(h.ledger.exits![KEY].state, 'watching');
   assert.equal(h.ledger.exits![KEY].targetPx, 150);
+});
+
+test('with no tab open, the watcher confirms the opening fill itself and arms the levels', async () => {
+  // The opening order is still 'pending' in the ledger: only the watcher's own refresh (broker read) confirms it.
+  const h = harness({
+    date: 'd', orders: [buy({ state: 'pending', filledQty: 0, avgPrice: null, ts: T0 - 1000 })],
+    exits: { [KEY]: watching({ state: 'waiting-fill', basis: null, targetPx: null, slPx: null, openedAt: T0 - 1000 }) },
+  }, { ltp: 105, refresh: l => Object.assign(l.orders[0], { state: 'filled', filledQty: 1, avgPrice: 100 }) });
+  await h.tick();
+  assert.equal(h.refreshes(), 1);
+  assert.equal(h.ledger.exits![KEY].state, 'watching');
+  assert.equal(h.ledger.exits![KEY].targetPx, 130);
+});
+
+test('no exit records: no broker refresh', async () => {
+  const h = harness({ date: 'd', orders: [buy()], exits: {} });
+  await h.tick();
+  assert.equal(h.refreshes(), 0);
 });

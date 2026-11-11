@@ -148,3 +148,16 @@ test('watcher chip: watching', async ({ page }) => {
   await install(page, { withPosition: true, watcherAlive: true });
   await expect(page.getByText('Exits: watching')).toBeVisible();
 });
+
+for (const bad of ['-5', '1e9', 'abc', '0']) {
+  test(`typing ${bad} is refused with a message, never rewritten into another level`, async ({ page }) => {
+    await install(page);
+    const target = page.getByLabel('Target value (blank = off)').first();
+    await target.fill('30');
+    await target.press('Tab');
+    await target.fill(bad);
+    await target.press('Tab');
+    await expect(page.getByRole('alert').first()).toBeVisible();
+    await expect(target).toHaveValue('30');
+  });
+}
