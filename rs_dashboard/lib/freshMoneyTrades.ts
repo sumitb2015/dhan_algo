@@ -48,6 +48,9 @@ export interface FmOrder {
   filledQty: number;          // broker's cumulative filled units
   avgPrice: number | null;    // broker's cumulative average traded price
   reason?: string;
+  /** Why this close was sent when not by a click, e.g. "Target hit at 131.00" (the exit watcher). `reason` is the
+   *  broker's text and is overwritten by every order read, so the trigger lives apart. */
+  trigger?: string;
 }
 
 /** `exits`: per-position target / stop-loss, by position key (lib/freshMoneyExits.ts). */

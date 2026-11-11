@@ -56,7 +56,7 @@ test('format', () => {
 
 // ── Task 2: exit record and per-tick decision ────────────────────────────────────────────────────────────────────
 import {
-  nextExitAction, exitAfterClose, CONFIRM_TICKS, STREAK_MAX_GAP_MS, FIRING_STALE_MS, REFUSED_RETRY_MS, type FmExit,
+  nextExitAction, exitAfterClose, CONFIRM_TICKS, STREAK_MAX_GAP_MS, FIRING_STALE_MS, REFUSED_RETRY_MS, type ExitAction, type FmExit,
 } from './freshMoneyExits.ts';
 
 const X = (p: Partial<FmExit> = {}): FmExit => ({
@@ -89,7 +89,7 @@ test('drop when flat or flipped, but never while the contract is settling', () =
 test('a breach fires on the second consecutive tick', () => {
   const a = nextExitAction(X(), LONG, false, 131, null, 1000);
   assert.deepEqual(a, { kind: 'streak', streak: { level: 'target', count: 1, at: 1000 } });
-  const b = nextExitAction(X(), LONG, false, 131, (a as { streak: never }).streak, 3000);
+  const b = nextExitAction(X(), LONG, false, 131, (a as Extract<ExitAction, { kind: 'streak' }>).streak, 3000);
   assert.deepEqual(b, { kind: 'fire', level: 'target' });
 });
 
