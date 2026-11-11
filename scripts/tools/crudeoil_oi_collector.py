@@ -30,6 +30,7 @@ sys.path.insert(0, ROOT)
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.prev_close_sidecar import write_prev_closes
 from scripts.tools.premarket_data import _find_nearest_future
 
 _LOG_FILE = os.path.join(ROOT, 'debug', 'crudeoil_oi_collector.log')
@@ -385,6 +386,8 @@ def main():
                 else:
                     write_rows(out_path, rows, write_header=(need_header and iteration == 0))
                     need_header = False
+                    # Option previous closes for the Fresh Money board's buildup tags (side file, CSV unchanged).
+                    write_prev_closes(out_path, expiry, oc)
                 log.info('[%s] Wrote %d rows (spot=%.2f)', ts, len(rows), live_spot)
                 write_status(status='RUNNING', expiry=expiry, atm=atm,
                              rows=len(rows), last_update=ts, spot=round(live_spot, 2))

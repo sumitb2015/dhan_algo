@@ -4,9 +4,10 @@ import { listDates, resolveCsvPath } from '@/lib/ivSnapshotFiles';
 import { resolveLotSize } from '@/lib/lotSize';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { parsedDay } from '@/lib/freshMoneyFiles';
+import { readJsonFile } from '@/lib/lockedJsonFile';
 import {
   boardFresh, sane, normalAt, bandFromHistory, buildBoardRows, strikeStep,
-  type DaySummary, type SidePair, type Range, type SeriesPoint, type BandPoint,
+  type Buildup, type DaySummary, type PrevCloses, type SidePair, type Range, type SeriesPoint, type BandPoint,
 } from '@/lib/freshMoney';
 
 // Read-only: everything comes from snapshot CSVs in debug/ (no Dhan call except the cached lot-size lookup). The IV
@@ -19,7 +20,7 @@ const MCX_DAY = { from: 9 * 60, to: 23 * 60 + 55 };
 const HISTORY_DAYS = 14;
 const WINGS = 12;
 
-export interface FreshMoneySide { oi: number | null; oiMoved: number | null; fresh: number | null }
+export interface FreshMoneySide { oi: number | null; oiMoved: number | null; fresh: number | null; buildup: Buildup | null }
 export interface FreshMoneyRow { strike: number; put: FreshMoneySide | null; call: FreshMoneySide | null }
 
 export interface FreshMoneyResponse {
@@ -44,6 +45,8 @@ export interface FreshMoneyResponse {
   series: SeriesPoint[];
   band: BandPoint[];
   historyDays: number;
+  /** Option previous closes are on record for this day (the collector's side file): buildup tags can be shown. */
+  hasBuildup: boolean;
   error?: string;
 }
 
@@ -113,10 +116,13 @@ export async function GET(req: NextRequest) {
   }
 
   const toLots = (n: number | null) => (n === null ? null : lot ? n / lot : n);
-  const rows: FreshMoneyRow[] = buildBoardRows(last, WINGS).map(r => ({
+  // Option previous closes for the buildup tags: the collector's side file next to the CSV, for this expiry only.
+  const pcFile = readJsonFile<{ expiry?: string; ce?: Record<string, number>; pe?: Record<string, number> }>(file.replace(/\.csv$/, '_prev_close.json'));
+  const prevCloses: PrevCloses | null = pcFile && pcFile.expiry === expiry ? { ce: pcFile.ce ?? {}, pe: pcFile.pe ?? {} } : null;
+  const rows: FreshMoneyRow[] = buildBoardRows(last, WINGS, prevCloses).map(r => ({
     strike: r.strike,
-    put: r.put ? { oi: toLots(r.put.oi), oiMoved: toLots(r.put.oiMoved), fresh: r.put.fresh } : null,
-    call: r.call ? { oi: toLots(r.call.oi), oiMoved: toLots(r.call.oiMoved), fresh: r.call.fresh } : null,
+    put: r.put ? { oi: toLots(r.put.oi), oiMoved: toLots(r.put.oiMoved), fresh: r.put.fresh, buildup: r.put.buildup } : null,
+    call: r.call ? { oi: toLots(r.call.oi), oiMoved: toLots(r.call.oiMoved), fresh: r.call.fresh, buildup: r.call.buildup } : null,
   }));
 
   const body: FreshMoneyResponse = {
@@ -138,6 +144,7 @@ export async function GET(req: NextRequest) {
     series: today.series,
     band: bandFromHistory(history, day.from, day.to),
     historyDays: history.length,
+    hasBuildup: prevCloses !== null,
   };
   respCache.set(underlying, { key: cacheKey, body });
   return NextResponse.json(body);

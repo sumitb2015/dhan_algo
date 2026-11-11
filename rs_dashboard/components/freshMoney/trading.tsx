@@ -314,7 +314,7 @@ export function OffBoardPositions({ positions, armed, inflight, canClose, onClos
         const lots = p.lot > 0 ? Math.abs(p.netQty) / p.lot : 0;
         const busy = inflight.has(lockKey(p.broker, p.underlying, p.strike, p.opt));
         return (
-          <span key={p.securityId} className="flex items-center gap-1 rounded border border-zinc-800 bg-zinc-950/40 px-1.5 py-0.5 tabular-nums">
+          <span key={p.key} className="flex items-center gap-1 rounded border border-zinc-800 bg-zinc-950/40 px-1.5 py-0.5 tabular-nums">
             <span className="rounded bg-zinc-800 px-1 text-[9px] font-bold uppercase text-zinc-300">{brokerLabel(p.broker)}</span>
             <span className="font-bold text-zinc-200">{p.underlying} {p.strike} {p.opt}</span>
             <span className="text-zinc-500">{p.expiry}</span>

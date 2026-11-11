@@ -5,7 +5,7 @@ import { BadgeIndianRupee, AlertTriangle } from 'lucide-react';
 import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
 import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
-import { fmtOi, fmtOiAbs, fmtPct, intensity, type Intensity, type Range } from '@/lib/freshMoney';
+import { BUILDUP_TEXT, fmtOi, fmtOiAbs, fmtPct, intensity, type Buildup, type Intensity, type Range } from '@/lib/freshMoney';
 import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades } from './freshMoney/trading';
 import { usePageBroker } from './BrokerPicker';
@@ -77,17 +77,32 @@ function istEpoch(ts: string): number {
   return new Date(`${ts.replace(' ', 'T')}+05:30`).getTime();
 }
 
+/** LB / SB / SC / LU pill at a bar's outer end; full name and meaning on hover. */
+function BuildupTag({ tag }: { tag: Buildup }) {
+  const t = BUILDUP_TEXT[tag];
+  return (
+    <span title={`${t.name} — ${t.meaning}`} aria-label={t.name}
+      className="shrink-0 rounded bg-zinc-800 px-1 text-[9px] font-bold leading-[14px] tracking-wide text-zinc-300">
+      {tag}
+    </span>
+  );
+}
+
 /** `length` sets the bar (OI moved, or total OI); `moved` (today's change) always decides filled = building vs
  *  outline = leaving, and `fresh` vs `normal` the shade — so both modes read the same way. */
-function Bar({ side, length, moved, max, fresh, normal }: {
+function Bar({ side, length, moved, max, fresh, normal, tag }: {
   side: 'put' | 'call'; length: number | null; moved: number | null; max: number; fresh: number | null; normal: Range | null;
+  tag: Buildup | null;
 }) {
   if (length === null || length === 0 || max <= 0) return <div />;
-  const w = Math.max(1.5, (Math.abs(length) / max) * 100);
+  // The tag takes room at the outer end, so the bar scales within what is left.
+  const w = Math.max(1.5, (Math.abs(length) / max) * (tag ? 88 : 100));
   const cls = BAR_CLASS[side][(moved ?? 0) >= 0 ? 'fill' : 'outline'][intensity(fresh, normal)];
   return (
-    <div className={`flex h-full items-center ${side === 'put' ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex h-full min-w-0 items-center gap-1 ${side === 'put' ? 'justify-end' : 'justify-start'}`}>
+      {side === 'put' && tag && <BuildupTag tag={tag} />}
       <div className={`h-[15px] ${cls}`} style={{ width: `${w}%` }} />
+      {side === 'call' && tag && <BuildupTag tag={tag} />}
     </div>
   );
 }
@@ -114,7 +129,7 @@ function BoardRowView({ row, max, normal, boxed, trade, mode }: {
   };
   return (
     <div className={`${trade ? `${GRID_TRADE} h-[26px]` : `${GRID} h-[21px]`} text-[13px] tabular-nums`}>
-      <Bar side="put" length={shown(p)} moved={p?.oiMoved ?? null} max={max} fresh={p?.fresh ?? null} normal={normal.puts} />
+      <Bar side="put" length={shown(p)} moved={p?.oiMoved ?? null} max={max} fresh={p?.fresh ?? null} normal={normal.puts} tag={p?.buildup ?? null} />
       <span className="pr-1.5 text-right text-zinc-300">{fmtPct(p?.fresh ?? null)}</span>
       <span className="pr-2 text-right font-bold text-emerald-400">{label(p)}</span>
       {cell('put')}
@@ -126,7 +141,7 @@ function BoardRowView({ row, max, normal, boxed, trade, mode }: {
       {cell('call')}
       <span className="pl-2 font-bold text-red-400">{label(c)}</span>
       <span className="pl-1.5 text-zinc-300">{fmtPct(c?.fresh ?? null)}</span>
-      <Bar side="call" length={shown(c)} moved={c?.oiMoved ?? null} max={max} fresh={c?.fresh ?? null} normal={normal.calls} />
+      <Bar side="call" length={shown(c)} moved={c?.oiMoved ?? null} max={max} fresh={c?.fresh ?? null} normal={normal.calls} tag={c?.buildup ?? null} />
     </div>
   );
 }
@@ -483,6 +498,15 @@ export default function FreshMoneyBoard() {
               <div className="mt-0.5 text-[11.5px] text-zinc-400">
                 {oiMode === 'total' ? 'Bar = total OI (shade and fill still from today\'s change)' : 'Bar = OI moved'} · % = fresh share of the strike&apos;s volume · light / mid / bright = below / about / above
                 normal · filled building, outline leaving
+              </div>
+              <div className="mt-0.5 text-[11px] text-zinc-500">
+                {data.hasBuildup
+                  ? <>Tags (option&apos;s own premium vs its previous close): <span className="font-bold text-zinc-300">LB</span> long buildup ·{' '}
+                      <span className="font-bold text-zinc-300">SB</span> short buildup · <span className="font-bold text-zinc-300">SC</span> short covering ·{' '}
+                      <span className="font-bold text-zinc-300">LU</span> long unwinding — hover a tag for its meaning</>
+                  : data.isToday
+                    ? 'Buildup tags (LB / SB / SC / LU) start once the collector records option previous closes — after its next restart.'
+                    : 'No buildup tags for this day: option previous closes were not recorded for it.'}
               </div>
             </div>
 

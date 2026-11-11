@@ -8,6 +8,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Play, Square, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
 
 interface Status { status?: string; reason?: string; last_update?: string | null; expiry?: string; error?: string }
 
@@ -38,10 +39,15 @@ export default function CollectorControl({ underlying }: { underlying: string })
 
   const act = async (action: 'start' | 'stop') => {
     setBusy(true);
+    const what = `${action === 'start' ? 'Start' : 'Stop'} ${underlying} OI collector`;
     try {
-      await fetch('/api/crudeoil-oi-collector', {
+      const res = await fetch('/api/crudeoil-oi-collector', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, underlying }),
       });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string; message?: string } | null;
+      if (!res.ok || !j?.success) toast.error(`${what} failed`, { description: j?.error ?? j?.message ?? `HTTP ${res.status}` });
+    } catch (e) {
+      toast.error(`${what} failed`, { description: String((e as Error).message ?? e) });
     } finally {
       setTimeout(() => { refresh(); setBusy(false); }, 2_500);
     }

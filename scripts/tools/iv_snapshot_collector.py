@@ -23,6 +23,7 @@ sys.path.insert(0, ROOT)
 
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
+from lib.prev_close_sidecar import write_prev_closes
 
 _LOG_FILE = os.path.join(ROOT, 'debug', 'iv_snapshot_collector.log')
 os.makedirs(os.path.join(ROOT, 'debug'), exist_ok=True)
@@ -344,6 +345,8 @@ def main():
                     else:
                         for out_path in state['out_paths']:
                             write_rows(out_path, rows, write_header=(state['need_header'] and iteration == 0))
+                            # Option previous closes for the Fresh Money board's buildup tags (side file, CSV unchanged).
+                            write_prev_closes(out_path, state['expiry'], oc)
                         state['need_header'] = False
                         log.info('[%s %s] Wrote %d rows (spot=%.2f)', u, ts, len(rows), live_spot)
 

@@ -18,6 +18,8 @@ export interface SideSnap {
   oi: number | null;
   chg: number | null;
   vol: number | null;
+  /** Option last price (absent in hand-built snapshots = unknown). */
+  ltp?: number | null;
 }
 
 export interface Snapshot {
@@ -36,8 +38,33 @@ export interface BandPoint { m: number; putLo: number; putHi: number; callLo: nu
 
 export interface Range { lo: number; hi: number }
 
-/** `oi` = total open interest now; `oiMoved` = its change vs the previous close. */
-export interface BoardSide { oi: number | null; oiMoved: number | null; vol: number | null; fresh: number | null }
+/** `oi` = total open interest now; `oiMoved` = its change vs the previous close; `buildup` = what that move means. */
+export interface BoardSide { oi: number | null; oiMoved: number | null; vol: number | null; fresh: number | null; buildup: Buildup | null }
+
+/**
+ * OI buildup of one option (one side of one strike), the repo's standard four quadrants (OptionsBuildupTab's
+ * classifyBuildup, dhan-oi-analytics): sign of today's OI change x sign of the OPTION's own price change vs its previous
+ * close. An unchanged price counts as up, like that classifier. Null when OI did not change or a price is unknown.
+ */
+export type Buildup = 'LB' | 'SB' | 'SC' | 'LU';
+
+export function buildupOf(oiChg: number | null, ltp: number | null | undefined, prevClose: number | null | undefined): Buildup | null {
+  if (oiChg === null || !Number.isFinite(oiChg) || oiChg === 0) return null;
+  if (ltp == null || !(ltp > 0) || prevClose == null || !(prevClose > 0)) return null;
+  const up = ltp - prevClose >= 0;
+  if (oiChg > 0) return up ? 'LB' : 'SB';
+  return up ? 'SC' : 'LU';
+}
+
+export const BUILDUP_TEXT: Record<Buildup, { name: string; meaning: string }> = {
+  LB: { name: 'Long buildup', meaning: 'OI up, premium up: buyers adding' },
+  SB: { name: 'Short buildup', meaning: 'OI up, premium down: writers adding' },
+  SC: { name: 'Short covering', meaning: 'OI down, premium up: writers exiting' },
+  LU: { name: 'Long unwinding', meaning: 'OI down, premium down: buyers exiting' },
+};
+
+/** Previous closes of the options on the board, by strike (from the collector's _prev_close.json side file). */
+export interface PrevCloses { ce: Record<string, number>; pe: Record<string, number> }
 
 export interface BoardRow { strike: number; put: BoardSide | null; call: BoardSide | null }
 
@@ -65,8 +92,8 @@ export function parseSnapshotCsv(text: string, expiry?: string): Snapshot[] {
   const ix = (name: string) => head.indexOf(name);
   const I = {
     ts: ix('timestamp'), spot: ix('spot'), exp: ix('expiry'), k: ix('strike'),
-    ceOi: ix('CE_OI'), ceChg: ix('CE_change_OI'), ceVol: ix('CE_volume'),
-    peOi: ix('PE_OI'), peChg: ix('PE_change_OI'), peVol: ix('PE_volume'),
+    ceOi: ix('CE_OI'), ceChg: ix('CE_change_OI'), ceVol: ix('CE_volume'), ceLtp: ix('CE_LTP'),
+    peOi: ix('PE_OI'), peChg: ix('PE_change_OI'), peVol: ix('PE_volume'), peLtp: ix('PE_LTP'),
   };
   if (I.ts < 0 || I.k < 0) return [];
   const byTs = new Map<string, Snapshot>();
@@ -89,8 +116,8 @@ export function parseSnapshotCsv(text: string, expiry?: string): Snapshot[] {
     }
     if (snap.expiry !== exp) continue;
     snap.strikes.set(strike, {
-      ce: { oi: num(c[I.ceOi]), chg: num(c[I.ceChg]), vol: num(c[I.ceVol]) },
-      pe: { oi: num(c[I.peOi]), chg: num(c[I.peChg]), vol: num(c[I.peVol]) },
+      ce: { oi: num(c[I.ceOi]), chg: num(c[I.ceChg]), vol: num(c[I.ceVol]), ltp: I.ceLtp >= 0 ? num(c[I.ceLtp]) : null },
+      pe: { oi: num(c[I.peOi]), chg: num(c[I.peChg]), vol: num(c[I.peVol]), ltp: I.peLtp >= 0 ? num(c[I.peLtp]) : null },
     });
   }
   return [...byTs.values()].sort((a, b) => a.min - b.min);
@@ -101,12 +128,12 @@ export function latestExpiry(snaps: Snapshot[]): string {
   return snaps.length ? snaps[snaps.length - 1].expiry : '';
 }
 
-function sideFresh(s: SideSnap | undefined): BoardSide | null {
+function sideFresh(s: SideSnap | undefined, prevClose?: number): BoardSide | null {
   if (!s) return null;
   const raw = s.chg !== null && s.vol !== null && s.vol > 0 ? Math.abs(s.chg) / s.vol : null;
   // Above 100% cannot happen (a trade moves OI by at most its size): a data fault, shown as unknown.
   const fresh = raw !== null && raw <= 1 ? raw : null;
-  return { oi: s.oi, oiMoved: s.chg, vol: s.vol, fresh };
+  return { oi: s.oi, oiMoved: s.chg, vol: s.vol, fresh, buildup: buildupOf(s.chg, s.ltp, prevClose) };
 }
 
 /** Board-level fresh share of one snapshot: Σ|chg| / Σvol per side, over strikes that report both. */
@@ -259,7 +286,7 @@ export function strikeStep(strikes: number[]): number {
 }
 
 /** Board rows on a fixed ATM±wings grid, highest strike first. Strikes the snapshot lacks get null sides. */
-export function buildBoardRows(snap: Snapshot, wings = 12): BoardRow[] {
+export function buildBoardRows(snap: Snapshot, wings = 12, prevClose: PrevCloses | null = null): BoardRow[] {
   const strikes = [...snap.strikes.keys()];
   if (!strikes.length) return [];
   const step = strikeStep(strikes);
@@ -272,7 +299,7 @@ export function buildBoardRows(snap: Snapshot, wings = 12): BoardRow[] {
   const rows: BoardRow[] = [];
   for (let k = hiK; k >= loK; k -= step) {
     const s = snap.strikes.get(k);
-    rows.push({ strike: k, put: sideFresh(s?.pe), call: sideFresh(s?.ce) });
+    rows.push({ strike: k, put: sideFresh(s?.pe, prevClose?.pe[String(k)]), call: sideFresh(s?.ce, prevClose?.ce[String(k)]) });
   }
   return rows;
 }

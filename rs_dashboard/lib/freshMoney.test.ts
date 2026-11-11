@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   parseSnapshotCsv, boardFresh, windowFresh, summarizeDay, percentile, normalAt, bandFromHistory,
-  buildBoardRows, intensity, fmtOi, fmtOiAbs, fmtPct, strikeStep, hasCumulativeVolume, type DaySummary,
+  buildBoardRows, buildupOf, intensity, fmtOi, fmtOiAbs, fmtPct, strikeStep, hasCumulativeVolume, type DaySummary,
 } from './freshMoney.ts';
 
 const HEAD = 'timestamp,spot,expiry,strike,CE_LTP,CE_IV,CE_OI,CE_change_OI,CE_volume,PE_LTP,PE_IV,PE_OI,PE_change_OI,PE_volume';
@@ -158,4 +158,26 @@ test('board rows carry total OI next to the change; unsigned OI formatting', () 
   assert.equal(fmtOiAbs(83718), '83,718');
   assert.equal(fmtOiAbs(-134), '134');
   assert.equal(fmtOiAbs(null), '–');
+});
+
+test('buildup: the four quadrants of OI change x option price change', () => {
+  assert.equal(buildupOf(500, 120, 100), 'LB');
+  assert.equal(buildupOf(500, 80, 100), 'SB');
+  assert.equal(buildupOf(-500, 120, 100), 'SC');
+  assert.equal(buildupOf(-500, 80, 100), 'LU');
+  assert.equal(buildupOf(500, 100, 100), 'LB');      // unchanged price counts as up (OptionsBuildupTab)
+  assert.equal(buildupOf(0, 120, 100), null);        // no OI change: no tag
+  assert.equal(buildupOf(null, 120, 100), null);
+  assert.equal(buildupOf(500, 120, null), null);     // no previous close: no tag, never a guess
+  assert.equal(buildupOf(500, null, 100), null);
+});
+
+test('board rows get buildup tags only where a previous close is known', () => {
+  // HEAD has LTP columns at fixed "1": CE_LTP = PE_LTP = 1
+  const [snap] = parseSnapshotCsv([HEAD, row('2026-11-10 10:00:00', 22550, 750000, 5, 10, 120000, -5, 10)].join('\n'));
+  const rows = buildBoardRows(snap, 1, { ce: { '22550': 0.5 }, pe: {} });
+  const r = rows.find(x => x.strike === 22550)!;
+  assert.equal(r.call!.buildup, 'LB');   // OI +5, price 1 vs 0.5
+  assert.equal(r.put!.buildup, null);    // no previous close for the put
+  assert.equal(buildBoardRows(snap, 1).find(x => x.strike === 22550)!.call!.buildup, null);
 });
