@@ -8,6 +8,8 @@
  * never a price.
  */
 
+import { buildPositions, unconfirmedQty, type FmOrder, type FmPosition, type TxnSide } from './freshMoneyTrades.ts';
+
 export type ExitUnit = 'pct' | 'pts';
 export interface ExitSpec { value: number; unit: ExitUnit }
 export type ExitDir = 'long' | 'short';
@@ -148,4 +150,51 @@ export function exitAfterClose(r: CloseResult, level: 'target' | 'sl', now: numb
   if (r.kind === 'placed') return { state: 'sent', firedBy: level, firedAt: now };
   if (r.kind === 'refused') return { state: 'watching', note: r.error, retryAt: now + REFUSED_RETRY_MS, firedBy: undefined, firedAt: undefined };
   return { state: 'unknown', note: `exit UNKNOWN — check the broker: ${r.error}` };
+}
+
+// ── stamping on entry, editing per position ──────────────────────────────────────────────────────────────────────
+
+export interface ExitDefaults { target: ExitSpec | null; sl: ExitSpec | null }
+
+/** The header defaults an order carries (`exitDefaults`). Absent = both off; any invalid level refuses the order. */
+export function parseExitDefaults(raw: unknown): ExitDefaults | { error: string } {
+  if (raw === null || raw === undefined) return { target: null, sl: null };
+  if (typeof raw !== 'object') return { error: 'exitDefaults must be { target, sl }' };
+  const r = raw as { target?: unknown; sl?: unknown };
+  const target = validateExitSpec(r.target);
+  if (target && 'error' in target) return { error: `Target: ${target.error}` };
+  const sl = validateExitSpec(r.sl);
+  if (sl && 'error' in sl) return { error: `Stop-loss: ${sl.error}` };
+  return { target, sl };
+}
+
+/** The record an opening order stamps: only when the contract is flat with nothing unconfirmed (adding lots keeps the
+ *  position's levels) and at least one level is set. */
+export function stampExit(orders: FmOrder[], key: string, side: TxnSide, now: number, d: ExitDefaults): FmExit | null {
+  if (!d.target && !d.sl) return null;
+  const held = buildPositions(orders, {}, now).find(p => p.key === key)?.netQty ?? 0;
+  if (held !== 0 || unconfirmedQty(orders, key, now) !== 0) return null;
+  return {
+    key, openedAt: now, dir: side === 'BUY' ? 'long' : 'short', target: d.target, sl: d.sl,
+    basis: null, targetPx: null, slPx: null, state: 'waiting-fill',
+  };
+}
+
+/** A per-position edit from the Positions panel. Levels come from the position's CURRENT average; both null = remove. */
+export function editExit(
+  x: FmExit | undefined, pos: FmPosition, target: ExitSpec | null, sl: ExitSpec | null, now: number,
+): FmExit | null | { error: string } {
+  if (x?.state === 'firing') return { error: 'An exit for this position is being sent right now — try again in a moment' };
+  if (pos.netQty === 0) return { error: 'This position is flat' };
+  if (!target && !sl) return null;
+  const dir: ExitDir = pos.netQty > 0 ? 'long' : 'short';
+  const base: FmExit = { key: pos.key, openedAt: x?.openedAt ?? now, dir, target, sl, basis: null, targetPx: null, slPx: null, state: 'waiting-fill' };
+  if (pos.avgPrice === null) return base;
+  return { ...base, basis: pos.avgPrice, ...levelsFor(pos.avgPrice, dir, target, sl), state: 'watching' };
+}
+
+/** "T 30% · SL 20 pts" for a toast; '' when both are off. */
+export function exitSummary(d: ExitDefaults): string {
+  const parts = [d.target ? `T ${fmtExitSpec(d.target)}` : null, d.sl ? `SL ${fmtExitSpec(d.sl)}` : null].filter(Boolean);
+  return parts.join(' · ');
 }

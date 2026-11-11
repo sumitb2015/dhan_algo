@@ -140,3 +140,60 @@ test('close outcomes map to record states', () => {
     assert.match(p.note ?? '', /^exit UNKNOWN — check the broker: /);
   }
 });
+
+// ── Task 4: stamp on entry, per-position edit ────────────────────────────────────────────────────────────────────
+import { stampExit, parseExitDefaults, editExit } from './freshMoneyExits.ts';
+import type { FmOrder, FmPosition } from './freshMoneyTrades.ts';
+
+const KEY = 'dhan|111';
+const ord4 = (p: Partial<FmOrder>): FmOrder => ({
+  id: 'o1', ts: 1000, underlying: 'CRUDEOIL', expiry: '2026-11-17', strike: 8100, opt: 'CE', securityId: '111',
+  lot: 1, side: 'BUY', qty: 1, close: false, correlationId: 'fmabc', orderId: 'X1', state: 'filled', filledQty: 1,
+  avgPrice: 100, ...p,
+});
+const T30 = { value: 30, unit: 'pct' as const };
+const POS = (p: Partial<FmPosition> = {}): FmPosition => ({
+  key: KEY, broker: 'dhan', securityId: '111', priceId: '111', segment: 'MCX_COMM', mult: 100, underlying: 'CRUDEOIL',
+  expiry: '2026-11-17', strike: 8100, opt: 'CE', lot: 1, netQty: 1, avgPrice: 100, realised: 0, ltp: 110,
+  unrealised: 1000, pnl: 1000, busy: null, ...p,
+});
+
+test('stamp only on a flat contract with nothing unconfirmed', () => {
+  const s = stampExit([], KEY, 'BUY', 5000, { target: T30, sl: null });
+  assert.equal(s?.state, 'waiting-fill');
+  assert.equal(s?.dir, 'long');
+  assert.equal(s?.openedAt, 5000);
+  assert.equal(stampExit([], KEY, 'SELL', 5000, { target: T30, sl: null })?.dir, 'short');
+  assert.equal(stampExit([ord4({})], KEY, 'BUY', 5000, { target: T30, sl: null }), null);           // adding to a long
+  assert.equal(stampExit([ord4({ state: 'pending', filledQty: 0, avgPrice: null })], KEY, 'BUY', 5000, { target: T30, sl: null }), null);
+  assert.equal(stampExit([], KEY, 'BUY', 5000, { target: null, sl: null }), null);
+  assert.ok(stampExit([ord4({}), ord4({ id: 'o2', ts: 2000, side: 'SELL', close: true })], KEY, 'BUY', 5000, { target: T30, sl: null }));
+});
+
+test('header defaults: blank is off, bad values refuse', () => {
+  assert.deepEqual(parseExitDefaults(undefined), { target: null, sl: null });
+  assert.deepEqual(parseExitDefaults({ target: T30 }), { target: T30, sl: null });
+  for (const bad of [{ target: { value: 0, unit: 'pct' } }, { target: { value: 'abc', unit: 'pct' } },
+    { sl: { value: 1e9, unit: 'pts' } }, 'nope']) {
+    assert.ok('error' in parseExitDefaults(bad), JSON.stringify(bad));
+  }
+});
+
+test('edit a position: refused while firing or flat; both null removes; levels from the current average', () => {
+  const x = stampExit([], KEY, 'BUY', 0, { target: T30, sl: null })!;
+  assert.ok('error' in (editExit({ ...x, state: 'firing' }, POS(), T30, null, 0) as object));
+  assert.ok('error' in (editExit(x, POS({ netQty: 0 }), T30, null, 0) as object));
+  assert.equal(editExit(x, POS(), null, null, 0), null);
+  const e = editExit(x, POS({ avgPrice: 100 }), T30, { value: 15, unit: 'pts' }, 0) as FmExit;
+  assert.equal(e.state, 'watching');
+  assert.equal(e.targetPx, 130);
+  assert.equal(e.slPx, 85);
+  assert.equal(e.basis, 100);
+  const w = editExit(undefined, POS({ avgPrice: null }), T30, null, 0) as FmExit;
+  assert.equal(w.state, 'waiting-fill');
+  assert.equal(w.dir, 'long');
+  assert.equal((editExit(undefined, POS({ netQty: -1 }), T30, null, 0) as FmExit).dir, 'short');
+  const u = editExit({ ...x, state: 'unknown', note: 'old' }, POS(), T30, null, 0) as FmExit;
+  assert.equal(u.state, 'watching');
+  assert.equal(u.note, undefined);
+});

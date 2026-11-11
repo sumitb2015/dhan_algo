@@ -21,7 +21,9 @@ import {
   type FmBroker, type FmLedger, type FmOrder, type FmPosition, type FmSegment, type OptType, type SessionGate,
   type TradeWindow, type TxnSide,
 } from '@/lib/freshMoneyTrades';
-import type { CloseResult } from '@/lib/freshMoneyExits';
+import {
+  editExit, exitSummary, parseExitDefaults, stampExit, validateExitSpec, type CloseResult, type ExitDefaults, type FmExit,
+} from '@/lib/freshMoneyExits';
 
 /**
  * REAL MONEY. The Fresh Money board's trade engine (server only), shared by /api/fresh-money/trade (the B / S and ×
@@ -47,6 +49,9 @@ import type { CloseResult } from '@/lib/freshMoneyExits';
 const LEDGER = path.join(DEBUG_DIR, 'fresh_money_trades.json');
 const LOCK = `${LEDGER}.lock`;
 const LOCK_STALE_MS = 15_000;
+/** The exit watcher's heartbeat (lib/freshMoneyExitServer.ts), written every tick. */
+export const EXIT_WATCHER_FILE = path.join(DEBUG_DIR, 'fresh_money_exit_watcher.json');
+const WATCHER_ALIVE_MS = 10_000;
 /** SENSEX is BSE; the contract resolver covers NSE and MCX only, so its board is watch-only. */
 export const TRADABLE: ReadonlySet<string> = new Set(['NIFTY', 'BANKNIFTY', 'CRUDEOIL', 'CRUDEOILM']);
 const isMcx = (u: string) => MCX_LOT_MULTIPLIER[u] !== undefined;
@@ -243,6 +248,15 @@ export interface FreshMoneyTradeState {
   brokers: Record<FmBroker, boolean>;
   positions: FmPosition[];
   orders: (FmOrder & { effState: string })[];
+  /** Per-position target / stop-loss, by position key. */
+  exits: Record<string, FmExit>;
+  /** Whether the server's exit watcher is running (its heartbeat is fresh). */
+  exitWatcher: { alive: boolean; at: number | null };
+}
+
+function exitWatcherStatus(now: number): { alive: boolean; at: number | null } {
+  const at = Number(readJsonFile<{ at?: number }>(EXIT_WATCHER_FILE)?.at);
+  return Number.isFinite(at) && at > 0 ? { alive: now - at <= WATCHER_ALIVE_MS, at } : { alive: false, at: null };
 }
 
 export async function buildState(): Promise<FreshMoneyTradeState> {
@@ -267,6 +281,8 @@ export async function buildState(): Promise<FreshMoneyTradeState> {
     brokers: { dhan: brokerSessionOk('dhan'), kotak: brokerSessionOk('kotak'), zerodha: brokerSessionOk('zerodha') },
     positions: buildPositions(ledger.orders, ltps, now),
     orders: ledger.orders.slice(-40).reverse().map(o => ({ ...o, effState: effectiveState(o, now) })),
+    exits: ledger.exits ?? {},
+    exitWatcher: exitWatcherStatus(now),
   };
 }
 
@@ -298,19 +314,26 @@ function precheck(l: FmLedger, base: OrderBase): string | null {
   return null;
 }
 
-type SendResult = { kind: 'placed'; orderId: string } | { kind: 'refused'; error: string; http: number }
+type SendResult = { kind: 'placed'; orderId: string; stamped?: boolean } | { kind: 'refused'; error: string; http: number }
   | { kind: 'unknown'; error: string };
 
-/** Check + record (one lock) → send → record the outcome. A broker rejection is `refused` (nothing was placed). */
-async function sendOne(base: OrderBase, check = true): Promise<SendResult> {
+/** Check + record (one lock) → send → record the outcome. A broker rejection is `refused` (nothing was placed).
+ *  `stamp`: an opening order's header target / stop-loss, written in the same lock when the contract is flat. */
+async function sendOne(base: OrderBase, check = true, stamp?: ExitDefaults): Promise<SendResult> {
   const id = randomUUID();
   const correlationId = newCorrelationId(base.broker ?? 'dhan');
   let refused: string | null;
+  let stamped = false;
   try {
     refused = await mutateLedger(l => {
       const why = check ? precheck(l, base) : null;
-      if (!why) l.orders.push({ ...base, id, ts: Date.now(), correlationId, orderId: null, state: 'sending', filledQty: 0, avgPrice: null });
-      return why;
+      if (why) return why;
+      const now = Date.now();
+      const key = orderKey(base);
+      const x = stamp && !base.close ? stampExit(l.orders, key, base.side, now, stamp) : null;
+      l.orders.push({ ...base, id, ts: now, correlationId, orderId: null, state: 'sending', filledQty: 0, avgPrice: null });
+      if (x) { l.exits = { ...(l.exits ?? {}), [key]: x }; stamped = true; }
+      return null;
     });
   } catch (e) {
     return { kind: 'refused', error: `Nothing sent — ${String((e as Error).message ?? e)}`, http: 503 };
@@ -325,12 +348,14 @@ async function sendOne(base: OrderBase, check = true): Promise<SendResult> {
   // If this write fails the record stays 'sending', reads as UNKNOWN after 30 s and is looked up again.
   await mutateLedger(l => { const o = l.orders.find(x => x.id === id); if (o) Object.assign(o, patch); }).catch(() => {});
   stateVersion++;
-  if (r.status === 'placed') return { kind: 'placed', orderId: r.orderId };
+  if (r.status === 'placed') return { kind: 'placed', orderId: r.orderId, stamped };
   if (r.status === 'unknown') return { kind: 'unknown', error: r.error };
   return { kind: 'refused', error: r.error, http: r.http ?? 200 };
 }
 
-const asClose = (r: SendResult): CloseResult => (r.kind === 'unknown' ? { kind: 'unknown', error: r.error, partial: false } : r);
+const asClose = (r: SendResult): CloseResult =>
+  r.kind === 'unknown' ? { kind: 'unknown', error: r.error, partial: false }
+    : r.kind === 'placed' ? { kind: 'placed', orderId: r.orderId } : r;
 
 export interface OrderBody {
   action?: string;
@@ -345,6 +370,11 @@ export interface OrderBody {
   key?: string;
   securityId?: string;
   idempotencyKey?: string;
+  /** Order: the header's target / stop-loss defaults, stamped onto a position this order opens. */
+  exitDefaults?: unknown;
+  /** setExit: the position's new levels (null = off). */
+  target?: unknown;
+  sl?: unknown;
 }
 
 const refuse = (error: string, http: number): CloseResult => ({ kind: 'refused', error, http });
@@ -360,6 +390,8 @@ export async function placeOrderCore(b: OrderBody): Promise<CloseResult> {
   if (!opt || !side || !Number.isFinite(strike)) return refuse('opt (CE/PE), side (BUY/SELL) and strike are required', 400);
   if (!Number.isInteger(lots) || lots <= 0) return refuse('Lots must be a positive integer', 400);
   if (lots > FM_MAX_LOTS_PER_ORDER) return refuse(`Max ${FM_MAX_LOTS_PER_ORDER} lots per order`, 400);
+  const defaults = parseExitDefaults(b.exitDefaults);
+  if ('error' in defaults) return refuse(`${defaults.error} — nothing was sent`, 400);
   const broker = (b.broker ?? 'dhan') as FmBroker;
   if (!BROKERS.includes(broker)) return refuse(`Unknown broker ${b.broker}`, 400);
   if (!brokerSessionOk(broker)) return refuse(`${brokerName(broker)} is not logged in — nothing was sent`, 409);
@@ -385,10 +417,39 @@ export async function placeOrderCore(b: OrderBody): Promise<CloseResult> {
   if (broker !== 'dhan' && !bc) return refuse(`${brokerName(broker)} does not list ${underlying} ${board.expiry} ${strike} ${opt}`, 400);
   const units = brokerUnits(broker, underlying, c.lot, bc?.brokerLot ?? null, mcx ? MCX_LOT_MULTIPLIER[underlying] : null);
   if ('error' in units) return refuse(units.error, 400);
-  return asClose(await sendOne({
+  const r = await sendOne({
     underlying, expiry: board.expiry, strike, opt, broker, securityId: bc?.handle ?? c.securityId, priceId: c.securityId,
     segment: c.segment as FmSegment, lot: units.lot, mult: units.mult, side, qty: lots * units.lot, close: false,
-  }));
+  }, true, defaults);
+  if (r.kind === 'placed' && r.stamped) return { kind: 'placed', orderId: r.orderId, note: exitSummary(defaults) };
+  return asClose(r);
+}
+
+/** The Positions panel's per-position target / stop-loss edit (both null = remove). Changes no order. */
+export async function setExitCore(b: OrderBody): Promise<{ ok: true } | { ok: false; error: string; http: number }> {
+  const key = typeof b.key === 'string' ? b.key : '';
+  if (!key) return { ok: false, error: 'key is required', http: 400 };
+  const target = validateExitSpec(b.target);
+  if (target && 'error' in target) return { ok: false, error: `Target: ${target.error}`, http: 400 };
+  const sl = validateExitSpec(b.sl);
+  if (sl && 'error' in sl) return { ok: false, error: `Stop-loss: ${sl.error}`, http: 400 };
+  try {
+    const err = await mutateLedger(l => {
+      const now = Date.now();
+      const pos = buildPositions(l.orders, {}, now).find(p => p.key === key);
+      if (!pos) return 'This page holds no position on that contract';
+      const x = editExit(l.exits?.[key], pos, target, sl, now);
+      if (x && 'error' in x) return x.error;
+      const exits = { ...(l.exits ?? {}) };
+      if (x) exits[key] = x; else delete exits[key];
+      l.exits = exits;
+      return null;
+    });
+    stateVersion++;
+    return err ? { ok: false, error: err, http: 409 } : { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e as Error).message ?? e), http: 503 };
+  }
 }
 
 /**

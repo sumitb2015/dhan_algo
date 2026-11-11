@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { dedupe } from '@/lib/pyExec';
 import type { CloseResult } from '@/lib/freshMoneyExits';
 import {
-  buildState, closePositionCore, placeOrderCore, tradeStateVersion, type FreshMoneyTradeState, type OrderBody,
+  buildState, closePositionCore, placeOrderCore, setExitCore, tradeStateVersion, type FreshMoneyTradeState, type OrderBody,
 } from '@/lib/freshMoneyTradeServer';
 
 /**
@@ -47,7 +47,11 @@ export async function POST(req: NextRequest) {
   const run = async () => {
     if (b.action === 'close') return replyFor(await closePositionCore(typeof b.key === 'string' && b.key ? b.key : `dhan|${String(b.securityId ?? '')}`));
     if (b.action === 'order') return replyFor(await placeOrderCore(b));
-    return reply({ success: false, error: 'action must be order or close' }, 400);
+    if (b.action === 'setExit') {
+      const r = await setExitCore(b);
+      return r.ok ? NextResponse.json({ success: true }) : reply({ success: false, error: r.error }, r.http);
+    }
+    return reply({ success: false, error: 'action must be order, close or setExit' }, 400);
   };
 
   const key = typeof b.idempotencyKey === 'string' && b.idempotencyKey.length >= 8 && b.idempotencyKey.length <= 64 ? b.idempotencyKey : null;
