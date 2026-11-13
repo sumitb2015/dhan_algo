@@ -135,7 +135,15 @@ export interface CumulativeOiWidgetProps {
   onSelectStrikeBand?: (wings: number) => void;
 }
 
+/** The collector records ATM ±10 strikes for the NIFTY family and ±6 for crude; the API clamps to that, so the picker
+ *  offers only windows the data can really give (a ±15 button used to return the ±10 numbers). */
+function wingChoices(underlying: string): { max: number; options: number[] } {
+  const max = /^CRUDEOIL/i.test(underlying) ? 6 : 10;
+  return { max, options: [Math.round(max / 2), max] };
+}
+
 export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetProps) {
+  const { max: maxWings, options: wingOptions } = wingChoices(underlying);
   const [data, setData] = useState<CumulativeResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -145,6 +153,7 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
 
   const fetchData = useCallback(async (wingVal = wings, silent = false) => {
     const seq = ++requestSeq.current;
+    wingVal = Math.min(wingVal, maxWings);
     if (!silent) setLoading(true);
     else setIsRefreshing(true);
     try {
@@ -167,7 +176,7 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
         setIsRefreshing(false);
       }
     }
-  }, [underlying, wings]);
+  }, [underlying, wings, maxWings]);
 
   useEffect(() => {
     setData(null);
@@ -179,6 +188,8 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
     return () => clearInterval(interval);
   }, [fetchData, wings, underlying]);
 
+  const shownWings = Math.min(wings, maxWings);
+  const istToday = new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
   const points = data?.data ?? [];
   const regime = data?.regime;
 
@@ -224,8 +235,9 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
           {/* PCR & Net Diff Pills */}
           {latestPoint && (
             <div className="hidden sm:flex items-center gap-1 text-[10px] font-mono tabular-nums">
-              <span className="px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-800 text-zinc-300">
-                PCR <span className="font-bold text-white">{currentPcr}</span>
+              <span className="px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-800 text-zinc-300"
+                title={`Put OI ÷ Call OI summed over ATM ±${shownWings} strikes (not the whole chain)${data && data.date !== istToday ? ` · session ${data.date}` : ''}`}>
+                PCR ±{shownWings}{data && data.date !== istToday && <span className="text-amber-300"> {data.date.slice(5)}</span>} <span className="font-bold text-white">{currentPcr}</span>
               </span>
               <span className={`px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-800 font-bold ${currentDiff >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {currentDiff >= 0 ? '+' : ''}{fmtOI(currentDiff)}
@@ -235,13 +247,13 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
 
           {/* Wings Picker */}
           <div className="flex items-center gap-0.5 bg-zinc-950 p-0.5 rounded border border-zinc-800 text-[10px]">
-            {[5, 10, 15].map(w => (
+            {wingOptions.map(w => (
               <button
                 key={w}
                 type="button"
                 onClick={() => setWings(w)}
                 className={`px-1.5 py-0.5 font-bold rounded transition-colors ${
-                  wings === w ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40' : 'text-zinc-500 hover:text-zinc-300'
+                  shownWings === w ? 'bg-blue-500/20 text-blue-300 border border-blue-500/40' : 'text-zinc-500 hover:text-zinc-300'
                 }`}
                 title={`ATM ±${w} strikes`}
               >
