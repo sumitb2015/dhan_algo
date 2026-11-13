@@ -11,14 +11,14 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Minus, Plus, X, ShieldAlert, Loader2 } from 'lucide-react';
+import { Minus, Plus, X, ShieldAlert, Loader2, Target } from 'lucide-react';
 import { sendOrderRequest, UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import type { FreshMoneyTradeState } from '@/app/api/fresh-money/trade/route';
 import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { BrokerPicker } from '@/components/BrokerPicker';
 import type { ExitSpec, FmExit } from '@/lib/freshMoneyExits';
 import type { FmGlobalExit } from '@/lib/freshMoneyGlobalExit';
-import { ExitSpecInput, exitLevelsText, exitNeedsLook } from './ExitInputs';
+import { ExitEditor, ExitSpecInput, exitLevelsText, exitNeedsLook } from './ExitInputs';
 import { GlobalExitInputs } from './GlobalExitInputs';
 import { totalPnl } from '@/lib/freshMoneyGlobalExit';
 
@@ -278,17 +278,6 @@ export function TradeBar({
         </div>
       )}
 
-      {tradable && (
-        <div className="flex flex-wrap items-center gap-2" title="Stamped onto each position an order opens (adding lots keeps its levels). % of the fill price or premium points. Blank = off.">
-          <ExitSpecInput label="Target" value={exitDefaults.target} onCommit={t => onExitDefaults({ ...exitDefaults, target: t })} />
-          <ExitSpecInput label="SL" value={exitDefaults.sl} onCommit={v => onExitDefaults({ ...exitDefaults, sl: v })} />
-        </div>
-      )}
-      <GlobalExitInputs
-        global={globalExit} total={totalPnl(allPositions)} saving={savingGlobal}
-        watcherAlive={exitWatcher ? exitWatcher.alive : null}
-        onSet={(t, v) => { setSavingGlobal(true); onSetGlobal(t, v).finally(() => setSavingGlobal(false)); }}
-      />
       {exitWatcher && (exitWatcher.alive ? (
         (hasExits || exitDefaults.target || exitDefaults.sl || globalExit?.state === 'watching') && (
           <span className="flex items-center gap-1 text-[11px] text-zinc-400" title="The dashboard server checks every position's target / stop-loss every 2 s, with or without this tab">
@@ -308,15 +297,87 @@ export function TradeBar({
         <span className="text-zinc-400">Booked <span className={`font-bold ${pnlClass(totals.realised)}`}>{fmtRs(totals.realised)}</span></span>
         <span className="text-zinc-300">P&amp;L <span className={`text-[14px] font-bold ${pnlClass(totals.pnl)}`}>{fmtRs(totals.pnl)}</span></span>
       </div>
+
+      {/* Line 2: the two exit layers, labelled so it is clear what each one covers. */}
+      <div className="flex w-full flex-wrap items-center gap-x-5 gap-y-2 border-t border-zinc-800 pt-2">
+        {tradable && (
+          <div className="flex flex-wrap items-center gap-2"
+            title="Stamped onto each position an order opens (adding lots keeps its levels). % of the fill price or premium points. Blank = off. To change one open strike, click its Target button on the ladder.">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500">New positions</span>
+            <ExitSpecInput label="Target" value={exitDefaults.target} onCommit={t => onExitDefaults({ ...exitDefaults, target: t })} />
+            <ExitSpecInput label="SL" value={exitDefaults.sl} onCommit={v => onExitDefaults({ ...exitDefaults, sl: v })} />
+          </div>
+        )}
+        <GlobalExitInputs
+          global={globalExit} total={totalPnl(allPositions)} saving={savingGlobal}
+          watcherAlive={exitWatcher ? exitWatcher.alive : null}
+          onSet={(t, v) => { setSavingGlobal(true); onSetGlobal(t, v).finally(() => setSavingGlobal(false)); }}
+        />
+      </div>
     </div>
   );
 }
 
 // ── per strike / side ─────────────────────────────────────────────────────────────────────────────────────────────
 
+/** Target / SL button beside a held strike's chip; opens a popover (fixed, so no row clips it) holding the shared
+ *  ExitEditor. Sky = levels set, amber = the exit needs a look, grey = none. */
+function ExitPopoverButton({ pos, exit, strike, opt, onSetExit }: {
+  pos: FmPosition; exit?: FmExit; strike: number; opt: OptType;
+  onSetExit: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
+}) {
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const [saving, setSaving] = useState(false);
+  const btn = useRef<HTMLButtonElement>(null);
+  const pop = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!at) return;
+    const down = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (!pop.current?.contains(t) && !btn.current?.contains(t)) setAt(null);
+    };
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') setAt(null); };
+    document.addEventListener('mousedown', down);
+    document.addEventListener('keydown', key);
+    return () => { document.removeEventListener('mousedown', down); document.removeEventListener('keydown', key); };
+  }, [at]);
+  const open = () => {
+    const r = btn.current?.getBoundingClientRect();
+    if (!r) return;
+    const w = 440;
+    setAt({ x: Math.max(8, Math.min(window.innerWidth - w - 8, r.left - w / 2)), y: r.bottom + 4 });
+  };
+  const tone = exitNeedsLook(exit) ? 'text-amber-400' : exit ? 'text-sky-400' : 'text-zinc-500';
+  const dir = pos.netQty > 0 ? 'long' : 'short';
+  return (
+    <>
+      <button ref={btn} type="button" onClick={() => (at ? setAt(null) : open())}
+        aria-label={`Target and stop-loss for ${strike} ${opt}`} aria-expanded={!!at}
+        title={exit ? `${exitLevelsText(exit)} — click to edit` : 'Set target / stop-loss for this position'}
+        className={`${FOCUS} flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-zinc-700 ${tone}`}>
+        <Target className="h-3.5 w-3.5" />
+      </button>
+      {at && (
+        <div ref={pop} role="dialog" aria-label={`${strike} ${opt} target and stop-loss`}
+          style={{ position: 'fixed', left: at.x, top: at.y, width: 440 }}
+          className="z-50 rounded-lg border border-zinc-700 bg-zinc-900 shadow-xl">
+          <p className="border-b border-zinc-800 px-3 py-1.5 text-[11px] font-bold text-zinc-300">
+            {strike} {opt} · {dir} · % of fill or premium points
+          </p>
+          <ExitEditor exit={exit} avgPrice={pos.avgPrice} ltp={pos.ltp} dir={dir} saving={saving}
+            onCancel={() => setAt(null)}
+            onSave={async (t, s) => { setSaving(true); const ok = await onSetExit(pos.key, t, s); setSaving(false); if (ok) setAt(null); }} />
+        </div>
+      )}
+    </>
+  );
+}
+
 export function TradeCell({
-  side, opt, strike, pos, showButtons, canOrder, canClose, busy, onBuy, onSell, onClose, armed, ltpSource, exit,
+  side, opt, strike, pos, showButtons, canOrder, canClose, busy, onBuy, onSell, onClose, armed, ltpSource, exit, onSetExit,
 }: {
+  /** Save / clear this position's own target / stop-loss (armed page only). */
+  onSetExit?: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
   side: 'put' | 'call';
   opt: OptType;
   strike: number;
@@ -348,13 +409,12 @@ export function TradeCell({
       {held && <span className="text-[9px] font-bold text-zinc-300">{pos!.netQty > 0 ? 'L' : 'S'}{lotsHeld}</span>}
       {fmtRs(pos!.pnl ?? (held ? null : pos!.realised))}
       {(pos!.busy === 'unknown' || unpriced) && <span className="text-amber-300">?</span>}
-      {/* A dot, not text: the chip must fit its 150px trade column beside B / S and ×. Full levels are in the hover. */}
-      {held && exit && (
-        <span className={`ml-0.5 h-1.5 w-1.5 shrink-0 rounded-full ${exitNeedsLook(exit) ? 'bg-amber-400' : 'bg-sky-400'}`}>
-          <span className="sr-only">{exitNeedsLook(exit) ? 'exit needs a look' : 'target / stop-loss set'}</span>
-        </span>
-      )}
+      {/* Target / SL state is shown by the Target button beside the chip (sky = set, amber = needs a look). */}
     </span>
+  ) : null;
+
+  const exitBtn = held && armed && pos && onSetExit ? (
+    <ExitPopoverButton pos={pos} exit={exit} strike={strike} opt={opt} onSetExit={onSetExit} />
   ) : null;
 
   const closeBtn = held && armed ? (
@@ -382,9 +442,9 @@ export function TradeCell({
   ) : null;
 
   return side === 'put' ? (
-    <span className="flex items-center justify-end gap-1 pr-1">{chip}{closeBtn}{buttons}</span>
+    <span className="flex items-center justify-end gap-1 pr-1">{chip}{exitBtn}{closeBtn}{buttons}</span>
   ) : (
-    <span className="flex items-center justify-start gap-1 pl-1">{buttons}{closeBtn}{chip}</span>
+    <span className="flex items-center justify-start gap-1 pl-1">{buttons}{closeBtn}{exitBtn}{chip}</span>
   );
 }
 
