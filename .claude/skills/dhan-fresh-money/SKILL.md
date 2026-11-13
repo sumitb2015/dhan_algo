@@ -49,6 +49,10 @@ positions read twice", "board price snaps back to the startup value", "OI change
 - `lib/freshMoneyExits.ts` / `freshMoneyExitTick.ts` (pure decisions) + `freshMoneyExitServer.ts` (2 s loop started from
   `instrumentation.node.ts`, idle with no levels, heartbeat `debug/fresh_money_exit_watcher.json`) - per-position
   target / SL. `freshMoneyGlobalExit.ts` / `GlobalTick.ts` - combined-P&L rupee target / SL.
+- `lib/freshMoneyExitAll.ts` (pure loop) + `exitAllCore` (route action `exitAll`) - the header's **Exit all**: every
+  open position this page holds (all underlyings and brokers, never broker positions it does not own), MARKET via
+  `closePositionCore`, shorts first, no hedge closed after a short's cover failed; one run per server
+  (`shared.exitAllBusy`); 504 when any close is UNKNOWN. Two clicks within 4 s, no ARM needed (it only reduces risk).
 
 ## Rules (each came from a fix)
 1. **The watcher and the route share one close path.** Exits call `closePositionCore` - the same own-fill sizing, holds,
@@ -74,7 +78,12 @@ positions read twice", "board price snaps back to the startup value", "OI change
    is still none, because the dashboard spawns collectors detached.
 10. **change_OI only when oi AND previous_oi are both known** (`b1e8cc3f`): a missing previous_oi read as 0 puts the whole OI
     on the board as today's change.
-11. MCX collectors auto-start per MCX session (holiday file shared with `lib/mcxSession`); `instrumentation.node.ts` must not
+11. **An outside close gets its real price or none** (2026-11-13: a Kotak-app close blanked Booked / P&L for the day).
+    The reconcile's `external` record is priced by `priceExternalCloses` from the broker's order book
+    (`lib/freshMoneyExternalPrice.ts`): same contract / side / intraday product, an order id the ledger never sent, inside
+    the window since the page's last own order, fills adding up to exactly the written-down quantity. Ambiguous = stays
+    unknown. NSE only (Kotak's MCX quantity unit differs). Max 6 tries, 20 s apart per broker.
+12. MCX collectors auto-start per MCX session (holiday file shared with `lib/mcxSession`); `instrumentation.node.ts` must not
     kill them on a dashboard restart. A WAITING collector counts as alive.
 
 ## Tests

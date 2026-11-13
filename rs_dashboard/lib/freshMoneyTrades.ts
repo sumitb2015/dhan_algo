@@ -41,8 +41,13 @@ export interface FmOrder {
   qty: number;                // order quantity as sent (units on NSE, lots on MCX)
   close: boolean;             // sent by the × (square off) button
   /** Synthetic record from the down-only reconcile: the broker no longer holds this quantity (closed outside this
-   *  page, e.g. an MIS auto square-off). Never sent; its price is unknown, so the day's booked P&L reads unknown. */
+   *  page, e.g. an MIS auto square-off). Never sent; priced from the broker's order book when exactly one reading fits
+   *  (lib/freshMoneyExternalPrice.ts), else its price stays unknown and the day's booked P&L reads unknown. */
   external?: boolean;
+  /** External record: the broker order(s) it was priced from (lib/freshMoneyExternalPrice.ts); each is used once. */
+  externalOrderIds?: string[];
+  /** External record: order-book look-ups tried so far (stops after a few; unknown then stays unknown). */
+  priceTries?: number;
   correlationId: string;
   orderId: string | null;
   state: OrderState;

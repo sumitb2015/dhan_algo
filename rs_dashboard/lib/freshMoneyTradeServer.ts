@@ -13,7 +13,7 @@ import { wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
 import { parsedDay } from '@/lib/freshMoneyFiles';
 import { globalOnce } from '@/lib/globalOnce';
 import {
-  BROKERS, brokerContract, brokerName, brokerNets, brokerSessionOk, newCorrelationId, readOrder, sendOrder,
+  BROKERS, brokerContract, brokerFills, brokerName, brokerNets, brokerSessionOk, intradayProduct, newCorrelationId, readOrder, sendOrder,
 } from '@/lib/freshMoneyBrokers';
 import {
   brokerUnits, buildPositions, closeCheck, closeQty, freshRestCache, contractHold, contractSettling, dueForCheck, effectiveState, hhmmToMin, isTerminal,
@@ -23,6 +23,8 @@ import {
   type TradeWindow, type TxnSide,
 } from '@/lib/freshMoneyTrades';
 import { validateGlobalAmount, type FmGlobalExit } from './freshMoneyGlobalExit.ts';
+import { runExitAll, type ExitAllResult } from './freshMoneyExitAll.ts';
+import { priceExternalClose } from './freshMoneyExternalPrice.ts';
 import {
   editExit, exitSummary, exitsOnOpen, parseExitDefaults, validateExitSpec, type CloseResult, type ExitDefaults, type FmExit,
 } from '@/lib/freshMoneyExits';
@@ -129,6 +131,10 @@ interface ServerShared {
   lastRefresh: number;
   lastReconcile: Map<FmBroker, number>;
   stateVersion: number;
+  /** An "Exit all" is running in this process (a second click / tab is refused, not queued). */
+  exitAllBusy?: boolean;
+  /** Last order-book read per broker for pricing an outside close. */
+  lastExtPrice?: Map<FmBroker, number>;
 }
 const shared = globalOnce<ServerShared>('__freshMoneyTradeServer', () => ({
   restCache: null, nextAt: new Map(), attempts: new Map(), lastRefresh: 0, lastReconcile: new Map(), stateVersion: 0,
@@ -225,7 +231,8 @@ const { lastReconcile } = shared;
 /**
  * Write this page's positions DOWN to what each broker still holds (Invariant 2): an MIS auto square-off or a close from
  * another desk otherwise leaves a phantom position that is marked to market and counted toward the cap. The reduction
- * is a synthetic `external` record with an unknown price (the day's booked P&L then reads unknown, never a guess).
+ * is a synthetic `external` record; priceExternalCloses then prices it from the broker's order book when one order fits
+ * exactly, else it stays unknown (the day's booked P&L reads unknown, never a guess).
  * Skipped for a contract with an order in flight or placed in the last 20 s, and when the positions read fails.
  */
 export async function reconcileWithBrokers(): Promise<void> {
@@ -255,6 +262,38 @@ export async function reconcileWithBrokers(): Promise<void> {
         });
       }
     }).catch(() => {});
+  }
+  await priceExternalCloses().catch(() => {});
+}
+
+const EXT_PRICE_TRIES = 6;
+const EXT_PRICE_GAP_MS = 20_000;
+
+/**
+ * Give an outside close (an `external` record) its real price from the broker's order book, when exactly one reading
+ * fits (lib/freshMoneyExternalPrice.ts). Reads a book only while such a record is unpriced, at most every 20 s per
+ * broker and 6 times per record; after that it stays unknown (Booked / P&L show "–", never a guess).
+ */
+async function priceExternalCloses(): Promise<void> {
+  const now = Date.now();
+  const todo = loadLedger().orders.filter(o => o.external && o.avgPrice === null && (o.priceTries ?? 0) < EXT_PRICE_TRIES);
+  for (const b of new Set(todo.map(o => o.broker ?? 'dhan'))) {
+    const lastAt = (shared.lastExtPrice ??= new Map()).get(b) ?? 0;
+    if (now - lastAt < EXT_PRICE_GAP_MS || !brokerSessionOk(b)) continue;
+    shared.lastExtPrice.set(b, now);
+    const book = await brokerFills(b);
+    await mutateLedger(l => {
+      for (const o of l.orders) {
+        if (!o.external || o.avgPrice !== null || (o.broker ?? 'dhan') !== b || (o.priceTries ?? 0) >= EXT_PRICE_TRIES) continue;
+        o.priceTries = (o.priceTries ?? 0) + 1;
+        const hit = book ? priceExternalClose(o, l.orders, book, intradayProduct(b)) : null;
+        if (!hit) continue;
+        o.avgPrice = hit.avgPrice;
+        o.externalOrderIds = hit.orderIds;
+        o.reason = `${o.reason ?? 'Closed outside this page'} — priced from ${brokerName(b)} order ${hit.orderIds.join(', ')}`;
+      }
+    }).catch(() => {});
+    shared.stateVersion++;
   }
 }
 
@@ -552,4 +591,20 @@ export async function closePositionCore(key: string, trigger?: string): Promise<
     return { kind: 'partial', error: `${done}; the rest (${qty - placedQty}) was not: ${r.error}` };
   }
   return { kind: 'placed', orderId: lastId, ...(parts.length > 1 ? { note: `${parts.length} orders, ${qty} units` } : {}) };
+}
+
+/**
+ * The header's "Exit all": square off EVERY open position this page holds (all underlyings and brokers) with MARKET
+ * orders, shorts first, each through closePositionCore. One run at a time per server; a run already going = refused.
+ */
+export async function exitAllCore(): Promise<ExitAllResult | { busy: true }> {
+  if (shared.exitAllBusy) return { busy: true };
+  shared.exitAllBusy = true;
+  try {
+    const open = buildPositions(loadLedger().orders, {}, Date.now()).filter(p => p.netQty !== 0);
+    return await runExitAll(open, key => closePositionCore(key, 'Exit all (header)'));
+  } finally {
+    shared.exitAllBusy = false;
+    shared.stateVersion++;
+  }
 }

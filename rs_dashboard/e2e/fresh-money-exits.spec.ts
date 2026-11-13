@@ -69,6 +69,9 @@ async function install(page: Page, opts: { watcherAlive?: boolean; withPosition?
       posts.push(body);
       if (body.action === 'order') return json(route, { success: true, order_id: 'X1', note: 'T 30% · SL 20 pts' });
       if (body.action === 'setExit') return json(route, { success: true });
+      if (body.action === 'exitAll') {
+        return json(route, { success: true, outcome: 'sent', items: [{ key: KEY, label: 'CRUDEOIL 8100 CE', kind: 'placed' }] });
+      }
       return json(route, { success: false, error: 'not mocked' }, 400);
     }
     if (p === '/api/options/iv-history') {
@@ -349,5 +352,26 @@ test('sounds: mute button is remembered; a server-fired target exit gets a toast
   await expect(unmute).toHaveAttribute('aria-pressed', 'true');
   await page.reload();
   await expect(page.getByRole('button', { name: 'Unmute Fresh Money sounds' })).toHaveAttribute('aria-pressed', 'true');
+  expect(m.blocked).toEqual([]);
+});
+
+test('header Exit all: disabled with nothing open; one click only asks, the second sends', async ({ page }) => {
+  const flat = await install(page);
+  await expect(page.getByTestId('fm-exit-all')).toBeDisabled();
+  expect(flat.posts).toEqual([]);
+
+  const m = await install(page, { withPosition: true });
+  const btn = page.getByTestId('fm-exit-all');
+  await expect(btn).toHaveText('Exit all (1)');
+  await btn.click();
+  await expect(btn).toHaveText('Confirm exit 1?');
+  await page.waitForTimeout(500);
+  expect(m.posts.filter(b => b.action === 'exitAll')).toHaveLength(0);   // the first click never sends
+  await page.waitForTimeout(4_000);
+  await expect(btn).toHaveText('Exit all (1)');                          // the question lapses
+  await btn.click();
+  await btn.click();
+  await expect(page.getByText('Exit all: 1 close sent')).toBeVisible();
+  expect(m.posts.filter(b => b.action === 'exitAll')).toHaveLength(1);
   expect(m.blocked).toEqual([]);
 });

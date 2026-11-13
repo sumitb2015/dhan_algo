@@ -11,7 +11,7 @@ import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/ro
 import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
 import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, flowScale, flowStreak, flowTier, streakVsDay, sumFlows, type Buildup, type FlowTier, type SideFlow, type SumFlow } from '@/lib/freshMoney';
 import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
-import { FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
+import { ExitAllButton, FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
 import { validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
 import { usePageBroker } from './BrokerPicker';
 import CollectorControl from './freshMoney/CollectorControl';
@@ -719,6 +719,9 @@ export default function FreshMoneyBoard() {
           <span className="rounded border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-amber-300">
             DATA: {data?.date ?? '—'}{data && !data.isToday ? ' · last session' : ''}
           </span>
+          {ts && (
+            <ExitAllButton count={ts.positions.filter(p => p.netQty !== 0).length} busy={trades.exitingAll} onExit={trades.exitAll} />
+          )}
           <span className="h-5 w-px shrink-0 bg-zinc-800" />
           <NavBar />
         </div>

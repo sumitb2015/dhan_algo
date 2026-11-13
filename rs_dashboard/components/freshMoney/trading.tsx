@@ -21,6 +21,7 @@ import type { FmGlobalExit } from '@/lib/freshMoneyGlobalExit';
 import { ExitEditor, ExitSpecInput, exitLevelsText, exitNeedsLook } from './ExitInputs';
 import { GlobalExitInputs } from './GlobalExitInputs';
 import { totalPnl } from '@/lib/freshMoneyGlobalExit';
+import type { ExitAllItem, ExitAllResult } from '@/lib/freshMoneyExitAll';
 
 /** The header's target / stop-loss defaults, stamped onto each position an order opens. */
 export interface ExitDefaultsUi { target: ExitSpec | null; sl: ExitSpec | null }
@@ -55,6 +56,10 @@ export interface TradeApi {
   setExit: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
   /** Set or clear the global (combined P&L, rupees) target / stop-loss; resolves true when the server took it. */
   setGlobal: (target: number | null, sl: number | null) => Promise<boolean>;
+  /** Square off EVERY open position this page holds (all underlyings and brokers), MARKET, shorts first. */
+  exitAll: () => Promise<void>;
+  /** An Exit all request from this tab is in flight. */
+  exitingAll: boolean;
 }
 
 /** `onWarn` is called when an order or close THIS tab sent comes back rejected, UNKNOWN or partly sent (the page plays
@@ -162,7 +167,85 @@ export function useFreshMoneyTrades(onWarn?: () => void): TradeApi {
     }
   }, [refresh]);
 
-  return { state, inflight, order, close, setExit, setGlobal };
+  const [exitingAll, setExitingAll] = useState(false);
+  const exitingAllRef = useRef(false);
+  const exitAll: TradeApi['exitAll'] = useCallback(async () => {
+    if (exitingAllRef.current) return; // synchronous double-click guard
+    exitingAllRef.current = true;
+    setExitingAll(true);
+    let status: number | null = null;
+    let j: { error?: string; outcome?: ExitAllResult['outcome']; items?: ExitAllItem[] } | null = null;
+    try {
+      const res = await fetch(TRADE_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'exitAll', idempotencyKey: newKey() }),
+      });
+      status = res.status;
+      j = await res.json().catch(() => null);
+    } catch { /* no reply: UNKNOWN below */ }
+    try {
+      const items = j?.items ?? [];
+      const bad = items.filter(i => i.kind !== 'placed');
+      const lines = bad.map(i => `${i.label}: ${i.kind === 'skipped' ? 'skipped' : i.kind.toUpperCase()}${i.error ? ` — ${i.error}` : ''}`).join('\n');
+      const outcome = j?.outcome;
+      if (outcome === 'none') toast.info('Exit all: no open positions');
+      else if (outcome === 'sent') toast.success(`Exit all: ${items.length} close${items.length === 1 ? '' : 's'} sent`, { description: 'MARKET · shorts first' });
+      else if (outcome === 'incomplete' || outcome === 'failed') {
+        onWarnRef.current?.();
+        toast.error(`Exit all: ${items.length - bad.length} of ${items.length} closes sent`, { description: lines, duration: 20_000 });
+      } else if (status === 409 && j?.error) {
+        toast.error('Exit all not sent', { description: j.error, duration: 8_000 });
+      } else {
+        // 504, a server error or no reply: some closes may be live — never send it again blind.
+        onWarnRef.current?.();
+        toast.error('Exit all: status UNKNOWN', { description: `${lines || j?.error || 'No reply from the server.'} ${UNKNOWN_ORDER_HINT}`, duration: 20_000 });
+      }
+    } finally {
+      exitingAllRef.current = false;
+      setExitingAll(false);
+      refresh();
+      for (const ms of [600, 1300, 2200, 3500]) setTimeout(refresh, ms);
+    }
+  }, [refresh]);
+
+  return { state, inflight, order, close, setExit, setGlobal, exitAll, exitingAll };
+}
+
+// ── header Exit all ──────────────────────────────────────────────────────────────────────────────────────────────
+
+const CONFIRM_MS = 4_000;
+
+/** The header's Exit all: the first click asks, a second click within 4 s sends (MARKET, every open position of this
+ *  page, all underlyings and brokers). Needs no ARM — it only reduces risk — but never fires on one click. */
+export function ExitAllButton({ count, busy, onExit }: { count: number; busy: boolean; onExit: () => void }) {
+  const [asking, setAsking] = useState(false);
+  useEffect(() => {
+    if (!asking) return;
+    const t = setTimeout(() => setAsking(false), CONFIRM_MS);
+    return () => clearTimeout(t);
+  }, [asking]);
+  const disabled = busy || count === 0;
+  if (asking && disabled) setAsking(false);
+  const click = () => {
+    if (disabled) return;
+    if (!asking) { setAsking(true); return; }
+    setAsking(false);
+    onExit();
+  };
+  const noun = `${count} open position${count === 1 ? '' : 's'}`;
+  return (
+    <button type="button" onClick={click} disabled={disabled} data-testid="fm-exit-all"
+      aria-label={asking ? `Confirm: exit all ${noun} at market` : `Exit all ${noun} at market`}
+      title={count === 0 ? 'No open positions on this page'
+        : `Close every open Fresh Money position (${noun}, all underlyings and brokers) with MARKET orders, shorts first. Click twice.`}
+      onKeyDown={e => { if (e.key === 'Escape') setAsking(false); }}
+      className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-bold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${FOCUS} ${
+        asking ? 'animate-pulse border-red-400 bg-red-600 text-oncolor'
+          : 'border-red-500/50 bg-red-600/15 text-red-300 hover:bg-red-600/30'}`}>
+      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldAlert className="h-3.5 w-3.5" />}
+      {busy ? 'Exiting…' : asking ? `Confirm exit ${count}?` : `Exit all${count ? ` (${count})` : ''}`}
+    </button>
+  );
 }
 
 // ── ARM / lots / P&L bar ──────────────────────────────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { dedupe } from '@/lib/pyExec';
 import type { CloseResult } from '@/lib/freshMoneyExits';
 import {
-  buildState, closePositionCore, placeOrderCore, setExitCore, setGlobalCore, tradeStateVersion, type FreshMoneyTradeState, type OrderBody,
+  buildState, closePositionCore, exitAllCore, placeOrderCore, setExitCore, setGlobalCore, tradeStateVersion, type FreshMoneyTradeState, type OrderBody,
 } from '@/lib/freshMoneyTradeServer';
 
 /**
@@ -46,6 +46,12 @@ export async function POST(req: NextRequest) {
   if (!b) return reply({ success: false, error: 'Invalid JSON body' }, 400);
   const run = async () => {
     if (b.action === 'close') return replyFor(await closePositionCore(typeof b.key === 'string' && b.key ? b.key : `dhan|${String(b.securityId ?? '')}`));
+    if (b.action === 'exitAll') {
+      const r = await exitAllCore();
+      if ('busy' in r) return reply({ success: false, error: 'An Exit all is already running — wait for it to finish' }, 409);
+      // 504 when any close may be live (the client must not read it as "nothing happened"); 200 otherwise.
+      return NextResponse.json({ success: r.outcome === 'sent' || r.outcome === 'none', ...r }, { status: r.outcome === 'unknown' ? 504 : 200 });
+    }
     if (b.action === 'order') return replyFor(await placeOrderCore(b));
     if (b.action === 'setExit') {
       const r = await setExitCore(b);
@@ -55,7 +61,7 @@ export async function POST(req: NextRequest) {
       const r = await setGlobalCore(b);
       return r.ok ? NextResponse.json({ success: true }) : reply({ success: false, error: r.error }, r.http);
     }
-    return reply({ success: false, error: 'action must be order, close, setExit or setGlobal' }, 400);
+    return reply({ success: false, error: 'action must be order, close, exitAll, setExit or setGlobal' }, 400);
   };
 
   const key = typeof b.idempotencyKey === 'string' && b.idempotencyKey.length >= 8 && b.idempotencyKey.length <= 64 ? b.idempotencyKey : null;

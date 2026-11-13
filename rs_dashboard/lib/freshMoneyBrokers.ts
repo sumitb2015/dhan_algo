@@ -16,12 +16,13 @@ import { kotakOptionContract, kotakDerivativeBySymbol } from '@/lib/kotakContrac
 import { buildKotakOrderPayload } from '@/lib/kotakOrderPayload';
 import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
 import { isKotakTokenValid, kotakGet, kotakRows, kotakPriority, KOTAK_PATHS } from '@/lib/kotakToken';
-import { findRecentKotakOrder, shapeKotakPosition } from '@/lib/kotakShape';
+import { findRecentKotakOrder, parseKotakTime, shapeKotakOrder, shapeKotakPosition } from '@/lib/kotakShape';
 import { zerodhaOptionContract, cachedZerodhaContract, slicesFor } from '@/lib/zerodhaContracts';
 import { zerodhaLotCapError } from '@/lib/zerodhaOrderRules';
 import { placeZerodhaOrder, findOrderByTag } from '@/lib/zerodhaPlaceOrder';
 import { isZerodhaTokenValid, kiteGet } from '@/lib/zerodhaToken';
-import { shapeZerodhaPosition } from '@/lib/zerodhaShape';
+import { shapeZerodhaOrder, shapeZerodhaPosition, type ScalperOrder } from '@/lib/zerodhaShape';
+import type { BookFill } from '@/lib/freshMoneyExternalPrice';
 import { stateFromBroker, type FmBroker, type FmOrder, type OptType, type TxnSide } from '@/lib/freshMoneyTrades';
 
 export const BROKERS: readonly FmBroker[] = ['dhan', 'kotak', 'zerodha'];
@@ -149,6 +150,44 @@ export async function brokerNets(b: FmBroker): Promise<Map<string, number> | nul
       for (const p of kotakRows(await kotakGet(KOTAK_PATHS.positions)).map(shapeKotakPosition)) add(p.tradingSymbol, String(p.productType ?? ''), Number(p.netQty) || 0);
     }
     return out;
+  } catch {
+    return null;
+  }
+}
+
+/** The broker's product code for an intraday position (Dhan INTRADAY, Kotak / Zerodha MIS). */
+export const intradayProduct = (b: FmBroker) => INTRADAY[b];
+
+/**
+ * Today's filled orders in the broker's order book, normalised (lib/freshMoneyExternalPrice.ts prices an outside close
+ * from them). Null when the book cannot be read. Times are read as IST; an unreadable one is null (never matched).
+ */
+export async function brokerFills(b: FmBroker): Promise<BookFill[] | null> {
+  try {
+    let rows: ScalperOrder[];
+    if (b === 'dhan') {
+      const raw = await dhanGet('/orders', 6_000);
+      if (!Array.isArray(raw)) return null;
+      rows = (raw as Record<string, unknown>[]).map(r => ({
+        orderId: String(r.orderId ?? ''), tradingSymbol: String(r.securityId ?? ''), orderStatus: String(r.orderStatus ?? ''),
+        transactionType: String(r.transactionType ?? ''), quantity: Number(r.quantity) || 0, price: Number(r.price) || 0,
+        orderType: String(r.orderType ?? ''), createTime: String(r.createTime ?? ''),
+        averagePrice: Number(r.averageTradedPrice) || 0, filledQty: Number(r.filledQty) || 0, productType: String(r.productType ?? ''),
+      }));
+    } else if (b === 'zerodha') {
+      const raw = await kiteGet('/orders');
+      if (!Array.isArray(raw)) return null;
+      rows = (raw as Record<string, unknown>[]).map(shapeZerodhaOrder);
+    } else {
+      kotakPriority(2_500);
+      rows = kotakRows(await kotakGet(KOTAK_PATHS.orderBook)).map(shapeKotakOrder);
+    }
+    return rows
+      .filter(r => (r.filledQty ?? 0) > 0 && (r.transactionType === 'BUY' || r.transactionType === 'SELL'))
+      .map(r => ({
+        orderId: r.orderId, symbol: r.tradingSymbol, side: r.transactionType as 'BUY' | 'SELL', filledQty: r.filledQty ?? 0,
+        avgPrice: r.averagePrice ?? 0, ts: parseKotakTime(r.createTime), product: r.productType ?? '',
+      }));
   } catch {
     return null;
   }
