@@ -12,7 +12,8 @@ const istToday = () => istNow().slice(0, 10);
 // Board scale (95th pct of |cell|) = 1500. Puts: ten tinted adds in a row -> ▲10, and the widest number label
 // ("▲10 +99,999"). Calls: -300, -400, -900, -12000 cutting -> ▼4; +12 ... +15 are grey (under 10 %) noise.
 const PUT_FLOW = { cells: [300, 320, 340, 360, 380, 400, 600, 450, 400, 1500, 77], day: 99999 };
-const CALL_FLOW = { cells: [null, 12, 13, 14, 15, 10, -300, -400, -900, -12000, 5], day: -12835 };
+// The calls' day (+500) is positive while the last 4 slots cut OI: the ▼4 runs against the day -> amber (reversal).
+const CALL_FLOW = { cells: [null, 12, 13, 14, 15, 10, -300, -400, -900, -12000, 5], day: 500 };
 const side = (oi: number, chg: number, flow: unknown) => ({ oi, oiMoved: chg, buildup: null, flow });
 function board() {
   const rows = [8300, 8200, 8100, 8000, 7900].map(strike => ({ strike, put: side(4000, 300, PUT_FLOW), call: side(3000, -200, CALL_FLOW) }));
@@ -191,13 +192,13 @@ test('Δ OI tab: call OI − put OI on the left, coloured by the heavier side; r
   await expect(page.getByRole('tab', { name: 'Δ OI' })).toHaveAttribute('aria-selected', 'true');
 });
 
-test('3m slots tab: frozen slots + shaded running slot, coloured by sign, running next to the strike; survives a reload', async ({ page }) => {
+test('3m slots tab: tints, streak / reversal badges, totals row, crosshair, sticky times, legend; survives a reload', async ({ page }) => {
   const m = await install(page);
   await page.getByRole('tab', { name: '3m slots' }).click();
   await expect(page.getByText('PUTS: OI Δ today @ 10:30')).toBeVisible();
   // Completed slot: exact value and slot in the hover.
-  const add = page.getByText('+1.5k', { exact: true }).first();
-  await expect(add).toHaveAttribute('title', '10:27–10:30: +1,500 lots');
+  const add = page.getByTitle('10:27–10:30: +1,500 lots', { exact: true }).first();   // a strike's cell (the totals row sums 5)
+  await expect(add).toHaveText('+1.5k');
   await expect(add).toHaveClass(/bg-emerald-500\/45/);                 // >= 70 % of the scale: strongest tint, bold
   await expect(add).toHaveClass(/font-bold/);
   await expect(add).toHaveClass(/text-white/);                         // theme token: readable on the strong tint
@@ -206,14 +207,19 @@ test('3m slots tab: frozen slots + shaded running slot, coloured by sign, runnin
   await expect(small).toHaveClass(/text-zinc-500/);
   await expect(small).not.toHaveClass(/bg-/);
   // Streak badges: completed slots only, newest backwards.
-  await expect(page.getByTitle('10 completed slots in a row adding OI (10:00–10:30)').first()).toHaveText('▲10');
+  const up = page.getByTitle('10 completed slots in a row adding OI (10:00–10:30)', { exact: true }).first();
+  await expect(up).toHaveText('▲10');
+  await expect(up).toHaveClass(/text-emerald-400/);                    // same direction as today's net: green
   // The widest label stays on one line inside its column (no wrap into the next row).
   const wide = page.getByTitle("Today's OI change vs the previous close, as of 10:30: +99,999 lots · live (10:31:20): +300 lots").first();
   await expect(wide).toHaveText('▲10 +99,999');
   const box = await wide.boundingBox();
   expect(box!.height).toBeLessThan(22);
   expect(await wide.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
-  await expect(page.getByTitle('4 completed slots in a row cutting OI (10:18–10:30)').first()).toHaveText('▼4');
+  // Against today's net (+500): amber, and the hover says so.
+  const rev = page.getByTitle("4 completed slots in a row cutting OI (10:18–10:30) — against today's net +500 lots: reversing", { exact: true }).first();
+  await expect(rev).toHaveText('▼4');
+  await expect(rev).toHaveClass(/text-amber-400/);
   // Running slot: shaded, italic, labelled as running.
   const run = page.getByText('+77', { exact: true }).first();
   await expect(run).toHaveClass(/italic/);
@@ -224,8 +230,29 @@ test('3m slots tab: frozen slots + shaded running slot, coloured by sign, runnin
   const unknown = page.getByTitle('10:00–10:03: no OI reading at a slot edge').first();   // the call side's first slot
   await expect(unknown).toHaveText('–');
   // Today's change as of the last completed slot, with the live figure in the hover.
-  await expect(page.getByTitle("Today's OI change vs the previous close, as of 10:30: -12,835 lots · live (10:31:20): -200 lots").first())
-    .toHaveText('-12,835 ▼4');
+  await expect(page.getByTitle("Today's OI change vs the previous close, as of 10:30: +500 lots · live (10:31:20): -200 lots").first())
+    .toHaveText('+500 ▼4');
+  // Board totals: the 5 mocked strikes summed per slot, own row under the slot times.
+  await expect(page.getByText('Σ shown', { exact: true })).toBeVisible();
+  await expect(page.getByTitle('10:27–10:30: +7,500 lots', { exact: true })).toHaveText('+7.5k');
+  await expect(page.getByTitle('10:27–10:30: -60,000 lots', { exact: true })).toHaveText('-60k');
+  // Slot times + totals are pinned while the ladder scrolls.
+  expect(await page.getByTestId('flow-sticky-head').evaluate(el => getComputedStyle(el).position)).toBe('sticky');
+  // Crosshair: hovering a cell highlights its strike row and its slot column (other rows and the header).
+  await add.hover();
+  await expect(page.locator('div.grid').filter({ has: add }).first()).toHaveClass(/bg-zinc-800\/50/);
+  await expect(page.getByTitle('10:27–10:30: +1,500 lots', { exact: true }).nth(1)).toHaveClass(/ring-zinc-300/);
+  await expect(page.getByTestId('flow-sticky-head').locator('[data-slot="9"]').first()).toHaveClass(/ring-zinc-300/);
+  // Leaving the cells (onto the strike) clears the crosshair.
+  await page.getByText('8100', { exact: true }).first().hover();
+  await expect(page.locator('div.grid').filter({ has: add }).first()).not.toHaveClass(/bg-zinc-800\/50/);
+  await expect(page.getByTestId('flow-sticky-head').locator('[data-slot="9"]').first()).not.toHaveClass(/ring-zinc-300/);
+  // Compact legend; the full explanation is behind "?" and the choice is remembered.
+  const help = page.getByRole('button', { name: 'How to read the slots' });
+  await expect(help).toHaveAttribute('aria-expanded', 'false');
+  await help.click();
+  await expect(help).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByText('a possible turn', { exact: false })).toBeVisible();
   // Running slot sits next to the strike on both sides.
   const row = page.locator('div.grid', { hasText: '8100' }).filter({ hasText: '+1.5k' }).first();
   const text = (await row.innerText()).replace(/\s+/g, ' ');
@@ -235,6 +262,7 @@ test('3m slots tab: frozen slots + shaded running slot, coloured by sign, runnin
   expect(text.indexOf('+5 ')).toBeLessThan(text.indexOf('-12k'));
   await page.reload();
   await expect(page.getByRole('tab', { name: '3m slots' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('button', { name: 'How to read the slots' })).toHaveAttribute('aria-expanded', 'true');
   expect(m.blocked).toEqual([]);
 });
 

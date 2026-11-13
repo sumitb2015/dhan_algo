@@ -1,11 +1,11 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BadgeIndianRupee, AlertTriangle } from 'lucide-react';
+import { BadgeIndianRupee, AlertTriangle, CircleHelp } from 'lucide-react';
 import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
 import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
-import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, flowScale, flowStreak, flowTier, type Buildup, type FlowTier, type SideFlow } from '@/lib/freshMoney';
+import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, flowScale, flowStreak, flowTier, streakVsDay, sumFlows, type Buildup, type FlowTier, type SideFlow, type SumFlow } from '@/lib/freshMoney';
 import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
 import { validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
@@ -23,6 +23,7 @@ const PREF_LOTS = 'freshMoney.lots';
 const PREF_OI_MODE = 'freshMoney.oiMode';
 type OiMode = 'change' | 'total' | 'delta' | 'flow';
 const PREF_POS_COLLAPSED = 'freshMoney.positionsCollapsed';
+const PREF_FLOW_HELP = 'freshMoney.flowHelp';
 const PREF_EXIT_DEFAULTS = 'freshMoney.exitDefaults';
 const NO_EXITS: ExitDefaultsUi = { target: null, sl: null };
 
@@ -152,18 +153,28 @@ const cellClass = (v: number | null, scale: number) => {
   return t === 'none' ? 'text-zinc-500' : TINT[v! > 0 ? 'up' : 'down'][t];
 };
 
+/** Hovered slot cell: its row and its slot column are highlighted across the board (both sides). */
+type Hover = { row: string; slot: number } | null;
+interface HoverProps { rowKey: string; hover: Hover; onHover: (h: Hover) => void }
+
 /** One side's slot cells: OI change per completed slot (frozen) plus the running slot so far (ringed, italic). The
  *  background tint grows with the move's size against the board's scale; moves under 10 % of it are grey. */
-function FlowCells({ side, flow, fs, unit, scale }: { side: 'put' | 'call'; flow: SideFlow | null; fs: FlowSlots; unit: string; scale: number }) {
+function FlowCells({ side, flow, fs, unit, scale, rowKey, hover, onHover, note }: {
+  side: 'put' | 'call'; flow: SideFlow | null; fs: FlowSlots; unit: string; scale: number;
+  /** Why an unknown cell is unknown, when the caller knows better than "no reading" (the totals' partial slots). */
+  note?: (i: number) => string | null;
+} & HoverProps) {
   return (
-    <span className="grid grid-cols-11 gap-px text-[11px]">
+    // Leaving the cell block clears the crosshair (a bar, the strike or the B / S buttons must not keep it lit).
+    <span className="grid grid-cols-11 gap-px text-[11px]" onMouseLeave={() => onHover(null)}>
       {slotOrder(fs, side).map(i => {
         const v = flow?.cells[i] ?? null;
         const s = slotInfo(fs, i);
+        const col = hover?.slot === i;
         return (
-          <span key={i}
-            className={`rounded-sm text-center ${s.running ? 'italic ring-1 ring-inset ring-zinc-500' : ''} ${cellClass(v, scale)}`}
-            title={`${s.span}: ${v === null ? (s.ok ? 'unknown' : 'no OI reading at a slot edge') : `${fmtOi(v)} ${unit}`}`}>
+          <span key={i} data-slot={i} onMouseEnter={() => onHover({ row: rowKey, slot: i })}
+            className={`rounded-sm text-center ${s.running ? 'italic' : ''} ${col ? 'ring-1 ring-inset ring-zinc-300' : s.running ? 'ring-1 ring-inset ring-zinc-500' : ''} ${cellClass(v, scale)}`}
+            title={`${s.span}: ${v === null ? (note?.(i) ?? (s.ok ? 'unknown' : 'no OI reading at a slot edge')) : `${fmtOi(v)} ${unit}`}`}>
             {fmtOiShort(v)}
           </span>
         );
@@ -172,37 +183,81 @@ function FlowCells({ side, flow, fs, unit, scale }: { side: 'put' | 'call'; flow
   );
 }
 
-/** ▲n / ▼n: n completed slots in a row adding / cutting, each a tinted (not grey) move (only runs of 3+). */
-function StreakBadge({ flow, fs, scale }: { flow: SideFlow | null; fs: FlowSlots; scale: number }) {
+/** ▲n / ▼n: n completed slots in a row adding / cutting, each a tinted (not grey) move (only runs of 3+). Amber when the
+ *  run goes against today's net change (built all day, now unwinding, or the reverse): a possible turn. */
+function StreakBadge({ flow, fs, scale, unit }: { flow: SideFlow | null; fs: FlowSlots; scale: number; unit: string }) {
   const n = fs.bounds.length - 1;
   const st = flow ? flowStreak(flow.cells, n, scale) : null;
   if (!st) return null;
   const from = fs.bounds[n - st.n], to = fs.bounds[n];
+  const against = streakVsDay(st, flow?.day ?? null) === 'against';
   return (
-    <span className={`text-[10px] font-bold ${st.dir > 0 ? 'text-emerald-400' : 'text-red-400'}`}
-      title={`${st.n} completed slots in a row ${st.dir > 0 ? 'adding' : 'cutting'} OI (${from}–${to})`}>
+    <span className={`text-[10px] font-bold ${against ? 'text-amber-400' : st.dir > 0 ? 'text-emerald-400' : 'text-red-400'}`}
+      title={`${st.n} completed slots in a row ${st.dir > 0 ? 'adding' : 'cutting'} OI (${from}–${to})`
+        + (against ? ` — against today's net ${fmtOi(flow!.day)} ${unit}: reversing` : '')}>
       {st.dir > 0 ? '▲' : '▼'}{st.n}
     </span>
   );
 }
 
 /** Column labels over the slot cells: each slot's end time (the running one with "…"), in the cells' order. */
-function FlowHeader({ side, fs }: { side: 'put' | 'call'; fs: FlowSlots }) {
+function FlowHeader({ side, fs, hoverSlot }: { side: 'put' | 'call'; fs: FlowSlots; hoverSlot: number | null }) {
   return (
-    <span className="grid grid-cols-11">
+    <span className="grid grid-cols-11 gap-px">
       {slotOrder(fs, side).map(i => {
         const s = slotInfo(fs, i);
-        return <span key={i} className={`text-center ${s.running ? 'italic text-zinc-300' : ''}`} title={s.span}>{s.head}</span>;
+        return (
+          <span key={i} data-slot={i}
+            className={`rounded-sm text-center ${s.running ? 'italic text-zinc-300' : ''} ${hoverSlot === i ? 'ring-1 ring-inset ring-zinc-300 text-zinc-100' : ''}`}
+            title={s.span}>{s.head}</span>
+        );
       })}
     </span>
   );
 }
 
-function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale }: {
+/** Board totals (flow tab): per slot the sum over the strikes on the board, puts and calls, on their OWN tint scale (sums
+ *  are far larger than single strikes), with Σ today's change and the streak badge. Lines up with the strike rows. */
+function TotalsRow({ put, call, fs, unit, scale, trade, hover, onHover }: {
+  put: SumFlow; call: SumFlow; fs: FlowSlots; unit: string; scale: number; trade: boolean;
+  hover: Hover; onHover: (h: Hover) => void;
+}) {
+  const nStrikes = Math.max(put.n, call.n);
+  // A slot some strikes have no reading for is left blank (a partial sum would look like a move); say why.
+  const partial = (f: SumFlow) => (i: number) =>
+    f.counts[i] > 0 && f.counts[i] < f.n ? `only ${f.counts[i]} of ${f.n} strikes have a reading here — no partial sum` : null;
+  const num = (f: SumFlow, side: 'put' | 'call') => (
+    <span className={`whitespace-nowrap font-bold ${side === 'put' ? 'pr-2 text-right text-emerald-400' : 'pl-2 text-red-400'}`}
+      title={`Σ today's OI change vs the previous close over the ${f.n} strikes with data on the board, as of ${fs.dayAt ?? '–'}: ${
+        f.day != null ? `${fmtOi(f.day)} ${unit}` : f.dayCount > 0 ? `unknown (only ${f.dayCount} of ${f.n} strikes have it)` : 'unknown'}`}>
+      {side === 'put' && <><StreakBadge flow={f} fs={fs} scale={scale} unit={unit} />{' '}</>}
+      {fmtOi(f.day)}
+      {side === 'call' && <>{' '}<StreakBadge flow={f} fs={fs} scale={scale} unit={unit} /></>}
+    </span>
+  );
+  return (
+    <div className={`${gridFor('flow', trade)} h-[21px] text-[13px] tabular-nums ${hover?.row === 'sum' ? 'bg-zinc-800/50' : ''}`}>
+      <FlowCells side="put" flow={put} fs={fs} unit={unit} scale={scale} rowKey="sum" hover={hover} onHover={onHover} note={partial(put)} />
+      <span />
+      {num(put, 'put')}
+      {trade && <span />}
+      <span className="text-center text-[11.5px] font-bold text-zinc-300"
+        title={`Sum over the ${nStrikes} strikes with data on the board (not the whole chain); its tints use their own scale`}>Σ shown</span>
+      {trade && <span />}
+      {num(call, 'call')}
+      <span />
+      <FlowCells side="call" flow={call} fs={fs} unit={unit} scale={scale} rowKey="sum" hover={hover} onHover={onHover} note={partial(call)} />
+    </div>
+  );
+}
+
+function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, onHover }: {
   row: FreshMoneyRow; max: number; boxed: boolean; trade: RowTrade | null; mode: OiMode;
   /** Slot layout, the OI unit and the board-wide cell scale (see flowScale), for the slot-flow tab. */
   fs: FlowSlots; unit: string; scale: number;
+  hover: Hover; onHover: (h: Hover) => void;
 }) {
+  const rowKey = String(row.strike);
   const shown = (sd: FreshMoneyRow['put']) => (sd ? (mode === 'total' ? sd.oi : mode === 'flow' ? sd.flow?.day ?? null : sd.oiMoved) : null);
   const label = (sd: FreshMoneyRow['put']) => (sd
     ? (mode === 'total' ? fmtOiAbs(sd.oi) : mode === 'flow' ? fmtOi(sd.flow?.day ?? null) : fmtOi(sd.oiMoved)) : '–');
@@ -234,8 +289,8 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale }: {
   };
   const delta = mode === 'delta' ? oiDelta(row) : null;
   return (
-    <div className={`${gridFor(mode, !!trade)} ${trade ? 'h-[26px]' : 'h-[21px]'} text-[13px] tabular-nums`}>
-      {mode === 'flow' && <FlowCells side="put" flow={p?.flow ?? null} fs={fs} unit={unit} scale={scale} />}
+    <div className={`${gridFor(mode, !!trade)} ${trade ? 'h-[26px]' : 'h-[21px]'} text-[13px] tabular-nums ${mode === 'flow' && hover?.row === rowKey ? 'bg-zinc-800/50' : ''}`}>
+      {mode === 'flow' && <FlowCells side="put" flow={p?.flow ?? null} fs={fs} unit={unit} scale={scale} rowKey={rowKey} hover={hover} onHover={onHover} />}
       {mode === 'delta' ? (
         <>
           <DeltaBar delta={delta} max={max} />
@@ -248,7 +303,7 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale }: {
         <>
           <Bar side="put" length={shown(p)} moved={moved(p)} max={max} tag={mode === 'flow' ? null : p?.buildup ?? null} />
           <span className="whitespace-nowrap pr-2 text-right font-bold text-emerald-400" title={flowTitle(p)}>
-            {mode === 'flow' && <><StreakBadge flow={p?.flow ?? null} fs={fs} scale={scale} />{' '}</>}{label(p)}
+            {mode === 'flow' && <><StreakBadge flow={p?.flow ?? null} fs={fs} scale={scale} unit={unit} />{' '}</>}{label(p)}
           </span>
         </>
       )}
@@ -265,12 +320,12 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale }: {
       ) : (
         <>
           <span className="whitespace-nowrap pl-2 font-bold text-red-400" title={flowTitle(c)}>
-            {label(c)}{mode === 'flow' && <>{' '}<StreakBadge flow={c?.flow ?? null} fs={fs} scale={scale} /></>}
+            {label(c)}{mode === 'flow' && <>{' '}<StreakBadge flow={c?.flow ?? null} fs={fs} scale={scale} unit={unit} /></>}
           </span>
           <Bar side="call" length={shown(c)} moved={moved(c)} max={max} tag={mode === 'flow' ? null : c?.buildup ?? null} />
         </>
       )}
-      {mode === 'flow' && <FlowCells side="call" flow={c?.flow ?? null} fs={fs} unit={unit} scale={scale} />}
+      {mode === 'flow' && <FlowCells side="call" flow={c?.flow ?? null} fs={fs} unit={unit} scale={scale} rowKey={rowKey} hover={hover} onHover={onHover} />}
     </div>
   );
 }
@@ -301,6 +356,54 @@ function PriceChip({ underlying, q, fallback }: { underlying: string; q: FreshMo
         <span className="text-[11px] text-zinc-500">{live ? 'chg –' : 'snapshot'}</span>
       )}
     </div>
+  );
+}
+
+/** The strike ladder (all tabs). It owns the slot tab's hover crosshair, so moving the mouse across the cells re-renders
+ *  only the ladder, not the trade bar, positions panel or the Cumulative OI chart. */
+function Ladder({ data, oiMode, tradeMode, fs, maxAbs, boxedStrike, rowTrade, spot, liveSpot, totals, scale }: {
+  data: FreshMoneyResponse; oiMode: OiMode; tradeMode: boolean; fs: FlowSlots; maxAbs: number; boxedStrike: number | null;
+  rowTrade: (strike: number) => RowTrade | null; spot: number | null; liveSpot: number | null;
+  totals: { put: SumFlow; call: SumFlow; scale: number }; scale: number;
+}) {
+  const [hover, setHover] = useState<Hover>(null);
+  const flowTotals = totals, flowCellScale = scale;
+  return (
+    <>
+    {/* Flow tab: the ladder scrolls inside its own box (both ways), so the slot times and totals can stay pinned
+        (an overflow-x box is a scroll container, so `sticky` could never pin against the window). */}
+    <div className={oiMode === 'flow' ? 'max-h-[calc(100vh-170px)] overflow-auto px-4 pb-2' : 'overflow-x-auto px-4 pb-2 pt-2'}
+      onMouseLeave={() => setHover(null)}>
+     <div className={oiMode === 'flow' ? (tradeMode ? 'min-w-[1916px]' : 'min-w-[1596px]') : tradeMode ? 'min-w-[1040px]' : 'min-w-[720px]'}>
+      <div data-testid="flow-sticky-head" className={oiMode === 'flow' ? 'sticky top-0 z-10 border-b border-zinc-700 bg-zinc-900 pt-2' : ''}>
+      <div className={`${gridFor(oiMode, tradeMode)} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
+        {oiMode === 'flow' && <FlowHeader side="put" fs={fs} hoverSlot={hover?.slot ?? null} />}
+        <span className="col-span-2 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `OI Δ today @ ${fs.dayAt ?? '–'}` : 'OI moved'}`}</span>
+        {tradeMode && <span className="pr-1 text-right text-zinc-400">PE trade</span>}
+        <span className="text-center">STRIKE</span>
+        {tradeMode && <span className="pl-1 text-zinc-400">CE trade</span>}
+        <span className="col-span-2 pl-2">{oiMode === 'delta' ? '' : `CALLS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `OI Δ today @ ${fs.dayAt ?? '–'}` : 'OI moved'}`}</span>
+        {oiMode === 'flow' && <FlowHeader side="call" fs={fs} hoverSlot={hover?.slot ?? null} />}
+      </div>
+      {oiMode === 'flow' && fs.bounds.length > 0 && (
+        <TotalsRow put={flowTotals.put} call={flowTotals.call} fs={fs} unit={data.oiUnit} scale={flowTotals.scale}
+          trade={tradeMode} hover={hover} onHover={setHover} />
+      )}
+      </div>
+      {data.rows.map((r, i) => {
+        const next = data.rows[i + 1];
+        const divider = spot !== null && next && r.strike > spot && next.strike <= spot;
+        return (
+          <React.Fragment key={r.strike}>
+            <BoardRowView row={r} max={maxAbs} boxed={r.strike === boxedStrike} trade={rowTrade(r.strike)} mode={oiMode}
+              fs={fs} unit={data.oiUnit} scale={flowCellScale} hover={hover} onHover={setHover} />
+            {divider && <SpotDivider spot={spot!} live={liveSpot !== null} />}
+          </React.Fragment>
+        );
+      })}
+     </div>
+    </div>
+    </>
   );
 }
 
@@ -336,6 +439,9 @@ export default function FreshMoneyBoard() {
   const pickExitDefaults = (d: ExitDefaultsUi) => { setExitDefaults(d); writePref(PREF_EXIT_DEFAULTS, JSON.stringify(d)); };
   // Collapsed panels (remembered per browser).
   const [posCollapsed, setPosCollapsed] = useState(false);
+  // Slot tab: the "How to read" panel (remembered per browser). The hover crosshair lives in <Ladder>.
+  const [flowHelp, setFlowHelp] = useState(false);
+  const toggleFlowHelp = () => setFlowHelp(o => { writePref(PREF_FLOW_HELP, o ? '0' : '1'); return !o; });
   // What the board's numbers and bar lengths show: today's OI change (default) or total OI outstanding.
   const [oiMode, setOiMode] = useState<OiMode>('change');
   const pickOiMode = (m: OiMode) => { setOiMode(m); writePref(PREF_OI_MODE, m); };
@@ -352,6 +458,7 @@ export default function FreshMoneyBoard() {
     const l = Number(readPref(PREF_LOTS));
     if (Number.isInteger(l) && l >= 1 && l <= 20) setLots(l);
     setPosCollapsed(readPref(PREF_POS_COLLAPSED) === '1');
+    setFlowHelp(readPref(PREF_FLOW_HELP) === '1');
     const om = readPref(PREF_OI_MODE);
     if (om === 'total' || om === 'delta' || om === 'flow') setOiMode(om);
     try {
@@ -398,6 +505,13 @@ export default function FreshMoneyBoard() {
   const fs = data?.flowSlots ?? NO_SLOTS;
   const nSlots = Math.max(0, fs.bounds.length - 1);
   // One tint scale for every slot cell on the board (puts and calls), so sizes compare across strikes.
+  // Board totals per slot (puts / calls) and their own tint scale: sums dwarf single strikes.
+  const flowTotals = useMemo(() => {
+    const len = fs.bounds.length;
+    const put = sumFlows((data?.rows ?? []).map(r => r.put?.flow ?? null), len);
+    const call = sumFlows((data?.rows ?? []).map(r => r.call?.flow ?? null), len);
+    return { put, call, scale: flowScale([...put.cells, ...call.cells]) };
+  }, [data, fs.bounds.length]);
   const flowCellScale = useMemo(
     () => flowScale((data?.rows ?? []).flatMap(r => [...(r.put?.flow?.cells ?? []), ...(r.call?.flow?.cells ?? [])])),
     [data],
@@ -616,13 +730,26 @@ export default function FreshMoneyBoard() {
               </div>
               <div className="mt-0.5 text-[11.5px] text-zinc-400">
                 {oiMode === 'flow' ? (
-                  <>Each cell = OI change ({data.oiUnit}) in one {fs.slotMin}-min slot counted from the open ({data.market === 'MCX' ? '09:00' : '09:15'}, {fs.bounds[0] ?? '–'} …);
-                    completed slots are frozen, the ringed <i>…</i> cell next to the strike is the current slot so far ·{' '}
-                    <span className="text-emerald-400">green = added</span> · <span className="text-red-400">red = cut</span> · – = no reading ·
-                    bar = today&apos;s OI change vs the previous close as of the last completed slot with a reading ({fs.dayAt ?? '–'}); each slot that
-                    completes adds its cell to it · filled = net added, outline = net cut ·
-                    tint = size of the move (vs this board&apos;s 95th percentile), grey = under 10 % ·
-                    <span className="font-bold text-emerald-400"> ▲n</span> / <span className="font-bold text-red-400">▼n</span> = n completed slots in a row adding / cutting (tinted moves only)</>
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    {/* One-line legend; the full explanation is behind "?". */}
+                    {([['none', 'noise <10 %'], ['low', 'small'], ['mid', 'medium'], ['high', 'big ≥70 %']] as const).map(([t, name]) => (
+                      <span key={t} className="flex items-center gap-1">
+                        {t === 'none'
+                          ? <span className="rounded-sm px-1 text-[10px] text-zinc-500">+9</span>
+                          : <><span className={`rounded-sm px-1 text-[10px] ${TINT.up[t]}`}>+2k</span><span className={`rounded-sm px-1 text-[10px] ${TINT.down[t]}`}>-2k</span></>}
+                        <span>{name}</span>
+                      </span>
+                    ))}
+                    <span><span className="font-bold text-emerald-400">▲n</span> / <span className="font-bold text-red-400">▼n</span> n slots in a row</span>
+                    <span><span className="font-bold text-amber-400">▼n</span> against today&apos;s net</span>
+                    <span className="flex items-center gap-1"><span className="rounded-sm px-1 text-[10px] italic ring-1 ring-inset ring-zinc-500">+1k</span> live slot</span>
+                    <span>number = OI Δ today @ {fs.dayAt ?? '–'}</span>
+                    <button type="button" onClick={toggleFlowHelp} aria-label="How to read the slots" aria-expanded={flowHelp}
+                      title="How to read the slots"
+                      className="flex h-5 w-5 items-center justify-center rounded text-zinc-400 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70">
+                      <CircleHelp className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
                 ) : oiMode === 'delta' ? (
                   <>Bar = Call OI − Put OI (total OI, in {data.oiUnit}) · <span className="text-red-400">red = calls heavier</span> ·{' '}
                     <span className="text-emerald-400">green = puts heavier</span></>
@@ -630,6 +757,23 @@ export default function FreshMoneyBoard() {
                   <>{oiMode === 'total' ? 'Bar = total OI (fill still from today\'s change)' : 'Bar = OI moved'} · filled = building, outline = leaving</>
                 )}
               </div>
+              {oiMode === 'flow' && flowHelp && (
+                <div className="mt-1 space-y-0.5 rounded-md border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-[11.5px] text-zinc-300">
+                  <p>Each cell is the OI change ({data.oiUnit}) in one {fs.slotMin}-minute slot counted from the open ({data.market === 'MCX' ? '09:00' : '09:15'}).
+                    Completed slots are frozen; the ringed, italic cell next to the strike is the current slot so far. – = no OI reading at a slot edge.</p>
+                  <p>Tint = size of the move against this board&apos;s 95th-percentile move: grey under 10 %, then faint, medium, and bold white on a
+                    strong tint for the biggest moves (≥ 70 %). Green = OI added, red = OI cut.</p>
+                  <p>The number and bar beside the strike = today&apos;s OI change vs the previous close as of the last completed slot with a reading
+                    ({fs.dayAt ?? '–'}); each slot that completes adds its cell to it. Filled bar = net added today, outline = net cut.</p>
+                  <p><span className="font-bold text-emerald-400">▲n</span> / <span className="font-bold text-red-400">▼n</span> = the last n completed slots
+                    all added / all cut OI (tinted moves only, runs of 3+). <span className="font-bold text-amber-400">Amber</span> = that run goes against
+                    today&apos;s net (built all day, now unwinding, or the reverse): a possible turn.</p>
+                  <p>Σ shown = the same for the whole board (the {Math.max(flowTotals.put.n, flowTotals.call.n)} strikes with data, not the whole chain), on its
+                    own tint scale; a slot that some strikes have no reading for is left blank rather than summed short.
+                    Hover a cell to highlight its strike and its slot across the board.</p>
+                  <p>On a short window the ladder scrolls inside its own box, so the slot times and Σ row stay pinned at its top.</p>
+                </div>
+              )}
               {oiMode !== 'delta' && oiMode !== 'flow' && <div className="mt-0.5 text-[11px] text-zinc-500">
                 {data.hasBuildup
                   ? <>Tags (option&apos;s own premium vs its previous close): <span className="font-bold text-zinc-300">LB</span> long buildup ·{' '}
@@ -641,30 +785,8 @@ export default function FreshMoneyBoard() {
               </div>}
             </div>
 
-            <div className="overflow-x-auto px-4 pb-2 pt-2">
-             <div className={oiMode === 'flow' ? (tradeMode ? 'min-w-[1916px]' : 'min-w-[1596px]') : tradeMode ? 'min-w-[1040px]' : 'min-w-[720px]'}>
-              <div className={`${gridFor(oiMode, tradeMode)} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
-                {oiMode === 'flow' && <FlowHeader side="put" fs={fs} />}
-                <span className="col-span-2 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `OI Δ today @ ${fs.dayAt ?? '–'}` : 'OI moved'}`}</span>
-                {tradeMode && <span className="pr-1 text-right text-zinc-400">PE trade</span>}
-                <span className="text-center">STRIKE</span>
-                {tradeMode && <span className="pl-1 text-zinc-400">CE trade</span>}
-                <span className="col-span-2 pl-2">{oiMode === 'delta' ? '' : `CALLS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `OI Δ today @ ${fs.dayAt ?? '–'}` : 'OI moved'}`}</span>
-                {oiMode === 'flow' && <FlowHeader side="call" fs={fs} />}
-              </div>
-              {data.rows.map((r, i) => {
-                const next = data.rows[i + 1];
-                const divider = spot !== null && next && r.strike > spot && next.strike <= spot;
-                return (
-                  <React.Fragment key={r.strike}>
-                    <BoardRowView row={r} max={maxAbs} boxed={r.strike === boxedStrike} trade={rowTrade(r.strike)} mode={oiMode}
-                      fs={fs} unit={data.oiUnit} scale={flowCellScale} />
-                    {divider && <SpotDivider spot={spot!} live={liveSpot !== null} />}
-                  </React.Fragment>
-                );
-              })}
-             </div>
-            </div>
+            <Ladder data={data} oiMode={oiMode} tradeMode={tradeMode} fs={fs} maxAbs={maxAbs} boxedStrike={boxedStrike}
+              rowTrade={rowTrade} spot={spot} liveSpot={liveSpot} totals={flowTotals} scale={flowCellScale} />
 
             {/* Cumulative OI over the day (ATM ± strikes), the same widget the Scalp Cockpit uses. It fills its parent's height. */}
             <div className="h-[340px] border-t border-zinc-800 px-4 pb-3 pt-3">

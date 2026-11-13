@@ -310,6 +310,41 @@ export function flowStreak(cells: (number | null)[], slots: number, scale: numbe
   return dir !== 0 && n >= min ? { dir, n } : null;
 }
 
+/** Board totals for one side: per slot the sum over the strikes on the board, plus how many strikes fed it. */
+export interface SumFlow extends SideFlow {
+  /** Per slot (and for `day`): how many strikes had a value. */
+  counts: number[];
+  dayCount: number;
+  /** Strikes that have any reading at all (a strike the collector never recorded is not counted). */
+  n: number;
+}
+
+/** Board totals: per slot index the sum over strikes. A slot (or `day`) only gets a total when EVERY strike with data
+ *  has a value there; otherwise it is null and `counts` says how many did. A partial sum would add fewer strikes than its
+ *  neighbours and show a step that looks like a move (e.g. after a collector restart re-centres its strike band). */
+export function sumFlows(flows: (SideFlow | null)[], cellsLen: number): SumFlow {
+  const known = (v: number | null | undefined): v is number => v != null && Number.isFinite(v);
+  const live = flows.filter((f): f is SideFlow => !!f && (f.cells.some(known) || known(f.day)));
+  const n = live.length;
+  const counts: number[] = [];
+  const cells: (number | null)[] = Array.from({ length: cellsLen }, (_, i) => {
+    let t = 0, c = 0;
+    for (const f of live) { const v = f.cells[i]; if (known(v)) { t += v; c++; } }
+    counts.push(c);
+    return c > 0 && c === n ? t : null;
+  });
+  let day = 0, dayCount = 0;
+  for (const f of live) if (known(f.day)) { day += f.day; dayCount++; }
+  return { cells, day: dayCount > 0 && dayCount === n ? day : null, counts, dayCount, n };
+}
+
+/** A streak against today's net change (e.g. ▼3 beside +14,052: built all day, now unwinding) is a possible turn;
+ *  'with' when they agree; null without a streak or a non-zero day. */
+export function streakVsDay(st: { dir: 1 | -1 } | null, day: number | null): 'with' | 'against' | null {
+  if (!st || day === null || !Number.isFinite(day) || Math.round(day) === 0) return null;
+  return Math.sign(day) === st.dir ? 'with' : 'against';
+}
+
 /** Minutes of the day → "HH:MM". */
 export function fmtMinOfDay(m: number): string {
   const r = Math.round(m);

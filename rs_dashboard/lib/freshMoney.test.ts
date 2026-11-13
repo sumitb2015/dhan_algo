@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak,
+  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay,
 } from './freshMoney.ts';
 
 const HEAD = 'timestamp,spot,expiry,strike,CE_LTP,CE_IV,CE_OI,CE_change_OI,CE_volume,PE_LTP,PE_IV,PE_OI,PE_change_OI,PE_volume';
@@ -280,4 +280,32 @@ test('flowStreak: a grey (under 10 % of the scale) move ends the run, so badges 
   assert.equal(flowStreak([500, 400, 50, 300, 200, 9], 5, 1000), null);            // run of 2 after the grey 50
   assert.deepEqual(flowStreak([500, 400, 150, 300, 200, 9], 5, 1000), { dir: 1, n: 5 });
   assert.equal(flowStreak([500, 400, 300, 200], 4, 0), null);                    // no scale -> every cell is grey
+});
+
+test('sumFlows: a slot is summed only when every strike with data has it; counts say how many did', () => {
+  const t = sumFlows([
+    { cells: [1, null, 3], day: 10 },
+    { cells: [2, null, null], day: null },
+    null,
+    { cells: [-4, null, 5], day: -3 },
+    { cells: [null, null, null], day: null },          // never recorded: not counted
+  ], 3);
+  assert.equal(t.n, 3);
+  assert.deepEqual(t.counts, [3, 0, 2]);
+  assert.deepEqual(t.cells, [-1, null, null]);         // slot 2: only 2 of 3 strikes -> no partial sum
+  assert.equal(t.dayCount, 2);
+  assert.equal(t.day, null);                           // one strike has no day -> no total
+  const full = sumFlows([{ cells: [1, 2], day: 5 }, { cells: [3, 4], day: 6 }], 2);
+  assert.deepEqual([full.cells, full.day, full.n], [[4, 6], 11, 2]);
+  assert.deepEqual(sumFlows([], 2), { cells: [null, null], day: null, counts: [0, 0], dayCount: 0, n: 0 });
+});
+
+test('streakVsDay: with / against / no day / zero day / no streak', () => {
+  assert.equal(streakVsDay({ dir: -1 }, 14052), 'against');
+  assert.equal(streakVsDay({ dir: 1 }, -500), 'against');
+  assert.equal(streakVsDay({ dir: 1 }, 99999), 'with');
+  assert.equal(streakVsDay({ dir: -1 }, -1), 'with');
+  assert.equal(streakVsDay({ dir: 1 }, null), null);
+  assert.equal(streakVsDay({ dir: 1 }, 0.2), null);
+  assert.equal(streakVsDay(null, 500), null);
 });

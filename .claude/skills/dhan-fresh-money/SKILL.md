@@ -29,7 +29,9 @@ positions read twice", "board price snaps back to the startup value", "OI change
   restart causes) falls back to the newest earlier edge and the header says which (`OI Δ today @ HH:MM`); it never
   blanks the column. Cells are tinted by `flowTier` against ONE board-wide `flowScale` (95th percentile of |cell|, not
   the max, so an OI dip cannot wash the board out; under 10 % = grey); `flowStreak` gives the ▲n / ▼n badge (completed
-  slots only, runs of 3+).
+  slots only, runs of 3+), amber when `streakVsDay` says it runs against the day's net (a possible turn). The `Σ shown`
+  totals row (`sumFlows`, known values only) has its OWN `flowScale`: sums dwarf single strikes. On this tab the ladder
+  scrolls in its own box so the slot times + totals stay `sticky` (an overflow-x box is a scroll container).
 - `lib/freshMoneyFiles.ts` - ONE parse per snapshot-file change, shared by the board route and the trade route. Only
   files the board shows keep full snapshots in memory (14 days x 5 underlyings would exceed 100 MB).
 - `lib/freshMoneyWs.ts` + `freshMoneyWsQuote.ts` - WebSocket prices via `scripts/tools/price_ladder_ws.py --name fresh_money`
