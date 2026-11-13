@@ -4,6 +4,7 @@ import fs from 'fs';
 import { computeRegimeSeries, type RegimeInputPoint } from '@/lib/optionsRegime';
 import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 import { listDates, resolveCsvPath } from '@/lib/ivSnapshotFiles';
+import { recordedWings, spotCentredPcr } from '@/lib/cumulativeOiPcr';
 
 const BUILD_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'build_oi_snapshots.py');
 
@@ -169,8 +170,11 @@ export async function GET(request: NextRequest) {
 
   // ── Cumulative OI mode ────────────────────────────────────────────
   if (mode === 'cumulative') {
-    // Collector captures ATM±10 (500pt) for Nifty, ATM±6 (600pt) for Crude — clamp to avoid silent partial-data responses
-    const maxWings = isCrude ? 6 : 10;
+    // The collector records a constant strike set per day (ATM ±10 today, ±20 from 2026-11-16; both for NIFTY-family and
+    // crude). Clamp to what THIS day's file actually holds, so an older ±10 day never returns silent partial sums.
+    let minStrike = Infinity, maxStrike = -Infinity;
+    for (const r of allRows) { if (r.strike < minStrike) minStrike = r.strike; if (r.strike > maxStrike) maxStrike = r.strike; }
+    const maxWings = recordedWings(minStrike, maxStrike, atm, strikeStep);
     const clampedWings = Math.min(Math.max(wings, 1), maxWings);
     const wingRange = clampedWings * strikeStep;
 
@@ -247,8 +251,15 @@ export async function GET(request: NextRequest) {
       regimeConfirmed: regimePoints[i].confirmed,
     }));
 
+    // PCR is a single point-in-time ratio, so unlike the series above (fixed window: the regime maths needs a
+    // constant strike set) it can follow spot: centred on the latest spot, inside the recorded strikes.
+    const lastTs = sorted.length ? sorted[sorted.length - 1][0] : null;
+    const lastRows = lastTs ? allRows.filter(r => r.timestamp === lastTs).map(r => ({ strike: r.strike, ceOI: r.CE_OI, peOI: r.PE_OI })) : [];
+    const lastSpot = sorted.length ? sorted[sorted.length - 1][1].spot : atm;
+    const pcr = lastRows.length ? spotCentredPcr(lastRows, lastSpot, strikeStep, clampedWings, minStrike, maxStrike) : null;
+
     const response = NextResponse.json({
-      success: true, date, atm, expiry, wings: clampedWings, data, regime,
+      success: true, date, atm, expiry, wings: clampedWings, maxWings, pcr, data, regime,
     });
     response.headers.set('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=60');
     return response;

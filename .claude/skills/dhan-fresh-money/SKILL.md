@@ -68,3 +68,12 @@ never start a second `next dev`. Never add a real-order case.
 - Deriving exit size from the broker net instead of the ledger's own fills.
 - Reading REST quotes for the board spot (the quote lane crawls after a 429) - use the WebSocket price.
 - Treating a missing LTP as 0 in P&L, or a missing previous OI as 0 in change.
+
+## Cumulative OI chart on the board (2026-11-13)
+`CumulativeOiWidget` (shared with the Scalp Cockpit) reads `/api/options/iv-history?mode=cumulative`. The **series and
+regime stay on a fixed strike window** (ATM locked at the day's first snapshot): `lib/optionsRegime.ts` treats the CE/PE
+sums as one constant-membership series, so a window that follows spot makes D = PE-CE jump at every shift and spikes
+slope / acceleration / z-scores. Only the **PCR pill** is spot-centred (`lib/cumulativeOiPcr.ts`, latest snapshot only,
+shifted inward / narrowed at the recorded edge, `clipped` -> asterisk). The picker width is `maxWings`, derived from the
+strikes the day's file really holds (collectors record ATM +-20 from 2026-11-16, +-10 before; the fixed set is widened,
+never re-centred per poll, because Fresh Money's `_prev_close.json` sidecar covers that fixed set).

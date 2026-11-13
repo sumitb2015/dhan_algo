@@ -40,6 +40,10 @@ interface CumulativeResponse {
   atm: number;
   expiry: string;
   wings: number;
+  /** Widest window this day's file supports (the collector's recorded band). */
+  maxWings?: number;
+  /** Put ÷ call OI on a window centred on the latest spot (the chart itself stays on the locked-ATM window). */
+  pcr?: { value: number | null; centre: number; wings: number; clipped: boolean } | null;
   data: TimePoint[];
   regime?: RegimeSnapshot;
   error?: string;
@@ -135,15 +139,11 @@ export interface CumulativeOiWidgetProps {
   onSelectStrikeBand?: (wings: number) => void;
 }
 
-/** The collector records ATM ±10 strikes for the NIFTY family and ±6 for crude; the API clamps to that, so the picker
- *  offers only windows the data can really give (a ±15 button used to return the ±10 numbers). */
-function wingChoices(underlying: string): { max: number; options: number[] } {
-  const max = /^CRUDEOIL/i.test(underlying) ? 6 : 10;
-  return { max, options: [Math.round(max / 2), max] };
-}
+/** Before the first reply: the collector's older ±10 band. The reply's `maxWings` (this day's recorded band, ±20 from
+ *  2026-11-16) replaces it, and the API clamps to it, so the picker only offers windows the data can really give. */
+const FALLBACK_MAX_WINGS = 10;
 
 export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetProps) {
-  const { max: maxWings, options: wingOptions } = wingChoices(underlying);
   const [data, setData] = useState<CumulativeResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -153,7 +153,6 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
 
   const fetchData = useCallback(async (wingVal = wings, silent = false) => {
     const seq = ++requestSeq.current;
-    wingVal = Math.min(wingVal, maxWings);
     if (!silent) setLoading(true);
     else setIsRefreshing(true);
     try {
@@ -176,7 +175,7 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
         setIsRefreshing(false);
       }
     }
-  }, [underlying, wings, maxWings]);
+  }, [underlying, wings]);
 
   useEffect(() => {
     setData(null);
@@ -188,13 +187,19 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
     return () => clearInterval(interval);
   }, [fetchData, wings, underlying]);
 
-  const shownWings = Math.min(wings, maxWings);
+  const maxWings = data?.maxWings ?? FALLBACK_MAX_WINGS;
+  const wingOptions = [Math.round(maxWings / 2), maxWings];
+  const shownWings = data?.wings ?? Math.min(wings, maxWings);
   const istToday = new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
   const points = data?.data ?? [];
   const regime = data?.regime;
 
   const latestPoint = points.length > 0 ? points[points.length - 1] : null;
-  const currentPcr = latestPoint && latestPoint.ceOI > 0 ? (latestPoint.peOI / latestPoint.ceOI).toFixed(2) : '—';
+  const spotPcr = data?.pcr ?? null;
+  const currentPcr = spotPcr
+    ? (spotPcr.value !== null ? spotPcr.value.toFixed(2) : '—')
+    : latestPoint && latestPoint.ceOI > 0 ? (latestPoint.peOI / latestPoint.ceOI).toFixed(2) : '—';
+  const pcrWings = spotPcr?.wings ?? shownWings;
   const currentDiff = latestPoint ? latestPoint.peOI - latestPoint.ceOI : 0;
 
   const timeBounds = useMemo(() => {
@@ -236,8 +241,8 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
           {latestPoint && (
             <div className="hidden sm:flex items-center gap-1 text-[10px] font-mono tabular-nums">
               <span className="px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-800 text-zinc-300"
-                title={`Put OI ÷ Call OI summed over ATM ±${shownWings} strikes (not the whole chain)${data && data.date !== istToday ? ` · session ${data.date}` : ''}`}>
-                PCR ±{shownWings}{data && data.date !== istToday && <span className="text-amber-300"> {data.date.slice(5)}</span>} <span className="font-bold text-white">{currentPcr}</span>
+                title={`Put OI ÷ Call OI over ±${pcrWings} strikes${spotPcr ? ` centred on the latest spot (${spotPcr.centre})${spotPcr.clipped ? ', shifted or narrowed at the edge of the recorded strikes' : ''}` : ' around the day\'s opening ATM'} — not the whole chain${data && data.date !== istToday ? ` · session ${data.date}` : ''}`}>
+                PCR ±{pcrWings}{spotPcr?.clipped && <span className="text-amber-300" aria-label="window clipped">*</span>}{data && data.date !== istToday && <span className="text-amber-300"> {data.date.slice(5)}</span>} <span className="font-bold text-white">{currentPcr}</span>
               </span>
               <span className={`px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-800 font-bold ${currentDiff >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                 {currentDiff >= 0 ? '+' : ''}{fmtOI(currentDiff)}

@@ -65,7 +65,7 @@ async function install(page: Page, opts: { watcherAlive?: boolean; withPosition?
         time: '', ts: now - (11 - i) * 300_000, spot: 8100 + i, ceOI: 1_000_000 + i * 20_000, peOI: 900_000 + i * 35_000,
         diff: -100_000 + i * 15_000, oiZ: 0, slopeZ: 0, wpiZ: 0, regimeLabel: 'Neutral', regimeConfirmed: false,
       }));
-      return json(route, { success: true, date: istToday(), atm: 8100, expiry: '2026-11-17', wings: 10, data });
+      return json(route, { success: true, date: istToday(), atm: 8100, expiry: '2026-11-17', wings: 10, maxWings: 10, pcr: { value: 1.23, centre: 8100, wings: 10, clipped: false }, data });
     }
     if (p === '/api/crudeoil-oi-collector') return json(route, { success: true, status: { status: 'RUNNING', last_update: istNow() } });
     if (req.method() !== 'GET') { blocked.push(`${req.method()} ${p}`); return route.fulfill({ status: 599, body: 'blocked by test' }); }
@@ -239,10 +239,10 @@ test('header shows the labelled New positions and Total groups', async ({ page }
   await expect(page.getByText(/Board fresh money|fresh share|normal range/i)).toHaveCount(0);
   await expect(page.getByText('Cumulative OI', { exact: true })).toBeVisible();
   await expect(page.locator('.recharts-area').first()).toBeVisible();
-  // Crude records ATM ±6: the picker offers only what the data can give, and the PCR pill names its window.
-  await expect(page.getByRole('button', { name: '±3', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: '±6', exact: true })).toBeVisible();
+  // The picker offers half and full of the recorded band the API reports; the PCR pill shows the spot-centred value.
+  await expect(page.getByRole('button', { name: '±5', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '±10', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '±15', exact: true })).toHaveCount(0);
-  await expect(page.getByText(/PCR ±6/)).toContainText('1.05');
+  await expect(page.getByText(/PCR ±10/)).toContainText('1.23');
   await page.screenshot({ path: '/tmp/claude-1000/-home-sumit-dhan-algo/69b017f5-26e6-4b1a-b412-ef2f63cac250/scratchpad/fm-header.png', fullPage: true });
 });
