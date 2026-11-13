@@ -4,7 +4,7 @@ import fs from 'fs';
 import { computeRegimeSeries, type RegimeInputPoint } from '@/lib/optionsRegime';
 import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 import { listDates, resolveCsvPath } from '@/lib/ivSnapshotFiles';
-import { recordedWings, spotCentredPcr } from '@/lib/cumulativeOiPcr';
+import { commonStrikeBand, lockedAtm, recordedWings, snapshotBand, spotCentredPcr } from '@/lib/cumulativeOiPcr';
 
 const BUILD_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'build_oi_snapshots.py');
 
@@ -165,16 +165,17 @@ export async function GET(request: NextRequest) {
   const firstRow = allRows[0];
   const strikeStep = (underlying === 'BANKNIFTY' || underlying === 'SENSEX' || isCrude) ? 100 : 50;
   // ATM is locked at 9:15 (first snapshot) — the collector records a constant strike set per day
-  const atm    = Math.round(firstRow.spot / strikeStep) * strikeStep;
+  // (the centre of the first snapshot's recorded strikes — rounding its spot can land one step off the locked ATM).
+  const atm    = lockedAtm(allRows, firstRow.timestamp, strikeStep) ?? Math.round(firstRow.spot / strikeStep) * strikeStep;
   const expiry = firstRow.expiry;
 
   // ── Cumulative OI mode ────────────────────────────────────────────
   if (mode === 'cumulative') {
-    // The collector records a constant strike set per day (ATM ±10 today, ±20 from 2026-11-16; both for NIFTY-family and
-    // crude). Clamp to what THIS day's file actually holds, so an older ±10 day never returns silent partial sums.
-    let minStrike = Infinity, maxStrike = -Infinity;
-    for (const r of allRows) { if (r.strike < minStrike) minStrike = r.strike; if (r.strike > maxStrike) maxStrike = r.strike; }
-    const maxWings = recordedWings(minStrike, maxStrike, atm, strikeStep);
+    // The collector records ATM ±N (±10 until 2026-11-13, ±20 after), but a restart re-locks ATM and appends to the same
+    // file, so one day can hold two strike sets. Clamp to the strikes EVERY snapshot holds, so the series never sums
+    // fewer strikes early in the day than late (a silent step in the totals and the regime z-scores).
+    const band = commonStrikeBand(allRows);
+    const maxWings = band ? recordedWings(band.lo, band.hi, atm, strikeStep) : 1;
     const clampedWings = Math.min(Math.max(wings, 1), maxWings);
     const wingRange = clampedWings * strikeStep;
 
@@ -256,7 +257,9 @@ export async function GET(request: NextRequest) {
     const lastTs = sorted.length ? sorted[sorted.length - 1][0] : null;
     const lastRows = lastTs ? allRows.filter(r => r.timestamp === lastTs).map(r => ({ strike: r.strike, ceOI: r.CE_OI, peOI: r.PE_OI })) : [];
     const lastSpot = sorted.length ? sorted[sorted.length - 1][1].spot : atm;
-    const pcr = lastRows.length ? spotCentredPcr(lastRows, lastSpot, strikeStep, clampedWings, minStrike, maxStrike) : null;
+    const lastBand = lastTs ? snapshotBand(allRows, lastTs) : null;   // the latest snapshot's own recorded strikes
+    const pcr = lastRows.length && lastBand
+      ? spotCentredPcr(lastRows, lastSpot, strikeStep, clampedWings, lastBand.lo, lastBand.hi) : null;
 
     const response = NextResponse.json({
       success: true, date, atm, expiry, wings: clampedWings, maxWings, pcr, data, regime,

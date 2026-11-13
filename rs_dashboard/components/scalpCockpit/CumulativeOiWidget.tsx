@@ -148,6 +148,7 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [wings, setWings] = useState(10);
+  const [fetchedDay, setFetchedDay] = useState('');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const requestSeq = useRef(0);
 
@@ -162,6 +163,8 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
       if (seq !== requestSeq.current) return;
       if (json.success) {
         setData(json);
+        // The IST day this reply was fetched on (read here, not during render: Date.now() in render is impure).
+        setFetchedDay(new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10));
         setError('');
       } else {
         setError(json.error || 'Failed to load Cumulative OI');
@@ -188,9 +191,9 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
   }, [fetchData, wings, underlying]);
 
   const maxWings = data?.maxWings ?? FALLBACK_MAX_WINGS;
-  const wingOptions = [Math.round(maxWings / 2), maxWings];
+  const wingOptions = [...new Set([Math.round(maxWings / 2), maxWings])];   // [1, 1] when only ±1 is recorded
   const shownWings = data?.wings ?? Math.min(wings, maxWings);
-  const istToday = new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
+  const istToday = fetchedDay;
   const points = data?.data ?? [];
   const regime = data?.regime;
 

@@ -20,6 +20,44 @@ export interface SpotPcr {
   clipped: boolean;
 }
 
+export interface BandRow { timestamp: string; strike: number }
+export interface StrikeBand { lo: number; hi: number }
+
+/** Lowest and highest strike of one snapshot (`timestamp`); null when it has no rows. */
+export function snapshotBand(rows: BandRow[], timestamp: string): StrikeBand | null {
+  let lo = Infinity, hi = -Infinity;
+  for (const r of rows) {
+    if (r.timestamp !== timestamp) continue;
+    if (r.strike < lo) lo = r.strike;
+    if (r.strike > hi) hi = r.strike;
+  }
+  return lo <= hi ? { lo, hi } : null;
+}
+
+/** The strike range EVERY snapshot in the file covers (highest per-snapshot low, lowest per-snapshot high). A
+ *  collector restart re-locks ATM and appends to the same day's file (possibly with a different ±N), so the union of
+ *  all rows overstates what the early snapshots hold. Null when there are no rows or the snapshots share no strike. */
+export function commonStrikeBand(rows: BandRow[]): StrikeBand | null {
+  const per = new Map<string, StrikeBand>();
+  for (const r of rows) {
+    const b = per.get(r.timestamp);
+    if (!b) per.set(r.timestamp, { lo: r.strike, hi: r.strike });
+    else { if (r.strike < b.lo) b.lo = r.strike; if (r.strike > b.hi) b.hi = r.strike; }
+  }
+  if (!per.size) return null;
+  let lo = -Infinity, hi = Infinity;
+  for (const b of per.values()) { if (b.lo > lo) lo = b.lo; if (b.hi < hi) hi = b.hi; }
+  return lo <= hi ? { lo, hi } : null;
+}
+
+/** The collector's locked ATM: it records ATM ±N, so the centre of the first snapshot's strikes, snapped to the
+ *  step. Rounding the first row's spot can land one step off (the collector locked on an earlier spot read). Null
+ *  when the first snapshot has no rows. */
+export function lockedAtm(rows: BandRow[], firstTimestamp: string, step: number): number | null {
+  const b = snapshotBand(rows, firstTimestamp);
+  return b ? Math.round((b.lo + b.hi) / 2 / step) * step : null;
+}
+
 /** Widest symmetric window (strikes each side of `atm`) the recorded strike set supports; at least 1. */
 export function recordedWings(minStrike: number, maxStrike: number, atm: number, step: number): number {
   const w = Math.floor(Math.min(atm - minStrike, maxStrike - atm) / step);

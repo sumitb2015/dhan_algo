@@ -97,6 +97,10 @@ export async function GET(req: NextRequest) {
   if (!parsed || !last) {
     return NextResponse.json({ error: `The ${date} snapshot file has no rows yet` }, { status: 404 });
   }
+  // Re-checked on this parse: the file can change after the date loop above picked it.
+  if (!parsed.cumulative) {
+    return NextResponse.json({ error: `The ${date} snapshot file is a 1-minute backfill, which is not shown` }, { status: 404 });
+  }
 
   const toLots = (n: number | null) => (n === null ? null : lot ? n / lot : n);
   // Option previous closes for the buildup tags: the collector's side file next to the CSV, for this expiry only.

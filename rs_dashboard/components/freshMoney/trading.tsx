@@ -330,23 +330,37 @@ function ExitPopoverButton({ pos, exit, strike, opt, onSetExit }: {
   const [saving, setSaving] = useState(false);
   const btn = useRef<HTMLButtonElement>(null);
   const pop = useRef<HTMLDivElement>(null);
+  const isOpen = at !== null;
+  /** Popover position under the button (clamped to the viewport); null before the button mounts. Refs only. */
+  const anchor = (): { x: number; y: number } | null => {
+    const r = btn.current?.getBoundingClientRect();
+    if (!r) return null;
+    const w = 440;
+    return { x: Math.max(8, Math.min(window.innerWidth - w - 8, r.left - w / 2)), y: r.bottom + 4 };
+  };
   useEffect(() => {
-    if (!at) return;
+    if (!isOpen) return;
     const down = (e: MouseEvent) => {
       const t = e.target as Node;
       if (!pop.current?.contains(t) && !btn.current?.contains(t)) setAt(null);
     };
     const key = (e: KeyboardEvent) => { if (e.key === 'Escape') setAt(null); };
+    // Fixed-positioned, so it is re-placed under its button when the page or the board's own scroller moves
+    // (never re-opened: a late event after close leaves it closed).
+    const follow = () => {
+      const p = anchor();
+      if (p) setAt(prev => (!prev || (prev.x === p.x && prev.y === p.y) ? prev : p));
+    };
     document.addEventListener('mousedown', down);
     document.addEventListener('keydown', key);
-    return () => { document.removeEventListener('mousedown', down); document.removeEventListener('keydown', key); };
-  }, [at]);
-  const open = () => {
-    const r = btn.current?.getBoundingClientRect();
-    if (!r) return;
-    const w = 440;
-    setAt({ x: Math.max(8, Math.min(window.innerWidth - w - 8, r.left - w / 2)), y: r.bottom + 4 });
-  };
+    window.addEventListener('scroll', follow, true);
+    window.addEventListener('resize', follow);
+    return () => {
+      document.removeEventListener('mousedown', down); document.removeEventListener('keydown', key);
+      window.removeEventListener('scroll', follow, true); window.removeEventListener('resize', follow);
+    };
+  }, [isOpen]);
+  const open = () => { const p = anchor(); if (p) setAt(p); };
   const tone = exitNeedsLook(exit) ? 'text-amber-400' : exit ? 'text-sky-400' : 'text-zinc-500';
   const dir = pos.netQty > 0 ? 'long' : 'short';
   return (
