@@ -9,8 +9,8 @@ const istNow = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().replace
 const istToday = () => istNow().slice(0, 10);
 
 // Slot cells: 10 completed slots oldest first, then the running slot; the oldest edge had no reading (null).
-const PUT_FLOW = { cells: [null, 2, 3, 4, 6, 8, 120, 0, -40, 1500, 77], total: 1657 };
-const CALL_FLOW = { cells: [11, 12, 13, 14, 15, 10, 20, 30, -900, -12000, 5], total: -12835 };
+const PUT_FLOW = { cells: [null, 2, 3, 4, 6, 8, 120, 0, -40, 1500, 77], day: 1657 };
+const CALL_FLOW = { cells: [11, 12, 13, 14, 15, 10, 20, 30, -900, -12000, 5], day: -12835 };
 const side = (oi: number, chg: number, flow: unknown) => ({ oi, oiMoved: chg, buildup: null, flow });
 function board() {
   const rows = [8300, 8200, 8100, 8000, 7900].map(strike => ({ strike, put: side(4000, 300, PUT_FLOW), call: side(3000, -200, CALL_FLOW) }));
@@ -19,7 +19,7 @@ function board() {
     lot: 1, oiUnit: 'lots', market: 'MCX', mult: 100, day: { from: 540, to: 1435 }, rows,
     hasBuildup: false,
     flowSlots: { slotMin: 3, bounds: ['10:00', '10:03', '10:06', '10:09', '10:12', '10:15', '10:18', '10:21', '10:24', '10:27', '10:30'],
-      boundOk: [false, true, true, true, true, true, true, true, true, true, true], lastTs: '10:31:20' },
+      boundOk: [false, true, true, true, true, true, true, true, true, true, true], lastTs: '10:31:20', dayAt: '10:30' },
   };
 }
 
@@ -192,7 +192,7 @@ test('Δ OI tab: call OI − put OI on the left, coloured by the heavier side; r
 test('3m slots tab: frozen slots + shaded running slot, coloured by sign, running next to the strike; survives a reload', async ({ page }) => {
   const m = await install(page);
   await page.getByRole('tab', { name: '3m slots' }).click();
-  await expect(page.getByText('PUTS: 10 × 3 min + now')).toBeVisible();
+  await expect(page.getByText('PUTS: OI Δ today @ 10:30')).toBeVisible();
   // Completed slot: exact value and slot in the hover.
   const add = page.getByText('+1.5k', { exact: true }).first();
   await expect(add).toHaveClass(/text-emerald-400/);
@@ -206,8 +206,9 @@ test('3m slots tab: frozen slots + shaded running slot, coloured by sign, runnin
   // An edge with no reading.
   const unknown = page.getByTitle('10:00–10:03: no OI reading at a slot edge').first();
   await expect(unknown).toHaveText('–');
-  // Totals.
-  await expect(page.getByText('-12,835', { exact: true }).first()).toHaveAttribute('title', 'OI change 10:00–10:31:20: -12,835 lots');
+  // Today's change as of the last completed slot, with the live figure in the hover.
+  await expect(page.getByText('-12,835', { exact: true }).first()).toHaveAttribute('title',
+    "Today's OI change vs the previous close, as of 10:30: -12,835 lots · live (10:31:20): -200 lots");
   // Running slot sits next to the strike on both sides.
   const row = page.locator('div.grid', { hasText: '8100' }).filter({ hasText: '+1.5k' }).first();
   const text = (await row.innerText()).replace(/\s+/g, ' ');

@@ -23,7 +23,11 @@ positions read twice", "board price snaps back to the startup value", "OI change
   completed slots (frozen) plus the running slot. A slot edge reads the latest snapshot at or before it within 1 min
   (a gap or another expiry = null, never 0); the open edge is the previous close's OI (`oi − change` of the day's first
   snapshot). Dhan's chain OI moves about once a minute and swings back and forth (vault: dhan-observed-quirks), so a
-  single cell is weak evidence; runs and the total are stronger.
+  single cell is weak evidence; runs are stronger. The bar / number beside the strike is `day`: the strike's OI change
+  vs the previous close (the snapshot's own `change_OI`) as of `dayAt`, the latest completed edge with a reading, so
+  each completed slot adds exactly its cell to it. A gap at that edge (a collector restart, which every dashboard
+  restart causes) falls back to the newest earlier edge and the header says which (`OI Δ today @ HH:MM`); it never
+  blanks the column.
 - `lib/freshMoneyFiles.ts` - ONE parse per snapshot-file change, shared by the board route and the trade route. Only
   files the board shows keep full snapshots in memory (14 days x 5 underlyings would exceed 100 MB).
 - `lib/freshMoneyWs.ts` + `freshMoneyWsQuote.ts` - WebSocket prices via `scripts/tools/price_ladder_ws.py --name fresh_money`

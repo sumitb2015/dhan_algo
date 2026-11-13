@@ -148,12 +148,14 @@ const lab = (f: ReturnType<typeof slotsOf>) => f.bounds.map(fmtMinOfDay);
 
 test('oiFlow: slots are fixed offsets from the open; 5 completed + the running one; total adds up', () => {
   // CE +100 per minute from 09:15; last snapshot 10:31:00 -> running slot 10:30-10:33.
-  const f = slotsOf(series('09:15', '10:31', m => 1000 + 100 * (m - OPEN), () => 7));
+  // Previous close OI 1000, so today's change = 100 per minute too.
+  const f = slotsOf(series('09:15', '10:31', m => 1000 + 100 * (m - OPEN), () => 7, () => false, '2026-11-12', m => 100 * (m - OPEN)));
   assert.deepEqual(lab(f), ['10:15', '10:18', '10:21', '10:24', '10:27', '10:30']);
   assert.equal(f.lastTs, '10:31:00');
   const s = f.byStrike.get(22550)!;
   assert.deepEqual(s.ce.cells, [300, 300, 300, 300, 300, 100]);   // last = running 10:30 -> 10:31
-  assert.equal(s.ce.total, 1600);
+  assert.equal(s.ce.day, 7500);                                     // today's change at the 10:30 edge (75 min x 100)
+  assert.equal(s.pe.day, null);                                     // no change on record -> unknown, not 0
   assert.deepEqual(s.pe.cells, [0, 0, 0, 0, 0, 0]);
 });
 
@@ -177,25 +179,25 @@ test('oiFlow: the open boundary is the previous close OI (OI - change), so the f
   assert.deepEqual(f.boundOk, [false, false, false, false, true, true]);
   const s = f.byStrike.get(22550)!;
   assert.deepEqual(s.ce.cells, [null, null, null, null, 600, 400]);   // 09:15-09:18 from 5000, running 09:18-09:20
-  assert.equal(s.ce.total, null);
+  assert.equal(s.ce.day, 600);                                      // = the open slot's cell
   // No change on record -> no open value (never assume the change was 0).
   assert.deepEqual(slotsOf(series('09:15', '09:20', m => 5000 + m, () => 1, m => m < OPEN + 0.5)).byStrike.get(22550)!.ce.cells.slice(4, 5), [null]);
 });
 
 test('oiFlow: a collector gap at a slot edge nulls the slots it bounds; the total still comes from the ends', () => {
   // No snapshots 10:22-10:24:00 -> the 10:24 edge would read 10:21:30 (2.5 min early): refused.
-  const snaps = series('09:15', '10:31', m => 100 * m, () => 7, m => m >= M('10:22') && m <= M('10:24'));
+  const snaps = series('09:15', '10:31', m => 100 * m, () => 7, m => m >= M('10:22') && m <= M('10:24'), '2026-11-12', m => 100 * (m - OPEN));
   const f = slotsOf(snaps);
   assert.deepEqual(f.boundOk, [true, true, true, false, true, true]);
   const s = f.byStrike.get(22550)!;
   assert.deepEqual(s.ce.cells, [300, 300, null, null, 300, 100]);
-  assert.equal(s.ce.total, 1600);
+  assert.equal(s.ce.day, 7500);   // the latest completed edge (10:30) has a reading
 });
 
 test('oiFlow: a missing OI is null, never 0', () => {
   const s = slotsOf(series('09:15', '10:31', m => (m < M('10:20') ? '' : 1000), () => 1)).byStrike.get(22550)!;
   assert.deepEqual(s.ce.cells, [null, null, 0, 0, 0, 0]);
-  assert.equal(s.ce.total, null);
+  assert.equal(s.ce.day, null);
 });
 
 test('oiFlow: an edge on another expiry is refused', () => {
@@ -211,9 +213,32 @@ test('oiFlow: MCX slots count from 09:00', () => {
   assert.deepEqual(f.bounds.map(fmtMinOfDay), ['08:54', '08:57', '09:00', '09:03', '09:06', '09:09']);
 });
 
+test('oiFlow: a gap at the latest edge falls back to the newest earlier edge for today\'s change, labelled', () => {
+  // No snapshots 10:28:00-10:30:00 (e.g. a collector restart): the 10:30 edge would read 10:27:30, 2.5 min early.
+  const chg = (m: number) => 100 * (m - OPEN);
+  const f = slotsOf(series('09:15', '10:31', m => 1000 + chg(m), () => 1, m => m >= M('10:28') && m <= M('10:30'), '2026-11-12', chg));
+  assert.deepEqual(f.boundOk, [true, true, true, true, true, false]);
+  assert.equal(fmtMinOfDay(f.dayAt!), '10:27');
+  assert.equal(f.byStrike.get(22550)!.ce.day, 7200);                 // change at 10:27, not blank
+  // Every shown edge empty -> no day, no label.
+  const none = slotsOf(series('10:29', '10:31', m => 1000 + chg(m), () => 1, () => false, '2026-11-12', chg)
+    .filter(s => s.min > M('10:30')));
+  assert.equal(none.dayAt, null);
+  assert.equal(none.byStrike.get(22550)!.ce.day, null);
+});
+
 test('oiFlow: no snapshots', () => {
   const f = oiFlow([], { anchorMin: OPEN });
   assert.equal(f.byStrike.size, 0);
   assert.equal(f.bounds.length, 6);
   assert.deepEqual(f.boundOk, [false, false, false, false, false, false]);
+  assert.equal(f.dayAt, null);
+});
+
+test('oiFlow: each completed slot adds exactly its cell to today\'s change', () => {
+  const ce = (m: number) => 4000 + Math.round(37 * Math.sin(m) * 100) + 50 * (m - OPEN);
+  const chg = (m: number) => ce(m) - 3000;   // previous close OI 3000
+  const a = slotsOf(series('09:15', '10:32', ce, () => 1, () => false, '2026-11-12', chg)).byStrike.get(22550)!.ce;
+  const b = slotsOf(series('09:15', '10:33', ce, () => 1, () => false, '2026-11-12', chg)).byStrike.get(22550)!.ce;
+  assert.equal(b.day! - a.day!, b.cells[4]);   // the 10:30-10:33 slot that just completed
 });

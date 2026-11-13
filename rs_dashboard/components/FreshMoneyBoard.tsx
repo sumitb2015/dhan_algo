@@ -117,7 +117,7 @@ function DeltaBar({ delta, max }: { delta: number | null; max: number }) {
 
 type FlowSlots = FreshMoneyResponse['flowSlots'];
 /** A server that predates the slot tab sends no layout: no cells, nothing to break. */
-const NO_SLOTS: FlowSlots = { slotMin: 3, bounds: [], boundOk: [], lastTs: '' };
+const NO_SLOTS: FlowSlots = { slotMin: 3, bounds: [], boundOk: [], lastTs: '', dayAt: null };
 
 /** Slot i (oldest first; the last index = the running slot): label, hover text and whether it is still running. */
 function slotInfo(fs: FlowSlots, i: number): { head: string; span: string; running: boolean; ok: boolean } {
@@ -176,15 +176,17 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit }: {
   /** Slot layout and the OI unit, for the slot-flow tab. */
   fs: FlowSlots; unit: string;
 }) {
-  const shown = (sd: FreshMoneyRow['put']) => (sd ? (mode === 'total' ? sd.oi : mode === 'flow' ? sd.flow?.total ?? null : sd.oiMoved) : null);
+  const shown = (sd: FreshMoneyRow['put']) => (sd ? (mode === 'total' ? sd.oi : mode === 'flow' ? sd.flow?.day ?? null : sd.oiMoved) : null);
   const label = (sd: FreshMoneyRow['put']) => (sd
-    ? (mode === 'total' ? fmtOiAbs(sd.oi) : mode === 'flow' ? fmtOi(sd.flow?.total ?? null) : fmtOi(sd.oiMoved)) : '–');
-  // In flow mode the bar's fill / outline follows the slots' total (added vs cut), not today's change.
-  const moved = (sd: FreshMoneyRow['put']) => (mode === 'flow' ? sd?.flow?.total ?? null : sd?.oiMoved ?? null);
+    ? (mode === 'total' ? fmtOiAbs(sd.oi) : mode === 'flow' ? fmtOi(sd.flow?.day ?? null) : fmtOi(sd.oiMoved)) : '–');
+  // In flow mode the bar is today's OI change as of the latest completed slot (it grows by each completed slot's cell).
+  const moved = (sd: FreshMoneyRow['put']) => (mode === 'flow' ? sd?.flow?.day ?? null : sd?.oiMoved ?? null);
   const flowTitle = (sd: FreshMoneyRow['put']) => {
     if (mode !== 'flow') return undefined;
-    const from = fs.bounds[0];
-    return `OI change ${from && fs.lastTs ? `${from}–${fs.lastTs}` : 'over the shown slots'}: ${sd?.flow?.total == null ? 'unknown' : `${fmtOi(sd.flow.total)} ${unit}`}`;
+    const v = (n: number | null | undefined) => (n == null ? 'unknown' : `${fmtOi(n)} ${unit}`);
+    const late = fs.dayAt && fs.dayAt !== fs.bounds[fs.bounds.length - 1] ? ' (latest slot edge had no reading)' : '';
+    return `Today's OI change vs the previous close, as of ${fs.dayAt ?? 'no slot edge with a reading'}${late}: ${v(sd?.flow?.day)}`
+      + ` · live (${fs.lastTs || 'now'}): ${v(sd?.oiMoved)}`;
   };
   const p = row.put, c = row.call;
   const cell = (side: 'put' | 'call') => {
@@ -371,7 +373,7 @@ export default function FreshMoneyBoard() {
       for (const r of data?.rows ?? []) mx = Math.max(mx, Math.abs(oiDelta(r) ?? 0));
       return mx;
     }
-    const v = (sd: FreshMoneyRow['put']) => Math.abs((oiMode === 'total' ? sd?.oi : oiMode === 'flow' ? sd?.flow?.total : sd?.oiMoved) ?? 0);
+    const v = (sd: FreshMoneyRow['put']) => Math.abs((oiMode === 'total' ? sd?.oi : oiMode === 'flow' ? sd?.flow?.day : sd?.oiMoved) ?? 0);
     for (const r of data?.rows ?? []) mx = Math.max(mx, v(r.put), v(r.call));
     return mx;
   }, [data, oiMode]);
@@ -581,7 +583,8 @@ export default function FreshMoneyBoard() {
                   <>Each cell = OI change ({data.oiUnit}) in one {fs.slotMin}-min slot counted from the open ({data.market === 'MCX' ? '09:00' : '09:15'}, {fs.bounds[0] ?? '–'} …);
                     completed slots are frozen, the shaded <i>…</i> cell next to the strike is the current slot so far ·{' '}
                     <span className="text-emerald-400">green = added</span> · <span className="text-red-400">red = cut</span> · – = no reading ·
-                    bar = total since {fs.bounds[0] ?? '–'}, filled = added, outline = cut</>
+                    bar = today&apos;s OI change vs the previous close as of the last completed slot with a reading ({fs.dayAt ?? '–'}); each slot that
+                    completes adds its cell to it · filled = net added, outline = net cut</>
                 ) : oiMode === 'delta' ? (
                   <>Bar = Call OI − Put OI (total OI, in {data.oiUnit}) · <span className="text-red-400">red = calls heavier</span> ·{' '}
                     <span className="text-emerald-400">green = puts heavier</span></>
@@ -604,11 +607,11 @@ export default function FreshMoneyBoard() {
              <div className={oiMode === 'flow' ? (tradeMode ? 'min-w-[1876px]' : 'min-w-[1556px]') : tradeMode ? 'min-w-[1040px]' : 'min-w-[720px]'}>
               <div className={`${gridFor(oiMode, tradeMode)} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
                 {oiMode === 'flow' && <FlowHeader side="put" fs={fs} />}
-                <span className="col-span-2 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `${nSlots} × ${fs.slotMin} min + now` : 'OI moved'}`}</span>
+                <span className="col-span-2 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `OI Δ today @ ${fs.dayAt ?? '–'}` : 'OI moved'}`}</span>
                 {tradeMode && <span className="pr-1 text-right text-zinc-400">PE trade</span>}
                 <span className="text-center">STRIKE</span>
                 {tradeMode && <span className="pl-1 text-zinc-400">CE trade</span>}
-                <span className="col-span-2 pl-2">{oiMode === 'delta' ? '' : `CALLS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `${nSlots} × ${fs.slotMin} min + now` : 'OI moved'}`}</span>
+                <span className="col-span-2 pl-2">{oiMode === 'delta' ? '' : `CALLS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `OI Δ today @ ${fs.dayAt ?? '–'}` : 'OI moved'}`}</span>
                 {oiMode === 'flow' && <FlowHeader side="call" fs={fs} />}
               </div>
               {data.rows.map((r, i) => {

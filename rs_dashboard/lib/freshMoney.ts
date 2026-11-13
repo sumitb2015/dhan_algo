@@ -188,8 +188,9 @@ export function fmtOiAbs(n: number | null): string {
 // ── OI flow in fixed session slots (the "3m slots" tab) ───────────────────────────────────────────────────────────
 
 /** One side of one strike: OI change in each completed slot (oldest first), then the running slot so far (last
- *  entry), and the total from the oldest shown slot's start to the latest snapshot. Null = not known. */
-export interface SideFlow { cells: (number | null)[]; total: number | null }
+ *  entry); and `day` = the strike's OI change vs the previous close as of `OiFlow.dayAt` (the latest COMPLETED slot
+ *  edge that has a reading), so each slot that completes adds exactly its cell to it. Null = not known. */
+export interface SideFlow { cells: (number | null)[]; day: number | null }
 
 export interface OiFlow {
   /** Slot length, minutes. */
@@ -200,6 +201,9 @@ export interface OiFlow {
   boundOk: boolean[];
   /** "HH:MM:SS" of the latest snapshot: the running slot's "so far". */
   lastTs: string;
+  /** The slot edge (minutes of the day) every `day` is read at: the latest completed edge with a reading, or an earlier
+   *  one when a collector gap (e.g. a restart) left that edge empty; null when no shown edge has a reading. */
+  dayAt: number | null;
   byStrike: Map<number, { ce: SideFlow; pe: SideFlow }>;
 }
 
@@ -220,7 +224,9 @@ export interface OiFlowOpts {
  * OI at a boundary = the latest snapshot at or before it, accepted only within `slackMin` (a collector gap is not a
  * reading) and on the last snapshot's expiry. The open boundary needs no snapshot: OI at the open is the previous
  * close's OI, i.e. a snapshot's OI minus its change vs the previous close (the day's first snapshot is used). A missing
- * OI is never read as 0. The total is end to end when both ends are known, else the sum of the cells when all are known.
+ * OI is never read as 0. `day` is the snapshot's own change vs the previous close (0 at the open edge) at `dayAt`, so
+ * day(next edge) − day(this edge) = the completed slot's cell. A gap at the latest edge falls back to the newest earlier
+ * edge with a reading (labelled by `dayAt`) instead of blanking every strike's number until the next slot completes.
  */
 export function oiFlow(snaps: Snapshot[], opts: OiFlowOpts): OiFlow {
   const slots = opts.slots ?? 5, slotMin = opts.slotMin ?? 3, slack = opts.slackMin ?? 1, anchor = opts.anchorMin;
@@ -228,7 +234,7 @@ export function oiFlow(snaps: Snapshot[], opts: OiFlowOpts): OiFlow {
   const last = snaps[snaps.length - 1];
   const cur = last ? anchor + Math.max(0, Math.floor((last.min - anchor + 1e-9) / slotMin)) * slotMin : anchor;
   const bounds = Array.from({ length: slots + 1 }, (_, i) => cur - (slots - i) * slotMin);   // oldest first
-  if (!last) return { slotMin, bounds, boundOk: bounds.map(() => false), lastTs: '', byStrike };
+  if (!last) return { slotMin, bounds, boundOk: bounds.map(() => false), lastTs: '', dayAt: null, byStrike };
 
   // Each boundary resolves to a snapshot, to 'open' (previous-close OI), or to nothing.
   const first = snaps.find(s => s.expiry === last.expiry) ?? null;
@@ -248,18 +254,27 @@ export function oiFlow(snaps: Snapshot[], opts: OiFlowOpts): OiFlow {
     if (r !== 'open') return sd.oi;
     return sd.chg == null || !Number.isFinite(sd.chg) ? null : sd.oi - sd.chg;
   };
+  // The edge today's change is read at: the latest completed edge with a reading (one global choice for every strike).
+  let dayIdx = -1;
+  for (let i = slots; i >= 0; i--) if (refs[i] !== null) { dayIdx = i; break; }
   const sideFlow = (k: number, side: 'ce' | 'pe'): SideFlow => {
     const at = refs.map(r => oiAt(r, k, side));
     const now = oiAt(last, k, side);
     const cells: (number | null)[] = [];
     for (let i = 0; i < slots; i++) cells.push(at[i] === null || at[i + 1] === null ? null : at[i + 1]! - at[i]!);
     cells.push(now === null || at[slots] === null ? null : now - at[slots]!);   // running slot so far
-    const total = now !== null && at[0] !== null ? now - at[0]
-      : cells.every(c => c !== null) ? cells.reduce<number>((t, c) => t + (c as number), 0) : null;
-    return { cells, total };
+    // Today's change at that edge: the snapshot's own change vs the previous close (never assumed 0).
+    const edge = dayIdx >= 0 ? refs[dayIdx] : null;
+    let day: number | null = null;
+    if (edge === 'open') day = at[dayIdx] === null ? null : 0;
+    else if (edge) { const c = edge.strikes.get(k)?.[side].chg; day = c == null || !Number.isFinite(c) ? null : c; }
+    return { cells, day };
   };
   for (const k of last.strikes.keys()) byStrike.set(k, { ce: sideFlow(k, 'ce'), pe: sideFlow(k, 'pe') });
-  return { slotMin, bounds, boundOk: refs.map(r => r !== null), lastTs: last.ts.slice(11, 19), byStrike };
+  return {
+    slotMin, bounds, boundOk: refs.map(r => r !== null), lastTs: last.ts.slice(11, 19),
+    dayAt: dayIdx >= 0 ? bounds[dayIdx] : null, byStrike,
+  };
 }
 
 /** Minutes of the day → "HH:MM". */

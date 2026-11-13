@@ -22,8 +22,8 @@ const FLOW_SLOT_MIN = 3;
 
 export interface FreshMoneySide {
   oi: number | null; oiMoved: number | null; buildup: Buildup | null;
-  /** OI change per completed slot (oldest first) then the running slot so far, and their total; same units as `oi`;
-   *  null = no reading. */
+  /** OI change per completed slot (oldest first) then the running slot so far, and `day` = today's OI change as of the
+   *  latest completed slot edge; same units as `oi`; null = no reading. */
   flow: SideFlow | null;
 }
 export interface FreshMoneyRow { strike: number; put: FreshMoneySide | null; call: FreshMoneySide | null }
@@ -48,8 +48,9 @@ export interface FreshMoneyResponse {
   /** Option previous closes are on record for this day (the collector's side file): buildup tags can be shown. */
   hasBuildup: boolean;
   /** Slot layout of every row's `flow`: boundaries "HH:MM" oldest first (FLOW_SLOTS + 1; the last = the running slot's
-   *  start), whether each had a reading, and the latest snapshot time ("HH:MM:SS", the running slot's "so far"). */
-  flowSlots: { slotMin: number; bounds: string[]; boundOk: boolean[]; lastTs: string };
+   *  start), whether each had a reading, the latest snapshot time ("HH:MM:SS", the running slot's "so far"), and the
+   *  edge every row's `flow.day` is read at ("HH:MM"; earlier than the last bound after a collector gap; null = none). */
+  flowSlots: { slotMin: number; bounds: string[]; boundOk: boolean[]; lastTs: string; dayAt: string | null };
   error?: string;
 }
 
@@ -120,7 +121,7 @@ export async function GET(req: NextRequest) {
   const prevCloses: PrevCloses | null = pcFile && pcFile.expiry === expiry ? { ce: pcFile.ce ?? {}, pe: pcFile.pe ?? {} } : null;
   const flow = oiFlow(snaps, { slots: FLOW_SLOTS, slotMin: FLOW_SLOT_MIN, anchorMin: day.from });
   const flowLots = (f: SideFlow | undefined): SideFlow | null =>
-    (f ? { cells: f.cells.map(toLots), total: toLots(f.total) } : null);
+    (f ? { cells: f.cells.map(toLots), day: toLots(f.day) } : null);
   const rows: FreshMoneyRow[] = buildBoardRows(last, WINGS, prevCloses).map(r => {
     const fl = flow.byStrike.get(r.strike);
     return {
@@ -145,7 +146,10 @@ export async function GET(req: NextRequest) {
     day,
     rows,
     hasBuildup: prevCloses !== null,
-    flowSlots: { slotMin: flow.slotMin, bounds: flow.bounds.map(fmtMinOfDay), boundOk: flow.boundOk, lastTs: flow.lastTs },
+    flowSlots: {
+      slotMin: flow.slotMin, bounds: flow.bounds.map(fmtMinOfDay), boundOk: flow.boundOk, lastTs: flow.lastTs,
+      dayAt: flow.dayAt === null ? null : fmtMinOfDay(flow.dayAt),
+    },
   };
   respCache.set(underlying, { key: cacheKey, body });
   return NextResponse.json(body);
