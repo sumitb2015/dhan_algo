@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, fmtOiShort,
+  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, fmtOiShort, fmtMinOfDay,
 } from './freshMoney.ts';
 
 const HEAD = 'timestamp,spot,expiry,strike,CE_LTP,CE_IV,CE_OI,CE_change_OI,CE_volume,PE_LTP,PE_IV,PE_OI,PE_change_OI,PE_volume';
@@ -109,66 +109,18 @@ test('delta OI: call total OI minus put total OI; unknown when either side is mi
 
 // ── oiFlow ──
 /** One snapshot every 30 s from `from` to `to` (HH:MM), strike 22550 with CE OI = f(minute) and PE OI = g(minute). */
-function series(from: string, to: string, ce: (m: number) => number | '', pe: (m: number) => number | '', skip: (m: number) => boolean = () => false, exp = '2026-11-12') {
+function series(from: string, to: string, ce: (m: number) => number | '', pe: (m: number) => number | '', skip: (m: number) => boolean = () => false, exp = '2026-11-12', ceChg: (m: number) => number | '' = () => '') {
   const [fh, fm] = from.split(':').map(Number), [th, tm] = to.split(':').map(Number);
   const lines = [HEAD];
   for (let m = fh * 60 + fm; m <= th * 60 + tm + 1e-9; m += 0.5) {
     if (skip(m)) continue;
     const hh = String(Math.floor(m / 60)).padStart(2, '0'), mm = String(Math.floor(m % 60)).padStart(2, '0');
     const ss = m % 1 ? '30' : '00';
-    lines.push(`2026-11-13 ${hh}:${mm}:${ss},22575,${exp},22550,1,1,${ce(m)},,0,1,1,${pe(m)},,0`);
+    lines.push(`2026-11-13 ${hh}:${mm}:${ss},22575,${exp},22550,1,1,${ce(m)},${ceChg(m)},0,1,1,${pe(m)},,0`);
   }
   return parseSnapshotCsv(lines.join('\n'));
 }
 const M = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
-
-test('oiFlow: five clean windows add up to the total, oldest first', () => {
-  // CE grows 100 per minute; PE falls 20 per minute after 10:10.
-  const snaps = series('09:30', '10:25', m => 1000 + 100 * (m - M('09:30')), m => 5000 - 20 * Math.max(0, m - M('10:10')));
-  const f = oiFlow(snaps);
-  assert.deepEqual(f.marks, ['10:00', '10:05', '10:10', '10:15', '10:20', '10:25']);
-  const s = f.byStrike.get(22550)!;
-  assert.deepEqual(s.ce.cells, [500, 500, 500, 500, 500]);
-  assert.equal(s.ce.total, 2500);
-  assert.deepEqual(s.pe.cells, [0, 0, -100, -100, -100]);
-  assert.equal(s.pe.total, -300);
-});
-
-test('oiFlow: a collector gap nulls that window; the total still comes from the two ends', () => {
-  // No snapshots from 10:12 to 10:15:30 -> boundary 10:15 has no reading within 2 min (latest is 10:11:30).
-  const snaps = series('09:30', '10:25', m => 100 * m, () => 7, m => m >= M('10:12') && m <= M('10:15') + 0.5);
-  const s = oiFlow(snaps).byStrike.get(22550)!;
-  assert.deepEqual(s.ce.cells, [500, 500, null, null, 500]);
-  assert.equal(s.ce.total, 2500);
-  assert.deepEqual(oiFlow(snaps).marks, ['10:00', '10:05', '10:10', null, '10:20', '10:25']);
-});
-
-test('oiFlow: under 25 minutes of data leaves the older cells null', () => {
-  const s = oiFlow(series('09:15', '09:27', m => 10 * m, () => 1)).byStrike.get(22550)!;
-  assert.deepEqual(s.ce.cells, [null, null, null, 50, 50]);
-  assert.equal(s.ce.total, null);   // neither end-to-end nor every cell is known
-});
-
-test('oiFlow: a missing OI is null, never 0', () => {
-  const snaps = series('09:30', '10:25', m => (m < M('10:06') ? '' : 1000), () => 1);
-  const s = oiFlow(snaps).byStrike.get(22550)!;
-  assert.deepEqual(s.ce.cells, [null, null, 0, 0, 0]);
-  assert.equal(s.ce.total, null);
-});
-
-test('oiFlow: a boundary on another expiry is refused', () => {
-  const older = series('09:55', '10:12', () => 1, () => 1, () => false, '2026-11-05');
-  const newer = series('10:12:30'.slice(0, 5), '10:25', () => 9, () => 9);
-  const f = oiFlow([...older, ...newer.filter(s => s.min > M('10:12'))]);
-  assert.deepEqual(f.marks.slice(0, 3), [null, null, null]);
-  assert.deepEqual(f.byStrike.get(22550)!.ce.cells.slice(2), [null, 0, 0]);
-});
-
-test('oiFlow: no snapshots', () => {
-  const f = oiFlow([]);
-  assert.equal(f.byStrike.size, 0);
-  assert.equal(f.marks.length, 6);
-});
 
 test('fmtOiShort keeps cells narrow', () => {
   assert.equal(fmtOiShort(null), '–');
@@ -180,19 +132,6 @@ test('fmtOiShort keeps cells narrow', () => {
   assert.equal(fmtOiShort(1.1e7), '+1.1Cr');
 });
 
-test('oiFlow: a boundary 1½ min early is refused, so neighbouring windows stay comparable (4-6 min)', () => {
-  // Snapshots 10:13:30-10:15:00 missing: the 10:15 boundary would fall back to 10:13:00 (2 min early), making the
-  // 10:10->10:15 cell 3 min and the 10:15->10:20 cell 7 min. It is refused instead.
-  const snaps = series('09:30', '10:25', m => 100 * m, () => 7, m => m >= M('10:13') + 0.5 && m <= M('10:15'));
-  const f = oiFlow(snaps);
-  assert.equal(f.marks[3], null);
-  assert.deepEqual(f.byStrike.get(22550)!.ce.cells, [500, 500, null, null, 500]);
-  // One missed poll (30 s) is still a reading.
-  const one = oiFlow(series('09:30', '10:25', m => 100 * m, () => 7, m => m === M('10:15')));
-  assert.equal(one.marks[3], '10:14');
-  assert.deepEqual(one.byStrike.get(22550)!.ce.cells, [500, 500, 450, 550, 500]);
-});
-
 test('parse skips a row cut short by a write in progress (never reads a truncated OI)', () => {
   const full = row('2026-11-10 09:20:00', 22550, 11265020, 10, 50, 200, 20, 100);
   const cut = full.slice(0, full.indexOf('11265020') + 3);   // "...,112" — the collector is mid-write
@@ -200,4 +139,81 @@ test('parse skips a row cut short by a write in progress (never reads a truncate
   assert.equal(snaps.length, 1);
   assert.equal(snaps[0].strikes.has(22550), false);
   assert.equal(snaps[0].strikes.get(22600)!.ce.oi, 5);
+});
+
+// ── oiFlow: fixed 3-min slots from the 09:15 open ──
+const OPEN = 9 * 60 + 15;
+const slotsOf = (snaps: ReturnType<typeof series>) => oiFlow(snaps, { slots: 5, slotMin: 3, anchorMin: OPEN });
+const lab = (f: ReturnType<typeof slotsOf>) => f.bounds.map(fmtMinOfDay);
+
+test('oiFlow: slots are fixed offsets from the open; 5 completed + the running one; total adds up', () => {
+  // CE +100 per minute from 09:15; last snapshot 10:31:00 -> running slot 10:30-10:33.
+  const f = slotsOf(series('09:15', '10:31', m => 1000 + 100 * (m - OPEN), () => 7));
+  assert.deepEqual(lab(f), ['10:15', '10:18', '10:21', '10:24', '10:27', '10:30']);
+  assert.equal(f.lastTs, '10:31:00');
+  const s = f.byStrike.get(22550)!;
+  assert.deepEqual(s.ce.cells, [300, 300, 300, 300, 300, 100]);   // last = running 10:30 -> 10:31
+  assert.equal(s.ce.total, 1600);
+  assert.deepEqual(s.pe.cells, [0, 0, 0, 0, 0, 0]);
+});
+
+test('oiFlow: completed slots are frozen; the running slot freezes when it ends and the row shifts', () => {
+  const ce = (m: number) => 1000 + 100 * (m - OPEN) + (m >= M('10:31') ? 50 : 0);   // a jump inside the running slot
+  const at1031 = slotsOf(series('09:15', '10:31', ce, () => 1)).byStrike.get(22550)!.ce.cells;
+  const at1032 = slotsOf(series('09:15', '10:32', ce, () => 1)).byStrike.get(22550)!.ce.cells;
+  assert.deepEqual(at1031.slice(0, 5), at1032.slice(0, 5));           // completed slots did not move
+  assert.equal(at1031[5], 150);
+  assert.equal(at1032[5], 250);                                       // running slot keeps counting
+  const f1033 = slotsOf(series('09:15', '10:33', ce, () => 1));
+  assert.deepEqual(lab(f1033), ['10:18', '10:21', '10:24', '10:27', '10:30', '10:33']);
+  assert.deepEqual(f1033.byStrike.get(22550)!.ce.cells, [300, 300, 300, 300, 350, 0]);   // 10:30-10:33 now frozen
+});
+
+test('oiFlow: the open boundary is the previous close OI (OI - change), so the first slot has a value', () => {
+  // Previous close OI 5000; collector starts 09:15:30.
+  const snaps = series('09:15', '09:20', m => 5000 + 200 * (m - OPEN), () => 1, m => m < OPEN + 0.5, '2026-11-12', m => 200 * (m - OPEN));
+  const f = slotsOf(snaps);
+  assert.deepEqual(lab(f), ['09:03', '09:06', '09:09', '09:12', '09:15', '09:18']);
+  assert.deepEqual(f.boundOk, [false, false, false, false, true, true]);
+  const s = f.byStrike.get(22550)!;
+  assert.deepEqual(s.ce.cells, [null, null, null, null, 600, 400]);   // 09:15-09:18 from 5000, running 09:18-09:20
+  assert.equal(s.ce.total, null);
+  // No change on record -> no open value (never assume the change was 0).
+  assert.deepEqual(slotsOf(series('09:15', '09:20', m => 5000 + m, () => 1, m => m < OPEN + 0.5)).byStrike.get(22550)!.ce.cells.slice(4, 5), [null]);
+});
+
+test('oiFlow: a collector gap at a slot edge nulls the slots it bounds; the total still comes from the ends', () => {
+  // No snapshots 10:22-10:24:00 -> the 10:24 edge would read 10:21:30 (2.5 min early): refused.
+  const snaps = series('09:15', '10:31', m => 100 * m, () => 7, m => m >= M('10:22') && m <= M('10:24'));
+  const f = slotsOf(snaps);
+  assert.deepEqual(f.boundOk, [true, true, true, false, true, true]);
+  const s = f.byStrike.get(22550)!;
+  assert.deepEqual(s.ce.cells, [300, 300, null, null, 300, 100]);
+  assert.equal(s.ce.total, 1600);
+});
+
+test('oiFlow: a missing OI is null, never 0', () => {
+  const s = slotsOf(series('09:15', '10:31', m => (m < M('10:20') ? '' : 1000), () => 1)).byStrike.get(22550)!;
+  assert.deepEqual(s.ce.cells, [null, null, 0, 0, 0, 0]);
+  assert.equal(s.ce.total, null);
+});
+
+test('oiFlow: an edge on another expiry is refused', () => {
+  const older = series('10:10', '10:22', () => 1, () => 1, () => false, '2026-11-05');
+  const newer = series('10:22', '10:31', () => 9, () => 9).filter(x => x.min > M('10:22'));
+  const f = slotsOf([...older, ...newer]);
+  assert.deepEqual(f.boundOk, [false, false, false, true, true, true]);
+  assert.deepEqual(f.byStrike.get(22550)!.ce.cells, [null, null, null, 0, 0, 0]);
+});
+
+test('oiFlow: MCX slots count from 09:00', () => {
+  const f = oiFlow(series('09:00', '09:10', m => m, () => 1), { slots: 5, slotMin: 3, anchorMin: 9 * 60 });
+  assert.deepEqual(f.bounds.map(fmtMinOfDay), ['08:54', '08:57', '09:00', '09:03', '09:06', '09:09']);
+});
+
+test('oiFlow: no snapshots', () => {
+  const f = oiFlow([], { anchorMin: OPEN });
+  assert.equal(f.byStrike.size, 0);
+  assert.equal(f.bounds.length, 6);
+  assert.deepEqual(f.boundOk, [false, false, false, false, false, false]);
 });

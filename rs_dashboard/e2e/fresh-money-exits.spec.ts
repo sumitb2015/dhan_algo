@@ -8,16 +8,18 @@ const KEY = 'dhan|111';
 const istNow = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().replace('T', ' ').slice(0, 19);
 const istToday = () => istNow().slice(0, 10);
 
-// Flow cells oldest → newest; the oldest window had no snapshot (null).
-const PUT_FLOW = { cells: [null, 120, 0, -40, 1500], total: 1580 };
-const CALL_FLOW = { cells: [10, 20, 30, -900, -12000], total: -12840 };
+// Slot cells: 10 completed slots oldest first, then the running slot; the oldest edge had no reading (null).
+const PUT_FLOW = { cells: [null, 2, 3, 4, 6, 8, 120, 0, -40, 1500, 77], total: 1657 };
+const CALL_FLOW = { cells: [11, 12, 13, 14, 15, 10, 20, 30, -900, -12000, 5], total: -12835 };
 const side = (oi: number, chg: number, flow: unknown) => ({ oi, oiMoved: chg, buildup: null, flow });
 function board() {
   const rows = [8300, 8200, 8100, 8000, 7900].map(strike => ({ strike, put: side(4000, 300, PUT_FLOW), call: side(3000, -200, CALL_FLOW) }));
   return {
     underlying: 'CRUDEOIL', date: istToday(), isToday: true, lastTs: istNow(), spot: 8105, expiry: '2026-11-17', step: 100,
     lot: 1, oiUnit: 'lots', market: 'MCX', mult: 100, day: { from: 540, to: 1435 }, rows,
-    hasBuildup: false, flowMarks: [null, '10:05', '10:10', '10:15', '10:20', '10:25'], flowMinutes: 5,
+    hasBuildup: false,
+    flowSlots: { slotMin: 3, bounds: ['10:00', '10:03', '10:06', '10:09', '10:12', '10:15', '10:18', '10:21', '10:24', '10:27', '10:30'],
+      boundOk: [false, true, true, true, true, true, true, true, true, true, true], lastTs: '10:31:20' },
   };
 }
 
@@ -187,30 +189,34 @@ test('Δ OI tab: call OI − put OI on the left, coloured by the heavier side; r
   await expect(page.getByRole('tab', { name: 'Δ OI' })).toHaveAttribute('aria-selected', 'true');
 });
 
-test('5×5m flow tab: per-window cells coloured by sign, 25-min total, newest next to the strike; survives a reload', async ({ page }) => {
+test('3m slots tab: frozen slots + shaded running slot, coloured by sign, running next to the strike; survives a reload', async ({ page }) => {
   const m = await install(page);
-  await page.getByRole('tab', { name: '5×5m flow' }).click();
-  await expect(page.getByText('PUTS: last 5 × 5 min')).toBeVisible();
-  // Put cells: + added (green), − cut (red), 0 and unknown neutral; exact value and window in the hover.
+  await page.getByRole('tab', { name: '3m slots' }).click();
+  await expect(page.getByText('PUTS: 10 × 3 min + now')).toBeVisible();
+  // Completed slot: exact value and slot in the hover.
   const add = page.getByText('+1.5k', { exact: true }).first();
   await expect(add).toHaveClass(/text-emerald-400/);
-  await expect(add).toHaveAttribute('title', '10:20–10:25: +1,500 lots');
+  await expect(add).toHaveAttribute('title', '10:27–10:30: +1,500 lots');
   await expect(page.getByText('-40', { exact: true }).first()).toHaveClass(/text-red-400/);
-  await expect(page.getByText('-12k', { exact: true }).first()).toHaveClass(/text-red-400/);
-  const unknown = page.getByTitle('no snapshot at a boundary: unknown').first();
+  // Running slot: shaded, italic, labelled as running.
+  const run = page.getByText('+77', { exact: true }).first();
+  await expect(run).toHaveClass(/italic/);
+  await expect(run).toHaveAttribute('title', '10:30–10:33, running (so far to 10:31:20): +77 lots');
+  await expect(page.getByText('10:33…').first()).toBeVisible();
+  // An edge with no reading.
+  const unknown = page.getByTitle('10:00–10:03: no OI reading at a slot edge').first();
   await expect(unknown).toHaveText('–');
-  await expect(unknown).toHaveClass(/text-zinc-400/);
-  // Totals (25 min).
-  await expect(page.getByText('+1,580', { exact: true }).first()).toBeVisible();
-  await expect(page.getByText('-12,840', { exact: true }).first()).toHaveAttribute('title', 'OI change over the last 25 min: -12,840 lots');
-  // Newest next to the strike: in the 8100 row the put's newest cell precedes the strike, the call's follows it.
+  // Totals.
+  await expect(page.getByText('-12,835', { exact: true }).first()).toHaveAttribute('title', 'OI change 10:00–10:31:20: -12,835 lots');
+  // Running slot sits next to the strike on both sides.
   const row = page.locator('div.grid', { hasText: '8100' }).filter({ hasText: '+1.5k' }).first();
   const text = (await row.innerText()).replace(/\s+/g, ' ');
-  expect(text.indexOf('+1.5k')).toBeLessThan(text.indexOf('8100'));
-  expect(text.indexOf('-12k')).toBeGreaterThan(text.indexOf('8100'));
-  expect(text.indexOf('-12k')).toBeLessThan(text.indexOf('+10'));
+  expect(text.indexOf('+1.5k')).toBeLessThan(text.indexOf('+77'));
+  expect(text.indexOf('+77')).toBeLessThan(text.indexOf('8100'));
+  expect(text.indexOf('+5 ')).toBeGreaterThan(text.indexOf('8100'));
+  expect(text.indexOf('+5 ')).toBeLessThan(text.indexOf('-12k'));
   await page.reload();
-  await expect(page.getByRole('tab', { name: '5×5m flow' })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tab', { name: '3m slots' })).toHaveAttribute('aria-selected', 'true');
   expect(m.blocked).toEqual([]);
 });
 

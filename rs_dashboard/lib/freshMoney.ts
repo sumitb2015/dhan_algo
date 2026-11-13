@@ -185,56 +185,87 @@ export function fmtOiAbs(n: number | null): string {
   return Math.round(a).toLocaleString('en-IN');
 }
 
-// ── Recent OI flow (the "5×5m flow" tab) ──────────────────────────────────────────────────────────────────────────
+// ── OI flow in fixed session slots (the "3m slots" tab) ───────────────────────────────────────────────────────────
 
-/** One side of one strike: OI change in each recent window (oldest first) and over all of them. */
+/** One side of one strike: OI change in each completed slot (oldest first), then the running slot so far (last
+ *  entry), and the total from the oldest shown slot's start to the latest snapshot. Null = not known. */
 export interface SideFlow { cells: (number | null)[]; total: number | null }
 
 export interface OiFlow {
-  /** HH:MM of the snapshot at each window boundary, oldest first (`windows + 1` entries; null = no reading there). */
-  marks: (string | null)[];
+  /** Slot length, minutes. */
+  slotMin: number;
+  /** Slot boundaries as minutes of the day, oldest first: `slots + 1` entries, the last one = the running slot's start. */
+  bounds: number[];
+  /** Per boundary: an OI reading was available there (false = collector gap / before the session). */
+  boundOk: boolean[];
+  /** "HH:MM:SS" of the latest snapshot: the running slot's "so far". */
+  lastTs: string;
   byStrike: Map<number, { ce: SideFlow; pe: SideFlow }>;
 }
 
+export interface OiFlowOpts {
+  /** Completed slots shown before the running one. */
+  slots?: number;
+  slotMin?: number;
+  /** Session open, minutes of the day (09:15 NSE, 09:00 MCX): slots are counted from here. */
+  anchorMin: number;
+  /** A boundary reads the latest snapshot at or before it, no more than this many minutes earlier. */
+  slackMin?: number;
+}
+
 /**
- * OI change per strike over the last `windows` rolling windows of `minutes` each, ending at the latest snapshot.
- * Boundary k is the latest snapshot at or before `last.min − k·minutes`, accepted only within `slackMin` of that time
- * (a collector gap is not a reading; 1 min tolerates one missed ~30 s poll and keeps every window within 4-6 min, so
- * the cells stay comparable — at 2 min a single gap made neighbouring windows 3½ and 6½ min long) and only on the last snapshot's expiry. A cell is null when a boundary or either
- * OI is missing: a missing OI is never read as 0. The total is end-to-end when both ends are known, else the sum of
- * the cells when all of them are known, else null.
+ * OI change per strike in fixed slots counted from the session open (09:15, 09:18, 09:21 … for 3 min), so a completed
+ * slot never changes; the last cell is the current slot so far and freezes when the slot ends.
+ *
+ * OI at a boundary = the latest snapshot at or before it, accepted only within `slackMin` (a collector gap is not a
+ * reading) and on the last snapshot's expiry. The open boundary needs no snapshot: OI at the open is the previous
+ * close's OI, i.e. a snapshot's OI minus its change vs the previous close (the day's first snapshot is used). A missing
+ * OI is never read as 0. The total is end to end when both ends are known, else the sum of the cells when all are known.
  */
-export function oiFlow(snaps: Snapshot[], windows = 5, minutes = 5, slackMin = 1): OiFlow {
+export function oiFlow(snaps: Snapshot[], opts: OiFlowOpts): OiFlow {
+  const slots = opts.slots ?? 5, slotMin = opts.slotMin ?? 3, slack = opts.slackMin ?? 1, anchor = opts.anchorMin;
   const byStrike = new Map<number, { ce: SideFlow; pe: SideFlow }>();
   const last = snaps[snaps.length - 1];
-  if (!last) return { marks: Array(windows + 1).fill(null), byStrike };
-  // refs[k] = boundary k (0 = now); snaps are sorted by `min`.
-  const refs: (Snapshot | null)[] = [];
-  let j = snaps.length - 1;
-  for (let k = 0; k <= windows; k++) {
-    const target = last.min - k * minutes;
-    while (j >= 0 && snaps[j].min > target + 1e-9) j--;
+  const cur = last ? anchor + Math.max(0, Math.floor((last.min - anchor + 1e-9) / slotMin)) * slotMin : anchor;
+  const bounds = Array.from({ length: slots + 1 }, (_, i) => cur - (slots - i) * slotMin);   // oldest first
+  if (!last) return { slotMin, bounds, boundOk: bounds.map(() => false), lastTs: '', byStrike };
+
+  // Each boundary resolves to a snapshot, to 'open' (previous-close OI), or to nothing.
+  const first = snaps.find(s => s.expiry === last.expiry) ?? null;
+  type Ref = Snapshot | 'open' | null;
+  const refs: Ref[] = bounds.map(b => {
+    if (b < anchor - 1e-9) return null;                      // before the session
+    let j = snaps.length - 1;
+    while (j >= 0 && snaps[j].min > b + 1e-9) j--;
     const s = j >= 0 ? snaps[j] : null;
-    refs.push(s && target - s.min <= slackMin && s.expiry === last.expiry ? s : null);
-  }
-  const oiAt = (s: Snapshot | null, k: number, side: 'ce' | 'pe'): number | null => {
-    const v = s?.strikes.get(k)?.[side].oi;
-    return v == null || !Number.isFinite(v) ? null : v;
+    if (s && b - s.min <= slack && s.expiry === last.expiry) return s;
+    return Math.abs(b - anchor) < 1e-9 && first ? 'open' : null;
+  });
+  const oiAt = (r: Ref, k: number, side: 'ce' | 'pe'): number | null => {
+    if (r === null) return null;
+    const sd = (r === 'open' ? first! : r).strikes.get(k)?.[side];
+    if (!sd || sd.oi == null || !Number.isFinite(sd.oi)) return null;
+    if (r !== 'open') return sd.oi;
+    return sd.chg == null || !Number.isFinite(sd.chg) ? null : sd.oi - sd.chg;
   };
   const sideFlow = (k: number, side: 'ce' | 'pe'): SideFlow => {
+    const at = refs.map(r => oiAt(r, k, side));
+    const now = oiAt(last, k, side);
     const cells: (number | null)[] = [];
-    for (let i = 0; i < windows; i++) {
-      const a = oiAt(refs[windows - i], k, side), b = oiAt(refs[windows - 1 - i], k, side);
-      cells.push(a === null || b === null ? null : b - a);
-    }
-    const end = oiAt(refs[0], k, side), start = oiAt(refs[windows], k, side);
-    const total = end !== null && start !== null ? end - start
+    for (let i = 0; i < slots; i++) cells.push(at[i] === null || at[i + 1] === null ? null : at[i + 1]! - at[i]!);
+    cells.push(now === null || at[slots] === null ? null : now - at[slots]!);   // running slot so far
+    const total = now !== null && at[0] !== null ? now - at[0]
       : cells.every(c => c !== null) ? cells.reduce<number>((t, c) => t + (c as number), 0) : null;
     return { cells, total };
   };
   for (const k of last.strikes.keys()) byStrike.set(k, { ce: sideFlow(k, 'ce'), pe: sideFlow(k, 'pe') });
-  const marks = refs.map(s => (s ? s.ts.slice(11, 16) : null)).reverse();
-  return { marks, byStrike };
+  return { slotMin, bounds, boundOk: refs.map(r => r !== null), lastTs: last.ts.slice(11, 19), byStrike };
+}
+
+/** Minutes of the day → "HH:MM". */
+export function fmtMinOfDay(m: number): string {
+  const r = Math.round(m);
+  return `${String(Math.floor(r / 60)).padStart(2, '0')}:${String(r % 60).padStart(2, '0')}`;
 }
 
 /** Compact signed OI for narrow cells: +950, +84k, -1.2L, +1.1Cr; 0 unsigned; '–' when unknown. */
