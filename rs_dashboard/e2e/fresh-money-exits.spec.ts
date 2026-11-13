@@ -9,8 +9,10 @@ const istNow = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().replace
 const istToday = () => istNow().slice(0, 10);
 
 // Slot cells: 10 completed slots oldest first, then the running slot; the oldest edge had no reading (null).
-const PUT_FLOW = { cells: [null, 2, 3, 4, 6, 8, 120, 0, -40, 1500, 77], day: 1657 };
-const CALL_FLOW = { cells: [11, 12, 13, 14, 15, 10, 20, 30, -900, -12000, 5], day: -12835 };
+// Board scale (95th pct of |cell|) = 1500. Puts: ten tinted adds in a row -> ▲10, and the widest number label
+// ("▲10 +99,999"). Calls: -300, -400, -900, -12000 cutting -> ▼4; +12 ... +15 are grey (under 10 %) noise.
+const PUT_FLOW = { cells: [300, 320, 340, 360, 380, 400, 600, 450, 400, 1500, 77], day: 99999 };
+const CALL_FLOW = { cells: [null, 12, 13, 14, 15, 10, -300, -400, -900, -12000, 5], day: -12835 };
 const side = (oi: number, chg: number, flow: unknown) => ({ oi, oiMoved: chg, buildup: null, flow });
 function board() {
   const rows = [8300, 8200, 8100, 8000, 7900].map(strike => ({ strike, put: side(4000, 300, PUT_FLOW), call: side(3000, -200, CALL_FLOW) }));
@@ -195,20 +197,35 @@ test('3m slots tab: frozen slots + shaded running slot, coloured by sign, runnin
   await expect(page.getByText('PUTS: OI Δ today @ 10:30')).toBeVisible();
   // Completed slot: exact value and slot in the hover.
   const add = page.getByText('+1.5k', { exact: true }).first();
-  await expect(add).toHaveClass(/text-emerald-400/);
   await expect(add).toHaveAttribute('title', '10:27–10:30: +1,500 lots');
-  await expect(page.getByText('-40', { exact: true }).first()).toHaveClass(/text-red-400/);
+  await expect(add).toHaveClass(/bg-emerald-500\/45/);                 // >= 70 % of the scale: strongest tint, bold
+  await expect(add).toHaveClass(/font-bold/);
+  await expect(add).toHaveClass(/text-white/);                         // theme token: readable on the strong tint
+  await expect(page.getByText('-900', { exact: true }).first()).toHaveClass(/bg-red-500\/25/);   // 60 %: mid tint
+  const small = page.getByText('+12', { exact: true }).first();          // under 10 % of the scale: grey, no tint
+  await expect(small).toHaveClass(/text-zinc-500/);
+  await expect(small).not.toHaveClass(/bg-/);
+  // Streak badges: completed slots only, newest backwards.
+  await expect(page.getByTitle('10 completed slots in a row adding OI (10:00–10:30)').first()).toHaveText('▲10');
+  // The widest label stays on one line inside its column (no wrap into the next row).
+  const wide = page.getByTitle("Today's OI change vs the previous close, as of 10:30: +99,999 lots · live (10:31:20): +300 lots").first();
+  await expect(wide).toHaveText('▲10 +99,999');
+  const box = await wide.boundingBox();
+  expect(box!.height).toBeLessThan(22);
+  expect(await wide.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
+  await expect(page.getByTitle('4 completed slots in a row cutting OI (10:18–10:30)').first()).toHaveText('▼4');
   // Running slot: shaded, italic, labelled as running.
   const run = page.getByText('+77', { exact: true }).first();
   await expect(run).toHaveClass(/italic/);
+  await expect(run).toHaveClass(/ring-1/);
   await expect(run).toHaveAttribute('title', '10:30–10:33, running (so far to 10:31:20): +77 lots');
   await expect(page.getByText('10:33…').first()).toBeVisible();
   // An edge with no reading.
-  const unknown = page.getByTitle('10:00–10:03: no OI reading at a slot edge').first();
+  const unknown = page.getByTitle('10:00–10:03: no OI reading at a slot edge').first();   // the call side's first slot
   await expect(unknown).toHaveText('–');
   // Today's change as of the last completed slot, with the live figure in the hover.
-  await expect(page.getByText('-12,835', { exact: true }).first()).toHaveAttribute('title',
-    "Today's OI change vs the previous close, as of 10:30: -12,835 lots · live (10:31:20): -200 lots");
+  await expect(page.getByTitle("Today's OI change vs the previous close, as of 10:30: -12,835 lots · live (10:31:20): -200 lots").first())
+    .toHaveText('-12,835 ▼4');
   // Running slot sits next to the strike on both sides.
   const row = page.locator('div.grid', { hasText: '8100' }).filter({ hasText: '+1.5k' }).first();
   const text = (await row.innerText()).replace(/\s+/g, ' ');

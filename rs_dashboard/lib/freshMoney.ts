@@ -277,6 +277,39 @@ export function oiFlow(snaps: Snapshot[], opts: OiFlowOpts): OiFlow {
   };
 }
 
+export type FlowTier = 'none' | 'low' | 'mid' | 'high';
+
+/** Board-wide scale for the slot cells: the 95th percentile of |v| over every known cell (not the max: one of Dhan's
+ *  one-minute OI dips would otherwise set the scale and wash every other cell out). 0 when there are none. */
+export function flowScale(values: (number | null)[]): number {
+  const a = values.filter((v): v is number => v !== null && Number.isFinite(v)).map(Math.abs).sort((x, y) => x - y);
+  if (!a.length) return 0;
+  const pos = (a.length - 1) * 0.95, lo = Math.floor(pos), hi = Math.ceil(pos);
+  return a[lo] + (a[hi] - a[lo]) * (pos - lo);
+}
+
+/** Tint tier of one cell against the board scale: under 10 % = none (shown grey), then <35 %, <70 %, >=70 %. */
+export function flowTier(v: number | null, scale: number): FlowTier {
+  if (v === null || !Number.isFinite(v) || !(scale > 0)) return 'none';
+  const r = Math.abs(v) / scale;
+  return r < 0.1 ? 'none' : r < 0.35 ? 'low' : r < 0.7 ? 'mid' : 'high';
+}
+
+/** Run of the most recent COMPLETED slots (the first `slots` cells; the running one after them is ignored) moving the
+ *  same way, newest backwards. Null, a sign change, or a move the tint calls noise (`flowTier(v, scale) === 'none'`,
+ *  under 10 % of the board scale, which includes 0) ends it, so a badge never sits on grey cells. Null when the run is
+ *  shorter than `min`. */
+export function flowStreak(cells: (number | null)[], slots: number, scale: number, min = 3): { dir: 1 | -1; n: number } | null {
+  let dir: 1 | -1 | 0 = 0, n = 0;
+  for (let i = Math.min(slots, cells.length) - 1; i >= 0; i--) {
+    const v = cells[i];
+    const sg = v === null || flowTier(v, scale) === 'none' ? 0 : v > 0 ? 1 : -1;
+    if (sg === 0 || (dir !== 0 && sg !== dir)) break;
+    dir = sg; n++;
+  }
+  return dir !== 0 && n >= min ? { dir, n } : null;
+}
+
 /** Minutes of the day → "HH:MM". */
 export function fmtMinOfDay(m: number): string {
   const r = Math.round(m);

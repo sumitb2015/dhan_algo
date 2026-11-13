@@ -5,7 +5,7 @@ import { BadgeIndianRupee, AlertTriangle } from 'lucide-react';
 import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
 import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
-import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, type Buildup, type SideFlow } from '@/lib/freshMoney';
+import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, flowScale, flowStreak, flowTier, type Buildup, type FlowTier, type SideFlow } from '@/lib/freshMoney';
 import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
 import { validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
@@ -41,9 +41,10 @@ const BAR_CLASS: Record<'put' | 'call', Record<'fill' | 'outline', string>> = {
 const GRID = 'grid grid-cols-[minmax(0,1fr)_76px_96px_76px_minmax(0,1fr)] items-center';
 // With trading on, a cell each side of the strike holds B / S, the P&L chip and × (literal string for Tailwind).
 const GRID_TRADE = 'grid grid-cols-[minmax(0,1fr)_76px_172px_80px_172px_76px_minmax(0,1fr)] items-center';
-// Slot-flow tab: the same grids plus an 11-cell block (10 completed slots + the running one, 38 px each) on each outer edge.
-const GRID_FLOW = 'grid grid-cols-[418px_minmax(0,1fr)_76px_96px_76px_minmax(0,1fr)_418px] items-center';
-const GRID_FLOW_TRADE = 'grid grid-cols-[418px_minmax(0,1fr)_76px_172px_80px_172px_76px_minmax(0,1fr)_418px] items-center';
+// Slot-flow tab: the same grids plus an 11-cell block (10 completed slots + the running one, 38 px each) on each outer edge,
+// and 96 px number columns (the streak badge sits beside the number: "▲10 +99,999").
+const GRID_FLOW = 'grid grid-cols-[418px_minmax(0,1fr)_96px_96px_96px_minmax(0,1fr)_418px] items-center';
+const GRID_FLOW_TRADE = 'grid grid-cols-[418px_minmax(0,1fr)_96px_172px_80px_172px_96px_minmax(0,1fr)_418px] items-center';
 const gridFor = (mode: OiMode, trade: boolean) => (mode === 'flow' ? (trade ? GRID_FLOW_TRADE : GRID_FLOW) : (trade ? GRID_TRADE : GRID));
 
 interface RowTrade {
@@ -139,22 +140,48 @@ function slotOrder(fs: FlowSlots, side: 'put' | 'call'): number[] {
   return side === 'call' ? idx.reverse() : idx;
 }
 
-/** One side's slot cells: OI change per completed slot (frozen) plus the running slot so far (shaded). Green = OI
- *  added, red = OI cut. */
-function FlowCells({ side, flow, fs, unit }: { side: 'put' | 'call'; flow: SideFlow | null; fs: FlowSlots; unit: string }) {
+// Slot-cell tint by size (literal strings for Tailwind; tints on backgrounds are data colours, allowed in every theme).
+// The strongest tier uses text-white, a theme token (near-white in dark, near-black in white / beige): coloured text on a
+// 45 % tint of its own colour is too faint.
+const TINT: Record<'up' | 'down', Record<Exclude<FlowTier, 'none'>, string>> = {
+  up: { low: 'bg-emerald-500/10 text-emerald-400', mid: 'bg-emerald-500/25 text-emerald-400', high: 'bg-emerald-500/45 text-white font-bold' },
+  down: { low: 'bg-red-500/10 text-red-400', mid: 'bg-red-500/25 text-red-400', high: 'bg-red-500/45 text-white font-bold' },
+};
+const cellClass = (v: number | null, scale: number) => {
+  const t = flowTier(v, scale);
+  return t === 'none' ? 'text-zinc-500' : TINT[v! > 0 ? 'up' : 'down'][t];
+};
+
+/** One side's slot cells: OI change per completed slot (frozen) plus the running slot so far (ringed, italic). The
+ *  background tint grows with the move's size against the board's scale; moves under 10 % of it are grey. */
+function FlowCells({ side, flow, fs, unit, scale }: { side: 'put' | 'call'; flow: SideFlow | null; fs: FlowSlots; unit: string; scale: number }) {
   return (
-    <span className="grid grid-cols-11 text-[11px]">
+    <span className="grid grid-cols-11 gap-px text-[11px]">
       {slotOrder(fs, side).map(i => {
         const v = flow?.cells[i] ?? null;
         const s = slotInfo(fs, i);
         return (
           <span key={i}
-            className={`text-center ${s.running ? 'rounded-sm bg-zinc-800 italic' : ''} ${v === null || Math.round(v) === 0 ? 'text-zinc-400' : v > 0 ? 'text-emerald-400' : 'text-red-400'}`}
+            className={`rounded-sm text-center ${s.running ? 'italic ring-1 ring-inset ring-zinc-500' : ''} ${cellClass(v, scale)}`}
             title={`${s.span}: ${v === null ? (s.ok ? 'unknown' : 'no OI reading at a slot edge') : `${fmtOi(v)} ${unit}`}`}>
             {fmtOiShort(v)}
           </span>
         );
       })}
+    </span>
+  );
+}
+
+/** ▲n / ▼n: n completed slots in a row adding / cutting, each a tinted (not grey) move (only runs of 3+). */
+function StreakBadge({ flow, fs, scale }: { flow: SideFlow | null; fs: FlowSlots; scale: number }) {
+  const n = fs.bounds.length - 1;
+  const st = flow ? flowStreak(flow.cells, n, scale) : null;
+  if (!st) return null;
+  const from = fs.bounds[n - st.n], to = fs.bounds[n];
+  return (
+    <span className={`text-[10px] font-bold ${st.dir > 0 ? 'text-emerald-400' : 'text-red-400'}`}
+      title={`${st.n} completed slots in a row ${st.dir > 0 ? 'adding' : 'cutting'} OI (${from}–${to})`}>
+      {st.dir > 0 ? '▲' : '▼'}{st.n}
     </span>
   );
 }
@@ -171,10 +198,10 @@ function FlowHeader({ side, fs }: { side: 'put' | 'call'; fs: FlowSlots }) {
   );
 }
 
-function BoardRowView({ row, max, boxed, trade, mode, fs, unit }: {
+function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale }: {
   row: FreshMoneyRow; max: number; boxed: boolean; trade: RowTrade | null; mode: OiMode;
-  /** Slot layout and the OI unit, for the slot-flow tab. */
-  fs: FlowSlots; unit: string;
+  /** Slot layout, the OI unit and the board-wide cell scale (see flowScale), for the slot-flow tab. */
+  fs: FlowSlots; unit: string; scale: number;
 }) {
   const shown = (sd: FreshMoneyRow['put']) => (sd ? (mode === 'total' ? sd.oi : mode === 'flow' ? sd.flow?.day ?? null : sd.oiMoved) : null);
   const label = (sd: FreshMoneyRow['put']) => (sd
@@ -208,7 +235,7 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit }: {
   const delta = mode === 'delta' ? oiDelta(row) : null;
   return (
     <div className={`${gridFor(mode, !!trade)} ${trade ? 'h-[26px]' : 'h-[21px]'} text-[13px] tabular-nums`}>
-      {mode === 'flow' && <FlowCells side="put" flow={p?.flow ?? null} fs={fs} unit={unit} />}
+      {mode === 'flow' && <FlowCells side="put" flow={p?.flow ?? null} fs={fs} unit={unit} scale={scale} />}
       {mode === 'delta' ? (
         <>
           <DeltaBar delta={delta} max={max} />
@@ -220,7 +247,9 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit }: {
       ) : (
         <>
           <Bar side="put" length={shown(p)} moved={moved(p)} max={max} tag={mode === 'flow' ? null : p?.buildup ?? null} />
-          <span className="pr-2 text-right font-bold text-emerald-400" title={flowTitle(p)}>{label(p)}</span>
+          <span className="whitespace-nowrap pr-2 text-right font-bold text-emerald-400" title={flowTitle(p)}>
+            {mode === 'flow' && <><StreakBadge flow={p?.flow ?? null} fs={fs} scale={scale} />{' '}</>}{label(p)}
+          </span>
         </>
       )}
       {cell('put')}
@@ -235,11 +264,13 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit }: {
         <><span /><span /></>
       ) : (
         <>
-          <span className="pl-2 font-bold text-red-400" title={flowTitle(c)}>{label(c)}</span>
+          <span className="whitespace-nowrap pl-2 font-bold text-red-400" title={flowTitle(c)}>
+            {label(c)}{mode === 'flow' && <>{' '}<StreakBadge flow={c?.flow ?? null} fs={fs} scale={scale} /></>}
+          </span>
           <Bar side="call" length={shown(c)} moved={moved(c)} max={max} tag={mode === 'flow' ? null : c?.buildup ?? null} />
         </>
       )}
-      {mode === 'flow' && <FlowCells side="call" flow={c?.flow ?? null} fs={fs} unit={unit} />}
+      {mode === 'flow' && <FlowCells side="call" flow={c?.flow ?? null} fs={fs} unit={unit} scale={scale} />}
     </div>
   );
 }
@@ -366,6 +397,11 @@ export default function FreshMoneyBoard() {
   // Slot-flow layout; empty from a server that predates the slot tab.
   const fs = data?.flowSlots ?? NO_SLOTS;
   const nSlots = Math.max(0, fs.bounds.length - 1);
+  // One tint scale for every slot cell on the board (puts and calls), so sizes compare across strikes.
+  const flowCellScale = useMemo(
+    () => flowScale((data?.rows ?? []).flatMap(r => [...(r.put?.flow?.cells ?? []), ...(r.call?.flow?.cells ?? [])])),
+    [data],
+  );
 
   const maxAbs = useMemo(() => {
     let mx = 0;
@@ -513,10 +549,10 @@ export default function FreshMoneyBoard() {
         </div>
       </div>
 
-      {/* The flow tab adds an 11-cell block on each side (board min-width 1876 / 1556 px + paddings), so the page widens
+      {/* The flow tab adds an 11-cell block on each side (board min-width 1916 / 1596 px + paddings), so the page widens
           with it instead of making the call cells scroll off to the right. */}
       <div className={`mx-auto flex w-full ${oiMode === 'flow'
-        ? (tradeMode ? 'max-w-[2000px]' : 'max-w-[1680px]')
+        ? (tradeMode ? 'max-w-[2040px]' : 'max-w-[1720px]')
         : (tradeMode ? 'max-w-[1320px]' : 'max-w-[1100px]')} flex-1 flex-col gap-3 px-6 py-5`}>
         {isStale && (
           <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
@@ -581,10 +617,12 @@ export default function FreshMoneyBoard() {
               <div className="mt-0.5 text-[11.5px] text-zinc-400">
                 {oiMode === 'flow' ? (
                   <>Each cell = OI change ({data.oiUnit}) in one {fs.slotMin}-min slot counted from the open ({data.market === 'MCX' ? '09:00' : '09:15'}, {fs.bounds[0] ?? '–'} …);
-                    completed slots are frozen, the shaded <i>…</i> cell next to the strike is the current slot so far ·{' '}
+                    completed slots are frozen, the ringed <i>…</i> cell next to the strike is the current slot so far ·{' '}
                     <span className="text-emerald-400">green = added</span> · <span className="text-red-400">red = cut</span> · – = no reading ·
                     bar = today&apos;s OI change vs the previous close as of the last completed slot with a reading ({fs.dayAt ?? '–'}); each slot that
-                    completes adds its cell to it · filled = net added, outline = net cut</>
+                    completes adds its cell to it · filled = net added, outline = net cut ·
+                    tint = size of the move (vs this board&apos;s 95th percentile), grey = under 10 % ·
+                    <span className="font-bold text-emerald-400"> ▲n</span> / <span className="font-bold text-red-400">▼n</span> = n completed slots in a row adding / cutting (tinted moves only)</>
                 ) : oiMode === 'delta' ? (
                   <>Bar = Call OI − Put OI (total OI, in {data.oiUnit}) · <span className="text-red-400">red = calls heavier</span> ·{' '}
                     <span className="text-emerald-400">green = puts heavier</span></>
@@ -604,7 +642,7 @@ export default function FreshMoneyBoard() {
             </div>
 
             <div className="overflow-x-auto px-4 pb-2 pt-2">
-             <div className={oiMode === 'flow' ? (tradeMode ? 'min-w-[1876px]' : 'min-w-[1556px]') : tradeMode ? 'min-w-[1040px]' : 'min-w-[720px]'}>
+             <div className={oiMode === 'flow' ? (tradeMode ? 'min-w-[1916px]' : 'min-w-[1596px]') : tradeMode ? 'min-w-[1040px]' : 'min-w-[720px]'}>
               <div className={`${gridFor(oiMode, tradeMode)} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
                 {oiMode === 'flow' && <FlowHeader side="put" fs={fs} />}
                 <span className="col-span-2 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `OI Δ today @ ${fs.dayAt ?? '–'}` : 'OI moved'}`}</span>
@@ -620,7 +658,7 @@ export default function FreshMoneyBoard() {
                 return (
                   <React.Fragment key={r.strike}>
                     <BoardRowView row={r} max={maxAbs} boxed={r.strike === boxedStrike} trade={rowTrade(r.strike)} mode={oiMode}
-                      fs={fs} unit={data.oiUnit} />
+                      fs={fs} unit={data.oiUnit} scale={flowCellScale} />
                     {divider && <SpotDivider spot={spot!} live={liveSpot !== null} />}
                   </React.Fragment>
                 );

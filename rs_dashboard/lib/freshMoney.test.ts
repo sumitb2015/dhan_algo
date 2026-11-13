@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, fmtOiShort, fmtMinOfDay,
+  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak,
 } from './freshMoney.ts';
 
 const HEAD = 'timestamp,spot,expiry,strike,CE_LTP,CE_IV,CE_OI,CE_change_OI,CE_volume,PE_LTP,PE_IV,PE_OI,PE_change_OI,PE_volume';
@@ -241,4 +241,43 @@ test('oiFlow: each completed slot adds exactly its cell to today\'s change', () 
   const a = slotsOf(series('09:15', '10:32', ce, () => 1, () => false, '2026-11-12', chg)).byStrike.get(22550)!.ce;
   const b = slotsOf(series('09:15', '10:33', ce, () => 1, () => false, '2026-11-12', chg)).byStrike.get(22550)!.ce;
   assert.equal(b.day! - a.day!, b.cells[4]);   // the 10:30-10:33 slot that just completed
+});
+
+test('flowScale is the 95th percentile of |cell|, so one outlier does not set it', () => {
+  assert.equal(flowScale([]), 0);
+  assert.equal(flowScale([null, null]), 0);
+  const v = [...Array.from({ length: 99 }, (_, i) => (i % 2 ? -(i + 1) : i + 1)), 1e6, null];
+  assert.ok(Math.abs(flowScale(v) - 95.05) < 1e-9);   // 100 values: 95th pct between 95 and 96, not 1e6
+});
+
+test('flowTier boundaries', () => {
+  assert.equal(flowTier(null, 100), 'none');
+  assert.equal(flowTier(0, 100), 'none');
+  assert.equal(flowTier(50, 0), 'none');
+  assert.equal(flowTier(9.9, 100), 'none');
+  assert.equal(flowTier(-10, 100), 'low');
+  assert.equal(flowTier(34.9, 100), 'low');
+  assert.equal(flowTier(35, 100), 'mid');
+  assert.equal(flowTier(-69.9, 100), 'mid');
+  assert.equal(flowTier(70, 100), 'high');
+  assert.equal(flowTier(-500, 100), 'high');
+});
+
+test('flowStreak counts completed slots only, newest backwards; null / 0 / a flip ends it; under 3 = none', () => {
+  // 5 completed + running (last). Running is ignored even when it flips.
+  assert.deepEqual(flowStreak([-5, 1, 2, 3, 4, -99], 5, 1), { dir: 1, n: 4 });
+  assert.deepEqual(flowStreak([1, -2, -3, -4, -5, 9], 5, 1), { dir: -1, n: 4 });
+  assert.equal(flowStreak([1, 2, 3, -4, 5, 6], 5, 1), null);          // run of 1
+  assert.deepEqual(flowStreak([9, null, 1, 2, 3, 0], 5, 1), { dir: 1, n: 3 });
+  assert.equal(flowStreak([1, 2, 0, 3, 4, 1], 5, 1), null);           // 0 breaks: run of 2
+  assert.equal(flowStreak([1, 2, 3, 4, null, 1], 5, 1), null);        // newest completed unknown
+  assert.deepEqual(flowStreak([1, 1, 1, 1, 1, 1], 5, 1), { dir: 1, n: 5 });
+});
+
+test('flowStreak: a grey (under 10 % of the scale) move ends the run, so badges never sit on noise', () => {
+  // Scale 1000: 50 is grey. +2, +1, +3 lots in a row is noise, not a trend.
+  assert.equal(flowStreak([500, 2, 1, 3, 0], 4, 1000), null);
+  assert.equal(flowStreak([500, 400, 50, 300, 200, 9], 5, 1000), null);            // run of 2 after the grey 50
+  assert.deepEqual(flowStreak([500, 400, 150, 300, 200, 9], 5, 1000), { dir: 1, n: 5 });
+  assert.equal(flowStreak([500, 400, 300, 200], 4, 0), null);                    // no scale -> every cell is grey
 });
