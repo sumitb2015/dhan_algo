@@ -1,7 +1,7 @@
 """
 Crude Oil Options OI Snapshot Collector — runs during MCX market hours (09:00 IST to the evening close: 23:30
 while the US is on daylight saving, 23:55 otherwise), polling the CRUDEOIL or CRUDEOILM option chain every 30 seconds
-and writing a snapshot of ATM±10 strikes to a daily CSV file.
+and writing a snapshot of ATM±20 strikes to a daily CSV file.
 
 ATM is locked at startup based on the active near-month Futures contract price.
 
@@ -50,7 +50,7 @@ stdout_handler.setFormatter(logging.Formatter('%(asctime)s  %(levelname)s  %(mes
 log.addHandler(stdout_handler)
 
 STRIKE_STEP = 100
-ATM_RANGE   = 10          # ATM ± 10 strikes = 21 total
+ATM_RANGE   = 20          # ATM ± 20 strikes = 41 total (the cumulative-OI PCR re-centres on spot inside this band)
 POLL_SEC    = 30
 MARKET_OPEN = (9, 0)      # MCX opens at 09:00
 UNDERLYINGS = ('CRUDEOIL', 'CRUDEOILM')

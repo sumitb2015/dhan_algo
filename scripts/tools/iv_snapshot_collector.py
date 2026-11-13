@@ -1,6 +1,6 @@
 """
 IV Snapshot Collector — runs from 09:15 to 15:40 IST, polling the NIFTY, BANKNIFTY,
-and SENSEX option chains every 30 seconds and writing a full snapshot of ATM±10
+and SENSEX option chains every 30 seconds and writing a full snapshot of ATM±20
 strikes to daily CSV files in debug/.
 
 Usage:
@@ -60,7 +60,7 @@ TARGETS = {
     },
 }
 
-ATM_RANGE   = 10          # ATM ± 10 strikes = 21 total
+ATM_RANGE   = 20          # ATM ± 20 strikes = 41 total (the cumulative-OI PCR re-centres on spot inside this band)
 POLL_SEC    = 30
 MARKET_OPEN = (9, 15)     # HH, MM
 MARKET_CLOSE = (15, 40)   # HH, MM — F&O close post-SEBI-CAS
