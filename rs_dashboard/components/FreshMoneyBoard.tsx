@@ -493,7 +493,11 @@ export default function FreshMoneyBoard() {
         </div>
       </div>
 
-      <div className={`mx-auto flex w-full ${tradeMode ? 'max-w-[1320px]' : 'max-w-[1100px]'} flex-1 flex-col gap-3 px-6 py-5`}>
+      {/* The flow tab adds a 5-cell block on each side (board min-width 1480 / 1160 px + paddings), so the page widens
+          with it instead of making the call cells scroll off to the right. */}
+      <div className={`mx-auto flex w-full ${oiMode === 'flow'
+        ? (tradeMode ? 'max-w-[1600px]' : 'max-w-[1260px]')
+        : (tradeMode ? 'max-w-[1320px]' : 'max-w-[1100px]')} flex-1 flex-col gap-3 px-6 py-5`}>
         {isStale && (
           <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
             <AlertTriangle className="h-3.5 w-3.5" />
