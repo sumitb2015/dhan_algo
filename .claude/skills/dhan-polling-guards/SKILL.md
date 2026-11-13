@@ -270,7 +270,20 @@ clicks both passed the 20-lot cap. Keep the early check for a quick refusal, but
 `updateLadderState` callback that appends (return the state unchanged and set a flag to answer "cap"). This is guard 1 and 2 applied
 to a limit rather than a spawn: any check-then-act over a shared ledger needs the check in the same critical section.
 
+### 18. Use the shared helpers, and module state is per Next bundle (refactor `b3eacf28`, `6217eaea`)
+
+Do not write private copies of these - six stores each had their own `writeJsonAtomic` with a fixed `${file}.tmp`, so two
+processes saving one file clobbered each other's tmp:
+- `lib/lockedJsonFile`: `withFileLock`, `readJsonFile` (parse-or-null), `writeJsonAtomic(file, data, {pretty})` (tmp name carries the pid).
+- `lib/bridgeSpawn`: `bridgeRunning` / `startBridge` (O_EXCL start lock, 60 s steal, 15 s release) for any WebSocket bridge spawn.
+- `lib/istTime`: `IST_OFFSET_S`, `istToday`, `istDayNumber`, `minuteStart`; dates still come from `nseHolidays.istDateIso`.
+- `lib/localPref`: `readPref` / `readPrefOf` / `savePref` (try/catch around localStorage).
+- `lib/globalOnce`: `globalOnce(key, init)`. Next compiles each route and `instrumentation` into its own bundle, so a
+  module-level `let` / `new Map()` exists once per bundle: a route and a watcher then run two throttles and two caches
+  (Kotak positions were read twice per cycle). Anything that must be one-per-process goes on `globalThis` through this.
+
 ## Before You Ship
+- Is any throttle, cache or lock a module-level variable that a route and a watcher both use? Put it on `globalOnce`.
 - Can two tabs run this at once? What happens if they do?
 - If this spawns something, what stops a second spawn during the startup window?
 - If this caches, what does it do with a `{success:false}` 200?
