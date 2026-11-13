@@ -181,3 +181,68 @@ export function fmtOiAbs(n: number | null): string {
   if (a >= 1e5) return `${(a / 1e5).toFixed(1)}L`;
   return Math.round(a).toLocaleString('en-IN');
 }
+
+// ── Recent OI flow (the "5×5m flow" tab) ──────────────────────────────────────────────────────────────────────────
+
+/** One side of one strike: OI change in each recent window (oldest first) and over all of them. */
+export interface SideFlow { cells: (number | null)[]; total: number | null }
+
+export interface OiFlow {
+  /** HH:MM of the snapshot at each window boundary, oldest first (`windows + 1` entries; null = no reading there). */
+  marks: (string | null)[];
+  byStrike: Map<number, { ce: SideFlow; pe: SideFlow }>;
+}
+
+/**
+ * OI change per strike over the last `windows` rolling windows of `minutes` each, ending at the latest snapshot.
+ * Boundary k is the latest snapshot at or before `last.min − k·minutes`, accepted only within `slackMin` of that time
+ * (a collector gap is not a reading) and only on the last snapshot's expiry. A cell is null when a boundary or either
+ * OI is missing: a missing OI is never read as 0. The total is end-to-end when both ends are known, else the sum of
+ * the cells when all of them are known, else null.
+ */
+export function oiFlow(snaps: Snapshot[], windows = 5, minutes = 5, slackMin = 2): OiFlow {
+  const byStrike = new Map<number, { ce: SideFlow; pe: SideFlow }>();
+  const last = snaps[snaps.length - 1];
+  if (!last) return { marks: Array(windows + 1).fill(null), byStrike };
+  // refs[k] = boundary k (0 = now); snaps are sorted by `min`.
+  const refs: (Snapshot | null)[] = [];
+  let j = snaps.length - 1;
+  for (let k = 0; k <= windows; k++) {
+    const target = last.min - k * minutes;
+    while (j >= 0 && snaps[j].min > target + 1e-9) j--;
+    const s = j >= 0 ? snaps[j] : null;
+    refs.push(s && target - s.min <= slackMin && s.expiry === last.expiry ? s : null);
+  }
+  const oiAt = (s: Snapshot | null, k: number, side: 'ce' | 'pe'): number | null => {
+    const v = s?.strikes.get(k)?.[side].oi;
+    return v == null || !Number.isFinite(v) ? null : v;
+  };
+  const sideFlow = (k: number, side: 'ce' | 'pe'): SideFlow => {
+    const cells: (number | null)[] = [];
+    for (let i = 0; i < windows; i++) {
+      const a = oiAt(refs[windows - i], k, side), b = oiAt(refs[windows - 1 - i], k, side);
+      cells.push(a === null || b === null ? null : b - a);
+    }
+    const end = oiAt(refs[0], k, side), start = oiAt(refs[windows], k, side);
+    const total = end !== null && start !== null ? end - start
+      : cells.every(c => c !== null) ? cells.reduce<number>((t, c) => t + (c as number), 0) : null;
+    return { cells, total };
+  };
+  for (const k of last.strikes.keys()) byStrike.set(k, { ce: sideFlow(k, 'ce'), pe: sideFlow(k, 'pe') });
+  const marks = refs.map(s => (s ? s.ts.slice(11, 16) : null)).reverse();
+  return { marks, byStrike };
+}
+
+/** Compact signed OI for narrow cells: +950, +84k, -1.2L, +1.1Cr; 0 unsigned; '–' when unknown. */
+export function fmtOiShort(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return '–';
+  const r = Math.round(n);
+  if (r === 0) return '0';
+  const sign = r > 0 ? '+' : '-';
+  const a = Math.abs(r);
+  if (a >= 1e7) return `${sign}${(a / 1e7).toFixed(1)}Cr`;
+  if (a >= 1e5) return `${sign}${(a / 1e5).toFixed(1)}L`;
+  if (a >= 1e4) return `${sign}${Math.round(a / 1e3)}k`;
+  if (a >= 1e3) return `${sign}${(a / 1e3).toFixed(1)}k`;
+  return `${sign}${a}`;
+}

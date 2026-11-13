@@ -18,7 +18,9 @@ positions read twice", "board price snaps back to the startup value", "OI change
 
 ## Map (who owns what)
 - `lib/freshMoney.ts` - pure engine: snapshot CSV -> board rows, buildup tags, Δ OI
-  (LB/SB/SC/LU), OI change | Total OI switch. No I/O.
+  (LB/SB/SC/LU), OI change | Total OI switch. No I/O. `oiFlow()` feeds the "5×5m flow" tab: OI change per strike in
+  each of the last five rolling 5-min windows ending at the latest snapshot; a boundary with no snapshot within 2 min
+  (collector gap) or on another expiry is null, never 0, and the total is end-to-end.
 - `lib/freshMoneyFiles.ts` - ONE parse per snapshot-file change, shared by the board route and the trade route. Only
   files the board shows keep full snapshots in memory (14 days x 5 underlyings would exceed 100 MB).
 - `lib/freshMoneyWs.ts` + `freshMoneyWsQuote.ts` - WebSocket prices via `scripts/tools/price_ladder_ws.py --name fresh_money`

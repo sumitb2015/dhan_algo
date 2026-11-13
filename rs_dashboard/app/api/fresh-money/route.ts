@@ -5,7 +5,7 @@ import { resolveLotSize } from '@/lib/lotSize';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { parsedDay } from '@/lib/freshMoneyFiles';
 import { readJsonFile } from '@/lib/lockedJsonFile';
-import { buildBoardRows, strikeStep, type Buildup, type PrevCloses } from '@/lib/freshMoney';
+import { buildBoardRows, oiFlow, strikeStep, type Buildup, type PrevCloses, type SideFlow } from '@/lib/freshMoney';
 
 // Read-only: everything comes from snapshot CSVs in debug/ (no Dhan call except the cached lot-size lookup). The IV
 // snapshot collector writes NIFTY / BANKNIFTY / SENSEX (starts with the dashboard); scripts/tools/crudeoil_oi_collector.py
@@ -15,8 +15,15 @@ const UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEO
 const NSE_DAY = { from: 9 * 60 + 15, to: 15 * 60 + 30 };
 const MCX_DAY = { from: 9 * 60, to: 23 * 60 + 55 };
 const WINGS = 12;
+/** The "5×5m flow" tab: OI change in each of the last FLOW_WINDOWS rolling windows of FLOW_MINUTES. */
+const FLOW_WINDOWS = 5;
+const FLOW_MINUTES = 5;
 
-export interface FreshMoneySide { oi: number | null; oiMoved: number | null; buildup: Buildup | null }
+export interface FreshMoneySide {
+  oi: number | null; oiMoved: number | null; buildup: Buildup | null;
+  /** OI change per recent window (oldest first) and over all of them, same units as `oi`; null cells = no reading. */
+  flow: SideFlow | null;
+}
 export interface FreshMoneyRow { strike: number; put: FreshMoneySide | null; call: FreshMoneySide | null }
 
 export interface FreshMoneyResponse {
@@ -38,6 +45,9 @@ export interface FreshMoneyResponse {
   rows: FreshMoneyRow[];
   /** Option previous closes are on record for this day (the collector's side file): buildup tags can be shown. */
   hasBuildup: boolean;
+  /** HH:MM of each flow-window boundary, oldest first (FLOW_WINDOWS + 1 entries; null = no snapshot there). */
+  flowMarks: (string | null)[];
+  flowMinutes: number;
   error?: string;
 }
 
@@ -106,11 +116,17 @@ export async function GET(req: NextRequest) {
   // Option previous closes for the buildup tags: the collector's side file next to the CSV, for this expiry only.
   const pcFile = readJsonFile<{ expiry?: string; ce?: Record<string, number>; pe?: Record<string, number> }>(file.replace(/\.csv$/, '_prev_close.json'));
   const prevCloses: PrevCloses | null = pcFile && pcFile.expiry === expiry ? { ce: pcFile.ce ?? {}, pe: pcFile.pe ?? {} } : null;
-  const rows: FreshMoneyRow[] = buildBoardRows(last, WINGS, prevCloses).map(r => ({
-    strike: r.strike,
-    put: r.put ? { oi: toLots(r.put.oi), oiMoved: toLots(r.put.oiMoved), buildup: r.put.buildup } : null,
-    call: r.call ? { oi: toLots(r.call.oi), oiMoved: toLots(r.call.oiMoved), buildup: r.call.buildup } : null,
-  }));
+  const flow = oiFlow(snaps, FLOW_WINDOWS, FLOW_MINUTES);
+  const flowLots = (f: SideFlow | undefined): SideFlow | null =>
+    (f ? { cells: f.cells.map(toLots), total: toLots(f.total) } : null);
+  const rows: FreshMoneyRow[] = buildBoardRows(last, WINGS, prevCloses).map(r => {
+    const fl = flow.byStrike.get(r.strike);
+    return {
+      strike: r.strike,
+      put: r.put ? { oi: toLots(r.put.oi), oiMoved: toLots(r.put.oiMoved), buildup: r.put.buildup, flow: flowLots(fl?.pe) } : null,
+      call: r.call ? { oi: toLots(r.call.oi), oiMoved: toLots(r.call.oiMoved), buildup: r.call.buildup, flow: flowLots(fl?.ce) } : null,
+    };
+  });
 
   const body: FreshMoneyResponse = {
     underlying,
@@ -127,6 +143,8 @@ export async function GET(req: NextRequest) {
     day,
     rows,
     hasBuildup: prevCloses !== null,
+    flowMarks: flow.marks,
+    flowMinutes: FLOW_MINUTES,
   };
   respCache.set(underlying, { key: cacheKey, body });
   return NextResponse.json(body);

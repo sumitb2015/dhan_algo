@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume,
+  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, fmtOiShort,
 } from './freshMoney.ts';
 
 const HEAD = 'timestamp,spot,expiry,strike,CE_LTP,CE_IV,CE_OI,CE_change_OI,CE_volume,PE_LTP,PE_IV,PE_OI,PE_change_OI,PE_volume';
@@ -105,4 +105,77 @@ test('delta OI: call total OI minus put total OI; unknown when either side is mi
   assert.equal(oiDelta({ call: side(5), put: side(5) }), 0);
   assert.equal(oiDelta({ call: null, put: side(5) }), null);
   assert.equal(oiDelta({ call: side(5), put: side(null) }), null);
+});
+
+// ── oiFlow ──
+/** One snapshot every 30 s from `from` to `to` (HH:MM), strike 22550 with CE OI = f(minute) and PE OI = g(minute). */
+function series(from: string, to: string, ce: (m: number) => number | '', pe: (m: number) => number | '', skip: (m: number) => boolean = () => false, exp = '2026-11-12') {
+  const [fh, fm] = from.split(':').map(Number), [th, tm] = to.split(':').map(Number);
+  const lines = [HEAD];
+  for (let m = fh * 60 + fm; m <= th * 60 + tm + 1e-9; m += 0.5) {
+    if (skip(m)) continue;
+    const hh = String(Math.floor(m / 60)).padStart(2, '0'), mm = String(Math.floor(m % 60)).padStart(2, '0');
+    const ss = m % 1 ? '30' : '00';
+    lines.push(`2026-11-13 ${hh}:${mm}:${ss},22575,${exp},22550,1,1,${ce(m)},,0,1,1,${pe(m)},,0`);
+  }
+  return parseSnapshotCsv(lines.join('\n'));
+}
+const M = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
+
+test('oiFlow: five clean windows add up to the total, oldest first', () => {
+  // CE grows 100 per minute; PE falls 20 per minute after 10:10.
+  const snaps = series('09:30', '10:25', m => 1000 + 100 * (m - M('09:30')), m => 5000 - 20 * Math.max(0, m - M('10:10')));
+  const f = oiFlow(snaps);
+  assert.deepEqual(f.marks, ['10:00', '10:05', '10:10', '10:15', '10:20', '10:25']);
+  const s = f.byStrike.get(22550)!;
+  assert.deepEqual(s.ce.cells, [500, 500, 500, 500, 500]);
+  assert.equal(s.ce.total, 2500);
+  assert.deepEqual(s.pe.cells, [0, 0, -100, -100, -100]);
+  assert.equal(s.pe.total, -300);
+});
+
+test('oiFlow: a collector gap nulls that window; the total still comes from the two ends', () => {
+  // No snapshots from 10:12 to 10:15:30 -> boundary 10:15 has no reading within 2 min (latest is 10:11:30).
+  const snaps = series('09:30', '10:25', m => 100 * m, () => 7, m => m >= M('10:12') && m <= M('10:15') + 0.5);
+  const s = oiFlow(snaps).byStrike.get(22550)!;
+  assert.deepEqual(s.ce.cells, [500, 500, null, null, 500]);
+  assert.equal(s.ce.total, 2500);
+  assert.deepEqual(oiFlow(snaps).marks, ['10:00', '10:05', '10:10', null, '10:20', '10:25']);
+});
+
+test('oiFlow: under 25 minutes of data leaves the older cells null', () => {
+  const s = oiFlow(series('09:15', '09:27', m => 10 * m, () => 1)).byStrike.get(22550)!;
+  assert.deepEqual(s.ce.cells, [null, null, null, 50, 50]);
+  assert.equal(s.ce.total, null);   // neither end-to-end nor every cell is known
+});
+
+test('oiFlow: a missing OI is null, never 0', () => {
+  const snaps = series('09:30', '10:25', m => (m < M('10:06') ? '' : 1000), () => 1);
+  const s = oiFlow(snaps).byStrike.get(22550)!;
+  assert.deepEqual(s.ce.cells, [null, null, 0, 0, 0]);
+  assert.equal(s.ce.total, null);
+});
+
+test('oiFlow: a boundary on another expiry is refused', () => {
+  const older = series('09:55', '10:12', () => 1, () => 1, () => false, '2026-11-05');
+  const newer = series('10:12:30'.slice(0, 5), '10:25', () => 9, () => 9);
+  const f = oiFlow([...older, ...newer.filter(s => s.min > M('10:12'))]);
+  assert.deepEqual(f.marks.slice(0, 3), [null, null, null]);
+  assert.deepEqual(f.byStrike.get(22550)!.ce.cells.slice(2), [null, 0, 0]);
+});
+
+test('oiFlow: no snapshots', () => {
+  const f = oiFlow([]);
+  assert.equal(f.byStrike.size, 0);
+  assert.equal(f.marks.length, 6);
+});
+
+test('fmtOiShort keeps cells narrow', () => {
+  assert.equal(fmtOiShort(null), '–');
+  assert.equal(fmtOiShort(0.2), '0');
+  assert.equal(fmtOiShort(950), '+950');
+  assert.equal(fmtOiShort(-1234), '-1.2k');
+  assert.equal(fmtOiShort(83718), '+84k');
+  assert.equal(fmtOiShort(-120000), '-1.2L');
+  assert.equal(fmtOiShort(1.1e7), '+1.1Cr');
 });

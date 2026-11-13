@@ -8,13 +8,16 @@ const KEY = 'dhan|111';
 const istNow = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().replace('T', ' ').slice(0, 19);
 const istToday = () => istNow().slice(0, 10);
 
-const side = (oi: number, chg: number) => ({ oi, oiMoved: chg, fresh: 0.2, buildup: null });
+// Flow cells oldest → newest; the oldest window had no snapshot (null).
+const PUT_FLOW = { cells: [null, 120, 0, -40, 1500], total: 1580 };
+const CALL_FLOW = { cells: [10, 20, 30, -900, -12000], total: -12840 };
+const side = (oi: number, chg: number, flow: unknown) => ({ oi, oiMoved: chg, buildup: null, flow });
 function board() {
-  const rows = [8300, 8200, 8100, 8000, 7900].map(strike => ({ strike, put: side(4000, 300), call: side(3000, -200) }));
+  const rows = [8300, 8200, 8100, 8000, 7900].map(strike => ({ strike, put: side(4000, 300, PUT_FLOW), call: side(3000, -200, CALL_FLOW) }));
   return {
     underlying: 'CRUDEOIL', date: istToday(), isToday: true, lastTs: istNow(), spot: 8105, expiry: '2026-11-17', step: 100,
     lot: 1, oiUnit: 'lots', market: 'MCX', mult: 100, day: { from: 540, to: 1435 }, rows,
-    board: { puts: 0.15, calls: 0.1 }, normal: { puts: null, calls: null }, series: [], band: [], historyDays: 1, hasBuildup: false,
+    hasBuildup: false, flowMarks: [null, '10:05', '10:10', '10:15', '10:20', '10:25'], flowMinutes: 5,
   };
 }
 
@@ -182,6 +185,33 @@ test('Δ OI tab: call OI − put OI on the left, coloured by the heavier side; r
   await expect(page.getByText('3,000', { exact: true })).toHaveCount(0);   // right panel empty
   await page.reload();
   await expect(page.getByRole('tab', { name: 'Δ OI' })).toHaveAttribute('aria-selected', 'true');
+});
+
+test('5×5m flow tab: per-window cells coloured by sign, 25-min total, newest next to the strike; survives a reload', async ({ page }) => {
+  const m = await install(page);
+  await page.getByRole('tab', { name: '5×5m flow' }).click();
+  await expect(page.getByText('PUTS: last 5 × 5 min')).toBeVisible();
+  // Put cells: + added (green), − cut (red), 0 and unknown neutral; exact value and window in the hover.
+  const add = page.getByText('+1.5k', { exact: true }).first();
+  await expect(add).toHaveClass(/text-emerald-400/);
+  await expect(add).toHaveAttribute('title', '10:20–10:25: +1,500 lots');
+  await expect(page.getByText('-40', { exact: true }).first()).toHaveClass(/text-red-400/);
+  await expect(page.getByText('-12k', { exact: true }).first()).toHaveClass(/text-red-400/);
+  const unknown = page.getByTitle('no snapshot at a boundary: unknown').first();
+  await expect(unknown).toHaveText('–');
+  await expect(unknown).toHaveClass(/text-zinc-400/);
+  // Totals (25 min).
+  await expect(page.getByText('+1,580', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('-12,840', { exact: true }).first()).toHaveAttribute('title', 'OI change over the last 25 min: -12,840 lots');
+  // Newest next to the strike: in the 8100 row the put's newest cell precedes the strike, the call's follows it.
+  const row = page.locator('div.grid', { hasText: '8100' }).filter({ hasText: '+1.5k' }).first();
+  const text = (await row.innerText()).replace(/\s+/g, ' ');
+  expect(text.indexOf('+1.5k')).toBeLessThan(text.indexOf('8100'));
+  expect(text.indexOf('-12k')).toBeGreaterThan(text.indexOf('8100'));
+  expect(text.indexOf('-12k')).toBeLessThan(text.indexOf('+10'));
+  await page.reload();
+  await expect(page.getByRole('tab', { name: '5×5m flow' })).toHaveAttribute('aria-selected', 'true');
+  expect(m.blocked).toEqual([]);
 });
 
 test('− / + step the header level by 1: off → 1 → 2, back to off; a typed value is stepped from', async ({ page }) => {
