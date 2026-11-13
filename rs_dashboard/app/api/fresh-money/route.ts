@@ -5,22 +5,18 @@ import { resolveLotSize } from '@/lib/lotSize';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { parsedDay } from '@/lib/freshMoneyFiles';
 import { readJsonFile } from '@/lib/lockedJsonFile';
-import {
-  boardFresh, sane, normalAt, bandFromHistory, buildBoardRows, strikeStep,
-  type Buildup, type DaySummary, type PrevCloses, type SidePair, type Range, type SeriesPoint, type BandPoint,
-} from '@/lib/freshMoney';
+import { buildBoardRows, strikeStep, type Buildup, type PrevCloses } from '@/lib/freshMoney';
 
 // Read-only: everything comes from snapshot CSVs in debug/ (no Dhan call except the cached lot-size lookup). The IV
 // snapshot collector writes NIFTY / BANKNIFTY / SENSEX (starts with the dashboard); scripts/tools/crudeoil_oi_collector.py
 // writes CRUDEOIL / CRUDEOILM (started from the page). Each underlying reads ONLY its own files (strict prefixes).
 const UNDERLYINGS = new Set(['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM']);
-/** Session window (IST minutes) the chart and the normal band span. MCX runs to 23:30 / 23:55 (US DST). */
+/** Session window (IST minutes) of the market. MCX runs to 23:30 / 23:55 (US DST). */
 const NSE_DAY = { from: 9 * 60 + 15, to: 15 * 60 + 30 };
 const MCX_DAY = { from: 9 * 60, to: 23 * 60 + 55 };
-const HISTORY_DAYS = 14;
 const WINGS = 12;
 
-export interface FreshMoneySide { oi: number | null; oiMoved: number | null; fresh: number | null; buildup: Buildup | null }
+export interface FreshMoneySide { oi: number | null; oiMoved: number | null; buildup: Buildup | null }
 export interface FreshMoneyRow { strike: number; put: FreshMoneySide | null; call: FreshMoneySide | null }
 
 export interface FreshMoneyResponse {
@@ -37,14 +33,9 @@ export interface FreshMoneyResponse {
   market: 'NSE' | 'MCX';
   /** Rupees per point per lot for MCX (barrels per lot); null on NSE, where `lot` is the units per lot. */
   mult: number | null;
-  /** The chart's x-axis span, IST minutes. */
+  /** The market session, IST minutes. */
   day: { from: number; to: number };
   rows: FreshMoneyRow[];
-  board: SidePair;
-  normal: { puts: Range | null; calls: Range | null };
-  series: SeriesPoint[];
-  band: BandPoint[];
-  historyDays: number;
   /** Option previous closes are on record for this day (the collector's side file): buildup tags can be shown. */
   hasBuildup: boolean;
   error?: string;
@@ -79,7 +70,7 @@ export async function GET(req: NextRequest) {
     const onlyBackfill = allDates.length > 0;
     return NextResponse.json({
       error: mcx
-        ? `No live-collected ${underlying} snapshots yet${onlyBackfill ? ' (the files on disk are 1-minute backfills, whose per-candle volume cannot give a fresh share)' : ''}. Start the ${underlying} OI collector during MCX hours to build the board.`
+        ? `No live-collected ${underlying} snapshots yet${onlyBackfill ? ' (the files on disk are 1-minute backfills, which are not shown)' : ''}. Start the ${underlying} OI collector during MCX hours to build the board.`
         : 'No IV snapshot files on disk yet. The IV snapshot collector writes them while the dashboard runs in market hours.',
       needsCollector: mcx,
     }, { status: 404 });
@@ -103,16 +94,8 @@ export async function GET(req: NextRequest) {
   const snaps = parsed?.snaps ?? [];
   const expiry = parsed?.expiry ?? '';
   const last = snaps[snaps.length - 1];
-  if (!parsed || !last || !parsed.summary) {
+  if (!parsed || !last) {
     return NextResponse.json({ error: `The ${date} snapshot file has no rows yet` }, { status: 404 });
-  }
-
-  const today = parsed.summary;
-  const history: DaySummary[] = [];
-  for (const d of dates.slice(1, 1 + HISTORY_DAYS)) {
-    const f = resolveCsvPath(underlying, d, true);
-    const s = f ? (await parsedDay(f, false))?.summary ?? null : null;
-    if (s) history.push(s);
   }
 
   const toLots = (n: number | null) => (n === null ? null : lot ? n / lot : n);
@@ -121,8 +104,8 @@ export async function GET(req: NextRequest) {
   const prevCloses: PrevCloses | null = pcFile && pcFile.expiry === expiry ? { ce: pcFile.ce ?? {}, pe: pcFile.pe ?? {} } : null;
   const rows: FreshMoneyRow[] = buildBoardRows(last, WINGS, prevCloses).map(r => ({
     strike: r.strike,
-    put: r.put ? { oi: toLots(r.put.oi), oiMoved: toLots(r.put.oiMoved), fresh: r.put.fresh, buildup: r.put.buildup } : null,
-    call: r.call ? { oi: toLots(r.call.oi), oiMoved: toLots(r.call.oiMoved), fresh: r.call.fresh, buildup: r.call.buildup } : null,
+    put: r.put ? { oi: toLots(r.put.oi), oiMoved: toLots(r.put.oiMoved), buildup: r.put.buildup } : null,
+    call: r.call ? { oi: toLots(r.call.oi), oiMoved: toLots(r.call.oiMoved), buildup: r.call.buildup } : null,
   }));
 
   const body: FreshMoneyResponse = {
@@ -139,11 +122,6 @@ export async function GET(req: NextRequest) {
     mult: isMcx ? MCX_LOT_MULTIPLIER[underlying] : null,
     day,
     rows,
-    board: sane(boardFresh(last)),
-    normal: normalAt(history, Math.floor(last.min)),
-    series: today.series,
-    band: bandFromHistory(history, day.from, day.to),
-    historyDays: history.length,
     hasBuildup: prevCloses !== null,
   };
   respCache.set(underlying, { key: cacheKey, body });

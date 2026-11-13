@@ -1,13 +1,12 @@
 ---
 name: dhan-fresh-money
-description: Use when touching the Fresh Money board (/options/fresh-money) - rs_dashboard/components for it, lib/freshMoney*.ts (freshMoney, freshMoneyChart, freshMoneyFiles, freshMoneyWs, freshMoneyBrokers, freshMoneyTrades, freshMoneyTradeServer, freshMoneyExits, freshMoneyExitTick, freshMoneyExitServer, freshMoneyGlobalExit/Tick), app/api/fresh-money/*, or the OI collectors that feed it (iv_snapshot_collector.py, scripts/tools/crudeoil_oi_collector.py). A map of the page, its real-money trade/exit path and the rules each fix came from. Real-money endpoint (Dhan, Kotak, Zerodha).
+description: Use when touching the Fresh Money board (/options/fresh-money) - rs_dashboard/components for it, lib/freshMoney*.ts (freshMoney, freshMoneyFiles, freshMoneyWs, freshMoneyBrokers, freshMoneyTrades, freshMoneyTradeServer, freshMoneyExits, freshMoneyExitTick, freshMoneyExitServer, freshMoneyGlobalExit/Tick), app/api/fresh-money/*, or the OI collectors that feed it (iv_snapshot_collector.py, scripts/tools/crudeoil_oi_collector.py). A map of the page, its real-money trade/exit path and the rules each fix came from. Real-money endpoint (Dhan, Kotak, Zerodha).
 ---
 
 # Fresh Money board
 
 ## Overview
-`/options/fresh-money`: per-strike "fresh share" = |change in OI| / volume (how much of the traded volume opened or
-closed positions) against a 14-day normal band, for NIFTY-family indices and CRUDEOIL / CRUDEOILM option months, with
+`/options/fresh-money`: per-strike OI board (OI change, total OI, call − put Δ OI, buildup tags; the fresh-share / normal-band / rolling-chart logic was removed 2026-11-13: too little history), for NIFTY-family indices and CRUDEOIL / CRUDEOILM option months, with
 live B/S trading, a Positions | Orders panel, per-position target / SL and a global rupee target / SL. Built
 2026-11-06..13 (`3d2e0fd5` .. `741459a5`). **REAL MONEY**: read `dhan-terminal-position-ownership` first (ledger owns
 positions, down-only reconcile, unconfirmed-order holds) and `dhan-polling-guards`.
@@ -18,7 +17,7 @@ Any edit to the files in the description, or a symptom such as "a new position t
 positions read twice", "board price snaps back to the startup value", "OI change looks huge on the first row".
 
 ## Map (who owns what)
-- `lib/freshMoney.ts` (+ `freshMoneyChart.ts`) - pure engine: snapshot CSV -> fresh share, rolling 5 min, buildup tags
+- `lib/freshMoney.ts` - pure engine: snapshot CSV -> board rows, buildup tags, Δ OI
   (LB/SB/SC/LU), OI change | Total OI switch. No I/O.
 - `lib/freshMoneyFiles.ts` - ONE parse per snapshot-file change, shared by the board route and the trade route. Only
   files the board shows keep full snapshots in memory (14 days x 5 underlyings would exceed 100 MB).

@@ -3,20 +3,19 @@
  * and expiry may be traded). Server-only (fs). Today's file is re-parsed when the collector appends (mtime/size key);
  * a past day is parsed once.
  *
- * Only files the board must show keep their snapshots in memory (`keepSnaps`); history days keep just their small
- * per-minute summary — 14 days x 5 underlyings of full snapshots would be well over 100 MB.
+ * Only files the board must show keep their snapshots in memory (`keepSnaps`); other days keep only their date and flags
+ * — many days x 5 underlyings of full snapshots would be well over 100 MB.
  */
 import fs from 'fs';
 import {
-  parseSnapshotCsv, latestExpiry, hasCumulativeVolume, summarizeDay, type DaySummary, type Snapshot,
+  parseSnapshotCsv, latestExpiry, hasCumulativeVolume, type Snapshot,
 } from './freshMoney.ts';
 
 export interface ParsedDay {
   key: string;
   expiry: string;
-  /** False for a 1-minute backfill (per-candle volume): unusable for a fresh share, never shown or traded from. */
+  /** False for a 1-minute backfill (per-candle volume): never shown or traded from. */
   cumulative: boolean;
-  summary: DaySummary | null;
   /** Snapshots of the latest expiry, oldest first (only when asked to keep them). */
   snaps: Snapshot[] | null;
 }
@@ -37,7 +36,7 @@ export async function parsedDay(file: string, keepSnaps: boolean): Promise<Parse
   const expiry = latestExpiry(all);
   const snaps = all.filter(s => s.expiry === expiry);
   const cumulative = hasCumulativeVolume(snaps);
-  const entry: ParsedDay = { key, expiry, cumulative, summary: cumulative ? summarizeDay(snaps) : null, snaps: keepSnaps ? snaps : null };
+  const entry: ParsedDay = { key, expiry, cumulative, snaps: keepSnaps ? snaps : null };
   cache.delete(file);
   cache.set(file, entry);
   while (cache.size > MAX_ENTRIES) cache.delete(cache.keys().next().value as string);

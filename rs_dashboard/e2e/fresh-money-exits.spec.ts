@@ -59,6 +59,14 @@ async function install(page: Page, opts: { watcherAlive?: boolean; withPosition?
       if (body.action === 'setExit') return json(route, { success: true });
       return json(route, { success: false, error: 'not mocked' }, 400);
     }
+    if (p === '/api/options/iv-history') {
+      const now = Date.now();
+      const data = Array.from({ length: 12 }, (_, i) => ({
+        time: '', ts: now - (11 - i) * 300_000, spot: 8100 + i, ceOI: 1_000_000 + i * 20_000, peOI: 900_000 + i * 35_000,
+        diff: -100_000 + i * 15_000, oiZ: 0, slopeZ: 0, wpiZ: 0, regimeLabel: 'Neutral', regimeConfirmed: false,
+      }));
+      return json(route, { success: true, date: istToday(), atm: 8100, expiry: '2026-11-17', wings: 10, data });
+    }
     if (p === '/api/crudeoil-oi-collector') return json(route, { success: true, status: { status: 'RUNNING', last_update: istNow() } });
     if (req.method() !== 'GET') { blocked.push(`${req.method()} ${p}`); return route.fulfill({ status: 599, body: 'blocked by test' }); }
     return route.continue();
@@ -196,4 +204,45 @@ test('− / + step the header level by 1: off → 1 → 2, back to off; a typed 
   await expect(target).toHaveValue('22');
   await page.reload();
   await expect(page.getByLabel('Target value (blank = off)').first()).toHaveValue('22');
+});
+
+test('strike-row Target button opens a popover and saves that position\'s own SL in points', async ({ page }) => {
+  const m = await install(page, { withPosition: true });
+  await page.getByRole('button', { name: /Arm live trading/ }).click();
+  const btn = page.getByRole('button', { name: 'Target and stop-loss for 8100 CE' });
+  await expect(btn).toBeVisible();
+  await btn.click();
+  const dlg = page.getByRole('dialog', { name: '8100 CE target and stop-loss' });
+  await expect(dlg).toBeVisible();
+  await page.screenshot({ path: '/tmp/claude-1000/-home-sumit-dhan-algo/69b017f5-26e6-4b1a-b412-ef2f63cac250/scratchpad/fm-popover.png' });
+  // Escape closes it, re-open, edit SL to 15 pts and Save
+  await page.keyboard.press('Escape');
+  await expect(dlg).toBeHidden();
+  await btn.click();
+  const sl = dlg.getByLabel('SL value (blank = off)');
+  await sl.fill('15');
+  await sl.press('Tab');
+  await dlg.getByRole('group', { name: 'SL unit' }).getByRole('button', { name: 'pts' }).click();
+  await expect(dlg.getByText('target 130.00 · SL 85.00')).toBeVisible();
+  await dlg.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect.poll(() => m.posts.find(b => b.action === 'setExit')).toEqual({
+    action: 'setExit', key: KEY, target: { value: 30, unit: 'pct' }, sl: { value: 15, unit: 'pts' },
+  });
+  await expect(dlg).toBeHidden();
+  expect(m.blocked).toEqual([]);
+});
+
+test('header shows the labelled New positions and Total groups', async ({ page }) => {
+  await install(page);
+  await expect(page.getByText('New positions', { exact: true })).toBeVisible();
+  await expect(page.getByText('Total · all brokers')).toBeVisible();
+  await expect(page.getByText(/Board fresh money|fresh share|normal range/i)).toHaveCount(0);
+  await expect(page.getByText('Cumulative OI', { exact: true })).toBeVisible();
+  await expect(page.locator('.recharts-area').first()).toBeVisible();
+  // Crude records ATM ±6: the picker offers only what the data can give, and the PCR pill names its window.
+  await expect(page.getByRole('button', { name: '±3', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '±6', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '±15', exact: true })).toHaveCount(0);
+  await expect(page.getByText(/PCR ±6/)).toContainText('1.05');
+  await page.screenshot({ path: '/tmp/claude-1000/-home-sumit-dhan-algo/69b017f5-26e6-4b1a-b412-ef2f63cac250/scratchpad/fm-header.png', fullPage: true });
 });

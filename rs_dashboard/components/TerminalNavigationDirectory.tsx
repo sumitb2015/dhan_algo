@@ -79,7 +79,7 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
       {
         name: 'Fresh Money Board',
         href: '/options/fresh-money',
-        desc: 'Per-strike fresh share of volume (OI moved / volume) against a 14-day normal band',
+        desc: 'Per-strike OI change, total OI and call − put Δ OI, with live trading',
       },
       {
         name: 'Cyber Scalper (9/20 EMA)',

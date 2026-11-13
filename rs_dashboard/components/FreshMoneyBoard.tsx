@@ -5,23 +5,21 @@ import { BadgeIndianRupee, AlertTriangle } from 'lucide-react';
 import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
 import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
-import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtPct, intensity, type Buildup, type Intensity, type Range } from '@/lib/freshMoney';
+import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, type Buildup } from '@/lib/freshMoney';
 import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
 import { validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
 import { usePageBroker } from './BrokerPicker';
 import CollectorControl from './freshMoney/CollectorControl';
-import FreshChart from './freshMoney/FreshChart';
 import PositionsOrders from './freshMoney/PositionsOrders';
+import CumulativeOiWidget from './scalpCockpit/CumulativeOiWidget';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
 const MCX_UNDERLYINGS: ReadonlySet<string> = new Set(['CRUDEOIL', 'CRUDEOILM']);
 type Underlying = (typeof UNDERLYINGS)[number];
 const POLL_MS = 30_000;
 const PREF_UNDERLYING = 'freshMoney.underlying';
-const PREF_CHART_H = 'freshMoney.chartHeight.v2';
 const PREF_LOTS = 'freshMoney.lots';
-const PREF_CHART_COLLAPSED = 'freshMoney.chartCollapsed';
 const PREF_OI_MODE = 'freshMoney.oiMode';
 type OiMode = 'change' | 'total' | 'delta';
 const PREF_POS_COLLAPSED = 'freshMoney.positionsCollapsed';
@@ -31,27 +29,18 @@ const NO_EXITS: ExitDefaultsUi = { target: null, sl: null };
 /** A remembered spec, re-validated (a hand-edited or old value is dropped, never used). */
 const specOrNull = (v: unknown): ExitSpec | null => { const r = validateExitSpec(v); return r && !('error' in r) ? r : null; };
 const LIVE_POLL_MS = 2_000;
-const CHART_DEFAULT_H = 340;
-const CHART_MIN_H = 160;
-const CHART_MAX_H = 760;
 /** Fallback chart span (NSE) until the board reply says which session it covers. */
 const NSE_DAY = { from: 9 * 60 + 15, to: 15 * 60 + 30 };
 
-// Literal class strings (Tailwind cannot see interpolated ones).
-const BAR_CLASS: Record<'put' | 'call', Record<'fill' | 'outline', Record<Intensity, string>>> = {
-  put: {
-    fill: { low: 'bg-emerald-500/30', mid: 'bg-emerald-500/55', high: 'bg-emerald-500/90' },
-    outline: { low: 'border border-emerald-500/35', mid: 'border border-emerald-500/60', high: 'border border-emerald-500/90' },
-  },
-  call: {
-    fill: { low: 'bg-red-500/30', mid: 'bg-red-500/60', high: 'bg-red-500/90' },
-    outline: { low: 'border border-red-500/35', mid: 'border border-red-500/60', high: 'border border-red-500/90' },
-  },
+// Literal class strings (Tailwind cannot see interpolated ones). Fill = OI building, outline = OI leaving.
+const BAR_CLASS: Record<'put' | 'call', Record<'fill' | 'outline', string>> = {
+  put: { fill: 'bg-emerald-500/55', outline: 'border border-emerald-500/60' },
+  call: { fill: 'bg-red-500/60', outline: 'border border-red-500/60' },
 };
 
-const GRID = 'grid grid-cols-[minmax(0,1fr)_44px_76px_96px_76px_44px_minmax(0,1fr)] items-center';
+const GRID = 'grid grid-cols-[minmax(0,1fr)_76px_96px_76px_minmax(0,1fr)] items-center';
 // With trading on, a cell each side of the strike holds B / S, the P&L chip and × (literal string for Tailwind).
-const GRID_TRADE = 'grid grid-cols-[minmax(0,1fr)_44px_76px_150px_80px_150px_76px_44px_minmax(0,1fr)] items-center';
+const GRID_TRADE = 'grid grid-cols-[minmax(0,1fr)_76px_172px_80px_172px_76px_minmax(0,1fr)] items-center';
 
 interface RowTrade {
   put: FmPosition | undefined;
@@ -65,6 +54,7 @@ interface RowTrade {
   busy: (opt: OptType) => boolean;
   order: (opt: OptType, side: TxnSide) => void;
   close: (p: FmPosition) => void;
+  setExit: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
 }
 
 function readPref(key: string): string | null {
@@ -74,10 +64,6 @@ function writePref(key: string, v: string) {
   try { window.localStorage.setItem(key, v); } catch { /* storage blocked */ }
 }
 
-
-function rangeText(r: Range | null): string {
-  return r ? `${Math.round(r.lo * 100)}-${Math.round(r.hi * 100)}%` : '–';
-}
 
 /** "YYYY-MM-DD HH:MM:SS" IST → epoch ms. */
 function istEpoch(ts: string): number {
@@ -96,15 +82,15 @@ function BuildupTag({ tag }: { tag: Buildup }) {
 }
 
 /** `length` sets the bar (OI moved, or total OI); `moved` (today's change) always decides filled = building vs
- *  outline = leaving, and `fresh` vs `normal` the shade — so both modes read the same way. */
-function Bar({ side, length, moved, max, fresh, normal, tag }: {
-  side: 'put' | 'call'; length: number | null; moved: number | null; max: number; fresh: number | null; normal: Range | null;
+ *  outline = leaving, so both modes read the same way. */
+function Bar({ side, length, moved, max, tag }: {
+  side: 'put' | 'call'; length: number | null; moved: number | null; max: number;
   tag: Buildup | null;
 }) {
   if (length === null || length === 0 || max <= 0) return <div />;
   // The tag takes room at the outer end, so the bar scales within what is left.
   const w = Math.max(1.5, (Math.abs(length) / max) * (tag ? 88 : 100));
-  const cls = BAR_CLASS[side][(moved ?? 0) >= 0 ? 'fill' : 'outline'][intensity(fresh, normal)];
+  const cls = BAR_CLASS[side][(moved ?? 0) >= 0 ? 'fill' : 'outline'];
   return (
     <div className={`flex h-full min-w-0 items-center gap-1 ${side === 'put' ? 'justify-end' : 'justify-start'}`}>
       {side === 'put' && tag && <BuildupTag tag={tag} />}
@@ -125,8 +111,8 @@ function DeltaBar({ delta, max }: { delta: number | null; max: number }) {
   );
 }
 
-function BoardRowView({ row, max, normal, boxed, trade, mode }: {
-  row: FreshMoneyRow; max: number; normal: FreshMoneyResponse['normal']; boxed: boolean; trade: RowTrade | null; mode: OiMode;
+function BoardRowView({ row, max, boxed, trade, mode }: {
+  row: FreshMoneyRow; max: number; boxed: boolean; trade: RowTrade | null; mode: OiMode;
 }) {
   const shown = (sd: FreshMoneyRow['put']) => (sd ? (mode === 'total' ? sd.oi : sd.oiMoved) : null);
   const label = (sd: FreshMoneyRow['put']) => (sd ? (mode === 'total' ? fmtOiAbs(sd.oi) : fmtOi(sd.oiMoved)) : '–');
@@ -143,6 +129,7 @@ function BoardRowView({ row, max, normal, boxed, trade, mode }: {
         exit={(() => { const p = side === 'put' ? trade.put : trade.call; return p ? trade.exits[p.key] : undefined; })()}
         onBuy={() => trade.order(opt, 'BUY')} onSell={() => trade.order(opt, 'SELL')}
         onClose={() => { const pos = side === 'put' ? trade.put : trade.call; if (pos) trade.close(pos); }}
+        onSetExit={trade.setExit}
       />
     );
   };
@@ -152,7 +139,6 @@ function BoardRowView({ row, max, normal, boxed, trade, mode }: {
       {mode === 'delta' ? (
         <>
           <DeltaBar delta={delta} max={max} />
-          <span />
           <span className={`pr-2 text-right font-bold ${delta === null || delta === 0 ? 'text-zinc-300' : delta > 0 ? 'text-red-400' : 'text-emerald-400'}`}
             title={delta === null ? undefined : `Call OI ${fmtOiAbs(c?.oi ?? null)} − Put OI ${fmtOiAbs(p?.oi ?? null)}`}>
             {fmtOi(delta)}
@@ -160,8 +146,7 @@ function BoardRowView({ row, max, normal, boxed, trade, mode }: {
         </>
       ) : (
         <>
-          <Bar side="put" length={shown(p)} moved={p?.oiMoved ?? null} max={max} fresh={p?.fresh ?? null} normal={normal.puts} tag={p?.buildup ?? null} />
-          <span className="pr-1.5 text-right text-zinc-300">{fmtPct(p?.fresh ?? null)}</span>
+          <Bar side="put" length={shown(p)} moved={p?.oiMoved ?? null} max={max} tag={p?.buildup ?? null} />
           <span className="pr-2 text-right font-bold text-emerald-400">{label(p)}</span>
         </>
       )}
@@ -174,12 +159,11 @@ function BoardRowView({ row, max, normal, boxed, trade, mode }: {
       {cell('call')}
       {mode === 'delta' ? (
         // Δ OI tab: the right panel is left empty (the difference is on the left).
-        <><span /><span /><span /></>
+        <><span /><span /></>
       ) : (
         <>
           <span className="pl-2 font-bold text-red-400">{label(c)}</span>
-          <span className="pl-1.5 text-zinc-300">{fmtPct(c?.fresh ?? null)}</span>
-          <Bar side="call" length={shown(c)} moved={c?.oiMoved ?? null} max={max} fresh={c?.fresh ?? null} normal={normal.calls} tag={c?.buildup ?? null} />
+          <Bar side="call" length={shown(c)} moved={c?.oiMoved ?? null} max={max} tag={c?.buildup ?? null} />
         </>
       )}
     </div>
@@ -235,7 +219,6 @@ export default function FreshMoneyBoard() {
   const [data, setData] = useState<FreshMoneyResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [chartH, setChartH] = useState(CHART_DEFAULT_H);
   // REAL-money arm: per page load, never persisted, dropped on an underlying switch.
   const [armed, setArmed] = useState(false);
   // Account for NEW orders (remembered per browser). An open position keeps the broker it was opened on.
@@ -247,12 +230,10 @@ export default function FreshMoneyBoard() {
   const [exitDefaults, setExitDefaults] = useState<ExitDefaultsUi>(NO_EXITS);
   const pickExitDefaults = (d: ExitDefaultsUi) => { setExitDefaults(d); writePref(PREF_EXIT_DEFAULTS, JSON.stringify(d)); };
   // Collapsed panels (remembered per browser).
-  const [chartCollapsed, setChartCollapsed] = useState(false);
   const [posCollapsed, setPosCollapsed] = useState(false);
   // What the board's numbers and bar lengths show: today's OI change (default) or total OI outstanding.
   const [oiMode, setOiMode] = useState<OiMode>('change');
   const pickOiMode = (m: OiMode) => { setOiMode(m); writePref(PREF_OI_MODE, m); };
-  const toggleChart = () => setChartCollapsed(c => { writePref(PREF_CHART_COLLAPSED, c ? '0' : '1'); return !c; });
   const togglePos = () => setPosCollapsed(c => { writePref(PREF_POS_COLLAPSED, c ? '0' : '1'); return !c; });
   const trades = useFreshMoneyTrades();
   const [now, setNow] = useState(() => Date.now());
@@ -263,11 +244,8 @@ export default function FreshMoneyBoard() {
     const u = readPref(PREF_UNDERLYING);
     // eslint-disable-next-line react-hooks/set-state-in-effect -- localStorage is only readable after hydration
     if (u && (UNDERLYINGS as readonly string[]).includes(u)) setUnderlying(u as Underlying);
-    const h = Number(readPref(PREF_CHART_H));
-    if (Number.isFinite(h) && h >= CHART_MIN_H && h <= CHART_MAX_H) setChartH(h);
     const l = Number(readPref(PREF_LOTS));
     if (Number.isInteger(l) && l >= 1 && l <= 20) setLots(l);
-    setChartCollapsed(readPref(PREF_CHART_COLLAPSED) === '1');
     setPosCollapsed(readPref(PREF_POS_COLLAPSED) === '1');
     const om = readPref(PREF_OI_MODE);
     if (om === 'total' || om === 'delta') setOiMode(om);
@@ -309,30 +287,6 @@ export default function FreshMoneyBoard() {
     setArmed(false);
     setUnderlying(u);
     writePref(PREF_UNDERLYING, u);
-  };
-
-  // Drag the grip to resize the chart; persist on release.
-  const drag = useRef<{ y: number; h: number } | null>(null);
-  const onGripDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    e.currentTarget.setPointerCapture(e.pointerId);
-    drag.current = { y: e.clientY, h: chartH };
-  };
-  const onGripMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!drag.current) return;
-    const h = Math.min(CHART_MAX_H, Math.max(CHART_MIN_H, drag.current.h - (e.clientY - drag.current.y)));
-    setChartH(h);
-  };
-  const onGripUp = () => {
-    if (drag.current) writePref(PREF_CHART_H, String(chartH));
-    drag.current = null;
-  };
-  const onGripKey = (e: React.KeyboardEvent) => {
-    const d = e.key === 'ArrowUp' ? 20 : e.key === 'ArrowDown' ? -20 : 0;
-    if (!d) return;
-    e.preventDefault();
-    const h = Math.min(CHART_MAX_H, Math.max(CHART_MIN_H, chartH + d));
-    setChartH(h);
-    writePref(PREF_CHART_H, String(h));
   };
 
   const maxAbs = useMemo(() => {
@@ -381,8 +335,6 @@ export default function FreshMoneyBoard() {
     return best;
   }, [data, spot]);
 
-  const historyLabel = data ? `${Math.min(data.historyDays, 14)}d` : '14d';
-  const hasNormal = !!(data?.normal.puts && data?.normal.calls);
   const staleMin = data?.isToday ? Math.floor((now - istEpoch(data.lastTs)) / 60_000) : 0;
   const nowIstMin = (() => {
     const d = new Date(now + 5.5 * 3600_000);
@@ -438,8 +390,9 @@ export default function FreshMoneyBoard() {
       busy: opt => inflight.has(lockKey(broker, underlying, strike, opt)),
       order: (opt, side) => sendOrder({ broker, underlying, expiry: data.expiry, strike, opt, side, lots, exitDefaults }),
       close: p => sendClose(p),
+      setExit,
     };
-  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, lots, ts, exitDefaults]);
+  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, setExit, lots, ts, exitDefaults]);
   const setLotsPref = (n: number) => { setLots(n); writePref(PREF_LOTS, String(n)); };
 
   return (
@@ -453,7 +406,7 @@ export default function FreshMoneyBoard() {
             <p className="mb-0.5 text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400">Options · {underlying}</p>
             <h1 className="text-sm font-bold leading-none tracking-tight text-white">Fresh Money Board</h1>
             <p className="mt-1 text-[10px] font-medium text-zinc-500">
-              Share of each strike&apos;s volume that opened or closed positions{data && data.historyDays >= 5 ? `, against a ${historyLabel} normal` : ' · normal range after 5 days of data'}
+              Open interest by strike: today&apos;s change, total outstanding, and call − put difference
             </p>
           </div>
         </div>
@@ -529,17 +482,6 @@ export default function FreshMoneyBoard() {
             )}
             <div className="px-4 pt-3">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <div className="text-[15px] text-zinc-200">
-                Board fresh money:{' '}
-                <span className="font-bold text-emerald-400">puts {fmtPct(data.board.puts)}</span>
-                <span className="text-zinc-400"> · </span>
-                <span className="font-bold text-red-400">calls {fmtPct(data.board.calls)}</span>
-                <span className="text-zinc-400">
-                  {'  '}({hasNormal
-                    ? `normal ${historyLabel}: puts ${rangeText(data.normal.puts)} · calls ${rangeText(data.normal.calls)}`
-                    : `normal: needs ≥5 days of snapshots, have ${data.historyDays}`})
-                </span>
-              </div>
               <div role="tablist" aria-label="Bars and numbers show" className="ml-auto flex rounded-md border border-zinc-800 bg-zinc-950/40 p-0.5">
                 {([['change', 'OI change'], ['total', 'Total OI'], ['delta', 'Δ OI']] as const).map(([m, name]) => (
                   <button key={m} type="button" role="tab" aria-selected={oiMode === m} onClick={() => pickOiMode(m)}
@@ -557,8 +499,7 @@ export default function FreshMoneyBoard() {
                   <>Bar = Call OI − Put OI (total OI, in {data.oiUnit}) · <span className="text-red-400">red = calls heavier</span> ·{' '}
                     <span className="text-emerald-400">green = puts heavier</span></>
                 ) : (
-                  <>{oiMode === 'total' ? 'Bar = total OI (shade and fill still from today\'s change)' : 'Bar = OI moved'} · % = fresh share of the strike&apos;s volume · light / mid / bright = below / about / above
-                    normal · filled building, outline leaving</>
+                  <>{oiMode === 'total' ? 'Bar = total OI (fill still from today\'s change)' : 'Bar = OI moved'} · filled = building, outline = leaving</>
                 )}
               </div>
               {oiMode !== 'delta' && <div className="mt-0.5 text-[11px] text-zinc-500">
@@ -575,18 +516,18 @@ export default function FreshMoneyBoard() {
             <div className="overflow-x-auto px-4 pb-2 pt-2">
              <div className={tradeMode ? 'min-w-[1040px]' : 'min-w-[720px]'}>
               <div className={`${tradeMode ? GRID_TRADE : GRID} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
-                <span className="col-span-3 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: fresh · ${oiMode === 'total' ? 'total OI' : 'OI moved'}`}</span>
+                <span className="col-span-2 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: ${oiMode === 'total' ? 'total OI' : 'OI moved'}`}</span>
                 {tradeMode && <span className="pr-1 text-right text-zinc-400">PE trade</span>}
                 <span className="text-center">STRIKE</span>
                 {tradeMode && <span className="pl-1 text-zinc-400">CE trade</span>}
-                <span className="col-span-3 pl-2">{oiMode === 'delta' ? '' : `CALLS: ${oiMode === 'total' ? 'total OI' : 'OI moved'} · fresh`}</span>
+                <span className="col-span-2 pl-2">{oiMode === 'delta' ? '' : `CALLS: ${oiMode === 'total' ? 'total OI' : 'OI moved'}`}</span>
               </div>
               {data.rows.map((r, i) => {
                 const next = data.rows[i + 1];
                 const divider = spot !== null && next && r.strike > spot && next.strike <= spot;
                 return (
                   <React.Fragment key={r.strike}>
-                    <BoardRowView row={r} max={maxAbs} normal={data.normal} boxed={r.strike === boxedStrike} trade={rowTrade(r.strike)} mode={oiMode} />
+                    <BoardRowView row={r} max={maxAbs} boxed={r.strike === boxedStrike} trade={rowTrade(r.strike)} mode={oiMode} />
                     {divider && <SpotDivider spot={spot!} live={liveSpot !== null} />}
                   </React.Fragment>
                 );
@@ -594,28 +535,9 @@ export default function FreshMoneyBoard() {
              </div>
             </div>
 
-            {!chartCollapsed && (
-            <div
-              role="separator"
-              aria-orientation="horizontal"
-              aria-label="Resize chart"
-              aria-valuenow={chartH}
-              aria-valuemin={CHART_MIN_H}
-              aria-valuemax={CHART_MAX_H}
-              tabIndex={0}
-              onPointerDown={onGripDown}
-              onPointerMove={onGripMove}
-              onPointerUp={onGripUp}
-              onPointerCancel={onGripUp}
-              onKeyDown={onGripKey}
-              className="group flex h-3 cursor-row-resize touch-none items-center justify-center border-t border-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60"
-            >
-              <span className="text-[10px] leading-none tracking-[0.2em] text-zinc-500 group-hover:text-zinc-300">•••</span>
-            </div>
-            )}
-
-            <div className={`px-4 pb-3 ${chartCollapsed ? 'border-t border-zinc-800 pt-2.5' : ''}`}>
-              <FreshChart data={data} height={chartH} collapsed={chartCollapsed} onToggle={toggleChart} />
+            {/* Cumulative OI over the day (ATM ± strikes), the same widget the Scalp Cockpit uses. It fills its parent's height. */}
+            <div className="h-[340px] border-t border-zinc-800 px-4 pb-3 pt-3">
+              <CumulativeOiWidget key={underlying} underlying={underlying} />
             </div>
           </div>
         )}
