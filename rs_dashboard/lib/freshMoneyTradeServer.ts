@@ -13,13 +13,13 @@ import { wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
 import { parsedDay } from '@/lib/freshMoneyFiles';
 import { globalOnce } from '@/lib/globalOnce';
 import {
-  BROKERS, brokerContract, brokerFills, brokerName, brokerNets, brokerSessionOk, intradayProduct, newCorrelationId, readOrder, sendOrder,
+  BROKERS, brokerContract, brokerFills, brokerName, brokerNets, brokerSessionOk, newCorrelationId, productCode, readOrder, sendOrder,
 } from '@/lib/freshMoneyBrokers';
 import {
   brokerUnits, buildPositions, closeCheck, closeQty, freshRestCache, contractHold, contractSettling, dueForCheck, effectiveState, hhmmToMin, isTerminal,
-  inFlightReducing, nextCheckDelay, orderKey, reconcileDownQty, sessionGate, sessionMessage, slices, unconfirmedQty,
+  inFlightReducing, netKey, nextCheckDelay, orderKey, productWindow, reconcileDownQty, sessionGate, sessionMessage, slices, unconfirmedQty,
   NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, FM_MAX_LOTS_PER_ORDER, FM_MAX_POSITION_LOTS,
-  type FmBroker, type FmLedger, type FmOrder, type FmPosition, type FmSegment, type OptType, type SessionGate,
+  type FmBroker, type FmLedger, type FmOrder, type FmPosition, type FmProduct, type FmSegment, type OptType, type SessionGate,
   type TradeWindow, type TxnSide,
 } from '@/lib/freshMoneyTrades';
 import { validateGlobalAmount, type FmGlobalExit } from './freshMoneyGlobalExit.ts';
@@ -75,8 +75,20 @@ function windowFor(underlying: string): TradeWindow | null {
   return { open: hhmmToMin(m.open), cutoff: hhmmToMin(m.autoExit), close: hhmmToMin(m.close) };
 }
 const marketName = (u: string) => (isMcx(u) ? 'MCX' : 'NSE');
-export const gateNow = (u: string): SessionGate => sessionGate(Date.now(), windowFor(u));
-const gateMessage = (u: string, gate: SessionGate) => sessionMessage(gate, windowFor(u), marketName(u));
+/** MIS and NRML share the open and the close; NRML may open new positions until a minute before the close. */
+export const gateNow = (u: string, product?: FmProduct): SessionGate => sessionGate(Date.now(), productWindow(windowFor(u), product));
+const gateMessage = (u: string, gate: SessionGate, product?: FmProduct) =>
+  sessionMessage(gate, productWindow(windowFor(u), product), marketName(u));
+
+/** Minutes before the close from which an open NRML position is flagged (this page never squares NRML off). */
+const NRML_WARN_MIN = 10;
+/** From NRML_WARN_MIN before the close until the day roll (an open NRML position after the bell is carried). */
+function nearClose(u: string, now: number): boolean {
+  const w = windowFor(u);
+  if (!w) return true;
+  const d = new Date(now + 19_800_000);
+  return d.getUTCHours() * 60 + d.getUTCMinutes() >= w.close - NRML_WARN_MIN;
+}
 
 // ── ledger ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -84,7 +96,9 @@ export function loadLedger(): FmLedger {
   const today = istToday();
   const l = readJsonFile<FmLedger>(LEDGER);
   if (l && l.date === today && Array.isArray(l.orders)) return l;
-  // Day roll: INTRADAY positions are squared off by the broker; keep yesterday's file for the record.
+  // Day roll: MIS positions are squared off by the broker; keep yesterday's file for the record. An NRML position still
+  // open is NOT carried into the new ledger (the user's choice, 2026-11-13: no auto-exit, warned from 10 min before the
+  // close — `nrmlWarning`); it is then managed at the broker.
   if (l && l.date && l.date !== today) {
     try { fs.renameSync(LEDGER, path.join(DEBUG_DIR, `fresh_money_trades_${l.date}.json`)); } catch { /* raced */ }
   }
@@ -245,18 +259,18 @@ export async function reconcileWithBrokers(): Promise<void> {
     lastReconcile.set(b, now);
     const nets = await brokerNets(b);
     if (!nets) continue;
-    if (!mine.some(p => reconcileDownQty(p.netQty, nets.get(p.securityId) ?? 0, false) > 0)) continue;
+    if (!mine.some(p => reconcileDownQty(p.netQty, nets.get(netKey(p.securityId, p.product)) ?? 0, false) > 0)) continue;
     await mutateLedger(l => {
       // Re-decide against the ledger as it is inside the lock: an order may have been placed meanwhile.
       const t = Date.now();
       for (const p of buildPositions(l.orders, {}, t)) {
         if (p.broker !== b) continue;
-        const drop = reconcileDownQty(p.netQty, nets.get(p.securityId) ?? 0, contractSettling(l.orders, p.key, t));
+        const drop = reconcileDownQty(p.netQty, nets.get(netKey(p.securityId, p.product)) ?? 0, contractSettling(l.orders, p.key, t));
         if (drop <= 0) continue;
         l.orders.push({
           id: randomUUID(), ts: t, underlying: p.underlying, expiry: p.expiry, strike: p.strike, opt: p.opt,
           securityId: p.securityId, broker: p.broker, priceId: p.priceId, segment: p.segment, lot: p.lot, mult: p.mult,
-          side: p.netQty > 0 ? 'SELL' : 'BUY', qty: drop, close: true, external: true, correlationId: 'external',
+          side: p.netQty > 0 ? 'SELL' : 'BUY', product: p.product, qty: drop, close: true, external: true, correlationId: 'external',
           orderId: null, state: 'filled', filledQty: drop, avgPrice: null,
           reason: `Closed outside this page: ${brokerName(b)} no longer shows this quantity (MIS auto square-off or another desk)`,
         });
@@ -286,7 +300,7 @@ async function priceExternalCloses(): Promise<void> {
       for (const o of l.orders) {
         if (!o.external || o.avgPrice !== null || (o.broker ?? 'dhan') !== b || (o.priceTries ?? 0) >= EXT_PRICE_TRIES) continue;
         o.priceTries = (o.priceTries ?? 0) + 1;
-        const hit = book ? priceExternalClose(o, l.orders, book, intradayProduct(b)) : null;
+        const hit = book ? priceExternalClose(o, l.orders, book, productCode(b, o.product)) : null;
         if (!hit) continue;
         o.avgPrice = hit.avgPrice;
         o.externalOrderIds = hit.orderIds;
@@ -305,7 +319,9 @@ export interface FreshMoneyTradeState {
   maxLots: number;
   maxPositionLots: number;
   /** Per underlying: 'open' = new positions allowed, 'close-only' after the cutoff, 'closed' outside the session. */
-  sessions: Record<string, { gate: SessionGate; note: string | null }>;
+  sessions: Record<string, { gate: SessionGate; note: string | null; nrml?: { gate: SessionGate; note: string | null } }>;
+  /** Open NRML positions near / after the close: this page does not square NRML off (null = nothing to say). */
+  nrmlWarning: string | null;
   boardExpiry: Record<string, string | null>;
   /** Where each open position's LTP came from, by priceId: the WebSocket, or the REST fallback. */
   ltpSource: Record<string, 'ws' | 'rest'>;
@@ -336,13 +352,21 @@ export async function buildState(): Promise<FreshMoneyTradeState> {
   const boardExpiry: Record<string, string | null> = {};
   for (const u of TRADABLE) boardExpiry[u] = (await todaysBoard(u).catch(() => null))?.expiry ?? null;
   const sessions: FreshMoneyTradeState['sessions'] = {};
-  for (const u of TRADABLE) { const g = gateNow(u); sessions[u] = { gate: g, note: gateMessage(u, g) }; }
+  for (const u of TRADABLE) {
+    const g = gateNow(u), n = gateNow(u, 'NRML');
+    sessions[u] = { gate: g, note: gateMessage(u, g), nrml: { gate: n, note: gateMessage(u, n, 'NRML') } };
+  }
+  const nrmlOpen = pre.filter(p => p.netQty !== 0 && p.product === 'NRML' && nearClose(p.underlying, now));
+  const nrmlWarning = nrmlOpen.length
+    ? `${nrmlOpen.length} NRML position${nrmlOpen.length === 1 ? '' : 's'} still open (${nrmlOpen.map(p => `${p.underlying} ${p.strike} ${p.opt}`).join(', ')}). This page does not square NRML off: close before the bell or it is carried overnight, and it leaves this page at the next day's roll.`
+    : null;
   return {
     date: ledger.date,
     tradable: [...TRADABLE],
     maxLots: FM_MAX_LOTS_PER_ORDER,
     maxPositionLots: FM_MAX_POSITION_LOTS,
     sessions,
+    nrmlWarning,
     boardExpiry,
     ltpSource,
     brokers: { dhan: brokerSessionOk('dhan'), kotak: brokerSessionOk('kotak'), zerodha: brokerSessionOk('zerodha') },
@@ -365,8 +389,8 @@ type OrderBase = Omit<FmOrder, 'id' | 'ts' | 'correlationId' | 'orderId' | 'stat
  *  pass). The cap counts unconfirmed orders (UNKNOWN / in flight) as if they fill. */
 function precheck(l: FmLedger, base: OrderBase): string | null {
   const now = Date.now();
-  const gate = gateNow(base.underlying);
-  if (gate === 'closed' || (gate === 'close-only' && !base.close)) return gateMessage(base.underlying, gate);
+  const gate = gateNow(base.underlying, base.product);
+  if (gate === 'closed' || (gate === 'close-only' && !base.close)) return gateMessage(base.underlying, gate, base.product);
   const key = orderKey(base);
   const hold = contractHold(l.orders, key, now);
   if (hold === 'unknown') return 'An earlier order on this contract has an UNKNOWN outcome — check Positions/Orders; new orders on it are held for a minute';
@@ -447,6 +471,8 @@ export interface OrderBody {
   /** setGlobal: rupee amounts (null = off); both null = remove. */
   globalTarget?: unknown;
   globalSl?: unknown;
+  /** Order: MIS (default) or NRML. */
+  product?: unknown;
 }
 
 const refuse = (error: string, http: number): CloseResult => ({ kind: 'refused', error, http });
@@ -467,8 +493,11 @@ export async function placeOrderCore(b: OrderBody): Promise<CloseResult> {
   const broker = (b.broker ?? 'dhan') as FmBroker;
   if (!BROKERS.includes(broker)) return refuse(`Unknown broker ${b.broker}`, 400);
   if (!brokerSessionOk(broker)) return refuse(`${brokerName(broker)} is not logged in — nothing was sent`, 409);
-  const gate = gateNow(underlying);
-  if (gate !== 'open') return refuse(gateMessage(underlying, gate)!, 409);
+  // Absent = MIS (pages from before the product choice). Anything else is refused, never coerced.
+  if (b.product !== undefined && b.product !== 'MIS' && b.product !== 'NRML') return refuse('product must be MIS or NRML', 400);
+  const product: FmProduct = b.product === 'NRML' ? 'NRML' : 'MIS';
+  const gate = gateNow(underlying, product);
+  if (gate !== 'open') return refuse(gateMessage(underlying, gate, product)!, 409);
 
   const board = await todaysBoard(underlying).catch(() => null);
   if (!board) return refuse(`No ${underlying} board snapshot today — the IV snapshot collector must be running to trade from this page`, 409);
@@ -491,7 +520,7 @@ export async function placeOrderCore(b: OrderBody): Promise<CloseResult> {
   if ('error' in units) return refuse(units.error, 400);
   const r = await sendOne({
     underlying, expiry: board.expiry, strike, opt, broker, securityId: bc?.handle ?? c.securityId, priceId: c.securityId,
-    segment: c.segment as FmSegment, lot: units.lot, mult: units.mult, side, qty: lots * units.lot, close: false,
+    segment: c.segment as FmSegment, lot: units.lot, mult: units.mult, side, product, qty: lots * units.lot, close: false,
   }, true, defaults);
   if (r.kind === 'placed' && r.stamped) return { kind: 'placed', orderId: r.orderId, note: exitSummary(defaults) };
   return asClose(r);
@@ -568,9 +597,9 @@ export async function closePositionCore(key: string, trigger?: string): Promise<
   const remaining = Math.max(0, Math.abs(pos.netQty) - inFlight);
   if (remaining === 0) return refuse('A close for this position is already in flight (unconfirmed) — check Orders before sending another', 409);
   const nets = await brokerNets(pos.broker);
-  const qty = closeQty(Math.sign(pos.netQty) * remaining, nets ? nets.get(pos.securityId) ?? 0 : null);
+  const qty = closeQty(Math.sign(pos.netQty) * remaining, nets ? nets.get(netKey(pos.securityId, pos.product)) ?? 0 : null);
   if (qty <= 0) {
-    return refuse(`${brokerName(pos.broker)} shows no intraday position left in that direction — nothing was sent. It may have been closed elsewhere.`, 409);
+    return refuse(`${brokerName(pos.broker)} shows no ${pos.product} position left in that direction — nothing was sent. It may have been closed elsewhere.`, 409);
   }
   const side: TxnSide = pos.netQty > 0 ? 'SELL' : 'BUY';
   const parts = slices(qty, pos.lot);
@@ -581,7 +610,7 @@ export async function closePositionCore(key: string, trigger?: string): Promise<
     const r = await sendOne({
       underlying: pos.underlying, expiry: pos.expiry, strike: pos.strike, opt: pos.opt, broker: pos.broker,
       securityId: pos.securityId, priceId: pos.priceId, segment: pos.segment, lot: pos.lot, mult: pos.mult, side,
-      qty: parts[i], close: true, ...(trigger ? { trigger } : {}),
+      product: pos.product, qty: parts[i], close: true, ...(trigger ? { trigger } : {}),
     }, i === 0);
     if (r.kind === 'placed') { placedQty += parts[i]; lastId = r.orderId; continue; }
     // Never send the next slice around a refusal or an UNKNOWN; say exactly what did go out.

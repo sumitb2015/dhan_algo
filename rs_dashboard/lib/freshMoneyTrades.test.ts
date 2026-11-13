@@ -324,3 +324,22 @@ test('a REST price cache is served only while fresh, also when the fetch fails',
   assert.equal(freshRestCache(null, 'MCX_COMM:111', 10_001), null);
   assert.equal(REST_CACHE_MS, 1500);
 });
+
+test('product: the same contract under MIS and NRML is two positions; old records read as MIS', async () => {
+  const { orderKey, netKey } = await import('./freshMoneyTrades.ts');
+  const ps = buildPositions([ord({ side: 'SELL' }), ord({ product: 'NRML', side: 'BUY', qty: 130, filledQty: 130 })], {}, 99_000);
+  assert.deepEqual(ps.map(p => [p.key, p.product, p.netQty]), [['dhan|111', 'MIS', -65], ['dhan|111|NRML', 'NRML', 130]]);
+  assert.equal(orderKey({ broker: 'kotak', securityId: 'X', product: 'MIS' }), 'kotak|X');
+  assert.equal(netKey('X', undefined), 'X|MIS');
+  assert.equal(netKey('X', 'NRML'), 'X|NRML');
+});
+
+test('product window: NRML opens until 15:29, MIS keeps 15:17; both close at 15:30', async () => {
+  const { productWindow } = await import('./freshMoneyTrades.ts');
+  const at = (hhmm: string) => Date.parse(`2026-11-13T${hhmm}:00+05:30`);
+  assert.equal(sessionGate(at('15:20'), productWindow(NSE_WINDOW, 'MIS')), 'close-only');
+  assert.equal(sessionGate(at('15:28'), productWindow(NSE_WINDOW, 'NRML')), 'open');
+  assert.equal(sessionGate(at('15:29'), productWindow(NSE_WINDOW, 'NRML')), 'close-only');
+  assert.equal(sessionGate(at('15:30'), productWindow(NSE_WINDOW, 'NRML')), 'closed');
+  assert.equal(productWindow(null, 'NRML'), null);
+});

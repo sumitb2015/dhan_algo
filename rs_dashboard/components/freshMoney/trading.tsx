@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * Fresh Money board — live trading pieces. REAL MONEY (Dhan, MARKET, INTRADAY).
+ * Fresh Money board — live trading pieces. REAL MONEY (Dhan / Kotak / Zerodha, MARKET, MIS or NRML).
  *
  * - `useFreshMoneyTrades` polls /api/fresh-money/trade (fast while anything is open or in flight) and sends orders.
  *   Every reply is classified with lib/orderOutcome (placed / rejected / UNKNOWN); an UNKNOWN is never retried.
@@ -14,7 +14,7 @@ import { toast } from 'sonner';
 import { Minus, Plus, X, ShieldAlert, Loader2, Target } from 'lucide-react';
 import { sendOrderRequest, UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import type { FreshMoneyTradeState } from '@/app/api/fresh-money/trade/route';
-import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
+import type { FmBroker, FmPosition, FmProduct, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { BrokerPicker } from '@/components/BrokerPicker';
 import type { ExitSpec, FmExit } from '@/lib/freshMoneyExits';
 import type { FmGlobalExit } from '@/lib/freshMoneyGlobalExit';
@@ -50,7 +50,7 @@ const newKey = () => `fm-${typeof crypto !== 'undefined' && 'randomUUID' in cryp
 export interface TradeApi {
   state: FreshMoneyTradeState | null;
   inflight: ReadonlySet<string>;
-  order: (o: { broker: FmBroker; underlying: string; expiry: string; strike: number; opt: OptType; side: TxnSide; lots: number; exitDefaults: ExitDefaultsUi }) => void;
+  order: (o: { broker: FmBroker; underlying: string; expiry: string; strike: number; opt: OptType; side: TxnSide; lots: number; product: FmProduct; exitDefaults: ExitDefaultsUi }) => void;
   close: (p: FmPosition) => void;
   /** Change or clear one position's target / stop-loss; resolves true when the server took it. */
   setExit: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
@@ -110,7 +110,7 @@ export function useFreshMoneyTrades(onWarn?: () => void): TradeApi {
         toast.warning(`${label}: PARTLY sent${outcome.kind === 'unknown' ? ' (rest UNKNOWN)' : ''}`, {
           description: `${outcome.error}${outcome.kind === 'unknown' ? ` ${UNKNOWN_ORDER_HINT}` : ''}`, duration: 20_000,
         });
-      } else if (outcome.kind === 'placed') toast.success(`${label} sent`, { description: `MARKET · INTRADAY${typeof reply?.note === 'string' ? ` · ${reply.note}` : ''}` });
+      } else if (outcome.kind === 'placed') toast.success(`${label} sent`, { description: `MARKET · ${typeof body.product === 'string' ? body.product : 'MIS'}${typeof reply?.note === 'string' ? ` · ${reply.note}` : ''}` });
       else if (outcome.kind === 'unknown') toast.error(`${label}: status UNKNOWN`, { description: `${outcome.error} ${UNKNOWN_ORDER_HINT}`, duration: 20_000 });
       else toast.error(`${label} rejected`, { description: outcome.error, duration: 8_000 });
     } finally {
@@ -123,13 +123,14 @@ export function useFreshMoneyTrades(onWarn?: () => void): TradeApi {
   }, [refresh]);
 
   const order: TradeApi['order'] = useCallback(o => {
-    const label = `${o.side} ${o.lots} lot${o.lots === 1 ? '' : 's'} ${o.underlying} ${o.strike} ${o.opt} on ${brokerLabel(o.broker)}`;
+    const label = `${o.side} ${o.lots} lot${o.lots === 1 ? '' : 's'} ${o.underlying} ${o.strike} ${o.opt} ${o.product} on ${brokerLabel(o.broker)}`;
     run(lockKey(o.broker, o.underlying, o.strike, o.opt), label, { action: 'order', ...o });
   }, [run]);
 
   const close: TradeApi['close'] = useCallback(p => {
-    const label = `Close ${p.underlying} ${p.strike} ${p.opt} on ${brokerLabel(p.broker)}`;
-    run(lockKey(p.broker, p.underlying, p.strike, p.opt), label, { action: 'close', key: p.key });
+    const label = `Close ${p.underlying} ${p.strike} ${p.opt}${p.product === 'NRML' ? ' NRML' : ''} on ${brokerLabel(p.broker)}`;
+    // `product` only words the toast: the server closes the position the key names, in its own product.
+    run(lockKey(p.broker, p.underlying, p.strike, p.opt), label, { action: 'close', key: p.key, product: p.product });
   }, [run]);
 
   const setExit: TradeApi['setExit'] = useCallback(async (key, target, sl) => {
@@ -253,7 +254,7 @@ export function ExitAllButton({ count, busy, onExit }: { count: number; busy: bo
 // Tints here are -600/NN on purpose: globals.css forces dark text inside any bg-red-500/NN or bg-emerald-500/NN element
 // in the light theme, which would turn the armed button's white label and a short chip's profit rose.
 export function TradeBar({
-  underlying, armed, onArm, lots, onLots, maxLots, lotSize, mcxMult, tradable, blocked, positions,
+  underlying, armed, onArm, lots, onLots, product, onProduct, maxLots, lotSize, mcxMult, tradable, blocked, positions,
   broker, onBroker, brokerReady, brokerSessions, exitDefaults, onExitDefaults, exitWatcher, hasExits,
   globalExit, allPositions, onSetGlobal,
 }: {
@@ -262,6 +263,9 @@ export function TradeBar({
   onArm: (v: boolean) => void;
   lots: number;
   onLots: (n: number) => void;
+  /** MIS (intraday, broker squares off ~15:18) or NRML (not squared off by this page); every new order carries it. */
+  product: FmProduct;
+  onProduct: (p: FmProduct) => void;
   maxLots: number;
   lotSize: number | null;
   /** Barrels per lot on MCX (order quantity there is lots); null on NSE. */
@@ -338,6 +342,19 @@ export function TradeBar({
       )}
 
       {tradable && (
+        <div role="radiogroup" aria-label="Product for new orders" className="flex rounded-md border border-zinc-700 bg-zinc-900 p-0.5"
+          title="Product for new orders. MIS: intraday, the broker squares it off. NRML: this page never squares it off — close it yourself before 15:30 or it is carried overnight.">
+          {(['MIS', 'NRML'] as const).map(p => (
+            <button key={p} type="button" role="radio" aria-checked={product === p} onClick={() => onProduct(p)}
+              className={`${FOCUS} rounded px-2 py-0.5 text-[11px] font-bold transition-colors ${
+                product === p ? (p === 'NRML' ? 'bg-amber-600 text-oncolor' : 'bg-zinc-700 text-white') : 'text-zinc-400 hover:text-zinc-200'}`}>
+              {p}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {tradable && (
         <div className="flex items-center gap-1.5">
           <span className="text-[11px] text-zinc-400">Lots</span>
           <button type="button" aria-label="One lot fewer" onClick={() => onLots(Math.max(1, lots - 1))}
@@ -361,17 +378,19 @@ export function TradeBar({
             <Plus className="h-3 w-3" />
           </button>
           <span className="text-[11px] tabular-nums text-zinc-500">
-            {mcxMult ? `= ${(lots * mcxMult).toLocaleString('en-IN')} bbl` : lotSize ? `= ${(lots * lotSize).toLocaleString('en-IN')} qty` : ''} · max {maxLots} · MARKET · MIS
+            {mcxMult ? `= ${(lots * mcxMult).toLocaleString('en-IN')} bbl` : lotSize ? `= ${(lots * lotSize).toLocaleString('en-IN')} qty` : ''} · max {maxLots} · MARKET · {product}
           </span>
         </div>
       )}
 
       {exitWatcher && (exitWatcher.alive ? (
-        (hasExits || exitDefaults.target || exitDefaults.sl || globalExit?.state === 'watching') && (
-          <span className="flex items-center gap-1 text-[11px] text-zinc-400" title="The dashboard server checks every position's target / stop-loss every 2 s, with or without this tab">
+        // Space kept (invisible) while nothing is watched: committing a level on blur must not re-wrap the bar under a
+        // click on the − / + beside it (the click then lands on nothing).
+        <span aria-hidden={!(hasExits || exitDefaults.target || exitDefaults.sl || globalExit?.state === 'watching')}
+          className={`flex items-center gap-1 text-[11px] text-zinc-400 ${hasExits || exitDefaults.target || exitDefaults.sl || globalExit?.state === 'watching' ? '' : 'invisible'}`}
+          title="The dashboard server checks every position's target / stop-loss every 2 s, with or without this tab">
             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden />Exits: watching
-          </span>
-        )
+        </span>
       ) : (hasExits || globalExit?.state === 'watching') && (
         <span role="alert" className="rounded border border-red-500/50 bg-red-600/15 px-1.5 py-0.5 text-[11px] font-bold text-red-300">
           Exits watcher STOPPED — levels are not being watched
@@ -502,13 +521,14 @@ export function TradeCell({
   const unpriced = pos ? pos.realised === null || (held && pos.avgPrice === null) : false;
   const lotsHeld = pos && pos.lot > 0 ? Math.abs(pos.netQty) / pos.lot : 0;
   const title = pos
-    ? `${held ? `${pos.netQty > 0 ? 'Long' : 'Short'} ${lotsHeld} lot${lotsHeld === 1 ? '' : 's'} @ ${pos.avgPrice?.toFixed(2) ?? 'price pending'} · LTP ${pos.ltp?.toFixed(2) ?? '–'}${pos.ltp != null && ltpSource ? (ltpSource === 'ws' ? ' (live)' : ' (REST)') : ''} · ` : ''}booked ${fmtRs(pos.realised)}${pos.realised === null ? ' (a fill price is still pending)' : ''}${pos.busy === 'unknown' ? ' · an order has UNKNOWN status' : ''}${exit ? ` · ${exitLevelsText(exit)}` : ''}`
+    ? `${held ? `${pos.product} · ${pos.netQty > 0 ? 'Long' : 'Short'} ${lotsHeld} lot${lotsHeld === 1 ? '' : 's'} @ ${pos.avgPrice?.toFixed(2) ?? 'price pending'} · LTP ${pos.ltp?.toFixed(2) ?? '–'}${pos.ltp != null && ltpSource ? (ltpSource === 'ws' ? ' (live)' : ' (REST)') : ''} · ` : ''}booked ${fmtRs(pos.realised)}${pos.realised === null ? ' (a fill price is still pending)' : ''}${pos.busy === 'unknown' ? ' · an order has UNKNOWN status' : ''}${exit ? ` · ${exitLevelsText(exit)}` : ''}`
     : '';
 
   const chip = showChip ? (
     <span title={title} className={`flex items-center gap-0.5 rounded px-1.5 text-[12px] font-bold tabular-nums leading-5 ${
       held ? (pos!.netQty > 0 ? 'bg-emerald-600/15' : 'bg-red-600/15') : 'bg-zinc-800'} ${pnlClass(pos!.pnl)}`}>
       {held && <span className="text-[9px] font-bold text-zinc-300">{pos!.netQty > 0 ? 'L' : 'S'}{lotsHeld}</span>}
+      {pos!.product === 'NRML' && <span className="text-[9px] font-bold text-amber-300">NRML</span>}
       {fmtRs(pos!.pnl ?? (held ? null : pos!.realised))}
       {(pos!.busy === 'unknown' || unpriced) && <span className="text-amber-300">?</span>}
       {/* Target / SL state is shown by the Target button beside the chip (sky = set, amber = needs a look). */}
@@ -571,6 +591,7 @@ export function OffBoardPositions({ positions, armed, inflight, canClose, onClos
           <span key={p.key} className="flex items-center gap-1 rounded border border-zinc-800 bg-zinc-950/40 px-1.5 py-0.5 tabular-nums">
             <span className="rounded bg-zinc-800 px-1 text-[9px] font-bold uppercase text-zinc-300">{brokerLabel(p.broker)}</span>
             <span className="font-bold text-zinc-200">{p.underlying} {p.strike} {p.opt}</span>
+            {p.product === 'NRML' && <span className="text-[10px] font-bold text-amber-300">NRML</span>}
             <span className="text-zinc-500">{p.expiry}</span>
             <span className="text-[10px] font-bold text-zinc-300">{p.netQty > 0 ? 'L' : 'S'}{lots}</span>
             <span className={`font-bold ${pnlClass(p.pnl)}`}>{fmtRs(p.pnl)}</span>

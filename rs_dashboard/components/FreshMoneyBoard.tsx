@@ -10,7 +10,7 @@ import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
 import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
 import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, flowScale, flowStreak, flowTier, streakVsDay, sumFlows, type Buildup, type FlowTier, type SideFlow, type SumFlow } from '@/lib/freshMoney';
-import type { FmBroker, FmPosition, OptType, TxnSide } from '@/lib/freshMoneyTrades';
+import type { FmBroker, FmPosition, FmProduct, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { ExitAllButton, FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
 import { validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
 import { usePageBroker } from './BrokerPicker';
@@ -24,6 +24,7 @@ type Underlying = (typeof UNDERLYINGS)[number];
 const POLL_MS = 30_000;
 const PREF_UNDERLYING = 'freshMoney.underlying';
 const PREF_LOTS = 'freshMoney.lots';
+const PREF_PRODUCT = 'freshMoney.product';
 const PREF_OI_MODE = 'freshMoney.oiMode';
 type OiMode = 'change' | 'total' | 'delta' | 'flow';
 const PREF_POS_COLLAPSED = 'freshMoney.positionsCollapsed';
@@ -440,6 +441,7 @@ export default function FreshMoneyBoard() {
   // Switching account disarms: an armed page must never quietly start sending to a different account.
   const setBroker = useCallback((b: FmBroker) => { setArmed(false); setBrokerRaw(b); }, [setBrokerRaw]);
   const [lots, setLots] = useState(1);
+  const [product, setProduct] = useState<FmProduct>('MIS');
   // Target / stop-loss stamped onto each new position (remembered per browser, like Lots).
   const [exitDefaults, setExitDefaults] = useState<ExitDefaultsUi>(NO_EXITS);
   const pickExitDefaults = (d: ExitDefaultsUi) => { setExitDefaults(d); writePref(PREF_EXIT_DEFAULTS, JSON.stringify(d)); };
@@ -480,6 +482,7 @@ export default function FreshMoneyBoard() {
     if (u && (UNDERLYINGS as readonly string[]).includes(u)) setUnderlying(u as Underlying);
     const l = Number(readPref(PREF_LOTS));
     if (Number.isInteger(l) && l >= 1 && l <= 20) setLots(l);
+    if (readPref(PREF_PRODUCT) === 'NRML') setProduct('NRML');
     setPosCollapsed(readPref(PREF_POS_COLLAPSED) === '1');
     setFlowHelp(readPref(PREF_FLOW_HELP) === '1');
     setSoundOn(readPref(PREF_SOUND) !== '0');
@@ -639,10 +642,12 @@ export default function FreshMoneyBoard() {
   const tradable = !!ts?.tradable.includes(underlying);
   const tradeExpiry = ts?.boardExpiry[underlying] ?? null;
   // Orders only from a live board: today's snapshot, and the expiry the server will trade.
-  const session = ts?.sessions[underlying]?.gate ?? 'closed';
+  // NRML may open new positions until 15:29 (MIS: 15:17); the server re-checks with the order's own product.
+  const sessionInfo = product === 'NRML' ? (ts?.sessions[underlying]?.nrml ?? ts?.sessions[underlying]) : ts?.sessions[underlying];
+  const session = sessionInfo?.gate ?? 'closed';
   const blocked = !data ? null
     : ts && !ts.brokers[broker] ? `${brokerLabel(broker)} is not logged in — log in from Autologin, then refresh`
-    : session !== 'open' ? (ts?.sessions[underlying]?.note ?? null)
+    : session !== 'open' ? (sessionInfo?.note ?? null)
     : !data.isToday ? `Trading opens when today's board is live (the ${collectorName} has not written today)`
       : isStale ? 'Board snapshot is stale — orders paused until the collector writes again'
         : tradeExpiry !== data.expiry ? "The board's expiry is changing — wait for the next refresh"
@@ -655,8 +660,9 @@ export default function FreshMoneyBoard() {
   // under the bar (with its own ×) — a position must never become invisible because spot moved or the expiry rolled.
   const boardStrikes = useMemo(() => new Set((data?.rows ?? []).map(r => r.strike)), [data]);
   const myPositions = useMemo(
-    () => underlyingPositions.filter(p => !!data && p.expiry === data.expiry && boardStrikes.has(p.strike)),
-    [underlyingPositions, data, boardStrikes],
+    // ...and the selected product: a strike can hold an MIS and an NRML position, each listed apart.
+    () => underlyingPositions.filter(p => !!data && p.expiry === data.expiry && boardStrikes.has(p.strike) && (p.product ?? 'MIS') === product),
+    [underlyingPositions, data, boardStrikes, product],
   );
   const offBoard = useMemo(() => {
     const on = new Set(myPositions.map(p => p.key));
@@ -677,12 +683,13 @@ export default function FreshMoneyBoard() {
       exits: ts?.exits ?? {},
       armed,
       busy: opt => inflight.has(lockKey(broker, underlying, strike, opt)),
-      order: (opt, side) => sendOrder({ broker, underlying, expiry: data.expiry, strike, opt, side, lots, exitDefaults }),
+      order: (opt, side) => sendOrder({ broker, underlying, expiry: data.expiry, strike, opt, side, lots, product, exitDefaults }),
       close: p => sendClose(p),
       setExit,
     };
-  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, setExit, lots, ts, exitDefaults]);
+  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, setExit, lots, product, ts, exitDefaults]);
   const setLotsPref = (n: number) => { setLots(n); writePref(PREF_LOTS, String(n)); };
+  const setProductPref = (p: FmProduct) => { setProduct(p); writePref(PREF_PRODUCT, p); };
 
   return (
     <div className="flex min-h-screen flex-col bg-zinc-950 text-white">
@@ -738,6 +745,12 @@ export default function FreshMoneyBoard() {
             The {collectorName} has not written for {staleMin} min. The board shows its last snapshot.
           </div>
         )}
+        {ts?.nrmlWarning && (
+          <div role="alert" data-testid="fm-nrml-warning" className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+            {ts.nrmlWarning}
+          </div>
+        )}
         {data && !data.isToday && (
           <div className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-400">
             <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
@@ -763,6 +776,7 @@ export default function FreshMoneyBoard() {
             {ts && (
               <TradeBar
                 underlying={underlying} armed={armed} onArm={setArmed} lots={lots} onLots={setLotsPref}
+                product={product} onProduct={setProductPref}
                 maxLots={ts.maxLots} lotSize={data.lot} mcxMult={data.mult} tradable={tradable} blocked={blocked} positions={underlyingPositions}
                 broker={broker} onBroker={setBroker} brokerReady={brokerReady} brokerSessions={ts.brokers ?? null}
                 exitDefaults={exitDefaults} onExitDefaults={pickExitDefaults}

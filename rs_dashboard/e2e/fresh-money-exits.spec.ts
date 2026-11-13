@@ -112,6 +112,7 @@ test('header target commits on blur, Escape reverts, and the order carries the d
   await expect(page.getByText('T 30% · SL 20 pts', { exact: false })).toBeVisible();
   const order = m.posts.find(b => b.action === 'order')!;
   expect(order.exitDefaults).toEqual({ target: { value: 30, unit: 'pct' }, sl: { value: 20, unit: 'pts' } });
+  expect(order.product).toBe('MIS');
   expect(m.blocked).toEqual([]);
 });
 
@@ -373,5 +374,21 @@ test('header Exit all: disabled with nothing open; one click only asks, the seco
   await btn.click();
   await expect(page.getByText('Exit all: 1 close sent')).toBeVisible();
   expect(m.posts.filter(b => b.action === 'exitAll')).toHaveLength(1);
+  expect(m.blocked).toEqual([]);
+});
+
+test('product switch: NRML is sent with the order, labelled, and remembered across a reload', async ({ page }) => {
+  const m = await install(page);
+  const group = page.getByRole('radiogroup', { name: 'Product for new orders' });
+  await expect(group.getByRole('radio', { name: 'MIS' })).toHaveAttribute('aria-checked', 'true');
+  await group.getByRole('radio', { name: 'NRML' }).click();
+  await expect(group.getByRole('radio', { name: 'NRML' })).toHaveAttribute('aria-checked', 'true');
+  await expect(page.getByText('MARKET · NRML')).toBeVisible();
+  await page.getByRole('button', { name: /Arm live trading/ }).click();
+  await page.getByRole('button', { name: 'Buy 8100 CE' }).click();
+  await expect.poll(() => m.posts.find(b => b.action === 'order')?.product).toBe('NRML');
+  await page.reload();
+  await expect(page.getByRole('radiogroup', { name: 'Product for new orders' }).getByRole('radio', { name: 'NRML' }))
+    .toHaveAttribute('aria-checked', 'true');
   expect(m.blocked).toEqual([]);
 });

@@ -153,7 +153,7 @@ const ord4 = (p: Partial<FmOrder>): FmOrder => ({
 });
 const T30 = { value: 30, unit: 'pct' as const };
 const POS = (p: Partial<FmPosition> = {}): FmPosition => ({
-  key: KEY, broker: 'dhan', securityId: '111', priceId: '111', segment: 'MCX_COMM', mult: 100, underlying: 'CRUDEOIL',
+  key: KEY, broker: 'dhan', product: 'MIS', securityId: '111', priceId: '111', segment: 'MCX_COMM', mult: 100, underlying: 'CRUDEOIL',
   expiry: '2026-11-17', strike: 8100, opt: 'CE', lot: 1, netQty: 1, avgPrice: 100, realised: 0, ltp: 110,
   unrealised: 1000, pnl: 1000, busy: null, ...p,
 });

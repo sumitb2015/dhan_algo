@@ -38,6 +38,8 @@ export interface FmOrder {
   /** Rupee multiplier per unit of qty for P&L: 1 when qty is already units/barrels, barrels per lot when qty is MCX lots. */
   mult?: number;
   side: TxnSide;
+  /** MIS (intraday) or NRML (carry); absent on records written before the product choice = MIS. */
+  product?: FmProduct;
   qty: number;                // order quantity as sent (units on NSE, lots on MCX)
   close: boolean;             // sent by the × (square off) button
   /** Synthetic record from the down-only reconcile: the broker no longer holds this quantity (closed outside this
@@ -66,6 +68,8 @@ export interface FmPosition {
   /** `broker|securityId`: Kotak and Zerodha trading symbols can coincide, so a contract is only unique per broker. */
   key: string;
   broker: FmBroker;
+  /** MIS or NRML: the same contract under each product is a separate position (and a separate broker position). */
+  product: FmProduct;
   securityId: string;
   priceId: string;
   segment: FmSegment;
@@ -100,7 +104,18 @@ export const UNCONFIRMED_COUNT_MS = 10 * 60_000;
 export const RECONCILE_GRACE_MS = 20_000;
 
 /** A position / contract key: the same contract on two brokers is two positions. */
-export const orderKey = (o: Pick<FmOrder, 'broker' | 'securityId'>) => `${o.broker ?? 'dhan'}|${o.securityId}`;
+export const orderKey = (o: Pick<FmOrder, 'broker' | 'securityId' | 'product'>) =>
+  `${o.broker ?? 'dhan'}|${o.securityId}${o.product === 'NRML' ? '|NRML' : ''}`;
+
+export type FmProduct = 'MIS' | 'NRML';
+export const FM_PRODUCTS: readonly FmProduct[] = ['MIS', 'NRML'];
+
+/** A broker net-position key: the same contract under MIS and NRML is two broker positions. */
+export const netKey = (handle: string, product: FmProduct | undefined) => `${handle}|${product === 'NRML' ? 'NRML' : 'MIS'}`;
+
+/** The window for a product: NRML may open new positions until a minute before the close (MIS keeps the cutoff). */
+export const productWindow = (w: TradeWindow | null, product: FmProduct | undefined): TradeWindow | null =>
+  (w && product === 'NRML' ? { ...w, cutoff: Math.max(w.cutoff, w.close - 1) } : w);
 
 const TERMINAL: ReadonlySet<OrderState> = new Set(['filled', 'rejected', 'cancelled']);
 export const isTerminal = (s: OrderState) => TERMINAL.has(s);
@@ -201,7 +216,7 @@ export function buildPositions(orders: FmOrder[], ltps: Record<string, number>, 
       a = {
         avg: null, realised: 0, basisKnown: true, realisedKnown: true,
         pos: {
-          key, broker: o.broker ?? 'dhan', securityId: o.securityId, priceId: o.priceId ?? o.securityId, segment: o.segment ?? 'NSE_FNO', mult: o.mult && o.mult > 0 ? o.mult : 1, underlying: o.underlying, expiry: o.expiry, strike: o.strike, opt: o.opt, lot: o.lot,
+          key, broker: o.broker ?? 'dhan', product: o.product === 'NRML' ? 'NRML' : 'MIS', securityId: o.securityId, priceId: o.priceId ?? o.securityId, segment: o.segment ?? 'NSE_FNO', mult: o.mult && o.mult > 0 ? o.mult : 1, underlying: o.underlying, expiry: o.expiry, strike: o.strike, opt: o.opt, lot: o.lot,
           netQty: 0, avgPrice: null, realised: 0, ltp: null, unrealised: null, pnl: null, busy: null,
         },
       };

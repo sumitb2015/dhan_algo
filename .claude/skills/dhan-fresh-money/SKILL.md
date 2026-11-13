@@ -83,7 +83,13 @@ positions read twice", "board price snaps back to the startup value", "OI change
     (`lib/freshMoneyExternalPrice.ts`): same contract / side / intraday product, an order id the ledger never sent, inside
     the window since the page's last own order, fills adding up to exactly the written-down quantity. Ambiguous = stays
     unknown. NSE only (Kotak's MCX quantity unit differs). Max 6 tries, 20 s apart per broker.
-12. MCX collectors auto-start per MCX session (holiday file shared with `lib/mcxSession`); `instrumentation.node.ts` must not
+12. **Product (MIS / NRML) is part of the position key** (`orderKey`: `broker|handle` for MIS, `broker|handle|NRML`), and
+    every broker read is per product (`netKey`; Dhan INTRADAY / MARGIN, Kotak + Zerodha MIS / NRML), so closes, the
+    down-only reconcile and outside-close pricing never mix the two. NRML opens until a minute before the close (MIS:
+    the 15:17 cutoff). The page NEVER squares NRML off (user's choice 2026-11-13): `nrmlWarning` from 10 min before the
+    close; an NRML position open at the day roll leaves the ledger. The board shows the selected product's positions;
+    the other product's are in the off-board list.
+13. MCX collectors auto-start per MCX session (holiday file shared with `lib/mcxSession`); `instrumentation.node.ts` must not
     kill them on a dashboard restart. A WAITING collector counts as alive.
 
 ## Tests

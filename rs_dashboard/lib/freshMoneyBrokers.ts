@@ -23,7 +23,7 @@ import { placeZerodhaOrder, findOrderByTag } from '@/lib/zerodhaPlaceOrder';
 import { isZerodhaTokenValid, kiteGet } from '@/lib/zerodhaToken';
 import { shapeZerodhaOrder, shapeZerodhaPosition, type ScalperOrder } from '@/lib/zerodhaShape';
 import type { BookFill } from '@/lib/freshMoneyExternalPrice';
-import { stateFromBroker, type FmBroker, type FmOrder, type OptType, type TxnSide } from '@/lib/freshMoneyTrades';
+import { netKey, stateFromBroker, type FmBroker, type FmOrder, type FmProduct, type OptType, type TxnSide } from '@/lib/freshMoneyTrades';
 
 export const BROKERS: readonly FmBroker[] = ['dhan', 'kotak', 'zerodha'];
 export const brokerName = (b: FmBroker) => (b === 'kotak' ? 'Kotak' : b === 'zerodha' ? 'Zerodha' : 'Dhan');
@@ -59,16 +59,17 @@ export function newCorrelationId(b: FmBroker): string {
 
 export type SendOutcome = { status: 'placed'; orderId: string } | { status: 'rejected'; error: string; http?: number } | { status: 'unknown'; error: string };
 
-/** One MARKET, intraday order. `open` orders carry the 'fm' source (per-order lot caps); closes never do. */
+/** One MARKET order, MIS (intraday) or NRML (carry) — Dhan calls these INTRADAY / MARGIN. `open` orders carry the 'fm' source (per-order lot caps); closes never do. */
 export async function sendOrder(
-  o: Pick<FmOrder, 'broker' | 'securityId' | 'segment' | 'underlying' | 'side' | 'qty' | 'correlationId'>, open: boolean,
+  o: Pick<FmOrder, 'broker' | 'securityId' | 'segment' | 'underlying' | 'side' | 'qty' | 'correlationId' | 'product'>, open: boolean,
 ): Promise<SendOutcome> {
   const b = o.broker ?? 'dhan';
+  const product = productCode(b, o.product);
   if (!brokerSessionOk(b)) return { status: 'rejected', error: `${brokerName(b)} is not logged in — nothing was sent`, http: 409 };
   if (b === 'kotak') {
     const built = buildKotakOrderPayload({
       tradingsymbol: o.securityId, quantity: o.qty, side: o.side, exchange: isMcx(o.underlying) ? 'mcx_fo' : 'nse_fo',
-      product: 'MIS', orderType: 'MARKET', ...(open ? { source: 'fm' } : {}),
+      product, orderType: 'MARKET', ...(open ? { source: 'fm' } : {}),
     }, kotakDerivativeBySymbol(o.securityId, o.underlying));
     if ('error' in built) return { status: 'rejected', error: built.error, http: 400 };
     const r = await placeKotakOrder(built.payload);
@@ -84,14 +85,14 @@ export async function sendOrder(
     if (slicesFor(o.securityId, o.qty).length > 1) return { status: 'rejected', error: `${o.qty} is above the exchange freeze quantity for one Zerodha order — use fewer lots`, http: 400 };
     const r = await placeZerodhaOrder({
       tradingsymbol: o.securityId, exchange: isMcx(o.underlying) ? 'MCX' : 'NFO', transaction_type: o.side,
-      order_type: 'MARKET', quantity: o.qty, product: 'MIS', validity: 'DAY', market_protection: -1,
+      order_type: 'MARKET', quantity: o.qty, product, validity: 'DAY', market_protection: -1,
     }, o.correlationId);
     if (r.status === 'placed') { invalidateBrokerCache('zerodha'); return { status: 'placed', orderId: r.orderId }; }
     return r;
   }
   const r = await placeDhanOrder({
     securityId: o.securityId, quantity: o.qty, side: o.side, orderType: 'MARKET', exchangeSegment: o.segment ?? 'NSE_FNO',
-    productType: 'INTRADAY', ...(open ? { source: 'fm' } : {}), correlationId: o.correlationId,
+    productType: product, ...(open ? { source: 'fm' } : {}), correlationId: o.correlationId,
   });
   if (r.status === 'invalid') return { status: 'rejected', error: r.error, http: r.http };
   return r;
@@ -125,17 +126,25 @@ export async function readOrder(o: FmOrder, unknown: boolean): Promise<Partial<F
 }
 
 const INTRADAY: Record<FmBroker, string> = { dhan: 'INTRADAY', kotak: 'MIS', zerodha: 'MIS' };
+const CARRY: Record<FmBroker, string> = { dhan: 'MARGIN', kotak: 'NRML', zerodha: 'NRML' };
+
+/** The broker's own product code (Dhan INTRADAY / MARGIN, Kotak and Zerodha MIS / NRML). */
+export const productCode = (b: FmBroker, p: FmProduct | undefined) => (p === 'NRML' ? CARRY[b] : INTRADAY[b]);
 
 /**
- * The broker's intraday net quantity per contract handle (Dhan security id / trading symbol), in the broker's own unit,
- * or null when the book cannot be read. Live (never cached): close sizing reads it.
+ * The broker's net quantity per contract handle AND product (`netKey(handle, product)`: Dhan security id / trading
+ * symbol; MIS or NRML), in the broker's own unit, or null when the book cannot be read. Other products (CNC, ...) are
+ * ignored. Live (never cached): close sizing reads it.
  */
 export async function brokerNets(b: FmBroker): Promise<Map<string, number> | null> {
   try {
     const out = new Map<string, number>();
     const add = (key: string, product: string, net: number) => {
-      if (product.toUpperCase() !== INTRADAY[b]) return;
-      out.set(key, (out.get(key) ?? 0) + net);
+      const code = product.toUpperCase();
+      const p: FmProduct | null = code === INTRADAY[b] ? 'MIS' : code === CARRY[b] ? 'NRML' : null;
+      if (!p) return;
+      const k = netKey(key, p);
+      out.set(k, (out.get(k) ?? 0) + net);
     };
     if (b === 'dhan') {
       const rows = await dhanGet('/positions', 6_000);
@@ -154,9 +163,6 @@ export async function brokerNets(b: FmBroker): Promise<Map<string, number> | nul
     return null;
   }
 }
-
-/** The broker's product code for an intraday position (Dhan INTRADAY, Kotak / Zerodha MIS). */
-export const intradayProduct = (b: FmBroker) => INTRADAY[b];
 
 /**
  * Today's filled orders in the broker's order book, normalised (lib/freshMoneyExternalPrice.ts prices an outside close
