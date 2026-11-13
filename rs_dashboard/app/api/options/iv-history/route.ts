@@ -124,7 +124,8 @@ export async function GET(request: NextRequest) {
   const colIdx   = (name: string) => colMap.get(name) ?? -1;
 
   // Parse every data row
-  const allRows = lines.slice(1).map(line => {
+  // Skip a row the collector is still writing (cut short: a truncated OI would read as a huge drop).
+  const allRows = lines.slice(1).filter(line => line.split(',').length >= headers.length).map(line => {
     const cols = line.split(',');
     const get  = (name: string) => cols[colIdx(name)] ?? '';
     return {

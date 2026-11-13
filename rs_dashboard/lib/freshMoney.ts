@@ -76,6 +76,9 @@ export function parseSnapshotCsv(text: string, expiry?: string): Snapshot[] {
     const line = lines[i];
     if (!line) continue;
     const c = line.split(',');
+    // A row the collector is still writing (one snapshot is ~10 KB, more than one write()) can be cut short: a cut
+    // inside CE_OI would read 11265020 as 112. Skip any row with fewer fields than the header.
+    if (c.length < head.length) continue;
     const ts = c[I.ts];
     const strike = num(c[I.k]);
     if (!ts || strike === null) continue;
@@ -196,11 +199,12 @@ export interface OiFlow {
 /**
  * OI change per strike over the last `windows` rolling windows of `minutes` each, ending at the latest snapshot.
  * Boundary k is the latest snapshot at or before `last.min − k·minutes`, accepted only within `slackMin` of that time
- * (a collector gap is not a reading) and only on the last snapshot's expiry. A cell is null when a boundary or either
+ * (a collector gap is not a reading; 1 min tolerates one missed ~30 s poll and keeps every window within 4-6 min, so
+ * the cells stay comparable — at 2 min a single gap made neighbouring windows 3½ and 6½ min long) and only on the last snapshot's expiry. A cell is null when a boundary or either
  * OI is missing: a missing OI is never read as 0. The total is end-to-end when both ends are known, else the sum of
  * the cells when all of them are known, else null.
  */
-export function oiFlow(snaps: Snapshot[], windows = 5, minutes = 5, slackMin = 2): OiFlow {
+export function oiFlow(snaps: Snapshot[], windows = 5, minutes = 5, slackMin = 1): OiFlow {
   const byStrike = new Map<number, { ce: SideFlow; pe: SideFlow }>();
   const last = snaps[snaps.length - 1];
   if (!last) return { marks: Array(windows + 1).fill(null), byStrike };

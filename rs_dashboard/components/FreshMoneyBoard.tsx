@@ -344,6 +344,9 @@ export default function FreshMoneyBoard() {
     writePref(PREF_UNDERLYING, u);
   };
 
+  // Flow-window boundaries (HH:MM, oldest first); empty from a server that predates the flow tab.
+  const flowMarks = data?.flowMarks ?? [];
+
   const maxAbs = useMemo(() => {
     let mx = 0;
     if (oiMode === 'delta') {
@@ -554,7 +557,7 @@ export default function FreshMoneyBoard() {
               <div className="mt-0.5 text-[11.5px] text-zinc-400">
                 {oiMode === 'flow' ? (
                   <>Each cell = OI change ({data.oiUnit}) in one {data.flowMinutes}-min window, newest next to the strike
-                    {(data.flowMarks ?? [])[0] && (data.flowMarks ?? [])[(data.flowMarks ?? []).length - 1] ? ` (${(data.flowMarks ?? [])[0]}–${(data.flowMarks ?? [])[(data.flowMarks ?? []).length - 1]})` : ''} ·{' '}
+                    {flowMarks[0] && flowMarks[flowMarks.length - 1] ? ` (${flowMarks[0]}–${flowMarks[flowMarks.length - 1]})` : ''} ·{' '}
                     <span className="text-emerald-400">green = added</span> · <span className="text-red-400">red = cut</span> · – = no snapshot ·
                     bar = 25-min total, filled = added, outline = cut</>
                 ) : oiMode === 'delta' ? (
@@ -578,13 +581,13 @@ export default function FreshMoneyBoard() {
             <div className="overflow-x-auto px-4 pb-2 pt-2">
              <div className={oiMode === 'flow' ? (tradeMode ? 'min-w-[1480px]' : 'min-w-[1160px]') : tradeMode ? 'min-w-[1040px]' : 'min-w-[720px]'}>
               <div className={`${gridFor(oiMode, tradeMode)} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
-                {oiMode === 'flow' && <FlowHeader side="put" marks={(data.flowMarks ?? [])} />}
-                <span className="col-span-2 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `last ${(data.flowMarks ?? []).length - 1} × ${data.flowMinutes} min` : 'OI moved'}`}</span>
+                {oiMode === 'flow' && <FlowHeader side="put" marks={flowMarks} />}
+                <span className="col-span-2 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `last ${flowMarks.length - 1} × ${data.flowMinutes} min` : 'OI moved'}`}</span>
                 {tradeMode && <span className="pr-1 text-right text-zinc-400">PE trade</span>}
                 <span className="text-center">STRIKE</span>
                 {tradeMode && <span className="pl-1 text-zinc-400">CE trade</span>}
-                <span className="col-span-2 pl-2">{oiMode === 'delta' ? '' : `CALLS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `last ${(data.flowMarks ?? []).length - 1} × ${data.flowMinutes} min` : 'OI moved'}`}</span>
-                {oiMode === 'flow' && <FlowHeader side="call" marks={(data.flowMarks ?? [])} />}
+                <span className="col-span-2 pl-2">{oiMode === 'delta' ? '' : `CALLS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `last ${flowMarks.length - 1} × ${data.flowMinutes} min` : 'OI moved'}`}</span>
+                {oiMode === 'flow' && <FlowHeader side="call" marks={flowMarks} />}
               </div>
               {data.rows.map((r, i) => {
                 const next = data.rows[i + 1];
@@ -592,7 +595,7 @@ export default function FreshMoneyBoard() {
                 return (
                   <React.Fragment key={r.strike}>
                     <BoardRowView row={r} max={maxAbs} boxed={r.strike === boxedStrike} trade={rowTrade(r.strike)} mode={oiMode}
-                      marks={data.flowMarks ?? []} unit={data.oiUnit} />
+                      marks={flowMarks} unit={data.oiUnit} />
                     {divider && <SpotDivider spot={spot!} live={liveSpot !== null} />}
                   </React.Fragment>
                 );

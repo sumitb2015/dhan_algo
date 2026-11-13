@@ -179,3 +179,25 @@ test('fmtOiShort keeps cells narrow', () => {
   assert.equal(fmtOiShort(-120000), '-1.2L');
   assert.equal(fmtOiShort(1.1e7), '+1.1Cr');
 });
+
+test('oiFlow: a boundary 1½ min early is refused, so neighbouring windows stay comparable (4-6 min)', () => {
+  // Snapshots 10:13:30-10:15:00 missing: the 10:15 boundary would fall back to 10:13:00 (2 min early), making the
+  // 10:10->10:15 cell 3 min and the 10:15->10:20 cell 7 min. It is refused instead.
+  const snaps = series('09:30', '10:25', m => 100 * m, () => 7, m => m >= M('10:13') + 0.5 && m <= M('10:15'));
+  const f = oiFlow(snaps);
+  assert.equal(f.marks[3], null);
+  assert.deepEqual(f.byStrike.get(22550)!.ce.cells, [500, 500, null, null, 500]);
+  // One missed poll (30 s) is still a reading.
+  const one = oiFlow(series('09:30', '10:25', m => 100 * m, () => 7, m => m === M('10:15')));
+  assert.equal(one.marks[3], '10:14');
+  assert.deepEqual(one.byStrike.get(22550)!.ce.cells, [500, 500, 450, 550, 500]);
+});
+
+test('parse skips a row cut short by a write in progress (never reads a truncated OI)', () => {
+  const full = row('2026-11-10 09:20:00', 22550, 11265020, 10, 50, 200, 20, 100);
+  const cut = full.slice(0, full.indexOf('11265020') + 3);   // "...,112" — the collector is mid-write
+  const snaps = parseSnapshotCsv([HEAD, row('2026-11-10 09:20:00', 22600, 5, 1, 1, 5, 1, 1), cut].join('\n'));
+  assert.equal(snaps.length, 1);
+  assert.equal(snaps[0].strikes.has(22550), false);
+  assert.equal(snaps[0].strikes.get(22600)!.ce.oi, 5);
+});
