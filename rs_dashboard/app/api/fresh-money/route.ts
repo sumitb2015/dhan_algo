@@ -49,8 +49,9 @@ export interface FreshMoneyResponse {
   hasBuildup: boolean;
   /** Slot layout of every row's `flow`: boundaries "HH:MM" oldest first (FLOW_SLOTS + 1; the last = the running slot's
    *  start), whether each had a reading, the latest snapshot time ("HH:MM:SS", the running slot's "so far"), and the
-   *  edge every row's `flow.day` is read at ("HH:MM"; earlier than the last bound after a collector gap; null = none). */
-  flowSlots: { slotMin: number; bounds: string[]; boundOk: boolean[]; lastTs: string; dayAt: string | null };
+   *  edge every row's `flow.day` is read at ("HH:MM"; earlier than the last bound after a collector gap; null = none).
+   *  `closed` = the session is over: the bounds end AT the close and every cell is a completed slot (no running one). */
+  flowSlots: { slotMin: number; bounds: string[]; boundOk: boolean[]; lastTs: string; dayAt: string | null; closed?: boolean };
   error?: string;
 }
 
@@ -59,6 +60,12 @@ const respCache = new Map<string, { key: string; body: FreshMoneyResponse }>();
 
 function todayIST(): string {
   return new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
+}
+
+/** Minutes of the day now, IST. */
+function nowIstMin(): number {
+  const d = new Date(Date.now() + 5.5 * 3600_000);
+  return d.getUTCHours() * 60 + d.getUTCMinutes();
 }
 
 export async function GET(req: NextRequest) {
@@ -99,7 +106,10 @@ export async function GET(req: NextRequest) {
   try { st = await fs.promises.stat(file); } catch {
     return NextResponse.json({ error: `Cannot read ${date} snapshot file` }, { status: 500 });
   }
-  const cacheKey = `${file}:${st.mtimeMs}:${st.size}:${lot}:${todayIST()}`;
+  // The session is over (an earlier day, or past today's close): the slots stop at the close, so OI the chain keeps
+  // moving after the bell (the collector writes on for a while) is not shown as slots or as today's change.
+  const ended = date !== todayIST() || nowIstMin() >= day.to;
+  const cacheKey = `${file}:${st.mtimeMs}:${st.size}:${lot}:${todayIST()}:${ended}`;
   const cached = respCache.get(underlying);
   if (cached && cached.key === cacheKey) return NextResponse.json(cached.body);
 
@@ -119,7 +129,7 @@ export async function GET(req: NextRequest) {
   // Option previous closes for the buildup tags: the collector's side file next to the CSV, for this expiry only.
   const pcFile = readJsonFile<{ expiry?: string; ce?: Record<string, number>; pe?: Record<string, number> }>(file.replace(/\.csv$/, '_prev_close.json'));
   const prevCloses: PrevCloses | null = pcFile && pcFile.expiry === expiry ? { ce: pcFile.ce ?? {}, pe: pcFile.pe ?? {} } : null;
-  const flow = oiFlow(snaps, { slots: FLOW_SLOTS, slotMin: FLOW_SLOT_MIN, anchorMin: day.from });
+  const flow = oiFlow(snaps, { slots: FLOW_SLOTS, slotMin: FLOW_SLOT_MIN, anchorMin: day.from, endMin: ended ? day.to : undefined });
   const flowLots = (f: SideFlow | undefined): SideFlow | null =>
     (f ? { cells: f.cells.map(toLots), day: toLots(f.day) } : null);
   const rows: FreshMoneyRow[] = buildBoardRows(last, WINGS, prevCloses).map(r => {
@@ -148,7 +158,7 @@ export async function GET(req: NextRequest) {
     hasBuildup: prevCloses !== null,
     flowSlots: {
       slotMin: flow.slotMin, bounds: flow.bounds.map(fmtMinOfDay), boundOk: flow.boundOk, lastTs: flow.lastTs,
-      dayAt: flow.dayAt === null ? null : fmtMinOfDay(flow.dayAt),
+      dayAt: flow.dayAt === null ? null : fmtMinOfDay(flow.dayAt), closed: flow.closed,
     },
   };
   respCache.set(underlying, { key: cacheKey, body });

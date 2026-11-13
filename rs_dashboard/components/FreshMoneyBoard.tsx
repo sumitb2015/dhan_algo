@@ -49,10 +49,21 @@ const BAR_CLASS: Record<'put' | 'call', Record<'fill' | 'outline', string>> = {
 const GRID = 'grid grid-cols-[minmax(0,1fr)_76px_96px_76px_minmax(0,1fr)] items-center';
 // With trading on, a cell each side of the strike holds B / S, the P&L chip and × (literal string for Tailwind).
 const GRID_TRADE = 'grid grid-cols-[minmax(0,1fr)_76px_172px_80px_172px_76px_minmax(0,1fr)] items-center';
-// Slot-flow tab: the same grids plus an 11-cell block (10 completed slots + the running one, 38 px each) on each outer edge,
-// and 96 px number columns (the streak badge sits beside the number: "▲10 +99,999").
-const GRID_FLOW = 'grid grid-cols-[418px_minmax(0,1fr)_96px_96px_96px_minmax(0,1fr)_418px] items-center';
-const GRID_FLOW_TRADE = 'grid grid-cols-[418px_minmax(0,1fr)_96px_172px_80px_172px_96px_minmax(0,1fr)_418px] items-center';
+// Slot-flow tab: the same grids plus a block of slot cells (38 px each; up to 10 completed slots + the running one) on each
+// outer edge, and 96 px number columns (the streak badge sits beside the number: "▲10 +99,999"). The block's width and
+// cell count are CSS variables set by the Ladder from the width it has (see slotsThatFit), so the call-side slots never
+// scroll off to the right on a narrower screen: older slots are dropped instead.
+const GRID_FLOW = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_96px_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
+const GRID_FLOW_TRADE = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_172px_80px_172px_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
+const SLOT_CELL_PX = 38;
+const MIN_SLOT_CELLS = 4;
+/** Width of everything on a flow-tab row except the two slot blocks: the fixed columns plus a 120 px minimum per bar. */
+const flowFixedPx = (trade: boolean) => (trade ? 96 + 172 + 80 + 172 + 96 : 96 * 3) + 2 * 120;
+/** How many slot cells per side fit in `width` px (at least MIN_SLOT_CELLS — narrower than that scrolls — at most `max`). */
+function slotsThatFit(width: number, trade: boolean, max: number): number {
+  const n = Math.floor((width - flowFixedPx(trade)) / (2 * SLOT_CELL_PX));
+  return Math.max(Math.min(MIN_SLOT_CELLS, max), Math.min(max, n));
+}
 const gridFor = (mode: OiMode, trade: boolean) => (mode === 'flow' ? (trade ? GRID_FLOW_TRADE : GRID_FLOW) : (trade ? GRID_TRADE : GRID));
 
 interface RowTrade {
@@ -124,11 +135,24 @@ function DeltaBar({ delta, max }: { delta: number | null; max: number }) {
   );
 }
 
-type FlowSlots = FreshMoneyResponse['flowSlots'];
-/** A server that predates the slot tab sends no layout: no cells, nothing to break. */
-const NO_SLOTS: FlowSlots = { slotMin: 3, bounds: [], boundOk: [], lastTs: '', dayAt: null };
+/** Colour of a strike's number: the side's colour (puts green, calls red) when OI was added, dimmed when it was cut
+ *  (an unwind), so the two read apart at a glance; Total OI is never negative and keeps the side's colour. */
+function numTone(side: 'put' | 'call', v: number | null | undefined, mode: OiMode): string {
+  if (mode !== 'total' && v != null && Number.isFinite(v) && Math.round(v) < 0) return 'text-zinc-400';
+  return side === 'put' ? 'text-emerald-400' : 'text-red-400';
+}
 
-/** Slot i (oldest first; the last index = the running slot): label, hover text and whether it is still running. */
+type FlowSlots = FreshMoneyResponse['flowSlots'] & {
+  /** Cells shown per side (the newest ones), set by the Ladder from its width; all of them when absent. */
+  show?: number;
+};
+/** A server that predates the slot tab sends no layout: no cells, nothing to break. */
+const NO_SLOTS: FlowSlots = { slotMin: 3, bounds: [], boundOk: [], lastTs: '', dayAt: null, closed: false };
+
+/** Cells per side the server sent: the completed slots plus the running one (none running once the session closed). */
+const cellCount = (fs: FlowSlots) => (fs.bounds.length === 0 ? 0 : fs.closed ? fs.bounds.length - 1 : fs.bounds.length);
+
+/** Slot i (oldest first; the last index = the running slot, unless closed): label, hover text, whether it is running. */
 function slotInfo(fs: FlowSlots, i: number): { head: string; span: string; running: boolean; ok: boolean } {
   const n = fs.bounds.length - 1;   // completed slots
   if (i < n) {
@@ -142,9 +166,11 @@ function slotInfo(fs: FlowSlots, i: number): { head: string; span: string; runni
 }
 
 /** Cell order for one side: puts read oldest → running left to right, calls are mirrored, so the running slot always
- *  sits next to the strike. */
+ *  sits next to the strike. Only the newest `fs.show` cells (indices stay the server's, so hover and streaks agree). */
 function slotOrder(fs: FlowSlots, side: 'put' | 'call'): number[] {
-  const idx = Array.from({ length: fs.bounds.length }, (_, i) => i);   // n completed + 1 running
+  const total = cellCount(fs);
+  const shown = Math.min(total, fs.show ?? total);
+  const idx = Array.from({ length: shown }, (_, k) => total - shown + k);
   return side === 'call' ? idx.reverse() : idx;
 }
 
@@ -173,7 +199,7 @@ function FlowCells({ side, flow, fs, unit, scale, rowKey, hover, onHover, note }
 } & HoverProps) {
   return (
     // Leaving the cell block clears the crosshair (a bar, the strike or the B / S buttons must not keep it lit).
-    <span className="grid grid-cols-11 gap-px text-[11px]" onMouseLeave={() => onHover(null)}>
+    <span className="grid grid-cols-[repeat(var(--fm-n),minmax(0,1fr))] gap-px text-[11px]" onMouseLeave={() => onHover(null)}>
       {slotOrder(fs, side).map(i => {
         const v = flow?.cells[i] ?? null;
         const s = slotInfo(fs, i);
@@ -210,7 +236,7 @@ function StreakBadge({ flow, fs, scale, unit }: { flow: SideFlow | null; fs: Flo
 /** Column labels over the slot cells: each slot's end time (the running one with "…"), in the cells' order. */
 function FlowHeader({ side, fs, hoverSlot }: { side: 'put' | 'call'; fs: FlowSlots; hoverSlot: number | null }) {
   return (
-    <span className="grid grid-cols-11 gap-px">
+    <span className="grid grid-cols-[repeat(var(--fm-n),minmax(0,1fr))] gap-px">
       {slotOrder(fs, side).map(i => {
         const s = slotInfo(fs, i);
         return (
@@ -234,7 +260,7 @@ function TotalsRow({ put, call, fs, unit, scale, trade, hover, onHover }: {
   const partial = (f: SumFlow) => (i: number) =>
     f.counts[i] > 0 && f.counts[i] < f.n ? `only ${f.counts[i]} of ${f.n} strikes have a reading here — no partial sum` : null;
   const num = (f: SumFlow, side: 'put' | 'call') => (
-    <span className={`whitespace-nowrap font-bold ${side === 'put' ? 'pr-2 text-right text-emerald-400' : 'pl-2 text-red-400'}`}
+    <span className={`whitespace-nowrap font-bold ${side === 'put' ? 'pr-2 text-right' : 'pl-2'} ${numTone(side, f.day, 'flow')}`}
       title={`Σ today's OI change vs the previous close over the ${f.n} strikes with data on the board, as of ${fs.dayAt ?? '–'}: ${
         f.day != null ? `${fmtOi(f.day)} ${unit}` : f.dayCount > 0 ? `unknown (only ${f.dayCount} of ${f.n} strikes have it)` : 'unknown'}`}>
       {side === 'put' && <><StreakBadge flow={f} fs={fs} scale={scale} unit={unit} />{' '}</>}
@@ -309,7 +335,7 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, on
       ) : (
         <>
           <Bar side="put" length={shown(p)} moved={moved(p)} max={max} tag={mode === 'flow' ? null : p?.buildup ?? null} />
-          <span className="whitespace-nowrap pr-2 text-right font-bold text-emerald-400" title={flowTitle(p)}>
+          <span className={`whitespace-nowrap pr-2 text-right font-bold ${numTone('put', shown(p), mode)}`} title={flowTitle(p)}>
             {mode === 'flow' && <><StreakBadge flow={p?.flow ?? null} fs={fs} scale={scale} unit={unit} />{' '}</>}{label(p)}
           </span>
         </>
@@ -326,7 +352,7 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, on
         <><span /><span /></>
       ) : (
         <>
-          <span className="whitespace-nowrap pl-2 font-bold text-red-400" title={flowTitle(c)}>
+          <span className={`whitespace-nowrap pl-2 font-bold ${numTone('call', shown(c), mode)}`} title={flowTitle(c)}>
             {label(c)}{mode === 'flow' && <>{' '}<StreakBadge flow={c?.flow ?? null} fs={fs} scale={scale} unit={unit} /></>}
           </span>
           <Bar side="call" length={shown(c)} moved={moved(c)} max={max} tag={mode === 'flow' ? null : c?.buildup ?? null} />
@@ -336,6 +362,9 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, on
     </div>
   );
 }
+
+/** Minutes of the day → "HH:MM". */
+const fmtHm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 
 const inr = (v: number, d = 2) => v.toLocaleString('en-IN', { minimumFractionDigits: d, maximumFractionDigits: d });
 
@@ -368,27 +397,43 @@ function PriceChip({ underlying, q, fallback }: { underlying: string; q: FreshMo
 
 /** The strike ladder (all tabs). It owns the slot tab's hover crosshair, so moving the mouse across the cells re-renders
  *  only the ladder, not the trade bar, positions panel or the Cumulative OI chart. */
-function Ladder({ data, oiMode, tradeMode, fs, maxAbs, boxedStrike, rowTrade, spot, liveSpot, totals, scale }: {
+function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTrade, spot, liveSpot, totals, scale }: {
   data: FreshMoneyResponse; oiMode: OiMode; tradeMode: boolean; fs: FlowSlots; maxAbs: number; boxedStrike: number | null;
   rowTrade: (strike: number) => RowTrade | null; spot: number | null; liveSpot: number | null;
   totals: { put: SumFlow; call: SumFlow; scale: number }; scale: number;
 }) {
   const [hover, setHover] = useState<Hover>(null);
   const flowTotals = totals, flowCellScale = scale;
+  // Flow tab: as many slot cells per side as the box has room for (the newest ones), so on a narrower screen the oldest
+  // slots go instead of the call side scrolling off to the right once the trade columns appear.
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [boxW, setBoxW] = useState(0);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => setBoxW(el.clientWidth - 32));   // minus px-4 on both sides
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const total = cellCount(fsAll);
+  const show = boxW > 0 ? slotsThatFit(boxW, tradeMode, total) : total;
+  const fs = useMemo<FlowSlots>(() => ({ ...fsAll, show }), [fsAll, show]);
+  const flowVars = { '--fm-slots': `${show * SLOT_CELL_PX}px`, '--fm-n': String(Math.max(1, show)) } as React.CSSProperties;
   return (
     <>
     {/* Flow tab: the ladder scrolls inside its own box (both ways), so the slot times and totals can stay pinned
         (an overflow-x box is a scroll container, so `sticky` could never pin against the window). */}
-    <div className={oiMode === 'flow' ? 'max-h-[calc(100vh-170px)] overflow-auto px-4 pb-2' : 'overflow-x-auto px-4 pb-2 pt-2'}
+    <div ref={boxRef} className={oiMode === 'flow' ? 'max-h-[calc(100vh-170px)] overflow-auto px-4 pb-2' : 'overflow-x-auto px-4 pb-2 pt-2'}
       onMouseLeave={() => setHover(null)}>
-     <div className={oiMode === 'flow' ? (tradeMode ? 'min-w-[1916px]' : 'min-w-[1596px]') : tradeMode ? 'min-w-[1040px]' : 'min-w-[720px]'}>
+     <div className={oiMode === 'flow' ? '' : tradeMode ? 'min-w-[1040px]' : 'min-w-[720px]'}
+       style={oiMode === 'flow' ? { ...flowVars, minWidth: 2 * show * SLOT_CELL_PX + flowFixedPx(tradeMode) } : undefined}>
       <div data-testid="flow-sticky-head" className={oiMode === 'flow' ? 'sticky top-0 z-10 border-b border-zinc-700 bg-zinc-900 pt-2' : ''}>
       <div className={`${gridFor(oiMode, tradeMode)} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
         {oiMode === 'flow' && <FlowHeader side="put" fs={fs} hoverSlot={hover?.slot ?? null} />}
         <span className="col-span-2 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `OI Δ today @ ${fs.dayAt ?? '–'}` : 'OI moved'}`}</span>
-        {tradeMode && <span className="pr-1 text-right text-zinc-400">PE trade</span>}
+        {tradeMode && <span className="pr-1 text-right text-zinc-400" title="Buy / Sell the put, and your put position's P&L at this strike (open, or booked today once closed)">PE · B/S · P&amp;L</span>}
         <span className="text-center">STRIKE</span>
-        {tradeMode && <span className="pl-1 text-zinc-400">CE trade</span>}
+        {tradeMode && <span className="pl-1 text-zinc-400" title="Buy / Sell the call, and your call position's P&L at this strike (open, or booked today once closed)">CE · B/S · P&amp;L</span>}
         <span className="col-span-2 pl-2">{oiMode === 'delta' ? '' : `CALLS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `OI Δ today @ ${fs.dayAt ?? '–'}` : 'OI moved'}`}</span>
         {oiMode === 'flow' && <FlowHeader side="call" fs={fs} hoverSlot={hover?.slot ?? null} />}
       </div>
@@ -534,17 +579,18 @@ export default function FreshMoneyBoard() {
   // One tint scale for every slot cell on the board (puts and calls), so sizes compare across strikes.
   // Board totals per slot (puts / calls) and their own tint scale: sums dwarf single strikes.
   const flowTotals = useMemo(() => {
-    const len = fs.bounds.length;
+    const len = cellCount(fs);
     const put = sumFlows((data?.rows ?? []).map(r => r.put?.flow ?? null), len);
     const call = sumFlows((data?.rows ?? []).map(r => r.call?.flow ?? null), len);
     return { put, call, scale: flowScale([...put.cells, ...call.cells]) };
-  }, [data, fs.bounds.length]);
+  }, [data, fs]);
 
   // Board-wide streak alert: the Σ totals row starts (or turns into) a run of 3+ slots on puts or calls. Live board only,
   // leader tab only; the first reply after a load / underlying or day switch only records (no chime for history).
   const prevStreakRef = useRef<{ key: string; put: { dir: 1 | -1 } | null; call: { dir: 1 | -1 } | null } | null>(null);
   useEffect(() => {
-    if (!data?.isToday || fs.bounds.length < 2) return;
+    // Not once the session closed: the slot row is re-laid on the close then, which is no new streak.
+    if (!data?.isToday || fs.closed || fs.bounds.length < 2) return;
     const n = fs.bounds.length - 1;
     const put = flowStreak(flowTotals.put.cells, n, flowTotals.scale);
     const call = flowStreak(flowTotals.call.cells, n, flowTotals.scale);
@@ -560,7 +606,7 @@ export default function FreshMoneyBoard() {
       });
       play('alert');
     }
-  }, [flowTotals, data, fs.bounds, leaderRef, play]);
+  }, [flowTotals, data, fs.bounds, fs.closed, leaderRef, play]);
   const flowCellScale = useMemo(
     () => flowScale((data?.rows ?? []).flatMap(r => [...(r.put?.flow?.cells ?? []), ...(r.call?.flow?.cells ?? [])])),
     [data],
@@ -621,6 +667,8 @@ export default function FreshMoneyBoard() {
   const isMcx = MCX_UNDERLYINGS.has(underlying);
   const collectorName = isMcx ? `${underlying} OI collector` : 'IV snapshot collector';
   const isStale = !!data?.isToday && staleMin >= 3 && nowIstMin >= day.from && nowIstMin <= day.to;
+  // Today's session is over (the server stops the slots at the close then; flowSlots.closed says it did).
+  const sessionOver = !!data?.isToday && (nowIstMin >= day.to || !!data.flowSlots?.closed);
 
   // ── trading ──
   const ts = trades.state;
@@ -726,9 +774,14 @@ export default function FreshMoneyBoard() {
           <span className="rounded border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-amber-300">
             DATA: {data?.date ?? '—'}{data && !data.isToday ? ' · last session' : ''}
           </span>
-          {ts && (
-            <ExitAllButton count={ts.positions.filter(p => p.netQty !== 0).length} busy={trades.exitingAll} onExit={trades.exitAll} />
+          {sessionOver && (
+            <span data-testid="fm-closed" className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-300"
+              title={`The ${data!.market} session closed at ${fmtHm(day.to)}: the slots and today's change stop there, and the board no longer moves`}>
+              Closed · final {fmtHm(day.to)}
+            </span>
           )}
+          {/* Rendered (disabled, 0) before the trade state arrives, so the header does not reflow when it does. */}
+          <ExitAllButton count={ts ? ts.positions.filter(p => p.netQty !== 0).length : 0} busy={trades.exitingAll} onExit={trades.exitAll} />
           <span className="h-5 w-px shrink-0 bg-zinc-800" />
           <NavBar />
         </div>
@@ -804,7 +857,7 @@ export default function FreshMoneyBoard() {
                     title={m === 'change' ? "Today's change in open interest vs the previous close"
                       : m === 'total' ? 'Open interest outstanding now'
                       : m === 'delta' ? 'Call OI − Put OI (total OI outstanding) at each strike'
-                      : `OI added or cut in fixed ${fs.slotMin}-minute slots counted from the session open: the last ${nSlots} completed slots (frozen) and the running one`}
+                      : `OI added or cut in fixed ${fs.slotMin}-minute slots counted from the session open: the last ${nSlots} completed slots (frozen)${fs.closed ? ', ending at the close' : ' and the running one'}`}
                     className={`rounded px-2.5 py-1 text-[11px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 ${
                       oiMode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}>
                     {name}
@@ -826,8 +879,8 @@ export default function FreshMoneyBoard() {
                     ))}
                     <span><span className="font-bold text-emerald-400">▲n</span> / <span className="font-bold text-red-400">▼n</span> n slots in a row</span>
                     <span><span className="font-bold text-amber-400">▼n</span> against today&apos;s net</span>
-                    <span className="flex items-center gap-1"><span className="rounded-sm px-1 text-[10px] italic ring-1 ring-inset ring-zinc-500">+1k</span> live slot</span>
-                    <span>number = OI Δ today @ {fs.dayAt ?? '–'}</span>
+                    {!fs.closed && <span className="flex items-center gap-1"><span className="rounded-sm px-1 text-[10px] italic ring-1 ring-inset ring-zinc-500">+1k</span> live slot</span>}
+                    <span>number = OI Δ today @ {fs.dayAt ?? '–'} <span className="text-zinc-500">(grey = cut)</span></span>
                     <button type="button" onClick={toggleFlowHelp} aria-label="How to read the slots" aria-expanded={flowHelp}
                       title="How to read the slots"
                       className="flex h-5 w-5 items-center justify-center rounded text-zinc-400 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70">
@@ -844,11 +897,13 @@ export default function FreshMoneyBoard() {
               {oiMode === 'flow' && flowHelp && (
                 <div className="mt-1 space-y-0.5 rounded-md border border-zinc-800 bg-zinc-950/40 px-3 py-2 text-[11.5px] text-zinc-300">
                   <p>Each cell is the OI change ({data.oiUnit}) in one {fs.slotMin}-minute slot counted from the open ({data.market === 'MCX' ? '09:00' : '09:15'}).
-                    Completed slots are frozen; the ringed, italic cell next to the strike is the current slot so far. – = no OI reading at a slot edge.</p>
+                    Completed slots are frozen; the ringed, italic cell next to the strike is the current slot so far (after the close there is none:
+                    the slots stop at the close, so OI the chain moves after the bell is not counted). – = no OI reading at a slot edge.
+                    On a narrower screen the oldest slots are left out.</p>
                   <p>Tint = size of the move against this board&apos;s 95th-percentile move: grey under 10 %, then faint, medium, and bold white on a
                     strong tint for the biggest moves (≥ 70 %). Green = OI added, red = OI cut.</p>
                   <p>The number and bar beside the strike = today&apos;s OI change vs the previous close as of the last completed slot with a reading
-                    ({fs.dayAt ?? '–'}); each slot that completes adds its cell to it. Filled bar = net added today, outline = net cut.</p>
+                    ({fs.dayAt ?? '–'}); each slot that completes adds its cell to it. Filled bar = net added today, outline = net cut; a cut also turns the number grey.</p>
                   <p><span className="font-bold text-emerald-400">▲n</span> / <span className="font-bold text-red-400">▼n</span> = the last n completed slots
                     all added / all cut OI (tinted moves only, runs of 3+). <span className="font-bold text-amber-400">Amber</span> = that run goes against
                     today&apos;s net (built all day, now unwinding, or the reverse): a possible turn.</p>

@@ -49,8 +49,13 @@ interface CumulativeResponse {
   error?: string;
 }
 
+// Series colours (red-500 / emerald-500): calls red, puts green, as on the option boards next to this chart.
+const CE_COLOR = '#ef4444';
+const PE_COLOR = '#10b981';
+
 function fmtOI(n: number): string {
   const abs = Math.abs(n);
+  if (abs >= 100_000_000) return `${(n / 10_000_000).toFixed(1)}Cr`;
   if (abs >= 10_000_000) return `${(n / 10_000_000).toFixed(2)}Cr`;
   if (abs >= 100_000) return `${(n / 100_000).toFixed(1)}L`;
   return n.toLocaleString('en-IN');
@@ -107,11 +112,11 @@ const CompactOITooltip = ({ active, payload, label }: Record<string, unknown>) =
     <div className="bg-zinc-950/95 border border-zinc-700/80 rounded-lg px-2.5 py-2 text-[11px] shadow-2xl backdrop-blur min-w-[150px] font-mono">
       <p className="text-zinc-400 font-bold mb-1">{typeof label === 'number' ? fmtTick(label) : String(label)}</p>
       <div className="flex justify-between gap-4 mb-0.5">
-        <span className="text-blue-400 font-semibold">CE OI</span>
+        <span className="text-red-400 font-semibold">CE OI</span>
         <span className="text-zinc-100 font-bold tabular-nums">{fmtOI(ceOI)}</span>
       </div>
       <div className="flex justify-between gap-4 mb-0.5">
-        <span className="text-rose-400 font-semibold">PE OI</span>
+        <span className="text-emerald-400 font-semibold">PE OI</span>
         <span className="text-zinc-100 font-bold tabular-nums">{fmtOI(peOI)}</span>
       </div>
       <div className="flex justify-between gap-4 mb-0.5 pt-1 border-t border-zinc-800">
@@ -307,35 +312,35 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
         {points.length > 0 && (
           <div className="flex-1 w-full h-[155px]">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={points} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
+              <AreaChart data={points} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
                 <defs>
+                  {/* Series colours match the option boards: calls red, puts green (data colours, not chrome). */}
                   <linearGradient id="cumCeGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.35} />
-                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0.02} />
+                    <stop offset="5%" stopColor={CE_COLOR} stopOpacity={0.3} />
+                    <stop offset="95%" stopColor={CE_COLOR} stopOpacity={0.02} />
                   </linearGradient>
                   <linearGradient id="cumPeGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.35} />
-                    <stop offset="95%" stopColor="#f43f5e" stopOpacity={0.02} />
+                    <stop offset="5%" stopColor={PE_COLOR} stopOpacity={0.3} />
+                    <stop offset="95%" stopColor={PE_COLOR} stopOpacity={0.02} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="2 2" stroke="#27272a" vertical={false} />
+                <CartesianGrid strokeDasharray="2 2" vertical={false} />
                 <XAxis
                   dataKey="ts"
                   domain={[timeBounds.min, timeBounds.max]}
-                  tick={{ fontSize: 9, fill: '#71717a' }}
+                  tick={{ fontSize: 9 }}
                   tickFormatter={fmtTick}
                   tickLine={false}
-                  axisLine={{ stroke: '#27272a' }}
                   interval="preserveStartEnd"
                   minTickGap={45}
                 />
                 <YAxis
                   yAxisId="oi"
-                  tick={{ fontSize: 9, fill: '#71717a' }}
+                  tick={{ fontSize: 9 }}
                   tickFormatter={fmtOI}
                   tickLine={false}
                   axisLine={false}
-                  width={38}
+                  width={50}
                 />
                 <YAxis
                   yAxisId="spot"
@@ -343,13 +348,13 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
                   domain={['auto', 'auto']}
                   hide
                 />
-                <Tooltip content={<CompactOITooltip />} />
+                <Tooltip content={<CompactOITooltip />} cursor={{ stroke: 'var(--chart-cursor-line)' }} />
                 <Area
                   yAxisId="oi"
                   type="monotone"
                   dataKey="ceOI"
                   name="CE OI"
-                  stroke="#3b82f6"
+                  stroke={CE_COLOR}
                   strokeWidth={1.5}
                   fill="url(#cumCeGrad)"
                   dot={false}
@@ -360,7 +365,7 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
                   type="monotone"
                   dataKey="peOI"
                   name="PE OI"
-                  stroke="#f43f5e"
+                  stroke={PE_COLOR}
                   strokeWidth={1.5}
                   fill="url(#cumPeGrad)"
                   dot={false}
@@ -401,8 +406,8 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
               })}
             </div>
             <div className="flex items-center gap-2 text-[9px] text-zinc-400 font-semibold shrink-0">
-              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-blue-400" />CE</span>
-              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-rose-400" />PE</span>
+              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-red-400" />CE</span>
+              <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />PE</span>
               <span className="flex items-center gap-0.5"><span className="w-1.5 h-1.5 rounded-full bg-amber-400" />Spot</span>
             </div>
           </div>

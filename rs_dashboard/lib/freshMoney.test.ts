@@ -194,6 +194,28 @@ test('oiFlow: a collector gap at a slot edge nulls the slots it bounds; the tota
   assert.equal(s.ce.day, 7500);   // the latest completed edge (10:30) has a reading
 });
 
+test('oiFlow: after the close the slots stop AT the close; OI moved after the bell is not a slot or today\'s change', () => {
+  // Snapshots run on to 15:40; +100 per minute all day, then +5000 per minute after 15:30 (post-close noise).
+  const CLOSE = M('15:30');
+  const ce = (m: number) => 1000 + 100 * (m - OPEN) + (m > CLOSE ? 5000 * (m - CLOSE) : 0);
+  const chg = (m: number) => ce(m) - 1000;
+  const f = oiFlow(series('09:15', '15:40', ce, () => 1, () => false, '2026-11-12', chg), { slots: 5, slotMin: 3, anchorMin: OPEN, endMin: CLOSE });
+  assert.equal(f.closed, true);
+  assert.deepEqual(lab(f), ['15:12', '15:15', '15:18', '15:21', '15:24', '15:27', '15:30']);   // 6 completed, no running
+  const s = f.byStrike.get(22550)!;
+  assert.deepEqual(s.ce.cells, [300, 300, 300, 300, 300, 300]);
+  assert.equal(f.dayAt, CLOSE);
+  assert.equal(s.ce.day, 100 * (CLOSE - OPEN));                     // as of 15:30, not 15:40
+  assert.deepEqual(flowStreak(s.ce.cells, f.bounds.length - 1, 300), { dir: 1, n: 6 });
+});
+
+test('oiFlow: a close off the slot grid ends with one short slot (MCX 23:55 from 09:00)', () => {
+  const MO = M('09:00'), MC = M('23:55');
+  const f = oiFlow(series('23:30', '23:55', m => 100 * m, () => 1), { slots: 5, slotMin: 3, anchorMin: MO, endMin: MC });
+  assert.deepEqual(lab(f), ['23:39', '23:42', '23:45', '23:48', '23:51', '23:54', '23:55']);
+  assert.deepEqual(f.byStrike.get(22550)!.ce.cells, [300, 300, 300, 300, 300, 100]);
+});
+
 test('oiFlow: a missing OI is null, never 0', () => {
   const s = slotsOf(series('09:15', '10:31', m => (m < M('10:20') ? '' : 1000), () => 1)).byStrike.get(22550)!;
   assert.deepEqual(s.ce.cells, [null, null, 0, 0, 0, 0]);

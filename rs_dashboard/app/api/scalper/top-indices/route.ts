@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getDhanCredentials } from '@/lib/dhanToken';
+import { fetchDailyCloses, fetchLatestPrevClose } from '@/lib/dhanDailyCloses';
 import path from 'path';
 import fs from 'fs';
 import { dedupe, runPythonJson, PROJECT_ROOT } from '@/lib/pyExec';
@@ -56,7 +57,6 @@ const HUB_QUOTES_FILE = path.join(PROJECT_ROOT, 'debug', 'live_indices_quotes.js
 // a correct percentage rather than a blank one.
 
 const DHAN_OHLC_URL = 'https://api.dhan.co/v2/marketfeed/ohlc';
-const DHAN_HISTORICAL_URL = 'https://api.dhan.co/v2/charts/historical';
 
 interface IndexDef {
   /** Stable key used by the UI. */
@@ -458,60 +458,12 @@ function prunePrevDayChangeCache(day: string): void {
   }
 }
 
-// Wide enough to survive the longest realistic NSE/MCX gap (a long weekend
-// butted up against a holiday) while staying a small, fast request.
-const LOOKBACK_DAYS = 12;
 // Dhan's ~1 req/s guidance applies to the batched OHLC endpoint under
 // continuous polling; this path runs once a day (cached below) but still
 // issues one historical request per row, so a small stagger avoids bursting
 // nine requests in the same instant.
 const HISTORICAL_STAGGER_MS = 150;
 
-/**
- * Fetches daily-candle closes for the last `LOOKBACK_DAYS` calendar days, as
- * {date, close} rows in IST-date order (oldest first). Dhan's daily-candle
- * endpoint only ever returns rows for days the exchange actually traded, so
- * callers get weekend/holiday skipping for free — no local calendar needed.
- */
-async function fetchDailyCloses(
-  sid: number, segment: string, instrument: string,
-): Promise<{ date: string; close: number }[] | null> {
-  const { clientId, token } = getDhanCredentials();
-  if (!token) return null;
-
-  const to = new Date();
-  const from = new Date(to);
-  from.setDate(from.getDate() - LOOKBACK_DAYS);
-  const fmt = (d: Date) => d.toISOString().slice(0, 10);
-
-  const res = await fetch(DHAN_HISTORICAL_URL, {
-    method: 'POST',
-    headers: {
-      'access-token': token,
-      'client-id': clientId,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify({
-      securityId: String(sid),
-      exchangeSegment: segment,
-      instrument,
-      oi: false,
-      fromDate: fmt(from),
-      toDate: fmt(to),
-    }),
-    signal: AbortSignal.timeout(8000),
-  });
-  const json = (await res.json()) as { close?: number[]; timestamp?: number[]; remarks?: unknown };
-  const closes = json.close ?? [];
-  const timestamps = json.timestamp ?? [];
-  if (closes.length === 0 || closes.length !== timestamps.length) return null;
-
-  return timestamps.map((ts, i) => ({
-    date: new Date(ts * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }),
-    close: closes[i],
-  }));
-}
 
 /**
  * Before 09:15 IST there is no "today" yet — `fromDhan`'s live LTP still
@@ -535,24 +487,6 @@ async function fetchPrevSessionChange(
   return last.close > 0 && prev.close > 0 ? { ltp: last.close, prevClose: prev.close } : null;
 }
 
-/**
- * Yesterday's close for `fromDhan`'s post-close fallback.
- *
- * Verified 2026-09-10: Dhan's daily candle for TODAY is not published at the
- * close bell — still absent from this endpoint at 20:17 IST, ~5h after close.
- * So the most recent row strictly before today already IS the correct
- * prevClose; no "last two rows" comparison is needed here (unlike
- * `fetchPrevSessionChange` above, this call site already has a genuine live
- * `ltp` from the OHLC batch call in `fromDhan` — it only needs one number).
- */
-async function fetchLatestPrevClose(
-  sid: number, segment: string, instrument: string, today: string,
-): Promise<number | null> {
-  const rows = (await fetchDailyCloses(sid, segment, instrument))?.filter(r => r.date < today);
-  if (!rows || rows.length === 0) return null;
-  const last = rows[rows.length - 1];
-  return last.close > 0 ? last.close : null;
-}
 
 async function fromDhanPrevSessionChange(wanted: IndexDef[]): Promise<Record<string, Quote>> {
   const out: Record<string, Quote> = {};

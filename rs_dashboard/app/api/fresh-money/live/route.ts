@@ -4,6 +4,8 @@ import { istToday } from '@/lib/istTime';
 import { isRegularSession } from '@/lib/nseHolidays';
 import { mcxSession } from '@/lib/mcxSession';
 import { pickPrevClose, spotInstrument, wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
+import { fetchLatestPrevClose } from '@/lib/dhanDailyCloses';
+import { globalOnce } from '@/lib/globalOnce';
 
 // The board's live price from Dhan's WebSocket (lib/freshMoneyWs.ts): an MCX option month's own futures, or the index,
 // with its change against the previous close. Polled every ~2 s by the page; each call keeps the subscription asked for.
@@ -28,6 +30,32 @@ export interface FreshMoneyLive {
 
 const prevCache: Map<string, { date: string; prev: number }> =
   ((globalThis as { __fmPrevClose?: Map<string, { date: string; prev: number }> }).__fmPrevClose ??= new Map());
+
+// Out of session with nothing cached today (the price was first asked for after the bell, or the dashboard restarted
+// since), the quote's `close` has already flipped to today's: read the previous close from Dhan's daily candles instead
+// (the same source as the Top Indices strip). One request per instrument per day; a failure waits 5 min before the next
+// try, so the ~2 s page poll never turns into a stream of historical-API calls. Never blocks the reply: the first poll
+// still answers "–" and a later one has the value.
+const candleFallback = globalOnce('__fmPrevCloseCandles', () => ({
+  inflight: new Set<string>(),
+  failedAt: new Map<string, number>(),
+}));
+const CANDLE_RETRY_MS = 5 * 60_000;
+
+function fillFromCandles(key: string, securityId: string, segment: string, today: string): void {
+  if (candleFallback.inflight.has(key)) return;
+  const failed = candleFallback.failedAt.get(key);
+  if (failed && Date.now() - failed < CANDLE_RETRY_MS) return;
+  candleFallback.inflight.add(key);
+  const instrument = segment === 'MCX_COMM' ? 'FUTCOM' : 'INDEX';
+  fetchLatestPrevClose(Number(securityId), segment, instrument, today)
+    .then(pc => {
+      if (pc && pc > 0) { prevCache.set(key, { date: today, prev: pc }); candleFallback.failedAt.delete(key); }
+      else candleFallback.failedAt.set(key, Date.now());
+    })
+    .catch(() => { candleFallback.failedAt.set(key, Date.now()); })
+    .finally(() => { candleFallback.inflight.delete(key); });
+}
 
 function inSession(mcx: boolean): boolean {
   const today = istToday();
@@ -59,6 +87,9 @@ export async function GET(req: NextRequest) {
   const cachedToday = cached && cached.date === today ? cached.prev : null;
   const prev = pickPrevClose(q.ltp, q.prevClose, live, cachedToday);
   if (live && q.prevClose && q.prevClose > 0) prevCache.set(key, { date: today, prev: q.prevClose });
+  // A raw close that equals the last price out of session is the flipped one (pickPrevClose refused it): no cached value
+  // means no in-session reading today, so go to the daily candles.
+  if (!live && cachedToday === null) fillFromCandles(key, inst.securityId, inst.segment, today);
   const change = prev ? q.ltp - prev : null;
   return NextResponse.json({
     underlying, label: inst.label, spot: q.ltp, prevClose: prev,

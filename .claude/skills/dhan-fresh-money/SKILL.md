@@ -32,6 +32,10 @@ positions read twice", "board price snaps back to the startup value", "OI change
   slots only, runs of 3+), amber when `streakVsDay` says it runs against the day's net (a possible turn). The `Σ shown`
   totals row (`sumFlows`, known values only) has its OWN `flowScale`: sums dwarf single strikes. On this tab the ladder
   scrolls in its own box so the slot times + totals stay `sticky` (an overflow-x box is a scroll container).
+  Once the session is over (an earlier day, or past `day.to`) the route passes `endMin`: the slots end AT the close
+  (11 completed, no running one, `flowSlots.closed`), so OI Dhan's chain keeps moving after the bell is never a slot or
+  part of `day` (2026-11-13: slots ran to 15:42). The slot blocks are sized by CSS vars from the box width
+  (`slotsThatFit`): a narrow screen drops the OLDEST slots instead of scrolling the call side off to the right.
 - `lib/freshMoneyChime.ts` - pure: `tradeEvents(prev, cur)` diffs two trade-state polls into one sound (warn > exit >
   entry) plus toasts for SERVER-fired exits (target / SL / total; they had no toast before), `streakStart` rings when the
   Σ row starts or turns a 3+ run. The page plays them via `lib/alertSound.ts` (dhan-alert-sound): leader tab only

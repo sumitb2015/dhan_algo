@@ -204,6 +204,9 @@ export interface OiFlow {
   /** The slot edge (minutes of the day) every `day` is read at: the latest completed edge with a reading, or an earlier
    *  one when a collector gap (e.g. a restart) left that edge empty; null when no shown edge has a reading. */
   dayAt: number | null;
+  /** The session is over: `bounds` end AT the close, every cell is a completed slot and there is no running one (so
+   *  `bounds` has one more entry than the cells' slot count + 1 would suggest: cells = bounds.length − 1). */
+  closed: boolean;
   byStrike: Map<number, { ce: SideFlow; pe: SideFlow }>;
 }
 
@@ -215,6 +218,9 @@ export interface OiFlowOpts {
   anchorMin: number;
   /** A boundary reads the latest snapshot at or before it, no more than this many minutes earlier. */
   slackMin?: number;
+  /** Set once the session is over (minute of the day of the close): the slots stop at the close — `slots + 1` completed
+   *  slots ending there, no running one — so OI the chain moves after the bell never shows as a slot or in `day`. */
+  endMin?: number;
 }
 
 /**
@@ -232,9 +238,22 @@ export function oiFlow(snaps: Snapshot[], opts: OiFlowOpts): OiFlow {
   const slots = opts.slots ?? 5, slotMin = opts.slotMin ?? 3, slack = opts.slackMin ?? 1, anchor = opts.anchorMin;
   const byStrike = new Map<number, { ce: SideFlow; pe: SideFlow }>();
   const last = snaps[snaps.length - 1];
-  const cur = last ? anchor + Math.max(0, Math.floor((last.min - anchor + 1e-9) / slotMin)) * slotMin : anchor;
-  const bounds = Array.from({ length: slots + 1 }, (_, i) => cur - (slots - i) * slotMin);   // oldest first
-  if (!last) return { slotMin, bounds, boundOk: bounds.map(() => false), lastTs: '', dayAt: null, byStrike };
+  const end = opts.endMin;
+  const closed = end !== undefined && !!last;
+  let bounds: number[];
+  if (closed) {
+    // Completed slots up to the close; a close off the slot grid (MCX 23:55) ends with one short slot.
+    const lastEdge = anchor + Math.max(0, Math.floor((end - anchor + 1e-9) / slotMin)) * slotMin;
+    const onGrid = Math.abs(lastEdge - end) < 1e-9;
+    const k = onGrid ? slots + 1 : slots;
+    bounds = Array.from({ length: k + 1 }, (_, i) => lastEdge - (k - i) * slotMin);
+    if (!onGrid) bounds.push(end);
+  } else {
+    const cur = last ? anchor + Math.max(0, Math.floor((last.min - anchor + 1e-9) / slotMin)) * slotMin : anchor;
+    bounds = Array.from({ length: slots + 1 }, (_, i) => cur - (slots - i) * slotMin);   // oldest first
+  }
+  if (!last) return { slotMin, bounds, boundOk: bounds.map(() => false), lastTs: '', dayAt: null, closed: false, byStrike };
+  const top = bounds.length - 1;   // index of the newest edge
 
   // Each boundary resolves to a snapshot, to 'open' (previous-close OI), or to nothing.
   const first = snaps.find(s => s.expiry === last.expiry) ?? null;
@@ -256,13 +275,15 @@ export function oiFlow(snaps: Snapshot[], opts: OiFlowOpts): OiFlow {
   };
   // The edge today's change is read at: the latest completed edge with a reading (one global choice for every strike).
   let dayIdx = -1;
-  for (let i = slots; i >= 0; i--) if (refs[i] !== null) { dayIdx = i; break; }
+  for (let i = top; i >= 0; i--) if (refs[i] !== null) { dayIdx = i; break; }
   const sideFlow = (k: number, side: 'ce' | 'pe'): SideFlow => {
     const at = refs.map(r => oiAt(r, k, side));
-    const now = oiAt(last, k, side);
     const cells: (number | null)[] = [];
-    for (let i = 0; i < slots; i++) cells.push(at[i] === null || at[i + 1] === null ? null : at[i + 1]! - at[i]!);
-    cells.push(now === null || at[slots] === null ? null : now - at[slots]!);   // running slot so far
+    for (let i = 0; i < top; i++) cells.push(at[i] === null || at[i + 1] === null ? null : at[i + 1]! - at[i]!);
+    if (!closed) {   // running slot so far
+      const now = oiAt(last, k, side);
+      cells.push(now === null || at[top] === null ? null : now - at[top]!);
+    }
     // Today's change at that edge: the snapshot's own change vs the previous close (never assumed 0).
     const edge = dayIdx >= 0 ? refs[dayIdx] : null;
     let day: number | null = null;
@@ -273,7 +294,7 @@ export function oiFlow(snaps: Snapshot[], opts: OiFlowOpts): OiFlow {
   for (const k of last.strikes.keys()) byStrike.set(k, { ce: sideFlow(k, 'ce'), pe: sideFlow(k, 'pe') });
   return {
     slotMin, bounds, boundOk: refs.map(r => r !== null), lastTs: last.ts.slice(11, 19),
-    dayAt: dayIdx >= 0 ? bounds[dayIdx] : null, byStrike,
+    dayAt: dayIdx >= 0 ? bounds[dayIdx] : null, closed, byStrike,
   };
 }
 
