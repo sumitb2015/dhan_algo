@@ -57,7 +57,11 @@ export interface TradeApi {
   setGlobal: (target: number | null, sl: number | null) => Promise<boolean>;
 }
 
-export function useFreshMoneyTrades(): TradeApi {
+/** `onWarn` is called when an order or close THIS tab sent comes back rejected, UNKNOWN or partly sent (the page plays
+ *  its warning chime there; this hook stays sound-free). Held in a ref so a new callback never re-creates the API. */
+export function useFreshMoneyTrades(onWarn?: () => void): TradeApi {
+  const onWarnRef = useRef(onWarn);
+  useEffect(() => { onWarnRef.current = onWarn; }, [onWarn]);
   const [state, setState] = useState<FreshMoneyTradeState | null>(null);
   const [inflight, setInflight] = useState<ReadonlySet<string>>(new Set());
   const inflightRef = useRef(new Set<string>());
@@ -95,6 +99,7 @@ export function useFreshMoneyTrades(): TradeApi {
     setInflight(new Set(inflightRef.current));
     try {
       const { outcome, reply } = await sendOrderRequest(TRADE_URL, { ...body, idempotencyKey: newKey() });
+      if (outcome.kind !== 'placed') onWarnRef.current?.();
       if (outcome.kind !== 'placed' && reply?.partial === true) {
         // Part of a sliced close went out: never word it as a plain "rejected".
         toast.warning(`${label}: PARTLY sent${outcome.kind === 'unknown' ? ' (rest UNKNOWN)' : ''}`, {

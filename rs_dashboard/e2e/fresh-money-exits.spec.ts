@@ -37,6 +37,8 @@ const exitRecord = {
 };
 
 async function install(page: Page, opts: { watcherAlive?: boolean; withPosition?: boolean } = {}) {
+  // Set by the test (fireExit) once the page has recorded the watching state: from then on the server reports it fired.
+  let exitFired = false;
   const posts: Record<string, unknown>[] = [];
   const blocked: string[] = [];
   const state = () => ({
@@ -45,7 +47,9 @@ async function install(page: Page, opts: { watcherAlive?: boolean; withPosition?
     boardExpiry: { NIFTY: null, BANKNIFTY: null, CRUDEOIL: '2026-11-17', CRUDEOILM: null },
     ltpSource: { '111': 'ws' }, brokers: { dhan: true, kotak: true, zerodha: true },
     positions: opts.withPosition ? [position] : [], orders: [],
-    exits: opts.withPosition ? { [KEY]: exitRecord } : {},
+    exits: opts.withPosition
+      ? { [KEY]: exitFired ? { ...exitRecord, state: 'sent', firedBy: 'target', firedAt: Date.now() } : exitRecord }
+      : {},
     exitWatcher: { alive: opts.watcherAlive ?? true, at: Date.now() },
   });
   await page.addInitScript(() => {
@@ -82,7 +86,7 @@ async function install(page: Page, opts: { watcherAlive?: boolean; withPosition?
   await page.goto('/options/fresh-money');
   await expect(page.getByRole('heading', { name: 'Fresh Money Board' })).toBeVisible();
   await expect(page.getByText('8100').first()).toBeVisible();
-  return { posts, blocked };
+  return { posts, blocked, fireExit: () => { exitFired = true; } };
 }
 
 test.beforeEach(async ({ context }) => { await signIn(context); });
@@ -327,4 +331,23 @@ test('header shows the labelled New positions and Total groups', async ({ page }
   await expect(page.getByRole('button', { name: '±15', exact: true })).toHaveCount(0);
   await expect(page.getByText(/PCR ±10/)).toContainText('1.23');
   await page.screenshot({ path: '/tmp/claude-1000/-home-sumit-dhan-algo/69b017f5-26e6-4b1a-b412-ef2f63cac250/scratchpad/fm-header.png', fullPage: true });
+});
+
+test('sounds: mute button is remembered; a server-fired target exit gets a toast (once)', async ({ page }) => {
+  const m = await install(page, { withPosition: true });
+  await expect(page.getByText('L1', { exact: true }).first()).toBeVisible();   // the watching position is on screen
+  await page.waitForTimeout(2_500);                                            // a poll has recorded it
+  m.fireExit();
+  // The watcher's exit (sent by the server, not this tab) is announced with a toast; the chime rides on it.
+  await expect(page.getByText('Target hit — CRUDEOIL 8100 CE closed')).toBeVisible({ timeout: 15_000 });
+  await page.waitForTimeout(3_000);
+  await expect(page.getByText('Target hit — CRUDEOIL 8100 CE closed')).toHaveCount(1);   // not re-announced every poll
+  const mute = page.getByRole('button', { name: 'Mute Fresh Money sounds' });
+  await expect(mute).toHaveAttribute('aria-pressed', 'false');
+  await mute.click();
+  const unmute = page.getByRole('button', { name: 'Unmute Fresh Money sounds' });
+  await expect(unmute).toHaveAttribute('aria-pressed', 'true');
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Unmute Fresh Money sounds' })).toHaveAttribute('aria-pressed', 'true');
+  expect(m.blocked).toEqual([]);
 });

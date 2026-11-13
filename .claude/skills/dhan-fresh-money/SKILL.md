@@ -32,6 +32,11 @@ positions read twice", "board price snaps back to the startup value", "OI change
   slots only, runs of 3+), amber when `streakVsDay` says it runs against the day's net (a possible turn). The `Σ shown`
   totals row (`sumFlows`, known values only) has its OWN `flowScale`: sums dwarf single strikes. On this tab the ladder
   scrolls in its own box so the slot times + totals stay `sticky` (an overflow-x box is a scroll container).
+- `lib/freshMoneyChime.ts` - pure: `tradeEvents(prev, cur)` diffs two trade-state polls into one sound (warn > exit >
+  entry) plus toasts for SERVER-fired exits (target / SL / total; they had no toast before), `streakStart` rings when the
+  Σ row starts or turns a 3+ run. The page plays them via `lib/alertSound.ts` (dhan-alert-sound): leader tab only
+  (`useTabLeader('fresh-money')`), first poll only records, own mute key `freshMoney.sound`; a rejected / UNKNOWN order
+  this tab sent warns via `useFreshMoneyTrades(onWarn)`. Sound needs a first click after every reload.
 - `lib/freshMoneyFiles.ts` - ONE parse per snapshot-file change, shared by the board route and the trade route. Only
   files the board shows keep full snapshots in memory (14 days x 5 underlyings would exceed 100 MB).
 - `lib/freshMoneyWs.ts` + `freshMoneyWsQuote.ts` - WebSocket prices via `scripts/tools/price_ladder_ws.py --name fresh_money`

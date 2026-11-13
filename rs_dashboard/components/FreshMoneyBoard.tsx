@@ -1,7 +1,11 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BadgeIndianRupee, AlertTriangle, CircleHelp } from 'lucide-react';
+import { BadgeIndianRupee, AlertTriangle, CircleHelp, Volume2, VolumeX } from 'lucide-react';
+import { toast } from 'sonner';
+import { installAlertSoundUnlock, playAlertChime, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
+import { streakStart, tradeEvents, type ChimeKind, type TradeSnapshot } from '@/lib/freshMoneyChime';
+import { useTabLeader } from '@/hooks/useTabLeader';
 import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
 import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
@@ -24,6 +28,8 @@ const PREF_OI_MODE = 'freshMoney.oiMode';
 type OiMode = 'change' | 'total' | 'delta' | 'flow';
 const PREF_POS_COLLAPSED = 'freshMoney.positionsCollapsed';
 const PREF_FLOW_HELP = 'freshMoney.flowHelp';
+/** Fresh Money's own sound on / off ('1' / '0', default on) — never another page's mute (dhan-alert-sound). */
+const PREF_SOUND = 'freshMoney.sound';
 const PREF_EXIT_DEFAULTS = 'freshMoney.exitDefaults';
 const NO_EXITS: ExitDefaultsUi = { target: null, sl: null };
 
@@ -446,7 +452,24 @@ export default function FreshMoneyBoard() {
   const [oiMode, setOiMode] = useState<OiMode>('change');
   const pickOiMode = (m: OiMode) => { setOiMode(m); writePref(PREF_OI_MODE, m); };
   const togglePos = () => setPosCollapsed(c => { writePref(PREF_POS_COLLAPSED, c ? '0' : '1'); return !c; });
-  const trades = useFreshMoneyTrades();
+  // Sounds (dhan-alert-sound): unlocked by the first click / key on the page; poll-driven ones ring only in the leader
+  // tab so two open tabs never double-ring; always in addition to a toast; own mute setting.
+  const [soundOn, setSoundOn] = useState(true);
+  const soundRef = useRef(true);
+  useEffect(() => { soundRef.current = soundOn; }, [soundOn]);
+  const toggleSound = () => setSoundOn(o => { writePref(PREF_SOUND, o ? '0' : '1'); return !o; });
+  const play = useCallback((k: ChimeKind | 'alert') => {
+    if (!soundRef.current) return;
+    if (k === 'entry') playEntryChime();
+    else if (k === 'exit') playExitChime();
+    else if (k === 'warn') playWarnChime();
+    else playAlertChime();
+  }, []);
+  useEffect(() => installAlertSoundUnlock(), []);
+  const { leaderRef } = useTabLeader('fresh-money');
+  // An order or close this tab sent came back rejected / UNKNOWN / partly sent: warn right here (its toast is here too).
+  const onOrderWarn = useCallback(() => play('warn'), [play]);
+  const trades = useFreshMoneyTrades(onOrderWarn);
   const [now, setNow] = useState(() => Date.now());
   const seq = useRef(0);
 
@@ -459,6 +482,7 @@ export default function FreshMoneyBoard() {
     if (Number.isInteger(l) && l >= 1 && l <= 20) setLots(l);
     setPosCollapsed(readPref(PREF_POS_COLLAPSED) === '1');
     setFlowHelp(readPref(PREF_FLOW_HELP) === '1');
+    setSoundOn(readPref(PREF_SOUND) !== '0');
     const om = readPref(PREF_OI_MODE);
     if (om === 'total' || om === 'delta' || om === 'flow') setOiMode(om);
     try {
@@ -512,6 +536,28 @@ export default function FreshMoneyBoard() {
     const call = sumFlows((data?.rows ?? []).map(r => r.call?.flow ?? null), len);
     return { put, call, scale: flowScale([...put.cells, ...call.cells]) };
   }, [data, fs.bounds.length]);
+
+  // Board-wide streak alert: the Σ totals row starts (or turns into) a run of 3+ slots on puts or calls. Live board only,
+  // leader tab only; the first reply after a load / underlying or day switch only records (no chime for history).
+  const prevStreakRef = useRef<{ key: string; put: { dir: 1 | -1 } | null; call: { dir: 1 | -1 } | null } | null>(null);
+  useEffect(() => {
+    if (!data?.isToday || fs.bounds.length < 2) return;
+    const n = fs.bounds.length - 1;
+    const put = flowStreak(flowTotals.put.cells, n, flowTotals.scale);
+    const call = flowStreak(flowTotals.call.cells, n, flowTotals.scale);
+    const key = `${data.underlying}|${data.date}`;
+    const prev = prevStreakRef.current;
+    prevStreakRef.current = { key, put, call };
+    if (!prev || prev.key !== key || !leaderRef.current) return;
+    for (const [side, cur, was] of [['puts', put, prev.put], ['calls', call, prev.call]] as const) {
+      if (!cur || !streakStart(was, cur)) continue;
+      toast.info(`Σ ${side} ${cur.dir > 0 ? '▲' : '▼'}${cur.n} — ${data.underlying}`, {
+        description: `The board ${cur.dir > 0 ? 'added' : 'cut'} ${side === 'puts' ? 'put' : 'call'} OI ${cur.n} slots in a row (${fs.bounds[n - cur.n]}–${fs.bounds[n]})`,
+        duration: 10_000,
+      });
+      play('alert');
+    }
+  }, [flowTotals, data, fs.bounds, leaderRef, play]);
   const flowCellScale = useMemo(
     () => flowScale((data?.rows ?? []).flatMap(r => [...(r.put?.flow?.cells ?? []), ...(r.call?.flow?.cells ?? [])])),
     [data],
@@ -575,6 +621,21 @@ export default function FreshMoneyBoard() {
 
   // ── trading ──
   const ts = trades.state;
+  // Trade sounds + toasts for what changed since the last trade-state poll (entry / exit / warn; server-fired target,
+  // stop-loss and total exits get a toast here, which they had none of). The first poll only records.
+  const prevTradeRef = useRef<TradeSnapshot | null>(null);
+  useEffect(() => {
+    if (!ts) return;
+    const cur: TradeSnapshot = { positions: ts.positions, exits: ts.exits ?? {}, global: ts.global ?? null };
+    const ev = tradeEvents(prevTradeRef.current, cur);
+    prevTradeRef.current = cur;
+    if (!leaderRef.current) return;
+    for (const t of ev.toasts) {
+      if (t.kind === 'error') toast.error(t.title, { description: t.detail, duration: 20_000 });
+      else toast.success(t.title, { description: t.detail, duration: 8_000 });
+    }
+    if (ev.sound) play(ev.sound);
+  }, [ts, leaderRef, play]);
   const tradable = !!ts?.tradable.includes(underlying);
   const tradeExpiry = ts?.boardExpiry[underlying] ?? null;
   // Orders only from a live board: today's snapshot, and the expiry the server will trade.
@@ -714,7 +775,13 @@ export default function FreshMoneyBoard() {
             )}
             <div className="px-4 pt-3">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <div role="tablist" aria-label="Bars and numbers show" className="ml-auto flex rounded-md border border-zinc-800 bg-zinc-950/40 p-0.5">
+              <button type="button" onClick={toggleSound} aria-pressed={!soundOn}
+                aria-label={soundOn ? 'Mute Fresh Money sounds' : 'Unmute Fresh Money sounds'}
+                title={soundOn ? 'Sounds on (trades, board-wide streaks) — click to mute. They play after your first click on the page.' : 'Sounds muted — toasts still show'}
+                className={`ml-auto flex h-6 w-6 items-center justify-center rounded border border-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70 ${soundOn ? 'text-zinc-300' : 'text-zinc-500'}`}>
+                {soundOn ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+              </button>
+              <div role="tablist" aria-label="Bars and numbers show" className="flex rounded-md border border-zinc-800 bg-zinc-950/40 p-0.5">
                 {([['change', 'OI change'], ['total', 'Total OI'], ['delta', 'Δ OI'], ['flow', `${fs.slotMin}m slots`]] as const).map(([m, name]) => (
                   <button key={m} type="button" role="tab" aria-selected={oiMode === m} onClick={() => pickOiMode(m)}
                     title={m === 'change' ? "Today's change in open interest vs the previous close"
