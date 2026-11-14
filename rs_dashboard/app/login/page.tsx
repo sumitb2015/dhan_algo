@@ -10,7 +10,6 @@ import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
-import { FloatingPaths } from "@/components/ui/background-paths";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -329,13 +328,7 @@ export default function LoginPage() {
   return (
     <div className="relative min-h-screen overflow-hidden bg-zinc-950 flex items-center justify-center px-4">
 
-      {/* Layer 1 — animated floating paths */}
-      <div className="pointer-events-none absolute inset-0 overflow-hidden opacity-40 select-none">
-        <FloatingPaths position={1} />
-        <FloatingPaths position={-1} />
-      </div>
-
-      {/* Layer 2 — emerald bloom from below */}
+      {/* Layer 1 — static emerald bloom from below */}
       <div
         className="pointer-events-none absolute inset-0"
         style={{
