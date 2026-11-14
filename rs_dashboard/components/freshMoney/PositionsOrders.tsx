@@ -101,11 +101,13 @@ export default function PositionsOrders({ state, broker, armed, inflight, canClo
         </div>
         <span className="text-[11px] text-zinc-500">
           {tab === 'positions'
-            ? `${brokerLabel(broker)} positions from this page, every underlying (not the broker's pooled net)${otherOpen ? ` · ${otherOpen} open on other brokers (shown under the trade bar)` : ''}`
+            ? `This page's own fills (not the broker's pooled net)${otherOpen ? ` · ${otherOpen} open on other brokers, listed under the trade bar` : ''}`
             : "Today's latest orders from this page"}
         </span>
         {(tab === 'positions' || collapsed) && (
           <span className="ml-auto text-[12px] tabular-nums text-zinc-400">
+            {/* Scope differs from the trade bar (one underlying) and the Total block (everything): say which. */}
+            <span className="mr-2 text-[10px] font-bold uppercase tracking-wider text-zinc-500">{brokerLabel(broker)} · all underlyings</span>
             Open <span className={`font-bold ${pnlClass(tOpen)}`}>{fmtRs(tOpen)}</span>
             {' · '}Booked <span className={`font-bold ${pnlClass(tBooked)}`}>{fmtRs(tBooked)}</span>
             {' · '}P&amp;L <span className={`text-[13px] font-bold ${pnlClass(tTotal)}`}>{fmtRs(tTotal)}</span>

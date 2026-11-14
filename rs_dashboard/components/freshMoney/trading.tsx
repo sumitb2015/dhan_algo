@@ -258,7 +258,7 @@ export function ExitAllButton({ count, busy, onExit }: { count: number; busy: bo
 export function TradeBar({
   underlying, armed, onArm, lots, onLots, product, onProduct, maxLots, lotSize, mcxMult, tradable, blocked, positions,
   broker, onBroker, brokerReady, brokerSessions, exitDefaults, onExitDefaults, exitWatcher, hasExits,
-  globalExit, allPositions, onSetGlobal,
+  globalExit, allPositions, onSetGlobal, exitAll,
 }: {
   underlying: string;
   armed: boolean;
@@ -290,6 +290,8 @@ export function TradeBar({
   globalExit: FmGlobalExit | null;
   allPositions: FmPosition[];
   onSetGlobal: (target: number | null, sl: number | null) => Promise<boolean>;
+  /** The Exit all button, shown beside the P&L it acts on. */
+  exitAll?: React.ReactNode;
 }) {
   const [savingGlobal, setSavingGlobal] = useState(false);
   const [draft, setDraft] = useState(String(lots));
@@ -401,10 +403,16 @@ export function TradeBar({
 
       {blocked && tradable && <span className="text-[11px] text-amber-300">{blocked}</span>}
 
-      <div className="ml-auto flex items-center gap-3 text-[12px] tabular-nums">
+      <div className="ml-auto flex flex-wrap items-center gap-3 text-[12px] tabular-nums">
+        {/* Scope: this bar's P&L is the board's underlying on the selected broker (the Positions panel covers the broker's
+            every underlying; the Total block below covers everything). */}
+        <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500" title={`P&L of ${underlying} positions on ${brokerLabel(broker)} from this page`}>
+          {underlying} · {brokerLabel(broker)}
+        </span>
         <span className="text-zinc-400">Open <span className={`font-bold ${pnlClass(totals.open)}`}>{fmtRs(totals.open)}</span></span>
         <span className="text-zinc-400">Booked <span className={`font-bold ${pnlClass(totals.realised)}`}>{fmtRs(totals.realised)}</span></span>
         <span className="text-zinc-300">P&amp;L <span className={`text-[14px] font-bold ${pnlClass(totals.pnl)}`}>{fmtRs(totals.pnl)}</span></span>
+        {exitAll}
       </div>
 
       {/* Line 2: the two exit layers, labelled so it is clear what each one covers. */}
@@ -418,7 +426,7 @@ export function TradeBar({
           </div>
         )}
         <GlobalExitInputs
-          global={globalExit} total={totalPnl(allPositions)} unknownWhy={pnlUnknownReason(allPositions)} saving={savingGlobal}
+          global={globalExit} total={totalPnl(allPositions)} totalText={fmtRs(totalPnl(allPositions))} totalClass={pnlClass(totalPnl(allPositions))} unknownWhy={pnlUnknownReason(allPositions)} saving={savingGlobal}
           watcherAlive={exitWatcher ? exitWatcher.alive : null}
           onSet={(t, v) => { setSavingGlobal(true); onSetGlobal(t, v).finally(() => setSavingGlobal(false)); }}
         />

@@ -81,10 +81,13 @@ function AmountInput({ label, value, onCommit, disabled }: {
   );
 }
 
-export function GlobalExitInputs({ global, total, unknownWhy, onSet, saving, watcherAlive }: {
+export function GlobalExitInputs({ global, total, totalText, totalClass, unknownWhy, onSet, saving, watcherAlive }: {
   global: FmGlobalExit | null;
   /** Combined P&L now (null = unknown). */
   total: number | null;
+  /** The combined P&L as the page formats rupees, and its colour class. */
+  totalText?: string;
+  totalClass?: string;
   /** Why the combined P&L is unknown (pnlUnknownReason), or null. */
   unknownWhy?: string | null;
   onSet: (target: number | null, sl: number | null) => void;
@@ -96,9 +99,17 @@ export function GlobalExitInputs({ global, total, unknownWhy, onSet, saving, wat
   const past = global?.state === 'watching' ? globalBreach(total, { target, sl }) : null;
   const bad = global && (global.state === 'unknown' || global.state === 'incomplete' || global.state === 'rejected');
   return (
-    <div className="flex flex-wrap items-center gap-2"
+    // Boxed apart from the per-position defaults: this one closes EVERYTHING (all brokers, all underlyings).
+    <div className={`flex flex-wrap items-center gap-2 rounded-md border px-2 py-1 ${
+      bad || (global?.state === 'watching' && total === null && unknownWhy) ? 'border-amber-500/50 bg-amber-500/5'
+        : global?.state === 'watching' ? 'border-sky-500/40 bg-sky-500/5' : 'border-zinc-700 bg-zinc-950/30'}`}
       title="Total target / stop-loss in rupees on the combined P&L of every position on this page (booked + open). When either is reached the server closes ALL positions with MARKET orders, shorts first. Armed as soon as you commit a value; runs with the tab closed. Blank = off.">
       <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-300">Total · all brokers</span>
+      {totalText !== undefined && (
+        <span className="text-[12px] tabular-nums text-zinc-400" title="Combined P&L now: every position on this page, all brokers and underlyings (booked + open)">
+          now <b className={totalClass}>{totalText}</b>
+        </span>
+      )}
       <AmountInput label="Target" value={target} onCommit={t => onSet(t, sl)} disabled={saving} />
       <AmountInput label="SL" value={sl} onCommit={v => onSet(target, v)} disabled={saving} />
       {global && (

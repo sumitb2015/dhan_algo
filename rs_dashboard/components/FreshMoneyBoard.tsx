@@ -18,6 +18,7 @@ import { readPref, savePref as writePref } from '@/lib/localPref';
 import { istMinuteOfDay } from '@/lib/istTime';
 import CollectorControl from './freshMoney/CollectorControl';
 import PositionsOrders from './freshMoney/PositionsOrders';
+import CollapseToggle from './freshMoney/CollapseToggle';
 import CumulativeOiWidget from './scalpCockpit/CumulativeOiWidget';
 
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX', 'CRUDEOIL', 'CRUDEOILM'] as const;
@@ -31,6 +32,7 @@ const PREF_OI_MODE = 'freshMoney.oiMode';
 type OiMode = 'change' | 'total' | 'delta' | 'flow';
 const PREF_POS_COLLAPSED = 'freshMoney.positionsCollapsed';
 const PREF_FLOW_HELP = 'freshMoney.flowHelp';
+const PREF_CHART_COLLAPSED = 'freshMoney.chartCollapsed';
 /** Fresh Money's own sound on / off ('1' / '0', default on) — never another page's mute (dhan-alert-sound). */
 const PREF_SOUND = 'freshMoney.sound';
 const PREF_EXIT_DEFAULTS = 'freshMoney.exitDefaults';
@@ -50,17 +52,17 @@ const BAR_CLASS: Record<'put' | 'call', Record<'fill' | 'outline', string>> = {
 
 const GRID = 'grid grid-cols-[minmax(0,1fr)_76px_96px_76px_minmax(0,1fr)] items-center';
 // With trading on, a cell each side of the strike holds B / S, the P&L chip and × (literal string for Tailwind).
-const GRID_TRADE = 'grid grid-cols-[minmax(0,1fr)_76px_172px_80px_172px_76px_minmax(0,1fr)] items-center';
+const GRID_TRADE = 'grid grid-cols-[minmax(0,1fr)_76px_204px_80px_204px_76px_minmax(0,1fr)] items-center';
 // Slot-flow tab: the same grids plus a block of slot cells (38 px each; up to 10 completed slots + the running one) on each
 // outer edge, and 96 px number columns (the streak badge sits beside the number: "▲10 +99,999"). The block's width and
 // cell count are CSS variables set by the Ladder from the width it has (see slotsThatFit), so the call-side slots never
 // scroll off to the right on a narrower screen: older slots are dropped instead.
 const GRID_FLOW = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_96px_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
-const GRID_FLOW_TRADE = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_172px_80px_172px_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
+const GRID_FLOW_TRADE = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_204px_80px_204px_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
 const SLOT_CELL_PX = 38;
 const MIN_SLOT_CELLS = 4;
 /** Width of everything on a flow-tab row except the two slot blocks: the fixed columns plus a 120 px minimum per bar. */
-const flowFixedPx = (trade: boolean) => (trade ? 96 + 172 + 80 + 172 + 96 : 96 * 3) + 2 * 120;
+const flowFixedPx = (trade: boolean) => (trade ? 96 + 204 + 80 + 204 + 96 : 96 * 3) + 2 * 120;
 /** How many slot cells per side fit in `width` px (at least MIN_SLOT_CELLS — narrower than that scrolls — at most `max`). */
 function slotsThatFit(width: number, trade: boolean, max: number): number {
   const n = Math.floor((width - flowFixedPx(trade)) / (2 * SLOT_CELL_PX));
@@ -421,7 +423,7 @@ function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTr
         (an overflow-x box is a scroll container, so `sticky` could never pin against the window). */}
     <div ref={boxRef} className={oiMode === 'flow' ? 'max-h-[calc(100vh-170px)] overflow-auto px-4 pb-2' : 'overflow-x-auto px-4 pb-2 pt-2'}
       onMouseLeave={() => setHover(null)}>
-     <div className={oiMode === 'flow' ? '' : tradeMode ? 'min-w-[1040px]' : 'min-w-[720px]'}
+     <div className={oiMode === 'flow' ? '' : tradeMode ? 'min-w-[1104px]' : 'min-w-[720px]'}
        style={oiMode === 'flow' ? { ...flowVars, minWidth: 2 * show * SLOT_CELL_PX + flowFixedPx(tradeMode) } : undefined}>
       <div data-testid="flow-sticky-head" className={oiMode === 'flow' ? 'sticky top-0 z-10 border-b border-zinc-700 bg-zinc-900 pt-2' : ''}>
       <div className={`${gridFor(oiMode, tradeMode)} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
@@ -495,6 +497,8 @@ export default function FreshMoneyBoard() {
   const [oiMode, setOiMode] = useState<OiMode>('change');
   const pickOiMode = (m: OiMode) => { setOiMode(m); writePref(PREF_OI_MODE, m); };
   const togglePos = () => setPosCollapsed(c => { writePref(PREF_POS_COLLAPSED, c ? '0' : '1'); return !c; });
+  const [chartCollapsed, setChartCollapsed] = useState(false);
+  const toggleChart = () => setChartCollapsed(c => { writePref(PREF_CHART_COLLAPSED, c ? '0' : '1'); return !c; });
   // Sounds (dhan-alert-sound): unlocked by the first click / key on the page; poll-driven ones ring only in the leader
   // tab so two open tabs never double-ring; always in addition to a toast; own mute setting.
   const [soundOn, setSoundOn] = useState(true);
@@ -525,6 +529,7 @@ export default function FreshMoneyBoard() {
     if (Number.isInteger(l) && l >= 1 && l <= 20) setLots(l);
     if (readPref(PREF_PRODUCT) === 'NRML') setProduct('NRML');
     setPosCollapsed(readPref(PREF_POS_COLLAPSED) === '1');
+    setChartCollapsed(readPref(PREF_CHART_COLLAPSED) === '1');
     setFlowHelp(readPref(PREF_FLOW_HELP) === '1');
     setSoundOn(readPref(PREF_SOUND) !== '0');
     const om = readPref(PREF_OI_MODE);
@@ -734,12 +739,14 @@ export default function FreshMoneyBoard() {
       setExit,
     };
   }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, setExit, lots, product, ts, exitDefaults]);
+  const showTradeBar = !!(data && ts);
+  const openCount = ts ? ts.positions.filter(p => p.netQty !== 0).length : 0;
   const setLotsPref = (n: number) => { setLots(n); writePref(PREF_LOTS, String(n)); };
   const setProductPref = (p: FmProduct) => { setProduct(p); writePref(PREF_PRODUCT, p); };
 
   return (
     <div className="flex min-h-screen flex-col bg-zinc-950 text-white">
-      <div className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 bg-zinc-950/95 px-6 py-3 backdrop-blur">
+      <div className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 bg-zinc-950/95 px-4 py-3 backdrop-blur sm:px-6">
         <div className="flex items-center gap-3">
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-emerald-500/25 bg-emerald-500/10">
             <BadgeIndianRupee className="h-4 w-4 text-emerald-400" />
@@ -752,8 +759,8 @@ export default function FreshMoneyBoard() {
             </p>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <div role="tablist" aria-label="Underlying" className="flex rounded-md border border-zinc-800 bg-zinc-900 p-0.5">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
+          <div role="tablist" aria-label="Underlying" className="flex max-w-full overflow-x-auto rounded-md border border-zinc-800 bg-zinc-900 p-0.5">
             {UNDERLYINGS.map(u => (
               <button key={u} role="tab" aria-selected={u === underlying} onClick={() => pickUnderlying(u)}
                 className={`rounded px-2.5 py-1 text-[11px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 ${
@@ -778,18 +785,19 @@ export default function FreshMoneyBoard() {
               Closed · final {fmtHm(day.to)}
             </span>
           )}
-          {/* Rendered (disabled, 0) before the trade state arrives, so the header does not reflow when it does. */}
-          <ExitAllButton count={ts ? ts.positions.filter(p => p.netQty !== 0).length : 0} busy={trades.exitingAll} onExit={trades.exitAll} />
+          {/* Exit all lives in the trade bar, beside the P&L it acts on. When the bar is not shown (no board loaded, trade
+              state not in yet) it stays here, so it is reachable whenever this page holds a position. */}
+          {!showTradeBar && <ExitAllButton count={openCount} busy={trades.exitingAll} onExit={trades.exitAll} />}
           <span className="h-5 w-px shrink-0 bg-zinc-800" />
-          <NavBar />
+          <div className="max-w-full overflow-x-auto"><NavBar /></div>
         </div>
       </div>
 
-      {/* The flow tab adds an 11-cell block on each side (board min-width 1916 / 1596 px + paddings), so the page widens
+      {/* The flow tab adds an 11-cell block on each side (board min-width 1980 / 1596 px + paddings), so the page widens
           with it instead of making the call cells scroll off to the right. */}
       <div className={`mx-auto flex w-full ${oiMode === 'flow'
-        ? (tradeMode ? 'max-w-[2040px]' : 'max-w-[1720px]')
-        : (tradeMode ? 'max-w-[1320px]' : 'max-w-[1100px]')} flex-1 flex-col gap-3 px-6 py-5`}>
+        ? (tradeMode ? 'max-w-[2104px]' : 'max-w-[1720px]')
+        : (tradeMode ? 'max-w-[1640px]' : 'max-w-[1400px]')} flex-1 flex-col gap-3 px-4 py-5 sm:px-6`}>
         {isStale && (
           <div className="flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
             <AlertTriangle className="h-3.5 w-3.5" />
@@ -833,6 +841,7 @@ export default function FreshMoneyBoard() {
                 exitDefaults={exitDefaults} onExitDefaults={pickExitDefaults}
                 exitWatcher={ts.exitWatcher ?? null} hasExits={Object.keys(ts.exits ?? {}).length > 0}
                 globalExit={ts.global ?? null} allPositions={ts.positions} onSetGlobal={trades.setGlobal}
+                exitAll={<ExitAllButton count={openCount} busy={trades.exitingAll} onExit={trades.exitAll} />}
               />
             )}
             {ts && offBoard.length > 0 && (
@@ -843,6 +852,14 @@ export default function FreshMoneyBoard() {
             )}
             <div className="px-4 pt-3">
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              {oiMode !== 'flow' && (
+                // The bar / tag legend is static text: shown on demand (the slots tab keeps its own one-line legend).
+                <button type="button" onClick={toggleFlowHelp} aria-label="How to read the board" aria-expanded={flowHelp}
+                  title="How to read the bars and tags"
+                  className="flex items-center gap-1 text-[11px] text-zinc-500 hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70">
+                  <CircleHelp className="h-3.5 w-3.5" /> How to read
+                </button>
+              )}
               <button type="button" onClick={toggleSound} aria-pressed={!soundOn}
                 aria-label={soundOn ? 'Mute Fresh Money sounds' : 'Unmute Fresh Money sounds'}
                 title={soundOn ? 'Sounds on (trades, board-wide streaks) — click to mute. They play after your first click on the page.' : 'Sounds muted — toasts still show'}
@@ -885,7 +902,7 @@ export default function FreshMoneyBoard() {
                       <CircleHelp className="h-3.5 w-3.5" />
                     </button>
                   </div>
-                ) : oiMode === 'delta' ? (
+                ) : !flowHelp ? null : oiMode === 'delta' ? (
                   <>Bar = Call OI − Put OI (total OI, in {data.oiUnit}) · <span className="text-red-400">red = calls heavier</span> ·{' '}
                     <span className="text-emerald-400">green = puts heavier</span></>
                 ) : (
@@ -911,7 +928,7 @@ export default function FreshMoneyBoard() {
                   <p>On a short window the ladder scrolls inside its own box, so the slot times and Σ row stay pinned at its top.</p>
                 </div>
               )}
-              {oiMode !== 'delta' && oiMode !== 'flow' && <div className="mt-0.5 text-[11px] text-zinc-500">
+              {flowHelp && oiMode !== 'delta' && oiMode !== 'flow' && <div className="mt-0.5 text-[11px] text-zinc-500">
                 {data.hasBuildup
                   ? <>Tags (option&apos;s own premium vs its previous close): <span className="font-bold text-zinc-300">LB</span> long buildup ·{' '}
                       <span className="font-bold text-zinc-300">SB</span> short buildup · <span className="font-bold text-zinc-300">SC</span> short covering ·{' '}
@@ -925,19 +942,33 @@ export default function FreshMoneyBoard() {
             <Ladder data={data} oiMode={oiMode} tradeMode={tradeMode} fs={fs} maxAbs={maxAbs} boxedStrike={boxedStrike}
               rowTrade={rowTrade} spot={spot} liveSpot={liveSpot} totals={flowTotals} scale={flowCellScale} />
 
-            {/* Cumulative OI over the day (ATM ± strikes), the same widget the Scalp Cockpit uses. It fills its parent's height. */}
-            <div className="h-[340px] border-t border-zinc-800 px-4 pb-3 pt-3">
-              <CumulativeOiWidget key={underlying} underlying={underlying} />
-            </div>
           </div>
         )}
 
+        {/* Positions sit right under the board: mid-trade they matter more than the chart below. */}
         {ts && (
           <PositionsOrders
             state={ts} broker={broker} armed={armed} inflight={inflight} onClose={sendClose} onSetExit={setExit}
             collapsed={posCollapsed} onToggle={togglePos}
             canClose={p => (ts.sessions[p.underlying]?.gate ?? 'closed') !== 'closed' && !!ts.brokers?.[p.broker]}
           />
+        )}
+
+        {/* Cumulative OI over the day (ATM ± strikes), the same widget the Scalp Cockpit uses. It fills its parent's
+            height. Collapsible (remembered): only the header row stays. */}
+        {data && (
+          <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-900">
+            {/* The widget carries its own title, so the bar names the chart only while it is hidden. */}
+            <div className="flex items-center gap-2 px-4 pt-2">
+              <CollapseToggle collapsed={chartCollapsed} onToggle={toggleChart} label="cumulative OI chart" controls="fm-chart-body" />
+              <span className="text-[11px] text-zinc-500">{chartCollapsed ? 'Cumulative OI chart (hidden)' : 'Hide chart'}</span>
+            </div>
+            {chartCollapsed ? <div className="h-2" /> : (
+              <div id="fm-chart-body" className="h-[340px] px-4 pb-3 pt-2">
+                <CumulativeOiWidget key={underlying} underlying={underlying} />
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>
