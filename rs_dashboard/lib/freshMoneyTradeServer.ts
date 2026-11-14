@@ -26,7 +26,7 @@ import { validateGlobalAmount, type FmGlobalExit } from './freshMoneyGlobalExit.
 import { runExitAll, type ExitAllResult } from './freshMoneyExitAll.ts';
 import { priceExternalClose } from './freshMoneyExternalPrice.ts';
 import {
-  editExit, exitSummary, exitsOnOpen, parseExitDefaults, validateExitSpec, type CloseResult, type ExitDefaults, type FmExit,
+  editExit, exitSummary, exitsOnOpen, parseExitDefaults, validateExitSpec, validateTrail, type CloseResult, type ExitDefaults, type FmExit,
 } from '@/lib/freshMoneyExits';
 
 /**
@@ -502,6 +502,8 @@ export interface OrderBody {
   /** setExit: the position's new levels (null = off). */
   target?: unknown;
   sl?: unknown;
+  /** setExit: trailing stop-loss rule (null / absent = off; needs `sl`). */
+  trail?: unknown;
   /** setGlobal: rupee amounts (null = off); both null = remove. */
   globalTarget?: unknown;
   globalSl?: unknown;
@@ -568,12 +570,14 @@ export async function setExitCore(b: OrderBody): Promise<{ ok: true } | { ok: fa
   if (target && 'error' in target) return { ok: false, error: `Target: ${target.error}`, http: 400 };
   const sl = validateExitSpec(b.sl);
   if (sl && 'error' in sl) return { ok: false, error: `Stop-loss: ${sl.error}`, http: 400 };
+  const trail = validateTrail(b.trail);
+  if (trail && 'error' in trail) return { ok: false, error: trail.error, http: 400 };
   try {
     const err = await mutateLedger(l => {
       const now = Date.now();
       const pos = buildPositions(l.orders, {}, now).find(p => p.key === key);
       if (!pos) return 'This page holds no position on that contract';
-      const x = editExit(l.exits?.[key], pos, target, sl, now);
+      const x = editExit(l.exits?.[key], pos, target, sl, now, trail);
       if (x && 'error' in x) return x.error;
       const exits = { ...(l.exits ?? {}) };
       if (x) exits[key] = x; else delete exits[key];

@@ -101,9 +101,82 @@ export interface FmExit {
   state: ExitState;
   firedBy?: 'target' | 'sl';
   firedAt?: number;
+  /** Trailing stop-loss rule (needs `sl`); null / absent = the stop stays where it was set. */
+  trail?: FmTrail | null;
+  /** The stop before any trailing (`slPx` is the stop in force, moved by `trailSteps` steps of the trail's Y). */
+  slBasePx?: number | null;
+  /** Trail steps taken so far. Only ever grows (a ratchet): the stop never moves back when the price does. */
+  trailSteps?: number;
   /** A refused exit (nothing sent) is not retried before this. */
   retryAt?: number;
   note?: string;
+}
+
+// ── trailing stop-loss ────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Trailing stop-loss, "X − Y" (as on the Ultimate Scalper Terminal / AlgoTest Trail SL): every time the price moves
+ * `every` (X) in the position's favour — up for a long, down for a short — the stop moves `by` (Y) the same way.
+ * In points, or % of the position's fill price (fixed at the fill). `startAt` (same unit): count steps only once the
+ * position is this far in profit; the first step then comes one X beyond it. Y may not exceed X, so a step can never
+ * carry the stop past the price.
+ */
+export interface FmTrail { every: number; by: number; unit: ExitUnit; startAt: number | null }
+
+/** A trail as sent by the page: null / absent = off; anything else must be valid (never coerced). */
+export function validateTrail(raw: unknown): FmTrail | null | { error: string } {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== 'object') return { error: 'A trail must be { every, by, unit }' };
+  const r = raw as { every?: unknown; by?: unknown; unit?: unknown; startAt?: unknown };
+  if (r.unit !== 'pct' && r.unit !== 'pts') return { error: 'Trail unit must be % or pts' };
+  const max = r.unit === 'pct' ? EXIT_MAX_PCT : EXIT_MAX_PTS;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : NaN);
+  const every = num(r.every), by = num(r.by);
+  if (!(every > 0) || !(by > 0)) return { error: 'Trail: both "every" (X) and "move by" (Y) must be above 0' };
+  if (every > max || by > max) return { error: `Trail: at most ${max.toLocaleString('en-IN')}${r.unit === 'pct' ? '%' : ' pts'}` };
+  if (by > every) return { error: `Trail: the stop can't move more than the price (Y ${by} > X ${every}) — it would jump past the price` };
+  let startAt: number | null = null;
+  if (r.startAt !== null && r.startAt !== undefined && r.startAt !== '') {
+    const v = num(r.startAt);
+    if (!(v >= 0) || v > max) return { error: 'Trail: "start after profit" must be 0 or more' };
+    startAt = v > 0 ? v : null;
+  }
+  return { every, by, unit: r.unit, startAt };
+}
+
+/** Steps the price has earned: one per X in favour beyond the start. 0 when not in profit. */
+export function trailSteps(t: FmTrail, basis: number, dir: ExitDir, ltp: number): number {
+  if (!(basis > 0) || !(ltp > 0)) return 0;
+  const every = offset(basis, { value: t.every, unit: t.unit });
+  if (!(every > 0)) return 0;
+  const start = t.startAt ? offset(basis, { value: t.startAt, unit: t.unit }) : 0;
+  const favour = dir === 'long' ? ltp - basis : basis - ltp;
+  return Math.max(0, Math.floor((favour - start) / every + 1e-9));
+}
+
+/** The stop after `steps` steps from its plain level. */
+export const trailedStop = (base: number, t: FmTrail, basis: number, dir: ExitDir, steps: number) =>
+  round2(base + (dir === 'long' ? 1 : -1) * steps * offset(basis, { value: t.by, unit: t.unit }));
+
+/** The record's new stop when the price has earned MORE steps than it has taken (null = nothing to move). */
+export function trailUpdate(x: FmExit, ltp: number): { trailSteps: number; slPx: number } | null {
+  if (x.state !== 'watching' || !x.trail || x.basis === null || x.slBasePx == null) return null;
+  const steps = trailSteps(x.trail, x.basis, x.dir, ltp);
+  if (steps <= (x.trailSteps ?? 0)) return null;
+  return { trailSteps: steps, slPx: trailedStop(x.slBasePx, x.trail, x.basis, x.dir, steps) };
+}
+
+const sameSpec = (a: ExitSpec | null | undefined, b: ExitSpec | null | undefined) =>
+  (a ?? null) === (b ?? null) || (!!a && !!b && a.value === b.value && a.unit === b.unit);
+const sameTrail = (a: FmTrail | null | undefined, b: FmTrail | null | undefined) =>
+  (a ?? null) === (b ?? null)
+  || (!!a && !!b && a.every === b.every && a.by === b.by && a.unit === b.unit && (a.startAt ?? null) === (b.startAt ?? null));
+
+/** "every 10 pts → 5 pts (from 20 pts profit)" */
+export function fmtTrail(t: FmTrail | null | undefined): string {
+  if (!t) return 'off';
+  const u = (v: number) => (t.unit === 'pct' ? `${v}%` : `${v} pts`);
+  return `every ${u(t.every)} → ${u(t.by)}${t.startAt ? ` (from ${u(t.startAt)} profit)` : ''}`;
 }
 
 /** Consecutive breaching ticks of one level (kept in the watcher's memory). */
@@ -223,15 +296,27 @@ export function exitsOnOpen(
 
 /** A per-position edit from the Positions panel. Levels come from the position's CURRENT average; both null = remove. */
 export function editExit(
-  x: FmExit | undefined, pos: FmPosition, target: ExitSpec | null, sl: ExitSpec | null, now: number,
+  x: FmExit | undefined, pos: FmPosition, target: ExitSpec | null, sl: ExitSpec | null, now: number, trail: FmTrail | null = null,
 ): FmExit | null | { error: string } {
   if (x?.state === 'firing') return { error: 'An exit for this position is being sent right now — try again in a moment' };
   if (pos.netQty === 0) return { error: 'This position is flat' };
+  if (trail && !sl) return { error: 'A trailing stop-loss needs a stop-loss to move — set SL too' };
   if (!target && !sl) return null;
   const dir: ExitDir = pos.netQty > 0 ? 'long' : 'short';
-  const base: FmExit = { key: pos.key, openedAt: x?.openedAt ?? now, dir, target, sl, basis: null, targetPx: null, slPx: null, state: 'waiting-fill' };
+  const base: FmExit = {
+    key: pos.key, openedAt: x?.openedAt ?? now, dir, target, sl, basis: null, targetPx: null, slPx: null, state: 'waiting-fill',
+    ...(trail ? { trail, slBasePx: null, trailSteps: 0 } : {}),
+  };
   if (pos.avgPrice === null) return base;
-  return { ...base, basis: pos.avgPrice, ...levelsFor(pos.avgPrice, dir, target, sl), state: 'watching' };
+  const lv = levelsFor(pos.avgPrice, dir, target, sl);
+  // Same stop, same trail, same basis, same direction: keep the steps already taken, so an edit of the target (or a
+  // re-save) never loosens a stop that has trailed. Anything else about the stop changed: start from its plain level.
+  const keep = !!trail && !!x && x.state === 'watching' && x.dir === dir && x.basis === pos.avgPrice
+    && sameSpec(x.sl, sl) && sameTrail(x.trail, trail) && (x.trailSteps ?? 0) > 0 && x.slPx !== null;
+  return {
+    ...base, basis: pos.avgPrice, ...lv, state: 'watching',
+    ...(trail ? { slBasePx: lv.slPx, trailSteps: keep ? x!.trailSteps! : 0, ...(keep ? { slPx: x!.slPx } : {}) } : {}),
+  };
 }
 
 /** "T 30% · SL 20 pts" for a toast; '' when both are off. */

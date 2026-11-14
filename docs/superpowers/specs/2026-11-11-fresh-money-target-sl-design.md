@@ -137,3 +137,21 @@ the user can set them from the Positions panel.
 
 Known limits: the watcher stops with the dashboard (the chip says so); exits are MARKET, so a thin contract can fill
 well past the level; prices are Dhan's for every broker.
+
+## 8. Trailing stop-loss (added 2026-11-14)
+
+Per position only (the Target / SL editor in the Positions table and the ladder popover); the header defaults do not
+carry one. Same rule as the Ultimate Scalper Terminal's Trail SL, "X − Y": every time the price moves **X** in the
+position's favour (up for a long, down for a short) the stop moves **Y** the same way. X, Y and the optional "from
+profit" start are in points or % of the fill price (`basis`). Pure maths in `lib/freshMoneyExits.ts`
+(`validateTrail`, `trailSteps`, `trailUpdate`).
+
+- **Needs a stop-loss** to move; refused without one. **Y ≤ X**, so a step can never carry the stop past the price.
+- **Ratchet.** `FmExit.trailSteps` only grows; `slBasePx` keeps the plain stop and `slPx` is the stop in force
+  (`slBasePx ± trailSteps × Y`). A price that comes back never loosens it.
+- **Watcher.** Each tick (`lib/freshMoneyExitTick.ts`) moves the stop first, writes it under the ledger lock, and decides
+  the exit on the moved stop. A fire claims the record as it is after that write, so a target reached on a tick that also
+  trails still fires. The close reason says "Trailing stop-loss hit … trailed N× from …".
+- **Edits.** Saving the same SL and trail on the same basis keeps the steps taken (changing only the target never
+  loosens a trailed stop). Changing the SL or the trail, or switching the trail off, starts again from the plain stop.
+- **UI.** "T" badge when armed, "T3" once the stop has moved three steps; hover for the rule and where it started.

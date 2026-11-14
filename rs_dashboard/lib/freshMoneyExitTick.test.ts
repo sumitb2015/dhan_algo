@@ -165,3 +165,27 @@ test('no exit records: no broker refresh', async () => {
   await h.tick();
   assert.equal(h.refreshes(), 0);
 });
+
+test('trailing: the watcher moves the stop up as price rises, then exits on the trailed stop', async () => {
+  const trail = { every: 10, by: 5, unit: 'pts' as const, startAt: null };
+  const h = harness({ date: 'd', orders: [buy()], exits: { [KEY]: watching({ target: null, targetPx: null, trail, slBasePx: 80, trailSteps: 0 }) } }, { ltp: 125 });
+  await h.tick();
+  assert.equal(h.ledger.exits![KEY].slPx, 90);
+  assert.equal(h.ledger.exits![KEY].trailSteps, 2);
+  h.setLtp(118); h.advance(2000); await h.tick();
+  assert.equal(h.ledger.exits![KEY].slPx, 90, 'the stop never moves back');
+  h.setLtp(89); h.advance(2000); await h.tick();
+  h.advance(2000); await h.tick();
+  assert.equal(h.closes.length, 1);
+  assert.match(h.closes[0].reason, /Trailing stop-loss hit at 89\.00 \(stop 90\.00/);
+});
+
+test('trailing: a target reached while the stop trails still fires (the trail write does not block the claim)', async () => {
+  const trail = { every: 10, by: 5, unit: 'pts' as const, startAt: null };
+  const h = harness({ date: 'd', orders: [buy()], exits: { [KEY]: watching({ trail, slBasePx: 80, trailSteps: 0 }) } }, { ltp: 131 });
+  await h.tick();
+  h.setLtp(141); h.advance(2000); await h.tick();
+  assert.equal(h.closes.length, 1);
+  assert.match(h.closes[0].reason, /^Target hit/);
+  assert.equal(h.ledger.exits![KEY].trailSteps, 4);
+});

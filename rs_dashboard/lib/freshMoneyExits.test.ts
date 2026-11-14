@@ -250,3 +250,77 @@ test('stepper: ±1 in the current unit; off ↔ 1; capped at the limit', async (
   assert.deepEqual(stepExitSpec({ value: 100000, unit: 'pts' }, 'pts', 1), { value: 100000, unit: 'pts' });
   assert.deepEqual(stepExitSpec({ value: 0.1, unit: 'pts' }, 'pts', 1), { value: 1.1, unit: 'pts' });   // no float drift
 });
+
+// ── trailing stop-loss ───────────────────────────────────────────────────────────────────────────────────────────────
+import { validateTrail, trailSteps, trailUpdate, type FmTrail } from './freshMoneyExits.ts';
+
+const TR = (p: Partial<FmTrail> = {}): FmTrail => ({ every: 10, by: 5, unit: 'pts', startAt: null, ...p });
+
+test('trail validation: off, valid, Y above X refused, bad numbers refused', () => {
+  assert.equal(validateTrail(null), null);
+  assert.equal(validateTrail(undefined), null);
+  assert.deepEqual(validateTrail({ every: 10, by: 5, unit: 'pts' }), TR());
+  assert.deepEqual(validateTrail({ every: 10, by: 10, unit: 'pct', startAt: 20 }), TR({ by: 10, unit: 'pct', startAt: 20 }));
+  assert.deepEqual(validateTrail({ every: 10, by: 5, unit: 'pts', startAt: 0 }), TR(), 'a 0 start = from the fill');
+  assert.match((validateTrail({ every: 5, by: 10, unit: 'pts' }) as { error: string }).error, /can't move more than/);
+  assert.ok('error' in (validateTrail({ every: 0, by: 1, unit: 'pts' }) as object));
+  assert.ok('error' in (validateTrail({ every: 10, by: -1, unit: 'pts' }) as object));
+  assert.ok('error' in (validateTrail({ every: 10, by: 5, unit: 'x' }) as object));
+  assert.ok('error' in (validateTrail({ every: 10, by: 5, unit: 'pts', startAt: -3 }) as object));
+});
+
+test('trail steps: one per X in favour, long up / short down, after the start', () => {
+  assert.equal(trailSteps(TR(), 100, 'long', 109.99), 0);
+  assert.equal(trailSteps(TR(), 100, 'long', 110), 1);
+  assert.equal(trailSteps(TR(), 100, 'long', 135), 3);
+  assert.equal(trailSteps(TR(), 100, 'long', 90), 0, 'never negative against the position');
+  assert.equal(trailSteps(TR(), 100, 'short', 80), 2);
+  assert.equal(trailSteps(TR(), 100, 'short', 120), 0);
+  // 10% of a 200 fill = 20 per step; start 15% = 30 of profit first.
+  assert.equal(trailSteps(TR({ every: 10, by: 5, unit: 'pct', startAt: 15 }), 200, 'long', 249), 0);
+  assert.equal(trailSteps(TR({ every: 10, by: 5, unit: 'pct', startAt: 15 }), 200, 'long', 250), 1);
+});
+
+const tw = (p: Partial<import('./freshMoneyExits.ts').FmExit> = {}) => ({
+  key: 'k', openedAt: 0, dir: 'long' as const, target: null, sl: { value: 20, unit: 'pts' as const },
+  basis: 100, targetPx: null, slPx: 80, slBasePx: 80, trailSteps: 0, trail: TR(), state: 'watching' as const, ...p,
+});
+
+test('trail update: moves the stop by Y per new step, ratchets (never back), only while watching', () => {
+  assert.deepEqual(trailUpdate(tw(), 121), { trailSteps: 2, slPx: 90 });
+  assert.equal(trailUpdate(tw({ trailSteps: 2, slPx: 90 }), 112), null, 'price came back: the stop stays');
+  assert.deepEqual(trailUpdate(tw({ trailSteps: 2, slPx: 90 }), 131), { trailSteps: 3, slPx: 95 });
+  assert.deepEqual(trailUpdate(tw({ dir: 'short', slPx: 120, slBasePx: 120 }), 79), { trailSteps: 2, slPx: 110 });
+  assert.equal(trailUpdate(tw({ trail: null }), 150), null);
+  assert.equal(trailUpdate(tw({ state: 'waiting-fill' }), 150), null);
+  assert.equal(trailUpdate(tw({ slBasePx: null, slPx: null }), 150), null);
+});
+
+test('a trailed stop never passes the price when it moves (Y <= X)', () => {
+  for (const ltp of [110, 117, 150, 333]) {
+    const u = trailUpdate(tw({ trail: TR({ every: 10, by: 10 }) }), ltp)!;
+    assert.ok(u.slPx < ltp, `long stop ${u.slPx} below ${ltp}`);
+  }
+});
+
+const pos = (p: object = {}) => ({ key: 'k', netQty: 65, avgPrice: 100 } as unknown as import('./freshMoneyTrades.ts').FmPosition & object);
+
+test('edit: a trail needs a stop-loss', () => {
+  const r = editExit(undefined, { ...pos() }, null, null, 0, TR());
+  assert.match((r as { error: string }).error, /needs a stop-loss/);
+});
+
+test('edit: new trail starts from the plain stop; same stop + trail keeps the progress, a changed one resets it', () => {
+  const fresh = editExit(undefined, pos(), null, { value: 20, unit: 'pts' }, 0, TR()) as import('./freshMoneyExits.ts').FmExit;
+  assert.equal(fresh.slPx, 80); assert.equal(fresh.slBasePx, 80); assert.equal(fresh.trailSteps, 0);
+  const trailed = { ...fresh, slPx: 95, trailSteps: 3 };
+  // Only the target changed: the trailed stop stays where it is (never loosened by an unrelated edit).
+  const kept = editExit(trailed, pos(), { value: 30, unit: 'pct' }, { value: 20, unit: 'pts' }, 0, TR()) as import('./freshMoneyExits.ts').FmExit;
+  assert.equal(kept.slPx, 95); assert.equal(kept.trailSteps, 3); assert.equal(kept.targetPx, 130);
+  // The stop itself changed: start again from the new plain stop.
+  const reset = editExit(trailed, pos(), null, { value: 10, unit: 'pts' }, 0, TR()) as import('./freshMoneyExits.ts').FmExit;
+  assert.equal(reset.slPx, 90); assert.equal(reset.trailSteps, 0);
+  // Trail switched off: back to the plain stop.
+  const off = editExit(trailed, pos(), null, { value: 20, unit: 'pts' }, 0, null) as import('./freshMoneyExits.ts').FmExit;
+  assert.equal(off.slPx, 80); assert.equal(off.trail ?? null, null);
+});

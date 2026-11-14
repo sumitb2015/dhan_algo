@@ -18,6 +18,7 @@ import { readPref, savePref as writePref } from '@/lib/localPref';
 import { istMinuteOfDay } from '@/lib/istTime';
 import CollectorControl from './freshMoney/CollectorControl';
 import PositionsOrders from './freshMoney/PositionsOrders';
+import type { SetExitFn } from './freshMoney/ExitInputs';
 import CollapseToggle from './freshMoney/CollapseToggle';
 import CumulativeOiWidget from './scalpCockpit/CumulativeOiWidget';
 
@@ -82,7 +83,7 @@ interface RowTrade {
   busy: (opt: OptType) => boolean;
   order: (opt: OptType, side: TxnSide) => void;
   close: (p: FmPosition) => void;
-  setExit: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
+  setExit: SetExitFn;
 }
 
 

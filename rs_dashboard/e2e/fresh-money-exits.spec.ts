@@ -36,7 +36,7 @@ const exitRecord = {
   basis: 100, targetPx: 130, slPx: 80, state: 'watching',
 };
 
-async function install(page: Page, opts: { watcherAlive?: boolean; withPosition?: boolean } = {}) {
+async function install(page: Page, opts: { watcherAlive?: boolean; withPosition?: boolean; trailed?: boolean } = {}) {
   // Set by the test (fireExit) once the page has recorded the watching state: from then on the server reports it fired.
   let exitFired = false;
   const posts: Record<string, unknown>[] = [];
@@ -48,7 +48,9 @@ async function install(page: Page, opts: { watcherAlive?: boolean; withPosition?
     ltpSource: { '111': 'ws' }, brokers: { dhan: true, kotak: true, zerodha: true },
     positions: opts.withPosition ? [position] : [], orders: [],
     exits: opts.withPosition
-      ? { [KEY]: exitFired ? { ...exitRecord, state: 'sent', firedBy: 'target', firedAt: Date.now() } : exitRecord }
+      ? { [KEY]: exitFired ? { ...exitRecord, state: 'sent', firedBy: 'target', firedAt: Date.now() }
+        : opts.trailed ? { ...exitRecord, slPx: 95, slBasePx: 80, trailSteps: 3, trail: { every: 10, by: 5, unit: 'pts', startAt: null } }
+        : exitRecord }
       : {},
     exitWatcher: { alive: opts.watcherAlive ?? true, at: Date.now() },
   });
@@ -148,9 +150,38 @@ test('Positions editor saves a per-position stop-loss in points', async ({ page 
   await expect(page.getByText('target 130.00 · SL 85.00')).toBeVisible();
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await expect.poll(() => m.posts.find(b => b.action === 'setExit')).toEqual({
-    action: 'setExit', key: KEY, target: { value: 30, unit: 'pct' }, sl: { value: 15, unit: 'pts' },
+    action: 'setExit', key: KEY, target: { value: 30, unit: 'pct' }, sl: { value: 15, unit: 'pts' }, trail: null,
   });
   expect(m.blocked).toEqual([]);
+});
+
+test('Positions editor: trailing stop-loss X − Y is saved; Y above X is refused before Save', async ({ page }) => {
+  const m = await install(page, { withPosition: true });
+  await page.getByRole('button', { name: /Arm live trading/ }).click();
+  await page.getByRole('button', { name: 'Edit target and stop-loss of CRUDEOIL 8100 CE on Dhan' }).click();
+  await page.getByLabel('Trailing stop-loss').last().check();
+  const x = page.getByLabel('Trail: price move X').last();
+  const y = page.getByLabel('Trail: stop move Y').last();
+  await x.fill('5'); await x.press('Tab');
+  await y.fill('10'); await y.press('Tab');
+  await expect(page.getByRole('alert').filter({ hasText: "can't move more than the price" })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Save', exact: true })).toBeDisabled();
+  await x.fill('10'); await x.press('Tab');
+  await y.fill('5'); await y.press('Tab');
+  await page.getByRole('group', { name: 'Trail unit' }).last().getByRole('button', { name: 'pts' }).click();
+  await expect(page.getByText('SL moves +5.00 every +10.00')).toBeVisible();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect.poll(() => m.posts.find(b => b.action === 'setExit')).toEqual({
+    action: 'setExit', key: KEY, target: { value: 30, unit: 'pct' }, sl: { value: 20, unit: 'pct' },
+    trail: { every: 10, by: 5, unit: 'pts', startAt: null },
+  });
+  expect(m.blocked).toEqual([]);
+});
+
+test('a trailed stop shows its T badge with the step count', async ({ page }) => {
+  await install(page, { withPosition: true, trailed: true });
+  await expect(page.getByLabel('Trailing stop-loss, moved 3 times')).toHaveText('T3');
+  await expect(page.getByText('130.00 / 95.00')).toBeVisible();
 });
 
 test('a level the price has already passed is flagged before Save', async ({ page }) => {
@@ -316,7 +347,7 @@ test('strike-row Target button opens a popover and saves that position\'s own SL
   await expect(dlg.getByText('target 130.00 · SL 85.00')).toBeVisible();
   await dlg.getByRole('button', { name: 'Save', exact: true }).click();
   await expect.poll(() => m.posts.find(b => b.action === 'setExit')).toEqual({
-    action: 'setExit', key: KEY, target: { value: 30, unit: 'pct' }, sl: { value: 15, unit: 'pts' },
+    action: 'setExit', key: KEY, target: { value: 30, unit: 'pct' }, sl: { value: 15, unit: 'pts' }, trail: null,
   });
   await expect(dlg).toBeHidden();
   expect(m.blocked).toEqual([]);

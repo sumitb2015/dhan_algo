@@ -12,10 +12,10 @@ import CollapseToggle from './CollapseToggle';
 import { Loader2, Pencil, X } from 'lucide-react';
 import type { FreshMoneyTradeState } from '@/app/api/fresh-money/trade/route';
 import type { FmBroker, FmPosition } from '@/lib/freshMoneyTrades';
-import type { ExitSpec, FmExit } from '@/lib/freshMoneyExits';
+import type { FmExit } from '@/lib/freshMoneyExits';
 import { brokerLabel, fmtRs, lockKey } from './trading';
 import { istClock } from '@/lib/istTime';
-import { EXIT_STATE_LABEL, ExitEditor, exitNeedsLook } from './ExitInputs';
+import { EXIT_STATE_LABEL, ExitEditor, exitLevelsText, exitNeedsLook, type SetExitFn } from './ExitInputs';
 
 const FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70';
 const TH = 'px-2 py-1.5 text-left text-xs font-bold text-white';
@@ -43,8 +43,14 @@ function ExitCell({ x }: { x: FmExit | undefined }) {
   const p = (n: number | null) => (n === null ? 'off' : n.toFixed(2));
   const look = exitNeedsLook(x);
   return (
-    <span className="flex flex-wrap items-center gap-1" title={x.note}>
+    <span className="flex flex-wrap items-center gap-1" title={[exitLevelsText(x), x.note].filter(Boolean).join(' — ')}>
       {x.state !== 'waiting-fill' && <span className="text-zinc-200">{p(x.targetPx)} / {p(x.slPx)}</span>}
+      {x.trail && (
+        // T = trailing armed; T3 = the stop has moved 3 steps (hover for the rule and where it started).
+        <span className="rounded bg-sky-600/15 px-1 text-[10px] font-bold text-sky-300" aria-label={`Trailing stop-loss${(x.trailSteps ?? 0) > 0 ? `, moved ${x.trailSteps} times` : ''}`}>
+          T{(x.trailSteps ?? 0) > 0 ? x.trailSteps : ''}
+        </span>
+      )}
       <span className={`rounded px-1 text-[10px] font-bold ${look ? 'bg-amber-600/20 text-amber-300' : x.state === 'watching' ? 'bg-emerald-600/15 text-emerald-400' : 'bg-zinc-800 text-zinc-300'}`}>
         {EXIT_STATE_LABEL[x.state]}
       </span>
@@ -61,7 +67,7 @@ export default function PositionsOrders({ state, broker, armed, inflight, canClo
   canClose: (p: FmPosition) => boolean;
   onClose: (p: FmPosition) => void;
   /** Change or clear one position's target / stop-loss (armed page only). */
-  onSetExit: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
+  onSetExit: SetExitFn;
   /** Collapsed: only the header row (tabs with counts, P&L totals) stays. */
   collapsed?: boolean;
   onToggle?: () => void;
@@ -183,7 +189,7 @@ export default function PositionsOrders({ state, broker, armed, inflight, canClo
                         <td colSpan={11}>
                           <ExitEditor exit={x} avgPrice={p.avgPrice} ltp={p.ltp} dir={p.netQty > 0 ? 'long' : 'short'} saving={saving}
                             onCancel={() => setEditing(null)}
-                            onSave={async (t, s) => { setSaving(true); const ok = await onSetExit(p.key, t, s); setSaving(false); if (ok) setEditing(null); }} />
+                            onSave={async (t, s, tr) => { setSaving(true); const ok = await onSetExit(p.key, t, s, tr); setSaving(false); if (ok) setEditing(null); }} />
                         </td>
                       </tr>
                     )}

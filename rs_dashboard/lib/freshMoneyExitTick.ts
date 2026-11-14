@@ -8,7 +8,7 @@
  * is the one it decided on. An exit is claimed ('firing') in the lock BEFORE the close is sent, so it goes at most once.
  */
 import {
-  exitAfterClose, nextExitAction, type CloseResult, type ExitAction, type FmExit, type Streak,
+  exitAfterClose, nextExitAction, trailUpdate, type CloseResult, type ExitAction, type FmExit, type Streak,
 } from './freshMoneyExits.ts';
 import { buildPositions, contractSettling, type FmLedger, type FmPosition, type FmSegment } from './freshMoneyTrades.ts';
 
@@ -53,30 +53,41 @@ export async function runExitTick(deps: ExitTickDeps, streaks: Map<string, Strea
 
   const changes: { x: FmExit; a: ExitAction }[] = [];
   const fires: { x: FmExit; level: 'target' | 'sl'; ltp: number }[] = [];
+  // Trailing stops this tick has moved: written (ratchet) before any exit is claimed, and the exit decided on the moved
+  // stop — a fire claims the record as it will be after that write.
+  const trails: { x: FmExit; u: { trailSteps: number; slPx: number } }[] = [];
   for (const k of keys) {
-    const x = exits[k];
+    const x0 = exits[k];
     const p = positions.get(k) ?? null;
     const ltpRaw = p && deps.canExit(p) ? (ltps as Record<string, number>)[p.priceId] : undefined;
     const ltp = ltpRaw !== undefined && ltpRaw > 0 ? ltpRaw : null;
+    const sameDir = !!p && Math.sign(p.netQty) === (x0.dir === 'long' ? 1 : -1);
+    const u = ltp !== null && sameDir ? trailUpdate(x0, ltp) : null;
+    if (u) trails.push({ x: x0, u });
+    const x = u ? { ...x0, ...u } : x0;
     const a = nextExitAction(x, p, contractSettling(l.orders, k, now), ltp, streaks.get(k) ?? null, now);
     if (a.kind === 'streak') { if (a.streak) streaks.set(k, a.streak); else streaks.delete(k); }
     else if (a.kind === 'fire') fires.push({ x, level: a.level, ltp: ltp! });
-    else if (a.kind !== 'none') changes.push({ x, a });
+    else if (a.kind !== 'none') changes.push({ x: x0, a });
   }
 
-  if (changes.length) {
+  if (changes.length || trails.length) {
     await deps.mutate(led => {
       const cur = { ...(led.exits ?? {}) };
+      for (const { x, u } of trails) if (same(cur[x.key], x)) cur[x.key] = { ...cur[x.key], ...u };
       for (const { x, a } of changes) {
         if (!same(cur[x.key], x)) continue;
         if (a.kind === 'drop' || (a.kind === 'settle' && a.to === 'drop')) delete cur[x.key];
         else if (a.kind === 'settle') cur[x.key] = { ...x, state: 'incomplete', note: 'exit filled only part — the rest is not watched; edit to re-arm' };
-        else if (a.kind === 'resolve') cur[x.key] = { ...x, basis: a.basis, ...a.levels, state: 'watching' };
+        else if (a.kind === 'resolve') {
+          cur[x.key] = { ...x, basis: a.basis, ...a.levels, state: 'watching', ...(x.trail ? { slBasePx: a.levels.slPx, trailSteps: 0 } : {}) };
+        }
         else if (a.kind === 'mark-unknown') cur[x.key] = { ...x, state: 'unknown', note: a.note };
       }
       led.exits = cur;
     });
     for (const { x, a } of changes) deps.log(`${x.key} ${a.kind}${a.kind === 'settle' ? ` → ${a.to}` : ''}`);
+    for (const { x, u } of trails) deps.log(`${x.key} trailing stop → ${px(u.slPx)} (${u.trailSteps} step${u.trailSteps === 1 ? '' : 's'})`);
   }
 
   for (const { x, level, ltp } of fires) {
@@ -91,7 +102,9 @@ export async function runExitTick(deps: ExitTickDeps, streaks: Map<string, Strea
     streaks.delete(x.key);
     const reason = level === 'target'
       ? `Target hit at ${px(ltp)} (target ${px(x.targetPx)}, basis ${px(x.basis)})`
-      : `Stop-loss hit at ${px(ltp)} (stop ${px(x.slPx)}, basis ${px(x.basis)})`;
+      : (x.trailSteps ?? 0) > 0
+        ? `Trailing stop-loss hit at ${px(ltp)} (stop ${px(x.slPx)}, trailed ${x.trailSteps}× from ${px(x.slBasePx ?? null)}, basis ${px(x.basis)})`
+        : `Stop-loss hit at ${px(ltp)} (stop ${px(x.slPx)}, basis ${px(x.basis)})`;
     deps.log(`${x.key} ${reason} — sending the close`);
     let r: CloseResult;
     try { r = await deps.close(x.key, reason); } catch (e) { r = { kind: 'unknown', error: String((e as Error).message ?? e), partial: false }; }

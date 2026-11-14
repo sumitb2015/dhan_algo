@@ -18,7 +18,7 @@ import type { FmBroker, FmPosition, FmProduct, OptType, TxnSide } from '@/lib/fr
 import { BrokerPicker } from '@/components/BrokerPicker';
 import type { ExitSpec, FmExit } from '@/lib/freshMoneyExits';
 import type { FmGlobalExit } from '@/lib/freshMoneyGlobalExit';
-import { ExitEditor, ExitSpecInput, exitLevelsText, exitNeedsLook } from './ExitInputs';
+import { ExitEditor, ExitSpecInput, exitLevelsText, exitNeedsLook, type SetExitFn } from './ExitInputs';
 import { GlobalExitInputs } from './GlobalExitInputs';
 import { pnlUnknownReason, totalPnl } from '@/lib/freshMoneyGlobalExit';
 import type { ExitAllItem, ExitAllResult } from '@/lib/freshMoneyExitAll';
@@ -54,8 +54,8 @@ export interface TradeApi {
   inflight: ReadonlySet<string>;
   order: (o: { broker: FmBroker; underlying: string; expiry: string; strike: number; opt: OptType; side: TxnSide; lots: number; product: FmProduct; exitDefaults: ExitDefaultsUi }) => void;
   close: (p: FmPosition) => void;
-  /** Change or clear one position's target / stop-loss; resolves true when the server took it. */
-  setExit: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
+  /** Change or clear one position's target / stop-loss / trailing stop; resolves true when the server took it. */
+  setExit: SetExitFn;
   /** Set or clear the global (combined P&L, rupees) target / stop-loss; resolves true when the server took it. */
   setGlobal: (target: number | null, sl: number | null) => Promise<boolean>;
   /** Square off EVERY open position this page holds (all underlyings and brokers), MARKET, shorts first. */
@@ -135,13 +135,13 @@ export function useFreshMoneyTrades(onWarn?: () => void): TradeApi {
     run(lockKey(p.broker, p.underlying, p.strike, p.opt, p.product), label, { action: 'close', key: p.key, product: p.product });
   }, [run]);
 
-  const setExit: TradeApi['setExit'] = useCallback(async (key, target, sl) => {
+  const setExit: TradeApi['setExit'] = useCallback(async (key, target, sl, trail) => {
     try {
       const res = await fetch(TRADE_URL, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setExit', key, target, sl }),
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setExit', key, target, sl, trail }),
       });
       const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
-      if (res.ok && j?.success) { toast.success(target || sl ? 'Target / SL saved' : 'Target / SL cleared'); return true; }
+      if (res.ok && j?.success) { toast.success(target || sl ? `Target / SL saved${trail ? ' · trailing on' : ''}` : 'Target / SL cleared'); return true; }
       toast.error('Target / SL not saved', { description: j?.error ?? `HTTP ${res.status}` });
       return false;
     } catch (e) {
@@ -441,7 +441,7 @@ export function TradeBar({
  *  ExitEditor. Sky = levels set, amber = the exit needs a look, grey = none. */
 function ExitPopoverButton({ pos, exit, strike, opt, onSetExit }: {
   pos: FmPosition; exit?: FmExit; strike: number; opt: OptType;
-  onSetExit: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
+  onSetExit: SetExitFn;
 }) {
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -497,7 +497,7 @@ function ExitPopoverButton({ pos, exit, strike, opt, onSetExit }: {
           </p>
           <ExitEditor exit={exit} avgPrice={pos.avgPrice} ltp={pos.ltp} dir={dir} saving={saving}
             onCancel={() => setAt(null)}
-            onSave={async (t, s) => { setSaving(true); const ok = await onSetExit(pos.key, t, s); setSaving(false); if (ok) setAt(null); }} />
+            onSave={async (t, s, tr) => { setSaving(true); const ok = await onSetExit(pos.key, t, s, tr); setSaving(false); if (ok) setAt(null); }} />
         </div>
       )}
     </>
@@ -508,7 +508,7 @@ export function TradeCell({
   side, opt, strike, pos, showButtons, canOrder, canClose, busy, onBuy, onSell, onClose, armed, ltpSource, exit, onSetExit,
 }: {
   /** Save / clear this position's own target / stop-loss (armed page only). */
-  onSetExit?: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
+  onSetExit?: SetExitFn;
   side: 'put' | 'call';
   opt: OptType;
   strike: number;
