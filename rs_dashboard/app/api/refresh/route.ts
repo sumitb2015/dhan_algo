@@ -121,6 +121,12 @@ export async function POST(req: NextRequest) {
     if (body?.source) source = body.source;
   } catch { /* no body */ }
 
+  // Always pass the source: the script's own default is yahoo, so omitting it for 'dhan' (as this used to) silently
+  // ran Yahoo whenever the panel asked for Dhan. Anything but the two known sources is refused, never coerced.
+  if (source !== 'yahoo' && source !== 'dhan') {
+    return NextResponse.json({ error: `source must be "yahoo" or "dhan"` }, { status: 400 });
+  }
+
   // Reset status file so the poll doesn't see the previous run's done=true
   try {
     fs.writeFileSync(STATUS_FILE, JSON.stringify({
@@ -130,10 +136,7 @@ export async function POST(req: NextRequest) {
     }));
   } catch { /* non-fatal */ }
 
-  const scriptArgs = [SCRIPT_PATH, '--target', target];
-  if (source === 'yahoo') {
-    scriptArgs.push('--source', 'yahoo');
-  }
+  const scriptArgs = [SCRIPT_PATH, '--target', target, '--source', source];
 
   const child = spawn(PYTHON_EXE, scriptArgs, {
     cwd: PROJECT_ROOT,
