@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  validateGlobalAmount, parseGlobalDraft, stepGlobalAmount, totalPnl, globalBreach, nextGlobalAction, globalAfterClose,
+  validateGlobalAmount, parseGlobalDraft, stepGlobalAmount, totalPnl, pnlUnknownReason, globalBreach, nextGlobalAction, globalAfterClose,
   closeOrder, mustStopAfter, type FmGlobalExit,
 } from './freshMoneyGlobalExit.ts';
 
@@ -79,4 +79,12 @@ test('shorts close first and a failed short cover stops the hedges', () => {
   assert.equal(mustStopAfter({ netQty: -50 }, { kind: 'refused', error: 'x', http: 409 }), true);
   assert.equal(mustStopAfter({ netQty: -50 }, { kind: 'placed', orderId: '1' }), false);
   assert.equal(mustStopAfter({ netQty: 50 }, { kind: 'refused', error: 'x', http: 409 }), false);
+});
+
+test('why the combined P&L is unknown: said for unpriced closes and missing prices, not for a brief in-flight order', () => {
+  const P = (o: object) => ({ pnl: 10, busy: null, netQty: 65, underlying: 'NIFTY', strike: 25000, opt: 'CE' as const, ...o });
+  assert.equal(pnlUnknownReason([P({})]), null);
+  assert.equal(pnlUnknownReason([P({ pnl: null, busy: 'pending' })]), null);
+  assert.match(pnlUnknownReason([P({ pnl: null, netQty: 0 })])!, /booked P&L unknown on NIFTY 25000 CE/);
+  assert.match(pnlUnknownReason([P({ pnl: null, strike: 25100 })])!, /no price for NIFTY 25100 CE/);
 });

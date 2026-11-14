@@ -20,7 +20,7 @@ import type { ExitSpec, FmExit } from '@/lib/freshMoneyExits';
 import type { FmGlobalExit } from '@/lib/freshMoneyGlobalExit';
 import { ExitEditor, ExitSpecInput, exitLevelsText, exitNeedsLook } from './ExitInputs';
 import { GlobalExitInputs } from './GlobalExitInputs';
-import { totalPnl } from '@/lib/freshMoneyGlobalExit';
+import { pnlUnknownReason, totalPnl } from '@/lib/freshMoneyGlobalExit';
 import type { ExitAllItem, ExitAllResult } from '@/lib/freshMoneyExitAll';
 
 /** The header's target / stop-loss defaults, stamped onto each position an order opens. */
@@ -28,8 +28,10 @@ export interface ExitDefaultsUi { target: ExitSpec | null; sl: ExitSpec | null }
 
 export const FM_BROKERS: readonly FmBroker[] = ['dhan', 'kotak', 'zerodha'];
 export const brokerLabel = (b: FmBroker) => (b === 'kotak' ? 'Kotak' : b === 'zerodha' ? 'Zerodha' : 'Dhan');
-/** In-flight lock key: one per broker + contract. */
-export const lockKey = (b: FmBroker, underlying: string, strike: number, opt: string) => `${b}:${underlying}:${strike}:${opt}`;
+/** In-flight lock key: one per broker + contract + product (MIS and NRML on one strike are separate positions, and the
+ *  server holds them separately — orderKey). */
+export const lockKey = (b: FmBroker, underlying: string, strike: number, opt: string, product: FmProduct | undefined) =>
+  `${b}:${underlying}:${strike}:${opt}:${product === 'NRML' ? 'NRML' : 'MIS'}`;
 
 const TRADE_URL = '/api/fresh-money/trade';
 const FAST_POLL_MS = 2_000;
@@ -124,13 +126,13 @@ export function useFreshMoneyTrades(onWarn?: () => void): TradeApi {
 
   const order: TradeApi['order'] = useCallback(o => {
     const label = `${o.side} ${o.lots} lot${o.lots === 1 ? '' : 's'} ${o.underlying} ${o.strike} ${o.opt} ${o.product} on ${brokerLabel(o.broker)}`;
-    run(lockKey(o.broker, o.underlying, o.strike, o.opt), label, { action: 'order', ...o });
+    run(lockKey(o.broker, o.underlying, o.strike, o.opt, o.product), label, { action: 'order', ...o });
   }, [run]);
 
   const close: TradeApi['close'] = useCallback(p => {
     const label = `Close ${p.underlying} ${p.strike} ${p.opt}${p.product === 'NRML' ? ' NRML' : ''} on ${brokerLabel(p.broker)}`;
     // `product` only words the toast: the server closes the position the key names, in its own product.
-    run(lockKey(p.broker, p.underlying, p.strike, p.opt), label, { action: 'close', key: p.key, product: p.product });
+    run(lockKey(p.broker, p.underlying, p.strike, p.opt, p.product), label, { action: 'close', key: p.key, product: p.product });
   }, [run]);
 
   const setExit: TradeApi['setExit'] = useCallback(async (key, target, sl) => {
@@ -416,7 +418,7 @@ export function TradeBar({
           </div>
         )}
         <GlobalExitInputs
-          global={globalExit} total={totalPnl(allPositions)} saving={savingGlobal}
+          global={globalExit} total={totalPnl(allPositions)} unknownWhy={pnlUnknownReason(allPositions)} saving={savingGlobal}
           watcherAlive={exitWatcher ? exitWatcher.alive : null}
           onSet={(t, v) => { setSavingGlobal(true); onSetGlobal(t, v).finally(() => setSavingGlobal(false)); }}
         />
@@ -586,7 +588,7 @@ export function OffBoardPositions({ positions, armed, inflight, canClose, onClos
       <span className="text-zinc-400">Open, not on this board:</span>
       {positions.map(p => {
         const lots = p.lot > 0 ? Math.abs(p.netQty) / p.lot : 0;
-        const busy = inflight.has(lockKey(p.broker, p.underlying, p.strike, p.opt));
+        const busy = inflight.has(lockKey(p.broker, p.underlying, p.strike, p.opt, p.product));
         return (
           <span key={p.key} className="flex items-center gap-1 rounded border border-zinc-800 bg-zinc-950/40 px-1.5 py-0.5 tabular-nums">
             <span className="rounded bg-zinc-800 px-1 text-[9px] font-bold uppercase text-zinc-300">{brokerLabel(p.broker)}</span>

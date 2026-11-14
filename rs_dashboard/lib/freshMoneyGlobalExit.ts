@@ -67,6 +67,24 @@ export function totalPnl(positions: Pick<FmPosition, 'pnl' | 'busy'>[]): number 
   return t;
 }
 
+/**
+ * Why totalPnl is unknown beyond an order in flight (that clears in seconds), for the page to say so — the global
+ * exit cannot fire while it is: the contracts with an unknown P&L (an unpriced fill or outside close, a missing LTP).
+ * Null when nothing but in-flight orders stands in the way.
+ */
+export function pnlUnknownReason(
+  positions: Pick<FmPosition, 'pnl' | 'busy' | 'netQty' | 'underlying' | 'strike' | 'opt'>[],
+): string | null {
+  const name = (p: Pick<FmPosition, 'underlying' | 'strike' | 'opt'>) => `${p.underlying} ${p.strike} ${p.opt}`;
+  const unpriced = positions.filter(p => !p.busy && p.pnl === null);
+  const parts: string[] = [];
+  const closed = unpriced.filter(p => p.netQty === 0).map(name);
+  const open = unpriced.filter(p => p.netQty !== 0).map(name);
+  if (closed.length) parts.push(`booked P&L unknown on ${closed.join(', ')} (a fill or outside close has no price)`);
+  if (open.length) parts.push(`no price for ${open.join(', ')}`);
+  return parts.length ? parts.join('; ') : null;
+}
+
 /** Which level the total has reached. The stop-loss wins a tie. */
 export function globalBreach(total: number | null, g: Pick<FmGlobalExit, 'target' | 'sl'>): 'target' | 'sl' | null {
   if (total === null) return null;

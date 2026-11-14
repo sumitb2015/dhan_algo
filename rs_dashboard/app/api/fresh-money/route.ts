@@ -5,6 +5,7 @@ import { resolveLotSize } from '@/lib/lotSize';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { parsedDay } from '@/lib/freshMoneyFiles';
 import { readJsonFile } from '@/lib/lockedJsonFile';
+import { istMinuteOfDay, istToday } from '@/lib/istTime';
 import { buildBoardRows, fmtMinOfDay, oiFlow, strikeStep, type Buildup, type PrevCloses, type SideFlow } from '@/lib/freshMoney';
 
 // Read-only: everything comes from snapshot CSVs in debug/ (no Dhan call except the cached lot-size lookup). The IV
@@ -58,15 +59,9 @@ export interface FreshMoneyResponse {
 // The shown day is re-read when the collector appends (mtime changes); polls in between reuse the result.
 const respCache = new Map<string, { key: string; body: FreshMoneyResponse }>();
 
-function todayIST(): string {
-  return new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
-}
-
+const todayIST = istToday;
 /** Minutes of the day now, IST. */
-function nowIstMin(): number {
-  const d = new Date(Date.now() + 5.5 * 3600_000);
-  return d.getUTCHours() * 60 + d.getUTCMinutes();
-}
+const nowIstMin = () => istMinuteOfDay(Date.now());
 
 export async function GET(req: NextRequest) {
   const underlying = (new URL(req.url).searchParams.get('underlying') ?? 'NIFTY').toUpperCase();

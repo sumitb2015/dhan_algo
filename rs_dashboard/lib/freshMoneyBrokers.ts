@@ -15,7 +15,7 @@ import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { kotakOptionContract, kotakDerivativeBySymbol } from '@/lib/kotakContracts';
 import { buildKotakOrderPayload } from '@/lib/kotakOrderPayload';
 import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
-import { isKotakTokenValid, kotakGet, kotakRows, kotakPriority, KOTAK_PATHS } from '@/lib/kotakToken';
+import { isKotakTokenValid, kotakGet, kotakRows, kotakPriority, KOTAK_NO_DATA, KOTAK_PATHS } from '@/lib/kotakToken';
 import { findRecentKotakOrder, parseKotakTime, shapeKotakOrder, shapeKotakPosition } from '@/lib/kotakShape';
 import { zerodhaOptionContract, cachedZerodhaContract, slicesFor } from '@/lib/zerodhaContracts';
 import { zerodhaLotCapError } from '@/lib/zerodhaOrderRules';
@@ -23,11 +23,25 @@ import { placeZerodhaOrder, findOrderByTag } from '@/lib/zerodhaPlaceOrder';
 import { isZerodhaTokenValid, kiteGet } from '@/lib/zerodhaToken';
 import { shapeZerodhaOrder, shapeZerodhaPosition, type ScalperOrder } from '@/lib/zerodhaShape';
 import type { BookFill } from '@/lib/freshMoneyExternalPrice';
-import { netKey, stateFromBroker, type FmBroker, type FmOrder, type FmProduct, type OptType, type TxnSide } from '@/lib/freshMoneyTrades';
+import { cutClose, netKey, stateFromBroker, type FmBroker, type FmOrder, type FmProduct, type OptType, type TxnSide } from '@/lib/freshMoneyTrades';
 
 export const BROKERS: readonly FmBroker[] = ['dhan', 'kotak', 'zerodha'];
 export const brokerName = (b: FmBroker) => (b === 'kotak' ? 'Kotak' : b === 'zerodha' ? 'Zerodha' : 'Dhan');
 const isMcx = (u: string) => u === 'CRUDEOIL' || u === 'CRUDEOILM';
+
+/** A Kotak book's rows, or null when the reply is not a book (error-shaped, no data array): never read as "empty". */
+function kotakBook(json: Record<string, unknown>): Record<string, unknown>[] | null {
+  if (json.stCode === KOTAK_NO_DATA) return [];
+  return Array.isArray(json.data) ? kotakRows(json) : null;
+}
+
+/**
+ * How a CLOSE of `qty` units is cut into orders: at the per-order lot cap (`maxPerOrder` units), and for Zerodha also at
+ * the exchange freeze quantity. A close only reduces risk, so it is sliced rather than refused (opens are still refused
+ * above the freeze in sendOrder).
+ */
+export const closeSlices = (b: FmBroker, handle: string, qty: number, maxPerOrder: number): number[] =>
+  cutClose(qty, maxPerOrder, b === 'zerodha' ? part => slicesFor(handle, part) : undefined);
 
 /** Whether the broker's session is usable right now (no network call). */
 export function brokerSessionOk(b: FmBroker): boolean {
@@ -80,9 +94,9 @@ export async function sendOrder(
     const contract = cachedZerodhaContract(o.securityId);
     const capError = zerodhaLotCapError(o.qty, open ? 'fm' : undefined, o.securityId, contract);
     if (capError) return { status: 'rejected', error: capError, http: 400 };
-    // One order = one order id this ledger tracks: an order Kite would need cut at the freeze is refused (20 lots stay
-    // under every freeze today), never silently split.
-    if (slicesFor(o.securityId, o.qty).length > 1) return { status: 'rejected', error: `${o.qty} is above the exchange freeze quantity for one Zerodha order — use fewer lots`, http: 400 };
+    // One order = one order id this ledger tracks: an OPEN Kite would need cut at the freeze is refused, never silently
+    // split. Closes arrive already cut at the freeze (closeSlices), so this never refuses one.
+    if (open && slicesFor(o.securityId, o.qty).length > 1) return { status: 'rejected', error: `${o.qty} is above the exchange freeze quantity for one Zerodha order — use fewer lots`, http: 400 };
     const r = await placeZerodhaOrder({
       tradingsymbol: o.securityId, exchange: isMcx(o.underlying) ? 'MCX' : 'NFO', transaction_type: o.side,
       order_type: 'MARKET', quantity: o.qty, product, validity: 'DAY', market_protection: -1,
@@ -122,7 +136,8 @@ export async function readOrder(o: FmOrder, unknown: boolean): Promise<Partial<F
   // matches, so "CANCEL PENDING" stays live).
   const state = stateFromBroker(s.orderStatus, s.filledQty, o.qty, avgPrice);
   if (state === o.state && s.filledQty === o.filledQty && avgPrice === o.avgPrice) return null;
-  return { filledQty: s.filledQty, avgPrice, state, reason: s.reason || undefined };
+  // Only a reason the broker actually gave: an empty one must not erase the stored text (an UNKNOWN's send error).
+  return { filledQty: s.filledQty, avgPrice, state, ...(s.reason ? { reason: s.reason } : {}) };
 }
 
 const INTRADAY: Record<FmBroker, string> = { dhan: 'INTRADAY', kotak: 'MIS', zerodha: 'MIS' };
@@ -156,7 +171,9 @@ export async function brokerNets(b: FmBroker): Promise<Map<string, number> | nul
       for (const p of net.map(shapeZerodhaPosition)) add(p.tradingSymbol, String(p.productType ?? ''), Number(p.netQty) || 0);
     } else {
       kotakPriority(2_500);
-      for (const p of kotakRows(await kotakGet(KOTAK_PATHS.positions)).map(shapeKotakPosition)) add(p.tradingSymbol, String(p.productType ?? ''), Number(p.netQty) || 0);
+      const book = kotakBook(await kotakGet(KOTAK_PATHS.positions));
+      if (!book) return null;
+      for (const p of book.map(shapeKotakPosition)) add(p.tradingSymbol, String(p.productType ?? ''), Number(p.netQty) || 0);
     }
     return out;
   } catch {
@@ -186,7 +203,9 @@ export async function brokerFills(b: FmBroker): Promise<BookFill[] | null> {
       rows = (raw as Record<string, unknown>[]).map(shapeZerodhaOrder);
     } else {
       kotakPriority(2_500);
-      rows = kotakRows(await kotakGet(KOTAK_PATHS.orderBook)).map(shapeKotakOrder);
+      const book = kotakBook(await kotakGet(KOTAK_PATHS.orderBook));
+      if (!book) return null;
+      rows = book.map(shapeKotakOrder);
     }
     return rows
       .filter(r => (r.filledQty ?? 0) > 0 && (r.transactionType === 'BUY' || r.transactionType === 'SELL'))

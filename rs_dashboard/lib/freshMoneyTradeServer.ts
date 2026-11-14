@@ -3,7 +3,7 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { DEBUG_DIR, resolveCsvPath } from '@/lib/ivSnapshotFiles';
 import { withFileLock, readJsonFile, writeJsonAtomic } from '@/lib/lockedJsonFile';
-import { istToday } from '@/lib/istTime';
+import { istMinuteOfDay, istToday } from '@/lib/istTime';
 import { isRegularSession } from '@/lib/nseHolidays';
 import { mcxSession } from '@/lib/mcxSession';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
@@ -13,11 +13,11 @@ import { wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
 import { parsedDay } from '@/lib/freshMoneyFiles';
 import { globalOnce } from '@/lib/globalOnce';
 import {
-  BROKERS, brokerContract, brokerFills, brokerName, brokerNets, brokerSessionOk, newCorrelationId, productCode, readOrder, sendOrder,
+  BROKERS, brokerContract, brokerFills, closeSlices, brokerName, brokerNets, brokerSessionOk, newCorrelationId, productCode, readOrder, sendOrder,
 } from '@/lib/freshMoneyBrokers';
 import {
   brokerUnits, buildPositions, closeCheck, closeQty, freshRestCache, contractHold, contractSettling, dueForCheck, effectiveState, hhmmToMin, isTerminal,
-  inFlightReducing, netKey, nextCheckDelay, orderKey, productWindow, reconcileDownQty, sessionGate, sessionMessage, slices, unconfirmedQty,
+  inFlightReducing, netKey, recentOrders, nextCheckDelay, orderKey, productWindow, reconcileDownQty, sessionGate, sessionMessage, unconfirmedQty,
   NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, FM_MAX_LOTS_PER_ORDER, FM_MAX_POSITION_LOTS,
   type FmBroker, type FmLedger, type FmOrder, type FmPosition, type FmProduct, type FmSegment, type OptType, type SessionGate,
   type TradeWindow, type TxnSide,
@@ -86,20 +86,48 @@ const NRML_WARN_MIN = 10;
 function nearClose(u: string, now: number): boolean {
   const w = windowFor(u);
   if (!w) return true;
-  const d = new Date(now + 19_800_000);
-  return d.getUTCHours() * 60 + d.getUTCMinutes() >= w.close - NRML_WARN_MIN;
+  return istMinuteOfDay(now) >= w.close - NRML_WARN_MIN;
 }
 
 // ── ledger ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+const LEDGER_READ_TRIES = 5;
+const LEDGER_RETRY_MS = 20;
+const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * The ledger file as it is on disk: null ONLY when there is no file. A file that exists but cannot be read or parsed
+ * (Windows EBUSY / EPERM while another bundle renames its tmp over it, an antivirus scan) is retried briefly, then
+ * THROWS — never read as "no orders today": mutateLedger would write that empty ledger back and erase the day's
+ * positions and exit levels while the positions stay live at the broker.
+ */
+function readLedgerFile(): FmLedger | null {
+  let lastErr: unknown = null;
+  for (let i = 0; i < LEDGER_READ_TRIES; i++) {
+    if (i > 0) sleepSync(LEDGER_RETRY_MS);
+    let text: string;
+    try { text = fs.readFileSync(LEDGER, 'utf8'); } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      lastErr = e; continue;
+    }
+    try { return JSON.parse(text) as FmLedger; } catch (e) { lastErr = e; }
+  }
+  throw new Error(`Fresh Money ledger unreadable (${String((lastErr as Error)?.message ?? lastErr)}) — nothing was changed`);
+}
+
 export function loadLedger(): FmLedger {
   const today = istToday();
-  const l = readJsonFile<FmLedger>(LEDGER);
-  if (l && l.date === today && Array.isArray(l.orders)) return l;
+  const l = readLedgerFile();
+  if (l && l.date === today) {
+    if (Array.isArray(l.orders)) return l;
+    // Today's file with no orders array is damaged, not empty: refuse rather than overwrite it.
+    throw new Error('Fresh Money ledger is damaged (no orders list) — nothing was changed; check debug/fresh_money_trades.json');
+  }
   // Day roll: MIS positions are squared off by the broker; keep yesterday's file for the record. An NRML position still
   // open is NOT carried into the new ledger (the user's choice, 2026-11-13: no auto-exit, warned from 10 min before the
   // close — `nrmlWarning`); it is then managed at the broker.
-  if (l && l.date && l.date !== today) {
+  if (l && typeof l.date !== 'string') throw new Error('Fresh Money ledger is damaged (no date) — nothing was changed; check debug/fresh_money_trades.json');
+  if (l && l.date !== today) {
     try { fs.renameSync(LEDGER, path.join(DEBUG_DIR, `fresh_money_trades_${l.date}.json`)); } catch { /* raced */ }
   }
   return { date: today, orders: [] };
@@ -129,7 +157,7 @@ export async function todaysBoard(underlying: string): Promise<{ expiry: string;
   return { expiry: p.expiry, strikes: new Set(last.strikes.keys()), lastMin: last.min };
 }
 
-const istMinuteNow = () => { const d = new Date(Date.now() + 19_800_000); return d.getUTCHours() * 60 + d.getUTCMinutes() + d.getUTCSeconds() / 60; };
+const istMinuteNow = () => istMinuteOfDay(Date.now(), true);
 
 // ── broker reads ──────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -259,13 +287,16 @@ export async function reconcileWithBrokers(): Promise<void> {
     lastReconcile.set(b, now);
     const nets = await brokerNets(b);
     if (!nets) continue;
-    if (!mine.some(p => reconcileDownQty(p.netQty, nets.get(netKey(p.securityId, p.product)) ?? 0, false) > 0)) continue;
+    // A contract this page traded today is listed in the broker's day book even after it is closed (net 0). One that is
+    // MISSING means the book is partial, empty or error-shaped — unknown, never "broker holds 0" (null = no reduction).
+    const brokerNet = (p: FmPosition) => nets.get(netKey(p.securityId, p.product)) ?? null;
+    if (!mine.some(p => reconcileDownQty(p.netQty, brokerNet(p), false) > 0)) continue;
     await mutateLedger(l => {
       // Re-decide against the ledger as it is inside the lock: an order may have been placed meanwhile.
       const t = Date.now();
       for (const p of buildPositions(l.orders, {}, t)) {
         if (p.broker !== b) continue;
-        const drop = reconcileDownQty(p.netQty, nets.get(netKey(p.securityId, p.product)) ?? 0, contractSettling(l.orders, p.key, t));
+        const drop = reconcileDownQty(p.netQty, brokerNet(p), contractSettling(l.orders, p.key, t));
         if (drop <= 0) continue;
         l.orders.push({
           id: randomUUID(), ts: t, underlying: p.underlying, expiry: p.expiry, strike: p.strike, opt: p.opt,
@@ -296,11 +327,13 @@ async function priceExternalCloses(): Promise<void> {
     if (now - lastAt < EXT_PRICE_GAP_MS || !brokerSessionOk(b)) continue;
     shared.lastExtPrice.set(b, now);
     const book = await brokerFills(b);
+    // An unreadable book (rate limit, network) says nothing about the close: it must not use up a try.
+    if (!book) continue;
     await mutateLedger(l => {
       for (const o of l.orders) {
         if (!o.external || o.avgPrice !== null || (o.broker ?? 'dhan') !== b || (o.priceTries ?? 0) >= EXT_PRICE_TRIES) continue;
         o.priceTries = (o.priceTries ?? 0) + 1;
-        const hit = book ? priceExternalClose(o, l.orders, book, productCode(b, o.product)) : null;
+        const hit = priceExternalClose(o, l.orders, book, productCode(b, o.product));
         if (!hit) continue;
         o.avgPrice = hit.avgPrice;
         o.externalOrderIds = hit.orderIds;
@@ -349,8 +382,9 @@ export async function buildState(): Promise<FreshMoneyTradeState> {
   const now = Date.now();
   const pre = buildPositions(ledger.orders, {}, now);
   const { ltps, source: ltpSource } = await ltpsFor(pre.filter(p => p.netQty !== 0).map(p => ({ id: p.priceId, segment: p.segment })));
-  const boardExpiry: Record<string, string | null> = {};
-  for (const u of TRADABLE) boardExpiry[u] = (await todaysBoard(u).catch(() => null))?.expiry ?? null;
+  const boardExpiry: Record<string, string | null> = Object.fromEntries(await Promise.all(
+    [...TRADABLE].map(async u => [u, (await todaysBoard(u).catch(() => null))?.expiry ?? null] as const),
+  ));
   const sessions: FreshMoneyTradeState['sessions'] = {};
   for (const u of TRADABLE) {
     const g = gateNow(u), n = gateNow(u, 'NRML');
@@ -371,7 +405,7 @@ export async function buildState(): Promise<FreshMoneyTradeState> {
     ltpSource,
     brokers: { dhan: brokerSessionOk('dhan'), kotak: brokerSessionOk('kotak'), zerodha: brokerSessionOk('zerodha') },
     positions: buildPositions(ledger.orders, ltps, now),
-    orders: ledger.orders.slice(-40).reverse().map(o => ({ ...o, effState: effectiveState(o, now) })),
+    orders: recentOrders(ledger.orders, now),
     exits: ledger.exits ?? {},
     global: ledger.global ?? null,
     exitWatcher: exitWatcherStatus(now),
@@ -602,7 +636,8 @@ export async function closePositionCore(key: string, trigger?: string): Promise<
     return refuse(`${brokerName(pos.broker)} shows no ${pos.product} position left in that direction — nothing was sent. It may have been closed elsewhere.`, 409);
   }
   const side: TxnSide = pos.netQty > 0 ? 'SELL' : 'BUY';
-  const parts = slices(qty, pos.lot);
+  // Cut at the per-order lot cap, and at Zerodha's freeze quantity: a close is sliced, never refused for its size.
+  const parts = closeSlices(pos.broker, pos.securityId, qty, FM_MAX_LOTS_PER_ORDER * pos.lot);
   let placedQty = 0;
   let lastId = '';
   for (let i = 0; i < parts.length; i++) {

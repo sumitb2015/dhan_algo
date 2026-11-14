@@ -14,6 +14,7 @@ import type { FreshMoneyTradeState } from '@/app/api/fresh-money/trade/route';
 import type { FmBroker, FmPosition } from '@/lib/freshMoneyTrades';
 import type { ExitSpec, FmExit } from '@/lib/freshMoneyExits';
 import { brokerLabel, fmtRs, lockKey } from './trading';
+import { istClock } from '@/lib/istTime';
 import { EXIT_STATE_LABEL, ExitEditor, exitNeedsLook } from './ExitInputs';
 
 const FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70';
@@ -21,7 +22,7 @@ const TH = 'px-2 py-1.5 text-left text-xs font-bold text-white';
 const TD = 'px-2 py-1.5 tabular-nums';
 const pnlClass = (n: number | null) => (n === null ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : n < 0 ? 'text-red-400' : 'text-zinc-300');
 
-const istTime = (ms: number) => new Date(ms + 19_800_000).toISOString().slice(11, 19);
+const istTime = istClock;
 const px = (v: number | null | undefined) => (v == null ? '–' : v.toFixed(2));
 const contract = (p: { underlying: string; strike: number; opt: string; expiry: string }) => `${p.underlying} ${p.strike} ${p.opt}`;
 
@@ -130,7 +131,7 @@ export default function PositionsOrders({ state, broker, armed, inflight, canClo
               <tbody>
                 {positions.map(p => {
                   const lots = p.lot > 0 ? Math.abs(p.netQty) / p.lot : 0;
-                  const busy = inflight.has(lockKey(p.broker, p.underlying, p.strike, p.opt));
+                  const busy = inflight.has(lockKey(p.broker, p.underlying, p.strike, p.opt, p.product));
                   const src = state?.ltpSource?.[p.priceId];
                   const x = exits[p.key];
                   return (

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
-import { istToday } from '@/lib/istTime';
+import { istMinuteOfDay, istToday } from '@/lib/istTime';
 import { isRegularSession } from '@/lib/nseHolidays';
 import { mcxSession } from '@/lib/mcxSession';
 import { pickPrevClose, spotInstrument, wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
@@ -59,8 +59,8 @@ function fillFromCandles(key: string, securityId: string, segment: string, today
 
 function inSession(mcx: boolean): boolean {
   const today = istToday();
-  const d = new Date(Date.now() + 19_800_000);
-  const hhmm = d.getUTCHours() * 100 + d.getUTCMinutes();
+  const m = istMinuteOfDay(Date.now());
+  const hhmm = Math.floor(m / 60) * 100 + (m % 60);
   if (mcx) { const s = mcxSession(today); return hhmm >= s.open && hhmm < s.close; }
   return isRegularSession(today) && hhmm >= 915 && hhmm < 1530;
 }

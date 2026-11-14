@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildPositions, closeQty, contractHold, dueForCheck, effectiveState, nextCheckDelay, sessionGate, slices, stateFromBroker,
+  buildPositions, closeQty, cutClose, recentOrders, contractHold, dueForCheck, effectiveState, nextCheckDelay, sessionGate, slices, stateFromBroker,
   unconfirmedQty, brokerUnits, inFlightReducing, contractSettling, reconcileDownQty, UNCONFIRMED_COUNT_MS, RECONCILE_GRACE_MS, hhmmToMin, sessionMessage, NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, PENDING_HOLD_MS, type FmOrder,
 } from './freshMoneyTrades.ts';
 
@@ -342,4 +342,33 @@ test('product window: NRML opens until 15:29, MIS keeps 15:17; both close at 15:
   assert.equal(sessionGate(at('15:29'), productWindow(NSE_WINDOW, 'NRML')), 'close-only');
   assert.equal(sessionGate(at('15:30'), productWindow(NSE_WINDOW, 'NRML')), 'closed');
   assert.equal(productWindow(null, 'NRML'), null);
+});
+
+test('closes are cut at the lot cap, then again at a freeze (sliced, never refused)', () => {
+  assert.deepEqual(cutClose(65 * 25, 65 * 20), [65 * 20, 65 * 5]);
+  // A freeze of 9 lots inside each 20-lot part.
+  const freeze = (part: number) => { const out: number[] = []; for (let l = part; l > 0; l -= 9 * 65) out.push(Math.min(l, 9 * 65)); return out; };
+  const parts = cutClose(65 * 25, 65 * 20, freeze);
+  assert.deepEqual(parts, [9 * 65, 9 * 65, 2 * 65, 5 * 65]);
+  assert.equal(parts.reduce((a, b) => a + b, 0), 65 * 25);
+});
+
+test('down-only reconcile: a contract missing from the broker book (null) reduces nothing', () => {
+  assert.equal(reconcileDownQty(130, null, false), 0);
+  assert.equal(reconcileDownQty(130, 0, false), 130); // listed at net 0 = really closed outside
+});
+
+test('Orders tab: the latest 40 of EACH broker, plus every unsettled order however old', () => {
+  const now = 1e9;
+  const orders: FmOrder[] = [
+    ord({ broker: 'dhan', state: 'unknown', orderId: null, ts: now - 1 }),
+    ...Array.from({ length: 5 }, () => ord({ broker: 'dhan', ts: now })),
+    ...Array.from({ length: 60 }, () => ord({ broker: 'kotak', ts: now })),
+  ];
+  const list = recentOrders(orders, now);
+  assert.equal(list.filter(o => o.broker === 'kotak').length, 40);
+  assert.equal(list.filter(o => o.broker === 'dhan').length, 6);
+  assert.equal(list[0].id, orders[orders.length - 1].id); // newest first
+  const old = [ord({ broker: 'dhan', state: 'unknown', orderId: null, ts: now }), ...Array.from({ length: 50 }, () => ord({ broker: 'dhan', ts: now }))];
+  assert.ok(recentOrders(old, now).some(o => o.id === old[0].id), 'an UNKNOWN beyond the window is still listed');
 });

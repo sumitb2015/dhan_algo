@@ -14,6 +14,8 @@ import type { FmBroker, FmPosition, FmProduct, OptType, TxnSide } from '@/lib/fr
 import { ExitAllButton, FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
 import { validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
 import { usePageBroker } from './BrokerPicker';
+import { readPref, savePref as writePref } from '@/lib/localPref';
+import { istMinuteOfDay } from '@/lib/istTime';
 import CollectorControl from './freshMoney/CollectorControl';
 import PositionsOrders from './freshMoney/PositionsOrders';
 import CumulativeOiWidget from './scalpCockpit/CumulativeOiWidget';
@@ -81,12 +83,6 @@ interface RowTrade {
   setExit: (key: string, target: ExitSpec | null, sl: ExitSpec | null) => Promise<boolean>;
 }
 
-function readPref(key: string): string | null {
-  try { return window.localStorage.getItem(key); } catch { return null; }
-}
-function writePref(key: string, v: string) {
-  try { window.localStorage.setItem(key, v); } catch { /* storage blocked */ }
-}
 
 
 /** "YYYY-MM-DD HH:MM:SS" IST → epoch ms. */
@@ -659,10 +655,7 @@ export default function FreshMoneyBoard() {
   }, [data, spot]);
 
   const staleMin = data?.isToday ? Math.floor((now - istEpoch(data.lastTs)) / 60_000) : 0;
-  const nowIstMin = (() => {
-    const d = new Date(now + 5.5 * 3600_000);
-    return d.getUTCHours() * 60 + d.getUTCMinutes();
-  })();
+  const nowIstMin = istMinuteOfDay(now);
   const day = data?.day ?? NSE_DAY;
   const isMcx = MCX_UNDERLYINGS.has(underlying);
   const collectorName = isMcx ? `${underlying} OI collector` : 'IV snapshot collector';
@@ -730,7 +723,12 @@ export default function FreshMoneyBoard() {
       ltpSource: ts?.ltpSource ?? {},
       exits: ts?.exits ?? {},
       armed,
-      busy: opt => inflight.has(lockKey(broker, underlying, strike, opt)),
+      // The order buttons trade the selected product; × closes the position shown, in its own product.
+      busy: opt => {
+        const shown = posByKey.get(`${strike}:${opt}`);
+        return inflight.has(lockKey(broker, underlying, strike, opt, product))
+          || (!!shown && inflight.has(lockKey(shown.broker, underlying, strike, opt, shown.product)));
+      },
       order: (opt, side) => sendOrder({ broker, underlying, expiry: data.expiry, strike, opt, side, lots, product, exitDefaults }),
       close: p => sendClose(p),
       setExit,

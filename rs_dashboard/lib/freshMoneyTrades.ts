@@ -9,6 +9,7 @@
  */
 
 import type { FmExit } from './freshMoneyExits.ts';
+import { istMinuteOfDay } from './istTime.ts';
 import type { FmGlobalExit } from './freshMoneyGlobalExit.ts';
 
 export type OptType = 'CE' | 'PE';
@@ -271,6 +272,16 @@ export function closeQty(netQty: number, brokerNet: number | null): number {
   return Math.min(own, Math.abs(brokerNet));
 }
 
+/**
+ * A CLOSE of `qty` units cut into orders: at most `maxPerOrder` units each, then each part cut again by `freezeCut`
+ * (Zerodha's exchange freeze quantity; identity for other brokers). A close only reduces risk: sliced, never refused.
+ */
+export function cutClose(qty: number, maxPerOrder: number, freezeCut: (part: number) => number[] = p => [p]): number[] {
+  const out: number[] = [];
+  for (let left = qty; left > 0; left -= maxPerOrder) out.push(...freezeCut(Math.min(left, maxPerOrder)));
+  return out;
+}
+
 /** Split `qty` units into orders of at most `maxLots` lots each. */
 export function slices(qty: number, lot: number, maxLots = FM_MAX_LOTS_PER_ORDER): number[] {
   const max = maxLots * lot;
@@ -307,8 +318,7 @@ export type SessionGate = 'open' | 'close-only' | 'closed';
 /** What this page may send at `nowMs`. `window` null = no session today (weekend / holiday). */
 export function sessionGate(nowMs: number, window: TradeWindow | null): SessionGate {
   if (!window) return 'closed';
-  const d = new Date(nowMs + 19_800_000);
-  const m = d.getUTCHours() * 60 + d.getUTCMinutes();
+  const m = istMinuteOfDay(nowMs);
   if (m < window.open || m >= window.close) return 'closed';
   return m < window.cutoff ? 'open' : 'close-only';
 }
@@ -371,4 +381,26 @@ export function freshRestCache(
   cache: { at: number; ids: string; data: Record<string, number> } | null, ids: string, now: number,
 ): Record<string, number> | null {
   return cache && cache.ids === ids && now - cache.at < REST_CACHE_MS ? cache.data : null;
+}
+
+/** Orders shown per broker on the Orders tab. */
+const ORDERS_PER_BROKER = 40;
+
+/**
+ * The Orders tab's list, newest first: the latest ORDERS_PER_BROKER of EACH broker (the page filters by broker, so a
+ * window across all brokers could leave one with none listed), plus every order not yet settled, however old — an
+ * UNKNOWN or partial order is exactly the one that needs a look.
+ */
+export function recentOrders(orders: FmOrder[], now: number): (FmOrder & { effState: string })[] {
+  const seen = new Map<FmBroker, number>();
+  const out: (FmOrder & { effState: string })[] = [];
+  for (let i = orders.length - 1; i >= 0; i--) {
+    const o = orders[i];
+    const b = o.broker ?? 'dhan';
+    const n = (seen.get(b) ?? 0) + 1;
+    seen.set(b, n);
+    const effState = effectiveState(o, now);
+    if (n <= ORDERS_PER_BROKER || !isTerminal(effState)) out.push({ ...o, effState });
+  }
+  return out;
 }

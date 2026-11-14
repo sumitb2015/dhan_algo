@@ -81,10 +81,12 @@ function AmountInput({ label, value, onCommit, disabled }: {
   );
 }
 
-export function GlobalExitInputs({ global, total, onSet, saving, watcherAlive }: {
+export function GlobalExitInputs({ global, total, unknownWhy, onSet, saving, watcherAlive }: {
   global: FmGlobalExit | null;
   /** Combined P&L now (null = unknown). */
   total: number | null;
+  /** Why the combined P&L is unknown (pnlUnknownReason), or null. */
+  unknownWhy?: string | null;
   onSet: (target: number | null, sl: number | null) => void;
   saving: boolean;
   watcherAlive: boolean | null;
@@ -105,6 +107,11 @@ export function GlobalExitInputs({ global, total, onSet, saving, watcherAlive }:
           <span className={`h-1.5 w-1.5 rounded-full ${bad ? 'bg-amber-400' : global.state === 'watching' ? 'bg-sky-400' : 'bg-zinc-500'}`} aria-hidden />
           {GLOBAL_STATE_LABEL[global.state]} · T {fmtGlobalAmount(target)} · SL {fmtGlobalAmount(sl === null ? null : sl)}
           {global.state === 'watching' && watcherAlive === false && <b className="text-red-300"> · watcher STOPPED</b>}
+        </span>
+      )}
+      {global?.state === 'watching' && total === null && unknownWhy && (
+        <span className="text-[11px] font-bold text-amber-300" role="alert" title={unknownWhy}>
+          PAUSED — combined P&amp;L unknown, the total target / SL cannot fire: {unknownWhy}
         </span>
       )}
       {past && <span className="text-[11px] font-bold text-amber-300" role="alert">{past === 'sl' ? 'SL' : 'Target'} already past — closes everything within ~4 s</span>}
