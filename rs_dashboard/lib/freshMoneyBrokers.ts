@@ -18,7 +18,7 @@ import { placeKotakOrder } from '@/lib/kotakPlaceOrder';
 import { isKotakTokenValid, kotakGet, kotakRows, kotakPriority, KOTAK_NO_DATA, KOTAK_PATHS } from '@/lib/kotakToken';
 import { findRecentKotakOrder, parseKotakTime, shapeKotakOrder, shapeKotakPosition } from '@/lib/kotakShape';
 import { zerodhaOptionContract, cachedZerodhaContract, slicesFor } from '@/lib/zerodhaContracts';
-import { zerodhaLotCapError } from '@/lib/zerodhaOrderRules';
+import { zerodhaLotCapError, zerodhaOrderSlices, zerodhaUnderlyingOf } from '@/lib/zerodhaOrderRules';
 import { placeZerodhaOrder, findOrderByTag } from '@/lib/zerodhaPlaceOrder';
 import { isZerodhaTokenValid, kiteGet } from '@/lib/zerodhaToken';
 import { shapeZerodhaOrder, shapeZerodhaPosition, type ScalperOrder } from '@/lib/zerodhaShape';
@@ -40,8 +40,15 @@ function kotakBook(json: Record<string, unknown>): Record<string, unknown>[] | n
  * the exchange freeze quantity. A close only reduces risk, so it is sliced rather than refused (opens are still refused
  * above the freeze in sendOrder).
  */
-export const closeSlices = (b: FmBroker, handle: string, qty: number, maxPerOrder: number): number[] =>
-  cutClose(qty, maxPerOrder, b === 'zerodha' ? part => slicesFor(handle, part) : undefined);
+export const closeSlices = (
+  b: FmBroker, handle: string, qty: number, maxPerOrder: number, underlying: string, lot: number,
+): number[] => {
+  if (b !== 'zerodha') return cutClose(qty, maxPerOrder);
+  // Kite's own lot from the instrument cache, else the position's lot (checked equal to Kite's when it opened): a cache
+  // miss must not send one order above the freeze, which Kite rejects and leaves the stop-loss unwatched.
+  const kiteLot = cachedZerodhaContract(handle)?.lotSize ?? (lot > 0 ? lot : null);
+  return cutClose(qty, maxPerOrder, part => zerodhaOrderSlices(part, zerodhaUnderlyingOf(handle) ?? underlying, kiteLot));
+};
 
 /** Whether the broker's session is usable right now (no network call). */
 export function brokerSessionOk(b: FmBroker): boolean {

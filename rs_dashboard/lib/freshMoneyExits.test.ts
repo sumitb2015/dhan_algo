@@ -252,7 +252,7 @@ test('stepper: ±1 in the current unit; off ↔ 1; capped at the limit', async (
 });
 
 // ── trailing stop-loss ───────────────────────────────────────────────────────────────────────────────────────────────
-import { validateTrail, trailSteps, trailUpdate, type FmTrail } from './freshMoneyExits.ts';
+import { validateTrail, trailSteps, trailUpdate, resolveExit, type FmTrail } from './freshMoneyExits.ts';
 
 const TR = (p: Partial<FmTrail> = {}): FmTrail => ({ every: 10, by: 5, unit: 'pts', startAt: null, ...p });
 
@@ -303,7 +303,7 @@ test('a trailed stop never passes the price when it moves (Y <= X)', () => {
   }
 });
 
-const pos = (p: object = {}) => ({ key: 'k', netQty: 65, avgPrice: 100 } as unknown as import('./freshMoneyTrades.ts').FmPosition & object);
+const pos = (p: object = {}) => ({ key: 'k', netQty: 65, avgPrice: 100, ...p } as unknown as import('./freshMoneyTrades.ts').FmPosition & object);
 
 test('edit: a trail needs a stop-loss', () => {
   const r = editExit(undefined, { ...pos() }, null, null, 0, TR());
@@ -320,7 +320,37 @@ test('edit: new trail starts from the plain stop; same stop + trail keeps the pr
   // The stop itself changed: start again from the new plain stop.
   const reset = editExit(trailed, pos(), null, { value: 10, unit: 'pts' }, 0, TR()) as import('./freshMoneyExits.ts').FmExit;
   assert.equal(reset.slPx, 90); assert.equal(reset.trailSteps, 0);
-  // Trail switched off: back to the plain stop.
+  // Trail switched off: the stop stays where it trailed to (frozen), it does not fall back to the plain stop.
   const off = editExit(trailed, pos(), null, { value: 20, unit: 'pts' }, 0, null) as import('./freshMoneyExits.ts').FmExit;
-  assert.equal(off.slPx, 80); assert.equal(off.trail ?? null, null);
+  assert.equal(off.slPx, 95); assert.equal(off.trail ?? null, null);
+  // ...and a later target edit on that frozen stop still keeps it.
+  const later = editExit(off, pos(), { value: 30, unit: 'pct' }, { value: 20, unit: 'pts' }, 0, null) as import('./freshMoneyExits.ts').FmExit;
+  assert.equal(later.slPx, 95);
+});
+
+test('edit: changing the trail X / Y keeps the stop already trailed, steps restart, and the ratchet never loosens it', () => {
+  const trailed = { ...(editExit(undefined, pos(), null, { value: 20, unit: 'pts' }, 0, TR()) as import('./freshMoneyExits.ts').FmExit), slPx: 95, trailSteps: 3 };
+  const changed = editExit(trailed, pos(), null, { value: 20, unit: 'pts' }, 0, TR({ every: 20, by: 5 })) as import('./freshMoneyExits.ts').FmExit;
+  assert.equal(changed.slPx, 95); assert.equal(changed.slBasePx, 80); assert.equal(changed.trailSteps, 0);
+  // 2 new steps would give 80 + 10 = 90: looser than 95, so nothing moves.
+  assert.equal(trailUpdate(changed, 141), null);
+  // 4 steps = 100: tighter, it moves.
+  assert.deepEqual(trailUpdate(changed, 181), { trailSteps: 4, slPx: 100 });
+  // A short: the trailed stop is lower and stays lower.
+  const sp = pos({ netQty: -65 });
+  const st = { ...(editExit(undefined, sp, null, { value: 20, unit: 'pts' }, 0, TR()) as import('./freshMoneyExits.ts').FmExit), slPx: 105, trailSteps: 3 };
+  assert.equal((editExit(st, sp, null, { value: 20, unit: 'pts' }, 0, null) as import('./freshMoneyExits.ts').FmExit).slPx, 105);
+});
+
+test('edit / resolve: a trail with no stop above zero is refused, never shown as trailing', () => {
+  // Long filled at 30, SL 40 pts = -10: no stop.
+  const r = editExit(undefined, pos({ avgPrice: 30 }), null, { value: 40, unit: 'pts' }, 0, TR());
+  assert.match((r as { error: string }).error, /at or below 0/);
+  // Waiting for the fill when the trail was set: resolving drops the trail and says why.
+  const w = editExit(undefined, pos({ avgPrice: null }), null, { value: 40, unit: 'pts' }, 0, TR()) as import('./freshMoneyExits.ts').FmExit;
+  const done = resolveExit(w, 30, levelsFor(30, 'long', null, { value: 40, unit: 'pts' }));
+  assert.equal(done.trail, null); assert.equal(done.slPx, null); assert.match(done.note!, /at or below 0/);
+  // A stop above zero resolves with the trail on.
+  const ok = resolveExit(w, 100, levelsFor(100, 'long', null, { value: 40, unit: 'pts' }));
+  assert.deepEqual([ok.slPx, ok.slBasePx, ok.trailSteps, !!ok.trail], [60, 60, 0, true]);
 });

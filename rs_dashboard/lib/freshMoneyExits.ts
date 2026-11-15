@@ -158,12 +158,32 @@ export function trailSteps(t: FmTrail, basis: number, dir: ExitDir, ltp: number)
 export const trailedStop = (base: number, t: FmTrail, basis: number, dir: ExitDir, steps: number) =>
   round2(base + (dir === 'long' ? 1 : -1) * steps * offset(basis, { value: t.by, unit: t.unit }));
 
-/** The record's new stop when the price has earned MORE steps than it has taken (null = nothing to move). */
+/** The tighter of two stops: higher for a long, lower for a short. */
+const tighter = (dir: ExitDir, a: number, b: number) => (dir === 'long' ? Math.max(a, b) : Math.min(a, b));
+
+/** The record's new stop when the price has earned MORE steps than it has taken (null = nothing to move). A ratchet:
+ *  never looser than the stop in force (an edit may have kept a stop already tighter than the new trail's steps). */
 export function trailUpdate(x: FmExit, ltp: number): { trailSteps: number; slPx: number } | null {
   if (x.state !== 'watching' || !x.trail || x.basis === null || x.slBasePx == null) return null;
   const steps = trailSteps(x.trail, x.basis, x.dir, ltp);
   if (steps <= (x.trailSteps ?? 0)) return null;
-  return { trailSteps: steps, slPx: trailedStop(x.slBasePx, x.trail, x.basis, x.dir, steps) };
+  const next = trailedStop(x.slBasePx, x.trail, x.basis, x.dir, steps);
+  if (x.slPx !== null && tighter(x.dir, next, x.slPx) === x.slPx) return null;
+  return { trailSteps: steps, slPx: next };
+}
+
+/** Why a trail cannot run on these levels, or null: it moves the stop, and a stop at or below zero is off. */
+const trailWithoutStop = (trail: FmTrail | null | undefined, lv: ExitLevels) =>
+  trail && lv.slPx === null ? 'A trailing stop-loss needs a stop above zero — this stop-loss works out at or below 0, so it is off' : null;
+
+/**
+ * The record once its opening fill is priced (the watcher's 'resolve'). A trail with no stop to move is switched off
+ * and the reason kept in `note`, so the page never shows a trailing badge with no stop behind it.
+ */
+export function resolveExit(x: FmExit, basis: number, lv: ExitLevels): FmExit {
+  const why = trailWithoutStop(x.trail, lv);
+  if (why) return { ...x, basis, ...lv, state: 'watching', trail: null, slBasePx: null, trailSteps: 0, note: why };
+  return { ...x, basis, ...lv, state: 'watching', ...(x.trail ? { slBasePx: lv.slPx, trailSteps: 0 } : {}) };
 }
 
 const sameSpec = (a: ExitSpec | null | undefined, b: ExitSpec | null | undefined) =>
@@ -309,13 +329,19 @@ export function editExit(
   };
   if (pos.avgPrice === null) return base;
   const lv = levelsFor(pos.avgPrice, dir, target, sl);
-  // Same stop, same trail, same basis, same direction: keep the steps already taken, so an edit of the target (or a
-  // re-save) never loosens a stop that has trailed. Anything else about the stop changed: start from its plain level.
-  const keep = !!trail && !!x && x.state === 'watching' && x.dir === dir && x.basis === pos.avgPrice
-    && sameSpec(x.sl, sl) && sameTrail(x.trail, trail) && (x.trailSteps ?? 0) > 0 && x.slPx !== null;
+  const noStop = trailWithoutStop(trail, lv);
+  if (noStop) return { error: noStop };
+  // The same stop-loss on the same basis and direction: never loosen the stop in force. A stop that has trailed into
+  // profit stays where it is when the target is edited, the trail is switched off or its X / Y / start changes; only a
+  // NEW stop-loss value starts again from its plain level (the user asked for that stop).
+  const sameStop = !!x && x.state === 'watching' && x.dir === dir && x.basis === pos.avgPrice && sameSpec(x.sl, sl)
+    && x.slPx !== null && lv.slPx !== null;
+  const slPx = sameStop ? tighter(dir, lv.slPx!, x!.slPx!) : lv.slPx;
+  // Same trail as well: keep the steps already taken.
+  const keepSteps = sameStop && !!trail && sameTrail(x!.trail, trail) ? (x!.trailSteps ?? 0) : 0;
   return {
-    ...base, basis: pos.avgPrice, ...lv, state: 'watching',
-    ...(trail ? { slBasePx: lv.slPx, trailSteps: keep ? x!.trailSteps! : 0, ...(keep ? { slPx: x!.slPx } : {}) } : {}),
+    ...base, basis: pos.avgPrice, ...lv, slPx, state: 'watching',
+    ...(trail ? { slBasePx: lv.slPx, trailSteps: keepSteps } : {}),
   };
 }
 

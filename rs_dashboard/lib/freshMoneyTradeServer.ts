@@ -17,9 +17,9 @@ import {
 } from '@/lib/freshMoneyBrokers';
 import {
   brokerUnits, buildPositions, closeCheck, closeQty, freshRestCache, contractHold, contractSettling, dueForCheck, effectiveState, hhmmToMin, isTerminal,
-  inFlightReducing, netKey, recentOrders, nextCheckDelay, orderKey, productWindow, reconcileDownQty, sessionGate, sessionMessage, unconfirmedQty,
+  bookNet, inFlightReducing, netKey, recentOrders, nextCheckDelay, orderKey, productWindow, reconcileDownQty, sessionGate, sessionMessage, unconfirmedQty,
   NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, FM_MAX_LOTS_PER_ORDER, FM_MAX_POSITION_LOTS,
-  type FmBroker, type FmLedger, type FmOrder, type FmPosition, type FmProduct, type FmSegment, type OptType, type SessionGate,
+  type FmBroker, type FmLedger, type MissingSeen, type FmOrder, type FmPosition, type FmProduct, type FmSegment, type OptType, type SessionGate,
   type TradeWindow, type TxnSide,
 } from '@/lib/freshMoneyTrades';
 import { validateGlobalAmount, type FmGlobalExit } from './freshMoneyGlobalExit.ts';
@@ -93,7 +93,8 @@ function nearClose(u: string, now: number): boolean {
 
 const LEDGER_READ_TRIES = 5;
 const LEDGER_RETRY_MS = 20;
-const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+// An async wait: a blocking sleep would freeze every route and the exit watcher on this server while it retries.
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 /**
  * The ledger file as it is on disk: null ONLY when there is no file. A file that exists but cannot be read or parsed
@@ -101,10 +102,10 @@ const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuf
  * THROWS — never read as "no orders today": mutateLedger would write that empty ledger back and erase the day's
  * positions and exit levels while the positions stay live at the broker.
  */
-function readLedgerFile(): FmLedger | null {
+async function readLedgerFile(): Promise<FmLedger | null> {
   let lastErr: unknown = null;
   for (let i = 0; i < LEDGER_READ_TRIES; i++) {
-    if (i > 0) sleepSync(LEDGER_RETRY_MS);
+    if (i > 0) await sleep(LEDGER_RETRY_MS);
     let text: string;
     try { text = fs.readFileSync(LEDGER, 'utf8'); } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
@@ -115,9 +116,9 @@ function readLedgerFile(): FmLedger | null {
   throw new Error(`Fresh Money ledger unreadable (${String((lastErr as Error)?.message ?? lastErr)}) — nothing was changed`);
 }
 
-export function loadLedger(): FmLedger {
+export async function loadLedger(): Promise<FmLedger> {
   const today = istToday();
-  const l = readLedgerFile();
+  const l = await readLedgerFile();
   if (l && l.date === today) {
     if (Array.isArray(l.orders)) return l;
     // Today's file with no orders array is damaged, not empty: refuse rather than overwrite it.
@@ -134,8 +135,8 @@ export function loadLedger(): FmLedger {
 }
 
 export const mutateLedger = <T>(fn: (l: FmLedger) => T): Promise<T> =>
-  withFileLock(LOCK, LOCK_STALE_MS, 'Fresh Money ledger', () => {
-    const l = loadLedger();
+  withFileLock(LOCK, LOCK_STALE_MS, 'Fresh Money ledger', async () => {
+    const l = await loadLedger();
     const out = fn(l);
     writeJsonAtomic(LEDGER, l, { pretty: true });
     return out;
@@ -177,6 +178,8 @@ interface ServerShared {
   exitAllBusy?: boolean;
   /** Last order-book read per broker for pricing an outside close. */
   lastExtPrice?: Map<FmBroker, number>;
+  /** Contracts missing from a readable positions book, by `broker|netKey` (bookNet): shared by reconcile and close. */
+  missing?: Map<string, MissingSeen>;
 }
 const shared = globalOnce<ServerShared>('__freshMoneyTradeServer', () => ({
   restCache: null, nextAt: new Map(), attempts: new Map(), lastRefresh: 0, lastReconcile: new Map(), stateVersion: 0,
@@ -240,7 +243,7 @@ function nextReadAt(o: FmOrder, now: number, attempts: number, changed: boolean)
 export async function refreshOrders(): Promise<void> {
   const now = Date.now();
   if (now - shared.lastRefresh < YOUNG_REFRESH_GAP_MS) return;
-  const ledger = loadLedger();
+  const ledger = await loadLedger();
   const youngOpen = ledger.orders.some(o => !isTerminal(effectiveState(o, now)) && now - o.ts < YOUNG_ORDER_MS);
   if (!youngOpen && now - shared.lastRefresh < REFRESH_GAP_MS) return;
   shared.lastRefresh = now;
@@ -279,7 +282,7 @@ const { lastReconcile } = shared;
  */
 export async function reconcileWithBrokers(): Promise<void> {
   const now = Date.now();
-  const ledger = loadLedger();
+  const ledger = await loadLedger();
   const open = buildPositions(ledger.orders, {}, now).filter(p => p.netQty !== 0 && !contractSettling(ledger.orders, p.key, now));
   for (const b of BROKERS) {
     const mine = open.filter(p => p.broker === b);
@@ -287,9 +290,15 @@ export async function reconcileWithBrokers(): Promise<void> {
     lastReconcile.set(b, now);
     const nets = await brokerNets(b);
     if (!nets) continue;
-    // A contract this page traded today is listed in the broker's day book even after it is closed (net 0). One that is
-    // MISSING means the book is partial, empty or error-shaped — unknown, never "broker holds 0" (null = no reduction).
-    const brokerNet = (p: FmPosition) => nets.get(netKey(p.securityId, p.product)) ?? null;
+    // A contract MISSING from the book is unknown (no reduction) until bookNet has seen it missing on several reads in a
+    // row — then it is believed gone (0), the same verdict closePositionCore uses. Decided once per read.
+    const seen = (shared.missing ??= new Map());
+    const verdict = new Map<string, number | null>();
+    for (const p of mine) {
+      const nk = netKey(p.securityId, p.product);
+      if (!verdict.has(nk)) verdict.set(nk, bookNet(nets, nk, `${b}|${nk}`, seen, now));
+    }
+    const brokerNet = (p: FmPosition) => verdict.get(netKey(p.securityId, p.product)) ?? null;
     if (!mine.some(p => reconcileDownQty(p.netQty, brokerNet(p), false) > 0)) continue;
     await mutateLedger(l => {
       // Re-decide against the ledger as it is inside the lock: an order may have been placed meanwhile.
@@ -321,7 +330,7 @@ const EXT_PRICE_GAP_MS = 20_000;
  */
 async function priceExternalCloses(): Promise<void> {
   const now = Date.now();
-  const todo = loadLedger().orders.filter(o => o.external && o.avgPrice === null && (o.priceTries ?? 0) < EXT_PRICE_TRIES);
+  const todo = (await loadLedger()).orders.filter(o => o.external && o.avgPrice === null && (o.priceTries ?? 0) < EXT_PRICE_TRIES);
   for (const b of new Set(todo.map(o => o.broker ?? 'dhan'))) {
     const lastAt = (shared.lastExtPrice ??= new Map()).get(b) ?? 0;
     if (now - lastAt < EXT_PRICE_GAP_MS || !brokerSessionOk(b)) continue;
@@ -378,7 +387,7 @@ function exitWatcherStatus(now: number): { alive: boolean; at: number | null } {
 export async function buildState(): Promise<FreshMoneyTradeState> {
   await refreshOrders().catch(() => {});
   await reconcileWithBrokers().catch(() => {});
-  const ledger = loadLedger();
+  const ledger = await loadLedger();
   const now = Date.now();
   const pre = buildPositions(ledger.orders, {}, now);
   const { ltps, source: ltpSource } = await ltpsFor(pre.filter(p => p.netQty !== 0).map(p => ({ id: p.priceId, segment: p.segment })));
@@ -617,7 +626,7 @@ export async function setGlobalCore(b: OrderBody): Promise<{ ok: true } | { ok: 
  * at the per-order cap, stopping at the first refusal or UNKNOWN. `trigger` is recorded on each close order.
  */
 export async function closePositionCore(key: string, trigger?: string): Promise<CloseResult> {
-  const ledger = loadLedger();
+  const ledger = await loadLedger();
   const now = Date.now();
   const pos = buildPositions(ledger.orders, {}, now).find(p => p.key === key);
   if (!pos || pos.netQty === 0) return refuse('This page holds no open position on that contract', 400);
@@ -635,13 +644,16 @@ export async function closePositionCore(key: string, trigger?: string): Promise<
   const remaining = Math.max(0, Math.abs(pos.netQty) - inFlight);
   if (remaining === 0) return refuse('A close for this position is already in flight (unconfirmed) — check Orders before sending another', 409);
   const nets = await brokerNets(pos.broker);
-  const qty = closeQty(Math.sign(pos.netQty) * remaining, nets ? nets.get(netKey(pos.securityId, pos.product)) ?? 0 : null);
+  // Same verdict as the reconcile (bookNet): unreadable, or missing on a single read = size from this page's own fills;
+  // missing on several reads in a row = gone (refused, the reconcile writes it off).
+  const nk = netKey(pos.securityId, pos.product);
+  const qty = closeQty(Math.sign(pos.netQty) * remaining, bookNet(nets, nk, `${pos.broker}|${nk}`, (shared.missing ??= new Map()), Date.now()));
   if (qty <= 0) {
     return refuse(`${brokerName(pos.broker)} shows no ${pos.product} position left in that direction — nothing was sent. It may have been closed elsewhere.`, 409);
   }
   const side: TxnSide = pos.netQty > 0 ? 'SELL' : 'BUY';
   // Cut at the per-order lot cap, and at Zerodha's freeze quantity: a close is sliced, never refused for its size.
-  const parts = closeSlices(pos.broker, pos.securityId, qty, FM_MAX_LOTS_PER_ORDER * pos.lot);
+  const parts = closeSlices(pos.broker, pos.securityId, qty, FM_MAX_LOTS_PER_ORDER * pos.lot, pos.underlying, pos.lot);
   let placedQty = 0;
   let lastId = '';
   for (let i = 0; i < parts.length; i++) {
@@ -669,7 +681,7 @@ export async function exitAllCore(): Promise<ExitAllResult | { busy: true }> {
   if (shared.exitAllBusy) return { busy: true };
   shared.exitAllBusy = true;
   try {
-    const open = buildPositions(loadLedger().orders, {}, Date.now()).filter(p => p.netQty !== 0);
+    const open = buildPositions((await loadLedger()).orders, {}, Date.now()).filter(p => p.netQty !== 0);
     return await runExitAll(open, key => closePositionCore(key, 'Exit all (header)'));
   } finally {
     shared.exitAllBusy = false;

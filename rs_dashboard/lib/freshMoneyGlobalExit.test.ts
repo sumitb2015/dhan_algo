@@ -87,4 +87,6 @@ test('why the combined P&L is unknown: said for unpriced closes and missing pric
   assert.equal(pnlUnknownReason([P({ pnl: null, busy: 'pending' })]), null);
   assert.match(pnlUnknownReason([P({ pnl: null, netQty: 0 })])!, /booked P&L unknown on NIFTY 25000 CE/);
   assert.match(pnlUnknownReason([P({ pnl: null, strike: 25100 })])!, /no price for NIFTY 25100 CE/);
+  // An UNKNOWN order is named: it does not clear like one in flight, and the total stop cannot fire while it lasts.
+  assert.match(pnlUnknownReason([P({ pnl: null, busy: 'unknown', strike: 25200 })])!, /UNKNOWN status on NIFTY 25200 CE/);
 });

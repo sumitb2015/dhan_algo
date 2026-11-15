@@ -8,13 +8,13 @@
  * is the one it decided on. An exit is claimed ('firing') in the lock BEFORE the close is sent, so it goes at most once.
  */
 import {
-  exitAfterClose, nextExitAction, trailUpdate, type CloseResult, type ExitAction, type FmExit, type Streak,
+  exitAfterClose, nextExitAction, resolveExit, trailUpdate, type CloseResult, type ExitAction, type FmExit, type Streak,
 } from './freshMoneyExits.ts';
 import { buildPositions, contractSettling, type FmLedger, type FmPosition, type FmSegment } from './freshMoneyTrades.ts';
 
 export interface ExitTickDeps {
   now(): number;
-  readLedger(): FmLedger;
+  readLedger(): FmLedger | Promise<FmLedger>;
   mutate<T>(fn: (l: FmLedger) => T): Promise<T>;
   /** Usable LTPs by Dhan price id; a missing id = no price this tick. */
   prices(items: { id: string; segment: FmSegment }[]): Promise<Record<string, number>>;
@@ -34,9 +34,9 @@ const same = (a: FmExit | undefined, b: FmExit) =>
 const px = (n: number | null) => (n === null ? '–' : n.toFixed(2));
 
 export async function runExitTick(deps: ExitTickDeps, streaks: Map<string, Streak>): Promise<void> {
-  if (!Object.keys(deps.readLedger().exits ?? {}).length) { streaks.clear(); return; }
+  if (!Object.keys((await deps.readLedger()).exits ?? {}).length) { streaks.clear(); return; }
   await deps.refresh().catch(err => deps.log(`broker refresh failed: ${String((err as Error)?.message ?? err)}`));
-  const l = deps.readLedger();
+  const l = await deps.readLedger();
   const exits = l.exits ?? {};
   const keys = Object.keys(exits);
   for (const k of [...streaks.keys()]) if (!exits[k]) streaks.delete(k);
@@ -80,7 +80,7 @@ export async function runExitTick(deps: ExitTickDeps, streaks: Map<string, Strea
         if (a.kind === 'drop' || (a.kind === 'settle' && a.to === 'drop')) delete cur[x.key];
         else if (a.kind === 'settle') cur[x.key] = { ...x, state: 'incomplete', note: 'exit filled only part — the rest is not watched; edit to re-arm' };
         else if (a.kind === 'resolve') {
-          cur[x.key] = { ...x, basis: a.basis, ...a.levels, state: 'watching', ...(x.trail ? { slBasePx: a.levels.slPx, trailSteps: 0 } : {}) };
+          cur[x.key] = resolveExit(x, a.basis, a.levels);
         }
         else if (a.kind === 'mark-unknown') cur[x.key] = { ...x, state: 'unknown', note: a.note };
       }

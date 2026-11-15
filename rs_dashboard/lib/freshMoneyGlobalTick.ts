@@ -13,7 +13,7 @@ import { buildPositions, type FmLedger, type FmPosition, type FmSegment } from '
 
 export interface GlobalTickDeps {
   now(): number;
-  readLedger(): FmLedger;
+  readLedger(): FmLedger | Promise<FmLedger>;
   mutate<T>(fn: (l: FmLedger) => T): Promise<T>;
   prices(items: { id: string; segment: FmSegment }[]): Promise<Record<string, number>>;
   /** The market is open or close-only for this position and its broker session is usable. */
@@ -28,10 +28,10 @@ const same = (a: FmGlobalExit | undefined, b: FmGlobalExit) =>
 
 /** `streak` is the one global streak, kept in the watcher's memory (null = none). */
 export async function runGlobalTick(deps: GlobalTickDeps, streak: { cur: Streak | null }): Promise<void> {
-  const g0 = deps.readLedger().global;
+  const g0 = (await deps.readLedger()).global;
   if (!g0) { streak.cur = null; return; }
   if (g0.state === 'watching') await deps.refresh().catch(err => deps.log(`broker refresh failed: ${String((err as Error)?.message ?? err)}`));
-  const l = deps.readLedger();
+  const l = await deps.readLedger();
   const g = l.global;
   if (!g) { streak.cur = null; return; }
   const now = deps.now();

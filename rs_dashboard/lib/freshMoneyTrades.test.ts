@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildPositions, closeQty, cutClose, recentOrders, contractHold, dueForCheck, effectiveState, nextCheckDelay, sessionGate, slices, stateFromBroker,
+  buildPositions, bookNet, closeQty, cutClose, MISSING_CONFIRM_MS, type MissingSeen, recentOrders, contractHold, dueForCheck, effectiveState, nextCheckDelay, sessionGate, slices, stateFromBroker,
   unconfirmedQty, brokerUnits, inFlightReducing, contractSettling, reconcileDownQty, UNCONFIRMED_COUNT_MS, RECONCILE_GRACE_MS, hhmmToMin, sessionMessage, NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, PENDING_HOLD_MS, type FmOrder,
 } from './freshMoneyTrades.ts';
 
@@ -371,4 +371,32 @@ test('Orders tab: the latest 40 of EACH broker, plus every unsettled order howev
   assert.equal(list[0].id, orders[orders.length - 1].id); // newest first
   const old = [ord({ broker: 'dhan', state: 'unknown', orderId: null, ts: now }), ...Array.from({ length: 50 }, () => ord({ broker: 'dhan', ts: now }))];
   assert.ok(recentOrders(old, now).some(o => o.id === old[0].id), 'an UNKNOWN beyond the window is still listed');
+});
+
+test('bookNet: listed = its net; missing = unknown until missing on 3 reads over 30 s; unreadable = unknown, not counted', () => {
+  const seen = new Map<string, MissingSeen>();
+  const book = new Map([['111|MIS', -65]]);
+  assert.equal(bookNet(book, '111|MIS', 'dhan|111|MIS', seen, 0), -65);
+  const empty = new Map<string, number>();
+  assert.equal(bookNet(empty, '111|MIS', 't', seen, 0), null, 'first miss: partial book?');
+  assert.equal(bookNet(null, '111|MIS', 't', seen, 5_000), null, 'unreadable');
+  assert.equal(bookNet(empty, '111|MIS', 't', seen, 10_000), null);
+  assert.equal(bookNet(empty, '111|MIS', 't', seen, 20_000), null, '3 reads but under 30 s');
+  assert.equal(bookNet(empty, '111|MIS', 't', seen, MISSING_CONFIRM_MS), 0, 'believed gone');
+  assert.equal(closeQty(-65, 0), 0, 'close then refuses, the same verdict the reconcile acts on');
+  assert.equal(reconcileDownQty(-65, 0, false), 65);
+  // Listed again: the count starts over.
+  assert.equal(bookNet(new Map([['111|MIS', 0]]), '111|MIS', 't', seen, 40_000), 0);
+  assert.equal(seen.has('t'), false);
+  assert.equal(bookNet(empty, '111|MIS', 't', seen, 50_000), null);
+  // A single miss sizes the close from this page's own fills.
+  assert.equal(closeQty(-65, null), 65);
+});
+
+test('cutClose / slices: no usable per-order cap = one order, never an endless loop', () => {
+  assert.deepEqual(cutClose(130, 0), [130]);
+  assert.deepEqual(cutClose(130, NaN), [130]);
+  assert.deepEqual(cutClose(0, 1300), []);
+  assert.deepEqual(slices(130, 0), [130]);
+  assert.deepEqual(slices(0, 65), []);
 });

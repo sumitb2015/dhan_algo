@@ -69,8 +69,8 @@ export function totalPnl(positions: Pick<FmPosition, 'pnl' | 'busy'>[]): number 
 
 /**
  * Why totalPnl is unknown beyond an order in flight (that clears in seconds), for the page to say so — the global
- * exit cannot fire while it is: the contracts with an unknown P&L (an unpriced fill or outside close, a missing LTP).
- * Null when nothing but in-flight orders stands in the way.
+ * exit cannot fire while it is: an order with UNKNOWN status, and the contracts with an unknown P&L (an unpriced fill
+ * or outside close, a missing LTP). Null when nothing but pending orders stands in the way.
  */
 export function pnlUnknownReason(
   positions: Pick<FmPosition, 'pnl' | 'busy' | 'netQty' | 'underlying' | 'strike' | 'opt'>[],
@@ -78,6 +78,9 @@ export function pnlUnknownReason(
   const name = (p: Pick<FmPosition, 'underlying' | 'strike' | 'opt'>) => `${p.underlying} ${p.strike} ${p.opt}`;
   const unpriced = positions.filter(p => !p.busy && p.pnl === null);
   const parts: string[] = [];
+  // An UNKNOWN order does not clear in seconds like one in flight: say so, it is why the total stop cannot fire.
+  const unknown = positions.filter(p => p.busy === 'unknown').map(name);
+  if (unknown.length) parts.push(`an order has UNKNOWN status on ${unknown.join(', ')} — check the broker's order book`);
   const closed = unpriced.filter(p => p.netQty === 0).map(name);
   const open = unpriced.filter(p => p.netQty !== 0).map(name);
   if (closed.length) parts.push(`booked P&L unknown on ${closed.join(', ')} (a fill or outside close has no price)`);

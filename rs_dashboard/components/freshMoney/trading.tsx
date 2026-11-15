@@ -306,6 +306,8 @@ export function TradeBar({
     setDraft(String(n));
   };
 
+  // The combined P&L over every position (all brokers / underlyings) the global target / SL works on: once per render.
+  const allTotal = totalPnl(allPositions);
   const totals = useMemo(() => {
     let realised: number | null = 0, open: number | null = 0, openCount = 0;
     for (const p of positions) {
@@ -426,7 +428,7 @@ export function TradeBar({
           </div>
         )}
         <GlobalExitInputs
-          global={globalExit} total={totalPnl(allPositions)} totalText={fmtRs(totalPnl(allPositions))} totalClass={pnlClass(totalPnl(allPositions))} unknownWhy={pnlUnknownReason(allPositions)} saving={savingGlobal}
+          global={globalExit} total={allTotal} totalText={fmtRs(allTotal)} totalClass={pnlClass(allTotal)} unknownWhy={pnlUnknownReason(allPositions)} saving={savingGlobal}
           watcherAlive={exitWatcher ? exitWatcher.alive : null}
           onSet={(t, v) => { setSavingGlobal(true); onSetGlobal(t, v).finally(() => setSavingGlobal(false)); }}
         />

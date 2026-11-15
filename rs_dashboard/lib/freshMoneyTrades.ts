@@ -173,6 +173,33 @@ export function contractSettling(orders: FmOrder[], key: string, now: number): b
   return false;
 }
 
+/** A contract missing from a readable broker book counts as "broker holds 0" only after this many reads in a row,
+ *  spanning at least MISSING_CONFIRM_MS. */
+export const MISSING_CONFIRM_READS = 3;
+export const MISSING_CONFIRM_MS = 30_000;
+export interface MissingSeen { first: number; reads: number }
+
+/**
+ * The broker's net for one contract (`nk` = netKey) from one positions read, recording the read in `seen`
+ * (keyed by `tag`, e.g. `broker|netKey`). A contract this page traded today is normally listed in the day book even
+ * once closed (net 0), so one that is MISSING is first read as unknown (null): the book may be partial or error-shaped
+ * (2026-11-14: missing read as 0 wrote live positions off). Missing on MISSING_CONFIRM_READS reads in a row over at
+ * least MISSING_CONFIRM_MS is believed (0): the contract really has left the book, and the reconcile and the close
+ * must then agree it is gone instead of keeping a phantom that the exit watcher would try to close. `nets` null =
+ * unreadable book: null, and the read is not counted.
+ */
+export function bookNet(
+  nets: ReadonlyMap<string, number> | null, nk: string, tag: string, seen: Map<string, MissingSeen>, now: number,
+): number | null {
+  if (!nets) return null;
+  const v = nets.get(nk);
+  if (v !== undefined) { seen.delete(tag); return v; }
+  const s = seen.get(tag) ?? { first: now, reads: 0 };
+  s.reads += 1;
+  seen.set(tag, s);
+  return s.reads >= MISSING_CONFIRM_READS && now - s.first >= MISSING_CONFIRM_MS ? 0 : null;
+}
+
 /**
  * Down-only reconcile (dhan-terminal-position-ownership Invariant 2): how much of this page's position the broker no
  * longer holds (an MIS auto square-off, a close from another desk). Never up: a larger broker position belongs to
@@ -277,6 +304,9 @@ export function closeQty(netQty: number, brokerNet: number | null): number {
  * (Zerodha's exchange freeze quantity; identity for other brokers). A close only reduces risk: sliced, never refused.
  */
 export function cutClose(qty: number, maxPerOrder: number, freezeCut: (part: number) => number[] = p => [p]): number[] {
+  if (!(qty > 0)) return [];
+  // No usable cap (a lot size that did not resolve): one order rather than a loop that never ends.
+  if (!(maxPerOrder > 0)) return freezeCut(qty);
   const out: number[] = [];
   for (let left = qty; left > 0; left -= maxPerOrder) out.push(...freezeCut(Math.min(left, maxPerOrder)));
   return out;
@@ -285,6 +315,8 @@ export function cutClose(qty: number, maxPerOrder: number, freezeCut: (part: num
 /** Split `qty` units into orders of at most `maxLots` lots each. */
 export function slices(qty: number, lot: number, maxLots = FM_MAX_LOTS_PER_ORDER): number[] {
   const max = maxLots * lot;
+  if (!(qty > 0)) return [];
+  if (!(max > 0)) return [qty];
   const out: number[] = [];
   for (let left = qty; left > 0; left -= max) out.push(Math.min(left, max));
   return out;
