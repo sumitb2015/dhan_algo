@@ -78,7 +78,7 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
   return (
     <div data-testid="pnf-trade-bar" className="bg-zinc-900/70 border-b border-zinc-800 text-xs">
     {/* Row 1: account, size, style | the order buttons and the position (the buttons never drop to a line of their own) */}
-    <div className="flex items-center gap-x-4 gap-y-1.5 flex-wrap px-6 py-1">
+    <div className="flex items-center gap-x-3 gap-y-1.5 flex-wrap px-4 py-1">
       {/* 1. Broker & Trading Mode */}
       <div className="flex items-center gap-2">
         {/* the broker is picked in the page header; the bar names it so the order target is never in doubt */}
@@ -241,7 +241,7 @@ export default function PnfTradeBar({ trade, target, broker, mode, onModeChange,
     </div>
     {/* Row 2 (a Renko index chart): the option map - what Bull / Bear trade - on a line of its own under the account row */}
     {indexSlot && (!mapCollapsed || mapAttention) && (
-      <div data-testid="pnf-trade-map-row" className="flex items-center gap-3 px-6 py-1 border-t border-zinc-800/60">
+      <div data-testid="pnf-trade-map-row" className="flex items-center gap-3 px-4 py-1 border-t border-zinc-800/60">
         <span className={`${LABEL} shrink-0 whitespace-nowrap`} title="What the Bull / Bear buttons and AUTO trade on this index chart">Option map</span>
         {indexSlot}
       </div>

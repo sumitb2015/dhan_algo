@@ -12,10 +12,12 @@ import UpdateAppPanel from './UpdateAppPanel';
 import SettingsPanel from './SettingsPanel';
 import ThemeToggle from './ThemeToggle';
 
-// Takes no props: memo stops a page's own re-renders (a live chart ticks every second) re-rendering the whole nav and its panels.
+// memo stops a page's own re-renders (a live chart ticks every second) re-rendering the whole nav and its panels.
+// `compact`: Sync Data / Update / Disconnect show as icon-only buttons (name kept in aria-label + tooltip), for chart pages
+// that need the header width.
 export default memo(NavBar);
 
-function NavBar() {
+function NavBar({ compact = false }: { compact?: boolean } = {}) {
   const router = useRouter();
   const [syncPanelOpen, setSyncPanelOpen] = useState(false);
   const [updatePanelOpen, setUpdatePanelOpen] = useState(false);
@@ -82,10 +84,10 @@ function NavBar() {
       <Tooltip>
         <TooltipTrigger
           onClick={() => setSyncPanelOpen(true)}
-          render={<button className="flex items-center gap-1.5 px-2.5 border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900 text-zinc-100 dark:text-zinc-300 hover:text-emerald-400 hover:border-emerald-500/40 rounded-xl text-xs h-7 cursor-pointer font-medium transition-all" />}
+          render={<button type="button" aria-label="Sync Data" className={`flex items-center gap-1.5 ${compact ? 'px-1.5 min-w-7 justify-center' : 'px-2.5'} border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900 text-zinc-100 dark:text-zinc-300 hover:text-emerald-400 hover:border-emerald-500/40 rounded-xl text-xs h-7 cursor-pointer font-medium transition-all`} />}
         >
           <DatabaseZap className="h-3.5 w-3.5" />
-          Sync Data
+          {!compact && 'Sync Data'}
           {sync.running && (
             <>
               <RefreshCw className="h-3 w-3 animate-spin text-sky-500" />
@@ -111,21 +113,24 @@ function NavBar() {
       <Tooltip>
         <TooltipTrigger
           onClick={() => setUpdatePanelOpen(true)}
-          render={<button className="flex items-center gap-1.5 px-2.5 border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900 text-zinc-100 dark:text-zinc-300 hover:text-indigo-400 hover:border-indigo-500/40 rounded-xl text-xs h-7 cursor-pointer font-medium transition-all" />}
+          render={<button type="button" aria-label="Update" className={`flex items-center gap-1.5 ${compact ? 'w-7 justify-center' : 'px-2.5'} border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900 text-zinc-100 dark:text-zinc-300 hover:text-indigo-400 hover:border-indigo-500/40 rounded-xl text-xs h-7 cursor-pointer font-medium transition-all`} />}
         >
           <GitPullRequest className="h-3.5 w-3.5" />
-          Update
+          {!compact && 'Update'}
         </TooltipTrigger>
         <TooltipContent>
           Pull the latest changes from GitHub
         </TooltipContent>
       </Tooltip>
       <button
+        type="button"
         onClick={handleDisconnect}
-        className="flex items-center gap-1.5 px-2.5 h-7 border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900 text-zinc-100 dark:text-zinc-300 hover:text-red-400 hover:border-red-500/40 rounded-xl text-xs cursor-pointer font-medium active:scale-[0.98] transition-all whitespace-nowrap"
+        aria-label="Disconnect"
+        title={compact ? 'Disconnect (end the session)' : undefined}
+        className={`flex items-center gap-1.5 ${compact ? 'w-7 justify-center' : 'px-2.5'} h-7 border border-zinc-700/60 dark:border-zinc-800 bg-zinc-900 text-zinc-100 dark:text-zinc-300 hover:text-red-400 hover:border-red-500/40 rounded-xl text-xs cursor-pointer font-medium active:scale-[0.98] transition-all whitespace-nowrap`}
       >
         <LogOut className="h-3.5 w-3.5" />
-        Disconnect
+        {!compact && 'Disconnect'}
       </button>
     </div>
 

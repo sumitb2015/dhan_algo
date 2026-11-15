@@ -1386,7 +1386,6 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const seg = (active: boolean) =>
     `px-2.5 h-6 text-[11px] font-bold rounded-md transition-colors ${active ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-100'}`;
   const segLabel = SEGMENTS.find(x => x.id === activeTarget.kind)?.label ?? '';
-  const activeFno = activeTarget.kind === 'futures' || activeTarget.kind === 'options';
   const shownOverlay: Overlay = activeChartModel.vwapAllowed ? overlay : 'sma';
   const boxShort = (s: PnfSettings) => boxText(s).replace(/ box$/, '');
   const loadErrors = [feed1.loadError && (dual ? `Chart 1: ${feed1.loadError}` : feed1.loadError), dual && feed2.loadError && `Chart 2: ${feed2.loadError}`].filter(Boolean);
@@ -1596,53 +1595,43 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   return (
     <div className={`flex flex-col h-screen bg-zinc-950 text-white ${tradeMode === 'REAL' ? 'border-t-4 border-red-500' : ''}`} data-trade-mode={tradeMode}>
       <header className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur">
-        {/* row 1: identity, data date and navigation. */}
-        <div className="flex items-center gap-x-4 gap-y-2 flex-wrap px-6 pt-3 pb-2">
-          <div className="flex items-center gap-3 shrink-0 min-w-0">
-            <div className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
-              {renko ? <Boxes className="w-4 h-4 text-emerald-400" aria-hidden="true" /> : <ChartScatter className="w-4 h-4 text-emerald-400" aria-hidden="true" />}
+        {/* row 1: identity + WHAT the active chart shows (left); market context, account and navigation (right). One row on a
+            wide screen; it wraps (right block onto its own line) on a narrow one. The settings summary and the price strip
+            below already say interval / box / confirm, so the title carries no subtitle line. */}
+        <div className="flex items-center gap-x-3 gap-y-1.5 flex-wrap px-4 py-1.5">
+          <div data-testid="pnf-header-identity" className="flex items-center gap-2 shrink-0 min-w-0"
+               title={`${renko ? 'Renko' : 'Point & Figure'} · Scalping · ${segLabel} · ${dual ? `Chart ${active} · ` : ''}${intervalLabel(effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind), renko))} · ${boxText(activeSettings)} · ${renko ? `confirm ${activeSettings.reversal} brick${activeSettings.reversal === 1 ? '' : 's'}` : `${activeSettings.reversal}-box reversal`}`}>
+            <div className="flex items-center justify-center w-7 h-7 rounded-lg shrink-0 bg-emerald-500/10 border border-emerald-500/25">
+              {renko ? <Boxes className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" /> : <ChartScatter className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />}
             </div>
-            <div className="min-w-0">
-              <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400 mb-0.5">Scalping · {segLabel}</p>
-              <h1 className="text-sm font-bold text-white tracking-tight leading-none flex items-center gap-2">
-                {renko ? 'Renko' : <>Point &amp; Figure</>}
-                {tradeMode === 'REAL' && <span data-testid="pnf-real-banner" className="px-1.5 py-0.5 rounded bg-red-600 text-oncolor text-[11px] font-bold tracking-wide">LIVE · REAL MONEY</span>}
-              </h1>
-              <p className="text-[10px] text-zinc-500 font-medium mt-1 truncate">
-                {`${dual ? `Chart ${active} · ` : ''}${intervalLabel(effectiveInterval(activeSettings.interval, hasLongIntervals(activeTarget.kind), renko))} · ${boxText(activeSettings)} · ${renko ? `confirm ${activeSettings.reversal} brick${activeSettings.reversal === 1 ? '' : 's'}` : `${activeSettings.reversal}-box reversal`} · ${activeFno ? activeFeed.label : activeFeed.name ?? activeTarget.name}`}
-              </p>
-            </div>
+            <h1 className="text-sm font-bold text-white tracking-tight leading-none flex items-center gap-2 whitespace-nowrap">
+              {renko ? 'Renko' : <>Point &amp; Figure</>}
+              {tradeMode === 'REAL' && <span data-testid="pnf-real-banner" className="px-1.5 py-0.5 rounded bg-red-600 text-oncolor text-[11px] font-bold tracking-wide">LIVE · REAL MONEY</span>}
+            </h1>
           </div>
-          {/* Nifty and India VIX vs the previous close: market context, beside the data date on a wide screen. */}
-          <div className="ml-auto flex items-center gap-2 shrink-0">
-            {wideHeader && <><HeaderIndexChips /><span className="w-px h-5 bg-zinc-800 shrink-0" /></>}
-            <HeaderClock />
-            <span className="w-px h-5 bg-zinc-800 shrink-0" />
-            <DataChip date={activeFeed.loaded?.dataDate} lastSession={Boolean(activeFeed.loaded?.dataDate) && activeFeed.loaded?.dataDate !== today} />
-            <span className="w-px h-5 bg-zinc-800 shrink-0" />
-            <NavBar />
-          </div>
-        </div>
-
-        {/* row 2: WHAT the active chart shows (left) and the market / account it trades on (right), at every width. */}
-        <div className="flex items-center gap-x-4 gap-y-2 flex-wrap px-6 pb-2.5">
+          <span className="w-px h-5 bg-zinc-800 shrink-0" />
           {/* Remounted per chart, so one chart's contract lists never show on the other. */}
           <fieldset disabled={activeLocked} className="contents" title={activeLocked ? `Chart ${active} is running AUTO` : undefined}>
             <InstrumentBar key={active} target={activeTarget} onSegment={pickSegment} onPick={choose}
                            onError={msg => setContractError(e => (e[active] === msg ? e : { ...e, [active]: msg }))} />
           </fieldset>
-          {/* The account the trade bar and AUTO trade on (and, on a narrower screen, the Nifty / VIX chips). */}
-          <div className="ml-auto shrink-0 flex items-center gap-2">
-            {!wideHeader && <><HeaderIndexChips /><span className="w-px h-5 bg-zinc-800 shrink-0" /></>}
+          {/* Nifty / VIX vs the previous close, clock, data date, then the account the trade bar and AUTO trade on, nav last. */}
+          <div className="ml-auto flex items-center gap-2 shrink-0 flex-wrap justify-end">
+            {wideHeader && <><HeaderIndexChips /><span className="w-px h-5 bg-zinc-800 shrink-0" /></>}
+            <HeaderClock />
+            <DataChip date={activeFeed.loaded?.dataDate} lastSession={Boolean(activeFeed.loaded?.dataDate) && activeFeed.loaded?.dataDate !== today} />
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
             <BrokerPicker value={broker} onChange={setBroker} brokers={BROKERS} />
             <HeaderPnlMargin broker={broker} mode={tradeMode} paperPnl={paperPnl + autoPaper.total} prices={headerPrices}
                              paperNote={autoToday.some(r => r.mode === 'PAPER') ? `trade bar ${Math.round(paperPnl)} + AUTO ${Math.round(autoPaper.total)} (booked ${Math.round(autoPaper.realised)}, open ${Math.round(autoPaper.unrealised)})` : undefined} />
+            <span className="w-px h-5 bg-zinc-800 shrink-0" />
+            <NavBar compact />
           </div>
         </div>
 
         {/* row 3: the live price strip, then how the chart is drawn. The strip claims at least 560px and clips what does not fit, so
             on a narrow screen the settings move to the next line instead of sliding over the price. */}
-        <div className="flex items-center gap-x-3 gap-y-2 flex-wrap px-6 py-2 border-t border-zinc-800 bg-zinc-900/40">
+        <div className="flex items-center gap-x-3 gap-y-1.5 flex-wrap px-4 py-1 border-t border-zinc-800 bg-zinc-900/40">
           <div ref={setHeaderSlot} data-testid="pnf-header-summary" className="flex items-center grow basis-[560px] min-w-0 overflow-hidden" />
           {/* The settings fold away to one button that says what they are, so the charts get the row back; the price strip stays. */}
           {settingsFolded ? (
@@ -1706,14 +1695,14 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
           style={{ gridTemplateRows: 'minmax(0, 1fr)' }}
         >
           <PnfPanel
-            title={dual ? `C1 · ${feed1.label} · ${boxText(settings)}` : `${feed1.label} · ${boxText(settings)}`}
+            title={dual ? `C1 · ${feed1.label}` : `${feed1.label} · ${boxText(settings)}`}
             strike={feed1.loaded?.key ?? 0}
             fill
             {...chartProps(1)}
           />
           {dual && (
             <PnfPanel
-              title={`C2 · ${feed2.label} · ${boxText(settings2)}`}
+              title={`C2 · ${feed2.label}`}
               strike={feed2.loaded?.key ? -feed2.loaded.key : -1}
               fill
               {...chartProps(2)}

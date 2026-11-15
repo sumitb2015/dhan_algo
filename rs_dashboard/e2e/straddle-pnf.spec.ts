@@ -115,8 +115,8 @@ test('dual chart view by default, can toggle to one chart and back', async ({ pa
   await expect(panels).toHaveCount(2);
 
   // First chart defaults to 0.1% box, second chart defaults to 1% box
-  await expect(panels.nth(0)).toContainText('0.1% box');
-  await expect(panels.nth(1)).toContainText('1% box');
+  await expect(panels.nth(0).getByTestId('pnf-box-info')).toContainText('(0.1% of');
+  await expect(panels.nth(1).getByTestId('pnf-box-info')).toContainText('(1% of');
 
   // Toggle to 1 Chart view
   await page.getByRole('button', { name: '1 Chart View' }).click();
@@ -273,7 +273,7 @@ test('the interval and box % controls default to 1 minute / 0.1% and say so in t
   await page.goto('/straddle-pnf');
   await expect(page.getByLabel('Interval')).toHaveValue('1');
   await expect(page.getByLabel('Box %')).toHaveValue('0.1');
-  await expect(page.getByText(/1 min · 0.1% box/)).toBeVisible();
+  await expect(page.getByTestId('pnf-header-identity')).toHaveAttribute('title', /1 min · 0.1% box/);   // the header says it (title tooltip)
   await expect(page.getByTestId('pnf-box-info').first()).toContainText('(0.1% of');
 });
 
@@ -284,7 +284,7 @@ test('changing the interval regroups the bars: fewer columns, and the header say
   await expect(panel.getByTestId('pnf-box-info')).toContainText('cols');
   const one = await cols(panel);
   await page.getByLabel('Interval').selectOption('15');
-  await expect(page.getByText(/15 min · 0.1% box/)).toBeVisible();
+  await expect(page.getByTestId('pnf-header-identity')).toHaveAttribute('title', /15 min · 0.1% box/);   // the header says it (title tooltip)
   await expect.poll(async () => cols(panel)).toBeLessThan(one);
   await expect(page.getByLabel('Interval').locator('option')).toHaveText(['1 min', '3 min', '5 min', '15 min', '30 min', '1 hr', '4 hr', '1 day', '1 week', '1 month']);   // an index offers the long intervals too
 });
@@ -306,7 +306,7 @@ test('the box % applies on Enter, an invalid entry is refused and reverts, and t
   await input.press('Enter');
   await expect(panel.getByTestId('pnf-box-info')).toContainText('(0.2% of');
   expect(Math.abs((await boxOf()) - (await anchorOf()) * 0.002)).toBeLessThanOrEqual(0.0051);   // twice the box, on the same anchor
-  await expect(page.getByText(/1 min · 0.2% box/)).toBeVisible();
+  await expect(page.getByTestId('pnf-header-identity')).toHaveAttribute('title', /1 min · 0.2% box/);   // the header says it (title tooltip)
 
   await input.fill('abc');
   await expect(input).toHaveAttribute('aria-invalid', 'true');
@@ -326,11 +326,11 @@ test('the chosen interval and box % are remembered after a reload', async ({ pag
   await page.getByLabel('Interval').selectOption('5');
   await page.getByLabel('Box %').fill('0.75');
   await page.getByLabel('Box %').press('Enter');
-  await expect(page.getByText(/5 min · 0.75% box/)).toBeVisible();
+  await expect(page.getByTestId('pnf-header-identity')).toHaveAttribute('title', /5 min · 0.75% box/);   // the header says it (title tooltip)
   await page.reload();
   await expect(page.getByLabel('Interval')).toHaveValue('5');
   await expect(page.getByLabel('Box %')).toHaveValue('0.75');
-  await expect(page.getByText(/5 min · 0.75% box/)).toBeVisible();
+  await expect(page.getByTestId('pnf-header-identity')).toHaveAttribute('title', /5 min · 0.75% box/);   // the header says it (title tooltip)
 });
 
 test('changing the interval or the box % redraws the charts but never fires an alert for old signals', async ({ page }) => {
@@ -380,7 +380,6 @@ test('the reversal control defaults to 3 boxes, changes how often columns turn, 
   const three = await cols(panel);
   await page.getByRole('button', { name: 'Alert log' }).click();
   await page.getByLabel('Reversal').selectOption('2');
-  await expect(page.getByText(/2-box reversal/)).toBeVisible();
   await expect(panel.getByTestId('pnf-box-info')).toContainText('2-box');
   await expect.poll(async () => cols(panel)).toBeGreaterThan(three);   // a smaller reversal turns the column more often
   await page.waitForTimeout(400);
@@ -417,7 +416,7 @@ test('the box can be set in points: the unit toggle swaps the input, Enter appli
   await expect(page.getByTestId('pnf-box-info').first()).not.toContainText('Box 2.00');  // typing alone changes nothing
   await pts.press('Enter');
   await expect(page.getByTestId('pnf-box-info').first()).toContainText('Box 2.00 (points)');
-  await expect(page.getByText(/1 min · 2-pt box/)).toBeVisible();
+  await expect(page.getByTestId('pnf-header-identity')).toHaveAttribute('title', /1 min · 2-pt box/);   // the header says it (title tooltip)
   await pts.fill('-3');                                                           // invalid: reverts on commit
   await pts.blur();
   await expect(pts).toHaveValue('2');
