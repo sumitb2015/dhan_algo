@@ -17,7 +17,8 @@ const DHAN_HISTORICAL_URL = 'https://api.dhan.co/v2/charts/historical';
 const FAIL_RETRY_MS = 5 * 60_000;
 const FETCH_TIMEOUT_MS = 5000;
 
-export interface PrevDayLevel { high: number; low: number; close: number }
+/** `date` = the IST day the levels belong to (absent in a disk cache written before it was added). */
+export interface PrevDayLevel { high: number; low: number; close: number; date?: string }
 
 const INDEX_IDS: Record<string, string> = { NIFTY: '13', BANKNIFTY: '25', SENSEX: '51' };
 
@@ -58,7 +59,7 @@ export function pickPrevDay(json: { high?: number[]; low?: number[]; close?: num
   for (let i = 0; i < ts.length; i++) {
     const day = new Date(ts[i] * 1000).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
     const h = Number(json.high?.[i]), l = Number(json.low?.[i]), c = Number(json.close?.[i]);
-    if (day < today && h > 0 && l > 0 && c > 0) last = { high: h, low: l, close: c };
+    if (day < today && h > 0 && l > 0 && c > 0) last = { high: h, low: l, close: c, date: day };
   }
   return last;
 }

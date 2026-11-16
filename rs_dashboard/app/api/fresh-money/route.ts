@@ -6,6 +6,7 @@ import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { parsedDay } from '@/lib/freshMoneyFiles';
 import { readJsonFile } from '@/lib/lockedJsonFile';
 import { istMinuteOfDay, istToday } from '@/lib/istTime';
+import { prevDayLevelsNow, type PrevDayLevel } from '@/lib/prevDayLevels';
 import { buildBoardRows, fmtMinOfDay, oiFlow, strikeStep, type Buildup, type CloseOi, type PrevCloses, type SideFlow } from '@/lib/freshMoney';
 
 // Read-only: everything comes from snapshot CSVs in debug/ (no Dhan call except the cached lot-size lookup). The IV
@@ -51,6 +52,11 @@ export interface FreshMoneyResponse {
   /** A past session shown with its official end-of-day OI (the collector's `_eod_oi.json`, fetched the next trading
    *  morning): OI change / total OI come from it; `official` of `total` board sides had one. Null = in-session readings. */
   closeOi: { fetchedAt: string; official: number; total: number } | null;
+  /** The index's previous-day high / low / close for the PDH / PDL tags (Dhan daily candles, the Price Ladder's cache:
+   *  fetched once a day, never awaited — null until it arrives, on MCX, or when Dhan has none). The previous day of
+   *  TODAY (the session you trade), not of the shown file. Added outside the response cache (a past day's file never
+   *  changes, so a cached body would keep null all day). */
+  prevDay?: PrevDayLevel | null;
   /** Slot layout of every row's `flow`: boundaries "HH:MM" oldest first (FLOW_SLOTS + 1; the last = the running slot's
    *  start), whether each had a reading, the latest snapshot time ("HH:MM:SS", the running slot's "so far"), and the
    *  edge every row's `flow.day` is read at ("HH:MM"; earlier than the last bound after a collector gap; null = none).
@@ -63,6 +69,7 @@ export interface FreshMoneyResponse {
 const respCache = new Map<string, { key: string; body: FreshMoneyResponse }>();
 
 const todayIST = istToday;
+const isMcxU = (u: string) => MCX_LOT_MULTIPLIER[u] !== undefined;
 /** Minutes of the day now, IST. */
 const nowIstMin = () => istMinuteOfDay(Date.now());
 
@@ -112,7 +119,9 @@ export async function GET(req: NextRequest) {
   const eodMtime = ended ? await fs.promises.stat(eodFile).then(s => s.mtimeMs, () => 0) : 0;
   const cacheKey = `${file}:${st.mtimeMs}:${st.size}:${lot}:${todayIST()}:${ended}:${eodMtime}`;
   const cached = respCache.get(underlying);
-  if (cached && cached.key === cacheKey) return NextResponse.json(cached.body);
+  // Cached or null, never awaited (one background Dhan call per index per day).
+  const prevDay = isMcxU(underlying) ? null : prevDayLevelsNow(underlying);
+  if (cached && cached.key === cacheKey) return NextResponse.json({ ...cached.body, prevDay });
 
   const parsed = await parsedDay(file, true);
   const snaps = parsed?.snaps ?? [];
@@ -172,5 +181,5 @@ export async function GET(req: NextRequest) {
     },
   };
   respCache.set(underlying, { key: cacheKey, body });
-  return NextResponse.json(body);
+  return NextResponse.json({ ...body, prevDay });
 }

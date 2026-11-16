@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, flowCarry, scaleOiRows, pcrOf, boardPcr, fmtPcr, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay,
+  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, flowCarry, scaleOiRows, pcrOf, boardPcr, fmtPcr, levelStrikes, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay,
 } from './freshMoney.ts';
 
 const HEAD = 'timestamp,spot,expiry,strike,CE_LTP,CE_IV,CE_OI,CE_change_OI,CE_volume,PE_LTP,PE_IV,PE_OI,PE_change_OI,PE_volume';
@@ -401,4 +401,12 @@ test('PCR: put OI / call OI per strike (Dhan 24650: 20.83L / 0.79L = 26.35); boa
   assert.equal(boardPcr([]), null);
   assert.equal(fmtPcr(null), '–');
   assert.equal(fmtPcr(123.4), '123');
+});
+
+test('levelStrikes: PDH / PDL on the nearest strike; both on one strike on a narrow day; none without levels', () => {
+  const m = levelStrikes({ high: 25321.4, low: 25064.9 }, 50);
+  assert.deepEqual([...m], [[25300, ['PDH']], [25050, ['PDL']]]);
+  assert.deepEqual([...levelStrikes({ high: 25110, low: 25090 }, 50)], [[25100, ['PDH', 'PDL']]]);
+  assert.equal(levelStrikes(null, 50).size, 0);
+  assert.equal(levelStrikes({ high: 1, low: 1 }, 0).size, 0);
 });

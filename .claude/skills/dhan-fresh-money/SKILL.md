@@ -46,6 +46,10 @@ positions read twice", "board price snaps back to the startup value", "OI change
 - PCR switch (pref `freshMoney.showPcr`): `pcrOf` (put OI ÷ call OI, Dhan's definition; null when call OI is 0 or a side
   unknown) in a 40 px column beside the strike, `boardPcr` (two-sided strikes only) on the Σ row. The strike column
   width is the CSS var `--fm-k` in all four grids (`strikeColPx`), and `flowFixedPx`/`slotsThatFit` count it.
+- PDH / PDL tags (NSE indices): the route adds `prevDay` from `prevDayLevelsNow` (the Price Ladder's once-a-day Dhan
+  daily-candle cache, `lib/prevDayLevels.ts`) OUTSIDE `respCache` (a past day's file never changes, so a cached body
+  would keep null). It is the previous day of TODAY, not of the shown file. `levelStrikes` puts each tag on the nearest
+  strike; the strike column grows a 28 px tag slot (`LEVEL_PX`) only while the levels are known.
 - `lib/freshMoneyChime.ts` - pure: `tradeEvents(prev, cur)` diffs two trade-state polls into one sound (warn > exit >
   entry) plus toasts for SERVER-fired exits (target / SL / total; they had no toast before), `streakStart` rings when the
   Σ row starts or turns a 3+ run. The page plays them via `lib/alertSound.ts` (dhan-alert-sound): leader tab only

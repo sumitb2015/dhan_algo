@@ -452,3 +452,18 @@ export function boardPcr(rows: { put: { oi: number | null } | null; call: { oi: 
 export function fmtPcr(v: number | null): string {
   return v === null || !Number.isFinite(v) ? '–' : v >= 100 ? v.toFixed(0) : v.toFixed(2);
 }
+
+export type LevelTag = 'PDH' | 'PDL';
+
+/** The strike each previous-day level sits nearest to (rounded to the strike step), with its tags: one strike can
+ *  carry both on a narrow day. Empty without levels or a step. */
+export function levelStrikes(levels: { high: number; low: number } | null | undefined, step: number): Map<number, LevelTag[]> {
+  const out = new Map<number, LevelTag[]>();
+  if (!levels || !(step > 0)) return out;
+  for (const [tag, v] of [['PDH', levels.high], ['PDL', levels.low]] as const) {
+    if (!(v > 0) || !Number.isFinite(v)) continue;
+    const k = Math.round(v / step) * step;
+    out.set(k, [...(out.get(k) ?? []), tag]);
+  }
+  return out;
+}

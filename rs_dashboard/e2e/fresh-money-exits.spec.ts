@@ -490,3 +490,22 @@ test('PCR switch: a column beside the strike (put OI ÷ call OI), board PCR on t
   await expect(page.getByTestId('fm-pcr').first()).toHaveText('1.33');
   expect(m.blocked).toEqual([]);
 });
+
+test('PDH / PDL tags sit on the strike nearest each previous-day level, with the exact level in the hover; none on MCX', async ({ page }) => {
+  const m = await install(page);
+  await expect(page.getByTestId('fm-pdh')).toHaveCount(0);   // MCX board: no index levels
+  await page.route(/\/api\/fresh-money\?/, route => json(route, {
+    ...board(), market: 'NSE', lot: 65, mult: null, prevDay: { high: 8212.5, low: 7948, close: 8105, date: '2026-11-13' },
+  }));
+  await page.reload();
+  const pdh = page.getByTestId('fm-pdh');
+  await expect(pdh).toHaveCount(1);
+  await expect(page.locator('div.grid', { hasText: '8200' }).filter({ has: pdh })).toHaveCount(1);
+  await expect(pdh.locator('xpath=..')).toHaveAttribute('title', /^Previous day high 8,212\.5 \(2026-11-13\)/);
+  await expect(page.locator('div.grid', { hasText: '7900' }).filter({ has: page.getByTestId('fm-pdl') })).toHaveCount(1);
+  // With PCR on and on the slots tab, rows still hold one line.
+  await page.getByRole('button', { name: 'PCR', exact: true }).click();
+  await page.getByRole('tab', { name: '3m slots' }).click();
+  expect((await page.locator('div.grid', { hasText: '8200' }).filter({ has: pdh }).first().boundingBox())!.height).toBeLessThan(30);
+  expect(m.blocked).toEqual([]);
+});
