@@ -269,12 +269,19 @@ export function valueArea(rows: ProfileRow[], pct: number): ValueArea {
 
 /**
  * The value-area expansion itself, on bare per-row weights (volume or TPO count): from
- * `pocIdx`, repeatedly add whichever side's next TWO rows weigh more (up wins a tie) until
- * `pct` of the total is enclosed. Returns the enclosed row-index range. Shared by the volume
- * profile above and the TPO profile in lib/marketProfile.ts, which differ only in how they
- * pick the POC row.
+ * `pocIdx`, repeatedly compare the next TWO rows above with the next two below and add the
+ * heavier side (up wins a tie) until `pct` of the total is enclosed. Returns the enclosed
+ * row-index range. Shared by the volume profile above and the TPO profile in
+ * lib/marketProfile.ts.
+ *
+ * `wholePairs`: the textbook Steidlmayer / CBOT TPO method adds the chosen pair as a unit,
+ * even when the target is reached on its first row ("at least 70%"). Without it (the volume
+ * profile's long-standing behaviour) expansion stops on the row that reaches the target,
+ * which can leave the value area one row narrower than a TPO platform shows.
  */
-export function expandValueArea(weights: number[], pocIdx: number, pct: number): { lo: number; hi: number } {
+export function expandValueArea(
+  weights: number[], pocIdx: number, pct: number, wholePairs = false,
+): { lo: number; hi: number } {
   if (pocIdx < 0 || pocIdx >= weights.length) return { lo: -1, hi: -1 };
   const total = weights.reduce((s, w) => s + w, 0);
   const target = (total * Math.min(Math.max(pct, 1), 100)) / 100;
@@ -293,9 +300,9 @@ export function expandValueArea(weights: number[], pocIdx: number, pct: number):
     const upSum = hi < weights.length - 1 ? pairAt(hi + 1, 1) : -1;
     const downSum = lo > 0 ? pairAt(lo - 1, -1) : -1;
     if (upSum >= downSum) {
-      for (let k = 0; k < 2 && hi < weights.length - 1 && cum < target; k++) cum += weights[++hi];
+      for (let k = 0; k < 2 && hi < weights.length - 1 && (wholePairs || cum < target); k++) cum += weights[++hi];
     } else {
-      for (let k = 0; k < 2 && lo > 0 && cum < target; k++) cum += weights[--lo];
+      for (let k = 0; k < 2 && lo > 0 && (wholePairs || cum < target); k++) cum += weights[--lo];
     }
   }
   return { lo, hi };

@@ -119,7 +119,7 @@ export interface Profile {
   ibLow: number | null;
   extUp: number;
   extDown: number;
-  /** TPOs strictly above / below the POC row. */
+  /** Dalton's TPO count: TPOs above / below the POC row, excluding the POC row and single-print tails. */
   tpoAbove: number;
   tpoBelow: number;
   /** Mid-profile single-print runs (count 1, at least two rows tall, not touching an extreme). */
@@ -282,13 +282,14 @@ export function pocIndex(counts: number[]): number {
 }
 
 /**
- * Value area by the classic expansion (lib/volumeProfile.ts expandValueArea, shared with the
- * volume profile): from the POC, add whichever side's next TWO rows hold more TPOs until `pct`
- * of all TPOs is enclosed. Only the POC pick differs — TPO counts tie far more often than
- * volumes, so pocIndex breaks ties toward the middle. Returns row indices.
+ * Value area by the Steidlmayer / CBOT TPO method (lib/volumeProfile.ts expandValueArea): from
+ * the POC, compare the next TWO rows above with the two below and add the heavier PAIR as a
+ * whole (up wins a tie) until at least `pct` of all TPOs is enclosed. TPO counts tie far more
+ * often than volumes, so the POC itself comes from pocIndex (ties toward the middle).
+ * Returns row indices. Verified against an independent implementation on 50 NIFTY sessions.
  */
 export function valueAreaIdx(counts: number[], poc: number, pct: number): { lo: number; hi: number } {
-  return expandValueArea(counts, poc, pct);
+  return expandValueArea(counts, poc, pct, true);
 }
 
 /**
@@ -351,13 +352,6 @@ function finish(acc: Accumulated, rowSize: number, vaPct: number): Profile {
     }
   }
 
-  let tpoAbove = 0;
-  let tpoBelow = 0;
-  counts.forEach((c, i) => {
-    if (i > pocI) tpoAbove += c;
-    else if (i < pocI) tpoBelow += c;
-  });
-
   // A row whose only TPO belongs to the period still forming is not a single print yet:
   // the next minutes may well print there again.
   const isSingle = (r: TpoRow) => r.marks.length === 1 && r.marks[0] !== acc.formingMark;
@@ -376,6 +370,18 @@ function finish(acc: Accumulated, rowSize: number, vaPct: number): Profile {
     sellingTail = null;
     buyingTail = null;
   }
+
+  // Dalton's TPO count: TPOs above vs below the POC, leaving out the POC row itself and the
+  // single-print tails (their message is already read as excess at the extremes).
+  const tailRows = (t: PriceRun | null) => (t ? Math.round((t.to - t.from) / rowSize) + 1 : 0);
+  const topCut = rows.length - tailRows(sellingTail);
+  const bottomCut = tailRows(buyingTail);
+  let tpoAbove = 0;
+  let tpoBelow = 0;
+  counts.forEach((c, i) => {
+    if (i > pocI && i < topCut) tpoAbove += c;
+    else if (i < pocI && i >= bottomCut) tpoBelow += c;
+  });
 
   let rotationFactor = 0;
   for (let i = 1; i < acc.periods.length; i++) {

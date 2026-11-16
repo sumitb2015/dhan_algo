@@ -90,11 +90,25 @@ test('pocIndex breaks ties toward the middle of the range', () => {
   assert.strictEqual(pocIndex([]), -1);
 });
 
-test('valueAreaIdx expands two rows at a time toward the heavier side', () => {
+test('valueAreaIdx adds the heavier two-row PAIR as a whole (Steidlmayer / CBOT)', () => {
   // total 20, 70% = 14. POC row 3 (6). Up pair (4,5)=3+1=4, down pair (2,1)=4+2=6 → down: 6+4+2=12.
-  // Next: up (4,5)=4 vs down (0)=1 → up: +3 = 15 ≥ 14 stop.
+  // Next: up (4,5)=4 vs down (0)=1 → up pair added WHOLE: +3+1 = 16 (stopping at row 4's 15
+  // would leave the value area one row narrower than a TPO platform shows).
   const counts = [1, 2, 4, 6, 3, 1, 1, 2];
-  assert.deepStrictEqual(valueAreaIdx(counts, 3, 70), { lo: 1, hi: 4 });
+  assert.deepStrictEqual(valueAreaIdx(counts, 3, 70), { lo: 1, hi: 5 });
+  // Near an edge the pair is whatever rows are left.
+  assert.deepStrictEqual(valueAreaIdx([5, 1, 1], 0, 100), { lo: 0, hi: 2 });
+});
+
+test("TPO count above/below the POC leaves out the POC row and single-print tails (Dalton)", () => {
+  // A sells off from 30 to 20 alone (selling tail 26-30); B-D build 20-25, POC in there.
+  const [p] = buildDayProfiles(periodBars('2026-11-13', [[20, 30], [20, 25], [20, 25], [21, 24]]), { rowSize: 1 });
+  assert.deepStrictEqual(p.sellingTail, { from: 26, to: 30 });
+  const pocRow = p.rows.findIndex((r) => r.price === p.poc);
+  const above = p.rows.slice(pocRow + 1).filter((r) => r.price < 26).reduce((s, r) => s + r.marks.length, 0);
+  const below = p.rows.slice(0, pocRow).reduce((s, r) => s + r.marks.length, 0);
+  assert.strictEqual(p.tpoAbove, above, 'tail rows 26-30 are not counted');
+  assert.strictEqual(p.tpoBelow, below);
 });
 
 test('day profile reproduces the course diagram (letters, POC, IB, value area)', () => {

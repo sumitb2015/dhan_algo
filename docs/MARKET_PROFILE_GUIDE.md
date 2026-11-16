@@ -23,7 +23,7 @@ FINNIFTY and every F&O stock. MCX is not supported yet.
 | Mark | Meaning | Rule |
 |---|---|---|
 | **POC** (red row/line) | Price with the most time | Most TPOs; a tie goes to the row nearest the middle of the range |
-| **VAH / VAL** (violet dotted) | Value area: 70% of TPOs | Start at the POC, add whichever side's next two rows hold more TPOs, until 70% (selectable 60/68/70/80) |
+| **VAH / VAL** (violet dotted) | Value area: at least 70% of TPOs | Steidlmayer / CBOT: start at the POC, compare the next two rows above with the two below, add the heavier **pair as a whole** (up wins a tie), repeat until ≥ 70% (selectable 60/68/70/80). CQG's one-row-at-a-time variant can differ by a row. VAH / VAL are printed as row prices (the bottom of the edge row) |
 | **IB** (sky bar on the left) | Initial balance: the first hour | High/low of periods A+B (one hour at any period length) |
 | **▸ / ◂ C** | Open / close | `◂ LTP` while today is still developing |
 | Amber stripe | Mid-profile single prints | ≥ 2 consecutive rows with exactly one TPO, not at an extreme |
@@ -56,8 +56,8 @@ A row whose only TPO belongs to the period still forming is not counted as a sin
 
 Inside the previous value area the market is **Balanced** (degree 0).
 
-**Skew pressure**: more TPOs below the POC than above (by more than 10% of them) leans bullish, and the reverse
-leans bearish. It is the course's statistical expectation that a lopsided profile fills back in.
+**Skew pressure** uses Dalton's TPO count: TPOs above vs below the POC, leaving out the POC row and the single-print
+tails. More below than above (by more than 10% of them) leans bullish, and the reverse leans bearish. It is the course's statistical expectation that a lopsided profile fills back in.
 
 **Rotation factor**: the sum, over consecutive periods, of +1/−1 for a higher/lower high plus +1/−1 for a
 higher/lower low.
@@ -70,6 +70,12 @@ drag = pan · click = select a profile (right panel) · double-click or ↺ = fi
 pointer fixed. The maths is in `rs_dashboard/lib/tpoChartZoom.ts` (tested). Styles: **Letters** (letters drop to plain blocks when cells are too small), **Blocks**,
 **Histogram**. Live mode polls only today's session every 10 s during NSE cash hours and merges it over the
 loaded history. A banner shows when updates stall for more than 3 minutes.
+
+## Verification
+
+`lib/marketProfile.ts` was checked (2026-11-16) against an independent Python implementation of the textbook rules
+on 50 NIFTY sessions at 5- and 10-point rows: POC, VAH, VAL, total TPOs, IB high/low, TPO count above/below,
+rotation factor and both tails matched on every day.
 
 ## Known limits
 
