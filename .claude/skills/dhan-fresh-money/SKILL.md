@@ -43,6 +43,9 @@ positions read twice", "board price snaps back to the startup value", "OI change
   the rows with `scaleOiRows(rows, lot)` (`rawData` -> `data`). Display only: never scale anything an order reads.
   Dhan's web chain shows units; its "Per Lot" checkbox MULTIPLIES OI by the lot size (meant for prices), so it is no
   way to compare.
+- PCR switch (pref `freshMoney.showPcr`): `pcrOf` (put OI ÷ call OI, Dhan's definition; null when call OI is 0 or a side
+  unknown) in a 40 px column beside the strike, `boardPcr` (two-sided strikes only) on the Σ row. The strike column
+  width is the CSS var `--fm-k` in all four grids (`strikeColPx`), and `flowFixedPx`/`slotsThatFit` count it.
 - `lib/freshMoneyChime.ts` - pure: `tradeEvents(prev, cur)` diffs two trade-state polls into one sound (warn > exit >
   entry) plus toasts for SERVER-fired exits (target / SL / total; they had no toast before), `streakStart` rings when the
   Σ row starts or turns a 3+ run. The page plays them via `lib/alertSound.ts` (dhan-alert-sound): leader tab only

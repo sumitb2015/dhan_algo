@@ -9,7 +9,7 @@ import { useTabLeader } from '@/hooks/useTabLeader';
 import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
 import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
-import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, flowCarry, flowScale, scaleOiRows, flowStreak, flowTier, streakVsDay, sumFlows, type Buildup, type FlowTier, type SideFlow, type SumFlow } from '@/lib/freshMoney';
+import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, flowCarry, flowScale, scaleOiRows, pcrOf, boardPcr, fmtPcr, flowStreak, flowTier, streakVsDay, sumFlows, type Buildup, type FlowTier, type SideFlow, type SumFlow } from '@/lib/freshMoney';
 import type { FmBroker, FmPosition, FmProduct, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { ExitAllButton, FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
 import { validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
@@ -31,6 +31,7 @@ const PREF_LOTS = 'freshMoney.lots';
 const PREF_PRODUCT = 'freshMoney.product';
 const PREF_OI_MODE = 'freshMoney.oiMode';
 const PREF_OI_UNITS = 'freshMoney.oiUnits';
+const PREF_PCR = 'freshMoney.showPcr';
 type OiMode = 'change' | 'total' | 'delta' | 'flow';
 const PREF_POS_COLLAPSED = 'freshMoney.positionsCollapsed';
 const PREF_FLOW_HELP = 'freshMoney.flowHelp';
@@ -52,23 +53,29 @@ const BAR_CLASS: Record<'put' | 'call', Record<'fill' | 'outline', string>> = {
   call: { fill: 'bg-red-500/60', outline: 'border border-red-500/60' },
 };
 
-const GRID = 'grid grid-cols-[minmax(0,1fr)_76px_96px_76px_minmax(0,1fr)] items-center';
+// The strike column's width is the CSS var --fm-k (set by the Ladder), so the optional PCR column beside the strike can
+// widen it (PCR_PX) without a second set of grid strings.
+const GRID = 'grid grid-cols-[minmax(0,1fr)_76px_var(--fm-k,96px)_76px_minmax(0,1fr)] items-center';
 // With trading on, a cell each side of the strike holds B / S, the P&L chip and × (literal string for Tailwind).
-const GRID_TRADE = 'grid grid-cols-[minmax(0,1fr)_76px_204px_80px_204px_76px_minmax(0,1fr)] items-center';
+const GRID_TRADE = 'grid grid-cols-[minmax(0,1fr)_76px_204px_var(--fm-k,80px)_204px_76px_minmax(0,1fr)] items-center';
 // Slot-flow tab: the same grids plus a block of slot cells (38 px each; up to 10 completed slots + the running one) on each
 // outer edge, and 96 px number columns (the streak badge sits beside the number: "▲10 +99,999"). The block's width and
 // cell count are CSS variables set by the Ladder from the width it has (see slotsThatFit), so the call-side slots never
 // scroll off to the right on a narrower screen: older slots are dropped instead. The block also holds one "earlier" cell
 // at its outer end (OI change before the first shown slot), so a row's cells add up to its OI Δ today.
-const GRID_FLOW = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_96px_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
-const GRID_FLOW_TRADE = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_204px_80px_204px_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
+const GRID_FLOW = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_var(--fm-k,96px)_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
+const GRID_FLOW_TRADE = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_204px_var(--fm-k,80px)_204px_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
 const SLOT_CELL_PX = 38;
+/** Extra strike-column width for the PCR beside the strike ("26.35"). */
+const PCR_PX = 44;
+const strikeColPx = (trade: boolean, pcr: boolean) => (trade ? 80 : 96) + (pcr ? PCR_PX : 0);
 const MIN_SLOT_CELLS = 4;
 /** Width of everything on a flow-tab row except the two slot blocks: the fixed columns plus a 120 px minimum per bar. */
-const flowFixedPx = (trade: boolean) => (trade ? 96 + 204 + 80 + 204 + 96 : 96 * 3) + 2 * 120 + 2 * SLOT_CELL_PX;
+const flowFixedPx = (trade: boolean, pcr = false) =>
+  (trade ? 96 + 204 + 204 + 96 : 96 * 2) + strikeColPx(trade, pcr) + 2 * 120 + 2 * SLOT_CELL_PX;
 /** How many slot cells per side fit in `width` px (at least MIN_SLOT_CELLS — narrower than that scrolls — at most `max`). */
-function slotsThatFit(width: number, trade: boolean, max: number): number {
-  const n = Math.floor((width - flowFixedPx(trade)) / (2 * SLOT_CELL_PX));
+function slotsThatFit(width: number, trade: boolean, max: number, pcr = false): number {
+  const n = Math.floor((width - flowFixedPx(trade, pcr)) / (2 * SLOT_CELL_PX));
   return Math.max(Math.min(MIN_SLOT_CELLS, max), Math.min(max, n));
 }
 const gridFor = (mode: OiMode, trade: boolean) => (mode === 'flow' ? (trade ? GRID_FLOW_TRADE : GRID_FLOW) : (trade ? GRID_TRADE : GRID));
@@ -290,8 +297,10 @@ function FlowHeader({ side, fs, hoverSlot }: { side: 'put' | 'call'; fs: FlowSlo
 
 /** Board totals (flow tab): per slot the sum over the strikes on the board, puts and calls, on their OWN tint scale (sums
  *  are far larger than single strikes), with Σ today's change and the streak badge. Lines up with the strike rows. */
-function TotalsRow({ put, call, fs, unit, scale, trade, hover, onHover }: {
+function TotalsRow({ put, call, fs, unit, scale, trade, hover, onHover, pcr }: {
   put: SumFlow; call: SumFlow; fs: FlowSlots; unit: string; scale: number; trade: boolean;
+  /** Board PCR (Σ put OI ÷ Σ call OI over the strikes shown) when the PCR column is on; undefined = off. */
+  pcr?: number | null;
   hover: Hover; onHover: (h: Hover) => void;
 }) {
   const nStrikes = Math.max(put.n, call.n);
@@ -313,8 +322,14 @@ function TotalsRow({ put, call, fs, unit, scale, trade, hover, onHover }: {
       <span />
       {num(put, 'put')}
       {trade && <span />}
-      <span className="text-center text-[11.5px] font-bold text-zinc-300"
-        title={`Sum over the ${nStrikes} strikes with data on the board (not the whole chain); its tints use their own scale`}>Σ shown</span>
+      <span className={pcr === undefined ? '' : 'grid grid-cols-[minmax(0,1fr)_40px] items-center'}>
+        <span className="block text-center text-[11.5px] font-bold text-zinc-300"
+          title={`Sum over the ${nStrikes} strikes with data on the board (not the whole chain); its tints use their own scale`}>Σ shown</span>
+        {pcr !== undefined && (
+          <span className="pr-1 text-right text-[11.5px] font-bold text-zinc-300"
+            title={pcr === null ? 'Board PCR unknown' : `PCR of the strikes shown: Σ put OI ÷ Σ call OI = ${pcr.toFixed(2)}`}>{fmtPcr(pcr)}</span>
+        )}
+      </span>
       {trade && <span />}
       {num(call, 'call')}
       <span />
@@ -323,8 +338,8 @@ function TotalsRow({ put, call, fs, unit, scale, trade, hover, onHover }: {
   );
 }
 
-function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, onHover }: {
-  row: FreshMoneyRow; max: number; boxed: boolean; trade: RowTrade | null; mode: OiMode;
+function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, onHover, showPcr }: {
+  row: FreshMoneyRow; max: number; boxed: boolean; trade: RowTrade | null; mode: OiMode; showPcr: boolean;
   /** Slot layout, the OI unit and the board-wide cell scale (see flowScale), for the slot-flow tab. */
   fs: FlowSlots; unit: string; scale: number;
   hover: Hover; onHover: (h: Hover) => void;
@@ -384,11 +399,7 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, on
         </>
       )}
       {cell('put')}
-      <span className="flex justify-center">
-        <span className={`px-2 leading-[18px] ${boxed ? 'border border-sky-400 text-zinc-100' : 'border border-transparent text-zinc-300'}`}>
-          {row.strike}
-        </span>
-      </span>
+      <StrikeCell strike={row.strike} boxed={boxed} pcr={showPcr ? pcrOf(row) : undefined} />
       {cell('call')}
       {mode === 'delta' ? (
         // Δ OI tab: the right panel is left empty (the difference is on the left).
@@ -403,6 +414,24 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, on
       )}
       {mode === 'flow' && <FlowCells side="call" flow={c?.flow ?? null} fs={fs} unit={unit} scale={scale} rowKey={rowKey} hover={hover} onHover={onHover} />}
     </div>
+  );
+}
+
+/** The strike cell, with the strike's PCR (put OI ÷ call OI) right of it when the PCR column is on. */
+function StrikeCell({ strike, boxed, pcr }: { strike: number; boxed: boolean; pcr: number | null | undefined }) {
+  const box = (
+    <span className={`px-2 leading-[18px] ${boxed ? 'border border-sky-400 text-zinc-100' : 'border border-transparent text-zinc-300'}`}>
+      {strike}
+    </span>
+  );
+  if (pcr === undefined) return <span className="flex justify-center">{box}</span>;
+  return (
+    <span className="grid grid-cols-[minmax(0,1fr)_40px] items-center">
+      <span className="flex justify-center">{box}</span>
+      <span data-testid="fm-pcr" className="pr-1 text-right text-[11.5px] text-zinc-400" title={pcr === null ? 'PCR unknown (a side has no OI)' : `PCR = put OI ÷ call OI = ${pcr.toFixed(2)}`}>
+        {fmtPcr(pcr)}
+      </span>
+    </span>
   );
 }
 
@@ -440,7 +469,8 @@ function PriceChip({ underlying, q, fallback }: { underlying: string; q: FreshMo
 
 /** The strike ladder (all tabs). It owns the slot tab's hover crosshair, so moving the mouse across the cells re-renders
  *  only the ladder, not the trade bar, positions panel or the Cumulative OI chart. */
-function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTrade, spot, liveSpot, totals, scale }: {
+function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTrade, spot, liveSpot, totals, scale, showPcr }: {
+  showPcr: boolean;
   data: FreshMoneyResponse; oiMode: OiMode; tradeMode: boolean; fs: FlowSlots; maxAbs: number; boxedStrike: number | null;
   rowTrade: (strike: number) => RowTrade | null; spot: number | null; liveSpot: number | null;
   totals: { put: SumFlow; call: SumFlow; scale: number }; scale: number;
@@ -459,31 +489,40 @@ function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTr
     return () => ro.disconnect();
   }, []);
   const total = cellCount(fsAll);
-  const show = boxW > 0 ? slotsThatFit(boxW, tradeMode, total) : total;
+  const show = boxW > 0 ? slotsThatFit(boxW, tradeMode, total, showPcr) : total;
   const fs = useMemo<FlowSlots>(() => ({ ...fsAll, show }), [fsAll, show]);
   // +1: the "earlier" cell at the outer end of each slot block (its width is counted in flowFixedPx for slotsThatFit).
   const flowVars = { '--fm-slots': `${(show + 1) * SLOT_CELL_PX}px`, '--fm-n': String(show + 1) } as React.CSSProperties;
+  const kPx = strikeColPx(tradeMode, showPcr);
+  const kVar = { '--fm-k': `${kPx}px` } as React.CSSProperties;
+  const pcrAll = useMemo(() => (showPcr ? boardPcr(data.rows) : undefined), [showPcr, data.rows]);
   return (
     <>
     {/* Flow tab: the ladder scrolls inside its own box (both ways), so the slot times and totals can stay pinned
         (an overflow-x box is a scroll container, so `sticky` could never pin against the window). */}
     <div ref={boxRef} className={oiMode === 'flow' ? 'max-h-[calc(100vh-170px)] overflow-auto px-4 pb-2' : 'overflow-x-auto px-4 pb-2 pt-2'}
       onMouseLeave={() => setHover(null)}>
-     <div className={oiMode === 'flow' ? '' : tradeMode ? 'min-w-[1104px]' : 'min-w-[720px]'}
-       style={oiMode === 'flow' ? { ...flowVars, minWidth: 2 * show * SLOT_CELL_PX + flowFixedPx(tradeMode) } : undefined}>
+     <div style={oiMode === 'flow'
+       ? { ...flowVars, ...kVar, minWidth: 2 * show * SLOT_CELL_PX + flowFixedPx(tradeMode, showPcr) }
+       : { ...kVar, minWidth: (tradeMode ? 1104 : 720) + kPx - strikeColPx(tradeMode, false) }}>
       <div data-testid="flow-sticky-head" className={oiMode === 'flow' ? 'sticky top-0 z-10 border-b border-zinc-700 bg-zinc-900 pt-2' : ''}>
       <div className={`${gridFor(oiMode, tradeMode)} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
         {oiMode === 'flow' && <FlowHeader side="put" fs={fs} hoverSlot={hover?.slot ?? null} />}
         <span className="col-span-2 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `OI Δ today @ ${fs.dayAt ?? '–'}` : 'OI moved'}`}</span>
         {tradeMode && <span className="pr-1 text-right text-zinc-400" title="Buy / Sell the put, and your put position's P&L at this strike (open, or booked today once closed)">PE · B/S · P&amp;L</span>}
-        <span className="text-center">STRIKE</span>
+        {showPcr ? (
+          <span className="grid grid-cols-[minmax(0,1fr)_40px]">
+            <span className="text-center">STRIKE</span>
+            <span className="pr-1 text-right" title="Put-call ratio at the strike: put total OI ÷ call total OI (as Dhan's option chain shows it)">PCR</span>
+          </span>
+        ) : <span className="text-center">STRIKE</span>}
         {tradeMode && <span className="pl-1 text-zinc-400" title="Buy / Sell the call, and your call position's P&L at this strike (open, or booked today once closed)">CE · B/S · P&amp;L</span>}
         <span className="col-span-2 pl-2">{oiMode === 'delta' ? '' : `CALLS: ${oiMode === 'total' ? 'total OI' : oiMode === 'flow' ? `OI Δ today @ ${fs.dayAt ?? '–'}` : 'OI moved'}`}</span>
         {oiMode === 'flow' && <FlowHeader side="call" fs={fs} hoverSlot={hover?.slot ?? null} />}
       </div>
       {oiMode === 'flow' && fs.bounds.length > 0 && (
         <TotalsRow put={flowTotals.put} call={flowTotals.call} fs={fs} unit={data.oiUnit} scale={flowTotals.scale}
-          trade={tradeMode} hover={hover} onHover={setHover} />
+          trade={tradeMode} hover={hover} onHover={setHover} pcr={pcrAll} />
       )}
       </div>
       {data.rows.map((r, i) => {
@@ -492,7 +531,7 @@ function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTr
         return (
           <React.Fragment key={r.strike}>
             <BoardRowView row={r} max={maxAbs} boxed={r.strike === boxedStrike} trade={rowTrade(r.strike)} mode={oiMode}
-              fs={fs} unit={data.oiUnit} scale={flowCellScale} hover={hover} onHover={setHover} />
+              fs={fs} unit={data.oiUnit} scale={flowCellScale} hover={hover} onHover={setHover} showPcr={showPcr} />
             {divider && <SpotDivider spot={spot!} live={liveSpot !== null} />}
           </React.Fragment>
         );
@@ -525,6 +564,9 @@ export default function FreshMoneyBoard() {
   // MCX OI is already lots (lot 1). Display only — orders, lots and the lot size are never scaled.
   const [oiUnits, setOiUnits] = useState(false);
   const pickOiUnits = (on: boolean) => { setOiUnits(on); writePref(PREF_OI_UNITS, on ? '1' : '0'); };
+  // PCR column beside the strike (remembered per browser), like Dhan's option chain.
+  const [showPcr, setShowPcr] = useState(false);
+  const toggleShowPcr = () => setShowPcr(o => { writePref(PREF_PCR, o ? '0' : '1'); return !o; });
   const canUnits = !!rawData && rawData.market === 'NSE' && rawData.oiUnit === 'lots' && (rawData.lot ?? 0) > 1;
   const data = useMemo<FreshMoneyResponse | null>(() => (rawData && canUnits && oiUnits
     ? { ...rawData, oiUnit: 'units', rows: scaleOiRows(rawData.rows, rawData.lot!) }
@@ -586,6 +628,7 @@ export default function FreshMoneyBoard() {
     setChartCollapsed(readPref(PREF_CHART_COLLAPSED) === '1');
     setFlowHelp(readPref(PREF_FLOW_HELP) === '1');
     setOiUnits(readPref(PREF_OI_UNITS) === '1');
+    setShowPcr(readPref(PREF_PCR) === '1');
     setSoundOn(readPref(PREF_SOUND) !== '0');
     const om = readPref(PREF_OI_MODE);
     if (om === 'total' || om === 'delta' || om === 'flow') setOiMode(om);
@@ -935,6 +978,12 @@ export default function FreshMoneyBoard() {
                 className={`ml-auto flex h-6 w-6 items-center justify-center rounded border border-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70 ${soundOn ? 'text-zinc-300' : 'text-zinc-500'}`}>
                 {soundOn ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
               </button>
+              <button type="button" aria-pressed={showPcr} onClick={toggleShowPcr}
+                title={showPcr ? 'Hide the PCR column' : 'Show each strike\'s PCR (put OI ÷ call OI) beside the strike, as Dhan\'s option chain does'}
+                className={`rounded-md border border-zinc-800 px-2.5 py-1 text-[11px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 ${
+                  showPcr ? 'bg-zinc-700 text-white' : 'bg-zinc-950/40 text-zinc-400 hover:text-zinc-200'}`}>
+                PCR
+              </button>
               {canUnits && (
                 <div role="group" aria-label="OI unit" className="flex rounded-md border border-zinc-800 bg-zinc-950/40 p-0.5">
                   {([[false, 'Lots'], [true, 'Units']] as const).map(([on, name]) => (
@@ -1023,7 +1072,7 @@ export default function FreshMoneyBoard() {
             </div>
 
             <Ladder data={data} oiMode={oiMode} tradeMode={tradeMode} fs={fs} maxAbs={maxAbs} boxedStrike={boxedStrike}
-              rowTrade={rowTrade} spot={spot} liveSpot={liveSpot} totals={flowTotals} scale={flowCellScale} />
+              rowTrade={rowTrade} spot={spot} liveSpot={liveSpot} totals={flowTotals} scale={flowCellScale} showPcr={showPcr} />
 
           </div>
         )}

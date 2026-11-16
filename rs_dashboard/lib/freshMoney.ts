@@ -428,3 +428,27 @@ export function scaleOiRows<S extends { oi: number | null; oiMoved: number | nul
     : null);
   return rows.map(r => ({ ...r, put: side(r.put), call: side(r.call) }));
 }
+
+/** Strike PCR as Dhan's option chain shows it: put total OI ÷ call total OI (unit-free). Null when either is unknown or
+ *  the call side has no OI (no division by zero shown as ∞). */
+export function pcrOf(r: { put: { oi: number | null } | null; call: { oi: number | null } | null }): number | null {
+  const p = r.put?.oi, c = r.call?.oi;
+  return p == null || c == null || !Number.isFinite(p) || !Number.isFinite(c) || !(c > 0) || p < 0 ? null : p / c;
+}
+
+/** PCR of the strikes shown: Σ put OI ÷ Σ call OI over strikes where BOTH sides are known (a one-sided strike would
+ *  tilt it). Null when no call OI is summed. */
+export function boardPcr(rows: { put: { oi: number | null } | null; call: { oi: number | null } | null }[]): number | null {
+  let p = 0, c = 0;
+  for (const r of rows) {
+    const po = r.put?.oi, co = r.call?.oi;
+    if (po == null || co == null || !Number.isFinite(po) || !Number.isFinite(co)) continue;
+    p += po; c += co;
+  }
+  return c > 0 ? p / c : null;
+}
+
+/** PCR for a narrow column: 2 decimals, 0 decimals from 100; '–' when unknown. */
+export function fmtPcr(v: number | null): string {
+  return v === null || !Number.isFinite(v) ? '–' : v >= 100 ? v.toFixed(0) : v.toFixed(2);
+}

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, flowCarry, scaleOiRows, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay,
+  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, flowCarry, scaleOiRows, pcrOf, boardPcr, fmtPcr, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay,
 } from './freshMoney.ts';
 
 const HEAD = 'timestamp,spot,expiry,strike,CE_LTP,CE_IV,CE_OI,CE_change_OI,CE_volume,PE_LTP,PE_IV,PE_OI,PE_change_OI,PE_volume';
@@ -390,4 +390,15 @@ test('scaleOiRows: lots -> units multiplies every OI figure; nulls stay null; fa
   assert.equal(u[0].put, null);
   assert.equal(scaleOiRows(rows, 1), rows);
   assert.equal(rows[0].call.oi, 51205);   // input untouched
+});
+
+test('PCR: put OI / call OI per strike (Dhan 24650: 20.83L / 0.79L = 26.35); board PCR only over two-sided strikes', () => {
+  assert.equal(fmtPcr(pcrOf({ put: { oi: 2082535 }, call: { oi: 79040 } })), '26.35');
+  assert.equal(pcrOf({ put: { oi: 5 }, call: { oi: 0 } }), null);
+  assert.equal(pcrOf({ put: { oi: 5 }, call: null }), null);
+  assert.equal(pcrOf({ put: { oi: null }, call: { oi: 3 } }), null);
+  assert.equal(boardPcr([{ put: { oi: 300 }, call: { oi: 100 } }, { put: { oi: 100 }, call: { oi: 300 } }, { put: { oi: 999 }, call: null }]), 1);
+  assert.equal(boardPcr([]), null);
+  assert.equal(fmtPcr(null), '–');
+  assert.equal(fmtPcr(123.4), '123');
 });

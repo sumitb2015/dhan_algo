@@ -470,3 +470,23 @@ test('lots / units switch (NSE): every OI figure × lot size, header says units,
   await expect(page.getByText('2.6L', { exact: true }).first()).toBeVisible();
   expect(m.blocked).toEqual([]);
 });
+
+test('PCR switch: a column beside the strike (put OI ÷ call OI), board PCR on the Σ row, remembered; rows stay one line', async ({ page }) => {
+  const m = await install(page);
+  await expect(page.getByTestId('fm-pcr')).toHaveCount(0);
+  const btn = page.getByRole('button', { name: 'PCR', exact: true });
+  await btn.click();
+  await expect(btn).toHaveAttribute('aria-pressed', 'true');
+  const cells = page.getByTestId('fm-pcr');
+  await expect(cells).toHaveCount(5);
+  await expect(cells.first()).toHaveText('1.33');                       // 4,000 / 3,000
+  const row = page.locator('div.grid', { hasText: '8100' }).first();
+  expect((await row.boundingBox())!.height).toBeLessThan(30);
+  await page.getByRole('tab', { name: '3m slots' }).click();
+  await expect(page.getByTitle(/^PCR of the strikes shown: Σ put OI ÷ Σ call OI = 1\.33$/)).toHaveText('1.33');
+  await expect(cells).toHaveCount(5);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'PCR', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('fm-pcr').first()).toHaveText('1.33');
+  expect(m.blocked).toEqual([]);
+});
