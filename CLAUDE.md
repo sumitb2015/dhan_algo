@@ -170,6 +170,7 @@ docs/
   PNF_TRIANGLE.md              # User guide for the P&F triangle (squeeze) pattern: nested columns, entry / stop / vertical-count target, alerts; not traded by AUTO
   GEX_OI_GUIDE.md              # User guide for /options/gex: gamma-weighted OI, walls, gamma flip, regime, the video's strangle checklist and risk rules
   RENKO_AUTO_GUIDE.md          # User guide for /renko AUTO: the four rules, entries/exits, brokers + 1-lot MCX cap, MTM guard (rupees or boxes), the server-side exit watcher, limits
+  BEARISH_STRIKES_GUIDE.md     # User guide for /bearish-strikes: scan filters, signals and lights, SIM/REAL arm, SL/target/trail, max-loss kill switch, auto-exit, browser-only limits
 scripts/
   downloader/               # Historical data downloaders + refresh_dashboard_data.py / fetch_today_quotes.py
   analysis/                 # Backtests (backtest_nifty50_rs*.py suite, backtest_short_straddle.py),
