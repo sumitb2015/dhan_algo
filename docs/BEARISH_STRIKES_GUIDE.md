@@ -80,7 +80,13 @@ Once anything is open, the **Positions** panel moves above the scan table.
 
 - Choose which levels to watch (Supertrend / VWAP / EMA20).
 - **Live price** warns earliest; **Closed bar** waits for a closed candle and gives fewer false alarms.
-- The bell toggles the sound, and **Desktop** turns on browser notifications.
+- **Sounds** (they start only after your first click anywhere on the page, a browser rule; the toasts always show):
+  - **Bell**: alert sounds. A rising three-tone chime when a level alert or the SL / Target / Trail fires; a low buzz
+    when max loss is hit or auto-exit gives up.
+  - **Speaker**: trade chimes. Two rising tones on a sell fill, two falling tones on a buy-back, a low buzz on a
+    rejected or unknown order, or when a position was closed outside the page.
+  - With the page open in several tabs, only one tab plays the automatic sounds (the others show "sound: other tab").
+- **Desktop** turns on browser notifications.
 
 **Per row:**
 

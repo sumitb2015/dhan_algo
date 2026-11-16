@@ -247,3 +247,14 @@ test('arming REAL needs a confirmation; Cancel keeps the page in SIM', async ({ 
   await expect(page.getByRole('button', { name: 'SIM', exact: true })).toBeVisible();
   await expect(page.getByRole('status', { name: 'Real money armed' })).toHaveCount(0);
 });
+
+test('trade chimes have their own mute, remembered across a reload', async ({ page }) => {
+  await install(page);
+  await page.goto('/bearish-strikes', { waitUntil: 'domcontentloaded' });
+  const pos = page.getByRole('region', { name: 'Positions on this page' });
+  const mute = pos.getByRole('button', { name: 'Mute trade chimes' });
+  await expect(async () => { await mute.click(); await expect(pos.getByRole('button', { name: 'Unmute trade chimes' })).toBeVisible({ timeout: 1_000 }); }).toPass({ timeout: 30_000 });
+  await expect(pos.getByRole('button', { name: 'Alert sound' })).toHaveAttribute('aria-pressed', 'true');   // the alert bell is separate
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('region', { name: 'Positions on this page' }).getByRole('button', { name: 'Unmute trade chimes' })).toBeVisible({ timeout: 30_000 });
+});

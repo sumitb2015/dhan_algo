@@ -58,8 +58,7 @@ double-ring. If a non-leader tab must also show the alert, show the toast there 
 ## Do not
 - Do not reuse `lib/cyberAudio.ts` for alerts: it is Cyber Scalper's click/buy/sell effects and its mute lives in
   localStorage key `cyber-scalper-audio`, so muting Cyber Scalper would silently mute your alerts.
-- Do not copy `BearishStrikes.tsx`'s private `playAlertSound` (older pattern, its own AudioContext ref and sound toggle);
-  new pages use `lib/alertSound.ts`. Migrating BearishStrikes is optional.
+- Do not write a private `AudioContext` beeper (BearishStrikes had one until 2026-11-16); every page uses `lib/alertSound.ts`.
 - Do not ship audio files or `new Audio(url)`: they load late and the first alert can be lost. Synthesize with oscillators.
 - Do not keep a toast on screen until dismissed to "make up" for sound unless the user asks; the agreed behaviour is the
   normal toast lifetime (7 s for error toasts in Multi-Leg Focus) plus the chime.
@@ -116,6 +115,15 @@ on a unique line, and let an e2e test click the control.
 
 Testing: `lib/alertSound.test.ts` covers the family (oscillator counts 2/2/3, shared throttle);
 `e2e/price-ladder.spec.ts` covers the toggle and that it is remembered across a reload.
+
+## Pages without a leader engine (Bearish Strikes, 2026-11-16)
+Bearish Strikes runs its alert / stop / settle loops in EVERY open tab, so it takes `useTabLeader('bearish-strikes')`
+only for sound: one `chime(kind, auto, order?)` helper in the component. `auto = true` (raised by a loop every tab runs:
+level alerts, SL / target / trail, fills settled by the poll, max loss, auto-exit failure, closed-outside reconcile)
+rings only in the leader tab; `auto = false` (an order THIS tab sent, its fill or rejection) rings where it was sent.
+Two switches with separate storage: the bell (alerts + automatic warnings, saved with the page's alert settings) and a
+Volume2 / VolumeX trade-chime mute (`bearishStrikes.tradeSound`) for entry / exit / order problems. A follower tab shows
+"sound: other tab". Toggles read through a ref so the 1 s loops do not restart when they change.
 
 ## Checklist
 - [ ] `installAlertSoundUnlock()` in a mount `useEffect` of the page (returns its own cleanup).

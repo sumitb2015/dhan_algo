@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Settings, X, TrendingDown, ClipboardList, LogOut, Bell, BellOff, TriangleAlert, ShieldAlert, Trash2, SlidersHorizontal, ChevronDown, OctagonX } from 'lucide-react';
+import { Settings, X, TrendingDown, ClipboardList, LogOut, Bell, BellOff, TriangleAlert, ShieldAlert, Trash2, SlidersHorizontal, ChevronDown, OctagonX, Volume2, VolumeX } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import AddNewLegModal from '@/components/multiLegFocus/AddNewLegModal';
 import ExitLotsModal from '@/components/multiLegFocus/ExitLotsModal';
@@ -32,7 +32,8 @@ import {
 } from '@/lib/bearishStrikes';
 import { RESERVATION_PREFIX, correlationIdOf, findSentOrder, isReservation, legPnl, type BsPosition, type LedgerOp, type PendingOrder } from '@/lib/bearishLedger';
 import { NO_RISK, pageLossState, riskHit, riskLevels, type RiskCfg, type RiskHit } from '@/lib/bearishRisk';
-import { installAlertSoundUnlock, playAlertChime, playExitChime, playWarnChime } from '@/lib/alertSound';
+import { installAlertSoundUnlock, playAlertChime, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
+import { useTabLeader } from '@/hooks/useTabLeader';
 import { readPref, savePref } from '@/lib/localPref';
 import { Check, Cluster, ConfirmDialog, NumField, Seg, Switch } from '@/components/bearishStrikes/controls';
 import {
@@ -128,6 +129,23 @@ export default function BearishStrikes() {
   const [watchEma, setWatchEma] = useState(false);
   const [alertBasis, setAlertBasis] = useState<Basis>('live');
   const [alertSound, setAlertSound] = useState(true);
+  // Trade sounds (entry / exit / order problem): their own switch and storage key, so muting the level alerts never
+  // silences a rejected order (dhan-alert-sound).
+  const [tradeSound, setTradeSound] = useState(true);
+  // Sounds for AUTOMATIC events (alerts, stops, fills settled by the poll, max loss) ring in ONE tab only: every open
+  // tab runs those loops, and two tabs would double-ring. An order this tab sent rings here.
+  const { isLeader, leaderRef } = useTabLeader('bearish-strikes');
+  const soundRef = useRef({ alert: true, trade: true });
+  useEffect(() => { soundRef.current = { alert: alertSound, trade: tradeSound }; }, [alertSound, tradeSound]);
+  /** alert = a level / stop / max-loss rule fired; entry / exit = a fill; warn = an order needs a look. `auto` = raised by
+   *  a loop every tab runs (leader tab only). Alerts and automatic warnings follow the bell; fills and order problems
+   *  follow the trade-sound switch. Sound is always an addition to the toast, never the only signal. */
+  const chime = useCallback((kind: 'alert' | 'entry' | 'exit' | 'warn', auto: boolean, order = false) => {
+    if (auto && !leaderRef.current) return;
+    const on = kind === 'entry' || kind === 'exit' || order ? soundRef.current.trade : soundRef.current.alert;
+    if (!on) return;
+    if (kind === 'alert') playAlertChime(); else if (kind === 'entry') playEntryChime(); else if (kind === 'exit') playExitChime(); else playWarnChime();
+  }, [leaderRef]);
   const [alertNotify, setAlertNotify] = useState(false);
   const [autoExit, setAutoExit] = useState(false);   // buys back a position at MARKET when a ticked alert fires — per page load, never persisted
   const [indCfg, setIndCfg] = useState<IndParams>(DEFAULT_IND_PARAMS);   // indicator settings (Supertrend period/multiplier, EMA length)
@@ -161,6 +179,7 @@ export default function BearishStrikes() {
         }
       } catch { /* storage blocked: defaults */ }
       setShowFilters(readPref('bearishStrikes.filtersOpen') === '1');
+      setTradeSound(readPref('bearishStrikes.tradeSound') !== '0');
       cfgLoaded.current = true;
     }, 0);
     return () => clearTimeout(t);
@@ -490,7 +509,7 @@ export default function BearishStrikes() {
         const lv = levelValue(w, ev.level);
         const text = `${label} — price ${alertBasis === 'live' ? (w?.ltp ?? 0).toFixed(2) : (w?.ind?.close ?? 0).toFixed(2)} is above ${levelLabel[ev.level]}${lv != null ? ` ${lv.toFixed(2)}` : ''}`;
         toast.error(`⚠ ${text}`, { id: ev.key, duration: 10_000, action: { label: 'Exit', onClick: () => setExitId(p.id) } });
-        if (alertSound) playAlertChime();
+        chime('alert', true);
         try {
           if (alertNotify && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
             new Notification('Short position against you', { body: text, tag: ev.key, requireInteraction: true });
@@ -499,7 +518,7 @@ export default function BearishStrikes() {
       }
     }, 1000);
     return () => clearInterval(id);
-  }, [watchSt, watchVwap, watchEma, alertBasis, alertSound, alertNotify, tf, indCfg, levelLabel]);
+  }, [watchSt, watchVwap, watchEma, alertBasis, alertNotify, tf, indCfg, levelLabel, chime]);
 
   // Tab title: the one thing visible from another tab. (Browsers slow background timers, so a hidden tab may be a
   // few tens of seconds late — keep the page in its own window if it must be watched closely.)
@@ -517,6 +536,12 @@ export default function BearishStrikes() {
     const on = !alertSound;
     setAlertSound(on);
     if (on) playAlertChime();   // audible confirmation that it works
+  };
+  const toggleTradeSound = () => {
+    const on = !tradeSound;
+    setTradeSound(on);
+    savePref('bearishStrikes.tradeSound', on ? '1' : '0');
+    if (on) playEntryChime();
   };
   const toggleNotify = async () => {
     if (alertNotify) { setAlertNotify(false); return; }
@@ -565,7 +590,7 @@ export default function BearishStrikes() {
                 } else {
                   await op({ op: 'pending', id: p.id, pending: null, clearOrderId: o.orderId });
                   toast.warning(`${p.strike} ${p.option}: an ${o.kind} order may have been sent without being recorded — check the ${bkName} order book`, { duration: 15_000 });
-                  if (alertSound) playWarnChime();
+                  chime('warn', true, true);
                 }
               }
               continue;
@@ -576,24 +601,25 @@ export default function BearishStrikes() {
               if (Date.now() - o.at > SETTLE_GIVE_UP_MS && !warnedUnknown.current.has(o.orderId)) {
                 warnedUnknown.current.add(o.orderId);
                 toast.warning(`Order ${o.orderId} status unknown — check the ${bkName} order book`);
+                chime('warn', true, true);
               }
               continue;
             }
             const st = r.data.orderStatus;
             if (st === 'TRADED') {
               await op({ op: 'settle', id: p.id, orderId: o.orderId, filledQty: r.data.filledQty, avgPrice: r.data.averageTradedPrice, at: Date.now() });
-              if (alertSound) { if (o.kind === 'exit') playExitChime(); }
+              chime(o.kind === 'exit' ? 'exit' : 'entry', true);
             }
             else if (['REJECTED', 'CANCELLED', 'CANCELED', 'EXPIRED'].includes(st)) {
               await op({ op: 'settle', id: p.id, orderId: o.orderId, filledQty: r.data.filledQty, avgPrice: r.data.averageTradedPrice, at: Date.now() });
-              if (r.data.filledQty === 0) toast.error(`${p.strike} ${p.option} ${o.kind} order ${st.toLowerCase()}`);
+              if (r.data.filledQty === 0) { toast.error(`${p.strike} ${p.option} ${o.kind} order ${st.toLowerCase()}`); chime('warn', true, true); }
             }
           }
         }
       } finally { settling.current = false; }
     }, 4000);
     return () => clearInterval(id);
-  }, [op, alertSound]);
+  }, [op, chime]);
 
   // Down-only reconcile against the broker for REAL rows: the broker may have LESS than the ledger (closed outside
   // this page), never more. Skipped inside the fill grace and while any order is unresolved.
@@ -618,13 +644,15 @@ export default function BearishStrikes() {
               const d = `${p.underlying}|${p.expiry}` === scopeRef.current ? q?.strikes[String(p.strike)]?.[p.option === 'CE' ? 'ce' : 'pe'] : undefined;
               const fresh = !!q?.updated_at && Date.now() - Date.parse(q.updated_at) < FEED_FRESH_MS;
               await op({ op: 'clamp', id: p.id, qty: shortQty, at: Date.now(), ...(fresh && d && d.ltp > 0 ? { price: d.ltp } : {}) });
+              toast.warning(`${p.underlying} ${p.strike} ${p.option}: the ${BROKER_LABELS[bk]} position is smaller than this page's — ${shortQty === 0 ? 'closed' : 'reduced'} outside this page`, { duration: 15_000 });
+              chime('warn', true, true);
             }
           }
         } catch { /* retry next tick */ }
       }
     }, 10_000);
     return () => clearInterval(id);
-  }, [op]);
+  }, [op, chime]);
 
   // ── Live price lookup for a ledger row ──────────────────────────
   const ltpOf = useCallback((p: Pick<BsPosition, 'underlying' | 'expiry' | 'option' | 'strike'>): number | null => {
@@ -742,7 +770,7 @@ export default function BearishStrikes() {
         const ok = existing
           ? await op({ op: 'add', id: existing.id, qty, price, at: Date.now() })
           : await op({ op: 'open', position: newPosition({ mode, underlying, expiry: p.expiry, option: p.option, strike: p.strike, lotSize, qty, avgPrice: price }) });
-        if (ok) toast.success(`SIM sold ${p.lots} lot${p.lots > 1 ? 's' : ''} ${label} @ ${price.toFixed(2)}`);
+        if (ok) { toast.success(`SIM sold ${p.lots} lot${p.lots > 1 ? 's' : ''} ${label} @ ${price.toFixed(2)}`); chime('entry', false); }
         return;
       }
 
@@ -780,17 +808,18 @@ export default function BearishStrikes() {
         // Unknown outcome: keep the reservation — it blocks a blind re-send and is cleared with a warning after a minute.
         if (!r.unknown) await op({ op: 'pending', id: rowId, pending: null, clearOrderId: resv.orderId });
         toast.error(r.unknown ? `Order status unknown for ${label} — check ${bkName} Positions/Orders before retrying` : `Order rejected: ${r.error}`);
+        chime('warn', false, true);
         return;
       }
       const tracked = await op({ op: 'pending', id: rowId, pending: { ...resv, orderId: r.orderId, at: Date.now() }, clearOrderId: resv.orderId });
-      if (!tracked) { toast.error(`Order ${r.orderId} was sent but could not be recorded — check ${bkName} Positions`); return; }
+      if (!tracked) { toast.error(`Order ${r.orderId} was sent but could not be recorded — check ${bkName} Positions`); chime('warn', false, true); return; }
       const c = await confirmOrder(r.orderId, broker);
       if (c.phase === 'pending') { toast.warning(`${label} order still working — it is tracked and will settle automatically`); return; }
       await op({ op: 'settle', id: rowId, orderId: r.orderId, filledQty: c.qty, avgPrice: c.avg, at: Date.now() });
-      if (c.phase === 'filled') toast.success(`Sold ${p.lots} lot${p.lots > 1 ? 's' : ''} ${label} @ ${c.avg.toFixed(2)}`);
-      else toast.error(`${label} order ${c.reason || 'rejected'}`);
+      if (c.phase === 'filled') { toast.success(`Sold ${p.lots} lot${p.lots > 1 ? 's' : ''} ${label} @ ${c.avg.toFixed(2)}`); chime('entry', false); }
+      else { toast.error(`${label} order ${c.reason || 'rejected'}`); chime('warn', false, true); }
     } finally { lock.current = false; }
-  }, [lotSize, ltpOf, underlying, positions, mode, op, lookup, sendOrder, confirmOrder, broker, refreshLedger]);
+  }, [lotSize, ltpOf, underlying, positions, mode, op, lookup, sendOrder, confirmOrder, broker, refreshLedger, chime]);
 
   const doExit = useCallback(async (pos: BsPosition, lots: number, orderType: 'MARKET' | 'LIMIT', limitPrice?: number): Promise<boolean> => {
     if (lock.current) { toast.warning('Another order is still in flight'); return false; }
@@ -806,7 +835,7 @@ export default function BearishStrikes() {
         if (!(price > 0)) { toast.error('No live price for this strike yet'); return false; }
         if (orderType === 'LIMIT' && ltp != null && ltp > price) { toast.error(`SIM limit ${price} is below the market (${ltp}); a buy limit would rest — use MARKET`); return false; }
         const ok = await op({ op: 'reduce', id: pos.id, qty, price, at: Date.now() });
-        if (ok) toast.success(`SIM bought back ${label} @ ${price.toFixed(2)}`);
+        if (ok) { toast.success(`SIM bought back ${label} @ ${price.toFixed(2)}`); chime('exit', false); }
         return ok;
       }
       const bk: Broker = pos.broker ?? 'dhan';
@@ -817,7 +846,7 @@ export default function BearishStrikes() {
       for (const o of (pos.pendingOrders ?? []).filter((x) => x.kind === 'exit')) {
         if (isReservation(o.orderId)) { toast.error(`Another exit for ${label} is being sent right now — wait for it to settle`); return false; }
         const cr = await fetch('/api/scalper/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId: o.orderId, broker: bk }) }).then((x) => x.json()).catch(() => null) as { success?: boolean } | null;
-        if (!cr?.success) { toast.error(`Could not cancel the resting exit ${o.orderId}; exit not sent`); return false; }
+        if (!cr?.success) { toast.error(`Could not cancel the resting exit ${o.orderId}; exit not sent`); chime('warn', false, true); return false; }
         // A cancel ACK is not proof (Kotak can answer 200 with an error body), and the order may have part-filled before
         // it died: read its final state and book exactly what it filled, or send nothing.
         const fin = await confirmOrder(o.orderId, bk, 5000);
@@ -840,17 +869,18 @@ export default function BearishStrikes() {
       if (!r.orderId) {
         if (!r.unknown) await op({ op: 'pending', id: row.id, pending: null, clearOrderId: resv.orderId });
         toast.error(r.unknown ? `Exit status unknown for ${label} — check ${bkName} Positions before retrying` : `Exit rejected: ${r.error}`);
+        chime('warn', false, true);
         return false;
       }
       await op({ op: 'pending', id: row.id, pending: { ...resv, orderId: r.orderId, at: Date.now() }, clearOrderId: resv.orderId });
       const c = await confirmOrder(r.orderId, bk);
       if (c.phase === 'pending') { toast.warning(`${label} exit still working — tracked, will settle automatically`); return true; }
       await op({ op: 'settle', id: row.id, orderId: r.orderId, filledQty: c.qty, avgPrice: c.avg, at: Date.now() });
-      if (c.phase === 'filled') { toast.success(`Bought back ${label} @ ${c.avg.toFixed(2)}`); if (alertSound) playExitChime(); }
-      else toast.error(`${label} exit ${c.reason || 'rejected'} — position is still open`);
+      if (c.phase === 'filled') { toast.success(`Bought back ${label} @ ${c.avg.toFixed(2)}`); chime('exit', false); }
+      else { toast.error(`${label} exit ${c.reason || 'rejected'} — position is still open`); chime('warn', false, true); }
       return c.phase === 'filled';
     } finally { lock.current = false; }
-  }, [ltpOf, op, sendOrder, confirmOrder, alertSound]);
+  }, [ltpOf, op, sendOrder, confirmOrder, chime]);
 
   /** Buys back every open row of `m` at MARKET, one at a time (doExit holds the single order lock). No confirm: callers ask. */
   const exitAllNow = useCallback(async (m: 'SIM' | 'REAL') => {
@@ -902,14 +932,14 @@ export default function BearishStrikes() {
           const label = `${p.underlying} ${p.strike} ${p.option}`;
           toast.error(`⚠ ${label} — ${hit === 'SL' ? 'stop-loss' : hit === 'TRAIL' ? 'trailing stop' : 'target'} hit @ ${ltp.toFixed(2)}`,
             { id: `risk-${p.id}`, duration: 10_000, action: { label: 'Exit', onClick: () => setExitId(p.id) } });
-          if (alertSound) playWarnChime();
+          chime('alert', true);
         }
       }
       setRiskPaused((prev) => (JSON.stringify(prev) === JSON.stringify(paused) ? prev : paused));
       setRiskHits((prev) => (JSON.stringify(prev) === JSON.stringify(hits) ? prev : hits));
     }, 1000);
     return () => clearInterval(id);
-  }, [risk, alertSound, op]);
+  }, [risk, op, chime]);
 
   /** Trail switched on (0 -> >0) by the user: restart every open short's anchor at its entry, so trailing starts now. */
   const restartTrailAnchors = useCallback(async () => {
@@ -941,7 +971,7 @@ export default function BearishStrikes() {
         if (!autoFailed[id]) {
           setAutoFailed((f) => ({ ...f, [id]: `${p.underlying} ${p.strike} ${p.option}` }));
           toast.error(`AUTO-EXIT FAILED ${p.underlying} ${p.strike} ${p.option} after 3 tries — exit it manually`, { duration: 30_000 });
-          if (alertSound) playWarnChime();
+          chime('warn', true);
         }
         continue;
       }
@@ -951,7 +981,7 @@ export default function BearishStrikes() {
       void doExit(p, p.qty / p.lotSize, 'MARKET');
       return;   // one order at a time; the next position goes on the next pass
     }
-  }, [autoExit, activeAlerts, riskHits, doExit, levelLabel, autoFailed, alertSound]);
+  }, [autoExit, activeAlerts, riskHits, doExit, levelLabel, autoFailed, chime]);
 
   // A give-up clears itself once the position is flat (closed here or outside).
   useEffect(() => {
@@ -985,8 +1015,8 @@ export default function BearishStrikes() {
   // Checked on its own 1 s timer (the render that computed pageLoss hands it over through a ref).
   // The timer is created once: everything it needs is read from this ref, because exitAllNow changes identity with every
   // quote update, and a timer re-created that often would never reach its first tick.
-  const lossRef = useRef({ pageLoss, killed, mode, maxLoss: risk.maxLoss ?? 0, autoExit, alertSound, exitAllNow });
-  useEffect(() => { lossRef.current = { pageLoss, killed, mode, maxLoss: risk.maxLoss ?? 0, autoExit, alertSound, exitAllNow }; });
+  const lossRef = useRef({ pageLoss, killed, mode, maxLoss: risk.maxLoss ?? 0, autoExit, chime, exitAllNow });
+  useEffect(() => { lossRef.current = { pageLoss, killed, mode, maxLoss: risk.maxLoss ?? 0, autoExit, chime, exitAllNow }; });
   useEffect(() => {
     const id = setInterval(() => {
       const L = lossRef.current;
@@ -995,7 +1025,7 @@ export default function BearishStrikes() {
       killRef.current = money(k.total);
       setKill(k);
       toast.error(`MAX LOSS HIT — ${L.mode} P&L ${money(k.total)} ≤ −₹${L.maxLoss.toLocaleString('en-IN')}. New sells blocked.${L.autoExit ? ' Exiting everything at MARKET.' : ' Exit now.'}`, { duration: 30_000 });
-      if (L.alertSound) playWarnChime();
+      L.chime('warn', true);
       if (L.autoExit) void L.exitAllNow(L.mode);
     }, 1000);
     return () => clearInterval(id);
@@ -1145,10 +1175,16 @@ export default function BearishStrikes() {
           <Check label={emaName} checked={watchEma} onChange={setWatchEma} />
           <Seg label="Alert basis" value={alertBasis} onChange={setAlertBasis} options={[{ v: 'live', l: 'Live price' }, { v: 'closed', l: 'Closed bar' }]} />
           <button type="button" onClick={toggleSound} aria-pressed={alertSound} aria-label="Alert sound"
-            title={alertSound ? 'Sound on' : 'Sound off'}
+            title={`Alert sound ${alertSound ? 'on' : 'off'}: level alerts, SL / target / trail, max loss, auto-exit failures${isLeader === false ? ' — another open tab of this page plays the sounds' : ''}. Sounds start after your first click on the page.`}
             className={`h-7 w-7 inline-flex items-center justify-center rounded border ${FOCUS_RING} ${alertSound ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400' : 'border-zinc-700 bg-zinc-900 text-zinc-500'}`}>
             {alertSound ? <Bell className="w-3.5 h-3.5" aria-hidden="true" /> : <BellOff className="w-3.5 h-3.5" aria-hidden="true" />}
           </button>
+          <button type="button" onClick={toggleTradeSound} aria-pressed={tradeSound} aria-label={tradeSound ? 'Mute trade chimes' : 'Unmute trade chimes'}
+            title={`Trade chimes ${tradeSound ? 'on' : 'off'}: a rising chime on a sell fill, a falling one on a buy-back, a low buzz on a rejected / unknown order`}
+            className={`h-7 w-7 inline-flex items-center justify-center rounded border ${FOCUS_RING} ${tradeSound ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400' : 'border-zinc-700 bg-zinc-900 text-zinc-500'}`}>
+            {tradeSound ? <Volume2 className="w-3.5 h-3.5" aria-hidden="true" /> : <VolumeX className="w-3.5 h-3.5" aria-hidden="true" />}
+          </button>
+          {isLeader === false && <span className="text-[10px] font-mono text-zinc-500" title="Another open tab of this page plays the alert sounds, so two tabs never double-ring">sound: other tab</span>}
           <button type="button" onClick={toggleNotify} aria-pressed={alertNotify}
             title="Desktop notification (works while the tab is in the background)"
             className={`h-7 px-2 rounded border text-[10px] font-bold uppercase tracking-wider ${FOCUS_RING} ${alertNotify ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400' : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:text-zinc-200'}`}>
