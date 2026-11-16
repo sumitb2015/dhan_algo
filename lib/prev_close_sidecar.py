@@ -30,15 +30,23 @@ def _price(v):
     return f if f > 0 else None
 
 
+def strike_key(k):
+    """A chain / CSV strike ('25000.000000', 25000.0, '25075.5') as the side files' key ('25000', '25075.5'), the same
+    string the dashboard's String(strike) gives; None when it is not a number."""
+    try:
+        strike = float(k)
+    except (TypeError, ValueError):
+        return None
+    return str(int(strike)) if strike.is_integer() else str(strike)
+
+
 def prev_closes_from_chain(oc: dict) -> dict:
     """{'ce': {'25000': px}, 'pe': {...}} from a Dhan chain `oc` dict; strikes as plain numbers, missing/zero skipped."""
     out = {'ce': {}, 'pe': {}}
     for k, entry in (oc or {}).items():
-        try:
-            strike = float(k)
-        except (TypeError, ValueError):
+        key = strike_key(k)
+        if key is None:
             continue
-        key = str(int(strike)) if strike.is_integer() else str(strike)
         for side in ('ce', 'pe'):
             px = _price(((entry or {}).get(side) or {}).get('previous_close_price'))
             if px is not None:

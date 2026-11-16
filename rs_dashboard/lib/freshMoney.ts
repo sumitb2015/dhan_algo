@@ -110,15 +110,21 @@ export function latestExpiry(snaps: Snapshot[]): string {
  *  from the chain's `previous_oi`): Dhan revises in-session OI after the close (vault: dhan-observed-quirks). */
 export interface CloseOi { ce: Record<string, number>; pe: Record<string, number> }
 
-/** One side of a board row. With `closeOi` the OI is the official close and the change is measured from the same
- *  previous-close OI as every in-session reading (`oi − chg`, constant all day); a strike or side without both stays on
- *  the in-session reading (`official: false`). */
-function sideRow(s: SideSnap | undefined, prevClose?: number, closeOi?: number): (BoardSide & { official: boolean }) | null {
+/** Whether a side can take the official close: a close value and the previous-close OI (`oi − chg`) both known. */
+function canOfficial(s: SideSnap | undefined, closeOi: number | undefined): boolean {
+  return !!s && closeOi != null && Number.isFinite(closeOi) && s.oi != null && s.chg != null
+    && Number.isFinite(s.oi) && Number.isFinite(s.chg);
+}
+
+/** One side of a board row. With `useClose` the OI is the official close and the change is measured from the same
+ *  previous-close OI as every in-session reading (`oi − chg`, constant all day); otherwise the in-session reading
+ *  (`official: false`). The caller decides per STRIKE (both sides or neither), so one row never mixes the two. */
+function sideRow(s: SideSnap | undefined, prevClose?: number, closeOi?: number, useClose = false): (BoardSide & { official: boolean }) | null {
   if (!s) return null;
-  const prevOi = s.oi != null && s.chg != null && Number.isFinite(s.oi) && Number.isFinite(s.chg) ? s.oi - s.chg : null;
-  if (closeOi != null && Number.isFinite(closeOi) && prevOi !== null) {
-    const chg = closeOi - prevOi;
-    return { oi: closeOi, oiMoved: chg, vol: s.vol, buildup: buildupOf(chg, s.ltp, prevClose), official: true };
+  if (useClose && canOfficial(s, closeOi)) {
+    const prevOi = s.oi! - s.chg!;
+    const chg = closeOi! - prevOi;
+    return { oi: closeOi!, oiMoved: chg, vol: s.vol, buildup: buildupOf(chg, s.ltp, prevClose), official: true };
   }
   return { oi: s.oi, oiMoved: s.chg, vol: s.vol, buildup: buildupOf(s.chg, s.ltp, prevClose), official: false };
 }
@@ -167,10 +173,15 @@ export function buildBoardRows(snap: Snapshot, wings = 12, prevClose: PrevCloses
   const rows: BoardRow[] = [];
   for (let k = hiK; k >= loK; k -= step) {
     const s = snap.strikes.get(k);
+    const pc = closeOi?.pe[String(k)], cc = closeOi?.ce[String(k)];
+    // Official only when every side the strike has can take it: a row mixing an official side with an in-session one
+    // would show a false call − put imbalance on the Δ OI tab (the close is often a few % below the session).
+    const useClose = !!closeOi && !!s && (!s.pe || canOfficial(s.pe, pc)) && (!s.ce || canOfficial(s.ce, cc))
+      && (canOfficial(s.pe, pc) || canOfficial(s.ce, cc));
     rows.push({
       strike: k,
-      put: sideRow(s?.pe, prevClose?.pe[String(k)], closeOi?.pe[String(k)]),
-      call: sideRow(s?.ce, prevClose?.ce[String(k)], closeOi?.ce[String(k)]),
+      put: sideRow(s?.pe, prevClose?.pe[String(k)], pc, useClose),
+      call: sideRow(s?.ce, prevClose?.ce[String(k)], cc, useClose),
     });
   }
   return rows;

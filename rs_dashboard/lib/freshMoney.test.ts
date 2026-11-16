@@ -370,16 +370,21 @@ test('flowCarry: earlier + the shown completed cells up to dayAt = day; unknown 
   assert.equal((flowCarry(gs, 0, gi) ?? NaN) + gs.cells.slice(0, gi).reduce<number>((a, v) => a + v!, 0), gs.day);
 });
 
-test('official close OI: total and change come from it, measured from the same previous-close OI; gaps stay in-session', () => {
-  // In session: CE 6,212,635 (+230,360 vs a previous close of 5,982,275); PE has no change on record.
-  const [snap] = parseSnapshotCsv([HEAD, row('2026-11-13 15:39:40', 22550, 6212635, 230360, 10, 900, '', 10)].join('\n'));
-  const rows = buildBoardRows(snap, 1, null, { ce: { '22550': 5779930 }, pe: { '22550': 800 } });
-  const r = rows.find(x => x.strike === 22550)!;
+test('official close OI: total and change come from it, measured from the same previous-close OI; a row is all or nothing', () => {
+  // In session: CE 6,212,635 (+230,360 vs a previous close of 5,982,275); PE 900 (+100 -> previous close 800).
+  const [snap] = parseSnapshotCsv([HEAD, row('2026-11-13 15:39:40', 22550, 6212635, 230360, 10, 900, 100, 10)].join('\n'));
+  const r = buildBoardRows(snap, 1, null, { ce: { '22550': 5779930 }, pe: { '22550': 780 } }).find(x => x.strike === 22550)!;
   assert.equal(r.call!.oi, 5779930);
   assert.equal(r.call!.oiMoved, 5779930 - 5982275);   // a build-up in session that the close turns into a cut
-  assert.equal(r.call!.official, true);
-  assert.equal(r.put!.oi, 900);                       // previous-close OI unknown: no official change can be made
-  assert.equal(r.put!.official, false);
+  assert.equal(r.put!.oiMoved, 780 - 800);
+  assert.equal(r.call!.official && r.put!.official, true);
+  // A side without an official value (or without a known previous close) keeps the WHOLE row in-session, so Δ OI
+  // (call − put) never mixes an official side with an in-session one.
+  const half = buildBoardRows(snap, 1, null, { ce: { '22550': 5779930 }, pe: {} }).find(x => x.strike === 22550)!;
+  assert.deepEqual([half.call!.oi, half.call!.official, half.put!.oi, half.put!.official], [6212635, false, 900, false]);
+  const [noChg] = parseSnapshotCsv([HEAD, row('2026-11-13 15:39:40', 22550, 6212635, 230360, 10, 900, '', 10)].join('\n'));
+  const r2 = buildBoardRows(noChg, 1, null, { ce: { '22550': 5779930 }, pe: { '22550': 780 } }).find(x => x.strike === 22550)!;
+  assert.equal(r2.call!.official, false);
   assert.equal(buildBoardRows(snap, 1).find(x => x.strike === 22550)!.call!.official, false);
 });
 

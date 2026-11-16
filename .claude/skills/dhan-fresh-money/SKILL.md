@@ -111,11 +111,14 @@ positions read twice", "board price snaps back to the startup value", "OI change
     close; an NRML position open at the day roll leaves the ledger. The board shows the selected product's positions;
     the other product's are in the off-board list.
 13. **A past NSE session shows the official close OI, not the last in-session reading.** Dhan revises option OI after the
-    close (2026-11-13: 0-7 % lower on most NIFTY strikes; 24700 PE flipped from +3.5k to -3.1k lots). On startup each
-    trading day the IV snapshot collector writes the previous session's `previous_oi` (`lib/eod_oi_sidecar.py`) to
-    `<csv>_eod_oi.json`; the route applies it (`buildBoardRows(..., closeOi)`) only when `date` and `expiry` match, and the
-    change is measured from that day's own previous-close OI (`oi − chg`). The 3m slots stay in-session. Header chip
-    `fm-oi-source` says which source is shown. No side file for MCX, or when the shown file's expiry has expired.
+    close (2026-11-13: 0-7 % lower on most NIFTY strikes; 24700 PE flipped from +3.5k to -3.1k lots). The IV snapshot
+    collector's `EodOiTask` writes the previous session's `previous_oi` (`lib/eod_oi_sidecar.py`) to `<csv>_eod_oi.json`,
+    one chain call per slot (pre-open wait + between polls), retried every 120 s, and ONLY once `has_rolled` says Dhan has
+    moved `previous_oi` on (most strikes differ from the session's own `oi − chg`): before the roll, or on a non-trading
+    day, it is still the close before, which would read as a ~0 change on every strike. The route applies it
+    (`buildBoardRows(..., closeOi)`) only when `date` and `expiry` match, per STRIKE (both sides or neither — a mixed row
+    fakes a Δ OI imbalance), change measured from that day's own previous-close OI. The 3m slots stay in-session. Header
+    chip `fm-oi-source` says which source is shown. No side file for MCX, or when the shown file's expiry has expired.
 14. MCX collectors auto-start per MCX session (holiday file shared with `lib/mcxSession`); `instrumentation.node.ts` must not
     kill them on a dashboard restart. A WAITING collector counts as alive.
 

@@ -230,11 +230,14 @@ function slotInfo(fs: FlowSlots, i: number): { head: string; span: string; runni
   return { head: `${end}…`, span: `${start}–${end}, running (so far to ${fs.lastTs})`, running: true, ok: !!fs.boundOk[n] };
 }
 
-/** For flowCarry: the oldest shown cell's index (= its start edge in `bounds`) and `dayAt`'s index in `bounds`. */
+/** For flowCarry: where the "earlier" cell starts counting (= a start edge in `bounds`) and `dayAt`'s index in `bounds`.
+ *  It starts at the oldest shown cell, or at the session open when shown cells lie before it (the first half hour):
+ *  those cells have no reading by design, and nothing trades before the open, so "earlier" is then exactly 0. */
 function carryIdx(fs: FlowSlots): { first: number; dayIdx: number } {
   const total = cellCount(fs);
   const shown = Math.min(total, fs.show ?? total);
-  return { first: total - shown, dayIdx: fs.dayAt ? fs.bounds.indexOf(fs.dayAt) : -1 };
+  const openIdx = fs.open ? fs.bounds.findIndex(b => b >= fs.open!) : -1;   // "HH:MM" compares as text
+  return { first: Math.max(total - shown, openIdx), dayIdx: fs.dayAt ? fs.bounds.indexOf(fs.dayAt) : -1 };
 }
 
 /** Cell order for one side: puts read oldest → running left to right, calls are mirrored, so the running slot always
@@ -419,7 +422,7 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, on
     const split = carry !== null && sd?.flow?.day != null
       ? ` = earlier ${v(carry)} + slots ${fs.bounds[first]}–${fs.dayAt} ${v(sd.flow.day - carry)}` : '';
     return `Today's OI change vs the previous close, as of ${fs.dayAt ?? 'no slot edge with a reading'}${late}: ${v(sd?.flow?.day)}${split}`
-      + ` · live (${fs.lastTs || 'now'}): ${v(sd?.oiMoved)}`;
+      + (sd?.official ? ` · official close (the OI change tab): ${v(sd?.oiMoved)}` : ` · live (${fs.lastTs || 'now'}): ${v(sd?.oiMoved)}`);
   };
   const p = row.put, c = row.call;
   const cell = (side: 'put' | 'call') => {
@@ -1146,8 +1149,8 @@ export default function FreshMoneyBoard() {
                   <p>Each cell is the OI change ({data.oiUnit}) in one {fs.slotMin}-minute slot counted from the open ({data.market === 'MCX' ? '09:00' : '09:15'}).
                     Completed slots are frozen; the ringed, italic cell next to the strike is the current slot so far (after the close there is none:
                     the slots stop at the close, so OI the chain moves after the bell is not counted). – = no OI reading at a slot edge.
-                    On a narrower screen the oldest slots are left out. The grey cell at the outer end (&lt;{fs.bounds[carryIdx(fs).first] ?? '–'}) is
-                    everything before the first slot shown, so that cell + the completed slots = the number beside the strike, exactly.
+                    On a narrower screen the oldest slots are left out. The grey cell at the outer end (headed &lt;HH:MM) is everything
+                    before that time, so that cell + the completed slots = the number beside the strike, exactly.
                     Hover a cell for today&apos;s OI change as of that slot&apos;s end.</p>
                   <p>Tint = size of the move against this board&apos;s 95th-percentile move: grey under 10 %, then faint, medium, and bold white on a
                     strong tint for the biggest moves (≥ 70 %). Green = OI added, red = OI cut.</p>

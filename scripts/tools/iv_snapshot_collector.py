@@ -24,7 +24,10 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.prev_close_sidecar import write_prev_closes
-from lib.eod_oi_sidecar import eod_oi_path, last_expiry_of_csv, previous_trading_day, write_eod_oi
+from lib.eod_oi_sidecar import (
+    eod_oi_from_chain, eod_oi_path, has_rolled, last_expiry_of_csv, previous_trading_day, session_prev_oi_from_csv,
+    write_eod_oi,
+)
 
 _LOG_FILE = os.path.join(ROOT, 'debug', 'iv_snapshot_collector.log')
 os.makedirs(os.path.join(ROOT, 'debug'), exist_ok=True)
@@ -111,29 +114,63 @@ def get_csv_paths(today: date, underlying: str) -> list[str]:
     return [os.path.join(debug_dir, f'iv_snapshots_{underlying}_{d_str}.csv')]
 
 
-def record_prev_session_eod_oi(helper, underlyings, today: date, sleep=time.sleep) -> None:
-    """Once per start: the previous session's official end-of-day OI (the chain's `previous_oi` today) into a side file
-    next to that session's CSV, for the Fresh Money board. Skipped when it is already there, when there is no CSV for
-    the session right before today, or when that file's expiry has expired (no chain). Never raises."""
+EOD_RETRY_SEC = 120   # official close OI: wait between tries while Dhan has not rolled `previous_oi` / a fetch failed
+
+
+def eod_oi_step(helper, u, today: date) -> str:
+    """One try at the previous session's official close OI for `u` (the chain's `previous_oi` today) into a side file
+    next to that session's CSV, for the Fresh Money board. Returns:
+      'done'  written (or already there),
+      'skip'  nothing to do today (no CSV for the session right before today, or its expiry has expired: no chain),
+      'retry' try again later (fetch failed / empty, or Dhan has not rolled `previous_oi` to that session yet).
+    Never raises."""
     prev = previous_trading_day(today)
-    for u in underlyings:
-        try:
-            paths = [p for p in get_csv_paths(prev, u) if os.path.exists(p)]
-            if not paths or all(os.path.exists(eod_oi_path(p)) for p in paths):
-                continue
-            expiry = last_expiry_of_csv(paths[-1])
-            if not expiry or expiry < today.isoformat():
-                continue
-            cfg = TARGETS[u]
-            chain = helper.get_option_chain(cfg['chain_id'], expiry, exchange_segment=cfg['chain_seg'])
-            oc = chain.get('oc', {}) if chain else {}
-            fetched = ist_now().strftime('%Y-%m-%d %H:%M:%S')
-            ok = [write_eod_oi(p, prev.isoformat(), expiry, oc, fetched) for p in paths]
-            log.info('[%s] official close OI for %s (exp %s): %s', u, prev.isoformat(), expiry,
-                     'written' if all(ok) else 'no previous_oi in the chain')
-        except Exception as exc:  # noqa: BLE001 — best effort; collection must still start
-            log.warning('[%s] official close OI for the previous session failed: %s', u, exc)
-        sleep(3.0)   # Dhan option chain: one call per ~3 s
+    try:
+        paths = [p for p in get_csv_paths(prev, u) if os.path.exists(p)]
+        if not paths:
+            return 'skip'
+        if all(os.path.exists(eod_oi_path(p)) for p in paths):
+            return 'done'
+        expiry = last_expiry_of_csv(paths[-1])
+        if not expiry or expiry < today.isoformat():
+            return 'skip'
+        cfg = TARGETS[u]
+        chain = helper.get_option_chain(cfg['chain_id'], expiry, exchange_segment=cfg['chain_seg'])
+        fresh = eod_oi_from_chain(chain.get('oc', {}) if chain else {})
+        rolled = has_rolled(fresh, session_prev_oi_from_csv(paths[-1], expiry))
+        if not rolled:
+            log.info('[%s] official close OI for %s: %s — retrying in %ds', u, prev.isoformat(),
+                     'too few strikes to compare' if rolled is None else 'Dhan has not rolled previous_oi yet',
+                     EOD_RETRY_SEC)
+            return 'retry'
+        fetched = ist_now().strftime('%Y-%m-%d %H:%M:%S')
+        ok = all([write_eod_oi(p, prev.isoformat(), expiry, fresh, fetched) for p in paths])
+        log.info('[%s] official close OI for %s (exp %s): %s', u, prev.isoformat(), expiry, 'written' if ok else 'write failed')
+        return 'done' if ok else 'retry'
+    except Exception as exc:  # noqa: BLE001 — best effort; collection must go on
+        log.warning('[%s] official close OI for the previous session failed: %s', u, exc)
+        return 'retry'
+
+
+class EodOiTask:
+    """Spreads the official-close fetches over the day: at most ONE chain call per `due()` slot, the next slot after
+    EOD_RETRY_SEC, so a collector start or restart never delays a snapshot by more than one call."""
+
+    def __init__(self, underlyings, today: date, clock=time.monotonic):
+        self.pending = list(underlyings)
+        self.today = today
+        self.clock = clock
+        self.next_at = 0.0
+
+    def tick(self, helper) -> None:
+        if not self.pending or self.clock() < self.next_at:
+            return
+        u = self.pending.pop(0)
+        if eod_oi_step(helper, u, self.today) == 'retry':
+            self.pending.append(u)
+            self.next_at = self.clock() + EOD_RETRY_SEC
+        else:
+            self.next_at = self.clock() + 3.0   # Dhan option chain: one call per ~3 s
 
 
 def stop_trigger_path() -> str:
@@ -329,12 +366,13 @@ def main():
     helper = DhanHelper(dhan)
 
     # The previous session's official close OI for the Fresh Money board (Dhan revises in-session OI after the close).
-    if not args.dry_run:
-        record_prev_session_eod_oi(helper, active_underlyings, date.today())
+    # Tried during the pre-open wait and between polls, one chain call at a time, until Dhan has rolled it.
+    eod_task = EodOiTask([] if args.dry_run else active_underlyings, date.today())
 
     # Wait for market open
     if not args.ignore_market_hours:
         while is_before_open(ist_now()):
+            eod_task.tick(helper)
             now = ist_now()
             wait_mins = (MARKET_OPEN[0] * 60 + MARKET_OPEN[1]) - minutes_since_midnight(now)
             log.info('Market not open yet — sleeping %d min', wait_mins)
@@ -411,6 +449,7 @@ def main():
                 log.error('[%s %s] Error: %s', u, ts, exc)
 
         iteration += 1
+        eod_task.tick(helper)
 
         if consecutive_failures and consecutive_failures % 15 == 0:
             fresh = rebuild_helper(f'{consecutive_failures} consecutive poll failures')

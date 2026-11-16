@@ -27,6 +27,8 @@ export interface FreshMoneySide {
   /** OI change per completed slot (oldest first) then the running slot so far, and `day` = today's OI change as of the
    *  latest completed slot edge; same units as `oi`; null = no reading. */
   flow: SideFlow | null;
+  /** `oi` / `oiMoved` are the official close (a past session with `closeOi`), not the last in-session reading. */
+  official?: boolean;
 }
 export interface FreshMoneyRow { strike: number; put: FreshMoneySide | null; call: FreshMoneySide | null }
 
@@ -61,7 +63,9 @@ export interface FreshMoneyResponse {
    *  start), whether each had a reading, the latest snapshot time ("HH:MM:SS", the running slot's "so far"), and the
    *  edge every row's `flow.day` is read at ("HH:MM"; earlier than the last bound after a collector gap; null = none).
    *  `closed` = the session is over: the bounds end AT the close and every cell is a completed slot (no running one). */
-  flowSlots: { slotMin: number; bounds: string[]; boundOk: boolean[]; lastTs: string; dayAt: string | null; closed?: boolean };
+  flowSlots: { slotMin: number; bounds: string[]; boundOk: boolean[]; lastTs: string; dayAt: string | null; closed?: boolean;
+    /** Session open "HH:MM": slot edges before it have no reading by design, so the "earlier" cell counts from here. */
+    open?: string };
   error?: string;
 }
 
@@ -69,7 +73,6 @@ export interface FreshMoneyResponse {
 const respCache = new Map<string, { key: string; body: FreshMoneyResponse }>();
 
 const todayIST = istToday;
-const isMcxU = (u: string) => MCX_LOT_MULTIPLIER[u] !== undefined;
 /** Minutes of the day now, IST. */
 const nowIstMin = () => istMinuteOfDay(Date.now());
 
@@ -120,7 +123,7 @@ export async function GET(req: NextRequest) {
   const cacheKey = `${file}:${st.mtimeMs}:${st.size}:${lot}:${todayIST()}:${ended}:${eodMtime}`;
   const cached = respCache.get(underlying);
   // Cached or null, never awaited (one background Dhan call per index per day).
-  const prevDay = isMcxU(underlying) ? null : prevDayLevelsNow(underlying);
+  const prevDay = isMcx ? null : prevDayLevelsNow(underlying);
   if (cached && cached.key === cacheKey) return NextResponse.json({ ...cached.body, prevDay });
 
   const parsed = await parsedDay(file, true);
@@ -152,8 +155,8 @@ export async function GET(req: NextRequest) {
     const fl = flow.byStrike.get(r.strike);
     return {
       strike: r.strike,
-      put: r.put ? { oi: toLots(r.put.oi), oiMoved: toLots(r.put.oiMoved), buildup: r.put.buildup, flow: flowLots(fl?.pe) } : null,
-      call: r.call ? { oi: toLots(r.call.oi), oiMoved: toLots(r.call.oiMoved), buildup: r.call.buildup, flow: flowLots(fl?.ce) } : null,
+      put: r.put ? { oi: toLots(r.put.oi), oiMoved: toLots(r.put.oiMoved), buildup: r.put.buildup, flow: flowLots(fl?.pe), official: !!r.put.official } : null,
+      call: r.call ? { oi: toLots(r.call.oi), oiMoved: toLots(r.call.oiMoved), buildup: r.call.buildup, flow: flowLots(fl?.ce), official: !!r.call.official } : null,
     };
   });
 
@@ -177,7 +180,7 @@ export async function GET(req: NextRequest) {
       : null,
     flowSlots: {
       slotMin: flow.slotMin, bounds: flow.bounds.map(fmtMinOfDay), boundOk: flow.boundOk, lastTs: flow.lastTs,
-      dayAt: flow.dayAt === null ? null : fmtMinOfDay(flow.dayAt), closed: flow.closed,
+      dayAt: flow.dayAt === null ? null : fmtMinOfDay(flow.dayAt), closed: flow.closed, open: fmtMinOfDay(day.from),
     },
   };
   respCache.set(underlying, { key: cacheKey, body });
