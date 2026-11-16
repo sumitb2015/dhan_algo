@@ -7,13 +7,20 @@
  * nodes. Colours come from the theme hooks because canvas cannot read CSS variables per
  * draw call; the saturated period colours are data colours and stay fixed across themes.
  *
- * Interaction: wheel = vertical zoom (row height), Shift + wheel = horizontal zoom (cell
- * width), drag = pan, click = select a profile, double-click = fit.
+ * Interaction follows the P&F chart (dhan-pnf-chart-panel; maths in lib/tpoChartZoom.ts):
+ * wheel / − + = zoom both axes, Shift + wheel / squeeze-stretch = horizontal only (TPO cell
+ * width), drag on the price axis = vertical only (row height, drag up = in), drag = pan,
+ * click = select a profile, double-click = fit.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useChartChrome } from '@/lib/chartTheme';
-import { tpoLetter, type NakedPoc, type PowerDegree, type Profile } from '@/lib/marketProfile';
+import { rowFloor, tpoLetter, type NakedPoc, type PowerDegree, type Profile } from '@/lib/marketProfile';
+import {
+  anchorOffsetX, axisDragFactor, BUTTON_STEP, wheelFactor, zoomCellW, zoomRows,
+} from '@/lib/tpoChartZoom';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { ChevronsLeftRight, ChevronsRightLeft, Minus, Plus, RotateCcw } from 'lucide-react';
 
 export type TpoStyle = 'letters' | 'blocks' | 'histogram';
 
@@ -269,7 +276,7 @@ export default function TpoChart({
           ctx.fillStyle = isPoc ? POC_CELL : markColor(m, alpha);
           ctx.fillRect(cx, yTop, Math.max(1, l.cw - (l.cw >= 4 ? 1 : 0)), hgt);
           if (letters) {
-            ctx.fillStyle = '#ffffff';
+            ctx.fillStyle = chrome.onColor;
             ctx.fillText(tpoLetter(m), cx + l.cw / 2, yTop + hgt / 2 + 0.5);
           }
         });
@@ -313,8 +320,8 @@ export default function TpoChart({
 
       // initial balance bar
       if (show.ib && p.ibHigh !== null && p.ibLow !== null) {
-        const yH = yOf(Math.floor(p.ibHigh / rowSize + 1e-9) * rowSize + rowSize);
-        const yL = yOf(Math.floor(p.ibLow / rowSize + 1e-9) * rowSize);
+        const yH = yOf(rowFloor(p.ibHigh, rowSize) + rowSize);
+        const yL = yOf(rowFloor(p.ibLow, rowSize));
         ctx.fillStyle = IB_SKY;
         ctx.fillRect(x0 + 2, yH, IB_W, Math.max(2, yL - yH));
       }
@@ -336,10 +343,11 @@ export default function TpoChart({
       ctx.font = font(9, 700);
       ctx.textBaseline = 'middle';
       ctx.fillStyle = chrome.textSecondary;
-      const yOpen = yOf(Math.floor(p.open / rowSize + 1e-9) * rowSize + rowSize / 2);
+      const yOpen = yOf(rowFloor(p.open, rowSize) + rowSize / 2);
       ctx.textAlign = 'right';
       ctx.fillText('▸', cellsX - 5, yOpen);
-      const closeRow = Math.floor(p.close / rowSize + 1e-9) * rowSize;
+      // rowFloor rounds like the engine's row prices, so the lookup also hits for 0.05 rows.
+      const closeRow = rowFloor(p.close, rowSize);
       const closeMarks = p.rows.find((r) => r.price === closeRow)?.marks.length ?? 0;
       ctx.textAlign = 'left';
       ctx.fillText(p.developing ? '◂ LTP' : '◂ C', cellsX + closeMarks * l.cw + 2, yOf(closeRow + rowSize / 2));
@@ -459,7 +467,7 @@ export default function TpoChart({
       if (y > 0 && y < plotBottom) {
         ctx.fillStyle = IB_SKY;
         ctx.fillRect(plotW + 1, y - 8, AXIS_W - 2, 16);
-        ctx.fillStyle = '#0f172a';
+        ctx.fillStyle = chrome.onColorDark;
         ctx.font = font(10, 800);
         ctx.fillText(lastPrice.toFixed(2), plotW + 5, y);
         ctx.setLineDash([2, 2]);
@@ -530,44 +538,71 @@ export default function TpoChart({
     return null;
   }, [layoutFor, profiles, rowSize]);
 
+  // ── zoom (lib/tpoChartZoom.ts) ──
+  const zoomX = useCallback((factor: number, anchorX: number) => {
+    const v = view.current;
+    const next = zoomCellW(v.cellW, factor);
+    if (next === v.cellW) return;
+    v.offsetX = anchorOffsetX(layoutFor(v.cellW), layoutFor(next), GAP, v.offsetX, anchorX);
+    v.cellW = next;
+  }, [layoutFor]);
+  const zoomY = useCallback((factor: number, anchorY: number) => {
+    Object.assign(view.current, zoomRows(view.current, factor, anchorY, PAD_TOP, rowSize));
+  }, [rowSize]);
+  /** Buttons zoom about the centre of the plot. */
+  const zoomCentre = useCallback((factor: number, axes: 'both' | 'x') => {
+    const { w, h } = size.current;
+    zoomX(factor, (w - AXIS_W) / 2);
+    if (axes === 'both') zoomY(factor, (h - X_AXIS_H) / 2);
+    schedule();
+  }, [zoomX, zoomY, schedule]);
+
   // Wheel must be non-passive to stop the page scrolling under the chart.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const v = view.current;
       const rect = canvas.getBoundingClientRect();
-      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-      if (e.shiftKey) {
-        const mx = e.clientX - rect.left + v.offsetX;
-        const next = Math.min(18, Math.max(1, v.cellW * factor));
-        v.offsetX = Math.max(0, v.offsetX + mx * (next / v.cellW - 1));
-        v.cellW = next;
-      } else {
-        const my = e.clientY - rect.top;
-        const priceAtCursor = v.topPrice - ((my - PAD_TOP) / v.rowH) * rowSize;
-        const next = Math.min(30, Math.max(1.5, v.rowH * factor));
-        v.rowH = next;
-        v.topPrice = priceAtCursor + ((my - PAD_TOP) / next) * rowSize;
-      }
+      const factor = wheelFactor(e);
+      if (factor === 1) return;
+      zoomX(factor, e.clientX - rect.left);
+      if (!e.shiftKey) zoomY(factor, e.clientY - rect.top);
       schedule();
     };
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', onWheel);
-  }, [rowSize, schedule]);
+  }, [zoomX, zoomY, schedule]);
 
-  const drag = useRef<{ x: number; y: number; offsetX: number; topPrice: number; moved: boolean } | null>(null);
+  type Drag =
+    | { mode: 'pan'; x: number; y: number; offsetX: number; topPrice: number; moved: boolean }
+    | { mode: 'axis'; y: number; anchorY: number; base: { rowH: number; topPrice: number } };
+  const drag = useRef<Drag | null>(null);
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     e.currentTarget.setPointerCapture(e.pointerId);
-    drag.current = {
-      x: e.clientX, y: e.clientY, offsetX: view.current.offsetX, topPrice: view.current.topPrice, moved: false,
-    };
+    const rect = e.currentTarget.getBoundingClientRect();
+    const v = view.current;
+    if (e.clientX - rect.left > rect.width - AXIS_W) {
+      // Price-axis drag: vertical zoom about the price grabbed. Recomputed from the start
+      // view on every move, so a fast drag never compounds against a stale row height.
+      drag.current = {
+        mode: 'axis', y: e.clientY, anchorY: e.clientY - rect.top,
+        base: { rowH: v.rowH, topPrice: v.topPrice },
+      };
+      return;
+    }
+    drag.current = { mode: 'pan', x: e.clientX, y: e.clientY, offsetX: v.offsetX, topPrice: v.topPrice, moved: false };
   };
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
+    const canvas = e.currentTarget;
+    const rect = canvas.getBoundingClientRect();
     const d = drag.current;
+    if (d?.mode === 'axis') {
+      Object.assign(view.current, zoomRows(d.base, axisDragFactor(d.y, e.clientY), d.anchorY, PAD_TOP, rowSize));
+      schedule();
+      return;
+    }
     if (d) {
       const dx = e.clientX - d.x;
       const dy = e.clientY - d.y;
@@ -583,7 +618,9 @@ export default function TpoChart({
     }
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    if (x > rect.width - AXIS_W || y > rect.height - X_AXIS_H) {
+    const onAxis = x > rect.width - AXIS_W;
+    canvas.style.cursor = onAxis ? 'ns-resize' : 'crosshair';
+    if (onAxis || y > rect.height - X_AXIS_H) {
       setHover(null);
       return;
     }
@@ -592,7 +629,7 @@ export default function TpoChart({
   const onPointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const d = drag.current;
     drag.current = null;
-    if (d && !d.moved) {
+    if (d?.mode === 'pan' && !d.moved) {
       const rect = e.currentTarget.getBoundingClientRect();
       const hit = hitTest(e.clientX - rect.left, e.clientY - rect.top);
       if (hit) onSelect(hit.profile.key);
@@ -619,11 +656,19 @@ export default function TpoChart({
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onPointerCancel={() => { drag.current = null; }}
         onPointerLeave={() => setHover(null)}
         onDoubleClick={onDoubleClick}
         aria-label="Market profile TPO chart"
         role="img"
       />
+      <div className="absolute bottom-8 z-10 flex items-center gap-1" style={{ right: AXIS_W + 8 }}>
+        <ZoomButton label="Zoom out" onClick={() => zoomCentre(BUTTON_STEP, 'both')}><Minus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        <ZoomButton label="Fit chart to panel" onClick={onDoubleClick}><RotateCcw className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        <ZoomButton label="Zoom in" onClick={() => zoomCentre(1 / BUTTON_STEP, 'both')}><Plus className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        <ZoomButton label="Squeeze profiles (horizontal zoom out, Shift + wheel)" onClick={() => zoomCentre(BUTTON_STEP, 'x')}><ChevronsRightLeft className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+        <ZoomButton label="Stretch profiles (horizontal zoom in, Shift + wheel)" onClick={() => zoomCentre(1 / BUTTON_STEP, 'x')}><ChevronsLeftRight className="w-3 h-3" aria-hidden="true" /></ZoomButton>
+      </div>
       {tip && hover && (
         <div
           className="pointer-events-none absolute z-10 rounded-lg border border-zinc-700 bg-zinc-900/95 px-2.5 py-1.5 text-[11px] font-mono text-zinc-200 shadow-lg"
@@ -642,5 +687,21 @@ export default function TpoChart({
         </div>
       )}
     </div>
+  );
+}
+
+/** Same round zoom button as the P&F panel (components/straddlePnf/PnfPanel.tsx). */
+function ZoomButton({ label, onClick, children }: { label: string; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        onClick={onClick}
+        render={<button type="button" aria-label={label}
+                        className="flex items-center justify-center w-6 h-6 rounded-full bg-zinc-900 border border-zinc-700 text-zinc-100 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400" />}
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent>{label === 'Fit chart to panel' ? 'Fit chart to panel (or double-click the chart)' : label}</TooltipContent>
+    </Tooltip>
   );
 }

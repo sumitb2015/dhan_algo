@@ -15,6 +15,9 @@ import {
   powerDegree,
   tpoSkew,
   nakedPocs,
+  rowFloor,
+  minRowSize,
+  MAX_ROWS_PER_PROFILE,
   type Bar,
   type Profile,
 } from './marketProfile.ts';
@@ -209,23 +212,48 @@ test('averageIb uses only earlier sessions', () => {
 
 test('powerDegree ranks the six bullish and six bearish degrees', () => {
   // Previous day: VA 100-110, range 90-120. Today: IB 115-125, VA 112-128 (synthetic).
-  const prev = { vah: 110, val: 100, high: 120, low: 90 } as Profile;
-  const today = { vah: 128, val: 112, ibHigh: 125, ibLow: 115 } as Profile;
+  // vah is the bottom of the top VA row: with rowSize 1 the value area tops out at vah + 1.
+  const prev = { vah: 110, val: 100, high: 120, low: 90, rowSize: 1 } as Profile;
+  const today = { vah: 128, val: 112, ibHigh: 125, ibLow: 115, rowSize: 1 } as Profile;
   assert.strictEqual(powerDegree(today, prev, 105).side, 'balanced');
   assert.strictEqual(powerDegree(today, prev, 122).degree, 1 + 3, 'in IB, above prev range');
   assert.strictEqual(powerDegree({ ...today, ibLow: 111, ibHigh: 113 } as Profile, prev, 112).degree, 1);
-  const lowToday = { vah: 119, val: 108, ibHigh: 113, ibLow: 108 } as Profile;
+  const lowToday = { vah: 119, val: 108, ibHigh: 113, ibLow: 108, rowSize: 1 } as Profile;
   assert.strictEqual(powerDegree(lowToday, prev, 112).degree, 1, 'within IB, above prev VA');
   assert.strictEqual(powerDegree(lowToday, prev, 115).degree, 2, 'above IB within VA');
   assert.strictEqual(powerDegree({ ...lowToday, vah: 116 } as Profile, prev, 118).degree, 3, 'above own VA');
   assert.strictEqual(powerDegree(today, prev, 126).degree, 5);
   assert.strictEqual(powerDegree(today, prev, 130).degree, 6);
 
-  const bearToday = { vah: 98, val: 82, ibHigh: 95, ibLow: 85 } as Profile;
+  const bearToday = { vah: 98, val: 82, ibHigh: 95, ibLow: 85, rowSize: 1 } as Profile;
   assert.deepStrictEqual(
     [92, 88 - 4, 80].map((p) => [powerDegree(bearToday, prev, p).side, powerDegree(bearToday, prev, p).degree]),
     [['bearish', 1], ['bearish', 5], ['bearish', 6]],
   );
+});
+
+test('powerDegree: a price inside the top value-area row is still inside value', () => {
+  // Row size 5: the VAH row 24100 covers 24100-24105, so a 24102 close is balanced, not bullish.
+  const prev = { vah: 24100, val: 24000, high: 24150, low: 23950, rowSize: 5 } as Profile;
+  assert.strictEqual(powerDegree({ vah: 24100, val: 24050, ibHigh: 24110, ibLow: 24060, rowSize: 5 } as Profile, prev, 24102).side, 'balanced');
+  assert.strictEqual(powerDegree({ vah: 24100, val: 24050, ibHigh: 24110, ibLow: 24060, rowSize: 5 } as Profile, prev, 24106).side, 'bullish');
+  // …and the same row edge decides "above its own value area" (+2): 24104 sits in today's VAH row.
+  const today = { vah: 24100, val: 24060, ibHigh: 24090, ibLow: 24070, rowSize: 5 } as Profile;
+  const p2 = { ...prev, vah: 24050, high: 24080 } as Profile;
+  assert.strictEqual(powerDegree(today, p2, 24104).degree, 5, 'above IB within VA, above prev range');
+  assert.strictEqual(powerDegree(today, p2, 24106).degree, 6);
+});
+
+test('rowFloor matches row prices exactly for fractional row sizes', () => {
+  const [p] = buildDayProfiles([{ t: '2026-11-13 09:15:00', o: 100.6, h: 100.7, l: 100.6, c: 100.65, v: 0 }], { rowSize: 0.05 });
+  assert.ok(p.rows.some((r) => r.price === rowFloor(100.65, 0.05)));
+  assert.strictEqual(rowFloor(100.65, 0.05), 100.65);
+});
+
+test('minRowSize keeps a profile under MAX_ROWS_PER_PROFILE rows', () => {
+  assert.strictEqual(minRowSize(1500), 5);
+  assert.ok(1500 / minRowSize(1500) <= MAX_ROWS_PER_PROFILE);
+  assert.strictEqual(minRowSize(0), 0);
 });
 
 test('tpoSkew leans toward the thin side', () => {

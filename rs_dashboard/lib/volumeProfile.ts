@@ -263,33 +263,42 @@ export function valueArea(rows: ProfileRow[], pct: number): ValueArea {
   const poc = rows[pocIdx].price;
   if (total <= 0) return { poc, vah: poc, val: poc, total: 0 };
 
-  const target = (total * Math.min(Math.max(pct, 1), 100)) / 100;
-  let cum = rows[pocIdx].total;
-  let up = pocIdx + 1;
-  let down = pocIdx - 1;
+  const { lo, hi } = expandValueArea(rows.map((r) => r.total), pocIdx, pct);
+  return { poc, vah: rows[hi].price, val: rows[lo].price, total };
+}
 
+/**
+ * The value-area expansion itself, on bare per-row weights (volume or TPO count): from
+ * `pocIdx`, repeatedly add whichever side's next TWO rows weigh more (up wins a tie) until
+ * `pct` of the total is enclosed. Returns the enclosed row-index range. Shared by the volume
+ * profile above and the TPO profile in lib/marketProfile.ts, which differ only in how they
+ * pick the POC row.
+ */
+export function expandValueArea(weights: number[], pocIdx: number, pct: number): { lo: number; hi: number } {
+  if (pocIdx < 0 || pocIdx >= weights.length) return { lo: -1, hi: -1 };
+  const total = weights.reduce((s, w) => s + w, 0);
+  const target = (total * Math.min(Math.max(pct, 1), 100)) / 100;
+  let cum = weights[pocIdx];
+  let lo = pocIdx;
+  let hi = pocIdx;
   const pairAt = (start: number, step: number) => {
     let sum = 0;
     for (let k = 0; k < 2; k++) {
       const i = start + k * step;
-      if (i >= 0 && i < rows.length) sum += rows[i].total;
+      if (i >= 0 && i < weights.length) sum += weights[i];
     }
     return sum;
   };
-
-  while (cum < target && (up < rows.length || down >= 0)) {
-    const upSum = up < rows.length ? pairAt(up, 1) : -1;
-    const downSum = down >= 0 ? pairAt(down, -1) : -1;
+  while (cum < target && (hi < weights.length - 1 || lo > 0)) {
+    const upSum = hi < weights.length - 1 ? pairAt(hi + 1, 1) : -1;
+    const downSum = lo > 0 ? pairAt(lo - 1, -1) : -1;
     if (upSum >= downSum) {
-      for (let k = 0; k < 2 && up < rows.length && cum < target; k++, up++) cum += rows[up].total;
+      for (let k = 0; k < 2 && hi < weights.length - 1 && cum < target; k++) cum += weights[++hi];
     } else {
-      for (let k = 0; k < 2 && down >= 0 && cum < target; k++, down--) cum += rows[down].total;
+      for (let k = 0; k < 2 && lo > 0 && cum < target; k++) cum += weights[--lo];
     }
   }
-
-  const vahIdx = Math.min(up - 1 < pocIdx ? pocIdx : up - 1, rows.length - 1);
-  const valIdx = Math.max(down + 1 > pocIdx ? pocIdx : down + 1, 0);
-  return { poc, vah: rows[vahIdx].price, val: rows[valIdx].price, total };
+  return { lo, hi };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -588,12 +597,22 @@ export const TICK_LADDER = [0.05, 0.1, 0.25, 0.5, 1, 2, 2.5, 5, 10, 25, 50, 100]
  * rather than the mean so one climax bar cannot blow the ladder out.
  */
 export function suggestTickSize(bars: Bar[], tfMinutes: number, targetRows = 20): number {
-  const tf = resampleBars(bars, tfMinutes);
-  const ranges = tf.map((b) => b.h - b.l).filter((r) => r > 0).sort((a, b) => a - b);
-  if (ranges.length === 0) return TICK_LADDER[0];
+  return stepForRanges(resampleBars(bars, tfMinutes).map((b) => b.h - b.l), targetRows);
+}
 
-  const median = ranges[Math.floor(ranges.length / 2)];
-  const ideal = median / Math.max(targetRows, 1);
+/**
+ * The TICK_LADDER step that puts about `targetRows` rows across the MEDIAN of `ranges`
+ * (zero ranges ignored; the finest step when nothing is left). Shared with the TPO row size.
+ */
+export function stepForRanges(ranges: number[], targetRows: number): number {
+  const sorted = ranges.filter((r) => r > 0).sort((a, b) => a - b);
+  if (sorted.length === 0) return TICK_LADDER[0];
+  const median = sorted[Math.floor(sorted.length / 2)];
+  return ladderStepAtLeast(median / Math.max(targetRows, 1));
+}
+
+/** Smallest TICK_LADDER step ≥ `ideal` (the coarsest step when `ideal` is beyond the ladder). */
+export function ladderStepAtLeast(ideal: number): number {
   return TICK_LADDER.find((t) => t >= ideal) ?? TICK_LADDER[TICK_LADDER.length - 1];
 }
 

@@ -16,7 +16,7 @@
  * docs/MARKET_PROFILE_GUIDE.md. They are labels to read the auction, not trading signals.
  */
 
-import { TICK_LADDER, type Bar } from './volumeProfile.ts';
+import { expandValueArea, ladderStepAtLeast, stepForRanges, type Bar } from './volumeProfile.ts';
 
 export type { Bar };
 
@@ -180,11 +180,36 @@ export function isoWeekKey(day: string): string {
  * Sized from the MEDIAN range so one gap day cannot blow the ladder out.
  */
 export function suggestRowSize(ranges: number[], targetRows = 40): number {
-  const sorted = ranges.filter((r) => r > 0).sort((a, b) => a - b);
-  if (sorted.length === 0) return TICK_LADDER[0];
-  const median = sorted[Math.floor(sorted.length / 2)];
-  const ideal = median / Math.max(targetRows, 1);
-  return TICK_LADDER.find((t) => t >= ideal) ?? TICK_LADDER[TICK_LADDER.length - 1];
+  return stepForRanges(ranges, targetRows);
+}
+
+/** Most rows one profile may span before the chart stops being drawable (a typo'd row size). */
+export const MAX_ROWS_PER_PROFILE = 400;
+
+/**
+ * Smallest row size that keeps a profile of `maxRange` within MAX_ROWS_PER_PROFILE rows.
+ * A manual row size below this is raised to it: 0.05 on a 1,500-pt monthly NIFTY profile
+ * would be 30k rows and hundreds of thousands of canvas cells per frame.
+ */
+export function minRowSize(maxRange: number): number {
+  return maxRange > 0 ? ladderStepAtLeast(maxRange / MAX_ROWS_PER_PROFILE) : 0;
+}
+
+/**
+ * Bottom price of the row a price falls in, rounded the same way as every TpoRow.price, so
+ * `row.price === rowFloor(x, rowSize)` is a safe equality test even for 0.05-sized rows.
+ */
+export function rowFloor(price: number, rowSize: number): number {
+  return rowPrice(rowIdx(price, rowSize), rowSize);
+}
+
+/**
+ * Top edge of the value area. `vah` is the bottom of the top value-area ROW (the level every
+ * TPO platform prints), so the value area itself reaches one row higher. Price comparisons
+ * against "above value" must use this, not `vah`.
+ */
+export function vaTop(p: Pick<Profile, 'vah' | 'rowSize'>): number {
+  return p.vah + p.rowSize;
 }
 
 /** Session date → its 1-minute bars, in time order. Bars outside the session window are dropped. */
@@ -257,36 +282,13 @@ export function pocIndex(counts: number[]): number {
 }
 
 /**
- * Value area by the classic expansion: start at the POC and repeatedly add whichever side's
- * next TWO rows hold more TPOs, until `pct` of all TPOs is enclosed. Same algorithm as
- * lib/volumeProfile.ts valueArea, kept here because the POC tie rule differs (TPO counts tie
- * far more often than volumes do). Returns row indices.
+ * Value area by the classic expansion (lib/volumeProfile.ts expandValueArea, shared with the
+ * volume profile): from the POC, add whichever side's next TWO rows hold more TPOs until `pct`
+ * of all TPOs is enclosed. Only the POC pick differs — TPO counts tie far more often than
+ * volumes, so pocIndex breaks ties toward the middle. Returns row indices.
  */
 export function valueAreaIdx(counts: number[], poc: number, pct: number): { lo: number; hi: number } {
-  if (poc < 0) return { lo: -1, hi: -1 };
-  const total = counts.reduce((s, c) => s + c, 0);
-  const target = (total * Math.min(Math.max(pct, 1), 100)) / 100;
-  let cum = counts[poc];
-  let lo = poc;
-  let hi = poc;
-  const sum2 = (from: number, step: number) => {
-    let s = 0;
-    for (let k = 0; k < 2; k++) {
-      const i = from + k * step;
-      if (i >= 0 && i < counts.length) s += counts[i];
-    }
-    return s;
-  };
-  while (cum < target && (hi < counts.length - 1 || lo > 0)) {
-    const up = hi < counts.length - 1 ? sum2(hi + 1, 1) : -1;
-    const down = lo > 0 ? sum2(lo - 1, -1) : -1;
-    if (up >= down) {
-      for (let k = 0; k < 2 && hi < counts.length - 1 && cum < target; k++) cum += counts[++hi];
-    } else {
-      for (let k = 0; k < 2 && lo > 0 && cum < target; k++) cum += counts[--lo];
-    }
-  }
-  return { lo, hi };
+  return expandValueArea(counts, poc, pct);
 }
 
 /**
@@ -610,7 +612,7 @@ export interface PowerDegree {
  * Mirror image for bearish. Inside the previous day's value area the market is balanced.
  */
 export function powerDegree(today: Profile, prev: Profile, price: number): PowerDegree {
-  const bull = price > prev.vah;
+  const bull = price > vaTop(prev);
   const bear = price < prev.val;
   if (!bull && !bear) {
     return { side: 'balanced', degree: 0, reason: 'Inside the previous value area' };
@@ -618,7 +620,7 @@ export function powerDegree(today: Profile, prev: Profile, price: number): Power
   const outsideRange = bull ? price > prev.high : price < prev.low;
   let step: number;
   let where: string;
-  if (bull ? price > today.vah : price < today.val) {
+  if (bull ? price > vaTop(today) : price < today.val) {
     step = 2;
     where = bull ? 'above its value area' : 'below its value area';
   } else if (today.ibHigh !== null && today.ibLow !== null && (bull ? price > today.ibHigh : price < today.ibLow)) {

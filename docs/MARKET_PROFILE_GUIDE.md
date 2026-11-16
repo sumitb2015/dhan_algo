@@ -64,8 +64,10 @@ higher/lower low.
 
 ## Chart controls
 
-Wheel = vertical zoom · Shift + wheel = horizontal zoom · drag = pan · click = select a profile (right panel) ·
-double-click = fit. Styles: **Letters** (letters drop to plain blocks when cells are too small), **Blocks**,
+Same zoom model as the P&F chart: wheel or − / + = zoom both axes · Shift + wheel or the squeeze / stretch
+buttons = horizontal only (TPO cell width) · drag the price axis = vertical only (row height; drag up = zoom in) ·
+drag = pan · click = select a profile (right panel) · double-click or ↺ = fit. Each zoom keeps the point under the
+pointer fixed. The maths is in `rs_dashboard/lib/tpoChartZoom.ts` (tested). Styles: **Letters** (letters drop to plain blocks when cells are too small), **Blocks**,
 **Histogram**. Live mode polls only today's session every 10 s during NSE cash hours and merges it over the
 loaded history. A banner shows when updates stall for more than 3 minutes.
 

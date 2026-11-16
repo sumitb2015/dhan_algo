@@ -22,6 +22,13 @@ export interface ChartChrome {
   textMuted: string;
   /** Neutral chart-tooltip surface. */
   surface: string;
+  /**
+   * Fixed label colours for text drawn ON a saturated data fill (a lettered TPO cell, a
+   * price chip). They do not flip with the theme — same values as the --color-oncolor /
+   * --color-oncolor-dark tokens that text-oncolor / text-oncolor-dark use in CSS.
+   */
+  onColor: string;
+  onColorDark: string;
 }
 
 const CHROME: Record<ResolvedTheme, ChartChrome> = {
@@ -31,6 +38,8 @@ const CHROME: Record<ResolvedTheme, ChartChrome> = {
     textSecondary: '#e4e4e7',
     textMuted: '#a1a1aa',
     surface: '#18181b',
+    onColor: '#ffffff',
+    onColorDark: '#09090b',
   },
   light: {
     gridline: '#e2e8f0',
@@ -38,6 +47,8 @@ const CHROME: Record<ResolvedTheme, ChartChrome> = {
     textSecondary: '#0f172a',
     textMuted: '#475569',
     surface: '#ffffff',
+    onColor: '#ffffff',
+    onColorDark: '#09090b',
   },
   beige: {
     gridline: '#e6ddd0',
@@ -45,6 +56,8 @@ const CHROME: Record<ResolvedTheme, ChartChrome> = {
     textSecondary: '#2c2a29',
     textMuted: '#5c5349',
     surface: '#faf6ef',
+    onColor: '#ffffff',
+    onColorDark: '#09090b',
   },
 };
 

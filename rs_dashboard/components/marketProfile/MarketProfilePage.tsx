@@ -9,11 +9,14 @@ import {
   buildDayProfiles,
   classifyDay,
   isoWeekKey,
+  MAX_ROWS_PER_PROFILE,
+  minRowSize,
   nakedPocs,
   powerDegree,
   splitSessions,
   suggestRowSize,
   tpoSkew,
+  vaTop,
   type Bar,
   type Profile,
 } from '@/lib/marketProfile';
@@ -161,7 +164,10 @@ export default function MarketProfilePage() {
   const [stocks, setStocks] = useState<string[]>([]);
   const [history, setHistory] = useState<Loaded | null>(null);
   const [live, setLive] = useState<{ key: string; bars: Bar[]; at: number } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // Errors carry the request key they belong to, so a failure on one symbol is not shown
+  // (as "No session data") while the next symbol is still loading.
+  const [error, setError] = useState<{ key: string; msg: string } | null>(null);
+  const [liveError, setLiveError] = useState<{ key: string; msg: string; since: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   // Wall clock for the stale banner and market-open chip; Date.now() in render is impure.
@@ -210,36 +216,54 @@ export default function MarketProfilePage() {
   const fetchDays = config.view === 'day' ? config.days : COMPOSITE_DAYS;
   const histKey = `${config.symbol}|${fetchDays}`;
 
-  const loadHistory = useCallback(async (signal?: AbortSignal) => {
-    const res = await fetch(
-      `/api/volume-footprint?symbol=${encodeURIComponent(config.symbol)}&days=${fetchDays}`,
-      { signal },
-    );
-    const json: FootprintFetchResponse = await res.json();
-    if (!json.success) throw new Error(json.error ?? 'Failed to load 1-minute bars');
-    setHistory({ key: histKey, bars: json.bars ?? [], meta: json });
-    setError(null);
+  // One history request at a time. A newer load (effect or the Reload button) aborts the
+  // older one, and the sequence check drops any reply that still lands late: a manual reload
+  // of the previous symbol must never overwrite the current one's key (that left the page on
+  // the loading spinner forever).
+  const histSeq = useRef(0);
+  const histAbort = useRef<AbortController | null>(null);
+  const loadHistory = useCallback(async () => {
+    histAbort.current?.abort();
+    const ctrl = new AbortController();
+    histAbort.current = ctrl;
+    const seq = ++histSeq.current;
+    const key = histKey;
+    try {
+      const res = await fetch(
+        `/api/volume-footprint?symbol=${encodeURIComponent(config.symbol)}&days=${fetchDays}`,
+        { signal: ctrl.signal },
+      );
+      const json: FootprintFetchResponse = await res.json();
+      if (seq !== histSeq.current) return;
+      if (!json.success) {
+        setError({ key, msg: json.error ?? 'Failed to load 1-minute bars' });
+        return;
+      }
+      setHistory({ key, bars: json.bars ?? [], meta: json });
+      setError(null);
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
+      if (seq === histSeq.current) setError({ key, msg: e instanceof Error ? e.message : String(e) });
+    }
   }, [config.symbol, fetchDays, histKey]);
 
-  // Superseded loads are aborted, not ignored: a stale symbol landing last would otherwise
-  // show the previous instrument's levels under the new header.
   useEffect(() => {
-    const ctrl = new AbortController();
     // eslint-disable-next-line react-hooks/set-state-in-effect -- loadHistory sets state only after its fetch resolves
-    loadHistory(ctrl.signal).catch((e) => {
-      if (e instanceof DOMException && e.name === 'AbortError') return;
-      setError(e instanceof Error ? e.message : String(e));
-    });
-    return () => ctrl.abort();
+    void loadHistory();
   }, [loadHistory]);
+  useEffect(() => () => histAbort.current?.abort(), []);
 
   // Live: poll only today's session (days=1) and merge it over the history — re-fetching
-  // 50 sessions every 10 s would respawn an 18k-bar Dhan pull each time.
+  // 50 sessions every 10 s would respawn an 18k-bar Dhan pull each time. Failures are
+  // surfaced (expired token, Dhan error), never swallowed: a dead feed under a pulsing
+  // "10s Live" chip reads as a quiet market.
   const liveSeq = useRef(0);
   useEffect(() => {
     if (!config.live) return;
     const ctrl = new AbortController();
     const key = config.symbol;
+    const fail = (msg: string) =>
+      setLiveError((prev) => ({ key, msg, since: prev?.key === key ? prev.since : Date.now() }));
     const tick = async () => {
       if (!isNseCashLive(new Date())) return;
       const seq = ++liveSeq.current;
@@ -247,9 +271,17 @@ export default function MarketProfilePage() {
         const res = await fetch(`/api/volume-footprint?symbol=${encodeURIComponent(key)}&days=1`, { signal: ctrl.signal });
         const json: FootprintFetchResponse = await res.json();
         // Drop out-of-order replies: an older poll must not overwrite a newer one.
-        if (seq !== liveSeq.current || !json.success) return;
+        if (seq !== liveSeq.current) return;
+        if (!json.success) {
+          fail(json.error ?? 'live poll failed');
+          return;
+        }
         setLive({ key, bars: json.bars ?? [], at: Date.now() });
-      } catch { /* the next tick retries; history stays on screen */ }
+        setLiveError(null);
+      } catch (e) {
+        if (e instanceof DOMException && e.name === 'AbortError') return;
+        if (seq === liveSeq.current) fail(e instanceof Error ? e.message : String(e));
+      }
     };
     const timer = setInterval(tick, LIVE_POLL_MS);
     return () => {
@@ -262,8 +294,6 @@ export default function MarketProfilePage() {
     setBusy(true);
     try {
       await loadHistory();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
     }
@@ -274,25 +304,37 @@ export default function MarketProfilePage() {
   const liveBars = live?.key === config.symbol ? live.bars : NO_BARS;
   const bars = useMemo(() => mergeLive(histBars, liveBars), [histBars, liveBars]);
   const meta = current?.meta ?? null;
+  const today = istToday();
 
   // ── derived profiles: every control recomputes client-side, no refetch ──
-  const autoRowSize = useMemo(() => {
-    const sessions = splitSessions(bars);
-    const groups = new Map<string, { h: number; l: number }>();
-    for (const [day, list] of sessions) {
+  // Row size comes from the HISTORY load, never the live merge, and the automatic one
+  // ignores today's still-growing range: otherwise a live tick that nudges the median across
+  // a ladder step re-buckets every profile and resets the user's zoom mid-session.
+  const { autoRowSize, minRow } = useMemo(() => {
+    const groups = new Map<string, { h: number; l: number; today: boolean }>();
+    for (const [day, list] of splitSessions(histBars)) {
       const k = config.view === 'day' ? day : config.view === 'week' ? isoWeekKey(day) : day.slice(0, 7);
-      const g = groups.get(k) ?? { h: -Infinity, l: Infinity };
+      const g = groups.get(k) ?? { h: -Infinity, l: Infinity, today: false };
       for (const b of list) {
         g.h = Math.max(g.h, b.h);
         g.l = Math.min(g.l, b.l);
       }
+      if (day === today) g.today = true;
       groups.set(k, g);
     }
-    return suggestRowSize([...groups.values()].map((g) => g.h - g.l), config.view === 'day' ? 50 : 60);
-  }, [bars, config.view]);
-  const rowSize = config.rowSize > 0 ? config.rowSize : autoRowSize;
+    const all = [...groups.values()];
+    const settled = all.filter((g) => !g.today);
+    const ranges = (settled.length ? settled : all).map((g) => g.h - g.l);
+    return {
+      autoRowSize: suggestRowSize(ranges, config.view === 'day' ? 50 : 60),
+      minRow: minRowSize(Math.max(0, ...all.map((g) => g.h - g.l))),
+    };
+  }, [histBars, config.view, today]);
+  // A manual row size below the drawable minimum is raised (a 0.05 row on a monthly NIFTY
+  // profile is ~30k rows and freezes the tab).
+  const rowRaised = config.rowSize > 0 && config.rowSize < minRow;
+  const rowSize = config.rowSize > 0 ? Math.max(config.rowSize, minRow) : autoRowSize;
 
-  const today = istToday();
   const profiles = useMemo(() => {
     if (bars.length === 0) return [];
     const opts = { rowSize, periodMin: config.periodMin, vaPct: config.vaPct, today };
@@ -316,7 +358,12 @@ export default function MarketProfilePage() {
     return m;
   }, [profiles]);
 
-  const nPocs = useMemo(() => nakedPocs(profiles), [profiles]);
+  // The newest profile's POC has no later session to test it, so it is never "naked" — on the
+  // chart or in the panel.
+  const nPocs = useMemo(() => {
+    const lastKey = profiles[profiles.length - 1]?.key;
+    return nakedPocs(profiles).filter((n) => n.key !== lastKey);
+  }, [profiles]);
   const lastPrice = bars.length ? bars[bars.length - 1].c : null;
 
   const selected = profiles.find((p) => p.key === selectedKey) ?? profiles[profiles.length - 1] ?? null;
@@ -328,7 +375,9 @@ export default function MarketProfilePage() {
   const dataDate = lastBarT?.slice(0, 10) ?? null;
   const marketOpen = clock > 0 && isNseCashLive(new Date(clock));
   const stale = config.live && marketOpen && live?.key === config.symbol && clock - live.at > STALE_BAR_MS;
-  const openNaked = nPocs.filter((n) => !n.touchedBy && n.key !== profiles[profiles.length - 1]?.key);
+  const liveFailing = config.live && marketOpen && liveError?.key === config.symbol ? liveError : null;
+  const histError = error?.key === histKey ? error.msg : null;
+  const openNaked = nPocs.filter((n) => !n.touchedBy);
   const fitKey = `${config.symbol}|${config.view}|${rowSize}|${config.periodMin}|${fetchDays}|${config.show.stats}`;
 
   const symbolOptions = useMemo(() => {
@@ -336,7 +385,7 @@ export default function MarketProfilePage() {
     return { idx, stocks };
   }, [indices, stocks]);
 
-  const loading = !current && !error;
+  const loading = !current && !histError;
   const fmt = (n: number) => n.toLocaleString('en-IN', { maximumFractionDigits: 2 });
 
   return (
@@ -359,7 +408,7 @@ export default function MarketProfilePage() {
         <div className="flex items-center gap-2 flex-wrap">
           <select
             value={config.symbol}
-            onChange={(e) => { patch({ symbol: e.target.value }); setSelectedKey(null); }}
+            onChange={(e) => { patch({ symbol: e.target.value, rowSize: 0 }); setSelectedKey(null); }}
             aria-label="Symbol"
             className="rounded-md border border-zinc-800 bg-zinc-900 px-2 py-1 text-xs font-semibold text-zinc-100 focus:outline-none focus:ring-2 focus:ring-sky-400"
           >
@@ -416,7 +465,7 @@ export default function MarketProfilePage() {
               config.live ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-zinc-900 text-zinc-500 border-zinc-800'
             }`}
           >
-            <span className={`w-2 h-2 rounded-full ${config.live && marketOpen ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'}`} />
+            <span className={`w-2 h-2 rounded-full ${liveFailing ? 'bg-amber-400' : config.live && marketOpen ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-600'}`} />
             {config.live ? (marketOpen ? '10s Live' : 'Live (closed)') : 'Paused'}
           </button>
           <button
@@ -462,13 +511,13 @@ export default function MarketProfilePage() {
             </button>
           ))}
           <span className="ml-auto text-[10px] text-zinc-500">
-            {meta ? `${meta.sessions ?? 0} sessions · source ${meta.source ?? '—'}` : ''} · wheel zoom · Shift+wheel width · drag pan · double-click fit
+            {meta ? `${meta.sessions ?? 0} sessions · source ${meta.source ?? '—'}` : ''} · wheel zoom · Shift+wheel width · drag price axis height · drag pan · double-click fit
           </span>
         </div>
 
-        {error && (
+        {histError && (
           <div className="bg-red-500/10 border border-red-500/30 text-red-300 p-3 rounded-xl text-xs flex items-center justify-between">
-            <span>{error}</span>
+            <span>{histError}</span>
             <button type="button" onClick={refreshNow} className="underline font-bold hover:text-red-200">Retry</button>
           </div>
         )}
@@ -477,7 +526,17 @@ export default function MarketProfilePage() {
             Dhan reported: {meta.api_error} — the profile may be incomplete.
           </div>
         )}
-        {stale && (
+        {liveFailing && (
+          <div className="bg-amber-500/10 border border-amber-500/30 text-amber-300 p-2.5 rounded-xl text-[11px]">
+            Live updates are failing ({liveFailing.msg}) — today&apos;s profile is not updating. Check the Dhan session.
+          </div>
+        )}
+        {rowRaised && (
+          <div className="text-[11px] text-amber-300">
+            Row {config.rowSize} would draw over {MAX_ROWS_PER_PROFILE} rows per profile — using {rowSize} instead.
+          </div>
+        )}
+        {stale && !liveFailing && (
           <div className="bg-amber-500/10 border border-amber-500/30 text-amber-300 p-2.5 rounded-xl text-[11px]">
             Live updates have stalled for over 3 minutes — today&apos;s profile may be behind.
           </div>
@@ -600,7 +659,7 @@ export default function MarketProfilePage() {
                   <Stat
                     label="Open vs prev"
                     value={selected.open > selPrev.high ? 'above range' : selected.open < selPrev.low ? 'below range'
-                      : selected.open > selPrev.vah ? 'above value' : selected.open < selPrev.val ? 'below value' : 'inside value'}
+                      : selected.open > vaTop(selPrev) ? 'above value' : selected.open < selPrev.val ? 'below value' : 'inside value'}
                   />
                 </section>
               )}
