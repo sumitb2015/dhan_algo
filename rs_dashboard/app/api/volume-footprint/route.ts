@@ -55,7 +55,9 @@ export interface FootprintFetchResponse {
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const symbol = (params.get('symbol') ?? '').trim().toUpperCase();
-  const days = Math.min(Math.max(Number(params.get('days') ?? 5) || 5, 1), 30);
+  // 50 = the Python fetcher's own cap (Dhan's 90-day intraday window); Market Profile's
+  // monthly composites use the upper end, the footprint page stays at ≤ 10.
+  const days = Math.min(Math.max(Number(params.get('days') ?? 5) || 5, 1), 50);
   const source = ['auto', 'store', 'dhan'].includes(params.get('source') ?? '')
     ? (params.get('source') as string)
     : 'auto';

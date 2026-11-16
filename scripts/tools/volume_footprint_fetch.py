@@ -145,7 +145,9 @@ def main():
     args = ap.parse_args()
 
     symbol = args.symbol.strip().upper()
-    sessions = max(1, min(args.days, 30))
+    # 50 sessions × 1.6 + 4 = 84 calendar days, inside Dhan's 90-day limit for one
+    # intraday request (the Market Profile page's monthly composites need ~2 months).
+    sessions = max(1, min(args.days, 50))
 
     store_df = pd.DataFrame()
     if args.source in ("auto", "store"):
@@ -171,7 +173,11 @@ def main():
         elif store_is_stale(store_df, now):
             used_dhan = True
             gap_days = (now.date() - store_df.index.max().date()).days
-            dhan_df, api_error = fetch_dhan(symbol, calendar_days=min(gap_days + 2, MAX_TOPUP_DAYS))
+            # Cover the requested window when the store is far behind (Market Profile asks
+            # for up to 50 sessions); a short request keeps the cheap 12-day top-up.
+            # 84 days stays inside Dhan's 90-day limit for one intraday request.
+            window_days = max(MAX_TOPUP_DAYS, int(sessions * 1.6) + 4)
+            dhan_df, api_error = fetch_dhan(symbol, calendar_days=min(gap_days + 2, window_days, 84))
 
     dhan_df = session_filter(dhan_df)
 
