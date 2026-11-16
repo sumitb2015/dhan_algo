@@ -16,6 +16,8 @@ export interface PendingOrder {
   side: 'BUY' | 'SELL';
   qty: number;
   at: number;
+  /** MARKET or LIMIT. Absent on older rows. Auto-exit replaces a resting LIMIT exit, never a working MARKET one. */
+  type?: 'MARKET' | 'LIMIT';
 }
 
 export interface BsPosition {
@@ -252,7 +254,8 @@ export function validateOp(raw: unknown): LedgerOp {
   const pend = (v: unknown) => {
     const x = v as Record<string, unknown>;
     if (!x || typeof x !== 'object' || !isStr(x.orderId) || !isNum(x.qty) || !(x.qty > 0) || !isNum(x.at)
-      || (x.kind !== 'entry' && x.kind !== 'exit') || (x.side !== 'BUY' && x.side !== 'SELL')) bad('pending order shape');
+      || (x.kind !== 'entry' && x.kind !== 'exit') || (x.side !== 'BUY' && x.side !== 'SELL')
+      || (x.type != null && x.type !== 'MARKET' && x.type !== 'LIMIT')) bad('pending order shape');
   };
   switch (o.op) {
     case 'open': {
@@ -282,4 +285,61 @@ export function validateOp(raw: unknown): LedgerOp {
     default: bad('unknown op');
   }
   return o as unknown as LedgerOp;
+}
+
+/** Dhan correlationId for an order this page sends (8-25 lowercase letters/digits), derived from its idempotency key so a
+ *  reservation alone is enough to find the order again. */
+export const correlationIdOf = (idem: string): string => idem.replace(/[^a-z0-9]/g, '').slice(0, 25);
+
+/** IST wall-clock stamp from an order book ('2026-11-16 10:15:02', '16-Nov-2026 10:15:02', ISO) to epoch ms; null if unknown. */
+export function parseIstStamp(s: string): number | null {
+  const t = s.trim();
+  if (!t) return null;
+  if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(t) && !Number.isNaN(Date.parse(t))) return Date.parse(t);
+  const MON: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+  let m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/.exec(t);
+  let y: number, mo: number, d: number;
+  if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else {
+    m = /^(\d{1,2})[-/ ]([A-Za-z]{3})[-/ ](\d{4})[ ,]+(\d{2}):(\d{2})(?::(\d{2}))?/.exec(t);
+    if (!m || !MON[m[2].toLowerCase()]) return null;
+    d = +m[1]; mo = MON[m[2].toLowerCase()]; y = +m[3];
+  }
+  return Date.UTC(y, mo - 1, d, +m[4], +m[5], +(m[6] ?? 0)) - 5.5 * 3600_000;
+}
+
+/**
+ * A reservation whose tab died (or whose send came back "unknown") may still have reached the broker. Find that order in
+ * the broker's order book before the reservation is dropped, so a real fill is not lost:
+ *  - Dhan: by the exact correlationId the page sent (entries and exits);
+ *  - Kotak / Zerodha (no correlation id): ENTRIES only, by trading symbol + SELL + qty, not already tracked, and not
+ *    placed before the reservation (when the book's time can be read). Adopting the wrong sell can only make the ledger
+ *    too big, which the down-only reconcile corrects; adopting the wrong buy-back would make it too small, which nothing
+ *    corrects — so exits there are never guessed.
+ */
+export function findSentOrder(
+  orders: Record<string, unknown>[],
+  q: { broker: 'dhan' | 'kotak' | 'zerodha'; reservation: PendingOrder; symbol?: string; tracked: Set<string> },
+): string | null {
+  const r = q.reservation;
+  if (!isReservation(r.orderId)) return null;
+  const idem = r.orderId.slice(RESERVATION_PREFIX.length);
+  if (q.broker === 'dhan') {
+    const corr = correlationIdOf(idem);
+    const hit = orders.find((o) => String(o.correlationId ?? '') === corr && String(o.orderId ?? ''));
+    return hit ? String(hit.orderId) : null;
+  }
+  if (r.kind !== 'entry' || !q.symbol) return null;
+  const hits = orders.filter((o) => {
+    const id = String(o.orderId ?? '');
+    if (!id || q.tracked.has(id)) return false;
+    if (String(o.tradingSymbol ?? '') !== q.symbol) return false;
+    if (String(o.transactionType ?? '').toUpperCase() !== 'SELL') return false;
+    if (Number(o.quantity) !== r.qty) return false;
+    const at = parseIstStamp(String(o.createTime ?? ''));
+    return at == null || at >= r.at - 5_000;
+  });
+  // Newest first when the book has times; otherwise the last row (both brokers list oldest first).
+  hits.sort((a, b) => (parseIstStamp(String(b.createTime ?? '')) ?? 0) - (parseIstStamp(String(a.createTime ?? '')) ?? 0));
+  return hits.length ? String(hits[0].orderId) : null;
 }

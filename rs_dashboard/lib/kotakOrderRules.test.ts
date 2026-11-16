@@ -37,3 +37,10 @@ test("'fts' (Focus Tool opens) is capped at FTS_KOTAK_MAX_ORDER_LOTS lots; a clo
   assert.match(String(sourceLotCapError((FTS_KOTAK_MAX_ORDER_LOTS + 1) * 65, 'fts', 'NIFTY26O1925200PE', 65)), /fts per-order cap/);
   assert.equal(sourceLotCapError(10_000 * 65, undefined, 'NIFTY26O1925200PE', 65), null);
 });
+
+test("'bs' (Bearish Strikes sells on Kotak / Zerodha) is capped at 50 lots; MCX Kotak counts barrels per lot", () => {
+  assert.strictEqual(sourceLotCapError(65 * 50, 'bs', 'NIFTY26O2025000CE', 65), null);
+  assert.match(sourceLotCapError(65 * 51, 'bs', 'NIFTY26O2025000CE', 65) ?? '', /51 lots\) exceeds the bs per-order cap of 50 lots/);
+  assert.strictEqual(sourceLotCapError(10 * 50, 'bs', 'CRUDEOILM26NOV8500CE', 10), null);
+  assert.match(sourceLotCapError(65, 'bs', 'NIFTY26O2025000CE', null) ?? '', /cannot check the bs per-order cap/);
+});

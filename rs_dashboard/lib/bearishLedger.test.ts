@@ -178,3 +178,43 @@ test('Zerodha rows: own contract key, MCX counts lots like Dhan, REAL needs a tr
   assert.throws(() => applyOpK({ rev: 0, positions: [] }, { op: 'open', position: base as never }), /Zerodha trading symbol/);
   assert.doesNotThrow(() => validateOp({ op: 'open', position: { ...base, symbol: 'CRUDEOILM26NOV8500CE' } }));
 });
+
+test('validateOp: a pending order may carry MARKET / LIMIT type, nothing else', () => {
+  const base = { op: 'pending', id: 'x', pending: { orderId: 'o1', kind: 'exit', side: 'BUY', qty: 65, at: 1 } };
+  assert.doesNotThrow(() => validateOp({ ...base, pending: { ...base.pending, type: 'LIMIT' } }));
+  assert.doesNotThrow(() => validateOp({ ...base, pending: { ...base.pending, type: 'MARKET' } }));
+  assert.doesNotThrow(() => validateOp(base));
+  assert.throws(() => validateOp({ ...base, pending: { ...base.pending, type: 'SL' } }), /pending order shape/);
+});
+
+test('findSentOrder: Dhan matches the exact correlationId, entries and exits', async () => {
+  const { findSentOrder, correlationIdOf, RESERVATION_PREFIX } = await import('./bearishLedger.ts');
+  const idem = 'bs-x-mhz1abcd-k3j9q2';
+  const resv = { orderId: `${RESERVATION_PREFIX}${idem}`, kind: 'exit' as const, side: 'BUY' as const, qty: 65, at: 0 };
+  const orders = [{ orderId: '1', correlationId: 'other' }, { orderId: '2', correlationId: correlationIdOf(idem) }];
+  assert.strictEqual(correlationIdOf(idem), 'bsxmhz1abcdk3j9q2');
+  assert.strictEqual(findSentOrder(orders, { broker: 'dhan', reservation: resv, tracked: new Set() }), '2');
+  assert.strictEqual(findSentOrder([orders[0]], { broker: 'dhan', reservation: resv, tracked: new Set() }), null);
+});
+
+test('findSentOrder: Kotak / Zerodha adopt an entry by symbol + SELL + qty after the reservation, never an exit', async () => {
+  const { findSentOrder, RESERVATION_PREFIX, parseIstStamp } = await import('./bearishLedger.ts');
+  const at = parseIstStamp('2026-11-16 10:15:00')!;
+  const resv = { orderId: `${RESERVATION_PREFIX}bs-a-b`, kind: 'entry' as const, side: 'SELL' as const, qty: 65, at };
+  const row = (id: string, over: Record<string, unknown> = {}) => ({ orderId: id, tradingSymbol: 'NIFTY26N2024600CE', transactionType: 'SELL', quantity: 65, createTime: '2026-11-16 10:15:01', ...over });
+  const q = { broker: 'kotak' as const, reservation: resv, symbol: 'NIFTY26N2024600CE', tracked: new Set(['9']) };
+  assert.strictEqual(findSentOrder([row('1', { createTime: '2026-11-16 09:30:00' }), row('2')], q), '2');   // an earlier sell is not it
+  assert.strictEqual(findSentOrder([row('9')], q), null);                                                  // already tracked
+  assert.strictEqual(findSentOrder([row('3', { transactionType: 'BUY' })], q), null);
+  assert.strictEqual(findSentOrder([row('4', { quantity: 130 })], q), null);
+  assert.strictEqual(findSentOrder([row('5', { createTime: '16-Nov-2026 10:15:30' })], q), '5');
+  assert.strictEqual(findSentOrder([row('6', { createTime: '' })], q), '6');                               // no time: still adopted (reconcile corrects an over-adopt)
+  assert.strictEqual(findSentOrder([row('2')], { ...q, reservation: { ...resv, kind: 'exit', side: 'BUY' } }), null);
+});
+
+test('parseIstStamp reads IST wall clock', async () => {
+  const { parseIstStamp } = await import('./bearishLedger.ts');
+  assert.strictEqual(parseIstStamp('2026-11-16 10:15:00'), Date.parse('2026-11-16T10:15:00+05:30'));
+  assert.strictEqual(parseIstStamp('16-Nov-2026 10:15:00'), Date.parse('2026-11-16T10:15:00+05:30'));
+  assert.strictEqual(parseIstStamp('junk'), null);
+});

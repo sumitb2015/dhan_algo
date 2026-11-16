@@ -25,6 +25,8 @@ interface AddNewLegModalProps {
   sellOnly?: boolean;
   /** Hide the resting stop entries SL-L / SL-M (a page with no waiting-entry ledger). Default true. */
   allowStops?: boolean;
+  /** Optional strip under the header (e.g. Bearish Strikes' SIM / REAL account line). */
+  banner?: React.ReactNode;
   onAddLeg: (params: {
     side: 'B' | 'S';
     option: 'CE' | 'PE';
@@ -56,6 +58,7 @@ export default function AddNewLegModal({
   initial,
   sellOnly = false,
   allowStops = true,
+  banner,
   onAddLeg,
 }: AddNewLegModalProps) {
   const [side, setSide] = useState<'B' | 'S'>(sellOnly ? 'S' : (initial?.side ?? 'S'));
@@ -153,11 +156,13 @@ export default function AddNewLegModal({
           <button
             type="button"
             onClick={onClose}
-            className="p-1 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+            aria-label="Close"
+            className={`p-1 rounded-lg text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors ${FOCUS_RING}`}
           >
-            <X className="w-4 h-4" />
+            <X className="w-4 h-4" aria-hidden="true" />
           </button>
         </div>
+        {banner}
 
         {/* Form */}
         <form onSubmit={handleSubmit} className="p-5 space-y-4">

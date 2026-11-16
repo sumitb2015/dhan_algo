@@ -165,6 +165,7 @@ test('OI buildup is highlighted against the bearish signal and can be filtered',
   await expect(sb).toContainText('OI ✓ SB', { timeout: 60_000 });          // short buildup backs the signal
   await expect(lb).toContainText('OI ⚠ LB');                              // long buildup contradicts it
 
+  await page.getByRole('button', { name: /^Filters/ }).click();                 // the fine filters live in the drawer
   await page.getByRole('button', { name: 'Not LB' }).click();
   await expect(lb).toHaveCount(0);
   await expect(sb).toHaveCount(1);
@@ -207,4 +208,42 @@ test('Zerodha can be picked: its lookup and book are used, and SIM never reaches
 
   expect(seen.paths.filter((x) => /\/order$|fast-order/.test(x))).toEqual([]);
   expect(seen.blocked).toEqual([]);
+});
+
+test('max loss (SIM): with Auto-exit on, the kill switch buys everything back and blocks new sells until reset', async ({ page }) => {
+  const m = await install(page);
+  await page.goto('/bearish-strikes', { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'CE', exact: true }).click();
+  await expect(page.getByRole('row').filter({ hasText: '24600' })).toContainText(/BEARISH/, { timeout: 60_000 });
+  await page.getByRole('button', { name: 'Sell 24600 CE' }).click();
+  await expect(page.getByText(/SIM · paper fill/)).toBeVisible();                   // the ticket says which mode it is in
+  await page.getByRole('button', { name: /Place & Add Leg/ }).click();
+  const pos = page.getByRole('region', { name: 'Positions on this page' });
+  await expect(pos).toContainText('OPEN');
+
+  await pos.getByRole('checkbox', { name: 'Supertrend' }).uncheck();
+  await pos.getByRole('spinbutton', { name: 'Max loss ₹' }).fill('1000');
+  await pos.getByRole('spinbutton', { name: 'Max loss ₹' }).press('Enter');
+  await pos.getByRole('switch', { name: 'Auto-exit' }).click();
+  m.px.ce24600 = 130;                                                              // -30 x 65 = -1950 <= -1000
+
+  await expect(page.getByRole('alert', { name: 'Position alerts' })).toContainText('MAX LOSS HIT', { timeout: 30_000 });
+  await expect(pos).toContainText('CLOSED', { timeout: 30_000 });
+  await expect(page.getByRole('button', { name: /^Sell \d+ (CE|PE)$/ }).first()).toBeDisabled();
+  await pos.getByRole('button', { name: /KILL SWITCH/ }).click();                    // reset: realized loss is still past the cap, so it re-arms
+  await expect(pos.getByRole('button', { name: /KILL SWITCH/ })).toBeVisible({ timeout: 10_000 });
+  expect(m.fastOrder).toBe(0);
+  expect(m.blocked).toEqual([]);
+});
+
+test('arming REAL needs a confirmation; Cancel keeps the page in SIM', async ({ page }) => {
+  await install(page);
+  await page.goto('/bearish-strikes', { waitUntil: 'domcontentloaded' });
+  await expect(async () => {
+    await page.getByRole('button', { name: 'SIM', exact: true }).click();
+    await expect(page.getByRole('dialog', { name: /Arm REAL on Dhan/ })).toBeVisible({ timeout: 1_000 });
+  }).toPass({ timeout: 30_000 });
+  await page.getByRole('dialog', { name: /Arm REAL on Dhan/ }).getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByRole('button', { name: 'SIM', exact: true })).toBeVisible();
+  await expect(page.getByRole('status', { name: 'Real money armed' })).toHaveCount(0);
 });
