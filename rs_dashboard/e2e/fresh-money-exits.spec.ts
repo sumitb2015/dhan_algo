@@ -236,7 +236,7 @@ test('3m slots tab: tints, streak / reversal badges, totals row, crosshair, stic
   await page.getByRole('tab', { name: '3m slots' }).click();
   await expect(page.getByText('PUTS: OI Δ today @ 10:30')).toBeVisible();
   // Completed slot: exact value and slot in the hover.
-  const add = page.getByTitle('10:27–10:30: +1,500 lots', { exact: true }).first();   // a strike's cell (the totals row sums 5)
+  const add = page.getByTitle(/^10:27–10:30: \+1,500 lots · OI Δ today at 10:30: /).first();   // a strike's cell (the totals row sums 5)
   await expect(add).toHaveText('+1.5k');
   await expect(add).toHaveClass(/bg-emerald-500\/45/);                 // >= 70 % of the scale: strongest tint, bold
   await expect(add).toHaveClass(/font-bold/);
@@ -250,7 +250,7 @@ test('3m slots tab: tints, streak / reversal badges, totals row, crosshair, stic
   await expect(up).toHaveText('▲10');
   await expect(up).toHaveClass(/text-emerald-400/);                    // same direction as today's net: green
   // The widest label stays on one line inside its column (no wrap into the next row).
-  const wide = page.getByTitle("Today's OI change vs the previous close, as of 10:30: +99,999 lots · live (10:31:20): +300 lots").first();
+  const wide = page.getByTitle(/^Today's OI change vs the previous close, as of 10:30: \+99,999 lots = earlier .+ · live \(10:31:20\): \+300 lots$/).first();
   await expect(wide).toHaveText('▲10 +99,999');
   const box = await wide.boundingBox();
   expect(box!.height).toBeLessThan(22);
@@ -263,24 +263,34 @@ test('3m slots tab: tints, streak / reversal badges, totals row, crosshair, stic
   const run = page.getByText('+77', { exact: true }).first();
   await expect(run).toHaveClass(/italic/);
   await expect(run).toHaveClass(/ring-1/);
-  await expect(run).toHaveAttribute('title', '10:30–10:33, running (so far to 10:31:20): +77 lots');
+  await expect(run).toHaveAttribute('title', /^10:30–10:33, running \(so far to 10:31:20\): \+77 lots · OI Δ today so far \(10:31:20\): /);
   await expect(page.getByText('10:33…').first()).toBeVisible();
   // An edge with no reading.
-  const unknown = page.getByTitle('10:00–10:03: no OI reading at a slot edge').first();   // the call side's first slot
+  const unknown = page.getByTitle(/^10:00–10:03: no OI reading at a slot edge/).first();   // the call side's first slot
   await expect(unknown).toHaveText('–');
   // Today's change as of the last completed slot, with the live figure in the hover.
-  await expect(page.getByTitle("Today's OI change vs the previous close, as of 10:30: +500 lots · live (10:31:20): -200 lots").first())
+  await expect(page.getByTitle(/^Today's OI change vs the previous close, as of 10:30: \+500 lots.* · live \(10:31:20\): -200 lots$/).first())
     .toHaveText('+500 ▼4');
+  // "Earlier" cell at the outer end of each block: everything before the first shown slot, so a row adds up.
+  await expect(page.getByTestId('flow-sticky-head').locator('[data-slot="carry"]')).toHaveCount(4);   // slot times + Σ row, both sides
+  await expect(page.getByTestId('flow-sticky-head').locator('[data-slot="carry"]').first()).toHaveText(/^<\d\d:\d\d$/);
+  const sums = await page.locator('div.grid', { hasText: '8100' }).first().evaluate(row => {
+    const block = row.querySelector('span.grid');                       // the put side's cell block (carry first)
+    const day = row.querySelector('[title^="Today\'s OI change"]')?.getAttribute('title') ?? '';
+    return { cells: [...(block?.children ?? [])].map(c => ({ slot: c.getAttribute('data-slot'), title: c.getAttribute('title') ?? '' })), day };
+  });
+  expect(sums.cells[0].slot).toBe('carry');
+  expect(sums.day).toMatch(/ = earlier .+ \+ slots /);
   // Board totals: the 5 mocked strikes summed per slot, own row under the slot times.
   await expect(page.getByText('Σ shown', { exact: true })).toBeVisible();
-  await expect(page.getByTitle('10:27–10:30: +7,500 lots', { exact: true })).toHaveText('+7.5k');
-  await expect(page.getByTitle('10:27–10:30: -60,000 lots', { exact: true })).toHaveText('-60k');
+  await expect(page.getByTitle(/^10:27–10:30: \+7,500 lots · /)).toHaveText('+7.5k');
+  await expect(page.getByTitle(/^10:27–10:30: -60,000 lots · /)).toHaveText('-60k');
   // Slot times + totals are pinned while the ladder scrolls.
   expect(await page.getByTestId('flow-sticky-head').evaluate(el => getComputedStyle(el).position)).toBe('sticky');
   // Crosshair: hovering a cell highlights its strike row and its slot column (other rows and the header).
   await add.hover();
   await expect(page.locator('div.grid').filter({ has: add }).first()).toHaveClass(/bg-zinc-800\/50/);
-  await expect(page.getByTitle('10:27–10:30: +1,500 lots', { exact: true }).nth(1)).toHaveClass(/ring-zinc-300/);
+  await expect(page.getByTitle(/^10:27–10:30: \+1,500 lots · OI Δ today at 10:30: /).nth(1)).toHaveClass(/ring-zinc-300/);
   await expect(page.getByTestId('flow-sticky-head').locator('[data-slot="9"]').first()).toHaveClass(/ring-zinc-300/);
   // Leaving the cells (onto the strike) clears the crosshair.
   await page.getByText('8100', { exact: true }).first().hover();
@@ -421,5 +431,23 @@ test('product switch: NRML is sent with the order, labelled, and remembered acro
   await page.reload();
   await expect(page.getByRole('radiogroup', { name: 'Product for new orders' }).getByRole('radio', { name: 'NRML' }))
     .toHaveAttribute('aria-checked', 'true');
+  expect(m.blocked).toEqual([]);
+});
+
+test('a past NSE session says where its OI comes from: the official close once loaded, else the last session reading', async ({ page }) => {
+  const m = await install(page);
+  let closeOi: unknown = null;
+  // Registered after install, so it wins over the shared board mock.
+  await page.route(/\/api\/fresh-money\?/, route => json(route, {
+    ...board(), market: 'NSE', isToday: false, date: '2026-11-13', lastTs: '2026-11-13 15:39:40', closeOi,
+  }));
+  await page.reload();
+  const chip = page.getByTestId('fm-oi-source');
+  await expect(chip).toHaveText('OI · last session reading');
+  await expect(chip).toHaveAttribute('title', /official close OI loads on the next trading morning/);
+  closeOi = { fetchedAt: '2026-11-16 08:38:49', official: 48, total: 50 };
+  await page.reload();
+  await expect(chip).toHaveText('OI · official close (48/50)');
+  await expect(chip).toHaveAttribute('title', /fetched 2026-11-16 08:38:49\), on 48 of 50 strike sides/);
   expect(m.blocked).toEqual([]);
 });

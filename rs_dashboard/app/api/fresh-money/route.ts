@@ -6,7 +6,7 @@ import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { parsedDay } from '@/lib/freshMoneyFiles';
 import { readJsonFile } from '@/lib/lockedJsonFile';
 import { istMinuteOfDay, istToday } from '@/lib/istTime';
-import { buildBoardRows, fmtMinOfDay, oiFlow, strikeStep, type Buildup, type PrevCloses, type SideFlow } from '@/lib/freshMoney';
+import { buildBoardRows, fmtMinOfDay, oiFlow, strikeStep, type Buildup, type CloseOi, type PrevCloses, type SideFlow } from '@/lib/freshMoney';
 
 // Read-only: everything comes from snapshot CSVs in debug/ (no Dhan call except the cached lot-size lookup). The IV
 // snapshot collector writes NIFTY / BANKNIFTY / SENSEX (starts with the dashboard); scripts/tools/crudeoil_oi_collector.py
@@ -48,6 +48,9 @@ export interface FreshMoneyResponse {
   rows: FreshMoneyRow[];
   /** Option previous closes are on record for this day (the collector's side file): buildup tags can be shown. */
   hasBuildup: boolean;
+  /** A past session shown with its official end-of-day OI (the collector's `_eod_oi.json`, fetched the next trading
+   *  morning): OI change / total OI come from it; `official` of `total` board sides had one. Null = in-session readings. */
+  closeOi: { fetchedAt: string; official: number; total: number } | null;
   /** Slot layout of every row's `flow`: boundaries "HH:MM" oldest first (FLOW_SLOTS + 1; the last = the running slot's
    *  start), whether each had a reading, the latest snapshot time ("HH:MM:SS", the running slot's "so far"), and the
    *  edge every row's `flow.day` is read at ("HH:MM"; earlier than the last bound after a collector gap; null = none).
@@ -104,7 +107,10 @@ export async function GET(req: NextRequest) {
   // The session is over (an earlier day, or past today's close): the slots stop at the close, so OI the chain keeps
   // moving after the bell (the collector writes on for a while) is not shown as slots or as today's change.
   const ended = date !== todayIST() || nowIstMin() >= day.to;
-  const cacheKey = `${file}:${st.mtimeMs}:${st.size}:${lot}:${todayIST()}:${ended}`;
+  // The official close OI arrives next morning in a side file; its mtime is part of the key so the board picks it up.
+  const eodFile = file.replace(/\.csv$/, '_eod_oi.json');
+  const eodMtime = ended ? await fs.promises.stat(eodFile).then(s => s.mtimeMs, () => 0) : 0;
+  const cacheKey = `${file}:${st.mtimeMs}:${st.size}:${lot}:${todayIST()}:${ended}:${eodMtime}`;
   const cached = respCache.get(underlying);
   if (cached && cached.key === cacheKey) return NextResponse.json(cached.body);
 
@@ -124,10 +130,16 @@ export async function GET(req: NextRequest) {
   // Option previous closes for the buildup tags: the collector's side file next to the CSV, for this expiry only.
   const pcFile = readJsonFile<{ expiry?: string; ce?: Record<string, number>; pe?: Record<string, number> }>(file.replace(/\.csv$/, '_prev_close.json'));
   const prevCloses: PrevCloses | null = pcFile && pcFile.expiry === expiry ? { ce: pcFile.ce ?? {}, pe: pcFile.pe ?? {} } : null;
+  const eod = eodMtime
+    ? readJsonFile<{ date?: string; expiry?: string; fetched_at?: string; ce?: Record<string, number>; pe?: Record<string, number> }>(eodFile)
+    : null;
+  const closeOi: CloseOi | null = eod && eod.date === date && eod.expiry === expiry ? { ce: eod.ce ?? {}, pe: eod.pe ?? {} } : null;
   const flow = oiFlow(snaps, { slots: FLOW_SLOTS, slotMin: FLOW_SLOT_MIN, anchorMin: day.from, endMin: ended ? day.to : undefined });
   const flowLots = (f: SideFlow | undefined): SideFlow | null =>
     (f ? { cells: f.cells.map(toLots), day: toLots(f.day) } : null);
-  const rows: FreshMoneyRow[] = buildBoardRows(last, WINGS, prevCloses).map(r => {
+  const boardRows = buildBoardRows(last, WINGS, prevCloses, closeOi);
+  const sides = boardRows.flatMap(r => [r.put, r.call]).filter(s => s !== null);
+  const rows: FreshMoneyRow[] = boardRows.map(r => {
     const fl = flow.byStrike.get(r.strike);
     return {
       strike: r.strike,
@@ -151,6 +163,9 @@ export async function GET(req: NextRequest) {
     day,
     rows,
     hasBuildup: prevCloses !== null,
+    closeOi: closeOi
+      ? { fetchedAt: eod?.fetched_at ?? '', official: sides.filter(s => s.official).length, total: sides.length }
+      : null,
     flowSlots: {
       slotMin: flow.slotMin, bounds: flow.bounds.map(fmtMinOfDay), boundOk: flow.boundOk, lastTs: flow.lastTs,
       dayAt: flow.dayAt === null ? null : fmtMinOfDay(flow.dayAt), closed: flow.closed,

@@ -27,7 +27,10 @@ positions read twice", "board price snaps back to the startup value", "OI change
   vs the previous close (the snapshot's own `change_OI`) as of `dayAt`, the latest completed edge with a reading, so
   each completed slot adds exactly its cell to it. A gap at that edge (a collector restart, which every dashboard
   restart causes) falls back to the newest earlier edge and the header says which (`OI Δ today @ HH:MM`); it never
-  blanks the column. Cells are tinted by `flowTier` against ONE board-wide `flowScale` (95th percentile of |cell|, not
+  blanks the column. The grey cell at each block's outer end (`<HH:MM`) is `flowCarry`: the change from the previous
+  close to the first SHOWN edge, so carry + the shown completed cells up to `dayAt` = `day` exactly (verified on the
+  2026-11-13 NIFTY file: Σ of every slot from the open = `day`, 0 mismatches); it is never tinted or in `flowScale`, and
+  null when any cell it spans is. Each cell's hover adds the running OI Δ today at its end. Cells are tinted by `flowTier` against ONE board-wide `flowScale` (95th percentile of |cell|, not
   the max, so an OI dip cannot wash the board out; under 10 % = grey); `flowStreak` gives the ▲n / ▼n badge (completed
   slots only, runs of 3+), amber when `streakVsDay` says it runs against the day's net (a possible turn). The `Σ shown`
   totals row (`sumFlows`, known values only) has its OWN `flowScale`: sums dwarf single strikes. On this tab the ladder
@@ -93,7 +96,13 @@ positions read twice", "board price snaps back to the startup value", "OI change
     the 15:17 cutoff). The page NEVER squares NRML off (user's choice 2026-11-13): `nrmlWarning` from 10 min before the
     close; an NRML position open at the day roll leaves the ledger. The board shows the selected product's positions;
     the other product's are in the off-board list.
-13. MCX collectors auto-start per MCX session (holiday file shared with `lib/mcxSession`); `instrumentation.node.ts` must not
+13. **A past NSE session shows the official close OI, not the last in-session reading.** Dhan revises option OI after the
+    close (2026-11-13: 0-7 % lower on most NIFTY strikes; 24700 PE flipped from +3.5k to -3.1k lots). On startup each
+    trading day the IV snapshot collector writes the previous session's `previous_oi` (`lib/eod_oi_sidecar.py`) to
+    `<csv>_eod_oi.json`; the route applies it (`buildBoardRows(..., closeOi)`) only when `date` and `expiry` match, and the
+    change is measured from that day's own previous-close OI (`oi − chg`). The 3m slots stay in-session. Header chip
+    `fm-oi-source` says which source is shown. No side file for MCX, or when the shown file's expiry has expired.
+14. MCX collectors auto-start per MCX session (holiday file shared with `lib/mcxSession`); `instrumentation.node.ts` must not
     kill them on a dashboard restart. A WAITING collector counts as alive.
 
 ## Tests

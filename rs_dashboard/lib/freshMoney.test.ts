@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay,
+  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, flowCarry, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay,
 } from './freshMoney.ts';
 
 const HEAD = 'timestamp,spot,expiry,strike,CE_LTP,CE_IV,CE_OI,CE_change_OI,CE_volume,PE_LTP,PE_IV,PE_OI,PE_change_OI,PE_volume';
@@ -330,4 +330,55 @@ test('streakVsDay: with / against / no day / zero day / no streak', () => {
   assert.equal(streakVsDay({ dir: 1 }, null), null);
   assert.equal(streakVsDay({ dir: 1 }, 0.2), null);
   assert.equal(streakVsDay(null, 500), null);
+});
+
+// ── a row adds up: earlier (flowCarry) + the completed shown cells = today's change ──
+test('oiFlow: every slot from the open adds up to today\'s change (closed and running session)', () => {
+  // Uneven OI path (up and down), previous close OI 4000.
+  const ce = (m: number) => 4000 + Math.round(300 * Math.sin((m - OPEN) / 7) + 20 * (m - OPEN));
+  const chg = (m: number) => ce(m) - 4000;
+  const CLOSE = M('15:30');
+  const allSlots = Math.round((CLOSE - OPEN) / 3);
+  const closed = oiFlow(series('09:15', '15:40', ce, () => 1, () => false, '2026-11-12', chg), { slots: allSlots - 1, slotMin: 3, anchorMin: OPEN, endMin: CLOSE });
+  const s = closed.byStrike.get(22550)!.ce;
+  assert.equal(closed.bounds[0], OPEN);
+  assert.equal(s.cells.reduce<number>((a, v) => a + v!, 0), s.day);
+  // Running: day is at the last completed edge; the running cell is not part of it.
+  const run = oiFlow(series('09:15', '11:01', ce, () => 1, () => false, '2026-11-12', chg), { slots: 35, slotMin: 3, anchorMin: OPEN });
+  const r = run.byStrike.get(22550)!.ce;
+  assert.equal(run.bounds[0], OPEN);
+  assert.equal(r.cells.slice(0, -1).reduce<number>((a, v) => a + v!, 0), r.day);
+});
+
+test('flowCarry: earlier + the shown completed cells up to dayAt = day; unknown stays unknown', () => {
+  const ce = (m: number) => 1000 + 100 * (m - OPEN);
+  const f = slotsOf(series('09:15', '10:31', ce, () => 1, () => false, '2026-11-12', m => ce(m) - 1000));
+  const s = f.byStrike.get(22550)!.ce;
+  const dayIdx = f.bounds.indexOf(f.dayAt!);
+  assert.equal(dayIdx, 5);
+  assert.equal(flowCarry(s, 0, dayIdx), 7500 - 5 * 300);   // 09:15 -> 10:15
+  assert.equal(flowCarry(s, 2, dayIdx), 7500 - 3 * 300);   // narrow screen: only the newest cells shown
+  assert.equal((flowCarry(s, 0, dayIdx) ?? NaN) + s.cells.slice(0, 5).reduce<number>((a, v) => a + v!, 0), s.day);
+  assert.equal(flowCarry({ cells: [1, null, 1], day: 5 }, 0, 3), null);
+  assert.equal(flowCarry({ cells: [1, 1, 1], day: null }, 0, 3), null);
+  assert.equal(flowCarry({ cells: [1, 1, 1], day: 5 }, 2, 1), null);   // dayAt before the first shown edge
+  // A gap at the newest edge: day falls back to an earlier edge, and the carry still adds up to it.
+  const g = slotsOf(series('09:15', '10:31', ce, () => 1, m => m > M('10:28') + 0.5 && m <= M('10:30') + 0.5, '2026-11-12', m => ce(m) - 1000));
+  const gs = g.byStrike.get(22550)!.ce;
+  const gi = g.bounds.indexOf(g.dayAt!);
+  assert.equal(gi, 4);
+  assert.equal((flowCarry(gs, 0, gi) ?? NaN) + gs.cells.slice(0, gi).reduce<number>((a, v) => a + v!, 0), gs.day);
+});
+
+test('official close OI: total and change come from it, measured from the same previous-close OI; gaps stay in-session', () => {
+  // In session: CE 6,212,635 (+230,360 vs a previous close of 5,982,275); PE has no change on record.
+  const [snap] = parseSnapshotCsv([HEAD, row('2026-11-13 15:39:40', 22550, 6212635, 230360, 10, 900, '', 10)].join('\n'));
+  const rows = buildBoardRows(snap, 1, null, { ce: { '22550': 5779930 }, pe: { '22550': 800 } });
+  const r = rows.find(x => x.strike === 22550)!;
+  assert.equal(r.call!.oi, 5779930);
+  assert.equal(r.call!.oiMoved, 5779930 - 5982275);   // a build-up in session that the close turns into a cut
+  assert.equal(r.call!.official, true);
+  assert.equal(r.put!.oi, 900);                       // previous-close OI unknown: no official change can be made
+  assert.equal(r.put!.official, false);
+  assert.equal(buildBoardRows(snap, 1).find(x => x.strike === 22550)!.call!.official, false);
 });

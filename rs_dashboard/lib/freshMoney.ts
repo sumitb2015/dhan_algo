@@ -50,7 +50,7 @@ export const BUILDUP_TEXT: Record<Buildup, { name: string; meaning: string }> = 
 /** Previous closes of the options on the board, by strike (from the collector's _prev_close.json side file). */
 export interface PrevCloses { ce: Record<string, number>; pe: Record<string, number> }
 
-export interface BoardRow { strike: number; put: BoardSide | null; call: BoardSide | null }
+export interface BoardRow { strike: number; put: (BoardSide & { official?: boolean }) | null; call: (BoardSide & { official?: boolean }) | null }
 
 function num(s: string | undefined): number | null {
   if (s === undefined || s === '') return null;
@@ -106,9 +106,21 @@ export function latestExpiry(snaps: Snapshot[]): string {
   return snaps.length ? snaps[snaps.length - 1].expiry : '';
 }
 
-function sideRow(s: SideSnap | undefined, prevClose?: number): BoardSide | null {
+/** A past session's official end-of-day OI by strike (the collector's `_eod_oi.json` side file, written next morning
+ *  from the chain's `previous_oi`): Dhan revises in-session OI after the close (vault: dhan-observed-quirks). */
+export interface CloseOi { ce: Record<string, number>; pe: Record<string, number> }
+
+/** One side of a board row. With `closeOi` the OI is the official close and the change is measured from the same
+ *  previous-close OI as every in-session reading (`oi − chg`, constant all day); a strike or side without both stays on
+ *  the in-session reading (`official: false`). */
+function sideRow(s: SideSnap | undefined, prevClose?: number, closeOi?: number): (BoardSide & { official: boolean }) | null {
   if (!s) return null;
-  return { oi: s.oi, oiMoved: s.chg, vol: s.vol, buildup: buildupOf(s.chg, s.ltp, prevClose) };
+  const prevOi = s.oi != null && s.chg != null && Number.isFinite(s.oi) && Number.isFinite(s.chg) ? s.oi - s.chg : null;
+  if (closeOi != null && Number.isFinite(closeOi) && prevOi !== null) {
+    const chg = closeOi - prevOi;
+    return { oi: closeOi, oiMoved: chg, vol: s.vol, buildup: buildupOf(chg, s.ltp, prevClose), official: true };
+  }
+  return { oi: s.oi, oiMoved: s.chg, vol: s.vol, buildup: buildupOf(s.chg, s.ltp, prevClose), official: false };
 }
 
 /**
@@ -142,7 +154,7 @@ export function strikeStep(strikes: number[]): number {
 }
 
 /** Board rows on a fixed ATM±wings grid, highest strike first. Strikes the snapshot lacks get null sides. */
-export function buildBoardRows(snap: Snapshot, wings = 12, prevClose: PrevCloses | null = null): BoardRow[] {
+export function buildBoardRows(snap: Snapshot, wings = 12, prevClose: PrevCloses | null = null, closeOi: CloseOi | null = null): BoardRow[] {
   const strikes = [...snap.strikes.keys()];
   if (!strikes.length) return [];
   const step = strikeStep(strikes);
@@ -155,7 +167,11 @@ export function buildBoardRows(snap: Snapshot, wings = 12, prevClose: PrevCloses
   const rows: BoardRow[] = [];
   for (let k = hiK; k >= loK; k -= step) {
     const s = snap.strikes.get(k);
-    rows.push({ strike: k, put: sideRow(s?.pe, prevClose?.pe[String(k)]), call: sideRow(s?.ce, prevClose?.ce[String(k)]) });
+    rows.push({
+      strike: k,
+      put: sideRow(s?.pe, prevClose?.pe[String(k)], closeOi?.pe[String(k)]),
+      call: sideRow(s?.ce, prevClose?.ce[String(k)], closeOi?.ce[String(k)]),
+    });
   }
   return rows;
 }
@@ -357,6 +373,21 @@ export function sumFlows(flows: (SideFlow | null)[], cellsLen: number): SumFlow 
   let day = 0, dayCount = 0;
   for (const f of live) if (known(f.day)) { day += f.day; dayCount++; }
   return { cells, day: dayCount > 0 && dayCount === n ? day : null, counts, dayCount, n };
+}
+
+/** OI change from the previous close up to the first SHOWN slot edge (`bounds[firstShown]`): `day` minus the shown
+ *  completed cells that `day` already includes (cells firstShown .. dayIdx−1; `dayIdx` = index of `dayAt` in `bounds`).
+ *  So carry + those cells = `day` exactly, and a row on the board adds up. Null when `day`, `dayIdx` or any of those
+ *  cells is unknown (no partial guess), or when `dayAt` lies before the first shown edge. */
+export function flowCarry(flow: SideFlow | null, firstShown: number, dayIdx: number): number | null {
+  if (!flow || flow.day == null || !Number.isFinite(flow.day) || dayIdx < firstShown || firstShown < 0) return null;
+  let t = 0;
+  for (let i = firstShown; i < dayIdx; i++) {
+    const v = flow.cells[i];
+    if (v == null || !Number.isFinite(v)) return null;
+    t += v;
+  }
+  return flow.day - t;
 }
 
 /** A streak against today's net change (e.g. ▼3 beside +14,052: built all day, now unwinding) is a possible turn;

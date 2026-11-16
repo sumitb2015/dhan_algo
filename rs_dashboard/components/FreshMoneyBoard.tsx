@@ -9,7 +9,7 @@ import { useTabLeader } from '@/hooks/useTabLeader';
 import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
 import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
-import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, flowScale, flowStreak, flowTier, streakVsDay, sumFlows, type Buildup, type FlowTier, type SideFlow, type SumFlow } from '@/lib/freshMoney';
+import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, flowCarry, flowScale, flowStreak, flowTier, streakVsDay, sumFlows, type Buildup, type FlowTier, type SideFlow, type SumFlow } from '@/lib/freshMoney';
 import type { FmBroker, FmPosition, FmProduct, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { ExitAllButton, FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
 import { validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
@@ -57,13 +57,14 @@ const GRID_TRADE = 'grid grid-cols-[minmax(0,1fr)_76px_204px_80px_204px_76px_min
 // Slot-flow tab: the same grids plus a block of slot cells (38 px each; up to 10 completed slots + the running one) on each
 // outer edge, and 96 px number columns (the streak badge sits beside the number: "▲10 +99,999"). The block's width and
 // cell count are CSS variables set by the Ladder from the width it has (see slotsThatFit), so the call-side slots never
-// scroll off to the right on a narrower screen: older slots are dropped instead.
+// scroll off to the right on a narrower screen: older slots are dropped instead. The block also holds one "earlier" cell
+// at its outer end (OI change before the first shown slot), so a row's cells add up to its OI Δ today.
 const GRID_FLOW = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_96px_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
 const GRID_FLOW_TRADE = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_204px_80px_204px_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
 const SLOT_CELL_PX = 38;
 const MIN_SLOT_CELLS = 4;
 /** Width of everything on a flow-tab row except the two slot blocks: the fixed columns plus a 120 px minimum per bar. */
-const flowFixedPx = (trade: boolean) => (trade ? 96 + 204 + 80 + 204 + 96 : 96 * 3) + 2 * 120;
+const flowFixedPx = (trade: boolean) => (trade ? 96 + 204 + 80 + 204 + 96 : 96 * 3) + 2 * 120 + 2 * SLOT_CELL_PX;
 /** How many slot cells per side fit in `width` px (at least MIN_SLOT_CELLS — narrower than that scrolls — at most `max`). */
 function slotsThatFit(width: number, trade: boolean, max: number): number {
   const n = Math.floor((width - flowFixedPx(trade)) / (2 * SLOT_CELL_PX));
@@ -164,6 +165,13 @@ function slotInfo(fs: FlowSlots, i: number): { head: string; span: string; runni
   return { head: `${end}…`, span: `${start}–${end}, running (so far to ${fs.lastTs})`, running: true, ok: !!fs.boundOk[n] };
 }
 
+/** For flowCarry: the oldest shown cell's index (= its start edge in `bounds`) and `dayAt`'s index in `bounds`. */
+function carryIdx(fs: FlowSlots): { first: number; dayIdx: number } {
+  const total = cellCount(fs);
+  const shown = Math.min(total, fs.show ?? total);
+  return { first: total - shown, dayIdx: fs.dayAt ? fs.bounds.indexOf(fs.dayAt) : -1 };
+}
+
 /** Cell order for one side: puts read oldest → running left to right, calls are mirrored, so the running slot always
  *  sits next to the strike. Only the newest `fs.show` cells (indices stay the server's, so hover and streaks agree). */
 function slotOrder(fs: FlowSlots, side: 'put' | 'call'): number[] {
@@ -196,21 +204,44 @@ function FlowCells({ side, flow, fs, unit, scale, rowKey, hover, onHover, note }
   /** Why an unknown cell is unknown, when the caller knows better than "no reading" (the totals' partial slots). */
   note?: (i: number) => string | null;
 } & HoverProps) {
+  const order = slotOrder(fs, side);
+  const { first, dayIdx } = carryIdx(fs);
+  const carry = flowCarry(flow, first, dayIdx);
+  // OI Δ today at the end of each shown cell (carry + the cells up to it); null once any of them is unknown.
+  const upTo = new Map<number, number | null>();
+  let run: number | null = carry;
+  for (let i = first; i < cellCount(fs); i++) {
+    const v = flow?.cells[i] ?? null;
+    run = run === null || v === null ? null : run + v;
+    upTo.set(i, run);
+  }
+  const carryCell = order.length > 0 && (
+    <span key="carry" data-slot="carry" onMouseEnter={() => onHover({ row: rowKey, slot: -1 })}
+      className={`rounded-sm bg-zinc-800 text-center text-zinc-300 ${hover?.slot === -1 ? 'ring-1 ring-inset ring-zinc-300' : ''}`}
+      title={`Earlier: OI Δ from the previous close to ${fs.bounds[first]}: ${carry === null ? 'unknown' : `${fmtOi(carry)} ${unit}`}`
+        + ` · earlier + the slots to ${fs.dayAt ?? '–'} = OI Δ today${flow?.day != null ? ` (${fmtOi(flow.day)} ${unit})` : ''}`}>
+      {fmtOiShort(carry)}
+    </span>
+  );
   return (
     // Leaving the cell block clears the crosshair (a bar, the strike or the B / S buttons must not keep it lit).
     <span className="grid grid-cols-[repeat(var(--fm-n),minmax(0,1fr))] gap-px text-[11px]" onMouseLeave={() => onHover(null)}>
-      {slotOrder(fs, side).map(i => {
+      {side === 'put' && carryCell}
+      {order.map(i => {
         const v = flow?.cells[i] ?? null;
         const s = slotInfo(fs, i);
         const col = hover?.slot === i;
+        const cum = upTo.get(i) ?? null;
         return (
           <span key={i} data-slot={i} onMouseEnter={() => onHover({ row: rowKey, slot: i })}
             className={`rounded-sm text-center ${s.running ? 'italic' : ''} ${col ? 'ring-1 ring-inset ring-zinc-300' : s.running ? 'ring-1 ring-inset ring-zinc-500' : ''} ${cellClass(v, scale)}`}
-            title={`${s.span}: ${v === null ? (note?.(i) ?? (s.ok ? 'unknown' : 'no OI reading at a slot edge')) : `${fmtOi(v)} ${unit}`}`}>
+            title={`${s.span}: ${v === null ? (note?.(i) ?? (s.ok ? 'unknown' : 'no OI reading at a slot edge')) : `${fmtOi(v)} ${unit}`}`
+              + ` · OI Δ today ${s.running ? `so far (${fs.lastTs})` : `at ${s.head}`}: ${cum === null ? 'unknown' : `${fmtOi(cum)} ${unit}`}`}>
             {fmtOiShort(v)}
           </span>
         );
       })}
+      {side === 'call' && carryCell}
     </span>
   );
 }
@@ -234,9 +265,16 @@ function StreakBadge({ flow, fs, scale, unit }: { flow: SideFlow | null; fs: Flo
 
 /** Column labels over the slot cells: each slot's end time (the running one with "…"), in the cells' order. */
 function FlowHeader({ side, fs, hoverSlot }: { side: 'put' | 'call'; fs: FlowSlots; hoverSlot: number | null }) {
+  const order = slotOrder(fs, side);
+  const { first } = carryIdx(fs);
+  const carryHead = order.length > 0 && (
+    <span key="carry" data-slot="carry" className={`rounded-sm text-center ${hoverSlot === -1 ? 'ring-1 ring-inset ring-zinc-300 text-zinc-100' : ''}`}
+      title={`Earlier: OI Δ from the previous close to ${fs.bounds[first]} (this + the slots = OI Δ today)`}>&lt;{fs.bounds[first]}</span>
+  );
   return (
     <span className="grid grid-cols-[repeat(var(--fm-n),minmax(0,1fr))] gap-px">
-      {slotOrder(fs, side).map(i => {
+      {side === 'put' && carryHead}
+      {order.map(i => {
         const s = slotInfo(fs, i);
         return (
           <span key={i} data-slot={i}
@@ -244,6 +282,7 @@ function FlowHeader({ side, fs, hoverSlot }: { side: 'put' | 'call'; fs: FlowSlo
             title={s.span}>{s.head}</span>
         );
       })}
+      {side === 'call' && carryHead}
     </span>
   );
 }
@@ -299,7 +338,11 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, on
     if (mode !== 'flow') return undefined;
     const v = (n: number | null | undefined) => (n == null ? 'unknown' : `${fmtOi(n)} ${unit}`);
     const late = fs.dayAt && fs.dayAt !== fs.bounds[fs.bounds.length - 1] ? ' (latest slot edge had no reading)' : '';
-    return `Today's OI change vs the previous close, as of ${fs.dayAt ?? 'no slot edge with a reading'}${late}: ${v(sd?.flow?.day)}`
+    const { first, dayIdx } = carryIdx(fs);
+    const carry = flowCarry(sd?.flow ?? null, first, dayIdx);
+    const split = carry !== null && sd?.flow?.day != null
+      ? ` = earlier ${v(carry)} + slots ${fs.bounds[first]}–${fs.dayAt} ${v(sd.flow.day - carry)}` : '';
+    return `Today's OI change vs the previous close, as of ${fs.dayAt ?? 'no slot edge with a reading'}${late}: ${v(sd?.flow?.day)}${split}`
       + ` · live (${fs.lastTs || 'now'}): ${v(sd?.oiMoved)}`;
   };
   const p = row.put, c = row.call;
@@ -417,7 +460,8 @@ function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTr
   const total = cellCount(fsAll);
   const show = boxW > 0 ? slotsThatFit(boxW, tradeMode, total) : total;
   const fs = useMemo<FlowSlots>(() => ({ ...fsAll, show }), [fsAll, show]);
-  const flowVars = { '--fm-slots': `${show * SLOT_CELL_PX}px`, '--fm-n': String(Math.max(1, show)) } as React.CSSProperties;
+  // +1: the "earlier" cell at the outer end of each slot block (its width is counted in flowFixedPx for slotsThatFit).
+  const flowVars = { '--fm-slots': `${(show + 1) * SLOT_CELL_PX}px`, '--fm-n': String(show + 1) } as React.CSSProperties;
   return (
     <>
     {/* Flow tab: the ladder scrolls inside its own box (both ways), so the slot times and totals can stay pinned
@@ -780,6 +824,20 @@ export default function FreshMoneyBoard() {
           <span className="rounded border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-amber-300">
             DATA: {data?.date ?? '—'}{data && !data.isToday ? ' · last session' : ''}
           </span>
+          {data?.closeOi ? (
+            <span data-testid="fm-oi-source" className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-300"
+              title={`OI change, Total OI and Δ OI use the exchange's official end-of-day OI for ${data.date} (Dhan, fetched ${data.closeOi.fetchedAt}),`
+                + ` on ${data.closeOi.official} of ${data.closeOi.total} strike sides; the rest show the last in-session reading.`
+                + ' The 3m slots stay on in-session readings (to the close).'}>
+              OI · official close{data.closeOi.official < data.closeOi.total ? ` (${data.closeOi.official}/${data.closeOi.total})` : ''}
+            </span>
+          ) : data && data.market === 'NSE' && (!data.isToday || sessionOver) && (
+            <span data-testid="fm-oi-source" className="rounded border border-zinc-700 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-400"
+              title={`Dhan revises option OI after the close (often a few % lower). This is the last reading of the session (${data.lastTs.slice(11)});`
+                + ' the official close OI loads on the next trading morning when the IV snapshot collector starts.'}>
+              OI · last session reading
+            </span>
+          )}
           {sessionOver && (
             <span data-testid="fm-closed" className="rounded border border-zinc-700 bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider text-zinc-300"
               title={`The ${data!.market} session closed at ${fmtHm(day.to)}: the slots and today's change stop there, and the board no longer moves`}>
@@ -915,7 +973,9 @@ export default function FreshMoneyBoard() {
                   <p>Each cell is the OI change ({data.oiUnit}) in one {fs.slotMin}-minute slot counted from the open ({data.market === 'MCX' ? '09:00' : '09:15'}).
                     Completed slots are frozen; the ringed, italic cell next to the strike is the current slot so far (after the close there is none:
                     the slots stop at the close, so OI the chain moves after the bell is not counted). – = no OI reading at a slot edge.
-                    On a narrower screen the oldest slots are left out.</p>
+                    On a narrower screen the oldest slots are left out. The grey cell at the outer end (&lt;{fs.bounds[carryIdx(fs).first] ?? '–'}) is
+                    everything before the first slot shown, so that cell + the completed slots = the number beside the strike, exactly.
+                    Hover a cell for today&apos;s OI change as of that slot&apos;s end.</p>
                   <p>Tint = size of the move against this board&apos;s 95th-percentile move: grey under 10 %, then faint, medium, and bold white on a
                     strong tint for the biggest moves (≥ 70 %). Green = OI added, red = OI cut.</p>
                   <p>The number and bar beside the strike = today&apos;s OI change vs the previous close as of the last completed slot with a reading

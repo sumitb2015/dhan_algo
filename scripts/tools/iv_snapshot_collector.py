@@ -24,6 +24,7 @@ sys.path.insert(0, ROOT)
 from login import get_dhan_client
 from lib.dhan_helper import DhanHelper
 from lib.prev_close_sidecar import write_prev_closes
+from lib.eod_oi_sidecar import eod_oi_path, last_expiry_of_csv, previous_trading_day, write_eod_oi
 
 _LOG_FILE = os.path.join(ROOT, 'debug', 'iv_snapshot_collector.log')
 os.makedirs(os.path.join(ROOT, 'debug'), exist_ok=True)
@@ -108,6 +109,31 @@ def get_csv_paths(today: date, underlying: str) -> list[str]:
             os.path.join(debug_dir, f'iv_snapshots_NIFTY_{d_str}.csv'),
         ]
     return [os.path.join(debug_dir, f'iv_snapshots_{underlying}_{d_str}.csv')]
+
+
+def record_prev_session_eod_oi(helper, underlyings, today: date, sleep=time.sleep) -> None:
+    """Once per start: the previous session's official end-of-day OI (the chain's `previous_oi` today) into a side file
+    next to that session's CSV, for the Fresh Money board. Skipped when it is already there, when there is no CSV for
+    the session right before today, or when that file's expiry has expired (no chain). Never raises."""
+    prev = previous_trading_day(today)
+    for u in underlyings:
+        try:
+            paths = [p for p in get_csv_paths(prev, u) if os.path.exists(p)]
+            if not paths or all(os.path.exists(eod_oi_path(p)) for p in paths):
+                continue
+            expiry = last_expiry_of_csv(paths[-1])
+            if not expiry or expiry < today.isoformat():
+                continue
+            cfg = TARGETS[u]
+            chain = helper.get_option_chain(cfg['chain_id'], expiry, exchange_segment=cfg['chain_seg'])
+            oc = chain.get('oc', {}) if chain else {}
+            fetched = ist_now().strftime('%Y-%m-%d %H:%M:%S')
+            ok = [write_eod_oi(p, prev.isoformat(), expiry, oc, fetched) for p in paths]
+            log.info('[%s] official close OI for %s (exp %s): %s', u, prev.isoformat(), expiry,
+                     'written' if all(ok) else 'no previous_oi in the chain')
+        except Exception as exc:  # noqa: BLE001 — best effort; collection must still start
+            log.warning('[%s] official close OI for the previous session failed: %s', u, exc)
+        sleep(3.0)   # Dhan option chain: one call per ~3 s
 
 
 def stop_trigger_path() -> str:
@@ -301,6 +327,10 @@ def main():
             time.sleep(15)
 
     helper = DhanHelper(dhan)
+
+    # The previous session's official close OI for the Fresh Money board (Dhan revises in-session OI after the close).
+    if not args.dry_run:
+        record_prev_session_eod_oi(helper, active_underlyings, date.today())
 
     # Wait for market open
     if not args.ignore_market_hours:
