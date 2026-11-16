@@ -9,7 +9,7 @@ import { useTabLeader } from '@/hooks/useTabLeader';
 import NavBar from './NavBar';
 import type { FreshMoneyResponse, FreshMoneyRow } from '@/app/api/fresh-money/route';
 import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
-import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, flowCarry, flowScale, flowStreak, flowTier, streakVsDay, sumFlows, type Buildup, type FlowTier, type SideFlow, type SumFlow } from '@/lib/freshMoney';
+import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, flowCarry, flowScale, scaleOiRows, flowStreak, flowTier, streakVsDay, sumFlows, type Buildup, type FlowTier, type SideFlow, type SumFlow } from '@/lib/freshMoney';
 import type { FmBroker, FmPosition, FmProduct, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { ExitAllButton, FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
 import { validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
@@ -30,6 +30,7 @@ const PREF_UNDERLYING = 'freshMoney.underlying';
 const PREF_LOTS = 'freshMoney.lots';
 const PREF_PRODUCT = 'freshMoney.product';
 const PREF_OI_MODE = 'freshMoney.oiMode';
+const PREF_OI_UNITS = 'freshMoney.oiUnits';
 type OiMode = 'change' | 'total' | 'delta' | 'flow';
 const PREF_POS_COLLAPSED = 'freshMoney.positionsCollapsed';
 const PREF_FLOW_HELP = 'freshMoney.flowHelp';
@@ -519,7 +520,15 @@ function SpotDivider({ spot, live }: { spot: number; live: boolean }) {
 
 export default function FreshMoneyBoard() {
   const [underlying, setUnderlying] = useState<Underlying>('NIFTY');
-  const [data, setData] = useState<FreshMoneyResponse | null>(null);
+  const [rawData, setData] = useState<FreshMoneyResponse | null>(null);
+  // OI unit (remembered per browser): lots as served, or units (lots x lot size) like Dhan's option chain. NSE only:
+  // MCX OI is already lots (lot 1). Display only — orders, lots and the lot size are never scaled.
+  const [oiUnits, setOiUnits] = useState(false);
+  const pickOiUnits = (on: boolean) => { setOiUnits(on); writePref(PREF_OI_UNITS, on ? '1' : '0'); };
+  const canUnits = !!rawData && rawData.market === 'NSE' && rawData.oiUnit === 'lots' && (rawData.lot ?? 0) > 1;
+  const data = useMemo<FreshMoneyResponse | null>(() => (rawData && canUnits && oiUnits
+    ? { ...rawData, oiUnit: 'units', rows: scaleOiRows(rawData.rows, rawData.lot!) }
+    : rawData), [rawData, canUnits, oiUnits]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // REAL-money arm: per page load, never persisted, dropped on an underlying switch.
@@ -576,6 +585,7 @@ export default function FreshMoneyBoard() {
     setPosCollapsed(readPref(PREF_POS_COLLAPSED) === '1');
     setChartCollapsed(readPref(PREF_CHART_COLLAPSED) === '1');
     setFlowHelp(readPref(PREF_FLOW_HELP) === '1');
+    setOiUnits(readPref(PREF_OI_UNITS) === '1');
     setSoundOn(readPref(PREF_SOUND) !== '0');
     const om = readPref(PREF_OI_MODE);
     if (om === 'total' || om === 'delta' || om === 'flow') setOiMode(om);
@@ -925,6 +935,18 @@ export default function FreshMoneyBoard() {
                 className={`ml-auto flex h-6 w-6 items-center justify-center rounded border border-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70 ${soundOn ? 'text-zinc-300' : 'text-zinc-500'}`}>
                 {soundOn ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
               </button>
+              {canUnits && (
+                <div role="group" aria-label="OI unit" className="flex rounded-md border border-zinc-800 bg-zinc-950/40 p-0.5">
+                  {([[false, 'Lots'], [true, 'Units']] as const).map(([on, name]) => (
+                    <button key={name} type="button" aria-pressed={oiUnits === on} onClick={() => pickOiUnits(on)}
+                      title={on ? `OI in units (lots × ${rawData!.lot}), as Dhan's option chain shows it` : 'OI in lots (contracts), as NSE reports it'}
+                      className={`rounded px-2.5 py-1 text-[11px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 ${
+                        oiUnits === on ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:text-zinc-200'}`}>
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div role="tablist" aria-label="Bars and numbers show" className="flex rounded-md border border-zinc-800 bg-zinc-950/40 p-0.5">
                 {([['change', 'OI change'], ['total', 'Total OI'], ['delta', 'Δ OI'], ['flow', `${fs.slotMin}m slots`]] as const).map(([m, name]) => (
                   <button key={m} type="button" role="tab" aria-selected={oiMode === m} onClick={() => pickOiMode(m)}

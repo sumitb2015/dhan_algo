@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, flowCarry, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay,
+  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, flowCarry, scaleOiRows, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay,
 } from './freshMoney.ts';
 
 const HEAD = 'timestamp,spot,expiry,strike,CE_LTP,CE_IV,CE_OI,CE_change_OI,CE_volume,PE_LTP,PE_IV,PE_OI,PE_change_OI,PE_volume';
@@ -381,4 +381,13 @@ test('official close OI: total and change come from it, measured from the same p
   assert.equal(r.put!.oi, 900);                       // previous-close OI unknown: no official change can be made
   assert.equal(r.put!.official, false);
   assert.equal(buildBoardRows(snap, 1).find(x => x.strike === 22550)!.call!.official, false);
+});
+
+test('scaleOiRows: lots -> units multiplies every OI figure; nulls stay null; factor 1 is a no-op', () => {
+  const rows = [{ strike: 25150, put: null, call: { oi: 51205, oiMoved: 655, buildup: null, flow: { cells: [1, null, -2], day: 3 } } }];
+  const u = scaleOiRows(rows, 65);
+  assert.deepEqual(u[0].call, { oi: 3328325, oiMoved: 42575, buildup: null, flow: { cells: [65, null, -130], day: 195 } });
+  assert.equal(u[0].put, null);
+  assert.equal(scaleOiRows(rows, 1), rows);
+  assert.equal(rows[0].call.oi, 51205);   // input untouched
 });

@@ -451,3 +451,22 @@ test('a past NSE session says where its OI comes from: the official close once l
   await expect(chip).toHaveAttribute('title', /fetched 2026-11-16 08:38:49\), on 48 of 50 strike sides/);
   expect(m.blocked).toEqual([]);
 });
+
+test('lots / units switch (NSE): every OI figure × lot size, header says units, choice remembered; not shown on MCX', async ({ page }) => {
+  const m = await install(page);
+  await expect(page.getByRole('group', { name: 'OI unit' })).toHaveCount(0);   // MCX board: OI is already lots
+  await page.route(/\/api\/fresh-money\?/, route => json(route, { ...board(), market: 'NSE', lot: 65, mult: null }));
+  await page.reload();
+  const units = page.getByRole('group', { name: 'OI unit' }).getByRole('button', { name: 'Units' });
+  await expect(page.getByText('+300', { exact: true }).first()).toBeVisible();          // put OI change, lots
+  await units.click();
+  await expect(units).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByText(/OI in units/)).toBeVisible();
+  await expect(page.getByText('+19,500', { exact: true }).first()).toBeVisible();       // 300 x 65
+  await page.getByRole('tab', { name: 'Total OI' }).click();
+  await expect(page.getByText('2.6L', { exact: true }).first()).toBeVisible();          // 4,000 x 65 = 2,60,000
+  await page.reload();
+  await expect(page.getByRole('group', { name: 'OI unit' }).getByRole('button', { name: 'Units' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByText('2.6L', { exact: true }).first()).toBeVisible();
+  expect(m.blocked).toEqual([]);
+});

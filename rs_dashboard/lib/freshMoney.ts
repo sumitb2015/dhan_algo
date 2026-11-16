@@ -416,3 +416,15 @@ export function fmtOiShort(n: number | null): string {
   if (a >= 1e3) return `${sign}${(a / 1e3).toFixed(1)}k`;
   return `${sign}${a}`;
 }
+
+/** Board rows in another OI unit: every OI figure (total, change, slot cells, today's change) times `factor` (e.g. the
+ *  NSE lot size to show units, as Dhan's option chain does, instead of lots). Nulls stay null; factor 1 = unchanged. */
+export function scaleOiRows<S extends { oi: number | null; oiMoved: number | null; flow?: SideFlow | null },
+  R extends { put: S | null; call: S | null }>(rows: R[], factor: number): R[] {
+  if (!(factor > 0) || factor === 1) return rows;
+  const m = (v: number | null) => (v === null ? null : v * factor);
+  const side = (s: S | null): S | null => (s
+    ? { ...s, oi: m(s.oi), oiMoved: m(s.oiMoved), flow: s.flow ? { cells: s.flow.cells.map(m), day: m(s.flow.day) } : s.flow }
+    : null);
+  return rows.map(r => ({ ...r, put: side(r.put), call: side(r.call) }));
+}
