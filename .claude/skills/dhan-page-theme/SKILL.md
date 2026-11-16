@@ -76,6 +76,10 @@ Why each token is what it is: `references/header-anatomy.md`.
   its own icon; the Sidebar already links Dashboard.
 - **Modal backdrop `bg-oncolor-dark/NN` at `z-50`**; `bg-black/NN` stops dimming in white mode.
 - **No text opacity modifiers** (`text-white/70`); use `text-zinc-100`..`-600`. Background opacity is fine.
+- **Laptop / desktop only — do not optimise for mobile.** The dashboard is used on laptops and desktops (user decision,
+  2026-11-16). Don't add phone breakpoints (`sm:`-gutters, stacked mobile layouts, 390 px fixes), don't run or report
+  phone-width checks, and don't spend a review on them. Design for ~1280–1920 px wide; a narrow laptop *window* is
+  still worth surviving (e.g. a wide table scrolls inside its own `overflow-x-auto` wrapper, not the whole panel).
 
 ## Accent = domain
 `emerald` is the default (options and derivatives analytics, equity analytics, trading terminals, algo). Use the

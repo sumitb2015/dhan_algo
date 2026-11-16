@@ -33,6 +33,10 @@ sparkline + risk rail`).
 - Font sizes in the file are a scatter of `text-[Npx]` arbitrary values with no
   naming.
 
+**Target screens: laptops and desktops only.** These terminals are not used on phones (user decision, 2026-11-16):
+spend density work on ~1280–1920 px widths and never add mobile-only layouts, breakpoints or phone-width test passes.
+Do keep a narrow laptop window usable — scroll wide tables inside their own wrapper so toolbars are never cut off.
+
 ## Stay Within the Existing Token System
 
 Don't introduce new hex values or a new palette for one page. Grep the file for
