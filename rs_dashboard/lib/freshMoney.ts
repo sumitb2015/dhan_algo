@@ -23,7 +23,11 @@ export interface Snapshot {
 }
 
 /** `oi` = total open interest now; `oiMoved` = its change vs the previous close; `buildup` = what that move means. */
-export interface BoardSide { oi: number | null; oiMoved: number | null; vol: number | null; buildup: Buildup | null }
+export interface BoardSide {
+  oi: number | null; oiMoved: number | null; vol: number | null; buildup: Buildup | null;
+  /** The option's last price in the snapshot and its previous close (side file); null = unknown. Optional: older callers. */
+  ltp?: number | null; prevClose?: number | null;
+}
 
 /**
  * OI buildup of one option (one side of one strike), the repo's standard four quadrants (OptionsBuildupTab's
@@ -110,6 +114,12 @@ export function latestExpiry(snaps: Snapshot[]): string {
  *  from the chain's `previous_oi`): Dhan revises in-session OI after the close (vault: dhan-observed-quirks). */
 export interface CloseOi { ce: Record<string, number>; pe: Record<string, number> }
 
+/** A side's price fields: last price and previous close, each only when a positive number. */
+const px = (s: SideSnap, prevClose?: number) => ({
+  ltp: s.ltp != null && s.ltp > 0 ? s.ltp : null,
+  prevClose: prevClose != null && prevClose > 0 ? prevClose : null,
+});
+
 /** Whether a side can take the official close: a close value and the previous-close OI (`oi − chg`) both known. */
 function canOfficial(s: SideSnap | undefined, closeOi: number | undefined): boolean {
   return !!s && closeOi != null && Number.isFinite(closeOi) && s.oi != null && s.chg != null
@@ -124,9 +134,9 @@ function sideRow(s: SideSnap | undefined, prevClose?: number, closeOi?: number, 
   if (useClose && canOfficial(s, closeOi)) {
     const prevOi = s.oi! - s.chg!;
     const chg = closeOi! - prevOi;
-    return { oi: closeOi!, oiMoved: chg, vol: s.vol, buildup: buildupOf(chg, s.ltp, prevClose), official: true };
+    return { oi: closeOi!, oiMoved: chg, vol: s.vol, buildup: buildupOf(chg, s.ltp, prevClose), official: true, ...px(s, prevClose) };
   }
-  return { oi: s.oi, oiMoved: s.chg, vol: s.vol, buildup: buildupOf(s.chg, s.ltp, prevClose), official: false };
+  return { oi: s.oi, oiMoved: s.chg, vol: s.vol, buildup: buildupOf(s.chg, s.ltp, prevClose), official: false, ...px(s, prevClose) };
 }
 
 /**

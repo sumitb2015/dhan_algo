@@ -32,6 +32,7 @@ const PREF_PRODUCT = 'freshMoney.product';
 const PREF_OI_MODE = 'freshMoney.oiMode';
 const PREF_OI_UNITS = 'freshMoney.oiUnits';
 const PREF_PCR = 'freshMoney.showPcr';
+const PREF_PRICE = 'freshMoney.showPrice';
 type OiMode = 'change' | 'total' | 'both' | 'delta' | 'flow';
 const PREF_POS_COLLAPSED = 'freshMoney.positionsCollapsed';
 const PREF_FLOW_HELP = 'freshMoney.flowHelp';
@@ -72,18 +73,26 @@ const PCR_PX = 44;
 const NUM_BOTH_PX = 112;
 /** Extra strike-column width for the PDH / PDL tag left of the strike (only while the levels are known). */
 const LEVEL_PX = 30;
-const strikeColPx = (trade: boolean, pcr: boolean, lv = false) => (trade ? 80 : 96) + (pcr ? PCR_PX : 0) + (lv ? LEVEL_PX : 0);
-/** Strike cell columns: [level tag] strike [PCR]. Literal strings for Tailwind. */
-const strikeCols = (lv: boolean, pcr: boolean) => (lv
-  ? (pcr ? 'grid grid-cols-[28px_minmax(0,1fr)_40px] items-center' : 'grid grid-cols-[28px_minmax(0,1fr)] items-center')
-  : (pcr ? 'grid grid-cols-[minmax(0,1fr)_40px] items-center' : ''));
+/** Width of each option-price column beside the strike ("1234.50"). */
+const PRICE_PX = 54;
+/** What the strike column holds besides the strike: level tags, PCR, the PE / CE prices. */
+type StrikeLayout = { lv: boolean; pcr: boolean; price: boolean };
+const NO_EXTRAS: StrikeLayout = { lv: false, pcr: false, price: false };
+const strikeColPx = (trade: boolean, l: StrikeLayout) =>
+  (trade ? 80 : 96) + (l.pcr ? PCR_PX : 0) + (l.lv ? LEVEL_PX : 0) + (l.price ? 2 * PRICE_PX : 0);
+/** Strike cell columns: [PE price] [level tag] strike [PCR] [CE price] (inline style: the combinations are many). */
+function strikeGrid(l: StrikeLayout): React.CSSProperties | undefined {
+  if (!l.lv && !l.pcr && !l.price) return undefined;
+  const cols = [l.price && `${PRICE_PX - 2}px`, l.lv && '28px', 'minmax(0,1fr)', l.pcr && '40px', l.price && `${PRICE_PX - 2}px`];
+  return { display: 'grid', gridTemplateColumns: cols.filter(Boolean).join(' '), alignItems: 'center' };
+}
 const MIN_SLOT_CELLS = 4;
 /** Width of everything on a flow-tab row except the two slot blocks: the fixed columns plus a 120 px minimum per bar. */
-const flowFixedPx = (trade: boolean, pcr = false, lv = false) =>
-  (trade ? 96 + 204 + 204 + 96 : 96 * 2) + strikeColPx(trade, pcr, lv) + 2 * 120 + 2 * SLOT_CELL_PX;
+const flowFixedPx = (trade: boolean, l: StrikeLayout = NO_EXTRAS) =>
+  (trade ? 96 + 204 + 204 + 96 : 96 * 2) + strikeColPx(trade, l) + 2 * 120 + 2 * SLOT_CELL_PX;
 /** How many slot cells per side fit in `width` px (at least MIN_SLOT_CELLS — narrower than that scrolls — at most `max`). */
-function slotsThatFit(width: number, trade: boolean, max: number, pcr = false, lv = false): number {
-  const n = Math.floor((width - flowFixedPx(trade, pcr, lv)) / (2 * SLOT_CELL_PX));
+function slotsThatFit(width: number, trade: boolean, max: number, l: StrikeLayout = NO_EXTRAS): number {
+  const n = Math.floor((width - flowFixedPx(trade, l)) / (2 * SLOT_CELL_PX));
   return Math.max(Math.min(MIN_SLOT_CELLS, max), Math.min(max, n));
 }
 const gridFor = (mode: OiMode, trade: boolean) => (mode === 'flow' ? (trade ? GRID_FLOW_TRADE : GRID_FLOW) : (trade ? GRID_TRADE : GRID));
@@ -357,9 +366,9 @@ function FlowHeader({ side, fs, hoverSlot }: { side: 'put' | 'call'; fs: FlowSlo
 
 /** Board totals (flow tab): per slot the sum over the strikes on the board, puts and calls, on their OWN tint scale (sums
  *  are far larger than single strikes), with Σ today's change and the streak badge. Lines up with the strike rows. */
-function TotalsRow({ put, call, fs, unit, scale, trade, hover, onHover, pcr, lv }: {
-  /** The strike column has a level-tag slot (keeps "Σ shown" over the strikes). */
-  lv: boolean;
+function TotalsRow({ put, call, fs, unit, scale, trade, hover, onHover, pcr, layout }: {
+  /** The strike column's extras (keeps "Σ shown" over the strikes). */
+  layout: StrikeLayout;
   put: SumFlow; call: SumFlow; fs: FlowSlots; unit: string; scale: number; trade: boolean;
   /** Board PCR (Σ put OI ÷ Σ call OI over the strikes shown) when the PCR column is on; undefined = off. */
   pcr?: number | null;
@@ -384,14 +393,16 @@ function TotalsRow({ put, call, fs, unit, scale, trade, hover, onHover, pcr, lv 
       <span />
       {num(put, 'put')}
       {trade && <span />}
-      <span className={strikeCols(lv, pcr !== undefined)}>
-        {lv && <span />}
+      <span style={strikeGrid(layout)}>
+        {layout.price && <span />}
+        {layout.lv && <span />}
         <span className="block text-center text-[11.5px] font-bold text-zinc-300"
           title={`Sum over the ${nStrikes} strikes with data on the board (not the whole chain); its tints use their own scale`}>Σ shown</span>
         {pcr !== undefined && (
           <span className="pr-1 text-right text-[11.5px] font-bold text-zinc-300"
             title={pcr === null ? 'Board PCR unknown' : `PCR of the strikes shown: Σ put OI ÷ Σ call OI = ${pcr.toFixed(2)}`}>{fmtPcr(pcr)}</span>
         )}
+        {layout.price && <span />}
       </span>
       {trade && <span />}
       {num(call, 'call')}
@@ -401,8 +412,10 @@ function TotalsRow({ put, call, fs, unit, scale, trade, hover, onHover, pcr, lv 
   );
 }
 
-function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, onHover, showPcr, lv }: {
+function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, onHover, showPcr, lv, priceAsOf }: {
   row: FreshMoneyRow; max: number; boxed: boolean; trade: RowTrade | null; mode: OiMode; showPcr: boolean; lv: LevelInfo;
+  /** Snapshot time ("HH:MM:SS") when the price columns are on; undefined = off. */
+  priceAsOf?: string;
   /** Slot layout, the OI unit and the board-wide cell scale (see flowScale), for the slot-flow tab. */
   fs: FlowSlots; unit: string; scale: number;
   hover: Hover; onHover: (h: Hover) => void;
@@ -464,7 +477,8 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, on
         </>
       )}
       {cell('put')}
-      <StrikeCell strike={row.strike} boxed={boxed} pcr={showPcr ? pcrOf(row) : undefined} lv={lv} />
+      <StrikeCell strike={row.strike} boxed={boxed} pcr={showPcr ? pcrOf(row) : undefined} lv={lv}
+        price={priceAsOf !== undefined ? { put: p, call: c, asOf: priceAsOf } : undefined} />
       {cell('call')}
       {mode === 'delta' ? (
         // Δ OI tab: the right panel is left empty (the difference is on the left).
@@ -518,16 +532,40 @@ function LevelTags({ tags, lv }: { tags: LevelTag[]; lv: NonNullable<LevelInfo> 
 }
 
 /** The strike cell: [DH / DL / PDH / PDL tag] strike [PCR (put OI ÷ call OI) when the PCR column is on]. */
-function StrikeCell({ strike, boxed, pcr, lv }: { strike: number; boxed: boolean; pcr: number | null | undefined; lv: LevelInfo }) {
+/** An option's price beside the strike: its last price from the board snapshot, green / red against its previous close. */
+function OptPrice({ side, s, asOf }: { side: 'put' | 'call'; s: FreshMoneyRow['put']; asOf: string }) {
+  const ltp = s?.ltp ?? null, pc = s?.prevClose ?? null;
+  const chg = ltp !== null && pc !== null && pc > 0 ? ltp - pc : null;
+  const tone = chg === null || Math.abs(chg) < 1e-9 ? 'text-zinc-300' : chg > 0 ? 'text-emerald-400' : 'text-red-400';
+  return (
+    <span data-testid={`fm-price-${side === 'put' ? 'pe' : 'ce'}`}
+      className={`${side === 'put' ? 'pl-1 text-left' : 'pr-1 text-right'} text-[11.5px] ${tone}`}
+      title={ltp === null ? `${side === 'put' ? 'PE' : 'CE'} price unknown`
+        : `${side === 'put' ? 'PE' : 'CE'} last price ${ltp.toFixed(2)}`
+          + (chg !== null ? ` · prev close ${pc!.toFixed(2)} · ${chg >= 0 ? '+' : ''}${chg.toFixed(2)} (${chg >= 0 ? '+' : ''}${((chg / pc!) * 100).toFixed(1)} %)` : '')
+          + ` · board snapshot ${asOf}`}>
+      {ltp === null ? '–' : ltp.toFixed(2)}
+    </span>
+  );
+}
+
+function StrikeCell({ strike, boxed, pcr, lv, price }: {
+  strike: number; boxed: boolean; pcr: number | null | undefined; lv: LevelInfo;
+  /** The row's sides and the snapshot time when the price columns are on; undefined = off. */
+  price?: { put: FreshMoneyRow['put']; call: FreshMoneyRow['call']; asOf: string };
+}) {
   const box = (
     <span className={`px-2 leading-[18px] ${boxed ? 'border border-sky-400 text-zinc-100' : 'border border-transparent text-zinc-300'}`}>
       {strike}
     </span>
   );
-  if (pcr === undefined && !lv) return <span className="flex justify-center">{box}</span>;
+  const layout: StrikeLayout = { lv: !!lv, pcr: pcr !== undefined, price: !!price };
+  const grid = strikeGrid(layout);
+  if (!grid) return <span className="flex justify-center">{box}</span>;
   const tags = lv?.tags.get(strike);
   return (
-    <span className={strikeCols(!!lv, pcr !== undefined)}>
+    <span style={grid}>
+      {price && <OptPrice side="put" s={price.put} asOf={price.asOf} />}
       {lv && (tags ? <LevelTags tags={tags} lv={lv} /> : <span />)}
       <span className="flex justify-center">{box}</span>
       {pcr !== undefined && (
@@ -535,6 +573,7 @@ function StrikeCell({ strike, boxed, pcr, lv }: { strike: number; boxed: boolean
           {fmtPcr(pcr)}
         </span>
       )}
+      {price && <OptPrice side="call" s={price.call} asOf={price.asOf} />}
     </span>
   );
 }
@@ -573,8 +612,10 @@ function PriceChip({ underlying, q, fallback }: { underlying: string; q: FreshMo
 
 /** The strike ladder (all tabs). It owns the slot tab's hover crosshair, so moving the mouse across the cells re-renders
  *  only the ladder, not the trade bar, positions panel or the Cumulative OI chart. */
-function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTrade, spot, liveSpot, totals, scale, showPcr, today }: {
+function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTrade, spot, liveSpot, totals, scale, showPcr, showPrice, today }: {
   showPcr: boolean;
+  /** PE / CE price columns beside the strike. */
+  showPrice: boolean;
   /** Today's high / low of the board's price (live, for DH / DL); null when the board is not today's or not known. */
   today: { high: number | null; low: number | null } | null;
   data: FreshMoneyResponse; oiMode: OiMode; tradeMode: boolean; fs: FlowSlots; maxAbs: number; boxedStrike: number | null;
@@ -597,7 +638,7 @@ function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTr
     return () => ro.disconnect();
   }, []);
   const total = cellCount(fsAll);
-  const show = boxW > 0 ? slotsThatFit(boxW, tradeMode, total, showPcr, hasLevels) : total;
+  const show = boxW > 0 ? slotsThatFit(boxW, tradeMode, total, { lv: hasLevels, pcr: showPcr, price: showPrice }) : total;
   const fs = useMemo<FlowSlots>(() => ({ ...fsAll, show }), [fsAll, show]);
   // +1: the "earlier" cell at the outer end of each slot block (its width is counted in flowFixedPx for slotsThatFit).
   const flowVars = { '--fm-slots': `${(show + 1) * SLOT_CELL_PX}px`, '--fm-n': String(show + 1) } as React.CSSProperties;
@@ -611,7 +652,9 @@ function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTr
     const tags = levelStrikes((Object.entries(values) as [LevelTag, number][]).map(([tag, value]) => ({ tag, value })), data.step);
     return tags.size ? { tags, values, prevDate: p?.date } : null;
   }, [data.prevDay, data.market, data.step, dh, dl]);
-  const kPx = strikeColPx(tradeMode, showPcr, !!lv);
+  const layout: StrikeLayout = { lv: !!lv, pcr: showPcr, price: showPrice };
+  const kPx = strikeColPx(tradeMode, layout);
+  const priceAsOf = showPrice ? data.lastTs.slice(11) : undefined;
   const numPx = oiMode === 'both' ? NUM_BOTH_PX : 76;
   const kVar = { '--fm-k': `${kPx}px`, '--fm-num': `${numPx}px` } as React.CSSProperties;
   const pcrAll = useMemo(() => (showPcr ? boardPcr(data.rows) : undefined), [showPcr, data.rows]);
@@ -622,18 +665,20 @@ function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTr
     <div ref={boxRef} className={oiMode === 'flow' ? 'max-h-[calc(100vh-170px)] overflow-auto px-4 pb-2' : 'overflow-x-auto px-4 pb-2 pt-2'}
       onMouseLeave={() => setHover(null)}>
      <div style={oiMode === 'flow'
-       ? { ...flowVars, ...kVar, minWidth: 2 * show * SLOT_CELL_PX + flowFixedPx(tradeMode, showPcr, !!lv) }
-       : { ...kVar, minWidth: (tradeMode ? 1104 : 720) + kPx - strikeColPx(tradeMode, false) + 2 * (numPx - 76) }}>
+       ? { ...flowVars, ...kVar, minWidth: 2 * show * SLOT_CELL_PX + flowFixedPx(tradeMode, layout) }
+       : { ...kVar, minWidth: (tradeMode ? 1104 : 720) + kPx - strikeColPx(tradeMode, NO_EXTRAS) + 2 * (numPx - 76) }}>
       <div data-testid="flow-sticky-head" className={oiMode === 'flow' ? 'sticky top-0 z-10 border-b border-zinc-700 bg-zinc-900 pt-2' : ''}>
       <div className={`${gridFor(oiMode, tradeMode)} h-5 whitespace-nowrap text-[11.5px] text-zinc-400`}>
         {oiMode === 'flow' && <FlowHeader side="put" fs={fs} hoverSlot={hover?.slot ?? null} />}
         <span className="col-span-2 pr-2 text-right">{oiMode === 'delta' ? 'Δ OI: calls − puts (total)' : `PUTS: ${oiMode === 'total' ? 'total OI' : oiMode === 'both' ? 'total OI · Δ today' : oiMode === 'flow' ? `OI Δ today @ ${fs.dayAt ?? '–'}` : 'OI moved'}`}</span>
         {tradeMode && <span className="pr-1 text-right text-zinc-400" title="Buy / Sell the put, and your put position's P&L at this strike (open, or booked today once closed)">PE · B/S · P&amp;L</span>}
-        {showPcr || lv ? (
-          <span className={strikeCols(!!lv, showPcr)}>
+        {strikeGrid(layout) ? (
+          <span style={strikeGrid(layout)}>
+            {showPrice && <span className="pl-1" title={`Put last price, from the board snapshot (${priceAsOf}); green / red vs its previous close`}>PE ₹</span>}
             {lv && <span />}
             <span className="text-center">STRIKE</span>
             {showPcr && <span className="pr-1 text-right" title="Put-call ratio at the strike: put total OI ÷ call total OI (as Dhan's option chain shows it)">PCR</span>}
+            {showPrice && <span className="pr-1 text-right" title={`Call last price, from the board snapshot (${priceAsOf}); green / red vs its previous close`}>CE ₹</span>}
           </span>
         ) : <span className="text-center">STRIKE</span>}
         {tradeMode && <span className="pl-1 text-zinc-400" title="Buy / Sell the call, and your call position's P&L at this strike (open, or booked today once closed)">CE · B/S · P&amp;L</span>}
@@ -642,7 +687,7 @@ function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTr
       </div>
       {oiMode === 'flow' && fs.bounds.length > 0 && (
         <TotalsRow put={flowTotals.put} call={flowTotals.call} fs={fs} unit={data.oiUnit} scale={flowTotals.scale}
-          trade={tradeMode} hover={hover} onHover={setHover} pcr={pcrAll} lv={!!lv} />
+          trade={tradeMode} hover={hover} onHover={setHover} pcr={pcrAll} layout={layout} />
       )}
       </div>
       {data.rows.map((r, i) => {
@@ -651,7 +696,7 @@ function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTr
         return (
           <React.Fragment key={r.strike}>
             <BoardRowView row={r} max={maxAbs} boxed={r.strike === boxedStrike} trade={rowTrade(r.strike)} mode={oiMode}
-              fs={fs} unit={data.oiUnit} scale={flowCellScale} hover={hover} onHover={setHover} showPcr={showPcr} lv={lv} />
+              fs={fs} unit={data.oiUnit} scale={flowCellScale} hover={hover} onHover={setHover} showPcr={showPcr} lv={lv} priceAsOf={priceAsOf} />
             {divider && <SpotDivider spot={spot!} live={liveSpot !== null} />}
           </React.Fragment>
         );
@@ -687,6 +732,9 @@ export default function FreshMoneyBoard() {
   // PCR column beside the strike (remembered per browser), like Dhan's option chain.
   const [showPcr, setShowPcr] = useState(false);
   const toggleShowPcr = () => setShowPcr(o => { writePref(PREF_PCR, o ? '0' : '1'); return !o; });
+  // PE / CE price columns beside the strike (remembered per browser).
+  const [showPrice, setShowPrice] = useState(false);
+  const toggleShowPrice = () => setShowPrice(o => { writePref(PREF_PRICE, o ? '0' : '1'); return !o; });
   const canUnits = !!rawData && rawData.market === 'NSE' && rawData.oiUnit === 'lots' && (rawData.lot ?? 0) > 1;
   const data = useMemo<FreshMoneyResponse | null>(() => (rawData && canUnits && oiUnits
     ? { ...rawData, oiUnit: 'units', rows: scaleOiRows(rawData.rows, rawData.lot!) }
@@ -749,6 +797,7 @@ export default function FreshMoneyBoard() {
     setFlowHelp(readPref(PREF_FLOW_HELP) === '1');
     setOiUnits(readPref(PREF_OI_UNITS) === '1');
     setShowPcr(readPref(PREF_PCR) === '1');
+    setShowPrice(readPref(PREF_PRICE) === '1');
     setSoundOn(readPref(PREF_SOUND) !== '0');
     const om = readPref(PREF_OI_MODE);
     if (om === 'total' || om === 'both' || om === 'delta' || om === 'flow') setOiMode(om);
@@ -1105,6 +1154,12 @@ export default function FreshMoneyBoard() {
                   showPcr ? 'bg-zinc-700 text-white' : 'bg-zinc-950/40 text-zinc-400 hover:text-zinc-200'}`}>
                 PCR
               </button>
+              <button type="button" aria-pressed={showPrice} onClick={toggleShowPrice}
+                title={showPrice ? 'Hide the option prices' : 'Show each strike\'s put and call last price beside the strike (board snapshot, ~30 s)'}
+                className={`rounded-md border border-zinc-800 px-2.5 py-1 text-[11px] font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500/60 ${
+                  showPrice ? 'bg-zinc-700 text-white' : 'bg-zinc-950/40 text-zinc-400 hover:text-zinc-200'}`}>
+                Price
+              </button>
               {canUnits && (
                 <div role="group" aria-label="OI unit" className="flex rounded-md border border-zinc-800 bg-zinc-950/40 p-0.5">
                   {([[false, 'Lots'], [true, 'Units']] as const).map(([on, name]) => (
@@ -1197,7 +1252,7 @@ export default function FreshMoneyBoard() {
             </div>
 
             <Ladder data={data} oiMode={oiMode} tradeMode={tradeMode} fs={fs} maxAbs={maxAbs} boxedStrike={boxedStrike}
-              rowTrade={rowTrade} spot={spot} liveSpot={liveSpot} totals={flowTotals} scale={flowCellScale} showPcr={showPcr}
+              rowTrade={rowTrade} spot={spot} liveSpot={liveSpot} totals={flowTotals} scale={flowCellScale} showPcr={showPcr} showPrice={showPrice}
               today={data.isToday && liveQ ? { high: liveQ.dayHigh ?? null, low: liveQ.dayLow ?? null } : null} />
 
           </div>

@@ -29,6 +29,8 @@ export interface FreshMoneySide {
   flow: SideFlow | null;
   /** `oi` / `oiMoved` are the official close (a past session with `closeOi`), not the last in-session reading. */
   official?: boolean;
+  /** The option's last price in the shown snapshot and its previous close (null = unknown): the Price columns. */
+  ltp?: number | null; prevClose?: number | null;
 }
 export interface FreshMoneyRow { strike: number; put: FreshMoneySide | null; call: FreshMoneySide | null }
 
@@ -155,8 +157,8 @@ export async function GET(req: NextRequest) {
     const fl = flow.byStrike.get(r.strike);
     return {
       strike: r.strike,
-      put: r.put ? { oi: toLots(r.put.oi), oiMoved: toLots(r.put.oiMoved), buildup: r.put.buildup, flow: flowLots(fl?.pe), official: !!r.put.official } : null,
-      call: r.call ? { oi: toLots(r.call.oi), oiMoved: toLots(r.call.oiMoved), buildup: r.call.buildup, flow: flowLots(fl?.ce), official: !!r.call.official } : null,
+      put: r.put ? { oi: toLots(r.put.oi), oiMoved: toLots(r.put.oiMoved), buildup: r.put.buildup, flow: flowLots(fl?.pe), official: !!r.put.official, ltp: r.put.ltp ?? null, prevClose: r.put.prevClose ?? null } : null,
+      call: r.call ? { oi: toLots(r.call.oi), oiMoved: toLots(r.call.oiMoved), buildup: r.call.buildup, flow: flowLots(fl?.ce), official: !!r.call.official, ltp: r.call.ltp ?? null, prevClose: r.call.prevClose ?? null } : null,
     };
   });
 

@@ -428,3 +428,14 @@ test('stackParts: held + added = OI on a build-up; held + cut = previous OI on a
   assert.deepEqual(stackParts(10, 30), { held: 0, added: 10, cut: 0, total: 10, unknown: false });   // bad previous OI
   assert.equal(stackParts(null, 5), null);
 });
+
+test('board rows carry each option\'s last price and previous close (Price columns); a 0 / missing one is unknown', () => {
+  const line = '2026-11-16 09:30:00,25300,2026-11-17,25300,137.4,,3579290,3018405,1,0,,3143985,1550185,1';   // PE LTP 0
+  const [snap] = parseSnapshotCsv([HEAD, line].join('\n'));
+  const r = buildBoardRows(snap, 1, { ce: { '25300': 120.1 }, pe: { '25300': 0 } }).find(x => x.strike === 25300)!;
+  assert.deepEqual([r.call!.ltp, r.call!.prevClose], [137.4, 120.1]);
+  assert.deepEqual([r.put!.ltp, r.put!.prevClose], [null, null]);
+  // An official-close row keeps the session's last price (the close of the shown day).
+  const o = buildBoardRows(snap, 1, null, { ce: { '25300': 3500000 }, pe: { '25300': 3100000 } }).find(x => x.strike === 25300)!;
+  assert.deepEqual([o.call!.official, o.call!.ltp], [true, 137.4]);
+});

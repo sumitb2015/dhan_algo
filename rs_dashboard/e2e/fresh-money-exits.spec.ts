@@ -563,3 +563,31 @@ test('DH / DL: today\'s high / low (live) tag their nearest strikes beside PDH /
   await expect(dh).toHaveClass(/bg-sky-600/);                                                      // today = solid
   expect(m.blocked).toEqual([]);
 });
+
+test('Price switch: PE / CE last price beside the strike, green / red vs previous close, snapshot time in the hover; remembered', async ({ page }) => {
+  const m = await install(page);
+  await page.route(/\/api\/fresh-money\?/, route => {
+    const b = board();
+    b.rows = b.rows.map(r => ({ ...r, put: { ...r.put, ltp: 120, prevClose: 100 }, call: { ...r.call, ltp: 80.5, prevClose: 90 } }));
+    return json(route, b);
+  });
+  await page.reload();
+  await expect(page.getByTestId('fm-price-pe')).toHaveCount(0);
+  const btn = page.getByRole('button', { name: 'Price', exact: true });
+  await btn.click();
+  await expect(btn).toHaveAttribute('aria-pressed', 'true');
+  const pe = page.getByTestId('fm-price-pe').first(), ce = page.getByTestId('fm-price-ce').first();
+  await expect(pe).toHaveText('120.00');
+  await expect(pe).toHaveClass(/text-emerald-400/);
+  await expect(ce).toHaveText('80.50');
+  await expect(ce).toHaveClass(/text-red-400/);
+  await expect(pe).toHaveAttribute('title', /^PE last price 120\.00 · prev close 100\.00 · \+20\.00 \(\+20\.0 %\) · board snapshot /);
+  await expect(page.getByText('PE ₹', { exact: true })).toBeVisible();
+  // With PCR on and the slots tab, rows stay one line.
+  await page.getByRole('button', { name: 'PCR', exact: true }).click();
+  await page.getByRole('tab', { name: '3m slots' }).click();
+  expect((await page.locator('div.grid', { hasText: '8100' }).first().boundingBox())!.height).toBeLessThan(30);
+  await page.reload();
+  await expect(page.getByRole('button', { name: 'Price', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  expect(m.blocked).toEqual([]);
+});

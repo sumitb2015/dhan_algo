@@ -43,6 +43,10 @@ positions read twice", "board price snaps back to the startup value", "OI change
   the rows with `scaleOiRows(rows, lot)` (`rawData` -> `data`). Display only: never scale anything an order reads.
   Dhan's web chain shows units; its "Per Lot" checkbox MULTIPLIES OI by the lot size (meant for prices), so it is no
   way to compare.
+- Price switch (pref `freshMoney.showPrice`): PE / CE last price from the SHOWN snapshot (`ltp`, ~30 s cadence, never a
+  new fetch) with `prevClose` from the collector's `_prev_close.json`, green / red vs it, in 54 px columns at the strike
+  cell's outer ends. The strike cell's columns are an inline grid template from `StrikeLayout` (`strikeGrid`,
+  `strikeColPx`), not Tailwind strings: lv x PCR x price is too many combinations.
 - PCR switch (pref `freshMoney.showPcr`): `pcrOf` (put OI ÷ call OI, Dhan's definition; null when call OI is 0 or a side
   unknown) in a 40 px column beside the strike, `boardPcr` (two-sided strikes only) on the Σ row. The strike column
   width is the CSS var `--fm-k` in all four grids (`strikeColPx`), and `flowFixedPx`/`slotsThatFit` count it.
