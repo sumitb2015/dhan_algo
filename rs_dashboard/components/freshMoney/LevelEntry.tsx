@@ -69,6 +69,8 @@ export function LevelTicket({ at, strike, opt, side, cell, canArm, blockedWhy, o
   // The committed level (blur / Enter): the verdict and the Arm button act on this, never on a half-typed value.
   const [level, setLevel] = useState<number | null>(cell.spot ?? null);
   const [busy, setBusy] = useState(false);
+  // Synchronous guard: Enter pressed twice (or Enter then a click) must not arm twice.
+  const busyRef = useRef(false);
   useEffect(() => { input.current?.focus(); input.current?.select(); }, []);
   useEffect(() => {
     const down = (e: MouseEvent) => { if (!pop.current?.contains(e.target as Node)) onClose(); };
@@ -89,15 +91,22 @@ export function LevelTicket({ at, strike, opt, side, cell, canArm, blockedWhy, o
   const armed = cell.entries.filter(e => e.opt === opt);
 
   const doArm = async () => {
+    // Enter and the button share these checks: the page may arm now, and no arm is already in flight.
+    if (!canArm || busyRef.current) return;
     // Read the box itself: a click straight after typing must arm what is shown, not the last committed value.
     const raw = input.current?.value ?? draft;
     const n = Number(raw.replace(/,/g, ''));
     if (!spot || !(n > 0) || levelProblem(n, spot)) { commit(raw); return; }
     const v = classifyEntry(opt, side, n, spot);
+    busyRef.current = true;
     setBusy(true);
-    const ok = await cell.arm(opt, side, n, v.kind);
-    setBusy(false);
-    if (ok) onClose();
+    try {
+      const ok = await cell.arm(opt, side, n, v.kind);
+      if (ok) onClose();
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
   };
 
   return (
@@ -128,8 +137,9 @@ export function LevelTicket({ at, strike, opt, side, cell, canArm, blockedWhy, o
             : null)}
         </p>
         <p className="text-[11px] text-zinc-500">
-          Target / SL on the fill: {cell.exitText}. Watched by the dashboard server every 2 s (two checks in a row);
-          nothing rests at the broker. It stops if the dashboard stops, and expires at the {cell.product} cutoff.
+          Target / SL on the fill: {cell.exitText}. Watched by the dashboard server (WebSocket price, every 250 ms): sent at
+          market on the first new tick at or past the level, so expect some slippage on a fast move. Nothing rests at the
+          broker; it stops if the dashboard stops, expires at the {cell.product} cutoff, and Exit all / the total SL cancel it.
         </p>
         {armed.length > 0 && (
           <div className="border-t border-zinc-800 pt-1.5">

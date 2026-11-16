@@ -28,7 +28,7 @@ import { priceExternalClose } from './freshMoneyExternalPrice.ts';
 import {
   editExit, exitSummary, exitsOnOpen, parseExitDefaults, validateExitSpec, validateTrail, type CloseResult, type ExitDefaults, type FmExit,
 } from '@/lib/freshMoneyExits';
-import { armedQty, classifyEntry, entryLabel, levelProblem, type EntryKind, type FmEntry } from '@/lib/freshMoneyEntries';
+import { armedQty, classifyEntry, entryLabel, levelProblem, type EntryKind, type FmEntry, type SpotQuote } from '@/lib/freshMoneyEntries';
 
 /**
  * REAL MONEY. The Fresh Money board's trade engine (server only), shared by /api/fresh-money/trade (the B / S and ×
@@ -450,9 +450,12 @@ function precheck(l: FmLedger, base: OrderBase): string | null {
  *  plus this order. Only a move away from flat past the cap is refused (a reducing order never is). */
 function capCheck(l: FmLedger, key: string, side: TxnSide, qty: number, lot: number, now: number): string | null {
   const held = buildPositions(l.orders, {}, now).find(p => p.key === key)?.netQty ?? 0;
-  const exposure = held + unconfirmedQty(l.orders, key, now) + armedQty(l.entries, key);
-  const after = exposure + (side === 'BUY' ? 1 : -1) * qty;
-  if (Math.abs(after) > FM_MAX_POSITION_LOTS * lot && Math.abs(after) > Math.abs(exposure)) {
+  const base = held + unconfirmedQty(l.orders, key, now);
+  const armed = armedQty(l.entries, key);
+  // Worst case either way: armed BUYs all fill, or armed SELLs all fill (never one offsetting the other).
+  const worst = (x: number) => Math.max(Math.abs(x + armed.buy), Math.abs(x - armed.sell));
+  const after = base + (side === 'BUY' ? 1 : -1) * qty;
+  if (worst(after) > FM_MAX_POSITION_LOTS * lot && worst(after) > worst(base)) {
     return `That would take this contract past ${FM_MAX_POSITION_LOTS} lots (counting orders not yet confirmed and armed levels)`;
   }
   return null;
@@ -614,12 +617,22 @@ export async function placeOrderCore(b: OrderBody): Promise<CloseResult> {
  *  WEBSOCKET ONLY, by design: never add a REST quote fallback here. Levels arm and fire on this price; the quote API is
  *  ~1 req/s, shared with every bridge, and serves old values after a 429 (dhan-fresh-money "Common Mistakes"). No
  *  WebSocket price = the level does not arm (the ticket says so) and an armed one does not fire (the count resets). */
-export function spotNow(underlying: string, expiry: string): number | null {
+export function spotQuoteNow(underlying: string, expiry: string): SpotQuote | null {
   const inst = spotInstrument(underlying, expiry, isMcx(underlying));
   if (!inst) return null;
   const k = wsWant(inst.segment, inst.securityId);
   wsSync();
-  return wsPrice(k)?.ltp ?? null;
+  const q = wsPrice(k);
+  return q ? { ltp: q.ltp, changedMs: q.changedMs } : null;
+}
+export const spotNow = (underlying: string, expiry: string): number | null => spotQuoteNow(underlying, expiry)?.ltp ?? null;
+
+/** The level-entry watcher's heartbeat (lib/freshMoneyExitServer.ts entry loop), written about every second. */
+export const ENTRY_WATCHER_FILE = path.join(DEBUG_DIR, 'fresh_money_entry_watcher.json');
+const ENTRY_WATCHER_ALIVE_MS = 5_000;
+function entryWatcherAlive(now: number): boolean {
+  const at = Number(readJsonFile<{ at?: number }>(ENTRY_WATCHER_FILE)?.at);
+  return Number.isFinite(at) && now - at <= ENTRY_WATCHER_ALIVE_MS;
 }
 
 /** The body an entry's fire re-resolves with: the order as it was armed. */
@@ -638,6 +651,10 @@ export async function armEntryCore(b: OrderBody): Promise<ArmResult> {
   const res = await resolveOrder(b);
   if (!res.ok) return { ok: false, error: (res.r as { error: string }).error, http: (res.r as { http?: number }).http ?? 409 };
   const { base, defaults } = res;
+  // Nothing would fire it: the watcher runs in the dashboard server (refused rather than armed in vain).
+  if (!entryWatcherAlive(Date.now())) {
+    return { ok: false, error: 'The level watcher is not running on the dashboard server — not armed. Restart the dashboard.', http: 503 };
+  }
   const level = Number(b.level);
   const spot = spotNow(base.underlying, base.expiry);
   const why = levelProblem(level, spot ?? NaN);
@@ -655,6 +672,7 @@ export async function armEntryCore(b: OrderBody): Promise<ArmResult> {
   };
   try {
     const err = await mutateLedger(l => {
+      if (l.global && l.global.state !== 'watching') return 'The total target / stop-loss has fired today — no new levels (clear it in the header first)';
       const gate = gateNow(base.underlying, base.product);
       if (gate !== 'open') return gateMessage(base.underlying, gate, base.product);
       const cap = capCheck(l, entry.key, entry.side, entry.qty, entry.lot, Date.now());
@@ -815,6 +833,11 @@ export async function exitAllCore(): Promise<ExitAllResult | { busy: true }> {
   if (shared.exitAllBusy) return { busy: true };
   shared.exitAllBusy = true;
   try {
+    // Exit all is the kill switch: no armed level may re-open anything afterwards (cancelled first, in the lock).
+    await mutateLedger(l => {
+      const t = Date.now();
+      for (const e of l.entries ?? []) if (e.state === 'armed') Object.assign(e, { state: 'cancelled', endedAt: t, reason: 'Cancelled by Exit all' });
+    }).catch(() => {});
     const open = buildPositions((await loadLedger()).orders, {}, Date.now()).filter(p => p.netQty !== 0);
     return await runExitAll(open, key => closePositionCore(key, 'Exit all (header)'));
   } finally {

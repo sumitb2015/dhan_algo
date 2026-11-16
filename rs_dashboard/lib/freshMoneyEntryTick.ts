@@ -1,18 +1,19 @@
 /**
  * Fresh Money level-entry watcher — one tick, every outside effect injected (testable without a broker). REAL MONEY:
  * `deps.fire` is the click's own send path (lib/freshMoneyTradeServer.ts fireEntryCore), wired by
- * lib/freshMoneyExitServer.ts, which runs this every 2 s next to the exit watcher.
+ * lib/freshMoneyExitServer.ts in its OWN fast loop (every 250 ms), so a fire neither waits for nor delays the target /
+ * stop-loss watcher.
  *
- * Each tick re-reads the ledger (the route and this loop can be separate module instances; the file is the truth):
+ * Each tick:
+ *   - the global (combined P&L) exit has fired = the user's kill switch: every armed level is CANCELLED, none fires;
  *   - an armed entry whose product can no longer open (the MIS cutoff, NRML a minute before the close) is EXPIRED;
  *   - a 'firing' entry left without an outcome (the dashboard stopped mid-send) becomes UNKNOWN — never resent;
- *   - an armed entry breached on two checks in a row is CLAIMED ('firing') under the ledger lock, then sent, then its
- *     outcome recorded. At most once: only an entry still 'armed' in the lock can be claimed.
- * A contract with an order still in flight waits a tick rather than firing into the hold (a refusal would reject it).
+ *   - an armed entry whose watched price printed a NEW tick (changed after arming) at or past the level is CLAIMED
+ *     ('firing') under the ledger lock — only if still 'armed' and no order on its contract is in flight, both decided
+ *     in that lock — then sent, then its outcome recorded. At most once.
+ * One fire per contract per tick; a contract with an order in flight waits (the entry stays armed).
  */
-import {
-  ENTRY_FIRING_STALE_MS, entryActive, entryAfterFire, entryStep, type EntryStreak, type FmEntry,
-} from './freshMoneyEntries.ts';
+import { ENTRY_FIRING_STALE_MS, entryActive, entryAfterFire, entryFires, globalFired, type FmEntry, type SpotQuote } from './freshMoneyEntries.ts';
 import type { CloseResult } from './freshMoneyExits.ts';
 import type { FmLedger, SessionGate } from './freshMoneyTrades.ts';
 
@@ -20,11 +21,12 @@ export interface EntryTickDeps {
   now(): number;
   readLedger(): FmLedger | Promise<FmLedger>;
   mutate<T>(fn: (l: FmLedger) => T): Promise<T>;
-  /** The board's price (index, or the option month's future) for this underlying + expiry; null = no usable price. */
-  spot(underlying: string, expiry: string): number | null;
+  /** The board's price (index, or the option month's future) for this underlying + expiry, from the WebSocket only;
+   *  null = no usable quote. */
+  spot(underlying: string, expiry: string): SpotQuote | null;
   /** Whether new positions may open now for this underlying and product. */
   gate(underlying: string, product: FmEntry['product']): SessionGate;
-  /** An order on this contract is still in flight / UNKNOWN: wait. */
+  /** An order on this contract is still in flight / UNKNOWN: wait. Called inside the ledger lock. */
   held(l: FmLedger, key: string): boolean;
   fire(e: FmEntry, spot: number): Promise<CloseResult>;
   log(msg: string): void;
@@ -40,10 +42,9 @@ async function update(deps: EntryTickDeps, id: string, expect: FmEntry['state'],
   });
 }
 
-export async function runEntryTick(deps: EntryTickDeps, streaks: Map<string, EntryStreak>): Promise<void> {
+export async function runEntryTick(deps: EntryTickDeps): Promise<void> {
   const l = await deps.readLedger();
   const active = (l.entries ?? []).filter(e => entryActive(e.state));
-  for (const id of [...streaks.keys()]) if (!active.some(e => e.id === id && e.state === 'armed')) streaks.delete(id);
   if (!active.length) return;
   const now = deps.now();
 
@@ -54,13 +55,23 @@ export async function runEntryTick(deps: EntryTickDeps, streaks: Map<string, Ent
       });
     }
   }
+  const armedNow = active.filter(e => e.state === 'armed');
+  if (!armedNow.length) return;
+
+  if (globalFired(l.global)) {
+    await deps.mutate(m => {
+      for (const e of m.entries ?? []) {
+        if (e.state === 'armed') Object.assign(e, { state: 'cancelled', endedAt: now, reason: 'Cancelled: the total target / stop-loss fired' });
+      }
+    });
+    deps.log('global exit fired: armed levels cancelled');
+    return;
+  }
 
   const armed: FmEntry[] = [];
-  for (const e of active) {
-    if (e.state !== 'armed') continue;
+  for (const e of armedNow) {
     if (deps.gate(e.underlying, e.product) !== 'open') {
       if (await update(deps, e.id, 'armed', { state: 'expired', endedAt: now, reason: `Expired: ${e.product} can no longer open new positions today` })) {
-        streaks.delete(e.id);
         deps.log(`expired ${e.underlying} ${e.strike} ${e.opt} ${e.side} @ ${e.level}`);
       }
       continue;
@@ -69,32 +80,33 @@ export async function runEntryTick(deps: EntryTickDeps, streaks: Map<string, Ent
   }
   if (!armed.length) return;
 
-  const prices = new Map<string, number | null>();
-  const priceOf = (e: FmEntry) => {
+  const quotes = new Map<string, SpotQuote | null>();
+  const quoteOf = (e: FmEntry) => {
     const k = `${e.underlying}|${e.expiry}`;
-    if (!prices.has(k)) prices.set(k, deps.spot(e.underlying, e.expiry));
-    return prices.get(k)!;
+    if (!quotes.has(k)) quotes.set(k, deps.spot(e.underlying, e.expiry));
+    return quotes.get(k)!;
   };
   const firedKeys = new Set<string>();
   for (const e of armed) {
-    const spot = priceOf(e);
-    const step = entryStep(e, spot, streaks.get(e.id) ?? null, now);
-    if (step.streak) streaks.set(e.id, step.streak); else streaks.delete(e.id);
-    if (!step.fire || spot === null) continue;
-    // One fire per contract per tick, and none into an order still in flight: the next tick fires it (the streak stays).
-    if (firedKeys.has(e.key) || deps.held(await deps.readLedger(), e.key)) continue;
-    const claimed = await update(deps, e.id, 'armed', { state: 'firing', firedAt: deps.now(), spotAtFire: spot });
+    const q = quoteOf(e);
+    if (!q || !entryFires(e, q) || firedKeys.has(e.key)) continue;
+    // Claim: still armed, no order in flight on the contract, no global exit — all decided inside the lock.
+    const claimed = await deps.mutate(m => {
+      const x = (m.entries ?? []).find(y => y.id === e.id);
+      if (!x || x.state !== 'armed' || globalFired(m.global) || deps.held(m, e.key)) return false;
+      Object.assign(x, { state: 'firing', firedAt: deps.now(), spotAtFire: q.ltp });
+      return true;
+    });
     if (!claimed) continue;
     firedKeys.add(e.key);
-    streaks.delete(e.id);
-    deps.log(`fire ${e.underlying} ${e.strike} ${e.opt} ${e.side} ${e.lots} lot(s): ${e.underlying} ${spot} vs level ${e.level}`);
+    deps.log(`fire ${e.underlying} ${e.strike} ${e.opt} ${e.side} ${e.lots} lot(s): ${e.underlying} ${q.ltp} vs level ${e.level}`);
     let r: CloseResult;
     try {
-      r = await deps.fire(e, spot);
+      r = await deps.fire(e, q.ltp);
     } catch (err) {
       r = { kind: 'unknown', error: String((err as Error)?.message ?? err), partial: false };
     }
-    const patch = entryAfterFire(r, deps.now());
-    await update(deps, e.id, 'firing', patch).catch(err => deps.log(`could not record the outcome of ${e.id}: ${String(err)}`));
+    await update(deps, e.id, 'firing', entryAfterFire(r, deps.now()))
+      .catch(err => deps.log(`could not record the outcome of ${e.id}: ${String(err)}`));
   }
 }

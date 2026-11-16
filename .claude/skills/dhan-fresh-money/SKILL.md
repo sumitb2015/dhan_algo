@@ -64,14 +64,19 @@ positions read twice", "board price snaps back to the startup value", "OI change
 - Level entries (XY-ladder model; vault decision 2026-11-16-fresh-money-level-entries-index-levels): a per-strike MKT / LVL
   switch (page memory only — a reload is MKT). On LVL, B / S open `LevelTicket` (components/freshMoney/LevelEntry.tsx) and
   `arm` writes an `FmEntry` to `ledger.entries` (lib/freshMoneyEntries.ts): an INDEX level (MCX: the option month's
-  future), limit vs stop by which side of the price it sits (`limitSide`). `runEntryTick` (lib/freshMoneyEntryTick.ts, in
-  the exit loop) fires it at MARKET through `fireEntryCore` → `resolveOrder` → `sendOne` (the click's own path; the board,
-  session, contract and cap are re-checked at fire time). Rules: two breached checks in a row; claimed `firing` in the
-  lock (at most once); UNKNOWN / a throw never resent; a contract with an order in flight waits a tick; one fire per
-  contract per tick; armed lots count toward the cap (`armedQty` in `capCheck`); expired when the product's gate is not
-  `open`; a `firing` entry with no outcome after 60 s = unknown. Nothing rests at the broker.
-  Prices for levels are WEBSOCKET ONLY (`spotNow` → `wsPrice`, and the ticket's price from `/api/fresh-money/live`, also
-  `wsPrice`): no REST quote fallback, ever — no WS price = no arm / no fire.
+  future), limit vs stop by which side of the price it sits (`limitSide`). Its OWN 250 ms loop (`startFreshMoneyEntryLoop`
+  in lib/freshMoneyExitServer.ts, heartbeat `debug/fresh_money_entry_watcher.json`; arming is refused when it is stale)
+  runs `runEntryTick` and fires at MARKET through `fireEntryCore` → `resolveOrder` → `sendOne` (the click's own path; the
+  board, session, contract and cap re-checked at fire time). Rules: fires on the FIRST NEW WebSocket tick at or past the
+  level (`entryFires`: the quote's `changedMs` after arming — an old print never fires; 2026-11-16 the first version,
+  two 2 s checks inside the exit loop, fired 3-4 s late and slipped 5 points); claimed `firing` in the lock together with
+  the in-flight hold and the global-exit check (at most once); UNKNOWN / a throw never resent; one fire per contract per
+  tick; armed lots count toward the cap PER DIRECTION (`armedQty` {buy, sell} worst case — an armed SELL must never
+  offset a BUY); Exit all and a fired total target / SL cancel every armed level (kill switch) and the total exit
+  blocks new ones; expired when the product's gate is not `open`; a `firing` entry with no outcome after 60 s = unknown.
+  The ledger is read at most once a second in that loop (cache dropped after every write). Nothing rests at the broker.
+  Prices for levels are WEBSOCKET ONLY (`spotQuoteNow` → `wsPrice`, and the ticket's price from `/api/fresh-money/live`,
+  also `wsPrice`): no REST quote fallback, ever — no WS price = no arm / no fire.
 - `lib/freshMoneyChime.ts` - pure: `tradeEvents(prev, cur)` diffs two trade-state polls into one sound (warn > exit >
   entry) plus toasts for SERVER-fired exits (target / SL / total; they had no toast before), `streakStart` rings when the
   Σ row starts or turns a 3+ run. The page plays them via `lib/alertSound.ts` (dhan-alert-sound): leader tab only

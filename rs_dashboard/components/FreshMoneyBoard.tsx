@@ -999,11 +999,11 @@ export default function FreshMoneyBoard() {
   const entriesByStrike = useMemo(() => {
     const m = new Map<number, FmEntry[]>();
     for (const e of ts?.entries ?? []) {
-      if (e.broker !== broker || e.underlying !== underlying || !entryActive(e.state)) continue;
+      if (e.broker !== broker || e.underlying !== underlying || e.expiry !== data?.expiry || !entryActive(e.state)) continue;
       m.set(e.strike, [...(m.get(e.strike) ?? []), e]);
     }
     return m;
-  }, [ts, broker, underlying]);
+  }, [ts, broker, underlying, data?.expiry]);
   const levelPriceName = data?.market === 'MCX' ? (liveQ?.label ?? `${underlying} FUT`) : underlying;
   const exitText = exitSummary(exitDefaults) || 'none (header New positions)';
   const rowTrade = useCallback((strike: number): RowTrade | null => {
