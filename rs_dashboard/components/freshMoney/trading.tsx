@@ -79,6 +79,7 @@ export function useFreshMoneyTrades(onWarn?: () => void): TradeApi {
   const [inflight, setInflight] = useState<ReadonlySet<string>>(new Set());
   const inflightRef = useRef(new Set<string>());
   const seq = useRef(0);
+  const applied = useRef(0);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(async () => {
@@ -87,7 +88,10 @@ export function useFreshMoneyTrades(onWarn?: () => void): TradeApi {
       const res = await fetch(TRADE_URL, { cache: 'no-store' });
       if (!res.ok) return;
       const body = (await res.json()) as FreshMoneyTradeState;
-      if (my === seq.current) setState(body);
+      // Drop only a reply OLDER than one already shown. "Only the newest request" starved the panel: after an order the
+      // page fires five polls in 3.5 s, and while each reply took longer than the gap every one was superseded and thrown
+      // away, so a fill the server already had stayed off the screen.
+      if (my > applied.current) { applied.current = my; setState(body); }
     } catch { /* keep the last state; the next poll retries */ }
   }, []);
 

@@ -66,6 +66,8 @@ const READS_PER_REFRESH = 4;
 const YOUNG_ORDER_MS = 15_000;
 const YOUNG_REFRESH_GAP_MS = 400;
 const REFRESH_GAP_MS = 2_000;
+/** How long the page's state poll waits for a REST LTP (a contract the WebSocket has no price for yet) before replying without it. */
+const STATE_REST_WAIT_MS = 250;
 
 /** Today's trading window for this underlying's market, or null when that market is shut today. */
 function windowFor(underlying: string): TradeWindow | null {
@@ -191,7 +193,10 @@ const shared = globalOnce<ServerShared>('__freshMoneyTradeServer', () => ({
  * kept alive while the position is open), REST only for the ones without a usable WebSocket price yet (a fresh
  * subscription, the bridge starting, the hub down). `source` says which one each price came from.
  */
-export async function ltpsFor(items: { id: string; segment: FmSegment }[]): Promise<{ ltps: Record<string, number>; source: Record<string, 'ws' | 'rest'> }> {
+export async function ltpsFor(
+  items: { id: string; segment: FmSegment }[],
+  opts: { restWaitMs?: number } = {},
+): Promise<{ ltps: Record<string, number>; source: Record<string, 'ws' | 'rest'> }> {
   const ltps: Record<string, number> = {};
   const source: Record<string, 'ws' | 'rest'> = {};
   if (!items.length) { wsSync(); return { ltps, source }; }
@@ -207,15 +212,21 @@ export async function ltpsFor(items: { id: string; segment: FmSegment }[]): Prom
   const cached = freshRestCache(shared.restCache, key, Date.now());
   if (cached) rest = cached;
   else {
-    try {
+    const fetchRest = async (): Promise<Record<string, number>> => {
+      const got: Record<string, number> = {};
       for (const seg of ['NSE_FNO', 'MCX_COMM'] as const) {
         const ids = missing.filter(i => i.segment === seg).map(i => i.id);
-        if (ids.length) Object.assign(rest, await fetchLtps(seg, ids));
+        if (ids.length) Object.assign(got, await fetchLtps(seg, ids));
       }
-      shared.restCache = { at: Date.now(), ids: key, data: rest };
-    } catch {
-      rest = freshRestCache(shared.restCache, key, Date.now()) ?? {}; // no price rather than an old one
-    }
+      shared.restCache = { at: Date.now(), ids: key, data: got };
+      return got;
+    };
+    const p = fetchRest().catch(() => freshRestCache(shared.restCache, key, Date.now()) ?? {}); // no price rather than an old one
+    // The quote lane is account-wide and ~1 call/s (20 s gaps after a 429): the page's state poll must not wait behind it,
+    // or a fresh fill reaches the screen only when an unrelated quote does. It shows "no price" for that contract this
+    // poll; the fetch keeps running and fills restCache for the next one (by then the WebSocket usually has it).
+    rest = opts.restWaitMs === undefined ? await p
+      : await Promise.race([p, new Promise<Record<string, number>>(res => setTimeout(() => res({}), opts.restWaitMs))]);
   }
   for (const i of missing) if (rest[i.id] > 0) { ltps[i.id] = rest[i.id]; source[i.id] = 'rest'; }
   return { ltps, source };
@@ -253,7 +264,10 @@ export async function refreshOrders(): Promise<void> {
   for (const o of due) {
     let patch: Partial<FmOrder> | null = null;
     try { patch = await readOrder(o, effectiveState(o, Date.now()) === 'unknown'); } catch { /* unreadable (429, network): back off */ }
-    const n = patch ? 0 : (attempts.get(o.id) ?? 0) + 1;
+    // Reads while the order is young do not count toward the backoff: a dozen "not filled yet" / rate-limited reads in the
+    // first 15 s otherwise put the next read 60 s out (2 s x 2^n), and a late-reported fill sat off the screen that long.
+    const young = Date.now() - o.ts < YOUNG_ORDER_MS;
+    const n = patch || young ? 0 : (attempts.get(o.id) ?? 0) + 1;
     attempts.set(o.id, n);
     nextAt.set(o.id, nextReadAt({ ...o, ...(patch ?? {}) }, Date.now(), n, !!patch));
     if (patch) updates.set(o.id, patch);
@@ -393,7 +407,7 @@ export async function buildState(): Promise<FreshMoneyTradeState> {
   const ledger = await loadLedger();
   const now = Date.now();
   const pre = buildPositions(ledger.orders, {}, now);
-  const { ltps, source: ltpSource } = await ltpsFor(pre.filter(p => p.netQty !== 0).map(p => ({ id: p.priceId, segment: p.segment })));
+  const { ltps, source: ltpSource } = await ltpsFor(pre.filter(p => p.netQty !== 0).map(p => ({ id: p.priceId, segment: p.segment })), { restWaitMs: STATE_REST_WAIT_MS });
   const boardExpiry: Record<string, string | null> = Object.fromEntries(await Promise.all(
     [...TRADABLE].map(async u => [u, (await todaysBoard(u).catch(() => null))?.expiry ?? null] as const),
   ));
@@ -497,6 +511,9 @@ async function sendOne(base: OrderBase, check = true, stamp?: ExitDefaults): Pro
   // If this write fails the record stays 'sending', reads as UNKNOWN after 30 s and is looked up again.
   await mutateLedger(l => { const o = l.orders.find(x => x.id === id); if (o) Object.assign(o, patch); }).catch(() => {});
   shared.stateVersion++;
+  // Ask the WebSocket for the contract now, not once the fill is read back: the position then has a live price on its
+  // first poll instead of waiting on the REST quote lane.
+  if (r.status === 'placed' && base.priceId) { wsWant(base.segment ?? 'NSE_FNO', base.priceId); wsSync(); }
   if (r.status === 'placed') return { kind: 'placed', orderId: r.orderId, stamped };
   if (r.status === 'unknown') return { kind: 'unknown', error: r.error };
   return { kind: 'rejected', error: r.error, http: r.http ?? 200 };
