@@ -50,6 +50,10 @@ positions read twice", "board price snaps back to the startup value", "OI change
   daily-candle cache, `lib/prevDayLevels.ts`) OUTSIDE `respCache` (a past day's file never changes, so a cached body
   would keep null). It is the previous day of TODAY, not of the shown file. `levelStrikes` puts each tag on the nearest
   strike; the strike column grows a 28 px tag slot (`LEVEL_PX`) only while the levels are known.
+- DH / DL (today's high / low, NSE and MCX): from the board's own price bridge quote (`high` / `low` in
+  `fresh_money_ws_quotes.json`, read by `usableQuote`) via `/api/fresh-money/live` (`dayHigh` / `dayLow`), null before
+  today's session opens (the packet still carries the previous session's range). Solid tags; PDH / PDL tinted.
+  `levelStrikes` takes `{tag, value}[]` and orders a shared strike's tags DH, DL, PDH, PDL (3-4 = a 2x2 grid).
 - "OI + Δ" tab (`oiMode 'both'`): one bar per side = total OI with today's change in it, from `stackParts(oi, chg)`
   (held since the previous close dim, added today bright, cut today a dashed tail; bar length and `maxAbs` = the larger
   of today's and the previous close's OI). The number column widens to `NUM_BOTH_PX` via `--fm-num` for "1.3L +12k".

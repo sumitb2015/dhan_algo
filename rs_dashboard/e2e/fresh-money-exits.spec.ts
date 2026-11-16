@@ -541,3 +541,25 @@ test('OI + Δ tab: one total-OI bar per side with today\'s change in it (held / 
   await expect(page.getByRole('tab', { name: 'OI + Δ' })).toHaveAttribute('aria-selected', 'true');
   expect(m.blocked).toEqual([]);
 });
+
+test('DH / DL: today\'s high / low (live) tag their nearest strikes beside PDH / PDL; a shared strike stays one line', async ({ page }) => {
+  const m = await install(page);
+  await page.route(/\/api\/fresh-money\?/, route => json(route, {
+    ...board(), market: 'NSE', lot: 65, mult: null, prevDay: { high: 8212.5, low: 7948, close: 8105, date: '2026-11-13' },
+  }));
+  await page.route(/\/api\/fresh-money\/live/, route => json(route, {
+    underlying: 'CRUDEOIL', label: 'NIFTY', spot: 8105, prevClose: 8050, change: 55, changePct: 0.68, changedMs: Date.now(),
+    instrument: 'IDX_I:13', dayHigh: 8205, dayLow: 7990,
+  }));
+  await page.reload();
+  const dh = page.getByTestId('fm-dh'), dl = page.getByTestId('fm-dl');
+  await expect(dh).toHaveCount(1);
+  // 8205 -> 8200, the same strike as PDH (8212.5): both tags, DH first, row still one line.
+  const shared = page.locator('div.grid', { hasText: '8200' }).filter({ has: dh }).first();
+  await expect(shared.getByTestId('fm-pdh')).toHaveCount(1);
+  await expect(dh.locator('xpath=..')).toHaveAttribute('title', /^Today's high 8,205 \(live\) · Previous day high 8,212\.5 \(2026-11-13\)/);
+  expect((await shared.boundingBox())!.height).toBeLessThan(30);
+  await expect(page.locator('div.grid', { hasText: '8000' }).filter({ has: dl })).toHaveCount(1);   // 7990 -> 8000
+  await expect(dh).toHaveClass(/bg-sky-600/);                                                      // today = solid
+  expect(m.blocked).toEqual([]);
+});

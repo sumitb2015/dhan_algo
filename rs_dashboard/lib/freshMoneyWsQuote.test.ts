@@ -6,7 +6,9 @@ const now = 1_000_000;
 const file = (q: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({ updated_ms: now - 500, hub_alive: true, quotes: { 'MCX_COMM:573423': q }, ...extra });
 
 test('a changed price is usable at once', () => {
-  assert.deepEqual(usableQuote(file({ ltp: 7970, changed_ms: now - 200, since_ms: now - 1000, prev_close: 8010 }), 'MCX_COMM:573423', now), { ltp: 7970, changedMs: now - 200, sinceMs: now - 1000, prevClose: 8010 });
+  assert.deepEqual(usableQuote(file({ ltp: 7970, changed_ms: now - 200, since_ms: now - 1000, prev_close: 8010 }), 'MCX_COMM:573423', now), { ltp: 7970, changedMs: now - 200, sinceMs: now - 1000, prevClose: 8010, high: null, low: null });
+  const r = usableQuote(file({ ltp: 7970, changed_ms: now - 200, since_ms: now - 1000, high: 8030.5, low: 0 }), 'MCX_COMM:573423', now);
+  assert.deepEqual([r?.high, r?.low], [8030.5, null]);   // a zero low is unknown, never a level
 });
 
 test('an unchanged price is usable only once the subscription has settled (the replayed last tick)', () => {

@@ -464,18 +464,21 @@ export function fmtPcr(v: number | null): string {
   return v === null || !Number.isFinite(v) ? '–' : v >= 100 ? v.toFixed(0) : v.toFixed(2);
 }
 
-export type LevelTag = 'PDH' | 'PDL';
+/** Today's high / low (DH / DL) and the previous day's (PDH / PDL). */
+export type LevelTag = 'DH' | 'DL' | 'PDH' | 'PDL';
+const LEVEL_ORDER: LevelTag[] = ['DH', 'DL', 'PDH', 'PDL'];
 
-/** The strike each previous-day level sits nearest to (rounded to the strike step), with its tags: one strike can
- *  carry both on a narrow day. Empty without levels or a step. */
-export function levelStrikes(levels: { high: number; low: number } | null | undefined, step: number): Map<number, LevelTag[]> {
+/** The strike each level sits nearest to (rounded to the strike step), with its tags in a fixed order (DH, DL, PDH,
+ *  PDL): one strike can carry several on a narrow day. Unknown / non-positive values are skipped; empty without a step. */
+export function levelStrikes(levels: { tag: LevelTag; value: number | null | undefined }[], step: number): Map<number, LevelTag[]> {
   const out = new Map<number, LevelTag[]>();
-  if (!levels || !(step > 0)) return out;
-  for (const [tag, v] of [['PDH', levels.high], ['PDL', levels.low]] as const) {
-    if (!(v > 0) || !Number.isFinite(v)) continue;
-    const k = Math.round(v / step) * step;
+  if (!(step > 0)) return out;
+  for (const { tag, value } of levels) {
+    if (value == null || !(value > 0) || !Number.isFinite(value)) continue;
+    const k = Math.round(value / step) * step;
     out.set(k, [...(out.get(k) ?? []), tag]);
   }
+  for (const [k, tags] of out) out.set(k, LEVEL_ORDER.filter(t => tags.includes(t)));
   return out;
 }
 

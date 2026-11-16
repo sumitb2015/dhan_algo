@@ -485,21 +485,31 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, on
 }
 
 /** Previous-day levels shown as tags (the strike column grows a tag slot only while they are known). */
-type LevelInfo = { tags: Map<number, LevelTag[]>; high: number; low: number; date?: string } | null;
+type LevelInfo = { tags: Map<number, LevelTag[]>; values: Partial<Record<LevelTag, number>>; prevDate?: string } | null;
+// Today's range solid, the previous day's tinted, so the two sets read apart at a glance (data colours; the label on a
+// solid fill is text-oncolor, which never flips).
 const LEVEL_TAG_CLASS: Record<LevelTag, string> = {
+  DH: 'border border-sky-600 bg-sky-600 text-oncolor',
+  DL: 'border border-fuchsia-600 bg-fuchsia-600 text-oncolor',
   PDH: 'border border-sky-500/50 bg-sky-500/15 text-sky-300',
   PDL: 'border border-fuchsia-500/50 bg-fuchsia-500/15 text-fuchsia-300',
 };
+const LEVEL_NAME: Record<LevelTag, string> = {
+  DH: "Today's high", DL: "Today's low", PDH: 'Previous day high', PDL: 'Previous day low',
+};
 
-/** PDH / PDL tag(s) at the strike nearest the previous day's high / low; the exact level is in the hover. */
+/** DH / DL / PDH / PDL tag(s) at the strike nearest each level; the exact levels are in the hover. One or two tags
+ *  stack; three or four (rare) sit in a 2×2 grid so the row never grows. */
 function LevelTags({ tags, lv }: { tags: LevelTag[]; lv: NonNullable<LevelInfo> }) {
-  const what = (t: LevelTag) => `${t === 'PDH' ? 'Previous day high' : 'Previous day low'} ${(t === 'PDH' ? lv.high : lv.low).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
+  const what = (t: LevelTag) => `${LEVEL_NAME[t]} ${(lv.values[t] ?? 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`
+    + (t === 'DH' || t === 'DL' ? ' (live)' : lv.prevDate ? ` (${lv.prevDate})` : '');
+  const size = tags.length > 2 ? 'text-[7px] leading-[8px]' : tags.length > 1 ? 'text-[8px] leading-[9px]' : 'text-[9px] leading-[13px]';
   return (
-    <span className="flex flex-col items-start justify-center gap-px"
-      title={`${tags.map(what).join(' · ')}${lv.date ? ` (${lv.date})` : ''} — nearest strike (Dhan daily candle of the index)`}>
+    <span className={tags.length > 2 ? 'grid grid-cols-2 items-center gap-px' : 'flex flex-col items-start justify-center gap-px'}
+      title={`${tags.map(what).join(' · ')} — nearest strike`}>
       {tags.map(t => (
         <span key={t} data-testid={`fm-${t.toLowerCase()}`}
-          className={`rounded-sm px-0.5 font-bold tracking-tight ${tags.length > 1 ? 'text-[8px] leading-[9px]' : 'text-[9px] leading-[13px]'} ${LEVEL_TAG_CLASS[t]}`}>
+          className={`rounded-sm px-0.5 font-bold tracking-tight ${size} ${LEVEL_TAG_CLASS[t]}`}>
           {t}
         </span>
       ))}
@@ -507,7 +517,7 @@ function LevelTags({ tags, lv }: { tags: LevelTag[]; lv: NonNullable<LevelInfo> 
   );
 }
 
-/** The strike cell: [PDH / PDL tag] strike [PCR (put OI ÷ call OI) when the PCR column is on]. */
+/** The strike cell: [DH / DL / PDH / PDL tag] strike [PCR (put OI ÷ call OI) when the PCR column is on]. */
 function StrikeCell({ strike, boxed, pcr, lv }: { strike: number; boxed: boolean; pcr: number | null | undefined; lv: LevelInfo }) {
   const box = (
     <span className={`px-2 leading-[18px] ${boxed ? 'border border-sky-400 text-zinc-100' : 'border border-transparent text-zinc-300'}`}>
@@ -563,13 +573,17 @@ function PriceChip({ underlying, q, fallback }: { underlying: string; q: FreshMo
 
 /** The strike ladder (all tabs). It owns the slot tab's hover crosshair, so moving the mouse across the cells re-renders
  *  only the ladder, not the trade bar, positions panel or the Cumulative OI chart. */
-function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTrade, spot, liveSpot, totals, scale, showPcr }: {
+function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTrade, spot, liveSpot, totals, scale, showPcr, today }: {
   showPcr: boolean;
+  /** Today's high / low of the board's price (live, for DH / DL); null when the board is not today's or not known. */
+  today: { high: number | null; low: number | null } | null;
   data: FreshMoneyResponse; oiMode: OiMode; tradeMode: boolean; fs: FlowSlots; maxAbs: number; boxedStrike: number | null;
   rowTrade: (strike: number) => RowTrade | null; spot: number | null; liveSpot: number | null;
   totals: { put: SumFlow; call: SumFlow; scale: number }; scale: number;
 }) {
   const [hover, setHover] = useState<Hover>(null);
+  // The strike column grows a tag slot while any level is known (sized here, before the slot count is worked out).
+  const hasLevels = (data.market === 'NSE' && !!data.prevDay) || !!today?.high || !!today?.low;
   const flowTotals = totals, flowCellScale = scale;
   // Flow tab: as many slot cells per side as the box has room for (the newest ones), so on a narrower screen the oldest
   // slots go instead of the call side scrolling off to the right once the trade columns appear.
@@ -583,14 +597,20 @@ function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTr
     return () => ro.disconnect();
   }, []);
   const total = cellCount(fsAll);
-  const show = boxW > 0 ? slotsThatFit(boxW, tradeMode, total, showPcr, !!data.prevDay && data.market === 'NSE') : total;
+  const show = boxW > 0 ? slotsThatFit(boxW, tradeMode, total, showPcr, hasLevels) : total;
   const fs = useMemo<FlowSlots>(() => ({ ...fsAll, show }), [fsAll, show]);
   // +1: the "earlier" cell at the outer end of each slot block (its width is counted in flowFixedPx for slotsThatFit).
   const flowVars = { '--fm-slots': `${(show + 1) * SLOT_CELL_PX}px`, '--fm-n': String(show + 1) } as React.CSSProperties;
+  const dh = today?.high ?? null, dl = today?.low ?? null;
   const lv = useMemo<LevelInfo>(() => {
-    const p = data.prevDay;
-    return p && data.market === 'NSE' ? { tags: levelStrikes(p, data.step), high: p.high, low: p.low, date: p.date } : null;
-  }, [data.prevDay, data.market, data.step]);
+    const p = data.market === 'NSE' ? data.prevDay : null;   // PDH / PDL: NSE indices only
+    const values: Partial<Record<LevelTag, number>> = {};
+    if (dh) values.DH = dh;
+    if (dl) values.DL = dl;
+    if (p) { values.PDH = p.high; values.PDL = p.low; }
+    const tags = levelStrikes((Object.entries(values) as [LevelTag, number][]).map(([tag, value]) => ({ tag, value })), data.step);
+    return tags.size ? { tags, values, prevDate: p?.date } : null;
+  }, [data.prevDay, data.market, data.step, dh, dl]);
   const kPx = strikeColPx(tradeMode, showPcr, !!lv);
   const numPx = oiMode === 'both' ? NUM_BOTH_PX : 76;
   const kVar = { '--fm-k': `${kPx}px`, '--fm-num': `${numPx}px` } as React.CSSProperties;
@@ -1177,7 +1197,8 @@ export default function FreshMoneyBoard() {
             </div>
 
             <Ladder data={data} oiMode={oiMode} tradeMode={tradeMode} fs={fs} maxAbs={maxAbs} boxedStrike={boxedStrike}
-              rowTrade={rowTrade} spot={spot} liveSpot={liveSpot} totals={flowTotals} scale={flowCellScale} showPcr={showPcr} />
+              rowTrade={rowTrade} spot={spot} liveSpot={liveSpot} totals={flowTotals} scale={flowCellScale} showPcr={showPcr}
+              today={data.isToday && liveQ ? { high: liveQ.dayHigh ?? null, low: liveQ.dayLow ?? null } : null} />
 
           </div>
         )}

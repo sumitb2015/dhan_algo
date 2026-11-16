@@ -408,12 +408,17 @@ test('PCR: put OI / call OI per strike (Dhan 24650: 20.83L / 0.79L = 26.35); boa
   assert.equal(fmtPcr(123.4), '123');
 });
 
-test('levelStrikes: PDH / PDL on the nearest strike; both on one strike on a narrow day; none without levels', () => {
-  const m = levelStrikes({ high: 25321.4, low: 25064.9 }, 50);
-  assert.deepEqual([...m], [[25300, ['PDH']], [25050, ['PDL']]]);
-  assert.deepEqual([...levelStrikes({ high: 25110, low: 25090 }, 50)], [[25100, ['PDH', 'PDL']]]);
-  assert.equal(levelStrikes(null, 50).size, 0);
-  assert.equal(levelStrikes({ high: 1, low: 1 }, 0).size, 0);
+test('levelStrikes: each level on the nearest strike, fixed tag order, several on one strike; unknowns skipped', () => {
+  const pd = (h: number, l: number) => [{ tag: 'PDH' as const, value: h }, { tag: 'PDL' as const, value: l }];
+  assert.deepEqual([...levelStrikes(pd(25321.4, 25064.9), 50)], [[25300, ['PDH']], [25050, ['PDL']]]);
+  assert.deepEqual([...levelStrikes(pd(25110, 25090), 50)], [[25100, ['PDH', 'PDL']]]);
+  // Today's range (NIFTY 2026-11-16 10:03: high 25,337.60, low 25,195.35) next to Friday's (25,246.35 / 25,054.40).
+  const all = levelStrikes([...pd(25246.35, 25054.4), { tag: 'DL', value: 25195.35 }, { tag: 'DH', value: 25337.6 }], 50);
+  assert.deepEqual([...all].sort((a, b) => b[0] - a[0]), [[25350, ['DH']], [25250, ['PDH']], [25200, ['DL']], [25050, ['PDL']]]);
+  // All four on one strike come back in the fixed order whatever the input order.
+  assert.deepEqual(levelStrikes([...pd(25101, 25099), { tag: 'DL', value: 25098 }, { tag: 'DH', value: 25102 }], 50).get(25100), ['DH', 'DL', 'PDH', 'PDL']);
+  assert.equal(levelStrikes([{ tag: 'DH', value: null }, { tag: 'DL', value: 0 }], 50).size, 0);
+  assert.equal(levelStrikes(pd(1, 1), 0).size, 0);
 });
 
 test('stackParts: held + added = OI on a build-up; held + cut = previous OI on a cut; unknown change = all held', () => {

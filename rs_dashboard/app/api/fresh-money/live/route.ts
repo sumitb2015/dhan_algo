@@ -26,6 +26,10 @@ export interface FreshMoneyLive {
   /** When the price last changed (ms), null when it has not changed since we subscribed. */
   changedMs: number | null;
   instrument: string | null;
+  /** Today's high / low of that price, for the DH / DL tags; null before today's session opens (the packet then still
+   *  carries the previous session's range, which PDH / PDL already show) or when the feed has none. */
+  dayHigh: number | null;
+  dayLow: number | null;
 }
 
 const prevCache: Map<string, { date: string; prev: number }> =
@@ -65,6 +69,15 @@ function inSession(mcx: boolean): boolean {
   return isRegularSession(today) && hhmm >= 915 && hhmm < 1530;
 }
 
+/** Today's session has opened (and may since have closed): the quote's high / low are today's from here on. */
+function sessionOpenedToday(mcx: boolean): boolean {
+  const today = istToday();
+  const m = istMinuteOfDay(Date.now());
+  const hhmm = Math.floor(m / 60) * 100 + (m % 60);
+  if (mcx) { const s = mcxSession(today); return hhmm >= s.open; }
+  return isRegularSession(today) && hhmm >= 915;
+}
+
 export async function GET(req: NextRequest) {
   const sp = new URL(req.url).searchParams;
   const underlying = (sp.get('underlying') ?? '').toUpperCase();
@@ -73,7 +86,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'underlying and expiry (YYYY-MM-DD) are required' }, { status: 400 });
   }
   const mcx = MCX_LOT_MULTIPLIER[underlying] !== undefined;
-  const empty: FreshMoneyLive = { underlying, label: null, spot: null, prevClose: null, change: null, changePct: null, changedMs: null, instrument: null };
+  const empty: FreshMoneyLive = { underlying, label: null, spot: null, prevClose: null, change: null, changePct: null, changedMs: null, instrument: null, dayHigh: null, dayLow: null };
   const inst = spotInstrument(underlying, expiry, mcx);
   if (!inst) return NextResponse.json(empty);
   const key = wsWant(inst.segment, inst.securityId);
@@ -91,9 +104,11 @@ export async function GET(req: NextRequest) {
   // means no in-session reading today, so go to the daily candles.
   if (!live && cachedToday === null) fillFromCandles(key, inst.securityId, inst.segment, today);
   const change = prev ? q.ltp - prev : null;
+  const opened = sessionOpenedToday(mcx);
   return NextResponse.json({
     underlying, label: inst.label, spot: q.ltp, prevClose: prev,
     change, changePct: prev && change !== null ? (change / prev) * 100 : null,
     changedMs: q.changedMs, instrument: key,
+    dayHigh: opened ? q.high : null, dayLow: opened ? q.low : null,
   } satisfies FreshMoneyLive);
 }

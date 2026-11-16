@@ -10,20 +10,25 @@ export const WS_FILE_STALE_MS = 3_000;
 /** A subscription this old has had the hub's replay of the current last packet (the hub scans every 3 s). */
 export const WS_SETTLED_MS = 8_000;
 
-export interface WsPrice { ltp: number; changedMs: number | null; sinceMs: number; /** Dhan's raw `close` from the quote packet (see pickPrevClose). */ prevClose: number | null }
+export interface WsPrice {
+  ltp: number; changedMs: number | null; sinceMs: number;
+  /** Dhan's raw `close` from the quote packet (see pickPrevClose). */ prevClose: number | null;
+  /** The packet's day high / low (> 0, else null). Before the open it is still the PREVIOUS session's range. */
+  high: number | null; low: number | null;
+}
 
 export function usableQuote(
   file: { updated_ms?: unknown; hub_alive?: unknown; quotes?: unknown } | null, key: string, now: number,
 ): WsPrice | null {
   if (!file || !(now - Number(file.updated_ms) <= WS_FILE_STALE_MS) || file.hub_alive === false) return null;
-  const q = (file.quotes as Record<string, { ltp?: unknown; changed_ms?: unknown; since_ms?: unknown; prev_close?: unknown }> | undefined)?.[key];
+  const q = (file.quotes as Record<string, { ltp?: unknown; changed_ms?: unknown; since_ms?: unknown; prev_close?: unknown; high?: unknown; low?: unknown }> | undefined)?.[key];
   const ltp = Number(q?.ltp);
   if (!q || !(ltp > 0)) return null;
   const changedMs = q.changed_ms == null ? null : Number(q.changed_ms);
   const sinceMs = Number(q.since_ms);
   if (changedMs === null && !(now - sinceMs >= WS_SETTLED_MS)) return null;
-  const pc = Number(q.prev_close);
-  return { ltp, changedMs, sinceMs, prevClose: pc > 0 ? pc : null };
+  const pc = Number(q.prev_close), hi = Number(q.high), lo = Number(q.low);
+  return { ltp, changedMs, sinceMs, prevClose: pc > 0 ? pc : null, high: hi > 0 ? hi : null, low: lo > 0 ? lo : null };
 }
 
 /**
