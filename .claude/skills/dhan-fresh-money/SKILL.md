@@ -50,6 +50,9 @@ positions read twice", "board price snaps back to the startup value", "OI change
   daily-candle cache, `lib/prevDayLevels.ts`) OUTSIDE `respCache` (a past day's file never changes, so a cached body
   would keep null). It is the previous day of TODAY, not of the shown file. `levelStrikes` puts each tag on the nearest
   strike; the strike column grows a 28 px tag slot (`LEVEL_PX`) only while the levels are known.
+- "OI + Δ" tab (`oiMode 'both'`): one bar per side = total OI with today's change in it, from `stackParts(oi, chg)`
+  (held since the previous close dim, added today bright, cut today a dashed tail; bar length and `maxAbs` = the larger
+  of today's and the previous close's OI). The number column widens to `NUM_BOTH_PX` via `--fm-num` for "1.3L +12k".
 - `lib/freshMoneyChime.ts` - pure: `tradeEvents(prev, cur)` diffs two trade-state polls into one sound (warn > exit >
   entry) plus toasts for SERVER-fired exits (target / SL / total; they had no toast before), `streakStart` rings when the
   Σ row starts or turns a 3+ run. The page plays them via `lib/alertSound.ts` (dhan-alert-sound): leader tab only

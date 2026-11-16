@@ -467,3 +467,16 @@ export function levelStrikes(levels: { high: number; low: number } | null | unde
   }
   return out;
 }
+
+/** One side's stacked bar on the "OI + Δ" tab: OI held since the previous close, OI added today, OI cut today. `total`
+ *  = the bar's full length (today's OI, or the previous close's when OI was cut, so the cut shows as a tail).
+ *  `unknown` = today's change is not known: the whole OI shows as held. Null when the OI itself is unknown. */
+export interface StackParts { held: number; added: number; cut: number; total: number; unknown: boolean }
+
+export function stackParts(oi: number | null | undefined, chg: number | null | undefined): StackParts | null {
+  if (oi == null || !Number.isFinite(oi) || oi < 0) return null;
+  if (chg == null || !Number.isFinite(chg)) return { held: oi, added: 0, cut: 0, total: oi, unknown: true };
+  const prev = oi - chg;
+  if (prev < 0) return { held: 0, added: oi, cut: 0, total: oi, unknown: false };   // more added than now open: guard
+  return { held: Math.min(oi, prev), added: Math.max(0, chg), cut: Math.max(0, -chg), total: Math.max(oi, prev), unknown: false };
+}

@@ -509,3 +509,35 @@ test('PDH / PDL tags sit on the strike nearest each previous-day level, with the
   expect((await page.locator('div.grid', { hasText: '8200' }).filter({ has: pdh }).first().boundingBox())!.height).toBeLessThan(30);
   expect(m.blocked).toEqual([]);
 });
+
+test('OI + Δ tab: one total-OI bar per side with today\'s change in it (held / added / cut tail), total + change chip', async ({ page }) => {
+  const m = await install(page);
+  await page.getByRole('tab', { name: 'OI + Δ' }).click();
+  await expect(page.getByText('PUTS: total OI · Δ today')).toBeVisible();
+  const row = page.locator('div.grid', { hasText: '8100' }).first();
+  // Puts: OI 4,000, +300 today -> held 3,700 + added 300; no cut tail.
+  const put = row.getByTestId('fm-stack').first();
+  await expect(put.locator('[data-part="held"]')).toHaveCount(1);
+  await expect(put.locator('[data-part="added"]')).toHaveCount(1);
+  await expect(put.locator('[data-part="cut"]')).toHaveCount(0);
+  await expect(put.locator('xpath=..')).toHaveAttribute('title', 'Total OI 4,000 lots · prev close 3,700 · today +300 (+8.1 %)');
+  // Calls: OI 3,000, −200 today -> held 3,000 + a 200 cut tail (bar runs to the previous close, 3,200).
+  const call = row.getByTestId('fm-stack').nth(1);
+  await expect(call.locator('[data-part="cut"]')).toHaveCount(1);
+  await expect(call.locator('[data-part="added"]')).toHaveCount(0);
+  await expect(call.locator('xpath=..')).toHaveAttribute('title', 'Total OI 3,000 lots · prev close 3,200 · today -200 (-6.3 %)');
+  const cw = await call.boundingBox(), pw = await put.boundingBox();
+  expect(Math.abs(cw!.width / pw!.width - 3200 / 4000)).toBeLessThan(0.03);   // one board-wide scale
+  const tail = await call.locator('[data-part="cut"]').boundingBox();
+  expect(Math.abs(tail!.width / cw!.width - 200 / 3200)).toBeLessThan(0.02);
+  // Number cell: total, then today's change (grey when cut).
+  await expect(row.getByText(/^4,000\s*\+300$/)).toBeVisible();
+  const chips = row.getByTestId('fm-chg-chip');
+  await expect(chips.first()).toHaveText('+300');
+  await expect(chips.nth(1)).toHaveText('-200');
+  await expect(chips.nth(1)).toHaveClass(/text-zinc-400/);
+  expect((await row.boundingBox())!.height).toBeLessThan(30);
+  await page.reload();
+  await expect(page.getByRole('tab', { name: 'OI + Δ' })).toHaveAttribute('aria-selected', 'true');
+  expect(m.blocked).toEqual([]);
+});

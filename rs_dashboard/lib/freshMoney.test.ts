@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, flowCarry, scaleOiRows, pcrOf, boardPcr, fmtPcr, levelStrikes, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay,
+  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, flowCarry, scaleOiRows, pcrOf, boardPcr, fmtPcr, levelStrikes, stackParts, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay,
 } from './freshMoney.ts';
 
 const HEAD = 'timestamp,spot,expiry,strike,CE_LTP,CE_IV,CE_OI,CE_change_OI,CE_volume,PE_LTP,PE_IV,PE_OI,PE_change_OI,PE_volume';
@@ -409,4 +409,12 @@ test('levelStrikes: PDH / PDL on the nearest strike; both on one strike on a nar
   assert.deepEqual([...levelStrikes({ high: 25110, low: 25090 }, 50)], [[25100, ['PDH', 'PDL']]]);
   assert.equal(levelStrikes(null, 50).size, 0);
   assert.equal(levelStrikes({ high: 1, low: 1 }, 0).size, 0);
+});
+
+test('stackParts: held + added = OI on a build-up; held + cut = previous OI on a cut; unknown change = all held', () => {
+  assert.deepEqual(stackParts(120, 20), { held: 100, added: 20, cut: 0, total: 120, unknown: false });
+  assert.deepEqual(stackParts(80, -20), { held: 80, added: 0, cut: 20, total: 100, unknown: false });
+  assert.deepEqual(stackParts(50, null), { held: 50, added: 0, cut: 0, total: 50, unknown: true });
+  assert.deepEqual(stackParts(10, 30), { held: 0, added: 10, cut: 0, total: 10, unknown: false });   // bad previous OI
+  assert.equal(stackParts(null, 5), null);
 });
