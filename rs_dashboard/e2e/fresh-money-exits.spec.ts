@@ -41,6 +41,8 @@ async function install(page: Page, opts: { watcherAlive?: boolean; withPosition?
   let exitFired = false;
   const posts: Record<string, unknown>[] = [];
   const blocked: string[] = [];
+  // Level entries armed through the mock (arm / cancelEntry change only this list; nothing is ever sent).
+  const entries: Record<string, unknown>[] = [];
   const state = () => ({
     date: istToday(), tradable: ['NIFTY', 'BANKNIFTY', 'CRUDEOIL', 'CRUDEOILM'], maxLots: 20, maxPositionLots: 60,
     sessions: Object.fromEntries(['NIFTY', 'BANKNIFTY', 'CRUDEOIL', 'CRUDEOILM'].map(u => [u, { gate: 'open', note: null }])),
@@ -53,6 +55,7 @@ async function install(page: Page, opts: { watcherAlive?: boolean; withPosition?
         : exitRecord }
       : {},
     exitWatcher: { alive: opts.watcherAlive ?? true, at: Date.now() },
+    entries,
   });
   await page.addInitScript(() => {
     localStorage.setItem('freshMoney.underlying', 'CRUDEOIL');
@@ -71,6 +74,22 @@ async function install(page: Page, opts: { watcherAlive?: boolean; withPosition?
       posts.push(body);
       if (body.action === 'order') return json(route, { success: true, order_id: 'X1', note: 'T 30% · SL 20 pts' });
       if (body.action === 'setExit') return json(route, { success: true });
+      if (body.action === 'arm') {
+        const level = Number(body.level);
+        const dir = level < 8105 ? 'below' : 'above';
+        const entry = {
+          id: `e${entries.length + 1}`, ts: Date.now(), broker: body.broker, underlying: body.underlying, expiry: body.expiry, strike: body.strike,
+          opt: body.opt, side: body.side, lots: body.lots, product: body.product, exitDefaults: body.exitDefaults, level, dir, kind: body.expect,
+          key: 'k', qty: Number(body.lots), lot: 1, state: 'armed', spotAtArm: 8105,
+        };
+        entries.push(entry);
+        return json(route, { success: true, entry });
+      }
+      if (body.action === 'cancelEntry') {
+        const e = entries.find(x => x.id === body.id);
+        if (e) e.state = 'cancelled';
+        return json(route, { success: true });
+      }
       if (body.action === 'exitAll') {
         return json(route, { success: true, outcome: 'sent', items: [{ key: KEY, label: 'CRUDEOIL 8100 CE', kind: 'placed' }] });
       }
@@ -589,5 +608,50 @@ test('Price switch: PE / CE last price beside the strike, green / red vs previou
   expect((await page.locator('div.grid', { hasText: '8100' }).first().boundingBox())!.height).toBeLessThan(30);
   await page.reload();
   await expect(page.getByRole('button', { name: 'Price', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  expect(m.blocked).toEqual([]);
+});
+
+test('level entries: LVL strike opens the ticket (limit vs stop by side of price), Arm posts the level, Levels list cancels; MKT still sends', async ({ page }) => {
+  const m = await install(page);
+  await page.getByRole('button', { name: /Arm live trading/ }).click();
+  const row = page.locator('div.grid', { hasText: '8100' }).filter({ has: page.getByRole('button', { name: 'Buy 8100 CE' }) }).first();
+  // MKT (default): B sends a market order at once.
+  await row.getByRole('button', { name: 'Buy 8100 CE' }).click();
+  await expect.poll(() => m.posts.filter(p => p.action === 'order').length).toBe(1);
+  // LVL: the same click opens the ticket instead, and sends nothing.
+  await row.getByTestId('fm-lvl-ce').click();
+  await expect(row.getByTestId('fm-lvl-ce')).toHaveAttribute('aria-pressed', 'true');
+  await row.getByRole('button', { name: 'Arm a level to buy 8100 CE' }).click();
+  const ticket = page.getByTestId('fm-level-ticket');
+  await expect(ticket).toBeVisible();
+  const box = ticket.getByRole('textbox');
+  await box.fill('8080');
+  await box.blur();
+  await expect(ticket.getByTestId('fm-level-verdict')).toContainText('Limit entry');                 // CE buy below the price
+  await box.fill('8130');
+  await box.blur();
+  await expect(ticket.getByTestId('fm-level-verdict')).toContainText('Stop / breakout entry');       // above it: breakout
+  await box.fill('7000');
+  await box.blur();
+  await expect(ticket.getByTestId('fm-level-verdict')).toContainText('more than 5%');
+  await expect(ticket.getByRole('button', { name: 'Arm BUY' })).toBeDisabled();
+  await box.fill('8080');
+  await ticket.getByRole('button', { name: 'Arm BUY' }).click();
+  await expect(ticket).toBeHidden();
+  const armPost = m.posts.find(p => p.action === 'arm')!;
+  expect([armPost.level, armPost.expect, armPost.side, armPost.opt, armPost.strike]).toEqual([8080, 'limit', 'BUY', 'CE', 8100]);
+  expect(m.posts.filter(p => p.action === 'order').length).toBe(1);                                    // arming sent no order
+  // Armed: counted on the toggle and listed under Orders with ×.
+  await expect(row.getByTestId('fm-lvl-ce')).toHaveText('L1');
+  await page.getByRole('tab', { name: /Orders · 1 armed/ }).click();
+  const levels = page.getByTestId('fm-levels');
+  await expect(levels.getByText('B ≤8,080')).toBeVisible();
+  await expect(levels.getByText('ARMED')).toBeVisible();
+  await levels.getByRole('button', { name: /Cancel level B ≤8,080/ }).click();
+  await expect.poll(() => m.posts.some(p => p.action === 'cancelEntry')).toBe(true);
+  await expect(levels.getByText('CANCELLED')).toBeVisible();
+  // A reload puts every strike back on MKT.
+  await page.reload();
+  await expect(page.getByTestId('fm-lvl-ce').first()).toHaveAttribute('aria-pressed', 'false');
   expect(m.blocked).toEqual([]);
 });

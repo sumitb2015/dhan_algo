@@ -16,6 +16,17 @@ import type { FmExit } from '@/lib/freshMoneyExits';
 import { brokerLabel, fmtRs, lockKey } from './trading';
 import { istClock } from '@/lib/istTime';
 import { EXIT_STATE_LABEL, ExitEditor, exitLevelsText, exitNeedsLook, type SetExitFn } from './ExitInputs';
+import { entryActive, entryLabel, type FmEntry } from '@/lib/freshMoneyEntries';
+
+const ENTRY_STATE: Record<FmEntry['state'], { label: string; cls: string }> = {
+  armed: { label: 'ARMED', cls: 'bg-amber-600/20 text-amber-300' },
+  firing: { label: 'FIRING', cls: 'bg-amber-600/20 text-amber-300' },
+  sent: { label: 'SENT', cls: 'bg-emerald-600/15 text-emerald-400' },
+  unknown: { label: 'UNKNOWN', cls: 'bg-amber-600/20 text-amber-300' },
+  rejected: { label: 'REJECTED', cls: 'bg-red-600/15 text-red-400' },
+  cancelled: { label: 'CANCELLED', cls: 'bg-zinc-800 text-zinc-400' },
+  expired: { label: 'EXPIRED', cls: 'bg-zinc-800 text-zinc-400' },
+};
 
 const FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400/70';
 const TH = 'px-2 py-1.5 text-left text-xs font-bold text-white';
@@ -58,7 +69,9 @@ function ExitCell({ x }: { x: FmExit | undefined }) {
   );
 }
 
-export default function PositionsOrders({ state, broker, armed, inflight, canClose, onClose, onSetExit, collapsed = false, onToggle }: {
+export default function PositionsOrders({ state, broker, armed, inflight, canClose, onClose, onSetExit, onCancelEntry, collapsed = false, onToggle }: {
+  /** Cancel an armed level entry (needs no ARM: it only removes a pending order). */
+  onCancelEntry: (e: FmEntry) => void;
   state: FreshMoneyTradeState | null;
   /** The page's selected broker: only its positions and orders are listed (others are counted in the header). */
   broker: FmBroker;
@@ -80,6 +93,10 @@ export default function PositionsOrders({ state, broker, armed, inflight, canClo
     .filter(p => p.broker === broker && (p.netQty !== 0 || p.realised !== 0))
     .sort((a, b) => Number(b.netQty !== 0) - Number(a.netQty !== 0) || a.underlying.localeCompare(b.underlying) || a.strike - b.strike);
   const orders: Order[] = (state?.orders ?? []).filter(o => (o.broker ?? 'dhan') === broker);
+  // Level entries on this broker: active first, then today's ended ones (newest first).
+  const entries = (state?.entries ?? []).filter(e => e.broker === broker)
+    .sort((a, b) => Number(entryActive(b.state)) - Number(entryActive(a.state)) || b.ts - a.ts);
+  const activeEntries = entries.filter(e => entryActive(e.state)).length;
   const otherOpen = (state?.positions ?? []).filter(p => p.broker !== broker && p.netQty !== 0).length;
   const open = positions.filter(p => p.netQty !== 0).length;
 
@@ -103,7 +120,7 @@ export default function PositionsOrders({ state, broker, armed, inflight, canClo
         {onToggle && <CollapseToggle collapsed={collapsed} onToggle={onToggle} label="positions and orders" controls="fm-pos-body" />}
         <div role="tablist" aria-label="Positions and orders" className="flex rounded-md border border-zinc-800 bg-zinc-950/40 p-0.5">
           {tabBtn('positions', 'Positions', open)}
-          {tabBtn('orders', 'Orders', orders.length)}
+          {tabBtn('orders', activeEntries ? `Orders · ${activeEntries} armed` : 'Orders', orders.length + activeEntries)}
         </div>
         <span className="text-[11px] text-zinc-500">
           {tab === 'positions'
@@ -199,7 +216,46 @@ export default function PositionsOrders({ state, broker, armed, inflight, canClo
               </tbody>
             </table>
           )
-        ) : orders.length === 0 ? (
+        ) : (<>
+        {entries.length > 0 && (
+          <table className="w-full min-w-[900px] text-[12px]" data-testid="fm-levels">
+            <thead className="bg-zinc-800">
+              <tr>
+                <th className={TH}>Armed</th><th className={TH}>Contract</th><th className={TH}>Level (sent at market on the cross)</th>
+                <th className={`${TH} text-right`}>Lots</th><th className={TH}>Kind</th><th className={TH}>Status</th><th className={TH}>Note</th>
+                <th className={TH}><span className="sr-only">Cancel</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map(e => {
+                const st = ENTRY_STATE[e.state];
+                return (
+                  <tr key={e.id} className="border-t border-zinc-800 hover:bg-zinc-800/40">
+                    <td className={`${TD} text-zinc-400`}>{istTime(e.ts)}</td>
+                    <td className={`${TD} font-bold text-zinc-200`}>{contract(e)} <span className="text-[10px] font-normal text-zinc-500">{e.product}</span></td>
+                    <td className={TD}><span className={`font-bold ${e.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`}>{entryLabel(e)}</span>
+                      <span className="ml-1 text-[11px] text-zinc-500">{e.underlying} was {px(e.spotAtArm)}</span></td>
+                    <td className={`${TD} text-right text-zinc-300`}>{e.lots}</td>
+                    <td className={`${TD} text-zinc-300`}>{e.kind === 'limit' ? 'Limit' : 'Stop'}</td>
+                    <td className={TD}><span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${st.cls}`}>{st.label}</span></td>
+                    <td className={`${TD} max-w-[320px] truncate text-zinc-400`} title={[e.reason, e.orderId ? `Order ${e.orderId}` : null].filter(Boolean).join(' · ')}>
+                      {e.state === 'sent' ? `Fired at ${px(e.spotAtFire)}${e.orderId ? ` · #${e.orderId}` : ''}` : e.state === 'unknown' ? 'May be live — check Orders at the broker' : (e.reason ?? '')}
+                    </td>
+                    <td className={`${TD} w-8`}>
+                      {e.state === 'armed' && (
+                        <button type="button" onClick={() => onCancelEntry(e)} aria-label={`Cancel level ${entryLabel(e)} on ${contract(e)}`} title="Cancel this level"
+                          className={`${FOCUS} flex h-5 w-5 items-center justify-center rounded text-zinc-400 hover:bg-zinc-700 hover:text-white`}>
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+        {orders.length === 0 ? (
           <p className="px-4 py-6 text-center text-[12px] text-zinc-500">No orders from this page today.</p>
         ) : (
           <table className="w-full min-w-[900px] text-[12px]">
@@ -237,6 +293,7 @@ export default function PositionsOrders({ state, broker, armed, inflight, canClo
             </tbody>
           </table>
         )}
+        </>)}
       </div>
       )}
     </div>

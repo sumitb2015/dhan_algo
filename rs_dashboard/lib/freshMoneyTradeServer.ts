@@ -9,7 +9,7 @@ import { mcxSession } from '@/lib/mcxSession';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { resolveOption } from '@/lib/pnfContracts';
 import { fetchLtps } from '@/lib/dhanEquityQuote';
-import { wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
+import { spotInstrument, wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
 import { parsedDay } from '@/lib/freshMoneyFiles';
 import { globalOnce } from '@/lib/globalOnce';
 import {
@@ -28,6 +28,7 @@ import { priceExternalClose } from './freshMoneyExternalPrice.ts';
 import {
   editExit, exitSummary, exitsOnOpen, parseExitDefaults, validateExitSpec, validateTrail, type CloseResult, type ExitDefaults, type FmExit,
 } from '@/lib/freshMoneyExits';
+import { armedQty, classifyEntry, entryLabel, levelProblem, type EntryKind, type FmEntry } from '@/lib/freshMoneyEntries';
 
 /**
  * REAL MONEY. The Fresh Money board's trade engine (server only), shared by /api/fresh-money/trade (the B / S and ×
@@ -377,6 +378,8 @@ export interface FreshMoneyTradeState {
   global: FmGlobalExit | null;
   /** Whether the server's exit watcher is running (its heartbeat is fresh). */
   exitWatcher: { alive: boolean; at: number | null };
+  /** Today's level entries (armed, firing and ended), all brokers and underlyings. */
+  entries: FmEntry[];
 }
 
 function exitWatcherStatus(now: number): { alive: boolean; at: number | null } {
@@ -418,6 +421,7 @@ export async function buildState(): Promise<FreshMoneyTradeState> {
     exits: ledger.exits ?? {},
     global: ledger.global ?? null,
     exitWatcher: exitWatcherStatus(now),
+    entries: ledger.entries ?? [],
   };
 }
 
@@ -439,11 +443,17 @@ function precheck(l: FmLedger, base: OrderBase): string | null {
   if (hold === 'unknown') return 'An earlier order on this contract has an UNKNOWN outcome — check Positions/Orders; new orders on it are held for a minute';
   if (hold === 'pending') return 'An earlier order on this contract is still being confirmed — try again in a moment';
   if (base.close) return closeCheck(l.orders, key, base.side, base.qty, now);
+  return capCheck(l, key, base.side, base.qty, base.lot, now);
+}
+
+/** The per-contract cap: what this page holds + unconfirmed orders + ARMED level entries (all counted as if they fill),
+ *  plus this order. Only a move away from flat past the cap is refused (a reducing order never is). */
+function capCheck(l: FmLedger, key: string, side: TxnSide, qty: number, lot: number, now: number): string | null {
   const held = buildPositions(l.orders, {}, now).find(p => p.key === key)?.netQty ?? 0;
-  const exposure = held + unconfirmedQty(l.orders, key, now);
-  const after = exposure + (base.side === 'BUY' ? 1 : -1) * base.qty;
-  if (Math.abs(after) > FM_MAX_POSITION_LOTS * base.lot && Math.abs(after) > Math.abs(exposure)) {
-    return `That would take this contract past ${FM_MAX_POSITION_LOTS} lots (counting orders not yet confirmed)`;
+  const exposure = held + unconfirmedQty(l.orders, key, now) + armedQty(l.entries, key);
+  const after = exposure + (side === 'BUY' ? 1 : -1) * qty;
+  if (Math.abs(after) > FM_MAX_POSITION_LOTS * lot && Math.abs(after) > Math.abs(exposure)) {
+    return `That would take this contract past ${FM_MAX_POSITION_LOTS} lots (counting orders not yet confirmed and armed levels)`;
   }
   return null;
 }
@@ -518,58 +528,182 @@ export interface OrderBody {
   globalSl?: unknown;
   /** Order: MIS (default) or NRML. */
   product?: unknown;
+  /** arm: the index (MCX: futures) level, and the kind the page showed ('limit' | 'stop'): a mismatch is refused. */
+  level?: unknown;
+  expect?: unknown;
+  /** cancelEntry: the entry's id. */
+  id?: unknown;
 }
 
 const refuse = (error: string, http: number): CloseResult => ({ kind: 'refused', error, http });
 
-/** One new order from the board's B / S buttons. Every check that refuses sends nothing. */
-export async function placeOrderCore(b: OrderBody): Promise<CloseResult> {
+type Resolved = { ok: true; base: OrderBase; defaults: ExitDefaults } | { ok: false; r: CloseResult };
+
+/**
+ * Every check a new order must pass, and its contract resolved, without sending anything: the B / S click, arming a
+ * level entry, and that entry's fire all go through it (the fire re-checks the board, the session and the contract at
+ * the moment it sends). Refusal = nothing sent.
+ */
+async function resolveOrder(b: OrderBody): Promise<Resolved> {
+  const no = (error: string, http: number): Resolved => ({ ok: false, r: refuse(error, http) });
   const underlying = String(b.underlying ?? '').toUpperCase();
-  if (!TRADABLE.has(underlying)) return refuse(`${underlying || 'This underlying'} is watch-only on this board`, 400);
+  if (!TRADABLE.has(underlying)) return no(`${underlying || 'This underlying'} is watch-only on this board`, 400);
   const opt: OptType | null = b.opt === 'CE' || b.opt === 'PE' ? b.opt : null;
   const side: TxnSide | null = b.side === 'BUY' || b.side === 'SELL' ? b.side : null;
   const strike = Number(b.strike);
   const lots = Number(b.lots);
-  if (!opt || !side || !Number.isFinite(strike)) return refuse('opt (CE/PE), side (BUY/SELL) and strike are required', 400);
-  if (!Number.isInteger(lots) || lots <= 0) return refuse('Lots must be a positive integer', 400);
-  if (lots > FM_MAX_LOTS_PER_ORDER) return refuse(`Max ${FM_MAX_LOTS_PER_ORDER} lots per order`, 400);
+  if (!opt || !side || !Number.isFinite(strike)) return no('opt (CE/PE), side (BUY/SELL) and strike are required', 400);
+  if (!Number.isInteger(lots) || lots <= 0) return no('Lots must be a positive integer', 400);
+  if (lots > FM_MAX_LOTS_PER_ORDER) return no(`Max ${FM_MAX_LOTS_PER_ORDER} lots per order`, 400);
   const defaults = parseExitDefaults(b.exitDefaults);
-  if ('error' in defaults) return refuse(`${defaults.error} — nothing was sent`, 400);
+  if ('error' in defaults) return no(`${defaults.error} — nothing was sent`, 400);
   const broker = (b.broker ?? 'dhan') as FmBroker;
-  if (!BROKERS.includes(broker)) return refuse(`Unknown broker ${b.broker}`, 400);
-  if (!brokerSessionOk(broker)) return refuse(`${brokerName(broker)} is not logged in — nothing was sent`, 409);
+  if (!BROKERS.includes(broker)) return no(`Unknown broker ${b.broker}`, 400);
+  if (!brokerSessionOk(broker)) return no(`${brokerName(broker)} is not logged in — nothing was sent`, 409);
   // Absent = MIS (pages from before the product choice). Anything else is refused, never coerced.
-  if (b.product !== undefined && b.product !== 'MIS' && b.product !== 'NRML') return refuse('product must be MIS or NRML', 400);
+  if (b.product !== undefined && b.product !== 'MIS' && b.product !== 'NRML') return no('product must be MIS or NRML', 400);
   const product: FmProduct = b.product === 'NRML' ? 'NRML' : 'MIS';
   const gate = gateNow(underlying, product);
-  if (gate !== 'open') return refuse(gateMessage(underlying, gate, product)!, 409);
+  if (gate !== 'open') return no(gateMessage(underlying, gate, product)!, 409);
 
   const board = await todaysBoard(underlying).catch(() => null);
-  if (!board) return refuse(`No ${underlying} board snapshot today — the IV snapshot collector must be running to trade from this page`, 409);
-  if (b.expiry !== board.expiry) return refuse(`The board's expiry is ${board.expiry} now — refresh before trading`, 409);
-  if (!board.strikes.has(strike)) return refuse(`${strike} is not on today's board`, 400);
+  if (!board) return no(`No ${underlying} board snapshot today — the IV snapshot collector must be running to trade from this page`, 409);
+  if (b.expiry !== board.expiry) return no(`The board's expiry is ${board.expiry} now — refresh before trading`, 409);
+  if (!board.strikes.has(strike)) return no(`${strike} is not on today's board`, 400);
   const behind = istMinuteNow() - board.lastMin;
   if (behind > BOARD_STALE_MIN) {
-    return refuse(`The board's last snapshot is ${Math.floor(behind)} min old — is the collector running? No new positions from a stale board`, 409);
+    return no(`The board's last snapshot is ${Math.floor(behind)} min old — is the collector running? No new positions from a stale board`, 409);
   }
 
   const mcx = isMcx(underlying);
   const c = resolveOption(underlying, board.expiry, strike, opt);
   if (!c || c.segment !== (mcx ? 'MCX_COMM' : 'NSE_FNO') || !(c.lot > 0)) {
-    return refuse(`No ${underlying} ${board.expiry} ${strike} ${opt} contract in the master list`, 400);
+    return no(`No ${underlying} ${board.expiry} ${strike} ${opt} contract in the master list`, 400);
   }
   // The same contract on the chosen broker, in that broker's own unit (checked against its own master).
   const bc = broker === 'dhan' ? null : await brokerContract(broker, underlying, board.expiry, strike, opt);
-  if (broker !== 'dhan' && !bc) return refuse(`${brokerName(broker)} does not list ${underlying} ${board.expiry} ${strike} ${opt}`, 400);
+  if (broker !== 'dhan' && !bc) return no(`${brokerName(broker)} does not list ${underlying} ${board.expiry} ${strike} ${opt}`, 400);
   const units = brokerUnits(broker, underlying, c.lot, bc?.brokerLot ?? null, mcx ? MCX_LOT_MULTIPLIER[underlying] : null);
-  if ('error' in units) return refuse(units.error, 400);
-  const r = await sendOne({
-    underlying, expiry: board.expiry, strike, opt, broker, securityId: bc?.handle ?? c.securityId, priceId: c.securityId,
-    segment: c.segment as FmSegment, lot: units.lot, mult: units.mult, side, product, qty: lots * units.lot, close: false,
-  }, true, defaults);
+  if ('error' in units) return no(units.error, 400);
+  return {
+    ok: true, defaults,
+    base: {
+      underlying, expiry: board.expiry, strike, opt, broker, securityId: bc?.handle ?? c.securityId, priceId: c.securityId,
+      segment: c.segment as FmSegment, lot: units.lot, mult: units.mult, side, product, qty: lots * units.lot, close: false,
+    },
+  };
+}
+
+/** Resolve → send (sendOne re-checks session, holds and the cap inside the ledger lock) → the reply. */
+async function placeResolved(base: OrderBase, defaults: ExitDefaults): Promise<CloseResult> {
+  const r = await sendOne(base, true, defaults);
   if (r.kind === 'placed' && r.stamped) return { kind: 'placed', orderId: r.orderId, note: exitSummary(defaults) };
   return asClose(r);
 }
+
+/** One new order from the board's B / S buttons. Every check that refuses sends nothing. */
+export async function placeOrderCore(b: OrderBody): Promise<CloseResult> {
+  const res = await resolveOrder(b);
+  return res.ok ? placeResolved(res.base, res.defaults) : res.r;
+}
+
+// ── level entries (index level → MARKET order; lib/freshMoneyEntries.ts) ─────────────────────────────────────────────
+
+/** The board's price for this underlying and option expiry (index, or the option month's future on MCX) from the
+ *  WebSocket bridge, asked for here so the watcher keeps it subscribed with every tab closed. Null = no usable price.
+ *  WEBSOCKET ONLY, by design: never add a REST quote fallback here. Levels arm and fire on this price; the quote API is
+ *  ~1 req/s, shared with every bridge, and serves old values after a 429 (dhan-fresh-money "Common Mistakes"). No
+ *  WebSocket price = the level does not arm (the ticket says so) and an armed one does not fire (the count resets). */
+export function spotNow(underlying: string, expiry: string): number | null {
+  const inst = spotInstrument(underlying, expiry, isMcx(underlying));
+  if (!inst) return null;
+  const k = wsWant(inst.segment, inst.securityId);
+  wsSync();
+  return wsPrice(k)?.ltp ?? null;
+}
+
+/** The body an entry's fire re-resolves with: the order as it was armed. */
+const entryBody = (e: FmEntry): OrderBody => ({
+  broker: e.broker, underlying: e.underlying, expiry: e.expiry, strike: e.strike, opt: e.opt, side: e.side, lots: e.lots,
+  product: e.product, exitDefaults: e.exitDefaults,
+});
+
+export type ArmResult = { ok: true; entry: FmEntry } | { ok: false; error: string; http: number };
+
+/**
+ * Arm a level entry: the same checks as a click (resolveOrder), a live price, a sane level, the kind the page showed,
+ * and the per-contract cap (armed entries count as if they fill) inside the ledger lock. Sends nothing.
+ */
+export async function armEntryCore(b: OrderBody): Promise<ArmResult> {
+  const res = await resolveOrder(b);
+  if (!res.ok) return { ok: false, error: (res.r as { error: string }).error, http: (res.r as { http?: number }).http ?? 409 };
+  const { base, defaults } = res;
+  const level = Number(b.level);
+  const spot = spotNow(base.underlying, base.expiry);
+  const why = levelProblem(level, spot ?? NaN);
+  if (why) return { ok: false, error: why, http: spot === null ? 409 : 400 };
+  const v = classifyEntry(base.opt, base.side, level, spot!);
+  const expect: EntryKind | null = b.expect === 'limit' || b.expect === 'stop' ? b.expect : null;
+  if (expect && expect !== v.kind) {
+    return { ok: false, error: `The price moved (${spot!.toFixed(2)}): ${level} is now a ${v.kind === 'limit' ? 'limit' : 'stop / breakout'} entry — check and arm again`, http: 409 };
+  }
+  const lots = Number(b.lots);
+  const entry: FmEntry = {
+    id: randomUUID(), ts: Date.now(), broker: base.broker ?? 'dhan', underlying: base.underlying, expiry: base.expiry,
+    strike: base.strike, opt: base.opt, side: base.side, lots, product: base.product ?? 'MIS', exitDefaults: defaults,
+    level, dir: v.dir, kind: v.kind, key: orderKey(base), qty: base.qty, lot: base.lot, state: 'armed', spotAtArm: spot!,
+  };
+  try {
+    const err = await mutateLedger(l => {
+      const gate = gateNow(base.underlying, base.product);
+      if (gate !== 'open') return gateMessage(base.underlying, gate, base.product);
+      const cap = capCheck(l, entry.key, entry.side, entry.qty, entry.lot, Date.now());
+      if (cap) return cap;
+      l.entries = [...(l.entries ?? []), entry];
+      return null;
+    });
+    shared.stateVersion++;
+    return err ? { ok: false, error: err, http: 409 } : { ok: true, entry };
+  } catch (e) {
+    return { ok: false, error: `Not armed — ${String((e as Error).message ?? e)}`, http: 503 };
+  }
+}
+
+/** Cancel an ARMED entry (checked in the lock: one that has started firing cannot be taken back). */
+export async function cancelEntryCore(b: OrderBody): Promise<{ ok: true } | { ok: false; error: string; http: number }> {
+  const id = typeof b.id === 'string' ? b.id : '';
+  if (!id) return { ok: false, error: 'id is required', http: 400 };
+  try {
+    const err = await mutateLedger(l => {
+      const e = (l.entries ?? []).find(x => x.id === id);
+      if (!e) return 'No such level entry today';
+      if (e.state === 'firing' || e.state === 'sent') return 'Too late — this level has already fired; check Orders';
+      if (e.state !== 'armed') return `This level is already ${e.state}`;
+      e.state = 'cancelled';
+      e.endedAt = Date.now();
+      e.reason = 'Cancelled';
+      return null;
+    });
+    shared.stateVersion++;
+    return err ? { ok: false, error: err, http: 409 } : { ok: true };
+  } catch (e) {
+    return { ok: false, error: String((e as Error).message ?? e), http: 503 };
+  }
+}
+
+/**
+ * Send a fired entry's order (the watcher has already claimed it 'firing' in the lock): re-resolved and re-checked now
+ * (board, session, contract, holds, cap), then the click's own send. The order records what fired it.
+ */
+export async function fireEntryCore(e: FmEntry, spot: number): Promise<CloseResult> {
+  const res = await resolveOrder(entryBody(e));
+  if (!res.ok) return res.r;
+  const trigger = `Level ${e.kind === 'limit' ? 'limit' : 'stop'} entry ${entryLabel(e)} — ${e.underlying} at ${spot.toFixed(2)}`;
+  return placeResolved({ ...res.base, trigger }, res.defaults);
+}
+
+/** For the watcher: a new order on this contract must wait (an earlier one is in flight / UNKNOWN). */
+export const contractHeld = (l: FmLedger, key: string) => contractHold(l.orders, key, Date.now()) !== null;
 
 /** The Positions panel's per-position target / stop-loss edit (both null = remove). Changes no order. */
 export async function setExitCore(b: OrderBody): Promise<{ ok: true } | { ok: false; error: string; http: number }> {

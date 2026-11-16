@@ -62,3 +62,17 @@ test('streakStart: rings when a run of 3+ starts or turns, not while it grows', 
   assert.equal(streakStart(null, { dir: 1, n: 2 }), false);
   assert.equal(streakStart({ dir: -1 }, null), false);
 });
+
+test('level entries: a server fire toasts, unknown / rejected / expired warn, a cancel is silent, history never chimes', () => {
+  const e = (state: string) => ({
+    id: 'e1', ts: 0, broker: 'dhan', underlying: 'NIFTY', expiry: '2026-11-17', strike: 25300, opt: 'CE', side: 'BUY', lots: 2,
+    product: 'MIS', exitDefaults: { target: null, sl: null }, level: 25250, dir: 'below', kind: 'limit', key: 'k', qty: 130, lot: 65,
+    state, spotAtArm: 25300, spotAtFire: 25249.5,
+  }) as never;
+  const snap = (entries: never[]) => ({ positions: [], exits: {}, global: null, entries });
+  const sent = tradeEvents(snap([e('armed')]), snap([e('sent')]));
+  assert.equal(sent.toasts[0].title, 'Level hit — BUY 2 lots NIFTY 25300 CE sent at market');
+  for (const s of ['unknown', 'rejected', 'expired']) assert.equal(tradeEvents(snap([e('firing')]), snap([e(s)])).sound, 'warn');
+  assert.deepEqual(tradeEvents(snap([e('armed')]), snap([e('cancelled')])), { sound: null, toasts: [] });
+  assert.deepEqual(tradeEvents(null, snap([e('sent')])), { sound: null, toasts: [] });
+});

@@ -61,6 +61,17 @@ positions read twice", "board price snaps back to the startup value", "OI change
 - "OI + Δ" tab (`oiMode 'both'`): one bar per side = total OI with today's change in it, from `stackParts(oi, chg)`
   (held since the previous close dim, added today bright, cut today a dashed tail; bar length and `maxAbs` = the larger
   of today's and the previous close's OI). The number column widens to `NUM_BOTH_PX` via `--fm-num` for "1.3L +12k".
+- Level entries (XY-ladder model; vault decision 2026-11-16-fresh-money-level-entries-index-levels): a per-strike MKT / LVL
+  switch (page memory only — a reload is MKT). On LVL, B / S open `LevelTicket` (components/freshMoney/LevelEntry.tsx) and
+  `arm` writes an `FmEntry` to `ledger.entries` (lib/freshMoneyEntries.ts): an INDEX level (MCX: the option month's
+  future), limit vs stop by which side of the price it sits (`limitSide`). `runEntryTick` (lib/freshMoneyEntryTick.ts, in
+  the exit loop) fires it at MARKET through `fireEntryCore` → `resolveOrder` → `sendOne` (the click's own path; the board,
+  session, contract and cap are re-checked at fire time). Rules: two breached checks in a row; claimed `firing` in the
+  lock (at most once); UNKNOWN / a throw never resent; a contract with an order in flight waits a tick; one fire per
+  contract per tick; armed lots count toward the cap (`armedQty` in `capCheck`); expired when the product's gate is not
+  `open`; a `firing` entry with no outcome after 60 s = unknown. Nothing rests at the broker.
+  Prices for levels are WEBSOCKET ONLY (`spotNow` → `wsPrice`, and the ticket's price from `/api/fresh-money/live`, also
+  `wsPrice`): no REST quote fallback, ever — no WS price = no arm / no fire.
 - `lib/freshMoneyChime.ts` - pure: `tradeEvents(prev, cur)` diffs two trade-state polls into one sound (warn > exit >
   entry) plus toasts for SERVER-fired exits (target / SL / total; they had no toast before), `streakStart` rings when the
   Σ row starts or turns a 3+ run. The page plays them via `lib/alertSound.ts` (dhan-alert-sound): leader tab only

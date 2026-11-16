@@ -8,6 +8,7 @@
 import type { FmPosition } from './freshMoneyTrades.ts';
 import type { FmExit } from './freshMoneyExits.ts';
 import type { FmGlobalExit } from './freshMoneyGlobalExit.ts';
+import { entryLabel, type FmEntry } from './freshMoneyEntries.ts';
 
 export type ChimeKind = 'warn' | 'exit' | 'entry';
 
@@ -15,6 +16,8 @@ export interface TradeSnapshot {
   positions: FmPosition[];
   exits: Record<string, FmExit>;
   global: FmGlobalExit | null;
+  /** Level entries (absent from an older server = none). */
+  entries?: FmEntry[];
 }
 
 export interface ChimeToast { kind: 'success' | 'error'; title: string; detail?: string }
@@ -54,6 +57,21 @@ export function tradeEvents(prev: TradeSnapshot | null, cur: TradeSnapshot): Tra
     } else if (PROBLEM.has(x.state)) {
       bump('warn');
       toasts.push({ kind: 'error', title: `${name}: exit ${x.state.toUpperCase()}`, detail: x.note });
+    }
+  }
+
+  // Level entries the SERVER fired or ended (the page never sends them): sent = a toast (its fill sounds as an entry);
+  // unknown / rejected / expired = warn + toast. Cancelled by a click is silent.
+  const wasEntry = new Map((prev.entries ?? []).map(e => [e.id, e.state]));
+  for (const e of cur.entries ?? []) {
+    const was = wasEntry.get(e.id);
+    if (was === undefined || was === e.state) continue;
+    const name = `${e.underlying} ${e.strike} ${e.opt} ${entryLabel(e)}`;
+    if (e.state === 'sent') {
+      toasts.push({ kind: 'success', title: `Level hit — ${e.side} ${e.lots} lot${e.lots === 1 ? '' : 's'} ${e.underlying} ${e.strike} ${e.opt} sent at market`, detail: `${entryLabel(e)} · ${e.underlying} at ${e.spotAtFire ?? '–'}` });
+    } else if (e.state === 'unknown' || e.state === 'rejected' || e.state === 'expired') {
+      bump('warn');
+      toasts.push({ kind: 'error', title: `${name}: level ${e.state.toUpperCase()}`, detail: e.reason });
     }
   }
 

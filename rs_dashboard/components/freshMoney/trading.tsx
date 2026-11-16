@@ -22,6 +22,8 @@ import { ExitEditor, ExitSpecInput, exitLevelsText, exitNeedsLook, type SetExitF
 import { GlobalExitInputs } from './GlobalExitInputs';
 import { pnlUnknownReason, totalPnl } from '@/lib/freshMoneyGlobalExit';
 import type { ExitAllItem, ExitAllResult } from '@/lib/freshMoneyExitAll';
+import { entryLabel, type EntryKind, type FmEntry } from '@/lib/freshMoneyEntries';
+import { LevelTicket, LevelToggle, type LevelCell } from './LevelEntry';
 
 /** The header's target / stop-loss defaults, stamped onto each position an order opens. */
 export interface ExitDefaultsUi { target: ExitSpec | null; sl: ExitSpec | null }
@@ -62,6 +64,10 @@ export interface TradeApi {
   exitAll: () => Promise<void>;
   /** An Exit all request from this tab is in flight. */
   exitingAll: boolean;
+  /** Arm a level entry (sends nothing now; the server fires it at market on the cross). Resolves true when armed. */
+  arm: (o: { broker: FmBroker; underlying: string; expiry: string; strike: number; opt: OptType; side: TxnSide; lots: number; product: FmProduct; exitDefaults: ExitDefaultsUi; level: number; expect: EntryKind }) => Promise<boolean>;
+  /** Cancel an armed level entry. */
+  cancelEntry: (e: FmEntry) => Promise<void>;
 }
 
 /** `onWarn` is called when an order or close THIS tab sent comes back rejected, UNKNOWN or partly sent (the page plays
@@ -211,7 +217,45 @@ export function useFreshMoneyTrades(onWarn?: () => void): TradeApi {
     }
   }, [refresh]);
 
-  return { state, inflight, order, close, setExit, setGlobal, exitAll, exitingAll };
+  // Arming sends no order: a plain POST (an idempotency key so a retried request cannot arm twice).
+  const arm: TradeApi['arm'] = useCallback(async o => {
+    const what = `${o.side} ${o.lots} lot${o.lots === 1 ? '' : 's'} ${o.underlying} ${o.strike} ${o.opt}`;
+    try {
+      const res = await fetch(TRADE_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'arm', ...o, idempotencyKey: newKey() }),
+      });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string; entry?: FmEntry } | null;
+      if (res.ok && j?.success && j.entry) {
+        toast.success(`Level armed: ${what}`, { description: `${j.entry.kind === 'limit' ? 'Limit' : 'Stop / breakout'} entry — at market when ${o.underlying} ${entryLabel(j.entry).slice(2)}` });
+        return true;
+      }
+      toast.error('Level not armed', { description: j?.error ?? `HTTP ${res.status}`, duration: 8_000 });
+      return false;
+    } catch (e) {
+      toast.error('Level not armed', { description: String((e as Error).message ?? e) });
+      return false;
+    } finally {
+      refresh();
+    }
+  }, [refresh]);
+
+  const cancelEntry: TradeApi['cancelEntry'] = useCallback(async e => {
+    try {
+      const res = await fetch(TRADE_URL, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'cancelEntry', id: e.id }),
+      });
+      const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+      if (res.ok && j?.success) toast.success(`Level cancelled: ${e.underlying} ${e.strike} ${e.opt} ${entryLabel(e)}`);
+      else { onWarnRef.current?.(); toast.error('Level not cancelled', { description: j?.error ?? `HTTP ${res.status}`, duration: 10_000 }); }
+    } catch (err) {
+      toast.error('Level not cancelled', { description: `${String((err as Error).message ?? err)} — check the Orders panel: it may still be armed` });
+    } finally {
+      refresh();
+    }
+  }, [refresh]);
+
+  return { state, inflight, order, close, setExit, setGlobal, exitAll, exitingAll, arm, cancelEntry };
 }
 
 // ── header Exit all ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -507,8 +551,12 @@ function ExitPopoverButton({ pos, exit, strike, opt, onSetExit }: {
 }
 
 export function TradeCell({
-  side, opt, strike, pos, showButtons, canOrder, canClose, busy, onBuy, onSell, onClose, armed, ltpSource, exit, onSetExit,
+  side, opt, strike, pos, showButtons, canOrder, canClose, busy, onBuy, onSell, onClose, armed, ltpSource, exit, onSetExit, level, blockedWhy,
 }: {
+  /** Level entries on this strike (MKT / LVL switch, ticket); absent = market only. */
+  level?: LevelCell;
+  /** Why orders cannot go now (shown in the level ticket). */
+  blockedWhy?: string | null;
   /** Save / clear this position's own target / stop-loss (armed page only). */
   onSetExit?: SetExitFn;
   side: 'put' | 'call';
@@ -559,26 +607,42 @@ export function TradeCell({
     </button>
   ) : null;
 
+  // LVL strike: B / S open the level ticket under the clicked button instead of sending.
+  const [ticket, setTicket] = useState<{ side: TxnSide; at: { x: number; y: number } } | null>(null);
+  const click = (s: TxnSide, e: React.MouseEvent<HTMLButtonElement>) => {
+    if (!level?.on) { (s === 'BUY' ? onBuy : onSell)(); return; }
+    const r = e.currentTarget.getBoundingClientRect();
+    const w = 360;
+    setTicket({ side: s, at: { x: Math.max(8, Math.min(window.innerWidth - w - 8, r.left - w / 2)), y: r.bottom + 4 } });
+  };
+  const verb = level?.on ? 'Arm a level to' : '';
   const buttons = showButtons ? (
     <span className="flex items-center gap-1">
+      {level && <LevelToggle strike={strike} opt={opt} cell={level} />}
       {busy ? (
         // Same footprint as the two buttons, so the row does not jump while an order is in flight.
         <span className="flex h-5 w-[56px] items-center justify-center"><Loader2 className="h-4 w-4 animate-spin text-zinc-400" aria-label="Order in flight" /></span>
       ) : (
         <>
-          <button type="button" onClick={onBuy} disabled={!canOrder} aria-label={`Buy ${strike} ${opt}`} title={`BUY ${strike} ${opt} at market`}
+          <button type="button" onClick={e => click('BUY', e)} disabled={!canOrder && !level?.on} aria-label={`${verb ? `${verb} buy` : 'Buy'} ${strike} ${opt}`}
+            title={level?.on ? `Arm a ${level.priceName} level to BUY ${strike} ${opt} (at market on the cross)` : `BUY ${strike} ${opt} at market`}
             className={`${FOCUS} h-5 w-[26px] rounded bg-emerald-600 text-[11px] font-bold leading-5 text-oncolor shadow-sm transition-colors hover:bg-emerald-500 active:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-30`}>B</button>
-          <button type="button" onClick={onSell} disabled={!canOrder} aria-label={`Sell ${strike} ${opt}`} title={`SELL ${strike} ${opt} at market`}
+          <button type="button" onClick={e => click('SELL', e)} disabled={!canOrder && !level?.on} aria-label={`${verb ? `${verb} sell` : 'Sell'} ${strike} ${opt}`}
+            title={level?.on ? `Arm a ${level.priceName} level to SELL ${strike} ${opt} (at market on the cross)` : `SELL ${strike} ${opt} at market`}
             className={`${FOCUS} h-5 w-[26px] rounded bg-red-600 text-[11px] font-bold leading-5 text-oncolor shadow-sm transition-colors hover:bg-red-500 active:bg-red-700 disabled:cursor-not-allowed disabled:opacity-30`}>S</button>
         </>
       )}
     </span>
   ) : null;
 
+  const ticketEl = ticket && level ? (
+    <LevelTicket at={ticket.at} strike={strike} opt={opt} side={ticket.side} cell={level} canArm={canOrder}
+      blockedWhy={canOrder ? null : (blockedWhy ?? 'Orders are not open right now')} onClose={() => setTicket(null)} />
+  ) : null;
   return side === 'put' ? (
-    <span className="flex items-center justify-end gap-1 pr-1">{chip}{exitBtn}{closeBtn}{buttons}</span>
+    <span className="flex items-center justify-end gap-1 pr-1">{chip}{exitBtn}{closeBtn}{buttons}{ticketEl}</span>
   ) : (
-    <span className="flex items-center justify-start gap-1 pl-1">{buttons}{closeBtn}{exitBtn}{chip}</span>
+    <span className="flex items-center justify-start gap-1 pl-1">{buttons}{closeBtn}{exitBtn}{chip}{ticketEl}</span>
   );
 }
 

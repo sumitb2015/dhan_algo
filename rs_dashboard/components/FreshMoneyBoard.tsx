@@ -12,7 +12,9 @@ import type { FreshMoneyLive } from '@/app/api/fresh-money/live/route';
 import { BUILDUP_TEXT, oiDelta, fmtOi, fmtOiAbs, fmtOiShort, flowCarry, flowScale, scaleOiRows, pcrOf, boardPcr, fmtPcr, levelStrikes, stackParts, type LevelTag, flowStreak, flowTier, streakVsDay, sumFlows, type Buildup, type FlowTier, type SideFlow, type SumFlow } from '@/lib/freshMoney';
 import type { FmBroker, FmPosition, FmProduct, OptType, TxnSide } from '@/lib/freshMoneyTrades';
 import { ExitAllButton, FM_BROKERS, OffBoardPositions, TradeBar, TradeCell, brokerLabel, lockKey, useFreshMoneyTrades, type ExitDefaultsUi } from './freshMoney/trading';
-import { validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
+import { exitSummary, validateExitSpec, type ExitSpec, type FmExit } from '@/lib/freshMoneyExits';
+import { entryActive, type FmEntry } from '@/lib/freshMoneyEntries';
+import type { LevelCell } from './freshMoney/LevelEntry';
 import { usePageBroker } from './BrokerPicker';
 import { readPref, savePref as writePref } from '@/lib/localPref';
 import { istMinuteOfDay } from '@/lib/istTime';
@@ -110,6 +112,10 @@ interface RowTrade {
   order: (opt: OptType, side: TxnSide) => void;
   close: (p: FmPosition) => void;
   setExit: SetExitFn;
+  /** Level entries (MKT / LVL switch, ticket) for this strike. */
+  level: LevelCell;
+  /** Why new orders cannot go now, or null. */
+  blockedWhy: string | null;
 }
 
 
@@ -451,6 +457,7 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, hover, on
         onBuy={() => trade.order(opt, 'BUY')} onSell={() => trade.order(opt, 'SELL')}
         onClose={() => { const pos = side === 'put' ? trade.put : trade.call; if (pos) trade.close(pos); }}
         onSetExit={trade.setExit}
+        level={trade.level} blockedWhy={trade.blockedWhy}
       />
     );
   };
@@ -943,7 +950,7 @@ export default function FreshMoneyBoard() {
   const prevTradeRef = useRef<TradeSnapshot | null>(null);
   useEffect(() => {
     if (!ts) return;
-    const cur: TradeSnapshot = { positions: ts.positions, exits: ts.exits ?? {}, global: ts.global ?? null };
+    const cur: TradeSnapshot = { positions: ts.positions, exits: ts.exits ?? {}, global: ts.global ?? null, entries: ts.entries ?? [] };
     const ev = tradeEvents(prevTradeRef.current, cur);
     prevTradeRef.current = cur;
     if (!leaderRef.current) return;
@@ -984,7 +991,21 @@ export default function FreshMoneyBoard() {
   }, [ts, myPositions]);
   const posByKey = useMemo(() => new Map(myPositions.map(p => [`${p.strike}:${p.opt}`, p] as const)), [myPositions]);
   const tradeMode = armed || myPositions.length > 0;
-  const { order: sendOrder, close: sendClose, setExit, inflight } = trades;
+  const { order: sendOrder, close: sendClose, setExit, inflight, arm, cancelEntry } = trades;
+  // Strikes switched to LVL (page memory only: a reload is back on MKT, so it can never turn a click into a level).
+  const [levelOn, setLevelOn] = useState<ReadonlySet<string>>(new Set());
+  const toggleLevel = useCallback((k: string) => setLevelOn(s => { const n = new Set(s); if (n.has(k)) n.delete(k); else n.add(k); return n; }), []);
+  // Active level entries on this board (selected broker + underlying), by strike.
+  const entriesByStrike = useMemo(() => {
+    const m = new Map<number, FmEntry[]>();
+    for (const e of ts?.entries ?? []) {
+      if (e.broker !== broker || e.underlying !== underlying || !entryActive(e.state)) continue;
+      m.set(e.strike, [...(m.get(e.strike) ?? []), e]);
+    }
+    return m;
+  }, [ts, broker, underlying]);
+  const levelPriceName = data?.market === 'MCX' ? (liveQ?.label ?? `${underlying} FUT`) : underlying;
+  const exitText = exitSummary(exitDefaults) || 'none (header New positions)';
   const rowTrade = useCallback((strike: number): RowTrade | null => {
     if (!tradeMode || !data) return null;
     return {
@@ -1005,8 +1026,18 @@ export default function FreshMoneyBoard() {
       order: (opt, side) => sendOrder({ broker, underlying, expiry: data.expiry, strike, opt, side, lots, product, exitDefaults }),
       close: p => sendClose(p),
       setExit,
+      blockedWhy: !armed ? 'Arm live trading first' : blocked,
+      level: {
+        on: levelOn.has(`${underlying}:${strike}`),
+        toggle: () => toggleLevel(`${underlying}:${strike}`),
+        entries: entriesByStrike.get(strike) ?? [],
+        spot: liveSpot, priceName: levelPriceName, lots, product, exitText,
+        arm: (opt, side, level, expect) => arm({ broker, underlying, expiry: data.expiry, strike, opt, side, lots, product, exitDefaults, level, expect }),
+        cancel: cancelEntry,
+      },
     };
-  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, setExit, lots, product, ts, exitDefaults]);
+  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, setExit, lots, product, ts, exitDefaults,
+    levelOn, toggleLevel, entriesByStrike, liveSpot, levelPriceName, exitText, arm, cancelEntry]);
   const showTradeBar = !!(data && ts);
   const openCount = ts ? ts.positions.filter(p => p.netQty !== 0).length : 0;
   const setLotsPref = (n: number) => { setLots(n); writePref(PREF_LOTS, String(n)); };
@@ -1261,7 +1292,7 @@ export default function FreshMoneyBoard() {
         {/* Positions sit right under the board: mid-trade they matter more than the chart below. */}
         {ts && (
           <PositionsOrders
-            state={ts} broker={broker} armed={armed} inflight={inflight} onClose={sendClose} onSetExit={setExit}
+            state={ts} broker={broker} armed={armed} inflight={inflight} onClose={sendClose} onSetExit={setExit} onCancelEntry={cancelEntry}
             collapsed={posCollapsed} onToggle={togglePos}
             canClose={p => (ts.sessions[p.underlying]?.gate ?? 'closed') !== 'closed' && !!ts.brokers?.[p.broker]}
           />

@@ -4,6 +4,9 @@
  * (closePositionCore — same sizing, holds and in-flight rules as the × button). It stops with the dashboard: the page
  * shows "Exits watcher STOPPED" from the heartbeat below. Idle (one ledger read per tick) while no position has levels.
  * The decisions are in lib/freshMoneyExitTick.ts / lib/freshMoneyExits.ts (pure, tested).
+ *
+ * The same loop runs the level-entry watcher (lib/freshMoneyEntryTick.ts): armed index levels fire a MARKET order
+ * through the click's own send path (fireEntryCore). Idle (one ledger read) while nothing is armed.
  */
 import { writeJsonAtomic } from '@/lib/lockedJsonFile';
 import { brokerSessionOk } from '@/lib/freshMoneyBrokers';
@@ -11,14 +14,21 @@ import { runExitTick } from '@/lib/freshMoneyExitTick';
 import type { Streak } from '@/lib/freshMoneyExits';
 import type { FmPosition } from '@/lib/freshMoneyTrades';
 import { runGlobalTick } from '@/lib/freshMoneyGlobalTick';
+import { runEntryTick } from '@/lib/freshMoneyEntryTick';
+import type { EntryStreak } from '@/lib/freshMoneyEntries';
 import {
-  EXIT_WATCHER_FILE, closePositionCore, gateNow, loadLedger, ltpsFor, mutateLedger, reconcileWithBrokers, refreshOrders,
+  EXIT_WATCHER_FILE, closePositionCore, contractHeld, fireEntryCore, gateNow, loadLedger, ltpsFor, mutateLedger, reconcileWithBrokers,
+  refreshOrders, spotNow,
 } from '@/lib/freshMoneyTradeServer';
 
 const TAG = '[fm-exit]';
 const TICK_MS = 2000;
 
-interface Holder { timer: ReturnType<typeof setInterval>; busy: boolean; streaks: Map<string, Streak>; global: { cur: Streak | null } }
+interface Holder {
+  timer: ReturnType<typeof setInterval>; busy: boolean; streaks: Map<string, Streak>; global: { cur: Streak | null };
+  /** Level-entry breach streaks, by entry id (absent on a loop started before entries existed: a dev reload). */
+  entryStreaks?: Map<string, EntryStreak>;
+}
 const LOOP_KEY = '__freshMoneyExitLoop';
 
 async function tick(h: Holder): Promise<void> {
@@ -36,6 +46,17 @@ async function tick(h: Holder): Promise<void> {
     // Both throttle themselves (2 s; 5 / 10 / 15 s per broker).
     refresh: async () => { await refreshOrders().catch(() => {}); await reconcileWithBrokers().catch(() => {}); },
   };
+  // Entries first: a fill they produce is then guarded by the exit tick's stamped levels on its next pass.
+  await runEntryTick({
+    now: () => Date.now(),
+    readLedger: loadLedger,
+    mutate: mutateLedger,
+    spot: spotNow,
+    gate: (u, product) => gateNow(u, product),
+    held: contractHeld,
+    fire: fireEntryCore,
+    log: (msg: string) => console.log(`[fm-entry] ${msg}`),
+  }, (h.entryStreaks ??= new Map())).catch(err => console.error('[fm-entry] tick failed:', err));
   await runExitTick(deps, h.streaks);
   await runGlobalTick(deps, (h.global ??= { cur: null })); // a loop started before this field existed (dev reload) lacks it
 }

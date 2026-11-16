@@ -11,6 +11,7 @@
 import type { FmExit } from './freshMoneyExits.ts';
 import { istMinuteOfDay } from './istTime.ts';
 import type { FmGlobalExit } from './freshMoneyGlobalExit.ts';
+import type { FmEntry } from './freshMoneyEntries.ts';
 
 export type OptType = 'CE' | 'PE';
 export type FmSegment = 'NSE_FNO' | 'MCX_COMM';
@@ -62,8 +63,9 @@ export interface FmOrder {
   trigger?: string;
 }
 
-/** `exits`: per-position target / stop-loss, by position key (lib/freshMoneyExits.ts). */
-export interface FmLedger { date: string; orders: FmOrder[]; exits?: Record<string, FmExit>; global?: FmGlobalExit }
+/** `exits`: per-position target / stop-loss, by position key (lib/freshMoneyExits.ts). `entries`: armed index-level
+ *  entries and their outcomes (lib/freshMoneyEntries.ts); a new day's ledger starts without them (the day roll). */
+export interface FmLedger { date: string; orders: FmOrder[]; exits?: Record<string, FmExit>; global?: FmGlobalExit; entries?: FmEntry[] }
 
 export interface FmPosition {
   /** `broker|securityId`: Kotak and Zerodha trading symbols can coincide, so a contract is only unique per broker. */

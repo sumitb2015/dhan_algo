@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { dedupe } from '@/lib/pyExec';
 import type { CloseResult } from '@/lib/freshMoneyExits';
 import {
-  buildState, closePositionCore, exitAllCore, placeOrderCore, setExitCore, setGlobalCore, tradeStateVersion, type FreshMoneyTradeState, type OrderBody,
+  armEntryCore, buildState, cancelEntryCore, closePositionCore, exitAllCore, placeOrderCore, setExitCore, setGlobalCore, tradeStateVersion,
+  type FreshMoneyTradeState, type OrderBody,
 } from '@/lib/freshMoneyTradeServer';
 
 /**
@@ -61,7 +62,16 @@ export async function POST(req: NextRequest) {
       const r = await setGlobalCore(b);
       return r.ok ? NextResponse.json({ success: true }) : reply({ success: false, error: r.error }, r.http);
     }
-    return reply({ success: false, error: 'action must be order, close, exitAll, setExit or setGlobal' }, 400);
+    if (b.action === 'arm') {
+      // Arms a level entry (sends nothing now): the watcher fires it at market when the price crosses the level.
+      const r = await armEntryCore(b);
+      return r.ok ? NextResponse.json({ success: true, entry: r.entry }) : reply({ success: false, error: r.error }, r.http);
+    }
+    if (b.action === 'cancelEntry') {
+      const r = await cancelEntryCore(b);
+      return r.ok ? NextResponse.json({ success: true }) : reply({ success: false, error: r.error }, r.http);
+    }
+    return reply({ success: false, error: 'action must be order, close, exitAll, setExit, setGlobal, arm or cancelEntry' }, 400);
   };
 
   const key = typeof b.idempotencyKey === 'string' && b.idempotencyKey.length >= 8 && b.idempotencyKey.length <= 64 ? b.idempotencyKey : null;
