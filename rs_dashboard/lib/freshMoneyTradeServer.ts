@@ -17,8 +17,8 @@ import {
 } from '@/lib/freshMoneyBrokers';
 import {
   brokerUnits, buildPositions, closeCheck, closeQty, freshRestCache, contractHold, contractSettling, dueForCheck, effectiveState, hhmmToMin, isTerminal,
-  bookNet, inFlightReducing, netKey, recentOrders, nextCheckDelay, orderKey, productWindow, reconcileDownQty, sessionGate, sessionMessage, unconfirmedQty,
-  NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, FM_MAX_LOTS_PER_ORDER, FM_MAX_POSITION_LOTS,
+  bookNet, inFlightReducing, netKey, recentOrders, nextReadAt, orderKey, productWindow, reconcileDownQty, sessionGate, sessionMessage, unconfirmedQty,
+  NSE_WINDOW, YOUNG_ORDER_MS, FM_MAX_LOTS_PER_ORDER, FM_MAX_POSITION_LOTS,
   type FmBroker, type FmLedger, type MissingSeen, type FmOrder, type FmPosition, type FmProduct, type FmSegment, type OptType, type SessionGate,
   type TradeWindow, type TxnSide,
 } from '@/lib/freshMoneyTrades';
@@ -62,8 +62,6 @@ export const TRADABLE: ReadonlySet<string> = new Set(['NIFTY', 'BANKNIFTY', 'CRU
 const isMcx = (u: string) => MCX_LOT_MULTIPLIER[u] !== undefined;
 /** Broker reads per refresh, and the least gap between refreshes (every tab's poll shares one refresh). */
 const READS_PER_REFRESH = 4;
-/** An order this young is read on a fast schedule (see nextReadAt / refreshOrders). */
-const YOUNG_ORDER_MS = 15_000;
 const YOUNG_REFRESH_GAP_MS = 400;
 const REFRESH_GAP_MS = 2_000;
 /** How long the page's state poll waits for a REST LTP (a contract the WebSocket has no price for yet) before replying without it. */
@@ -232,24 +230,9 @@ export async function ltpsFor(
   return { ltps, source };
 }
 
-// Per-order re-read schedule (backoff), so a few settled-late orders cannot hog the reads and none is starved.
+// Per-order re-read schedule (backoff, lib/freshMoneyTrades.ts nextReadAt), so a few settled-late orders cannot hog the
+// reads and none is starved.
 const { nextAt, attempts } = shared;
-
-/** When to read an unsettled order next. A record with no order id is looked up every 2 s from the moment it can be
- *  UNKNOWN until its hold has run out (so a late booking is adopted before new orders on the contract are allowed),
- *  then with backoff. Before that ('sending', not yet stale) there is nothing to look up. */
-function nextReadAt(o: FmOrder, now: number, attempts: number, changed: boolean): number {
-  if (!o.orderId) {
-    const staleAt = o.ts + SENDING_STALE_MS;
-    if (now < staleAt) return staleAt;
-    if (now < o.ts + UNKNOWN_HOLD_MS + 60_000) return now + 2_000;
-  }
-  // A just-placed MARKET order usually fills within a second: read it again quickly so the strike shows the position
-  // at once (the 2 s / doubling schedule below is for orders that are slow to settle).
-  const young = now - o.ts < YOUNG_ORDER_MS;
-  if (young) return now + (changed ? 500 : Math.min(1_000, nextCheckDelay(attempts)));
-  return now + (changed ? 2_000 : nextCheckDelay(attempts));
-}
 
 /** Bring unsettled orders up to date: at most READS_PER_REFRESH due orders, oldest due first, with backoff. */
 export async function refreshOrders(): Promise<void> {
@@ -273,10 +256,13 @@ export async function refreshOrders(): Promise<void> {
     if (patch) updates.set(o.id, patch);
   }
   if (!updates.size) return;
+  const seenAt = Date.now();
   await mutateLedger(l => {
     for (const o of l.orders) {
       const u = updates.get(o.id);
-      if (u) Object.assign(o, u);
+      if (!u) continue;
+      Object.assign(o, u);
+      if (o.state === 'filled' && o.seenAt === undefined) o.seenAt = seenAt; // display only: the fill's lag
     }
   });
   shared.stateVersion++; // the route's GET cache must not serve the state from before this fill
@@ -510,6 +496,10 @@ async function sendOne(base: OrderBase, check = true, stamp?: ExitDefaults): Pro
         : { state: 'rejected', reason: r.error };
   // If this write fails the record stays 'sending', reads as UNKNOWN after 30 s and is looked up again.
   await mutateLedger(l => { const o = l.orders.find(x => x.id === id); if (o) Object.assign(o, patch); }).catch(() => {});
+  // A refresh that ran while this order was still 'sending' scheduled its next read without an order id: drop that, so
+  // the fill is read on the very next refresh (2026-11-17: it waited until send + 30 s, so did the board and the chime).
+  nextAt.delete(id);
+  attempts.delete(id);
   shared.stateVersion++;
   // Ask the WebSocket for the contract now, not once the fill is read back: the position then has a live price on its
   // first poll instead of waiting on the REST quote lane.

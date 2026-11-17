@@ -61,6 +61,9 @@ export interface FmOrder {
   /** Why this close was sent when not by a click, e.g. "Target hit at 131.00" (the exit watcher). `reason` is the
    *  broker's text and is overwritten by every order read, so the trigger lives apart. */
   trigger?: string;
+  /** When this server first read the order as filled (ms). Display only (the Orders panel shows seenAt − ts as the
+   *  fill's lag); nothing decides on it. Absent on older records. */
+  seenAt?: number;
 }
 
 /** `exits`: per-position target / stop-loss, by position key (lib/freshMoneyExits.ts). `entries`: armed index-level
@@ -327,6 +330,31 @@ export function slices(qty: number, lot: number, maxLots = FM_MAX_LOTS_PER_ORDER
 /** Backoff for re-reading an unsettled order: 2 s, 4 s, 8 s ... capped at 60 s. */
 export function nextCheckDelay(attempts: number): number {
   return Math.min(60_000, 2_000 * 2 ** Math.max(0, attempts));
+}
+
+/** An order this young is read on a fast schedule (nextReadAt; the trade server's refreshOrders). */
+export const YOUNG_ORDER_MS = 15_000;
+/** How soon a 'sending' order (its broker reply not back yet) is looked at again. Free: no broker call is made for it. */
+export const SENDING_RECHECK_MS = 400;
+
+/**
+ * When to read an unsettled order next. A record with no order id is looked up every 2 s from the moment it can be
+ * UNKNOWN until its hold has run out (so a late booking is adopted before new orders on the contract are allowed),
+ * then with backoff. Before that it is 'sending' (the broker's reply is not back yet): nothing to look up, but it is
+ * re-checked within SENDING_RECHECK_MS, never parked until it turns stale. (2026-11-17: a read that landed during a
+ * Kotak send parked the order at send + 30 s, and its fill reached the board and the chime ~30 s after Kotak filled it.)
+ */
+export function nextReadAt(o: FmOrder, now: number, attempts: number, changed: boolean): number {
+  if (!o.orderId) {
+    const staleAt = o.ts + SENDING_STALE_MS;
+    if (now < staleAt) return Math.min(staleAt, now + SENDING_RECHECK_MS);
+    if (now < o.ts + UNKNOWN_HOLD_MS + 60_000) return now + 2_000;
+  }
+  // A just-placed MARKET order usually fills within a second: read it again quickly so the strike shows the position
+  // at once (the 2 s / doubling schedule below is for orders that are slow to settle).
+  const young = now - o.ts < YOUNG_ORDER_MS;
+  if (young) return now + (changed ? 500 : Math.min(1_000, nextCheckDelay(attempts)));
+  return now + (changed ? 2_000 : nextCheckDelay(attempts));
 }
 
 /** Which unsettled orders to read now: due ones, oldest first, at most `limit` (no order is starved by newer ones). */

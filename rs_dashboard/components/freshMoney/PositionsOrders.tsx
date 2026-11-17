@@ -273,7 +273,8 @@ export default function PositionsOrders({ state, broker, armed, inflight, canClo
                 const filledLots = o.lot > 0 ? o.filledQty / o.lot : o.filledQty;
                 return (
                   <tr key={o.id} className="border-t border-zinc-800 hover:bg-zinc-800/40">
-                    <td className={`${TD} text-zinc-400`}>{istTime(o.ts)}</td>
+                    <td className={`${TD} text-zinc-400`}
+                      title={o.seenAt !== undefined ? `Fill seen here +${((o.seenAt - o.ts) / 1000).toFixed(1)} s after sending` : undefined}>{istTime(o.ts)}</td>
                     <td className={TD}><span className="rounded bg-zinc-800 px-1 text-[10px] font-bold uppercase text-zinc-300">{brokerLabel(o.broker ?? 'dhan')}</span></td>
                     <td className={`${TD} font-bold text-zinc-200`}>{contract(o)}</td>
                     <td className={TD}>

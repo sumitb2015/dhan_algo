@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildPositions, bookNet, closeQty, cutClose, MISSING_CONFIRM_MS, type MissingSeen, recentOrders, contractHold, dueForCheck, effectiveState, nextCheckDelay, sessionGate, slices, stateFromBroker,
+  buildPositions, bookNet, closeQty, cutClose, MISSING_CONFIRM_MS, type MissingSeen, recentOrders, contractHold, dueForCheck, effectiveState, nextCheckDelay, nextReadAt, SENDING_RECHECK_MS, YOUNG_ORDER_MS, sessionGate, slices, stateFromBroker,
   unconfirmedQty, brokerUnits, inFlightReducing, contractSettling, reconcileDownQty, UNCONFIRMED_COUNT_MS, RECONCILE_GRACE_MS, hhmmToMin, sessionMessage, NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, PENDING_HOLD_MS, type FmOrder,
 } from './freshMoneyTrades.ts';
 
@@ -154,6 +154,29 @@ test('order re-reads are due oldest first, capped, with backoff', () => {
   assert.deepEqual(dueForCheck([c, b, a, done], new Map(), now, 10).map(o => o.id), ['a', 'b', 'c']);
   assert.equal(nextCheckDelay(1), 4_000);
   assert.equal(nextCheckDelay(20), 60_000);
+});
+
+test('a read during the send never parks the order until it turns stale (2026-11-17: fills shown ~30 s late)', () => {
+  const ts = 5_000_000;
+  const sending = ord({ ts, state: 'sending', orderId: null, filledQty: 0, avgPrice: null });
+  // Read 100 ms into the broker call: re-checked within SENDING_RECHECK_MS, not at ts + SENDING_STALE_MS.
+  const at = nextReadAt(sending, ts + 100, 0, false);
+  assert.ok(at <= ts + 100 + SENDING_RECHECK_MS, `next read ${at - ts} ms after send`);
+  assert.ok(at < ts + SENDING_STALE_MS);
+  // Never past the moment it can turn UNKNOWN.
+  assert.equal(nextReadAt(sending, ts + SENDING_STALE_MS - 100, 0, false), ts + SENDING_STALE_MS);
+  // Once the id is back and the order is young: read again within a second.
+  const placed = { ...sending, orderId: 'K1', state: 'pending' as const };
+  assert.ok(nextReadAt(placed, ts + 300, 0, false) <= ts + 1_300);
+  assert.equal(nextReadAt(placed, ts + 300, 0, true), ts + 800);
+  // A stale no-id order (UNKNOWN) is looked up every 2 s until its hold has run out, then backs off.
+  assert.equal(nextReadAt(sending, ts + SENDING_STALE_MS + 1, 3, false), ts + SENDING_STALE_MS + 1 + 2_000);
+  const late = ts + UNKNOWN_HOLD_MS + 60_000 + 1;
+  assert.equal(nextReadAt(sending, late, 2, false), late + nextCheckDelay(2));
+  // An aged order with an id keeps the old backoff.
+  const aged = ts + YOUNG_ORDER_MS + 1;
+  assert.equal(nextReadAt(placed, aged, 3, false), aged + nextCheckDelay(3));
+  assert.equal(nextReadAt(placed, aged, 3, true), aged + 2_000);
 });
 
 test('session gate: NSE opens 09:15-15:17 IST, closes only to 15:30, nothing on a holiday', () => {
