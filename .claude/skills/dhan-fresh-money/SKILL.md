@@ -185,3 +185,11 @@ slope / acceleration / z-scores. Only the **PCR pill** is spot-centred (`lib/cum
 shifted inward / narrowed at the recorded edge, `clipped` -> asterisk). The picker width is `maxWings`, derived from the
 strikes the day's file really holds (collectors record ATM +-20 from 2026-11-16, +-10 before; the fixed set is widened,
 never re-centred per poll, because Fresh Money's `_prev_close.json` sidecar covers that fixed set).
+Route rules (2026-11-17, `app/api/options/iv-history/route.ts`, helpers in `lib/cumulativeOiPcr.ts`): the window comes
+from `sharedRun` (the strikes every snapshot holds; if a restart ever shares NO strike with the earlier snapshots the
+series starts at that restart and the reply carries `since`). Only `completeSnapshots` are summed: a half-written
+snapshot or one with a blank OI inside the window is left out, never plotted as an OI drop (a blank parses to 0 in
+`parseNumber`; `ceOiKnown` / `peOiKnown` carry the difference). Rows with a damaged timestamp are dropped at parse
+(2026-11-13 13:01:55 had one with junk before the time). `despikeSpots` thresholds are a share of the price, not NIFTY
+points. The reply's `drift` (spot vs the window centre, in strikes; `outside` once spot leaves the window) is shown as
+a chip on the widget, because the series does NOT follow spot. Replies are `private, no-cache`.

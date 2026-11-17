@@ -44,6 +44,12 @@ interface CumulativeResponse {
   maxWings?: number;
   /** Put ÷ call OI on a window centred on the latest spot (the chart itself stays on the locked-ATM window). */
   pcr?: { value: number | null; centre: number; wings: number; clipped: boolean } | null;
+  /** The latest spot against the fixed window's centre, in strikes; `outside` once it has left the window. */
+  drift?: { strikes: number; outside: boolean } | null;
+  /** "HH:MM" the series starts at when it cannot cover the whole day (the recorded strike set moved too far). */
+  since?: string | null;
+  /** Snapshots left out as incomplete (half-written, or a blank OI inside the window). */
+  dropped?: number;
   data: TimePoint[];
   regime?: RegimeSnapshot;
   error?: string;
@@ -243,6 +249,21 @@ export default function CumulativeOiWidget({ underlying }: CumulativeOiWidgetPro
               <ShieldCheck className="w-2.5 h-2.5" />
               <span>{regime.label}</span>
             </div>
+          )}
+
+          {/* The series stays on the opening ATM's strikes by design; say how far spot has moved from them. */}
+          {data?.drift && (
+            <span data-testid="coi-window"
+              className={`hidden sm:inline px-1.5 py-0.5 rounded bg-zinc-950 border border-zinc-800 text-[10px] font-mono tabular-nums ${
+                data.drift.outside ? 'text-rose-400' : Math.abs(data.drift.strikes) * 2 > shownWings ? 'text-amber-300' : 'text-zinc-300'}`}
+              title={`The lines sum a FIXED window: ${data.atm} ±${shownWings} strikes, locked at the day's first snapshot (it does not follow spot, so the series never changes membership). `
+                + (data.drift.outside ? 'Spot has LEFT this window: the lines describe strikes away from the price. '
+                  : `Spot is ${Math.abs(data.drift.strikes)} strike${Math.abs(data.drift.strikes) === 1 ? '' : 's'} ${data.drift.strikes >= 0 ? 'above' : 'below'} its centre. `)
+                + 'The PCR pill is centred on the latest spot.'
+                + (data.since ? ` Series starts ${data.since}: the recorded strikes moved too far to join the earlier part of the day.` : '')
+                + (data.dropped ? ` ${data.dropped} incomplete snapshot${data.dropped === 1 ? '' : 's'} left out.` : '')}>
+              {data.atm} {data.drift.strikes > 0 ? '+' : ''}{data.drift.strikes}{data.drift.outside ? ' out' : ''}{data.since ? ` · ${data.since}→` : ''}
+            </span>
           )}
 
           {/* PCR & Net Diff Pills */}

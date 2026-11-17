@@ -4,7 +4,7 @@ import fs from 'fs';
 import { computeRegimeSeries, type RegimeInputPoint } from '@/lib/optionsRegime';
 import { PROJECT_ROOT, runPythonJson, dedupe } from '@/lib/pyExec';
 import { listDates, resolveCsvPath } from '@/lib/ivSnapshotFiles';
-import { commonStrikeBand, lockedAtm, recordedWings, snapshotBand, spotCentredPcr } from '@/lib/cumulativeOiPcr';
+import { completeSnapshots, despikeSpots, lockedAtm, recordedWings, sharedRun, snapshotBand, spotCentredPcr, windowDrift } from '@/lib/cumulativeOiPcr';
 
 const BUILD_SCRIPT = path.join(PROJECT_ROOT, 'scripts', 'tools', 'build_oi_snapshots.py');
 
@@ -37,6 +37,9 @@ function todayIST(): string {
 function orNull(n: number): number | null {
   return Number.isFinite(n) && n !== 0 ? n : null;
 }
+
+/** A snapshot row's timestamp, exactly: "YYYY-MM-DD HH:MM:SS". */
+const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
 function parseNumber(s: string): number {
   const n = parseFloat(s);
@@ -137,6 +140,9 @@ export async function GET(request: NextRequest) {
       CE_LTP:       parseNumber(get('CE_LTP')),
       CE_IV:        parseNumber(get('CE_IV')),
       CE_OI:        parseNumber(get('CE_OI')),
+      // Whether the file really holds an OI here (a blank parses to 0 above, which the cumulative series must not sum).
+      ceOiKnown:    Number.isFinite(parseFloat(get('CE_OI'))),
+      peOiKnown:    Number.isFinite(parseFloat(get('PE_OI'))),
       CE_change_OI: parseNumber(get('CE_change_OI')),
       CE_volume:    parseNumber(get('CE_volume')),
       CE_bid:       parseNumber(get('CE_bid')),
@@ -157,7 +163,9 @@ export async function GET(request: NextRequest) {
       PE_theta:     parseNumber(get('PE_theta')),
       PE_vega:      parseNumber(get('PE_vega')),
     };
-  }).filter(r => !isNaN(r.strike));
+  // A row with a damaged timestamp is not a snapshot (2026-11-13 13:01:55: one row written with junk before the time,
+  // which then counted as a snapshot of its own with a single strike).
+  }).filter(r => !isNaN(r.strike) && TIMESTAMP_RE.test(r.timestamp));
 
   if (allRows.length === 0) {
     return NextResponse.json({ success: false, error: 'No valid rows in CSV' }, { status: 404 });
@@ -173,12 +181,22 @@ export async function GET(request: NextRequest) {
   // ── Cumulative OI mode ────────────────────────────────────────────
   if (mode === 'cumulative') {
     // The collector records ATM ±N (±10 until 2026-11-13, ±20 after), but a restart re-locks ATM and appends to the same
-    // file, so one day can hold two strike sets. Clamp to the strikes EVERY snapshot holds, so the series never sums
-    // fewer strikes early in the day than late (a silent step in the totals and the regime z-scores).
-    const band = commonStrikeBand(allRows);
-    const maxWings = band ? recordedWings(band.lo, band.hi, atm, strikeStep) : 1;
+    // file, so one day can hold several strike sets. The series uses the strikes EVERY snapshot holds, so it never sums
+    // fewer strikes early in the day than late (a silent step in the totals and the regime z-scores). If a restart ever
+    // lands so far away that it shares no strike with the earlier snapshots, the series starts at that restart.
+    const run = sharedRun(allRows);
+    const winAtm = run ? (lockedAtm(allRows, run.from, strikeStep) ?? atm) : atm;
+    const maxWings = run ? recordedWings(run.band.lo, run.band.hi, winAtm, strikeStep) : 1;
     const clampedWings = Math.min(Math.max(wings, 1), maxWings);
     const wingRange = clampedWings * strikeStep;
+    // Only snapshots that hold the whole window with every OI known: one the collector is still writing, or one with a
+    // blank OI, would plot as an OI drop and feed it to the regime.
+    const complete = completeSnapshots(
+      allRows.map(r => ({ timestamp: r.timestamp, strike: r.strike, ceOI: r.ceOiKnown ? r.CE_OI : null, peOI: r.peOiKnown ? r.PE_OI : null })),
+      run?.from ?? '', winAtm - wingRange, winAtm + wingRange, 2 * clampedWings + 1);
+    const allTs = new Set<string>();
+    for (const r of allRows) if (!run || r.timestamp >= run.from) allTs.add(r.timestamp);
+    const dropped = allTs.size - complete.size;
 
     // Group by timestamp, sum OI for strikes within atm±wings.
     // LTP is tracked as an OI-weighted sum (divided by total OI below) rather than
@@ -190,7 +208,7 @@ export async function GET(request: NextRequest) {
       ceChgOI: number; peChgOI: number;
     }>();
     for (const row of allRows) {
-      if (Math.abs(row.strike - atm) > wingRange) continue;
+      if (!complete.has(row.timestamp) || Math.abs(row.strike - winAtm) > wingRange) continue;
       const existing = byTs.get(row.timestamp);
       if (existing) {
         existing.ceOI += row.CE_OI;
@@ -217,16 +235,8 @@ export async function GET(request: NextRequest) {
     // move never reverts within one snapshot, so any point that jumps away
     // from both neighbours while its neighbours stay close to each other is
     // swapped for their average rather than plotted as-is.
-    const spikeJump = 12;     // points — bigger than a normal 30s NIFTY move
-    const neighborClose = 10; // points — how close the two flanking reads must be
-    const spots = sorted.map(([, v]) => v.spot);
-    for (let i = 1; i < spots.length - 1; i++) {
-      const prev = spots[i - 1], cur = spots[i], next = spots[i + 1];
-      if (Math.abs(cur - prev) > spikeJump && Math.abs(cur - next) > spikeJump
-          && Math.abs(prev - next) < neighborClose) {
-        sorted[i][1].spot = (prev + next) / 2;
-      }
-    }
+    const spots = despikeSpots(sorted.map(([, v]) => v.spot));   // thresholds are a share of the price (any underlying)
+    spots.forEach((v, k) => { sorted[k][1].spot = v; });
 
     const regimeInput: RegimeInputPoint[] = sorted.map(([, v]) => ({
       spot: v.spot,
@@ -257,15 +267,22 @@ export async function GET(request: NextRequest) {
     // constant strike set) it can follow spot: centred on the latest spot, inside the recorded strikes.
     const lastTs = sorted.length ? sorted[sorted.length - 1][0] : null;
     const lastRows = lastTs ? allRows.filter(r => r.timestamp === lastTs).map(r => ({ strike: r.strike, ceOI: r.CE_OI, peOI: r.PE_OI })) : [];
-    const lastSpot = sorted.length ? sorted[sorted.length - 1][1].spot : atm;
+    const lastSpot = sorted.length ? sorted[sorted.length - 1][1].spot : winAtm;
     const lastBand = lastTs ? snapshotBand(allRows, lastTs) : null;   // the latest snapshot's own recorded strikes
     const pcr = lastRows.length && lastBand
       ? spotCentredPcr(lastRows, lastSpot, strikeStep, clampedWings, lastBand.lo, lastBand.hi) : null;
 
     const response = NextResponse.json({
-      success: true, date, atm, expiry, wings: clampedWings, maxWings, pcr, data, regime,
+      success: true, date, atm: winAtm, expiry, wings: clampedWings, maxWings, pcr, data, regime,
+      // How far the latest spot is from the fixed window's centre (the series does not follow spot).
+      drift: sorted.length ? windowDrift(lastSpot, winAtm, strikeStep, clampedWings) : null,
+      // Set when the series could not cover the whole day (see sharedRun): the time it starts at.
+      since: run && !run.whole ? run.from.slice(11, 16) : null,
+      // Snapshots left out as incomplete (half-written, or a blank OI inside the window).
+      dropped,
     });
-    response.headers.set('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=60');
+    // Behind login and polled live: never stored by a shared cache, always revalidated.
+    response.headers.set('Cache-Control', 'private, no-cache');
     return response;
   }
 
@@ -375,7 +392,8 @@ export async function GET(request: NextRequest) {
       atm, expiry, strikes: strikeSet, selectedStrike: nearest,
       series, skew, surface, summary,
     });
-    response.headers.set('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=60');
+    // Behind login and polled live: never stored by a shared cache, always revalidated.
+    response.headers.set('Cache-Control', 'private, no-cache');
     return response;
   }
 
@@ -392,6 +410,7 @@ export async function GET(request: NextRequest) {
   const response = NextResponse.json({
     success: true, date, atm, expiry, strikes: strikeSet, selectedStrike: nearest, data,
   });
-  response.headers.set('Cache-Control', 'public, s-maxage=30, stale-while-revalidate=60');
+  // Behind login and polled live: never stored by a shared cache, always revalidated.
+    response.headers.set('Cache-Control', 'private, no-cache');
   return response;
 }
