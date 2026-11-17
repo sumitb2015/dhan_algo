@@ -18,6 +18,7 @@ import type { LevelCell } from './freshMoney/LevelEntry';
 import { usePageBroker } from './BrokerPicker';
 import { readPref, readPrefOf, savePref as writePref } from '@/lib/localPref';
 import { openBurst } from '@/lib/freshMoneyOpen';
+import { liveIdsParam, withLiveLtps } from '@/lib/freshMoneyLivePrices';
 import { isRegularSession } from '@/lib/nseHolidays';
 import { NSE_WINDOW } from '@/lib/freshMoneyTrades';
 import { istToday, istMinuteOfDay } from '@/lib/istTime';
@@ -50,7 +51,8 @@ const NO_EXITS: ExitDefaultsUi = { target: null, sl: null };
 
 /** A remembered spec, re-validated (a hand-edited or old value is dropped, never used). */
 const specOrNull = (v: unknown): ExitSpec | null => { const r = validateExitSpec(v); return r && !('error' in r) ? r : null; };
-const LIVE_POLL_MS = 2_000;
+/** The live poll: spot, the board strikes' and the open positions' WebSocket LTPs (a 5-30 ms file read on the server). */
+const LIVE_POLL_MS = 1_000;
 /** Fallback chart span (NSE) until the board reply says which session it covers. */
 const NSE_DAY = { from: 9 * 60 + 15, to: 15 * 60 + 30 };
 
@@ -458,7 +460,9 @@ function TopMark({ side, at }: { side: 'put' | 'call'; at: string | null }) {
   );
 }
 
-function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, view, round, line, topPut, topCall, hover, onHover, showPcr, lv, priceAsOf }: {
+function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, view, round, line, topPut, topCall, hover, onHover, showPcr, lv, priceAsOf, livePut, liveCall }: {
+  /** WebSocket LTPs for this strike's PE / CE (undefined = none fresh; the snapshot price is shown). */
+  livePut?: number; liveCall?: number;
   /** Slot cells' view (flow tab). `round`: a round strike, drawn bolder on every tab; `line`: with a faint line above it
    *  (not where the header or the spot divider already draws one). `topPut` / `topCall`: this strike is the session's
    *  biggest OI builder on that side (flow tab only). */
@@ -530,7 +534,7 @@ function BoardRowView({ row, max, boxed, trade, mode, fs, unit, scale, view, rou
       )}
       {cell('put')}
       <StrikeCell strike={row.strike} boxed={boxed} round={round} pcr={showPcr ? pcrOf(row) : undefined} lv={lv}
-        price={priceAsOf !== undefined ? { put: p, call: c, asOf: priceAsOf } : undefined} />
+        price={priceAsOf !== undefined ? { put: p, call: c, asOf: priceAsOf, livePut, liveCall } : undefined} />
       {cell('call')}
       {mode === 'delta' ? (
         // Δ OI tab: the right panel is left empty (the difference is on the left).
@@ -585,9 +589,11 @@ function LevelTags({ tags, lv }: { tags: LevelTag[]; lv: NonNullable<LevelInfo> 
 }
 
 /** The strike cell: [DH / DL / PDH / PDL tag] strike [PCR (put OI ÷ call OI) when the PCR column is on]. */
-/** An option's price beside the strike: its last price from the board snapshot, green / red against its previous close. */
-function OptPrice({ side, s, asOf }: { side: 'put' | 'call'; s: FreshMoneyRow['put']; asOf: string }) {
-  const ltp = s?.ltp ?? null, pc = s?.prevClose ?? null;
+/** An option's price beside the strike: the live WebSocket LTP when there is a fresh one, else the board snapshot's last
+ *  price; green / red against its previous close. */
+function OptPrice({ side, s, asOf, live }: { side: 'put' | 'call'; s: FreshMoneyRow['put']; asOf: string; live?: number }) {
+  const isLive = live !== undefined && live > 0;
+  const ltp = isLive ? live : s?.ltp ?? null, pc = s?.prevClose ?? null;
   const chg = ltp !== null && pc !== null && pc > 0 ? ltp - pc : null;
   const tone = chg === null || Math.abs(chg) < 1e-9 ? 'text-zinc-300' : chg > 0 ? 'text-emerald-400' : 'text-red-400';
   return (
@@ -596,7 +602,7 @@ function OptPrice({ side, s, asOf }: { side: 'put' | 'call'; s: FreshMoneyRow['p
       title={ltp === null ? `${side === 'put' ? 'PE' : 'CE'} price unknown`
         : `${side === 'put' ? 'PE' : 'CE'} last price ${ltp.toFixed(2)}`
           + (chg !== null ? ` · prev close ${pc!.toFixed(2)} · ${chg >= 0 ? '+' : ''}${chg.toFixed(2)} (${chg >= 0 ? '+' : ''}${((chg / pc!) * 100).toFixed(1)} %)` : '')
-          + ` · board snapshot ${asOf}`}>
+          + (isLive ? ' · live (WebSocket)' : ` · board snapshot ${asOf} (no live price)`)}>
       {ltp === null ? '–' : ltp.toFixed(2)}
     </span>
   );
@@ -605,7 +611,7 @@ function OptPrice({ side, s, asOf }: { side: 'put' | 'call'; s: FreshMoneyRow['p
 function StrikeCell({ strike, boxed, round, pcr, lv, price }: {
   strike: number; boxed: boolean; round: boolean; pcr: number | null | undefined; lv: LevelInfo;
   /** The row's sides and the snapshot time when the price columns are on; undefined = off. */
-  price?: { put: FreshMoneyRow['put']; call: FreshMoneyRow['call']; asOf: string };
+  price?: { put: FreshMoneyRow['put']; call: FreshMoneyRow['call']; asOf: string; livePut?: number; liveCall?: number };
 }) {
   const box = (
     <span className={`px-2 leading-[18px] ${boxed ? 'border border-sky-400 bg-sky-500/15 font-bold text-white' : round ? 'border border-transparent font-bold text-zinc-100' : 'border border-transparent text-zinc-300'}`}>
@@ -618,7 +624,7 @@ function StrikeCell({ strike, boxed, round, pcr, lv, price }: {
   const tags = lv?.tags.get(strike);
   return (
     <span style={grid}>
-      {price && <OptPrice side="put" s={price.put} asOf={price.asOf} />}
+      {price && <OptPrice side="put" s={price.put} asOf={price.asOf} live={price.livePut} />}
       {lv && (tags ? <LevelTags tags={tags} lv={lv} /> : <span />)}
       <span className="flex justify-center">{box}</span>
       {pcr !== undefined && (
@@ -626,7 +632,7 @@ function StrikeCell({ strike, boxed, round, pcr, lv, price }: {
           {fmtPcr(pcr)}
         </span>
       )}
-      {price && <OptPrice side="call" s={price.call} asOf={price.asOf} />}
+      {price && <OptPrice side="call" s={price.call} asOf={price.asOf} live={price.liveCall} />}
     </span>
   );
 }
@@ -665,12 +671,14 @@ function PriceChip({ underlying, q, fallback }: { underlying: string; q: FreshMo
 
 /** The strike ladder (all tabs). It owns the slot tab's hover crosshair, so moving the mouse across the cells re-renders
  *  only the ladder, not the trade bar, positions panel or the Cumulative OI chart. */
-function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTrade, spot, liveSpot, totals, scale, view, showPcr, showPrice, today }: {
+function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTrade, spot, liveSpot, totals, scale, view, showPcr, showPrice, livePrices, today }: {
   /** Slot cells: numbers, heat or both (flow tab). */
   view: FlowView;
   showPcr: boolean;
   /** PE / CE price columns beside the strike. */
   showPrice: boolean;
+  /** WebSocket LTPs by `"strike:opt"` (today's board only); the snapshot price is the fallback. */
+  livePrices: Readonly<Record<string, number>> | null;
   /** Today's high / low of the board's price (live, for DH / DL); null when the board is not today's or not known. */
   today: { high: number | null; low: number | null } | null;
   data: FreshMoneyResponse; oiMode: OiMode; tradeMode: boolean; fs: FlowSlots; maxAbs: number; boxedStrike: number | null;
@@ -759,7 +767,8 @@ function Ladder({ data, oiMode, tradeMode, fs: fsAll, maxAbs, boxedStrike, rowTr
             <BoardRowView row={r} max={maxAbs} boxed={r.strike === boxedStrike} trade={rowTrade(r.strike)} mode={oiMode}
               fs={fs} unit={data.oiUnit} scale={flowCellScale} view={view} round={round}
               line={round && i > 0 && !afterDivider} topPut={tops.put === r.strike} topCall={tops.call === r.strike}
-              hover={hover} onHover={setHover} showPcr={showPcr} lv={lv} priceAsOf={priceAsOf} />
+              hover={hover} onHover={setHover} showPcr={showPcr} lv={lv} priceAsOf={priceAsOf}
+              livePut={livePrices?.[`${r.strike}:PE`]} liveCall={livePrices?.[`${r.strike}:CE`]} />
             {divider && <SpotDivider spot={spot!} live={liveSpot !== null} />}
           </React.Fragment>
         );
@@ -973,21 +982,28 @@ export default function FreshMoneyBoard() {
   // Live spot from the WebSocket (today's board only: a live price over an old session's OI would mislead). Falls back
   // to the board snapshot's spot when there is no fresh WebSocket price.
   // Polled whenever a board is shown (the header price); the board itself uses it only on today's board.
-  const [live, setLive] = useState<{ key: string; q: FreshMoneyLive } | null>(null);
+  const [live, setLive] = useState<{ key: string; q: FreshMoneyLive; at: number } | null>(null);
   const liveKey = data ? `${underlying}|${data.expiry}` : null;
+  // The open positions' contracts ride on the same poll (their WebSocket LTPs re-price the P&L between trade polls).
+  const liveIdsRef = useRef('');
+  useEffect(() => { liveIdsRef.current = liveIdsParam(trades.state?.positions ?? []); }, [trades.state]);
   useEffect(() => {
     if (!liveKey) return;
     const [u, expiry] = liveKey.split('|');
     let alive = true;
     let my = 0;
+    let applied = 0;
     const tick = async () => {
       if (document.hidden) return;
       const n = ++my;
       try {
-        const r = await fetch(`/api/fresh-money/live?underlying=${u}&expiry=${expiry}`, { cache: 'no-store' });
+        const ids = liveIdsRef.current;
+        const r = await fetch(`/api/fresh-money/live?underlying=${u}&expiry=${expiry}${ids ? `&ids=${encodeURIComponent(ids)}` : ''}`, { cache: 'no-store' });
         const j = (await r.json()) as FreshMoneyLive;
-        if (!alive || n !== my) return;
-        setLive({ key: liveKey, q: j });
+        // Drop only a reply OLDER than one shown (dropping all but the newest starves a 1 s poll; see useFreshMoneyTrades).
+        if (!alive || n < applied) return;
+        applied = n;
+        setLive({ key: liveKey, q: j, at: Date.now() });
       } catch { /* keep the last value; the next tick retries */ }
     };
     tick();
@@ -1031,6 +1047,18 @@ export default function FreshMoneyBoard() {
     }
     if (ev.sound) play(ev.sound);
   }, [ts, leaderRef, play]);
+  // What the screen shows: the trade state with position LTP / P&L re-priced at the 1 s live poll's WebSocket LTPs
+  // (lib/freshMoneyLivePrices.ts), so they no longer step only with the 2 s trade poll. DISPLAY ONLY: sounds and toasts
+  // above diff the server's own state, and every order, close and exit is decided on the server.
+  const liveIdLtps = liveQ?.idLtps ?? null;
+  const tsView = useMemo(() => {
+    if (!ts || !liveIdLtps) return ts;
+    const positions = withLiveLtps(ts.positions, liveIdLtps);
+    if (positions === ts.positions) return ts;
+    const ltpSource = { ...ts.ltpSource };
+    for (const id of Object.keys(liveIdLtps)) ltpSource[id] = 'ws';
+    return { ...ts, positions, ltpSource };
+  }, [ts, liveIdLtps]);
   const tradable = !!ts?.tradable.includes(underlying);
   const tradeExpiry = ts?.boardExpiry[underlying] ?? null;
   // Orders only from a live board: today's snapshot, and the expiry the server will trade.
@@ -1080,7 +1108,7 @@ export default function FreshMoneyBoard() {
   // This underlying's positions on every expiry: they all count in the bar's P&L.
   // The bar and the board show the selected broker; positions on other brokers are listed under the bar.
   const underlyingPositions = useMemo(
-    () => (ts?.positions ?? []).filter(p => p.underlying === underlying && p.broker === broker), [ts, underlying, broker]);
+    () => (tsView?.positions ?? []).filter(p => p.underlying === underlying && p.broker === broker), [tsView, underlying, broker]);
   // On the board: the board's expiry AND a strike the board has a row for. Everything else that is still open is listed
   // under the bar (with its own ×) — a position must never become invisible because spot moved or the expiry rolled.
   const boardStrikes = useMemo(() => new Set((data?.rows ?? []).map(r => r.strike)), [data]);
@@ -1091,8 +1119,8 @@ export default function FreshMoneyBoard() {
   );
   const offBoard = useMemo(() => {
     const on = new Set(myPositions.map(p => p.key));
-    return (ts?.positions ?? []).filter(p => p.netQty !== 0 && !on.has(p.key));
-  }, [ts, myPositions]);
+    return (tsView?.positions ?? []).filter(p => p.netQty !== 0 && !on.has(p.key));
+  }, [tsView, myPositions]);
   const posByKey = useMemo(() => new Map(myPositions.map(p => [`${p.strike}:${p.opt}`, p] as const)), [myPositions]);
   const tradeMode = armed || myPositions.length > 0;
   const { order: sendOrder, close: sendClose, setExit, inflight, arm, cancelEntry } = trades;
@@ -1118,7 +1146,7 @@ export default function FreshMoneyBoard() {
       showButtons: armed && tradable,
       canOrder: armed && tradable && !blocked,
       canClose: armed && session !== 'closed',
-      ltpSource: ts?.ltpSource ?? {},
+      ltpSource: tsView?.ltpSource ?? {},
       exits: ts?.exits ?? {},
       armed,
       // The order buttons trade the selected product; × closes the position shown, in its own product.
@@ -1140,7 +1168,7 @@ export default function FreshMoneyBoard() {
         cancel: cancelEntry,
       },
     };
-  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, setExit, lots, product, ts, exitDefaults,
+  }, [tradeMode, data, posByKey, armed, tradable, blocked, session, inflight, underlying, broker, sendOrder, sendClose, setExit, lots, product, ts, tsView, exitDefaults,
     levelOn, toggleLevel, entriesByStrike, liveSpot, levelPriceName, exitText, arm, cancelEntry]);
   const showTradeBar = !!(data && ts);
   const openCount = ts ? ts.positions.filter(p => p.netQty !== 0).length : 0;
@@ -1257,7 +1285,7 @@ export default function FreshMoneyBoard() {
                 broker={broker} onBroker={setBroker} brokerReady={brokerReady} brokerSessions={ts.brokers ?? null}
                 exitDefaults={exitDefaults} onExitDefaults={pickExitDefaults}
                 exitWatcher={ts.exitWatcher ?? null} hasExits={Object.keys(ts.exits ?? {}).length > 0}
-                globalExit={ts.global ?? null} allPositions={ts.positions} onSetGlobal={trades.setGlobal}
+                globalExit={ts.global ?? null} allPositions={tsView?.positions ?? ts.positions} onSetGlobal={trades.setGlobal}
                 exitAll={<ExitAllButton count={openCount} busy={trades.exitingAll} onExit={trades.exitAll} />}
               />
             )}
@@ -1416,6 +1444,7 @@ export default function FreshMoneyBoard() {
 
             <Ladder data={data} oiMode={oiMode} tradeMode={tradeMode} fs={fs} maxAbs={maxAbs} boxedStrike={boxedStrike}
               rowTrade={rowTrade} spot={spot} liveSpot={liveSpot} totals={flowTotals} scale={flowCellScale} view={flowView} showPcr={showPcr} showPrice={showPrice}
+              livePrices={data.isToday ? liveQ?.optionLtps ?? null : null}
               today={data.isToday && liveQ ? { high: liveQ.dayHigh ?? null, low: liveQ.dayLow ?? null } : null} />
 
           </div>
@@ -1424,7 +1453,7 @@ export default function FreshMoneyBoard() {
         {/* Positions sit right under the board: mid-trade they matter more than the chart below. */}
         {ts && (
           <PositionsOrders
-            state={ts} broker={broker} armed={armed} inflight={inflight} onClose={sendClose} onSetExit={setExit} onCancelEntry={cancelEntry}
+            state={tsView} broker={broker} armed={armed} inflight={inflight} onClose={sendClose} onSetExit={setExit} onCancelEntry={cancelEntry}
             collapsed={posCollapsed} onToggle={togglePos}
             canClose={p => (ts.sessions[p.underlying]?.gate ?? 'closed') !== 'closed' && !!ts.brokers?.[p.broker]}
           />

@@ -3,7 +3,10 @@ import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { istMinuteOfDay, istToday } from '@/lib/istTime';
 import { isRegularSession } from '@/lib/nseHolidays';
 import { mcxSession } from '@/lib/mcxSession';
-import { pickPrevClose, spotInstrument, wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
+import { pickPrevClose, spotInstrument, wsPrice, wsSync, wsWant, type WsSegment } from '@/lib/freshMoneyWs';
+import { resolveOption } from '@/lib/pnfContracts';
+import { todaysBoard } from '@/lib/freshMoneyTradeServer';
+import { parseLiveIds } from '@/lib/freshMoneyLivePrices';
 import { fetchLatestPrevClose } from '@/lib/dhanDailyCloses';
 import { globalOnce } from '@/lib/globalOnce';
 
@@ -30,6 +33,47 @@ export interface FreshMoneyLive {
    *  carries the previous session's range, which PDH / PDL already show) or when the feed has none. */
   dayHigh: number | null;
   dayLow: number | null;
+  /** WebSocket LTP per board strike, `"25450:CE"` → price (today's live board only; a contract with no fresh WebSocket
+   *  price is left out). The page's Price column; display only. */
+  optionLtps?: Record<string, number>;
+  /** WebSocket LTP per position contract asked for in `ids` (by priceId). The page re-prices position LTP / P&L with
+   *  it between trade-state polls (lib/freshMoneyLivePrices.ts); display only — exits use the server's own prices. */
+  idLtps?: Record<string, number>;
+}
+
+/** The board's strike contracts (`"strike:opt"` → contract), built once per underlying / expiry / strike set: the
+ *  master-list lookup is a scan, and this route is polled every second. */
+const boardContracts = globalOnce('__fmLiveBoardContracts', () => new Map<string, { sig: string; map: Map<string, { segment: WsSegment; id: string }> }>());
+
+function contractsFor(underlying: string, expiry: string, strikes: Set<number>): Map<string, { segment: WsSegment; id: string }> {
+  const sorted = [...strikes].sort((a, b) => a - b);
+  const sig = sorted.join(',');
+  const hit = boardContracts.get(`${underlying}|${expiry}`);
+  if (hit && hit.sig === sig) return hit.map;
+  const map = new Map<string, { segment: WsSegment; id: string }>();
+  for (const k of sorted) {
+    for (const opt of ['CE', 'PE'] as const) {
+      const c = resolveOption(underlying, expiry, k, opt);
+      if (c && (c.segment === 'NSE_FNO' || c.segment === 'MCX_COMM')) map.set(`${k}:${opt}`, { segment: c.segment, id: c.securityId });
+    }
+  }
+  boardContracts.set(`${underlying}|${expiry}`, { sig, map });
+  return map;
+}
+
+/** Board strike + position LTPs from the WebSocket (subscribing them as a side effect, kept alive by this poll). */
+async function optionPrices(underlying: string, expiry: string, ids: ReturnType<typeof parseLiveIds>, opened: boolean) {
+  const optionLtps: Record<string, number> = {};
+  const idLtps: Record<string, number> = {};
+  const board = opened ? await todaysBoard(underlying).catch(() => null) : null;
+  const strikes = board && board.expiry === expiry ? contractsFor(underlying, expiry, board.strikes) : null;
+  const keyOf = new Map<string, string>();
+  if (strikes) for (const [sk, c] of strikes) keyOf.set(sk, wsWant(c.segment, c.id));
+  const idKeys = ids.map(i => [i.id, wsWant(i.segment, i.id)] as const);
+  if (keyOf.size || idKeys.length) wsSync();
+  for (const [sk, k] of keyOf) { const q = wsPrice(k); if (q && q.ltp > 0) optionLtps[sk] = q.ltp; }
+  for (const [id, k] of idKeys) { const q = wsPrice(k); if (q && q.ltp > 0) idLtps[id] = q.ltp; }
+  return { optionLtps, idLtps };
 }
 
 const prevCache: Map<string, { date: string; prev: number }> =
@@ -91,8 +135,11 @@ export async function GET(req: NextRequest) {
   if (!inst) return NextResponse.json(empty);
   const key = wsWant(inst.segment, inst.securityId);
   wsSync();
+  // Option prices only once today's session has opened: before that the bridge would replay yesterday's last ticks.
+  const opened = sessionOpenedToday(mcx);
+  const opts = await optionPrices(underlying, expiry, parseLiveIds(sp.get('ids')), opened);
   const q = wsPrice(key);
-  if (!q) return NextResponse.json({ ...empty, label: inst.label, instrument: key });
+  if (!q) return NextResponse.json({ ...empty, label: inst.label, instrument: key, ...opts });
 
   const today = istToday();
   const live = inSession(mcx);
@@ -104,8 +151,8 @@ export async function GET(req: NextRequest) {
   // means no in-session reading today, so go to the daily candles.
   if (!live && cachedToday === null) fillFromCandles(key, inst.securityId, inst.segment, today);
   const change = prev ? q.ltp - prev : null;
-  const opened = sessionOpenedToday(mcx);
   return NextResponse.json({
+    ...opts,
     underlying, label: inst.label, spot: q.ltp, prevClose: prev,
     change, changePct: prev && change !== null ? (change / prev) * 100 : null,
     changedMs: q.changedMs, instrument: key,
