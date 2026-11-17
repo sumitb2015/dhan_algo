@@ -65,16 +65,19 @@ const BAR_CLASS: Record<'put' | 'call', Record<'fill' | 'outline', string>> = {
 // The strike column's width is the CSS var --fm-k (set by the Ladder), so the optional PCR column beside the strike can
 // widen it (PCR_PX) without a second set of grid strings.
 const GRID = 'grid grid-cols-[minmax(0,1fr)_var(--fm-num,76px)_var(--fm-k,96px)_var(--fm-num,76px)_minmax(0,1fr)] items-center';
-// With trading on, a cell each side of the strike holds B / S, the P&L chip and × (literal string for Tailwind).
-const GRID_TRADE = 'grid grid-cols-[minmax(0,1fr)_var(--fm-num,76px)_204px_var(--fm-k,80px)_204px_var(--fm-num,76px)_minmax(0,1fr)] items-center';
+// With trading on, a cell each side of the strike holds B / S, the P&L chip and × (literal string for Tailwind; TRADE_PX).
+const GRID_TRADE = 'grid grid-cols-[minmax(0,1fr)_var(--fm-num,76px)_272px_var(--fm-k,80px)_272px_var(--fm-num,76px)_minmax(0,1fr)] items-center';
 // Slot-flow tab: the same grids plus a block of slot cells (38 px each; up to 10 completed slots + the running one) on each
 // outer edge, and 96 px number columns (the streak badge sits beside the number: "▲10 +99,999"). The block's width and
 // cell count are CSS variables set by the Ladder from the width it has (see slotsThatFit), so the call-side slots never
 // scroll off to the right on a narrower screen: older slots are dropped instead. The block also holds one "earlier" cell
 // at its outer end (OI change before the first shown slot), so a row's cells add up to its OI Δ today.
 const GRID_FLOW = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_var(--fm-k,96px)_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
-const GRID_FLOW_TRADE = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_204px_var(--fm-k,80px)_204px_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
+const GRID_FLOW_TRADE = 'grid grid-cols-[var(--fm-slots)_minmax(0,1fr)_96px_272px_var(--fm-k,80px)_272px_96px_minmax(0,1fr)_var(--fm-slots)] items-center';
 const SLOT_CELL_PX = 38;
+/** Each trade cell (L / B / S, target, ×, and the position chip "S6 NRML −1,26,042"); keep in step with the 272px in GRID_TRADE
+ *  and GRID_FLOW_TRADE. At 204 px the chip ran over the OI number beside it (2026-11-17). */
+const TRADE_PX = 272;
 /** Extra strike-column width for the PCR beside the strike ("26.35"). */
 const PCR_PX = 44;
 /** Number column on the "OI + Δ" tab: total OI plus today's change chip ("1.3L +12k"); 76 px elsewhere (non-flow grids). */
@@ -97,7 +100,7 @@ function strikeGrid(l: StrikeLayout): React.CSSProperties | undefined {
 const MIN_SLOT_CELLS = 4;
 /** Width of everything on a flow-tab row except the two slot blocks: the fixed columns plus a 120 px minimum per bar. */
 const flowFixedPx = (trade: boolean, l: StrikeLayout = NO_EXTRAS) =>
-  (trade ? 96 + 204 + 204 + 96 : 96 * 2) + strikeColPx(trade, l) + 2 * 120 + 2 * SLOT_CELL_PX;
+  (trade ? 96 + 2 * TRADE_PX + 96 : 96 * 2) + strikeColPx(trade, l) + 2 * 120 + 2 * SLOT_CELL_PX;
 /** How many slot cells per side fit in `width` px (at least MIN_SLOT_CELLS — narrower than that scrolls — at most `max`). */
 function slotsThatFit(width: number, trade: boolean, max: number, l: StrikeLayout = NO_EXTRAS): number {
   const n = Math.floor((width - flowFixedPx(trade, l)) / (2 * SLOT_CELL_PX));

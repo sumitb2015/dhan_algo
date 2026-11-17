@@ -591,7 +591,7 @@ export function TradeCell({
     : '';
 
   const chip = showChip ? (
-    <span title={title} className={`flex items-center gap-0.5 rounded px-1.5 text-[12px] font-bold tabular-nums leading-5 ${
+    <span title={title} className={`flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded px-1.5 text-[12px] font-bold tabular-nums leading-5 ${
       held ? (pos!.netQty > 0 ? 'bg-emerald-600/15' : 'bg-red-600/15') : 'bg-zinc-800'} ${pnlClass(pos!.pnl)}`}>
       {held && <span className="text-[9px] font-bold text-zinc-300">{pos!.netQty > 0 ? 'L' : 'S'}{lotsHeld}</span>}
       {pos!.product === 'NRML' && <span className="text-[9px] font-bold text-amber-300">NRML</span>}
@@ -646,9 +646,9 @@ export function TradeCell({
       blockedWhy={canOrder ? null : (blockedWhy ?? 'Orders are not open right now')} onClose={() => setTicket(null)} />
   ) : null;
   return side === 'put' ? (
-    <span className="flex items-center justify-end gap-1 pr-1">{chip}{exitBtn}{closeBtn}{buttons}{ticketEl}</span>
+    <span className="flex min-w-0 items-center justify-end gap-1 overflow-hidden pr-1">{chip}{exitBtn}{closeBtn}{buttons}{ticketEl}</span>
   ) : (
-    <span className="flex items-center justify-start gap-1 pl-1">{buttons}{closeBtn}{exitBtn}{chip}{ticketEl}</span>
+    <span className="flex min-w-0 items-center justify-start gap-1 overflow-hidden pl-1">{buttons}{closeBtn}{exitBtn}{chip}{ticketEl}</span>
   );
 }
 
