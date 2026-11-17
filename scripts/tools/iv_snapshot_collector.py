@@ -86,6 +86,123 @@ def minutes_since_midnight(dt: datetime) -> int:
     return dt.hour * 60 + dt.minute
 
 
+# The collector gets ready this long before the open (expiry, spot, strike window), so the first chain read starts AT
+# the open instead of after the setup calls. No EOD chain call is made inside this lead either: DhanHelper spaces
+# option-chain calls 3 s apart, and that slot must be free at 09:15:00 (the Fresh Money board takes no order until
+# today's first snapshot exists).
+PREP_LEAD_S = 45
+
+
+# The first snapshot of the day unlocks orders on the Fresh Money board and is the day's OI baseline, so it must be
+# today's session, not what the chain still showed before the open. A pre-open reading of the chain is kept per index
+# (chain_signature); at the open the first row is written once the chain differs from it, re-reading for at most
+# FIRST_SNAPSHOT_WAIT_S and then writing anyway with a warning (never blocked for good). DhanHelper caches a chain for
+# 5 s, so a re-read waits CHAIN_CACHE_S, and the pre-open reading is never taken inside the last BASELINE_MIN_LEAD_S
+# (the 09:15:00 read would otherwise be served that cached pre-open chain).
+FIRST_SNAPSHOT_WAIT_S = 11
+CHAIN_CACHE_S = 5.2
+BASELINE_MIN_LEAD_S = 9
+
+
+def chain_signature(oc: dict) -> dict:
+    """Per strike: (CE volume, CE last price, PE volume, PE last price) over the WHOLE chain. Any trade changes it."""
+    sig = {}
+    for k, v in (oc or {}).items():
+        ce, pe = (v or {}).get('ce') or {}, (v or {}).get('pe') or {}
+        sig[k] = (ce.get('volume'), ce.get('last_price'), pe.get('volume'), pe.get('last_price'))
+    return sig
+
+
+def first_live_chain(fetch, oc, baseline, wait_s=FIRST_SNAPSHOT_WAIT_S, retry_s=CHAIN_CACHE_S,
+                     sleep=time.sleep, clock=time.monotonic):
+    """The chain to write as the day's FIRST snapshot: `oc` when it already differs from the pre-open `baseline` (or
+    there is none: started after the open, or the pre-open read failed); otherwise re-read until it differs or `wait_s`
+    has passed. Returns (oc, live) — live False = still the pre-open picture, written anyway."""
+    if not baseline:
+        return oc, True
+    deadline = clock() + wait_s
+    while chain_signature(oc) == baseline:
+        if clock() + retry_s > deadline:
+            return oc, False
+        sleep(retry_s)
+        try:
+            nxt = fetch()
+        except Exception as e:  # noqa: BLE001 — a failed re-read is tried again until the deadline
+            log.warning('First-snapshot re-read failed: %s', e)
+            nxt = None
+        if nxt:
+            oc = nxt
+    return oc, True
+
+
+def recentre(state: dict, spot: float) -> bool:
+    """Centre the strike window on `spot` (used once, before the day's first write: the window was built from a
+    pre-open price). True when it moved."""
+    step = state['cfg']['step']
+    atm = int(round(spot / step) * step)
+    if atm == state['atm']:
+        return False
+    state['atm'] = atm
+    state['strikes'] = [atm + i * step for i in range(-ATM_RANGE, ATM_RANGE + 1)]
+    return True
+
+
+def chain_oc(helper, state) -> dict:
+    cfg = state['cfg']
+    data = helper.get_option_chain(cfg['chain_id'], state['expiry'], exchange_segment=cfg['chain_seg'])
+    return data.get('oc', {}) if data else {}
+
+
+def seconds_to_open(now: datetime) -> float:
+    """Seconds (not whole minutes) until MARKET_OPEN today; <= 0 once the market is open."""
+    open_dt = now.replace(hour=MARKET_OPEN[0], minute=MARKET_OPEN[1], second=0, microsecond=0)
+    return (open_dt - now).total_seconds()
+
+
+def prepare_for_open(helper, active, args, today, eod_tick, now=None, sleep=time.sleep):
+    """Wait for the open, with every index initialised BEFORE it: returns (states, pending).
+
+    1. More than PREP_LEAD_S to go: the EOD-OI task ticks, then sleep (at most a minute at a time).
+    2. Inside the lead (or at once when started late / with --ignore-market-hours): expiry, spot and strike window per
+       index. One that cannot start yet goes to `pending` and is retried by the poll loop; it is never dropped.
+    3. Sleep exactly to the open. Nothing is written here: no snapshot row ever carries a pre-open time.
+    """
+    now = now or ist_now
+    wait = not args.ignore_market_hours
+    while wait:
+        left = seconds_to_open(now())
+        if left <= PREP_LEAD_S:
+            break
+        eod_tick()
+        left = seconds_to_open(now())
+        if left > PREP_LEAD_S:
+            log.info('Market not open yet — %d s to go', int(left))
+            sleep(min(60.0, left - PREP_LEAD_S))
+    states, pending = {}, []
+    for u in active:
+        st = init_underlying(helper, u, TARGETS[u], args, len(active), today, sleep=sleep)
+        if st:
+            states[u] = st
+        else:
+            pending.append(u)
+    if wait:
+        # A pre-open reading of each chain, to tell today's session from it at the open (see first_live_chain).
+        for u, st in states.items():
+            if seconds_to_open(now()) < BASELINE_MIN_LEAD_S:
+                break
+            try:
+                oc = chain_oc(helper, st)
+                if oc:
+                    st['pre_open_sig'] = chain_signature(oc)
+            except Exception as e:  # noqa: BLE001 — no baseline = the first snapshot is written without the check
+                log.warning('[%s] Pre-open chain read failed: %s', u, e)
+        left = seconds_to_open(now())
+        if left > 0:
+            log.info('Ready for the open — first snapshot in %.1f s', left)
+            sleep(left)
+    return states, pending
+
+
 def is_before_open(dt: datetime) -> bool:
     open_mins = MARKET_OPEN[0] * 60 + MARKET_OPEN[1]
     return minutes_since_midnight(dt) < open_mins
@@ -369,26 +486,11 @@ def main():
     # Tried during the pre-open wait and between polls, one chain call at a time, until Dhan has rolled it.
     eod_task = EodOiTask([] if args.dry_run else active_underlyings, date.today())
 
-    # Wait for market open
-    if not args.ignore_market_hours:
-        while is_before_open(ist_now()):
-            eod_task.tick(helper)
-            now = ist_now()
-            wait_mins = (MARKET_OPEN[0] * 60 + MARKET_OPEN[1]) - minutes_since_midnight(now)
-            log.info('Market not open yet — sleeping %d min', wait_mins)
-            time.sleep(min(wait_mins * 60, 60))
-
-    # Resolve expiries, spots, and strikes for each active underlying. One that cannot start yet stays pending and is
-    # retried every cycle — it is never dropped for the day.
+    # Wait for the open with expiries, spots and strikes already resolved, so the first snapshot starts at 09:15:00
+    # (see prepare_for_open). One index that cannot start yet stays pending and is retried every cycle — it is never
+    # dropped for the day.
     today = date.today()
-    underlying_states = {}
-    pending = []
-    for u in active_underlyings:
-        st = init_underlying(helper, u, TARGETS[u], args, len(active_underlyings), today)
-        if st:
-            underlying_states[u] = st
-        else:
-            pending.append(u)
+    underlying_states, pending = prepare_for_open(helper, active_underlyings, args, today, lambda: eod_task.tick(helper))
     if pending:
         log.warning('Not started yet (retried every cycle): %s', pending)
 
@@ -412,10 +514,7 @@ def main():
 
         ts = now.strftime('%Y-%m-%d %H:%M:%S')
 
-        if pending:
-            retry_pending(helper, pending, underlying_states, args, today)
-
-        for u, state in underlying_states.items():
+        for u, state in list(underlying_states.items()):
             cfg = state['cfg']
             try:
                 # Refresh spot
@@ -424,8 +523,20 @@ def main():
                     state['last_good_spot'] = fetched_spot
                 live_spot = state['last_good_spot']
 
-                chain_data = helper.get_option_chain(cfg['chain_id'], state['expiry'], exchange_segment=cfg['chain_seg'])
-                oc = chain_data.get('oc', {}) if chain_data else {}
+                oc = chain_oc(helper, state)
+
+                if oc and not state.get('written'):
+                    # The day's first snapshot: today's session only, on a strike window centred on the live price.
+                    oc, live = first_live_chain(lambda st=state: chain_oc(helper, st), oc, state.get('pre_open_sig'))
+                    if not live:
+                        log.warning('[%s] Chain still shows the pre-open picture after %d s — writing it anyway', u, FIRST_SNAPSHOT_WAIT_S)
+                    ts = ist_now().strftime('%Y-%m-%d %H:%M:%S')
+                    if state.get('pre_open_sig') is not None:
+                        fresh = helper.get_ltp(cfg['spot_id'], exchange='IDX_I', instrument='INDEX')
+                        if fresh and fresh > 0:
+                            state['last_good_spot'] = live_spot = fresh
+                        if recentre(state, live_spot):
+                            log.info('[%s] Strike window re-centred on the opening price: ATM=%d', u, state['atm'])
 
                 if not oc:
                     log.warning('[%s %s] Empty option chain response', u, ts)
@@ -441,12 +552,19 @@ def main():
                         state['need_header'] = False
                         log.info('[%s %s] Wrote %d rows (spot=%.2f)', u, ts, len(rows), live_spot)
 
+                    state['written'] = True   # the first-snapshot check runs once (a dry run counts)
+
                 # Pace between underlying chain calls to avoid 429
                 time.sleep(1.0)
 
             except Exception as exc:
                 consecutive_failures += 1
                 log.error('[%s %s] Error: %s', u, ts, exc)
+
+        # After the reads, never before them: a retry's expiry lookup shares DhanHelper's 3 s option-chain slot, which
+        # must be free for the first read at the open.
+        if pending:
+            retry_pending(helper, pending, underlying_states, args, today)
 
         iteration += 1
         eod_task.tick(helper)

@@ -678,3 +678,58 @@ test('level entries: LVL strike opens the ticket (limit vs stop by side of price
   await expect(page.getByTestId('fm-lvl-ce').first()).toHaveAttribute('aria-pressed', 'false');
   expect(m.blocked).toEqual([]);
 });
+
+// The NSE open: the buttons need the session gate AND today's first snapshot. The page's normal polls are 10 s (trade
+// state) and 30 s (board); around 09:15 it re-reads both every second instead (lib/freshMoneyOpen.ts), so the buttons
+// enable within a couple of seconds of the server reporting the open, with no reload. Nothing is ordered here.
+test('NSE open: B / S enable within seconds of 09:15 without a reload (1 s polls around the open)', async ({ page }) => {
+  await page.clock.install({ time: new Date('2026-11-17T09:14:53+05:30') });
+  let open = false;
+  let boardReads = 0;
+  const flow = { cells: [], day: 0 };
+  const nifty = () => ({
+    underlying: 'NIFTY', date: open ? '2026-11-17' : '2026-11-16', isToday: open,
+    lastTs: open ? '2026-11-17 09:15:01' : '2026-11-16 15:29:30', spot: 25010, expiry: '2026-11-17', step: 50,
+    lot: 65, oiUnit: 'lots', market: 'NSE', day: { from: 555, to: 930 }, hasBuildup: false,
+    rows: [25100, 25050, 25000, 24950].map(strike => ({ strike, put: side(4000, 300, flow), call: side(3000, -200, flow) })),
+    flowSlots: { slotMin: 3, bounds: [], boundOk: [], lastTs: '', dayAt: null },
+  });
+  const gate = () => (open ? { gate: 'open', note: null } : { gate: 'closed', note: 'NSE closed — orders are taken 09:15-15:30 IST' });
+  const blocked: string[] = [];
+  await page.addInitScript(() => {
+    localStorage.setItem('freshMoney.underlying', 'NIFTY');
+    localStorage.setItem('freshMoney.broker', 'dhan');
+  });
+  await page.route('**/api/**', async (route: Route) => {
+    const req = route.request();
+    const p = new URL(req.url()).pathname;
+    if (p === '/api/fresh-money') { boardReads++; return json(route, nifty()); }
+    if (p === '/api/fresh-money/live') return json(route, { underlying: 'NIFTY', label: 'NIFTY', spot: null });
+    if (p === '/api/fresh-money/trade' && req.method() === 'GET') {
+      return json(route, {
+        date: '2026-11-17', tradable: ['NIFTY', 'BANKNIFTY'], maxLots: 20, maxPositionLots: 60,
+        sessions: { NIFTY: gate(), BANKNIFTY: gate() }, boardExpiry: { NIFTY: '2026-11-17', BANKNIFTY: null },
+        ltpSource: {}, brokers: { dhan: true, kotak: true, zerodha: true }, positions: [], orders: [], exits: {},
+        exitWatcher: { alive: true, at: Date.now() }, entries: [],
+      });
+    }
+    if (req.method() !== 'GET') { blocked.push(`${req.method()} ${p}`); return route.fulfill({ status: 599, body: 'blocked by test' }); }
+    return route.continue();
+  });
+  await page.goto('/options/fresh-money');
+  await expect(page.getByText('25000').first()).toBeVisible();
+  await page.getByRole('button', { name: /Arm live trading/ }).click();
+  const buy = page.getByRole('button', { name: 'Buy 25000 CE' });
+  await expect(buy).toBeDisabled();                       // market closed, yesterday's board
+  // 09:14:55 onward the page polls every second while it is still blocked.
+  const before = boardReads;
+  await expect.poll(() => boardReads - before, { timeout: 8_000 }).toBeGreaterThanOrEqual(2);
+  open = true;                                            // the server: session open + today's first snapshot written
+  await expect(buy).toBeEnabled({ timeout: 4_000 });      // far inside the 10 s / 30 s polls
+  // Once usable, the burst stops: the board is not read every second any more.
+  await page.waitForTimeout(600);
+  const settled = boardReads;
+  await page.waitForTimeout(3_000);
+  expect(boardReads - settled).toBeLessThanOrEqual(1);
+  expect(blocked).toEqual([]);
+});

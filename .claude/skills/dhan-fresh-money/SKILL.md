@@ -48,6 +48,18 @@ positions read twice", "board price snaps back to the startup value", "OI change
   the previous close per side; it sits at the BAR's outer end and every slots-tab bar reserves that room (`room`), so
   the marked bar is not shorter. Round strikes (`isRoundStrike`: 100s on a 50 step, 500s on a 100 step) are bold on ALL
   tabs with an inset-shadow line above (no layout shift; skipped under the header and the spot divider).
+- The NSE open (2026-11-17; timing unconfirmed until a real open): the buttons need the session gate AND today's first
+  snapshot (`todaysBoard`). (1) `iv_snapshot_collector.py` `prepare_for_open` resolves expiry / spot / strikes inside
+  the last 45 s BEFORE 09:15 (no EOD chain call in that lead) and sleeps to the open in seconds, so the first chain read
+  starts at 09:15:00 (it used to wake up to a minute late, then set up). No row is written before the open. The first
+  row must be TODAY's session: a pre-open `chain_signature` is kept per index and `first_live_chain` re-reads (5.2 s
+  apart: DhanHelper caches a chain 5 s, so the pre-open read is never taken in the last 9 s either) until the chain
+  differs, at most 11 s, then writes with a warning. The strike window is re-centred on the opening price before that
+  first write (`recentre`). `retry_pending` runs AFTER the reads (its expiry lookup shares the helper's 3 s chain slot).
+  (2) The page polls board + trade state every second from 09:14:55 to 09:17 while still blocked by anything the open
+  resolves (`lib/freshMoneyOpen.ts` `openBurst`; not for a logged-out broker or watch-only SENSEX), and re-reads both
+  when a background tab becomes visible. The board `load` drops only replies OLDER than one shown (`applied`), never
+  "all but the newest" (1 s polls would starve it). Server still re-checks every order. MCX is not covered.
 - Lots / Units switch (NSE only, pref `freshMoney.oiUnits`): the route always serves lots; the page scales a VIEW of
   the rows with `scaleOiRows(rows, lot)` (`rawData` -> `data`). Display only: never scale anything an order reads.
   Dhan's web chain shows units; its "Per Lot" checkbox MULTIPLIES OI by the lot size (meant for prices), so it is no

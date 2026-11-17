@@ -17,7 +17,10 @@ import { entryActive, type FmEntry } from '@/lib/freshMoneyEntries';
 import type { LevelCell } from './freshMoney/LevelEntry';
 import { usePageBroker } from './BrokerPicker';
 import { readPref, readPrefOf, savePref as writePref } from '@/lib/localPref';
-import { istMinuteOfDay } from '@/lib/istTime';
+import { openBurst } from '@/lib/freshMoneyOpen';
+import { isRegularSession } from '@/lib/nseHolidays';
+import { NSE_WINDOW } from '@/lib/freshMoneyTrades';
+import { istToday, istMinuteOfDay } from '@/lib/istTime';
 import CollectorControl from './freshMoney/CollectorControl';
 import PositionsOrders from './freshMoney/PositionsOrders';
 import type { SetExitFn } from './freshMoney/ExitInputs';
@@ -846,6 +849,10 @@ export default function FreshMoneyBoard() {
   const trades = useFreshMoneyTrades(onOrderWarn);
   const [now, setNow] = useState(() => Date.now());
   const seq = useRef(0);
+  /** The newest board request whose reply (or error) is on screen, and the underlying the page shows now. */
+  const applied = useRef(0);
+  const underlyingRef = useRef<Underlying>(underlying);
+  useEffect(() => { underlyingRef.current = underlying; }, [underlying]);
 
   // Restore preferences after mount (SSR renders the defaults).
   useEffect(() => {
@@ -871,19 +878,25 @@ export default function FreshMoneyBoard() {
     } catch { /* a bad saved value = no defaults */ }
   }, []);
 
+  // A reply is dropped only when it is for another underlying or OLDER than one already shown. "Only the newest request"
+  // would starve the board around the open, where it is re-read every second: a reply slower than a second would always
+  // be superseded and thrown away (the trade state poll had the same fault; see useFreshMoneyTrades).
   const load = useCallback(async (u: Underlying, signal?: AbortSignal) => {
     const my = ++seq.current;
+    const stale = () => u !== underlyingRef.current || my < applied.current;
     try {
       const res = await fetch(`/api/fresh-money?underlying=${u}`, { cache: 'no-store', signal });
       const body = await res.json();
-      if (my !== seq.current) return; // a newer request (or underlying switch) superseded this one
+      if (stale()) return;
+      applied.current = my;
       if (!res.ok || body.error) { setError(body.error ?? `HTTP ${res.status}`); setData(null); }
       else { setData(body as FreshMoneyResponse); setError(null); }
     } catch (e) {
-      if (my !== seq.current || (e as Error).name === 'AbortError') return;
+      if (stale() || (e as Error).name === 'AbortError') return;
+      applied.current = my;
       setError(String((e as Error).message ?? e));
     } finally {
-      if (my === seq.current) { setLoading(false); setNow(Date.now()); }
+      if (my === applied.current) { setLoading(false); setNow(Date.now()); }
     }
   }, []);
 
@@ -901,6 +914,7 @@ export default function FreshMoneyBoard() {
     setData(null);
     setError(null);
     setArmed(false);
+    underlyingRef.current = u;   // a reply for the old underlying still in flight is dropped at once
     setUnderlying(u);
     writePref(PREF_UNDERLYING, u);
   };
@@ -1030,6 +1044,39 @@ export default function FreshMoneyBoard() {
       : isStale ? 'Board snapshot is stale — orders paused until the collector writes again'
         : tradeExpiry !== data.expiry ? "The board's expiry is changing — wait for the next refresh"
           : null;
+  // Around the NSE open the normal polls (board 30 s, trade state 10 s) are far too slow: the buttons need the session
+  // gate AND today's first snapshot, both of which appear within a second or two of 09:15:00. So from 5 s before the
+  // open the page re-reads both once a second until trading is unblocked (lib/freshMoneyOpen.ts); no timer otherwise.
+  // The server still re-checks every order (session, today's board, staleness).
+  // "Still blocked" = anything the open resolves: no board on screen (a failed read must not end the polling), or any
+  // blocked reason (session, yesterday's board, a stale board, the trade state's expiry not caught up yet). Not while
+  // the broker is logged out (polling cannot fix that) or on a watch-only index (SENSEX: never tradable).
+  const waitingForOpen = !isMcx && (!ts || (tradable && !!ts.brokers[broker])) && (!data || blocked !== null);
+  const waitingRef = useRef(false);
+  useEffect(() => { waitingRef.current = waitingForOpen; }, [waitingForOpen]);
+  const refreshTrades = trades.refresh;
+  useEffect(() => {
+    if (isMcx) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // One self-rescheduling timer: every second inside the window, otherwise asleep until the next window starts
+    // (re-checked at least hourly, so a laptop that slept or a clock change cannot leave it pointing at the wrong time).
+    const step = () => {
+      const b = openBurst(Date.now(), NSE_WINDOW.open);
+      if (b.active && waitingRef.current && !document.hidden && isRegularSession(istToday())) {
+        load(underlying);
+        refreshTrades();
+      }
+      timer = setTimeout(step, b.active ? 1_000 : Math.min(b.startsInMs, 3_600_000));
+    };
+    step();
+    return () => { if (timer) clearTimeout(timer); };
+  }, [isMcx, underlying, load, refreshTrades]);
+  // Coming back to a background tab: re-read both at once instead of waiting for the next 10 s / 30 s tick.
+  useEffect(() => {
+    const onVisible = () => { if (!document.hidden) { load(underlying); refreshTrades(); } };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [underlying, load, refreshTrades]);
   // This underlying's positions on every expiry: they all count in the bar's P&L.
   // The bar and the board show the selected broker; positions on other brokers are listed under the bar.
   const underlyingPositions = useMemo(

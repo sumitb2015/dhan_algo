@@ -68,6 +68,8 @@ export interface TradeApi {
   arm: (o: { broker: FmBroker; underlying: string; expiry: string; strike: number; opt: OptType; side: TxnSide; lots: number; product: FmProduct; exitDefaults: ExitDefaultsUi; level: number; expect: EntryKind }) => Promise<boolean>;
   /** Cancel an armed level entry. */
   cancelEntry: (e: FmEntry) => Promise<void>;
+  /** Re-read the trade state now (the page calls it every second around the open, and when the tab comes back). */
+  refresh: () => Promise<void>;
 }
 
 /** `onWarn` is called when an order or close THIS tab sent comes back rejected, UNKNOWN or partly sent (the page plays
@@ -259,7 +261,7 @@ export function useFreshMoneyTrades(onWarn?: () => void): TradeApi {
     }
   }, [refresh]);
 
-  return { state, inflight, order, close, setExit, setGlobal, exitAll, exitingAll, arm, cancelEntry };
+  return { state, inflight, order, close, setExit, setGlobal, exitAll, exitingAll, arm, cancelEntry, refresh };
 }
 
 // ── header Exit all ──────────────────────────────────────────────────────────────────────────────────────────────
