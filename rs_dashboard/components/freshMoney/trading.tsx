@@ -14,7 +14,7 @@ import { toast } from 'sonner';
 import { Minus, Plus, X, ShieldAlert, Loader2, Target } from 'lucide-react';
 import { sendOrderRequest, UNKNOWN_ORDER_HINT } from '@/lib/orderOutcome';
 import type { FreshMoneyTradeState } from '@/app/api/fresh-money/trade/route';
-import type { FmBroker, FmPosition, FmProduct, OptType, TxnSide } from '@/lib/freshMoneyTrades';
+import { shownTotals, type FmBroker, type FmPosition, type FmProduct, type OptType, type ShownSum, type TxnSide } from '@/lib/freshMoneyTrades';
 import { BrokerPicker } from '@/components/BrokerPicker';
 import type { ExitSpec, FmExit } from '@/lib/freshMoneyExits';
 import type { FmGlobalExit } from '@/lib/freshMoneyGlobalExit';
@@ -48,6 +48,19 @@ export function fmtRs(n: number | null): string {
 }
 
 const pnlClass = (n: number | null) => (n === null ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : n < 0 ? 'text-red-400' : 'text-zinc-300');
+
+/** Why a "?" sits beside a P&L figure. */
+export const PARTIAL_PNL_TITLE = 'Leaves out what has no price yet: a close made outside this page (being looked up in the broker\'s order book), '
+  + 'a fill whose price is pending, or a position with no live price. The total target / stop-loss waits until every price is known.';
+
+/** A display total (lib/freshMoneyTrades.ts shownTotals): the known part, with an amber "?" when something is missing. */
+export function ShownRs({ s, big = false, plain = false }: { s: ShownSum; big?: boolean; plain?: boolean }) {
+  return (
+    <span className={`${plain ? '' : 'font-bold'} ${big ? 'text-[14px]' : ''} ${pnlClass(s.value)}`} title={s.partial ? PARTIAL_PNL_TITLE : undefined}>
+      {fmtRs(s.value)}{s.partial && <span className="ml-0.5 text-amber-300">?</span>}
+    </span>
+  );
+}
 
 const newKey = () => `fm-${typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}${Math.random()}`}`;
 
@@ -358,15 +371,9 @@ export function TradeBar({
 
   // The combined P&L over every position (all brokers / underlyings) the global target / SL works on: once per render.
   const allTotal = totalPnl(allPositions);
-  const totals = useMemo(() => {
-    let realised: number | null = 0, open: number | null = 0, openCount = 0;
-    for (const p of positions) {
-      realised = realised === null || p.realised === null ? null : realised + p.realised;
-      if (p.netQty !== 0) openCount++;
-      open = open === null || p.unrealised === null ? null : open + p.unrealised;
-    }
-    return { realised, open, pnl: open === null || realised === null ? null : realised + open, openCount };
-  }, [positions]);
+  // Display totals: the known part with a "?" when a price is missing (an unpriced outside close no longer blanks them).
+  // The global target / SL decides on totalPnl, which stays unknown until every price is known.
+  const totals = useMemo(() => shownTotals(positions), [positions]);
 
   return (
     <div className={`flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-4 py-2 ${armed ? 'border-red-500/40 bg-red-600/10' : 'border-zinc-800 bg-zinc-950/40'}`}>
@@ -461,9 +468,9 @@ export function TradeBar({
         <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500" title={`P&L of ${underlying} positions on ${brokerLabel(broker)} from this page`}>
           {underlying} · {brokerLabel(broker)}
         </span>
-        <span className="text-zinc-400">Open <span className={`font-bold ${pnlClass(totals.open)}`}>{fmtRs(totals.open)}</span></span>
-        <span className="text-zinc-400">Booked <span className={`font-bold ${pnlClass(totals.realised)}`}>{fmtRs(totals.realised)}</span></span>
-        <span className="text-zinc-300">P&amp;L <span className={`text-[14px] font-bold ${pnlClass(totals.pnl)}`}>{fmtRs(totals.pnl)}</span></span>
+        <span className="text-zinc-400">Open <ShownRs s={totals.open} /></span>
+        <span className="text-zinc-400">Booked <ShownRs s={totals.booked} /></span>
+        <span className="text-zinc-300">P&amp;L <ShownRs s={totals.pnl} big /></span>
         {exitAll}
       </div>
 
@@ -587,15 +594,17 @@ export function TradeCell({
   const unpriced = pos ? pos.realised === null || (held && pos.avgPrice === null) : false;
   const lotsHeld = pos && pos.lot > 0 ? Math.abs(pos.netQty) / pos.lot : 0;
   const title = pos
-    ? `${held ? `${pos.product} · ${pos.netQty > 0 ? 'Long' : 'Short'} ${lotsHeld} lot${lotsHeld === 1 ? '' : 's'} @ ${pos.avgPrice?.toFixed(2) ?? 'price pending'} · LTP ${pos.ltp?.toFixed(2) ?? '–'}${pos.ltp != null && ltpSource ? (ltpSource === 'ws' ? ' (live)' : ' (REST)') : ''} · ` : ''}booked ${fmtRs(pos.realised)}${pos.realised === null ? ' (a fill price is still pending)' : ''}${pos.busy === 'unknown' ? ' · an order has UNKNOWN status' : ''}${exit ? ` · ${exitLevelsText(exit)}` : ''}`
+    ? `${held ? `${pos.product} · ${pos.netQty > 0 ? 'Long' : 'Short'} ${lotsHeld} lot${lotsHeld === 1 ? '' : 's'} @ ${pos.avgPrice?.toFixed(2) ?? 'price pending'} · LTP ${pos.ltp?.toFixed(2) ?? '–'}${pos.ltp != null && ltpSource ? (ltpSource === 'ws' ? ' (live)' : ' (REST)') : ''} · ` : ''}booked ${fmtRs(pos.realised ?? pos.bookedKnown ?? null)}${pos.realised === null ? ' so far (a close or fill price is still being looked up — not counted yet)' : ''}${pos.busy === 'unknown' ? ' · an order has UNKNOWN status' : ''}${exit ? ` · ${exitLevelsText(exit)}` : ''}`
     : '';
 
+  // The known part when a price is missing (shown with the "?"), never a blank: display only, exits decide on pos.pnl.
+  const chipPnl = pos ? (pos.pnl ?? shownTotals([pos]).pnl.value) : null;
   const chip = showChip ? (
     <span title={title} className={`flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded px-1.5 text-[12px] font-bold tabular-nums leading-5 ${
-      held ? (pos!.netQty > 0 ? 'bg-emerald-600/15' : 'bg-red-600/15') : 'bg-zinc-800'} ${pnlClass(pos!.pnl)}`}>
+      held ? (pos!.netQty > 0 ? 'bg-emerald-600/15' : 'bg-red-600/15') : 'bg-zinc-800'} ${pnlClass(chipPnl)}`}>
       {held && <span className="text-[9px] font-bold text-zinc-300">{pos!.netQty > 0 ? 'L' : 'S'}{lotsHeld}</span>}
       {pos!.product === 'NRML' && <span className="text-[9px] font-bold text-amber-300">NRML</span>}
-      {fmtRs(pos!.pnl ?? (held ? null : pos!.realised))}
+      {fmtRs(chipPnl)}
       {(pos!.busy === 'unknown' || unpriced) && <span className="text-amber-300">?</span>}
       {/* Target / SL state is shown by the Target button beside the chip (sky = set, amber = needs a look). */}
     </span>

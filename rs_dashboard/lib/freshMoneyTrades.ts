@@ -52,6 +52,8 @@ export interface FmOrder {
   externalOrderIds?: string[];
   /** External record: order-book look-ups tried so far (stops after a few; unknown then stays unknown). */
   priceTries?: number;
+  /** The matching rule those tries were made under (a newer rule starts its own count). */
+  priceRule?: number;
   correlationId: string;
   orderId: string | null;
   state: OrderState;
@@ -91,7 +93,28 @@ export interface FmPosition {
   ltp: number | null;
   unrealised: number | null;
   pnl: number | null;         // realised + unrealised (null when either side is unknown)
+  /** DISPLAY ONLY: rupees booked by the closes whose prices ARE known (= realised when nothing is missing). Shown with a
+   *  "?" when realised is null, so one unpriced outside close does not blank the whole P&L. Never decide on it: exits
+   *  and the global target / SL use realised / pnl, which stay null (unknown) until every price is known. */
+  bookedKnown?: number;
   busy: 'pending' | 'unknown' | null; // an order on this contract is still in flight / unknown: hold new orders
+}
+
+/** A display total that may leave out what is not known yet (`partial`: show it with a "?"). Never for decisions. */
+export interface ShownSum { value: number; partial: boolean }
+
+/** Booked / open / P&L over `positions` for the screen: known parts summed, unknown parts flagged instead of blanking
+ *  the total. Decisions (the global target / SL) keep using totalPnl, which is null when anything is unknown. */
+export function shownTotals(positions: readonly Pick<FmPosition, 'realised' | 'bookedKnown' | 'unrealised' | 'netQty'>[]): { booked: ShownSum; open: ShownSum; pnl: ShownSum } {
+  const booked: ShownSum = { value: 0, partial: false };
+  const open: ShownSum = { value: 0, partial: false };
+  for (const p of positions) {
+    if (p.realised !== null) booked.value += p.realised;
+    else { booked.value += p.bookedKnown ?? 0; booked.partial = true; }
+    if (p.unrealised !== null) open.value += p.unrealised;
+    else if (p.netQty !== 0) open.partial = true;
+  }
+  return { booked, open, pnl: { value: booked.value + open.value, partial: booked.partial || open.partial } };
 }
 
 export const FM_MAX_LOTS_PER_ORDER = 20;
@@ -284,6 +307,7 @@ export function buildPositions(orders: FmOrder[], ltps: Record<string, number>, 
     const pos = a.pos;
     pos.avgPrice = pos.netQty !== 0 && a.basisKnown ? a.avg : null;
     pos.realised = a.realisedKnown ? a.realised : null;
+    pos.bookedKnown = a.realised;
     pos.busy = contractHold(orders, pos.key, now);
     const ltp = ltps[pos.priceId];
     pos.ltp = ltp > 0 ? ltp : null;

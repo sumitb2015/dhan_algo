@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  buildPositions, bookNet, closeQty, cutClose, MISSING_CONFIRM_MS, type MissingSeen, recentOrders, contractHold, dueForCheck, effectiveState, nextCheckDelay, nextReadAt, SENDING_RECHECK_MS, YOUNG_ORDER_MS, sessionGate, slices, stateFromBroker,
+  buildPositions, bookNet, closeQty, cutClose, MISSING_CONFIRM_MS, type MissingSeen, recentOrders, contractHold, dueForCheck, effectiveState, nextCheckDelay, nextReadAt, shownTotals, SENDING_RECHECK_MS, YOUNG_ORDER_MS, sessionGate, slices, stateFromBroker,
   unconfirmedQty, brokerUnits, inFlightReducing, contractSettling, reconcileDownQty, UNCONFIRMED_COUNT_MS, RECONCILE_GRACE_MS, hhmmToMin, sessionMessage, NSE_WINDOW, SENDING_STALE_MS, UNKNOWN_HOLD_MS, PENDING_HOLD_MS, type FmOrder,
 } from './freshMoneyTrades.ts';
 
@@ -422,4 +422,24 @@ test('cutClose / slices: no usable per-order cap = one order, never an endless l
   assert.deepEqual(cutClose(0, 1300), []);
   assert.deepEqual(slices(130, 0), [130]);
   assert.deepEqual(slices(0, 65), []);
+});
+
+test('display totals: an unpriced outside close leaves the known booked P&L on screen, flagged; decisions stay unknown', () => {
+  const now = 20_000_000;
+  const orders = [
+    ord({ id: 'b1', ts: 1, side: 'BUY', qty: 130, filledQty: 130, avgPrice: 200 }),
+    ord({ id: 's1', ts: 2, side: 'SELL', qty: 65, filledQty: 65, avgPrice: 230, close: true }),          // +1,950 booked
+    ord({ id: 'x1', ts: 3, side: 'SELL', qty: 65, filledQty: 65, avgPrice: null, close: true, external: true, orderId: null }),
+  ];
+  const [p] = buildPositions(orders, {}, now);
+  assert.equal(p.netQty, 0);
+  assert.equal(p.realised, null, 'decisions still see unknown');
+  assert.equal(p.pnl, null);
+  assert.equal(p.bookedKnown, 1950);
+  const t = shownTotals([p]);
+  assert.deepEqual(t.booked, { value: 1950, partial: true });
+  assert.deepEqual(t.pnl, { value: 1950, partial: true });
+  const priced = buildPositions(orders.map(o => (o.id === 'x1' ? { ...o, avgPrice: 226.25 } : o)), {}, now)[0];
+  assert.equal(priced.realised, 1950 + 26.25 * 65);
+  assert.deepEqual(shownTotals([priced]).pnl, { value: 1950 + 26.25 * 65, partial: false });
 });

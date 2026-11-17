@@ -11,9 +11,9 @@ import React, { useState } from 'react';
 import CollapseToggle from './CollapseToggle';
 import { Loader2, Pencil, X } from 'lucide-react';
 import type { FreshMoneyTradeState } from '@/app/api/fresh-money/trade/route';
-import type { FmBroker, FmPosition } from '@/lib/freshMoneyTrades';
+import { shownTotals, type FmBroker, type FmPosition } from '@/lib/freshMoneyTrades';
 import type { FmExit } from '@/lib/freshMoneyExits';
-import { brokerLabel, fmtRs, lockKey } from './trading';
+import { ShownRs, brokerLabel, fmtRs, lockKey } from './trading';
 import { istClock } from '@/lib/istTime';
 import { EXIT_STATE_LABEL, ExitEditor, exitLevelsText, exitNeedsLook, type SetExitFn } from './ExitInputs';
 import { entryActive, entryLabel, type FmEntry } from '@/lib/freshMoneyEntries';
@@ -100,12 +100,8 @@ export default function PositionsOrders({ state, broker, armed, inflight, canClo
   const otherOpen = (state?.positions ?? []).filter(p => p.broker !== broker && p.netQty !== 0).length;
   const open = positions.filter(p => p.netQty !== 0).length;
 
-  let tOpen: number | null = 0, tBooked: number | null = 0;
-  for (const p of positions) {
-    tOpen = tOpen === null || p.unrealised === null ? null : tOpen + p.unrealised;
-    tBooked = tBooked === null || p.realised === null ? null : tBooked + p.realised;
-  }
-  const tTotal = tOpen === null || tBooked === null ? null : tOpen + tBooked;
+  // Display totals: the known part, "?" when a price is missing (shownTotals); never used for a decision.
+  const tot = shownTotals(positions);
 
   const tabBtn = (id: 'positions' | 'orders', label: string, n: number) => (
     <button type="button" role="tab" aria-selected={tab === id} onClick={() => { setTab(id); if (collapsed) onToggle?.(); }}
@@ -131,9 +127,9 @@ export default function PositionsOrders({ state, broker, armed, inflight, canClo
           <span className="ml-auto text-[12px] tabular-nums text-zinc-400">
             {/* Scope differs from the trade bar (one underlying) and the Total block (everything): say which. */}
             <span className="mr-2 text-[10px] font-bold uppercase tracking-wider text-zinc-500">{brokerLabel(broker)} · all underlyings</span>
-            Open <span className={`font-bold ${pnlClass(tOpen)}`}>{fmtRs(tOpen)}</span>
-            {' · '}Booked <span className={`font-bold ${pnlClass(tBooked)}`}>{fmtRs(tBooked)}</span>
-            {' · '}P&amp;L <span className={`text-[13px] font-bold ${pnlClass(tTotal)}`}>{fmtRs(tTotal)}</span>
+            Open <ShownRs s={tot.open} />
+            {' · '}Booked <ShownRs s={tot.booked} />
+            {' · '}P&amp;L <ShownRs s={tot.pnl} big />
           </span>
         )}
       </div>
@@ -176,8 +172,8 @@ export default function PositionsOrders({ state, broker, armed, inflight, canClo
                         {p.netQty !== 0 && src && <span className="ml-1 text-[9px] font-bold uppercase text-zinc-500">{src === 'ws' ? 'live' : 'rest'}</span>}
                       </td>
                       <td className={`${TD} text-right font-bold ${pnlClass(p.unrealised)}`}>{p.netQty === 0 ? '–' : fmtRs(p.unrealised)}</td>
-                      <td className={`${TD} text-right ${pnlClass(p.realised)}`}>{fmtRs(p.realised)}</td>
-                      <td className={`${TD} text-right font-bold ${pnlClass(p.pnl)}`}>{fmtRs(p.pnl)}</td>
+                      <td className={`${TD} text-right`}><ShownRs s={shownTotals([p]).booked} plain /></td>
+                      <td className={`${TD} text-right`}><ShownRs s={shownTotals([p]).pnl} /></td>
                       <td className={TD}>
                         <span className="flex items-center gap-1">
                           <ExitCell x={x} />

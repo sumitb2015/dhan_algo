@@ -323,6 +323,10 @@ export async function reconcileWithBrokers(): Promise<void> {
 
 const EXT_PRICE_TRIES = 6;
 const EXT_PRICE_GAP_MS = 20_000;
+/** Bumped when the matching rule changes: a record the old rule gave up on gets a fresh set of tries under the new one
+ *  (2: the window opens where the position was opened from flat, 2026-11-17). */
+const EXT_PRICE_RULE = 2;
+const triesUsed = (o: FmOrder) => (o.priceRule === EXT_PRICE_RULE ? (o.priceTries ?? 0) : 0);
 
 /**
  * Give an outside close (an `external` record) its real price from the broker's order book, when exactly one reading
@@ -331,7 +335,7 @@ const EXT_PRICE_GAP_MS = 20_000;
  */
 async function priceExternalCloses(): Promise<void> {
   const now = Date.now();
-  const todo = (await loadLedger()).orders.filter(o => o.external && o.avgPrice === null && (o.priceTries ?? 0) < EXT_PRICE_TRIES);
+  const todo = (await loadLedger()).orders.filter(o => o.external && o.avgPrice === null && triesUsed(o) < EXT_PRICE_TRIES);
   for (const b of new Set(todo.map(o => o.broker ?? 'dhan'))) {
     const lastAt = (shared.lastExtPrice ??= new Map()).get(b) ?? 0;
     if (now - lastAt < EXT_PRICE_GAP_MS || !brokerSessionOk(b)) continue;
@@ -341,8 +345,9 @@ async function priceExternalCloses(): Promise<void> {
     if (!book) continue;
     await mutateLedger(l => {
       for (const o of l.orders) {
-        if (!o.external || o.avgPrice !== null || (o.broker ?? 'dhan') !== b || (o.priceTries ?? 0) >= EXT_PRICE_TRIES) continue;
-        o.priceTries = (o.priceTries ?? 0) + 1;
+        if (!o.external || o.avgPrice !== null || (o.broker ?? 'dhan') !== b || triesUsed(o) >= EXT_PRICE_TRIES) continue;
+        o.priceTries = triesUsed(o) + 1;
+        o.priceRule = EXT_PRICE_RULE;
         const hit = priceExternalClose(o, l.orders, book, productCode(b, o.product));
         if (!hit) continue;
         o.avgPrice = hit.avgPrice;
