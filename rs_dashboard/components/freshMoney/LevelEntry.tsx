@@ -88,6 +88,11 @@ export function LevelTicket({ at, strike, opt, side, cell, canArm, blockedWhy, o
   const spot = cell.spot;
   const problem = level === null ? 'Enter a level' : levelProblem(level, spot ?? NaN);
   const verdict = level !== null && spot ? classifyEntry(opt, side, level, spot) : null;
+  // The Arm button follows the BOX, not the committed level: doArm arms what the box shows (and re-checks it), so a
+  // level typed after a refused one must not leave the button disabled until focus happens to move elsewhere (a click
+  // on a disabled button does not arm, and may not even blur the box). The verdict above still waits for blur / Enter.
+  const typed = Number(draft.replace(/,/g, ''));
+  const boxProblem = !(typed > 0) ? 'Enter a level' : levelProblem(typed, spot ?? NaN);
   const armed = cell.entries.filter(e => e.opt === opt);
 
   const doArm = async () => {
@@ -165,7 +170,7 @@ export function LevelTicket({ at, strike, opt, side, cell, canArm, blockedWhy, o
         {blockedWhy && <span className="mr-auto text-[11px] text-amber-300">{blockedWhy}</span>}
         <button type="button" onClick={onClose}
           className={`${FOCUS} rounded border border-zinc-700 px-2.5 py-1 text-[11px] font-bold text-zinc-300 hover:text-white`}>Close</button>
-        <button type="button" onClick={() => void doArm()} disabled={!canArm || busy || !!problem}
+        <button type="button" onClick={() => void doArm()} disabled={!canArm || busy || !!boxProblem}
           className={`${FOCUS} flex items-center gap-1 rounded px-2.5 py-1 text-[11px] font-bold text-oncolor disabled:cursor-not-allowed disabled:opacity-40 ${
             side === 'BUY' ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-red-600 hover:bg-red-500'}`}>
           {busy && <Loader2 className="h-3 w-3 animate-spin" />}Arm {side}
