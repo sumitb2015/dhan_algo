@@ -59,7 +59,7 @@ import { detectTriangles, type PnfTriangle } from '@/lib/pnfTriangle';
 import { isSellSignal } from '@/lib/straddlePnf';
 import type { PnfScope } from '@/lib/pnfScope';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent, type AutoPyramid } from './straddlePnf/usePnfAuto';
-import { autoDaySummary, autoMarkers, holdsPosition, heldSide, isLive, markPnl, PYRAMID_HARD_MAX, rowPnl } from '@/lib/pnfAutoLedger';
+import { autoDaySummary, autoMarkers, autoOwnedElsewhere, holdsPosition, heldSide, isLive, markPnl, PYRAMID_HARD_MAX, rowPnl } from '@/lib/pnfAutoLedger';
 import AutoControls, { type AutoRule } from './straddlePnf/AutoControls';
 import { AUTO_PRODUCT_LABEL, autoProductOf, autoWindow, carriesOvernight, pyramidEveryOf, rowMarket, TRAIL_BOXES_MAX, TRAIL_BOXES_MIN, type AutoProduct } from '@/lib/pnfAuto';
 import { guardLevelsText, syncGuardFromServer, type ServerGuardView } from '@/lib/pnfServerGuardView';
@@ -1022,6 +1022,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const now = nowSec();
     return {
       position: positions[rc.targetKey] ?? null,
+      positionLine: !autoOwnedElsewhere(autoLedger.rows, c, rc.targetKey, tradeMode, broker),
       armed: railArmed,
       lockable: tradeMode === 'REAL',
       instant: instant[c],
