@@ -137,6 +137,11 @@ positions read twice", "board price snaps back to the startup value", "OI change
    `lib/globalOnce.ts`. Same for any new shared cache here.
 7. **A new fill must show within ~1-2 s** (`9dbe809b`): young orders (<15 s) are read every 0.4-1 s, the route state cache is
    busted when a fill is written, the page re-polls at 0.6/1.3/2.2/3.5 s after any order or close. Don't slow these down.
+   The read schedule (`nextAt` / `attempts`, pure `nextReadAt` in `lib/freshMoneyTrades.ts`) must follow the order's
+   state (`06e70190`): `sendOne` clears it once the send outcome is written, and a `sending` order (no id yet) is re-checked
+   within `SENDING_RECHECK_MS` (400 ms), never parked until it turns stale. A refresh during a Kotak send once parked it at
+   send + 30 s, so the fill, P&L and chime came ~30 s after Kotak filled it. Any new code that changes an order's state
+   outside `refreshOrders` must reset its schedule too. The Orders time-cell hover shows `seenAt − ts`, the fill's lag.
 8. **The panel lists only the selected broker** (`741459a5`); the global Total is labelled all brokers. A position keeps the
    broker it opened on.
 9. **Collectors must carry the LAST GOOD price** and never drop an underlying for the day on one failed quote (`6d57fba6`,
