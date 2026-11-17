@@ -454,17 +454,3 @@ test('index row, REAL: an exit booked with no option price takes the broker\'s e
   l = run(l, { op: 'fillPrice', id: 'r1', which: 'exit', price: 95, legCount: 1 });
   assert.equal(l.rows[0].pnl, (120 - 95) * 65);
 });
-
-test('autoOwnedElsewhere: the position line belongs to the chart whose AUTO holds the contract', async () => {
-  const { autoOwnedElsewhere } = await import('./pnfAutoLedger.ts');
-  const tk = 'futures|NIFTY|2026-11-24||';
-  const r1 = { ...row({ mode: 'REAL', broker: 'kotak' }), targetKey: tk, state: 'open' } as unknown as AutoRow;
-  assert.equal(autoOwnedElsewhere([r1], 2, tk, 'REAL', 'kotak'), true);       // C1's AUTO trade: not drawn on C2
-  assert.equal(autoOwnedElsewhere([r1], 1, tk, 'REAL', 'kotak'), false);      // drawn on C1
-  assert.equal(autoOwnedElsewhere([], 2, tk, 'REAL', 'kotak'), false);        // a hand trade: drawn on both
-  assert.equal(autoOwnedElsewhere([{ ...r1, state: 'closed' } as AutoRow], 2, tk, 'REAL', 'kotak'), false);
-  assert.equal(autoOwnedElsewhere([r1], 2, 'other', 'REAL', 'kotak'), false); // another contract
-  assert.equal(autoOwnedElsewhere([r1], 2, tk, 'REAL', 'dhan'), false);       // another broker's account
-  assert.equal(autoOwnedElsewhere([r1], 2, tk, 'PAPER', 'kotak'), false);     // another mode
-  assert.equal(autoOwnedElsewhere([r1, { ...r1, id: 'r2', chart: 2 } as AutoRow], 2, tk, 'REAL', 'kotak'), false); // both AUTOs hold it
-});

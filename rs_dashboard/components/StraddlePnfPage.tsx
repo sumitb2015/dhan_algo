@@ -40,6 +40,7 @@ import {
   practiceFill, practiceFlatten, practiceMove, practicePlace, practicePnl, randomStartT, type PracticeBook, type PracticeQuote,
 } from '@/lib/pnfReplay';
 import { paperPosition, type LadderPosition } from '@/lib/pnfLadderPosition';
+import { chartOwnPosition } from '@/lib/pnfChartPosition';
 import { crosshairStamp } from '@/lib/straddlePnfTimeAxis';
 import { useReplay } from './straddlePnf/useReplay';
 import ReplayBar from './straddlePnf/ReplayBar';
@@ -59,7 +60,7 @@ import { detectTriangles, type PnfTriangle } from '@/lib/pnfTriangle';
 import { isSellSignal } from '@/lib/straddlePnf';
 import type { PnfScope } from '@/lib/pnfScope';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent, type AutoPyramid } from './straddlePnf/usePnfAuto';
-import { autoDaySummary, autoMarkers, autoOwnedElsewhere, holdsPosition, heldSide, isLive, markPnl, PYRAMID_HARD_MAX, rowPnl } from '@/lib/pnfAutoLedger';
+import { autoDaySummary, autoMarkers, holdsPosition, isLive, markPnl, PYRAMID_HARD_MAX } from '@/lib/pnfAutoLedger';
 import AutoControls, { type AutoRule } from './straddlePnf/AutoControls';
 import { AUTO_PRODUCT_LABEL, autoProductOf, autoWindow, carriesOvernight, pyramidEveryOf, rowMarket, TRAIL_BOXES_MAX, TRAIL_BOXES_MIN, type AutoProduct } from '@/lib/pnfAuto';
 import { guardLevelsText, syncGuardFromServer, type ServerGuardView } from '@/lib/pnfServerGuardView';
@@ -685,6 +686,13 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   };
   const positionsInfo = usePnfPositions({ charts: railCharts, broker, mode: tradeMode, paper });
   const positions = positionsInfo.byKey;
+  /**
+   * The position chart c OWNS: its own AUTO row, else what no AUTO row holds on its contract (lots opened by hand). Not the contract's
+   * total: both charts may trade one contract (e.g. CRUDEOILM on a 15-pt and an 8-pt Renko), and the broker nets them into one position.
+   */
+  const chartPos = (rc: RailChart): LadderPosition | null => chartOwnPosition({
+    chart: rc.chart, tk: rc.targetKey, mode: tradeMode, broker, rows: autoLedger.rows, contract: positions[rc.targetKey] ?? null, price: rc.price,
+  });
   const changeStyle = (s: StyleState) => { setOrderStyle(s); saveP(STYLE_KEY, JSON.stringify(s)); };
   /** The next entry's bracket: a spec, null (Single), or why it is not ready (then nothing is sent). */
   // The Style bar's numbers are P&F boxes of the chart the order goes to: they become price points with that chart's own box size.
@@ -830,7 +838,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const adjustSeqRef = useRef(0);   // marker ids: two clicks in one second must not share one
   const adjustPosition = async (c: ChartId, dir: 1 | -1) => {
     const rc = railCharts.find(x => x.chart === c);
-    const pos = rc ? positions[rc.targetKey] : null;
+    const pos = rc ? chartPos(rc) : null;
     if (!rc || !pos || pos.side === 'MIXED' || !railArmed || adjustBusyRef.current[c]) return;
     if (autoArm[c].on || autoOf(c).row) { toast.warning(`Chart ${c} is run by AUTO: stop it before changing its position by hand`); return; }
     const action: 'BUY' | 'SELL' = (pos.side === 'LONG') === (dir === 1) ? 'BUY' : 'SELL';
@@ -878,23 +886,11 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const autoTraded1 = autoLedger.rows.find(r => r.chart === 1 && isLive(r) && r.traded)?.traded ?? null;
   const autoTraded2 = autoLedger.rows.find(r => r.chart === 2 && isLive(r) && r.traded)?.traded ?? null;
   const autoOpt1 = useTradedLive(autoTraded1?.ids ?? null), autoOpt2 = useTradedLive(autoTraded2?.ids ?? null);
-  // The guard watches AUTO's PAPER position too: it lives in the AUTO ledger, not the trade bar's paper book. A REAL AUTO position is
-  // already in the broker's book, which `positions` reads.
-  const guardPositions: Record<string, LadderPosition | null> = { ...positions };
-  if (tradeMode === 'PAPER') {
-    for (const rc of railCharts) {
-      const r = autoLedger.rows.find(x => x.mode === 'PAPER' && x.state === 'open' && x.chart === rc.chart && x.targetKey === rc.targetKey);
-      if (r && !guardPositions[rc.targetKey]) {
-        // An index chart's row holds an OPTION: its side, entry and P&L are the option's (premium from the bridge), never the index's.
-        const opt = r.traded ? (rc.chart === 1 ? autoOpt1 : autoOpt2).ltp : null;
-        const side = heldSide(r);
-        guardPositions[rc.targetKey] = {
-          side: side === 'SELL' ? 'SHORT' : 'LONG', lots: r.lots, avg: r.traded ? r.traded.entryPremium : r.entryPrice, entryPnl: 0,
-          pnl: r.traded ? (opt != null && opt > 0 ? markPnl(r, opt) : null) : rc.price != null && rc.price > 0 ? rowPnl(r.side, r.entryPrice, rc.price, r.unitsPerPoint) : null,
-        };
-      }
-    }
-  }
+  // The guard watches the position each chart OWNS (chartPos: its AUTO row, PAPER or REAL, else its hand lots), keyed per chart: two charts
+  // on one contract each have their own guard, measured on their own lots, never on the broker's netted total.
+  const guardKey = (rc: RailChart) => `c${rc.chart}:${rc.targetKey}`;
+  const guardPositions: Record<string, LadderPosition | null> = {};
+  for (const rc of railCharts) guardPositions[guardKey(rc)] = chartPos(rc);
   // A Renko INDEX chart: its guard watches the OPTION it trades - AUTO's option row (premium vs entry premium) plus the units this chart
   // opened by hand (its own mark, above). Keyed PER CHART (`ix1:<index key>`): both
   // charts may show the same index, and each holds its own option position (a contract's position is shared; an index chart's is not).
@@ -918,7 +914,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   // A Renko Log % chart's box is the one it shows (P % of the LTP when the newest brick printed), so the guard's boxes follow it too.
   const boxRupees = (c: ChartId): number | null => {
     const rc = railCharts.find(x => x.chart === c);
-    return rc ? rupeesPerBox((c === 2 ? c2 : c1).model.box, guardPositions[rc.targetKey]?.lots, rc.unitsPerLot[0]) : null;
+    return rc ? rupeesPerBox((c === 2 ? c2 : c1).model.box, guardPositions[guardKey(rc)]?.lots, rc.unitsPerLot[0]) : null;
   };
   // The guard is also enforced by the dashboard SERVER on open REAL AUTO positions (lib/autoServerWatcher.ts), so a closed or sleeping tab
   // does not leave one without its stop: every change of a chart's guard is synced to it.
@@ -941,7 +937,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     }).catch(() => { /* the page's own guard still runs; the server copy is the backstop */ });
   };
   const guards = usePnfGuard({
-    charts: [...railCharts.map(c => ({ chart: c.chart, targetKey: c.targetKey })), ...indexGuardCharts], positions: guardPositions, positionsLoaded: positionsInfo.loaded,
+    charts: [...railCharts.map(c => ({ chart: c.chart, targetKey: guardKey(c) })), ...indexGuardCharts], positions: guardPositions, positionsLoaded: positionsInfo.loaded,
     scope: `${broker}:${tradeMode}`, leaderRef, exitChart, rupeesPerBox: boxRupees, tradeKey: c => autoOf(c).row?.id ?? null, syncServer: syncServerGuard, storeKey: prefKey(chart, 'straddle-pnf-guard-'),
     onEvent: (c, kind, text) => { if (kind === 'warn') { toast.warning(text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); } else toast(text); void c; },
   });
@@ -1021,8 +1017,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const byId = (id: string) => rows.find(r => r.id === id);
     const now = nowSec();
     return {
-      position: positions[rc.targetKey] ?? null,
-      positionLine: !autoOwnedElsewhere(autoLedger.rows, c, rc.targetKey, tradeMode, broker),
+      position: chartPos(rc),
       armed: railArmed,
       lockable: tradeMode === 'REAL',
       instant: instant[c],
@@ -1048,7 +1043,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       onPlace: (side: 'BUY' | 'SELL', level: number) => {
         if (!railArmed) return;
         // An order against the open position reduces it: it never carries a bracket (the trade bar does the same).
-        const pos = positions[rc.targetKey];
+        const pos = chartPos(rc);
         const reduces = !!pos && pos.side !== 'MIXED' && (pos.side === 'LONG') === (side === 'SELL');
         const spec = reduces ? null : bracketSpecNow(c, side, level);
         if (typeof spec === 'string') { toast.error(spec); return; }            // Bracket / Cover not filled in: nothing is placed

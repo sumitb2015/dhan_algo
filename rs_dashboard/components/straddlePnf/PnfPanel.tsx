@@ -125,8 +125,6 @@ export type PnfRail = {
   orders: RailOrder[];
   /** The chart's open position: its entry line, and its live P&L chip on the rail (like the XY ladder's entry row). */
   position?: LadderPosition | null;
-  /** False: the other chart's AUTO owns this position (same contract on both charts), so its entry line is drawn there, not here. */
-  positionLine?: boolean;
   /** A click on a box row: the box price. */
   onPlace: (side: 'BUY' | 'SELL', level: number) => void;
   onModify: (id: string, level: number) => void;
@@ -789,7 +787,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
       items.push({ key: `o:${o.id}`, y: yOf(railDrag?.id === o.id ? railDrag.level : o.level) });
       for (const k of o.planned ?? []) items.push({ key: `p:${o.id}:${k.role}`, y: yOf(railDrag?.id === `plan:${o.id}:${k.role}` ? railDrag.level : k.level) });
     }
-    if (rail.positionLine !== false && rail.position && rail.position.avg !== null) items.push({ key: 'pos', y: yOf(rail.position.avg) });
+    if (rail.position && rail.position.avg !== null) items.push({ key: 'pos', y: yOf(rail.position.avg) });
     return layoutTags(items, 18);
   })();
   const cross = (() => {
@@ -1600,7 +1598,7 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
               })()}
 
               {/* the open position: an entry line across the chart with its side, size, entry premium and live P&L */}
-              {rail?.linesShown !== false && rail?.positionLine !== false && rail?.position && rail.position.avg !== null && (() => {
+              {rail?.linesShown !== false && rail?.position && rail.position.avg !== null && (() => {
                 const pos = rail.position;
                 const lineY = yOf(pos.avg as number);
                 const y = railTagY.get('pos') ?? lineY;

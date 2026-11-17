@@ -229,16 +229,6 @@ export const closingSide = (r: Pick<AutoRow, 'side' | 'traded'>): 'BUY' | 'SELL'
 
 export const pricedKey = (r: Pick<AutoRow, 'targetKey' | 'traded'>) => r.traded?.targetKey ?? r.targetKey;
 
-/**
- * Whether chart `chart`'s position on contract `tk` belongs to the OTHER chart's AUTO: a live row of the other chart is on that contract
- * (same mode, and same broker for REAL) and none of this chart's is. Both charts on one contract read the same broker position, so
- * without this the entry line of C1's AUTO trade is drawn on C2 as well. A position no AUTO row claims (a hand trade) stays on both.
- */
-export function autoOwnedElsewhere(rows: readonly AutoRow[], chart: 1 | 2, tk: string, mode: AutoMode, broker: string): boolean {
-  const on = rows.filter(r => isLive(r) && r.mode === mode && (mode === 'PAPER' || r.broker === broker) && pricedKey(r) === tk);
-  return on.some(r => r.chart !== chart) && !on.some(r => r.chart === chart);
-}
-
 /** An open row's P&L at `px`, the price of `pricedKey(r)` (an index chart's row: the option's premium, on the option's own side). */
 export const markPnl = (r: Pick<AutoRow, 'side' | 'entryPrice' | 'unitsPerPoint' | 'traded'>, px: number) =>
   r.traded ? rowPnl(r.traded.action, r.traded.entryPremium, px, r.unitsPerPoint) : rowPnl(r.side, r.entryPrice, px, r.unitsPerPoint);
