@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, flowCarry, scaleOiRows, pcrOf, boardPcr, fmtPcr, levelStrikes, stackParts, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay,
+  parseSnapshotCsv, buildBoardRows, buildupOf, fmtOi, fmtOiAbs, strikeStep, hasCumulativeVolume, oiFlow, flowCarry, scaleOiRows, pcrOf, boardPcr, fmtPcr, levelStrikes, stackParts, fmtOiShort, fmtMinOfDay, flowScale, flowTier, flowStreak, sumFlows, streakVsDay, flowHeat, topBuilders, roundStrikeUnit, isRoundStrike, FLOW_NOISE,
 } from './freshMoney.ts';
 
 const HEAD = 'timestamp,spot,expiry,strike,CE_LTP,CE_IV,CE_OI,CE_change_OI,CE_volume,PE_LTP,PE_IV,PE_OI,PE_change_OI,PE_volume';
@@ -438,4 +438,61 @@ test('board rows carry each option\'s last price and previous close (Price colum
   // An official-close row keeps the session's last price (the close of the shown day).
   const o = buildBoardRows(snap, 1, null, { ce: { '25300': 3500000 }, pe: { '25300': 3100000 } }).find(x => x.strike === 25300)!;
   assert.deepEqual([o.call!.official, o.call!.ltp], [true, 137.4]);
+});
+
+test('flowHeat: 0 under the noise floor, linear, capped at 1, and coloured exactly when flowTier tints', () => {
+  assert.equal(flowHeat(null, 100), 0);
+  assert.equal(flowHeat(NaN, 100), 0);
+  assert.equal(flowHeat(50, 0), 0);
+  assert.equal(flowHeat(9.9, 100), 0);
+  assert.equal(flowHeat(10, 100), 0.1);
+  assert.equal(flowHeat(-50, 100), 0.5);
+  assert.equal(flowHeat(100, 100), 1);
+  assert.equal(flowHeat(-900, 100), 1);
+  let prev = 0;
+  for (let v = 0; v <= 150; v += 5) {
+    const h = flowHeat(v, 100);
+    assert.ok(h >= prev);
+    assert.equal(h > 0, flowTier(v, 100) !== 'none');
+    prev = h;
+  }
+});
+
+test('topBuilders: largest positive OI added today per side, null without one', () => {
+  const f = (day: number | null) => ({ flow: { cells: [], day } });
+  const rows = [
+    { strike: 300, put: f(5), call: f(-9) },
+    { strike: 250, put: f(40), call: f(null) },
+    { strike: 200, put: f(40), call: null },
+    { strike: 150, put: null, call: f(0) },
+  ];
+  assert.deepEqual(topBuilders(rows), { put: 250, call: null });
+  assert.deepEqual(topBuilders([{ strike: 100, put: f(-1), call: f(7) }]), { put: null, call: 100 });
+  assert.deepEqual(topBuilders([]), { put: null, call: null });
+});
+
+test('flowHeat and flowTier share one noise floor', () => {
+  assert.equal(flowTier(FLOW_NOISE * 100 - 0.01, 100), 'none');
+  assert.equal(flowHeat(FLOW_NOISE * 100 - 0.01, 100), 0);
+  assert.equal(flowTier(FLOW_NOISE * 100, 100), 'low');
+  assert.equal(flowHeat(FLOW_NOISE * 100, 100), FLOW_NOISE);
+});
+
+test('round strikes: 100s on a 50 step, 500s on a 100 step', () => {
+  assert.equal(roundStrikeUnit(50), 100);
+  assert.equal(roundStrikeUnit(100), 500);
+  assert.equal(roundStrikeUnit(25), 50);
+  assert.equal(roundStrikeUnit(500), 1000);
+  assert.equal(roundStrikeUnit(0.5), 1);
+  assert.equal(roundStrikeUnit(0.05), 0.1);
+  assert.equal(roundStrikeUnit(0), null);
+  assert.equal(roundStrikeUnit(NaN), null);
+  assert.equal(isRoundStrike(25300, 50), true);
+  assert.equal(isRoundStrike(25350, 50), false);
+  assert.equal(isRoundStrike(56500, 100), true);
+  assert.equal(isRoundStrike(56400, 100), false);
+  assert.equal(isRoundStrike(57000, 100), true);
+  assert.equal(isRoundStrike(8000, 100), true);
+  assert.equal(isRoundStrike(8200, 100), false);
+  assert.equal(isRoundStrike(100, 0), false);
 });

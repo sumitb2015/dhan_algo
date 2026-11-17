@@ -348,9 +348,60 @@ export function flowScale(values: (number | null)[]): number {
 
 /** Tint tier of one cell against the board scale: under 10 % = none (shown grey), then <35 %, <70 %, >=70 %. */
 export function flowTier(v: number | null, scale: number): FlowTier {
-  if (v === null || !Number.isFinite(v) || !(scale > 0)) return 'none';
-  const r = Math.abs(v) / scale;
-  return r < 0.1 ? 'none' : r < 0.35 ? 'low' : r < 0.7 ? 'mid' : 'high';
+  const r = flowRatio(v, scale);
+  return r < FLOW_NOISE ? 'none' : r < 0.35 ? 'low' : r < 0.7 ? 'mid' : 'high';
+}
+
+/** A slot move under this share of the board scale is noise: grey / blank in every view, and it ends a streak. */
+export const FLOW_NOISE = 0.1;
+/** |v| against the board scale (0 when either is unknown): the one ratio `flowTier` and `flowHeat` both read. */
+function flowRatio(v: number | null, scale: number): number {
+  return v === null || !Number.isFinite(v) || !(scale > 0) ? 0 : Math.abs(v) / scale;
+}
+
+/** How the slot cells are drawn: exact numbers on 3 fixed tints, colour only (a heat map), or numbers on the gradient. */
+export type FlowView = 'numbers' | 'heat' | 'both';
+export const FLOW_VIEWS: readonly FlowView[] = ['numbers', 'heat', 'both'];
+
+/** Colour strength of one cell for the heat views, 0..1 against the board scale: 0 under the noise floor `flowTier`
+ *  uses (10 % — so a heat cell is coloured exactly when the Numbers view tints it and a streak can count it), then
+ *  linear in |v| / scale, capped at 1 (the scale is a 95th percentile, so the largest moves exceed it). */
+export function flowHeat(v: number | null, scale: number): number {
+  const r = flowRatio(v, scale);
+  return r < FLOW_NOISE ? 0 : Math.min(1, r);
+}
+
+/** Spacing of the "round" strikes the ladder emphasises: the smallest 1 x 10^n or 5 x 10^n that is at least two strike
+ *  steps (50 -> 100, 100 -> 500, 25 -> 50, 500 -> 1000). Null for an unusable step. */
+export function roundStrikeUnit(step: number): number | null {
+  if (!Number.isFinite(step) || !(step > 0)) return null;
+  const need = step * 2 * (1 - 1e-9);
+  for (let p = Math.pow(10, Math.floor(Math.log10(step))); ; p *= 10) {
+    if (p >= need) return p;
+    if (5 * p >= need) return 5 * p;
+  }
+}
+
+/** Whether `strike` is a round strike for this step (see roundStrikeUnit); tolerant of float strikes. */
+export function isRoundStrike(strike: number, step: number): boolean {
+  const u = roundStrikeUnit(step);
+  if (u === null || !Number.isFinite(strike)) return false;
+  const q = strike / u;
+  return Math.abs(q - Math.round(q)) < 1e-6;
+}
+
+/** The strike with the largest OI ADDED since the previous close per side (`flow.day`, as of `dayAt`): the session's biggest put / call
+ *  writer on the board. Null when no strike on that side has a known positive change; the first listed wins a tie. */
+export function topBuilders(rows: { strike: number; put: { flow?: SideFlow | null } | null; call: { flow?: SideFlow | null } | null }[]): { put: number | null; call: number | null } {
+  const best = (side: 'put' | 'call'): number | null => {
+    let k: number | null = null, top = 0;
+    for (const r of rows) {
+      const d = r[side]?.flow?.day;
+      if (d != null && Number.isFinite(d) && d > top) { top = d; k = r.strike; }
+    }
+    return k;
+  };
+  return { put: best('put'), call: best('call') };
 }
 
 /** Run of the most recent COMPLETED slots (the first `slots` cells; the running one after them is ignored) moving the

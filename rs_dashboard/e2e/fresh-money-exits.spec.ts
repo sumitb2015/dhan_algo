@@ -328,9 +328,32 @@ test('3m slots tab: tints, streak / reversal badges, totals row, crosshair, stic
   expect(text.indexOf('+77')).toBeLessThan(text.indexOf('8100'));
   expect(text.indexOf('+5 ')).toBeGreaterThan(text.indexOf('8100'));
   expect(text.indexOf('+5 ')).toBeLessThan(text.indexOf('-12k'));
+  // The day's biggest builder per side is starred once (all mocked strikes tie: the first listed wins).
+  await expect(page.getByTestId('fm-top-put')).toHaveCount(1);
+  await expect(page.getByTestId('fm-top-call')).toHaveCount(1);
+  // Numbers / Heat / Both. Heat: colour only (the number stays in the hover and for screen readers); the grey
+  // "earlier" cell and an unknown cell keep their text.
+  const heat = page.getByRole('button', { name: 'Heat', exact: true });
+  await expect(page.getByRole('button', { name: 'Numbers', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await heat.click();
+  await expect(heat).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByTestId('fm-heat-legend')).toBeVisible();
+  // The number is only in the screen-reader span (clipped to 1 px), not drawn in the cell.
+  expect(await add.evaluate(el => [...el.childNodes].every(n => n.nodeType !== 3))).toBe(true);
+  expect(await add.locator('.sr-only').evaluate(el => el.getBoundingClientRect().width)).toBeLessThanOrEqual(1);
+  await expect(add.locator('.sr-only')).toHaveText('+1.5k');
+  expect(await add.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
+  await expect(add).not.toHaveClass(/bg-emerald-500\/45/);
+  await expect(unknown).toHaveText('–');
+  await expect(page.locator('div.grid', { hasText: '8100' }).first().locator('[data-slot="carry"]').first()).toHaveText(/\d/);
+  // Both: the number on the gradient.
+  await page.getByRole('button', { name: 'Both', exact: true }).click();
+  await expect(add).toHaveText('+1.5k');
+  expect(await add.evaluate(el => getComputedStyle(el).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
   await page.reload();
   await expect(page.getByRole('tab', { name: '3m slots' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('button', { name: 'How to read the slots' })).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByRole('button', { name: 'Both', exact: true })).toHaveAttribute('aria-pressed', 'true');
   expect(m.blocked).toEqual([]);
 });
 

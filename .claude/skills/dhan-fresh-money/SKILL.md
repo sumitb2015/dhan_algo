@@ -39,6 +39,15 @@ positions read twice", "board price snaps back to the startup value", "OI change
   (11 completed, no running one, `flowSlots.closed`), so OI Dhan's chain keeps moving after the bell is never a slot or
   part of `day` (2026-11-13: slots ran to 15:42). The slot blocks are sized by CSS vars from the box width
   (`slotsThatFit`): a narrow screen drops the OLDEST slots instead of scrolling the call side off to the right.
+- Slot view switch (pref `freshMoney.flowView`, 2026-11-17): Numbers (the 3 `flowTier` tints) / Heat (colour only, number
+  in the hover + an `sr-only` span; noise = truly blank) / Both. Heat strength is `flowHeat`, which shares `flowRatio` and
+  `FLOW_NOISE` (10 %) with `flowTier`, drawn as an inline `color-mix()` of emerald-500 / red-500 (`heatBg`): the SAME fixed
+  data shades the Numbers tints use (they do not flip per theme); only the cell TEXT uses flipping tokens. An inline
+  style is not matched by the white-mode `[class*="bg-emerald-500/"]` text rules in globals.css. The carry cell and an
+  unknown cell always keep their text. ★ (`topBuilders`, slots tab only) marks the strike with the most OI added since
+  the previous close per side; it sits at the BAR's outer end and every slots-tab bar reserves that room (`room`), so
+  the marked bar is not shorter. Round strikes (`isRoundStrike`: 100s on a 50 step, 500s on a 100 step) are bold on ALL
+  tabs with an inset-shadow line above (no layout shift; skipped under the header and the spot divider).
 - Lots / Units switch (NSE only, pref `freshMoney.oiUnits`): the route always serves lots; the page scales a VIEW of
   the rows with `scaleOiRows(rows, lot)` (`rawData` -> `data`). Display only: never scale anything an order reads.
   Dhan's web chain shows units; its "Per Lot" checkbox MULTIPLIES OI by the lot size (meant for prices), so it is no
