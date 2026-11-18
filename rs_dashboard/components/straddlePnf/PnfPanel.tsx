@@ -1,5 +1,6 @@
 'use client';
 
+import type { IndexEntryLine } from '@/lib/pnfIndexLines';
 import { intervalLabel, barCountdown, fmtCountdown, DAY_MIN } from '@/lib/straddlePnfInterval';
 import { createPortal } from 'react-dom';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -85,6 +86,8 @@ export type PnfPanelProps = {
   onToggleMarkers?: () => void;
   /** The ladder-style B / S rail beside the price axis (absent: no rail, e.g. an index chart). */
   rail?: PnfRail;
+  /** A Renko index chart's option positions: entry lines at the index level they were entered at, tagged with the option and its P&L. */
+  indexLines?: IndexEntryLine[];
   /** Today's session [open, close] in IST minutes: shows the countdown to the forming bar's close under the live price (null: none, e.g. in a replay). */
   session?: readonly [number, number] | null;
   /** Nested-column triangles of this chart (lib/pnfTriangle.ts), whether they are drawn, and the fewest columns that count. */
@@ -543,7 +546,7 @@ function sessionLabel(iso: string): string {
   return `${wd} ${String(d.getUTCDate()).padStart(2, '0')} ${mo}`;
 }
 
-export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, supertrendShown = false, coverShown = false, sessionLines = true, sessionDividers = true, timeAxis = false, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, session = null, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin, pivotsShown = true, pivotStrength = 2, onTogglePivots, onCyclePivotStrength, replayPick, replayStartT = null }: PnfPanelProps) {
+export default function PnfPanel({ title, strike, model, live, stale, flash, error, loading, fill, legs = true, resetTick = 0, headerSlot = null, scrip, feedPrevClose = null, sessionTag = null, overlayShown = true, supertrendShown = false, coverShown = false, sessionLines = true, sessionDividers = true, timeAxis = false, interval = 1, boxPct = 0.5, reversal = 3, tradeMarkers, showHeader = false, active = false, onActivate, autoSlot = null, markersShown = true, onToggleMarkers, rail, indexLines, session = null, triangles = [], triShown = true, triMin = 3, onToggleTri, onCycleTriMin, pivotsShown = true, pivotStrength = 2, onTogglePivots, onCyclePivotStrength, replayPick, replayStartT = null }: PnfPanelProps) {
   const [wrapRef, width, HEIGHT] = useSize();
   const { columns, box, signals, exits } = model;
   // Renko: every column is one filled brick on real price edges (lib/renko.ts); `reversal` holds the N-brick confirmation.
@@ -1614,6 +1617,23 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                   </g>
                 );
               })()}
+
+              {/* a Renko index chart's option positions (no rail here): an entry line at the index level, tagged with the option and its live P&L */}
+              {!rail && indexLines?.map((l, i) => {
+                const lineY = yOf(l.y);
+                const y = lineY + i * 18;   // two positions entered at nearby levels: tags stacked, lines stay at their level
+                const text = `${l.text}${l.pnl === null ? '' : ` · ${rupees(l.pnl)}`}`;
+                const w = text.length * 6.2 + 12;
+                const x = Math.max(4, Math.min(plotW, viewRight ?? plotW) - w - 6);
+                const up = l.pnl !== null && l.pnl >= 0;
+                return (
+                  <g key={l.key} data-testid="pnf-index-position-line" data-side={l.side} pointerEvents="none">
+                    <line x1={0} x2={plotW} y1={lineY} y2={lineY} strokeWidth={1.25} strokeDasharray="1 3" strokeLinecap="round" className={l.pnl === null ? 'stroke-zinc-400' : up ? 'stroke-emerald-300' : 'stroke-red-300'} />
+                    <rect x={x} y={y - 8} width={w} height={16} rx={3} className={l.pnl === null ? 'fill-zinc-700' : up ? 'fill-emerald-700' : 'fill-red-700'} />
+                    <text x={x + 6} y={y + 3.5} className="fill-oncolor font-mono" fontSize={10} fontWeight={700}>{text}</text>
+                  </g>
+                );
+              })}
 
               {/* resting orders: a line across the chart at the level, and a tag by the newest columns (× cancels). An exit is green (target) or
                   red (stop-loss) whichever side it sells on; tags that would overlap are spread apart (railTagY), the line stays at the level. */}

@@ -41,6 +41,7 @@ import {
 } from '@/lib/pnfReplay';
 import { paperPosition, type LadderPosition } from '@/lib/pnfLadderPosition';
 import { chartOwnPosition } from '@/lib/pnfChartPosition';
+import { indexEntryLines, type IndexEntryLine } from '@/lib/pnfIndexLines';
 import { crosshairStamp } from '@/lib/straddlePnfTimeAxis';
 import { useReplay } from './straddlePnf/useReplay';
 import ReplayBar from './straddlePnf/ReplayBar';
@@ -904,6 +905,16 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const hLeg = h && h.units > 0 && m?.id === h.id ? ownMarkLeg(m, heldLiveOf(c).ltp, heldLegsOf(c)?.unitsPerLot[0] ?? null) : null;
     return indexGuardPosition(aLeg, hLeg);
   };
+  // An index chart's entry lines: AUTO's option row and the option held by hand, each at the INDEX level it was entered at (display only).
+  const indexLinesOf = (c: ChartId): IndexEntryLine[] => {
+    const tk = targetKey(c === 2 ? target2 : target1);
+    const ar = autoLedger.rows.find(x => x.chart === c && x.mode === tradeMode && holdsPosition(x) && !!x.traded && x.targetKey === tk && (tradeMode === 'PAPER' || x.broker === broker)) ?? null;
+    const traded = c === 2 ? autoTraded2 : autoTraded1, opt = (c === 2 ? autoOpt2 : autoOpt1).ltp;
+    const autoPnl = ar && traded?.ids === ar.traded!.ids && opt != null && opt > 0 ? markPnl(ar, opt) : null;
+    const h = heldOf(c).held, m = ownMarks[c];
+    const hLeg = h && h.units > 0 && m?.id === h.id ? ownMarkLeg(m, heldLiveOf(c).ltp, heldLegsOf(c)?.unitsPerLot[0] ?? null) : null;
+    return indexEntryLines({ auto: ar, autoPnl, held: h, heldLeg: hLeg, heldAvg: hLeg && m ? m.leg.avg : null });
+  };
   const indexGuardCharts = ([1, 2] as const).filter(isIndexChart).map(c => ({
     chart: c, targetKey: `ix${c}:${targetKey(c === 2 ? target2 : target1)}`, rupeesOnly: true,
     // flat is read off the AUTO and held-option ledgers (exact); REAL waits for the held ledger's first read
@@ -1437,6 +1448,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       onTogglePivots: renko ? () => { const next = !pivShown[c]; saveP(`${PIV_SHOW_KEY}${c}`, next ? '1' : '0'); setPivShown(v => ({ ...v, [c]: next })); } : undefined,
       onCyclePivotStrength: renko ? () => { const next = pivK[c] >= 3 ? 1 : pivK[c] + 1; saveP(`${PIV_K_KEY}${c}`, String(next)); setPivK(v => ({ ...v, [c]: next })); } : undefined,
       rail: rp ? practiceRailFor(c) : railFor(c),
+      indexLines: !rp && isIndexChart(c) ? indexLinesOf(c) : undefined,
       onToggleMarkers: () => {
         const next = !markersShown[c];
         saveP(`${MARKERS_SHOWN_KEY}${c}`, next ? '1' : '0');
