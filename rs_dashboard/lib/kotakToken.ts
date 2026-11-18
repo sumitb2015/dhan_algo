@@ -222,7 +222,8 @@ export function raiseIfError(json: Record<string, unknown>, apiPath = '?'): void
   const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
   const msg = json.errMsg ?? json.emsg ?? data.errMsg ?? data.emsg;
   if (msg) {
-    console.error(`[kotakToken] request failed (${apiPath}), full response:`, JSON.stringify(json));
+    // A rate limit is retried by the read lane, which logs it once per pause; anything else is logged in full.
+    if (Number(json.stCode ?? data.stCode) !== KOTAK_RATE_LIMIT) console.error(`[kotakToken] request failed (${apiPath}), full response:`, JSON.stringify(json));
     // Surface the stCode alongside the message — Kotak reuses the same
     // errMsg text ("Unauthorized", etc.) across genuinely different stCodes,
     // and the bare message alone isn't enough to tell them apart later.
@@ -235,7 +236,56 @@ export function raiseIfError(json: Record<string, unknown>, apiPath = '?'): void
   }
 }
 
-/** Authenticated GET against the Kotak Neo REST API. Throws on error, `[]`-safe on an empty book. */
+// ─── One read lane for every Kotak read in the server process ──────────────────────────────────────────────────────
+// Kotak answers stCode 100025 "rate limit exceeded" past a few requests a second ACROSS the account, and two dozen
+// routes and watchers read it "live" with kotakGet (Fresh Money, Price Ladder, guards, scalper books...), each on its
+// own clock. Every read (GET, and the read-only POSTs such as limits) now goes through one process-wide lane:
+//   - reads START at least KOTAK_READ_GAP_MS apart, whoever sends them;
+//   - a read of a path already on the wire is joined, but only if it was queued after the last order write, so an
+//     exit's sizing read never gets a pre-order book;
+//   - a 100025 pauses the whole lane for KOTAK_RATE_LIMIT_PAUSE_MS and the read retries (twice) instead of failing,
+//     so a caller sees a short delay, not an error.
+// Order writes (place / modify / cancel) never wait on this lane: they keep their own 400 ms order lane.
+export const KOTAK_READ_GAP_MS = 350;
+export const KOTAK_RATE_LIMIT_PAUSE_MS = 1_500;
+const KOTAK_READ_RETRIES = 2;
+type ReadLane = { nextAt: number; pausedUntil: number; lastWriteAt: number; inflight: Map<string, { queuedAt: number; p: Promise<Record<string, unknown>> }> };
+const readLane = globalOnce<ReadLane>('__kotakReadLane', () => ({ nextAt: 0, pausedUntil: 0, lastWriteAt: 0, inflight: new Map() }));
+
+/** The wait before the next read may start: after the previous read's slot plus `gap`, and not before a rate-limit pause ends. Pure apart from `state`. */
+export function reserveReadSlot(state: { nextAt: number; pausedUntil: number }, now: number, gap = KOTAK_READ_GAP_MS): number {
+  const at = Math.max(now, state.nextAt, state.pausedUntil);
+  state.nextAt = at + gap;
+  return at - now;
+}
+
+export const isKotakRateLimit = (err: unknown) => String((err as Error)?.message ?? err).includes('100025');
+
+/** Run one read through the lane: paced, retried after a rate limit (the lane pauses for everyone), joined when the same read is already on the wire. */
+export async function laneRead(key: string, send: () => Promise<Record<string, unknown>>): Promise<Record<string, unknown>> {
+  const on = readLane.inflight.get(key);
+  if (on && on.queuedAt >= readLane.lastWriteAt) return on.p;
+  const run = async () => {
+    for (let attempt = 0; ; attempt++) {
+      const wait = reserveReadSlot(readLane, Date.now());
+      if (wait > 0) await new Promise(res => setTimeout(res, wait));
+      try {
+        return await send();
+      } catch (err) {
+        if (!isKotakRateLimit(err)) throw err;
+        if (attempt >= KOTAK_READ_RETRIES) { console.error(`[kotakToken] ${key}: still rate limited after ${KOTAK_READ_RETRIES} retries — giving up`); throw err; }
+        readLane.pausedUntil = Math.max(readLane.pausedUntil, Date.now() + KOTAK_RATE_LIMIT_PAUSE_MS);
+        console.warn(`[kotakToken] rate limited on ${key} — every Kotak read paused ${KOTAK_RATE_LIMIT_PAUSE_MS} ms, retry ${attempt + 1}/${KOTAK_READ_RETRIES}`);
+      }
+    }
+  };
+  const entry = { queuedAt: Date.now(), p: run() };
+  readLane.inflight.set(key, entry);
+  void entry.p.finally(() => { if (readLane.inflight.get(key) === entry) readLane.inflight.delete(key); }).catch(() => {});
+  return entry.p;
+}
+
+/** Authenticated GET against the Kotak Neo REST API. Throws on error, `[]`-safe on an empty book. Paced through the read lane. */
 export async function kotakGet(apiPath: string, timeoutMs = 10_000): Promise<Record<string, unknown>> {
   const doRequest = async () => {
     const res = await fetch(kotakUrl(apiPath), {
@@ -244,13 +294,14 @@ export async function kotakGet(apiPath: string, timeoutMs = 10_000): Promise<Rec
     });
     return await res.json() as Record<string, unknown>;
   };
-
-  let json = await doRequest();
-  if (isSessionDead(json) && await reloginKotak()) {
-    json = await doRequest();
-  }
-  raiseIfError(json, apiPath);
-  return json;
+  return laneRead(`GET ${apiPath}`, async () => {
+    let json = await doRequest();
+    if (isSessionDead(json) && await reloginKotak()) {
+      json = await doRequest();
+    }
+    raiseIfError(json, apiPath);
+    return json;
+  });
 }
 
 // Display polls (positions / orders / trades, every open tab every 2 s) share one Kotak call per path: Kotak answers
@@ -352,20 +403,29 @@ export async function kotakPost(
     return await res.json() as Record<string, unknown>;
   };
 
-  if (ORDER_WRITE_PATHS.has(apiPath)) {
-    const wait = reserveOrderSlot(lane, Date.now());
-    kotakPriority(2_000 + wait);
-    sharedGets.clear();
-    if (wait > 0) await new Promise(res => setTimeout(res, wait));
+  const once = async () => {
+    // Kotak rejects a request under a dead session outright rather than
+    // silently accepting it (see reloginKotak's doc comment) — a retry after a
+    // fresh login cannot double-place an order the first attempt never placed.
+    let json = await doRequest();
+    if (isSessionDead(json) && await reloginKotak()) {
+      json = await doRequest();
+    }
+    return json;
+  };
+  if (!ORDER_WRITE_PATHS.has(apiPath)) {
+    // A read-only POST (limits, margin): the read lane, joined only for an identical body.
+    return laneRead(`POST ${apiPath} ${JSON.stringify(params)}`, async () => { const json = await once(); raiseIfError(json, apiPath); return json; });
   }
-  // Kotak rejects a request under a dead session outright rather than
-  // silently accepting it (see reloginKotak's doc comment) — a retry after a
-  // fresh login cannot double-place an order the first attempt never placed.
-  let json = await doRequest();
-  if (isSessionDead(json) && await reloginKotak()) {
-    json = await doRequest();
-  }
-  if (ORDER_WRITE_PATHS.has(apiPath)) sharedGets.clear();
+  const wait = reserveOrderSlot(lane, Date.now());
+  kotakPriority(2_000 + wait);
+  sharedGets.clear();
+  if (wait > 0) await new Promise(res => setTimeout(res, wait));
+  // From here no read queued earlier may be joined: it could answer with the pre-order book.
+  readLane.lastWriteAt = Date.now();
+  const json = await once();
+  sharedGets.clear();
+  readLane.lastWriteAt = Date.now();
   raiseIfError(json, apiPath);
   return json;
 }
