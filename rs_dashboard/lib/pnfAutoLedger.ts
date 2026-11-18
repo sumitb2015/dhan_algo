@@ -18,6 +18,7 @@ import type { AutoProduct } from './pnfOrderLogic.ts';
 import { PYRAMID_EVERY_MAX, TRAIL_BOXES_MAX } from './pnfAuto.ts';
 import { readSettings, type PnfSettings } from './straddlePnfSettings.ts';
 import { mapRisks, parseIndexMap, tradedOf, type IndexMap } from './pnfIndexMap.ts';
+import { parseLimits, type AutoLimits } from './pnfAutoSafety.ts';
 
 export type AutoMode = 'PAPER' | 'REAL';
 export type AutoRowState = 'entering' | 'open' | 'exiting' | 'closed' | 'unknownEntry' | 'unknownExit' | 'adding' | 'unknownAdd';
@@ -121,6 +122,8 @@ export interface AutoRow {
   trailBest?: number;
   reason?: string;
   pnl?: number;
+  /** Resolved flat by the user from an unknown / stale ENTRY: it never opened (not a trade for the daily limits, lib/pnfAutoSafety.ts). */
+  neverOpened?: boolean;
   note?: string;
   /** When the REAL entry / exit was reserved (entering / exiting): a reservation much older than an order takes is stale. */
   pendingSince?: number;
@@ -184,6 +187,8 @@ export interface AutoArmRecord {
   pyramid?: { max: number; every?: number; trail?: number };
   /** 'MARGIN' = armed to trade NRML; absent = MIS. */
   product?: 'MARGIN';
+  /** Daily limits it was armed with (lib/pnfAutoSafety.ts): no new entry today once one is reached. Absent = none. */
+  limits?: AutoLimits;
   /** What the server engine trades (absent on an arming saved before the server ran AUTO: the engine then disarms it). */
   run?: ArmRun;
 }
@@ -310,7 +315,8 @@ function armOk(v: unknown): AutoArmRecord | null {
   const pyramid = Number.isInteger(pm) && (pm as number) >= 1 && (pm as number) <= PYRAMID_HARD_MAX
     ? { max: pm as number, ...(everyOk ? { every: pe as number } : {}), ...(trailOk ? { trail: pt as number } : {}) } : undefined;
   const run = runOk(a.run, a.targetKey);
-  return { mode: a.mode, broker: a.broker, targetKey: a.targetKey, day: a.day, t: a.t!, watermarkT: a.watermarkT!, lots: a.lots!, ...(rule ? { rule } : {}), ...(side ? { side } : {}), ...(pyramid ? { pyramid } : {}), ...(a.product === 'MARGIN' ? { product: 'MARGIN' as const } : {}), ...(run ? { run } : {}) };
+  const limits = parseLimits(a.limits);
+  return { mode: a.mode, broker: a.broker, targetKey: a.targetKey, day: a.day, t: a.t!, watermarkT: a.watermarkT!, lots: a.lots!, ...(rule ? { rule } : {}), ...(side ? { side } : {}), ...(pyramid ? { pyramid } : {}), ...(a.product === 'MARGIN' ? { product: 'MARGIN' as const } : {}), ...(limits ? { limits } : {}), ...(run ? { run } : {}) };
 }
 
 /** A well-formed run snapshot whose target IS the arming's contract, or undefined. Settings out of range fall back per field (readSettings). */
@@ -586,6 +592,7 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
         const neverOpened = r.state === 'unknownEntry' || r.state === 'entering';
         const prem = r.traded && finite(op.exitPremium) && op.exitPremium! > 0 ? op.exitPremium : undefined;
         rows[i] = { ...r, state: 'closed', exitT: op.t, exitPrice: px, reason: 'resolved', pnl: neverOpened ? 0 : r.traded ? closePnl(r, px, prem) : rowPnl(r.side, r.entryPrice, px, r.unitsPerPoint), note: 'resolved by the user: flat',
+          ...(neverOpened ? { neverOpened: true } : {}),
           ...(r.traded && prem !== undefined ? { traded: { ...r.traded, exitPremium: prem } } : {}) };
       }
       return bump(rows);

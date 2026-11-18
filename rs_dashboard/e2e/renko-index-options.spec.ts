@@ -46,15 +46,15 @@ async function installMock(page: Page, opts: { orderOutcome?: (b: OrderBody) => 
       return json(route, { success: true, legs: [{ quote: { ltp, changedMs: Date.now(), prevClose: ltp, volume: 0 }, last: null }] });
     }
     if (p === '/api/straddle-pnf/contracts' && method === 'GET') {
-      return json(route, { success: true, expiries: [EXPIRY, '2026-11-18'], expiry: EXPIRY, strikes: [24900, 24950, 25000, 25050, 25100], spot: SPOT, atm: 25000 });
+      return json(route, { success: true, expiries: [EXPIRY, '2026-11-18'], expiry: EXPIRY, strikes: [24750, 24800, 24850, 24900, 24950, 25000, 25050, 25100, 25150, 25200, 25250], spot: SPOT, atm: 25000 });
     }
     if (p === '/api/straddle-pnf/index-trade' && method === 'GET') {
       const map = JSON.parse(u.searchParams.get('map') ?? '{}') as { bull: Leg; bear: Leg };
       const dir = u.searchParams.get('dir') as 'bull' | 'bear';
       resolves.push({ dir, ...map });
       const leg = map[dir];
-      const strikes = [24900, 24950, 25000, 25050, 25100];
-      const strike = strikes[2 + (leg.opt === 'CE' ? leg.offset : -leg.offset)];
+      const strikes = [24750, 24800, 24850, 24900, 24950, 25000, 25050, 25100, 25150, 25200, 25250];
+      const strike = strikes[5 + (leg.opt === 'CE' ? leg.offset : -leg.offset)];
       return json(route, {
         success: true, traded: { kind: 'options', symbol: 'NIFTY', name: 'NIFTY', expiry: EXPIRY, strike, side: leg.opt }, action: leg.action,
         ids: `NSE_FNO:${ID[leg.opt]}`, spot: SPOT, spotSource: 'bridge', premium: u.searchParams.get('premium') === '1' ? premium[leg.opt] : null,

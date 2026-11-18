@@ -331,3 +331,63 @@ test('index chart: a map leg against its direction halts AUTO at the signal - no
   assert.equal(r.orders.length, 0);
   assert.match(r.engine.halt ?? '', /Risky option map: BEAR = SELL PE gains as NIFTY RISES.*correct the map, then arm again/);
 });
+
+// ── Risk gates (lib/pnfAutoSafety.ts, 2026-11-18) ──────────────────────────────────────────────────────────────────────────────
+test('daily limit: after the losing trade that reaches it, the next signal is not entered and AUTO is switched off', async () => {
+  const r = rig([{ success: true, outcome: 'placed', legs: [] }]);
+  const paper = { arm: { on: true, mode: 'PAPER' as const, watermarkT: ist(10, 25), armT: ist(10, 0) }, limits: { maxLosses: 1 } };
+  await r.engine.tick(r.inputs(paper));
+  r.advance(600);
+  await r.engine.tick(r.inputs({ ...paper, ledger: r.ledger(), model: reversal(), price: 103 }));   // the short is exited higher: a loss
+  assert.ok((r.ledger().rows[0].pnl ?? 0) < 0);
+  r.at(ist(10, 42) + 5);
+  const next = model({ columns: [...reversal().columns, col('O', 101)], columnTimes: [...reversal().columnTimes, { start: ist(10, 42), end: ist(10, 42) }],
+    signals: [sig('DOUBLE_BOTTOM_SELL', ist(10, 42))], lastBarT: ist(10, 42) });
+  await r.engine.tick(r.inputs({ ...paper, ledger: r.ledger(), model: next }));
+  assert.equal(r.ledger().rows.length, 1, 'no second trade');
+  assert.match(r.engine.halt ?? '', /1 losing trades in a row/);
+  assert.equal(r.disarms.length, 1);
+});
+
+test('NRML NIFTY option: carried past 15:35 only when the server guard has a stop (carry), else squared off', async () => {
+  const OPT: Target = { kind: 'options', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24', strike: 25000, side: 'CE' };
+  for (const carry of [true, false]) {
+    const r = rig([{ success: true, outcome: 'placed', legs: [] }]);
+    const over = { target: OPT, arm: { on: true, mode: 'PAPER' as const, watermarkT: ist(10, 25), armT: ist(10, 0), product: 'MARGIN' as const }, carry };
+    await r.engine.tick(r.inputs(over));
+    assert.equal(r.ledger().rows[0].product, 'MARGIN');
+    r.at(ist(15, 36));
+    await r.engine.tick(r.inputs({ ...over, ledger: r.ledger() }));
+    const row = r.ledger().rows[0];
+    if (carry) assert.equal(row.state, 'open', 'held overnight under the guard');
+    else assert.deepEqual([row.state, row.reason], ['closed', 'eod']);
+  }
+});
+
+test('a carried row whose guard stop is gone (carryLapsed) is closed at the open, not at 15:35', async () => {
+  const OPT: Target = { kind: 'options', symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24', strike: 25000, side: 'CE' };
+  const r = rig([{ success: true, outcome: 'placed', legs: [] }]);
+  const over = { target: OPT, arm: { on: true, mode: 'PAPER' as const, watermarkT: ist(10, 25), armT: ist(10, 0), product: 'MARGIN' as const } };
+  await r.engine.tick(r.inputs(over));
+  assert.equal(r.ledger().rows[0].state, 'open');
+  const off = { ...over, arm: { on: false, mode: 'PAPER' as const, watermarkT: 0 }, carryLapsed: true };
+  r.at(ist(9, 0));                                                        // before the open: waits
+  await r.engine.tick(r.inputs({ ...off, ledger: r.ledger() }));
+  assert.equal(r.ledger().rows[0].state, 'open');
+  assert.match(r.engine.note, /closes at the open/);
+  r.at(ist(9, 16));
+  await r.engine.tick(r.inputs({ ...off, ledger: r.ledger() }));
+  assert.deepEqual([r.ledger().rows[0].state, r.ledger().rows[0].reason], ['closed', 'eod']);
+  assert.ok(r.events.some(e => /carried overnight: its MTM guard stop-loss is gone/.test(e)));
+});
+
+test('resolve flat from an unknown entry marks the row neverOpened', () => {
+  let led: AutoLedger = EMPTY_LEDGER;
+  const t = ist(10, 31);
+  const open = applyAutoOp(led, { op: 'open', row: { id: 'u1', chart: 1, mode: 'REAL', day: '2026-10-30', state: 'entering', side: 'SELL', entryT: t, entryBarT: t, entryPrice: 100, lots: 1, unitsPerPoint: 75, legs: [{ label: 'F', units: 75, key: 'k' }], broker: 'dhan', target: TARGET, targetKey: 'x', pendingSince: t } } as unknown as AutoOp);
+  assert.ok(open.ok, open.ok ? '' : open.error);
+  led = open.ok ? open.ledger : led;
+  const r = applyAutoOp(led, { op: 'resolve', id: 'u1', as: 'flat', t: t + 120 });
+  assert.ok(r.ok);
+  assert.equal(r.ok && r.ledger.rows[0].neverOpened, true);
+});

@@ -23,6 +23,9 @@ import type { PnfScope } from '@/lib/pnfScope';
 import { premiumOf, resolveIndexTrade } from '@/lib/pnfIndexTradeServer';
 import { askBridge } from '@/lib/pnfLiveBridge';
 import type { WantedPair } from '@/lib/pnfWanted';
+import { keyOf, readServerGuards } from '@/lib/autoServerWatcher';
+import type { ServerGuardCfg } from '@/lib/autoServerGuard';
+import { armNeedsGuardStop, carryAllowed, carryLapsed, guardStopProblem } from '@/lib/pnfAutoSafety';
 
 // The P&F / Renko AUTO engine on the dashboard SERVER: it builds each armed chart from the saved arming (target + settings, lib/
 // pnfAutoLedger.ts ArmRun) and runs the AUTO rules on it (lib/pnfAutoChart.ts, the same engine the page used to run) with every tab
@@ -241,7 +244,7 @@ const arming = (rec: AutoArmRecord | undefined, row: AutoRow | undefined, ledger
   : { on: false, mode: row?.mode ?? 'PAPER', watermarkT: 0 };
 
 /** One chart's step: refuse an arming the engine cannot run, build the chart, run the rules. */
-async function stepChart(scope: PnfScope, chart: 1 | 2, ledger: AutoLedger, saved: EngineChartView | undefined, nowMs: number): Promise<EngineChartView | null> {
+async function stepChart(scope: PnfScope, chart: 1 | 2, ledger: AutoLedger, saved: EngineChartView | undefined, nowMs: number, guardCfgs: Record<string, ServerGuardCfg>): Promise<EngineChartView | null> {
   const k = String(chart) as '1' | '2';
   let rec = ledger.arms?.[k];
   const row = ledger.rows.find(r => r.chart === chart && isLive(r));
@@ -277,14 +280,28 @@ async function stepChart(scope: PnfScope, chart: 1 | 2, ledger: AutoLedger, save
     const m = parseOptionIds(held.ids);
     if (m) { try { askBridge(`autoengine:${scope}:${chart}:opt`, [[m.segment, m.securityId]] as WantedPair[], nowMs); } catch { /* the exit quotes it */ } }
   }
+  // The chart's server guard copy: a REAL arming of a rule with no stop of its own needs one with a stop-loss (lib/pnfAutoSafety.ts), and an
+  // NRML NIFTY option is carried overnight only under one.
+  const guardCfg = guardCfgs[keyOf(scope, chart)];
+  const stopLess = rec && armNeedsGuardStop(scope, { mode: rec.mode, rule: rec.rule ?? rule })
+    ? guardStopProblem(guardCfg, { broker: rec.broker, mode: rec.mode, index: rec.run?.target.kind === 'index' }) : null;
   if (rec && rt.engine.guardExitedSinceArm(ledger, arm)) {
     await applyAutoLedgerOp(scope, { op: 'setArm', chart, arm: null, t: nowMs / 1000, text: `AUTO switched off: the server guard exited chart ${chart}` });
+  } else if (stopLess) {
+    // the guard was switched off, lost its stop-loss, or moved to another broker / mode after arming: the rule would run with no loss limit
+    const why = `REAL AUTO switched off on chart ${chart}: ${stopLess} - this rule has no stop of its own (switch the guard on with a stop-loss and arm again)`;
+    await applyAutoLedgerOp(scope, { op: 'setArm', chart, arm: null, t: nowMs / 1000, text: `AUTO switched off: ${stopLess}` });
+    await applyAutoLedgerOp(scope, { op: 'log', chart, t: nowMs / 1000, kind: 'halt', text: why });   // a kind: an open tab toasts it
   } else if (!rt.busy) {
     rt.busy = true;
     const inputs = {
       arm, lots: rec?.lots ?? row?.lots ?? 1, target, model: renko && rule ? modelForRule(rule, model) : model, rule, side: (rec?.side ?? 'both') as AutoSide,
       pyramid: rec ? pyramidOf(rec) : undefined, price, stale, market, complete, broker, ledger, info: infoFor(rt, broker, target, nowMs),
       ...(run?.indexMap ? { indexMap: run.indexMap } : {}),
+      // the one carry decision the guard watcher also uses (lib/pnfAutoSafety.ts)
+      carry: !!row && carryAllowed(scope, row, nowMs / 1000, guardCfg),
+      carryLapsed: !!row && carryLapsed(scope, row, nowMs / 1000, guardCfg),
+      ...(rec?.limits ? { limits: rec.limits } : {}),
     };
     // Each chart runs on its own: an order on the wire on one chart never holds the other chart (or the other page) back.
     void rt.engine.tick(inputs).catch(e => console.error(`[pnf-auto-engine] ${scope} chart ${chart}:`, e)).finally(() => { rt.busy = false; });
@@ -320,6 +337,7 @@ async function tick(): Promise<void> {
     if (!holdLock(nowMs)) return;
     state.lastTickAt = nowMs;
     state.idle = false;
+    const guardCfgs = readServerGuards().cfg;                         // once per pass, for every chart of both pages
     for (const { scope, ledger } of ledgers) {
       // the views written before a restart: read once, for the chart of an open position whose arming was switched off
       const saved: EngineState['saved'] = (state.saved ??= {});
@@ -327,7 +345,7 @@ async function tick(): Promise<void> {
       const charts: EngineFile['charts'] = {};
       for (const chart of [1, 2] as const) {
         try {
-          const v = await stepChart(scope, chart, ledger, prev?.charts[String(chart) as '1' | '2'], nowMs);
+          const v = await stepChart(scope, chart, ledger, prev?.charts[String(chart) as '1' | '2'], nowMs, guardCfgs);
           if (v) charts[String(chart) as '1' | '2'] = v;
         } catch (e) {
           // one chart's failure never stops the other chart, the other page or the status file; it is shown on the chart

@@ -18,6 +18,7 @@ async function install(page: Page, opts: { reply?: (b: Body) => Record<string, u
   // (100.1-100.2, 100.0-100.1): the 2nd confirms a SELL, booked at its close 100.0.
   const state = { ledger: EMPTY_LEDGER as AutoLedger, tick: { ltp: 99.95, at: ist(10, 30, 10) } };
   const server = newAutoServer();
+  const guards: Record<string, unknown> = {};
   const bars = [100, 100.3, 100.3, 100.3].map((p, i) => ({ t: ist(10, 26 + i) / 1000, ce: p, pe: 0, straddle: p, vol: 10 }));
   await page.route('**/api/**', async (route: Route) => {
     const req = route.request();
@@ -58,7 +59,16 @@ async function install(page: Page, opts: { reply?: (b: Body) => Record<string, u
     if (p.endsWith('/funds')) return json(route, { success: true, data: { availabelBalance: 100000 } });
     if (p === '/api/scalper/poll') return json(route, { positions: [], positionsError: null });
     if (p === '/api/live-indices' && method === 'POST') return json(route, { success: true });
-    if (p === '/api/straddle-pnf/server-guard') return json(route, { success: true, guards: {} });   // the page syncs its MTM guard to the server watcher
+    if (p === '/api/straddle-pnf/server-guard') {
+      // the page syncs its MTM guard to the server watcher; kept like the real route, since a REAL arming reads it back
+      if (method === 'POST') {
+        const b = req.postDataJSON() as { chart: number; on: boolean; broker?: string; mode?: string; boxPts?: number | null; levels?: Record<string, number> };
+        if (b.on) guards[`renko:${b.chart}`] = { on: true, broker: b.broker, mode: b.mode, levels: b.levels ?? {}, boxPts: b.boxPts ?? null, updatedMs: Date.now() };
+        else delete guards[`renko:${b.chart}`];
+        return json(route, { success: true });
+      }
+      return json(route, { success: true, guards });
+    }
     if (method === 'GET') return json(route, { success: true });
     return route.fulfill({ status: 599, body: `unmocked ${method} ${p}` });
   });
@@ -71,6 +81,15 @@ async function openFuture(page: Page) {
   await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
   await expect(page.getByLabel('Expiry')).toHaveValue('2026-11-24');
   await expect(page.getByTestId('pnf-header-summary')).toContainText('99.95');
+}
+
+/** Switches chart 1's MTM guard on at its default levels (10 boxes target / 10 boxes stop) and closes the card. */
+async function guardStopOn(page: Page) {
+  await page.getByTestId('pnf-guard-toggle').click();
+  await page.getByTestId('pnf-guard-card').getByRole('button', { name: 'Switch on', exact: true }).click();
+  await expect(page.getByTestId('pnf-guard-toggle')).toContainText('MTM Guard ON');
+  await page.getByTestId('pnf-guard-toggle').click();
+  await expect(page.getByTestId('pnf-guard-card')).toHaveCount(0);
 }
 
 test.beforeEach(async ({ context }) => {
@@ -119,6 +138,7 @@ test('REAL: arming takes a second click; the server\'s REAL row is shown; Exit t
   await openFuture(page);
   page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  await guardStopOn(page);                                              // REAL AUTO on a stop-less rule needs the guard's stop-loss
   const auto = page.getByTestId('pnf-auto-1');
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await expect(auto).toHaveAttribute('data-armed', 'false');
@@ -149,6 +169,7 @@ test('REAL: stopping AUTO while it holds a position takes a second click (no re-
   await openFuture(page);
   page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  await guardStopOn(page);                                              // REAL AUTO on a stop-less rule needs the guard's stop-loss
   const auto = page.getByTestId('pnf-auto-1');
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
@@ -177,6 +198,7 @@ test('REAL: an entry the server marked unknown shows UNRESOLVED and the server\'
   await openFuture(page);
   page.once('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  await guardStopOn(page);                                              // REAL AUTO on a stop-less rule needs the guard's stop-loss
   const auto = page.getByTestId('pnf-auto-1');
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
@@ -359,6 +381,7 @@ test('a REAL arming survives a reload: the server keeps trading it, and the page
   await openFuture(page);
   page.on('dialog', d => { void d.accept(); });
   await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  await guardStopOn(page);                                              // REAL AUTO on a stop-less rule needs the guard's stop-loss
   const auto = page.getByTestId('pnf-auto-1');
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
   await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
@@ -452,3 +475,54 @@ test('pyramid: the +1L/brick setting (Max commits on Enter, Escape cancels) is s
   await expect(page.getByTestId('pnf-auto-status-1')).toContainText('SHORT 3L (1+2)', { timeout: 15_000 });
 });
 
+
+// 2026-11-18: Supertrend / N-brick / trend have no stop of their own - REAL needs the MTM guard's stop-loss first (lib/pnfAutoSafety.ts).
+test('REAL: a stop-less rule is not armed until the MTM guard is ON with a stop-loss; Two-back arms without one', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  page.on('dialog', d => { void d.accept(); });
+  await page.getByRole('group', { name: 'Execution mode' }).getByRole('button', { name: 'REAL' }).click();
+  const auto = page.getByTestId('pnf-auto-1');
+  const start = auto.getByRole('button', { name: 'Start AUTO on chart 1' });
+  await start.click();
+  await start.click();
+  await expect(page.getByText(/AUTO not armed on chart 1\. REAL AUTO on a rule with no stop of its own/)).toBeVisible();
+  await expect(auto).toHaveAttribute('data-armed', 'false');
+  expect(state.ledger.arms?.['1'], 'nothing saved').toBeUndefined();
+  // a guard with only a target is not a stop-loss
+  await page.getByTestId('pnf-guard-toggle').click();
+  await page.getByLabel('MTM stop-loss in boxes', { exact: true }).fill('');
+  await page.getByTestId('pnf-guard-card').getByRole('button', { name: 'Switch on', exact: true }).click();
+  await expect(page.getByTestId('pnf-guard-toggle')).toContainText('MTM Guard ON');
+  await page.getByTestId('pnf-guard-toggle').click();
+  await start.click();
+  await start.click();
+  await expect(auto).toHaveAttribute('data-armed', 'false');
+  expect(state.ledger.arms?.['1']).toBeUndefined();
+  // Two-back carries its own stop: it arms with that guard
+  await auto.getByLabel('AUTO rule on chart 1').selectOption('twoback');
+  await start.click();
+  await start.click();
+  await expect.poll(() => state.ledger.arms?.['1']?.rule).toBe('twoback');
+});
+
+test('daily limits: typed values commit on blur, are saved with the arming and locked while armed', async ({ page }) => {
+  await page.clock.setFixedTime(ist(10, 30, 20));
+  const { state } = await install(page);
+  await openFuture(page);
+  const auto = page.getByTestId('pnf-auto-1');
+  const loss = auto.getByTestId('pnf-auto-limit-loss-1');
+  await loss.fill('5000');
+  await loss.press('Tab');
+  await auto.getByTestId('pnf-auto-limit-trades-1').fill('6');
+  await auto.getByTestId('pnf-auto-limit-trades-1').press('Enter');
+  const losses = auto.getByTestId('pnf-auto-limit-losses-1');
+  await losses.fill('3');
+  await losses.press('Escape');                                         // Escape drops the typed value
+  await expect(losses).toHaveValue('');
+  await auto.getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect.poll(() => state.ledger.arms?.['1']?.limits).toEqual({ maxLoss: 5000, maxTrades: 6 });
+  await expect(loss).toBeDisabled();
+  await expect(page.getByText(/day limits: max loss ₹5,000 · 6 trades/).first()).toBeVisible();
+});

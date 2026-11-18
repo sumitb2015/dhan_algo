@@ -18,9 +18,11 @@ How the Renko page's automatic trading works: what it trades, when it enters and
 4. In the chart's **AUTO** controls choose the **rule** (see section 2) and the **lots** (`L` stepper).
 5. Click **AUTO**. In REAL the first click turns the button red (`ARM REAL AUTO?`); click again within 6 s.
 6. Arming does **not** switch the MTM guard on (section 6): it stays OFF until you open the MTM Guard card, set the levels (a chart with
-   nothing saved shows 10 boxes target / 10 boxes stop) and click **Switch on**. In REAL a toast reminds you it is off. Without it N-brick, trend
-   and Supertrend have **no loss limit** (only the end-of-day exit).
-7. You can close the tab: AUTO runs on the dashboard server while it is up (section 7).
+   nothing saved shows 10 boxes target / 10 boxes stop) and click **Switch on**. **REAL AUTO on Supertrend, N-brick or N-brick (trend) is
+   refused until the guard is ON with a stop-loss** (section 6a); Two-back / One-back carry their own stop and arm without it. In PAPER the
+   guard stays optional.
+7. Optionally set the chart's **daily limits** (`Day ₹- … · trades … · losses …`, section 4b).
+8. You can close the tab: AUTO runs on the dashboard server while it is up (section 7).
 
 While AUTO is armed or holds a position, the rule, lots, instrument and box are locked. To change them, stop AUTO (and close its
 position) first.
@@ -46,7 +48,8 @@ Pick one per chart from the dropdown next to AUTO. A chart starts on **Supertren
 | **One-back** | 2+ bricks, a 1-brick pullback, then 2 resuming bricks that break the swing. | The same kind of stop. |
 | **Supertrend** | BUY on a **green** brick while the Supertrend line is up, SELL on a **red** brick while it is down (the line's direction on the chart's ATR period x multiplier, the `ST` control). A brick of the other colour never enters: armed SELL-side while the line is down, a green pullback brick is skipped and the next red brick enters. Arming mid-run enters on the next brick of the right colour. | The first brick after the entry whose Supertrend direction is against the position (the line flips), and that brick is also the entry for the other side: the chart **flips**. No stop. |
 
-N-brick, N-brick (trend) and Supertrend carry **no stop of their own**: the MTM guard is their loss limit. Two consecutive S (or B) markers on the
+N-brick, N-brick (trend) and Supertrend carry **no stop of their own**: the MTM guard is their loss limit, and REAL AUTO on them needs it ON
+with a stop-loss (section 6a). Two consecutive S (or B) markers on the
 chart under the trend rule are a flip: the first is the exit of the old position, the second the entry of the new one.
 
 **Side.** Next to the rule, **Buy + Sell** (default) / **Buy only** / **Sell only** limits what AUTO may *open*; a signal for the other side is ignored (a buy-only chart stays flat through a sell phase and enters on the next buy). The AUTO status line says `SELL signal ignored (Buy only)` while it holds one back (logged once per change of direction), and arming logs and toasts the side. Exits are never filtered: an open position always exits by its own rule, MTM guard or end of day. The choice is remembered per chart and locked only while AUTO is armed. On options, "Sell" means selling the option.
@@ -65,8 +68,9 @@ chart under the trend rule are a flip: the first is the exit of the old position
   NRML has no broker square-off behind it: the server retries a refused end-of-day exit every 10 s until the close (it never stands down
   then), and a position still open from an earlier day is never exited by AUTO. It raises a red alert on the page and in the AUTO log
   instead, so close it at the broker and resolve it.
-- **NRML NIFTY options are held overnight** (decided 2026-11-09). An NRML position in a NIFTY option (an options chart, or an index chart's
-  option map) gets **no end-of-day exit**: it is carried to the next session, where its stop, trail, opposite-brick / Supertrend exit and
+- **NRML NIFTY options are held overnight** (decided 2026-11-09) **only under a guard stop-loss** (since 2026-11-18). An NRML position in a NIFTY
+  option (an options chart, or an index chart's option map) is carried only while the server holds the chart's MTM guard ON with a stop-loss for
+  the position's broker and mode (section 6a); without one it gets the 15:35 NRML exit like any other NRML row. Carried, it gets **no end-of-day exit**: it is carried to the next session, where its stop, trail, opposite-brick / Supertrend exit and
   the server MTM guard keep running (no "still open" alarm for it). On the option's **expiry day** the 15:35 NRML exit applies again, so a
   contract is never carried past expiry. MIS NIFTY options keep 15:15; futures, other underlyings and stocks are unchanged
   (`carriesOvernight` in `lib/pnfAuto.ts`). An overnight gap can trigger the exit at the next open, filled at the gapped price.
@@ -129,6 +133,23 @@ In priority order:
    live price and never books an exit at the entry price.
 
 Exits keep running for an open position even when AUTO is switched off.
+
+### 4b. Daily limits (`Day ₹- … · trades … · losses …`)
+
+Per chart, Renko only, all optional (blank = off). Set before arming; saved with the arming and locked while armed.
+
+- **₹ loss**: no new entry once today's **closed** AUTO trades on this chart have lost this many rupees in total.
+- **trades**: no new entry once this many AUTO trades were opened today on this chart (a refused entry, or one you resolved **Is flat** from an
+  unknown entry, never opened and does not count; an open one does).
+- **losses**: no new entry after this many losing trades in a row today.
+
+Loss and losing streak count trades by the day they **closed**, so an NRML trade carried from yesterday that closes at a loss today counts
+toward today's limits; the trade count is by the day a trade **opened**.
+
+They count today's ledger rows for the chart in the arming's mode (PAPER and REAL apart), so a dashboard restart or a re-arming with the same
+limits never resets them; raising a limit and arming again is the way to keep trading. When one is reached the server **halts** the chart
+(AUTO switches off, the status says `HALTED` and why, the AUTO log keeps the line). An open position is never touched by a limit: it still
+exits by its rule, the MTM guard and end of day. The loss limit reads **realised** P&L only; the open position's loss is the MTM guard's job.
 
 ### Adding lots as the trade moves (`+1L every N bricks`)
 
@@ -255,6 +276,24 @@ One guard per chart, shown in the toolbar (**MTM Guard ON/OFF**) with its card.
     both ledgers read flat. Both charts are watched, whichever one is shown.
   - **Server.** The guard synced for an index chart applies to its open REAL AUTO row with the tab closed too, on the option premium from the
     price bridge (no premium = the guard waits; the row's own stop and end-of-day exit still hold). Manual units are guarded by the tab only.
+
+### 6a. The guard stop-loss rule (since 2026-11-18)
+
+- **REAL arming.** A REAL arming of Supertrend, N-brick or N-brick (trend) is refused unless the chart's MTM guard is **ON with a stop-loss**: a
+  rupee stop, or a box stop on a contract chart whose box size is known (an index chart takes a rupee stop: its box is an index move). A target,
+  trail or Protect profit alone is not a stop-loss. The page checks the card; the ledger route checks the **server's** copy of the guard
+  (`debug/auto_server_guards.json`, the one that works with the tab closed), so switch the guard on a moment before arming.
+- **Arming waits for the server copy.** The card sends the guard to the server without waiting; arming reads the server's copy first and, when
+  it is missing, sends the card's guard and waits for it, so *Switch on* followed at once by *AUTO* is not refused. A box stop the server cannot
+  convert (the chart's box size not known yet) is refused with that reason: wait for the chart, or use a rupee stop.
+- **While armed.** If the server's copy goes (switched off, its stop removed), the engine switches that REAL AUTO off at once, and an open tab
+  toasts why (`REAL AUTO switched off on chart N: …`). Switching the page's broker or mode keeps the server copy of an **armed** chart (as for one
+  holding a position), so it does not cut off an arming on another account. An open position still exits by its rule and end of day.
+- **Overnight carry** of an NRML NIFTY option needs the same: a server guard with a stop-loss for the row's broker and mode, at the end-of-day
+  minute; without it the row is squared off at 15:35. A row already carried whose guard has gone by the next session is **closed at the open**
+  (end-of-day style: with no live price the entry price is booked and said), never held all day with no loss limit.
+- **The P&F page** (`/straddle-pnf`) is unchanged: none of these gates apply there.
+- Code: `lib/pnfAutoSafety.ts` (one rule for the page, the ledger route, the engine and the guard watcher).
 
 ## 7. What runs where
 
@@ -390,6 +429,7 @@ The REAL guard watcher (`lib/autoServerWatcher.ts`, started with the server) wor
 |---|---|
 | Tick interval | `scripts/tools/pnf_ws.py` (`TickLog`), `lib/pnfTicksServer.ts` + `app/api/straddle-pnf/ticks/route.ts` (log reader), `lib/pnfTicks.ts` (ticks to closed bars, splice with minute history), `components/straddlePnf/usePnfFeed.ts` |
 | Rules (pure, tested) | `rs_dashboard/lib/renko.ts` (`renkoSignals`, `trendSignals`, `twoBackSignals`, `oneBackSignals`), `lib/pnfAuto.ts` (`decideAuto`, windows), `lib/pnfAutoRule.ts` |
+| Risk gates (pure, tested) | `lib/pnfAutoSafety.ts`: REAL needs a guard stop, overnight carry needs one, daily limits |
 | Engine (server) | `lib/pnfAutoEngine.ts` (loop, lock, status file), `lib/pnfAutoChart.ts` (one chart's rules and orders), `lib/pnfServerFeed.ts`, `lib/pnfFeedCore.ts`, `lib/pnfHistory.ts`, `lib/pnfAutoOrders.ts`, `lib/brokerOrderStatus.ts`, `app/api/straddle-pnf/auto/exit/route.ts` |
 | Page (monitor) | `components/straddlePnf/usePnfAuto.ts`, `AutoControls.tsx`, `components/StraddlePnfPage.tsx` |
 | Ledger | `lib/pnfAutoLedger.ts`, `lib/pnfAutoServer.ts`, `app/api/straddle-pnf/auto/route.ts` |

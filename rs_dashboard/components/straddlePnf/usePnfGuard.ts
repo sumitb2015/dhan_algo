@@ -49,7 +49,7 @@ const saveLevels = (key: string, chart: number, g: LadderGuard, rupeesOnly = fal
   try { localStorage.setItem(`${key}${slotName(chart, rupeesOnly)}`, JSON.stringify(Object.fromEntries(FIELDS.filter(f => g[f] != null).map(f => [f, g[f]])))); } catch { /* ignore */ }
 };
 
-export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderRef, exitChart, onEvent, rupeesPerBox, tradeKey, syncServer, storeKey = KEY }: {
+export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderRef, exitChart, onEvent, rupeesPerBox, tradeKey, syncServer, storeKey = KEY, armed }: {
   charts: GuardChart[];
   positions: Record<string, LadderPosition | null>;
   positionsLoaded: boolean;
@@ -69,6 +69,11 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   tradeKey: (chart: 1 | 2) => string | null;
   /** Tells the dashboard server about this chart's guard (null: switched off) so it can enforce it on open REAL AUTO positions with the tab closed. */
   syncServer: (chart: 1 | 2, guard: LadderGuard | null) => void;
+  /**
+   * The chart has a saved AUTO arming: a broker / mode switch on the page then keeps the server copy, as for an open position. A REAL arming of
+   * a stop-less rule is switched off by the server engine the moment that copy goes (lib/pnfAutoSafety.ts), so a page switch must not take it.
+   */
+  armed?: (chart: 1 | 2) => boolean;
   /** localStorage prefix of the remembered levels (the Renko page keeps its own). */
   storeKey?: string;
 }) {
@@ -84,7 +89,8 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
   const rupeesOnlyOf = (chart: number) => !!chartsRef.current.find(c => c.chart === chart)?.rupeesOnly;
   const syncServerRef = useRef(syncServer);
   const tradeKeyRef = useRef(tradeKey);
-  useEffect(() => { syncServerRef.current = syncServer; tradeKeyRef.current = tradeKey; });
+  const armedRef = useRef(armed);
+  useEffect(() => { syncServerRef.current = syncServer; tradeKeyRef.current = tradeKey; armedRef.current = armed; });
   useEffect(() => { onEventRef.current = onEvent; });
   // Another broker or mode: nothing carries over (the levels stay, the switch goes off).
   useEffect(() => {
@@ -96,7 +102,7 @@ export function usePnfGuard({ charts, positions, positionsLoaded, scope, leaderR
     // The server copy goes with the page's guard - EXCEPT for a chart that still holds an AUTO position: that REAL position keeps its
     // server stop (the page's guard is off now, but a position must never be left without its stop by a mode or broker switch).
     for (const c of [1, 2] as const) {
-      if (slotsRef.current[c]?.guard.on && tradeKeyRef.current(c) === null) syncServerRef.current(c, null);
+      if (slotsRef.current[c]?.guard.on && tradeKeyRef.current(c) === null && !armedRef.current?.(c)) syncServerRef.current(c, null);
     }
   }, [scope]);
   // A chart switched between an index (option P&L, rupee levels) and a contract (box levels): the guard it had was set for the other

@@ -63,6 +63,8 @@ import { isSellSignal } from '@/lib/straddlePnf';
 import type { PnfScope } from '@/lib/pnfScope';
 import { usePnfAuto, usePnfAutoLedger, type AutoArm, type AutoEvent, type AutoPyramid } from './straddlePnf/usePnfAuto';
 import { autoDaySummary, autoMarkers, holdsPosition, isLive, markPnl, PYRAMID_HARD_MAX } from '@/lib/pnfAutoLedger';
+import { armNeedsGuardStop, guardStopProblem, levelsHaveStop, limitsText, NEEDS_STOP_TEXT, parseLimits, type AutoLimits } from '@/lib/pnfAutoSafety';
+import type { ServerGuardCfg } from '@/lib/autoServerGuard';
 import AutoControls, { type AutoRule } from './straddlePnf/AutoControls';
 import { AUTO_PRODUCT_LABEL, autoProductOf, autoWindow, carriesOvernight, pyramidEveryOf, rowMarket, TRAIL_BOXES_MAX, TRAIL_BOXES_MIN, type AutoProduct } from '@/lib/pnfAuto';
 import { guardLevelsText, syncGuardFromServer, type ServerGuardView } from '@/lib/pnfServerGuardView';
@@ -124,6 +126,9 @@ const AUTO_SIDE_KEY = 'straddle-pnf-auto-side-';
 const AUTO_PYR_KEY = 'straddle-pnf-auto-pyr-';
 /** The product AUTO opens with per chart: 'MARGIN' (NRML) or MIS (anything else). */
 const AUTO_PROD_KEY = 'straddle-pnf-auto-prod-';
+/** Renko AUTO daily limits per chart: JSON AutoLimits (lib/pnfAutoSafety.ts); absent = none. */
+const AUTO_LIM_KEY = 'straddle-pnf-auto-limits-';
+const limitsFromPref = (raw: string | null): AutoLimits => { try { return parseLimits(JSON.parse(raw ?? 'null')) ?? {}; } catch { return {}; } };
 const DEFAULT_PYRAMID: AutoPyramid = { on: false, max: 10, every: 1, trailOn: true, trail: 2 };
 const parsePyramid = (raw: string | null): AutoPyramid => {
   try {
@@ -302,6 +307,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const [autoLots, setAutoLots] = useState<Record<ChartId, number>>({ 1: 1, 2: 1 });
   const [autoPyr, setAutoPyr] = useState<Record<ChartId, AutoPyramid>>({ 1: DEFAULT_PYRAMID, 2: DEFAULT_PYRAMID });
   const [autoProd, setAutoProd] = useState<Record<ChartId, AutoProduct>>({ 1: 'INTRADAY', 2: 'INTRADAY' });
+  const [autoLimits, setAutoLimits] = useState<Record<ChartId, AutoLimits>>({ 1: {}, 2: {} });
   // Single | Bracket | Cover for the next entry (trade bar and chart rail), with its points; remembered, never armed silently.
   const [orderStyle, setOrderStyle] = useState<StyleState>(DEFAULT_STYLE);
   // Triangles (nested-column squeezes): drawn or not, and the fewest nested columns that count (3-6), per chart, remembered.
@@ -385,6 +391,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     setAutoSide({ 1: sideOf(1), 2: sideOf(2) });
     setAutoPyr({ 1: parsePyramid(readP(`${AUTO_PYR_KEY}1`)), 2: parsePyramid(readP(`${AUTO_PYR_KEY}2`)) });
     setAutoProd({ 1: autoProductOf(readP(`${AUTO_PROD_KEY}1`)), 2: autoProductOf(readP(`${AUTO_PROD_KEY}2`)) });
+    setAutoLimits({ 1: limitsFromPref(readP(`${AUTO_LIM_KEY}1`)), 2: limitsFromPref(readP(`${AUTO_LIM_KEY}2`)) });
     setMarkersShown({ 1: readP(`${MARKERS_SHOWN_KEY}1`) !== '0', 2: readP(`${MARKERS_SHOWN_KEY}2`) !== '0' });
     try { const raw = readP(STYLE_KEY); if (raw) { const j = JSON.parse(raw); setOrderStyle({ style: j.style === 'Bracket' || j.style === 'Cover' ? j.style : 'Single', tgt: String(j.tgt ?? ''), sl: String(j.sl ?? ''), trail: String(j.trail ?? ''), trailOn: j.trailOn === true }); } } catch { /* keep Single */ }
     const minOf = (c: ChartId) => { const n = Number(readP(`${TRI_MIN_KEY}${c}`)); return Number.isInteger(n) && n >= 3 && n <= 6 ? n : 3; };
@@ -930,7 +937,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   };
   // The guard is also enforced by the dashboard SERVER on open REAL AUTO positions (lib/autoServerWatcher.ts), so a closed or sleeping tab
   // does not leave one without its stop: every change of a chart's guard is synced to it.
-  const syncServerGuard = (c: 1 | 2, gIn: LadderGuard | null, quiet = false) => {
+  /** Sends chart c's guard (null: off) to the server watcher; resolves true once the server has stored it. */
+  const syncServerGuard = (c: 1 | 2, gIn: LadderGuard | null, quiet = false): Promise<boolean> => {
     // an index chart's guard is rupees only (its box is an index move): no box size, no box levels go to the server
     const ixc = isIndexChart(c);
     const g = gIn && ixc ? rupeeLevels(gIn) : gIn;
@@ -938,19 +946,34 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     if (g && (g.targetBoxes != null || g.stopBoxes != null) && !(boxPts != null && boxPts > 0)) {
       // A box that merely became unknown (chart 2 switched off in single-chart view, or still loading) is not a user action: the server
       // keeps the copy it already has, and the effect below re-syncs as soon as the box is known. Only a click on the card warns.
-      if (quiet) return;
+      if (quiet) return Promise.resolve(false);
       toast.warning(`The server copy of chart ${c}'s guard was NOT updated: its box size is not known yet, so the box levels cannot be enforced with the tab closed. It updates once the chart has its box.`, { duration: 15_000 });
-      return;
+      return Promise.resolve(false);
     }
     const levels = g ? Object.fromEntries((['target', 'stop', 'trailBy', 'lockAt', 'lockKeep', 'lockStepEvery', 'lockStepKeep', 'targetBoxes', 'stopBoxes'] as const).filter(k => g[k] != null).map(k => [k, g[k]])) : undefined;
-    void fetch(`/api/straddle-pnf/server-guard?scope=${scope}`, {
+    return fetch(`/api/straddle-pnf/server-guard?scope=${scope}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(g ? { chart: c, on: true, broker, mode: tradeMode, boxPts, levels } : { chart: c, on: false }),
-    }).catch(() => { /* the page's own guard still runs; the server copy is the backstop */ });
+    }).then(async r => Boolean(((await r.json()) as { success?: boolean }).success))
+      .catch(() => false);   // the page's own guard still runs; the server copy is the backstop
+  };
+  /**
+   * A REAL arming of a stop-less rule is checked by the ledger route against the SERVER's guard copy, which the card sends without waiting:
+   * read it first, and when it is missing or stale send the card's guard and wait for it, so a quick "Switch on, then arm" is not refused.
+   * Null = the server holds a guard with a stop-loss for this chart; otherwise why not.
+   */
+  const ensureServerGuardStop = async (c: ChartId): Promise<string | null> => {
+    const want = { broker, mode: tradeMode, index: isIndexChart(c) };
+    const read = async (): Promise<ServerGuardCfg | undefined> => {
+      try { return ((await (await fetch(`/api/straddle-pnf/server-guard?scope=${scope}`)).json()) as { guards?: Record<string, ServerGuardCfg> }).guards?.[`${scope}:${c}`]; } catch { return undefined; }
+    };
+    if (!guardStopProblem(await read(), want)) return null;
+    if (!(await syncServerGuard(c, guards.guardOf(c)))) return 'the MTM guard could not be copied to the server (its box size is not known yet, or the server did not answer) - try again in a moment';
+    return guardStopProblem(await read(), want);
   };
   const guards = usePnfGuard({
     charts: [...railCharts.map(c => ({ chart: c.chart, targetKey: guardKey(c) })), ...indexGuardCharts], positions: guardPositions, positionsLoaded: positionsInfo.loaded,
-    scope: `${broker}:${tradeMode}`, leaderRef, exitChart, rupeesPerBox: boxRupees, tradeKey: c => autoOf(c).row?.id ?? null, syncServer: syncServerGuard, storeKey: prefKey(chart, 'straddle-pnf-guard-'),
+    scope: `${broker}:${tradeMode}`, leaderRef, exitChart, rupeesPerBox: boxRupees, tradeKey: c => autoOf(c).row?.id ?? null, syncServer: syncServerGuard, armed: c => !!autoLedger.arms?.[String(c) as '1' | '2'], storeKey: prefKey(chart, 'straddle-pnf-guard-'),
     onEvent: (c, kind, text) => { if (kind === 'warn') { toast.warning(text, { duration: 15_000 }); chime({ kind: 'manual', outcome: 'rejected', close: false }); } else toast(text); void c; },
   });
   // A box-level guard is converted to rupees with the chart's box size: when that changes (or first becomes known), the server copy follows.
@@ -1091,7 +1114,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     const hm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
     // An NRML NIFTY option (the open row's contract, else what an index chart's map / an options chart would trade) is held overnight.
     const carry = row ? carriesOvernight(row, now / 1000) : prod === 'MARGIN' && (tgt.kind === 'options' || tgt.kind === 'index') && tgt.symbol.toUpperCase() === 'NIFTY';
-    return `${AUTO_PRODUCT_LABEL[prod]}: entries stop ${hm(win.entryCutoff)}, ${carry ? 'NIFTY options held overnight (no end-of-day exit)' : `squared off ${hm(win.eodExit)}`}`;
+    // carried only while the MTM guard with a stop-loss covers it (lib/pnfAutoSafety.ts carryAllowed): otherwise the NRML exit applies
+    return `${AUTO_PRODUCT_LABEL[prod]}: entries stop ${hm(win.entryCutoff)}, ${carry ? `NIFTY options held overnight only with the MTM guard ON with a stop-loss, else squared off ${hm(win.eodExit)}` : `squared off ${hm(win.eodExit)}`}`;
   };
   // The saved AUTO switch (ledger `arms`) IS the switch: the dashboard server runs AUTO from it (lib/pnfAutoEngine.ts), with or without a tab.
   //  - a saving exists: the chart shows armed, with the rule, side, lots, adds and product it was armed with (restored once per arming);
@@ -1127,6 +1151,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
           }
           const prod = autoProductOf(rec.product);
           setAutoProd(a => ({ ...a, [c]: prod })); saveP(`${AUTO_PROD_KEY}${c}`, prod);
+          if (renko) { const lim = rec.limits ?? {}; setAutoLimits(a => ({ ...a, [c]: lim })); saveP(`${AUTO_LIM_KEY}${c}`, JSON.stringify(lim)); }
           setAutoArm(a => ({ ...a, [c]: { on: true, mode: rec.mode, watermarkT: rec.watermarkT, armT: rec.t, product: prod } }));
         }
         continue;
@@ -1204,6 +1229,17 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     if (on && autoSide[c] !== 'both') toast.info(`AUTO armed on chart ${c}: ${SIDE_LABEL[autoSide[c]].toUpperCase()} - signals for the other side are ignored (open positions still exit normally).`, { duration: 8_000 });
     // Tick mode: every brick the live price prints is a closed bar, so AUTO enters, exits and adds within a second or two of it.
     if (on && (c === 2 ? tick2 : tick1)) toast.warning(`AUTO armed on a ${c === 2 ? tickName2 : tickName1} chart ${c}: it acts on bricks within seconds of the live price (not at a 1-minute close) - expect more trades and whipsaws than on a minute chart.`, { duration: 12_000 });
+    // REAL on a rule with no stop of its own (Supertrend / N-brick / trend) needs the MTM guard ON with a stop-loss: it is that rule's only loss
+    // limit (lib/pnfAutoSafety.ts; the ledger route and the server engine apply the same rule against the server's copy of the guard).
+    const needStop = on && armNeedsGuardStop(renko ? 'renko' : 'pnf', { mode: tradeMode, rule: autoRule[c] });
+    if (needStop) {
+      const g = guards.guardOf(c);
+      const ix = isIndexChart(c);
+      if (!g.on || !levelsHaveStop(g, { index: ix, boxPts: ix ? null : (c === 2 ? c2 : c1).model.box })) {
+        toast.error(`AUTO not armed on chart ${c}. ${NEEDS_STOP_TEXT}${ix ? ' (an index chart takes a rupee stop-loss)' : ''}.`, { duration: 15_000 });
+        return;
+      }
+    }
     if (on && tradeMode === 'REAL' && !guards.guardOf(c).on) toast.info(`AUTO armed on chart ${c} with the MTM guard OFF - switch it on from the MTM Guard card if you want a profit target / stop-loss.`, { duration: 10_000 });
     if (!on) { disarm(c, 'stopped by the user'); return; }
     const m = (c === 2 ? c2 : c1).model;
@@ -1232,23 +1268,29 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
       side: autoSide[c], ...(renko ? { rule: autoRule[c] } : {}),
       ...(renko && !indexArm && autoPyr[c].on && autoPyr[c].max > autoLots[c] ? { pyramid: { max: autoPyr[c].max, ...(autoPyr[c].every > 1 ? { every: autoPyr[c].every } : {}), trail: autoPyr[c].trailOn ? autoPyr[c].trail : 0 } } : {}),
       ...(product === 'MARGIN' ? { product: 'MARGIN' as const } : {}),
+      ...(renko && parseLimits(autoLimits[c]) ? { limits: parseLimits(autoLimits[c]) } : {}),
     };
     const pyrText = (rec.pyramid ? `, +1L/${rec.pyramid.every ? `${rec.pyramid.every} bricks` : 'brick'} to ${rec.pyramid.max}L${rec.pyramid.trail ? `, trail ${rec.pyramid.trail} bx` : ''}` : '') + (product === 'MARGIN' ? ', NRML' : '');
     if (renko && autoPyr[c].on && !rec.pyramid) toast.warning(`Chart ${c}: adds are on but Max (${autoPyr[c].max}) is not above the base lots (${autoLots[c]}) - no lots will be added`, { duration: 10_000 });
-    const mapText = indexArm ? `, bull ${legText(indexMap[c].bull)} / bear ${legText(indexMap[c].bear)}` : '';
-    void autoPost({ op: 'setArm', chart: c, arm: rec, t, text: `AUTO armed (${tradeMode}, ${autoLots[c]} lot${autoSide[c] !== 'both' ? `, ${SIDE_LABEL[autoSide[c]]}` : ''}${pyrText}${mapText})` }).then(r => {
+    const mapText = (indexArm ? `, bull ${legText(indexMap[c].bull)} / bear ${legText(indexMap[c].bear)}` : '') + (rec.limits ? `, day limits: ${limitsText(rec.limits)}` : '');
+    const unarm = () => setAutoArm(a => (a[c].on && a[c].watermarkT === watermarkT && a[c].armT === undefined ? { ...a, [c]: DISARMED } : a));
+    // a stop-less REAL rule: the server must hold the guard's stop-loss before the arming is sent (the route checks the server's copy)
+    void (needStop ? ensureServerGuardStop(c) : Promise.resolve(null)).then(problem => {
+      if (problem) { unarm(); toast.error(`AUTO on chart ${c} was NOT armed: ${problem}`, { duration: 15_000 }); return; }
+      return autoPost({ op: 'setArm', chart: c, arm: rec, t, text: `AUTO armed (${tradeMode}, ${autoLots[c]} lot${autoSide[c] !== 'both' ? `, ${SIDE_LABEL[autoSide[c]]}` : ''}${pyrText}${mapText})` }).then(r => {
       if (r.ok) {
         noteArmSaved(c, r.ledger?.rev);
         setAutoArm(a => (a[c].on && a[c].watermarkT === watermarkT && a[c].armT === undefined ? { ...a, [c]: { ...a[c], armT: t } } : a));
       } else {
         // AUTO runs on the server from the saved arming: an arming that was not saved trades nothing.
-        setAutoArm(a => (a[c].on && a[c].watermarkT === watermarkT && a[c].armT === undefined ? { ...a, [c]: DISARMED } : a));
+        unarm();
         toast.error(`AUTO on chart ${c} was NOT armed: it could not be saved (${r.error ?? 'no reply'})`, { duration: 15_000 });
       }
+      });
     });
     // autoOf reads auto1 / auto2 of this render (their `quiet` flag only)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoSide, autoLots, autoRule, autoPyr, autoProd, tradeMode, guards, disarm, c1, c2, feed1, feed2, settings, settings2, noteArmSaved, broker, target1, target2, renko, autoPost, tick1, tick2, tickName1, tickName2, indexMap]);
+  }, [autoSide, autoLots, autoRule, autoPyr, autoProd, autoLimits, tradeMode, guards, disarm, c1, c2, feed1, feed2, settings, settings2, noteArmSaved, broker, target1, target2, renko, autoPost, tick1, tick2, tickName1, tickName2, indexMap]);
   const setLotsFor = (c: ChartId, n: number) => { setAutoLots(l => ({ ...l, [c]: n })); saveP(`${AUTO_LOTS_KEY}${c}`, String(n)); };
   // The page mode is the mode new AUTO armings trade in: switching it disarms the charts armed in the OTHER mode (arming REAL is always an
   // explicit step). A REAL arming the server runs is left alone when the page (which always loads in PAPER) is switched to REAL.
@@ -1488,6 +1530,8 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
                       onProduct={target.kind === 'equity' ? undefined : p => { setAutoProd(a => ({ ...a, [c]: p })); saveP(`${AUTO_PROD_KEY}${c}`, p); }}
                       eodText={eodText(c)}
                       onPyramid={renko ? p => { setAutoPyr(a => ({ ...a, [c]: p })); saveP(`${AUTO_PYR_KEY}${c}`, JSON.stringify(p)); } : undefined}
+                      limits={renko ? autoLimits[c] : undefined}
+                      onLimits={renko ? l => { const v = parseLimits(l) ?? {}; setAutoLimits(a => ({ ...a, [c]: v })); saveP(`${AUTO_LIM_KEY}${c}`, JSON.stringify(v)); } : undefined}
                       autoRule={renko ? autoRule[c] : undefined} onAutoRule={renko ? r => { setAutoRule(a => ({ ...a, [c]: r })); saveP(`${AUTO_RULE_KEY}${c}`, r); } : undefined}
                       rule={renko ? ruleText(autoRule[c], (c === 2 ? settings2 : settings).reversal) : undefined}
                       disabledReason={target.kind === 'index' && !renko ? 'No AUTO on an index: chart its future or an option'

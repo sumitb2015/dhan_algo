@@ -15,6 +15,7 @@ import { indexSpotId } from '@/lib/pnfContracts';
 import { premiumOf } from '@/lib/pnfIndexTradeServer';
 import { chartPrice, guards, ownHeldQty, runtimeKey, stepRow, stopHit, type RowRuntime, type ServerGuardCfg } from '@/lib/autoServerGuard';
 import { autoProductOf, autoWindow, carriesOvernight, rowMarket } from '@/lib/pnfAuto';
+import { carryAllowed, carryLapsed } from '@/lib/pnfAutoSafety';
 import { istMinuteOfDay, sessionWindow } from '@/lib/straddlePnfLive';
 import { istDateIso } from '@/lib/nseHolidays';
 import { closingSide, pendingAddUnits, type AutoOp } from '@/lib/pnfAutoLedger';
@@ -40,7 +41,10 @@ const SCOPES: PnfScope[] = ['pnf', 'renko'];
 
 export interface ServerGuardsFile { v: 1; cfg: Record<string, ServerGuardCfg>; runtime: Record<string, RowRuntime> }
 const EMPTY: ServerGuardsFile = { v: 1, cfg: {}, runtime: {} };
-const keyOf = (scope: PnfScope, chart: number) => `${scope}:${chart}`;
+export const keyOf = (scope: PnfScope, chart: number) => `${scope}:${chart}`;
+
+/** The server's guard copy for one chart of a page, or undefined. */
+export const serverGuardOf = (scope: PnfScope, chart: number): ServerGuardCfg | undefined => readServerGuards().cfg[keyOf(scope, chart)];
 
 export function readServerGuards(): ServerGuardsFile {
   try {
@@ -254,7 +258,7 @@ async function tick(): Promise<void> {
     const nowS = now / 1000;
     const minute = istMinuteOfDay(nowS);
     /** `cfg` set: the page's guard is synced for this row (stop-loss, target, ... enforced). Unset: the row only gets the end-of-day exit. */
-    const todo: { scope: PnfScope; row: AutoRow; cfg: ServerGuardCfg | undefined; win: { open: number; entryCutoff: number; eodExit: number }; stuckAdd: boolean }[] = [];
+    const todo: { scope: PnfScope; row: AutoRow; cfg: ServerGuardCfg | undefined; win: { open: number; entryCutoff: number; eodExit: number }; stuckAdd: boolean; carry: boolean; lapsed: boolean }[] = [];
     const allLive = SCOPES.flatMap(sc => readAutoLedger(sc).rows.filter(r => r.mode === 'REAL' && r.state !== 'closed'));
     // Same contract, broker AND product: exits are capped by that product's broker row only, so an MIS row cannot take an NRML row's units.
     // compared on the contract each row actually holds (an index chart's row: its option)
@@ -283,7 +287,11 @@ async function tick(): Promise<void> {
         // An NRML NIFTY option row is carried overnight on purpose (carriesOvernight, judged at its entry): its stop and guard keep running
         // on later days, and on its expiry day (`carry` false) it gets the NRML end-of-day exit like any other row.
         const carried = carriesOvernight(row, row.entryT);
-        const carry = carriesOvernight(row, nowS);
+        // ...on the Renko page only while a guard with a stop-loss covers it (lib/pnfAutoSafety.ts carryAllowed): no overnight gap without a
+        // loss limit. A Renko row carried from an earlier day whose guard has gone (`lapsed`) is closed as soon as the market is open.
+        const rawCfg = file.cfg[keyOf(scope, row.chart)];
+        const carry = carryAllowed(scope, row, nowS, rawCfg);
+        const lapsed = carryLapsed(scope, row, nowS, rawCfg);
         if (row.day !== today && !carried) {
           const text = `chart ${row.chart}'s ${autoProductOf(row.product) === 'MARGIN' ? 'NRML ' : ''}position from ${row.day} is STILL OPEN - AUTO does not exit an earlier day's row; close it at the broker and resolve it on the page`;
           if (Date.now() - (lastWarned.get(`${scope}:${row.chart}:${text}`) ?? 0) >= WARN_REPEAT_MS) console.error(`[auto-server-guard] ${scope}: ${text}`);
@@ -295,8 +303,8 @@ async function tick(): Promise<void> {
         // After the close an exit cannot trade: say so (once in a while) instead of sending orders into a shut market every few seconds.
         if (minute >= sessionWindow(rowMarket(row), nowS)[1]) { if (carry) continue; await warn(scope, row, `chart ${row.chart}'s position is still open after the market closed - not exited; check the broker and resolve it`); continue; }
         // An unguarded row without a stop is only looked at once its end-of-day time is near (no price is asked for before that).
-        if (!cfg && row.stop === undefined && (carry || minute < win.eodExit - 2)) continue;
-        todo.push({ scope, row, cfg, win, stuckAdd });
+        if (!lapsed && !cfg && row.stop === undefined && (carry || minute < win.eodExit - 2)) continue;
+        todo.push({ scope, row, cfg, win, stuckAdd, carry, lapsed });
       }
     }
     // Runtime of rows that are over is dropped (the file would otherwise grow for ever).
@@ -327,10 +335,15 @@ async function tick(): Promise<void> {
     ensureBridge(now);
     const { book } = readBridgeBook(now);
     for (const { item, ids, optIds } of pairs) {
-      const { scope, row, cfg, win, stuckAdd } = item;
+      const { scope, row, cfg, win, stuckAdd, carry, lapsed } = item;
       const price = chartPrice(ids, book, now);
       const premium = optIds ? chartPrice(optIds, book, now) : null;
-      if (!carriesOvernight(row, nowS) && minute >= win.eodExit) {
+      if (lapsed) {
+        // carried overnight and its guard stop-loss is gone: no loss limit for this session, so it is closed now (no price: the entry price, said)
+        await exitRow(scope, row, price === null ? 'carried overnight with no guard stop-loss (no live price)' : 'carried overnight with no guard stop-loss', price ?? row.entryPrice, stuckAdd, true, undefined, premium);
+        continue;
+      }
+      if (!carry && minute >= win.eodExit) {
         // The end of day comes first and needs no price: the position must be flat before the broker's own square-off. With no price the
         // exit is booked at the entry price (as the tab's own end-of-day exit does when it has none) and the ledger says so.
         await exitRow(scope, row, price === null ? 'end of day (no live price)' : 'end of day', price ?? row.entryPrice, stuckAdd, true, undefined, premium);

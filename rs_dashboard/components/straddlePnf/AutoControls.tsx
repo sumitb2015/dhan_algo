@@ -5,6 +5,7 @@ import { Bot } from 'lucide-react';
 import { holdsPosition, markPnl, PYRAMID_HARD_MAX, type AutoRow } from '@/lib/pnfAutoLedger';
 import type { AutoProduct } from '@/lib/pnfOrderLogic';
 import { PYRAMID_EVERY_MAX, TRAIL_BOXES_MAX, TRAIL_BOXES_MIN } from '@/lib/pnfAuto';
+import { LIMIT_MAX_LOSS_MAX, LIMIT_MAX_LOSSES_MAX, LIMIT_MAX_TRADES_MAX, limitsText, type AutoLimits } from '@/lib/pnfAutoSafety';
 
 // One chart's AUTO switch, lots and status (engine: ./usePnfAuto.ts). The switch is saved in the AUTO ledger and resumed after a reload in
 // the same mode (the dashboard server runs the saved arming, lib/pnfAutoEngine.ts); in REAL mode
@@ -53,6 +54,45 @@ export interface AutoControlsProps {
   onProduct?: (p: AutoProduct) => void;
   /** Today's entry cutoff and square-off for this chart, e.g. "NRML: entries stop 15:35, squared off 15:35". */
   eodText?: string | null;
+  /** Renko only: daily limits saved with the arming (lib/pnfAutoSafety.ts). Each field blank = no limit. Locked while armed. */
+  limits?: AutoLimits;
+  onLimits?: (l: AutoLimits) => void;
+}
+
+/**
+ * One daily-limit box: blank = no limit. Commits on blur / Enter, never per keystroke (dhan-commit-on-blur); Escape restores the saved
+ * value. A value out of range is clamped, anything unreadable clears the limit back to what it was.
+ */
+function LimitInput({ label, testId, value, max, int, disabled, width, onCommit, title }: {
+  label: string; testId: string; value: number | undefined; max: number; int: boolean; disabled: boolean; width: string;
+  onCommit: (v: number | undefined) => void; title: string;
+}) {
+  const [draft, setDraft] = useState(value === undefined ? '' : String(value));
+  const focused = useRef(false), cancel = useRef(false);
+  useEffect(() => { if (!focused.current) setDraft(value === undefined ? '' : String(value)); }, [value]);
+  const commit = (raw: string) => {
+    const t = raw.trim().replace(/,/g, '');
+    if (t === '') { setDraft(''); if (value !== undefined) onCommit(undefined); return; }
+    const n = int ? parseInt(t, 10) : Number(t);
+    // whole numbers only, at least 1 (a loss under 0.5 would round to 0, which is no limit): anything else keeps the saved value
+    const whole = Number.isFinite(n) ? Math.round(n) : NaN;
+    if (!(whole >= 1)) { setDraft(value === undefined ? '' : String(value)); return; }
+    const next = Math.min(max, whole);
+    setDraft(String(next));
+    if (next !== value) onCommit(next);
+  };
+  return (
+    <input aria-label={label} data-testid={testId} value={draft} disabled={disabled} placeholder="off" inputMode="numeric" title={title}
+           onFocus={() => { focused.current = true; }}
+           onChange={e => setDraft(e.target.value)}
+           onBlur={e => { focused.current = false; if (cancel.current) { cancel.current = false; return; } commit(e.currentTarget.value); }}
+           onKeyDown={e => {
+             // Enter commits once: the blur it triggers must not commit the same text again before the new value arrives
+             if (e.key === 'Enter') { commit(e.currentTarget.value); cancel.current = true; e.currentTarget.blur(); }
+             if (e.key === 'Escape') { setDraft(value === undefined ? '' : String(value)); cancel.current = true; e.currentTarget.blur(); }
+           }}
+           className={`${width} h-6 text-center text-[11px] font-mono font-bold bg-transparent text-white placeholder:text-zinc-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 rounded disabled:text-zinc-400`} />
+  );
 }
 
 /** A row only the user can settle: an unknown outcome, or a reservation left over by a tab that died with the order out. */
@@ -61,7 +101,7 @@ export const needsResolve = (r: AutoRow, nowMs: number) =>
   r.state === 'unknownEntry' || r.state === 'unknownExit' || r.state === 'unknownAdd'
   || ((r.state === 'entering' || r.state === 'exiting' || r.state === 'adding') && nowMs - (r.pendingSince ?? r.entryT) * 1000 > STALE_PENDING_MS);
 
-export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, trailSl, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule, autoSide, onAutoSide, resumeNote, pyramid, onPyramid, product, onProduct, eodText }: AutoControlsProps) {
+export default function AutoControls({ chart, armed, mode, disabledReason, lots, onLots, onArm, row, price, note, trailSl, halt, onResolve, onExit, nowMs, rule, autoRule, onAutoRule, autoSide, onAutoSide, resumeNote, pyramid, onPyramid, product, onProduct, eodText, limits, onLimits }: AutoControlsProps) {
   const [confirmReal, setConfirmReal] = useState(false);
   const [confirmExit, setConfirmExit] = useState(false);
   const [draft, setDraft] = useState(String(lots));
@@ -274,6 +314,24 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
           )}
         </span>
       )}
+      {onLimits && (
+        <span role="group" aria-label={`AUTO daily limits on chart ${chart}`} data-testid={`pnf-auto-limits-${chart}`}
+              className="inline-flex items-center rounded border border-zinc-700 bg-zinc-950"
+              title={`${armed ? 'Stop AUTO to change the daily limits. ' : ''}Daily limits for this chart (blank = off): once one is reached AUTO takes no new trade today and switches off; an open position still exits by its rule. Counted from today's AUTO trades in this mode, so a restart or re-arming does not reset them. Now: ${limitsText(limits)}.`}>
+          <span className="pl-1 text-[11px] font-bold text-zinc-400" aria-hidden="true">Day ₹-</span>
+          <LimitInput label={`AUTO daily loss limit in rupees on chart ${chart}`} testId={`pnf-auto-limit-loss-${chart}`} value={limits?.maxLoss} max={LIMIT_MAX_LOSS_MAX} int={false}
+                      disabled={armed} width="w-12" title="Stop for the day once today's closed AUTO trades on this chart have lost this many rupees"
+                      onCommit={v => onLimits({ ...limits, maxLoss: v })} />
+          <span className="text-[11px] font-bold text-zinc-400" aria-hidden="true">· trades</span>
+          <LimitInput label={`AUTO maximum trades per day on chart ${chart}`} testId={`pnf-auto-limit-trades-${chart}`} value={limits?.maxTrades} max={LIMIT_MAX_TRADES_MAX} int
+                      disabled={armed} width="w-7" title={`Stop for the day after this many AUTO trades on this chart (1-${LIMIT_MAX_TRADES_MAX})`}
+                      onCommit={v => onLimits({ ...limits, maxTrades: v })} />
+          <span className="text-[11px] font-bold text-zinc-400" aria-hidden="true">· losses</span>
+          <LimitInput label={`AUTO maximum losing trades in a row on chart ${chart}`} testId={`pnf-auto-limit-losses-${chart}`} value={limits?.maxLosses} max={LIMIT_MAX_LOSSES_MAX} int
+                      disabled={armed} width="w-7" title={`Stop for the day after this many losing AUTO trades in a row on this chart (1-${LIMIT_MAX_LOSSES_MAX})`}
+                      onCommit={v => onLimits({ ...limits, maxLosses: v })} />
+        </span>
+      )}
       {/* A held position (side, lots, price, P&L, trail SL) is shown whole; only a waiting note is truncated. */}
       <span data-testid={`pnf-auto-status-${chart}`} className={`font-mono text-[11px] ${open || unresolved ? 'whitespace-nowrap' : 'truncate min-w-0 max-w-[13rem]'}`} title={halt ?? note}>
         {unresolved ? (<>
@@ -300,7 +358,7 @@ export default function AutoControls({ chart, armed, mode, disabledReason, lots,
                              title={`AUTO is OFF on this chart${resumeNote ? ` (${resumeNote})` : ''}: this position still exits by its rule, but nothing re-enters after it. Arm AUTO to keep trading.`}>AUTO OFF · exit only</span>}
           </span>
         ) : halt ? (
-          <span className="text-red-400 font-bold">HALTED</span>
+          <span className="text-red-400 font-bold">HALTED<span className="ml-1 font-normal text-red-300">{halt}</span></span>
         ) : armed ? (
           <span className="text-zinc-400">{note || 'waiting for a signal'}</span>
         ) : disabledReason ? <span className="text-zinc-500">{disabledReason}</span>

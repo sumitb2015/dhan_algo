@@ -3,7 +3,7 @@
 // touches outside itself (the ledger, the order route, the broker's order book, the clock) comes in through ChartDeps. Entries need
 // AUTO armed on this chart; exits run for this chart's open row whatever the switch says. REAL orders are reserved in the ledger before
 // they are sent and an unknown outcome is never resent: the chart halts and the user resolves it.
-import { autoProductOf, carriesOvernight, decideAdd, decideAuto, reentryBlockOf, rowMarket, trailBest, trailLevel, trailOf, type AutoProduct } from './pnfAuto.ts';
+import { autoProductOf, autoWindow, decideAdd, decideAuto, reentryBlockOf, rowMarket, trailBest, trailLevel, trailOf, type AutoProduct } from './pnfAuto.ts';
 import { ignoredByFilter, skippedBrick, SIDE_LABEL, withSide, type AutoRule, type AutoSide } from './pnfAutoRule.ts';
 import { isSellSignal } from './straddlePnf.ts';
 import { closingSide, isLive, PYRAMID_HARD_MAX, type AutoLedger, type AutoLeg, type AutoOp, type AutoRow } from './pnfAutoLedger.ts';
@@ -11,9 +11,10 @@ import { istDateIso } from './nseHolidays.ts';
 import { targetKey, type Target } from './pnfTarget.ts';
 import { fullFillAvg, type OrderPriceRead } from './tradedPriceClient.ts';
 import type { LegResult, PnfBroker } from './pnfOrderLogic.ts';
-import type { Market } from './straddlePnfLive.ts';
+import { istMinuteOfDay, sessionWindow, type Market } from './straddlePnfLive.ts';
 import type { PanelModel } from './straddlePnfModel.ts';
 import { riskText, type IndexDir, type IndexMap } from './pnfIndexMap.ts';
+import { dayLimitHit, type AutoLimits } from './pnfAutoSafety.ts';
 
 /** The option an index chart's entry trades, as the server resolved it (lib/pnfIndexTradeServer.ts resolveIndexTrade). */
 export type IndexResolved = {
@@ -93,6 +94,15 @@ export interface ChartInputs {
   info: ChartInfo;
   /** A Renko INDEX chart: the bull / bear option map saved with the arming. An index chart without one never enters. */
   indexMap?: IndexMap;
+  /**
+   * The open row is carried overnight (lib/pnfAutoSafety.ts carryAllowed, the decision the guard watcher shares): an NRML NIFTY option, on
+   * the Renko page only under a server guard with a stop-loss. Absent = false: the row gets its end-of-day exit.
+   */
+  carry?: boolean;
+  /** The open row was carried from an earlier day and its guard stop-loss is gone (carryLapsed): closed as soon as the market is open. */
+  carryLapsed?: boolean;
+  /** Daily limits the arming carries: once one is reached the chart opens nothing more today (an open position still exits by its rule). */
+  limits?: AutoLimits;
 }
 
 const RESOLVE_BACKOFF_MS = 10_000, RESOLVE_MAX_FAILS = 6;
@@ -430,10 +440,22 @@ export class ChartEngine {
     if (row) {
       this.retry = null;                                         // a row exists: the signal being retried was taken (or reserved)
       if (row.state !== 'open') { this.note = row.state === 'entering' || row.state === 'exiting' || row.state === 'adding' ? `${row.state}…` : 'unresolved - check the broker'; return; }
+      const carry = i.carry === true;
+      if (i.carryLapsed) {
+        // carried overnight with no loss limit left for this session: closed at once while the market is open (end of day needs no price)
+        const win = autoWindow(rowMarket(row), nowS, autoProductOf(row.product));
+        const minute = istMinuteOfDay(nowS);
+        if (!win || minute < win.open || minute >= sessionWindow(rowMarket(row), nowS)[1]) { this.note = 'carried overnight with no guard stop-loss: closes at the open'; return; }
+        const px = row.targetKey === tk && !stale ? price : null;
+        this.busy = true;
+        try { await this.exit(row, 'eod', px); } finally { this.busy = false; }
+        this.deps.event({ chart, kind: 'info', text: `AUTO C${chart} closed a position carried overnight: its MTM guard stop-loss is gone` });
+        return;
+      }
       if (row.targetKey !== tk) {
         // The chart was switched away from its position: only the EOD exit can still run (no model for that contract here).
-        const d = decideAuto({ model: { box: 0, signals: [], columns: [], columnTimes: [], lastBarT: null }, position: { side: row.side, entryBarT: row.entryBarT }, watermarkT: 0, nowS, market: rowMarket(row), product: autoProductOf(row.product), carry: carriesOvernight(row, nowS) });
-        this.note = carriesOvernight(row, nowS) ? 'position on another contract: held overnight (NRML NIFTY option), only the server guard watches it' : 'position on another contract: watching the EOD exit only';
+        const d = decideAuto({ model: { box: 0, signals: [], columns: [], columnTimes: [], lastBarT: null }, position: { side: row.side, entryBarT: row.entryBarT }, watermarkT: 0, nowS, market: rowMarket(row), product: autoProductOf(row.product), carry });
+        this.note = carry ? 'position on another contract: held overnight (NRML NIFTY option), only the server guard watches it' : 'position on another contract: watching the EOD exit only';
         if (d.action === 'exit' && d.reason === 'eod') { this.busy = true; try { await this.exit(row, 'eod', null); } finally { this.busy = false; } }
         return;
       }
@@ -441,7 +463,7 @@ export class ChartEngine {
       // loaded, which would flatten an MCX position at the NSE 15:15 straight away.
       const position = { side: row.side, entryBarT: row.entryBarT, stop: row.stop, exitBy: row.exitBy, trail: trailOf(row) };
       // A stale price never decides a stop (it may be minutes old): the Renko stop then reads closed bricks instead.
-      const d = decideAuto({ model, position, watermarkT: this.watermark, nowS, market: rowMarket(row), price: stale ? null : price, product: autoProductOf(row.product), carry: carriesOvernight(row, nowS) });
+      const d = decideAuto({ model, position, watermarkT: this.watermark, nowS, market: rowMarket(row), price: stale ? null : price, product: autoProductOf(row.product), carry });
       if (d.action !== 'exit') {
         const tl = trailLevel(model, position);
         const trailTxt = tl !== null ? ` · trail SL ${tl.toFixed(2)}` : '';
@@ -480,6 +502,10 @@ export class ChartEngine {
     if (!arm.on || this.halt) return;
     if (target.kind === 'index' && !i.indexMap) { this.note = 'an index chart trades options only through its map - arm it again from the page'; return; }
     if (!complete || stale || price === null) { this.note = stale ? 'feed stale: no entries' : 'waiting for a price'; return; }
+    // Daily limits (lib/pnfAutoSafety.ts): read from the ledger, so a restart or a re-arming with the same limits never resets them. Reached
+    // = AUTO is switched off on this chart for the day, said once; re-arming with a higher limit is the user's explicit choice.
+    const limitHit = dayLimitHit(ledger.rows, chart, arm.mode, istDateIso(this.deps.nowMs()), i.limits);
+    if (limitHit) { this.haltNow(limitHit); return; }
     // The chart's last trade, if the trailing SL closed it today on this contract in this mode: same-side entries wait for a new best brick.
     // The EXIT's day (an NRML trade opened yesterday and trailed out today still blocks), and the rule's signals of both sides (an
     // opposite signal the Buy only / Sell only filter ignores still ends the wait: the trend turned).
