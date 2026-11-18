@@ -213,4 +213,9 @@ if (process.env.DASHBOARD_NO_BACKGROUND === '1') {
   import('./lib/crudeCollector').then(m => m.startCrudeCollectorScheduler()).catch(err => {
     console.warn('[crude-collector] could not start the scheduler:', err);
   });
+  // master_list.csv: re-downloaded once a day (contract pickers and tickets read it directly; a stale one has only expired
+  // futures). Never logs in; instrument lists only.
+  import('./lib/masterListRefresh').then(m => m.startMasterListRefreshScheduler()).catch(err => {
+    console.warn('[master-list] could not start the scheduler:', err);
+  });
 }

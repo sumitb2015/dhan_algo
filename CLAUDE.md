@@ -185,7 +185,10 @@ scripts/
 Historical Data/            # Index CSVs: NIFTY_50_Daily_5Y.csv, NIFTY_500_Daily.csv
 Daily_Historical_Data_Fresh/ # Per-stock daily CSVs (<SYMBOL>_Daily_2Y.csv) for RS dashboard
 debug/                      # Runtime state JSON files, log files, trigger files (auto-created)
-master_list.csv             # 288K-row security master list (~15 MB, cached)
+master_list.csv             # security master list (~29 MB, NSE/BSE/MCX); auto re-downloaded once per IST day, or when it has no
+                            # MCX / no live NIFTY future (lib/master_list_refresh.py, run by DhanHelper init and the dashboard's
+                            # lib/masterListRefresh.ts; never logs in; a partial download never replaces it;
+                            # DHAN_MASTER_LIST_AUTO_REFRESH=0 disables)
 index_constituents/           # NSE's official constituent lists for 24 other indices (Bank, IT, Nifty 50, Midcap, ...) + manifest.json; refresh: scripts/download_index_constituents.py; read by the RS Strategy index filter
 ind_nifty500list.csv          # NSE's official Nifty 500 constituent list (refresh: scripts/download_nifty500_symbols.py); DUMMY* demerger placeholders are skipped
 Options Data/nifty_options.db  # SQLite cache of historical/expired option chain data, built by

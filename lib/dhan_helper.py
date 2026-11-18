@@ -129,7 +129,13 @@ class DhanHelper:
                 self._load_master_list(reload=True)
             else:
                 logger.error("Failed to download master list.")
-        
+        elif not skip_session_validation:
+            # A stale file (an earlier IST day, expired futures, no MCX) used to be used as-is for months. Never raises;
+            # DHAN_MASTER_LIST_AUTO_REFRESH=0 turns it off. Skipped with skip_session_validation (fast dashboard helpers:
+            # the dashboard runs its own refresh, rs_dashboard/lib/masterListRefresh.ts).
+            from lib.master_list_refresh import refresh_if_stale
+            refresh_if_stale(self)
+
         # WebSocket management
         self.ws_thread = None
         self._ws_stop_flag = False
@@ -3315,11 +3321,16 @@ class DhanHelper:
         return pd.DataFrame()
 
     # --- SECURITY / INSTRUMENT LIST ---
-    def fetch_security_list(self, segments: List[str] = ['NSE_EQ', 'NSE_FNO', 'BSE_EQ', 'BSE_FNO', 'MCX_COMM']) -> bool:
+    def fetch_security_list(self, segments: List[str] = ['NSE_EQ', 'NSE_FNO', 'BSE_EQ', 'BSE_FNO', 'MCX_COMM'],
+                            require_all: bool = False, min_rows: int = 0) -> bool:
         """
         Fetch and combine security lists for specific segments using authenticated API.
         Default: Equity (E) and Derivatives (D) for both NSE and BSE.
         API Endpoint: https://api.dhan.co/v2/instrument/{SEGMENT}
+
+        require_all: write nothing unless every segment downloaded (the auto-refresh uses it, so a failed MCX request
+        can never replace a complete file with one that has no MCX rows). min_rows: write nothing when the combined
+        list is smaller than this (a truncated download).
         """
         try:
             logger.info(f"Downloading compact master list for segments: {segments}...")
@@ -3348,24 +3359,32 @@ class DhanHelper:
                 url = f"https://api.dhan.co/v2/instrument/{seg}"
                 # logger.info(f"Downloading {seg} from {url}...")
                 try:
-                    resp = requests.get(url, headers=headers)
+                    resp = requests.get(url, headers=headers, timeout=60)
                     if resp.status_code == 200:
                         # API returns CSV content directly
                         df = pd.read_csv(io.StringIO(resp.text), low_memory=False)
-                        dfs.append(df)
-                        # logger.info(f"Downloaded {seg}: {len(df)} records")
+                        if df.empty:
+                            logger.error(f"Downloaded {seg} but it has no rows")
+                        else:
+                            dfs.append(df)
                     else:
                         logger.error(f"Failed to download {seg}: {resp.status_code} - {resp.text[:100]}")
                 except Exception as e:
                     logger.error(f"Exception downloading {seg}: {e}")
-            
+
             if not dfs:
                 logger.error("No segments downloaded successfully.")
                 return False
-                
+            if require_all and len(dfs) != len(segments):
+                logger.error(f"Only {len(dfs)}/{len(segments)} segments downloaded; keeping the existing master list")
+                return False
+
             # Combine all segments
             full_df = pd.concat(dfs, ignore_index=True)
-            
+            if len(full_df) < min_rows:
+                logger.error(f"Downloaded master list has {len(full_df)} rows (< {min_rows}); keeping the existing one")
+                return False
+
             # Save to disk
             tmp_path = f"{self._master_list_path}.tmp"
             full_df.to_csv(tmp_path, index=False)
