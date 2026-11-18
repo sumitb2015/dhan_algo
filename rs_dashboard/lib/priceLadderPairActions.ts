@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { resolveContract } from '@/lib/priceLadderView';
 import {
-  readLadderState, updateLadderState, loadPrices, availableFunds, brokerSessionOk, dhanSellMargin, LADDER_UNDERLYINGS,
+  readLadderState, updateLadderState, loadPrices, availableFunds, brokerSessionOk, copyTargetRefusal, dhanSellMargin, LADDER_UNDERLYINGS,
 } from '@/lib/priceLadderServer';
 import { fetchNettedMargin } from '@/lib/ultimateScannerDhan';
 import {
@@ -87,6 +87,7 @@ export function checkOpenAllowed(
   if (mode === 'real') {
     if (!realArmed(st, istDay(now))) return 'Switch on LIVE · REAL MONEY first';
     if (!brokerSessionOk(broker)) return `${BROKER_NAME[broker]} session is not logged in`;
+    const why = copyTargetRefusal(broker); if (why) return why;
   }
   return null;
 }
@@ -100,6 +101,7 @@ async function arm(b: Record<string, unknown>): Promise<NextResponse> {
   if (mode === 'real') {
     if (!realArmed(readLadderState(), istDay(now))) return bad('Switch on LIVE · REAL MONEY first', 403);
     if (!brokerSessionOk(broker)) return bad(`${BROKER_NAME[broker]} session is not logged in`, 403);
+    { const why = copyTargetRefusal(broker); if (why) return bad(why, 403); }
   }
   const u = String(b.underlying ?? '').toUpperCase();
   if (!LADDER_UNDERLYINGS.includes(u)) return bad(`Unsupported underlying ${b.underlying}`);

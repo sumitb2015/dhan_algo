@@ -458,7 +458,7 @@ test('Copy trading: one ARM control for both ladders; with the bridge armed each
   expect(seen.blocked).toEqual([]);
 });
 
-test('Copy trading: a REAL ladder on a broker that is also a copy child is flagged as a shared account', async ({ page }) => {
+test('Copy trading: a REAL ladder on a broker that is also a copy child says its REAL orders are blocked', async ({ page }) => {
   const seen = await install(page, { liveArmed: true, copyArmed: [{ broker: 'zerodha', multiplier: 2 }, { broker: 'kotak', multiplier: 1 }] });
   await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
@@ -466,7 +466,7 @@ test('Copy trading: a REAL ladder on a broker that is also a copy child is flagg
   // SIM sends nothing to Kotak: only the out-of-scope note
   await expect(page.getByRole('status').filter({ hasText: 'SIM — not copied' })).toHaveCount(1);
   await page.getByRole('button', { name: 'REAL', exact: true }).click();
-  const chip = page.getByRole('status').filter({ hasText: 'Kotak is a copy target — shared account' });
+  const chip = page.getByRole('status').filter({ hasText: 'Kotak is a copy target — REAL orders blocked' });
   await expect(chip).toHaveCount(1);
   await expect(chip).toHaveAttribute('title', /watchdog/);
   expect(seen.blocked).toEqual([]);

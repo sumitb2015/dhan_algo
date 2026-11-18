@@ -6,7 +6,7 @@ import { isPairLive, lotsOnContract, patchPair } from '@/lib/priceLadderPair';
 import { planExitAll, type ExitAllScope } from '@/lib/priceLadderExitAll';
 import {
   readLadderState, updateLadderState, startPriceLadderLoop, loadPrices, afterSend, cancelAtBroker,
-  brokerSessionOk, availableFunds, dhanSellMargin, withJob, commitIf, safePlace, openedPatch, LADDER_UNDERLYINGS,
+  brokerSessionOk, copyTargetRefusal, availableFunds, dhanSellMargin, withJob, commitIf, safePlace, openedPatch, LADDER_UNDERLYINGS,
 } from '@/lib/priceLadderServer';
 import {
   paneOf, sessionFor, spotKey, MAX_LADDER_LOTS, cleanBufferPct, stopLimitPrice, DEFAULT_SL_BUFFER_PCT, MIN_SL_BUFFER_PCT, MAX_SL_BUFFER_PCT, capLots, classifyClick, cleanBracket, istDay, istHhmm, levelSane, pushEvent, realArmed,
@@ -111,6 +111,7 @@ async function arm(b: ArmBody): Promise<NextResponse> {
   if (b.mode === 'real') {
     if (!realArmed(state, istDay(now))) return bad('Switch on LIVE · REAL MONEY first', 403);
     if (!brokerSessionOk(b.broker)) return bad(`${BROKER_NAME[b.broker]} session is not logged in`, 403);
+    { const why = copyTargetRefusal(b.broker); if (why) return bad(why, 403); }
   }
   const c = await resolveContract(b.broker, u, b.expiry, strike, b.opt);
   if (typeof c === 'string') return bad(c);
@@ -248,6 +249,7 @@ async function marketOrder(b: Record<string, unknown>): Promise<NextResponse> {
     if (istHhmm(now) < sess.open || istHhmm(now) >= sess.close) return bad('The market is closed');
     if (!realArmed(st0, istDay(now))) return bad('Switch on LIVE · REAL MONEY first', 403);
     if (!brokerSessionOk(broker)) return bad(`${BROKER_NAME[broker]} session is not logged in`, 403);
+    { const why = copyTargetRefusal(broker); if (why) return bad(why, 403); }
   }
   const c = await resolveContract(broker, u, String(b.expiry), strike, opt);
   if (typeof c === 'string') return bad(c);
@@ -323,6 +325,7 @@ async function addLot(id: string): Promise<NextResponse> {
     if (hhmm < sess.open || hhmm >= sess.close) return bad('The market is closed');
     if (!realArmed(st0, istDay(now))) return bad('Switch on LIVE · REAL MONEY first', 403);
     if (!brokerSessionOk(p.broker)) return bad(`${BROKER_NAME[p.broker]} session is not logged in`, 403);
+    { const why = copyTargetRefusal(p.broker); if (why) return bad(why, 403); }
   }
   const heldLots = lotsHeld(st0, p);
   if (heldLots + 1 > MAX_LADDER_LOTS) return bad(`The ladder holds ${heldLots} lots of this contract — the cap is ${MAX_LADDER_LOTS}`);
@@ -590,6 +593,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         if (!x0) return bad('Unknown order');
         // More lots on a REAL level is a bigger opening order: the same holding cap and funds/margin check as an arm.
         if (x0.mode === 'real' && lots > x0.lots) {
+          { const why = copyTargetRefusal(x0.broker); if (why) return bad(why, 403); }
           if (lotsHeld(st0, x0, x0.id) + lots > MAX_LADDER_LOTS) return bad(`That would take this contract past the ${MAX_LADDER_LOTS}-lot cap`);
           const prices = await loadPrices([spotKey(x0.contract)], [x0.contract]);
           const ltp = prices.ltps[x0.contract.securityId] ?? 0;

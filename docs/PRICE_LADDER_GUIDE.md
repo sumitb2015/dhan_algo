@@ -170,10 +170,16 @@ Baskets is the same switch, and it copies fills from every page, not only from t
   amber with the reason when they are not, red when copying is armed but not working (bridge down, a child that
   failed to log in — the chip names it). The chip is about the pane's **selected** contract: an order already open
   or armed on a REAL Dhan NIFTY option is still copied when it fills, whatever the pane shows now.
-- **Don't trade the ladder REAL on a broker that is also a copy child.** The copies and the ladder's own orders net
-  into one position on that account: the ladder then mistakes the copies for its own (or its position for "closed
-  outside the ladder"), and the bridge's watchdog closes that whole position once Dhan's NIFTY options are flat —
-  the ladder's part included. The chip turns red (*Kotak is a copy target — shared account*) when this is set up.
+- **No new REAL ladder orders on a broker that is also a copy child.** While Kotak (or Zerodha) is armed as a copy
+  target, the server refuses every new REAL ladder order on it — XY / Plain arm, Market, +1 lot, more lots on an
+  armed level, Pair / Basket / Synthetic entries, +1 and rolls — and the watcher cancels REAL levels already armed on
+  it (with an event). Exits, the MTM guard, Exit all and the positions-window close are never blocked. A REAL
+  order already resting at the broker is left alone, as when LIVE is switched off. Why: the copies and the
+  ladder's own orders would net into one position on that account; the ladder would mistake the copies for its own
+  (or its position for "closed outside the ladder"), and the bridge's watchdog closes that whole position once
+  Dhan's NIFTY options are flat. The chip turns red (*Kotak is a copy target — REAL orders blocked*). Dhan is the
+  copy parent and is never blocked. An unreadable `debug/copy_trade_config.json` blocks REAL Kotak and Zerodha
+  orders until it reads again.
 - **The copies are not in the ladder.** The MTM guard, brackets, positions window and Exit all act on Dhan only;
   a Dhan exit reaches the child account only because the bridge copies that fill too. Disarming does **not** close
   positions already copied — manage them in that account.

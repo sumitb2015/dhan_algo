@@ -106,6 +106,12 @@ per write; the page drops a view older than the one on screen). It is re-read on
     while a window close of a row is in flight or in its 8 s cooldown, slice / pair / basket exits on that row wait 3 s and size
     again, and `inExitGrace` stops trusting the ledger once a window close went out after the position opened. A new exit path or a
     new close route must use both. A part-filled resting entry carries `partFilled` / `partAvg` (MTM only; NOT `filledQty`).
+18. **No REAL entry on a copy-trade child broker** (2026-11-18). While Kotak / Zerodha is an armed, enabled child in
+    `debug/copy_trade_config.json`, `copyTargetRefusal(broker)` (`priceLadderServer.ts`, read fresh, unreadable file = fail
+    closed) refuses every REAL opening path: the route's arm / market / add / lots-up, `checkOpenAllowed` (pair arm, market,
+    +1, roll; baskets) and pair `arm`, basket lots-up. The watcher runs `cancelCopyTargetLevels` (`lib/priceLadderCopy.ts`)
+    before `planTick` to cancel REAL ARMED slices / pairs / baskets on a target. Never on an exit path. A new opening path
+    needs the same call, after its `brokerSessionOk` check.
 15. **`settings` lives in two places** (the settings file and `state.settings`; the state's wins, shallow). Change a cutoff only
     through `setCutoffsFromBody`.
 

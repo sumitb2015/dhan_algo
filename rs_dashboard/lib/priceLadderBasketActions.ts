@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { resolveContract } from '@/lib/priceLadderView';
-import { readLadderState, updateLadderState, loadPrices, availableFunds, dhanSellMargin, LADDER_UNDERLYINGS } from '@/lib/priceLadderServer';
+import { readLadderState, updateLadderState, loadPrices, availableFunds, dhanSellMargin, copyTargetRefusal, LADDER_UNDERLYINGS } from '@/lib/priceLadderServer';
 import { fetchNettedMargin } from '@/lib/ultimateScannerDhan';
 import {
   capLots, classifyClick, cleanBracket, ev, isMcxUnderlying, newLadderId, parseTrailRequest, pushEvent, replanBracket, snapToStep, spotFresh, istDay, trailedBracket, MAX_LADDER_LOTS,
@@ -381,6 +381,7 @@ async function lotsOp(body: Record<string, unknown>, id: string): Promise<NextRe
     const pre = overCap(others(readLadderState()), b.broker, b.mode, b.legs, lots) ?? synCap(readLadderState());
     if (pre) return bad(pre);
     if (b.mode === 'real' && lots > b.lots) {
+      { const why = copyTargetRefusal(b.broker); if (why) return bad(why, 403); }
       const prices = await loadPrices([], contracts);
       const blocked = await realBasketBlocked(b.broker, u, b.legs, lots, b.product, prices.ltps);
       if (blocked) return bad(blocked);

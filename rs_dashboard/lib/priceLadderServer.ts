@@ -34,6 +34,7 @@ import { readLadderSettings } from '@/lib/priceLadderSettings';
 import { archiveDay, partsToArchive } from '@/lib/priceLadderArchive';
 import { sharedCloseGuard, inExitGrace } from '@/lib/priceLadderClose';
 import { rowsWithEntryInFlight } from '@/lib/priceLadderReconcile';
+import { copyTargets, copyTargetBlock, cancelCopyTargetLevels } from '@/lib/priceLadderCopy';
 
 // The Price Ladder's server watcher. It owns debug/price_ladder_state.json (re-read on every tick and every request,
 // never cached, because the instrumentation hook and the API route can be separate module instances) and, about once
@@ -356,6 +357,21 @@ export async function loadPrices(underlyings: string[], contracts: LadderContrac
 // ── broker IO ─────────────────────────────────────────────────────────
 
 export type PlaceOutcome = { status: 'placed'; orderId: string } | { status: 'rejected'; error: string } | { status: 'unknown'; error: string };
+
+const COPY_TRADE_CONFIG = path.join(PROJECT_ROOT, 'debug', 'copy_trade_config.json');
+
+/** The copy-trade bridge's armed child brokers, read fresh (the config route writes it by atomic rename). No file = none;
+ *  an unreadable file fails CLOSED (every child broker counts as a target — see copyTargets). */
+export function readCopyTargets(): Set<string> {
+  let raw: string;
+  try { raw = fs.readFileSync(COPY_TRADE_CONFIG, 'utf8'); } catch (e) { return copyTargets((e as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : null); }
+  try { return copyTargets(JSON.parse(raw)); } catch { return copyTargets(null); }
+}
+
+/** Why a NEW REAL ladder order on `broker` is refused because that broker is a copy-trade child, or null. Entry paths only — never exits. */
+export function copyTargetRefusal(broker: LadderBroker): string | null {
+  return broker === 'dhan' ? null : copyTargetBlock(broker, readCopyTargets());
+}
 
 export function brokerSessionOk(broker: LadderBroker): boolean {
   if (broker === 'kotak') return isKotakTokenValid();
@@ -1396,7 +1412,11 @@ async function tick(): Promise<void> {
   let jobs: Job[] = [];
   let pairJobs: PairJob[] = [];
   let basketJobs: BasketJob[] = [];
+  // A REAL level armed on Kotak / Zerodha before that broker became a copy-trade child must not fire into the shared
+  // account. The config is read only when such a level exists (a small sync read, inside the lock so it judges this write's state).
+  const armedOffDhan = (x: { mode: string; broker: string; state: string }) => x.mode === 'real' && x.broker !== 'dhan' && x.state === 'armed';
   const planned = await updateLadderState(cur => {
+    if (cur.slices.some(armedOffDhan) || (cur.pairs ?? []).some(armedOffDhan) || (cur.baskets ?? []).some(armedOffDhan)) cur = cancelCopyTargetLevels(cur, readCopyTargets(), now);
     // The global MTM guards first: a trip queues every exit of its scope, which planTick then sends in this same write.
     const g = applyGuards(cur, prices.ltps, now);
     cur = g.next;
