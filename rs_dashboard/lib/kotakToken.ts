@@ -209,7 +209,7 @@ export class KotakRejectedError extends Error {
 }
 
 /** Throws on an error-shaped Kotak reply. `apiPath` only labels the log line (which call failed). Exported for tests. */
-export function raiseIfError(json: Record<string, unknown>, apiPath = '?'): void {
+export function raiseIfError(json: Record<string, unknown>, apiPath = '?', quietRateLimit = false): void {
   if (json.stCode === KOTAK_NO_DATA) return;   // an empty book, not a failure
   if (json.error) {
     const errs = json.error;
@@ -222,8 +222,8 @@ export function raiseIfError(json: Record<string, unknown>, apiPath = '?'): void
   const data = (typeof json.data === 'object' && json.data !== null ? json.data : {}) as Record<string, unknown>;
   const msg = json.errMsg ?? json.emsg ?? data.errMsg ?? data.emsg;
   if (msg) {
-    // A rate limit is retried by the read lane, which logs it once per pause; anything else is logged in full.
-    if (Number(json.stCode ?? data.stCode) !== KOTAK_RATE_LIMIT) console.error(`[kotakToken] request failed (${apiPath}), full response:`, JSON.stringify(json));
+    // A rate limit on a READ is retried by the read lane, which logs it itself; anything else (an order write's included) is logged in full.
+    if (!(quietRateLimit && Number(json.stCode ?? data.stCode) === KOTAK_RATE_LIMIT)) console.error(`[kotakToken] request failed (${apiPath}), full response:`, JSON.stringify(json));
     // Surface the stCode alongside the message — Kotak reuses the same
     // errMsg text ("Unauthorized", etc.) across genuinely different stCodes,
     // and the bare message alone isn't enough to tell them apart later.
@@ -259,16 +259,21 @@ export function reserveReadSlot(state: { nextAt: number; pausedUntil: number }, 
   return at - now;
 }
 
-export const isKotakRateLimit = (err: unknown) => String((err as Error)?.message ?? err).includes('100025');
+/** A Kotak 100025 rejection, as raiseIfError words it (`… (stCode 100025)`): matched on the stCode, not on any '100025' in a message. */
+export const isKotakRateLimit = (err: unknown) => /stCode 100025\b/.test(String((err as Error)?.message ?? err));
 
 /** Run one read through the lane: paced, retried after a rate limit (the lane pauses for everyone), joined when the same read is already on the wire. */
 export async function laneRead(key: string, send: () => Promise<Record<string, unknown>>): Promise<Record<string, unknown>> {
   const on = readLane.inflight.get(key);
-  if (on && on.queuedAt >= readLane.lastWriteAt) return on.p;
+  // Strictly after: a read queued in the same millisecond as an order write may have been queued before it.
+  if (on && on.queuedAt > readLane.lastWriteAt) return on.p;
   const run = async () => {
     for (let attempt = 0; ; attempt++) {
-      const wait = reserveReadSlot(readLane, Date.now());
-      if (wait > 0) await new Promise(res => setTimeout(res, wait));
+      // A slot reserved before another read hit the limit must not fire inside the pause it started: wait again.
+      do {
+        const wait = reserveReadSlot(readLane, Date.now());
+        if (wait > 0) await new Promise(res => setTimeout(res, wait));
+      } while (Date.now() < readLane.pausedUntil);
       try {
         return await send();
       } catch (err) {
@@ -285,6 +290,9 @@ export async function laneRead(key: string, send: () => Promise<Record<string, u
   return entry.p;
 }
 
+/** An order write is about to go out / just answered: no read queued before now may be joined from here on (it could carry the pre-order book). */
+export function noteKotakOrderWrite(now = Date.now()): void { readLane.lastWriteAt = Math.max(readLane.lastWriteAt, now); }
+
 /** Authenticated GET against the Kotak Neo REST API. Throws on error, `[]`-safe on an empty book. Paced through the read lane. */
 export async function kotakGet(apiPath: string, timeoutMs = 10_000): Promise<Record<string, unknown>> {
   const doRequest = async () => {
@@ -299,7 +307,7 @@ export async function kotakGet(apiPath: string, timeoutMs = 10_000): Promise<Rec
     if (isSessionDead(json) && await reloginKotak()) {
       json = await doRequest();
     }
-    raiseIfError(json, apiPath);
+    raiseIfError(json, apiPath, true);
     return json;
   });
 }
@@ -366,7 +374,7 @@ export async function kotakGetShared(apiPath: string): Promise<Record<string, un
     json => { sharedGets.set(apiPath, { at: Date.now(), json }); return json; },
     err => {
       // Only a rate limit is remembered; any other failure is retried by the next caller.
-      if (String((err as Error)?.message ?? err).includes(String(KOTAK_RATE_LIMIT))) sharedGets.set(apiPath, { at: Date.now(), err });
+      if (isKotakRateLimit(err)) sharedGets.set(apiPath, { at: Date.now(), err });
       else sharedGets.delete(apiPath);
       throw err;
     },
@@ -375,7 +383,10 @@ export async function kotakGetShared(apiPath: string): Promise<Record<string, un
   return inflight;
 }
 
-const ORDER_WRITE_PATHS: ReadonlySet<string> = new Set([KOTAK_PATHS.placeOrder, KOTAK_PATHS.cancelOrder, KOTAK_PATHS.modifyOrder]);
+// POSTs that only READ, and so may be paced, retried after a rate limit and joined. An ALLOW-list on purpose: every
+// other POST (place / modify / cancel, and any path added later) is treated as an order write — sent once, never
+// retried or merged with another, through the order lane, and it drops the shared read cache.
+const READ_POST_PATHS: ReadonlySet<string> = new Set([KOTAK_PATHS.limits]);
 
 /**
  * Authenticated form-encoded POST against the Kotak Neo REST API.
@@ -413,8 +424,8 @@ export async function kotakPost(
     }
     return json;
   };
-  if (!ORDER_WRITE_PATHS.has(apiPath)) {
-    // A read-only POST (limits, margin): the read lane, joined only for an identical body.
+  if (READ_POST_PATHS.has(apiPath)) {
+    // A read-only POST (limits): the read lane, joined only for an identical body.
     return laneRead(`POST ${apiPath} ${JSON.stringify(params)}`, async () => { const json = await once(); raiseIfError(json, apiPath); return json; });
   }
   const wait = reserveOrderSlot(lane, Date.now());
@@ -422,10 +433,10 @@ export async function kotakPost(
   sharedGets.clear();
   if (wait > 0) await new Promise(res => setTimeout(res, wait));
   // From here no read queued earlier may be joined: it could answer with the pre-order book.
-  readLane.lastWriteAt = Date.now();
+  noteKotakOrderWrite();
   const json = await once();
   sharedGets.clear();
-  readLane.lastWriteAt = Date.now();
+  noteKotakOrderWrite();
   raiseIfError(json, apiPath);
   return json;
 }
@@ -444,7 +455,7 @@ export async function kotakLimits(timeoutMs = 10_000): Promise<Record<string, un
   try {
     return await kotakPost(KOTAK_PATHS.limits, { seg: 'ALL', exch: 'ALL', prod: 'ALL' }, timeoutMs);
   } catch (err) {
-    if (String((err as Error)?.message ?? err).includes(String(KOTAK_RATE_LIMIT))) limitsRateLimit = { at: Date.now(), err };
+    if (isKotakRateLimit(err)) limitsRateLimit = { at: Date.now(), err };
     throw err;
   }
 }
