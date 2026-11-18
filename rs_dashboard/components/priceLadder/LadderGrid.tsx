@@ -248,7 +248,7 @@ function InnerPriceWidget({ w, decimals, tick, onTrail }: {
       className={`font-mono text-xs font-semibold select-none px-1 py-0.5 rounded transition-colors inline-flex items-center gap-1 ${w.planned ? 'text-zinc-400 italic opacity-75' : 'text-zinc-100'} ${w.drag ? 'cursor-grab active:cursor-grabbing hover:text-white hover:bg-zinc-800/60' : ''}`}
     >
       {TAG[w.kind] && (
-        <span className={`px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight ${
+        <span className={`px-1 py-0.5 rounded text-[10px] font-bold font-mono tracking-tight ${
           w.kind === 'tgt' ? 'bg-emerald-600 text-oncolor' :
           w.kind === 'sl' ? 'bg-red-600 text-oncolor' :
           'bg-blue-600 text-oncolor'
@@ -344,7 +344,7 @@ export interface LadderKeyLevels {
 }
 
 /**
- * The ladder: Buy | Bids | Price | Offers | Sell.
+ * The ladder: Buy | Buy trig | Price | Sell trig | Sell (OptionX calls the inner columns Bids / Offers; they hold no depth).
  * Reference UI (OptionX):
  *  - Trigger prices for Target / SL / armed orders sit in the INNER column (Bids for BUY, Offers for SELL).
  *  - Controls (+ / − buttons and lot quantity) sit in the OUTER column (Buy for BUY, Sell for SELL).
@@ -428,9 +428,10 @@ export function LadderGrid({
     >
       <div className="grid grid-cols-[1.3fr_0.8fr_0.8fr_0.8fr_1.3fr] text-xs font-bold text-white bg-zinc-800">
         <div className="px-2 py-1.5 text-center">Buy</div>
-        <div className="px-2 py-1.5 text-center">Bids</div>
+        {/* Not market depth (the ladder has none): these hold the BUY-side and SELL-side trigger prices — armed entries, target, SL. */}
+        <div className="px-2 py-1.5 text-center whitespace-nowrap" title="Buy-side triggers: armed BUY entries and the target / stop of SELL positions">Buy trig</div>
         <div className="px-2 py-1.5 text-center">Price</div>
-        <div className="px-2 py-1.5 text-center">Offers</div>
+        <div className="px-2 py-1.5 text-center whitespace-nowrap" title="Sell-side triggers: armed SELL entries and the target / stop of BUY positions">Sell trig</div>
         <div className="px-2 py-1.5 text-center">Sell</div>
       </div>
       {onScroll && (
@@ -515,12 +516,12 @@ export function LadderGrid({
                   {/* Call OI (red) grows to the LEFT of the Price column, Put OI (green) to the RIGHT; with oiPlace 'edges' they start at the outer edges instead. */}
                   {cePct > 0 && (
                     <div title={`${oiRow.strike} CE OI ${oiRow.ceOi.toLocaleString('en-IN')} · ${chg(oiRow.ceOi, oiRow.cePrev)}`}
-                      className={`absolute top-0.5 bottom-0.5 bg-red-500/25 flex items-center text-[9px] font-mono text-zinc-400 ${oiPlace === 'edges' ? 'left-0 rounded-r pl-1' : 'right-[58%] rounded-l pl-1'}`}
+                      className={`absolute top-0.5 bottom-0.5 bg-red-500/25 flex items-center text-[10px] font-mono text-zinc-400 ${oiPlace === 'edges' ? 'left-0 rounded-r pl-1' : 'right-[58%] rounded-l pl-1'}`}
                       style={{ width: `${cePct * PRICE_COL_LEFT_PCT / 100}%` }}>{showNum ? compactOi(oiRow.ceOi) : null}</div>
                   )}
                   {pePct > 0 && (
                     <div title={`${oiRow.strike} PE OI ${oiRow.peOi.toLocaleString('en-IN')} · ${chg(oiRow.peOi, oiRow.pePrev)}`}
-                      className={`absolute top-0.5 bottom-0.5 bg-emerald-500/25 flex items-center justify-end pr-1 text-[9px] font-mono text-zinc-400 ${oiPlace === 'edges' ? 'right-0 rounded-l' : 'left-[58%] rounded-r'}`}
+                      className={`absolute top-0.5 bottom-0.5 bg-emerald-500/25 flex items-center justify-end pr-1 text-[10px] font-mono text-zinc-400 ${oiPlace === 'edges' ? 'right-0 rounded-l' : 'left-[58%] rounded-r'}`}
                       style={{ width: `${pePct * PRICE_COL_LEFT_PCT / 100}%` }}>{showNum ? compactOi(oiRow.peOi) : null}</div>
                   )}
                 </div>
@@ -537,10 +538,10 @@ export function LadderGrid({
               {buyWs.map(w => <OuterControlWidget key={w.key} w={w} onAdjust={onAdjust} onCancel={onCancel} />)}
             </div>
 
-            {/* Column 2: Bids (Inner trigger price for Buy-side triggers) */}
+            {/* Column 2: Buy trig (Inner trigger price for Buy-side triggers) */}
             <div
               role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
-              aria-label={buyStop ? buyLabel : `Bid ${fmt(p)}`} title={buyStop ? buyLabel : undefined}
+              aria-label={buyStop ? buyLabel : `Buy trigger at ${fmt(p)}`} title={buyStop ? buyLabel : undefined}
               onClick={() => { if (!disabled) onPlace('BUY', p); }}
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('BUY', p); } }}
               className={`h-7 flex items-center justify-center gap-1 px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/10 dark:bg-emerald-500/22' : buyStop ? 'bg-amber-500/10 dark:bg-amber-500/18' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/20 dark:hover:bg-emerald-500/35'}`}
@@ -548,13 +549,13 @@ export function LadderGrid({
               {buyWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} tick={tick} onTrail={onTrail} />)}
               {hasRowTgt && !hasBuyTgt && (
                 <span title="Target"
-                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-emerald-600 text-oncolor pointer-events-none select-none">
+                  className="px-1 py-0.5 rounded text-[10px] font-bold font-mono tracking-tight bg-emerald-600 text-oncolor pointer-events-none select-none">
                   TGT
                 </span>
               )}
               {hasRowSl && !hasBuySl && (
                 <span title="Stop Loss"
-                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-red-600 text-oncolor pointer-events-none select-none">
+                  className="px-1 py-0.5 rounded text-[10px] font-bold font-mono tracking-tight bg-red-600 text-oncolor pointer-events-none select-none">
                   SL
                 </span>
               )}
@@ -578,31 +579,31 @@ export function LadderGrid({
               <span>{isRef ? refPrice.toFixed(2) : fmt(p)}</span>
               {isPdh && (
                 <span title={`Previous Day High: ${keyLevels?.pdh?.toFixed(decimals)}`}
-                  className="shrink-0 px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight leading-none shadow-sm bg-rose-500/20 text-rose-300 border border-rose-500/40 pointer-events-none select-none">
+                  className="shrink-0 px-1 py-0.5 rounded text-[10px] font-bold font-mono tracking-tight leading-none shadow-sm bg-rose-500/20 text-rose-300 border border-rose-500/40 pointer-events-none select-none">
                   PDH
                 </span>
               )}
               {isDayHigh && (
                 <span title={`Today's High: ${keyLevels?.dayHigh?.toFixed(decimals)}`}
-                  className="shrink-0 px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight leading-none shadow-sm bg-amber-500/20 text-amber-300 border border-amber-500/40 pointer-events-none select-none">
+                  className="shrink-0 px-1 py-0.5 rounded text-[10px] font-bold font-mono tracking-tight leading-none shadow-sm bg-amber-500/20 text-amber-300 border border-amber-500/40 pointer-events-none select-none">
                   DH
                 </span>
               )}
               {isDayLow && (
                 <span title={`Today's Low: ${keyLevels?.dayLow?.toFixed(decimals)}`}
-                  className="shrink-0 px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight leading-none shadow-sm bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 pointer-events-none select-none">
+                  className="shrink-0 px-1 py-0.5 rounded text-[10px] font-bold font-mono tracking-tight leading-none shadow-sm bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 pointer-events-none select-none">
                   DL
                 </span>
               )}
               {isPdl && (
                 <span title={`Previous Day Low: ${keyLevels?.pdl?.toFixed(decimals)}`}
-                  className="shrink-0 px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight leading-none shadow-sm bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 pointer-events-none select-none">
+                  className="shrink-0 px-1 py-0.5 rounded text-[10px] font-bold font-mono tracking-tight leading-none shadow-sm bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 pointer-events-none select-none">
                   PDL
                 </span>
               )}
               {rowPivots.map(c => (
                 <span key={c.key} title={`${PIVOT_NAME[c.key] ?? `${c.label} (previous-day pivot)`}: ${c.price.toFixed(decimals)}`}
-                  className={`shrink-0 px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight leading-none shadow-sm border pointer-events-none select-none ${PIVOT_TONE[c.group]}`}>
+                  className={`shrink-0 px-1 py-0.5 rounded text-[10px] font-bold font-mono tracking-tight leading-none shadow-sm border pointer-events-none select-none ${PIVOT_TONE[c.group]}`}>
                   {c.label}
                 </span>
               ))}
@@ -618,10 +619,10 @@ export function LadderGrid({
               )}
             </div>
 
-            {/* Column 4: Offers (Inner trigger price for Sell-side triggers) */}
+            {/* Column 4: Sell trig (Inner trigger price for Sell-side triggers) */}
             <div
               role="button" tabIndex={disabled ? -1 : 0} aria-disabled={disabled}
-              aria-label={sellStop ? sellLabel : `Offer ${fmt(p)}`} title={sellStop ? sellLabel : undefined}
+              aria-label={sellStop ? sellLabel : `Sell trigger at ${fmt(p)}`} title={sellStop ? sellLabel : undefined}
               onClick={() => { if (!disabled) onPlace('SELL', p); }}
               onKeyDown={e => { if (!disabled && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onPlace('SELL', p); } }}
               className={`h-7 flex items-center justify-center px-1 overflow-hidden transition-colors ${sellZone ? 'bg-red-500/10 dark:bg-red-500/22' : sellStop ? 'bg-amber-500/10 dark:bg-amber-500/18' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-red-500/20 dark:hover:bg-red-500/35'}`}

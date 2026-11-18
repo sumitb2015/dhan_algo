@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { loadDefaults, saveDefaults, clearDefaults, resolveDefaults, LADDER_UNDERLYINGS, type LadderDefaults } from '@/lib/priceLadderDefaults';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu';
 import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2, Volume2, VolumeX, OctagonX, Repeat } from 'lucide-react';
@@ -203,6 +203,14 @@ const timeOf = (at: number) => new Date(at).toLocaleTimeString('en-IN', { timeZo
 /** One ladder pane. The page can show two side by side: the second keeps its own saved choices (keys end in `-2`), has no
  *  NavBar, and neither auto-focuses a live contract nor chimes (the first pane already does both). The ledger and the
  *  server watcher are shared — every slice carries its own contract, so the panes only differ in what they display. */
+const WIDE_QUERY = '(min-width: 1536px)';   // Tailwind 2xl
+function subscribeWide(cb: () => void) { const m = window.matchMedia(WIDE_QUERY); m.addEventListener('change', cb); return () => m.removeEventListener('change', cb); }
+function isWide() { return window.matchMedia(WIDE_QUERY).matches; }
+
+/** The orders tables are wider than a pane: their row actions (Cancel / Exit / resolve) stay pinned at the right edge
+ *  while the detail columns scroll under them, so an Exit is never off-screen. Opaque grounds: the scrolled cells pass beneath. */
+const STICKY_TH = 'sticky right-0 z-[1] bg-zinc-800';
+const STICKY_TD = 'sticky right-0 z-[1] bg-zinc-950 border-l border-zinc-800';
 const EXIT_BTN = 'flex-1 px-2 py-1 rounded text-xs font-semibold border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40 disabled:cursor-not-allowed';
 
 /** One "Exit 25 / 50 / 75 %" dropdown instead of three more buttons; shares that would exit nothing are disabled, and so is the trigger when none is usable. */
@@ -294,6 +302,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   copyTrade?: CopyTradeApi;
 }) {
   const second = ladderId === 2;
+  // Two ladders sit side by side only from 2xl (PriceLadderWorkspace). The NavBar goes in the top row at the top right of
+  // the page: ladder 2's row side by side, ladder 1's when they stack (it is rendered once — its panels poll).
+  const sideBySide = useSyncExternalStore(subscribeWide, isWide, () => true);
   const k = useCallback((key: string) => (second ? `${key}-2` : key), [second]);
   const [broker, setBroker, brokerLoaded] = usePageBroker<LadderBroker>(k('price-ladder-broker'), LADDER_BROKERS);
   useEffect(() => { onBrokerChange?.(broker); }, [broker, onBrokerChange]);
@@ -1581,15 +1592,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         title={isFut ? 'Futures have no option chain' : `The ${underlying} option chain for ${expiry || 'the selected expiry'}`}>
         <Table2 className="w-3.5 h-3.5 text-emerald-400" /> Option chain
       </button>
-      {!second && <button
-        type="button"
-        onClick={() => setSettingsModalOpen(true)}
-        className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer"
-        title="Configure Price Ladder trading cutoff & session thresholds"
-      >
-        <Settings className="w-3.5 h-3.5 text-amber-400" />
-        Settings
-      </button>}
+      {/* Settings lives once per ladder, in the grid toolbar (it opened the same dialog from here too). */}
       {second ? (
         <button type="button" onClick={onRemoveLadder} title="Close this ladder (orders it placed keep running on the server)"
           className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer">
@@ -1605,10 +1608,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
 
   return (
     <div className="flex flex-col min-h-screen bg-zinc-950 text-white min-w-0">
-      <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur xl:min-h-[var(--ladder-head-h)]" style={headerMinHeight ? ({ '--ladder-head-h': `${headerMinHeight + 1}px` } as React.CSSProperties) : undefined}>
+      <div className="sticky top-0 z-30 border-b border-zinc-800 bg-zinc-950/95 backdrop-blur 2xl:min-h-[var(--ladder-head-h)]" style={headerMinHeight ? ({ '--ladder-head-h': `${headerMinHeight + 1}px` } as React.CSSProperties) : undefined}>
       <div ref={headRef}>
       {/* Indices + P&L: always visible, above the foldable controls */}
-      <div className="xl:min-h-[var(--ladder-row-h)]" style={rowMinHeight ? ({ '--ladder-row-h': `${rowMinHeight}px` } as React.CSSProperties) : undefined}>
+      <div className="2xl:min-h-[var(--ladder-row-h)]" style={rowMinHeight ? ({ '--ladder-row-h': `${rowMinHeight}px` } as React.CSSProperties) : undefined}>
       <div ref={rowRef} className="flex items-center gap-2 flex-wrap px-6 pt-2.5 text-xs min-h-[38px]">
         {notTracking && (
           <span role="alert" title="The dashboard server is not running its watcher: brackets, armed levels, the MTM guard and the square-off are NOT being run. Orders already at the broker stay live. Restart the dashboard server."
@@ -1639,7 +1642,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         </span>}
         {exitAllEl}
         {/* The standard header buttons (theme, alerts, settings, Sync Data, Update, Disconnect): at the top right of the page, in the always-visible top row. Side by side that is ladder 2's row; alone, ladder 1's. */}
-        {(dual ? second : true) && <div className="ml-auto"><NavBar /></div>}
+        {(!dual || (sideBySide ? second : !second)) && <div className="ml-auto"><NavBar /></div>}
         {!second && !dual && headControls && <div>{headControls}</div>}
       </div>
       </div>
@@ -1709,9 +1712,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       )}
 
       <div className="flex-1 flex flex-col gap-4 px-6 pt-1.5 pb-5 max-w-[1680px] w-full mx-auto">
-        <div className="flex flex-col gap-4 xl:min-h-[var(--ladder-top-h)]" style={topMinHeight ? ({ '--ladder-top-h': `${topMinHeight}px` } as React.CSSProperties) : undefined}>
+        <div className="flex flex-col gap-4 2xl:min-h-[var(--ladder-top-h)]" style={topMinHeight ? ({ '--ladder-top-h': `${topMinHeight}px` } as React.CSSProperties) : undefined}>
         <div ref={topRef} className="flex flex-col gap-4">
-        <div className="xl:min-h-[var(--ladder-banner-h)]" style={{ ...(bannerMinHeight ? { '--ladder-banner-h': `${bannerMinHeight}px` } : { marginBottom: -16 }) } as React.CSSProperties}>
+        <div className="2xl:min-h-[var(--ladder-banner-h)]" style={{ ...(bannerMinHeight ? { '--ladder-banner-h': `${bannerMinHeight}px` } : { marginBottom: -16 }) } as React.CSSProperties}>
         <div ref={bannerRef} className="flex flex-col gap-4">
         {loadError && (
           <Banner tone="red" key={String(loadError)}>
@@ -1820,11 +1823,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         </div>
         </div>
 
-        <div className={`grid grid-cols-1 gap-4 ${dual ? '2xl:grid-cols-[272px_minmax(0,1fr)]' : 'lg:grid-cols-[272px_minmax(0,1fr)]'}`}>
+        {/* Panel beside the grid at every laptop width. Two ladders sit side by side only from 2xl (PriceLadderWorkspace); below
+            that they stack, each full width, so the grid is never pushed under its settings. */}
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[272px_minmax(0,1fr)]">
           {/* ── left panel ── */}
           <div className="flex flex-col gap-2" style={{ fontFeatureSettings: '"cv11", "ss01"' }}>
-            {/* Side by side below 2xl when two ladders stack their panel above the grid: the two cards share a row. */}
-            <div className={dual ? 'grid grid-cols-2 2xl:grid-cols-1 gap-2 items-start [&>*:only-child]:col-span-2 2xl:[&>*:only-child]:col-span-1' : 'contents'}>
+            <div className="contents">
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5">
               <p className="text-xs font-semibold tracking-tight text-zinc-400">{optLabel}</p>
               {mode === 'basket' ? (
@@ -1863,8 +1867,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               <span className="text-zinc-400 font-medium">P&amp;L</span><span className={`font-mono text-right ${pnlClass(contractPnl)}`}>{fmtMoney(contractPnl)}</span>
               <span className="text-zinc-400 font-medium">Avg Price</span><span className="font-mono text-right text-zinc-100">{net.avg ? net.avg.toFixed(2) : '—'}</span>
               <div className="col-span-2 flex gap-1 mt-1.5">
+                {/* Lots, as the Pair / Basket panels show; the raw quantity is in the tooltip. A quantity that is not whole lots shows as is. */}
                 <button type="button" disabled={busy || net.qty === 0} onClick={() => void post({ action: 'exit', securityId, broker, mode: pageMode, pct: 100 })}
-                  className={EXIT_BTN}>Exit ({net.qty})</button>
+                  title={`Exit the whole net position at market (${Math.abs(net.qty)} qty)`}
+                  className={EXIT_BTN}>Exit ({lotSize && net.qty % lotSize === 0 ? `${Math.abs(net.qty / lotSize)}L` : Math.abs(net.qty)})</button>
                 <PartialExit disabled={busy || net.qty === 0} onPick={p => void post({ action: 'exit', securityId, broker, mode: pageMode, pct: p })} />
               </div>
             </div>}
@@ -2028,8 +2034,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
               </div>
             </div>
             <MtmGuardCard key={myGuardKey} broker={broker} real={real} ladderId={ladderId} mtm={ladderPnl} guard={data?.state?.guards?.[myGuardKey]} post={post} />
-            <p className="flex items-center gap-1.5 text-[10px] text-zinc-500">
-              <span className="inline-flex items-center gap-1 cursor-help" title={HELP_TEXT} aria-label={HELP_TEXT} role="img"><Info className="w-3.5 h-3.5" aria-hidden /> How the ladder works</span>
+            <p className="flex items-center gap-1.5 text-[11px] text-zinc-400">
+              <span tabIndex={0} className={`inline-flex items-center gap-1 cursor-help rounded hover:text-zinc-200 ${FOCUS_RING}`} title={HELP_TEXT} aria-label={HELP_TEXT} role="img"><Info className="w-3.5 h-3.5 text-sky-400" aria-hidden /> How the ladder works</span>
             </p>
           </div>
 
@@ -2051,24 +2057,30 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             <div className="flex items-center gap-2 flex-wrap text-xs -mt-1.5 -mb-2">
               <div className="flex items-center gap-2 w-full rounded-xl border border-zinc-800/60 bg-zinc-950/40 px-2.5 py-1">
               <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
+              {/* Three groups that wrap as wholes (view · overlays · actions), so a narrow pane never strands one checkbox on its own line. */}
+              <span className="inline-flex items-center gap-2 whitespace-nowrap">
               <span className="text-zinc-400">Tick</span>
               <Seg value={String(tick)} options={ticks.map(String)} onChange={v => chooseTick(Number(v), mode)} />
-              <button type="button" onClick={() => { setFollow(true); setManual(false); setCenter(refPrice); }} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white">
-                <Crosshair className="w-3.5 h-3.5" /> Centre
+              <button type="button" onClick={() => { setFollow(true); setManual(false); setCenter(refPrice); }} className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 text-zinc-300 hover:text-white ${FOCUS_RING}`}>
+                <Crosshair className="w-3.5 h-3.5" aria-hidden /> Centre
               </button>
+              <label className="flex items-center gap-1.5 text-zinc-400" title="Keep the ladder centred on the live price"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow</label>
+              </span>
+              {mode === 'xy' && <span className="inline-flex items-center gap-2 whitespace-nowrap">
               {mode === 'xy' && <label className="flex items-center gap-1.5 text-zinc-400" title="Previous day's Central Pivot Range: TC / P / BC marks, the rows between BC and TC tinted. Formula and the R/S switch are in Settings."><input type="checkbox" checked={pivotPrefs.cprOn} onChange={e => changeDefaults({ cprOn: e.target.checked })} /> CPR</label>}
               {mode === 'xy' && <label className="flex items-center gap-1.5 text-zinc-400" title={`Previous day's R1-R4 and S1-S4 (${pivotPrefs.pivotFormula} formula; change it in Settings)`}><input type="checkbox" checked={pivotPrefs.pivotsOn} onChange={e => changeDefaults({ pivotsOn: e.target.checked })} /> R/S</label>}
               {mode === 'xy' && !isFut && <label className="flex items-center gap-1.5 text-zinc-400" title="Open-interest bars on the strike rows: puts left of the Price column, calls right"><input type="checkbox" checked={oiOn} onChange={e => { setOiOn(e.target.checked); savePref(k('price-ladder-oi'), e.target.checked ? '1' : '0'); }} /> OI</label>}
               {mode === 'xy' && oiOn && oiRows.staleSince != null && <span className="text-[10px] text-amber-300" title="Dhan refused a fresh option chain, so the OI bars come from the last good one">OI stale since {timeOf(oiRows.staleSince)}</span>}
-              <label className="flex items-center gap-1.5 text-zinc-400"><input type="checkbox" checked={follow} onChange={e => { setFollow(e.target.checked); if (e.target.checked) setManual(false); }} /> Follow</label>
-              <div className="flex items-center gap-2 shrink-0">
+              </span>}
+              <div className="flex items-center gap-2 shrink-0 ml-auto">
               <button
                 type="button"
                 onClick={() => setSettingsModalOpen(true)}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 bg-zinc-900/60 text-zinc-300 hover:text-white hover:border-zinc-500 cursor-pointer"
-                title="Configure trading cutoff & Price Ladder settings"
+                aria-label="Ladder settings"
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border border-zinc-700 bg-zinc-900/60 text-zinc-300 hover:text-white hover:border-zinc-500 cursor-pointer ${FOCUS_RING}`}
+                title="Price Ladder settings: trading cutoffs, session thresholds, defaults, pivots"
               >
-                <Settings className="w-3.5 h-3.5 text-amber-400" /> Settings
+                <Settings className="w-3.5 h-3.5 text-amber-400" aria-hidden /> Settings
               </button>
               <button
                 type="button" disabled={busy || pendingHere === 0}
@@ -2145,17 +2157,17 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                     ['Contract', ''],
                     ['Side', ''],
                     ['Qty', 'Filled quantity (ordered while unfilled), in lots'],
+                    ['State', ''],
+                    ['P&L', 'Closed: at the exit price. Open: at the live price'],
                     ['Trigger', 'Index: the index / futures level that fires the entry. Plain: the LIMIT / SL price'],
                     ['Fired at', 'Index: the index / futures level when the entry fired (the bracket is measured from it)'],
                     ['Entry ₹', 'Option entry price: the average fill'],
                     ['LTP ₹', 'Option live price (open positions)'],
                     ['Exit ₹', 'Option exit price: the average exit fill, with the exit time'],
                     ['TGT / SL', 'Bracket target / stop on the index / futures level (T = trailing step)'],
-                    ['State', ''],
-                    ['P&L', 'Closed: at the exit price. Open: at the live price'],
                     ['', ''],
-                  ].map(([h, t], i) => (
-                    <th key={`${h}-${i}`} title={t || undefined} className="px-2 py-1.5 text-xs font-bold text-white whitespace-nowrap">{h}</th>
+                  ].map(([h, t], i, all) => (
+                    <th key={`${h}-${i}`} title={t || undefined} className={`px-2 py-1.5 text-xs font-bold text-white whitespace-nowrap ${i === all.length - 1 ? STICKY_TH : ''}`}>{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -2482,6 +2494,11 @@ function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; 
         {/* MCX on Dhan: qty is lots, so show the barrels too. */}
         {s.contract.mult ? <>{qty}L <span className="text-zinc-500">({qty * s.contract.mult} bbl)</span></> : <>{qty} <span className="text-zinc-500">({s.lots}L)</span></>}
       </td>
+      <td className={`px-2 py-1 whitespace-nowrap ${stateClass}`} title={s.note ?? s.exitReason ?? ''}>
+        {s.state.toUpperCase()}{s.state === 'closed' && s.exitReason ? <span className="text-zinc-500 font-normal"> · {s.exitReason}</span> : null}
+        {s.note && s.state !== 'closed' ? <span className="block text-[10px] font-normal text-zinc-500 max-w-64 truncate">{s.note}</span> : null}
+      </td>
+      <td className={`px-2 py-1 font-mono whitespace-nowrap ${pnlClass(pnl)}`}>{fmtMoney(pnl)}</td>
       <td className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap">{trig}</td>
       <td className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap">{s.kind === 'xy' && s.entryY ? s.entryY.toFixed(2) : '—'}</td>
       <td className="px-2 py-1 font-mono font-bold text-zinc-100 whitespace-nowrap">{s.avg ? s.avg.toFixed(2) : '—'}</td>
@@ -2492,12 +2509,7 @@ function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; 
       <td className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap">
         {s.bracket ? `${s.bracket.tgtPts > 0 ? (s.tgtY ?? `+${s.bracket.tgtPts}`) : 'Cover'} / ${s.slY ?? `-${s.bracket.slPts}`}${s.bracket.trailPts ? ` · T${s.bracket.trailPts}` : ''}` : '—'}
       </td>
-      <td className={`px-2 py-1 whitespace-nowrap ${stateClass}`} title={s.note ?? s.exitReason ?? ''}>
-        {s.state.toUpperCase()}{s.state === 'closed' && s.exitReason ? <span className="text-zinc-500 font-normal"> · {s.exitReason}</span> : null}
-        {s.note && s.state !== 'closed' ? <span className="block text-[10px] font-normal text-zinc-500 max-w-64 truncate">{s.note}</span> : null}
-      </td>
-      <td className={`px-2 py-1 font-mono ${pnlClass(pnl)}`}>{fmtMoney(pnl)}</td>
-      <td className="px-2 py-1 whitespace-nowrap">
+      <td className={`px-2 py-1 whitespace-nowrap ${STICKY_TD}`}>
         <div className="flex gap-1">
           {(s.state === 'armed' || s.state === 'working') && (
             <button type="button" disabled={busy} onClick={() => void post({ action: 'cancel', id: s.id })} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">Cancel</button>
@@ -2533,11 +2545,11 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect, shown, onLots,
   onRoll: (p: LadderPair, legs: 'both' | 'ce' | 'pe', steps: number) => void;
 }) {
   const heads: [string, string][] = [
-    ['Time', 'When the pair was armed'], ['Mode', ''], ['Pair', ''], ['Side', ''], ['Qty', 'Per leg, in lots'],
+    ['Time', 'When the pair was armed'], ['Mode', ''], ['Pair', ''], ['Side', ''], ['Qty', 'Per leg, in lots'], ['State', ''],
+    ['P&L', 'Both legs: closed at their exits, open at live prices'],
     ['Trigger', 'The combined premium (CE + PE) that fires the entry'],
     ['Entry ₹', 'CE fill + PE fill = combined fill'], ['Now ₹', 'Live CE + PE (open pairs)'], ['Exit ₹', 'CE exit + PE exit, with the exit time'],
-    ['TGT / SL', 'Bracket target / stop on the combined premium (T = trailing distance)'], ['State', ''],
-    ['P&L', 'Both legs: closed at their exits, open at live prices'], ['', ''],
+    ['TGT / SL', 'Bracket target / stop on the combined premium (T = trailing distance)'], ['', ''],
   ];
   const two = (a?: number, b?: number) => (a && b ? `${a.toFixed(2)} + ${b.toFixed(2)} = ${(a + b).toFixed(2)}` : '—');
   return (
@@ -2553,7 +2565,7 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect, shown, onLots,
       <table className="w-full text-xs">
         <thead className="bg-zinc-800">
           <tr className="text-left">
-            {heads.map(([h, t], i) => <th key={`${h}-${i}`} title={t || undefined} className="px-2 py-1.5 text-xs font-bold text-white whitespace-nowrap">{h}</th>)}
+            {heads.map(([h, t], i) => <th key={`${h}-${i}`} title={t || undefined} className={`px-2 py-1.5 text-xs font-bold text-white whitespace-nowrap ${i === heads.length - 1 ? STICKY_TH : ''}`}>{h}</th>)}
           </tr>
         </thead>
         <tbody>
@@ -2585,6 +2597,11 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect, shown, onLots,
                 <td className="px-2 py-1 font-mono text-zinc-200 whitespace-nowrap">
                   {mult ? <>{p.qty}L <span className="text-zinc-500">({p.qty * mult} bbl)</span></> : <>{p.qty} <span className="text-zinc-500">({p.lots}L)</span></>}
                 </td>
+                <td className={`px-2 py-1 whitespace-nowrap ${stateClass}`} title={p.note ?? p.exitReason ?? ''}>
+                  {p.state.toUpperCase()}{p.state === 'closed' && p.exitReason ? <span className="text-zinc-500 font-normal"> · {p.exitReason}</span> : null}
+                  {p.note && p.state !== 'closed' ? <span className="block text-[10px] font-normal text-zinc-500 max-w-64 truncate">{p.note}</span> : null}
+                </td>
+                <td className={`px-2 py-1 font-mono whitespace-nowrap ${pnlClass(pnl)}`}>{fmtMoney(pnl)}</td>
                 <td className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap">{p.entryLevel ? `CE+PE ${p.entryDir === 'below' ? '≤' : '≥'} ${p.entryLevel}` : '—'}</td>
                 <td className="px-2 py-1 font-mono font-bold text-zinc-100 whitespace-nowrap">{two(ce.avg, pe.avg)}</td>
                 <td className="px-2 py-1 font-mono text-zinc-200 whitespace-nowrap">{holding ? two(nowCe, nowPe) : '—'}</td>
@@ -2600,13 +2617,9 @@ function PairTable({ pairs, ltps, busy, post, trailPts, onSelect, shown, onLots,
                     </span>
                   ) : null}
                 </td>
-                <td className={`px-2 py-1 whitespace-nowrap ${stateClass}`} title={p.note ?? p.exitReason ?? ''}>
-                  {p.state.toUpperCase()}{p.state === 'closed' && p.exitReason ? <span className="text-zinc-500 font-normal"> · {p.exitReason}</span> : null}
-                  {p.note && p.state !== 'closed' ? <span className="block text-[10px] font-normal text-zinc-500 max-w-64 truncate">{p.note}</span> : null}
-                </td>
-                <td className={`px-2 py-1 font-mono ${pnlClass(pnl)}`}>{fmtMoney(pnl)}</td>
-                <td className="px-2 py-1 whitespace-nowrap">
-                  <div className="flex gap-1">
+                <td className={`px-2 py-1 ${STICKY_TD}`}>
+                  {/* Pinned, so it must stay narrow: the lots / shift / roll / leg-SL controls wrap onto a second line instead of covering the row. */}
+                  <div className="flex flex-wrap items-center gap-1 w-[17rem] [&>*]:whitespace-nowrap">
                     {p.state === 'armed' && (
                       <button type="button" disabled={busy} onClick={() => void post({ action: 'pair', op: 'cancel', id: p.id })} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">Cancel</button>
                     )}
@@ -2715,7 +2728,7 @@ function PairTrailControl({ p, busy, post, fallback }: { p: LadderPair; busy: bo
 
 /** The baskets (armed, open and finished today) of this ladder: what each is, where it entered, its P&L, and its Cancel / Exit. */
 function BasketTable({ baskets, ltps, busy, post, shown, onSelect }: { baskets: LadderBasket[]; ltps: Record<string, number>; busy: boolean; post: (b: Record<string, unknown>) => Promise<boolean>; shown: ReadonlySet<string>; onSelect: (b: LadderBasket) => void }) {
-  const heads = ['Time', 'Mode', 'Basket', 'Side', 'Lots', 'Legs', 'Trigger', 'Entry net', 'Now net', 'TGT / SL', 'State', 'P&L', ''];
+  const heads = ['Time', 'Mode', 'Basket', 'Side', 'Lots', 'State', 'P&L', 'Legs', 'Trigger', 'Entry net', 'Now net', 'TGT / SL', ''];
   return (
     <div className="rounded-lg border border-zinc-800 overflow-x-auto">
       <div className="flex items-center justify-between px-3 py-2 bg-zinc-900/40">
@@ -2728,7 +2741,7 @@ function BasketTable({ baskets, ltps, busy, post, shown, onSelect }: { baskets: 
       </div>
       <table className="w-full text-xs">
         <thead className="bg-zinc-800">
-          <tr className="text-left">{heads.map((h, i) => <th key={`${h}-${i}`} className="px-2 py-1.5 text-xs font-bold text-white whitespace-nowrap">{h}</th>)}</tr>
+          <tr className="text-left">{heads.map((h, i) => <th key={`${h}-${i}`} className={`px-2 py-1.5 text-xs font-bold text-white whitespace-nowrap ${i === heads.length - 1 ? STICKY_TH : ''}`}>{h}</th>)}</tr>
         </thead>
         <tbody>
           {[...baskets].reverse().map(b => {
@@ -2745,14 +2758,14 @@ function BasketTable({ baskets, ltps, busy, post, shown, onSelect }: { baskets: 
                 <td className="px-2 py-1 font-mono whitespace-nowrap" title={basketName(b)}>{basketName(b)}{live && !shown.has(b.id) && <button type="button" onClick={() => onSelect(b)} className="ml-2 text-[10px] text-amber-300 underline font-sans">View on ladder</button>}</td>
                 <td className={`px-2 py-1 font-bold ${b.side === 'BUY' ? 'text-emerald-400' : 'text-red-400'}`} title={b.side === 'SELL' ? 'Receives the net premium' : 'Pays the net premium'}>{b.side}</td>
                 <td className="px-2 py-1 font-mono">{b.lots}</td>
+                <td className={`px-2 py-1 whitespace-nowrap ${stateClass}`}>{b.state.toUpperCase()}{b.state === 'closed' && b.exitReason ? <span className="text-zinc-500 font-normal"> · {b.exitReason}</span> : null}{b.note && b.state !== 'closed' ? <span className="block text-[10px] font-normal text-zinc-500 max-w-64 truncate">{b.note}</span> : null}</td>
+                <td className={`px-2 py-1 font-mono whitespace-nowrap ${pnlClass(pnl)}`}>{fmtMoney(pnl)}</td>
                 <td className="px-2 py-1 font-mono text-zinc-400 whitespace-nowrap">{b.legs.map(l => `${l.side === 'BUY' ? '+' : '−'}${l.contract.strike}${l.contract.opt}${l.ratio > 1 ? `×${l.ratio}` : ''}`).join(' ')}</td>
                 <td className="px-2 py-1 font-mono whitespace-nowrap">{b.entryLevel ? `net ${b.entryDir === 'below' ? '≤' : '≥'} ${b.entryLevel}` : '—'}</td>
                 <td className="px-2 py-1 font-mono">{b.entryY ? b.entryY.toFixed(2) : '—'}</td>
                 <td className="px-2 py-1 font-mono">{live && b.state !== 'armed' && now != null ? now.toFixed(2) : '—'}</td>
                 <td className="px-2 py-1 font-mono whitespace-nowrap">{b.tgtY != null || b.slY != null ? `${b.tgtY != null ? b.tgtY.toFixed(2) : '—'} / ${b.slY != null ? b.slY.toFixed(2) : '—'}${b.bracket?.trailPts ? ` (T${b.bracket.trailPts})` : ''}` : '—'}</td>
-                <td className={`px-2 py-1 ${stateClass}`}>{b.state.toUpperCase()}{b.state === 'closed' && b.exitReason ? <span className="text-zinc-500 font-normal"> · {b.exitReason}</span> : null}{b.note && b.state !== 'closed' ? <span className="block text-[10px] font-normal text-zinc-500 max-w-64 truncate">{b.note}</span> : null}</td>
-                <td className={`px-2 py-1 font-mono ${pnlClass(pnl)}`}>{fmtMoney(pnl)}</td>
-                <td className="px-2 py-1 whitespace-nowrap">
+                <td className={`px-2 py-1 whitespace-nowrap ${STICKY_TD}`}>
                   {b.state === 'armed' && <button type="button" disabled={busy} onClick={() => void post({ action: 'basket', op: 'cancel', id: b.id })} className="px-1.5 py-0.5 rounded border border-zinc-700 text-zinc-300 hover:text-white">Cancel</button>}
                   {(b.state === 'open' || b.state === 'broken') && <button type="button" disabled={busy || !!b.exitWanted} onClick={() => void post({ action: 'basket', op: 'exit', id: b.id })} title={b.state === 'broken' ? 'Exit what is left of this basket at market' : 'Exit every leg at market (shorts first)'}
                     className="px-1.5 py-0.5 rounded border border-red-500/40 text-red-300 hover:bg-red-500/15 disabled:opacity-40">{b.exitWanted ? 'Exiting…' : b.state === 'broken' ? 'Exit remaining' : 'Exit all legs'}</button>}

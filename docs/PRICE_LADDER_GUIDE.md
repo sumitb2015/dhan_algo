@@ -7,6 +7,10 @@ orders and cancels armed REAL levels; exits always work). The arm lapses at the 
 
 ## Placing orders
 
+The grid's columns are **Buy | Buy trig | Price | Sell trig | Sell**. The two inner columns are not market depth: they show
+the trigger prices (armed entries, target, SL) for each side. Two ladders sit side by side from 1536 px wide; below that they
+stack, each with its settings panel beside its grid. The ladder's **Settings** button is in the grid toolbar.
+
 - **XY (index) ladder** — click the Buy or Sell column at an *index* level. Limit = the option is cheaper (Buy) / dearer (Sell)
   at that level; the other side needs Order Type SL (breakout), or is a breakout by itself in **Anywhere** zones. The option
   order goes at MARKET when the index crosses the level. On a Put the ladder is inverted: a Buy is a limit *above* spot.

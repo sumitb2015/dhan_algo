@@ -43,7 +43,9 @@ export default function PriceLadderWorkspace() {
   const copyTrade = useCopyTrade(notify);
   if (!dual) return <PriceLadder copyTrade={copyTrade} onAddLadder={() => setDual(true)} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />;
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-zinc-800 min-h-screen bg-zinc-950">
+    // Side by side only from 2xl: below it a half-width pane cannot hold the settings panel beside the grid, and stacking the
+    // panel above the grid pushed the ladder below the fold on a laptop. Below 2xl the two ladders stack, each full width.
+    <div className="grid grid-cols-1 2xl:grid-cols-2 divide-y 2xl:divide-y-0 2xl:divide-x divide-zinc-800 min-h-screen bg-zinc-950">
       <PriceLadder copyTrade={copyTrade} ladderId={1} dual onBrokerChange={setFirstBroker} onHeaderHeight={head1} onRowHeight={row1} rowMinHeight={rowMax} onTopHeight={top1} onBannerHeight={ban1} headerMinHeight={headMax} topMinHeight={topMax} bannerMinHeight={bannerMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
       <PriceLadder copyTrade={copyTrade} ladderId={2} dual peerBroker={firstBroker} onHeaderHeight={head2} onRowHeight={row2} rowMinHeight={rowMax} onTopHeight={top2} onBannerHeight={ban2} headerMinHeight={headMax} topMinHeight={topMax} bannerMinHeight={bannerMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} onRemoveLadder={() => setDual(false)} />
     </div>

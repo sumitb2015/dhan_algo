@@ -312,7 +312,7 @@ test('The chime toggle mutes and unmutes trade sounds and is remembered', async 
 test('Settings: the NSE cutoff is set separately from the MCX one', async ({ page }) => {
   const seen = await install(page);
   await gotoSingle(page);
-  await page.getByTitle('Configure Price Ladder trading cutoff & session thresholds').click();
+  await page.getByRole('button', { name: 'Ladder settings', exact: true }).first().click();
   await expect(page.getByText('NSE Trading Cutoff (Nifty, Bank Nifty & other indices)')).toBeVisible();
   await expect(page.getByText('MCX Trading Cutoff (CRUDEOILM)')).toBeVisible();
   const nse = page.getByText('NSE Trading Cutoff (Nifty, Bank Nifty & other indices)').locator('xpath=ancestor::div[contains(@class,"space-y-3")][1]');
@@ -416,13 +416,23 @@ test('Two ladders by default: ladder 1 is the call, ladder 2 the put, each with 
   // Page-wide header controls appear once, not once per ladder
   // The books sit under each ladder's header (the account chips stay once)
   for (const name of [/Order book/, /Trade book/, /^Positions/]) await expect(page.getByRole('button', { name })).toHaveCount(2);
-  await expect(page.locator('.sticky').getByText('Settings', { exact: true })).toHaveCount(1);
+  // Settings: once per ladder, in its grid toolbar (the header no longer repeats it)
+  await expect(page.locator('.sticky').getByText('Settings', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Ladder settings', exact: true })).toHaveCount(2);
   await expect(page.getByText(/^DATA:/)).toHaveCount(1);
-  // Side by side, the two ladders start at the same height (headers held to the taller one)
+  // Below 2xl (1440 here) the two ladders stack, and each keeps its settings panel BESIDE its grid: ladder 1's grid starts
+  // above the fold (it used to sit under the panel, ~1,300 px down on a laptop).
+  const scrollUp = page.getByRole('button', { name: /^Scroll ladder up/ });
+  await expect(scrollUp).toHaveCount(2);
+  expect((await scrollUp.first().boundingBox())!.y).toBeLessThan(900);
+  expect((await page.getByRole('heading', { level: 1 }).nth(1).boundingBox())!.y).toBeGreaterThan((await scrollUp.first().boundingBox())!.y);
+  // Side by side (2xl), the two ladders start at the same height (headers held to the taller one)
+  await page.setViewportSize({ width: 1900, height: 900 });
   await expect.poll(async () => {
-    const h = await page.locator('.sticky').evaluateAll(els => els.filter(e => e.querySelector('h1')).map(e => Math.round(e.getBoundingClientRect().height)));
-    return h.length === 2 && h[0] === h[1];
+    const h = await page.locator('.sticky').evaluateAll(els => els.filter(e => e.querySelector('h1')).map(e => [Math.round(e.getBoundingClientRect().top), Math.round(e.getBoundingClientRect().height)]));
+    return h.length === 2 && h[0][0] === h[1][0] && h[0][1] === h[1][1];
   }).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 900 });
   await underlying.nth(1).selectOption('BANKNIFTY');
   await expect(underlying.nth(0)).toHaveValue('NIFTY');
   await expect(underlying.nth(1)).toHaveValue('BANKNIFTY');
@@ -800,7 +810,7 @@ test('OI bars: they start on the outer edges (call far left, put far right); the
   const c0 = (await ce.boundingBox())!, p0 = (await pe.boundingBox())!;
   expect(Math.round(c0.x - rowBox.x)).toBeLessThanOrEqual(1);                                      // call bar starts at the row's left edge
   expect(Math.round(rowBox.x + rowBox.width - (p0.x + p0.width))).toBeLessThanOrEqual(1);          // put bar ends at the right edge
-  await page.getByTitle('Configure Price Ladder trading cutoff & session thresholds').click();
+  await page.getByRole('button', { name: 'Ladder settings', exact: true }).first().click();
   await page.getByRole('button', { name: 'Beside price' }).click();
   await page.keyboard.press('Escape');
   await expect.poll(async () => (await ce.boundingBox())!.x + (await ce.boundingBox())!.width).toBeGreaterThan(rowBox.x + rowBox.width * 0.3);   // now ends at the Price column (~42 % across)
