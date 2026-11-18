@@ -16,7 +16,8 @@ import IndexMapControls from './straddlePnf/IndexMapControls';
 import { useIndexHeld, useTradedLive } from './straddlePnf/useIndexHeld';
 import { closeHeldForGuard } from './straddlePnf/indexGuardExit';
 import { autoIndexLeg, indexGuardPosition, ownMarkLeg, rupeeLevels, stepOwnMark, type OwnMark } from '@/lib/pnfIndexGuard';
-import { DEFAULT_INDEX_MAP, legShort, legText, readIndexMap, type IndexMap } from '@/lib/pnfIndexMap';
+import { DEFAULT_INDEX_MAP, legShort, legText, mapRisks, readIndexMap, type IndexMap } from '@/lib/pnfIndexMap';
+import { useMappedPrices, useOptionChain, type MappedPrice } from './straddlePnf/useMappedPrices';
 import { usePnfTrade } from './straddlePnf/usePnfTrade';
 import BrokerBooks from './straddlePnf/BrokerBooks';
 import HeaderClock from './straddlePnf/HeaderClock';
@@ -1192,6 +1193,12 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     replay.open();
   };
   const armChart = useCallback((c: ChartId, on: boolean) => {
+    // A risky option map is refused before anything else is said (no "AUTO armed..." notes ahead of a refusal)
+    if (on) {
+      const tg = c === 2 ? target2 : target1;
+      const risks = renko && tg.kind === 'index' ? mapRisks(tg.symbol, indexMap[c]) : [];
+      if (risks.length) { toast.error(`AUTO not armed on chart ${c}. ${risks.join('. ')}.`, { duration: 20_000 }); return; }
+    }
     // The MTM guard is the user's choice: arming AUTO leaves it as it is (OFF unless switched on from the MTM Guard card, whose levels start
     // at 10 boxes / 10 boxes). Said once, because the Supertrend / N-brick rules have no stop of their own.
     if (on && autoSide[c] !== 'both') toast.info(`AUTO armed on chart ${c}: ${SIDE_LABEL[autoSide[c]].toUpperCase()} - signals for the other side are ignored (open positions still exit normally).`, { duration: 8_000 });
@@ -1323,7 +1330,13 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
   const tradedLive = heldLiveOf(active);
   const changeIndexMap = (c: ChartId, m: IndexMap) => { setIndexMap(v => ({ ...v, [c]: m })); saveP(`${INDEX_MAP_KEY}${c}`, JSON.stringify(m)); };
   const activeMap = indexMap[active];
-  const indexSideHints = indexTradable ? { BUY: legShort(activeMap.bull), SELL: legShort(activeMap.bear) } : undefined;
+  // The premium each direction would trade now (ATM +/- N at the live index): shown on the BULL / BEAR buttons. A preview - the server picks at the click.
+  const indexChain = useOptionChain(activeTarget.symbol, activeMap.expiry === 'NEAREST' ? '' : activeMap.expiry, indexTradable);
+  const mappedPx = useMappedPrices({ chain: indexChain, symbol: activeTarget.symbol, map: activeMap, spot: activeFeed.live ? activeFeed.live.ce + activeFeed.live.pe : null, enabled: indexTradable });
+  const pxText = (p: MappedPrice) => (p ? ` · ${p.strike} ${p.ltp != null && p.ltp > 0 ? `₹${p.ltp.toFixed(2)}` : '₹–'}` : '');
+  const indexSideHints = indexTradable ? { BUY: `${legShort(activeMap.bull)}${pxText(mappedPx.bull)}`, SELL: `${legShort(activeMap.bear)}${pxText(mappedPx.bear)}` } : undefined;
+  // A map leg that gains as the index moves AGAINST its direction is not traded (lib/pnfIndexMap.ts mappedTarget refuses it): said here.
+  const activeMapRisks = indexTradable ? mapRisks(activeTarget.symbol, activeMap) : [];
   const indexSideTitles = indexTradable ? { BUY: legText(activeMap.bull), SELL: legText(activeMap.bear) } : undefined;
   /** No rail on an index chart yet, so no page-held exits: Bracket / Cover are off there (the bar shows Single). */
   const INDEX_NO_BRACKETS = 'No Bracket / Cover on an index chart yet: no rail holds the exits for the option it trades. Exit by hand, or chart the option itself.';
@@ -1353,7 +1366,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
     } : undefined,
   });
   const indexMapSlot = indexTradable ? (
-    <IndexMapControls symbol={activeTarget.symbol} map={activeMap} onChange={m => changeIndexMap(active, m)}
+    <IndexMapControls symbol={activeTarget.symbol} map={activeMap} onChange={m => changeIndexMap(active, m)} chain={indexChain}
                       spot={activeFeed.live ? activeFeed.live.ce + activeFeed.live.pe : null} held={indexHeld.held}
                       disabled={locked(active)}
                       ownLots={trade.ownLots} mismatch={trade.heldMismatch} onForget={trade.forgetHeld}
@@ -1688,7 +1701,7 @@ function StraddlePnfPage({ chart = 'pnf' }: { chart?: ChartType }) {
             sideTitles={indexSideTitles}
             mapCollapsed={mapFolded}
             onMapCollapsed={v => { setMapFolded(v); saveP(INDEX_MAP_FOLD_KEY, v ? '1' : '0'); }}
-            mapAttention={!!indexHeld.held && (indexHeld.held.state !== 'open' || !!trade.heldMismatch)}
+            mapAttention={activeMapRisks.length > 0 || (!!indexHeld.held && (indexHeld.held.state !== 'open' || !!trade.heldMismatch))}
             mapSummary={indexSideTitles ? `Bull ${indexSideTitles.BUY} · Bear ${indexSideTitles.SELL} · ${activeMap.expiry === 'NEAREST' ? 'nearest expiry' : activeMap.expiry}` : undefined}
           />
         </div>

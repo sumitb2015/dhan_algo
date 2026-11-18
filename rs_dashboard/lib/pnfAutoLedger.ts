@@ -17,7 +17,7 @@ import type { Market } from './straddlePnfLive.ts';
 import type { AutoProduct } from './pnfOrderLogic.ts';
 import { PYRAMID_EVERY_MAX, TRAIL_BOXES_MAX } from './pnfAuto.ts';
 import { readSettings, type PnfSettings } from './straddlePnfSettings.ts';
-import { parseIndexMap, tradedOf, type IndexMap } from './pnfIndexMap.ts';
+import { mapRisks, parseIndexMap, tradedOf, type IndexMap } from './pnfIndexMap.ts';
 
 export type AutoMode = 'PAPER' | 'REAL';
 export type AutoRowState = 'entering' | 'open' | 'exiting' | 'closed' | 'unknownEntry' | 'unknownExit' | 'adding' | 'unknownAdd';
@@ -604,6 +604,9 @@ export function applyAutoOp(led: AutoLedger, op: AutoOp): { ok: true; ledger: Au
       } else {
         const a = armOk(op.arm);
         if (!a) return { ok: false, status: 400, error: 'Invalid arm' };
+        // an index chart's option map that trades against its direction is never armed (whichever tab or bundle sent it)
+        const risks = a.run?.indexMap ? mapRisks(a.run.target.symbol, a.run.indexMap) : [];
+        if (risks.length) return { ok: false, status: 422, error: risks.join('. ') };
         arms[k] = a;
       }
       return bump(led.rows, [...led.log, { t: op.t, chart: op.chart, text: op.text.slice(0, 300) }], arms);

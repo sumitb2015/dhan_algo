@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  DEFAULT_INDEX_MAP, againstDir, chartActionOf, dirOf, legBias, legText, mappedTarget, parseIndexMap, pickExpiry, pickStrike, readIndexMap, tradedOf,
+  DEFAULT_INDEX_MAP, againstDir, correctedMap, mapRisks, withDirLeg, chartActionOf, dirOf, legBias, legText, mappedTarget, parseIndexMap, pickExpiry, pickStrike, readIndexMap, tradedOf,
   type IndexMap,
 } from './pnfIndexMap.ts';
 
@@ -98,4 +98,17 @@ test('legText', () => {
   assert.equal(legText({ action: 'BUY', opt: 'CE', offset: 0 }), 'BUY CE ATM');
   assert.equal(legText({ action: 'SELL', opt: 'PE', offset: 2 }), 'SELL PE +2 OTM');
   assert.equal(legText({ action: 'BUY', opt: 'CE', offset: -1 }), 'BUY CE 1 ITM');
+});
+
+test('a risky leg (against its direction) is refused at entry and corrected by swapping CE / PE', () => {
+  const risky: IndexMap = { bull: { action: 'SELL', opt: 'CE', offset: 5 }, bear: { action: 'SELL', opt: 'PE', offset: 5 }, expiry: 'NEAREST' };
+  assert.match(mappedTarget({ symbol: 'NIFTY' }, risky, 'bear', 24160, ['2026-11-11'], () => K) as string, /Risky option map: BEAR = SELL PE gains as NIFTY RISES.*SELL CE \(or BUY PE\)$/);
+  assert.match(mappedTarget({ symbol: 'NIFTY' }, risky, 'bull', 24160, ['2026-11-11'], () => K) as string, /BULL = SELL CE gains as NIFTY FALLS/);
+  assert.equal(mapRisks('NIFTY', risky).length, 2);
+  const fixed = correctedMap(risky);
+  assert.deepEqual(fixed, { bull: { action: 'SELL', opt: 'PE', offset: 5 }, bear: { action: 'SELL', opt: 'CE', offset: 5 }, expiry: 'NEAREST' });
+  assert.deepEqual(mapRisks('NIFTY', fixed), []);
+  assert.deepEqual(mapRisks('NIFTY', DEFAULT_INDEX_MAP), []);
+  assert.deepEqual(withDirLeg('bear', { action: 'BUY', opt: 'CE', offset: 0 }), { action: 'BUY', opt: 'PE', offset: 0 });
+  assert.deepEqual(withDirLeg('bear', { action: 'BUY', opt: 'PE', offset: 0 }), { action: 'BUY', opt: 'PE', offset: 0 });
 });

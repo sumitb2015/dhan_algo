@@ -13,7 +13,7 @@ import { fullFillAvg, type OrderPriceRead } from './tradedPriceClient.ts';
 import type { LegResult, PnfBroker } from './pnfOrderLogic.ts';
 import type { Market } from './straddlePnfLive.ts';
 import type { PanelModel } from './straddlePnfModel.ts';
-import type { IndexDir, IndexMap } from './pnfIndexMap.ts';
+import { riskText, type IndexDir, type IndexMap } from './pnfIndexMap.ts';
 
 /** The option an index chart's entry trades, as the server resolved it (lib/pnfIndexTradeServer.ts resolveIndexTrade). */
 export type IndexResolved = {
@@ -236,6 +236,10 @@ export class ChartEngine {
     let info = i.info, traded: AutoRow['traded'] | undefined, pyramid = i.pyramid;
     if (target.kind === 'index') {
       if (!i.indexMap || !this.deps.resolveIndex || !this.deps.premium) { this.note = 'no option map saved with this arming'; return null; }
+      // A map leg that trades against its direction is refused for good, not retried: AUTO stops at once and says why (an open row still
+      // exits by its rule). Checked here, not only at arming, because an arming saved before the rule existed may still carry one.
+      const risk = riskText(target.symbol, side === 'BUY' ? 'bull' : 'bear', i.indexMap[side === 'BUY' ? 'bull' : 'bear']);
+      if (risk) { this.haltNow(`${risk} - stop, correct the map, then arm again`); return null; }
       if (this.deps.nowMs() < this.resolveRetryAt) return this.note ?? 'waiting to retry the option lookup';
       const r = await this.deps.resolveIndex(broker, target, i.indexMap, side === 'BUY' ? 'bull' : 'bear').catch((e: Error) => `option lookup failed (${e.message})`);
       const why = typeof r === 'string' ? r : !(r.premium && r.premium > 0) ? `no price for the ${r.traded.strike} ${r.traded.side} option yet` : null;

@@ -454,3 +454,14 @@ test('index row, REAL: an exit booked with no option price takes the broker\'s e
   l = run(l, { op: 'fillPrice', id: 'r1', which: 'exit', price: 95, legCount: 1 });
   assert.equal(l.rows[0].pnl, (120 - 95) * 65);
 });
+
+test('an index arming whose map trades against its direction is refused (a saved one is still read, the engine halts it)', () => {
+  const settings = { interval: 1 };
+  const risky = { bull: { action: 'BUY', opt: 'CE', offset: 0 }, bear: { action: 'SELL', opt: 'PE', offset: 5 }, expiry: 'NEAREST' };
+  const arm = { mode: 'PAPER', broker: 'dhan', targetKey: 'index|NIFTY|||', day: '2026-10-30', t: 1, watermarkT: 1, lots: 1, run: { target: idx, settings, volume: false, indexMap: risky } };
+  const r = applyAutoOp(EMPTY_LEDGER, { op: 'setArm', chart: 1, t: 1000, text: 'armed', arm } as never);
+  assert.ok(!r.ok && r.status === 422 && /BEAR = SELL PE gains as NIFTY RISES/.test(r.error));
+  const safe = applyAutoOp(EMPTY_LEDGER, { op: 'setArm', chart: 1, t: 1000, text: 'armed', arm: { ...arm, run: { ...arm.run, indexMap: { ...risky, bear: { action: 'SELL', opt: 'CE', offset: 5 } } } } } as never);
+  assert.ok(safe.ok);
+  assert.ok(parseLedger({ rev: 1, rows: [], log: [], arms: { 1: arm } }).arms?.['1']?.run?.indexMap, 'an arming already saved is still read');
+});

@@ -419,3 +419,42 @@ test('two index charts holding the SAME option have independent MTM guards: one 
   expect(placed.length).toBe(3);                                          // three paper orders sent for checks; paper closes send nothing
   expect(blocked).toEqual([]);
 });
+
+test('a risky map leg is never built: SELL on BEAR picks the CE, PE on BULL picks SELL, and the user is told', async ({ page }) => {
+  await installMock(page);
+  const bar = await openIndex(page);
+  const bear = bar.getByTestId('index-map-bear');
+  await bear.getByRole('button', { name: 'SELL' }).click();                 // BUY PE -> SELL would be SELL PE (bullish): SELL CE instead
+  await expect(bear.getByRole('button', { name: 'CE' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByText(/SELL PE gains as NIFTY RISES - not allowed for BEAR/)).toBeVisible();
+  const bull = bar.getByTestId('index-map-bull');
+  await bull.getByRole('button', { name: 'PE' }).click();                   // BUY CE -> PE would be BUY PE (bearish): SELL PE instead
+  await expect(bull.getByRole('button', { name: 'SELL' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(bar.getByTestId('index-map-risky')).toHaveCount(0);
+  await expect(bar.getByTestId('pnf-trade-sell')).toContainText('BEAR ▸ SELL CE');
+});
+
+test('a saved risky map: banner, AUTO refuses to arm, one click corrects it', async ({ page }) => {
+  const { auto } = await installMock(page);
+  await page.addInitScript(() => {
+    localStorage.setItem('renko-index-map-1', JSON.stringify({ bull: { action: 'SELL', opt: 'CE', offset: 5 }, bear: { action: 'SELL', opt: 'PE', offset: 5 }, expiry: 'NEAREST' }));
+  });
+  await page.goto('/renko');
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Index' }).click();
+  const bar = page.getByTestId('pnf-trade-bar');
+  const banner = bar.getByTestId('index-map-risky');
+  await expect(banner).toContainText('BEAR = SELL PE gains as NIFTY RISES');
+  await expect(banner).toContainText('BULL = SELL CE gains as NIFTY FALLS');
+  await page.getByTestId('pnf-auto-1').getByRole('button', { name: 'Start AUTO on chart 1' }).click();
+  await expect(page.getByText(/AUTO not armed on chart 1/)).toBeVisible();
+  expect(auto.ops.filter(o => o.op === 'setArm')).toEqual([]);
+  // a strike change never swaps the side or the type: the leg stays risky until corrected
+  await bar.getByTestId('index-map-bear').getByLabel('Bearish strike').selectOption('2');
+  await expect(bar.getByTestId('index-map-bear').getByRole('button', { name: 'PE' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(banner).toBeVisible();
+  await bar.getByTestId('index-map-bear').getByLabel('Bearish strike').selectOption('5');
+  await bar.getByTestId('index-map-correct').click();
+  await expect(banner).toHaveCount(0);
+  await expect(bar.getByTestId('pnf-trade-buy')).toContainText('BULL ▸ SELL PE +5');
+  await expect(bar.getByTestId('pnf-trade-sell')).toContainText('BEAR ▸ SELL CE +5');
+});

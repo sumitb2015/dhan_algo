@@ -62,8 +62,30 @@ export const chartActionOf = (d: IndexDir): PnfAction => (d === 'bull' ? 'BUY' :
 /** +1 when the leg gains as the index rises (BUY CE, SELL PE), -1 otherwise: the Price Ladder's own rule. */
 export const legBias = (leg: IndexMapLeg): 1 | -1 => ladderBias(leg.opt, leg.action);
 
-/** A map leg that trades AGAINST its direction (a bull leg that loses as the index rises): allowed, but the controls warn. */
+/**
+ * A map leg that trades AGAINST its direction (a bull leg that loses as the index rises, e.g. BEAR = SELL PE). NOT allowed: the controls
+ * refuse to build one, a saved one is shown as risky with a one-click fix, and `mappedTarget` (every entry, by hand or by AUTO) refuses it.
+ */
 export const againstDir = (d: IndexDir, leg: IndexMapLeg) => legBias(leg) !== (d === 'bull' ? 1 : -1);
+
+/** The same action on the other option type: the leg that trades WITH `d` (bear: SELL PE -> SELL CE, BUY CE -> BUY PE). */
+export const withDirLeg = (d: IndexDir, leg: IndexMapLeg): IndexMapLeg =>
+  againstDir(d, leg) ? { ...leg, opt: leg.opt === 'CE' ? 'PE' : 'CE' } : leg;
+
+/** The map with every risky leg corrected (its action kept, its option type swapped). */
+export const correctedMap = (map: IndexMap): IndexMap => ({ ...map, bull: withDirLeg('bull', map.bull), bear: withDirLeg('bear', map.bear) });
+
+/** Why `dir`'s leg must not trade, or null when it trades with its direction. */
+export function riskText(symbol: string, dir: IndexDir, leg: IndexMapLeg): string | null {
+  if (!againstDir(dir, leg)) return null;
+  const fix = withDirLeg(dir, leg);
+  return `Risky option map: ${dir === 'bull' ? 'BULL' : 'BEAR'} = ${leg.action} ${leg.opt} gains as ${symbol} ${dir === 'bull' ? 'FALLS' : 'RISES'} - `
+    + `against a ${dir === 'bull' ? 'bullish' : 'bearish'} trade. Correct it to ${fix.action} ${fix.opt} (or ${fix.action === 'BUY' ? 'SELL' : 'BUY'} ${leg.opt})`;
+}
+
+/** Every risky leg of the map, as text (empty = the map is safe). */
+export const mapRisks = (symbol: string, map: IndexMap): string[] =>
+  (['bull', 'bear'] as const).map(d => riskText(symbol, d, map[d])).filter((x): x is string => x !== null);
 
 /** The expiry the map trades: NEAREST = the first live one; a chosen expiry only while it is still listed. */
 export function pickExpiry(map: IndexMap, expiries: string[]): string | null {
@@ -98,6 +120,8 @@ export function legText(leg: IndexMapLeg): string {
 export function mappedTarget(index: Pick<Target, 'symbol'>, map: IndexMap, dir: IndexDir, spot: number | null, expiries: string[],
   strikesOf: (expiry: string) => number[]): { target: Target; action: PnfAction } | string {
   const leg = map[dir];
+  const risk = riskText(index.symbol, dir, leg);
+  if (risk) return risk;                                   // every caller says what was (not) sent
   const expiry = pickExpiry(map, expiries);
   if (!expiry) return map.expiry === 'NEAREST' ? `${index.symbol} has no live options` : `${index.symbol} has no options expiring ${map.expiry} any more - pick another expiry`;
   if (spot === null || !(spot > 0)) return `No fresh ${index.symbol} price - ATM cannot be picked`;

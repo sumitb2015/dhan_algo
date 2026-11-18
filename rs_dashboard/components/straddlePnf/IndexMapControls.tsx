@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { AlertTriangle, Info } from 'lucide-react';
+import { AlertTriangle, Info, ShieldAlert } from 'lucide-react';
+import type { OptionChain } from './useMappedPrices';
+import { toast } from 'sonner';
 import {
-  MAX_STRIKE_OFFSET, againstDir, legText, pickExpiry, pickStrike, type IndexDir, type IndexMap, type IndexMapLeg,
+  MAX_STRIKE_OFFSET, againstDir, correctedMap, legText, mapRisks, pickExpiry, pickStrike, withDirLeg, type IndexDir, type IndexMap, type IndexMapLeg,
 } from '@/lib/pnfIndexMap';
 import { expiryLabel, targetLabel } from '@/lib/pnfTarget';
 import { pendingText, type HeldRow } from '@/lib/pnfIndexHeld';
@@ -16,12 +17,12 @@ const FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:rin
 const OFFSETS = Array.from({ length: MAX_STRIKE_OFFSET * 2 + 1 }, (_, i) => i - MAX_STRIKE_OFFSET);
 const offsetText = (n: number) => (n === 0 ? 'ATM' : n > 0 ? `+${n} OTM` : `${-n} ITM`);
 
-type Chain = { symbol: string; expiries: string[]; expiry: string | null; strikes: number[] };
-
 export interface IndexMapControlsProps {
   symbol: string;
   map: IndexMap;
   onChange: (map: IndexMap) => void;
+  /** The index's option chain for the map's expiry (useOptionChain, shared with the BULL / BEAR prices); null while it loads. */
+  chain: OptionChain | null;
   /** The index's live price, for the strike preview (the order itself is resolved by the server at the click). */
   spot: number | null;
   held: HeldRow | null;
@@ -37,21 +38,7 @@ export interface IndexMapControlsProps {
   disabled?: boolean;
 }
 
-export default function IndexMapControls({ symbol, map, onChange, spot, held, onSettle, ownLots, mismatch, onForget, disabled = false }: IndexMapControlsProps) {
-  const [chain, setChain] = useState<Chain | null>(null);
-  const want = map.expiry === 'NEAREST' ? '' : map.expiry;
-  useEffect(() => {
-    let dead = false;
-    void (async () => {
-      try {
-        const q = new URLSearchParams({ kind: 'options', underlying: symbol, nospot: '1', ...(want ? { expiry: want } : {}) });   // the chart's live price drives the preview
-        const j = await (await fetch(`/api/straddle-pnf/contracts?${q}`)).json() as { success?: boolean; expiries?: string[]; expiry?: string; strikes?: number[] };
-        if (!dead && j.success) setChain({ symbol, expiries: j.expiries ?? [], expiry: j.expiry ?? null, strikes: j.strikes ?? [] });
-      } catch { /* the preview waits; the order is resolved server-side anyway */ }
-    })();
-    return () => { dead = true; };
-  }, [symbol, want]);
-
+export default function IndexMapControls({ symbol, map, onChange, chain, spot, held, onSettle, ownLots, mismatch, onForget, disabled = false }: IndexMapControlsProps) {
   const ch = chain && chain.symbol === symbol ? chain : null;
   const expiry = ch ? pickExpiry(map, ch.expiries) : null;
   const strikes = ch && ch.expiry === expiry ? ch.strikes : [];
@@ -59,7 +46,17 @@ export default function IndexMapControls({ symbol, map, onChange, spot, held, on
     const k = pickStrike(strikes, spot, leg.opt, leg.offset);
     return k === null ? null : `${leg.action} ${k} ${leg.opt}`;
   };
-  const setLeg = (d: IndexDir, p: Partial<IndexMapLeg>) => onChange({ ...map, [d]: { ...map[d], ...p } });
+  // A leg that would trade AGAINST its direction is never built: picking BUY / SELL keeps the direction by choosing the option type, picking
+  // CE / PE by choosing the side (bear + SELL -> SELL CE; bear + PE -> BUY PE), and the user is told what was picked and why. A strike
+  // change never touches the side or the type: a saved risky leg stays as it is (banner, entries refused) until the user corrects it.
+  const setLeg = (d: IndexDir, p: Partial<IndexMapLeg>) => {
+    const want = { ...map[d], ...p };
+    if ((p.action === undefined && p.opt === undefined) || !againstDir(d, want)) { onChange({ ...map, [d]: want }); return; }
+    const fixed: IndexMapLeg = p.opt !== undefined ? { ...want, action: want.action === 'BUY' ? 'SELL' : 'BUY' } : withDirLeg(d, want);
+    onChange({ ...map, [d]: fixed });
+    toast.warning(`${want.action} ${want.opt} gains as ${symbol} ${d === 'bull' ? 'FALLS' : 'RISES'} - not allowed for ${d === 'bull' ? 'BULL' : 'BEAR'}. Set to ${fixed.action} ${fixed.opt} instead.`, { duration: 10_000 });
+  };
+  const risks = mapRisks(symbol, map);
 
   const toggle = (on: boolean, tone: 'buy' | 'sell' | 'plain') =>
     `px-1.5 h-6 text-[11px] font-bold rounded transition-colors ${FOCUS} ${on
@@ -94,8 +91,8 @@ export default function IndexMapControls({ symbol, map, onChange, spot, held, on
           {p ?? '—'}
         </span>
         {againstDir(d, leg) && (
-          <span title={`${legText(leg)} gains as ${symbol} ${d === 'bull' ? 'FALLS' : 'RISES'} - against a ${name.toLowerCase()} trade`}>
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-400" aria-label={`${name} leg trades against the direction`} />
+          <span title={`${legText(leg)} gains as ${symbol} ${d === 'bull' ? 'FALLS' : 'RISES'}: refused - correct it (banner)`}>
+            <ShieldAlert className="w-3.5 h-3.5 text-red-400" aria-label={`${name} leg trades against the direction: entries refused`} />
           </span>
         )}
       </div>
@@ -104,6 +101,17 @@ export default function IndexMapControls({ symbol, map, onChange, spot, held, on
 
   return (
     <div className="flex items-center gap-3 flex-wrap" data-testid="index-map">
+      {risks.length > 0 && (
+        <div role="alert" data-testid="index-map-risky"
+             className="basis-full flex items-center gap-2 rounded-md border border-red-500/60 bg-red-500/10 px-2 py-1 text-[11px] font-semibold text-red-300">
+          <ShieldAlert className="w-4 h-4 shrink-0 text-red-400" aria-hidden="true" />
+          <span className="flex-1">{risks.join('. ')}. New entries on this map are refused until it is corrected.{disabled ? ' Stop AUTO on this chart first: it was armed with this map.' : ''}</span>
+          <button type="button" data-testid="index-map-correct" disabled={disabled} onClick={() => onChange(correctedMap(map))}
+                  className={`px-2 h-6 rounded border border-red-500/60 bg-red-600 font-bold text-oncolor hover:bg-red-500 disabled:opacity-50 ${FOCUS}`}>
+            Correct it
+          </button>
+        </div>
+      )}
       {legPicker('bull')}
       {legPicker('bear')}
       <label className="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-zinc-400">

@@ -33,6 +33,9 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   if (target.kind === 'index') return NextResponse.json({ success: true, legs: [], unsupported: 'An index cannot be traded directly' });
   const legs = resolvePnfLegs(target);
   if (typeof legs === 'string') return bad(legs);
+  const ids = legs.map(l => `${l.segment}:${l.securityId}`).join(',');
+  // `idsOnly=1`: just the contract's ids for a live-price read (from the master list): no broker contract lookup
+  if (p.get('idsOnly') === '1') return NextResponse.json({ success: true, ids });
   const onBroker = await brokerLegs(broker, target, legs).catch((e: Error) => `Contract lookup failed: ${e.message}`);
   return NextResponse.json({
     success: true,
@@ -42,6 +45,8 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       lotUnits: typeof onBroker === 'string' ? null : onBroker[i].lotUnits,
     })),
     unsupported: typeof onBroker === 'string' ? onBroker : null,
+    /** `SEG:ID[,SEG:ID]` of the contract, for its live price (/api/straddle-pnf/live): a price read, never an order field. */
+    ids,
   });
 }
 

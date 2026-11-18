@@ -322,3 +322,12 @@ test('REAL pyramid: the add is reserved, sent as 1 lot on the row\'s side, confi
   assert.deepEqual(exit.exitOwn && { side: exit.exitOwn.side, units: exit.exitOwn.units }, { side: 'BUY', units: [150] }, 'both lots, 2 x 75');
   assert.equal(r.ledger().rows[0].state, 'closed');
 });
+
+test('index chart: a map leg against its direction halts AUTO at the signal - no option lookup, no order, no retries', async () => {
+  const r = indexRig([placedOpt('SELL')]);
+  const risky = { ...MAP, bear: { action: 'SELL' as const, opt: 'PE' as const, offset: 5 } };
+  await r.engine.tick(r.inputs({ indexMap: risky }));
+  assert.deepEqual(r.dirs, [], 'never resolved');
+  assert.equal(r.orders.length, 0);
+  assert.match(r.engine.halt ?? '', /Risky option map: BEAR = SELL PE gains as NIFTY RISES.*correct the map, then arm again/);
+});
