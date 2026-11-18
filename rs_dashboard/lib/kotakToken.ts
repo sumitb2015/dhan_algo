@@ -1,6 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import { runPythonJson } from './pyExec.ts';
+import { globalOnce } from './globalOnce.ts';
 
 // Direct Kotak Neo REST from Node, mirroring lib/zerodhaToken.ts.
 //
@@ -261,7 +262,11 @@ export async function kotakGet(apiPath: string, timeoutMs = 10_000): Promise<Rec
 const SHARED_GET_TTL_MS = 1_200;
 const RATE_LIMIT_COOLDOWN_MS = 3_000;
 const KOTAK_RATE_LIMIT = 100025;
-const sharedGets = new Map<string, { at: number; json?: Record<string, unknown>; err?: unknown; inflight?: Promise<Record<string, unknown>> }>();
+// One map per server PROCESS, not per bundle: Next compiles each route and the instrumentation watchers into separate
+// bundles, and a module-level Map made the Price Ladder watcher, /api/dashboard/portfolio and the scalper poll each
+// call portfolio/v2/positions on their own clock (stCode 100025 with two REAL Kotak ladder positions open, 2026-11-18).
+type SharedGet = { at: number; json?: Record<string, unknown>; err?: unknown; inflight?: Promise<Record<string, unknown>> };
+const sharedGets = globalOnce('__kotakSharedGets', () => new Map<string, SharedGet>());
 
 // Order placement and an exit's position read are the only Kotak calls whose speed matters: display polls (books, P&L chips) yield to
 // them. While a priority window is open a display read is served from its last result, or waits for the window to end, instead of
@@ -286,7 +291,11 @@ export function reserveOrderSlot(state: { nextOrderAt: number }, now: number, ga
 }
 // The order and trade books are display reads (fills are confirmed through scalper/orders' own live read): they may be a few seconds old.
 const SLOW_BOOK_TTL_MS = 4_000;
-const ttlFor = (apiPath: string) => (apiPath === KOTAK_PATHS.orderBook || apiPath === KOTAK_PATHS.tradeBook ? SLOW_BOOK_TTL_MS : SHARED_GET_TTL_MS);
+// Delivery holdings move only with a delivery trade: the portfolio chip's 5 s poll reused them for 30 s instead of adding a
+// third Kotak call to every poll. Anything that sizes a sell off holdings (kotakContracts) keeps reading them live.
+const HOLDINGS_TTL_MS = 30_000;
+const ttlFor = (apiPath: string) => (apiPath === KOTAK_PATHS.holdings ? HOLDINGS_TTL_MS
+  : apiPath === KOTAK_PATHS.orderBook || apiPath === KOTAK_PATHS.tradeBook ? SLOW_BOOK_TTL_MS : SHARED_GET_TTL_MS);
 
 export async function kotakGetShared(apiPath: string): Promise<Record<string, unknown>> {
   const held = lane.priorityUntil - Date.now();

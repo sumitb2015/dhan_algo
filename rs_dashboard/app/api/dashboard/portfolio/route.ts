@@ -4,7 +4,7 @@ import { PROJECT_ROOT } from '@/lib/pyExec';
 import { NextResponse, type NextRequest } from 'next/server';
 import { dhanGet } from '@/lib/dhanToken';
 import { kiteGet, isZerodhaTokenValid } from '@/lib/zerodhaToken';
-import { kotakGet, kotakGetShared, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
+import { kotakGetShared, kotakLimits, kotakRows, KOTAK_PATHS, isKotakTokenValid } from '@/lib/kotakToken';
 import { isDhanTokenValid } from '@/lib/session';
 import { shapeZerodhaPosition } from '@/lib/zerodhaShape';
 import { shapeKotakPosition, shapeKotakFunds } from '@/lib/kotakShape';
@@ -326,7 +326,7 @@ async function loadKotak(): Promise<BrokerPortfolio> {
   const [limitsRes, posRes, holdRes] = await Promise.allSettled([
     getCachedFunds('kotak', () => kotakLimits()),
     getCachedPositions('kotak', () => kotakGetShared(KOTAK_PATHS.positions)),
-    kotakGet(KOTAK_PATHS.holdings),
+    kotakGetShared(KOTAK_PATHS.holdings),   // display only: reused for 30 s (kotakToken HOLDINGS_TTL_MS)
   ]);
 
   if (limitsRes.status === 'fulfilled') {
