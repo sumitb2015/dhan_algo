@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { LadderBroker } from '@/lib/priceLadder';
+import { toast } from 'sonner';
 import PriceLadder from './PriceLadder';
+import { useCopyTrade } from '@/components/CopyTrade';
 
 /** Two ladders to start with — ATM call and ATM put. Close ladder 2 leaves one; "Add ladder" brings the second back (at most two). */
 export default function PriceLadderWorkspace() {
@@ -35,11 +37,15 @@ export default function PriceLadderWorkspace() {
     return !c;
   }), []);
   const [firstBroker, setFirstBroker] = useState<LadderBroker | null>(null);
-  if (!dual) return <PriceLadder onAddLadder={() => setDual(true)} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />;
+  // Dhan → Zerodha/Kotak copy trading: one hook (one 3 s poll) for both panes. The bridge is account-wide; ladder 1 shows the
+  // ARM control, each ladder shows whether its own trades are copied. Stable notify: the hook's arm() depends on it.
+  const notify = useCallback((type: 'success' | 'error', message: string) => { if (type === 'success') toast.success(message); else toast.error(message); }, []);
+  const copyTrade = useCopyTrade(notify);
+  if (!dual) return <PriceLadder copyTrade={copyTrade} onAddLadder={() => setDual(true)} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />;
   return (
     <div className="grid grid-cols-1 xl:grid-cols-2 divide-y xl:divide-y-0 xl:divide-x divide-zinc-800 min-h-screen bg-zinc-950">
-      <PriceLadder ladderId={1} dual onBrokerChange={setFirstBroker} onHeaderHeight={head1} onRowHeight={row1} rowMinHeight={rowMax} onTopHeight={top1} onBannerHeight={ban1} headerMinHeight={headMax} topMinHeight={topMax} bannerMinHeight={bannerMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
-      <PriceLadder ladderId={2} dual peerBroker={firstBroker} onHeaderHeight={head2} onRowHeight={row2} rowMinHeight={rowMax} onTopHeight={top2} onBannerHeight={ban2} headerMinHeight={headMax} topMinHeight={topMax} bannerMinHeight={bannerMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} onRemoveLadder={() => setDual(false)} />
+      <PriceLadder copyTrade={copyTrade} ladderId={1} dual onBrokerChange={setFirstBroker} onHeaderHeight={head1} onRowHeight={row1} rowMinHeight={rowMax} onTopHeight={top1} onBannerHeight={ban1} headerMinHeight={headMax} topMinHeight={topMax} bannerMinHeight={bannerMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} />
+      <PriceLadder copyTrade={copyTrade} ladderId={2} dual peerBroker={firstBroker} onHeaderHeight={head2} onRowHeight={row2} rowMinHeight={rowMax} onTopHeight={top2} onBannerHeight={ban2} headerMinHeight={headMax} topMinHeight={topMax} bannerMinHeight={bannerMax} collapsed={collapsed} onToggleCollapsed={toggleCollapsed} onRemoveLadder={() => setDual(false)} />
     </div>
   );
 }

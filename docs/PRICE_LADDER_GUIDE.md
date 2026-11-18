@@ -156,6 +156,28 @@ off by hand never needs a valid draft.
 - A guard only ever exits or cancels, so it needs no REAL arm.
 - One guard covers every ladder on that broker + mode (both cards show the same guard).
 
+## Copy trading (Dhan → Zerodha / Kotak)
+
+The header of ladder 1 carries the same copy-trade control as the Advanced Scalper: tick Zerodha and/or Kotak, set a
+whole-number multiplier for each, click **ARM** (it asks once more) — **Disarm** stops it. It drives the one
+account-wide bridge (`scripts/tools/copy_trade_bridge.py`), so arming it here, on the Advanced Scalper, Focus Tool or
+Baskets is the same switch, and it copies fills from every page, not only from the ladder.
+
+- **What is copied:** REAL **Dhan NIFTY option** fills — entries, server-fired levels, bracket target/SL exits and
+  Exit all — at quantity × the child's multiplier.
+- **What is not:** SIM trades, ladders on Kotak or Zerodha, BANKNIFTY / SENSEX / CRUDEOILM and futures. While the
+  bridge is armed each ladder shows a chip in its top row: sky *Copying → Zerodha 2x* when its trades are mirrored,
+  amber with the reason when they are not, red when copying is armed but not working (bridge down, a child that
+  failed to log in — the chip names it). The chip is about the pane's **selected** contract: an order already open
+  or armed on a REAL Dhan NIFTY option is still copied when it fills, whatever the pane shows now.
+- **Don't trade the ladder REAL on a broker that is also a copy child.** The copies and the ladder's own orders net
+  into one position on that account: the ladder then mistakes the copies for its own (or its position for "closed
+  outside the ladder"), and the bridge's watchdog closes that whole position once Dhan's NIFTY options are flat —
+  the ladder's part included. The chip turns red (*Kotak is a copy target — shared account*) when this is set up.
+- **The copies are not in the ladder.** The MTM guard, brackets, positions window and Exit all act on Dhan only;
+  a Dhan exit reaches the child account only because the bridge copies that fill too. Disarming does **not** close
+  positions already copied — manage them in that account.
+
 ## Saved trades (restart-proof)
 
 The ledger `debug/price_ladder_state.json` is written atomically on every change, so a restart the same day, or the next

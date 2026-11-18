@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { loadDefaults, saveDefaults, clearDefaults, resolveDefaults, LADDER_UNDERLYINGS, type LadderDefaults } from '@/lib/priceLadderDefaults';
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem } from '@/components/ui/dropdown-menu';
-import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2, Volume2, VolumeX, OctagonX } from 'lucide-react';
+import { Rows3, Crosshair, AlertTriangle, ShieldAlert, Trash2, Briefcase, ClipboardList, ReceiptText, ChevronRight, ChevronUp, ChevronDown, Clock, Settings, X, Plus, Info, Table2, Volume2, VolumeX, OctagonX, Repeat } from 'lucide-react';
 import { toast } from 'sonner';
 import { MCX_LOT_MULTIPLIER, scaleBrokerPnl } from '@/lib/positionPnl';
 import { oiRowsFor, maxOi, type OiStrike } from '@/lib/priceLadderOi';
@@ -24,6 +24,8 @@ import { StepArrows } from '@/components/priceLadder/StepArrows';
 import { PROFIT_LOCKED, guardKey, scopeMtm } from '@/lib/priceLadderGuard';
 import { planExitAll, type ExitAllPlan, type ExitAllScope } from '@/lib/priceLadderExitAll';
 import { MtmGuardCard } from '@/components/priceLadder/MtmGuardCard';
+import { CopyTradeControls, type CopyTradeApi } from '@/components/CopyTrade';
+import { copyScopeNote } from '@/lib/priceLadderCopy';
 import { installAlertSoundUnlock, playAlertChime, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import { chimeFor } from '@/lib/priceLadderChime';
 import {
@@ -274,7 +276,7 @@ function Banner({ tone, children }: { tone: 'red' | 'amber'; children: React.Rea
   );
 }
 
-export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, onRemoveLadder, onBrokerChange, peerBroker, onHeaderHeight, headerMinHeight, onRowHeight, rowMinHeight, onTopHeight, topMinHeight, onBannerHeight, bannerMinHeight, collapsed = false, onToggleCollapsed }: {
+export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, onRemoveLadder, onBrokerChange, peerBroker, onHeaderHeight, headerMinHeight, onRowHeight, rowMinHeight, onTopHeight, topMinHeight, onBannerHeight, bannerMinHeight, collapsed = false, onToggleCollapsed, copyTrade }: {
   ladderId?: 1 | 2; dual?: boolean; onAddLadder?: () => void; onRemoveLadder?: () => void;
   /** Reports this pane's broker; the other pane gets it as `peerBroker`. */
   onBrokerChange?: (b: LadderBroker) => void; peerBroker?: LadderBroker | null;
@@ -288,6 +290,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   onBannerHeight?: (h: number) => void; bannerMinHeight?: number;
   /** The header's control rows folded away (shared by both panes), leaving the title row. */
   collapsed?: boolean; onToggleCollapsed?: () => void;
+  /** Dhan → child-broker copy trading (one hook in the workspace, shared by both panes). */
+  copyTrade?: CopyTradeApi;
 }) {
   const second = ladderId === 2;
   const k = useCallback((key: string) => (second ? `${key}-2` : key), [second]);
@@ -1530,6 +1534,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     selectContract({ contract: latest.contract, broker: latest.broker });
   }, [data, real, selectContract, second]);
 
+  // Whether the (account-wide) copy-trade bridge mirrors what this pane trades; shown in the always-visible top row.
+  const copyNote = copyTrade ? copyScopeNote({
+    armed: copyTrade.armed, bridgeRunning: copyTrade.bridgeRunning, failed: copyTrade.brokerFailures, real, broker, underlying, isFut,
+    children: copyTrade.armedChildren.map(c => ({ ...c, label: BROKER_LABELS[c.broker] })),
+  }) : null;
+
   // Always visible (it sits in the top row, not in the foldable controls): an emergency exit must never be one click behind a chevron.
   const exitAllEl = !second && (<button type="button" disabled={busy || !exitAllPlan || (exitAllPlan.positions === 0 && exitAllPlan.cancelSliceIds.length + exitAllPlan.cancelPairIds.length + exitAllPlan.cancelBasketIds.length === 0)}
         onClick={() => { if (!data) return; setExitAllCancel(true); setExitAllSnap(planExitAll(data.state)); }}
@@ -1563,6 +1573,9 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
       {!second && <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-amber-300 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/20">
         DATA: {dataDate ?? '—'}
       </span>}
+      {!second && copyTrade && <div className="flex items-center gap-2 flex-nowrap shrink-0 bg-zinc-950/40 border border-zinc-800/60 rounded-xl px-3 py-1.5 [&>span:first-child]:hidden">
+        <CopyTradeControls copyTrade={copyTrade} />
+      </div>}
       <button type="button" onClick={() => setChainOpen(true)} disabled={!expiry || isFut}
         className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold border border-zinc-700 bg-zinc-900 text-zinc-200 hover:text-white hover:border-zinc-500 transition-colors cursor-pointer disabled:opacity-50"
         title={isFut ? 'Futures have no option chain' : `The ${underlying} option chain for ${expiry || 'the selected expiry'}`}>
@@ -1617,6 +1630,13 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             ? `${BROKER_LABELS[broker]} P&L minus charges — charges unavailable${charges.note ? `: ${charges.note}` : ''}`
             : `${BROKER_LABELS[broker]} P&L after estimated charges of ₹${Math.round(charges.total).toLocaleString('en-IN')} on ${charges.orders} executed order(s) today (brokerage ₹${charges.brokerage}/order${charges.breakdown ? ` · STT/CTT ₹${Math.round(charges.breakdown.stt)} · exchange ₹${Math.round(charges.breakdown.exchange)} · GST ₹${Math.round(charges.breakdown.gst)} · stamp ₹${Math.round(charges.breakdown.stamp)} · SEBI ₹${Math.round(charges.breakdown.sebi)}` : ''}). An estimate from rate tables, not your contract note.`} />}
         {showAccount && acct.note && <span className="text-amber-300 truncate max-w-[18rem]" title={acct.note}>{acct.note}</span>}
+        {copyNote && <span role="status" title={copyNote.detail}
+          className={`inline-flex items-center gap-1.5 h-7 px-2.5 rounded-md border text-[11px] font-bold whitespace-nowrap ${
+            copyNote.tone === 'copy' ? 'border-sky-500/40 bg-sky-500/10 text-sky-300'
+              : copyNote.tone === 'danger' ? 'border-red-500/40 bg-red-500/15 text-red-300'
+              : 'border-amber-500/40 bg-amber-500/10 text-amber-300'}`}>
+          {copyNote.tone === 'danger' ? <AlertTriangle className="w-3.5 h-3.5" aria-hidden="true" /> : <Repeat className="w-3.5 h-3.5" aria-hidden="true" />} {copyNote.text}
+        </span>}
         {exitAllEl}
         {/* The standard header buttons (theme, alerts, settings, Sync Data, Update, Disconnect): at the top right of the page, in the always-visible top row. Side by side that is ladder 2's row; alone, ladder 1's. */}
         {(dual ? second : true) && <div className="ml-auto"><NavBar /></div>}

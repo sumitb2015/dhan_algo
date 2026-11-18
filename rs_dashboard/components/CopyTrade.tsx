@@ -50,6 +50,8 @@ export interface CopyTradeApi {
   selected: Record<ChildBroker, boolean>;
   toggleBroker: (broker: ChildBroker) => void;
   armedBrokers: ChildBroker[];
+  /** The enabled children with the multiplier the bridge is actually using (the saved config, not the edit boxes). */
+  armedChildren: { broker: ChildBroker; multiplier: number }[];
   armed: boolean;
   bridgeRunning: boolean;
   brokerFailures: Record<string, string>;
@@ -212,14 +214,15 @@ export function useCopyTrade(notify: (type: 'success' | 'error', message: string
     }
   }, [notify]);
 
-  const armedBrokers = (config.children ?? [])
+  const armedChildren = (config.children ?? [])
     .filter(c => c.enabled && CHILD_BROKERS.includes(c.broker))
-    .map(c => c.broker);
+    .map(c => ({ broker: c.broker, multiplier: Math.max(1, Math.trunc(Number(c.multiplier)) || 1) }));
+  const armedBrokers = armedChildren.map(c => c.broker);
 
   return {
     multipliers, setMultiplier,
     selected, toggleBroker,
-    armedBrokers,
+    armedBrokers, armedChildren,
     armed: config.armed,
     bridgeRunning: status?.status === 'RUNNING',
     brokerFailures: status?.broker_failures ?? {},

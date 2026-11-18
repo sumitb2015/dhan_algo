@@ -18,7 +18,7 @@ const lastTradingDay = () => {
 const istToday = () => new Date(Date.now() + 5.5 * 3600_000).toISOString().slice(0, 10);
 const SPOT = 23200;
 
-async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** One open SIM short iron condor (2 lots) on the mocked strikes. */ openBasket?: boolean; /** The synthetic future's market: tight books around the last prices, a stale CE last trade, or no depth at all (default). */ synBook?: 'tight' | 'stale'; /** Combined-premium level of the first armed pair (default 250). */ armedPairLevel?: number; /** N armed (not yet fired) pairs on the two legs the Pair ladder shows. */ armedPairs?: number; /** One armed pair on OTHER strikes (23300 CE / 23100 PE) than the Pair ladder shows. */ offPair?: boolean; /** Give the chain open interest on 23200 so the XY ladder draws OI bars. */ oi?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> } } = {}) {
+async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boolean; sessions?: Record<string, boolean>; /** Server clock as IST HH:MM today, and a spot that last moved a minute before it. */ staleAt?: string; /** How long ago the server watcher last ticked (ms); absent = healthy. */ watcherLagMs?: number; /** One open XY slice, one open Plain slice and one open short strangle (every mode has a position). */ openAll?: boolean; /** One open SIM short iron condor (2 lots) on the mocked strikes. */ openBasket?: boolean; /** The synthetic future's market: tight books around the last prices, a stale CE last trade, or no depth at all (default). */ synBook?: 'tight' | 'stale'; /** Combined-premium level of the first armed pair (default 250). */ armedPairLevel?: number; /** N armed (not yet fired) pairs on the two legs the Pair ladder shows. */ armedPairs?: number; /** One armed pair on OTHER strikes (23300 CE / 23100 PE) than the Pair ladder shows. */ offPair?: boolean; /** Give the chain open interest on 23200 so the XY ladder draws OI bars. */ oi?: boolean; /** Broker positions the books window lists, and what POST /api/price-ladder/close-position answers. */ positions?: Record<string, unknown>[]; closeReply?: { status?: number; body: Record<string, unknown> }; /** The copy-trade bridge's config: armed with these children (absent = disarmed, nothing enabled). */ copyArmed?: { broker: string; multiplier: number }[] } = {}) {
   const clock = opts.staleAt ? new Date(`${lastTradingDay()}T${opts.staleAt}:00+05:30`).getTime() : null;
   let armed = !!opts.liveArmed;   // POST action 'live' flips it, as the server does
   const seen = { posts: [] as Record<string, unknown>[], blocked: [] as string[], gets: [] as string[], closes: [] as Record<string, unknown>[] };
@@ -79,6 +79,13 @@ async function install(page: Page, opts: { liveArmed?: boolean; openLong?: boole
       const broker = u.searchParams.get('broker');
       return json(route, { success: true, brokers: [{ broker, connected: true, error: null, unpricedPositions: 0, openPositions: 2, totalPnl: broker === 'dhan' ? -8012 : 150 }] });
     }
+    // The copy-trade bridge is account-wide: never read the real config or process. ARM/Disarm POSTs fall to the 599 net below.
+    if (p === '/api/copy-trade/config' && method === 'GET') {
+      seen.gets.push(p);
+      const kids = opts.copyArmed ?? [];
+      return json(route, { success: true, config: { armed: !!opts.copyArmed, children: kids.map(c => ({ ...c, enabled: true })) } });
+    }
+    if (p === '/api/copy-trade' && method === 'GET') return json(route, { success: true, status: { status: opts.copyArmed ? 'RUNNING' : 'STOPPED' } });
     if (/^\/api\/scalper(\/(kotak|zerodha))?\/poll$/.test(p)) {
       seen.gets.push(p);
       return json(route, { success: true, positions: opts.positions ?? [], orders: [], trades: [] });
@@ -424,6 +431,53 @@ test('Two ladders by default: ladder 1 is the call, ladder 2 the put, each with 
   await expect(underlying).toHaveCount(1);
   await page.getByRole('button', { name: /Add ladder/ }).click();
   await expect(underlying).toHaveCount(2);
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Copy trading: one ARM control for both ladders; with the bridge armed each ladder says whether its own trades are copied', async ({ page }) => {
+  const seen = await install(page, { liveArmed: true, copyArmed: [{ broker: 'zerodha', multiplier: 2 }] });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/price-ladder');
+  await expect(page.getByLabel('Underlying')).toHaveCount(2);
+  // Both panes hydrated: an earlier selectOption would be reset by the mount effect that restores saved choices.
+  await expect(page.getByLabel('Expiry').first()).toHaveValue('2026-10-27');
+  await expect(page.getByLabel('Expiry').nth(1)).toHaveValue('2026-10-27');
+  // The same control as the Advanced Scalper, shown once (ladder 1), reading the bridge's config
+  await expect(page.getByText(/Copy → Zerodha/)).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Disarm', exact: true })).toHaveCount(1);
+  await expect(page.getByText('ARMED', { exact: true })).toHaveCount(1);
+  // Both ladders start on SIM: neither is copied
+  await expect(page.getByRole('status').filter({ hasText: 'SIM — not copied' })).toHaveCount(2);
+  // Ladder 1 on REAL (Dhan, NIFTY option): copied; ladder 2 on BANKNIFTY: out of the bridge's scope
+  await page.getByRole('button', { name: 'REAL', exact: true }).first().click();
+  await expect(page.getByRole('status').filter({ hasText: 'Copying → Zerodha 2x' })).toHaveCount(1);
+  await page.getByLabel('Underlying').nth(1).selectOption('BANKNIFTY');
+  await page.getByRole('button', { name: 'REAL', exact: true }).nth(1).click();
+  await expect(page.getByRole('status').filter({ hasText: 'BANKNIFTY not copied — NIFTY options only' })).toHaveCount(1);
+  expect(seen.gets).toContain('/api/copy-trade/config');
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Copy trading: a REAL ladder on a broker that is also a copy child is flagged as a shared account', async ({ page }) => {
+  const seen = await install(page, { liveArmed: true, copyArmed: [{ broker: 'zerodha', multiplier: 2 }, { broker: 'kotak', multiplier: 1 }] });
+  await gotoSingle(page);
+  await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByLabel('Broker for new orders').selectOption('kotak');
+  // SIM sends nothing to Kotak: only the out-of-scope note
+  await expect(page.getByRole('status').filter({ hasText: 'SIM — not copied' })).toHaveCount(1);
+  await page.getByRole('button', { name: 'REAL', exact: true }).click();
+  const chip = page.getByRole('status').filter({ hasText: 'Kotak is a copy target — shared account' });
+  await expect(chip).toHaveCount(1);
+  await expect(chip).toHaveAttribute('title', /watchdog/);
+  expect(seen.blocked).toEqual([]);
+});
+
+test('Copy trading disarmed: the ARM control shows, no copy chip on either ladder', async ({ page }) => {
+  const seen = await install(page);
+  await page.goto('/price-ladder');
+  await expect(page.getByLabel('Underlying')).toHaveCount(2);
+  await expect(page.getByRole('button', { name: 'ARM', exact: true })).toHaveCount(1);
+  await expect(page.getByRole('status').filter({ hasText: /copied|Copying/ })).toHaveCount(0);
   expect(seen.blocked).toEqual([]);
 });
 

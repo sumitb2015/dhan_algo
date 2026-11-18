@@ -18,6 +18,7 @@ LIVE · REAL MONEY arm (`liveArmedOn`). **Exits never need the arm** (the MTM gu
 | Page view builder (shared by GET poll and SSE) + `resolveContract` | `lib/priceLadderView.ts`, `app/api/price-ladder/stream/route.ts` |
 | Pair mode (straddle/strangle on combined premium) | `lib/priceLadderPair.ts`, `priceLadderPairActions.ts` |
 | MTM guard (one per ladder + broker + mode) | `lib/priceLadderGuard.ts`, `components/priceLadder/MtmGuardCard.tsx` |
+| Copy trading: the shared account-wide bridge control (one `useCopyTrade` in the workspace, ARM in ladder 1) + per-ladder copied / not-copied chip | `components/CopyTrade.tsx`, `lib/priceLadderCopy.ts` (`copyScopeNote`) |
 | NSE / MCX cutoffs | `lib/priceLadderCutoff.ts`, `priceLadderSettings.ts` |
 | Positions-window close | `lib/priceLadderClose.ts`, `app/api/price-ladder/close-position/route.ts` |
 | WebSocket prices | `scripts/tools/price_ladder_ws.py` (+ `live_indices_ws.py`, options bridges' files) |
