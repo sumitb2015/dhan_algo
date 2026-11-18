@@ -180,3 +180,42 @@ test('the order Style bar sits in the trade bar row, never over the charts', asy
   }
   expect(blocked).toEqual([]);
 });
+
+test('the current VWAP is drawn as a horizontal level with an axis tag, only where there is a VWAP', async ({ page }) => {
+  const blocked: string[] = [];
+  await page.route('**/api/**', async (route: Route) => {
+    const req = route.request();
+    const u = new URL(req.url());
+    const p = u.pathname;
+    const method = req.method();
+    if (p === '/api/straddle-pnf' && method === 'GET') {
+      const isIndex = u.searchParams.get('kind') === 'index';
+      const bars = history().map(b => ({ ...b, vol: isIndex ? 0 : 10 }));
+      return json(route, {
+        success: true, mode: isIndex ? 'price' : 'contract', atm: 0, strikes: [1], name: isIndex ? 'Nifty 50' : 'NIFTY FUT 24 Nov 26',
+        instrument: { segment: isIndex ? 'IDX_I' : 'NSE_FNO', security_id: isIndex ? '13' : '54321' }, errors: {}, dataDate: '2026-10-30', bars: { 1: bars },
+      });
+    }
+    if (p === '/api/straddle-pnf/contracts' && method === 'GET') return json(route, { success: true, expiries: ['2026-11-24'] });
+    if (p === '/api/straddle-pnf/live' && method === 'GET') return json(route, { success: true, bridge: true, hub: true, quote: null, last: null, legs: [{ quote: null, last: null }] });
+    if (p === '/api/live-indices' && method === 'POST') return json(route, { success: true });
+    if (p === '/api/straddle-pnf/server-guard') return json(route, { success: true, guards: {} });
+    if (method === 'GET') return json(route, { success: true });
+    blocked.push(`${method} ${p}`);
+    return route.fulfill({ status: 599, body: 'blocked by e2e mock' });
+  });
+  await page.goto('/renko');
+  const panel = page.getByTestId('pnf-panel').first();
+  await expect(panel.getByTestId('pnf-bricks-up')).toBeVisible();
+  // an index has no VWAP (the SMA is drawn): no VWAP level
+  await expect(panel.getByTestId('pnf-vwap-level')).toHaveCount(0);
+  await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
+  await expect(panel.getByTestId('pnf-vwap-level')).toHaveCount(1);
+  // equal volume on every bar: VWAP = the mean close, 22,662 → its tag on the price axis
+  await expect(panel.getByTestId('pnf-vwap-tag')).toHaveText('22,662');
+  // the eye hides the line, and the level with it
+  await page.getByRole('button', { name: 'Hide the VWAP / SMA line' }).click();
+  await expect(panel.getByTestId('pnf-vwap-level')).toHaveCount(0);
+  await expect(panel.getByTestId('pnf-vwap-tag')).toHaveCount(0);
+  expect(blocked).toEqual([]);
+});
