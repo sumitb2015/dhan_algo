@@ -85,9 +85,9 @@ chart under the trend rule are a flip: the first is the exit of the old position
   moment - a dashboard restart), it is retried every second while the signal is still the newest closed bar's; a signal that ages out that
   way is logged as `missed the … signal`.
 
-### Tick and 10 / 20 / 30 sec intervals (live-price bricks)
+### Tick and 5 / 10 / 20 / 30 sec intervals (live-price bricks)
 
-Pick **Tick**, **10 sec**, **20 sec** or **30 sec** in the Interval list (Renko only). Bricks then come from the live price itself, not from 1-minute closes:
+Pick **Tick**, **5 sec**, **10 sec**, **20 sec** or **30 sec** in the Interval list (Renko only). Bricks then come from the live price itself, not from 1-minute closes:
 
 - **What it reads.** The price bridge (`scripts/tools/pnf_ws.py`) logs every price change it sees, sampled every 0.5 s, to
   `debug/pnf_ticks/<date>/<SEG>_<id>.jsonl`. The page reads that log every second. It is not every exchange trade: a spike that reverses
@@ -112,6 +112,8 @@ Pick **Tick**, **10 sec**, **20 sec** or **30 sec** in the Interval list (Renko 
 - **10 sec** groups the same recorded prices into 10-second bars (the bar's last price), and a brick prints when its 10 s are over
   (about 0.5-1.5 s after the boundary, once the log has been served past it). A spike that reverses inside the 10 s prints nothing, so it whipsaws less than Tick and still
   reacts far sooner than 1 min. Same log, same fallback to minute closes.
+- **5 sec** works the same way with 5-second bars: between Tick and 10 sec - it reacts within about 5 s and filters only the shortest spikes
+  (each 5 s bar holds about ten of the bridge's 0.5 s readings), so expect nearly as many whipsaws as on Tick.
 - **20 sec** and **30 sec** work the same way with 20- and 30-second bars: fewer whipsaws than 10 sec, slower to react.
 - **Brick count after a reload.** On an index the 1-minute history is a rolling window whose start (`anchor_t`) moves with the clock, so
   a full rebuild can differ by a few bricks at the far start of the chart (2024). Recent bricks are identical (checked 2026-11-05:
@@ -357,7 +359,7 @@ The REAL guard watcher (`lib/autoServerWatcher.ts`, started with the server) wor
 - **Status line** next to AUTO: `SHORT 5L @ 9,085.00 +₹X paper`, `waiting for a signal`, `HALTED`, `UNRESOLVED`, the stop level, and the **Exit**
   button.
 - **Bar-close countdown** on the ladder, under the live price (on an index chart, under the live tag on the price axis): the time left
-  in the bar now forming, e.g. `0:14` on a 20 sec chart. 10 / 20 / 30 sec bars close on the clock's :00 / :20 / :40 (or :00 / :10 ...);
+  in the bar now forming, e.g. `0:14` on a 20 sec chart. 5 / 10 / 20 / 30 sec bars close on the clock's :00 / :20 / :40 (or :00 / :05 ...);
   minute bars count from the 09:15 open and the last one ends at the session close. It ticks on whole seconds, shows `0:00` in the bar's
   last second and turns amber for the last 3. If an order or your entry is in the row just below the live price, it sits above the live
   row instead; it never hides an order's price. Not shown on Tick, on day or longer bars, outside the session, on an NSE weekend or
@@ -414,7 +416,7 @@ The REAL guard watcher (`lib/autoServerWatcher.ts`, started with the server) wor
 | `No IPs configured for this app` on a Zerodha order | Kite requires a static IP: add this machine's public IP in the Kite developer console. |
 | Zerodha order fails | The Zerodha session expires daily at 06:00 IST; log in again (`scripts/tools/zerodha_autologin.py`). |
 | AUTO entered late / not at all | It only trades a signal on the newest closed bar, and only after arming. Arm before the move. |
-| `red brick skipped: Supertrend line is up` (or green / down) | Supertrend rule: a brick against the line is a pullback, not an entry. A SELL needs a red brick with the line down, a BUY a green one with the line up. Logged once per brick and kept on the status line as `last: ...` until the next entry. On 10 / 20 / 30 sec only the bar's last price makes a brick: a dip inside the bar that recovers by its close prints nothing. |
+| `red brick skipped: Supertrend line is up` (or green / down) | Supertrend rule: a brick against the line is a pullback, not an entry. A SELL needs a red brick with the line down, a BUY a green one with the line up. Logged once per brick and kept on the status line as `last: ...` until the next entry. On 5 / 10 / 20 / 30 sec only the bar's last price makes a brick: a dip inside the bar that recovers by its close prints nothing. |
 | The countdown hit 0:00 and no brick printed | The bar closed without its last price reaching the next box edge (see the row above). The countdown times the bar, not the brick. |
 | Two S (or B) markers in a row | The trend rule flipped: exit of the old position, then entry of the new one. |
 | `exit waiting for a live price` | The feed has no price for that chart; the exit (manual or guard) is retried. |

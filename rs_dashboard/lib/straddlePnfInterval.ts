@@ -16,11 +16,11 @@ export const EQUITY_INTERVALS = [1, 3, 5, 15, 30, 60, 240, 1440, 10080, 43200] a
  */
 export const TICK_INTERVAL = 0 as const;
 /**
- * Renko only: "10 / 20 / 30 sec" — the same recorded prices grouped into N-second bars, a brick printing when its N seconds are over.
- * Stored as -N.
+ * Renko only: "5 / 10 / 20 / 30 sec" — the same recorded prices grouped into N-second bars, a brick printing when its N seconds are over.
+ * Stored as -N. (5 sec added 2026-11-18: the bridge samples every 0.5 s, so a 5 s bar still holds about ten readings.)
  */
 export const SEC10_INTERVAL = -10 as const;
-export const SEC_INTERVALS = [SEC10_INTERVAL, -20, -30] as const;
+export const SEC_INTERVALS = [-5, SEC10_INTERVAL, -20, -30] as const;
 export type Interval = (typeof EQUITY_INTERVALS)[number] | typeof TICK_INTERVAL | (typeof SEC_INTERVALS)[number];
 /** Built from the bridge's tick log (Tick or N seconds) rather than from 1-minute bars. */
 export const isTickInterval = (n: number) => n <= 0;
@@ -46,7 +46,7 @@ export const intervalsFor = (equity: boolean, renko = false): readonly Interval[
 };
 /** Stocks and indices have the longer 30 min – 1 month intervals (their history is long enough: daily closes before the 1-min data). */
 export const hasLongIntervals = (kind: string) => kind === 'equity' || kind === 'index';
-/** Tick (0) and 10 / 20 / 30 sec (-10 / -20 / -30) only on a Renko chart; anything not offered falls back to 1 min. */
+/** Tick (0) and 5 / 10 / 20 / 30 sec (-5 / -10 / -20 / -30) only on a Renko chart; anything not offered falls back to 1 min. */
 export const effectiveInterval = (interval: number, equity: boolean, renko = false): Interval =>
   (intervalsFor(equity, renko) as readonly number[]).includes(interval) ? (interval as Interval) : 1;
 
@@ -126,7 +126,7 @@ function resampleCalendar(bars: Bar[], n: number, sessionCloseMin = 15 * 60 + 30
 
 /**
  * Seconds until the bar now forming closes, for the ladder's countdown: N-second bars on the epoch grid (as `bucketTickBars`
- * builds them; IST's offset divides 10 / 20 / 30, so :00 / :20 / :40), N-minute bars from the 09:15 anchor cut short at the
+ * builds them; IST's offset divides 5 / 10 / 20 / 30, so :00 / :20 / :40), N-minute bars from the 09:15 anchor cut short at the
  * session close (as `resample`). Whole seconds rounded down, like a clock: `0:00` is the bar's last second. Null for Tick, a day or longer, outside `session` ([open, close] IST minutes) or with none.
  */
 export function barCountdown(interval: number, nowS: number, session: readonly [number, number] | null | undefined): { left: number; total: number } | null {

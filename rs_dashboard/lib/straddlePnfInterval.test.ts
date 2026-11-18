@@ -129,6 +129,8 @@ test('barCountdown: seconds to the forming bar close, on the grids the bars are 
   const at = (h: number, m: number, s = 0) => Date.UTC(2026, 10, 6, h, m, s) / 1000 - 5.5 * 3600;   // IST wall time on 6 Nov
   const fno = [9 * 60 + 15, 15 * 60 + 40] as const;
   assert.deepEqual(barCountdown(-20, at(12, 7, 37), fno), { left: 3, total: 20 });
+  assert.deepEqual(barCountdown(-5, at(12, 7, 37), fno), { left: 3, total: 5 });       // 5 s bars close on :35 / :40
+  assert.deepEqual(barCountdown(-5, at(12, 7, 40), fno), { left: 5, total: 5 });
   assert.deepEqual(barCountdown(-30, at(12, 7, 0), fno), { left: 30, total: 30 });
   assert.deepEqual(barCountdown(3, at(9, 16, 30), fno), { left: 90, total: 180 });
   assert.deepEqual(barCountdown(15, at(15, 33), fno), { left: 7 * 60, total: 10 * 60 });   // 15:30 bucket cut short at 15:40

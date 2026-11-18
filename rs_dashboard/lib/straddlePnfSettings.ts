@@ -143,7 +143,7 @@ export function readSettings(raw: string | null, fallback: PnfSettings = DEFAULT
   let parsed: unknown = null;
   try { parsed = raw ? JSON.parse(raw) : null; } catch { parsed = null; }
   const o = (parsed && typeof parsed === 'object' ? parsed : {}) as Record<string, unknown>;
-  // Tick (0) and 10 / 20 / 30 sec (-10 / -20 / -30) are kept as stored; the P&F page never offers it and effectiveInterval falls back to 1 min there.
+  // Tick (0) and 5 / 10 / 20 / 30 sec (-5 / -10 / -20 / -30) are kept as stored; the P&F page never offers it and effectiveInterval falls back to 1 min there.
   const interval = typeof o.interval === 'number' && (o.interval === TICK_INTERVAL || (SEC_INTERVALS as readonly number[]).includes(o.interval) || (EQUITY_INTERVALS as readonly number[]).includes(o.interval))
     ? (o.interval as Interval) : fallback.interval;
   const boxPct = typeof o.boxPct === 'number' && Number.isFinite(o.boxPct) && o.boxPct >= MIN_BOX_PCT && o.boxPct <= MAX_BOX_PCT
