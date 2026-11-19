@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useState } from 'react';
-import { ChevronDown, ChevronUp, Power, Settings2, ShieldAlert } from 'lucide-react';
+import { Bell, BellOff, ChevronDown, ChevronUp, Power, Settings2, ShieldAlert, Volume2, VolumeX } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { Orb } from '@/components/signalOrb/Orb';
 import { OrbDrawer } from '@/components/signalOrb/OrbDrawer';
@@ -77,6 +77,24 @@ export default function SignalOrb() {
               {ledger.mode} · {ledger.config.broker.toUpperCase()}
             </span>
           )}
+          {(e.tradeSound || e.alertSound) && !e.soundReady && (
+            <span className="whitespace-nowrap rounded border border-zinc-800 px-2 py-0.5 font-mono text-[10px] text-zinc-500"
+              title="Browsers allow sound only after you interact with the page">click to enable sound</span>
+          )}
+          <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Sound">
+            <button type="button" onClick={() => e.setTradeSound(!e.tradeSound)} aria-pressed={e.tradeSound}
+              aria-label={e.tradeSound ? 'Mute trade chimes' : 'Unmute trade chimes'}
+              title={`Trade chimes ${e.tradeSound ? 'on' : 'off'}: entry (rising), exit (falling), rejected / unknown order (buzz)${e.isLeader ? '' : ' - automatic trades ring in the engine tab'}`}
+              className={cn('rounded-l-lg p-1.5 hover:bg-zinc-800', FOCUS, e.tradeSound ? 'text-zinc-200' : 'text-zinc-500')}>
+              {e.tradeSound ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+            </button>
+            <button type="button" onClick={() => e.setAlertSound(!e.alertSound)} aria-pressed={e.alertSound}
+              aria-label={e.alertSound ? 'Mute signal alerts' : 'Unmute signal alerts'}
+              title={`Signal alerts ${e.alertSound ? 'on' : 'off'}: orb turns green (arpeggio up), red (down), gray (two level tones); halt, stale feed or a row needing you (buzz)${e.isLeader ? '' : ' - rings in the engine tab only'}`}
+              className={cn('rounded-r-lg border-l border-zinc-800 p-1.5 hover:bg-zinc-800', FOCUS, e.alertSound ? 'text-zinc-200' : 'text-zinc-500')}>
+              {e.alertSound ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}
+            </button>
+          </div>
           <button type="button" onClick={() => setDrawer(true)} aria-label="Rules and indicators" title="Rules and indicators"
             className={cn('rounded-lg border border-zinc-800 bg-zinc-900 p-1.5 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100', FOCUS)}>
             <Settings2 className="h-4 w-4" />

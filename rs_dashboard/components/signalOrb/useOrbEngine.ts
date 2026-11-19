@@ -4,7 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePnfFeed } from '@/components/straddlePnf/usePnfFeed';
 import { istMinuteOfDay } from '@/lib/istTime';
 import { istDateIso } from '@/lib/nseHolidays';
-import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
+import {
+  alertSoundReady, installAlertSoundUnlock, playBearChime, playBullChime, playEntryChime, playExitChime, playNeutralChime, playWarnChime,
+} from '@/lib/alertSound';
+import { orbAlert, type OrbAlertSnap, type OrbSound } from '@/lib/signalOrbChime';
 import type { Target } from '@/lib/pnfTarget';
 import { closedBars, decideOrb, evaluate, positionPnl, replay, sideOf, type Evaluation, type ReplaySummary, type Side } from '@/lib/signalOrb';
 import { isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
@@ -33,6 +36,13 @@ export const REPLAY_SESSIONS = 20;
 
 export type OrbEngine = ReturnType<typeof useOrbEngine>;
 
+/** Sound switches, each in its own key (never shared with another page): trade chimes, and signal / warning alerts. */
+const TRADE_SOUND_KEY = 'signalOrb.tradeSound';
+const ALERT_SOUND_KEY = 'signalOrb.alertSound';
+const readOn = (key: string) => { try { return localStorage.getItem(key) !== '0'; } catch { return true; } };
+const saveOn = (key: string, on: boolean) => { try { localStorage.setItem(key, on ? '1' : '0'); } catch { /* best effort */ } };
+const PLAY: Record<OrbSound, () => boolean> = { bull: playBullChime, bear: playBearChime, neutral: playNeutralChime, warn: playWarnChime };
+
 export function useOrbEngine() {
   const [state, setState] = useState<StateReply | null>(null);
   const [stateError, setStateError] = useState<string | null>(null);
@@ -48,8 +58,25 @@ export function useOrbEngine() {
   const [priceAt, setPriceAt] = useState(0);
   const liftedRef = useRef<{ side: Side | null; lifted: boolean }>({ side: null, lifted: false });
   const staleWarned = useRef<string | null>(null);
+  // sound: two switches (default on), read through refs so the 1 s tick never restarts when they change
+  const [tradeSound, setTradeSoundState] = useState(true);
+  const [alertSound, setAlertSoundState] = useState(true);
+  const [soundReady, setSoundReady] = useState(false);
+  const tradeSoundRef = useRef(true);
+  const alertSoundRef = useRef(true);
+  const prevSnap = useRef<OrbAlertSnap | null>(null);
 
   useEffect(() => installAlertSoundUnlock(), []);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      const a = readOn(TRADE_SOUND_KEY), b = readOn(ALERT_SOUND_KEY);
+      tradeSoundRef.current = a; alertSoundRef.current = b;
+      setTradeSoundState(a); setAlertSoundState(b);
+    }, 0);
+    return () => clearTimeout(t);
+  }, []);
+  const setTradeSound = useCallback((on: boolean) => { tradeSoundRef.current = on; setTradeSoundState(on); saveOn(TRADE_SOUND_KEY, on); }, []);
+  const setAlertSound = useCallback((on: boolean) => { alertSoundRef.current = on; setAlertSoundState(on); saveOn(ALERT_SOUND_KEY, on); }, []);
   useEffect(() => {
     const first = setTimeout(() => setNow(Date.now()), 0);
     const id = setInterval(() => setNow(Date.now()), 1_000);
@@ -152,12 +179,13 @@ export function useOrbEngine() {
       const r = await fetch('/api/signal-orb/trade', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const j = await r.json() as { success: boolean; error?: string; ledger?: OrbLedger };
       if (j.ledger) accept(j);
-      if (j.success) { if (body.action === 'exit') playExitChime(); else playEntryChime(); }
-      else { playWarnChime(); setNote(j.error ?? 'Refused'); }
+      // trade chimes ring in the tab that sent the order (the leader for automatic ones, this tab for a manual close)
+      if (tradeSoundRef.current) { if (!j.success) playWarnChime(); else if (body.action === 'exit') playExitChime(); else playEntryChime(); }
+      if (!j.success) setNote(j.error ?? 'Refused');
       return j.success;
     } catch (e) {
       // no reply: the server finishes and books what it sent; the next poll shows the row's real status
-      playWarnChime();
+      if (tradeSoundRef.current) playWarnChime();
       setNote(`No reply from the trade route (${e instanceof Error ? e.message : 'network'}) - waiting for the ledger`);
       return false;
     } finally {
@@ -183,13 +211,10 @@ export function useOrbEngine() {
     try { const raw = localStorage.getItem(LOCK_KEY); if (raw && (JSON.parse(raw) as { id?: string }).id === viewerId) localStorage.removeItem(LOCK_KEY); } catch { /* */ }
   }, [viewerId]);
 
-  const runEngine = () => {
-    const t = Date.now();
-    const leader = claimLock(t);
-    if (leader !== isLeader) setIsLeader(leader);
-    if (!ledger || !cfg) return;
-    if (!leader) { setNote('Another tab is running the engine'); return; }
-    if (busyRef.current) return;
+  /** One engine step (leader only). True when it sent an entry or a reversal this tick (that trade's chime speaks for the flip). */
+  const step = (t: number): boolean => {
+    if (!ledger || !cfg) return false;
+    if (busyRef.current) return false;
 
     // stop-out block: lifts (in this tab) once the colour is anything but the stopped side; the server clears it on the next entry
     if (liftedRef.current.side !== ledger.blockedSide) liftedRef.current = { side: ledger.blockedSide, lifted: false };
@@ -198,7 +223,7 @@ export function useOrbEngine() {
 
     if (live && live.status !== 'open') {
       setNote(live.status === 'unknown' || isStuck(live, t) ? 'Order outcome unknown - check the broker book and resolve the row' : `Position ${live.status.toUpperCase()} - waiting`);
-      return;
+      return false;
     }
     const staleDay = live && live.day !== today;
     if (staleDay && staleWarned.current !== live.id) {
@@ -215,26 +240,48 @@ export function useOrbEngine() {
     if (position && openPnl !== null && realised + openPnl <= -cfg.dailyLossLimit && t >= exitRetryAt.current) {
       exitRetryAt.current = t + EXIT_RETRY_MS;
       void trade({ action: 'exit', price, reason: `Daily loss limit ₹${cfg.dailyLossLimit}`, exitKind: 'manual', auto: true });
-      return;
+      return false;
     }
     if (d.action === 'exit') {
-      if (t < exitRetryAt.current) return;
+      if (t < exitRetryAt.current) return false;
       exitRetryAt.current = t + EXIT_RETRY_MS;
       // the cutoff exits without a quote: the ledger books the last price seen
       const px = price ?? live!.entry;
       void trade({ action: 'exit', price: px, reason: d.reason, exitKind: d.kind, auto: true });
-      return;
+      return false;
     }
-    if (d.action === 'none') { setNote(ledger.engineActive ? d.reason : 'Auto is OFF'); return; }
+    if (d.action === 'none') { setNote(ledger.engineActive ? d.reason : 'Auto is OFF'); return false; }
     // entries / reversals
-    if (!ledger.engineActive) { setNote(ledger.haltReason ? `Halted: ${ledger.haltReason}` : 'Auto is OFF'); return; }
-    if (ledger.mode === 'REAL' && !armed) { setNote('REAL is not armed on this page load'); return; }
-    if (!priceFresh || price === null) { setNote('Price feed stale - no entries'); return; }
-    if (staleDay) { setNote('An earlier day\'s row is open - close it first'); return; }
-    if (realised <= -cfg.dailyLossLimit) { setNote('Daily loss limit reached'); return; }
+    if (!ledger.engineActive) { setNote(ledger.haltReason ? `Halted: ${ledger.haltReason}` : 'Auto is OFF'); return false; }
+    if (ledger.mode === 'REAL' && !armed) { setNote('REAL is not armed on this page load'); return false; }
+    if (!priceFresh || price === null) { setNote('Price feed stale - no entries'); return false; }
+    if (staleDay) { setNote('An earlier day\'s row is open - close it first'); return false; }
+    if (realised <= -cfg.dailyLossLimit) { setNote('Daily loss limit reached'); return false; }
     setNote(d.reason);
     void trade({ action: d.action, side: d.side, price, barT: ev.barT, reason: d.reason });
+    return true;
   };
+  const runEngine = () => {
+    const t = Date.now();
+    const leader = claimLock(t);
+    if (leader !== isLeader) setIsLeader(leader);
+    const ready = alertSoundReady();
+    if (ready !== soundReady) setSoundReady(ready);
+    if (!ledger || !cfg) return;
+    let traded = false;
+    if (leader) traded = step(t);
+    else setNote('Another tab is running the engine');
+    // Alerts: every tab keeps its snapshot current (a tab that becomes leader must not replay old changes); only the leader rings.
+    const snap: OrbAlertSnap = {
+      signal: ev.signal, barT: ev.barT, halt: ledger.haltReason, fresh: priceFresh, engineActive: ledger.engineActive,
+      unresolved: !live ? null : live.status === 'unknown' ? `Row ${live.id} outcome UNKNOWN`
+        : isStuck(live, t) ? `Row ${live.id} stuck in flight` : live.day !== today ? `Row ${live.id} is from ${live.day}` : null,
+    };
+    const alert = orbAlert(prevSnap.current, snap, traded);
+    prevSnap.current = snap;
+    if (alert && leader && alertSoundRef.current) PLAY[alert.sound]();
+  };
+
   const engineRef = useRef<() => void>(() => {});
   useEffect(() => { engineRef.current = runEngine; });
   useEffect(() => {
@@ -250,5 +297,6 @@ export function useOrbEngine() {
   return {
     state, ledger, live: live as OrbRow | null, contract, feed, ev, price, priceFresh, openPnl, realised, now, isLeader, note, stateError,
     armed, setArmed, busy, op, closeAndStop, today, replayed, secsToClose, barSecs,
+    tradeSound, setTradeSound, alertSound, setAlertSound, soundReady,
   };
 }

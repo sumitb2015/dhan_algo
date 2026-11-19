@@ -80,3 +80,26 @@ export function playExitChime(now = Date.now()): boolean {
 export function playWarnChime(now = Date.now()): boolean {
   return playTones([330, 330, 330], 'square', now, 0.16);
 }
+
+// ── Signal chimes (Signal Orb): the indicator consensus changed colour. Softer, lower triangle arpeggios, so a signal never sounds
+// like a trade (the trade chimes are two high sine tones).
+
+/** Signal turned bullish: an A-major arpeggio up. */
+export function playBullChime(now = Date.now()): boolean {
+  return playTones([440, 554, 659], 'triangle', now, 0.15);
+}
+
+/** Signal turned bearish: the same arpeggio down. */
+export function playBearChime(now = Date.now()): boolean {
+  return playTones([659, 554, 440], 'triangle', now, 0.15);
+}
+
+/** Signal went neutral: two soft level tones. */
+export function playNeutralChime(now = Date.now()): boolean {
+  return playTones([523, 523], 'triangle', now, 0.16);
+}
+
+/** True once audio is unlocked and running (the page can show "click to enable sound" until then). */
+export function alertSoundReady(): boolean {
+  return ctx !== null && ctx.state === 'running';
+}

@@ -53,6 +53,21 @@ Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest ye
 - A row from an earlier IST day is not managed automatically.
 - Ledger: `debug/signal_orb_state.json`. Writes are op-based and serialised on one in-process chain, with atomic writes and a `rev` bump on every write. The client accepts only a newer `rev`.
 
+## Sounds
+`lib/alertSound.ts` synthesises every sound. The page decides when to play one with `lib/signalOrbChime.ts` (`orbAlert`, pure and tested), and a sound only comes from a *change* between two ticks.
+
+| Sound | When | Switch |
+|---|---|---|
+| Entry: two rising tones | an entry or reversal was placed | speaker (trade chimes) |
+| Exit: two falling tones | a position was closed | speaker |
+| Buzz | an order was rejected, or its outcome is unknown | speaker |
+| Arpeggio up / down / two level tones | the orb turned green / red / gray on a new closed bar, and the engine did NOT trade it | bell (signal alerts) |
+| Buzz | the engine halted (including the loss limit), a row needs you (unknown / stuck / an earlier day's), or the feed went stale while auto is on | bell |
+
+- **Which tab rings:** automatic sounds ring in the leader tab only. A manual close rings in the tab that sent it.
+- **Switches:** each is saved in its own localStorage key, `signalOrb.tradeSound` / `signalOrb.alertSound`, default on.
+- **Autoplay:** browsers keep the page silent until the first click or key press. Until then the header shows "click to enable sound". On-screen messages always show, sound or not.
+
 ## Known limits
 - Browser-only engine: there is no server-side stop watcher.
 - There is no real backtest. The page shows a **replay** (`replay()` in `lib/signalOrb.ts`) of the last 20 sessions with the current rules: the same `decideOrb`, one decision per closed bar at its close, the stop checked on closes, no costs or slippage. It is a rough flip-rate / direction check.
