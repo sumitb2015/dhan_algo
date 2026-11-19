@@ -233,6 +233,11 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   // The closed bars are sliced off only when the confirmed chart is rebuilt (a copy of years of minutes per tick otherwise).
   const closedLen = formingBar ? bars.length - 1 : bars.length;
   const closedLast = closedLen > 0 ? bars[closedLen - 1] : undefined;
+  // Tick / N sec: the minute bars the VWAP is built on - in replay only those closed by the cursor, so a replay never sees the future
+  const vwapBarsNow = useMemo(
+    () => (!feed.vwapBars ? null : replayT === null ? feed.vwapBars : feed.vwapBars.slice(0, countUpTo(feed.vwapBars, replayT - 59))),
+    [feed.vwapBars, replayT],
+  );
   // The confirmed chart depends only on the closed bars, so it is rebuilt when a bar closes or history reloads, not on every tick.
   const closedKey = `${closedLen}:${bars[0]?.t ?? 0}:${closedLast?.t ?? 0}:${closedLast?.straddle ?? 0}:${feed.histVersion}`;
   const sessionClose = sessionWindow(feed.market, now / 1000)[1];
@@ -240,13 +245,14 @@ function useChartModel(feed: PnfFeed, target: Target, rawSettings: PnfSettings, 
   const prevRef = useRef<ConfirmedModel | null>(null);
   const confirmed = useMemo(
     // Reading the ref here is safe: `prev` only speeds the build up, the result is the same without it (straddlePnfModel.test.ts).
+    // Tick / N sec: the VWAP comes from the minute bars (TradingView's 1-minute VWAP); in replay, the minutes closed by the cursor.
     // eslint-disable-next-line react-hooks/refs
-    () => buildConfirmedModel(closedLen < bars.length ? bars.slice(0, closedLen) : bars, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined, boxBaseT, chart, boxTick }, prevRef.current),
+    () => buildConfirmedModel(closedLen < bars.length ? bars.slice(0, closedLen) : bars, overlay, { ...settings, sessionCloseMin: sessionClose || undefined, volume: !indexNoVwap, anchorT: feed.loaded?.anchorT ?? undefined, boxBaseT, chart, boxTick, vwapBars: vwapBarsNow ?? undefined }, prevRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [closedKey, overlay, settings, sessionClose, indexNoVwap, feed.loaded?.anchorT, boxBaseT, chart, boxTick],
   );
   useEffect(() => { prevRef.current = confirmed; }, [confirmed]);
-  const model = useMemo(() => withLive(confirmed, formingBar), [confirmed, formingBar]);
+  const model = useMemo(() => withLive(confirmed, formingBar, vwapBarsNow), [confirmed, formingBar, vwapBarsNow]);
   const vwapAllowed = !indexNoVwap && (closedLen === 0 || model.vwapAvailable);
   return { model, indexNoVwap, vwapAllowed, lastBar: closedLast ?? null, boxBaseT };
 }

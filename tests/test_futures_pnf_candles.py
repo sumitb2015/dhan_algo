@@ -38,6 +38,16 @@ class ToBars(unittest.TestCase):
         self.assertTrue(all(b["pe"] == 0 and b["ce"] == b["straddle"] for b in bars))
         self.assertEqual([b["vol"] for b in bars], [7, 3])
 
+    def test_high_low_carried_when_the_source_has_them(self):
+        # the Renko VWAP is TradingView's (hlc3), so each bar carries its range; a row without one (a daily stitch) gets none
+        df = pd.DataFrame([(_epoch(23, 9, 0), 9500.5, 9502.0, 9499.0, 7), (_epoch(23, 9, 1), 9501.0, float("nan"), float("nan"), 3)],
+                          columns=["start_Time", "close", "high", "low", "volume"])
+        bars = self.m.to_bars(df, 3)
+        self.assertEqual((bars[0]["h"], bars[0]["l"]), (9502.0, 9499.0))
+        self.assertNotIn("h", bars[1])
+        plain = self.m.to_bars(df[["start_Time", "close", "volume"]], 3)
+        self.assertTrue(all("h" not in b and "l" not in b for b in plain))
+
     def test_keeps_only_the_last_sessions_and_drops_zero_closes(self):
         rows = [(_epoch(d, 9, 0), 9000.0 + d, 1) for d in (20, 21, 22, 23)] + [(_epoch(23, 9, 1), 0.0, 1)]
         bars = self.m.to_bars(pd.DataFrame(rows, columns=["start_Time", "close", "volume"]), 2)

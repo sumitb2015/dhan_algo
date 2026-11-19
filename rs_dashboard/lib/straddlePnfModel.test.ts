@@ -469,3 +469,57 @@ test('option box: a Renko % box is measured on the LTP at the pinned time (Tradi
   assert.ok(Math.abs(buildConfirmedModel(all, 'vwap', { boxPct: 2, chart: 'renko', boxBaseT: 1 }).box - 0.02 * 999.2) < 1e-9);
   assert.equal(pts.boxBase, null);
 });
+
+// ── Renko VWAP = TradingView's: session-anchored, hlc3, on 1-minute bars ─────────────────────────────────────
+// two IST sessions of a single price (MCX-like 09:00 opens): 2026-11-17 and 2026-11-18
+const IST_0900 = (d: number) => Date.UTC(2026, 10, d, 3, 30) / 1000;
+const minute = (t: number, c: number, h: number, l: number, vol: number): Bar => ({ t, ce: c, pe: 0, straddle: c, vol, h, l });
+
+test('Renko VWAP restarts each session and is volume-weighted hlc3 (TradingView); P&F stays one continuous close-weighted line', () => {
+  const d1 = [minute(IST_0900(17), 9000, 9010, 8990, 10), minute(IST_0900(17) + 60, 9020, 9030, 9000, 10)];
+  const d2 = [minute(IST_0900(18), 8000, 8030, 7990, 30), minute(IST_0900(18) + 60, 8010, 8020, 8000, 10)];
+  const b = [...d1, ...d2];
+  const tp = (x: Bar) => (x.h! + x.l! + x.straddle) / 3;
+  const want = (tp(d2[0]) * 30 + tp(d2[1]) * 10) / 40;
+  const r = buildPanelModel(b, 'vwap', { chart: 'renko', boxMode: 'pts', boxPts: 10 });
+  assert.ok(Math.abs((r.vwapNow as number) - want) < 1e-9);
+  assert.equal(r.overlayNow, r.vwapNow);
+  // the SMA overlay keeps the VWAP level
+  const s = buildPanelModel(b, 'sma', { chart: 'renko', boxMode: 'pts', boxPts: 10 });
+  assert.ok(Math.abs((s.vwapNow as number) - want) < 1e-9);
+  // P&F: unchanged - every bar's close, all sessions
+  const p = buildPanelModel(b, 'vwap');
+  assert.equal(p.vwapNow, (9000 * 10 + 9020 * 10 + 8000 * 30 + 8010 * 10) / 60);
+  // an incremental build (bar by bar) gives the same VWAP as one build
+  let prev = null as ReturnType<typeof buildConfirmedModel> | null;
+  for (let n = 1; n <= b.length; n++) prev = buildConfirmedModel(b.slice(0, n), 'vwap', { chart: 'renko', boxMode: 'pts', boxPts: 10 }, prev);
+  assert.ok(Math.abs((prev!.vwapNow as number) - want) < 1e-9);
+});
+
+test('Renko on minute bars: the VWAP level includes the forming minute (signals keep the closed bars\')', () => {
+  const closed = [minute(IST_0900(18), 8000, 8010, 7990, 10)];
+  const forming = minute(IST_0900(18) + 60, 8100, 8120, 8000, 30);
+  const c = buildConfirmedModel(closed, 'vwap', { chart: 'renko', boxMode: 'pts', boxPts: 10 });
+  const m = withLive(c, forming);
+  const tp = (x: Bar) => (x.h! + x.l! + x.straddle) / 3;
+  assert.ok(Math.abs((m.vwapNow as number) - (tp(closed[0]) * 10 + tp(forming) * 30) / 40) < 1e-9);
+  assert.equal(c.vwapNow, tp(closed[0]));
+});
+
+test('Renko Tick / N sec: each chart bar reads the 1-minute VWAP of the minutes closed by its time; the level reads through the forming minute', () => {
+  const t0 = IST_0900(18);
+  const mins = [minute(t0, 8000, 8010, 7990, 10), minute(t0 + 60, 8100, 8110, 8090, 10), minute(t0 + 120, 8200, 8250, 8150, 20)];
+  // tick bars every 20 s with unrelated volume: they must not weight the VWAP
+  const ticks: Bar[] = [];
+  for (let s = 0; s < 150; s += 20) ticks.push({ t: t0 + s, ce: 8000 + s, pe: 0, straddle: 8000 + s, vol: 999 });
+  const tp = (x: Bar) => (x.h! + x.l! + x.straddle) / 3;
+  const c = buildConfirmedModel(ticks, 'vwap', { chart: 'renko', boxMode: 'pts', boxPts: 10, vwapBars: mins });
+  const v1 = tp(mins[0]), v2 = (tp(mins[0]) * 10 + tp(mins[1]) * 10) / 20, v3 = (tp(mins[0]) * 10 + tp(mins[1]) * 10 + tp(mins[2]) * 20) / 40;
+  // ticks in minute 0 see no closed minute; in minute 1 the first minute; in minute 2 the first two
+  assert.deepEqual(c.build.vw1, ticks.map(k => (k.t < t0 + 60 ? null : k.t < t0 + 120 ? v1 : v2)));
+  assert.ok(Math.abs((c.vwapNow as number) - v3) < 1e-9);
+  // live: the level follows the minute bars as they stand now
+  const later = [...mins.slice(0, 2), { ...mins[2], straddle: 8300, h: 8300, vol: 40 }];
+  const m = withLive(c, undefined, later);
+  assert.ok(Math.abs((m.vwapNow as number) - (tp(mins[0]) * 10 + tp(mins[1]) * 10 + ((8300 + 8300 + 8150) / 3) * 40) / 60) < 1e-9);
+});

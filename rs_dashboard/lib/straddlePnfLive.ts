@@ -28,7 +28,7 @@ export function foldTick(bars: Bar[], tick: Tick, single = false): { bars: Bar[]
   const fresh = (): Bar => {
     const base = cv === null ? undefined : last?.cum !== undefined && cv >= last.cum ? last.cum : cv;
     return {
-      t, ce: tick.ce, pe: tick.pe, straddle,
+      t, ce: tick.ce, pe: tick.pe, straddle, h: straddle, l: straddle,
       vol: cv !== null && base !== undefined ? Math.max(0, cv - base) : 0,
       ...(cv !== null ? { cum: cv, cumBase: base } : {}),
     };
@@ -42,7 +42,8 @@ export function foldTick(bars: Bar[], tick: Tick, single = false): { bars: Bar[]
     if (cumBase === undefined || (last.cum !== undefined && cv < last.cum)) cumBase = cv - vol; // first live tick on this bar, or a counter reset
     else vol = Math.max(0, cv - cumBase);
   }
-  const next: Bar = { ...last, ce: tick.ce, pe: tick.pe, straddle, vol };
+  // the minute's range grows with each price (a history bar still forming keeps the range it already has)
+  const next: Bar = { ...last, ce: tick.ce, pe: tick.pe, straddle, vol, h: Math.max(last.h ?? last.straddle, straddle), l: Math.min(last.l ?? last.straddle, straddle) };
   if (cv !== null) { next.cum = cv; next.cumBase = cumBase; }
   const out = bars.slice();      // one copy, not two: a long history holds years of minutes
   out[out.length - 1] = next;
@@ -158,7 +159,7 @@ export function mergeHistory(hist: Bar[], onScreen: Bar[], tick: Tick | null, si
 }
 
 const sameBar = (a: Bar, b: Bar) => a.t === b.t && a.ce === b.ce && a.pe === b.pe && a.straddle === b.straddle && a.vol === b.vol
-  && a.dc === b.dc && a.cum === b.cum && a.cumBase === b.cumBase;
+  && a.dc === b.dc && a.cum === b.cum && a.cumBase === b.cumBase && a.h === b.h && a.l === b.l;
 
 /**
  * `next` (a history reload) with every bar that equals the bar already on screen at the same minute replaced by that on-screen

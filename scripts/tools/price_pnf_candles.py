@@ -93,8 +93,12 @@ def load_stored_1min(symbol: str, directory: str = STORED_DIR) -> pd.DataFrame:
         return pd.DataFrame(columns=["start_Time", "close", "volume"])
     raw = pd.read_parquet(path)
     ist = pd.DatetimeIndex(raw.index).tz_localize(_IST)
-    return pd.DataFrame({"start_Time": ((ist - pd.Timestamp(0, tz="UTC")) // pd.Timedelta(seconds=1)).astype("int64"),
-                         "close": raw["Close"].to_numpy(), "volume": raw["Volume"].to_numpy()})
+    out = pd.DataFrame({"start_Time": ((ist - pd.Timestamp(0, tz="UTC")) // pd.Timedelta(seconds=1)).astype("int64"),
+                        "close": raw["Close"].to_numpy(), "volume": raw["Volume"].to_numpy()})
+    if "High" in raw.columns and "Low" in raw.columns:
+        out["high"] = raw["High"].to_numpy()
+        out["low"] = raw["Low"].to_numpy()
+    return out
 
 
 DAILY_DIR = os.path.join(ROOT, "Daily_Historical_Data_Fresh")
@@ -246,6 +250,11 @@ def _normalise(frame: pd.DataFrame) -> pd.DataFrame:
     vl = next((c for c in ("volume", "Volume", "vol", "Vol") if c in frame.columns), None)
     out = pd.DataFrame({"start_Time": _to_epoch_seconds(frame[ts]), "close": frame[cl].to_numpy(),
                         "volume": frame[vl].to_numpy() if vl else 0})
+    hi = next((c for c in ("high", "High") if c in frame.columns), None)
+    lo = next((c for c in ("low", "Low") if c in frame.columns), None)
+    if hi and lo:                                      # the bar's range (hlc3 VWAP); a stitch with a side lacking it leaves NaN
+        out["high"] = frame[hi].to_numpy()
+        out["low"] = frame[lo].to_numpy()
     if "day_close" in frame.columns:                   # a session's official close (snap_session_closes) survives a later stitch
         out["day_close"] = frame["day_close"].to_numpy()
     return out

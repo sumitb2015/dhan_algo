@@ -779,6 +779,15 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   };
   const rowTop = padY + PAD_TOP;
   const TIME_AXIS_H = 24;
+  // The VWAP tag stays on the axis when the level is scrolled out of view (or beyond the price range): pinned to the visible
+  // edge with an arrow pointing at where it is, as TradingView does. The line itself stays at its true price.
+  const vwapTag = (() => {
+    if (vwapLevelY === null || vwapNow === null) return null;
+    const top = (viewTop ?? 0) + 9, bottom = (viewTop ?? 0) + HEIGHT - (timeAxis ? TIME_AXIS_H : 0) - 9;
+    const y = Math.min(Math.max(vwapLevelY, top), Math.max(top, bottom));
+    const arrow = vwapLevelY < top ? '▲' : vwapLevelY > bottom ? '▼' : '';
+    return { y, arrow };
+  })();
   const axisLabels = useMemo(
     // Renko gets TradingView's 1-minute Renko axis (days with times between them) whatever span the history covers.
     () => (timeAxis ? timeAxisLabels(model.columnTimes.map(t => t.start), model.columnTimes.map((_, j) => offsetX + j * colW + colW / 2), 44, renko ? 'intraday' : undefined) : []),
@@ -1756,10 +1765,11 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                  onPointerUp={() => { axisDragRef.current = null; }}
                  onPointerCancel={() => { axisDragRef.current = null; }}>
               <g data-testid="pnf-axis">{priceAxisText}</g>
-              {vwapLevelY !== null && vwapNow !== null && (
-                <g data-testid="pnf-vwap-tag">
-                  <rect x={2} y={vwapLevelY - 8} width={AXIS_W - 4} height={16} rx={2} className="fill-amber-300" />
-                  <text x={6} y={vwapLevelY + 3.5} className="fill-oncolor-dark font-mono" fontSize={10} fontWeight={700}>{fmt(vwapNow, axisDigits)}</text>
+              {vwapTag !== null && vwapNow !== null && (
+                <g data-testid="pnf-vwap-tag" data-pinned={vwapTag.arrow ? 'yes' : 'no'}>
+                  <title>{`VWAP ${fmt(vwapNow, axisDigits)}${vwapTag.arrow ? (vwapTag.arrow === '▲' ? ' (above the view)' : ' (below the view)') : ''}`}</title>
+                  <rect x={2} y={vwapTag.y - 8} width={AXIS_W - 4} height={16} rx={2} className="fill-amber-300" />
+                  <text x={vwapTag.arrow ? 4 : 6} y={vwapTag.y + 3.5} className="fill-oncolor-dark font-mono" fontSize={10} fontWeight={700}>{`${vwapTag.arrow}${fmt(vwapNow, axisDigits)}`}</text>
                 </g>
               )}
               {/* live price tag: the brightest-text / page-ground token pair, so it flips with the theme and is never mistaken for

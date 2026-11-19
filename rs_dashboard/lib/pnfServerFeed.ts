@@ -45,6 +45,9 @@ export class ServerFeed {
   private tickBuild: TickBuild = newTickBuild(1);
   private secBuild: SecBuild | null = null;
   private tickBars: Bar[] | null = null;
+  /** Tick mode: the 1-minute bars with the live price folded in (the Renko VWAP's source: straddlePnfModel's vwapBars). */
+  private vwBars: Bar[] = [];
+  private lastHead: Tick | null = null;
   /** fillCutoff at the first read of the day's log: gaps that had ended by then (and inside the history held then) are filled from history (spliceTicks). */
   private tickFillTo = -Infinity;
 
@@ -72,6 +75,7 @@ export class ServerFeed {
       this.cas = j.cas === true;
       this.anchorT = j.anchorT ?? null;
       this.bars = mergeHistory(tail ? mergeTail(this.bars, hist) : hist, this.bars, this.lastTick, instruments.length < 2);
+      this.vwBars = mergeHistory(tail ? mergeTail(this.vwBars, hist) : hist, this.vwBars, this.lastHead, instruments.length < 2);
       this.loaded = true;
       this.error = null;
       this.histVersion++;
@@ -95,7 +99,11 @@ export class ServerFeed {
     const r = liveRead(last?.straddle, quotes, this.market, this.tickSec !== null);
     if (r.kind === 'none') { this.headPrice = null; return; }
     if (r.kind === 'wild') return;
-    if (r.kind === 'out' || r.kind === 'head') { this.headPrice = r.tick.ce + r.tick.pe; return; }
+    if (r.kind === 'out' || r.kind === 'head') {
+      this.headPrice = r.tick.ce + r.tick.pe;
+      if (r.kind === 'head') { this.lastHead = r.tick; this.vwBars = foldLive(this.vwBars, r.tick, this.single); }
+      return;
+    }
     this.headPrice = null;
     this.lastTick = r.tick;
     this.bars = foldLive(this.bars, r.tick, this.single);
@@ -123,6 +131,9 @@ export class ServerFeed {
     this.live(nowMs);
     this.ticks(nowMs);
   }
+
+  /** Tick / N-second mode: the 1-minute bars the Renko VWAP is built on (null on a minute chart: its own bars are). */
+  get vwapBars(): Bar[] | null { return this.tickSec === null ? null : this.vwBars; }
 
   /** The chart's bars as the page draws them: in Tick / N-second mode the history up to the tick log, then the recorded prices. */
   chartBars(nowMs: number): Bar[] {

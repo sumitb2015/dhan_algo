@@ -45,6 +45,12 @@ def _leg(df: pd.DataFrame) -> pd.DataFrame:
         "close": pd.to_numeric(df[cl], errors="coerce").fillna(0.0),
         "vol": pd.to_numeric(df[vl], errors="coerce").fillna(0).astype("int64") if vl else 0,
     })
+    # the bar's high / low, when the source has them: the Renko VWAP is TradingView's, on hlc3 (futures_pnf_candles.to_bars)
+    hi = next((c for c in ("high", "High", "h") if c in df.columns), None)
+    lo = next((c for c in ("low", "Low", "l") if c in df.columns), None)
+    if hi and lo:
+        out["high"] = pd.to_numeric(df[hi], errors="coerce").to_numpy()
+        out["low"] = pd.to_numeric(df[lo], errors="coerce").to_numpy()
     if "day_close" in df.columns:                      # an equity session's official close (price_pnf_candles.snap_session_closes)
         out["day_close"] = pd.to_numeric(df["day_close"], errors="coerce").to_numpy()
     return out.drop_duplicates("t", keep="last")

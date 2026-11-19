@@ -1,7 +1,7 @@
 // One chart panel's data: P&F columns, signals, exit cues and the overlay line, from CLOSED 1-min bars only
 // (a bar still forming must never feed a signal, or the marker would repaint). The 1-min bars are grouped into the chosen
 // interval first; the box size is a percentage of the first price.
-import { VWAP_START, buildPnf, continuePnf, detectSignals, exitTags, extendPnf, sessionOf, vwapFrom, type VwapState, type Bar, type PnfColumn, type PnfResume, type PnfSignal } from './straddlePnf.ts';
+import { VWAP_START, sessionVwapNow, buildPnf, continuePnf, detectSignals, exitTags, extendPnf, sessionOf, vwapFrom, type VwapState, type Bar, type PnfColumn, type PnfResume, type PnfSignal } from './straddlePnf.ts';
 import { resample } from './straddlePnfInterval.ts';
 import { buildRenko, buildLogRenko, continueRenko, extendRenko, renkoSignals, trendSignals, supertrendSignals, twoBackSignals, oneBackSignals, renkoSmaResume, renkoSmaByBarFrom, renkoSupertrendResume, runStartOf, type RenkoResume, type RenkoSupertrendPoint, type LogGrid } from './renko.ts';
 import type { SupertrendState } from './indicators.ts';
@@ -195,6 +195,12 @@ export type PanelOptions = {
    * is no VWAP, and the box SMA takes its place as the line and as the signals' reference. Default true.
    */
   volume?: boolean;
+  /**
+   * Renko Tick / N-second charts: the instrument's 1-minute bars (history plus the live minute fold, the forming minute included).
+   * TradingView's VWAP is built on them, not on the ticks: each chart bar reads the VWAP of the minutes that had closed by its time
+   * (so a signal never repaints) and the header / level read it through the forming minute.
+   */
+  vwapBars?: Bar[];
   /** IST minute of the day the session closes (MCX 23:55 does not divide into 3 / 15-minute buckets): see resample. */
   sessionCloseMin?: number;
   /**
@@ -237,6 +243,8 @@ export type ConfirmedModel = Omit<PanelModel, 'liveColumns' | 'sessionOpen' | 'p
     chartBars: Bar[]; chartEndIdx: number[];
     /** VWAP of every 1-min bar and its running sums, and VWAP at each chart bar: carried on by a longer history of the same bars. */
     vw1: (number | null)[]; vwapState: VwapState; chartVw: (number | null)[];
+    /** True when VWAP came from `vwapBars` (Tick / N sec): vw1 is then not carried on by a later build, and withLive adds nothing. */
+    tickVwap: boolean;
     /** The closed bars' sessions, their last session's open and the close before it, computed once (not per tick). */
     closedSessions: string[]; closedOpen: number | null; closedPrev: number | null;
     /** Whether any closed bar traded volume (no VWAP without it). */
@@ -348,11 +356,27 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   const pb = p?.closedBars;
   // `prev` was built on the first pb.length of these very bars: VWAP and the session list carry on from it whatever the settings
   const prefix = !!p && !!pb && pb.length > 0 && pb.length <= closedBars.length && pb[0] === closedBars[0] && pb[pb.length - 1] === closedBars[pb.length - 1];
+  // Renko's VWAP resets each IST session (TradingView's session VWAP: the line, the level and every signal's reference); P&F's
+  // runs on over the whole loaded range (a P&F chart has no time axis).
   let vw1: (number | null)[], vwapState: VwapState;
-  if (prefix) {
-    const more = vwapFrom(closedBars, pb!.length, p!.vwapState);
+  let tickVwapNow: number | null | undefined;
+  const vb = renko ? opts.vwapBars : undefined;
+  if (vb) {
+    // Tick / N sec: the 1-minute VWAP at each chart bar = through the last minute closed by its time (read fresh each build: the
+    // minute bars are revised by each history load). vwapState stays empty, so withLive adds nothing on top.
+    const mv = vwapFrom(vb, 0, VWAP_START, true).series;
+    vw1 = new Array(closedBars.length);
+    let k = 0;
+    for (let i = 0; i < closedBars.length; i++) {
+      while (k < vb.length && vb[k].t + 60 <= closedBars[i].t) k++;
+      vw1[i] = k > 0 ? mv[k - 1] : null;
+    }
+    vwapState = VWAP_START;
+    tickVwapNow = mv.length ? mv[mv.length - 1] : null;
+  } else if (prefix && p!.chart === chart && p!.vw1.length === pb!.length && !p!.tickVwap) {
+    const more = vwapFrom(closedBars, pb!.length, p!.vwapState, renko);
     vw1 = more.series.length ? p!.vw1.concat(more.series) : p!.vw1; vwapState = more.state;
-  } else ({ series: vw1, state: vwapState } = vwapFrom(closedBars, 0, VWAP_START));
+  } else ({ series: vw1, state: vwapState } = vwapFrom(closedBars, 0, VWAP_START, renko));
   const firstBar = closedBars.find(b => b.straddle > 0 && (opts.anchorT === undefined || b.t >= opts.anchorT)) ?? closedBars.find(b => b.straddle > 0);
   const firstPrice = firstBar?.straddle; // the grid is anchored on the first 1-minute price whatever the interval
   const ptsAsked = opts.boxMode === 'pts' && (opts.boxPts ?? 0) > 0 ? (opts.boxPts as number) : null;
@@ -419,7 +443,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   for (let i = prefix ? pb!.length : 0; !hasVol && i < closedBars.length; i++) hasVol = closedBars[i].vol > 0;
   const vwapAvailable = opts.volume !== false && hasVol;
   const overlayKind: Overlay = vwapAvailable ? overlay : 'sma';
-  const vwapNow = vwapAvailable && vw1.length ? vw1[vw1.length - 1] : null;
+  const vwapNow = !vwapAvailable ? null : tickVwapNow !== undefined ? tickVwapNow : vw1.length ? vw1[vw1.length - 1] : null;
   if (renko) return renkoModel();
   const boxSma = boxSmaOf(columns, box, smaPeriod);
   // The reference the short-entry zone (below it) and the cover cue (above it) are measured against: VWAP when the instrument
@@ -463,7 +487,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   function buildState(renkoCarry: RenkoCarry | null): ConfirmedModel['build'] {
     return {
       chart, closedBars, interval, boxPct, reversal, anchorPrice, boxSize, sessionCloseMin: opts.sessionCloseMin,
-      resume, lastEnd: endIdx.length ? endIdx[endIdx.length - 1] : -1, chartBars: bars, chartEndIdx: endIdx, ptsAsked, logAsked, vw1, vwapState, chartVw: vw,
+      resume, lastEnd: endIdx.length ? endIdx[endIdx.length - 1] : -1, chartBars: bars, chartEndIdx: endIdx, ptsAsked, logAsked, vw1, vwapState, chartVw: vw, tickVwap: !!vb,
       closedSessions: facts.sessions, closedOpen: facts.open, closedPrev: facts.prev, hasVol, renko: renkoCarry,
     };
   }
@@ -528,7 +552,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
  * close and the session list. A forming price that would add more than MAX_UNCONFIRMED_BOXES is a bad tick: it is rejected from
  * its distance to the last close BEFORE anything is built, so one wild print costs nothing and draws nothing.
  */
-export function withLive(c: ConfirmedModel, forming?: Bar): PanelModel {
+export function withLive(c: ConfirmedModel, forming?: Bar, vwapBars?: Bar[] | null): PanelModel {
   const { chart, closedBars, interval, boxPct, reversal, sessionCloseMin, resume, lastEnd } = c.build;
   const lastClose = closedBars.length ? closedBars[closedBars.length - 1].straddle : null;
   const wild = !!forming && lastClose !== null && c.box > 0 && Math.abs(forming.straddle - lastClose) / c.box > MAX_UNCONFIRMED_BOXES;
@@ -562,10 +586,18 @@ export function withLive(c: ConfirmedModel, forming?: Bar): PanelModel {
   const newSession = formingSession !== null && formingSession !== closedSessions[closedSessions.length - 1];
   let lastPositive: Bar | undefined;
   if (newSession) for (let i = closedBars.length - 1; i >= 0 && !lastPositive; i--) if (closedBars[i].straddle > 0) lastPositive = closedBars[i];
+  // Renko on minute bars: the header / VWAP level read TradingView's live VWAP, the forming minute included (signals keep the
+  // closed bars' VWAP; a Tick / N-second chart already read its VWAP through the forming minute).
+  // (`vwapBars`: a Tick / N-second chart's minute bars as they stand now, read on every live tick, not only at a bar close).
+  const liveVwap = c.chart !== 'renko' || c.vwapNow === null ? c.vwapNow
+    : c.build.tickVwap ? (vwapBars ? sessionVwapNow(vwapBars) ?? c.vwapNow : c.vwapNow)
+    : forming && !wild ? vwapFrom([forming], 0, c.build.vwapState, true).series[0] ?? c.vwapNow : c.vwapNow;
   const { build: _build, ...confirmed } = c;
   void _build;
   return {
     ...confirmed,
+    vwapNow: liveVwap,
+    overlayNow: c.overlayKind === 'vwap' && c.chart === 'renko' ? liveVwap : c.overlayNow,
     sessionOpen: newSession ? (forming!.straddle > 0 ? forming!.straddle : null) : closedOpen ?? (forming && forming.straddle > 0 ? forming.straddle : null),
     prevClose: newSession ? (lastPositive ? lastPositive.dc ?? lastPositive.straddle : null) : closedPrev,
     sessions: newSession ? [...closedSessions, formingSession!] : closedSessions,

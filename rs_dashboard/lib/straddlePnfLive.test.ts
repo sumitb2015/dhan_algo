@@ -240,3 +240,15 @@ test('keepSameBars: a reload hands back the on-screen object for every unchanged
   assert.equal(merged[0], onScreen[0]);
   assert.equal(merged[2], onScreen[2]);
 });
+
+test('foldTick tracks the live minute\'s high / low (the Renko VWAP\'s hlc3), on top of a forming history bar\'s range', () => {
+  const t = Date.UTC(2026, 10, 18, 3, 30) / 1000;
+  let b = foldTick([], { t, ce: 100, pe: 0 }, true).bars;
+  b = foldTick(b, { t: t + 10, ce: 104, pe: 0 }, true).bars;
+  b = foldTick(b, { t: t + 20, ce: 98, pe: 0 }, true).bars;
+  b = foldTick(b, { t: t + 30, ce: 101, pe: 0 }, true).bars;
+  assert.deepEqual([b[0].h, b[0].l, b[0].straddle], [104, 98, 101]);
+  const hist = [{ t, ce: 100, pe: 0, straddle: 100, vol: 5, h: 110, l: 90 }];
+  const f = foldTick(hist, { t: t + 40, ce: 112, pe: 0 }, true).bars[0];
+  assert.deepEqual([f.h, f.l], [112, 90]);
+});

@@ -11,6 +11,8 @@ import { IST_OFFSET_S } from './istTime.ts';
 
 export type Bar = {
   t: number; ce: number; pe: number; straddle: number; vol: number;
+  /** The bar's high / low where the source has them (Dhan history, the live minute fold): the Renko VWAP's hlc3. */
+  h?: number; l?: number;
   /** Live bars only: the feed's cumulative day volume (CE + PE) at the latest tick, and its value when this bar's volume started counting. */
   cum?: number; cumBase?: number;
   /**
@@ -202,23 +204,47 @@ export function vwap(bars: Bar[]): (number | null)[] {
   return vwapFrom(bars, 0, VWAP_START).series;
 }
 
-/** The running sums behind vwap(), so a longer history can carry the series on instead of re-reading every bar. */
-export type VwapState = { sumPV: number; sumV: number; sumP: number; n: number; last: number | null };
-export const VWAP_START: VwapState = { sumPV: 0, sumV: 0, sumP: 0, n: 0, last: null };
+/** The running sums behind vwap(), so a longer history can carry the series on instead of re-reading every bar. `sess` is the
+ *  IST session of the last bar read (only a session-reset VWAP uses it). */
+export type VwapState = { sumPV: number; sumV: number; sumP: number; n: number; last: number | null; sess?: number | null };
+export const VWAP_START: VwapState = { sumPV: 0, sumV: 0, sumP: 0, n: 0, last: null, sess: null };
 
-/** vwap() of bars[from..] continuing from `state` (the sums after bars[0..from)); returns that part of the series and the new sums. */
-export function vwapFrom(bars: Bar[], from: number, state: VwapState): { series: (number | null)[]; state: VwapState } {
+/** A bar's price for TradingView's VWAP: hlc3 when it carries a usable high / low, else its close. */
+export const hlc3 = (b: Bar) => (b.h !== undefined && b.l !== undefined && b.l > 0 && b.h >= b.l ? (b.h + b.l + b.straddle) / 3 : b.straddle);
+
+/**
+ * vwap() of bars[from..] continuing from `state` (the sums after bars[0..from)); returns that part of the series and the new sums.
+ * `tv` (Renko): TradingView's VWAP - anchored on the session (the sums restart on each IST trading day's first bar; the value carries
+ * the previous session's last VWAP only until the new session's first priced bar) and sourced on hlc3.
+ */
+export function vwapFrom(bars: Bar[], from: number, state: VwapState, tv = false): { series: (number | null)[]; state: VwapState } {
   let { sumPV, sumV, sumP, n, last } = state;
+  let sess = state.sess ?? null;
   const series = new Array<number | null>(Math.max(0, bars.length - from));
   for (let i = from; i < bars.length; i++) {
     const b = bars[i];
+    if (tv) {
+      const s = Math.floor((b.t + IST_OFFSET_S) / 86400);        // the IST day (sessionOf without a Date per bar)
+      if (s !== sess) { sumPV = 0; sumV = 0; sumP = 0; n = 0; sess = s; }
+    }
     if (b.straddle > 0) {
-      sumPV += b.straddle * b.vol; sumV += b.vol; sumP += b.straddle; n += 1;
+      const px = tv ? hlc3(b) : b.straddle;
+      sumPV += px * b.vol; sumV += b.vol; sumP += px; n += 1;
       last = sumV > 0 ? sumPV / sumV : sumP / n;
     }
     series[i - from] = last;
   }
-  return { series, state: { sumPV, sumV, sumP, n, last } };
+  return { series, state: { sumPV, sumV, sumP, n, last, sess } };
+}
+
+/** TradingView's VWAP now (session-anchored, hlc3) from 1-minute bars, the forming one included: reads the last session's bars only. */
+export function sessionVwapNow(bars: Bar[]): number | null {
+  if (!bars.length) return null;
+  const day = Math.floor((bars[bars.length - 1].t + IST_OFFSET_S) / 86400);
+  let i = bars.length - 1;
+  while (i > 0 && Math.floor((bars[i - 1].t + IST_OFFSET_S) / 86400) === day) i--;
+  const s = vwapFrom(bars, i, VWAP_START, true).series;
+  return s.length ? s[s.length - 1] : null;
 }
 
 /** For each green X column: the first bar inside it that trades above VWAP (the video's exit cue). */

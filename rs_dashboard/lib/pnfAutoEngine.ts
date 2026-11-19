@@ -213,6 +213,7 @@ function modelFor(rt: ChartRt, scope: PnfScope, run: ArmRun, nowMs: number): { m
     const confirmed = buildConfirmedModel(closed, 'vwap', {
       ...run.settings, interval, sessionCloseMin: sessionClose || undefined, volume: run.volume,
       anchorT: run.anchorT ?? feed.anchorT ?? undefined, boxBaseT: run.boxBaseT, boxTick: run.boxTick, chart: renko ? 'renko' : 'pnf',
+      vwapBars: feed.vwapBars ?? undefined,
     }, rt.prev);
     rt.prev = confirmed;
     rt.model = withLive(confirmed);

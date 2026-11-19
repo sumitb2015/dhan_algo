@@ -30,6 +30,10 @@ const NO_BARS: Bar[] = [];  // Renko Tick mode: how often the bridge's tick log 
  */
 export function usePnfFeed(target: Target | null, recenter: number, now: number, tickSec: number | null = null) {
   const [bars, setBars] = useState<Bar[]>([]);
+  // Tick / N sec only: the 1-minute bars with the live price folded in (the chart's own minute bars are not folded in that mode). The
+  // Renko VWAP is TradingView's 1-minute one, built on these (straddlePnfModel's vwapBars), never on the ticks.
+  const [vwBars, setVwBars] = useState<Bar[]>([]);
+  const headRef = useRef<Tick | null>(null);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [name, setName] = useState<string | null>(null);   // the full name the server resolved for the chosen symbol
   // Bumped on every history load: the confirmed chart is rebuilt then (the API may have revised closed bars).
@@ -59,9 +63,10 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   useEffect(() => {
     reqRef.current++;
     tickRef.current = null;
+    headRef.current = null;
     fullRef.current = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setFeedPrevClose(null); setOutQuote(null); setLoaded(null); setBars([]); setName(null); setLoadError(null); setLoading(true);
+    setFeedPrevClose(null); setOutQuote(null); setLoaded(null); setBars([]); setVwBars([]); setName(null); setLoadError(null); setLoading(true);
   }, [tKey]);
 
   // reset = new instrument / Re-center (alerts restart); otherwise a quiet refresh.
@@ -84,6 +89,8 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
       const instruments = j.instruments ?? (j.instrument ? [j.instrument] : []);
       if (!tail) fullRef.current = true;
       setBars(prev => mergeHistory(tail ? mergeTail(prev, hist) : hist, prev, tk, instruments.length < 2));
+      const hk = headRef.current;
+      setVwBars(prev => mergeHistory(tail ? mergeTail(prev, hist) : hist, prev, hk, instruments.length < 2));
       setHistVersion(v => v + 1);
       if (reset) setEpoch(n => n + 1);
       setLoaded({ key, dataDate: j.dataDate, error: j.errors?.[String(key)], instruments, anchorT: j.anchorT ?? null, cas: j.cas === true });
@@ -136,7 +143,12 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
         const tick = r.tick;
         if (r.kind === 'out') { setOutQuote({ ce: tick.ce, pe: tick.pe, t: tick.t }); return; }
         setOutQuote(null);
-        if (r.kind === 'head') { setHeadTick({ ce: tick.ce, pe: tick.pe }); return; }
+        if (r.kind === 'head') {
+          setHeadTick({ ce: tick.ce, pe: tick.pe });
+          headRef.current = tick;
+          setVwBars(prev => foldLive(prev, tick, single));
+          return;
+        }
         tickRef.current = tick;
         setBars(prev => foldLive(prev, tick, single));
       } catch { /* the header keeps the last price and shows Stale until the next read lands */ }
@@ -220,7 +232,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   const scrip = !target ? '' : fno ? label : name && name !== target.symbol ? `${target.symbol} · ${name}` : target.symbol;
 
   return {
-    bars: chartBars, loaded, name, loading, loadError: loadError ?? (tickMode ? tickError : null), histVersion, epoch, market, complete, live, stale, sessionTag, trustedPrevClose, label, scrip,
+    bars: chartBars, vwapBars: tickMode ? vwBars : null, loaded, name, loading, loadError: loadError ?? (tickMode ? tickError : null), histVersion, epoch, market, complete, live, stale, sessionTag, trustedPrevClose, label, scrip,
   };
 }
 

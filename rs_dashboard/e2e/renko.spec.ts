@@ -212,11 +212,27 @@ test('the current VWAP is drawn as a horizontal level with an axis tag, only whe
   await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
   await expect(panel.getByTestId('pnf-vwap-level')).toHaveCount(1);
   // equal volume on every bar: VWAP = the mean close, 22,662 → its tag on the price axis
-  await expect(panel.getByTestId('pnf-vwap-tag')).toHaveText('22,662');
+  await expect(panel.getByTestId('pnf-vwap-tag').locator('text')).toHaveText('22,662');
   // with the SMA as the overlay the VWAP level stays (same value)
   await page.getByRole('group', { name: 'Overlay' }).getByRole('button', { name: /^SMA/ }).click();
   await expect(panel.getByTestId('pnf-vwap-level')).toHaveCount(1);
-  await expect(panel.getByTestId('pnf-vwap-tag')).toHaveText('22,662');
+  await expect(panel.getByTestId('pnf-vwap-tag').locator('text')).toHaveText('22,662');
+  await expect(panel.getByTestId('pnf-vwap-tag')).toHaveAttribute('data-pinned', 'no');
+  // zoomed in and scrolled until the VWAP leaves the view: the tag stays on the axis, pinned to the edge with an arrow toward it
+  const axis = (await panel.getByTestId('pnf-axis-drag').boundingBox())!;
+  const ax = axis.x + axis.width / 2, ay = axis.y + Math.min(axis.height, 600) / 2;
+  await page.mouse.move(ax, ay);
+  await page.mouse.down();
+  await page.mouse.move(ax, ay - 250, { steps: 20 });
+  await page.mouse.up();
+  const scroll = panel.getByTestId('pnf-scroll');
+  for (const edge of ['top', 'bottom'] as const) {
+    await scroll.evaluate((el, e) => { el.scrollTop = e === 'top' ? 0 : el.scrollHeight; }, edge);
+    if (await panel.getByTestId('pnf-vwap-tag').getAttribute('data-pinned') === 'yes') break;
+  }
+  await expect(panel.getByTestId('pnf-vwap-tag')).toHaveAttribute('data-pinned', 'yes');
+  await expect(panel.getByTestId('pnf-vwap-tag').locator('text')).toHaveText(/^[▲▼]22,662$/);
+  await expect(panel.getByTestId('pnf-vwap-tag')).toBeInViewport();
   // the eye hides the line, and the level with it
   await page.getByRole('button', { name: 'Hide the VWAP / SMA line' }).click();
   await expect(panel.getByTestId('pnf-vwap-level')).toHaveCount(0);
