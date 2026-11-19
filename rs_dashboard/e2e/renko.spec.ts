@@ -181,7 +181,7 @@ test('the order Style bar sits in the trade bar row, never over the charts', asy
   expect(blocked).toEqual([]);
 });
 
-test('the current VWAP is drawn as a horizontal level with an axis tag, only where there is a VWAP', async ({ page }) => {
+test('the current VWAP is drawn as a horizontal level with an axis tag, only where there is a VWAP (with either overlay)', async ({ page }) => {
   const blocked: string[] = [];
   await page.route('**/api/**', async (route: Route) => {
     const req = route.request();
@@ -212,6 +212,10 @@ test('the current VWAP is drawn as a horizontal level with an axis tag, only whe
   await page.getByRole('group', { name: 'Segment' }).getByRole('button', { name: 'Futures' }).click();
   await expect(panel.getByTestId('pnf-vwap-level')).toHaveCount(1);
   // equal volume on every bar: VWAP = the mean close, 22,662 → its tag on the price axis
+  await expect(panel.getByTestId('pnf-vwap-tag')).toHaveText('22,662');
+  // with the SMA as the overlay the VWAP level stays (same value)
+  await page.getByRole('group', { name: 'Overlay' }).getByRole('button', { name: /^SMA/ }).click();
+  await expect(panel.getByTestId('pnf-vwap-level')).toHaveCount(1);
   await expect(panel.getByTestId('pnf-vwap-tag')).toHaveText('22,662');
   // the eye hides the line, and the level with it
   await page.getByRole('button', { name: 'Hide the VWAP / SMA line' }).click();

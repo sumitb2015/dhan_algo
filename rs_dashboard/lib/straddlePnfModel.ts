@@ -43,6 +43,8 @@ export type PanelModel = {
   overlay: (number | null)[];
   /** The overlay's value at the last closed bar (the header's figure); the per-column series lags it while price goes sideways. */
   overlayNow: number | null;
+  /** VWAP at the last closed bar whatever overlay is drawn (null without volume): Renko's horizontal VWAP level reads it. */
+  vwapNow: number | null;
   /**
    * False for an instrument without traded volume (an index; or no bar carried any volume): there is no VWAP, the overlay is the
    * box SMA whatever was asked, and the SMA is also the reference for the short-entry zone and the cover cue.
@@ -417,7 +419,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   for (let i = prefix ? pb!.length : 0; !hasVol && i < closedBars.length; i++) hasVol = closedBars[i].vol > 0;
   const vwapAvailable = opts.volume !== false && hasVol;
   const overlayKind: Overlay = vwapAvailable ? overlay : 'sma';
-  const vwapNow = vw1.length ? vw1[vw1.length - 1] : null;
+  const vwapNow = vwapAvailable && vw1.length ? vw1[vw1.length - 1] : null;
   if (renko) return renkoModel();
   const boxSma = boxSmaOf(columns, box, smaPeriod);
   // The reference the short-entry zone (below it) and the cover cue (above it) are measured against: VWAP when the instrument
@@ -445,6 +447,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
     exits: exitTags(columns, bars, reference),
     overlay: overlayLine,
     overlayNow,
+    vwapNow,
     vwapAvailable,
     overlayKind,
     smaPeriod,
@@ -505,6 +508,7 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
       exits: [],
       overlay: overlayLine,
       overlayNow,
+      vwapNow,
       vwapAvailable,
       overlayKind,
       smaPeriod,

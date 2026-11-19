@@ -615,8 +615,9 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const { cell, colW, yMin, yMax, plotW, contentW, contentH, offsetX, padY, padR } = L;
   // stable between crosshair moves, so the memoised rail does not re-render on each one
   const yOf = useCallback((p: number) => padY + PAD_TOP + ((yMax - p) / box) * cell, [padY, yMax, box, cell]);
-  // Renko only: the current VWAP as a horizontal level (shown with the VWAP line; never for the SMA).
-  const vwapLevelY = renko && overlayShown && kind === 'vwap' && overlayNow !== null && columns.length > 0 ? yOf(overlayNow) : null;
+  // Renko only: the current VWAP as a horizontal level, with either overlay (VWAP or SMA) shown; none without volume (an index).
+  const vwapNow = model.vwapNow;
+  const vwapLevelY = renko && overlayShown && vwapNow !== null && columns.length > 0 ? yOf(vwapNow) : null;
   const xOf = (j: number) => offsetX + j * colW;
   const vis = columns;
   const first = 0;
@@ -1755,10 +1756,10 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
                  onPointerUp={() => { axisDragRef.current = null; }}
                  onPointerCancel={() => { axisDragRef.current = null; }}>
               <g data-testid="pnf-axis">{priceAxisText}</g>
-              {vwapLevelY !== null && overlayNow !== null && (
+              {vwapLevelY !== null && vwapNow !== null && (
                 <g data-testid="pnf-vwap-tag">
                   <rect x={2} y={vwapLevelY - 8} width={AXIS_W - 4} height={16} rx={2} className="fill-amber-300" />
-                  <text x={6} y={vwapLevelY + 3.5} className="fill-oncolor-dark font-mono" fontSize={10} fontWeight={700}>{fmt(overlayNow, axisDigits)}</text>
+                  <text x={6} y={vwapLevelY + 3.5} className="fill-oncolor-dark font-mono" fontSize={10} fontWeight={700}>{fmt(vwapNow, axisDigits)}</text>
                 </g>
               )}
               {/* live price tag: the brightest-text / page-ground token pair, so it flips with the theme and is never mistaken for
