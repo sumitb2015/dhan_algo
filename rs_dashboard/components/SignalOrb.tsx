@@ -5,6 +5,7 @@ import { ChevronDown, ChevronUp, Power, Settings2, ShieldAlert } from 'lucide-re
 import NavBar from '@/components/NavBar';
 import { Orb } from '@/components/signalOrb/Orb';
 import { OrbDrawer } from '@/components/signalOrb/OrbDrawer';
+import { ReplayCard } from '@/components/signalOrb/ReplayCard';
 import { useOrbEngine } from '@/components/signalOrb/useOrbEngine';
 import { istClock } from '@/lib/istTime';
 import { istDateIso } from '@/lib/nseHolidays';
@@ -55,11 +56,20 @@ export default function SignalOrb() {
           <div>
             <h1 className="text-[11px] font-black uppercase tracking-[0.45em] text-zinc-100">Signal Orb</h1>
             <p className="font-mono text-[10px] text-zinc-500">
-              {contract ? `${contract.symbol} FUT ${contract.expiry ? expiryLabel(contract.expiry) : ''}` : 'resolving contract…'} · {ledger ? `${ledger.config.timeframe}m` : ''}
+              {contract ? `${contract.symbol} FUT ${contract.expiry ? expiryLabel(contract.expiry) : ''}` : 'resolving contract…'} · {ledger ? (ledger.config.timeframe === 60 ? '1h' : `${ledger.config.timeframe}m`) : ''}
             </p>
           </div>
         </div>
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+          <span title={e.priceFresh ? 'Live price is updating' : 'No new price for 30 s - entries are paused (exits still run)'}
+            className={cn('flex items-center gap-1.5 whitespace-nowrap rounded border px-2 py-0.5 font-mono text-[10px] font-bold',
+              e.priceFresh ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400' : 'border-amber-500/40 bg-amber-500/10 text-amber-400')}>
+            <span className={cn('h-1.5 w-1.5 rounded-full', e.priceFresh ? 'bg-emerald-400' : 'bg-amber-400')} aria-hidden />
+            {e.priceFresh ? 'LIVE' : 'STALE'}
+          </span>
+          {ledger && !e.isLeader && (
+            <span title="Another open tab runs the engine; this one only watches" className="whitespace-nowrap rounded border border-zinc-700 px-2 py-0.5 font-mono text-[10px] font-bold text-zinc-400">VIEW ONLY</span>
+          )}
           <span className="whitespace-nowrap rounded border border-zinc-800 bg-zinc-900/60 px-2 py-0.5 font-mono text-[10px] font-bold text-zinc-400">DATA: {dataDate}</span>
           {ledger && (
             <span className={cn('whitespace-nowrap rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-bold tracking-widest',
@@ -100,7 +110,8 @@ export default function SignalOrb() {
           </div>
         )}
 
-        <Orb signal={ev.signal} readings={ev.readings} position={position} pnl={e.openPnl} ltp={e.price} busy={e.busy} />
+        <Orb signal={ev.signal} readings={ev.readings} position={position} pnl={e.openPnl} ltp={e.price} busy={e.busy}
+          since={ev.sinceT ? istClock(ev.sinceT * 1000).slice(0, 5) : null} progress={1 - e.secsToClose / e.barSecs} secsLeft={e.secsToClose} />
 
         {/* indicator readout */}
         <div className="flex max-w-xl flex-wrap justify-center gap-1.5">
@@ -149,6 +160,7 @@ export default function SignalOrb() {
             {live?.status === 'open' && <span>Entry <strong className="text-zinc-300">{live.entry.toFixed(0)}</strong></span>}
           </div>
         )}
+        {ledger && <ReplayCard r={e.replayed} tf={ledger.config.timeframe} />}
       </main>
 
       {/* log ribbon */}
@@ -174,7 +186,7 @@ export default function SignalOrb() {
       )}
 
       {ledger && e.state && (
-        <OrbDrawer open={drawer} onClose={() => setDrawer(false)} ledger={ledger} locked={!!live} maxLots={e.state.maxLots}
+        <OrbDrawer open={drawer} onClose={() => setDrawer(false)} ledger={ledger} locked={!!live} maxLots={e.state.maxLots} replayed={e.replayed}
           onPatch={patch} onMode={setMode} onResetSim={async () => setErr(await e.op({ op: 'resetSim' }))} error={err} />
       )}
       {err && !drawer && (

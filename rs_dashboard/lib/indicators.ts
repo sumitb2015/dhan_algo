@@ -19,7 +19,8 @@ export function smaArray(values: number[], period: number): (number | null)[] {
 
 /**
  * Stochastic RSI (TradingView `ta.stoch(rsi, rsi, rsi, stochPeriod)` smoothed): stoch = (RSI - lowest RSI) / (highest - lowest) x 100
- * over `stochPeriod` RSI values, K = SMA(stoch, k), D = SMA(K, d). A flat RSI window (highest = lowest) reads 0, as TradingView's does.
+ * over `stochPeriod` RSI values, K = SMA(stoch, k), D = SMA(K, d). A flat RSI window (highest = lowest) is null: Pine divides by
+ * zero there, which is na, and the K / D SMAs over it are na too (TradingView draws a gap).
  * Null until every input of a value exists.
  */
 export function stochRsiArray(values: number[], rsiPeriod = 14, stochPeriod = 14, k = 3, d = 3): { k: (number | null)[]; d: (number | null)[] } {
@@ -35,7 +36,7 @@ export function stochRsiArray(values: number[], rsiPeriod = 14, stochPeriod = 14
       if (r < lo) lo = r;
       if (r > hi) hi = r;
     }
-    if (ok) stoch[i] = hi === lo ? 0 : ((rsi[i] as number) - lo) / (hi - lo) * 100;
+    if (ok && hi !== lo) stoch[i] = ((rsi[i] as number) - lo) / (hi - lo) * 100;   // flat window: Pine's x / 0 is na
   }
   const smaNullable = (xs: (number | null)[], p: number) => xs.map((_, i) => {
     if (i - p + 1 < 0) return null;
@@ -207,8 +208,55 @@ export function supertrendSeries(
   rows: { high: number; low: number; close: number }[],
   period = 10,
   mult = 3,
+  opts: { pine?: boolean } = {},
 ): { line: number | null; dir: 1 | -1 | null }[] {
+  if (opts.pine) return supertrendPine(rows, period, mult);
   return supertrendResume(rows.length, i => rows[i], period, mult, null).out;
+}
+
+/**
+ * Supertrend exactly as TradingView's Pine `ta.supertrend(factor, atrPeriod)` computes it (opt-in: `supertrendSeries(..., { pine: true })`).
+ * It differs from the default path in three places, and it only matters near the start of a series or in a flat, quiet stretch:
+ *  - ATR is `ta.atr` = `ta.rma(ta.tr(true), n)`: TR on bar 0 is high - low, and the RMA is seeded with the SMA of TR[0..n-1], so the
+ *    first value is on bar n-1 (the default seeds from TR[1..n], first value on bar n);
+ *  - the first bar starts DOWN (Pine: `na(atr[1]) => direction := 1`);
+ *  - the flip asks which band the previous line was on: from the upper band (down) it turns up only when close > upper; from the lower
+ *    band (up) it turns down only when close < lower. When the ratcheted bands have CROSSED (upper < lower: seen in flat CRUDEOILM
+ *    minutes) a close between them flips in Pine; the default path checks `close > upper` first and stays up.
+ * Direction here is 1 = up, -1 = down (Pine's own is the reverse). Measured against a literal Pine port on 51,969 CRUDEOILM
+ * 1-minute bars (2026-11-19): identical on every bar.
+ */
+function supertrendPine(rows: { high: number; low: number; close: number }[], period: number, mult: number): { line: number | null; dir: 1 | -1 | null }[] {
+  const n = rows.length;
+  const out: { line: number | null; dir: 1 | -1 | null }[] = [];
+  if (period < 1) return rows.map(() => ({ line: null, dir: null }));
+  const tr = (i: number) => {
+    const r = rows[i];
+    if (i === 0) return r.high - r.low;
+    const pc = rows[i - 1].close;
+    return Math.max(r.high - r.low, Math.abs(r.high - pc), Math.abs(r.low - pc));
+  };
+  let atr = 0, sum = 0, upper = 0, lower = 0, line = 0;
+  let dir: 1 | -1 = -1;
+  for (let i = 0; i < n; i++) {
+    const r = rows[i];
+    if (i < period - 1) { sum += tr(i); out.push({ line: null, dir: null }); continue; }
+    if (i === period - 1) { sum += tr(i); atr = sum / period; } else atr = (1 / period) * tr(i) + (1 - 1 / period) * atr;
+    const hl2 = (r.high + r.low) / 2;
+    const bu = hl2 + mult * atr, bl = hl2 - mult * atr;
+    const pc = i > 0 ? rows[i - 1].close : NaN;           // Pine: close[1] is na on bar 0, and na comparisons are false
+    const first = i === period - 1;
+    const prevUpper = first ? 0 : upper, prevLower = first ? 0 : lower;   // nz(band[1]): the band is na before the first ATR
+    const prevLine = line;
+    lower = bl > prevLower || pc < prevLower ? bl : prevLower;
+    upper = bu < prevUpper || pc > prevUpper ? bu : prevUpper;
+    if (first) dir = -1;
+    else if (prevLine === prevUpper) dir = r.close > upper ? 1 : -1;
+    else dir = r.close < lower ? -1 : 1;
+    line = dir === 1 ? lower : upper;
+    out.push({ line, dir });
+  }
+  return out;
 }
 
 /** Where a Supertrend run stopped: `next` is the first row not yet read; the RMA ATR, the trailing bands and the direction. */

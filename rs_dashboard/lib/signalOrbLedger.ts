@@ -2,7 +2,7 @@
 // these under one in-process chain; the browser only sends config / mode / engine ops and asks the trade route to act. Real money:
 // the ledger is the authority for what THIS page opened (an exit closes only its own units, never the broker's whole net).
 
-import { sanitizeSpec, hhmmToMin, defaultSpec, type IndicatorSpec, type Side, type Timeframe } from './signalOrb.ts';
+import { TIMEFRAMES, sanitizeSpec, hhmmToMin, defaultSpec, type IndicatorSpec, type Side, type Timeframe } from './signalOrb.ts';
 import type { Target } from './pnfTarget.ts';
 
 export type OrbMode = 'SIM' | 'REAL';
@@ -134,8 +134,8 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
     next.indicators = specs as IndicatorSpec[];
   }
   if (p.timeframe !== undefined) {
-    if (p.timeframe !== 1 && p.timeframe !== 3 && p.timeframe !== 5) return 'timeframe must be 1, 3 or 5';
-    next.timeframe = p.timeframe;
+    if (!TIMEFRAMES.includes(p.timeframe as Timeframe)) return `timeframe must be one of ${TIMEFRAMES.join(', ')} minutes`;
+    next.timeframe = p.timeframe as Timeframe;
   }
   if (p.lots !== undefined) {
     const n = Number(p.lots);

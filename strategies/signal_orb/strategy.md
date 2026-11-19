@@ -4,7 +4,7 @@ Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest ye
 
 ## Rules
 - **Instrument:** the CRUDEOILM future with the nearest expiry *after* today (IST). A contract is never opened on its expiry day. An open position keeps its own contract until it is closed.
-- **Bars:** 1-minute bars from the P&F feed (`usePnfFeed`: history plus the live LTP from the WebSocket bridge), resampled to 1, 3 or 5 minutes on the epoch grid (09:00 IST lies on it). **Only closed bars are read.**
+- **Bars:** 1-minute bars from the P&F feed (`usePnfFeed`: history plus the live LTP from the WebSocket bridge), resampled to 1, 3, 5, 15 or 60 minutes on the IST clock. **Only closed bars are read.**
 - **Indicators.** Each one votes +1, −1 or 0. A warming-up indicator votes 0.
 
 | Indicator | Default | +1 (bull) | −1 (bear) |
@@ -15,7 +15,18 @@ Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest ye
 | RSI | 14, 55 / 45 | RSI > 55 | RSI < 45 (in between = 0) |
 | Stoch RSI | 14, 14, K3, D3, 80 / 20 | K > D and K < 80 | K < D and K > 20 |
 
-  EMA is `emaSmaSeeded` (TradingView's seed). Supertrend is `supertrendSeries`, and **it runs on closes only (high = low = close), because the feed has no high or low**, so it will not exactly match a TradingView candle Supertrend. Stoch RSI is `stochRsiArray` in `lib/indicators.ts`.
+  **Matching TradingView.** Every indicator follows TradingView's Pine definitions:
+  - EMA is `emaSmaSeeded` (`ta.ema`).
+  - RSI is `rsiArray` (`ta.rsi`).
+  - Stoch RSI is `stochRsiArray`, matching TradingView's built-in Stoch RSI. A flat RSI window gives na, because Pine's x / 0 is na.
+  - Supertrend is `supertrendSeries(..., { pine: true })`, the exact `ta.supertrend`: ATR from `ta.rma(ta.tr(true))` with TR on bar 0 = high − low, a DOWN start, and the flip decided by the previous line's band. That last rule matters when the ratcheted bands **cross** in a flat stretch. The default `supertrendSeries` path (used by Renko, Breakdown Scalper, Algo Lab, Bearish Strikes, RS Strategy) is unchanged and differs there; `lib/indicatorsPine.test.ts` pins both.
+  - Bars carry the true high / low through resampling, and sit on the **IST clock**, so hourly bars start 09:00, 10:00, … as TradingView draws MCX.
+
+  **Verified on 2026-11-19:**
+  - Against a literal Pine port on 51,981 CRUDEOILM DEC 1-minute bars: the Supertrend line was identical on every bar, and direction from bar 9 (bars 0–8 are warm-up). EMA and RSI were identical (≤ 6e-14 rounding).
+  - Against a TradingView screenshot of the 1-hour chart (forming bar O 7820 H 7857 L 7757 C 7780): EMA 9 = 7780.80, EMA 21 = 7786.36, ST(10,2) = 7684.68 up. Both match to the paisa.
+  - Stoch RSI differs only in illiquid flat stretches. There the value depends on 1e-14 float rounding, TradingView itself shows na or noise, and the Orb's vote is neutral.
+  - The Orb reads only CLOSED bars, so it can differ from a chart's still-forming last bar until that bar closes.
 - **Orb colour:** green (BULL) when *every* active indicator votes +1, red (BEAR) when every one votes −1, gray otherwise. With no indicators the orb is gray.
 - **Follower** (`decideOrb`, checked in this order):
   1. Cutoff (default 23:00 IST): exit. This runs even with no price; the ledger then books the last price seen.
@@ -44,6 +55,13 @@ Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest ye
 
 ## Known limits
 - Browser-only engine: there is no server-side stop watcher.
-- Supertrend runs on closes only.
-- There is no backtest.
+- There is no real backtest. The page shows a **replay** (`replay()` in `lib/signalOrb.ts`) of the last 20 sessions with the current rules: the same `decideOrb`, one decision per closed bar at its close, the stop checked on closes, no costs or slippage. It is a rough flip-rate / direction check.
+- **What the replay found with the defaults (EMA 9 + ST 10,2) on the stored CRUDEOILM history, 62 sessions to 2026-11-19, gross:**
+
+  | Timeframe | Orders / day | Points / day | Green days |
+  |---|---|---|---|
+  | 1m | ~126 | −285 | 9 / 62 |
+  | 5m | ~21 | −75 | 18 / 62 |
+
+  Do not run the defaults in REAL without changing them.
 - The Zerodha MCX futures quantity is unconfirmed against a live fill (see `lib/pnfOrderServer.ts`).

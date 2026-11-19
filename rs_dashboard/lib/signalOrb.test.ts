@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stochRsiArray } from './indicators.ts';
 import {
-  closedBars, consensus, decideOrb, defaultSpec, evaluate, nextBlock, positionPnl, readIndicator, sanitizeSpec, type DecideInput, type OrbBar,
+  replay, closedBars, consensus, decideOrb, defaultSpec, evaluate, nextBlock, positionPnl, readIndicator, sanitizeSpec, type DecideInput, type OrbBar,
 } from './signalOrb.ts';
 
-const series = (closes: number[], t0 = 1_700_000_000 - (1_700_000_000 % 300)): OrbBar[] => closes.map((c, i) => ({ t: t0 + i * 60, close: c }));
+const series = (closes: number[], t0 = 1_700_000_000 - (1_700_000_000 % 300)): OrbBar[] => closes.map((c, i) => ({ t: t0 + i * 60, close: c, high: c + 1, low: c - 1 }));
 const up = Array.from({ length: 60 }, (_, i) => 100 + i);
 const down = Array.from({ length: 60 }, (_, i) => 200 - i);
 
@@ -48,7 +48,9 @@ test('stochRsiArray: hand-checked small case and warm-up nulls', () => {
   assert.equal(s.k[3], 0);
   assert.equal(s.k[4], 100);
   assert.deepEqual(s.d, s.k);                      // D = SMA1(K)
-  const t = stochRsiArray(up, 14, 14, 3, 3);
+  // a choppy series (a steady rise keeps RSI flat at 100, which Pine leaves na)
+  const chop = Array.from({ length: 60 }, (_, i) => 100 + (i % 5) * (i % 2 ? 1 : -1) + i * 0.1);
+  const t = stochRsiArray(chop, 14, 14, 3, 3);
   assert.equal(t.d[14 + 13 + 2 + 2 - 1], null);    // one bar before the first D
   assert.notEqual(t.d[14 + 13 + 2 + 2], null);
 });
@@ -115,4 +117,52 @@ test('sanitizeSpec bounds and rejects', () => {
 test('positionPnl: points x barrels x lots', () => {
   assert.equal(positionPnl('LONG', 6000, 6010, 1, 10), 100);
   assert.equal(positionPnl('SHORT', 6000, 6010, 2, 10), -200);
+});
+
+test('closedBars carries the true range through resampling; a bad or missing range falls back to the close', () => {
+  const t0 = 1_700_000_100 - (1_700_000_100 % 300);
+  const m = [
+    { t: t0, straddle: 100, h: 104, l: 99 },
+    { t: t0 + 60, straddle: 102, h: 103, l: 95 },
+    { t: t0 + 120, straddle: 101 },                 // no range
+    { t: t0 + 180, straddle: 103, h: 102, l: 101 }, // close outside its range: not trusted
+    { t: t0 + 240, straddle: 100, h: 100, l: 100 },
+  ];
+  const [b] = closedBars(m, 5, t0 + 300);
+  assert.deepEqual(b, { t: t0, close: 100, high: 104, low: 95 });
+  const one = closedBars(m, 1, t0 + 300);
+  assert.equal(one[2].high, 101);
+  assert.equal(one[3].high, 103);
+  assert.equal(one[3].low, 103);
+});
+
+test('evaluate reports when the current colour began', () => {
+  const spec = [defaultSpec('ema', 'e')];
+  const ev = evaluate(spec, series([...down.slice(0, 30), ...up.slice(0, 30).map(x => x + 100)]));
+  assert.equal(ev.signal, 'BULL');
+  assert.ok(ev.sinceT !== null);
+});
+
+test('replay: a steady trend enters once and books the move; a reversal counts two orders', () => {
+  // 09:30 IST on one day, 1-minute bars
+  const t0 = Date.UTC(2026, 10, 18, 4, 0) / 1000;
+  const bars = [...up, ...down].map((c, i) => ({ t: t0 + i * 60, close: c, high: c + 0.5, low: c - 0.5 }));
+  const r = replay([defaultSpec('ema', 'e')], bars, { times: { entryStart: '09:15', entryEnd: '22:45', eodExit: '23:00' }, stopPts: 0, lots: 1, unitsPerLot: 10 });
+  assert.ok(r);
+  assert.equal(r!.sessions, 1);
+  assert.equal(r!.ordersPerDay, 3);             // enter long, then reverse to short (close + open)
+  assert.ok(r!.days[0].points > 0);
+  assert.equal(r!.rupeesPerDay, r!.pointsPerDay * 10);
+  assert.equal(replay([], bars, { times: { entryStart: '09:15', entryEnd: '22:45', eodExit: '23:00' }, stopPts: 0, lots: 1, unitsPerLot: 10 }), null);
+});
+
+test('closedBars: hourly bars start on the IST hour (09:00, 10:00 ...), as TradingView draws MCX', () => {
+  const t0 = Date.UTC(2026, 10, 19, 3, 30) / 1000;          // 09:00 IST
+  const m = Array.from({ length: 130 }, (_, i) => ({ t: t0 + i * 60, straddle: 100 + i, h: 101 + i, l: 99 + i }));
+  const h = closedBars(m, 60, t0 + 130 * 60);
+  assert.equal(h.length, 2);
+  assert.equal(h[0].t, t0);                                   // 09:00-09:59
+  assert.equal(h[1].t, t0 + 3600);                            // 10:00-10:59
+  assert.deepEqual([h[0].high, h[0].low, h[0].close], [160, 99, 159]);
+  assert.equal(closedBars(m, 15, t0 + 130 * 60)[0].t, t0);    // 15m on the same grid
 });

@@ -7,7 +7,8 @@ import { emaSmaSeeded, rsiArray, stochRsiArray, supertrendSeries } from './indic
 export type Vote = 1 | -1 | 0;
 export type Signal = 'BULL' | 'BEAR' | 'NEUTRAL';
 export type Side = 'LONG' | 'SHORT';
-export type Timeframe = 1 | 3 | 5;
+export type Timeframe = 1 | 3 | 5 | 15 | 60;
+export const TIMEFRAMES: Timeframe[] = [1, 3, 5, 15, 60];
 
 export type IndicatorSpec =
   | { id: string; kind: 'ema'; period: number }
@@ -18,8 +19,8 @@ export type IndicatorSpec =
 
 export type IndicatorKind = IndicatorSpec['kind'];
 
-/** A closed bar: one close per bucket (the P&F feed is close-only, so Supertrend reads high = low = close). */
-export type OrbBar = { t: number; close: number };
+/** A closed bar: the bucket's close and true range (the feed's 1-min `h` / `l`; a bar without them falls back to its close). */
+export type OrbBar = { t: number; close: number; high: number; low: number };
 
 export const KIND_LABEL: Record<IndicatorKind, string> = {
   ema: 'EMA', emaCross: 'EMA Cross', supertrend: 'Supertrend', rsi: 'RSI', stochRsi: 'Stoch RSI',
@@ -54,6 +55,7 @@ const num = (v: unknown, lo: number, hi: number, d: number) => {
   return Number.isFinite(n) && n >= lo && n <= hi ? n : d;
 };
 const ID_RE = /^[a-z0-9-]{1,24}$/i;
+const IST_S = 19_800;
 
 /** Any stored / sent spec -> a bounded valid spec, or null. */
 export function sanitizeSpec(v: unknown): IndicatorSpec | null {
@@ -85,45 +87,53 @@ export function sanitizeSpec(v: unknown): IndicatorSpec | null {
 
 export type IndicatorReading = { id: string; label: string; vote: Vote; value: string };
 
-const fmt = (n: number | null | undefined, dp = 1) => (n === null || n === undefined || !Number.isFinite(n) ? '—' : n.toFixed(dp));
+const fmt = (n: number | null | undefined, dp = 2) => (n === null || n === undefined || !Number.isFinite(n) ? '—' : n.toFixed(dp));
 
-/** One indicator's vote on the LAST bar of `bars` (the caller passes closed bars only). 0 = warming up or no opinion. */
-export function readIndicator(spec: IndicatorSpec, bars: OrbBar[]): IndicatorReading {
+/** One indicator over every bar: its vote per bar (0 = warming up or no opinion) and the value shown for it. */
+export function indicatorSeries(spec: IndicatorSpec, bars: OrbBar[]): { votes: Vote[]; value: (i: number) => string } {
   const closes = bars.map(b => b.close);
   const n = closes.length;
-  const last = n ? closes[n - 1] : null;
-  const label = specLabel(spec);
-  const out = (vote: Vote, value: string): IndicatorReading => ({ id: spec.id, label, vote, value });
-  if (!n || last === null) return out(0, '—');
+  const votes: Vote[] = new Array(n).fill(0);
   switch (spec.kind) {
     case 'ema': {
-      const e = emaSmaSeeded(closes, spec.period)[n - 1];
-      if (e === null) return out(0, 'warming');
-      return out(last > e ? 1 : last < e ? -1 : 0, fmt(e));
+      const e = emaSmaSeeded(closes, spec.period);
+      for (let i = 0; i < n; i++) { const x = e[i]; if (x !== null) votes[i] = closes[i] > x ? 1 : closes[i] < x ? -1 : 0; }
+      return { votes, value: i => (e[i] === null ? 'warming' : fmt(e[i])) };
     }
     case 'emaCross': {
-      const f = emaSmaSeeded(closes, spec.fast)[n - 1], s = emaSmaSeeded(closes, spec.slow)[n - 1];
-      if (f === null || s === null) return out(0, 'warming');
-      return out(f > s ? 1 : f < s ? -1 : 0, `${fmt(f)} / ${fmt(s)}`);
+      const f = emaSmaSeeded(closes, spec.fast), s = emaSmaSeeded(closes, spec.slow);
+      for (let i = 0; i < n; i++) { const a = f[i], b = s[i]; if (a !== null && b !== null) votes[i] = a > b ? 1 : a < b ? -1 : 0; }
+      return { votes, value: i => (f[i] === null || s[i] === null ? 'warming' : `${fmt(f[i])} / ${fmt(s[i])}`) };
     }
     case 'supertrend': {
-      const st = supertrendSeries(closes.map(c => ({ high: c, low: c, close: c })), spec.period, spec.mult)[n - 1];
-      if (!st || st.dir === null || st.line === null) return out(0, 'warming');
-      return out(st.dir === 1 ? 1 : -1, fmt(st.line));
+      // pine: TradingView's exact ta.supertrend (warm-up and the crossed-band flip), so the orb matches the chart
+      const st = supertrendSeries(bars, spec.period, spec.mult, { pine: true });
+      for (let i = 0; i < n; i++) { const d = st[i]?.dir; if (d === 1 || d === -1) votes[i] = d; }
+      return { votes, value: i => (st[i]?.line == null ? 'warming' : fmt(st[i].line)) };
     }
     case 'rsi': {
-      const r = rsiArray(closes, spec.period)[n - 1];
-      if (r === null) return out(0, 'warming');
-      return out(r > spec.upper ? 1 : r < spec.lower ? -1 : 0, fmt(r));
+      const r = rsiArray(closes, spec.period);
+      for (let i = 0; i < n; i++) { const x = r[i]; if (x !== null) votes[i] = x > spec.upper ? 1 : x < spec.lower ? -1 : 0; }
+      return { votes, value: i => (r[i] === null ? 'warming' : fmt(r[i])) };
     }
     case 'stochRsi': {
       const s = stochRsiArray(closes, spec.rsiPeriod, spec.stochPeriod, spec.k, spec.d);
-      const k = s.k[n - 1], d = s.d[n - 1];
-      if (k === null || d === null) return out(0, 'warming');
-      const vote: Vote = k > d && k < spec.upper ? 1 : k < d && k > spec.lower ? -1 : 0;
-      return out(vote, `${fmt(k)} / ${fmt(d)}`);
+      for (let i = 0; i < n; i++) {
+        const k = s.k[i], d = s.d[i];
+        if (k !== null && d !== null) votes[i] = k > d && k < spec.upper ? 1 : k < d && k > spec.lower ? -1 : 0;
+      }
+      return { votes, value: i => (s.k[i] === null || s.d[i] === null ? 'warming' : `${fmt(s.k[i])} / ${fmt(s.d[i])}`) };
     }
   }
+}
+
+/** One indicator's vote on the LAST bar of `bars` (the caller passes closed bars only). */
+export function readIndicator(spec: IndicatorSpec, bars: OrbBar[]): IndicatorReading {
+  const label = specLabel(spec);
+  if (!bars.length) return { id: spec.id, label, vote: 0, value: '—' };
+  const s = indicatorSeries(spec, bars);
+  const i = bars.length - 1;
+  return { id: spec.id, label, vote: s.votes[i], value: s.value(i) };
 }
 
 /** BULL / BEAR only when every active indicator votes the same non-zero way; none active or any 0 = NEUTRAL. */
@@ -134,27 +144,106 @@ export function consensus(votes: Vote[]): Signal {
   return 'NEUTRAL';
 }
 
-/** 1-minute bars -> closed `tf`-minute bars at `nowS`. A bucket is closed once nowS >= its end. MCX opens 09:00 IST (03:30 UTC),
- *  which is on both the 3- and 5-minute epoch grid, so buckets are floor(t / (tf*60)). */
-export function closedBars(bars1m: { t: number; straddle: number }[], tf: Timeframe, nowS: number): OrbBar[] {
+/** 1-minute bars -> closed `tf`-minute bars at `nowS`. A bucket is closed once nowS >= its end. Buckets sit on the IST clock
+ *  (floor((t + 5:30) / size)), as TradingView draws MCX: hourly bars start 09:00, 10:00, ... IST. For 1 / 3 / 5 / 15 minutes that
+ *  is the same grid as UTC; only the hour needs the offset. */
+export function closedBars(bars1m: { t: number; straddle: number; h?: number; l?: number }[], tf: Timeframe, nowS: number): OrbBar[] {
   const size = tf * 60;
   const out: OrbBar[] = [];
   for (const b of bars1m) {
-    if (!(b.straddle > 0) || !Number.isFinite(b.straddle)) continue;
-    const t = Math.floor(b.t / size) * size;
-    if (out.length && out[out.length - 1].t === t) out[out.length - 1].close = b.straddle;
-    else out.push({ t, close: b.straddle });
+    const c = b.straddle;
+    if (!(c > 0) || !Number.isFinite(c)) continue;
+    // a range that does not contain the close is not trusted (a stitched or bad row): the close stands in for it
+    const ok = b.h !== undefined && b.l !== undefined && Number.isFinite(b.h) && Number.isFinite(b.l) && b.l > 0 && b.l <= c && c <= b.h;
+    const hi = ok ? b.h! : c, lo = ok ? b.l! : c;
+    const t = Math.floor((b.t + IST_S) / size) * size - IST_S;
+    const cur = out[out.length - 1];
+    if (cur && cur.t === t) { cur.close = c; cur.high = Math.max(cur.high, hi); cur.low = Math.min(cur.low, lo); }
+    else out.push({ t, close: c, high: hi, low: lo });
   }
   while (out.length && nowS < out[out.length - 1].t + size) out.pop();
   return out;
 }
 
-export type Evaluation = { signal: Signal; barT: number | null; readings: IndicatorReading[]; lastClose: number | null };
+export type Evaluation = {
+  signal: Signal; barT: number | null; readings: IndicatorReading[]; lastClose: number | null;
+  /** Start time of the bar on which the current colour began (null: no bars, or it has held for the whole window). */
+  sinceT: number | null;
+};
+
+/** Consensus per bar from each indicator's vote series. */
+export function signalSeries(series: { votes: Vote[] }[], n: number): Signal[] {
+  const out: Signal[] = new Array(n);
+  for (let i = 0; i < n; i++) out[i] = consensus(series.map(s => s.votes[i]));
+  return out;
+}
 
 export function evaluate(specs: IndicatorSpec[], bars: OrbBar[]): Evaluation {
-  const readings = specs.map(s => readIndicator(s, bars));
-  const last = bars[bars.length - 1];
-  return { signal: consensus(readings.map(r => r.vote)), barT: last ? last.t : null, readings, lastClose: last ? last.close : null };
+  const n = bars.length;
+  const series = specs.map(s => indicatorSeries(s, bars));
+  const readings: IndicatorReading[] = specs.map((s, k) => ({
+    id: s.id, label: specLabel(s), vote: n ? series[k].votes[n - 1] : 0, value: n ? series[k].value(n - 1) : '—',
+  }));
+  const sig = signalSeries(series, n);
+  const signal = n ? sig[n - 1] : 'NEUTRAL';
+  let j = n - 1;
+  while (j > 0 && sig[j - 1] === signal) j--;
+  const last = bars[n - 1];
+  return { signal, barT: last ? last.t : null, readings, lastClose: last ? last.close : null, sinceT: n && j > 0 ? bars[j].t : null };
+}
+
+// ── Replay ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+export type ReplayDay = { day: string; orders: number; points: number };
+export type ReplaySummary = {
+  sessions: number; ordersPerDay: number; pointsPerDay: number; rupeesPerDay: number; greenDays: number; days: ReplayDay[];
+};
+
+/**
+ * The follower replayed over closed bars with the SAME decideOrb, one decision per bar at its close: entries, reversals, the
+ * stop (checked on the close, so a real stop fills earlier / worse) and the cutoff. Fills are the bar close with no slippage or
+ * costs. A rough "how often does this flip and which way does it lean" check, not a backtest.
+ */
+export function replay(specs: IndicatorSpec[], bars: OrbBar[], cfg: { times: OrbTimes; stopPts: number; lots: number; unitsPerLot: number }, sessions = 20): ReplaySummary | null {
+  const n = bars.length;
+  if (!n || !specs.length) return null;
+  const sig = signalSeries(specs.map(s => indicatorSeries(s, bars)), n);
+  const days = new Map<string, ReplayDay>();
+  let pos: { side: Side; entry: number } | null = null;
+  let blocked: Side | null = null;
+  let watermark = 0;
+  for (let i = 0; i < n; i++) {
+    const b = bars[i];
+    const ist = new Date((b.t + 19_800) * 1000);
+    const dayKey = ist.toISOString().slice(0, 10);
+    const minute = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    let d = days.get(dayKey);
+    if (!d) { d = { day: dayKey, orders: 0, points: 0 }; days.set(dayKey, d); }
+    blocked = nextBlock(blocked, sig[i]);
+    const dec = decideOrb({ signal: sig[i], barT: b.t, watermarkT: watermark, position: pos, price: b.close, minute, times: cfg.times, stopPts: cfg.stopPts, blockedSide: blocked });
+    const book = (p: { side: Side; entry: number }) => (p.side === 'LONG' ? b.close - p.entry : p.entry - b.close);
+    if (dec.action === 'exit' && pos) {
+      d.points += book(pos); d.orders++;
+      if (dec.kind === 'stop') blocked = pos.side;
+      pos = null;
+    } else if (dec.action === 'enter') {
+      pos = { side: dec.side, entry: b.close }; d.orders++; watermark = b.t; blocked = null;
+    } else if (dec.action === 'reverse' && pos) {
+      d.points += book(pos); d.orders += 2;
+      pos = { side: dec.side, entry: b.close }; watermark = b.t;
+    }
+  }
+  const traded = [...days.values()].filter(d => d.orders > 0).slice(-sessions);
+  if (!traded.length) return null;
+  const pts = traded.reduce((s, d) => s + d.points, 0);
+  return {
+    sessions: traded.length,
+    ordersPerDay: traded.reduce((s, d) => s + d.orders, 0) / traded.length,
+    pointsPerDay: pts / traded.length,
+    rupeesPerDay: (pts / traded.length) * cfg.lots * cfg.unitsPerLot,
+    greenDays: traded.filter(d => d.points > 0).length,
+    days: traded,
+  };
 }
 
 // ── Decision ───────────────────────────────────────────────────────────────────────────────────────────────────────────

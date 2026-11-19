@@ -6,7 +6,7 @@ import { istMinuteOfDay } from '@/lib/istTime';
 import { istDateIso } from '@/lib/nseHolidays';
 import { installAlertSoundUnlock, playEntryChime, playExitChime, playWarnChime } from '@/lib/alertSound';
 import type { Target } from '@/lib/pnfTarget';
-import { closedBars, decideOrb, evaluate, positionPnl, sideOf, type Evaluation, type Side } from '@/lib/signalOrb';
+import { closedBars, decideOrb, evaluate, positionPnl, replay, sideOf, type Evaluation, type ReplaySummary, type Side } from '@/lib/signalOrb';
 import { isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 
 // The Signal Orb's live engine (browser). Leader tab only (localStorage lock); the tick is rebuilt every render and called through
@@ -27,6 +27,9 @@ const EXIT_RETRY_MS = 5_000;
  * bars); the slowest default (Wilder RSI / StochRSI, EMA up to 400) has converged long before 3000 bars, and the tick stays cheap.
  */
 const READ_BARS_1M = 3_000;
+/** 1-minute bars the replay reads: ~20 MCX sessions (870 min each) plus indicator warm-up. */
+const REPLAY_BARS_1M = 20_000;
+export const REPLAY_SESSIONS = 20;
 
 export type OrbEngine = ReturnType<typeof useOrbEngine>;
 
@@ -113,6 +116,21 @@ export function useOrbEngine() {
     [closedKey, tf, nowMinute],
   );
   const ev: Evaluation = useMemo(() => evaluate(cfg?.indicators ?? [], closed), [cfg?.indicators, closed]);
+
+  // The same rules replayed over the recent sessions (lib/signalOrb.ts replay): recomputed when the history reloads or a rule
+  // changes, not per tick. Reads the bars up to the newest history load, so today's closed bars are in it.
+  const unitsPerLot = state?.unitsPerLot ?? 10;
+  const hasClock = nowMinute > 0;
+  const replayed: ReplaySummary | null = useMemo(() => {
+    if (!cfg || !nowMinute) return null;
+    return replay(cfg.indicators, closedBars(bars.slice(-REPLAY_BARS_1M), tf, nowMinute * 60 + 1),
+      { times: cfg, stopPts: cfg.stopPts, lots: cfg.lots, unitsPerLot }, REPLAY_SESSIONS);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [feed.histVersion, cfg, unitsPerLot, tf, hasClock]);
+
+  const barSecs = tf * 60;
+  // bars sit on the IST clock (lib/signalOrb.ts closedBars): an hourly bar closes on the IST hour, not the UTC one
+  const secsToClose = now ? barSecs - ((Math.floor(now / 1000) + 19_800) % barSecs) : barSecs;
 
   const lastBar = feed.bars[feed.bars.length - 1];
   const price = lastBar && lastBar.straddle > 0 ? lastBar.straddle : null;
@@ -231,6 +249,6 @@ export function useOrbEngine() {
 
   return {
     state, ledger, live: live as OrbRow | null, contract, feed, ev, price, priceFresh, openPnl, realised, now, isLeader, note, stateError,
-    armed, setArmed, busy, op, closeAndStop, today,
+    armed, setArmed, busy, op, closeAndStop, today, replayed, secsToClose, barSecs,
   };
 }

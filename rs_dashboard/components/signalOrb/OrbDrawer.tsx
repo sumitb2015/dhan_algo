@@ -4,8 +4,10 @@ import { useEffect, useRef, useState } from 'react';
 import { Plus, Trash2, X } from 'lucide-react';
 import { RuleNumInput } from '@/components/breakdownScalper/RuleNumInput';
 import { cn } from '@/lib/utils';
-import { KIND_LABEL, defaultSpec, specLabel, type IndicatorKind, type IndicatorSpec } from '@/lib/signalOrb';
+import { KIND_LABEL, TIMEFRAMES, defaultSpec, specLabel, type IndicatorKind, type IndicatorSpec } from '@/lib/signalOrb';
 import type { OrbConfig, OrbLedger } from '@/lib/signalOrbLedger';
+import type { ReplaySummary } from '@/lib/signalOrb';
+import { ReplayCard } from '@/components/signalOrb/ReplayCard';
 
 // Signal Orb settings: indicators (add / remove / tune), timeframe, stop, loss limit, times, broker, mode. Every field commits on
 // blur / Enter (dhan-commit-on-blur) and goes to the server as one setConfig patch; the server bounds and may refuse it.
@@ -78,7 +80,8 @@ function SpecEditor({ spec, onChange, onRemove }: { spec: IndicatorSpec; onChang
   );
 }
 
-export function OrbDrawer({ open, onClose, ledger, locked, maxLots, onPatch, onMode, onResetSim, error }: {
+export function OrbDrawer({ open, onClose, ledger, locked, maxLots, onPatch, onMode, onResetSim, error, replayed }: {
+  replayed: ReplaySummary | null;
   open: boolean;
   onClose: () => void;
   ledger: OrbLedger;
@@ -119,6 +122,10 @@ export function OrbDrawer({ open, onClose, ledger, locked, maxLots, onPatch, onM
           </button>
         </div>
         {error && <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</p>}
+        <div className="flex flex-col gap-1">
+          <ReplayCard r={replayed} tf={c.timeframe} compact />
+          <p className="px-1 text-[11px] text-zinc-500">Updates as you change the rules: the same follower over the recent sessions, fills at the bar close, before costs.</p>
+        </div>
 
         <Section title="Indicators — all must agree">
           <div className="flex flex-col gap-2">
@@ -137,15 +144,15 @@ export function OrbDrawer({ open, onClose, ledger, locked, maxLots, onPatch, onM
               </button>
             ))}
           </div>
-          <p className="mt-2 text-[11px] text-zinc-500">Price vs EMA · Supertrend direction (on 1-min closes) · fast vs slow EMA · RSI above / below its band · Stoch RSI K vs D outside its extremes.</p>
+          <p className="mt-2 text-[11px] text-zinc-500">Price vs EMA · Supertrend direction (TradingView&apos;s ta.supertrend on true high / low) · fast vs slow EMA · RSI above / below its band · Stoch RSI K vs D outside its extremes.</p>
         </Section>
 
         <Section title="Timing">
           <Row label="Timeframe" sub="Signals read only closed bars">
             <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
-              {([1, 3, 5] as const).map(tf => (
+              {TIMEFRAMES.map(tf => (
                 <button key={tf} type="button" onClick={() => onPatch({ timeframe: tf })}
-                  className={cn('rounded-md px-3 py-1 text-xs font-bold', FOCUS, c.timeframe === tf ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}>{tf}m</button>
+                  className={cn('rounded-md px-3 py-1 text-xs font-bold', FOCUS, c.timeframe === tf ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}>{tf === 60 ? '1h' : `${tf}m`}</button>
               ))}
             </div>
           </Row>

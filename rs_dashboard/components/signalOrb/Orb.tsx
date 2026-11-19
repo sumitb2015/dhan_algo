@@ -32,8 +32,13 @@ const STYLE = `
   .orb-breathe, .orb-spin, .orb-spin-back, .orb-float, .orb-ripple, .orb-dot { animation: none }
 }`;
 
-export function Orb({ signal, readings, position, pnl, ltp, busy }: {
+export function Orb({ signal, readings, position, pnl, ltp, busy, since, progress, secsLeft }: {
   signal: Signal;
+  /** IST HH:MM the current colour began, or null. */
+  since: string | null;
+  /** 0..1 of the current bar elapsed, and seconds until it closes (the next signal read). */
+  progress: number;
+  secsLeft: number;
   readings: IndicatorReading[];
   position: 'LONG' | 'SHORT' | 'FLAT' | 'PENDING';
   pnl: number | null;
@@ -84,6 +89,14 @@ export function Orb({ signal, readings, position, pnl, ltp, busy }: {
         <circle cx="50" cy="50" r="49" fill="none" stroke="var(--orb-c)" strokeOpacity=".22" strokeWidth=".3" strokeDasharray="12 6 2 6" />
       </svg>
 
+      {/* bar clock: a hairline that fills as the forming bar runs; the orb re-reads at its close */}
+      <svg viewBox="0 0 100 100" className="absolute inset-[13%] h-[74%] w-[74%] -rotate-90" aria-hidden>
+        <circle cx="50" cy="50" r="49" fill="none" stroke="var(--orb-c)" strokeOpacity=".12" strokeWidth=".8" />
+        <circle cx="50" cy="50" r="49" fill="none" stroke="var(--orb-hi)" strokeOpacity=".75" strokeWidth=".8" strokeLinecap="round"
+          pathLength={100} strokeDasharray="100 100" strokeDashoffset={(100 - Math.min(1, Math.max(0, progress)) * 100).toFixed(2)}
+          className={progress > 0.04 ? 'transition-[stroke-dashoffset] duration-1000 ease-linear' : undefined} />
+      </svg>
+
       {/* ripples on flip */}
       {ripples.map(id => (
         <div key={id} className="orb-ripple pointer-events-none absolute inset-[18%] rounded-full border-2" style={{ borderColor: 'var(--orb-c)' }} />
@@ -100,6 +113,7 @@ export function Orb({ signal, readings, position, pnl, ltp, busy }: {
           <div className="absolute left-[20%] top-[10%] h-[22%] w-[40%] rotate-[-18deg] rounded-full bg-oncolor opacity-20 blur-md" />
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-0.5 text-oncolor">
             <span className="text-[10px] font-bold uppercase tracking-[0.5em] opacity-90">{p.label}</span>
+            {since && <span className="font-mono text-[10px] font-semibold tracking-widest opacity-80">since {since}</span>}
             <span className="font-mono text-4xl font-black tracking-wider sm:text-5xl">{position}</span>
             {pnl !== null && (
               <span className="font-mono text-lg font-bold tabular-nums">
@@ -109,7 +123,9 @@ export function Orb({ signal, readings, position, pnl, ltp, busy }: {
             <span className="mt-1 rounded-full bg-oncolor-dark/25 px-2.5 py-0.5 font-mono text-xs tabular-nums">
               {ltp === null ? 'no price' : `LTP ${ltp.toFixed(0)}`}
             </span>
-            {busy && <span className="mt-1 text-[10px] font-bold uppercase tracking-[0.3em]">sending…</span>}
+            <span className="mt-0.5 font-mono text-[10px] tabular-nums opacity-80" title="Seconds until the bar closes and the signal is read again">
+              {busy ? 'sending…' : `next read ${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, '0')}`}
+            </span>
           </div>
         </div>
       </div>
