@@ -9,7 +9,7 @@ import {
 } from '@/lib/alertSound';
 import { orbAlert, type OrbAlertSnap, type OrbSound } from '@/lib/signalOrbChime';
 import type { Target } from '@/lib/pnfTarget';
-import { closedBars, decideOrb, evaluate, positionPnl, replay, sideOf, type Evaluation, type ReplaySummary, type Side } from '@/lib/signalOrb';
+import { ORB_CODE_VERSION, closedBars, decideOrb, evaluate, positionPnl, replay, sideOf, type Evaluation, type ReplaySummary, type Side } from '@/lib/signalOrb';
 import { isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 
 // The Signal Orb's live engine (browser). Leader tab only (localStorage lock); the tick is rebuilt every render and called through
@@ -17,7 +17,7 @@ import { isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/
 // (/api/signal-orb/trade); the server sizes, sends and books. Stale feed blocks entries, never exits; a missing price skips the stop
 // but not the cutoff. REAL entries also need this page load's ARM click, which is never saved.
 
-type StateReply = { success: boolean; ledger: OrbLedger; contract: Target | null; unitsPerLot: number; maxLots: number; today: string };
+type StateReply = { success: boolean; ledger: OrbLedger; contract: Target | null; unitsPerLot: number; maxLots: number; today: string; codeVersion?: string };
 
 const STATE_POLL_MS = 3_000;
 const LOCK_KEY = 'signalOrb.engineLock';
@@ -168,6 +168,8 @@ export function useOrbEngine() {
   const priceFresh = price !== null && priceAt > 0 && now - priceAt < PRICE_STALE_MS && !feed.stale;
 
   const today = now ? istDateIso(now) : '';
+  // the server runs newer code than this tab's bundle (a hot update that never arrived): reload before trading on it
+  const outdated = !!state?.codeVersion && state.codeVersion !== ORB_CODE_VERSION;
   const openPnl = live?.status === 'open' && price !== null ? positionPnl(live.side, live.entry, price, live.lots, live.unitsPerLot) : null;
   const realised = ledger && today ? realisedToday(ledger, ledger.mode, today) : 0;
 
@@ -253,12 +255,13 @@ export function useOrbEngine() {
     if (d.action === 'none') { setNote(ledger.engineActive ? d.reason : 'Auto is OFF'); return false; }
     // entries / reversals
     if (!ledger.engineActive) { setNote(ledger.haltReason ? `Halted: ${ledger.haltReason}` : 'Auto is OFF'); return false; }
+    if (outdated) { setNote('This tab runs an older version - reload it before new entries'); return false; }
     if (ledger.mode === 'REAL' && !armed) { setNote('REAL is not armed on this page load'); return false; }
     if (!priceFresh || price === null) { setNote('Price feed stale - no entries'); return false; }
     if (staleDay) { setNote('An earlier day\'s row is open - close it first'); return false; }
     if (realised <= -cfg.dailyLossLimit) { setNote('Daily loss limit reached'); return false; }
     setNote(d.reason);
-    void trade({ action: d.action, side: d.side, price, barT: ev.barT, reason: d.reason });
+    void trade({ action: d.action, side: d.side, price, barT: ev.barT, reason: d.reason, v: ORB_CODE_VERSION });
     return true;
   };
   const runEngine = () => {
@@ -297,6 +300,6 @@ export function useOrbEngine() {
   return {
     state, ledger, live: live as OrbRow | null, contract, feed, ev, price, priceFresh, openPnl, realised, now, isLeader, note, stateError,
     armed, setArmed, busy, op, closeAndStop, today, replayed, secsToClose, barSecs,
-    tradeSound, setTradeSound, alertSound, setAlertSound, soundReady,
+    tradeSound, setTradeSound, alertSound, setAlertSound, soundReady, outdated,
   };
 }

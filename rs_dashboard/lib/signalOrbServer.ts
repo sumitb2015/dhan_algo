@@ -7,7 +7,7 @@ import { brokerLegs, resolvePnfLegs } from '@/lib/pnfOrderServer';
 import { parsePnfOrder } from '@/lib/pnfOrderLogic';
 import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import type { Target } from '@/lib/pnfTarget';
-import type { Side } from '@/lib/signalOrb';
+import { ORB_CODE_VERSION, type Side } from '@/lib/signalOrb';
 import { ORB_STATE_FILE, readOrbLedger } from '@/lib/signalOrbFile';
 import {
   MAX_ORB_LOTS, MAX_REJECTS, addLog, applyClientOp, closeRow, halt, liveRow, patchRow, realisedToday, trimRows, type OrbLedger, type OrbRow,
@@ -49,7 +49,7 @@ export function orbState(): Reply {
   const live = liveRow(ledger);
   // An open row pins the contract (its exit must go to the contract it was opened on).
   const contract = live?.target ?? orbContract();
-  return { status: 200, body: { success: true, ledger, contract, unitsPerLot: UNITS_PER_LOT, maxLots: MAX_ORB_LOTS, today: istDateIso(Date.now()) } };
+  return { status: 200, body: { success: true, ledger, contract, unitsPerLot: UNITS_PER_LOT, maxLots: MAX_ORB_LOTS, today: istDateIso(Date.now()), codeVersion: ORB_CODE_VERSION } };
 }
 
 export function orbClientOp(op: unknown): Promise<Reply> {
@@ -73,6 +73,8 @@ export type TradeRequest = {
   exitKind?: 'stop' | 'eod' | 'manual';
   /** manual exits and the cutoff run with the engine off; automatic entries need it on. */
   auto: boolean;
+  /** The tab's ORB_CODE_VERSION: entries / reversals from another version are refused (exits never are). */
+  v?: string;
 };
 
 export function parseTrade(b: unknown): TradeRequest | string {
@@ -89,7 +91,7 @@ export function parseTrade(b: unknown): TradeRequest | string {
   if (o.side !== 'LONG' && o.side !== 'SHORT') return 'side must be LONG or SHORT';
   const barT = Number(o.barT);
   if (!Number.isInteger(barT) || barT <= 0) return 'barT is required';
-  return { action: o.action, side: o.side, price, barT, reason: reason || o.action, auto: true };
+  return { action: o.action, side: o.side, price, barT, reason: reason || o.action, auto: true, v: typeof o.v === 'string' ? o.v : undefined };
 }
 
 const fail = (error: string, status = 400): Reply => ({ status, body: { success: false, error } });
@@ -109,7 +111,8 @@ export function orbTrade(req: TradeRequest): Promise<Reply> {
       return { status: out.ok ? 200 : out.unknown ? 504 : 502, body: { success: out.ok, error: out.error, ledger: save(l, now) } };
     }
 
-    // enter / reverse: automatic only, engine on, newer bar, loss limit
+    // enter / reverse: automatic only, from a tab running this code, engine on, newer bar, loss limit
+    if (req.v !== ORB_CODE_VERSION) return fail('This tab runs an older version of the Signal Orb - reload it (entries refused, exits still work)', 409);
     if (!l.engineActive) return fail(l.haltReason ? `Engine halted: ${l.haltReason}` : 'Auto is OFF', 409);
     if (req.barT! <= l.watermarkT) return fail('This bar was already acted on', 409);
     if (req.action === 'enter' && live) return fail('A position is already open', 409);

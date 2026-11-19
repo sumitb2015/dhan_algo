@@ -108,6 +108,13 @@ export default function SignalOrb() {
         {(e.stateError || e.feed.loadError) && (
           <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs text-red-300">{e.stateError ?? e.feed.loadError}</p>
         )}
+        {e.outdated && (
+          <div role="alert" className="flex flex-wrap items-center justify-center gap-3 rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs font-bold text-amber-300">
+            <span>This tab is running an older version of the Signal Orb. Its numbers may be wrong and new entries are blocked.</span>
+            <button type="button" onClick={() => window.location.reload()}
+              className={cn('rounded border border-amber-500/50 px-2.5 py-0.5 hover:bg-amber-500/20', FOCUS)}>Reload</button>
+          </div>
+        )}
         {ledger?.haltReason && (
           <p className="flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-bold text-red-300">
             <ShieldAlert className="h-3.5 w-3.5" /> HALTED — {ledger.haltReason}
