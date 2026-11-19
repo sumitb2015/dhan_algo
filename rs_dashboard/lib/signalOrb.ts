@@ -9,7 +9,7 @@ import { emaSmaSeeded, rsiArray, stochRsiArray, supertrendSeries } from './indic
  * update never reached) shows a reload banner and its entries are refused (lib/signalOrbServer.ts). Bump on every change to
  * the rules, the indicators or the engine.
  */
-export const ORB_CODE_VERSION = '2026-11-19.4';
+export const ORB_CODE_VERSION = '2026-11-19.5';
 
 export type Vote = 1 | -1 | 0;
 export type Signal = 'BULL' | 'BEAR' | 'NEUTRAL';

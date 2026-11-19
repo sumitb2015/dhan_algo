@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { IndicatorReading, Signal } from '@/lib/signalOrb';
+import { cn } from '@/lib/utils';
 
 // The Signal Orb itself: a layered sphere that breathes in the signal's colour, a slow orbit ring, one satellite per active indicator
 // lit in its own vote, and a single ripple each time the colour flips. Colours are theme/data tokens (emerald / red / slate — slate,
@@ -32,7 +33,7 @@ const STYLE = `
   .orb-breathe, .orb-spin, .orb-spin-back, .orb-float, .orb-ripple, .orb-dot { animation: none }
 }`;
 
-export function Orb({ signal, readings, position, pnl, ltp, busy, since, progress, secsLeft }: {
+export function Orb({ signal, readings, positionLabel, busy, since, progress, secsLeft }: {
   signal: Signal;
   /** IST HH:MM the current colour began, or null. */
   since: string | null;
@@ -40,9 +41,8 @@ export function Orb({ signal, readings, position, pnl, ltp, busy, since, progres
   progress: number;
   secsLeft: number;
   readings: IndicatorReading[];
-  position: 'LONG' | 'SHORT' | 'FLAT' | 'PENDING';
-  pnl: number | null;
-  ltp: number | null;
+  /** For the screen-reader label only: the position is shown by the page, not inside the orb. */
+  positionLabel: string;
   busy: boolean;
 }) {
   const p = PALETTE[signal];
@@ -63,10 +63,10 @@ export function Orb({ signal, readings, position, pnl, ltp, busy, since, progres
   const n = readings.length;
   return (
     <div
-      className="relative aspect-square w-[min(74vw,54vh,420px)] min-w-[240px] select-none"
+      className="relative aspect-square w-[min(74vw,46vh,400px)] min-w-[220px] select-none"
       style={{ ['--orb-c' as string]: p.c, ['--orb-hi' as string]: p.hi, ['--orb-deep' as string]: p.deep }}
       role="img"
-      aria-label={`Signal ${p.label}. Position ${position}.${readings.map(r => ` ${r.label} ${r.vote === 1 ? 'bullish' : r.vote === -1 ? 'bearish' : 'neutral'}.`).join('')}`}
+      aria-label={`Signal ${p.label}. Position ${positionLabel}.${readings.map(r => ` ${r.label} ${r.vote === 1 ? 'bullish' : r.vote === -1 ? 'bearish' : 'neutral'}.`).join('')}`}
     >
       <style>{STYLE}</style>
 
@@ -111,20 +111,16 @@ export function Orb({ signal, readings, position, pnl, ltp, busy, since, progres
           }}>
           {/* glass highlight */}
           <div className="absolute left-[20%] top-[10%] h-[22%] w-[40%] rotate-[-18deg] rounded-full bg-oncolor opacity-20 blur-md" />
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-0.5 text-oncolor">
-            <span className="text-[10px] font-bold uppercase tracking-[0.5em] opacity-90">{p.label}</span>
-            {since && <span className="font-mono text-[10px] font-semibold tracking-widest opacity-80">since {since}</span>}
-            <span className="font-mono text-4xl font-black tracking-wider sm:text-5xl">{position}</span>
-            {pnl !== null && (
-              <span className="font-mono text-lg font-bold tabular-nums">
-                {`${pnl >= 0 ? '+' : '−'}₹${Math.abs(pnl).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`}
-              </span>
-            )}
-            <span className="mt-1 rounded-full bg-oncolor-dark/25 px-2.5 py-0.5 font-mono text-xs tabular-nums">
-              {ltp === null ? 'no price' : `LTP ${ltp.toFixed(0)}`}
+          {/* the orb says one thing: the signal. The position lives under it (the page's position pill). */}
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-oncolor">
+            <span className="text-[9px] font-bold uppercase tracking-[0.6em] opacity-80">Signal</span>
+            <span className={cn('mt-1 font-black leading-none tracking-[0.08em]', signal === 'NEUTRAL' ? 'text-3xl sm:text-4xl' : 'text-5xl sm:text-6xl')}>
+              {signal}
             </span>
-            <span className="mt-0.5 font-mono text-[10px] tabular-nums opacity-80" title="Seconds until the bar closes and the signal is read again">
-              {busy ? 'sending…' : `next read ${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, '0')}`}
+            <span className="mt-2 h-3.5 font-mono text-[11px] font-semibold tracking-widest opacity-85">{since ? `since ${since}` : ''}</span>
+            <span className="mt-3 rounded-full bg-oncolor-dark/25 px-2.5 py-0.5 font-mono text-[11px] font-bold tabular-nums"
+              title="Time until the bar closes and the signal is read again">
+              {busy ? 'sending…' : `${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, '0')}`}
             </span>
           </div>
         </div>
