@@ -32,6 +32,7 @@ const HIDDEN_SCOPES = new Set(['skills', 'claude', 'deps']);
 /** Commit scope -> dashboard route. Only scopes that are a page of their own. */
 export const SCOPE_TO_HREF: Record<string, string> = {
   'focus-tool': '/focus-tool',
+  'signal-orb': '/signal-orb',
   'multi-leg-focus': '/multi-leg-focus',
   baskets: '/baskets',
   'cyber-scalper': '/cyber-scalper',

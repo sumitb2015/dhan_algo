@@ -1,0 +1,26 @@
+import path from 'path';
+import { readJsonFile } from '@/lib/lockedJsonFile';
+import { PROJECT_ROOT } from '@/lib/pyExec';
+import { targetKey } from '@/lib/pnfTarget';
+import { isLive, normalizeLedger, type OrbLedger } from '@/lib/signalOrbLedger';
+
+// The Signal Orb ledger file, read-only helpers. Kept apart from lib/signalOrbServer.ts so the P&F / Renko order path
+// (lib/pnfAutoOrders.ts) can keep the Orb's units out of its square-off without importing the Orb's order code (no cycle).
+
+export const ORB_STATE_FILE = path.join(PROJECT_ROOT, 'debug', 'signal_orb_state.json');
+
+export const readOrbLedger = (): OrbLedger => normalizeLedger(readJsonFile(ORB_STATE_FILE));
+
+/**
+ * What the Orb's live REAL rows hold of a contract at `broker`, signed broker units (long +, short -). A P&F / Renko square-off of
+ * the same contract keeps them, as it keeps the other page's AUTO. The Orb trades MIS only, so an NRML row is never reserved.
+ */
+export function reservedByOrb(broker: string, tKey: string, product: 'INTRADAY' | 'MARGIN', ledger: OrbLedger = readOrbLedger()): number {
+  if (product !== 'INTRADAY') return 0;
+  let out = 0;
+  for (const r of ledger.rows) {
+    if (!isLive(r) || r.mode !== 'REAL' || r.broker !== broker || targetKey(r.target) !== tKey) continue;
+    out += (r.side === 'LONG' ? 1 : -1) * (Number(r.units) || 0);
+  }
+  return out;
+}

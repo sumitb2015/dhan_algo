@@ -17,6 +17,36 @@ export function smaArray(values: number[], period: number): (number | null)[] {
   return result;
 }
 
+/**
+ * Stochastic RSI (TradingView `ta.stoch(rsi, rsi, rsi, stochPeriod)` smoothed): stoch = (RSI - lowest RSI) / (highest - lowest) x 100
+ * over `stochPeriod` RSI values, K = SMA(stoch, k), D = SMA(K, d). A flat RSI window (highest = lowest) reads 0, as TradingView's does.
+ * Null until every input of a value exists.
+ */
+export function stochRsiArray(values: number[], rsiPeriod = 14, stochPeriod = 14, k = 3, d = 3): { k: (number | null)[]; d: (number | null)[] } {
+  const n = values.length;
+  const rsi = rsiArray(values, rsiPeriod);
+  const stoch: (number | null)[] = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    if (i - stochPeriod + 1 < 0) continue;
+    let lo = Infinity, hi = -Infinity, ok = true;
+    for (let j = i - stochPeriod + 1; j <= i; j++) {
+      const r = rsi[j];
+      if (r === null) { ok = false; break; }
+      if (r < lo) lo = r;
+      if (r > hi) hi = r;
+    }
+    if (ok) stoch[i] = hi === lo ? 0 : ((rsi[i] as number) - lo) / (hi - lo) * 100;
+  }
+  const smaNullable = (xs: (number | null)[], p: number) => xs.map((_, i) => {
+    if (i - p + 1 < 0) return null;
+    let s = 0;
+    for (let j = i - p + 1; j <= i; j++) { const x = xs[j]; if (x === null) return null; s += x; }
+    return s / p;
+  });
+  const K = smaNullable(stoch, k);
+  return { k: K, d: smaNullable(K, d) };
+}
+
 /** Exponential Moving Average — seeded from first value, no nulls. */
 export function emaArray(values: number[], period: number): number[] {
   if (values.length === 0) return [];

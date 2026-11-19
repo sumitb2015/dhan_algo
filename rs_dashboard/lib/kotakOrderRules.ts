@@ -10,7 +10,7 @@ import { FTS_KOTAK_MAX_ORDER_LOTS } from './focusToolUnderlyings.ts';
  *  'fts' = Focus Tool opens (its orders are sliced under this on the page); 'pl' = Price Ladder opens (20 lots, its
  *  MAX_LADDER_LOTS). */
 // fm = Fresh Money board (FM_MAX_LOTS_PER_ORDER). bs = Bearish Strikes sells (its MAX_LOTS = 50; Kotak and Zerodha).
-export const SOURCE_LOT_CAPS: Record<string, number> = { as: 100, bds: 20, alab: 20, fts: FTS_KOTAK_MAX_ORDER_LOTS, pl: 20, pnf: 20, pnfa: 20, fm: 20, bs: 50 };
+export const SOURCE_LOT_CAPS: Record<string, number> = { as: 100, bds: 20, alab: 20, fts: FTS_KOTAK_MAX_ORDER_LOTS, pl: 20, pnf: 20, pnfa: 20, orba: 1, fm: 20, bs: 50 };
 
 /** NSE/BSE options and futures tick at 0.05; used only when the instrument cache has no tick for the contract. */
 export const DEFAULT_FO_TICK = 0.05;
