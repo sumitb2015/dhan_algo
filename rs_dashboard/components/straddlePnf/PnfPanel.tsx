@@ -784,8 +784,14 @@ export default function PnfPanel({ title, strike, model, live, stale, flash, err
   const vwapTag = (() => {
     if (vwapLevelY === null || vwapNow === null) return null;
     const top = (viewTop ?? 0) + 9, bottom = (viewTop ?? 0) + HEIGHT - (timeAxis ? TIME_AXIS_H : 0) - 9;
-    const y = Math.min(Math.max(vwapLevelY, top), Math.max(top, bottom));
+    let y = Math.min(Math.max(vwapLevelY, top), Math.max(top, bottom));
     const arrow = vwapLevelY < top ? '▲' : vwapLevelY > bottom ? '▼' : '';
+    // never under the live price tag (drawn over it): moved just clear of it, on the side the VWAP is (below it, also clear of the
+    // axis countdown that sits under the live tag on a chart without a rail)
+    if (liveValue !== null) {
+      const ly = yOf(liveValue);
+      if (Math.abs(y - ly) < 17) y = vwapLevelY >= ly ? ly + (rail ? 17 : 34) : ly - 17;
+    }
     return { y, arrow };
   })();
   const axisLabels = useMemo(

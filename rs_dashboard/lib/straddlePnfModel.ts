@@ -364,12 +364,15 @@ export function buildConfirmedModel(closedBars: Bar[], overlay: Overlay, opts: P
   if (vb) {
     // Tick / N sec: the 1-minute VWAP at each chart bar = through the last minute closed by its time (read fresh each build: the
     // minute bars are revised by each history load). vwapState stays empty, so withLive adds nothing on top.
+    // A bar with no closed minute of its own session yet (the open's first minute, e.g. a gap open printing bricks at 09:00:01)
+    // reads its own price, as TradingView's VWAP on a session's first bar does - never the previous session's VWAP.
     const mv = vwapFrom(vb, 0, VWAP_START, true).series;
     vw1 = new Array(closedBars.length);
     let k = 0;
     for (let i = 0; i < closedBars.length; i++) {
-      while (k < vb.length && vb[k].t + 60 <= closedBars[i].t) k++;
-      vw1[i] = k > 0 ? mv[k - 1] : null;
+      const b = closedBars[i];
+      while (k < vb.length && vb[k].t + 60 <= b.t) k++;
+      vw1[i] = k > 0 && istDayNumber(vb[k - 1].t) === istDayNumber(b.t) ? mv[k - 1] : b.straddle > 0 ? b.straddle : k > 0 ? mv[k - 1] : null;
     }
     vwapState = VWAP_START;
     tickVwapNow = mv.length ? mv[mv.length - 1] : null;

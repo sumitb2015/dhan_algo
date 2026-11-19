@@ -515,8 +515,13 @@ test('Renko Tick / N sec: each chart bar reads the 1-minute VWAP of the minutes 
   const tp = (x: Bar) => (x.h! + x.l! + x.straddle) / 3;
   const c = buildConfirmedModel(ticks, 'vwap', { chart: 'renko', boxMode: 'pts', boxPts: 10, vwapBars: mins });
   const v1 = tp(mins[0]), v2 = (tp(mins[0]) * 10 + tp(mins[1]) * 10) / 20, v3 = (tp(mins[0]) * 10 + tp(mins[1]) * 10 + tp(mins[2]) * 20) / 40;
-  // ticks in minute 0 see no closed minute; in minute 1 the first minute; in minute 2 the first two
-  assert.deepEqual(c.build.vw1, ticks.map(k => (k.t < t0 + 60 ? null : k.t < t0 + 120 ? v1 : v2)));
+  // ticks in minute 0 have no closed minute of the session: their own price (TradingView's first-bar VWAP); in minute 1 the first
+  // minute; in minute 2 the first two
+  assert.deepEqual(c.build.vw1, ticks.map(k => (k.t < t0 + 60 ? k.straddle : k.t < t0 + 120 ? v1 : v2)));
+  // the previous session's minutes never stand in for the open's first minute (a gap open printing bricks at 09:00:01)
+  const yday = [minute(t0 - 86400, 9000, 9010, 8990, 50)];
+  const g = buildConfirmedModel(ticks.slice(0, 2), 'vwap', { chart: 'renko', boxMode: 'pts', boxPts: 10, vwapBars: [...yday, ...mins] });
+  assert.deepEqual(g.build.vw1, [ticks[0].straddle, ticks[1].straddle]);
   assert.ok(Math.abs((c.vwapNow as number) - v3) < 1e-9);
   // live: the level follows the minute bars as they stand now
   const later = [...mins.slice(0, 2), { ...mins[2], straddle: 8300, h: 8300, vol: 40 }];
