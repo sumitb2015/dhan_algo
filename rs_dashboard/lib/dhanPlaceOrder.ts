@@ -2,7 +2,7 @@ import { getDhanCredentials } from '@/lib/dhanToken';
 import { invalidateBrokerCache } from '@/lib/brokerPositionsCache';
 import { reserveOrderSlot, ORDER_WINDOW_MS } from '@/lib/dhanOrderPacer';
 import { reconcileByCorrelationId, isAmbiguousReply } from '@/lib/dhanOrderReconcile';
-import { FTS_DHAN_MAX_ORDER_QTY } from '@/lib/focusToolUnderlyings';
+import { dhanSourceCapError } from '@/lib/dhanSourceCaps';
 
 // The one way server code places a plain Dhan order (the Dhan twin of lib/kotakPlaceOrder.ts). /api/scalper/fast-order
 // is a thin HTTP wrapper over it, and the Price Ladder's server watcher (lib/priceLadderServer.ts) calls it directly.
@@ -20,33 +20,8 @@ const ORDER_TIMEOUT_MS = 10_000;
  *  own exit order against them. */
 const DHAN_PRODUCTS = new Set(['INTRADAY', 'MARGIN', 'CNC']);
 
-/** 'ts' = Triple Straddle: 50 lots (its lot cap) x 75, the largest index lot seen (NIFTY's
- *  previous size; today 65 -> 3250), so the cap stays tight yet survives a lot-size change. */
-export const SOURCE_QTY_CAPS: Record<string, number> = {
-  ts: 3750,
-  // 'bs' = Bearish Strikes: same bound as 'ts' (50 lots x 75 units).
-  bs: 3750,
-  // 'bds' = Breakdown Scalper: lots are capped at 20 on the ledger, so 20 x 75 would be 1500; same bound as 'ts'.
-  bds: 3750,
-  // 'alab' = Algo Lab entries (lib/algoLab/configSchema.ts MAX_LOTS_PER_TRADE = 20, also checked by its ledger).
-  alab: 3750,
-  // 'fts' = Focus Tool: every order (closes too) is sliced under this cap and the exchange freeze on the page.
-  fts: FTS_DHAN_MAX_ORDER_QTY,
-  // 'pl' = Price Ladder: MAX_LADDER_LOTS (20) x 75 (the largest index lot seen), matching Kotak's 20-lot 'pl' cap.
-  pl: 1500,
-  // 'fm' = Fresh Money board: FM_MAX_LOTS_PER_ORDER (20) x 75, the largest index lot seen.
-  fm: 1500,
-};
-
-/** The same backstop where Dhan's order quantity is LOTS (MCX_COMM), not units: 1500 there would mean 1500 lots. */
-export const SOURCE_QTY_CAPS_MCX: Record<string, number> = {
-  // 'pl' = Price Ladder: MAX_LADDER_LOTS.
-  pl: 20,
-  // 'fm' = Fresh Money board: FM_MAX_LOTS_PER_ORDER (20). Without it the NSE 1500 would apply: 1500 MCX lots.
-  fm: 20,
-  // 'orba' = Signal Orb (CRUDEOILM futures): lib/signalOrbLedger.ts MAX_ORB_LOTS (1 lot until it has run live).
-  orba: 1,
-};
+// The per-source caps live in lib/dhanSourceCaps.ts (pure, unit-tested); re-exported here for existing importers.
+export { SOURCE_QTY_CAPS, SOURCE_QTY_CAPS_MCX } from '@/lib/dhanSourceCaps';
 
 export interface DhanOrderInput {
   securityId: string;
@@ -99,12 +74,8 @@ export async function placeDhanOrder(body: DhanOrderInput): Promise<DhanPlaceRes
 
   // Per-source sanity cap on units per order (a backstop against a UI bug, not an auth
   // boundary: callers that send no source are uncapped, as before). Rejected, never clamped.
-  const sourceCap = !body.source ? undefined
-    : String(exchangeSegment).toUpperCase() === 'MCX_COMM' ? (SOURCE_QTY_CAPS_MCX[body.source] ?? SOURCE_QTY_CAPS[body.source])
-      : SOURCE_QTY_CAPS[body.source];
-  if (sourceCap !== undefined && qtyNum > sourceCap) {
-    return { status: 'invalid', http: 400, error: `Quantity ${qtyNum} exceeds the ${body.source} per-order cap of ${sourceCap}` };
-  }
+  const capError = dhanSourceCapError(qtyNum, body.source, exchangeSegment);
+  if (capError) return { status: 'invalid', http: 400, error: capError };
 
   const sideUpper = String(side).toUpperCase();
   if (sideUpper !== 'BUY' && sideUpper !== 'SELL') {

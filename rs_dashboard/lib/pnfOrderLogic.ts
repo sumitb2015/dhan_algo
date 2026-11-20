@@ -3,7 +3,7 @@
 // The browser only names WHAT to trade (the chart's target) and how many lots: contracts, lot sizes and, for a close,
 // the side, quantity and product are all resolved on the server (app/api/straddle-pnf/order/route.ts).
 
-import { isComplete, parseTarget, type Target } from './pnfTarget.ts';
+import { isComplete, parseTarget, targetKey, type Target } from './pnfTarget.ts';
 
 export const MAX_PNF_LOTS = 20;
 /** Cash equity is sized in shares. */
@@ -180,6 +180,17 @@ export function planLegCloseKeeping(key: string, rows: BookRow[], reserved: numb
     const qty = Math.abs(net) - Math.min(Math.abs(net), Math.abs(res));
     return qty > 0 ? [{ ...o, qty }] : [];
   });
+}
+
+/** Per leg of an options chart, the contract's own option key (a straddle's CE leg keys as the single CE); null for any other leg. */
+export function optionLegKeys(target: Target, legs: { side: string }[]): (string | null)[] {
+  return legs.map(l => (target.kind === 'options' && (l.side === 'CE' || l.side === 'PE') ? targetKey({ ...target, side: l.side }) : null));
+}
+
+/** A close's per-leg hold-back matched on the option contract itself: the sum of every reader's signed units for that leg's key, 0 for a
+ *  leg with no option key. The readers are the ledgers that may hold the same option (index charts, AUTO, Gearbox Drive). */
+export function optionLegReserved(legKeys: (string | null)[], readers: ((key: string) => number)[]): number[] {
+  return legKeys.map(k => (k ? readers.reduce((n, read) => n + read(k), 0) : 0));
 }
 
 /** `flat`: an AUTO exit found nothing of its own left at the broker (closed elsewhere), so nothing was sent. */

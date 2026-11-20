@@ -5,13 +5,15 @@ import type { PnfScope } from '@/lib/pnfScope';
 import { exitingAutoProduct, readAutoLedger, reservedByAuto, reservedByAutoTraded } from '@/lib/pnfAutoServer';
 import { reservedByIndexHeld } from '@/lib/pnfIndexHeld';
 import { reservedByOrb } from '@/lib/signalOrbFile';
+import { readGbLedger, reservedByGearbox } from '@/lib/gearboxFile';
 import { readIndexHeld } from '@/lib/pnfIndexHeldServer';
 import { brokerPositionRows, brokerSessionOk } from '@/lib/priceLadderServer';
 import { CloseGuard } from '@/lib/priceLadderClose';
 import { targetKey } from '@/lib/pnfTarget';
 import { brokerLegs, resolvePnfLegs, type PnfLeg } from '@/lib/pnfOrderServer';
 import {
-  MAX_PNF_LOTS, brokerProduct, needsRollback, orderQty, parsePnfOrder, planLegClose, planLegCloseKeeping, planOwnExit, sendOutcome, type AutoProduct,
+  MAX_PNF_LOTS, brokerProduct, needsRollback, optionLegKeys, optionLegReserved, orderQty, parsePnfOrder, planLegClose, planLegCloseKeeping, planOwnExit,
+  sendOutcome, type AutoProduct,
   type LegResult, type PnfBroker,
 } from '@/lib/pnfOrderLogic';
 
@@ -45,9 +47,10 @@ export function paperReply(order: PnfOrder, legs: PnfLeg[]): OrderReply {
 
 /**
  * A MARKET order (not a resting one: the route handles those). `scope`: whose ledgers (P&F or Renko) the close keeps out.
- * `tagOverride`: another page's correlation tag / Kotak per-source cap key (the Signal Orb sends 'orba'; it never sends `close`).
+ * `tagOverride`: another page's correlation tag / Kotak per-source cap key (the Signal Orb sends 'orba', Gearbox Drive 'gbx';
+ * neither sends `close`).
  */
-export async function placePnfMarket(order: PnfOrder, scope: PnfScope, tagOverride?: 'orba'): Promise<OrderReply> {
+export async function placePnfMarket(order: PnfOrder, scope: PnfScope, tagOverride?: 'orba' | 'gbx'): Promise<OrderReply> {
   const { broker, mode, target, close, exitOwn } = order;
   const tag = tagOverride ?? (order.source === 'auto' ? 'pnfa' : 'pnf');
   if (order.orderType !== 'MARKET' || order.brokerOp) return bad('Not a MARKET order');
@@ -93,7 +96,9 @@ export async function placePnfMarket(order: PnfOrder, scope: PnfScope, tagOverri
       // A Renko / P&F INDEX chart's held option (lib/pnfIndexHeld.ts) is kept too: matched per leg by the option contract itself, so a
       // straddle's CE leg keeps the units an index chart holds of that CE. An index chart never sends this close (it exits with exitOwn).
       const heldLeds = [readIndexHeld('renko'), readIndexHeld('pnf')];
-      const legKeys = onBroker.map(l => (target.kind === 'options' && (l.side === 'CE' || l.side === 'PE') ? targetKey({ ...target, side: l.side }) : null));
+      // Gearbox Drive's live REAL option rows (lib/gearboxFile.ts) too, matched the same way: it trades the same Dhan options account.
+      const gbLed = readGbLedger();
+      const legKeys = optionLegKeys(target, onBroker);
       const keep = (p: AutoProduct) => {
         // the Signal Orb's live REAL futures row on this contract too (single-leg, MIS): it shares the broker's netted position
         const orb = reservedByOrb(broker, targetKey(target), p);
@@ -101,8 +106,11 @@ export async function placePnfMarket(order: PnfOrder, scope: PnfScope, tagOverri
         // Chart N's MTM guard: this page's OTHER chart's AUTO on the same contract is kept too (each chart guards its own trade).
         const fromSibling = order.guardChart ? reservedByAuto(ownLed, broker, targetKey(target), onBroker.length, order.guardChart, p) : onBroker.map(() => 0);
         // ...and an index chart's AUTO option row (either page), matched on the option itself
-        const fromIndex = legKeys.map(k => (k ? heldLeds.reduce((n, led) => n + reservedByIndexHeld(led, broker, k, p), 0)
-          + reservedByAutoTraded(otherLed, broker, k, p) + reservedByAutoTraded(ownLed, broker, k, p) : 0));
+        const fromIndex = optionLegReserved(legKeys, [
+          ...heldLeds.map(led => (k: string) => reservedByIndexHeld(led, broker, k, p)),
+          k => reservedByAutoTraded(otherLed, broker, k, p), k => reservedByAutoTraded(ownLed, broker, k, p),
+          k => reservedByGearbox(broker, k, p, gbLed),
+        ]);
         return { fromOther, fromSibling, fromIndex, reserved: fromOther.map((r, i) => r + fromSibling[i] + fromIndex[i]) };
       };
       const mis = keep('INTRADAY'), nrml = keep('MARGIN');
@@ -115,7 +123,7 @@ export async function placePnfMarket(order: PnfOrder, scope: PnfScope, tagOverri
       const fromOther = mis.fromOther.some(r => r !== 0) || nrml.fromOther.some(r => r !== 0);
       const fromSibling = mis.fromSibling.some(r => r !== 0) || nrml.fromSibling.some(r => r !== 0);
       const fromIndex = mis.fromIndex.some(r => r !== 0) || nrml.fromIndex.some(r => r !== 0);
-      const whose = anyKept ? [fromOther ? `the ${otherName} page's AUTO or the Signal Orb` : '', fromSibling ? `chart ${sibling}'s AUTO` : '', fromIndex ? 'an index chart\'s option (held or AUTO)' : ''].filter(Boolean).join(' and ') : '';
+      const whose = anyKept ? [fromOther ? `the ${otherName} page's AUTO or the Signal Orb` : '', fromSibling ? `chart ${sibling}'s AUTO` : '', fromIndex ? 'an index chart\'s option (held or AUTO) or Gearbox Drive' : ''].filter(Boolean).join(' and ') : '';
       if (whose) keptNote = ` KEPT: ${kept.join(' / ')} units on this contract belong to ${whose} and were not closed.`;
       if (plans.every(p => p.orders.length === 0)) {
         return reply({
