@@ -54,6 +54,19 @@ export default function SignalOrb() {
 
   return (
     <div className="relative flex h-dvh min-h-[560px] flex-col overflow-x-hidden overflow-y-auto bg-zinc-950 text-zinc-100">
+      {/* Cyberpunk stage atmosphere & subtle grid */}
+      <div
+        className="pointer-events-none absolute inset-0 z-0 opacity-[0.035]"
+        style={{
+          backgroundImage: 'linear-gradient(to right, #ffffff 1px, transparent 1px), linear-gradient(to bottom, #ffffff 1px, transparent 1px)',
+          backgroundSize: '44px 44px',
+        }}
+        aria-hidden
+      />
+      <div
+        className="pointer-events-none absolute inset-0 z-0 bg-[radial-gradient(ellipse_at_center,transparent_0%,rgba(0,0,0,0.75)_100%)]"
+        aria-hidden
+      />
       {/* header */}
       <header className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-2 border-b border-zinc-900 bg-zinc-950/80 px-4 py-2.5 backdrop-blur sm:px-6">
         <div className="flex items-center gap-3">
@@ -176,17 +189,27 @@ export default function SignalOrb() {
           onClose={live?.status === 'open' ? () => void e.closeAndStop() : null} />
 
         {/* readout: the price first, then one chip per indicator */}
-        <div className="flex max-w-2xl flex-wrap items-center justify-center gap-1.5">
-          <span className="flex items-center gap-1.5 rounded-full border border-zinc-700 bg-zinc-900/80 px-2.5 py-0.5 font-mono text-[11px] backdrop-blur">
-            <span className="font-bold text-zinc-400">LTP</span>
-            <span className="font-bold tabular-nums text-zinc-100">{e.price === null ? '—' : e.price.toLocaleString('en-IN')}</span>
+        <div className="flex max-w-2xl flex-wrap items-center justify-center gap-2">
+          <span className="flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900/90 px-3 py-1 font-mono text-[11px] backdrop-blur-md shadow-sm">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="font-bold text-zinc-400 text-[10px] tracking-wider uppercase">FUT LTP</span>
+            <span className="font-black tabular-nums text-zinc-100">{e.price === null ? '—' : e.price.toLocaleString('en-IN')}</span>
           </span>
           {ev.readings.map(r => (
-            <span key={r.id} className={cn('flex items-center gap-1.5 rounded-full border bg-zinc-950/70 px-2.5 py-0.5 font-mono text-[11px] backdrop-blur',
-              r.vote === 1 ? 'border-emerald-500/40 text-emerald-300' : r.vote === -1 ? 'border-red-500/40 text-red-300' : 'border-zinc-700 text-zinc-400')}>
-              <span aria-hidden className="text-[9px]">{r.vote === 1 ? '▲' : r.vote === -1 ? '▼' : '●'}</span>
-              <span className="font-bold">{r.label}</span>
-              <span className="tabular-nums text-zinc-400">{r.value}</span>
+            <span
+              key={r.id}
+              className={cn(
+                'flex items-center gap-2 rounded-full border px-3 py-1 font-mono text-[11px] backdrop-blur-md shadow-sm transition-all',
+                r.vote === 1
+                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.15)]'
+                  : r.vote === -1
+                    ? 'border-red-500/40 bg-red-500/10 text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.15)]'
+                    : 'border-zinc-800 bg-zinc-900/60 text-zinc-400',
+              )}
+            >
+              <span aria-hidden className="text-[10px] font-bold">{r.vote === 1 ? '▲' : r.vote === -1 ? '▼' : '●'}</span>
+              <span className="font-bold tracking-tight">{r.label}</span>
+              <span className="tabular-nums font-semibold text-zinc-300">{r.value}</span>
               <span className="sr-only">{r.vote === 1 ? 'bullish' : r.vote === -1 ? 'bearish' : 'neutral or warming up'}</span>
             </span>
           ))}
@@ -194,23 +217,51 @@ export default function SignalOrb() {
         </div>
 
         {/* control capsule: the switch, what it is doing, and REAL's arm */}
-        <div className="flex items-center gap-3 rounded-full border border-zinc-800 bg-zinc-950/80 py-1.5 pl-1.5 pr-5 backdrop-blur">
-          <button type="button" onClick={toggle} disabled={!ledger} aria-pressed={!!ledger?.engineActive}
+        <div
+          className={cn(
+            'flex items-center gap-3.5 rounded-full border py-1.5 pl-1.5 pr-6 backdrop-blur-md transition-all duration-300',
+            ledger?.engineActive
+              ? 'border-emerald-500/40 bg-zinc-950/90 shadow-[0_0_28px_-4px_rgba(16,185,129,0.25)]'
+              : 'border-zinc-800 bg-zinc-950/80 shadow-md',
+          )}
+        >
+          <button
+            type="button"
+            onClick={toggle}
+            disabled={!ledger}
+            aria-pressed={!!ledger?.engineActive}
             aria-label={ledger?.engineActive ? 'Turn auto-trading off' : 'Turn auto-trading on'}
-            className={cn('flex h-12 w-12 shrink-0 items-center justify-center rounded-full border-2 transition-colors disabled:opacity-40', FOCUS,
-              ledger?.engineActive ? 'border-emerald-400 bg-emerald-500/15 text-emerald-300' : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200')}>
+            className={cn(
+              'relative flex h-12 w-12 shrink-0 items-center justify-center rounded-full border-2 transition-all duration-300 disabled:opacity-40',
+              FOCUS,
+              ledger?.engineActive
+                ? 'border-emerald-400 bg-emerald-500/20 text-emerald-300 shadow-[0_0_16px_rgba(16,185,129,0.45)]'
+                : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200',
+            )}
+          >
+            {ledger?.engineActive && (
+              <span className="absolute -inset-1 rounded-full border border-emerald-400/40 animate-ping opacity-60" />
+            )}
             <Power className="h-5 w-5" />
           </button>
           <div className="min-w-0">
-            <p className={cn('text-[10px] font-black uppercase tracking-[0.35em]', ledger?.engineActive ? 'text-emerald-300' : 'text-zinc-400')}>{autoLabel}</p>
+            <p className={cn('text-[10px] font-black uppercase tracking-[0.35em]', ledger?.engineActive ? 'text-emerald-300 drop-shadow-[0_0_6px_rgba(16,185,129,0.35)]' : 'text-zinc-400')}>
+              {autoLabel}
+            </p>
             <p className="flex max-w-[22rem] items-center gap-1.5 font-mono text-[11px] text-zinc-400" aria-live="polite">
               <NoteIcon note={note} active={!!ledger?.engineActive} />
               <span className="truncate">{note ?? 'Turn on to follow the orb'}</span>
             </p>
           </div>
           {real && !e.armed && ledger?.engineActive && (
-            <button type="button" onClick={() => e.setArmed(true)}
-              className={cn('ml-1 whitespace-nowrap rounded-full border border-red-500/60 bg-red-500/15 px-3 py-1 text-[10px] font-black uppercase tracking-[0.25em] text-red-300 hover:bg-red-500/25', FOCUS)}>
+            <button
+              type="button"
+              onClick={() => e.setArmed(true)}
+              className={cn(
+                'ml-2 whitespace-nowrap rounded-full border border-red-500/60 bg-red-500/20 px-3.5 py-1 text-[10px] font-black uppercase tracking-[0.25em] text-red-300 hover:bg-red-500/30 shadow-[0_0_12px_rgba(239,68,68,0.25)] transition-all',
+                FOCUS,
+              )}
+            >
               Arm real money
             </button>
           )}
@@ -279,37 +330,74 @@ function PositionPill({ live, position, pnl, stopLevel, mark, onClose }: {
 }) {
   if (!live) {
     return (
-      <div className="flex items-center gap-2 rounded-full border border-zinc-800 bg-zinc-950/80 px-4 py-1.5 font-mono text-[11px] text-zinc-500 backdrop-blur">
-        <span className="h-1.5 w-1.5 rounded-full bg-zinc-600" aria-hidden />
+      <div className="flex items-center gap-2.5 rounded-full border border-zinc-800/80 bg-zinc-950/80 px-4 py-1.5 font-mono text-[11px] text-zinc-500 backdrop-blur-md shadow-sm">
+        <span className="h-1.5 w-1.5 rounded-full bg-zinc-600 animate-pulse" aria-hidden />
         <span className="font-bold tracking-[0.25em] text-zinc-400">FLAT</span>
-        <span>no position</span>
+        <span className="text-zinc-500">no active position</span>
       </div>
     );
   }
   if (position === 'PENDING') {
     return (
-      <div className="flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/10 px-4 py-1.5 font-mono text-[11px] text-amber-300">
-        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" aria-hidden />
-        <span className="font-bold tracking-[0.2em]">{live.status.toUpperCase()}</span>
+      <div className="flex items-center gap-2.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-4 py-1.5 font-mono text-[11px] text-amber-300 shadow-[0_0_15px_rgba(245,158,11,0.15)]">
+        <span className="h-2 w-2 animate-ping rounded-full bg-amber-400" aria-hidden />
+        <span className="font-black tracking-[0.2em]">{live.status.toUpperCase()}</span>
         <span>{live.side} {optionOf(live) ? `· SELL ${optionOf(live)} ` : ''}{live.lots} lot{live.lots > 1 ? 's' : ''}</span>
       </div>
     );
   }
   const long = position === 'LONG';
   return (
-    <div className={cn('flex flex-wrap items-center justify-center gap-3 rounded-full border bg-zinc-950/85 py-1 pl-1 pr-2 font-mono text-[11px] backdrop-blur',
-      long ? 'border-emerald-500/50' : 'border-red-500/50')}>
-      <span className={cn('rounded-full px-3 py-1 text-[11px] font-black tracking-[0.25em] text-oncolor', long ? 'bg-emerald-600' : 'bg-red-600')}>{position}</span>
-      {optionOf(live) && <span className="font-bold text-zinc-200">SELL {optionOf(live)}</span>}
-      <span className="text-zinc-400">{live.lots} lot{live.lots > 1 ? 's' : ''} @ <strong className="text-zinc-200">{live.entry.toLocaleString('en-IN')}</strong>
-        {optionOf(live) && <> · now <strong className="text-zinc-200">{mark === null ? '—' : mark.toLocaleString('en-IN')}</strong></>}</span>
-      <strong className={cn('text-sm tabular-nums', pnl === null ? 'text-zinc-500' : pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+    <div
+      className={cn(
+        'group relative flex flex-wrap items-center justify-center gap-3 rounded-full border bg-zinc-950/90 py-1 pl-1.5 pr-2.5 font-mono text-[11px] backdrop-blur-md transition-all duration-300',
+        long
+          ? 'border-emerald-500/50 shadow-[0_0_24px_-4px_rgba(16,185,129,0.25)]'
+          : 'border-red-500/50 shadow-[0_0_24px_-4px_rgba(239,68,68,0.25)]',
+      )}
+    >
+      <span
+        className={cn(
+          'rounded-full px-3 py-0.5 text-[10px] font-black tracking-[0.25em] text-oncolor shadow-sm',
+          long ? 'bg-emerald-600' : 'bg-red-600',
+        )}
+      >
+        {position}
+      </span>
+      {optionOf(live) && (
+        <span className="font-bold text-zinc-100 flex items-center gap-1.5">
+          <span className="text-zinc-500 text-[10px] font-normal">SOLD</span> {optionOf(live)}
+        </span>
+      )}
+      <span className="text-zinc-400">
+        {live.lots} lot{live.lots > 1 ? 's' : ''} @ <strong className="text-zinc-200">{live.entry.toLocaleString('en-IN')}</strong>
+        {optionOf(live) && <> · now <strong className="text-zinc-100">{mark === null ? '—' : mark.toLocaleString('en-IN')}</strong></>}
+      </span>
+      <span className="h-3 w-px bg-zinc-800" aria-hidden />
+      <strong
+        className={cn(
+          'text-sm font-black tabular-nums tracking-tight',
+          pnl === null ? 'text-zinc-500' : pnl >= 0 ? 'text-emerald-400 drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'text-red-400 drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]',
+        )}
+      >
         {pnl === null ? '—' : inr(pnl)}
       </strong>
-      {stopLevel !== null && <span className="text-zinc-500">stop <strong className="text-zinc-300">{stopLevel.toLocaleString('en-IN')}</strong></span>}
+      {stopLevel !== null && (
+        <span className="text-zinc-500 text-[10px]">
+          SL <strong className="text-zinc-300">{stopLevel.toLocaleString('en-IN')}</strong>
+        </span>
+      )}
       {onClose && (
-        <button type="button" onClick={onClose} aria-label="Close the position and turn auto off" title="Close the position and turn auto off"
-          className={cn('ml-1 flex items-center gap-1 rounded-full border border-zinc-700 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:border-red-500/60 hover:text-red-400', FOCUS)}>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close the position and turn auto off"
+          title="Close the position and turn auto off"
+          className={cn(
+            'ml-1 flex items-center gap-1 rounded-full border border-zinc-700 bg-zinc-900/60 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:border-red-500/70 hover:bg-red-500/15 hover:text-red-300 transition-colors',
+            FOCUS,
+          )}
+        >
           <X className="h-3 w-3" aria-hidden /> Close
         </button>
       )}
