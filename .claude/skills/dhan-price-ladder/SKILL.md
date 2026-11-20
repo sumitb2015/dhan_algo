@@ -86,11 +86,11 @@ per write; the page drops a view older than the one on screen). It is re-read on
     `K + CE - PE` (`synAxis`; the premium axis flips sign). The server builds the legs from `synStrike` + `side` (ATM or its neighbour, derived
     with `synStrikeFor`) and ignores any legs the browser sends. Entry/unwind/UNKNOWN/exit rules are the Basket's. REAL cap `MAX_REAL_SYN_LOTS`
     (2) counts ALL live+armed synthetics (`synLotsLive`), re-checked in the lock. `synSane` (1.5% + carry; an unknown spot is NOT sane) pauses
-    entry, bracket and `modify`, never a requested exit; on an open position the pause is said once and kept as `SYN_PAUSED_NOTE` (the bracket
+    entry, bracket and `modify`, never a requested exit; on an open position the pause is said once and kept as `SYN_PAUSED_NOTE` (note + event written when a pause starts or its `synPauseCause` changes, never per price change — that rewrote the ledger every tick; the same cause back within `SYN_PAUSE_REPEAT_MS` of `synPauseClearedAt` is quiet; a broken basket keeps its note; the bracket
     is OFF on a naked short leg: it must never be silent). The page's `syn` flag is page-only (not an `OptType`); the positions-window close
     refuses a REAL syn leg only while placing/open/exiting (`synLegOwner`), never UNKNOWN/BROKEN, where the ladder's Exit cannot run.
     Bid/ask: the ladder's prices are LAST trades, so `synQuoteVerdict` judges them against each leg's book: a last price outside its market
-    (by the market's width) = `stale` (pauses entry, Market, `modify` AND the bracket), a combined spread > `SYN_MAX_SPREAD` (0.1% of K) =
+    (by the market's width + max(2 ticks, 0.1% of ask), float-guarded; 1 tick of slack paused a live REAL synthetic many times a minute on 2026-11-20) = `stale` (pauses entry, Market, `modify` AND the bracket), a combined spread > `SYN_MAX_SPREAD` (0.1% of K) =
     `wide` (refuses a NEW entry only, never an open position's bracket). The book is the best level of a Full packet: `loadPrices(.., depthFor)` ->
     `ws.depth` -> the wanted file's `depth` list -> `price_ladder_ws.py` subscribes only those NSE/BSE legs as Full (never MCX) and writes
     `bid`/`ask` per instrument. Missing book = cannot judge (not a pause): the basis check stays the guard. Unconfirmed live (2026-10-27).

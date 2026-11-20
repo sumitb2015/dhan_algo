@@ -73,6 +73,10 @@ export interface LadderBasket {
   exitReason?: string;
   closedAt?: number;
   note?: string;
+  /** The cause of the current (or last) synthetic pause: a new cause is always announced, a price change inside it is not. */
+  synPauseCause?: SynPauseCause;
+  /** When the last synthetic pause cleared (ms): the same cause returning within SYN_PAUSE_REPEAT_MS raises no new event. */
+  synPauseClearedAt?: number;
   /** The ladder pane that placed it when two are open (absent = ladder 1). */
   pane?: 2;
 }
@@ -252,8 +256,19 @@ export interface LegBook { bid: number; ask: number }
 export interface SynMarket { buy: number; sell: number; spread: number }
 /** A wider combined bid-ask spread than this share of the strike refuses a NEW entry (about 23 points on NIFTY 22750). */
 export const SYN_MAX_SPREAD = 0.001;
-/** The smallest tolerance for a last price outside its market (one tick). */
-const SYN_BOOK_TOL = 0.05;
+/**
+ * Slack added to the market's width before a last price counts as outside it: at least two ticks, or 0.1% of the ask. An ATM
+ * option's book is often 0.10-0.20 wide and a live print routinely lands a tick past a book read a moment later; one tick of
+ * slack paused the bracket of an open REAL synthetic many times a minute (2026-11-20). A genuinely stale print is points away.
+ */
+const SYN_BOOK_TICKS = 0.10;
+const SYN_BOOK_PCT = 0.001;
+/** Float guard: 162.95 + 0.15 is 163.09999999999997, which put a last price of exactly 163.1 "outside" its limit. */
+const SYN_BOOK_EPS = 1e-6;
+/** Why a synthetic's levels are paused: the basis against the index, a stale last trade, or (an entry only) a wide market. */
+export type SynPauseCause = 'basis' | 'stale' | 'wide';
+/** A pause that clears and comes back with the same cause within this window (from the clear) sets the note but raises no event. */
+export const SYN_PAUSE_REPEAT_MS = 60_000;
 
 export function synMarket(k: number, ce: LegBook | undefined, pe: LegBook | undefined): SynMarket | null {
   if (!(k > 0) || !ce || !pe) return null;
@@ -263,7 +278,8 @@ export function synMarket(k: number, ce: LegBook | undefined, pe: LegBook | unde
 /**
  * Judge the legs' last prices against their books. `stale` = a last price sits outside its own market by more than the
  * market's width (a stale last trade: pause entries AND the bracket); `wide` = the combined spread is too wide (refuse a new
- * ENTRY only: an open position's bracket must not stop because the market is thin). With a leg's book missing nothing can be
+ * ENTRY only: an open position's bracket must not stop because the market is thin). The width carries a slack of two ticks or
+ * 0.1% of the ask (`SYN_BOOK_TICKS` / `SYN_BOOK_PCT`): a print one tick past the book is a moving market, not a stale trade. With a leg's book missing nothing can be
  * judged (both null, `market` null): the basis check against the index remains the guard.
  */
 export function synQuoteVerdict(k: number, ceLtp: number | undefined, peLtp: number | undefined, ce: LegBook | undefined, pe: LegBook | undefined): { stale: string | null; wide: string | null; market: SynMarket | null } {
@@ -272,8 +288,8 @@ export function synQuoteVerdict(k: number, ceLtp: number | undefined, peLtp: num
   let stale: string | null = null;
   for (const [name, ltp, b] of [['CE', ceLtp, ce], ['PE', peLtp, pe]] as const) {
     if (!(ltp != null && ltp > 0)) continue;
-    const w = Math.max(b.ask - b.bid, SYN_BOOK_TOL);
-    if (ltp < b.bid - w || ltp > b.ask + w) { stale = `${name} last price ${ltp} is outside its market ${b.bid}–${b.ask} (a stale last trade)`; break; }
+    const w = (b.ask - b.bid) + Math.max(SYN_BOOK_TICKS, b.ask * SYN_BOOK_PCT);
+    if (ltp < b.bid - w - SYN_BOOK_EPS || ltp > b.ask + w + SYN_BOOK_EPS) { stale = `${name} last price ${ltp} is outside its market ${b.bid}–${b.ask} (a stale last trade)`; break; }
   }
   const limit = round2(k * SYN_MAX_SPREAD);
   const wide = market.spread > limit ? `the market is wide: the two legs' bid-ask spread is ${market.spread} points (limit ${limit})` : null;
@@ -378,13 +394,14 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
     // Two guards: the basis against the index, and the last prices against the legs' own books (a stale last trade; a wide market
     // refuses an ENTRY only — the bracket of an open position must not stop because the market is thin).
     let synWhy: string | null = null;
+    let synCause: SynPauseCause | undefined;
     if (b.kind === 'syn' && c != null) {
       const ceL = b.legs.find(l => l.contract.opt === 'CE'), peL = b.legs.find(l => l.contract.opt === 'PE');
       const books = io.legBooks?.(b);
       const qv = ceL && peL && b.synStrike ? synQuoteVerdict(b.synStrike, ltps[ceL.contract.securityId], ltps[peL.contract.securityId], books?.ce, books?.pe) : null;
-      if (!synSane(c, io.spotOf?.(b), daysToExpiry(b.legs[0].contract.expiry, today))) synWhy = 'a leg price or the index spot looks stale';
-      else if (qv?.stale) synWhy = qv.stale;
-      else if (qv?.wide && b.state === 'armed') synWhy = qv.wide;
+      if (!synSane(c, io.spotOf?.(b), daysToExpiry(b.legs[0].contract.expiry, today))) { synWhy = 'a leg price or the index spot looks stale'; synCause = 'basis'; }
+      else if (qv?.stale) { synWhy = qv.stale; synCause = 'stale'; }
+      else if (qv?.wide && b.state === 'armed') { synWhy = qv.wide; synCause = 'wide'; }
     }
     const synPaused = synWhy != null;
     if (synPaused) c = null;
@@ -531,12 +548,22 @@ export function planBaskets(s: LadderState, ltps: Record<string, number>, now: n
       const legs = b.legs.map(l => ({ ...l, held: 0, exitedQty: (l.exitedQty ?? 0) + basketLegHeld(l), exitAvg: blendExitAvg(l, basketLegHeld(l), ltps[l.contract.securityId]) } as BasketLeg));
       next = say(patch(b.id, { ...step.patch, state: 'closed', exitReason: step.reason, exitWanted: undefined, closedAt: now, note: undefined, legs }),
         'info', `SIM exit ${name} (${step.reason})${c != null ? ` at net ${c.toFixed(2)}` : ''}`, b.id);
-    } else if (synPaused) {
+    } else if (synPaused && b.state !== 'broken') {
       // Said once, and kept on the basket while it lasts: the user must see that the bracket is off on a naked short leg.
-      const note = synPausedNote(synWhy ?? undefined);
-      if (b.note !== note) next = say(patch(b.id, { ...step.patch, note }), 'error', `${name}: ${note}`, b.id);
+      // The note is written when the pause starts or its CAUSE changes (basis / stale / wide), not when only the prices inside
+      // the reason move: that rewrote the ledger and raised an event on every tick. A pause of the same cause that returns
+      // within SYN_PAUSE_REPEAT_MS of clearing (a flicker) updates the note without a new event; a new cause is always said.
+      // A broken basket keeps its own note: its bracket is already off and the note says how to exit what is left.
+      const wasPaused = b.note?.startsWith(SYN_PAUSED_PREFIX) ?? false;
+      if (!wasPaused || b.synPauseCause !== synCause) {
+        const note = synPausedNote(synWhy ?? undefined);
+        const flicker = !wasPaused && b.synPauseCause === synCause && b.synPauseClearedAt != null && now - b.synPauseClearedAt < SYN_PAUSE_REPEAT_MS;
+        const patched = patch(b.id, { ...step.patch, note, synPauseCause: synCause });
+        next = flicker ? patched : say(patched, 'error', `${name}: ${note}`, b.id);
+      } else if (Object.keys(step.patch).length) next = patch(b.id, step.patch);
     } else if (Object.keys(step.patch).length || (b.note && b.state === 'open')) {
-      next = patch(b.id, { ...step.patch, ...(b.note && b.state === 'open' ? { note: undefined } : {}) });
+      const clearing = b.note != null && b.state === 'open';
+      next = patch(b.id, { ...step.patch, ...(clearing ? { note: undefined, ...(b.note!.startsWith(SYN_PAUSED_PREFIX) ? { synPauseClearedAt: now } : {}) } : {}) });
     }
   }
   return { next, jobs };

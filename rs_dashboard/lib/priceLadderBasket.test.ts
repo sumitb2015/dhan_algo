@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   basketTemplates, draftFromTemplate, validateDraft, basketAxis, orientLegs, basketCombined, basketName, basketNowPnl, sumBasketPnl,
-  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, synLotsLive, daysToExpiry, SYN_PAUSED_NOTE, synMarket, synQuoteVerdict, synPausedNote, SYN_MAX_SPREAD, MAX_REAL_SYN_LOTS, MAX_REAL_BASKET_LOTS, type LadderBasket, type BasketLeg, type DraftLeg,
+  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, synLotsLive, daysToExpiry, SYN_PAUSED_NOTE, synMarket, synQuoteVerdict, synPausedNote, SYN_MAX_SPREAD, SYN_PAUSE_REPEAT_MS, MAX_REAL_SYN_LOTS, MAX_REAL_BASKET_LOTS, type LadderBasket, type BasketLeg, type DraftLeg,
 } from './priceLadderBasket.ts';
 import { rollDay, type LadderState } from './priceLadder.ts';
 import { lotsOnContract, openPositionCount } from './priceLadderPair.ts';
@@ -486,6 +486,15 @@ test('synQuoteVerdict: last prices inside their markets are fine; one outside by
   assert.equal(synQuoteVerdict(SYN_K, 161, 140, BOOK_CE, BOOK_PE).stale, null);
 });
 
+test('synQuoteVerdict: a print a tick or two past a tight ATM book is a moving market, not a stale trade (2026-11-20 alerts)', () => {
+  // the three prints that paused a live synthetic: exactly on the old limit (float), and one tick past a 0.20 / 0.10 book
+  assert.equal(synQuoteVerdict(SYN_K, 160, 163.1, BOOK_CE, { bid: 162.8, ask: 162.95 }).stale, null);
+  assert.equal(synQuoteVerdict(SYN_K, 109.75, 140, { bid: 109.3, ask: 109.5 }, BOOK_PE).stale, null);
+  assert.equal(synQuoteVerdict(SYN_K, 110.25, 140, { bid: 110.4, ask: 110.5 }, BOOK_PE).stale, null);
+  // a print a point away from a 0.10 book is still stale
+  assert.match(synQuoteVerdict(SYN_K, 109.4, 140, { bid: 110.4, ask: 110.5 }, BOOK_PE).stale ?? '', /^CE last price 109.4 is outside/);
+});
+
 test('synQuoteVerdict: a wide combined spread is flagged against the strike; no books = nothing to judge', () => {
   const wide = synQuoteVerdict(SYN_K, 160, 140, { bid: 150, ask: 170 }, { bid: 130, ask: 150 });          // 40 points wide vs a 22.5 limit
   assert.match(wide.wide ?? '', /bid-ask spread is 40 points \(limit 22.5\)/);
@@ -503,6 +512,49 @@ test('planBaskets: a stale last trade pauses an armed entry AND an open bracket,
   const r = planBaskets(st([open]), { '22500CE': 100, '22500PE': 140 }, NOW, books).next.baskets![0];
   assert.equal(r.state, 'open');                                                                          // the SL did not fire on the stale price
   assert.match(r.note ?? '', /^Synthetic price paused — CE last price 100 is outside its market 149–151/);
+});
+
+const openSyn = (extra: Partial<LadderBasket> = {}) => synBasket('BUY', { state: 'open', mode: 'real', entryY: 22520,
+  legs: synBasket('BUY').legs.map(l => ({ ...l, avg: SYN_PX[l.contract.securityId], held: LOT, filledQty: LOT, entry: 'filled' as const })),
+  bracket: { tgtPts: 30, slPts: 20 } as LadderBasket['bracket'], slY: 22500, tgtY: 22550, ...extra });
+const pausedEvents = (s: LadderState) => (s.events ?? []).filter(e => /Synthetic price paused/.test(e.msg)).length;
+
+test('planBaskets: a stale-price pause raises ONE event and one write; prices moving inside the reason change nothing', () => {
+  const books = { ...SPOT_IO, legBooks: () => ({ ce: { bid: 149, ask: 151 }, pe: BOOK_PE }) };
+  const t1 = planBaskets(st([openSyn()]), { '22500CE': 100, '22500PE': 140 }, NOW, books).next;
+  assert.equal(pausedEvents(t1), 1);
+  const t2 = planBaskets(t1, { '22500CE': 101, '22500PE': 140 }, NOW + 1000, books).next;
+  assert.equal(t2, t1);                                                                                  // no ledger write at all
+  assert.equal(pausedEvents(t2), 1);
+});
+
+test('planBaskets: a pause whose CAUSE changes is said again (stale trade -> index basis)', () => {
+  const books = { ...SPOT_IO, legBooks: () => ({ ce: { bid: 149, ask: 151 }, pe: BOOK_PE }) };
+  const t1 = planBaskets(st([openSyn()]), { '22500CE': 100, '22500PE': 140 }, NOW, books).next;
+  const basis = planBaskets(t1, { '22500CE': 100, '22500PE': 140 }, NOW + 1000, { ...books, spotOf: () => 23500 }).next;
+  assert.match(basis.baskets![0].note ?? '', /index spot looks stale/);
+  assert.equal(pausedEvents(basis), 2);
+});
+
+test('planBaskets: the same cause returning within the window from its CLEAR is quiet; after it, said again', () => {
+  const books = { ...SPOT_IO, legBooks: () => ({ ce: { bid: 149, ask: 151 }, pe: BOOK_PE }) };
+  const t1 = planBaskets(st([openSyn()]), { '22500CE': 100, '22500PE': 140 }, NOW, books).next;
+  const CLEAR = NOW + 5 * SYN_PAUSE_REPEAT_MS;                                                           // a long pause, then it clears
+  const cleared = planBaskets(t1, SYN_PX, CLEAR, { ...SPOT_IO, legBooks: () => ({}) }).next;
+  assert.equal(cleared.baskets![0].note, undefined);
+  const back = planBaskets(cleared, { '22500CE': 100, '22500PE': 140 }, CLEAR + 2000, books).next;
+  assert.match(back.baskets![0].note ?? '', /^Synthetic price paused/);
+  assert.equal(pausedEvents(back), 1);
+  const later = planBaskets(cleared, { '22500CE': 100, '22500PE': 140 }, CLEAR + SYN_PAUSE_REPEAT_MS + 1000, books).next;
+  assert.equal(pausedEvents(later), 2);
+});
+
+test('planBaskets: a broken synthetic keeps its own note through a stale-price pause', () => {
+  const books = { ...SPOT_IO, legBooks: () => ({ ce: { bid: 149, ask: 151 }, pe: BOOK_PE }) };
+  const broken = openSyn({ state: 'broken', note: 'closed outside the ladder' });
+  const r = planBaskets(st([broken]), { '22500CE': 100, '22500PE': 140 }, NOW, books).next;
+  assert.equal(r.baskets![0].note, 'closed outside the ladder');
+  assert.equal(pausedEvents(r), 0);
 });
 
 test('planBaskets: a wide market refuses an ENTRY but never stops an open position\'s bracket', () => {
