@@ -7,6 +7,7 @@ import { Orb } from '@/components/signalOrb/Orb';
 import { OrbDrawer } from '@/components/signalOrb/OrbDrawer';
 import { ReplayCard } from '@/components/signalOrb/ReplayCard';
 import { useOrbEngine } from '@/components/signalOrb/useOrbEngine';
+import { useBrokerPnl } from '@/components/signalOrb/useBrokerPnl';
 import { istClock } from '@/lib/istTime';
 import { istDateIso } from '@/lib/nseHolidays';
 import { expiryLabel } from '@/lib/pnfTarget';
@@ -26,6 +27,7 @@ export default function SignalOrb() {
   const [logOpen, setLogOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const { ledger, live, ev, contract } = e;
+  const brokerPnl = useBrokerPnl(ledger?.config.broker);
 
   const patch = useCallback(async (p: Partial<OrbConfig>) => setErr(await e.op({ op: 'setConfig', patch: p })), [e]);
   const setMode = useCallback(async (m: 'SIM' | 'REAL') => { setErr(await e.op({ op: 'setMode', mode: m })); e.setArmed(false); }, [e]);
@@ -78,6 +80,30 @@ export default function SignalOrb() {
             <span title="Another open tab runs the engine; this one only watches" className="whitespace-nowrap rounded border border-zinc-700 px-2 py-0.5 font-mono text-[10px] font-bold text-zinc-400">VIEW ONLY</span>
           )}
           <span className="whitespace-nowrap rounded border border-zinc-800 bg-zinc-900/60 px-2 py-0.5 font-mono text-[10px] font-bold text-zinc-400">DATA: {dataDate}</span>
+          {ledger && (
+            <span
+              title={
+                brokerPnl.connected && brokerPnl.totalPnl !== null
+                  ? `${ledger.config.broker.toUpperCase()} overall P&L today: Realised ${inr(brokerPnl.realizedPnl ?? 0)} · Unrealised ${inr(brokerPnl.unrealizedPnl ?? 0)}${brokerPnl.openPositions !== null ? ` · ${brokerPnl.openPositions} open position(s)` : ''}`
+                  : brokerPnl.error
+                    ? `${ledger.config.broker.toUpperCase()}: ${brokerPnl.error}`
+                    : `${ledger.config.broker.toUpperCase()} P&L loading…`
+              }
+              className={cn(
+                'flex items-center gap-1.5 whitespace-nowrap rounded border px-2 py-0.5 font-mono text-[10px] font-bold',
+                brokerPnl.totalPnl !== null
+                  ? brokerPnl.totalPnl >= 0
+                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                    : 'border-red-500/30 bg-red-500/10 text-red-400'
+                  : 'border-zinc-800 bg-zinc-900/60 text-zinc-400',
+              )}
+            >
+              <span className="text-zinc-500">{ledger.config.broker.toUpperCase()} P&L</span>
+              <span className="tabular-nums font-bold">
+                {brokerPnl.totalPnl !== null ? inr(brokerPnl.totalPnl) : brokerPnl.loading ? '…' : '—'}
+              </span>
+            </span>
+          )}
           {ledger && (
             <span className={cn('whitespace-nowrap rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-bold tracking-widest',
               real ? 'border-red-500/40 bg-red-500/10 text-red-400' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400')}>
