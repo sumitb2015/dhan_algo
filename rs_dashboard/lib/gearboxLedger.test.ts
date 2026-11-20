@@ -6,7 +6,7 @@ import { targetKey } from './pnfTarget.ts';
 const target = { kind: 'options' as const, symbol: 'CRUDEOILM', name: 'CRUDEOILM', expiry: '2026-12-15', strike: 6000, side: 'CE' as const };
 const row = (x: Partial<GbRow> = {}): GbRow => ({
   id: 'r1', mode: 'REAL', broker: 'dhan', underlying: 'CRUDEOILM', dir: 'LONG', leg: { action: 'BUY', opt: 'CE', offset: 0, expiry: 'nearest' },
-  target, lots: 1, units: 10, unitsPerLot: 10, entry: 100, entryDecision: 100, entryAt: 1, day: '2026-11-20', status: 'open', ...x,
+  target, lots: 1, units: 1, unitsPerLot: 10, entry: 100, entryDecision: 100, entryAt: 1, day: '2026-11-20', status: 'open', ...x,
 });
 const withRows = (rows: GbRow[], mode: 'SIM' | 'REAL' = 'SIM'): GbLedger => ({ ...emptyLedger(), mode, rows });
 const cfg = (l: GbLedger, patch: object) => applyClientOp(l, { op: 'setConfig', patch }, 1);
@@ -68,6 +68,7 @@ test('rowPnl signs by leg action', () => {
   assert.equal(rowPnl(row({ leg: { action: 'SELL', opt: 'CE', offset: 0, expiry: 'nearest' } }), 110), -100);
   assert.equal(rowPnl(row({ status: 'closed', exit: 90 }), 200), -100);
   assert.equal(rowPnl(row(), null), null);
+  assert.equal(rowPnl(row({ units: 7 }), 110), 100); // units (broker order units) never affect P&L
 });
 
 test('entryBlock on max loss and max trades', () => {
@@ -92,6 +93,6 @@ test('reservedUnits sums only live REAL rows of the key', () => {
     row({ id: 'e', target: other }),
     row({ id: 'f', status: 'unknown', units: 20 }),
   ]);
-  assert.equal(reservedUnits(l, 'dhan', k, targetKey), 10 - 4 + 20);
+  assert.equal(reservedUnits(l, 'dhan', k, targetKey), 1 - 4 + 20);
   assert.equal(reservedUnits(l, 'kotak', k, targetKey), 0);
 });

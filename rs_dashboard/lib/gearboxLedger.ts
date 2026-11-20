@@ -32,7 +32,9 @@ export interface GbRow {
   leg: DirLeg;
   target: Target;
   lots: number;
+  /** Broker ORDER units (lots x the broker leg's lot units; on Dhan MCX = lots). Feeds exitOwn / reservedByGearbox, never P&L. */
   units: number;
+  /** Barrels per lot (CRUDEOIL 100, CRUDEOILM 10). Used ONLY for P&L. */
   unitsPerLot: number;
   entry: number;
   entryDecision: number;
@@ -170,12 +172,12 @@ export function normalizeLedger(v: unknown): GbLedger {
 export const isLive = (r: GbRow): boolean => r.status === 'sending' || r.status === 'open' || r.status === 'closing' || r.status === 'unknown';
 export const liveRow = (l: GbLedger, u: GbUnderlying): GbRow | null => l.rows.find(r => r.underlying === u && isLive(r)) ?? null;
 
-/** (exit | ltp - entry) x units, sign by leg action; null with no price. */
+/** (exit | ltp - entry) x lots x unitsPerLot, sign by leg action; null with no price. */
 export function rowPnl(r: GbRow, ltp: number | null): number | null {
   const price = r.status === 'closed' && Number.isFinite(r.exit) ? (r.exit as number) : ltp;
   if (price === null || price === undefined || !Number.isFinite(price)) return null;
   const move = r.leg.action === 'BUY' ? price - r.entry : r.entry - price;
-  return move * r.units;
+  return move * r.lots * r.unitsPerLot;
 }
 
 export const realisedToday = (l: GbLedger, mode: GbMode, day: string): number =>
