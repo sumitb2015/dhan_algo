@@ -44,3 +44,8 @@ test("'bs' (Bearish Strikes sells on Kotak / Zerodha) is capped at 50 lots; MCX 
   assert.strictEqual(sourceLotCapError(10 * 50, 'bs', 'CRUDEOILM26NOV8500CE', 10), null);
   assert.match(sourceLotCapError(65, 'bs', 'NIFTY26O2025000CE', null) ?? '', /cannot check the bs per-order cap/);
 });
+
+test('gbx (Gearbox Drive) is capped at 1 lot per order on Kotak', () => {
+  assert.strictEqual(sourceLotCapError(10, 'gbx', 'CRUDEOILM', 10), null);
+  assert.match(String(sourceLotCapError(20, 'gbx', 'CRUDEOILM', 10)), /gbx per-order cap of 1 lots/);
+});
