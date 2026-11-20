@@ -158,7 +158,7 @@ export default function GearboxPage() {
         )}
         <div className={cn('overflow-hidden rounded-2xl border bg-zinc-900', real ? 'border-red-500/50' : 'border-zinc-800')}>
           <div className="relative h-[clamp(240px,40vh,400px)]">
-            <RoadScene states={states} held={held?.status === 'open' || held?.status === 'closing' ? held.dir : null} paused={paused} />
+            <RoadScene states={states} held={held?.status === 'open' || held?.status === 'closing' ? held.dir : null} paused={paused} live={e.price} />
             <div className="pointer-events-none absolute left-3 right-3 top-2.5 flex flex-wrap justify-between gap-2">
               <span className="rounded-full bg-zinc-950/80 px-3 py-1 text-sm font-semibold text-zinc-100">
                 {s ? `${istDateIso(s.t * 1000)} · ${istClock(s.t * 1000).slice(0, seconds ? 8 : 5)}` : 'Waiting for bars'} · {tfLabel(config?.tf ?? 5)}

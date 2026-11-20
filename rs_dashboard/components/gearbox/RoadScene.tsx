@@ -1,10 +1,9 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { emaArray } from '@/lib/indicators';
 import type { GbState } from '@/lib/gearbox';
 
-// The game's side-scrolling road: the road is the signal future's closes (EMA 8 smoothed), the fog hides the future, the sky follows
+// The game's side-scrolling road: the road is the signal future's price (each closed bar's close, then the live price), the fog hides the future, the sky follows
 // the mode, and the car carries a LONG / SHORT flag while this page holds a leg. Colours are the --gb-* tokens in app/globals.css,
 // read through getComputedStyle (re-read when the theme flips). It draws at most 10 frames a second, never while the tab is hidden,
 // and freezes (one redraw per data change) while paused.
@@ -40,11 +39,11 @@ function readColors(el: Element): Colors {
   };
 }
 
-export function RoadScene({ states, held, paused }: { states: GbState[]; held: 'LONG' | 'SHORT' | null; paused: boolean }) {
+export function RoadScene({ states, held, paused, live }: { states: GbState[]; held: 'LONG' | 'SHORT' | null; paused: boolean; live: number | null }) {
   const ref = useRef<HTMLCanvasElement>(null);
-  const data = useRef({ states, held, paused });
+  const data = useRef({ states, held, paused, live });
   const dirty = useRef(true);
-  useEffect(() => { data.current = { states, held, paused }; dirty.current = true; }, [states, held, paused]);
+  useEffect(() => { data.current = { states, held, paused, live }; dirty.current = true; }, [states, held, paused, live]);
 
   useEffect(() => {
     const cv = ref.current;
@@ -62,17 +61,18 @@ export function RoadScene({ states, held, paused }: { states: GbState[]; held: '
     mo.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] });
 
     let col: Pal | null = null;
-    let pos = -1, camRef = 0, ang = 0, jolt = 0, lastGear = 0, lastN = 0;
-    let rd: number[] = [], rdFor: GbState[] | null = null;
+    let pos = -1, lo = 0, hi = 0, ang = 0, jolt = 0, lastGear = 0, lastN = 0;
     let puffs: { x: number; y: number; r: number; a: number }[] = [];
 
     const draw = () => {
-      const { states: S, held: h, paused: p } = data.current;
+      const { states: S, held: h, paused: p, live: lv } = data.current;
       if (!W || !H) return;
-      if (S !== rdFor) { rd = S.length ? emaArray(S.map(s => s.c), 8) : []; rdFor = S; }
-      const n = S.length;
+      // The road IS the future's price: each closed bar's close, then the live price at the front (where the car drives).
+      const rd = S.map(s => s.c);
+      if (rd.length && lv !== null && lv > 0) rd.push(lv);
+      const n = rd.length;
       ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-      const s = S[n - 1];
+      const s = S[S.length - 1];
       const tg = C.pal[String(s?.mode ?? 0) as '0'];
       if (!col) col = JSON.parse(JSON.stringify(tg)) as Pal;
       const ease = p ? 1 : 0.15;
@@ -85,15 +85,21 @@ export function RoadScene({ states, held, paused }: { states: GbState[]; held: '
         return;
       }
       const known = n - 1;
-      if (n !== lastN) { if (pos < 0 || n < lastN) pos = known; lastN = n; }
+      if (n !== lastN) { if (pos < 0 || n < lastN || n > lastN + 2) pos = known; lastN = n; }
       pos = p ? known : pos + (known - pos) * 0.25;
       if (s.gear !== lastGear) { jolt = s.gear > lastGear ? -1 : 1; lastGear = s.gear; }
-      const dx = Math.max(7, Math.min(13, W / 75)), carX = W * 0.6, baseY = H * 0.62, sc = H * 0.28;
+      const dx = Math.max(7, Math.min(13, W / 75)), carX = W * 0.6, baseY = H * 0.62;
       const i0 = Math.max(0, Math.min(known, Math.floor(pos))), f = Math.min(1, pos - i0);
       const R = (k: number) => rd[Math.max(0, Math.min(known, k))];
-      const target = R(i0) + (R(i0 + 1) - R(i0)) * f;
-      camRef = camRef ? camRef + (target - camRef) * (p ? 1 : 0.2) : target;
-      const X = (k: number) => carX + (k - pos) * dx, Y = (k: number) => baseY - (R(k) / camRef - 1) * 100 * sc;
+      // Vertical scale fitted to the price range on screen (eased, so it does not jump): the visible move fills the scene.
+      const k0 = Math.max(0, Math.floor(pos - carX / dx) - 2);
+      let vMin = Infinity, vMax = -Infinity;
+      for (let k = k0; k <= known; k++) { const v = rd[k]; if (v < vMin) vMin = v; if (v > vMax) vMax = v; }
+      const minSpan = Math.max(vMax * 0.0004, 1e-9);           // a flat market still reads as nearly flat, not as noise blown up
+      if (vMax - vMin < minSpan) { const m = (vMax + vMin) / 2; vMin = m - minSpan / 2; vMax = m + minSpan / 2; }
+      if (!hi || p) { lo = vMin; hi = vMax; } else { lo += (vMin - lo) * 0.15; hi += (vMax - hi) * 0.15; }
+      const top = H * 0.24, bot = H * 0.8;
+      const X = (k: number) => carX + (k - pos) * dx, Y = (k: number) => bot - ((R(k) - lo) / Math.max(hi - lo, 1e-9)) * (bot - top);
       if (s.mode === 1) { ctx.fillStyle = C.sun; ctx.beginPath(); ctx.arc(W * 0.82, H * 0.18, Math.min(28, H * 0.07), 0, 7); ctx.fill(); }
       const off = pos * dx;
       ([[col.m0, 0.12, 0.45, 0.32], [col.m1, 0.3, 0.58, 0.22]] as [Rgb, number, number, number][]).forEach(([c, par, yb, amp]) => {
@@ -116,6 +122,9 @@ export function RoadScene({ states, held, paused }: { states: GbState[]; held: '
       g = ctx.createLinearGradient(fx, 0, fx + Math.min(160, W * 0.3), 0);
       g.addColorStop(0, rgb(C.fog, 0)); g.addColorStop(0.35, rgb(C.fog, 0.85)); g.addColorStop(1, rgb(C.fog, 0.97)); ctx.fillStyle = g; ctx.fillRect(fx, 0, W - fx, H);
       ctx.fillStyle = C.fogText; ctx.font = '600 13px Inter, sans-serif'; ctx.fillText('fog: future unknown', Math.min(W - 140, fx + 30), Y(known) - 34);
+      // the price the car is at, and the range the road is drawn over
+      ctx.font = '700 13px Inter, sans-serif'; ctx.fillText(R(known).toFixed(1), Math.min(W - 140, fx + 30), Y(known) - 16);
+      ctx.font = '600 11px Inter, sans-serif'; ctx.fillText(hi.toFixed(1), 8, top - 6); ctx.fillText(lo.toFixed(1), 8, bot + 14);
       // car
       const cy = Y(i0) + (Y(i0 + 1) - Y(i0)) * f;
       const back = Math.max(kA, i0 - 2);
