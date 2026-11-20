@@ -48,8 +48,14 @@ export interface GbRow {
   day: string;
   status: GbStatus;
   note?: string;
-  /** Last good option price, kept fresh by gbState(); the square-off's SIM fallback. */
+  /** Last good option price, kept fresh by gbState() and the square-off tick; the square-off's SIM fallback. */
   lastLtp?: number;
+  /** When the broker confirmed the entry fill (TRADED). An exit answered "flat" within 60 s of it is treated as UNKNOWN. */
+  entryFilledAt?: number;
+  /** Square-off attempts on a REAL row: the IST day they count for, how many were sent that day and when the last one was. */
+  sqDay?: string;
+  sqTries?: number;
+  sqAt?: number;
 }
 
 export interface GbLog { at: number; level: 'info' | 'warn' | 'error' | 'trade'; msg: string }
@@ -150,7 +156,23 @@ export function sanitizeConfigPatch(patch: unknown, cur: GbConfig, mode: GbMode)
   return next;
 }
 
-/** A stored ledger of any shape -> a valid one (corrupt fields fall back to defaults; rows are kept as written). */
+const STATUSES: readonly GbStatus[] = ['sending', 'open', 'closing', 'closed', 'failed', 'unknown'];
+const LOG_LEVELS: readonly GbLog['level'][] = ['info', 'warn', 'error', 'trade'];
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/** A stored row every reader can use without throwing: a known status, a target with kind / symbol, a leg action, numeric lots / units. */
+export function isUsableRow(v: unknown): v is GbRow {
+  if (!isObj(v)) return false;
+  if (typeof v.id !== 'string' || !STATUSES.includes(v.status as GbStatus)) return false;
+  const t = v.target;
+  if (!isObj(t) || typeof t.kind !== 'string' || typeof t.symbol !== 'string') return false;
+  if (!isObj(v.leg) || (v.leg.action !== 'BUY' && v.leg.action !== 'SELL')) return false;
+  return isNum(v.lots) && isNum(v.units);
+}
+const isUsableLog = (v: unknown): v is GbLog => isObj(v) && isNum(v.at) && LOG_LEVELS.includes(v.level as GbLog['level']) && typeof v.msg === 'string';
+
+/** A stored ledger of any shape -> a valid one (corrupt fields fall back to defaults; rows / log entries no reader could use are dropped). */
 export function normalizeLedger(v: unknown): GbLedger {
   const base = emptyLedger();
   if (!v || typeof v !== 'object') return base;
@@ -162,8 +184,8 @@ export function normalizeLedger(v: unknown): GbLedger {
     updatedAt: Number.isFinite(o.updatedAt) ? (o.updatedAt as number) : 0,
     mode,
     config: typeof cfg === 'string' ? base.config : cfg,
-    rows: Array.isArray(o.rows) ? o.rows : [],
-    log: Array.isArray(o.log) ? o.log : [],
+    rows: Array.isArray(o.rows) ? (o.rows as unknown[]).filter(isUsableRow) : [],
+    log: Array.isArray(o.log) ? (o.log as unknown[]).filter(isUsableLog) : [],
     lastSquareOffDay: typeof o.lastSquareOffDay === 'string' ? o.lastSquareOffDay : null,
   };
 }
@@ -171,6 +193,20 @@ export function normalizeLedger(v: unknown): GbLedger {
 /** A row that holds (or may hold) a broker position. */
 export const isLive = (r: GbRow): boolean => r.status === 'sending' || r.status === 'open' || r.status === 'closing' || r.status === 'unknown';
 export const liveRow = (l: GbLedger, u: GbUnderlying): GbRow | null => l.rows.find(r => r.underlying === u && isLive(r)) ?? null;
+
+export const ORPHAN_NOTE = 'orphaned by a restart — check the order book';
+
+/**
+ * 'sending' / 'closing' exist only while one serial server op runs (it sends, then books the verdict). Seen at the START of an op,
+ * such a row was left by a restart or a throw mid-send: its outcome is UNKNOWN (never resent; a human resolves it). Null = none.
+ */
+export function recoverOrphans(l: GbLedger, now: number): GbLedger | null {
+  const orphans = l.rows.filter(r => r.status === 'sending' || r.status === 'closing');
+  if (orphans.length === 0) return null;
+  let next: GbLedger = { ...l, rows: l.rows.map(r => (r.status === 'sending' || r.status === 'closing' ? { ...r, status: 'unknown' as const, note: ORPHAN_NOTE } : r)) };
+  for (const r of orphans) next = addLog(next, 'error', `Row ${r.id} was ${r.status.toUpperCase()} with no order in flight - now UNKNOWN: ${ORPHAN_NOTE}`, now);
+  return next;
+}
 
 /** (exit | ltp - entry) x lots x unitsPerLot, sign by leg action; null with no price. */
 export function rowPnl(r: GbRow, ltp: number | null): number | null {

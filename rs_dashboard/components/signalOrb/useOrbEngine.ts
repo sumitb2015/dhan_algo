@@ -99,11 +99,16 @@ export function useOrbEngine() {
       const j = await r.json() as StateReply & { error?: string };
       if (!j.success) { setStateError(j.error ?? 'State unavailable'); return; }
       setStateError(null);
-      // unchanged rev + contract keeps the same objects, so the indicator memos do not recompute every poll
+      // unchanged rev + contract keeps the same ledger/contract objects (so indicator memos don't recompute every poll),
+      // but optionLtp and unitsPerLot always refresh — they change every tick independent of the ledger rev.
       setState(prev => {
         if (!prev) return j;
         const sameContract = JSON.stringify(prev.contract) === JSON.stringify(j.contract);
-        if (j.ledger.rev === prev.ledger.rev && sameContract && prev.today === j.today) return prev;
+        if (j.ledger.rev === prev.ledger.rev && sameContract && prev.today === j.today) {
+          // Ledger unchanged: keep heavy objects stable but always update live price fields
+          if (prev.optionLtp === j.optionLtp && prev.unitsPerLot === j.unitsPerLot) return prev;
+          return { ...prev, optionLtp: j.optionLtp, unitsPerLot: j.unitsPerLot };
+        }
         if (j.ledger.rev < prev.ledger.rev) return sameContract ? prev : { ...prev, contract: j.contract };
         return j;
       });
