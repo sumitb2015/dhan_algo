@@ -296,6 +296,12 @@ export function synQuoteVerdict(k: number, ceLtp: number | undefined, peLtp: num
   return { stale, wide, market };
 }
 
+/** What a broken basket still holds, leg by leg ('B PE 65', '—' when nothing): shown in place of its whole-basket lots. */
+export function brokenLegsLeft(b: Pick<LadderBasket, 'legs'>): string {
+  const left = b.legs.filter(l => (l.held ?? 0) > 0).map(l => `${l.side === 'BUY' ? 'B' : 'S'} ${l.contract.opt} ${l.held}`);
+  return left.length ? left.join(' + ') : '—';
+}
+
 /** "Iron Condor 22400/22500/22700/22800": the strategy and its distinct strikes. */
 export function basketName(b: Pick<LadderBasket, 'name' | 'legs'>): string {
   const strikes = [...new Set(b.legs.map(l => l.contract.strike))].sort((x, y) => x - y);

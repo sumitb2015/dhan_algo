@@ -17,7 +17,7 @@ import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { computePivots, pivotChips, PIVOT_FORMULAS } from '@/lib/pivotLevels';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, basketWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { BasketLegsModal } from '@/components/priceLadder/BasketLegsModal';
-import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_PREFIX, SYN_PAUSED_NOTE, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
+import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_PREFIX, SYN_PAUSED_NOTE, basketNowPnl, basketName, brokenLegsLeft, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
 import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, sumPairPnl, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
@@ -975,7 +975,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const entryMarks = useMemo(() => {
     const marks: EntryMark[] = [];
     if (mode === 'basket') {
-      for (const b of myBaskets) if ((b.state === 'open' || b.state === 'broken' || b.state === 'exiting' || b.state === 'unknown') && b.entryY) marks.push({ y: b.entryY, side: b.side, qty: b.lots * b.legs[0].contract.lotSize, pnl: basketNowPnl(b, data?.ltps ?? {}) });
+      for (const b of myBaskets) if ((b.state === 'open' || b.state === 'broken' || b.state === 'exiting' || b.state === 'unknown') && b.entryY) marks.push({ y: b.entryY, side: b.side, qty: b.lots * b.legs[0].contract.lotSize, pnl: basketNowPnl(b, data?.ltps ?? {}), ...(b.state === 'broken' ? { broken: brokenLegsLeft(b) } : {}) });
       return marks;
     }
     if (mode === 'pair') {
@@ -1024,9 +1024,14 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const basketHere = useMemo(() => (viewSig ? baskets.filter(b => b.broker === broker && b.mode === pageMode && sigOf(b) === viewSig) : []), [baskets, viewSig, broker, pageMode]);
   const basketPnl = useMemo(() => sumBasketPnl(basketHere, () => true, data?.ltps ?? {}), [basketHere, data?.ltps]);
   const basketHeldNow = myBaskets.filter(b => b.state === 'open' || b.state === 'broken' || b.state === 'exiting');
-  const basketNetLots = basketHeldNow.reduce((a, b) => a + (b.side === 'SELL' ? -1 : 1) * b.lots, 0);
+  // A broken basket is no longer the strategy it was armed as (a leg closed outside the ladder): it is listed apart, not
+  // netted in as whole lots or averaged into the entry. Exit still covers it (basketLotsHeld / basketExitable).
+  const basketWhole = basketHeldNow.filter(b => b.state !== 'broken');
+  const basketBroken = basketHeldNow.filter(b => b.state === 'broken');
+  const basketNetLots = basketWhole.reduce((a, b) => a + (b.side === 'SELL' ? -1 : 1) * b.lots, 0);
   const basketLotsHeld = basketHeldNow.reduce((a, b) => a + b.lots, 0);
-  const basketAvgEntry = basketLotsHeld > 0 ? basketHeldNow.reduce((a, b) => a + b.lots * (b.entryY ?? 0), 0) / basketLotsHeld : null;
+  const basketWholeLots = basketWhole.reduce((a, b) => a + b.lots, 0);
+  const basketAvgEntry = basketWholeLots > 0 ? basketWhole.reduce((a, b) => a + b.lots * (b.entryY ?? 0), 0) / basketWholeLots : null;
   const basketExitable = myBaskets.filter(b => (b.state === 'open' || b.state === 'broken') && !b.exitWanted);
   const basketOpenLots = basketExitable.filter(b => b.state === 'open').reduce((a, b) => a + b.lots, 0);
 
@@ -1869,6 +1874,10 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
             </div>}
             {mode === 'basket' && <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2.5 grid grid-cols-2 gap-y-0.5 text-xs">
               <span className="text-zinc-400 font-medium">Net Pos <span className="text-zinc-500">({pageMode.toUpperCase()})</span></span><span className="font-mono text-right text-zinc-100" aria-label="Basket net position">{basketNetLots} lot{Math.abs(basketNetLots) === 1 ? '' : 's'}</span>
+              {basketBroken.length > 0 && <>
+                <span className="text-amber-400 font-medium" title="A leg was closed outside the ladder: these are not whole positions any more and their bracket is off">Broken</span>
+                <span className="font-mono text-right text-amber-400" aria-label="Broken baskets">{basketBroken.map(brokenLegsLeft).join(' · ')}</span>
+              </>}
               <span className="text-zinc-400 font-medium">P&amp;L</span><span className={`font-mono text-right ${pnlClass(basketPnl)}`}>{fmtMoney(basketPnl)}</span>
               <span className="text-zinc-400 font-medium" title="Net premium at entry, weighted by lots">Avg Price</span><span className="font-mono text-right text-zinc-100">{basketAvgEntry ? basketAvgEntry.toFixed(2) : '—'}</span>
               <div className="col-span-2 flex gap-1 mt-1.5">

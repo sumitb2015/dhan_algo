@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   basketTemplates, draftFromTemplate, validateDraft, basketAxis, orientLegs, basketCombined, basketName, basketNowPnl, sumBasketPnl,
-  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, daysToExpiry, SYN_PAUSED_NOTE, synMarket, synQuoteVerdict, synPausedNote, SYN_MAX_SPREAD, SYN_PAUSE_REPEAT_MS, type LadderBasket, type BasketLeg, type DraftLeg,
+  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, daysToExpiry, SYN_PAUSED_NOTE, synMarket, synQuoteVerdict, synPausedNote, brokenLegsLeft, SYN_MAX_SPREAD, SYN_PAUSE_REPEAT_MS, type LadderBasket, type BasketLeg, type DraftLeg,
 } from './priceLadderBasket.ts';
 import { rollDay, type LadderState } from './priceLadder.ts';
 import { lotsOnContract, openPositionCount } from './priceLadderPair.ts';
@@ -561,4 +561,10 @@ test('planBaskets: with no books the synthetic behaves as before (the basis chec
 test('the paused note carries its reason and the default one is the stale-price text', () => {
   assert.equal(SYN_PAUSED_NOTE, synPausedNote());
   assert.match(synPausedNote('CE is stale'), /^Synthetic price paused — CE is stale; target \/ SL \/ trail are OFF/);
+});
+
+test('brokenLegsLeft lists only the legs a broken basket still holds', () => {
+  const legs = synBasket('SELL').legs.map(l => ({ ...l, held: l.contract.opt === 'PE' ? LOT : 0 }));
+  assert.equal(brokenLegsLeft({ legs }), `${legs.find(l => l.contract.opt === 'PE')!.side === 'BUY' ? 'B' : 'S'} PE ${LOT}`);
+  assert.equal(brokenLegsLeft({ legs: legs.map(l => ({ ...l, held: 0 })) }), '—');
 });

@@ -42,7 +42,8 @@ export interface LadderWidget {
 }
 
 /** An open position's entry on the ladder's axis: drawn as a tinted row with a side / qty / fill tag in the Price column. */
-export interface EntryMark { y: number; side: LadderSide; qty: number; avg?: number; /** Open P&L in rupees; null = no price yet, absent = not shown. */ pnl?: number | null }
+export interface EntryMark { y: number; side: LadderSide; qty: number; avg?: number; /** Open P&L in rupees; null = no price yet, absent = not shown. */ pnl?: number | null;
+  /** A broken basket: the legs it still holds ('B PE 65'). Its tag says BROKEN so a lone leg never reads as the whole position. */ broken?: string }
 
 /** Kotak MCX quantity is already barrels (no `mult`): flag it so the badge says bbl. Dhan / Zerodha carry `mult` instead. */
 const barrelsFlag = (c: { mult?: number; exchangeSegment?: string }) => (!c.mult && c.exchangeSegment === 'MCX_COMM' ? { bbl: true } : {});
@@ -570,6 +571,10 @@ export function LadderGrid({
                 >
                   {t.side === 'BUY' ? 'B' : 'S'}{t.qty}
                 </span>
+              ))}
+              {marks.filter(m => m.broken).map((m, i) => (
+                <span key={`broken-${i}`} title={`Broken basket (bracket off): it now holds only ${m.broken} — exit it from the baskets table`}
+                  className="shrink-0 px-1 rounded text-[10px] font-bold leading-4 text-oncolor bg-amber-600">BROKEN · {m.broken}</span>
               ))}
               {isRef && (
                 <span aria-hidden="true" title="Current price" data-testid="ladder-ltp-dot"
