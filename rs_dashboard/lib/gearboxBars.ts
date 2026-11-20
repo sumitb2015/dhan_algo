@@ -53,6 +53,12 @@ export const tfSeconds = (tf: number | string): number | null => {
   return m ? Number(m[1]) : null;
 };
 
+/** The bar size as the page names it: 1 -> "1-min", '10s' -> "10-sec". */
+export const tfLabel = (tf: number | string): string => {
+  const s = tfSeconds(tf);
+  return s !== null ? `${s}-sec` : `${tf}-min`;
+};
+
 /**
  * The tick log's N-second bars (lib/pnfTicks.ts bucketTickBars: start-stamped, every one already CLOSED by the server's cut-off)
  * -> GbBars. Bucketed on whole seconds (never `sec / 60` minutes through gbClosedBars: a fractional minute could mis-bucket),

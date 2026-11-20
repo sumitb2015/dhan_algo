@@ -116,3 +116,11 @@ test('computeGearbox on 10 s bars: session bar counts N-second bars from the MCX
   // 09:05 + 400 x 10 s = 10:11: no bar before 09:15 IST may signal (ENTRY_AFTER_OPEN_MIN)
   for (const s of st) if (s.t < open + 600) assert.equal(s.signal, false);
 });
+
+test('tfLabel names the real bar size', async () => {
+  const { tfLabel } = await import('./gearboxBars.ts');
+  assert.equal(tfLabel(1), '1-min');
+  assert.equal(tfLabel(5), '5-min');
+  assert.equal(tfLabel('10s'), '10-sec');
+  assert.equal(tfLabel('30s'), '30-sec');
+});

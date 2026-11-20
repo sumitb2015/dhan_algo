@@ -5,8 +5,8 @@ import { usePnfFeed } from '@/components/straddlePnf/usePnfFeed';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import { computeGearbox, ghostTrades, WARM_BARS, type GbBar, type GbState, type GhostTrade } from '@/lib/gearbox';
-import { gbClosedBars, gbClosedKey, gbSecondBars, gbSession, tfSeconds } from '@/lib/gearboxBars';
-import { liveRow, realisedToday, type Dir, type GbConfig, type GbLedger, type GbMode, type GbRow } from '@/lib/gearboxLedger';
+import { gbClosedBars, gbClosedKey, gbSecondBars, gbSession, tfLabel, tfSeconds } from '@/lib/gearboxBars';
+import { gbContractLabel, liveRow, realisedToday, type Dir, type GbConfig, type GbLedger, type GbMode, type GbRow } from '@/lib/gearboxLedger';
 import type { McxSession } from '@/lib/mcxSession';
 import type { Target } from '@/lib/pnfTarget';
 
@@ -149,7 +149,7 @@ export function useGearboxEngine() {
   const realArmed = mode === 'REAL' && !!key && armKey === key;
   const armReal = useCallback(() => {
     if (!cfg || mode !== 'REAL') return;
-    if (!window.confirm(`Arm REAL MONEY for ${cfg.underlying}?\n\n↑ Long and ↓ Short will place live Dhan option orders (1 lot) until you disarm or reload the page.`)) return;
+    if (!window.confirm(`Arm REAL MONEY for ${cfg.underlying}?\n\n↑ Long and ↓ Short will place live Dhan orders (1 lot) until you disarm or reload the page.`)) return;
     setArmKey(key);
   }, [cfg, mode, key]);
   const disarm = useCallback(() => setArmKey(null), []);
@@ -157,7 +157,7 @@ export function useGearboxEngine() {
   /** Why a new entry is refused here (null = allowed). Exits are never refused here. */
   const entryBlock: string | null = !state ? 'Loading…'
     : busy ? 'Sending…'
-      : warming ? `Warming up: ${bars.length} / ${WARM_BARS} closed ${tfMin ? `${tf}-min` : tf} bars`
+      : warming ? `Warming up: ${bars.length} / ${WARM_BARS} closed ${tfLabel(tf)} bars${secs ? ' (built from today\'s tick log since the MCX open)' : ''}`
         : mode === 'REAL' && !realArmed ? 'REAL is not armed on this page load'
           : !feedFresh ? 'Feed stale - no new entries'
             : null;
@@ -191,7 +191,7 @@ export function useGearboxEngine() {
     if (mode === 'REAL') {
       const c = state?.contracts[dir];
       const leg = cfg.map[dir];
-      const what = `${action === 'reverse' ? `Reverse to ${dir}` : dir}: ${leg.action} ${cfg.lots} lot ${c ? `${c.symbol} ${c.strike} ${c.side}` : leg.opt}`;
+      const what = `${action === 'reverse' ? `Reverse to ${dir}` : dir}: ${leg.action} ${cfg.lots} lot ${c ? gbContractLabel(c) : leg.opt}`;
       if (!window.confirm(`${what}?\n\nThis is a REAL order at your broker.`)) return;
     }
     await send({ action, dir, underlying: cfg.underlying, decisionPrice: price, reason: `Manual ${dir}`, mode, broker: cfg.broker });
@@ -199,7 +199,7 @@ export function useGearboxEngine() {
 
   const exitWith = useCallback(async (reason: string, confirmReal: boolean): Promise<void> => {
     if (!cfg || !held || held.status !== 'open' || inFlight.current) return;   // never a confirm while an order is in flight
-    if (confirmReal && held.mode === 'REAL' && !window.confirm(`Exit ${held.dir} ${held.lots} lot ${held.target.symbol} ${held.target.strike} ${held.target.side}?\n\nThis is a REAL order at your broker.`)) return;
+    if (confirmReal && held.mode === 'REAL' && !window.confirm(`Exit ${held.dir} ${held.lots} lot ${gbContractLabel(held.target)}?\n\nThis is a REAL order at your broker.`)) return;
     await send({ action: 'exit', underlying: cfg.underlying, decisionPrice: price ?? held.entry, reason, mode, broker: cfg.broker });
   }, [cfg, held, price, mode, send]);
   const exit = useCallback(() => exitWith('Manual exit', true), [exitWith]);

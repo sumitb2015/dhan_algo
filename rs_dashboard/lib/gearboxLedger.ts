@@ -196,6 +196,23 @@ export function normalizeLedger(v: unknown): GbLedger {
   };
 }
 
+/** Does this leg profit when price moves the opposite way to its arrow? (LONG = price up, SHORT = price down.) A BUY FUT gains on a
+ *  rise and a SELL FUT on a fall; an option gains on a rise when it is a BUY CE or a SELL PE. */
+export const legAgainstDir = (d: Dir, leg: DirLeg): boolean => {
+  const gainsOnRise = leg.opt === 'FUT' ? leg.action === 'BUY' : (leg.action === 'BUY') === (leg.opt === 'CE');
+  return d === 'LONG' ? !gainsOnRise : gainsOnRise;
+};
+
+const MON = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+/** A row's / leg's contract for the page: "FUT CRUDEOILM DEC" for a future, "CRUDEOILM 5400 CE" for an option. */
+export function gbContractLabel(t: Target): string {
+  if (t.kind === 'futures') {
+    const m = t.expiry ? MON[Number(t.expiry.slice(5, 7)) - 1] : undefined;
+    return m ? `FUT ${t.symbol} ${m}` : `FUT ${t.symbol}`;
+  }
+  return `${t.symbol} ${t.strike} ${t.side}`;
+}
+
 /** A row that holds (or may hold) a broker position. */
 export const isLive = (r: GbRow): boolean => r.status === 'sending' || r.status === 'open' || r.status === 'closing' || r.status === 'unknown';
 export const liveRow = (l: GbLedger, u: GbUnderlying): GbRow | null => l.rows.find(r => r.underlying === u && isLive(r)) ?? null;

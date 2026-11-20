@@ -174,3 +174,24 @@ test('rowPnl of a FUT SELL: 1 lot CRUDEOIL 6000 -> 5990 = +1000', () => {
   assert.equal(rowPnl(r, 5990), 1000);
   assert.equal(rowPnl({ ...r, leg: { ...r.leg, action: 'BUY' } }, 5990), -1000);
 });
+
+test('legAgainstDir: options by side and action, FUT by action only', async () => {
+  const { legAgainstDir } = await import('./gearboxLedger.ts');
+  const leg = (action: 'BUY' | 'SELL', opt: 'CE' | 'PE' | 'FUT') => ({ action, opt, offset: 0, expiry: 'nearest' });
+  assert.equal(legAgainstDir('LONG', leg('BUY', 'CE')), false);
+  assert.equal(legAgainstDir('LONG', leg('SELL', 'CE')), true);
+  assert.equal(legAgainstDir('SHORT', leg('BUY', 'CE')), true);
+  assert.equal(legAgainstDir('SHORT', leg('SELL', 'PE')), true);
+  // BUY FUT gains on a rise, SELL FUT on a fall: LONG flags SELL FUT, SHORT flags BUY FUT
+  assert.equal(legAgainstDir('LONG', leg('BUY', 'FUT')), false);
+  assert.equal(legAgainstDir('LONG', leg('SELL', 'FUT')), true);
+  assert.equal(legAgainstDir('SHORT', leg('SELL', 'FUT')), false);
+  assert.equal(legAgainstDir('SHORT', leg('BUY', 'FUT')), true);
+});
+
+test('gbContractLabel: a future reads FUT <symbol> <month>, an option <symbol> <strike> <side>', async () => {
+  const { gbContractLabel } = await import('./gearboxLedger.ts');
+  assert.equal(gbContractLabel({ kind: 'futures', symbol: 'CRUDEOILM', name: 'CRUDEOILM', expiry: '2026-12-16' }), 'FUT CRUDEOILM DEC');
+  assert.equal(gbContractLabel({ kind: 'futures', symbol: 'CRUDEOIL', name: 'CRUDEOIL' }), 'FUT CRUDEOIL');
+  assert.equal(gbContractLabel(target), 'CRUDEOILM 6000 CE');
+});

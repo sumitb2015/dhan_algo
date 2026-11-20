@@ -3,10 +3,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { gbContractLabel } from '@/lib/gearboxLedger';
 import type { GearboxEngine } from './useGearboxEngine';
 
 // ↑ Long / Exit / ↓ Short, the lots stepper, the held leg (entry / LTP / P&L ₹) and why the buttons are off; plus the risk inputs
-// (SL / target in premium points, daily limits) that commit on blur / Enter only. REAL MONEY in REAL mode: the browser sends only
+// (SL / target in points of the held contract: option premium, or the future for a FUT leg; daily limits) that commit on blur / Enter only. REAL MONEY in REAL mode: the browser sends only
 // the action, the server picks contract, size and exit quantity.
 
 export const FOCUS_RING = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/60 focus-visible:ring-offset-1 focus-visible:ring-offset-zinc-950';
@@ -60,7 +61,7 @@ export function TradeStrip({ e }: { e: GearboxEngine }) {
           {!held ? 'Flat · no leg held' : (
             <span className="flex flex-wrap items-center gap-x-3">
               <b className={held.dir === 'LONG' ? 'text-emerald-300' : 'text-red-300'}>{held.dir}</b>
-              <span className="text-zinc-200">{held.leg.action} {held.lots}L {held.target.symbol} {held.target.strike} {held.target.side}</span>
+              <span className="text-zinc-200">{held.leg.action} {held.lots}L {gbContractLabel(held.target)}</span>
               <span className="text-zinc-400">entry <b className="text-zinc-100">{held.entry.toFixed(2)}</b></span>
               <span className="text-zinc-400">LTP <b className="text-zinc-100">{e.heldLtp === null ? '—' : e.heldLtp.toFixed(2)}</b>{!e.heldFresh && e.heldLtp !== null ? ' (stale)' : ''}</span>
               <b className={pnl === null ? 'text-zinc-400' : pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>{pnl === null ? '—' : inr(pnl)}</b>
@@ -120,8 +121,8 @@ export function RiskPanel({ e }: { e: GearboxEngine }) {
   );
   return (
     <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2">
-      {field('SL', <NumInput label="Stop loss in premium points" value={c.slPts} onCommit={v => void e.setConfig({ slPts: v })} />, 'pts')}
-      {field('Target', <NumInput label="Target in premium points" value={c.tgtPts} onCommit={v => void e.setConfig({ tgtPts: v })} />, 'pts')}
+      {field('SL', <NumInput label="Stop loss in points (option premium, or the future for a FUT leg)" value={c.slPts} onCommit={v => void e.setConfig({ slPts: v })} />, 'pts')}
+      {field('Target', <NumInput label="Target in points (option premium, or the future for a FUT leg)" value={c.tgtPts} onCommit={v => void e.setConfig({ tgtPts: v })} />, 'pts')}
       <span className="text-[11px] text-amber-400" title="The SL and target are watched by this browser tab (the leader tab when several are open)">
         browser-only — closes nothing if this tab is closed{e.isLeader === false ? ' · another tab watches them' : ''}
       </span>

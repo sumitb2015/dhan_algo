@@ -6,9 +6,9 @@ import NavBar from '@/components/NavBar';
 import { istClock, istMinuteOfDay } from '@/lib/istTime';
 import { istDateIso } from '@/lib/nseHolidays';
 import { WARM_BARS } from '@/lib/gearbox';
-import { hhmmToMin } from '@/lib/gearboxBars';
+import { hhmmToMin, tfLabel, tfSeconds } from '@/lib/gearboxBars';
 import { targetLabel } from '@/lib/pnfTarget';
-import type { GbMode, GbRow, GbUnderlying } from '@/lib/gearboxLedger';
+import type { GbMode, GbRow, GbTf, GbUnderlying } from '@/lib/gearboxLedger';
 import { cn } from '@/lib/utils';
 import { Cluster } from './Cluster';
 import { DirectionMap } from './DirectionMap';
@@ -21,8 +21,11 @@ import { TripLog } from './TripLog';
 import { useGearboxEngine } from './useGearboxEngine';
 
 // /gearbox — Gearbox Drive: the driving game on the live CRUDEOIL(M) future. The road, gears and lamps read the future's closed bars
-// (lib/gearbox.ts); ↑ / ↓ buy the option the direction map names, through the server (lib/gearboxCore.ts). REAL MONEY in REAL mode:
+// (lib/gearbox.ts) on 1 / 3 / 5-min or 5-30 s bars; ↑ / ↓ trade the option or future the direction map names, through the server (lib/gearboxCore.ts). REAL MONEY in REAL mode:
 // Dhan only, 1 lot, armed per page load. Keys ↑ / ↓ / X trade (never on key repeat or while typing); Space only pauses the scene.
+
+/** The picker's order: seconds bars first, then minutes. */
+const TF_PICKS: readonly GbTf[] = ['5s', '10s', '20s', '30s', 1, 3, 5];
 
 const CHIP = 'whitespace-nowrap rounded border px-2 py-0.5 font-mono text-[10px] font-bold';
 
@@ -51,6 +54,7 @@ export default function GearboxPage() {
   const { config, mode, held, states } = e;
   const s = states.length ? states[states.length - 1] : null;
   const real = mode === 'REAL';
+  const seconds = !!config && tfSeconds(config.tf) !== null;
 
   useHotkeys({ up: () => void e.open('LONG'), down: () => void e.open('SHORT'), exit: () => void e.exit(), space: () => setPaused(p => !p) });
 
@@ -74,10 +78,10 @@ export default function GearboxPage() {
             <CarFront className="h-4 w-4 text-amber-400" />
           </div>
           <div>
-            <p className="mb-0.5 text-[10px] font-bold uppercase tracking-[0.16em] text-amber-400">Scalping · MCX options</p>
+            <p className="mb-0.5 text-[10px] font-bold uppercase tracking-[0.16em] text-amber-400">Scalping · MCX options &amp; futures</p>
             <h1 className="text-sm font-bold leading-none tracking-tight text-white">Gearbox Drive</h1>
             <p className="mt-1 text-[10px] font-medium text-zinc-500">
-              {e.state?.future ? `${targetLabel(e.state.future)} drives the road` : 'resolving the future…'} · EMA gears on closed bars
+              {e.state?.future ? `${targetLabel(e.state.future)} drives the road` : 'resolving the future…'} · EMA gears on closed {config ? tfLabel(config.tf) : ''} bars
             </p>
           </div>
         </div>
@@ -88,14 +92,22 @@ export default function GearboxPage() {
             className={cn('h-7 rounded-md border border-zinc-700 bg-zinc-900 px-2 text-xs text-zinc-100 disabled:opacity-50', FOCUS_RING)}>
             <option value="CRUDEOILM">CRUDEOILM</option><option value="CRUDEOIL">CRUDEOIL</option>
           </select>
-          <div className="flex items-center rounded-md border border-zinc-700 bg-zinc-900 p-0.5" role="group" aria-label="Timeframe">
-            {([1, 3, 5] as const).map(t => (
-              <button key={t} type="button" aria-pressed={config?.tf === t} disabled={!config} onClick={() => void e.setConfig({ tf: t })}
-                className={cn('rounded px-2 py-0.5 text-xs font-bold', config?.tf === t ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200', FOCUS_RING)}>
-                {t}m
+          <div className="flex items-center rounded-md border border-zinc-700 bg-zinc-900 p-0.5" role="group" aria-label="Bar size">
+            {TF_PICKS.map(t => (
+              <button key={t} type="button" aria-pressed={config?.tf === t} disabled={!config || !!held}
+                title={held ? 'Bar size is locked while a leg is held' : `${tfLabel(t)} bars${tfSeconds(t) ? ' from the WebSocket tick log' : ''}`}
+                onClick={() => { if (config && config.tf !== t) void e.setConfig({ tf: t }); }}
+                className={cn('rounded px-2 py-0.5 text-xs font-bold disabled:cursor-not-allowed', config?.tf === t ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200', FOCUS_RING)}>
+                {typeof t === 'number' ? `${t}m` : t}
               </button>
             ))}
           </div>
+          {config && tfSeconds(config.tf) !== null && (
+            <span data-testid="gb-tf-seconds" className={cn(CHIP, 'border-amber-500/40 bg-amber-500/10 text-amber-300')}
+              title="Seconds bars are built from today's tick log (sampled every 0.5 s), from the MCX open; the gearbox reads them only once 200 have closed">
+              more trades and whipsaws
+            </span>
+          )}
           <span className={cn(CHIP, 'border-zinc-700 text-zinc-300')} title="REAL is Dhan only in Gearbox Drive">DHAN</span>
           <div className="flex items-center rounded-md border border-zinc-700 bg-zinc-900 p-0.5" role="group" aria-label="Mode">
             {(['SIM', 'REAL'] as const).map(m => (
@@ -149,7 +161,7 @@ export default function GearboxPage() {
             <RoadScene states={states} held={held?.status === 'open' || held?.status === 'closing' ? held.dir : null} paused={paused} />
             <div className="pointer-events-none absolute left-3 right-3 top-2.5 flex flex-wrap justify-between gap-2">
               <span className="rounded-full bg-zinc-950/80 px-3 py-1 text-sm font-semibold text-zinc-100">
-                {s ? `${istDateIso(s.t * 1000)} · ${istClock(s.t * 1000).slice(0, 5)}` : 'Waiting for bars'} · {typeof config?.tf === 'string' ? config.tf : `${config?.tf ?? 5}m`}
+                {s ? `${istDateIso(s.t * 1000)} · ${istClock(s.t * 1000).slice(0, seconds ? 8 : 5)}` : 'Waiting for bars'} · {tfLabel(config?.tf ?? 5)}
               </span>
               <span className="rounded-full bg-zinc-950/80 px-3 py-1 text-sm font-semibold text-zinc-100">
                 {!held ? 'Flat' : <>{held.dir === 'LONG' ? 'Long' : 'Short'} · <b className={unrealPts === null ? 'text-zinc-400' : unrealPts >= 0 ? 'text-emerald-400' : 'text-red-400'}>
@@ -168,7 +180,7 @@ export default function GearboxPage() {
             <DirectionMap e={e} />
             <RiskPanel e={e} />
             <Scoreboard ledger={e.ledger} mode={mode} today={e.state?.today ?? ''} heldPnl={e.heldPnl} states={states} ghost={e.ghost} />
-            <TripLog states={states} ghost={e.ghost} log={e.ledger?.log ?? []} tf={typeof config?.tf === 'number' ? config.tf : 5} />
+            <TripLog states={states} ghost={e.ghost} log={e.ledger?.log ?? []} tf={config?.tf ?? 5} />
           </div>
         </div>
         <section aria-label="Today's trades" className="flex flex-col gap-2">

@@ -2,8 +2,8 @@
 
 import { useMemo } from 'react';
 import type { GbState, GhostTrade } from '@/lib/gearbox';
-import { gbEvents } from '@/lib/gearboxBars';
-import type { GbLog } from '@/lib/gearboxLedger';
+import { gbEvents, tfLabel, tfSeconds } from '@/lib/gearboxBars';
+import type { GbLog, GbTf } from '@/lib/gearboxLedger';
 import { istClock } from '@/lib/istTime';
 import { cn } from '@/lib/utils';
 
@@ -20,9 +20,10 @@ const TONE: Record<string, string> = {
   warn: 'text-amber-400', error: 'text-red-400', trade: 'text-zinc-100 font-semibold',
 };
 
-export function TripLog({ states, ghost, log, tf }: { states: GbState[]; ghost: GhostTrade[]; log: GbLog[]; tf: number }) {
+export function TripLog({ states, ghost, log, tf }: { states: GbState[]; ghost: GhostTrade[]; log: GbLog[]; tf: GbTf }) {
   const from = Math.max(0, states.length - CELLS);
   const s = states[states.length - 1];
+  const clk = tfSeconds(tf) !== null ? 8 : 5;   // HH:MM:SS on seconds bars
   const lines = useMemo(() => {
     const road = gbEvents(states, ghost, from).map(e => ({ at: e.t * 1000, msg: e.msg, tone: e.tone }));
     const own = log.slice(-30).map(l => ({ at: l.at, msg: l.msg, tone: l.level }));
@@ -31,12 +32,12 @@ export function TripLog({ states, ghost, log, tf }: { states: GbState[]; ghost: 
   return (
     <div>
       <div className="flex justify-between text-xs text-zinc-400">
-        <span>Trip log · gear by bar (last {CELLS} closed {tf}-min bars)</span>
+        <span>Trip log · gear by bar (last {CELLS} closed {tfLabel(tf)} bars)</span>
         <span>{!s ? '' : s.mode === 0 ? 'N' : s.mode > 0 ? '▲ up' : '▼ down'}</span>
       </div>
       <div className="mt-1 flex h-10 items-end gap-0.5" data-testid="gb-cells">
         {states.slice(from).map(q => (
-          <i key={q.t} title={`${istClock(q.t * 1000).slice(0, 5)} · gear ${q.gear || 'N'}`}
+          <i key={q.t} title={`${istClock(q.t * 1000).slice(0, clk)} · gear ${q.gear || 'N'}`}
             className={cn('min-h-[3px] flex-1 rounded-t-sm', q.mode ? GEAR[q.mode][q.gear - 1] : 'bg-zinc-500')}
             style={{ height: `${q.mode ? q.gear * 20 : 12}%` }} />
         ))}
@@ -44,7 +45,7 @@ export function TripLog({ states, ghost, log, tf }: { states: GbState[]; ghost: 
       <ul className="mt-3 text-sm" data-testid="gb-events">
         {lines.map((l, i) => (
           <li key={`${l.at}-${i}`} className="border-t border-zinc-800 py-1">
-            <em className="mr-2 not-italic tabular-nums text-zinc-500">{istClock(l.at).slice(0, 5)}</em>
+            <em className="mr-2 not-italic tabular-nums text-zinc-500">{istClock(l.at).slice(0, clk)}</em>
             <span className={TONE[l.tone] ?? 'text-zinc-300'}>{l.msg}</span>
           </li>
         ))}

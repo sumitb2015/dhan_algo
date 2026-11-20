@@ -47,7 +47,7 @@ export function RulesPanel({ session }: { session: McxSession | null }) {
         </ol>
       </details>
       <p className="mt-3 text-xs text-zinc-400">
-        Your trades: ↑ / ↓ buy or sell the option set in the direction map (nearest expiry after today, ATM from the server&apos;s futures price).
+        Your trades: ↑ / ↓ buy or sell the option or future set in the direction map (options: nearest expiry after today, ATM from the server&apos;s futures price; FUT: the signal future itself).
         REAL is Dhan only, 1 lot, and must be armed on every page load. The server squares off open legs at {sq}. Keys: ↑ long · ↓ short · X exit · Space pause.
       </p>
     </section>

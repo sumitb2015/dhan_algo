@@ -1,6 +1,6 @@
 'use client';
 
-import { rowPnl, type GbLedger, type GbRow } from '@/lib/gearboxLedger';
+import { gbContractLabel, rowPnl, type GbLedger, type GbRow } from '@/lib/gearboxLedger';
 import { istClock } from '@/lib/istTime';
 import { cn } from '@/lib/utils';
 
@@ -30,7 +30,7 @@ export function TradesTable({ ledger, today, ltpOf }: { ledger: GbLedger | null;
                 <td className="px-2 py-1 text-zinc-400">{istClock(r.entryAt).slice(0, 8)}</td>
                 <td className={cn('px-2 py-1 font-bold', r.mode === 'REAL' ? 'text-red-400' : 'text-zinc-400')}>{r.mode}</td>
                 <td className={cn('px-2 py-1 font-bold', r.dir === 'LONG' ? 'text-emerald-400' : 'text-red-400')}>{r.dir}</td>
-                <td className="px-2 py-1 text-zinc-200">{r.leg.action} {r.target.symbol} {r.target.strike} {r.target.side}</td>
+                <td className="px-2 py-1 text-zinc-200">{r.leg.action} {gbContractLabel(r.target)}</td>
                 <td className="px-2 py-1 text-zinc-300">{r.lots}</td>
                 <td className="px-2 py-1 text-zinc-200">{r.entry.toFixed(2)}</td>
                 <td className="px-2 py-1 text-zinc-200">{ltp === null ? '—' : ltp.toFixed(2)}</td>
