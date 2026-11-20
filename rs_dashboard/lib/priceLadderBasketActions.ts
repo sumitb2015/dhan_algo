@@ -78,8 +78,8 @@ interface Prepared {
   syn?: { kind: 'syn'; synStrike: number };
 }
 
-/** A synthetic future's strike may sit at most this many strike steps from the ATM strike of the live spot. */
-const SYN_MAX_STEPS_FROM_ATM = 1;
+/** A synthetic future's strike may sit at most this many strike steps from the ATM strike of the live spot (1 until 2026-11-20). */
+const SYN_MAX_STEPS_FROM_ATM = 2;
 
 /** The checks arm and market share; returns the prepared basket legs and live net premium, or the refusal. */
 async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<Prepared | NextResponse> {
@@ -131,7 +131,7 @@ async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<P
     if (!sp || !(sp.spot > 0) || !spotFresh(sp.at, now)) return bad(`${u} spot price is stale — try again in a moment`);
     // The ATM strike is derived here from the live spot; the browser's strike must be that one or its neighbour.
     const atm = synStrikeFor(sp.spot, step);
-    if (atm == null || Math.abs(synStrike - atm) > SYN_MAX_STEPS_FROM_ATM * step) return bad(`Strike ${synStrike} is not at the money (${u} ${sp.spot}, ATM ${atm ?? '?'}) — the synthetic must be at the money; refresh the legs`);
+    if (atm == null || Math.abs(synStrike - atm) > SYN_MAX_STEPS_FROM_ATM * step) return bad(`Strike ${synStrike} is not at the money (${u} ${sp.spot}, ATM ${atm ?? '?'}) — the synthetic must be within ${SYN_MAX_STEPS_FROM_ATM} strikes of the money; refresh the legs`);
     if (!synSane(a, sp.spot, daysToExpiry(expiry, istDay(now)))) return bad(`The synthetic price ${a} is too far from ${u} ${sp.spot} — a leg's price looks stale; refused`);
     // The legs' own books: a last price outside its market is a stale trade, and a wide market refuses a new entry. With no book
     // from the bridge yet the basis check above is the guard (the page says "no market depth").

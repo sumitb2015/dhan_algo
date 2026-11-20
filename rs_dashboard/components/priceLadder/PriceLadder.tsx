@@ -17,7 +17,7 @@ import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { computePivots, pivotChips, PIVOT_FORMULAS } from '@/lib/pivotLevels';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, basketWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { BasketLegsModal } from '@/components/priceLadder/BasketLegsModal';
-import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_PREFIX, SYN_PAUSED_NOTE, basketNowPnl, basketName, brokenLegsLeft, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
+import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_PREFIX, SYN_PAUSED_NOTE, basketNowPnl, basketName, brokenLegsLeft, isBasketLive, basketHasPosition, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
 import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, sumPairPnl, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
@@ -898,11 +898,15 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     setBasketLegs(draftFromTemplate(basketTpl.legs, atm, STRIKE_STEP[underlying] ?? 50, strikes));
   }, [basketTpl, strikes, underlying, syn]);
   const atmReady = atmStrike != null;
-  // A synthetic sits on the ATM strike: when ATM moves its legs are rebuilt on the new one, unless a live synthetic of this
-  // broker / mode / underlying / expiry exists (the page then keeps showing the strike that position is on).
-  const synLive = syn && (data?.state.baskets ?? []).some(b => b.kind === 'syn' && isBasketLive(b) && b.broker === broker && b.mode === (real ? 'real' : 'sim')
-    && b.legs[0].contract.underlying === underlying && b.legs[0].contract.expiry === expiry);
-  const synAtm = syn && !synLive ? atmStrike : null;
+  // A synthetic sits on the ATM strike: when ATM moves its legs are rebuilt on the new one, unless a synthetic of this
+  // broker / mode / underlying / expiry is still WAITING to fire (armed) or being placed: its level must stay on screen.
+  // An open position does not hold the strike (2026-11-20): it keeps running server-side, and "View <strike>" below
+  // shows its ladder (that pauses following until "Follow ATM").
+  const synSameBook = (b: LadderBasket) => b.kind === 'syn' && b.broker === broker && b.mode === (real ? 'real' : 'sim')
+    && b.legs[0].contract.underlying === underlying && b.legs[0].contract.expiry === expiry;
+  const synArmed = syn && (data?.state.baskets ?? []).some(b => synSameBook(b) && (b.state === 'armed' || b.state === 'placing'));
+  const synAtm = syn && !synArmed ? atmStrike : null;
+  const synHeldStrikes = syn ? [...new Set((data?.state.baskets ?? []).filter(b => synSameBook(b) && basketHasPosition(b) && b.synStrike).map(b => b.synStrike!))].sort((x, y) => x - y) : [];
   useEffect(() => { if (mode === 'basket' && !basketEdited) buildBasket(); }, [mode, basketEdited, buildBasket, atmReady, expiry, synAtm]);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -1929,6 +1933,19 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   <span className="font-mono text-zinc-100" aria-label="Synthetic strike">{synK ? (atmStrike != null && synK !== atmStrike ? `${synK} (${synK > atmStrike ? '+' : ''}${synK - atmStrike} from ATM ${atmStrike})` : `${synK} ATM`) : '—'}
                     {basketView && <span className="ml-2 text-zinc-400">CE {basketView.legs.find(l => l.opt === 'CE')?.ltp ?? '—'} · PE {basketView.legs.find(l => l.opt === 'PE')?.ltp ?? '—'}</span>}</span>
                 </div>
+                {(synHeldStrikes.some(k => k !== synK) || (basketEdited && atmStrike != null && synK !== atmStrike)) && (
+                  <div className="flex items-center justify-end gap-1 flex-wrap">
+                    {synHeldStrikes.filter(k => k !== synK).map(k => (
+                      <button key={k} type="button" onClick={() => { setBasketLegs(draftSyn(k, 'BUY')); setBasketEdited(true); }}
+                        title={`Show the ladder of your open synthetic at ${k} (stops following ATM until Follow ATM)`}
+                        className="px-2 py-0.5 rounded border border-blue-500/40 bg-blue-500/10 text-[11px] font-medium text-blue-300 hover:bg-blue-500/20">View {k}</button>
+                    ))}
+                    {basketEdited && atmStrike != null && synK !== atmStrike && (
+                      <button type="button" onClick={() => setBasketEdited(false)} title={`Rebuild the legs on the at-the-money strike ${atmStrike} and keep following it`}
+                        className="px-2 py-0.5 rounded border border-zinc-700 bg-zinc-800 text-[11px] font-medium text-zinc-200 hover:bg-zinc-700">Follow ATM {atmStrike}</button>
+                    )}
+                  </div>
+                )}
                 <div className="flex items-center justify-between gap-2 min-w-0 font-mono text-[11px]" aria-label="Synthetic market">
                   <span className="text-zinc-400 font-sans font-medium" title="What the two legs can really be traded at: buy = CE ask − PE bid, sell = CE bid − PE ask">Market</span>
                   {basketView?.market
