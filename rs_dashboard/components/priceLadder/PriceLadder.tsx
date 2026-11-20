@@ -17,7 +17,7 @@ import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { computePivots, pivotChips, PIVOT_FORMULAS } from '@/lib/pivotLevels';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, basketWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { BasketLegsModal } from '@/components/priceLadder/BasketLegsModal';
-import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_PREFIX, SYN_PAUSED_NOTE, MAX_REAL_BASKET_LOTS, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
+import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_PREFIX, SYN_PAUSED_NOTE, basketNowPnl, basketName, isBasketLive, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
 import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, sumPairPnl, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
@@ -1322,7 +1322,6 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
         const lots = w.lots + delta;
         if (lots < 1) { toast.info('One lot is the minimum — use × to cancel'); return; }
         if (lots > MAX_LADDER_LOTS) { toast.warning(`${MAX_LADDER_LOTS} lots is the cap`); return; }
-        if (real && lots > MAX_REAL_BASKET_LOTS) { toast.warning(`REAL baskets are limited to ${MAX_REAL_BASKET_LOTS} lots for now`); return; }
         void post({ action: 'basket', op: 'lots', id: w.ids[0], lots });
         return;
       }

@@ -646,17 +646,6 @@ export interface BasketTickIo {
 }
 const NO_IO: BasketTickIo = { polledAt: () => 0, busy: () => false };
 
-/** The tighter cap on a REAL basket's lots for this first REAL release (the per-contract 20-lot cap still applies). */
-export const MAX_REAL_BASKET_LOTS = 5;
-/** A REAL synthetic future is capped lower still until it has run live (2026-10-27): per request AND in total (see synLotsLive). */
-export const MAX_REAL_SYN_LOTS = 2;
-
-/** Lots of live synthetic futures (armed ones too) on this broker, mode and underlying: the REAL cap counts every one of them. */
-export function synLotsLive(st: Pick<LadderState, 'baskets'>, broker: LadderBroker, mode: 'sim' | 'real', underlying: string): number {
-  return (st.baskets ?? []).filter(b => b.kind === 'syn' && b.broker === broker && b.mode === mode && isBasketLive(b) && b.legs[0].contract.underlying === underlying)
-    .reduce((a, b) => a + b.lots, 0);
-}
-
 /** The legs the phase sends: hedges (BUY) first; shorts (SELL) once the hedges are filled. */
 export const phaseLegs = (b: Pick<LadderBasket, 'legs'>, phase: 'hedges' | 'shorts'): BasketLeg[] => b.legs.filter(l => (phase === 'hedges' ? l.side === 'BUY' : l.side === 'SELL'));
 

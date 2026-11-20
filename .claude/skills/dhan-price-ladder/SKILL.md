@@ -79,13 +79,13 @@ per write; the page drops a view older than the one on screen). It is re-read on
     needs its `baskets` twin. REAL (`runBasketJob` in `priceLadderServer.ts`, pure rules in `priceLadderBasket.ts`): hedges (BUY legs)
     go together and must ALL fill in full before any SELL leg is sent (`basketEntryVerdict` advance / open / unwind / unknown), a failed
     hedge sends no short, a failed short unwinds shorts first, exits cover shorts before hedges (`exitLegs`), an UNKNOWN leg stops and
-    reverses nothing (resolve per leg), the reconcile cuts legs down only (`cutBasketLeg` -> BROKEN). Capped at `MAX_REAL_BASKET_LOTS`
-    (5) and funds-checked fail closed (`realBasketBlocked`) until it has run live (`dhan-terminal-position-ownership` Inv 4, 9, 10, 14).
+    reverses nothing (resolve per leg), the reconcile cuts legs down only (`cutBasketLeg` -> BROKEN). No REAL basket cap beyond the
+    20-lot per-contract `overCap` (the 5-lot `MAX_REAL_BASKET_LOTS` was removed at the user's request, 2026-11-20); funds-checked fail closed (`realBasketBlocked`) (`dhan-terminal-position-ownership` Inv 4, 9, 10, 14).
 16. **Synthetic future = a Basket with `kind: 'syn'`** (2026-10-27). Two legs at the ATM strike (`draftSyn`: long BUY CE + SELL PE, short the mirror),
     `side` is the DIRECTION (BUY = long) where a premium basket's is the cash direction, so `basketCombined` takes the whole basket; the axis is
     `K + CE - PE` (`synAxis`; the premium axis flips sign). The server builds the legs from `synStrike` + `side` (ATM or its neighbour, derived
-    with `synStrikeFor`) and ignores any legs the browser sends. Entry/unwind/UNKNOWN/exit rules are the Basket's. REAL cap `MAX_REAL_SYN_LOTS`
-    (2) counts ALL live+armed synthetics (`synLotsLive`), re-checked in the lock. `synSane` (1.5% + carry; an unknown spot is NOT sane) pauses
+    with `synStrikeFor`) and ignores any legs the browser sends. Entry/unwind/UNKNOWN/exit rules are the Basket's. No synthetic-only
+    REAL cap (the 2-lot total `MAX_REAL_SYN_LOTS` was removed at the user's request, 2026-11-20); the 20-lot per-contract cap applies. `synSane` (1.5% + carry; an unknown spot is NOT sane) pauses
     entry, bracket and `modify`, never a requested exit; on an open position the pause is said once and kept as `SYN_PAUSED_NOTE` (note + event written when a pause starts or its `synPauseCause` changes, never per price change — that rewrote the ledger every tick; the same cause back within `SYN_PAUSE_REPEAT_MS` of `synPauseClearedAt` is quiet; a broken basket keeps its note; the bracket
     is OFF on a naked short leg: it must never be silent). The page's `syn` flag is page-only (not an `OptType`); the positions-window close
     refuses a REAL syn leg only while placing/open/exiting (`synLegOwner`), never UNKNOWN/BROKEN, where the ladder's Exit cannot run.

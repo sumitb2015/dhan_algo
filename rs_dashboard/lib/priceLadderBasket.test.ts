@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   basketTemplates, draftFromTemplate, validateDraft, basketAxis, orientLegs, basketCombined, basketName, basketNowPnl, sumBasketPnl,
-  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, synLotsLive, daysToExpiry, SYN_PAUSED_NOTE, synMarket, synQuoteVerdict, synPausedNote, SYN_MAX_SPREAD, SYN_PAUSE_REPEAT_MS, MAX_REAL_SYN_LOTS, MAX_REAL_BASKET_LOTS, type LadderBasket, type BasketLeg, type DraftLeg,
+  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, daysToExpiry, SYN_PAUSED_NOTE, synMarket, synQuoteVerdict, synPausedNote, SYN_MAX_SPREAD, SYN_PAUSE_REPEAT_MS, type LadderBasket, type BasketLeg, type DraftLeg,
 } from './priceLadderBasket.ts';
 import { rollDay, type LadderState } from './priceLadder.ts';
 import { lotsOnContract, openPositionCount } from './priceLadderPair.ts';
@@ -426,10 +426,6 @@ test('REAL synthetic entry: the bought leg goes first (CE for a long, PE for a s
   assert.deepEqual(exitLegs(held, NOW).map(l => l.contract.opt), ['PE']);      // the short put is covered before the long call is sold
 });
 
-test('the REAL synthetic cap is tighter than the REAL basket cap', () => {
-  assert.ok(MAX_REAL_SYN_LOTS < MAX_REAL_BASKET_LOTS);
-});
-
 test('an entry on a synthetic with NO fresh spot pauses (the guard cannot be checked), and fires once a spot is known', () => {
   const b = synBasket('BUY');
   assert.equal(planBaskets(st([b]), SYN_PX, NOW).next.baskets![0].state, 'armed');
@@ -452,15 +448,6 @@ test('an OPEN REAL synthetic whose price goes bad says so once, keeps the note, 
   assert.equal(r2.next.events.filter(e => e.msg.includes('Synthetic price paused')).length, 1);
   // and the note clears once the price is trustworthy again
   assert.equal(planBaskets(r2.next, SYN_PX, NOW + 2000, SPOT_IO).next.baskets![0].note, undefined);
-});
-
-test('synLotsLive counts every live synthetic of the broker, mode and underlying (armed ones too), not closed ones or other baskets', () => {
-  const real = (o: Partial<LadderBasket>) => synBasket('BUY', { mode: 'real', ...o });
-  const s = st([real({ id: 'a', lots: 1 }), real({ id: 'b', lots: 1, state: 'open' }), real({ id: 'c', lots: 2, state: 'closed' }), real({ id: 'd', mode: 'sim', lots: 2 }),
-    real({ id: 'e', broker: 'kotak', lots: 2 }), basket({ mode: 'real' })]);
-  assert.equal(synLotsLive(s, 'dhan', 'real', 'NIFTY'), 2);
-  assert.equal(synLotsLive(s, 'dhan', 'sim', 'NIFTY'), 2);
-  assert.equal(synLotsLive(s, 'dhan', 'real', 'BANKNIFTY'), 0);
 });
 
 test('synStrikeFor picks the ATM on the strike grid', () => {

@@ -8,15 +8,14 @@ import {
 } from '@/lib/priceLadder';
 import { blendExitAvg, lotsOnContract, pairBias, pairLevelSane, PAIR_STRIKE_STEP, MIN_PAIR_TRAIL_PTS } from '@/lib/priceLadderPair';
 import {
-  applyBasketShare, basketAxis, basketCombined, basketLegQty, basketName, daysToExpiry, draftSyn, firstPhase, isBasketLive, orientLegs, patchBasket, synAxis, synLotsLive, synQuoteVerdict, synSane, synStrikeFor, validateDraft,
-  MAX_REAL_BASKET_LOTS, MAX_REAL_SYN_LOTS,
+  applyBasketShare, basketAxis, basketCombined, basketLegQty, basketName, daysToExpiry, draftSyn, firstPhase, isBasketLive, orientLegs, patchBasket, synAxis, synQuoteVerdict, synSane, synStrikeFor, validateDraft,
   type BasketLeg, type DraftLeg, type LadderBasket,
 } from '@/lib/priceLadderBasket';
 import { checkOpenAllowed } from '@/lib/priceLadderPairActions';
 
 // The Price Ladder's Basket-mode actions (POST /api/price-ladder/state with action 'basket'). Real-money endpoint for mode
-// 'real': a REAL basket also needs the daily LIVE · REAL MONEY arm, a live broker session, at most MAX_REAL_BASKET_LOTS lots
-// and a fail-closed funds / margin check; its orders are sent by the watcher's basket jobs (hedges first, then the shorts).
+// 'real': a REAL basket also needs the daily LIVE · REAL MONEY arm, a live broker session and a
+// fail-closed funds / margin check; its orders are sent by the watcher's basket jobs (hedges first, then the shorts).
 // Every check mirrors the Pair arm: each leg's contract resolved from the broker's own master (never an id from the browser), strikes on the grid, the
 // 20-lot cap per contract (counted with slices and pairs, re-checked inside the lock), session / auto-exit, a live price for
 // every leg, the click verdict the user saw, and the level against the live net premium.
@@ -82,13 +81,6 @@ interface Prepared {
 /** A synthetic future's strike may sit at most this many strike steps from the ATM strike of the live spot. */
 const SYN_MAX_STEPS_FROM_ATM = 1;
 
-/** The REAL synthetic cap counts every live synthetic (armed included) plus this request; null when it fits. */
-function synTotalCap(st: LadderState, p: { broker: LadderBroker; mode: 'sim' | 'real'; u: string; lots: number }): string | null {
-  if (p.mode !== 'real') return null;
-  const held = synLotsLive(st, p.broker, p.mode, p.u);
-  return held + p.lots > MAX_REAL_SYN_LOTS ? `REAL synthetic futures are limited to ${MAX_REAL_SYN_LOTS} lots in total for now — ${held} already held or armed on ${p.u}` : null;
-}
-
 /** The checks arm and market share; returns the prepared basket legs and live net premium, or the refusal. */
 async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<Prepared | NextResponse> {
   const now = Date.now();
@@ -105,10 +97,8 @@ async function prepare(b: Record<string, unknown>, isMarket: boolean): Promise<P
   if (b.product !== 'NRML' && b.product !== 'MIS') return bad('product must be NRML or MIS');
   const lots = capLots(b.lots);
   if (lots == null) return bad('Lots must be a whole number from 1 to 20');
-  if (mode === 'real' && lots > MAX_REAL_BASKET_LOTS) return bad(`REAL baskets are limited to ${MAX_REAL_BASKET_LOTS} lots for now`);
   const isSyn = b.kind === 'syn';
   if (isSyn && isMcxUnderlying(u)) return bad(`${u}: a synthetic future is offered on the indices only`);
-  if (isSyn) { const e = synTotalCap(readLadderState(), { broker, mode, u, lots }); if (e) return bad(e); }
   const synStrike = Number(b.synStrike);
   if (isSyn && !(synStrike > 0)) return bad('A synthetic future needs its strike');
   // The synthetic's legs are built here from the strike and the direction, never taken from the browser.
@@ -189,7 +179,7 @@ async function arm(b: Record<string, unknown>): Promise<NextResponse> {
   };
   let err: string | null = null;
   const s = await updateLadderState(st => {
-    err = overCap(st, p.broker, p.mode, basket.legs, basket.lots) ?? (basket.kind === 'syn' ? synTotalCap(st, p) : null);       // re-checked inside the lock: two clicks in flight must not both pass
+    err = overCap(st, p.broker, p.mode, basket.legs, basket.lots);       // re-checked inside the lock: two clicks in flight must not both pass
     if (err) return st;
     return pushEvent({ ...st, baskets: [...(st.baskets ?? []), basket] },
       ev('info', `Armed ${p.mode === 'real' ? 'REAL' : 'SIM'} ${p.side} ${p.lots} lot(s) ${basketName(basket)} when the net ${verdict.dir === 'below' ? '≤' : '≥'} ${level}`, basket.id));
@@ -212,7 +202,7 @@ async function market(b: Record<string, unknown>): Promise<NextResponse> {
       createdAt: p.now, updatedAt: p.now, openedAt: p.now, entryY: p.a, note: 'Market order', ...(p.pane ? { pane: p.pane } : {}) };
   let err: string | null = null;
   const s = await updateLadderState(st => {
-    err = overCap(st, p.broker, p.mode, basket.legs, basket.lots) ?? (basket.kind === 'syn' ? synTotalCap(st, p) : null);
+    err = overCap(st, p.broker, p.mode, basket.legs, basket.lots);
     if (err) return st;
     return pushEvent({ ...st, baskets: [...(st.baskets ?? []), basket] },
       ev('info', isReal
@@ -374,11 +364,9 @@ async function lotsOp(body: Record<string, unknown>, id: string): Promise<NextRe
   if (b.state === 'armed') {
     const lots = capLots(body.lots);
     if (lots == null) return bad('Lots must be a whole number from 1 to 20');
-    if (b.mode === 'real' && lots > MAX_REAL_BASKET_LOTS) return bad(`REAL baskets are limited to ${MAX_REAL_BASKET_LOTS} lots for now`);
     const others = (st: LadderState): LadderState => ({ ...st, baskets: (st.baskets ?? []).filter(y => y.id !== id) });
     const u = b.legs[0].contract.underlying;
-    const synCap = (st: LadderState) => (b.kind === 'syn' ? synTotalCap(others(st), { broker: b.broker, mode: b.mode, u, lots }) : null);
-    const pre = overCap(others(readLadderState()), b.broker, b.mode, b.legs, lots) ?? synCap(readLadderState());
+    const pre = overCap(others(readLadderState()), b.broker, b.mode, b.legs, lots);
     if (pre) return bad(pre);
     if (b.mode === 'real' && lots > b.lots) {
       { const why = copyTargetRefusal(b.broker); if (why) return bad(why, 403); }
@@ -388,7 +376,7 @@ async function lotsOp(body: Record<string, unknown>, id: string): Promise<NextRe
     }
     let err: string | null = null;
     const r = await guarded(id, y => y.state === 'armed', st => {
-      err = overCap(others(st), b.broker, b.mode, b.legs, lots) ?? synCap(st);
+      err = overCap(others(st), b.broker, b.mode, b.legs, lots);
       if (err) return st;
       return pushEvent(patchBasket(st, id, { lots }), ev('info', `Basket lots changed to ${lots}`, id));
     });

@@ -52,8 +52,8 @@ strategy (Sell a credit / Buy a debit) the legs are as defined; in the other dir
   drag the entry / target / SL, the Net Pos panel (25 / 50 / 75 / Exit, whole lots oldest first), the Open positions / Total P&L strip,
   the MTM guard, the day archive, the cutoff square-off, and the server watcher with every tab closed.
 - **SIM** fills every leg at its live price at once.
-- **REAL** needs the daily LIVE · REAL MONEY arm and a live broker session, is limited to **5 lots** per basket for now (the
-  20-lot per-contract cap still applies) and passes a fail-closed funds check (the basket's hedged exchange margin plus the
+- **REAL** needs the daily LIVE · REAL MONEY arm and a live broker session, is limited only by the 20-lot per-contract cap (the
+  5-lot REAL basket cap was removed on 2026-11-20) and passes a fail-closed funds check (the basket's hedged exchange margin plus the
   premium of the BUY legs). The orders go **hedges first**: the BUY legs together at MARKET, and only once every one filled in
   full the SELL legs. A hedge that fails sends no short (what filled is sold again); a short that fails or part-fills closes
   every filled leg, shorts first. An unknown order outcome stops everything and reverses nothing: resolve each leg
@@ -228,7 +228,7 @@ The **Option** row has a fourth choice, **Synthetic**: a long call against a sho
 
 - **Buy = long** (BUY CE + SELL PE), **Sell = short** (SELL CE + BUY PE). A long gains as the synthetic price rises. Buy below it / Sell above it is the limit-like entry; the other side is a breakout (Anywhere view or Order Type SL). Target / SL / trail are synthetic-price points; Buy / Sell Market fills both legs now.
 - **REAL order sequence** is the Basket's: the BOUGHT leg goes first and must fill in full before the SOLD leg is sent; a failed or part-filled leg closes what filled; a send with an unknown outcome stops everything and reverses nothing (resolve it per leg). Exit covers the SOLD leg first, then sells the bought one.
-- **Caps:** 2 lots in REAL **in total** across every live or armed synthetic on that broker and underlying (the Basket's 5 and the 20-lot-per-contract cap still apply), funds / margin checked fail closed.
+- **Caps:** no synthetic-only cap (removed 2026-11-20); the 20-lot-per-contract cap applies, funds / margin checked fail closed.
 - **Safety pauses:** entry, bracket and moving a level pause while either leg has no fresh price, the index spot is not fresh (nothing to check against), or the synthetic sits more than 1.5% (plus about 12% a year of carry to expiry) from the index. On an OPEN position this switches target / SL / trail OFF, so it is said once in the events, kept as a note on the basket and shown as an amber banner. An exit you ask for, the MTM guard and the square-off still run.
 - **Positions window:** closing one leg of a REAL synthetic that is placing, open or exiting is refused (it would leave the other leg naked); use Exit on the ladder. An UNKNOWN or BROKEN synthetic cannot be exited from the ladder, so its legs can be closed from the window.
 - Like every bracket, the SL / target / trail run in the dashboard process, not at the broker: closing the dashboard stops them.
