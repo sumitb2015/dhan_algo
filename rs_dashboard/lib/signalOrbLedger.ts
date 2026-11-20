@@ -2,15 +2,18 @@
 // these under one in-process chain; the browser only sends config / mode / engine ops and asks the trade route to act. Real money:
 // the ledger is the authority for what THIS page opened (an exit closes only its own units, never the broker's whole net).
 
-import { TIMEFRAMES, sanitizeSpec, hhmmToMin, defaultSpec, type IndicatorSpec, type Side, type Timeframe } from './signalOrb.ts';
+import { TIMEFRAMES, sanitizeSpec, hhmmToMin, defaultSpec, rowPnl, type IndicatorSpec, type Side, type Timeframe } from './signalOrb.ts';
 import type { Target } from './pnfTarget.ts';
 
 export type OrbMode = 'SIM' | 'REAL';
 export type OrbBroker = 'dhan' | 'kotak' | 'zerodha';
 export type RowStatus = 'sending' | 'open' | 'closing' | 'closed' | 'failed' | 'unknown';
-
-/** MCX: one lot per order until this page has traded live, as Renko AUTO's MCX cap. */
-export const MAX_ORB_LOTS = 1;
+export type OrbSymbol = 'CRUDEOILM' | 'CRUDEOIL';
+export const ORB_SYMBOLS: OrbSymbol[] = ['CRUDEOILM', 'CRUDEOIL'];
+/** futures: long on BULL, short on BEAR. options: SELL a PE on BULL, SELL a CE on BEAR (the indicators always read the future). */
+export type OrbInstrument = 'futures' | 'options';
+/** Strike offset bounds: 0 = ATM, +N = N strikes OTM (PE down, CE up), -N = ITM. */
+export const MAX_STRIKE_OFFSET = 10;
 export const MAX_INDICATORS = 8;
 export const MAX_REJECTS = 3;
 /** A 'sending' / 'closing' row older than this lost its order call (server restart mid-send): the user may resolve it. */
@@ -34,6 +37,9 @@ export interface OrbConfig {
   entryEnd: string;
   eodExit: string;
   broker: OrbBroker;
+  symbol: OrbSymbol;
+  instrument: OrbInstrument;
+  strikeOffset: number;
 }
 
 export interface OrbRow {
@@ -47,8 +53,12 @@ export interface OrbRow {
   units: number;
   /** Rupees per point per lot (CRUDEOILM: 10 barrels). */
   unitsPerLot: number;
-  /** Decision price (the live LTP when the order was sent), not the broker fill. */
+  /** Decision price of the row's OWN instrument (futures LTP, or the option premium) when the order was sent, not the broker fill. */
   entry: number;
+  /** The future the signal (and the stop) read. Absent on rows written before options existed: then `target`. */
+  signalTarget?: Target;
+  /** The future's price at entry: the stop is measured from it. Absent on old rows: then `entry`. */
+  signalEntry?: number;
   entryAt: number;
   day: string;
   status: RowStatus;
@@ -89,6 +99,9 @@ export const DEFAULT_CONFIG: OrbConfig = {
   entryEnd: '22:45',
   eodExit: '23:00',
   broker: 'dhan',
+  symbol: 'CRUDEOILM',
+  instrument: 'futures',
+  strikeOffset: 0,
 };
 
 export const emptyLedger = (): OrbLedger => ({
@@ -139,7 +152,8 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
   }
   if (p.lots !== undefined) {
     const n = Number(p.lots);
-    if (!Number.isInteger(n) || n < 1 || n > MAX_ORB_LOTS) return `lots must be 1-${MAX_ORB_LOTS} (MCX cap until this page has run live)`;
+    // no lot cap on this page (the user's call, 2026-11-20); the exchange's freeze quantity still rejects an oversized order
+    if (!Number.isSafeInteger(n) || n < 1) return 'lots must be a whole number of at least 1';
     next.lots = n;
   }
   if (p.stopPts !== undefined) {
@@ -155,6 +169,19 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
   if (p.broker !== undefined) {
     if (p.broker !== 'dhan' && p.broker !== 'kotak' && p.broker !== 'zerodha') return 'broker must be dhan, kotak or zerodha';
     next.broker = p.broker;
+  }
+  if (p.symbol !== undefined) {
+    if (!ORB_SYMBOLS.includes(p.symbol as OrbSymbol)) return `symbol must be ${ORB_SYMBOLS.join(' or ')}`;
+    next.symbol = p.symbol as OrbSymbol;
+  }
+  if (p.instrument !== undefined) {
+    if (p.instrument !== 'futures' && p.instrument !== 'options') return 'instrument must be futures or options';
+    next.instrument = p.instrument;
+  }
+  if (p.strikeOffset !== undefined) {
+    const n = Number(p.strikeOffset);
+    if (!Number.isInteger(n) || Math.abs(n) > MAX_STRIKE_OFFSET) return `strikeOffset must be a whole number from -${MAX_STRIKE_OFFSET} to ${MAX_STRIKE_OFFSET}`;
+    next.strikeOffset = n;
   }
   let timePatched = false;
   for (const k of ['entryStart', 'entryEnd', 'eodExit'] as const) {
@@ -216,6 +243,9 @@ export function applyClientOp(l: OrbLedger, raw: unknown, now: number): OpResult
       const next = sanitizeConfigPatch(op.patch, l.config);
       if (typeof next === 'string') return bad(next);
       if (live && next.broker !== l.config.broker) return bad('The broker cannot change while a position is open', 409);
+      if (live && (next.symbol !== l.config.symbol || next.instrument !== l.config.instrument || next.strikeOffset !== l.config.strikeOffset)) {
+        return bad('Symbol, instrument and strike cannot change while a position is open', 409);
+      }
       return { ok: true, ledger: { ...l, config: next } };
     }
     case 'setMode': {
@@ -269,7 +299,7 @@ export function closeRow(l: OrbLedger, id: string, exit: number, reason: string,
     ...l,
     rows: l.rows.map(r => (r.id !== id ? r : {
       ...r, status: 'closed' as const, exit, exitAt: at, exitReason: reason,
-      pnl: Math.round((r.side === 'LONG' ? exit - r.entry : r.entry - exit) * r.lots * r.unitsPerLot * 100) / 100,
+      pnl: Math.round(rowPnl(r, exit) * 100) / 100,
     })),
   };
 }

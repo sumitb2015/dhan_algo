@@ -85,8 +85,12 @@ export function kotakMcxFutureError(symbol: string, kotakLotSize: number, barrel
   return `Kotak lists ${symbol} with lot size ${kotakLotSize}, not the expected ${barrelsPerLot} barrels per lot - not sent`;
 }
 
-/** A request body -> a valid order request, or the reason it is refused. */
-export function parsePnfOrder(body: unknown): PnfOrderRequest | string {
+/**
+ * A request body -> a valid order request, or the reason it is refused. `opts.uncapped` lifts the per-order lot cap: server code
+ * only (the Signal Orb, whose lot count comes from its own ledger) - it is an argument, never read from the body, so a browser
+ * request can not ask for it.
+ */
+export function parsePnfOrder(body: unknown, opts: { uncapped?: boolean } = {}): PnfOrderRequest | string {
   if (!body || typeof body !== 'object') return 'Invalid request';
   const b = body as Record<string, unknown>;
   const broker = b.broker;
@@ -123,7 +127,7 @@ export function parsePnfOrder(body: unknown): PnfOrderRequest | string {
   const cap = lotCap(target);
   const unit = target.kind === 'equity' ? 'shares' : 'lots';
   if (!Number.isInteger(lots) || lots < 1) return `${unit} must be a positive whole number`;
-  if (lots > cap) return `Order exceeds the ${cap}-${unit} cap for one order`;
+  if (lots > cap && !opts.uncapped) return `Order exceeds the ${cap}-${unit} cap for one order`;
   const product = b.product;
   const allowed: PnfProduct[] = target.kind === 'equity' ? ['INTRADAY', 'CNC'] : ['INTRADAY', 'MARGIN'];
   if (!allowed.includes(product as PnfProduct)) return `product must be ${allowed.join(' or ')} for this instrument`;

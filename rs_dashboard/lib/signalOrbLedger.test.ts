@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  MAX_ORB_LOTS, applyClientOp, closeRow, emptyLedger, normalizeLedger, realisedToday, sanitizeConfigPatch, trimRows, type OrbLedger, type OrbRow,
+  applyClientOp, closeRow, emptyLedger, normalizeLedger, realisedToday, sanitizeConfigPatch, trimRows, type OrbLedger, type OrbRow,
 } from './signalOrbLedger.ts';
 
 const target = { kind: 'futures' as const, symbol: 'CRUDEOILM', name: 'CRUDEOILM', expiry: '2026-12-17' };
@@ -10,9 +10,12 @@ const row = (extra: Partial<OrbRow> = {}): OrbRow => ({
 });
 const withRow = (r: OrbRow): OrbLedger => ({ ...emptyLedger(), rows: [r] });
 
-test('config: lot cap, bounds and time order', () => {
+test('config: no lot cap, bounds and time order', () => {
   const cur = emptyLedger().config;
-  assert.equal(typeof sanitizeConfigPatch({ lots: MAX_ORB_LOTS + 1 }, cur), 'string');
+  const big = sanitizeConfigPatch({ lots: 250 }, cur);
+  assert.ok(typeof big !== 'string' && big.lots === 250);
+  assert.equal(typeof sanitizeConfigPatch({ lots: 0 }, cur), 'string');
+  assert.equal(typeof sanitizeConfigPatch({ lots: 1.5 }, cur), 'string');
   assert.equal(typeof sanitizeConfigPatch({ timeframe: 2 }, cur), 'string');
   assert.equal(typeof sanitizeConfigPatch({ entryStart: '23:10' }, cur), 'string');
   assert.equal(typeof sanitizeConfigPatch({ entryEnd: '9:00' }, cur), 'string');
@@ -32,6 +35,36 @@ test('REAL engine needs a stop; an UNKNOWN row blocks the engine', () => {
   assert.equal(applyClientOp(l, { op: 'setEngine', active: true }, 1).ok, false);
   assert.equal(applyClientOp(withRow(row({ status: 'unknown' })), { op: 'setEngine', active: true }, 1).ok, false);
   assert.ok(applyClientOp(emptyLedger(), { op: 'setEngine', active: true }, 1).ok);
+});
+
+test('symbol, instrument and strike offset: bounded, defaults keep CRUDEOILM futures ATM', () => {
+  const cur = emptyLedger().config;
+  assert.equal(cur.symbol, 'CRUDEOILM');
+  assert.equal(cur.instrument, 'futures');
+  assert.equal(cur.strikeOffset, 0);
+  const ok = sanitizeConfigPatch({ symbol: 'CRUDEOIL', instrument: 'options', strikeOffset: -2 }, cur);
+  assert.ok(typeof ok !== 'string' && ok.symbol === 'CRUDEOIL' && ok.instrument === 'options' && ok.strikeOffset === -2);
+  assert.equal(typeof sanitizeConfigPatch({ symbol: 'NIFTY' }, cur), 'string');
+  assert.equal(typeof sanitizeConfigPatch({ instrument: 'spread' }, cur), 'string');
+  assert.equal(typeof sanitizeConfigPatch({ strikeOffset: 11 }, cur), 'string');
+  assert.equal(typeof sanitizeConfigPatch({ strikeOffset: 0.5 }, cur), 'string');
+  // a ledger written before these fields existed reads as the old behaviour
+  const old = normalizeLedger({ config: { lots: 1, broker: 'dhan' } });
+  assert.equal(old.config.symbol, 'CRUDEOILM');
+  assert.equal(old.config.instrument, 'futures');
+});
+
+test('symbol, instrument, strike are pinned while a position is open; lots may change', () => {
+  for (const patch of [{ symbol: 'CRUDEOIL' }, { instrument: 'options' }, { strikeOffset: 1 }]) {
+    assert.equal(applyClientOp(withRow(row()), { op: 'setConfig', patch }, 1).ok, false, JSON.stringify(patch));
+    assert.ok(applyClientOp(emptyLedger(), { op: 'setConfig', patch }, 1).ok);
+  }
+});
+
+test('an options row is booked as a sold option', () => {
+  const opt = { kind: 'options' as const, symbol: 'CRUDEOIL', name: 'CRUDEOIL', expiry: '2026-12-14', strike: 5600, side: 'PE' as const };
+  const l = closeRow(withRow(row({ target: opt, side: 'LONG', entry: 80, unitsPerLot: 100, lots: 2, signalEntry: 5650 })), 'r1', 65, 'x', 2);
+  assert.equal(l.rows[0].pnl, 3000);
 });
 
 test('broker is pinned while a position is open', () => {

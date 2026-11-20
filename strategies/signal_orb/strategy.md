@@ -27,6 +27,7 @@ Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest ye
   - Against a TradingView screenshot of the 1-hour chart (forming bar O 7820 H 7857 L 7757 C 7780): EMA 9 = 7780.80, EMA 21 = 7786.36, ST(10,2) = 7684.68 up. Both match to the paisa.
   - Stoch RSI differs only in illiquid flat stretches. There the value depends on 1e-14 float rounding, TradingView itself shows na or noise, and the Orb's vote is neutral.
   - The Orb reads only CLOSED bars, so it can differ from a chart's still-forming last bar until that bar closes.
+- **VWAP** indicator: close vs TradingView's session VWAP (hlc3 × volume on the chart-timeframe bars, reset each IST day). No volume in the session = no vote ("no volume").
 - **Orb colour:** green (BULL) when *every* active indicator votes +1, red (BEAR) when every one votes −1, gray otherwise. With no indicators the orb is gray.
 - **Follower** (`decideOrb`, checked in this order):
   1. Cutoff (default 23:00 IST): exit. This runs even with no price; the ledger then books the last price seen.
@@ -37,14 +38,17 @@ Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest ye
 
 ## Orders (lib/signalOrbServer.ts)
 - The browser sends only `enter` / `exit` / `reverse`, the side and the decision price. The server reads lots, contract and broker from the ledger. It sizes the order from the broker's own lot (`brokerLegs`) and sends through the P&F executor `placePnfMarket(order, 'pnf', 'orba')`. Brokers: Dhan, Kotak and Zerodha. Product: MIS.
-- **One lot per order** (`MAX_ORB_LOTS = 1`, `orba` caps in `lib/dhanPlaceOrder.ts` (MCX) and `lib/kotakOrderRules.ts`) until the page has traded live.
+- **No lot cap** (user's decision, 2026-11-20): `lots` is any whole number ≥ 1; `orba` has no per-source cap in `lib/dhanSourceCaps.ts` / `lib/kotakOrderRules.ts`, and the Orb's server passes `parsePnfOrder(…, { uncapped: true })` (a function argument, never read from a request body) past the P&F 20-lot cap. Orders above the MCX freeze quantity are rejected by the exchange, not sliced.
+- **Symbol:** CRUDEOILM (10 barrels/lot) or CRUDEOIL (100). The indicators always read the symbol's nearest future after today.
+- **Instrument:** `futures` — BULL long, BEAR short the future. `options` — BULL **sells a PE**, BEAR **sells a CE** on the nearest option expiry after today, ATM ± `strikeOffset` (+N = N strikes OTM: PE down, CE up; −N ITM), picked with Gearbox's `pickTarget()` at the decision future price. A reversal buys the sold option back, then sells the other side at the new strike. The premium is read from Fresh Money's server WebSocket (`lib/freshMoneyWs.ts`); an entry without a live premium is refused before the bar is consumed (it retries next tick); an exit never waits for one (it books the last premium seen, else the entry, and notes it). Symbol, instrument and strike offset are pinned while a row is live.
+- **The stop is in FUTURE points** for both instruments (`row.signalEntry`).
 - **A reversal is two orders: close, then open.** The open is sent only after the close was placed. If the close outcome is unknown, the engine halts and no second order is sent.
 - The row is written (`sending` / `closing`) **before** the order leaves. Outcomes:
   - `placed`: the row becomes open or closed.
   - `rejected`: an entry row becomes failed; an exit row goes back to open and is retried after 5 s. Three rejects in a row halt the engine.
   - `unknown` (no clean reply / 504): the row becomes unknown and the engine halts. You resolve it from the broker book ("It is open" / "Never filled" / "It is closed"). A row still `sending` / `closing` after 90 s (its request died with a server restart) is treated the same way.
 - **An exit closes only the Orb's own units** (`exitOwn`), capped by what the broker shows in that direction. A P&F / Renko square-off of the same contract keeps the Orb's units (`reservedByOrb` in `lib/signalOrbFile.ts`).
-- **P&L uses the decision price (the LTP when the order was sent), not the broker fill.** It is points × 10 barrels × lots.
+- **P&L uses the decision price (the LTP when the order was sent), not the broker fill.** Futures: points × barrels per lot × lots; options (always sold): (entry premium − exit premium) × barrels per lot × lots (`rowPnl`). The replay stays in future points in options mode (labelled "fut pts").
 
 ## Safety
 - SIM is the default. Switching mode always leaves the engine paused. REAL needs a hard stop above 0 and the **Arm real money** click on each page load; the arm is never saved.

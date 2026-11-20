@@ -5,7 +5,7 @@ import { Plus, Trash2, X } from 'lucide-react';
 import { RuleNumInput } from '@/components/breakdownScalper/RuleNumInput';
 import { cn } from '@/lib/utils';
 import { KIND_LABEL, TIMEFRAMES, defaultSpec, specLabel, type IndicatorKind, type IndicatorSpec } from '@/lib/signalOrb';
-import type { OrbConfig, OrbLedger } from '@/lib/signalOrbLedger';
+import { MAX_STRIKE_OFFSET, ORB_SYMBOLS, type OrbConfig, type OrbLedger } from '@/lib/signalOrbLedger';
 import type { ReplaySummary } from '@/lib/signalOrb';
 import { ReplayCard } from '@/components/signalOrb/ReplayCard';
 
@@ -13,7 +13,7 @@ import { ReplayCard } from '@/components/signalOrb/ReplayCard';
 // blur / Enter (dhan-commit-on-blur) and goes to the server as one setConfig patch; the server bounds and may refuse it.
 
 const FOCUS = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500';
-const KINDS: IndicatorKind[] = ['ema', 'supertrend', 'emaCross', 'rsi', 'stochRsi'];
+const KINDS: IndicatorKind[] = ['ema', 'supertrend', 'emaCross', 'rsi', 'stochRsi', 'vwap'];
 
 function TimeField({ value, onCommit, label }: { value: string; onCommit: (v: string) => void; label: string }) {
   const [draft, setDraft] = useState(value);
@@ -80,14 +80,13 @@ function SpecEditor({ spec, onChange, onRemove }: { spec: IndicatorSpec; onChang
   );
 }
 
-export function OrbDrawer({ open, onClose, ledger, locked, maxLots, onPatch, onMode, onResetSim, error, replayed }: {
+export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onResetSim, error, replayed }: {
   replayed: ReplaySummary | null;
   open: boolean;
   onClose: () => void;
   ledger: OrbLedger;
-  /** a position is live: broker and mode are pinned */
+  /** a position is live: broker, mode, symbol, instrument, strike and lots are pinned */
   locked: boolean;
-  maxLots: number;
   onPatch: (patch: Partial<OrbConfig>) => void;
   onMode: (m: 'SIM' | 'REAL') => void;
   onResetSim: () => void;
@@ -123,7 +122,7 @@ export function OrbDrawer({ open, onClose, ledger, locked, maxLots, onPatch, onM
         </div>
         {error && <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</p>}
         <div className="flex flex-col gap-1">
-          <ReplayCard r={replayed} tf={c.timeframe} compact />
+          <ReplayCard r={replayed} tf={c.timeframe} compact futuresPoints={c.instrument === 'options'} />
           <p className="px-1 text-[11px] text-zinc-500">Updates as you change the rules: the same follower over the recent sessions, fills at the bar close, before costs.</p>
         </div>
 
@@ -144,7 +143,33 @@ export function OrbDrawer({ open, onClose, ledger, locked, maxLots, onPatch, onM
               </button>
             ))}
           </div>
-          <p className="mt-2 text-[11px] text-zinc-500">Price vs EMA · Supertrend direction (TradingView&apos;s ta.supertrend on true high / low) · fast vs slow EMA · RSI above / below its band · Stoch RSI K vs D outside its extremes.</p>
+          <p className="mt-2 text-[11px] text-zinc-500">Price vs EMA · Supertrend direction (TradingView&apos;s ta.supertrend on true high / low) · fast vs slow EMA · RSI above / below its band · Stoch RSI K vs D outside its extremes · price vs session VWAP (TradingView&apos;s: hlc3, resets each day). All read the future.</p>
+        </Section>
+
+        <Section title="Market">
+          <Row label="Symbol" sub={locked ? 'Pinned while a position is open' : 'The indicators read this future'}>
+            <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+              {ORB_SYMBOLS.map(sym => (
+                <button key={sym} type="button" disabled={locked} onClick={() => onPatch({ symbol: sym })} aria-pressed={c.symbol === sym}
+                  className={cn('rounded-md px-3 py-1 text-xs font-bold disabled:opacity-50', FOCUS, c.symbol === sym ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}>{sym}</button>
+              ))}
+            </div>
+          </Row>
+          <Row label="Trade" sub={c.instrument === 'options' ? 'Green sells a PE, red sells a CE (nearest expiry)' : 'Green goes long the future, red short'}>
+            <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+              {(['futures', 'options'] as const).map(k => (
+                <button key={k} type="button" disabled={locked} onClick={() => onPatch({ instrument: k })} aria-pressed={c.instrument === k}
+                  className={cn('rounded-md px-3 py-1 text-xs font-bold disabled:opacity-50', FOCUS, c.instrument === k ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}>{k === 'futures' ? 'Futures' : 'Sell options'}</button>
+              ))}
+            </div>
+          </Row>
+          {c.instrument === 'options' && (
+            <Row label="Strike" sub={`0 = ATM · +N = N strikes OTM · −N = ITM (−${MAX_STRIKE_OFFSET}…${MAX_STRIKE_OFFSET})`}>
+              <RuleNumInput value={c.strikeOffset} step={1} min={-MAX_STRIKE_OFFSET} max={MAX_STRIKE_OFFSET} label="Strike offset" disabled={locked}
+                onCommit={s => onPatch({ strikeOffset: Number(s) })}
+                className="h-8 w-16 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100 disabled:opacity-50" />
+            </Row>
+          )}
         </Section>
 
         <Section title="Timing">
@@ -162,10 +187,11 @@ export function OrbDrawer({ open, onClose, ledger, locked, maxLots, onPatch, onM
         </Section>
 
         <Section title="Risk">
-          <Row label="Lots" sub={`CRUDEOILM, capped at ${maxLots} until this page has run live`}>
-            <span className="font-mono text-sm font-bold text-zinc-100">{c.lots}</span>
+          <Row label="Lots" sub={`${c.symbol} · no cap; the exchange rejects an order above its freeze quantity`}>
+            <RuleNumInput value={c.lots} step={1} min={1} label="Lots" disabled={locked} onCommit={s => onPatch({ lots: Number(s) })}
+              className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100 disabled:opacity-50" />
           </Row>
-          <Row label="Hard stop (points)" sub="From entry. Required for REAL. 0 = off">
+          <Row label="Hard stop (points)" sub="On the future, from entry (options too). Required for REAL. 0 = off">
             <RuleNumInput value={c.stopPts} step={5} min={0} label="Hard stop points" onCommit={s => onPatch({ stopPts: Number(s) })}
               className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
           </Row>

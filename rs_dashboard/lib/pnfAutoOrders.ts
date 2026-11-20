@@ -47,7 +47,7 @@ export function paperReply(order: PnfOrder, legs: PnfLeg[]): OrderReply {
 
 /**
  * A MARKET order (not a resting one: the route handles those). `scope`: whose ledgers (P&F or Renko) the close keeps out.
- * `tagOverride`: another page's correlation tag / Kotak per-source cap key (the Signal Orb sends 'orba', Gearbox Drive 'gbx';
+ * `tagOverride`: another page's correlation tag / Kotak per-source cap key (the Signal Orb sends 'orba' - no lot cap - Gearbox Drive 'gbx';
  * neither sends `close`).
  */
 export async function placePnfMarket(order: PnfOrder, scope: PnfScope, tagOverride?: 'orba' | 'gbx'): Promise<OrderReply> {
@@ -138,7 +138,9 @@ export async function placePnfMarket(order: PnfOrder, scope: PnfScope, tagOverri
     } else {
       const product = brokerProduct(order.product, broker);
       // Sized here from the server's own lot, so this only guards a lot lookup gone wrong. Checked for every leg before any is sent.
-      if (onBroker.some(l => !(l.lotUnits > 0) || (l.segment !== 'NSE_EQ' && order.lots > MAX_PNF_LOTS))) return bad('Order size check failed - nothing was sent', 500);
+      // the Signal Orb ('orba') has no lot cap by the user's choice (2026-11-20): only the lot lookup is checked for it
+      const lotCapped = tag !== 'orba';
+      if (onBroker.some(l => !(l.lotUnits > 0) || (lotCapped && l.segment !== 'NSE_EQ' && order.lots > MAX_PNF_LOTS))) return bad('Order size check failed - nothing was sent', 500);
       sent = true;
       for (const leg of onBroker) {
         const qty = orderQty(order.lots, leg.lotUnits);

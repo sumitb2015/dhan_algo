@@ -3,13 +3,14 @@
 // Spec: strategies/signal_orb/strategy.md.
 
 import { emaSmaSeeded, rsiArray, stochRsiArray, supertrendSeries } from './indicators.ts';
+import { VWAP_START, vwapFrom } from './straddlePnf.ts';
 
 /**
  * The page's code version. The server reports its own; a tab whose bundle carries another (an old tab the dev server's hot
  * update never reached) shows a reload banner and its entries are refused (lib/signalOrbServer.ts). Bump on every change to
  * the rules, the indicators or the engine.
  */
-export const ORB_CODE_VERSION = '2026-11-19.5';
+export const ORB_CODE_VERSION = '2026-11-20.1';
 
 export type Vote = 1 | -1 | 0;
 export type Signal = 'BULL' | 'BEAR' | 'NEUTRAL';
@@ -22,15 +23,17 @@ export type IndicatorSpec =
   | { id: string; kind: 'emaCross'; fast: number; slow: number }
   | { id: string; kind: 'supertrend'; period: number; mult: number }
   | { id: string; kind: 'rsi'; period: number; upper: number; lower: number }
-  | { id: string; kind: 'stochRsi'; rsiPeriod: number; stochPeriod: number; k: number; d: number; upper: number; lower: number };
+  | { id: string; kind: 'stochRsi'; rsiPeriod: number; stochPeriod: number; k: number; d: number; upper: number; lower: number }
+  | { id: string; kind: 'vwap' };
 
 export type IndicatorKind = IndicatorSpec['kind'];
 
-/** A closed bar: the bucket's close and true range (the feed's 1-min `h` / `l`; a bar without them falls back to its close). */
-export type OrbBar = { t: number; close: number; high: number; low: number };
+/** A closed bar: the bucket's close and true range (the feed's 1-min `h` / `l`; a bar without them falls back to its close),
+ *  and its traded volume (the sum of the 1-min `vol`; 0 when the feed carries none). */
+export type OrbBar = { t: number; close: number; high: number; low: number; vol: number };
 
 export const KIND_LABEL: Record<IndicatorKind, string> = {
-  ema: 'EMA', emaCross: 'EMA Cross', supertrend: 'Supertrend', rsi: 'RSI', stochRsi: 'Stoch RSI',
+  ema: 'EMA', emaCross: 'EMA Cross', supertrend: 'Supertrend', rsi: 'RSI', stochRsi: 'Stoch RSI', vwap: 'VWAP',
 };
 
 export function defaultSpec(kind: IndicatorKind, id: string): IndicatorSpec {
@@ -40,6 +43,7 @@ export function defaultSpec(kind: IndicatorKind, id: string): IndicatorSpec {
     case 'supertrend': return { id, kind, period: 10, mult: 2 };
     case 'rsi': return { id, kind, period: 14, upper: 55, lower: 45 };
     case 'stochRsi': return { id, kind, rsiPeriod: 14, stochPeriod: 14, k: 3, d: 3, upper: 80, lower: 20 };
+    case 'vwap': return { id, kind };
   }
 }
 
@@ -50,6 +54,7 @@ export const specLabel = (s: IndicatorSpec): string => {
     case 'supertrend': return `ST ${s.period},${s.mult}`;
     case 'rsi': return `RSI ${s.period}`;
     case 'stochRsi': return `StochRSI ${s.rsiPeriod},${s.stochPeriod}`;
+    case 'vwap': return 'VWAP';
   }
 };
 
@@ -89,6 +94,7 @@ export function sanitizeSpec(v: unknown): IndicatorSpec | null {
       return { ...d, rsiPeriod: int(o.rsiPeriod, 2, 100, d.rsiPeriod), stochPeriod: int(o.stochPeriod, 2, 100, d.stochPeriod),
         k: int(o.k, 1, 20, d.k), d: int(o.d, 1, 20, d.d), upper, lower: Math.min(lower, upper) };
     }
+    case 'vwap': return d;
   }
 }
 
@@ -131,6 +137,22 @@ export function indicatorSeries(spec: IndicatorSpec, bars: OrbBar[]): { votes: V
       }
       return { votes, value: i => (s.k[i] === null || s.d[i] === null ? 'warming' : `${fmt(s.k[i])} / ${fmt(s.d[i])}`) };
     }
+    case 'vwap': {
+      // TradingView's session VWAP on the chart bars: hlc3, the sums restart on each IST day. A session that has traded no volume
+      // yet has no VWAP (vwapFrom would fall back to the mean price): its vote is 0 and the chip says so.
+      const vw = vwapFrom(bars.map(b => ({ t: b.t, ce: 0, pe: 0, straddle: b.close, h: b.high, l: b.low, vol: b.vol > 0 ? b.vol : 0 })), 0, VWAP_START, true).series;
+      const sessVol: number[] = new Array(n);
+      let day = NaN, acc = 0;
+      for (let i = 0; i < n; i++) {
+        const d = Math.floor((bars[i].t + IST_S) / 86_400);
+        if (d !== day) { day = d; acc = 0; }
+        acc += bars[i].vol > 0 ? bars[i].vol : 0;
+        sessVol[i] = acc;
+        const x = vw[i];
+        if (acc > 0 && x !== null && x !== undefined) votes[i] = closes[i] > x ? 1 : closes[i] < x ? -1 : 0;
+      }
+      return { votes, value: i => (!(sessVol[i] > 0) ? 'no volume' : fmt(vw[i])) };
+    }
   }
 }
 
@@ -154,7 +176,7 @@ export function consensus(votes: Vote[]): Signal {
 /** 1-minute bars -> closed `tf`-minute bars at `nowS`. A bucket is closed once nowS >= its end. Buckets sit on the IST clock
  *  (floor((t + 5:30) / size)), as TradingView draws MCX: hourly bars start 09:00, 10:00, ... IST. For 1 / 3 / 5 / 15 minutes that
  *  is the same grid as UTC; only the hour needs the offset. */
-export function closedBars(bars1m: { t: number; straddle: number; h?: number; l?: number }[], tf: Timeframe, nowS: number): OrbBar[] {
+export function closedBars(bars1m: { t: number; straddle: number; h?: number; l?: number; vol?: number }[], tf: Timeframe, nowS: number): OrbBar[] {
   const size = tf * 60;
   const out: OrbBar[] = [];
   for (const b of bars1m) {
@@ -163,10 +185,11 @@ export function closedBars(bars1m: { t: number; straddle: number; h?: number; l?
     // a range that does not contain the close is not trusted (a stitched or bad row): the close stands in for it
     const ok = b.h !== undefined && b.l !== undefined && Number.isFinite(b.h) && Number.isFinite(b.l) && b.l > 0 && b.l <= c && c <= b.h;
     const hi = ok ? b.h! : c, lo = ok ? b.l! : c;
+    const v = Number.isFinite(b.vol) && (b.vol as number) > 0 ? (b.vol as number) : 0;
     const t = Math.floor((b.t + IST_S) / size) * size - IST_S;
     const cur = out[out.length - 1];
-    if (cur && cur.t === t) { cur.close = c; cur.high = Math.max(cur.high, hi); cur.low = Math.min(cur.low, lo); }
-    else out.push({ t, close: c, high: hi, low: lo });
+    if (cur && cur.t === t) { cur.close = c; cur.high = Math.max(cur.high, hi); cur.low = Math.min(cur.low, lo); cur.vol += v; }
+    else out.push({ t, close: c, high: hi, low: lo, vol: v });
   }
   while (out.length && nowS < out[out.length - 1].t + size) out.pop();
   return out;
@@ -313,3 +336,10 @@ export const nextBlock = (blocked: Side | null, signal: Signal): Side | null => 
 /** Rupee P&L of a CRUDEOILM-style futures position: points x barrels per lot x lots. */
 export const positionPnl = (side: Side, entry: number, price: number, lots: number, unitsPerLot: number): number =>
   (side === 'LONG' ? price - entry : entry - price) * lots * unitsPerLot;
+
+/**
+ * Rupee P&L of one Orb row at `mark` (the row's OWN instrument price). A futures row is long / short the future; an options row is
+ * always a SOLD option (BULL sold a PE, BEAR sold a CE), so it gains as the premium falls, whatever its `side`.
+ */
+export const rowPnl = (r: { side: Side; entry: number; lots: number; unitsPerLot: number; target: { kind: string } }, mark: number): number =>
+  r.target.kind === 'options' ? (r.entry - mark) * r.lots * r.unitsPerLot : positionPnl(r.side, r.entry, mark, r.lots, r.unitsPerLot);

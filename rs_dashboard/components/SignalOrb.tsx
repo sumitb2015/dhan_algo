@@ -13,8 +13,8 @@ import { expiryLabel } from '@/lib/pnfTarget';
 import { cn } from '@/lib/utils';
 import { isStuck, type OrbConfig, type OrbRow } from '@/lib/signalOrbLedger';
 
-// /signal-orb: one orb, one switch. CRUDEOILM futures follow the consensus of the active indicators on closed bars — green long,
-// red short, gray holds. Real money in REAL mode; the rules and every safety limit live in lib/signalOrb*.ts and
+// /signal-orb: one orb, one switch. A CRUDEOIL / CRUDEOILM future's closed bars give the consensus of the active indicators —
+// futures mode: green long, red short; options mode: green sells a PE, red sells a CE; gray holds. Real money in REAL mode; the rules and every safety limit live in lib/signalOrb*.ts and
 // strategies/signal_orb/strategy.md. The engine runs only while this page is open (leader tab).
 
 const FOCUS = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500';
@@ -35,8 +35,11 @@ export default function SignalOrb() {
   }, [e, ledger]);
 
   const position = !live ? 'FLAT' : live.status === 'open' ? live.side : 'PENDING';
+  // the stop reads the future (an options row's own entry is its premium)
+  const sigEntry = live ? live.signalEntry ?? live.entry : 0;
   const stopLevel = live?.status === 'open' && ledger && ledger.config.stopPts > 0
-    ? live.side === 'LONG' ? live.entry - ledger.config.stopPts : live.entry + ledger.config.stopPts : null;
+    ? live.side === 'LONG' ? sigEntry - ledger.config.stopPts : sigEntry + ledger.config.stopPts : null;
+  const optMode = ledger?.config.instrument === 'options';
   const tfLabel = ledger ? (ledger.config.timeframe === 60 ? '1h' : `${ledger.config.timeframe}m`) : '';
   const real = ledger?.mode === 'REAL';
   const lastBar = e.feed.bars[e.feed.bars.length - 1];
@@ -60,6 +63,7 @@ export default function SignalOrb() {
             <h1 className="text-[11px] font-black uppercase tracking-[0.45em] text-zinc-100">Signal Orb</h1>
             <p className="font-mono text-[10px] text-zinc-500">
               {contract ? `${contract.symbol} FUT ${contract.expiry ? expiryLabel(contract.expiry) : ''}` : 'resolving contract…'} · {tfLabel}
+              {ledger && <> · {optMode ? `sell options ${ledger.config.strikeOffset === 0 ? 'ATM' : `ATM${ledger.config.strikeOffset > 0 ? '+' : '−'}${Math.abs(ledger.config.strikeOffset)}`}` : 'futures'} · {ledger.config.lots} lot{ledger.config.lots > 1 ? 's' : ''}</>}
             </p>
           </div>
         </div>
@@ -134,7 +138,7 @@ export default function SignalOrb() {
                 <button type="button" className={cn('rounded border border-amber-500/40 px-2 py-0.5 font-bold hover:bg-amber-500/20', FOCUS)} onClick={async () => setErr(await e.op({ op: 'resolve', id: unresolved.id, as: 'failed' }))}>Never filled</button>
               </>
             )}
-            <button type="button" className={cn('rounded border border-amber-500/40 px-2 py-0.5 font-bold hover:bg-amber-500/20', FOCUS)} onClick={async () => setErr(await e.op({ op: 'resolve', id: unresolved.id, as: 'closed', price: e.price ?? undefined }))}>It is closed</button>
+            <button type="button" className={cn('rounded border border-amber-500/40 px-2 py-0.5 font-bold hover:bg-amber-500/20', FOCUS)} onClick={async () => setErr(await e.op({ op: 'resolve', id: unresolved.id, as: 'closed', price: (unresolved.target.kind === 'options' ? e.state?.optionLtp : e.price) ?? undefined }))}>It is closed</button>
           </div>
         )}
 
@@ -142,7 +146,7 @@ export default function SignalOrb() {
           since={ev.sinceT ? istClock(ev.sinceT * 1000).slice(0, 5) : null} progress={1 - e.secsToClose / e.barSecs} secsLeft={e.secsToClose} />
 
         {/* position: its own element, coloured by side (the orb shows the signal) */}
-        <PositionPill live={live} position={position} pnl={e.openPnl} stopLevel={stopLevel}
+        <PositionPill live={live} position={position} pnl={e.openPnl} stopLevel={stopLevel} mark={e.mark}
           onClose={live?.status === 'open' ? () => void e.closeAndStop() : null} />
 
         {/* readout: the price first, then one chip per indicator */}
@@ -198,7 +202,7 @@ export default function SignalOrb() {
               <span>Limit <strong className="text-zinc-300">₹{ledger.config.dailyLossLimit.toLocaleString('en-IN')}</strong></span>
             </div>
             <span className="hidden h-4 w-px bg-zinc-800 md:block" aria-hidden />
-            <ReplayCard r={e.replayed} tf={ledger.config.timeframe} bare />
+            <ReplayCard r={e.replayed} tf={ledger.config.timeframe} bare futuresPoints={optMode} />
           </div>
         </section>
       )}
@@ -226,7 +230,7 @@ export default function SignalOrb() {
       )}
 
       {ledger && e.state && (
-        <OrbDrawer open={drawer} onClose={() => setDrawer(false)} ledger={ledger} locked={!!live} maxLots={e.state.maxLots} replayed={e.replayed}
+        <OrbDrawer open={drawer} onClose={() => setDrawer(false)} ledger={ledger} locked={!!live} replayed={e.replayed}
           onPatch={patch} onMode={setMode} onResetSim={async () => setErr(await e.op({ op: 'resetSim' }))} error={err} />
       )}
       {err && !drawer && (
@@ -238,8 +242,14 @@ export default function SignalOrb() {
   );
 }
 
-function PositionPill({ live, position, pnl, stopLevel, onClose }: {
-  live: OrbRow | null; position: 'LONG' | 'SHORT' | 'FLAT' | 'PENDING'; pnl: number | null; stopLevel: number | null; onClose: (() => void) | null;
+/** What a row holds, e.g. "CRUDEOIL 5600 PE" for an options row (always sold), or "" for a futures row. */
+const optionOf = (r: OrbRow) => (r.target.kind === 'options' ? `${r.target.symbol} ${r.target.strike} ${r.target.side}` : '');
+
+function PositionPill({ live, position, pnl, stopLevel, mark, onClose }: {
+  live: OrbRow | null; position: 'LONG' | 'SHORT' | 'FLAT' | 'PENDING'; pnl: number | null; stopLevel: number | null;
+  /** the row's own live price (an option's premium for an options row) */
+  mark: number | null;
+  onClose: (() => void) | null;
 }) {
   if (!live) {
     return (
@@ -255,7 +265,7 @@ function PositionPill({ live, position, pnl, stopLevel, onClose }: {
       <div className="flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/10 px-4 py-1.5 font-mono text-[11px] text-amber-300">
         <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" aria-hidden />
         <span className="font-bold tracking-[0.2em]">{live.status.toUpperCase()}</span>
-        <span>{live.side} {live.lots} lot{live.lots > 1 ? 's' : ''}</span>
+        <span>{live.side} {optionOf(live) ? `· SELL ${optionOf(live)} ` : ''}{live.lots} lot{live.lots > 1 ? 's' : ''}</span>
       </div>
     );
   }
@@ -264,7 +274,9 @@ function PositionPill({ live, position, pnl, stopLevel, onClose }: {
     <div className={cn('flex flex-wrap items-center justify-center gap-3 rounded-full border bg-zinc-950/85 py-1 pl-1 pr-2 font-mono text-[11px] backdrop-blur',
       long ? 'border-emerald-500/50' : 'border-red-500/50')}>
       <span className={cn('rounded-full px-3 py-1 text-[11px] font-black tracking-[0.25em] text-oncolor', long ? 'bg-emerald-600' : 'bg-red-600')}>{position}</span>
-      <span className="text-zinc-400">{live.lots} lot @ <strong className="text-zinc-200">{live.entry.toLocaleString('en-IN')}</strong></span>
+      {optionOf(live) && <span className="font-bold text-zinc-200">SELL {optionOf(live)}</span>}
+      <span className="text-zinc-400">{live.lots} lot{live.lots > 1 ? 's' : ''} @ <strong className="text-zinc-200">{live.entry.toLocaleString('en-IN')}</strong>
+        {optionOf(live) && <> · now <strong className="text-zinc-200">{mark === null ? '—' : mark.toLocaleString('en-IN')}</strong></>}</span>
       <strong className={cn('text-sm tabular-nums', pnl === null ? 'text-zinc-500' : pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
         {pnl === null ? '—' : inr(pnl)}
       </strong>

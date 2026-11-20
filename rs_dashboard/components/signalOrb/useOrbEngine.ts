@@ -9,7 +9,7 @@ import {
 } from '@/lib/alertSound';
 import { orbAlert, type OrbAlertSnap, type OrbSound } from '@/lib/signalOrbChime';
 import type { Target } from '@/lib/pnfTarget';
-import { ORB_CODE_VERSION, closedBars, decideOrb, evaluate, positionPnl, replay, sideOf, type Evaluation, type ReplaySummary, type Side } from '@/lib/signalOrb';
+import { ORB_CODE_VERSION, closedBars, decideOrb, evaluate, replay, rowPnl, sideOf, type Evaluation, type ReplaySummary, type Side } from '@/lib/signalOrb';
 import { isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 
 // The Signal Orb's live engine (browser). Leader tab only (localStorage lock); the tick is rebuilt every render and called through
@@ -17,7 +17,8 @@ import { isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/
 // (/api/signal-orb/trade); the server sizes, sends and books. Stale feed blocks entries, never exits; a missing price skips the stop
 // but not the cutoff. REAL entries also need this page load's ARM click, which is never saved.
 
-type StateReply = { success: boolean; ledger: OrbLedger; contract: Target | null; unitsPerLot: number; maxLots: number; today: string; codeVersion?: string };
+/** `contract` is always the FUTURE the signal reads; `optionLtp` is a live option row's premium (server WebSocket), else null. */
+type StateReply = { success: boolean; ledger: OrbLedger; contract: Target | null; unitsPerLot: number; optionLtp?: number | null; today: string; codeVersion?: string };
 
 const STATE_POLL_MS = 3_000;
 const LOCK_KEY = 'signalOrb.engineLock';
@@ -170,7 +171,10 @@ export function useOrbEngine() {
   const today = now ? istDateIso(now) : '';
   // the server runs newer code than this tab's bundle (a hot update that never arrived): reload before trading on it
   const outdated = !!state?.codeVersion && state.codeVersion !== ORB_CODE_VERSION;
-  const openPnl = live?.status === 'open' && price !== null ? positionPnl(live.side, live.entry, price, live.lots, live.unitsPerLot) : null;
+  // the row's own mark: the future's LTP, or (options) the sold option's premium from the state poll
+  const isOption = live?.target.kind === 'options';
+  const mark = isOption ? (state?.optionLtp ?? null) : price;
+  const openPnl = live?.status === 'open' && mark !== null && mark > 0 ? rowPnl(live, mark) : null;
   const realised = ledger && today ? realisedToday(ledger, ledger.mode, today) : 0;
 
   const trade = useCallback(async (body: Record<string, unknown>): Promise<boolean> => {
@@ -232,7 +236,8 @@ export function useOrbEngine() {
       staleWarned.current = live.id;
       void op({ op: 'addLog', level: 'warn', msg: `Open row ${live.id} is from ${live.day}: not auto-managed. Check the broker, then Close or mark it.` });
     }
-    const position = live && !staleDay ? { side: live.side, entry: live.entry } : null;
+    // the stop is measured on the FUTURE the signal reads (an options row's own entry is its premium)
+    const position = live && !staleDay ? { side: live.side, entry: live.signalEntry ?? live.entry } : null;
     const d = decideOrb({
       signal: ev.signal, barT: ev.barT, watermarkT: ledger.watermarkT, position, price: priceFresh ? price : null,
       minute: istMinuteOfDay(t), times: cfg, stopPts: cfg.stopPts, blockedSide,
@@ -248,7 +253,7 @@ export function useOrbEngine() {
       if (t < exitRetryAt.current) return false;
       exitRetryAt.current = t + EXIT_RETRY_MS;
       // the cutoff exits without a quote: the ledger books the last price seen
-      const px = price ?? live!.entry;
+      const px = price ?? live!.signalEntry ?? live!.entry;
       void trade({ action: 'exit', price: px, reason: d.reason, exitKind: d.kind, auto: true });
       return false;
     }
@@ -294,11 +299,11 @@ export function useOrbEngine() {
 
   const closeAndStop = useCallback(async () => {
     await op({ op: 'setEngine', active: false });
-    if (live?.status === 'open') await trade({ action: 'exit', price: price ?? live.entry, reason: 'Closed by user', exitKind: 'manual', auto: false });
+    if (live?.status === 'open') await trade({ action: 'exit', price: price ?? live.signalEntry ?? live.entry, reason: 'Closed by user', exitKind: 'manual', auto: false });
   }, [op, trade, live, price]);
 
   return {
-    state, ledger, live: live as OrbRow | null, contract, feed, ev, price, priceFresh, openPnl, realised, now, isLeader, note, stateError,
+    state, ledger, live: live as OrbRow | null, contract, feed, ev, price, priceFresh, openPnl, mark, realised, now, isLeader, note, stateError,
     armed, setArmed, busy, op, closeAndStop, today, replayed, secsToClose, barSecs,
     tradeSound, setTradeSound, alertSound, setAlertSound, soundReady, outdated,
   };

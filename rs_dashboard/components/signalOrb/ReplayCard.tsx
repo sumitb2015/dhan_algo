@@ -9,19 +9,23 @@ import type { ReplaySummary } from '@/lib/signalOrb';
 
 const inr = (n: number) => `${n >= 0 ? '+' : '−'}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
 
-export function ReplayCard({ r, tf, compact = false, bare = false }: { r: ReplaySummary | null; tf: number; compact?: boolean; bare?: boolean }) {
+export function ReplayCard({ r, tf, compact = false, bare = false, futuresPoints = false }: {
+  r: ReplaySummary | null; tf: number; compact?: boolean; bare?: boolean;
+  /** options mode: the replay still trades the future's points, not the option premium */
+  futuresPoints?: boolean;
+}) {
   if (!r) {
     return <p className="font-mono text-[11px] text-zinc-500">Replay: not enough history yet</p>;
   }
   const max = Math.max(1, ...r.days.map(d => Math.abs(d.points)));
   const tone = r.rupeesPerDay >= 0 ? 'text-emerald-400' : 'text-red-400';
-  const title = `Replay of the last ${r.sessions} sessions with these rules on ${tf === 60 ? '1h' : `${tf}m`} bars: each decision at the bar close, no costs, no slippage. A rough check, not a backtest.`;
+  const title = `Replay of the last ${r.sessions} sessions with these rules on ${tf === 60 ? '1h' : `${tf}m`} bars: each decision at the bar close, no costs, no slippage. A rough check, not a backtest.${futuresPoints ? ' Options mode: replayed on the future\'s points, not on option premiums.' : ''}`;
   return (
     <div title={title}
       className={cn('flex flex-wrap items-center gap-x-4 gap-y-1.5', bare ? '' : 'rounded-2xl border border-zinc-900 bg-zinc-950/70 backdrop-blur', bare ? '' : compact ? 'px-3 py-2' : 'px-4 py-2.5')}>
       <div className="flex items-center gap-2 text-zinc-500">
         <History className="h-3.5 w-3.5 shrink-0" aria-hidden />
-        <span className="whitespace-nowrap text-[10px] font-bold uppercase tracking-[0.25em]">Replay · {r.sessions}d</span>
+        <span className="whitespace-nowrap text-[10px] font-bold uppercase tracking-[0.25em]">Replay · {r.sessions}d{futuresPoints ? ' · fut pts' : ''}</span>
       </div>
       <dl className="flex items-baseline gap-4 whitespace-nowrap font-mono text-[11px]">
         <div><dt className="sr-only">Orders per day</dt><dd className="text-zinc-300"><strong className="text-zinc-100">{r.ordersPerDay.toFixed(0)}</strong> orders/day</dd></div>

@@ -233,3 +233,12 @@ test('liveRealPnl: a missing price on an open leg falls back to the book total',
   assert.equal(liveRealPnl(300, [1, 1], [100, null], [101, 92], [65, 65]), 300);
   assert.equal(liveRealPnl(300, [1], [100], [0], [65]), 300);
 });
+
+test('the lot cap is lifted only by the server-side argument, never by the request body', () => {
+  const t = { kind: 'futures', symbol: 'CRUDEOIL', name: 'CRUDEOIL', expiry: '2026-12-17' };
+  const body = { broker: 'dhan', mode: 'REAL', target: t, action: 'SELL', lots: 50, product: 'INTRADAY', source: 'bar' };
+  assert.equal(typeof parsePnfOrder(body), 'string');
+  assert.equal(typeof parsePnfOrder({ ...body, uncapped: true }), 'string');
+  const ok = parsePnfOrder(body, { uncapped: true });
+  assert.ok(typeof ok !== 'string' && ok.lots === 50);
+});

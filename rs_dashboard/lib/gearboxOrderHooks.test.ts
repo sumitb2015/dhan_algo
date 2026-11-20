@@ -20,7 +20,7 @@ test('gbx: quantity 2 on MCX_COMM is refused naming the cap, quantity 1 passes',
 });
 
 test('existing caps are unchanged', () => {
-  assert.equal(dhanSourceQtyCap('orba', 'MCX_COMM'), 1);
+  assert.equal(dhanSourceQtyCap('orba', 'MCX_COMM'), undefined);   // Signal Orb: uncapped since 2026-11-20
   assert.equal(dhanSourceQtyCap('pl', 'MCX_COMM'), 20);
   assert.equal(dhanSourceQtyCap('pl', 'NSE_FNO'), 1500);
   assert.equal(dhanSourceQtyCap('ts', 'MCX_COMM'), SOURCE_QTY_CAPS.ts);   // falls back to the unit table
