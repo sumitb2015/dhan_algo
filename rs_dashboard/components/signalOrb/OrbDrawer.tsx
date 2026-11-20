@@ -195,6 +195,16 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
             <RuleNumInput value={c.stopPts} step={5} min={0} label="Hard stop points" onCommit={s => onPatch({ stopPts: Number(s) })}
               className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
           </Row>
+          <Row label="Lock & Trail start (pts)" sub="Favorable move to activate trailing. 0 = off (fixed stop only)">
+            <RuleNumInput value={c.trailStartPts ?? 0} step={5} min={0} label="Trail start points" onCommit={s => onPatch({ trailStartPts: Number(s) })}
+              className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
+          </Row>
+          {(c.trailStartPts ?? 0) > 0 && (
+            <Row label="Trail gap (points)" sub="Distance kept behind peak profit price">
+              <RuleNumInput value={c.trailGapPts ?? 15} step={5} min={1} label="Trail gap points" onCommit={s => onPatch({ trailGapPts: Number(s) })}
+                className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
+            </Row>
+          )}
           <Row label="Daily loss limit (₹)" sub="Realised + open; closes and halts">
             <RuleNumInput value={c.dailyLossLimit} step={500} min={100} label="Daily loss limit" onCommit={s => onPatch({ dailyLossLimit: Number(s) })}
               className="h-8 w-24 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />

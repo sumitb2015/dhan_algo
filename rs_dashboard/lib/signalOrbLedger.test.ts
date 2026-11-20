@@ -19,8 +19,10 @@ test('config: no lot cap, bounds and time order', () => {
   assert.equal(typeof sanitizeConfigPatch({ timeframe: 2 }, cur), 'string');
   assert.equal(typeof sanitizeConfigPatch({ entryStart: '23:10' }, cur), 'string');
   assert.equal(typeof sanitizeConfigPatch({ entryEnd: '9:00' }, cur), 'string');
-  const ok = sanitizeConfigPatch({ stopPts: 25, timeframe: 3 }, cur);
-  assert.ok(typeof ok !== 'string' && ok.stopPts === 25 && ok.timeframe === 3);
+  const ok = sanitizeConfigPatch({ stopPts: 25, timeframe: 3, trailStartPts: 20, trailGapPts: 10 }, cur);
+  assert.ok(typeof ok !== 'string' && ok.stopPts === 25 && ok.timeframe === 3 && ok.trailStartPts === 20 && ok.trailGapPts === 10);
+  assert.equal(typeof sanitizeConfigPatch({ trailStartPts: -5 }, cur), 'string');
+  assert.equal(typeof sanitizeConfigPatch({ trailGapPts: 0 }, cur), 'string');
   assert.equal(typeof sanitizeConfigPatch({ indicators: [{ id: 'a', kind: 'ema', period: 9 }, { id: 'a', kind: 'rsi' }] }, cur), 'string');
 });
 

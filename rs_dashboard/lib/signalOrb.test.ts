@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { stochRsiArray } from './indicators.ts';
 import {
-  replay, closedBars, consensus, decideOrb, defaultSpec, evaluate, nextBlock, positionPnl, readIndicator, rowPnl, sanitizeSpec, type DecideInput, type OrbBar,
+  replay, closedBars, computeEffectiveStop, consensus, decideOrb, defaultSpec, evaluate, nextBlock, positionPnl, readIndicator, rowPnl, sanitizeSpec, type DecideInput, type OrbBar,
 } from './signalOrb.ts';
 
 const series = (closes: number[], t0 = 1_700_000_000 - (1_700_000_000 % 300)): OrbBar[] => closes.map((c, i) => ({ t: t0 + i * 60, close: c, high: c + 1, low: c - 1, vol: 100 }));
@@ -96,6 +96,50 @@ test('decideOrb: stop and cutoff exit even on an old bar; no quote skips the sto
   assert.equal(e.action === 'exit' && e.kind, 'eod');
   const short = decideOrb({ ...base, position: { side: 'SHORT', entry: 100 }, signal: 'BEAR', price: 131 });
   assert.equal(short.action, 'exit');
+});
+
+test('computeEffectiveStop: fixed stop, trail activation and ratcheting', () => {
+  // Fixed stop only (trailing off)
+  const fixed = computeEffectiveStop({ side: 'LONG', entry: 5000, stopPts: 30, trailStartPts: 0 });
+  assert.equal(fixed.stopLevel, 4970);
+  assert.equal(fixed.isTrailing, false);
+
+  // LONG: Entry 5000, stopPts 30, trailStart 20, trailGap 10
+  // Peak at 5015 (+15 pts gain): not yet trailing
+  const preTrail = computeEffectiveStop({ side: 'LONG', entry: 5000, stopPts: 30, trailStartPts: 20, trailGapPts: 10, bestPrice: 5015 });
+  assert.equal(preTrail.stopLevel, 4970);
+  assert.equal(preTrail.isTrailing, false);
+
+  // Peak at 5030 (+30 pts gain >= 20): trailing active! Stop = 5030 - 10 = 5020 (+20 pts locked)
+  const activeTrail = computeEffectiveStop({ side: 'LONG', entry: 5000, stopPts: 30, trailStartPts: 20, trailGapPts: 10, bestPrice: 5030 });
+  assert.equal(activeTrail.stopLevel, 5020);
+  assert.equal(activeTrail.isTrailing, true);
+  assert.equal(activeTrail.trailedPtsFromEntry, 20);
+
+  // Dip after peak: bestPrice remains 5030, currentPrice 5025: stop remains locked at 5020
+  const dip = computeEffectiveStop({ side: 'LONG', entry: 5000, stopPts: 30, trailStartPts: 20, trailGapPts: 10, bestPrice: 5030, currentPrice: 5025 });
+  assert.equal(dip.stopLevel, 5020);
+
+  // SHORT: Entry 5000, stopPts 30, trailStart 20, trailGap 10
+  // Trough at 4970 (30 pts gain >= 20): trailing active! Stop = 4970 + 10 = 4980 (+20 pts locked)
+  const shortTrail = computeEffectiveStop({ side: 'SHORT', entry: 5000, stopPts: 30, trailStartPts: 20, trailGapPts: 10, bestPrice: 4970 });
+  assert.equal(shortTrail.stopLevel, 4980);
+  assert.equal(shortTrail.isTrailing, true);
+  assert.equal(shortTrail.trailedPtsFromEntry, 20);
+});
+
+test('decideOrb: trailing stop exits when price hits trailed level', () => {
+  const pos = { side: 'LONG' as const, entry: 5000, bestPrice: 5040 };
+  // trailStartPts = 20, trailGapPts = 10 -> stop level is 5040 - 10 = 5030
+  // Price at 5032: still holding
+  const hold = decideOrb({ ...base, position: pos, price: 5032, stopPts: 30, trailStartPts: 20, trailGapPts: 10 });
+  assert.equal(hold.action, 'none');
+
+  // Price drops to 5030: trailing stop hit!
+  const exit = decideOrb({ ...base, position: pos, price: 5030, stopPts: 30, trailStartPts: 20, trailGapPts: 10 });
+  assert.equal(exit.action, 'exit');
+  assert.equal(exit.kind, 'stop');
+  assert.ok(exit.reason.includes('Trailing stop hit'));
 });
 
 test('decideOrb: entry window and stop-out block', () => {

@@ -12,6 +12,7 @@ import { istClock } from '@/lib/istTime';
 import { istDateIso } from '@/lib/nseHolidays';
 import { expiryLabel } from '@/lib/pnfTarget';
 import { cn } from '@/lib/utils';
+import { type EffectiveStopResult } from '@/lib/signalOrb';
 import { isStuck, type OrbConfig, type OrbRow } from '@/lib/signalOrbLedger';
 
 // /signal-orb: one orb, one switch. A CRUDEOIL / CRUDEOILM future's closed bars give the consensus of the active indicators —
@@ -37,10 +38,6 @@ export default function SignalOrb() {
   }, [e, ledger]);
 
   const position = !live ? 'FLAT' : live.status === 'open' ? live.side : 'PENDING';
-  // the stop reads the future (an options row's own entry is its premium)
-  const sigEntry = live ? live.signalEntry ?? live.entry : 0;
-  const stopLevel = live?.status === 'open' && ledger && ledger.config.stopPts > 0
-    ? live.side === 'LONG' ? sigEntry - ledger.config.stopPts : sigEntry + ledger.config.stopPts : null;
   const optMode = ledger?.config.instrument === 'options';
   const tfLabel = ledger ? (ledger.config.timeframe === 60 ? '1h' : `${ledger.config.timeframe}m`) : '';
   const real = ledger?.mode === 'REAL';
@@ -78,7 +75,12 @@ export default function SignalOrb() {
             <h1 className="text-[11px] font-black uppercase tracking-[0.45em] text-zinc-100">Signal Orb</h1>
             <p className="font-mono text-[10px] text-zinc-500">
               {contract ? `${contract.symbol} FUT ${contract.expiry ? expiryLabel(contract.expiry) : ''}` : 'resolving contract…'} · {tfLabel}
-              {ledger && <> · {optMode ? `sell options ${ledger.config.strikeOffset === 0 ? 'ATM' : `ATM${ledger.config.strikeOffset > 0 ? '+' : '−'}${Math.abs(ledger.config.strikeOffset)}`}` : 'futures'} · {ledger.config.lots} lot{ledger.config.lots > 1 ? 's' : ''}</>}
+              {ledger && (
+                <>
+                  {' '}· {optMode ? `sell options ${ledger.config.strikeOffset === 0 ? 'ATM' : `ATM${ledger.config.strikeOffset > 0 ? '+' : '−'}${Math.abs(ledger.config.strikeOffset)}`}` : 'futures'} · {ledger.config.lots} lot{ledger.config.lots > 1 ? 's' : ''} · SL {ledger.config.stopPts}p
+                  {(ledger.config.trailStartPts ?? 0) > 0 ? ` (trail +${ledger.config.trailStartPts}/${ledger.config.trailGapPts ?? 15}p)` : ''}
+                </>
+              )}
             </p>
           </div>
         </div>
@@ -185,7 +187,7 @@ export default function SignalOrb() {
           since={ev.sinceT ? istClock(ev.sinceT * 1000).slice(0, 5) : null} progress={1 - e.secsToClose / e.barSecs} secsLeft={e.secsToClose} />
 
         {/* position: its own element, coloured by side (the orb shows the signal) */}
-        <PositionPill live={live} position={position} pnl={e.openPnl} stopLevel={stopLevel} mark={e.mark}
+        <PositionPill live={live} position={position} pnl={e.openPnl} effectiveStop={e.effectiveStop} config={ledger?.config} mark={e.mark}
           onClose={live?.status === 'open' ? () => void e.closeAndStop() : null} />
 
         {/* readout: the price first, then one chip per indicator */}
@@ -322,8 +324,8 @@ export default function SignalOrb() {
 /** What a row holds, e.g. "CRUDEOIL 5600 PE" for an options row (always sold), or "" for a futures row. */
 const optionOf = (r: OrbRow) => (r.target.kind === 'options' ? `${r.target.symbol} ${r.target.strike} ${r.target.side}` : '');
 
-function PositionPill({ live, position, pnl, stopLevel, mark, onClose }: {
-  live: OrbRow | null; position: 'LONG' | 'SHORT' | 'FLAT' | 'PENDING'; pnl: number | null; stopLevel: number | null;
+function PositionPill({ live, position, pnl, effectiveStop, config, mark, onClose }: {
+  live: OrbRow | null; position: 'LONG' | 'SHORT' | 'FLAT' | 'PENDING'; pnl: number | null; effectiveStop: EffectiveStopResult | null; config?: OrbConfig;
   /** the row's own live price (an option's premium for an options row) */
   mark: number | null;
   onClose: (() => void) | null;
@@ -382,10 +384,24 @@ function PositionPill({ live, position, pnl, stopLevel, mark, onClose }: {
       >
         {pnl === null ? '—' : inr(pnl)}
       </strong>
-      {stopLevel !== null && (
-        <span className="text-zinc-500 text-[10px]">
-          SL <strong className="text-zinc-300">{stopLevel.toLocaleString('en-IN')}</strong>
-        </span>
+      {effectiveStop && effectiveStop.stopLevel !== null && (
+        effectiveStop.isTrailing ? (
+          <span className="flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-2.5 py-0.5 text-[10px] font-bold text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.2)]">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
+            <span>TRAIL SL</span>
+            <strong className="font-mono text-zinc-100">{effectiveStop.stopLevel.toLocaleString('en-IN', { maximumFractionDigits: 1 })}</strong>
+            <span className="font-bold text-emerald-400">
+              ({effectiveStop.trailedPtsFromEntry >= 0 ? `+${effectiveStop.trailedPtsFromEntry.toFixed(1)}` : effectiveStop.trailedPtsFromEntry.toFixed(1)} pts)
+            </span>
+          </span>
+        ) : (
+          <span className="text-[10px] text-zinc-500">
+            SL <strong className="text-zinc-300">{effectiveStop.stopLevel.toLocaleString('en-IN', { maximumFractionDigits: 1 })}</strong>
+            {config && (config.trailStartPts ?? 0) > 0 && (
+              <span className="ml-1 text-zinc-500">· trail @ +{config.trailStartPts}</span>
+            )}
+          </span>
+        )
       )}
       {onClose && (
         <button

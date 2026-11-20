@@ -31,6 +31,10 @@ export interface OrbConfig {
   lots: number;
   /** Hard stop, points from entry. REAL needs it > 0. */
   stopPts: number;
+  /** Trailing stop: points profit to activate trailing (0 = off). */
+  trailStartPts?: number;
+  /** Trailing stop: points gap behind peak price once trailing is active. */
+  trailGapPts?: number;
   /** Rupees; today's realised loss (active mode) at or past it halts entries. */
   dailyLossLimit: number;
   entryStart: string;
@@ -94,6 +98,8 @@ export const DEFAULT_CONFIG: OrbConfig = {
   timeframe: 1,
   lots: 1,
   stopPts: 30,
+  trailStartPts: 0,
+  trailGapPts: 15,
   dailyLossLimit: 3000,
   entryStart: '09:15',
   entryEnd: '22:45',
@@ -160,6 +166,16 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
     const n = Number(p.stopPts);
     if (!Number.isFinite(n) || n < 0 || n > 1000) return 'stopPts must be 0-1000';
     next.stopPts = n;
+  }
+  if (p.trailStartPts !== undefined) {
+    const n = Number(p.trailStartPts);
+    if (!Number.isFinite(n) || n < 0 || n > 1000) return 'trailStartPts must be 0-1000';
+    next.trailStartPts = n;
+  }
+  if (p.trailGapPts !== undefined) {
+    const n = Number(p.trailGapPts);
+    if (!Number.isFinite(n) || n < 1 || n > 1000) return 'trailGapPts must be 1-1000';
+    next.trailGapPts = n;
   }
   if (p.dailyLossLimit !== undefined) {
     const n = Number(p.dailyLossLimit);

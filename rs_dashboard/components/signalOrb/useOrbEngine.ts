@@ -9,7 +9,10 @@ import {
 } from '@/lib/alertSound';
 import { orbAlert, type OrbAlertSnap, type OrbSound } from '@/lib/signalOrbChime';
 import type { Target } from '@/lib/pnfTarget';
-import { ORB_CODE_VERSION, closedBars, decideOrb, evaluate, replay, rowPnl, sideOf, type Evaluation, type ReplaySummary, type Side } from '@/lib/signalOrb';
+import {
+  ORB_CODE_VERSION, closedBars, computeEffectiveStop, decideOrb, evaluate, replay, rowPnl, sideOf,
+  type EffectiveStopResult, type Evaluation, type ReplaySummary, type Side,
+} from '@/lib/signalOrb';
 import { isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 
 // The Signal Orb's live engine (browser). Leader tab only (localStorage lock); the tick is rebuilt every render and called through
@@ -55,6 +58,7 @@ export function useOrbEngine() {
   const [viewerId] = useState(() => `orb-${Math.random().toString(36).slice(2, 10)}`);
   const busyRef = useRef(false);
   const exitRetryAt = useRef(0);
+  const bestPriceRef = useRef<{ id: string; price: number } | null>(null);
   // when the price last changed (a frozen feed keeps folding the same LTP into the open bar)
   const [priceAt, setPriceAt] = useState(0);
   const liftedRef = useRef<{ side: Side | null; lifted: boolean }>({ side: null, lifted: false });
@@ -170,7 +174,18 @@ export function useOrbEngine() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (price !== null) setPriceAt(Date.now());
-  }, [price]);
+    if (!live || live.status !== 'open') {
+      bestPriceRef.current = null;
+    } else if (price !== null) {
+      if (bestPriceRef.current?.id !== live.id) {
+        bestPriceRef.current = { id: live.id, price };
+      } else {
+        bestPriceRef.current.price = live.side === 'LONG'
+          ? Math.max(bestPriceRef.current.price, price)
+          : Math.min(bestPriceRef.current.price, price);
+      }
+    }
+  }, [price, live?.id, live?.status, live?.side]);
   const priceFresh = price !== null && priceAt > 0 && now - priceAt < PRICE_STALE_MS && !feed.stale;
 
   const today = now ? istDateIso(now) : '';
@@ -242,10 +257,14 @@ export function useOrbEngine() {
       void op({ op: 'addLog', level: 'warn', msg: `Open row ${live.id} is from ${live.day}: not auto-managed. Check the broker, then Close or mark it.` });
     }
     // the stop is measured on the FUTURE the signal reads (an options row's own entry is its premium)
-    const position = live && !staleDay ? { side: live.side, entry: live.signalEntry ?? live.entry } : null;
+    const position = live && !staleDay ? {
+      side: live.side,
+      entry: live.signalEntry ?? live.entry,
+      bestPrice: bestPriceRef.current?.price,
+    } : null;
     const d = decideOrb({
       signal: ev.signal, barT: ev.barT, watermarkT: ledger.watermarkT, position, price: priceFresh ? price : null,
-      minute: istMinuteOfDay(t), times: cfg, stopPts: cfg.stopPts, blockedSide,
+      minute: istMinuteOfDay(t), times: cfg, stopPts: cfg.stopPts, trailStartPts: cfg.trailStartPts, trailGapPts: cfg.trailGapPts, blockedSide,
     });
 
     // E11: realised + open P&L past the limit closes the position (the server then halts)
@@ -307,9 +326,23 @@ export function useOrbEngine() {
     if (live?.status === 'open') await trade({ action: 'exit', price: price ?? live.signalEntry ?? live.entry, reason: 'Closed by user', exitKind: 'manual', auto: false });
   }, [op, trade, live, price]);
 
+  const effectiveStop = useMemo((): EffectiveStopResult | null => {
+    if (!live || live.status !== 'open' || !cfg) return null;
+    const sigEntry = live.signalEntry ?? live.entry;
+    return computeEffectiveStop({
+      side: live.side,
+      entry: sigEntry,
+      stopPts: cfg.stopPts,
+      trailStartPts: cfg.trailStartPts,
+      trailGapPts: cfg.trailGapPts,
+      bestPrice: bestPriceRef.current?.price,
+      currentPrice: price,
+    });
+  }, [live, cfg, price]);
+
   return {
     state, ledger, live: live as OrbRow | null, contract, feed, ev, price, priceFresh, openPnl, mark, realised, now, isLeader, note, stateError,
     armed, setArmed, busy, op, closeAndStop, today, replayed, secsToClose, barSecs,
-    tradeSound, setTradeSound, alertSound, setAlertSound, soundReady, outdated,
+    tradeSound, setTradeSound, alertSound, setAlertSound, soundReady, outdated, effectiveStop,
   };
 }

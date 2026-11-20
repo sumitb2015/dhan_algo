@@ -234,12 +234,17 @@ export type ReplaySummary = {
  * stop (checked on the close, so a real stop fills earlier / worse) and the cutoff. Fills are the bar close with no slippage or
  * costs. A rough "how often does this flip and which way does it lean" check, not a backtest.
  */
-export function replay(specs: IndicatorSpec[], bars: OrbBar[], cfg: { times: OrbTimes; stopPts: number; lots: number; unitsPerLot: number }, sessions = 20): ReplaySummary | null {
+export function replay(
+  specs: IndicatorSpec[],
+  bars: OrbBar[],
+  cfg: { times: OrbTimes; stopPts: number; lots: number; unitsPerLot: number; trailStartPts?: number; trailGapPts?: number },
+  sessions = 20,
+): ReplaySummary | null {
   const n = bars.length;
   if (!n || !specs.length) return null;
   const sig = signalSeries(specs.map(s => indicatorSeries(s, bars)), n);
   const days = new Map<string, ReplayDay>();
-  let pos: { side: Side; entry: number } | null = null;
+  let pos: { side: Side; entry: number; bestPrice: number } | null = null;
   let blocked: Side | null = null;
   let watermark = 0;
   for (let i = 0; i < n; i++) {
@@ -250,17 +255,32 @@ export function replay(specs: IndicatorSpec[], bars: OrbBar[], cfg: { times: Orb
     let d = days.get(dayKey);
     if (!d) { d = { day: dayKey, orders: 0, points: 0 }; days.set(dayKey, d); }
     blocked = nextBlock(blocked, sig[i]);
-    const dec = decideOrb({ signal: sig[i], barT: b.t, watermarkT: watermark, position: pos, price: b.close, minute, times: cfg.times, stopPts: cfg.stopPts, blockedSide: blocked });
+    if (pos) {
+      pos.bestPrice = pos.side === 'LONG' ? Math.max(pos.bestPrice, b.high) : Math.min(pos.bestPrice, b.low);
+    }
+    const dec = decideOrb({
+      signal: sig[i],
+      barT: b.t,
+      watermarkT: watermark,
+      position: pos,
+      price: b.close,
+      minute,
+      times: cfg.times,
+      stopPts: cfg.stopPts,
+      trailStartPts: cfg.trailStartPts,
+      trailGapPts: cfg.trailGapPts,
+      blockedSide: blocked,
+    });
     const book = (p: { side: Side; entry: number }) => (p.side === 'LONG' ? b.close - p.entry : p.entry - b.close);
     if (dec.action === 'exit' && pos) {
       d.points += book(pos); d.orders++;
       if (dec.kind === 'stop') blocked = pos.side;
       pos = null;
     } else if (dec.action === 'enter') {
-      pos = { side: dec.side, entry: b.close }; d.orders++; watermark = b.t; blocked = null;
+      pos = { side: dec.side, entry: b.close, bestPrice: b.close }; d.orders++; watermark = b.t; blocked = null;
     } else if (dec.action === 'reverse' && pos) {
       d.points += book(pos); d.orders += 2;
-      pos = { side: dec.side, entry: b.close }; watermark = b.t;
+      pos = { side: dec.side, entry: b.close, bestPrice: b.close }; watermark = b.t;
     }
   }
   const traded = [...days.values()].filter(d => d.orders > 0).slice(-sessions);
@@ -285,7 +305,7 @@ export type DecideInput = {
   barT: number | null;
   /** The newest bar an entry / reversal was already taken on: one bar never acts twice. */
   watermarkT: number;
-  position: { side: Side; entry: number } | null;
+  position: { side: Side; entry: number; bestPrice?: number } | null;
   /** Live price for the stop (null = no quote: the stop is not evaluated). */
   price: number | null;
   /** IST minute of day. */
@@ -293,6 +313,10 @@ export type DecideInput = {
   times: OrbTimes;
   /** Hard stop in points from entry; 0 = off. */
   stopPts: number;
+  /** Points gain to trigger trailing stop; 0 = off. */
+  trailStartPts?: number;
+  /** Points gap behind peak for trailing stop. */
+  trailGapPts?: number;
   /** After a stop-out, the side that may not be re-entered until the colour has changed. */
   blockedSide: Side | null;
 };
@@ -309,14 +333,91 @@ export const hhmmToMin = (s: string): number => {
 
 export const sideOf = (s: Signal): Side | null => (s === 'BULL' ? 'LONG' : s === 'BEAR' ? 'SHORT' : null);
 
+export interface EffectiveStopResult {
+  stopLevel: number | null;
+  isTrailing: boolean;
+  peakGain: number;
+  trailedPtsFromEntry: number;
+}
+
+/**
+ * Calculates the current stop level factoring in the hard stop and trailing stop-loss (Lock & Trail).
+ * LONG: base stop = entry - stopPts; once peak gain >= trailStartPts, stop trails at (peak - trailGapPts).
+ * SHORT: base stop = entry + stopPts; once peak gain >= trailStartPts, stop trails at (peak + trailGapPts).
+ * The stop level only ratchets in the trade's favor; it never loosens against the base stop.
+ */
+export function computeEffectiveStop(params: {
+  side: Side;
+  entry: number;
+  stopPts: number;
+  trailStartPts?: number;
+  trailGapPts?: number;
+  bestPrice?: number | null;
+  currentPrice?: number | null;
+}): EffectiveStopResult {
+  const { side, entry, stopPts, trailStartPts = 0, trailGapPts = 0, bestPrice, currentPrice } = params;
+  const baseStop = stopPts > 0 ? (side === 'LONG' ? entry - stopPts : entry + stopPts) : null;
+
+  const peak = side === 'LONG'
+    ? Math.max(entry, bestPrice ?? entry, currentPrice ?? entry)
+    : Math.min(entry, bestPrice ?? entry, currentPrice ?? entry);
+
+  const peakGain = side === 'LONG' ? peak - entry : entry - peak;
+
+  if (trailStartPts > 0 && trailGapPts > 0 && peakGain >= trailStartPts) {
+    if (side === 'LONG') {
+      const trailLevel = peak - trailGapPts;
+      const stopLevel = baseStop !== null ? Math.max(baseStop, trailLevel) : trailLevel;
+      return {
+        stopLevel,
+        isTrailing: true,
+        peakGain,
+        trailedPtsFromEntry: stopLevel - entry,
+      };
+    } else {
+      const trailLevel = peak + trailGapPts;
+      const stopLevel = baseStop !== null ? Math.min(baseStop, trailLevel) : trailLevel;
+      return {
+        stopLevel,
+        isTrailing: true,
+        peakGain,
+        trailedPtsFromEntry: entry - stopLevel,
+      };
+    }
+  }
+
+  return {
+    stopLevel: baseStop,
+    isTrailing: false,
+    peakGain: Math.max(0, peakGain),
+    trailedPtsFromEntry: baseStop !== null ? -stopPts : 0,
+  };
+}
+
 /** What the follower does now. Exits (cutoff, stop) come before entries and never depend on a fresh bar. */
 export function decideOrb(i: DecideInput): Decision {
   const eod = hhmmToMin(i.times.eodExit), start = hhmmToMin(i.times.entryStart), end = hhmmToMin(i.times.entryEnd);
   if (i.position) {
     if (i.minute >= eod) return { action: 'exit', kind: 'eod', reason: `Cutoff ${i.times.eodExit}` };
-    if (i.stopPts > 0 && i.price !== null) {
-      const adverse = i.position.side === 'LONG' ? i.position.entry - i.price : i.price - i.position.entry;
-      if (adverse >= i.stopPts) return { action: 'exit', kind: 'stop', reason: `Stop ${i.stopPts} pts hit (${adverse.toFixed(1)} against)` };
+    if (i.price !== null) {
+      const eff = computeEffectiveStop({
+        side: i.position.side,
+        entry: i.position.entry,
+        stopPts: i.stopPts,
+        trailStartPts: i.trailStartPts,
+        trailGapPts: i.trailGapPts,
+        bestPrice: i.position.bestPrice,
+        currentPrice: i.price,
+      });
+      if (eff.stopLevel !== null) {
+        const hit = i.position.side === 'LONG' ? i.price <= eff.stopLevel : i.price >= eff.stopLevel;
+        if (hit) {
+          const reason = eff.isTrailing
+            ? `Trailing stop hit: locked at ${eff.stopLevel.toFixed(1)} (peak +${eff.peakGain.toFixed(1)} pts)`
+            : `Stop ${i.stopPts} pts hit (${(i.position.side === 'LONG' ? i.position.entry - i.price : i.price - i.position.entry).toFixed(1)} against)`;
+          return { action: 'exit', kind: 'stop', reason };
+        }
+      }
     }
   }
   const want = sideOf(i.signal);
