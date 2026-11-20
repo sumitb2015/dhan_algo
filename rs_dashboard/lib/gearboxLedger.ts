@@ -281,8 +281,8 @@ export function applyClientOp(l: GbLedger, raw: unknown, now: number): OpResult 
     const next = sanitizeConfigPatch(op.patch, l.config, l.mode);
     if (typeof next === 'string') return refuse(400, next);
     const live = liveRow(l, l.config.underlying);
-    if (live && (next.underlying !== l.config.underlying || next.broker !== l.config.broker || !same(next.map, l.config.map))) {
-      return refuse(409, 'Underlying, broker and the direction map are locked while a position is open');
+    if (live && (next.underlying !== l.config.underlying || next.broker !== l.config.broker || next.tf !== l.config.tf || !same(next.map, l.config.map))) {
+      return refuse(409, 'Underlying, broker, bar size and the direction map are locked while a position is open');
     }
     return { ok: true, ledger: stamp({ ...l, config: next }) };
   }

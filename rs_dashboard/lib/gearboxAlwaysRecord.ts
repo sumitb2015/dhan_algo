@@ -11,7 +11,7 @@ import { gbRecordPairs, mcxRecordOpen } from '@/lib/gearboxAlwaysRecordCore';
 // Every second, like an open chart: the bridge keeps at most WANTED_MAX_PAIRS asks, oldest dropped first.
 const EVERY_MS = 1_000;
 
-const state = ((globalThis as { __gearboxAlwaysRecord?: { timer?: ReturnType<typeof setInterval> } }).__gearboxAlwaysRecord ??= {});
+const state = ((globalThis as { __gearboxAlwaysRecord?: { timer?: ReturnType<typeof setInterval>; warnedAt?: number } }).__gearboxAlwaysRecord ??= {});
 
 function step(): void {
   const now = Date.now();
@@ -22,7 +22,11 @@ function step(): void {
     for (const p of pairs) askBridge(`gearbox-record:${p[0]}:${p[1]}`, [p], now);
     ensureBridge(now);
   } catch (err) {
-    console.warn('[gearbox-always-record] could not ask the price bridge:', (err as Error).message);
+    // at most once a minute: a failure that persists (e.g. debug/ not writable) must not log every second
+    if (now - (state.warnedAt ?? 0) >= 60_000) {
+      state.warnedAt = now;
+      console.warn('[gearbox-always-record] could not ask the price bridge:', (err as Error).message);
+    }
   }
 }
 

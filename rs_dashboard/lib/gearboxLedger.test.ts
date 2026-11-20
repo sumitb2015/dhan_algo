@@ -43,6 +43,8 @@ test('underlying / map / broker locked while a live row exists', () => {
   assert.ok(!a.ok && a.status === 409);
   const b = cfg(l, { map: { SHORT: { action: 'SELL', opt: 'CE', offset: 1, expiry: 'nearest' } } });
   assert.ok(!b.ok && b.status === 409);
+  const c = cfg(l, { tf: '10s' });
+  assert.ok(!c.ok && c.status === 409);
   assert.ok(cfg(l, { slPts: 5 }).ok);
 });
 
