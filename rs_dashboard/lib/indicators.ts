@@ -130,18 +130,20 @@ export function macdSeries(
 }
 
 /**
- * Wilder's ADX — null before 2*period bars.
- * Uses standard DM/TR smoothing.
+ * Wilder's ADX with +DI and -DI — null before 2*period bars.
+ * Uses standard Wilder DM/TR smoothing.
  */
-export function adxArray(
+export function adxDmiArray(
   highs: number[],
   lows: number[],
   closes: number[],
   period = 14,
-): (number | null)[] {
+): { adx: (number | null)[]; plusDi: (number | null)[]; minusDi: (number | null)[] } {
   const n = highs.length;
-  const result: (number | null)[] = new Array(n).fill(null);
-  if (n < period * 2 + 2) return result;
+  const adx: (number | null)[] = new Array(n).fill(null);
+  const plusDi: (number | null)[] = new Array(n).fill(null);
+  const minusDi: (number | null)[] = new Array(n).fill(null);
+  if (n < period * 2 + 2) return { adx, plusDi, minusDi };
 
   const trs: number[] = [];
   const plusDMs: number[] = [];
@@ -167,21 +169,37 @@ export function adxArray(
     sMinus = sMinus - sMinus / period + minusDMs[i];
     const pDI = sTR > 0 ? (sPlus / sTR) * 100 : 0;
     const mDI = sTR > 0 ? (sMinus / sTR) * 100 : 0;
+    const barIdx = i + 1;
+    plusDi[barIdx] = pDI;
+    minusDi[barIdx] = mDI;
     const s = pDI + mDI;
     dxVals.push(s > 0 ? (Math.abs(pDI - mDI) / s) * 100 : 0);
   }
 
-  if (dxVals.length < period) return result;
+  if (dxVals.length < period) return { adx, plusDi, minusDi };
 
   // ADX = Wilder-smooth of DX; first valid ADX at original index 2*period
   let adxVal = dxVals.slice(0, period).reduce((a, b) => a + b, 0) / period;
   const adxStart = 2 * period;
-  result[adxStart] = adxVal;
+  adx[adxStart] = adxVal;
   for (let i = period; i < dxVals.length; i++) {
     adxVal = (adxVal * (period - 1) + dxVals[i]) / period;
-    result[adxStart + (i - period) + 1] = adxVal;
+    adx[adxStart + (i - period) + 1] = adxVal;
   }
-  return result;
+  return { adx, plusDi, minusDi };
+}
+
+/**
+ * Wilder's ADX — null before 2*period bars.
+ * Uses standard DM/TR smoothing.
+ */
+export function adxArray(
+  highs: number[],
+  lows: number[],
+  closes: number[],
+  period = 14,
+): (number | null)[] {
+  return adxDmiArray(highs, lows, closes, period).adx;
 }
 
 /** N-period SMA smoothing of a numeric array. */

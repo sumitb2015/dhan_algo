@@ -36,6 +36,16 @@ test('RSI uses its neutral band', () => {
   assert.equal(readIndicator(defaultSpec('rsi', 'r'), series(flatish)).vote, 0);
 });
 
+test('ADX / DMI votes trend direction when ADX >= minAdx, else 0', () => {
+  const adxSpec = defaultSpec('adx', 'a');
+  assert.equal(readIndicator(adxSpec, series(up)).vote, 1);
+  assert.equal(readIndicator(adxSpec, series(down)).vote, -1);
+  const flatish = Array.from({ length: 60 }, (_, i) => 100 + (i % 2));
+  assert.equal(readIndicator(adxSpec, series(flatish)).vote, 0);
+  // Short series warming up
+  assert.equal(readIndicator(adxSpec, series([100, 101, 102])).vote, 0);
+});
+
 test('stochRsiArray: hand-checked small case and warm-up nulls', () => {
   // RSI(2) over these closes, stoch over 2 RSI values, K = SMA1, D = SMA1: values follow directly from the RSI ordering
   const closes = [10, 11, 12, 11, 13, 12, 14];
@@ -156,6 +166,8 @@ test('sanitizeSpec bounds and rejects', () => {
   assert.equal(sanitizeSpec({ id: 'a', kind: 'macd' }), null);
   assert.deepEqual(sanitizeSpec({ id: 'a', kind: 'ema', period: 9999 }), { id: 'a', kind: 'ema', period: 9 });
   assert.deepEqual(sanitizeSpec({ id: 'x', kind: 'emaCross', fast: 30, slow: 10 }), defaultSpec('emaCross', 'x'));
+  assert.deepEqual(sanitizeSpec({ id: 'a1', kind: 'adx', period: 14, minAdx: 25 }), { id: 'a1', kind: 'adx', period: 14, minAdx: 25 });
+  assert.deepEqual(sanitizeSpec({ id: 'a2', kind: 'adx', period: 999, minAdx: 100 }), { id: 'a2', kind: 'adx', period: 14, minAdx: 20 });
 });
 
 test('VWAP: price above the session VWAP votes bull, below bear; it resets each IST day; no volume = no vote', () => {

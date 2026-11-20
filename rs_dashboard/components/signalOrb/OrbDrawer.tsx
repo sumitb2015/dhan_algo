@@ -13,7 +13,7 @@ import { ReplayCard } from '@/components/signalOrb/ReplayCard';
 // blur / Enter (dhan-commit-on-blur) and goes to the server as one setConfig patch; the server bounds and may refuse it.
 
 const FOCUS = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500';
-const KINDS: IndicatorKind[] = ['ema', 'supertrend', 'emaCross', 'rsi', 'stochRsi', 'vwap'];
+const KINDS: IndicatorKind[] = ['ema', 'supertrend', 'emaCross', 'rsi', 'stochRsi', 'adx', 'vwap'];
 
 function TimeField({ value, onCommit, label }: { value: string; onCommit: (v: string) => void; label: string }) {
   const [draft, setDraft] = useState(value);
@@ -71,6 +71,9 @@ function SpecEditor({ spec, onChange, onRemove }: { spec: IndicatorSpec; onChang
       {spec.kind === 'stochRsi' && <>
         {field('RSI', spec.rsiPeriod, n => set({ rsiPeriod: n }), 1, 2)}{field('Stoch', spec.stochPeriod, n => set({ stochPeriod: n }), 1, 2)}
         {field('K', spec.k, n => set({ k: n }))}{field('D', spec.d, n => set({ d: n }))}
+      </>}
+      {spec.kind === 'adx' && <>
+        {field('Period', spec.period, n => set({ period: n }), 1, 2)}{field('Min ADX', spec.minAdx, n => set({ minAdx: n }), 1, 5)}
       </>}
       <button type="button" onClick={onRemove} aria-label={`Remove ${specLabel(spec)}`} title="Remove"
         className={cn('ml-auto rounded-md p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-red-400', FOCUS)}>
@@ -143,7 +146,7 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
               </button>
             ))}
           </div>
-          <p className="mt-2 text-[11px] text-zinc-500">Price vs EMA · Supertrend direction (TradingView&apos;s ta.supertrend on true high / low) · fast vs slow EMA · RSI above / below its band · Stoch RSI K vs D outside its extremes · price vs session VWAP (TradingView&apos;s: hlc3, resets each day). All read the future.</p>
+          <p className="mt-2 text-[11px] text-zinc-500">Price vs EMA · Supertrend direction (TradingView&apos;s ta.supertrend on true high / low) · fast vs slow EMA · RSI above / below its band · Stoch RSI K vs D outside its extremes · ADX / DMI trend strength & direction · price vs session VWAP (TradingView&apos;s: hlc3, resets each day). All read the future.</p>
         </Section>
 
         <Section title="Market">

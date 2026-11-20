@@ -2,7 +2,7 @@
 // does about it. No IO, no clock (time is passed in), no React — the browser engine and the tests call the same functions.
 // Spec: strategies/signal_orb/strategy.md.
 
-import { emaSmaSeeded, rsiArray, stochRsiArray, supertrendSeries } from './indicators.ts';
+import { adxDmiArray, emaSmaSeeded, rsiArray, stochRsiArray, supertrendSeries } from './indicators.ts';
 import { VWAP_START, vwapFrom } from './straddlePnf.ts';
 
 /**
@@ -10,7 +10,7 @@ import { VWAP_START, vwapFrom } from './straddlePnf.ts';
  * update never reached) shows a reload banner and its entries are refused (lib/signalOrbServer.ts). Bump on every change to
  * the rules, the indicators or the engine.
  */
-export const ORB_CODE_VERSION = '2026-11-20.1';
+export const ORB_CODE_VERSION = '2026-11-20.2';
 
 export type Vote = 1 | -1 | 0;
 export type Signal = 'BULL' | 'BEAR' | 'NEUTRAL';
@@ -24,6 +24,7 @@ export type IndicatorSpec =
   | { id: string; kind: 'supertrend'; period: number; mult: number }
   | { id: string; kind: 'rsi'; period: number; upper: number; lower: number }
   | { id: string; kind: 'stochRsi'; rsiPeriod: number; stochPeriod: number; k: number; d: number; upper: number; lower: number }
+  | { id: string; kind: 'adx'; period: number; minAdx: number }
   | { id: string; kind: 'vwap' };
 
 export type IndicatorKind = IndicatorSpec['kind'];
@@ -33,7 +34,7 @@ export type IndicatorKind = IndicatorSpec['kind'];
 export type OrbBar = { t: number; close: number; high: number; low: number; vol: number };
 
 export const KIND_LABEL: Record<IndicatorKind, string> = {
-  ema: 'EMA', emaCross: 'EMA Cross', supertrend: 'Supertrend', rsi: 'RSI', stochRsi: 'Stoch RSI', vwap: 'VWAP',
+  ema: 'EMA', emaCross: 'EMA Cross', supertrend: 'Supertrend', rsi: 'RSI', stochRsi: 'Stoch RSI', adx: 'ADX / DMI', vwap: 'VWAP',
 };
 
 export function defaultSpec(kind: IndicatorKind, id: string): IndicatorSpec {
@@ -43,6 +44,7 @@ export function defaultSpec(kind: IndicatorKind, id: string): IndicatorSpec {
     case 'supertrend': return { id, kind, period: 10, mult: 2 };
     case 'rsi': return { id, kind, period: 14, upper: 55, lower: 45 };
     case 'stochRsi': return { id, kind, rsiPeriod: 14, stochPeriod: 14, k: 3, d: 3, upper: 80, lower: 20 };
+    case 'adx': return { id, kind, period: 14, minAdx: 20 };
     case 'vwap': return { id, kind };
   }
 }
@@ -54,6 +56,7 @@ export const specLabel = (s: IndicatorSpec): string => {
     case 'supertrend': return `ST ${s.period},${s.mult}`;
     case 'rsi': return `RSI ${s.period}`;
     case 'stochRsi': return `StochRSI ${s.rsiPeriod},${s.stochPeriod}`;
+    case 'adx': return `ADX ${s.period} ≥ ${s.minAdx}`;
     case 'vwap': return 'VWAP';
   }
 };
@@ -93,6 +96,9 @@ export function sanitizeSpec(v: unknown): IndicatorSpec | null {
       const upper = num(o.upper, 50, 100, d.upper), lower = num(o.lower, 0, 50, d.lower);
       return { ...d, rsiPeriod: int(o.rsiPeriod, 2, 100, d.rsiPeriod), stochPeriod: int(o.stochPeriod, 2, 100, d.stochPeriod),
         k: int(o.k, 1, 20, d.k), d: int(o.d, 1, 20, d.d), upper, lower: Math.min(lower, upper) };
+    }
+    case 'adx': {
+      return { ...d, period: int(o.period, 2, 100, d.period), minAdx: num(o.minAdx, 5, 80, d.minAdx) };
     }
     case 'vwap': return d;
   }
@@ -136,6 +142,29 @@ export function indicatorSeries(spec: IndicatorSpec, bars: OrbBar[]): { votes: V
         if (k !== null && d !== null) votes[i] = k > d && k < spec.upper ? 1 : k < d && k > spec.lower ? -1 : 0;
       }
       return { votes, value: i => (s.k[i] === null || s.d[i] === null ? 'warming' : `${fmt(s.k[i])} / ${fmt(s.d[i])}`) };
+    }
+    case 'adx': {
+      const highs = bars.map(b => b.high);
+      const lows = bars.map(b => b.low);
+      const { adx, plusDi, minusDi } = adxDmiArray(highs, lows, closes, spec.period);
+      for (let i = 0; i < n; i++) {
+        const a = adx[i], p = plusDi[i], m = minusDi[i];
+        if (a !== null && p !== null && m !== null) {
+          if (a >= spec.minAdx) {
+            votes[i] = p > m ? 1 : m > p ? -1 : 0;
+          } else {
+            votes[i] = 0;
+          }
+        }
+      }
+      return {
+        votes,
+        value: i => {
+          const a = adx[i], p = plusDi[i], m = minusDi[i];
+          if (a === null || p === null || m === null) return 'warming';
+          return `${fmt(a, 1)} (${fmt(p, 0)}/${fmt(m, 0)})`;
+        },
+      };
     }
     case 'vwap': {
       // TradingView's session VWAP on the chart bars: hlc3, the sums restart on each IST day. A session that has traded no volume
