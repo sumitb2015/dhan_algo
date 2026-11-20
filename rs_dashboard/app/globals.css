@@ -933,3 +933,43 @@ button.rs-sell-btn:disabled {
   border-color: var(--z-700);
   opacity: 0.7;
 }
+/* =====================================================================
+ * GEARBOX DRIVE (/gearbox) — the road scene (canvas, read through getComputedStyle in components/gearbox/RoadScene.tsx) and the
+ * cluster's SVG dials. Per mode: up = blue sky climbing, dn = dusk descending, fog = neutral. White first, then dark, then beige.
+ * ===================================================================== */
+:root {
+  --gb-sky-up-0: #4e99de; --gb-sky-up-1: #cce5f4; --gb-hill-up-0: #96b6cf; --gb-hill-up-1: #6c94b2; --gb-ground-up: #588c3e; --gb-dirt-up: #685034;
+  --gb-sky-dn-0: #5a4e84; --gb-sky-dn-1: #d8a090; --gb-hill-dn-0: #8a7c9e; --gb-hill-dn-1: #6c5e82; --gb-ground-dn: #6e6258; --gb-dirt-dn: #5a4a44;
+  --gb-sky-fog-0: #9aa2ac; --gb-sky-fog-1: #dfe2e5; --gb-hill-fog-0: #b4bac0; --gb-hill-fog-1: #969ca2; --gb-ground-fog: #7a8872; --gb-dirt-fog: #6a6860;
+  --gb-road: #2e3033; --gb-road-line: #f3e9c6; --gb-fog: #eef0f2; --gb-fog-text: #4b5058; --gb-sun: #fff4d6;
+  --gb-car: #e8461e; --gb-car-glass: #bfe0f2; --gb-wheel: #16171a; --gb-hub: #9aa0a6; --gb-smoke: #e6e6e6; --gb-pole: #222428;
+  --gb-flag-long: #2f8a26; --gb-flag-short: #c0392b; --gb-flag-text: #ffffff; --gb-headlight: #fff3c4; --gb-taillight: #a3170c; --gb-blink: #ffb020;
+  --gb-shadow: #000000; --gb-shine: #ffffff;
+  --gb-dial-track: #cbd5e1; --gb-dial-red: #dc2626; --gb-dial-tick: #475569; --gb-dial-text: #64748b; --gb-needle: #ea580c; --gb-hub-fill: #e2e8f0;
+  --gb-shift-track: #cbd5e1; --gb-shift-text: #64748b; --gb-knob-up: #4ade80; --gb-knob-dn: #f87171; --gb-knob-n: #94a3b8;
+  --gb-knob-shadow: #0f172a; --gb-knob-ring: #ffffff; --gb-knob-text: #111111;
+}
+.dark {
+  --gb-sky-up-0: #2c5f8e; --gb-sky-up-1: #7aa6c4; --gb-hill-up-0: #4a6a84; --gb-hill-up-1: #3a5870; --gb-ground-up: #3f6a2c; --gb-dirt-up: #4a3a28;
+  --gb-sky-dn-0: #2a2440; --gb-sky-dn-1: #8a6058; --gb-hill-dn-0: #4c4458; --gb-hill-dn-1: #3a3446; --gb-ground-dn: #4a423c; --gb-dirt-dn: #3a302c;
+  --gb-sky-fog-0: #4a4f56; --gb-sky-fog-1: #7c8187; --gb-hill-fog-0: #5c6268; --gb-hill-fog-1: #4c5258; --gb-ground-fog: #4e5a48; --gb-dirt-fog: #44423c;
+  --gb-road: #1c1d20; --gb-road-line: #d9cfae; --gb-fog: #2a2d31; --gb-fog-text: #c4c8ce; --gb-sun: #f5e6b8;
+  --gb-car: #e8461e; --gb-car-glass: #9cc6dc; --gb-wheel: #0d0e10; --gb-hub: #9aa0a6; --gb-smoke: #c8c8c8; --gb-pole: #d4d4d8;
+  --gb-flag-long: #2f8a26; --gb-flag-short: #c0392b; --gb-flag-text: #ffffff; --gb-headlight: #fff3c4; --gb-taillight: #e0301c; --gb-blink: #ffb020;
+  --gb-shadow: #000000; --gb-shine: #ffffff;
+  --gb-dial-track: #34383d; --gb-dial-red: #e2402e; --gb-dial-tick: #d9d6cf; --gb-dial-text: #b9b6b0; --gb-needle: #ff6a1a; --gb-hub-fill: #2b2e33;
+  --gb-shift-track: #454a50; --gb-shift-text: #8a8f96; --gb-knob-up: #7fd46a; --gb-knob-dn: #ff7a68; --gb-knob-n: #9aa0a6;
+  --gb-knob-shadow: #0d0e10; --gb-knob-ring: #ffffff; --gb-knob-text: #111111;
+}
+:root[data-theme="beige"] {
+  --gb-sky-up-0: #6fa3cf; --gb-sky-up-1: #e8e2cf; --gb-hill-up-0: #a9b8c0; --gb-hill-up-1: #869aa6; --gb-ground-up: #6c8a46; --gb-dirt-up: #7a5c3a;
+  --gb-sky-dn-0: #6a5a82; --gb-sky-dn-1: #e0b096; --gb-hill-dn-0: #9a8a9e; --gb-hill-dn-1: #7c6c82; --gb-ground-dn: #7a6a58; --gb-dirt-dn: #64503e;
+  --gb-sky-fog-0: #a8a498; --gb-sky-fog-1: #ebe5d8; --gb-hill-fog-0: #bdb8aa; --gb-hill-fog-1: #a19c8e; --gb-ground-fog: #868c6e; --gb-dirt-fog: #736a58;
+  --gb-road: #3a342c; --gb-road-line: #f3e3b8; --gb-fog: #f5f0e6; --gb-fog-text: #5c544a; --gb-sun: #fff1cc;
+  --gb-car: #d9431c; --gb-car-glass: #c4dce6; --gb-wheel: #1e1b18; --gb-hub: #a39a8e; --gb-smoke: #e8e2d6; --gb-pole: #2c2a29;
+  --gb-flag-long: #2f7a26; --gb-flag-short: #b5372a; --gb-flag-text: #ffffff; --gb-headlight: #fff1c0; --gb-taillight: #a3170c; --gb-blink: #e8a020;
+  --gb-shadow: #2c2a29; --gb-shine: #ffffff;
+  --gb-dial-track: #d9d0bf; --gb-dial-red: #c2410c; --gb-dial-tick: #6b5f52; --gb-dial-text: #7a6e60; --gb-needle: #c2410c; --gb-hub-fill: #ebe3d3;
+  --gb-shift-track: #d0c6b4; --gb-shift-text: #7a6e60; --gb-knob-up: #65a30d; --gb-knob-dn: #dc2626; --gb-knob-n: #a39a8e;
+  --gb-knob-shadow: #2c2a29; --gb-knob-ring: #ffffff; --gb-knob-text: #1e1b18;
+}

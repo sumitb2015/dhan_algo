@@ -115,6 +115,7 @@ const NAV_GROUPS = [
     icon: Target,
     links: [
       { href: '/signal-orb', label: 'Signal Orb', desc: 'CRUDEOILM futures auto-trader: one orb turns green / red when every active indicator (EMA, Supertrend, RSI, Stoch RSI) agrees on closed bars — long, short or hold' },
+      { href: '/gearbox', label: 'Gearbox Drive', desc: 'Drive the live CRUDEOIL / CRUDEOILM future as a road: EMA gears, VWAP / Supertrend lamps and a ghost driver; ↑ / ↓ buy the mapped option (SIM, or REAL on Dhan, 1 lot)' },
       { href: '/scalp-cockpit', label: 'Scalp Cockpit', desc: 'Tight multi-window scalping desk: Cumulative OI, Strikes OI slider, India VIX, collapsible Multi-Leg Focus trade desk & analysis windows' },
       { href: '/options/fresh-money', label: 'Fresh Money', desc: 'Per-strike share of volume opening/closing positions vs a 14-day normal' },
       { href: '/price-ladder', label: 'Price Ladder XY', desc: 'Trade an option on index levels — click a Nifty level to arm an entry with a bracket target/SL and trailing SL in index points; server-fired' },
