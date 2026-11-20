@@ -117,11 +117,13 @@ export function useGearboxEngine() {
   // ── the signal future and the gearbox on closed bars ───────────────────────────────────────────────
   const feed = usePnfFeed(state?.future ?? null, 0, now);
   const tf = cfg?.tf ?? 5;
+  // Seconds bars ('5s' ...) are not built on this page yet: no bars, so the page stays warming up and entries stay off (fail-safe).
+  const tfMin = typeof tf === 'number' ? tf : 0;
   const nowS = Math.floor(now / 1000);
   const nowMinute = Math.floor(now / 60_000);
-  const closedKey = gbClosedKey(feed.bars, tf, nowMinute * 60 + 1, feed.histVersion);
+  const closedKey = `${tf}|${tfMin ? gbClosedKey(feed.bars, tfMin, nowMinute * 60 + 1, feed.histVersion) : ''}`;
   const bars: GbBar[] = useMemo(
-    () => (nowMinute ? gbClosedBars(feed.bars.slice(-READ_BARS_1M * tf), tf, nowMinute * 60 + 1) : []),
+    () => (nowMinute && tfMin ? gbClosedBars(feed.bars.slice(-READ_BARS_1M * tfMin), tfMin, nowMinute * 60 + 1) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [closedKey],
   );
@@ -147,7 +149,7 @@ export function useGearboxEngine() {
   /** Why a new entry is refused here (null = allowed). Exits are never refused here. */
   const entryBlock: string | null = !state ? 'Loading…'
     : busy ? 'Sending…'
-      : warming ? `Warming up: ${bars.length} / ${WARM_BARS} closed ${tf}-min bars`
+      : warming ? `Warming up: ${bars.length} / ${WARM_BARS} closed ${tfMin ? `${tf}-min` : tf} bars`
         : mode === 'REAL' && !realArmed ? 'REAL is not armed on this page load'
           : !feedFresh ? 'Feed stale - no new entries'
             : null;

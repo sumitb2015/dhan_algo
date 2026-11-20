@@ -149,7 +149,7 @@ export default function GearboxPage() {
             <RoadScene states={states} held={held?.status === 'open' || held?.status === 'closing' ? held.dir : null} paused={paused} />
             <div className="pointer-events-none absolute left-3 right-3 top-2.5 flex flex-wrap justify-between gap-2">
               <span className="rounded-full bg-zinc-950/80 px-3 py-1 text-sm font-semibold text-zinc-100">
-                {s ? `${istDateIso(s.t * 1000)} · ${istClock(s.t * 1000).slice(0, 5)}` : 'Waiting for bars'} · {config?.tf ?? 5}m
+                {s ? `${istDateIso(s.t * 1000)} · ${istClock(s.t * 1000).slice(0, 5)}` : 'Waiting for bars'} · {typeof config?.tf === 'string' ? config.tf : `${config?.tf ?? 5}m`}
               </span>
               <span className="rounded-full bg-zinc-950/80 px-3 py-1 text-sm font-semibold text-zinc-100">
                 {!held ? 'Flat' : <>{held.dir === 'LONG' ? 'Long' : 'Short'} · <b className={unrealPts === null ? 'text-zinc-400' : unrealPts >= 0 ? 'text-emerald-400' : 'text-red-400'}>
@@ -168,7 +168,7 @@ export default function GearboxPage() {
             <DirectionMap e={e} />
             <RiskPanel e={e} />
             <Scoreboard ledger={e.ledger} mode={mode} today={e.state?.today ?? ''} heldPnl={e.heldPnl} states={states} ghost={e.ghost} />
-            <TripLog states={states} ghost={e.ghost} log={e.ledger?.log ?? []} tf={config?.tf ?? 5} />
+            <TripLog states={states} ghost={e.ghost} log={e.ledger?.log ?? []} tf={typeof config?.tf === 'number' ? config.tf : 5} />
           </div>
         </div>
         <section aria-label="Today's trades" className="flex flex-col gap-2">

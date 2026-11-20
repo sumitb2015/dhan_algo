@@ -378,4 +378,112 @@ test('state lists the option expiries after today for the expiry picker', () => 
   assert.deepEqual(r.body.expiries, [NEXT]);
 });
 
+// ── FUT legs (2026-11-20): the signal future itself ──
+
+const FUT_T: Target = { kind: 'futures', symbol: U, name: U, expiry: '2026-12-17' };
+const futLeg = (action: 'BUY' | 'SELL') => ({ action, opt: 'FUT' as const, offset: 0, expiry: 'nearest' });
+const futMap = (dirn: 'LONG' | 'SHORT', action: 'BUY' | 'SELL') => {
+  const m = { ...emptyLedger().config.map };
+  m[dirn] = futLeg(action);
+  return { ...emptyLedger().config, map: m };
+};
+const noOption = () => { throw new Error('optionPrice must not be asked for a FUT leg'); };
+
+test('pickTarget of a FUT leg is the signal future (first future on or after the nearest option expiry)', () => {
+  assert.deepEqual(pickTarget(U, futLeg('BUY'), 6010, TODAY, FNO), FUT_T);
+  assert.deepEqual(pickTarget(U, { ...futLeg('SELL'), expiry: NEXT }, 6010, TODAY, FNO), FUT_T);
+  assert.equal(typeof pickTarget(U, { ...futLeg('BUY'), expiry: TODAY }, 6010, TODAY, FNO), 'string'); // never today's expiry
+  assert.equal(typeof pickTarget(U, futLeg('BUY'), 6010, TODAY, FNO.filter(r => r.optType !== null)), 'string'); // no future listed
+});
+
+test('FUT SIM open books the future price as entry', async () => {
+  write({ config: futMap('LONG', 'BUY') });
+  const s = stubs({ optionPrice: noOption });
+  const r = await gbTrade(req('open', 'LONG'), s.deps);
+  assert.equal(r.status, 200, String(r.body.error));
+  const row = read().rows[0];
+  assert.deepEqual(row.target, FUT_T);
+  assert.equal(row.entry, 6010);
+  assert.equal(row.lastLtp, 6010);
+  assert.equal(row.leg.opt, 'FUT');
+  assert.equal(s.calls.length, 0);
+});
+
+test('FUT REAL open sends 1 lot SELL on the future, INTRADAY, tag gbx', async () => {
+  real({ config: futMap('SHORT', 'SELL') });
+  const s = stubs({ optionPrice: noOption });
+  const r = await gbTrade(req('open', 'SHORT'), s.deps);
+  assert.equal(r.status, 200, String(r.body.error));
+  assert.equal(s.calls.length, 1);
+  const c = s.calls[0];
+  assert.equal(c.tag, 'gbx');
+  assert.equal(c.order.lots, 1);
+  assert.equal(c.order.action, 'SELL');
+  assert.equal(c.order.product, 'INTRADAY');
+  assert.deepEqual(c.order.target, FUT_T);
+  assert.equal(c.fileAtSend.rows[0].status, 'sending');
+  const row = read().rows[0];
+  assert.equal(row.status, 'open');
+  assert.equal(row.entry, 123.5);
+  assert.equal(row.units, 1);
+});
+
+test('FUT open on a stale or missing future price is refused, nothing sent', async () => {
+  real({ config: futMap('LONG', 'BUY') });
+  const s = stubs({ price: () => ({ ltp: 6010, ageMs: 10_001 }), optionPrice: noOption });
+  assert.equal((await gbTrade(req('open', 'LONG'), s.deps)).status, 409);
+  const n = stubs({ price: () => null, optionPrice: noOption });
+  assert.equal((await gbTrade(req('open', 'LONG'), n.deps)).status, 409);
+  assert.equal(s.calls.length + n.calls.length, 0);
+  assert.equal(read().rows.length, 0);
+});
+
+test('FUT exit sends exitOwn on the future with the row\'s own units', async () => {
+  real({ config: futMap('SHORT', 'SELL'), rows: [openRow({ mode: 'REAL', dir: 'SHORT', leg: futLeg('SELL'), target: FUT_T, units: 1, entry: 6000 })] });
+  const s = stubs({ optionPrice: noOption });
+  const r = await gbTrade(req('exit'), s.deps);
+  assert.equal(r.status, 200, String(r.body.error));
+  assert.equal(s.calls.length, 1);
+  assert.deepEqual(s.calls[0].order.target, FUT_T);
+  assert.deepEqual(s.calls[0].order.exitOwn, { side: 'BUY', units: [1], product: 'INTRADAY' });
+  assert.equal(read().rows[0].status, 'closed');
+});
+
+test('FUT SIM close uses the future price (not an option price)', async () => {
+  const row = openRow({ leg: futLeg('SELL'), target: FUT_T, entry: 6000 });
+  const l: GbLedger = { ...emptyLedger(), config: futMap('LONG', 'SELL'), rows: [row] };
+  const out = await closeRowNow(l, row, 'click', stubs({ price: () => ({ ltp: 5990, ageMs: 500 }), optionPrice: noOption }).deps);
+  assert.ok(out.ok);
+  assert.equal(out.ledger.rows[0].exit, 5990);
+});
+
+test('reverse LONG BUY FUT -> SHORT BUY PE', async () => {
+  const cfgMap = { ...emptyLedger().config, map: { LONG: futLeg('BUY'), SHORT: { action: 'BUY' as const, opt: 'PE' as const, offset: 0, expiry: 'nearest' } } };
+  real({ config: cfgMap, rows: [openRow({ mode: 'REAL', leg: futLeg('BUY'), target: FUT_T, entry: 6000 })] });
+  const s = stubs();
+  const r = await gbTrade(req('reverse', 'SHORT'), s.deps);
+  assert.equal(r.status, 200, String(r.body.error));
+  assert.equal(s.calls.length, 2);
+  assert.deepEqual(s.calls[0].order.target, FUT_T);
+  assert.deepEqual(s.calls[0].order.exitOwn, { side: 'SELL', units: [1], product: 'INTRADAY' });
+  assert.deepEqual(s.calls[1].order.target, opt(6000, 'PE'));
+  const rows = read().rows;
+  assert.equal(rows[0].status, 'closed');
+  assert.equal(rows[1].dir, 'SHORT');
+  assert.equal(rows[1].entry, 123.5);
+});
+
+test('state shows the future as the contract of a FUT direction and prices a FUT row from the future', () => {
+  write({ config: futMap('SHORT', 'SELL'), rows: [openRow({ leg: futLeg('SELL'), target: FUT_T, dir: 'SHORT' })] });
+  const asked: string[] = [];
+  const r = gbState(stubs({ optionPrice: t => { asked.push(t.kind); return { ltp: 120, ageMs: 500 }; } }).deps);
+  const contracts = r.body.contracts as Record<string, Target | null>;
+  assert.deepEqual(contracts.SHORT, FUT_T);
+  assert.deepEqual(contracts.LONG, opt(6000, 'CE'));
+  const prices = r.body.prices as { contracts: Record<string, { ltp: number } | null>; rows: Record<string, { ltp: number } | null> };
+  assert.equal(prices.contracts.SHORT?.ltp, 6010);
+  assert.equal(prices.rows.r1?.ltp, 6010);
+  assert.ok(!asked.includes('futures'));
+});
+
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));

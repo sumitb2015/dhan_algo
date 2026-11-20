@@ -7,13 +7,18 @@ export type GbMode = 'SIM' | 'REAL';
 export type GbUnderlying = 'CRUDEOIL' | 'CRUDEOILM';
 export type Dir = 'LONG' | 'SHORT';
 
-export interface DirLeg { action: 'BUY' | 'SELL'; opt: 'CE' | 'PE'; offset: number; expiry: 'nearest' | string }
+/** `opt: 'FUT'` trades the signal future itself (offset is always 0; `expiry` names the option expiry the future is picked for). */
+export interface DirLeg { action: 'BUY' | 'SELL'; opt: 'CE' | 'PE' | 'FUT'; offset: number; expiry: 'nearest' | string }
+
+/** Bar size: minutes (1 / 3 / 5) or N-second WebSocket bars ('5s' ...). */
+export type GbTf = 1 | 3 | 5 | '5s' | '10s' | '20s' | '30s';
+export const GB_TFS: readonly GbTf[] = [1, 3, 5, '5s', '10s', '20s', '30s'];
 
 export interface GbConfig {
   underlying: GbUnderlying;
   broker: 'dhan';
   lots: number;
-  tf: 1 | 3 | 5;
+  tf: GbTf;
   map: Record<Dir, DirLeg>;
   slPts: number | null;
   tgtPts: number | null;
@@ -48,7 +53,7 @@ export interface GbRow {
   day: string;
   status: GbStatus;
   note?: string;
-  /** Last good option price, kept fresh by gbState() and the square-off tick; the square-off's SIM fallback. */
+  /** Last good price of the row's contract (option, or the future for a FUT leg), kept fresh by gbState() and the square-off tick; the square-off's SIM fallback. */
   lastLtp?: number;
   /** When the broker confirmed the entry fill (TRADED). An exit answered "flat" within 60 s of it is treated as UNKNOWN. */
   entryFilledAt?: number;
@@ -106,11 +111,12 @@ function sanitizeLeg(v: unknown): DirLeg | string {
   if (!v || typeof v !== 'object') return 'map leg must be an object';
   const o = v as Record<string, unknown>;
   if (o.action !== 'BUY' && o.action !== 'SELL') return 'leg action must be BUY or SELL';
-  if (o.opt !== 'CE' && o.opt !== 'PE') return 'leg opt must be CE or PE';
+  if (o.opt !== 'CE' && o.opt !== 'PE' && o.opt !== 'FUT') return 'leg opt must be CE, PE or FUT';
   if (typeof o.offset !== 'number' || !Number.isInteger(o.offset) || o.offset < -3 || o.offset > 3) return 'leg offset must be an integer -3..3';
   const exp = o.expiry;
   if (exp !== 'nearest' && !(typeof exp === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(exp))) return 'leg expiry must be "nearest" or YYYY-MM-DD';
-  return { action: o.action, opt: o.opt, offset: o.offset, expiry: exp };
+  // a future has no strike to offset: always 0
+  return { action: o.action, opt: o.opt, offset: o.opt === 'FUT' ? 0 : o.offset, expiry: exp };
 }
 
 /** Merge a config patch into `cur`, bounded; a reason string when refused. Unknown keys are ignored. */
@@ -133,8 +139,8 @@ export function sanitizeConfigPatch(patch: unknown, cur: GbConfig, mode: GbMode)
     next.lots = n;
   }
   if (p.tf !== undefined) {
-    if (p.tf !== 1 && p.tf !== 3 && p.tf !== 5) return 'tf must be 1, 3 or 5 minutes';
-    next.tf = p.tf;
+    if (!GB_TFS.includes(p.tf as GbTf)) return 'tf must be 1, 3 or 5 minutes or 5s, 10s, 20s, 30s';
+    next.tf = p.tf as GbTf;
   }
   if (p.map !== undefined) {
     if (!p.map || typeof p.map !== 'object') return 'map must be an object';

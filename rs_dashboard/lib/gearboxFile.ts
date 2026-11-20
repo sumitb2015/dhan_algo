@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { readJsonFile } from './lockedJsonFile.ts';
 import { PROJECT_ROOT } from './pyExec.ts';
-import { targetKey } from './pnfTarget.ts';
+import { targetKey, type Target } from './pnfTarget.ts';
 import { normalizeLedger, reservedUnits, type GbLedger } from './gearboxLedger.ts';
 
 // The Gearbox ledger file, read-only helpers. Kept apart from the server so the shared P&F order layer can keep Gearbox's
@@ -45,4 +45,12 @@ export function reservedByGearbox(broker: string, tKey: string, product: 'INTRAD
     console.warn('[gearbox] reservedByGearbox failed, keeping 0 units back:', e instanceof Error ? e.message : e);
     return 0;
   }
+}
+
+/**
+ * Gearbox's live REAL FUT-leg units on a FUTURES chart's contract (0 for any other chart): the P&F / Renko close's `fromOther` keeps
+ * them. Option rows are not counted here; the close keeps those per option leg (optionLegKeys), so nothing is held back twice.
+ */
+export function reservedByGearboxFuture(broker: string, target: Target, product: 'INTRADAY' | 'MARGIN', ledger?: GbLedger): number {
+  return target.kind === 'futures' ? reservedByGearbox(broker, targetKey(target), product, ledger) : 0;
 }

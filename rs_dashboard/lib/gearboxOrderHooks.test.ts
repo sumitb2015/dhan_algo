@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { SOURCE_QTY_CAPS, SOURCE_QTY_CAPS_MCX, dhanSourceCapError, dhanSourceQtyCap } from './dhanSourceCaps.ts';
 import { optionLegKeys, optionLegReserved, planLegCloseKeeping } from './pnfOrderLogic.ts';
 import { emptyLedger, reservedUnits, type GbLedger, type GbRow } from './gearboxLedger.ts';
+import { reservedByGearboxFuture } from './gearboxFile.ts';
 import { targetKey } from './pnfTarget.ts';
 
 // Task 3 of Gearbox Drive: the 'gbx' per-order cap in the Dhan order layer, and the P&F square-off keeping Gearbox's units.
@@ -67,4 +68,26 @@ test('Gearbox SIM, closed or other-broker rows keep nothing; non-option legs kee
 
 test('reservation sources add up per leg', () => {
   assert.deepEqual(optionLegReserved(['a', 'b'], [k => (k === 'a' ? 5 : 1), k => (k === 'a' ? -2 : 3)]), [3, 4]);
+});
+
+// FUT legs (2026-11-20): a /renko or P&F close on the crude future keeps Gearbox's live REAL futures units (placePnfMarket's fromOther).
+const futT = { kind: 'futures' as const, symbol: 'CRUDEOILM', name: 'CRUDEOILM', expiry: '2026-12-17' };
+const futRow = (x: Partial<GbRow> = {}) => gbRow({ id: 'f1', target: futT, leg: { action: 'SELL', opt: 'FUT', offset: 0, expiry: 'nearest' }, units: 1, ...x });
+
+test('a close on the future keeps Gearbox\'s FUT units (signed), MIS only', () => {
+  const ledger = gb([futRow()]);
+  assert.equal(reservedByGearboxFuture('dhan', futT, 'INTRADAY', ledger), -1);
+  assert.equal(reservedByGearboxFuture('dhan', futT, 'MARGIN', ledger), 0);
+  assert.equal(reservedByGearboxFuture('kotak', futT, 'INTRADAY', ledger), 0);
+  assert.equal(reservedByGearboxFuture('dhan', { ...futT, expiry: '2027-01-19' }, 'INTRADAY', ledger), 0);
+  assert.equal(reservedByGearboxFuture('dhan', futT, 'INTRADAY', gb([futRow({ mode: 'SIM' }), futRow({ id: 'f2', status: 'closed' })])), 0);
+  // broker is short 3 lots of the future; Gearbox owns 1 of them: the close buys back 2
+  const plan = planLegCloseKeeping('fut-id', [{ key: 'fut-id', product: 'INTRADAY', net: -3 }], reservedByGearboxFuture('dhan', futT, 'INTRADAY', ledger), 'dhan');
+  assert.deepEqual(plan, [{ side: 'BUY', qty: 2, product: 'INTRADAY' }]);
+});
+
+test('the futures hold-back never counts an option row (those are kept per option leg, not twice)', () => {
+  const ledger = gb([gbRow(), futRow()]);
+  assert.equal(reservedByGearboxFuture('dhan', ce as never, 'INTRADAY', ledger), 0);
+  assert.equal(reservedByGearboxFuture('dhan', futT, 'INTRADAY', ledger), -1);
 });

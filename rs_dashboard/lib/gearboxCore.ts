@@ -13,7 +13,8 @@ import {
   type Dir, type DirLeg, type GbLedger, type GbMode, type GbRow, type GbUnderlying,
 } from './gearboxLedger.ts';
 
-// Gearbox Drive's server core: the one writer of debug/gearbox_state.json and its order path. REAL MONEY (Dhan MCX options).
+// Gearbox Drive's server core: the one writer of debug/gearbox_state.json and its order path. REAL MONEY (Dhan MCX options and,
+// for a FUT leg, the signal future itself).
 // Every mutation (client op, trade, lastLtp refresh) runs on one in-process chain, so a trade and a config write never interleave.
 // The browser names only WHAT to do (open LONG / SHORT, exit, reverse); contract, strike, lots, broker quantity and the exit size
 // come from the ledger and the server's own prices here. A REAL row is written BEFORE its order is sent, and an UNKNOWN outcome is
@@ -84,7 +85,16 @@ const opposite = (a: 'BUY' | 'SELL'): 'BUY' | 'SELL' => (a === 'BUY' ? 'SELL' : 
 const patchRow = (l: GbLedger, id: string, p: Partial<GbRow>): GbLedger => ({ ...l, rows: l.rows.map(r => (r.id === id ? { ...r, ...p } : r)) });
 const unitsPerLotOf = (u: GbUnderlying) => MCX_LOT_MULTIPLIER[u] ?? (u === 'CRUDEOIL' ? 100 : 10);
 const capOf = (m: GbMode) => (m === 'REAL' ? MAX_REAL_LOTS : MAX_SIM_LOTS);
-const optName = (t: Target) => `${t.symbol} ${t.expiry} ${t.strike} ${t.side}`;
+const optName = (t: Target) => (t.kind === 'futures' ? `${t.symbol} ${t.expiry} FUT` : `${t.symbol} ${t.expiry} ${t.strike} ${t.side}`);
+
+/**
+ * The live price of a row's / leg's contract: an option from optionPrice, a future (FUT leg) from price(). price() picks the first
+ * future expiring on or after the expiry it is given, so a future's own expiry names that same future. Asking keeps it subscribed.
+ */
+export function contractQuote(deps: Pick<GbDeps, 'price' | 'optionPrice'>, t: Target): Quote | null {
+  if (t.kind !== 'futures') return deps.optionPrice(t);
+  return t.expiry && (t.symbol === 'CRUDEOIL' || t.symbol === 'CRUDEOILM') ? deps.price(t.symbol, t.expiry) : null;
+}
 
 // ── Contract pick ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -98,10 +108,14 @@ export function legExpiry(u: GbUnderlying, leg: DirLeg, today: string, from?: Fn
 }
 const isIso = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
 
-/** The option a leg trades at future price `futLtp`: ATM of the listed strikes, `offset` strikes OTM (CE up, PE down). */
+/**
+ * The contract a leg trades at future price `futLtp`: an option ATM of the listed strikes, `offset` strikes OTM (CE up, PE down);
+ * a FUT leg trades the signal future of its option expiry (futureTarget), so never a future expiring today.
+ */
 export function pickTarget(u: GbUnderlying, leg: DirLeg, futLtp: number, today: string, from?: FnoRow[]): Target | string {
   const exp = legExpiry(u, leg, today, from);
   if (!isIso(exp)) return exp;
+  if (leg.opt === 'FUT') return futureTarget(u, exp, from) ?? `No ${u} future expiring on or after ${exp} in the master list`;
   if (!(futLtp > 0)) return 'No futures price to pick the strike from';
   const strikes = strikesFor(u, exp, from);
   const atm = atmStrike(strikes, futLtp);
@@ -177,15 +191,15 @@ export function gbState(deps: GbDeps): Reply {
     const t = !isIso(exp) ? exp : fq && fq.ageMs <= FUT_FRESH_MS ? pickTarget(u, leg, fq.ltp, today, deps.fno) : 'No fresh futures price';
     if (typeof t === 'string') { contractErrors[d] = t; continue; }
     contracts[d] = t;
-    contractPrices[d] = deps.optionPrice(t);
+    contractPrices[d] = contractQuote(deps, t);
   }
 
-  // Every live row's option stays subscribed; a fresh price refreshes its lastLtp (the square-off's SIM fallback).
+  // Every live row's contract (option, or the future of a FUT row) stays subscribed; a fresh price refreshes its lastLtp (the square-off's SIM fallback).
   const rowPrices: Record<string, Quote | null> = {};
   const fresh: Record<string, number> = {};
   for (const r of ledger.rows) {
     if (!isLive(r)) continue;
-    const q = deps.optionPrice(r.target);
+    const q = contractQuote(deps, r.target);
     rowPrices[r.id] = q;
     if (q && q.ageMs <= OPT_FRESH_MS && q.ltp !== r.lastLtp) fresh[r.id] = q.ltp;
   }
@@ -263,6 +277,7 @@ const hhmm = (ms: number) => { const m = istMinuteOfDay(ms); return Math.floor(m
 /** Marks a refusal as "no fresh futures price" (a reverse that meets it after its exit logs "reverse stopped: stale price"). */
 const stale = (r: Reply): Reply => ({ ...r, body: { ...r.body, stalePrice: true } });
 
+/** `optLtp`: the contract's price now (the option's, or the future's for a FUT leg). */
 type OpenPlan = { leg: DirLeg; target: Target; lots: number; lotUnits: number; optLtp: number };
 
 /** Every check an entry needs, before anything is sent (a reverse runs these BEFORE its exit, so it never exits for nothing). */
@@ -286,7 +301,8 @@ async function planOpen(l: GbLedger, req: TradeReq, deps: GbDeps, now: number, t
   if (fut.ageMs > FUT_FRESH_MS) return stale(fail(`The futures price is ${Math.round(fut.ageMs / 1000)} s old - nothing was sent`, 409));
   const target = pickTarget(req.underlying, leg, fut.ltp, today, deps.fno);
   if (typeof target === 'string') return fail(target, 409);
-  const opt = deps.optionPrice(target);
+  // a FUT leg's contract IS the future just checked (<= FUT_FRESH_MS): its entry is that price
+  const opt = target.kind === 'futures' ? fut : deps.optionPrice(target);
   if (!opt) return fail(`No live price for ${optName(target)} yet - try again in a few seconds`, 409);
   if (opt.ageMs > OPT_FRESH_MS) return fail(`The ${optName(target)} price is ${Math.round(opt.ageMs / 1000)} s old - nothing was sent`, 409);
   const lotUnits = await deps.lotUnits(target).catch((e: Error) => `Contract lookup failed: ${e.message}`);
@@ -325,8 +341,8 @@ async function openRow(l0: GbLedger, req: TradeReq, p: OpenPlan, deps: GbDeps, n
       const note = `entry ${fill.reason} by the broker`;
       return { ok: false, error: `Entry ${fill.reason}`, ledger: addLog(patchRow(l, row.id, { status: 'failed', note }), 'error', `REAL ${what}: ${note}`, deps.now()) };
     }
-    const ltp = deps.optionPrice(p.target)?.ltp ?? p.optLtp;
-    l = patchRow(l, row.id, { entry: ltp, note: 'fill price not confirmed - booked at the option LTP' });
+    const ltp = contractQuote(deps, p.target)?.ltp ?? p.optLtp;
+    l = patchRow(l, row.id, { entry: ltp, note: 'fill price not confirmed - booked at the LTP' });
     return { ok: true, ledger: addLog(l, 'warn', `REAL ${what} placed; fill price not confirmed in ${FILL_POLLS} s - booked at LTP ${ltp}`, deps.now()) };
   }
   if (outcome === 'unknown' || r.status === 504) {
@@ -341,13 +357,13 @@ function closed(l: GbLedger, row: GbRow, price: number, reason: string, now: num
 }
 
 /**
- * Closes one open row: SIM at the option's fresh LTP (else lastLtp, logged); REAL by sending ONLY this row's units (exitOwn, capped
+ * Closes one open row: SIM at its contract's fresh LTP (the future's for a FUT row) (else lastLtp, logged); REAL by sending ONLY this row's units (exitOwn, capped
  * by the broker row) and waiting for the fill. Refused -> the row stays open. No verdict / unknown -> the row goes UNKNOWN, never
  * resent. Call inside gbSerial; the caller saves the returned ledger (the REAL 'closing' row is saved here, before the send).
  */
 export async function closeRowNow(l0: GbLedger, row: GbRow, reason: string, deps: GbDeps, decisionPrice?: number): Promise<Step> {
   const now = deps.now();
-  const q = deps.optionPrice(row.target);
+  const q = contractQuote(deps, row.target);
   const freshLtp = q && q.ageMs <= OPT_FRESH_MS ? q.ltp : null;
   const dec = decisionPrice !== undefined ? { exitDecision: decisionPrice } : {};
   const what = `${row.dir} ${row.leg.action} ${row.lots} x ${optName(row.target)}`;
@@ -357,7 +373,7 @@ export async function closeRowNow(l0: GbLedger, row: GbRow, reason: string, deps
     if (price === null) {
       price = row.lastLtp ?? q?.ltp ?? row.entry;
       const src = row.lastLtp !== undefined ? 'last good price' : q ? 'stale LTP' : 'entry price (no price at all)';
-      l = addLog(l, 'warn', `SIM exit ${optName(row.target)}: no fresh option price - closed at the ${src} ${price}`, now);
+      l = addLog(l, 'warn', `SIM exit ${optName(row.target)}: no fresh price - closed at the ${src} ${price}`, now);
     }
     return { ok: true, ledger: addLog(closed(l, row, price, reason, now, dec), 'trade', `SIM exit ${what} @ ${price} - ${reason}`, now) };
   }

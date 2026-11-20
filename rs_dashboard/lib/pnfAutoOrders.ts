@@ -5,7 +5,7 @@ import type { PnfScope } from '@/lib/pnfScope';
 import { exitingAutoProduct, readAutoLedger, reservedByAuto, reservedByAutoTraded } from '@/lib/pnfAutoServer';
 import { reservedByIndexHeld } from '@/lib/pnfIndexHeld';
 import { reservedByOrb } from '@/lib/signalOrbFile';
-import { readGbLedger, reservedByGearbox } from '@/lib/gearboxFile';
+import { readGbLedger, reservedByGearbox, reservedByGearboxFuture } from '@/lib/gearboxFile';
 import { readIndexHeld } from '@/lib/pnfIndexHeldServer';
 import { brokerPositionRows, brokerSessionOk } from '@/lib/priceLadderServer';
 import { CloseGuard } from '@/lib/priceLadderClose';
@@ -100,8 +100,9 @@ export async function placePnfMarket(order: PnfOrder, scope: PnfScope, tagOverri
       const gbLed = readGbLedger();
       const legKeys = optionLegKeys(target, onBroker);
       const keep = (p: AutoProduct) => {
-        // the Signal Orb's live REAL futures row on this contract too (single-leg, MIS): it shares the broker's netted position
-        const orb = reservedByOrb(broker, targetKey(target), p);
+        // the Signal Orb's and Gearbox Drive's (FUT leg) live REAL futures rows on this contract too (single-leg, MIS): they share
+        // the broker's netted position. Gearbox's option rows are kept per option leg below (fromIndex), never here.
+        const orb = reservedByOrb(broker, targetKey(target), p) + reservedByGearboxFuture(broker, target, p, gbLed);
         const fromOther = reservedByAuto(otherLed, broker, targetKey(target), onBroker.length, undefined, p).map((r, i) => (i === 0 ? r + orb : r));
         // Chart N's MTM guard: this page's OTHER chart's AUTO on the same contract is kept too (each chart guards its own trade).
         const fromSibling = order.guardChart ? reservedByAuto(ownLed, broker, targetKey(target), onBroker.length, order.guardChart, p) : onBroker.map(() => 0);
@@ -123,7 +124,7 @@ export async function placePnfMarket(order: PnfOrder, scope: PnfScope, tagOverri
       const fromOther = mis.fromOther.some(r => r !== 0) || nrml.fromOther.some(r => r !== 0);
       const fromSibling = mis.fromSibling.some(r => r !== 0) || nrml.fromSibling.some(r => r !== 0);
       const fromIndex = mis.fromIndex.some(r => r !== 0) || nrml.fromIndex.some(r => r !== 0);
-      const whose = anyKept ? [fromOther ? `the ${otherName} page's AUTO or the Signal Orb` : '', fromSibling ? `chart ${sibling}'s AUTO` : '', fromIndex ? 'an index chart\'s option (held or AUTO) or Gearbox Drive' : ''].filter(Boolean).join(' and ') : '';
+      const whose = anyKept ? [fromOther ? `the ${otherName} page's AUTO, the Signal Orb or Gearbox Drive's future` : '', fromSibling ? `chart ${sibling}'s AUTO` : '', fromIndex ? 'an index chart\'s option (held or AUTO) or Gearbox Drive' : ''].filter(Boolean).join(' and ') : '';
       if (whose) keptNote = ` KEPT: ${kept.join(' / ')} units on this contract belong to ${whose} and were not closed.`;
       if (plans.every(p => p.orders.length === 0)) {
         return reply({

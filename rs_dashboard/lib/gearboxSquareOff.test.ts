@@ -181,3 +181,43 @@ test('a tick after the square-off with nothing live does nothing', async () => {
   assert.equal(fs.readFileSync(FILE, 'utf8'), before);
   assert.equal(s.calls.length, 0);
 });
+
+// ── FUT rows (2026-11-20): priced and closed on the future ──
+
+const fut: Target = { kind: 'futures', symbol: U, name: U, expiry: '2026-12-17' };
+const futRow = (extra: Partial<GbRow> = {}) => row({ target: fut, leg: { action: 'SELL', opt: 'FUT', offset: 0, expiry: 'nearest' }, entry: 6000, ...extra });
+const noOption = () => { throw new Error('optionPrice must not be asked for a FUT row'); };
+
+test('a SIM FUT row is squared off at the future price', async () => {
+  write([futRow()]);
+  const asked: string[] = [];
+  await tick(stubs(AFTER, { optionPrice: noOption, price: (u, e) => { asked.push(`${u} ${e}`); return { ltp: 5990, ageMs: 500 }; } }).deps);
+  const l = read();
+  assert.equal(l.rows[0].status, 'closed');
+  assert.equal(l.rows[0].exit, 5990);
+  assert.ok(asked.includes(`${U} 2026-12-17`));
+});
+
+test('a SIM FUT row with no future price closes at lastLtp and logs it', async () => {
+  write([futRow({ lastLtp: 6005 })]);
+  await tick(stubs(AFTER, { optionPrice: noOption, price: () => null }).deps);
+  const l = read();
+  assert.equal(l.rows[0].exit, 6005);
+  assert.ok(l.log.some(e => e.msg.includes('square-off at last price')));
+});
+
+test('a REAL FUT row is squared off with exitOwn on the future, tab closed', async () => {
+  write([futRow({ mode: 'REAL' })], { mode: 'REAL' });
+  const s = stubs(AFTER, { optionPrice: noOption, price: () => ({ ltp: 5990, ageMs: 500 }) });
+  await tick(s.deps);
+  assert.equal(s.calls.length, 1);
+  assert.deepEqual(s.calls[0].target, fut);
+  assert.deepEqual(s.calls[0].exitOwn, { side: 'BUY', units: [1], product: 'INTRADAY' });
+  assert.equal(read().rows[0].status, 'closed');
+});
+
+test('a tick refreshes a FUT row\'s lastLtp from the future price', async () => {
+  write([futRow({ lastLtp: 6000 })]);
+  await tick(stubs(BEFORE, { optionPrice: noOption, price: () => ({ ltp: 6020, ageMs: 500 }) }).deps);
+  assert.equal(read().rows[0].lastLtp, 6020);
+});

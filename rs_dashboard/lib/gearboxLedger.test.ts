@@ -138,3 +138,39 @@ test('reservedByGearbox never throws on a bad ledger: 0 and a warning', () => {
   } finally { console.warn = warn; }
   assert.equal(reservedByGearbox('dhan', targetKey(target), 'INTRADAY', withRows([row()])), 1);
 });
+
+// ── FUT legs and seconds bars (2026-11-20) ──
+
+test('a FUT leg is accepted with its offset forced to 0; other opt values are refused', () => {
+  const r = cfg(emptyLedger(), { map: { SHORT: { action: 'SELL', opt: 'FUT', offset: 2, expiry: 'nearest' } } });
+  assert.ok(r.ok);
+  assert.deepEqual(r.ledger.config.map.SHORT, { action: 'SELL', opt: 'FUT', offset: 0, expiry: 'nearest' });
+  assert.equal(cfg(emptyLedger(), { map: { LONG: { action: 'BUY', opt: 'FUTURE', offset: 0, expiry: 'nearest' } } }).ok, false);
+  assert.equal(cfg(emptyLedger(), { map: { LONG: { action: 'BUY', opt: 'FUT', offset: 9, expiry: 'nearest' } } }).ok, false);
+});
+
+test('tf accepts 1 / 3 / 5 min and 5 / 10 / 20 / 30 s, stored as given; anything else is refused', () => {
+  for (const tf of [1, 3, 5, '5s', '10s', '20s', '30s'] as const) {
+    const r = cfg(emptyLedger(), { tf });
+    assert.ok(r.ok && r.ledger.config.tf === tf, String(tf));
+  }
+  for (const tf of [2, 10, '1s', '15s', '5', '60s', null]) assert.equal(cfg(emptyLedger(), { tf }).ok, false, String(tf));
+});
+
+test('a config saved before FUT / seconds bars loads unchanged', () => {
+  const old = {
+    underlying: 'CRUDEOIL', broker: 'dhan', lots: 1, tf: 3,
+    map: { LONG: { action: 'SELL', opt: 'PE', offset: 1, expiry: 'nearest' }, SHORT: { action: 'BUY', opt: 'PE', offset: -2, expiry: '2026-12-16' } },
+    slPts: 12, tgtPts: null, maxLoss: 2000, maxTrades: 5,
+  };
+  const l = normalizeLedger({ mode: 'REAL', config: old, rows: [row()] });
+  assert.deepEqual(l.config, old);
+  assert.equal(l.rows.length, 1);
+});
+
+test('rowPnl of a FUT SELL: 1 lot CRUDEOIL 6000 -> 5990 = +1000', () => {
+  const fut = { kind: 'futures' as const, symbol: 'CRUDEOIL', name: 'CRUDEOIL', expiry: '2026-12-17' };
+  const r = row({ underlying: 'CRUDEOIL', target: fut, leg: { action: 'SELL', opt: 'FUT', offset: 0, expiry: 'nearest' }, unitsPerLot: 100, entry: 6000 });
+  assert.equal(rowPnl(r, 5990), 1000);
+  assert.equal(rowPnl({ ...r, leg: { ...r.leg, action: 'BUY' } }, 5990), -1000);
+});

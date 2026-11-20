@@ -4,7 +4,7 @@ import { istMinuteOfDay } from './istTime.ts';
 import { mcxSession } from './mcxSession.ts';
 import { GB_UNREADABLE, readGbLedger, readGbLedgerForWrite } from './gearboxFile.ts';
 import { addLog, isLive, type GbLedger, type GbRow } from './gearboxLedger.ts';
-import { OPT_FRESH_MS, closeRowNow, gbSerial, loadGbLedgerForOp, saveGbLedger, type GbDeps } from './gearboxCore.ts';
+import { OPT_FRESH_MS, closeRowNow, contractQuote, gbSerial, loadGbLedgerForOp, saveGbLedger, type GbDeps } from './gearboxCore.ts';
 
 // Gearbox's server square-off: at the MCX auto-exit it closes every live row (SIM and REAL) with every tab closed.
 // REAL MONEY. Each close runs inside gbSerial (never interleaves with a click) through closeRowNow, which sends only the row's own
@@ -12,7 +12,7 @@ import { OPT_FRESH_MS, closeRowNow, gbSerial, loadGbLedgerForOp, saveGbLedger, t
 // 'open' (nothing was sent) and is retried at most SQ_MAX_TRIES times a day, SQ_RETRY_MS apart, never at / after the MCX close;
 // after the last refusal the row goes UNKNOWN. An UNKNOWN row is left for a human, logged once a day (a 'sending' / 'closing' row
 // seen at the start of a tick is an orphan and becomes UNKNOWN first). Every tick with a live row also asks for each live row's
-// option price, which keeps its WebSocket subscription alive with every tab closed, and refreshes lastLtp (the SIM fallback).
+// contract price (option, or the future of a FUT row), which keeps its WebSocket subscription alive with every tab closed, and refreshes lastLtp (the SIM fallback).
 // Relative imports only so lib/gearboxSquareOff.test.ts runs under `node --test`; lib/gearboxSquareOff.ts binds the real deps.
 
 const hhmmToMinutes = (hhmm: number): number => Math.floor(hhmm / 100) * 60 + (hhmm % 100);
@@ -54,12 +54,12 @@ function heldBack(nowMs: number, ledger: GbLedger): GbRow[] {
 const warned = globalOnce('gearbox.squareOffWarned', () => new Set<string>());
 const unreadableWarned = globalOnce('gearbox.squareOffUnreadable', () => ({ at: 0 }));
 
-/** Asks for every live row's option price (keeps its WebSocket want alive) and books a fresh one as lastLtp. */
+/** Asks for every live row's contract price (option, or the future of a FUT row; keeps its WebSocket want alive) and books a fresh one as lastLtp. */
 function refreshLastLtp(l: GbLedger, deps: GbDeps): GbLedger {
   let changed = false;
   const rows = l.rows.map(r => {
     if (!isLive(r)) return r;
-    const q = deps.optionPrice(r.target);
+    const q = contractQuote(deps, r.target);
     if (!q || q.ageMs > OPT_FRESH_MS || q.ltp === r.lastLtp) return r;
     changed = true;
     return { ...r, lastLtp: q.ltp };
@@ -100,8 +100,8 @@ export async function gearboxSquareOffTickCore(deps: GbDeps): Promise<void> {
         l = { ...l, rows: l.rows.map(r => (r.id === cur!.id ? { ...r, sqDay: w.today, sqTries: tries, sqAt: now } : r)) };
         cur = l.rows.find(r => r.id === row.id)!;
       } else {
-        const q = deps.optionPrice(cur.target);
-        if (!(q && q.ageMs <= OPT_FRESH_MS)) l = addLog(l, 'warn', `square-off at last price: ${cur.id} (no fresh option price)`, now);
+        const q = contractQuote(deps, cur.target);
+        if (!(q && q.ageMs <= OPT_FRESH_MS)) l = addLog(l, 'warn', `square-off at last price: ${cur.id} (no fresh price)`, now);
       }
       try {
         l = (await closeRowNow(l, cur, 'square-off', deps)).ledger;
