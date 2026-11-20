@@ -326,6 +326,7 @@ test('Bracket: target and SL show on the ladder as soon as it is armed (dashed, 
   await install(page);
   await gotoSingle(page);
   await expect(page.getByRole('heading', { name: /23200\.00/ })).toBeVisible();
+  await page.getByRole('button', { name: 'Bracket', exact: true }).click();
   await page.getByRole('button', { name: 'Buy at 23180' }).click();
   // 23180 + 40 = 23220 target, 23180 - 30 = 23150 SL
   await expect(page.locator('[title^="Target — set when the entry fills"]', { hasText: '23220' })).toHaveCount(1);

@@ -29,7 +29,7 @@ export const LADDER_UNDERLYINGS: readonly string[] = ['NIFTY', 'BANKNIFTY', 'SEN
 export const LADDER_DEFAULTS_KEY = 'price-ladder-defaults';
 /** Built-in values: what the ladder used before defaults existed. */
 export const BUILT_IN_DEFAULTS: Required<LadderDefaults> = {
-  mode: 'xy', product: 'MIS', underlying: 'NIFTY', zones: 'classic', orderType: 'LIMIT', style: 'Bracket',
+  mode: 'xy', product: 'MIS', underlying: 'NIFTY', zones: 'classic', orderType: 'LIMIT', style: 'Cover',
   tgtPts: 40, slPts: 30, trailOn: false, trailPts: 30, lots: 1, opt1: 'CE', opt2: 'PE', oiPlace: 'edges',
   cprOn: true, pivotsOn: true, pivotFormula: 'traditional',
 };

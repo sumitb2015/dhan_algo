@@ -399,7 +399,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const chooseTick = (t: number, m: PageMode) => { setTick(t); savePref(k(`price-ladder-tick-${m}`), String(t)); };
   const [slBufferPct, setSlBufferPct] = useState(DEFAULT_SL_BUFFER_PCT);
   const [eventsOpen, setEventsOpen] = useState(false);
-  const [style, setStyle] = useState<'Single' | 'Bracket' | 'Cover'>('Bracket');
+  const [style, setStyle] = useState<'Single' | 'Bracket' | 'Cover'>('Cover');
   const [tgtPts, setTgtPts] = useState(40);
   const [slPts, setSlPts] = useState(30);
   const [trailOn, setTrailOn] = useState(false);
