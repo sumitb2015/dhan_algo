@@ -219,6 +219,14 @@ export function synStrikeFor(spot: number, step: number): number | null {
   return spot > 0 && step > 0 ? Math.round(spot / step) * step : null;
 }
 
+/** How many strikes from ATM a NEW synthetic may sit (server refusal) — the page also stops holding an armed strike beyond it. */
+export const SYN_MAX_STEPS_FROM_ATM = 2;
+
+/** True while `k` is within SYN_MAX_STEPS_FROM_ATM strikes of `atm`. */
+export function synStrikeInReach(k: number, atm: number | null, step: number): boolean {
+  return atm != null && step > 0 && Math.abs(k - atm) <= SYN_MAX_STEPS_FROM_ATM * step + 1e-9;
+}
+
 /** How far the synthetic price may sit from the index before it is treated as a bad print (one stale leg shifts it by a whole option move). */
 export const SYN_MAX_BASIS = 0.015;
 /** Cost of carry the bound allows per year: a synthetic on a far expiry sits above spot by about rate x time (generous 12%). */

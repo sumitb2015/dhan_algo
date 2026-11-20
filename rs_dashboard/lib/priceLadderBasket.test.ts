@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   basketTemplates, draftFromTemplate, validateDraft, basketAxis, orientLegs, basketCombined, basketName, basketNowPnl, sumBasketPnl,
-  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, daysToExpiry, SYN_PAUSED_NOTE, synMarket, synQuoteVerdict, synPausedNote, brokenLegsLeft, SYN_MAX_SPREAD, SYN_PAUSE_REPEAT_MS, type LadderBasket, type BasketLeg, type DraftLeg,
+  draftToParam, draftFromParam, mixedExpiry, planBaskets, splitBasketLots, applyBasketShare, basketLegQty, basketEntryVerdict, exitLegs, cutBasketLeg, firstPhase, phaseLegs, draftSyn, synAxis, synStrikeFor, synSane, daysToExpiry, SYN_PAUSED_NOTE, synMarket, synQuoteVerdict, synPausedNote, brokenLegsLeft, synStrikeInReach, SYN_MAX_SPREAD, SYN_PAUSE_REPEAT_MS, type LadderBasket, type BasketLeg, type DraftLeg,
 } from './priceLadderBasket.ts';
 import { rollDay, type LadderState } from './priceLadder.ts';
 import { lotsOnContract, openPositionCount } from './priceLadderPair.ts';
@@ -567,4 +567,11 @@ test('brokenLegsLeft lists only the legs a broken basket still holds', () => {
   const legs = synBasket('SELL').legs.map(l => ({ ...l, held: l.contract.opt === 'PE' ? LOT : 0 }));
   assert.equal(brokenLegsLeft({ legs }), `${legs.find(l => l.contract.opt === 'PE')!.side === 'BUY' ? 'B' : 'S'} PE ${LOT}`);
   assert.equal(brokenLegsLeft({ legs: legs.map(l => ({ ...l, held: 0 })) }), '—');
+});
+
+test('synStrikeInReach: up to 2 strikes from ATM; an old armed strike 3 away no longer holds the page', () => {
+  assert.equal(synStrikeInReach(25500, 25600, 50), true);
+  assert.equal(synStrikeInReach(25700, 25600, 50), true);
+  assert.equal(synStrikeInReach(25450, 25600, 50), false); // the 2026-11-20 screenshot: NIFTY 25586.55, ATM 25600
+  assert.equal(synStrikeInReach(25450, null, 50), false);
 });

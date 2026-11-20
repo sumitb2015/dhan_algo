@@ -17,7 +17,7 @@ import type { BrokerPortfolio } from '@/app/api/dashboard/portfolio/route';
 import { computePivots, pivotChips, PIVOT_FORMULAS } from '@/lib/pivotLevels';
 import { LadderGrid, type EntryMark, widgetsFor, pairWidgetsFor, basketWidgetsFor, type LadderWidget } from '@/components/priceLadder/LadderGrid';
 import { BasketLegsModal } from '@/components/priceLadder/BasketLegsModal';
-import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_PREFIX, SYN_PAUSED_NOTE, basketNowPnl, basketName, brokenLegsLeft, isBasketLive, basketHasPosition, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
+import { basketTemplates, daysToExpiry, draftFromTemplate, draftSyn, draftToParam, synSane, SYN_PAUSED_PREFIX, SYN_PAUSED_NOTE, basketNowPnl, basketName, brokenLegsLeft, synStrikeInReach, isBasketLive, basketHasPosition, sumBasketPnl, type DraftLeg, type LadderBasket } from '@/lib/priceLadderBasket';
 import { isPairLive, legSlPrice, pairName, pairNowPnl, LEG_KEYS, PAIR_STRIKE_STEP, openPositionCount, sumPairPnl, pairStrikes, pairCentreOffsets, type LadderPair, type PairLeg, type PairLegKey, type PairStructure } from '@/lib/priceLadderPair';
 import { LadderOptionChain } from '@/components/priceLadder/LadderOptionChain';
 import { StepArrows } from '@/components/priceLadder/StepArrows';
@@ -904,9 +904,12 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   // shows its ladder (that pauses following until "Follow ATM").
   const synSameBook = (b: LadderBasket) => b.kind === 'syn' && b.broker === broker && b.mode === (real ? 'real' : 'sim')
     && b.legs[0].contract.underlying === underlying && b.legs[0].contract.expiry === expiry;
-  const synArmed = syn && (data?.state.baskets ?? []).some(b => synSameBook(b) && (b.state === 'armed' || b.state === 'placing'));
+  // An armed level holds its strike only while that strike is still tradable (within 2 strikes of ATM, the server's limit):
+  // an old level left armed far from the money must not stop a new order on the current ATM (2026-11-20).
+  const synArmed = syn && (data?.state.baskets ?? []).some(b => synSameBook(b) && (b.state === 'armed' || b.state === 'placing')
+    && b.synStrike != null && synStrikeInReach(b.synStrike, atmStrike, STRIKE_STEP[underlying] ?? 50));
   const synAtm = syn && !synArmed ? atmStrike : null;
-  const synHeldStrikes = syn ? [...new Set((data?.state.baskets ?? []).filter(b => synSameBook(b) && basketHasPosition(b) && b.synStrike).map(b => b.synStrike!))].sort((x, y) => x - y) : [];
+  const synHeldStrikes = syn ? [...new Set((data?.state.baskets ?? []).filter(b => synSameBook(b) && (basketHasPosition(b) || b.state === 'armed' || b.state === 'placing') && b.synStrike).map(b => b.synStrike!))].sort((x, y) => x - y) : [];
   useEffect(() => { if (mode === 'basket' && !basketEdited) buildBasket(); }, [mode, basketEdited, buildBasket, atmReady, expiry, synAtm]);
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -1937,7 +1940,7 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   <div className="flex items-center justify-end gap-1 flex-wrap">
                     {synHeldStrikes.filter(k => k !== synK).map(k => (
                       <button key={k} type="button" onClick={() => { setBasketLegs(draftSyn(k, 'BUY')); setBasketEdited(true); }}
-                        title={`Show the ladder of your open synthetic at ${k} (stops following ATM until Follow ATM)`}
+                        title={`Show the ladder of your open or armed synthetic at ${k} (stops following ATM until Follow ATM)`}
                         className="px-2 py-0.5 rounded border border-blue-500/40 bg-blue-500/10 text-[11px] font-medium text-blue-300 hover:bg-blue-500/20">View {k}</button>
                     ))}
                     {basketEdited && atmStrike != null && synK !== atmStrike && (
