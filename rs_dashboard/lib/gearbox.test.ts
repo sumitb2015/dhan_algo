@@ -113,7 +113,7 @@ test('fog does not exit the ghost', () => {
   assert.equal(tr.length, 1);
   assert.equal(tr[0].why, 'session close'); // held through the fog, left only at the close
   assert.ok(tr[0].xi > E + 3);
-  // cut right after the fog: still open, listed one past the data and markable by ghostScore
+  // cut right after the fog: still open, flagged open: true at the last bar (xi = the last index) and markable by ghostScore
   const cut = ghostTrades(bars.slice(0, E + 4), states.slice(0, E + 4), artifactSession);
   assert.equal(cut.length, 1);
   assert.equal(cut[0].open, true);

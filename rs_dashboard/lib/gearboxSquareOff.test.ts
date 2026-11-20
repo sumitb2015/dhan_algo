@@ -93,19 +93,71 @@ test('a REAL row with no price still sends exitOwn', async () => {
   assert.equal(read().rows[0].status, 'closed');
 });
 
-test('a refused REAL exit leaves the row open and the next tick retries it', async () => {
+const refusedPlace = (count: { n: number }) => async () => { count.n++; return { status: 409, body: { success: false, outcome: 'refused', error: 'busy' } }; };
+
+test('a refused REAL exit leaves the row open and is retried only 30 s later', async () => {
   write([row({ mode: 'REAL' })], { mode: 'REAL' });
   let n = 0;
-  const s = stubs(AFTER, {
-    place: async () => (n++ === 0
-      ? { status: 409, body: { success: false, outcome: 'refused', error: 'busy' } }
-      : { status: 200, body: { success: true, outcome: 'placed', legs: [{ status: 'placed', orderId: 'X2' }] } }),
-  });
-  await tick(s.deps);
+  const place = async () => (n++ === 0
+    ? { status: 409, body: { success: false, outcome: 'refused', error: 'busy' } }
+    : { status: 200, body: { success: true, outcome: 'placed', legs: [{ status: 'placed', orderId: 'X2' }] } });
+  await tick(stubs(AFTER, { place }).deps);
   assert.equal(read().rows[0].status, 'open');
-  await tick(s.deps);
+  assert.equal(read().rows[0].sqTries, 1);
+  await tick(stubs(AFTER + 29_000, { place }).deps);
+  assert.equal(n, 1, 'no retry inside 30 s');
+  await tick(stubs(AFTER + 30_000, { place }).deps);
   assert.equal(read().rows[0].status, 'closed');
   assert.equal(n, 2);
+});
+
+test('a REAL exit refused 3 times goes UNKNOWN and is never sent a 4th time', async () => {
+  write([row({ mode: 'REAL' })], { mode: 'REAL' });
+  const c = { n: 0 };
+  for (let i = 0; i < 5; i++) await tick(stubs(AFTER + i * 30_000, { place: refusedPlace(c) }).deps);
+  assert.equal(c.n, 3);
+  const l = read();
+  assert.equal(l.rows[0].status, 'unknown');
+  assert.equal(l.rows[0].note, 'square-off failed 3 times');
+  assert.equal(l.log.filter(e => e.msg.includes('square-off failed 3 times')).length, 1);
+});
+
+test('no REAL square-off is sent at or after the MCX close', async () => {
+  write([row({ mode: 'REAL' })], { mode: 'REAL' });
+  const c = { n: 0 };
+  await tick(stubs(at('23:55'), { place: refusedPlace(c) }).deps);
+  await tick(stubs(at('23:58'), { place: refusedPlace(c) }).deps);
+  assert.equal(c.n, 0);
+  assert.equal(read().rows[0].status, 'open');
+});
+
+test('every tick with a live row asks for its option price and refreshes lastLtp from a fresh one', async () => {
+  write([row({ lastLtp: 100 })]);
+  const asked: string[] = [];
+  await tick(stubs(BEFORE, { optionPrice: t => { asked.push(String(t.strike)); return { ltp: 130, ageMs: 500 }; } }).deps);
+  assert.ok(asked.length >= 1);
+  assert.equal(read().rows[0].lastLtp, 130);
+  await tick(stubs(BEFORE, { optionPrice: () => ({ ltp: 140, ageMs: 20_000 }) }).deps);
+  assert.equal(read().rows[0].lastLtp, 130, 'a stale price is not booked');
+  assert.equal(read().rows[0].status, 'open');
+});
+
+test('an orphaned CLOSING row becomes UNKNOWN at the next tick and is never sent', async () => {
+  write([row({ mode: 'REAL', status: 'closing' })], { mode: 'REAL' });
+  const s = stubs(AFTER);
+  await tick(s.deps);
+  assert.equal(s.calls.length, 0);
+  const r = read().rows[0];
+  assert.equal(r.status, 'unknown');
+  assert.match(r.note ?? '', /orphaned by a restart/);
+});
+
+test('an unreadable ledger file is never written by the square-off', async () => {
+  fs.writeFileSync(FILE, '{ not json');
+  const s = stubs(AFTER);
+  await tick(s.deps);
+  assert.equal(fs.readFileSync(FILE, 'utf8'), '{ not json');
+  assert.equal(s.calls.length, 0);
 });
 
 test('an UNKNOWN REAL exit is never resent; an UNKNOWN row is skipped and logged once', async () => {

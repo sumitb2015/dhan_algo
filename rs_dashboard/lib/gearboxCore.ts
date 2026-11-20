@@ -7,9 +7,9 @@ import { MCX_LOT_MULTIPLIER } from './positionPnl.ts';
 import { atmStrike, expiriesFor, resolveOption, strikesFor, type FnoRow } from './pnfContracts.ts';
 import { parsePnfOrder } from './pnfOrderLogic.ts';
 import type { Target } from './pnfTarget.ts';
-import { gbStateFile, readGbLedger } from './gearboxFile.ts';
+import { GB_UNREADABLE, gbStateFile, readGbLedgerForWrite } from './gearboxFile.ts';
 import {
-  MAX_REAL_LOTS, MAX_SIM_LOTS, addLog, applyClientOp, entryBlock, isLive, liveRow, trimRows,
+  MAX_REAL_LOTS, MAX_SIM_LOTS, addLog, applyClientOp, entryBlock, isLive, liveRow, recoverOrphans, trimRows,
   type Dir, type DirLeg, type GbLedger, type GbMode, type GbRow, type GbUnderlying,
 } from './gearboxLedger.ts';
 
@@ -41,8 +41,10 @@ export interface GbDeps {
 
 /** A future price older than this refuses an open (exits are never refused for a stale price). */
 export const FUT_FRESH_MS = 10_000;
-/** A SIM close uses the option's LTP only when it is this fresh; else the row's lastLtp. */
-const OPT_FRESH_MS = 10_000;
+/** An entry needs an option price this fresh (SIM books it; REAL refuses without one); a SIM close falls back to lastLtp past it. */
+export const OPT_FRESH_MS = 10_000;
+/** An exit answered "flat" this soon after the entry fill (or the entry, when its fill was never confirmed) is UNKNOWN, not closed. */
+export const FLAT_GRACE_MS = 60_000;
 /** After a placed order: read its status every second, up to ten times. */
 const FILL_POLLS = 10;
 const FILL_POLL_MS = 1_000;
@@ -57,6 +59,18 @@ export function gbSerial<T>(fn: () => Promise<T>): Promise<T> {
   chain.p = run.catch(() => undefined);
   return run;
 }
+
+/**
+ * The ledger a serial op starts from: null when the file exists but does not parse (the caller refuses with 503 and never writes).
+ * Any 'sending' / 'closing' row is an orphan at this point (no op is in flight inside gbSerial) and is saved as UNKNOWN first.
+ */
+export function loadGbLedgerForOp(now: number): GbLedger | null {
+  const l = readGbLedgerForWrite();
+  if (!l) return null;
+  const rec = recoverOrphans(l, now);
+  return rec ? saveGbLedger(rec, now) : l;
+}
+const unreadable = (): Reply => ({ status: 503, body: { success: false, error: GB_UNREADABLE } });
 
 /** Writes the ledger with rev + 1. Call only inside gbSerial. */
 export function saveGbLedger(l: GbLedger, now: number): GbLedger {
@@ -143,8 +157,11 @@ export function parseTrade(b: unknown): TradeReq | string {
 export function gbState(deps: GbDeps): Reply {
   const now = deps.now();
   const today = istDateIso(now);
-  const ledger = readGbLedger();
+  const read = readGbLedgerForWrite();
+  if (!read) return unreadable();
+  const ledger = read;
   const u = ledger.config.underlying;
+  const expiries = expiriesFor('options', u, deps.fno).filter(e => e > today);
   const nearest = legExpiry(u, { action: 'BUY', opt: 'CE', offset: 0, expiry: 'nearest' }, today, deps.fno);
   const future = isIso(nearest) ? futureTarget(u, nearest, deps.fno) : null;
   const futQuote = isIso(nearest) ? deps.price(u, nearest) : null;
@@ -175,8 +192,8 @@ export function gbState(deps: GbDeps): Reply {
   if (Object.keys(fresh).length && now - ltpWrite.at >= LTP_WRITE_EVERY_MS) {
     ltpWrite.at = now;
     void gbSerial(async () => {
-      const l = readGbLedger();
-      if (!l.rows.some(r => isLive(r) && fresh[r.id] !== undefined)) return;
+      const l = readGbLedgerForWrite();
+      if (!l || !l.rows.some(r => isLive(r) && fresh[r.id] !== undefined)) return;
       saveGbLedger({ ...l, rows: l.rows.map(r => (isLive(r) && fresh[r.id] !== undefined ? { ...r, lastLtp: fresh[r.id] } : r)) }, deps.now());
     }).catch(() => undefined);
   }
@@ -184,7 +201,7 @@ export function gbState(deps: GbDeps): Reply {
   return {
     status: 200,
     body: {
-      success: true, ledger, future, contracts, contractErrors,
+      success: true, ledger, future, contracts, contractErrors, expiries,
       prices: { future: futQuote, contracts: contractPrices, rows: rowPrices },
       caps: { REAL: MAX_REAL_LOTS, SIM: MAX_SIM_LOTS }, unitsPerLot: unitsPerLotOf(u),
       today, session: mcxSession(today),
@@ -195,7 +212,9 @@ export function gbState(deps: GbDeps): Reply {
 export function gbClientOp(op: unknown, deps: Pick<GbDeps, 'now'>): Promise<Reply> {
   return gbSerial(async () => {
     const now = deps.now();
-    const r = applyClientOp(readGbLedger(), op, now);
+    const l = loadGbLedgerForOp(now);
+    if (!l) return unreadable();
+    const r = applyClientOp(l, op, now);
     if (!r.ok) return fail(r.error, r.status);
     // applyClientOp already stamps rev + 1
     const next = { ...r.ledger, rows: trimRows(r.ledger.rows) };
@@ -241,6 +260,9 @@ async function placeSafely(deps: GbDeps, order: Exclude<ReturnType<typeof parseP
 
 const hhmm = (ms: number) => { const m = istMinuteOfDay(ms); return Math.floor(m / 60) * 100 + (m % 60); };
 
+/** Marks a refusal as "no fresh futures price" (a reverse that meets it after its exit logs "reverse stopped: stale price"). */
+const stale = (r: Reply): Reply => ({ ...r, body: { ...r.body, stalePrice: true } });
+
 type OpenPlan = { leg: DirLeg; target: Target; lots: number; lotUnits: number; optLtp: number };
 
 /** Every check an entry needs, before anything is sent (a reverse runs these BEFORE its exit, so it never exits for nothing). */
@@ -260,12 +282,13 @@ async function planOpen(l: GbLedger, req: TradeReq, deps: GbDeps, now: number, t
   const exp = legExpiry(req.underlying, leg, today, deps.fno);
   if (!isIso(exp)) return fail(exp, 409);
   const fut = deps.price(req.underlying, exp);
-  if (!fut) return fail('No live futures price on the server - nothing was sent', 409);
-  if (fut.ageMs > FUT_FRESH_MS) return fail(`The futures price is ${Math.round(fut.ageMs / 1000)} s old - nothing was sent`, 409);
+  if (!fut) return stale(fail('No live futures price on the server - nothing was sent', 409));
+  if (fut.ageMs > FUT_FRESH_MS) return stale(fail(`The futures price is ${Math.round(fut.ageMs / 1000)} s old - nothing was sent`, 409));
   const target = pickTarget(req.underlying, leg, fut.ltp, today, deps.fno);
   if (typeof target === 'string') return fail(target, 409);
   const opt = deps.optionPrice(target);
   if (!opt) return fail(`No live price for ${optName(target)} yet - try again in a few seconds`, 409);
+  if (opt.ageMs > OPT_FRESH_MS) return fail(`The ${optName(target)} price is ${Math.round(opt.ageMs / 1000)} s old - nothing was sent`, 409);
   const lotUnits = await deps.lotUnits(target).catch((e: Error) => `Contract lookup failed: ${e.message}`);
   if (typeof lotUnits === 'string') return fail(lotUnits, 409);
   if (!(lotUnits > 0)) return fail('Order size check failed - nothing was sent', 500);
@@ -296,7 +319,7 @@ async function openRow(l0: GbLedger, req: TradeReq, p: OpenPlan, deps: GbDeps, n
     l = patchRow(l, row.id, { status: 'open', ...(orderId ? { entryOrderId: orderId } : {}) });
     const fill = await pollFill(orderId, deps);
     if (fill.kind === 'traded') {
-      return { ok: true, ledger: addLog(patchRow(l, row.id, { entry: fill.price }), 'trade', `REAL ${what} filled @ ${fill.price} - ${req.reason}`, deps.now()) };
+      return { ok: true, ledger: addLog(patchRow(l, row.id, { entry: fill.price, entryFilledAt: deps.now() }), 'trade', `REAL ${what} filled @ ${fill.price} - ${req.reason}`, deps.now()) };
     }
     if (fill.kind === 'refused') {
       const note = `entry ${fill.reason} by the broker`;
@@ -351,6 +374,12 @@ export async function closeRowNow(l0: GbLedger, row: GbRow, reason: string, deps
   const orderId = orderIdOf(r);
   const fallback = () => freshLtp ?? row.lastLtp ?? row.entry;
   if (outcome === 'flat') {
+    // Just after the entry, "nothing at the broker" more likely means the position has not shown up yet than that it was closed
+    const since = row.entryFilledAt ?? row.entryAt;
+    if (deps.now() - since < FLAT_GRACE_MS) {
+      const note = `exit found nothing at the broker ${Math.round((deps.now() - since) / 1000)} s after the entry - check the ${row.broker} positions`;
+      return { ok: false, unknown: true, error: note, ledger: addLog(patchRow(l, row.id, { status: 'unknown', note }), 'error', `REAL exit ${what}: ${note}`, deps.now()) };
+    }
     const note = 'nothing was left at the broker (closed outside this page)';
     const price = fallback();
     return { ok: true, ledger: addLog(closed(l, row, price, reason, deps.now(), { ...dec, note }), 'trade', `REAL exit ${what} @ ~${price} - ${reason} (${note})`, deps.now()) };
@@ -382,8 +411,10 @@ const stepReply = (s: Step, now: number, prefix = ''): Reply => ({
 
 export function gbTrade(req: TradeReq, deps: GbDeps): Promise<Reply> {
   return gbSerial(async () => {
-    const l = readGbLedger();
     const now = deps.now();
+    const loaded = loadGbLedgerForOp(now);
+    if (!loaded) return unreadable();
+    const l = loaded;
     const today = istDateIso(now);
     if (req.mode !== undefined && req.mode !== l.mode) return fail(`The ledger is in ${l.mode} - reload the page (nothing was sent)`, 409);
     if (req.broker !== undefined && req.broker !== 'dhan') return fail('REAL is Dhan-only in Gearbox Drive (Kotak / Zerodha are off) - nothing was sent', 400);
@@ -416,9 +447,14 @@ export function gbTrade(req: TradeReq, deps: GbDeps): Promise<Reply> {
     if ('status' in plan) return fail(`Reverse refused, nothing was sent: ${String(plan.body.error)}`, plan.status);
     const out = await closeRowNow(l, live, `Reverse: ${req.reason}`, deps, req.decisionPrice);
     if (!out.ok) return stepReply(out, now, 'Reverse stopped at the close: ');
+    // The exit is TRADED: the market has moved since the plan, so pick the new leg again from fresh prices (and every limit again)
     const after = deps.now();
-    const block = entryBlock(out.ledger, today);
-    if (block) return { status: 409, body: { success: false, error: `Closed; ${block} - the new leg was not opened`, ledger: saveGbLedger(out.ledger, after) } };
-    return stepReply(await openRow(out.ledger, req, plan, deps, after, today), after);
+    const plan2 = await planOpen(out.ledger, req, deps, after, today);
+    if ('status' in plan2) {
+      const why = String(plan2.body.error);
+      const logged = addLog(out.ledger, 'warn', plan2.body.stalePrice ? 'reverse stopped: stale price' : `reverse stopped: ${why}`, after);
+      return { status: 409, body: { success: false, error: `Closed; ${why} - the new leg was not opened`, ledger: saveGbLedger(logged, after) } };
+    }
+    return stepReply(await openRow(out.ledger, req, plan2, deps, after, today), after);
   });
 }

@@ -4,7 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { setGbStateFileForTests } from './gearboxFile.ts';
-import { closeRowNow, gbTrade, parseTrade, pickTarget, type GbDeps, type TradeReq } from './gearboxCore.ts';
+import { closeRowNow, gbClientOp, gbState, gbTrade, parseTrade, pickTarget, type GbDeps, type TradeReq } from './gearboxCore.ts';
 import { emptyLedger, type GbLedger, type GbRow } from './gearboxLedger.ts';
 import type { FnoRow } from './pnfContracts.ts';
 import type { Target } from './pnfTarget.ts';
@@ -285,6 +285,97 @@ test('SIM close with a stale option price uses lastLtp and logs it', async () =>
   assert.ok(out.ok);
   assert.equal(out.ledger.rows[0].exit, 111);
   assert.ok(out.ledger.log.some(x => /last good price/.test(x.msg)));
+});
+
+test('a SENDING / CLOSING row left by a restart becomes UNKNOWN at the next op and is never sent', async () => {
+  real({ rows: [openRow({ mode: 'REAL', status: 'sending' })] });
+  const s = stubs();
+  const x = await gbTrade(req('exit'), s.deps);
+  assert.equal(x.status, 409);
+  assert.match(String(x.body.error), /UNKNOWN - resolve it first/);
+  assert.equal(s.calls.length, 0);
+  const row = read().rows[0];
+  assert.equal(row.status, 'unknown');
+  assert.equal(row.note, 'orphaned by a restart — check the order book');
+  assert.ok(read().log.some(e => /no order in flight/.test(e.msg)));
+  // a client op recovers it too, and then the row can be resolved
+  real({ rows: [openRow({ mode: 'REAL', status: 'closing' })] });
+  const r = await gbClientOp({ op: 'resolve', id: 'r1', as: 'open' }, s.deps);
+  assert.equal(r.status, 200);
+  assert.equal(read().rows[0].status, 'open');
+});
+
+test('an unreadable ledger file refuses every trade / op / state read with 503 and is never written', async () => {
+  fs.writeFileSync(FILE, '{"rows": [');
+  const s = stubs();
+  for (const r of [await gbTrade(req('open', 'LONG'), s.deps), await gbClientOp({ op: 'setMode', mode: 'SIM' }, s.deps), gbState(s.deps)]) {
+    assert.equal(r.status, 503);
+    assert.match(String(r.body.error), /gearbox ledger unreadable/);
+  }
+  assert.equal(fs.readFileSync(FILE, 'utf8'), '{"rows": [');
+  assert.equal(s.calls.length, 0);
+});
+
+test('a SIM entry on a stale option price is refused', async () => {
+  write({});
+  const s = stubs({ optionPrice: () => ({ ltp: 120, ageMs: 11_000 }) });
+  const r = await gbTrade(req('open', 'LONG'), s.deps);
+  assert.equal(r.status, 409);
+  assert.match(String(r.body.error), /s old/);
+  assert.equal(read().rows.length, 0);
+});
+
+test('an exit answered flat within 60 s of the entry fill is UNKNOWN; later it closes the row', async () => {
+  const flat = async () => ({ status: 200, body: { success: true, outcome: 'flat' } });
+  real({ rows: [openRow({ mode: 'REAL', entryFilledAt: NOW - 20_000 })] });
+  const a = await gbTrade(req('exit'), stubs({ place: flat }).deps);
+  assert.equal(a.status, 504);
+  assert.equal(read().rows[0].status, 'unknown');
+  real({ rows: [openRow({ mode: 'REAL', entryAt: NOW - 30_000 })] }); // fill never confirmed: counted from the entry
+  await gbTrade(req('exit'), stubs({ place: flat }).deps);
+  assert.equal(read().rows[0].status, 'unknown');
+  real({ rows: [openRow({ mode: 'REAL', entryFilledAt: NOW - 61_000 })] });
+  const b = await gbTrade(req('exit'), stubs({ place: flat }).deps);
+  assert.equal(b.status, 200);
+  assert.equal(read().rows[0].status, 'closed');
+});
+
+test('a REAL entry fill records when it was confirmed', async () => {
+  real();
+  await gbTrade(req('open', 'LONG'), stubs().deps);
+  assert.equal(read().rows[0].entryFilledAt, NOW);
+});
+
+test('reverse picks the new leg from the price AFTER the exit', async () => {
+  real({ rows: [openRow({ mode: 'REAL' })] });
+  let fut = 6010;
+  const s = stubs({ price: () => ({ ltp: fut, ageMs: 500 }) });
+  const place = s.deps.place;
+  s.deps.place = async (o, sc, t) => { const r = await place(o, sc, t); fut = 6090; return r; };
+  const r = await gbTrade(req('reverse', 'SHORT'), s.deps);
+  assert.equal(r.status, 200);
+  assert.equal((s.calls[1].order.target as Target).strike, 6100);
+});
+
+test('reverse stops after the exit when the future price has gone stale', async () => {
+  real({ rows: [openRow({ mode: 'REAL' })] });
+  let age = 500;
+  const s = stubs({ price: () => ({ ltp: 6010, ageMs: age }) });
+  const place = s.deps.place;
+  s.deps.place = async (o, sc, t) => { const r = await place(o, sc, t); age = 30_000; return r; };
+  const r = await gbTrade(req('reverse', 'SHORT'), s.deps);
+  assert.equal(r.status, 409);
+  assert.equal(s.calls.length, 1);
+  const l = read();
+  assert.equal(l.rows.length, 1);
+  assert.equal(l.rows[0].status, 'closed');
+  assert.ok(l.log.some(e => e.msg === 'reverse stopped: stale price'));
+});
+
+test('state lists the option expiries after today for the expiry picker', () => {
+  write({});
+  const r = gbState(stubs().deps);
+  assert.deepEqual(r.body.expiries, [NEXT]);
 });
 
 test.after(() => fs.rmSync(dir, { recursive: true, force: true }));

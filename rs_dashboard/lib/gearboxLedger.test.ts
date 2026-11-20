@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyClientOp, emptyLedger, entryBlock, normalizeLedger, reservedUnits, rowPnl, type GbLedger, type GbRow } from './gearboxLedger.ts';
+import { ORPHAN_NOTE, applyClientOp, emptyLedger, entryBlock, normalizeLedger, recoverOrphans, reservedUnits, rowPnl, type GbLedger, type GbRow } from './gearboxLedger.ts';
+import { reservedByGearbox } from './gearboxFile.ts';
 import { targetKey } from './pnfTarget.ts';
 
 const target = { kind: 'options' as const, symbol: 'CRUDEOILM', name: 'CRUDEOILM', expiry: '2026-12-15', strike: 6000, side: 'CE' as const };
@@ -95,4 +96,45 @@ test('reservedUnits sums only live REAL rows of the key', () => {
   ]);
   assert.equal(reservedUnits(l, 'dhan', k, targetKey), 1 - 4 + 20);
   assert.equal(reservedUnits(l, 'kotak', k, targetKey), 0);
+});
+
+test('resolve an unknown row as open or as failed', () => {
+  const l = withRows([row({ status: 'unknown', note: 'x' })]);
+  const o = applyClientOp(l, { op: 'resolve', id: 'r1', as: 'open' }, 5);
+  assert.ok(o.ok && o.ledger.rows[0].status === 'open' && o.ledger.rows[0].exit === undefined);
+  const f = applyClientOp(l, { op: 'resolve', id: 'r1', as: 'failed' }, 5);
+  assert.ok(f.ok && f.ledger.rows[0].status === 'failed');
+  assert.equal(reservedUnits(f.ok ? f.ledger : l, 'dhan', targetKey(target), targetKey), 0);
+});
+
+test('recoverOrphans turns sending / closing rows UNKNOWN with a note; null when there are none', () => {
+  assert.equal(recoverOrphans(withRows([row(), row({ id: 'u', status: 'unknown' })]), 9), null);
+  const r = recoverOrphans(withRows([row({ status: 'sending' }), row({ id: 'c', status: 'closing' }), row({ id: 'o' })]), 9);
+  assert.ok(r);
+  assert.deepEqual(r.rows.map(x => x.status), ['unknown', 'unknown', 'open']);
+  assert.equal(r.rows[0].note, ORPHAN_NOTE);
+  assert.equal(r.log.length, 2);
+});
+
+test('normalizeLedger drops rows and log entries no reader could use', () => {
+  const good = row();
+  const l = normalizeLedger({
+    rows: [good, null, 'x', { ...good, status: 'weird' }, { ...good, target: null }, { ...good, target: { kind: 'options' } },
+      { ...good, lots: '1' }, { ...good, units: undefined }, { ...good, leg: null }],
+    log: [{ at: 1, level: 'info', msg: 'ok' }, null, { at: 'x', level: 'info', msg: 'm' }, { at: 1, level: 'loud', msg: 'm' }],
+  });
+  assert.deepEqual(l.rows, [good]);
+  assert.equal(l.log.length, 1);
+});
+
+test('reservedByGearbox never throws on a bad ledger: 0 and a warning', () => {
+  const warn = console.warn;
+  let warned = 0;
+  console.warn = () => { warned++; };
+  try {
+    const bad = { ...emptyLedger(), rows: [{ ...row(), target: null }] } as unknown as GbLedger;
+    assert.equal(reservedByGearbox('dhan', targetKey(target), 'INTRADAY', bad), 0);
+    assert.equal(warned, 1);
+  } finally { console.warn = warn; }
+  assert.equal(reservedByGearbox('dhan', targetKey(target), 'INTRADAY', withRows([row()])), 1);
 });
