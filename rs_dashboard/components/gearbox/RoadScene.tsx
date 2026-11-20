@@ -39,6 +39,9 @@ function readColors(el: Element): Colors {
   };
 }
 
+/** The scene's minimum height in ATRs of the signal future. */
+const ROAD_MIN_ATRS = 3;
+
 export function RoadScene({ states, held, paused, live }: { states: GbState[]; held: 'LONG' | 'SHORT' | null; paused: boolean; live: number | null }) {
   const ref = useRef<HTMLCanvasElement>(null);
   const data = useRef({ states, held, paused, live });
@@ -91,11 +94,14 @@ export function RoadScene({ states, held, paused, live }: { states: GbState[]; h
       const dx = Math.max(7, Math.min(13, W / 75)), carX = W * 0.6, baseY = H * 0.62;
       const i0 = Math.max(0, Math.min(known, Math.floor(pos))), f = Math.min(1, pos - i0);
       const R = (k: number) => rd[Math.max(0, Math.min(known, k))];
-      // Vertical scale fitted to the price range on screen (eased, so it does not jump): the visible move fills the scene.
+      // Vertical scale in ATRs: the scene is at least ROAD_MIN_ATRS x the latest ATR tall, stretched only when the price on screen
+      // moved more than that (eased, so it does not jump). A hill a third of the scene high is then always about one normal move, so
+      // a quiet market looks calm, a sharp move looks steep and the car's tilt compares across sessions and bar sizes.
       const k0 = Math.max(0, Math.floor(pos - carX / dx) - 2);
       let vMin = Infinity, vMax = -Infinity;
       for (let k = k0; k <= known; k++) { const v = rd[k]; if (v < vMin) vMin = v; if (v > vMax) vMax = v; }
-      const minSpan = Math.max(vMax * 0.0004, 1e-9);           // a flat market still reads as nearly flat, not as noise blown up
+      const atr = s.atr > 0 ? s.atr : vMax * 0.0004;
+      const minSpan = Math.max(ROAD_MIN_ATRS * atr, 1e-9);
       if (vMax - vMin < minSpan) { const m = (vMax + vMin) / 2; vMin = m - minSpan / 2; vMax = m + minSpan / 2; }
       if (!hi || p) { lo = vMin; hi = vMax; } else { lo += (vMin - lo) * 0.15; hi += (vMax - hi) * 0.15; }
       const top = H * 0.24, bot = H * 0.8;
@@ -124,7 +130,7 @@ export function RoadScene({ states, held, paused, live }: { states: GbState[]; h
       ctx.fillStyle = C.fogText; ctx.font = '600 13px Inter, sans-serif'; ctx.fillText('fog: future unknown', Math.min(W - 140, fx + 30), Y(known) - 34);
       // the price the car is at, and the range the road is drawn over
       ctx.font = '700 13px Inter, sans-serif'; ctx.fillText(R(known).toFixed(1), Math.min(W - 140, fx + 30), Y(known) - 16);
-      ctx.font = '600 11px Inter, sans-serif'; ctx.fillText(hi.toFixed(1), 8, top - 6); ctx.fillText(lo.toFixed(1), 8, bot + 14);
+      ctx.font = '600 11px Inter, sans-serif'; ctx.fillText(`${hi.toFixed(1)}  ·  scene ${((hi - lo) / atr).toFixed(1)} ATR`, 8, top - 6); ctx.fillText(lo.toFixed(1), 8, bot + 14);
       // car
       const cy = Y(i0) + (Y(i0 + 1) - Y(i0)) * f;
       const back = Math.max(kA, i0 - 2);

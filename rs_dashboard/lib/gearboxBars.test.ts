@@ -51,7 +51,7 @@ test('gbClosedKey changes only when a bar closes', () => {
 });
 
 const st = (p: Partial<GbState>): GbState => ({
-  c: 100, gear: 1, mode: 1, armed: false, signal: false, vwOK: false, stOK: false, sd: 1, sl: 0, sp: 0, acc: 0, rpm: 0, alt: 0, t: T, sessionBar: 0, ...p,
+  c: 100, gear: 1, mode: 1, armed: false, signal: false, vwOK: false, stOK: false, sd: 1, sl: 0, sp: 0, acc: 0, rpm: 0, alt: 0, t: T, sessionBar: 0, atr: 1, ...p,
 });
 
 test('gbEvents: mode changes, setups, shift-up signals and ghost trades, newest first', () => {

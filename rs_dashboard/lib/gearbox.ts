@@ -20,6 +20,8 @@ export type Mode = 1 | -1 | 0;
 export interface GbState {
   c: number; gear: 0 | 1 | 2 | 3 | 4 | 5; mode: Mode; armed: boolean; signal: boolean; vwOK: boolean; stOK: boolean;
   sd: 1 | -1; sl: number; sp: number; acc: number; rpm: number; alt: number; t: number; sessionBar: number;
+  /** ATR(14, Wilder) at this bar, in price points (the road's scale unit). */
+  atr: number;
 }
 export interface GhostTrade {
   side: 1 | -1; ei: number; xi: number; ep: number; xp: number;
@@ -122,6 +124,7 @@ export function computeGearbox(bars: GbBar[], session: (t: number) => GbSession)
       c, gear, mode: m, armed, signal, vwOK, stOK, sd: SD[i], sl: SL[i], sp,
       acc: i >= 6 ? sp - S[i - 3].sp : 0,
       rpm: at > 0 ? Math.abs(c - E9[i]) / at : 0,
+      atr: at,
       alt: at > 0 ? (c - E200[i]) / at : 0,
       t: b.t, sessionBar: SB[i],
     });

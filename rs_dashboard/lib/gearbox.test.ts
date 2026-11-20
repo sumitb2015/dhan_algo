@@ -74,7 +74,7 @@ function flat(): { bars: GbBar[]; states: GbState[] } {
   for (let i = 0; i < N; i++) {
     const t = T0 + 540 * 60 + (i % 75) * 300 + Math.floor(i / 75) * 86400;
     bars.push({ t, o: 100, h: 102, l: 98, c: 100, v: 1 });
-    states.push({ c: 100, gear: 3, mode: 1, armed: false, signal: false, vwOK: true, stOK: true, sd: 1, sl: 97, sp: 0, acc: 0, rpm: 0, alt: 0, t, sessionBar: i % 75 });
+    states.push({ c: 100, gear: 3, mode: 1, armed: false, signal: false, vwOK: true, stOK: true, sd: 1, sl: 97, sp: 0, acc: 0, rpm: 0, alt: 0, t, sessionBar: i % 75, atr: 2 });
   }
   return { bars, states };
 }
