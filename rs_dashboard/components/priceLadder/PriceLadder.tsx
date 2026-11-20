@@ -399,7 +399,8 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
   const chooseTick = (t: number, m: PageMode) => { setTick(t); savePref(k(`price-ladder-tick-${m}`), String(t)); };
   const [slBufferPct, setSlBufferPct] = useState(DEFAULT_SL_BUFFER_PCT);
   const [eventsOpen, setEventsOpen] = useState(false);
-  const [style, setStyle] = useState<'Single' | 'Bracket' | 'Cover'>('Cover');
+  const [style, setStyleRaw] = useState<'Single' | 'Bracket' | 'Cover'>('Cover');
+  const setStyle = (s: 'Single' | 'Bracket' | 'Cover') => { setStyleRaw(s); savePref(k('price-ladder-style'), s); };
   const [tgtPts, setTgtPts] = useState(40);
   const [slPts, setSlPts] = useState(30);
   const [trailOn, setTrailOn] = useState(false);
@@ -444,7 +445,15 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
     if (d.underlying) setUnderlyingRaw(d.underlying);
     if (d.product) setProduct(d.product);
     if (d.orderType) setOrderType(d.orderType);
-    if (d.style) setStyle(d.style);
+    const styleMigrationKey = 'price-ladder-cover-style-migrated';
+    if (!localStorage.getItem(styleMigrationKey)) {
+      localStorage.setItem(styleMigrationKey, '1');
+      if (localStorage.getItem(k('price-ladder-style')) === 'Single') {
+        savePref(k('price-ladder-style'), 'Cover');
+      }
+    }
+    const savedStyle = readPrefOf(k('price-ladder-style'), ['Single', 'Bracket', 'Cover'] as const, 'Cover');
+    setStyleRaw(d.style ?? savedStyle);
     if (d.tgtPts != null) setTgtPts(d.tgtPts);
     if (d.slPts != null) setSlPts(d.slPts);
     if (d.trailOn != null) setTrailOn(d.trailOn);

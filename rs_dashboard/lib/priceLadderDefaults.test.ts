@@ -35,6 +35,7 @@ test('lots must be a whole number within the cap', () => {
 
 test('resolve lays saved values over the built-in ones', () => {
   assert.deepEqual(resolveDefaults({}), BUILT_IN_DEFAULTS);
+  assert.equal(resolveDefaults({}).style, 'Cover');
   assert.equal(resolveDefaults({ tgtPts: 55 }).tgtPts, 55);
   assert.equal(resolveDefaults({ tgtPts: 55 }).slPts, BUILT_IN_DEFAULTS.slPts);
 });

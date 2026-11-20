@@ -68,7 +68,24 @@ export function resolveDefaults(saved: LadderDefaults): Required<LadderDefaults>
 }
 
 export function loadDefaults(): LadderDefaults {
-  try { const s = localStorage.getItem(LADDER_DEFAULTS_KEY); return s ? sanitizeDefaults(JSON.parse(s)) : {}; } catch { return {}; }
+  try {
+    const s = localStorage.getItem(LADDER_DEFAULTS_KEY);
+    if (!s) return {};
+    const d = sanitizeDefaults(JSON.parse(s));
+    // Migration: Cover is now the default style across the ladder. If an existing saved defaults
+    // record had 'Single' (or was never explicitly set), update it to 'Cover'.
+    const migrationKey = 'price-ladder-cover-default-migrated';
+    if (!localStorage.getItem(migrationKey)) {
+      localStorage.setItem(migrationKey, '1');
+      if (d.style === 'Single' || !d.style) {
+        d.style = 'Cover';
+        saveDefaults(d);
+      }
+    }
+    return d;
+  } catch {
+    return {};
+  }
 }
 export function saveDefaults(d: LadderDefaults): void {
   try { localStorage.setItem(LADDER_DEFAULTS_KEY, JSON.stringify(sanitizeDefaults(d))); } catch { /* best effort */ }
