@@ -193,6 +193,10 @@ if (process.env.DASHBOARD_NO_BACKGROUND === '1') {
   import('./lib/freshMoneyExitServer').then(m => m.startFreshMoneyExitLoop()).catch(err => {
     console.warn('[fm-exit] could not start the watcher:', err);
   });
+  // Gearbox Drive: closes every live Gearbox row (SIM and REAL) at the MCX auto-exit with every tab closed. Idle with no live row.
+  import('./lib/gearboxSquareOff').then(m => m.startGearboxSquareOffLoop()).catch(err => {
+    console.warn('[gearbox-squareoff] could not start the watcher:', err);
+  });
   // P&F / Renko AUTO: enforces the page's MTM guard (stop-loss included) on open REAL AUTO positions with every tab closed.
   // Idle (one file read every 2.5 s) until the page has synced a guard.
   import('./lib/autoServerWatcher').then(m => m.startAutoServerLoop()).catch(err => {
