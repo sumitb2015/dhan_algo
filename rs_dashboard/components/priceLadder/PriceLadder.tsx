@@ -2027,22 +2027,40 @@ export default function PriceLadder({ ladderId = 1, dual = false, onAddLadder, o
                   <NumField compact label="SL limit buffer percent" value={slBufferPct} onCommit={setSlBufferPct} min={MIN_SL_BUFFER_PCT} max={MAX_SL_BUFFER_PCT} step={0.1} />
                 </div>
               ) : null}
-              {(mode === 'xy' || mode === 'pair' || mode === 'basket') && (
-                <>
-                  <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title={mode === 'pair' ? 'Target / SL / trail are points of the combined premium' : mode === 'basket' ? 'Target / SL / trail are points of the basket\'s net premium' : undefined}>Style</span>
-                    <Seg compact value={style} options={['Single', 'Bracket', 'Cover'] as const} onChange={setStyle} />
-                  </div>
-                  <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 items-center">
-                    {style === 'Bracket' && <><span className="text-zinc-400 font-medium">Target pts</span><NumField compact label="Target points" value={tgtPts} onCommit={setTgtPts} min={1} /></>}
-                    {style !== 'Single' && <><span className="text-zinc-400 font-medium">SL pts</span><NumField compact label="Stop-loss points" value={slPts} onCommit={setSlPts} min={1} /></>}
-                    {/* Every style: Single + trail = a trailing stop on its own (the SL starts at the trail distance). */}
-                    <label className="flex items-center gap-1.5 text-zinc-400" title="Continuous trailing SL: the SL stays this many points behind the best level reached and moves with every new high / low — never back">
-                      <input type="checkbox" checked={trailOn} onChange={e => { setTrailOn(e.target.checked); applyPositionTrail(e.target.checked, trailPts); }} /> Trail SL by
-                    </label>
-                    <NumField compact label="Trailing SL distance in points" value={trailPts} onCommit={v => { setTrailPts(v); if (trailOn && v !== trailPts) applyPositionTrail(true, v); }} min={1} />
-                  </div>
-                </>
-              )}
+              {(mode === 'xy' || mode === 'pair' || mode === 'basket') && (() => {
+                const ladderUnits = mcx ? lots * (MCX_LOT_MULTIPLIER[underlying] ?? 1) : (lotSize ? lots * lotSize : lots);
+                return (
+                  <>
+                    <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium" title={mode === 'pair' ? 'Target / SL / trail are points of the combined premium' : mode === 'basket' ? 'Target / SL / trail are points of the basket\'s net premium' : undefined}>Style</span>
+                      <Seg compact value={style} options={['Single', 'Bracket', 'Cover'] as const} onChange={setStyle} />
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 items-center">
+                      {style === 'Bracket' && (
+                        <>
+                          <span className="text-zinc-400 font-medium">
+                            Target pts {ladderUnits > 0 && tgtPts > 0 ? <span className="text-emerald-400 font-mono text-[11px] font-bold">(+₹{Math.round(tgtPts * ladderUnits).toLocaleString('en-IN')})</span> : null}
+                          </span>
+                          <NumField compact label="Target points" value={tgtPts} onCommit={setTgtPts} min={1} />
+                        </>
+                      )}
+                      {style !== 'Single' && (
+                        <>
+                          <span className="text-zinc-400 font-medium">
+                            SL pts {ladderUnits > 0 && slPts > 0 ? <span className="text-rose-400 font-mono text-[11px] font-bold">(−₹{Math.round(slPts * ladderUnits).toLocaleString('en-IN')})</span> : null}
+                          </span>
+                          <NumField compact label="Stop-loss points" value={slPts} onCommit={setSlPts} min={1} />
+                        </>
+                      )}
+                      {/* Every style: Single + trail = a trailing stop on its own (the SL starts at the trail distance). */}
+                      <label className="flex items-center gap-1.5 text-zinc-400" title="Continuous trailing SL: the SL stays this many points behind the best level reached and moves with every new high / low — never back">
+                        <input type="checkbox" checked={trailOn} onChange={e => { setTrailOn(e.target.checked); applyPositionTrail(e.target.checked, trailPts); }} /> Trail SL by
+                        {trailOn && ladderUnits > 0 && trailPts > 0 ? <span className="text-amber-300 font-mono text-[10px] font-bold">(₹{Math.round(trailPts * ladderUnits).toLocaleString('en-IN')})</span> : null}
+                      </label>
+                      <NumField compact label="Trailing SL distance in points" value={trailPts} onCommit={v => { setTrailPts(v); if (trailOn && v !== trailPts) applyPositionTrail(true, v); }} min={1} />
+                    </div>
+                  </>
+                );
+              })()}
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-center justify-between"><span className="text-zinc-400 font-medium">Lots {lotSize ? <span className="text-zinc-500">({mcx ? `${lots * (MCX_LOT_MULTIPLIER[underlying] ?? 1)} bbl` : `${lots * lotSize} qty`})</span> : null}</span>
                   <NumField compact label="Lots" value={lots} onCommit={v => setLots(Math.min(MAX_LADDER_LOTS, Math.max(1, Math.round(v))))} min={1} max={MAX_LADDER_LOTS} />
@@ -2527,7 +2545,24 @@ function SliceRow({ s, ltp, busy, post, trailPts, onSelect }: { s: LadderSlice; 
         {s.exitAvg ? <>{s.exitAvg.toFixed(2)}{s.closedAt ? <span className="text-zinc-500"> · {timeOf(s.closedAt)}</span> : null}</> : '—'}
       </td>
       <td className="px-2 py-1 font-mono text-zinc-300 whitespace-nowrap">
-        {s.bracket ? `${s.bracket.tgtPts > 0 ? (s.tgtY ?? `+${s.bracket.tgtPts}`) : 'Cover'} / ${s.slY ?? `-${s.bracket.slPts}`}${s.bracket.trailPts ? ` · T${s.bracket.trailPts}` : ''}` : '—'}
+        {s.bracket ? (() => {
+          const entryPx = s.entryY ?? s.entryLevel;
+          const uQty = (Number(s.filledQty) || Number(s.qty) || 0) * (s.contract.mult ?? 1);
+          const tgtAmt = s.bracket.tgtPts > 0 && entryPx != null && uQty > 0 ? Math.round(s.bracket.tgtPts * uQty) : null;
+          const slAmt = entryPx != null && uQty > 0 ? Math.round(s.bracket.slPts * uQty) : null;
+          return (
+            <span>
+              {s.bracket.tgtPts > 0 ? (
+                <>
+                  <span className="text-emerald-400">{s.tgtY ?? `+${s.bracket.tgtPts}`}{tgtAmt != null ? ` (+₹${tgtAmt.toLocaleString('en-IN')})` : ''}</span>
+                  {' / '}
+                </>
+              ) : 'Cover / '}
+              <span className="text-rose-400">{s.slY ?? `-${s.bracket.slPts}`}{slAmt != null ? ` (−₹${slAmt.toLocaleString('en-IN')})` : ''}</span>
+              {s.bracket.trailPts ? ` · T${s.bracket.trailPts}` : ''}
+            </span>
+          );
+        })() : '—'}
       </td>
       <td className={`px-2 py-1 whitespace-nowrap ${stateClass}`} title={s.note ?? s.exitReason ?? ''}>
         {s.state.toUpperCase()}{s.state === 'closed' && s.exitReason ? <span className="text-zinc-500 font-normal"> · {s.exitReason}</span> : null}

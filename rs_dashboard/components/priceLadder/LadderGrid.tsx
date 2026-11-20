@@ -39,6 +39,8 @@ export interface LadderWidget {
   bbl?: boolean;
   /** A trailing SL's distance behind the best level (continuous trail); the marker shows it with − / + to change it. */
   trail?: number;
+  /** Projected profit (positive) or loss (negative) in rupees if this target or SL is hit. */
+  amount?: number;
 }
 
 /** An open position's entry on the ladder's axis: drawn as a tinted row with a side / qty / fill tag in the Price column. */
@@ -65,21 +67,26 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
     if (!g) { groups.set(key, { ...w, key, ...(contractMult ? { mult: contractMult } : {}), ...bbl }); newest.set(key, at); return; }
     // One exit level shared by several slices: one widget with their total quantity, newest slice first.
     g.qty += w.qty; g.lots += w.lots;
+    if (w.amount != null) g.amount = (g.amount ?? 0) + w.amount;
     if (at >= (newest.get(key) ?? 0)) { g.ids = [...w.ids, ...g.ids]; newest.set(key, at); } else g.ids = [...g.ids, ...w.ids];
   };
   for (const s of slices) {
     const held = Number(s.filledQty) || 0;
     const heldLots = Math.max(1, Math.round(held / s.contract.lotSize));
     const live = s.state === 'open';
+    const mult = s.contract.mult ?? 1;
     if (mode === 'xy' && s.kind === 'xy') {
       if (s.state === 'armed' && s.entryLevel) {
         add({ price: s.entryLevel, column: s.side, kind: 'entry', label: s.orderType === 'SL' ? 'SL entry' : 'Entry', qty: s.qty, lots: s.lots, ids: [s.id], adjust: 'order', cancellable: true, drag: 'entry' }, 0);
         if (s.bracket) {
           // As in OptionX: the bracket's target and SL show the moment it is placed, before it fills.
-          const lv = bracketLevels(bias(s.contract.opt, s.side), s.entryLevel, s.bracket);
+          const b = bias(s.contract.opt, s.side);
+          const lv = bracketLevels(b, s.entryLevel, s.bracket);
+          const tgtAmt = lv.tgtY != null ? (lv.tgtY - s.entryLevel) * b * s.qty * mult : undefined;
+          const slAmt = (lv.slY - s.entryLevel) * b * s.qty * mult;
           // Draggable before the fill too: moving one changes the bracket's points from the entry level.
-          if (lv.tgtY != null) add({ price: lv.tgtY, column: opposite(s.side), kind: 'tgt', label: 'Target', qty: s.qty, lots: s.lots, ids: [s.id], planned: true, drag: 'tgt' }, 0);
-          add({ price: lv.slY, column: opposite(s.side), kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', qty: s.qty, lots: s.lots, ids: [s.id], planned: true, drag: 'sl', ...(s.bracket.trailPts ? { trail: s.bracket.trailPts } : {}) }, 0);
+          if (lv.tgtY != null) add({ price: lv.tgtY, column: opposite(s.side), kind: 'tgt', label: 'Target', qty: s.qty, lots: s.lots, ids: [s.id], planned: true, drag: 'tgt', amount: tgtAmt }, 0);
+          add({ price: lv.slY, column: opposite(s.side), kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', qty: s.qty, lots: s.lots, ids: [s.id], planned: true, drag: 'sl', amount: slAmt, ...(s.bracket.trailPts ? { trail: s.bracket.trailPts } : {}) }, 0);
         }
       }
     }
@@ -93,10 +100,17 @@ export function widgetsFor(slices: LadderSlice[], mode: 'xy' | 'plain'): LadderW
             qty: held, lots: heldLots, ids: [s.id], ...(live ? { adjust: 'position' as const } : {}),
           }, s.openedAt ?? 0);
         }
-        if (s.bracket) {
+        if (s.bracket && entryPrice != null) {
           const common = { column: opposite(s.side), qty: held, lots: heldLots, ids: [s.id], ...(live ? { adjust: 'position' as const } : {}) };
-          if (s.tgtY != null) add({ ...common, price: s.tgtY, kind: 'tgt', label: 'Target', ...(live ? { drag: 'tgt' as const } : {}) }, s.openedAt ?? 0);
-          if (s.slY != null) add({ ...common, price: s.slY, kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', ...(live ? { drag: 'sl' as const } : {}), ...(s.bracket.trailPts ? { trail: s.bracket.trailPts } : {}) }, s.openedAt ?? 0);
+          const b = bias(s.contract.opt, s.side);
+          if (s.tgtY != null) {
+            const tgtAmt = (s.tgtY - entryPrice) * b * held * mult;
+            add({ ...common, price: s.tgtY, kind: 'tgt', label: 'Target', amount: tgtAmt, ...(live ? { drag: 'tgt' as const } : {}) }, s.openedAt ?? 0);
+          }
+          if (s.slY != null) {
+            const slAmt = (s.slY - entryPrice) * b * held * mult;
+            add({ ...common, price: s.slY, kind: 'sl', label: s.bracket.trailPts ? 'Trailing SL' : 'SL', amount: slAmt, ...(live ? { drag: 'sl' as const } : {}), ...(s.bracket.trailPts ? { trail: s.bracket.trailPts } : {}) }, s.openedAt ?? 0);
+          }
         }
       }
     }
@@ -126,6 +140,7 @@ export function pairWidgetsFor(pairs: LadderPair[]): LadderWidget[] {
     const g = merged.get(k);
     if (!g) { merged.set(k, { ...w, key: `po|${k}` }); newest.set(k, at); return; }
     g.qty += w.qty; g.lots += w.lots;
+    if (w.amount != null) g.amount = (g.amount ?? 0) + w.amount;
     if (at >= (newest.get(k) ?? 0)) { g.ids = [...w.ids, ...g.ids]; newest.set(k, at); } else g.ids = [...g.ids, ...w.ids];
   };
   for (const p of pairs) {
@@ -135,12 +150,15 @@ export function pairWidgetsFor(pairs: LadderPair[]): LadderWidget[] {
     const exitCol = opposite(p.side);
     const trail = p.bracket?.trailPts ? { trail: p.bracket.trailPts } : {};
     const slLabel = p.bracket?.trailPts ? 'Trailing SL' : 'SL';
+    const b = pairBias(p.side);
     if (p.state === 'armed' && p.entryLevel) {
       out.push({ ...common, key: `pe|${p.id}`, price: p.entryLevel, column: p.side, kind: 'entry', label: p.orderType === 'SL' ? 'Pair breakout entry' : 'Pair entry', cancellable: true, adjust: 'order', drag: 'entry' });
       if (p.bracket) {
-        const lv = bracketLevels(pairBias(p.side), p.entryLevel, p.bracket);
-        if (lv.tgtY != null) out.push({ ...common, key: `pt|${p.id}`, price: lv.tgtY, column: exitCol, kind: 'tgt', label: 'Target', planned: true, drag: 'tgt' });
-        out.push({ ...common, key: `ps|${p.id}`, price: lv.slY, column: exitCol, kind: 'sl', label: slLabel, planned: true, drag: 'sl', ...trail });
+        const lv = bracketLevels(b, p.entryLevel, p.bracket);
+        const tgtAmt = lv.tgtY != null ? (lv.tgtY - p.entryLevel) * b * p.qty * (mult ?? 1) : undefined;
+        const slAmt = (lv.slY - p.entryLevel) * b * p.qty * (mult ?? 1);
+        if (lv.tgtY != null) out.push({ ...common, key: `pt|${p.id}`, price: lv.tgtY, column: exitCol, kind: 'tgt', label: 'Target', planned: true, drag: 'tgt', amount: tgtAmt });
+        out.push({ ...common, key: `ps|${p.id}`, price: lv.slY, column: exitCol, kind: 'sl', label: slLabel, planned: true, drag: 'sl', amount: slAmt, ...trail });
       }
     }
     // A position (also while exiting, BROKEN or UNKNOWN) stays marked at its combined fill; only an open pair's exits drag.
@@ -152,8 +170,14 @@ export function pairWidgetsFor(pairs: LadderPair[]): LadderWidget[] {
       const live = { ...common, adjust: 'position' as const, lots: Math.max(1, Math.round(p.qty / lotSize)) };
       const at = p.openedAt ?? p.createdAt;
       if (p.entryY != null) addOpen({ ...live, key: '', price: p.entryY, column: p.side, kind: 'pos', label: 'Pair position' }, at);
-      if (p.tgtY != null) addOpen({ ...live, key: '', price: p.tgtY, column: exitCol, kind: 'tgt', label: 'Target', drag: 'tgt' }, at);
-      if (p.slY != null) addOpen({ ...live, key: '', price: p.slY, column: exitCol, kind: 'sl', label: slLabel, drag: 'sl', ...trail }, at);
+      if (p.tgtY != null) {
+        const tgtAmt = p.entryY != null ? (p.tgtY - p.entryY) * b * p.qty * (mult ?? 1) : undefined;
+        addOpen({ ...live, key: '', price: p.tgtY, column: exitCol, kind: 'tgt', label: 'Target', drag: 'tgt', amount: tgtAmt }, at);
+      }
+      if (p.slY != null) {
+        const slAmt = p.entryY != null ? (p.slY - p.entryY) * b * p.qty * (mult ?? 1) : undefined;
+        addOpen({ ...live, key: '', price: p.slY, column: exitCol, kind: 'sl', label: slLabel, drag: 'sl', amount: slAmt, ...trail }, at);
+      }
     }
   }
   return [...out, ...merged.values()];
@@ -174,6 +198,7 @@ export function basketWidgetsFor(baskets: LadderBasket[]): LadderWidget[] {
     const g = merged.get(k);
     if (!g) { merged.set(k, { ...w, key: `bo|${k}` }); newest.set(k, at); return; }
     g.qty += w.qty; g.lots += w.lots;
+    if (w.amount != null) g.amount = (g.amount ?? 0) + w.amount;
     if (at >= (newest.get(k) ?? 0)) { g.ids = [...w.ids, ...g.ids]; newest.set(k, at); } else g.ids = [...g.ids, ...w.ids];
   };
   for (const b of baskets) {
@@ -183,12 +208,16 @@ export function basketWidgetsFor(baskets: LadderBasket[]): LadderWidget[] {
     const exitCol = opposite(b.side);
     const trail = b.bracket?.trailPts ? { trail: b.bracket.trailPts } : {};
     const slLabel = b.bracket?.trailPts ? 'Trailing SL' : 'SL';
+    const bBias = pairBias(b.side);
+    const qty = b.lots * lotSize;
     if (b.state === 'armed' && b.entryLevel) {
       out.push({ ...common, key: `be|${b.id}`, price: b.entryLevel, column: b.side, kind: 'entry', label: b.orderType === 'SL' ? 'Basket breakout entry' : 'Basket entry', cancellable: true, adjust: 'order', drag: 'entry' });
       if (b.bracket) {
-        const lv = bracketLevels(pairBias(b.side), b.entryLevel, b.bracket);
-        if (lv.tgtY != null) out.push({ ...common, key: `bt|${b.id}`, price: lv.tgtY, column: exitCol, kind: 'tgt', label: 'Target', planned: true, drag: 'tgt' });
-        out.push({ ...common, key: `bs|${b.id}`, price: lv.slY, column: exitCol, kind: 'sl', label: slLabel, planned: true, drag: 'sl', ...trail });
+        const lv = bracketLevels(bBias, b.entryLevel, b.bracket);
+        const tgtAmt = lv.tgtY != null ? (lv.tgtY - b.entryLevel) * bBias * qty * (mult ?? 1) : undefined;
+        const slAmt = (lv.slY - b.entryLevel) * bBias * qty * (mult ?? 1);
+        if (lv.tgtY != null) out.push({ ...common, key: `bt|${b.id}`, price: lv.tgtY, column: exitCol, kind: 'tgt', label: 'Target', planned: true, drag: 'tgt', amount: tgtAmt });
+        out.push({ ...common, key: `bs|${b.id}`, price: lv.slY, column: exitCol, kind: 'sl', label: slLabel, planned: true, drag: 'sl', amount: slAmt, ...trail });
       }
     }
     if ((b.state === 'exiting' || b.state === 'unknown') && b.entryY != null) {
@@ -199,8 +228,14 @@ export function basketWidgetsFor(baskets: LadderBasket[]): LadderWidget[] {
       const live = { ...common, adjust: 'position' as const };
       const at = b.openedAt ?? b.createdAt;
       addOpen({ ...live, key: '', price: b.entryY, column: b.side, kind: 'pos', label: 'Basket position' }, at);
-      if (b.tgtY != null) addOpen({ ...live, key: '', price: b.tgtY, column: exitCol, kind: 'tgt', label: 'Target', drag: 'tgt' }, at);
-      if (b.slY != null) addOpen({ ...live, key: '', price: b.slY, column: exitCol, kind: 'sl', label: slLabel, drag: 'sl', ...trail }, at);
+      if (b.tgtY != null) {
+        const tgtAmt = (b.tgtY - b.entryY) * bBias * qty * (mult ?? 1);
+        addOpen({ ...live, key: '', price: b.tgtY, column: exitCol, kind: 'tgt', label: 'Target', drag: 'tgt', amount: tgtAmt }, at);
+      }
+      if (b.slY != null) {
+        const slAmt = (b.slY - b.entryY) * bBias * qty * (mult ?? 1);
+        addOpen({ ...live, key: '', price: b.slY, column: exitCol, kind: 'sl', label: slLabel, drag: 'sl', amount: slAmt, ...trail }, at);
+      }
     }
   }
   return [...out, ...merged.values()];
@@ -222,7 +257,10 @@ function InnerPriceWidget({ w, decimals, tick, onTrail }: {
   w: LadderWidget; decimals: number; tick: number; onTrail?: (w: LadderWidget, delta: number) => void;
 }) {
   const stop = (e: React.SyntheticEvent) => e.stopPropagation();
-  const what = `${w.label} at ${w.price.toFixed(decimals)}`;
+  const amtStr = w.amount != null
+    ? `${w.amount >= 0 ? '+' : '−'}₹${Math.abs(Math.round(w.amount)).toLocaleString('en-IN')}`
+    : null;
+  const what = `${w.label} at ${w.price.toFixed(decimals)}${amtStr ? ` (${amtStr})` : ''}`;
   // A trailing SL: its distance in view, with − / + (one ladder tick) to tighten / widen it.
   if (w.trail != null && onTrail) {
     const btn = 'px-0.5 rounded text-zinc-400 hover:text-white hover:bg-zinc-700 focus-visible:outline focus-visible:outline-1 focus-visible:outline-zinc-400';
@@ -258,6 +296,13 @@ function InnerPriceWidget({ w, decimals, tick, onTrail }: {
         </span>
       )}
       <span>{w.price.toFixed(decimals)}</span>
+      {amtStr && (
+        <span className={`font-mono text-[10px] font-bold tracking-tight ${
+          (w.amount ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+        }`}>
+          {amtStr}
+        </span>
+      )}
     </div>
   );
 }
@@ -547,18 +592,24 @@ export function LadderGrid({
               className={`h-7 flex items-center justify-center gap-1 px-1 overflow-hidden transition-colors ${buyZone ? 'bg-emerald-500/10 dark:bg-emerald-500/22' : buyStop ? 'bg-amber-500/10 dark:bg-amber-500/18' : ''} ${disabled ? 'cursor-not-allowed' : 'cursor-pointer hover:bg-emerald-500/20 dark:hover:bg-emerald-500/35'}`}
             >
               {buyWs.map(w => <InnerPriceWidget key={w.key} w={w} decimals={decimals} tick={tick} onTrail={onTrail} />)}
-              {hasRowTgt && !hasBuyTgt && (
-                <span title="Target"
-                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-emerald-600 text-oncolor pointer-events-none select-none">
-                  TGT
-                </span>
-              )}
-              {hasRowSl && !hasBuySl && (
-                <span title="Stop Loss"
-                  className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-red-600 text-oncolor pointer-events-none select-none">
-                  SL
-                </span>
-              )}
+              {hasRowTgt && !hasBuyTgt && (() => {
+                const tw = ws.find(w => w.kind === 'tgt');
+                return (
+                  <span title={`Target${tw?.amount != null ? ` (+₹${Math.abs(Math.round(tw.amount)).toLocaleString('en-IN')})` : ''}`}
+                    className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-emerald-600 text-oncolor pointer-events-none select-none">
+                    TGT
+                  </span>
+                );
+              })()}
+              {hasRowSl && !hasBuySl && (() => {
+                const sw = ws.find(w => w.kind === 'sl');
+                return (
+                  <span title={`Stop Loss${sw?.amount != null ? ` (−₹${Math.abs(Math.round(sw.amount)).toLocaleString('en-IN')})` : ''}`}
+                    className="px-1 py-0.5 rounded text-[9px] font-bold font-mono tracking-tight bg-red-600 text-oncolor pointer-events-none select-none">
+                    SL
+                  </span>
+                );
+              })()}
             </div>
 
             {/* Column 3: Price */}
