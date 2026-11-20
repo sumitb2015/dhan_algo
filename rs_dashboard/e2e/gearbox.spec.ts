@@ -11,7 +11,7 @@ const PE = { kind: 'options', symbol: 'CRUDEOILM', name: 'CRUDEOILM', expiry: '2
 const MAP = { LONG: { action: 'BUY', opt: 'CE', offset: 0, expiry: 'nearest' }, SHORT: { action: 'BUY', opt: 'PE', offset: 0, expiry: 'nearest' } };
 
 type Row = Record<string, unknown>;
-type Opts = { mode?: 'SIM' | 'REAL'; tf?: 1 | 3 | 5; bars?: number; staleFeed?: boolean; rows?: Row[]; noBook?: boolean };
+type Opts = { mode?: 'SIM' | 'REAL'; tf?: 1 | 3 | 5; bars?: number; staleFeed?: boolean; rows?: Row[]; noBook?: boolean; map?: typeof MAP };
 
 function heldRow(mode: 'SIM' | 'REAL', dir: 'LONG' | 'SHORT' = 'LONG'): Row {
   return {
@@ -39,7 +39,7 @@ async function installMock(page: Page, o: Opts = {}) {
   const blocked: string[] = [];
   const st = {
     rev: 1, mode: o.mode ?? 'SIM', rows: [...(o.rows ?? [])] as Row[],
-    config: { underlying: 'CRUDEOILM', broker: 'dhan', lots: 1, tf: o.tf ?? 1, map: MAP, slPts: null, tgtPts: null, maxLoss: null, maxTrades: null },
+    config: { underlying: 'CRUDEOILM', broker: 'dhan', lots: 1, tf: o.tf ?? 1, map: o.map ?? MAP, slPts: null, tgtPts: null, maxLoss: null, maxTrades: null },
   };
   const ledger = () => ({ rev: st.rev, updatedAt: Date.now(), mode: st.mode, config: st.config, rows: st.rows, log: [], lastSquareOffDay: null });
   const bars = history(o.bars ?? 260, !!o.staleFeed);
@@ -51,7 +51,7 @@ async function installMock(page: Page, o: Opts = {}) {
     if (p === '/api/gearbox/state' && method === 'GET') {
       const live = st.rows.find(r => r.status === 'open');
       return json(route, {
-        success: true, ledger: ledger(), future: FUT, contracts: { LONG: CE, SHORT: PE }, contractErrors: { LONG: null, SHORT: null },
+        success: true, ledger: ledger(), future: FUT, contracts: { LONG: CE, SHORT: PE }, contractErrors: { LONG: null, SHORT: null }, expiries: ['2026-12-16', '2027-01-15'],
         prices: {
           future: { ltp: 5400, ageMs: 400 }, contracts: { LONG: { ltp: 120, ageMs: 400 }, SHORT: { ltp: 110, ageMs: 400 } },
           rows: live ? { [String(live.id)]: { ltp: 125, ageMs: 400 } } : {},
@@ -101,6 +101,9 @@ test('disabled while warming up', async ({ page }) => {
   const { blocked, trades } = await installMock(page, { bars: 100, tf: 5 });
   await page.goto('/gearbox');
   await expect(page.getByTestId('gb-reason')).toContainText('Warming up');
+  await expect(page.getByTestId('gb-warming')).toContainText('closed bars');
+  await expect(page.getByTestId('gb-lamps')).toHaveCount(0);
+  await expect(page.getByTestId('gb-knob')).toHaveCount(0);
   await expect(long(page)).toBeDisabled();
   await expect(short(page)).toBeDisabled();
   await page.keyboard.press('ArrowUp');
@@ -185,4 +188,17 @@ test('a stale feed disables REAL entries', async ({ page }) => {
   await expect(long(page)).toBeDisabled();
   await expect(short(page)).toBeDisabled();
   expect(trades).toEqual([]);
+});
+
+test('the direction map flags SELL legs, legs against their arrow, and lists the expiries', async ({ page }) => {
+  const map = { LONG: { action: 'SELL', opt: 'CE', offset: 0, expiry: 'nearest' }, SHORT: { action: 'BUY', opt: 'PE', offset: 0, expiry: 'nearest' } };
+  const { blocked } = await installMock(page, { map: map as unknown as typeof MAP });
+  await page.goto('/gearbox');
+  await expect(page.getByTestId('gb-map-sell-LONG')).toContainText('margin, unlimited risk');
+  await expect(page.getByTestId('gb-map-against-LONG')).toBeVisible();   // ↑ with a CE SELL gains on a fall
+  await expect(page.getByTestId('gb-map-sell-SHORT')).toHaveCount(0);
+  await expect(page.getByTestId('gb-map-against-SHORT')).toHaveCount(0);  // ↓ with a PE BUY is the normal map
+  const exp = page.getByLabel('LONG expiry');
+  await expect(exp.locator('option')).toHaveText(['Nearest', '2026-12-16', '2027-01-15']);
+  expect(blocked).toEqual([]);
 });

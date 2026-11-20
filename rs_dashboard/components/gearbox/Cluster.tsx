@@ -106,7 +106,19 @@ function Lamp({ tone, children, title }: { tone: Tone; children: string; title: 
   );
 }
 
-export function Cluster({ s }: { s: GbState | null }) {
+/** While warming up (fewer than WARM_BARS closed bars) the gearbox is not trustworthy yet: no gear, gauges or lamps, just progress. */
+export function Cluster({ s, warming }: { s: GbState | null; warming?: { have: number; need: number } | null }) {
+  if (warming) {
+    return (
+      <div data-testid="gb-warming" role="status" className="flex flex-col items-center gap-2 py-6 text-center">
+        <div className="text-[22px] font-bold leading-tight text-zinc-100" style={{ fontFamily: SAIRA }}>Warming up the engine</div>
+        <div className="text-xs text-zinc-400">{warming.have} / {warming.need} closed bars · gears and lamps show once the EMA200 has enough history</div>
+        <div className="h-2 w-64 overflow-hidden rounded bg-zinc-800" aria-hidden>
+          <i className="block h-full rounded bg-amber-500" style={{ width: `${Math.min(100, (100 * warming.have) / warming.need)}%` }} />
+        </div>
+      </div>
+    );
+  }
   const m = s?.mode ?? 0;
   const sp = s?.sp ?? 0;
   return (

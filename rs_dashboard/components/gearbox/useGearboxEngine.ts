@@ -19,6 +19,8 @@ type Quote = { ltp: number; ageMs: number };
 export type GbStateReply = {
   success: boolean; error?: string; ledger: GbLedger; future: Target | null; contracts: Record<Dir, Target | null>;
   contractErrors?: Record<Dir, string | null>;
+  /** Option expiries after today for the underlying (the expiry picker's list). */
+  expiries?: string[];
   prices: { future: Quote | null; contracts: Record<Dir, Quote | null>; rows: Record<string, Quote | null> };
   caps: { REAL: number; SIM: number }; unitsPerLot: number; today: string; session: McxSession;
 };
@@ -49,6 +51,11 @@ export function useGearboxEngine() {
   const seq = useRef(0);
   const exitRetryAt = useRef(0);
   const lastSignalT = useRef<number | null>(null);
+  /** A poll whose ledger rev is LOWER than the one on screen, waiting for a second poll to confirm the file was reset. */
+  const revDrop = useRef<{ rev: number; updatedAt: number } | null>(null);
+  /** The ledger on screen, for the poll's rev check (read outside setState so the updater stays pure). */
+  const shownLedger = useRef<GbLedger | null>(null);
+  useEffect(() => { shownLedger.current = state?.ledger ?? null; }, [state]);
   const { isLeader, leaderRef } = useTabLeader('gearbox');
 
   useEffect(() => installAlertSoundUnlock(), []);
@@ -79,7 +86,16 @@ export function useGearboxEngine() {
       const j = await r.json() as GbStateReply;
       if (id !== seq.current) return;
       if (!j.success) { setError(j.error ?? 'Gearbox state unavailable'); return; }
-      setState(prev => (prev && j.ledger.rev < prev.ledger.rev ? { ...j, ledger: prev.ledger } : j));
+      // A lower rev is normally a slow poll racing a trade reply: keep the newer ledger. Two polls in a row reporting the same
+      // lower rev + updatedAt mean the file itself went back (deleted / restored / reset): accept it then.
+      const shown = shownLedger.current;
+      let acceptDrop = false;
+      if (shown && j.ledger.rev < shown.rev) {
+        const d = revDrop.current;
+        acceptDrop = !!d && d.rev === j.ledger.rev && d.updatedAt === j.ledger.updatedAt;
+        revDrop.current = acceptDrop ? null : { rev: j.ledger.rev, updatedAt: j.ledger.updatedAt };
+      } else revDrop.current = null;
+      setState(prev => (prev && j.ledger.rev < prev.ledger.rev && !acceptDrop ? { ...j, ledger: prev.ledger } : j));
     } catch (e) {
       if (id === seq.current) setError(e instanceof Error ? e.message : 'Gearbox state unavailable');
     } finally { pollInFlight.current = false; }
@@ -158,7 +174,7 @@ export function useGearboxEngine() {
   }, [acceptLedger, load]);
 
   const open = useCallback(async (dir: Dir): Promise<void> => {
-    if (!cfg || entryBlock || price === null) return;
+    if (!cfg || entryBlock || price === null || inFlight.current) return;   // never a confirm while an order is in flight
     if (held && held.status !== 'open') return;
     if (held?.dir === dir) return;
     const action = held ? 'reverse' : 'open';
@@ -172,7 +188,7 @@ export function useGearboxEngine() {
   }, [cfg, entryBlock, price, held, mode, state, send]);
 
   const exitWith = useCallback(async (reason: string, confirmReal: boolean): Promise<void> => {
-    if (!cfg || !held || held.status !== 'open') return;
+    if (!cfg || !held || held.status !== 'open' || inFlight.current) return;   // never a confirm while an order is in flight
     if (confirmReal && held.mode === 'REAL' && !window.confirm(`Exit ${held.dir} ${held.lots} lot ${held.target.symbol} ${held.target.strike} ${held.target.side}?\n\nThis is a REAL order at your broker.`)) return;
     await send({ action: 'exit', underlying: cfg.underlying, decisionPrice: price ?? held.entry, reason, mode, broker: cfg.broker });
   }, [cfg, held, price, mode, send]);

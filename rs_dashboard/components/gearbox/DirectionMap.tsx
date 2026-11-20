@@ -5,8 +5,16 @@ import type { Dir, DirLeg } from '@/lib/gearboxLedger';
 import { FOCUS_RING } from './TradeStrip';
 import type { GearboxEngine } from './useGearboxEngine';
 
-// What ↑ and ↓ trade: per direction, BUY / SELL, CE / PE and the strike offset from ATM (OTM positive). The summary line shows the
-// contract the server would pick now (from its own fresh futures price) and that option's live price. Locked while a leg is held.
+// What ↑ and ↓ trade: per direction, BUY / SELL, CE / PE, the strike offset from ATM (OTM positive) and the expiry (Nearest = the
+// first expiry after today, or a listed one). The summary line shows the contract the server would pick now (from its own fresh
+// futures price) and that option's live price. Safety cues: a SELL leg is flagged "margin, unlimited risk", and a leg that gains on
+// the OTHER direction's move (↑ with a PE BUY / CE SELL, ↓ with a CE BUY / PE SELL) gets a ⚠. Locked while a leg is held.
+
+/** Does this leg profit when price moves the opposite way to its arrow? (↑ = price up, ↓ = price down) */
+export const legAgainstDir = (d: Dir, leg: DirLeg): boolean => {
+  const gainsOnRise = (leg.action === 'BUY') === (leg.opt === 'CE');
+  return d === 'LONG' ? !gainsOnRise : gainsOnRise;
+};
 
 const SEL = 'h-7 rounded-md border border-zinc-700 bg-zinc-900 px-1.5 text-xs text-zinc-100 disabled:opacity-40';
 
@@ -22,6 +30,9 @@ export function DirectionMap({ e }: { e: GearboxEngine }) {
         const t = e.contracts[d];
         const q = e.prices?.contracts[d] ?? null;
         const err = e.state?.contractErrors?.[d] ?? null;
+        const listed = e.state?.expiries ?? [];
+        const expiries = leg.expiry !== 'nearest' && !listed.includes(leg.expiry) ? [leg.expiry, ...listed] : listed;
+        const against = legAgainstDir(d, leg);
         return (
           <div key={d} className="flex flex-wrap items-center gap-1.5 text-xs">
             <span className={cn('w-14 font-bold', d === 'LONG' ? 'text-emerald-300' : 'text-red-300')}>{d === 'LONG' ? '↑ Long' : '↓ Short'}</span>
@@ -34,7 +45,23 @@ export function DirectionMap({ e }: { e: GearboxEngine }) {
             <select aria-label={`${d} strike offset`} disabled={locked} value={leg.offset} onChange={ev => set(d, { offset: Number(ev.target.value) })} className={cn(SEL, FOCUS_RING)}>
               {[-3, -2, -1, 0, 1, 2, 3].map(o => <option key={o} value={o}>{o === 0 ? 'ATM' : o > 0 ? `${o} OTM` : `${-o} ITM`}</option>)}
             </select>
-            <span className="tabular-nums text-zinc-300" title={err ?? 'The option the server would pick now (nearest expiry after today)'}>
+            <select aria-label={`${d} expiry`} disabled={locked} value={leg.expiry} onChange={ev => set(d, { expiry: ev.target.value })} className={cn(SEL, FOCUS_RING)}
+              title="Nearest = the first option expiry after today (never one expiring today)">
+              <option value="nearest">Nearest</option>
+              {expiries.map(x => <option key={x} value={x}>{x}</option>)}
+            </select>
+            {against && (
+              <span data-testid={`gb-map-against-${d}`} className="font-bold text-amber-400"
+                title={`This leg gains when price moves ${d === 'LONG' ? 'DOWN' : 'UP'}, the opposite of the ${d === 'LONG' ? '↑' : '↓'} button`}>
+                ⚠ gains on a {d === 'LONG' ? 'fall' : 'rise'}
+              </span>
+            )}
+            {leg.action === 'SELL' && (
+              <span data-testid={`gb-map-sell-${d}`} className="rounded bg-red-500/15 px-1.5 text-[11px] font-bold text-red-300" title="A SELL leg is a short option">
+                margin, unlimited risk
+              </span>
+            )}
+            <span className="tabular-nums text-zinc-300" title={err ?? 'The option the server would pick now, at this expiry'}>
               {t ? `${leg.action} ${t.strike} ${t.side}` : <span className="text-amber-400">{err ?? '—'}</span>}
               {t && <span className="ml-1.5 text-zinc-400">{q ? `@ ${q.ltp.toFixed(2)}${q.ageMs > 10_000 ? ' (stale)' : ''}` : '@ —'}</span>}
             </span>

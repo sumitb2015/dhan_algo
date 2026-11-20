@@ -5,6 +5,7 @@ import { BellRing, BellOff, CarFront, Lock, LockOpen, Pause, Play } from 'lucide
 import NavBar from '@/components/NavBar';
 import { istClock, istMinuteOfDay } from '@/lib/istTime';
 import { istDateIso } from '@/lib/nseHolidays';
+import { WARM_BARS } from '@/lib/gearbox';
 import { hhmmToMin } from '@/lib/gearboxBars';
 import { targetLabel } from '@/lib/pnfTarget';
 import type { GbMode, GbRow, GbUnderlying } from '@/lib/gearboxLedger';
@@ -162,7 +163,7 @@ export default function GearboxPage() {
             </button>
           </div>
           <div className="flex flex-col gap-4 border-t border-zinc-800 bg-zinc-900 px-5 pb-5 pt-4">
-            <Cluster s={s} />
+            <Cluster s={e.warming ? null : s} warming={e.warming ? { have: e.bars.length, need: WARM_BARS } : null} />
             <TradeStrip e={e} />
             <DirectionMap e={e} />
             <RiskPanel e={e} />

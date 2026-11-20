@@ -17,6 +17,8 @@ Everything below is computed on the last **closed** bar.
 
 - **Road and sky** — the *mode*. Blue sky, road climbing: two closes above EMA200 and EMA200 not falling. Dusk, road descending:
   the mirror. **Fog / Neutral**: price within 0.3 ATR of EMA200, or the EMA200 slope disagrees with the side.
+- **Warming up** — until 200 closed bars exist the cluster shows only a progress bar ("Warming up the engine"): no gear, gauges
+  or lamps, and entries are off.
 - **Gear shifter** — trend strength: 1 plus how many of EMA 9 / 20 / 50 / 100 price is beyond, in the mode's direction (1 to 5).
   N when in fog. Gear 5 is full throttle; gear 1 is a deep pullback, near a reversal.
 - **Speed** — slope of EMA9 over 3 bars, in basis points per bar.
@@ -44,25 +46,30 @@ Everything below is computed on the last **closed** bar.
 
 - One position per underlying. There is no pyramiding: pressing the same direction again is ignored.
 - Hotkeys ignore key repeat (holding ↑ sends one order) and do nothing while a text box or dropdown has focus.
-- In REAL every ↑ / ↓ / X asks for a confirmation first, the same as the buttons.
+- In REAL every ↑ / ↓ / X asks for a confirmation first, the same as the buttons. While an order is in flight the buttons and
+  hotkeys are off, so no second confirmation can pop up.
 - A **reverse** checks every entry rule *first* (price, strike, option price, limits) and only then sends the exit; it opens
   the new leg only after the exit is confirmed filled. If the exit is rejected, the old leg stays open and nothing new is sent.
-  If the exit has no verdict within 10 s, the row goes UNKNOWN and the reverse is abandoned.
+  If the exit has no verdict within 10 s, the row goes UNKNOWN and the reverse is abandoned. After the exit fills, the new leg's
+  strike is **picked again from the price at that moment** (and every entry check runs again); if the futures price has gone
+  stale by then, the reverse stops flat (the log says "reverse stopped: stale price").
 
 ## The direction map
 
 The map says which option each button trades. Defaults: **↑ = BUY ATM CE, ↓ = BUY ATM PE.** Per direction you can change
-BUY / SELL, CE / PE and the strike offset (3 ITM … ATM … 3 OTM). Expiry is always the **nearest expiry after today**.
+BUY / SELL, CE / PE, the strike offset (3 ITM … ATM … 3 OTM) and the expiry: **Nearest** (the first expiry after today, never
+one expiring today) or any listed later expiry.
 
 - The summary next to each row shows the contract the server would pick right now and its live price.
 - **The strike is picked on the server at the click**, from its own fresh price of the future whose expiry matches the option
   expiry. The price on your screen is only recorded, never used to pick or price a fill.
 - The map, the underlying and the broker are **locked while a leg is held** (so are mode and lots).
-- A SELL leg is a short option: margin and unlimited risk. A map such as "↑ BUY PE" is allowed (it gains when price falls): check it.
+- A SELL leg is a short option: the map marks it **margin, unlimited risk**. A leg that gains on the other direction's move
+  (↑ with a PE BUY or a CE SELL, ↓ with a CE BUY or a PE SELL) is allowed but gets a **⚠ gains on a fall / rise** mark: check it.
 
 ## SIM vs REAL
 
-- **SIM** — paper. Fills at the option's live price at the click. Nothing is sent to any broker. Up to 10 lots.
+- **SIM** — paper. Fills at the option's live price at the click (refused if that price is more than 10 s old). Nothing is sent to any broker. Up to 10 lots.
 - **REAL** — live Dhan orders, intraday product. **1 lot per order and per position** on both CRUDEOIL and CRUDEOILM, until it
   has run live. Switch with the SIM / REAL toggle (not possible while a leg is held), then press **Arm real money** and confirm.
   The arm is for **this page load only**: it is not saved, and changing mode, underlying or broker disarms it. A reload disarms it.
@@ -77,8 +84,11 @@ BUY / SELL, CE / PE and the strike offset (3 ITM … ATM … 3 OTM). Expiry is a
 auto-exit time (`mcxSession().autoExit`, shown in the header). It checks every 5 s, uses only this page's own quantity, and runs
 whether or not a tab is open. An earlier day's leg that is still open is closed once the next session opens.
 
-It will **not** touch a row whose status is UNKNOWN, SENDING or CLOSING: it logs "square-off skipped" once and leaves it for you.
-A REAL exit the broker refuses leaves the row open and is retried on the next 5-second tick.
+It will **not** touch a row whose status is UNKNOWN: it logs "square-off skipped" once and leaves it for you.
+A REAL exit the broker refuses leaves the row open and is retried at most **3 times a day, at least 30 s apart**, and never at or
+after the MCX close. After the 3rd refusal the row goes UNKNOWN ("square-off failed 3 times"): close it at Dhan and resolve it.
+While any leg is live the server also keeps its option price subscribed, so a SIM square-off with every tab closed uses a fresh
+price, not the last one a tab saw.
 
 Nothing else runs on the server: no entries, no stop-loss, no target, no trailing. Stopping or restarting the dashboard stops the
 square-off with it.
@@ -118,8 +128,20 @@ Nothing is sent when any of these fails, and the page shows the reason. Exits ar
 
 ## UNKNOWN outcomes
 
-If the broker's reply to an order is unclear, the row goes **UNKNOWN** and the page **never resends it.** Check the Dhan order
-book and positions, then choose **It is open**, **Never filled**, or **It is closed (at LTP)**. A new entry is blocked until you do.
+If the broker's reply to an order is unclear, the row goes **UNKNOWN** and the page **never resends it.** Also UNKNOWN:
+
+- A row still SENDING or CLOSING when the next server action starts (the dashboard restarted, or the send threw, mid-order). Its
+  note says "orphaned by a restart — check the order book".
+- An exit that finds nothing at Dhan within 60 s of the entry fill (or of the entry, when its fill was never confirmed): too soon
+  to trust "already closed".
+
+Check the Dhan order book and positions, then choose **It is open**, **Never filled**, or **It is closed (at LTP)**. A new entry is blocked until you do.
+
+## A damaged ledger file
+
+If `debug/gearbox_state.json` exists but is not valid JSON, the server refuses every trade, setting and resolve with
+"gearbox ledger unreadable — fix debug/gearbox_state.json" and **never writes the file** (so nothing on it is lost). The
+square-off does not run until it is fixed. A row in the file that is missing its status, contract or size is ignored.
 
 ## What other pages can and cannot close
 
