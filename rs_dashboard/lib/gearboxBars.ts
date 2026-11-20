@@ -47,7 +47,34 @@ export function gbClosedKey(bars1m: FeedBar[], tf: number, nowS: number, histVer
   return `${histVersion}|${tf}|${lastClosedStart}|${i}|${bars1m[i]?.t}|${bars1m[i]?.straddle}`;
 }
 
-export type GbEvent = { t: number; msg: string; tone: 'info' | 'good' | 'bad' | 'hot' };
+/** A seconds timeframe ('5s' .. '30s') as whole seconds; null for a minutes timeframe. */
+export const tfSeconds = (tf: number | string): number | null => {
+  const m = typeof tf === 'string' ? /^(\d+)s$/.exec(tf) : null;
+  return m ? Number(m[1]) : null;
+};
+
+/**
+ * The tick log's N-second bars (lib/pnfTicks.ts bucketTickBars: start-stamped, every one already CLOSED by the server's cut-off)
+ * -> GbBars. Bucketed on whole seconds (never `sec / 60` minutes through gbClosedBars: a fractional minute could mis-bucket),
+ * on the IST clock (the 19 800 s offset is a multiple of 5 / 10 / 20 / 30). A tick bar carries only its last price, so
+ * o = h = l = c. Bad prices are skipped; two bars in one bucket merge. Nothing is dropped as "forming".
+ */
+export function gbSecondBars(bars: FeedBar[], sec: number): GbBar[] {
+  const out: GbBar[] = [];
+  if (!(sec > 0) || !Number.isInteger(sec)) return out;
+  for (const b of bars) {
+    const c = b.straddle;
+    if (!(c > 0) || !Number.isFinite(c)) continue;
+    const v = Number.isFinite(b.vol) && b.vol > 0 ? b.vol : 0;
+    const t = Math.floor((Math.floor(b.t) + IST_S) / sec) * sec - IST_S;
+    const cur = out[out.length - 1];
+    if (cur && t <= cur.t) { cur.c = c; cur.h = Math.max(cur.h!, c); cur.l = Math.min(cur.l!, c); cur.v += v; }
+    else out.push({ t, o: c, h: c, l: c, c, v });
+  }
+  return out;
+}
+
+export type GbEvent ={ t: number; msg: string; tone: 'info' | 'good' | 'bad' | 'hot' };
 
 const fmt = (v: number) => (v > 0 ? '+' : '') + v.toFixed(1);
 

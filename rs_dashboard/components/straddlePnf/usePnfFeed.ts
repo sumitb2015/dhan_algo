@@ -232,7 +232,8 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   const scrip = !target ? '' : fno ? label : name && name !== target.symbol ? `${target.symbol} · ${name}` : target.symbol;
 
   return {
-    bars: chartBars, vwapBars: tickMode ? vwBars : null, loaded, name, loading, loadError: loadError ?? (tickMode ? tickError : null), histVersion, epoch, market, complete, live, stale, sessionTag, trustedPrevClose, label, scrip,
+    // logBars: Tick / N-second mode only, the bars built from the tick log alone (no history minutes spliced in); null otherwise.
+    bars: chartBars, logBars: tickMode ? (tickBars ?? NO_BARS) : null, vwapBars: tickMode ? vwBars : null, loaded, name, loading, loadError: loadError ?? (tickMode ? tickError : null), histVersion, epoch, market, complete, live, stale, sessionTag, trustedPrevClose, label, scrip,
   };
 }
 

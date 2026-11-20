@@ -212,6 +212,11 @@ if (process.env.DASHBOARD_NO_BACKGROUND === '1') {
   import('./lib/pnfAlwaysRecord').then(m => m.startPnfAlwaysRecord()).catch(err => {
     console.warn('[pnf-always-record] could not start:', err);
   });
+  // Gearbox Drive 5-30 s bars: keeps its crude future (and any live FUT row's) in the same tick log for the whole MCX session
+  // with every tab closed. Idle outside the session. Read-only.
+  import('./lib/gearboxAlwaysRecord').then(m => m.startGearboxAlwaysRecord()).catch(err => {
+    console.warn('[gearbox-always-record] could not start:', err);
+  });
   // Fresh Money's CRUDEOIL / CRUDEOILM boards: start their OI collectors for each MCX session (holidays and hours from
   // lib/mcxSession), so nobody has to press Start. A Stop on the page keeps one off for that day. Market data only.
   import('./lib/crudeCollector').then(m => m.startCrudeCollectorScheduler()).catch(err => {

@@ -5,7 +5,7 @@ import { usePnfFeed } from '@/components/straddlePnf/usePnfFeed';
 import { useTabLeader } from '@/hooks/useTabLeader';
 import { installAlertSoundUnlock, playAlertChime } from '@/lib/alertSound';
 import { computeGearbox, ghostTrades, WARM_BARS, type GbBar, type GbState, type GhostTrade } from '@/lib/gearbox';
-import { gbClosedBars, gbClosedKey, gbSession } from '@/lib/gearboxBars';
+import { gbClosedBars, gbClosedKey, gbSecondBars, gbSession, tfSeconds } from '@/lib/gearboxBars';
 import { liveRow, realisedToday, type Dir, type GbConfig, type GbLedger, type GbMode, type GbRow } from '@/lib/gearboxLedger';
 import type { McxSession } from '@/lib/mcxSession';
 import type { Target } from '@/lib/pnfTarget';
@@ -115,24 +115,32 @@ export function useGearboxEngine() {
   const heldFresh = !!heldQuote && heldQuote.ageMs <= QUOTE_FRESH_MS;
 
   // ── the signal future and the gearbox on closed bars ───────────────────────────────────────────────
-  const feed = usePnfFeed(state?.future ?? null, 0, now);
   const tf = cfg?.tf ?? 5;
-  // Seconds bars ('5s' ...) are not built on this page yet: no bars, so the page stays warming up and entries stay off (fail-safe).
+  // A seconds tf ('5s' .. '30s') reads the price bridge's tick log (usePnfFeed's tickSec path, as /renko does): its N-second bars are
+  // already closed by the server's cut-off, and the array only changes when one closes. No history before logging started: the page
+  // warms up on today's log (lib/gearboxAlwaysRecord.ts keeps the future logged all MCX session).
+  const secs = tfSeconds(tf);
+  const feed = usePnfFeed(state?.future ?? null, 0, now, secs);
   const tfMin = typeof tf === 'number' ? tf : 0;
   const nowS = Math.floor(now / 1000);
   const nowMinute = Math.floor(now / 60_000);
   const closedKey = `${tf}|${tfMin ? gbClosedKey(feed.bars, tfMin, nowMinute * 60 + 1, feed.histVersion) : ''}`;
-  const bars: GbBar[] = useMemo(
+  const minuteBars: GbBar[] = useMemo(
     () => (nowMinute && tfMin ? gbClosedBars(feed.bars.slice(-READ_BARS_1M * tfMin), tfMin, nowMinute * 60 + 1) : []),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [closedKey],
   );
+  const logBars = feed.logBars;
+  const secondBars: GbBar[] = useMemo(() => (secs && logBars ? gbSecondBars(logBars, secs) : []), [secs, logBars]);
+  const bars = secs ? secondBars : minuteBars;
   const states: GbState[] = useMemo(() => computeGearbox(bars, gbSession), [bars]);
   const ghost: GhostTrade[] = useMemo(() => ghostTrades(bars, states, gbSession), [bars, states]);
   const warming = bars.length < WARM_BARS;
 
   const lastBar = feed.bars[feed.bars.length - 1];
-  const price = lastBar && lastBar.straddle > 0 ? lastBar.straddle : null;
+  // Seconds bars hold only CLOSED buckets: the price is the log's latest (feed.live), not a close up to N s old.
+  const livePx = secs && feed.live ? feed.live.ce + feed.live.pe : null;
+  const price = livePx !== null && livePx > 0 ? livePx : lastBar && lastBar.straddle > 0 ? lastBar.straddle : null;
   const futQuote = state?.prices.future ?? null;
   const feedFresh = !!state && !feed.stale && price !== null && !!futQuote && futQuote.ageMs <= QUOTE_FRESH_MS;
 

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { gbClosedBars, gbSession, gbEvents, hhmmToMin, gbClosedKey } from './gearboxBars.ts';
+import { gbClosedBars, gbSession, gbEvents, hhmmToMin, gbClosedKey, gbSecondBars, tfSeconds } from './gearboxBars.ts';
+import { computeGearbox } from './gearbox.ts';
 import type { GbState, GhostTrade } from './gearbox.ts';
 
 const IST = 19800;
@@ -77,4 +78,41 @@ test('gbEvents: the open ghost trade has no exit line, and bars before `from` ar
   const ghost: GhostTrade[] = [{ side: -1, ei: 2, xi: 2, ep: 90, xp: 90, open: true, why: 'open' }];
   const ev = gbEvents(states, ghost, 2);
   assert.deepEqual(ev.map(e => e.msg), ['Ghost went short at 90.0']);
+});
+
+test('tfSeconds: seconds timeframes as whole seconds, minutes as null', () => {
+  assert.equal(tfSeconds('5s'), 5);
+  assert.equal(tfSeconds('30s'), 30);
+  assert.equal(tfSeconds(1), null);
+  assert.equal(tfSeconds(5), null);
+});
+
+test('gbSecondBars: one GbBar per closed 10 s tick bar, on whole seconds, nothing dropped as forming', () => {
+  const s = (i: number, c: number, vol = 1) => ({ t: T + i * 10, straddle: c, vol });
+  const out = gbSecondBars([s(0, 100), s(1, 101, 2), s(2, 0), s(3, 99, 3)], 10);
+  assert.deepEqual(out.map(b => b.t), [T, T + 10, T + 30], 'a bad price is skipped; the last bar is kept (already closed)');
+  assert.deepEqual(out[1], { t: T + 10, o: 101, h: 101, l: 101, c: 101, v: 2 });
+});
+
+test('gbSecondBars: buckets on the IST clock; two bars in one bucket merge; times never go back', () => {
+  // 30 s buckets: 10:00:00 and 10:00:20 share one, 10:00:30 opens the next; an unaligned stamp lands in its own bucket's start
+  const out = gbSecondBars([
+    { t: T, straddle: 100, vol: 1 }, { t: T + 20, straddle: 103, vol: 1 }, { t: T + 30.7, straddle: 98, vol: 2 },
+    { t: T + 29, straddle: 97, vol: 1 },   // out of order: folded into the bar it trails
+  ], 30);
+  assert.deepEqual(out, [
+    { t: T, o: 100, h: 103, l: 100, c: 103, v: 2 },
+    { t: T + 30, o: 98, h: 98, l: 97, c: 97, v: 3 },
+  ]);
+  assert.equal(gbSecondBars([{ t: T, straddle: 100, vol: 1 }], 0).length, 0, 'a bad size builds nothing');
+});
+
+test('computeGearbox on 10 s bars: session bar counts N-second bars from the MCX open, entry window stays in minutes', () => {
+  const open = Date.UTC(2026, 10, 18, 9, 5) / 1000 - IST;   // 09:05 IST, 5 min after the 09:00 open
+  const bars = Array.from({ length: 400 }, (_, i) => ({ t: open + i * 10, c: 100 + Math.sin(i / 7) * 2 + i * 0.05, v: 1 }));
+  const st = computeGearbox(bars, gbSession);
+  assert.equal(st[0].sessionBar, 30, '5 minutes = thirty 10 s bars after the open');
+  assert.equal(st[399].sessionBar, 429);
+  // 09:05 + 400 x 10 s = 10:11: no bar before 09:15 IST may signal (ENTRY_AFTER_OPEN_MIN)
+  for (const s of st) if (s.t < open + 600) assert.equal(s.signal, false);
 });
