@@ -23,7 +23,9 @@ export interface GbState {
 }
 export interface GhostTrade {
   side: 1 | -1; ei: number; xi: number; ep: number; xp: number;
-  why: 'stop hit' | 'mode flipped' | 'gear collapsed' | 'session close';
+  /** true only for the trade still open on the last bar (xi = last bar index, xp = its close, why = 'open'). */
+  open: boolean;
+  why: 'stop hit' | 'mode flipped' | 'gear collapsed' | 'session close' | 'open';
 }
 export interface GbSession { openMin: number; autoExitMin: number } // IST minutes of day
 
@@ -128,7 +130,7 @@ export function computeGearbox(bars: GbBar[], session: (t: number) => GbSession)
 }
 
 /** Trades the rules would have taken. Starts after WARM_BARS; one position at a time. The trade
- *  open on the last bar (if any) is the final element, with xi === bars.length. */
+ *  open on the last bar (if any) is the final element, flagged open: true. */
 export function ghostTrades(bars: GbBar[], states: GbState[], session: (t: number) => GbSession): GhostTrade[] {
   const T: GhostTrade[] = [];
   const n = Math.min(bars.length, states.length);
@@ -147,7 +149,7 @@ export function ghostTrades(bars: GbBar[], states: GbState[], session: (t: numbe
       else if (s.mode === -pos) why = 'mode flipped';
       else if (s.mode === pos && s.gear === 1) why = 'gear collapsed';
       else if (lastOfSession(i)) why = 'session close';
-      if (why) { T.push({ side: pos, ei, xi: i, ep: ent, xp, why }); pos = 0; }
+      if (why) { T.push({ side: pos, ei, xi: i, ep: ent, xp, open: false, why }); pos = 0; }
     }
     if (!pos && s.signal && s.mode !== 0 && !lastOfSession(i) && inEntryWindow(b.t, session(b.t))) {
       pos = s.mode; ent = b.c; ei = i;
@@ -156,9 +158,8 @@ export function ghostTrades(bars: GbBar[], states: GbState[], session: (t: numbe
       stop = pos > 0 ? Math.max(sw, s.sl) : Math.min(sw, s.sl);
     }
   }
-  // A trade still open on the last bar is listed with xi === bars.length (one past the data) and
-  // xp = the last close, so ghostScore can mark it; `why` is a placeholder until it really exits.
-  if (pos) T.push({ side: pos, ei, xi: n, ep: ent, xp: bars[n - 1].c, why: 'session close' });
+  // A trade still open on the last bar is the final element: open = true, marked at the last close.
+  if (pos) T.push({ side: pos, ei, xi: n - 1, ep: ent, xp: bars[n - 1].c, open: true, why: 'open' });
   return T;
 }
 
@@ -166,8 +167,9 @@ export function ghostTrades(bars: GbBar[], states: GbState[], session: (t: numbe
 export function ghostScore(trades: GhostTrade[], states: GbState[], i: number): { points: number; closed: number; wins: number; open: 1 | -1 | 0 } {
   let points = 0, closed = 0, wins = 0, open: 1 | -1 | 0 = 0;
   for (const x of trades) {
-    if (x.xi <= i) { const p = (x.xp - x.ep) * x.side; points += p; closed++; if (p > 0) wins++; }
-    else if (x.ei <= i) { open = x.side; points += (states[i].c - x.ep) * x.side; }
+    if (!x.open && x.xi <= i) { const p = (x.xp - x.ep) * x.side; points += p; closed++; if (p > 0) wins++; }
+    else if (x.ei <= i) { // still open at bar i (or the live open trade)
+      open = x.side; points += (states[i].c - x.ep) * x.side; }
   }
   return { points, closed, wins, open };
 }

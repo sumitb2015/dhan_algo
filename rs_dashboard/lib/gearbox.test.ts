@@ -116,7 +116,10 @@ test('fog does not exit the ghost', () => {
   // cut right after the fog: still open, listed one past the data and markable by ghostScore
   const cut = ghostTrades(bars.slice(0, E + 4), states.slice(0, E + 4), artifactSession);
   assert.equal(cut.length, 1);
-  assert.equal(cut[0].xi, E + 4);
+  assert.equal(cut[0].open, true);
+  assert.equal(cut[0].why, 'open');
+  assert.equal(cut[0].xi, E + 3);
+  assert.equal(cut[0].xp, 100);
   const sc = ghostScore(cut, states, E + 3);
   assert.equal(sc.open, 1);
   assert.equal(sc.closed, 0);
@@ -160,9 +163,9 @@ test('ghost closes at the session close', () => {
 test('ghostScore sums closed trades and marks the open one', () => {
   const states = flat().states;
   const trades = [
-    { side: 1 as const, ei: 1, xi: 3, ep: 100, xp: 104, why: 'stop hit' as const },
-    { side: -1 as const, ei: 4, xi: 6, ep: 100, xp: 103, why: 'mode flipped' as const },
-    { side: 1 as const, ei: 8, xi: 20, ep: 98, xp: 99, why: 'session close' as const },
+    { side: 1 as const, ei: 1, xi: 3, ep: 100, xp: 104, open: false, why: 'stop hit' as const },
+    { side: -1 as const, ei: 4, xi: 6, ep: 100, xp: 103, open: false, why: 'mode flipped' as const },
+    { side: 1 as const, ei: 8, xi: 20, ep: 98, xp: 99, open: false, why: 'session close' as const },
   ];
   states[9].c = 101;
   const s = ghostScore(trades, states, 9);
@@ -170,4 +173,15 @@ test('ghostScore sums closed trades and marks the open one', () => {
   assert.equal(s.wins, 1);
   assert.equal(s.open, 1);
   assert.equal(s.points, 4 - 3 + 3);
+});
+
+test('ghostScore marks an open last trade without counting it closed', () => {
+  const states = flat().states;
+  states[20].c = 103;
+  const trades = [
+    { side: 1 as const, ei: 1, xi: 3, ep: 100, xp: 101, open: false, why: 'stop hit' as const },
+    { side: 1 as const, ei: 10, xi: 20, ep: 100, xp: 103, open: true, why: 'open' as const },
+  ];
+  const s = ghostScore(trades, states, 20);
+  assert.deepEqual(s, { points: 1 + 3, closed: 1, wins: 1, open: 1 });
 });
