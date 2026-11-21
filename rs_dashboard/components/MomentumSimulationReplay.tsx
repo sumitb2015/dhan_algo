@@ -1055,7 +1055,9 @@ export default function MomentumSimulationReplay({
             <div className="bg-zinc-900 border border-zinc-800 rounded px-3 py-2 text-xs">
               <div className="text-zinc-500 font-bold uppercase tracking-wider mb-2 flex items-center justify-between">
                 <span>Sector Diversification on {currentSnapshot.date} (Max {shownSectorCap} position{shownSectorCap === 1 ? '' : 's'}/sector)</span>
-                <span className="text-zinc-400 font-normal">{Object.keys(sectorCounts).length} active sectors</span>
+                <span className="text-zinc-400 font-normal">
+                  {currentSnapshot.holdings.length} {currentSnapshot.holdings.length === 1 ? 'stock' : 'stocks'} · {Object.keys(sectorCounts).length} active {Object.keys(sectorCounts).length === 1 ? 'sector' : 'sectors'}
+                </span>
               </div>
               <div className="flex flex-wrap gap-2">
                 {Object.entries(sectorCounts).map(([sec, count]) => {
@@ -1086,6 +1088,8 @@ export default function MomentumSimulationReplay({
               <span>Holdings as of {currentSnapshot.date} ({currentSnapshot.holdings.length}/{currentSnapshot.slots} slots)</span>
               {currentSnapshot.holdings.length > 0 && (
                 <span className="text-zinc-500 font-normal">
+                  Stocks Held: <b className="text-zinc-300">{currentSnapshot.holdings.length}</b>
+                  <span className="mx-2 text-zinc-700">|</span>
                   Total Invested: <b className="text-zinc-300">{rupees(currentSnapshot.invested)}</b>
                 </span>
               )}
