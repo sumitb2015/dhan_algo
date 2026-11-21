@@ -2,14 +2,14 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import dynamic from 'next/dynamic';
+import Link from 'next/link';
 import { cn } from '@/lib/utils';
 import TopIndices from '@/components/TopIndices';
-import TopWeightStocks from '@/components/TopWeightStocks';
-import { NIFTY_TOP10_BY_WEIGHT } from '@/lib/nifty50';
 import type { Signal } from '@/lib/signalOrb';
-import { heavyweightPull, oiAgreement, oiSide, oiSummary, type EquityQuote, type OiPoint } from '@/lib/signalOrbPanels';
+import type { ContributionResult } from '@/lib/niftyContribution';
+import { oiAgreement, oiSide, oiSummary, type OiPoint } from '@/lib/signalOrbPanels';
 
-// Market context for the Signal Orb: the live indices, the Nifty heavyweights and what they add up to, and the cumulative-OI regime.
+// Market context for the Signal Orb: the live indices, the Nifty contribution list (shared with the Nifty Contribution page) and the cumulative-OI regime.
 // Information only - none of it feeds a rule or an order. The tables are the Advanced Scalper's own panels; the bridges that feed
 // them are started from here only when the user presses Start.
 
@@ -35,53 +35,58 @@ function Card({ title, note, children }: { title: string; note?: string; childre
   );
 }
 
-// ── Feeds ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+// ── Feeds and the Nifty contribution ─────────────────────────────────────────────────────────────────────────────────────
 
-type EquityReply = { status?: { status?: string }; quotes?: { updated_at: string | null; quotes: Record<string, EquityQuote> } };
-const FEED_STALE_MS = 30_000;
+type FeedState = 'live' | 'starting' | 'stale' | 'stopped';
+type ContribReply = {
+  success: boolean; error?: string;
+  feeds?: { stocks: { state: FeedState }; indices: { state: FeedState } };
+  nifty?: { ltp: number; change: number; changePct: number } | null;
+  result?: ContributionResult;
+};
 
-/** The equity bridge's quotes (the heavyweights) and how fresh they are; polled only while the Market tab is mounted. */
-function useEquityFeed() {
-  const [reply, setReply] = useState<EquityReply | null>(null);
-  const [now, setNow] = useState(0);
+/** The Nifty Contribution page's own API (all 50 names, free-float weighted, with its stale-weights alarm); polled while the Market tab is mounted. */
+function useContribution() {
+  const [reply, setReply] = useState<ContribReply | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = async () => {
+    try {
+      const r = await fetch('/api/nifty-contribution', { cache: 'no-store' });
+      const j = await r.json() as ContribReply;
+      setReply(j); setError(j.success ? null : (j.error ?? 'Contribution unavailable'));
+    } catch (e) { setError(e instanceof Error ? e.message : 'Contribution unavailable'); }
+  };
   useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const r = await fetch('/api/live-equity', { cache: 'no-store' });
-        const j = await r.json() as EquityReply;
-        if (alive) setReply(j);
-      } catch { /* the next poll retries */ }
-    };
-    const first = setTimeout(() => { setNow(Date.now()); void load(); }, 0);
-    const id = setInterval(() => { setNow(Date.now()); void load(); }, 3_000);
-    return () => { alive = false; clearTimeout(first); clearInterval(id); };
+    const first = setTimeout(() => { void load(); }, 0);
+    const id = setInterval(() => { void load(); }, 3_000);
+    return () => { clearTimeout(first); clearInterval(id); };
   }, []);
-  const at = reply?.quotes?.updated_at ? new Date(reply.quotes.updated_at).getTime() : NaN;
-  const fresh = Number.isFinite(at) && now - at < FEED_STALE_MS;
-  return { quotes: reply?.quotes?.quotes ?? {}, fresh, loaded: reply !== null };
+  return { reply, error, reload: load };
 }
 
-/** Starts the two read-only bridges (indices, Nifty 50 equities); both routes are idempotent ("already running"). */
-function FeedBar({ fresh, equity }: { fresh: boolean; equity: boolean }) {
+/** Starts the read-only bridges the panels need (indices; and the stocks feed for the contribution); both routes are idempotent. */
+function FeedBar({ feeds, stocks, onStarted }: { feeds: ContribReply['feeds']; stocks: boolean; onStarted: () => void }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  const needed: FeedState[] = [feeds?.indices.state ?? 'stopped', ...(stocks ? [feeds?.stocks.state ?? 'stopped'] : [])];
+  const live = needed.every(s => s === 'live' || s === 'starting');
   const start = async () => {
     setBusy(true); setMsg(null);
     try {
-      const calls = ['/api/live-indices', ...(equity ? ['/api/live-equity'] : [])].map(u => fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'start' }) }));
-      await Promise.all(calls);
+      const routes = ['/api/live-indices', ...(stocks ? ['/api/daily-market'] : [])];
+      await Promise.all(routes.map(u => fetch(u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'start' }) })));
       setMsg('Feeds starting - quotes appear in a few seconds');
+      setTimeout(onStarted, 2_000);
     } catch (e) { setMsg(e instanceof Error ? e.message : 'Could not start the feeds'); }
     finally { setBusy(false); }
   };
   return (
     <div className="flex items-center justify-between gap-2 rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-1.5 text-[11px]">
       <span className="flex items-center gap-1.5 font-mono text-zinc-400">
-        <span className={cn('h-1.5 w-1.5 rounded-full', fresh ? 'bg-emerald-400' : 'bg-amber-400')} aria-hidden />
-        {msg ?? (fresh ? 'Live feeds running' : 'Live feeds off or stale')}
+        <span className={cn('h-1.5 w-1.5 rounded-full', live ? 'bg-emerald-400' : 'bg-amber-400')} aria-hidden />
+        {msg ?? (live ? 'Live feeds running' : 'Live feeds off or stale')}
       </span>
-      {!fresh && (
+      {!live && (
         <button type="button" onClick={() => void start()} disabled={busy}
           className={cn('rounded border border-zinc-700 px-2 py-0.5 font-bold text-zinc-200 hover:bg-zinc-800 disabled:opacity-50', FOCUS)}>
           {busy ? 'Starting…' : 'Start feeds'}
@@ -91,45 +96,61 @@ function FeedBar({ fresh, equity }: { fresh: boolean; equity: boolean }) {
   );
 }
 
-/** What the ten heaviest names add up to in index points, and how many are up. */
-function PullCard({ quotes, level, fresh }: { quotes: Record<string, EquityQuote>; level: number | null; fresh: boolean }) {
-  const p = useMemo(() => heavyweightPull(NIFTY_TOP10_BY_WEIGHT, quotes, level), [quotes, level]);
-  if (!p) return <Card title="Heavyweight pull"><p className="text-[11px] text-zinc-500">Waiting for the equity quotes…</p></Card>;
-  const tone = p.pts > 0 ? 'text-emerald-400' : p.pts < 0 ? 'text-red-400' : 'text-zinc-300';
-  const top = p.rows.slice(0, 3);
+const CONCENTRATION: Record<'narrow' | 'moderate' | 'broad', { label: string; cls: string; hint: string }> = {
+  narrow: { label: 'Narrow', cls: 'border-amber-500/30 bg-amber-500/10 text-amber-300', hint: 'A few heavyweights carry the move - such rallies and falls tend not to hold.' },
+  moderate: { label: 'Moderate', cls: 'border-zinc-700 bg-zinc-900 text-zinc-300', hint: 'The move is shared by a fair number of stocks.' },
+  broad: { label: 'Broad', cls: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300', hint: 'Many stocks are moving the index the same way.' },
+};
+
+/** How many index points each Nifty 50 stock adds or takes: the net, whether the move is narrow or broad, and the top pullers and draggers. */
+function ContributionCard({ reply, error }: { reply: ContribReply | null; error: string | null }) {
+  const res = reply?.result;
+  if (error && !res) return <Card title="Nifty contribution"><p className="text-[11px] text-zinc-400">{error}</p></Card>;
+  if (!res || !res.rows.length) return <Card title="Nifty contribution"><p className="text-[11px] text-zinc-500">{reply ? 'No priced stocks yet - start the feeds.' : 'Loading…'}</p></Card>;
+  if (res.rows.every(r => r.points === 0)) return <Card title="Nifty contribution" note={reply?.feeds ? `stocks ${reply.feeds.stocks.state}` : undefined}><p className="text-[11px] text-zinc-500">No price movement against the previous close yet (market closed or before the open).</p></Card>;
+  const conc = res.concentration ? CONCENTRATION[res.concentration] : null;
+  // the index-vs-stocks gap only means something while both feeds tick: a feed that is starting or stale shows a zero index move
+  const live = reply?.feeds?.stocks.state === 'live' && reply?.feeds?.indices.state === 'live';
+  const tone = res.net > 0 ? 'text-emerald-400' : res.net < 0 ? 'text-red-400' : 'text-zinc-300';
+  const col = (rows: ContributionResult['rows'], good: boolean) => rows.slice(0, 5).map(r => (
+    <li key={r.symbol} className="flex items-center justify-between gap-2">
+      <span className="truncate text-zinc-400" title={`${r.name} ${r.changePct >= 0 ? '+' : ''}${r.changePct.toFixed(2)}%`}>{r.symbol}</span>
+      <span className={cn('tabular-nums', good ? 'text-emerald-400' : 'text-red-400')}>{signed(r.points)}</span>
+    </li>
+  ));
   return (
-    <Card title="Heavyweight pull" note={`${fresh ? '' : 'STALE · '}${p.covered.toFixed(0)}% of the index`}>
-      <p className="font-mono text-sm">
-        <strong className={cn('text-base', tone)}>{signed(p.pts)} pts</strong>
-        <span className="ml-2 text-[11px] text-zinc-500">{p.up} up · {p.down} down of {p.rows.length}</span>
-      </p>
-      <ul className="mt-1.5 flex flex-col gap-0.5 font-mono text-[11px]">
-        {top.map(r => (
-          <li key={r.symbol} className="flex items-center justify-between">
-            <span className="text-zinc-400">{r.name} <span className="text-zinc-600">{r.weight.toFixed(1)}%</span></span>
-            <span className={r.pts >= 0 ? 'text-emerald-400' : 'text-red-400'}>{signed(r.pts)}</span>
-          </li>
-        ))}
-      </ul>
-      <p className="mt-1.5 text-[10px] text-zinc-600">Weight × % change × index level, from the live equity feed. A few names moving the index is a narrower move than many.</p>
+    <Card title="Nifty contribution" note={reply?.feeds ? `stocks ${reply.feeds.stocks.state}` : undefined}>
+      <div className="flex items-baseline justify-between gap-2">
+        <p className="font-mono"><strong className={cn('text-base', tone)}>{signed(res.net)} pts</strong><span className="ml-2 text-[11px] text-zinc-500">from {res.rows.length} stocks</span></p>
+        {conc && <span className={cn('rounded border px-1.5 text-[9px] font-black uppercase', conc.cls)} title={conc.hint}>{conc.label}</span>}
+      </div>
+      {reply?.nifty && (
+        <p className="mt-0.5 font-mono text-[11px] text-zinc-500">
+          Nifty {signed(reply.nifty.change)} ({signed(reply.nifty.changePct, 2)}%)
+          {live && res.residual !== null && <span className={res.residualFlag ? ' text-amber-400' : ''}> · gap {signed(res.residual)}</span>}
+        </p>
+      )}
+      {!live && <p className="mt-1 text-[10px] text-zinc-500">Feeds are not both live yet: these numbers are the last snapshot.</p>}
+      {live && res.residualFlag && <p className="mt-1 text-[10px] text-amber-400">The stock total and the index disagree by more than usual - the weights may be out of date after a rebalance.</p>}
+      <div className="mt-2 grid grid-cols-2 gap-3 font-mono text-[11px]">
+        <div><p className="mb-0.5 text-[9px] font-bold uppercase tracking-wider text-zinc-600">Pulling up</p><ul className="flex flex-col gap-0.5">{col(res.pullers, true)}</ul></div>
+        <div><p className="mb-0.5 text-[9px] font-bold uppercase tracking-wider text-zinc-600">Dragging down</p><ul className="flex flex-col gap-0.5">{col(res.draggers, false)}</ul></div>
+      </div>
+      {res.missing.length > 0 && <p className="mt-1.5 text-[10px] text-zinc-600">{res.missing.length} name{res.missing.length > 1 ? 's' : ''} without a price are held at their last weight.</p>}
+      <Link href="/nifty-contribution" target="_blank" rel="noreferrer" className={cn('mt-2 block text-center text-[11px] font-bold text-zinc-400 hover:text-zinc-200', FOCUS)}>Open the full contribution page ↗</Link>
     </Card>
   );
 }
 
-/** Indices (NIFTY and crude both), and for NIFTY the heavyweights: the Advanced Scalper's tables plus the pull summary. */
-export function MarketTab({ symbol, price }: { symbol: string; price: number | null }) {
+/** Indices (NIFTY and crude both) and, for NIFTY, the contribution list (the Nifty Contribution page's own data). */
+export function MarketTab({ symbol }: { symbol: string }) {
   const nifty = symbol === 'NIFTY';
-  const feed = useEquityFeed();
+  const c = useContribution();
   return (
     <div className="flex flex-col gap-3">
-      <FeedBar fresh={nifty ? feed.fresh : true} equity={nifty} />
+      <FeedBar feeds={c.reply?.feeds} stocks={nifty} onStarted={c.reload} />
       <TopIndices />
-      {nifty && (
-        <>
-          <PullCard quotes={feed.quotes} level={price} fresh={feed.fresh} />
-          <TopWeightStocks />
-        </>
-      )}
+      {nifty && <ContributionCard reply={c.reply} error={c.error} />}
     </div>
   );
 }

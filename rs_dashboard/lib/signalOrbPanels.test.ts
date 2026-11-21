@@ -55,19 +55,7 @@ test('mtfTable: one row per indicator, one cell per timeframe, orb colour per ti
   assert.deepEqual(empty.signals, ['NEUTRAL', 'NEUTRAL', 'NEUTRAL', 'NEUTRAL', 'NEUTRAL']);
 });
 
-import { heavyweightPull, oiAgreement, oiSide, oiSummary } from './signalOrbPanels.ts';
-
-test('heavyweightPull: weight x % change x level, names without a quote are left out and the weight covered says so', () => {
-  const w = [{ symbol: 'A', name: 'A', weight: 10 }, { symbol: 'B', name: 'B', weight: 5 }, { symbol: 'C', name: 'C', weight: 2 }];
-  const p = heavyweightPull(w, { A: { change_pct: 1 }, B: { change_pct: -2 } }, 25_000)!;
-  assert.ok(Math.abs(p.rows[0].pts - 25) < 1e-9);          // 10% x 1% x 25000 = 25
-  assert.ok(Math.abs(p.rows[1].pts + 25) < 1e-9);          // 5% x -2% x 25000 = -25
-  assert.ok(Math.abs(p.pts) < 1e-9);
-  assert.deepEqual([p.up, p.down, p.covered], [1, 1, 15]);
-  assert.equal(heavyweightPull(w, {}, 25_000), null);
-  assert.equal(heavyweightPull(w, { A: { change_pct: 1 } }, null), null);
-  assert.equal(heavyweightPull(w, { A: { change_pct: Number.NaN } }, 25_000), null);
-});
+import { oiAgreement, oiSide, oiSummary } from './signalOrbPanels.ts';
 
 test('oiSummary / oiSide / oiAgreement', () => {
   const s = oiSummary([{ ts: 1, spot: 1, ceOI: 100, peOI: 80 }, { ts: 2, spot: 1, ceOI: 150, peOI: 120 }])!;

@@ -179,7 +179,7 @@ export function ContextTabs({ mtf, active, history, levels, price, today, symbol
             <LevelsPanel levels={levels} price={price} today={today} />
           </>
         )}
-        {tab === 'market' && <MarketTab symbol={symbol} price={price} />}
+        {tab === 'market' && <MarketTab symbol={symbol} />}
         {tab === 'oi' && <OiTab symbol={symbol} signal={signal} />}
       </div>
     </div>

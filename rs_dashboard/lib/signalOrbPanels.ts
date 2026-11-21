@@ -130,41 +130,6 @@ export function keyLevels(bars1m: Bar1m[]): KeyLevels | null {
 
 // ── Market context (information only) ────────────────────────────────────────────────────────────────────────────────────
 
-export type WeightRow = { symbol: string; name: string; weight: number };
-export type EquityQuote = { ltp?: number; change_pct?: number | null };
-export type PullRow = WeightRow & { changePct: number; pts: number };
-export type HeavyweightPull = {
-  /** Index points the covered names are adding (+) or taking (−): sum of weight% x their % change x the index level. */
-  pts: number;
-  up: number;
-  down: number;
-  /** Combined index weight of the names that had a quote, percent. */
-  covered: number;
-  rows: PullRow[];
-};
-
-/**
- * How much the heaviest index names are pulling the index: each contributes (weight / 100) x its % change x `level` points. A
- * name with no quote is left out and `covered` says how much of the weight that leaves. null when none has a quote or the level is unknown.
- */
-export function heavyweightPull(weights: WeightRow[], quotes: Record<string, EquityQuote | undefined>, level: number | null): HeavyweightPull | null {
-  if (!(level && level > 0)) return null;
-  const rows: PullRow[] = [];
-  for (const w of weights) {
-    const c = quotes[w.symbol]?.change_pct;
-    if (typeof c !== 'number' || !Number.isFinite(c)) continue;
-    rows.push({ ...w, changePct: c, pts: (w.weight / 100) * (c / 100) * level });
-  }
-  if (!rows.length) return null;
-  return {
-    pts: rows.reduce((s, r) => s + r.pts, 0),
-    up: rows.filter(r => r.changePct > 0).length,
-    down: rows.filter(r => r.changePct < 0).length,
-    covered: rows.reduce((s, r) => s + r.weight, 0),
-    rows: rows.sort((a, b) => Math.abs(b.pts) - Math.abs(a.pts)),
-  };
-}
-
 export type OiPoint = { ts: number; spot: number; ceOI: number; peOI: number };
 export type OiSummary = {
   ceOI: number;
