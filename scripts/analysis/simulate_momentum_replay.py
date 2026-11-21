@@ -30,7 +30,7 @@ import pandas as pd
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from lib import minervini, fifty_two_week, clenow                      # noqa: E402
+from lib import minervini, fifty_two_week, clenow, data_quality      # noqa: E402
 from lib.momentum import (
     MomentumConfig, Position,
     STAGE_INITIAL, STAGE_BREAKEVEN, STAGE_TRAIL,
@@ -154,6 +154,10 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
     industries = {u["symbol"]: u["industry"] for u in universe}
     bench = load_benchmark()
     price_map = load_price_map(symbols, min_bars=cfg.min_history_bars)
+    data_warnings = data_quality.find_suspect_breaks(price_map, bench=bench)
+    for w in data_warnings:
+        print(f"DATA WARNING {w['symbol']} {w['date']}: close {w['prev_close']} -> {w['close']} (x{w['ratio']}) "
+              f"looks like an unadjusted corporate action; repair with scripts/downloader/repair_symbol_history.py")
 
     tables = build_tables(price_map, cfg)
     calendar = build_regime_weekly(bench, cfg)
@@ -302,92 +306,91 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
                 pending_sells.append((sym, reason))
                 queued_sells.add(sym)
 
-        # ── 5. Review day logic ──────────────────────────────────────────────
+        # ── 5. Daily scan & rebalancing ──────────────────────────────────────
         is_review = calendar.is_review_day(d)
         regime_on = bool(calendar.is_on(d))
 
-        # Minervini and 52-Week High breakouts scan for entries every session (daily).
-        # Liquidation on a regime flip and rank rotation stay review-day-only.
-        if is_review or strategy in ("minervini", "52w_high"):
-            if not regime_on:
-                if cfg.regime_exit and is_review:
-                    for sym in portfolio:
-                        if sym not in queued_sells:
-                            pending_sells.append((sym, "regime"))
-                            queued_sells.add(sym)
+        # All strategies evaluate regime, rank rotation, and new entries daily.
+        if not regime_on:
+            if cfg.regime_exit:
+                for sym in portfolio:
+                    if sym not in queued_sells:
+                        pending_sells.append((sym, "regime"))
+                        queued_sells.add(sym)
+        else:
+            # Rank universe based on strategy
+            if strategy == "turtle_rs":
+                ranking = rank_universe(price_map, bench, d, cfg, matrix=rs_matrix) or []
+            elif strategy == "minervini":
+                ranking = rs_ranking(d)[0]
+            elif strategy == "52w_high":
+                cands = []
+                for sym, t in tables.items():
+                    px_r = t["px"].get(d)
+                    if not px_r:
+                        continue
+                    h250 = t["high250"].get(d)
+                    if h250 and not np.isnan(h250) and h250 > 0:
+                        cands.append((sym, float(px_r.close) / float(h250)))
+                cands.sort(key=lambda x: x[1], reverse=True)
+                ranking = cands
+            elif strategy == "clenow":
+                cands = []
+                for sym, t in tables.items():
+                    px_r = t["px"].get(d)
+                    if not px_r:
+                        continue
+                    score = t["clenow"].get(d, 0.0)
+                    if score > 0:
+                        cands.append((sym, float(score)))
+                cands.sort(key=lambda x: x[1], reverse=True)
+                ranking = cands
             else:
-                # Rank universe based on strategy
+                ranking = []
+
+            if ranking:
+                ranks = ranks_by_symbol(ranking)
+                survivors = {s: p for s, p in portfolio.items() if s not in queued_sells}
+
+                # Daily rank rotation / rebalancing
                 if strategy == "turtle_rs":
-                    ranking = rank_universe(price_map, bench, d, cfg, matrix=rs_matrix) or []
-                elif strategy == "minervini":
-                    ranking = rs_ranking(d)[0]
-                elif strategy == "52w_high":
-                    cands = []
-                    for sym, t in tables.items():
-                        px_r = t["px"].get(d)
-                        if not px_r:
-                            continue
-                        h250 = t["high250"].get(d)
-                        if h250 and not np.isnan(h250) and h250 > 0:
-                            cands.append((sym, float(px_r.close) / float(h250)))
-                    cands.sort(key=lambda x: x[1], reverse=True)
-                    ranking = cands
+                    for sym, reason in rank_rotation_exits(survivors, ranks, d, cfg):
+                        pending_sells.append((sym, "rebalance"))
+                        queued_sells.add(sym)
                 elif strategy == "clenow":
-                    cands = []
-                    for sym, t in tables.items():
-                        px_r = t["px"].get(d)
-                        if not px_r:
+                    for sym, reason in clenow.rank_rotation_exits(survivors, ranking, min_percentile=80.0):
+                        pending_sells.append((sym, "rotation"))
+                        queued_sells.add(sym)
+
+                # Daily buys for next session open
+                slots_free = cfg.slots - (len(portfolio) - len(queued_sells))
+                if slots_free > 0:
+                    counts = sector_counts(survivors)
+                    picks = []
+                    for s, _ in ranking:
+                        if len(picks) >= slots_free:
+                            break
+                        if s in survivors or s in queued_sells:
                             continue
-                        score = t["clenow"].get(d, 0.0)
-                        if score > 0:
-                            cands.append((sym, float(score)))
-                    cands.sort(key=lambda x: x[1], reverse=True)
-                    ranking = cands
-                else:
-                    ranking = []
+                        if s in cooldowns and d < cooldowns[s]:
+                            continue
+                        ind = industries.get(s, "")
+                        if counts.get(ind, 0) >= cfg.sector_cap:
+                            continue
+                        ok, _ = passes_strategy_entry(
+                            strategy, s, tables, d, cfg,
+                            rs_pct=rs_ranking(d)[1] if strategy == "minervini" else None)
+                        if not ok:
+                            continue
+                        picks.append({"symbol": s, "rank": ranks.get(s, 999), "industry": ind})
+                        counts[ind] = counts.get(ind, 0) + 1
 
-                if ranking:
-                    ranks = ranks_by_symbol(ranking)
-                    survivors = {s: p for s, p in portfolio.items() if s not in queued_sells}
-                    if is_review:
-                        if strategy == "turtle_rs":
-                            for sym, reason in rank_rotation_exits(survivors, ranks, d, cfg):
-                                pending_sells.append((sym, "rebalance"))
-                                queued_sells.add(sym)
-                        elif strategy == "clenow":
-                            for sym, reason in clenow.rank_rotation_exits(survivors, ranking, min_percentile=80.0):
-                                pending_sells.append((sym, "rotation"))
-                                queued_sells.add(sym)
-
-                    # Buys for next session open
-                    slots_free = cfg.slots - (len(portfolio) - len(queued_sells))
-                    if slots_free > 0:
-                        counts = sector_counts(survivors)
-                        picks = []
-                        for s, _ in ranking:
-                            if len(picks) >= slots_free:
-                                break
-                            if s in survivors or s in queued_sells:
-                                continue
-                            if s in cooldowns and d < cooldowns[s]:
-                                continue
-                            ind = industries.get(s, "")
-                            if counts.get(ind, 0) >= cfg.sector_cap:
-                                continue
-                            ok, _ = passes_strategy_entry(
-                                strategy, s, tables, d, cfg,
-                                rs_pct=rs_ranking(d)[1] if strategy == "minervini" else None)
-                            if not ok:
-                                continue
-                            picks.append({"symbol": s, "rank": ranks.get(s, 999), "industry": ind})
-                            counts[ind] = counts.get(ind, 0) + 1
-
-                        for pick in picks:
-                            pending_buys.append({
-                                "symbol": pick["symbol"],
-                                "rank": pick["rank"],
-                                "industry": pick["industry"],
-                            })
+                    for pick in picks:
+                        pending_buys.append({
+                            "symbol": pick["symbol"],
+                            "rank": pick["rank"],
+                            "industry": pick["industry"],
+                        })
 
         # ── 6. Compute Top 25 Ranking snapshot for today ───────────────────────
         if strategy == "turtle_rs":
@@ -502,6 +505,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
 
     result_payload = {
         "success": True,
+        "data_warnings": data_warnings,
         "config": {
             "universe": cfg.universe,
             "capital": cfg.capital,

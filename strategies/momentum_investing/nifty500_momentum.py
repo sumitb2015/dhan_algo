@@ -48,7 +48,7 @@ from lib.strategy_state_helper import (                                  # noqa:
     save_strategy_state, check_shutdown_trigger, instance_log_suffix,
 )
 from lib.algo_kit import setup_strategy_logging  # noqa: E402
-from lib import minervini                                                # noqa: E402
+from lib import data_quality, minervini                                                # noqa: E402
 from lib.momentum import (                                               # noqa: E402
     MomentumConfig, Position, STAGE_TRAIL,
     build_regime_weekly, build_rs_matrix, build_tables,
@@ -266,6 +266,11 @@ class MomentumPortfolioStrategy:
             self.last_alert = "No price data loaded"
             logger.error(self.last_alert)
             return False
+        for w in data_quality.find_suspect_breaks(self.price_map, bench=self.bench):
+            if (date.today() - date.fromisoformat(w["date"])).days <= 400:       # inside the indicator lookback
+                logger.warning(f"DATA WARNING {w['symbol']} {w['date']}: close {w['prev_close']} -> {w['close']} "
+                               f"(x{w['ratio']}) looks like an unadjusted corporate action — its ranking and stops "
+                               f"may be wrong; repair with scripts/downloader/repair_symbol_history.py")
 
         self.tables = build_tables(self.price_map, self.cfg)
         self.calendar = build_regime_weekly(self.bench, self.cfg)
@@ -566,26 +571,18 @@ class MomentumPortfolioStrategy:
             if reason:
                 self.close_position(sym, prices[sym], reason)
 
-        # 2. Weekly review.
-        is_review = self.calendar.is_review_day(self.data_date)
+        # 2. Daily review & rebalancing.
         already_reviewed = self.last_review_date == self.data_date
-        if self.model == "minervini":
-            # Entries are scanned every session; only regime liquidation stays weekly.
-            if is_review and not already_reviewed:
-                self.last_review_date = self.data_date
-                if not regime_on and self.cfg.regime_exit and self.positions:
-                    logger.warning("Regime OFF — liquidating the book")
-                    for sym in list(self.positions.keys()):
-                        self.close_position(sym, prices.get(sym, self.positions[sym].last_close), "regime")
-            self.minervini_entries(prices, regime_on)
-        elif is_review and not already_reviewed:
-            self.weekly_review(prices, regime_on)
+        if not already_reviewed:
+            if not regime_on and self.cfg.regime_exit and self.positions:
+                logger.warning("Regime OFF — liquidating the book")
+                for sym in list(self.positions.keys()):
+                    self.close_position(sym, prices.get(sym, self.positions[sym].last_close), "regime")
+            elif self.model == "minervini":
+                self.minervini_entries(prices, regime_on)
+            else:
+                self.weekly_review(prices, regime_on)
             self.last_review_date = self.data_date
-        elif is_review:
-            logger.info("Review already done for this date — skipping")
-        else:
-            nxt = self.calendar.next_review_day(self.data_date)
-            logger.info(f"Not a review day. Next review: {nxt}")
 
         self.last_cycle_date = self.data_date
         self.save_portfolio()
