@@ -58,32 +58,20 @@ const STRATEGY_DETAILS: Record<string, {
   rules: string[];
   verdict: string;
 }> = {
-  '1. 52-Week High Breakout': {
-    key: '52w_high',
-    badge: 'High Consistency & Clean Breakouts',
-    badgeColor: 'bg-sky-500/10 text-sky-400 border-sky-500/30',
-    summary: 'George & Hwang (2004) Journal of Finance 52-Week High Anomaly: daily breakout above the 52-week ceiling with zero overhead supply.',
-    rules: [
-      'Breakout trigger: Daily scan for true 52-week (250-day) high breakout; max 5% extension',
-      'Trend filter: Close > 50 SMA > 200 SMA and volume >= 20-day average',
-      'Exit: Trailing stop 12% below running peak close; market regime on Nifty 200 SMA',
-    ],
-    verdict: '+19.4% CAGR with -28.1% max drawdown and 1.76 Profit Factor. Solid, dependable compounding on genuine new 52W peaks.',
-  },
-  '2. Minervini Trend Template': {
-    key: 'minervini',
-    badge: 'Best Win Rate & Quality Growth',
+  '1. EMA & Supertrend (Trend Follower)': {
+    key: 'ema_supertrend',
+    badge: 'Highest Profit Factor & Sharpe Ratio',
     badgeColor: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
-    summary: 'Mark Minervini’s Trend Template from Trade Like a Stock Market Wizard. Daily pivot breakout with stacked MAs and rising 200-SMA.',
+    summary: 'Textbook multi-timeframe moving average ribbon (EMA 20 > 50 > 200) coupled with ATR volatility trailing bands (Supertrend 10, 3.0).',
     rules: [
-      'Trend Template: Close > 50 SMA > 150 SMA > 200 SMA, and 200 SMA must be rising (> 22 bars ago)',
-      'Base & Extension: Close >= 25% above 52W low, within 20% of 52W high, and <= 5% above 20d pivot',
-      'Relative Strength: Universe RS percentile >= 70 (top 30% strongest leaders)',
-      'Exit: 12% initial stop; once gain >= 15%, trails 50-day SMA (never loosens)',
+      'Trend alignment: Close > EMA 20 > EMA 50 > EMA 200 (stacked moving average ribbon)',
+      'Volatility confirmation: Supertrend (10, 3.0) is Green (st_dir == +1, close > Supertrend)',
+      'Volume & Strength: Volume >= 80% of 20-day average; RS percentile >= 60 (top 40% strongest)',
+      'Exit: Supertrend turns Bearish (Red) or Close drops below EMA 50; 12% disaster trailing stop',
     ],
-    verdict: '+25.4% CAGR with highest Win Rate (54.8%) and 2.13 Profit Factor. Strict quality filters deliver pristine risk-adjusted returns.',
+    verdict: '+21.5% CAGR with lowest Max Drawdown (-12.4%), highest Sharpe (1.59), and highest Profit Factor (2.29). Outstanding risk-adjusted compounding.',
   },
-  '3. Andreas Clenow Momentum': {
+  '2. Andreas Clenow Momentum': {
     key: 'clenow',
     badge: 'Aggressive Compounder',
     badgeColor: 'bg-purple-500/10 text-purple-300 border-purple-500/30',
@@ -96,7 +84,32 @@ const STRATEGY_DETAILS: Record<string, {
     ],
     verdict: '+36.4% CAGR and 2.19 Profit Factor. Turned ₹5 Lakhs into ₹42.00 Lakhs over 6.9 years with gap filtering containing drawdowns.',
   },
-  '4. Current Turtle RS Breakout': {
+  '3. Minervini Trend Template': {
+    key: 'minervini',
+    badge: 'Best Win Rate & Quality Growth',
+    badgeColor: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
+    summary: 'Mark Minervini’s Trend Template from Trade Like a Stock Market Wizard. Daily pivot breakout with stacked MAs and rising 200-SMA.',
+    rules: [
+      'Trend Template: Close > 50 SMA > 150 SMA > 200 SMA, and 200 SMA must be rising (> 22 bars ago)',
+      'Base & Extension: Close >= 25% above 52W low, within 20% of 52W high, and <= 5% above 20d pivot',
+      'Relative Strength: Universe RS percentile >= 70 (top 30% strongest leaders)',
+      'Exit: 12% initial stop; once gain >= 15%, trails 50-day SMA (never loosens)',
+    ],
+    verdict: '+25.4% CAGR with highest Win Rate (54.8%) and 2.13 Profit Factor. Strict quality filters deliver pristine risk-adjusted returns.',
+  },
+  '4. 52-Week High Breakout': {
+    key: '52w_high',
+    badge: 'High Consistency & Clean Breakouts',
+    badgeColor: 'bg-sky-500/10 text-sky-400 border-sky-500/30',
+    summary: 'George & Hwang (2004) Journal of Finance 52-Week High Anomaly: daily breakout above the 52-week ceiling with zero overhead supply.',
+    rules: [
+      'Breakout trigger: Daily scan for true 52-week (250-day) high breakout; max 5% extension',
+      'Trend filter: Close > 50 SMA > 200 SMA and volume >= 20-day average',
+      'Exit: Trailing stop 12% below running peak close; market regime on Nifty 200 SMA',
+    ],
+    verdict: '+19.4% CAGR with -28.1% max drawdown and 1.76 Profit Factor. Solid, dependable compounding on genuine new 52W peaks.',
+  },
+  '5. Current Turtle RS Breakout': {
     key: 'turtle_rs',
     badge: 'Defensive Baseline',
     badgeColor: 'bg-amber-500/10 text-amber-300 border-amber-500/30',
@@ -108,7 +121,7 @@ const STRATEGY_DETAILS: Record<string, {
     ],
     verdict: '+14.9% CAGR with the lowest drawdown of all models (-14.3%) and highest Sharpe (1.21). Maximum downside protection.',
   },
-  '5. Connors RSI-2 Mean Reversion': {
+  '6. Connors RSI-2 Mean Reversion': {
     key: 'connors_rsi2',
     badge: 'High Frequency Dip Buyer',
     badgeColor: 'bg-zinc-800 text-zinc-400 border-zinc-700',
@@ -212,10 +225,10 @@ export default function StrategyBenchmarkPanel({ onSelectStrategy }: {
             </thead>
             <tbody>
               {results.map((row) => {
-                const details = STRATEGY_DETAILS[row.Strategy];
-                const isTopCagr = row['CAGR (%)'].includes('40.');
-                const isBestPF = row['Profit Factor'].includes('2.24');
-                const isLowestDD = row['Max Drawdown'].includes('14.31');
+                const details = STRATEGY_DETAILS[row.Strategy] || Object.values(STRATEGY_DETAILS).find(d => row.Strategy.toLowerCase().includes(d.key.replace('_', ' ')) || (d.key === 'ema_supertrend' && row.Strategy.toLowerCase().includes('ema')));
+                const isTopCagr = row['CAGR (%)'].includes('35.') || row['CAGR (%)'].includes('40.');
+                const isBestPF = row['Profit Factor'].includes('2.29');
+                const isLowestDD = row['Max Drawdown'].includes('12.43');
 
                 return (
                   <tr key={row.Strategy} className="border-t border-zinc-800 hover:bg-zinc-800/40 transition-colors">

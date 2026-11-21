@@ -48,7 +48,7 @@ from lib.strategy_state_helper import (                                  # noqa:
     save_strategy_state, check_shutdown_trigger, instance_log_suffix,
 )
 from lib.algo_kit import setup_strategy_logging  # noqa: E402
-from lib import data_quality, minervini                                                # noqa: E402
+from lib import data_quality, minervini, ema_supertrend                           # noqa: E402
 from lib.momentum import (                                               # noqa: E402
     MomentumConfig, Position, STAGE_TRAIL,
     build_regime_daily, build_rs_matrix, build_tables,
@@ -294,6 +294,9 @@ class MomentumPortfolioStrategy:
         if self.model == "minervini":
             minervini.add_tables(self.price_map, self.tables)
             self.rs_pct = minervini.rs_percentiles(self.ranking)
+        elif self.model == "ema_supertrend":
+            ema_supertrend.add_tables(self.price_map, self.tables)
+            self.rs_pct = minervini.rs_percentiles(self.ranking)
         logger.info(f"Loaded {len(self.price_map)} symbols, data date {self.data_date}, "
                     f"{len(self.ranking)} ranked, regime "
                     f"{'ON' if self.calendar.is_on(self.data_date) else 'OFF'}")
@@ -505,11 +508,15 @@ class MomentumPortfolioStrategy:
         if self.model == "minervini":
             return minervini.entry_check(sym, self.tables, self.data_date,
                                          self.cfg.breakout_days, self.rs_pct)
+        elif self.model == "ema_supertrend":
+            return ema_supertrend.entry_check(sym, self.tables, self.data_date, self.rs_pct)
         return passes_entry_filters(sym, self.tables, self.data_date, self.cfg)
 
     def check_exit(self, pos: Position, price: float) -> str | None:
         if self.model == "minervini":
             return minervini.exit_check(pos, price, self.tables, self.data_date, STAGE_TRAIL)
+        elif self.model == "ema_supertrend":
+            return ema_supertrend.exit_check(pos, price, self.tables, self.data_date, stop_pct=self.cfg.stop_pct)
         return pos.update(price, self.cfg)
 
     def minervini_picks(self, free: int) -> list[dict]:
@@ -578,7 +585,7 @@ class MomentumPortfolioStrategy:
                 logger.warning("Regime OFF — liquidating the book")
                 for sym in list(self.positions.keys()):
                     self.close_position(sym, prices.get(sym, self.positions[sym].last_close), "regime")
-            elif self.model == "minervini":
+            elif self.model in ("minervini", "ema_supertrend"):
                 self.minervini_entries(prices, regime_on)
             else:
                 self.weekly_review(prices, regime_on)
@@ -723,9 +730,10 @@ Examples:
 """)
     p.add_argument("--live", action="store_true", default=False,
                    help="place real CNC orders (default: paper)")
-    p.add_argument("--model", choices=["turtle_rs", "minervini"], default="turtle_rs",
+    p.add_argument("--model", choices=["turtle_rs", "minervini", "ema_supertrend"], default="turtle_rs",
                    help="turtle_rs: composite-RS breakout, weekly entries/rotation (default). "
                         "minervini: Trend Template (rising 200 SMA, RS>=70, pivot breakout), entries scanned DAILY. "
+                        "ema_supertrend: EMA 20>50>200 ribbon + Supertrend Green, entries scanned DAILY. "
                         "A portfolio file belongs to one model; use --instance-id to run both")
     p.add_argument("--breakout-days", type=int, default=None,
                    help="breakout lookback in days (turtle_rs default 55; minervini pivot 20, or 10 for a tight VCP)")

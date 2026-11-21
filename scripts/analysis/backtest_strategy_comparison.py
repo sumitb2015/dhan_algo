@@ -631,13 +631,44 @@ def main():
     print("Running Connors RSI-2 Mean Reversion Swing...")
     eq_rsi2, trades_rsi2 = run_connors_rsi2()
 
+    print("Running EMA & Supertrend (Trend Follower)...")
+    cfg_ema = MomentumConfig(universe="nifty500", capital=capital, slots=slots, regime_enabled=True, stop_pct=12.0)
+    ema_sim = run_replay_simulation(cfg_ema, start_date, end_date, strategy="ema_supertrend", force=True)
+    ema_snaps = ema_sim["snapshots"]
+    ema_eq = pd.Series({datetime.strptime(s["date"], "%Y-%m-%d").date(): s["equity"] for s in ema_snaps})
+    ema_trades = [
+        TradeRecord(
+            "EMA_Supertrend",
+            t["symbol"],
+            datetime.strptime(t["entry_date"], "%Y-%m-%d").date(),
+            datetime.strptime(t["exit_date"], "%Y-%m-%d").date(),
+            t["entry_price"],
+            t["exit_price"],
+            t["qty"],
+            t["invested"],
+            t["pnl"],
+            t["pnl_pct"],
+            t["exit_reason"],
+            t["hold_days"],
+        )
+        for s in ema_snaps for t in s.get("closed_trades", [])
+    ]
+    seen_ema = set()
+    unique_ema_trades = []
+    for t in ema_trades:
+        key = (t.symbol, t.entry_date, t.exit_date)
+        if key not in seen_ema:
+            seen_ema.add(key)
+            unique_ema_trades.append(t)
+
     # Summarize all
     strategies = {
-        "1. 52-Week High Breakout": (eq_52w, trades_52w),
-        "2. Minervini Trend Template": (eq_minervini, trades_minervini),
-        "3. Andreas Clenow Momentum": (eq_clenow, trades_clenow),
-        "4. Current Turtle RS Breakout": (turtle_eq, unique_turtle_trades),
-        "5. Connors RSI-2 Mean Reversion": (eq_rsi2, trades_rsi2),
+        "1. EMA & Supertrend (Trend Follower)": (ema_eq, unique_ema_trades),
+        "2. Andreas Clenow Momentum": (eq_clenow, trades_clenow),
+        "3. Minervini Trend Template": (eq_minervini, trades_minervini),
+        "4. 52-Week High Breakout": (eq_52w, trades_52w),
+        "5. Current Turtle RS Breakout": (turtle_eq, unique_turtle_trades),
+        "6. Connors RSI-2 Mean Reversion": (eq_rsi2, trades_rsi2),
     }
 
     summary_rows = []
