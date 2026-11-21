@@ -7,6 +7,8 @@ import { withFileLock, writeJsonAtomic } from '@/lib/lockedJsonFile';
 import {
   emptyGuardState, stepGuards, contractPricesFromBridges, type ServerGuardState, type PosView, type ExitOrder, type BridgeQuoteFile,
 } from '@/lib/kotakGuardEngine';
+import { parseGuardDefaults, type GuardDefaults } from '@/lib/guardDefaults';
+import { readJsonFile } from '@/lib/lockedJsonFile';
 
 // The broker-neutral half of the server-resident guards (P&L Guard + brackets): file store, tick loop, pricing and the
 // cover-before-sell ordering around the pure engine in lib/kotakGuardEngine.ts. A broker supplies only an adapter (its
@@ -30,6 +32,8 @@ export interface GuardAdapter {
   loadBook(): Promise<PosView[]>;
   /** Sends one market exit. Throws GuardExitRejected on a refusal, any other Error when the outcome is unknown. */
   sendExit(e: ExitOrder): Promise<void>;
+  /** True = arm the daily default P&L Guard (debug/<key>_guard_defaults.json) by itself each IST day. Kotak only for now. */
+  autoArm?: boolean;
 }
 
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
@@ -37,6 +41,8 @@ const TICK_MS = 2500;
 const QUOTES_FRESH_MS = 6000;
 const LOCK_STALE_MS = 8000;
 const WARN_REPEAT_MS = 120_000;
+/** Poll interval for an armed default while nothing is open (a position then moves it back to TICK_MS). */
+const IDLE_POLL_MS = 10_000;
 
 export const istDay = (): string => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
@@ -68,6 +74,8 @@ function readAllBridgeFiles(): BridgeQuoteFile[] {
 }
 
 export interface GuardServer {
+  readGuardDefaults(): GuardDefaults;
+  writeGuardDefaults(d: GuardDefaults): void;
   readGuardState(): ServerGuardState;
   updateGuardState(mutate: (s: ServerGuardState) => ServerGuardState): Promise<ServerGuardState>;
   startLoop(): void;
@@ -77,6 +85,10 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
   const stateFile = path.join(DEBUG_DIR, `${adapter.key}_server_guards.json`);
   const lockFile = `${stateFile}.lock`;
   const tag = `[${adapter.key}-guard]`;
+  const defaultsFile = path.join(DEBUG_DIR, `${adapter.key}_guard_defaults.json`);
+
+  function readGuardDefaults(): GuardDefaults { return parseGuardDefaults(readJsonFile(defaultsFile)); }
+  function writeGuardDefaults(d: GuardDefaults): void { writeJsonAtomic(defaultsFile, d, { pretty: true }); }
 
   function readStateFile(): ServerGuardState {
     try {
@@ -85,6 +97,8 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
         date: String(s.date ?? istDay()), pnl: s.pnl ?? null,
         brackets: Array.isArray(s.brackets) ? s.brackets : [], watch: Array.isArray(s.watch) ? s.watch : [],
         events: Array.isArray(s.events) ? s.events : [],
+        lock: s.lock ?? null, lockSent: s.lockSent && typeof s.lockSent === 'object' ? s.lockSent : {},
+        autoArmedDate: s.autoArmedDate, health: s.health,
       };
     } catch {
       return emptyGuardState(istDay());
@@ -180,6 +194,33 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
     await note('error', text);
   }
 
+  let idleUntil = 0;
+
+  /** Records whether the watcher can protect right now; written only when it changes or goes 60 s stale. */
+  async function setHealth(watching: boolean, reason: string): Promise<void> {
+    const h = readGuardState().health;
+    if (h && h.watching === watching && h.reason === reason && Date.now() - h.at < 60_000) return;
+    try { await updateGuardState(s => ({ ...s, health: { watching, reason, at: Date.now() } })); } catch { /* best effort */ }
+  }
+
+  /** Arms the daily default P&L Guard once per IST day (Kotak). A manual clear the same day is respected (autoArmedDate). */
+  async function autoArmDefault(): Promise<void> {
+    if (!adapter.autoArm) return;
+    const today = istDay();
+    const cur = readGuardState();
+    if (cur.pnl || cur.lock || cur.autoArmedDate === today) return;
+    const d = readGuardDefaults();
+    if (!d.enabled || !adapter.isSessionValid()) return;
+    await updateGuardState(s => {
+      if (s.pnl || s.lock || s.autoArmedDate === today) return s;
+      const text = `Daily default armed: loss limit ₹${d.loss}${d.profit > 0 ? `, target ₹${d.profit}` : ''} on ${d.products.join('/')}`;
+      return {
+        ...s, autoArmedDate: today, pnl: { profit: d.profit, loss: d.loss, products: d.products, date: today },
+        events: [...s.events, { at: Date.now(), kind: 'armed' as const, text }].slice(-40),
+      };
+    });
+  }
+
   /** True once every covered short shows flat in the position book (retried briefly: the book lags a fill). */
   async function shortsFlat(covers: ExitOrder[]): Promise<boolean> {
     for (let attempt = 0; attempt < 6; attempt++) {
@@ -195,12 +236,17 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
   async function tick(): Promise<void> {
     const loop = G[loopKey];
     if (!loop || loop.busy) return;
-    const cur = readGuardState();
-    if (!cur.pnl && cur.brackets.length === 0 && cur.watch.length === 0) return;
     loop.busy = true;
     try {
+      await autoArmDefault();
+      const cur = readGuardState();
+      if (!cur.pnl && cur.brackets.length === 0 && cur.watch.length === 0 && !cur.lock) return;
+      // An armed default with nothing open is polled slowly (the broker's book is rate limited); anything open, any exit in
+      // flight and a locked day are polled every tick so a new position is flattened within a few seconds.
+      if (!cur.lock && cur.brackets.length === 0 && cur.watch.length === 0 && Date.now() < idleUntil) return;
       if (!adapter.isSessionValid()) {
         // Nothing can be read or sent, so the guard is NOT protecting anything: say so instead of idling silently.
+        await setHealth(false, `${adapter.key} session is not valid - log in again`);
         await warn(`${adapter.key} session is not valid - guards cannot watch or exit until you log in again`);
         return;
       }
@@ -209,10 +255,14 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
         positions = await loadPositionsPriced();
       } catch (err) {
         // A revoked token or a Kite/Neo outage looks valid to the file check; the first failing read is where it shows.
+        await setHealth(false, `could not read the ${adapter.key} position book`);
         await warn(`could not read the ${adapter.key} position book (${String((err as Error).message ?? err)}) - guards are not watching`);
         return;
       }
+      const anyOpen = positions.some(p => p.netQty !== 0);
+      idleUntil = anyOpen ? 0 : Date.now() + IDLE_POLL_MS;
       const unpriced = positions.filter(p => p.netQty !== 0 && !(p.ltp > 0)).map(p => p.symbol);
+      await setHealth(true, unpriced.length ? `no live price for ${unpriced.join(', ')}: only the loss limit can act on it` : '');
       if (unpriced.length) await warn(`no live price for ${unpriced.join(', ')} - guards pause on ${unpriced.length === 1 ? 'it' : 'them'} (only a P&L loss limit can still fire)`);
       const exits: ExitOrder[] = [];
       await updateGuardState(s => {
@@ -263,5 +313,5 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
     console.log(`${tag} watcher started`);
   }
 
-  return { readGuardState, updateGuardState, startLoop };
+  return { readGuardDefaults, writeGuardDefaults, readGuardState, updateGuardState, startLoop };
 }

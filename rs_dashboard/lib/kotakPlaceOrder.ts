@@ -1,5 +1,6 @@
 import { kotakGet, kotakPost, kotakRows, KOTAK_PATHS, KotakRejectedError } from '@/lib/kotakToken';
 import { findRecentKotakOrder } from '@/lib/kotakShape';
+import { kotakLockRefusal } from '@/lib/kotakDayLock';
 
 // The one way a dashboard route places a Kotak order. Three outcomes, never two:
 //  - placed:   Kotak returned an order number, or the order was found in the order book after an unclean reply;
@@ -27,7 +28,15 @@ async function reconcile(want: { symbol: string; side: 'BUY' | 'SELL'; qty: numb
 }
 
 /** `payload` is Kotak's own place-order body (`ts` symbol, `tt` B/S, `qt` absolute quantity, ...). */
-export async function placeKotakOrder(payload: Record<string, string>): Promise<KotakPlaceResult> {
+export async function placeKotakOrder(
+  payload: Record<string, string>,
+  /** `bypassLock`: only the guard's own flatten sets it; every other order is refused if it adds exposure on a locked day. */
+  opts: { bypassLock?: boolean } = {},
+): Promise<KotakPlaceResult> {
+  if (!opts.bypassLock) {
+    const refusal = await kotakLockRefusal(payload);
+    if (refusal) return { status: 'rejected', error: refusal };
+  }
   const want = {
     symbol: String(payload.ts), side: (payload.tt === 'B' ? 'BUY' : 'SELL') as 'BUY' | 'SELL',
     qty: Math.round(Number(payload.qt)), since: Date.now(),

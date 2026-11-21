@@ -3,6 +3,7 @@ import { Inter, Geist_Mono, Poppins, DM_Sans, Playfair_Display, Lora, Montserrat
 import { TooltipProvider } from "@/components/ui/tooltip";
 import ThemeInit from "@/components/ThemeInit";
 import Sidebar from "@/components/Sidebar";
+import KotakGuardBanner from "@/components/KotakGuardBanner";
 import { Toaster } from "sonner";
 import ThemeInitScript from "@/components/ThemeInitScript";
 import "./globals.css";
@@ -118,6 +119,7 @@ export default function RootLayout({
             },
           }}
         />
+        <KotakGuardBanner />
         <TooltipProvider>{children}</TooltipProvider>
       </body>
     </html>

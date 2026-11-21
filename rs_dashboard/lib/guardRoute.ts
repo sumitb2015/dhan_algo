@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { SOFT_BRACKET_MARKET_TTL_MS, SOFT_BRACKET_TTL_MS, guardProductOf, validateSoftPnlGuard } from '@/lib/softGuards';
 import type { ServerBracket, ServerGuardState } from '@/lib/kotakGuardEngine';
 import { istDay } from '@/lib/guardServerCore';
+import { validateGuardDefaults, type GuardDefaults } from '@/lib/guardDefaults';
 
 // Registers and reads a SERVER-resident P&L Guard and brackets (Kotak: lib/kotakGuardServer.ts, Zerodha:
 // lib/zerodhaGuardServer.ts). Registering a guard here is what arms it: the tab never fires one. Real-money endpoint (the
@@ -20,12 +21,18 @@ export interface GuardRouteBroker {
   readGuardState(): ServerGuardState;
   updateGuardState(mutate: (s: ServerGuardState) => ServerGuardState): Promise<ServerGuardState>;
   startLoop(): void;
+  /** Brokers whose watcher auto-arms a daily default (Kotak) supply these; the others leave them out. */
+  readGuardDefaults?(): GuardDefaults;
+  writeGuardDefaults?(d: GuardDefaults): void;
 }
 
 export function guardRouteHandlers(b: GuardRouteBroker) {
   async function GET(): Promise<NextResponse> {
     b.startLoop();
-    return NextResponse.json({ success: true, sessionValid: b.isSessionValid(), state: b.readGuardState() });
+    return NextResponse.json({
+      success: true, sessionValid: b.isSessionValid(), state: b.readGuardState(),
+      defaults: b.readGuardDefaults ? b.readGuardDefaults() : null,
+    });
   }
 
   async function POST(req: NextRequest): Promise<NextResponse> {
@@ -43,6 +50,14 @@ export function guardRouteHandlers(b: GuardRouteBroker) {
       if (!b.isSessionValid()) return bad(`${b.label} session is not valid - log in first; a guard cannot watch or exit without it`);
       const s = await b.updateGuardState(st => ({ ...st, pnl: { profit, loss, products, date: istDay() } }));
       return NextResponse.json({ success: true, state: s });
+    }
+
+    if (action === 'setDefaults') {
+      if (!b.writeGuardDefaults) return bad(`${b.label} has no daily default guard`);
+      const v = validateGuardDefaults(body);
+      if (!v.ok) return bad(v.error);
+      b.writeGuardDefaults(v.value);
+      return NextResponse.json({ success: true, defaults: v.value, state: b.readGuardState() });
     }
 
     if (action === 'clearPnl') {

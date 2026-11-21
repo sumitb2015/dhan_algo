@@ -21,10 +21,17 @@ export interface ServerBracket extends PendingSoftBracket {
   entry: number;
 }
 
-export type GuardEventKind = 'armed' | 'fired' | 'pnl_fired' | 'dropped' | 'expired' | 'incomplete' | 'error';
+export type GuardEventKind = 'armed' | 'fired' | 'pnl_fired' | 'locked' | 'dropped' | 'expired' | 'incomplete' | 'error';
 export interface GuardEvent { at: number; kind: GuardEventKind; text: string }
 
 export interface ExitWatch { symbol: string; product: GuardProduct; dir: 1 | -1; at: number }
+
+/** Set when the P&L loss limit fires: for the rest of the IST day every NEW in-scope position is squared off on sight and
+ *  dashboard orders that add exposure are refused (lib/kotakDayLock.ts). The day roll clears it. */
+export interface GuardLock { at: number; reason: string; products: string[] }
+
+/** Whether the watcher can actually protect right now (written each tick; the banner shows it). */
+export interface GuardHealth { watching: boolean; reason: string; at: number }
 
 export interface ServerGuardState {
   /** IST day the state belongs to; a new day starts empty (a guard never outlives its session). */
@@ -33,6 +40,13 @@ export interface ServerGuardState {
   brackets: ServerBracket[];
   watch: ExitWatch[];
   events: GuardEvent[];
+  /** Day lock set by a fired loss limit; null/absent = unlocked. */
+  lock?: GuardLock | null;
+  /** `symbol|product` -> when a lock flatten was last sent, so a failed exit is retried at most every LOCK_RESEND_MS. */
+  lockSent?: Record<string, number>;
+  /** IST day the daily default guard was auto-armed, so a manual clear is not re-armed the same day. */
+  autoArmedDate?: string;
+  health?: GuardHealth;
 }
 
 export interface PosView {
@@ -60,6 +74,8 @@ export interface ExitOrder {
 }
 
 export const EXIT_VERIFY_MS = 10_000;
+/** A locked day re-sends a flatten for the same leg at most this often (a refused or lagging exit must not fire every tick). */
+export const LOCK_RESEND_MS = 30_000;
 
 /** The parts of a live options bridge's quotes file (debug/live_options_quotes_dhan_<u>.json) the guards read. */
 export interface BridgeQuoteFile {
@@ -133,12 +149,13 @@ export function stepGuards(
 ): { state: ServerGuardState; exits: ExitOrder[] } {
   const s: ServerGuardState = {
     ...prev, brackets: prev.brackets.map(b => ({ ...b })), watch: [...prev.watch], events: [...prev.events],
+    lockSent: { ...(prev.lockSent ?? {}) },
   };
   const exits: ExitOrder[] = [];
 
   if (s.date !== today) {
-    if (s.pnl || s.brackets.length) pushEvent(s, now, 'expired', 'A new trading day started: yesterday\'s guards were discarded');
-    s.date = today; s.pnl = null; s.brackets = []; s.watch = [];
+    if (s.pnl || s.brackets.length || s.lock) pushEvent(s, now, 'expired', 'A new trading day started: yesterday\'s guards and day lock were discarded');
+    s.date = today; s.pnl = null; s.brackets = []; s.watch = []; s.lock = null; s.lockSent = {};
   }
 
   const open = positions.filter(p => p.netQty !== 0);
@@ -189,6 +206,11 @@ export function stepGuards(
       const verdict = evaluateSoftPnlGuard(g, pnl, today, allPriced);
       if (verdict.fire) {
         s.pnl = null;   // disarm before exiting: it fires once
+        // A LOSS fire locks the day (a profit target is the user's win: no lock). Anything new in scope is flattened below.
+        if (g.loss > 0 && pnl <= -g.loss) {
+          s.lock = { at: now, reason: verdict.reason, products: [...g.products] };
+          pushEvent(s, now, 'locked', `${verdict.reason} - Kotak is locked for the rest of the day: new positions are squared off on sight`);
+        }
         pushEvent(s, now, 'pnl_fired', `${verdict.reason} - exiting ${scopeOpen.length} leg(s)`);
         for (const p of scopeOpen) {
           const key = `${p.symbol}|${productOf(p)}`;
@@ -200,6 +222,31 @@ export function stepGuards(
         // Brackets on the legs being closed have nothing left to do.
         s.brackets = s.brackets.filter(b => !scopeOpen.some(p => p.symbol === b.symbol && productOf(p) === b.product));
       }
+    }
+  }
+
+  // ── Day lock: flatten on sight. Runs every tick while locked, so a position opened afterwards (from any tool or the Kotak
+  // app) is closed within one tick. A leg already being exited (watch / this tick) is left alone; a leg whose last flatten
+  // was sent less than LOCK_RESEND_MS ago is not re-sent (the 10 s verify above reports it as incomplete if it stuck).
+  if (s.lock) {
+    const lock = s.lock;
+    const lockOpen = open.filter(p => lock.products.includes(productOf(p)));
+    for (const p of lockOpen) {
+      const key = `${p.symbol}|${productOf(p)}`;
+      if (exiting.has(key)) continue;
+      if (s.watch.some(w => w.symbol === p.symbol && w.product === productOf(p) && w.dir === dirOf(p))) continue;
+      const last = s.lockSent?.[key];   // undefined = never sent for this leg: send now
+      if (last !== undefined && now - last < LOCK_RESEND_MS) continue;
+      exiting.add(key);
+      s.lockSent = { ...s.lockSent, [key]: now };
+      exits.push(exitFor(p, 'Day loss limit hit - flattening on sight'));
+      s.watch.push({ symbol: p.symbol, product: productOf(p), dir: dirOf(p), at: now });
+      pushEvent(s, now, 'locked', `${p.symbol}: opened after the loss limit fired - squaring off`);
+    }
+    // A flatten sent for a leg that the pnl branch exited this tick must not be re-sent 30 s later: record it.
+    for (const e of exits) {
+      const k = `${e.symbol}|${guardProductOf(e.productRaw)}`;
+      if (!(k in (s.lockSent ?? {}))) s.lockSent = { ...s.lockSent, [k]: now };
     }
   }
 

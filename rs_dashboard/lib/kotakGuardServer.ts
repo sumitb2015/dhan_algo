@@ -23,13 +23,15 @@ async function sendExit(e: ExitOrder): Promise<void> {
   const r = await placeKotakOrder({
     es: e.exchange, pc: e.productRaw || 'MIS', pr: '0', pt: 'MKT', qt: String(e.qty), rt: 'DAY', ts: e.symbol,
     tt: e.side, am: 'NO', dq: '0', mp: '0', pf: 'N', tp: '0', os: 'NEOTRADEAPI',
-  });
+  }, { bypassLock: true });   // the guard's own flatten must never be blocked by the lock it enforces
   if (r.status === 'rejected') throw new GuardExitRejected(r.error);
   if (r.status === 'unknown') throw new Error(r.error);
 }
 
-const server = createGuardServer({ key: 'kotak', isSessionValid: isKotakTokenValid, symbolMapFor: kotakSymbolMap, loadBook, sendExit });
+const server = createGuardServer({ key: 'kotak', isSessionValid: isKotakTokenValid, symbolMapFor: kotakSymbolMap, loadBook, sendExit, autoArm: true });
 
+export const readGuardDefaults = server.readGuardDefaults;
+export const writeGuardDefaults = server.writeGuardDefaults;
 export const readGuardState = server.readGuardState;
 export const updateGuardState = server.updateGuardState;
 export const startKotakGuardLoop = server.startLoop;
