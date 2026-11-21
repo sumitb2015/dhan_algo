@@ -734,7 +734,7 @@ Examples:
                    help="breakout lookback in days (turtle_rs default 55; minervini pivot 20, or 10 for a tight VCP)")
     p.add_argument("--once", action="store_true", help="run one cycle and exit")
     p.add_argument("--run-at", default="15:20", help="daily cycle time IST (default 15:20)")
-    p.add_argument("--capital", type=float, default=175_000.0)
+    p.add_argument("--capital", type=float, default=500_000.0)
     p.add_argument("--slots", type=int, default=10)
     p.add_argument("--universe", choices=["nifty500", "nifty50"], default="nifty500")
     p.add_argument("--stop", type=float, default=12.0, help="initial stop loss %%")

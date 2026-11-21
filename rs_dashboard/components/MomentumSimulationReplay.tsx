@@ -226,7 +226,7 @@ function shortReason(reason: string): string {
 const defaultStopFor = (strategy: string) => (strategy === 'clenow' ? 15 : 12);
 
 export default function MomentumSimulationReplay({
-  initialCapital = 175000,
+  initialCapital = 500000,
   initialSlots = 10,
   activeStrategy = 'minervini',
   onStrategyChange,
@@ -467,7 +467,7 @@ export default function MomentumSimulationReplay({
               type="number"
               step={25000}
               value={capital}
-              onChange={(e) => setCapital(Number(e.target.value) || 175000)}
+              onChange={(e) => setCapital(Number(e.target.value) || 500000)}
               className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs w-28 focus:outline-none focus:border-emerald-500"
             />
           </div>

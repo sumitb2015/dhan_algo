@@ -532,7 +532,7 @@ def main():
     p = argparse.ArgumentParser(description="Simulate momentum daily time-travel replay")
     p.add_argument("--start", default="2026-10-15", help="Start date YYYY-MM-DD")
     p.add_argument("--end", default="2026-11-20", help="End date YYYY-MM-DD")
-    p.add_argument("--capital", type=float, default=175_000.0)
+    p.add_argument("--capital", type=float, default=500_000.0)
     p.add_argument("--slots", type=int, default=10)
     p.add_argument("--universe", choices=["nifty500", "nifty50"], default="nifty500")
     p.add_argument("--strategy", choices=["turtle_rs", "minervini", "52w_high", "clenow"], default="turtle_rs", help="Strategy to simulate")

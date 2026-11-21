@@ -101,7 +101,7 @@ class MomentumConfig:
     # --slots 15 committed 143%, so the last few slots silently failed to fund. That made
     # `slots` look like it barely affected returns when the sizing was simply broken.
     slots: int = 10
-    capital: float = 175_000.0
+    capital: float = 500_000.0
     top_tier_slots: int = 5             # ranks 1..N get the larger allocation
     top_tier_ratio: float = 4.0 / 3.0   # top slot : lower slot (i.e. the old 20k : 15k)
 

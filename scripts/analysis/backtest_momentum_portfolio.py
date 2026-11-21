@@ -657,7 +657,7 @@ def main() -> None:
     p.add_argument("--start", default="2019-06-01", help="YYYY-MM-DD (default 2019-06-01)")
     p.add_argument("--end", default=None, help="YYYY-MM-DD (default: last data date)")
     p.add_argument("--universe", choices=["nifty500", "nifty50"], default="nifty500")
-    p.add_argument("--capital", type=float, default=175_000.0)
+    p.add_argument("--capital", type=float, default=500_000.0)
     p.add_argument("--slots", type=int, default=10)
     p.add_argument("--target", default="none",
                    help="profit target %%, or 'none' (default) to let winners run")

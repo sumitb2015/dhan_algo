@@ -51,7 +51,7 @@ function parseParams(get: (k: string) => unknown): ReplayParams | { error: strin
   return {
     start,
     end,
-    capital: Math.max(10_000, Number(get('capital')) || 175_000),
+    capital: Math.max(10_000, Number(get('capital')) || 500_000),
     slots: Math.max(1, Math.min(30, Number(get('slots')) || 10)),
     regimeEnabled: get('regime') !== 'false' && get('regime') !== false,
     breakoutDays: Math.max(5, Math.min(100, Number(get('breakout_days')) || 55)),
