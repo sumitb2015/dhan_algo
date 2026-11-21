@@ -126,7 +126,7 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
         {error && <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</p>}
         <div className="flex flex-col gap-1">
           <ReplayCard r={replayed} tf={c.timeframe} compact futuresPoints={c.instrument === 'options'} />
-          <p className="px-1 text-[11px] text-zinc-500">Updates as you change the rules: the same follower over the recent sessions, fills at the bar close, before costs.</p>
+          <p className="px-1 text-[11px] text-zinc-500">What-if, not live results: these rules replayed over the last 20 sessions (fills at the bar close, no costs). Fills/day counts every entry and exit, so a flip is 2. Use it to spot a setting that flips too often before you arm.</p>
         </div>
 
         <Section title="Indicators — all must agree">

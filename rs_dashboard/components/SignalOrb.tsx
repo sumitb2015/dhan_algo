@@ -5,7 +5,6 @@ import { Bell, BellOff, ChevronDown, ChevronUp, Clock, Info, PauseCircle, Power,
 import NavBar from '@/components/NavBar';
 import { Orb } from '@/components/signalOrb/Orb';
 import { OrbDrawer } from '@/components/signalOrb/OrbDrawer';
-import { ReplayCard } from '@/components/signalOrb/ReplayCard';
 import { useOrbEngine } from '@/components/signalOrb/useOrbEngine';
 import { useBrokerPnl } from '@/components/signalOrb/useBrokerPnl';
 import { istClock } from '@/lib/istTime';
@@ -13,7 +12,7 @@ import { istDateIso } from '@/lib/nseHolidays';
 import { expiryLabel } from '@/lib/pnfTarget';
 import { cn } from '@/lib/utils';
 import { type EffectiveStopResult } from '@/lib/signalOrb';
-import { isStuck, type OrbConfig, type OrbRow } from '@/lib/signalOrbLedger';
+import { isStuck, type OrbConfig, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 
 // /signal-orb: one orb, one switch. A CRUDEOIL / CRUDEOILM / NIFTY future's closed bars give the consensus of the active indicators —
 // futures mode: green long, red short; options mode: green sells a PE, red sells a CE; gray holds. Real money in REAL mode; the rules and every safety limit live in lib/signalOrb*.ts and
@@ -270,21 +269,8 @@ export default function SignalOrb() {
         </div>
       </main>
 
-      {/* dock: today's numbers and the replay, one bar pinned above the log */}
-      {ledger && (
-        <section aria-label="Today and replay" className="relative z-10 border-t border-zinc-900 bg-zinc-950/85 px-4 py-2 backdrop-blur sm:px-6">
-          <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-center gap-x-6 gap-y-2 font-mono text-[11px] text-zinc-500">
-            <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
-              <span className="text-[10px] font-bold uppercase tracking-[0.25em] text-zinc-500">Today</span>
-              <span>Realised <strong className={e.realised >= 0 ? 'text-emerald-400' : 'text-red-400'}>{inr(e.realised)}</strong></span>
-              <span>Stop <strong className="text-zinc-300">{ledger.config.stopPts || 'off'}</strong>{ledger.config.stopPts ? ' pts' : ''}</span>
-              <span>Limit <strong className="text-zinc-300">₹{ledger.config.dailyLossLimit.toLocaleString('en-IN')}</strong></span>
-            </div>
-            <span className="hidden h-4 w-px bg-zinc-800 md:block" aria-hidden />
-            <ReplayCard r={e.replayed} tf={ledger.config.timeframe} bare futuresPoints={optMode} />
-          </div>
-        </section>
-      )}
+      {/* dock: today only - what the day has done and how close it is to the loss limit (the replay lives in the Rules drawer) */}
+      {ledger && <DayDock ledger={ledger} today={e.today} realised={e.realised} openPnl={e.openPnl} />}
 
       {/* log ribbon */}
       {ledger && (
@@ -318,6 +304,44 @@ export default function SignalOrb() {
         </button>
       )}
     </div>
+  );
+}
+
+/** Today's result in the active mode: net P&L, trades and win/loss, the share of the daily loss limit used, and the last closed trade. */
+function DayDock({ ledger, today, realised, openPnl }: { ledger: OrbLedger; today: string; realised: number; openPnl: number | null }) {
+  const done = ledger.rows.filter(r => r.mode === ledger.mode && r.day === today && r.status === 'closed');
+  const wins = done.filter(r => (r.pnl ?? 0) > 0).length;
+  const last = done.length ? done.reduce((a, b) => ((b.exitAt ?? 0) > (a.exitAt ?? 0) ? b : a)) : null;
+  const net = realised + (openPnl ?? 0);
+  const limit = ledger.config.dailyLossLimit;
+  const used = Math.min(1, Math.max(0, -net) / limit);
+  const tone = used >= 0.8 ? 'bg-red-500' : used >= 0.5 ? 'bg-amber-400' : 'bg-emerald-500';
+  return (
+    <section aria-label="Today" className="relative z-10 border-t border-zinc-900 bg-zinc-950/85 px-4 py-2 backdrop-blur sm:px-6">
+      <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-center gap-x-6 gap-y-1.5 font-mono text-[11px] text-zinc-500">
+        <span className="text-[10px] font-bold uppercase tracking-[0.25em] text-zinc-500">Today · {ledger.mode}</span>
+        <span title={`Realised ${inr(realised)}${openPnl !== null ? ` + open ${inr(openPnl)}` : ''}`}>
+          Net <strong className={cn('text-sm', net > 0 ? 'text-emerald-400' : net < 0 ? 'text-red-400' : 'text-zinc-300')}>{inr(net)}</strong>
+        </span>
+        <span>
+          {done.length ? <><strong className="text-zinc-300">{done.length}</strong> trade{done.length > 1 ? 's' : ''} · <strong className="text-emerald-400">{wins}</strong> win · <strong className="text-red-400">{done.length - wins}</strong> loss</> : 'No trades yet'}
+        </span>
+        <span className="flex items-center gap-2" title={`Realised + open loss against the daily limit of ₹${limit.toLocaleString('en-IN')}; at the limit the Orb closes and halts`}>
+          Loss limit
+          <span className="relative h-1.5 w-24 overflow-hidden rounded-full bg-zinc-800" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(used * 100)} aria-label="Daily loss limit used">
+            <span className={cn('absolute inset-y-0 left-0 rounded-full', tone)} style={{ width: `${used * 100}%` }} />
+          </span>
+          <strong className="text-zinc-300">{Math.round(used * 100)}%</strong>
+        </span>
+        {last && (
+          <span title={last.exitReason ?? ''}>
+            Last <strong className={last.side === 'LONG' ? 'text-emerald-400' : 'text-red-400'}>{last.target.kind === 'options' ? `SELL ${last.target.side}` : last.side}</strong>{' '}
+            <strong className={(last.pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>{inr(last.pnl ?? 0)}</strong>
+            <span className="text-zinc-600"> · {istClock((last.exitAt ?? 0)).slice(0, 5)}</span>
+          </span>
+        )}
+      </div>
+    </section>
   );
 }
 
