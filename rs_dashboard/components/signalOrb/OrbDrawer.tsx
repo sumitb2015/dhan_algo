@@ -194,7 +194,7 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
             <RuleNumInput value={c.lots} step={1} min={1} label="Lots" disabled={locked} onCommit={s => onPatch({ lots: Number(s) })}
               className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100 disabled:opacity-50" />
           </Row>
-          <Row label="Hard stop (points)" sub="On the future, from entry (options too). Required for REAL. 0 = off">
+          <Row label="Hard stop (points)" sub="Points on the future's price from its entry, also for options rows (never option premium). Required for REAL. 0 = off">
             <RuleNumInput value={c.stopPts} step={5} min={0} label="Hard stop points" onCommit={s => onPatch({ stopPts: Number(s) })}
               className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
           </Row>
@@ -203,7 +203,7 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
               className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
           </Row>
           {(c.trailStartPts ?? 0) > 0 && (
-            <Row label="Trail gap (points)" sub="Distance kept behind peak profit price">
+            <Row label="Trail gap (points)" sub={c.trailGapPts !== undefined && c.trailGapPts > (c.trailStartPts ?? 0) ? `Gap is larger than the start (${c.trailStartPts}): once trailing begins the stop jumps to a locked LOSS of ${c.trailGapPts - (c.trailStartPts ?? 0)} pts` : 'Distance kept behind peak profit price'}>
               <RuleNumInput value={c.trailGapPts ?? 15} step={5} min={1} label="Trail gap points" onCommit={s => onPatch({ trailGapPts: Number(s) })}
                 className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
             </Row>

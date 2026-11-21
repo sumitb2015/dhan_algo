@@ -18,7 +18,7 @@ export function ReplayCard({ r, tf, compact = false, bare = false, futuresPoints
     return <p className="font-mono text-[11px] text-zinc-500">Replay: not enough history yet</p>;
   }
   const max = Math.max(1, ...r.days.map(d => Math.abs(d.points)));
-  const tone = r.rupeesPerDay >= 0 ? 'text-emerald-400' : 'text-red-400';
+  const tone = (futuresPoints ? r.pointsPerDay : r.rupeesPerDay) >= 0 ? 'text-emerald-400' : 'text-red-400';
   const title = `Replay of the last ${r.sessions} sessions with these rules on ${tf === 60 ? '1h' : `${tf}m`} bars: each decision at the bar close, no costs, no slippage. A rough check, not a backtest.${futuresPoints ? ' Options mode: replayed on the future\'s points, not on option premiums.' : ''}`;
   return (
     <div title={title}
@@ -29,7 +29,7 @@ export function ReplayCard({ r, tf, compact = false, bare = false, futuresPoints
       </div>
       <dl className="flex items-baseline gap-4 whitespace-nowrap font-mono text-[11px]">
         <div><dt className="sr-only">Orders per day</dt><dd className="text-zinc-300"><strong className="text-zinc-100">{r.ordersPerDay.toFixed(0)}</strong> orders/day</dd></div>
-        <div><dt className="sr-only">Gross per day</dt><dd className={cn('font-bold', tone)}>{inr(r.rupeesPerDay)}/day</dd></div>
+        <div><dt className="sr-only">Gross per day</dt><dd className={cn('font-bold', tone)}>{futuresPoints ? `${r.pointsPerDay >= 0 ? '+' : '−'}${Math.abs(r.pointsPerDay).toFixed(1)} pts` : inr(r.rupeesPerDay)}/day</dd></div>
         <div><dt className="sr-only">Green days</dt><dd className="text-zinc-300"><strong className="text-zinc-100">{r.greenDays}</strong>/{r.sessions} green</dd></div>
       </dl>
       {/* one bar per session, up = green day */}

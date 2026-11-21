@@ -184,7 +184,7 @@ export default function SignalOrb() {
         )}
 
         <Orb signal={ev.signal} readings={ev.readings} positionLabel={position} busy={e.busy}
-          since={ev.sinceT ? istClock(ev.sinceT * 1000).slice(0, 5) : null} progress={1 - e.secsToClose / e.barSecs} secsLeft={e.secsToClose} />
+          since={ev.sinceT ? sinceLabel(ev.sinceT, e.today) : null} progress={1 - e.secsToClose / e.barSecs} secsLeft={e.secsToClose} />
 
         {/* position: its own element, coloured by side (the orb shows the signal) */}
         <PositionPill live={live} position={position} pnl={e.openPnl} effectiveStop={e.effectiveStop} config={ledger?.config} mark={e.mark}
@@ -320,6 +320,13 @@ export default function SignalOrb() {
     </div>
   );
 }
+
+/** "23:46" for a colour that began today (IST), "Fri 23:46" for an earlier day, so a weekend reading is not mistaken for this morning. */
+const sinceLabel = (t: number, today: string): string => {
+  const hhmm = istClock(t * 1000).slice(0, 5);
+  if (!today || istDateIso(t * 1000) === today) return hhmm;
+  return `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date((t + 19_800) * 1000).getUTCDay()]} ${hhmm}`;
+};
 
 /** What a row holds, e.g. "CRUDEOIL 5600 PE" for an options row (always sold), or "" for a futures row. */
 const optionOf = (r: OrbRow) => (r.target.kind === 'options' ? `${r.target.symbol} ${r.target.strike} ${r.target.side}` : '');
