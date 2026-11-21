@@ -232,16 +232,19 @@ test('closeRowLegs books each leg at its exit; a leg without one is booked at en
   assert.equal(c3.pnl, 0);                                             // no price anywhere: booked at entry, no P&L
 });
 
-test('synthetic: a row knows its instrument; Dhan only; the instrument is pinned while a position is open; resolve closed books at entry', () => {
+test('synthetic: a row knows its instrument; Dhan or Kotak, not Zerodha; the instrument is pinned while a position is open; resolve closed books at entry', () => {
   assert.equal(rowInstrument(synRow()), 'synthetic');
   assert.equal(rowInstrument(row({ target: cePE().pe })), 'options');
   assert.equal(rowInstrument(row()), 'futures');
   const cur = emptyLedger().config;
   const ok = sanitizeConfigPatch({ instrument: 'synthetic' }, cur);
   assert.ok(typeof ok !== 'string' && ok.instrument === 'synthetic');
-  assert.equal(typeof sanitizeConfigPatch({ instrument: 'synthetic', broker: 'kotak' }, cur), 'string');
+  assert.equal(typeof sanitizeConfigPatch({ instrument: 'synthetic', broker: 'zerodha' }, cur), 'string');
+  const k = sanitizeConfigPatch({ instrument: 'synthetic', broker: 'kotak' }, cur);
+  assert.ok(typeof k !== 'string' && k.broker === 'kotak' && k.instrument === 'synthetic');
   const syn = { ...cur, instrument: 'synthetic' as const };
   assert.equal(typeof sanitizeConfigPatch({ broker: 'zerodha' }, syn), 'string');
+  assert.equal(typeof sanitizeConfigPatch({ broker: 'kotak' }, syn), 'object');
   assert.equal(applyClientOp(withRow(synRow()), { op: 'setConfig', patch: { instrument: 'options' } }, 1).ok, false);
   const r = applyClientOp(withRow(synRow({ status: 'unknown' })), { op: 'resolve', id: 's1', as: 'closed' }, 1);
   assert.ok(r.ok && r.ledger.rows[0].status === 'closed' && r.ledger.rows[0].pnl === 0);
@@ -250,11 +253,12 @@ test('synthetic: a row knows its instrument; Dhan only; the instrument is pinned
   assert.equal(l.rows[0].legs, undefined);
 });
 
-test('straddle / strangle config: Dhan only, a strangle needs an offset, premium rules are merged and bounded, REAL needs a leg or total SL', () => {
+test('straddle / strangle config: Dhan or Kotak, a strangle needs an offset, premium rules are merged and bounded, REAL needs a leg or total SL', () => {
   const cur = emptyLedger().config;
   const st = sanitizePremiumConfig({ instrument: 'straddle' }, cur);
   assert.equal(st.instrument, 'straddle');
-  assert.equal(typeof sanitizeConfigPatch({ instrument: 'straddle', broker: 'kotak' }, cur), 'string');
+  assert.equal(typeof sanitizeConfigPatch({ instrument: 'straddle', broker: 'zerodha' }, cur), 'string');
+  assert.equal(typeof sanitizeConfigPatch({ instrument: 'straddle', broker: 'kotak' }, cur), 'object');
   assert.equal(typeof sanitizeConfigPatch({ instrument: 'strangle' }, cur), 'string');                    // strikeOffset 0
   const g = sanitizeConfigPatch({ instrument: 'strangle', strikeOffset: 2 }, cur);
   assert.ok(typeof g !== 'string' && g.instrument === 'strangle' && g.strikeOffset === 2);

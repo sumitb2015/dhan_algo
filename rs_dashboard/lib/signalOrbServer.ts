@@ -409,7 +409,7 @@ export const legDeps = (broker: OrbBroker): LegDeps => ({
     const order = parsePnfOrder({ broker, mode: 'REAL', target: c.target, source: 'bar', exitOwn: { side: c.action, units: [c.units], product: 'INTRADAY' } });
     return typeof order === 'string' ? { status: 400, body: { success: false, outcome: 'rejected', error: order } } : placePnfMarket(order, 'pnf', 'orba');
   },
-  readOrder: id => readBrokerOrder(id, 'dhan'),
+  readOrder: id => readBrokerOrder(id, broker),
   sleep: ms => new Promise(r => setTimeout(r, ms)),
 });
 
@@ -438,6 +438,8 @@ export async function enterStructure(l0: OrbLedger, structure: 'synthetic' | 'st
     return { ok: true, ledger: addLog({ ...paper, rejects: 0 }, 'trade', `SIM ${what} - ${reason}`, now) };
   }
 
+  // (the config already refuses it; this keeps a hand-edited ledger from reaching a broker lookup)
+  if (config.broker === 'zerodha') return { ok: false, error: 'Zerodha is not supported for this structure yet', ledger: addLog(l0, 'error', 'Entry not sent: Zerodha is not supported for this structure', now) };
   // REAL: contract units and funds are checked BEFORE the row is written or anything is sent (nothing to undo if they refuse)
   const lotUnits: number[] = [];
   for (const g of pick.legs) {
@@ -447,7 +449,7 @@ export async function enterStructure(l0: OrbLedger, structure: 'synthetic' | 'st
     if (typeof onBroker === 'string') return { ok: false, error: onBroker, ledger: addLog(l0, 'error', `Entry not sent: ${onBroker}`, now) };
     lotUnits.push(onBroker[0].lotUnits);
   }
-  const block = await orbMarginBlock(pick.legs.map((g, i) => ({ target: g.target, action: g.action, lots, lotUnits: lotUnits[i], unitsPerLot, premium: g.premium })));
+  const block = await orbMarginBlock(config.broker, pick.legs.map((g, i) => ({ target: g.target, action: g.action, lots, lotUnits: lotUnits[i], unitsPerLot, premium: g.premium })));
   if (block) return { ok: false, error: block, ledger: addLog(l0, 'error', `Entry refused: ${block}`, now) };
 
   save(l, now);   // the 'sending' row is on disk before the first order leaves

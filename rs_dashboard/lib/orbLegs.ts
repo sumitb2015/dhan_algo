@@ -97,7 +97,8 @@ export async function pollFill(orderId: string | null, deps: LegDeps): Promise<F
     const o = await deps.readOrder(orderId).catch(() => null);
     if (!o) continue;
     const s = o.orderStatus.toUpperCase();
-    if (s === 'TRADED' && o.averageTradedPrice > 0) return { kind: 'traded', price: o.averageTradedPrice };
+    // TRADED with a fill is enough: some brokers report no average price on a market order, and the price decides nothing here
+    if (s === 'TRADED' && (o.averageTradedPrice > 0 || o.filledQty > 0)) return { kind: 'traded', price: o.averageTradedPrice > 0 ? o.averageTradedPrice : 0 };
     if ((s === 'REJECTED' || s === 'CANCELLED' || s === 'EXPIRED') && !(o.filledQty > 0)) return { kind: 'refused', reason: s };
   }
   return { kind: 'timeout' };

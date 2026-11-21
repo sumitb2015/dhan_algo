@@ -29,7 +29,7 @@ export const SYMBOL_RISK: Record<OrbSymbol, { stopPts: number; trailStartPts: nu
 export type OrbInstrument = 'futures' | 'options' | 'synthetic' | 'straddle' | 'strangle';
 /** Straddle / strangle are non-directional: no indicator, a timed entry and the Focus Tool's SL / target rules (lib/orbFocus.ts). */
 export const isPremiumInstrument = (i: OrbInstrument): boolean => i === 'straddle' || i === 'strangle';
-/** Structures that are several option legs (placed leg by leg, Dhan only for now). */
+/** Structures that are several option legs (placed leg by leg; Dhan or Kotak, Zerodha not yet). */
 export const isLegInstrument = (i: OrbInstrument): boolean => i === 'synthetic' || i === 'straddle' || i === 'strangle';
 /** Strike offset bounds: 0 = ATM, +N = N strikes OTM (PE down, CE up), -N = ITM. */
 export const MAX_STRIKE_OFFSET = 10;
@@ -288,7 +288,7 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
     if (typeof pr === 'string') return pr;
     next.premium = pr;
   }
-  if (isLegInstrument(next.instrument) && next.broker !== 'dhan') return `${next.instrument === 'synthetic' ? 'Synthetic futures' : 'Straddle / strangle'} run on Dhan only for now`;
+  if (isLegInstrument(next.instrument) && next.broker === 'zerodha') return `${next.instrument === 'synthetic' ? 'Synthetic futures' : 'Straddle / strangle'} run on Dhan or Kotak (Zerodha is not supported for them yet)`;
   if (next.instrument === 'strangle' && next.strikeOffset < 1) return 'A strangle needs a strike offset of at least 1 (strikes OTM per side)';
   let timePatched = false;
   for (const k of ['entryStart', 'entryEnd', 'eodExit'] as const) {

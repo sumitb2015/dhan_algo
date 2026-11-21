@@ -149,8 +149,8 @@ function Settings({ ledger, locked, onPatch, onMode, onResetSim, replayed, units
     setSpecs([...c.indicators, defaultSpec(kind, `${kind}-${i}`)]);
   };
   const tradeSub = c.instrument === 'options' ? 'Green sells a PE, red sells a CE (nearest expiry)'
-    : c.instrument === 'synthetic' ? 'Green: long synthetic (buy the ATM CE, sell the ATM PE); red: short synthetic (buy the PE, sell the CE). Dhan only'
-    : premium ? 'Sold at the entry time on a timer, not the signal; the Focus Tool\'s SL / target rules run on the server, so closing the tab is safe. Dhan only'
+    : c.instrument === 'synthetic' ? 'Green: long synthetic (buy the ATM CE, sell the ATM PE); red: short synthetic (buy the PE, sell the CE). Dhan or Kotak'
+    : premium ? 'Sold at the entry time on a timer, not the signal; the Focus Tool\'s SL / target rules run on the server, so closing the tab is safe. Dhan or Kotak'
     : 'Green goes long the future, red short';
 
   const market = (

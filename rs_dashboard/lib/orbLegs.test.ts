@@ -158,3 +158,17 @@ test('premiumLegs: a straddle sells the ATM CE and PE; a strangle sells each sid
   assert.equal(typeof premiumLegs('strangle', U, 9, 6010, TODAY, FNO), 'string');     // outside the listed strikes
   assert.equal(typeof premiumLegs('straddle', U, 0, 0, TODAY, FNO), 'string');         // no futures price
 });
+
+test('enterLegs: a bought leg TRADED with a fill but no average price (a broker that does not report one) still confirms', async () => {
+  const { deps, log } = stubs([placed('B1'), placed('S1')]);
+  const noPrice: LegDeps = { ...deps, readOrder: async () => ({ orderStatus: 'TRADED', filledQty: 2, averageTradedPrice: 0 }) };
+  const r = await enterLegs(plans, noPrice);
+  assert.equal(r.ok, true);
+  assert.deepEqual(log, ['open BUY CE', 'open SELL PE']);
+  assert.equal(r.legs[0].fillPrice, 0);
+  // no fill and no price: still not confirmed (unknown), the short is not sent
+  const none = stubs([placed('B1')]);
+  const r2 = await enterLegs(plans, { ...none.deps, readOrder: async () => ({ orderStatus: 'TRADED', filledQty: 0, averageTradedPrice: 0 }) });
+  assert.equal(r2.unknown, true);
+  assert.deepEqual(none.log, ['open BUY CE']);
+});
