@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
-import { isStrategyRunning, isValidInstanceId, stateKeyFor, DEBUG_DIR } from '@/lib/strategyRegistry';
-import { readJsonFile } from '@/lib/lockedJsonFile';
+import { spawn } from 'child_process';
+import { isStrategyRunning, isValidInstanceId, stateKeyFor, DEBUG_DIR, PROJECT_ROOT } from '@/lib/strategyRegistry';
+import { readJsonFile, writeJsonAtomic } from '@/lib/lockedJsonFile';
+import { PYTHON_EXE } from '@/lib/pyExec';
 
 const readJson = (file: string) => readJsonFile<Record<string, unknown>>(file);
 
@@ -157,4 +159,122 @@ export async function GET(request: NextRequest) {
     alert: state?.alert ?? '',
     backtest,
   });
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+    const { action, symbol, instanceId } = body;
+
+    if (instanceId && !isValidInstanceId(instanceId)) {
+      return NextResponse.json({ success: false, error: 'Invalid instanceId' }, { status: 400 });
+    }
+    const stateKey = stateKeyFor(BASE_KEY, instanceId || undefined);
+    const statePath = path.join(DEBUG_DIR, `${stateKey}_state.json`);
+    const portfolioPath = path.join(DEBUG_DIR, `${stateKey}_portfolio.json`);
+
+    if (action === 'run_cycle') {
+      const state = readJson(statePath);
+      const pid = Number(state?.pid ?? 0);
+      if (pid > 0 && isStrategyRunning(pid, stateKey)) {
+        return NextResponse.json(
+          { success: false, error: 'Strategy process is already running.' },
+          { status: 400 }
+        );
+      }
+
+      const scriptPath = path.join(PROJECT_ROOT, 'strategies', 'momentum_investing', 'nifty500_momentum.py');
+      const processArgs = [scriptPath, '--once', ...(instanceId ? ['--instance-id', instanceId] : [])];
+
+      const child = spawn(PYTHON_EXE, processArgs, {
+        cwd: PROJECT_ROOT,
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      child.unref();
+
+      return NextResponse.json({
+        success: true,
+        message: 'On-demand momentum cycle started in background.',
+      });
+    }
+
+    if (action === 'exit_position') {
+      if (!symbol || typeof symbol !== 'string') {
+        return NextResponse.json({ success: false, error: 'Missing symbol' }, { status: 400 });
+      }
+
+      const portfolio = readJson(portfolioPath) as Record<string, any> | null;
+      if (!portfolio) {
+        return NextResponse.json({ success: false, error: 'Portfolio file not found' }, { status: 404 });
+      }
+
+      const positions = Array.isArray(portfolio.positions) ? portfolio.positions : [];
+      const idx = positions.findIndex((p: any) => p.symbol === symbol);
+      if (idx === -1) {
+        return NextResponse.json({ success: false, error: `Position ${symbol} not found in portfolio` }, { status: 404 });
+      }
+
+      const pos = positions[idx];
+      const state = readJson(statePath) as Record<string, any> | null;
+      const stateHolding = Array.isArray(state?.holdings) ? state.holdings.find((h: any) => h.symbol === symbol) : null;
+      const exitPrice = Number(stateHolding?.ltp || pos.last_close || pos.entry_price);
+      const qty = Number(pos.qty) || 0;
+      const entryPrice = Number(pos.entry_price) || 0;
+      const proceeds = exitPrice * qty;
+      const pnl = (exitPrice - entryPrice) * qty;
+
+      // Remove from positions
+      positions.splice(idx, 1);
+      portfolio.positions = positions;
+      portfolio.cash = (Number(portfolio.cash) || 0) + proceeds;
+      portfolio.realized_pnl = (Number(portfolio.realized_pnl) || 0) + pnl;
+      if (!Array.isArray(portfolio.closed_trades)) portfolio.closed_trades = [];
+      portfolio.closed_trades.push({
+        symbol,
+        industry: pos.industry || '',
+        entry_date: pos.entry_date,
+        exit_date: new Date().toISOString().slice(0, 10),
+        entry_price: entryPrice,
+        exit_price: exitPrice,
+        qty,
+        pnl: Math.round(pnl * 100) / 100,
+        pnl_pct: entryPrice ? Math.round(((exitPrice / entryPrice - 1) * 100) * 100) / 100 : 0,
+        exit_reason: 'manual exit (UI)',
+        hold_days: pos.entry_date ? Math.max(0, Math.floor((Date.now() - new Date(pos.entry_date).getTime()) / 86400000)) : 0,
+      });
+      portfolio.updated_at = new Date().toISOString();
+
+      writeJsonAtomic(portfolioPath, portfolio, { pretty: true });
+
+      // If state exists, update state as well
+      if (state) {
+        if (Array.isArray(state.holdings)) {
+          state.holdings = state.holdings.filter((h: any) => h.symbol !== symbol);
+        }
+        state.cash = portfolio.cash;
+        state.realized_pnl = portfolio.realized_pnl;
+        state.positions = positions.length;
+        const invested = (state.holdings || []).reduce((s: number, h: any) => s + (h.entry_price || 0) * (h.qty || 0), 0);
+        const unrealised = (state.holdings || []).reduce((s: number, h: any) => s + (h.unrealised || 0), 0);
+        state.invested = invested;
+        state.unrealised_pnl = unrealised;
+        state.total_pnl = (state.realized_pnl || 0) + unrealised;
+        state.equity = (state.cash || 0) + invested + unrealised;
+        state.closed_trades = portfolio.closed_trades.slice(-20);
+        state.last_update = new Date().toISOString().replace('T', ' ').slice(0, 19);
+        writeJsonAtomic(statePath, state, { pretty: true });
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: `Successfully closed position for ${symbol}.`,
+      });
+    }
+
+    return NextResponse.json({ success: false, error: `Unknown action: ${action}` }, { status: 400 });
+  } catch (e) {
+    return NextResponse.json({ success: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
+  }
 }

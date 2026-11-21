@@ -1,9 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { RefreshCw, AlertTriangle, TrendingUp, TrendingDown, BookOpen, X } from 'lucide-react';
+import { RefreshCw, AlertTriangle, TrendingUp, TrendingDown, BookOpen, X, Play, CheckCircle2, History, Briefcase, BarChart2 } from 'lucide-react';
 import NavBar from './NavBar';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
+import MomentumSimulationReplay from './MomentumSimulationReplay';
+import StrategyBenchmarkPanel from './StrategyBenchmarkPanel';
 
 interface Holding {
   symbol: string;
@@ -69,7 +71,7 @@ interface MomentumData {
   totalPnl: number;
   equity: number;
   holdings: Holding[];
-  topRanks: { symbol: string; rs: number }[];
+  topRanks: { symbol: string; rs: number; industry?: string; status?: string }[];
   closedTrades: ClosedTrade[];
   dataDate: string | null;
   regime: boolean | null;
@@ -120,10 +122,10 @@ const TH = ({ children, align = 'left', tip }: {
   </th>
 );
 
-const TD = ({ children, align = 'left', className = '' }: {
-  children: React.ReactNode; align?: 'left' | 'right'; className?: string;
+const TD = ({ children, align = 'left', className = '', title }: {
+  children: React.ReactNode; align?: 'left' | 'right'; className?: string; title?: string;
 }) => (
-  <td className={`px-3 py-2 whitespace-nowrap ${align === 'right' ? 'text-right tabular-nums' : ''} ${className}`}>
+  <td className={`px-3 py-2 whitespace-nowrap ${align === 'right' ? 'text-right tabular-nums' : ''} ${className}`} title={title}>
     {children}
   </td>
 );
@@ -294,7 +296,7 @@ function ReadmeModal({ onClose }: { onClose: () => void }) {
           <table className="w-full text-xs mb-2">
             <tbody>
               <Row k={<span className="text-amber-400 font-mono">PAPER</span>} v="Simulated. Real prices, no broker orders, no money at risk. This is the default." />
-              <Row k={<span className="text-red-400 font-mono">LIVE</span>} v="Places real CNC delivery orders in your Dhan account." />
+              <Row k={<span className="text-red-400 font-mono">LIVE</span>} v="Places real CNC delivery orders in your Dhan account via Phase 4 execution. (Requires active DDPI or daily CDSL eDIS authorization on Dhan to sell delivery shares)." />
               <Row k="Stopping it" v="Does NOT sell anything. Holdings, stops and cash are saved to disk and resume exactly where they left off when restarted. STOPPED between daily cycles is the normal state." />
               <Row k="Market filter" v={<>Switch off via Strategies → <b>⚙</b> on this strategy&apos;s card → Market Filter, then relaunch. Takes effect only at start-up.</>} />
               <Row k="Stale data" v="If the daily CSVs are more than 4 days old the strategy refuses to trade rather than rank on stale prices. Refresh with refresh_dashboard_data.py." />
@@ -431,6 +433,11 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [showReadme, setShowReadme] = useState(false);
+  const [cycling, setCycling] = useState(false);
+  const [actionMsg, setActionMsg] = useState<{ text: string; ok: boolean } | null>(null);
+  const [exitingSymbol, setExitingSymbol] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'live' | 'replay' | 'benchmark'>('live');
+  const [selectedStrategy, setSelectedStrategy] = useState<string>('minervini');
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -448,6 +455,47 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
       setLoading(false);
     }
   }, [instanceId]);
+
+  const handleRunCycle = async () => {
+    setCycling(true);
+    setActionMsg(null);
+    try {
+      const res = await fetch('/api/momentum', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'run_cycle', instanceId }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error || 'Cycle run failed');
+      setActionMsg({ text: json.message || 'On-demand cycle started in background', ok: true });
+      setTimeout(fetchData, 2500);
+    } catch (e) {
+      setActionMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
+    } finally {
+      setCycling(false);
+    }
+  };
+
+  const handleExitPosition = async (symbol: string) => {
+    if (!confirm(`Are you sure you want to square off position for ${symbol}?`)) return;
+    setExitingSymbol(symbol);
+    setActionMsg(null);
+    try {
+      const res = await fetch('/api/momentum', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'exit_position', symbol, instanceId }),
+      });
+      const json = await res.json();
+      if (!json.success) throw new Error(json.error || 'Exit failed');
+      setActionMsg({ text: json.message || `Closed position ${symbol}`, ok: true });
+      await fetchData();
+    } catch (e) {
+      setActionMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
+    } finally {
+      setExitingSymbol(null);
+    }
+  };
 
   useEffect(() => {
     fetchData();
@@ -472,7 +520,7 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
             <Info
               tip={data.dryRun
                 ? 'PAPER: simulated trading. The strategy tracks a portfolio using real prices but places NO orders with the broker — no real money is at risk.'
-                : 'LIVE: the strategy places real CNC (delivery) orders in your Dhan account. Real money is at risk.'}
+                : 'LIVE: real CNC (delivery) orders placed in your Dhan account via Phase 4 execution. Real capital at risk.'}
               className={`font-mono text-xs px-2 py-1 rounded border ${
                 data.dryRun
                   ? 'bg-amber-500/10 text-amber-400 border-amber-500/40'
@@ -544,6 +592,15 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
             </span>
           )}
           <button
+            onClick={handleRunCycle}
+            disabled={cycling}
+            className="h-8 px-2.5 flex items-center gap-1.5 bg-zinc-800 border border-zinc-700 rounded hover:border-emerald-500 hover:text-emerald-400 text-zinc-300 text-xs font-bold uppercase tracking-wider cursor-pointer disabled:opacity-50 transition-colors"
+            title="Trigger an on-demand daily momentum cycle in background"
+          >
+            <Play size={12} className={cycling ? 'animate-pulse text-emerald-400' : ''} />
+            {cycling ? 'Running…' : 'Run Cycle'}
+          </button>
+          <button
             onClick={() => setShowReadme(true)}
             className="h-8 px-2.5 flex items-center gap-1.5 bg-zinc-800 border border-zinc-700 rounded hover:border-zinc-500 hover:text-white text-zinc-300 text-xs font-bold uppercase tracking-wider cursor-pointer"
             title="How this strategy works, when it trades, and how to read this page"
@@ -560,78 +617,221 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
         </div>
       </header>
 
-      {loading && !data && (
-        <div className="flex-1 flex flex-col items-center justify-center gap-4">
-          <RefreshCw size={20} className="animate-spin text-zinc-400" />
-          <div className="text-sm text-zinc-400 uppercase tracking-widest">Loading Portfolio…</div>
+      {/* View Switcher Toolbar */}
+      <div className="bg-zinc-900 border-b border-zinc-800 px-4 py-2 flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex items-center gap-1 bg-zinc-950 p-0.5 rounded-lg border border-zinc-800">
+          <button
+            onClick={() => setViewMode('live')}
+            className={`px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 transition-colors cursor-pointer ${
+              viewMode === 'live'
+                ? 'bg-zinc-800 text-white shadow-sm'
+                : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <Briefcase size={13} />
+            <span>Live / Paper Book</span>
+          </button>
+          <button
+            onClick={() => setViewMode('replay')}
+            className={`px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 transition-colors cursor-pointer ${
+              viewMode === 'replay'
+                ? 'bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 shadow-sm'
+                : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <History size={13} />
+            <span>Historical Replay</span>
+            <span className="px-1.5 py-0.2 rounded text-[10px] bg-emerald-500/20 text-emerald-400 font-mono">
+              Scrubber
+            </span>
+          </button>
+          <button
+            onClick={() => setViewMode('benchmark')}
+            className={`px-3 py-1.5 rounded-md text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 transition-colors cursor-pointer ${
+              viewMode === 'benchmark'
+                ? 'bg-purple-600/30 text-purple-300 border border-purple-500/40 shadow-sm'
+                : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <BarChart2 size={13} />
+            <span>Strategy Benchmarks</span>
+            <span className="px-1.5 py-0.2 rounded text-[10px] bg-purple-500/20 text-purple-300 font-mono">
+              2020–2026
+            </span>
+          </button>
         </div>
-      )}
 
-      {error && (
-        <div className="m-4 bg-red-500/10 border border-red-500/40 rounded px-4 py-3 text-sm text-red-400">
-          {error}
-        </div>
-      )}
-
-      {data && !data.exists && (
-        <main className="flex-1 w-full mx-auto px-4 py-4 space-y-4">
-          <BacktestPanel bt={data.backtest} />
-          <div className="flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
-            <div className="text-sm text-zinc-300 uppercase tracking-widest">No portfolio yet</div>
-            <div className="text-sm text-zinc-400 max-w-2xl">{data.message}</div>
+        {viewMode === 'replay' ? (
+          <div className="text-xs text-zinc-400 hidden md:block">
+            Step through historical trading sessions day-by-day to verify trade executions, ratcheted stops, and RS rankings.
           </div>
-        </main>
+        ) : viewMode === 'benchmark' ? (
+          <div className="text-xs text-zinc-400 hidden md:block">
+            Comparing 5 quantitative equity strategies across 486 Nifty 500 stocks with statutory delivery transaction costs.
+          </div>
+        ) : (
+          data?.lastReview && (
+            <div className="text-xs text-zinc-500 hidden md:block">
+              Last review: {data.lastReview} · Next review: {data.nextReview ?? '—'}
+            </div>
+          )
+        )}
+      </div>
+
+      {actionMsg && (
+        <div className={`mx-4 mt-3 px-3 py-2 rounded text-xs flex items-center justify-between border ${
+          actionMsg.ok
+            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+            : 'bg-red-500/10 text-red-400 border-red-500/30'
+        }`}>
+          <div className="flex items-center gap-2">
+            {actionMsg.ok ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
+            <span>{actionMsg.text}</span>
+          </div>
+          <button
+            onClick={() => setActionMsg(null)}
+            className="text-zinc-400 hover:text-white text-xs cursor-pointer ml-3"
+          >
+            ✕
+          </button>
+        </div>
       )}
 
-      {data?.exists && (
-        // Uncapped by design — matches the repo-wide convention set in e8840c6, where every
-        // page wrapper dropped its max-w so pages line up with each other on a wide monitor.
+      {viewMode === 'replay' ? (
         <main className="flex-1 w-full mx-auto px-4 py-4 space-y-4">
-          {data.alert && (
-            <div className="bg-amber-500/10 border border-amber-500/40 rounded px-4 py-2 text-sm text-amber-400 flex items-center gap-2">
-              <AlertTriangle size={14} /> {data.alert}
+          <MomentumSimulationReplay
+            initialCapital={data?.capital || 175000}
+            initialSlots={data?.slots || 10}
+            activeStrategy={selectedStrategy}
+            onStrategyChange={setSelectedStrategy}
+          />
+        </main>
+      ) : viewMode === 'benchmark' ? (
+        <main className="flex-1 w-full mx-auto px-4 py-4 space-y-4">
+          <StrategyBenchmarkPanel
+            onSelectStrategy={(stratKey) => {
+              setSelectedStrategy(stratKey);
+              setViewMode('replay');
+            }}
+          />
+        </main>
+      ) : (
+        <>
+          {loading && !data && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-4 py-20">
+              <RefreshCw size={20} className="animate-spin text-zinc-400" />
+              <div className="text-sm text-zinc-400 uppercase tracking-widest">Loading Portfolio…</div>
             </div>
           )}
 
-          {/* Summary */}
-          <div className="flex flex-wrap gap-2">
-            <StatTile label="Equity" value={rupees(data.equity)} sub={`from ${rupees(data.capital)}`}
-                      tip="Total portfolio value: uninvested cash plus the current market value of every holding. Compare it to the starting capital below to see overall progress." />
-            <StatTile label="Total P&L" value={signed(data.totalPnl)}
-                      tone={data.totalPnl >= 0 ? 'good' : 'bad'}
-                      sub={data.capital ? `${((data.totalPnl / data.capital) * 100).toFixed(2)}%` : undefined}
-                      tip="Realized plus unrealised profit since inception, after trading costs. The percentage is against starting capital." />
-            <StatTile label="Realized" value={signed(data.realizedPnl)}
-                      tone={data.realizedPnl >= 0 ? 'good' : 'bad'}
-                      tip="Profit actually banked from positions that have been closed, net of brokerage, STT and slippage. This number can only change when a position is sold." />
-            <StatTile label="Unrealised" value={signed(data.unrealisedPnl)}
-                      tone={data.unrealisedPnl >= 0 ? 'good' : 'bad'}
-                      tip="Paper profit on positions still open — it moves with the market every day and is not yours until the position is closed." />
-            <StatTile label="Deployed" value={`${data.deployedPct.toFixed(0)}%`}
-                      sub={`${data.holdings.length}/${data.slots} slots · cash ${rupees(data.cash)}`}
-                      tip="Share of capital currently invested in stocks. The rest sits in cash. It is normal for this to be 0% while the market regime is OFF — the strategy waits in cash rather than forcing trades." />
-            <StatTile label="Status" value={data.running ? data.status : 'STOPPED'}
-                      tone={data.running ? 'good' : 'neutral'}
-                      sub={data.running ? undefined : 'holdings still tracked'}
-                      tip="Whether the strategy process is currently running. This is a positional strategy that only acts once a day, so STOPPED is normal between cycles — your holdings and stops are saved to disk and resume untouched on the next start. Stopping it does NOT sell anything." />
-          </div>
+          {error && (
+            <div className="m-4 bg-red-500/10 border border-red-500/40 rounded px-4 py-3 text-sm text-red-400">
+              {error}
+            </div>
+          )}
 
-          <div className="text-xs text-zinc-500">
-            <Info
-              tip="The strategy reviews rankings and opens new positions only on the first trading day of each week. Stops and targets are still checked every day in between."
-              className="text-xs text-zinc-500 underline decoration-dotted decoration-zinc-600 underline-offset-2"
-            >
-              Last review: {data.lastReview ?? '—'} · Next review: {data.nextReview ?? '—'}
-            </Info>
-            {data.lastUpdate && <span> · Updated {data.lastUpdate}</span>}
-          </div>
+          {data && !data.exists && (
+            <main className="flex-1 w-full mx-auto px-4 py-4 space-y-4">
+              <BacktestPanel bt={data.backtest} />
+              <div className="flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
+                <div className="text-sm text-zinc-300 uppercase tracking-widest">No portfolio yet</div>
+                <div className="text-sm text-zinc-400 max-w-2xl">{data.message}</div>
+              </div>
+            </main>
+          )}
+
+          {data?.exists && (
+            <main className="flex-1 w-full mx-auto px-4 py-4 space-y-4">
+              {data.alert && (
+                <div className="bg-amber-500/10 border border-amber-500/40 rounded px-4 py-2 text-sm text-amber-400 flex items-center gap-2">
+                  <AlertTriangle size={14} /> {data.alert}
+                </div>
+              )}
+
+              {/* Summary */}
+              <div className="flex flex-wrap gap-2">
+                <StatTile label="Equity" value={rupees(data.equity)} sub={`from ${rupees(data.capital)}`}
+                          tip="Total portfolio value: uninvested cash plus the current market value of every holding. Compare it to the starting capital below to see overall progress." />
+                <StatTile label="Total P&L" value={signed(data.totalPnl)}
+                          tone={data.totalPnl >= 0 ? 'good' : 'bad'}
+                          sub={data.capital ? `${((data.totalPnl / data.capital) * 100).toFixed(2)}%` : undefined}
+                          tip="Realized plus unrealised profit since inception, after trading costs. The percentage is against starting capital." />
+                <StatTile label="Realized" value={signed(data.realizedPnl)}
+                          tone={data.realizedPnl >= 0 ? 'good' : 'bad'}
+                          tip="Profit actually banked from positions that have been closed, net of brokerage, STT and slippage. This number can only change when a position is sold." />
+                <StatTile label="Unrealised" value={signed(data.unrealisedPnl)}
+                          tone={data.unrealisedPnl >= 0 ? 'good' : 'bad'}
+                          tip="Paper profit on positions still open — it moves with the market every day and is not yours until the position is closed." />
+                <StatTile label="Deployed" value={`${data.deployedPct.toFixed(0)}%`}
+                          sub={`${data.holdings.length}/${data.slots} slots · cash ${rupees(data.cash)}`}
+                          tip="Share of capital currently invested in stocks. The rest sits in cash. It is normal for this to be 0% while the market regime is OFF — the strategy waits in cash rather than forcing trades." />
+                <StatTile label="Status" value={data.running ? data.status : 'STOPPED'}
+                          tone={data.running ? 'good' : 'neutral'}
+                          sub={data.running ? undefined : 'holdings still tracked'}
+                          tip="Whether the strategy process is currently running. This is a positional strategy that only acts once a day, so STOPPED is normal between cycles — your holdings and stops are saved to disk and resume untouched on the next start. Stopping it does NOT sell anything." />
+              </div>
+
+              <div className="text-xs text-zinc-500">
+                <Info
+                  tip="The strategy reviews rankings and opens new positions only on the first trading day of each week. Stops and targets are still checked every day in between."
+                  className="text-xs text-zinc-500 underline decoration-dotted decoration-zinc-600 underline-offset-2"
+                >
+                  Last review: {data.lastReview ?? '—'} · Next review: {data.nextReview ?? '—'}
+                </Info>
+                {data.lastUpdate && <span> · Updated {data.lastUpdate}</span>}
+              </div>
 
           <BacktestPanel bt={data.backtest} />
 
+          {/* Sector Diversification Overview */}
+          {data.holdings.length > 0 && (
+            <div className="bg-zinc-900 border border-zinc-800 rounded px-3 py-2 text-xs">
+              <div className="text-zinc-500 font-bold uppercase tracking-wider mb-2 flex items-center justify-between">
+                <span>Sector Diversification (Cap: max 2 positions per sector)</span>
+                <span className="text-zinc-400 font-normal">
+                  {new Set(data.holdings.map((h) => h.industry || 'Unknown')).size} active sectors
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(
+                  data.holdings.reduce((acc: Record<string, number>, h) => {
+                    const sec = h.industry || 'Unknown';
+                    acc[sec] = (acc[sec] || 0) + 1;
+                    return acc;
+                  }, {})
+                ).map(([sector, count]) => {
+                  const isMax = count >= 2;
+                  return (
+                    <div
+                      key={sector}
+                      className={`px-2 py-1 rounded border flex items-center gap-1.5 ${
+                        isMax
+                          ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                          : 'bg-zinc-800/80 border-zinc-700 text-zinc-300'
+                      }`}
+                    >
+                      <span>{sector}</span>
+                      <span className={`px-1 rounded text-[10px] font-bold ${
+                        isMax ? 'bg-amber-500/20 text-amber-200' : 'bg-zinc-700 text-zinc-200'
+                      }`}>
+                        {count}/2
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Holdings */}
           <div>
-            <div className="text-xs font-bold text-zinc-300 uppercase tracking-wider mb-2">
-              Holdings ({data.holdings.length})
+            <div className="text-xs font-bold text-zinc-300 uppercase tracking-wider mb-2 flex items-center justify-between">
+              <span>Holdings ({data.holdings.length}/{data.slots} slots)</span>
+              {data.holdings.length > 0 && (
+                <span className="text-zinc-500 font-normal">
+                  Total Invested: <b className="text-zinc-300">{rupees(data.invested)}</b>
+                </span>
+              )}
             </div>
             <div className="overflow-x-auto border border-zinc-800 rounded">
               <table className="w-full text-xs text-zinc-300">
@@ -643,50 +843,69 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
                     <TH align="right">Qty</TH>
                     <TH align="right" tip="Average price paid per share.">Entry</TH>
                     <TH align="right" tip="Last traded price, refreshed from Dhan on each cycle.">LTP</TH>
+                    <TH align="right" tip="Total market value of this position (LTP × Qty).">Value</TH>
+                    <TH align="right" tip="Share of current total portfolio equity.">Weight</TH>
                     <TH align="right" tip="Unrealised rupee profit on this position at the current price.">P&L</TH>
                     <TH align="right" tip="Unrealised profit as a percentage of the entry price.">P&L %</TH>
                     <TH align="right" tip="The price at which this position will be sold. It only ever moves up, never down.">Stop</TH>
                     <TH tip={<><b>Which rung of the exit ladder this position has reached.</b><br /><br /><b>hard stop</b> — the initial 12% stop below entry; a loss if hit.<br /><b>breakeven</b> — it gained 15%, so the stop moved up to the entry price: the position can no longer lose money.<br /><b>trailing</b> — it gained 25%, so the stop now follows 25% below its highest close, locking in profit as it rises.</>}>Stage</TH>
                     <TH align="right" tip="How far the price can fall before the stop triggers, as a percentage of the current price. Green is comfortable, amber is getting close, red means a small move would sell it.">Room to stop</TH>
                     <TH align="right" tip="Calendar days held. Positions are not rotated out on rank before 7 days.">Days</TH>
+                    <TH align="right">Action</TH>
                   </tr>
                 </thead>
                 <tbody>
                   {data.holdings.length === 0 && (
-                    <tr><td colSpan={12} className="px-3 py-6 text-center text-zinc-500">
+                    <tr><td colSpan={15} className="px-3 py-6 text-center text-zinc-500">
                       No open positions — all capital in cash.
                     </td></tr>
                   )}
-                  {data.holdings.map((h) => (
-                    <tr key={h.symbol} className="border-t border-zinc-800 hover:bg-zinc-900">
-                      <TD className="font-bold text-zinc-100">{h.symbol}</TD>
-                      <TD className="text-zinc-500">{h.industry}</TD>
-                      <TD align="right">
-                        <span className={h.rank_strikes > 0 ? 'text-amber-400' : 'text-zinc-400'}>
-                          {h.rank ?? '—'}
-                        </span>
-                        <span className="text-zinc-600"> / {h.rank_at_entry}</span>
-                      </TD>
-                      <TD align="right">{h.qty}</TD>
-                      <TD align="right">{h.entry_price.toFixed(2)}</TD>
-                      <TD align="right" className="text-zinc-100">{h.ltp.toFixed(2)}</TD>
-                      <TD align="right" className={pnlColor(h.unrealised)}>{signed(h.unrealised)}</TD>
-                      <TD align="right" className={pnlColor(h.unrealised_pct)}>
-                        {h.unrealised_pct >= 0 ? '+' : ''}{h.unrealised_pct.toFixed(2)}%
-                      </TD>
-                      <TD align="right">{h.stop_price.toFixed(2)}</TD>
-                      <TD>
-                        <span className={`px-1.5 py-0.5 rounded text-xs ${
-                          h.stage === 'trailing' ? 'bg-emerald-500/10 text-emerald-400'
-                            : h.stage === 'breakeven' ? 'bg-sky-500/10 text-sky-400'
-                            : 'bg-zinc-800 text-zinc-400'}`}>
-                          {h.stage}
-                        </span>
-                      </TD>
-                      <TD align="right"><StopBar h={h} /></TD>
-                      <TD align="right" className="text-zinc-400">{h.hold_days}</TD>
-                    </tr>
-                  ))}
+                  {data.holdings.map((h) => {
+                    const posValue = h.ltp * h.qty;
+                    const weightPct = data.equity > 0 ? (posValue / data.equity) * 100 : 0;
+                    return (
+                      <tr key={h.symbol} className="border-t border-zinc-800 hover:bg-zinc-900">
+                        <TD className="font-bold text-zinc-100">{h.symbol}</TD>
+                        <TD className="text-zinc-500">{h.industry}</TD>
+                        <TD align="right">
+                          <span className={h.rank_strikes > 0 ? 'text-amber-400' : 'text-zinc-400'}>
+                            {h.rank ?? '—'}
+                          </span>
+                          <span className="text-zinc-600"> / {h.rank_at_entry}</span>
+                        </TD>
+                        <TD align="right">{h.qty}</TD>
+                        <TD align="right">{h.entry_price.toFixed(2)}</TD>
+                        <TD align="right" className="text-zinc-100">{h.ltp.toFixed(2)}</TD>
+                        <TD align="right" className="text-zinc-200">{rupees(posValue)}</TD>
+                        <TD align="right" className="text-zinc-400">{weightPct.toFixed(1)}%</TD>
+                        <TD align="right" className={pnlColor(h.unrealised)}>{signed(h.unrealised)}</TD>
+                        <TD align="right" className={pnlColor(h.unrealised_pct)}>
+                          {h.unrealised_pct >= 0 ? '+' : ''}{h.unrealised_pct.toFixed(2)}%
+                        </TD>
+                        <TD align="right">{h.stop_price.toFixed(2)}</TD>
+                        <TD>
+                          <span className={`px-1.5 py-0.5 rounded text-xs ${
+                            h.stage === 'trailing' ? 'bg-emerald-500/10 text-emerald-400'
+                              : h.stage === 'breakeven' ? 'bg-sky-500/10 text-sky-400'
+                              : 'bg-zinc-800 text-zinc-400'}`}>
+                            {h.stage}
+                          </span>
+                        </TD>
+                        <TD align="right"><StopBar h={h} /></TD>
+                        <TD align="right" className="text-zinc-400">{h.hold_days}</TD>
+                        <TD align="right">
+                          <button
+                            onClick={() => handleExitPosition(h.symbol)}
+                            disabled={exitingSymbol === h.symbol}
+                            className="px-2 py-0.5 rounded border border-red-500/40 bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:border-red-500 text-xs font-semibold cursor-pointer disabled:opacity-50 transition-colors"
+                            title={`Square off ${h.symbol} position manually`}
+                          >
+                            {exitingSymbol === h.symbol ? 'Exiting…' : 'Exit'}
+                          </button>
+                        </TD>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -709,26 +928,52 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
                     <tr>
                       <TH align="right" tip="Rank by composite relative strength. Only the top 20 are eligible to buy.">#</TH>
                       <TH>Symbol</TH>
+                      <TH tip="Sector / Industry group">Sector</TH>
                       <TH align="right" tip={<><b>Composite relative strength versus the Nifty 50</b>, blending 4 lookbacks (2 weeks, 1, 3 and 6 months, weighted toward 3 months).<br /><br />0 means it moved exactly with the index. +0.30 means it outperformed by about 30%. Negative means it lagged.</>}>RS</TH>
-                      <TH tip="A green dot marks a name currently held in the portfolio. A high-ranked name with no dot failed an entry filter — usually it has not broken out to a new 55-day high yet.">Held</TH>
+                      <TH tip="Filter eligibility status or reason why the stock was not picked.">Status</TH>
                     </tr>
                   </thead>
                   <tbody>
                     {data.topRanks.length === 0 && (
-                      <tr><td colSpan={4} className="px-3 py-6 text-center text-zinc-500">
+                      <tr><td colSpan={5} className="px-3 py-6 text-center text-zinc-500">
                         Ranking appears after the next cycle.
                       </td></tr>
                     )}
                     {data.topRanks.map((r, i) => {
                       const held = data.holdings.some((h) => h.symbol === r.symbol);
+                      const status = r.status || (held ? 'HELD' : 'QUALIFIED');
                       return (
                         <tr key={r.symbol} className="border-t border-zinc-800 hover:bg-zinc-900">
                           <TD align="right" className="text-zinc-500">{i + 1}</TD>
                           <TD className={held ? 'font-bold text-emerald-400' : 'text-zinc-100'}>{r.symbol}</TD>
+                          <TD className="text-zinc-500 text-xs truncate max-w-[120px]" title={r.industry || ''}>
+                            {r.industry || '—'}
+                          </TD>
                           <TD align="right" className={r.rs >= 0 ? 'text-emerald-400' : 'text-red-400'}>
                             {r.rs >= 0 ? '+' : ''}{r.rs.toFixed(4)}
                           </TD>
-                          <TD>{held && <span className="text-emerald-400">●</span>}</TD>
+                          <TD>
+                            {status === 'HELD' ? (
+                              <span className="px-1.5 py-0.5 rounded text-xs bg-emerald-500/10 text-emerald-400 font-bold inline-flex items-center gap-1">
+                                <span className="text-[10px]">●</span> HELD
+                              </span>
+                            ) : status === 'QUALIFIED' ? (
+                              <span className="px-1.5 py-0.5 rounded text-xs bg-sky-500/10 text-sky-400 font-bold">
+                                QUALIFIED
+                              </span>
+                            ) : status.startsWith('Cooldown') ? (
+                              <span className="px-1.5 py-0.5 rounded text-xs bg-amber-500/10 text-amber-400">
+                                {status}
+                              </span>
+                            ) : (
+                              <span
+                                className="px-1.5 py-0.5 rounded text-xs bg-zinc-800 text-zinc-400 truncate max-w-[140px] inline-block align-middle"
+                                title={status}
+                              >
+                                {status}
+                              </span>
+                            )}
+                          </TD>
                         </tr>
                       );
                     })}
@@ -783,6 +1028,8 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
             </div>
           </div>
         </main>
+      )}
+        </>
       )}
     </div>
   );
