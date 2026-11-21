@@ -19,7 +19,7 @@ import { wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
 import { ORB_CODE_VERSION, hhmmToMin, type Side } from '@/lib/signalOrb';
 import { ORB_STATE_FILE, readOrbLedger } from '@/lib/signalOrbFile';
 import {
-  MAX_REJECTS, addLog, applyClientOp, closeRow, closeRowLegs, halt, isLegInstrument, isPremiumInstrument, liveRow, patchRow, realisedToday, rowInstrument, trimRows,
+  MAX_REJECTS, addLog, applyClientOp, closeRow, closeRowLegs, halt, isLegInstrument, isPremiumInstrument, legsAfterClose, liveRow, patchRow, realisedToday, rowInstrument, statusAfterUnknown, trimRows,
   type OrbBroker, type OrbConfig, type OrbLedger, type OrbLeg, type OrbRow, type OrbSymbol,
 } from '@/lib/signalOrbLedger';
 
@@ -45,6 +45,9 @@ export function unitsPerLotOf(sym: OrbSymbol, nowMs = Date.now()): number {
  */
 const armed = globalOnce('signalOrb.armed', () => ({ day: '' }));
 export const isArmedToday = (now: number): boolean => armed.day === istDateIso(now);
+
+/** When an open straddle / strangle first had no live premium on a leg (0 = priced). In memory: the watcher and the state route share it. */
+export const premiumBlind = globalOnce('signalOrb.premiumBlind', () => ({ since: 0, warnedAt: 0 }));
 
 /** An option premium older than this (no change) is not used to book an entry. */
 const OPT_FRESH_MS = 30_000;
@@ -114,7 +117,7 @@ export function orbState(): Reply {
   let optCandidates: Target[] = [];
   if (live?.legs) {
     // a multi-leg row: each open leg's live premium (a closed leg keeps the premium it closed at)
-    legLtps = live.legs.map(g => (g.status === 'open' ? optionLtp(g.target, now, Number.POSITIVE_INFINITY) : g.exit ?? null));
+    legLtps = live.legs.map(g => (g.status === 'open' || g.status === 'unknown' ? optionLtp(g.target, now, Number.POSITIVE_INFINITY) : g.exit ?? null));
   } else if (live?.target.kind === 'options') {
     optLtp = optionLtp(live.target, now, Number.POSITIVE_INFINITY);
   } else if (!live && (ledger.config.instrument === 'options' || isLegInstrument(ledger.config.instrument)) && ledger.engineActive && contract) {
@@ -137,7 +140,7 @@ export function orbState(): Reply {
     }
   }
   const unitsPerLot = live?.unitsPerLot ?? unitsPerLotOf(ledger.config.symbol, now);
-  return { status: 200, body: { success: true, ledger, contract, unitsPerLot, optionLtp: optLtp, legLtps, armedToday: isArmedToday(now), today, codeVersion: ORB_CODE_VERSION } };
+  return { status: 200, body: { success: true, ledger, contract, unitsPerLot, optionLtp: optLtp, legLtps, armedToday: isArmedToday(now), premiumBlindMs: premiumBlind.since > 0 ? now - premiumBlind.since : 0, today, codeVersion: ORB_CODE_VERSION } };
 }
 
 /** The signal future's WebSocket key (subscribing it): the strike pick for the warm-up reads its price. */
@@ -451,7 +454,7 @@ export async function enterStructure(l0: OrbLedger, structure: 'synthetic' | 'st
   const res = await enterLegs(pick.legs.map((g, i) => ({ target: g.target, action: g.action, lots, lotUnits: lotUnits[i] })), legDeps(config.broker));
   const legsOut: OrbLeg[] = legs.map((g, i) => {
     const st = res.legs[i].state;
-    return { ...g, units: lots * lotUnits[i], status: st === 'open' || st === 'unknown' ? 'open' : 'failed', ...(st === 'unknown' ? { note: 'outcome unknown' } : {}) };
+    return { ...g, units: lots * lotUnits[i], status: st === 'open' ? 'open' : st === 'unknown' ? 'unknown' : 'failed', ...(st === 'unknown' ? { note: 'outcome unknown' } : {}) };
   });
   const units = legsOut[0].units;
   if (res.ok) {
@@ -459,7 +462,8 @@ export async function enterStructure(l0: OrbLedger, structure: 'synthetic' | 'st
     return { ok: true, ledger: l };
   }
   if (res.unknown) {
-    l = patchRow(l, row.id, { status: 'unknown', units, legs: legsOut, note: res.error });
+    // a straddle / strangle whose OTHER leg is open stays 'open': that leg keeps its stops (the unknown one is never resent)
+    l = patchRow(l, row.id, { status: statusAfterUnknown(row, legsOut), units, legs: legsOut, note: res.error });
     return { ok: false, unknown: true, error: res.error, ledger: halt(l, `Entry outcome UNKNOWN - check the ${config.broker} order book and positions: ${res.error}`, now) };
   }
   return { ok: false, error: res.error, ledger: bumpReject(patchRow(l, row.id, { status: 'failed', legs: legsOut, note: res.error }), `Entry refused: ${res.error}`, now) };
@@ -492,7 +496,7 @@ export async function exitStructure(l0: OrbLedger, row: OrbRow, req: TradeReques
   for (const r of res.legs) {
     const i = todo[r.index].i;
     if (r.state === 'closed') after[i] = { ...after[i], status: 'closed', exit: marks[i] ?? after[i].entry };
-    else if (r.state === 'unknown') after[i] = { ...after[i], note: 'exit unknown' };
+    else if (r.state === 'unknown') after[i] = { ...after[i], status: 'unknown', note: 'exit unknown' };
   }
   if (res.ok) {
     const flat = res.legs.some(r => r.flat) ? 'a leg was already flat at the broker (closed outside this page)' : undefined;
@@ -502,7 +506,8 @@ export async function exitStructure(l0: OrbLedger, row: OrbRow, req: TradeReques
     return { ok: true, ledger: lossCheck(l, now) };
   }
   if (res.unknown) {
-    l = patchRow(l, row.id, { status: 'unknown', legs: after, note: `exit unknown: ${res.error}` });
+    // the legs the loop never reached stay open (and judged); only the unknown one waits for the user
+    l = patchRow(l, row.id, { status: statusAfterUnknown(row, after), legs: after, note: `exit unknown: ${res.error}` });
     return { ok: false, unknown: true, error: res.error, ledger: halt(l, `Exit outcome UNKNOWN - check the ${row.broker} positions: ${res.error}`, now) };
   }
   // refused part-way: the legs that did close are booked, the rest are still open and the next tick retries them
@@ -576,15 +581,13 @@ export async function exitOneLeg(l0: OrbLedger, row: OrbRow, index: number, why:
   const mark = optionLtp(g.target, now, Number.POSITIVE_INFINITY) ?? lastPremium.get(targetKey(g.target)) ?? null;
   const px = mark ?? g.entry;
   const note = mark === null ? 'no premium quote: this leg is booked at entry - check the broker fill' : undefined;
-  const after = (): OrbLeg[] => legs.map((x, i) => (i === index
-    ? { ...x, status: 'closed' as const, exit: px }
-    : why === 'sl' && l0.config.premium.slToCost && x.status === 'open' ? { ...x, costStop: true } : x));
   const word = `${g.action === 'BUY' ? 'SELL' : 'BUY'} ${optLabel(g.target)}`;
   const finish = (l: OrbLedger, tagWord: string): Step => {
-    const nl = after();
-    let out = patchRow(l, row.id, { legs: nl, status: 'open', note });
-    if (!nl.some(x => x.status === 'open')) {
-      out = closeRowLegs(out, row.id, nl.map(x => x.exit ?? null), `${reason}`, now);
+    // after a leg's SL, the other open leg gets its cost stop (Focus: SL to cost) when that option is on
+    const c = legsAfterClose(legs, index, px, why === 'sl' && l0.config.premium.slToCost);
+    let out = patchRow(l, row.id, { legs: c.legs, status: 'open', note });
+    if (!c.anyHeld) {
+      out = closeRowLegs(out, row.id, c.legs.map(x => x.exit ?? null), `${reason}`, now);
       out = lossCheck(addLog({ ...out, rejects: 0 }, 'trade', `${tagWord} exit (last leg) ${word} @ ${px} - ${reason}`, now), now);
     } else {
       out = addLog({ ...out, rejects: 0 }, 'trade', `${tagWord} leg ${why.toUpperCase()} ${word} @ ${px} - ${reason}`, now);
@@ -597,7 +600,9 @@ export async function exitOneLeg(l0: OrbLedger, row: OrbRow, index: number, why:
   const res = await exitLegs([{ target: g.target, action: g.action, units: g.units }], legDeps(row.broker));
   if (res.ok) return finish(l, 'REAL');
   if (res.unknown) {
-    l = patchRow(l, row.id, { status: 'unknown', note: `leg exit unknown: ${res.error}` });
+    // only this leg is unknown: the other leg stays open and keeps being judged; this one is never resent
+    const unk = legs.map((x, i) => (i === index ? { ...x, status: 'unknown' as const, note: 'exit unknown' } : x));
+    l = patchRow(l, row.id, { legs: unk, status: statusAfterUnknown(row, unk), note: `leg exit unknown: ${res.error}` });
     return { ok: false, unknown: true, error: res.error, ledger: halt(l, `Leg exit outcome UNKNOWN - check the ${row.broker} positions: ${res.error}`, now) };
   }
   return { ok: false, error: res.error, ledger: bumpReject(patchRow(l, row.id, { status: 'open' }), `Leg exit refused: ${res.error}`, now) };

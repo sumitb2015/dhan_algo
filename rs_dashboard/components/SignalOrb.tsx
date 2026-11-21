@@ -1,10 +1,10 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useState } from 'react';
 import { Bell, BellOff, ChevronDown, ChevronUp, Clock, Info, PauseCircle, Power, Settings2, ShieldAlert, Volume2, VolumeX, X } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { Orb } from '@/components/signalOrb/Orb';
-import { OrbDrawer } from '@/components/signalOrb/OrbDrawer';
 import { useOrbEngine } from '@/components/signalOrb/useOrbEngine';
 import { useBrokerPnl } from '@/components/signalOrb/useBrokerPnl';
 import { istClock } from '@/lib/istTime';
@@ -15,7 +15,8 @@ import { type EffectiveStopResult } from '@/lib/signalOrb';
 import { ContextTabs } from '@/components/signalOrb/ContextPanels';
 import { PivotPanel } from '@/components/signalOrb/PivotChart';
 import { legStopForDisplay } from '@/lib/orbFocus';
-import { isPremiumInstrument, isStuck, type OrbConfig, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
+import { BLIND_WARN_MS } from '@/lib/orbFocus';
+import { isPremiumInstrument, isStuck, unknownLegIndexes, type OrbConfig, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 
 // /signal-orb: one orb, one switch. A CRUDEOIL / CRUDEOILM / NIFTY future's closed bars give the consensus of the active indicators —
 // futures mode: green long, red short; options mode: green sells a PE, red sells a CE; gray holds. Real money in REAL mode; the rules and every safety limit live in lib/signalOrb*.ts and
@@ -26,14 +27,11 @@ const inr = (n: number) => `${n >= 0 ? '+' : '−'}₹${Math.abs(n).toLocaleStri
 
 export default function SignalOrb() {
   const e = useOrbEngine();
-  const [drawer, setDrawer] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const { ledger, live, ev, contract } = e;
   const brokerPnl = useBrokerPnl(ledger?.config.broker);
 
-  const patch = useCallback(async (p: Partial<OrbConfig>) => setErr(await e.op({ op: 'setConfig', patch: p })), [e]);
-  const setMode = useCallback(async (m: 'SIM' | 'REAL') => { setErr(await e.op({ op: 'setMode', mode: m })); e.setArmed(false); }, [e]);
   const toggle = useCallback(async () => {
     if (!ledger) return;
     setErr(await e.op({ op: 'setEngine', active: !ledger.engineActive }));
@@ -148,10 +146,10 @@ export default function SignalOrb() {
               {e.alertSound ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}
             </button>
           </div>
-          <button type="button" onClick={() => setDrawer(true)} aria-label="Rules and indicators" title="Rules and indicators"
+          <Link href="/signal-orb/settings" aria-label="Rules and indicators" title="Rules and indicators (full page)"
             className={cn('rounded-lg border border-zinc-800 bg-zinc-900 p-1.5 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100', FOCUS)}>
             <Settings2 className="h-4 w-4" />
-          </button>
+          </Link>
           <NavBar />
         </div>
       </header>
@@ -173,6 +171,18 @@ export default function SignalOrb() {
         {ledger?.haltReason && (
           <p className="flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-bold text-red-300">
             <ShieldAlert className="h-3.5 w-3.5" /> HALTED — {ledger.haltReason}
+          </p>
+        )}
+        {live?.legs && unknownLegIndexes(live).map(i => (
+          <div key={i} className="flex flex-wrap items-center justify-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+            <span className="font-bold">Leg {i + 1} ({live.legs![i].action === 'BUY' ? 'bought' : 'sold'} {live.legs![i].target.strike} {live.legs![i].target.side}) outcome UNKNOWN - check the {live.broker} book, then:</span>
+            <button type="button" className={cn('rounded border border-amber-500/40 px-2 py-0.5 font-bold hover:bg-amber-500/20', FOCUS)} onClick={async () => setErr(await e.op({ op: 'resolveLeg', id: live.id, leg: i, as: 'open' }))}>It is open</button>
+            <button type="button" className={cn('rounded border border-amber-500/40 px-2 py-0.5 font-bold hover:bg-amber-500/20', FOCUS)} onClick={async () => setErr(await e.op({ op: 'resolveLeg', id: live.id, leg: i, as: 'closed', price: e.state?.legLtps?.[i] ?? undefined }))}>It is closed</button>
+          </div>
+        ))}
+        {(e.state?.premiumBlindMs ?? 0) >= BLIND_WARN_MS && live?.status === 'open' && (
+          <p role="alert" className="flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-bold text-red-300">
+            <ShieldAlert className="h-3.5 w-3.5" /> No live premium for {Math.round((e.state?.premiumBlindMs ?? 0) / 1000)} s - this structure&apos;s stops are NOT being judged (only the cutoff). Check the price feed and the broker.
           </p>
         )}
         {unresolved && (
@@ -322,16 +332,12 @@ export default function SignalOrb() {
         </footer>
       )}
 
-      {ledger && e.state && (
-        <OrbDrawer open={drawer} onClose={() => setDrawer(false)} ledger={ledger} locked={!!live} replayed={e.replayed} unitsPerLot={e.state.unitsPerLot} price={e.price}
-          onPatch={patch} onMode={setMode} onResetSim={async () => setErr(await e.op({ op: 'resetSim' }))} error={err} />
-      )}
       {e.tradeErr && (
         <button type="button" onClick={e.clearTradeErr} className="fixed bottom-24 left-1/2 z-40 max-w-xl -translate-x-1/2 rounded-lg border border-amber-500/40 bg-zinc-950 px-3 py-1.5 text-xs text-amber-300 shadow-lg">
           Order not sent: {e.tradeErr} ✕
         </button>
       )}
-      {err && !drawer && (
+      {err && (
         <button type="button" onClick={() => setErr(null)} className="fixed bottom-24 left-1/2 z-40 -translate-x-1/2 rounded-lg border border-red-500/40 bg-zinc-950 px-3 py-1.5 text-xs text-red-300 shadow-lg">
           {err} ✕
         </button>
@@ -368,7 +374,7 @@ function DayDock({ ledger, today, realised, openPnl }: { ledger: OrbLedger; toda
         </span>
         {last && (
           <span title={last.exitReason ?? ''}>
-            Last <strong className={last.side === 'LONG' ? 'text-emerald-400' : 'text-red-400'}>{last.legs ? `SYN ${last.side}` : last.target.kind === 'options' ? `SELL ${last.target.side}` : last.side}</strong>{' '}
+            Last <strong className={last.side === 'LONG' ? 'text-emerald-400' : 'text-red-400'}>{last.legs ? (last.structure === 'synthetic' ? `SYN ${last.side}` : `SHORT ${last.structure === 'strangle' ? 'STRANGLE' : 'STRADDLE'}`) : last.target.kind === 'options' ? `SELL ${last.target.side}` : last.side}</strong>{' '}
             <strong className={(last.pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>{inr(last.pnl ?? 0)}</strong>
             <span className="text-zinc-600"> · {istClock((last.exitAt ?? 0)).slice(0, 5)}</span>
           </span>

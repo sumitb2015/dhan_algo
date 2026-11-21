@@ -10,11 +10,12 @@ import {
 import { orbAlert, type OrbAlertSnap, type OrbSound } from '@/lib/signalOrbChime';
 import type { Target } from '@/lib/pnfTarget';
 import {
-  ORB_CODE_VERSION, closedBars, computeEffectiveStop, decideOrb, evaluate, replay, rowLegsPnl, rowPnl, sideOf,
-  type EffectiveStopResult, type Evaluation, type ReplaySummary, type Side,
+  ORB_CODE_VERSION, closedBars, computeEffectiveStop, decideOrb, evaluate, rowLegsPnl, rowPnl, sideOf,
+  type EffectiveStopResult, type Evaluation, type Side,
 } from '@/lib/signalOrb';
-import { isPremiumInstrument, isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
+import { isPremiumInstrument, isStuck, liveRow, realisedToday, unknownLegIndexes, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 import { keyLevels, mtfTable, sessionPath, signalChanges } from '@/lib/signalOrbPanels';
+import { BLIND_WARN_MS } from '@/lib/orbFocus';
 
 // The Signal Orb's live engine (browser). Leader tab only (localStorage lock); the tick is rebuilt every render and called through
 // a ref from ONE interval, so quotes never restart it. It decides on closed bars (lib/signalOrb.ts) and asks the server to act
@@ -22,7 +23,7 @@ import { keyLevels, mtfTable, sessionPath, signalChanges } from '@/lib/signalOrb
 // but not the cutoff. REAL entries also need this page load's ARM click, which is never saved.
 
 /** `contract` is always the FUTURE the signal reads; `optionLtp` is a live option row's premium (server WebSocket), else null. */
-type StateReply = { success: boolean; ledger: OrbLedger; contract: Target | null; unitsPerLot: number; optionLtp?: number | null; legLtps?: (number | null)[] | null; armedToday?: boolean; today: string; codeVersion?: string };
+type StateReply = { success: boolean; ledger: OrbLedger; contract: Target | null; unitsPerLot: number; optionLtp?: number | null; legLtps?: (number | null)[] | null; armedToday?: boolean; premiumBlindMs?: number; today: string; codeVersion?: string };
 
 const STATE_POLL_MS = 3_000;
 const LOCK_KEY = 'signalOrb.engineLock';
@@ -35,9 +36,6 @@ const EXIT_RETRY_MS = 5_000;
  * bars); the slowest default (Wilder RSI / StochRSI, EMA up to 400) has converged long before 3000 bars, and the tick stays cheap.
  */
 const READ_BARS_1M = 3_000;
-/** 1-minute bars the replay reads: ~20 sessions (MCX 870 min each, NSE 375) plus indicator warm-up. */
-const REPLAY_BARS_1M = 20_000;
-export const REPLAY_SESSIONS = 20;
 
 export type OrbEngine = ReturnType<typeof useOrbEngine>;
 
@@ -177,17 +175,6 @@ export function useOrbEngine() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [closedKey, nowMinute],
   );
-
-  // The same rules replayed over the recent sessions (lib/signalOrb.ts replay): recomputed when the history reloads or a rule
-  // changes, not per tick. Reads the bars up to the newest history load, so today's closed bars are in it.
-  const unitsPerLot = state?.unitsPerLot ?? 10;
-  const hasClock = nowMinute > 0;
-  const replayed: ReplaySummary | null = useMemo(() => {
-    if (!cfg || !nowMinute) return null;
-    return replay(cfg.indicators, closedBars(bars.slice(-REPLAY_BARS_1M), tf, nowMinute * 60 + 1),
-      { times: cfg, stopPts: cfg.stopPts, trailStartPts: cfg.trailStartPts, trailGapPts: cfg.trailGapPts, lots: cfg.lots, unitsPerLot }, REPLAY_SESSIONS);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [feed.histVersion, cfg, unitsPerLot, tf, hasClock]);
 
   const barSecs = tf * 60;
   // bars sit on the IST clock (lib/signalOrb.ts closedBars): an hourly bar closes on the IST hour, not the UTC one
@@ -352,11 +339,15 @@ export function useOrbEngine() {
     const snap: OrbAlertSnap = {
       signal: ev.signal, barT: ev.barT, halt: ledger.haltReason, fresh: priceFresh, engineActive: ledger.engineActive,
       unresolved: !live ? null : live.status === 'unknown' ? `Row ${live.id} outcome UNKNOWN`
-        : isStuck(live, t) ? `Row ${live.id} stuck in flight` : live.day !== today ? `Row ${live.id} is from ${live.day}` : null,
+        : unknownLegIndexes(live).length ? `Row ${live.id} has a leg with an UNKNOWN outcome`
+        : isStuck(live, t) ? `Row ${live.id} stuck in flight` : live.day !== today ? `Row ${live.id} is from ${live.day}`
+        : (state?.premiumBlindMs ?? 0) >= BLIND_WARN_MS ? 'No live premium: the stops are not being judged' : null,
     };
     const alert = orbAlert(prevSnap.current, snap, traded);
     prevSnap.current = snap;
-    if (alert && leader && alertSoundRef.current) PLAY[alert.sound]();
+    // a straddle / strangle ignores the signal: its colour chimes are noise (halts, unknown rows and stale feeds still ring)
+    const signalOnly = alert && (alert.sound === 'bull' || alert.sound === 'bear' || alert.sound === 'neutral');
+    if (alert && leader && alertSoundRef.current && !(signalOnly && (isPremiumInstrument(cfg.instrument) || isPremiumRow))) PLAY[alert.sound]();
   };
 
   const engineRef = useRef<() => void>(() => {});
@@ -383,11 +374,11 @@ export function useOrbEngine() {
       bestPrice: bestPriceRef.current?.price,
       currentPrice: price,
     });
-  }, [live, cfg, price]);
+  }, [live, cfg, price, isPremiumRow]);
 
   return {
     state, ledger, live: live as OrbRow | null, contract, feed, ev, price, priceFresh, openPnl, mark, realised, now, isLeader, note, stateError,
-    armed, setArmed, armedToday: state?.armedToday === true, isPremiumRow, busy, op, trade, tradeErr, clearTradeErr: () => setTradeErr(null), closeAndStop, today, replayed, secsToClose, barSecs,
+    armed, setArmed, armedToday: state?.armedToday === true, isPremiumRow, busy, op, trade, tradeErr, clearTradeErr: () => setTradeErr(null), closeAndStop, today, secsToClose, barSecs,
     tradeSound, setTradeSound, alertSound, setAlertSound, soundReady, outdated, effectiveStop, mtf, history, levels, dayPath, tf,
   };
 }

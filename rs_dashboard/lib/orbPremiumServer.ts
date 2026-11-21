@@ -2,10 +2,10 @@ import { globalOnce } from '@/lib/globalOnce';
 import { istDateIso } from '@/lib/nseHolidays';
 import { istMinuteOfDay } from '@/lib/istTime';
 import { hhmmToMin, rowLegsPnl } from '@/lib/signalOrb';
-import { premiumTick, type PremiumAction, type PremiumRowIn } from '@/lib/orbFocus';
+import { BLIND_WARN_MS, blindSince, premiumTick, type PremiumAction, type PremiumRowIn } from '@/lib/orbFocus';
 import { readOrbLedger } from '@/lib/signalOrbFile';
-import { isPremiumInstrument, liveRow, patchRow, realisedToday, type OrbRow } from '@/lib/signalOrbLedger';
-import { exitOneLeg, exitStructure, optionLtp, orbEnterPremiumAuto, save, serial } from '@/lib/signalOrbServer';
+import { addLog, isPremiumInstrument, liveRow, patchRow, realisedToday, type OrbRow } from '@/lib/signalOrbLedger';
+import { exitOneLeg, exitStructure, optionLtp, orbEnterPremiumAuto, premiumBlind, save, serial } from '@/lib/signalOrbServer';
 
 // The server loop behind the Signal Orb's short straddle / strangle. It runs with every browser tab closed (the straddle is a
 // naked short: its stops cannot depend on a page being open). Every 2.5 s it (1) sells the structure at its entry time when Auto
@@ -43,6 +43,7 @@ async function tick(): Promise<void> {
     if (row.status === 'open' && row.day === istDateIso(now)) await manage(row.id, now);
     return;
   }
+  premiumBlind.since = 0;
   if (row || !isPremiumInstrument(l.config.instrument) || !l.engineActive || l.haltReason) return;
   const day = istDateIso(now);
   if (l.premiumEntryDay === day) return;
@@ -69,6 +70,14 @@ async function manage(rowId: string, now: number): Promise<void> {
   if (!(lotUnits > 0)) return;
   const marks: { CE: number | null; PE: number | null } = { CE: null, PE: null };
   for (const g of legs) if (g.status === 'open' && (g.target.side === 'CE' || g.target.side === 'PE')) marks[g.target.side] = optionLtp(g.target, now);
+  // No live premium on an open leg: its stops cannot be judged. Say so (a log line, the page's banner and chime) instead of sitting silent.
+  const blind = legs.some(g => g.status === 'open' && !((marks[g.target.side as 'CE' | 'PE'] ?? 0) > 0));
+  premiumBlind.since = blindSince(premiumBlind.since, blind, now);
+  if (blind && now - premiumBlind.since >= BLIND_WARN_MS && now - premiumBlind.warnedAt >= 5 * 60_000) {
+    premiumBlind.warnedAt = now;
+    const secs = Math.round((now - premiumBlind.since) / 1000);
+    await serial(async () => save(addLog(readOrbLedger(), 'warn', `No live premium for ${secs} s: this structure's stops are NOT being judged (only the cutoff). Check the price feed and the broker.`, now), now));
+  }
   const rowIn: PremiumRowIn = {
     lots, unitsPerLot: row.unitsPerLot, lotUnits, peak: row.peak,
     legs: legs.map(g => ({ side: g.target.side as 'CE' | 'PE', entry: g.entry, units: g.units, status: g.status, exit: g.exit, costStop: g.costStop, trailSteps: g.trailSteps })),
@@ -78,7 +87,7 @@ async function manage(rowId: string, now: number): Promise<void> {
   // the day's loss limit covers the open structure too: realised + open at or past it closes everything (the exit then halts the engine)
   const open = legs.filter(g => g.status === 'open');
   if (!actions.some(a => a.kind === 'exitAll') && open.every(g => (marks[g.target.side as 'CE' | 'PE'] ?? 0) > 0)) {
-    const px = legs.map(g => (g.status === 'closed' ? g.exit ?? g.entry : marks[g.target.side as 'CE' | 'PE']));
+    const px = legs.map(g => (g.status === 'closed' ? g.exit ?? g.entry : g.status === 'unknown' ? g.entry : marks[g.target.side as 'CE' | 'PE']));
     const openPnl = rowLegsPnl({ lots, unitsPerLot: row.unitsPerLot, legs }, px);
     if (openPnl !== null && realisedToday(l0, l0.mode, row.day) + openPnl <= -l0.config.dailyLossLimit) {
       actions.unshift({ kind: 'exitAll', why: 'sl', reason: `Daily loss limit ₹${l0.config.dailyLossLimit}` });

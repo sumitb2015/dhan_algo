@@ -72,8 +72,18 @@ Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest ye
 - **Switches:** each is saved in its own localStorage key, `signalOrb.tradeSound` / `signalOrb.alertSound`, default on.
 - **Autoplay:** browsers keep the page silent until the first click or key press. Until then the header shows "click to enable sound". On-screen messages always show, sound or not.
 
+## Synthetic futures, short straddle and short strangle
+Three structures beyond the future and the one sold option. Every leg is its own single-option market order (`lib/orbLegs.ts`); REAL is **Dhan only** for now (the config refuses another broker).
+
+- **Synthetic** (signal-driven, like futures): BULL = long synthetic (BUY the ATM CE + SELL the ATM PE, same strike and expiry), BEAR = short synthetic (BUY the PE + SELL the CE). The stop, trail, cutoff and daily loss limit are the future-point ones above; BULL <-> BEAR closes both legs and opens the opposite pair.
+- **Straddle / strangle** (NOT signal-driven): a short straddle (ATM CE + PE) or strangle (each `strikeOffset` strikes OTM). The indicators are ignored. They are sold at the entry time (`premium.entryTime`, default 09:20 NIFTY / 09:30 crude) once a day when Auto is on, or with **Enter now**, and managed by the **Ultimate Scalper's own rule functions** (`lib/orbFocus.ts` builds their inputs and calls `lib/focusToolRules.ts`): leg SL x (+ Trail SL every/by/start), SL to cost, leg target %, total SL (% of premium and / or rupees), overall target (% of premium or rupees), the cutoff and the daily loss limit. A leg's SL / target / cost stop closes that leg; the total SL, overall target, cutoff and loss limit close everything.
+- **Server-side:** `lib/orbPremiumServer.ts` runs the entry and these rules every 2.5 s with every browser tab closed (started from `instrumentation.node.ts`). Prices come from the server's own WebSocket (`lib/freshMoneyWs.ts`). A row is marked `closing` before an exit is sent; an exit is never resent after an unknown outcome. If an open leg has no live premium for 60 s the page shows a banner, sounds the warning chime and the log notes it: its stops cannot be judged (only the cutoff).
+- **Safety:** a REAL run needs a leg SL or a total SL, and a server-side **ARM** for the day (kept in memory: a dashboard restart disarms). A fail-closed funds / margin check (`lib/orbMargin.ts`) runs before any entry with a short leg. A bought leg is confirmed filled before a short is sent; a leg refused after another went in reverses the placed ones; an UNKNOWN leg is flagged on its own (resolve it from the broker book with "It is open / It is closed") while the other leg stays judged.
+- **Measure:** the total-SL % and the overall-target % are measured on the legs still open (the Focus Tool's definition), so after one leg stopped they apply to the remaining leg alone; use the rupee total SL to cap the whole loss.
+- Not built yet: the overall Trail SL and re-entry (ASAP / OTM / Cost / Momentum). Untested against a live fill.
+
 ## Known limits
-- Browser-only engine: there is no server-side stop watcher.
+- The signal-driven structures (futures, one sold option, synthetic) run in the browser engine: there is no server-side stop watcher for them (the straddle / strangle have one, above).
 - There is no real backtest. The page shows a **replay** (`replay()` in `lib/signalOrb.ts`) of the last 20 sessions with the current rules: the same `decideOrb`, one decision per closed bar at its close, the stop checked on closes, no costs or slippage. It is a rough flip-rate / direction check.
 - **What the replay found with the defaults (EMA 9 + ST 10,2) on the stored CRUDEOILM history, 62 sessions to 2026-11-19, gross:**
 

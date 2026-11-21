@@ -282,3 +282,74 @@ function sanitizePremiumConfig(patch: unknown, cur: ReturnType<typeof emptyLedge
   assert.ok(typeof r !== 'string', String(r));
   return r as ReturnType<typeof emptyLedger>['config'];
 }
+
+import { legHeld, legsAfterClose, statusAfterUnknown, unknownLegIndexes } from './signalOrbLedger.ts';
+import { BLIND_WARN_MS, blindSince } from './orbFocus.ts';
+
+const strad = (extra: Partial<OrbRow> = {}): OrbRow => {
+  const { ce, pe } = cePE();
+  return {
+    ...row(), id: 'x1', unitsPerLot: 65, lots: 2, structure: 'straddle', target: ce, entry: 100,
+    legs: [{ target: ce, action: 'SELL', entry: 100, units: 130, status: 'open' }, { target: pe, action: 'SELL', entry: 90, units: 130, status: 'open' }],
+    ...extra,
+  };
+};
+
+test('legsAfterClose: the closed leg is booked, an SL arms the cost stop on the other open leg, a target or cost exit does not', () => {
+  const r = strad();
+  const sl = legsAfterClose(r.legs!, 0, 150, true);
+  assert.deepEqual(sl.legs.map(g => [g.status, g.exit, g.costStop]), [['closed', 150, undefined], ['open', undefined, true]]);
+  assert.equal(sl.anyOpen, true);
+  const tgt = legsAfterClose(r.legs!, 0, 60, false);
+  assert.equal(tgt.legs[1].costStop, undefined);
+  const last = legsAfterClose(legsAfterClose(r.legs!, 0, 150, true).legs, 1, 90, false);
+  assert.equal(last.anyOpen, false);
+  assert.equal(last.anyHeld, false);
+  const withUnknown = legsAfterClose([{ ...r.legs![0], status: 'unknown' as const }, r.legs![1]], 1, 80, false);
+  assert.equal(withUnknown.anyOpen, false);
+  assert.equal(withUnknown.anyHeld, true);                  // an unknown leg may still hold units: the row is not finished
+});
+
+test('an unknown leg exit: a straddle with another open leg stays open (still watched), a synthetic or an all-unknown row is unknown', () => {
+  const r = strad();
+  const legs = r.legs!.map((g, i) => (i === 0 ? { ...g, status: 'unknown' as const } : g));
+  assert.equal(statusAfterUnknown(r, legs), 'open');
+  assert.equal(statusAfterUnknown(r, legs.map(g => ({ ...g, status: 'unknown' as const }))), 'unknown');
+  assert.equal(statusAfterUnknown(synRow(), legs), 'unknown');
+  assert.deepEqual(unknownLegIndexes({ legs }), [0]);
+  assert.equal(legHeld({ status: 'unknown' }), true);
+  assert.equal(legHeld({ status: 'closed' }), false);
+});
+
+test('resolveLeg: confirm open, or closed at a price; the row closes once nothing is held; only an unknown leg can be resolved', () => {
+  const r = strad();
+  const unk = { ...r, legs: r.legs!.map((g, i) => (i === 0 ? { ...g, status: 'unknown' as const } : g)) };
+  const l = withRow(unk);
+  assert.equal(applyClientOp(l, { op: 'resolveLeg', id: 'x1', leg: 1, as: 'open' }, 1).ok, false);            // leg 1 is not unknown
+  const open = applyClientOp(l, { op: 'resolveLeg', id: 'x1', leg: 0, as: 'open' }, 1);
+  assert.ok(open.ok && open.ledger.rows[0].legs![0].status === 'open' && open.ledger.rows[0].status === 'open');
+  const closed = applyClientOp(l, { op: 'resolveLeg', id: 'x1', leg: 0, as: 'closed', price: 130 }, 1);
+  assert.ok(closed.ok && closed.ledger.rows[0].legs![0].exit === 130 && closed.ledger.rows[0].status === 'open');   // the other leg is still open
+  const allDone = withRow({ ...unk, legs: unk.legs!.map((g, i) => (i === 1 ? { ...g, status: 'closed' as const, exit: 80 } : g)) });
+  const fin = applyClientOp(allDone, { op: 'resolveLeg', id: 'x1', leg: 0, as: 'closed', price: 130 }, 1);
+  assert.ok(fin.ok && fin.ledger.rows[0].status === 'closed');
+  assert.equal(fin.ok && fin.ledger.rows[0].pnl, ((100 - 130) + (90 - 80)) * 2 * 65);
+  // the row-level "It is open" confirms every unknown leg too
+  const all = applyClientOp(withRow({ ...unk, status: 'unknown' }), { op: 'resolve', id: 'x1', as: 'open' }, 1);
+  assert.ok(all.ok && all.ledger.rows[0].legs!.every(g => g.status === 'open'));
+});
+
+test('blindSince: starts when a leg first has no premium, keeps its start while blind, clears once priced', () => {
+  assert.equal(blindSince(0, true, 1000), 1000);
+  assert.equal(blindSince(1000, true, 5000), 1000);
+  assert.equal(blindSince(1000, false, 5000), 0);
+  assert.equal(blindSince(0, false, 5000), 0);
+  assert.ok(BLIND_WARN_MS >= 30_000);
+});
+
+test('a stored premium block keeps its good fields when one is bad (loaded field by field)', () => {
+  const l = normalizeLedger({ config: { instrument: 'straddle', premium: { legSlX: 2.2, totalSlPct: 1, entryTime: '09:45' } } });
+  assert.equal(l.config.premium.legSlX, 2.2);
+  assert.equal(l.config.premium.entryTime, '09:45');
+  assert.equal(l.config.premium.totalSlPct, emptyLedger().config.premium.totalSlPct);   // 1 is below the allowed 5: default for that field only
+});

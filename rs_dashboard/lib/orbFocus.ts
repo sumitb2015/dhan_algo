@@ -90,7 +90,8 @@ export interface PremiumLegIn {
   entry: number;
   /** Broker units held (lots x the broker's lot). */
   units: number;
-  status: 'open' | 'closed' | 'failed';
+  /** 'unknown' (an order may be live, unresolved): not judged and no P&L counted until the user resolves it. */
+  status: 'open' | 'closed' | 'failed' | 'unknown';
   exit?: number;
   /** Set once the other leg's SL fired and SL-to-cost applies: this leg now exits when its premium climbs back to `entry`. */
   costStop?: boolean;
@@ -146,7 +147,7 @@ function focusInputs(cfg: PremiumConfig, row: PremiumRowIn, marks: { CE: number 
   for (const l of row.legs) {
     if (l.status === 'failed') continue;
     const lots = row.lotUnits > 0 ? l.units / row.lotUnits : 0;
-    const px = l.status === 'closed' ? l.exit ?? l.entry : marks[l.side] ?? l.entry;
+    const px = l.status === 'closed' ? l.exit ?? l.entry : l.status === 'unknown' ? l.entry : marks[l.side] ?? l.entry;
     pnl += (l.entry - px) * lots * row.unitsPerLot;
   }
   const held = (l?: PremiumLegIn) => (l ? { netQty: -l.units, sellAvg: l.entry, buyAvg: 0 } as unknown as RowLive['cePosition'] : null);
@@ -219,4 +220,10 @@ export function premiumEntryCheck(i: { entryTime: string; cutoffHm: string; nowH
     { status: 'armed' as FocusRowStatus, lots: 1, dte: 'Any', entryTime: i.entryTime, exitTime: i.cutoffHm, side: 'BOTH' },
     { nowHm: i.nowHm, groupEnabled: i.autoOn, product: 'INTRADAY', backstopHm: i.cutoffHm, dte: null, strikesReady: true, flat: i.flat, tradingDay: i.tradingDay },
   );
+}
+
+/** How long the structure has gone without a live premium on some open leg: `since` is when that began (0 = priced now). */
+export const BLIND_WARN_MS = 60_000;
+export function blindSince(prevSince: number, blindNow: boolean, now: number): number {
+  return blindNow ? (prevSince > 0 ? prevSince : now) : 0;
 }

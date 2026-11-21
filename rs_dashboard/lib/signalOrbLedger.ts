@@ -78,7 +78,8 @@ export interface OrbLeg {
   entry: number;
   exit?: number;
   units: number;
-  status: 'open' | 'closed' | 'failed';
+  /** 'unknown': an order for this leg may be live at the broker and nobody can say yet; it is never resent and never judged (resolve it). */
+  status: 'open' | 'closed' | 'failed' | 'unknown';
   note?: string;
   /** Straddle / strangle: the other leg's SL fired and SL-to-cost applies, so this leg now exits at its entry premium. */
   costStop?: boolean;
@@ -182,6 +183,14 @@ export function normalizeLedger(v: unknown): OrbLedger {
   const TIME_KEYS = ['entryStart', 'entryEnd', 'eodExit'];
   // the symbol first: switching it brings that symbol's stop / trail / times, which the stored values then replace
   for (const k of Object.keys(stored).filter(x => !TIME_KEYS.includes(x)).sort((a, b) => (a === 'symbol' ? -1 : b === 'symbol' ? 1 : 0))) {
+    if (k === 'premium' && stored[k] && typeof stored[k] === 'object') {
+      // the straddle / strangle rules too, field by field: one bad stored value must not reset the others to defaults
+      for (const pk of Object.keys(stored[k] as object)) {
+        const r = sanitizeConfigPatch({ premium: { [pk]: (stored[k] as Record<string, unknown>)[pk] } }, cfg);
+        if (typeof r !== 'string') cfg = r;
+      }
+      continue;
+    }
     const r = sanitizeConfigPatch({ [k]: stored[k] }, cfg);
     if (typeof r !== 'string') cfg = r;
   }
@@ -330,7 +339,8 @@ export type ClientOp =
   | { op: 'addLog'; level: OrbLog['level']; msg: string }
   | { op: 'peak'; id: string; price: number }
   | { op: 'resetSim' }
-  | { op: 'resolve'; id: string; as: 'open' | 'closed' | 'failed'; price?: number };
+  | { op: 'resolve'; id: string; as: 'open' | 'closed' | 'failed'; price?: number }
+  | { op: 'resolveLeg'; id: string; leg: number; as: 'open' | 'closed'; price?: number };
 
 export type OpResult = { ok: true; ledger: OrbLedger } | { ok: false; status: number; error: string };
 
@@ -389,11 +399,32 @@ export function applyClientOp(l: OrbLedger, raw: unknown, now: number): OpResult
       if (live?.mode === 'SIM') return bad('Close the SIM position first', 409);
       return { ok: true, ledger: addLog({ ...l, rows: l.rows.filter(r => r.mode !== 'SIM') }, 'info', 'SIM trades cleared', now) };
     }
+    case 'resolveLeg': {
+      // The user's reading of the broker book for ONE leg of a multi-leg row whose order outcome was unknown.
+      const r = l.rows.find(x => x.id === op.id);
+      const g = r?.legs?.[op.leg];
+      if (!r || !r.legs || !isLive(r) || !g) return bad('No such leg', 404);
+      if (g.status !== 'unknown') return bad('That leg is not waiting for a decision', 409);
+      if (op.as !== 'open' && op.as !== 'closed') return bad('as must be open or closed');
+      const px = Number(op.price);
+      const legs = r.legs.map((x, i) => (i !== op.leg ? x : op.as === 'open'
+        ? { ...x, status: 'open' as const, note: 'confirmed open by user' }
+        : { ...x, status: 'closed' as const, exit: Number.isFinite(px) && px > 0 ? px : x.entry, note: 'marked closed by user' }));
+      if (!legs.some(legHeld)) {
+        return { ok: true, ledger: addLog(closeRowLegs(patchRow(l, r.id, { legs }), r.id, legs.map(x => x.exit ?? null), 'Marked closed by user', now), 'warn', `Row ${r.id} leg ${op.leg + 1} marked CLOSED by user - the row is closed`, now) };
+      }
+      const status = legs.some(x => x.status === 'unknown') ? statusAfterUnknown(r, legs) : 'open';
+      return { ok: true, ledger: addLog(patchRow(l, r.id, { legs, status }), 'warn', `Row ${r.id} leg ${op.leg + 1} marked ${op.as.toUpperCase()} by user`, now) };
+    }
     case 'resolve': {
       // The user's reading of the broker book for a row the page cannot be sure of (UNKNOWN outcome, or one from an earlier day).
       const r = l.rows.find(x => x.id === op.id);
       if (!r || !isLive(r)) return bad('No such live row', 404);
       if ((r.status === 'sending' || r.status === 'closing') && !isStuck(r, now)) return bad('An order for this row is still in flight', 409);
+      if (op.as === 'open' && r.legs) {
+        const legs = r.legs.map(g => (g.status === 'unknown' ? { ...g, status: 'open' as const } : g));
+        return { ok: true, ledger: addLog(patchRow(l, r.id, { status: 'open', legs, note: 'confirmed open by user' }), 'warn', `Row ${r.id} confirmed OPEN by user`, now) };
+      }
       if (op.as === 'open') return { ok: true, ledger: addLog(patchRow(l, r.id, { status: 'open', note: 'confirmed open by user' }), 'warn', `Row ${r.id} confirmed OPEN by user`, now) };
       if (op.as === 'failed') return { ok: true, ledger: addLog(patchRow(l, r.id, { status: 'failed', note: 'confirmed not filled by user' }), 'warn', `Row ${r.id} marked NOT FILLED by user`, now) };
       if (op.as === 'closed' && r.legs) {
@@ -438,3 +469,29 @@ export function closeRowLegs(l: OrbLedger, id: string, exits: (number | null)[],
     }),
   };
 }
+
+// ── Multi-leg bookkeeping (pure, so the server's per-leg exits can be tested) ──────────────────────────────────────────────
+
+/** A leg that may still hold units at the broker (open, or unknown): what other pages' closes must leave alone. */
+export const legHeld = (g: Pick<OrbLeg, 'status'>): boolean => g.status === 'open' || g.status === 'unknown';
+
+/**
+ * The row's status after an outcome left some leg unknown. A straddle / strangle stays 'open' while another leg is open, so that leg
+ * is still judged by its stops (the unknown one is never resent); anything else (a synthetic: its legs are one position) is 'unknown'.
+ */
+export function statusAfterUnknown(row: Pick<OrbRow, 'structure'>, legs: OrbLeg[]): 'open' | 'unknown' {
+  const watched = row.structure === 'straddle' || row.structure === 'strangle';
+  return watched && legs.some(g => g.status === 'open') ? 'open' : 'unknown';
+}
+
+/**
+ * `legs` after leg `index` closed at premium `px`. After a leg's SL (`armCost`) every other still-open leg gets its cost stop
+ * (Focus: SL to cost). The row is finished when `anyHeld` is false.
+ */
+export function legsAfterClose(legs: OrbLeg[], index: number, px: number, armCost: boolean): { legs: OrbLeg[]; anyOpen: boolean; anyHeld: boolean } {
+  const next = legs.map((g, i) => (i === index ? { ...g, status: 'closed' as const, exit: px } : armCost && g.status === 'open' ? { ...g, costStop: true } : g));
+  return { legs: next, anyOpen: next.some(g => g.status === 'open'), anyHeld: next.some(legHeld) };
+}
+
+/** Leg indexes still unknown on a row. */
+export const unknownLegIndexes = (r: Pick<OrbRow, 'legs'>): number[] => (r.legs ?? []).flatMap((g, i) => (g.status === 'unknown' ? [i] : []));

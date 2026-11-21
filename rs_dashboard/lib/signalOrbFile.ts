@@ -2,7 +2,7 @@ import path from 'path';
 import { readJsonFile } from '@/lib/lockedJsonFile';
 import { PROJECT_ROOT } from '@/lib/pyExec';
 import { targetKey } from '@/lib/pnfTarget';
-import { isLive, normalizeLedger, type OrbLedger } from '@/lib/signalOrbLedger';
+import { isLive, legHeld, normalizeLedger, type OrbLedger } from '@/lib/signalOrbLedger';
 
 // The Signal Orb ledger file, read-only helpers. Kept apart from lib/signalOrbServer.ts so the P&F / Renko order path
 // (lib/pnfAutoOrders.ts) can keep the Orb's units out of its square-off without importing the Orb's order code (no cycle).
@@ -22,7 +22,7 @@ export function reservedByOrb(broker: string, tKey: string, product: 'INTRADAY' 
     if (!isLive(r) || r.mode !== 'REAL' || r.broker !== broker) continue;
     if (r.legs) {
       // a multi-leg row: each open leg holds its own units, signed by what opened it (BUY = long, SELL = short)
-      for (const g of r.legs) if (g.status === 'open' && targetKey(g.target) === tKey) out += (g.action === 'BUY' ? 1 : -1) * (Number(g.units) || 0);
+      for (const g of r.legs) if (legHeld(g) && targetKey(g.target) === tKey) out += (g.action === 'BUY' ? 1 : -1) * (Number(g.units) || 0);
       continue;
     }
     if (targetKey(r.target) !== tKey) continue;
