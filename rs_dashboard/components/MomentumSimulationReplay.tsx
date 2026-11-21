@@ -538,6 +538,21 @@ export default function MomentumSimulationReplay({
     const avgTradePct = totalTrades > 0 ? allClosed.reduce((sum, t) => sum + (t.pnl_pct || 0), 0) / totalTrades : 0;
     const avgHoldDays = totalTrades > 0 ? allClosed.reduce((sum, t) => sum + (t.hold_days || 0), 0) / totalTrades : 0;
 
+    // Open positions mark-to-market metrics (crucial when simulation ends while holding active positions)
+    const openHoldings = finalSnap?.holdings || [];
+    const openWins = openHoldings.filter((h) => h.unrealised > 0);
+    const openLosses = openHoldings.filter((h) => h.unrealised <= 0);
+    const openGrossProfit = openWins.reduce((sum, h) => sum + h.unrealised, 0);
+    const openGrossLoss = Math.abs(openLosses.reduce((sum, h) => sum + h.unrealised, 0));
+    const openPf = openGrossLoss > 0 ? openGrossProfit / openGrossLoss : (openGrossProfit > 0 ? 999.0 : 0.0);
+    const openWinRate = openHoldings.length > 0 ? (openWins.length / openHoldings.length) * 100 : 0;
+    const openAvgPnl = openHoldings.length > 0 ? openHoldings.reduce((sum, h) => sum + h.unrealised, 0) / openHoldings.length : 0;
+    const openAvgPct = openHoldings.length > 0 ? openHoldings.reduce((sum, h) => sum + h.unrealised_pct, 0) / openHoldings.length : 0;
+    const openAvgHold = openHoldings.length > 0 ? openHoldings.reduce((sum, h) => sum + h.hold_days, 0) / openHoldings.length : 0;
+
+    const hasClosed = totalTrades > 0;
+    const hasOpen = openHoldings.length > 0;
+
     return {
       totalTrades,
       winningTrades: wins.length,
@@ -553,7 +568,18 @@ export default function MomentumSimulationReplay({
       finalEquity: simData.final_equity,
       totalReturnPct: simData.total_return_pct,
       initialCapital: simData.initial_capital,
-      openPositions: finalSnap ? finalSnap.holdings.length : 0,
+      openPositions: openHoldings.length,
+      hasClosed,
+      hasOpen,
+      openWins: openWins.length,
+      openLosses: openLosses.length,
+      openWinRate,
+      openPf,
+      openGrossProfit,
+      openGrossLoss,
+      openAvgPnl,
+      openAvgPct,
+      openAvgHold,
     };
   }, [simData]);
 
@@ -990,15 +1016,29 @@ export default function MomentumSimulationReplay({
                 <div className="bg-zinc-800/80 border border-zinc-700/70 rounded p-2.5">
                   <div className="flex items-center justify-between text-[10px] uppercase font-bold text-zinc-400 tracking-wider">
                     <span>Profit Factor</span>
-                    <Info tip="Ratio of gross winning trades to gross losing trades. > 1.5 is good; > 2.0 is exceptional.">
+                    <Info tip="Ratio of gross winning trades to gross losing trades. > 1.5 is good; > 2.0 is exceptional. When all positions are active/unclosed, shows current open mark-to-market ratio.">
                       <span className="cursor-help text-zinc-500 hover:text-zinc-300">ⓘ</span>
                     </Info>
                   </div>
-                  <div className={`text-base font-bold tabular-nums mt-0.5 ${overallMetrics.profitFactor >= 1.5 ? 'text-emerald-400' : overallMetrics.profitFactor >= 1.0 ? 'text-amber-300' : 'text-red-400'}`}>
-                    {overallMetrics.profitFactor >= 99 ? '∞ (No loss)' : overallMetrics.totalTrades > 0 ? overallMetrics.profitFactor.toFixed(2) : '—'}
+                  <div className={`text-base font-bold tabular-nums mt-0.5 ${
+                    overallMetrics.hasClosed
+                      ? (overallMetrics.profitFactor >= 1.5 ? 'text-emerald-400' : overallMetrics.profitFactor >= 1.0 ? 'text-amber-300' : 'text-red-400')
+                      : overallMetrics.hasOpen
+                      ? (overallMetrics.openPf >= 1.5 ? 'text-emerald-400' : overallMetrics.openPf >= 1.0 ? 'text-amber-300' : 'text-red-400')
+                      : 'text-zinc-400'
+                  }`}>
+                    {overallMetrics.hasClosed
+                      ? (overallMetrics.profitFactor >= 99 ? '∞ (No loss)' : overallMetrics.profitFactor.toFixed(2))
+                      : overallMetrics.hasOpen
+                      ? (overallMetrics.openPf >= 99 ? '∞ (MTM)' : `${overallMetrics.openPf.toFixed(2)} (MTM)`)
+                      : '—'}
                   </div>
                   <div className="text-[10px] text-zinc-400 tabular-nums truncate">
-                    GP {rupees(overallMetrics.grossProfit)} / GL {rupees(overallMetrics.grossLoss)}
+                    {overallMetrics.hasClosed
+                      ? `GP ${rupees(overallMetrics.grossProfit)} / GL ${rupees(overallMetrics.grossLoss)}`
+                      : overallMetrics.hasOpen
+                      ? `MTM: +${rupees(overallMetrics.openGrossProfit)} / -${rupees(overallMetrics.openGrossLoss)}`
+                      : '100% Cash'}
                   </div>
                 </div>
 
@@ -1006,15 +1046,29 @@ export default function MomentumSimulationReplay({
                 <div className="bg-zinc-800/80 border border-zinc-700/70 rounded p-2.5">
                   <div className="flex items-center justify-between text-[10px] uppercase font-bold text-zinc-400 tracking-wider">
                     <span>Win Rate</span>
-                    <Info tip="Percentage of closed trades with positive realized profit.">
+                    <Info tip="Percentage of trades with positive profit. When positions are currently active, displays open mark-to-market win rate.">
                       <span className="cursor-help text-zinc-500 hover:text-zinc-300">ⓘ</span>
                     </Info>
                   </div>
-                  <div className={`text-base font-bold tabular-nums mt-0.5 ${overallMetrics.winRate >= 50 ? 'text-emerald-400' : overallMetrics.winRate > 0 ? 'text-amber-300' : 'text-zinc-400'}`}>
-                    {overallMetrics.totalTrades > 0 ? `${overallMetrics.winRate.toFixed(1)}%` : '—'}
+                  <div className={`text-base font-bold tabular-nums mt-0.5 ${
+                    overallMetrics.hasClosed
+                      ? (overallMetrics.winRate >= 50 ? 'text-emerald-400' : 'text-amber-300')
+                      : overallMetrics.hasOpen
+                      ? (overallMetrics.openWinRate >= 50 ? 'text-emerald-400' : 'text-amber-300')
+                      : 'text-zinc-400'
+                  }`}>
+                    {overallMetrics.hasClosed
+                      ? `${overallMetrics.winRate.toFixed(1)}%`
+                      : overallMetrics.hasOpen
+                      ? `${overallMetrics.openWinRate.toFixed(1)}% (MTM)`
+                      : '—'}
                   </div>
                   <div className="text-[10px] text-zinc-400 tabular-nums">
-                    {overallMetrics.winningTrades}W · {overallMetrics.losingTrades}L
+                    {overallMetrics.hasClosed
+                      ? `${overallMetrics.winningTrades}W · ${overallMetrics.losingTrades}L Closed`
+                      : overallMetrics.hasOpen
+                      ? `${overallMetrics.openWins}W · ${overallMetrics.openLosses}L Open`
+                      : '0 Trades'}
                   </div>
                 </div>
 
@@ -1022,15 +1076,23 @@ export default function MomentumSimulationReplay({
                 <div className="bg-zinc-800/80 border border-zinc-700/70 rounded p-2.5">
                   <div className="flex items-center justify-between text-[10px] uppercase font-bold text-zinc-400 tracking-wider">
                     <span>Total Trades</span>
-                    <Info tip="Total closed round-trip positions taken in this simulation, plus currently active open slots.">
+                    <Info tip="Total positions entered and closed in this simulation, plus currently active open slots.">
                       <span className="cursor-help text-zinc-500 hover:text-zinc-300">ⓘ</span>
                     </Info>
                   </div>
                   <div className="text-base font-bold text-zinc-100 tabular-nums mt-0.5">
-                    {overallMetrics.totalTrades}
+                    {overallMetrics.hasClosed
+                      ? overallMetrics.totalTrades
+                      : overallMetrics.hasOpen
+                      ? `${overallMetrics.openPositions} Active`
+                      : '0'}
                   </div>
                   <div className="text-[10px] text-zinc-400 tabular-nums">
-                    {overallMetrics.openPositions} active open
+                    {overallMetrics.hasClosed
+                      ? `${overallMetrics.openPositions} open · ${overallMetrics.totalTrades} closed`
+                      : overallMetrics.hasOpen
+                      ? `${overallMetrics.openPositions} open · 0 closed`
+                      : '100% Cash (Regime OFF)'}
                   </div>
                 </div>
 
@@ -1054,15 +1116,29 @@ export default function MomentumSimulationReplay({
                 <div className="bg-zinc-800/80 border border-zinc-700/70 rounded p-2.5">
                   <div className="flex items-center justify-between text-[10px] uppercase font-bold text-zinc-400 tracking-wider">
                     <span>Avg Trade</span>
-                    <Info tip="Average realized P&L and average holding duration per closed trade.">
+                    <Info tip="Average realized P&L and average holding duration per closed trade (or open MTM average when positions are held).">
                       <span className="cursor-help text-zinc-500 hover:text-zinc-300">ⓘ</span>
                     </Info>
                   </div>
-                  <div className={`text-base font-bold tabular-nums mt-0.5 ${overallMetrics.avgTradePnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {overallMetrics.totalTrades > 0 ? signed(overallMetrics.avgTradePnl) : '—'}
+                  <div className={`text-base font-bold tabular-nums mt-0.5 ${
+                    overallMetrics.hasClosed
+                      ? (overallMetrics.avgTradePnl >= 0 ? 'text-emerald-400' : 'text-red-400')
+                      : overallMetrics.hasOpen
+                      ? (overallMetrics.openAvgPnl >= 0 ? 'text-emerald-400' : 'text-red-400')
+                      : 'text-zinc-400'
+                  }`}>
+                    {overallMetrics.hasClosed
+                      ? signed(overallMetrics.avgTradePnl)
+                      : overallMetrics.hasOpen
+                      ? signed(overallMetrics.openAvgPnl)
+                      : '—'}
                   </div>
                   <div className="text-[10px] text-zinc-400 tabular-nums truncate">
-                    {overallMetrics.totalTrades > 0 ? `${overallMetrics.avgTradePct >= 0 ? '+' : ''}${overallMetrics.avgTradePct.toFixed(1)}% · ${overallMetrics.avgHoldDays.toFixed(0)}d hold` : 'no closed trades'}
+                    {overallMetrics.hasClosed
+                      ? `${overallMetrics.avgTradePct >= 0 ? '+' : ''}${overallMetrics.avgTradePct.toFixed(1)}% · ${overallMetrics.avgHoldDays.toFixed(0)}d hold`
+                      : overallMetrics.hasOpen
+                      ? `MTM (${overallMetrics.openAvgPct >= 0 ? '+' : ''}${overallMetrics.openAvgPct.toFixed(1)}% · ${overallMetrics.openAvgHold.toFixed(0)}d hold)`
+                      : 'no trades taken'}
                   </div>
                 </div>
               </div>
