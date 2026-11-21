@@ -14,7 +14,7 @@ import {
   type EffectiveStopResult, type Evaluation, type ReplaySummary, type Side,
 } from '@/lib/signalOrb';
 import { isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
-import { keyLevels, mtfTable, signalChanges } from '@/lib/signalOrbPanels';
+import { keyLevels, mtfTable, sessionPath, signalChanges } from '@/lib/signalOrbPanels';
 
 // The Signal Orb's live engine (browser). Leader tab only (localStorage lock); the tick is rebuilt every render and called through
 // a ref from ONE interval, so quotes never restart it. It decides on closed bars (lib/signalOrb.ts) and asks the server to act
@@ -166,6 +166,11 @@ export function useOrbEngine() {
   const history = useMemo(() => signalChanges(cfg?.indicators ?? [], closed, 10), [cfg?.indicators, closed]);
   const levels = useMemo(
     () => keyLevels(bars.slice(-6_000)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [closedKey, nowMinute],
+  );
+  const dayPath = useMemo(
+    () => sessionPath(bars.slice(-6_000)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [closedKey, nowMinute],
   );
@@ -370,6 +375,6 @@ export function useOrbEngine() {
   return {
     state, ledger, live: live as OrbRow | null, contract, feed, ev, price, priceFresh, openPnl, mark, realised, now, isLeader, note, stateError,
     armed, setArmed, busy, op, closeAndStop, today, replayed, secsToClose, barSecs,
-    tradeSound, setTradeSound, alertSound, setAlertSound, soundReady, outdated, effectiveStop, mtf, history, levels, tf,
+    tradeSound, setTradeSound, alertSound, setAlertSound, soundReady, outdated, effectiveStop, mtf, history, levels, dayPath, tf,
   };
 }

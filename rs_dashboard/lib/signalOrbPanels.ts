@@ -162,3 +162,43 @@ export function oiAgreement(orb: Signal, oi: Signal): 'agree' | 'conflict' | 'no
   if (orb === 'NEUTRAL' || oi === 'NEUTRAL') return 'none';
   return orb === oi ? 'agree' : 'conflict';
 }
+
+// ── CPR / pivots against the live price ──────────────────────────────────────────────────────────────────────────────────
+
+/** The latest session's closes in time order, thinned to at most `max` points (always keeping the newest): the price path drawn over the levels. */
+export function sessionPath(bars1m: Bar1m[], max = 240): { t: number; c: number }[] {
+  const valid = bars1m.filter(b => b.straddle > 0 && Number.isFinite(b.straddle));
+  if (!valid.length) return [];
+  const d0 = istDay(valid[valid.length - 1].t);
+  const day = valid.filter(b => istDay(b.t) === d0).map(b => ({ t: b.t, c: b.straddle }));
+  if (day.length <= max) return day;
+  const step = day.length / max;
+  const out: { t: number; c: number }[] = [];
+  for (let i = 0; i < max - 1; i++) out.push(day[Math.floor(i * step)]);
+  out.push(day[day.length - 1]);
+  return out;
+}
+
+export type ZoneLevel = { key: string; label: string; price: number; dist: number };
+export type PivotZone = {
+  /** The nearest level at or below the price, and the nearest above (null beyond the outermost). */
+  below: ZoneLevel | null;
+  above: ZoneLevel | null;
+  /** Between the CPR's bottom and top. */
+  inCpr: boolean;
+  /** "Inside the CPR", "Above TC, below R1", "Below S4" ... */
+  text: string;
+};
+
+/** Where `price` sits among the CPR and R1-R4 / S1-S4 (any level object with p, tc, bc, r1-r4, s1-s4). */
+export function pivotZone(price: number, set: { p: number; tc: number; bc: number; r1: number; r2: number; r3: number; r4: number; s1: number; s2: number; s3: number; s4: number }): PivotZone {
+  const all: ZoneLevel[] = ([
+    ['s4', 'S4', set.s4], ['s3', 'S3', set.s3], ['s2', 'S2', set.s2], ['s1', 'S1', set.s1], ['bc', 'BC', set.bc], ['p', 'P', set.p], ['tc', 'TC', set.tc],
+    ['r1', 'R1', set.r1], ['r2', 'R2', set.r2], ['r3', 'R3', set.r3], ['r4', 'R4', set.r4],
+  ] as [string, string, number][]).map(([key, label, p]) => ({ key, label, price: p, dist: price - p })).sort((a, b) => a.price - b.price);
+  let below: ZoneLevel | null = null, above: ZoneLevel | null = null;
+  for (const l of all) { if (l.price <= price) below = l; else { above = l; break; } }
+  const inCpr = price >= set.bc && price <= set.tc;
+  const text = inCpr ? 'Inside the CPR' : !below ? `Below ${above?.label ?? ''}`.trim() : !above ? `Above ${below.label}` : `${below.label} to ${above.label}`;
+  return { below, above, inCpr, text };
+}

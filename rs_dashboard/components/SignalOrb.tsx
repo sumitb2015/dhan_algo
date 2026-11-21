@@ -13,6 +13,7 @@ import { expiryLabel } from '@/lib/pnfTarget';
 import { cn } from '@/lib/utils';
 import { type EffectiveStopResult } from '@/lib/signalOrb';
 import { ContextTabs } from '@/components/signalOrb/ContextPanels';
+import { PivotPanel } from '@/components/signalOrb/PivotChart';
 import { isStuck, type OrbConfig, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 
 // /signal-orb: one orb, one switch. A CRUDEOIL / CRUDEOILM / NIFTY future's closed bars give the consensus of the active indicators —
@@ -151,9 +152,10 @@ export default function SignalOrb() {
         </div>
       </header>
 
-      {/* stage: the orb, with the context panels beside it (below it on a narrow window) */}
-      <div className="relative z-10 grid flex-1 grid-cols-1 items-center gap-2 lg:grid-cols-[minmax(0,1fr)_21rem]">
-      <main className="flex flex-col items-center justify-center gap-4 px-4 py-4">
+      {/* stage: the CPR window | the orb | the context window on a wide screen; the orb and the context window side by side on a
+          laptop, with the CPR window under the orb; everything stacked on a narrow one */}
+      <div className="relative z-10 grid flex-1 grid-cols-1 gap-2 lg:grid-cols-[minmax(0,1fr)_24rem] xl:grid-cols-[27rem_minmax(0,1fr)_29rem] 2xl:grid-cols-[35rem_minmax(0,1fr)_29rem]">
+      <main className="flex flex-col items-center justify-center gap-4 px-4 py-4 xl:col-start-2 xl:row-start-1">
         {(e.stateError || e.feed.loadError) && (
           <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs text-red-300">{e.stateError ?? e.feed.loadError}</p>
         )}
@@ -272,10 +274,15 @@ export default function SignalOrb() {
       </main>
 
       {ledger && (
-        <aside aria-label="Context" className="flex flex-col gap-3 px-4 pb-4 lg:py-4 lg:pl-0 lg:pr-4">
-          <ContextTabs mtf={e.mtf} active={e.tf} history={e.history} levels={e.levels} price={e.price} today={e.today}
-            symbol={ledger.config.symbol} signal={ev.signal} />
-        </aside>
+        <>
+          <aside aria-label="Context" className="flex flex-col gap-3 self-start px-4 pb-4 lg:self-center lg:py-4 lg:pl-0 lg:pr-4 xl:col-start-3 xl:row-start-1">
+            <ContextTabs mtf={e.mtf} active={e.tf} history={e.history} levels={e.levels} price={e.price} today={e.today}
+              symbol={ledger.config.symbol} signal={ev.signal} />
+          </aside>
+          <aside aria-label="CPR and pivots" className="self-start px-4 pb-4 lg:py-4 lg:pr-0 xl:col-start-1 xl:row-start-1 xl:self-center xl:pl-4 xl:pr-0">
+            <PivotPanel levels={e.levels} price={e.price} path={e.dayPath} symbol={ledger.config.symbol} />
+          </aside>
+        </>
       )}
       </div>
 

@@ -71,3 +71,31 @@ test('oiSummary / oiSide / oiAgreement', () => {
   assert.equal(oiAgreement('BULL', 'BEAR'), 'conflict');
   assert.equal(oiAgreement('NEUTRAL', 'BEAR'), 'none');
 });
+
+import { pivotZone, sessionPath } from './signalOrbPanels.ts';
+import { computePivots } from './pivotLevels.ts';
+
+test('pivotZone: nearest levels either side, inside / above / below the whole ladder', () => {
+  const set = computePivots(110, 90, 100, 'classic')!;     // P 100, BC 100, TC 100 (a flat CPR), R1 110, S1 90 ...
+  const z = pivotZone(105, set);
+  assert.equal(z.below?.label, 'TC');
+  assert.equal(z.above?.label, 'R1');
+  assert.equal(z.text, 'TC to R1');
+  assert.ok(Math.abs((z.above?.dist ?? 0) + 5) < 1e-9);    // price minus level: 5 below R1
+  const set2 = computePivots(120, 90, 100, 'classic')!;    // a CPR with some width
+  assert.equal(pivotZone((set2.bc + set2.tc) / 2, set2).inCpr, true);
+  assert.equal(pivotZone(set2.tc + 0.01, set2).inCpr, false);
+  assert.equal(pivotZone(set2.r4 + 5, set2).text, 'Above R4');
+  assert.equal(pivotZone(set2.s4 - 5, set2).text, 'Below S4');
+});
+
+test('sessionPath: only the latest session, thinned to the cap and ending on the newest close', () => {
+  const prev = session(0, 100, i => 1000 + i);
+  const today = session(1, 500, i => 1200 + i);
+  const p = sessionPath([...prev, ...today], 100);
+  assert.equal(p.length, 100);
+  assert.equal(p[p.length - 1].c, 1699);
+  assert.ok(p.every(x => x.c >= 1200));
+  assert.equal(sessionPath([...prev, ...today], 1000).length, 500);
+  assert.deepEqual(sessionPath([], 10), []);
+});
