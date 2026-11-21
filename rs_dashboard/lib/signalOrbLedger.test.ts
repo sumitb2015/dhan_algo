@@ -116,3 +116,28 @@ test('a row stuck in flight past STUCK_MS can be resolved; a fresh one cannot', 
   assert.ok(r.ok && r.ledger.rows[0].status === 'failed');
   assert.equal(applyClientOp(l, { op: 'setEngine', active: true }, 1_000 + 91_000).ok, false);
 });
+
+test('peak op ratchets in the trade\'s favour only, and only on an open row', () => {
+  const up = (l: OrbLedger, price: number) => { const r = applyClientOp(l, { op: 'peak', id: 'r1', price }, 1); assert.ok(r.ok); return r.ledger; };
+  let l = withRow(row({ side: 'LONG', entry: 6000 }));
+  l = up(l, 6010); assert.equal(l.rows[0].bestPrice, 6010);
+  l = up(l, 6005); assert.equal(l.rows[0].bestPrice, 6010);
+  l = up(l, 6025); assert.equal(l.rows[0].bestPrice, 6025);
+  let s = withRow(row({ side: 'SHORT' }));
+  s = up(s, 5990); s = up(s, 5995); assert.equal(s.rows[0].bestPrice, 5990);
+  s = up(s, 5980); assert.equal(s.rows[0].bestPrice, 5980);
+  const closed = withRow(row({ status: 'closed' }));
+  assert.equal(up(closed, 6100).rows[0].bestPrice, undefined);
+  assert.equal(up(withRow(row()), -1).rows[0].bestPrice, undefined);
+});
+
+test('normalizeLedger keeps good config fields when one stored field is bad', () => {
+  const l = normalizeLedger({ config: { lots: 5, stopPts: 45, broker: 'kotak', timeframe: 7, trailStartPts: -3 } });
+  assert.equal(l.config.lots, 5);
+  assert.equal(l.config.stopPts, 45);
+  assert.equal(l.config.broker, 'kotak');
+  assert.equal(l.config.timeframe, emptyLedger().config.timeframe);
+  assert.equal(l.config.trailStartPts, emptyLedger().config.trailStartPts);
+  const t = normalizeLedger({ config: { entryStart: '10:00', entryEnd: '20:00', eodExit: '21:00' } });
+  assert.deepEqual([t.config.entryStart, t.config.entryEnd, t.config.eodExit], ['10:00', '20:00', '21:00']);
+});

@@ -73,6 +73,8 @@ export interface OrbRow {
   note?: string;
   /** When the row last went 'sending' / 'closing' (ms): an order still in flight after STUCK_MS died with the server. */
   sentAt?: number;
+  /** The best signal-future price seen while open (high for LONG, low for SHORT): the trailing stop's peak, kept here so a reload or a new leader tab does not lose it. */
+  bestPrice?: number;
 }
 
 export interface OrbLog { at: number; level: 'info' | 'warn' | 'error' | 'trade'; msg: string }
@@ -122,10 +124,21 @@ export function normalizeLedger(v: unknown): OrbLedger {
   const base = emptyLedger();
   if (!v || typeof v !== 'object') return base;
   const o = v as Partial<OrbLedger>;
-  const cfg = sanitizeConfigPatch(o.config ?? {}, base.config);
+  // field by field: one bad stored value falls back to its own default, never resets the whole config
+  let cfg: OrbConfig = base.config;
+  const stored = o.config && typeof o.config === 'object' ? (o.config as unknown as Record<string, unknown>) : {};
+  const TIME_KEYS = ['entryStart', 'entryEnd', 'eodExit'];
+  for (const k of Object.keys(stored).filter(x => !TIME_KEYS.includes(x))) {
+    const r = sanitizeConfigPatch({ [k]: stored[k] }, cfg);
+    if (typeof r !== 'string') cfg = r;
+  }
+  // the three times are ordered against each other, so they are checked as one group
+  const times = Object.fromEntries(TIME_KEYS.filter(k => k in stored).map(k => [k, stored[k]]));
+  const tr = sanitizeConfigPatch(times, cfg);
+  if (typeof tr !== 'string') cfg = tr;
   return {
     rev: Number.isInteger(o.rev) ? (o.rev as number) : 0,
-    config: typeof cfg === 'string' ? base.config : cfg,
+    config: cfg,
     mode: o.mode === 'REAL' ? 'REAL' : 'SIM',
     engineActive: o.engineActive === true,
     haltReason: typeof o.haltReason === 'string' ? o.haltReason : null,
@@ -243,6 +256,7 @@ export type ClientOp =
   | { op: 'setMode'; mode: OrbMode }
   | { op: 'setEngine'; active: boolean }
   | { op: 'addLog'; level: OrbLog['level']; msg: string }
+  | { op: 'peak'; id: string; price: number }
   | { op: 'resetSim' }
   | { op: 'resolve'; id: string; as: 'open' | 'closed' | 'failed'; price?: number };
 
@@ -282,6 +296,15 @@ export function applyClientOp(l: OrbLedger, raw: unknown, now: number): OpResult
       const level = op.level === 'warn' || op.level === 'error' || op.level === 'trade' ? op.level : 'info';
       if (typeof op.msg !== 'string' || !op.msg.trim()) return bad('msg required');
       return { ok: true, ledger: addLog(l, level, op.msg.slice(0, 240), now) };
+    }
+    case 'peak': {
+      // ratchets only in the trade's favour (never loosens the trail); a stale or odd report changes nothing
+      const r = l.rows.find(x => x.id === op.id);
+      const px = Number(op.price);
+      if (!r || r.status !== 'open' || !Number.isFinite(px) || px <= 0) return { ok: true, ledger: l };
+      const cur = r.bestPrice;
+      const better = cur === undefined || (r.side === 'LONG' ? px > cur : px < cur);
+      return { ok: true, ledger: better ? patchRow(l, r.id, { bestPrice: px }) : l };
     }
     case 'resetSim': {
       if (live?.mode === 'SIM') return bad('Close the SIM position first', 409);

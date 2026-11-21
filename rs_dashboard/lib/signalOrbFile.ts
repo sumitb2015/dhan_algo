@@ -20,7 +20,9 @@ export function reservedByOrb(broker: string, tKey: string, product: 'INTRADAY' 
   let out = 0;
   for (const r of ledger.rows) {
     if (!isLive(r) || r.mode !== 'REAL' || r.broker !== broker || targetKey(r.target) !== tKey) continue;
-    out += (r.side === 'LONG' ? 1 : -1) * (Number(r.units) || 0);
+    // an options row is always a SOLD option (short at the broker) whatever its signal side; a futures row follows its side
+    const sign = r.target.kind === 'options' ? -1 : r.side === 'LONG' ? 1 : -1;
+    out += sign * (Number(r.units) || 0);
   }
   return out;
 }

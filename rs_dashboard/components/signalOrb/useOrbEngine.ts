@@ -58,6 +58,7 @@ export function useOrbEngine() {
   const [viewerId] = useState(() => `orb-${Math.random().toString(36).slice(2, 10)}`);
   const busyRef = useRef(false);
   const exitRetryAt = useRef(0);
+  const peakSentAt = useRef(0);
   const bestPriceRef = useRef<{ id: string; price: number } | null>(null);
   // when the price last changed (a frozen feed keeps folding the same LTP into the open bar)
   const [priceAt, setPriceAt] = useState(0);
@@ -161,7 +162,7 @@ export function useOrbEngine() {
   const replayed: ReplaySummary | null = useMemo(() => {
     if (!cfg || !nowMinute) return null;
     return replay(cfg.indicators, closedBars(bars.slice(-REPLAY_BARS_1M), tf, nowMinute * 60 + 1),
-      { times: cfg, stopPts: cfg.stopPts, lots: cfg.lots, unitsPerLot }, REPLAY_SESSIONS);
+      { times: cfg, stopPts: cfg.stopPts, trailStartPts: cfg.trailStartPts, trailGapPts: cfg.trailGapPts, lots: cfg.lots, unitsPerLot }, REPLAY_SESSIONS);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [feed.histVersion, cfg, unitsPerLot, tf, hasClock]);
 
@@ -178,14 +179,25 @@ export function useOrbEngine() {
       bestPriceRef.current = null;
     } else if (price !== null) {
       if (bestPriceRef.current?.id !== live.id) {
-        bestPriceRef.current = { id: live.id, price };
+        // resume from the ledger's saved peak (a reload or a new leader tab must not forget it)
+        const saved = live.bestPrice;
+        bestPriceRef.current = { id: live.id, price: saved === undefined ? price : live.side === 'LONG' ? Math.max(saved, price) : Math.min(saved, price) };
       } else {
         bestPriceRef.current.price = live.side === 'LONG'
           ? Math.max(bestPriceRef.current.price, price)
           : Math.min(bestPriceRef.current.price, price);
       }
+      // save a new peak (leader only, at most every 3 s; the server keeps only improvements)
+      const peak = bestPriceRef.current.price;
+      const t = Date.now();
+      const better = live.bestPrice === undefined || (live.side === 'LONG' ? peak > live.bestPrice : peak < live.bestPrice);
+      if (better && isLeader && t - peakSentAt.current >= 3_000) {
+        peakSentAt.current = t;
+        void op({ op: 'peak', id: live.id, price: peak });
+      }
     }
-  }, [price, live?.id, live?.status, live?.side]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [price, live?.id, live?.status, live?.side, live?.bestPrice, isLeader]);
   const priceFresh = price !== null && priceAt > 0 && now - priceAt < PRICE_STALE_MS && !feed.stale;
 
   const today = now ? istDateIso(now) : '';
@@ -270,7 +282,7 @@ export function useOrbEngine() {
     // E11: realised + open P&L past the limit closes the position (the server then halts)
     if (position && openPnl !== null && realised + openPnl <= -cfg.dailyLossLimit && t >= exitRetryAt.current) {
       exitRetryAt.current = t + EXIT_RETRY_MS;
-      void trade({ action: 'exit', price, reason: `Daily loss limit ₹${cfg.dailyLossLimit}`, exitKind: 'manual', auto: true });
+      void trade({ action: 'exit', price: price ?? live!.signalEntry ?? live!.entry, reason: `Daily loss limit ₹${cfg.dailyLossLimit}`, exitKind: 'manual', auto: true });
       return false;
     }
     if (d.action === 'exit') {
