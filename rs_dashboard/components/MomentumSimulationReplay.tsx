@@ -473,9 +473,9 @@ export default function MomentumSimulationReplay({
               }}
               className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs font-semibold focus:outline-none focus:border-emerald-500 cursor-pointer"
             >
-              <option value="minervini">Minervini Trend Template (+25.1% CAGR · 54.8% Win)</option>
-              <option value="clenow">Clenow Smooth Momentum (+34.8% CAGR · 2.00 PF)</option>
-              <option value="52w_high">52-Week High Breakout (+19.8% CAGR · 1.79 PF)</option>
+              <option value="minervini">Minervini Trend Template (+25.4% CAGR · 54.8% Win)</option>
+              <option value="clenow">Clenow Smooth Momentum (+36.4% CAGR · 2.19 PF)</option>
+              <option value="52w_high">52-Week High Breakout (+19.4% CAGR · 1.76 PF)</option>
               <option value="turtle_rs">Turtle Composite RS (+14.9% CAGR · -14.3% DD)</option>
             </select>
           </div>

@@ -68,7 +68,7 @@ const STRATEGY_DETAILS: Record<string, {
       'Trend filter: Close > 50 SMA > 200 SMA and volume >= 20-day average',
       'Exit: Trailing stop 12% below running peak close; market regime on Nifty 200 SMA',
     ],
-    verdict: '+19.8% CAGR with -28.1% max drawdown and 1.79 Profit Factor. Solid, dependable compounding on genuine new 52W peaks.',
+    verdict: '+19.4% CAGR with -28.1% max drawdown and 1.76 Profit Factor. Solid, dependable compounding on genuine new 52W peaks.',
   },
   '2. Minervini Trend Template': {
     key: 'minervini',
@@ -81,7 +81,7 @@ const STRATEGY_DETAILS: Record<string, {
       'Relative Strength: Universe RS percentile >= 70 (top 30% strongest leaders)',
       'Exit: 12% initial stop; once gain >= 15%, trails 50-day SMA (never loosens)',
     ],
-    verdict: '+25.1% CAGR with highest Win Rate (54.8%) and 2.10 Profit Factor. Strict quality filters deliver pristine risk-adjusted returns.',
+    verdict: '+25.4% CAGR with highest Win Rate (54.8%) and 2.13 Profit Factor. Strict quality filters deliver pristine risk-adjusted returns.',
   },
   '3. Andreas Clenow Momentum': {
     key: 'clenow',
@@ -94,7 +94,7 @@ const STRATEGY_DETAILS: Record<string, {
       'Weekly rank rotation: Rotates out holdings falling out of the top 20% into top leaders',
       'Exit: Close below 100-day SMA, or 15% disaster stop',
     ],
-    verdict: '+34.8% CAGR and 2.00 Profit Factor. Turned ₹5 Lakhs into ₹38.85 Lakhs over 6.9 years with gap filtering containing drawdowns.',
+    verdict: '+36.4% CAGR and 2.19 Profit Factor. Turned ₹5 Lakhs into ₹42.00 Lakhs over 6.9 years with gap filtering containing drawdowns.',
   },
   '4. Current Turtle RS Breakout': {
     key: 'turtle_rs',
@@ -118,7 +118,7 @@ const STRATEGY_DETAILS: Record<string, {
       'Entry: 2-period RSI drops below 10',
       'Exit: Close crosses above 5-day SMA or 6 days max hold',
     ],
-    verdict: '-1.16% CAGR despite 58.3% win rate. 4,637 trades caused statutory delivery taxes (STT 0.1% both ways) to eat all profits.',
+    verdict: '-1.05% CAGR despite 58.3% win rate. 4,639 trades caused statutory delivery taxes (STT 0.1% both ways) to eat all profits.',
   },
 };
 
