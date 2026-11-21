@@ -4,7 +4,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef, useId } from 
 import {
   Play, Pause, SkipBack, SkipForward, ChevronLeft, ChevronRight,
   RefreshCw, TrendingUp, TrendingDown, AlertTriangle, CheckCircle2,
-  Calendar, Layers, ShieldCheck, Clock, Trash2
+  Calendar, Layers, ShieldCheck, Clock, Trash2, BarChart2, Target, Award, Percent
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
@@ -278,6 +278,8 @@ export default function MomentumSimulationReplay({
   });
 
   const [stopPct, setStopPct] = useState<number>(() => defaultStopFor(activeStrategy));
+  const [sectorCap, setSectorCap] = useState<number>(2);
+  const [sectorDraft, setSectorDraft] = useState<string>('2');
   const [stopDraft, setStopDraft] = useState<string>(() => String(defaultStopFor(activeStrategy)));
 
   const [simData, setSimData] = useState<SimulationResponse | null>(null);
@@ -305,7 +307,8 @@ export default function MomentumSimulationReplay({
     sl: number = stopPct,
     bench: 'nifty50' | 'nifty500' = benchmark,
     interval: 'weekly' | 'daily' = regimeInterval,
-    force: boolean = forceFresh
+    force: boolean = forceFresh,
+    sc: number = sectorCap
   ) => {
     const myReq = ++reqSeq.current;
     reqAbort.current?.abort();
@@ -326,12 +329,13 @@ export default function MomentumSimulationReplay({
             strategy: strat, regime: reg, breakout_days: bo,
             stop_pct: sl, benchmark: bench, regime_interval: interval,
             force: true,
+            sector_cap: sc,
           }),
           signal: ac.signal,
         });
         json = await res.json();
       } else {
-        const qs = `?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&capital=${cap}&slots=${slt}&strategy=${encodeURIComponent(strat)}&regime=${reg}&breakout_days=${bo}&stop_pct=${sl}&benchmark=${bench}&regime_interval=${interval}`;
+        const qs = `?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&capital=${cap}&slots=${slt}&strategy=${encodeURIComponent(strat)}&regime=${reg}&breakout_days=${bo}&stop_pct=${sl}&benchmark=${bench}&regime_interval=${interval}&sector_cap=${sc}`;
         const res = await fetch(`/api/momentum/simulation${qs}`, { signal: ac.signal });
         json = await res.json();
       }
@@ -345,7 +349,7 @@ export default function MomentumSimulationReplay({
     } finally {
       if (!isStale()) setLoading(false);
     }
-  }, [strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh]);
+  }, [strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh, sectorCap]);
 
   const handleClearCache = async () => {
     if (!window.confirm('Delete all cached simulation replay JSON files in debug/replays? Future runs will recompute fresh.')) return;
@@ -413,6 +417,24 @@ export default function MomentumSimulationReplay({
       fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, v);
     }
   };
+
+  // Same commit-on-blur rule as the stop-loss box. The cap is a whole number of positions per sector.
+  const commitSector = () => {
+    const n = Math.round(Number(sectorDraft));
+    if (!Number.isFinite(n) || n < 1) {
+      setSectorDraft(String(sectorCap));
+      return;
+    }
+    const v = Math.min(10, n);
+    setSectorDraft(String(v));
+    if (v !== sectorCap) {
+      setSectorCap(v);
+      fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh, v);
+    }
+  };
+
+  // The cap the shown replay was actually run with (not the box, which may be ahead of it while a run is in flight).
+  const shownSectorCap = (simData?.config as { sector_cap?: number } | undefined)?.sector_cap ?? 2;
 
   const snapshots = simData?.snapshots || [];
   const currentSnapshot = snapshots[currentIdx] || null;
@@ -738,6 +760,29 @@ export default function MomentumSimulationReplay({
             )}
           </div>
 
+          <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+            <Info tip="Maximum open positions in the same sector (NSE industry). A new entry in a full sector is skipped and the next qualifying stock is taken. 2 is the default; 1 is the most diversified. Applied when you press Enter or leave the box.">
+              <span className="cursor-help underline decoration-dotted decoration-zinc-600 underline-offset-2">
+                Max / sector:
+              </span>
+            </Info>
+            <input
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={10}
+              step={1}
+              value={sectorDraft}
+              aria-label="Maximum positions per sector"
+              onChange={(e) => setSectorDraft(e.target.value)}
+              onBlur={commitSector}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+              }}
+              className="w-12 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs font-mono text-right focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+
           <label className="flex items-center gap-1.5 cursor-pointer text-xs select-none px-2 py-1 bg-zinc-800 border border-zinc-700 rounded hover:border-zinc-500 transition-colors">
             <input
               type="checkbox"
@@ -1009,12 +1054,12 @@ export default function MomentumSimulationReplay({
           {currentSnapshot.holdings.length > 0 && (
             <div className="bg-zinc-900 border border-zinc-800 rounded px-3 py-2 text-xs">
               <div className="text-zinc-500 font-bold uppercase tracking-wider mb-2 flex items-center justify-between">
-                <span>Sector Diversification on {currentSnapshot.date} (Max 2 positions/sector)</span>
+                <span>Sector Diversification on {currentSnapshot.date} (Max {shownSectorCap} position{shownSectorCap === 1 ? '' : 's'}/sector)</span>
                 <span className="text-zinc-400 font-normal">{Object.keys(sectorCounts).length} active sectors</span>
               </div>
               <div className="flex flex-wrap gap-2">
                 {Object.entries(sectorCounts).map(([sec, count]) => {
-                  const isMax = count >= 2;
+                  const isMax = count >= shownSectorCap;
                   return (
                     <div
                       key={sec}
@@ -1026,7 +1071,7 @@ export default function MomentumSimulationReplay({
                       <span className={`px-1 rounded text-[10px] font-bold ${
                         isMax ? 'bg-amber-500/20 text-amber-200' : 'bg-zinc-700 text-zinc-200'
                       }`}>
-                        {count}/2
+                        {count}/{shownSectorCap}
                       </span>
                     </div>
                   );

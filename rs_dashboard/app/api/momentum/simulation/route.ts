@@ -26,6 +26,9 @@ function defaultStop(strategy: string): number {
   return strategy === 'clenow' ? 15 : 12;
 }
 
+/** Max positions per sector. Mirrors DEFAULT_SECTOR_CAP in simulate_momentum_replay.py. */
+const DEFAULT_SECTOR_CAP = 2;
+
 function sanitizeStop(v: unknown, strategy: string): number {
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) return defaultStop(strategy);
@@ -41,6 +44,7 @@ interface ReplayParams {
   breakoutDays: number;
   strategy: string;
   stopPct: number;
+  sectorCap: number;
   benchmark: 'nifty50' | 'nifty500';
   regimeInterval: 'weekly' | 'daily';
 }
@@ -61,6 +65,7 @@ function parseParams(get: (k: string) => unknown): ReplayParams | { error: strin
     breakoutDays: Math.max(5, Math.min(100, Number(get('breakout_days')) || 55)),
     strategy,
     stopPct: sanitizeStop(get('stop_pct'), strategy),
+    sectorCap: Math.max(1, Math.min(10, Math.round(Number(get('sector_cap'))) || DEFAULT_SECTOR_CAP)),
     benchmark,
     regimeInterval,
   };
@@ -77,10 +82,11 @@ function cacheFileFor(p: ReplayParams): string {
   else if (p.strategy === '52w_high') boSuffix = p.breakoutDays === 5 || p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
   else boSuffix = p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
   const slSuffix = p.stopPct === defaultStop(p.strategy) ? '' : `_sl${p.stopPct}`;
+  const scSuffix = p.sectorCap === DEFAULT_SECTOR_CAP ? '' : `_sc${p.sectorCap}`;
   const stratPrefix = p.strategy !== 'turtle_rs' ? `${p.strategy}_` : '';
   return path.join(
     REPLAYS_DIR,
-    `replay_${stratPrefix}${p.start}_${p.end}_${Math.round(p.capital)}_${p.slots}${regimeSuffix}${benchSuffix}${intervalSuffix}${boSuffix}${slSuffix}.json`,
+    `replay_${stratPrefix}${p.start}_${p.end}_${Math.round(p.capital)}_${p.slots}${regimeSuffix}${benchSuffix}${intervalSuffix}${boSuffix}${slSuffix}${scSuffix}.json`,
   );
 }
 
@@ -98,6 +104,7 @@ async function runReplay(p: ReplayParams, force: boolean) {
     '--regime', String(p.regimeEnabled),
     '--breakout-days', String(p.breakoutDays),
     '--stop-pct', String(p.stopPct),
+    '--sector-cap', String(p.sectorCap),
   ];
   if (force) args.push('--force');
   return execFileAsync(PYTHON_EXE, args, { cwd: PROJECT_ROOT, timeout: 120_000, maxBuffer: 32 * 1024 * 1024 });

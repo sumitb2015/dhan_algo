@@ -43,6 +43,9 @@ from lib.momentum import (
 DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")
 REPLAYS_DIR = os.path.join(DEBUG_DIR, "replays")
 
+DEFAULT_SECTOR_CAP = 2     # max concurrent positions per Industry; mirrored by the replay route
+
+
 def default_stop_pct(strategy: str) -> float:
     """Stop distance each model used before the stop became a user setting."""
     return 15.0 if strategy == "clenow" else 12.0
@@ -129,6 +132,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
 
     strat_prefix = f"{strategy}_" if strategy != "turtle_rs" else ""
     bo_suffix += stop_suffix(strategy, cfg.stop_pct)
+    bo_suffix += "" if cfg.sector_cap == DEFAULT_SECTOR_CAP else f"_sc{cfg.sector_cap}"
 
     cache_file = os.path.join(
         REPLAYS_DIR, f"replay_{strat_prefix}{start}_{end}_{int(cfg.capital)}_{cfg.slots}{regime_suffix}{bench_suffix}{interval_suffix}{bo_suffix}.json"
@@ -505,6 +509,54 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
             "closed_trades": list(closed_trades),
         })
 
+    # Calculate simulation performance metrics across the window
+    wins = [t for t in closed_trades if t.get("pnl", 0) > 0]
+    losses = [t for t in closed_trades if t.get("pnl", 0) <= 0]
+    winning_trades = len(wins)
+    losing_trades = len(losses)
+    total_trades = len(closed_trades)
+    win_rate_pct = round((winning_trades / total_trades * 100.0), 1) if total_trades > 0 else 0.0
+
+    gross_profit = sum(t.get("pnl", 0) for t in wins)
+    gross_loss = abs(sum(t.get("pnl", 0) for t in losses))
+    if gross_loss > 0:
+        profit_factor = round(gross_profit / gross_loss, 2)
+    elif gross_profit > 0:
+        profit_factor = 999.0
+    else:
+        profit_factor = 0.0
+
+    peak = cfg.capital
+    max_dd = 0.0
+    for s in snapshots:
+        eq = s.get("equity", cfg.capital)
+        if eq > peak:
+            peak = eq
+        if peak > 0:
+            dd = (eq - peak) / peak * 100.0
+            if dd < max_dd:
+                max_dd = dd
+    max_drawdown_pct = round(max_dd, 2)
+
+    avg_trade_pnl = round(sum(t.get("pnl", 0) for t in closed_trades) / total_trades, 2) if total_trades > 0 else 0.0
+    avg_trade_pct = round(sum(t.get("pnl_pct", 0) for t in closed_trades) / total_trades, 2) if total_trades > 0 else 0.0
+    avg_hold_days = round(sum(t.get("hold_days", 0) for t in closed_trades) / total_trades, 1) if total_trades > 0 else 0.0
+
+    metrics = {
+        "total_trades": total_trades,
+        "winning_trades": winning_trades,
+        "losing_trades": losing_trades,
+        "win_rate_pct": win_rate_pct,
+        "profit_factor": profit_factor,
+        "gross_profit": round(gross_profit, 2),
+        "gross_loss": round(gross_loss, 2),
+        "max_drawdown_pct": max_drawdown_pct,
+        "avg_trade_pnl": avg_trade_pnl,
+        "avg_trade_pct": avg_trade_pct,
+        "avg_hold_days": avg_hold_days,
+        "open_positions": len(portfolio),
+    }
+
     result_payload = {
         "success": True,
         "data_warnings": data_warnings,
@@ -517,6 +569,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
             "regime_enabled": cfg.regime_enabled,
             "breakout_days": cfg.breakout_days,
             "stop_pct": cfg.stop_pct,
+            "sector_cap": cfg.sector_cap,
             "start": start.isoformat(),
             "end": end.isoformat(),
             "trading_days": len(all_trading_days),
@@ -524,7 +577,12 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         "initial_capital": cfg.capital,
         "final_equity": snapshots[-1]["equity"] if snapshots else cfg.capital,
         "total_return_pct": snapshots[-1]["total_pnl_pct"] if snapshots else 0.0,
-        "total_trades": len(closed_trades),
+        "total_trades": total_trades,
+        "profit_factor": profit_factor,
+        "win_rate_pct": win_rate_pct,
+        "max_drawdown_pct": max_drawdown_pct,
+        "metrics": metrics,
+        "closed_trades": closed_trades,
         "snapshots": snapshots,
     }
 
@@ -547,6 +605,7 @@ def main():
     p.add_argument("--regime", type=lambda x: str(x).lower() in ("true", "1", "yes"), default=True, help="Enable 200-SMA regime filter")
     p.add_argument("--no-regime", dest="regime", action="store_false", help="Disable regime filter (always ON)")
     p.add_argument("--breakout-days", type=int, default=55, help="Donchian breakout lookback days (default 55)")
+    p.add_argument("--sector-cap", type=int, default=DEFAULT_SECTOR_CAP, help="max positions per sector/industry (default 2)")
     p.add_argument("--stop-pct", type=float, default=None, help="Stop-loss distance in %% (default: 12, Clenow 10)")
     p.add_argument("--force", action="store_true", help="force recomputation even if cached")
     p.add_argument("--clear-cache", action="store_true", help="Delete all cached replay json files and exit")
@@ -576,6 +635,7 @@ def main():
         regime_enabled=args.regime,
         breakout_days=args.breakout_days,
         stop_pct=args.stop_pct if args.stop_pct is not None else default_stop_pct(args.strategy),
+        sector_cap=max(1, args.sector_cap),
     )
 
     print(f"Simulating momentum replay [{args.strategy}] from {start_date} to {end_date} (capital: {cfg.capital:,.0f}, regime: {cfg.regime_enabled})...")
