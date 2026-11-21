@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Play, Pause, SkipBack, SkipForward, ChevronLeft, ChevronRight,
   RefreshCw, TrendingUp, TrendingDown, AlertTriangle, CheckCircle2,
@@ -264,6 +264,12 @@ export default function MomentumSimulationReplay({
   const [isPlaying, setIsPlaying] = useState(false);
   const [playSpeed, setPlaySpeed] = useState<number>(1200); // ms per step
 
+  // Only the newest request may touch the page. A fresh window takes 20+ s to compute, so an older request
+  // can finish AFTER a newer, cached one and overwrite it with stale settings' results.
+  const reqSeq = useRef(0);
+  const reqAbort = useRef<AbortController | null>(null);
+  useEffect(() => () => reqAbort.current?.abort(), []);
+
   const fetchSimulation = useCallback(async (
     start: string,
     end: string,
@@ -277,6 +283,11 @@ export default function MomentumSimulationReplay({
     interval: 'weekly' | 'daily' = regimeInterval,
     force: boolean = forceFresh
   ) => {
+    const myReq = ++reqSeq.current;
+    reqAbort.current?.abort();
+    const ac = new AbortController();
+    reqAbort.current = ac;
+    const isStale = () => myReq !== reqSeq.current;
     setLoading(true);
     setError(null);
     setIsPlaying(false);
@@ -292,20 +303,23 @@ export default function MomentumSimulationReplay({
             stop_pct: sl, benchmark: bench, regime_interval: interval,
             force: true,
           }),
+          signal: ac.signal,
         });
         json = await res.json();
       } else {
         const qs = `?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&capital=${cap}&slots=${slt}&strategy=${encodeURIComponent(strat)}&regime=${reg}&breakout_days=${bo}&stop_pct=${sl}&benchmark=${bench}&regime_interval=${interval}`;
-        const res = await fetch(`/api/momentum/simulation${qs}`);
+        const res = await fetch(`/api/momentum/simulation${qs}`, { signal: ac.signal });
         json = await res.json();
       }
+      if (isStale()) return;
       if (!json.success) throw new Error(json.error || 'Failed to generate simulation replay');
       setSimData(json);
       setCurrentIdx(0);
     } catch (e) {
+      if (isStale() || (e instanceof DOMException && e.name === 'AbortError')) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
   }, [strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh]);
 
