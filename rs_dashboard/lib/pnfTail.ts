@@ -22,3 +22,10 @@ export function mergeTail(prev: Bar[], tail: Bar[]): Bar[] {
   const from = tail[0].t;
   return [...prev.filter(b => b.t < from), ...tail];
 }
+
+/** `mergeTail` over every series of a `{ key: bars }` map: each series of `tail` is laid over the same key of `prev` (a key only in `tail` is taken as is). */
+export function mergeBarsMap(prev: Record<string, Bar[]>, tail: Record<string, Bar[]>): Record<string, Bar[]> {
+  const out: Record<string, Bar[]> = { ...prev };
+  for (const [k, v] of Object.entries(tail)) out[k] = mergeTail(prev[k] ?? [], v);
+  return out;
+}

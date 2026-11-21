@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { BrokerPortfolio, DashboardPortfolioResponse } from '@/app/api/dashboard/portfolio/route';
 import { sharedJson } from '@/lib/sharedPoll';
+import { isTabHidden, onTabVisible } from '@/lib/tabVisibility';
 
 export interface BrokerPnlState {
   connected: boolean;
@@ -33,7 +34,7 @@ export function useBrokerPnl(broker: string | undefined): BrokerPnlState {
     const mySeq = ++seq.current;
 
     const load = async () => {
-      if (typeof document !== 'undefined' && document.hidden) return;
+      if (isTabHidden()) return;
       try {
         const j = await sharedJson<DashboardPortfolioResponse>(`/api/dashboard/portfolio?broker=${broker}`, 3_000);
         if (mySeq !== seq.current) return;
@@ -71,7 +72,11 @@ export function useBrokerPnl(broker: string | undefined): BrokerPnlState {
 
     void load();
     const interval = setInterval(() => { void load(); }, POLL_MS);
-    return () => clearInterval(interval);
+    const cleanupVis = onTabVisible(() => { void load(); });
+    return () => {
+      clearInterval(interval);
+      cleanupVis();
+    };
   }, [broker]);
 
   return state;

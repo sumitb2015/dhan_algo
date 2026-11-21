@@ -8,6 +8,7 @@ import TopIndices from '@/components/TopIndices';
 import type { Signal } from '@/lib/signalOrb';
 import type { ContributionResult } from '@/lib/niftyContribution';
 import { oiAgreement, oiSide, oiSummary, type OiPoint } from '@/lib/signalOrbPanels';
+import { isTabHidden, onTabVisible } from '@/lib/tabVisibility';
 
 // Market context for the Signal Orb: the live indices, the Nifty contribution list (shared with the Nifty Contribution page) and the cumulative-OI regime.
 // Information only - none of it feeds a rule or an order. The tables are the Advanced Scalper's own panels; the bridges that feed
@@ -50,6 +51,7 @@ function useContribution() {
   const [reply, setReply] = useState<ContribReply | null>(null);
   const [error, setError] = useState<string | null>(null);
   const load = async () => {
+    if (isTabHidden()) return;
     try {
       const r = await fetch('/api/nifty-contribution', { cache: 'no-store' });
       const j = await r.json() as ContribReply;
@@ -59,7 +61,8 @@ function useContribution() {
   useEffect(() => {
     const first = setTimeout(() => { void load(); }, 0);
     const id = setInterval(() => { void load(); }, 3_000);
-    return () => { clearTimeout(first); clearInterval(id); };
+    const cleanupVis = onTabVisible(() => { void load(); });
+    return () => { clearTimeout(first); clearInterval(id); cleanupVis(); };
   }, []);
   return { reply, error, reload: load };
 }
@@ -173,6 +176,7 @@ export function OiTab({ symbol, signal }: { symbol: string; signal: Signal }) {
     let alive = true;
     setReply(null); setError(null);
     const load = async () => {
+      if (isTabHidden()) return;
       try {
         const r = await fetch(`/api/options/iv-history?mode=cumulative&underlying=${underlying}&wings=10`, { cache: 'no-store' });
         const j = await r.json() as OiReply;
@@ -182,7 +186,8 @@ export function OiTab({ symbol, signal }: { symbol: string; signal: Signal }) {
     };
     const first = setTimeout(() => { void load(); }, 0);
     const id = setInterval(() => { void load(); }, 15_000);
-    return () => { alive = false; clearTimeout(first); clearInterval(id); };
+    const cleanupVis = onTabVisible(() => { void load(); });
+    return () => { alive = false; clearTimeout(first); clearInterval(id); cleanupVis(); };
   }, [underlying]);
 
   const pts = reply?.data ?? [];

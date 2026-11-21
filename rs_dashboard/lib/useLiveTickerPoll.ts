@@ -9,6 +9,7 @@
 // logic means the next person fixes one and misses the other.
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { isTabHidden, onTabVisible } from '@/lib/tabVisibility';
 
 /** Poll cadence. Scheduled AFTER the previous response settles — see below. */
 export const POLL_MS = 3000;
@@ -132,7 +133,9 @@ export function useLiveTickerPoll<T>(
     // once the previous one has settled, so a slow response can never stack
     // overlapping in-flight fetches.
     const tick = async () => {
-      await poll();
+      if (!isTabHidden()) {
+        await poll();
+      }
       if (cancelled) return;
       pollRef.current = setTimeout(tick, POLL_MS);
     };
@@ -140,18 +143,26 @@ export function useLiveTickerPoll<T>(
     // mount (also what keeps react-hooks/set-state-in-effect satisfied).
     pollRef.current = setTimeout(tick, 0);
 
+    const cleanupVis = onTabVisible(() => {
+      if (!cancelled) void poll();
+    });
+
     return () => {
       cancelled = true;
       if (pollRef.current) clearTimeout(pollRef.current);
       if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+      cleanupVis();
     };
   }, [poll]);
 
   // Independent clock so a feed that stops mid-session ages into STALE on its
   // own. A dead feed sends no responses, so age can't be driven by poll results.
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), POLL_MS);
-    return () => clearInterval(t);
+    const t = setInterval(() => {
+      if (!isTabHidden()) setNow(Date.now());
+    }, POLL_MS);
+    const cleanupVis = onTabVisible(() => setNow(Date.now()));
+    return () => { clearInterval(t); cleanupVis(); };
   }, []);
 
   return { data, flash, now };

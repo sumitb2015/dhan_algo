@@ -19,3 +19,14 @@ test('mergeTail replaces everything from the tail\'s first bar on and keeps the 
   assert.deepEqual(mergeTail(prev, tail).map(b => b.straddle), [1, 2, 30, 40, 50]);
   assert.equal(mergeTail(prev, []), prev);
 });
+
+import { mergeBarsMap } from './pnfTail.ts';
+
+test('mergeBarsMap: each series of the tail is laid over the same series; a series only in the tail is taken as is', () => {
+  const b = (t: number, c: number) => ({ t, ce: 0, pe: 0, straddle: c } as unknown as Parameters<typeof mergeTail>[0][number]);
+  const prev = { '0': [b(100, 1), b(200, 2), b(300, 3)] };
+  const out = mergeBarsMap(prev, { '0': [b(300, 33), b(400, 4)], '1': [b(10, 9)] });
+  assert.deepEqual(out['0'].map(x => [x.t, x.straddle]), [[100, 1], [200, 2], [300, 33], [400, 4]]);
+  assert.deepEqual(out['1'].map(x => x.t), [10]);
+  assert.deepEqual(mergeBarsMap(prev, {})['0'].length, 3);
+});

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getDhanCredentials } from '@/lib/dhanToken';
 import { fetchDailyCloses, fetchLatestPrevClose } from '@/lib/dhanDailyCloses';
+import { pacedQuoteCall } from '@/lib/dhanQuotePacer';
 import path from 'path';
 import fs from 'fs';
 import { dedupe, runPythonJson, PROJECT_ROOT } from '@/lib/pyExec';
@@ -9,6 +10,7 @@ import { dedupe, runPythonJson, PROJECT_ROOT } from '@/lib/pyExec';
 // against rs_dashboard/ rather than the project root and silently never run.
 const OPTIONS_FETCH = path.join(PROJECT_ROOT, 'scripts', 'tools', 'options_data_fetch.py');
 const HUB_QUOTES_FILE = path.join(PROJECT_ROOT, 'debug', 'live_indices_quotes.json');
+const PNF_QUOTES_FILE = path.join(PROJECT_ROOT, 'debug', 'pnf_ws_quotes.json');
 
 // Live LTP + % change vs yesterday's close for the headline indices, for the
 // Advanced Scalper's Top Indices panel.
@@ -356,6 +358,55 @@ function mkQuote(
   };
 }
 
+interface PnfQuotesFile {
+  updated_ms?: number;
+  hub_alive?: boolean;
+  quotes?: Record<string, { ltp?: number; prev_close?: number; volume?: number; high?: number; low?: number }>;
+}
+
+/**
+ * Reads MCX commodities (e.g. CRUDEOIL, CRUDEOILM) from debug/pnf_ws_quotes.json,
+ * fed by scripts/tools/pnf_ws.py whenever Signal Orb (or another P&F tool) subscribes to it.
+ * This avoids Dhan's REST OHLC endpoint rate limit entirely when the WebSocket bridge is active.
+ */
+function fromPnf(wanted: IndexDef[]): Record<string, Quote> {
+  const out: Record<string, Quote> = {};
+  if (wanted.length === 0) return out;
+
+  let parsed: PnfQuotesFile | null;
+  try {
+    parsed = JSON.parse(fs.readFileSync(PNF_QUOTES_FILE, 'utf8')) as PnfQuotesFile;
+  } catch {
+    return out;
+  }
+
+  const updatedMs = Number(parsed.updated_ms) || NaN;
+  if (!Number.isFinite(updatedMs) || Date.now() - updatedMs > HUB_STALE_MS || parsed.hub_alive === false) {
+    return out;
+  }
+
+  const day = istToday();
+  prunePrevCloseCache(day);
+  const nowMin = istMinutesOfDay();
+  const resolved = resolveSids(wanted);
+
+  for (const { def, sid, segment } of resolved) {
+    const key = `${segment}:${sid}`;
+    const q = parsed.quotes?.[key];
+    if (!q || !(Number(q.ltp) > 0)) continue;
+    const ltp = Number(q.ltp);
+    const cached = prevCloseCache.get(`${day}:${def.key}`);
+    const fresh = rejectFlippedClose(ltp, Number(q.prev_close ?? 0), nowMin);
+    const prev = cached ?? fresh;
+    if (!cached && prev > 0) prevCloseCache.set(`${day}:${def.key}`, prev);
+    const quote = mkQuote(ltp, prev, 'pnf_ws', Number(q.high ?? 0), Number(q.low ?? 0));
+    if (quote) {
+      out[def.key] = { ...quote, at: updatedMs };
+    }
+  }
+  return out;
+}
+
 /**
  * Dhan: last_price + prev close for every row, in one request.
  *
@@ -423,17 +474,24 @@ async function fromDhan(wanted: IndexDef[]): Promise<Record<string, Quote>> {
     // uses pre-market (see `fetchLatestPrevClose` for why this needs a
     // different row-selection rule than that function).
     if (prev === 0 && nowMin >= MARKET_CLOSE_IST_MIN) {
-      try {
-        const instrument = segment === 'MCX_COMM' ? 'FUTCOM' : 'INDEX';
-        const prevClose = await fetchLatestPrevClose(sid, segment, instrument, day);
-        if (prevClose) {
-          prev = prevClose;
-          source = 'dhan-prevsession';
+      const cacheKey = `${day}:${def.key}`;
+      const failedAt = failedRepairCache.get(cacheKey);
+      if (!failedAt || Date.now() - failedAt >= REPAIR_FAIL_TTL_MS) {
+        try {
+          const instrument = segment === 'MCX_COMM' ? 'FUTCOM' : 'INDEX';
+          const prevClose = await fetchLatestPrevClose(sid, segment, instrument, day);
+          if (prevClose) {
+            prev = prevClose;
+            source = 'dhan-prevsession';
+            failedRepairCache.delete(cacheKey);
+          } else {
+            failedRepairCache.set(cacheKey, Date.now());
+          }
+        } catch {
+          failedRepairCache.set(cacheKey, Date.now());
         }
-      } catch {
-        // Leave prev at 0 — mkQuote reports change_pct: null, the honest outcome.
+        await new Promise(r => setTimeout(r, HISTORICAL_STAGGER_MS));
       }
-      await new Promise(r => setTimeout(r, HISTORICAL_STAGGER_MS));
     }
 
     // Cache a genuine close so a later flip (or an MCX session that runs past
@@ -460,9 +518,20 @@ function prunePrevDayChangeCache(day: string): void {
 
 // Dhan's ~1 req/s guidance applies to the batched OHLC endpoint under
 // continuous polling; this path runs once a day (cached below) but still
-// issues one historical request per row, so a small stagger avoids bursting
-// nine requests in the same instant.
-const HISTORICAL_STAGGER_MS = 150;
+// issues one historical request per row. Dhan's historical Data API rate limit
+// is ~5 req/s. A 300 ms stagger (~3.3 req/s) stays comfortably below that limit
+// (150 ms was ~6.7 req/s and caused 429 bursts).
+const HISTORICAL_STAGGER_MS = 300;
+
+/** Failures for daily-candle repairs, keyed "<IST date>:<index key>". Kept for REPAIR_FAIL_TTL_MS so a failed or 429'd row does not retry on every 3s poll loop. */
+const failedRepairCache = new Map<string, number>();
+const REPAIR_FAIL_TTL_MS = 5 * 60_000;
+
+function pruneFailedRepairCache(day: string): void {
+  for (const key of failedRepairCache.keys()) {
+    if (!key.startsWith(`${day}:`)) failedRepairCache.delete(key);
+  }
+}
 
 
 /**
@@ -494,6 +563,7 @@ async function fromDhanPrevSessionChange(wanted: IndexDef[]): Promise<Record<str
 
   const day = istToday();
   prunePrevDayChangeCache(day);
+  pruneFailedRepairCache(day);
 
   const resolved = resolveSids(wanted);
   for (const { def, sid, segment } of resolved) {
@@ -503,6 +573,9 @@ async function fromDhanPrevSessionChange(wanted: IndexDef[]): Promise<Record<str
       out[def.key] = cached;
       continue;
     }
+    const failedAt = failedRepairCache.get(cacheKey);
+    if (failedAt && Date.now() - failedAt < REPAIR_FAIL_TTL_MS) continue;
+
     try {
       const instrument = segment === 'MCX_COMM' ? 'FUTCOM' : 'INDEX';
       const change = await fetchPrevSessionChange(sid, segment, instrument, day);
@@ -510,10 +583,14 @@ async function fromDhanPrevSessionChange(wanted: IndexDef[]): Promise<Record<str
         const q = mkQuote(change.ltp, change.prevClose, 'dhan-prevsession');
         if (q) {
           prevDayChangeCache.set(cacheKey, q);
+          failedRepairCache.delete(cacheKey);
           out[def.key] = q;
         }
+      } else {
+        failedRepairCache.set(cacheKey, Date.now());
       }
     } catch {
+      failedRepairCache.set(cacheKey, Date.now());
       // Leave this row out — GET() below has no per-row error channel, and a
       // missing row (rather than a stale/wrong one) is the honest outcome.
     }
@@ -544,6 +621,7 @@ async function repairFlippedHubRows(quotes: Record<string, Quote>): Promise<void
   if (!weekend && nowMin < MARKET_CLOSE_IST_MIN) return;
 
   for (const [k] of hubRepairCache) if (!k.startsWith(`${day}:`)) hubRepairCache.delete(k);
+  pruneFailedRepairCache(day);
 
   for (const { def, sid, segment } of resolveSids(WS_INDICES)) {
     const q = quotes[def.key];
@@ -551,6 +629,9 @@ async function repairFlippedHubRows(quotes: Record<string, Quote>): Promise<void
     const cacheKey = `${day}:${def.key}`;
     const hit = hubRepairCache.get(cacheKey);
     if (hit) { quotes[def.key] = { ...hit, ltp: q.ltp, day_high: q.day_high, day_low: q.day_low, at: q.at }; continue; }
+    const failedAt = failedRepairCache.get(cacheKey);
+    if (failedAt && Date.now() - failedAt < REPAIR_FAIL_TTL_MS) continue;
+
     try {
       let fixed: Quote | null = null;
       if (weekend) {
@@ -560,8 +641,17 @@ async function repairFlippedHubRows(quotes: Record<string, Quote>): Promise<void
         const pc = await fetchLatestPrevClose(sid, segment, 'INDEX', day);
         if (pc) fixed = mkQuote(q.ltp, pc, 'hub+dhan-prevsession', q.day_high ?? 0, q.day_low ?? 0);
       }
-      if (fixed) { hubRepairCache.set(cacheKey, fixed); quotes[def.key] = { ...fixed, at: q.at }; }
-    } catch { /* keep the hub row; change_pct 0 is the pre-existing state */ }
+      if (fixed) {
+        hubRepairCache.set(cacheKey, fixed);
+        failedRepairCache.delete(cacheKey);
+        quotes[def.key] = { ...fixed, at: q.at };
+      } else {
+        failedRepairCache.set(cacheKey, Date.now());
+      }
+    } catch {
+      failedRepairCache.set(cacheKey, Date.now());
+      /* keep the hub row; change_pct 0 is the pre-existing state */
+    }
     await new Promise(r => setTimeout(r, HISTORICAL_STAGGER_MS));
   }
 }
@@ -595,7 +685,13 @@ export async function GET() {
       errors.push(`hub: ${String(e).slice(0, 120)}`);
     }
     try {
-      quotes = { ...quotes, ...(await fromDhan(REST_INDICES)) };
+      const pnfQuotes = fromPnf(REST_INDICES);
+      quotes = { ...quotes, ...pnfQuotes };
+      const missingRest = REST_INDICES.filter(i => !quotes[i.key]);
+      if (missingRest.length > 0) {
+        const dhanQuotes = await pacedQuoteCall(() => fromDhan(missingRest));
+        quotes = { ...quotes, ...dhanQuotes };
+      }
     } catch (e) {
       errors.push(`dhan: ${String(e).slice(0, 120)}`);
     }

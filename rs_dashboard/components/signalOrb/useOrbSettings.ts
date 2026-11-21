@@ -5,6 +5,7 @@ import { usePnfFeed } from '@/components/straddlePnf/usePnfFeed';
 import { closedBars, replay, type ReplaySummary } from '@/lib/signalOrb';
 import { liveRow, type OrbConfig, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 import type { Target } from '@/lib/pnfTarget';
+import { isTabHidden, onTabVisible } from '@/lib/tabVisibility';
 
 // The Signal Orb settings page's data: the ledger and its config ops (the same server routes the orb page uses), the contract's
 // price for the exposure line, and the replay of the current rules. It never trades and never runs the engine.
@@ -36,6 +37,7 @@ export function useOrbSettings() {
   }, []);
 
   const load = useCallback(async () => {
+    if (isTabHidden()) return;
     try {
       const r = await fetch('/api/signal-orb/state', { cache: 'no-store' });
       const j = await r.json() as StateReply;
@@ -47,7 +49,8 @@ export function useOrbSettings() {
   useEffect(() => {
     const first = setTimeout(() => { void load(); }, 0);
     const id = setInterval(() => { void load(); }, POLL_MS);
-    return () => { clearTimeout(first); clearInterval(id); };
+    const cleanupVis = onTabVisible(() => { void load(); });
+    return () => { clearTimeout(first); clearInterval(id); cleanupVis(); };
   }, [load]);
 
   const op = useCallback(async (body: Record<string, unknown>): Promise<string | null> => {

@@ -8,6 +8,7 @@ import { bucketTickBars, fillCutoff, foldTickRows, newTickBuild, spliceTicks, ty
 import { isNseSessionDay, istDateIso } from '@/lib/nseHolidays';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
 import { isComplete, targetKey, targetLabel, targetQuery, type Target } from '@/lib/pnfTarget';
+import { isTabHidden, onTabVisible } from '@/lib/tabVisibility';
 
 // One chart's price series on the Point & Figure page: the history (re-fetched every 30 s) and the live price from the
 // WebSocket bridge folded into the open bar. Each chart runs its own, so two charts can show two instruments. A new target
@@ -53,7 +54,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   const lastCloseRef = useRef<number | undefined>(undefined);
   const tickMode = tickSec !== null;
   const reqRef = useRef(0);
-  // An index carries two years of 1-minute bars: the first load takes them all, the 30 s refresh only the last few sessions.
+  // An index carries two years of 1-minute bars (a future about 85 days): the first load takes them all, the 30 s refresh only the last few sessions.
   const fullRef = useRef(false);
 
   const complete = target !== null && isComplete(target);
@@ -75,7 +76,8 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
     const id = ++reqRef.current;
     if (reset) { setLoading(true); setLoadError(null); }
     try {
-      const tail = !reset && fullRef.current && target.kind === 'index';
+      // an index, a future or an option: the refresh takes the last few sessions only (the server keeps the full history and lays them over it)
+      const tail = !reset && fullRef.current && (target.kind === 'index' || target.kind === 'futures' || target.kind === 'options');
       const res = await fetch(`/api/straddle-pnf?${targetQuery(target)}${tail ? `&tail=${TAIL_SESSIONS}` : ''}`);
       const j = await res.json() as {
         success?: boolean; error?: string; strikes: number[]; dataDate: string | null; name?: string; instruments?: Instrument[];
@@ -110,8 +112,12 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   useEffect(() => { void load(true); }, [load, recenter]);
   useEffect(() => {
     if (!complete) return;
-    const id = setInterval(() => { void load(false); }, POLL_MS);
-    return () => clearInterval(id);
+    const id = setInterval(() => {
+      if (isTabHidden()) return;
+      void load(false);
+    }, POLL_MS);
+    const cleanupVis = onTabVisible(() => { void load(false); });
+    return () => { clearInterval(id); cleanupVis(); };
   }, [load, complete]);
 
   // ── live price over the WebSocket bridge → the open bar ─────────────────
@@ -125,6 +131,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
     if (!ids) return;
     let dead = false;
     const poll = async () => {
+      if (isTabHidden()) return;
       try {
         const res = await fetch(`/api/straddle-pnf/live?ids=${ids}`);
         const j = await res.json() as { success?: boolean; legs?: LiveLeg[] };
@@ -155,7 +162,8 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
     };
     void poll();
     const id = setInterval(() => { void poll(); }, LIVE_MS);
-    return () => { dead = true; clearInterval(id); };
+    const cleanupVis = onTabVisible(() => { void poll(); });
+    return () => { dead = true; clearInterval(id); cleanupVis(); };
   }, [ids, market, single, tickMode]);
 
   // ── Renko Tick / N sec: the bridge's tick log → closed bars (one per recorded price, or N-second buckets) ──
@@ -181,6 +189,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
     let busy = false;
     let fails = 0;
     const poll = async () => {
+      if (isTabHidden()) return;
       if (busy) return;            // a slow read is never overtaken by the next one (the cursor must move in order)
       busy = true;
       try {
@@ -204,7 +213,8 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
     };
     void poll();
     const id = setInterval(() => { void poll(); }, TICKS_MS);
-    return () => { dead = true; clearInterval(id); };
+    const cleanupVis = onTabVisible(() => { void poll(); });
+    return () => { dead = true; clearInterval(id); cleanupVis(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ids, market, tickMode, tickSec]);
 

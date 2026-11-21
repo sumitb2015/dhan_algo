@@ -4,7 +4,7 @@ import { findEquity } from '@/lib/equityMaster';
 import { isIndexSymbol, isSymbol } from '@/lib/straddlePnfSearch';
 import { resolveFuture, resolveOption, type Contract } from '@/lib/pnfContracts';
 import { sessionOf, type Bar } from '@/lib/straddlePnf';
-import { tailSessions } from '@/lib/pnfTail';
+import { mergeBarsMap, tailSessions } from '@/lib/pnfTail';
 import type { PnfLegInput } from '@/lib/pnfOrderLogic';
 
 // The Point & Figure / Renko price history: an NSE index or stock price, or an F&O contract (a future, one option, or a CE + PE
@@ -27,6 +27,14 @@ const CACHE_MAX = 12;
 // On globalThis: the route and the instrumentation hook (the AUTO engine) can be separate module instances.
 const g = globalThis as unknown as { __pnfHistoryCache?: Map<string, { ts: number; body: unknown }> };
 const cache = (g.__pnfHistoryCache ??= new Map<string, { ts: number; body: unknown }>());
+// The last FULL history per contract. A 30 s tail refresh lays a few fresh sessions over it instead of downloading the whole window again
+// (about 85 days of 1-minute bars with OI for a future: a Dhan intraday call, a Python start and ~70k bars every 30 s per chart). A full
+// fetch is taken again every FULL_KEEP_MS, so a bar revised outside the tail window is healed.
+const gf = globalThis as unknown as { __pnfHistoryFull?: Map<string, { at: number; body: Record<string, unknown> }> };
+const fullStore = (gf.__pnfHistoryFull ??= new Map<string, { at: number; body: Record<string, unknown> }>());
+const FULL_KEEP_MS = 30 * 60_000;
+/** Completed sessions an incremental refresh asks the script for: the tail plus a margin for a holiday week and a revised bar. */
+const INCREMENTAL_MIN_SESSIONS = 4;
 
 function remember(key: string, body: unknown) {
   const now = Date.now();
@@ -51,21 +59,33 @@ function forTail(body: Record<string, unknown>, tail: number): Record<string, un
 async function run(key: string, args: string[], fallbackName: string, contracts?: PnfLegInput[], sessions = SESSIONS, tail = 0): Promise<HistoryReply> {
   const hit = cache.get(key);
   if (hit && Date.now() - hit.ts < CACHE_TTL) return ok(forTail(hit.body as Record<string, unknown>, tail));
+  // a tail refresh of a history we already hold in full: fetch only the last few sessions and lay them over it
+  const base = tail >= 1 ? fullStore.get(key) : undefined;
+  const incremental = !!base && Date.now() - base.at < FULL_KEEP_MS;
+  const ask = incremental ? Math.max(tail + 1, INCREMENTAL_MIN_SESSIONS) : sessions;
   try {
-    const out = await dedupe(`straddle-pnf:${key}`, () => runPythonJson<ScriptOut>(PRICE_SCRIPT, [...args, '--sessions', String(sessions)], 90_000));
+    const out = await dedupe(`straddle-pnf:${key}:${incremental ? `inc${ask}` : 'full'}`, () => runPythonJson<ScriptOut>(PRICE_SCRIPT, [...args, '--sessions', String(ask)], 90_000));
     if (out.error) return { status: 500, body: { success: false, error: out.error } };
-    const bars = out.bars ?? {};
+    const bars = incremental && Object.keys(out.bars ?? {}).length ? mergeBarsMap((base!.body.bars ?? {}) as Record<string, Bar[]>, out.bars ?? {}) : out.bars ?? {};
     const lastT = Math.max(0, ...Object.values(bars).map(b => (b.length ? b[b.length - 1].t : 0)));
     const instruments = out.instruments ?? (out.instrument ? [out.instrument] : []);
     const body = {
       success: true, atm: 0, strikes: [0], name: out.name ?? fallbackName, instrument: instruments[0] ?? null, instruments,
       contracts: contracts ?? instruments.map(i => ({ segment: i.segment, securityId: i.security_id, instrument: 'EQUITY', displayName: fallbackName, lot: 1, expiry: '' })),
       bars,
-      errors: out.errors ?? {}, anchorT: out.anchor_t ?? null, dataDate: lastT ? sessionOf(lastT) : null,
+      errors: out.errors ?? {},
+      // the anchor is the first bar of the FULL history: a short refresh window must not move it
+      anchorT: incremental ? ((base!.body.anchorT as number | null | undefined) ?? out.anchor_t ?? null) : out.anchor_t ?? null, dataDate: lastT ? sessionOf(lastT) : null,
       // a stock with derivatives: its continuous session ends at 15:15 and its close is set by NSE's Closing Auction Session
       cas: out.cas === true,
     };
-    if (Object.keys(bars).length) remember(key, body);
+    if (Object.keys(bars).length) {
+      remember(key, body);
+      // the full history's age is that of the last FULL fetch (an incremental refresh keeps it)
+      fullStore.delete(key);
+      fullStore.set(key, { at: incremental ? base!.at : Date.now(), body });
+      while (fullStore.size > CACHE_MAX) fullStore.delete(fullStore.keys().next().value as string);
+    }
     return ok(forTail(body, tail));
   } catch (e) {
     return { status: 500, body: { success: false, error: `Script error: ${(e as Error).message}` } };
