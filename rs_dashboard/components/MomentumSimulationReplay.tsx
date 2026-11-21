@@ -87,12 +87,29 @@ interface DailySnapshot {
   closed_trades: ClosedTrade[];
 }
 
+interface SimulationMetrics {
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  win_rate_pct: number;
+  profit_factor: number;
+  gross_profit: number;
+  gross_loss: number;
+  max_drawdown_pct: number;
+  avg_trade_pnl: number;
+  avg_trade_pct: number;
+  avg_hold_days: number;
+  open_positions: number;
+}
+
 interface SimulationResponse {
   success: boolean;
   config: {
     universe: string;
     capital: number;
     slots: number;
+    strategy?: string;
+    strategy_name?: string;
     regime_enabled?: boolean;
     breakout_days?: number;
     start: string;
@@ -103,6 +120,11 @@ interface SimulationResponse {
   final_equity: number;
   total_return_pct: number;
   total_trades: number;
+  profit_factor?: number;
+  win_rate_pct?: number;
+  max_drawdown_pct?: number;
+  metrics?: SimulationMetrics;
+  closed_trades?: ClosedTrade[];
   snapshots: DailySnapshot[];
   error?: string;
 }
@@ -485,6 +507,55 @@ export default function MomentumSimulationReplay({
       return acc;
     }, {});
   }, [currentSnapshot]);
+
+  // Overall Simulation Performance Metrics across the entire date window
+  const overallMetrics = useMemo(() => {
+    if (!simData || !simData.snapshots || simData.snapshots.length === 0) return null;
+    const finalSnap = simData.snapshots[simData.snapshots.length - 1];
+    const allClosed = simData.closed_trades || finalSnap?.closed_trades || [];
+    const totalTrades = allClosed.length;
+    const wins = allClosed.filter((t) => t.pnl > 0);
+    const losses = allClosed.filter((t) => t.pnl <= 0);
+    const winRate = totalTrades > 0 ? (wins.length / totalTrades) * 100 : 0;
+    const grossProfit = wins.reduce((sum, t) => sum + t.pnl, 0);
+    const grossLoss = Math.abs(losses.reduce((sum, t) => sum + t.pnl, 0));
+    let pf = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 999.0 : 0.0);
+    if (simData.profit_factor !== undefined) pf = simData.profit_factor;
+
+    // Max Drawdown across all snapshot equities
+    let peak = simData.initial_capital;
+    let maxDd = 0;
+    for (const s of simData.snapshots) {
+      if (s.equity > peak) peak = s.equity;
+      if (peak > 0) {
+        const dd = ((s.equity - peak) / peak) * 100;
+        if (dd < maxDd) maxDd = dd;
+      }
+    }
+    if (simData.max_drawdown_pct !== undefined) maxDd = simData.max_drawdown_pct;
+
+    const avgTradePnl = totalTrades > 0 ? allClosed.reduce((sum, t) => sum + t.pnl, 0) / totalTrades : 0;
+    const avgTradePct = totalTrades > 0 ? allClosed.reduce((sum, t) => sum + (t.pnl_pct || 0), 0) / totalTrades : 0;
+    const avgHoldDays = totalTrades > 0 ? allClosed.reduce((sum, t) => sum + (t.hold_days || 0), 0) / totalTrades : 0;
+
+    return {
+      totalTrades,
+      winningTrades: wins.length,
+      losingTrades: losses.length,
+      winRate: simData.win_rate_pct !== undefined ? simData.win_rate_pct : winRate,
+      profitFactor: pf,
+      grossProfit,
+      grossLoss,
+      maxDrawdown: maxDd,
+      avgTradePnl,
+      avgTradePct,
+      avgHoldDays,
+      finalEquity: simData.final_equity,
+      totalReturnPct: simData.total_return_pct,
+      initialCapital: simData.initial_capital,
+      openPositions: finalSnap ? finalSnap.holdings.length : 0,
+    };
+  }, [simData]);
 
   return (
     <div className="space-y-4">
@@ -879,6 +950,125 @@ export default function MomentumSimulationReplay({
 
       {simData && currentSnapshot && (
         <>
+          {/* Overall Simulation Performance Strip */}
+          {overallMetrics && (
+            <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3 space-y-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-2">
+                <div className="flex items-center gap-2">
+                  <BarChart2 size={15} className="text-emerald-400" />
+                  <span className="text-xs font-bold text-zinc-100 uppercase tracking-wider">
+                    Full Period Simulation Performance ({simData.config.start} → {simData.config.end} · {snapshots.length} Trading Days)
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-zinc-400">
+                  <span>Strategy: <b className="text-zinc-200">{simData.config.strategy_name || strategy}</b></span>
+                  <span>•</span>
+                  <span>Benchmark: <b className="text-zinc-200">{benchmark === 'nifty50' ? 'Nifty 50' : 'Nifty 500'}</b></span>
+                  <span>•</span>
+                  <span>Regime: <b className="text-zinc-200">{regimeEnabled ? `${regimeInterval.toUpperCase()} 200 SMA` : 'OFF'}</b></span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2">
+                {/* Total Return */}
+                <div className="bg-zinc-800/80 border border-zinc-700/70 rounded p-2.5">
+                  <div className="flex items-center justify-between text-[10px] uppercase font-bold text-zinc-400 tracking-wider">
+                    <span>Total Return</span>
+                    <Info tip="Total portfolio return over the entire simulation date window, from initial capital.">
+                      <span className="cursor-help text-zinc-500 hover:text-zinc-300">ⓘ</span>
+                    </Info>
+                  </div>
+                  <div className={`text-base font-bold tabular-nums mt-0.5 ${overallMetrics.totalReturnPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {overallMetrics.totalReturnPct >= 0 ? '+' : ''}{overallMetrics.totalReturnPct.toFixed(2)}%
+                  </div>
+                  <div className="text-[10px] text-zinc-400 tabular-nums truncate">
+                    {rupees(overallMetrics.finalEquity)} from {rupees(overallMetrics.initialCapital)}
+                  </div>
+                </div>
+
+                {/* Profit Factor */}
+                <div className="bg-zinc-800/80 border border-zinc-700/70 rounded p-2.5">
+                  <div className="flex items-center justify-between text-[10px] uppercase font-bold text-zinc-400 tracking-wider">
+                    <span>Profit Factor</span>
+                    <Info tip="Ratio of gross winning trades to gross losing trades. > 1.5 is good; > 2.0 is exceptional.">
+                      <span className="cursor-help text-zinc-500 hover:text-zinc-300">ⓘ</span>
+                    </Info>
+                  </div>
+                  <div className={`text-base font-bold tabular-nums mt-0.5 ${overallMetrics.profitFactor >= 1.5 ? 'text-emerald-400' : overallMetrics.profitFactor >= 1.0 ? 'text-amber-300' : 'text-red-400'}`}>
+                    {overallMetrics.profitFactor >= 99 ? '∞ (No loss)' : overallMetrics.totalTrades > 0 ? overallMetrics.profitFactor.toFixed(2) : '—'}
+                  </div>
+                  <div className="text-[10px] text-zinc-400 tabular-nums truncate">
+                    GP {rupees(overallMetrics.grossProfit)} / GL {rupees(overallMetrics.grossLoss)}
+                  </div>
+                </div>
+
+                {/* Win Rate */}
+                <div className="bg-zinc-800/80 border border-zinc-700/70 rounded p-2.5">
+                  <div className="flex items-center justify-between text-[10px] uppercase font-bold text-zinc-400 tracking-wider">
+                    <span>Win Rate</span>
+                    <Info tip="Percentage of closed trades with positive realized profit.">
+                      <span className="cursor-help text-zinc-500 hover:text-zinc-300">ⓘ</span>
+                    </Info>
+                  </div>
+                  <div className={`text-base font-bold tabular-nums mt-0.5 ${overallMetrics.winRate >= 50 ? 'text-emerald-400' : overallMetrics.winRate > 0 ? 'text-amber-300' : 'text-zinc-400'}`}>
+                    {overallMetrics.totalTrades > 0 ? `${overallMetrics.winRate.toFixed(1)}%` : '—'}
+                  </div>
+                  <div className="text-[10px] text-zinc-400 tabular-nums">
+                    {overallMetrics.winningTrades}W · {overallMetrics.losingTrades}L
+                  </div>
+                </div>
+
+                {/* Total Trades */}
+                <div className="bg-zinc-800/80 border border-zinc-700/70 rounded p-2.5">
+                  <div className="flex items-center justify-between text-[10px] uppercase font-bold text-zinc-400 tracking-wider">
+                    <span>Total Trades</span>
+                    <Info tip="Total closed round-trip positions taken in this simulation, plus currently active open slots.">
+                      <span className="cursor-help text-zinc-500 hover:text-zinc-300">ⓘ</span>
+                    </Info>
+                  </div>
+                  <div className="text-base font-bold text-zinc-100 tabular-nums mt-0.5">
+                    {overallMetrics.totalTrades}
+                  </div>
+                  <div className="text-[10px] text-zinc-400 tabular-nums">
+                    {overallMetrics.openPositions} active open
+                  </div>
+                </div>
+
+                {/* Max Drawdown */}
+                <div className="bg-zinc-800/80 border border-zinc-700/70 rounded p-2.5">
+                  <div className="flex items-center justify-between text-[10px] uppercase font-bold text-zinc-400 tracking-wider">
+                    <span>Max Drawdown</span>
+                    <Info tip="Maximum peak-to-trough equity drop during this simulation period.">
+                      <span className="cursor-help text-zinc-500 hover:text-zinc-300">ⓘ</span>
+                    </Info>
+                  </div>
+                  <div className="text-base font-bold text-red-400 tabular-nums mt-0.5">
+                    {overallMetrics.maxDrawdown.toFixed(2)}%
+                  </div>
+                  <div className="text-[10px] text-zinc-400">
+                    peak-to-trough
+                  </div>
+                </div>
+
+                {/* Avg Trade & Hold */}
+                <div className="bg-zinc-800/80 border border-zinc-700/70 rounded p-2.5">
+                  <div className="flex items-center justify-between text-[10px] uppercase font-bold text-zinc-400 tracking-wider">
+                    <span>Avg Trade</span>
+                    <Info tip="Average realized P&L and average holding duration per closed trade.">
+                      <span className="cursor-help text-zinc-500 hover:text-zinc-300">ⓘ</span>
+                    </Info>
+                  </div>
+                  <div className={`text-base font-bold tabular-nums mt-0.5 ${overallMetrics.avgTradePnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {overallMetrics.totalTrades > 0 ? signed(overallMetrics.avgTradePnl) : '—'}
+                  </div>
+                  <div className="text-[10px] text-zinc-400 tabular-nums truncate">
+                    {overallMetrics.totalTrades > 0 ? `${overallMetrics.avgTradePct >= 0 ? '+' : ''}${overallMetrics.avgTradePct.toFixed(1)}% · ${overallMetrics.avgHoldDays.toFixed(0)}d hold` : 'no closed trades'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Time-Travel Control Strip */}
           <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-3 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-4">
@@ -1087,6 +1277,15 @@ export default function MomentumSimulationReplay({
             <StatTile label="Unrealised" value={signed(currentSnapshot.unrealised_pnl)} tone={currentSnapshot.unrealised_pnl >= 0 ? 'good' : 'bad'} />
             <StatTile label="Deployed" value={`${currentSnapshot.deployed_pct.toFixed(0)}%`} sub={`${currentSnapshot.active_slots}/${currentSnapshot.slots} slots · cash ${rupees(currentSnapshot.cash)}`} />
             <StatTile label="Day P&L" value={signed(currentSnapshot.day_pnl)} tone={currentSnapshot.day_pnl >= 0 ? 'good' : 'bad'} sub="session mark-to-market" />
+            <StatTile
+              label="Trades to Date"
+              value={String(currentSnapshot.closed_trades.length)}
+              sub={
+                currentSnapshot.closed_trades.length > 0
+                  ? `${currentSnapshot.closed_trades.filter((t) => t.pnl > 0).length}W · ${currentSnapshot.closed_trades.filter((t) => t.pnl <= 0).length}L (${((currentSnapshot.closed_trades.filter((t) => t.pnl > 0).length / currentSnapshot.closed_trades.length) * 100).toFixed(0)}% Win)`
+                  : '0 closed trades'
+              }
+            />
           </div>
 
           {/* Sector Diversification Strip as of Day D */}
@@ -1310,8 +1509,24 @@ export default function MomentumSimulationReplay({
 
             {/* Closed Trades up to Day D */}
             <div>
-              <div className="text-xs font-bold text-zinc-300 uppercase tracking-wider mb-2">
-                Closed Trades up to {currentSnapshot.date} ({currentSnapshot.closed_trades.length})
+              <div className="text-xs font-bold text-zinc-300 uppercase tracking-wider mb-2 flex flex-wrap items-center justify-between gap-2">
+                <span>Closed Trades up to {currentSnapshot.date} ({currentSnapshot.closed_trades.length})</span>
+                {currentSnapshot.closed_trades.length > 0 && (
+                  <div className="flex items-center gap-3 text-xs font-normal text-zinc-400">
+                    <span>
+                      Win Rate:{' '}
+                      <b className="text-zinc-200">
+                        {((currentSnapshot.closed_trades.filter((t) => t.pnl > 0).length / currentSnapshot.closed_trades.length) * 100).toFixed(1)}%
+                      </b>{' '}
+                      ({currentSnapshot.closed_trades.filter((t) => t.pnl > 0).length}W / {currentSnapshot.closed_trades.filter((t) => t.pnl <= 0).length}L)
+                    </span>
+                    <span>•</span>
+                    <span>
+                      Realized P&L:{' '}
+                      <b className={pnlColor(currentSnapshot.realized_pnl)}>{signed(currentSnapshot.realized_pnl)}</b>
+                    </span>
+                  </div>
+                )}
               </div>
               <div className="overflow-x-auto border border-zinc-800 rounded max-h-96 overflow-y-auto">
                 <table className="w-full text-xs text-zinc-300">
