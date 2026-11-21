@@ -19,7 +19,13 @@ function TimeField({ value, onCommit, label }: { value: string; onCommit: (v: st
   const [draft, setDraft] = useState(value);
   const focused = useRef(false);
   useEffect(() => { if (!focused.current) setDraft(value); }, [value]);
-  const commit = () => { if (/^([01]\d|2[0-3]):[0-5]\d$/.test(draft) && draft !== value) onCommit(draft); else setDraft(value); };
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  // a refused edit leaves `value` unchanged, so the field would keep showing what was typed: show what is saved again
+  const commit = () => {
+    if (/^([01]\d|2[0-3]):[0-5]\d$/.test(draft) && draft !== value) { onCommit(draft); setTimeout(() => { if (!focused.current) setDraft(valueRef.current); }, 1_000); }
+    else setDraft(value);
+  };
   return (
     <input value={draft} aria-label={label} inputMode="numeric" placeholder="HH:MM"
       onFocus={() => { focused.current = true; }}
@@ -83,8 +89,14 @@ function SpecEditor({ spec, onChange, onRemove }: { spec: IndicatorSpec; onChang
   );
 }
 
-export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onResetSim, error, replayed }: {
+const rs = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
+
+export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onResetSim, error, replayed, unitsPerLot, price }: {
   replayed: ReplaySummary | null;
+  /** rupees per point per lot (barrels for crude, the master lot for NIFTY); 0 = not known yet */
+  unitsPerLot: number;
+  /** the signal future's live price, for the exposure line (null = no quote) */
+  price: number | null;
   open: boolean;
   onClose: () => void;
   ledger: OrbLedger;
@@ -103,6 +115,11 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
   }, [open, onClose]);
   if (!open) return null;
   const c = ledger.config;
+  // risk in rupees: a point is worth unitsPerLot x lots; the stop is measured on the future, so for a sold option this is the
+  // most it can cost if the option moved one-for-one (it moves by its delta, so a real loss is smaller)
+  const perPt = unitsPerLot > 0 ? unitsPerLot * c.lots : 0;
+  const stopRs = perPt * c.stopPts;
+  const lockPts = (c.trailStartPts ?? 0) - (c.trailGapPts ?? 15);
   const setSpecs = (indicators: IndicatorSpec[]) => onPatch({ indicators });
   const addKind = (kind: IndicatorKind) => {
     let i = 1;
@@ -123,7 +140,12 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
             <X className="h-4 w-4" />
           </button>
         </div>
-        {error && <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">{error}</p>}
+        {/* sticky: a refusal must be seen wherever in the drawer the edit was made */}
+        {error && (
+          <div className="sticky top-0 z-10 -mx-5 -mt-1 bg-zinc-950 px-5 pb-1 pt-1" role="alert">
+            <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">Not saved: {error}</p>
+          </div>
+        )}
         <div className="flex flex-col gap-1">
           <ReplayCard r={replayed} tf={c.timeframe} compact futuresPoints={c.instrument === 'options'} />
           <p className="px-1 text-[11px] text-zinc-500">What-if, not live results: these rules replayed over the last 20 sessions (fills at the bar close, no costs). Fills/day counts every entry and exit, so a flip is 2. Use it to spot a setting that flips too often before you arm.</p>
@@ -190,15 +212,15 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
         </Section>
 
         <Section title="Risk">
-          <Row label="Lots" sub={`${c.symbol} · no cap; the exchange rejects an order above its freeze quantity`}>
+          <Row label="Lots" sub={`${c.symbol} · no cap; the exchange rejects an order above its freeze quantity${perPt > 0 ? `. ${c.lots} × ${unitsPerLot} = ${(c.lots * unitsPerLot).toLocaleString('en-IN')} units · 1 pt = ${rs(perPt)}${price ? ` · exposure ${rs(price * c.lots * unitsPerLot)}` : ''}` : ''}`}>
             <RuleNumInput value={c.lots} step={1} min={1} label="Lots" disabled={locked} onCommit={s => onPatch({ lots: Number(s) })}
               className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100 disabled:opacity-50" />
           </Row>
-          <Row label="Hard stop (points)" sub="Points on the future's price from its entry, also for options rows (never option premium). Required for REAL. 0 = off">
+          <Row label="Hard stop (points)" sub={`Points on the future's price from its entry, also for options rows (never option premium). Required for REAL. 0 = off${stopRs > 0 ? `. Worst case per stop ≈ ${rs(stopRs)}${c.instrument === 'options' ? ' on the future (a sold option loses less)' : ''}` : ''}`}>
             <RuleNumInput value={c.stopPts} step={5} min={0} label="Hard stop points" onCommit={s => onPatch({ stopPts: Number(s) })}
               className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
           </Row>
-          <Row label="Lock & Trail start (pts)" sub="Favorable move to activate trailing. 0 = off (fixed stop only)">
+          <Row label="Lock & Trail start (pts)" sub={(c.trailStartPts ?? 0) > 0 && lockPts > 0 ? `Favorable move to activate trailing. Once active the stop sits at least +${lockPts} pts in profit${perPt > 0 ? ` (${rs(lockPts * perPt)})` : ''}` : 'Favorable move to activate trailing. 0 = off (fixed stop only)'}>
             <RuleNumInput value={c.trailStartPts ?? 0} step={5} min={0} label="Trail start points" onCommit={s => onPatch({ trailStartPts: Number(s) })}
               className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
           </Row>
@@ -208,7 +230,7 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
                 className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
             </Row>
           )}
-          <Row label="Daily loss limit (₹)" sub="Realised + open; closes and halts">
+          <Row label="Daily loss limit (₹)" sub={`Realised + open; closes and halts${stopRs > 0 ? `. = ${(c.dailyLossLimit / stopRs).toFixed(1)} full stops at this size` : ''}`}>
             <RuleNumInput value={c.dailyLossLimit} step={500} min={100} label="Daily loss limit" onCommit={s => onPatch({ dailyLossLimit: Number(s) })}
               className="h-8 w-24 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
           </Row>

@@ -2,7 +2,7 @@
 // these under one in-process chain; the browser only sends config / mode / engine ops and asks the trade route to act. Real money:
 // the ledger is the authority for what THIS page opened (an exit closes only its own units, never the broker's whole net).
 
-import { TIMEFRAMES, sanitizeSpec, hhmmToMin, defaultSpec, rowPnl, type IndicatorSpec, type Side, type Timeframe } from './signalOrb.ts';
+import { TIMEFRAMES, sanitizeSpec, specIssue, hhmmToMin, defaultSpec, rowPnl, type IndicatorSpec, type Side, type Timeframe } from './signalOrb.ts';
 import type { Target } from './pnfTarget.ts';
 
 export type OrbMode = 'SIM' | 'REAL';
@@ -242,6 +242,9 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
   if (timePatched && !(hhmmToMin(next.entryStart) < hhmmToMin(next.entryEnd) && hhmmToMin(next.entryEnd) <= hhmmToMin(next.eodExit))) {
     return 'Times must run entry start < entry end <= cutoff';
   }
+  // the broker squares MIS off before the exchange closes: a cutoff after that point never runs on this page
+  const maxCutoff = next.symbol === 'NIFTY' ? '15:25' : '23:25';
+  if (timePatched && hhmmToMin(next.eodExit) > hhmmToMin(maxCutoff)) return `${next.symbol} cutoff must be ${maxCutoff} or earlier (the broker squares off intraday positions near then)`;
   return next;
 }
 
@@ -292,6 +295,11 @@ export function applyClientOp(l: OrbLedger, raw: unknown, now: number): OpResult
     case 'setConfig': {
       const next = sanitizeConfigPatch(op.patch, l.config);
       if (typeof next === 'string') return bad(next);
+      // a live edit is strict: a spec that sanitizing would change is refused, not quietly rewritten
+      const specs = (op.patch as { indicators?: unknown } | null)?.indicators;
+      if (Array.isArray(specs)) { for (const sp of specs) { const why = specIssue(sp); if (why) return bad(why); } }
+      // REAL never runs without a hard stop, whatever order the settings were changed in
+      if (l.mode === 'REAL' && !(next.stopPts > 0)) return bad('REAL needs a hard stop (points) above 0 - switch to SIM to turn the stop off', 409);
       if (live && next.broker !== l.config.broker) return bad('The broker cannot change while a position is open', 409);
       if (live && (next.symbol !== l.config.symbol || next.instrument !== l.config.instrument || next.strikeOffset !== l.config.strikeOffset)) {
         return bad('Symbol, instrument and strike cannot change while a position is open', 409);

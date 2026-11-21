@@ -295,7 +295,7 @@ export default function SignalOrb() {
       )}
 
       {ledger && e.state && (
-        <OrbDrawer open={drawer} onClose={() => setDrawer(false)} ledger={ledger} locked={!!live} replayed={e.replayed}
+        <OrbDrawer open={drawer} onClose={() => setDrawer(false)} ledger={ledger} locked={!!live} replayed={e.replayed} unitsPerLot={e.state.unitsPerLot} price={e.price}
           onPatch={patch} onMode={setMode} onResetSim={async () => setErr(await e.op({ op: 'resetSim' }))} error={err} />
       )}
       {err && !drawer && (

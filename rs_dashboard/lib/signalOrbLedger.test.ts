@@ -176,3 +176,21 @@ test('normalizeLedger: a stored NIFTY config keeps its own stop and trail (the s
   const l = normalizeLedger({ config: { stopPts: 55, trailStartPts: 12, trailGapPts: 6, symbol: 'NIFTY' } });
   assert.deepEqual([l.config.symbol, l.config.stopPts, l.config.trailStartPts, l.config.trailGapPts], ['NIFTY', 55, 12, 6]);
 });
+
+test('live edits are strict: bad indicator values are refused, REAL keeps its stop, cutoff stays inside the session', () => {
+  const l = emptyLedger();
+  const ec = (fast: number, slow: number) => applyClientOp(l, { op: 'setConfig', patch: { indicators: [{ id: 'x-1', kind: 'emaCross', fast, slow }] } }, 1);
+  assert.equal(ec(30, 20).ok, false);
+  assert.equal(ec(9, 21).ok, true);
+  const rsi = (upper: number, lower: number) => applyClientOp(l, { op: 'setConfig', patch: { indicators: [{ id: 'r-1', kind: 'rsi', period: 14, upper, lower }] } }, 1);
+  assert.equal(rsi(40, 30).ok, false);   // bull level below 50
+  assert.equal(rsi(55, 45).ok, true);
+  const real: OrbLedger = { ...emptyLedger(), mode: 'REAL' };
+  assert.equal(applyClientOp(real, { op: 'setConfig', patch: { stopPts: 0 } }, 1).ok, false);
+  assert.equal(applyClientOp(real, { op: 'setConfig', patch: { stopPts: 20 } }, 1).ok, true);
+  assert.equal(applyClientOp(l, { op: 'setConfig', patch: { stopPts: 0 } }, 1).ok, true);   // SIM may run without
+  const n = sanitizeConfigPatch({ symbol: 'NIFTY' }, l.config);
+  assert.ok(typeof n !== 'string');
+  assert.equal(typeof sanitizeConfigPatch({ eodExit: '23:00' }, n as typeof l.config), 'string');
+  assert.equal(typeof sanitizeConfigPatch({ eodExit: '15:25' }, n as typeof l.config), 'object');
+});

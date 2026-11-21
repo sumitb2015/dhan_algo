@@ -10,7 +10,7 @@ import { VWAP_START, vwapFrom } from './straddlePnf.ts';
  * update never reached) shows a reload banner and its entries are refused (lib/signalOrbServer.ts). Bump on every change to
  * the rules, the indicators or the engine.
  */
-export const ORB_CODE_VERSION = '2026-11-21.3';
+export const ORB_CODE_VERSION = '2026-11-21.4';
 
 export type Vote = 1 | -1 | 0;
 export type Signal = 'BULL' | 'BEAR' | 'NEUTRAL';
@@ -102,6 +102,25 @@ export function sanitizeSpec(v: unknown): IndicatorSpec | null {
     }
     case 'vwap': return d;
   }
+}
+
+/**
+ * Why a spec the user typed would not be saved as written, or null. sanitizeSpec bounds quietly (it also reads stored files); a
+ * live edit must not: an EMA cross with fast >= slow would otherwise snap back to 9/21 and an RSI band outside its range to the
+ * default, with nothing said. Every numeric field the input carries must survive sanitizing unchanged.
+ */
+export function specIssue(raw: unknown): string | null {
+  const s = sanitizeSpec(raw);
+  if (!s) return 'An indicator is invalid';
+  const o = raw as Record<string, unknown>;
+  if (s.kind === 'emaCross' && Number(o.fast) >= Number(o.slow)) return 'EMA Cross: the fast period must be below the slow one';
+  if (s.kind === 'rsi' && Number(o.lower) > Number(o.upper)) return 'RSI: the bear level must be below the bull level';
+  if (s.kind === 'stochRsi' && Number(o.lower) > Number(o.upper)) return 'Stoch RSI: the lower level must be below the upper one';
+  for (const [k, v] of Object.entries(s)) {
+    if (k === 'id' || k === 'kind' || o[k] === undefined) continue;
+    if (Number(o[k]) !== v) return `${KIND_LABEL[s.kind]}: ${k} ${String(o[k])} is outside the allowed range - not saved`;
+  }
+  return null;
 }
 
 export type IndicatorReading = { id: string; label: string; vote: Vote; value: string };
