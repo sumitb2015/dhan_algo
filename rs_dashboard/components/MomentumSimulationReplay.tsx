@@ -207,6 +207,21 @@ function MiniEquitySparkline({ snapshots, currentIdx, onSelectIdx }: {
   );
 }
 
+/** Compact label for a rejection reason (full text stays in the pill's tooltip). */
+function shortReason(reason: string): string {
+  let m: RegExpMatchArray | null;
+  if (reason.startsWith('trend not stacked')) return 'Trend not stacked';
+  if (reason.startsWith('200 SMA not rising')) return '200 SMA not rising';
+  if (reason.startsWith('<25% above 52w low')) return '<25% off low';
+  if (reason.startsWith('>20% below 52w high')) return '>20% off high';
+  if ((m = reason.match(/^below (\d+)d pivot high/))) return `Below ${m[1]}d pivot`;
+  if ((m = reason.match(/^extended (\d+)% above pivot/))) return `Extended +${m[1]}%`;
+  if (reason.startsWith('volume <')) return 'Low volume';
+  if ((m = reason.match(/^RS rank <(\d+) \((.+)\)/))) return `RS ${m[2]} (<${m[1]})`;
+  if (reason.startsWith('insufficient history')) return 'Short history';
+  return reason;
+}
+
 /** Stop distance each model used before it became a setting (mirrors default_stop_pct in simulate_momentum_replay.py). */
 const defaultStopFor = (strategy: string) => (strategy === 'clenow' ? 10 : 12);
 
@@ -1037,9 +1052,17 @@ export default function MomentumSimulationReplay({
                                 {r.status}
                               </span>
                             ) : (
-                              <span className="px-1.5 py-0.5 rounded text-xs bg-zinc-800 text-zinc-400 truncate max-w-[140px] inline-block" title={r.status}>
-                                {r.status}
-                              </span>
+                              <div className="flex flex-wrap gap-1" title={r.status}>
+                                {r.status.split(' · ').map((reason) => (
+                                  <span
+                                    key={reason}
+                                    title={reason}
+                                    className="px-1.5 py-0.5 rounded-full text-[11px] leading-none bg-zinc-800 border border-zinc-700 text-zinc-300 whitespace-nowrap"
+                                  >
+                                    {shortReason(reason)}
+                                  </span>
+                                ))}
+                              </div>
                             )}
                           </TD>
                         </tr>

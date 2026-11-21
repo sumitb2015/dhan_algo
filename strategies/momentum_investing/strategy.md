@@ -140,12 +140,14 @@ venv\Scripts\python.exe strategies/momentum_investing/nifty500_momentum.py --onc
 # Paper daemon: cycles every trading day at 15:20 IST
 venv\Scripts\python.exe strategies/momentum_investing/nifty500_momentum.py
 
-# Live delivery trading — NOT IMPLEMENTED YET (Phase 4)
+# Live delivery trading (Phase 4 — automated CNC delivery orders)
 venv\Scripts\python.exe strategies/momentum_investing/nifty500_momentum.py --live
 ```
 
-Dry run is the default. `--live` currently refuses to place orders and logs an alert rather
-than trading — real CNC execution lands in Phase 4.
+Dry run is the default. `--live` places real CNC delivery orders via `DhanHelper` with fill confirmation.
+Selling CNC shares requires active Demat Debit and Pledge Instruction (DDPI) or daily CDSL eDIS
+authorization on Dhan; if unauthorized, Dhan will reject the sell order and the strategy logs
+an alert.
 
 Useful flags: `--capital`, `--slots`, `--stop`, `--trail-pct`, `--target` (`none` by default),
 `--buy-rank-limit`, `--sector-cap`, `--run-at`, `--instance-id`, and the regime controls
@@ -211,3 +213,21 @@ rather than rejecting every candidate on quote-patched days.
 Live, the cycle runs at 15:20 and fills at LTP. So the ranking "close" is a near-final 15:20
 price, and live fills avoid the overnight gap risk the backtest charges itself. Neither
 difference flatters live results.
+
+## Model: Minervini Trend Template (`--model minervini`)
+
+Alternative entry/exit model, selected with `--model minervini` (default stays `turtle_rs`). Rules live in
+[`lib/minervini.py`](../../lib/minervini.py), shared with the historical replay
+(`scripts/analysis/simulate_momentum_replay.py`) so the replay is evidence for this exact code.
+
+- **Entry** (checked every session at `--run-at`, not only at the weekly review): Close > 50 > 150 > 200 SMA; 200 SMA
+  above its level 22 sessions ago; >=25% above the 52-week low and within 20% of the high; close at/above the 20-day
+  closing high (`--breakout-days 10` for a tight VCP) but no more than 5% above it; volume >= 20-day average;
+  composite-RS percentile >= 70.
+- **Exit**: close below the stop. Initial stop `--stop` % (default 12) below entry; after +15% it trails the 50 SMA and
+  never loosens. Regime liquidation stays weekly. No rank rotation.
+- **Book isolation**: the portfolio file records its model; a run with the other model refuses to start
+  (use `--instance-id` to run both). Files from before this flag count as `turtle_rs`.
+- **Validation**: replay on Nifty 500, 10 slots, regime on: 2020-23 +192% (PF 3.84), 2024-26 +36% (PF 1.87). Parameters
+  were tuned looking at both windows, so 2024-26 is lightly in-sample; 2025-26 alone was weak for momentum. Live fills
+  happen at the 15:20 LTP, not the next open as in the replay. **Paper-trade it first** (`--once`, no `--live`).

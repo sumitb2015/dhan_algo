@@ -184,7 +184,14 @@ export async function POST(request: NextRequest) {
       }
 
       const scriptPath = path.join(PROJECT_ROOT, 'strategies', 'momentum_investing', 'nifty500_momentum.py');
-      const processArgs = [scriptPath, '--once', ...(instanceId ? ['--instance-id', instanceId] : [])];
+      // A saved book belongs to one model; run the on-demand cycle under that model or the script refuses.
+      const savedBook = readJson(portfolioPath) as Record<string, any> | null;
+      const savedModel = savedBook?.model === 'minervini' ? 'minervini' : null;
+      const processArgs = [
+        scriptPath, '--once',
+        ...(savedModel ? ['--model', savedModel] : []),
+        ...(instanceId ? ['--instance-id', instanceId] : []),
+      ];
 
       const child = spawn(PYTHON_EXE, processArgs, {
         cwd: PROJECT_ROOT,

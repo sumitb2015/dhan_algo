@@ -30,6 +30,7 @@ import pandas as pd
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
+from lib import minervini                                              # noqa: E402
 from lib.momentum import (
     MomentumConfig, Position,
     STAGE_INITIAL, STAGE_BREAKEVEN, STAGE_TRAIL,
@@ -60,20 +61,6 @@ STRATEGY_NAMES = {
 }
 
 
-MINERVINI_MIN_RS_PCT = 70.0     # Minervini template: relative-strength rank >= 70 (top 30% of the universe)
-# Don't chase: Minervini buys within ~5% of the pivot. Validated 2020-23 and 2024-26 (PF 2.46->2.95, 1.06->1.20).
-MINERVINI_MAX_EXT = 0.05
-MINERVINI_SMA200_RISE_BARS = 22  # 200-SMA must be higher than it was ~1 month (22 trading days) ago
-
-
-def rs_percentiles(ranking: List[Tuple[str, float]]) -> Dict[str, float]:
-    """{symbol: RS percentile 1-99} from a strongest-first composite-RS ranking."""
-    n = len(ranking)
-    if n <= 1:
-        return {s: 99.0 for s, _ in ranking}
-    return {s: round(100.0 * (n - 1 - i) / (n - 1), 1) for i, (s, _) in enumerate(ranking)}
-
-
 def passes_strategy_entry(strategy: str, sym: str, tables: dict, d: date, cfg: MomentumConfig,
                           rs_pct: Optional[Dict[str, float]] = None) -> Tuple[bool, str]:
     t = tables.get(sym)
@@ -90,34 +77,7 @@ def passes_strategy_entry(strategy: str, sym: str, tables: dict, d: date, cfg: M
         return passes_entry_filters(sym, tables, d, cfg)
 
     elif strategy == "minervini":
-        sma50 = t["sma50"].get(d)
-        sma150 = t["sma150"].get(d)
-        sma200 = t["sma200"].get(d)
-        h250 = t["high250"].get(d)
-        l250 = t["low250"].get(d)
-        lookback = cfg.breakout_days if cfg.breakout_days in (10, 20) else 20
-        pivot_h = t.get(f"high{lookback}", t.get("high20", {})).get(d)
-        sma200_prev = t["sma200_prev"].get(d)
-        if any(v is None or np.isnan(v) for v in (sma50, sma150, sma200, sma200_prev, h250, l250, pivot_h)):
-            return False, "insufficient history (<250d)"
-        if not (close > sma50 > sma150 > sma200):
-            return False, "trend not stacked (Close > 50 > 150 > 200 SMA)"
-        if not sma200 > sma200_prev:
-            return False, "200 SMA not rising (vs 1 month ago)"
-        if close < l250 * 1.25:
-            return False, "<25% above 52w low"
-        if close < h250 * 0.80:
-            return False, ">20% below 52w high"
-        if close < pivot_h:
-            return False, f"below {lookback}d pivot high"
-        if vol < vol20:
-            return False, "volume < 20d average"
-        if close > pivot_h * (1.0 + MINERVINI_MAX_EXT):
-            return False, f"extended >{MINERVINI_MAX_EXT*100:.0f}% above pivot"
-        pct = (rs_pct or {}).get(sym)
-        if pct is None or pct < MINERVINI_MIN_RS_PCT:
-            return False, f"RS rank <{MINERVINI_MIN_RS_PCT:.0f} ({'n/a' if pct is None else f'{pct:.0f}'})"
-        return True, "QUALIFIED"
+        return minervini.entry_check(sym, tables, d, cfg.breakout_days, rs_pct)
 
     elif strategy == "52w_high":
         sma50 = t["sma50"].get(d)
@@ -157,18 +117,7 @@ def check_strategy_exit(strategy: str, pos: Position, close: float, tables: dict
         return pos.update(close, cfg)
 
     elif strategy == "minervini":
-        pos.peak_close = max(pos.peak_close, close)
-        pos.last_close = close
-        gain_pct = (pos.peak_close / pos.entry_price - 1.0) * 100.0
-        sma50 = t["sma50"].get(d) if t else None
-        # Initial stop is cfg.stop_pct (12%). An extra 8% floor I tried first whipsawed good trades:
-        # 2020-23 PF 2.46 -> 3.84 and 2024-26 PF 1.06 -> 1.87 once it was removed (with the extension rule).
-        if (gain_pct >= 15.0 or pos.stage == STAGE_TRAIL) and sma50 and not np.isnan(sma50):
-            pos.stop_price = max(pos.stop_price, float(sma50))
-            pos.stage = STAGE_TRAIL
-        if close < pos.stop_price:
-            return "stop"
-        return None
+        return minervini.exit_check(pos, close, tables, d, STAGE_TRAIL)
 
     elif strategy == "52w_high":
         pos.peak_close = max(pos.peak_close, close)
@@ -246,7 +195,9 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
     rs_matrix = build_rs_matrix(price_map, bench)
 
     # Enrich tables conditionally based on selected strategy (fast vectorized)
-    if strategy in ("minervini", "52w_high"):
+    if strategy == "minervini":
+        minervini.add_tables(price_map, tables)         # shared with the live bot: lib/minervini.py
+    elif strategy == "52w_high":
         for sym, df in price_map.items():
             if sym in tables:
                 c_ser = df["close"]
@@ -254,12 +205,6 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
                 tables[sym]["sma50"] = dict(zip(d_list, c_ser.rolling(50, min_periods=50).mean()))
                 tables[sym]["sma200"] = dict(zip(d_list, c_ser.rolling(200, min_periods=200).mean()))
                 tables[sym]["high250"] = dict(zip(d_list, df["high"].rolling(250, min_periods=200).max().shift(1)))
-                if strategy == "minervini":
-                    tables[sym]["sma150"] = dict(zip(d_list, c_ser.rolling(150, min_periods=150).mean()))
-                    tables[sym]["sma200_prev"] = dict(zip(d_list, c_ser.rolling(200, min_periods=200).mean().shift(MINERVINI_SMA200_RISE_BARS)))
-                    tables[sym]["high20"] = dict(zip(d_list, c_ser.rolling(20, min_periods=20).max().shift(1)))
-                    tables[sym]["high10"] = dict(zip(d_list, c_ser.rolling(10, min_periods=10).max().shift(1)))
-                    tables[sym]["low250"] = dict(zip(d_list, df["low"].rolling(250, min_periods=200).min().shift(1)))
 
     elif strategy == "clenow":
         dx = np.arange(90) - 44.5
@@ -311,7 +256,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         """Composite-RS ranking + percentiles for day d, computed once per day."""
         if d not in rs_day_cache:
             r = rank_universe(price_map, bench, d, cfg, matrix=rs_matrix) or []
-            rs_day_cache[d] = (r, rs_percentiles(r))
+            rs_day_cache[d] = (r, minervini.rs_percentiles(r))
         return rs_day_cache[d]
 
     for day_idx, d in enumerate(all_trading_days):
