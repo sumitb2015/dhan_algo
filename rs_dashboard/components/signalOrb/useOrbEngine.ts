@@ -14,6 +14,7 @@ import {
   type EffectiveStopResult, type Evaluation, type ReplaySummary, type Side,
 } from '@/lib/signalOrb';
 import { isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
+import { keyLevels, mtfTable, signalChanges } from '@/lib/signalOrbPanels';
 
 // The Signal Orb's live engine (browser). Leader tab only (localStorage lock); the tick is rebuilt every render and called through
 // a ref from ONE interval, so quotes never restart it. It decides on closed bars (lib/signalOrb.ts) and asks the server to act
@@ -154,6 +155,20 @@ export function useOrbEngine() {
     [closedKey, tf, nowMinute],
   );
   const ev: Evaluation = useMemo(() => evaluate(cfg?.indicators ?? [], closed), [cfg?.indicators, closed]);
+
+  // Context panels (information only, never read by the rules): the chosen indicators on every timeframe, the orb's recent colour
+  // changes, and today's / yesterday's key levels. Recomputed when a minute closes or the history reloads, like the orb itself.
+  const mtf = useMemo(
+    () => (nowMinute && cfg ? mtfTable(cfg.indicators, bars.slice(0, lastClosed + 1), nowMinute * 60 + 1) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [closedKey, cfg?.indicators, nowMinute],
+  );
+  const history = useMemo(() => signalChanges(cfg?.indicators ?? [], closed, 10), [cfg?.indicators, closed]);
+  const levels = useMemo(
+    () => keyLevels(bars.slice(-6_000)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [closedKey, nowMinute],
+  );
 
   // The same rules replayed over the recent sessions (lib/signalOrb.ts replay): recomputed when the history reloads or a rule
   // changes, not per tick. Reads the bars up to the newest history load, so today's closed bars are in it.
@@ -355,6 +370,6 @@ export function useOrbEngine() {
   return {
     state, ledger, live: live as OrbRow | null, contract, feed, ev, price, priceFresh, openPnl, mark, realised, now, isLeader, note, stateError,
     armed, setArmed, busy, op, closeAndStop, today, replayed, secsToClose, barSecs,
-    tradeSound, setTradeSound, alertSound, setAlertSound, soundReady, outdated, effectiveStop,
+    tradeSound, setTradeSound, alertSound, setAlertSound, soundReady, outdated, effectiveStop, mtf, history, levels, tf,
   };
 }

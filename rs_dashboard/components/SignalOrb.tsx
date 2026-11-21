@@ -12,6 +12,7 @@ import { istDateIso } from '@/lib/nseHolidays';
 import { expiryLabel } from '@/lib/pnfTarget';
 import { cn } from '@/lib/utils';
 import { type EffectiveStopResult } from '@/lib/signalOrb';
+import { HistoryPanel, LevelsPanel, MtfPanel } from '@/components/signalOrb/ContextPanels';
 import { isStuck, type OrbConfig, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 
 // /signal-orb: one orb, one switch. A CRUDEOIL / CRUDEOILM / NIFTY future's closed bars give the consensus of the active indicators —
@@ -150,8 +151,9 @@ export default function SignalOrb() {
         </div>
       </header>
 
-      {/* stage */}
-      <main className="relative z-10 flex flex-1 flex-col items-center justify-center gap-4 px-4 py-4">
+      {/* stage: the orb, with the context panels beside it (below it on a narrow window) */}
+      <div className="relative z-10 grid flex-1 grid-cols-1 items-center gap-2 lg:grid-cols-[minmax(0,1fr)_21rem]">
+      <main className="flex flex-col items-center justify-center gap-4 px-4 py-4">
         {(e.stateError || e.feed.loadError) && (
           <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs text-red-300">{e.stateError ?? e.feed.loadError}</p>
         )}
@@ -268,6 +270,15 @@ export default function SignalOrb() {
           )}
         </div>
       </main>
+
+      {ledger && (
+        <aside aria-label="Context" className="flex flex-col gap-3 px-4 pb-4 lg:py-4 lg:pl-0 lg:pr-4">
+          <MtfPanel table={e.mtf} active={e.tf} />
+          <HistoryPanel history={e.history} today={e.today} />
+          <LevelsPanel levels={e.levels} price={e.price} today={e.today} />
+        </aside>
+      )}
+      </div>
 
       {/* dock: today only - what the day has done and how close it is to the loss limit (the replay lives in the Rules drawer) */}
       {ledger && <DayDock ledger={ledger} today={e.today} realised={e.realised} openPnl={e.openPnl} />}
