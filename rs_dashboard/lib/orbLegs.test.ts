@@ -145,3 +145,16 @@ test('exitLegs: the short is bought back first, then the long is sold; a long wa
   assert.equal(rd.ok, true);
   assert.equal(rd.legs[0].flat, true);
 });
+
+import { premiumLegs } from './orbLegs.ts';
+
+test('premiumLegs: a straddle sells the ATM CE and PE; a strangle sells each side OTM (CE up, PE down); never today\'s expiry', () => {
+  const s = premiumLegs('straddle', U, 0, 6010, TODAY, FNO) as { target: Target; action: string }[];
+  assert.deepEqual(s.map(x => [x.action, x.target.side, x.target.strike]), [['SELL', 'CE', 6000], ['SELL', 'PE', 6000]]);
+  assert.equal(s[0].target.expiry, NEXT);
+  const g = premiumLegs('strangle', U, 1, 6010, TODAY, FNO) as { target: Target; action: string }[];
+  assert.deepEqual(g.map(x => [x.target.side, x.target.strike]), [['CE', 6050], ['PE', 5950]]);
+  assert.equal(typeof premiumLegs('strangle', U, 0, 6010, TODAY, FNO), 'string');
+  assert.equal(typeof premiumLegs('strangle', U, 9, 6010, TODAY, FNO), 'string');     // outside the listed strikes
+  assert.equal(typeof premiumLegs('straddle', U, 0, 0, TODAY, FNO), 'string');         // no futures price
+});

@@ -13,7 +13,7 @@ import {
   ORB_CODE_VERSION, closedBars, computeEffectiveStop, decideOrb, evaluate, replay, rowLegsPnl, rowPnl, sideOf,
   type EffectiveStopResult, type Evaluation, type ReplaySummary, type Side,
 } from '@/lib/signalOrb';
-import { isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
+import { isPremiumInstrument, isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 import { keyLevels, mtfTable, sessionPath, signalChanges } from '@/lib/signalOrbPanels';
 
 // The Signal Orb's live engine (browser). Leader tab only (localStorage lock); the tick is rebuilt every render and called through
@@ -22,7 +22,7 @@ import { keyLevels, mtfTable, sessionPath, signalChanges } from '@/lib/signalOrb
 // but not the cutoff. REAL entries also need this page load's ARM click, which is never saved.
 
 /** `contract` is always the FUTURE the signal reads; `optionLtp` is a live option row's premium (server WebSocket), else null. */
-type StateReply = { success: boolean; ledger: OrbLedger; contract: Target | null; unitsPerLot: number; optionLtp?: number | null; legLtps?: (number | null)[] | null; today: string; codeVersion?: string };
+type StateReply = { success: boolean; ledger: OrbLedger; contract: Target | null; unitsPerLot: number; optionLtp?: number | null; legLtps?: (number | null)[] | null; armedToday?: boolean; today: string; codeVersion?: string };
 
 const STATE_POLL_MS = 3_000;
 const LOCK_KEY = 'signalOrb.engineLock';
@@ -56,6 +56,8 @@ export function useOrbEngine() {
   const [note, setNote] = useState('Loading…');
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
+  // the last refused order's reason: the 1 s engine note would overwrite it before it could be read
+  const [tradeErr, setTradeErr] = useState<string | null>(null);
   const [viewerId] = useState(() => `orb-${Math.random().toString(36).slice(2, 10)}`);
   const busyRef = useRef(false);
   const exitRetryAt = useRef(0);
@@ -137,6 +139,7 @@ export function useOrbEngine() {
 
   const ledger = state?.ledger ?? null;
   const live = ledger ? liveRow(ledger) : null;
+  const isPremiumRow = live?.structure === 'straddle' || live?.structure === 'strangle';
   const contract = state?.contract ?? null;
   const feed = usePnfFeed(contract, 0, now);
   const cfg = ledger?.config;
@@ -244,6 +247,7 @@ export function useOrbEngine() {
       // trade chimes ring in the tab that sent the order (the leader for automatic ones, this tab for a manual close)
       if (tradeSoundRef.current) { if (!j.success) playWarnChime(); else if (body.action === 'exit') playExitChime(); else playEntryChime(); }
       if (!j.success) setNote(j.error ?? 'Refused');
+      setTradeErr(j.success ? null : (j.error ?? 'Refused'));
       return j.success;
     } catch (e) {
       // no reply: the server finishes and books what it sent; the next poll shows the row's real status
@@ -277,6 +281,11 @@ export function useOrbEngine() {
   const step = (t: number): boolean => {
     if (!ledger || !cfg) return false;
     if (busyRef.current) return false;
+    // a straddle / strangle is not signal-driven: the server loop sells it at its entry time and runs its stops with every tab closed
+    if (isPremiumInstrument(cfg.instrument) || isPremiumRow) {
+      setNote(live ? 'Straddle / strangle: stops and targets run on the server' : ledger.engineActive ? `Straddle / strangle: sold at ${cfg.premium.entryTime} by the server` : 'Auto is OFF');
+      return false;
+    }
 
     // stop-out block: lifts (in this tab) once the colour is anything but the stopped side; the server clears it on the next entry
     if (liftedRef.current.side !== ledger.blockedSide) liftedRef.current = { side: ledger.blockedSide, lifted: false };
@@ -363,7 +372,7 @@ export function useOrbEngine() {
   }, [op, trade, live, price]);
 
   const effectiveStop = useMemo((): EffectiveStopResult | null => {
-    if (!live || live.status !== 'open' || !cfg) return null;
+    if (!live || live.status !== 'open' || !cfg || isPremiumRow) return null;
     const sigEntry = live.signalEntry ?? live.entry;
     return computeEffectiveStop({
       side: live.side,
@@ -378,7 +387,7 @@ export function useOrbEngine() {
 
   return {
     state, ledger, live: live as OrbRow | null, contract, feed, ev, price, priceFresh, openPnl, mark, realised, now, isLeader, note, stateError,
-    armed, setArmed, busy, op, closeAndStop, today, replayed, secsToClose, barSecs,
+    armed, setArmed, armedToday: state?.armedToday === true, isPremiumRow, busy, op, trade, tradeErr, clearTradeErr: () => setTradeErr(null), closeAndStop, today, replayed, secsToClose, barSecs,
     tradeSound, setTradeSound, alertSound, setAlertSound, soundReady, outdated, effectiveStop, mtf, history, levels, dayPath, tf,
   };
 }

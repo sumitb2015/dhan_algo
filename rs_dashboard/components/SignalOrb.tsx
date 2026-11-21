@@ -14,7 +14,8 @@ import { cn } from '@/lib/utils';
 import { type EffectiveStopResult } from '@/lib/signalOrb';
 import { ContextTabs } from '@/components/signalOrb/ContextPanels';
 import { PivotPanel } from '@/components/signalOrb/PivotChart';
-import { isStuck, type OrbConfig, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
+import { legStopForDisplay } from '@/lib/orbFocus';
+import { isPremiumInstrument, isStuck, type OrbConfig, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 
 // /signal-orb: one orb, one switch. A CRUDEOIL / CRUDEOILM / NIFTY future's closed bars give the consensus of the active indicators —
 // futures mode: green long, red short; options mode: green sells a PE, red sells a CE; gray holds. Real money in REAL mode; the rules and every safety limit live in lib/signalOrb*.ts and
@@ -46,7 +47,10 @@ export default function SignalOrb() {
   const dataDate = lastBar ? istDateIso(lastBar.t * 1000) : '—';
   const stuck = !!live && isStuck(live, e.now);
   const unresolved = live && (live.status === 'unknown' || stuck || live.day !== e.today) ? live : null;
-  const autoLabel = ledger?.engineActive ? (real && !e.armed ? 'Auto on · not armed' : 'Auto on') : 'Auto off';
+  const premiumMode = !!ledger && isPremiumInstrument(ledger.config.instrument);
+  // REAL is armed per page load for signal-driven trades; a straddle / strangle is entered by the server, so its ARM lives there (today only)
+  const armedEff = premiumMode ? e.armedToday : e.armed;
+  const autoLabel = ledger?.engineActive ? (real && !armedEff ? 'Auto on · not armed' : 'Auto on') : 'Auto off';
   // the engine note, unless it only repeats the switch label
   const note = /^Auto is OFF$/i.test(e.note) ? null : e.note;
 
@@ -78,8 +82,8 @@ export default function SignalOrb() {
               {contract ? `${contract.symbol} FUT ${contract.expiry ? expiryLabel(contract.expiry) : ''}` : 'resolving contract…'} · {tfLabel}
               {ledger && (
                 <>
-                  {' '}· {optMode ? `sell options ${ledger.config.strikeOffset === 0 ? 'ATM' : `ATM${ledger.config.strikeOffset > 0 ? '+' : '−'}${Math.abs(ledger.config.strikeOffset)}`}` : ledger.config.instrument === 'synthetic' ? 'synthetic futures ATM' : 'futures'} · {ledger.config.lots} lot{ledger.config.lots > 1 ? 's' : ''} · SL {ledger.config.stopPts}p
-                  {(ledger.config.trailStartPts ?? 0) > 0 ? ` (trail +${ledger.config.trailStartPts}/${ledger.config.trailGapPts ?? 15}p)` : ''}
+                  {' '}· {optMode ? `sell options ${ledger.config.strikeOffset === 0 ? 'ATM' : `ATM${ledger.config.strikeOffset > 0 ? '+' : '−'}${Math.abs(ledger.config.strikeOffset)}`}` : ledger.config.instrument === 'synthetic' ? 'synthetic futures ATM' : ledger.config.instrument === 'straddle' ? `short straddle ATM @ ${ledger.config.premium.entryTime}` : ledger.config.instrument === 'strangle' ? `short strangle ±${ledger.config.strikeOffset} @ ${ledger.config.premium.entryTime}` : 'futures'} · {ledger.config.lots} lot{ledger.config.lots > 1 ? 's' : ''} {premiumMode ? `· leg SL ×${ledger.config.premium.legSlX || 'off'}` : `· SL ${ledger.config.stopPts}p`}
+                  {!premiumMode && (ledger.config.trailStartPts ?? 0) > 0 ? ` (trail +${ledger.config.trailStartPts}/${ledger.config.trailGapPts ?? 15}p)` : ''}
                 </>
               )}
             </p>
@@ -258,10 +262,17 @@ export default function SignalOrb() {
               <span className="truncate">{note ?? 'Turn on to follow the orb'}</span>
             </p>
           </div>
-          {real && !e.armed && ledger?.engineActive && (
+          {premiumMode && !live && (!real || armedEff) && (
+            <button type="button" onClick={() => void e.trade({ action: 'enterNow' })} disabled={e.busy}
+              title="Sell the structure now at the live prices (the server places it; its stops then run on the server)"
+              className={cn('ml-2 whitespace-nowrap rounded-full border border-emerald-500/50 bg-emerald-500/15 px-3.5 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-50', FOCUS)}>
+              Enter now
+            </button>
+          )}
+          {real && !armedEff && (ledger?.engineActive || premiumMode) && (
             <button
               type="button"
-              onClick={() => e.setArmed(true)}
+              onClick={() => { e.setArmed(true); if (premiumMode) void e.op({ op: 'arm' }); }}
               className={cn(
                 'ml-2 whitespace-nowrap rounded-full border border-red-500/60 bg-red-500/20 px-3.5 py-1 text-[10px] font-black uppercase tracking-[0.25em] text-red-300 hover:bg-red-500/30 shadow-[0_0_12px_rgba(239,68,68,0.25)] transition-all',
                 FOCUS,
@@ -314,6 +325,11 @@ export default function SignalOrb() {
       {ledger && e.state && (
         <OrbDrawer open={drawer} onClose={() => setDrawer(false)} ledger={ledger} locked={!!live} replayed={e.replayed} unitsPerLot={e.state.unitsPerLot} price={e.price}
           onPatch={patch} onMode={setMode} onResetSim={async () => setErr(await e.op({ op: 'resetSim' }))} error={err} />
+      )}
+      {e.tradeErr && (
+        <button type="button" onClick={e.clearTradeErr} className="fixed bottom-24 left-1/2 z-40 max-w-xl -translate-x-1/2 rounded-lg border border-amber-500/40 bg-zinc-950 px-3 py-1.5 text-xs text-amber-300 shadow-lg">
+          Order not sent: {e.tradeErr} ✕
+        </button>
       )}
       {err && !drawer && (
         <button type="button" onClick={() => setErr(null)} className="fixed bottom-24 left-1/2 z-40 -translate-x-1/2 rounded-lg border border-red-500/40 bg-zinc-950 px-3 py-1.5 text-xs text-red-300 shadow-lg">
@@ -424,13 +440,23 @@ function PositionPill({ live, position, pnl, effectiveStop, config, mark, legLtp
         </span>
       )}
       {live.legs && (
-        <span className="font-bold text-zinc-100 flex items-center gap-1.5" title="Each leg: entry premium to live premium">
-          <span className="text-zinc-500 text-[10px] font-normal">SYNTHETIC</span>
-          {live.legs.map((g, i) => (
-            <span key={i} className={g.action === 'BUY' ? 'text-emerald-300' : 'text-red-300'}>
-              {g.action === 'BUY' ? '+' : '−'}{g.target.strike}{g.target.side} <span className="font-normal text-zinc-500">{g.entry.toLocaleString('en-IN')}→{legLtps?.[i] == null ? '—' : legLtps[i]!.toLocaleString('en-IN')}</span>
-            </span>
-          ))}
+        <span className="font-bold text-zinc-100 flex flex-wrap items-center gap-x-3 gap-y-1" title="Each leg: entry premium to live premium; a short leg also shows the SL it exits at">
+          <span className="text-zinc-500 text-[10px] font-normal uppercase">{live.structure === 'synthetic' ? 'Synthetic' : `Short ${live.structure}`}</span>
+          {live.legs.map((g, i) => {
+            const stop = config && (live.structure === 'straddle' || live.structure === 'strangle') && g.status === 'open' && legLtps?.[i] != null
+              ? legStopForDisplay(config.premium, { lots: live.lots, unitsPerLot: live.unitsPerLot, lotUnits: live.lots > 0 ? live.legs![0].units / live.lots : 0,
+                legs: live.legs!.map(x => ({ side: x.target.side as 'CE' | 'PE', entry: x.entry, units: x.units, status: x.status, exit: x.exit, costStop: x.costStop, trailSteps: x.trailSteps })) }, i, legLtps[i]!)
+              : null;
+            return (
+              <span key={i} className={cn(g.status === 'closed' ? 'text-zinc-500 line-through' : g.action === 'BUY' ? 'text-emerald-300' : 'text-red-300')}>
+                {g.action === 'BUY' ? '+' : '−'}{g.target.strike}{g.target.side}{' '}
+                <span className="font-normal text-zinc-500 no-underline">
+                  {g.entry.toLocaleString('en-IN')}→{g.status === 'closed' ? (g.exit ?? '—').toLocaleString('en-IN') : legLtps?.[i] == null ? '—' : legLtps[i]!.toLocaleString('en-IN')}
+                  {stop && <> · SL <strong className="text-zinc-300">{stop.level.toLocaleString('en-IN', { maximumFractionDigits: 1 })}</strong>{stop.trailed > 0 ? ` (trailed ${stop.trailed}×)` : ''}</>}
+                </span>
+              </span>
+            );
+          })}
         </span>
       )}
       <span className="text-zinc-400">

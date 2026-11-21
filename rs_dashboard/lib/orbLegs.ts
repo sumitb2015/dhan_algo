@@ -46,6 +46,23 @@ export function syntheticLegs(symbol: string, side: 'LONG' | 'SHORT', futPrice: 
   return [{ target: buy, action: 'BUY' }, { target: sell, action: 'SELL' }];
 }
 
+/**
+ * A short straddle (CE and PE at the ATM) or strangle (each `offset` strikes OTM): both legs SOLD, same expiry (the nearest after
+ * today), CE first. A reason string when it cannot be built.
+ */
+export function premiumLegs(kind: 'straddle' | 'strangle', symbol: string, offset: number, futPrice: number, today: string, from?: FnoRow[]): { target: Target; action: LegAction }[] | string {
+  const n = kind === 'straddle' ? 0 : offset;
+  if (kind === 'strangle' && !(n >= 1)) return 'A strangle needs a strike offset of at least 1';
+  const ce = pickTarget(symbol, { action: 'SELL', opt: 'CE', offset: n, expiry: 'nearest' }, futPrice, today, from);
+  if (typeof ce === 'string') return ce;
+  const pe = pickTarget(symbol, { action: 'SELL', opt: 'PE', offset: n, expiry: 'nearest' }, futPrice, today, from);
+  if (typeof pe === 'string') return pe;
+  if (ce.expiry !== pe.expiry) return 'The legs did not resolve to one expiry';
+  if (kind === 'straddle' && ce.strike !== pe.strike) return 'The straddle legs did not resolve to one strike';
+  if (kind === 'strangle' && !((ce.strike as number) > (pe.strike as number))) return 'The strangle strikes are inverted or equal - not sold';
+  return [{ target: ce, action: 'SELL' }, { target: pe, action: 'SELL' }];
+}
+
 // ── Outcomes ─────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 type Outcome =

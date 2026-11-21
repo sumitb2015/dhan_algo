@@ -249,3 +249,36 @@ test('synthetic: a row knows its instrument; Dhan only; the instrument is pinned
   const l = normalizeLedger({ rows: [row()] });
   assert.equal(l.rows[0].legs, undefined);
 });
+
+test('straddle / strangle config: Dhan only, a strangle needs an offset, premium rules are merged and bounded, REAL needs a leg or total SL', () => {
+  const cur = emptyLedger().config;
+  const st = sanitizePremiumConfig({ instrument: 'straddle' }, cur);
+  assert.equal(st.instrument, 'straddle');
+  assert.equal(typeof sanitizeConfigPatch({ instrument: 'straddle', broker: 'kotak' }, cur), 'string');
+  assert.equal(typeof sanitizeConfigPatch({ instrument: 'strangle' }, cur), 'string');                    // strikeOffset 0
+  const g = sanitizeConfigPatch({ instrument: 'strangle', strikeOffset: 2 }, cur);
+  assert.ok(typeof g !== 'string' && g.instrument === 'strangle' && g.strikeOffset === 2);
+  const p = sanitizeConfigPatch({ premium: { legSlX: 2, totalSlPct: 40, slToCost: true } }, cur);
+  assert.ok(typeof p !== 'string' && p.premium.legSlX === 2 && p.premium.totalSlPct === 40 && p.premium.slToCost && p.premium.targetValue === cur.premium.targetValue);
+  assert.equal(typeof sanitizeConfigPatch({ premium: { legSlX: 1 } }, cur), 'string');
+  // REAL: a straddle with no leg SL and no total SL is refused (the hard stop in points is not what stops it)
+  const real: OrbLedger = { ...emptyLedger(), mode: 'REAL', config: { ...cur, instrument: 'straddle' } };
+  assert.equal(applyClientOp(real, { op: 'setConfig', patch: { premium: { legSlX: 0, totalSlPct: 0 } } }, 1).ok, false);
+  assert.equal(applyClientOp(real, { op: 'setConfig', patch: { premium: { legSlX: 0, totalSlPct: 25 } } }, 1).ok, true);
+  const noStop: OrbLedger = { ...emptyLedger(), config: { ...cur, instrument: 'straddle', premium: { ...cur.premium, legSlX: 0, totalSlPct: 0, totalSlRs: 0 } } };
+  assert.equal(applyClientOp(noStop, { op: 'setMode', mode: 'REAL' }, 1).ok, false);
+  assert.equal(applyClientOp({ ...noStop, mode: 'REAL' }, { op: 'setEngine', active: true }, 1).ok, false);
+  // a symbol switch brings that symbol's straddle entry time
+  const n = sanitizeConfigPatch({ symbol: 'NIFTY' }, { ...cur, symbol: 'CRUDEOILM' });
+  assert.ok(typeof n !== 'string' && n.premium.entryTime === '09:20');
+  // an old ledger without the premium block loads with the defaults; a stored one survives
+  assert.equal(normalizeLedger({ config: { lots: 1 } }).config.premium.legSlX, cur.premium.legSlX);
+  assert.equal(normalizeLedger({ config: { instrument: 'straddle', premium: { legSlX: 2.5 } } }).config.premium.legSlX, 2.5);
+  assert.equal(normalizeLedger({}).premiumEntryDay, null);
+});
+
+function sanitizePremiumConfig(patch: unknown, cur: ReturnType<typeof emptyLedger>['config']) {
+  const r = sanitizeConfigPatch(patch, cur);
+  assert.ok(typeof r !== 'string', String(r));
+  return r as ReturnType<typeof emptyLedger>['config'];
+}

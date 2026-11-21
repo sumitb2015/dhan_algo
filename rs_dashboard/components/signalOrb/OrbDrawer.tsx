@@ -5,7 +5,8 @@ import { Plus, Trash2, X } from 'lucide-react';
 import { RuleNumInput } from '@/components/breakdownScalper/RuleNumInput';
 import { cn } from '@/lib/utils';
 import { KIND_LABEL, TIMEFRAMES, defaultSpec, specLabel, type IndicatorKind, type IndicatorSpec } from '@/lib/signalOrb';
-import { MAX_STRIKE_OFFSET, ORB_SYMBOLS, type OrbConfig, type OrbLedger } from '@/lib/signalOrbLedger';
+import { MAX_STRIKE_OFFSET, ORB_SYMBOLS, isPremiumInstrument, type OrbConfig, type OrbLedger } from '@/lib/signalOrbLedger';
+import type { PremiumConfig } from '@/lib/orbFocus';
 import type { ReplaySummary } from '@/lib/signalOrb';
 import { ReplayCard } from '@/components/signalOrb/ReplayCard';
 
@@ -115,6 +116,9 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
   }, [open, onClose]);
   if (!open) return null;
   const c = ledger.config;
+  const premium = isPremiumInstrument(c.instrument);
+  /** A straddle / strangle rule: sent as a partial `premium` patch (the server merges and bounds it). */
+  const P = (patch: Partial<PremiumConfig>) => onPatch({ premium: patch as PremiumConfig });
   // risk in rupees: a point is worth unitsPerLot x lots; the stop is measured on the future, so for a sold option this is the
   // most it can cost if the option moved one-for-one (it moves by its delta, so a real loss is smaller)
   const perPt = unitsPerLot > 0 ? unitsPerLot * c.lots : 0;
@@ -152,7 +156,8 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
         </div>
 
         <Section title="Indicators — all must agree">
-          <div className="flex flex-col gap-2">
+          {premium && <p className="mb-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">Not used for a straddle / strangle: it is sold at its entry time, not on the signal.</p>}
+          <div className={cn('flex flex-col gap-2', premium && 'opacity-50')}>
             {c.indicators.length === 0 && <p className="text-xs text-zinc-500">No indicators: the orb stays gray and nothing trades.</p>}
             {c.indicators.map((s, i) => (
               <SpecEditor key={s.id} spec={s}
@@ -180,16 +185,16 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
               ))}
             </div>
           </Row>
-          <Row label="Trade" sub={c.instrument === 'options' ? 'Green sells a PE, red sells a CE (nearest expiry)' : c.instrument === 'synthetic' ? 'Green: long synthetic (buy the ATM CE, sell the ATM PE); red: short synthetic (buy the PE, sell the CE). Dhan only' : 'Green goes long the future, red short'}>
-            <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
-              {(['futures', 'options', 'synthetic'] as const).map(k => (
+          <Row label="Trade" sub={c.instrument === 'options' ? 'Green sells a PE, red sells a CE (nearest expiry)' : c.instrument === 'synthetic' ? 'Green: long synthetic (buy the ATM CE, sell the ATM PE); red: short synthetic (buy the PE, sell the CE). Dhan only' : premium ? 'Sold at the entry time on a timer, not the signal; the Focus Tool\'s SL / target rules run on the server, so closing the tab is safe. Dhan only' : 'Green goes long the future, red short'}>
+            <div className="inline-flex flex-wrap rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+              {(['futures', 'options', 'synthetic', 'straddle', 'strangle'] as const).map(k => (
                 <button key={k} type="button" disabled={locked} onClick={() => onPatch({ instrument: k })} aria-pressed={c.instrument === k}
-                  className={cn('rounded-md px-3 py-1 text-xs font-bold disabled:opacity-50', FOCUS, c.instrument === k ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}>{k === 'futures' ? 'Futures' : k === 'options' ? 'Sell option' : 'Synthetic'}</button>
+                  className={cn('rounded-md px-3 py-1 text-xs font-bold disabled:opacity-50', FOCUS, c.instrument === k ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}>{k === 'futures' ? 'Futures' : k === 'options' ? 'Sell option' : k === 'synthetic' ? 'Synthetic' : k === 'straddle' ? 'Straddle' : 'Strangle'}</button>
               ))}
             </div>
           </Row>
-          {c.instrument === 'options' && (
-            <Row label="Strike" sub={`0 = ATM · +N = N strikes OTM · −N = ITM (−${MAX_STRIKE_OFFSET}…${MAX_STRIKE_OFFSET})`}>
+          {(c.instrument === 'options' || c.instrument === 'strangle') && (
+            <Row label={c.instrument === 'strangle' ? 'Strikes OTM' : 'Strike'} sub={c.instrument === 'strangle' ? 'Each leg this many strikes OTM of the ATM (CE up, PE down), at least 1' : `0 = ATM · +N = N strikes OTM · −N = ITM (−${MAX_STRIKE_OFFSET}…${MAX_STRIKE_OFFSET})`}>
               <RuleNumInput value={c.strikeOffset} step={1} min={-MAX_STRIKE_OFFSET} max={MAX_STRIKE_OFFSET} label="Strike offset" disabled={locked}
                 onCommit={s => onPatch({ strikeOffset: Number(s) })}
                 className="h-8 w-16 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100 disabled:opacity-50" />
@@ -198,16 +203,16 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
         </Section>
 
         <Section title="Timing">
-          <Row label="Timeframe" sub="Signals read only closed bars">
+          {!premium && <Row label="Timeframe" sub="Signals read only closed bars">
             <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
               {TIMEFRAMES.map(tf => (
                 <button key={tf} type="button" onClick={() => onPatch({ timeframe: tf })}
                   className={cn('rounded-md px-3 py-1 text-xs font-bold', FOCUS, c.timeframe === tf ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}>{tf === 60 ? '1h' : `${tf}m`}</button>
               ))}
             </div>
-          </Row>
-          <Row label="Entries from"><TimeField label="Entries from" value={c.entryStart} onCommit={v => onPatch({ entryStart: v })} /></Row>
-          <Row label="Entries until"><TimeField label="Entries until" value={c.entryEnd} onCommit={v => onPatch({ entryEnd: v })} /></Row>
+          </Row>}
+          {!premium && <Row label="Entries from"><TimeField label="Entries from" value={c.entryStart} onCommit={v => onPatch({ entryStart: v })} /></Row>}
+          <Row label={premium ? 'Last entry' : 'Entries until'} sub={premium ? 'No entry is taken after this time' : undefined}><TimeField label="Entries until" value={c.entryEnd} onCommit={v => onPatch({ entryEnd: v })} /></Row>
           <Row label="Cutoff (square off)" sub={c.symbol === 'NIFTY' ? 'NSE MIS; the broker squares off near 15:20' : 'MCX MIS; the broker squares off near 23:25'}><TimeField label="Cutoff" value={c.eodExit} onCommit={v => onPatch({ eodExit: v })} /></Row>
         </Section>
 
@@ -216,6 +221,7 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
             <RuleNumInput value={c.lots} step={1} min={1} label="Lots" disabled={locked} onCommit={s => onPatch({ lots: Number(s) })}
               className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100 disabled:opacity-50" />
           </Row>
+          {!premium && (<>
           <Row label="Hard stop (points)" sub={`Points on the future's price from its entry, also for options rows (never option premium). Required for REAL. 0 = off${stopRs > 0 ? `. Worst case per stop ≈ ${rs(stopRs)}${c.instrument === 'options' ? ' on the future (a sold option loses less)' : ''}` : ''}`}>
             <RuleNumInput value={c.stopPts} step={5} min={0} label="Hard stop points" onCommit={s => onPatch({ stopPts: Number(s) })}
               className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
@@ -230,11 +236,68 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
                 className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
             </Row>
           )}
+          </>)}
           <Row label="Daily loss limit (₹)" sub={`Realised + open; closes and halts${stopRs > 0 ? `. = ${(c.dailyLossLimit / stopRs).toFixed(1)} full stops at this size` : ''}`}>
             <RuleNumInput value={c.dailyLossLimit} step={500} min={100} label="Daily loss limit" onCommit={s => onPatch({ dailyLossLimit: Number(s) })}
               className="h-8 w-24 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
           </Row>
         </Section>
+
+
+        {premium && (
+          <Section title={`Short ${c.instrument} rules`}>
+            <p className="mb-2 text-[11px] text-zinc-500">The Ultimate Scalper&apos;s own rules, run on the server (the same functions the Focus Tool page uses). 0 = off. A REAL run needs a leg SL or a total SL.</p>
+            <Row label="Entry time" sub="Sold at the first minute at or after this, once a day (Auto must be on), or with Enter now">
+              <TimeField label="Entry time" value={c.premium.entryTime} onCommit={v => P({ entryTime: v })} />
+            </Row>
+            <Row label="Leg SL ×" sub={`A leg exits when its premium reaches its entry × this (e.g. 1.5 = +50%). ${perPt > 0 ? `One leg moving 1 point = ${rs(perPt)}.` : ''}`}>
+              <RuleNumInput value={c.premium.legSlX} step={0.1} min={0} label="Leg SL multiple" onCommit={s => P({ legSlX: Number(s) })}
+                className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
+            </Row>
+            <Row label="SL to cost" sub="After one leg's SL, the other leg's stop moves to its entry premium">
+              <input type="checkbox" aria-label="SL to cost" checked={c.premium.slToCost} onChange={e => P({ slToCost: e.target.checked })} className={cn('h-4 w-4 accent-emerald-500', FOCUS)} />
+            </Row>
+            <Row label="Total SL (% of premium)" sub="Exit everything when the combined premium is up this % over the combined entry">
+              <RuleNumInput value={c.premium.totalSlPct} step={5} min={0} label="Total SL percent" onCommit={s => P({ totalSlPct: Number(s) })}
+                className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
+            </Row>
+            <Row label="Total SL (₹)" sub="Exit everything when the P&L falls to minus this (MTM)">
+              <RuleNumInput value={c.premium.totalSlRs} step={500} min={0} label="Total SL rupees" onCommit={s => P({ totalSlRs: Number(s) })}
+                className="h-8 w-24 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
+            </Row>
+            <Row label="Leg target (%)" sub="A leg exits when its premium has decayed this % from entry">
+              <RuleNumInput value={c.premium.legTgtPct} step={5} min={0} label="Leg target percent" onCommit={s => P({ legTgtPct: Number(s) })}
+                className="h-8 w-20 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
+            </Row>
+            <Row label="Overall target" sub={c.premium.targetMode === 'mtm' ? 'Exit everything at this profit in rupees' : 'Exit everything at this % of the combined entry premium'}>
+              <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+                {(['premiumPct', 'mtm'] as const).map(m => (
+                  <button key={m} type="button" aria-pressed={c.premium.targetMode === m} onClick={() => P({ targetMode: m })}
+                    className={cn('rounded-md px-2 py-1 text-xs font-bold', FOCUS, c.premium.targetMode === m ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}>{m === 'mtm' ? '₹' : '%'}</button>
+                ))}
+              </div>
+              <RuleNumInput value={c.premium.targetValue} step={c.premium.targetMode === 'mtm' ? 500 : 5} min={0} label="Overall target" onCommit={s => P({ targetValue: Number(s) })}
+                className="h-8 w-24 rounded-lg border border-zinc-700 bg-zinc-900 px-2 text-center font-mono text-sm text-zinc-100" />
+            </Row>
+            <Row label="Leg Trail SL" sub="Every X the premium falls below entry, the leg's stop moves Y closer (Y at most X)">
+              <input type="checkbox" aria-label="Leg trail SL" checked={c.premium.trail.enabled} onChange={e => P({ trail: { ...c.premium.trail, enabled: e.target.checked } })} className={cn('h-4 w-4 accent-emerald-500', FOCUS)} />
+            </Row>
+            {c.premium.trail.enabled && (
+              <Row label="Trail every / by / start" sub={c.premium.trail.unit === 'pct' ? 'Percent of the leg\'s entry premium' : 'Premium points'}>
+                <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+                  {(['pts', 'pct'] as const).map(u => (
+                    <button key={u} type="button" aria-pressed={c.premium.trail.unit === u} onClick={() => P({ trail: { ...c.premium.trail, unit: u } })}
+                      className={cn('rounded-md px-2 py-1 text-xs font-bold', FOCUS, c.premium.trail.unit === u ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}>{u === 'pct' ? '%' : 'pts'}</button>
+                  ))}
+                </div>
+                {([['every', 'Trail every'], ['by', 'Trail by'], ['startAt', 'Trail start']] as const).map(([k, lab]) => (
+                  <RuleNumInput key={k} value={c.premium.trail[k]} step={1} min={0} label={lab} onCommit={s => P({ trail: { ...c.premium.trail, [k]: Number(s) } })}
+                    className="h-8 w-14 rounded-lg border border-zinc-700 bg-zinc-900 px-1.5 text-center font-mono text-sm text-zinc-100" />
+                ))}
+              </Row>
+            )}
+          </Section>
+        )}
 
         <Section title="Account">
           <Row label="Broker" sub={locked ? 'Pinned while a position is open' : 'Orders go to this account'}>

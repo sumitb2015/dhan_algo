@@ -4,6 +4,7 @@
 
 import { TIMEFRAMES, sanitizeSpec, specIssue, hhmmToMin, defaultSpec, rowPnl, rowLegsPnl, type IndicatorSpec, type Side, type Timeframe } from './signalOrb.ts';
 import type { Target } from './pnfTarget.ts';
+import { DEFAULT_PREMIUM, premiumHasStop, sanitizePremiumPatch, type PremiumConfig } from './orbFocus.ts';
 
 export type OrbMode = 'SIM' | 'REAL';
 export type OrbBroker = 'dhan' | 'kotak' | 'zerodha';
@@ -17,13 +18,19 @@ export const SYMBOL_TIMES: Record<OrbSymbol, { entryStart: string; entryEnd: str
   NIFTY: { entryStart: '09:16', entryEnd: '15:00', eodExit: '15:17' },
 };
 /** Points are not comparable across symbols (30 points is ~0.4% of crude, ~0.12% of NIFTY), so a symbol switch brings its own stop and trail. */
+/** When a straddle / strangle is sold, per symbol (a few minutes after the open). */
+export const SYMBOL_PREMIUM_ENTRY: Record<OrbSymbol, string> = { CRUDEOILM: '09:30', CRUDEOIL: '09:30', NIFTY: '09:20' };
 export const SYMBOL_RISK: Record<OrbSymbol, { stopPts: number; trailStartPts: number; trailGapPts: number }> = {
   CRUDEOILM: { stopPts: 30, trailStartPts: 8, trailGapPts: 15 },
   CRUDEOIL: { stopPts: 30, trailStartPts: 8, trailGapPts: 15 },
   NIFTY: { stopPts: 40, trailStartPts: 25, trailGapPts: 15 },
 };
 /** futures: long on BULL, short on BEAR. options: SELL a PE on BULL, SELL a CE on BEAR (the indicators always read the future). */
-export type OrbInstrument = 'futures' | 'options' | 'synthetic';
+export type OrbInstrument = 'futures' | 'options' | 'synthetic' | 'straddle' | 'strangle';
+/** Straddle / strangle are non-directional: no indicator, a timed entry and the Focus Tool's SL / target rules (lib/orbFocus.ts). */
+export const isPremiumInstrument = (i: OrbInstrument): boolean => i === 'straddle' || i === 'strangle';
+/** Structures that are several option legs (placed leg by leg, Dhan only for now). */
+export const isLegInstrument = (i: OrbInstrument): boolean => i === 'synthetic' || i === 'straddle' || i === 'strangle';
 /** Strike offset bounds: 0 = ATM, +N = N strikes OTM (PE down, CE up), -N = ITM. */
 export const MAX_STRIKE_OFFSET = 10;
 export const MAX_INDICATORS = 8;
@@ -56,7 +63,12 @@ export interface OrbConfig {
   symbol: OrbSymbol;
   instrument: OrbInstrument;
   strikeOffset: number;
+  /** The straddle / strangle rules (used only when `instrument` is straddle or strangle). */
+  premium: PremiumConfig;
 }
+
+/** REAL never runs a naked structure without a stop: a signal-driven one needs the hard stop, a straddle / strangle needs a leg or total SL. */
+export const configHasStop = (c: OrbConfig): boolean => (isPremiumInstrument(c.instrument) ? premiumHasStop(c.premium) : c.stopPts > 0);
 
 /** One leg of a multi-leg row. `entry` / `exit` are premiums (the decision price, like a single-leg row), `units` the broker quantity sent. */
 export interface OrbLeg {
@@ -68,11 +80,15 @@ export interface OrbLeg {
   units: number;
   status: 'open' | 'closed' | 'failed';
   note?: string;
+  /** Straddle / strangle: the other leg's SL fired and SL-to-cost applies, so this leg now exits at its entry premium. */
+  costStop?: boolean;
+  /** Straddle / strangle: Trail SL steps earned (never lost). */
+  trailSteps?: number;
 }
 
 /** What a row is, for comparing with the configured instrument: legs first, else a sold option, else the future. */
 export const rowInstrument = (r: Pick<OrbRow, 'structure' | 'target'>): OrbInstrument =>
-  r.structure === 'synthetic' ? 'synthetic' : r.target.kind === 'options' ? 'options' : 'futures';
+  r.structure ? r.structure : r.target.kind === 'options' ? 'options' : 'futures';
 
 export interface OrbRow {
   id: string;
@@ -88,8 +104,10 @@ export interface OrbRow {
   /** Decision price of the row's OWN instrument (futures LTP, or the option premium) when the order was sent, not the broker fill. */
   entry: number;
   /** A multi-leg row (synthetic future): its legs, in placement order (BUY first). Absent = a single-leg row. Leg 0 is mirrored in `target` / `entry`. */
-  structure?: 'synthetic';
+  structure?: 'synthetic' | 'straddle' | 'strangle';
   legs?: OrbLeg[];
+  /** Straddle / strangle: the running profit peak (rupees, premium points) the overall trail needs. */
+  peak?: { pnl: number; pts: number };
   /** The future the signal (and the stop) read. Absent on rows written before options existed: then `target`. */
   signalTarget?: Target;
   /** The future's price at entry: the stop is measured from it. Absent on old rows: then `entry`. */
@@ -120,6 +138,8 @@ export interface OrbLedger {
   watermarkT: number;
   /** After a stop-out: this side waits for the colour to change. */
   blockedSide: Side | null;
+  /** The IST day a straddle / strangle was last entered (or an entry attempt consumed): one entry a day. */
+  premiumEntryDay: string | null;
   rejects: number;
   rows: OrbRow[];
   log: OrbLog[];
@@ -141,11 +161,12 @@ export const DEFAULT_CONFIG: OrbConfig = {
   symbol: 'CRUDEOILM',
   instrument: 'futures',
   strikeOffset: 0,
+  premium: { ...DEFAULT_PREMIUM, trail: { ...DEFAULT_PREMIUM.trail } },
 };
 
 export const emptyLedger = (): OrbLedger => ({
   rev: 0, config: { ...DEFAULT_CONFIG, indicators: [...DEFAULT_CONFIG.indicators] }, mode: 'SIM', engineActive: false, haltReason: null,
-  watermarkT: 0, blockedSide: null, rejects: 0, rows: [], log: [], updatedAt: 0,
+  watermarkT: 0, blockedSide: null, premiumEntryDay: null, rejects: 0, rows: [], log: [], updatedAt: 0,
 });
 
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -176,6 +197,7 @@ export function normalizeLedger(v: unknown): OrbLedger {
     haltReason: typeof o.haltReason === 'string' ? o.haltReason : null,
     watermarkT: Number.isFinite(o.watermarkT) ? (o.watermarkT as number) : 0,
     blockedSide: o.blockedSide === 'LONG' || o.blockedSide === 'SHORT' ? o.blockedSide : null,
+    premiumEntryDay: typeof o.premiumEntryDay === 'string' ? o.premiumEntryDay : null,
     rejects: Number.isInteger(o.rejects) ? (o.rejects as number) : 0,
     rows: Array.isArray(o.rows) ? o.rows : [],
     log: Array.isArray(o.log) ? o.log : [],
@@ -240,18 +262,25 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
     if (p.symbol !== cur.symbol && p.stopPts === undefined && p.trailStartPts === undefined && p.trailGapPts === undefined) {
       Object.assign(next, SYMBOL_RISK[p.symbol as OrbSymbol]);
     }
+    if (p.symbol !== cur.symbol && p.premium === undefined) next.premium = { ...next.premium, entryTime: SYMBOL_PREMIUM_ENTRY[p.symbol as OrbSymbol] };
     next.symbol = p.symbol as OrbSymbol;
   }
   if (p.instrument !== undefined) {
-    if (p.instrument !== 'futures' && p.instrument !== 'options' && p.instrument !== 'synthetic') return 'instrument must be futures, options or synthetic';
-    next.instrument = p.instrument;
+    if (!['futures', 'options', 'synthetic', 'straddle', 'strangle'].includes(p.instrument as string)) return 'instrument must be futures, options, synthetic, straddle or strangle';
+    next.instrument = p.instrument as OrbInstrument;
   }
   if (p.strikeOffset !== undefined) {
     const n = Number(p.strikeOffset);
     if (!Number.isInteger(n) || Math.abs(n) > MAX_STRIKE_OFFSET) return `strikeOffset must be a whole number from -${MAX_STRIKE_OFFSET} to ${MAX_STRIKE_OFFSET}`;
     next.strikeOffset = n;
   }
-  if (next.instrument === 'synthetic' && next.broker !== 'dhan') return 'Synthetic futures run on Dhan only for now';
+  if (p.premium !== undefined) {
+    const pr = sanitizePremiumPatch(p.premium, cur.premium ?? DEFAULT_PREMIUM);
+    if (typeof pr === 'string') return pr;
+    next.premium = pr;
+  }
+  if (isLegInstrument(next.instrument) && next.broker !== 'dhan') return `${next.instrument === 'synthetic' ? 'Synthetic futures' : 'Straddle / strangle'} run on Dhan only for now`;
+  if (next.instrument === 'strangle' && next.strikeOffset < 1) return 'A strangle needs a strike offset of at least 1 (strikes OTM per side)';
   let timePatched = false;
   for (const k of ['entryStart', 'entryEnd', 'eodExit'] as const) {
     if (p[k] === undefined) continue;
@@ -319,7 +348,7 @@ export function applyClientOp(l: OrbLedger, raw: unknown, now: number): OpResult
       const specs = (op.patch as { indicators?: unknown } | null)?.indicators;
       if (Array.isArray(specs)) { for (const sp of specs) { const why = specIssue(sp); if (why) return bad(why); } }
       // REAL never runs without a hard stop, whatever order the settings were changed in
-      if (l.mode === 'REAL' && !(next.stopPts > 0)) return bad('REAL needs a hard stop (points) above 0 - switch to SIM to turn the stop off', 409);
+      if (l.mode === 'REAL' && !configHasStop(next)) return bad(isPremiumInstrument(next.instrument) ? 'REAL needs a leg SL or a total SL - switch to SIM to turn the stops off' : 'REAL needs a hard stop (points) above 0 - switch to SIM to turn the stop off', 409);
       if (live && next.broker !== l.config.broker) return bad('The broker cannot change while a position is open', 409);
       if (live && (next.symbol !== l.config.symbol || next.instrument !== l.config.instrument || next.strikeOffset !== l.config.strikeOffset)) {
         return bad('Symbol, instrument and strike cannot change while a position is open', 409);
@@ -331,13 +360,13 @@ export function applyClientOp(l: OrbLedger, raw: unknown, now: number): OpResult
     case 'setMode': {
       if (op.mode !== 'SIM' && op.mode !== 'REAL') return bad('mode must be SIM or REAL');
       if (live) return bad('Close the open position before switching mode', 409);
-      if (op.mode === 'REAL' && !(l.config.stopPts > 0)) return bad('REAL needs a hard stop (points) above 0', 409);
+      if (op.mode === 'REAL' && !configHasStop(l.config)) return bad(isPremiumInstrument(l.config.instrument) ? 'REAL needs a leg SL or a total SL' : 'REAL needs a hard stop (points) above 0', 409);
       // a mode switch always lands paused: REAL is armed by the user, never inherited from SIM's running engine
       return { ok: true, ledger: addLog({ ...l, mode: op.mode, engineActive: false, watermarkT: 0, blockedSide: null, rejects: 0 }, 'info', `Mode -> ${op.mode}`, now) };
     }
     case 'setEngine': {
       const active = op.active === true;
-      if (active && l.mode === 'REAL' && !(l.config.stopPts > 0)) return bad('REAL needs a hard stop (points) above 0', 409);
+      if (active && l.mode === 'REAL' && !configHasStop(l.config)) return bad(isPremiumInstrument(l.config.instrument) ? 'REAL needs a leg SL or a total SL' : 'REAL needs a hard stop (points) above 0', 409);
       if (active && !l.config.indicators.length) return bad('Add at least one indicator', 409);
       if (active && (live?.status === 'unknown' || (live && isStuck(live, now)))) return bad('A position has an UNKNOWN outcome - resolve it from the broker book first', 409);
       return { ok: true, ledger: addLog({ ...l, engineActive: active, haltReason: active ? null : l.haltReason, rejects: active ? 0 : l.rejects }, 'info', active ? 'Auto ON' : 'Auto OFF', now) };
