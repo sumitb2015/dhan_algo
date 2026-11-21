@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, useId } from 'react';
 import {
   Play, Pause, SkipBack, SkipForward, ChevronLeft, ChevronRight,
   RefreshCw, TrendingUp, TrendingDown, AlertTriangle, CheckCircle2,
@@ -163,24 +163,32 @@ function StatTile({ label, value, sub, tone = 'neutral', tip }: {
   );
 }
 
-function MiniEquitySparkline({ snapshots, currentIdx, onSelectIdx }: {
+function MiniEquitySparkline({ snapshots, currentIdx, onSelectIdx, baseline }: {
   snapshots: DailySnapshot[]; currentIdx: number; onSelectIdx: (idx: number) => void;
+  /** Starting capital: the zero line. Equity above it is a profit (green), below it a loss (red). */
+  baseline: number;
 }) {
+  const uid = useId().replace(/:/g, '');
   if (snapshots.length < 2) return null;
   const equities = snapshots.map((s) => s.equity);
   const min = Math.min(...equities);
   const max = Math.max(...equities);
-  const range = max - min || 1;
+  // The scale always contains the zero line, even if equity never crosses it.
+  const lo = Math.min(min, baseline);
+  const hi = Math.max(max, baseline);
+  const range = hi - lo || 1;
   const h = 48;
   const w = 400;
+  const yOf = (eq: number) => h - ((eq - lo) / range) * (h - 10) - 5;
+  const zeroY = yOf(baseline);
 
   const points = snapshots.map((s, i) => {
     const x = (i / (snapshots.length - 1)) * w;
-    const y = h - ((s.equity - min) / range) * (h - 10) - 5;
-    return `${x.toFixed(1)},${y.toFixed(1)}`;
+    return `${x.toFixed(1)},${yOf(s.equity).toFixed(1)}`;
   }).join(' ');
 
   const currentX = (currentIdx / (snapshots.length - 1)) * w;
+  const currentPnl = equities[currentIdx] - baseline;
 
   return (
     <div className="bg-zinc-900/80 border border-zinc-800 rounded p-2 flex flex-col gap-1 w-full max-w-md">
@@ -197,11 +205,27 @@ function MiniEquitySparkline({ snapshots, currentIdx, onSelectIdx }: {
         onSelectIdx(targetIdx);
       }}>
         <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-12 overflow-visible">
-          <polyline fill="none" stroke="#10b981" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" points={points} />
+          <defs>
+            <clipPath id={`${uid}-above`}><rect x={-2} y={-h} width={w + 4} height={zeroY + h} /></clipPath>
+            <clipPath id={`${uid}-below`}><rect x={-2} y={zeroY} width={w + 4} height={h * 2} /></clipPath>
+          </defs>
+          {/* Zero line = starting capital */}
+          <line x1={0} y1={zeroY} x2={w} y2={zeroY} className="stroke-zinc-500" strokeWidth="1" strokeDasharray="4 3" />
+          {/* Same polyline twice: green where it sits above the zero line, red where it sits below */}
+          <polyline fill="none" stroke="#10b981" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                    clipPath={`url(#${uid}-above)`} points={points} />
+          <polyline fill="none" stroke="#ef4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                    clipPath={`url(#${uid}-below)`} points={points} />
           {/* Vertical cursor */}
           <line x1={currentX} y1={0} x2={currentX} y2={h} stroke="#38bdf8" strokeWidth="2" strokeDasharray="3 3" />
-          <circle cx={currentX} cy={h - ((equities[currentIdx] - min) / range) * (h - 10) - 5} r="4" fill="#38bdf8" />
+          <circle cx={currentX} cy={yOf(equities[currentIdx])} r="4" fill="#38bdf8" />
         </svg>
+      </div>
+      <div className="flex items-center justify-between text-[10px] text-zinc-500">
+        <span>┄ Zero line = start {rupees(baseline)}</span>
+        <span className={`font-mono ${currentPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+          {currentPnl >= 0 ? '+' : '−'}{rupees(Math.abs(currentPnl))} on this day
+        </span>
       </div>
     </div>
   );
@@ -834,6 +858,7 @@ export default function MomentumSimulationReplay({
 
               {/* Mini Sparkline Chart */}
               <MiniEquitySparkline
+                baseline={simData?.config?.capital ?? simData?.initial_capital ?? snapshots[0]?.equity ?? 0}
                 snapshots={snapshots}
                 currentIdx={currentIdx}
                 onSelectIdx={(idx) => setCurrentIdx(idx)}
