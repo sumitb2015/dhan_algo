@@ -2,7 +2,7 @@
 // these under one in-process chain; the browser only sends config / mode / engine ops and asks the trade route to act. Real money:
 // the ledger is the authority for what THIS page opened (an exit closes only its own units, never the broker's whole net).
 
-import { TIMEFRAMES, sanitizeSpec, specIssue, hhmmToMin, defaultSpec, rowPnl, type IndicatorSpec, type Side, type Timeframe } from './signalOrb.ts';
+import { TIMEFRAMES, sanitizeSpec, specIssue, hhmmToMin, defaultSpec, rowPnl, rowLegsPnl, type IndicatorSpec, type Side, type Timeframe } from './signalOrb.ts';
 import type { Target } from './pnfTarget.ts';
 
 export type OrbMode = 'SIM' | 'REAL';
@@ -23,7 +23,7 @@ export const SYMBOL_RISK: Record<OrbSymbol, { stopPts: number; trailStartPts: nu
   NIFTY: { stopPts: 40, trailStartPts: 25, trailGapPts: 15 },
 };
 /** futures: long on BULL, short on BEAR. options: SELL a PE on BULL, SELL a CE on BEAR (the indicators always read the future). */
-export type OrbInstrument = 'futures' | 'options';
+export type OrbInstrument = 'futures' | 'options' | 'synthetic';
 /** Strike offset bounds: 0 = ATM, +N = N strikes OTM (PE down, CE up), -N = ITM. */
 export const MAX_STRIKE_OFFSET = 10;
 export const MAX_INDICATORS = 8;
@@ -58,6 +58,22 @@ export interface OrbConfig {
   strikeOffset: number;
 }
 
+/** One leg of a multi-leg row. `entry` / `exit` are premiums (the decision price, like a single-leg row), `units` the broker quantity sent. */
+export interface OrbLeg {
+  target: Target;
+  /** The action that OPENED the leg (a SELL leg is closed by a BUY). */
+  action: 'BUY' | 'SELL';
+  entry: number;
+  exit?: number;
+  units: number;
+  status: 'open' | 'closed' | 'failed';
+  note?: string;
+}
+
+/** What a row is, for comparing with the configured instrument: legs first, else a sold option, else the future. */
+export const rowInstrument = (r: Pick<OrbRow, 'structure' | 'target'>): OrbInstrument =>
+  r.structure === 'synthetic' ? 'synthetic' : r.target.kind === 'options' ? 'options' : 'futures';
+
 export interface OrbRow {
   id: string;
   mode: OrbMode;
@@ -71,6 +87,9 @@ export interface OrbRow {
   unitsPerLot: number;
   /** Decision price of the row's OWN instrument (futures LTP, or the option premium) when the order was sent, not the broker fill. */
   entry: number;
+  /** A multi-leg row (synthetic future): its legs, in placement order (BUY first). Absent = a single-leg row. Leg 0 is mirrored in `target` / `entry`. */
+  structure?: 'synthetic';
+  legs?: OrbLeg[];
   /** The future the signal (and the stop) read. Absent on rows written before options existed: then `target`. */
   signalTarget?: Target;
   /** The future's price at entry: the stop is measured from it. Absent on old rows: then `entry`. */
@@ -224,7 +243,7 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
     next.symbol = p.symbol as OrbSymbol;
   }
   if (p.instrument !== undefined) {
-    if (p.instrument !== 'futures' && p.instrument !== 'options') return 'instrument must be futures or options';
+    if (p.instrument !== 'futures' && p.instrument !== 'options' && p.instrument !== 'synthetic') return 'instrument must be futures, options or synthetic';
     next.instrument = p.instrument;
   }
   if (p.strikeOffset !== undefined) {
@@ -232,6 +251,7 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
     if (!Number.isInteger(n) || Math.abs(n) > MAX_STRIKE_OFFSET) return `strikeOffset must be a whole number from -${MAX_STRIKE_OFFSET} to ${MAX_STRIKE_OFFSET}`;
     next.strikeOffset = n;
   }
+  if (next.instrument === 'synthetic' && next.broker !== 'dhan') return 'Synthetic futures run on Dhan only for now';
   let timePatched = false;
   for (const k of ['entryStart', 'entryEnd', 'eodExit'] as const) {
     if (p[k] === undefined) continue;
@@ -347,6 +367,10 @@ export function applyClientOp(l: OrbLedger, raw: unknown, now: number): OpResult
       if ((r.status === 'sending' || r.status === 'closing') && !isStuck(r, now)) return bad('An order for this row is still in flight', 409);
       if (op.as === 'open') return { ok: true, ledger: addLog(patchRow(l, r.id, { status: 'open', note: 'confirmed open by user' }), 'warn', `Row ${r.id} confirmed OPEN by user`, now) };
       if (op.as === 'failed') return { ok: true, ledger: addLog(patchRow(l, r.id, { status: 'failed', note: 'confirmed not filled by user' }), 'warn', `Row ${r.id} marked NOT FILLED by user`, now) };
+      if (op.as === 'closed' && r.legs) {
+        // a multi-leg row has no single price to mark it at: every open leg is booked at its entry (no P&L), the broker book is the truth
+        return { ok: true, ledger: addLog(closeRowLegs(l, r.id, r.legs.map(() => null), 'Marked closed by user (legs booked at entry: P&L not recorded)', now), 'warn', `Row ${r.id} marked CLOSED by user - its P&L is not recorded`, now) };
+      }
       if (op.as === 'closed') {
         const px = Number(op.price);
         const exit = Number.isFinite(px) && px > 0 ? px : r.entry;
@@ -370,5 +394,18 @@ export function closeRow(l: OrbLedger, id: string, exit: number, reason: string,
       ...r, status: 'closed' as const, exit, exitAt: at, exitReason: reason,
       pnl: Math.round(rowPnl(r, exit) * 100) / 100,
     })),
+  };
+}
+
+/** Closes a multi-leg row at the legs' exit premiums (null = a leg's exit is unknown: it is booked at its entry, so it adds no P&L). */
+export function closeRowLegs(l: OrbLedger, id: string, exits: (number | null)[], reason: string, at: number): OrbLedger {
+  return {
+    ...l,
+    rows: l.rows.map(r => {
+      if (r.id !== id || !r.legs) return r;
+      const legs = r.legs.map((g, i) => (g.status === 'closed' && g.exit !== undefined ? g : { ...g, status: 'closed' as const, exit: exits[i] ?? g.entry }));
+      const pnl = rowLegsPnl({ lots: r.lots, unitsPerLot: r.unitsPerLot, legs }, legs.map(g => g.exit ?? g.entry));
+      return { ...r, legs, status: 'closed' as const, exit: legs[0].exit, exitAt: at, exitReason: reason, pnl: Math.round((pnl ?? 0) * 100) / 100 };
+    }),
   };
 }

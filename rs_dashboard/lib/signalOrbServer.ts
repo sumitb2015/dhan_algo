@@ -9,11 +9,15 @@ import { MCX_LOT_MULTIPLIER } from '@/lib/positionPnl';
 import { targetKey, type Target } from '@/lib/pnfTarget';
 import { resolveOption } from '@/lib/pnfContracts';
 import { pickTarget } from '@/lib/gearboxCore';
+import { readBrokerOrder } from '@/lib/brokerOrderStatus';
+import { enterLegs, exitLegs, syntheticLegs, type LegDeps } from '@/lib/orbLegs';
+import { orbMarginBlock } from '@/lib/orbMargin';
 import { wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
 import { ORB_CODE_VERSION, type Side } from '@/lib/signalOrb';
 import { ORB_STATE_FILE, readOrbLedger } from '@/lib/signalOrbFile';
 import {
-  MAX_REJECTS, addLog, applyClientOp, closeRow, halt, liveRow, patchRow, realisedToday, trimRows, type OrbConfig, type OrbLedger, type OrbRow, type OrbSymbol,
+  MAX_REJECTS, addLog, applyClientOp, closeRow, closeRowLegs, halt, liveRow, patchRow, realisedToday, rowInstrument, trimRows,
+  type OrbBroker, type OrbConfig, type OrbLedger, type OrbLeg, type OrbRow, type OrbSymbol,
 } from '@/lib/signalOrbLedger';
 
 // The Signal Orb's server: the one writer of debug/signal_orb_state.json, and its order path. Real money. Every mutation (client op
@@ -96,21 +100,29 @@ export function orbState(): Reply {
   // An open row pins the contract (its exit must go to the contract it was opened on); the feed always reads the future.
   const contract = live ? signalTargetOf(live) : orbContract(ledger.config.symbol, now);
   let optLtp: number | null = null;
+  let legLtps: (number | null)[] | null = null;
   let optCandidates: Target[] = [];
-  if (live?.target.kind === 'options') {
+  if (live?.legs) {
+    // a multi-leg row: each open leg's live premium (a closed leg keeps the premium it closed at)
+    legLtps = live.legs.map(g => (g.status === 'open' ? optionLtp(g.target, now, Number.POSITIVE_INFINITY) : g.exit ?? null));
+  } else if (live?.target.kind === 'options') {
     optLtp = optionLtp(live.target, now, Number.POSITIVE_INFINITY);
-  } else if (!live && ledger.config.instrument === 'options' && ledger.engineActive && contract) {
-    // keep the options an entry could sell subscribed, so their premium has settled by the time a bar flips the orb
+  } else if (!live && (ledger.config.instrument === 'options' || ledger.config.instrument === 'synthetic') && ledger.engineActive && contract) {
+    // keep the options an entry could trade subscribed, so their premium has settled by the time a bar flips the orb
     const fk = contract.expiry ? optionFutureKey(contract) : null;
     const fp = fk ? wsPrice(fk)?.ltp ?? null : null;
     if (fp) {
-      optCandidates = (['LONG', 'SHORT'] as const).map(sd => orbOptionTarget(ledger.config, sd, fp, today)).filter((t): t is Target => typeof t !== 'string');
+      optCandidates = (['LONG', 'SHORT'] as const).flatMap(sd => {
+        if (ledger.config.instrument === 'synthetic') { const g = syntheticLegs(ledger.config.symbol, sd, fp, today); return typeof g === 'string' ? [] : g.map(x => x.target); }
+        const t = orbOptionTarget(ledger.config, sd, fp, today);
+        return typeof t === 'string' ? [] : [t];
+      });
       for (const t of optCandidates) optionKey(t);
       wsSync();
     }
   }
   const unitsPerLot = live?.unitsPerLot ?? unitsPerLotOf(ledger.config.symbol, now);
-  return { status: 200, body: { success: true, ledger, contract, unitsPerLot, optionLtp: optLtp, today, codeVersion: ORB_CODE_VERSION } };
+  return { status: 200, body: { success: true, ledger, contract, unitsPerLot, optionLtp: optLtp, legLtps, today, codeVersion: ORB_CODE_VERSION } };
 }
 
 /** The signal future's WebSocket key (subscribing it): the strike pick for the warm-up reads its price. */
@@ -176,6 +188,21 @@ function pickOption(l: OrbLedger, side: Side, futPrice: number, now: number, day
   return { target: t, premium };
 }
 
+/** What a synthetic entry trades and the premium of each leg (a missing quote on any leg refuses the whole entry: it retries next tick). */
+type SynPick = { legs: { target: Target; action: 'BUY' | 'SELL'; premium: number }[] };
+
+function pickSynthetic(l: OrbLedger, side: Side, futPrice: number, now: number, day: string): SynPick | string {
+  const legs = syntheticLegs(l.config.symbol, side, futPrice, day);
+  if (typeof legs === 'string') return legs;
+  const out: SynPick['legs'] = [];
+  for (const g of legs) {
+    const premium = optionLtp(g.target, now);
+    if (premium === null) return `No live premium for ${optLabel(g.target)} yet (WebSocket subscribing) - retrying`;
+    out.push({ ...g, premium });
+  }
+  return { legs: out };
+}
+
 const optLabel = (t: Target) => (t.kind === 'options' ? `${t.symbol} ${t.strike} ${t.side}` : `${t.symbol} FUT`);
 
 export function orbTrade(req: TradeRequest): Promise<Reply> {
@@ -204,7 +231,7 @@ export function orbTrade(req: TradeRequest): Promise<Reply> {
       if (live.status !== 'open') return fail(`The position is ${live.status.toUpperCase()}`, 409);
       if (live.side === req.side) return fail(`Already ${req.side}`, 409);
       if (live.day !== day) return fail('The open position is from an earlier day - close it by hand', 409);
-      if ((live.target.kind === 'options') !== (l.config.instrument === 'options')) return fail('The open position is not the configured instrument - close it by hand', 409);
+      if (rowInstrument(live) !== l.config.instrument) return fail('The open position is not the configured instrument - close it by hand', 409);
     }
     // options: the strike and its premium must be known before anything is sent (a reversal never closes into a sale it cannot price)
     let opt: OptPick | null = null;
@@ -212,6 +239,12 @@ export function orbTrade(req: TradeRequest): Promise<Reply> {
       const p = pickOption(l, req.side!, req.price, now, day);
       if (typeof p === 'string') return fail(p, 409);
       opt = p;
+    }
+    let syn: SynPick | null = null;
+    if (l.config.instrument === 'synthetic') {
+      const p = pickSynthetic(l, req.side!, req.price, now, day);
+      if (typeof p === 'string') return fail(p, 409);
+      syn = p;
     }
     // the bar is consumed before any send: a retry of the same bar can never place a second order
     l = { ...l, watermarkT: req.barT! };
@@ -224,7 +257,7 @@ export function orbTrade(req: TradeRequest): Promise<Reply> {
       l = halt(l, `Daily loss limit ₹${l.config.dailyLossLimit} reached`, now);
       return { status: 409, body: { success: false, error: l.haltReason, ledger: save(l, now) } };
     }
-    const out = await enterRow(l, req.side!, req.price, opt, req.reason, now, day);
+    const out = syn ? await enterSynthetic(l, req.side!, req.price, syn, req.reason, now, day) : await enterRow(l, req.side!, req.price, opt, req.reason, now, day);
     l = out.ledger;
     return { status: out.ok ? 200 : out.unknown ? 504 : 502, body: { success: out.ok, error: out.error, ledger: save(l, now) } };
   });
@@ -293,6 +326,7 @@ function exitMark(row: OrbRow, futPrice: number, now: number): { px: number; not
 }
 
 async function exitRow(l0: OrbLedger, row: OrbRow, req: TradeRequest, now: number): Promise<Step> {
+  if (row.legs) return exitStructure(l0, row, req, now);
   const tag = req.exitKind === 'stop' ? { blockedSide: row.side } : {};
   const mark = exitMark(row, req.price, now);
   const what = `${closeAction(row)} ${optLabel(row.target)}`;
@@ -330,4 +364,114 @@ function lossCheck(l: OrbLedger, now: number): OrbLedger {
   const day = istDateIso(now);
   return realisedToday(l, l.mode, day) <= -l.config.dailyLossLimit && l.engineActive
     ? halt(l, `Daily loss limit ₹${l.config.dailyLossLimit} reached`, now) : l;
+}
+
+// ── Multi-leg rows (synthetic future) ───────────────────────────────────────────────────────────────────────────────────────
+
+/** The real order path for a structure's legs: each leg is its own single-option market order through the P&F order layer (tag 'orba'). */
+const legDeps = (broker: OrbBroker): LegDeps => ({
+  open: async p => {
+    const order = parsePnfOrder({ broker, mode: 'REAL', target: p.target, action: p.action, lots: p.lots, product: 'INTRADAY', source: 'bar' }, { uncapped: true });
+    return typeof order === 'string' ? { status: 400, body: { success: false, outcome: 'rejected', error: order } } : placePnfMarket(order, 'pnf', 'orba');
+  },
+  close: async c => {
+    const order = parsePnfOrder({ broker, mode: 'REAL', target: c.target, source: 'bar', exitOwn: { side: c.action, units: [c.units], product: 'INTRADAY' } });
+    return typeof order === 'string' ? { status: 400, body: { success: false, outcome: 'rejected', error: order } } : placePnfMarket(order, 'pnf', 'orba');
+  },
+  readOrder: id => readBrokerOrder(id, 'dhan'),
+  sleep: ms => new Promise(r => setTimeout(r, ms)),
+});
+
+const legWord = (g: { action: 'BUY' | 'SELL'; target: Target }) => `${g.action} ${optLabel(g.target)}`;
+
+async function enterSynthetic(l0: OrbLedger, side: Side, futPrice: number, pick: SynPick, reason: string, now: number, day: string): Promise<Step> {
+  const { mode, config } = l0;
+  const fut = orbContract(config.symbol, now);
+  if (!fut) return { ok: false, error: `No live ${config.symbol} future in the master list`, ledger: addLog(l0, 'error', 'No contract', now) };
+  const unitsPerLot = unitsPerLotOf(config.symbol, now);
+  if (!(unitsPerLot > 0)) return { ok: false, error: `No lot size for ${config.symbol} in the master list`, ledger: addLog(l0, 'error', 'No lot size', now) };
+  const lots = config.lots;
+  const what = `${side} synthetic ${pick.legs.map(legWord).join(' + ')} x${lots}`;
+  const legs: OrbLeg[] = pick.legs.map(g => ({ target: g.target, action: g.action, entry: g.premium, units: 0, status: 'open' }));
+  const row: OrbRow = {
+    id: `orb-${now}`, mode, broker: config.broker, target: legs[0].target, side, lots, units: 0, unitsPerLot, entry: legs[0].entry,
+    structure: 'synthetic', legs, signalTarget: fut, signalEntry: futPrice,
+    entryAt: now, day, status: mode === 'SIM' ? 'open' : 'sending', ...(mode === 'SIM' ? {} : { sentAt: now }),
+  };
+  // a new entry means the stop-out block was lifted (the colour changed since the stop): it is cleared here
+  let l: OrbLedger = { ...l0, rows: [...l0.rows, row], blockedSide: null };
+  if (mode === 'SIM') return { ok: true, ledger: addLog({ ...l, rejects: 0 }, 'trade', `SIM ${what} - ${reason}`, now) };
+
+  // REAL: contract units and funds are checked BEFORE the row is written or anything is sent (nothing to undo if they refuse)
+  const lotUnits: number[] = [];
+  for (const g of pick.legs) {
+    const rl = resolvePnfLegs(g.target);
+    if (typeof rl === 'string') return { ok: false, error: rl, ledger: addLog(l0, 'error', `Entry not sent: ${rl}`, now) };
+    const onBroker = await brokerLegs(config.broker, g.target, rl).catch((e: Error) => `Contract lookup failed: ${e.message}`);
+    if (typeof onBroker === 'string') return { ok: false, error: onBroker, ledger: addLog(l0, 'error', `Entry not sent: ${onBroker}`, now) };
+    lotUnits.push(onBroker[0].lotUnits);
+  }
+  const block = await orbMarginBlock(pick.legs.map((g, i) => ({ target: g.target, action: g.action, lots, lotUnits: lotUnits[i], unitsPerLot, premium: g.premium })));
+  if (block) return { ok: false, error: block, ledger: addLog(l0, 'error', `Entry refused: ${block}`, now) };
+
+  save(l, now);   // the 'sending' row is on disk before the first order leaves
+  const res = await enterLegs(pick.legs.map((g, i) => ({ target: g.target, action: g.action, lots, lotUnits: lotUnits[i] })), legDeps(config.broker));
+  const legsOut: OrbLeg[] = legs.map((g, i) => {
+    const st = res.legs[i].state;
+    return { ...g, units: lots * lotUnits[i], status: st === 'open' || st === 'unknown' ? 'open' : 'failed', ...(st === 'unknown' ? { note: 'outcome unknown' } : {}) };
+  });
+  const units = legsOut[0].units;
+  if (res.ok) {
+    l = addLog(patchRow({ ...l, rejects: 0 }, row.id, { status: 'open', units, legs: legsOut }), 'trade', `REAL ${what} - ${reason}`, now);
+    return { ok: true, ledger: l };
+  }
+  if (res.unknown) {
+    l = patchRow(l, row.id, { status: 'unknown', units, legs: legsOut, note: res.error });
+    return { ok: false, unknown: true, error: res.error, ledger: halt(l, `Entry outcome UNKNOWN - check the ${config.broker} order book and positions: ${res.error}`, now) };
+  }
+  return { ok: false, error: res.error, ledger: bumpReject(patchRow(l, row.id, { status: 'failed', legs: legsOut, note: res.error }), `Entry refused: ${res.error}`, now) };
+}
+
+async function exitStructure(l0: OrbLedger, row: OrbRow, req: TradeRequest, now: number): Promise<Step> {
+  const tag = req.exitKind === 'stop' ? { blockedSide: row.side } : {};
+  const legs = row.legs ?? [];
+  // each leg's booking price: its live premium, else the last one seen; a leg with neither is booked at entry (and the note says so)
+  let unpriced = false;
+  const marks = legs.map(g => {
+    if (g.status === 'closed') return g.exit ?? g.entry;
+    const m = optionLtp(g.target, now, Number.POSITIVE_INFINITY) ?? lastPremium.get(targetKey(g.target)) ?? null;
+    if (m === null) unpriced = true;
+    return m;
+  });
+  const note = unpriced ? 'no premium quote on a leg: its P&L is booked at entry - check the broker fills' : undefined;
+  const what = `exit ${row.side} synthetic ${legs.map(g => `${g.action === 'BUY' ? 'SELL' : 'BUY'} ${optLabel(g.target)}`).join(' + ')}`;
+  if (row.mode === 'SIM') {
+    let l = addLog({ ...closeRowLegs(l0, row.id, marks, req.reason, now), ...tag }, 'trade', `SIM ${what} - ${req.reason}`, now);
+    if (note) l = patchRow(l, row.id, { note });
+    return { ok: true, ledger: lossCheck(l, now) };
+  }
+  let l = patchRow(l0, row.id, { status: 'closing', sentAt: now });
+  save(l, now);
+  const todo = legs.map((g, i) => ({ g, i })).filter(x => x.g.status === 'open');
+  const res = await exitLegs(todo.map(x => ({ target: x.g.target, action: x.g.action, units: x.g.units })), legDeps(row.broker));
+  // per-leg bookkeeping: a closed leg is booked, the rest stay open for the next try
+  const after = legs.map(g => ({ ...g }));
+  for (const r of res.legs) {
+    const i = todo[r.index].i;
+    if (r.state === 'closed') after[i] = { ...after[i], status: 'closed', exit: marks[i] ?? after[i].entry };
+    else if (r.state === 'unknown') after[i] = { ...after[i], note: 'exit unknown' };
+  }
+  if (res.ok) {
+    const flat = res.legs.some(r => r.flat) ? 'a leg was already flat at the broker (closed outside this page)' : undefined;
+    const notes = [flat, note].filter(Boolean).join('; ') || undefined;
+    l = addLog({ ...closeRowLegs(patchRow(l, row.id, { legs: after }), row.id, marks, req.reason, now), ...tag, rejects: 0 }, 'trade', `REAL ${what} - ${req.reason}${notes ? ` (${notes})` : ''}`, now);
+    if (notes) l = patchRow(l, row.id, { note: notes });
+    return { ok: true, ledger: lossCheck(l, now) };
+  }
+  if (res.unknown) {
+    l = patchRow(l, row.id, { status: 'unknown', legs: after, note: `exit unknown: ${res.error}` });
+    return { ok: false, unknown: true, error: res.error, ledger: halt(l, `Exit outcome UNKNOWN - check the ${row.broker} positions: ${res.error}`, now) };
+  }
+  // refused part-way: the legs that did close are booked, the rest are still open and the next tick retries them
+  return { ok: false, error: res.error, ledger: bumpReject(patchRow(l, row.id, { status: 'open', legs: after }), `Exit refused: ${res.error}`, now) };
 }

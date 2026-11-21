@@ -147,7 +147,7 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
           </div>
         )}
         <div className="flex flex-col gap-1">
-          <ReplayCard r={replayed} tf={c.timeframe} compact futuresPoints={c.instrument === 'options'} />
+          <ReplayCard r={replayed} tf={c.timeframe} compact futuresPoints={c.instrument !== 'futures'} />
           <p className="px-1 text-[11px] text-zinc-500">What-if, not live results: these rules replayed over the last 20 sessions (fills at the bar close, no costs). Fills/day counts every entry and exit, so a flip is 2. Use it to spot a setting that flips too often before you arm.</p>
         </div>
 
@@ -180,11 +180,11 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
               ))}
             </div>
           </Row>
-          <Row label="Trade" sub={c.instrument === 'options' ? 'Green sells a PE, red sells a CE (nearest expiry)' : 'Green goes long the future, red short'}>
+          <Row label="Trade" sub={c.instrument === 'options' ? 'Green sells a PE, red sells a CE (nearest expiry)' : c.instrument === 'synthetic' ? 'Green: long synthetic (buy the ATM CE, sell the ATM PE); red: short synthetic (buy the PE, sell the CE). Dhan only' : 'Green goes long the future, red short'}>
             <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
-              {(['futures', 'options'] as const).map(k => (
+              {(['futures', 'options', 'synthetic'] as const).map(k => (
                 <button key={k} type="button" disabled={locked} onClick={() => onPatch({ instrument: k })} aria-pressed={c.instrument === k}
-                  className={cn('rounded-md px-3 py-1 text-xs font-bold disabled:opacity-50', FOCUS, c.instrument === k ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}>{k === 'futures' ? 'Futures' : 'Sell options'}</button>
+                  className={cn('rounded-md px-3 py-1 text-xs font-bold disabled:opacity-50', FOCUS, c.instrument === k ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}>{k === 'futures' ? 'Futures' : k === 'options' ? 'Sell option' : 'Synthetic'}</button>
               ))}
             </div>
           </Row>

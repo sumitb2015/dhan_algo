@@ -194,3 +194,58 @@ test('live edits are strict: bad indicator values are refused, REAL keeps its st
   assert.equal(typeof sanitizeConfigPatch({ eodExit: '23:00' }, n as typeof l.config), 'string');
   assert.equal(typeof sanitizeConfigPatch({ eodExit: '15:25' }, n as typeof l.config), 'object');
 });
+
+import { closeRowLegs, rowInstrument } from './signalOrbLedger.ts';
+import { rowLegsPnl } from './signalOrb.ts';
+
+const cePE = (strike = 25800) => ({
+  ce: { kind: 'options' as const, symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24', strike, side: 'CE' as const },
+  pe: { kind: 'options' as const, symbol: 'NIFTY', name: 'NIFTY', expiry: '2026-11-24', strike, side: 'PE' as const },
+});
+const synRow = (extra: Partial<OrbRow> = {}): OrbRow => {
+  const { ce, pe } = cePE();
+  return {
+    ...row(), id: 's1', unitsPerLot: 65, lots: 2, structure: 'synthetic', target: ce, entry: 100,
+    legs: [{ target: ce, action: 'BUY', entry: 100, units: 130, status: 'open' }, { target: pe, action: 'SELL', entry: 90, units: 130, status: 'open' }],
+    ...extra,
+  };
+};
+
+test('rowLegsPnl: a synthetic gains on the bought leg rising and the sold leg falling; any leg without a mark makes it unknown', () => {
+  const r = synRow();
+  assert.equal(rowLegsPnl({ lots: r.lots, unitsPerLot: r.unitsPerLot, legs: r.legs! }, [110, 80]), (10 + 10) * 2 * 65);
+  assert.equal(rowLegsPnl({ lots: r.lots, unitsPerLot: r.unitsPerLot, legs: r.legs! }, [90, 100]), (-10 - 10) * 2 * 65);
+  assert.equal(rowLegsPnl({ lots: r.lots, unitsPerLot: r.unitsPerLot, legs: r.legs! }, [110, null]), null);
+});
+
+test('closeRowLegs books each leg at its exit; a leg without one is booked at entry; closed legs keep their exit', () => {
+  const l = withRow(synRow());
+  const c = closeRowLegs(l, 's1', [112, 85], 'Cutoff', 5);
+  const r = c.rows[0];
+  assert.equal(r.status, 'closed');
+  assert.deepEqual(r.legs!.map(g => [g.status, g.exit]), [['closed', 112], ['closed', 85]]);
+  assert.equal(r.pnl, (12 + 5) * 2 * 65);
+  const half = synRow({ legs: synRow().legs!.map((g, i) => (i === 1 ? { ...g, status: 'closed' as const, exit: 70 } : g)) });
+  const c2 = closeRowLegs(withRow(half), 's1', [105, 999], 'x', 5).rows[0];
+  assert.deepEqual(c2.legs!.map(g => g.exit), [105, 70]);             // the earlier close stands
+  const c3 = closeRowLegs(l, 's1', [null, null], 'x', 5).rows[0];
+  assert.equal(c3.pnl, 0);                                             // no price anywhere: booked at entry, no P&L
+});
+
+test('synthetic: a row knows its instrument; Dhan only; the instrument is pinned while a position is open; resolve closed books at entry', () => {
+  assert.equal(rowInstrument(synRow()), 'synthetic');
+  assert.equal(rowInstrument(row({ target: cePE().pe })), 'options');
+  assert.equal(rowInstrument(row()), 'futures');
+  const cur = emptyLedger().config;
+  const ok = sanitizeConfigPatch({ instrument: 'synthetic' }, cur);
+  assert.ok(typeof ok !== 'string' && ok.instrument === 'synthetic');
+  assert.equal(typeof sanitizeConfigPatch({ instrument: 'synthetic', broker: 'kotak' }, cur), 'string');
+  const syn = { ...cur, instrument: 'synthetic' as const };
+  assert.equal(typeof sanitizeConfigPatch({ broker: 'zerodha' }, syn), 'string');
+  assert.equal(applyClientOp(withRow(synRow()), { op: 'setConfig', patch: { instrument: 'options' } }, 1).ok, false);
+  const r = applyClientOp(withRow(synRow({ status: 'unknown' })), { op: 'resolve', id: 's1', as: 'closed' }, 1);
+  assert.ok(r.ok && r.ledger.rows[0].status === 'closed' && r.ledger.rows[0].pnl === 0);
+  // legacy rows without legs load unchanged
+  const l = normalizeLedger({ rows: [row()] });
+  assert.equal(l.rows[0].legs, undefined);
+});

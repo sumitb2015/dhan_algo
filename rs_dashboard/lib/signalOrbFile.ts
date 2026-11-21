@@ -19,7 +19,13 @@ export function reservedByOrb(broker: string, tKey: string, product: 'INTRADAY' 
   if (product !== 'INTRADAY') return 0;
   let out = 0;
   for (const r of ledger.rows) {
-    if (!isLive(r) || r.mode !== 'REAL' || r.broker !== broker || targetKey(r.target) !== tKey) continue;
+    if (!isLive(r) || r.mode !== 'REAL' || r.broker !== broker) continue;
+    if (r.legs) {
+      // a multi-leg row: each open leg holds its own units, signed by what opened it (BUY = long, SELL = short)
+      for (const g of r.legs) if (g.status === 'open' && targetKey(g.target) === tKey) out += (g.action === 'BUY' ? 1 : -1) * (Number(g.units) || 0);
+      continue;
+    }
+    if (targetKey(r.target) !== tKey) continue;
     // an options row is always a SOLD option (short at the broker) whatever its signal side; a futures row follows its side
     const sign = r.target.kind === 'options' ? -1 : r.side === 'LONG' ? 1 : -1;
     out += sign * (Number(r.units) || 0);

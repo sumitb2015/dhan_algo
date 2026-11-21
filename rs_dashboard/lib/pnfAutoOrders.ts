@@ -111,6 +111,9 @@ export async function placePnfMarket(order: PnfOrder, scope: PnfScope, tagOverri
           ...heldLeds.map(led => (k: string) => reservedByIndexHeld(led, broker, k, p)),
           k => reservedByAutoTraded(otherLed, broker, k, p), k => reservedByAutoTraded(ownLed, broker, k, p),
           k => reservedByGearbox(broker, k, p, gbLed),
+          // the Signal Orb's multi-leg rows (a synthetic's two options) are matched per option; a single-option target already has the
+          // Orb's single-leg rows in `fromOther` above, so it is not counted twice
+          k => (onBroker.length > 1 ? reservedByOrb(broker, k, p) : 0),
         ]);
         return { fromOther, fromSibling, fromIndex, reserved: fromOther.map((r, i) => r + fromSibling[i] + fromIndex[i]) };
       };

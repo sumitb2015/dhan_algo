@@ -10,7 +10,7 @@ import { VWAP_START, vwapFrom } from './straddlePnf.ts';
  * update never reached) shows a reload banner and its entries are refused (lib/signalOrbServer.ts). Bump on every change to
  * the rules, the indicators or the engine.
  */
-export const ORB_CODE_VERSION = '2026-11-21.4';
+export const ORB_CODE_VERSION = '2026-11-22.1';
 
 export type Vote = 1 | -1 | 0;
 export type Signal = 'BULL' | 'BEAR' | 'NEUTRAL';
@@ -492,3 +492,22 @@ export const positionPnl = (side: Side, entry: number, price: number, lots: numb
  */
 export const rowPnl = (r: { side: Side; entry: number; lots: number; unitsPerLot: number; target: { kind: string } }, mark: number): number =>
   r.target.kind === 'options' ? (r.entry - mark) * r.lots * r.unitsPerLot : positionPnl(r.side, r.entry, mark, r.lots, r.unitsPerLot);
+
+/**
+ * Rupee P&L of a multi-leg Orb row (a synthetic future, later a straddle / strangle): each leg is long (BUY) or short (SELL) and
+ * gains as its own premium moves its way. `marks` are the legs' live premiums in `legs` order; a leg with no mark (null) makes the
+ * total unknown (null), never a partial sum.
+ */
+export const rowLegsPnl = (
+  r: { lots: number; unitsPerLot: number; legs: { action: 'BUY' | 'SELL'; entry: number; exit?: number }[] },
+  marks: (number | null | undefined)[],
+): number | null => {
+  let t = 0;
+  for (let i = 0; i < r.legs.length; i++) {
+    const m = marks[i];
+    if (m === null || m === undefined || !Number.isFinite(m)) return null;
+    const l = r.legs[i];
+    t += (l.action === 'SELL' ? l.entry - m : m - l.entry) * r.lots * r.unitsPerLot;
+  }
+  return t;
+};

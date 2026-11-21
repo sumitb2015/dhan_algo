@@ -10,7 +10,7 @@ import {
 import { orbAlert, type OrbAlertSnap, type OrbSound } from '@/lib/signalOrbChime';
 import type { Target } from '@/lib/pnfTarget';
 import {
-  ORB_CODE_VERSION, closedBars, computeEffectiveStop, decideOrb, evaluate, replay, rowPnl, sideOf,
+  ORB_CODE_VERSION, closedBars, computeEffectiveStop, decideOrb, evaluate, replay, rowLegsPnl, rowPnl, sideOf,
   type EffectiveStopResult, type Evaluation, type ReplaySummary, type Side,
 } from '@/lib/signalOrb';
 import { isStuck, liveRow, realisedToday, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
@@ -22,7 +22,7 @@ import { keyLevels, mtfTable, sessionPath, signalChanges } from '@/lib/signalOrb
 // but not the cutoff. REAL entries also need this page load's ARM click, which is never saved.
 
 /** `contract` is always the FUTURE the signal reads; `optionLtp` is a live option row's premium (server WebSocket), else null. */
-type StateReply = { success: boolean; ledger: OrbLedger; contract: Target | null; unitsPerLot: number; optionLtp?: number | null; today: string; codeVersion?: string };
+type StateReply = { success: boolean; ledger: OrbLedger; contract: Target | null; unitsPerLot: number; optionLtp?: number | null; legLtps?: (number | null)[] | null; today: string; codeVersion?: string };
 
 const STATE_POLL_MS = 3_000;
 const LOCK_KEY = 'signalOrb.engineLock';
@@ -112,8 +112,8 @@ export function useOrbEngine() {
         const sameContract = JSON.stringify(prev.contract) === JSON.stringify(j.contract);
         if (j.ledger.rev === prev.ledger.rev && sameContract && prev.today === j.today) {
           // Ledger unchanged: keep heavy objects stable but always update live price fields
-          if (prev.optionLtp === j.optionLtp && prev.unitsPerLot === j.unitsPerLot) return prev;
-          return { ...prev, optionLtp: j.optionLtp, unitsPerLot: j.unitsPerLot };
+          if (prev.optionLtp === j.optionLtp && prev.unitsPerLot === j.unitsPerLot && JSON.stringify(prev.legLtps) === JSON.stringify(j.legLtps)) return prev;
+          return { ...prev, optionLtp: j.optionLtp, unitsPerLot: j.unitsPerLot, legLtps: j.legLtps };
         }
         if (j.ledger.rev < prev.ledger.rev) return sameContract ? prev : { ...prev, contract: j.contract };
         return j;
@@ -225,8 +225,12 @@ export function useOrbEngine() {
   const outdated = !!state?.codeVersion && state.codeVersion !== ORB_CODE_VERSION;
   // the row's own mark: the future's LTP, or (options) the sold option's premium from the state poll
   const isOption = live?.target.kind === 'options';
-  const mark = isOption ? (state?.optionLtp ?? null) : price;
-  const openPnl = live?.status === 'open' && mark !== null && mark > 0 ? rowPnl(live, mark) : null;
+  // a multi-leg row (synthetic) has no single mark: its P&L is the signed sum over its legs' live premiums (null while any leg has none)
+  const mark = live?.legs ? null : isOption ? (state?.optionLtp ?? null) : price;
+  const openPnl = live?.status === 'open'
+    ? (live.legs ? rowLegsPnl({ lots: live.lots, unitsPerLot: live.unitsPerLot, legs: live.legs }, state?.legLtps ?? [])
+      : mark !== null && mark > 0 ? rowPnl(live, mark) : null)
+    : null;
   const realised = ledger && today ? realisedToday(ledger, ledger.mode, today) : 0;
 
   const trade = useCallback(async (body: Record<string, unknown>): Promise<boolean> => {

@@ -78,7 +78,7 @@ export default function SignalOrb() {
               {contract ? `${contract.symbol} FUT ${contract.expiry ? expiryLabel(contract.expiry) : ''}` : 'resolving contract…'} · {tfLabel}
               {ledger && (
                 <>
-                  {' '}· {optMode ? `sell options ${ledger.config.strikeOffset === 0 ? 'ATM' : `ATM${ledger.config.strikeOffset > 0 ? '+' : '−'}${Math.abs(ledger.config.strikeOffset)}`}` : 'futures'} · {ledger.config.lots} lot{ledger.config.lots > 1 ? 's' : ''} · SL {ledger.config.stopPts}p
+                  {' '}· {optMode ? `sell options ${ledger.config.strikeOffset === 0 ? 'ATM' : `ATM${ledger.config.strikeOffset > 0 ? '+' : '−'}${Math.abs(ledger.config.strikeOffset)}`}` : ledger.config.instrument === 'synthetic' ? 'synthetic futures ATM' : 'futures'} · {ledger.config.lots} lot{ledger.config.lots > 1 ? 's' : ''} · SL {ledger.config.stopPts}p
                   {(ledger.config.trailStartPts ?? 0) > 0 ? ` (trail +${ledger.config.trailStartPts}/${ledger.config.trailGapPts ?? 15}p)` : ''}
                 </>
               )}
@@ -190,7 +190,7 @@ export default function SignalOrb() {
           since={ev.sinceT ? sinceLabel(ev.sinceT, e.today) : null} progress={1 - e.secsToClose / e.barSecs} secsLeft={e.secsToClose} />
 
         {/* position: its own element, coloured by side (the orb shows the signal) */}
-        <PositionPill live={live} position={position} pnl={e.openPnl} effectiveStop={e.effectiveStop} config={ledger?.config} mark={e.mark}
+        <PositionPill live={live} position={position} pnl={e.openPnl} effectiveStop={e.effectiveStop} config={ledger?.config} mark={e.mark} legLtps={e.state?.legLtps}
           onClose={live?.status === 'open' ? () => void e.closeAndStop() : null} />
 
         {/* readout: the price first, then one chip per indicator */}
@@ -352,7 +352,7 @@ function DayDock({ ledger, today, realised, openPnl }: { ledger: OrbLedger; toda
         </span>
         {last && (
           <span title={last.exitReason ?? ''}>
-            Last <strong className={last.side === 'LONG' ? 'text-emerald-400' : 'text-red-400'}>{last.target.kind === 'options' ? `SELL ${last.target.side}` : last.side}</strong>{' '}
+            Last <strong className={last.side === 'LONG' ? 'text-emerald-400' : 'text-red-400'}>{last.legs ? `SYN ${last.side}` : last.target.kind === 'options' ? `SELL ${last.target.side}` : last.side}</strong>{' '}
             <strong className={(last.pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>{inr(last.pnl ?? 0)}</strong>
             <span className="text-zinc-600"> · {istClock((last.exitAt ?? 0)).slice(0, 5)}</span>
           </span>
@@ -369,13 +369,17 @@ const sinceLabel = (t: number, today: string): string => {
   return `${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][new Date((t + 19_800) * 1000).getUTCDay()]} ${hhmm}`;
 };
 
-/** What a row holds, e.g. "CRUDEOIL 5600 PE" for an options row (always sold), or "" for a futures row. */
-const optionOf = (r: OrbRow) => (r.target.kind === 'options' ? `${r.target.symbol} ${r.target.strike} ${r.target.side}` : '');
+/** What a single-leg row holds, e.g. "CRUDEOIL 5600 PE" for an options row (always sold), or "" for a futures row or a multi-leg row. */
+const optionOf = (r: OrbRow) => (!r.legs && r.target.kind === 'options' ? `${r.target.symbol} ${r.target.strike} ${r.target.side}` : '');
+/** A multi-leg row's legs, e.g. "+25800 CE −25800 PE" (+ bought, − sold). */
+const legsOf = (r: OrbRow) => (r.legs ?? []).map(g => `${g.action === 'BUY' ? '+' : '−'}${g.target.strike} ${g.target.side}`).join('  ');
 
-function PositionPill({ live, position, pnl, effectiveStop, config, mark, onClose }: {
+function PositionPill({ live, position, pnl, effectiveStop, config, mark, legLtps, onClose }: {
   live: OrbRow | null; position: 'LONG' | 'SHORT' | 'FLAT' | 'PENDING'; pnl: number | null; effectiveStop: EffectiveStopResult | null; config?: OrbConfig;
   /** the row's own live price (an option's premium for an options row) */
   mark: number | null;
+  /** a multi-leg row's live premiums, in leg order */
+  legLtps?: (number | null)[] | null;
   onClose: (() => void) | null;
 }) {
   if (!live) {
@@ -392,7 +396,7 @@ function PositionPill({ live, position, pnl, effectiveStop, config, mark, onClos
       <div className="flex items-center gap-2.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-4 py-1.5 font-mono text-[11px] text-amber-300 shadow-[0_0_15px_rgba(245,158,11,0.15)]">
         <span className="h-2 w-2 animate-ping rounded-full bg-amber-400" aria-hidden />
         <span className="font-black tracking-[0.2em]">{live.status.toUpperCase()}</span>
-        <span>{live.side} {optionOf(live) ? `· SELL ${optionOf(live)} ` : ''}{live.lots} lot{live.lots > 1 ? 's' : ''}</span>
+        <span>{live.side} {optionOf(live) ? `· SELL ${optionOf(live)} ` : ''}{live.legs ? `· ${legsOf(live)} ` : ''}{live.lots} lot{live.lots > 1 ? 's' : ''}</span>
       </div>
     );
   }
@@ -419,8 +423,18 @@ function PositionPill({ live, position, pnl, effectiveStop, config, mark, onClos
           <span className="text-zinc-500 text-[10px] font-normal">SOLD</span> {optionOf(live)}
         </span>
       )}
+      {live.legs && (
+        <span className="font-bold text-zinc-100 flex items-center gap-1.5" title="Each leg: entry premium to live premium">
+          <span className="text-zinc-500 text-[10px] font-normal">SYNTHETIC</span>
+          {live.legs.map((g, i) => (
+            <span key={i} className={g.action === 'BUY' ? 'text-emerald-300' : 'text-red-300'}>
+              {g.action === 'BUY' ? '+' : '−'}{g.target.strike}{g.target.side} <span className="font-normal text-zinc-500">{g.entry.toLocaleString('en-IN')}→{legLtps?.[i] == null ? '—' : legLtps[i]!.toLocaleString('en-IN')}</span>
+            </span>
+          ))}
+        </span>
+      )}
       <span className="text-zinc-400">
-        {live.lots} lot{live.lots > 1 ? 's' : ''} @ <strong className="text-zinc-200">{live.entry.toLocaleString('en-IN')}</strong>
+        {live.lots} lot{live.lots > 1 ? 's' : ''}{!live.legs && <> @ <strong className="text-zinc-200">{live.entry.toLocaleString('en-IN')}</strong></>}
         {optionOf(live) && <> · now <strong className="text-zinc-100">{mark === null ? '—' : mark.toLocaleString('en-IN')}</strong></>}
       </span>
       <span className="h-3 w-px bg-zinc-800" aria-hidden />
