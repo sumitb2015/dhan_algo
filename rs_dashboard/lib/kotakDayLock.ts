@@ -1,12 +1,12 @@
 import path from 'path';
-import { kotakGet, kotakRows, KOTAK_PATHS } from '@/lib/kotakToken';
+import { kotakGetShared, kotakRows, KOTAK_PATHS } from '@/lib/kotakToken';
 import { shapeKotakPosition } from '@/lib/kotakShape';
 import { readJsonFile } from '@/lib/lockedJsonFile';
 import { PROJECT_ROOT } from '@/lib/pyExec';
 import { istToday } from '@/lib/istTime';
 import { guardProductOf } from '@/lib/softGuards';
 import type { ServerGuardState } from '@/lib/kotakGuardEngine';
-import { orderAddsExposure } from '@/lib/kotakLockRules';
+import { orderAddsExposure, lockGateDecision, type LockBookRow } from '@/lib/kotakLockRules';
 
 export { orderAddsExposure };
 
@@ -28,23 +28,37 @@ export function readActiveKotakLock(): { at: number; reason: string; products: s
   return s.lock;
 }
 
+// The last book read that worked, so one rate-limited (429) or failed read does not open the gate: Kotak's limit is the
+// exact condition a burst of locked-day orders creates. Per server process; a stale snapshot is not used.
+const SNAPSHOT_MAX_AGE_MS = 120_000;
+let lastBook: { at: number; rows: LockBookRow[] } | null = null;
+
+async function readBookRows(): Promise<LockBookRow[] | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      // Shared read: concurrent orders and the guard's own poll reuse one request instead of each adding to the rate limit.
+      const rows = kotakRows(await kotakGetShared(KOTAK_PATHS.positions)).map(shapeKotakPosition)
+        .map(p => ({ symbol: p.tradingSymbol, product: guardProductOf(p.productType) as string, net: p.netQty }));
+      lastBook = { at: Date.now(), rows };
+      return rows;
+    } catch { if (attempt === 0) await new Promise(r => setTimeout(r, 400)); }
+  }
+  return lastBook && Date.now() - lastBook.at <= SNAPSHOT_MAX_AGE_MS ? lastBook.rows : null;
+}
+
 /**
- * Null = let the order through. A message = refuse it (nothing is sent). Fails OPEN when the book cannot be read: a lock
- * must never trap an exit, and the guard's 2.5 s flatten-on-sight still catches whatever slips through.
+ * Null = let the order through. A message = refuse it (nothing is sent). A failed read retries once, then falls back to the last
+ * good book (at most 2 min old); with neither the order passes, because a lock must never trap an exit.
  */
 export async function kotakLockRefusal(payload: Record<string, string>): Promise<string | null> {
   const lock = readActiveKotakLock();
   if (!lock) return null;
-  const product = guardProductOf(payload.pc);
-  if (product && !lock.products.includes(product)) return null;   // a product the loss limit does not cover
-  const side = payload.tt === 'B' ? 'B' : 'S';
-  const qty = Math.round(Number(payload.qt));
-  let net = 0;
-  try {
-    const rows = kotakRows(await kotakGet(KOTAK_PATHS.positions)).map(shapeKotakPosition);
-    net = rows
-      .filter(p => p.tradingSymbol === String(payload.ts) && guardProductOf(p.productType) === product)
-      .reduce((n, p) => n + p.netQty, 0);
-  } catch { return null; }
-  return orderAddsExposure(side, qty, net) ? KOTAK_LOCK_MSG : null;
+  const order = { symbol: String(payload.ts), product: guardProductOf(payload.pc) as string, side: (payload.tt === 'B' ? 'B' : 'S') as 'B' | 'S', qty: Math.round(Number(payload.qt)) };
+  const book = lockGateNeedsBook(lock, order) ? await readBookRows() : null;
+  return lockGateDecision(lock, order, book) === 'refuse' ? KOTAK_LOCK_MSG : null;
+}
+
+/** The book is only worth a request for an order in a covered product. */
+function lockGateNeedsBook(lock: { products: string[] }, order: { product: string }): boolean {
+  return !order.product || lock.products.includes(order.product);
 }

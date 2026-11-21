@@ -9,6 +9,8 @@ import {
 } from '@/lib/kotakGuardEngine';
 import { parseGuardDefaults, type GuardDefaults } from '@/lib/guardDefaults';
 import { readJsonFile } from '@/lib/lockedJsonFile';
+import { shouldAutoArm, withAutoArm, shouldSkipIdleTick, nextHealth, IDLE_POLL_MS } from '@/lib/guardArm';
+import { lockKey, LOCK_RETRY_MS } from '@/lib/kotakGuardEngine';
 
 // The broker-neutral half of the server-resident guards (P&L Guard + brackets): file store, tick loop, pricing and the
 // cover-before-sell ordering around the pure engine in lib/kotakGuardEngine.ts. A broker supplies only an adapter (its
@@ -34,6 +36,10 @@ export interface GuardAdapter {
   sendExit(e: ExitOrder): Promise<void>;
   /** True = arm the daily default P&L Guard (debug/<key>_guard_defaults.json) by itself each IST day. Kotak only for now. */
   autoArm?: boolean;
+  /** True = a fired LOSS limit locks the day (flatten on sight). Needs the broker's own order gate and banner: Kotak only. */
+  dayLock?: boolean;
+  /** Called before a day-lock flatten: clear what would double it (resting exit orders on the leg). Throw GuardExitRejected to hold the flatten back. */
+  prepareLockFlatten?(e: ExitOrder): Promise<void>;
 }
 
 const DEBUG_DIR = path.join(PROJECT_ROOT, 'debug');
@@ -41,8 +47,7 @@ const TICK_MS = 2500;
 const QUOTES_FRESH_MS = 6000;
 const LOCK_STALE_MS = 8000;
 const WARN_REPEAT_MS = 120_000;
-/** Poll interval for an armed default while nothing is open (a position then moves it back to TICK_MS). */
-const IDLE_POLL_MS = 10_000;
+
 
 export const istDay = (): string => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 
@@ -98,6 +103,7 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
         brackets: Array.isArray(s.brackets) ? s.brackets : [], watch: Array.isArray(s.watch) ? s.watch : [],
         events: Array.isArray(s.events) ? s.events : [],
         lock: s.lock ?? null, lockSent: s.lockSent && typeof s.lockSent === 'object' ? s.lockSent : {},
+        lockRetry: s.lockRetry && typeof s.lockRetry === 'object' ? s.lockRetry : {},
         autoArmedDate: s.autoArmedDate, health: s.health,
       };
     } catch {
@@ -196,29 +202,19 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
 
   let idleUntil = 0;
 
-  /** Records whether the watcher can protect right now; written only when it changes or goes 60 s stale. */
+  /** Records whether the watcher can protect right now; written only when it changes or goes HEALTH_REFRESH_MS stale. */
   async function setHealth(watching: boolean, reason: string): Promise<void> {
-    const h = readGuardState().health;
-    if (h && h.watching === watching && h.reason === reason && Date.now() - h.at < 60_000) return;
-    try { await updateGuardState(s => ({ ...s, health: { watching, reason, at: Date.now() } })); } catch { /* best effort */ }
+    if (!nextHealth(readGuardState().health, watching, reason, Date.now())) return;
+    try { await updateGuardState(s => ({ ...s, health: nextHealth(s.health, watching, reason, Date.now()) ?? s.health })); } catch { /* best effort */ }
   }
 
   /** Arms the daily default P&L Guard once per IST day (Kotak). A manual clear the same day is respected (autoArmedDate). */
   async function autoArmDefault(): Promise<void> {
     if (!adapter.autoArm) return;
     const today = istDay();
-    const cur = readGuardState();
-    if (cur.pnl || cur.lock || cur.autoArmedDate === today) return;
     const d = readGuardDefaults();
-    if (!d.enabled || !adapter.isSessionValid()) return;
-    await updateGuardState(s => {
-      if (s.pnl || s.lock || s.autoArmedDate === today) return s;
-      const text = `Daily default armed: loss limit ₹${d.loss}${d.profit > 0 ? `, target ₹${d.profit}` : ''} on ${d.products.join('/')}`;
-      return {
-        ...s, autoArmedDate: today, pnl: { profit: d.profit, loss: d.loss, products: d.products, date: today },
-        events: [...s.events, { at: Date.now(), kind: 'armed' as const, text }].slice(-40),
-      };
-    });
+    if (!shouldAutoArm(readGuardState(), d, today, adapter.isSessionValid())) return;
+    await updateGuardState(s => (shouldAutoArm(s, d, today, true) ? withAutoArm(s, d, today, Date.now()) : s));
   }
 
   /** True once every covered short shows flat in the position book (retried briefly: the book lags a fill). */
@@ -243,7 +239,7 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
       if (!cur.pnl && cur.brackets.length === 0 && cur.watch.length === 0 && !cur.lock) return;
       // An armed default with nothing open is polled slowly (the broker's book is rate limited); anything open, any exit in
       // flight and a locked day are polled every tick so a new position is flattened within a few seconds.
-      if (!cur.lock && cur.brackets.length === 0 && cur.watch.length === 0 && Date.now() < idleUntil) return;
+      if (shouldSkipIdleTick(cur, idleUntil, Date.now())) return;
       if (!adapter.isSessionValid()) {
         // Nothing can be read or sent, so the guard is NOT protecting anything: say so instead of idling silently.
         await setHealth(false, `${adapter.key} session is not valid - log in again`);
@@ -266,7 +262,7 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
       if (unpriced.length) await warn(`no live price for ${unpriced.join(', ')} - guards pause on ${unpriced.length === 1 ? 'it' : 'them'} (only a P&L loss limit can still fire)`);
       const exits: ExitOrder[] = [];
       await updateGuardState(s => {
-        const r = stepGuards(s, positions, Date.now(), istDay());
+        const r = stepGuards(s, positions, Date.now(), istDay(), { lockOnLoss: adapter.dayLock === true });
         exits.push(...r.exits);
         return r.state;
       });
@@ -287,9 +283,19 @@ export function createGuardServer(adapter: GuardAdapter): GuardServer {
             continue;
           }
         }
-        try { await adapter.sendExit(e); }
+        try {
+          if (e.lock && adapter.prepareLockFlatten) await adapter.prepareLockFlatten(e);
+          await adapter.sendExit(e);
+        }
         catch (err) {
           if (e.phase === 'cover-short') coverFailed = true;
+          // Nothing was placed: on a locked day the same leg may be tried again after LOCK_RETRY_MS. An unknown outcome is never retried.
+          if (err instanceof GuardExitRejected) {
+            await updateGuardState(s => (s.lock ? {
+              ...s, lockRetry: { ...s.lockRetry, [lockKey(e.symbol, e.productRaw)]: Date.now() + LOCK_RETRY_MS },
+              watch: s.watch.filter(w => w.symbol !== e.symbol),
+            } : s)).catch(() => undefined);
+          }
           // Only an explicit refusal means nothing was placed; a timeout may have filled (the 10 s verify reports it).
           await note('error', err instanceof GuardExitRejected
             ? `${e.symbol}: exit order REJECTED - ${err.message}`

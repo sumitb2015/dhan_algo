@@ -42,8 +42,11 @@ export interface ServerGuardState {
   events: GuardEvent[];
   /** Day lock set by a fired loss limit; null/absent = unlocked. */
   lock?: GuardLock | null;
-  /** `symbol|product` -> when a lock flatten was last sent, so a failed exit is retried at most every LOCK_RESEND_MS. */
+  /** `symbol|product` -> when a lock flatten was sent. A leg listed here is NEVER re-sent on its own (a lagging book would make a
+   *  second market order flip the position); the only way back out is `lockRetry`, set when the broker explicitly refused. */
   lockSent?: Record<string, number>;
+  /** `symbol|product` -> earliest time a REFUSED (nothing placed) lock flatten may be sent again. */
+  lockRetry?: Record<string, number>;
   /** IST day the daily default guard was auto-armed, so a manual clear is not re-armed the same day. */
   autoArmedDate?: string;
   health?: GuardHealth;
@@ -61,6 +64,9 @@ export interface PosView {
   ltp: number;
   realized: number;
   unrealized: number;
+  /** Held over from an earlier day (Kotak cf* quantities). Its P&L against the carry average is not a day P&L, so it is left
+   *  out of the loss limit's sum and is not "new" for the lock's flatten-on-sight. Unset = not carried. */
+  carried?: boolean;
 }
 
 export interface ExitOrder {
@@ -71,11 +77,19 @@ export interface ExitOrder {
   /** Shorts are covered before longs are sold, so a hedge is never sold from under an open short. */
   phase: 'cover-short' | 'sell-long';
   reason: string;
+  /** Sent by the day lock (not a bracket or the loss limit itself): the adapter clears the leg's resting exit orders first. */
+  lock?: boolean;
 }
 
+/** Options of one step. `lockOnLoss`: a fired LOSS limit locks the day (Kotak only: its order gate and banner exist). */
+export interface StepOptions { lockOnLoss?: boolean }
+
+/** The key a lock flatten is remembered under. */
+export const lockKey = (symbol: string, productRaw: string): string => `${symbol}|${guardProductOf(productRaw)}`;
+
 export const EXIT_VERIFY_MS = 10_000;
-/** A locked day re-sends a flatten for the same leg at most this often (a refused or lagging exit must not fire every tick). */
-export const LOCK_RESEND_MS = 30_000;
+/** A lock flatten the broker REFUSED is tried again after this long (never every tick). An accepted or unknown-outcome one is not retried. */
+export const LOCK_RETRY_MS = 10_000;
 
 /** The parts of a live options bridge's quotes file (debug/live_options_quotes_dhan_<u>.json) the guards read. */
 export interface BridgeQuoteFile {
@@ -145,17 +159,17 @@ function pushEvent(s: ServerGuardState, now: number, kind: GuardEventKind, text:
  * exits to send, shorts first. Never mutates its input.
  */
 export function stepGuards(
-  prev: ServerGuardState, positions: PosView[], now: number, today: string,
+  prev: ServerGuardState, positions: PosView[], now: number, today: string, opts: StepOptions = {},
 ): { state: ServerGuardState; exits: ExitOrder[] } {
   const s: ServerGuardState = {
     ...prev, brackets: prev.brackets.map(b => ({ ...b })), watch: [...prev.watch], events: [...prev.events],
-    lockSent: { ...(prev.lockSent ?? {}) },
+    lockSent: { ...(prev.lockSent ?? {}) }, lockRetry: { ...(prev.lockRetry ?? {}) },
   };
   const exits: ExitOrder[] = [];
 
   if (s.date !== today) {
     if (s.pnl || s.brackets.length || s.lock) pushEvent(s, now, 'expired', 'A new trading day started: yesterday\'s guards and day lock were discarded');
-    s.date = today; s.pnl = null; s.brackets = []; s.watch = []; s.lock = null; s.lockSent = {};
+    s.date = today; s.pnl = null; s.brackets = []; s.watch = []; s.lock = null; s.lockSent = {}; s.lockRetry = {};
   }
 
   const open = positions.filter(p => p.netQty !== 0);
@@ -201,13 +215,14 @@ export function stepGuards(
     const inScope = (p: PosView) => g.products.includes(productOf(p));
     const scopeOpen = open.filter(inScope);
     if (scopeOpen.length > 0) {
-      const pnl = positions.filter(inScope).reduce((sum, p) => sum + p.realized + p.unrealized, 0);
+      // Carried legs are excluded: their P&L against the carry average is cumulative, not today's (see PosView.carried).
+      const pnl = positions.filter(p => inScope(p) && !p.carried).reduce((sum, p) => sum + p.realized + p.unrealized, 0);
       const allPriced = scopeOpen.every(p => p.ltp > 0);
       const verdict = evaluateSoftPnlGuard(g, pnl, today, allPriced);
       if (verdict.fire) {
         s.pnl = null;   // disarm before exiting: it fires once
         // A LOSS fire locks the day (a profit target is the user's win: no lock). Anything new in scope is flattened below.
-        if (g.loss > 0 && pnl <= -g.loss) {
+        if (opts.lockOnLoss && g.loss > 0 && pnl <= -g.loss) {
           s.lock = { at: now, reason: verdict.reason, products: [...g.products] };
           pushEvent(s, now, 'locked', `${verdict.reason} - Kotak is locked for the rest of the day: new positions are squared off on sight`);
         }
@@ -226,26 +241,33 @@ export function stepGuards(
   }
 
   // ── Day lock: flatten on sight. Runs every tick while locked, so a position opened afterwards (from any tool or the Kotak
-  // app) is closed within one tick. A leg already being exited (watch / this tick) is left alone; a leg whose last flatten
-  // was sent less than LOCK_RESEND_MS ago is not re-sent (the 10 s verify above reports it as incomplete if it stuck).
+  // app) is closed within one tick. Carried legs are not "new" and are left alone; a leg already being exited (watch / this
+  // tick) is left alone. ONE flatten per leg: it is never re-sent on a timer (an accepted market order whose fill the book has
+  // not shown yet would be doubled and flip the position - the same reason a bracket exit is never retried). Only a flatten
+  // the broker explicitly REFUSED comes back, via `lockRetry`, which the tick loop sets.
   if (s.lock) {
     const lock = s.lock;
-    const lockOpen = open.filter(p => lock.products.includes(productOf(p)));
+    const lockOpen = open.filter(p => lock.products.includes(productOf(p)) && !p.carried);
+    const openKeys = new Set(lockOpen.map(p => lockKey(p.symbol, p.productRaw)));
+    // A leg that closed (or was never sent) forgets its memory, so the same contract opened again later is flattened too.
+    for (const k of Object.keys(s.lockSent ?? {})) if (!openKeys.has(k)) { delete s.lockSent![k]; delete s.lockRetry![k]; }
     for (const p of lockOpen) {
-      const key = `${p.symbol}|${productOf(p)}`;
+      const key = lockKey(p.symbol, p.productRaw);
       if (exiting.has(key)) continue;
       if (s.watch.some(w => w.symbol === p.symbol && w.product === productOf(p) && w.dir === dirOf(p))) continue;
-      const last = s.lockSent?.[key];   // undefined = never sent for this leg: send now
-      if (last !== undefined && now - last < LOCK_RESEND_MS) continue;
+      const sent = s.lockSent?.[key];
+      const retryAt = s.lockRetry?.[key];
+      if (sent !== undefined && !(retryAt !== undefined && now >= retryAt)) continue;
       exiting.add(key);
       s.lockSent = { ...s.lockSent, [key]: now };
-      exits.push(exitFor(p, 'Day loss limit hit - flattening on sight'));
+      delete s.lockRetry![key];
+      exits.push({ ...exitFor(p, 'Day loss limit hit - flattening on sight'), lock: true });
       s.watch.push({ symbol: p.symbol, product: productOf(p), dir: dirOf(p), at: now });
       pushEvent(s, now, 'locked', `${p.symbol}: opened after the loss limit fired - squaring off`);
     }
-    // A flatten sent for a leg that the pnl branch exited this tick must not be re-sent 30 s later: record it.
+    // The leg the loss limit itself exited this tick is remembered too, so the lock never sends it a second flatten.
     for (const e of exits) {
-      const k = `${e.symbol}|${guardProductOf(e.productRaw)}`;
+      const k = lockKey(e.symbol, e.productRaw);
       if (!(k in (s.lockSent ?? {}))) s.lockSent = { ...s.lockSent, [k]: now };
     }
   }

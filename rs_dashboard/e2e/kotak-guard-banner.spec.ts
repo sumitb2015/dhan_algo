@@ -42,3 +42,21 @@ test('an expired Kotak session warns that nothing is protecting, and the warning
   await page.getByRole('button', { name: 'Dismiss warning' }).click();
   await expect(page.getByRole('alert').filter({ hasText: /KOTAK/ })).toHaveCount(0);
 });
+
+test('a dismissed warning stays dismissed after a reload the same day', async ({ page }) => {
+  await mockGuards(page, { sessionValid: false, state: { pnl: { loss: 10000 }, lock: null }, defaults: { enabled: true, loss: 10000 } });
+  await page.goto('/us-markets');
+  await page.getByRole('button', { name: 'Dismiss warning' }).click();
+  await page.reload();
+  await page.waitForTimeout(1500);
+  await expect(page.getByRole('alert').filter({ hasText: /KOTAK/ })).toHaveCount(0);
+});
+
+test('a watcher that stopped updating its health record is called out even though it last said "watching"', async ({ page }) => {
+  await mockGuards(page, {
+    sessionValid: true, defaults: { enabled: true, loss: 10000 },
+    state: { pnl: { loss: 10000 }, lock: null, health: { watching: true, reason: '', at: Date.now() - 10 * 60_000 } },
+  });
+  await page.goto('/us-markets');
+  await expect(page.getByRole('alert').filter({ hasText: /KOTAK/ })).toContainText('stopped updating');
+});

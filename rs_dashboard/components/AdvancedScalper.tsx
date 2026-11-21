@@ -1452,7 +1452,7 @@ function AdvancedScalper() {
       if (seenGuardEventRef.current == null) { seenGuardEventRef.current = last; return; }
       for (const e of j.state.events) {
         if (e.at <= seenGuardEventRef.current) continue;
-        const bad = e.kind === 'fired' || e.kind === 'pnl_fired' || e.kind === 'incomplete' || e.kind === 'error';
+        const bad = e.kind === 'fired' || e.kind === 'pnl_fired' || e.kind === 'locked' || e.kind === 'incomplete' || e.kind === 'error';
         addToast(bad ? 'error' : 'success', `Guard: ${e.kind.replace('_', ' ')}`, e.text);
       }
       seenGuardEventRef.current = Math.max(seenGuardEventRef.current, last);

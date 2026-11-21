@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
 import {
-  emptyGuardState, stepGuards, bracketVerdict, contractPricesFromBridges, EXIT_VERIFY_MS, LOCK_RESEND_MS, type PosView, type ServerBracket,
+  emptyGuardState, stepGuards, bracketVerdict, contractPricesFromBridges, EXIT_VERIFY_MS, LOCK_RETRY_MS, lockKey, type PosView, type ServerBracket,
   type ServerGuardState,
 } from './kotakGuardEngine.ts';
 
@@ -148,56 +148,87 @@ test('contract prices: nothing from a stale or undated file, and a zero or missi
 
 // ── Day lock (flatten on sight) ─────────────────────────────────────────────────────────────────────────────────────
 const lossGuard = { profit: 0, loss: 10_000, products: ['INTRADAY', 'MARGIN', 'CNC'], date: T };
+const LOCK = { lockOnLoss: true };
+const lockedState = (o: Partial<ServerGuardState> = {}) => st({ lock: { at: 1000, reason: 'limit', products: ['INTRADAY', 'MARGIN'] }, ...o });
 
-test('a fired LOSS limit locks the day; a fired profit target does not', () => {
-  const loss = stepGuards(st({ pnl: lossGuard }), [pos({ unrealized: -10_500 })], 5000, T);
+test('a fired LOSS limit locks the day only when the broker opts in; a profit target never locks', () => {
+  const loss = stepGuards(st({ pnl: lossGuard }), [pos({ unrealized: -10_500 })], 5000, T, LOCK);
   assert.ok(loss.state.lock, 'lock set');
   assert.deepStrictEqual(loss.state.lock?.products, lossGuard.products);
   assert.strictEqual(loss.exits.length, 1);
-  const win = stepGuards(st({ pnl: { ...lossGuard, loss: 0, profit: 500 } }), [pos({ unrealized: 900 })], 5000, T);
+  // Zerodha shares the engine but has no order gate or banner: no opt-in, no lock (the loss limit still exits).
+  const noOptIn = stepGuards(st({ pnl: lossGuard }), [pos({ unrealized: -10_500 })], 5000, T);
+  assert.strictEqual(noOptIn.exits.length, 1);
+  assert.ok(!noOptIn.state.lock);
+  const win = stepGuards(st({ pnl: { ...lossGuard, loss: 0, profit: 500 } }), [pos({ unrealized: 900 })], 5000, T, LOCK);
   assert.strictEqual(win.exits.length, 1);
   assert.ok(!win.state.lock, 'a profit target never locks');
 });
 
-test('while locked, a NEW position in scope is flattened at once, covers first', () => {
-  const locked = st({ lock: { at: 1000, reason: 'limit', products: ['INTRADAY', 'MARGIN'] } });
+test('the loss limit ignores carried legs: an old position\'s cumulative loss is not a day loss', () => {
+  const carried = pos({ symbol: 'OLD', netQty: 65, buyAvg: 300, sellAvg: 0, ltp: 100, unrealized: -13_000, productRaw: 'NRML', carried: true });
+  const r = stepGuards(st({ pnl: lossGuard }), [carried], 5000, T, LOCK);
+  assert.strictEqual(r.exits.length, 0);
+  assert.ok(!r.state.lock);
+  // Today's own losses still count, and the exit then takes every in-scope leg, the carried one included.
+  const both = stepGuards(st({ pnl: lossGuard }), [carried, pos({ unrealized: -10_500 })], 5000, T, LOCK);
+  assert.deepStrictEqual(both.exits.map(e => e.symbol).sort(), ['NIFTY26OCT24500CE', 'OLD']);
+});
+
+test('while locked, a NEW position in scope is flattened at once, covers first, tagged as a lock flatten', () => {
   const fresh = [
     pos({ symbol: 'A', netQty: 65, buyAvg: 100, sellAvg: 0, productRaw: 'NRML' }),
     pos({ symbol: 'B', netQty: -65, productRaw: 'NRML' }),
   ];
-  const r = stepGuards(locked, fresh, 9000, T);
-  assert.deepStrictEqual(r.exits.map(e => [e.symbol, e.phase]), [['B', 'cover-short'], ['A', 'sell-long']]);
+  const r = stepGuards(lockedState(), fresh, 9000, T);
+  assert.deepStrictEqual(r.exits.map(e => [e.symbol, e.phase, e.lock]), [['B', 'cover-short', true], ['A', 'sell-long', true]]);
   assert.strictEqual(r.state.watch.length, 2);
 });
 
-test('a locked day leaves a product outside the lock scope alone', () => {
-  const locked = st({ lock: { at: 1000, reason: 'limit', products: ['INTRADAY'] } });
-  assert.strictEqual(stepGuards(locked, [pos({ productRaw: 'NRML' })], 9000, T).exits.length, 0);
+test('a locked day leaves a carried leg and a product outside the lock scope alone', () => {
+  assert.strictEqual(stepGuards(lockedState(), [pos({ productRaw: 'NRML', carried: true })], 9000, T).exits.length, 0);
+  assert.strictEqual(stepGuards(lockedState({ lock: { at: 1, reason: 'x', products: ['INTRADAY'] } }), [pos({ productRaw: 'NRML' })], 9000, T).exits.length, 0);
 });
 
-test('a flatten that has not worked is re-sent at most every LOCK_RESEND_MS, never every tick', () => {
-  const locked = st({ lock: { at: 1000, reason: 'limit', products: ['INTRADAY'] } });
+test('a flatten is sent ONCE: an accepted order whose fill the book has not shown is never doubled', () => {
   const p = [pos()];
-  const first = stepGuards(locked, p, 10_000, T);
+  const first = stepGuards(lockedState(), p, 10_000, T);
   assert.strictEqual(first.exits.length, 1);
-  // 10 s verify window passes with the leg still open -> reported incomplete, watch dropped; the resend is still cooling down.
+  // The verify window passes with the leg still open: reported incomplete, and NOT sent again, however long it takes.
   const mid = stepGuards(first.state, p, 10_000 + EXIT_VERIFY_MS + 1, T);
   assert.ok(mid.state.events.some(e => e.kind === 'incomplete'));
-  assert.strictEqual(mid.exits.length, 0, 'inside the resend cooldown');
-  const later = stepGuards(mid.state, p, 10_000 + LOCK_RESEND_MS + 1, T);
-  assert.strictEqual(later.exits.length, 1, 'cooldown over: flatten again');
+  assert.strictEqual(mid.exits.length, 0);
+  for (const dt of [30_000, 120_000, 3_600_000]) assert.strictEqual(stepGuards(mid.state, p, 10_000 + dt, T).exits.length, 0, `still no resend after ${dt} ms`);
+});
+
+test('a flatten the broker REFUSED comes back after LOCK_RETRY_MS, and only then', () => {
+  const p = [pos()];
+  const first = stepGuards(lockedState(), p, 10_000, T);
+  // What the tick loop does on GuardExitRejected: schedule the retry and drop the watch entry.
+  const refused: ServerGuardState = { ...first.state, watch: [], lockRetry: { [lockKey('NIFTY26OCT24500CE', 'MIS')]: 10_000 + LOCK_RETRY_MS } };
+  assert.strictEqual(stepGuards(refused, p, 10_000 + LOCK_RETRY_MS - 1, T).exits.length, 0);
+  const again = stepGuards(refused, p, 10_000 + LOCK_RETRY_MS, T);
+  assert.strictEqual(again.exits.length, 1);
+  assert.strictEqual(again.state.lockRetry?.['NIFTY26OCT24500CE|INTRADAY'], undefined, 'the retry is consumed');
+});
+
+test('a contract that closed and is opened again later the same day is flattened again', () => {
+  const first = stepGuards(lockedState(), [pos()], 10_000, T);
+  const flat = stepGuards({ ...first.state, watch: [] }, [pos({ netQty: 0 })], 20_000, T);
+  assert.deepStrictEqual(flat.state.lockSent, {});
+  assert.strictEqual(stepGuards(flat.state, [pos()], 30_000, T).exits.length, 1);
 });
 
 test('the leg the loss limit just exited is not flattened a second time by the lock in the same tick', () => {
-  const r = stepGuards(st({ pnl: lossGuard }), [pos({ unrealized: -12_000 })], 5000, T);
+  const r = stepGuards(st({ pnl: lossGuard }), [pos({ unrealized: -12_000 })], 5000, T, LOCK);
   assert.strictEqual(r.exits.length, 1);
   assert.ok(r.state.lockSent?.['NIFTY26OCT24500CE|INTRADAY']);
 });
 
-test('a new trading day clears the lock and its resend memory', () => {
-  const old = st({ lock: { at: 1, reason: 'x', products: ['INTRADAY'] }, lockSent: { 'A|INTRADAY': 5 } });
+test('a new trading day clears the lock and its memory', () => {
+  const old = st({ lock: { at: 1, reason: 'x', products: ['INTRADAY'] }, lockSent: { 'A|INTRADAY': 5 }, lockRetry: { 'A|INTRADAY': 9 } });
   const r = stepGuards(old, [], 9000, '2026-10-18');
   assert.ok(!r.state.lock);
-  assert.deepStrictEqual(r.state.lockSent, {});
+  assert.deepStrictEqual([r.state.lockSent, r.state.lockRetry], [{}, {}]);
   assert.ok(r.state.events.some(e => e.kind === 'expired'));
 });

@@ -24,3 +24,10 @@ test('validate: enabling needs a level and a product; disabling needs neither', 
   assert.strictEqual(validateGuardDefaults({ enabled: true, loss: 5000, products: ['NRML'] }).ok, true);
   assert.strictEqual(validateGuardDefaults({ enabled: false }).ok, true);
 });
+
+test('validate: a request that does not say enabled is refused, never read as "off"', () => {
+  for (const body of [{ loss: 15000, products: ['MIS'] }, { enabled: 'yes', loss: 15000, products: ['MIS'] }, { enabled: undefined, loss: 1 }]) {
+    const r = validateGuardDefaults(body);
+    assert.strictEqual(r.ok, false);
+  }
+});

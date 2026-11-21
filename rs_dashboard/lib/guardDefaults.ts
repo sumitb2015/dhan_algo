@@ -35,7 +35,9 @@ export function validateGuardDefaults(body: Record<string, unknown>): { ok: true
   const loss = Math.abs(num(body.loss)) || 0;
   const profit = Math.abs(num(body.profit)) || 0;
   const products = Array.isArray(body.products) ? [...new Set(body.products.map(p => guardProductOf(p)).filter(Boolean))] : [];
-  const enabled = body.enabled === true;
+  // The switch must be said outright: a request that only changes the level must not silently turn the daily guard off.
+  if (typeof body.enabled !== 'boolean') return { ok: false, error: 'enabled (true or false) is required' };
+  const enabled = body.enabled;
   // Disabling needs no levels; enabling must be a guard that could actually fire.
   if (enabled) {
     const err = validateSoftPnlGuard(profit, loss, products);
