@@ -278,6 +278,7 @@ export default function MomentumSimulationReplay({
   });
 
   const [stopPct, setStopPct] = useState<number>(() => defaultStopFor(activeStrategy));
+  const [slotsDraft, setSlotsDraft] = useState<string>(String(initialSlots));
   const [sectorCap, setSectorCap] = useState<number>(2);
   const [sectorDraft, setSectorDraft] = useState<string>('2');
   const [stopDraft, setStopDraft] = useState<string>(() => String(defaultStopFor(activeStrategy)));
@@ -415,6 +416,21 @@ export default function MomentumSimulationReplay({
     if (v !== stopPct) {
       setStopPct(v);
       fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, v);
+    }
+  };
+
+  // Slots = the most stocks held at once; capital is split across them. Commit on blur/Enter, whole number 1-30.
+  const commitSlots = () => {
+    const n = Math.round(Number(slotsDraft));
+    if (!Number.isFinite(n) || n < 1) {
+      setSlotsDraft(String(slots));
+      return;
+    }
+    const v = Math.min(30, n);
+    setSlotsDraft(String(v));
+    if (v !== slots) {
+      setSlots(v);
+      fetchSimulation(startDate, endDate, capital, v, strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh);
     }
   };
 
@@ -758,6 +774,29 @@ export default function MomentumSimulationReplay({
                 Reset
               </button>
             )}
+          </div>
+
+          <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+            <Info tip="Maximum number of stocks held at once. Capital is split across the slots, so fewer slots means bigger positions and more concentration; more slots means smaller, more diversified positions. 10 is the default. Applied when you press Enter or leave the box.">
+              <span className="cursor-help underline decoration-dotted decoration-zinc-600 underline-offset-2">
+                Slots:
+              </span>
+            </Info>
+            <input
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={30}
+              step={1}
+              value={slotsDraft}
+              aria-label="Maximum number of stocks held"
+              onChange={(e) => setSlotsDraft(e.target.value)}
+              onBlur={commitSlots}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+              }}
+              className="w-12 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs font-mono text-right focus:outline-none focus:border-emerald-500"
+            />
           </div>
 
           <div className="flex items-center gap-1.5 text-xs text-zinc-400">
