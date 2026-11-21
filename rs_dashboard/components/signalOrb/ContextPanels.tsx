@@ -1,6 +1,8 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { cn } from '@/lib/utils';
+import { MarketTab, OiTab } from '@/components/signalOrb/MarketPanels';
 import { istClock } from '@/lib/istTime';
 import { istDateIso } from '@/lib/nseHolidays';
 import type { KeyLevels, MtfTable, SignalChange } from '@/lib/signalOrbPanels';
@@ -136,5 +138,50 @@ export function LevelsPanel({ levels, price, today }: { levels: KeyLevels | null
         ))}
       </dl>
     </Panel>
+  );
+}
+
+// ── Tabs ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+type TabId = 'tech' | 'market' | 'oi';
+const TABS: { id: TabId; label: string }[] = [{ id: 'tech', label: 'Technical' }, { id: 'market', label: 'Market' }, { id: 'oi', label: 'OI' }];
+const TAB_KEY = 'signalOrb.contextTab';
+
+/** The context column: Technical (timeframes, history, levels), Market (indices, heavyweights) and OI. Only the open tab polls. */
+export function ContextTabs({ mtf, active, history, levels, price, today, symbol, signal }: {
+  mtf: MtfTable | null; active: Timeframe; history: SignalChange[]; levels: KeyLevels | null; price: number | null; today: string;
+  symbol: string; signal: Signal;
+}) {
+  const [tab, setTab] = useState<TabId>('tech');
+  // the saved choice is read after mount (never during render), so the first render matches the server's
+  useEffect(() => {
+    const t = setTimeout(() => {
+      try { const v = localStorage.getItem(TAB_KEY); if (v === 'tech' || v === 'market' || v === 'oi') setTab(v); } catch { /* default tab */ }
+    }, 0);
+    return () => clearTimeout(t);
+  }, []);
+  const pick = (id: TabId) => { setTab(id); try { localStorage.setItem(TAB_KEY, id); } catch { /* best effort */ } };
+  return (
+    <div className="flex flex-col gap-3">
+      <div role="tablist" aria-label="Context" className="inline-flex self-start rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+        {TABS.map(t => (
+          <button key={t.id} id={`orb-tab-${t.id}`} type="button" role="tab" aria-selected={tab === t.id} aria-controls="orb-tabpanel" onClick={() => pick(t.id)}
+            className={cn('rounded-md px-3 py-1 text-xs font-bold focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500', tab === t.id ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:text-zinc-200')}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      <div id="orb-tabpanel" role="tabpanel" aria-labelledby={`orb-tab-${tab}`} className="flex flex-col gap-3">
+        {tab === 'tech' && (
+          <>
+            <MtfPanel table={mtf} active={active} />
+            <HistoryPanel history={history} today={today} />
+            <LevelsPanel levels={levels} price={price} today={today} />
+          </>
+        )}
+        {tab === 'market' && <MarketTab symbol={symbol} price={price} />}
+        {tab === 'oi' && <OiTab symbol={symbol} signal={signal} />}
+      </div>
+    </div>
   );
 }

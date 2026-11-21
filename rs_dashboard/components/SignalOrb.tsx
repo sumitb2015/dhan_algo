@@ -12,7 +12,7 @@ import { istDateIso } from '@/lib/nseHolidays';
 import { expiryLabel } from '@/lib/pnfTarget';
 import { cn } from '@/lib/utils';
 import { type EffectiveStopResult } from '@/lib/signalOrb';
-import { HistoryPanel, LevelsPanel, MtfPanel } from '@/components/signalOrb/ContextPanels';
+import { ContextTabs } from '@/components/signalOrb/ContextPanels';
 import { isStuck, type OrbConfig, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 
 // /signal-orb: one orb, one switch. A CRUDEOIL / CRUDEOILM / NIFTY future's closed bars give the consensus of the active indicators —
@@ -273,9 +273,8 @@ export default function SignalOrb() {
 
       {ledger && (
         <aside aria-label="Context" className="flex flex-col gap-3 px-4 pb-4 lg:py-4 lg:pl-0 lg:pr-4">
-          <MtfPanel table={e.mtf} active={e.tf} />
-          <HistoryPanel history={e.history} today={e.today} />
-          <LevelsPanel levels={e.levels} price={e.price} today={e.today} />
+          <ContextTabs mtf={e.mtf} active={e.tf} history={e.history} levels={e.levels} price={e.price} today={e.today}
+            symbol={ledger.config.symbol} signal={ev.signal} />
         </aside>
       )}
       </div>

@@ -127,3 +127,73 @@ export function keyLevels(bars1m: Bar1m[]): KeyLevels | null {
     prevClose, prevHigh: prevClose === null ? null : prevHigh, prevLow: prevClose === null ? null : prevLow,
   };
 }
+
+// ── Market context (information only) ────────────────────────────────────────────────────────────────────────────────────
+
+export type WeightRow = { symbol: string; name: string; weight: number };
+export type EquityQuote = { ltp?: number; change_pct?: number | null };
+export type PullRow = WeightRow & { changePct: number; pts: number };
+export type HeavyweightPull = {
+  /** Index points the covered names are adding (+) or taking (−): sum of weight% x their % change x the index level. */
+  pts: number;
+  up: number;
+  down: number;
+  /** Combined index weight of the names that had a quote, percent. */
+  covered: number;
+  rows: PullRow[];
+};
+
+/**
+ * How much the heaviest index names are pulling the index: each contributes (weight / 100) x its % change x `level` points. A
+ * name with no quote is left out and `covered` says how much of the weight that leaves. null when none has a quote or the level is unknown.
+ */
+export function heavyweightPull(weights: WeightRow[], quotes: Record<string, EquityQuote | undefined>, level: number | null): HeavyweightPull | null {
+  if (!(level && level > 0)) return null;
+  const rows: PullRow[] = [];
+  for (const w of weights) {
+    const c = quotes[w.symbol]?.change_pct;
+    if (typeof c !== 'number' || !Number.isFinite(c)) continue;
+    rows.push({ ...w, changePct: c, pts: (w.weight / 100) * (c / 100) * level });
+  }
+  if (!rows.length) return null;
+  return {
+    pts: rows.reduce((s, r) => s + r.pts, 0),
+    up: rows.filter(r => r.changePct > 0).length,
+    down: rows.filter(r => r.changePct < 0).length,
+    covered: rows.reduce((s, r) => s + r.weight, 0),
+    rows: rows.sort((a, b) => Math.abs(b.pts) - Math.abs(a.pts)),
+  };
+}
+
+export type OiPoint = { ts: number; spot: number; ceOI: number; peOI: number };
+export type OiSummary = {
+  ceOI: number;
+  peOI: number;
+  /** Put OI / call OI over the strikes read; null when call OI is 0. */
+  pcr: number | null;
+  /** Change since the first point of the day, in contracts. */
+  ceChange: number;
+  peChange: number;
+};
+
+/** Latest cumulative call / put OI over the strikes read, the put-call ratio, and how each side moved since the first point. */
+export function oiSummary(points: OiPoint[]): OiSummary | null {
+  if (!points.length) return null;
+  const first = points[0], last = points[points.length - 1];
+  return {
+    ceOI: last.ceOI, peOI: last.peOI, pcr: last.ceOI > 0 ? last.peOI / last.ceOI : null,
+    ceChange: last.ceOI - first.ceOI, peChange: last.peOI - first.peOI,
+  };
+}
+
+/** The OI tool's regime label -> a side. Only a confirmed Bullish / Bearish counts; pending, neutral and warming up are no side. */
+export function oiSide(label: string | undefined, confirmed: boolean | undefined): Signal {
+  if (!label || !confirmed) return 'NEUTRAL';
+  return label.includes('Bullish') ? 'BULL' : label.includes('Bearish') ? 'BEAR' : 'NEUTRAL';
+}
+
+/** Does the OI regime back the orb? 'none' when either side has no opinion. */
+export function oiAgreement(orb: Signal, oi: Signal): 'agree' | 'conflict' | 'none' {
+  if (orb === 'NEUTRAL' || oi === 'NEUTRAL') return 'none';
+  return orb === oi ? 'agree' : 'conflict';
+}
