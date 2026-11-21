@@ -1,7 +1,7 @@
 """
 Nifty 500 Momentum Investing Portfolio — autonomous positional equity strategy.
 
-Holds up to N momentum stocks ranked by composite relative strength versus the Nifty 50.
+Holds up to N momentum stocks ranked by composite relative strength versus the Nifty 500.
 Exits on a trailing stop ladder or a rank-rotation review; freed capital is redeployed into
 the next qualifying names at the following weekly review.
 
@@ -51,7 +51,7 @@ from lib.algo_kit import setup_strategy_logging  # noqa: E402
 from lib import data_quality, minervini                                                # noqa: E402
 from lib.momentum import (                                               # noqa: E402
     MomentumConfig, Position, STAGE_TRAIL,
-    build_regime_weekly, build_rs_matrix, build_tables,
+    build_regime_daily, build_rs_matrix, build_tables,
     load_benchmark, load_price_map, load_universe,
     latest_data_date, rank_rotation_exits, rank_universe, ranks_by_symbol,
     select_candidates, size_position, passes_entry_filters, sector_counts,
@@ -259,7 +259,7 @@ class MomentumPortfolioStrategy:
         logger.info("Loading universe and price history...")
         self.universe = load_universe(self.cfg.universe)
         self.industries = {u["symbol"]: u["industry"] for u in self.universe}
-        self.bench = load_benchmark()
+        self.bench = load_benchmark(self.cfg.benchmark)
         self.price_map = load_price_map([u["symbol"] for u in self.universe],
                                         min_bars=self.cfg.min_history_bars)
         if not self.price_map:
@@ -273,7 +273,7 @@ class MomentumPortfolioStrategy:
                                f"may be wrong; repair with scripts/downloader/repair_symbol_history.py")
 
         self.tables = build_tables(self.price_map, self.cfg)
-        self.calendar = build_regime_weekly(self.bench, self.cfg)
+        self.calendar = build_regime_daily(self.bench, self.cfg)
         self.data_date = latest_data_date(self.price_map)
 
         # Freshness guard. This strategy ranks off the same CSVs the dashboard reads; if the
@@ -742,6 +742,10 @@ Examples:
     p.add_argument("--sell-rank-limit", type=int, default=25)
     p.add_argument("--sector-cap", type=int, default=2)
     p.add_argument("--max-new-per-review", type=int, default=None)
+    p.add_argument("--benchmark", choices=["nifty50", "nifty500"], default="nifty50",
+                   help="benchmark index for RS ranking and regime: nifty50 (proven default) or nifty500")
+    p.add_argument("--regime-interval", choices=["weekly", "daily"], default="weekly",
+                   help="regime check frequency: weekly (prior week close, proven default) or daily")
     p.add_argument("--no-regime-exit", action="store_true",
                    help="stay invested when the regime turns off (still blocks new buys)")
     p.add_argument("--no-regime", action="store_true",
@@ -749,7 +753,7 @@ Examples:
                         "Backtested 2019-2026: near-identical CAGR (13.35%% vs 13.63%%) but max "
                         "drawdown worsens from -13.1%% to -18.1%%")
     p.add_argument("--regime-sma", type=int, default=200,
-                   help="weekly Nifty close vs this SMA (default 200)")
+                   help="daily Nifty 500 close vs this SMA (default 200)")
     p.add_argument("--instance-id", default=None,
                    help="run a second independent instance under its own state files")
     args = p.parse_args()
@@ -764,6 +768,8 @@ Examples:
         stop_pct=args.stop, target_pct=target, trail_pct=args.trail_pct,
         buy_rank_limit=args.buy_rank_limit, sell_rank_limit=args.sell_rank_limit,
         sector_cap=args.sector_cap, max_new_per_review=args.max_new_per_review,
+        benchmark=args.benchmark,
+        regime_interval=args.regime_interval,
         regime_exit=not args.no_regime_exit,
         regime_enabled=not args.no_regime,
         regime_sma=args.regime_sma, breakout_days=breakout_days,
@@ -790,7 +796,8 @@ Examples:
     logger.info(f"  Entry       : rank<={cfg.buy_rank_limit}, {cfg.breakout_days}d breakout, "
                 f"sector cap {cfg.sector_cap}")
     if cfg.regime_enabled:
-        logger.info(f"  Regime      : weekly Nifty > {cfg.regime_sma} SMA"
+        bench_label = "Nifty 50" if cfg.benchmark == "nifty50" else "Nifty 500"
+        logger.info(f"  Regime      : {cfg.regime_interval} {bench_label} > {cfg.regime_sma} SMA"
                     f"{', liquidate when off' if cfg.regime_exit else ', stay invested when off'}")
     else:
         logger.warning("  Regime      : DISABLED — no market filter. The strategy will stay "

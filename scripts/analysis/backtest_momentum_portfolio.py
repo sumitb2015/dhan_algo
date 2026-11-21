@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 from lib.momentum import (  # noqa: E402
     MomentumConfig, Position,
-    build_regime_weekly, build_rs_matrix, build_tables,
+    build_regime_daily, build_rs_matrix, build_tables,
     load_benchmark, load_price_map, load_universe,
     rank_rotation_exits, rank_universe, ranks_by_symbol, select_candidates, size_position,
 )
@@ -136,12 +136,12 @@ def run_backtest(cfg: MomentumConfig, start: date, end: Optional[date] = None,
     else:
         universe = load_universe(cfg.universe)
         symbols = [u["symbol"] for u in universe]
-        bench = load_benchmark()
+        bench = load_benchmark(cfg.benchmark)
         price_map = load_price_map(symbols, min_bars=cfg.min_history_bars)
 
     industries = {u["symbol"]: u["industry"] for u in universe}
     tables = build_tables(price_map, cfg)
-    calendar = build_regime_weekly(bench, cfg)
+    calendar = build_regime_daily(bench, cfg)
     # Built once and reused on every review day: rank_universe would otherwise rebuild the
     # benchmark-aligned close matrix ~370 times over a 7-year run.
     rs_matrix = build_rs_matrix(price_map, bench)
@@ -323,8 +323,9 @@ def print_report(res: BacktestResult, fd_rate: float = 6.45) -> None:
     new_cap = "free slots" if cfg.max_new_per_review is None else f"{cfg.max_new_per_review}"
     print(f"  Rotation        : sell if rank>{cfg.sell_rank_limit} for {cfg.sell_rank_strikes} reviews, "
           f"min hold {cfg.min_hold_days}d, max new/review: {new_cap}")
+    bench_label = "Nifty 50" if cfg.benchmark == "nifty50" else "Nifty 500"
     print("  Regime          : " + ("DISABLED (always invested)" if not cfg.regime_enabled else
-          f"weekly Nifty > {cfg.regime_sma} SMA"
+          f"{cfg.regime_interval} {bench_label} > {cfg.regime_sma} SMA"
           f"{', liquidate when off' if cfg.regime_exit else ', stay invested when off'}"))
     print(f"  Costs           : {cfg.fee_pct:g}% + Rs {cfg.fixed_fee:g}/order + "
           f"{cfg.slippage_pct:g}% slippage, per side")
@@ -333,7 +334,7 @@ def print_report(res: BacktestResult, fd_rate: float = 6.45) -> None:
     # Fixed deposit is the honest do-nothing alternative for a multi-year investing system.
     fd_final = cfg.capital * (1 + fd_rate / 100.0) ** s["years"]
     fd_return = (fd_final / cfg.capital - 1.0) * 100.0
-    print(f"  {'':<20}{'STRATEGY':>13}{'NIFTY 50':>13}{'FD @' + f'{fd_rate:g}%':>13}")
+    print(f"  {'':<20}{'STRATEGY':>13}{'NIFTY 500':>13}{'FD @' + f'{fd_rate:g}%':>13}")
     print(f"  {'Total return':<20}{s['total_return_pct']:>12.2f}%{s['bench_return_pct']:>12.2f}%{fd_return:>12.2f}%")
     print(f"  {'CAGR':<20}{s['cagr_pct']:>12.2f}%{s['bench_cagr_pct']:>12.2f}%{fd_rate:>12.2f}%")
     print(f"  {'Max drawdown':<20}{s['max_drawdown_pct']:>12.2f}%{s['bench_max_drawdown_pct']:>12.2f}%{0.0:>12.2f}%")
@@ -370,7 +371,7 @@ def print_report(res: BacktestResult, fd_rate: float = 6.45) -> None:
     print("\n  READING THE REPORT")
     alpha = s["total_return_pct"] - s["bench_return_pct"]
     verdict = "BEAT" if alpha > 0 else "UNDERPERFORMED"
-    print(f"  * {verdict} the Nifty 50 by {abs(alpha):.2f}% over the period.")
+    print(f"  * {verdict} the Nifty 500 by {abs(alpha):.2f}% over the period.")
     if s["cagr_pct"] > fd_rate:
         print(f"  * CAGR {s['cagr_pct']:.2f}% beats a {fd_rate:g}% FD by "
               f"{s['cagr_pct'] - fd_rate:.2f}%/yr — the risk is being paid for.")
@@ -456,9 +457,9 @@ def write_excel(res: BacktestResult, path: str) -> Optional[str]:
             "Sharpe": round(s["sharpe"], 2),
             "Sortino": round(s["sortino"], 2),
             "Calmar": round(s["calmar"], 2),
-            "Nifty 50 return %": round(s["bench_return_pct"], 2),
-            "Nifty 50 CAGR %": round(s["bench_cagr_pct"], 2),
-            "Nifty 50 max DD %": round(s["bench_max_drawdown_pct"], 2),
+            "Nifty 500 return %": round(s["bench_return_pct"], 2),
+            "Nifty 500 CAGR %": round(s["bench_cagr_pct"], 2),
+            "Nifty 500 max DD %": round(s["bench_max_drawdown_pct"], 2),
             "Trades": s["trades"],
             "Win rate %": round(s["win_rate_pct"], 2),
             "Profit factor": round(s["profit_factor"], 2),
@@ -496,7 +497,7 @@ def _returns_series(res: BacktestResult) -> Tuple[pd.Series, pd.Series]:
     b = res.bench.copy()
     b.index = pd.to_datetime(b["date"])
     bench = b["close"].reindex(strat.index).ffill().bfill().pct_change().fillna(0.0)
-    bench.name = "NIFTY 50"
+    bench.name = "NIFTY 500"
     return strat, bench
 
 
@@ -683,12 +684,16 @@ def main() -> None:
                    help="zero all costs (comparable to the older backtest_nifty50_rs_v*.py)")
     p.add_argument("--fd-rate", type=float, default=6.45,
                    help="fixed-deposit %%%% p.a. to compare against (default 6.45)")
+    p.add_argument("--benchmark", choices=["nifty50", "nifty500"], default="nifty50",
+                   help="benchmark index for RS ranking and regime: nifty50 (proven default) or nifty500")
+    p.add_argument("--regime-interval", choices=["weekly", "daily"], default="weekly",
+                   help="regime check frequency: weekly (prior week close, proven default) or daily")
     p.add_argument("--no-regime-exit", action="store_true",
                    help="stay invested when the regime turns off (still blocks new buys)")
     p.add_argument("--no-regime", action="store_true",
                    help="disable the market filter entirely — always fully invested")
     p.add_argument("--regime-sma", type=int, default=200,
-                   help="weekly Nifty close vs this SMA (default 200)")
+                   help="daily Nifty 500 close vs this SMA (default 200)")
     p.add_argument("--no-breakout-confirm", action="store_true")
     p.add_argument("--sweep", action="store_true", help="one-at-a-time parameter ablation")
     p.add_argument("--excel", default=None, help="output path (default debug/momentum_backtest.xlsx)")
@@ -717,6 +722,8 @@ def main() -> None:
         fee_pct=0.0 if args.no_costs else args.fee_pct,
         fixed_fee=0.0 if args.no_costs else args.fixed_fee,
         slippage_pct=0.0 if args.no_costs else args.slippage_pct,
+        benchmark=args.benchmark,
+        regime_interval=args.regime_interval,
         regime_exit=not args.no_regime_exit,
         regime_enabled=not args.no_regime,
         regime_sma=args.regime_sma,

@@ -1,17 +1,17 @@
 ## Summary
 
 Positional, multi-day, CNC-delivery equity portfolio — the only strategy of this kind in the
-repo. Ranks the Nifty 500 by composite relative strength versus the Nifty 50, holds up to 10
+repo. Ranks the Nifty 500 by composite relative strength versus the Nifty 500, holds up to 10
 names, and rotates via a trailing stop ladder or a weekly rank review. Regime-gated by default
-(only buys while the Nifty 50 is above its weekly 200 SMA). Backtested 2019–2026: CAGR 13.63%,
+(only buys while the Nifty 500 is above its daily 200 SMA). Backtested 2019–2026: CAGR 13.63%,
 max drawdown −13.07%, Sharpe 1.16. **Stopping this strategy does NOT flatten the book** — it
 exits cleanly and leaves holdings in place for the next start to reload.
 
 ## Entry
 
 All must hold at the weekly review:
-1. Regime ON (previous week's Nifty 50 close above its 200 SMA — disable with `--no-regime`).
-2. Composite RS rank ≤ 20 (weighted blend of 10/21/63/126-day relative strength vs Nifty 50; the 63-day term dominates).
+1. Regime ON (daily Nifty 500 close above its 200 SMA — disable with `--no-regime`).
+2. Composite RS rank ≤ 20 (weighted blend of 10/21/63/126-day relative strength vs Nifty 500; the 63-day term dominates).
 3. `Close > EMA20 > EMA50 > EMA200`.
 4. Close above the 55-day closing high, confirmed by two consecutive closes.
 5. Volume above its 20-day average (skipped gracefully if volume data is unavailable).

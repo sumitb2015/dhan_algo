@@ -41,6 +41,8 @@ interface ReplayParams {
   breakoutDays: number;
   strategy: string;
   stopPct: number;
+  benchmark: 'nifty50' | 'nifty500';
+  regimeInterval: 'weekly' | 'daily';
 }
 
 function parseParams(get: (k: string) => unknown): ReplayParams | { error: string } {
@@ -48,6 +50,8 @@ function parseParams(get: (k: string) => unknown): ReplayParams | { error: strin
   const end = sanitizeDate(get('end') as string, '2026-11-20');
   if (start > end) return { error: 'Start date cannot be after end date' };
   const strategy = sanitizeStrategy(get('strategy') as string);
+  const benchmark = String(get('benchmark') || 'nifty50').toLowerCase() === 'nifty500' ? 'nifty500' : 'nifty50';
+  const regimeInterval = String(get('regime_interval') || get('regimeInterval') || 'weekly').toLowerCase() === 'daily' ? 'daily' : 'weekly';
   return {
     start,
     end,
@@ -57,12 +61,16 @@ function parseParams(get: (k: string) => unknown): ReplayParams | { error: strin
     breakoutDays: Math.max(5, Math.min(100, Number(get('breakout_days')) || 55)),
     strategy,
     stopPct: sanitizeStop(get('stop_pct'), strategy),
+    benchmark,
+    regimeInterval,
   };
 }
 
 /** Cache filename. Every suffix must mirror run_replay_simulation() in simulate_momentum_replay.py exactly. */
 function cacheFileFor(p: ReplayParams): string {
   const regimeSuffix = p.regimeEnabled ? '' : '_no_regime';
+  const benchSuffix = p.benchmark === 'nifty500' ? '_nifty500' : '';
+  const intervalSuffix = p.regimeInterval === 'daily' ? '_daily' : '';
   let boSuffix: string;
   if (p.strategy === 'clenow') boSuffix = '';
   else if (p.strategy === 'minervini') boSuffix = p.breakoutDays === 20 || p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
@@ -72,7 +80,7 @@ function cacheFileFor(p: ReplayParams): string {
   const stratPrefix = p.strategy !== 'turtle_rs' ? `${p.strategy}_` : '';
   return path.join(
     REPLAYS_DIR,
-    `replay_${stratPrefix}${p.start}_${p.end}_${Math.round(p.capital)}_${p.slots}${regimeSuffix}${boSuffix}${slSuffix}.json`,
+    `replay_${stratPrefix}${p.start}_${p.end}_${Math.round(p.capital)}_${p.slots}${regimeSuffix}${benchSuffix}${intervalSuffix}${boSuffix}${slSuffix}.json`,
   );
 }
 
@@ -85,6 +93,8 @@ async function runReplay(p: ReplayParams, force: boolean) {
     '--capital', String(p.capital),
     '--slots', String(p.slots),
     '--strategy', p.strategy,
+    '--benchmark', p.benchmark,
+    '--regime-interval', p.regimeInterval,
     '--regime', String(p.regimeEnabled),
     '--breakout-days', String(p.breakoutDays),
     '--stop-pct', String(p.stopPct),
@@ -125,10 +135,26 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    const body = await request.json().catch(() => ({}));
+    if (body?.action === 'clear_cache') {
+      let count = 0;
+      if (fs.existsSync(REPLAYS_DIR)) {
+        for (const f of fs.readdirSync(REPLAYS_DIR)) {
+          if (f.startsWith('replay_') && f.endsWith('.json')) {
+            try {
+              fs.unlinkSync(path.join(REPLAYS_DIR, f));
+              count++;
+            } catch {}
+          }
+        }
+      }
+      return NextResponse.json({ success: true, message: `Cleared ${count} cached replay files.`, cleared: count });
+    }
+
     const p = parseParams((k) => body?.[k]);
     if ('error' in p) return NextResponse.json({ success: false, error: p.error }, { status: 400 });
-    return await respond(p, true);
+    const force = body?.force !== false;
+    return await respond(p, force);
   } catch (e) {
     return NextResponse.json({ success: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }

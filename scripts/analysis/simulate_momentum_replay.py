@@ -34,7 +34,7 @@ from lib import minervini, fifty_two_week, clenow, data_quality      # noqa: E40
 from lib.momentum import (
     MomentumConfig, Position,
     STAGE_INITIAL, STAGE_BREAKEVEN, STAGE_TRAIL,
-    build_regime_weekly, build_rs_matrix, build_tables,
+    build_regime_daily, build_rs_matrix, build_tables,
     load_benchmark, load_price_map, load_universe,
     rank_rotation_exits, rank_universe, ranks_by_symbol,
     select_candidates, size_position, passes_entry_filters, sector_counts,
@@ -116,6 +116,8 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
 
     os.makedirs(REPLAYS_DIR, exist_ok=True)
     regime_suffix = "" if cfg.regime_enabled else "_no_regime"
+    bench_suffix = "" if getattr(cfg, "benchmark", "nifty50") == "nifty50" else f"_{cfg.benchmark}"
+    interval_suffix = "" if getattr(cfg, "regime_interval", "weekly") == "weekly" else f"_{cfg.regime_interval}"
     if strategy == "clenow":
         bo_suffix = ""
     elif strategy == "minervini":
@@ -129,13 +131,13 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
     bo_suffix += stop_suffix(strategy, cfg.stop_pct)
 
     cache_file = os.path.join(
-        REPLAYS_DIR, f"replay_{strat_prefix}{start}_{end}_{int(cfg.capital)}_{cfg.slots}{regime_suffix}{bo_suffix}.json"
+        REPLAYS_DIR, f"replay_{strat_prefix}{start}_{end}_{int(cfg.capital)}_{cfg.slots}{regime_suffix}{bench_suffix}{interval_suffix}{bo_suffix}.json"
     )
 
     # Legacy cache (turtle_rs files written before the strategy prefix existed). No other fallback: serving a
     # file from a different setting (bo / stop / regime) would silently show the wrong replay.
     legacy_file = os.path.join(
-        REPLAYS_DIR, f"replay_{start}_{end}_{int(cfg.capital)}_{cfg.slots}{regime_suffix}{bo_suffix}.json"
+        REPLAYS_DIR, f"replay_{start}_{end}_{int(cfg.capital)}_{cfg.slots}{regime_suffix}{bench_suffix}{interval_suffix}{bo_suffix}.json"
     )
     target_cache = cache_file if os.path.exists(cache_file) else (
         legacy_file if strategy == "turtle_rs" and os.path.exists(legacy_file) else None)
@@ -152,7 +154,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
     universe = load_universe(cfg.universe)
     symbols = [u["symbol"] for u in universe]
     industries = {u["symbol"]: u["industry"] for u in universe}
-    bench = load_benchmark()
+    bench = load_benchmark(getattr(cfg, "benchmark", "nifty50"))
     price_map = load_price_map(symbols, min_bars=cfg.min_history_bars)
     data_warnings = data_quality.find_suspect_breaks(price_map, bench=bench)
     for w in data_warnings:
@@ -160,7 +162,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
               f"looks like an unadjusted corporate action; repair with scripts/downloader/repair_symbol_history.py")
 
     tables = build_tables(price_map, cfg)
-    calendar = build_regime_weekly(bench, cfg)
+    calendar = build_regime_daily(bench, cfg)
     rs_matrix = build_rs_matrix(price_map, bench)
 
     # Enrich tables conditionally based on selected strategy (fast vectorized)
@@ -540,12 +542,28 @@ def main():
     p.add_argument("--slots", type=int, default=10)
     p.add_argument("--universe", choices=["nifty500", "nifty50"], default="nifty500")
     p.add_argument("--strategy", choices=["turtle_rs", "minervini", "52w_high", "clenow"], default="turtle_rs", help="Strategy to simulate")
-    p.add_argument("--regime", type=lambda x: str(x).lower() in ("true", "1", "yes"), default=True, help="Enable 200-SMA weekly regime filter")
+    p.add_argument("--benchmark", choices=["nifty50", "nifty500"], default="nifty50", help="Benchmark index for RS and regime (default nifty50)")
+    p.add_argument("--regime-interval", choices=["weekly", "daily"], default="weekly", help="Regime check frequency: weekly (prior week close) or daily (default weekly)")
+    p.add_argument("--regime", type=lambda x: str(x).lower() in ("true", "1", "yes"), default=True, help="Enable 200-SMA regime filter")
     p.add_argument("--no-regime", dest="regime", action="store_false", help="Disable regime filter (always ON)")
     p.add_argument("--breakout-days", type=int, default=55, help="Donchian breakout lookback days (default 55)")
     p.add_argument("--stop-pct", type=float, default=None, help="Stop-loss distance in %% (default: 12, Clenow 10)")
     p.add_argument("--force", action="store_true", help="force recomputation even if cached")
+    p.add_argument("--clear-cache", action="store_true", help="Delete all cached replay json files and exit")
     args = p.parse_args()
+
+    if args.clear_cache:
+        count = 0
+        if os.path.exists(REPLAYS_DIR):
+            for f in os.listdir(REPLAYS_DIR):
+                if f.startswith("replay_") and f.endswith(".json"):
+                    try:
+                        os.remove(os.path.join(REPLAYS_DIR, f))
+                        count += 1
+                    except Exception:
+                        pass
+        print(f"Cleared {count} cached replay files in {REPLAYS_DIR}")
+        return
 
     start_date = datetime.strptime(args.start, "%Y-%m-%d").date()
     end_date = datetime.strptime(args.end, "%Y-%m-%d").date()
@@ -553,6 +571,8 @@ def main():
         universe=args.universe,
         capital=args.capital,
         slots=args.slots,
+        benchmark=args.benchmark,
+        regime_interval=args.regime_interval,
         regime_enabled=args.regime,
         breakout_days=args.breakout_days,
         stop_pct=args.stop_pct if args.stop_pct is not None else default_stop_pct(args.strategy),

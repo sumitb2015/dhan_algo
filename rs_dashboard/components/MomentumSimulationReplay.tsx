@@ -4,7 +4,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Play, Pause, SkipBack, SkipForward, ChevronLeft, ChevronRight,
   RefreshCw, TrendingUp, TrendingDown, AlertTriangle, CheckCircle2,
-  Calendar, Layers, ShieldCheck, Clock
+  Calendar, Layers, ShieldCheck, Clock, Trash2
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 
@@ -241,6 +241,11 @@ export default function MomentumSimulationReplay({
   const [capital, setCapital] = useState(initialCapital);
   const [slots, setSlots] = useState(initialSlots);
   const [regimeEnabled, setRegimeEnabled] = useState(true);
+  const [benchmark, setBenchmark] = useState<'nifty50' | 'nifty500'>('nifty50');
+  const [regimeInterval, setRegimeInterval] = useState<'weekly' | 'daily'>('weekly');
+  const [forceFresh, setForceFresh] = useState(false);
+  const [clearingCache, setClearingCache] = useState(false);
+  const [cacheNotice, setCacheNotice] = useState<string | null>(null);
   const [strategy, setStrategy] = useState(activeStrategy);
   const [breakoutDays, setBreakoutDays] = useState<number>(() => {
     if (activeStrategy === 'minervini') return 20;
@@ -267,15 +272,33 @@ export default function MomentumSimulationReplay({
     strat: string = strategy,
     reg: boolean = regimeEnabled,
     bo: number = breakoutDays,
-    sl: number = stopPct
+    sl: number = stopPct,
+    bench: 'nifty50' | 'nifty500' = benchmark,
+    interval: 'weekly' | 'daily' = regimeInterval,
+    force: boolean = forceFresh
   ) => {
     setLoading(true);
     setError(null);
     setIsPlaying(false);
     try {
-      const qs = `?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&capital=${cap}&slots=${slt}&strategy=${encodeURIComponent(strat)}&regime=${reg}&breakout_days=${bo}&stop_pct=${sl}`;
-      const res = await fetch(`/api/momentum/simulation${qs}`);
-      const json = await res.json();
+      let json;
+      if (force) {
+        const res = await fetch(`/api/momentum/simulation`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            start, end, capital: cap, slots: slt,
+            strategy: strat, regime: reg, breakout_days: bo,
+            stop_pct: sl, benchmark: bench, regime_interval: interval,
+            force: true,
+          }),
+        });
+        json = await res.json();
+      } else {
+        const qs = `?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&capital=${cap}&slots=${slt}&strategy=${encodeURIComponent(strat)}&regime=${reg}&breakout_days=${bo}&stop_pct=${sl}&benchmark=${bench}&regime_interval=${interval}`;
+        const res = await fetch(`/api/momentum/simulation${qs}`);
+        json = await res.json();
+      }
       if (!json.success) throw new Error(json.error || 'Failed to generate simulation replay');
       setSimData(json);
       setCurrentIdx(0);
@@ -284,7 +307,27 @@ export default function MomentumSimulationReplay({
     } finally {
       setLoading(false);
     }
-  }, [strategy, regimeEnabled, breakoutDays, stopPct]);
+  }, [strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh]);
+
+  const handleClearCache = async () => {
+    if (!window.confirm('Delete all cached simulation replay JSON files in debug/replays? Future runs will recompute fresh.')) return;
+    setClearingCache(true);
+    try {
+      const res = await fetch('/api/momentum/simulation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'clear_cache' }),
+      });
+      const data = await res.json();
+      setCacheNotice(data.message || 'Cached replays cleared successfully.');
+      setTimeout(() => setCacheNotice(null), 5000);
+      fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, true);
+    } catch (e) {
+      setError('Failed to clear cache: ' + String(e));
+    } finally {
+      setClearingCache(false);
+    }
+  };
 
   useEffect(() => {
     const defaultBo = activeStrategy === 'minervini' ? 20 : activeStrategy === '52w_high' ? 5 : 55;
@@ -472,6 +515,48 @@ export default function MomentumSimulationReplay({
             />
           </div>
 
+          {/* Benchmark Selector */}
+          <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+            <Info tip="Benchmark index used for Relative Strength (RS) scoring and Market Regime filter. Nifty 50 is the proven, lower-churn default (+200% return, PF 4.15 in 2020-23); Nifty 500 benchmarks against the broader 500-stock universe.">
+              <span className="cursor-help underline decoration-dotted decoration-zinc-600 underline-offset-2">
+                Benchmark:
+              </span>
+            </Info>
+            <select
+              value={benchmark}
+              onChange={(e) => {
+                const b = e.target.value as 'nifty50' | 'nifty500';
+                setBenchmark(b);
+                fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct, b, regimeInterval, forceFresh);
+              }}
+              className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs focus:outline-none focus:border-emerald-500 cursor-pointer"
+            >
+              <option value="nifty50">Nifty 50 (Proven Default)</option>
+              <option value="nifty500">Nifty 500 (Broad Index)</option>
+            </select>
+          </div>
+
+          {/* Regime Check Frequency Selector */}
+          <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+            <Info tip="Regime evaluation frequency. Weekly Check (evaluated on prior week's close vs 200 SMA) is the proven default that protects against intra-week noise and false breakdowns. Daily Check tests every day's close vs 200 SMA.">
+              <span className="cursor-help underline decoration-dotted decoration-zinc-600 underline-offset-2">
+                Regime Check:
+              </span>
+            </Info>
+            <select
+              value={regimeInterval}
+              onChange={(e) => {
+                const ri = e.target.value as 'weekly' | 'daily';
+                setRegimeInterval(ri);
+                fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct, benchmark, ri, forceFresh);
+              }}
+              className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs focus:outline-none focus:border-emerald-500 cursor-pointer"
+            >
+              <option value="weekly">Weekly (Prior Week Close · Proven)</option>
+              <option value="daily">Daily (Daily Close)</option>
+            </select>
+          </div>
+
           {/* Regime Filter Toggle */}
           <label className="flex items-center gap-1.5 cursor-pointer text-xs select-none px-2 py-1 bg-zinc-800/60 border border-zinc-700 rounded hover:border-zinc-500 transition-colors">
             <input
@@ -480,21 +565,15 @@ export default function MomentumSimulationReplay({
               onChange={(e) => {
                 const val = e.target.checked;
                 setRegimeEnabled(val);
-                fetchSimulation(startDate, endDate, capital, slots, strategy, val, breakoutDays, stopPct);
+                fetchSimulation(startDate, endDate, capital, slots, strategy, val, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh);
               }}
               className="rounded border-zinc-700 bg-zinc-800 text-emerald-500 focus:ring-0 cursor-pointer"
             />
             <Info tip={
-              strategy === 'minervini'
-                ? 'Minervini Stage 2 Market Defense: Halts new buys when Nifty 50 trades below its 200 SMA to prevent bear market drawdowns.'
-                : strategy === '52w_high'
-                ? 'George & Hwang Market Regime Filter: Only enters new 52-week high breakouts when benchmark is above 200 SMA (protects against false breakouts).'
-                : strategy === 'clenow'
-                ? 'Andreas Clenow Index Timing Rule: Switches to 100% cash allocation when benchmark is below 200 SMA.'
-                : 'Weekly Trend Filter: Blocks new Donchian entries when Nifty 50 is below 200 SMA.'
+              `Regime Filter: Halts new buys when ${benchmark === 'nifty50' ? 'Nifty 50' : 'Nifty 500'} trades below its ${regimeInterval} 200 SMA to prevent bear market drawdowns.`
             }>
               <span className={regimeEnabled ? 'text-zinc-200 font-medium cursor-help underline decoration-dotted decoration-zinc-600 underline-offset-2' : 'text-zinc-400 cursor-help underline decoration-dotted decoration-zinc-600 underline-offset-2'}>
-                Regime Filter (200 SMA)
+                Regime Filter ({benchmark === 'nifty50' ? 'Nifty 50' : 'Nifty 500'} 200 SMA · {regimeInterval === 'weekly' ? 'Weekly' : 'Daily'})
               </span>
             </Info>
             <span className={`px-1.5 py-0.2 rounded text-[10px] font-bold ${
@@ -621,8 +700,29 @@ export default function MomentumSimulationReplay({
             )}
           </div>
 
+          <label className="flex items-center gap-1.5 cursor-pointer text-xs select-none px-2 py-1 bg-zinc-800 border border-zinc-700 rounded hover:border-zinc-500 transition-colors">
+            <input
+              type="checkbox"
+              checked={forceFresh}
+              onChange={(e) => setForceFresh(e.target.checked)}
+              className="rounded border-zinc-700 bg-zinc-800 text-emerald-500 focus:ring-0 cursor-pointer"
+            />
+            <span className="text-zinc-300">Force Fresh Re-run</span>
+          </label>
+
           <button
-            onClick={() => fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct)}
+            type="button"
+            title="Delete all cached replay json files in debug/replays so they recompute with latest data"
+            onClick={handleClearCache}
+            disabled={clearingCache}
+            className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-zinc-400 hover:text-red-400 rounded text-xs flex items-center gap-1 cursor-pointer transition-colors"
+          >
+            <Trash2 size={12} className={clearingCache ? 'animate-spin' : ''} />
+            <span>Clear Cache</span>
+          </button>
+
+          <button
+            onClick={() => fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh)}
             disabled={loading}
             className="ml-auto px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
           >
@@ -631,6 +731,13 @@ export default function MomentumSimulationReplay({
           </button>
         </div>
       </div>
+
+      {cacheNotice && (
+        <div className="bg-emerald-500/10 border border-emerald-500/40 rounded px-4 py-2 text-xs text-emerald-300 flex items-center gap-2">
+          <CheckCircle2 size={14} />
+          <span>{cacheNotice}</span>
+        </div>
+      )}
 
       {error && (
         <div className="bg-red-500/10 border border-red-500/40 rounded px-4 py-3 text-xs text-red-400 flex items-center gap-2">
@@ -685,19 +792,19 @@ export default function MomentumSimulationReplay({
                 )}
 
                 {!regimeEnabled ? (
-                  <Info tip="Market Regime Filter is DISABLED. Trades are evaluated purely on individual stock relative strength and breakout, regardless of Nifty 50 trend.">
+                  <Info tip={`Market Regime Filter is DISABLED. Trades are evaluated purely on individual stock relative strength and breakout, regardless of ${benchmark === 'nifty50' ? 'Nifty 50' : 'Nifty 500'} trend.`}>
                     <span className="px-2 py-1 rounded text-xs font-bold border bg-purple-500/10 text-purple-300 border-purple-500/40 flex items-center gap-1">
                       <ShieldCheck size={13} /> REGIME FILTER: OFF (All Trades Allowed)
                     </span>
                   </Info>
                 ) : currentSnapshot.regime_on ? (
-                  <Info tip="Market Regime is ON. Nifty 50 is trading above its weekly 200 SMA — buying and rebalancing allowed.">
+                  <Info tip={`Market Regime is ON. ${benchmark === 'nifty50' ? 'Nifty 50' : 'Nifty 500'} is trading above its ${regimeInterval} 200 SMA — buying and rebalancing allowed.`}>
                     <span className="px-2 py-1 rounded text-xs font-bold border bg-emerald-500/10 text-emerald-400 border-emerald-500/40 flex items-center gap-1">
                       <ShieldCheck size={13} /> REGIME: BULL (ON)
                     </span>
                   </Info>
                 ) : (
-                  <Info tip="Market Regime is OFF. Nifty 50 is below its weekly 200 SMA. The strategy sits in 100% cash to protect capital from market drawdown. No new buys are taken.">
+                  <Info tip={`Market Regime is OFF. ${benchmark === 'nifty50' ? 'Nifty 50' : 'Nifty 500'} is below its ${regimeInterval} 200 SMA. The strategy sits in 100% cash to protect capital from market drawdown. No new buys are taken.`}>
                     <span className="px-2 py-1 rounded text-xs font-bold border bg-red-500/10 text-red-400 border-red-500/40 flex items-center gap-1">
                       <AlertTriangle size={13} /> REGIME: BEAR (OFF — 100% Cash)
                     </span>
@@ -937,7 +1044,7 @@ export default function MomentumSimulationReplay({
                           {regimeEnabled && !currentSnapshot.regime_on ? (
                             <>
                               <p className="text-xs text-zinc-500 leading-relaxed">
-                                Nifty 50 was trading below its weekly 200 SMA on this date. By design, all new entries are halted to preserve capital during market downtrends.
+                                {benchmark === 'nifty50' ? 'Nifty 50' : 'Nifty 500'} was trading below its {regimeInterval} 200 SMA on this date. By design, all new entries are halted to preserve capital during market downtrends.
                               </p>
                               <button
                                 onClick={() => {

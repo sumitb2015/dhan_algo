@@ -217,7 +217,7 @@ function ReadmeModal({ onClose }: { onClose: () => void }) {
         <div className="px-5 pb-5">
           <H>What it does</H>
           <P>
-            It ranks every Nifty 500 stock by how strongly it is outperforming the Nifty 50,
+            It ranks every Nifty 500 stock by how strongly it is outperforming the Nifty 500,
             buys the strongest names that are also breaking out, and holds up to 10 at a time.
             Positions are sold when they hit a stop, or when they stop being among the
             strongest names. Freed cash is redeployed into the next qualifying stocks. It runs
@@ -261,8 +261,8 @@ function ReadmeModal({ onClose }: { onClose: () => void }) {
           </P>
           <table className="w-full text-xs mb-2">
             <tbody>
-              <Row k="Market regime" v="Last week's Nifty close above its 200-day average. If not, nothing is bought at all (and holdings are sold). Can be switched off — see Controls." />
-              <Row k="Rank ≤ 20" v="Composite relative strength vs the Nifty 50, blending 2-week, 1-, 3- and 6-month performance, weighted toward 3 months." />
+              <Row k="Market regime" v="Benchmark close above its 200 SMA (weekly check on prior week's close by default to avoid whipsaws; daily check and Nifty 50 / Nifty 500 configurable). If not, nothing is bought at all (and holdings are sold). Can be switched off — see Controls." />
+              <Row k="Rank ≤ 20" v="Composite relative strength vs benchmark (Nifty 50 or Nifty 500), blending 2-week, 1-, 3- and 6-month performance, weighted toward 3 months." />
               <Row k="Trend stacked" v="Price above its 20-day average, which is above the 50-day, which is above the 200-day." />
               <Row k="Breakout" v="Closing at a new 55-day high, confirmed by two consecutive closes — this avoids one-day false breakouts." />
               <Row k="Liquidity" v="At least ₹5 crore average daily traded value, price above ₹50." />
@@ -556,11 +556,11 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
                 <>
                   <b>Market regime filter</b>
                   <br />
-                  ON when last week&apos;s Nifty 50 close was above its {data.regimeSma ?? 200}-day
+                  ON when Nifty 500 close was above its {data.regimeSma ?? 200}-day daily
                   average, OFF when below.
                   <br /><br />
                   {data.regime
-                    ? 'ON — the strategy may open new positions at the weekly review.'
+                    ? 'ON — the strategy may open new positions daily.'
                     : data.regimeExit === false
                       ? 'OFF — no new positions will be opened, but existing holdings are kept. This is the strategy sitting out a downtrend, not an error.'
                       : 'OFF — no new positions will be opened, and existing holdings are sold at the review. This is the strategy sitting out a downtrend, not an error.'}
@@ -929,7 +929,7 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
                       <TH align="right" tip="Rank by composite relative strength. Only the top 20 are eligible to buy.">#</TH>
                       <TH>Symbol</TH>
                       <TH tip="Sector / Industry group">Sector</TH>
-                      <TH align="right" tip={<><b>Composite relative strength versus the Nifty 50</b>, blending 4 lookbacks (2 weeks, 1, 3 and 6 months, weighted toward 3 months).<br /><br />0 means it moved exactly with the index. +0.30 means it outperformed by about 30%. Negative means it lagged.</>}>RS</TH>
+                      <TH align="right" tip={<><b>Composite relative strength versus the Nifty 500</b>, blending 4 lookbacks (2 weeks, 1, 3 and 6 months, weighted toward 3 months).<br /><br />0 means it moved exactly with the index. +0.30 means it outperformed by about 30%. Negative means it lagged.</>}>RS</TH>
                       <TH tip="Filter eligibility status or reason why the stock was not picked.">Status</TH>
                     </tr>
                   </thead>

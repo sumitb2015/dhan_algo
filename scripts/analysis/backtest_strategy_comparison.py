@@ -220,7 +220,7 @@ def main():
             "rs_score": rs_score,
         }
 
-    # Benchmark regime (Nifty 50 vs weekly 200 SMA)
+    # Benchmark regime (Nifty 500 vs daily 200 SMA)
     bench_closes = bench["close"].values
     bench_sma200 = pd.Series(bench_closes).rolling(200, min_periods=200).mean().values
     bench_date_idx = {d: i for i, d in enumerate(bench["date"])}

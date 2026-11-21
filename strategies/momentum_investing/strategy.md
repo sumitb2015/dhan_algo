@@ -1,7 +1,7 @@
 # Nifty 500 Momentum Investing Portfolio
 
 Autonomous positional equity strategy. Ranks the Nifty 500 by composite relative strength
-versus the Nifty 50, holds up to 10 names, exits on a trailing stop ladder or a weekly
+versus the Nifty 500, holds up to 10 names, exits on a trailing stop ladder or a weekly
 rank-rotation review, and redeploys freed capital into the next qualifying names.
 
 **This is the only multi-day, CNC-delivery, portfolio-level strategy in the repo.** Read
@@ -36,8 +36,7 @@ Zero means the stock tracked the index exactly. The 63-day term dominates delibe
 enough to ignore noise, short enough to catch rotation. Rank 1 = strongest.
 
 ### Regime gate — optional (`--no-regime` to disable)
-Week W is ON iff the **previous** week's Nifty 50 close was above its 200 SMA. Deciding from
-a completed week removes the intra-week whipsaw that hurt earlier daily-regime versions.
+Trading day D is ON iff the Nifty 500 close is above its daily 200 SMA.
 Regime OFF ⇒ no new entries, and (by default) the book is liquidated at the review.
 
 Measured over 2019-06 → 2026-08 on the Nifty 500, varying only the filter:
@@ -105,7 +104,7 @@ per review** — capping it at 2/week left the book permanently under-filled and
 
 Nifty 500, 2019-06 → 2026-08, ₹1.75L, costs at 0.111%/side + ₹20/order + 0.05% slippage:
 
-| | Strategy | Nifty 50 | FD @6.45% |
+| | Strategy | Nifty 500 | FD @6.45% |
 |---|---|---|---|
 | Total return | **150.05%** | 103.62% | 56.55% |
 | CAGR | **13.63%** | 10.43% | 6.45% |
@@ -116,7 +115,7 @@ Exits: rebalance 142, stop 110, regime 41.
 
 Split-sample (the parameters were tuned on the full period, so the second row matters most):
 
-| Period | Strategy | Nifty 50 |
+| Period | Strategy | Nifty 500 |
 |---|---|---|
 | 2019–2022 | 20.88% | 11.96% |
 | **2023–2026 (held out)** | **14.07%** | 8.79% |

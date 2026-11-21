@@ -61,9 +61,11 @@ class MomentumConfig:
     # Ranking
     rs_weights: List[Tuple[int, float]] = field(default_factory=lambda: list(RS_WEIGHTS))
 
-    # Regime
+    # Benchmark & Regime
+    benchmark: str = "nifty50"          # "nifty50" (default, proven lower churn) | "nifty500"
     regime_enabled: bool = True         # False = always ON, i.e. no market filter at all
-    regime_sma: int = 200               # weekly Nifty close vs this SMA
+    regime_sma: int = 200               # 200 SMA
+    regime_interval: str = "weekly"     # "weekly" (prior week's close vs 200 SMA) | "daily" (daily close vs 200 SMA)
     regime_exit: bool = True            # liquidate the book when regime flips off
 
     # Entry
@@ -238,12 +240,18 @@ def load_daily(symbol: str) -> Optional[pd.DataFrame]:
     return _read_ohlcv(os.path.join(STOCK_DIR, f"{symbol}_Daily_2Y.csv"))
 
 
-def load_benchmark() -> pd.DataFrame:
-    """Nifty 50 daily closes, 5Y file extended with anything only the 1Y file has."""
+def load_benchmark(name: Optional[str] = None) -> pd.DataFrame:
+    """Benchmark daily closes. Defaults to Nifty 50 (or Nifty 500 if requested)."""
+    target = (name or "nifty50").lower().strip()
+    if target in ("nifty500", "nifty 500", "ind_nifty500list.csv"):
+        n500 = _read_ohlcv(os.path.join(INDEX_DIR, "NIFTY_500_Daily.csv"))
+        if n500 is not None:
+            return n500
+
     base = _read_ohlcv(os.path.join(INDEX_DIR, "NIFTY_50_Daily_5Y.csv"))
     extra = _read_ohlcv(os.path.join(INDEX_DIR, "NIFTY_50_Daily_1Y.csv"))
     if base is None and extra is None:
-        raise FileNotFoundError(f"No Nifty 50 daily CSV under {INDEX_DIR}")
+        raise FileNotFoundError(f"No benchmark daily CSV under {INDEX_DIR}")
     if base is None:
         return extra
     if extra is not None:
@@ -396,7 +404,19 @@ class RegimeCalendar:
         return None
 
 
-def build_regime_weekly(bench: pd.DataFrame, cfg: MomentumConfig) -> RegimeCalendar:
+def build_regime_calendar(bench: pd.DataFrame, cfg: MomentumConfig) -> RegimeCalendar:
+    """Market-regime calendar derived from the benchmark (Nifty 50 or Nifty 500).
+
+    When cfg.regime_interval == "weekly" (default):
+        Week W is ON iff the previous completed week's close was above the 200 SMA.
+        This eliminates intra-week whipsaws and excessive turnover.
+    When cfg.regime_interval == "daily":
+        Day d is ON iff the benchmark's close on d is above its daily 200 SMA.
+
+    Crucially, review_days is ALWAYS the set of weekly review days (first trading day of each week)
+    so that weekly rank-rotation rules (such as Turtle RS 2 consecutive reviews outside rank 25)
+    are preserved and never degraded into daily churn.
+    """
     closes = bench["close"]
     sma = closes.rolling(cfg.regime_sma, min_periods=cfg.regime_sma).mean()
     dates = list(bench["date"])
@@ -406,25 +426,55 @@ def build_regime_weekly(bench: pd.DataFrame, cfg: MomentumConfig) -> RegimeCalen
         iso = pd.Timestamp(d).isocalendar()
         week_days[(iso[0], iso[1])].append((i, d))
 
-    weeks = sorted(week_days.keys())
-    week_regime: Dict[Tuple[int, int], bool] = {}
-    for w_idx, wk in enumerate(weeks):
-        if not cfg.regime_enabled:
-            week_regime[wk] = True
-            continue
-        if w_idx == 0:
-            week_regime[wk] = False
-            continue
-        last_i = week_days[weeks[w_idx - 1]][-1][0]
-        prev_sma = sma.iloc[last_i]
-        week_regime[wk] = (not pd.isna(prev_sma)) and bool(closes.iloc[last_i] > prev_sma)
-
-    on_days = {d for wk, days in week_days.items() if week_regime.get(wk)
-               for _, d in days}
+    # Weekly review days are ALWAYS the first trading day of each ISO week
     review_days = {days[0][1] for days in week_days.values()}
 
-    return RegimeCalendar(trading_days=dates, on_days=on_days,
-                          review_days=review_days, week_regime=week_regime)
+    interval = getattr(cfg, "regime_interval", "weekly").lower().strip()
+    if interval == "daily":
+        daily_regime: Dict[date, bool] = {}
+        on_days = set()
+        for i, d in enumerate(dates):
+            if not cfg.regime_enabled:
+                is_on = True
+            else:
+                sma_val = sma.iloc[i]
+                is_on = (not pd.isna(sma_val)) and bool(closes.iloc[i] > sma_val)
+            daily_regime[d] = is_on
+            if is_on:
+                on_days.add(d)
+
+        weeks = sorted(week_days.keys())
+        week_regime: Dict[Tuple[int, int], bool] = {}
+        for wk in weeks:
+            last_d = week_days[wk][-1][1]
+            week_regime[wk] = daily_regime.get(last_d, False)
+
+        return RegimeCalendar(trading_days=dates, on_days=on_days,
+                              review_days=review_days, week_regime=week_regime)
+    else:
+        # Weekly regime check (proven default):
+        # Week W is ON iff the previous completed week's close was above the 200 SMA.
+        weeks = sorted(week_days.keys())
+        week_regime: Dict[Tuple[int, int], bool] = {}
+        for w_idx, wk in enumerate(weeks):
+            if not cfg.regime_enabled:
+                week_regime[wk] = True
+                continue
+            if w_idx == 0:
+                week_regime[wk] = False
+                continue
+            last_i = week_days[weeks[w_idx - 1]][-1][0]
+            prev_sma = sma.iloc[last_i]
+            week_regime[wk] = (not pd.isna(prev_sma)) and bool(closes.iloc[last_i] > prev_sma)
+
+        on_days = {d for wk, days in week_days.items() if week_regime.get(wk)
+                   for _, d in days}
+        return RegimeCalendar(trading_days=dates, on_days=on_days,
+                              review_days=review_days, week_regime=week_regime)
+
+
+build_regime_weekly = build_regime_calendar
+build_regime_daily = build_regime_calendar
 
 
 # ──────────────────────────────────────────────────────────────────────────────
