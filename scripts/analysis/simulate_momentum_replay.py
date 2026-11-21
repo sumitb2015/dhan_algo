@@ -42,6 +42,16 @@ from lib.momentum import (
 DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")
 REPLAYS_DIR = os.path.join(DEBUG_DIR, "replays")
 
+def default_stop_pct(strategy: str) -> float:
+    """Stop distance each model used before the stop became a user setting."""
+    return 10.0 if strategy == "clenow" else 12.0
+
+
+def stop_suffix(strategy: str, stop_pct: float) -> str:
+    """Cache-name suffix; empty at the model's default. Must mirror stopSuffix() in the simulation route."""
+    return "" if abs(stop_pct - default_stop_pct(strategy)) < 1e-9 else f"_sl{stop_pct:g}"
+
+
 STRATEGY_NAMES = {
     "turtle_rs": "Turtle RS Breakout (Composite RS + 55d Breakout)",
     "minervini": "Minervini Trend Template (Stage 2 Superperformance)",
@@ -163,7 +173,7 @@ def check_strategy_exit(strategy: str, pos: Position, close: float, tables: dict
     elif strategy == "52w_high":
         pos.peak_close = max(pos.peak_close, close)
         pos.last_close = close
-        pos.stop_price = max(pos.stop_price, pos.peak_close * 0.88)
+        pos.stop_price = max(pos.stop_price, pos.peak_close * (1.0 - cfg.stop_pct / 100.0))
         pos.stage = STAGE_TRAIL
         if close < pos.stop_price:
             return "stop"
@@ -173,7 +183,7 @@ def check_strategy_exit(strategy: str, pos: Position, close: float, tables: dict
         pos.peak_close = max(pos.peak_close, close)
         pos.last_close = close
         sma100 = t["sma100"].get(d) if t else None
-        pos.stop_price = pos.entry_price * 0.90
+        pos.stop_price = pos.entry_price * (1.0 - cfg.stop_pct / 100.0)
         pos.stage = STAGE_INITIAL
         if (sma100 and not np.isnan(sma100) and close < float(sma100)) or close < pos.stop_price:
             return "sma100_exit"
@@ -202,25 +212,19 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         bo_suffix = "" if cfg.breakout_days == 55 else f"_bo{cfg.breakout_days}"
 
     strat_prefix = f"{strategy}_" if strategy != "turtle_rs" else ""
+    bo_suffix += stop_suffix(strategy, cfg.stop_pct)
 
     cache_file = os.path.join(
         REPLAYS_DIR, f"replay_{strat_prefix}{start}_{end}_{int(cfg.capital)}_{cfg.slots}{regime_suffix}{bo_suffix}.json"
     )
 
-    # Fallback to unsuffixed cache file if it exists
-    fallback_file = os.path.join(
-        REPLAYS_DIR, f"replay_{strat_prefix}{start}_{end}_{int(cfg.capital)}_{cfg.slots}{regime_suffix}.json"
-    )
-    # Legacy cache fallback for turtle_rs
+    # Legacy cache (turtle_rs files written before the strategy prefix existed). No other fallback: serving a
+    # file from a different setting (bo / stop / regime) would silently show the wrong replay.
     legacy_file = os.path.join(
         REPLAYS_DIR, f"replay_{start}_{end}_{int(cfg.capital)}_{cfg.slots}{regime_suffix}{bo_suffix}.json"
     )
-
-    target_cache = (
-        cache_file if os.path.exists(cache_file)
-        else (fallback_file if os.path.exists(fallback_file)
-        else (legacy_file if strategy == "turtle_rs" and os.path.exists(legacy_file) else None))
-    )
+    target_cache = cache_file if os.path.exists(cache_file) else (
+        legacy_file if strategy == "turtle_rs" and os.path.exists(legacy_file) else None)
 
     if not force and target_cache and os.path.exists(target_cache):
         try:
@@ -647,6 +651,7 @@ def main():
     p.add_argument("--regime", type=lambda x: str(x).lower() in ("true", "1", "yes"), default=True, help="Enable 200-SMA weekly regime filter")
     p.add_argument("--no-regime", dest="regime", action="store_false", help="Disable regime filter (always ON)")
     p.add_argument("--breakout-days", type=int, default=55, help="Donchian breakout lookback days (default 55)")
+    p.add_argument("--stop-pct", type=float, default=None, help="Stop-loss distance in %% (default: 12, Clenow 10)")
     p.add_argument("--force", action="store_true", help="force recomputation even if cached")
     args = p.parse_args()
 
@@ -658,6 +663,7 @@ def main():
         slots=args.slots,
         regime_enabled=args.regime,
         breakout_days=args.breakout_days,
+        stop_pct=args.stop_pct if args.stop_pct is not None else default_stop_pct(args.strategy),
     )
 
     print(f"Simulating momentum replay [{args.strategy}] from {start_date} to {end_date} (capital: {cfg.capital:,.0f}, regime: {cfg.regime_enabled})...")

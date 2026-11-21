@@ -207,6 +207,9 @@ function MiniEquitySparkline({ snapshots, currentIdx, onSelectIdx }: {
   );
 }
 
+/** Stop distance each model used before it became a setting (mirrors default_stop_pct in simulate_momentum_replay.py). */
+const defaultStopFor = (strategy: string) => (strategy === 'clenow' ? 10 : 12);
+
 export default function MomentumSimulationReplay({
   initialCapital = 175000,
   initialSlots = 10,
@@ -230,6 +233,9 @@ export default function MomentumSimulationReplay({
     return 55;
   });
 
+  const [stopPct, setStopPct] = useState<number>(() => defaultStopFor(activeStrategy));
+  const [stopDraft, setStopDraft] = useState<string>(() => String(defaultStopFor(activeStrategy)));
+
   const [simData, setSimData] = useState<SimulationResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -245,13 +251,14 @@ export default function MomentumSimulationReplay({
     slt: number,
     strat: string = strategy,
     reg: boolean = regimeEnabled,
-    bo: number = breakoutDays
+    bo: number = breakoutDays,
+    sl: number = stopPct
   ) => {
     setLoading(true);
     setError(null);
     setIsPlaying(false);
     try {
-      const qs = `?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&capital=${cap}&slots=${slt}&strategy=${encodeURIComponent(strat)}&regime=${reg}&breakout_days=${bo}`;
+      const qs = `?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&capital=${cap}&slots=${slt}&strategy=${encodeURIComponent(strat)}&regime=${reg}&breakout_days=${bo}&stop_pct=${sl}`;
       const res = await fetch(`/api/momentum/simulation${qs}`);
       const json = await res.json();
       if (!json.success) throw new Error(json.error || 'Failed to generate simulation replay');
@@ -262,11 +269,11 @@ export default function MomentumSimulationReplay({
     } finally {
       setLoading(false);
     }
-  }, [strategy, regimeEnabled, breakoutDays]);
+  }, [strategy, regimeEnabled, breakoutDays, stopPct]);
 
   useEffect(() => {
     const defaultBo = activeStrategy === 'minervini' ? 20 : activeStrategy === '52w_high' ? 5 : 55;
-    fetchSimulation(startDate, endDate, capital, slots, activeStrategy, regimeEnabled, defaultBo);
+    fetchSimulation(startDate, endDate, capital, slots, activeStrategy, regimeEnabled, defaultBo, defaultStopFor(activeStrategy));
   }, []);
 
   useEffect(() => {
@@ -274,7 +281,10 @@ export default function MomentumSimulationReplay({
       setStrategy(activeStrategy);
       const newBo = activeStrategy === 'minervini' ? 20 : activeStrategy === '52w_high' ? 5 : 55;
       setBreakoutDays(newBo);
-      fetchSimulation(startDate, endDate, capital, slots, activeStrategy, regimeEnabled, newBo);
+      const newSl = defaultStopFor(activeStrategy);
+      setStopPct(newSl);
+      setStopDraft(String(newSl));
+      fetchSimulation(startDate, endDate, capital, slots, activeStrategy, regimeEnabled, newBo, newSl);
     }
   }, [activeStrategy]);
 
@@ -292,6 +302,21 @@ export default function MomentumSimulationReplay({
     }, playSpeed);
     return () => clearInterval(timer);
   }, [isPlaying, simData, playSpeed]);
+
+  // Free-typed value: commit on blur/Enter only, clamped to the range the route accepts.
+  const commitStop = () => {
+    const n = Number(stopDraft);
+    if (!Number.isFinite(n) || n <= 0) {
+      setStopDraft(String(stopPct));
+      return;
+    }
+    const v = Math.round(Math.max(2, Math.min(30, n)) * 10) / 10;
+    setStopDraft(String(v));
+    if (v !== stopPct) {
+      setStopPct(v);
+      fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, v);
+    }
+  };
 
   const snapshots = simData?.snapshots || [];
   const currentSnapshot = snapshots[currentIdx] || null;
@@ -382,8 +407,11 @@ export default function MomentumSimulationReplay({
                   newBo = 55;
                 }
                 setBreakoutDays(newBo);
+                const newSl = defaultStopFor(newStrat);
+                setStopPct(newSl);
+                setStopDraft(String(newSl));
                 onStrategyChange?.(newStrat);
-                fetchSimulation(startDate, endDate, capital, slots, newStrat, regimeEnabled, newBo);
+                fetchSimulation(startDate, endDate, capital, slots, newStrat, regimeEnabled, newBo, newSl);
               }}
               className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs font-semibold focus:outline-none focus:border-emerald-500 cursor-pointer"
             >
@@ -537,6 +565,45 @@ export default function MomentumSimulationReplay({
               </div>
             </Info>
           )}
+
+          <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+            <Info tip="Initial stop-loss distance below the entry price, in %. The position is sold at the next open after a close below it. 12% is the default (Clenow 10%); the trailing rules of each model still apply on top. Applied when you press Enter or leave the box.">
+              <span className="cursor-help underline decoration-dotted decoration-zinc-600 underline-offset-2">
+                Stop-loss:
+              </span>
+            </Info>
+            <input
+              type="number"
+              inputMode="decimal"
+              min={2}
+              max={30}
+              step={0.5}
+              value={stopDraft}
+              aria-label="Stop-loss percent"
+              onChange={(e) => setStopDraft(e.target.value)}
+              onBlur={commitStop}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+              }}
+              className="w-16 bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs font-mono text-right focus:outline-none focus:border-emerald-500"
+            />
+            <span>%</span>
+            {stopPct !== defaultStopFor(strategy) && (
+              <button
+                type="button"
+                aria-label="Reset stop-loss to the model default"
+                onClick={() => {
+                  const d = defaultStopFor(strategy);
+                  setStopPct(d);
+                  setStopDraft(String(d));
+                  fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, d);
+                }}
+                className="px-1.5 py-0.5 rounded border border-zinc-700 text-[10px] text-zinc-300 hover:border-emerald-500 cursor-pointer"
+              >
+                Reset
+              </button>
+            )}
+          </div>
 
           <button
             onClick={() => fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays)}

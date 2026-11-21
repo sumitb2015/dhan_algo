@@ -21,162 +21,115 @@ function sanitizeStrategy(s: string | null | undefined): string {
   return allowed.includes(val) ? val : 'turtle_rs';
 }
 
+/** Stop distance each model used before it became a setting. Mirrors default_stop_pct() in simulate_momentum_replay.py. */
+function defaultStop(strategy: string): number {
+  return strategy === 'clenow' ? 10 : 12;
+}
+
+function sanitizeStop(v: unknown, strategy: string): number {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return defaultStop(strategy);
+  return Math.round(Math.max(2, Math.min(30, n)) * 10) / 10;
+}
+
+interface ReplayParams {
+  start: string;
+  end: string;
+  capital: number;
+  slots: number;
+  regimeEnabled: boolean;
+  breakoutDays: number;
+  strategy: string;
+  stopPct: number;
+}
+
+function parseParams(get: (k: string) => unknown): ReplayParams | { error: string } {
+  const start = sanitizeDate(get('start') as string, '2026-10-15');
+  const end = sanitizeDate(get('end') as string, '2026-11-20');
+  if (start > end) return { error: 'Start date cannot be after end date' };
+  const strategy = sanitizeStrategy(get('strategy') as string);
+  return {
+    start,
+    end,
+    capital: Math.max(10_000, Number(get('capital')) || 175_000),
+    slots: Math.max(1, Math.min(30, Number(get('slots')) || 10)),
+    regimeEnabled: get('regime') !== 'false' && get('regime') !== false,
+    breakoutDays: Math.max(5, Math.min(100, Number(get('breakout_days')) || 55)),
+    strategy,
+    stopPct: sanitizeStop(get('stop_pct'), strategy),
+  };
+}
+
+/** Cache filename. Every suffix must mirror run_replay_simulation() in simulate_momentum_replay.py exactly. */
+function cacheFileFor(p: ReplayParams): string {
+  const regimeSuffix = p.regimeEnabled ? '' : '_no_regime';
+  let boSuffix: string;
+  if (p.strategy === 'clenow') boSuffix = '';
+  else if (p.strategy === 'minervini') boSuffix = p.breakoutDays === 20 || p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
+  else if (p.strategy === '52w_high') boSuffix = p.breakoutDays === 5 || p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
+  else boSuffix = p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
+  const slSuffix = p.stopPct === defaultStop(p.strategy) ? '' : `_sl${p.stopPct}`;
+  const stratPrefix = p.strategy !== 'turtle_rs' ? `${p.strategy}_` : '';
+  return path.join(
+    REPLAYS_DIR,
+    `replay_${stratPrefix}${p.start}_${p.end}_${Math.round(p.capital)}_${p.slots}${regimeSuffix}${boSuffix}${slSuffix}.json`,
+  );
+}
+
+async function runReplay(p: ReplayParams, force: boolean) {
+  const scriptPath = path.join(PROJECT_ROOT, 'scripts', 'analysis', 'simulate_momentum_replay.py');
+  const args = [
+    scriptPath,
+    '--start', p.start,
+    '--end', p.end,
+    '--capital', String(p.capital),
+    '--slots', String(p.slots),
+    '--strategy', p.strategy,
+    '--regime', String(p.regimeEnabled),
+    '--breakout-days', String(p.breakoutDays),
+    '--stop-pct', String(p.stopPct),
+  ];
+  if (force) args.push('--force');
+  return execFileAsync(PYTHON_EXE, args, { cwd: PROJECT_ROOT, timeout: 120_000, maxBuffer: 32 * 1024 * 1024 });
+}
+
+async function respond(p: ReplayParams, force: boolean) {
+  fs.mkdirSync(REPLAYS_DIR, { recursive: true });
+  const cacheFile = cacheFileFor(p);
+  if (!force && fs.existsSync(cacheFile)) {
+    const cached = readJsonFile(cacheFile);
+    if (cached) return NextResponse.json(cached);
+  }
+  const run = await runReplay(p, force);
+  const data = fs.existsSync(cacheFile) ? readJsonFile(cacheFile) : null;
+  if (data) return NextResponse.json(data);
+  return NextResponse.json(
+    {
+      success: false,
+      error: `Replay output was not generated (expected ${path.basename(cacheFile)}). ${String(run.stderr || run.stdout || '').slice(-300)}`,
+    },
+    { status: 500 },
+  );
+}
 
 export async function GET(request: NextRequest) {
   try {
     const sp = request.nextUrl.searchParams;
-    const start = sanitizeDate(sp.get('start'), '2026-10-15');
-    const end = sanitizeDate(sp.get('end'), '2026-11-20');
-    if (start > end) {
-      return NextResponse.json({ success: false, error: 'Start date cannot be after end date' }, { status: 400 });
-    }
-    const capital = Math.max(10_000, Number(sp.get('capital')) || 175_000);
-    const slots = Math.max(1, Math.min(30, Number(sp.get('slots')) || 10));
-    const regimeEnabled = sp.get('regime') !== 'false';
-    const breakoutDays = Math.max(5, Math.min(100, Number(sp.get('breakout_days')) || 55));
-    const strategy = sanitizeStrategy(sp.get('strategy'));
-
-    fs.mkdirSync(REPLAYS_DIR, { recursive: true });
-    const regimeSuffix = regimeEnabled ? '' : '_no_regime';
-    let boSuffix = '';
-    if (strategy === 'clenow') {
-      boSuffix = '';
-    } else if (strategy === 'minervini') {
-      boSuffix = breakoutDays === 20 || breakoutDays === 55 ? '' : `_bo${breakoutDays}`;
-    } else if (strategy === '52w_high') {
-      boSuffix = breakoutDays === 5 || breakoutDays === 55 ? '' : `_bo${breakoutDays}`;
-    } else {
-      boSuffix = breakoutDays === 55 ? '' : `_bo${breakoutDays}`;
-    }
-
-    const stratPrefix = strategy !== 'turtle_rs' ? `${strategy}_` : '';
-    const cacheFile = path.join(REPLAYS_DIR, `replay_${stratPrefix}${start}_${end}_${Math.round(capital)}_${slots}${regimeSuffix}${boSuffix}.json`);
-    const fallbackFile = path.join(REPLAYS_DIR, `replay_${stratPrefix}${start}_${end}_${Math.round(capital)}_${slots}${regimeSuffix}.json`);
-    const legacyFile = path.join(REPLAYS_DIR, `replay_${start}_${end}_${Math.round(capital)}_${slots}${regimeSuffix}${boSuffix}.json`);
-
-    const targetFile = fs.existsSync(cacheFile)
-      ? cacheFile
-      : (fs.existsSync(fallbackFile)
-        ? fallbackFile
-        : (strategy === 'turtle_rs' && fs.existsSync(legacyFile) ? legacyFile : null));
-
-    if (targetFile) {
-      const data = readJsonFile(targetFile);
-      if (data) {
-        return NextResponse.json(data);
-      }
-    }
-
-    // Generate on demand
-    const scriptPath = path.join(PROJECT_ROOT, 'scripts', 'analysis', 'simulate_momentum_replay.py');
-    const args = [
-      scriptPath,
-      '--start', start,
-      '--end', end,
-      '--capital', String(capital),
-      '--slots', String(slots),
-      '--strategy', strategy,
-      '--regime', String(regimeEnabled),
-      '--breakout-days', String(breakoutDays),
-    ];
-
-    const run = await execFileAsync(PYTHON_EXE, args, {
-      cwd: PROJECT_ROOT,
-      timeout: 120_000,
-      maxBuffer: 32 * 1024 * 1024,
-    });
-
-    if (fs.existsSync(cacheFile)) {
-      const data = readJsonFile(cacheFile);
-      if (data) return NextResponse.json(data);
-    }
-    if (strategy === 'turtle_rs' && fs.existsSync(legacyFile)) {
-      const data = readJsonFile(legacyFile);
-      if (data) return NextResponse.json(data);
-    }
-
-    return NextResponse.json(
-      {
-        success: false,
-        error: `Replay output was not generated (expected ${path.basename(cacheFile)}). ${String(run.stderr || run.stdout || '').slice(-300)}`,
-      },
-      { status: 500 }
-    );
+    const p = parseParams((k) => sp.get(k));
+    if ('error' in p) return NextResponse.json({ success: false, error: p.error }, { status: 400 });
+    return await respond(p, false);
   } catch (e) {
-    return NextResponse.json(
-      { success: false, error: e instanceof Error ? e.message : String(e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const start = sanitizeDate(body.start, '2026-10-15');
-    const end = sanitizeDate(body.end, '2026-11-20');
-    if (start > end) {
-      return NextResponse.json({ success: false, error: 'Start date cannot be after end date' }, { status: 400 });
-    }
-    const capital = Math.max(10_000, Number(body.capital) || 175_000);
-    const slots = Math.max(1, Math.min(30, Number(body.slots) || 10));
-    const regimeEnabled = body.regime !== false;
-    const breakoutDays = Math.max(5, Math.min(100, Number(body.breakout_days) || 55));
-    const strategy = sanitizeStrategy(body.strategy);
-
-    fs.mkdirSync(REPLAYS_DIR, { recursive: true });
-    const scriptPath = path.join(PROJECT_ROOT, 'scripts', 'analysis', 'simulate_momentum_replay.py');
-    const args = [
-      scriptPath,
-      '--start', start,
-      '--end', end,
-      '--capital', String(capital),
-      '--slots', String(slots),
-      '--strategy', strategy,
-      '--regime', String(regimeEnabled),
-      '--breakout-days', String(breakoutDays),
-      '--force',
-    ];
-
-    await execFileAsync(PYTHON_EXE, args, {
-      cwd: PROJECT_ROOT,
-      timeout: 120_000,
-      maxBuffer: 32 * 1024 * 1024,
-    });
-
-    const regimeSuffix = regimeEnabled ? '' : '_no_regime';
-    let boSuffix = '';
-    if (strategy === 'clenow') {
-      boSuffix = '';
-    } else if (strategy === 'minervini') {
-      boSuffix = breakoutDays === 20 || breakoutDays === 55 ? '' : `_bo${breakoutDays}`;
-    } else if (strategy === '52w_high') {
-      boSuffix = breakoutDays === 5 || breakoutDays === 55 ? '' : `_bo${breakoutDays}`;
-    } else {
-      boSuffix = breakoutDays === 55 ? '' : `_bo${breakoutDays}`;
-    }
-
-    const stratPrefix = strategy !== 'turtle_rs' ? `${strategy}_` : '';
-    const cacheFile = path.join(REPLAYS_DIR, `replay_${stratPrefix}${start}_${end}_${Math.round(capital)}_${slots}${regimeSuffix}${boSuffix}.json`);
-    const fallbackFile = path.join(REPLAYS_DIR, `replay_${stratPrefix}${start}_${end}_${Math.round(capital)}_${slots}${regimeSuffix}.json`);
-
-    if (fs.existsSync(cacheFile)) {
-      const data = readJsonFile(cacheFile);
-      if (data) return NextResponse.json(data);
-    }
-    if (fs.existsSync(fallbackFile)) {
-      const data = readJsonFile(fallbackFile);
-      if (data) return NextResponse.json(data);
-    }
-
-    return NextResponse.json(
-      { success: false, error: 'Simulation completed but replay cache not found.' },
-      { status: 500 }
-    );
+    const p = parseParams((k) => body?.[k]);
+    if ('error' in p) return NextResponse.json({ success: false, error: p.error }, { status: 400 });
+    return await respond(p, true);
   } catch (e) {
-    return NextResponse.json(
-      { success: false, error: e instanceof Error ? e.message : String(e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ success: false, error: e instanceof Error ? e.message : String(e) }, { status: 500 });
   }
 }
