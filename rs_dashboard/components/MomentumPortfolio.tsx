@@ -700,7 +700,7 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
       {viewMode === 'replay' ? (
         <main className="flex-1 w-full mx-auto px-4 py-4 space-y-4">
           <MomentumSimulationReplay
-            initialCapital={data?.capital || 500000}
+            initialCapital={500000}
             initialSlots={data?.slots || 10}
             activeStrategy={selectedStrategy}
             onStrategyChange={setSelectedStrategy}
