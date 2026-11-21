@@ -23,7 +23,7 @@ function sanitizeStrategy(s: string | null | undefined): string {
 
 /** Stop distance each model used before it became a setting. Mirrors default_stop_pct() in simulate_momentum_replay.py. */
 function defaultStop(strategy: string): number {
-  return strategy === 'clenow' ? 10 : 12;
+  return strategy === 'clenow' ? 15 : 12;
 }
 
 function sanitizeStop(v: unknown, strategy: string): number {

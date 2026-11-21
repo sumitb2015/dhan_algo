@@ -5,6 +5,8 @@ import { pacedQuoteCall } from '@/lib/dhanQuotePacer';
 import path from 'path';
 import fs from 'fs';
 import { dedupe, runPythonJson, PROJECT_ROOT } from '@/lib/pyExec';
+import { askBridge, ensureBridge } from '@/lib/pnfLiveBridge';
+import type { WantedPair } from '@/lib/pnfWanted';
 
 // Absolute: runPythonJson execs without a cwd, so a relative path would resolve
 // against rs_dashboard/ rather than the project root and silently never run.
@@ -685,6 +687,13 @@ export async function GET() {
       errors.push(`hub: ${String(e).slice(0, 120)}`);
     }
     try {
+      // Ask the price bridge for BOTH crude contracts this row resolves (the Orb only subscribes the one symbol it is set to, and its
+      // contract can differ from this row's): they join the other charts' asks in the bridge's one subscription, so the crude rows
+      // are WebSocket whatever the Orb is trading. The first poll or two may still fall back to the paced REST call below.
+      try {
+        const wantedPairs = resolveSids(REST_INDICES).map(r => [r.segment, String(r.sid)] as WantedPair);
+        if (wantedPairs.length) { askBridge('top-indices:crude', wantedPairs, Date.now()); ensureBridge(Date.now()); }
+      } catch { /* the REST fallback below serves the rows */ }
       const pnfQuotes = fromPnf(REST_INDICES);
       quotes = { ...quotes, ...pnfQuotes };
       const missingRest = REST_INDICES.filter(i => !quotes[i.key]);

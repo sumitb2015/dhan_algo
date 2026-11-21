@@ -139,7 +139,8 @@ export function useOrbEngine() {
   const live = ledger ? liveRow(ledger) : null;
   const isPremiumRow = live?.structure === 'straddle' || live?.structure === 'strangle';
   const contract = state?.contract ?? null;
-  const feed = usePnfFeed(contract, 0, now);
+  // the leader tab keeps its prices flowing even hidden (its stops and exits depend on them); a tab that only watches pauses
+  const feed = usePnfFeed(contract, 0, now, null, { pauseWhenHidden: !isLeader });
   const cfg = ledger?.config;
 
   const tf = cfg?.timeframe ?? 1;

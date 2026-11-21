@@ -29,7 +29,11 @@ const NO_BARS: Bar[] = [];  // Renko Tick mode: how often the bridge's tick log 
  * `tickSec`: Renko Tick / N-second bars — the bridge's recorded prices replace the live minute fold (lib/pnfTicks.ts): 0 = one bar per
  * recorded price, N = N-second bars; null = 1-minute bars.
  */
-export function usePnfFeed(target: Target | null, recenter: number, now: number, tickSec: number | null = null) {
+export function usePnfFeed(target: Target | null, recenter: number, now: number, tickSec: number | null = null, opts: { pauseWhenHidden?: boolean } = {}) {
+  // Polling pauses in a hidden tab ONLY when the caller asks (a view that does not trade). An engine that places orders from its own tab
+  // keeps its live price and history flowing in the background: a stop it cannot price is a stop it cannot fire.
+  const pauseRef = useRef(false);
+  useEffect(() => { pauseRef.current = opts.pauseWhenHidden === true; });
   const [bars, setBars] = useState<Bar[]>([]);
   // Tick / N sec only: the 1-minute bars with the live price folded in (the chart's own minute bars are not folded in that mode). The
   // Renko VWAP is TradingView's 1-minute one, built on these (straddlePnfModel's vwapBars), never on the ticks.
@@ -113,7 +117,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
   useEffect(() => {
     if (!complete) return;
     const id = setInterval(() => {
-      if (isTabHidden()) return;
+      if (pauseRef.current && isTabHidden()) return;
       void load(false);
     }, POLL_MS);
     const cleanupVis = onTabVisible(() => { void load(false); });
@@ -131,7 +135,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
     if (!ids) return;
     let dead = false;
     const poll = async () => {
-      if (isTabHidden()) return;
+      if (pauseRef.current && isTabHidden()) return;
       try {
         const res = await fetch(`/api/straddle-pnf/live?ids=${ids}`);
         const j = await res.json() as { success?: boolean; legs?: LiveLeg[] };
@@ -189,7 +193,7 @@ export function usePnfFeed(target: Target | null, recenter: number, now: number,
     let busy = false;
     let fails = 0;
     const poll = async () => {
-      if (isTabHidden()) return;
+      if (pauseRef.current && isTabHidden()) return;
       if (busy) return;            // a slow read is never overtaken by the next one (the cursor must move in order)
       busy = true;
       try {

@@ -167,18 +167,31 @@ def main():
         rs = avg_gain / avg_loss.replace(0, np.nan)
         rsi2 = (100 - (100 / (1 + rs))).fillna(50).values
 
-        # Clenow exponential regression slope * R^2 over 90 days
-        # Log slope * 250 * R^2
+        # Clenow exponential regression slope * R^2 over 90 days (fast vectorized)
         clenow_score = np.zeros(n)
+        dx = np.arange(90) - 44.5
+        sxx = 60742.5
         for i in range(90, n):
-            y = np.log(closes[i - 90:i])
-            x = np.arange(90)
-            if np.all(np.isfinite(y)):
-                slope, intercept = np.polyfit(x, y, 1)
-                r_matrix = np.corrcoef(x, y)
-                r2 = r_matrix[0, 1] ** 2 if np.isfinite(r_matrix[0, 1]) else 0.0
-                annualized_slope = (math.exp(slope * 250) - 1.0) * 100.0
-                clenow_score[i] = annualized_slope * r2
+            sub_y = closes[i - 90:i]
+            if np.all(sub_y > 0):
+                y = np.log(sub_y)
+                sxy = float(np.dot(dx, y))
+                slope = sxy / sxx
+                dy = y - np.mean(y)
+                syy = float(np.dot(dy, dy))
+                r2 = (sxy * sxy) / (sxx * syy) if syy > 0 else 0.0
+                ann_slope = (math.exp(slope * 250.0) - 1.0) * 100.0
+                clenow_score[i] = ann_slope * r2
+
+        # 15% 1-day gap filter: max daily absolute return over past 90 days
+        daily_ret = c_series.pct_change().abs()
+        max_gap_90 = daily_ret.rolling(90, min_periods=90).max().values
+
+        # 200 SMA rising check (22 trading days ago)
+        sma200_prev = pd.Series(sma200).shift(22).values
+
+        # 6-month composite RS score for ranking
+        rs_score = (c_series / c_series.shift(126) - 1.0).fillna(0.0).values
 
         date_idx = {d: i for i, d in enumerate(dates)}
         indicators[sym] = {
@@ -194,6 +207,7 @@ def main():
             "sma100": sma100,
             "sma150": sma150,
             "sma200": sma200,
+            "sma200_prev": sma200_prev,
             "vol20": vol20,
             "high55": high55,
             "high20": high20,
@@ -202,6 +216,8 @@ def main():
             "atr14": atr14,
             "rsi2": rsi2,
             "clenow": clenow_score,
+            "max_gap_90": max_gap_90,
+            "rs_score": rs_score,
         }
 
     # Benchmark regime (Nifty 50 vs weekly 200 SMA)
@@ -217,7 +233,7 @@ def main():
     results = {}
 
     # ──────────────────────────────────────────────────────────────────────────
-    # 1. Strategy: 52-Week High Breakout Momentum
+    # 1. Strategy: 52-Week High Breakout Momentum (George & Hwang 2004)
     # ──────────────────────────────────────────────────────────────────────────
     def run_52w_high_momentum():
         cash = capital
@@ -242,7 +258,7 @@ def main():
                 pos["stop_price"] = max(pos["stop_price"], stop)
 
                 # Check stop exit
-                if px < pos["stop_price"] or (not regime_on and (d - pos["entry_date"]).days > 7):
+                if px < pos["stop_price"]:
                     proceeds = px * pos["qty"] * 0.998  # fees
                     cost = pos["entry_price"] * pos["qty"] * 1.002
                     pnl = proceeds - cost
@@ -250,8 +266,8 @@ def main():
                     cash += proceeds
                     del portfolio[sym]
 
-            # Bi-weekly rebalance / entry
-            if d.weekday() == 0 and regime_on:
+            # Daily scan for true 52-week high breakouts
+            if regime_on:
                 free_slots = slots - len(portfolio)
                 if free_slots > 0:
                     candidates = []
@@ -265,9 +281,11 @@ def main():
                         h250 = ind["high250"][i]
                         if np.isnan(h250) or h250 <= 0:
                             continue
-                        proximity = px / h250
-                        # Must be within 5% of 52-week high, above 50 and 200 SMA, volume > 20d avg
-                        if proximity >= 0.95 and px > ind["sma50"][i] > ind["sma200"][i] and ind["volumes"][i] > ind["vol20"][i]:
+                        # True 52-week high breakout, within 5% extension, stacked MAs, volume confirmation
+                        if (px >= h250 and px <= h250 * 1.05 and
+                            px > ind["sma50"][i] > ind["sma200"][i] and
+                            ind["volumes"][i] >= ind["vol20"][i]):
+                            proximity = px / h250
                             candidates.append((sym, proximity, px))
 
                     candidates.sort(key=lambda x: x[1], reverse=True)
@@ -318,8 +336,8 @@ def main():
                 px = ind["closes"][i]
                 pos["peak_price"] = max(pos["peak_price"], px)
 
-                # Exit rule: Close below 100-day SMA, or hard stop 10%
-                if px < ind["sma100"][i] or px < pos["entry_price"] * 0.90:
+                # Exit rule: Close below 100-day SMA, or disaster stop 15%
+                if px < ind["sma100"][i] or px < pos["entry_price"] * 0.85:
                     proceeds = px * pos["qty"] * 0.998
                     cost = pos["entry_price"] * pos["qty"] * 1.002
                     pnl = proceeds - cost
@@ -327,8 +345,32 @@ def main():
                     cash += proceeds
                     del portfolio[sym]
 
-            # Weekly review
+            # Weekly review: Rotation & new entries
             if d.weekday() == 0 and regime_on:
+                # Rank universe by Clenow score today
+                all_scores = []
+                for sym, ind in indicators.items():
+                    i = ind["dates"].get(d)
+                    if i is not None and i >= 90:
+                        all_scores.append((sym, ind["clenow"][i]))
+                all_scores.sort(key=lambda x: x[1], reverse=True)
+                n_scored = len(all_scores)
+                pct_ranks = {s: 100.0 * (n_scored - 1 - idx) / max(1, n_scored - 1) for idx, (s, _) in enumerate(all_scores)}
+
+                # Rotation exit: sell holdings falling out of top 20% (percentile < 80)
+                for sym in list(portfolio.keys()):
+                    if pct_ranks.get(sym, 0.0) < 80.0:
+                        pos = portfolio[sym]
+                        ind = indicators[sym]
+                        i = ind["dates"].get(d)
+                        px = ind["closes"][i] if i is not None else pos["entry_price"]
+                        proceeds = px * pos["qty"] * 0.998
+                        cost = pos["entry_price"] * pos["qty"] * 1.002
+                        pnl = proceeds - cost
+                        trades.append(TradeRecord("Clenow", sym, pos["entry_date"], d, pos["entry_price"], px, pos["qty"], cost, pnl, (pnl / cost) * 100, "ROTATION", (d - pos["entry_date"]).days))
+                        cash += proceeds
+                        del portfolio[sym]
+
                 free_slots = slots - len(portfolio)
                 if free_slots > 0:
                     candidates = []
@@ -340,7 +382,8 @@ def main():
                             continue
                         score = ind["clenow"][i]
                         px = ind["closes"][i]
-                        if score > 0 and px > ind["sma100"][i] and px > ind["sma200"][i]:
+                        # Clenow gates: score > 0, px > 100 SMA & 200 SMA, 15% gap filter
+                        if score > 0 and px > ind["sma100"][i] and px > ind["sma200"][i] and ind["max_gap_90"][i] <= 0.15:
                             candidates.append((sym, score, px))
 
                     candidates.sort(key=lambda x: x[1], reverse=True)
@@ -355,7 +398,7 @@ def main():
                                 "entry_price": px,
                                 "qty": qty,
                                 "peak_price": px,
-                                "stop_price": px * 0.90,
+                                "stop_price": px * 0.85,
                             }
                             free_slots -= 1
 
@@ -391,11 +434,12 @@ def main():
                 px = ind["closes"][i]
                 pos["peak_price"] = max(pos["peak_price"], px)
 
-                # Minervini 8% initial stop, trailing 50 EMA once up 15%
+                # Minervini 12% initial stop, trailing 50 SMA once up 15%
                 gain_pct = (pos["peak_price"] / pos["entry_price"] - 1.0) * 100
-                stop = ind["ema50"][i] if gain_pct > 15 else (pos["entry_price"] * 0.92)
+                if gain_pct >= 15.0:
+                    pos["stop_price"] = max(pos["stop_price"], ind["sma50"][i])
 
-                if px < stop:
+                if px < pos["stop_price"]:
                     proceeds = px * pos["qty"] * 0.998
                     cost = pos["entry_price"] * pos["qty"] * 1.002
                     pnl = proceeds - cost
@@ -403,8 +447,8 @@ def main():
                     cash += proceeds
                     del portfolio[sym]
 
-            # Review on Mondays & Thursdays
-            if d.weekday() in (0, 3) and regime_on:
+            # Daily scan when regime ON
+            if regime_on:
                 free_slots = slots - len(portfolio)
                 if free_slots > 0:
                     candidates = []
@@ -418,21 +462,26 @@ def main():
                         sma50 = ind["sma50"][i]
                         sma150 = ind["sma150"][i]
                         sma200 = ind["sma200"][i]
+                        sma200_prev = ind["sma200_prev"][i]
                         h250 = ind["high250"][i]
                         l250 = ind["low250"][i]
+                        h20 = ind["high20"][i]
 
-                        # Minervini Trend Template:
+                        # Full Minervini Trend Template:
                         # 1. Price > 50 > 150 > 200 SMA
-                        # 2. Price >= 25% above 52W low
-                        # 3. Price within 20% of 52W high
-                        # 4. Breakout of 20-day high with Volume > 20d avg
+                        # 2. 200 SMA rising (higher than 22 bars ago)
+                        # 3. Price >= 25% above 52W low
+                        # 4. Price within 20% of 52W high
+                        # 5. Breakout of 20-day high without being extended > 5%
+                        # 6. Volume >= 20d avg
                         if (px > sma50 > sma150 > sma200 and
+                            sma200 > sma200_prev and
                             px >= l250 * 1.25 and
                             px >= h250 * 0.80 and
-                            px >= ind["high20"][i] and
-                            ind["volumes"][i] > ind["vol20"][i]):
-                            # Score by RS proximity
-                            score = px / h250
+                            px >= h20 and px <= h20 * 1.05 and
+                            ind["volumes"][i] >= ind["vol20"][i]):
+                            # Rank candidates by RS score
+                            score = ind["rs_score"][i]
                             candidates.append((sym, score, px))
 
                     candidates.sort(key=lambda x: x[1], reverse=True)
@@ -447,7 +496,7 @@ def main():
                                 "entry_price": px,
                                 "qty": qty,
                                 "peak_price": px,
-                                "stop_price": px * 0.92,
+                                "stop_price": px * 0.88,
                             }
                             free_slots -= 1
 

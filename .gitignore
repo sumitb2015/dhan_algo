@@ -42,6 +42,7 @@ REORGANIZATION_SUMMARY.md
 # Runtime debug artifacts
 debug/option_chain_cache/
 debug/pnf_ticks/
+debug/replays/
 debug/*.txt
 debug/*.pid
 debug/*.lock
@@ -62,7 +63,11 @@ debug/screenshots/
 # machine-local run output (fills, P&L, spot prints), regenerated on every run.
 debug/logs/
 debug/**/*.log
-debug/**/*.log.bak
+*.log.*
+logs/
+debug/**/*.log
+*.log.*
+logs/.bak
 # Intraday bar snapshots published by the strategy poller for the terminal's
 # chart. Same single-level blind spot as above: debug/*.json never matched this
 # subtree, so they were committed and then churned on every poll.
@@ -112,6 +117,8 @@ temp_data/
 *.whl
 *.parquet
 *.log
+*.log.*
+logs/
 
 
 # Subagent-driven-development scratch state

@@ -30,7 +30,7 @@ import pandas as pd
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from lib import minervini                                              # noqa: E402
+from lib import minervini, fifty_two_week, clenow                      # noqa: E402
 from lib.momentum import (
     MomentumConfig, Position,
     STAGE_INITIAL, STAGE_BREAKEVEN, STAGE_TRAIL,
@@ -45,7 +45,7 @@ REPLAYS_DIR = os.path.join(DEBUG_DIR, "replays")
 
 def default_stop_pct(strategy: str) -> float:
     """Stop distance each model used before the stop became a user setting."""
-    return 10.0 if strategy == "clenow" else 12.0
+    return 15.0 if strategy == "clenow" else 12.0
 
 
 def stop_suffix(strategy: str, stop_pct: float) -> str:
@@ -80,33 +80,11 @@ def passes_strategy_entry(strategy: str, sym: str, tables: dict, d: date, cfg: M
         return minervini.entry_check(sym, tables, d, cfg.breakout_days, rs_pct)
 
     elif strategy == "52w_high":
-        sma50 = t["sma50"].get(d)
-        sma200 = t["sma200"].get(d)
-        h250 = t["high250"].get(d)
-        if any(v is None or np.isnan(v) for v in (sma50, sma200, h250)):
-            return False, "insufficient history (<250d)"
-        proximity = close / h250
-        min_prox = (1.0 - cfg.breakout_days / 100.0) if cfg.breakout_days in (5, 10) else 0.95
-        if proximity < min_prox:
-            return False, f"proximity <{min_prox*100:.0f}% ({proximity*100:.1f}%)"
-        if not (close > sma50 > sma200):
-            return False, "Close < 50 SMA or 50 < 200 SMA"
-        if vol < vol20:
-            return False, "volume < 20d average"
-        return True, "QUALIFIED"
-        return True, "QUALIFIED"
+        strict = cfg.breakout_days not in (5, 10)
+        return fifty_two_week.entry_check(sym, tables, d, strict_breakout=strict, max_proximity_pct=float(cfg.breakout_days))
 
     elif strategy == "clenow":
-        score = t["clenow"].get(d, 0.0)
-        sma100 = t["sma100"].get(d)
-        sma200 = t["sma200"].get(d)
-        if any(v is None or np.isnan(v) for v in (sma100, sma200)):
-            return False, "insufficient history (<200d)"
-        if score <= 0:
-            return False, "negative or flat exponential slope"
-        if not (close > sma100 and close > sma200):
-            return False, "Close < 100 SMA or 200 SMA"
-        return True, "QUALIFIED"
+        return clenow.entry_check(sym, tables, d)
 
     return False, "unknown strategy"
 
@@ -120,23 +98,10 @@ def check_strategy_exit(strategy: str, pos: Position, close: float, tables: dict
         return minervini.exit_check(pos, close, tables, d, STAGE_TRAIL)
 
     elif strategy == "52w_high":
-        pos.peak_close = max(pos.peak_close, close)
-        pos.last_close = close
-        pos.stop_price = max(pos.stop_price, pos.peak_close * (1.0 - cfg.stop_pct / 100.0))
-        pos.stage = STAGE_TRAIL
-        if close < pos.stop_price:
-            return "stop"
-        return None
+        return fifty_two_week.exit_check(pos, close, stop_pct=cfg.stop_pct)
 
     elif strategy == "clenow":
-        pos.peak_close = max(pos.peak_close, close)
-        pos.last_close = close
-        sma100 = t["sma100"].get(d) if t else None
-        pos.stop_price = pos.entry_price * (1.0 - cfg.stop_pct / 100.0)
-        pos.stage = STAGE_INITIAL
-        if (sma100 and not np.isnan(sma100) and close < float(sma100)) or close < pos.stop_price:
-            return "sma100_exit"
-        return None
+        return clenow.exit_check(pos, close, tables, d, stop_pct=cfg.stop_pct)
 
     return None
 
@@ -198,37 +163,9 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
     if strategy == "minervini":
         minervini.add_tables(price_map, tables)         # shared with the live bot: lib/minervini.py
     elif strategy == "52w_high":
-        for sym, df in price_map.items():
-            if sym in tables:
-                c_ser = df["close"]
-                d_list = list(df["date"])
-                tables[sym]["sma50"] = dict(zip(d_list, c_ser.rolling(50, min_periods=50).mean()))
-                tables[sym]["sma200"] = dict(zip(d_list, c_ser.rolling(200, min_periods=200).mean()))
-                tables[sym]["high250"] = dict(zip(d_list, df["high"].rolling(250, min_periods=200).max().shift(1)))
-
+        fifty_two_week.add_tables(price_map, tables)    # shared: lib/fifty_two_week.py
     elif strategy == "clenow":
-        dx = np.arange(90) - 44.5
-        sxx = 60742.5
-        for sym, df in price_map.items():
-            if sym in tables:
-                c_ser = df["close"]
-                d_list = list(df["date"])
-                tables[sym]["sma100"] = dict(zip(d_list, c_ser.rolling(100, min_periods=100).mean()))
-                tables[sym]["sma200"] = dict(zip(d_list, c_ser.rolling(200, min_periods=200).mean()))
-                c_arr = c_ser.values
-                n_len = len(c_arr)
-                clen_vals = np.zeros(n_len)
-                for b_i in range(90, n_len):
-                    sub_y = c_arr[b_i - 90:b_i]
-                    if np.all(sub_y > 0):
-                        y = np.log(sub_y)
-                        sxy = float(np.dot(dx, y))
-                        slope = sxy / sxx
-                        dy = y - np.mean(y)
-                        syy = float(np.dot(dy, dy))
-                        r2 = (sxy * sxy) / (sxx * syy) if syy > 0 else 0.0
-                        clen_vals[b_i] = (math.exp(slope * 250) - 1.0) * 100.0 * r2
-                tables[sym]["clenow"] = dict(zip(d_list, clen_vals))
+        clenow.add_tables(price_map, tables)            # shared: lib/clenow.py
 
     # Determine trading days in window
     all_trading_days = [d for d in calendar.trading_days if start <= d <= end]
@@ -369,9 +306,9 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         is_review = calendar.is_review_day(d)
         regime_on = bool(calendar.is_on(d))
 
-        # Minervini breakouts are not tied to a weekly calendar: scan for entries every session.
+        # Minervini and 52-Week High breakouts scan for entries every session (daily).
         # Liquidation on a regime flip and rank rotation stay review-day-only.
-        if is_review or strategy == "minervini":
+        if is_review or strategy in ("minervini", "52w_high"):
             if not regime_on:
                 if cfg.regime_exit and is_review:
                     for sym in portfolio:
@@ -412,10 +349,15 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
                 if ranking:
                     ranks = ranks_by_symbol(ranking)
                     survivors = {s: p for s, p in portfolio.items() if s not in queued_sells}
-                    if strategy == "turtle_rs":
-                        for sym, reason in rank_rotation_exits(survivors, ranks, d, cfg):
-                            pending_sells.append((sym, "rebalance"))
-                            queued_sells.add(sym)
+                    if is_review:
+                        if strategy == "turtle_rs":
+                            for sym, reason in rank_rotation_exits(survivors, ranks, d, cfg):
+                                pending_sells.append((sym, "rebalance"))
+                                queued_sells.add(sym)
+                        elif strategy == "clenow":
+                            for sym, reason in clenow.rank_rotation_exits(survivors, ranking, min_percentile=80.0):
+                                pending_sells.append((sym, "rotation"))
+                                queued_sells.add(sym)
 
                     # Buys for next session open
                     slots_free = cfg.slots - (len(portfolio) - len(queued_sells))
@@ -568,6 +510,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
             "strategy_name": STRATEGY_NAMES.get(strategy, strategy),
             "regime_enabled": cfg.regime_enabled,
             "breakout_days": cfg.breakout_days,
+            "stop_pct": cfg.stop_pct,
             "start": start.isoformat(),
             "end": end.isoformat(),
             "trading_days": len(all_trading_days),

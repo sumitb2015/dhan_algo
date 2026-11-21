@@ -223,7 +223,7 @@ function shortReason(reason: string): string {
 }
 
 /** Stop distance each model used before it became a setting (mirrors default_stop_pct in simulate_momentum_replay.py). */
-const defaultStopFor = (strategy: string) => (strategy === 'clenow' ? 10 : 12);
+const defaultStopFor = (strategy: string) => (strategy === 'clenow' ? 15 : 12);
 
 export default function MomentumSimulationReplay({
   initialCapital = 175000,
@@ -389,7 +389,7 @@ export default function MomentumSimulationReplay({
                   onClick={() => {
                     setStartDate(p.start);
                     setEndDate(p.end);
-                    fetchSimulation(p.start, p.end, capital, slots, strategy, regimeEnabled, breakoutDays);
+                    fetchSimulation(p.start, p.end, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct);
                   }}
                   className={`text-xs px-2.5 py-1 rounded border transition-colors cursor-pointer ${
                     active
@@ -417,7 +417,7 @@ export default function MomentumSimulationReplay({
                 if (newStrat === 'minervini') {
                   newBo = 20;
                 } else if (newStrat === '52w_high') {
-                  newBo = 5;
+                  newBo = 55;
                 } else if (newStrat === 'turtle_rs') {
                   newBo = 55;
                 }
@@ -430,9 +430,9 @@ export default function MomentumSimulationReplay({
               }}
               className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs font-semibold focus:outline-none focus:border-emerald-500 cursor-pointer"
             >
-              <option value="minervini">Minervini Trend Template (+31.9% CAGR · 2.24 PF)</option>
-              <option value="52w_high">52-Week High Breakout (+20.9% CAGR · -19.9% DD)</option>
-              <option value="clenow">Clenow Smooth Momentum (+40.1% CAGR)</option>
+              <option value="minervini">Minervini Trend Template (+25.1% CAGR · 54.8% Win)</option>
+              <option value="clenow">Clenow Smooth Momentum (+34.8% CAGR · 2.00 PF)</option>
+              <option value="52w_high">52-Week High Breakout (+19.8% CAGR · 1.79 PF)</option>
               <option value="turtle_rs">Turtle Composite RS (+14.9% CAGR · -14.3% DD)</option>
             </select>
           </div>
@@ -480,7 +480,7 @@ export default function MomentumSimulationReplay({
               onChange={(e) => {
                 const val = e.target.checked;
                 setRegimeEnabled(val);
-                fetchSimulation(startDate, endDate, capital, slots, strategy, val, breakoutDays);
+                fetchSimulation(startDate, endDate, capital, slots, strategy, val, breakoutDays, stopPct);
               }}
               className="rounded border-zinc-700 bg-zinc-800 text-emerald-500 focus:ring-0 cursor-pointer"
             />
@@ -517,7 +517,7 @@ export default function MomentumSimulationReplay({
                 onChange={(e) => {
                   const bo = Number(e.target.value);
                   setBreakoutDays(bo);
-                  fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, bo);
+                  fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, bo, stopPct);
                 }}
                 className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs focus:outline-none focus:border-emerald-500 cursor-pointer"
               >
@@ -540,7 +540,7 @@ export default function MomentumSimulationReplay({
                 onChange={(e) => {
                   const bo = Number(e.target.value);
                   setBreakoutDays(bo);
-                  fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, bo);
+                  fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, bo, stopPct);
                 }}
                 className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs focus:outline-none focus:border-emerald-500 cursor-pointer"
               >
@@ -552,9 +552,9 @@ export default function MomentumSimulationReplay({
 
           {strategy === '52w_high' && (
             <div className="flex items-center gap-1.5 text-xs text-zinc-400">
-              <Info tip="George & Hwang 52-week high proximity filter. Limits entries to market leaders trading within 5% or 10% of their 52-week peak.">
+              <Info tip="George & Hwang 52-week high trigger. True Breakout enters on fresh 52-week highs (with 5% max extension); Proximity modes allow entering leaders within 5% or 10% of their 52W high.">
                 <span className="cursor-help underline decoration-dotted decoration-zinc-600 underline-offset-2">
-                  52W Proximity:
+                  52W Trigger:
                 </span>
               </Info>
               <select
@@ -562,12 +562,13 @@ export default function MomentumSimulationReplay({
                 onChange={(e) => {
                   const bo = Number(e.target.value);
                   setBreakoutDays(bo);
-                  fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, bo);
+                  fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, bo, stopPct);
                 }}
                 className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs focus:outline-none focus:border-emerald-500 cursor-pointer"
               >
-                <option value={5}>Within 5% (Strict Leaders)</option>
-                <option value={10}>Within 10% (Broader Watchlist)</option>
+                <option value={55}>True Breakout (New 52W High)</option>
+                <option value={5}>Proximity (Within 5%)</option>
+                <option value={10}>Proximity (Within 10%)</option>
               </select>
             </div>
           )}
@@ -621,7 +622,7 @@ export default function MomentumSimulationReplay({
           </div>
 
           <button
-            onClick={() => fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays)}
+            onClick={() => fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct)}
             disabled={loading}
             className="ml-auto px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
           >

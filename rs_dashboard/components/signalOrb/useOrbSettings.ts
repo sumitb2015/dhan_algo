@@ -68,7 +68,7 @@ export function useOrbSettings() {
 
   const ledger = state?.ledger ?? null;
   const cfg = ledger?.config;
-  const feed = usePnfFeed(state?.contract ?? null, 0, now);
+  const feed = usePnfFeed(state?.contract ?? null, 0, now, null, { pauseWhenHidden: true });
   const bars = feed.bars;
   const last = bars[bars.length - 1];
   const price = last && last.straddle > 0 ? last.straddle : null;

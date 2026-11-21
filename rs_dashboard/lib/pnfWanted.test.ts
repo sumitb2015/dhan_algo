@@ -26,3 +26,13 @@ test('a flood of distinct asks keeps only the newest WANTED_MAX_PAIRS', () => {
   assert.equal(r.pairs.length, WANTED_MAX_PAIRS);
   assert.ok(!r.signature.split(',').includes('NSE_EQ:0'));
 });
+
+test('the Top Markets crude ask joins a chart\'s ask (both streamed) and is dropped once that panel stops polling', () => {
+  const m: WantedMap = new Map();
+  noteWanted(m, 'NSE_FNO:61471', [['NSE_FNO', '61471']], 0);
+  const u = noteWanted(m, 'top-indices:crude', [['MCX_COMM', '486502'], ['MCX_COMM', '486503']], 1_000);
+  assert.deepEqual(u.pairs.map(p => p.join(':')), ['MCX_COMM:486502', 'MCX_COMM:486503', 'NSE_FNO:61471']);
+  // the chart keeps polling, the panel stops: after WANTED_KEEP_MS only the chart's instrument remains
+  const later = noteWanted(m, 'NSE_FNO:61471', [['NSE_FNO', '61471']], 1_000 + WANTED_KEEP_MS + 1);
+  assert.deepEqual(later.pairs.map(p => p.join(':')), ['NSE_FNO:61471']);
+});
