@@ -99,7 +99,7 @@ export function contractQuote(deps: Pick<GbDeps, 'price' | 'optionPrice'>, t: Ta
 // ── Contract pick ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /** The option expiry a leg trades: "nearest" = the first listed expiry AFTER today (never one expiring today). */
-export function legExpiry(u: GbUnderlying, leg: DirLeg, today: string, from?: FnoRow[]): string {
+export function legExpiry(u: string, leg: DirLeg, today: string, from?: FnoRow[]): string {
   const exps = expiriesFor('options', u, from);
   if (leg.expiry === 'nearest') return exps.find(e => e > today) ?? `No ${u} option expiry after ${today} in the master list`;
   if (!exps.includes(leg.expiry)) return `${u} options expiring ${leg.expiry} are not listed`;
@@ -112,7 +112,7 @@ const isIso = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s);
  * The contract a leg trades at future price `futLtp`: an option ATM of the listed strikes, `offset` strikes OTM (CE up, PE down);
  * a FUT leg trades the signal future of its option expiry (futureTarget), so never a future expiring today.
  */
-export function pickTarget(u: GbUnderlying, leg: DirLeg, futLtp: number, today: string, from?: FnoRow[]): Target | string {
+export function pickTarget(u: string, leg: DirLeg, futLtp: number, today: string, from?: FnoRow[]): Target | string {
   const exp = legExpiry(u, leg, today, from);
   if (!isIso(exp)) return exp;
   if (leg.opt === 'FUT') return futureTarget(u, exp, from) ?? `No ${u} future expiring on or after ${exp} in the master list`;
@@ -128,7 +128,7 @@ export function pickTarget(u: GbUnderlying, leg: DirLeg, futLtp: number, today: 
 }
 
 /** The signal future for options of `optExpiry`: the first future expiring on or after it (spotInstrument's rule). */
-export function futureTarget(u: GbUnderlying, optExpiry: string, from?: FnoRow[]): Target | null {
+export function futureTarget(u: string, optExpiry: string, from?: FnoRow[]): Target | null {
   const exp = expiriesFor('futures', u, from).find(e => e >= optExpiry);
   return exp ? { kind: 'futures', symbol: u, name: u, expiry: exp } : null;
 }

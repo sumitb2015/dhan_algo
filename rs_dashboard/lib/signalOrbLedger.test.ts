@@ -46,7 +46,7 @@ test('symbol, instrument and strike offset: bounded, defaults keep CRUDEOILM fut
   assert.equal(cur.strikeOffset, 0);
   const ok = sanitizeConfigPatch({ symbol: 'CRUDEOIL', instrument: 'options', strikeOffset: -2 }, cur);
   assert.ok(typeof ok !== 'string' && ok.symbol === 'CRUDEOIL' && ok.instrument === 'options' && ok.strikeOffset === -2);
-  assert.equal(typeof sanitizeConfigPatch({ symbol: 'NIFTY' }, cur), 'string');
+  assert.equal(typeof sanitizeConfigPatch({ symbol: 'GOLD' }, cur), 'string');
   assert.equal(typeof sanitizeConfigPatch({ instrument: 'spread' }, cur), 'string');
   assert.equal(typeof sanitizeConfigPatch({ strikeOffset: 11 }, cur), 'string');
   assert.equal(typeof sanitizeConfigPatch({ strikeOffset: 0.5 }, cur), 'string');
@@ -140,4 +140,39 @@ test('normalizeLedger keeps good config fields when one stored field is bad', ()
   assert.equal(l.config.trailStartPts, emptyLedger().config.trailStartPts);
   const t = normalizeLedger({ config: { entryStart: '10:00', entryEnd: '20:00', eodExit: '21:00' } });
   assert.deepEqual([t.config.entryStart, t.config.entryEnd, t.config.eodExit], ['10:00', '20:00', '21:00']);
+});
+
+test('NIFTY: accepted, and a symbol switch brings that exchange\'s session times', () => {
+  const cur = emptyLedger().config;
+  const n = sanitizeConfigPatch({ symbol: 'NIFTY' }, cur);
+  assert.ok(typeof n !== 'string' && n.symbol === 'NIFTY' && n.entryStart === '09:16' && n.entryEnd === '15:00' && n.eodExit === '15:17');
+  const back = sanitizeConfigPatch({ symbol: 'CRUDEOILM' }, n as typeof cur);
+  assert.ok(typeof back !== 'string' && back.eodExit === '23:00' && back.entryEnd === '22:45');
+  // times in the same patch win
+  const own = sanitizeConfigPatch({ symbol: 'NIFTY', entryStart: '09:30', entryEnd: '14:30', eodExit: '15:10' }, cur);
+  assert.ok(typeof own !== 'string' && own.entryStart === '09:30' && own.eodExit === '15:10');
+  // a patch that keeps the symbol leaves the user's times alone
+  const same = sanitizeConfigPatch({ symbol: 'NIFTY', lots: 3 }, { ...(n as typeof cur), eodExit: '15:12' });
+  assert.ok(typeof same !== 'string' && same.eodExit === '15:12');
+  // stored times survive normalizeLedger
+  const l = normalizeLedger({ config: { symbol: 'NIFTY', entryStart: '09:20', entryEnd: '14:00', eodExit: '15:10' } });
+  assert.deepEqual([l.config.symbol, l.config.entryStart, l.config.eodExit], ['NIFTY', '09:20', '15:10']);
+});
+
+test('symbol switch: brings the stop / trail of that symbol and clears the old symbol\'s watermark and stop-out block', () => {
+  const cur = emptyLedger().config;
+  const n = sanitizeConfigPatch({ symbol: 'NIFTY' }, cur);
+  assert.ok(typeof n !== 'string' && n.stopPts === 40 && n.trailStartPts === 25 && n.trailGapPts === 15);
+  const keep = sanitizeConfigPatch({ symbol: 'NIFTY', stopPts: 55 }, cur);
+  assert.ok(typeof keep !== 'string' && keep.stopPts === 55);
+  const l: OrbLedger = { ...emptyLedger(), watermarkT: 1_700_000_000, blockedSide: 'LONG' };
+  const r = applyClientOp(l, { op: 'setConfig', patch: { symbol: 'NIFTY' } }, 1);
+  assert.ok(r.ok && r.ledger.watermarkT === 0 && r.ledger.blockedSide === null && r.ledger.config.symbol === 'NIFTY');
+  const same = applyClientOp(l, { op: 'setConfig', patch: { lots: 3 } }, 1);
+  assert.ok(same.ok && same.ledger.watermarkT === 1_700_000_000 && same.ledger.blockedSide === 'LONG');
+});
+
+test('normalizeLedger: a stored NIFTY config keeps its own stop and trail (the symbol is applied first)', () => {
+  const l = normalizeLedger({ config: { stopPts: 55, trailStartPts: 12, trailGapPts: 6, symbol: 'NIFTY' } });
+  assert.deepEqual([l.config.symbol, l.config.stopPts, l.config.trailStartPts, l.config.trailGapPts], ['NIFTY', 55, 12, 6]);
 });

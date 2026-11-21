@@ -150,7 +150,7 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
         </Section>
 
         <Section title="Market">
-          <Row label="Symbol" sub={locked ? 'Pinned while a position is open' : 'The indicators read this future'}>
+          <Row label="Symbol" sub={locked ? 'Pinned while a position is open' : c.symbol === 'NIFTY' ? 'The indicators read the NIFTY monthly future (the index has no volume)' : 'The indicators read this future'}>
             <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
               {ORB_SYMBOLS.map(sym => (
                 <button key={sym} type="button" disabled={locked} onClick={() => onPatch({ symbol: sym })} aria-pressed={c.symbol === sym}
@@ -186,7 +186,7 @@ export function OrbDrawer({ open, onClose, ledger, locked, onPatch, onMode, onRe
           </Row>
           <Row label="Entries from"><TimeField label="Entries from" value={c.entryStart} onCommit={v => onPatch({ entryStart: v })} /></Row>
           <Row label="Entries until"><TimeField label="Entries until" value={c.entryEnd} onCommit={v => onPatch({ entryEnd: v })} /></Row>
-          <Row label="Cutoff (square off)" sub="MCX MIS; the broker squares off near 23:25"><TimeField label="Cutoff" value={c.eodExit} onCommit={v => onPatch({ eodExit: v })} /></Row>
+          <Row label="Cutoff (square off)" sub={c.symbol === 'NIFTY' ? 'NSE MIS; the broker squares off near 15:20' : 'MCX MIS; the broker squares off near 23:25'}><TimeField label="Cutoff" value={c.eodExit} onCommit={v => onPatch({ eodExit: v })} /></Row>
         </Section>
 
         <Section title="Risk">

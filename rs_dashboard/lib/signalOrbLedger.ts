@@ -8,8 +8,20 @@ import type { Target } from './pnfTarget.ts';
 export type OrbMode = 'SIM' | 'REAL';
 export type OrbBroker = 'dhan' | 'kotak' | 'zerodha';
 export type RowStatus = 'sending' | 'open' | 'closing' | 'closed' | 'failed' | 'unknown';
-export type OrbSymbol = 'CRUDEOILM' | 'CRUDEOIL';
-export const ORB_SYMBOLS: OrbSymbol[] = ['CRUDEOILM', 'CRUDEOIL'];
+export type OrbSymbol = 'CRUDEOILM' | 'CRUDEOIL' | 'NIFTY';
+export const ORB_SYMBOLS: OrbSymbol[] = ['CRUDEOILM', 'CRUDEOIL', 'NIFTY'];
+/** Entry start / entry end / cutoff per symbol: MCX crude runs into the evening, NSE closes 15:30 (the repo's intraday exit is 15:17). */
+export const SYMBOL_TIMES: Record<OrbSymbol, { entryStart: string; entryEnd: string; eodExit: string }> = {
+  CRUDEOILM: { entryStart: '09:15', entryEnd: '22:45', eodExit: '23:00' },
+  CRUDEOIL: { entryStart: '09:15', entryEnd: '22:45', eodExit: '23:00' },
+  NIFTY: { entryStart: '09:16', entryEnd: '15:00', eodExit: '15:17' },
+};
+/** Points are not comparable across symbols (30 points is ~0.4% of crude, ~0.12% of NIFTY), so a symbol switch brings its own stop and trail. */
+export const SYMBOL_RISK: Record<OrbSymbol, { stopPts: number; trailStartPts: number; trailGapPts: number }> = {
+  CRUDEOILM: { stopPts: 30, trailStartPts: 8, trailGapPts: 15 },
+  CRUDEOIL: { stopPts: 30, trailStartPts: 8, trailGapPts: 15 },
+  NIFTY: { stopPts: 40, trailStartPts: 25, trailGapPts: 15 },
+};
 /** futures: long on BULL, short on BEAR. options: SELL a PE on BULL, SELL a CE on BEAR (the indicators always read the future). */
 export type OrbInstrument = 'futures' | 'options';
 /** Strike offset bounds: 0 = ATM, +N = N strikes OTM (PE down, CE up), -N = ITM. */
@@ -55,7 +67,7 @@ export interface OrbRow {
   lots: number;
   /** Broker quantity sent (lots x the broker's own lot units); 0 for SIM. */
   units: number;
-  /** Rupees per point per lot (CRUDEOILM: 10 barrels). */
+  /** Rupees per point per lot: barrels per lot for crude (CRUDEOILM 10), the master lot for NIFTY. */
   unitsPerLot: number;
   /** Decision price of the row's OWN instrument (futures LTP, or the option premium) when the order was sent, not the broker fill. */
   entry: number;
@@ -128,7 +140,8 @@ export function normalizeLedger(v: unknown): OrbLedger {
   let cfg: OrbConfig = base.config;
   const stored = o.config && typeof o.config === 'object' ? (o.config as unknown as Record<string, unknown>) : {};
   const TIME_KEYS = ['entryStart', 'entryEnd', 'eodExit'];
-  for (const k of Object.keys(stored).filter(x => !TIME_KEYS.includes(x))) {
+  // the symbol first: switching it brings that symbol's stop / trail / times, which the stored values then replace
+  for (const k of Object.keys(stored).filter(x => !TIME_KEYS.includes(x)).sort((a, b) => (a === 'symbol' ? -1 : b === 'symbol' ? 1 : 0))) {
     const r = sanitizeConfigPatch({ [k]: stored[k] }, cfg);
     if (typeof r !== 'string') cfg = r;
   }
@@ -201,6 +214,13 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
   }
   if (p.symbol !== undefined) {
     if (!ORB_SYMBOLS.includes(p.symbol as OrbSymbol)) return `symbol must be ${ORB_SYMBOLS.join(' or ')}`;
+    // a symbol change brings that exchange's session times (unless the same patch sets times itself)
+    if (p.symbol !== cur.symbol && p.entryStart === undefined && p.entryEnd === undefined && p.eodExit === undefined) {
+      Object.assign(next, SYMBOL_TIMES[p.symbol as OrbSymbol]);
+    }
+    if (p.symbol !== cur.symbol && p.stopPts === undefined && p.trailStartPts === undefined && p.trailGapPts === undefined) {
+      Object.assign(next, SYMBOL_RISK[p.symbol as OrbSymbol]);
+    }
     next.symbol = p.symbol as OrbSymbol;
   }
   if (p.instrument !== undefined) {
@@ -276,7 +296,9 @@ export function applyClientOp(l: OrbLedger, raw: unknown, now: number): OpResult
       if (live && (next.symbol !== l.config.symbol || next.instrument !== l.config.instrument || next.strikeOffset !== l.config.strikeOffset)) {
         return bad('Symbol, instrument and strike cannot change while a position is open', 409);
       }
-      return { ok: true, ledger: { ...l, config: next } };
+      // a new symbol is a new price series: its last-acted bar and stop-out block do not carry over (no row is live here)
+      const symbolChanged = next.symbol !== l.config.symbol;
+      return { ok: true, ledger: { ...l, config: next, ...(symbolChanged ? { watermarkT: 0, blockedSide: null } : {}) } };
     }
     case 'setMode': {
       if (op.mode !== 'SIM' && op.mode !== 'REAL') return bad('mode must be SIM or REAL');

@@ -34,7 +34,7 @@ const EXIT_RETRY_MS = 5_000;
  * bars); the slowest default (Wilder RSI / StochRSI, EMA up to 400) has converged long before 3000 bars, and the tick stays cheap.
  */
 const READ_BARS_1M = 3_000;
-/** 1-minute bars the replay reads: ~20 MCX sessions (870 min each) plus indicator warm-up. */
+/** 1-minute bars the replay reads: ~20 sessions (MCX 870 min each, NSE 375) plus indicator warm-up. */
 const REPLAY_BARS_1M = 20_000;
 export const REPLAY_SESSIONS = 20;
 

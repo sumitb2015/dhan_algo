@@ -262,3 +262,13 @@ test('closedBars: hourly bars start on the IST hour (09:00, 10:00 ...), as Tradi
   assert.deepEqual([h[0].high, h[0].low, h[0].close], [160, 99, 159]);
   assert.equal(closedBars(m, 15, t0 + 130 * 60)[0].t, t0);    // 15m on the same grid
 });
+
+test('rowPnl with NIFTY lot units: futures row by side, options row always a sold option', async () => {
+  const { rowPnl } = await import('./signalOrb.ts');
+  const fut = { side: 'LONG' as const, entry: 24000, lots: 2, unitsPerLot: 65, target: { kind: 'futures' } };
+  assert.equal(rowPnl(fut, 24010), 10 * 2 * 65);
+  assert.equal(rowPnl({ ...fut, side: 'SHORT' }, 24010), -10 * 2 * 65);
+  const opt = { side: 'LONG' as const, entry: 100, lots: 1, unitsPerLot: 65, target: { kind: 'options' } };
+  assert.equal(rowPnl(opt, 80), 20 * 65);
+  assert.equal(rowPnl(opt, 120), -20 * 65);
+});

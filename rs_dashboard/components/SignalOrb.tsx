@@ -15,7 +15,7 @@ import { cn } from '@/lib/utils';
 import { type EffectiveStopResult } from '@/lib/signalOrb';
 import { isStuck, type OrbConfig, type OrbRow } from '@/lib/signalOrbLedger';
 
-// /signal-orb: one orb, one switch. A CRUDEOIL / CRUDEOILM future's closed bars give the consensus of the active indicators —
+// /signal-orb: one orb, one switch. A CRUDEOIL / CRUDEOILM / NIFTY future's closed bars give the consensus of the active indicators —
 // futures mode: green long, red short; options mode: green sells a PE, red sells a CE; gray holds. Real money in REAL mode; the rules and every safety limit live in lib/signalOrb*.ts and
 // strategies/signal_orb/strategy.md. The engine runs only while this page is open (leader tab).
 

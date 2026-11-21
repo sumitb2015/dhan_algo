@@ -1,4 +1,4 @@
-# Signal Orb — CRUDEOILM indicator-consensus follower
+# Signal Orb — CRUDEOILM / CRUDEOIL / NIFTY indicator-consensus follower
 
 Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest yet, and these rules have not been checked against history.
 
@@ -39,7 +39,7 @@ Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest ye
 ## Orders (lib/signalOrbServer.ts)
 - The browser sends only `enter` / `exit` / `reverse`, the side and the decision price. The server reads lots, contract and broker from the ledger. It sizes the order from the broker's own lot (`brokerLegs`) and sends through the P&F executor `placePnfMarket(order, 'pnf', 'orba')`. Brokers: Dhan, Kotak and Zerodha. Product: MIS.
 - **No lot cap** (user's decision, 2026-11-20): `lots` is any whole number ≥ 1; `orba` has no per-source cap in `lib/dhanSourceCaps.ts` / `lib/kotakOrderRules.ts`, and the Orb's server passes `parsePnfOrder(…, { uncapped: true })` (a function argument, never read from a request body) past the P&F 20-lot cap. Orders above the MCX freeze quantity are rejected by the exchange, not sliced.
-- **Symbol:** CRUDEOILM (10 barrels/lot) or CRUDEOIL (100). The indicators always read the symbol's nearest future after today.
+- **Symbol:** CRUDEOILM (10 barrels/lot), CRUDEOIL (100) or NIFTY (the master lot, read from the contract, never hard-coded). The indicators always read the symbol's nearest monthly future after today (for NIFTY the future, not the index: the index feed has no volume, which would pin VWAP to neutral). NIFTY options sell the nearest weekly, ATM ± the strike offset. Switching symbol sets that exchange's times: crude 09:15 / 22:45 / 23:00, NIFTY 09:16 / 15:00 / 15:17 (editable afterwards). NIFTY is uncapped like crude (exchange freeze limit only) and refuses entries on a non-session day (`isNseSessionDay`). Product is MIS on every broker.
 - **Instrument:** `futures` — BULL long, BEAR short the future. `options` — BULL **sells a PE**, BEAR **sells a CE** on the nearest option expiry after today, ATM ± `strikeOffset` (+N = N strikes OTM: PE down, CE up; −N ITM), picked with Gearbox's `pickTarget()` at the decision future price. A reversal buys the sold option back, then sells the other side at the new strike. The premium is read from Fresh Money's server WebSocket (`lib/freshMoneyWs.ts`); an entry without a live premium is refused before the bar is consumed (it retries next tick); an exit never waits for one (it books the last premium seen, else the entry, and notes it). Symbol, instrument and strike offset are pinned while a row is live.
 - **The stop is in FUTURE points** for both instruments (`row.signalEntry`).
 - **A reversal is two orders: close, then open.** The open is sent only after the close was placed. If the close outcome is unknown, the engine halts and no second order is sent.

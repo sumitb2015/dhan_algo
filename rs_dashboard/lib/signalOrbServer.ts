@@ -1,6 +1,6 @@
 import { writeJsonAtomic } from '@/lib/lockedJsonFile';
 import { globalOnce } from '@/lib/globalOnce';
-import { istDateIso } from '@/lib/nseHolidays';
+import { isNseSessionDay, istDateIso } from '@/lib/nseHolidays';
 import { expiriesFor } from '@/lib/pnfContracts';
 import { placePnfMarket } from '@/lib/pnfAutoOrders';
 import { brokerLegs, resolvePnfLegs } from '@/lib/pnfOrderServer';
@@ -21,8 +21,17 @@ import {
 // (enter LONG, exit, reverse) and the decision price; contract, lots, broker quantity and the exit size come from the ledger and the
 // broker's own lot here. A row is written BEFORE its order is sent, so a crash mid-send leaves a 'sending' row, never a lost position.
 
-/** Rupees per point per lot: CRUDEOIL 100 barrels, CRUDEOILM 10. */
-export const unitsPerLotOf = (sym: OrbSymbol): number => MCX_LOT_MULTIPLIER[sym] ?? (sym === 'CRUDEOIL' ? 100 : 10);
+/**
+ * Rupees per point per lot: crude's barrels per lot (CRUDEOIL 100, CRUDEOILM 10), or NIFTY's master lot (it changes with NSE's
+ * revisions, so it is read from the master through the contract's own leg, never hard-coded). 0 = it could not be resolved.
+ */
+export function unitsPerLotOf(sym: OrbSymbol, nowMs = Date.now()): number {
+  if (sym !== 'NIFTY') return MCX_LOT_MULTIPLIER[sym] ?? (sym === 'CRUDEOIL' ? 100 : 10);
+  const fut = orbContract(sym, nowMs);
+  const legs = fut ? resolvePnfLegs(fut) : null;
+  const u = legs && typeof legs !== 'string' ? legs[0]?.unitsPerLot : null;
+  return u && u > 0 ? u : 0;
+}
 /** An option premium older than this (no change) is not used to book an entry. */
 const OPT_FRESH_MS = 30_000;
 
@@ -60,7 +69,7 @@ const lastPremium = globalOnce('signalOrb.lastPremium', () => new Map<string, nu
 function optionKey(t: Target): string | null {
   if (t.kind !== 'options' || !t.expiry || !t.strike || (t.side !== 'CE' && t.side !== 'PE')) return null;
   const c = resolveOption(t.symbol, t.expiry, t.strike, t.side);
-  return c && c.segment === 'MCX_COMM' ? wsWant('MCX_COMM', c.securityId) : null;
+  return c ? wsWant(c.segment, c.securityId) : null;
 }
 
 /** The option's live premium, or null (no quote, or none fresh enough). Every quote seen is kept as the exit's fallback. */
@@ -100,7 +109,7 @@ export function orbState(): Reply {
       wsSync();
     }
   }
-  const unitsPerLot = live?.unitsPerLot ?? unitsPerLotOf(ledger.config.symbol);
+  const unitsPerLot = live?.unitsPerLot ?? unitsPerLotOf(ledger.config.symbol, now);
   return { status: 200, body: { success: true, ledger, contract, unitsPerLot, optionLtp: optLtp, today, codeVersion: ORB_CODE_VERSION } };
 }
 
@@ -108,8 +117,8 @@ export function orbState(): Reply {
 function optionFutureKey(fut: Target): string | null {
   if (!fut.expiry) return null;
   const legs = resolvePnfLegs(fut);
-  if (typeof legs === 'string' || !legs[0] || legs[0].segment !== 'MCX_COMM') return null;
-  return wsWant('MCX_COMM', legs[0].securityId);
+  if (typeof legs === 'string' || !legs[0] || legs[0].segment === 'NSE_EQ') return null;
+  return wsWant(legs[0].segment, legs[0].securityId);
 }
 
 export function orbClientOp(op: unknown): Promise<Reply> {
@@ -186,6 +195,7 @@ export function orbTrade(req: TradeRequest): Promise<Reply> {
 
     // enter / reverse: automatic only, from a tab running this code, engine on, newer bar, loss limit
     if (req.v !== ORB_CODE_VERSION) return fail('This tab runs an older version of the Signal Orb - reload it (entries refused, exits still work)', 409);
+    if (l.config.symbol === 'NIFTY' && !isNseSessionDay(day)) return fail('NSE is closed today - no NIFTY entries', 409);
     if (!l.engineActive) return fail(l.haltReason ? `Engine halted: ${l.haltReason}` : 'Auto is OFF', 409);
     if (req.barT! <= l.watermarkT) return fail('This bar was already acted on', 409);
     if (req.action === 'enter' && live) return fail('A position is already open', 409);
@@ -236,13 +246,15 @@ async function enterRow(l0: OrbLedger, side: Side, futPrice: number, opt: OptPic
   const { mode, config } = l0;
   const fut = orbContract(config.symbol, now);
   if (!fut) return { ok: false, error: `No live ${config.symbol} future in the master list`, ledger: addLog(l0, 'error', 'No contract', now) };
+  const unitsPerLot = unitsPerLotOf(config.symbol, now);
+  if (!(unitsPerLot > 0)) return { ok: false, error: `No lot size for ${config.symbol} in the master list`, ledger: addLog(l0, 'error', 'No lot size', now) };
   const target = opt ? opt.target : fut;
   const entry = opt ? opt.premium : futPrice;
   const lots = config.lots;
   const action = openAction(side, !!opt);
   const what = `${action} ${optLabel(target)} x${lots}`;
   const row: OrbRow = {
-    id: `orb-${now}`, mode, broker: config.broker, target, side, lots, units: 0, unitsPerLot: unitsPerLotOf(config.symbol),
+    id: `orb-${now}`, mode, broker: config.broker, target, side, lots, units: 0, unitsPerLot,
     entry, signalTarget: fut, signalEntry: futPrice,
     entryAt: now, day, status: mode === 'SIM' ? 'open' : 'sending', ...(mode === 'SIM' ? {} : { sentAt: now }),
   };
