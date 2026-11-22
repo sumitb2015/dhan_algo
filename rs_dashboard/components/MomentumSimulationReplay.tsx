@@ -133,6 +133,11 @@ const PRESETS = [
   { label: 'Last 1 Month', start: '2026-10-15', end: '2026-11-20' },
   { label: 'Last 3 Months', start: '2026-08-15', end: '2026-11-20' },
   { label: 'Last 6 Months', start: '2026-05-15', end: '2026-11-20' },
+  { label: 'Last 1 Year', start: '2025-11-20', end: '2026-11-20' },
+  { label: 'Last 2 Years', start: '2024-11-20', end: '2026-11-20' },
+  { label: 'Last 3 Years', start: '2023-11-20', end: '2026-11-20' },
+  { label: 'Last 4 Years', start: '2022-11-20', end: '2026-11-20' },
+  { label: 'Last 5 Years', start: '2021-11-20', end: '2026-11-20' },
   { label: '2024 Bull Run', start: '2024-01-01', end: '2024-06-30' },
   { label: '2020 COVID Crash', start: '2020-02-01', end: '2020-08-31' },
 ];
