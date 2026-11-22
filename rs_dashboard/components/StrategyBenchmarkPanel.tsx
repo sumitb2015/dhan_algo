@@ -121,6 +121,18 @@ const STRATEGY_DETAILS: Record<string, {
     ],
     verdict: '+14.9% CAGR with the lowest drawdown of all models (-14.3%) and highest Sharpe (1.21). Maximum downside protection.',
   },
+  '5b. Turtle RS Optimised': {
+    key: 'turtle_rs_opt',
+    badge: 'Walk-forward Tuned Baseline',
+    badgeColor: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30',
+    summary: 'The Turtle RS baseline with looser exits: rank rotation only sells names that fall below rank 60 (baseline 25) and the initial stop is 20% (baseline 12%). Entries and sizing are unchanged.',
+    rules: [
+      'Entry: unchanged (composite RS rank <= 20, stacked EMAs, 55-day breakout confirmed by 2 closes)',
+      'Exit: 20% stop, breakeven at +15%, 25% trail from peak once +25%; rank-rotation sell only below rank 60',
+      'Chosen on 2020-24 and held up on 2023-26 and 2024-26 test windows; dropping the 2-close confirmation did not hold up, so it stays',
+    ],
+    verdict: '+15.5% CAGR, -13.9% max drawdown, 2.86 Profit Factor (2019-06 to 2026-11, fixed slots) against +12.9% / -14.7% / 1.95 for the baseline. Still trails the Nifty 500 in 2024-26 (about +2.7% vs +4.1%); survivor-biased universe.',
+  },
   '6. Connors RSI-2 Mean Reversion': {
     key: 'connors_rsi2',
     badge: 'High Frequency Dip Buyer',

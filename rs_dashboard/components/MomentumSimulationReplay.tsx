@@ -269,7 +269,7 @@ function shortReason(reason: string): string {
 }
 
 /** Stop distance each model used before it became a setting (mirrors default_stop_pct in simulate_momentum_replay.py). */
-const defaultStopFor = (strategy: string) => (strategy === 'clenow' ? 15 : 12);
+const defaultStopFor = (strategy: string) => (strategy === 'clenow' ? 15 : strategy === 'turtle_rs_opt' ? 20 : 12);
 
 export default function MomentumSimulationReplay({
   initialCapital = 500000,
@@ -636,7 +636,7 @@ export default function MomentumSimulationReplay({
                   newBo = 20;
                 } else if (newStrat === '52w_high') {
                   newBo = 55;
-                } else if (newStrat === 'turtle_rs') {
+                } else if (newStrat === 'turtle_rs' || newStrat === 'turtle_rs_opt') {
                   newBo = 55;
                 }
                 setBreakoutDays(newBo);
@@ -654,6 +654,7 @@ export default function MomentumSimulationReplay({
               <option value="minervini">Minervini Trend Template (+25.4% CAGR · 54.8% Win)</option>
               <option value="clenow">Clenow Smooth Momentum (+36.4% CAGR · 2.19 PF)</option>
               <option value="52w_high">52-Week High Breakout (+19.4% CAGR · 1.76 PF)</option>
+              <option value="turtle_rs_opt">Turtle RS Optimised (+15.5% CAGR · 2.86 PF · -13.9% DD)</option>
               <option value="turtle_rs">Turtle Composite RS (+14.9% CAGR · -14.3% DD)</option>
             </select>
           </div>
@@ -762,7 +763,7 @@ export default function MomentumSimulationReplay({
           </label>
 
           {/* Dynamic Context-Aware Secondary Control */}
-          {strategy === 'turtle_rs' && (
+          {(strategy === 'turtle_rs' || strategy === 'turtle_rs_opt') && (
             <div className="flex items-center gap-1.5 text-xs text-zinc-400">
               <Info tip="Lookback period for Donchian Channel upper breakout. Standard 55-day, fast 20-day, or intermediate 30-day.">
                 <span className="cursor-help underline decoration-dotted decoration-zinc-600 underline-offset-2">

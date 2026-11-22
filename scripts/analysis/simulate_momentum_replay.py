@@ -17,6 +17,7 @@ Caches results to debug/replays/replay_{start}_{end}_{capital}_{slots}.json for 
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 import math
 import os
@@ -72,7 +73,9 @@ DEFAULT_SECTOR_CAP = 2     # max concurrent positions per Industry; mirrored by 
 
 def default_stop_pct(strategy: str) -> float:
     """Stop distance each model used before the stop became a user setting."""
-    return 15.0 if strategy == "clenow" else 12.0
+    if strategy == "clenow":
+        return 15.0
+    return 20.0 if strategy == "turtle_rs_opt" else 12.0
 
 
 def stop_suffix(strategy: str, stop_pct: float) -> str:
@@ -80,8 +83,14 @@ def stop_suffix(strategy: str, stop_pct: float) -> str:
     return "" if abs(stop_pct - default_stop_pct(strategy)) < 1e-9 else f"_sl{stop_pct:g}"
 
 
+# turtle_rs_opt = turtle_rs with the walk-forward-validated exit settings: rank-rotation sells only below
+# rank 60 (live: 25) and a 20% initial stop (live: 12%). Entry rules, confirmation and sizing are unchanged.
+OPT_SELL_RANK_LIMIT = 60
+TURTLE = ("turtle_rs", "turtle_rs_opt")
+
 STRATEGY_NAMES = {
     "turtle_rs": "Turtle RS Breakout (Composite RS + 55d Breakout)",
+    "turtle_rs_opt": "Turtle RS Optimised (rotation sells below rank 60, 20% stop)",
     "minervini": "Minervini Trend Template (Stage 2 Superperformance)",
     "52w_high": "52-Week High Breakout (Yearly High Proximity)",
     "clenow": "Andreas Clenow Momentum (Smooth Exponential Slope)",
@@ -103,7 +112,7 @@ def passes_strategy_entry(strategy: str, sym: str, tables: dict, d: date, cfg: M
     vol = float(px_row.volume) if px_row.volume and not np.isnan(px_row.volume) else 0.0
     vol20 = float(t["vol20"].get(d, 0.0) or 0.0)
 
-    if strategy == "turtle_rs":
+    if strategy in TURTLE:
         return passes_entry_filters(sym, tables, d, cfg)
 
     elif strategy == "minervini":
@@ -130,7 +139,7 @@ def passes_strategy_entry(strategy: str, sym: str, tables: dict, d: date, cfg: M
 
 def check_strategy_exit(strategy: str, pos: Position, close: float, tables: dict, d: date, cfg: MomentumConfig) -> Optional[str]:
     t = tables.get(pos.symbol)
-    if strategy == "turtle_rs":
+    if strategy in TURTLE:
         return pos.update(close, cfg)
 
     elif strategy == "minervini":
@@ -161,6 +170,8 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
     strategy = strategy.lower().strip()
     if strategy not in STRATEGY_NAMES:
         strategy = "turtle_rs"
+    if strategy == "turtle_rs_opt":
+        cfg = replace(cfg, sell_rank_limit=OPT_SELL_RANK_LIMIT)
 
     os.makedirs(REPLAYS_DIR, exist_ok=True)
     regime_suffix = "" if cfg.regime_enabled else "_no_regime"
@@ -394,7 +405,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
                         queued_sells.add(sym)
         else:
             # Rank universe based on strategy
-            if strategy == "turtle_rs":
+            if strategy in TURTLE:
                 ranking = rank_universe(price_map, bench, d, cfg, matrix=rs_matrix) or []
             elif strategy in ("minervini", "ema_supertrend", "rs_supertrend", "weinstein"):
                 ranking = rs_ranking(d)[0]
@@ -428,7 +439,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
                 survivors = {s: p for s, p in portfolio.items() if s not in queued_sells}
 
                 # Daily rank rotation / rebalancing
-                if strategy == "turtle_rs":
+                if strategy in TURTLE:
                     for sym, reason in rank_rotation_exits(survivors, ranks, d, cfg):
                         pending_sells.append((sym, "rebalance"))
                         queued_sells.add(sym)
@@ -468,7 +479,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
                         })
 
         # ── 6. Compute Top 25 Ranking snapshot for today ───────────────────────
-        if strategy == "turtle_rs":
+        if strategy in TURTLE:
             ranking_today = rank_universe(price_map, bench, d, cfg, matrix=rs_matrix) or []
         elif strategy in ("minervini", "ema_supertrend", "rs_supertrend", "weinstein"):
             ranking_today = rs_ranking(d)[0]
@@ -668,7 +679,7 @@ def main():
     p.add_argument("--capital", type=float, default=500_000.0)
     p.add_argument("--slots", type=int, default=10)
     p.add_argument("--universe", choices=["nifty500", "nifty50"], default="nifty500")
-    p.add_argument("--strategy", choices=["turtle_rs", "minervini", "52w_high", "clenow", "ema_supertrend", "rs_supertrend", "weinstein"], default="turtle_rs", help="Strategy to simulate")
+    p.add_argument("--strategy", choices=["turtle_rs", "turtle_rs_opt", "minervini", "52w_high", "clenow", "ema_supertrend", "rs_supertrend", "weinstein"], default="turtle_rs", help="Strategy to simulate")
     p.add_argument("--benchmark", choices=["nifty50", "nifty500"], default="nifty50", help="Benchmark index for RS and regime (default nifty50)")
     p.add_argument("--regime-interval", choices=["weekly", "daily"], default="weekly", help="Regime check frequency: weekly (prior week close) or daily (default weekly)")
     p.add_argument("--regime", type=lambda x: str(x).lower() in ("true", "1", "yes"), default=True, help="Enable 200-SMA regime filter")

@@ -16,14 +16,15 @@ function sanitizeDate(d: string | null | undefined, fallback: string): string {
 }
 
 function sanitizeStrategy(s: string | null | undefined): string {
-  const allowed = ['turtle_rs', 'minervini', '52w_high', 'clenow', 'ema_supertrend', 'rs_supertrend', 'weinstein'];
+  const allowed = ['turtle_rs', 'turtle_rs_opt', 'minervini', '52w_high', 'clenow', 'ema_supertrend', 'rs_supertrend', 'weinstein'];
   const val = (s || '').toLowerCase().trim();
   return allowed.includes(val) ? val : 'turtle_rs';
 }
 
 /** Stop distance each model used before it became a setting. Mirrors default_stop_pct() in simulate_momentum_replay.py. */
 function defaultStop(strategy: string): number {
-  return strategy === 'clenow' ? 15 : 12;
+  if (strategy === 'clenow') return 15;
+  return strategy === 'turtle_rs_opt' ? 20 : 12;
 }
 
 /** Max positions per sector. Mirrors DEFAULT_SECTOR_CAP in simulate_momentum_replay.py. */
