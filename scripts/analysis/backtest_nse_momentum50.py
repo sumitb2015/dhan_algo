@@ -77,7 +77,7 @@ def rebal_indices(idx: pd.DatetimeIndex, months: list[int], first: pd.Timestamp)
     return out
 
 
-def run(cl, op, vo, months, n, buffer, weighting, first, cost_pct, fixed, capital):
+def run(cl, op, vo, months, n, buffer, weighting, first, cost_pct, fixed, capital, regime=None):
     idx = cl.index
     clv = cl.ffill()
     opv = op.where(op.notna(), clv)
@@ -86,9 +86,23 @@ def run(cl, op, vo, months, n, buffer, weighting, first, cost_pct, fixed, capita
     rebs = {i + 1: i for i in rebal_indices(idx, months, first)}   # fill row -> signal row
     start_row = min(rebs) if rebs else 0
     members: list[str] = []
+    prev_on = True
     for k in range(start_row, len(idx)):
-        if k in rebs:
-            sc = scores_at(cl, vo, rebs[k]).sort_values(ascending=False)
+        on = True if regime is None else bool(regime.iloc[k - 1])   # decided on k-1 close, acts at k open
+        if not on and hold:                                          # regime off: liquidate at the open
+            px = opv.iloc[k]
+            for s_ in list(hold):
+                if pd.notna(px[s_]):
+                    val = hold[s_] * px[s_]
+                    cash += val - val * cost_pct / 100 - fixed
+                    turnover_total += val; n_orders += 1
+                    del hold[s_]
+            members = []
+        do_rebal = on and (k in rebs or not prev_on)
+        sig = rebs.get(k, k - 1)
+        prev_on = on
+        if do_rebal:
+            sc = scores_at(cl, vo, sig).sort_values(ascending=False)
             if len(sc):
                 rank = {s: r for r, s in enumerate(sc.index)}
                 keep = [s for s in members if s in rank and rank[s] < buffer]
@@ -133,6 +147,14 @@ def run(cl, op, vo, months, n, buffer, weighting, first, cost_pct, fixed, capita
     return pd.Series(eq), turnover_total, n_orders
 
 
+def weekly_regime(bench: pd.Series, idx: pd.DatetimeIndex, sma: int = 200) -> pd.Series:
+    """Nifty 50 > its 200d SMA, sampled at each week's last close, held through the next week."""
+    b = bench.reindex(idx).ffill()
+    flag = (b > b.rolling(sma).mean()) & b.rolling(sma).mean().notna()
+    wk = flag.groupby(idx.to_period("W")).transform("last")
+    return wk.astype(bool)
+
+
 def stats(eq: pd.Series, label: str, capital: float | None = None) -> dict:
     eq = eq.dropna()
     yrs = (eq.index[-1] - eq.index[0]).days / 365.25
@@ -163,8 +185,14 @@ def main():
         "NSE monthly top20 EW":    dict(months=list(range(1, 13)), n=20, buffer=30, weighting="equal"),
     }
     rows, curves = [], {}
-    for name, kw in variants.items():
-        eq, tv, no = run(cl, op, vo, first=first, cost_pct=cost, fixed=20.0, capital=a.capital, **kw)
+    n50 = load_benchmark("nifty50")
+    reg = weekly_regime(n50.set_index(pd.to_datetime(n50["date"]))["close"], cl.index)
+    print(f"regime ON {reg[reg.index >= first].mean():.0%} of days since {first.date()}")
+    runs = [(nm, kw, None) for nm, kw in variants.items()] + \
+           [(nm + " +regime", kw, reg) for nm, kw in variants.items()]
+    for name, kw, rg in runs:
+        eq, tv, no = run(cl, op, vo, first=first, cost_pct=cost, fixed=20.0, capital=a.capital,
+                         regime=rg, **kw)
         curves[name] = eq
         s = stats(eq, name)
         yrs = (eq.index[-1] - eq.index[0]).days / 365.25
