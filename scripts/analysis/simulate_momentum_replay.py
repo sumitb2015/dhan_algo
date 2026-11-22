@@ -309,6 +309,8 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
                 "cost": round(cost + entry_cost, 2),
                 "exit_reason": reason,
                 "hold_days": (d - pos.entry_date).days,
+                "rank_at_entry": pos.rank_at_entry,
+                "peak_gain_pct": round((getattr(pos, "peak_close", pos.entry_price) / pos.entry_price - 1.0) * 100.0, 2) if pos.entry_price else 0.0,
             }
             closed_trades.append(trade_record)
             executions_today.append({

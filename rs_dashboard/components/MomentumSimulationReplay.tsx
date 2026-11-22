@@ -7,6 +7,7 @@ import {
   Calendar, Layers, ShieldCheck, Clock, Trash2, BarChart2, Target, Award, Percent
 } from 'lucide-react';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
+import MomentumTradeLog from './MomentumTradeLog';
 
 interface Holding {
   symbol: string;
@@ -60,6 +61,8 @@ interface ClosedTrade {
   cost: number;
   exit_reason: string;
   hold_days: number;
+  rank_at_entry?: number;   // absent in replays cached before the trade log existed
+  peak_gain_pct?: number;
 }
 
 interface DailySnapshot {
@@ -1656,6 +1659,16 @@ export default function MomentumSimulationReplay({
               </div>
             </div>
           </div>
+
+          {/* Every trade of the whole window, independent of the scrubber position */}
+          {snapshots.length > 0 && (
+            <MomentumTradeLog
+              closed={simData?.closed_trades ?? snapshots[snapshots.length - 1].closed_trades ?? []}
+              open={snapshots[snapshots.length - 1].holdings}
+              endDate={snapshots[snapshots.length - 1].date}
+              windowLabel={`${snapshots[0].date} → ${snapshots[snapshots.length - 1].date}`}
+            />
+          )}
         </>
       )}
     </div>
