@@ -4,6 +4,8 @@ import { spawn } from 'child_process';
 import { isStrategyRunning, isValidInstanceId, stateKeyFor, DEBUG_DIR, PROJECT_ROOT } from '@/lib/strategyRegistry';
 import { readJsonFile, writeJsonAtomic } from '@/lib/lockedJsonFile';
 import { PYTHON_EXE } from '@/lib/pyExec';
+import { readStockCSV } from '@/lib/dataLoader';
+import { dayChangeFromRows } from '@/lib/momentumDayChange';
 
 const readJson = (file: string) => readJsonFile<Record<string, unknown>>(file);
 
@@ -32,6 +34,10 @@ interface Holding {
   rank: number | null;
   rank_at_entry: number;
   rank_strikes: number;
+  // Latest session's move, from the daily CSV (patched with live quotes when they are fresh).
+  day_pnl?: number;
+  day_pct?: number | null;
+  prev_close?: number | null;
 }
 
 /** Rebuild holdings from the durable portfolio file when no state file exists yet. */
@@ -120,6 +126,16 @@ export async function GET(request: NextRequest) {
       ? holdingsFromPortfolio(portfolio)
       : [];
 
+  let dayDate: string | null = null;
+  for (const h of holdings) {
+    const d = dayChangeFromRows(readStockCSV(h.symbol), h);
+    h.day_pnl = d.day_pnl;
+    h.day_pct = d.day_pct;
+    h.prev_close = d.prev_close;
+    if (d.date && (!dayDate || d.date > dayDate)) dayDate = d.date;
+  }
+  const dayPnl = holdings.reduce((sum, h) => sum + (h.day_pnl ?? 0), 0);
+
   const invested = holdings.reduce((s, h) => s + h.entry_price * h.qty, 0);
   const unrealised = holdings.reduce((s, h) => s + h.unrealised, 0);
   const cash = Number(state?.cash ?? portfolio?.cash ?? 0);
@@ -142,6 +158,8 @@ export async function GET(request: NextRequest) {
     realizedPnl: realized,
     unrealisedPnl: unrealised,
     totalPnl: realized + unrealised,
+    dayPnl,
+    dayDate,
     equity: cash + invested + unrealised,
     holdings,
     topRanks: state?.top_ranks ?? [],

@@ -22,6 +22,8 @@ interface Holding {
   rank: number | null;
   rank_at_entry: number;
   rank_strikes: number;
+  day_pnl?: number;
+  day_pct?: number | null;
 }
 
 interface ClosedTrade {
@@ -69,6 +71,8 @@ interface MomentumData {
   realizedPnl: number;
   unrealisedPnl: number;
   totalPnl: number;
+  dayPnl?: number;
+  dayDate?: string | null;
   equity: number;
   holdings: Holding[];
   topRanks: { symbol: string; rs: number; industry?: string; status?: string }[];
@@ -752,10 +756,20 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
               <div className="flex flex-wrap gap-2">
                 <StatTile label="Equity" value={rupees(data.equity)} sub={`from ${rupees(data.capital)}`}
                           tip="Total portfolio value: uninvested cash plus the current market value of every holding. Compare it to the starting capital below to see overall progress." />
-                <StatTile label="Total P&L" value={signed(data.totalPnl)}
+                <StatTile label="Total gain" value={signed(data.totalPnl)}
                           tone={data.totalPnl >= 0 ? 'good' : 'bad'}
-                          sub={data.capital ? `${((data.totalPnl / data.capital) * 100).toFixed(2)}%` : undefined}
+                          sub={data.capital ? `${data.totalPnl >= 0 ? '+' : ''}${((data.totalPnl / data.capital) * 100).toFixed(2)}% on ${rupees(data.capital)}` : undefined}
                           tip="Realized plus unrealised profit since inception, after trading costs. The percentage is against starting capital." />
+                <StatTile label="Today's gain" value={signed(data.dayPnl ?? 0)}
+                          tone={(data.dayPnl ?? 0) >= 0 ? 'good' : 'bad'}
+                          sub={(() => {
+                            const dp = data.dayPnl ?? 0;
+                            const prevEquity = data.equity - dp;
+                            const pct = prevEquity > 0 ? `${dp >= 0 ? '+' : ''}${((dp / prevEquity) * 100).toFixed(2)}% · ` : '';
+                            if (data.holdings.length === 0) return 'no open positions';
+                            return `${pct}${data.dayDate ?? 'no price data'}`;
+                          })()}
+                          tip="How much the open holdings moved in the latest trading session: latest close minus the previous session's close, times quantity (a position bought that day is measured from its entry price). It does not include profit booked by positions sold today. The percentage is against the equity at the previous close." />
                 <StatTile label="Realized" value={signed(data.realizedPnl)}
                           tone={data.realizedPnl >= 0 ? 'good' : 'bad'}
                           tip="Profit actually banked from positions that have been closed, net of brokerage, STT and slippage. This number can only change when a position is sold." />
@@ -847,6 +861,7 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
                     <TH align="right" tip="Share of current total portfolio equity.">Weight</TH>
                     <TH align="right" tip="Unrealised rupee profit on this position at the current price.">P&L</TH>
                     <TH align="right" tip="Unrealised profit as a percentage of the entry price.">P&L %</TH>
+                    <TH align="right" tip="Latest session's move on this position: rupees and percent versus the previous close (versus the entry price if it was bought that session).">Today</TH>
                     <TH align="right" tip="The price at which this position will be sold. It only ever moves up, never down.">Stop</TH>
                     <TH tip={<><b>Which rung of the exit ladder this position has reached.</b><br /><br /><b>hard stop</b> — the initial 12% stop below entry; a loss if hit.<br /><b>breakeven</b> — it gained 15%, so the stop moved up to the entry price: the position can no longer lose money.<br /><b>trailing</b> — it gained 25%, so the stop now follows 25% below its highest close, locking in profit as it rises.</>}>Stage</TH>
                     <TH align="right" tip="How far the price can fall before the stop triggers, as a percentage of the current price. Green is comfortable, amber is getting close, red means a small move would sell it.">Room to stop</TH>
@@ -856,7 +871,7 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
                 </thead>
                 <tbody>
                   {data.holdings.length === 0 && (
-                    <tr><td colSpan={15} className="px-3 py-6 text-center text-zinc-500">
+                    <tr><td colSpan={16} className="px-3 py-6 text-center text-zinc-500">
                       No open positions — all capital in cash.
                     </td></tr>
                   )}
@@ -881,6 +896,9 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
                         <TD align="right" className={pnlColor(h.unrealised)}>{signed(h.unrealised)}</TD>
                         <TD align="right" className={pnlColor(h.unrealised_pct)}>
                           {h.unrealised_pct >= 0 ? '+' : ''}{h.unrealised_pct.toFixed(2)}%
+                        </TD>
+                        <TD align="right" className={pnlColor(h.day_pnl ?? 0)}>
+                          {h.day_pct == null ? '—' : `${signed(h.day_pnl ?? 0)} (${h.day_pct >= 0 ? '+' : ''}${h.day_pct.toFixed(2)}%)`}
                         </TD>
                         <TD align="right">{h.stop_price.toFixed(2)}</TD>
                         <TD>
