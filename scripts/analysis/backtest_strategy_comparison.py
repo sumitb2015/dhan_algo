@@ -661,6 +661,36 @@ def main():
             seen_ema.add(key)
             unique_ema_trades.append(t)
 
+    print("Running RS + Supertrend (Vivek Bajaj)...")
+    cfg_rsst = MomentumConfig(universe="nifty500", capital=capital, slots=slots, regime_enabled=True, stop_pct=12.0)
+    rsst_sim = run_replay_simulation(cfg_rsst, start_date, end_date, strategy="rs_supertrend", force=True)
+    rsst_snaps = rsst_sim["snapshots"]
+    rsst_eq = pd.Series({datetime.strptime(s["date"], "%Y-%m-%d").date(): s["equity"] for s in rsst_snaps})
+    rsst_trades = [
+        TradeRecord(
+            "RS_Supertrend",
+            t["symbol"],
+            datetime.strptime(t["entry_date"], "%Y-%m-%d").date(),
+            datetime.strptime(t["exit_date"], "%Y-%m-%d").date(),
+            t["entry_price"],
+            t["exit_price"],
+            t["qty"],
+            t["invested"],
+            t["pnl"],
+            t["pnl_pct"],
+            t["exit_reason"],
+            t["hold_days"],
+        )
+        for s in rsst_snaps for t in s.get("closed_trades", [])
+    ]
+    seen_rsst = set()
+    unique_rsst_trades = []
+    for t in rsst_trades:
+        key = (t.symbol, t.entry_date, t.exit_date)
+        if key not in seen_rsst:
+            seen_rsst.add(key)
+            unique_rsst_trades.append(t)
+
     # Summarize all
     strategies = {
         "1. EMA & Supertrend (Trend Follower)": (ema_eq, unique_ema_trades),
@@ -669,6 +699,7 @@ def main():
         "4. 52-Week High Breakout": (eq_52w, trades_52w),
         "5. Current Turtle RS Breakout": (turtle_eq, unique_turtle_trades),
         "6. Connors RSI-2 Mean Reversion": (eq_rsi2, trades_rsi2),
+        "7. RS + Supertrend (Vivek Bajaj)": (rsst_eq, unique_rsst_trades),
     }
 
     summary_rows = []

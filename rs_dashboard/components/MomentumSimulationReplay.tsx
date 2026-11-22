@@ -294,7 +294,7 @@ export default function MomentumSimulationReplay({
   const [cacheNotice, setCacheNotice] = useState<string | null>(null);
   const [strategy, setStrategy] = useState(activeStrategy);
   const [breakoutDays, setBreakoutDays] = useState<number>(() => {
-    if (activeStrategy === 'ema_supertrend' || activeStrategy === 'minervini') return 20;
+    if (activeStrategy === 'ema_supertrend' || activeStrategy === 'rs_supertrend' || activeStrategy === 'minervini') return 20;
     if (activeStrategy === '52w_high') return 5;
     return 55;
   });
@@ -395,14 +395,14 @@ export default function MomentumSimulationReplay({
   };
 
   useEffect(() => {
-    const defaultBo = activeStrategy === 'ema_supertrend' || activeStrategy === 'minervini' ? 20 : activeStrategy === '52w_high' ? 5 : 55;
+    const defaultBo = activeStrategy === 'ema_supertrend' || activeStrategy === 'rs_supertrend' || activeStrategy === 'minervini' ? 20 : activeStrategy === '52w_high' ? 5 : 55;
     fetchSimulation(startDate, endDate, capital, slots, activeStrategy, regimeEnabled, defaultBo, defaultStopFor(activeStrategy));
   }, []);
 
   useEffect(() => {
     if (activeStrategy && activeStrategy !== strategy) {
       setStrategy(activeStrategy);
-      const newBo = activeStrategy === 'ema_supertrend' || activeStrategy === 'minervini' ? 20 : activeStrategy === '52w_high' ? 5 : 55;
+      const newBo = activeStrategy === 'ema_supertrend' || activeStrategy === 'rs_supertrend' || activeStrategy === 'minervini' ? 20 : activeStrategy === '52w_high' ? 5 : 55;
       setBreakoutDays(newBo);
       const newSl = defaultStopFor(activeStrategy);
       setStopPct(newSl);
@@ -630,7 +630,7 @@ export default function MomentumSimulationReplay({
                 const newStrat = e.target.value;
                 setStrategy(newStrat);
                 let newBo = breakoutDays;
-                if (newStrat === 'ema_supertrend') {
+                if (newStrat === 'ema_supertrend' || newStrat === 'rs_supertrend') {
                   newBo = 20;
                 } else if (newStrat === 'minervini') {
                   newBo = 20;
@@ -649,6 +649,7 @@ export default function MomentumSimulationReplay({
               className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs font-semibold focus:outline-none focus:border-emerald-500 cursor-pointer"
             >
               <option value="weinstein">Weinstein Stage 2 (+21.7% CAGR · 5.80 PF · -19.0% DD)</option>
+              <option value="rs_supertrend">RS + Supertrend, Vivek Bajaj (+18.8% CAGR · 1.84 PF · -12.3% DD)</option>
               <option value="ema_supertrend">EMA + Supertrend (+23.4% CAGR · 3.10 PF · -9.9% DD)</option>
               <option value="minervini">Minervini Trend Template (+25.4% CAGR · 54.8% Win)</option>
               <option value="clenow">Clenow Smooth Momentum (+36.4% CAGR · 2.19 PF)</option>
@@ -1169,6 +1170,8 @@ export default function MomentumSimulationReplay({
                   <span>
                     {strategy === 'weinstein'
                       ? 'Weinstein Stage 2'
+                      : strategy === 'rs_supertrend'
+                      ? 'RS & Supertrend'
                       : strategy === 'ema_supertrend'
                       ? 'EMA & Supertrend'
                       : strategy === 'minervini'

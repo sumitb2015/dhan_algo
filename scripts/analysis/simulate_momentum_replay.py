@@ -30,7 +30,7 @@ import pandas as pd
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from lib import minervini, fifty_two_week, clenow, ema_supertrend, weinstein, data_quality      # noqa: E402
+from lib import minervini, fifty_two_week, clenow, ema_supertrend, rs_supertrend, weinstein, data_quality      # noqa: E402
 from lib.momentum import (
     MomentumConfig, Position,
     STAGE_INITIAL, STAGE_BREAKEVEN, STAGE_TRAIL,
@@ -86,6 +86,7 @@ STRATEGY_NAMES = {
     "52w_high": "52-Week High Breakout (Yearly High Proximity)",
     "clenow": "Andreas Clenow Momentum (Smooth Exponential Slope)",
     "ema_supertrend": "EMA & Supertrend (EMA 20 > 50 > 200 + Bullish Supertrend)",
+    "rs_supertrend": "RS + Supertrend (Vivek Bajaj: RS vs Nifty > 0 and rising, Supertrend green, exit on flip)",
     "weinstein": "Weinstein Stage 2 (weekly base breakout, 30-week MA exit)",
 }
 
@@ -118,6 +119,9 @@ def passes_strategy_entry(strategy: str, sym: str, tables: dict, d: date, cfg: M
     elif strategy == "ema_supertrend":
         return ema_supertrend.entry_check(sym, tables, d, rs_pct)
 
+    elif strategy == "rs_supertrend":
+        return rs_supertrend.entry_check(sym, tables, d, rs_pct)
+
     elif strategy == "weinstein":
         return weinstein.entry_check(sym, tables, d, rs_pct)
 
@@ -140,6 +144,9 @@ def check_strategy_exit(strategy: str, pos: Position, close: float, tables: dict
 
     elif strategy == "ema_supertrend":
         return ema_supertrend.exit_check(pos, close, tables, d, stop_pct=cfg.stop_pct)
+
+    elif strategy == "rs_supertrend":
+        return rs_supertrend.exit_check(pos, close, tables, d, stop_pct=cfg.stop_pct)
 
     elif strategy == "weinstein":
         return weinstein.exit_check(pos, close, tables, d, stop_pct=cfg.stop_pct)
@@ -165,7 +172,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         bo_suffix = "" if cfg.breakout_days in (20, 55) else f"_bo{cfg.breakout_days}"
     elif strategy == "52w_high":
         bo_suffix = "" if cfg.breakout_days in (5, 55) else f"_bo{cfg.breakout_days}"
-    elif strategy == "ema_supertrend":
+    elif strategy in ("ema_supertrend", "rs_supertrend"):
         bo_suffix = "" if cfg.breakout_days in (20, 55) else f"_bo{cfg.breakout_days}"
     else:
         bo_suffix = "" if cfg.breakout_days == 55 else f"_bo{cfg.breakout_days}"
@@ -219,6 +226,8 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         clenow.add_tables(price_map, tables)            # shared: lib/clenow.py
     elif strategy == "ema_supertrend":
         ema_supertrend.add_tables(price_map, tables)    # shared: lib/ema_supertrend.py
+    elif strategy == "rs_supertrend":
+        rs_supertrend.add_tables(price_map, tables, bench)  # shared: lib/rs_supertrend.py
     elif strategy == "weinstein":
         weinstein.add_tables(price_map, tables, bench)  # shared: lib/weinstein.py
 
@@ -387,7 +396,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
             # Rank universe based on strategy
             if strategy == "turtle_rs":
                 ranking = rank_universe(price_map, bench, d, cfg, matrix=rs_matrix) or []
-            elif strategy in ("minervini", "ema_supertrend", "weinstein"):
+            elif strategy in ("minervini", "ema_supertrend", "rs_supertrend", "weinstein"):
                 ranking = rs_ranking(d)[0]
             elif strategy == "52w_high":
                 cands = []
@@ -445,7 +454,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
                             continue
                         ok, _ = passes_strategy_entry(
                             strategy, s, tables, d, cfg,
-                            rs_pct=rs_ranking(d)[1] if strategy in ("minervini", "ema_supertrend") else None)
+                            rs_pct=rs_ranking(d)[1] if strategy in ("minervini", "ema_supertrend", "rs_supertrend") else None)
                         if not ok:
                             continue
                         picks.append({"symbol": s, "rank": ranks.get(s, 999), "industry": ind})
@@ -461,7 +470,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         # ── 6. Compute Top 25 Ranking snapshot for today ───────────────────────
         if strategy == "turtle_rs":
             ranking_today = rank_universe(price_map, bench, d, cfg, matrix=rs_matrix) or []
-        elif strategy in ("minervini", "ema_supertrend", "weinstein"):
+        elif strategy in ("minervini", "ema_supertrend", "rs_supertrend", "weinstein"):
             ranking_today = rs_ranking(d)[0]
         elif strategy == "52w_high":
             cands = []
@@ -659,7 +668,7 @@ def main():
     p.add_argument("--capital", type=float, default=500_000.0)
     p.add_argument("--slots", type=int, default=10)
     p.add_argument("--universe", choices=["nifty500", "nifty50"], default="nifty500")
-    p.add_argument("--strategy", choices=["turtle_rs", "minervini", "52w_high", "clenow", "ema_supertrend", "weinstein"], default="turtle_rs", help="Strategy to simulate")
+    p.add_argument("--strategy", choices=["turtle_rs", "minervini", "52w_high", "clenow", "ema_supertrend", "rs_supertrend", "weinstein"], default="turtle_rs", help="Strategy to simulate")
     p.add_argument("--benchmark", choices=["nifty50", "nifty500"], default="nifty50", help="Benchmark index for RS and regime (default nifty50)")
     p.add_argument("--regime-interval", choices=["weekly", "daily"], default="weekly", help="Regime check frequency: weekly (prior week close) or daily (default weekly)")
     p.add_argument("--regime", type=lambda x: str(x).lower() in ("true", "1", "yes"), default=True, help="Enable 200-SMA regime filter")

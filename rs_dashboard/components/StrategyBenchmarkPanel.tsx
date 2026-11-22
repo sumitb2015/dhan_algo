@@ -133,6 +133,19 @@ const STRATEGY_DETAILS: Record<string, {
     ],
     verdict: '-1.05% CAGR despite 58.3% win rate. 4,639 trades caused statutory delivery taxes (STT 0.1% both ways) to eat all profits.',
   },
+  '7. RS + Supertrend (Vivek Bajaj)': {
+    key: 'rs_supertrend',
+    badge: 'Video Rules, Backtested',
+    badgeColor: 'bg-amber-500/10 text-amber-300 border-amber-500/30',
+    summary: 'Vivek Bajaj (Learn2Trade session 19): buy stocks whose strength vs Nifty is positive and rising, while Supertrend is green; hold until Supertrend turns red.',
+    rules: [
+      'Relative strength: (stock / stock[123 bars]) / (Nifty / Nifty[123 bars]) - 1 > 0, with its 50-bar average rising 3 bars',
+      'Trend: Supertrend (10, 2.0) is Green and Close > 50 SMA; 20-day traded value >= Rs 2 crore',
+      'Exit: Supertrend turns Red (the video’s only exit); 12% disaster trailing stop and Nifty 200 SMA regime filter added by the engine',
+      'The video gives no periods, stop or size: those are this test’s choices',
+    ],
+    verdict: '+18.9% CAGR, -12.1% max drawdown, 1.84 Profit Factor, 41.6% win rate over 700 trades: mid-pack, behind EMA & Supertrend, Clenow and Minervini. RS filter does not beat the same system without it. Stop-only exit (no Supertrend-flip exit) scored better over the full period but not in 2024-26. See the vault page rs-supertrend-session19.',
+  },
 };
 
 export default function StrategyBenchmarkPanel({ onSelectStrategy }: {

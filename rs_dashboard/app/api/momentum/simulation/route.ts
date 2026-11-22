@@ -16,7 +16,7 @@ function sanitizeDate(d: string | null | undefined, fallback: string): string {
 }
 
 function sanitizeStrategy(s: string | null | undefined): string {
-  const allowed = ['turtle_rs', 'minervini', '52w_high', 'clenow', 'ema_supertrend', 'weinstein'];
+  const allowed = ['turtle_rs', 'minervini', '52w_high', 'clenow', 'ema_supertrend', 'rs_supertrend', 'weinstein'];
   const val = (s || '').toLowerCase().trim();
   return allowed.includes(val) ? val : 'turtle_rs';
 }
@@ -80,7 +80,7 @@ function cacheFileFor(p: ReplayParams): string {
   if (p.strategy === 'clenow') boSuffix = '';
   else if (p.strategy === 'minervini') boSuffix = p.breakoutDays === 20 || p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
   else if (p.strategy === '52w_high') boSuffix = p.breakoutDays === 5 || p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
-  else if (p.strategy === 'ema_supertrend') boSuffix = p.breakoutDays === 20 || p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
+  else if (p.strategy === 'ema_supertrend' || p.strategy === 'rs_supertrend') boSuffix = p.breakoutDays === 20 || p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
   else boSuffix = p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
   const slSuffix = p.stopPct === defaultStop(p.strategy) ? '' : `_sl${p.stopPct}`;
   const scSuffix = p.sectorCap === DEFAULT_SECTOR_CAP ? '' : `_sc${p.sectorCap}`;

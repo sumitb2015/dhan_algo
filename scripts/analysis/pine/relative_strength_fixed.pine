@@ -1,0 +1,60 @@
+// Relative Strength (fixed) - rework of bharatTrader's "Relative Strength" (MPL 2.0).
+// NOT compiled or run in TradingView by the author of this file: paste it into the Pine editor and fix any error first.
+// What changed and why (see scripts/analysis/backtest_rs_improved.py for the evidence):
+//   1. Log method (default): ln(S/S[N]) - ln(I/I[N]) is symmetric (+x and -x are equal and opposite). The simple ratio
+//      is capped at -100% on the downside and unbounded upside. Sign and ranking are identical to the simple ratio.
+//   2. Beta-adjusted option: removes the part of the move explained by the stock's beta to the benchmark.
+//   3. Default period 252 (was 123): in the 2024-2026 out-of-sample test 252 > 123 > 55.
+//   4. Alerts fire on a change of state (zero cross, RS-MA turning up/down), not on every bar.
+//   5. Dropped the atan "angle" (only its sign was used = sign of rs - rs[base]); uses the slope sign directly.
+//   6. "Confirmation bubbles" renamed: it is a price-vs-SMA trend flag, not a divergence test.
+//   Not fixed: the window-edge jump (RS moves when a big bar leaves the window). Averaging windows did not help in the backtest.
+//@version=6
+indicator("Relative Strength (fixed)", shorttitle="RS fixed")
+
+src      = input.source(close, "Source")
+cmpId    = input.symbol("NSE:NIFTY", "Benchmark")
+len      = input.int(252, "Period (bars)", minval=2)
+method   = input.string("Log", "Method", options=["Log", "Beta-adjusted", "Simple ratio"])
+betaLen  = input.int(126, "Beta window (bars)", minval=20, group="Beta-adjusted")
+maLen    = input.int(50, "RS average period", minval=2, group="RS trend")
+showMA   = input.bool(true, "Show RS average", group="RS trend")
+trendLen = input.int(50, "Price SMA period", minval=2, group="Price trend flag")
+showFlag = input.bool(true, "Show price trend flag", group="Price trend flag")
+
+base  = src
+bench = request.security(cmpId, timeframe.period, src, barmerge.gaps_off, barmerge.lookahead_off)
+
+// beta of the stock's daily log return against the benchmark, clamped to a sane range
+ret   = math.log(base / base[1])
+retB  = math.log(bench / bench[1])
+beta  = math.max(0.2, math.min(2.5, ta.correlation(ret, retB, betaLen) * ta.stdev(ret, betaLen) / ta.stdev(retB, betaLen)))
+
+lb = math.log(base / base[len])
+li = math.log(bench / bench[len])
+
+rs = switch method
+    "Log"           => lb - li
+    "Beta-adjusted" => lb - beta * li
+    => (base / base[len]) / (bench / bench[len]) - 1
+
+rsMA      = ta.sma(rs, maLen)
+maUp      = ta.rising(rsMA, 3)
+maDown    = ta.falling(rsMA, 3)
+maColor   = maUp ? color.green : maDown ? color.red : color.gray
+
+priceSMA = ta.sma(base, trendLen)
+trendUp  = ta.rising(priceSMA, 3) and base >= priceSMA
+trendDn  = ta.falling(priceSMA, 3) and base < priceSMA
+flagCol  = trendUp ? color.new(color.green, 85) : trendDn ? color.new(color.red, 85) : na
+
+plot(0, "Zero line", color=color.new(color.gray, 20), linewidth=2)
+plot(rs, "RS", color=rs > 0 ? color.green : color.red, linewidth=3)
+plot(showMA ? rsMA : na, "RS average", color=maColor, linewidth=2)
+plot(showFlag and (trendUp or trendDn) ? rs : na, "Price trend flag", color=flagCol, linewidth=10, style=plot.style_circles)
+
+// state-change alerts only
+alertcondition(ta.crossover(rs, 0), "RS crossed above 0", "RS crossed above 0")
+alertcondition(ta.crossunder(rs, 0), "RS crossed below 0", "RS crossed below 0")
+alertcondition(maUp and not maUp[1], "RS average turned up", "RS average turned up")
+alertcondition(maDown and not maDown[1], "RS average turned down", "RS average turned down")
