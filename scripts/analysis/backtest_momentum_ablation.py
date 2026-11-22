@@ -61,7 +61,7 @@ def review_rows(idx, kind, first):
     return rows
 
 
-def run(cl, op, score, n, entry_rank, buffer, reviews, stops, entry_gate, regime, ema, hi55):
+def run(cl, op, score, n, entry_rank, buffer, reviews, stops, entry_gate, regime, ema, hi55, compound=True):
     idx = cl.index
     clv, opv = cl.ffill(), op.where(op.notna(), cl.ffill())
     cash, hold, meta, eq, orders, traded = CAP, {}, {}, {}, 0, 0.0
@@ -97,7 +97,7 @@ def run(cl, op, score, n, entry_rank, buffer, reviews, stops, entry_gate, regime
                 if rank.get(s, 10**6) >= buffer and pd.notna(px[s]):
                     sell(s, px[s])
             total = cash + sum(sh * px[s] for s, sh in hold.items() if pd.notna(px[s]))
-            slot = total / n
+            slot = total / n if compound else CAP / n   # live strategy: fixed slot of INITIAL capital
             for s in sc.index[:entry_rank]:
                 if len(hold) >= n:
                     break
@@ -157,7 +157,7 @@ def main():
         return cache["rs"][i]
 
     W, SA = review_rows(cl.index, "W", first), review_rows(cl.index, "SA", first)
-    V = [  # label, score, n, entry_rank, buffer, reviews, stops, gate
+    V = [  # label, score, n, entry_rank, buffer, reviews, stops, gate, compound
         ("A  NSE   top50 semi-annual            ", nse, 50, 50, 75, SA, False, False),
         ("B  RS    top50 semi-annual            ", rs, 50, 50, 75, SA, False, False),
         ("C  NSE   top10 weekly                 ", nse, 10, 20, 25, W, False, False),
@@ -166,10 +166,13 @@ def main():
         ("F  RS    top10 weekly + stops         ", rs, 10, 20, 25, W, True, False),
         ("G  NSE   top10 weekly + stops + gate  ", nse, 10, 20, 25, W, True, True),
         ("H  RS    top10 weekly + stops + gate  ", rs, 10, 20, 25, W, True, True),
+        ("H' same as H, FIXED slots (no compounding)", rs, 10, 20, 25, W, True, True, False),
+        ("F' RS top10 + stops, FIXED slots           ", rs, 10, 20, 25, W, True, False, False),
+        ("G' NSE top10 + stops + gate, FIXED slots   ", nse, 10, 20, 25, W, True, True, False),
     ]
     rows, curves = [], {}
-    for lab, sf, n, er, buf, rvw, st, gate in V:
-        eqs, tv, no = run(cl, op, sf, n, er, buf, rvw, st, gate, reg, ema, hi55)
+    for lab, sf, n, er, buf, rvw, st, gate, *cp in V:
+        eqs, tv, no = run(cl, op, sf, n, er, buf, rvw, st, gate, reg, ema, hi55, *(cp or [True]))
         curves[lab] = eqs
         s = stats(eqs, lab)
         s["Turnover x/yr"], s["Orders"] = round(tv, 1), no
