@@ -15,11 +15,16 @@ Entry Rules (scanned DAILY on the signal day's close):
   * Relative Strength: Composite RS percentile >= 60 (market leader)
   * Market Regime: Benchmark (Nifty 50) > 200 SMA (preserves capital in bear markets)
 
-Exit Rules:
-  * Supertrend Reversal: Close < Supertrend line or Supertrend turns Red (st_dir == -1)
-  * Trend Breakdown: Close < EMA 50
+Exit Rules (stop only, by default):
   * Disaster / Trailing Stop: Initial stop_pct (default 12.0%) below entry.
     Once position is up >= 15%, trails running peak by stop_pct (never loosens).
+  * Two discretionary exits exist but are OFF by default (EXIT_ON_SUPERTREND, EXIT_ON_EMA50): a Supertrend flip
+    (Close < line / st_dir == -1) and Close < EMA 50. Replay ablation on Nifty 500, 10 slots, Nifty 50 weekly regime:
+        exits                       2020-23 ret / PF / maxDD     2024-26 ret / PF / maxDD
+        both (previous default)     +273% / 3.14 / 12.5%          +3.2% / 1.05 / 20.5%
+        stop only (default now)     +276% / 4.34 /  9.9%         +32.0% / 1.48 / 15.8%
+    Both flips whipsawed: more trades (283 vs 192), higher costs, lower profit per trade. Supertrend therefore acts
+    as an entry filter only.
 """
 
 from __future__ import annotations
@@ -32,6 +37,8 @@ from lib.intraday_signals import supertrend
 DEFAULT_STOP_PCT = 12.0
 TRAIL_ARM_GAIN_PCT = 15.0
 MIN_RS_PCT = 60.0
+EXIT_ON_SUPERTREND = False   # sell when Supertrend turns red / Close < line (hurt in both test windows)
+EXIT_ON_EMA50 = False        # sell when Close < EMA 50 (hurt in both test windows)
 
 
 def add_tables(price_map: Dict[str, "object"], tables: Dict[str, dict]) -> None:
@@ -150,12 +157,12 @@ def exit_check(pos: "Position", close: float, tables: dict, d, stop_pct: float =
     st_line = t["st_line"].get(d)
     ema50 = t["ema50"].get(d)
 
-    # 2. Supertrend reversal
-    if st_dir == -1 or (st_line is not None and close < st_line):
+    # 2. Supertrend reversal (optional, off by default)
+    if EXIT_ON_SUPERTREND and (st_dir == -1 or (st_line is not None and close < st_line)):
         return "Supertrend Bearish (Red)"
 
-    # 3. Close below EMA 50
-    if ema50 is not None and close < ema50:
+    # 3. Close below EMA 50 (optional, off by default)
+    if EXIT_ON_EMA50 and ema50 is not None and close < ema50:
         return "Close < EMA 50 (Trend Broken)"
 
     return None

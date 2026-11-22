@@ -648,7 +648,7 @@ export default function MomentumSimulationReplay({
               }}
               className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs font-semibold focus:outline-none focus:border-emerald-500 cursor-pointer"
             >
-              <option value="ema_supertrend">EMA + Supertrend (+21.5% CAGR · 2.29 PF · -12.4% DD)</option>
+              <option value="ema_supertrend">EMA + Supertrend (+23.4% CAGR · 3.10 PF · -9.9% DD)</option>
               <option value="minervini">Minervini Trend Template (+25.4% CAGR · 54.8% Win)</option>
               <option value="clenow">Clenow Smooth Momentum (+36.4% CAGR · 2.19 PF)</option>
               <option value="52w_high">52-Week High Breakout (+19.4% CAGR · 1.76 PF)</option>

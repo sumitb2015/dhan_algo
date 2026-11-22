@@ -56,24 +56,40 @@ def test_exit_check():
     pos = SimpleNamespace(symbol="AAA", entry_price=100.0, peak_price=105.0)
     tbl = tables()
 
-    # Normal: Close 110, Supertrend Green (st_line 100), EMA50 105 -> No exit
-    tbl_ok = tables(ema50=105.0, st_line=100.0)
-    assert est.exit_check(pos, 110.0, tbl_ok, D) is None
-
-    # Supertrend flips Red
+    # Default is stop-only: a red Supertrend or a close under EMA 50 does NOT sell on its own.
     tbl_red = tables(st_dir=-1, ema50=90.0, st_line=115.0)
-    assert est.exit_check(pos, 102.0, tbl_red, D) == "Supertrend Bearish (Red)"
-
-    # Close drops below EMA 50 (with st_line lower at 90.0 and st_dir=1)
+    assert est.exit_check(pos, 102.0, tbl_red, D) is None
     tbl_ema = tables(ema50=105.0, st_line=90.0, st_dir=1)
-    assert est.exit_check(pos, 102.0, tbl_ema, D) == "Close < EMA 50 (Trend Broken)"
+    assert est.exit_check(pos, 102.0, tbl_ema, D) is None
 
     # Hard stop hit (close < 88.0)
     assert est.exit_check(pos, 85.0, tbl, D) == "stop"
+
+
+def test_optional_discretionary_exits():
+    pos = SimpleNamespace(symbol="AAA", entry_price=100.0, peak_price=105.0)
+    try:
+        est.EXIT_ON_SUPERTREND = True
+        assert est.exit_check(pos, 102.0, tables(st_dir=-1, ema50=90.0, st_line=115.0), D) == "Supertrend Bearish (Red)"
+        est.EXIT_ON_SUPERTREND = False
+        est.EXIT_ON_EMA50 = True
+        assert est.exit_check(pos, 102.0, tables(ema50=105.0, st_line=90.0, st_dir=1), D) == "Close < EMA 50 (Trend Broken)"
+    finally:
+        est.EXIT_ON_SUPERTREND = False
+        est.EXIT_ON_EMA50 = False
+
+
+def test_trailing_stop_arms_after_15pct():
+    pos = SimpleNamespace(symbol="AAA", entry_price=100.0, peak_close=130.0, stop_price=88.0)
+    # peak +30% -> trailing stop 130*0.88 = 114.4; a close of 112 is under it, above the 88 hard stop
+    assert est.exit_check(pos, 112.0, tables(), D) == "stop"
+    assert est.exit_check(pos, 116.0, tables(), D) is None
 
 
 if __name__ == "__main__":
     test_qualifies()
     test_each_rule_rejects()
     test_exit_check()
+    test_optional_discretionary_exits()
+    test_trailing_stop_arms_after_15pct()
     print("All EMA + Supertrend unit tests passed!")
