@@ -58,7 +58,12 @@ def test_exit_stop_and_supertrend():
     assert rst.exit_check(pos(), 87.0, tb, D) == "stop"
     assert rst.exit_check(pos(), 110.0, tb, D) is None
     red = tables(st_dir=-1)
-    assert rst.exit_check(pos(), 110.0, red, D) == "Supertrend Bearish (Red)"
+    assert rst.exit_check(pos(), 110.0, red, D) is None          # stop-only by default
+    rst.EXIT_ON_SUPERTREND = True
+    try:
+        assert rst.exit_check(pos(), 110.0, red, D) == "Supertrend Bearish (Red)"
+    finally:
+        rst.EXIT_ON_SUPERTREND = False
 
 
 def test_trail_arms_after_15pct():

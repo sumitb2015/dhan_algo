@@ -274,7 +274,7 @@ const defaultStopFor = (strategy: string) => (strategy === 'clenow' ? 15 : 12);
 export default function MomentumSimulationReplay({
   initialCapital = 500000,
   initialSlots = 10,
-  activeStrategy = 'minervini',
+  activeStrategy = 'rs_supertrend',
   onStrategyChange,
 }: {
   initialCapital?: number;
@@ -649,7 +649,7 @@ export default function MomentumSimulationReplay({
               className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs font-semibold focus:outline-none focus:border-emerald-500 cursor-pointer"
             >
               <option value="weinstein">Weinstein Stage 2 (+21.7% CAGR · 5.80 PF · -19.0% DD)</option>
-              <option value="rs_supertrend">RS + Supertrend, Vivek Bajaj (+18.8% CAGR · 1.84 PF · -12.3% DD)</option>
+              <option value="rs_supertrend">RS + Supertrend, Vivek Bajaj (+21.6% CAGR · 2.69 PF · -12.9% DD)</option>
               <option value="ema_supertrend">EMA + Supertrend (+23.4% CAGR · 3.10 PF · -9.9% DD)</option>
               <option value="minervini">Minervini Trend Template (+25.4% CAGR · 54.8% Win)</option>
               <option value="clenow">Clenow Smooth Momentum (+36.4% CAGR · 2.19 PF)</option>

@@ -12,8 +12,11 @@ Entry (scanned DAILY on the signal day's close, fills next open in the replay):
   * Close > SMA(50).
   * Liquidity floor: 20-day average traded value >= Rs 2 crore (the video says "volume", unspecified).
 Exit:
-  * Supertrend turns red (the video's only exit) — EXIT_ON_SUPERTREND.
   * Disaster stop stop_pct below entry, trailing the peak once up 15% (framework default, same as EMA+Supertrend).
+  * Supertrend turns red (the video's only exit) — EXIT_ON_SUPERTREND, OFF by default. Replay ablation (Nifty 500, 10
+    slots, regime on): 2020-26 flip exit +18.8% CAGR / PF 1.84 / 701 trades; stop only +21.6% / PF 2.69 / 329 trades;
+    2024-26 about equal (5.8% vs 5.4%). Same finding as ema_supertrend: the flip whipsaws.
+  * Tuning on 2020-23 only picked Supertrend multiplier 3.0, which did worse in 2024-26 (2.4% vs 5.4%): kept 2.0.
 Ranking among qualifiers: the replay's composite-RS ranking (strongest first).
 """
 from __future__ import annotations
@@ -33,7 +36,7 @@ PRICE_MA = 50
 MIN_TURNOVER20 = 2e7
 DEFAULT_STOP_PCT = 12.0
 TRAIL_ARM_GAIN_PCT = 15.0
-EXIT_ON_SUPERTREND = True
+EXIT_ON_SUPERTREND = False   # the video's exit; OFF by default: stop-only scored better 2020-26 (see below)
 REQUIRE_RS = True            # False = ablation: Supertrend + SMA50 only, ranking still by composite RS
 
 

@@ -49,7 +49,8 @@ def metrics(res, start, end):
 
 
 def main():
-    sim.REPLAYS_DIR = tempfile.mkdtemp(prefix="rs_st_ablation_")
+    _tmp = tempfile.TemporaryDirectory(prefix="rs_st_ablation_")  # removed on exit
+    sim.REPLAYS_DIR = _tmp.name
     defaults = {k: getattr(rst, k) for k in ("RS_LOOKBACK", "EXIT_ON_SUPERTREND", "REQUIRE_RS")}
     rows = {w: {} for w in WINDOWS}
     try:

@@ -437,7 +437,7 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
   const [actionMsg, setActionMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [exitingSymbol, setExitingSymbol] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'live' | 'replay' | 'benchmark'>('live');
-  const [selectedStrategy, setSelectedStrategy] = useState<string>('minervini');
+  const [selectedStrategy, setSelectedStrategy] = useState<string>('rs_supertrend');
 
   const fetchData = useCallback(async () => {
     setLoading(true);
