@@ -306,6 +306,8 @@ export default function MomentumSimulationReplay({
   const [stopDraft, setStopDraft] = useState<string>(() => String(defaultStopFor(activeStrategy)));
 
   const [simData, setSimData] = useState<SimulationResponse | null>(null);
+  // Settings the shown replay was run with. Changing a setting never starts a run; the user presses Run Simulation.
+  const [ranKey, setRanKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -338,6 +340,7 @@ export default function MomentumSimulationReplay({
     const ac = new AbortController();
     reqAbort.current = ac;
     const isStale = () => myReq !== reqSeq.current;
+    setRanKey(JSON.stringify([start, end, cap, slt, strat, reg, bo, sl, bench, interval, sc]));
     setLoading(true);
     setError(null);
     setIsPlaying(false);
@@ -373,6 +376,9 @@ export default function MomentumSimulationReplay({
       if (!isStale()) setLoading(false);
     }
   }, [strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh, sectorCap]);
+
+  const settingsKey = JSON.stringify([startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, sectorCap]);
+  const settingsChanged = ranKey !== null && ranKey !== settingsKey;
 
   const handleClearCache = async () => {
     if (!window.confirm('Delete all cached simulation replay JSON files in debug/replays? Future runs will recompute fresh.')) return;
@@ -437,7 +443,6 @@ export default function MomentumSimulationReplay({
     setStopDraft(String(v));
     if (v !== stopPct) {
       setStopPct(v);
-      fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, v);
     }
   };
 
@@ -452,7 +457,6 @@ export default function MomentumSimulationReplay({
     setSlotsDraft(String(v));
     if (v !== slots) {
       setSlots(v);
-      fetchSimulation(startDate, endDate, capital, v, strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh);
     }
   };
 
@@ -467,7 +471,6 @@ export default function MomentumSimulationReplay({
     setSectorDraft(String(v));
     if (v !== sectorCap) {
       setSectorCap(v);
-      fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh, v);
     }
   };
 
@@ -605,7 +608,6 @@ export default function MomentumSimulationReplay({
                   onClick={() => {
                     setStartDate(p.start);
                     setEndDate(p.end);
-                    fetchSimulation(p.start, p.end, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct);
                   }}
                   className={`text-xs px-2.5 py-1 rounded border transition-colors cursor-pointer ${
                     active
@@ -644,7 +646,6 @@ export default function MomentumSimulationReplay({
                 setStopPct(newSl);
                 setStopDraft(String(newSl));
                 onStrategyChange?.(newStrat);
-                fetchSimulation(startDate, endDate, capital, slots, newStrat, regimeEnabled, newBo, newSl);
               }}
               className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs font-semibold focus:outline-none focus:border-emerald-500 cursor-pointer"
             >
@@ -706,7 +707,6 @@ export default function MomentumSimulationReplay({
               onChange={(e) => {
                 const b = e.target.value as 'nifty50' | 'nifty500';
                 setBenchmark(b);
-                fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct, b, regimeInterval, forceFresh);
               }}
               className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs focus:outline-none focus:border-emerald-500 cursor-pointer"
             >
@@ -727,7 +727,6 @@ export default function MomentumSimulationReplay({
               onChange={(e) => {
                 const ri = e.target.value as 'weekly' | 'daily';
                 setRegimeInterval(ri);
-                fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct, benchmark, ri, forceFresh);
               }}
               className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs focus:outline-none focus:border-emerald-500 cursor-pointer"
             >
@@ -744,7 +743,6 @@ export default function MomentumSimulationReplay({
               onChange={(e) => {
                 const val = e.target.checked;
                 setRegimeEnabled(val);
-                fetchSimulation(startDate, endDate, capital, slots, strategy, val, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh);
               }}
               className="rounded border-zinc-700 bg-zinc-800 text-emerald-500 focus:ring-0 cursor-pointer"
             />
@@ -775,7 +773,6 @@ export default function MomentumSimulationReplay({
                 onChange={(e) => {
                   const bo = Number(e.target.value);
                   setBreakoutDays(bo);
-                  fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, bo, stopPct);
                 }}
                 className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs focus:outline-none focus:border-emerald-500 cursor-pointer"
               >
@@ -798,7 +795,6 @@ export default function MomentumSimulationReplay({
                 onChange={(e) => {
                   const bo = Number(e.target.value);
                   setBreakoutDays(bo);
-                  fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, bo, stopPct);
                 }}
                 className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs focus:outline-none focus:border-emerald-500 cursor-pointer"
               >
@@ -820,7 +816,6 @@ export default function MomentumSimulationReplay({
                 onChange={(e) => {
                   const bo = Number(e.target.value);
                   setBreakoutDays(bo);
-                  fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, bo, stopPct);
                 }}
                 className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs focus:outline-none focus:border-emerald-500 cursor-pointer"
               >
@@ -870,7 +865,6 @@ export default function MomentumSimulationReplay({
                   const d = defaultStopFor(strategy);
                   setStopPct(d);
                   setStopDraft(String(d));
-                  fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, d);
                 }}
                 className="px-1.5 py-0.5 rounded border border-zinc-700 text-[10px] text-zinc-300 hover:border-emerald-500 cursor-pointer"
               >
@@ -946,10 +940,15 @@ export default function MomentumSimulationReplay({
             <span>Clear Cache</span>
           </button>
 
+          {settingsChanged && !loading && (
+            <span className="ml-auto text-xs text-amber-400" role="status">
+              Settings changed: the results below are from the previous run
+            </span>
+          )}
           <button
             onClick={() => fetchSimulation(startDate, endDate, capital, slots, strategy, regimeEnabled, breakoutDays, stopPct, benchmark, regimeInterval, forceFresh)}
             disabled={loading}
-            className="ml-auto px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
+            className={`${settingsChanged && !loading ? '' : 'ml-auto '}px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors ${settingsChanged && !loading ? 'ring-2 ring-amber-400' : ''}`}
           >
             <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
             {loading ? 'Simulating…' : 'Run Simulation'}
