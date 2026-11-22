@@ -148,11 +148,13 @@ def run(cl, op, vo, months, n, buffer, weighting, first, cost_pct, fixed, capita
 
 
 def weekly_regime(bench: pd.Series, idx: pd.DatetimeIndex, sma: int = 200) -> pd.Series:
-    """Nifty 50 > its 200d SMA, sampled at each week's last close, held through the next week."""
+    """Nifty 50 > its 200d SMA, sampled at each week's last close, applied from the following week."""
     b = bench.reindex(idx).ffill()
     flag = (b > b.rolling(sma).mean()) & b.rolling(sma).mean().notna()
-    wk = flag.groupby(idx.to_period("W")).transform("last")
-    return wk.astype(bool)
+    per = idx.to_period("W")
+    last = flag.groupby(per).last()                    # the week's closing signal
+    prev = last.shift(1).fillna(False).astype(bool)    # known only from the NEXT week (no look-ahead)
+    return pd.Series(prev.reindex(per).to_numpy(), index=idx)
 
 
 def stats(eq: pd.Series, label: str, capital: float | None = None) -> dict:
