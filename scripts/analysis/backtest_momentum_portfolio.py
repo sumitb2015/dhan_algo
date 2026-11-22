@@ -128,7 +128,8 @@ class BacktestResult:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_backtest(cfg: MomentumConfig, start: date, end: Optional[date] = None,
-                 verbose: bool = True, preloaded: Optional[tuple] = None) -> BacktestResult:
+                 verbose: bool = True, preloaded: Optional[tuple] = None,
+                 compound: bool = False) -> BacktestResult:
     cfg.validate()
 
     if preloaded is not None:
@@ -209,7 +210,13 @@ def run_backtest(cfg: MomentumConfig, start: date, end: Optional[date] = None,
             # Size against cash net of the costs the buy itself will incur, or a slot sized
             # to the last rupee would be rejected below for being a few rupees short.
             spendable = (cash - cfg.fixed_fee) / (1.0 + (cfg.fee_pct + cfg.slippage_pct) / 100.0)
-            qty = size_position(fill, order["rank"], cfg, max(spendable, 0.0))
+            # compound=False (live behaviour): slots are a fixed fraction of the STARTING capital.
+            # compound=True: slots scale with current equity, so profits are redeployed.
+            sizing_cfg = cfg
+            if compound:
+                eq_now = cash + sum(p_.last_close * p_.qty for p_ in portfolio.values())
+                sizing_cfg = replace(cfg, capital=eq_now)
+            qty = size_position(fill, order["rank"], sizing_cfg, max(spendable, 0.0))
             if qty <= 0:
                 continue
             spend = fill * qty
@@ -695,6 +702,8 @@ def main() -> None:
     p.add_argument("--regime-sma", type=int, default=200,
                    help="daily Nifty 500 close vs this SMA (default 200)")
     p.add_argument("--no-breakout-confirm", action="store_true")
+    p.add_argument("--compound", action="store_true",
+                   help="size slots from current equity (profits redeployed); live strategy does NOT do this")
     p.add_argument("--sweep", action="store_true", help="one-at-a-time parameter ablation")
     p.add_argument("--excel", default=None, help="output path (default debug/momentum_backtest.xlsx)")
     p.add_argument("--no-excel", action="store_true")
@@ -749,7 +758,7 @@ def main() -> None:
 
     print("=" * 78)
     print("  Loading data...")
-    res = run_backtest(cfg, start, end)
+    res = run_backtest(cfg, start, end, compound=args.compound)
     print_report(res, fd_rate=args.fd_rate)
 
     print()
