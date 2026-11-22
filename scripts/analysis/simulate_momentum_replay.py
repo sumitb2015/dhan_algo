@@ -30,7 +30,7 @@ import pandas as pd
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, PROJECT_ROOT)
 
-from lib import minervini, fifty_two_week, clenow, ema_supertrend, data_quality      # noqa: E402
+from lib import minervini, fifty_two_week, clenow, ema_supertrend, weinstein, data_quality      # noqa: E402
 from lib.momentum import (
     MomentumConfig, Position,
     STAGE_INITIAL, STAGE_BREAKEVEN, STAGE_TRAIL,
@@ -42,6 +42,30 @@ from lib.momentum import (
 
 DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")
 REPLAYS_DIR = os.path.join(DEBUG_DIR, "replays")
+
+# Optional portfolio risk controls (OFF by default, so existing results are unchanged). Set by the CLI flags below.
+#   dd_brake      [(drawdown %, size multiplier), ...]: new entries are scaled by the multiplier of the deepest tier
+#                 the account's current drawdown from its equity peak has reached (0 = no new entries).
+#   atr_risk_pct  size each new position so a 'atr_mult x ATR14' adverse move costs at most this % of equity.
+RISK = {"dd_brake": [], "atr_risk_pct": 0.0, "atr_mult": 2.0}
+
+
+def dd_scale(dd_pct: float) -> float:
+    scale = 1.0
+    for thr, mult in sorted(RISK["dd_brake"]):
+        if dd_pct >= thr:
+            scale = mult
+    return scale
+
+
+def risk_suffix() -> str:
+    out = ""
+    if RISK["dd_brake"]:
+        out += "_ddb" + "-".join(f"{t:g}x{m:g}" for t, m in sorted(RISK["dd_brake"]))
+    if RISK["atr_risk_pct"] > 0:
+        out += f"_atr{RISK['atr_risk_pct']:g}m{RISK['atr_mult']:g}"
+    return out
+
 
 DEFAULT_SECTOR_CAP = 2     # max concurrent positions per Industry; mirrored by the replay route
 
@@ -62,6 +86,7 @@ STRATEGY_NAMES = {
     "52w_high": "52-Week High Breakout (Yearly High Proximity)",
     "clenow": "Andreas Clenow Momentum (Smooth Exponential Slope)",
     "ema_supertrend": "EMA & Supertrend (EMA 20 > 50 > 200 + Bullish Supertrend)",
+    "weinstein": "Weinstein Stage 2 (weekly base breakout, 30-week MA exit)",
 }
 
 
@@ -93,6 +118,9 @@ def passes_strategy_entry(strategy: str, sym: str, tables: dict, d: date, cfg: M
     elif strategy == "ema_supertrend":
         return ema_supertrend.entry_check(sym, tables, d, rs_pct)
 
+    elif strategy == "weinstein":
+        return weinstein.entry_check(sym, tables, d, rs_pct)
+
     return False, "unknown strategy"
 
 
@@ -112,6 +140,9 @@ def check_strategy_exit(strategy: str, pos: Position, close: float, tables: dict
 
     elif strategy == "ema_supertrend":
         return ema_supertrend.exit_check(pos, close, tables, d, stop_pct=cfg.stop_pct)
+
+    elif strategy == "weinstein":
+        return weinstein.exit_check(pos, close, tables, d, stop_pct=cfg.stop_pct)
 
     return None
 
@@ -142,6 +173,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
     strat_prefix = f"{strategy}_" if strategy != "turtle_rs" else ""
     bo_suffix += stop_suffix(strategy, cfg.stop_pct)
     bo_suffix += "" if cfg.sector_cap == DEFAULT_SECTOR_CAP else f"_sc{cfg.sector_cap}"
+    bo_suffix += risk_suffix()
 
     cache_file = os.path.join(
         REPLAYS_DIR, f"replay_{strat_prefix}{start}_{end}_{int(cfg.capital)}_{cfg.slots}{regime_suffix}{bench_suffix}{interval_suffix}{bo_suffix}.json"
@@ -187,6 +219,8 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         clenow.add_tables(price_map, tables)            # shared: lib/clenow.py
     elif strategy == "ema_supertrend":
         ema_supertrend.add_tables(price_map, tables)    # shared: lib/ema_supertrend.py
+    elif strategy == "weinstein":
+        weinstein.add_tables(price_map, tables, bench)  # shared: lib/weinstein.py
 
     # Determine trading days in window
     all_trading_days = [d for d in calendar.trading_days if start <= d <= end]
@@ -208,6 +242,13 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
 
     snapshots = []
     prev_equity = cfg.capital
+    peak_equity = cfg.capital
+    if RISK["atr_risk_pct"] > 0:                      # ATR14 (simple mean of true range), known at each close
+        for sym, df in price_map.items():
+            if sym in tables:
+                pc = df["close"].shift(1)
+                tr = pd.concat([df["high"] - df["low"], (df["high"] - pc).abs(), (df["low"] - pc).abs()], axis=1).max(axis=1)
+                tables[sym]["atr14"] = dict(zip(df["date"], tr.rolling(14, min_periods=14).mean()))
     rs_day_cache: Dict[date, Tuple[list, Dict[str, float]]] = {}
 
     def rs_ranking(d: date):
@@ -276,6 +317,13 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
             fill = float(row.open)
             spendable = (cash - cfg.fixed_fee) / (1.0 + (cfg.fee_pct + cfg.slippage_pct) / 100.0)
             qty = size_position(fill, order["rank"], cfg, max(spendable, 0.0))
+            if qty > 0 and RISK["dd_brake"]:
+                dd_now = (peak_equity - prev_equity) / peak_equity * 100.0 if peak_equity > 0 else 0.0
+                qty = int(qty * dd_scale(dd_now))
+            if qty > 0 and RISK["atr_risk_pct"] > 0 and day_idx > 0:
+                atr = tables.get(sym, {}).get("atr14", {}).get(all_trading_days[day_idx - 1])
+                if atr and not np.isnan(atr) and atr > 0:
+                    qty = min(qty, int(prev_equity * RISK["atr_risk_pct"] / 100.0 / (RISK["atr_mult"] * atr)))
             if qty <= 0:
                 continue
             spend = fill * qty
@@ -312,6 +360,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         current_equity = cash + invested_val + unrealised_val
         day_pnl = current_equity - prev_equity
         prev_equity = current_equity
+        peak_equity = max(peak_equity, current_equity)
 
         # ── 4. Evaluate stop ladders for today's close ────────────────────────
         queued_sells = {s for s, _ in pending_sells}
@@ -338,7 +387,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
             # Rank universe based on strategy
             if strategy == "turtle_rs":
                 ranking = rank_universe(price_map, bench, d, cfg, matrix=rs_matrix) or []
-            elif strategy in ("minervini", "ema_supertrend"):
+            elif strategy in ("minervini", "ema_supertrend", "weinstein"):
                 ranking = rs_ranking(d)[0]
             elif strategy == "52w_high":
                 cands = []
@@ -412,7 +461,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         # ── 6. Compute Top 25 Ranking snapshot for today ───────────────────────
         if strategy == "turtle_rs":
             ranking_today = rank_universe(price_map, bench, d, cfg, matrix=rs_matrix) or []
-        elif strategy in ("minervini", "ema_supertrend"):
+        elif strategy in ("minervini", "ema_supertrend", "weinstein"):
             ranking_today = rs_ranking(d)[0]
         elif strategy == "52w_high":
             cands = []
@@ -610,17 +659,23 @@ def main():
     p.add_argument("--capital", type=float, default=500_000.0)
     p.add_argument("--slots", type=int, default=10)
     p.add_argument("--universe", choices=["nifty500", "nifty50"], default="nifty500")
-    p.add_argument("--strategy", choices=["turtle_rs", "minervini", "52w_high", "clenow", "ema_supertrend"], default="turtle_rs", help="Strategy to simulate")
+    p.add_argument("--strategy", choices=["turtle_rs", "minervini", "52w_high", "clenow", "ema_supertrend", "weinstein"], default="turtle_rs", help="Strategy to simulate")
     p.add_argument("--benchmark", choices=["nifty50", "nifty500"], default="nifty50", help="Benchmark index for RS and regime (default nifty50)")
     p.add_argument("--regime-interval", choices=["weekly", "daily"], default="weekly", help="Regime check frequency: weekly (prior week close) or daily (default weekly)")
     p.add_argument("--regime", type=lambda x: str(x).lower() in ("true", "1", "yes"), default=True, help="Enable 200-SMA regime filter")
     p.add_argument("--no-regime", dest="regime", action="store_false", help="Disable regime filter (always ON)")
     p.add_argument("--breakout-days", type=int, default=55, help="Donchian breakout lookback days (default 55)")
     p.add_argument("--sector-cap", type=int, default=DEFAULT_SECTOR_CAP, help="max positions per sector/industry (default 2)")
+    p.add_argument("--dd-brake", default="", help='scale new entries when the account is in drawdown, e.g. "5:0.5,10:0" (>=5%% dd: half size, >=10%%: no new entries)')
+    p.add_argument("--atr-risk-pct", type=float, default=0.0, help="size so an ATR-multiple adverse move costs at most this %% of equity (0=off)")
+    p.add_argument("--atr-mult", type=float, default=2.0, help="ATR multiple for --atr-risk-pct (default 2)")
     p.add_argument("--stop-pct", type=float, default=None, help="Stop-loss distance in %% (default: 12, Clenow 10)")
     p.add_argument("--force", action="store_true", help="force recomputation even if cached")
     p.add_argument("--clear-cache", action="store_true", help="Delete all cached replay json files and exit")
     args = p.parse_args()
+    RISK["dd_brake"] = [(float(a), float(b)) for a, b in (x.split(":") for x in args.dd_brake.split(",") if x.strip())]
+    RISK["atr_risk_pct"] = args.atr_risk_pct
+    RISK["atr_mult"] = args.atr_mult
 
     if args.clear_cache:
         count = 0

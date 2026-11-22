@@ -16,7 +16,7 @@ function sanitizeDate(d: string | null | undefined, fallback: string): string {
 }
 
 function sanitizeStrategy(s: string | null | undefined): string {
-  const allowed = ['turtle_rs', 'minervini', '52w_high', 'clenow', 'ema_supertrend'];
+  const allowed = ['turtle_rs', 'minervini', '52w_high', 'clenow', 'ema_supertrend', 'weinstein'];
   const val = (s || '').toLowerCase().trim();
   return allowed.includes(val) ? val : 'turtle_rs';
 }
