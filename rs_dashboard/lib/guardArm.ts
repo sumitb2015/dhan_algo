@@ -18,9 +18,9 @@ export function shouldAutoArm(
 
 /** The state with the default armed (call only when shouldAutoArm says so; re-check inside the lock). */
 export function withAutoArm(s: ServerGuardState, d: GuardDefaults, today: string, now: number): ServerGuardState {
-  const text = `Daily default armed: loss limit ₹${d.loss}${d.profit > 0 ? `, target ₹${d.profit}` : ''} on ${d.products.join('/')}`;
+  const text = `Daily default armed: loss limit ₹${d.loss}${d.profit > 0 ? `, target ₹${d.profit}` : ''} on ${d.products.join('/')}${d.lockDay ? ' (day lock on)' : ''}`;
   return {
-    ...s, autoArmedDate: today, pnl: { profit: d.profit, loss: d.loss, products: d.products, date: today },
+    ...s, autoArmedDate: today, pnl: { profit: d.profit, loss: d.loss, products: d.products, date: today, lockDay: d.lockDay === true },
     events: [...s.events, { at: now, kind: 'armed' as const, text }].slice(-40),
   };
 }

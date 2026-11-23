@@ -11,9 +11,11 @@ export interface GuardDefaults {
   /** Rupees; 0 = no profit target (a day-lock design: the default protects, it does not cap winners). */
   profit: number;
   products: string[];
+  /** Lock the day when the auto-armed loss limit fires (see SoftPnlGuard.lockDay). Off by default. */
+  lockDay: boolean;
 }
 
-export const DEFAULT_GUARD_DEFAULTS: GuardDefaults = { enabled: true, loss: 10_000, profit: 0, products: ['INTRADAY', 'MARGIN', 'CNC'] };
+export const DEFAULT_GUARD_DEFAULTS: GuardDefaults = { enabled: true, loss: 10_000, profit: 0, products: ['INTRADAY', 'MARGIN', 'CNC'], lockDay: false };
 
 const num = (v: unknown): number => (typeof v === 'number' ? v : Number(v));
 
@@ -25,9 +27,10 @@ export function parseGuardDefaults(raw: unknown): GuardDefaults {
   const loss = Math.abs(num(r.loss)) || 0;
   const profit = Math.abs(num(r.profit)) || 0;
   // An explicit "off" is honoured even with no levels; anything else that could not arm falls back to the built-in default.
-  if (r.enabled === false) return { enabled: false, loss, profit, products: products.length ? products : [...DEFAULT_GUARD_DEFAULTS.products] };
+  const lockDay = r.lockDay === true;
+  if (r.enabled === false) return { enabled: false, loss, profit, products: products.length ? products : [...DEFAULT_GUARD_DEFAULTS.products], lockDay };
   if (validateSoftPnlGuard(profit, loss, products)) return { ...DEFAULT_GUARD_DEFAULTS, products: [...DEFAULT_GUARD_DEFAULTS.products] };
-  return { enabled: r.enabled !== false, loss, profit, products };
+  return { enabled: r.enabled !== false, loss, profit, products, lockDay };
 }
 
 /** Validates what a request typed. Returns the clean value, or an error message. */
@@ -43,5 +46,5 @@ export function validateGuardDefaults(body: Record<string, unknown>): { ok: true
     const err = validateSoftPnlGuard(profit, loss, products);
     if (err) return { ok: false, error: err };
   }
-  return { ok: true, value: { enabled, loss, profit, products: products.length ? products : [...DEFAULT_GUARD_DEFAULTS.products] } };
+  return { ok: true, value: { enabled, loss, profit, products: products.length ? products : [...DEFAULT_GUARD_DEFAULTS.products], lockDay: body.lockDay === true } };
 }

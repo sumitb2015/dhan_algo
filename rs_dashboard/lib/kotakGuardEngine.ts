@@ -221,8 +221,9 @@ export function stepGuards(
       const verdict = evaluateSoftPnlGuard(g, pnl, today, allPriced);
       if (verdict.fire) {
         s.pnl = null;   // disarm before exiting: it fires once
-        // A LOSS fire locks the day (a profit target is the user's win: no lock). Anything new in scope is flattened below.
-        if (opts.lockOnLoss && g.loss > 0 && pnl <= -g.loss) {
+        // A LOSS fire locks the day only when the guard opted in (lockDay; off by default) and the broker supports it.
+        // A profit target never locks. Anything new in scope is flattened below.
+        if (opts.lockOnLoss && g.lockDay === true && g.loss > 0 && pnl <= -g.loss) {
           s.lock = { at: now, reason: verdict.reason, products: [...g.products] };
           pushEvent(s, now, 'locked', `${verdict.reason} - Kotak is locked for the rest of the day: new positions are squared off on sight`);
         }

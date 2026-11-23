@@ -31,3 +31,15 @@ test('validate: a request that does not say enabled is refused, never read as "o
     assert.strictEqual(r.ok, false);
   }
 });
+
+test('lockDay is off by default and only an explicit true turns it on', () => {
+  assert.strictEqual(DEFAULT_GUARD_DEFAULTS.lockDay, false);
+  assert.strictEqual(parseGuardDefaults(null).lockDay, false);
+  assert.strictEqual(parseGuardDefaults({ enabled: true, loss: 5000, profit: 0, products: ['MARGIN'] }).lockDay, false);
+  assert.strictEqual(parseGuardDefaults({ enabled: true, loss: 5000, profit: 0, products: ['MARGIN'], lockDay: 'yes' }).lockDay, false);
+  assert.strictEqual(parseGuardDefaults({ enabled: true, loss: 5000, profit: 0, products: ['MARGIN'], lockDay: true }).lockDay, true);
+  const v = validateGuardDefaults({ enabled: true, loss: 5000, products: ['MARGIN'] });
+  assert.ok(v.ok && v.value.lockDay === false);
+  const on = validateGuardDefaults({ enabled: true, loss: 5000, products: ['MARGIN'], lockDay: true });
+  assert.ok(on.ok && on.value.lockDay === true);
+});

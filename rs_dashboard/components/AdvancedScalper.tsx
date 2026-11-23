@@ -326,6 +326,8 @@ function AdvancedScalper() {
   // why it is stuck instead of sitting at "Loading…".
   const [loadError, setLoadError] = useState<string | null>(null);
   const [enableKillSwitch, setEnableKillSwitch]   = useState(false);
+  // Kotak's server guard: lock the rest of the day (square off new positions on sight) when the loss limit fires. Opt-in.
+  const [kotakLockDay, setKotakLockDay]           = useState(false);
   const [settingPnl, setSettingPnl]     = useState(false);
   const [clearingPnl, setClearingPnl]   = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -3093,7 +3095,7 @@ function AdvancedScalper() {
       setGuardError('');
       setSettingPnl(true);
       try {
-        if (await postGuard({ action: 'setPnl', profit: p, loss: l, products: guardProductTypes })) {
+        if (await postGuard({ action: 'setPnl', profit: p, loss: l, products: guardProductTypes, lockDay: broker === 'kotak' && kotakLockDay })) {
           addToast('success', 'P&L Guard armed (server)', 'Watched by the dashboard server - it keeps working if you close this tab. Keep the dashboard server running.');
         }
       } finally { setSettingPnl(false); }
@@ -3588,6 +3590,19 @@ function AdvancedScalper() {
                       🔴 Kill Switch {enableKillSwitch ? 'ON' : 'OFF'}
                     </button>)}
 
+                    {broker === 'kotak' && (<button onClick={() => setKotakLockDay(v => !v)}
+                      aria-pressed={kotakLockDay}
+                      title="When ON and the loss limit fires, Kotak is locked for the rest of the day: any new position in the selected products is squared off within seconds. OFF: the loss limit exits once and you can trade again. Applies when you press Set Guard."
+                      className={cn(
+                        'flex items-center gap-1.5 px-2.5 py-1 rounded', TXT_VALUE, 'font-bold border transition-all shrink-0 whitespace-nowrap',
+                        kotakLockDay
+                          ? 'bg-rose-900/50 border-rose-500/40 text-rose-300'
+                          : 'bg-zinc-900 border-zinc-700 text-zinc-500 hover:text-zinc-300',
+                        FOCUS_RING,
+                      )}>
+                      🔒 Lock Day {kotakLockDay ? 'ON' : 'OFF'}
+                    </button>)}
+
                     <button onClick={handleSetPnl} disabled={settingPnl}
                       className={cn('px-3 py-1.5 text-xs font-bold rounded-lg bg-violet-600 hover:bg-violet-500 text-white border border-violet-500/40 transition-all disabled:opacity-50 shrink-0 whitespace-nowrap', FOCUS_RING)}>
                       {settingPnl ? 'Setting…' : 'Set Guard'}
@@ -3627,6 +3642,7 @@ function AdvancedScalper() {
                     {serverPnlGuard.profit > 0 ? `🎯 ₹${serverPnlGuard.profit}` : ''}
                     {serverPnlGuard.profit > 0 && serverPnlGuard.loss > 0 ? '  ' : ''}
                     {serverPnlGuard.loss > 0 ? `🛑 ₹${serverPnlGuard.loss}` : ''}
+                    {serverPnlGuard.lockDay === true ? '  🔒 day lock' : ''}
                     {'  '}· held by the server
                   </span>
                 )}

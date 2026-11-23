@@ -24,6 +24,9 @@ export interface SoftPnlGuard {
   products: string[];
   /** IST calendar day it was set; a guard from an earlier day is discarded, never fired. */
   date: string;
+  /** Opt-in day lock: when the LOSS limit fires, square off every new in-scope position for the rest of the IST day.
+   *  Off unless set to true (and only on a broker whose adapter supports the lock: Kotak). */
+  lockDay?: boolean;
 }
 
 export type SoftPnlVerdict = { fire: false } | { fire: true; reason: string };

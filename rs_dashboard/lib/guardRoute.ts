@@ -48,7 +48,8 @@ export function guardRouteHandlers(b: GuardRouteBroker) {
       const err = validateSoftPnlGuard(profit, loss, products);
       if (err) return bad(err);
       if (!b.isSessionValid()) return bad(`${b.label} session is not valid - log in first; a guard cannot watch or exit without it`);
-      const s = await b.updateGuardState(st => ({ ...st, pnl: { profit, loss, products, date: istDay() } }));
+      const lockDay = body.lockDay === true;   // opt-in, off by default
+      const s = await b.updateGuardState(st => ({ ...st, pnl: { profit, loss, products, date: istDay(), lockDay } }));
       return NextResponse.json({ success: true, state: s });
     }
 

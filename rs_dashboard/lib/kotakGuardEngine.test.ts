@@ -147,9 +147,19 @@ test('contract prices: nothing from a stale or undated file, and a zero or missi
 });
 
 // ── Day lock (flatten on sight) ─────────────────────────────────────────────────────────────────────────────────────
-const lossGuard = { profit: 0, loss: 10_000, products: ['INTRADAY', 'MARGIN', 'CNC'], date: T };
+const lossGuard = { profit: 0, loss: 10_000, products: ['INTRADAY', 'MARGIN', 'CNC'], date: T, lockDay: true };
 const LOCK = { lockOnLoss: true };
 const lockedState = (o: Partial<ServerGuardState> = {}) => st({ lock: { at: 1000, reason: 'limit', products: ['INTRADAY', 'MARGIN'] }, ...o });
+
+test('the day lock is opt-in per guard: without lockDay a fired loss limit exits but does not lock', () => {
+  const { lockDay: _omit, ...plain } = lossGuard;
+  for (const g of [plain, { ...lossGuard, lockDay: false }]) {
+    const r = stepGuards(st({ pnl: g }), [pos({ unrealized: -10_500 })], 5000, T, LOCK);
+    assert.strictEqual(r.exits.length, 1, 'the loss limit still exits');
+    assert.ok(!r.state.lock, 'no lock without the opt-in');
+    assert.ok(!r.state.events.some(e => e.kind === 'locked'));
+  }
+});
 
 test('a fired LOSS limit locks the day only when the broker opts in; a profit target never locks', () => {
   const loss = stepGuards(st({ pnl: lossGuard }), [pos({ unrealized: -10_500 })], 5000, T, LOCK);

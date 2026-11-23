@@ -40,3 +40,10 @@ test('health: rewritten on change or when it goes stale, otherwise left alone', 
   assert.strictEqual(nextHealth(h, false, 'session', 2000)?.watching, false);
   assert.strictEqual(nextHealth(undefined, true, '', 2000)?.at, 2000);
 });
+
+test('the auto-armed default carries its lockDay setting (off by default)', () => {
+  const off = withAutoArm(emptyGuardState(T), { ...DEFAULT_GUARD_DEFAULTS }, T, 1);
+  assert.strictEqual(off.pnl?.lockDay, false);
+  const on = withAutoArm(emptyGuardState(T), { ...DEFAULT_GUARD_DEFAULTS, lockDay: true }, T, 1);
+  assert.strictEqual(on.pnl?.lockDay, true);
+});
