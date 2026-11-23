@@ -2,12 +2,10 @@
 """
 Multi-Strategy Backtest & Performance Comparison on Nifty 500 Historical Data.
 
-Compares 5 popular systematic equity strategies:
-1. Composite RS Breakout (Current "Turtle Momentum")
-2. Andreas Clenow "Stocks on the Move" (Smooth Exponential Slope * R^2)
-3. 52-Week High Breakout (George & Hwang Yearly High Anomaly)
-4. Minervini Trend Template (Stage 2 Superperformance)
-5. Connors RSI-2 Mean Reversion (Swing Dip-Buying in Uptrends)
+Every momentum model in the /momentum replay (Turtle RS and its optimised variant, Minervini, 52-Week High,
+Clenow, EMA + Supertrend, RS + Supertrend, Weinstein) is run through the replay engine itself, so the table
+describes the same rules the replay and the live bot use. Connors RSI-2 (mean reversion) is a contrast with its
+own runner below; it fills at the signal day's close, which flatters it slightly.
 
 Outputs CAGR, Max Drawdown, Sharpe Ratio, Win Rate, Total Trades, and Profit Factor.
 """
@@ -16,6 +14,7 @@ from __future__ import annotations
 
 import math
 import os
+from concurrent.futures import ProcessPoolExecutor
 import sys
 import json
 from dataclasses import dataclass
@@ -54,6 +53,26 @@ class TradeRecord:
     pnl_pct: float
     exit_reason: str
     hold_days: int
+
+
+def _replay_worker(job):
+    """Run one model through the replay engine in a worker process; return only what the table needs (a full replay
+    payload carries every daily snapshot and is too large to ship back between processes)."""
+    label, strategy, cfg_kw, capital, slots, start_date, end_date = job
+    from scripts.analysis.simulate_momentum_replay import run_replay_simulation, default_stop_pct
+    cfg = MomentumConfig(universe="nifty500", capital=capital, slots=slots, regime_enabled=True,
+                         stop_pct=default_stop_pct(strategy), **cfg_kw)
+    sim = run_replay_simulation(cfg, start_date, end_date, strategy=strategy)
+    eq = pd.Series({datetime.strptime(x["date"], "%Y-%m-%d").date(): x["equity"] for x in sim["snapshots"]})
+    trades = [
+        TradeRecord(label, t["symbol"],
+                    datetime.strptime(t["entry_date"], "%Y-%m-%d").date(),
+                    datetime.strptime(t["exit_date"], "%Y-%m-%d").date(),
+                    t["entry_price"], t["exit_price"], t["qty"], t["invested"], t["pnl"], t["pnl_pct"],
+                    t["exit_reason"], t["hold_days"])
+        for t in sim["closed_trades"]
+    ]
+    return label, eq, trades
 
 
 def calculate_metrics(equity_series: pd.Series, trades: List[TradeRecord], initial_capital: float) -> dict:
@@ -228,288 +247,9 @@ def main():
     trading_days = [d for d in bench_dates if d >= start_date]
 
     # Run simulations
-    print("\nRunning backtests across the 5 candidate strategies...")
+    print("\nRunning backtests across every momentum model plus Connors RSI-2...")
 
     results = {}
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # 1. Strategy: 52-Week High Breakout Momentum (George & Hwang 2004)
-    # ──────────────────────────────────────────────────────────────────────────
-    def run_52w_high_momentum():
-        cash = capital
-        portfolio = {}  # sym -> {entry_date, entry_price, qty, peak_price, stop_price}
-        trades = []
-        equity_records = {}
-
-        for d_idx, d in enumerate(trading_days):
-            b_i = bench_date_idx.get(d)
-            regime_on = (bench_closes[b_i] > bench_sma200[b_i]) if (b_i and not np.isnan(bench_sma200[b_i])) else True
-
-            # Check trailing stops & exits
-            for sym, pos in list(portfolio.items()):
-                ind = indicators[sym]
-                i = ind["dates"].get(d)
-                if i is None:
-                    continue
-                px = ind["closes"][i]
-                pos["peak_price"] = max(pos["peak_price"], px)
-                # Trailing stop: 12% below running peak
-                stop = pos["peak_price"] * 0.88
-                pos["stop_price"] = max(pos["stop_price"], stop)
-
-                # Check stop exit
-                if px < pos["stop_price"]:
-                    proceeds = px * pos["qty"] * 0.998  # fees
-                    cost = pos["entry_price"] * pos["qty"] * 1.002
-                    pnl = proceeds - cost
-                    trades.append(TradeRecord("52W_High", sym, pos["entry_date"], d, pos["entry_price"], px, pos["qty"], cost, pnl, (pnl / cost) * 100, "STOP", (d - pos["entry_date"]).days))
-                    cash += proceeds
-                    del portfolio[sym]
-
-            # Daily scan for true 52-week high breakouts
-            if regime_on:
-                free_slots = slots - len(portfolio)
-                if free_slots > 0:
-                    candidates = []
-                    for sym, ind in indicators.items():
-                        if sym in portfolio:
-                            continue
-                        i = ind["dates"].get(d)
-                        if i is None or i < 250:
-                            continue
-                        px = ind["closes"][i]
-                        h250 = ind["high250"][i]
-                        if np.isnan(h250) or h250 <= 0:
-                            continue
-                        # True 52-week high breakout, within 5% extension, stacked MAs, volume confirmation
-                        if (px >= h250 and px <= h250 * 1.05 and
-                            px > ind["sma50"][i] > ind["sma200"][i] and
-                            ind["volumes"][i] >= ind["vol20"][i]):
-                            proximity = px / h250
-                            candidates.append((sym, proximity, px))
-
-                    candidates.sort(key=lambda x: x[1], reverse=True)
-                    for sym, _, px in candidates[:free_slots]:
-                        alloc = (cash / free_slots) * 0.95
-                        qty = int(alloc // px)
-                        if qty > 0 and cash >= px * qty * 1.002:
-                            spend = px * qty * 1.002
-                            cash -= spend
-                            portfolio[sym] = {
-                                "entry_date": d,
-                                "entry_price": px,
-                                "qty": qty,
-                                "peak_price": px,
-                                "stop_price": px * 0.88,
-                            }
-                            free_slots -= 1
-
-            # End of day Mark-to-market
-            total_val = cash
-            for sym, pos in portfolio.items():
-                ind = indicators[sym]
-                i = ind["dates"].get(d)
-                px = ind["closes"][i] if i is not None else pos["entry_price"]
-                total_val += px * pos["qty"]
-            equity_records[d] = total_val
-
-        return pd.Series(equity_records), trades
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # 2. Strategy: Andreas Clenow "Stocks on the Move" (Slope * R^2)
-    # ──────────────────────────────────────────────────────────────────────────
-    def run_clenow_momentum():
-        cash = capital
-        portfolio = {}
-        trades = []
-        equity_records = {}
-
-        for d_idx, d in enumerate(trading_days):
-            b_i = bench_date_idx.get(d)
-            regime_on = (bench_closes[b_i] > bench_sma200[b_i]) if (b_i and not np.isnan(bench_sma200[b_i])) else True
-
-            for sym, pos in list(portfolio.items()):
-                ind = indicators[sym]
-                i = ind["dates"].get(d)
-                if i is None:
-                    continue
-                px = ind["closes"][i]
-                pos["peak_price"] = max(pos["peak_price"], px)
-
-                # Exit rule: Close below 100-day SMA, or disaster stop 15%
-                if px < ind["sma100"][i] or px < pos["entry_price"] * 0.85:
-                    proceeds = px * pos["qty"] * 0.998
-                    cost = pos["entry_price"] * pos["qty"] * 1.002
-                    pnl = proceeds - cost
-                    trades.append(TradeRecord("Clenow", sym, pos["entry_date"], d, pos["entry_price"], px, pos["qty"], cost, pnl, (pnl / cost) * 100, "SMA100_EXIT", (d - pos["entry_date"]).days))
-                    cash += proceeds
-                    del portfolio[sym]
-
-            # Weekly review: Rotation & new entries
-            if d.weekday() == 0 and regime_on:
-                # Rank universe by Clenow score today
-                all_scores = []
-                for sym, ind in indicators.items():
-                    i = ind["dates"].get(d)
-                    if i is not None and i >= 90:
-                        all_scores.append((sym, ind["clenow"][i]))
-                all_scores.sort(key=lambda x: x[1], reverse=True)
-                n_scored = len(all_scores)
-                pct_ranks = {s: 100.0 * (n_scored - 1 - idx) / max(1, n_scored - 1) for idx, (s, _) in enumerate(all_scores)}
-
-                # Rotation exit: sell holdings falling out of top 20% (percentile < 80)
-                for sym in list(portfolio.keys()):
-                    if pct_ranks.get(sym, 0.0) < 80.0:
-                        pos = portfolio[sym]
-                        ind = indicators[sym]
-                        i = ind["dates"].get(d)
-                        px = ind["closes"][i] if i is not None else pos["entry_price"]
-                        proceeds = px * pos["qty"] * 0.998
-                        cost = pos["entry_price"] * pos["qty"] * 1.002
-                        pnl = proceeds - cost
-                        trades.append(TradeRecord("Clenow", sym, pos["entry_date"], d, pos["entry_price"], px, pos["qty"], cost, pnl, (pnl / cost) * 100, "ROTATION", (d - pos["entry_date"]).days))
-                        cash += proceeds
-                        del portfolio[sym]
-
-                free_slots = slots - len(portfolio)
-                if free_slots > 0:
-                    candidates = []
-                    for sym, ind in indicators.items():
-                        if sym in portfolio:
-                            continue
-                        i = ind["dates"].get(d)
-                        if i is None or i < 90:
-                            continue
-                        score = ind["clenow"][i]
-                        px = ind["closes"][i]
-                        # Clenow gates: score > 0, px > 100 SMA & 200 SMA, 15% gap filter
-                        if score > 0 and px > ind["sma100"][i] and px > ind["sma200"][i] and ind["max_gap_90"][i] <= 0.15:
-                            candidates.append((sym, score, px))
-
-                    candidates.sort(key=lambda x: x[1], reverse=True)
-                    for sym, _, px in candidates[:free_slots]:
-                        alloc = (cash / free_slots) * 0.95
-                        qty = int(alloc // px)
-                        if qty > 0 and cash >= px * qty * 1.002:
-                            spend = px * qty * 1.002
-                            cash -= spend
-                            portfolio[sym] = {
-                                "entry_date": d,
-                                "entry_price": px,
-                                "qty": qty,
-                                "peak_price": px,
-                                "stop_price": px * 0.85,
-                            }
-                            free_slots -= 1
-
-            # End of day Mark-to-market
-            total_val = cash
-            for sym, pos in portfolio.items():
-                ind = indicators[sym]
-                i = ind["dates"].get(d)
-                px = ind["closes"][i] if i is not None else pos["entry_price"]
-                total_val += px * pos["qty"]
-            equity_records[d] = total_val
-
-        return pd.Series(equity_records), trades
-
-    # ──────────────────────────────────────────────────────────────────────────
-    # 3. Strategy: Minervini Trend Template (Stage 2 Superperformance)
-    # ──────────────────────────────────────────────────────────────────────────
-    def run_minervini_trend():
-        cash = capital
-        portfolio = {}
-        trades = []
-        equity_records = {}
-
-        for d_idx, d in enumerate(trading_days):
-            b_i = bench_date_idx.get(d)
-            regime_on = (bench_closes[b_i] > bench_sma200[b_i]) if (b_i and not np.isnan(bench_sma200[b_i])) else True
-
-            for sym, pos in list(portfolio.items()):
-                ind = indicators[sym]
-                i = ind["dates"].get(d)
-                if i is None:
-                    continue
-                px = ind["closes"][i]
-                pos["peak_price"] = max(pos["peak_price"], px)
-
-                # Minervini 12% initial stop, trailing 50 SMA once up 15%
-                gain_pct = (pos["peak_price"] / pos["entry_price"] - 1.0) * 100
-                if gain_pct >= 15.0:
-                    pos["stop_price"] = max(pos["stop_price"], ind["sma50"][i])
-
-                if px < pos["stop_price"]:
-                    proceeds = px * pos["qty"] * 0.998
-                    cost = pos["entry_price"] * pos["qty"] * 1.002
-                    pnl = proceeds - cost
-                    trades.append(TradeRecord("Minervini", sym, pos["entry_date"], d, pos["entry_price"], px, pos["qty"], cost, pnl, (pnl / cost) * 100, "STOP", (d - pos["entry_date"]).days))
-                    cash += proceeds
-                    del portfolio[sym]
-
-            # Daily scan when regime ON
-            if regime_on:
-                free_slots = slots - len(portfolio)
-                if free_slots > 0:
-                    candidates = []
-                    for sym, ind in indicators.items():
-                        if sym in portfolio:
-                            continue
-                        i = ind["dates"].get(d)
-                        if i is None or i < 250:
-                            continue
-                        px = ind["closes"][i]
-                        sma50 = ind["sma50"][i]
-                        sma150 = ind["sma150"][i]
-                        sma200 = ind["sma200"][i]
-                        sma200_prev = ind["sma200_prev"][i]
-                        h250 = ind["high250"][i]
-                        l250 = ind["low250"][i]
-                        h20 = ind["high20"][i]
-
-                        # Full Minervini Trend Template:
-                        # 1. Price > 50 > 150 > 200 SMA
-                        # 2. 200 SMA rising (higher than 22 bars ago)
-                        # 3. Price >= 25% above 52W low
-                        # 4. Price within 20% of 52W high
-                        # 5. Breakout of 20-day high without being extended > 5%
-                        # 6. Volume >= 20d avg
-                        if (px > sma50 > sma150 > sma200 and
-                            sma200 > sma200_prev and
-                            px >= l250 * 1.25 and
-                            px >= h250 * 0.80 and
-                            px >= h20 and px <= h20 * 1.05 and
-                            ind["volumes"][i] >= ind["vol20"][i]):
-                            # Rank candidates by RS score
-                            score = ind["rs_score"][i]
-                            candidates.append((sym, score, px))
-
-                    candidates.sort(key=lambda x: x[1], reverse=True)
-                    for sym, _, px in candidates[:free_slots]:
-                        alloc = (cash / free_slots) * 0.95
-                        qty = int(alloc // px)
-                        if qty > 0 and cash >= px * qty * 1.002:
-                            spend = px * qty * 1.002
-                            cash -= spend
-                            portfolio[sym] = {
-                                "entry_date": d,
-                                "entry_price": px,
-                                "qty": qty,
-                                "peak_price": px,
-                                "stop_price": px * 0.88,
-                            }
-                            free_slots -= 1
-
-            # End of day Mark-to-market
-            total_val = cash
-            for sym, pos in portfolio.items():
-                ind = indicators[sym]
-                i = ind["dates"].get(d)
-                px = ind["closes"][i] if i is not None else pos["entry_price"]
-                total_val += px * pos["qty"]
-            equity_records[d] = total_val
-
-        return pd.Series(equity_records), trades
 
     # ──────────────────────────────────────────────────────────────────────────
     # 4. Strategy: Connors RSI-2 Mean Reversion Swing
@@ -586,121 +326,34 @@ def main():
         return pd.Series(equity_records), trades
 
     # ──────────────────────────────────────────────────────────────────────────
-    # 5. Current Turtle RS Momentum (Benchmark from lib/momentum.py)
+    # Every momentum model runs through the replay engine (simulate_momentum_replay.py), i.e. the same rules,
+    # fills, costs, compounding and data-gap handling the /momentum replay and the live bot use. This file used to
+    # carry its own copies of the 52W / Clenow / Minervini rules, which had drifted from lib/. Only Connors RSI-2,
+    # a mean-reversion contrast the replay does not implement, keeps a runner here.
     # ──────────────────────────────────────────────────────────────────────────
-    from scripts.analysis.simulate_momentum_replay import run_replay_simulation
-    cfg_turtle = MomentumConfig(universe="nifty500", capital=capital, slots=slots, regime_enabled=True)
-    turtle_sim = run_replay_simulation(cfg_turtle, start_date, end_date)
-    turtle_snaps = turtle_sim["snapshots"]
-    turtle_eq = pd.Series({datetime.strptime(s["date"], "%Y-%m-%d").date(): s["equity"] for s in turtle_snaps})
-    turtle_trades = [
-        TradeRecord(
-            "Turtle_RS",
-            t["symbol"],
-            datetime.strptime(t["entry_date"], "%Y-%m-%d").date(),
-            datetime.strptime(t["exit_date"], "%Y-%m-%d").date(),
-            t["entry_price"],
-            t["exit_price"],
-            t["qty"],
-            t["invested"],
-            t["pnl"],
-            t["pnl_pct"],
-            t["exit_reason"],
-            t["hold_days"],
-        )
-        for s in turtle_snaps for t in s.get("closed_trades", [])
+
+    # Keys must match STRATEGY_DETAILS in rs_dashboard/components/StrategyBenchmarkPanel.tsx.
+    replay_models = [
+        ("1. EMA & Supertrend (Trend Follower)", "ema_supertrend", {"breakout_days": 20}),
+        ("2. Andreas Clenow Momentum", "clenow", {}),
+        ("3. Minervini Trend Template", "minervini", {"breakout_days": 20}),
+        ("4. 52-Week High Breakout", "52w_high", {"breakout_days": 5}),
+        ("5. Current Turtle RS Breakout", "turtle_rs", {}),
+        ("5b. Turtle RS Optimised", "turtle_rs_opt", {}),
+        ("7. RS + Supertrend (Vivek Bajaj)", "rs_supertrend", {"breakout_days": 20}),
+        ("8. Weinstein Stage 2", "weinstein", {}),
     ]
-    # Deduplicate trades (closed_trades list accumulates)
-    seen = set()
-    unique_turtle_trades = []
-    for t in turtle_trades:
-        key = (t.symbol, t.entry_date, t.exit_date)
-        if key not in seen:
-            seen.add(key)
-            unique_turtle_trades.append(t)
-
-    print("Running 52W High Breakout Momentum...")
-    eq_52w, trades_52w = run_52w_high_momentum()
-
-    print("Running Andreas Clenow 'Stocks on the Move'...")
-    eq_clenow, trades_clenow = run_clenow_momentum()
-
-    print("Running Minervini Trend Template (Stage 2 Superperformance)...")
-    eq_minervini, trades_minervini = run_minervini_trend()
+    strategies = {}
+    print(f"Running {len(replay_models)} replay models in parallel (cached replays are reused)...")
+    jobs = [(label, key, kw, capital, slots, start_date, end_date) for label, key, kw in replay_models]
+    with ProcessPoolExecutor(max_workers=min(4, os.cpu_count() or 1)) as pool:
+        for label, eq, trades in pool.map(_replay_worker, jobs):
+            strategies[label] = (eq, trades)
+            print(f"  done: {label} ({len(trades)} trades)")
 
     print("Running Connors RSI-2 Mean Reversion Swing...")
-    eq_rsi2, trades_rsi2 = run_connors_rsi2()
-
-    print("Running EMA & Supertrend (Trend Follower)...")
-    cfg_ema = MomentumConfig(universe="nifty500", capital=capital, slots=slots, regime_enabled=True, stop_pct=12.0)
-    ema_sim = run_replay_simulation(cfg_ema, start_date, end_date, strategy="ema_supertrend", force=True)
-    ema_snaps = ema_sim["snapshots"]
-    ema_eq = pd.Series({datetime.strptime(s["date"], "%Y-%m-%d").date(): s["equity"] for s in ema_snaps})
-    ema_trades = [
-        TradeRecord(
-            "EMA_Supertrend",
-            t["symbol"],
-            datetime.strptime(t["entry_date"], "%Y-%m-%d").date(),
-            datetime.strptime(t["exit_date"], "%Y-%m-%d").date(),
-            t["entry_price"],
-            t["exit_price"],
-            t["qty"],
-            t["invested"],
-            t["pnl"],
-            t["pnl_pct"],
-            t["exit_reason"],
-            t["hold_days"],
-        )
-        for s in ema_snaps for t in s.get("closed_trades", [])
-    ]
-    seen_ema = set()
-    unique_ema_trades = []
-    for t in ema_trades:
-        key = (t.symbol, t.entry_date, t.exit_date)
-        if key not in seen_ema:
-            seen_ema.add(key)
-            unique_ema_trades.append(t)
-
-    print("Running RS + Supertrend (Vivek Bajaj)...")
-    cfg_rsst = MomentumConfig(universe="nifty500", capital=capital, slots=slots, regime_enabled=True, stop_pct=12.0)
-    rsst_sim = run_replay_simulation(cfg_rsst, start_date, end_date, strategy="rs_supertrend", force=True)
-    rsst_snaps = rsst_sim["snapshots"]
-    rsst_eq = pd.Series({datetime.strptime(s["date"], "%Y-%m-%d").date(): s["equity"] for s in rsst_snaps})
-    rsst_trades = [
-        TradeRecord(
-            "RS_Supertrend",
-            t["symbol"],
-            datetime.strptime(t["entry_date"], "%Y-%m-%d").date(),
-            datetime.strptime(t["exit_date"], "%Y-%m-%d").date(),
-            t["entry_price"],
-            t["exit_price"],
-            t["qty"],
-            t["invested"],
-            t["pnl"],
-            t["pnl_pct"],
-            t["exit_reason"],
-            t["hold_days"],
-        )
-        for s in rsst_snaps for t in s.get("closed_trades", [])
-    ]
-    seen_rsst = set()
-    unique_rsst_trades = []
-    for t in rsst_trades:
-        key = (t.symbol, t.entry_date, t.exit_date)
-        if key not in seen_rsst:
-            seen_rsst.add(key)
-            unique_rsst_trades.append(t)
-
-    # Summarize all
-    strategies = {
-        "1. EMA & Supertrend (Trend Follower)": (ema_eq, unique_ema_trades),
-        "2. Andreas Clenow Momentum": (eq_clenow, trades_clenow),
-        "3. Minervini Trend Template": (eq_minervini, trades_minervini),
-        "4. 52-Week High Breakout": (eq_52w, trades_52w),
-        "5. Current Turtle RS Breakout": (turtle_eq, unique_turtle_trades),
-        "6. Connors RSI-2 Mean Reversion": (eq_rsi2, trades_rsi2),
-        "7. RS + Supertrend (Vivek Bajaj)": (rsst_eq, unique_rsst_trades),
-    }
+    strategies["6. Connors RSI-2 Mean Reversion"] = run_connors_rsi2()
+    strategies = dict(sorted(strategies.items()))
 
     summary_rows = []
     for name, (eq_s, tr_list) in strategies.items():
@@ -719,7 +372,7 @@ def main():
 
     df_summary = pd.DataFrame(summary_rows)
     print("\n" + "=" * 90)
-    print("BACKTEST PERFORMANCE COMPARISON (2019 - 2026, NIFTY 500)")
+    print(f"BACKTEST PERFORMANCE COMPARISON ({start_date} to {end_date}, NIFTY 500)")
     print("=" * 90)
     print(df_summary.to_string(index=False))
     print("=" * 90)

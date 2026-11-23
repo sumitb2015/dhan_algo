@@ -19,7 +19,7 @@ Exit Rules (stop only, by default):
   * Disaster / Trailing Stop: Initial stop_pct (default 12.0%) below entry.
     Once position is up >= 15%, trails running peak by stop_pct (never loosens).
   * Two discretionary exits exist but are OFF by default (EXIT_ON_SUPERTREND, EXIT_ON_EMA50): a Supertrend flip
-    (Close < line / st_dir == -1) and Close < EMA 50. Replay ablation on Nifty 500, 10 slots, Nifty 50 weekly regime:
+    (Close < line / st_dir == -1) and Close < EMA 50. Replay ablation (pre-2026-11-23 engine: fixed slots) on Nifty 500, 10 slots, Nifty 50 weekly regime:
         exits                       2020-23 ret / PF / maxDD     2024-26 ret / PF / maxDD
         both (previous default)     +273% / 3.14 / 12.5%          +3.2% / 1.05 / 20.5%
         stop only (default now)     +276% / 4.34 /  9.9%         +32.0% / 1.48 / 15.8%
@@ -36,6 +36,7 @@ from lib.intraday_signals import supertrend
 
 DEFAULT_STOP_PCT = 12.0
 TRAIL_ARM_GAIN_PCT = 15.0
+STAGE_TRAIL = 2              # lib.momentum.STAGE_TRAIL (not imported: lib.momentum must stay import-free of models)
 MIN_RS_PCT = 60.0
 EXIT_ON_SUPERTREND = False   # sell when Supertrend turns red / Close < line (hurt in both test windows)
 EXIT_ON_EMA50 = False        # sell when Close < EMA 50 (hurt in both test windows)
@@ -137,6 +138,8 @@ def exit_check(pos: "Position", close: float, tables: dict, d, stop_pct: float =
     if peak >= pos.entry_price * (1.0 + TRAIL_ARM_GAIN_PCT / 100.0):
         trailing_stop = peak * (1.0 - stop_pct / 100.0)
         eff_stop = max(hard_stop, trailing_stop)
+        if hasattr(pos, "stage"):
+            pos.stage = STAGE_TRAIL         # so the holdings table says "trailing", not "hard stop"
     else:
         eff_stop = hard_stop
 

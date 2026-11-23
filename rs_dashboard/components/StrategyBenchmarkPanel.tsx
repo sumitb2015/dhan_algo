@@ -50,6 +50,12 @@ const TD = ({ children, align = 'left', className = '', title }: {
   </td>
 );
 
+// Rules as the replay engine (scripts/analysis/simulate_momentum_replay.py + lib/<model>.py) runs them. The figures
+// live in the table, which is computed by backtest_strategy_comparison.py — keep numbers out of these notes, or they
+// go stale on the next engine change (they did: every verdict below quoted pre-2026-11-23 numbers).
+// Engine-wide: signal on the close, fill at the next open, 0.111%/side + Rs 20 + 0.05% slippage, slots sized off
+// current equity (compounding), Nifty 50 weekly 200-SMA regime, max 2 per sector, data-gap exits, survivor-biased
+// universe (today's Nifty 500 list).
 const STRATEGY_DETAILS: Record<string, {
   key: string;
   badge: string;
@@ -60,105 +66,117 @@ const STRATEGY_DETAILS: Record<string, {
 }> = {
   '1. EMA & Supertrend (Trend Follower)': {
     key: 'ema_supertrend',
-    badge: 'Highest Profit Factor & Sharpe Ratio',
+    badge: 'Trend Ribbon',
     badgeColor: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
-    summary: 'Textbook multi-timeframe moving average ribbon (EMA 20 > 50 > 200) coupled with ATR volatility trailing bands (Supertrend 10, 3.0).',
+    summary: 'Stacked EMA ribbon (20 > 50 > 200) with a green Supertrend (10, 3.0) as the entry filter; ranked by composite RS.',
     rules: [
-      'Trend alignment: Close > EMA 20 > EMA 50 > EMA 200 (stacked moving average ribbon)',
-      'Volatility confirmation: Supertrend (10, 3.0) is Green (st_dir == +1, close > Supertrend)',
-      'Volume & Strength: Volume >= 80% of 20-day average; RS percentile >= 60 (top 40% strongest)',
-      'Exit: Supertrend turns Bearish (Red) or Close drops below EMA 50; 12% disaster trailing stop',
+      'Entry (daily): Close > EMA 20 > EMA 50 > EMA 200, Supertrend (10, 3.0) green',
+      'Volume >= 80% of the 20-day average; composite-RS percentile >= 60',
+      'Exit: stop 12% below entry, trailing 12% below the peak once up 15%. The Supertrend-flip and EMA-50 exits exist but are off (both whipsawed in the ablation)',
     ],
-    verdict: '+21.5% CAGR with lowest Max Drawdown (-12.4%), highest Sharpe (1.59), and highest Profit Factor (2.29). Outstanding risk-adjusted compounding.',
+    verdict: 'Supertrend works here as an entry filter only. Read the drawdown column with the CAGR: fully invested, it is not a defensive model.',
   },
   '2. Andreas Clenow Momentum': {
     key: 'clenow',
-    badge: 'Aggressive Compounder',
+    badge: 'Smooth-Slope Rotation',
     badgeColor: 'bg-purple-500/10 text-purple-300 border-purple-500/30',
-    summary: 'From Andreas Clenow’s Stocks on the Move: weekly momentum rotation ranking by 90-day annualized exponential slope × R².',
+    summary: 'From Stocks on the Move: rank by 90-day annualized exponential regression slope x R², rotate weekly.',
     rules: [
-      '15% Gap Filter: Disqualifies any stock with a 1-day move > 15% in past 90 days (eliminates pumps & takeover noise)',
-      'Trend gate: Close > 100 SMA and Close > 200 SMA, momentum score > 0',
-      'Weekly rank rotation: Rotates out holdings falling out of the top 20% into top leaders',
-      'Exit: Close below 100-day SMA, or 15% disaster stop',
+      'Entry (daily): Close > 100 SMA and > 200 SMA, no 1-day move > 15% in 90 days, score > 0; best scores first',
+      'Weekly rotation: sells holdings that fall out of the top 20% of scores (a name with no bar that day is not sold for it)',
+      'Exit: Close below the 100-day SMA, or a 15% stop. Regime OFF blocks new buys but does not liquidate (as in the book)',
+      'Not the book: equal 4:3 slot sizing, not ATR risk parity; 10 slots, not unlimited positions',
     ],
-    verdict: '+36.4% CAGR and 2.19 Profit Factor. Turned ₹5 Lakhs into ₹42.00 Lakhs over 6.9 years with gap filtering containing drawdowns.',
+    verdict: 'The only model that rides a regime-OFF week instead of going to cash, so its drawdown includes the corrections the others sit out.',
   },
   '3. Minervini Trend Template': {
     key: 'minervini',
-    badge: 'Best Win Rate & Quality Growth',
+    badge: 'Quality Growth',
     badgeColor: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
-    summary: 'Mark Minervini’s Trend Template from Trade Like a Stock Market Wizard. Daily pivot breakout with stacked MAs and rising 200-SMA.',
+    summary: 'Mark Minervini’s Trend Template: daily pivot breakout with stacked SMAs and a rising 200 SMA.',
     rules: [
-      'Trend Template: Close > 50 SMA > 150 SMA > 200 SMA, and 200 SMA must be rising (> 22 bars ago)',
-      'Base & Extension: Close >= 25% above 52W low, within 20% of 52W high, and <= 5% above 20d pivot',
-      'Relative Strength: Universe RS percentile >= 70 (top 30% strongest leaders)',
-      'Exit: 12% initial stop; once gain >= 15%, trails 50-day SMA (never loosens)',
+      'Trend: Close > 50 SMA > 150 SMA > 200 SMA, and the 200 SMA above its level 22 sessions ago',
+      'Base: >= 25% above the 52W low, within 20% of the 52W high, at or <= 5% above the 20-day pivot; volume >= 20-day average',
+      'Relative strength: composite-RS percentile >= 70',
+      'Exit: 12% initial stop; once up 15%, trails the 50-day SMA (never loosens)',
     ],
-    verdict: '+25.4% CAGR with highest Win Rate (54.8%) and 2.13 Profit Factor. Strict quality filters deliver pristine risk-adjusted returns.',
+    verdict: 'Highest win rate of the breakout models. Parameters were chosen looking at both 2020-23 and 2024-26, so treat it as lightly in-sample.',
   },
   '4. 52-Week High Breakout': {
     key: '52w_high',
-    badge: 'High Consistency & Clean Breakouts',
+    badge: '52W Proximity',
     badgeColor: 'bg-sky-500/10 text-sky-400 border-sky-500/30',
-    summary: 'George & Hwang (2004) Journal of Finance 52-Week High Anomaly: daily breakout above the 52-week ceiling with zero overhead supply.',
+    summary: 'George & Hwang (2004): stocks nearest their 52-week high outperform. Ranked by close / 52-week high.',
     rules: [
-      'Breakout trigger: Daily scan for true 52-week (250-day) high breakout; max 5% extension',
-      'Trend filter: Close > 50 SMA > 200 SMA and volume >= 20-day average',
-      'Exit: Trailing stop 12% below running peak close; market regime on Nifty 200 SMA',
+      'Entry (daily): close within 5% of the 52-week high (breakout setting 5; other settings = strict breakout, max 5% extension)',
+      'Trend: Close > 50 SMA > 200 SMA; volume >= 20-day average',
+      'Exit: trailing stop 12% below the peak close',
     ],
-    verdict: '+19.4% CAGR with -28.1% max drawdown and 1.76 Profit Factor. Solid, dependable compounding on genuine new 52W peaks.',
+    verdict: 'Simple and close to the paper. A plain trailing stop, so it gives back more of each winner than the ladder models.',
   },
   '5. Current Turtle RS Breakout': {
     key: 'turtle_rs',
-    badge: 'Defensive Baseline',
+    badge: 'Live Baseline',
     badgeColor: 'bg-amber-500/10 text-amber-300 border-amber-500/30',
-    summary: 'Our baseline model: mid-weighted composite relative strength (10d, 21d, 63d, 126d) with 55-day Donchian channel breakout.',
+    summary: 'The live default: composite RS (10/21/63/126 days vs Nifty 50) with a confirmed 55-day breakout.',
     rules: [
-      'Composite RS: Outperformance vs Nifty 50 over 2-week, 1-mo, 3-mo, and 6-mo',
-      'Entry: 2 consecutive closes at new 55-day high with stacked EMAs (20 > 50 > 200)',
-      'Exit: 3-stage ratchet (12% stop → breakeven at +15% → trailing 25% from peak) + rank rotation exits',
+      'Entry (daily): RS rank <= 20, Close > EMA 20 > 50 > 200, 2 consecutive closes above the 55-day high, volume > 20-day average',
+      'Exit: 12% stop, breakeven at +15%, trail 25% below the peak once +25%',
+      'Weekly rotation: sells after 2 consecutive weekly reviews ranked below 25 (7-day minimum hold)',
     ],
-    verdict: '+14.9% CAGR with the lowest drawdown of all models (-14.3%) and highest Sharpe (1.21). Maximum downside protection.',
+    verdict: 'What the live bot runs. Before 2026-11-23 the replay rotated daily and skipped the rank-20 gate; this row is the corrected engine.',
   },
   '5b. Turtle RS Optimised': {
     key: 'turtle_rs_opt',
-    badge: 'Walk-forward Tuned Baseline',
+    badge: 'Looser Exits',
     badgeColor: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30',
-    summary: 'The Turtle RS baseline with looser exits: rank rotation only sells names that fall below rank 60 (baseline 25) and the initial stop is 20% (baseline 12%). Entries and sizing are unchanged.',
+    summary: 'Turtle RS with looser exits: rotation sells only below rank 60 (baseline 25), initial stop 20% (baseline 12%).',
     rules: [
-      'Entry: unchanged (composite RS rank <= 20, stacked EMAs, 55-day breakout confirmed by 2 closes)',
-      'Exit: 20% stop, breakeven at +15%, 25% trail from peak once +25%; rank-rotation sell only below rank 60',
-      'Chosen on 2020-24 and held up on 2023-26 and 2024-26 test windows; dropping the 2-close confirmation did not hold up, so it stays',
+      'Entry: unchanged (RS rank <= 20, stacked EMAs, confirmed 55-day breakout)',
+      'Exit: 20% stop, breakeven at +15%, 25% trail once +25%; weekly rotation sells only below rank 60',
     ],
-    verdict: '+15.5% CAGR, -13.9% max drawdown, 2.86 Profit Factor (2019-06 to 2026-11, fixed slots) against +12.9% / -14.7% / 1.95 for the baseline. Still trails the Nifty 500 in 2024-26 (about +2.7% vs +4.1%); survivor-biased universe.',
+    verdict: 'Its walk-forward tuning ran on the old daily-rotation engine, where looser exits mostly offset churn. On the corrected engine the wider 20% stop buys a little more return for a deeper drawdown than the baseline; re-validate before switching live.',
   },
   '6. Connors RSI-2 Mean Reversion': {
     key: 'connors_rsi2',
-    badge: 'High Frequency Dip Buyer',
+    badge: 'Contrast: Mean Reversion',
     badgeColor: 'bg-zinc-800 text-zinc-400 border-zinc-700',
-    summary: 'Larry Connors 2-period RSI swing system: buys deep oversold washouts (RSI < 10) in stocks above their 200 SMA.',
+    summary: 'Larry Connors 2-period RSI swing system: buys oversold dips (RSI < 10) in stocks above their 200 SMA.',
     rules: [
       'Trend filter: Stock > 200 SMA and Nifty 50 > 200 SMA',
-      'Entry: 2-period RSI drops below 10',
-      'Exit: Close crosses above 5-day SMA or 6 days max hold',
+      'Entry: 2-period RSI below 10; exit on a close above the 5-day SMA, 6 days max, or a 6% stop',
+      'Own runner, not the replay engine: fills at the signal close',
     ],
-    verdict: '-1.05% CAGR despite 58.3% win rate. 4,639 trades caused statutory delivery taxes (STT 0.1% both ways) to eat all profits.',
+    verdict: 'Thousands of short trades: delivery costs (STT both ways) eat the edge. Kept as a contrast, not a candidate.',
   },
   '7. RS + Supertrend (Vivek Bajaj)': {
     key: 'rs_supertrend',
     badge: 'Video Rules, Backtested',
     badgeColor: 'bg-amber-500/10 text-amber-300 border-amber-500/30',
-    summary: 'Vivek Bajaj (Learn2Trade session 19): buy stocks whose strength vs Nifty is positive and rising, while Supertrend is green; hold with a trailing stop.',
+    summary: 'Vivek Bajaj (Learn2Trade session 19): strength vs Nifty positive and rising, Supertrend green; hold with a trailing stop.',
     rules: [
       'Relative strength: (stock / stock[123 bars]) / (Nifty / Nifty[123 bars]) - 1 > 0, with its 50-bar average rising 3 bars',
-      'Trend: Supertrend (10, 2.0) is Green and Close > 50 SMA; 20-day traded value >= Rs 2 crore',
-      'Exit: 12% disaster trailing stop (arms after +15%); the video’s Supertrend-flip exit is available but off because it whipsawed; Nifty 200 SMA regime filter added by the engine',
+      'Trend: Supertrend (10, 2.0) green and Close > 50 SMA; 20-day traded value >= Rs 2 crore',
+      'Exit: 12% stop, trailing 12% below the peak once up 15%; the video’s Supertrend-flip exit is off (it whipsawed)',
       'The video gives no periods, stop or size: those are this test’s choices',
     ],
-    verdict: '+21.6% CAGR, -12.9% max drawdown, 2.69 Profit Factor, 52.6% win rate over 329 trades (stop-only exit). The video’s Supertrend-flip exit gave +18.8% / 1.84 / 701 trades. Behind EMA & Supertrend (+23.0%, PF 3.10). RS filter adds nothing over the same system without it; in 2024-26 it earned about 5%, against 10% for EMA & Supertrend. See the vault page rs-supertrend-session19.',
+    verdict: 'Tuned on 2020-23 and checked once on 2024-26, where it earned much less. See the vault page rs-supertrend-session19.',
+  },
+  '8. Weinstein Stage 2': {
+    key: 'weinstein',
+    badge: 'Weekly Base Breakout',
+    badgeColor: 'bg-sky-500/10 text-sky-400 border-sky-500/30',
+    summary: 'Stan Weinstein Stage 2 (The Long & The Short ep. 56 rule set): weekly breakout from a base above a rising 30-week MA.',
+    rules: [
+      'Entry (weekly close): prior downtrend and a base, close above the 26-week high and a rising 30-week MA, volume >= 2x the 4-week average, RS ratio above its 52-week average',
+      'Exit: weekly close below a 30-week MA that is no longer rising, or a 12% stop on any daily close (the video has no stop)',
+    ],
+    verdict: 'Fewest trades and the highest profit factor; a handful of big winners carry it, so the result is sensitive to which names happened to break out.',
   },
 };
+
+/** Numeric value of a formatted cell such as "+28.10%", "Rs 2,734,444" or "1.90". */
+const num = (v: string | number) => Number(String(v).replace(/[^0-9.+-]/g, '')) || 0;
 
 export default function StrategyBenchmarkPanel({ onSelectStrategy }: {
   onSelectStrategy: (strategyKey: string) => void;
@@ -186,6 +204,13 @@ export default function StrategyBenchmarkPanel({ onSelectStrategy }: {
     fetchResults();
   }, []);
 
+  // Highlight the best cell of each column, computed from the results (they used to be hardcoded string matches).
+  const best = {
+    cagr: Math.max(...results.map((r) => num(r['CAGR (%)']))),
+    pf: Math.max(...results.map((r) => num(r['Profit Factor']))),
+    dd: Math.max(...results.map((r) => num(r['Max Drawdown']))),   // drawdowns are negative: max = shallowest
+  };
+
   return (
     <div className="space-y-6">
       {/* Overview Banner */}
@@ -207,10 +232,10 @@ export default function StrategyBenchmarkPanel({ onSelectStrategy }: {
           </button>
         </div>
         <p className="text-xs text-zinc-400 leading-relaxed max-w-4xl">
-          Side-by-side performance across <b>486 liquid Nifty 500 stocks</b> over 6.9 years.
-          All tests run on historical daily data incorporating full Indian statutory delivery costs
-          (0.10% Securities Transaction Tax on buy & sell, exchange turnover, stamp duty, SEBI fees) and 0.05% slippage.
-          Initial capital: <b>₹5,00,000</b> deployed across 10 concurrent slots.
+          Every momentum model runs through the same replay engine on the Nifty 500 (today&apos;s list, so survivor-biased),
+          2020-01-10 to the latest data day: signal on the close, fill at the next open, 0.111% statutory cost per side
+          + ₹20 per order + 0.05% slippage. <b>₹5,00,000</b> across 10 slots, each sized off current equity (compounding),
+          max 2 per sector, Nifty 50 weekly 200-SMA regime. Connors RSI-2 is a contrast with its own runner.
         </p>
       </div>
 
@@ -251,9 +276,9 @@ export default function StrategyBenchmarkPanel({ onSelectStrategy }: {
             <tbody>
               {results.map((row) => {
                 const details = STRATEGY_DETAILS[row.Strategy] || Object.values(STRATEGY_DETAILS).find(d => row.Strategy.toLowerCase().includes(d.key.replace('_', ' ')) || (d.key === 'ema_supertrend' && row.Strategy.toLowerCase().includes('ema')));
-                const isTopCagr = row['CAGR (%)'].includes('35.') || row['CAGR (%)'].includes('40.');
-                const isBestPF = row['Profit Factor'].includes('2.29');
-                const isLowestDD = row['Max Drawdown'].includes('12.43');
+                const isTopCagr = num(row['CAGR (%)']) === best.cagr;
+                const isBestPF = num(row['Profit Factor']) === best.pf;
+                const isLowestDD = num(row['Max Drawdown']) === best.dd;
 
                 return (
                   <tr key={row.Strategy} className="border-t border-zinc-800 hover:bg-zinc-800/40 transition-colors">

@@ -26,7 +26,7 @@ export async function GET(request: NextRequest) {
     const scriptPath = path.join(PROJECT_ROOT, 'scripts', 'analysis', 'backtest_strategy_comparison.py');
     await execFileAsync(PYTHON_EXE, [scriptPath], {
       cwd: PROJECT_ROOT,
-      timeout: 180_000,
+      timeout: 600_000,   // up to 8 uncached replays (run 4 at a time) on a fresh engine version or data day
       maxBuffer: 32 * 1024 * 1024,
     });
 

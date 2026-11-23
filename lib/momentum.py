@@ -57,6 +57,16 @@ class MomentumConfig:
     min_price: float = 50.0
     min_avg_turnover: float = 5e7       # 20d avg close*volume, Rs. 5 crore
     sector_cap: int = 2                 # max concurrent positions per Industry
+    # A run of this many consecutive benchmark sessions with no bar of the symbol's own (a
+    # delisting and relisting, a long suspension, or a hole in the CSV) restarts its history:
+    # it needs min_history_bars fresh bars again before it can be ranked or bought. Without
+    # this, lookbacks span the gap — HEXT (no bars 2020-10-30 -> 2025-02-19) compared its
+    # relisting price with its 2020 price and ranked #1 with an RS of +2.7 for two months.
+    gap_reset_days: int = 20
+    # Simulation only: a held symbol with no bar for this many consecutive sessions is closed
+    # at its last close. Otherwise the replay holds it at a frozen price for as long as the
+    # gap lasts (HEXT: 4.3 years, then "sold" at the relisting price for a fake +Rs 92k).
+    gap_exit_days: int = 5
 
     # Ranking
     rs_weights: List[Tuple[int, float]] = field(default_factory=lambda: list(RS_WEIGHTS))
@@ -92,9 +102,12 @@ class MomentumConfig:
     trail_trigger_pct: float = 25.0
     trail_pct: float = 25.0             # distance below the running peak close
 
-    # Rank rotation (weekly review only)
+    # Rank rotation — at most once per ISO week (see rotation_due), while entries are scanned
+    # every session. Rotating daily turned "two consecutive reviews" into two days: 426 of
+    # 590 rotation sells in a 2020-26 replay came within 14 days of the buy, and CAGR / PF
+    # fell from 17.5% / 2.22 to 15.7% / 1.71.
     sell_rank_limit: int = 25
-    sell_rank_strikes: int = 2          # consecutive reviews above sell_rank_limit
+    sell_rank_strikes: int = 2          # consecutive weekly reviews above sell_rank_limit
     min_hold_days: int = 7
 
     # Sizing. Weights are DERIVED from `slots` so the book always commits ~100% of capital.
@@ -102,8 +115,13 @@ class MomentumConfig:
     # and wrong everywhere else: --slots 8 left 17% of capital permanently idle and
     # --slots 15 committed 143%, so the last few slots silently failed to fund. That made
     # `slots` look like it barely affected returns when the sizing was simply broken.
+    #
+    # compound=True sizes each new slot off CURRENT equity (cash + open positions marked to
+    # market), so profits are redeployed. Sizing off the starting capital left the book 29%
+    # invested by 2026 in a 2020-26 replay — returns and drawdowns described a cash account.
     slots: int = 10
     capital: float = 500_000.0
+    compound: bool = True
     top_tier_slots: int = 5             # ranks 1..N get the larger allocation
     top_tier_ratio: float = 4.0 / 3.0   # top slot : lower slot (i.e. the old 20k : 15k)
 
@@ -131,10 +149,14 @@ class MomentumConfig:
         w_rest = 1.0 / denom
         return self.top_tier_ratio * w_rest, w_rest
 
-    def allocation_for_rank(self, rank: int) -> float:
-        """Rupee allocation for a slot filled at this RS rank (1-based)."""
+    def allocation_for_rank(self, rank: int, equity: Optional[float] = None) -> float:
+        """Rupee allocation for a slot filled at this RS rank (1-based).
+
+        With compound=True and an `equity` figure the slot is a fraction of current equity;
+        otherwise of the starting capital."""
         w_top, w_rest = self.tier_weights()
-        return self.capital * (w_top if rank <= self.top_tier_slots else w_rest)
+        base = equity if (self.compound and equity is not None and equity > 0) else self.capital
+        return base * (w_top if rank <= self.top_tier_slots else w_rest)
 
     def validate(self) -> None:
         total = sum(w for _, w in self.rs_weights)
@@ -158,6 +180,8 @@ class MomentumConfig:
             raise ValueError("sector_cap must be >= 1")
         if self.top_tier_ratio <= 0:
             raise ValueError("top_tier_ratio must be > 0")
+        if self.gap_reset_days < 1 or self.gap_exit_days < 1:
+            raise ValueError("gap_reset_days and gap_exit_days must be >= 1")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -413,9 +437,9 @@ def build_regime_calendar(bench: pd.DataFrame, cfg: MomentumConfig) -> RegimeCal
     When cfg.regime_interval == "daily":
         Day d is ON iff the benchmark's close on d is above its daily 200 SMA.
 
-    Crucially, review_days is ALWAYS the set of weekly review days (first trading day of each week)
-    so that weekly rank-rotation rules (such as Turtle RS 2 consecutive reviews outside rank 25)
-    are preserved and never degraded into daily churn.
+    review_days is always the first trading day of each ISO week, whatever the regime interval.
+    Rank rotation runs at most once per ISO week (rotation_due), so the "two consecutive reviews
+    outside rank 25" rule means two weeks, not two days.
     """
     closes = bench["close"]
     sma = closes.rolling(cfg.regime_sma, min_periods=cfg.regime_sma).mean()
@@ -532,9 +556,37 @@ class RSMatrix:
     closes: Dict[str, np.ndarray]        # aligned to `dates`, forward-filled
     has_bar: Dict[str, np.ndarray]       # True where the symbol has its own bar that day
     bar_counts: Dict[str, np.ndarray]    # cumulative count of the symbol's own bars
+    # Own bars since the last gap of >= gap_reset_days missing sessions. This, not bar_counts,
+    # gates ranking: forward-filling across a long gap makes every lookback compare prices from
+    # either side of it.
+    seg_counts: Dict[str, np.ndarray] = field(default_factory=dict)
+
+    def history_ok(self, sym: str, d: date, min_bars: int) -> bool:
+        """True when `sym` has at least `min_bars` own bars since its last long gap, as of `d`."""
+        i = self.index_of.get(d)
+        seg = self.seg_counts.get(sym)
+        return i is not None and seg is not None and seg[i] >= min_bars
 
 
-def build_rs_matrix(price_map: Dict[str, pd.DataFrame], bench: pd.DataFrame) -> RSMatrix:
+def _segment_counts(present: np.ndarray, gap_reset_days: int) -> np.ndarray:
+    """Running count of own bars, reset to zero after `gap_reset_days`+ consecutive missing sessions."""
+    out = np.zeros(len(present), dtype=np.int64)
+    count = 0
+    missing = 0
+    for k, p in enumerate(present):
+        if p:
+            if missing >= gap_reset_days:
+                count = 0
+            missing = 0
+            count += 1
+        else:
+            missing += 1
+        out[k] = count
+    return out
+
+
+def build_rs_matrix(price_map: Dict[str, pd.DataFrame], bench: pd.DataFrame,
+                    gap_reset_days: int = 20) -> RSMatrix:
     dates = list(bench["date"])
     index_of = {d: i for i, d in enumerate(dates)}
     bench_arr = bench["close"].to_numpy(dtype=float)
@@ -542,6 +594,7 @@ def build_rs_matrix(price_map: Dict[str, pd.DataFrame], bench: pd.DataFrame) -> 
     closes: Dict[str, np.ndarray] = {}
     has_bar: Dict[str, np.ndarray] = {}
     bar_counts: Dict[str, np.ndarray] = {}
+    seg_counts: Dict[str, np.ndarray] = {}
     for sym, df in price_map.items():
         s = pd.Series(df["close"].to_numpy(dtype=float), index=list(df["date"]))
         s = s[~s.index.duplicated(keep="last")]
@@ -550,8 +603,10 @@ def build_rs_matrix(price_map: Dict[str, pd.DataFrame], bench: pd.DataFrame) -> 
         closes[sym] = aligned.ffill().to_numpy(dtype=float)
         has_bar[sym] = present
         bar_counts[sym] = np.cumsum(present)
+        seg_counts[sym] = _segment_counts(present, gap_reset_days)
     return RSMatrix(dates=dates, index_of=index_of, bench=bench_arr,
-                    closes=closes, has_bar=has_bar, bar_counts=bar_counts)
+                    closes=closes, has_bar=has_bar, bar_counts=bar_counts,
+                    seg_counts=seg_counts)
 
 
 def rank_universe(price_map: Dict[str, pd.DataFrame], bench: pd.DataFrame,
@@ -561,11 +616,12 @@ def rank_universe(price_map: Dict[str, pd.DataFrame], bench: pd.DataFrame,
 
     Symbols with no bar of their own on `as_of` (delisted, suspended, or a data gap) are
     excluded rather than ranked on a carried-forward price — debug/confirmed_data_gaps.json
-    documents multi-year holes in this dataset.
+    documents multi-year holes in this dataset. So are symbols with fewer than
+    min_history_bars own bars since their last long gap (cfg.gap_reset_days).
 
     Pass a prebuilt `matrix` to avoid rebuilding it on every review day; the backtest does.
     """
-    m = matrix if matrix is not None else build_rs_matrix(price_map, bench)
+    m = matrix if matrix is not None else build_rs_matrix(price_map, bench, cfg.gap_reset_days)
     i = m.index_of.get(as_of)
     if i is None or i < 1:
         return []
@@ -574,8 +630,8 @@ def rank_universe(price_map: Dict[str, pd.DataFrame], bench: pd.DataFrame,
     for sym, arr in m.closes.items():
         if not m.has_bar[sym][i]:
             continue                              # no bar of its own today
-        if m.bar_counts[sym][i] < cfg.min_history_bars:
-            continue
+        if m.seg_counts[sym][i] < cfg.min_history_bars:
+            continue                              # too new, or relisted after a long gap
         out.append((sym, composite_rs(arr[:i + 1], m.bench[:i + 1], cfg.rs_weights)))
 
     out.sort(key=lambda x: x[1], reverse=True)
@@ -792,7 +848,7 @@ def rank_rotation_exits(portfolio: Dict[str, Position], ranks: Dict[str, int],
     A position needs `sell_rank_strikes` CONSECUTIVE reviews outside the sell rank limit
     before it is dropped — one bad week in a 500-name universe is noise, not a trend break.
     Strike counters are mutated on the positions themselves, so this must be called exactly
-    once per review day.
+    once per week: gate every call with rotation_due().
     """
     exits: List[Tuple[str, str]] = []
     for sym, pos in portfolio.items():
@@ -816,6 +872,18 @@ def rank_rotation_exits(portfolio: Dict[str, Position], ranks: Dict[str, int],
         if pos.rank_strikes >= cfg.sell_rank_strikes:
             exits.append((sym, f"rank {rank} for {pos.rank_strikes} reviews"))
     return exits
+
+
+def rotation_due(last_rotation: Optional[date], as_of: date) -> bool:
+    """True when no rank rotation has run yet in `as_of`'s ISO week.
+
+    Rotation is weekly while entries are daily. Keying on the ISO week rather than on "is this
+    the first trading day of the week" means a cycle missed on Monday (holiday, the bot was not
+    running) still rotates on Tuesday instead of skipping the week.
+    """
+    if last_rotation is None:
+        return True
+    return tuple(last_rotation.isocalendar()[:2]) != tuple(as_of.isocalendar()[:2])
 
 
 def sector_counts(portfolio: Dict[str, Position]) -> Dict[str, int]:
@@ -872,9 +940,11 @@ def select_candidates(ranking: Sequence[Tuple[str, float]], portfolio: Dict[str,
 
 
 def size_position(price: float, rank: int, cfg: MomentumConfig,
-                  cash_available: float) -> int:
-    """Shares to buy for a slot at this rank, capped by cash on hand. 0 means skip."""
-    alloc = min(cfg.allocation_for_rank(rank), cash_available)
+                  cash_available: float, equity: Optional[float] = None) -> int:
+    """Shares to buy for a slot at this rank, capped by cash on hand. 0 means skip.
+
+    Pass `equity` (cash + positions at market) to size off current equity when cfg.compound."""
+    alloc = min(cfg.allocation_for_rank(rank, equity), cash_available)
     if price <= 0 or alloc <= 0:
         return 0
     return int(alloc // price)

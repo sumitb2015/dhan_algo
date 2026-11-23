@@ -43,7 +43,7 @@ from lib.momentum import (  # noqa: E402
     MomentumConfig, Position,
     build_regime_daily, build_rs_matrix, build_tables,
     load_benchmark, load_price_map, load_universe,
-    rank_rotation_exits, rank_universe, ranks_by_symbol, select_candidates, size_position,
+    rank_rotation_exits, rank_universe, ranks_by_symbol, rotation_due, select_candidates, size_position,
 )
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -128,8 +128,10 @@ class BacktestResult:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_backtest(cfg: MomentumConfig, start: date, end: Optional[date] = None,
-                 verbose: bool = True, preloaded: Optional[tuple] = None,
-                 compound: bool = False) -> BacktestResult:
+                 verbose: bool = True, preloaded: Optional[tuple] = None) -> BacktestResult:
+    """Same cadence as the live strategy and the replay: stops and entries every session (signal on D's close,
+    fill at D+1's open), rank rotation at most once per ISO week, slots sized off current equity when
+    cfg.compound, and a held symbol with no bar for cfg.gap_exit_days sessions closed at its last close."""
     cfg.validate()
 
     if preloaded is not None:
@@ -145,7 +147,7 @@ def run_backtest(cfg: MomentumConfig, start: date, end: Optional[date] = None,
     calendar = build_regime_daily(bench, cfg)
     # Built once and reused on every review day: rank_universe would otherwise rebuild the
     # benchmark-aligned close matrix ~370 times over a 7-year run.
-    rs_matrix = build_rs_matrix(price_map, bench)
+    rs_matrix = build_rs_matrix(price_map, bench, cfg.gap_reset_days)
 
     end = end or calendar.trading_days[-1]
     days = [d for d in calendar.trading_days if start <= d <= end]
@@ -164,6 +166,9 @@ def run_backtest(cfg: MomentumConfig, start: date, end: Optional[date] = None,
     pending_buys: List[dict] = []
     pending_sells: List[Tuple[str, str]] = []
     entry_costs: Dict[str, float] = {}     # cost paid to open, charged again at exit
+    missing_streak: Dict[str, int] = {}    # consecutive sessions a held symbol has had no bar
+    last_rotation: Optional[date] = None
+    prev_equity = cfg.capital
 
     def bar(sym: str, d: date):
         t = tables.get(sym)
@@ -206,17 +211,15 @@ def run_backtest(cfg: MomentumConfig, start: date, end: Optional[date] = None,
             row = bar(sym, d)
             if row is None or sym in portfolio:
                 continue
+            # A queued sell frees its slot only once it fills; one that could not fill still holds it.
+            if len(portfolio) >= cfg.slots:
+                continue
             fill = float(row.open)
             # Size against cash net of the costs the buy itself will incur, or a slot sized
             # to the last rupee would be rejected below for being a few rupees short.
             spendable = (cash - cfg.fixed_fee) / (1.0 + (cfg.fee_pct + cfg.slippage_pct) / 100.0)
-            # compound=False (live behaviour): slots are a fixed fraction of the STARTING capital.
-            # compound=True: slots scale with current equity, so profits are redeployed.
-            sizing_cfg = cfg
-            if compound:
-                eq_now = cash + sum(p_.last_close * p_.qty for p_ in portfolio.values())
-                sizing_cfg = replace(cfg, capital=eq_now)
-            qty = size_position(fill, order["rank"], sizing_cfg, max(spendable, 0.0))
+            # cfg.compound: slots are a fraction of yesterday's closing equity; otherwise of cfg.capital.
+            qty = size_position(fill, order["rank"], cfg, max(spendable, 0.0), equity=prev_equity)
             if qty <= 0:
                 continue
             spend = fill * qty
@@ -230,6 +233,32 @@ def run_backtest(cfg: MomentumConfig, start: date, end: Optional[date] = None,
                                       industry=order.get("industry", ""))
         pending_buys = []
 
+        # ── 1b. close positions stranded by a data gap, at their last close ───
+        for sym in list(portfolio):
+            missing_streak[sym] = missing_streak.get(sym, 0) + 1 if bar(sym, d) is None else 0
+            if missing_streak[sym] < cfg.gap_exit_days:
+                continue
+            pos = portfolio.pop(sym)
+            missing_streak.pop(sym, None)
+            pending_sells = [(s_, r_) for s_, r_ in pending_sells if s_ != sym]
+            fill = pos.last_close
+            cost = cfg.trade_cost(fill * pos.qty)
+            cash += fill * pos.qty - cost
+            pnl = (fill - pos.entry_price) * pos.qty - cost - entry_costs.pop(sym, 0.0)
+            trades.append({
+                "symbol": sym, "industry": pos.industry,
+                "entry_date": pos.entry_date, "exit_date": d,
+                "entry_price": pos.entry_price, "exit_price": fill,
+                "qty": pos.qty, "invested": pos.invested,
+                "pnl": pnl, "pnl_pct": pnl / pos.invested * 100.0 if pos.invested else 0.0,
+                "cost": cost, "exit_reason": "data_gap", "rank_at_entry": pos.rank_at_entry,
+                "hold_days": (d - pos.entry_date).days,
+                "peak_gain_pct": (pos.peak_close / pos.entry_price - 1.0) * 100.0,
+            })
+        for sym in list(missing_streak):
+            if sym not in portfolio:
+                missing_streak.pop(sym, None)
+
         # ── 2. mark to market on today's close ────────────────────────────────
         holdings_value = 0.0
         closes: Dict[str, float] = {}
@@ -238,6 +267,7 @@ def run_backtest(cfg: MomentumConfig, start: date, end: Optional[date] = None,
             close = float(row.close) if row is not None else pos.last_close
             closes[sym] = close
             holdings_value += close * pos.qty
+        prev_equity = cash + holdings_value
         equity_rows.append({"date": d, "equity": cash + holdings_value,
                             "cash": cash, "holdings": holdings_value,
                             "positions": len(portfolio),
@@ -253,10 +283,7 @@ def run_backtest(cfg: MomentumConfig, start: date, end: Optional[date] = None,
                 pending_sells.append((sym, reason))
                 queued.add(sym)
 
-        if not calendar.is_review_day(d):
-            continue
-
-        # ── 4. weekly review ──────────────────────────────────────────────────
+        # ── 4. daily review: regime, weekly rank rotation, entries ────────────
         if not calendar.is_on(d):
             if cfg.regime_exit:
                 for sym in portfolio:
@@ -271,9 +298,11 @@ def run_backtest(cfg: MomentumConfig, start: date, end: Optional[date] = None,
         ranks = ranks_by_symbol(ranking)
 
         survivors = {s: p for s, p in portfolio.items() if s not in queued}
-        for sym, reason in rank_rotation_exits(survivors, ranks, d, cfg):
-            pending_sells.append((sym, "rebalance"))
-            queued.add(sym)
+        if rotation_due(last_rotation, d):
+            last_rotation = d
+            for sym, reason in rank_rotation_exits(survivors, ranks, d, cfg):
+                pending_sells.append((sym, "rebalance"))
+                queued.add(sym)
 
         held_after = {s: p for s, p in portfolio.items() if s not in queued}
         free_slots = cfg.slots - len(held_after)
@@ -282,7 +311,8 @@ def run_backtest(cfg: MomentumConfig, start: date, end: Optional[date] = None,
 
         picks, _ = select_candidates(ranking, held_after, tables, industries, d,
                                      cooldowns, cfg, free_slots)
-        pending_buys = picks
+        # select_candidates sees only held_after, so drop names whose sell is queued for tomorrow's open.
+        pending_buys = [p_ for p_ in picks if p_["symbol"] not in queued]
 
     # ── final snapshot ────────────────────────────────────────────────────────
     last_day = days[-1]
@@ -702,8 +732,8 @@ def main() -> None:
     p.add_argument("--regime-sma", type=int, default=200,
                    help="daily Nifty 500 close vs this SMA (default 200)")
     p.add_argument("--no-breakout-confirm", action="store_true")
-    p.add_argument("--compound", action="store_true",
-                   help="size slots from current equity (profits redeployed); live strategy does NOT do this")
+    p.add_argument("--no-compound", action="store_true",
+                   help="size slots off the starting capital instead of current equity (the live default compounds)")
     p.add_argument("--sweep", action="store_true", help="one-at-a-time parameter ablation")
     p.add_argument("--excel", default=None, help="output path (default debug/momentum_backtest.xlsx)")
     p.add_argument("--no-excel", action="store_true")
@@ -737,6 +767,7 @@ def main() -> None:
         regime_enabled=not args.no_regime,
         regime_sma=args.regime_sma,
         breakout_confirm=not args.no_breakout_confirm,
+        compound=not args.no_compound,
     )
 
     start = datetime.strptime(args.start, "%Y-%m-%d").date()
@@ -758,7 +789,7 @@ def main() -> None:
 
     print("=" * 78)
     print("  Loading data...")
-    res = run_backtest(cfg, start, end, compound=args.compound)
+    res = run_backtest(cfg, start, end)
     print_report(res, fd_rate=args.fd_rate)
 
     print()

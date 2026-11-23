@@ -15,7 +15,7 @@ Entry (all must hold on the signal day's close):
 Exit: close below the stop. Initial stop is cfg.stop_pct below entry; once the position is up 15% the
 stop trails the 50 SMA (never loosens).
 
-Validation (replay, Nifty 500, 10 slots, regime on, 12% stop): 2020-23 +192% PF 3.84; 2024-26 +36% PF 1.87.
+Validation (pre-2026-11-23 replay engine with fixed slots; Nifty 500, 10 slots, regime on, 12% stop): 2020-23 +192% PF 3.84; 2024-26 +36% PF 1.87.
 Parameters were chosen looking at both windows, so treat the 2024-26 figure as lightly in-sample.
 """
 

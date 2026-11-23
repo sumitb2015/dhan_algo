@@ -1,9 +1,9 @@
 """
 Nifty 500 Momentum Investing Portfolio — autonomous positional equity strategy.
 
-Holds up to N momentum stocks ranked by composite relative strength versus the Nifty 500.
-Exits on a trailing stop ladder or a rank-rotation review; freed capital is redeployed into
-the next qualifying names at the following weekly review.
+Holds up to N momentum stocks ranked by composite relative strength versus the benchmark
+(Nifty 50 by default). Stops and new entries are checked every session; the rank-rotation
+review runs once a week. Slots are sized off current equity (--no-compound: off --capital).
 
 Every rule lives in lib/momentum.py, which the backtest
 (scripts/analysis/backtest_momentum_portfolio.py) imports too — so what was validated on
@@ -53,7 +53,7 @@ from lib.momentum import (                                               # noqa:
     MomentumConfig, Position, STAGE_TRAIL,
     build_regime_daily, build_rs_matrix, build_tables,
     load_benchmark, load_price_map, load_universe,
-    latest_data_date, rank_rotation_exits, rank_universe, ranks_by_symbol,
+    latest_data_date, rank_rotation_exits, rank_universe, ranks_by_symbol, rotation_due,
     select_candidates, size_position, passes_entry_filters, sector_counts,
 )
 
@@ -69,7 +69,7 @@ class MomentumPortfolioStrategy:
                  state_key: str = "nifty500_momentum", run_at: str = "15:20",
                  run_once: bool = False, model: str = "turtle_rs"):
         self.cfg = cfg
-        self.model = model          # "turtle_rs" (weekly RS rotation) or "minervini" (daily trend-template entries)
+        self.model = model          # "turtle_rs" (daily entries, weekly RS rotation), "minervini" / "ema_supertrend" (daily entries)
         self.rs_pct: dict[str, float] = {}
         self.dry_run = dry_run
         self.state_key = state_key
@@ -84,6 +84,7 @@ class MomentumPortfolioStrategy:
         self.cooldowns: dict[str, date] = {}
         self.last_cycle_date: date | None = None
         self.last_review_date: date | None = None
+        self.last_rotation_date: date | None = None   # rank rotation runs at most once per ISO week
 
         # Market data, rebuilt each cycle.
         self.universe: list[dict] = []
@@ -135,7 +136,7 @@ class MomentumPortfolioStrategy:
                           for p in data.get("positions", [])}
         self.cooldowns = {s: datetime.fromisoformat(d).date()
                           for s, d in (data.get("cooldowns") or {}).items()}
-        for key in ("last_cycle_date", "last_review_date"):
+        for key in ("last_cycle_date", "last_review_date", "last_rotation_date"):
             raw = data.get(key)
             if raw:
                 setattr(self, key, datetime.fromisoformat(raw).date())
@@ -167,6 +168,7 @@ class MomentumPortfolioStrategy:
             "closed_trades": self.closed_trades[-500:],
             "last_cycle_date": self.last_cycle_date.isoformat() if self.last_cycle_date else None,
             "last_review_date": self.last_review_date.isoformat() if self.last_review_date else None,
+            "last_rotation_date": self.last_rotation_date.isoformat() if self.last_rotation_date else None,
         }
         os.makedirs(DEBUG_DIR, exist_ok=True)
         tmp = self.portfolio_path + ".tmp"
@@ -196,6 +198,7 @@ class MomentumPortfolioStrategy:
         holdings.sort(key=lambda h: h["unrealised_pct"], reverse=True)
 
         invested = sum(p.entry_price * p.qty for p in self.positions.values())
+        equity = self.cash + invested + unrealised
         next_review = (self.calendar.next_review_day(self.data_date)
                        if self.calendar and self.data_date else None)
 
@@ -229,13 +232,15 @@ class MomentumPortfolioStrategy:
             "capital": self.cfg.capital,
             "cash": round(self.cash, 2),
             "invested": round(invested, 2),
-            "deployed_pct": round(invested / self.cfg.capital * 100, 1) if self.cfg.capital else 0,
+            # Share of current equity at cost — with compounding the slots scale with equity, not capital.
+            "deployed_pct": round(invested / equity * 100, 1) if equity > 0 else 0,
+            "compound": self.cfg.compound,
             "positions": len(self.positions),
             "slots": self.cfg.slots,
             "realized_pnl": round(self.realized_pnl, 2),
             "unrealised_pnl": round(unrealised, 2),
             "total_pnl": round(self.realized_pnl + unrealised, 2),
-            "equity": round(self.cash + invested + unrealised, 2),
+            "equity": round(equity, 2),
             "holdings": holdings,
             "top_ranks": top_ranks_data,
             "data_date": self.data_date.isoformat() if self.data_date else None,
@@ -287,7 +292,7 @@ class MomentumPortfolioStrategy:
         if stale_days > 1:
             logger.warning(f"Newest bar is {self.data_date} ({stale_days} days old)")
 
-        matrix = build_rs_matrix(self.price_map, self.bench)
+        matrix = build_rs_matrix(self.price_map, self.bench, self.cfg.gap_reset_days)
         self.ranking = rank_universe(self.price_map, self.bench, self.data_date, self.cfg,
                                      matrix=matrix)
         self.ranks = ranks_by_symbol(self.ranking)
@@ -481,10 +486,16 @@ class MomentumPortfolioStrategy:
         self.save_portfolio()
         return True
 
-    def open_position(self, symbol: str, rank: int, price: float, industry: str) -> bool:
+    def equity(self, prices: dict) -> float:
+        """Cash plus every open position marked at `prices` (last recorded close when missing)."""
+        return self.cash + sum(p.qty * (prices.get(s) or p.last_close) for s, p in self.positions.items())
+
+    def open_position(self, symbol: str, rank: int, price: float, industry: str,
+                      equity: float | None = None) -> bool:
         spendable = (self.cash - self.cfg.fixed_fee) / (
             1.0 + (self.cfg.fee_pct + self.cfg.slippage_pct) / 100.0)
-        qty = size_position(price, rank, self.cfg, max(spendable, 0.0))
+        # With cfg.compound the slot is a fraction of current equity, so profits are redeployed.
+        qty = size_position(price, rank, self.cfg, max(spendable, 0.0), equity=equity)
         if qty <= 0:
             logger.info(f"  SKIP {symbol}: insufficient cash (Rs {self.cash:,.0f})")
             return False
@@ -556,7 +567,7 @@ class MomentumPortfolioStrategy:
             if price <= 0:
                 logger.warning(f"  SKIP {sym}: no usable price")
                 continue
-            self.open_position(sym, pick["rank"], price, pick["industry"])
+            self.open_position(sym, pick["rank"], price, pick["industry"], equity=self.equity(prices))
 
     # ── the daily cycle ──────────────────────────────────────────────────────
     def daily_cycle(self) -> None:
@@ -574,9 +585,10 @@ class MomentumPortfolioStrategy:
         # 1. Ladder check on every held position — runs daily, not just at review.
         for sym in list(self.positions.keys()):
             pos = self.positions[sym]
-            reason = self.check_exit(pos, prices.get(sym, pos.last_close))
+            price = prices.get(sym, pos.last_close)
+            reason = self.check_exit(pos, price)
             if reason:
-                self.close_position(sym, prices[sym], reason)
+                self.close_position(sym, price, reason)
 
         # 2. Daily review & rebalancing.
         already_reviewed = self.last_review_date == self.data_date
@@ -612,8 +624,9 @@ class MomentumPortfolioStrategy:
         self.enter_picks(picks, prices)
 
     def weekly_review(self, prices: dict, regime_on: bool) -> None:
+        """Turtle RS review, called every session: daily entries, rank rotation once a week."""
         logger.info("=" * 70)
-        logger.info(f"WEEKLY REVIEW {self.data_date}")
+        logger.info(f"REVIEW {self.data_date}")
 
         if not regime_on:
             if self.cfg.regime_exit and self.positions:
@@ -625,10 +638,15 @@ class MomentumPortfolioStrategy:
                 logger.info("Regime OFF — no new entries")
             return
 
-        # Rank rotation. Mutates strike counters, so exactly once per review day.
-        for sym, why in rank_rotation_exits(self.positions, self.ranks, self.data_date, self.cfg):
-            logger.info(f"  Rotating out {sym}: {why}")
-            self.close_position(sym, prices.get(sym, self.positions[sym].last_close), "rebalance")
+        # Rank rotation: at most once per ISO week (it mutates the strike counters, and "two consecutive
+        # reviews" must mean two weeks). Entries below still run every session.
+        if rotation_due(self.last_rotation_date, self.data_date):
+            self.last_rotation_date = self.data_date
+            for sym, why in rank_rotation_exits(self.positions, self.ranks, self.data_date, self.cfg):
+                logger.info(f"  Rotating out {sym}: {why}")
+                self.close_position(sym, prices.get(sym, self.positions[sym].last_close), "rebalance")
+        else:
+            logger.info(f"  Rank rotation already ran this week ({self.last_rotation_date})")
 
         free = self.cfg.slots - len(self.positions)
         if free <= 0:
@@ -750,6 +768,8 @@ Examples:
     p.add_argument("--sell-rank-limit", type=int, default=25)
     p.add_argument("--sector-cap", type=int, default=2)
     p.add_argument("--max-new-per-review", type=int, default=None)
+    p.add_argument("--no-compound", action="store_true",
+                   help="size slots off the starting --capital instead of current equity")
     p.add_argument("--benchmark", choices=["nifty50", "nifty500"], default="nifty50",
                    help="benchmark index for RS ranking and regime: nifty50 (proven default) or nifty500")
     p.add_argument("--regime-interval", choices=["weekly", "daily"], default="weekly",
@@ -777,6 +797,7 @@ Examples:
         buy_rank_limit=args.buy_rank_limit, sell_rank_limit=args.sell_rank_limit,
         sector_cap=args.sector_cap, max_new_per_review=args.max_new_per_review,
         benchmark=args.benchmark,
+        compound=not args.no_compound,
         regime_interval=args.regime_interval,
         regime_exit=not args.no_regime_exit,
         regime_enabled=not args.no_regime,
@@ -795,7 +816,8 @@ Examples:
     logger.info(f"  Mode        : {'LIVE (real CNC orders)' if args.live else 'PAPER (dry run)'}")
     logger.info(f"  State key   : {state_key}")
     logger.info(f"  Universe    : {cfg.universe}   Slots: {cfg.slots}")
-    logger.info(f"  Capital     : Rs {cfg.capital:,.0f}")
+    logger.info(f"  Capital     : Rs {cfg.capital:,.0f}"
+                f"{' (slots compound with equity)' if cfg.compound else ' (fixed slots)'}")
     logger.info(f"  Ladder      : {'no target' if cfg.target_pct is None else f'target +{cfg.target_pct:g}%'}, "
                 f"stop -{cfg.stop_pct:g}%, BE +{cfg.breakeven_trigger_pct:g}%, "
                 f"trail {cfg.trail_pct:g}% from peak at +{cfg.trail_trigger_pct:g}%")

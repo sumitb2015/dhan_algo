@@ -11,7 +11,11 @@ historical date range (from 2019 to present). Generates complete daily snapshots
   - Top 25 momentum ranking with industry, RS score, and qualification / rejection reasons
   - Cumulative closed trades up to that day
 
-Caches results to debug/replays/replay_{start}_{end}_{capital}_{slots}.json for instant UI scrubbing.
+Caches results to debug/replays/replay_v{ENGINE}_{strategy_}{start}_{end}_{capital}_{slots}{suffixes}.json for instant
+UI scrubbing; the name is mirrored by cacheFileFor() in rs_dashboard/app/api/momentum/simulation/route.ts.
+
+Cadence: stops and new entries every session (signal on D's close, fill at D+1's open); rank rotation (Turtle,
+Clenow) at most once per ISO week. Slots are sized off current equity unless --no-compound.
 """
 
 from __future__ import annotations
@@ -37,8 +41,8 @@ from lib.momentum import (
     STAGE_INITIAL, STAGE_BREAKEVEN, STAGE_TRAIL,
     build_regime_daily, build_rs_matrix, build_tables,
     load_benchmark, load_price_map, load_universe,
-    rank_rotation_exits, rank_universe, ranks_by_symbol,
-    select_candidates, size_position, passes_entry_filters, sector_counts,
+    rank_rotation_exits, rank_universe, ranks_by_symbol, rotation_due,
+    size_position, passes_entry_filters, sector_counts,
 )
 
 DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")
@@ -70,6 +74,14 @@ def risk_suffix() -> str:
 
 DEFAULT_SECTOR_CAP = 2     # max concurrent positions per Industry; mirrored by the replay route
 
+# Bumped whenever the engine changes what a replay computes, so a cache written by an older engine is never served.
+# v2 (2026-11-23): weekly rank rotation, Turtle rank <= buy_rank_limit entry gate, compounding sizing, data-gap
+# exits and gap-aware history, no regime liquidation for Clenow. Mirrored by REPLAY_ENGINE in the simulation route.
+REPLAY_ENGINE = 2
+
+# Models whose entry check reads the composite-RS percentile.
+RS_PCT_MODELS = ("minervini", "ema_supertrend", "rs_supertrend", "weinstein")
+
 
 def default_stop_pct(strategy: str) -> float:
     """Stop distance each model used before the stop became a user setting."""
@@ -95,7 +107,7 @@ STRATEGY_NAMES = {
     "52w_high": "52-Week High Breakout (Yearly High Proximity)",
     "clenow": "Andreas Clenow Momentum (Smooth Exponential Slope)",
     "ema_supertrend": "EMA & Supertrend (EMA 20 > 50 > 200 + Bullish Supertrend)",
-    "rs_supertrend": "RS + Supertrend (Vivek Bajaj: RS vs Nifty > 0 and rising, Supertrend green, exit on flip)",
+    "rs_supertrend": "RS + Supertrend (Vivek Bajaj: RS vs Nifty > 0 and rising, Supertrend green, trailing stop)",
     "weinstein": "Weinstein Stage 2 (weekly base breakout, 30-week MA exit)",
 }
 
@@ -105,12 +117,8 @@ def passes_strategy_entry(strategy: str, sym: str, tables: dict, d: date, cfg: M
     t = tables.get(sym)
     if not t:
         return False, "no data"
-    px_row = t["px"].get(d)
-    if not px_row:
+    if not t["px"].get(d):
         return False, "no bar today"
-    close = float(px_row.close)
-    vol = float(px_row.volume) if px_row.volume and not np.isnan(px_row.volume) else 0.0
-    vol20 = float(t["vol20"].get(d, 0.0) or 0.0)
 
     if strategy in TURTLE:
         return passes_entry_filters(sym, tables, d, cfg)
@@ -192,22 +200,17 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
     bo_suffix += stop_suffix(strategy, cfg.stop_pct)
     bo_suffix += "" if cfg.sector_cap == DEFAULT_SECTOR_CAP else f"_sc{cfg.sector_cap}"
     bo_suffix += risk_suffix()
+    bo_suffix += "" if cfg.compound else "_nocomp"
 
+    # No fallback to any other file: serving a cache from a different setting or engine version would silently
+    # show the wrong replay.
     cache_file = os.path.join(
-        REPLAYS_DIR, f"replay_{strat_prefix}{start}_{end}_{int(cfg.capital)}_{cfg.slots}{regime_suffix}{bench_suffix}{interval_suffix}{bo_suffix}.json"
+        REPLAYS_DIR, f"replay_v{REPLAY_ENGINE}_{strat_prefix}{start}_{end}_{int(cfg.capital)}_{cfg.slots}{regime_suffix}{bench_suffix}{interval_suffix}{bo_suffix}.json"
     )
 
-    # Legacy cache (turtle_rs files written before the strategy prefix existed). No other fallback: serving a
-    # file from a different setting (bo / stop / regime) would silently show the wrong replay.
-    legacy_file = os.path.join(
-        REPLAYS_DIR, f"replay_{start}_{end}_{int(cfg.capital)}_{cfg.slots}{regime_suffix}{bench_suffix}{interval_suffix}{bo_suffix}.json"
-    )
-    target_cache = cache_file if os.path.exists(cache_file) else (
-        legacy_file if strategy == "turtle_rs" and os.path.exists(legacy_file) else None)
-
-    if not force and target_cache and os.path.exists(target_cache):
+    if not force and os.path.exists(cache_file):
         try:
-            with open(target_cache, "r", encoding="utf-8") as f:
+            with open(cache_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if data and data.get("success"):
                     return data
@@ -226,7 +229,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
 
     tables = build_tables(price_map, cfg)
     calendar = build_regime_daily(bench, cfg)
-    rs_matrix = build_rs_matrix(price_map, bench)
+    rs_matrix = build_rs_matrix(price_map, bench, cfg.gap_reset_days)
 
     # Enrich tables conditionally based on selected strategy (fast vectorized)
     if strategy == "minervini":
@@ -255,6 +258,8 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
     pending_buys: List[dict] = []
     pending_sells: List[Tuple[str, str]] = []
     entry_costs: Dict[str, float] = {}
+    missing_streak: Dict[str, int] = {}        # consecutive sessions a held symbol has had no bar
+    last_rotation: Optional[date] = None
 
     def bar(sym: str, d: date):
         t = tables.get(sym)
@@ -277,6 +282,37 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
             r = rank_universe(price_map, bench, d, cfg, matrix=rs_matrix) or []
             rs_day_cache[d] = (r, minervini.rs_percentiles(r))
         return rs_day_cache[d]
+
+    def score_ranking(d: date, key: str) -> list:
+        """Strongest-first ranking by a per-symbol score table (52W proximity or Clenow slope); bar today required."""
+        cands = []
+        for sym, t in tables.items():
+            px_r = t["px"].get(d)
+            if not px_r:
+                continue
+            if key == "high250":
+                h250 = t["high250"].get(d)
+                if h250 and not np.isnan(h250) and h250 > 0:
+                    cands.append((sym, float(px_r.close) / float(h250)))
+            else:
+                score = t["clenow"].get(d, 0.0)
+                if score > 0:
+                    cands.append((sym, float(score)))
+        cands.sort(key=lambda x: x[1], reverse=True)
+        return cands
+
+    def strategy_ranking(d: date) -> list:
+        """The ranking this model buys from (and shows as Top 25) on day d."""
+        if strategy in TURTLE or strategy in RS_PCT_MODELS:
+            return rs_ranking(d)[0]
+        if strategy == "52w_high":
+            return score_ranking(d, "high250")
+        if strategy == "clenow":
+            return score_ranking(d, "clenow")
+        return []
+
+    def rs_pct_for(d: date) -> Optional[Dict[str, float]]:
+        return rs_ranking(d)[1] if strategy in RS_PCT_MODELS else None
 
     for day_idx, d in enumerate(all_trading_days):
         executions_today = []
@@ -336,9 +372,13 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
             row = bar(sym, d)
             if row is None or sym in portfolio:
                 continue
+            # A queued sell frees its slot only once it fills; one that could not fill (no bar today) still holds it.
+            if len(portfolio) >= cfg.slots:
+                continue
             fill = float(row.open)
             spendable = (cash - cfg.fixed_fee) / (1.0 + (cfg.fee_pct + cfg.slippage_pct) / 100.0)
-            qty = size_position(fill, order["rank"], cfg, max(spendable, 0.0))
+            # Sized off yesterday's closing equity (known before the open) when compounding; otherwise off capital.
+            qty = size_position(fill, order["rank"], cfg, max(spendable, 0.0), equity=prev_equity)
             if qty > 0 and RISK["dd_brake"]:
                 dd_now = (peak_equity - prev_equity) / peak_equity * 100.0 if peak_equity > 0 else 0.0
                 qty = int(qty * dd_scale(dd_now))
@@ -369,6 +409,44 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
 
         pending_buys = []
 
+        # ── 2b. Close positions stranded by a data gap ────────────────────────
+        # A symbol with no bar for gap_exit_days sessions (delisted, suspended, or a hole in the CSV) is closed at
+        # its last close. Holding it instead freezes its price and its slot for as long as the gap lasts, and then
+        # "sells" it at whatever price the series resumes on — possibly years later and on another basis.
+        for sym in list(portfolio):
+            missing_streak[sym] = missing_streak.get(sym, 0) + 1 if bar(sym, d) is None else 0
+            if missing_streak[sym] < cfg.gap_exit_days:
+                continue
+            pos = portfolio.pop(sym)
+            missing_streak.pop(sym, None)
+            pending_sells = [(s_, r_) for s_, r_ in pending_sells if s_ != sym]
+            fill = pos.last_close
+            proceeds = fill * pos.qty
+            cost = cfg.trade_cost(proceeds)
+            cash += proceeds - cost
+            pnl = (fill - pos.entry_price) * pos.qty - cost - entry_costs.pop(sym, 0.0)
+            realized_pnl += pnl
+            reason = f"data gap ({cfg.gap_exit_days} sessions without a bar)"
+            closed_trades.append({
+                "symbol": sym, "industry": pos.industry,
+                "entry_date": pos.entry_date.isoformat(), "exit_date": d.isoformat(),
+                "entry_price": round(pos.entry_price, 2), "exit_price": round(fill, 2),
+                "qty": pos.qty, "invested": round(pos.invested, 2), "pnl": round(pnl, 2),
+                "pnl_pct": round(pnl / pos.invested * 100.0, 2) if pos.invested else 0.0,
+                "cost": round(cost, 2), "exit_reason": "data_gap",
+                "hold_days": (d - pos.entry_date).days, "rank_at_entry": pos.rank_at_entry,
+                "peak_gain_pct": round((pos.peak_close / pos.entry_price - 1.0) * 100.0, 2) if pos.entry_price else 0.0,
+            })
+            executions_today.append({
+                "symbol": sym, "action": "SELL", "qty": pos.qty, "price": round(fill, 2),
+                "amount": round(proceeds, 2), "pnl": round(pnl, 2),
+                "pnl_pct": round(pnl / pos.invested * 100.0, 2) if pos.invested else 0.0,
+                "reason": f"Exit: {reason}, at last close",
+            })
+        for sym in list(missing_streak):
+            if sym not in portfolio:
+                missing_streak.pop(sym, None)
+
         # ── 3. Mark to market on today's close ────────────────────────────────
         invested_val = sum(p.entry_price * p.qty for p in portfolio.values())
         unrealised_val = 0.0
@@ -394,143 +472,87 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
                 pending_sells.append((sym, reason))
                 queued_sells.add(sym)
 
-        # ── 5. Daily scan & rebalancing ──────────────────────────────────────
+        # ── 5. Daily scan; weekly rank rotation ───────────────────────────────
         is_review = calendar.is_review_day(d)
         regime_on = bool(calendar.is_on(d))
+        ranking_today = strategy_ranking(d)
+        ranks_today = ranks_by_symbol(ranking_today)
+        rs_pct_today = rs_pct_for(d)
 
-        # All strategies evaluate regime, rank rotation, and new entries daily.
+        # Entries are scanned every session. Rank rotation runs at most once per ISO week (rotation_due): run daily,
+        # "two consecutive reviews outside rank 25" meant two days and most rotation sells came within two weeks.
+        # Clenow follows the book on the regime: the filter blocks new buys, it does not liquidate the book.
         if not regime_on:
-            if cfg.regime_exit:
+            if cfg.regime_exit and strategy != "clenow":
                 for sym in portfolio:
                     if sym not in queued_sells:
                         pending_sells.append((sym, "regime"))
                         queued_sells.add(sym)
-        else:
-            # Rank universe based on strategy
-            if strategy in TURTLE:
-                ranking = rank_universe(price_map, bench, d, cfg, matrix=rs_matrix) or []
-            elif strategy in ("minervini", "ema_supertrend", "rs_supertrend", "weinstein"):
-                ranking = rs_ranking(d)[0]
-            elif strategy == "52w_high":
-                cands = []
-                for sym, t in tables.items():
-                    px_r = t["px"].get(d)
-                    if not px_r:
-                        continue
-                    h250 = t["high250"].get(d)
-                    if h250 and not np.isnan(h250) and h250 > 0:
-                        cands.append((sym, float(px_r.close) / float(h250)))
-                cands.sort(key=lambda x: x[1], reverse=True)
-                ranking = cands
-            elif strategy == "clenow":
-                cands = []
-                for sym, t in tables.items():
-                    px_r = t["px"].get(d)
-                    if not px_r:
-                        continue
-                    score = t["clenow"].get(d, 0.0)
-                    if score > 0:
-                        cands.append((sym, float(score)))
-                cands.sort(key=lambda x: x[1], reverse=True)
-                ranking = cands
-            else:
-                ranking = []
+        elif ranking_today:
+            survivors = {s: p for s, p in portfolio.items() if s not in queued_sells}
 
-            if ranking:
-                ranks = ranks_by_symbol(ranking)
-                survivors = {s: p for s, p in portfolio.items() if s not in queued_sells}
-
-                # Daily rank rotation / rebalancing
+            if strategy in TURTLE + ("clenow",) and rotation_due(last_rotation, d):
+                last_rotation = d
                 if strategy in TURTLE:
-                    for sym, reason in rank_rotation_exits(survivors, ranks, d, cfg):
-                        pending_sells.append((sym, "rebalance"))
-                        queued_sells.add(sym)
-                elif strategy == "clenow":
-                    for sym, reason in clenow.rank_rotation_exits(survivors, ranking, min_percentile=80.0):
-                        pending_sells.append((sym, "rotation"))
-                        queued_sells.add(sym)
+                    rotation = [(sym, "rebalance") for sym, _ in rank_rotation_exits(survivors, ranks_today, d, cfg)]
+                else:
+                    no_bar = {sym for sym in survivors if bar(sym, d) is None}
+                    rotation = [(sym, "rotation") for sym, _ in
+                                clenow.rank_rotation_exits(survivors, ranking_today, min_percentile=80.0, unscored=no_bar)]
+                for sym, why in rotation:
+                    pending_sells.append((sym, why))
+                    queued_sells.add(sym)
 
-                # Daily buys for next session open
-                slots_free = cfg.slots - (len(portfolio) - len(queued_sells))
-                if slots_free > 0:
-                    counts = sector_counts(survivors)
-                    picks = []
-                    for s, _ in ranking:
-                        if len(picks) >= slots_free:
-                            break
-                        if s in survivors or s in queued_sells:
-                            continue
-                        if s in cooldowns and d < cooldowns[s]:
-                            continue
-                        ind = industries.get(s, "")
-                        if counts.get(ind, 0) >= cfg.sector_cap:
-                            continue
-                        ok, _ = passes_strategy_entry(
-                            strategy, s, tables, d, cfg,
-                            rs_pct=rs_ranking(d)[1] if strategy in ("minervini", "ema_supertrend", "rs_supertrend") else None)
-                        if not ok:
-                            continue
-                        picks.append({"symbol": s, "rank": ranks.get(s, 999), "industry": ind})
-                        counts[ind] = counts.get(ind, 0) + 1
+            # Daily buys for next session open
+            slots_free = cfg.slots - (len(portfolio) - len(queued_sells))
+            if slots_free > 0:
+                counts = sector_counts({s: p for s, p in portfolio.items() if s not in queued_sells})
+                picks = []
+                for s, _ in ranking_today:
+                    if len(picks) >= slots_free:
+                        break
+                    rank = ranks_today.get(s, 999)
+                    if strategy in TURTLE and rank > cfg.buy_rank_limit:
+                        break                                   # Turtle buys only from the top buy_rank_limit
+                    if s in portfolio or s in queued_sells:
+                        continue
+                    if s in cooldowns and d < cooldowns[s]:
+                        continue
+                    if not rs_matrix.history_ok(s, d, cfg.min_history_bars):
+                        continue                                # new listing, or relisted after a long gap
+                    ind = industries.get(s, "")
+                    if counts.get(ind, 0) >= cfg.sector_cap:
+                        continue
+                    ok, _ = passes_strategy_entry(strategy, s, tables, d, cfg, rs_pct=rs_pct_today)
+                    if not ok:
+                        continue
+                    picks.append({"symbol": s, "rank": rank, "industry": ind})
+                    counts[ind] = counts.get(ind, 0) + 1
+                pending_buys.extend(picks)
 
-                    for pick in picks:
-                        pending_buys.append({
-                            "symbol": pick["symbol"],
-                            "rank": pick["rank"],
-                            "industry": pick["industry"],
-                        })
-
-        # ── 6. Compute Top 25 Ranking snapshot for today ───────────────────────
-        if strategy in TURTLE:
-            ranking_today = rank_universe(price_map, bench, d, cfg, matrix=rs_matrix) or []
-        elif strategy in ("minervini", "ema_supertrend", "rs_supertrend", "weinstein"):
-            ranking_today = rs_ranking(d)[0]
-        elif strategy == "52w_high":
-            cands = []
-            for sym, t in tables.items():
-                px_r = t["px"].get(d)
-                if not px_r:
-                    continue
-                h250 = t["high250"].get(d)
-                if h250 and not np.isnan(h250) and h250 > 0:
-                    cands.append((sym, float(px_r.close) / float(h250)))
-            cands.sort(key=lambda x: x[1], reverse=True)
-            ranking_today = cands
-        elif strategy == "clenow":
-            cands = []
-            for sym, t in tables.items():
-                px_r = t["px"].get(d)
-                if not px_r:
-                    continue
-                score = t["clenow"].get(d, 0.0)
-                if score > 0:
-                    cands.append((sym, float(score)))
-            cands.sort(key=lambda x: x[1], reverse=True)
-            ranking_today = cands
-        else:
-            ranking_today = []
-
-        ranks_today = ranks_by_symbol(ranking_today)
+        # ── 6. Top 25 ranking snapshot for today ──────────────────────────────
         counts = sector_counts(portfolio)
         top_ranks_data = []
-
         for s, rs in ranking_today[:25]:
             ind = industries.get(s, "")
+            rank = ranks_today.get(s, 0)
             item_status = "QUALIFIED"
             if s in portfolio:
                 item_status = "HELD"
+            elif strategy in TURTLE and rank > cfg.buy_rank_limit:
+                item_status = f"rank > {cfg.buy_rank_limit}"
             elif s in cooldowns and d < cooldowns[s]:
                 item_status = f"Cooldown ({cooldowns[s]})"
+            elif not rs_matrix.history_ok(s, d, cfg.min_history_bars):
+                item_status = "relisted / data gap: history too short"
             elif counts.get(ind, 0) >= cfg.sector_cap:
                 item_status = f"Sector cap ({ind})"
-            elif tables:
-                ok, reason = passes_strategy_entry(
-                    strategy, s, tables, d, cfg,
-                    rs_pct=rs_ranking(d)[1] if strategy == "minervini" else None)
+            else:
+                ok, reason = passes_strategy_entry(strategy, s, tables, d, cfg, rs_pct=rs_pct_today)
                 if not ok:
                     item_status = reason
             top_ranks_data.append({
-                "rank": ranks_today.get(s, 0),
+                "rank": rank,
                 "symbol": s,
                 "industry": ind,
                 "rs": round(rs, 4),
@@ -651,6 +673,8 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
             "regime_enabled": cfg.regime_enabled,
             "breakout_days": cfg.breakout_days,
             "stop_pct": cfg.stop_pct,
+            "compound": cfg.compound,
+            "engine": REPLAY_ENGINE,
             "sector_cap": cfg.sector_cap,
             "start": start.isoformat(),
             "end": end.isoformat(),
@@ -692,6 +716,8 @@ def main():
     p.add_argument("--atr-risk-pct", type=float, default=0.0, help="size so an ATR-multiple adverse move costs at most this %% of equity (0=off)")
     p.add_argument("--atr-mult", type=float, default=2.0, help="ATR multiple for --atr-risk-pct (default 2)")
     p.add_argument("--stop-pct", type=float, default=None, help="Stop-loss distance in %% (default: 12, Clenow 10)")
+    p.add_argument("--no-compound", dest="compound", action="store_false",
+                   help="size slots off the starting capital instead of current equity")
     p.add_argument("--force", action="store_true", help="force recomputation even if cached")
     p.add_argument("--clear-cache", action="store_true", help="Delete all cached replay json files and exit")
     args = p.parse_args()
@@ -724,6 +750,7 @@ def main():
         breakout_days=args.breakout_days,
         stop_pct=args.stop_pct if args.stop_pct is not None else default_stop_pct(args.strategy),
         sector_cap=max(1, args.sector_cap),
+        compound=args.compound,
     )
 
     print(f"Simulating momentum replay [{args.strategy}] from {start_date} to {end_date} (capital: {cfg.capital:,.0f}, regime: {cfg.regime_enabled})...")

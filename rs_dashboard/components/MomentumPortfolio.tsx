@@ -237,15 +237,16 @@ function ReadmeModal({ onClose }: { onClose: () => void }) {
             <tbody>
               <Row
                 k={<b className="text-zinc-200">Every trading day</b>}
-                v={<>Re-checks every holding against its stop. A stop-loss or trailing-stop exit
-                    can fire on <b>any</b> day — you are never left holding through a breach
-                    until the weekend.</>}
+                v={<>Re-checks every holding against its stop, rebuilds the rankings and buys any
+                    name that clears the entry rules into a free slot. A stop-loss or trailing-stop
+                    exit can fire on <b>any</b> day.</>}
               />
               <Row
-                k={<b className="text-zinc-200">First trading day of each week</b>}
-                v={<>The <i>weekly review</i>: rebuilds the rankings, sells anything that has
-                    dropped out of the top 25 for two reviews running, and opens new positions
-                    in the free slots.</>}
+                k={<b className="text-zinc-200">Once a week</b>}
+                v={<>The <i>weekly review</i> (first cycle of each week): sells anything that has
+                    dropped out of the top 25 for two weekly reviews running. It is weekly on purpose:
+                    run daily, &quot;two reviews&quot; became two days and most of those sells came
+                    within a fortnight of the buy.</>}
               />
               <Row
                 k={<b className="text-zinc-200">Never</b>}
@@ -254,8 +255,8 @@ function ReadmeModal({ onClose }: { onClose: () => void }) {
             </tbody>
           </table>
           <P>
-            So on a typical Monday you may see new buys; Tuesday to Friday you will usually see
-            nothing happen unless a stop is hit. That quiet is normal.
+            Most days nothing happens: a buy needs a fresh confirmed breakout from a top-20 name,
+            and a sell needs a stop hit or the weekly review. That quiet is normal.
           </P>
 
           <H>How stocks get picked</H>
@@ -272,6 +273,8 @@ function ReadmeModal({ onClose }: { onClose: () => void }) {
               <Row k="Liquidity" v="At least ₹5 crore average daily traded value, price above ₹50." />
               <Row k="Diversification" v="No more than 2 positions in any one sector." />
               <Row k="Cooldown" v="Not bought again within 10 days of being stopped out of the same stock." />
+              <Row k="Clean history" v="At least 250 bars since any gap of 20+ sessions with no data (a delisting and relisting, a long suspension): prices from before the gap would fake its relative strength." />
+              <Row k="Position size" v="Ranks 1-5 get a 4:3 larger slot than ranks 6-10, as a share of current equity (cash plus holdings at market), so profits are reinvested. Without this the book drifted to about 30% invested over a multi-year run." />
             </tbody>
           </table>
           <P>
@@ -671,7 +674,7 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
           </div>
         ) : viewMode === 'benchmark' ? (
           <div className="text-xs text-zinc-400 hidden md:block">
-            Comparing 5 quantitative equity strategies across 486 Nifty 500 stocks with statutory delivery transaction costs.
+            Every momentum model on one replay engine, plus a mean-reversion contrast, with delivery costs.
           </div>
         ) : (
           data?.lastReview && (
@@ -778,7 +781,7 @@ export default function MomentumPortfolio({ instanceId = '' }: { instanceId?: st
                           tip="Paper profit on positions still open — it moves with the market every day and is not yours until the position is closed." />
                 <StatTile label="Deployed" value={`${data.deployedPct.toFixed(0)}%`}
                           sub={`${data.holdings.length}/${data.slots} slots · cash ${rupees(data.cash)}`}
-                          tip="Share of capital currently invested in stocks. The rest sits in cash. It is normal for this to be 0% while the market regime is OFF — the strategy waits in cash rather than forcing trades." />
+                          tip="Share of current equity invested in stocks, at cost. The rest sits in cash. It is normal for this to be 0% while the market regime is OFF — the strategy waits in cash rather than forcing trades." />
                 <StatTile label="Status" value={data.running ? data.status : 'STOPPED'}
                           tone={data.running ? 'good' : 'neutral'}
                           sub={data.running ? undefined : 'holdings still tracked'}

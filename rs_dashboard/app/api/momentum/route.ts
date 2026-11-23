@@ -153,7 +153,9 @@ export async function GET(request: NextRequest) {
     capital,
     cash,
     invested,
-    deployedPct: capital ? (invested / capital) * 100 : 0,
+    // Share of current equity (not starting capital): slots compound with equity, so against capital it would
+    // read over 100% once the book is up.
+    deployedPct: cash + invested + unrealised > 0 ? (invested / (cash + invested + unrealised)) * 100 : 0,
     slots: Number(state?.slots ?? portfolio?.slots ?? 0),
     realizedPnl: realized,
     unrealisedPnl: unrealised,

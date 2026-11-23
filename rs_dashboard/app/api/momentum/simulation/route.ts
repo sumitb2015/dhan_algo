@@ -27,6 +27,10 @@ function defaultStop(strategy: string): number {
   return strategy === 'turtle_rs_opt' ? 20 : 12;
 }
 
+/** Replay engine version. Mirrors REPLAY_ENGINE in simulate_momentum_replay.py: bumping it there without here makes
+ *  this route look for a file the script never writes (and re-run the replay on every request). */
+const REPLAY_ENGINE = 2;
+
 /** Max positions per sector. Mirrors DEFAULT_SECTOR_CAP in simulate_momentum_replay.py. */
 const DEFAULT_SECTOR_CAP = 2;
 
@@ -88,7 +92,7 @@ function cacheFileFor(p: ReplayParams): string {
   const stratPrefix = p.strategy !== 'turtle_rs' ? `${p.strategy}_` : '';
   return path.join(
     REPLAYS_DIR,
-    `replay_${stratPrefix}${p.start}_${p.end}_${Math.round(p.capital)}_${p.slots}${regimeSuffix}${benchSuffix}${intervalSuffix}${boSuffix}${slSuffix}${scSuffix}.json`,
+    `replay_v${REPLAY_ENGINE}_${stratPrefix}${p.start}_${p.end}_${Math.round(p.capital)}_${p.slots}${regimeSuffix}${benchSuffix}${intervalSuffix}${boSuffix}${slSuffix}${scSuffix}.json`,
   );
 }
 

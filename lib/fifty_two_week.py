@@ -107,4 +107,6 @@ def exit_check(pos, close: float, stop_pct: float = DEFAULT_STOP_PCT) -> Optiona
     pos.peak_close = max(pos.peak_close, close)
     pos.last_close = close
     pos.stop_price = max(pos.stop_price, pos.peak_close * (1.0 - stop_pct / 100.0))
+    if hasattr(pos, "stage") and pos.peak_close > pos.entry_price:
+        pos.stage = 2                       # lib.momentum.STAGE_TRAIL: the stop has started to trail
     return "stop" if close < pos.stop_price else None

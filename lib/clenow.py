@@ -21,9 +21,11 @@ Entry Rules (evaluated on weekly review days):
 
 Exit Rules:
   * Trend Exit: Close < 100 SMA (evaluated on daily close)
-  * Rank Rotation: At weekly review, if a held position drops below the top momentum
+  * Rank Rotation: once a week, if a held position drops below the top momentum
     percentile (default: drops out of the top 20% / top 100 of the universe), it is
     rotated out for a higher-ranked leader.
+  * Regime: as in the book, the index filter only blocks NEW buys — held positions are not
+    liquidated when it turns off; their own exits manage them.
   * Optional Safety Stop: user-configured stop_pct (default: 15% disaster stop).
 """
 
@@ -150,11 +152,15 @@ def exit_check(pos, close: float, tables: dict, d, stop_pct: float = DEFAULT_STO
 
 
 def rank_rotation_exits(portfolio: dict, ranking: List[Tuple[str, float]],
-                        min_percentile: float = ROTATION_PERCENTILE) -> List[Tuple[str, str]]:
+                        min_percentile: float = ROTATION_PERCENTILE,
+                        unscored: Optional[set] = None) -> List[Tuple[str, str]]:
     """Identify holdings that have fallen out of the top momentum percentile.
 
     `ranking` is a list of (symbol, score) sorted descending by score.
     Returns [(symbol, 'rotation')] for positions that drop below `min_percentile`.
+    `unscored` holds symbols with no bar of their own today: they are absent from the ranking
+    for lack of data, not lack of momentum, so they are skipped rather than read as
+    percentile 0 (the stop and the 100 SMA exit still protect them).
     """
     n = len(ranking)
     if n <= 1:
@@ -165,6 +171,8 @@ def rank_rotation_exits(portfolio: dict, ranking: List[Tuple[str, float]],
 
     exits = []
     for sym in portfolio:
+        if unscored and sym in unscored:
+            continue
         pct = pct_map.get(sym, 0.0)
         if pct < min_percentile:
             exits.append((sym, f"rotation (rank dropped to {pct:.1f}pct)"))

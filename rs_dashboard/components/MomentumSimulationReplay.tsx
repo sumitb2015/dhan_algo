@@ -657,14 +657,16 @@ export default function MomentumSimulationReplay({
               }}
               className="bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200 text-xs font-semibold focus:outline-none focus:border-emerald-500 cursor-pointer"
             >
-              <option value="weinstein">Weinstein Stage 2 (+21.7% CAGR · 5.80 PF · -19.0% DD)</option>
-              <option value="rs_supertrend">RS + Supertrend, Vivek Bajaj (+21.6% CAGR · 2.69 PF · -12.9% DD)</option>
-              <option value="ema_supertrend">EMA + Supertrend (+23.4% CAGR · 3.10 PF · -9.9% DD)</option>
-              <option value="minervini">Minervini Trend Template (+25.4% CAGR · 54.8% Win)</option>
-              <option value="clenow">Clenow Smooth Momentum (+36.4% CAGR · 2.19 PF)</option>
-              <option value="52w_high">52-Week High Breakout (+19.4% CAGR · 1.76 PF)</option>
-              <option value="turtle_rs_opt">Turtle RS Optimised (+15.5% CAGR · 2.86 PF · -13.9% DD)</option>
-              <option value="turtle_rs">Turtle Composite RS (+14.9% CAGR · -14.3% DD)</option>
+              {/* Figures: backtest_strategy_comparison.py, replay engine v2, 2020-01-10 to 2026-11-20, Rs 5L, 10 slots,
+                  compounding. Re-run it and update these after any engine change. */}
+              <option value="weinstein">Weinstein Stage 2 (+28.1% CAGR · 3.40 PF · -21.7% DD)</option>
+              <option value="rs_supertrend">RS + Supertrend, Vivek Bajaj (+39.3% CAGR · 1.86 PF · -25.1% DD)</option>
+              <option value="ema_supertrend">EMA + Supertrend (+42.5% CAGR · 1.90 PF · -23.7% DD)</option>
+              <option value="minervini">Minervini Trend Template (+31.2% CAGR · 2.27 PF · -28.8% DD)</option>
+              <option value="clenow">Clenow Smooth Momentum (+35.0% CAGR · 2.29 PF · -24.8% DD)</option>
+              <option value="52w_high">52-Week High Breakout (+24.4% CAGR · 1.80 PF · -21.0% DD)</option>
+              <option value="turtle_rs_opt">Turtle RS Optimised (+28.7% CAGR · 2.13 PF · -27.9% DD)</option>
+              <option value="turtle_rs">Turtle Composite RS (+26.7% CAGR · 1.76 PF · -23.6% DD)</option>
             </select>
           </div>
 
@@ -705,7 +707,7 @@ export default function MomentumSimulationReplay({
 
           {/* Benchmark Selector */}
           <div className="flex items-center gap-1.5 text-xs text-zinc-400">
-            <Info tip="Benchmark index used for Relative Strength (RS) scoring and Market Regime filter. Nifty 50 is the proven, lower-churn default (+200% return, PF 4.15 in 2020-23); Nifty 500 benchmarks against the broader 500-stock universe.">
+            <Info tip="Benchmark index used for Relative Strength (RS) scoring and Market Regime filter. Nifty 50 is the default (lower churn); Nifty 500 benchmarks against the broader 500-stock universe.">
               <span className="cursor-help underline decoration-dotted decoration-zinc-600 underline-offset-2">
                 Benchmark:
               </span>

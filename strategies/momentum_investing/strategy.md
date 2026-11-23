@@ -1,8 +1,9 @@
 # Nifty 500 Momentum Investing Portfolio
 
 Autonomous positional equity strategy. Ranks the Nifty 500 by composite relative strength
-versus the Nifty 500, holds up to 10 names, exits on a trailing stop ladder or a weekly
-rank-rotation review, and redeploys freed capital into the next qualifying names.
+versus the benchmark (Nifty 50 by default, `--benchmark nifty500` optional), holds up to 10
+names, exits on a trailing stop ladder or a weekly rank-rotation review, scans for new
+entries every session, and sizes each slot off current equity so profits are reinvested.
 
 **This is the only multi-day, CNC-delivery, portfolio-level strategy in the repo.** Read
 [Operational notes](#operational-notes) before changing anything — several conventions that
@@ -12,7 +13,8 @@ hold for the intraday F&O strategies do not hold here.
 |---|---|
 | Script | `strategies/momentum_investing/nifty500_momentum.py` |
 | Shared rules engine | `lib/momentum.py` (also used by the backtest — do not fork the logic) |
-| Backtest | `scripts/analysis/backtest_momentum_portfolio.py` |
+| Backtest | `scripts/analysis/backtest_momentum_portfolio.py` (same engine as the `/momentum` replay: identical results on the same window) |
+| Replay | `scripts/analysis/simulate_momentum_replay.py` (engine v2), tests `tests/test_momentum_engine.py` |
 | State key | `nifty500_momentum` (`_<instance-id>` when suffixed) |
 | Portfolio file | `debug/nifty500_momentum_portfolio.json` |
 | Logs | `debug/logs/momentum_investing/YYYYMMDD.log` |
@@ -26,41 +28,44 @@ Nifty 500 from `ind_nifty500list.csv` (carries `Industry`, which drives the sect
 A name is eligible only with ≥250 bars of history, price ≥ ₹50, and 20-day average traded
 value ≥ ₹5 crore. Symbols whose newest bar predates the ranking date are dropped rather than
 ranked on stale prices — `debug/confirmed_data_gaps.json` documents multi-year holes in this
-dataset.
+dataset. A run of 20+ sessions with no bar (`gap_reset_days`: a delisting and relisting, a long
+suspension, a CSV hole) restarts the 250-bar count: until then the symbol is neither ranked nor
+bought. Before this rule HEXT (no bars 2020-10-30 → 2025-02-19) compared its relisting price with
+its 2020 price and ranked #1, with an RS of about +2.7, for two months.
 
 ### Ranking — composite relative strength
 ```
 RS = Σ wₙ · [ (Sₜ / Sₜ₋ₙ) / (Iₜ / Iₜ₋ₙ) − 1 ]     (n, w) ∈ {(10,.10) (21,.20) (63,.40) (126,.30)}
 ```
+I is the benchmark: the Nifty 50 by default (`--benchmark nifty500` to switch; it also drives the regime).
 Zero means the stock tracked the index exactly. The 63-day term dominates deliberately: long
 enough to ignore noise, short enough to catch rotation. Rank 1 = strongest.
 
 ### Regime gate — optional (`--no-regime` to disable)
-Trading day D is ON iff the Nifty 500 close is above its daily 200 SMA.
-Regime OFF ⇒ no new entries, and (by default) the book is liquidated at the review.
+Week W is ON iff the benchmark's close on the last session of week W−1 was above its daily
+200 SMA (`--regime-interval daily` checks each day's close instead). Regime OFF ⇒ no new
+entries, and (by default) the book is liquidated.
 
-Measured over 2019-06 → 2026-08 on the Nifty 500, varying only the filter:
+Measured over 2019-06-03 → 2026-11-20 on the Nifty 500 (engine v2: daily entries, weekly
+rotation, compounding), varying only the filter:
 
 | Variant | CAGR | Max DD | Sharpe | Days invested |
 |---|---|---|---|---|
-| **weekly 200 SMA + exit (default)** | **13.63%** | **−13.07%** | **1.16** | 70.3% |
-| weekly 150 SMA + exit | 13.57% | −13.69% | 1.15 | 66.8% |
-| weekly 200 SMA, stay invested | 11.48% | −19.72% | 0.91 | 83.1% |
-| weekly 100 SMA + exit | 6.68% | −20.79% | 0.60 | 59.8% |
-| weekly 50 SMA + exit | 4.59% | −23.41% | 0.46 | 55.6% |
-| `--no-regime` | 13.35% | −18.05% | 1.01 | 90.9% |
+| **weekly 200 SMA + exit (default)** | **23.84%** | **−23.57%** | **1.15** | 67.3% |
+| weekly 150 SMA + exit | 23.18% | −22.33% | 1.14 | 65.3% |
+| weekly 200 SMA, stay invested (`--no-regime-exit`) | 23.54% | −23.54% | 1.06 | 86.1% |
+| weekly 100 SMA + exit | 15.85% | −24.50% | 0.87 | 60.3% |
+| weekly 50 SMA + exit | 13.53% | −29.87% | 0.83 | 56.4% |
+| `--no-regime` | 21.40% | −29.04% | 0.94 | 91.4% |
 
-Reading: disabling it costs almost no return (−0.28 pts CAGR) but adds **5 points of
-drawdown**, so the filter is best understood as risk control that happens to be free rather
-than a return driver. In 2020 it returned +24.9% with a −7.1% drawdown against +18.3% / −16.2%
-unfiltered.
+Reading: switching the filter off costs 2.4 points of CAGR and adds 5.5 points of drawdown,
+so it is both risk control and a small return driver. **Do not speed it up**: 100/50 SMA cut
+CAGR by a third or more, because a twitchy filter whipsaws and each exit liquidates the whole
+book. 150 SMA performs like 200, so the parameter sits on a plateau. Staying invested through
+OFF weeks (`--no-regime-exit`) now matches the default on CAGR and drawdown with a lower Sharpe.
+On the pre-2026-11-23 engine it was worse on every axis; that conclusion no longer holds.
 
-Two things not to do: **do not speed it up** (100/50 SMA cut returns to a third — a twitchy
-filter whipsaws, and each regime exit liquidates the entire book), and note that
-`--no-regime-exit` (block buys but hold through) is worse on every axis than either extreme.
-150 SMA performs identically to 200, so the parameter sits on a plateau rather than a spike.
-
-### Entry — all must hold at the weekly review
+### Entry — checked every session; all must hold
 1. Regime ON
 2. RS rank ≤ 20
 3. `Close > EMA20 > EMA50 > EMA200`
@@ -77,56 +82,84 @@ filter whipsaws, and each regime exit liquidates the entire book), and note that
 | Peak ≥ +25% | stop = max(stop, peak × 0.75) — trailing |
 | Close < stop | exit |
 
-**There is no fixed profit target.** A target caps exactly the right tail momentum depends
-on; backtested +30% ⇒ 9.00% CAGR, +60% ⇒ 9.69%, none ⇒ 11.54%, and widening the trail from
-there reached 14.20%.
+**There is no fixed profit target by default.** The original argument was that a target caps
+the right tail momentum depends on. The old engine supported it: +30% ⇒ 9.00% CAGR, +60% ⇒
+9.69%, none ⇒ 11.54%. **On engine v2 that no longer holds** (2019-06 → 2026-11):
+
+| Target | CAGR | Max DD | Sharpe | Calmar | PF | Trades |
+|---|---|---|---|---|---|---|
+| none (default) | 23.84% | −23.57% | 1.15 | 1.01 | 1.73 | 378 |
+| +60% (`--target 60`) | 24.39% | −21.79% | 1.22 | 1.12 | 1.61 | 437 |
+| +30% (`--target 30`) | 23.17% | −17.41% | 1.25 | 1.33 | 1.55 | 515 |
+
+A +30% target gives up 0.7 points of CAGR for 6 points less drawdown. This is one sweep over the
+full period, not validated out of sample, so the default is unchanged. Revisit it with a
+split-sample test.
 
 Rungs are **cumulative floors, not exclusive branches**. An `if/elif` would let a position
 that gaps straight past +25% skip the breakeven rung, and with a 25% trail the resulting
 stop sits below entry (1.30 × 0.75 = 0.975) — a stock up 30% could stop out for a loss.
 Both rungs apply and the stop takes the max.
 
-Additionally at reviews only: sell if rank > 25 for **two consecutive** reviews (one bad week
-in a 500-name universe is noise), subject to a 7-day minimum hold.
+Additionally, **once a week** (the first cycle of each ISO week, `rotation_due()`): sell if
+rank > 25 for **two consecutive** weekly reviews (one bad week in a 500-name universe is noise),
+subject to a 7-day minimum hold. It must stay weekly. Commit 4211016e ran it daily, so "two
+reviews" became two days: 426 of 590 rotation sells came within 14 days of the buy, and the
+2020-26 replay fell from 17.5% CAGR / PF 2.22 to 15.7% / 1.71 (fixed slots).
 
 ### Sizing
-10 slots. Ranks 1–5 get a 4:3 larger allocation than ranks 6–10 — exactly ₹20k/₹15k on
-₹1.75L. The weights are **derived from `slots`**, so any slot count commits 100% of capital;
-they were briefly hardcoded for 10 slots, which left `--slots 8` 17% in cash and made
-`--slots 15` commit 143% and silently fail to fund its last positions.
-Freed capital returns to cash and is redeployed at the next review, with **no cap on new buys
-per review** — capping it at 2/week left the book permanently under-filled and cost roughly
-4 points of CAGR in idle cash.
+10 slots. Ranks 1–5 get a 4:3 larger allocation than ranks 6–10. The weights are **derived
+from `slots`**, so any slot count commits 100%. They were briefly hardcoded for 10 slots, which
+left `--slots 8` 17% in cash and made `--slots 15` commit 143%.
+
+**Slots are a share of current equity** (cash + holdings at market; the replay and backtest
+use the previous close, live uses LTP), so profits are redeployed (`compound`, default on;
+`--no-compound` sizes off `--capital`). Sizing off the starting capital left the book ~29%
+invested by 2026 in a 2020-26 replay: its later returns and drawdowns described a cash account.
+With fixed slots the same 2019-06 → 2026-11 run gives 15.52% CAGR / −15.49% DD / Sharpe 1.23,
+against 23.84% / −23.57% / 1.15 compounding. Compounding raises the drawdown in rupees and in
+percent; that is the price of staying invested.
+
+Freed capital returns to cash and is redeployed by the next session's scan, with **no cap on
+new buys per day**. Capping it at 2 per review left the book permanently under-filled and cost
+about 4 points of CAGR in idle cash.
 
 ---
 
 ## Backtested performance
 
-Nifty 500, 2019-06 → 2026-08, ₹1.75L, costs at 0.111%/side + ₹20/order + 0.05% slippage:
+Nifty 500, 2019-06-03 → 2026-11-20, ₹5L, engine v2 (daily entries, weekly rotation,
+compounding, data-gap exits), costs at 0.111%/side + ₹20/order + 0.05% slippage, Nifty 50
+benchmark and regime:
 
-| | Strategy | Nifty 500 | FD @6.45% |
-|---|---|---|---|
-| Total return | **150.05%** | 103.62% | 56.55% |
-| CAGR | **13.63%** | 10.43% | 6.45% |
-| Max drawdown | **−13.07%** | −38.44% | 0% |
-
-293 trades · win rate 40.3% · profit factor 1.94 · Sharpe 1.16 · Calmar 1.04.
-Exits: rebalance 142, stop 110, regime 41.
-
-Split-sample (the parameters were tuned on the full period, so the second row matters most):
-
-| Period | Strategy | Nifty 500 |
+| | Strategy | Nifty 500 |
 |---|---|---|
-| 2019–2022 | 20.88% | 11.96% |
-| **2023–2026 (held out)** | **14.07%** | 8.79% |
+| Total return | **393.5%** | — |
+| CAGR | **23.84%** | 10.69% |
+| Max drawdown | **−23.57%** | −38.44% |
+
+378 trades · win rate 43.1% · profit factor 1.73 · Sharpe 1.15 · Calmar 1.01.
+Exits: rebalance 188, stop 122, regime 67, data gap 1.
+
+Split sample (each window starts flat at ₹5L):
+
+| Period | Strategy CAGR / DD | Nifty 500 CAGR / DD |
+|---|---|---|
+| 2019-06 → 2022-12 | 33.42% / −23.57% | 11.96% / −38.44% |
+| **2023-01 → 2026-11** | **18.65% / −22.76%** | 9.41% / −15.77% |
+
+The previous figures here (13.63% CAGR, −13.07% DD, 293 trades) described the weekly-buy,
+fixed-slot system and are superseded. The replay and this backtest now agree exactly on the
+same window (2020-01-10 → 2026-11-20: ₹25,28,917, 377 trades).
 
 **Known limitations — do not treat the CAGR as an expectation:**
 - **Survivorship bias.** The universe is *today's* Nifty 500 list, so names added after a
   strong run are ranked during that run. No point-in-time constituent history exists here.
-- In 2023–2026 the drawdown was −19.2% against the index's −15.8%: it is not always the
+- In 2023–2026 the drawdown was −22.8% against the index's −15.8%: it is not always the
   calmer holding.
 - Seven years is roughly one full cycle, mostly bullish. The regime gate has been tested on
   one major crash (2020) and one correction.
+- The regime, target and sizing sweeps above were run on the full period, so they are in-sample.
 
 ---
 
@@ -149,8 +182,9 @@ authorization on Dhan; if unauthorized, Dhan will reject the sell order and the 
 an alert.
 
 Useful flags: `--capital`, `--slots`, `--stop`, `--trail-pct`, `--target` (`none` by default),
-`--buy-rank-limit`, `--sector-cap`, `--run-at`, `--instance-id`, and the regime controls
-`--no-regime` / `--no-regime-exit` / `--regime-sma N`.
+`--buy-rank-limit`, `--sector-cap`, `--run-at`, `--instance-id`, `--no-compound`,
+`--benchmark nifty50|nifty500`, and the regime controls `--no-regime` / `--no-regime-exit` /
+`--regime-sma N` / `--regime-interval weekly|daily`.
 
 The dashboard exposes capital, slots and a **Market Filter** checkbox on the Strategies card;
 unchecking it passes `--no-regime`. It defaults to on, and the `/momentum` page then shows a
@@ -192,6 +226,16 @@ positionally is wrong whenever a stock is missing bars the index has — and onl
 Nifty 500 symbols share the index's calendar exactly. `backtest_nifty50_rs_v9.py` has this
 bug; it never showed because a Nifty 50 universe is nearly aligned.
 
+**Rank rotation is weekly, entries are daily.** `last_rotation_date` is persisted in the
+portfolio file, and `rotation_due()` allows one rotation per ISO week. A Monday the bot missed
+therefore rotates on Tuesday instead of skipping the week. The rotation's strike counter
+assumes exactly one call per week.
+
+**A data gap closes the position in simulation.** The replay and backtest close a held symbol
+after 5 sessions with no bar (`gap_exit_days`), at its last close. Before this, HEXT was held at
+a frozen ₹235 for 4.3 years and "sold" at its ₹745 relisting price: a fake +₹92.5k, about 11% of
+the run's realized profit. Live sells at LTP and is unaffected.
+
 **A symbol missing from the ranking is not a sell signal.** `rank_universe()` drops any symbol
 without a fresh bar, so a stale CSV looks identical to a collapse in relative strength.
 `rank_rotation_exits()` therefore holds the strike counter steady for unranked names instead
@@ -227,6 +271,6 @@ Alternative entry/exit model, selected with `--model minervini` (default stays `
   never loosens. Regime liquidation stays weekly. No rank rotation.
 - **Book isolation**: the portfolio file records its model; a run with the other model refuses to start
   (use `--instance-id` to run both). Files from before this flag count as `turtle_rs`.
-- **Validation**: replay on Nifty 500, 10 slots, regime on: 2020-23 +192% (PF 3.84), 2024-26 +36% (PF 1.87). Parameters
+- **Validation**: replay on Nifty 500, 10 slots, regime on, pre-2026-11-23 engine (fixed slots, daily rotation): 2020-23 +192% (PF 3.84), 2024-26 +36% (PF 1.87). Engine v2 (compounding, data-gap rules), 2020-01-10 → 2026-11-20: 31.24% CAGR, −28.76% DD, PF 2.27, 254 trades (`backtest_strategy_comparison.py`). Parameters
   were tuned looking at both windows, so 2024-26 is lightly in-sample; 2025-26 alone was weak for momentum. Live fills
   happen at the 15:20 LTP, not the next open as in the replay. **Paper-trade it first** (`--once`, no `--live`).
