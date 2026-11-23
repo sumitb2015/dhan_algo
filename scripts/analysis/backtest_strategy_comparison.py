@@ -29,6 +29,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 DEBUG_DIR = os.path.join(PROJECT_ROOT, "debug")
 
+from lib.scanner_score import SCANNER_TOP_DEFAULTS as _SCAN
 from lib.momentum import (
     MomentumConfig,
     load_benchmark,
@@ -60,8 +61,9 @@ def _replay_worker(job):
     payload carries every daily snapshot and is too large to ship back between processes)."""
     label, strategy, cfg_kw, capital, slots, start_date, end_date = job
     from scripts.analysis.simulate_momentum_replay import run_replay_simulation, default_stop_pct
-    cfg = MomentumConfig(universe="nifty500", capital=capital, slots=slots, regime_enabled=True,
-                         stop_pct=default_stop_pct(strategy), **cfg_kw)
+    kw = dict(slots=slots, stop_pct=default_stop_pct(strategy))
+    kw.update(cfg_kw)                                        # a model may override slots / stop / sector cap
+    cfg = MomentumConfig(universe="nifty500", capital=capital, regime_enabled=True, **kw)
     sim = run_replay_simulation(cfg, start_date, end_date, strategy=strategy)
     eq = pd.Series({datetime.strptime(x["date"], "%Y-%m-%d").date(): x["equity"] for x in sim["snapshots"]})
     trades = [
@@ -342,6 +344,7 @@ def main():
         ("5b. Turtle RS Optimised", "turtle_rs_opt", {}),
         ("7. RS + Supertrend (Vivek Bajaj)", "rs_supertrend", {"breakout_days": 20}),
         ("8. Weinstein Stage 2", "weinstein", {}),
+        ("9. Scanner Top-N", "scanner_top", {"slots": _SCAN["n"], "sector_cap": _SCAN["sector_cap"]}),
     ]
     strategies = {}
     print(f"Running {len(replay_models)} replay models in parallel (cached replays are reused)...")

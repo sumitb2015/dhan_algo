@@ -48,7 +48,8 @@ from lib.strategy_state_helper import (                                  # noqa:
     save_strategy_state, check_shutdown_trigger, instance_log_suffix,
 )
 from lib.algo_kit import setup_strategy_logging  # noqa: E402
-from lib import data_quality, minervini, ema_supertrend                           # noqa: E402
+from lib import data_quality, minervini, ema_supertrend, scanner_score            # noqa: E402
+from lib.corporate_actions import adjust_frame                                     # noqa: E402
 from lib.momentum import (                                               # noqa: E402
     MomentumConfig, Position, STAGE_TRAIL,
     build_regime_daily, build_rs_matrix, build_tables,
@@ -69,7 +70,8 @@ class MomentumPortfolioStrategy:
                  state_key: str = "nifty500_momentum", run_at: str = "15:20",
                  run_once: bool = False, model: str = "turtle_rs"):
         self.cfg = cfg
-        self.model = model          # "turtle_rs" (daily entries, weekly RS rotation), "minervini" / "ema_supertrend" (daily entries)
+        self.model = model          # "turtle_rs" / "scanner_top" (daily entries, weekly rank rotation), "minervini" / "ema_supertrend" (daily entries)
+        self.matrix = None
         self.rs_pct: dict[str, float] = {}
         self.dry_run = dry_run
         self.state_key = state_key
@@ -277,6 +279,9 @@ class MomentumPortfolioStrategy:
                                f"(x{w['ratio']}) looks like an unadjusted corporate action — its ranking and stops "
                                f"may be wrong; repair with scripts/downloader/repair_symbol_history.py")
 
+        if self.model == "scanner_top":
+            # The /scanner ranking reads corporate-action-adjusted series; trade (stops, sizing) on the same basis.
+            self.price_map = {s: adjust_frame(s, df) for s, df in self.price_map.items()}
         self.tables = build_tables(self.price_map, self.cfg)
         self.calendar = build_regime_daily(self.bench, self.cfg)
         self.data_date = latest_data_date(self.price_map)
@@ -293,8 +298,15 @@ class MomentumPortfolioStrategy:
             logger.warning(f"Newest bar is {self.data_date} ({stale_days} days old)")
 
         matrix = build_rs_matrix(self.price_map, self.bench, self.cfg.gap_reset_days)
-        self.ranking = rank_universe(self.price_map, self.bench, self.data_date, self.cfg,
-                                     matrix=matrix)
+        self.matrix = matrix
+        if self.model == "scanner_top":
+            # The /scanner page's own order (score, RS percentile, volume ratio); lib/scanner_score.py is its
+            # parity-tested Python port.
+            book, _rows = scanner_score.load_book([u["symbol"] for u in self.universe])
+            self.ranking = book.ranking(self.data_date)
+        else:
+            self.ranking = rank_universe(self.price_map, self.bench, self.data_date, self.cfg,
+                                         matrix=matrix)
         self.ranks = ranks_by_symbol(self.ranking)
         if self.model == "minervini":
             minervini.add_tables(self.price_map, self.tables)
@@ -521,6 +533,13 @@ class MomentumPortfolioStrategy:
                                          self.cfg.breakout_days, self.rs_pct)
         elif self.model == "ema_supertrend":
             return ema_supertrend.entry_check(sym, self.tables, self.data_date, self.rs_pct)
+        elif self.model == "scanner_top":
+            # The scanner's rank is the rule; here only the data must be usable.
+            if self.tables.get(sym, {}).get("px", {}).get(self.data_date) is None:
+                return False, "no bar today"
+            if self.matrix is not None and not self.matrix.history_ok(sym, self.data_date, self.cfg.min_history_bars):
+                return False, "relisted / data gap: history too short"
+            return True, "QUALIFIED"
         return passes_entry_filters(sym, self.tables, self.data_date, self.cfg)
 
     def check_exit(self, pos: Position, price: float) -> str | None:
@@ -529,6 +548,29 @@ class MomentumPortfolioStrategy:
         elif self.model == "ema_supertrend":
             return ema_supertrend.exit_check(pos, price, self.tables, self.data_date, stop_pct=self.cfg.stop_pct)
         return pos.update(price, self.cfg)
+
+    def scanner_picks(self, free: int) -> list[dict]:
+        """The scanner's top buy_rank_limit (= N), in its order, skipping held names, cooldowns, the sector cap and
+        names without usable data. Same walk as the replay's daily scan."""
+        counts = sector_counts(self.positions)
+        picks: list[dict] = []
+        for rank, (sym, _score) in enumerate(self.ranking, start=1):
+            if len(picks) >= free or rank > self.cfg.buy_rank_limit:
+                break
+            if sym in self.positions:
+                continue
+            if sym in self.cooldowns and self.data_date < self.cooldowns[sym]:
+                continue
+            industry = self.industries.get(sym, "")
+            if counts.get(industry, 0) >= self.cfg.sector_cap:
+                continue
+            ok, why = self.entry_ok(sym)
+            if not ok:
+                logger.info(f"  skip {sym} (#{rank}): {why}")
+                continue
+            picks.append({"symbol": sym, "rank": rank, "industry": industry})
+            counts[industry] = counts.get(industry, 0) + 1
+        return picks
 
     def minervini_picks(self, free: int) -> list[dict]:
         """Top-RS names that clear the whole Minervini template, honouring cooldowns and the sector cap.
@@ -653,9 +695,12 @@ class MomentumPortfolioStrategy:
             logger.info("No free slots")
             return
 
-        picks, rejects = select_candidates(self.ranking, self.positions, self.tables,
-                                           self.industries, self.data_date, self.cooldowns,
-                                           self.cfg, free)
+        if self.model == "scanner_top":
+            picks, rejects = self.scanner_picks(free), []
+        else:
+            picks, rejects = select_candidates(self.ranking, self.positions, self.tables,
+                                               self.industries, self.data_date, self.cooldowns,
+                                               self.cfg, free)
         if rejects:
             logger.info("  Rejected: " + ", ".join(
                 f"{r['symbol']}(#{r['rank']}: {r['reason']})" for r in rejects[:8]))
@@ -748,7 +793,7 @@ Examples:
 """)
     p.add_argument("--live", action="store_true", default=False,
                    help="place real CNC orders (default: paper)")
-    p.add_argument("--model", choices=["turtle_rs", "minervini", "ema_supertrend"], default="turtle_rs",
+    p.add_argument("--model", choices=["turtle_rs", "minervini", "ema_supertrend", "scanner_top"], default="turtle_rs",
                    help="turtle_rs: composite-RS breakout, weekly entries/rotation (default). "
                         "minervini: Trend Template (rising 200 SMA, RS>=70, pivot breakout), entries scanned DAILY. "
                         "ema_supertrend: EMA 20>50>200 ribbon + Supertrend Green, entries scanned DAILY. "
@@ -778,10 +823,16 @@ Examples:
                    help="stay invested when the regime turns off (still blocks new buys)")
     p.add_argument("--no-regime", action="store_true",
                    help="disable the market filter entirely — always eligible to be invested. "
-                        "Backtested 2019-2026: near-identical CAGR (13.35%% vs 13.63%%) but max "
-                        "drawdown worsens from -13.1%% to -18.1%%")
+                        "Backtested 2019-06..2026-11 (engine v2): CAGR 21.40%% vs 23.84%%, max "
+                        "drawdown worsens from -23.6%% to -29.0%%")
     p.add_argument("--regime-sma", type=int, default=200,
                    help="daily Nifty 500 close vs this SMA (default 200)")
+    p.add_argument("--top-n", type=int, default=None,
+                   help="scanner_top: hold the scanner's top N (sets slots and the buy rank limit; default "
+                        f"{scanner_score.SCANNER_TOP_DEFAULTS['n']})")
+    p.add_argument("--sell-rank", type=int, default=None,
+                   help="scanner_top: rotation sells a holding ranked below this for 2 weekly reviews "
+                        f"(default {scanner_score.SCANNER_TOP_DEFAULTS['sell_mult']} x N)")
     p.add_argument("--instance-id", default=None,
                    help="run a second independent instance under its own state files")
     args = p.parse_args()
@@ -791,6 +842,16 @@ Examples:
         logger.error("[CONFIG ERROR] --model minervini needs --breakout-days 10 or 20")
         sys.exit(1)
     target = None if str(args.target).strip().lower() in ("none", "off", "") else float(args.target)
+    if args.model == "scanner_top":
+        # N drives slots and the buy limit; the stop / sector-cap defaults are the sweep winner's unless overridden.
+        sd = scanner_score.SCANNER_TOP_DEFAULTS
+        top_n = args.top_n or sd["n"]
+        args.slots, args.buy_rank_limit = top_n, top_n
+        args.sell_rank_limit = args.sell_rank or sd["sell_mult"] * top_n
+        if "--stop" not in sys.argv:
+            args.stop = sd["stop_pct"]
+        if "--sector-cap" not in sys.argv:
+            args.sector_cap = sd["sector_cap"]
     cfg = MomentumConfig(
         universe=args.universe, capital=args.capital, slots=args.slots,
         stop_pct=args.stop, target_pct=target, trail_pct=args.trail_pct,
@@ -802,6 +863,7 @@ Examples:
         regime_exit=not args.no_regime_exit,
         regime_enabled=not args.no_regime,
         regime_sma=args.regime_sma, breakout_days=breakout_days,
+        min_history_bars=scanner_score.MIN_ROWS if args.model == "scanner_top" else 250,
     )
     try:
         cfg.validate()
@@ -821,10 +883,13 @@ Examples:
     logger.info(f"  Ladder      : {'no target' if cfg.target_pct is None else f'target +{cfg.target_pct:g}%'}, "
                 f"stop -{cfg.stop_pct:g}%, BE +{cfg.breakeven_trigger_pct:g}%, "
                 f"trail {cfg.trail_pct:g}% from peak at +{cfg.trail_trigger_pct:g}%")
-    logger.info(f"  Model       : {args.model}"
-                f"{' (entries scanned every session)' if args.model == 'minervini' else ' (entries at the weekly review)'}")
-    logger.info(f"  Entry       : rank<={cfg.buy_rank_limit}, {cfg.breakout_days}d breakout, "
-                f"sector cap {cfg.sector_cap}")
+    logger.info(f"  Model       : {args.model} (entries every session, rank rotation weekly)")
+    if args.model == "scanner_top":
+        logger.info(f"  Entry       : /scanner rank<={cfg.buy_rank_limit}, sell below rank {cfg.sell_rank_limit} "
+                    f"for 2 weekly reviews, sector cap {cfg.sector_cap}")
+    else:
+        logger.info(f"  Entry       : rank<={cfg.buy_rank_limit}, {cfg.breakout_days}d breakout, "
+                    f"sector cap {cfg.sector_cap}")
     if cfg.regime_enabled:
         bench_label = "Nifty 50" if cfg.benchmark == "nifty50" else "Nifty 500"
         logger.info(f"  Regime      : {cfg.regime_interval} {bench_label} > {cfg.regime_sma} SMA"
@@ -832,7 +897,7 @@ Examples:
     else:
         logger.warning("  Regime      : DISABLED — no market filter. The strategy will stay "
                        "invested through downtrends; backtested max drawdown worsens from "
-                       "-13.1% to -18.1%.")
+                       "-23.6% to -29.0% (engine v2, 2019-06..2026-11).")
     logger.info(f"  Schedule    : {'single cycle' if args.once else f'daily at {args.run_at}'}")
     logger.info("=" * 60)
 

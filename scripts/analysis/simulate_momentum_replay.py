@@ -36,6 +36,8 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..
 sys.path.insert(0, PROJECT_ROOT)
 
 from lib import minervini, fifty_two_week, clenow, ema_supertrend, rs_supertrend, weinstein, data_quality      # noqa: E402
+from lib import scanner_score                                                                                   # noqa: E402
+from lib.corporate_actions import adjust_frame                                                                  # noqa: E402
 from lib.momentum import (
     MomentumConfig, Position,
     STAGE_INITIAL, STAGE_BREAKEVEN, STAGE_TRAIL,
@@ -85,6 +87,8 @@ RS_PCT_MODELS = ("minervini", "ema_supertrend", "rs_supertrend", "weinstein")
 
 def default_stop_pct(strategy: str) -> float:
     """Stop distance each model used before the stop became a user setting."""
+    if strategy == "scanner_top":
+        return float(scanner_score.SCANNER_TOP_DEFAULTS["stop_pct"])
     if strategy == "clenow":
         return 15.0
     return 20.0 if strategy == "turtle_rs_opt" else 12.0
@@ -100,6 +104,29 @@ def stop_suffix(strategy: str, stop_pct: float) -> str:
 OPT_SELL_RANK_LIMIT = 60
 TURTLE = ("turtle_rs", "turtle_rs_opt")
 
+# scanner_top = hold the /scanner page's top N (its exact order: score, RS percentile, volume ratio; lib/scanner_score.py),
+# with the Turtle stop ladder and weekly rank rotation. N is the slot count; the rotation sells a holding ranked below
+# the sell buffer for two consecutive weekly reviews.
+SCANNER_TOP = "scanner_top"
+SCANNER_DEFAULT_SELL_MULT = scanner_score.SCANNER_TOP_DEFAULTS["sell_mult"]   # sell buffer = mult x N
+RANK_LIMIT_MODELS = TURTLE + (SCANNER_TOP,)      # buy only from the top buy_rank_limit
+ROTATION_MODELS = TURTLE + (SCANNER_TOP, "clenow")
+
+
+def scanner_sell_limit(slots: int) -> int:
+    return SCANNER_DEFAULT_SELL_MULT * slots
+
+
+_SCANNER_BOOKS: Dict[tuple, "scanner_score.ScannerBook"] = {}
+
+
+def scanner_book(symbols: List[str]) -> "scanner_score.ScannerBook":
+    """The scanner book for this universe, built once per process (about 12 s for the Nifty 500)."""
+    key = tuple(symbols)
+    if key not in _SCANNER_BOOKS:
+        _SCANNER_BOOKS[key] = scanner_score.load_book(symbols)[0]
+    return _SCANNER_BOOKS[key]
+
 STRATEGY_NAMES = {
     "turtle_rs": "Turtle RS Breakout (Composite RS + 55d Breakout)",
     "turtle_rs_opt": "Turtle RS Optimised (rotation sells below rank 60, 20% stop)",
@@ -109,6 +136,7 @@ STRATEGY_NAMES = {
     "ema_supertrend": "EMA & Supertrend (EMA 20 > 50 > 200 + Bullish Supertrend)",
     "rs_supertrend": "RS + Supertrend (Vivek Bajaj: RS vs Nifty > 0 and rising, Supertrend green, trailing stop)",
     "weinstein": "Weinstein Stage 2 (weekly base breakout, 30-week MA exit)",
+    SCANNER_TOP: "Scanner Top-N (the /scanner ranking, Turtle stop ladder, weekly rotation)",
 }
 
 
@@ -122,6 +150,9 @@ def passes_strategy_entry(strategy: str, sym: str, tables: dict, d: date, cfg: M
 
     if strategy in TURTLE:
         return passes_entry_filters(sym, tables, d, cfg)
+
+    elif strategy == SCANNER_TOP:
+        return True, "QUALIFIED"            # the scanner's rank IS the entry rule (rank <= N is checked by the caller)
 
     elif strategy == "minervini":
         return minervini.entry_check(sym, tables, d, cfg.breakout_days, rs_pct)
@@ -147,7 +178,7 @@ def passes_strategy_entry(strategy: str, sym: str, tables: dict, d: date, cfg: M
 
 def check_strategy_exit(strategy: str, pos: Position, close: float, tables: dict, d: date, cfg: MomentumConfig) -> Optional[str]:
     t = tables.get(pos.symbol)
-    if strategy in TURTLE:
+    if strategy in TURTLE or strategy == SCANNER_TOP:
         return pos.update(close, cfg)
 
     elif strategy == "minervini":
@@ -171,7 +202,9 @@ def check_strategy_exit(strategy: str, pos: Position, close: float, tables: dict
     return None
 
 
-def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy: str = "turtle_rs", force: bool = False) -> dict:
+def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy: str = "turtle_rs", force: bool = False,
+                          sell_rank: Optional[int] = None) -> dict:
+    """`sell_rank` (scanner_top only): rotation sells a holding ranked below this; default 2 x slots."""
     if start > end:
         raise ValueError(f"Start date {start} cannot be after end date {end}")
 
@@ -180,6 +213,11 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         strategy = "turtle_rs"
     if strategy == "turtle_rs_opt":
         cfg = replace(cfg, sell_rank_limit=OPT_SELL_RANK_LIMIT)
+    if strategy == SCANNER_TOP:
+        # min_history_bars = the scanner's own 60-row minimum, so a recent listing it ranks can be bought; the gap rule
+        # still needs 60 fresh bars after a long gap.
+        cfg = replace(cfg, buy_rank_limit=cfg.slots, min_history_bars=scanner_score.MIN_ROWS,
+                      sell_rank_limit=int(sell_rank) if sell_rank else scanner_sell_limit(cfg.slots))
 
     os.makedirs(REPLAYS_DIR, exist_ok=True)
     regime_suffix = "" if cfg.regime_enabled else "_no_regime"
@@ -201,6 +239,10 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
     bo_suffix += "" if cfg.sector_cap == DEFAULT_SECTOR_CAP else f"_sc{cfg.sector_cap}"
     bo_suffix += risk_suffix()
     bo_suffix += "" if cfg.compound else "_nocomp"
+    if strategy == SCANNER_TOP:
+        bo_suffix = stop_suffix(strategy, cfg.stop_pct) + ("" if cfg.sector_cap == DEFAULT_SECTOR_CAP else f"_sc{cfg.sector_cap}") \
+            + ("" if cfg.sell_rank_limit == scanner_sell_limit(cfg.slots) else f"_sr{cfg.sell_rank_limit}") \
+            + risk_suffix() + ("" if cfg.compound else "_nocomp")      # breakout days do not apply
 
     # No fallback to any other file: serving a cache from a different setting or engine version would silently
     # show the wrong replay.
@@ -227,6 +269,10 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         print(f"DATA WARNING {w['symbol']} {w['date']}: close {w['prev_close']} -> {w['close']} (x{w['ratio']}) "
               f"looks like an unadjusted corporate action; repair with scripts/downloader/repair_symbol_history.py")
 
+    if strategy == SCANNER_TOP:
+        # The scanner reads corporate-action-adjusted series; trade (fills, stops) on the same basis.
+        price_map = {s: adjust_frame(s, df) for s, df in price_map.items()}
+        book = scanner_book(symbols)
     tables = build_tables(price_map, cfg)
     calendar = build_regime_daily(bench, cfg)
     rs_matrix = build_rs_matrix(price_map, bench, cfg.gap_reset_days)
@@ -309,6 +355,8 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
             return score_ranking(d, "high250")
         if strategy == "clenow":
             return score_ranking(d, "clenow")
+        if strategy == SCANNER_TOP:
+            return book.ranking(d)
         return []
 
     def rs_pct_for(d: date) -> Optional[Dict[str, float]]:
@@ -491,9 +539,9 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
         elif ranking_today:
             survivors = {s: p for s, p in portfolio.items() if s not in queued_sells}
 
-            if strategy in TURTLE + ("clenow",) and rotation_due(last_rotation, d):
+            if strategy in ROTATION_MODELS and rotation_due(last_rotation, d):
                 last_rotation = d
-                if strategy in TURTLE:
+                if strategy in RANK_LIMIT_MODELS:
                     rotation = [(sym, "rebalance") for sym, _ in rank_rotation_exits(survivors, ranks_today, d, cfg)]
                 else:
                     no_bar = {sym for sym in survivors if bar(sym, d) is None}
@@ -512,8 +560,8 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
                     if len(picks) >= slots_free:
                         break
                     rank = ranks_today.get(s, 999)
-                    if strategy in TURTLE and rank > cfg.buy_rank_limit:
-                        break                                   # Turtle buys only from the top buy_rank_limit
+                    if strategy in RANK_LIMIT_MODELS and rank > cfg.buy_rank_limit:
+                        break                                   # buys only from the top buy_rank_limit
                     if s in portfolio or s in queued_sells:
                         continue
                     if s in cooldowns and d < cooldowns[s]:
@@ -539,7 +587,7 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
             item_status = "QUALIFIED"
             if s in portfolio:
                 item_status = "HELD"
-            elif strategy in TURTLE and rank > cfg.buy_rank_limit:
+            elif strategy in RANK_LIMIT_MODELS and rank > cfg.buy_rank_limit:
                 item_status = f"rank > {cfg.buy_rank_limit}"
             elif s in cooldowns and d < cooldowns[s]:
                 item_status = f"Cooldown ({cooldowns[s]})"
@@ -675,6 +723,8 @@ def run_replay_simulation(cfg: MomentumConfig, start: date, end: date, strategy:
             "stop_pct": cfg.stop_pct,
             "compound": cfg.compound,
             "engine": REPLAY_ENGINE,
+            "buy_rank_limit": cfg.buy_rank_limit,
+            "sell_rank_limit": cfg.sell_rank_limit,
             "sector_cap": cfg.sector_cap,
             "start": start.isoformat(),
             "end": end.isoformat(),
@@ -705,7 +755,9 @@ def main():
     p.add_argument("--capital", type=float, default=500_000.0)
     p.add_argument("--slots", type=int, default=10)
     p.add_argument("--universe", choices=["nifty500", "nifty50"], default="nifty500")
-    p.add_argument("--strategy", choices=["turtle_rs", "turtle_rs_opt", "minervini", "52w_high", "clenow", "ema_supertrend", "rs_supertrend", "weinstein"], default="turtle_rs", help="Strategy to simulate")
+    p.add_argument("--strategy", choices=list(STRATEGY_NAMES), default="turtle_rs", help="Strategy to simulate")
+    p.add_argument("--sell-rank", type=int, default=None,
+                   help="scanner_top: rotation sells a holding ranked below this (default 2 x slots)")
     p.add_argument("--benchmark", choices=["nifty50", "nifty500"], default="nifty50", help="Benchmark index for RS and regime (default nifty50)")
     p.add_argument("--regime-interval", choices=["weekly", "daily"], default="weekly", help="Regime check frequency: weekly (prior week close) or daily (default weekly)")
     p.add_argument("--regime", type=lambda x: str(x).lower() in ("true", "1", "yes"), default=True, help="Enable 200-SMA regime filter")
@@ -754,7 +806,7 @@ def main():
     )
 
     print(f"Simulating momentum replay [{args.strategy}] from {start_date} to {end_date} (capital: {cfg.capital:,.0f}, regime: {cfg.regime_enabled})...")
-    res = run_replay_simulation(cfg, start_date, end_date, strategy=args.strategy, force=args.force)
+    res = run_replay_simulation(cfg, start_date, end_date, strategy=args.strategy, force=args.force, sell_rank=args.sell_rank)
     print(f"Done! {len(res['snapshots'])} daily snapshots generated. Final equity: Rs {res['final_equity']:,.2f} ({res['total_return_pct']:+.2f}%)")
 
 

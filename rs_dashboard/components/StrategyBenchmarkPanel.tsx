@@ -173,6 +173,18 @@ const STRATEGY_DETAILS: Record<string, {
     ],
     verdict: 'Fewest trades and the highest profit factor; a handful of big winners carry it, so the result is sensitive to which names happened to break out.',
   },
+  '9. Scanner Top-N': {
+    key: 'scanner_top',
+    badge: 'Failed Held-Out Test',
+    badgeColor: 'bg-red-500/10 text-red-400 border-red-500/30',
+    summary: 'Holds the /scanner page’s top 15 in its exact order (0-15 checklist score, then RS percentile, then the day’s volume ratio), rotated weekly.',
+    rules: [
+      'Entry (daily): scanner rank <= 15, regime ON, max 2 per sector, cooldown after a stop; no other technical gate',
+      'Exit: 20% stop, breakeven at +15%, 25% trail once +25%; weekly rotation sells below rank 45 for two reviews',
+      'Settings: the best of 32 by Calmar on 2020-23 (scripts/analysis/optimise_scanner_top.py), then run once on 2024-26',
+    ],
+    verdict: 'Best Calmar of the sweep on 2020-23, but it lost money on the held-out 2024-26 window while Turtle RS gained. The score saturates (dozens of stocks tie at 14-15) and the volume tie-break churns the top 15, so it trades about three times as often. Paper only.',
+  },
 };
 
 /** Numeric value of a formatted cell such as "+28.10%", "Rs 2,734,444" or "1.90". */

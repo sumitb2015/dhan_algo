@@ -16,13 +16,17 @@ function sanitizeDate(d: string | null | undefined, fallback: string): string {
 }
 
 function sanitizeStrategy(s: string | null | undefined): string {
-  const allowed = ['turtle_rs', 'turtle_rs_opt', 'minervini', '52w_high', 'clenow', 'ema_supertrend', 'rs_supertrend', 'weinstein'];
+  const allowed = ['turtle_rs', 'turtle_rs_opt', 'minervini', '52w_high', 'clenow', 'ema_supertrend', 'rs_supertrend', 'weinstein', 'scanner_top'];
   const val = (s || '').toLowerCase().trim();
   return allowed.includes(val) ? val : 'turtle_rs';
 }
 
+/** Scanner Top-N default stop. Mirrors SCANNER_TOP_DEFAULTS["stop_pct"] in lib/scanner_score.py. */
+const SCANNER_TOP_STOP = 20;
+
 /** Stop distance each model used before it became a setting. Mirrors default_stop_pct() in simulate_momentum_replay.py. */
 function defaultStop(strategy: string): number {
+  if (strategy === 'scanner_top') return SCANNER_TOP_STOP;
   if (strategy === 'clenow') return 15;
   return strategy === 'turtle_rs_opt' ? 20 : 12;
 }
@@ -82,7 +86,8 @@ function cacheFileFor(p: ReplayParams): string {
   const benchSuffix = p.benchmark === 'nifty500' ? '_nifty500' : '';
   const intervalSuffix = p.regimeInterval === 'daily' ? '_daily' : '';
   let boSuffix: string;
-  if (p.strategy === 'clenow') boSuffix = '';
+  // scanner_top ignores breakout days; the route never sends --sell-rank, so its default buffer needs no suffix.
+  if (p.strategy === 'clenow' || p.strategy === 'scanner_top') boSuffix = '';
   else if (p.strategy === 'minervini') boSuffix = p.breakoutDays === 20 || p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
   else if (p.strategy === '52w_high') boSuffix = p.breakoutDays === 5 || p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;
   else if (p.strategy === 'ema_supertrend' || p.strategy === 'rs_supertrend') boSuffix = p.breakoutDays === 20 || p.breakoutDays === 55 ? '' : `_bo${p.breakoutDays}`;

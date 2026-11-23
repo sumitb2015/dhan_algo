@@ -121,9 +121,10 @@ function ScoreBar({ score, max = 15 }: { score: number; max?: number }) {
 type SortKey = keyof ScannerResult | 'none';
 
 function TH({
-  children, right, sortKey, currentSort, onSort, className,
+  children, right, sortKey, currentSort, onSort, className, title,
 }: {
   children?: React.ReactNode;
+  title?: string;
   right?: boolean;
   sortKey?: SortKey;
   currentSort?: { key: SortKey; dir: 'asc' | 'desc' };
@@ -140,6 +141,7 @@ function TH({
         className,
       )}
       onClick={() => sortKey && onSort?.(sortKey)}
+      title={title}
     >
       <span className="inline-flex items-center gap-1">
         {children}
@@ -816,7 +818,8 @@ export default function Scanner() {
                     {/* NR */}
                     <TH sortKey="isNR7" {...thProps}>NR</TH>
                     {/* Score */}
-                    <TH right sortKey="scorePercent" {...thProps}>Score</TH>
+                    <TH right sortKey="scorePercent" {...thProps}
+                        title="0-15 checklist (EMA 20/50/200, Supertrend, RSI > 60, MACD, ADX > 25, volume > 1.5x, RS rising and above its average). Many stocks tie at 14-15, so the default order is then decided by RS% and that day's volume ratio. A full score needs only a rising 20-day RS line, so it ranks rebounds as well as 1-year leaders: check RS (the 252-day ratio) too.">Score</TH>
                   </tr>
                 </thead>
                 <tbody>

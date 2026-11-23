@@ -274,3 +274,52 @@ Alternative entry/exit model, selected with `--model minervini` (default stays `
 - **Validation**: replay on Nifty 500, 10 slots, regime on, pre-2026-11-23 engine (fixed slots, daily rotation): 2020-23 +192% (PF 3.84), 2024-26 +36% (PF 1.87). Engine v2 (compounding, data-gap rules), 2020-01-10 → 2026-11-20: 31.24% CAGR, −28.76% DD, PF 2.27, 254 trades (`backtest_strategy_comparison.py`). Parameters
   were tuned looking at both windows, so 2024-26 is lightly in-sample; 2025-26 alone was weak for momentum. Live fills
   happen at the 15:20 LTP, not the next open as in the replay. **Paper-trade it first** (`--once`, no `--live`).
+
+## Model: Scanner Top-N (`--model scanner_top`)
+
+Holds the **`/scanner` page's top N** (Nifty 500 universe) in its exact order and rotates it with the momentum
+engine. Added 2026-11-23. **It failed its held-out test, so paper-trade it only.**
+
+- **Ranking**: the scanner's own. That is the 0-15 checklist score (close vs EMA 20/50/200, Supertrend 7/3,
+  RSI > 60, MACD, ADX > 25, volume > 1.5x the 20-day average, 252-day RS rising and above its 21-bar average), then
+  the RS percentile, then that day's volume ratio. The maths lives in `rs_dashboard/lib/scannerMath.ts`.
+  `lib/scanner_score.py` is its Python port, held to it by `tests/test_scanner_score_parity.py` against
+  `lib/scannerMath.parity.json`. It reproduced the live scanner's 2026-11-20 top 15 exactly. Inputs are
+  corporate-action adjusted, like the dashboard (`lib/corporate_actions.py`), and the model trades on the same
+  adjusted series.
+- **Entry (every session)**: scanner rank ≤ N, regime ON, max 2 per sector, 10-day cooldown after a stop, a bar
+  today, and 60 bars since any long data gap. There is no other technical gate: the scanner's rank is the rule.
+- **Exit**: the Turtle ladder (stop %, breakeven at +15%, 25% trail from +25%), plus a weekly rotation that sells a
+  holding ranked below the sell buffer for two consecutive weekly reviews. The regime filter liquidates.
+- **Defaults** (`SCANNER_TOP_DEFAULTS`): N = 15, sell below rank 45, 20% stop, sector cap 2. Flags: `--top-n`,
+  `--sell-rank`, plus the usual `--stop` / `--sector-cap`. Always run it under its own `--instance-id`.
+
+### Split-sample sweep (`scripts/analysis/optimise_scanner_top.py`, results in `debug/scanner_top_sweep/`)
+32 configs (N 10/15 × sell buffer N/2N/3N/60 × stop 12/20 × sector cap 2/off) were tuned on 2020-01-10 → 2023-12-29
+and ranked by Calmar. The top 3 were then run once on 2024-01-01 → 2026-11-20. Engine v2, ₹5L, Nifty 50 regime.
+
+| Config | Window | CAGR | Max DD | Calmar | PF | Trades |
+|---|---|---|---|---|---|---|
+| **N15, sell >45, stop 20, cap 2 (default)** | tune 2020-23 | 45.19% | −19.73% | 2.29 | 1.89 | 684 |
+| | **held-out 2024-26** | **−4.01%** | **−26.65%** | −0.15 | 0.90 | 441 |
+| | full 2020-26 | 21.73% | −27.08% | 0.80 | 1.33 | 1126 |
+| N15, sell >60, stop 20, cap 2 | held-out 2024-26 | −2.97% | −22.79% | −0.13 | 0.92 | 403 |
+| N15, sell >45, stop 12, cap off | held-out 2024-26 | 5.80% | −23.90% | 0.24 | 1.14 | 432 |
+| default, no regime filter | full 2020-26 | 15.67% | −39.98% | 0.39 | 1.17 | 1416 |
+| turtle_rs (live default) | tune 2020-23 | 43.87% | −23.57% | 1.86 | 2.24 | 227 |
+| | held-out 2024-26 | 6.27% | −20.99% | 0.30 | 1.25 | 143 |
+| | full 2020-26 | 26.65% | −23.57% | 1.13 | 1.76 | 377 |
+
+Reading:
+- It beat Turtle RS in the tune window and **lost money on the held-out window**. The default stays the tune winner:
+  choosing the third config because it held up on 2024-26 would be selecting on the held-out data.
+- Narrow sell buffers (sell below N) churn: about 1,000 trades and a 14-day median hold, the worst configs.
+- The regime filter matters more here than for Turtle RS: without it the drawdown reaches −40%.
+
+Why it is weaker than Turtle RS:
+- The score saturates. On 2026-11-20, 82 of 499 stocks scored 14-15, so the top 15 is decided by the RS percentile
+  and a one-day volume ratio, which reshuffles daily. It trades about three times as often.
+- A full score needs only a rising 20-day RS line. The top 15 that day included 1-year laggards (RS ratio as low as
+  −0.10).
+- With the sector cap, a clustered top 15 leaves slots empty. A dry run on 2026-11-20 filled 8 of 15 and held 47% in
+  cash, because 5 of the top 15 were healthcare.

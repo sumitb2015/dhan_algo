@@ -277,7 +277,11 @@ function shortReason(reason: string): string {
 }
 
 /** Stop distance each model used before it became a setting (mirrors default_stop_pct in simulate_momentum_replay.py). */
-const defaultStopFor = (strategy: string) => (strategy === 'clenow' ? 15 : strategy === 'turtle_rs_opt' ? 20 : 12);
+// Mirrors default_stop_pct() in simulate_momentum_replay.py (scanner_top: SCANNER_TOP_DEFAULTS in lib/scanner_score.py).
+const defaultStopFor = (strategy: string) =>
+  (strategy === 'clenow' ? 15 : strategy === 'turtle_rs_opt' || strategy === 'scanner_top' ? 20 : 12);
+/** Scanner Top-N holds the scanner's top N, where N = slots; 15 is the sweep's default. */
+const SCANNER_TOP_N = 15;
 
 export default function MomentumSimulationReplay({
   initialCapital = 500000,
@@ -650,6 +654,10 @@ export default function MomentumSimulationReplay({
                   newBo = 55;
                 }
                 setBreakoutDays(newBo);
+                if (newStrat === 'scanner_top') {           // N = slots: start from the sweep's N
+                  setSlots(SCANNER_TOP_N);
+                  setSlotsDraft(String(SCANNER_TOP_N));
+                }
                 const newSl = defaultStopFor(newStrat);
                 setStopPct(newSl);
                 setStopDraft(String(newSl));
@@ -667,6 +675,7 @@ export default function MomentumSimulationReplay({
               <option value="52w_high">52-Week High Breakout (+24.4% CAGR · 1.80 PF · -21.0% DD)</option>
               <option value="turtle_rs_opt">Turtle RS Optimised (+28.7% CAGR · 2.13 PF · -27.9% DD)</option>
               <option value="turtle_rs">Turtle Composite RS (+26.7% CAGR · 1.76 PF · -23.6% DD)</option>
+              <option value="scanner_top">Scanner Top-N, /scanner rank (+21.7% CAGR · 1.33 PF · -27.1% DD; lost 4%/yr 2024-26)</option>
             </select>
           </div>
 
