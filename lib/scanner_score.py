@@ -328,9 +328,16 @@ class ScannerBook:
             self._rank_cache[key] = rank_snapshot(self.latest(key))
         return self._rank_cache[key]
 
-    def ranking(self, d) -> List[Tuple[str, float]]:
-        """[(symbol, score)] in the scanner's order as of `d` — the shape the momentum engine ranks with."""
-        return [(s, float(sc)) for s, sc, _rs, _r, _v in self.ranked_rows(d)]
+    def ranking(self, d, mode: str = "scanner") -> List[Tuple[str, float]]:
+        """[(symbol, score)] as of `d` — the shape the momentum engine ranks with.
+
+        mode "scanner": the /scanner page's own order (score, RS percentile, volume ratio).
+        mode "score_rs": only names with a positive 252-day RS ratio, ordered by score then RS ratio — a research
+        variant (scanner_rs) that drops 1-year laggards and the one-day volume tie-break."""
+        rows = self.ranked_rows(d)
+        if mode == "score_rs":
+            rows = sorted((r for r in rows if r[3] > 0), key=lambda r: (-r[1], -r[3]))
+        return [(s, float(sc)) for s, sc, _rs, _r, _v in rows]
 
 
 def build_book(rows_by_symbol: Dict[str, pd.DataFrame], bench: pd.DataFrame,

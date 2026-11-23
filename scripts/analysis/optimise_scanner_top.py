@@ -10,6 +10,7 @@ Engine v2 (compounding, weekly rotation, data-gap rules), Nifty 500, Rs 5L, Nift
 Replays go to a temp dir (the dashboard cache is untouched). Output: debug/scanner_top_sweep/results.md + CSVs.
 
     venv/bin/python scripts/analysis/optimise_scanner_top.py
+    SCANNER_STRATEGY=scanner_rs venv/bin/python scripts/analysis/optimise_scanner_top.py   # score + RS > 0 variant
 """
 from __future__ import annotations
 
@@ -27,7 +28,8 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "scripts", "analysis"))
 
-OUT_DIR = os.path.join(ROOT, "debug", "scanner_top_sweep")
+STRATEGY = os.environ.get("SCANNER_STRATEGY", "scanner_top")      # scanner_rs = score + positive-RS variant
+OUT_DIR = os.path.join(ROOT, "debug", "scanner_top_sweep" if STRATEGY == "scanner_top" else f"{STRATEGY}_sweep")
 END = date(2026, 11, 20)
 IS = ("tune 2020-23", date(2020, 1, 10), date(2023, 12, 29))
 OOS = ("held-out 2024-26", date(2024, 1, 1), END)
@@ -77,7 +79,7 @@ def run(job):
         else:
             cfg = MomentumConfig(capital=500_000.0, slots=c["n"], stop_pct=c["stop"], sector_cap=c["sector_cap"],
                                  regime_enabled=c.get("regime", True))
-            res = sim.run_replay_simulation(cfg, window[1], window[2], strategy="scanner_top", force=True,
+            res = sim.run_replay_simulation(cfg, window[1], window[2], strategy=STRATEGY, force=True,
                                             sell_rank=sell_rank(c))
         return c, window[0], metrics(res)
     finally:
@@ -118,7 +120,7 @@ def main():
 
     cols = ["config", "window", "CAGR", "MaxDD", "Calmar", "PF", "Trades", "Win", "MedianHold"]
     with open(os.path.join(OUT_DIR, "results.md"), "w", encoding="utf-8") as f:
-        f.write("# Scanner Top-N split-sample sweep\n\n")
+        f.write(f"# {STRATEGY} split-sample sweep\n\n")
         f.write(f"{len(cfgs)} configs tuned on {IS[1]}..{IS[2]}, ranked by Calmar (>= {MIN_TRADES} trades). "
                 f"Top 3, the default, the winner without the regime filter, and turtle_rs run on every window.\n\n")
         f.write("## Tune window, all configs\n\n")

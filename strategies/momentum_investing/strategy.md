@@ -323,3 +323,29 @@ Why it is weaker than Turtle RS:
   −0.10).
 - With the sector cap, a clustered top 15 leaves slots empty. A dry run on 2026-11-20 filled 8 of 15 and held 47% in
   cash, because 5 of the top 15 were healthcare.
+
+### Variant: score + positive RS (`scanner_rs`, research only)
+Same engine and the same 32-config split-sample sweep (`SCANNER_STRATEGY=scanner_rs
+scripts/analysis/optimise_scanner_top.py`, results in `debug/scanner_rs_sweep/`). The ranking keeps only names with
+a 252-day RS ratio > 0 and orders them by score, then RS ratio, with no one-day volume tie-break. It is not exposed in
+the dashboard or the live bot.
+
+| Config | Window | CAGR | Max DD | Calmar | PF | Trades |
+|---|---|---|---|---|---|---|
+| **N10, sell >30, stop 20, cap off (tune winner)** | tune 2020-23 | 50.02% | −17.75% | 2.82 | 1.95 | 463 |
+| | **held-out 2024-26** | **3.42%** | **−24.43%** | 0.14 | 1.09 | 290 |
+| | full 2020-26 | 27.50% | −26.59% | 1.03 | 1.44 | 761 |
+| N15, sell >30, stop 20, cap 2 (2nd) | held-out 2024-26 | −5.35% | −32.41% | −0.17 | 0.87 | 434 |
+| N15, sell >45, stop 20, cap off (3rd) | held-out 2024-26 | 5.14% | −23.88% | 0.22 | 1.13 | 387 |
+| tune winner, no regime filter | full 2020-26 | 20.24% | −38.27% | 0.53 | 1.22 | 942 |
+| turtle_rs (live default) | held-out 2024-26 | 6.27% | −20.99% | 0.30 | 1.25 | 143 |
+| | full 2020-26 | 26.65% | −23.57% | 1.13 | 1.76 | 377 |
+
+Reading:
+- The RS gate fixes part of the problem. Against the exact scanner order, the tune winner's held-out result goes
+  from −4.0% to +3.4% CAGR, and the tune Calmar rises from 2.29 to 2.82.
+- It **still trails Turtle RS out of sample** (Calmar 0.14 vs 0.30, deeper drawdown). Over the full period it has a
+  slightly higher CAGR but a 3-point deeper drawdown and a lower Calmar.
+- One of the three top picks lost money on 2024-26, so the result is not stable across nearby settings.
+- Verdict: no scanner-ranked variant has beaten the live Turtle RS model out of sample. Keep Turtle RS as the live
+  model.
