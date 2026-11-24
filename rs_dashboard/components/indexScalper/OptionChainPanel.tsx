@@ -87,7 +87,15 @@ export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onCl
     const ids = strikeIds.get(strike);
     const sideData = type === 'CE' ? quotes?.strikes?.[String(strike)]?.ce : quotes?.strikes?.[String(strike)]?.pe;
     const finalLtp = (ltp && ltp > 0) ? ltp : (sideData?.prev_close && sideData.prev_close > 0) ? sideData.prev_close : null;
-    return { strike, type, securityId: (type === 'CE' ? ids?.ceId : ids?.peId) ?? null, ltp: finalLtp, expiry: feed.expiry };
+    const kotakSym = type === 'CE' ? feed.kotak?.strikes?.get(strike)?.ceSymbol : feed.kotak?.strikes?.get(strike)?.peSymbol;
+    return {
+      strike,
+      type,
+      securityId: (type === 'CE' ? ids?.ceId : ids?.peId) ?? kotakSym ?? null,
+      ltp: finalLtp,
+      expiry: feed.expiry,
+      tradingSymbol: kotakSym,
+    };
   };
   const pick = (strike: number, type: 'CE' | 'PE', ltp: number | undefined) => onPick(contract(strike, type, ltp));
 
@@ -96,7 +104,7 @@ export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onCl
     return {
       strike: 0,
       type: 'FUT',
-      securityId: feed.future.dhanId,
+      securityId: feed.future.dhanId ?? feed.future.kotakSymbol ?? 'FUT',
       ltp: feed.future.ltp,
       expiry: feed.future.expiry ?? feed.expiry,
       tradingSymbol: feed.future.kotakSymbol ?? undefined,

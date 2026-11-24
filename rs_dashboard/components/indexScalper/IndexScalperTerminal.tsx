@@ -488,10 +488,10 @@ export default function IndexScalperTerminal() {
     const size = orderUnits(req.lots, f.lotSize ?? defaultLot);
     if (!size.ok) return { ok: false, text: size.error };
     const c = req.contract;
-    if (!c.securityId) return { ok: false, text: 'No security id for this contract' };
+    if (!c.securityId && !c.tradingSymbol) return { ok: false, text: 'No contract identifier for this order' };
     // The security id was picked for one expiry; never send it under a ticket that now shows another (except futures).
     if (!isFut && c.expiry !== f.expiry) return { ok: false, text: `This ticket was opened for the ${c.expiry || 'previous'} expiry: reopen it from the chain` };
-    const live = f.ltpById.get(c.securityId) ?? null;
+    const live = (c.securityId ? f.ltpById.get(c.securityId) : null) ?? c.ltp ?? null;
     const symbol = isFut
       ? `${underlying}-${c.expiry}-FUT`
       : `${underlying}-${f.expiry}-${c.strike}-${c.type}`;
@@ -538,6 +538,7 @@ export default function IndexScalperTerminal() {
       void loadOrders();
       return out;
     }
+    if (!c.securityId) return { ok: false, text: 'No Dhan security id for this contract' };
     const dQty = dhanOrderQty(underlying, req.lots, f.lotSize ?? defaultLot);
     const before = legs.find(l => l.securityId === c.securityId)?.netQty ?? 0;
     const out = await sendReal({
@@ -701,8 +702,18 @@ export default function IndexScalperTerminal() {
     const sd = q.strikes?.[String(q.atm)] ?? Object.values(q.strikes ?? {}).find(r => r.strike === q.atm);
     const id = type === 'CE' ? ids?.ceId : ids?.peId;
     const ltp = type === 'CE' ? sd?.ce?.ltp : sd?.pe?.ltp;
-    return { strike: q.atm, type, securityId: id ?? null, ltp: ltp && ltp > 0 ? ltp : null, expiry: feed.expiry };
-  }, [feed.quotes, feed.strikeIds, feed.expiry]);
+    const prevClose = type === 'CE' ? sd?.ce?.prev_close : sd?.pe?.prev_close;
+    const finalLtp = ltp && ltp > 0 ? ltp : (prevClose && prevClose > 0 ? prevClose : null);
+    const kotakSym = type === 'CE' ? feed.kotak?.strikes?.get(q.atm)?.ceSymbol : feed.kotak?.strikes?.get(q.atm)?.peSymbol;
+    return {
+      strike: q.atm,
+      type,
+      securityId: id ?? kotakSym ?? null,
+      ltp: finalLtp,
+      expiry: feed.expiry,
+      tradingSymbol: kotakSym,
+    };
+  }, [feed.quotes, feed.strikeIds, feed.kotak, feed.expiry]);
 
   /** Cancel one of THIS page's working orders (the panel offers it only for isx-tagged ones). */
   const cancelOrder = useCallback(async (orderId: string) => {
@@ -748,11 +759,15 @@ export default function IndexScalperTerminal() {
 
   const quickTradeFut = useCallback((side: 'BUY' | 'SELL') => {
     const f = feed.future;
-    if (!f || !f.dhanId) { flash({ ok: false, text: 'Future contract not ready yet' }); return; }
+    const isKotak = brokerRef.current === 'kotak';
+    if (!f || (isKotak ? !f.kotakSymbol : !f.dhanId)) {
+      flash({ ok: false, text: 'Future contract not ready yet' });
+      return;
+    }
     const c: PickedContract = {
       strike: 0,
       type: 'FUT',
-      securityId: f.dhanId,
+      securityId: f.dhanId ?? f.kotakSymbol ?? 'FUT',
       ltp: f.ltp,
       expiry: f.expiry ?? feed.expiry,
       tradingSymbol: f.kotakSymbol ?? undefined,

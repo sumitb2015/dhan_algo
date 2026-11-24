@@ -51,8 +51,9 @@ export default function OrderTicket({ contract, liveLtp, expiry, lotSize, real, 
   const [priceDraft, setPriceDraft] = useState('');
   const [trigDraft, setTrigDraft] = useState('');
   const [err, setErr] = useState<string | null>(null);
-  // This contract's tick from the master list; Rs 0.05 (NSE index options) until it answers or when it is unknown.
-  const [tick, setTick] = useState(OPTION_TICK);
+  // This contract's tick from the master list; Rs 0.05 (NSE index options) or 1.0 (MCX crude future) until it answers or when it is unknown.
+  const defaultTick = contract.type === 'FUT' && underlying === 'CRUDEOILM' ? 1.0 : OPTION_TICK;
+  const [tick, setTick] = useState(defaultTick);
   useEffect(() => {
     if (!contract.securityId) return;
     let dead = false;
@@ -75,7 +76,7 @@ export default function OrderTicket({ contract, liveLtp, expiry, lotSize, real, 
   const submit = (side: 'BUY' | 'SELL') => {
     setErr(null);
     if (!size.ok) return setErr(size.error);
-    if (!contract.securityId) return setErr('No security id for this strike');
+    if (!contract.securityId && !contract.tradingSymbol) return setErr('No contract identifier for this strike');
     const price = needsPrice ? Number(priceDraft) : null;
     const trigger = needsTrigger ? Number(trigDraft) : null;
     if (needsPrice && !(price && price > 0)) return setErr('Enter a limit price');
