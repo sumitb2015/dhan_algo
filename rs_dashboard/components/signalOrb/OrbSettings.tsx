@@ -237,7 +237,22 @@ function Settings({ ledger, locked, onPatch, onMode, onResetSim, replayed, units
   const replay = !premium && (
     <Section title="Replay — what if">
       <ReplayCard r={replayed} tf={c.timeframe} compact bare futuresPoints={c.instrument !== 'futures'} />
-      <p className="mt-3 text-[11px] leading-snug text-zinc-500">What-if, not live results: these rules replayed over the last 20 sessions (fills at the bar close, no costs). Fills/day counts every entry and exit, so a flip is 2. Use it to spot a setting that flips too often before you arm.</p>
+      <p className="mt-3 text-[11px] leading-snug text-zinc-500">What-if, not live results: these rules replayed over the last 20 sessions (fills at the bar close, no costs). Fills/day counts every entry and exit, so a flip is 2. Use it to spot a setting that flips too often before you arm.{(c.htfConfirm > 0 || c.levelGuardPts > 0) ? ' The entry filters are not applied here.' : ''}</p>
+    </Section>
+  );
+
+  const tfName = (t: number) => (t === 60 ? '1h' : `${t}m`);
+  const htfOk = c.htfConfirm === 0 || c.htfConfirm > c.timeframe;
+  const filters = !premium && (
+    <Section title="Entry filters" hint="off by default">
+      <p className="mb-3 text-[11px] leading-snug text-zinc-500">They only stop a NEW position. When one blocks a reversal, the open side is still closed (the signal is against it) and the Orb stays flat.</p>
+      <Row label="Higher timeframe must agree" stack sub={htfOk ? (c.htfConfirm ? `Enter only when the ${tfName(c.htfConfirm)} consensus (all indicators, closed bars) shows the same colour` : 'Off') : `Ignored: ${tfName(c.htfConfirm)} is not above the trading timeframe (${tfName(c.timeframe)})`}>
+        <Seg full label="Confirm timeframe" value={c.htfConfirm} onPick={v => onPatch({ htfConfirm: v })}
+          options={[{ v: 0, label: 'Off' }, ...TIMEFRAMES.filter(t => t > c.timeframe || t === c.htfConfirm).map(t => ({ v: t as number, label: tfName(t) }))]} />
+      </Row>
+      <Row label="No entry into a pivot (pts)" sub={c.levelGuardPts > 0 ? `No LONG with a CPR / R / S level within ${c.levelGuardPts} pts above, no SHORT with one within ${c.levelGuardPts} pts below (classic pivots, previous session)` : 'Off (0). Classic CPR and R1-R4 / S1-S4 from the previous session'}>
+        <RuleNumInput value={c.levelGuardPts} step={5} min={0} label="Pivot guard points" onCommit={s2 => onPatch({ levelGuardPts: Number(s2) })} className={NUM} />
+      </Row>
     </Section>
   );
 
@@ -314,7 +329,7 @@ function Settings({ ledger, locked, onPatch, onMode, onResetSim, replayed, units
   return (
     <div className="grid items-start gap-4 lg:grid-cols-2 xl:grid-cols-3">
       <div className="flex flex-col gap-4">{market}{timing}{account}</div>
-      <div className="flex flex-col gap-4">{indicators}{replay}</div>
+      <div className="flex flex-col gap-4">{indicators}{filters}{replay}</div>
       <div className="flex flex-col gap-4 lg:col-span-2 xl:col-span-1">{risk}{rules}</div>
     </div>
   );

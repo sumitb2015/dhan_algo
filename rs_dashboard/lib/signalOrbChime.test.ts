@@ -27,3 +27,17 @@ test('halt, unresolved row and stale feed warn once, ahead of a colour change', 
   assert.equal(orbAlert(s({ engineActive: false }), s({ fresh: false, engineActive: false }), false), null);
   assert.equal(orbAlert(s({ fresh: false }), s({ fresh: false }), false), null);
 });
+
+test('orbNotification: alerts only, leader only, switched on and granted, and only when the page is not in front', async () => {
+  const { orbNotification } = await import('./signalOrbChime.ts');
+  const on = { enabled: true, permission: 'granted', leader: true, visible: false };
+  const halt = { sound: 'warn' as const, group: 'alert' as const, reason: 'Halted: Daily loss limit ₹3000 reached' };
+  assert.deepEqual(orbNotification(halt, on), { title: 'Signal Orb - needs you', body: halt.reason, sticky: true });
+  assert.equal(orbNotification({ sound: 'bull', group: 'signal', reason: 'Signal NEUTRAL -> BULL' }, on), null);
+  assert.equal(orbNotification(halt, { ...on, visible: true }), null);
+  assert.equal(orbNotification(halt, { ...on, leader: false }), null);
+  assert.equal(orbNotification(halt, { ...on, enabled: false }), null);
+  assert.equal(orbNotification(halt, { ...on, permission: 'denied' }), null);
+  assert.equal(orbNotification(null, on), null);
+  assert.equal(orbNotification({ sound: 'warn', group: 'alert', reason: 'Price feed stale - entries paused' }, on)?.sticky, false);
+});

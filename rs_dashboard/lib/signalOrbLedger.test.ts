@@ -373,3 +373,19 @@ test('bookStructureExit: a leg still UNKNOWN keeps the row live (never booked cl
   assert.equal(done.ledger.rows[0].status, 'closed');
   assert.deepEqual(done.ledger.rows[0].legs!.map(g => g.exit), [120, 70]);
 });
+
+test('entry filter config: confirm timeframe must be off or above the trading timeframe; pivot guard 0-1000; both default off', async () => {
+  const { sanitizeConfigPatch: sc, emptyLedger: el, normalizeLedger: nl } = await import('./signalOrbLedger.ts');
+  const c = el().config;
+  assert.equal(c.htfConfirm, 0);
+  assert.equal(c.levelGuardPts, 0);
+  const ok = sc({ htfConfirm: 15, levelGuardPts: 20 }, c);
+  assert.ok(typeof ok !== 'string');
+  assert.equal((ok as typeof c).htfConfirm, 15);
+  assert.match(sc({ htfConfirm: 7 }, c) as string, /htfConfirm/);
+  assert.match(sc({ htfConfirm: 5 }, { ...c, timeframe: 5 }) as string, /above the trading timeframe/);
+  assert.match(sc({ levelGuardPts: -1 }, c) as string, /levelGuardPts/);
+  // a stored ledger without the fields (written before they existed) loads with both off
+  assert.equal(nl({ config: { lots: 2 } }).config.htfConfirm, 0);
+  assert.equal(nl({ config: { htfConfirm: 15, levelGuardPts: 25 } }).config.levelGuardPts, 25);
+});

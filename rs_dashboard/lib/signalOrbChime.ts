@@ -37,3 +37,14 @@ export function orbAlert(prev: OrbAlertSnap | null, cur: OrbAlertSnap, traded: b
   }
   return null;
 }
+
+/**
+ * A desktop notification for an alert, or null. Only the 'alert' group (halt, a row needing the user, stale feed, a refused order;
+ * never a colour change), only from the leader tab, only when switched on and allowed by the browser, and only while the page is
+ * NOT in front of the user (the banner and chime already say it there). Halts and unknown / stuck rows stay up until dismissed.
+ */
+export function orbNotification(alert: OrbAlert, o: { enabled: boolean; permission: string; leader: boolean; visible: boolean }): { title: string; body: string; sticky: boolean } | null {
+  if (!alert || alert.group !== 'alert' || !o.enabled || o.permission !== 'granted' || !o.leader || o.visible) return null;
+  const sticky = /^Halted|UNKNOWN|stuck|watcher|not being judged/i.test(alert.reason);
+  return { title: sticky ? 'Signal Orb - needs you' : 'Signal Orb', body: alert.reason, sticky };
+}

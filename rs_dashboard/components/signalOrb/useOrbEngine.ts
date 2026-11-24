@@ -7,15 +7,17 @@ import { istDateIso } from '@/lib/nseHolidays';
 import {
   alertSoundReady, installAlertSoundUnlock, playBearChime, playBullChime, playEntryChime, playExitChime, playNeutralChime, playWarnChime,
 } from '@/lib/alertSound';
-import { orbAlert, type OrbAlertSnap, type OrbSound } from '@/lib/signalOrbChime';
+import { orbAlert, orbNotification, type OrbAlert, type OrbAlertSnap, type OrbSound } from '@/lib/signalOrbChime';
 import type { Target } from '@/lib/pnfTarget';
 import {
   ORB_CODE_VERSION, closedBars, computeEffectiveStop, decideOrb, evaluate, rowLegsPnl, rowPnl, sideOf, signalRowExit,
-  type EffectiveStopResult, type Evaluation, type Side,
+  type EffectiveStopResult, type Evaluation, type Side, type Timeframe,
 } from '@/lib/signalOrb';
 import { isPremiumInstrument, isStuck, liveRow, realisedToday, unknownLegIndexes, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 import { keyLevels, mtfTable, sessionPath, signalChanges } from '@/lib/signalOrbPanels';
 import { BLIND_WARN_MS } from '@/lib/orbFocus';
+import { entryFilter } from '@/lib/orbFilters';
+import { computePivots } from '@/lib/pivotLevels';
 
 // The Signal Orb's live engine (browser). Leader tab only (localStorage lock); the tick is rebuilt every render and called through
 // a ref from ONE interval, so quotes never restart it. It decides on closed bars (lib/signalOrb.ts) and asks the server to act
@@ -45,6 +47,10 @@ export type OrbEngine = ReturnType<typeof useOrbEngine>;
 /** Sound switches, each in its own key (never shared with another page): trade chimes, and signal / warning alerts. */
 const TRADE_SOUND_KEY = 'signalOrb.tradeSound';
 const ALERT_SOUND_KEY = 'signalOrb.alertSound';
+/** Desktop notifications: OFF unless the user turns them on (the browser asks for permission on that click). */
+const NOTIFY_KEY = 'signalOrb.desktopNotify';
+export type NotifyPermission = 'unsupported' | 'default' | 'granted' | 'denied';
+const notifyPermission = (): NotifyPermission => (typeof Notification === 'undefined' ? 'unsupported' : Notification.permission as NotifyPermission);
 const readOn = (key: string) => { try { return localStorage.getItem(key) !== '0'; } catch { return true; } };
 const saveOn = (key: string, on: boolean) => { try { localStorage.setItem(key, on ? '1' : '0'); } catch { /* best effort */ } };
 const PLAY: Record<OrbSound, () => boolean> = { bull: playBullChime, bear: playBearChime, neutral: playNeutralChime, warn: playWarnChime };
@@ -77,6 +83,38 @@ export function useOrbEngine() {
   const tradeSoundRef = useRef(true);
   const alertSoundRef = useRef(true);
   const prevSnap = useRef<OrbAlertSnap | null>(null);
+  const [desktopNotify, setDesktopNotifyState] = useState(false);
+  const [notifyPerm, setNotifyPerm] = useState<NotifyPermission>('default');
+  const desktopNotifyRef = useRef(false);
+  const leaderRef = useRef(false);
+  useEffect(() => {
+    const t = setTimeout(() => {
+      let on = false;
+      try { on = localStorage.getItem(NOTIFY_KEY) === '1'; } catch { /* storage blocked: off */ }
+      const perm = notifyPermission();
+      setNotifyPerm(perm);
+      desktopNotifyRef.current = on && perm === 'granted';
+      setDesktopNotifyState(desktopNotifyRef.current);
+    }, 0);
+    return () => clearTimeout(t);
+  }, []);
+  /** Turning it on asks the browser once; a refusal leaves it off (and the button says the browser blocks it). */
+  const setDesktopNotify = useCallback(async (on: boolean) => {
+    let perm = notifyPermission();
+    if (on && perm === 'default') { try { perm = await Notification.requestPermission() as NotifyPermission; } catch { /* old API */ } }
+    setNotifyPerm(perm);
+    const next = on && perm === 'granted';
+    desktopNotifyRef.current = next;
+    setDesktopNotifyState(next);
+    try { localStorage.setItem(NOTIFY_KEY, next ? '1' : '0'); } catch { /* best effort */ }
+  }, []);
+  /** Shows a desktop notification for `alert` when the rule allows (leader tab, switched on, page not in front). */
+  const notify = useCallback((alert: OrbAlert) => {
+    const visible = typeof document !== 'undefined' && document.visibilityState === 'visible' && document.hasFocus();
+    const n = orbNotification(alert, { enabled: desktopNotifyRef.current, permission: notifyPermission(), leader: leaderRef.current, visible });
+    if (!n) return;
+    try { new Notification(n.title, { body: n.body, tag: `signal-orb-${n.body.slice(0, 40)}`, requireInteraction: n.sticky }); } catch { /* not allowed here */ }
+  }, []);
 
   useEffect(() => installAlertSoundUnlock(), []);
   useEffect(() => {
@@ -187,6 +225,13 @@ export function useOrbEngine() {
     [closedKey, nowMinute],
   );
 
+  // entry filters' inputs: the confirm timeframe's consensus (the Timeframes table's own rule) and the previous session's pivots
+  const htfSignal = cfg && cfg.htfConfirm > 0 && mtf ? (mtf.signals[mtf.timeframes.indexOf(cfg.htfConfirm as Timeframe)] ?? null) : null;
+  const pivots = useMemo(
+    () => (levels && levels.prevHigh !== null && levels.prevLow !== null && levels.prevClose !== null ? computePivots(levels.prevHigh, levels.prevLow, levels.prevClose, 'classic') : null),
+    [levels],
+  );
+
   const barSecs = tf * 60;
   // bars sit on the IST clock (lib/signalOrb.ts closedBars): an hourly bar closes on the IST hour, not the UTC one
   const secsToClose = now ? barSecs - ((Math.floor(now / 1000) + 19_800) % barSecs) : barSecs;
@@ -246,11 +291,14 @@ export function useOrbEngine() {
       // trade chimes ring in the tab that sent the order (the leader for automatic ones, this tab for a manual close)
       if (tradeSoundRef.current) { if (!j.success) playWarnChime(); else if (body.action === 'exit') playExitChime(); else playEntryChime(); }
       if (!j.success) setNote(j.error ?? 'Refused');
+      // an automatic order refused while nobody is looking: say it on the desktop too
+      if (!j.success && body.auto === true) notify({ sound: 'warn', group: 'alert', reason: `Order not sent (${String(body.action)}): ${j.error ?? 'Refused'}` });
       setTradeErr(j.success ? null : (j.error ?? 'Refused'));
       return j.success;
     } catch (e) {
       // no reply: the server finishes and books what it sent; the next poll shows the row's real status
       if (tradeSoundRef.current) playWarnChime();
+      if (body.auto === true) notify({ sound: 'warn', group: 'alert', reason: `No reply from the trade route (${String(body.action)}) - check the ledger and the broker` });
       setNote(`No reply from the trade route (${e instanceof Error ? e.message : 'network'}) - waiting for the ledger`);
       return false;
     } finally {
@@ -258,7 +306,7 @@ export function useOrbEngine() {
       setBusy(false);
       void load();
     }
-  }, [accept, load]);
+  }, [accept, load, notify]);
 
   // E2: one leader tab
   const claimLock = (t: number): boolean => {
@@ -337,13 +385,26 @@ export function useOrbEngine() {
     if (!priceFresh || price === null) { setNote('Price feed stale - no entries'); return false; }
     if (staleDay) { setNote('An earlier day\'s row is open - close it first'); return false; }
     if (realised <= -cfg.dailyLossLimit) { setNote('Daily loss limit reached'); return false; }
+    // entry filters: they only stop a NEW position. A filtered reversal still leaves the old side (the signal is against it): flat.
+    const blocked = entryFilter({ side: d.side, tf: cfg.timeframe, htfConfirm: cfg.htfConfirm, htfSignal, levelGuardPts: cfg.levelGuardPts, price, pivots });
+    if (blocked) {
+      if (d.action === 'reverse' && t >= exitRetryAt.current) {
+        exitRetryAt.current = t + EXIT_RETRY_MS;
+        setNote(`Filtered: ${blocked} - exiting ${live!.side} to flat`);
+        void trade({ action: 'exit', price, reason: `${d.reason} - entry filtered (${blocked}): flat`, exitKind: 'manual', auto: true });
+        return true;
+      }
+      setNote(`Filtered: ${blocked}`);
+      return false;
+    }
     setNote(d.reason);
-    void trade({ action: d.action, side: d.side, price, barT: ev.barT, reason: d.reason, v: ORB_CODE_VERSION });
+    void trade({ action: d.action, side: d.side, price, barT: ev.barT, reason: d.reason, v: ORB_CODE_VERSION, auto: true });
     return true;
   };
   const runEngine = () => {
     const t = Date.now();
     const leader = claimLock(t);
+    leaderRef.current = leader;
     if (leader !== isLeader) setIsLeader(leader);
     const ready = alertSoundReady();
     if (ready !== soundReady) setSoundReady(ready);
@@ -365,6 +426,7 @@ export function useOrbEngine() {
     // a straddle / strangle ignores the signal: its colour chimes are noise (halts, unknown rows and stale feeds still ring)
     const signalOnly = alert && (alert.sound === 'bull' || alert.sound === 'bear' || alert.sound === 'neutral');
     if (alert && leader && alertSoundRef.current && !(signalOnly && (isPremiumInstrument(cfg.instrument) || isPremiumRow))) PLAY[alert.sound]();
+    notify(alert);
   };
 
   const engineRef = useRef<() => void>(() => {});
@@ -396,6 +458,6 @@ export function useOrbEngine() {
   return {
     state, ledger, live: live as OrbRow | null, contract, feed, ev, price, priceFresh, openPnl, mark, realised, now, isLeader, note, stateError,
     armed, setArmed, armedToday: state?.armedToday === true, serverStops, watcherSeen: watcherAt > 0, isPremiumRow, busy, op, trade, tradeErr, clearTradeErr: () => setTradeErr(null), closeAndStop, today, secsToClose, barSecs,
-    tradeSound, setTradeSound, alertSound, setAlertSound, soundReady, outdated, effectiveStop, mtf, history, levels, dayPath, tf,
+    tradeSound, setTradeSound, alertSound, setAlertSound, desktopNotify, setDesktopNotify, notifyPerm, soundReady, outdated, effectiveStop, mtf, history, levels, dayPath, tf,
   };
 }

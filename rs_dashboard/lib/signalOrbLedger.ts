@@ -65,6 +65,10 @@ export interface OrbConfig {
   strikeOffset: number;
   /** The straddle / strangle rules (used only when `instrument` is straddle or strangle). */
   premium: PremiumConfig;
+  /** Entry filter (lib/orbFilters.ts): this higher timeframe's consensus must show the entry's colour. 0 = off. */
+  htfConfirm: number;
+  /** Entry filter: no LONG with a pivot level this many points above, no SHORT with one this many below. 0 = off. */
+  levelGuardPts: number;
 }
 
 /** REAL never runs a naked structure without a stop: a signal-driven one needs the hard stop, a straddle / strangle needs a leg or total SL. */
@@ -163,6 +167,8 @@ export const DEFAULT_CONFIG: OrbConfig = {
   instrument: 'futures',
   strikeOffset: 0,
   premium: { ...DEFAULT_PREMIUM, trail: { ...DEFAULT_PREMIUM.trail } },
+  htfConfirm: 0,
+  levelGuardPts: 0,
 };
 
 export const emptyLedger = (): OrbLedger => ({
@@ -282,6 +288,17 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
     const n = Number(p.strikeOffset);
     if (!Number.isInteger(n) || Math.abs(n) > MAX_STRIKE_OFFSET) return `strikeOffset must be a whole number from -${MAX_STRIKE_OFFSET} to ${MAX_STRIKE_OFFSET}`;
     next.strikeOffset = n;
+  }
+  if (p.htfConfirm !== undefined) {
+    const n = Number(p.htfConfirm);
+    if (n !== 0 && !TIMEFRAMES.includes(n as Timeframe)) return `htfConfirm must be 0 (off) or one of ${TIMEFRAMES.join(', ')} minutes`;
+    if (n !== 0 && n <= next.timeframe) return 'The confirm timeframe must be above the trading timeframe';
+    next.htfConfirm = n;
+  }
+  if (p.levelGuardPts !== undefined) {
+    const n = Number(p.levelGuardPts);
+    if (!Number.isFinite(n) || n < 0 || n > 1000) return 'levelGuardPts must be 0-1000';
+    next.levelGuardPts = n;
   }
   if (p.premium !== undefined) {
     const pr = sanitizePremiumPatch(p.premium, cur.premium ?? DEFAULT_PREMIUM);

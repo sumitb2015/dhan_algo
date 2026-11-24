@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Bell, BellOff, ChevronDown, ChevronUp, Clock, Info, Orbit, PauseCircle, Power, Settings2, ShieldAlert, Volume2, VolumeX, X } from 'lucide-react';
+import { Bell, BellOff, ChevronDown, ChevronUp, Clock, Info, MonitorDot, Orbit, PauseCircle, Power, Settings2, ShieldAlert, Volume2, VolumeX, X } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { Orb } from '@/components/signalOrb/Orb';
 import { useOrbEngine } from '@/components/signalOrb/useOrbEngine';
@@ -159,7 +159,7 @@ export default function SignalOrb() {
               {ledger.mode} · {ledger.config.broker.toUpperCase()}{real ? (armedEff ? ' · ARMED' : ' · NOT ARMED') : ''}
             </span>
           )}
-          <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Sound">
+          <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Sound and notifications">
             <button type="button" onClick={() => e.setTradeSound(!e.tradeSound)} aria-pressed={e.tradeSound}
               aria-label={e.tradeSound ? 'Mute trade chimes' : 'Unmute trade chimes'}
               title={`${(e.tradeSound || e.alertSound) && !e.soundReady ? 'Click anywhere on the page to enable sound. ' : ''}Trade chimes ${e.tradeSound ? 'on' : 'off'}: entry (rising), exit (falling), rejected / unknown order (buzz)${e.isLeader ? '' : ' - automatic trades ring in the engine tab'}`}
@@ -173,8 +173,17 @@ export default function SignalOrb() {
             <button type="button" onClick={() => e.setAlertSound(!e.alertSound)} aria-pressed={e.alertSound}
               aria-label={e.alertSound ? 'Mute signal alerts' : 'Unmute signal alerts'}
               title={`Signal alerts ${e.alertSound ? 'on' : 'off'}: orb turns green (arpeggio up), red (down), gray (two level tones); halt, stale feed or a row needing you (buzz)${e.isLeader ? '' : ' - rings in the engine tab only'}`}
-              className={cn('rounded-r-lg border-l border-zinc-800 p-1.5 hover:bg-zinc-800', FOCUS, e.alertSound ? 'text-zinc-200' : 'text-zinc-500')}>
+              className={cn('border-l border-zinc-800 p-1.5 hover:bg-zinc-800', FOCUS, e.alertSound ? 'text-zinc-200' : 'text-zinc-500')}>
               {e.alertSound ? <Bell className="h-4 w-4" /> : <BellOff className="h-4 w-4" />}
+            </button>
+            <button type="button" onClick={() => void e.setDesktopNotify(!e.desktopNotify)} aria-pressed={e.desktopNotify}
+              disabled={e.notifyPerm === 'unsupported' || (e.notifyPerm === 'denied' && !e.desktopNotify)}
+              aria-label={e.desktopNotify ? 'Turn desktop notifications off' : 'Turn desktop notifications on'}
+              title={e.notifyPerm === 'unsupported' ? 'This browser has no desktop notifications'
+                : e.notifyPerm === 'denied' ? 'The browser blocks notifications for this site - allow them in the site settings, then turn this on'
+                : `Desktop notifications ${e.desktopNotify ? 'on' : 'off'}: a halt, an UNKNOWN / stuck order, the stop watcher down, a stale feed or a refused automatic order, while this page is not in front${e.isLeader ? '' : ' - shown by the engine tab'}`}
+              className={cn('rounded-r-lg border-l border-zinc-800 p-1.5 hover:bg-zinc-800 disabled:opacity-40', FOCUS, e.desktopNotify ? 'text-zinc-200' : 'text-zinc-500')}>
+              <MonitorDot className="h-4 w-4" />
             </button>
           </div>
           <Link href="/signal-orb/settings" aria-label="Rules and indicators" title="Rules and indicators (full page)"
@@ -628,6 +637,8 @@ function ConfigChips({ config: c, tfLabel }: { config: OrbConfig; tfLabel: strin
     premium ? `Leg SL ×${c.premium.legSlX || 'off'}` : `SL ${c.stopPts} pts`,
     ...(!premium && (c.trailStartPts ?? 0) > 0 ? [`Trail +${c.trailStartPts} / ${c.trailGapPts ?? 15} pts`] : []),
     `Loss limit ₹${c.dailyLossLimit.toLocaleString('en-IN')}`,
+    ...(!premium && c.htfConfirm > 0 ? [`Confirm ${c.htfConfirm === 60 ? '1h' : `${c.htfConfirm}m`}`] : []),
+    ...(!premium && c.levelGuardPts > 0 ? [`Pivot guard ${c.levelGuardPts} pts`] : []),
   ];
   return (
     <ul className="mt-1 flex flex-wrap items-center gap-1" aria-label="Configuration">

@@ -36,6 +36,16 @@ Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest ye
   4. Entries and reversals only inside the entry window (default 09:15–22:45).
 - **Daily loss limit:** when realised plus open P&L reaches it, the page closes the position and the server halts the engine.
 
+## Entry filters (lib/orbFilters.ts, optional, off by default)
+
+- **Higher timeframe must agree** (`htfConfirm`: 3m / 5m / 15m / 1h, above the trading timeframe): an entry or reversal goes only when that timeframe's consensus (all indicators, closed bars: the Timeframes table's own rule) shows the entry's colour.
+- **No entry into a pivot** (`levelGuardPts`): no LONG with a classic CPR / R1-R4 / S1-S4 level (previous session) within N points above the price, no SHORT with one within N points below.
+- They only stop a NEW position. A filtered reversal still closes the open side (the signal is against it) and the Orb stays flat. They run in the engine tab (entries are decided there). The replay does not apply them.
+
+## Desktop notifications
+
+- Off by default; the monitor button in the header turns them on (the browser asks for permission once). Shown by the leader tab only, and only while the page is not in front: a halt, an UNKNOWN / stuck order, the server stop watcher down, no live price, a stale feed, or an automatic order that was refused or got no reply. Halts and UNKNOWN / stuck rows stay on screen until dismissed. Colour changes never notify.
+
 ## Orders (lib/signalOrbServer.ts)
 - The browser sends only `enter` / `exit` / `reverse`, the side and the decision price. The server reads lots, contract and broker from the ledger. It sizes the order from the broker's own lot (`brokerLegs`) and sends through the P&F executor `placePnfMarket(order, 'pnf', 'orba')`. Brokers: Dhan, Kotak and Zerodha. Product: MIS.
 - **No lot cap** (user's decision, 2026-11-20): `lots` is any whole number ≥ 1; `orba` has no per-source cap in `lib/dhanSourceCaps.ts` / `lib/kotakOrderRules.ts`, and the Orb's server passes `parsePnfOrder(…, { uncapped: true })` (a function argument, never read from a request body) past the P&F 20-lot cap. Orders above the MCX freeze quantity are rejected by the exchange, not sliced.
