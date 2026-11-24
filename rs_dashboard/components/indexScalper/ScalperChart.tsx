@@ -8,11 +8,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart, CandlestickSeries, LineSeries, HistogramSeries, ColorType, CrosshairMode, LineStyle, PriceScaleMode,
   type IChartApi, type ISeriesApi, type IPriceLine, type UTCTimestamp, type SeriesType, type MouseEventParams, type Time,
+  type AutoscaleInfo,
 } from 'lightweight-charts';
 import { Eye, EyeOff, Settings2, X, Plus, ArrowDown, ArrowUp, ArrowUpDown, Bell, FileText, Minus } from 'lucide-react';
 import { useChartChrome } from '@/lib/chartTheme';
 import { computeIndicator, indicatorLabel, tailUnchanged, type Bar, type IndicatorInstance, pointColor, flipsAtLast } from '@/lib/indexScalperIndicators';
-import { fmtRupees, legAnchor, legPnl, type ScalperLeg } from '@/lib/indexScalperPositions';
+import { bracketKind, fmtRupees, legAnchor, legPnl, type ScalperLeg } from '@/lib/indexScalperPositions';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { displayLotUnits, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
 import { readPref, savePref } from '@/lib/localPref';
@@ -90,6 +91,9 @@ function istLabel(shifted: number): string {
 }
 
 /** Split a coloured line into one series per colour, blank where the colour differs, so a flip leaves a gap instead of a diagonal. */
+/** Whole rupees with Indian grouping ("+9,120", "-2,640"), as the TP / SL / position chips show them. */
+const inrWhole = (n: number) => Math.round(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+
 export default function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, legs, entrySpots,
@@ -109,6 +113,8 @@ export default function ScalperChart(props: Props) {
   const orderLinesRef = useRef<Map<string, IPriceLine>>(new Map());
   const bracketLinesRef = useRef<Map<string, IPriceLine>>(new Map());
   const dragPriceLineRef = useRef<IPriceLine | null>(null);
+  /** Prices the autoscale must include: open positions, TP / SL and working orders (set below, read by the series). */
+  const scaleLevelsRef = useRef<number[]>([]);
   const drawLinesRef = useRef<IPriceLine[]>([]);
   const drawSeriesRef = useRef<ISeriesApi<'Line'>[]>([]);
   const toolRef = useRef<DrawTool>(tool);
@@ -158,6 +164,17 @@ export default function ScalperChart(props: Props) {
       upColor: UP, downColor: DOWN, borderUpColor: UP, borderDownColor: DOWN, wickUpColor: UP, wickDownColor: DOWN,
       // The axis label carries the symbol name next to the last price, as on Dhan's chart.
       priceLineVisible: true, lastValueVisible: true, title: symbolLabel.split(' · ')[0],
+      // Keep the position, TP / SL and working-order lines inside the price scale (as TradingView does), so a target
+      // or stop above / below the candles stays visible and draggable instead of sitting off-screen.
+      autoscaleInfoProvider: (original: () => AutoscaleInfo | null) => {
+        const base = original();
+        const extra = scaleLevelsRef.current;
+        if (!base || !base.priceRange || extra.length === 0) return base;
+        return { ...base, priceRange: {
+          minValue: Math.min(base.priceRange.minValue, ...extra),
+          maxValue: Math.max(base.priceRange.maxValue, ...extra),
+        } };
+      },
     });
     chartRef.current = chart;
     candleRef.current = candles;
@@ -389,7 +406,7 @@ export default function ScalperChart(props: Props) {
       seen.add(p.leg.id);
       // Entry line in crisp sky blue matching the reference screenshot
       const color = '#0284c7';
-      const opts = { price: p.anchor.level, color, lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${p.leg.type} ${p.leg.strike || ''}`.trim() };
+      const opts = { price: p.anchor.level, color, lineWidth: 1 as const, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: `${p.leg.type} ${p.leg.strike || ''}`.trim() };
       const ex = lines.get(p.leg.id);
       if (ex) ex.applyOptions(opts); else lines.set(p.leg.id, candles.createPriceLine(opts));
     }
@@ -438,11 +455,12 @@ export default function ScalperChart(props: Props) {
         const ordPrice = ord.price ?? ord.trigger ?? 0;
         if (ordPrice <= 0) continue;
 
-        const isTargetDirection = isLong ? (ordPrice >= p.anchor.level) : (ordPrice <= p.anchor.level);
-
-        if (!tp && isTargetDirection) {
+        if (!(p.anchor.level > 0)) continue;
+        // The order type decides (a stop order is the stop loss, a limit the target), as on Dhan's chart.
+        const kind = bracketKind(ot, ordPrice, p.anchor.level, isLong);
+        if (!tp && kind === 'TP') {
           tp = { price: ordPrice, orderId: ord.id, isSim: false };
-        } else if (!sl && !isTargetDirection) {
+        } else if (!sl && kind === 'SL') {
           sl = { price: ordPrice, orderId: ord.id, isSim: false };
         }
       }
@@ -451,6 +469,26 @@ export default function ScalperChart(props: Props) {
     }
     return res;
   }, [placed, simBrackets, tentativeBrackets, openOrders, underlying]);
+
+  // Autoscale levels: positions, TP / SL and working orders (the drag line is left out so the scale does not chase the
+  // mouse). Changing them re-fits the price scale.
+  useEffect(() => {
+    const lv: number[] = [];
+    for (const p of placed) {
+      if (p.anchor.level > 0) lv.push(p.anchor.level);
+      const b = activeBrackets[p.leg.id];
+      if (b?.tp) lv.push(b.tp.price);
+      if (b?.sl) lv.push(b.sl.price);
+    }
+    for (const o of openOrders) { const px = o.price ?? o.trigger; if (px && px > 0) lv.push(px); }
+    const key = lv.join(',');
+    if (key === scaleLevelsRef.current.join(',')) return;
+    scaleLevelsRef.current = lv;
+    chartRef.current?.priceScale('right').applyOptions({ autoScale: true });
+  }, [placed, activeBrackets, openOrders]);
+
+  // The last-price label names the instrument on screen: it follows an underlying switch (it was set once at mount).
+  useEffect(() => { candleRef.current?.applyOptions({ title: cName }); }, [cName]);
 
   // ── bracket lines (TP in emerald, SL in rose) ──────────────────────
   useEffect(() => {
@@ -465,14 +503,14 @@ export default function ScalperChart(props: Props) {
       if (b.tp) {
         const key = `tp_${p.leg.id}`;
         seen.add(key);
-        const opts = { price: b.tp.price, color: '#10b981', lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'TP' };
+        const opts = { price: b.tp.price, color: '#10b981', lineWidth: 1 as const, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'TP' };
         const ex = lines.get(key);
         if (ex) ex.applyOptions(opts); else lines.set(key, candles.createPriceLine(opts));
       }
       if (b.sl) {
         const key = `sl_${p.leg.id}`;
         seen.add(key);
-        const opts = { price: b.sl.price, color: '#ef4444', lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'SL' };
+        const opts = { price: b.sl.price, color: '#ef4444', lineWidth: 1 as const, lineStyle: LineStyle.Solid, axisLabelVisible: true, title: 'SL' };
         const ex = lines.get(key);
         if (ex) ex.applyOptions(opts); else lines.set(key, candles.createPriceLine(opts));
       }
@@ -621,8 +659,7 @@ export default function ScalperChart(props: Props) {
       let title = `${ord.qty ?? ''} ${ord.side} ${ord.orderType}`;
       if (matchedPos && matchedPos.anchor.level > 0 && ord.side === (matchedPos.leg.netQty > 0 ? 'SELL' : 'BUY')) {
         const isLong = matchedPos.leg.netQty > 0;
-        const ptDiff = isLong ? (p - matchedPos.anchor.level) : (matchedPos.anchor.level - p);
-        if (ptDiff >= 0) {
+        if (bracketKind(ord.orderType || '', p, matchedPos.anchor.level, isLong) === 'TP') {
           color = '#10b981'; // Green for TP
           title = 'TP';
         } else {
@@ -630,7 +667,7 @@ export default function ScalperChart(props: Props) {
           title = 'SL';
         }
       }
-      const opts = { price: p, color, lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title };
+      const opts = { price: p, color, lineWidth: 1 as const, lineStyle: LineStyle.Solid, axisLabelVisible: true, title };
       const ex = lines.get(ord.id);
       if (ex) ex.applyOptions(opts); else lines.set(ord.id, candles.createPriceLine(opts));
     }
@@ -978,8 +1015,8 @@ export default function ScalperChart(props: Props) {
           const ptDiff = isLong ? (p - matchedPos.anchor.level) : (matchedPos.anchor.level - p);
           const pct = (ptDiff / matchedPos.anchor.level) * 100;
           const pnl = ptDiff * totalUnits;
-          const isTp = ptDiff >= 0;
-          const kind: 'TP' | 'SL' = isTp ? 'TP' : 'SL';
+          const kind = bracketKind(ord.orderType || '', p, matchedPos.anchor.level, isLong);
+          const isTp = kind === 'TP';
 
           return (
             <div
@@ -998,7 +1035,7 @@ export default function ScalperChart(props: Props) {
                 className={cn('h-[22px] px-2 rounded-l flex items-center font-bold select-none border cursor-grab active:cursor-grabbing hover:brightness-110 transition-colors',
                   isTp ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-400' : 'bg-rose-950/90 border-rose-500/80 text-rose-400')}
               >
-                {isTp ? 'TP' : 'SL'} {pnl >= 0 ? '+' : ''}{fmt(Math.round(pnl))} ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)
+                {isTp ? 'TP' : 'SL'} {pnl >= 0 ? '+' : ''}{inrWhole(pnl)} ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)
               </div>
               <div
                 title={`Click and drag to move ${kind} to a new price`}
@@ -1087,7 +1124,7 @@ export default function ScalperChart(props: Props) {
                   }}
                   className="h-[22px] px-2 rounded-l flex items-center bg-emerald-950/90 border border-emerald-500/80 text-emerald-400 font-bold cursor-grab active:cursor-grabbing select-none"
                 >
-                  TP {tpPnl >= 0 ? '+' : ''}{fmt(Math.round(tpPnl))} ({tpPct >= 0 ? '+' : ''}{tpPct.toFixed(2)}%)
+                  TP {tpPnl >= 0 ? '+' : ''}{inrWhole(tpPnl)} ({tpPct >= 0 ? '+' : ''}{tpPct.toFixed(2)}%)
                 </div>
                 <div
                   title="Click and drag to move Target Profit to a new price"
@@ -1137,7 +1174,7 @@ export default function ScalperChart(props: Props) {
                   }}
                   className="h-[22px] px-2 rounded-l flex items-center bg-rose-950/90 border border-rose-500/80 text-rose-400 font-bold cursor-grab active:cursor-grabbing select-none"
                 >
-                  SL {slPnl >= 0 ? '' : ''}{fmt(Math.round(slPnl))} ({slPct >= 0 ? '+' : ''}{slPct.toFixed(2)}%)
+                  SL {slPnl >= 0 ? '+' : ''}{inrWhole(slPnl)} ({slPct >= 0 ? '+' : ''}{slPct.toFixed(2)}%)
                 </div>
                 <div
                   title="Click and drag to move Stop Loss to a new price"
@@ -1190,7 +1227,7 @@ export default function ScalperChart(props: Props) {
             {dragState.kind === 'TP' ? (
               <>
                 <div className="h-[22px] px-2 rounded-l flex items-center bg-emerald-950/95 border border-emerald-400 text-emerald-300 font-bold">
-                  TP {dragPnl >= 0 ? '+' : ''}{fmt(Math.round(dragPnl))} ({dragPct >= 0 ? '+' : ''}{dragPct.toFixed(2)}%)
+                  TP {dragPnl >= 0 ? '+' : ''}{inrWhole(dragPnl)} ({dragPct >= 0 ? '+' : ''}{dragPct.toFixed(2)}%)
                 </div>
                 <div className="h-[22px] px-2 rounded-r flex items-center bg-zinc-900 border border-emerald-500/80 border-l-0 text-zinc-100">
                   {dragState.lots} {dragState.isLong ? 'Sell' : 'Buy'} Limit
@@ -1199,7 +1236,7 @@ export default function ScalperChart(props: Props) {
             ) : (
               <>
                 <div className="h-[22px] px-2 rounded-l flex items-center bg-rose-950/95 border border-rose-400 text-rose-300 font-bold">
-                  SL {dragPnl >= 0 ? '' : ''}{fmt(Math.round(dragPnl))} ({dragPct >= 0 ? '+' : ''}{dragPct.toFixed(2)}%)
+                  SL {dragPnl >= 0 ? '+' : ''}{inrWhole(dragPnl)} ({dragPct >= 0 ? '+' : ''}{dragPct.toFixed(2)}%)
                 </div>
                 <div className="h-[22px] px-2 rounded-r flex items-center bg-zinc-900 border border-rose-500/80 border-l-0 text-zinc-100">
                   {dragState.lots} {dragState.isLong ? 'Sell' : 'Buy'} Stop Market
@@ -1283,7 +1320,7 @@ export default function ScalperChart(props: Props) {
 
             {/* Live P&L INR (+0.00%) */}
             <span className={cn('h-[18px] px-1 flex items-center text-[10px] font-semibold', pnlCls)}>
-              {curPnl >= 0 ? '+' : ''}{Math.round(curPnl)} INR ({curPct >= 0 ? '+' : ''}{curPct.toFixed(2)}%)
+              {curPnl >= 0 ? '+' : ''}{inrWhole(curPnl)} INR ({curPct >= 0 ? '+' : ''}{curPct.toFixed(2)}%)
             </span>
 
             {p.leg.sim && (

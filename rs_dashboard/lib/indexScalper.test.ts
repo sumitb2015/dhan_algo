@@ -292,3 +292,16 @@ test('futures legs: CRUDEOILM only, and never the full-size CRUDEOIL or a NIFTY 
   ], new Map());
   assert.equal(legs.length, 0);
 });
+
+test('a future is drawn at its average (the chart is that future); TP / SL follow the order type', async () => {
+  const { legAnchor: anchor, bracketKind } = await import('./indexScalperPositions.ts');
+  const fut = { id: 'f', securityId: '9001', product: 'INTRADAY', symbol: 'CRUDEOILM-18Dec2026-FUT', strike: 0, type: 'FUT' as const, netQty: 6, avg: 6110, ltp: 6120, sim: false, mult: 10 };
+  assert.deepEqual(anchor(fut, undefined), { level: 6110, kind: 'avg' });
+  assert.deepEqual(anchor(fut, 6000), { level: 6110, kind: 'avg' }); // not the spot at entry: the chart is the future
+  // A stop below a long is the SL, a limit above it the TP; the type wins even on the "wrong" side of the entry.
+  assert.equal(bracketKind('SL-M', 6095, 6110, true), 'SL');
+  assert.equal(bracketKind('Limit', 6140, 6110, true), 'TP');
+  assert.equal(bracketKind('SL', 6125, 6110, true), 'SL');
+  assert.equal(bracketKind('STOP_LOSS_MARKET', 6130, 6110, false), 'SL');
+  assert.equal(bracketKind('', 6090, 6110, false), 'TP'); // unknown type: side of the entry decides
+});

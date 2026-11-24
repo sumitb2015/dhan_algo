@@ -28,12 +28,24 @@ export interface ScalperLeg {
   mult?: number;
 }
 
-/** Index level this leg is drawn at on the chart: the spot recorded when this page opened it, else the strike. */
-export interface LegAnchor { level: number; kind: 'entry' | 'strike' }
+/** Level this leg is drawn at on the chart. A future is drawn at its own average price: the chart IS that future
+ *  (CRUDEOILM), so the average is exact, and it holds after a reload or for a position opened elsewhere (a future has
+ *  no strike to fall back on). An option: the spot recorded when this page opened it, else the strike. */
+export interface LegAnchor { level: number; kind: 'entry' | 'strike' | 'avg' }
 
 export function legAnchor(leg: ScalperLeg, spotAtEntry: number | undefined): LegAnchor {
+  if (leg.type === 'FUT' && Number.isFinite(leg.avg) && leg.avg > 0) return { level: leg.avg, kind: 'avg' };
   if (spotAtEntry !== undefined && Number.isFinite(spotAtEntry) && spotAtEntry > 0) return { level: spotAtEntry, kind: 'entry' };
   return { level: leg.strike, kind: 'strike' };
+}
+
+/** TP or SL for a working order that closes a position drawn at `anchor`: the order type decides (a stop order is a
+ *  stop loss wherever it sits, a limit is a target); only an unknown type falls back to which side of the entry it is. */
+export function bracketKind(orderType: string, price: number, anchor: number, isLong: boolean): 'TP' | 'SL' {
+  const t = orderType.toUpperCase().replace(/[\s_-]/g, '');
+  if (t.includes('STOP') || t.startsWith('SL')) return 'SL';
+  if (t.includes('LIMIT') || t === 'L' || t === 'LMT') return 'TP';
+  return (isLong ? price >= anchor : price <= anchor) ? 'TP' : 'SL';
 }
 
 /** Open P&L in rupees; null when the LTP is unknown. */
