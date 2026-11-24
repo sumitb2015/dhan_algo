@@ -860,12 +860,22 @@ def main():
                     if prev_close == 0.0:
                         prev_close = fallback_prev_close
                     
-                    change = ltp - prev_close if prev_close > 0 else 0.0
-                    change_pct = (change / prev_close * 100) if prev_close > 0 else 0.0
+                    if ltp <= 0.0 and prev_close > 0:
+                        effective_ltp = prev_close
+                        change = 0.0
+                        change_pct = 0.0
+                    elif ltp > 0 and prev_close > 0:
+                        effective_ltp = ltp
+                        change = ltp - prev_close
+                        change_pct = (change / prev_close * 100)
+                    else:
+                        effective_ltp = ltp
+                        change = 0.0
+                        change_pct = 0.0
                     oi_chg_pct = ((oi - side_prev_oi) / side_prev_oi * 100) if side_prev_oi > 0 and oi > 0 else 0.0
 
                     strikes_data[sk_key][meta['type'].lower()] = {
-                        'ltp':    round(ltp, 2),
+                        'ltp':    round(effective_ltp, 2),
                         'oi':     oi,
                         'volume': vol,
                         'open':   round(_f(tick.get('open')), 2),

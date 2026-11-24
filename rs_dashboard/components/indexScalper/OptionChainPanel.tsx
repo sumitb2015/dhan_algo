@@ -85,7 +85,9 @@ export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onCl
 
   const contract = (strike: number, type: 'CE' | 'PE', ltp: number | undefined): PickedContract => {
     const ids = strikeIds.get(strike);
-    return { strike, type, securityId: (type === 'CE' ? ids?.ceId : ids?.peId) ?? null, ltp: ltp && ltp > 0 ? ltp : null, expiry: feed.expiry };
+    const sideData = type === 'CE' ? quotes?.strikes?.[String(strike)]?.ce : quotes?.strikes?.[String(strike)]?.pe;
+    const finalLtp = (ltp && ltp > 0) ? ltp : (sideData?.prev_close && sideData.prev_close > 0) ? sideData.prev_close : null;
+    return { strike, type, securityId: (type === 'CE' ? ids?.ceId : ids?.peId) ?? null, ltp: finalLtp, expiry: feed.expiry };
   };
   const pick = (strike: number, type: 'CE' | 'PE', ltp: number | undefined) => onPick(contract(strike, type, ltp));
 
@@ -203,32 +205,36 @@ export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onCl
             )}
             {rows.map(r => {
               const atm = r.strike === (atmStrike ?? quotes?.atm);
+              const cePrice = (r.ce?.ltp && r.ce.ltp > 0) ? r.ce.ltp : (r.ce?.prev_close && r.ce.prev_close > 0) ? r.ce.prev_close : null;
+              const pePrice = (r.pe?.ltp && r.pe.ltp > 0) ? r.pe.ltp : (r.pe?.prev_close && r.pe.prev_close > 0) ? r.pe.prev_close : null;
+              const ceChg = r.ce?.ltp && r.ce.ltp > 0 ? r.ce.change_pct : (r.ce?.change_pct === -100 && (!r.ce.volume || r.ce.volume === 0)) ? 0 : r.ce?.change_pct;
+              const peChg = r.pe?.ltp && r.pe.ltp > 0 ? r.pe.change_pct : (r.pe?.change_pct === -100 && (!r.pe.volume || r.pe.volume === 0)) ? 0 : r.pe?.change_pct;
               return (
                 <tr key={r.strike} className={cn('group border-t border-zinc-800/70 hover:bg-zinc-800/60', atm && 'bg-sky-500/10')}>
                   <td className="px-2 py-1"><Buildup code={r.ce?.buildup} /></td>
                   <td className="px-2 text-right text-zinc-200">{fmtOI(r.ce?.oi)}</td>
                   <td className={cn('px-2 text-right', pctCls(r.ce?.oi_chg_pct))}>{pct(r.ce?.oi_chg_pct)}</td>
-                  <td className={cn('px-2 text-right', pctCls(r.ce?.change_pct))}>{pct(r.ce?.change_pct)}</td>
+                  <td className={cn('px-2 text-right', pctCls(ceChg))}>{pct(ceChg)}</td>
                   <td className="px-1 text-right">
                     <span className="flex items-center justify-end gap-1">
-                      {tradeButtons(r.strike, 'CE', r.ce?.ltp)}
-                      <button type="button" onClick={() => pick(r.strike, 'CE', r.ce?.ltp)} aria-label={`Trade ${r.strike} CE`}
+                      {tradeButtons(r.strike, 'CE', cePrice ?? undefined)}
+                      <button type="button" onClick={() => pick(r.strike, 'CE', cePrice ?? undefined)} aria-label={`Trade ${r.strike} CE`}
                         className="px-1.5 py-0.5 rounded font-bold text-zinc-100 hover:bg-sky-600 hover:text-oncolor focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60">
-                        {r.ce?.ltp ? r.ce.ltp.toFixed(2) : '—'}
+                        {cePrice ? cePrice.toFixed(2) : '—'}
                       </button>
                     </span>
                   </td>
                   <td className={cn('px-2 text-center font-bold', atm ? 'text-sky-300' : 'text-zinc-100')}>{r.strike}</td>
                   <td className="px-1 text-left">
                     <span className="flex items-center justify-start gap-1">
-                      <button type="button" onClick={() => pick(r.strike, 'PE', r.pe?.ltp)} aria-label={`Trade ${r.strike} PE`}
+                      <button type="button" onClick={() => pick(r.strike, 'PE', pePrice ?? undefined)} aria-label={`Trade ${r.strike} PE`}
                         className="px-1.5 py-0.5 rounded font-bold text-zinc-100 hover:bg-rose-600 hover:text-oncolor focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/60">
-                        {r.pe?.ltp ? r.pe.ltp.toFixed(2) : '—'}
+                        {pePrice ? pePrice.toFixed(2) : '—'}
                       </button>
-                      {tradeButtons(r.strike, 'PE', r.pe?.ltp)}
+                      {tradeButtons(r.strike, 'PE', pePrice ?? undefined)}
                     </span>
                   </td>
-                  <td className={cn('px-2 text-right', pctCls(r.pe?.change_pct))}>{pct(r.pe?.change_pct)}</td>
+                  <td className={cn('px-2 text-right', pctCls(peChg))}>{pct(peChg)}</td>
                   <td className={cn('px-2 text-right', pctCls(r.pe?.oi_chg_pct))}>{pct(r.pe?.oi_chg_pct)}</td>
                   <td className="px-2 text-right text-zinc-200">{fmtOI(r.pe?.oi)}</td>
                   <td className="px-2 text-right"><Buildup code={r.pe?.buildup} /></td>
