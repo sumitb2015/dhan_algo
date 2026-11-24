@@ -18,7 +18,9 @@ function candles() {
   });
 }
 
-async function mockApi(page: Page, state: { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[] }) {
+type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[] };
+
+async function mockApi(page: Page, state: MockState) {
   await page.route('**/api/**', async (route: Route) => {
     const req = route.request();
     const u = new URL(req.url());
@@ -27,7 +29,7 @@ async function mockApi(page: Page, state: { calls: Call[]; blocked: Call[]; posi
     const body = method === 'GET' ? null : (req.postDataJSON() as Record<string, unknown> | null);
 
     if (p === '/api/index-scalper/candles') return json(route, { success: true, candles: candles(), interval: '5' });
-    if (p === '/api/options/expiries') return json(route, { success: true, data: ['2026-12-01'] });
+    if (p === '/api/options/expiries') return json(route, { success: true, data: ['2026-12-01', '2026-12-08'] });
     if (p === '/api/scalper/lookup') {
       const strikes = Object.fromEntries(Object.entries(IDS).map(([k, [ce, pe]]) => [k, { ceId: ce, peId: pe }]));
       return json(route, { success: true, data: { lotSize: 65, strikes } });
@@ -39,10 +41,12 @@ async function mockApi(page: Page, state: { calls: Call[]; blocked: Call[]; posi
         ce: { ltp: 210.5, oi: 1_200_000, oi_chg_pct: 12.5, change_pct: -3.2, buildup: 'SB' },
         pe: { ltp: 229.95, oi: 2_300_000, oi_chg_pct: -4.1, change_pct: 5.5, buildup: 'LB' },
       }]));
-      return json(route, { success: true, status: { status: 'RUNNING' }, quotes: { underlying: 'NIFTY', expiry: '2026-12-01', spot: SPOT, atm: SPOT, updated_at: new Date().toISOString(), strikes } });
+      const expiry = u.searchParams.get('expiry') || '2026-12-01';
+      return json(route, { success: true, status: { status: 'RUNNING' }, quotes: { underlying: 'NIFTY', expiry, spot: SPOT, atm: SPOT, updated_at: new Date().toISOString(), strikes } });
     }
     if (p === '/api/scalper/funds') return json(route, { success: true, data: { availabelBalance: 4684089.17, utilizedAmount: 0 } });
     if (p === '/api/scalper/positions') return json(route, { success: true, data: state.positions });
+    if (p === '/api/scalper/orders' && method === 'GET') return json(route, { success: true, data: state.orders ?? [] });
     if (p === '/api/scalper/fast-order') {
       state.calls.push({ path: p, body });
       state.positions = [];
@@ -114,13 +118,18 @@ test.describe('Index Scalper', () => {
     expect(state.blocked).toEqual([]);
   });
 
-  test('REAL: arming is explicit, broker position is drawn, Exit sizes off the live row and tags source isx', async ({ page, context }) => {
-    const state = {
-      calls: [] as Call[], blocked: [] as Call[],
+  test('REAL: arming is explicit, broker position is drawn, Exit closes only what this page opened and tags source isx', async ({ page, context }) => {
+    const state: MockState = {
+      calls: [], blocked: [],
+      // 715 at the broker, of which this page's isx orders filled 65; the other 650 belong to a strategy.
       positions: [{
         tradingSymbol: 'NIFTY-Dec2026-25350-PE', securityId: '402', exchangeSegment: 'NSE_FNO', productType: 'INTRADAY',
-        netQty: 65, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG',
-      }] as Record<string, unknown>[],
+        netQty: 715, buyAvg: 200, costPrice: 200, sellAvg: 0, positionType: 'LONG',
+      }],
+      orders: [
+        { correlationId: 'isxk1', securityId: '402', productType: 'INTRADAY', transactionType: 'BUY', filledQty: 65 },
+        { correlationId: '', securityId: '402', productType: 'INTRADAY', transactionType: 'BUY', filledQty: 650 },
+      ],
     };
     await signIn(context);
     await mockApi(page, state);
@@ -137,7 +146,7 @@ test.describe('Index Scalper', () => {
     await expect(chip).toBeVisible({ timeout: 15_000 });
     await expect(chip).toContainText('PE 25350');
     await expect(chip).toContainText('@ 200.00');
-    await expect(page.getByTestId('open-pnl')).toContainText('+₹1,947');
+    await expect(page.getByTestId('open-pnl')).toContainText('+₹21,414');
 
     await page.getByRole('button', { name: 'Exit PE 25350' }).click();
     await expect.poll(() => state.calls.length, { timeout: 15_000 }).toBe(1);
@@ -145,6 +154,45 @@ test.describe('Index Scalper', () => {
       securityId: '402', quantity: 65, side: 'SELL', orderType: 'MARKET', productType: 'INTRADAY', source: 'isx', exchangeSegment: 'NSE_FNO',
     });
     expect(String(state.calls[0].body?.idempotencyKey ?? '').length).toBeGreaterThanOrEqual(8);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('REAL Exit All: one order per owned row, never a second pass, legs it did not open are left alone', async ({ page, context }) => {
+    const row = { tradingSymbol: 'NIFTY-Dec2026-25350-PE', securityId: '402', exchangeSegment: 'NSE_FNO', sellAvg: 230, buyAvg: 0, positionType: 'SHORT' };
+    const state: MockState = {
+      calls: [], blocked: [],
+      positions: [
+        { ...row, productType: 'INTRADAY', netQty: -65 },
+        { ...row, productType: 'INTRADAY', netQty: -65 }, // Dhan's verbatim duplicate row
+        { ...row, productType: 'MARGIN', netQty: -65 }, // opened elsewhere
+      ],
+      orders: [{ correlationId: 'isxk2', securityId: '402', productType: 'INTRADAY', transactionType: 'SELL', filledQty: 65 }],
+    };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'REAL', exact: true }).click();
+    await page.getByRole('button', { name: 'Arm REAL' }).click();
+    await expect(page.getByTestId('position-chip')).toHaveCount(2, { timeout: 15_000 });
+
+    await page.getByRole('button', { name: 'Exit All' }).click();
+    await expect(page.getByRole('status').filter({ hasText: 'Exit All' })).toContainText('1 leg(s) not opened from this page left open', { timeout: 15_000 });
+    expect(state.calls.length).toBe(1);
+    expect(state.calls[0].body).toMatchObject({ securityId: '402', quantity: 65, side: 'BUY', productType: 'INTRADAY', source: 'isx' });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('an open ticket closes when the expiry changes, so it can never send the previous expiry\'s contract', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [] };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Trade 25350 CE' }).click({ timeout: 60_000 });
+    await expect(page.getByTestId('order-ticket')).toContainText('2026-12-01');
+    await page.getByTestId('option-chain-panel').getByRole('combobox').selectOption('2026-12-08');
+    await expect(page.getByTestId('order-ticket')).toHaveCount(0);
+    expect(state.calls).toEqual([]);
     expect(state.blocked).toEqual([]);
   });
 });

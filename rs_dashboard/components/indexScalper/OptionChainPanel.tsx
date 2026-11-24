@@ -9,7 +9,11 @@ import type { IndexScalperFeed } from './useIndexScalperFeed';
 import { useDraggable } from './useDraggable';
 import { cn } from '@/lib/utils';
 
-export interface PickedContract { strike: number; type: 'CE' | 'PE'; securityId: string | null; ltp: number | null }
+export interface PickedContract {
+  strike: number; type: 'CE' | 'PE'; securityId: string | null; ltp: number | null;
+  /** Expiry the security id belongs to; the terminal refuses an order once the chain shows another. */
+  expiry: string;
+}
 
 const BUILDUP: Record<string, { label: string; cls: string }> = {
   LB: { label: 'Long Buildup', cls: 'text-emerald-400 border-emerald-500/40' },
@@ -53,7 +57,7 @@ export default function OptionChainPanel({ feed, onPick, onClose, wings = 8 }: {
 
   const pick = (strike: number, type: 'CE' | 'PE', ltp: number | undefined) => {
     const ids = strikeIds.get(strike);
-    onPick({ strike, type, securityId: (type === 'CE' ? ids?.ceId : ids?.peId) ?? null, ltp: ltp && ltp > 0 ? ltp : null });
+    onPick({ strike, type, securityId: (type === 'CE' ? ids?.ceId : ids?.peId) ?? null, ltp: ltp && ltp > 0 ? ltp : null, expiry: feed.expiry });
   };
 
   return (

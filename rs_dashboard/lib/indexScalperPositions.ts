@@ -4,11 +4,15 @@
 // the positions strip have one shape. Quantity is always UNITS (NSE index options: lots x lot size).
 
 import { parseTradingSymbol } from './positionLegs.ts';
+import { dedupePositions, positionProduct } from './positionProduct.ts';
 
 export interface ScalperLeg {
-  /** Stable key: Dhan security id (REAL) or the same id for the SIM row. */
+  /** Stable key: `securityId|product` for a REAL broker row (a security can carry an INTRADAY and a MARGIN row), the
+   *  security id for a SIM row. Entry spots are keyed by `securityId`, not by this. */
   id: string;
   securityId: string;
+  /** Broker product of a REAL row (INTRADAY / MARGIN); '' for SIM. */
+  product: string;
   symbol: string;
   strike: number;
   type: 'CE' | 'PE';
@@ -36,15 +40,21 @@ export function legPnl(leg: ScalperLeg): number | null {
 }
 
 export function totalPnl(legs: ScalperLeg[]): number | null {
+  return pnlSummary(legs).pnl;
+}
+
+/** Open P&L plus how many legs it leaves out for want of a live price, so a partial total is never shown as complete. */
+export function pnlSummary(legs: ScalperLeg[]): { pnl: number | null; unpriced: number } {
   let sum = 0;
   let any = false;
+  let unpriced = 0;
   for (const l of legs) {
     const p = legPnl(l);
-    if (p === null) continue;
+    if (p === null) { unpriced++; continue; }
     sum += p;
     any = true;
   }
-  return any ? sum : null;
+  return { pnl: any ? sum : null, unpriced };
 }
 
 /** Hard cap on lots per click (also enforced server-side through the `isx` source cap). */
@@ -60,13 +70,37 @@ export function orderUnits(lots: number, lotSize: number | null): SizeCheck {
   return { ok: true, units: lots * lotSize };
 }
 
-/** Units to close for `leg`: always the position's own open quantity (capped by what is live), side opposite to it. */
-export function closeOrder(leg: ScalperLeg, liveNetQty: number): { side: 'BUY' | 'SELL'; units: number } | null {
-  if (liveNetQty === 0) return null;
-  // Never exceed what the broker still shows, and never flip a position the broker has already reduced.
-  const units = Math.abs(liveNetQty);
-  if (leg.netQty !== 0 && Math.sign(leg.netQty) !== Math.sign(liveNetQty)) return null;
-  return { side: liveNetQty > 0 ? 'SELL' : 'BUY', units };
+/** correlationId prefix the order route stamps on every order this page sends (`source: 'isx'`). */
+export const ISX_SOURCE = 'isx';
+
+export const ownKey = (securityId: string, product: string) => `${securityId}|${product.toUpperCase()}`;
+
+/** Signed units this page's own orders have FILLED today, per `ownKey(securityId, product)`, read from Dhan's order
+ *  book (every order this page sends carries an `isx…` correlationId). Unfilled / rejected orders count 0 — only
+ *  `filledQty` moves ownership — and this page's exits net it back down. Quantity opened by a strategy, another terminal
+ *  or by hand never appears here, so it can never be closed from this page. */
+export function ownedQtyFromOrders(orders: Record<string, unknown>[], source = ISX_SOURCE): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const o of orders) {
+    if (!String(o.correlationId ?? '').startsWith(source)) continue;
+    const filled = Number(o.filledQty);
+    if (!Number.isFinite(filled) || filled <= 0) continue;
+    const side = String(o.transactionType ?? '').toUpperCase();
+    if (side !== 'BUY' && side !== 'SELL') continue;
+    const securityId = String(o.securityId ?? '');
+    if (!securityId) continue;
+    const k = ownKey(securityId, String(o.productType ?? ''));
+    out.set(k, (out.get(k) ?? 0) + (side === 'BUY' ? filled : -filled));
+  }
+  return out;
+}
+
+/** Close order for one broker row: what this page owns, clamped by what the broker still shows, side opposite to it.
+ *  null when the page owns nothing in that direction (the rest belongs to someone else and is left alone). */
+export function ownedCloseOrder(brokerNet: number, owned: number): { side: 'BUY' | 'SELL'; units: number } | null {
+  if (!Number.isFinite(brokerNet) || !Number.isFinite(owned) || brokerNet === 0 || owned === 0) return null;
+  if (Math.sign(brokerNet) !== Math.sign(owned)) return null;
+  return { side: brokerNet > 0 ? 'SELL' : 'BUY', units: Math.min(Math.abs(brokerNet), Math.abs(owned)) };
 }
 
 /** Apply a fill to a signed position, returning the new net qty and average (average of the open lot only). */
@@ -90,10 +124,12 @@ export function parseNiftyOption(tradingSymbol: string): { strike: number; type:
   return { strike: p.strike, type: p.type === 'CE' ? 'CE' : 'PE' };
 }
 
-/** Normalise raw Dhan position rows into NIFTY option legs (open quantity only). */
+/** Normalise raw Dhan position rows into NIFTY option legs (open quantity only), one per (security, product) row.
+ *  Dhan's verbatim duplicate rows are collapsed first so no leg is counted or closed twice. */
 export function legsFromDhanPositions(rows: Record<string, unknown>[], ltpById: Map<string, number>): ScalperLeg[] {
   const out: ScalperLeg[] = [];
-  for (const r of rows) {
+  const seen = new Set<string>();
+  for (const r of dedupePositions(rows)) {
     const sym = String(r.tradingSymbol ?? r.trading_symbol ?? '');
     const parsed = parseNiftyOption(sym);
     if (!parsed) continue;
@@ -104,9 +140,13 @@ export function legsFromDhanPositions(rows: Record<string, unknown>[], ltpById: 
     const avgRaw = netQty > 0 ? Number(r.buyAvg) : Number(r.sellAvg);
     const avg = Number.isFinite(avgRaw) && avgRaw > 0 ? avgRaw : Number(r.costPrice);
     if (!Number.isFinite(avg) || avg <= 0) continue;
+    const product = positionProduct(r);
+    const id = ownKey(securityId, product);
+    if (seen.has(id)) continue;
+    seen.add(id);
     const live = ltpById.get(securityId);
     out.push({
-      id: securityId, securityId, symbol: sym, strike: parsed.strike, type: parsed.type,
+      id, securityId, product, symbol: sym, strike: parsed.strike, type: parsed.type,
       netQty, avg, ltp: live !== undefined && live > 0 ? live : null, sim: false,
     });
   }

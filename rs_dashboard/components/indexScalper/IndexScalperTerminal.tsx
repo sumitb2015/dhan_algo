@@ -21,9 +21,9 @@ import {
   applyTick, newIndicator, type Bar, type IndicatorInstance, type IndicatorKind,
 } from '@/lib/indexScalperIndicators';
 import {
-  MAX_LOTS, applyFill, closeOrder, fmtRupees, legsFromDhanPositions, orderUnits, totalPnl, type ScalperLeg,
+  MAX_LOTS, applyFill, fmtRupees, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, pnlSummary, type ScalperLeg,
 } from '@/lib/indexScalperPositions';
-import { closeOrderProduct, positionProduct } from '@/lib/positionProduct';
+import { closeOrderProduct } from '@/lib/positionProduct';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 
@@ -202,10 +202,10 @@ export default function IndexScalperTerminal() {
     if (real) return legsFromDhanPositions(realRows, feed.ltpById);
     return Object.values(sim.legs).filter(l => l.netQty !== 0).map(l => {
       const live = feed.ltpById.get(l.securityId);
-      return { id: l.securityId, securityId: l.securityId, symbol: l.symbol, strike: l.strike, type: l.type, netQty: l.netQty, avg: l.avg, ltp: live ?? null, sim: true };
+      return { id: l.securityId, securityId: l.securityId, product: '', symbol: l.symbol, strike: l.strike, type: l.type, netQty: l.netQty, avg: l.avg, ltp: live ?? null, sim: true };
     });
   }, [real, realRows, sim.legs, feed.ltpById]);
-  const openPnl = totalPnl(legs);
+  const { pnl: openPnl, unpriced } = pnlSummary(legs);
 
   // ── order placement ────────────────────────────────────────────────
   interface Outcome { ok: boolean; unknown?: boolean; text: string }
@@ -249,6 +249,8 @@ export default function IndexScalperTerminal() {
     if (!size.ok) return { ok: false, text: size.error };
     const c = req.contract;
     if (!c.securityId) return { ok: false, text: 'No security id for this strike' };
+    // The security id was picked for one expiry; never send it under a ticket that now shows another.
+    if (c.expiry !== f.expiry) return { ok: false, text: `This ticket was opened for the ${c.expiry || 'previous'} expiry: reopen it from the chain` };
     const live = (c.type === 'CE' ? f.ltpById.get(c.securityId) : f.ltpById.get(c.securityId)) ?? null;
     const symbol = `NIFTY-${f.expiry}-${c.strike}-${c.type}`;
 
@@ -291,26 +293,42 @@ export default function IndexScalperTerminal() {
     if (leg.ltp === null) return { ok: false, text: 'No live price to close the paper position' };
     const sl = sim.legs[leg.id];
     if (!sl || sl.netQty === 0) return { ok: true, text: 'Already flat' };
-    simFill({ strike: sl.strike, type: sl.type, securityId: sl.securityId, ltp: leg.ltp }, sl.netQty > 0 ? 'SELL' : 'BUY', Math.abs(sl.netQty), leg.ltp, sl.symbol);
+    simFill({ strike: sl.strike, type: sl.type, securityId: sl.securityId, ltp: leg.ltp, expiry: '' }, sl.netQty > 0 ? 'SELL' : 'BUY', Math.abs(sl.netQty), leg.ltp, sl.symbol);
     return { ok: true, text: `SIM closed ${sl.strike} ${sl.type} @ ${leg.ltp.toFixed(2)}` };
   }, [sim.legs, simFill]);
 
-  /** Close every live broker row of `securityId` (a security can carry several products), from the broker's own quantity. */
-  const exitRealSecurity = useCallback(async (securityId: string, rows: Record<string, unknown>[]): Promise<Outcome> => {
-    const mine = rows.filter(r => String(r.securityId ?? r.security_id ?? '') === securityId && Number(r.netQty) !== 0);
-    if (mine.length === 0) return { ok: true, text: 'Already flat' };
-    let last: Outcome = { ok: true, text: 'Closed' };
-    for (const row of mine) {
-      const net = Number(row.netQty);
-      const order = closeOrder({ netQty: net } as ScalperLeg, net);
-      if (!order) continue;
-      const product = closeOrderProduct('dhan', positionProduct(row));
-      if (!product || product.assumed) return { ok: false, text: `Unsupported or missing product "${positionProduct(row)}": square this leg off at the broker` };
-      last = await sendReal({ securityId, quantity: order.units, side: order.side, orderType: 'MARKET', ...product.fields });
-      if (!last.ok) return last;
+  /** Signed units this page's own (`isx`-tagged) orders filled today, per security + product, from Dhan's order book.
+   *  null when the book cannot be read: an exit is then refused rather than sized off the broker's whole position. */
+  const loadOwned = useCallback(async (): Promise<Map<string, number> | null> => {
+    try {
+      const r = await fetch('/api/scalper/orders');
+      const j = await r.json() as { success: boolean; data?: Record<string, unknown>[] };
+      return j.success && Array.isArray(j.data) ? ownedQtyFromOrders(j.data) : null;
+    } catch { return null; }
+  }, []);
+
+  /** Close what THIS page opened on one broker row (security + product), clamped by what the broker still shows.
+   *  Quantity a strategy, another terminal or a manual order holds on the same contract is never touched. */
+  const exitRealRow = useCallback(async (leg: ScalperLeg, owned: Map<string, number>): Promise<Outcome & { skipped?: boolean }> => {
+    const label = `${leg.strike} ${leg.type}${leg.product ? ` ${leg.product}` : ''}`;
+    const order = ownedCloseOrder(leg.netQty, owned.get(leg.id) ?? 0);
+    if (!order) return { ok: false, skipped: true, text: `${label}: not opened from this page today, left open (square it off where it was opened)` };
+    const product = closeOrderProduct('dhan', leg.product);
+    if (!product || product.assumed) return { ok: false, text: `${label}: unsupported or missing product "${leg.product}", square it off at the broker` };
+    const out = await sendReal({ securityId: leg.securityId, quantity: order.units, side: order.side, orderType: 'MARKET', ...product.fields });
+    if (out.ok && order.units < Math.abs(leg.netQty)) {
+      return { ...out, text: `${out.text}: closed ${order.units} of ${Math.abs(leg.netQty)}, the rest was not opened from this page` };
     }
-    return last;
+    return out;
   }, [sendReal]);
+
+  /** Fresh broker rows + ownership, read together right before an exit. */
+  const readExitState = useCallback(async (): Promise<{ live: ScalperLeg[]; owned: Map<string, number> } | string> => {
+    const [rows, owned] = await Promise.all([loadPositions(), loadOwned()]);
+    if (!rows) return 'Could not read live positions: nothing was closed';
+    if (!owned) return 'Could not read the order book to tell which quantity this page opened: nothing was closed';
+    return { live: legsFromDhanPositions(rows, feedRef.current.ltpById), owned };
+  }, [loadPositions, loadOwned]);
 
   const exitLeg = useCallback(async (leg: ScalperLeg) => {
     if (exitingId) return;
@@ -319,13 +337,17 @@ export default function IndexScalperTerminal() {
       let out: Outcome;
       if (!real) out = exitSimLeg(leg);
       else {
-        const rows = await loadPositions();
-        out = rows ? await exitRealSecurity(leg.securityId, rows) : { ok: false, text: 'Could not read live positions to size the exit' };
+        const st = await readExitState();
+        if (typeof st === 'string') out = { ok: false, text: st };
+        else {
+          const row = st.live.find(l => l.id === leg.id);
+          out = row ? await exitRealRow(row, st.owned) : { ok: true, text: 'Already flat' };
+        }
         loadPositions();
       }
       flash({ ok: out.ok, text: out.text });
     } finally { setExitingId(null); }
-  }, [exitingId, real, exitSimLeg, loadPositions, exitRealSecurity, flash]);
+  }, [exitingId, real, exitSimLeg, readExitState, exitRealRow, loadPositions, flash]);
 
   const exitAll = useCallback(async () => {
     if (exitingId || legs.length === 0) return;
@@ -337,20 +359,28 @@ export default function IndexScalperTerminal() {
         flash({ ok: failed === 0, text: failed ? `${failed} paper leg(s) had no live price` : 'SIM: all positions closed' });
         return;
       }
-      const rows = await loadPositions();
-      if (!rows) { flash({ ok: false, text: 'Could not read live positions: nothing was closed' }); return; }
-      const live = legsFromDhanPositions(rows, feed.ltpById);
-      // Cover shorts before selling longs so a hedge is never gone while its short is still open.
-      const ordered = [...live.filter(l => l.netQty < 0), ...live.filter(l => l.netQty > 0)];
+      const st = await readExitState();
+      if (typeof st === 'string') { flash({ ok: false, text: st }); return; }
+      // One pass per broker row (legs are already one per security + product, duplicates collapsed), so no row is
+      // closed twice. Cover shorts before selling longs so a hedge is never gone while its short is still open.
+      const ordered = [...st.live.filter(l => l.netQty < 0), ...st.live.filter(l => l.netQty > 0)];
       const problems: string[] = [];
+      let skipped = 0;
+      let sent = 0;
       for (const l of ordered) {
-        const o = await exitRealSecurity(l.securityId, rows);
-        if (!o.ok) { problems.push(`${l.strike} ${l.type}: ${o.text}`); if (o.unknown) break; }
+        const o = await exitRealRow(l, st.owned);
+        if (o.skipped) { skipped++; continue; }
+        if (!o.ok) { problems.push(o.text); if (o.unknown) break; continue; }
+        sent++;
       }
-      flash({ ok: problems.length === 0, text: problems.length ? `Exit All incomplete: ${problems.join(' · ')}` : 'Exit All sent for every NIFTY option leg' });
+      const note = skipped ? ` · ${skipped} leg(s) not opened from this page left open` : '';
+      flash({
+        ok: problems.length === 0,
+        text: problems.length ? `Exit All incomplete: ${problems.join(' · ')}${note}` : `Exit All sent for ${sent} leg(s) opened from this page${note}`,
+      });
       loadPositions();
     } finally { setExitingId(null); }
-  }, [exitingId, legs, real, exitSimLeg, loadPositions, exitRealSecurity, feed.ltpById, flash]);
+  }, [exitingId, legs, real, exitSimLeg, readExitState, exitRealRow, loadPositions, flash]);
 
   // ── one-click scalper (buy ATM CE / PE) ────────────────────────────
   const atmContract = useCallback((type: 'CE' | 'PE'): PickedContract | null => {
@@ -360,8 +390,8 @@ export default function IndexScalperTerminal() {
     const sd = q.strikes?.[String(q.atm)] ?? Object.values(q.strikes ?? {}).find(r => r.strike === q.atm);
     const id = type === 'CE' ? ids?.ceId : ids?.peId;
     const ltp = type === 'CE' ? sd?.ce?.ltp : sd?.pe?.ltp;
-    return { strike: q.atm, type, securityId: id ?? null, ltp: ltp && ltp > 0 ? ltp : null };
-  }, [feed.quotes, feed.strikeIds]);
+    return { strike: q.atm, type, securityId: id ?? null, ltp: ltp && ltp > 0 ? ltp : null, expiry: feed.expiry };
+  }, [feed.quotes, feed.strikeIds, feed.expiry]);
 
   const quickBuy = useCallback(async (type: 'CE' | 'PE') => {
     const c = atmContract(type);
@@ -381,6 +411,12 @@ export default function IndexScalperTerminal() {
   const addIndicator = (k: IndicatorKind) => { setIndicators(p => [...p, newIndicator(k, nextId())]); setPickerOpen(false); };
   const patchIndicator = (id: string, patch: Partial<IndicatorInstance>) => setIndicators(p => p.map(i => (i.id === id ? { ...i, ...patch } : i)));
   const removeIndicator = (id: string) => setIndicators(p => p.filter(i => i.id !== id));
+
+  // A ticket belongs to the expiry it was picked under (its security id is that expiry's): close it on a switch.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTicket(cur => (cur && cur.expiry !== feed.expiry ? null : cur));
+  }, [feed.expiry]);
 
   const ticketLtp = useMemo(() => {
     if (!ticket?.securityId) return null;
@@ -519,7 +555,8 @@ export default function IndexScalperTerminal() {
       <div className="flex items-center justify-between gap-4 px-3 h-9 border-t border-zinc-800 bg-zinc-900 text-[11px] shrink-0">
         <span className="font-semibold text-zinc-300">Account Manager <span className={cn('ml-2 font-bold', real ? 'text-rose-400' : 'text-amber-300')}>{real ? 'REAL · Dhan' : 'SIM'}</span></span>
         <div className="flex items-center gap-6 tabular-nums">
-          <span className="text-zinc-400">Open P&amp;L <b data-testid="open-pnl" className={cn(openPnl === null ? 'text-zinc-400' : openPnl >= 0 ? 'text-emerald-400' : 'text-rose-400')}>{fmtRupees(openPnl)}</b></span>
+          <span className="text-zinc-400">Open P&amp;L <b data-testid="open-pnl" className={cn(openPnl === null ? 'text-zinc-400' : openPnl >= 0 ? 'text-emerald-400' : 'text-rose-400')}>{fmtRupees(openPnl)}</b>
+            {unpriced > 0 && <span data-testid="open-pnl-partial" className="ml-1 text-amber-300" title="Legs with no live price (e.g. an expiry other than the one in the chain) are not in this total">partial · {unpriced} unpriced</span>}</span>
           {!real && <span className="text-zinc-400">Realized (SIM) <b className={sim.realized >= 0 ? 'text-emerald-400' : 'text-rose-400'}>{fmtRupees(sim.realized)}</b></span>}
           <span className="text-zinc-400">Available Margin <b className="text-sky-300">{funds.available === null ? '—' : `₹${funds.available.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`}</b></span>
           <span className="text-zinc-400">Used Margin <b className="text-zinc-200">{funds.used === null ? '—' : `₹${funds.used.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`}</b></span>
@@ -530,7 +567,7 @@ export default function IndexScalperTerminal() {
         <OptionChainPanel feed={feed} onClose={() => setChainOpen(false)} onPick={c => { setTicket(c); setTicketMsg(null); }} />
       )}
       {ticket && (
-        <OrderTicket key={`${ticket.strike}${ticket.type}`} contract={ticket} liveLtp={ticketLtp} expiry={feed.expiry} lotSize={feed.lotSize}
+        <OrderTicket key={`${ticket.expiry}:${ticket.strike}${ticket.type}`} contract={ticket} liveLtp={ticketLtp} expiry={ticket.expiry} lotSize={feed.lotSize}
           real={real} available={funds.available} busy={ticketBusy} message={ticketMsg} onSubmit={submitTicket} onClose={() => setTicket(null)} />
       )}
       <IndicatorPicker open={pickerOpen} indicators={indicators} editId={editId} onAdd={addIndicator} onChange={patchIndicator}

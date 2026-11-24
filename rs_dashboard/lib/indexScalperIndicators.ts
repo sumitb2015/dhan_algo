@@ -220,3 +220,21 @@ export function applyTick(bars: Bar[], price: number, intervalMin: number, nowSe
   }
   return [...bars, { t: bucket, o: price, h: price, l: price, c: price }];
 }
+
+const sameBar = (a: Bar | undefined, b: Bar | undefined) =>
+  !!a && !!b && a.t === b.t && a.o === b.o && a.h === b.h && a.l === b.l && a.c === b.c;
+
+/** Whether the chart may take its fast path (update the forming bar only) going from what it drew last — `prevN` bars,
+ *  the last two of them `drawnTail` — to `bars`. True only when every bar but the forming one is exactly as drawn:
+ *  the same list with the last bar moved, or one new bar appended after an unchanged previous bar. A candle refresh that
+ *  corrected an earlier bar (a tick-built high/low the API fixed) returns false, so the caller redraws everything. */
+export function tailUnchanged(drawnTail: Bar[], prevN: number, bars: Bar[]): boolean {
+  const k = drawnTail.length;
+  if (k === 0) return false;
+  if (bars.length === prevN) {
+    if (bars[prevN - 1].t !== drawnTail[k - 1].t) return false;
+    return k < 2 || sameBar(drawnTail[k - 2], bars[prevN - 2]);
+  }
+  if (bars.length === prevN + 1) return sameBar(drawnTail[k - 1], bars[prevN - 1]);
+  return false;
+}

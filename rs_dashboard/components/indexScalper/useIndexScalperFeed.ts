@@ -87,12 +87,16 @@ export function useIndexScalperFeed(): IndexScalperFeed {
     const key = expiry;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLotSize(null);
+    // The strike -> id map is per expiry: drop the old one so a pick made before the new lookup lands has no id
+    // (refused) instead of the previous expiry's id.
+    setStrikeIdsRaw({});
     fetch(`/api/scalper/lookup?underlying=${UNDERLYING}&expiry=${expiry}`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: { lotSize?: number; strikes?: Record<string, StrikeIds> } }) => {
         if (dead || !j.success || !j.data) return;
-        if (j.data.strikes) setStrikeIdsRaw(j.data.strikes);
-        if (typeof j.data.lotSize === 'number' && j.data.lotSize > 0) { setLotSize(j.data.lotSize); setLookupFor(key); }
+        setStrikeIdsRaw(j.data.strikes ?? {});
+        if (typeof j.data.lotSize === 'number' && j.data.lotSize > 0) setLotSize(j.data.lotSize);
+        setLookupFor(key);
       })
       .catch(() => {});
     return () => { dead = true; };
@@ -107,9 +111,10 @@ export function useIndexScalperFeed(): IndexScalperFeed {
 
   const strikeIds = useMemo(() => {
     const m = new Map<number, StrikeIds>();
+    if (lookupFor !== expiry) return m;
     for (const [k, v] of Object.entries(strikeIdsRaw)) m.set(Number(k), v);
     return m;
-  }, [strikeIdsRaw]);
+  }, [strikeIdsRaw, lookupFor, expiry]);
 
   const ltpById = useMemo(() => {
     const m = new Map<string, number>();

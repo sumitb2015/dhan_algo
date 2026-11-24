@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  applyFill, closeOrder, legAnchor, legPnl, legsFromDhanPositions, orderUnits, parseNiftyOption, totalPnl, type ScalperLeg,
+  applyFill, legAnchor, legPnl, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, parseNiftyOption, pnlSummary, totalPnl,
+  type ScalperLeg,
 } from './indexScalperPositions.ts';
-import { applyTick, computeIndicator, newIndicator, sessionVwap, bollinger, clampParam, type Bar } from './indexScalperIndicators.ts';
+import { applyTick, computeIndicator, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
 
 const leg = (o: Partial<ScalperLeg> = {}): ScalperLeg => ({
-  id: '1', securityId: '1', symbol: 'NIFTY-Dec2026-25350-PE', strike: 25350, type: 'PE', netQty: 65, avg: 100, ltp: 110, sim: true, ...o,
+  id: '1', securityId: '1', product: '', symbol: 'NIFTY-Dec2026-25350-PE', strike: 25350, type: 'PE', netQty: 65, avg: 100, ltp: 110, sim: true, ...o,
 });
 
 test('long P&L is (ltp-avg)*qty, short is inverted, unknown LTP is null not zero', () => {
@@ -31,11 +32,34 @@ test('order sizing refuses unknown lot size, bad lots and over-cap', () => {
   assert.equal(orderUnits(21, 65).ok, false);
 });
 
-test('close order sizes off the live quantity and never flips a reduced position', () => {
-  assert.deepEqual(closeOrder(leg({ netQty: 130 }), 65), { side: 'SELL', units: 65 });
-  assert.deepEqual(closeOrder(leg({ netQty: -65 }), -65), { side: 'BUY', units: 65 });
-  assert.equal(closeOrder(leg({ netQty: 65 }), 0), null);
-  assert.equal(closeOrder(leg({ netQty: 65 }), -65), null);
+test('partial P&L counts the legs it leaves out', () => {
+  assert.deepEqual(pnlSummary([leg(), leg({ ltp: null })]), { pnl: 650, unpriced: 1 });
+  assert.deepEqual(pnlSummary([leg({ ltp: null })]), { pnl: null, unpriced: 1 });
+  assert.deepEqual(pnlSummary([]), { pnl: null, unpriced: 0 });
+});
+
+test('ownership is only what isx-tagged orders filled, per security + product, net of its own exits', () => {
+  const orders = [
+    { correlationId: 'isxabc1', securityId: '111', productType: 'INTRADAY', transactionType: 'SELL', filledQty: 65 },
+    { correlationId: 'isxabc2', securityId: '111', productType: 'INTRADAY', transactionType: 'SELL', filledQty: 65 },
+    { correlationId: 'isxabc3', securityId: '111', productType: 'INTRADAY', transactionType: 'BUY', filledQty: 65 },
+    { correlationId: 'isxabc4', securityId: '111', productType: 'MARGIN', transactionType: 'SELL', filledQty: 0 }, // unfilled
+    { correlationId: 'mlfxyz', securityId: '111', productType: 'INTRADAY', transactionType: 'SELL', filledQty: 650 }, // another terminal
+    { correlationId: '', securityId: '222', productType: 'INTRADAY', transactionType: 'BUY', filledQty: 75 }, // strategy / manual
+  ];
+  const own = ownedQtyFromOrders(orders);
+  assert.equal(own.get('111|INTRADAY'), -65);
+  assert.equal(own.has('111|MARGIN'), false);
+  assert.equal(own.has('222|INTRADAY'), false);
+});
+
+test('owned close is clamped by both the broker row and what this page owns, never flips, never touches others', () => {
+  assert.deepEqual(ownedCloseOrder(-715, -65), { side: 'BUY', units: 65 }); // a strategy holds the other 650
+  assert.deepEqual(ownedCloseOrder(-65, -130), { side: 'BUY', units: 65 }); // broker already reduced it
+  assert.deepEqual(ownedCloseOrder(130, 130), { side: 'SELL', units: 130 });
+  assert.equal(ownedCloseOrder(-65, 0), null); // not ours
+  assert.equal(ownedCloseOrder(65, -65), null); // opposite direction: not ours to close
+  assert.equal(ownedCloseOrder(0, 65), null);
 });
 
 test('applyFill blends adds, keeps avg on reduce, resets on flip and flat', () => {
@@ -63,6 +87,16 @@ test('Dhan rows become legs: short uses sellAvg, flat and other symbols dropped'
   assert.equal(legs[0].avg, 230);
   assert.equal(legs[0].ltp, 200);
   assert.equal(legPnl(legs[0]), 1950);
+});
+
+test('one leg per security + product row; verbatim duplicate rows collapse so nothing is closed twice', () => {
+  const r = { tradingSymbol: 'NIFTY-Dec2026-25350-PE', securityId: '111', exchangeSegment: 'NSE_FNO', positionType: 'SHORT', sellAvg: 230 };
+  const legs = legsFromDhanPositions([
+    { ...r, productType: 'INTRADAY', netQty: -75 },
+    { ...r, productType: 'INTRADAY', netQty: -75 }, // Dhan's duplicate of the same row
+    { ...r, productType: 'MARGIN', netQty: -75 },
+  ], new Map());
+  assert.deepEqual(legs.map(l => [l.id, l.product, l.netQty]), [['111|INTRADAY', 'INTRADAY', -75], ['111|MARGIN', 'MARGIN', -75]]);
 });
 
 const bar = (t: number, c: number): Bar => ({ t, o: c, h: c + 1, l: c - 1, c });
@@ -109,4 +143,16 @@ test('applyTick updates the forming bar, rolls a new one in-session, and never i
   const after = Date.UTC(2026, 10, 24, 12, 30, 0) / 1000;
   assert.equal(applyTick(bars, 105, 5, after), bars);
   assert.equal(applyTick(bars, 0, 5, t0 + 60), bars);
+});
+
+test('chart fast path only when every bar but the forming one is as drawn', () => {
+  const a = bar(1000, 100), b = bar(1300, 101), c = bar(1600, 102);
+  const drawn = [a, b];
+  assert.equal(tailUnchanged(drawn, 2, [a, { ...b, c: 105, h: 106 }]), true); // forming bar moved
+  assert.equal(tailUnchanged(drawn, 2, [a, b, c]), true); // new bar after an unchanged one
+  assert.equal(tailUnchanged(drawn, 2, [{ ...a, h: 120 }, b]), false); // refresh corrected the closed bar
+  assert.equal(tailUnchanged(drawn, 2, [a, { ...b, h: 120 }, c]), false); // refresh corrected the old forming bar, then rolled
+  assert.equal(tailUnchanged(drawn, 2, [a, c]), false); // last bar replaced by a different time
+  assert.equal(tailUnchanged([a], 1, [{ ...a, c: 99 }]), true);
+  assert.equal(tailUnchanged([], 0, [a]), false);
 });

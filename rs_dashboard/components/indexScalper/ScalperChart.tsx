@@ -11,7 +11,7 @@ import {
 } from 'lightweight-charts';
 import { Eye, EyeOff, Settings2, X } from 'lucide-react';
 import { useChartChrome } from '@/lib/chartTheme';
-import { computeIndicator, indicatorLabel, type Bar, type IndicatorInstance, type OutSeries } from '@/lib/indexScalperIndicators';
+import { computeIndicator, indicatorLabel, tailUnchanged, type Bar, type IndicatorInstance, type OutSeries } from '@/lib/indexScalperIndicators';
 import { fmtRupees, legAnchor, legPnl, type ScalperLeg } from '@/lib/indexScalperPositions';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
@@ -92,7 +92,8 @@ export default function ScalperChart(props: Props) {
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const indSeriesRef = useRef<ISeriesApi<SeriesType>[]>([]);
   const sigRef = useRef('');
-  const prevRef = useRef<{ n: number; first: number } | null>(null);
+  // What the last pass drew: length, first bar time, and the last two bars (to spot a refresh that rewrote history).
+  const prevRef = useRef<{ n: number; first: number; tail: Bar[] } | null>(null);
   const legLinesRef = useRef<Map<string, IPriceLine>>(new Map());
   const drawLinesRef = useRef<IPriceLine[]>([]);
   const drawSeriesRef = useRef<ISeriesApi<'Line'>[]>([]);
@@ -244,7 +245,12 @@ export default function ScalperChart(props: Props) {
 
     const sig = JSON.stringify(indicators.filter(i => i.visible).map(i => [i.id, i.kind, i.params, i.color]));
     const prev = prevRef.current;
-    const tail = !!prev && sig === sigRef.current && prev.first === bars[0].t && (bars.length === prev.n || bars.length === prev.n + 1);
+    // Fast path only when nothing but the forming bar moved: the bars before it must be exactly what was drawn. A candle
+    // refresh that corrected an earlier tick-built bar (missed high/low) falls through to a full setData, which also
+    // recomputes every indicator value.
+    const tail = !!prev && sig === sigRef.current && prev.first === bars[0].t
+      && (bars.length === prev.n || bars.length === prev.n + 1)
+      && tailUnchanged(prev.tail, prev.n, bars);
     const lastBar = bars[bars.length - 1];
 
     if (tail) {
@@ -262,7 +268,7 @@ export default function ScalperChart(props: Props) {
           }
         }
       } catch { /* "Cannot update oldest data": next full pass repairs it */ prevRef.current = null; }
-      prevRef.current = { n: bars.length, first: bars[0].t };
+      prevRef.current = { n: bars.length, first: bars[0].t, tail: bars.slice(-2) };
       return;
     }
 
@@ -311,7 +317,7 @@ export default function ScalperChart(props: Props) {
         api.setData(data as never);
       }
     }
-    prevRef.current = { n: bars.length, first: bars[0].t };
+    prevRef.current = { n: bars.length, first: bars[0].t, tail: bars.slice(-2) };
   }, [bars, outputs, indicators]);
 
   // Visible range request (1D / 1W / ... buttons).
@@ -324,7 +330,7 @@ export default function ScalperChart(props: Props) {
   }, [focusSeconds, bars.length === 0]);
 
   // ── position lines + chips ─────────────────────────────────────────
-  const placed = useMemo(() => legs.map(leg => ({ leg, anchor: legAnchor(leg, entrySpots[leg.id]), pnl: legPnl(leg) })), [legs, entrySpots]);
+  const placed = useMemo(() => legs.map(leg => ({ leg, anchor: legAnchor(leg, entrySpots[leg.securityId]), pnl: legPnl(leg) })), [legs, entrySpots]);
 
   useEffect(() => {
     const candles = candleRef.current;
