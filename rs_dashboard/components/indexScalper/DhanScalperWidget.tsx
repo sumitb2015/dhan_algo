@@ -18,6 +18,7 @@ import type { IndexScalperFeed } from './useIndexScalperFeed';
 import type { PickedContract } from './OptionChainPanel';
 import { useDraggable } from './useDraggable';
 import { MAX_LOTS } from '@/lib/indexScalperPositions';
+import { nrmlOnly } from '@/lib/indexScalperInstrument';
 import {
   calcOptionBuyReq, computeAtmStrikes, formatDhanExpiry, formatManageScripExpiry, getStrikeOffsetLabel,
 } from '@/lib/dhanScalperMath';
@@ -120,7 +121,10 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
   const [ceCardOpen, setCeCardOpen] = useState(false);
   const [peCardOpen, setPeCardOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
+  const [productDraft, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
+  // MCX crude is NRML only (Intraday disabled): Kotak's RMS refuses a fresh MIS crude position.
+  const crudeNrml = nrmlOnly(feed.underlying);
+  const productType: 'INTRADAY' | 'MARGIN' = crudeNrml ? 'MARGIN' : productDraft;
   const clickBusyRef = useRef(false);
 
   // null until the lookup for THIS expiry lands: no order then. REAL on Kotak sizes with Kotak's lot.
@@ -356,7 +360,8 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
               <div role="group" aria-label="Product" className="flex rounded border border-zinc-700 overflow-hidden bg-zinc-800">
                 {(['INTRADAY', 'MARGIN'] as const).map(p => (
                   <button key={p} type="button" aria-pressed={productType === p} onClick={() => setProductType(p)}
-                    className={cn('px-2.5 py-1 font-semibold text-[11px]', FOCUS, productType === p ? 'bg-sky-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-700/50')}>
+                    disabled={crudeNrml && p === 'INTRADAY'} title={crudeNrml && p === 'INTRADAY' ? 'Crude orders go as Normal (NRML) only' : undefined}
+                    className={cn('px-2.5 py-1 font-semibold text-[11px] disabled:opacity-40 disabled:cursor-not-allowed', FOCUS, productType === p ? 'bg-sky-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-700/50')}>
                     {p === 'INTRADAY' ? 'Intraday (MIS)' : 'Normal (NRML)'}
                   </button>
                 ))}

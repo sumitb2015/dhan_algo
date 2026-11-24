@@ -111,3 +111,17 @@ export function qtyLots(underlying: Underlying, qty: number, qtyMult: number, lo
   const whole = Math.round(lots);
   return whole >= 1 && Math.abs(lots - whole) < 1e-9 ? whole : null;
 }
+
+/** MCX crude (CRUDEOIL / CRUDEOILM, future or option): opening orders on /index-scalper are NRML (MARGIN) only. Kotak's
+ *  RMS refuses a fresh MIS position on CRUDEOILM ("No Fresh trade allowed ... NON-SQROFF", seen 2026-11-24), and the
+ *  user chose NRML for crude on every broker. Takes a symbol or underlying string. */
+export function nrmlOnly(underlyingOrSymbol: string): boolean {
+  return /^CRUDEOIL/i.test(underlyingOrSymbol.trim());
+}
+
+/** The product an OPENING order goes out under: MARGIN on MCX crude whatever was asked, the request elsewhere. An order
+ *  that closes an existing leg must keep that leg's own product instead (a MARGIN close of an MIS leg would open a
+ *  second position rather than reduce the first), so it never goes through this. */
+export function openingProduct(underlying: string, requested: 'INTRADAY' | 'MARGIN'): 'INTRADAY' | 'MARGIN' {
+  return nrmlOnly(underlying) ? 'MARGIN' : requested;
+}

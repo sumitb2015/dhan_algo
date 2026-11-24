@@ -8,7 +8,7 @@ import { X } from 'lucide-react';
 import type { PickedContract } from './OptionChainPanel';
 import { useDraggable } from './useDraggable';
 import { MAX_LOTS, OPTION_TICK, orderUnits, tickError } from '@/lib/indexScalperPositions';
-import type { Underlying } from '@/lib/indexScalperInstrument';
+import { nrmlOnly, type Underlying } from '@/lib/indexScalperInstrument';
 import { cn } from '@/lib/utils';
 
 export type TicketOrderType = 'MARKET' | 'LIMIT' | 'STOP_LOSS_MARKET' | 'STOP_LOSS';
@@ -22,6 +22,9 @@ export interface TicketRequest {
   trigger: number | null;
   product: TicketProduct;
   lots: number;
+  /** The order closes an existing leg (TP / SL bracket): it keeps `product` as given. Otherwise it opens, and on MCX
+   *  crude the terminal sends it as MARGIN whatever `product` says (lib/indexScalperInstrument.ts openingProduct). */
+  closesLeg?: boolean;
 }
 
 const TYPES: { v: TicketOrderType; label: string }[] = [
@@ -54,7 +57,10 @@ export default function OrderTicket({
   // Right of the chain panel and left of the chart's position chips, so neither is covered by default.
   const { pos, handle } = useDraggable({ x: Math.max(16, (typeof window === 'undefined' ? 1200 : window.innerWidth) - 800), y: 190 });
   const [orderType, setOrderType] = useState<TicketOrderType>(initialOrderType ?? 'MARKET');
-  const [product, setProduct] = useState<TicketProduct>('INTRADAY');
+  // MCX crude is NRML only (Intraday disabled): Kotak's RMS refuses a fresh MIS crude position.
+  const crudeNrml = nrmlOnly(underlying);
+  const [productDraft, setProduct] = useState<TicketProduct>('INTRADAY');
+  const product: TicketProduct = crudeNrml ? 'MARGIN' : productDraft;
   const [lotsDraft, setLotsDraft] = useState(String(initialLots ?? 1));
   const [priceDraft, setPriceDraft] = useState(initialPrice ? String(initialPrice) : '');
   const [trigDraft, setTrigDraft] = useState('');
@@ -151,8 +157,9 @@ export default function OrderTicket({
             <input inputMode="numeric" className={inputCls} value={lotsDraft} onChange={e => setLotsDraft(e.target.value)} />
           </label>
           <label className="text-[11px] text-zinc-400">Product
-            <select className={inputCls} value={product} onChange={e => setProduct(e.target.value as TicketProduct)}>
-              <option value="INTRADAY">Intraday</option><option value="MARGIN">Normal (carry)</option>
+            <select className={inputCls} value={product} onChange={e => setProduct(e.target.value as TicketProduct)}
+              title={crudeNrml ? `${underlying} orders go as Normal (NRML) only` : undefined}>
+              <option value="INTRADAY" disabled={crudeNrml}>{crudeNrml ? 'Intraday (not for crude)' : 'Intraday'}</option><option value="MARGIN">Normal (carry)</option>
             </select>
           </label>
         </div>

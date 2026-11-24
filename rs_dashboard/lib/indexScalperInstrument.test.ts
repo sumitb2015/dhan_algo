@@ -6,6 +6,8 @@ import {
   kotakOrderQty,
   pnlMultiplier,
   displayLotUnits,
+  nrmlOnly,
+  openingProduct,
 } from './indexScalperInstrument.ts';
 
 test('instrument specifications', () => {
@@ -76,4 +78,15 @@ test('qtyLots: a quantity in the broker\'s own unit -> whole lots, never rounded
 test('order quantity helpers never guess a NIFTY lot size', () => {
   assert.equal(dhanOrderQty('NIFTY', 2, 0), 0);
   assert.equal(kotakOrderQty('NIFTY', 2, 0), 0);
+});
+
+test('MCX crude opens NRML only; NIFTY keeps the requested product', () => {
+  assert.equal(nrmlOnly('CRUDEOILM'), true);
+  assert.equal(nrmlOnly('CRUDEOIL'), true);
+  assert.equal(nrmlOnly('CRUDEOILM18DEC26FUT'), true);
+  assert.equal(nrmlOnly('NIFTY'), false);
+  assert.equal(openingProduct('CRUDEOILM', 'INTRADAY'), 'MARGIN');
+  assert.equal(openingProduct('CRUDEOIL', 'MARGIN'), 'MARGIN');
+  assert.equal(openingProduct('NIFTY', 'INTRADAY'), 'INTRADAY');
+  assert.equal(openingProduct('NIFTY', 'MARGIN'), 'MARGIN');
 });

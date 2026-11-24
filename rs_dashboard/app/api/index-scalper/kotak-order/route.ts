@@ -8,6 +8,7 @@ import { buildKotakOrderPayload } from '@/lib/kotakOrderPayload';
 import { readJsonFile, withFileLock, writeJsonAtomic } from '@/lib/lockedJsonFile';
 import { PROJECT_ROOT } from '@/lib/pyExec';
 import { istDateIso } from '@/lib/nseHolidays';
+import { nrmlOnly } from '@/lib/indexScalperInstrument';
 import { appendRecord, kotakProduct, todaysRecords, type KotakDayFile, type KotakRecord } from '@/lib/indexScalperKotak';
 
 // REAL-MONEY route: /index-scalper's Kotak orders (NIFTY options only). Places through lib/kotakPlaceOrder.ts (placed /
@@ -52,6 +53,11 @@ async function placeOnce(b: Body): Promise<{ status: number; body: Record<string
   if (!product) return { status: 400, body: { success: false, error: `Unsupported product: ${String(b.product)} (expected INTRADAY or MARGIN)` } };
   const intent = b.intent === 'close' ? 'close' : b.intent === 'open' ? 'open' : null;
   if (!intent) return { status: 400, body: { success: false, error: 'intent must be open or close' } };
+  // MCX crude opens NRML only: Kotak's RMS accepts an MIS crude order and then rejects it ("No Fresh trade allowed ...
+  // NON-SQROFF"), so the page would report "placed". A close keeps its leg's product (squaring off MIS is allowed).
+  if (intent === 'open' && product === 'MIS' && nrmlOnly(underlying)) {
+    return { status: 400, body: { success: false, error: `${underlying} orders are NRML only on this page: Intraday (MIS) is disabled for crude` } };
+  }
   const side = String(b.side ?? '').toUpperCase();
 
   const contract = kotakDerivativeBySymbol(symbol, underlying);

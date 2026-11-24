@@ -30,7 +30,7 @@ import {
 import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
 import { inMarketSession } from '@/lib/indexScalperSession';
 import {
-  INSTRUMENTS, dhanOrderQty, kotakOrderQty, pnlMultiplier, lotUnits, qtyLots, type Underlying,
+  INSTRUMENTS, dhanOrderQty, kotakOrderQty, pnlMultiplier, lotUnits, qtyLots, nrmlOnly, openingProduct, type Underlying,
 } from '@/lib/indexScalperInstrument';
 import {
   MAX_LOTS, applyFill, legsFromDhanPositions, legsKey, orderUnits, ownedCloseOrder, ownedQtyFromOrders, type ScalperLeg,
@@ -503,6 +503,9 @@ export default function IndexScalperTerminal() {
     if (!size.ok) return { ok: false, text: size.error };
     const c = req.contract;
     if (!c.securityId && !c.tradingSymbol) return { ok: false, text: 'No contract identifier for this order' };
+    // MCX crude opens NRML (MARGIN) only, whatever the caller asked. An order closing an existing leg (TP / SL bracket)
+    // keeps that leg's own product: a MARGIN order against an MIS leg would open a second position, not reduce it.
+    const product = req.closesLeg ? req.product : openingProduct(underlying, req.product);
     // The security id was picked for one expiry; never send it under a ticket that now shows another (except futures).
     if (!isFut && c.expiry !== f.expiry) return { ok: false, text: `This ticket was opened for the ${c.expiry || 'previous'} expiry: reopen it from the chain` };
     // Live tick only (ltpById is built from the bridge's live chain): never the ticket's display price, which can be a
@@ -547,8 +550,8 @@ export default function IndexScalperTerminal() {
       const before = legsRef.current.find(l => l.securityId === sym)?.netQty ?? 0;
       const out = await sendReal({
         tradingSymbol: sym, quantity: kQty, side: req.side, orderType: req.orderType,
-        price: req.price ?? undefined, triggerPrice: req.trigger ?? undefined, product: req.product,
-      }, 'open');
+        price: req.price ?? undefined, triggerPrice: req.trigger ?? undefined, product,
+      }, req.closesLeg ? 'close' : 'open');
       if (out.ok && before === 0) rememberSpot(sym, f.spot);
       loadPositions();
       void loadOrders();
@@ -562,7 +565,7 @@ export default function IndexScalperTerminal() {
     const out = await sendReal({
       securityId: c.securityId, quantity: dQty, side: req.side, orderType: req.orderType,
       exchangeSegment: INSTRUMENTS[underlying].dhanSegment,
-      price: req.price ?? undefined, triggerPrice: req.trigger ?? undefined, productType: req.product,
+      price: req.price ?? undefined, triggerPrice: req.trigger ?? undefined, productType: product,
     });
     if (out.ok && before === 0) rememberSpot(c.securityId, f.spot);
     loadPositions();
@@ -952,6 +955,8 @@ export default function IndexScalperTerminal() {
       trigger: req.kind === 'SL' ? req.price : null,
       product: (req.leg.product as 'INTRADAY' | 'MARGIN') || 'INTRADAY',
       lots,
+      // A TP / SL closes this leg: it keeps the leg's product (an MIS crude leg is squared off as MIS).
+      closesLeg: true,
     });
     flash({ ok: out.ok, text: out.text });
     void loadOrders();
@@ -1011,6 +1016,13 @@ export default function IndexScalperTerminal() {
         lots: curLots,
       });
       flash({ ok: out.ok, text: `Reversed position to ${revSide} ${curLots} lot${curLots > 1 ? 's' : ''}` });
+      return;
+    }
+
+    // A REAL reverse is one 2x order in the leg's own product. On MCX crude that product must be MARGIN: reversing an
+    // MIS crude leg would open a fresh MIS position (refused: crude is NRML only), so exit it and re-enter instead.
+    if (nrmlOnly(underlying) && leg.product !== 'MARGIN') {
+      flash({ ok: false, text: `${underlying} is NRML-only: Exit this ${leg.product || 'intraday'} position, then open the other side (it goes as NRML)` });
       return;
     }
 
