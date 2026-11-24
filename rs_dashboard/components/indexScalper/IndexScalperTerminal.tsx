@@ -234,10 +234,10 @@ export default function IndexScalperTerminal() {
     if (spot === null || feed.stale || feed.feedAgeSec === null) return;
     // Outside market session, must not invent a candle.
     if (!inMarketSession(underlying, Date.now())) return;
-    setLiveBars(prev => (liveIntervalRef.current === interval ? applyTick(prev, spot, Number(interval), Date.now() / 1000) : prev));
+    setLiveBars(prev => (liveIntervalRef.current === interval ? applyTick(prev, spot, Number(interval), Date.now() / 1000, underlying) : prev));
     // feed.stale / feedAgeSec are read as guards only: a new tick is what moves a bar.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [feed.spot, interval, underlying]);
+  }, [feed.spot, feed.quotes, interval, underlying]);
 
   const wasStaleRef = useRef(false);
   useEffect(() => {

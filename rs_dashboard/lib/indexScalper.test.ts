@@ -132,8 +132,8 @@ test('param clamp keeps free-typed values in range', () => {
 });
 
 test('applyTick updates the forming bar, rolls a new one in-session, and never invents after-hours bars', () => {
-  // 2026-11-24 10:00:00 IST = 04:30:00 UTC
-  const t0 = Date.UTC(2026, 10, 24, 4, 30, 0) / 1000;
+  // 2026-11-25 10:00:00 IST = 04:30:00 UTC (regular NSE trading day)
+  const t0 = Date.UTC(2026, 10, 25, 4, 30, 0) / 1000;
   const bars: Bar[] = [{ t: t0, o: 100, h: 101, l: 99, c: 100 }];
   const up = applyTick(bars, 102, 5, t0 + 60);
   assert.deepEqual(up[0], { t: t0, o: 100, h: 102, l: 99, c: 102 });
@@ -141,9 +141,10 @@ test('applyTick updates the forming bar, rolls a new one in-session, and never i
   const rolled = applyTick(bars, 103, 5, t0 + 301);
   assert.equal(rolled.length, 2);
   assert.equal(rolled[1].t, t0 + 300);
-  // 18:00 IST: after the close
-  const after = Date.UTC(2026, 10, 24, 12, 30, 0) / 1000;
-  assert.equal(applyTick(bars, 105, 5, after), bars);
+  // 18:00 IST: after the close for NIFTY, but in-session for CRUDEOILM (MCX)
+  const after = Date.UTC(2026, 10, 25, 12, 30, 0) / 1000;
+  assert.equal(applyTick(bars, 105, 5, after), bars); // NIFTY: closed at 18:00 IST
+  assert.notEqual(applyTick(bars, 105, 5, after, 'CRUDEOILM'), bars); // CRUDEOILM: open at 18:00 IST
   assert.equal(applyTick(bars, 0, 5, t0 + 60), bars);
 });
 
