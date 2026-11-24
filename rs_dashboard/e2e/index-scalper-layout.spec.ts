@@ -42,10 +42,12 @@ async function mockApi(page: Page, state: State) {
     if (p === '/api/options/live') {
       if (method === 'POST') return json(route, { success: true });
       if (state.noSpot) return json(route, { success: true, status: { status: 'STARTING' }, quotes: null });
-      const strikes = Object.fromEntries(Object.keys(IDS).map(k => [k, {
-        strike: Number(k),
-        ce: { ltp: 210.5, oi: 1_200_000, oi_chg_pct: 1, change_pct: -3, buildup: 'SB' },
-        pe: { ltp: 229.95, oi: 2_300_000, oi_chg_pct: -4, change_pct: 5, buildup: 'LB' },
+      // 21 strikes around ATM; Call OI peaks above spot (25600), Put OI below it (25100)
+      const live = ALL_STRIKES.filter(k => Math.abs(k - SPOT) <= 500);
+      const strikes = Object.fromEntries(live.map(k => [String(k), {
+        strike: k,
+        ce: { ltp: IDS[String(k)] ? 210.5 : 100, oi: Math.round(4_000_000 * Math.exp(-(((k - 25600) / 180) ** 2))) + 200_000, oi_chg_pct: 1, change_pct: -3, buildup: 'SB' },
+        pe: { ltp: IDS[String(k)] ? 229.95 : 100, oi: Math.round(3_500_000 * Math.exp(-(((k - 25100) / 180) ** 2))) + 200_000, oi_chg_pct: -4, change_pct: 5, buildup: 'LB' },
       }]));
       return json(route, { success: true, status: { status: 'RUNNING' }, quotes: { underlying: 'NIFTY', expiry: '2026-12-01', spot: SPOT, atm: SPOT, updated_at: sessionIso(), strikes } });
     }
@@ -120,6 +122,38 @@ test.describe('Index Scalper layout + option charts', () => {
     await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem('indexScalper.layout.v2') ?? '{}').panes?.[1]?.source?.strike)).toBe(23500);
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(page.getByTestId('chart-pane-1').getByLabel('Chart 2 strike')).toHaveValue('23500', { timeout: 60_000 });
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('OI profile: Call / Put bars on the index chart only, toggled from the header and remembered', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('button', { name: 'Two charts side by side' }).click();
+    const left = page.getByTestId('chart-pane-0'), right = page.getByTestId('chart-pane-1');
+    await expect(right.getByLabel('Chart 2 strike')).toHaveValue('25350', { timeout: 60_000 });
+    await expect(page.getByRole('switch', { name: 'OI profile' })).toBeChecked();
+    await expect(left.getByTestId('oi-profile')).toHaveCount(1);
+    await expect(right.getByTestId('oi-profile')).toHaveCount(0); // a premium chart has no strike levels
+    // something is painted: red (Call) and green (Put) pixels on the index chart's overlay
+    await expect.poll(() => left.getByTestId('oi-profile').evaluate((c: HTMLCanvasElement) => {
+      const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+      let red = 0, green = 0;
+      for (let i = 0; i < d.length; i += 4) { if (d[i + 3] === 0) continue; if (d[i] > d[i + 1] + 60) red++; else if (d[i + 1] > d[i] + 60) green++; }
+      return red > 50 && green > 50;
+    }), { timeout: 10_000 }).toBe(true);
+
+    await page.getByRole('switch', { name: 'OI profile' }).click();
+    await expect(page.getByRole('switch', { name: 'OI profile' })).not.toBeChecked();
+    await expect(left.getByTestId('oi-profile')).toHaveCount(0);
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('switch', { name: 'OI profile' })).not.toBeChecked({ timeout: 60_000 });
+    await expect(page.getByTestId('oi-profile')).toHaveCount(0);
+    // clicking the switch's label (its icon, not the switch) turns it back on, exactly once: not toggled twice
+    await page.locator('label').filter({ has: page.getByRole('switch', { name: 'OI profile' }) }).click({ position: { x: 10, y: 14 } });
+    await expect(page.getByRole('switch', { name: 'OI profile' })).toBeChecked();
+    await expect(page.getByTestId('chart-pane-0').getByTestId('oi-profile')).toHaveCount(1);
     expect(state.blocked).toEqual([]);
   });
 

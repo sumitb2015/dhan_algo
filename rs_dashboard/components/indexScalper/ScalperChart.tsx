@@ -18,6 +18,7 @@ import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { displayLotUnits, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
+import { fmtOI, oiBars, type OiProfile } from '@/lib/indexScalperOiProfile';
 
 export type DrawTool = 'cursor' | 'hline' | 'trend' | 'ruler';
 
@@ -88,6 +89,9 @@ interface Props {
   /** What is plotted (instrument | contract | interval). When it changes, the view is fitted once its bars land: price
    *  axis back on auto-scale, time axis on the chosen range (1D / 1W ... button) or, with none chosen, all the bars. */
   viewKey?: string;
+  /** Call / Put open interest per strike, drawn as horizontal bars at each strike's level (underlying chart only; null
+   *  hides it). Display only. */
+  oiProfile?: OiProfile | null;
 }
 
 interface Hover { o: number; h: number; l: number; c: number; t: number }
@@ -121,7 +125,7 @@ function ScalperChart(props: Props) {
     onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
-    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey,
+    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, oiProfile = null,
   } = props;
   const drawKeyRef = useRef(drawKeyProp);
   const tickSize = tickProp ?? (underlying === 'CRUDEOILM' ? 1.0 : 0.05);
@@ -764,6 +768,52 @@ function ScalperChart(props: Props) {
     return () => clearInterval(t);
   }, [placed, activeBrackets, regularOrders]);
 
+  // ── OI profile: Call / Put OI bars at each strike's level ─────────────
+  // Drawn on one canvas over the plot, behind the chips, ignoring the mouse. Zoom / pan / autoscale fire no event, so it
+  // is re-checked every 150 ms (like the chips) and repainted only when the geometry or the OI changed: ticks are free.
+  const oiCanvasRef = useRef<HTMLCanvasElement>(null);
+  const oiSigRef = useRef('');
+  useEffect(() => {
+    oiSigRef.current = '';
+    const paint = () => {
+      const cvs = oiCanvasRef.current, box = boxRef.current, chart = chartRef.current, candles = candleRef.current;
+      if (!cvs || !box || !chart || !candles) return;
+      const W = box.clientWidth, H = box.clientHeight;
+      const axisW = chart.priceScale('right').width() || 65;
+      // The main pane only: an oscillator pane below it has its own price scale.
+      const plotH = chart.panes()[0]?.getHeight() ?? H;
+      const right = W - axisW;
+      const bars = oiProfile ? oiBars(oiProfile, p => candles.priceToCoordinate(p), right, plotH, Math.min(260, right * 0.3)) : [];
+      const sig = `${W}x${H}|${chromeRef.current.textSecondary}|` + bars.map(b => `${b.side}${b.strike}:${b.y.toFixed(1)}:${b.w.toFixed(1)}:${b.h.toFixed(1)}`).join(',');
+      if (sig === oiSigRef.current) return;
+      oiSigRef.current = sig;
+      const dpr = window.devicePixelRatio || 1;
+      if (cvs.width !== Math.round(W * dpr) || cvs.height !== Math.round(H * dpr)) {
+        cvs.width = Math.round(W * dpr); cvs.height = Math.round(H * dpr);
+      }
+      const ctx = cvs.getContext('2d');
+      if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+      ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'right';
+      for (const b of bars) {
+        // Data colours (CLAUDE.md theming exception): Calls rose, Puts emerald; the largest of each stronger.
+        const rgb = b.side === 'CE' ? '244,63,94' : '16,185,129';
+        ctx.fillStyle = `rgba(${rgb},${b.max ? 0.7 : 0.32})`;
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+        if (b.h >= 6) {
+          ctx.fillStyle = chromeRef.current.textSecondary;
+          ctx.fillText(fmtOI(b.oi).replace(' ', ''), b.x - 3, b.y + b.h / 2);
+        }
+      }
+    };
+    paint();
+    const t = setInterval(paint, 150);
+    return () => clearInterval(t);
+  }, [oiProfile, chrome]);
+
   // ── price scale hover '+' button ────────────────────────────────────
   useEffect(() => {
     const box = boxRef.current;
@@ -858,6 +908,7 @@ function ScalperChart(props: Props) {
   return (
     <div className="relative w-full h-full min-h-0">
       <div ref={boxRef} className={cn('absolute inset-0', tool !== 'cursor' && 'cursor-crosshair')} />
+      {oiProfile && <canvas ref={oiCanvasRef} data-testid="oi-profile" aria-hidden className="absolute inset-0 w-full h-full pointer-events-none z-[1]" />}
 
       {/* OHLC + indicator legend */}
       <div className="absolute left-3 top-2 z-10 flex flex-col gap-1 pointer-events-none max-w-[70%]">

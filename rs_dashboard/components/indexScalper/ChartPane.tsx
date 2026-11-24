@@ -16,6 +16,7 @@ import {
   legOnChart, nearestStrike, orderOnChart, resolveSource, sourceLabel, type ChartSource,
 } from '@/lib/indexScalperChartSource';
 import { legsKey, type ScalperLeg } from '@/lib/indexScalperPositions';
+import { buildOiProfile, oiProfileKey } from '@/lib/indexScalperOiProfile';
 import type { IndicatorInstance } from '@/lib/indexScalperIndicators';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
 import type { Underlying } from '@/lib/indexScalperInstrument';
@@ -69,6 +70,8 @@ interface Props {
   onReversePosition: (leg: ScalperLeg) => void;
   feedLotSize: number | null;
   orderQtyMult: number;
+  /** Draw the Call / Put OI profile (underlying panes only: strikes are underlying levels, not premiums). */
+  showOi: boolean;
 }
 
 function ChartPane(p: Props) {
@@ -121,6 +124,13 @@ function ChartPane(p: Props) {
   const legsSig = legsKey(paneLegsAll);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const paneLegs = useMemo(() => paneLegsAll, [legsSig]);
+  // OI per strike for the expiry on screen: the live chain, else Dhan's snapshot (display only). Kept by value (oiProfileKey)
+  // so a push that moved only prices does not re-render the chart.
+  const oiSource = !isOption && p.showOi ? (feed.quotes ?? feed.chain)?.strikes ?? null : null;
+  const oiRaw = useMemo(() => buildOiProfile(oiSource), [oiSource]);
+  const oiKey = oiProfileKey(oiRaw);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const oiProfile = useMemo(() => oiRaw, [oiKey]);
   const paneOrders = useMemo(() => p.openOrders.filter(o => orderOnChart(o, resolved)), [p.openOrders, resolved]);
 
   // Strike picker: every strike the expiry lists. Strikes far from ATM get history only (the bridge ticks 35 around ATM).
@@ -208,6 +218,7 @@ function ChartPane(p: Props) {
           tickSize={resolved.tick}
           drawKey={drawKey}
           viewKey={viewKey}
+          oiProfile={oiProfile}
         />
         {bars.length === 0 && !loading && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500 pointer-events-none">

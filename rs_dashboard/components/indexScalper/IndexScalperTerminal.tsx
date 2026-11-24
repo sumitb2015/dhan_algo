@@ -8,7 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BarChart3, CandlestickChart, Columns2, LayoutList, Square, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Trash2, TrendingUp, Zap,
+  BarChart3, CandlestickChart, Columns2, LayoutList, Square, AlignRight, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Trash2, TrendingUp, Zap,
 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import DataChip from '@/components/DataChip';
@@ -42,11 +42,13 @@ import {
 } from '@/lib/indexScalperKotak';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
+import { Switch } from '@/components/ui/switch';
 
 // v2: v1 could hold an ATM pin taken before any spot was known (the middle of the strike list, e.g. 24200). v1 is
 // read for the layout, instruments and timeframes only; its option strikes go back to ATM.
 const LAYOUT_KEY = 'indexScalper.layout.v2';
 const LAYOUT_KEY_V1 = 'indexScalper.layout.v1';
+const OI_KEY = 'indexScalper.oiProfile';
 /** Default panes: the underlying, and its ATM CE (strike 0 resolves to ATM once, then stays pinned). */
 const DEFAULT_PANES: [PaneCfg, PaneCfg] = [
   { source: { kind: 'underlying' }, interval: '5' },
@@ -127,6 +129,8 @@ export default function IndexScalperTerminal() {
   const [panes, setPanes] = useState<[PaneCfg, PaneCfg]>(DEFAULT_PANES);
   const [layoutReady, setLayoutReady] = useState(false);
   const [paneStatus, setPaneStatus] = useState<[PaneStatus, PaneStatus]>([NO_STATUS, NO_STATUS]);
+  // Call / Put OI bars at each strike on the underlying chart(s). Per viewer, on by default.
+  const [showOi, setShowOi] = useState(true);
   const [days, setDays] = useState(15);
   // Range-button request; `seq` makes a repeat click of the same range a new request.
   const [focus, setFocus] = useState<{ seconds: number; seq: number } | null>(null);
@@ -214,8 +218,10 @@ export default function IndexScalperTerminal() {
         setPanes([validPane(atmOnly(lay.panes[0]), DEFAULT_PANES[0]), validPane(atmOnly(lay.panes[1]), DEFAULT_PANES[1])]);
       }
     }
+    if (readPref(OI_KEY) === '0') setShowOi(false);
     setLayoutReady(true);
   }, []);
+  const setOi = (on: boolean) => { setShowOi(on); savePref(OI_KEY, on ? '1' : '0'); };
   // An ATM pin the pane made itself is saved as ATM (0), so the next session resolves today's ATM; a picked strike is kept.
   useEffect(() => {
     if (!layoutReady) return;
@@ -1180,6 +1186,14 @@ export default function IndexScalperTerminal() {
               className={cn(btn, layout === 2 && 'bg-zinc-800 text-white')}><Columns2 className="w-4 h-4" /></button>
           </div>
           {sep}
+          <label className="flex items-center gap-1.5 h-7 px-1.5 rounded text-xs font-semibold text-zinc-300 cursor-pointer select-none hover:bg-zinc-800"
+            title="OI profile: Call (red) and Put (green) open interest at each strike, on the index / future chart">
+            <AlignRight className="w-4 h-4" aria-hidden />
+            OI
+            <Switch size="sm" checked={showOi} onCheckedChange={setOi} aria-label="OI profile" />
+            <span className={cn('w-6 text-[10px] font-bold', showOi ? 'text-emerald-400' : 'text-zinc-500')} aria-hidden>{showOi ? 'ON' : 'OFF'}</span>
+          </label>
+          {sep}
           <button type="button" onClick={() => { setEditId(null); setPickerOpen(true); }} className={cn(btn, 'flex items-center gap-1')}>
             <BarChart3 className="w-4 h-4" />Indicators{indicators.length > 0 && <span className="text-sky-400">{indicators.length}</span>}
           </button>
@@ -1271,7 +1285,7 @@ export default function IndexScalperTerminal() {
               focus={focus} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
-              onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult}
+              onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi}
             />
               {layout === 2 && <div className="w-px bg-zinc-800 shrink-0" />}
               {layout === 2 && (
@@ -1286,7 +1300,7 @@ export default function IndexScalperTerminal() {
               focus={focus} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
-              onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult}
+              onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi}
             />
               )}
             </>

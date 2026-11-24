@@ -8,6 +8,7 @@ import { X } from 'lucide-react';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
 import { useDraggable } from './useDraggable';
 import { cn } from '@/lib/utils';
+import { fmtOI } from '@/lib/indexScalperOiProfile';
 
 export interface PickedContract {
   strike: number; type: 'CE' | 'PE' | 'FUT'; securityId: string | null; ltp: number | null;
@@ -23,13 +24,6 @@ const BUILDUP: Record<string, { label: string; cls: string }> = {
   LU: { label: 'Long Unwinding', cls: 'text-amber-400 border-amber-500/40' },
 };
 
-function fmtOI(n: number | undefined): string {
-  if (!n) return '—';
-  if (n >= 10_000_000) return `${(n / 10_000_000).toFixed(2)} Cr`;
-  if (n >= 100_000) return `${(n / 100_000).toFixed(2)} L`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1)} K`;
-  return String(n);
-}
 const pct = (n: number | undefined) => (n === undefined || !Number.isFinite(n) ? '—' : `${n > 0 ? '+' : ''}${n.toFixed(2)}%`);
 const pctCls = (n: number | undefined) => (n === undefined || n === 0 ? 'text-zinc-400' : n > 0 ? 'text-emerald-400' : 'text-rose-400');
 
