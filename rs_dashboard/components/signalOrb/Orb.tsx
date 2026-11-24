@@ -241,7 +241,7 @@ export function Orb({ signal, readings, positionLabel, busy, since, progress, se
             {/* Top Micro-HUD Tag */}
             <div className="flex items-center gap-1.5 opacity-90">
               <span className="h-1 w-1 rounded-full bg-white animate-ping" />
-              <span className="font-mono text-[9px] font-black uppercase tracking-[0.45em] drop-shadow-sm text-zinc-100">
+              <span className="font-mono text-[9px] font-black uppercase tracking-[0.45em] drop-shadow-sm text-oncolor">
                 AI CONSENSUS
               </span>
             </div>
@@ -266,17 +266,17 @@ export function Orb({ signal, readings, positionLabel, busy, since, progress, se
             </div>
 
             {/* Timestamp Subtitle */}
-            <div className="mt-2 flex items-center gap-1.5 font-mono text-[10px] font-semibold tracking-widest text-zinc-200/90 drop-shadow">
+            <div className="mt-2 flex items-center gap-1.5 font-mono text-[10px] font-semibold tracking-widest text-oncolor drop-shadow">
               {since ? <span>SINCE {since}</span> : <span className="opacity-60">SCANNING BARS</span>}
             </div>
 
             {/* Futuristic Segmented Countdown Capsule */}
             <div
-              className="mt-3 flex items-center gap-1.5 rounded-full border border-white/20 bg-black/45 px-3 py-0.5 font-mono text-[11px] font-bold backdrop-blur-md shadow-[0_2px_10px_rgba(0,0,0,0.5)]"
+              className="mt-3 flex items-center gap-1.5 rounded-full border border-oncolor/20 bg-oncolor-dark/45 px-3 py-0.5 font-mono text-[11px] font-bold backdrop-blur-md shadow-md"
               title="Time until current bar closes and signal recalculates"
             >
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="tabular-nums tracking-wider text-zinc-100">
+              <span className="tabular-nums tracking-wider text-oncolor">
                 {busy ? 'SYNCHRONIZING' : `${Math.floor(secsLeft / 60)}:${String(secsLeft % 60).padStart(2, '0')}`}
               </span>
             </div>

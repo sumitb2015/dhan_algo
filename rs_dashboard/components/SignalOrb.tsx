@@ -1,8 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
-import { Bell, BellOff, ChevronDown, ChevronUp, Clock, Info, PauseCircle, Power, Settings2, ShieldAlert, Volume2, VolumeX, X } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Bell, BellOff, ChevronDown, ChevronUp, Clock, Info, Orbit, PauseCircle, Power, Settings2, ShieldAlert, Volume2, VolumeX, X } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { Orb } from '@/components/signalOrb/Orb';
 import { useOrbEngine } from '@/components/signalOrb/useOrbEngine';
@@ -11,7 +11,7 @@ import { istClock } from '@/lib/istTime';
 import { istDateIso } from '@/lib/nseHolidays';
 import { expiryLabel } from '@/lib/pnfTarget';
 import { cn } from '@/lib/utils';
-import { type EffectiveStopResult } from '@/lib/signalOrb';
+import { type EffectiveStopResult, type IndicatorReading, type Signal } from '@/lib/signalOrb';
 import { ContextTabs } from '@/components/signalOrb/ContextPanels';
 import { PivotPanel } from '@/components/signalOrb/PivotChart';
 import { legStopForDisplay } from '@/lib/orbFocus';
@@ -38,7 +38,6 @@ export default function SignalOrb() {
   }, [e, ledger]);
 
   const position = !live ? 'FLAT' : live.status === 'open' ? live.side : 'PENDING';
-  const optMode = ledger?.config.instrument === 'options';
   const tfLabel = ledger ? (ledger.config.timeframe === 60 ? '1h' : `${ledger.config.timeframe}m`) : '';
   const real = ledger?.mode === 'REAL';
   const lastBar = e.feed.bars[e.feed.bars.length - 1];
@@ -89,35 +88,34 @@ export default function SignalOrb() {
     <div className="relative flex h-dvh min-h-[560px] flex-col overflow-x-hidden overflow-y-auto bg-zinc-950 text-zinc-100">
       {/* Cyberpunk stage atmosphere & subtle grid */}
       <div
-        className="pointer-events-none absolute inset-0 z-0 opacity-[0.035]"
+        className="pointer-events-none absolute inset-0 z-0 text-zinc-100 opacity-[0.035]"
         style={{
-          backgroundImage: 'linear-gradient(to right, #ffffff 1px, transparent 1px), linear-gradient(to bottom, #ffffff 1px, transparent 1px)',
+          backgroundImage: 'linear-gradient(to right, currentColor 1px, transparent 1px), linear-gradient(to bottom, currentColor 1px, transparent 1px)',
           backgroundSize: '44px 44px',
         }}
         aria-hidden
       />
       <div
-        className="pointer-events-none absolute inset-0 z-0 bg-[radial-gradient(ellipse_at_center,transparent_0%,rgba(0,0,0,0.75)_100%)]"
+        className="pointer-events-none absolute inset-0 z-0 bg-[radial-gradient(ellipse_at_center,transparent_0%,var(--color-zinc-950)_100%)] opacity-75"
         aria-hidden
       />
       {/* header */}
-      <header className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-2 border-b border-zinc-900 bg-zinc-950/80 px-4 py-2.5 backdrop-blur sm:px-6">
-        <div className="flex items-center gap-3">
-          <span className="relative flex h-2.5 w-2.5">
-            <span className={cn('absolute inline-flex h-full w-full animate-ping rounded-full opacity-60', ledger?.engineActive ? 'bg-emerald-400' : 'bg-zinc-600')} />
-            <span className={cn('relative inline-flex h-2.5 w-2.5 rounded-full', ledger?.engineActive ? 'bg-emerald-400' : 'bg-zinc-600')} />
-          </span>
-          <div>
-            <h1 className="text-[11px] font-black uppercase tracking-[0.45em] text-zinc-100">Signal Orb</h1>
-            <p className="font-mono text-[10px] text-zinc-500">
-              {contract ? `${contract.symbol} FUT ${contract.expiry ? expiryLabel(contract.expiry) : ''}` : 'resolving contract…'} · {tfLabel}
-              {ledger && (
-                <>
-                  {' '}· {optMode ? `sell options ${ledger.config.strikeOffset === 0 ? 'ATM' : `ATM${ledger.config.strikeOffset > 0 ? '+' : '−'}${Math.abs(ledger.config.strikeOffset)}`}` : ledger.config.instrument === 'synthetic' ? 'synthetic futures ATM' : ledger.config.instrument === 'straddle' ? `short straddle ATM @ ${ledger.config.premium.entryTime}` : ledger.config.instrument === 'strangle' ? `short strangle ±${ledger.config.strikeOffset} @ ${ledger.config.premium.entryTime}` : 'futures'} · {ledger.config.lots} lot{ledger.config.lots > 1 ? 's' : ''} {premiumMode ? `· leg SL ×${ledger.config.premium.legSlX || 'off'}` : `· SL ${ledger.config.stopPts}p`}
-                  {!premiumMode && (ledger.config.trailStartPts ?? 0) > 0 ? ` (trail +${ledger.config.trailStartPts}/${ledger.config.trailGapPts ?? 15}p)` : ''}
-                </>
-              )}
+      <header className="sticky top-0 z-30 flex flex-wrap items-center justify-between gap-3 border-b border-zinc-800 bg-zinc-950/95 px-4 py-2 backdrop-blur lg:px-6">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-emerald-500/25 bg-emerald-500/10">
+            <Orbit className="h-4 w-4 text-emerald-400" aria-hidden />
+          </div>
+          <div className="min-w-0">
+            <p className="mb-0.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-[0.16em] text-emerald-400">
+              Signal Orb
+              <span title={ledger?.engineActive ? 'Auto is on' : 'Auto is off'}
+                className={cn('h-1.5 w-1.5 rounded-full', ledger?.engineActive ? 'bg-emerald-400' : 'bg-zinc-600')} aria-hidden />
+              <span className="font-mono font-medium normal-case tracking-normal text-zinc-500">{ledger?.engineActive ? 'auto on' : 'auto off'}</span>
             </p>
+            <h1 className="text-sm font-bold leading-none tracking-tight text-white">
+              {contract ? `${contract.symbol} FUT ${contract.expiry ? expiryLabel(contract.expiry) : ''}` : 'Resolving contract…'}
+            </h1>
+            {ledger && <ConfigChips config={ledger.config} tfLabel={tfLabel} />}
           </div>
         </div>
         <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
@@ -206,7 +204,7 @@ export default function SignalOrb() {
           since={ev.sinceT ? sinceLabel(ev.sinceT, e.today) : null} progress={1 - e.secsToClose / e.barSecs} secsLeft={e.secsToClose} />
 
         {/* position: its own element, coloured by side (the orb shows the signal) */}
-        <PositionPill real={real} live={live} position={position} pnl={e.openPnl} effectiveStop={e.effectiveStop} config={ledger?.config} mark={e.mark} legLtps={e.state?.legLtps}
+        <PositionPill real={real} now={e.now} futPrice={e.price} live={live} position={position} pnl={e.openPnl} effectiveStop={e.effectiveStop} config={ledger?.config} mark={e.mark} legLtps={e.state?.legLtps}
           onClose={live?.status === 'open' ? () => void e.closeAndStop() : null} />
 
         {/* readout: the price first, then one chip per indicator */}
@@ -222,9 +220,9 @@ export default function SignalOrb() {
               className={cn(
                 'flex items-center gap-2 rounded-full border px-3 py-1 font-mono text-[11px] backdrop-blur-md shadow-sm transition-all',
                 r.vote === 1
-                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.15)]'
+                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300 shadow-md shadow-emerald-500/15'
                   : r.vote === -1
-                    ? 'border-red-500/40 bg-red-500/10 text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.15)]'
+                    ? 'border-red-500/40 bg-red-500/10 text-red-300 shadow-md shadow-red-500/15'
                     : 'border-zinc-800 bg-zinc-900/60 text-zinc-400',
               )}
             >
@@ -236,13 +234,14 @@ export default function SignalOrb() {
           ))}
           {!ev.readings.length && <span className="text-xs text-zinc-500">No indicators — open the rules to add one</span>}
         </div>
+        {ev.readings.length > 0 && <Agreement readings={ev.readings} signal={ev.signal} />}
 
         {/* control capsule: the switch, what it is doing, and REAL's arm */}
         <div
           className={cn(
             'flex items-center gap-3.5 rounded-full border py-1.5 pl-1.5 pr-6 backdrop-blur-md transition-all duration-300',
             ledger?.engineActive
-              ? 'border-emerald-500/40 bg-zinc-950/90 shadow-[0_0_28px_-4px_rgba(16,185,129,0.25)]'
+              ? 'border-emerald-500/40 bg-zinc-950/90 shadow-lg shadow-emerald-500/25'
               : 'border-zinc-800 bg-zinc-950/80 shadow-md',
           )}
         >
@@ -256,7 +255,7 @@ export default function SignalOrb() {
               'relative flex h-12 w-12 shrink-0 items-center justify-center rounded-full border-2 transition-all duration-300 disabled:opacity-40',
               FOCUS,
               ledger?.engineActive
-                ? 'border-emerald-400 bg-emerald-500/20 text-emerald-300 shadow-[0_0_16px_rgba(16,185,129,0.45)]'
+                ? 'border-emerald-400 bg-emerald-500/20 text-emerald-300 shadow-md shadow-emerald-500/45'
                 : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200',
             )}
           >
@@ -266,7 +265,7 @@ export default function SignalOrb() {
             <Power className="h-5 w-5" />
           </button>
           <div className="min-w-0">
-            <p className={cn('text-[10px] font-black uppercase tracking-[0.35em]', ledger?.engineActive ? 'text-emerald-300 drop-shadow-[0_0_6px_rgba(16,185,129,0.35)]' : 'text-zinc-400')}>
+            <p className={cn('text-[10px] font-black uppercase tracking-[0.35em]', ledger?.engineActive ? 'text-emerald-300' : 'text-zinc-400')}>
               {autoLabel}
             </p>
             <p className="flex max-w-[22rem] items-center gap-1.5 font-mono text-[11px] text-zinc-400" aria-live="polite">
@@ -286,7 +285,7 @@ export default function SignalOrb() {
               type="button"
               onClick={() => { e.setArmed(true); void e.op({ op: 'arm' }); }}
               className={cn(
-                'ml-2 whitespace-nowrap rounded-full border border-red-500/60 bg-red-500/20 px-3.5 py-1 text-[10px] font-black uppercase tracking-[0.25em] text-red-300 hover:bg-red-500/30 shadow-[0_0_12px_rgba(239,68,68,0.25)] transition-all',
+                'ml-2 whitespace-nowrap rounded-full border border-red-500/60 bg-red-500/20 px-3.5 py-1 text-[10px] font-black uppercase tracking-[0.25em] text-red-300 hover:bg-red-500/30 shadow-md transition-all',
                 FOCUS,
               )}
             >
@@ -329,27 +328,23 @@ export default function SignalOrb() {
             </span>
             {logOpen ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronUp className="h-3.5 w-3.5 shrink-0" />}
           </button>
-          {logOpen && (
-            <ul className="max-h-56 overflow-y-auto px-4 pb-3 font-mono text-[11px] sm:px-6">
-              {[...ledger.log].reverse().slice(0, 20).map((l, i) => (
-                <li key={`${l.at}-${i}`} className={cn('py-0.5', l.level === 'error' ? 'text-red-400' : l.level === 'warn' ? 'text-amber-400' : l.level === 'trade' ? 'text-zinc-100' : 'text-zinc-400')}>
-                  <span className="text-zinc-600">{istClock(l.at)}</span> {l.msg}
-                </li>
-              ))}
-            </ul>
-          )}
+          {logOpen && <Journal ledger={ledger} today={e.today} />}
         </footer>
       )}
 
-      {e.tradeErr && (
-        <button type="button" onClick={e.clearTradeErr} className="fixed bottom-24 left-1/2 z-40 max-w-xl -translate-x-1/2 rounded-lg border border-amber-500/40 bg-zinc-950 px-3 py-1.5 text-xs text-amber-300 shadow-lg">
-          Order not sent: {e.tradeErr} ✕
-        </button>
-      )}
-      {err && (
-        <button type="button" onClick={() => setErr(null)} className="fixed bottom-24 left-1/2 z-40 -translate-x-1/2 rounded-lg border border-red-500/40 bg-zinc-950 px-3 py-1.5 text-xs text-red-300 shadow-lg">
-          {err} ✕
-        </button>
+      {(e.tradeErr || err) && (
+        <div className="fixed bottom-24 left-1/2 z-50 flex max-w-xl -translate-x-1/2 flex-col items-center gap-2">
+          {e.tradeErr && (
+            <button type="button" onClick={e.clearTradeErr} aria-label="Dismiss" className={cn('rounded-lg border border-amber-500/40 bg-zinc-950 px-3 py-1.5 text-xs text-amber-300 shadow-lg', FOCUS)}>
+              Order not sent: {e.tradeErr} ✕
+            </button>
+          )}
+          {err && (
+            <button type="button" onClick={() => setErr(null)} aria-label="Dismiss" className={cn('rounded-lg border border-red-500/40 bg-zinc-950 px-3 py-1.5 text-xs text-red-300 shadow-lg', FOCUS)}>
+              {err} ✕
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
@@ -405,9 +400,12 @@ const optionOf = (r: OrbRow) => (!r.legs && r.target.kind === 'options' ? `${r.t
 /** A multi-leg row's legs, e.g. "+25800 CE −25800 PE" (+ bought, − sold). */
 const legsOf = (r: OrbRow) => (r.legs ?? []).map(g => `${g.action === 'BUY' ? '+' : '−'}${g.target.strike} ${g.target.side}`).join('  ');
 
-function PositionPill({ real, live, position, pnl, effectiveStop, config, mark, legLtps, onClose }: {
+function PositionPill({ real, now, futPrice, live, position, pnl, effectiveStop, config, mark, legLtps, onClose }: {
   /** REAL: Close needs a second click within a few seconds (it sends a market exit and turns Auto off) */
   real: boolean;
+  now: number;
+  /** the signal future's live price (the stop is measured on it) */
+  futPrice: number | null;
   live: OrbRow | null; position: 'LONG' | 'SHORT' | 'FLAT' | 'PENDING'; pnl: number | null; effectiveStop: EffectiveStopResult | null; config?: OrbConfig;
   /** the row's own live price (an option's premium for an options row) */
   mark: number | null;
@@ -426,7 +424,7 @@ function PositionPill({ real, live, position, pnl, effectiveStop, config, mark, 
   }
   if (position === 'PENDING') {
     return (
-      <div className="flex items-center gap-2.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-4 py-1.5 font-mono text-[11px] text-amber-300 shadow-[0_0_15px_rgba(245,158,11,0.15)]">
+      <div className="flex items-center gap-2.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-4 py-1.5 font-mono text-[11px] text-amber-300 shadow-md">
         <span className="h-2 w-2 animate-ping rounded-full bg-amber-400" aria-hidden />
         <span className="font-black tracking-[0.2em]">{live.status.toUpperCase()}</span>
         <span>{live.side} {optionOf(live) ? `· SELL ${optionOf(live)} ` : ''}{live.legs ? `· ${legsOf(live)} ` : ''}{live.lots} lot{live.lots > 1 ? 's' : ''}</span>
@@ -439,8 +437,8 @@ function PositionPill({ real, live, position, pnl, effectiveStop, config, mark, 
       className={cn(
         'group relative flex flex-wrap items-center justify-center gap-3 rounded-full border bg-zinc-950/90 py-1 pl-1.5 pr-2.5 font-mono text-[11px] backdrop-blur-md transition-all duration-300',
         long
-          ? 'border-emerald-500/50 shadow-[0_0_24px_-4px_rgba(16,185,129,0.25)]'
-          : 'border-red-500/50 shadow-[0_0_24px_-4px_rgba(239,68,68,0.25)]',
+          ? 'border-emerald-500/50 shadow-lg shadow-emerald-500/25'
+          : 'border-red-500/50 shadow-lg shadow-red-500/25',
       )}
     >
       <span
@@ -469,6 +467,10 @@ function PositionPill({ real, live, position, pnl, effectiveStop, config, mark, 
                 {g.action === 'BUY' ? '+' : '−'}{g.target.strike}{g.target.side}{' '}
                 <span className="font-normal text-zinc-500 no-underline">
                   {g.entry.toLocaleString('en-IN')}→{g.status === 'closed' ? (g.exit ?? '—').toLocaleString('en-IN') : legLtps?.[i] == null ? '—' : legLtps[i]!.toLocaleString('en-IN')}
+                  {g.status !== 'closed' && legLtps?.[i] != null && (() => {
+                    const v = (g.action === 'SELL' ? g.entry - legLtps[i]! : legLtps[i]! - g.entry) * live.lots * live.unitsPerLot;
+                    return <> <strong className={v >= 0 ? 'text-emerald-400' : 'text-red-400'}>{inr(v)}</strong></>;
+                  })()}
                   {stop && <> · SL <strong className="text-zinc-300">{stop.level.toLocaleString('en-IN', { maximumFractionDigits: 1 })}</strong>{stop.trailed > 0 ? ` (trailed ${stop.trailed}×)` : ''}</>}
                 </span>
               </span>
@@ -484,14 +486,14 @@ function PositionPill({ real, live, position, pnl, effectiveStop, config, mark, 
       <strong
         className={cn(
           'text-sm font-black tabular-nums tracking-tight',
-          pnl === null ? 'text-zinc-500' : pnl >= 0 ? 'text-emerald-400 drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'text-red-400 drop-shadow-[0_0_8px_rgba(239,68,68,0.5)]',
+          pnl === null ? 'text-zinc-500' : pnl >= 0 ? 'text-emerald-400' : 'text-red-400',
         )}
       >
         {pnl === null ? '—' : inr(pnl)}
       </strong>
       {effectiveStop && effectiveStop.stopLevel !== null && (
         effectiveStop.isTrailing ? (
-          <span className="flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-2.5 py-0.5 text-[10px] font-bold text-amber-300 shadow-[0_0_12px_rgba(245,158,11,0.2)]">
+          <span className="flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-2.5 py-0.5 text-[10px] font-bold text-amber-300 shadow-md">
             <span className="h-1.5 w-1.5 rounded-full bg-amber-400 animate-pulse" />
             <span>TRAIL SL</span>
             <strong className="font-mono text-zinc-100">{effectiveStop.stopLevel.toLocaleString('en-IN', { maximumFractionDigits: 1 })}</strong>
@@ -508,6 +510,18 @@ function PositionPill({ real, live, position, pnl, effectiveStop, config, mark, 
           </span>
         )
       )}
+      {effectiveStop && effectiveStop.stopLevel !== null && futPrice !== null && (() => {
+        const pts = live.side === 'LONG' ? futPrice - effectiveStop.stopLevel : effectiveStop.stopLevel - futPrice;
+        // rupees only where the stop's points ARE the row's P&L (a futures row); an option or a synthetic moves differently
+        const rs = live.target.kind !== 'options' && !live.legs ? pts * live.lots * live.unitsPerLot : null;
+        return (
+          <span className="text-[11px] text-zinc-400" title="Room left before the stop, on the signal future's price">
+            to stop <strong className={pts <= 0 ? 'text-red-400' : 'text-zinc-200'}>{pts.toFixed(1)} pts</strong>
+            {rs !== null && <> (₹{Math.abs(rs).toLocaleString('en-IN', { maximumFractionDigits: 0 })})</>}
+          </span>
+        );
+      })()}
+      {now > 0 && <span className="text-[11px] text-zinc-500" title={`Entered ${istClock(live.entryAt)}`}>{held(now - live.entryAt)}</span>}
       {onClose && <CloseButton real={real} onClose={onClose} />}
     </div>
   );
@@ -600,3 +614,126 @@ function StopsWhere({ server, seen, leader, premium }: { server: boolean; seen: 
     </p>
   );
 }
+
+/** The configured trade as chips (instrument, size, stop, trail) instead of one run-on line. */
+function ConfigChips({ config: c, tfLabel }: { config: OrbConfig; tfLabel: string }) {
+  const premium = isPremiumInstrument(c.instrument);
+  const off = c.strikeOffset === 0 ? 'ATM' : `ATM${c.strikeOffset > 0 ? '+' : '−'}${Math.abs(c.strikeOffset)}`;
+  const what = c.instrument === 'options' ? `Sell option ${off}` : c.instrument === 'synthetic' ? 'Synthetic ATM'
+    : c.instrument === 'straddle' ? `Short straddle @ ${c.premium.entryTime}` : c.instrument === 'strangle' ? `Short strangle ±${c.strikeOffset} @ ${c.premium.entryTime}` : 'Futures';
+  const chips = [
+    tfLabel,
+    what,
+    `${c.lots} lot${c.lots > 1 ? 's' : ''}`,
+    premium ? `Leg SL ×${c.premium.legSlX || 'off'}` : `SL ${c.stopPts} pts`,
+    ...(!premium && (c.trailStartPts ?? 0) > 0 ? [`Trail +${c.trailStartPts} / ${c.trailGapPts ?? 15} pts`] : []),
+    `Loss limit ₹${c.dailyLossLimit.toLocaleString('en-IN')}`,
+  ];
+  return (
+    <ul className="mt-1 flex flex-wrap items-center gap-1" aria-label="Configuration">
+      {chips.map(t => (
+        <li key={t} className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-px font-mono text-[11px] text-zinc-300">{t}</li>
+      ))}
+    </ul>
+  );
+}
+
+/** How close the indicators are to agreeing: "All 3 agree", or "2 of 3 bullish · waiting on ST". */
+function Agreement({ readings, signal }: { readings: IndicatorReading[]; signal: Signal }) {
+  const n = readings.length;
+  const bull = readings.filter(r => r.vote === 1);
+  const bear = readings.filter(r => r.vote === -1);
+  let text: string;
+  if (signal !== 'NEUTRAL') text = `All ${n} agree · ${signal === 'BULL' ? 'bullish' : 'bearish'}`;
+  else if (!bull.length && !bear.length) text = `None of ${n} has a view yet`;
+  else if (bull.length === bear.length) text = `Split · ${bull.length} bullish, ${bear.length} bearish of ${n}`;
+  else {
+    const lead = bull.length > bear.length ? bull : bear;
+    const word = lead === bull ? 'bullish' : 'bearish';
+    const waiting = readings.filter(r => !lead.includes(r)).map(r => r.label);
+    text = `${lead.length} of ${n} ${word} · waiting on ${waiting.join(', ')}`;
+  }
+  return <p className="font-mono text-xs text-zinc-400" aria-live="polite">{text}</p>;
+}
+
+/** Time in the trade: "45 s", "12 m", "2 h 05 m". */
+const held = (ms: number): string => {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (sec < 60) return `${sec} s`;
+  const m = Math.floor(sec / 60);
+  return m < 60 ? `${m} m` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} m`;
+};
+
+type JournalTab = 'trades' | 'all' | 'trade' | 'problems';
+const JOURNAL_TABS: { v: JournalTab; label: string }[] = [
+  { v: 'trades', label: 'Trades today' }, { v: 'all', label: 'Log' }, { v: 'trade', label: 'Orders' }, { v: 'problems', label: 'Errors & warnings' },
+];
+
+/** The footer panel: today's trades as a table (active mode), or the log (every stored line, filterable). */
+function Journal({ ledger, today }: { ledger: OrbLedger; today: string }) {
+  const [tab, setTab] = useState<JournalTab>('trades');
+  const rows = useMemo(
+    () => ledger.rows.filter(r => r.mode === ledger.mode && r.day === today && r.status !== 'failed').sort((a, b) => b.entryAt - a.entryAt),
+    [ledger.rows, ledger.mode, today],
+  );
+  const log = useMemo(() => [...ledger.log].reverse().filter(l => (tab === 'trade' ? l.level === 'trade' : tab === 'problems' ? l.level === 'error' || l.level === 'warn' : true)), [ledger.log, tab]);
+  return (
+    <div className="px-4 pb-3 lg:px-6">
+      <div role="tablist" aria-label="Journal" className="mb-2 inline-flex rounded-lg border border-zinc-800 bg-zinc-950 p-0.5">
+        {JOURNAL_TABS.map(t => (
+          <button key={t.v} type="button" role="tab" aria-selected={tab === t.v} onClick={() => setTab(t.v)}
+            className={cn('rounded-md px-2.5 py-0.5 text-xs font-bold', tab === t.v ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300', FOCUS)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {tab === 'trades' ? (
+        rows.length ? (
+          <div className="max-h-64 overflow-auto rounded-lg border border-zinc-800">
+            <table className="w-full border-collapse font-mono text-xs">
+              <thead className="sticky top-0 z-10">
+                <tr>
+                  {['In', 'Out', 'What', 'Lots', 'Entry', 'Exit', 'P&L', 'Reason'].map(h => (
+                    <th key={h} className={cn('bg-zinc-800 px-2 py-1 text-xs font-bold text-white', h === 'What' || h === 'Reason' ? 'text-left' : 'text-right')}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map(r => {
+                  const open = r.status !== 'closed';
+                  return (
+                    <tr key={r.id} className="border-t border-zinc-900">
+                      <td className="px-2 py-1 text-right text-zinc-400">{istClock(r.entryAt).slice(0, 5)}</td>
+                      <td className="px-2 py-1 text-right text-zinc-400">{r.exitAt ? istClock(r.exitAt).slice(0, 5) : <span className="text-amber-400">{r.status.toUpperCase()}</span>}</td>
+                      <td className="px-2 py-1 text-zinc-200">{rowWhat(r)}</td>
+                      <td className="px-2 py-1 text-right text-zinc-300">{r.lots}</td>
+                      <td className="px-2 py-1 text-right tabular-nums text-zinc-300">{r.legs ? '—' : r.entry.toLocaleString('en-IN')}</td>
+                      <td className="px-2 py-1 text-right tabular-nums text-zinc-300">{r.legs || r.exit === undefined ? '—' : r.exit.toLocaleString('en-IN')}</td>
+                      <td className={cn('px-2 py-1 text-right font-bold tabular-nums', open || r.pnl === undefined ? 'text-zinc-500' : r.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                        {open || r.pnl === undefined ? '—' : inr(r.pnl)}
+                      </td>
+                      <td className="max-w-[28rem] truncate px-2 py-1 text-zinc-400" title={[r.exitReason, r.note].filter(Boolean).join(' · ')}>{r.exitReason ?? r.note ?? ''}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : <p className="text-xs text-zinc-500">No {ledger.mode} trades today</p>
+      ) : (
+        <ul className="max-h-64 overflow-y-auto font-mono text-xs">
+          {log.length ? log.map((l, i) => (
+            <li key={`${l.at}-${i}`} className={cn('py-0.5', l.level === 'error' ? 'text-red-400' : l.level === 'warn' ? 'text-amber-400' : l.level === 'trade' ? 'text-zinc-100' : 'text-zinc-400')}>
+              <span className="text-zinc-600">{istClock(l.at)}</span> {l.msg}
+            </li>
+          )) : <li className="text-zinc-500">Nothing here</li>}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/** What a row traded, in a few words: "LONG FUT", "SELL 5600 PE", "SYN LONG", "SHORT STRADDLE". */
+const rowWhat = (r: OrbRow): string =>
+  r.legs ? (r.structure === 'synthetic' ? `SYN ${r.side} ${legsOf(r)}` : `SHORT ${(r.structure ?? '').toUpperCase()} ${legsOf(r)}`)
+    : r.target.kind === 'options' ? `SELL ${r.target.strike} ${r.target.side}` : `${r.side} FUT`;
