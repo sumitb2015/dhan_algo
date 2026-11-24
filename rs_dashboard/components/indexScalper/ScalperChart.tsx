@@ -118,6 +118,7 @@ export default function ScalperChart(props: Props) {
   const [chipTops, setChipTops] = useState<Record<string, number>>({});
   const [hoverScale, setHoverScale] = useState<{ y: number; price: number } | null>(null);
   const [menu, setMenu] = useState<{ y: number; price: number } | null>(null);
+  const [tentativeBrackets, setTentativeBrackets] = useState<Record<string, { tp?: number; sl?: number }>>({});
   const [dragState, setDragState] = useState<{
     kind: 'TP' | 'SL';
     leg: ScalperLeg;
@@ -403,35 +404,51 @@ export default function ScalperChart(props: Props) {
     for (const p of placed) {
       const legId = p.leg.id;
       const simB = simBrackets?.[legId];
+      const tent = tentativeBrackets?.[legId];
       let tp: { price: number; orderId?: string; isSim: boolean } | undefined;
       let sl: { price: number; orderId?: string; isSim: boolean } | undefined;
 
       if (simB?.tp && simB.tp > 0) tp = { price: simB.tp, isSim: true };
       if (simB?.sl && simB.sl > 0) sl = { price: simB.sl, isSim: true };
 
-      if (!tp || !sl) {
-        const isLong = p.leg.netQty > 0;
-        const oppSide = isLong ? 'SELL' : 'BUY';
-        for (const ord of openOrders) {
-          if (ord.side !== oppSide) continue;
-          const sName = (p.leg.symbol || '').toUpperCase();
-          const oName = (ord.symbol || '').toUpperCase();
-          const matchSym = (sName && (oName.includes(sName) || sName.includes(oName))) ||
-            (p.leg.type === 'FUT' && (oName.includes('FUT') || oName.includes('CRUDE')));
-          if (!matchSym && p.leg.strike > 0 && !oName.includes(String(p.leg.strike))) continue;
+      // Tentative / optimistic drag release values
+      if (!tp && tent?.tp && tent.tp > 0) tp = { price: tent.tp, isSim: false };
+      if (!sl && tent?.sl && tent.sl > 0) sl = { price: tent.sl, isSim: false };
 
-          if (!tp && ord.orderType === 'LIMIT' && (ord.price ?? 0) > 0) {
-            tp = { price: ord.price!, orderId: ord.id, isSim: false };
-          } else if (!sl && (ord.orderType === 'STOP_LOSS_MARKET' || ord.orderType === 'STOP_LOSS') && (ord.trigger ?? ord.price ?? 0) > 0) {
-            sl = { price: (ord.trigger ?? ord.price)!, orderId: ord.id, isSim: false };
-          }
+      const isLong = p.leg.netQty > 0;
+      const oppSide = isLong ? 'SELL' : 'BUY';
+
+      for (const ord of openOrders) {
+        if (ord.side !== oppSide) continue;
+        const sName = (p.leg.symbol || '').toUpperCase();
+        const oName = (ord.symbol || '').toUpperCase();
+        const isCrudeMatch = underlying === 'CRUDEOILM' && (
+          p.leg.type === 'FUT' || oName.includes('CRUDE') || sName.includes('CRUDE')
+        );
+        const isNiftyMatch = underlying === 'NIFTY' && (
+          (p.leg.type === 'FUT' && (oName.includes('FUT') || oName.includes('NIFTY'))) ||
+          (p.leg.strike > 0 && oName.includes(String(p.leg.strike)))
+        );
+        const matchesLeg = isCrudeMatch || isNiftyMatch || (sName && (oName.includes(sName) || sName.includes(oName)));
+        if (!matchesLeg) continue;
+
+        const ot = (ord.orderType || '').toUpperCase();
+        const ordPrice = ord.price ?? ord.trigger ?? 0;
+        if (ordPrice <= 0) continue;
+
+        const isTargetDirection = isLong ? (ordPrice >= p.anchor.level) : (ordPrice <= p.anchor.level);
+
+        if (!tp && isTargetDirection) {
+          tp = { price: ordPrice, orderId: ord.id, isSim: false };
+        } else if (!sl && !isTargetDirection) {
+          sl = { price: ordPrice, orderId: ord.id, isSim: false };
         }
       }
 
       res[legId] = { tp, sl };
     }
     return res;
-  }, [placed, simBrackets, openOrders]);
+  }, [placed, simBrackets, tentativeBrackets, openOrders, underlying]);
 
   // ── bracket lines (TP in emerald, SL in rose) ──────────────────────
   useEffect(() => {
@@ -550,6 +567,13 @@ export default function ScalperChart(props: Props) {
       const kind = dragState.kind;
       setDragState(null);
       if (finalPrice > 0) {
+        setTentativeBrackets(prev => ({
+          ...prev,
+          [leg.id]: {
+            ...prev[leg.id],
+            [kind === 'TP' ? 'tp' : 'sl']: finalPrice,
+          },
+        }));
         onSetBracket?.({ leg, kind, price: finalPrice });
       }
     };
@@ -585,13 +609,31 @@ export default function ScalperChart(props: Props) {
       const p = ord.price ?? ord.trigger;
       if (!p) continue;
       seen.add(ord.id);
-      const color = ord.side === 'BUY' ? '#0ea5e9' : '#f43f5e';
-      const opts = { price: p, color, lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${ord.qty ?? ''} ${ord.side} ${ord.orderType}` };
+      const matchedPos = placed.find(pos => {
+        const sName = (pos.leg.symbol || '').toUpperCase();
+        const oName = (ord.symbol || '').toUpperCase();
+        return (underlying === 'CRUDEOILM' && (oName.includes('CRUDE') || sName.includes('CRUDE'))) ||
+          (underlying === 'NIFTY' && (oName.includes('NIFTY') || sName.includes('NIFTY')));
+      });
+      let color = ord.side === 'BUY' ? '#0ea5e9' : '#f43f5e';
+      let title = `${ord.qty ?? ''} ${ord.side} ${ord.orderType}`;
+      if (matchedPos && matchedPos.anchor.level > 0 && ord.side === (matchedPos.leg.netQty > 0 ? 'SELL' : 'BUY')) {
+        const isLong = matchedPos.leg.netQty > 0;
+        const ptDiff = isLong ? (p - matchedPos.anchor.level) : (matchedPos.anchor.level - p);
+        if (ptDiff >= 0) {
+          color = '#10b981'; // Green for TP
+          title = 'TP';
+        } else {
+          color = '#ef4444'; // Red for SL
+          title = 'SL';
+        }
+      }
+      const opts = { price: p, color, lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title };
       const ex = lines.get(ord.id);
       if (ex) ex.applyOptions(opts); else lines.set(ord.id, candles.createPriceLine(opts));
     }
     for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
-  }, [regularOrders]);
+  }, [regularOrders, placed, underlying]);
 
   // Chip y-positions follow the price scale (zoom / pan / autoscale move it with no event), so re-read them on a short timer.
   useEffect(() => {
@@ -908,13 +950,52 @@ export default function ScalperChart(props: Props) {
         </div>
       )}
 
-      {/* working order chips on chart (non-bracket orders) */}
+      {/* working order chips on chart */}
       {regularOrders.map(ord => {
         const p = ord.price ?? ord.trigger;
         if (!p) return null;
         const top = chipTops[`ord_${ord.id}`];
         if (top === undefined) return null;
         const isBuy = ord.side === 'BUY';
+
+        const matchedPos = placed.find(pos => {
+          const sName = (pos.leg.symbol || '').toUpperCase();
+          const oName = (ord.symbol || '').toUpperCase();
+          return (underlying === 'CRUDEOILM' && (oName.includes('CRUDE') || sName.includes('CRUDE'))) ||
+            (underlying === 'NIFTY' && (oName.includes('NIFTY') || sName.includes('NIFTY')));
+        });
+
+        if (matchedPos && matchedPos.anchor.level > 0 && ord.side === (matchedPos.leg.netQty > 0 ? 'SELL' : 'BUY')) {
+          const isLong = matchedPos.leg.netQty > 0;
+          const lotSize = displayLotUnits(underlying, feedLotSize);
+          const lots = ord.qty ? (underlying === 'CRUDEOILM' ? ord.qty : Math.max(1, Math.round(ord.qty / lotSize))) : 1;
+          const totalUnits = underlying === 'CRUDEOILM' ? lots * 10 : lots * lotSize;
+          const ptDiff = isLong ? (p - matchedPos.anchor.level) : (matchedPos.anchor.level - p);
+          const pct = (ptDiff / matchedPos.anchor.level) * 100;
+          const pnl = ptDiff * totalUnits;
+          const isTp = ptDiff >= 0;
+
+          return (
+            <div key={ord.id} data-testid="order-chip" style={{ top: top - 11 }}
+              className="absolute right-[84px] z-[55] flex items-center shadow-lg font-mono text-[11px]">
+              <div className={cn('h-[22px] px-2 rounded-l flex items-center font-bold select-none border',
+                isTp ? 'bg-emerald-950/90 border-emerald-500/80 text-emerald-400' : 'bg-rose-950/90 border-rose-500/80 text-rose-400')}>
+                {isTp ? 'TP' : 'SL'} {pnl >= 0 ? '+' : ''}{fmt(Math.round(pnl))} ({pct >= 0 ? '+' : ''}{pct.toFixed(2)}%)
+              </div>
+              <div className={cn('h-[22px] px-2 rounded-r flex items-center gap-1.5 bg-zinc-900 border border-l-0 text-zinc-200',
+                isTp ? 'border-emerald-500/60' : 'border-rose-500/60')}>
+                <span>{ord.qty} {ord.side} {ord.orderType}</span>
+                {ord.cancellable && (
+                  <button type="button" aria-label={`Cancel order ${ord.id}`} onClick={() => onCancelOrder?.(ord.id)}
+                    className="h-[16px] w-[16px] rounded flex items-center justify-center text-zinc-400 hover:text-white hover:bg-rose-600 transition-colors">
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        }
+
         return (
           <div key={ord.id} data-testid="order-chip" style={{ top: top - 11 }}
             className={cn('absolute right-[84px] z-[55] flex items-center gap-1.5 pl-2 pr-1 h-[22px] rounded border text-[11px] font-mono bg-zinc-900 shadow',
@@ -982,6 +1063,12 @@ export default function ScalperChart(props: Props) {
                     title="Cancel Target"
                     onClick={(e) => {
                       e.stopPropagation();
+                      setTentativeBrackets(prev => {
+                        if (!prev[p.leg.id]) return prev;
+                        const next = { ...prev, [p.leg.id]: { ...prev[p.leg.id] } };
+                        delete next[p.leg.id].tp;
+                        return next;
+                      });
                       onCancelBracket?.({ legId: p.leg.id, kind: 'TP', orderId: b.tp!.orderId });
                     }}
                     className="h-[16px] w-[16px] rounded flex items-center justify-center text-zinc-400 hover:text-white hover:bg-rose-600 transition-colors"
@@ -1017,6 +1104,12 @@ export default function ScalperChart(props: Props) {
                     title="Cancel Stop Loss"
                     onClick={(e) => {
                       e.stopPropagation();
+                      setTentativeBrackets(prev => {
+                        if (!prev[p.leg.id]) return prev;
+                        const next = { ...prev, [p.leg.id]: { ...prev[p.leg.id] } };
+                        delete next[p.leg.id].sl;
+                        return next;
+                      });
                       onCancelBracket?.({ legId: p.leg.id, kind: 'SL', orderId: b.sl!.orderId });
                     }}
                     className="h-[16px] w-[16px] rounded flex items-center justify-center text-zinc-400 hover:text-white hover:bg-rose-600 transition-colors"
