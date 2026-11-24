@@ -18,7 +18,7 @@ function candles() {
   });
 }
 
-type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[] };
+type MockState = { calls: Call[]; blocked: Call[]; positions: Record<string, unknown>[]; orders?: Record<string, unknown>[]; noLive?: boolean; chainCalls?: number };
 
 async function mockApi(page: Page, state: MockState) {
   await page.route('**/api/**', async (route: Route) => {
@@ -34,8 +34,18 @@ async function mockApi(page: Page, state: MockState) {
       const strikes = Object.fromEntries(Object.entries(IDS).map(([k, [ce, pe]]) => [k, { ceId: ce, peId: pe }]));
       return json(route, { success: true, data: { lotSize: 65, strikes } });
     }
+    if (p === '/api/options/chain') {
+      state.chainCalls = (state.chainCalls ?? 0) + 1;
+      // Dhan REST shape: strike keys "25350.000000", previous_close_price, previous_oi (holiday snapshot)
+      const oc = Object.fromEntries(Object.keys(IDS).map(k => [`${k}.000000`, {
+        ce: { last_price: 270, oi: 577395, previous_close_price: 551.55, previous_oi: 109720, volume: 1 },
+        pe: { last_price: 229.95, oi: 1118715, previous_close_price: 98.85, previous_oi: 262730, volume: 1 },
+      }]));
+      return json(route, { success: true, data: { chain: { oc }, spot: 25349.65 } });
+    }
     if (p === '/api/options/live') {
       if (method === 'POST') return json(route, { success: true });
+      if (state.noLive) return json(route, { success: true, status: { status: 'STOPPED' }, quotes: null });
       const strikes = Object.fromEntries(Object.keys(IDS).map(k => [k, {
         strike: Number(k),
         ce: { ltp: 210.5, oi: 1_200_000, oi_chg_pct: 12.5, change_pct: -3.2, buildup: 'SB' },
@@ -70,8 +80,12 @@ test.describe('Index Scalper', () => {
 
     await expect(page.getByTestId('index-scalper')).toBeVisible({ timeout: 60_000 });
     await expect(page.locator('canvas').first()).toBeVisible({ timeout: 30_000 });
+    // the chain is closed until its toolbar button is clicked
+    await expect(page.getByTestId('option-chain-panel')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Option chain' }).click();
     await expect(page.getByTestId('option-chain-panel')).toBeVisible();
     await expect(page.getByRole('button', { name: 'Trade 25350 PE' })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId('chain-snapshot')).toHaveCount(0); // live ticks: no snapshot badge
     // default indicators from the reference screenshot: Supertrend + EMA
     await expect(page.getByText('Supertrend (10, 2)')).toBeVisible();
     await expect(page.getByText('EMA (20)')).toBeVisible();
@@ -188,10 +202,34 @@ test.describe('Index Scalper', () => {
     await signIn(context);
     await mockApi(page, state);
     await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 }); // hydrated: clicks are handled
+    await page.getByRole('button', { name: 'Option chain' }).click();
     await page.getByRole('button', { name: 'Trade 25350 CE' }).click({ timeout: 60_000 });
     await expect(page.getByTestId('order-ticket')).toContainText('2026-12-01');
     await page.getByTestId('option-chain-panel').getByRole('combobox').selectOption('2026-12-08');
     await expect(page.getByTestId('order-ticket')).toHaveCount(0);
+    expect(state.calls).toEqual([]);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('no live ticks (holiday / bridge down): the chain shows Dhan\'s REST snapshot, flagged, and nothing trades on it', async ({ page, context }) => {
+    const state: MockState = { calls: [], blocked: [], positions: [], noLive: true };
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('canvas').first()).toBeVisible({ timeout: 60_000 }); // hydrated: clicks are handled
+    await page.getByRole('button', { name: 'Option chain' }).click();
+    const panel = page.getByTestId('option-chain-panel');
+    await expect(panel.getByTestId('chain-snapshot')).toBeVisible({ timeout: 20_000 });
+    await expect(panel.getByRole('button', { name: 'Trade 25350 CE' })).toHaveText('270.00');
+    await expect(panel).toContainText('Short Buildup'); // CE: price down, OI up vs the previous session
+    await expect(panel).toContainText('Long Buildup'); // PE: price up, OI up
+
+    // a paper order from a snapshot price is refused: orders only ever price off live ticks
+    await panel.getByRole('button', { name: 'Trade 25350 CE' }).click();
+    await page.getByTestId('order-ticket').getByRole('button', { name: /^Buy / }).click();
+    await expect(page.getByTestId('order-ticket')).toContainText('No live price');
+    await expect(page.getByTestId('position-chip')).toHaveCount(0);
     expect(state.calls).toEqual([]);
     expect(state.blocked).toEqual([]);
   });

@@ -6,11 +6,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import type { LiveQuotes } from '@/components/Scalper';
+import { chainSnapshot, type RestChain } from '@/lib/indexScalperChain';
 
 export interface StrikeIds { ceId?: string; peId?: string }
 
 const UNDERLYING = 'NIFTY';
 const STALE_FEED_MS = 10_000;
+/** No live chain for this long after an expiry is picked: show Dhan's REST chain as a snapshot instead. */
+const SNAPSHOT_AFTER_MS = 4_000;
+/** Snapshot refresh while there is still no live chain (the route caches 30 s; Dhan allows ~1 chain call / 3 s). */
+const SNAPSHOT_EVERY_MS = 60_000;
 
 const newId = () => `isx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -18,7 +23,13 @@ export interface IndexScalperFeed {
   expiries: string[];
   expiry: string;
   setExpiry: (e: string) => void;
+  /** LIVE bridge quotes only. Orders, ATM one-click, spot and staleness read this and nothing else. */
   quotes: LiveQuotes | null;
+  /** What the chain panel draws: the live quotes, else a REST snapshot (display only, never an order price). */
+  chain: LiveQuotes | null;
+  chainSource: 'live' | 'snapshot' | null;
+  /** Error from the last snapshot fetch, shown in the panel when there is nothing to draw. */
+  snapshotError: string | null;
   spot: number | null;
   /** Seconds since the last tick; null when no tick has arrived. */
   feedAgeSec: number | null;
@@ -128,12 +139,39 @@ export function useIndexScalperFeed(): IndexScalperFeed {
     return m;
   }, [quotes, strikeIds]);
 
+  // REST snapshot, only while the live bridge has no chain for this expiry (e.g. an NSE holiday: Dhan's quote API has no
+  // index price then, so the bridge cannot pick an ATM and exits, and the WebSocket has nothing to stream anyway).
+  const [snapshot, setSnapshot] = useState<LiveQuotes | null>(null);
+  const [snapshotError, setSnapshotError] = useState<string | null>(null);
+  const hasLive = !!quotes;
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSnapshot(prev => (prev && prev.expiry === expiry ? prev : null));
+    if (!expiry || hasLive) return;
+    let dead = false;
+    const load = () => {
+      fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}&allowStale=1`)
+        .then(r => r.json())
+        .then((j: { success: boolean; data?: RestChain; error?: string; as_of?: number }) => {
+          if (dead) return;
+          const snap = j.success && j.data ? chainSnapshot(j.data, UNDERLYING, expiry, j.as_of ?? Date.now()) : null;
+          if (snap) { setSnapshot(snap); setSnapshotError(null); } else setSnapshotError(j.error ?? 'Option chain unavailable');
+        })
+        .catch(e => { if (!dead) setSnapshotError(String((e as Error)?.message ?? e)); });
+    };
+    const first = setTimeout(load, SNAPSHOT_AFTER_MS);
+    const every = setInterval(load, SNAPSHOT_EVERY_MS);
+    return () => { dead = true; clearTimeout(first); clearInterval(every); };
+  }, [expiry, hasLive]);
+  const chain = quotes ?? (snapshot && snapshot.expiry === expiry ? snapshot : null);
+
   const lastTick = quotes?.updated_at ? Date.parse(quotes.updated_at) : 0;
   const feedAgeSec = lastTick > 0 && nowMs > 0 ? Math.max(0, (nowMs - lastTick) / 1000) : null;
   const spot = quotes && quotes.spot > 0 ? quotes.spot : null;
 
   return {
-    expiries, expiry, setExpiry, quotes, spot, feedAgeSec,
+    expiries, expiry, setExpiry, quotes, chain, chainSource: quotes ? 'live' : chain ? 'snapshot' : null, snapshotError,
+    spot, feedAgeSec,
     stale: feedAgeSec !== null && feedAgeSec > STALE_FEED_MS / 1000,
     // The lookup that produced this lot size must be for the expiry on screen; until then an order is refused.
     lotSize: lookupFor === expiry ? lotSize : null,

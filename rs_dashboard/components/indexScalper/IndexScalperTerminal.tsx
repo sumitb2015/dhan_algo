@@ -82,7 +82,8 @@ export default function IndexScalperTerminal() {
   const [pctScale, setPctScale] = useState(false);
   const [autoScale, setAutoScale] = useState(true);
 
-  const [chainOpen, setChainOpen] = useState(true);
+  // The chain is a floating window opened from its toolbar button, not shown on load.
+  const [chainOpen, setChainOpen] = useState(false);
   const [scalperOn, setScalperOn] = useState(false);
   const [ticket, setTicket] = useState<PickedContract | null>(null);
   const [ticketBusy, setTicketBusy] = useState(false);
@@ -307,7 +308,8 @@ export default function IndexScalperTerminal() {
       return { ok: true, text: `SIM ${req.side} ${req.lots} lot${req.lots > 1 ? 's' : ''} ${c.strike} ${c.type} @ ${fillPx.toFixed(2)}` };
     }
 
-    if (req.orderType === 'MARKET' && f.stale) return { ok: false, text: 'Live prices are stale: refusing a market order' };
+    // A market order needs a live feed: stale ticks, or none at all (the chain may be a REST snapshot then), refuse it.
+    if (req.orderType === 'MARKET' && (f.stale || f.feedAgeSec === null)) return { ok: false, text: f.stale ? 'Live prices are stale: refusing a market order' : 'No live prices (tick feed not running): refusing a market order' };
     const before = legs.find(l => l.securityId === c.securityId)?.netQty ?? 0;
     const out = await sendReal({
       securityId: c.securityId, quantity: size.units, side: req.side, orderType: req.orderType,
@@ -465,7 +467,10 @@ export default function IndexScalperTerminal() {
 
   const lastBar = liveBars[liveBars.length - 1];
   const dataDate = lastBar ? toIsoDate(String(lastBar.t)) : null;
-  const spotDisplay = feed.spot ?? lastBar?.c ?? null;
+  // Live spot; else the chain snapshot's index price (Dhan's official close on a closed day: the intraday candles stop at
+  // the value frozen at 15:15, which is not the close); else the last candle.
+  const spotDisplay = feed.spot ?? feed.chain?.spot ?? lastBar?.c ?? null;
+  const notLive = feed.feedAgeSec === null && feed.chainSource === 'snapshot';
 
   const btn = 'h-7 px-2 rounded text-xs font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 transition-colors';
   const sep = <span className="w-px h-5 bg-zinc-800 shrink-0" />;
@@ -526,10 +531,11 @@ export default function IndexScalperTerminal() {
         </div>
       </div>
 
-      {(candleErr || posErr || feed.stale) && (
+      {(candleErr || posErr || feed.stale || notLive) && (
         <div role="alert" className="px-3 py-1 text-[11px] text-amber-300 bg-amber-500/10 border-b border-amber-500/30">
           {candleErr && <span className="mr-3">Candles: {candleErr}</span>}
           {posErr && <span className="mr-3">Positions: {posErr}</span>}
+          {notLive && <span className="mr-3">No live ticks (market closed or the tick bridge is not running): the option chain is Dhan&apos;s last snapshot, and market orders are refused.</span>}
           {feed.stale && <span>Live ticks are stale ({Math.round(feed.feedAgeSec ?? 0)}s): market closed or bridge down. Market orders are refused.</span>}
         </div>
       )}

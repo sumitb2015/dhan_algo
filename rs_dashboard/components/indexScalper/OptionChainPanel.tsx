@@ -45,7 +45,9 @@ export default function OptionChainPanel({ feed, onPick, onClose, wings = 8 }: {
   wings?: number;
 }) {
   const { pos, handle } = useDraggable({ x: 120, y: 190 });
-  const { quotes, strikeIds } = feed;
+  // The live chain, or Dhan's REST snapshot when the bridge has none (holiday / bridge down): same rows, flagged below.
+  const { chain: quotes, strikeIds } = feed;
+  const snapshot = feed.chainSource === 'snapshot';
 
   const rows = useMemo(() => {
     if (!quotes) return [];
@@ -64,7 +66,15 @@ export default function OptionChainPanel({ feed, onPick, onClose, wings = 8 }: {
     <div style={{ left: pos.x, top: pos.y }}
       className="fixed z-40 w-[860px] max-w-[calc(100vw-16px)] rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl select-none" data-testid="option-chain-panel">
       <div {...handle} className="flex items-center justify-between gap-3 px-3 py-2 border-b border-zinc-800 cursor-move">
-        <span className="text-sm font-bold text-white">Option Chain</span>
+        <span className="flex items-center gap-2 text-sm font-bold text-white">Option Chain
+          {feed.chainSource === 'live' && <span className="px-1.5 py-px rounded border border-emerald-500/40 text-[10px] font-bold text-emerald-400">LIVE</span>}
+          {snapshot && quotes?.updated_at && (
+            <span data-testid="chain-snapshot" title="No live ticks (market closed or the tick bridge is down): Dhan's last option chain, refreshed every minute. Display only: orders never use these prices."
+              className="px-1.5 py-px rounded border border-amber-500/40 text-[10px] font-bold text-amber-300">
+              SNAPSHOT · not live · {new Date(quotes.updated_at).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}
+            </span>
+          )}
+        </span>
         <div className="flex items-center gap-3 text-[11px] text-zinc-400">
           <label className="flex items-center gap-1">Expiry
             <select value={feed.expiry} onChange={e => feed.setExpiry(e.target.value)}
@@ -91,7 +101,7 @@ export default function OptionChainPanel({ feed, onPick, onClose, wings = 8 }: {
           </thead>
           <tbody>
             {rows.length === 0 && (
-              <tr><td colSpan={11} className="px-3 py-8 text-center text-zinc-500">{feed.expiry ? 'Waiting for live ticks…' : 'Loading expiries…'}</td></tr>
+              <tr><td colSpan={11} className="px-3 py-8 text-center text-zinc-500">{!feed.expiry ? 'Loading expiries…' : feed.snapshotError ? `No live ticks, and the chain snapshot failed: ${feed.snapshotError}` : 'Waiting for live ticks…'}</td></tr>
             )}
             {rows.map(r => {
               const atm = r.strike === quotes?.atm;
