@@ -239,3 +239,44 @@ test('saved Supertrend still on the old (10, 3) default moves to (10, 2); a user
   const ema = newIndicator('ema', 'e');
   assert.deepEqual(migrateIndicatorsV1([ema])[0], ema);
 });
+
+test('Dhan Scalper: ATM strikes, expiry formatting, and buy/sell requirements match screenshot specifications', async () => {
+  const {
+    computeAtmStrikes,
+    formatDhanExpiry,
+    formatManageScripExpiry,
+    getStrikeOffsetLabel,
+    calcOptionBuyReq,
+    calcOptionSellReq,
+  } = await import('./dhanScalperMath.ts');
+
+  // When spot is 25380 (between 25350 and 25400)
+  assert.deepEqual(computeAtmStrikes(25380, 50), { peStrike: 25350, ceStrike: 25400 });
+  // Exact strike
+  assert.deepEqual(computeAtmStrikes(25400, 50), { peStrike: 25400, ceStrike: 25400 });
+
+  // Expiry date format "01 DEC" and "1 DEC 2026"
+  assert.equal(formatDhanExpiry('2026-12-01'), '01 DEC');
+  assert.equal(formatDhanExpiry('2026-11-28'), '28 NOV');
+  assert.equal(formatManageScripExpiry('2026-12-01'), '1 DEC 2026');
+
+  // Strike offset labels matching Manage Scrips screenshot
+  assert.equal(getStrikeOffsetLabel(25350, 25350), 'ATM');
+  assert.equal(getStrikeOffsetLabel(25400, 25350), 'ATM+1');
+  assert.equal(getStrikeOffsetLabel(25450, 25350), 'ATM+2');
+  assert.equal(getStrikeOffsetLabel(25300, 25350), 'ATM-1');
+
+  // Buy Req: 65 units @ 244.95 LTP = 15,921.75
+  const buyCeReq = calcOptionBuyReq(244.95, 1, 65);
+  assert.equal(buyCeReq.toFixed(2), '15921.75');
+
+  // Buy Req: 65 units @ 229.95 LTP = 14,946.75
+  const buyPeReq = calcOptionBuyReq(229.95, 1, 65);
+  assert.equal(buyPeReq.toFixed(2), '14946.75');
+
+  // Sell Req: positive margin requirements > 120,000 / lot
+  const sellCeReq = calcOptionSellReq(25400, 25380, 244.95, 1, 65, 'CE');
+  assert.equal(sellCeReq > 120000, true);
+  const sellPeReq = calcOptionSellReq(25350, 25380, 229.95, 1, 65, 'PE');
+  assert.equal(sellPeReq > 120000, true);
+});
