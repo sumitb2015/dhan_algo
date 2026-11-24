@@ -231,8 +231,8 @@ export type TradeRequest = {
   /** enter / reverse: the closed bar the signal was read on (one bar acts once). */
   barT?: number;
   reason: string;
-  /** exit: 'stop' arms the stop-out block; 'eod' / 'manual' do not. */
-  exitKind?: 'stop' | 'eod' | 'manual';
+  /** exit: 'stop' arms the stop-out block (and the cooldown); 'lock' latches the day's profit lock; 'eod' / 'manual' do neither. */
+  exitKind?: 'stop' | 'eod' | 'manual' | 'lock';
   /** manual exits and the cutoff run with the engine off; automatic entries need it on. */
   auto: boolean;
   /** The tab's ORB_CODE_VERSION: entries / reversals from another version are refused (exits never are). */
@@ -249,7 +249,7 @@ export function parseTrade(b: unknown): TradeRequest | string {
   if (!Number.isFinite(price) || price <= 0) return 'price must be a positive number';
   const reason = typeof o.reason === 'string' ? o.reason.slice(0, 160) : '';
   if (o.action === 'exit') {
-    const exitKind = o.exitKind === 'stop' || o.exitKind === 'eod' ? o.exitKind : 'manual';
+    const exitKind = o.exitKind === 'stop' || o.exitKind === 'eod' || o.exitKind === 'lock' ? o.exitKind : 'manual';
     return { action: 'exit', price, reason: reason || 'Exit', exitKind, auto: o.auto === true };
   }
   if (o.side !== 'LONG' && o.side !== 'SHORT') return 'side must be LONG or SHORT';
@@ -342,6 +342,9 @@ export function orbTrade(req: TradeRequest): Promise<Reply> {
       const out = await exitRow(l, live!, { ...req, action: 'exit', exitKind: 'manual', reason: `Reverse: ${req.reason}` }, now);
       l = out.ledger;
       if (!out.ok) return { status: out.unknown ? 504 : 502, body: { success: false, error: `Reverse stopped at the close: ${out.error}`, ledger: save(l, now) } };
+      // the close itself can trip the gate (a third loss in a row, the profit lock): then the reversal stays flat
+      const after = entryGate(l, now, day);
+      if (after) return { status: 409, body: { success: false, error: `Closed, not reversed: ${after}`, ledger: save(addLog(l, 'info', `Reverse stopped after the close: ${after}`, now), now) } };
     }
     if (realisedToday(l, l.mode, day) <= -l.config.dailyLossLimit) {
       l = halt(l, `Daily loss limit ₹${l.config.dailyLossLimit} reached`, now);
@@ -438,9 +441,13 @@ function exitMark(row: OrbRow, futPrice: number, now: number): { px: number; not
   return live !== null ? { px: live } : { px: row.entry, note: 'no premium quote: P&L booked at entry - check the broker fill' };
 }
 
+/** Ledger fields a close sets: a stop blocks its side until the colour changes; the profit lock latches for the IST day. */
+const exitTag = (row: OrbRow, req: TradeRequest, now: number): Partial<OrbLedger> =>
+  req.exitKind === 'stop' ? { blockedSide: row.side } : req.exitKind === 'lock' ? { profitLockDay: istDateIso(now) } : {};
+
 async function exitRow(l0: OrbLedger, row: OrbRow, req: TradeRequest, now: number): Promise<Step> {
   if (row.legs) return exitStructure(l0, row, req, now);
-  const tag = req.exitKind === 'stop' ? { blockedSide: row.side } : {};
+  const tag = exitTag(row, req, now);
   const kind = { exitKind: req.exitKind ?? 'manual' } as const;
   const mark = exitMark(row, req.price, now);
   const what = `${closeAction(row)} ${optLabel(row.target)}`;
@@ -558,7 +565,7 @@ export async function enterStructure(l0: OrbLedger, structure: 'synthetic' | 'st
 }
 
 export async function exitStructure(l0: OrbLedger, row: OrbRow, req: TradeRequest, now: number): Promise<Step> {
-  const tag = req.exitKind === 'stop' ? { blockedSide: row.side } : {};
+  const tag = exitTag(row, req, now);
   const legs = row.legs ?? [];
   // each leg's booking price: its live premium, else the last one seen; a leg with neither is booked at entry (and the note says so)
   let unpriced = false;

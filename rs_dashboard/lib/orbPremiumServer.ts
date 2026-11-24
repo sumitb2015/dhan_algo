@@ -4,7 +4,7 @@ import { istMinuteOfDay } from '@/lib/istTime';
 import { hhmmToMin, rowPnl, signalRowExit } from '@/lib/signalOrb';
 import { BLIND_WARN_MS, blindSince, premiumTick, type PremiumAction, type PremiumRowIn } from '@/lib/orbFocus';
 import { readOrbLedger } from '@/lib/signalOrbFile';
-import { addLog, applyFill, entryBasis, rowLegsLivePnl, halt, isPremiumInstrument, liveRow, patchRow, pendingFills, realisedToday, type FillRef, type OrbLeg, type OrbRow } from '@/lib/signalOrbLedger';
+import { addLog, applyFill, classifyFill, entryBasis, rowLegsLivePnl, halt, isPremiumInstrument, liveRow, patchRow, pendingFills, realisedToday, type FillRef, type OrbLeg, type OrbRow } from '@/lib/signalOrbLedger';
 import { readBrokerOrder } from '@/lib/brokerOrderStatus';
 import { wsPrice, wsSync } from '@/lib/freshMoneyWs';
 import {
@@ -32,6 +32,10 @@ const FUT_STALE_MS = 30_000;
 const TAG = '[orb-premium]';
 
 const state = globalOnce('signalOrb.premiumLoop', () => ({ busy: false, started: false, entryRetryAt: 0, lastEntryMsg: '' }));
+/** When the running tick began (its own key: a hot reload keeps the older state object). */
+const tickClock = globalOnce('signalOrb.tickClock', () => ({ busySince: 0 }));
+/** A tick busy longer than this (a hung broker call) stops the heartbeat, so the page's fallback engine takes the stops over. */
+const WEDGED_MS = 20_000;
 /** Signal rows: retry gate of a refused exit, and the last future price seen (books a cutoff exit on a stale feed). Its own key, so a
  * hot reload that keeps the older loop state object never reads these as undefined. */
 const sig = globalOnce('signalOrb.signalWatch', () => ({ exitRetry: { id: '', at: 0 }, lastFut: { id: '', px: 0 } }));
@@ -40,11 +44,13 @@ export function startOrbPremiumLoop(): void {
   if (state.started) return;
   state.started = true;
   setInterval(() => {
-    // the heartbeat says the loop is alive, even while one tick is still busy with an order (the browser must not double up)
-    orbWatcher.at = Date.now();
+    // the heartbeat: alive while ticks run, and through a slow one (an order in flight); NOT through a wedged one
+    const t = Date.now();
+    if (!state.busy || t - tickClock.busySince < WEDGED_MS) orbWatcher.at = t;
     if (state.busy) return;
     state.busy = true;
-    tick().catch(e => console.error(`${TAG} tick failed:`, e)).finally(() => { state.busy = false; });
+    tickClock.busySince = t;
+    tick().catch(e => console.error(`${TAG} tick failed:`, e)).finally(() => { state.busy = false; tickClock.busySince = 0; });
   }, TICK_MS);
   console.log(`${TAG} watcher started`);
 }
@@ -69,20 +75,20 @@ async function settleFills(now: number): Promise<void> {
   const st = fills.get(f.orderId) ?? { tries: 0, nextAt: 0 };
   const o = await readBrokerOrder(f.orderId, 'dhan').catch(() => null);
   const s = o?.orderStatus ?? '';
-  const filled = (o?.filledQty ?? 0) > 0;
-  const avg = o?.averageTradedPrice ?? 0;
-  const final = (s === 'TRADED' || ((s === 'CANCELLED' || s === 'EXPIRED') && filled)) && avg > 0;
+  const verdict = classifyFill(o);
   const what = `${f.side} order ${f.orderId}${f.leg !== null ? ` (leg ${f.leg + 1})` : ''}`;
-  if (final) {
+  if (verdict === 'fill') {
     fills.delete(f.orderId);
-    await serial(async () => save(applyFill(readOrbLedger(), f, avg), Date.now()));
+    await serial(async () => save(applyFill(readOrbLedger(), f, o!.averageTradedPrice), Date.now()));
     return;
   }
-  if ((s === 'REJECTED' || s === 'CANCELLED' || s === 'EXPIRED') && !filled) {
+  if (verdict === 'nothing' || verdict === 'partial') {
+    // the broker position does not match what the ledger booked: stop and let the user look (the P&L stays on decision prices)
     fills.delete(f.orderId);
+    const why = verdict === 'nothing' ? `${s} with nothing filled` : `${s} with only ${o!.filledQty} of ${o!.quantity} filled`;
     await serial(async () => {
-      let l = patchRow(readOrbLedger(), f.rowId, { fillUnconfirmed: true, note: `Dhan reports the ${what} ${s} with nothing filled - check the positions` });
-      l = halt(l, `Dhan reports the ${what} ${s} with nothing filled: the ledger may not match the broker - check the positions and resolve the row`, Date.now());
+      let l = patchRow(readOrbLedger(), f.rowId, { fillUnconfirmed: true, note: `Dhan reports the ${what} ${why} - check the positions` });
+      l = halt(l, `Dhan reports the ${what} ${why}: the ledger may not match the broker - check the positions and resolve the row`, Date.now());
       return save(l, Date.now());
     });
     return;
@@ -99,7 +105,12 @@ async function settleFills(now: number): Promise<void> {
 
 async function tick(): Promise<void> {
   const now = Date.now();
-  await settleFills(now).catch(e => console.error(`${TAG} fill read failed:`, e));
+  await judge(now);
+  // fills only after the stops were judged and any exit sent (an order read can take seconds)
+  await settleFills(Date.now()).catch(e => console.error(`${TAG} fill read failed:`, e));
+}
+
+async function judge(now: number): Promise<void> {
   const l = readOrbLedger();
   const row = liveRow(l);
   if (isPremiumRow(row)) {

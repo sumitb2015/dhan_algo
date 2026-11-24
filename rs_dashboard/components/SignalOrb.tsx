@@ -207,7 +207,7 @@ export default function SignalOrb() {
       )}
       <main className="flex flex-col items-center justify-center gap-4 px-4 py-4 xl:col-start-2 xl:row-start-1">
         <Attention items={attention} />
-        {live?.status === 'open' && live.day === e.today && <StopsWhere server={e.serverStops} seen={e.watcherSeen} leader={e.isLeader} premium={e.isPremiumRow} />}
+        {live?.status === 'open' && live.day === e.today && <StopsWhere server={e.serverJudges || (e.isPremiumRow && e.serverStops)} blind={e.serverStops && e.serverBlind} seen={e.watcherSeen} leader={e.isLeader} premium={e.isPremiumRow} />}
 
         <Orb signal={ev.signal} readings={ev.readings} positionLabel={position} busy={e.busy}
           since={ev.sinceT ? sinceLabel(ev.sinceT, e.today) : null} progress={1 - e.secsToClose / e.barSecs} secsLeft={e.secsToClose} />
@@ -606,7 +606,7 @@ function Attention({ items }: { items: AttentionItem[] }) {
  * Where the open position's stops are running. Server: they run with every tab closed. Otherwise only the engine tab sends them,
  * so closing it leaves the position without a stop (or, for a straddle / strangle, without any of its rules).
  */
-function StopsWhere({ server, seen, leader, premium }: { server: boolean; seen: boolean; leader: boolean; premium: boolean }) {
+function StopsWhere({ server, blind, seen, leader, premium }: { server: boolean; blind: boolean; seen: boolean; leader: boolean; premium: boolean }) {
   if (server) {
     return (
       <p className="flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-0.5 font-mono text-[10px] font-bold text-emerald-300"
@@ -618,7 +618,9 @@ function StopsWhere({ server, seen, leader, premium }: { server: boolean; seen: 
   return (
     <p role="alert" className="flex max-w-2xl items-center gap-2 rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-1.5 text-xs font-bold text-red-300">
       <ShieldAlert className="h-3.5 w-3.5 shrink-0" aria-hidden />
-      {premium
+      {blind
+        ? `The server has no live price for the future, so the stops run only in the engine tab${leader ? ' (this one)' : ' (another tab)'} for now - keep it open.`
+        : premium
         ? `The server watcher is ${seen ? 'not responding' : 'not running'}: this straddle / strangle's stops and targets are NOT running. Restart the dashboard.`
         : `The server watcher is ${seen ? 'not responding' : 'not running'}: the stops run only in the engine tab${leader ? ' (this one) - keep it open' : ' (another tab) - keep it open'}.`}
     </p>

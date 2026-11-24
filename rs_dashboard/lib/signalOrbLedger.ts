@@ -153,7 +153,7 @@ export interface OrbRow {
   /** A traded price that never arrived after the retries: the P&L stays on decision prices. */
   fillUnconfirmed?: boolean;
   /** How the row was closed: 'stop' (hard / trailing stop: arms the cooldown), 'eod' (cutoff) or 'manual' (anything else). */
-  exitKind?: 'stop' | 'eod' | 'manual';
+  exitKind?: 'stop' | 'eod' | 'manual' | 'lock';
   /** The best signal-future price seen while open (high for LONG, low for SHORT): the trailing stop's peak, kept here so a reload or a new leader tab does not lose it. */
   bestPrice?: number;
 }
@@ -172,6 +172,8 @@ export interface OrbLedger {
   blockedSide: Side | null;
   /** The IST day a straddle / strangle was last entered (or an entry attempt consumed): one entry a day. */
   premiumEntryDay: string | null;
+  /** The IST day the daily profit lock fired: no new entry that day, even if the closing fill booked a little under the lock. */
+  profitLockDay: string | null;
   rejects: number;
   rows: OrbRow[];
   log: OrbLog[];
@@ -205,7 +207,7 @@ export const DEFAULT_CONFIG: OrbConfig = {
 
 export const emptyLedger = (): OrbLedger => ({
   rev: 0, config: { ...DEFAULT_CONFIG, indicators: [...DEFAULT_CONFIG.indicators] }, mode: 'SIM', engineActive: false, haltReason: null,
-  watermarkT: 0, blockedSide: null, premiumEntryDay: null, rejects: 0, rows: [], log: [], updatedAt: 0,
+  watermarkT: 0, blockedSide: null, premiumEntryDay: null, profitLockDay: null, rejects: 0, rows: [], log: [], updatedAt: 0,
 });
 
 const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
@@ -245,6 +247,7 @@ export function normalizeLedger(v: unknown): OrbLedger {
     watermarkT: Number.isFinite(o.watermarkT) ? (o.watermarkT as number) : 0,
     blockedSide: o.blockedSide === 'LONG' || o.blockedSide === 'SHORT' ? o.blockedSide : null,
     premiumEntryDay: typeof o.premiumEntryDay === 'string' ? o.premiumEntryDay : null,
+    profitLockDay: typeof o.profitLockDay === 'string' ? o.profitLockDay : null,
     rejects: Number.isInteger(o.rejects) ? (o.rejects as number) : 0,
     rows: Array.isArray(o.rows) ? o.rows : [],
     log: Array.isArray(o.log) ? o.log : [],
@@ -321,6 +324,7 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
     if (!Number.isInteger(n) || Math.abs(n) > MAX_STRIKE_OFFSET) return `strikeOffset must be a whole number from -${MAX_STRIKE_OFFSET} to ${MAX_STRIKE_OFFSET}`;
     next.strikeOffset = n;
   }
+  if (p.timeframe !== undefined && p.htfConfirm === undefined && next.htfConfirm !== 0 && next.htfConfirm <= next.timeframe) next.htfConfirm = 0;
   if (p.htfConfirm !== undefined) {
     const n = Number(p.htfConfirm);
     if (n !== 0 && !TIMEFRAMES.includes(n as Timeframe)) return `htfConfirm must be 0 (off) or one of ${TIMEFRAMES.join(', ')} minutes`;
@@ -608,7 +612,7 @@ const hhmmIst = (ms: number): string => {
  */
 export function entryGate(l: OrbLedger, now: number, day: string): string | null {
   const c = l.config;
-  if (c.profitLockRs > 0 && realisedToday(l, l.mode, day) >= c.profitLockRs) return `Daily profit lock ₹${c.profitLockRs.toLocaleString('en-IN')} reached - no new entries today`;
+  if (c.profitLockRs > 0 && (l.profitLockDay === day || realisedToday(l, l.mode, day) >= c.profitLockRs)) return `Daily profit lock ₹${c.profitLockRs.toLocaleString('en-IN')} reached - no new entries today`;
   if (c.maxTradesPerDay > 0 && tradesToday(l, l.mode, day) >= c.maxTradesPerDay) return `${c.maxTradesPerDay} trades taken today (the cap) - no new entries`;
   if (c.maxLossStreak > 0 && lossStreak(l, day) >= c.maxLossStreak) return `${c.maxLossStreak} losses in a row - no new entries today`;
   if (c.cooldownBars > 0) {
@@ -628,9 +632,10 @@ export type FillRef = { rowId: string; leg: number | null; side: 'entry' | 'exit
 export function pendingFills(l: OrbLedger, sinceMs: number): FillRef[] {
   const out: FillRef[] = [];
   for (const r of [...l.rows].reverse()) {
-    if (r.mode !== 'REAL' || r.broker !== 'dhan' || r.fillUnconfirmed || r.entryAt < sinceMs) continue;
+    if (r.mode !== 'REAL' || r.broker !== 'dhan' || r.fillUnconfirmed || r.status === 'failed' || r.entryAt < sinceMs) continue;
     if (r.legs) {
       r.legs.forEach((g, i) => {
+        if (g.status === 'failed') return;
         if (g.openOrderId && g.entryFill === undefined) out.push({ rowId: r.id, leg: i, side: 'entry', orderId: g.openOrderId });
         if (g.closeOrderId && g.exitFill === undefined) out.push({ rowId: r.id, leg: i, side: 'exit', orderId: g.closeOrderId });
       });
@@ -713,4 +718,22 @@ export function dailyHistory(rows: OrbRow[], days = 30): DayHistory[] {
     by.set(r.day, h);
   }
   return [...by.values()].sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0)).slice(0, days);
+}
+
+/**
+ * What one order read means for a fill: 'fill' (final, fully filled, priced), 'partial' (final with only part filled: the broker
+ * position no longer matches the ledger), 'nothing' (final with nothing filled: a phantom), or 'pending' (ask again later).
+ */
+export function classifyFill(o: { orderStatus: string; quantity: number; filledQty: number; averageTradedPrice: number } | null): 'fill' | 'partial' | 'nothing' | 'pending' {
+  if (!o) return 'pending';
+  const s = o.orderStatus.toUpperCase();
+  const short = o.quantity > 0 && o.filledQty > 0 && o.filledQty < o.quantity;
+  // TRADED is filled; its price may lag (some books report no filled quantity on a market order): wait for the price
+  if (s === 'TRADED') return o.averageTradedPrice > 0 ? (short ? 'partial' : 'fill') : 'pending';
+  if (s === 'REJECTED' || s === 'CANCELLED' || s === 'EXPIRED') {
+    if (!(o.filledQty > 0)) return 'nothing';
+    if (!(o.averageTradedPrice > 0)) return 'pending';
+    return o.filledQty < o.quantity ? 'partial' : 'fill';
+  }
+  return 'pending';
 }

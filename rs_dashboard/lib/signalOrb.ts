@@ -10,7 +10,7 @@ import { VWAP_START, vwapFrom } from './straddlePnf.ts';
  * update never reached) shows a reload banner and its entries are refused (lib/signalOrbServer.ts). Bump on every change to
  * the rules, the indicators or the engine.
  */
-export const ORB_CODE_VERSION = '2026-11-24.3';
+export const ORB_CODE_VERSION = '2026-11-24.4';
 
 export type Vote = 1 | -1 | 0;
 export type Signal = 'BULL' | 'BEAR' | 'NEUTRAL';
@@ -489,9 +489,9 @@ export function signalRowExit(i: {
   stopPts: number; trailStartPts?: number; trailGapPts?: number; openPnl: number | null; realised: number; dailyLossLimit: number;
   /** Realised + open at or above this closes the position (0 / absent = off). */
   profitLockRs?: number;
-}): { kind: 'stop' | 'eod' | 'manual'; reason: string } | null {
+}): { kind: 'stop' | 'eod' | 'manual' | 'lock'; reason: string } | null {
   if (i.openPnl !== null && i.realised + i.openPnl <= -i.dailyLossLimit) return { kind: 'manual', reason: `Daily loss limit ₹${i.dailyLossLimit}` };
-  if (i.openPnl !== null && (i.profitLockRs ?? 0) > 0 && i.realised + i.openPnl >= i.profitLockRs!) return { kind: 'manual', reason: `Daily profit lock ₹${i.profitLockRs}` };
+  if (i.openPnl !== null && (i.profitLockRs ?? 0) > 0 && i.realised + i.openPnl >= i.profitLockRs!) return { kind: 'lock', reason: `Daily profit lock ₹${i.profitLockRs}` };
   const d = decideOrb({
     signal: 'NEUTRAL', barT: null, watermarkT: 0, position: { side: i.side, entry: i.entry, bestPrice: i.bestPrice }, price: i.price,
     minute: i.minute, times: i.times, stopPts: i.stopPts, trailStartPts: i.trailStartPts, trailGapPts: i.trailGapPts, blockedSide: null,

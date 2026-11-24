@@ -483,3 +483,38 @@ test('dailyHistory: closed trades per day and mode, newest first; open / failed 
   assert.deepEqual(h[1].sim, { trades: 2, wins: 1, net: 60, onFills: 0 });
   assert.equal(h[1].real, null);
 });
+
+test('review fixes: failed rows / legs are never chased for fills; a fired profit lock latches for the day; a timeframe change drops a confirm it outgrew', async () => {
+  const { pendingFills: pf, entryGate: g, emptyLedger: el, sanitizeConfigPatch: sc } = await import('./signalOrbLedger.ts');
+  const t = Date.parse('2026-11-24T05:00:00Z');
+  const failed = row({ id: 'x', mode: 'REAL', broker: 'dhan', status: 'failed', entryAt: t, entryOrderId: 'E9' });
+  assert.deepEqual(pf(withRow(failed), 0), []);
+  const s = strad({ mode: 'REAL', broker: 'dhan', status: 'open', entryAt: t,
+    legs: [{ ...strad().legs![0], status: 'failed', openOrderId: 'B1' }, { ...strad().legs![1], openOrderId: 'S1' }] });
+  assert.deepEqual(pf(withRow(s), 0).map(x => x.orderId), ['S1']);
+  // the latch: the lock fired today; the close booked under the lock, so realised alone would let entries back in
+  const base = el();
+  const l = { ...base, profitLockDay: '2026-11-24', config: { ...base.config, profitLockRs: 5000 } };
+  assert.match(g(l, t, '2026-11-24')!, /profit lock/);
+  assert.equal(g(l, t, '2026-11-25'), null);
+  assert.equal(g({ ...l, config: { ...l.config, profitLockRs: 0 } }, t, '2026-11-24'), null);
+  // timeframe 5 + confirm 15, then timeframe 15: the confirm is turned off, not left saved and silently ignored
+  const c5 = sc({ timeframe: 5, htfConfirm: 15 }, base.config) as typeof base.config;
+  assert.equal(c5.htfConfirm, 15);
+  assert.equal((sc({ timeframe: 15 }, c5) as typeof c5).htfConfirm, 0);
+  assert.equal((sc({ timeframe: 3 }, c5) as typeof c5).htfConfirm, 15);
+});
+
+test('classifyFill: TRADED waits for its price; nothing filled is a phantom; a short fill is a mismatch, not a fill', async () => {
+  const { classifyFill: cf } = await import('./signalOrbLedger.ts');
+  const o = (orderStatus: string, quantity: number, filledQty: number, averageTradedPrice: number) => ({ orderStatus, quantity, filledQty, averageTradedPrice });
+  assert.equal(cf(null), 'pending');
+  assert.equal(cf(o('PENDING', 3, 0, 0)), 'pending');
+  assert.equal(cf(o('TRADED', 3, 3, 101.5)), 'fill');
+  assert.equal(cf(o('TRADED', 3, 0, 101.5)), 'fill');          // a book that reports no filled quantity on a market order
+  assert.equal(cf(o('TRADED', 3, 3, 0)), 'pending');           // filled, price not in yet
+  assert.equal(cf(o('REJECTED', 3, 0, 0)), 'nothing');
+  assert.equal(cf(o('CANCELLED', 3, 1, 100)), 'partial');
+  assert.equal(cf(o('TRADED', 3, 1, 100)), 'partial');
+  assert.equal(cf(o('CANCELLED', 3, 3, 100)), 'fill');
+});

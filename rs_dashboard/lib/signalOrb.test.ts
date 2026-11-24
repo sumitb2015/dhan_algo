@@ -297,5 +297,6 @@ test('signalRowExit: the daily profit lock closes at realised + open, after the 
   const b = { side: 'LONG' as const, entry: 5000, price: 5010, minute: 720, times, stopPts: 30, realised: 1500, dailyLossLimit: 3000 };
   assert.equal(signalRowExit({ ...b, openPnl: 400, profitLockRs: 2000 }), null);
   assert.match(signalRowExit({ ...b, openPnl: 500, profitLockRs: 2000 })!.reason, /profit lock/);
+  assert.equal(signalRowExit({ ...b, openPnl: 500, profitLockRs: 2000 })!.kind, 'lock');   // latches the day (exitKind 'lock')
   assert.equal(signalRowExit({ ...b, openPnl: 5000 }), null);   // off
 });
