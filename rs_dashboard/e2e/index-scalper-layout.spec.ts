@@ -123,6 +123,38 @@ test.describe('Index Scalper layout + option charts', () => {
     expect(state.blocked).toEqual([]);
   });
 
+  test('price-axis "+" stays put under the pointer (no flicker) and opens the order menu', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    const pane = page.getByTestId('chart-pane-0');
+    await expect(pane.locator('canvas').first()).toBeVisible({ timeout: 60_000 });
+    await page.waitForTimeout(800);
+    // hover the chart just left of the price axis: the "+" appears there
+    const box = (await pane.locator('canvas').first().boundingBox())!;
+    const paneBox = (await pane.boundingBox())!;
+    await page.mouse.move(paneBox.x + paneBox.width - 110, box.y + box.height * 0.4);
+    const plus = pane.getByRole('button', { name: /^Order options at / });
+    await expect(plus).toBeVisible();
+    // move ONTO it, the way a user does, and let it sit: it must stay (it used to vanish and reappear on every move)
+    const pb = (await plus.boundingBox())!;
+    const cx = pb.x + pb.width / 2, cy = pb.y + pb.height / 2;
+    await page.mouse.move(cx - 6, cy, { steps: 4 });
+    await page.mouse.move(cx, cy, { steps: 4 });
+    let seen = 0;
+    for (let i = 0; i < 10; i++) { seen += await plus.count(); await page.waitForTimeout(50); }
+    expect(seen).toBe(10);
+    await page.mouse.down();
+    await page.mouse.up();
+    await expect(pane.getByTestId('chart-scale-menu')).toBeVisible();
+    // leaving the "+" for somewhere outside the chart hides it (the menu stays until closed)
+    await page.keyboard.press('Escape');
+    await page.mouse.move(5, 5);
+    await expect(plus).toHaveCount(0);
+    expect(state.blocked).toEqual([]);
+  });
+
   test('2-chart layout: right pane plots the ATM CE premium, picks a PE and its own timeframe, survives a reload', async ({ page, context }) => {
     const state = newState();
     await signIn(context);

@@ -150,6 +150,7 @@ function ScalperChart(props: Props) {
   const [ruler, setRuler] = useState<string | null>(null);
   const [chipTops, setChipTops] = useState<Record<string, number>>({});
   const [hoverScale, setHoverScale] = useState<{ y: number; price: number } | null>(null);
+  const plusRef = useRef<HTMLButtonElement>(null);
   const [menu, setMenu] = useState<{ y: number; price: number } | null>(null);
   const [tentativeBrackets, setTentativeBrackets] = useState<Record<string, { tp?: number; sl?: number }>>({});
   const [dragState, setDragState] = useState<{
@@ -786,7 +787,11 @@ function ScalperChart(props: Props) {
       }
       if (!menu) setHoverScale(null);
     };
-    const onLeave = () => {
+    // The "+" is drawn over the chart but is not inside `box`: moving onto it fires `mouseleave` here. Hiding it then
+    // put the pointer back on the chart, which showed it again: it flickered on every move and could not be clicked.
+    const onLeave = (e: MouseEvent) => {
+      const to = e.relatedTarget as Node | null;
+      if (to && plusRef.current?.contains(to)) return;
       if (!menu) setHoverScale(null);
     };
     box.addEventListener('mousemove', onMove);
@@ -897,6 +902,14 @@ function ScalperChart(props: Props) {
       {/* '+' button on price scale edge */}
       {hoverScale && (
         <button
+          ref={plusRef}
+          // Leaving the "+" back onto the chart: the chart's mousemove takes over. Anywhere else: hide it (not while its
+          // menu is open).
+          onMouseLeave={(e) => {
+            const to = e.relatedTarget as Node | null;
+            if (to instanceof Node && boxRef.current?.contains(to)) return;
+            if (!menu) setHoverScale(null);
+          }}
           type="button"
           aria-label={`Order options at ${hoverScale.price}`}
           title={`Order options at ${hoverScale.price}`}
