@@ -29,6 +29,8 @@ export interface ChartChrome {
    */
   onColor: string;
   onColorDark: string;
+  /** User drawings on a chart (trend lines): an accent that stays readable on each theme's ground. */
+  drawing: string;
 }
 
 const CHROME: Record<ResolvedTheme, ChartChrome> = {
@@ -40,6 +42,7 @@ const CHROME: Record<ResolvedTheme, ChartChrome> = {
     surface: '#18181b',
     onColor: '#ffffff',
     onColorDark: '#09090b',
+    drawing: '#38bdf8',
   },
   light: {
     gridline: '#e2e8f0',
@@ -49,6 +52,7 @@ const CHROME: Record<ResolvedTheme, ChartChrome> = {
     surface: '#ffffff',
     onColor: '#ffffff',
     onColorDark: '#09090b',
+    drawing: '#0284c7',
   },
   beige: {
     gridline: '#e6ddd0',
@@ -58,6 +62,7 @@ const CHROME: Record<ResolvedTheme, ChartChrome> = {
     surface: '#faf6ef',
     onColor: '#ffffff',
     onColorDark: '#09090b',
+    drawing: '#0369a1',
   },
 };
 

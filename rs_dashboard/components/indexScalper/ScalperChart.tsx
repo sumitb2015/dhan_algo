@@ -57,7 +57,8 @@ interface Props {
   onEditIndicator: (id: string) => void;
   symbolLabel: string;
   /** Visible-range request: show the last N seconds of data. */
-  focusSeconds: number | null;
+  /** Range-button request: show the last `seconds`; a new `seq` re-applies it even for the same range. */
+  focus: { seconds: number; seq: number } | null;
 }
 
 interface Hover { o: number; h: number; l: number; c: number; t: number }
@@ -84,7 +85,7 @@ function splitByColor(s: OutSeries): OutSeries[] {
 export default function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, legs, entrySpots,
-    onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focusSeconds,
+    onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
   } = props;
   const chrome = useChromeStable();
   const boxRef = useRef<HTMLDivElement>(null);
@@ -105,7 +106,9 @@ export default function ScalperChart(props: Props) {
   const [ruler, setRuler] = useState<string | null>(null);
   const [chipTops, setChipTops] = useState<Record<string, number>>({});
 
-  useEffect(() => { toolRef.current = tool; barsRef.current = bars; });
+  // paintDrawings runs from chart click handlers created once, so it reads the theme through a ref.
+  const chromeRef = useRef(chrome);
+  useEffect(() => { toolRef.current = tool; barsRef.current = bars; chromeRef.current = chrome; });
 
   const last = bars[bars.length - 1];
   const shown: Hover | null = hover ?? (last ? { o: last.o, h: last.h, l: last.l, c: last.c, t: last.t + IST_SHIFT } : null);
@@ -189,10 +192,10 @@ export default function ScalperChart(props: Props) {
     drawLinesRef.current = []; drawSeriesRef.current = [];
     const d = drawingsRef.current;
     for (const price of d.h) {
-      drawLinesRef.current.push(candles.createPriceLine({ price, color: '#a1a1aa', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '' }));
+      drawLinesRef.current.push(candles.createPriceLine({ price, color: chromeRef.current.textMuted, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: '' }));
     }
     for (const t of d.t) {
-      const s = chart.addSeries(LineSeries, { color: '#38bdf8', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
+      const s = chart.addSeries(LineSeries, { color: chromeRef.current.drawing, lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
       const pts = t.t1 <= t.t2
         ? [{ time: t.t1 as UTCTimestamp, value: t.p1 }, { time: t.t2 as UTCTimestamp, value: t.p2 }]
         : [{ time: t.t2 as UTCTimestamp, value: t.p2 }, { time: t.t1 as UTCTimestamp, value: t.p1 }];
@@ -224,6 +227,7 @@ export default function ScalperChart(props: Props) {
       rightPriceScale: { borderColor: chrome.baseline },
       timeScale: { borderColor: chrome.baseline },
     });
+    paintDrawings();
   }, [chrome]);
 
   useEffect(() => {
@@ -243,7 +247,8 @@ export default function ScalperChart(props: Props) {
     const candles = candleRef.current;
     if (!chart || !candles || bars.length === 0) return;
 
-    const sig = JSON.stringify(indicators.filter(i => i.visible).map(i => [i.id, i.kind, i.params, i.color]));
+    // The guide-line colour is in the signature so a theme flip rebuilds the oscillator guides.
+    const sig = JSON.stringify([chrome.baseline, indicators.filter(i => i.visible).map(i => [i.id, i.kind, i.params, i.color])]);
     const prev = prevRef.current;
     // Fast path only when nothing but the forming bar moved: the bars before it must be exactly what was drawn. A candle
     // refresh that corrected an earlier tick-built bar (missed high/low) falls through to a full setData, which also
@@ -291,7 +296,7 @@ export default function ScalperChart(props: Props) {
               color: s.color, lineWidth: (paneIdx === 0 ? thick : 1) as 1 | 2 | 3, priceLineVisible: false, lastValueVisible: paneIdx !== 0 || !raw.colors,
               crosshairMarkerVisible: false,
             }, paneIdx);
-            for (const g of raw.guides ?? []) api.createPriceLine({ price: g, color: '#71717a', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' });
+            for (const g of raw.guides ?? []) api.createPriceLine({ price: g, color: chrome.baseline, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' });
           }
           indSeriesRef.current.push(api);
         }
@@ -318,16 +323,19 @@ export default function ScalperChart(props: Props) {
       }
     }
     prevRef.current = { n: bars.length, first: bars[0].t, tail: bars.slice(-2) };
-  }, [bars, outputs, indicators]);
+  }, [bars, outputs, indicators, chrome]);
 
-  // Visible range request (1D / 1W / ... buttons).
+  // Visible range request (1D / 1W / ... buttons). Applied on every click (`seq`), and again when a different history
+  // lands (its first bar moves: a longer range or another interval loaded), so 2M / 1M are framed on their own bars
+  // rather than on the shorter history that was on screen when the button was pressed. Ticks never re-apply it.
+  const firstT = bars.length ? bars[0].t : null;
   useEffect(() => {
     const chart = chartRef.current;
-    if (!chart || focusSeconds === null || bars.length === 0) return;
-    const end = bars[bars.length - 1].t + IST_SHIFT;
-    try { chart.timeScale().setVisibleRange({ from: (end - focusSeconds) as UTCTimestamp, to: (end + 20 * 60) as UTCTimestamp }); } catch { /* range outside data */ }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focusSeconds, bars.length === 0]);
+    const b = barsRef.current;
+    if (!chart || focus === null || b.length === 0) return;
+    const end = b[b.length - 1].t + IST_SHIFT;
+    try { chart.timeScale().setVisibleRange({ from: (end - focus.seconds) as UTCTimestamp, to: (end + 20 * 60) as UTCTimestamp }); } catch { /* range outside data */ }
+  }, [focus, firstT]);
 
   // ── position lines + chips ─────────────────────────────────────────
   const placed = useMemo(() => legs.map(leg => ({ leg, anchor: legAnchor(leg, entrySpots[leg.securityId]), pnl: legPnl(leg) })), [legs, entrySpots]);
@@ -339,13 +347,13 @@ export default function ScalperChart(props: Props) {
     const seen = new Set<string>();
     for (const p of placed) {
       seen.add(p.leg.id);
-      const color = p.pnl === null ? '#a1a1aa' : p.pnl >= 0 ? UP : DOWN;
+      const color = p.pnl === null ? chrome.textMuted : p.pnl >= 0 ? UP : DOWN;
       const opts = { price: p.anchor.level, color, lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${p.leg.type} ${p.leg.strike}` };
       const ex = lines.get(p.leg.id);
       if (ex) ex.applyOptions(opts); else lines.set(p.leg.id, candles.createPriceLine(opts));
     }
     for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
-  }, [placed]);
+  }, [placed, chrome]);
 
   // Chip y-positions follow the price scale (zoom / pan / autoscale move it with no event), so re-read them on a short timer.
   useEffect(() => {

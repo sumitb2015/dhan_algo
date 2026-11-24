@@ -61,7 +61,8 @@ export default function IndexScalperTerminal() {
 
   const [interval, setIntervalSel] = useState<Interval>('5');
   const [days, setDays] = useState(15);
-  const [focusSeconds, setFocusSeconds] = useState<number | null>(null);
+  // Range-button request; `seq` makes a repeat click of the same range a new request.
+  const [focus, setFocus] = useState<{ seconds: number; seq: number } | null>(null);
   // REST history, tagged with the interval it was loaded for so a switch never mixes two intervals' bars.
   const [history, setHistory] = useState<{ interval: Interval; bars: Bar[] } | null>(null);
   const [liveBars, setLiveBars] = useState<Bar[]>([]);
@@ -101,8 +102,8 @@ export default function IndexScalperTerminal() {
 
   const rootRef = useRef<HTMLDivElement>(null);
   const feedRef = useRef(feed);
-  const entrySpotsRef = useRef(entrySpots);
-  useEffect(() => { feedRef.current = feed; entrySpotsRef.current = entrySpots; });
+  const simRef = useRef(sim);
+  useEffect(() => { feedRef.current = feed; simRef.current = sim; });
 
   const flash = useCallback((t: Toast) => {
     setToast(t);
@@ -257,6 +258,11 @@ export default function IndexScalperTerminal() {
 
   const simFill = useCallback((c: PickedContract, side: 'BUY' | 'SELL', units: number, price: number, symbol: string) => {
     const id = c.securityId ?? `${c.type}${c.strike}`;
+    // A fill that opens a position (from flat, or flipping through zero) anchors the chip at today's spot, as REAL does:
+    // a leg closed and reopened later must not stay drawn at the first entry.
+    const before = simRef.current.legs[id]?.netQty ?? 0;
+    const after = before + (side === 'BUY' ? units : -units);
+    const opens = after !== 0 && (before === 0 || Math.sign(after) !== Math.sign(before));
     setSim(prev => {
       const cur = prev.legs[id] ?? { securityId: id, symbol, strike: c.strike, type: c.type, netQty: 0, avg: 0 };
       const next = applyFill(cur.netQty, cur.avg, side, units, price);
@@ -269,7 +275,7 @@ export default function IndexScalperTerminal() {
       }
       return { ...prev, realized, legs: { ...prev.legs, [id]: { ...cur, netQty: next.netQty, avg: next.avg } } };
     });
-    if (!entrySpotsRef.current[id]) rememberSpot(id, feedRef.current.spot);
+    if (opens) rememberSpot(id, feedRef.current.spot);
   }, [rememberSpot]);
 
   const placeContract = useCallback(async (req: TicketRequest): Promise<Outcome> => {
@@ -280,7 +286,7 @@ export default function IndexScalperTerminal() {
     if (!c.securityId) return { ok: false, text: 'No security id for this strike' };
     // The security id was picked for one expiry; never send it under a ticket that now shows another.
     if (c.expiry !== f.expiry) return { ok: false, text: `This ticket was opened for the ${c.expiry || 'previous'} expiry: reopen it from the chain` };
-    const live = (c.type === 'CE' ? f.ltpById.get(c.securityId) : f.ltpById.get(c.securityId)) ?? null;
+    const live = f.ltpById.get(c.securityId) ?? null;
     const symbol = `NIFTY-${f.expiry}-${c.strike}-${c.type}`;
 
     if (!real) {
@@ -320,6 +326,8 @@ export default function IndexScalperTerminal() {
   // ── exits ──────────────────────────────────────────────────────────
   const exitSimLeg = useCallback((leg: ScalperLeg): Outcome => {
     if (leg.ltp === null) return { ok: false, text: 'No live price to close the paper position' };
+    // Same rule as a paper entry: never book P&L on a price the feed stopped updating.
+    if (feedRef.current.stale) return { ok: false, text: 'Live prices are stale: not closing a paper position on an old price' };
     const sl = sim.legs[leg.id];
     if (!sl || sl.netQty === 0) return { ok: true, text: 'Already flat' };
     simFill({ strike: sl.strike, type: sl.type, securityId: sl.securityId, ltp: leg.ltp, expiry: '' }, sl.netQty > 0 ? 'SELL' : 'BUY', Math.abs(sl.netQty), leg.ltp, sl.symbol);
@@ -385,7 +393,7 @@ export default function IndexScalperTerminal() {
       if (!real) {
         let failed = 0;
         for (const l of legs) { const o = exitSimLeg(l); if (!o.ok) failed++; }
-        flash({ ok: failed === 0, text: failed ? `${failed} paper leg(s) had no live price` : 'SIM: all positions closed' });
+        flash({ ok: failed === 0, text: failed ? `${failed} paper leg(s) not closed: no live price, or prices are stale` : 'SIM: all positions closed' });
         return;
       }
       const st = await readExitState();
@@ -542,7 +550,7 @@ export default function IndexScalperTerminal() {
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} exitingId={exitingId}
               onToggleIndicator={id => setIndicators(p => p.map(i => (i.id === id ? { ...i, visible: !i.visible } : i)))}
               onRemoveIndicator={removeIndicator} onEditIndicator={id => { setEditId(id); setPickerOpen(true); }}
-              symbolLabel={`NIFTY · ${interval} · IDX`} focusSeconds={focusSeconds}
+              symbolLabel={`NIFTY · ${interval} · IDX`} focus={focus}
             />
           )}
           {liveBars.length === 0 && !loadingBars && (
@@ -569,7 +577,7 @@ export default function IndexScalperTerminal() {
       <div className="flex items-center justify-between px-3 h-8 border-t border-zinc-800 text-[11px] text-zinc-400 shrink-0">
         <div className="flex items-center gap-1">
           {RANGES.map(r => (
-            <button key={r.label} type="button" className={btn} onClick={() => { setDays(r.days); setFocusSeconds(r.focus); }}>{r.label}</button>
+            <button key={r.label} type="button" className={btn} onClick={() => { setDays(r.days); setFocus(f => ({ seconds: r.focus, seq: (f?.seq ?? 0) + 1 })); }}>{r.label}</button>
           ))}
         </div>
         <div className="flex items-center gap-3 tabular-nums font-mono">
