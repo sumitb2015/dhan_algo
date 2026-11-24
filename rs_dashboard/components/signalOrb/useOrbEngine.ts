@@ -131,9 +131,11 @@ export function useOrbEngine() {
       const r = await fetch('/api/signal-orb/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const j = await r.json() as { success: boolean; error?: string; ledger?: OrbLedger };
       if (j.ledger) accept(j);
+      // the ARM lives on the server and its reply carries no ledger: re-read the state so the button reflects it at once
+      if (body.op === 'arm' || body.op === 'disarm') void load();
       return j.success ? null : (j.error ?? 'Refused');
     } catch (e) { return e instanceof Error ? e.message : 'Request failed'; }
-  }, [accept]);
+  }, [accept, load]);
 
   const ledger = state?.ledger ?? null;
   const live = ledger ? liveRow(ledger) : null;
@@ -319,6 +321,7 @@ export function useOrbEngine() {
     if (!ledger.engineActive) { setNote(ledger.haltReason ? `Halted: ${ledger.haltReason}` : 'Auto is OFF'); return false; }
     if (outdated) { setNote('This tab runs an older version - reload it before new entries'); return false; }
     if (ledger.mode === 'REAL' && !armed) { setNote('REAL is not armed on this page load'); return false; }
+    if (ledger.mode === 'REAL' && state?.armedToday !== true) { setNote('REAL is not armed on the server (restart or mode switch) - press Arm real money'); return false; }
     if (!priceFresh || price === null) { setNote('Price feed stale - no entries'); return false; }
     if (staleDay) { setNote('An earlier day\'s row is open - close it first'); return false; }
     if (realised <= -cfg.dailyLossLimit) { setNote('Daily loss limit reached'); return false; }

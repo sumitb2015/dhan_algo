@@ -287,7 +287,7 @@ function sanitizePremiumConfig(patch: unknown, cur: ReturnType<typeof emptyLedge
   return r as ReturnType<typeof emptyLedger>['config'];
 }
 
-import { legHeld, legsAfterClose, statusAfterUnknown, unknownLegIndexes } from './signalOrbLedger.ts';
+import { bookStructureExit, legHeld, legsAfterClose, statusAfterUnknown, unknownLegIndexes } from './signalOrbLedger.ts';
 import { BLIND_WARN_MS, blindSince } from './orbFocus.ts';
 
 const strad = (extra: Partial<OrbRow> = {}): OrbRow => {
@@ -356,4 +356,20 @@ test('a stored premium block keeps its good fields when one is bad (loaded field
   assert.equal(l.config.premium.legSlX, 2.2);
   assert.equal(l.config.premium.entryTime, '09:45');
   assert.equal(l.config.premium.totalSlPct, emptyLedger().config.premium.totalSlPct);   // 1 is below the allowed 5: default for that field only
+});
+
+test('bookStructureExit: a leg still UNKNOWN keeps the row live (never booked closed); with nothing held the row closes', () => {
+  const r = strad();
+  // CE's earlier exit is UNKNOWN; the whole-structure exit then closed PE at 70
+  const after = [{ ...r.legs![0], status: 'unknown' as const }, { ...r.legs![1], status: 'closed' as const, exit: 70 }];
+  const kept = bookStructureExit(withRow(r), r.id, after, 'Cutoff', 5);
+  assert.equal(kept.finished, false);
+  const k = kept.ledger.rows[0];
+  assert.equal(k.status, 'unknown');                         // live: the resolve banner and the square-off reservation stay
+  assert.deepEqual(k.legs!.map(g => [g.status, g.exit]), [['unknown', undefined], ['closed', 70]]);
+  assert.equal(k.pnl, undefined);
+  const done = bookStructureExit(withRow(r), r.id, [{ ...after[0], status: 'closed' as const, exit: 120 }, after[1]], 'Cutoff', 5);
+  assert.equal(done.finished, true);
+  assert.equal(done.ledger.rows[0].status, 'closed');
+  assert.deepEqual(done.ledger.rows[0].legs!.map(g => g.exit), [120, 70]);
 });

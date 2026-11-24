@@ -19,7 +19,7 @@ import { wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
 import { ORB_CODE_VERSION, hhmmToMin, type Side } from '@/lib/signalOrb';
 import { ORB_STATE_FILE, readOrbLedger } from '@/lib/signalOrbFile';
 import {
-  MAX_REJECTS, addLog, applyClientOp, closeRow, closeRowLegs, halt, isLegInstrument, isPremiumInstrument, legsAfterClose, liveRow, patchRow, realisedToday, rowInstrument, statusAfterUnknown, trimRows,
+  MAX_REJECTS, addLog, applyClientOp, bookStructureExit, closeRow, closeRowLegs, halt, legHeld, unknownLegIndexes, isLegInstrument, isPremiumInstrument, legsAfterClose, liveRow, patchRow, realisedToday, rowInstrument, statusAfterUnknown, trimRows,
   type OrbBroker, type OrbConfig, type OrbLedger, type OrbLeg, type OrbRow, type OrbSymbol,
 } from '@/lib/signalOrbLedger';
 
@@ -162,10 +162,46 @@ export function orbClientOp(op: unknown): Promise<Reply> {
     }
     // any mode switch disarms: REAL is armed again by the user, never inherited
     if (kind === 'setMode') armed.day = '';
-    const r = applyClientOp(readOrbLedger(), op, now);
+    let base = readOrbLedger();
+    if (kind === 'resolve' && (op as { as?: unknown }).as === 'open') {
+      const filled = await withOwnUnits(base, String((op as { id?: unknown }).id ?? ''));
+      if (typeof filled === 'string') return fail(`Cannot confirm the row open: ${filled}`, 409);
+      base = filled;
+    }
+    const r = applyClientOp(base, op, now);
     if (!r.ok) return { status: r.status, body: { success: false, error: r.error } };
     return { status: 200, body: { success: true, ledger: save(r.ledger, now) } };
   });
+}
+
+/**
+ * A row stuck in 'sending' (the server died before the broker replied) was written with units 0, and an exit of 0 units is refused
+ * for ever. Confirming it open fills in what the entry sent: lots x the broker's own lot units, per open / unknown leg.
+ */
+async function withOwnUnits(l: OrbLedger, id: string): Promise<OrbLedger | string> {
+  const r = l.rows.find(x => x.id === id);
+  if (!r || r.mode !== 'REAL') return l;
+  const lotUnitsOf = async (t: Target): Promise<number | string> => {
+    const rl = resolvePnfLegs(t);
+    if (typeof rl === 'string') return rl;
+    const ob = await brokerLegs(r.broker, t, rl).catch((e: Error) => `Contract lookup failed: ${e.message}`);
+    if (typeof ob === 'string') return ob;
+    return ob[0] && ob[0].lotUnits > 0 ? ob[0].lotUnits : 'no lot size for the contract';
+  };
+  if (r.legs) {
+    if (r.legs.every(g => g.units > 0 || !legHeld(g))) return l;
+    const legs: OrbLeg[] = [];
+    for (const g of r.legs) {
+      if (g.units > 0 || !legHeld(g)) { legs.push(g); continue; }
+      const u = await lotUnitsOf(g.target);
+      if (typeof u === 'string') return u;
+      legs.push({ ...g, units: r.lots * u });
+    }
+    return patchRow(l, id, { legs, units: legs[0].units });
+  }
+  if (r.units > 0) return l;
+  const u = await lotUnitsOf(r.target);
+  return typeof u === 'string' ? u : patchRow(l, id, { units: r.lots * u });
 }
 
 export type TradeRequest = {
@@ -255,6 +291,7 @@ export function orbTrade(req: TradeRequest): Promise<Reply> {
     if (req.v !== ORB_CODE_VERSION) return fail('This tab runs an older version of the Signal Orb - reload it (entries refused, exits still work)', 409);
     if (l.config.symbol === 'NIFTY' && !isNseSessionDay(day)) return fail('NSE is closed today - no NIFTY entries', 409);
     if (!l.engineActive) return fail(l.haltReason ? `Engine halted: ${l.haltReason}` : 'Auto is OFF', 409);
+    if (l.mode === 'REAL' && !isArmedToday(now)) return fail('REAL is not armed - press Arm real money', 409);
     if (req.barT! <= l.watermarkT) return fail('This bar was already acted on', 409);
     if (req.action === 'enter' && live) return fail('A position is already open', 409);
     if (req.action === 'reverse') {
@@ -332,6 +369,11 @@ async function enterRow(l0: OrbLedger, side: Side, futPrice: number, opt: OptPic
   if (typeof legs === 'string') return { ok: false, error: legs, ledger: bumpReject(patchRow(l, row.id, { status: 'failed', note: legs }), legs, now) };
   const onBroker = await brokerLegs(config.broker, target, legs).catch((e: Error) => `Contract lookup failed: ${e.message}`);
   if (typeof onBroker === 'string') return { ok: false, error: onBroker, ledger: bumpReject(patchRow(l, row.id, { status: 'failed', note: onBroker }), onBroker, now) };
+  // a naked sold option is margin-checked like a structure (fail closed). Zerodha has no funds read here; a future is left to the broker.
+  if (opt && config.broker !== 'zerodha') {
+    const block = await orbMarginBlock(config.broker, [{ target, action: 'SELL', lots, lotUnits: onBroker[0].lotUnits, unitsPerLot, premium: opt.premium }]);
+    if (block) return { ok: false, error: block, ledger: bumpReject(patchRow(l, row.id, { status: 'failed', note: block }), `Entry refused: ${block}`, now) };
+  }
   const order = parsePnfOrder({ broker: config.broker, mode: 'REAL', target, action, lots, product: 'INTRADAY', source: 'bar' }, { uncapped: true });
   if (typeof order === 'string') return { ok: false, error: order, ledger: bumpReject(patchRow(l, row.id, { status: 'failed', note: order }), order, now) };
   const r = await placePnfMarket(order, 'pnf', 'orba');
@@ -503,7 +545,15 @@ export async function exitStructure(l0: OrbLedger, row: OrbRow, req: TradeReques
   if (res.ok) {
     const flat = res.legs.some(r => r.flat) ? 'a leg was already flat at the broker (closed outside this page)' : undefined;
     const notes = [flat, note].filter(Boolean).join('; ') || undefined;
-    l = addLog({ ...closeRowLegs(patchRow(l, row.id, { legs: after }), row.id, marks, req.reason, now), ...tag, rejects: 0 }, 'trade', `REAL ${what} - ${req.reason}${notes ? ` (${notes})` : ''}`, now);
+    const booked = bookStructureExit(l, row.id, after, req.reason, now);
+    if (!booked.finished) {
+      // a leg whose earlier order is UNKNOWN was not sent (never resent): the row stays live until the user resolves that leg
+      const idx = unknownLegIndexes({ legs: after }).map(i => i + 1).join(', ');
+      const msg = `Open legs closed; leg ${idx} is still UNKNOWN - check the ${row.broker} positions and resolve it`;
+      l = addLog({ ...patchRow(booked.ledger, row.id, { note: [msg, notes].filter(Boolean).join('; ') }), ...tag, rejects: 0 }, 'warn', `REAL ${what} - ${req.reason}: ${msg}`, now);
+      return { ok: false, unknown: true, error: msg, ledger: l };
+    }
+    l = addLog({ ...booked.ledger, ...tag, rejects: 0 }, 'trade', `REAL ${what} - ${req.reason}${notes ? ` (${notes})` : ''}`, now);
     if (notes) l = patchRow(l, row.id, { note: notes });
     return { ok: true, ledger: lossCheck(l, now) };
   }
@@ -541,6 +591,8 @@ export async function orbEnterPremiumCore(l: OrbLedger, now: number, manual: boo
   if (!isPremiumInstrument(cfg.instrument)) return fail('Trade is not set to Straddle or Strangle', 409);
   if (liveRow(l)) return fail('A position is already open', 409);
   if (l.haltReason) return fail(`Engine halted: ${l.haltReason}`, 409);
+  // the day's loss limit holds for Enter now too (lossCheck halts only while Auto is on, and turning Auto on clears a halt)
+  if (realisedToday(l, l.mode, day) <= -cfg.dailyLossLimit) return fail(`Daily loss limit ₹${cfg.dailyLossLimit} reached today - no new entries`, 409);
   if (!manual && l.premiumEntryDay === day) return fail('Already entered today', 409);
   if (l.mode === 'REAL' && !isArmedToday(now)) return fail('REAL is not armed - press ARM first', 409);
   const minute = istMinuteOfDay(now);

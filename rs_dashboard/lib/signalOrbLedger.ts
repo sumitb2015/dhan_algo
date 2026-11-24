@@ -493,5 +493,17 @@ export function legsAfterClose(legs: OrbLeg[], index: number, px: number, armCos
   return { legs: next, anyOpen: next.some(g => g.status === 'open'), anyHeld: next.some(legHeld) };
 }
 
+/**
+ * Books a whole-structure exit after the open legs were sent. `after` = the legs with each leg the exit closed marked 'closed' at its
+ * price. A leg still UNKNOWN (an earlier order nobody can confirm, never resent) keeps the row LIVE: closing it would drop a leg that
+ * may hold units at the broker (no resolve banner, no square-off reservation, invented P&L). `finished` = the row was closed.
+ */
+export function bookStructureExit(l: OrbLedger, id: string, after: OrbLeg[], reason: string, at: number): { ledger: OrbLedger; finished: boolean } {
+  const row = l.rows.find(r => r.id === id);
+  if (!row) return { ledger: l, finished: false };
+  if (after.some(legHeld)) return { ledger: patchRow(l, id, { legs: after, status: statusAfterUnknown(row, after) }), finished: false };
+  return { ledger: closeRowLegs(patchRow(l, id, { legs: after }), id, after.map(g => g.exit ?? null), reason, at), finished: true };
+}
+
 /** Leg indexes still unknown on a row. */
 export const unknownLegIndexes = (r: Pick<OrbRow, 'legs'>): number[] => (r.legs ?? []).flatMap((g, i) => (g.status === 'unknown' ? [i] : []));

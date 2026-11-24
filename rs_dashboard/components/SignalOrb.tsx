@@ -46,8 +46,9 @@ export default function SignalOrb() {
   const stuck = !!live && isStuck(live, e.now);
   const unresolved = live && (live.status === 'unknown' || stuck || live.day !== e.today) ? live : null;
   const premiumMode = !!ledger && isPremiumInstrument(ledger.config.instrument);
-  // REAL is armed per page load for signal-driven trades; a straddle / strangle is entered by the server, so its ARM lives there (today only)
-  const armedEff = premiumMode ? e.armedToday : e.armed;
+  // A straddle / strangle is entered by the server, so its ARM lives there (today only). Signal-driven trades need both: this page
+  // load's ARM and the server's (which a dashboard restart or a mode switch clears), so a tab cannot trade REAL on a stale arm.
+  const armedEff = premiumMode ? e.armedToday : e.armed && e.armedToday;
   const autoLabel = ledger?.engineActive ? (real && !armedEff ? 'Auto on · not armed' : 'Auto on') : 'Auto off';
   // the engine note, unless it only repeats the switch label
   const note = /^Auto is OFF$/i.test(e.note) ? null : e.note;
@@ -282,7 +283,7 @@ export default function SignalOrb() {
           {real && !armedEff && (ledger?.engineActive || premiumMode) && (
             <button
               type="button"
-              onClick={() => { e.setArmed(true); if (premiumMode) void e.op({ op: 'arm' }); }}
+              onClick={() => { e.setArmed(true); void e.op({ op: 'arm' }); }}
               className={cn(
                 'ml-2 whitespace-nowrap rounded-full border border-red-500/60 bg-red-500/20 px-3.5 py-1 text-[10px] font-black uppercase tracking-[0.25em] text-red-300 hover:bg-red-500/30 shadow-[0_0_12px_rgba(239,68,68,0.25)] transition-all',
                 FOCUS,
