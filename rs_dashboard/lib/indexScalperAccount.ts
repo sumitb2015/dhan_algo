@@ -70,12 +70,22 @@ export function orderBucket(status: unknown): OrderBucket {
 
 export interface OrderRowView {
   id: string; symbol: string; exchange: string; time: string; sortKey: string; side: 'BUY' | 'SELL' | '';
+  /** Contract handle: Dhan security id, or the Kotak trading symbol (kotakOrdersAsDhan sets it). '' when unknown. */
+  securityId: string;
+  /** An option order (CE / PE): it is priced in premium, so it belongs on that option's chart, not the underlying's. */
+  isOption: boolean;
   orderType: string; product: string; qty: number | null; tradedQty: number | null;
   price: number | null; trigger: number | null; avgTraded: number | null;
   status: string; bucket: OrderBucket; reason: string;
   /** This page's own order (isx correlationId) still working at the exchange: the panel may cancel it. Orders a
    *  strategy, another terminal or Dhan's own app placed are never cancelled from here. */
   cancellable: boolean;
+}
+
+function isOptionOrder(o: Row): boolean {
+  const opt = String(o.drvOptionType ?? '').toUpperCase();
+  if (opt === 'CALL' || opt === 'PUT') return true;
+  return /(CE|PE)$/.test(String(o.tradingSymbol ?? o.trading_symbol ?? '').toUpperCase());
 }
 
 export function orderRows(orders: Row[], ownSource = 'isx'): OrderRowView[] {
@@ -90,6 +100,8 @@ export function orderRows(orders: Row[], ownSource = 'isx'): OrderRowView[] {
     const created = normTime(o.createTime ?? o.updateTime) || String(o.createTime ?? o.updateTime ?? '');
     return {
       id: String(o.orderId ?? ''),
+      securityId: String(o.securityId ?? ''),
+      isOption: isOptionOrder(o),
       symbol: symbolLabel(o),
       exchange: exchangeLabel(o.exchangeSegment),
       time: timeLabel(created) || timeLabel(time),

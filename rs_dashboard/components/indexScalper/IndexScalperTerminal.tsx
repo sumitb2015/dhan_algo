@@ -8,13 +8,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  BarChart3, CandlestickChart, LayoutList, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Trash2, TrendingUp, Zap,
+  BarChart3, CandlestickChart, Columns2, LayoutList, Square, Maximize2, Minus, MousePointer2, RefreshCw, Ruler, Trash2, TrendingUp, Zap,
 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
-import DataChip, { toIsoDate } from '@/components/DataChip';
+import DataChip from '@/components/DataChip';
 import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import { scalperRoute } from '@/hooks/useBrokerSelector';
-import ScalperChart, { type DrawTool } from './ScalperChart';
+import { type DrawTool } from './ScalperChart';
+import ChartPane, { type PaneCfg } from './ChartPane';
 import OptionChainPanel, { type PickedContract } from './OptionChainPanel';
 import OrderTicket, { type TicketRequest, type TicketOrderType } from './OrderTicket';
 import DhanScalperWidget from './DhanScalperWidget';
@@ -25,10 +26,9 @@ import {
 import IndicatorPicker from './IndicatorPicker';
 import { useIndexScalperFeed } from './useIndexScalperFeed';
 import {
-  applyTick, mergeHistory, migrateIndicatorsV1, newIndicator, type Bar, type IndicatorInstance, type IndicatorKind,
+  migrateIndicatorsV1, newIndicator, type IndicatorInstance, type IndicatorKind,
 } from '@/lib/indexScalperIndicators';
 import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
-import { inMarketSession } from '@/lib/indexScalperSession';
 import {
   INSTRUMENTS, dhanOrderQty, kotakOrderQty, pnlMultiplier, lotUnits, qtyLots, nrmlOnly, openingProduct, type Underlying,
 } from '@/lib/indexScalperInstrument';
@@ -43,8 +43,26 @@ import {
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 
-type Interval = '1' | '3' | '5' | '15';
-const INTERVALS: Interval[] = ['1', '3', '5', '15'];
+const LAYOUT_KEY = 'indexScalper.layout.v1';
+/** Default panes: the underlying, and its ATM CE (strike 0 resolves to ATM once, then stays pinned). */
+const DEFAULT_PANES: [PaneCfg, PaneCfg] = [
+  { source: { kind: 'underlying' }, interval: '5' },
+  { source: { kind: 'option', type: 'CE', strike: 0 }, interval: '5' },
+];
+interface PaneStatus { date: string | null; loading: boolean; error: string | null }
+const NO_STATUS: PaneStatus = { date: null, loading: true, error: null };
+
+function validPane(x: unknown, fallback: PaneCfg): PaneCfg {
+  const c = x as Partial<PaneCfg> | null;
+  const iv = c?.interval;
+  const interval = iv === '1' || iv === '3' || iv === '5' || iv === '15' ? iv : fallback.interval;
+  const src = c?.source as PaneCfg['source'] | undefined;
+  if (src?.kind === 'underlying') return { source: src, interval };
+  if (src?.kind === 'option' && (src.type === 'CE' || src.type === 'PE') && Number.isFinite(src.strike)) {
+    return { source: { kind: 'option', type: src.type, strike: src.strike }, interval };
+  }
+  return { ...fallback, interval };
+}
 const RANGES: { label: string; days: number; focus: number }[] = [
   { label: '2M', days: 60, focus: 60 * 86400 }, { label: '1M', days: 30, focus: 30 * 86400 }, { label: '2W', days: 15, focus: 14 * 86400 },
   { label: '1W', days: 10, focus: 7 * 86400 }, { label: '3D', days: 10, focus: 3 * 86400 }, { label: '1D', days: 10, focus: 86400 },
@@ -83,6 +101,10 @@ export default function IndexScalperTerminal() {
   }, []);
   const selectUnderlying = (u: Underlying) => {
     if (real) return;
+    if (u !== underlying) {
+      // Option panes go back to ATM: the other underlying's strikes are a different ladder.
+      setPanes(ps => ps.map(c => (c.source.kind === 'option' ? { ...c, source: { ...c.source, strike: 0 } } : c)) as [PaneCfg, PaneCfg]);
+    }
     setUnderlying(u);
     savePref(UNDERLYING_KEY, u);
   };
@@ -97,15 +119,15 @@ export default function IndexScalperTerminal() {
   const brokerName = broker === 'kotak' ? 'Kotak' : 'Dhan';
   const feed = useIndexScalperFeed(broker, underlying);
 
-  const [interval, setIntervalSel] = useState<Interval>('5');
+  // Chart layout: one chart, or two side by side. Each pane picks the underlying or a CE / PE strike, and its timeframe.
+  const [layout, setLayout] = useState<1 | 2>(1);
+  const [panes, setPanes] = useState<[PaneCfg, PaneCfg]>(DEFAULT_PANES);
+  const [layoutReady, setLayoutReady] = useState(false);
+  const [paneStatus, setPaneStatus] = useState<[PaneStatus, PaneStatus]>([NO_STATUS, NO_STATUS]);
   const [days, setDays] = useState(15);
   // Range-button request; `seq` makes a repeat click of the same range a new request.
   const [focus, setFocus] = useState<{ seconds: number; seq: number } | null>(null);
-  // REST history, tagged with the interval it was loaded for so a switch never mixes two intervals' bars.
-  const [history, setHistory] = useState<{ interval: Interval; bars: Bar[] } | null>(null);
-  const [liveBars, setLiveBars] = useState<Bar[]>([]);
-  const [candleErr, setCandleErr] = useState<string | null>(null);
-  const [loadingBars, setLoadingBars] = useState(true);
+  // Bumped to reload every pane's REST backfill (refresh button, a stale feed coming back, the tab shown again).
   const [refreshTick, setRefreshTick] = useState(0);
 
   const [indicators, setIndicators] = useState<IndicatorInstance[]>([]);
@@ -180,7 +202,32 @@ export default function IndexScalperTerminal() {
     setSimReady(true);
     const sp = loadJson<{ day: string; spots: Record<string, number> } | null>(SPOT_KEY, null);
     if (sp && sp.day === istDayKey()) setEntrySpots(sp.spots);
+    const lay = loadJson<{ layout?: unknown; panes?: unknown[] } | null>(LAYOUT_KEY, null);
+    if (lay) {
+      if (lay.layout === 1 || lay.layout === 2) setLayout(lay.layout);
+      if (Array.isArray(lay.panes)) setPanes([validPane(lay.panes[0], DEFAULT_PANES[0]), validPane(lay.panes[1], DEFAULT_PANES[1])]);
+    }
+    setLayoutReady(true);
   }, []);
+  useEffect(() => { if (layoutReady) savePref(LAYOUT_KEY, JSON.stringify({ layout, panes })); }, [layout, panes, layoutReady]);
+  const onPaneCfg = useCallback((i: number, cfg: PaneCfg) => {
+    setPanes(ps => {
+      const cur = ps[i];
+      if (cur && JSON.stringify(cur) === JSON.stringify(cfg)) return ps;
+      const next = [...ps] as [PaneCfg, PaneCfg];
+      next[i] = cfg;
+      return next;
+    });
+  }, []);
+  const onPaneStatus = useCallback((i: number, st: PaneStatus) => {
+    setPaneStatus(ps => {
+      const cur = ps[i];
+      if (cur.date === st.date && cur.loading === st.loading && cur.error === st.error) return ps;
+      const next = [...ps] as [PaneStatus, PaneStatus];
+      next[i] = st;
+      return next;
+    });
+  }, [setPaneStatus]);
   useEffect(() => { if (indReady) savePref(IND_KEY, JSON.stringify(indicators)); }, [indicators, indReady]);
   useEffect(() => { if (simReady) savePref(SIM_KEY, JSON.stringify(sim)); }, [sim, simReady]);
   const rememberSpot = useCallback((id: string, spot: number | null) => {
@@ -197,52 +244,7 @@ export default function IndexScalperTerminal() {
     return () => clearInterval(t);
   }, []);
 
-  // ── candles ────────────────────────────────────────────────────────
-  useEffect(() => {
-    let dead = false;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLoadingBars(true);
-    const futParam = underlying === 'CRUDEOILM' && feed.future?.dhanId ? `&securityId=${feed.future.dhanId}` : '';
-    fetch(`/api/index-scalper/candles?underlying=${underlying}&interval=${interval}&days=${days}${futParam}`)
-      .then(r => r.json())
-      .then((j: { success: boolean; candles?: { t: number; o: number; h: number; l: number; c: number }[]; error?: string }) => {
-        if (dead) return;
-        if (!j.success || !j.candles) { setCandleErr(j.error ?? 'No candles'); return; }
-        setCandleErr(null);
-        setHistory({ interval, bars: j.candles });
-      })
-      .catch(e => { if (!dead) setCandleErr(String(e?.message ?? e)); })
-      .finally(() => { if (!dead) setLoadingBars(false); });
-    return () => { dead = true; };
-  }, [underlying, interval, days, refreshTick, feed.future?.dhanId]);
-
-  // Live candles are built from the WebSocket ticks; the REST
-  // history above is only the backfill: loaded per interval / range, and again after a gap the ticks cannot have covered
-  // (the tab was hidden, or the feed went stale and came back). Nothing polls it on a timer.
-  const liveIntervalRef = useRef<Interval | null>(null);
-  useEffect(() => {
-    if (!history || history.interval !== interval) {
-      // Switched interval, history not loaded yet: show nothing rather than the old interval's bars, and take no ticks.
-      liveIntervalRef.current = null;
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setLiveBars([]);
-      return;
-    }
-    const same = liveIntervalRef.current === interval;
-    liveIntervalRef.current = interval;
-    setLiveBars(prev => (same ? mergeHistory(history.bars, prev, Number(interval), Date.now() / 1000) : history.bars));
-  }, [history, interval]);
-
-  useEffect(() => {
-    const spot = feed.spot;
-    if (spot === null || feed.stale || feed.feedAgeSec === null) return;
-    // Outside market session, must not invent a candle.
-    if (!inMarketSession(underlying, Date.now())) return;
-    setLiveBars(prev => (liveIntervalRef.current === interval ? applyTick(prev, spot, Number(interval), Date.now() / 1000, underlying) : prev));
-    // feed.stale / feedAgeSec are read as guards only: a new tick is what moves a bar.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [feed.spot, feed.quotes, interval, underlying]);
-
+  // ── candles: each ChartPane loads its own (useChartBars); these only ask every pane to backfill again ──
   const wasStaleRef = useRef(false);
   useEffect(() => {
     if (wasStaleRef.current && !feed.stale && feed.feedAgeSec !== null) setRefreshTick(n => n + 1);
@@ -832,9 +834,9 @@ export default function IndexScalperTerminal() {
     ));
   }, [panelOrders, underlying]);
 
-  const onPlaceChartOrder = useCallback(async (req: { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' }) => {
+  // `contract` is the pane's: the option it plots, or the underlying's future (ChartPane binds it).
+  const onPlaceChartOrder = useCallback(async (c: PickedContract | null, req: { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' }) => {
     if (ticketBusy) return;
-    const c = chartContract;
     if (!c) {
       flash({ ok: false, text: 'No contract identifier for chart order' });
       return;
@@ -859,7 +861,7 @@ export default function IndexScalperTerminal() {
     } finally {
       setTicketBusy(false);
     }
-  }, [ticketBusy, chartContract, placeContract, flash, loadOrders, loadPositions]);
+  }, [ticketBusy, placeContract, flash, loadOrders, loadPositions]);
 
   // In SIM mode: auto-execute brackets when market price crosses TP or SL
   useEffect(() => {
@@ -868,8 +870,10 @@ export default function IndexScalperTerminal() {
       if (!leg.sim) continue;
       const b = simBrackets[leg.id];
       if (!b) continue;
-      const cur = leg.ltp ?? feed.spot ?? 0;
-      if (cur <= 0) continue;
+      // The leg's own live price (an option's premium, the future's LTP): TP / SL are set on that instrument's chart.
+      // Never fall back to spot: an index level against a premium bracket fires at once.
+      const cur = leg.ltp;
+      if (cur === null || !(cur > 0)) continue;
       const isLong = leg.netQty > 0;
       if (b.tp !== undefined && b.tp > 0) {
         const hit = isLong ? cur >= b.tp : cur <= b.tp;
@@ -898,7 +902,7 @@ export default function IndexScalperTerminal() {
         }
       }
     }
-  }, [real, legs, simBrackets, feed.spot, exitSimLeg, flash]);
+  }, [real, legs, simBrackets, exitSimLeg, flash]);
 
   const onSetBracket = useCallback(async (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => {
     if (!real || req.leg.sim) {
@@ -917,9 +921,9 @@ export default function IndexScalperTerminal() {
     const oppSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
     const targetType: TicketOrderType = req.kind === 'TP' ? 'LIMIT' : 'STOP_LOSS_MARKET';
 
-    // Cancel any existing bracket order of this kind for this instrument
+    // Cancel any existing bracket order of this kind on THIS contract (never another contract's order of the underlying)
     const existing = chartOpenOrders.find(o => {
-      if (o.side !== oppSide) return false;
+      if (o.side !== oppSide || !o.securityId || o.securityId !== req.leg.securityId) return false;
       const ot = (o.orderType || '').toUpperCase();
       const isLimit = ot.includes('LIMIT');
       const isStop = ot.includes('SL') || ot.includes('STOP');
@@ -960,7 +964,7 @@ export default function IndexScalperTerminal() {
     });
     flash({ ok: out.ok, text: out.text });
     void loadOrders();
-  }, [real, chartOpenOrders, cancelOrder, feed.expiry, feed.lotSize, underlying, placeContract, flash, loadOrders]);
+  }, [real, chartOpenOrders, chartContract, cancelOrder, feed.expiry, feed.lotSize, underlying, placeContract, flash, loadOrders]);
 
   const onCancelBracket = useCallback(async (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => {
     if (req.orderId) {
@@ -1091,11 +1095,14 @@ export default function IndexScalperTerminal() {
     return feed.ltpById.get(ticket.securityId) ?? null;
   }, [ticket, feed.ltpById]);
 
-  const lastBar = liveBars[liveBars.length - 1];
-  const dataDate = lastBar ? toIsoDate(String(lastBar.t)) : null;
+  const shownStatus = layout === 2 ? paneStatus : [paneStatus[0]];
+  const dataDate = shownStatus.map(x => x.date).filter((d): d is string => !!d).sort().pop() ?? null;
+  const loadingBars = shownStatus.some(x => x.loading);
+  const candleErr = shownStatus.map(x => x.error).find(Boolean) ?? null;
   // Live spot; else the chain snapshot's index price (Dhan's official close on a closed day: the intraday candles stop at
-  // the value frozen at 15:15, which is not the close); else the last candle.
-  const spotDisplay = feed.spot ?? feed.chain?.spot ?? lastBar?.c ?? null;
+  // the value frozen at 15:15, which is not the close).
+  const spotDisplay = feed.spot ?? feed.chain?.spot ?? null;
+  const orderQtyMult = real ? pnlMultiplier(underlying, broker) : 1;
   const notLive = feed.feedAgeSec === null && feed.chainSource === 'snapshot';
 
   const btn = 'h-7 px-2 rounded text-xs font-semibold text-zinc-300 hover:bg-zinc-800 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60 transition-colors';
@@ -1113,9 +1120,9 @@ export default function IndexScalperTerminal() {
   const onToolDone = useCallback(() => setTool('cursor'), []);
   const onToggleIndicator = useCallback((id: string) => setIndicators(p => p.map(i => (i.id === id ? { ...i, visible: !i.visible } : i))), []);
   const onEditIndicator = useCallback((id: string) => { setEditId(id); setPickerOpen(true); }, []);
-  const onOpenChartTicket = useCallback((req: { price: number; lots: number; orderType: 'LIMIT' }) => {
-    if (chartContract) {
-      setTicket(chartContract);
+  const onOpenChartTicket = useCallback((c: PickedContract | null, req: { price: number; lots: number; orderType: 'LIMIT' }) => {
+    if (c) {
+      setTicket(c);
       setTicketOrderType(req.orderType);
       setTicketPrice(req.price);
       setTicketLots(req.lots);
@@ -1123,7 +1130,7 @@ export default function IndexScalperTerminal() {
     } else {
       flash({ ok: false, text: 'No contract identifier for chart order' });
     }
-  }, [chartContract, flash]);
+  }, [flash]);
   const onChartAlert = useCallback((sym: string, p: number) => { flash({ ok: true, text: `Alert set on ${sym} at ₹${p.toFixed(2)}` }); }, [flash]);
 
   return (
@@ -1152,11 +1159,11 @@ export default function IndexScalperTerminal() {
             </button>
           </div>
           {sep}
-          <div role="group" aria-label="Timeframe" className="flex items-center">
-            {INTERVALS.map(i => (
-              <button key={i} type="button" aria-pressed={interval === i} onClick={() => setIntervalSel(i)}
-                className={cn(btn, interval === i && 'bg-zinc-800 text-white')}>{i}m</button>
-            ))}
+          <div role="group" aria-label="Chart layout" className="flex items-center">
+            <button type="button" aria-pressed={layout === 1} aria-label="One chart" title="One chart" onClick={() => setLayout(1)}
+              className={cn(btn, layout === 1 && 'bg-zinc-800 text-white')}><Square className="w-4 h-4" /></button>
+            <button type="button" aria-pressed={layout === 2} aria-label="Two charts side by side" title="Two charts side by side" onClick={() => setLayout(2)}
+              className={cn(btn, layout === 2 && 'bg-zinc-800 text-white')}><Columns2 className="w-4 h-4" /></button>
           </div>
           {sep}
           <button type="button" onClick={() => { setEditId(null); setPickerOpen(true); }} className={cn(btn, 'flex items-center gap-1')}>
@@ -1236,33 +1243,39 @@ export default function IndexScalperTerminal() {
             className="w-9 h-9 flex items-center justify-center rounded text-zinc-400 hover:text-rose-400 hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60"><Trash2 className="w-[18px] h-[18px]" /></button>
         </div>
 
-        <div className="relative flex-1 min-w-0 min-h-0">
-          {indReady && (
-            <ScalperChart
-              bars={liveBars} indicators={indicators} tool={tool} onToolDone={onToolDone} clearToken={clearToken}
+        <div className="relative flex flex-1 min-w-0 min-h-0">
+          {indReady && layoutReady && (
+            <>
+            <ChartPane
+              index={0} cfg={panes[0]} onCfgChange={onPaneCfg} onStatus={onPaneStatus}
+              underlying={underlying} feed={feed} days={days} refreshTick={refreshTick}
+              futureContract={chartContract} futureName={chartContractName}
+              indicators={indicators} tool={tool} onToolDone={onToolDone} clearToken={clearToken}
               logScale={logScale} pctScale={pctScale} autoScale={autoScale}
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} exitingId={exitingId}
-              onToggleIndicator={onToggleIndicator}
-              onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
-              symbolLabel={underlying === 'CRUDEOILM' ? `CRUDEOILM · ${interval} · FUT` : `NIFTY · ${interval} · IDX`} focus={focus}
-              contractName={chartContractName}
-              lots={scalpLots}
-              openOrders={chartOpenOrders}
-              onCancelOrder={cancelOrder}
-              onPlaceLimitOrder={onPlaceChartOrder}
-              onOpenTicket={onOpenChartTicket}
-              onAlert={onChartAlert}
-              simBrackets={simBrackets}
-              onSetBracket={onSetBracket}
-              onCancelBracket={onCancelBracket}
-              onReversePosition={onReversePosition}
-              underlying={underlying}
-              feedLotSize={feed.lotSize}
-              orderQtyMult={real ? pnlMultiplier(underlying, broker) : 1}
+              onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
+              focus={focus} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
+              onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
+              simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
+              onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult}
             />
-          )}
-          {liveBars.length === 0 && !loadingBars && (
-            <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500 pointer-events-none">No candles to show{candleErr ? '' : ' yet'}.</div>
+              {layout === 2 && <div className="w-px bg-zinc-800 shrink-0" />}
+              {layout === 2 && (
+            <ChartPane
+              index={1} cfg={panes[1]} onCfgChange={onPaneCfg} onStatus={onPaneStatus}
+              underlying={underlying} feed={feed} days={days} refreshTick={refreshTick}
+              futureContract={chartContract} futureName={chartContractName}
+              indicators={indicators} tool={tool} onToolDone={onToolDone} clearToken={clearToken}
+              logScale={logScale} pctScale={pctScale} autoScale={autoScale}
+              legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} exitingId={exitingId}
+              onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
+              focus={focus} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
+              onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
+              simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
+              onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult}
+            />
+              )}
+            </>
           )}
           {toast && (
             <div role="status" className={cn('absolute left-1/2 -translate-x-1/2 bottom-4 z-30 max-w-[70%] px-3 py-2 rounded border text-xs font-semibold',

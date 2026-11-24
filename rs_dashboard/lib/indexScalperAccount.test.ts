@@ -13,6 +13,18 @@ const cancelled = {
   drvExpiryDate: '2026-12-01', drvOptionType: 'CALL', drvStrikePrice: 25550.0, omsErrorDescription: '', averageTradedPrice: 0, filledQty: 0,
 };
 
+test('order row carries the contract handle and whether it is an option order', () => {
+  const [r] = orderRows([cancelled]);
+  assert.equal(r.securityId, '47812');
+  assert.equal(r.isOption, true);
+  const [f] = orderRows([{ ...cancelled, tradingSymbol: 'CRUDEOILM-18Dec2026-FUT', drvOptionType: 'XX', securityId: '9' }]);
+  assert.equal(f.isOption, false);
+  // Kotak rows (kotakOrdersAsDhan) have no drv fields when the symbol is unknown: the CE / PE suffix decides.
+  const [k] = orderRows([{ orderId: 'K1', tradingSymbol: 'NIFTY2612025550PE', securityId: 'NIFTY2612025550PE', orderStatus: 'PENDING' }]);
+  assert.equal(k.isOption, true);
+  assert.equal(k.securityId, 'NIFTY2612025550PE');
+});
+
 test('order row reads like Dhan\'s panel', () => {
   const [r] = orderRows([cancelled]);
   assert.equal(r.symbol, 'NIFTY 01 DEC 25550 CALL');

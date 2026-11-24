@@ -176,6 +176,8 @@ export function kotakOrdersAsDhan(book: Record<string, unknown>[], symbols: Reco
     const isMcx = sym.startsWith('CRUDEOIL');
     return {
       orderId: String(o.orderId ?? ''),
+      // Kotak's contract handle is its trading symbol (a Kotak leg's securityId is the same string).
+      securityId: sym,
       correlationId: ours.has(String(o.orderId ?? '')) ? 'isx-kotak' : '',
       orderStatus: status,
       transactionType: o.transactionType,

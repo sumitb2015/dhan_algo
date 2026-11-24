@@ -1,5 +1,6 @@
 """
-Index Scalper candles: NIFTY index intraday candles (1/3/5/15 min) for the /index-scalper chart.
+Index Scalper candles: NIFTY index / CRUDEOILM future intraday candles (1/3/5/15 min) for the /index-scalper chart,
+or one option contract's premium candles (--security-id with --segment NSE_FNO --instrument OPTIDX, or MCX_COMM OPTFUT).
 
 Index candles only (no futures, no volume) so the chart matches the index the options are traded on.
 Dhan only. Prints ONE JSON line: {"candles": [{"t": <epoch seconds>, "o","h","l","c"}], "interval": "5"}

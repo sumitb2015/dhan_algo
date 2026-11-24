@@ -42,6 +42,9 @@ Related skills:
 | Chip vertical layout | the chip-tops effect: `priceToCoordinate` polled every 150 ms, collisions pushed at least 26 px apart |
 | Autoscale including overlays | `autoscaleInfoProvider` on the candle series, plus `scaleLevelsRef` |
 | Price-scale "+" button and context menu; hotkeys | the `price scale hover` and `context menu events & keyboard shortcuts` sections |
+| 1 / 2 chart layout, per-pane instrument + timeframe | `ChartPane.tsx` (pane header, filters, contract binding); layout + panes in `indexScalper.layout.v1` |
+| What a pane plots; which legs / orders / TP-SL belong on it | `lib/indexScalperChartSource.ts`: `resolveSource` (strike pinned once resolved, ATM fallback), `legOnChart`, `bracketsOnChart`, `orderOnChart` (by `OrderRowView.securityId`, `isOption`) |
+| Per-pane candles (underlying or one option's premium) | `useChartBars.ts`; route `candles?kind=option&securityId=` (NSE_FNO/OPTIDX, MCX_COMM/OPTFUT) |
 | Placing / moving brackets (SIM and REAL) | `IndexScalperTerminal.tsx`: `onSetBracket`, `onCancelBracket`, `onReversePosition`, `onPlaceChartOrder` |
 
 ## Rules (each one fixed a real bug)
@@ -170,11 +173,17 @@ on CRUDEOILM. Apply the same rule to any option given at creation that depends o
 - **Real-money check:** every order from the chart still goes through the terminal's `placeContract`, with its cap,
   live-price, session and lot-size checks. The chart never calls an order route itself.
 
-### Open gap: brackets on option legs
-The chart plots the underlying (the index, or crude's future). A TP / SL dragged on an **option** leg is an underlying
-level, but the order is placed on the option's **premium**, and SIM compares it with the premium. Until brackets on
-option legs are converted (delta-based or premium-axis), do not offer them, or label them as underlying-level
-alerts. Futures legs are exact.
+### Brackets on option legs live on the option's own premium chart
+A pane plots the underlying or ONE option's premium (`ChartPane`, `premium` prop on `ScalperChart`). On an option pane
+the leg is anchored at its average premium (`legAnchor(..., { premium: true })`), and TP / SL / order chips / the "+"
+menu are premium levels on that contract: exact. On the underlying pane an option leg keeps its line and P&L chip but
+gets **no** TP / SL handles (`canBracket`), and option orders are not drawn there (`orderOnChart`), because an index
+level and a premium are different axes. The SIM bracket watcher compares `leg.ltp` only, never spot. Replacing a
+REAL bracket cancels only an order on the same `securityId`.
+- Each pane has its own drawings key (`indexScalper.drawings.v1:<securityId>` for an option) and is remounted
+  (`key`) when its contract changes, since drawings are read at mount.
+- A strike outside the bridge's 35-strike window gets REST history but no live ticks ("no live ticks" note); market
+  orders on it refuse in `placeContract` as before.
 
 ## Performance: what keeps the chart smooth
 The page receives bridge pushes at 20-40 Hz. `useLiveOptionsWS` coalesces them to at most one React update per frame,

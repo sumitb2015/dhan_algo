@@ -26,6 +26,12 @@ test('anchor uses entry spot when known, else the strike', () => {
   assert.deepEqual(legAnchor(leg(), 0), { level: 25350, kind: 'strike' });
 });
 
+test('on its own premium chart an option leg is anchored at its average premium', () => {
+  assert.deepEqual(legAnchor(leg(), 25360.5, { premium: true }), { level: 100, kind: 'avg' });
+  // No average yet: falls back as on the underlying chart (the chip is then hidden by the level>0 / axis rules).
+  assert.deepEqual(legAnchor(leg({ avg: 0 }), undefined, { premium: true }), { level: 25350, kind: 'strike' });
+});
+
 test('order sizing refuses unknown lot size, bad lots and over-cap', () => {
   assert.deepEqual(orderUnits(2, 65), { ok: true, units: 130 });
   assert.equal(orderUnits(1, null).ok, false);

@@ -30,11 +30,13 @@ export interface ScalperLeg {
 
 /** Level this leg is drawn at on the chart. A future is drawn at its own average price: the chart IS that future
  *  (CRUDEOILM), so the average is exact, and it holds after a reload or for a position opened elsewhere (a future has
- *  no strike to fall back on). An option: the spot recorded when this page opened it, else the strike. */
+ *  no strike to fall back on). An option: the spot recorded when this page opened it, else the strike; on its own
+ *  premium chart (`premium`), its average premium. */
 export interface LegAnchor { level: number; kind: 'entry' | 'strike' | 'avg' }
 
-export function legAnchor(leg: ScalperLeg, spotAtEntry: number | undefined): LegAnchor {
-  if (leg.type === 'FUT' && Number.isFinite(leg.avg) && leg.avg > 0) return { level: leg.avg, kind: 'avg' };
+export function legAnchor(leg: ScalperLeg, spotAtEntry: number | undefined, opts?: { premium?: boolean }): LegAnchor {
+  // On an option's own premium chart (opts.premium) the leg is drawn at its average premium, like a future.
+  if ((leg.type === 'FUT' || opts?.premium) && Number.isFinite(leg.avg) && leg.avg > 0) return { level: leg.avg, kind: 'avg' };
   if (spotAtEntry !== undefined && Number.isFinite(spotAtEntry) && spotAtEntry > 0) return { level: spotAtEntry, kind: 'entry' };
   return { level: leg.strike, kind: 'strike' };
 }

@@ -24,14 +24,15 @@ export type DrawTool = 'cursor' | 'hline' | 'trend' | 'ruler';
 const IST_SHIFT = 19800;
 const UP = '#10b981';
 const DOWN = '#ef4444';
-const DRAW_KEY = 'indexScalper.drawings.v1';
+/** Drawings of the underlying chart; an option chart stores its own under `${DRAW_KEY}:<securityId>` (drawKey prop). */
+export const DRAW_KEY = 'indexScalper.drawings.v1';
 
 interface TrendRec { t1: number; p1: number; t2: number; p2: number }
 interface Drawings { h: number[]; t: TrendRec[] }
 
-function loadDrawings(): Drawings {
+function loadDrawings(key: string): Drawings {
   try {
-    const raw = readPref(DRAW_KEY);
+    const raw = readPref(key);
     if (!raw) return { h: [], t: [] };
     const j = JSON.parse(raw) as Partial<Drawings>;
     return {
@@ -77,6 +78,13 @@ interface Props {
   feedLotSize?: number | null;
   /** Contract units per order-book quantity unit: Dhan MCX orders count lots (10), everything else units (1). */
   orderQtyMult?: number;
+  /** This chart plots an option's premium: legs are drawn at their average premium and TP / SL are premium levels.
+   *  On the underlying chart (false) only FUT legs get TP / SL: an option's TP / SL belongs on its own premium chart. */
+  premium?: boolean;
+  /** Price tick of what is plotted (snaps the "+" menu and drags). Default: the underlying's (crude future 1, else 0.05). */
+  tickSize?: number;
+  /** localStorage key for this chart's drawings, read at mount (remount the chart, via `key`, to switch it). */
+  drawKey?: string;
 }
 
 interface Hover { o: number; h: number; l: number; c: number; t: number }
@@ -109,7 +117,11 @@ function ScalperChart(props: Props) {
     onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
+    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY,
   } = props;
+  const drawKeyRef = useRef(drawKeyProp);
+  const tickSize = tickProp ?? (underlying === 'CRUDEOILM' ? 1.0 : 0.05);
+  const canBracket = useCallback((leg: ScalperLeg) => premium || leg.type === 'FUT', [premium]);
   const chrome = useChromeStable();
   const boxRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -202,7 +214,7 @@ function ScalperChart(props: Props) {
       const time = Number(p.time);
       if (t === 'hline') {
         drawingsRef.current.h.push(price);
-        savePref(DRAW_KEY, JSON.stringify(drawingsRef.current));
+        savePref(drawKeyRef.current, JSON.stringify(drawingsRef.current));
         paintDrawings();
         toolDone();
         return;
@@ -212,7 +224,7 @@ function ScalperChart(props: Props) {
       pendingRef.current = null;
       if (t === 'trend') {
         drawingsRef.current.t.push({ t1: pend.time, p1: pend.price, t2: time, p2: price });
-        savePref(DRAW_KEY, JSON.stringify(drawingsRef.current));
+        savePref(drawKeyRef.current, JSON.stringify(drawingsRef.current));
         paintDrawings();
       } else {
         const diff = price - pend.price;
@@ -223,7 +235,7 @@ function ScalperChart(props: Props) {
       toolDone();
     });
 
-    drawingsRef.current = loadDrawings();
+    drawingsRef.current = loadDrawings(drawKeyRef.current);
     paintDrawings();
 
     return () => {
@@ -271,7 +283,7 @@ function ScalperChart(props: Props) {
     if (clearSeen.current === clearToken) return;
     clearSeen.current = clearToken;
     drawingsRef.current = { h: [], t: [] };
-    savePref(DRAW_KEY, JSON.stringify(drawingsRef.current));
+    savePref(drawKeyRef.current, JSON.stringify(drawingsRef.current));
     pendingRef.current = null;
     setRuler(null);
     paintDrawings();
@@ -403,7 +415,7 @@ function ScalperChart(props: Props) {
   }, [focus, firstT]);
 
   // ── position lines ────────────────────────────────────────────────
-  const placed = useMemo(() => legs.map(leg => ({ leg, anchor: legAnchor(leg, entrySpots[leg.securityId]), pnl: legPnl(leg) })), [legs, entrySpots]);
+  const placed = useMemo(() => legs.map(leg => ({ leg, anchor: legAnchor(leg, entrySpots[leg.securityId], { premium }), pnl: legPnl(leg) })), [legs, entrySpots, premium]);
 
   useEffect(() => {
     const candles = candleRef.current;
@@ -430,6 +442,8 @@ function ScalperChart(props: Props) {
 
     for (const p of placed) {
       const legId = p.leg.id;
+      // No TP / SL for this leg on this chart (an option leg on the underlying chart): its levels are premiums.
+      if (!canBracket(p.leg)) { res[legId] = {}; continue; }
       const simB = simBrackets?.[legId];
       const tent = tentativeBrackets?.[legId];
       let tp: { price: number; orderId?: string; isSim: boolean } | undefined;
@@ -476,7 +490,7 @@ function ScalperChart(props: Props) {
       res[legId] = { tp, sl };
     }
     return res;
-  }, [placed, simBrackets, tentativeBrackets, openOrders, underlying]);
+  }, [placed, simBrackets, tentativeBrackets, openOrders, underlying, canBracket]);
 
   // Autoscale levels: positions, TP / SL and working orders (the drag line is left out so the scale does not chase the
   // mouse). Changing them re-fits the price scale.
@@ -533,8 +547,6 @@ function ScalperChart(props: Props) {
   }, [placed, activeBrackets]);
 
   // ── dragging logic for TP & SL ──────────────────────────────────────
-  const tickSize = underlying === 'CRUDEOILM' ? 1.0 : 0.05;
-
   const startDrag = useCallback((
     kind: 'TP' | 'SL',
     leg: ScalperLeg,
@@ -658,6 +670,7 @@ function ScalperChart(props: Props) {
       if (!p) continue;
       seen.add(ord.id);
       const matchedPos = placed.find(pos => {
+        if (!canBracket(pos.leg)) return false;
         const sName = (pos.leg.symbol || '').toUpperCase();
         const oName = (ord.symbol || '').toUpperCase();
         return (underlying === 'CRUDEOILM' && (oName.includes('CRUDE') || sName.includes('CRUDE'))) ||
@@ -680,7 +693,7 @@ function ScalperChart(props: Props) {
       if (ex) ex.applyOptions(opts); else lines.set(ord.id, candles.createPriceLine(opts));
     }
     for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
-  }, [regularOrders, placed, underlying]);
+  }, [regularOrders, placed, underlying, canBracket]);
 
   // Chip y-positions follow the price scale (zoom / pan / autoscale move it with no event), so re-read them on a short timer.
   useEffect(() => {
@@ -740,8 +753,7 @@ function ScalperChart(props: Props) {
         if (rawPrice !== null && rawPrice > 0) {
           // The instrument's own tick (CRUDEOILM future Rs 1, NSE index options Rs 0.05): an off-tick price would be
           // rejected by the exchange (the screenshot that found this offered 7,505.17 on crude).
-          const tick = underlying === 'CRUDEOILM' ? 1 : 0.05;
-          const snapped = Math.round(rawPrice / tick) * tick;
+          const snapped = Math.round(rawPrice / tickSize) * tickSize;
           setHoverScale({ y, price: Number(snapped.toFixed(2)) });
           return;
         }
@@ -757,7 +769,7 @@ function ScalperChart(props: Props) {
       box.removeEventListener('mousemove', onMove);
       box.removeEventListener('mouseleave', onLeave);
     };
-  }, [menu, underlying]);
+  }, [menu, tickSize]);
 
   // ── context menu events & keyboard shortcuts ────────────────────────
   useEffect(() => {
@@ -798,7 +810,7 @@ function ScalperChart(props: Props) {
       if (e.altKey && (e.key === 'H' || e.key === 'h')) {
         e.preventDefault();
         drawingsRef.current.h.push(menu.price);
-        savePref(DRAW_KEY, JSON.stringify(drawingsRef.current));
+        savePref(drawKeyRef.current, JSON.stringify(drawingsRef.current));
         paintDrawings();
         setMenu(null); setHoverScale(null);
         return;
@@ -983,7 +995,7 @@ function ScalperChart(props: Props) {
             type="button"
             onClick={() => {
               drawingsRef.current.h.push(menu.price);
-              savePref(DRAW_KEY, JSON.stringify(drawingsRef.current));
+              savePref(drawKeyRef.current, JSON.stringify(drawingsRef.current));
               paintDrawings();
               setMenu(null);
               setHoverScale(null);
@@ -1007,14 +1019,17 @@ function ScalperChart(props: Props) {
         if (top === undefined) return null;
         const isBuy = ord.side === 'BUY';
 
-        const matchedPos = placed.find(pos => pos.anchor.level > 0 && ord.side === (pos.leg.netQty > 0 ? 'SELL' : 'BUY'))
-          ?? placed.find(pos => {
+        // Only a leg that can carry a TP / SL on this chart (a FUT on the underlying, the option on its premium chart):
+        // dragging an order chip re-places it on that leg's contract at this chart's price.
+        const bracketable = placed.filter(pos => canBracket(pos.leg));
+        const matchedPos = bracketable.find(pos => pos.anchor.level > 0 && ord.side === (pos.leg.netQty > 0 ? 'SELL' : 'BUY'))
+          ?? bracketable.find(pos => {
             const sName = (pos.leg.symbol || '').toUpperCase();
             const oName = (ord.symbol || '').toUpperCase();
             return (underlying === 'CRUDEOILM' && (oName.includes('CRUDE') || sName.includes('CRUDE') || pos.leg.type === 'FUT')) ||
               (underlying === 'NIFTY' && (oName.includes('NIFTY') || sName.includes('NIFTY') || pos.leg.type === 'FUT'));
           })
-          ?? placed[0];
+          ?? bracketable[0];
 
         if (matchedPos && matchedPos.anchor.level > 0) {
           const isLong = matchedPos.leg.netQty > 0;
@@ -1282,6 +1297,7 @@ function ScalperChart(props: Props) {
             style={{ top: top - 11 }}
             className="absolute right-[84px] z-[55] flex items-center gap-1.5 px-1.5 h-[24px] rounded border border-sky-500/70 bg-zinc-900 shadow-md font-mono text-[11px]"
           >
+            {canBracket(p.leg) ? (<>
             {/* TP draggable button */}
             <button
               type="button"
@@ -1309,6 +1325,9 @@ function ScalperChart(props: Props) {
             >
               SL
             </button>
+            </>) : (
+              <span title="Set TP / SL on this option's own chart: its levels are premiums" className="text-[10px] text-zinc-500">{p.leg.type} {p.leg.strike}</span>
+            )}
 
             {/* Reverse position button */}
             <button

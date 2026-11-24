@@ -12,6 +12,8 @@ export interface InstrumentSpec {
   kotakExchange: 'nse_fo' | 'mcx_fo';
   strikeStep: number;
   futTick: number;
+  /** Option premium tick (NSE index options ₹0.05, MCX crude options ₹0.10). */
+  optTick: number;
   candleSegment: 'IDX_I' | 'MCX_COMM';
   candleInstrument: 'INDEX' | 'FUTCOM';
   defaultLots: number;
@@ -26,6 +28,7 @@ export const INSTRUMENTS: Record<Underlying, InstrumentSpec> = {
     kotakExchange: 'nse_fo',
     strikeStep: 50,
     futTick: 0.05,
+    optTick: 0.05,
     candleSegment: 'IDX_I',
     candleInstrument: 'INDEX',
     defaultLots: 1,
@@ -38,6 +41,7 @@ export const INSTRUMENTS: Record<Underlying, InstrumentSpec> = {
     kotakExchange: 'mcx_fo',
     strikeStep: 50,
     futTick: 1.0,
+    optTick: 0.1,
     candleSegment: 'MCX_COMM',
     candleInstrument: 'FUTCOM',
     defaultLots: 1,
