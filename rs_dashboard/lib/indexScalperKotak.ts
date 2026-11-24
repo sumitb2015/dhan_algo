@@ -8,6 +8,7 @@
 import { classifyKotakStatus } from './kotakShape.ts';
 import { normTime } from './indexScalperAccount.ts';
 import type { ScalperLeg } from './indexScalperPositions.ts';
+import type { Underlying } from './indexScalperInstrument.ts';
 
 /** One record of the page's day file. `unknown` = Kotak did not confirm and the order may be live. */
 export type KotakRecord =
@@ -127,20 +128,24 @@ export function recordedIds(records: KotakRecord[]): Set<string> {
 
 export type KotakSymbolInfo = { expiry: string; strike: number; side: 'CE' | 'PE' | 'FUT' };
 
-/** Kotak position rows (lib/kotakShape.ts shapeKotakPosition: no LTP) -> NIFTY option legs. Identity is trading
+/** Kotak position rows (lib/kotakShape.ts shapeKotakPosition: no LTP) -> Scalper legs. Identity is trading
  *  symbol + product; the symbol also sits in `securityId` (the repo rule for Kotak). `priceOf` prices a leg from the
  *  Dhan live feed (null when its expiry is not on screen: never the strike, never 0). */
 export function legsFromKotakPositions(
   rows: Record<string, unknown>[],
   symbols: Record<string, KotakSymbolInfo>,
   priceOf: (info: KotakSymbolInfo) => number | null,
+  underlying: Underlying = 'NIFTY',
 ): ScalperLeg[] {
   const out: ScalperLeg[] = [];
   const seen = new Set<string>();
+  const isTarget = (s: string) => (underlying === 'CRUDEOILM' ? /^CRUDEOILM\d/.test(s) : /^NIFTY\d/.test(s));
   for (const r of rows) {
     const sym = String(r.tradingSymbol ?? '');
     const info = symbols[sym];
-    if (!info || info.side === 'FUT' || !/^NIFTY\d/.test(sym)) continue;
+    if (!info || !isTarget(sym)) continue;
+    // For NIFTY we currently scalper options only unless futures are on screen; for CRUDEOILM we support options and FUT
+    if (underlying === 'NIFTY' && info.side === 'FUT') continue;
     const netQty = Number(r.netQty);
     if (!Number.isFinite(netQty) || netQty === 0) continue;
     const product = dashProduct(r.productType);
@@ -152,7 +157,7 @@ export function legsFromKotakPositions(
     const ltp = priceOf(info);
     out.push({
       id, securityId: sym, product, symbol: sym, strike: info.strike, type: info.side, netQty, avg: avgRaw,
-      ltp: ltp !== null && ltp > 0 ? ltp : null, sim: false,
+      ltp: ltp !== null && ltp > 0 ? ltp : null, sim: false, mult: 1,
     });
   }
   return out;
@@ -168,12 +173,13 @@ export function kotakOrdersAsDhan(book: Record<string, unknown>[], symbols: Reco
     const qty = Number(o.quantity) || 0;
     const filled = o.filledQty === undefined || o.filledQty === null ? null : Number(o.filledQty) || 0;
     const status = classifyKotakStatus(String(o.orderStatus ?? ''), filled ?? 0, qty);
+    const isMcx = sym.startsWith('CRUDEOIL');
     return {
       orderId: String(o.orderId ?? ''),
       correlationId: ours.has(String(o.orderId ?? '')) ? 'isx-kotak' : '',
       orderStatus: status,
       transactionType: o.transactionType,
-      exchangeSegment: 'NSE_FNO',
+      exchangeSegment: isMcx ? 'MCX_COMM' : 'NSE_FNO',
       productType: dashProduct(o.productType),
       orderType: o.orderType,
       tradingSymbol: sym,

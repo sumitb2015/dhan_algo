@@ -67,6 +67,9 @@ def resample_3(rows):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--symbol", default="NIFTY")
+    p.add_argument("--segment", default="IDX_I")
+    p.add_argument("--instrument", default="INDEX")
+    p.add_argument("--security-id", default=None)
     p.add_argument("--interval", default="5")
     p.add_argument("--days", type=int, default=10)
     a = p.parse_args()
@@ -82,18 +85,38 @@ def main():
         return
     helper = DhanHelper(dhan)
 
-    idx = helper.find_index(a.symbol)
-    if not idx:
-        print(json.dumps({"error": f"index {a.symbol} not found"}))
-        return
+    if a.security_id:
+        try:
+            sec_id = int(a.security_id)
+        except ValueError:
+            print(json.dumps({"error": f"invalid security_id: {a.security_id}"}))
+            return
+        segment = a.segment
+        inst = a.instrument
+    elif a.segment == "MCX_COMM" or a.symbol == "CRUDEOILM":
+        fut = helper.find_future("CRUDEOILM", exchange="MCX", instrument="FUTCOM")
+        if not fut:
+            print(json.dumps({"error": "CRUDEOILM future contract not found"}))
+            return
+        sec_id = int(fut["SECURITY_ID"])
+        segment = "MCX_COMM"
+        inst = "FUTCOM"
+    else:
+        idx = helper.find_index(a.symbol)
+        if not idx:
+            print(json.dumps({"error": f"index {a.symbol} not found"}))
+            return
+        sec_id = int(idx["SECURITY_ID"])
+        segment = "IDX_I"
+        inst = "INDEX"
 
     api_interval = "1" if a.interval == "3" else a.interval
     end = datetime.now() + timedelta(days=1)
     start = datetime.now() - timedelta(days=days)
     df = helper.get_intraday_minute_data(
-        security_id=int(idx["SECURITY_ID"]),
-        exchange_segment="IDX_I",
-        instrument_type="INDEX",
+        security_id=sec_id,
+        exchange_segment=segment,
+        instrument_type=inst,
         interval=api_interval,
         from_date=start.strftime("%Y-%m-%d"),
         to_date=end.strftime("%Y-%m-%d"),

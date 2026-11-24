@@ -16,22 +16,35 @@ const TTL_MS = 20_000;
 
 export async function GET(req: NextRequest) {
   const sp = new URL(req.url).searchParams;
+  const underlying = (sp.get('underlying') ?? 'NIFTY').toUpperCase();
+  if (underlying !== 'NIFTY' && underlying !== 'CRUDEOILM') {
+    return NextResponse.json({ success: false, error: 'underlying must be NIFTY or CRUDEOILM' }, { status: 400 });
+  }
   const interval = sp.get('interval') ?? '5';
   if (!['1', '3', '5', '15'].includes(interval)) {
     return NextResponse.json({ success: false, error: 'interval must be 1, 3, 5 or 15' }, { status: 400 });
   }
+  const secIdRaw = sp.get('securityId');
+  const secId = secIdRaw && /^\d+$/.test(secIdRaw) ? secIdRaw : null;
   const daysRaw = Number(sp.get('days') ?? '10');
   const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(60, Math.floor(daysRaw))) : 10;
-  const key = `idx-scalper:${interval}:${days}`;
+  const key = `idx-scalper:${underlying}:${secId ?? ''}:${interval}:${days}`;
 
   const hit = cache.get(key);
   if (hit && Date.now() - hit.ts < TTL_MS) {
     return NextResponse.json({ success: true, ...hit.data }, { headers: { 'Cache-Control': 'no-store' } });
   }
   try {
+    const args = ['--symbol', underlying, '--interval', interval, '--days', String(days)];
+    if (underlying === 'CRUDEOILM') {
+      args.push('--segment', 'MCX_COMM', '--instrument', 'FUTCOM');
+    }
+    if (secId) {
+      args.push('--security-id', secId);
+    }
     const data = await dedupe(key, () =>
       spaced('dhan-spawn:index-scalper-candles', () =>
-        runPythonJson<Result>(SCRIPT, ['--symbol', 'NIFTY', '--interval', interval, '--days', String(days)], 40_000),
+        runPythonJson<Result>(SCRIPT, args, 40_000),
       ),
     );
     if (data.error) {

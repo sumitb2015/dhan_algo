@@ -1,18 +1,25 @@
 'use client';
 
-// Live data for /index-scalper (Dhan only): the shared options tick bridge (spot + per-strike LTP / OI / buildup), the
-// expiry list, lot size and strike -> security id map. Nothing here places an order.
+// Live data for /index-scalper: the shared options tick bridge (spot + per-strike LTP / OI / buildup), the
+// expiry list, lot size and strike -> security id map. Supports NIFTY and CRUDEOILM. Nothing here places an order.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import type { LiveQuotes } from '@/components/Scalper';
 import { chainSnapshot, type RestChain } from '@/lib/indexScalperChain';
-import { inNseSession } from '@/lib/indexScalperSession';
+import { inMarketSession } from '@/lib/indexScalperSession';
 import type { KotakSymbolInfo } from '@/lib/indexScalperKotak';
+import type { Underlying } from '@/lib/indexScalperInstrument';
 
 export interface StrikeIds { ceId?: string; peId?: string }
 
-const UNDERLYING = 'NIFTY';
+export interface FutureContractInfo {
+  dhanId: string | null;
+  kotakSymbol: string | null;
+  expiry: string | null;
+  ltp: number | null;
+}
+
 const STALE_FEED_MS = 10_000;
 /** No live chain for this long after an expiry is picked: show Dhan's REST chain as a snapshot instead. */
 const SNAPSHOT_AFTER_MS = 4_000;
@@ -22,6 +29,7 @@ const SNAPSHOT_EVERY_MS = 60_000;
 const newId = () => `isx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
 export interface IndexScalperFeed {
+  underlying: Underlying;
   expiries: string[];
   expiry: string;
   setExpiry: (e: string) => void;
@@ -36,15 +44,15 @@ export interface IndexScalperFeed {
   /** Seconds since the last tick; null when no tick has arrived. */
   feedAgeSec: number | null;
   stale: boolean;
-  /** NSE session open now (regular day, 09:15-15:30 IST). Outside it nothing fills or sends at market, whatever the
-   *  feed says: a feed that keeps sending packets after the close must not make the page look tradable. */
+  /** Market session open now (NSE: 09:15-15:30 IST; MCX: 09:00-23:30/23:55 IST). Outside it nothing fills or sends at market. */
   marketOpen: boolean;
   lotSize: number | null;
   strikeIds: Map<number, StrikeIds>;
   /** security id -> last premium, for every strike the bridge tracks. */
   ltpById: Map<string, number>;
-  /** Kotak contracts when Kotak is the page's broker (null on Dhan, and until both reads land). Prices stay Dhan's: a
-   *  Kotak order only needs Kotak's trading symbol and lot size for the contract on screen. */
+  /** Future contract for the selected option month (MCX mini future, or Nifty future). */
+  future: FutureContractInfo | null;
+  /** Kotak contracts when Kotak is the page's broker (null on Dhan, and until both reads land). */
   kotak: KotakContracts | null;
   /** Why Kotak's contracts are not loaded (a read failed; it is retried every 15 s), null while fine or loading. */
   kotakError: string | null;
@@ -57,105 +65,115 @@ export interface KotakContracts {
   lotSize: number | null;
   /** Exchange freeze quantity (max units per order), when Kotak's cache lists it: larger closes are sent in slices. */
   freezeQty: number | null;
-  /** Every NIFTY Kotak symbol -> its contract, to place and price Kotak positions of any expiry. */
+  /** Every Kotak symbol for this underlying -> its contract, to place and price Kotak positions of any expiry. */
   symbols: Record<string, KotakSymbolInfo>;
 }
 
-export function useIndexScalperFeed(broker: 'dhan' | 'kotak' = 'dhan'): IndexScalperFeed {
+export function useIndexScalperFeed(
+  broker: 'dhan' | 'kotak' = 'dhan',
+  underlying: Underlying = 'NIFTY',
+): IndexScalperFeed {
   const [viewerId] = useState(newId);
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
+  const [expiryOwner, setExpiryOwner] = useState<Underlying>(underlying);
   const [lotSize, setLotSize] = useState<number | null>(null);
   const [strikeIdsRaw, setStrikeIdsRaw] = useState<Record<string, StrikeIds>>({});
+  const [dhanFuture, setDhanFuture] = useState<{ securityId: string; expiry: string } | null>(null);
+  const [kotakFutureSymbol, setKotakFutureSymbol] = useState<string | null>(null);
   const [lookupFor, setLookupFor] = useState('');
   const [nowMs, setNowMs] = useState(0);
 
+  // Fetch expiries whenever underlying changes
   useEffect(() => {
     let dead = false;
-    fetch(`/api/options/expiries?underlying=${UNDERLYING}&broker=dhan`)
+    fetch(`/api/options/expiries?underlying=${underlying}&broker=dhan`)
       .then(r => r.json())
       .then((j: { success: boolean; data?: string[] }) => {
         if (dead || !j.success || !Array.isArray(j.data) || j.data.length === 0) return;
         setExpiries(j.data);
         setExpiry(prev => (prev && j.data!.includes(prev) ? prev : j.data![0]));
+        setExpiryOwner(underlying);
       })
       .catch(() => {});
     return () => { dead = true; };
-  }, []);
+  }, [underlying]);
 
-  // Start the shared tick bridge for this expiry; stop it only on unmount (the route ignores the stop if another page
-  // is still heartbeating the same bridge).
+  // Start the shared tick bridge for this expiry; only when expiryOwner matches underlying (guards against expiry race)
   const startedRef = useRef(false);
   useEffect(() => {
-    if (!expiry) return;
+    if (!expiry || expiryOwner !== underlying) return;
     startedRef.current = true;
     fetch('/api/options/live', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'start', underlying: UNDERLYING, expiry, numStrikes: 35, broker: 'dhan', viewer: viewerId }),
+      body: JSON.stringify({ action: 'start', underlying, expiry, numStrikes: 35, broker: 'dhan', viewer: viewerId }),
     }).catch(() => {});
-  }, [expiry, viewerId]);
+  }, [underlying, expiry, expiryOwner, viewerId]);
+
   useEffect(() => () => {
     if (!startedRef.current) return;
     fetch('/api/options/live', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'stop', brokers: ['dhan'], underlying: UNDERLYING, viewer: viewerId }),
+      body: JSON.stringify({ action: 'stop', brokers: ['dhan'], underlying, viewer: viewerId }),
       keepalive: true,
     }).catch(() => {});
-  }, [viewerId]);
+  }, [underlying, viewerId]);
 
-  const { liveQuotes: raw, feedAt } = useLiveOptionsWS(expiry, 'dhan', ['dhan'], UNDERLYING);
+  const { liveQuotes: raw, feedAt } = useLiveOptionsWS(expiry, 'dhan', ['dhan'], underlying);
   const quotes = useMemo(() => {
     if (!raw) return null;
-    if (raw.underlying && raw.underlying.toUpperCase() !== UNDERLYING) return null;
+    if (raw.underlying && raw.underlying.toUpperCase() !== underlying) return null;
     if (raw.expiry && expiry && raw.expiry !== expiry) return null;
     return raw;
-  }, [raw, expiry]);
+  }, [raw, expiry, underlying]);
 
+  // Dhan contract and lot size lookup
   useEffect(() => {
-    if (!expiry) return;
+    if (!expiry || expiryOwner !== underlying) return;
     let dead = false;
-    const key = expiry;
+    const key = `${underlying}:${expiry}`;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLotSize(null);
-    // The strike -> id map is per expiry: drop the old one so a pick made before the new lookup lands has no id
-    // (refused) instead of the previous expiry's id.
     setStrikeIdsRaw({});
-    fetch(`/api/scalper/lookup?underlying=${UNDERLYING}&expiry=${expiry}`)
+    setDhanFuture(null);
+    fetch(`/api/scalper/lookup?underlying=${underlying}&expiry=${expiry}`)
       .then(r => r.json())
-      .then((j: { success: boolean; data?: { lotSize?: number; strikes?: Record<string, StrikeIds> } }) => {
+      .then((j: { success: boolean; data?: { lotSize?: number; strikes?: Record<string, StrikeIds>; future?: { securityId: string; expiry: string } } }) => {
         if (dead || !j.success || !j.data) return;
         setStrikeIdsRaw(j.data.strikes ?? {});
+        if (j.data.future) setDhanFuture(j.data.future);
         if (typeof j.data.lotSize === 'number' && j.data.lotSize > 0) setLotSize(j.data.lotSize);
         setLookupFor(key);
       })
       .catch(() => {});
     return () => { dead = true; };
-  }, [expiry]);
+  }, [underlying, expiry, expiryOwner]);
 
-  // Kotak's contracts for the expiry on screen, and its NIFTY symbol map, only while Kotak is the broker.
+  // Kotak's contracts for the expiry on screen
   const [kotakLookup, setKotakLookup] = useState<{ expiry: string; strikes: Record<string, { ceSymbol?: string; peSymbol?: string }>; lotSize: number | null; freezeQty: number | null } | null>(null);
   const [kotakSymbols, setKotakSymbols] = useState<Record<string, KotakSymbolInfo> | null>(null);
-  // One error per read: a success of one must not hide the other's failure (the page would look ready while not).
   const [kotakLookupError, setKotakLookupError] = useState<string | null>(null);
   const [kotakSymbolsError, setKotakSymbolsError] = useState<string | null>(null);
-  // Both reads retry every 15 s until they succeed: a first read can fail or time out (the lookup route may be
-  // rebuilding Kotak's instrument cache, a Python run of up to 120 s), and a page must not stay unable to trade Kotak.
   const KOTAK_RETRY_MS = 15_000;
+
   useEffect(() => {
-    if (broker !== 'kotak' || !expiry) return;
+    if (broker !== 'kotak' || !expiry || expiryOwner !== underlying) return;
     let dead = false;
     let done = false;
+    setKotakFutureSymbol(null);
+    const futParam = dhanFuture?.expiry ? `&futureExpiry=${dhanFuture.expiry}` : '';
     const load = () => {
       if (done) return;
-      fetch(`/api/scalper/kotak/lookup?underlying=${UNDERLYING}&expiry=${expiry}`)
+      fetch(`/api/scalper/kotak/lookup?underlying=${underlying}&expiry=${expiry}${futParam}`)
         .then(r => r.json())
-        .then((j: { success: boolean; error?: string; data?: { lotSize?: number; freezeQty?: number; strikes?: Record<string, { ceSymbol?: string; peSymbol?: string }> } }) => {
+        .then((j: { success: boolean; error?: string; data?: { lotSize?: number; freezeQty?: number; future?: { trading_symbol?: string }; strikes?: Record<string, { ceSymbol?: string; peSymbol?: string }> } }) => {
           if (dead) return;
           if (!j.success || !j.data) { setKotakLookupError(`Kotak contracts: ${j.error ?? 'lookup failed'} (retrying)`); return; }
           done = true;
           setKotakLookupError(null);
+          if (j.data.future?.trading_symbol) setKotakFutureSymbol(j.data.future.trading_symbol);
           setKotakLookup({
             expiry, strikes: j.data.strikes ?? {},
             lotSize: typeof j.data.lotSize === 'number' && j.data.lotSize > 0 ? j.data.lotSize : null,
@@ -167,12 +185,13 @@ export function useIndexScalperFeed(broker: 'dhan' | 'kotak' = 'dhan'): IndexSca
     load();
     const t = setInterval(load, KOTAK_RETRY_MS);
     return () => { dead = true; clearInterval(t); };
-  }, [broker, expiry]);
+  }, [broker, underlying, expiry, expiryOwner, dhanFuture?.expiry]);
+
   useEffect(() => {
-    if (broker !== 'kotak' || kotakSymbols) return;
+    if (broker !== 'kotak') return;
     let dead = false;
     const load = () => {
-      fetch(`/api/scalper/kotak/symbol-lookup?underlying=${UNDERLYING}`)
+      fetch(`/api/scalper/kotak/symbol-lookup?underlying=${underlying}`)
         .then(r => r.json())
         .then((j: { success: boolean; error?: string; data?: Record<string, KotakSymbolInfo> }) => {
           if (dead) return;
@@ -184,7 +203,8 @@ export function useIndexScalperFeed(broker: 'dhan' | 'kotak' = 'dhan'): IndexSca
     load();
     const t = setInterval(load, KOTAK_RETRY_MS);
     return () => { dead = true; clearInterval(t); };
-  }, [broker, kotakSymbols]);
+  }, [broker, underlying]);
+
   const kotak = useMemo<KotakContracts | null>(() => {
     if (broker !== 'kotak' || !kotakSymbols || !kotakLookup || kotakLookup.expiry !== expiry) return null;
     const strikes = new Map<number, { ceSymbol?: string; peSymbol?: string }>();
@@ -201,10 +221,10 @@ export function useIndexScalperFeed(broker: 'dhan' | 'kotak' = 'dhan'): IndexSca
 
   const strikeIds = useMemo(() => {
     const m = new Map<number, StrikeIds>();
-    if (lookupFor !== expiry) return m;
+    if (lookupFor !== `${underlying}:${expiry}`) return m;
     for (const [k, v] of Object.entries(strikeIdsRaw)) m.set(Number(k), v);
     return m;
-  }, [strikeIdsRaw, lookupFor, expiry]);
+  }, [strikeIdsRaw, lookupFor, underlying, expiry]);
 
   const ltpById = useMemo(() => {
     const m = new Map<string, number>();
@@ -215,25 +235,29 @@ export function useIndexScalperFeed(broker: 'dhan' | 'kotak' = 'dhan'): IndexSca
       if (ids.ceId && sd.ce?.ltp > 0) m.set(String(ids.ceId), sd.ce.ltp);
       if (ids.peId && sd.pe?.ltp > 0) m.set(String(ids.peId), sd.pe.ltp);
     }
+    // Also add the future's LTP if quoted
+    if (dhanFuture?.securityId) {
+      const futLtp = quotes.spot > 0 ? quotes.spot : 0;
+      if (futLtp > 0) m.set(dhanFuture.securityId, futLtp);
+    }
     return m;
-  }, [quotes, strikeIds]);
+  }, [quotes, strikeIds, dhanFuture]);
 
-  // REST snapshot, only while the live bridge has no chain for this expiry (e.g. an NSE holiday: Dhan's quote API has no
-  // index price then, so the bridge cannot pick an ATM and exits, and the WebSocket has nothing to stream anyway).
+  // REST snapshot, only while the live bridge has no chain for this expiry
   const [snapshot, setSnapshot] = useState<LiveQuotes | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const hasLive = !!quotes;
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setSnapshot(prev => (prev && prev.expiry === expiry ? prev : null));
-    if (!expiry || hasLive) return;
+    if (!expiry || expiryOwner !== underlying || hasLive) return;
     let dead = false;
     const load = () => {
-      fetch(`/api/options/chain?underlying=${UNDERLYING}&expiry=${expiry}&allowStale=1`)
+      fetch(`/api/options/chain?underlying=${underlying}&expiry=${expiry}&allowStale=1`)
         .then(r => r.json())
         .then((j: { success: boolean; data?: RestChain; error?: string; as_of?: number }) => {
           if (dead) return;
-          const snap = j.success && j.data ? chainSnapshot(j.data, UNDERLYING, expiry, j.as_of ?? Date.now()) : null;
+          const snap = j.success && j.data ? chainSnapshot(j.data, underlying, expiry, j.as_of ?? Date.now()) : null;
           if (snap) { setSnapshot(snap); setSnapshotError(null); } else setSnapshotError(j.error ?? 'Option chain unavailable');
         })
         .catch(e => { if (!dead) setSnapshotError(String((e as Error)?.message ?? e)); });
@@ -241,25 +265,34 @@ export function useIndexScalperFeed(broker: 'dhan' | 'kotak' = 'dhan'): IndexSca
     const first = setTimeout(load, SNAPSHOT_AFTER_MS);
     const every = setInterval(load, SNAPSHOT_EVERY_MS);
     return () => { dead = true; clearTimeout(first); clearInterval(every); };
-  }, [expiry, hasLive]);
+  }, [underlying, expiry, expiryOwner, hasLive]);
   const chain = quotes ?? (snapshot && snapshot.expiry === expiry ? snapshot : null);
 
-  // Liveness: when the broker feed last sent ANY packet (bridge heartbeat / feed_at), so a quiet minute with no price
-  // change is not "stale" while a frozen Dhan socket still is. A bridge too old to send feed_at falls back to the last
-  // price change.
   const feedMs = feedAt ? Date.parse(feedAt) : NaN;
   const changeMs = quotes?.updated_at ? Date.parse(quotes.updated_at) : 0;
   const lastTick = !quotes ? 0 : Number.isFinite(feedMs) && feedMs > 0 ? feedMs : changeMs;
   const feedAgeSec = lastTick > 0 && nowMs > 0 ? Math.max(0, (nowMs - lastTick) / 1000) : null;
   const spot = quotes && quotes.spot > 0 ? quotes.spot : null;
 
+  const future = useMemo<FutureContractInfo | null>(() => {
+    if (!dhanFuture && !kotakFutureSymbol) return null;
+    const futLtp = (dhanFuture?.securityId ? ltpById.get(dhanFuture.securityId) : null) ?? quotes?.spot ?? null;
+    return {
+      dhanId: dhanFuture?.securityId ?? null,
+      kotakSymbol: kotakFutureSymbol ?? null,
+      expiry: dhanFuture?.expiry ?? null,
+      ltp: futLtp,
+    };
+  }, [dhanFuture, kotakFutureSymbol, ltpById, quotes]);
+
   return {
+    underlying,
     expiries, expiry, setExpiry, quotes, chain, chainSource: quotes ? 'live' : chain ? 'snapshot' : null, snapshotError,
     spot, feedAgeSec,
     stale: feedAgeSec !== null && feedAgeSec > STALE_FEED_MS / 1000,
-    marketOpen: nowMs > 0 && inNseSession(nowMs),
-    // The lookup that produced this lot size must be for the expiry on screen; until then an order is refused.
-    lotSize: lookupFor === expiry ? lotSize : null,
-    strikeIds, ltpById, kotak, kotakError: broker === 'kotak' && !kotak ? (kotakSymbolsError ?? kotakLookupError) : null,
+    marketOpen: nowMs > 0 && inMarketSession(underlying, nowMs),
+    lotSize: lookupFor === `${underlying}:${expiry}` ? lotSize : null,
+    strikeIds, ltpById, future,
+    kotak, kotakError: broker === 'kotak' && !kotak ? (kotakSymbolsError ?? kotakLookupError) : null,
   };
 }

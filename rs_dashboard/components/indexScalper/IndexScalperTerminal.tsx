@@ -28,6 +28,10 @@ import {
   applyTick, mergeHistory, migrateIndicatorsV1, newIndicator, type Bar, type IndicatorInstance, type IndicatorKind,
 } from '@/lib/indexScalperIndicators';
 import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
+import { inMarketSession } from '@/lib/indexScalperSession';
+import {
+  INSTRUMENTS, dhanOrderQty, kotakOrderQty, pnlMultiplier, displayLotUnits, type Underlying,
+} from '@/lib/indexScalperInstrument';
 import {
   MAX_LOTS, applyFill, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, type ScalperLeg,
 } from '@/lib/indexScalperPositions';
@@ -51,7 +55,7 @@ const IND_KEY_V1 = 'indexScalper.indicators.v1';
 const SIM_KEY = 'indexScalper.sim.v1';
 const SPOT_KEY = 'indexScalper.entrySpots.v1';
 
-interface SimLeg { securityId: string; symbol: string; strike: number; type: 'CE' | 'PE'; netQty: number; avg: number; /** realized P&L of this leg today */ realized?: number }
+interface SimLeg { securityId: string; symbol: string; strike: number; type: 'CE' | 'PE' | 'FUT'; netQty: number; avg: number; /** realized P&L of this leg today */ realized?: number }
 interface SimState { day: string; legs: Record<string, SimLeg>; realized: number }
 
 const istDayKey = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
@@ -68,7 +72,21 @@ function defaultIndicators(): IndicatorInstance[] {
 
 interface Toast { ok: boolean; text: string }
 
+const UNDERLYING_KEY = 'indexScalper.underlying';
+
 export default function IndexScalperTerminal() {
+  // Underlying instrument (NIFTY index or CRUDEOILM mini crude). Switching is locked while REAL is armed.
+  const [underlying, setUnderlying] = useState<Underlying>('NIFTY');
+  useEffect(() => {
+    const u = readPref(UNDERLYING_KEY);
+    if (u === 'NIFTY' || u === 'CRUDEOILM') setUnderlying(u);
+  }, []);
+  const selectUnderlying = (u: Underlying) => {
+    if (real) return;
+    setUnderlying(u);
+    savePref(UNDERLYING_KEY, u);
+  };
+
   // Broker for REAL orders and the account panel (Dhan or Kotak). Prices are always Dhan's live feed. The first render
   // is always Dhan; every account read and REAL send waits for `brokerLoaded` so a page saved on Kotak never touches
   // Dhan's account. The picker is locked while REAL is armed: a REAL session trades one account.
@@ -77,7 +95,7 @@ export default function IndexScalperTerminal() {
   const brokerLoadedRef = useRef(brokerLoaded);
   useEffect(() => { brokerRef.current = broker; brokerLoadedRef.current = brokerLoaded; });
   const brokerName = broker === 'kotak' ? 'Kotak' : 'Dhan';
-  const feed = useIndexScalperFeed(broker);
+  const feed = useIndexScalperFeed(broker, underlying);
 
   const [interval, setIntervalSel] = useState<Interval>('5');
   const [days, setDays] = useState(15);
@@ -180,7 +198,8 @@ export default function IndexScalperTerminal() {
     let dead = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoadingBars(true);
-    fetch(`/api/index-scalper/candles?interval=${interval}&days=${days}`)
+    const futParam = underlying === 'CRUDEOILM' && feed.future?.dhanId ? `&securityId=${feed.future.dhanId}` : '';
+    fetch(`/api/index-scalper/candles?underlying=${underlying}&interval=${interval}&days=${days}${futParam}`)
       .then(r => r.json())
       .then((j: { success: boolean; candles?: { t: number; o: number; h: number; l: number; c: number }[]; error?: string }) => {
         if (dead) return;
@@ -191,9 +210,9 @@ export default function IndexScalperTerminal() {
       .catch(e => { if (!dead) setCandleErr(String(e?.message ?? e)); })
       .finally(() => { if (!dead) setLoadingBars(false); });
     return () => { dead = true; };
-  }, [interval, days, refreshTick]);
+  }, [underlying, interval, days, refreshTick, feed.future?.dhanId]);
 
-  // Live candles are built from the WebSocket index ticks (the shared options bridge pushes every tick); the REST
+  // Live candles are built from the WebSocket ticks; the REST
   // history above is only the backfill: loaded per interval / range, and again after a gap the ticks cannot have covered
   // (the tab was hidden, or the feed went stale and came back). Nothing polls it on a timer.
   const liveIntervalRef = useRef<Interval | null>(null);
@@ -213,12 +232,12 @@ export default function IndexScalperTerminal() {
   useEffect(() => {
     const spot = feed.spot;
     if (spot === null || feed.stale || feed.feedAgeSec === null) return;
-    // A held-over spot on a holiday / weekend (the bridge still answers with the last close) must not invent a candle.
-    if (!isRegularSession(istDateIso(Date.now()))) return;
+    // Outside market session, must not invent a candle.
+    if (!inMarketSession(underlying, Date.now())) return;
     setLiveBars(prev => (liveIntervalRef.current === interval ? applyTick(prev, spot, Number(interval), Date.now() / 1000) : prev));
     // feed.stale / feedAgeSec are read as guards only: a new tick is what moves a bar.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [feed.spot, interval]);
+  }, [feed.spot, interval, underlying]);
 
   const wasStaleRef = useRef(false);
   useEffect(() => {
@@ -343,21 +362,24 @@ export default function IndexScalperTerminal() {
   // A Kotak contract's live premium: Kotak rows carry no price, so they are priced off Dhan's feed through the
   // contract (expiry, strike, side). Only the expiry on screen is in the feed; anything else is unpriced (null).
   const kotakPrice = useCallback((info: KotakSymbolInfo): number | null => {
-    if (info.side === 'FUT' || info.expiry !== feed.expiry) return null;
+    if (info.side === 'FUT') {
+      return (info.expiry === feed.future?.expiry || info.expiry === feed.expiry) ? feed.future?.ltp ?? null : null;
+    }
+    if (info.expiry !== feed.expiry) return null;
     const ids = feed.strikeIds.get(info.strike);
     const id = info.side === 'CE' ? ids?.ceId : ids?.peId;
     return id ? feed.ltpById.get(id) ?? null : null;
-  }, [feed.expiry, feed.strikeIds, feed.ltpById]);
+  }, [feed.expiry, feed.future, feed.strikeIds, feed.ltpById]);
   const kotakSymbols = feed.kotak?.symbols;
 
   const legs: ScalperLeg[] = useMemo(() => {
-    if (real && broker === 'kotak') return legsFromKotakPositions(realRows, kotakSymbols ?? {}, kotakPrice);
-    if (real) return legsFromDhanPositions(realRows, feed.ltpById);
+    if (real && broker === 'kotak') return legsFromKotakPositions(realRows, kotakSymbols ?? {}, kotakPrice, underlying);
+    if (real) return legsFromDhanPositions(realRows, feed.ltpById, underlying);
     return Object.values(sim.legs).filter(l => l.netQty !== 0).map(l => {
       const live = feed.ltpById.get(l.securityId);
-      return { id: l.securityId, securityId: l.securityId, product: '', symbol: l.symbol, strike: l.strike, type: l.type, netQty: l.netQty, avg: l.avg, ltp: live ?? null, sim: true };
+      return { id: l.securityId, securityId: l.securityId, product: '', symbol: l.symbol, strike: l.strike, type: l.type, netQty: l.netQty, avg: l.avg, ltp: live ?? null, sim: true, mult: 1 };
     });
-  }, [real, broker, realRows, sim.legs, feed.ltpById, kotakSymbols, kotakPrice]);
+  }, [real, broker, realRows, sim.legs, feed.ltpById, kotakSymbols, kotakPrice, underlying]);
   // Bottom panel rows: the REAL Dhan book (open + closed rows), or the SIM paper book in the same shape.
   const panelPositions: PositionRowView[] = useMemo(() => {
     if (real && broker === 'kotak') {
@@ -367,28 +389,38 @@ export default function IndexScalperTerminal() {
       const rows = realRows.map(r => {
         const sym = String(r.tradingSymbol ?? '');
         const info = kotakSymbols?.[sym];
+        const isMcx = sym.startsWith('CRUDEOIL');
         return {
-          ...r, securityId: sym, productType: dashProduct(r.productType), exchangeSegment: 'NSE_FNO', unrealizedProfit: undefined,
-          ...(info && info.side !== 'FUT' ? { drvExpiryDate: info.expiry, drvOptionType: info.side === 'CE' ? 'CALL' : 'PUT', drvStrikePrice: info.strike } : {}),
+          ...r, securityId: sym, productType: dashProduct(r.productType), exchangeSegment: isMcx ? 'MCX_COMM' : 'NSE_FNO', unrealizedProfit: undefined,
+          ...(info && info.side !== 'FUT' ? { drvExpiryDate: info.expiry, drvOptionType: info.side === 'CE' ? 'CALL' : 'PUT', drvStrikePrice: info.strike } : info ? { drvExpiryDate: info.expiry } : {}),
         };
       });
       return positionRows(rows, row => { const info = kotakSymbols?.[String(row.securityId ?? '')]; return info ? kotakPrice(info) ?? undefined : undefined; });
     }
     if (real) return positionRows(realRows, feed.ltpById);
     return Object.values(sim.legs).map(l => {
-      const m = /^NIFTY-(\d{4}-\d{2}-\d{2})-/.exec(l.symbol);
+      const isFut = l.type === 'FUT';
+      const m = /^([A-Z]+)-(\d{4}-\d{2}-\d{2})-/.exec(l.symbol);
+      const root = m?.[1] ?? underlying;
       const live = feed.ltpById.get(l.securityId);
       const ltp = l.netQty !== 0 && live !== undefined && live > 0 ? live : null;
-      const unrealized = l.netQty === 0 ? 0 : ltp !== null ? (ltp - l.avg) * l.netQty : null;
+      const mult = pnlMultiplier(underlying, 'sim');
+      const unrealized = l.netQty === 0 ? 0 : ltp !== null ? (ltp - l.avg) * l.netQty * mult : null;
       const realized = l.realized ?? 0;
       return {
         key: l.securityId, securityId: l.securityId,
-        symbol: symbolLabel({ tradingSymbol: 'NIFTY', drvExpiryDate: m?.[1] ?? '', drvStrikePrice: l.strike, drvOptionType: l.type === 'CE' ? 'CALL' : 'PUT' }),
-        exchange: 'NSE', product: 'Intraday (SIM)', productCode: '', netQty: l.netQty, buyQty: null, sellQty: null, buyAvg: null, sellAvg: null,
+        symbol: symbolLabel({
+          tradingSymbol: root,
+          drvExpiryDate: m?.[2] ?? '',
+          drvStrikePrice: l.strike,
+          drvOptionType: isFut ? 'FUT' : (l.type === 'CE' ? 'CALL' : 'PUT'),
+        }),
+        exchange: underlying === 'CRUDEOILM' ? 'MCX' : 'NSE',
+        product: 'Intraday (SIM)', productCode: '', netQty: l.netQty, buyQty: null, sellQty: null, buyAvg: null, sellAvg: null,
         avg: l.netQty !== 0 ? l.avg : null, ltp, realized, unrealized, pnl: unrealized === null ? realized : realized + unrealized,
       };
     });
-  }, [real, broker, realRows, sim.legs, feed.ltpById, kotakSymbols, kotakPrice]);
+  }, [real, broker, realRows, sim.legs, feed.ltpById, kotakSymbols, kotakPrice, underlying]);
   const legForRow = useCallback((row: PositionRowView): ScalperLeg | undefined =>
     legs.find(l => (real ? l.id === `${row.securityId}|${row.productCode}` : l.id === row.securityId)), [legs, real]);
   const exitingRowKey = exitingId === null ? null : (panelPositions.find(r => legForRow(r)?.id === exitingId)?.key ?? 'busy');
@@ -410,7 +442,7 @@ export default function IndexScalperTerminal() {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(kotak
           ? { ...body, intent, idempotencyKey: newKey() }
-          : { ...body, exchangeSegment: 'NSE_FNO', source: 'isx', idempotencyKey: newKey() }),
+          : { exchangeSegment: INSTRUMENTS[underlying].dhanSegment, ...body, source: 'isx', idempotencyKey: newKey() }),
       });
       const j = await res.json() as { success: boolean; order_id?: string; error?: string; unknown?: boolean; warning?: string };
       if (kotak) void loadKotakRecords();
@@ -421,7 +453,7 @@ export default function IndexScalperTerminal() {
       // A throw after the request left may still have booked it: report unknown, never retry.
       return { ok: false, unknown: true, text: `No reply (${String((e as Error).message ?? e)}). Check Positions / Orders before retrying` };
     }
-  }, [loadKotakRecords]);
+  }, [loadKotakRecords, underlying]);
 
   const simFill = useCallback((c: PickedContract, side: 'BUY' | 'SELL', units: number, price: number, symbol: string) => {
     const id = c.securityId ?? `${c.type}${c.strike}`;
@@ -450,20 +482,25 @@ export default function IndexScalperTerminal() {
 
   const placeContract = useCallback(async (req: TicketRequest): Promise<Outcome> => {
     const f = feedRef.current;
-    const size = orderUnits(req.lots, f.lotSize);
+    const isCrude = underlying === 'CRUDEOILM';
+    const isFut = req.contract.type === 'FUT';
+    const defaultLot = isCrude ? 1 : 65;
+    const size = orderUnits(req.lots, f.lotSize ?? defaultLot);
     if (!size.ok) return { ok: false, text: size.error };
     const c = req.contract;
-    if (!c.securityId) return { ok: false, text: 'No security id for this strike' };
-    // The security id was picked for one expiry; never send it under a ticket that now shows another.
-    if (c.expiry !== f.expiry) return { ok: false, text: `This ticket was opened for the ${c.expiry || 'previous'} expiry: reopen it from the chain` };
+    if (!c.securityId) return { ok: false, text: 'No security id for this contract' };
+    // The security id was picked for one expiry; never send it under a ticket that now shows another (except futures).
+    if (!isFut && c.expiry !== f.expiry) return { ok: false, text: `This ticket was opened for the ${c.expiry || 'previous'} expiry: reopen it from the chain` };
     const live = f.ltpById.get(c.securityId) ?? null;
-    const symbol = `NIFTY-${f.expiry}-${c.strike}-${c.type}`;
+    const symbol = isFut
+      ? `${underlying}-${c.expiry}-FUT`
+      : `${underlying}-${f.expiry}-${c.strike}-${c.type}`;
 
     if (!real) {
       if (req.orderType !== 'MARKET' && req.orderType !== 'LIMIT') return { ok: false, text: 'SIM fills market and marketable limit orders only' };
       if (!(live && live > 0)) return { ok: false, text: 'No live price to fill the paper order' };
       if (f.stale) return { ok: false, text: 'Live prices are stale: not filling a paper order on an old price' };
-      if (!f.marketOpen) return { ok: false, text: 'NSE is closed: paper orders fill only during the session (09:15-15:30)' };
+      if (!f.marketOpen) return { ok: false, text: `${underlying === 'CRUDEOILM' ? 'MCX' : 'NSE'} is closed: paper orders fill only during the session` };
       let fillPx = live;
       if (req.orderType === 'LIMIT') {
         const lim = req.price ?? 0;
@@ -471,26 +508,29 @@ export default function IndexScalperTerminal() {
         if (!marketable) return { ok: false, text: `Limit ${lim} is not marketable at ${live.toFixed(2)} (SIM does not rest orders)` };
         fillPx = live;
       }
-      simFill(c, req.side, size.units, fillPx, symbol);
-      return { ok: true, text: `SIM ${req.side} ${req.lots} lot${req.lots > 1 ? 's' : ''} ${c.strike} ${c.type} @ ${fillPx.toFixed(2)}` };
+      const simUnits = displayLotUnits(underlying, f.lotSize) * req.lots;
+      simFill(c, req.side, simUnits, fillPx, symbol);
+      return { ok: true, text: `SIM ${req.side} ${req.lots} lot${req.lots > 1 ? 's' : ''} ${isFut ? 'FUT' : `${c.strike} ${c.type}`} @ ${fillPx.toFixed(2)}` };
     }
 
     // A market order needs a live feed: stale ticks, or none at all (the chain may be a REST snapshot then), refuse it.
-    if (req.orderType === 'MARKET' && !f.marketOpen) return { ok: false, text: 'NSE is closed: refusing a market order' };
+    if (req.orderType === 'MARKET' && !f.marketOpen) return { ok: false, text: `${underlying === 'CRUDEOILM' ? 'MCX' : 'NSE'} is closed: refusing a market order` };
     if (req.orderType === 'MARKET' && (f.stale || f.feedAgeSec === null)) return { ok: false, text: f.stale ? 'Live prices are stale: refusing a market order' : 'No live prices (tick feed not running): refusing a market order' };
     if (!brokerLoadedRef.current) return { ok: false, text: 'Broker not loaded yet' };
     if (brokerRef.current === 'kotak') {
       // Kotak: its own trading symbol and lot size for the contract on screen, never the Dhan security id.
       const k = f.kotak;
       if (!k) return { ok: false, text: f.kotakError ?? 'Kotak contracts are still loading' };
-      if (k.expiry !== c.expiry) return { ok: false, text: 'Kotak contracts are for another expiry: wait for them to load' };
-      const sym = c.type === 'CE' ? k.strikes.get(c.strike)?.ceSymbol : k.strikes.get(c.strike)?.peSymbol;
-      if (!sym) return { ok: false, text: `No Kotak contract for ${c.strike} ${c.type} on ${c.expiry}` };
-      const ks = orderUnits(req.lots, k.lotSize);
-      if (!ks.ok) return { ok: false, text: ks.error };
+      if (!isFut && k.expiry !== c.expiry) return { ok: false, text: 'Kotak contracts are for another expiry: wait for them to load' };
+      const sym = isFut
+        ? (f.future?.kotakSymbol ?? c.tradingSymbol)
+        : (c.type === 'CE' ? k.strikes.get(c.strike)?.ceSymbol : k.strikes.get(c.strike)?.peSymbol);
+      if (!sym) return { ok: false, text: `No Kotak contract for ${isFut ? 'FUT' : `${c.strike} ${c.type}`} on ${c.expiry}` };
+      const kotakLot = isCrude ? 10 : (k.lotSize ?? 65);
+      const kQty = kotakOrderQty(underlying, req.lots, kotakLot);
       const before = legs.find(l => l.securityId === sym)?.netQty ?? 0;
       const out = await sendReal({
-        tradingSymbol: sym, quantity: ks.units, side: req.side, orderType: req.orderType,
+        tradingSymbol: sym, quantity: kQty, side: req.side, orderType: req.orderType,
         price: req.price ?? undefined, triggerPrice: req.trigger ?? undefined, product: req.product,
       }, 'open');
       if (out.ok && before === 0) rememberSpot(sym, f.spot);
@@ -498,16 +538,18 @@ export default function IndexScalperTerminal() {
       void loadOrders();
       return out;
     }
+    const dQty = dhanOrderQty(underlying, req.lots, f.lotSize ?? defaultLot);
     const before = legs.find(l => l.securityId === c.securityId)?.netQty ?? 0;
     const out = await sendReal({
-      securityId: c.securityId, quantity: size.units, side: req.side, orderType: req.orderType,
+      securityId: c.securityId, quantity: dQty, side: req.side, orderType: req.orderType,
+      exchangeSegment: INSTRUMENTS[underlying].dhanSegment,
       price: req.price ?? undefined, triggerPrice: req.trigger ?? undefined, productType: req.product,
     });
     if (out.ok && before === 0) rememberSpot(c.securityId, f.spot);
     loadPositions();
     void loadOrders();
     return out;
-  }, [real, legs, sendReal, simFill, rememberSpot, loadPositions, loadOrders]);
+  }, [real, legs, sendReal, simFill, rememberSpot, loadPositions, loadOrders, underlying]);
 
   const submitTicket = useCallback(async (req: TicketRequest) => {
     if (ticketBusy) return;
@@ -522,7 +564,7 @@ export default function IndexScalperTerminal() {
     if (leg.ltp === null) return { ok: false, text: 'No live price to close the paper position' };
     // Same rule as a paper entry: never book P&L on a price the feed stopped updating.
     if (feedRef.current.stale) return { ok: false, text: 'Live prices are stale: not closing a paper position on an old price' };
-    if (!feedRef.current.marketOpen) return { ok: false, text: 'NSE is closed: paper positions close only during the session' };
+    if (!feedRef.current.marketOpen) return { ok: false, text: `${underlying === 'CRUDEOILM' ? 'MCX' : 'NSE'} is closed: paper positions close only during the session` };
     const sl = sim.legs[leg.id];
     if (!sl || sl.netQty === 0) return { ok: true, text: 'Already flat' };
     simFill({ strike: sl.strike, type: sl.type, securityId: sl.securityId, ltp: leg.ltp, expiry: '' }, sl.netQty > 0 ? 'SELL' : 'BUY', Math.abs(sl.netQty), leg.ltp, sl.symbol);
@@ -594,10 +636,10 @@ export default function IndexScalperTerminal() {
     const f = feedRef.current;
     if (brokerRef.current === 'kotak' && !f.kotak) return `${f.kotakError ?? 'Kotak contracts are not loaded yet'}: nothing was closed`;
     const live = brokerRef.current === 'kotak'
-      ? legsFromKotakPositions(rows, f.kotak?.symbols ?? {}, () => null)
-      : legsFromDhanPositions(rows, f.ltpById);
+      ? legsFromKotakPositions(rows, f.kotak?.symbols ?? {}, () => null, underlying)
+      : legsFromDhanPositions(rows, f.ltpById, underlying);
     return { live, owned: own.owned, records: own.records, book: own.book };
-  }, [loadPositions, loadOwned]);
+  }, [loadPositions, loadOwned, underlying]);
 
   const exitLeg = useCallback(async (leg: ScalperLeg) => {
     if (exitingId) return;
@@ -704,6 +746,20 @@ export default function IndexScalperTerminal() {
     void tradeNow(c, 'BUY');
   }, [atmContract, tradeNow, flash]);
 
+  const quickTradeFut = useCallback((side: 'BUY' | 'SELL') => {
+    const f = feed.future;
+    if (!f || !f.dhanId) { flash({ ok: false, text: 'Future contract not ready yet' }); return; }
+    const c: PickedContract = {
+      strike: 0,
+      type: 'FUT',
+      securityId: f.dhanId,
+      ltp: f.ltp,
+      expiry: f.expiry ?? feed.expiry,
+      tradingSymbol: f.kotakSymbol ?? undefined,
+    };
+    void tradeNow(c, side);
+  }, [feed.future, feed.expiry, tradeNow, flash]);
+
   const onTradeContract = useCallback(async (
     c: PickedContract,
     side: 'BUY' | 'SELL',
@@ -773,7 +829,26 @@ export default function IndexScalperTerminal() {
       {/* header toolbar */}
       <div className="flex items-center justify-between gap-2 px-3 h-11 border-b border-zinc-800 bg-zinc-950 shrink-0">
         <div className="flex items-center gap-1.5 min-w-0">
-          <span className="flex items-center gap-1.5 px-2 h-7 rounded text-sm font-bold text-white"><CandlestickChart className="w-4 h-4 text-sky-400" />NIFTY</span>
+          <div role="group" aria-label="Underlying" className="flex rounded border border-zinc-700 overflow-hidden" title={real ? 'Switch to SIM to change underlying: a REAL session trades one account' : undefined}>
+            <button
+              type="button"
+              aria-pressed={underlying === 'NIFTY'}
+              disabled={real}
+              onClick={() => selectUnderlying('NIFTY')}
+              className={cn('h-7 px-2 text-xs font-bold transition-colors disabled:opacity-50', underlying === 'NIFTY' ? 'bg-sky-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}
+            >
+              NIFTY
+            </button>
+            <button
+              type="button"
+              aria-pressed={underlying === 'CRUDEOILM'}
+              disabled={real}
+              onClick={() => selectUnderlying('CRUDEOILM')}
+              className={cn('h-7 px-2 text-xs font-bold transition-colors disabled:opacity-50', underlying === 'CRUDEOILM' ? 'bg-amber-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}
+            >
+              CRUDEOILM
+            </button>
+          </div>
           {sep}
           <div role="group" aria-label="Timeframe" className="flex items-center">
             {INTERVALS.map(i => (
@@ -786,6 +861,24 @@ export default function IndexScalperTerminal() {
             <BarChart3 className="w-4 h-4" />Indicators{indicators.length > 0 && <span className="text-sky-400">{indicators.length}</span>}
           </button>
           {sep}
+          {underlying === 'CRUDEOILM' && (
+            <>
+              <button
+                type="button"
+                onClick={() => quickTradeFut('BUY')}
+                className="h-7 px-2.5 rounded bg-emerald-600 hover:bg-emerald-500 text-oncolor text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300"
+              >
+                Buy FUT
+              </button>
+              <button
+                type="button"
+                onClick={() => quickTradeFut('SELL')}
+                className="h-7 px-2.5 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300"
+              >
+                Sell FUT
+              </button>
+            </>
+          )}
           <button type="button" onClick={() => quickBuy('PE')} className="h-7 px-3 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300">Buy PE</button>
           <button type="button" onClick={() => quickBuy('CE')} className="h-7 px-3 rounded bg-sky-600 hover:bg-sky-500 text-oncolor text-xs font-bold focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300">Buy CE</button>
           <button type="button" aria-pressed={scalperOn} onClick={() => setScalperOn(v => !v)}
@@ -824,7 +917,7 @@ export default function IndexScalperTerminal() {
           {candleErr && <span className="mr-3">Candles: {candleErr}</span>}
           {posErr && <span className="mr-3">Positions: {posErr}</span>}
           {feed.kotakError && <span data-testid="kotak-error" className="mr-3">{feed.kotakError}: Kotak orders and exits wait for it.</span>}
-          {!feed.marketOpen && <span data-testid="market-closed" className="mr-3">NSE is closed (session 09:15-15:30 IST): paper fills and market orders are off.</span>}
+          {!feed.marketOpen && <span data-testid="market-closed" className="mr-3">{underlying === 'CRUDEOILM' ? 'MCX is closed (session 09:00-23:30/23:55 IST)' : 'NSE is closed (session 09:15-15:30 IST)'}: paper fills and market orders are off.</span>}
           {notLive && <span className="mr-3">No live ticks (market closed or the tick bridge is not running): the option chain is Dhan&apos;s last snapshot, and market orders are refused.</span>}
           {feed.stale && <span>Live ticks are stale ({Math.round(feed.feedAgeSec ?? 0)}s): market closed or bridge down. Market orders are refused.</span>}
         </div>
@@ -849,7 +942,7 @@ export default function IndexScalperTerminal() {
               legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} exitingId={exitingId}
               onToggleIndicator={id => setIndicators(p => p.map(i => (i.id === id ? { ...i, visible: !i.visible } : i)))}
               onRemoveIndicator={removeIndicator} onEditIndicator={id => { setEditId(id); setPickerOpen(true); }}
-              symbolLabel={`NIFTY · ${interval} · IDX`} focus={focus}
+              symbolLabel={underlying === 'CRUDEOILM' ? `CRUDEOILM · ${interval} · FUT` : `NIFTY · ${interval} · IDX`} focus={focus}
             />
           )}
           {liveBars.length === 0 && !loadingBars && (
@@ -913,7 +1006,7 @@ export default function IndexScalperTerminal() {
       )}
       {ticket && (
         <OrderTicket key={`${ticket.expiry}:${ticket.strike}${ticket.type}`} contract={ticket} liveLtp={ticketLtp} expiry={ticket.expiry} lotSize={feed.lotSize}
-          real={real} available={funds.available} busy={ticketBusy} message={ticketMsg} onSubmit={submitTicket} onClose={() => setTicket(null)} />
+          underlying={underlying} real={real} available={funds.available} busy={ticketBusy} message={ticketMsg} onSubmit={submitTicket} onClose={() => setTicket(null)} />
       )}
       <IndicatorPicker open={pickerOpen} indicators={indicators} editId={editId} onAdd={addIndicator} onChange={patchIndicator}
         onRemove={removeIndicator} onEdit={setEditId} onClose={() => { setPickerOpen(false); setEditId(null); }} />
@@ -922,7 +1015,7 @@ export default function IndexScalperTerminal() {
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-oncolor-dark/70">
           <div role="alertdialog" aria-label="Arm real orders" className="w-[380px] rounded-lg border border-rose-500/70 bg-zinc-900 p-5 shadow-2xl">
             <h2 className="text-sm font-bold text-rose-300 mb-2">Arm REAL orders on {brokerName}?</h2>
-            <p className="text-xs text-zinc-300 mb-4">Buy/Sell, Scalper and Exit will place live orders with real money on your {brokerName} account (max {MAX_LOTS} lots per order). The chart then shows your {brokerName} NIFTY option positions; prices stay Dhan&apos;s live feed. REAL is switched off again whenever this page reloads.</p>
+            <p className="text-xs text-zinc-300 mb-4">Buy/Sell, Scalper and Exit will place live orders with real money on your {brokerName} account (max {MAX_LOTS} lots per order). The chart then shows your {brokerName} {underlying} positions; prices stay Dhan&apos;s live feed. REAL is switched off again whenever this page reloads.</p>
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setArmOpen(false)} className="h-8 px-3 rounded text-xs font-semibold text-zinc-300 hover:bg-zinc-800">Cancel</button>
               <button type="button" autoFocus disabled={!brokerLoaded} onClick={() => { if (brokerLoaded) { setReal(true); setArmOpen(false); } }} className="h-8 px-3 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold disabled:opacity-50">Arm REAL on {brokerName}</button>

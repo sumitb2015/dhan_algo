@@ -5,6 +5,7 @@
 
 import { parseTradingSymbol } from './positionLegs.ts';
 import { dedupePositions, positionProduct } from './positionProduct.ts';
+import { pnlMultiplier, type Underlying } from './indexScalperInstrument.ts';
 
 export interface ScalperLeg {
   /** Stable key: `securityId|product` for a REAL broker row (a security can carry an INTRADAY and a MARGIN row), the
@@ -15,7 +16,7 @@ export interface ScalperLeg {
   product: string;
   symbol: string;
   strike: number;
-  type: 'CE' | 'PE';
+  type: 'CE' | 'PE' | 'FUT';
   /** Signed units: >0 long, <0 short. */
   netQty: number;
   /** Average price of the open quantity (premium). */
@@ -23,6 +24,8 @@ export interface ScalperLeg {
   /** Last traded premium, null when unknown (never 0: unknown is not zero). */
   ltp: number | null;
   sim: boolean;
+  /** Multiplier per point per netQty unit (Dhan CRUDEOILM 10, else 1). */
+  mult?: number;
 }
 
 /** Index level this leg is drawn at on the chart: the spot recorded when this page opened it, else the strike. */
@@ -36,7 +39,8 @@ export function legAnchor(leg: ScalperLeg, spotAtEntry: number | undefined): Leg
 /** Open P&L in rupees; null when the LTP is unknown. */
 export function legPnl(leg: ScalperLeg): number | null {
   if (leg.ltp === null || !Number.isFinite(leg.ltp)) return null;
-  return (leg.ltp - leg.avg) * leg.netQty;
+  const mult = leg.mult ?? 1;
+  return (leg.ltp - leg.avg) * leg.netQty * mult;
 }
 
 export function totalPnl(legs: ScalperLeg[]): number | null {
@@ -116,22 +120,40 @@ export function applyFill(netQty: number, avg: number, side: 'BUY' | 'SELL', uni
   return { netQty: next, avg: price };
 }
 
-/** NIFTY option strike/type out of a Dhan trading symbol ("NIFTY-Dec2026-25350-PE"); null for anything else
- *  (BANKNIFTY, FINNIFTY, futures, other brokers' formats). Parsing is lib/positionLegs.ts's, not a private copy. */
-export function parseNiftyOption(tradingSymbol: string): { strike: number; type: 'CE' | 'PE' } | null {
+/** Option or futures contract out of a trading symbol ("NIFTY-Dec2026-25350-PE", "CRUDEOILM-17Nov2026-9000-CE", "CRUDEOILM-19Nov2026-FUT"). */
+export function parseScalperContract(tradingSymbol: string, underlying: Underlying = 'NIFTY'): { strike: number; type: 'CE' | 'PE' | 'FUT' } | null {
   const p = parseTradingSymbol(tradingSymbol);
-  if (!p || p.underlying !== 'NIFTY' || !Number.isFinite(p.strike)) return null;
-  return { strike: p.strike, type: p.type === 'CE' ? 'CE' : 'PE' };
+  if (p && p.underlying === underlying && (p.type === 'CE' || p.type === 'PE')) {
+    return { strike: p.strike, type: p.type };
+  }
+  const s = tradingSymbol.trim().toUpperCase();
+  // Check future: starts with the underlying root, followed by digits/hyphen, ending with FUT
+  if (s.startsWith(underlying) && (/-(?:FUT|\d{2}[A-Z]{3}\d{4}-FUT)$/.test(s) || /FUT$/.test(s))) {
+    return { strike: 0, type: 'FUT' };
+  }
+  return null;
 }
 
-/** Normalise raw Dhan position rows into NIFTY option legs (open quantity only), one per (security, product) row.
+/** NIFTY option strike/type out of a Dhan trading symbol ("NIFTY-Dec2026-25350-PE"); null for anything else. Kept for backwards compatibility. */
+export function parseNiftyOption(tradingSymbol: string): { strike: number; type: 'CE' | 'PE' } | null {
+  const parsed = parseScalperContract(tradingSymbol, 'NIFTY');
+  if (parsed && (parsed.type === 'CE' || parsed.type === 'PE')) return { strike: parsed.strike, type: parsed.type };
+  return null;
+}
+
+/** Normalise raw Dhan position rows into Scalper legs (open quantity only), one per (security, product) row.
  *  Dhan's verbatim duplicate rows are collapsed first so no leg is counted or closed twice. */
-export function legsFromDhanPositions(rows: Record<string, unknown>[], ltpById: Map<string, number>): ScalperLeg[] {
+export function legsFromDhanPositions(
+  rows: Record<string, unknown>[],
+  ltpById: Map<string, number>,
+  underlying: Underlying = 'NIFTY',
+): ScalperLeg[] {
   const out: ScalperLeg[] = [];
   const seen = new Set<string>();
+  const mult = pnlMultiplier(underlying, 'dhan');
   for (const r of dedupePositions(rows)) {
     const sym = String(r.tradingSymbol ?? r.trading_symbol ?? '');
-    const parsed = parseNiftyOption(sym);
+    const parsed = parseScalperContract(sym, underlying);
     if (!parsed) continue;
     const netQty = Number(r.netQty);
     if (!Number.isFinite(netQty) || netQty === 0) continue;
@@ -147,7 +169,7 @@ export function legsFromDhanPositions(rows: Record<string, unknown>[], ltpById: 
     const live = ltpById.get(securityId);
     out.push({
       id, securityId, product, symbol: sym, strike: parsed.strike, type: parsed.type,
-      netQty, avg, ltp: live !== undefined && live > 0 ? live : null, sim: false,
+      netQty, avg, ltp: live !== undefined && live > 0 ? live : null, sim: false, mult,
     });
   }
   return out;

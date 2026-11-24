@@ -12,7 +12,7 @@
 //  - No guessed spot or lot size: without a price there is no strike, without a lot size no order.
 //  - The sell "Req" is Dhan's own margin calculator (/api/options/margin), not a formula.
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp, Settings, X, Zap } from 'lucide-react';
 import type { IndexScalperFeed } from './useIndexScalperFeed';
 import type { PickedContract } from './OptionChainPanel';
@@ -113,6 +113,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
 
   const [ceLots, setCeLots] = useState(1);
   const [peLots, setPeLots] = useState(1);
+  const [futLots, setFutLots] = useState(1);
   // Manage Scrips: strike offsets in steps from the ATM pair, so the strikes follow the spot.
   const [ceOffset, setCeOffset] = useState(0);
   const [peOffset, setPeOffset] = useState(0);
@@ -132,6 +133,27 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
   const atmBase = spot !== null && spot > 0 ? Math.round(spot / STEP) * STEP : null;
   const ceStrike = strikes?.ceStrike ?? null;
   const peStrike = strikes?.peStrike ?? null;
+
+  const futContract: PickedContract | null = useMemo(() => {
+    if (!feed.future) return null;
+    return {
+      strike: 0,
+      type: 'FUT',
+      securityId: feed.future.dhanId,
+      ltp: feed.future.ltp,
+      expiry: feed.future.expiry ?? feed.expiry,
+    };
+  }, [feed.future, feed.expiry]);
+
+  const tradeFut = async (side: 'BUY' | 'SELL') => {
+    if (!futContract || clickBusyRef.current || busy) return;
+    clickBusyRef.current = true;
+    try {
+      await onTradeContract(futContract, side, futLots, productType);
+    } finally {
+      clickBusyRef.current = false;
+    }
+  };
 
   const ceId = ceStrike !== null ? feed.strikeIds.get(ceStrike)?.ceId ?? null : null;
   const peId = peStrike !== null ? feed.strikeIds.get(peStrike)?.peId ?? null : null;
@@ -207,7 +229,7 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
         <div {...handle} className="flex items-center justify-between px-3 py-2.5 border-b border-zinc-800 cursor-move">
           <div className="flex items-center gap-2 min-w-0">
             <Zap className="w-4 h-4 text-sky-400 fill-sky-400 shrink-0" />
-            <span className="text-sm font-bold text-zinc-100 tracking-tight">NIFTY 50</span>
+            <span className="text-sm font-bold text-zinc-100 tracking-tight">{feed.underlying === 'CRUDEOILM' ? 'CRUDEOILM (MCX)' : 'NIFTY 50'}</span>
             <span className={cn('text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border',
               real ? 'bg-rose-500/10 text-rose-400 border-rose-500/30' : 'bg-amber-500/10 text-amber-400 border-amber-500/30')}>{real ? `REAL · ${broker === 'kotak' ? 'Kotak' : 'Dhan'}` : 'SIM'}</span>
             <span className="text-[9px] font-bold text-amber-300" title="Buttons here send a market order at once">ONE-CLICK</span>
@@ -254,6 +276,37 @@ export default function DhanScalperWidget({ feed, real, broker, busy, topLots, o
           </div>
           {card('CE')}
           {card('PE')}
+          {feed.underlying === 'CRUDEOILM' && futContract && (
+            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-2.5 shadow-sm">
+              <div className="flex items-center justify-between py-0.5">
+                <span className="text-xs font-bold text-amber-300">
+                  FUT · {futContract.expiry ? futContract.expiry.slice(5) : ''} ({futContract.ltp ? futContract.ltp.toFixed(2) : '—'})
+                </span>
+                <span className="text-[10px] text-zinc-400">Mini 10 bbl</span>
+              </div>
+              <div className="mt-2 grid grid-cols-[1fr_100px_1fr] gap-2 items-center">
+                <button
+                  type="button"
+                  disabled={busy || !ready || !futContract.ltp}
+                  onClick={() => void tradeFut('SELL')}
+                  className={cn(tradeBtn, 'h-9 text-xs bg-rose-600 hover:bg-rose-500')}
+                >
+                  Sell FUT
+                </button>
+                <div className="flex justify-center">
+                  <Stepper lots={futLots} lotSize={lotSize} onChange={setFutLots} label="FUT" />
+                </div>
+                <button
+                  type="button"
+                  disabled={busy || !ready || !futContract.ltp}
+                  onClick={() => void tradeFut('BUY')}
+                  className={cn(tradeBtn, 'h-9 text-xs bg-sky-600 hover:bg-sky-500')}
+                >
+                  Buy FUT
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
 

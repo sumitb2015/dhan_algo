@@ -61,6 +61,23 @@ test('Kotak positions become legs keyed by symbol + product, priced only through
   assert.equal(unpriced[0].ltp, null); // never the strike, never 0
 });
 
+test('Kotak CRUDEOILM positions include FUT leg and correct mult', () => {
+  const symbols = {
+    'CRUDEOILM26DECFUT': { expiry: '2026-12-18', strike: 0, side: 'FUT' as const },
+    'CRUDEOILM26DEC6100CE': { expiry: '2026-12-15', strike: 6100, side: 'CE' as const },
+  };
+  const legs = legsFromKotakPositions([
+    { tradingSymbol: 'CRUDEOILM26DECFUT', netQty: 10, buyAvg: 6120, productType: 'NRML' },
+    { tradingSymbol: 'CRUDEOILM26DEC6100CE', netQty: -10, sellAvg: 110, productType: 'MIS' },
+  ], symbols, info => (info.side === 'FUT' ? 6130 : 105), 'CRUDEOILM');
+  assert.equal(legs.length, 2);
+  const fut = legs.find(l => l.type === 'FUT');
+  assert.ok(fut);
+  assert.equal(fut.netQty, 10);
+  assert.equal(fut.mult, 1);
+  assert.equal(fut.strike, 0);
+});
+
 test('Kotak orders read as Dhan rows for the panel; Cancel only on this page\'s orders', () => {
   const symbols = { [SYM]: { expiry: '2026-12-01', strike: 25350, side: 'PE' as const } };
   const rows = kotakOrdersAsDhan([ord('K1', 'SELL', 65, 'OPEN', 0), ord('S1', 'SELL', 65, 'COMPLETE', 65, 'NRML')], symbols, new Set(['K1']));

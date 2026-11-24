@@ -8,6 +8,7 @@ import { X } from 'lucide-react';
 import type { PickedContract } from './OptionChainPanel';
 import { useDraggable } from './useDraggable';
 import { MAX_LOTS, OPTION_TICK, orderUnits, tickError } from '@/lib/indexScalperPositions';
+import type { Underlying } from '@/lib/indexScalperInstrument';
 import { cn } from '@/lib/utils';
 
 export type TicketOrderType = 'MARKET' | 'LIMIT' | 'STOP_LOSS_MARKET' | 'STOP_LOSS';
@@ -29,7 +30,7 @@ const TYPES: { v: TicketOrderType; label: string }[] = [
 
 const inr = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
-export default function OrderTicket({ contract, liveLtp, expiry, lotSize, real, available, busy, message, onSubmit, onClose }: {
+export default function OrderTicket({ contract, liveLtp, expiry, lotSize, real, available, busy, message, onSubmit, onClose, underlying = 'NIFTY' }: {
   contract: PickedContract;
   liveLtp: number | null;
   expiry: string;
@@ -40,6 +41,7 @@ export default function OrderTicket({ contract, liveLtp, expiry, lotSize, real, 
   message: { ok: boolean; text: string } | null;
   onSubmit: (r: TicketRequest) => void;
   onClose: () => void;
+  underlying?: Underlying;
 }) {
   // Right of the chain panel and left of the chart's position chips, so neither is covered by default.
   const { pos, handle } = useDraggable({ x: Math.max(16, (typeof window === 'undefined' ? 1200 : window.innerWidth) - 800), y: 190 });
@@ -54,12 +56,13 @@ export default function OrderTicket({ contract, liveLtp, expiry, lotSize, real, 
   useEffect(() => {
     if (!contract.securityId) return;
     let dead = false;
-    fetch(`/api/index-scalper/tick?securityId=${encodeURIComponent(contract.securityId)}`)
+    const seg = underlying === 'CRUDEOILM' ? 'MCX_COMM' : 'NSE_FNO';
+    fetch(`/api/index-scalper/tick?securityId=${encodeURIComponent(contract.securityId)}&segment=${seg}`)
       .then(r => r.json())
       .then((j: { success: boolean; tick?: number | null }) => { if (!dead && j.success && typeof j.tick === 'number' && j.tick > 0) setTick(j.tick); })
       .catch(() => {});
     return () => { dead = true; };
-  }, [contract.securityId]);
+  }, [contract.securityId, underlying]);
 
   const ltp = liveLtp ?? contract.ltp;
   const lots = Number(lotsDraft);
@@ -85,12 +88,16 @@ export default function OrderTicket({ contract, liveLtp, expiry, lotSize, real, 
 
   const inputCls = 'w-full h-8 px-2 rounded bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60';
 
+  const title = contract.type === 'FUT'
+    ? `${expiry} FUT`
+    : `${expiry} ${contract.strike} ${contract.type === 'CE' ? 'CALL' : 'PUT'}`;
+
   return (
     <div style={{ left: pos.x, top: pos.y }} data-testid="order-ticket"
       className={cn('fixed z-50 w-[320px] rounded-lg border bg-zinc-900 shadow-2xl select-none', real ? 'border-rose-500/70' : 'border-zinc-700')}>
       <div {...handle} className="flex items-center justify-between gap-2 px-3 py-2 border-b border-zinc-800 cursor-move">
         <div className="min-w-0">
-          <div className="text-sm font-bold text-white truncate">NIFTY {expiry} {contract.strike} {contract.type === 'CE' ? 'CALL' : 'PUT'}</div>
+          <div className="text-sm font-bold text-white truncate">{underlying} {title}</div>
           <div className={cn('text-[10px] font-bold uppercase tracking-wider', real ? 'text-rose-400' : 'text-amber-300')}>{real ? 'REAL · Dhan' : 'SIM · paper'}</div>
         </div>
         <button type="button" aria-label="Close order ticket" onClick={onClose}

@@ -44,23 +44,27 @@ interface Body {
 
 async function placeOnce(b: Body): Promise<{ status: number; body: Record<string, unknown> }> {
   const symbol = String(b.tradingSymbol ?? '');
-  if (!symbol || kotakUnderlyingOf(symbol) !== 'NIFTY') return { status: 400, body: { success: false, error: 'tradingSymbol must be a NIFTY contract' } };
+  const underlying = kotakUnderlyingOf(symbol);
+  if (!symbol || (underlying !== 'NIFTY' && underlying !== 'CRUDEOILM')) {
+    return { status: 400, body: { success: false, error: 'tradingSymbol must be a NIFTY or CRUDEOILM contract' } };
+  }
   const product = kotakProduct(b.product);
   if (!product) return { status: 400, body: { success: false, error: `Unsupported product: ${String(b.product)} (expected INTRADAY or MARGIN)` } };
   const intent = b.intent === 'close' ? 'close' : b.intent === 'open' ? 'open' : null;
   if (!intent) return { status: 400, body: { success: false, error: 'intent must be open or close' } };
   const side = String(b.side ?? '').toUpperCase();
 
-  const contract = kotakDerivativeBySymbol(symbol, 'NIFTY');
+  const contract = kotakDerivativeBySymbol(symbol, underlying);
   if (!contract) return { status: 400, body: { success: false, error: `${symbol} is not in the Kotak instrument cache` } };
   // Above the exchange freeze quantity the exchange rejects the order: refuse here with the limit (the page slices).
   const qty = Number(b.quantity);
   if (contract.freezeQty && qty > contract.freezeQty) {
     return { status: 400, body: { success: false, error: `Quantity ${qty} exceeds the exchange freeze quantity ${contract.freezeQty} for ${symbol}: send it in parts` } };
   }
+  const exchange = contract.segment || (underlying === 'CRUDEOILM' ? 'mcx_fo' : 'nse_fo');
   const built = buildKotakOrderPayload({
     tradingsymbol: symbol, quantity: Number(b.quantity), side, orderType: String(b.orderType ?? 'MARKET'),
-    price: Number(b.price) || 0, triggerPrice: Number(b.triggerPrice) || 0, exchange: 'nse_fo', product,
+    price: Number(b.price) || 0, triggerPrice: Number(b.triggerPrice) || 0, exchange, product,
     ...(intent === 'open' ? { source: 'isx' } : {}),
   }, contract);
   if ('error' in built) return { status: 400, body: { success: false, error: built.error } };

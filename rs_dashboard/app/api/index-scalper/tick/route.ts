@@ -6,5 +6,6 @@ import { derivativeTick } from '@/lib/derivativeTick';
 export async function GET(req: NextRequest) {
   const id = req.nextUrl.searchParams.get('securityId') ?? '';
   if (!/^\d{1,12}$/.test(id)) return NextResponse.json({ success: false, error: 'securityId must be numeric' }, { status: 400 });
-  return NextResponse.json({ success: true, tick: derivativeTick(id, 'NSE_FNO') }, { headers: { 'Cache-Control': 'no-store' } });
+  const segment = req.nextUrl.searchParams.get('segment') ?? 'NSE_FNO';
+  return NextResponse.json({ success: true, tick: derivativeTick(id, segment) }, { headers: { 'Cache-Control': 'no-store' } });
 }

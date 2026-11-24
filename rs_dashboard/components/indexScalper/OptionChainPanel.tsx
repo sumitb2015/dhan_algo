@@ -10,9 +10,10 @@ import { useDraggable } from './useDraggable';
 import { cn } from '@/lib/utils';
 
 export interface PickedContract {
-  strike: number; type: 'CE' | 'PE'; securityId: string | null; ltp: number | null;
+  strike: number; type: 'CE' | 'PE' | 'FUT'; securityId: string | null; ltp: number | null;
   /** Expiry the security id belongs to; the terminal refuses an order once the chain shows another. */
   expiry: string;
+  tradingSymbol?: string | null;
 }
 
 const BUILDUP: Record<string, { label: string; cls: string }> = {
@@ -67,6 +68,17 @@ export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onCl
   };
   const pick = (strike: number, type: 'CE' | 'PE', ltp: number | undefined) => onPick(contract(strike, type, ltp));
 
+  const futContract = useMemo<PickedContract | null>(() => {
+    if (!feed.future) return null;
+    return {
+      strike: 0,
+      type: 'FUT',
+      securityId: feed.future.dhanId,
+      ltp: feed.future.ltp,
+      expiry: feed.future.expiry ?? feed.expiry,
+    };
+  }, [feed.future, feed.expiry]);
+
   // B / S on a row, shown on hover (and to the keyboard on focus). A snapshot chain is not live: nothing trades on it.
   const tradeButtons = (strike: number, type: 'CE' | 'PE', ltp: number | undefined) => {
     const what = `${strike} ${type}`;
@@ -120,6 +132,50 @@ export default function OptionChainPanel({ feed, onPick, onTrade, oneClick, onCl
             </tr>
           </thead>
           <tbody>
+            {futContract && (
+              <tr className="group border-b border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 font-semibold text-xs">
+                <td className="px-2 py-1 text-amber-300 font-bold" colSpan={4}>
+                  FUT · {feed.underlying} {futContract.expiry ? futContract.expiry.slice(5) : ''}
+                </td>
+                <td className="px-1 text-center" colSpan={3}>
+                  <div className="flex items-center justify-center gap-2">
+                    <span className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                      <button
+                        type="button"
+                        disabled={snapshot}
+                        onClick={() => onTrade(futContract, 'BUY')}
+                        aria-label="Buy Future"
+                        title="Buy Future"
+                        className="w-5 h-5 rounded text-[10px] font-bold text-oncolor bg-sky-600 hover:bg-sky-500 disabled:opacity-40"
+                      >
+                        B
+                      </button>
+                      <button
+                        type="button"
+                        disabled={snapshot}
+                        onClick={() => onTrade(futContract, 'SELL')}
+                        aria-label="Sell Future"
+                        title="Sell Future"
+                        className="w-5 h-5 rounded text-[10px] font-bold text-oncolor bg-rose-600 hover:bg-rose-500 disabled:opacity-40"
+                      >
+                        S
+                      </button>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onPick(futContract)}
+                      aria-label="Trade Future"
+                      className="px-2 py-0.5 rounded font-bold text-amber-300 hover:bg-amber-600 hover:text-oncolor tabular-nums"
+                    >
+                      {futContract.ltp ? futContract.ltp.toFixed(2) : '—'}
+                    </button>
+                  </div>
+                </td>
+                <td className="px-2 text-zinc-400 text-right" colSpan={4}>
+                  Future Contract
+                </td>
+              </tr>
+            )}
             {rows.length === 0 && (
               <tr><td colSpan={11} className="px-3 py-8 text-center text-zinc-500">{!feed.expiry ? 'Loading expiries…' : feed.snapshotError ? `No live ticks, and the chain snapshot failed: ${feed.snapshotError}` : 'Waiting for live ticks…'}</td></tr>
             )}

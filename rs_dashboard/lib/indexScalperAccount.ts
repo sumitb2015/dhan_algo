@@ -1,7 +1,7 @@
 // Pure mappers for /index-scalper's bottom account panel (Dhan-style: Positions, Closed Positions, Orders, Portfolio,
 // Funds). Raw Dhan payloads in, display rows out. No React, no fetch.
 
-import { scaleBrokerPnl } from './positionPnl.ts';
+import { scaleBrokerPnl, contractMultiplier } from './positionPnl.ts';
 import { positionProduct } from './positionProduct.ts';
 
 type Row = Record<string, unknown>;
@@ -148,7 +148,8 @@ export function positionRows(rows: Row[], prices: Map<string, number> | ((row: R
     let ltp: number | null = null;
     if (netQty !== 0 && live !== undefined && live > 0 && avg !== null && avg > 0) {
       ltp = live;
-      unrealized = (live - avg) * netQty;
+      const mult = contractMultiplier(r);
+      unrealized = (live - avg) * netQty * mult;
     }
     const pnl = realized === null && unrealized === null ? null : (realized ?? 0) + (unrealized ?? 0);
     return {
