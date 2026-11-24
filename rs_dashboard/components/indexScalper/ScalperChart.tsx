@@ -9,11 +9,12 @@ import {
   createChart, CandlestickSeries, LineSeries, HistogramSeries, ColorType, CrosshairMode, LineStyle, PriceScaleMode,
   type IChartApi, type ISeriesApi, type IPriceLine, type UTCTimestamp, type SeriesType, type MouseEventParams, type Time,
 } from 'lightweight-charts';
-import { Eye, EyeOff, Settings2, X, Plus, ArrowDown, ArrowUp, Bell, FileText, Minus } from 'lucide-react';
+import { Eye, EyeOff, Settings2, X, Plus, ArrowDown, ArrowUp, ArrowUpDown, Bell, FileText, Minus } from 'lucide-react';
 import { useChartChrome } from '@/lib/chartTheme';
 import { computeIndicator, indicatorLabel, tailUnchanged, type Bar, type IndicatorInstance, pointColor, flipsAtLast } from '@/lib/indexScalperIndicators';
 import { fmtRupees, legAnchor, legPnl, type ScalperLeg } from '@/lib/indexScalperPositions';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
+import { displayLotUnits, type Underlying } from '@/lib/indexScalperInstrument';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 
@@ -67,6 +68,12 @@ interface Props {
   onPlaceLimitOrder?: (req: { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' }) => void;
   onOpenTicket?: (req: { price: number; lots: number; orderType: 'LIMIT' }) => void;
   onAlert?: (symbol: string, price: number) => void;
+  simBrackets?: Record<string, { tp?: number; sl?: number }>;
+  onSetBracket?: (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => void;
+  onCancelBracket?: (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => void;
+  onReversePosition?: (leg: ScalperLeg) => void;
+  underlying?: Underlying;
+  feedLotSize?: number | null;
 }
 
 interface Hover { o: number; h: number; l: number; c: number; t: number }
@@ -86,6 +93,7 @@ export default function ScalperChart(props: Props) {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, legs, entrySpots,
     onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
+    simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize,
   } = props;
   const chrome = useChromeStable();
   const boxRef = useRef<HTMLDivElement>(null);
@@ -97,6 +105,8 @@ export default function ScalperChart(props: Props) {
   const prevRef = useRef<{ n: number; first: number; tail: Bar[]; flip: boolean } | null>(null);
   const legLinesRef = useRef<Map<string, IPriceLine>>(new Map());
   const orderLinesRef = useRef<Map<string, IPriceLine>>(new Map());
+  const bracketLinesRef = useRef<Map<string, IPriceLine>>(new Map());
+  const dragPriceLineRef = useRef<IPriceLine | null>(null);
   const drawLinesRef = useRef<IPriceLine[]>([]);
   const drawSeriesRef = useRef<ISeriesApi<'Line'>[]>([]);
   const toolRef = useRef<DrawTool>(tool);
@@ -108,6 +118,16 @@ export default function ScalperChart(props: Props) {
   const [chipTops, setChipTops] = useState<Record<string, number>>({});
   const [hoverScale, setHoverScale] = useState<{ y: number; price: number } | null>(null);
   const [menu, setMenu] = useState<{ y: number; price: number } | null>(null);
+  const [dragState, setDragState] = useState<{
+    kind: 'TP' | 'SL';
+    leg: ScalperLeg;
+    anchorLevel: number;
+    isLong: boolean;
+    lots: number;
+    totalUnits: number;
+    currentPrice: number;
+    y: number;
+  } | null>(null);
 
   const cName = contractName ?? symbolLabel.split(' · ')[0];
 
@@ -181,6 +201,12 @@ export default function ScalperChart(props: Props) {
       chart.remove();
       chartRef.current = null; candleRef.current = null;
       indSeriesRef.current = []; legLines.clear();
+      for (const [, l] of bracketLinesRef.current) { try { candles.removePriceLine(l); } catch { /* gone */ } }
+      bracketLinesRef.current.clear();
+      if (dragPriceLineRef.current) {
+        try { candles.removePriceLine(dragPriceLineRef.current); } catch { /* gone */ }
+        dragPriceLineRef.current = null;
+      }
       drawLinesRef.current = []; drawSeriesRef.current = [];
       sigRef.current = ''; prevRef.current = null;
     };
@@ -348,7 +374,7 @@ export default function ScalperChart(props: Props) {
     try { chart.timeScale().setVisibleRange({ from: (end - focus.seconds) as UTCTimestamp, to: (end + 20 * 60) as UTCTimestamp }); } catch { /* range outside data */ }
   }, [focus, firstT]);
 
-  // ── position lines + chips ─────────────────────────────────────────
+  // ── position lines ────────────────────────────────────────────────
   const placed = useMemo(() => legs.map(leg => ({ leg, anchor: legAnchor(leg, entrySpots[leg.securityId]), pnl: legPnl(leg) })), [legs, entrySpots]);
 
   useEffect(() => {
@@ -358,21 +384,204 @@ export default function ScalperChart(props: Props) {
     const seen = new Set<string>();
     for (const p of placed) {
       seen.add(p.leg.id);
-      const color = p.pnl === null ? chrome.textMuted : p.pnl >= 0 ? UP : DOWN;
-      const opts = { price: p.anchor.level, color, lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${p.leg.type} ${p.leg.strike}` };
+      // Entry line in crisp sky blue matching the reference screenshot
+      const color = '#0284c7';
+      const opts = { price: p.anchor.level, color, lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${p.leg.type} ${p.leg.strike || ''}`.trim() };
       const ex = lines.get(p.leg.id);
       if (ex) ex.applyOptions(opts); else lines.set(p.leg.id, candles.createPriceLine(opts));
     }
     for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
-  }, [placed, chrome]);
+  }, [placed]);
 
-  // ── open order lines ────────────────────────────────────────────────
+  // ── active brackets (TP & SL) resolution ────────────────────────────
+  const activeBrackets = useMemo(() => {
+    const res: Record<string, {
+      tp?: { price: number; orderId?: string; isSim: boolean };
+      sl?: { price: number; orderId?: string; isSim: boolean };
+    }> = {};
+
+    for (const p of placed) {
+      const legId = p.leg.id;
+      const simB = simBrackets?.[legId];
+      let tp: { price: number; orderId?: string; isSim: boolean } | undefined;
+      let sl: { price: number; orderId?: string; isSim: boolean } | undefined;
+
+      if (simB?.tp && simB.tp > 0) tp = { price: simB.tp, isSim: true };
+      if (simB?.sl && simB.sl > 0) sl = { price: simB.sl, isSim: true };
+
+      if (!tp || !sl) {
+        const isLong = p.leg.netQty > 0;
+        const oppSide = isLong ? 'SELL' : 'BUY';
+        for (const ord of openOrders) {
+          if (ord.side !== oppSide) continue;
+          const sName = (p.leg.symbol || '').toUpperCase();
+          const oName = (ord.symbol || '').toUpperCase();
+          const matchSym = (sName && (oName.includes(sName) || sName.includes(oName))) ||
+            (p.leg.type === 'FUT' && (oName.includes('FUT') || oName.includes('CRUDE')));
+          if (!matchSym && p.leg.strike > 0 && !oName.includes(String(p.leg.strike))) continue;
+
+          if (!tp && ord.orderType === 'LIMIT' && (ord.price ?? 0) > 0) {
+            tp = { price: ord.price!, orderId: ord.id, isSim: false };
+          } else if (!sl && (ord.orderType === 'STOP_LOSS_MARKET' || ord.orderType === 'STOP_LOSS') && (ord.trigger ?? ord.price ?? 0) > 0) {
+            sl = { price: (ord.trigger ?? ord.price)!, orderId: ord.id, isSim: false };
+          }
+        }
+      }
+
+      res[legId] = { tp, sl };
+    }
+    return res;
+  }, [placed, simBrackets, openOrders]);
+
+  // ── bracket lines (TP in emerald, SL in rose) ──────────────────────
+  useEffect(() => {
+    const candles = candleRef.current;
+    if (!candles) return;
+    const lines = bracketLinesRef.current;
+    const seen = new Set<string>();
+
+    for (const p of placed) {
+      const b = activeBrackets[p.leg.id];
+      if (!b) continue;
+      if (b.tp) {
+        const key = `tp_${p.leg.id}`;
+        seen.add(key);
+        const opts = { price: b.tp.price, color: '#10b981', lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'TP' };
+        const ex = lines.get(key);
+        if (ex) ex.applyOptions(opts); else lines.set(key, candles.createPriceLine(opts));
+      }
+      if (b.sl) {
+        const key = `sl_${p.leg.id}`;
+        seen.add(key);
+        const opts = { price: b.sl.price, color: '#ef4444', lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: 'SL' };
+        const ex = lines.get(key);
+        if (ex) ex.applyOptions(opts); else lines.set(key, candles.createPriceLine(opts));
+      }
+    }
+
+    for (const [key, l] of lines) {
+      if (!seen.has(key)) {
+        try { candles.removePriceLine(l); } catch { /* gone */ }
+        lines.delete(key);
+      }
+    }
+  }, [placed, activeBrackets]);
+
+  // ── dragging logic for TP & SL ──────────────────────────────────────
+  const tickSize = underlying === 'CRUDEOILM' ? 1.0 : 0.05;
+
+  const startDrag = useCallback((
+    kind: 'TP' | 'SL',
+    leg: ScalperLeg,
+    anchorLevel: number,
+    isLong: boolean,
+    lots: number,
+    totalUnits: number,
+    initialPrice?: number
+  ) => {
+    const candles = candleRef.current;
+    if (!candles) return;
+    const startPx = initialPrice ?? (
+      kind === 'TP'
+        ? (isLong ? anchorLevel * 1.01 : anchorLevel * 0.99)
+        : (isLong ? anchorLevel * 0.99 : anchorLevel * 1.01)
+    );
+    const snapped = Math.round(startPx / tickSize) * tickSize;
+    const px = Number(snapped.toFixed(2));
+    const y = candles.priceToCoordinate(px) ?? 200;
+    setDragState({
+      kind,
+      leg,
+      anchorLevel,
+      isLong,
+      lots,
+      totalUnits,
+      currentPrice: px,
+      y: Number(y),
+    });
+  }, [tickSize]);
+
+  useEffect(() => {
+    if (!dragState) {
+      if (dragPriceLineRef.current && candleRef.current) {
+        try { candleRef.current.removePriceLine(dragPriceLineRef.current); } catch { /* gone */ }
+        dragPriceLineRef.current = null;
+      }
+      return;
+    }
+
+    const box = boxRef.current;
+    const candles = candleRef.current;
+    if (!box || !candles) return;
+
+    const color = dragState.kind === 'TP' ? '#10b981' : '#ef4444';
+    if (!dragPriceLineRef.current) {
+      dragPriceLineRef.current = candles.createPriceLine({
+        price: dragState.currentPrice,
+        color,
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: dragState.kind,
+      });
+    } else {
+      dragPriceLineRef.current.applyOptions({
+        price: dragState.currentPrice,
+        color,
+        title: dragState.kind,
+      });
+    }
+
+    const onMouseMove = (e: MouseEvent) => {
+      const rect = box.getBoundingClientRect();
+      const y = e.clientY - rect.top;
+      const rawPrice = candles.coordinateToPrice(y);
+      if (rawPrice !== null && rawPrice > 0) {
+        const snapped = Math.round(rawPrice / tickSize) * tickSize;
+        const finalPx = Number(snapped.toFixed(2));
+        setDragState(prev => prev ? { ...prev, currentPrice: finalPx, y } : null);
+        dragPriceLineRef.current?.applyOptions({ price: finalPx });
+      }
+    };
+
+    const onMouseUp = () => {
+      const finalPrice = dragState.currentPrice;
+      const leg = dragState.leg;
+      const kind = dragState.kind;
+      setDragState(null);
+      if (finalPrice > 0) {
+        onSetBracket?.({ leg, kind, price: finalPrice });
+      }
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [dragState, onSetBracket, tickSize]);
+
+  // ── open order lines (excluding matched brackets) ───────────────────
+  const bracketOrderIds = useMemo(() => {
+    const s = new Set<string>();
+    for (const b of Object.values(activeBrackets)) {
+      if (b.tp?.orderId) s.add(b.tp.orderId);
+      if (b.sl?.orderId) s.add(b.sl.orderId);
+    }
+    return s;
+  }, [activeBrackets]);
+
+  const regularOrders = useMemo(() => {
+    return openOrders.filter(o => !bracketOrderIds.has(o.id));
+  }, [openOrders, bracketOrderIds]);
+
   useEffect(() => {
     const candles = candleRef.current;
     if (!candles) return;
     const lines = orderLinesRef.current;
     const seen = new Set<string>();
-    for (const ord of openOrders) {
+    for (const ord of regularOrders) {
       const p = ord.price ?? ord.trigger;
       if (!p) continue;
       seen.add(ord.id);
@@ -382,21 +591,29 @@ export default function ScalperChart(props: Props) {
       if (ex) ex.applyOptions(opts); else lines.set(ord.id, candles.createPriceLine(opts));
     }
     for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
-  }, [openOrders]);
+  }, [regularOrders]);
 
   // Chip y-positions follow the price scale (zoom / pan / autoscale move it with no event), so re-read them on a short timer.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (placed.length === 0 && openOrders.length === 0) { setChipTops({}); return; }
+    const candles = candleRef.current;
+    if (!candles) return;
     const tick = () => {
-      const candles = candleRef.current;
-      if (!candles) return;
       const raw: { id: string; y: number }[] = [];
       for (const p of placed) {
         const y = candles.priceToCoordinate(p.anchor.level);
         if (y !== null) raw.push({ id: p.leg.id, y: Number(y) });
+
+        const b = activeBrackets[p.leg.id];
+        if (b?.tp) {
+          const tpY = candles.priceToCoordinate(b.tp.price);
+          if (tpY !== null) raw.push({ id: `tp_${p.leg.id}`, y: Number(tpY) });
+        }
+        if (b?.sl) {
+          const slY = candles.priceToCoordinate(b.sl.price);
+          if (slY !== null) raw.push({ id: `sl_${p.leg.id}`, y: Number(slY) });
+        }
       }
-      for (const ord of openOrders) {
+      for (const ord of regularOrders) {
         const p = ord.price ?? ord.trigger;
         if (p) {
           const y = candles.priceToCoordinate(p);
@@ -416,7 +633,7 @@ export default function ScalperChart(props: Props) {
     tick();
     const t = setInterval(tick, 150);
     return () => clearInterval(t);
-  }, [placed, openOrders]);
+  }, [placed, activeBrackets, regularOrders]);
 
   // ── price scale hover '+' button ────────────────────────────────────
   useEffect(() => {
@@ -691,8 +908,8 @@ export default function ScalperChart(props: Props) {
         </div>
       )}
 
-      {/* working order chips on chart */}
-      {openOrders.map(ord => {
+      {/* working order chips on chart (non-bracket orders) */}
+      {regularOrders.map(ord => {
         const p = ord.price ?? ord.trigger;
         if (!p) return null;
         const top = chipTops[`ord_${ord.id}`];
@@ -716,26 +933,234 @@ export default function ScalperChart(props: Props) {
         );
       })}
 
-      {/* position chips: one per open option leg, at the index level it belongs to */}
+      {/* Target (TP) and Stop Loss (SL) chips matching reference */}
+      {placed.map(p => {
+        const b = activeBrackets[p.leg.id];
+        if (!b) return null;
+        const isLong = p.leg.netQty > 0;
+        const lotSize = displayLotUnits(underlying, feedLotSize);
+        const lots = underlying === 'CRUDEOILM'
+          ? Math.abs(p.leg.netQty)
+          : Math.max(1, Math.round(Math.abs(p.leg.netQty) / lotSize));
+        const totalUnits = underlying === 'CRUDEOILM' ? lots * 10 : lots * lotSize;
+
+        const tpTop = b.tp ? chipTops[`tp_${p.leg.id}`] : undefined;
+        const slTop = b.sl ? chipTops[`sl_${p.leg.id}`] : undefined;
+
+        const tpPtDiff = b.tp ? (isLong ? (b.tp.price - p.anchor.level) : (p.anchor.level - b.tp.price)) : 0;
+        const tpPct = b.tp && p.anchor.level > 0 ? (tpPtDiff / p.anchor.level) * 100 : 0;
+        const tpPnl = tpPtDiff * totalUnits;
+
+        const slPtDiff = b.sl ? (isLong ? (b.sl.price - p.anchor.level) : (p.anchor.level - b.sl.price)) : 0;
+        const slPct = b.sl && p.anchor.level > 0 ? (slPtDiff / p.anchor.level) * 100 : 0;
+        const slPnl = slPtDiff * totalUnits;
+
+        return (
+          <div key={`brackets_${p.leg.id}`}>
+            {/* Target Profit (TP) Chip */}
+            {b.tp && tpTop !== undefined && (
+              <div
+                data-testid="tp-chip"
+                style={{ top: tpTop - 11 }}
+                className="absolute right-[84px] z-[56] flex items-center shadow-lg font-mono text-[11px]"
+              >
+                <div
+                  title="Drag to adjust Target Profit"
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    startDrag('TP', p.leg, p.anchor.level, isLong, lots, totalUnits, b.tp!.price);
+                  }}
+                  className="h-[22px] px-2 rounded-l flex items-center bg-emerald-950/90 border border-emerald-500/80 text-emerald-400 font-bold cursor-grab active:cursor-grabbing select-none"
+                >
+                  TP {tpPnl >= 0 ? '+' : ''}{fmt(Math.round(tpPnl))} ({tpPct >= 0 ? '+' : ''}{tpPct.toFixed(2)}%)
+                </div>
+                <div className="h-[22px] px-2 rounded-r flex items-center gap-1.5 bg-zinc-900 border border-emerald-500/60 border-l-0 text-zinc-200">
+                  <span>{lots} {isLong ? 'Sell' : 'Buy'} Limit</span>
+                  <button
+                    type="button"
+                    title="Cancel Target"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCancelBracket?.({ legId: p.leg.id, kind: 'TP', orderId: b.tp!.orderId });
+                    }}
+                    className="h-[16px] w-[16px] rounded flex items-center justify-center text-zinc-400 hover:text-white hover:bg-rose-600 transition-colors"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Stop Loss (SL) Chip */}
+            {b.sl && slTop !== undefined && (
+              <div
+                data-testid="sl-chip"
+                style={{ top: slTop - 11 }}
+                className="absolute right-[84px] z-[56] flex items-center shadow-lg font-mono text-[11px]"
+              >
+                <div
+                  title="Drag to adjust Stop Loss"
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    startDrag('SL', p.leg, p.anchor.level, isLong, lots, totalUnits, b.sl!.price);
+                  }}
+                  className="h-[22px] px-2 rounded-l flex items-center bg-rose-950/90 border border-rose-500/80 text-rose-400 font-bold cursor-grab active:cursor-grabbing select-none"
+                >
+                  SL {slPnl >= 0 ? '' : ''}{fmt(Math.round(slPnl))} ({slPct >= 0 ? '+' : ''}{slPct.toFixed(2)}%)
+                </div>
+                <div className="h-[22px] px-2 rounded-r flex items-center gap-1.5 bg-zinc-900 border border-rose-500/60 border-l-0 text-zinc-200">
+                  <span>{lots} {isLong ? 'Sell' : 'Buy'} Stop Market</span>
+                  <button
+                    type="button"
+                    title="Cancel Stop Loss"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCancelBracket?.({ legId: p.leg.id, kind: 'SL', orderId: b.sl!.orderId });
+                    }}
+                    className="h-[16px] w-[16px] rounded flex items-center justify-center text-zinc-400 hover:text-white hover:bg-rose-600 transition-colors"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Floating Ghost Chip while Dragging */}
+      {dragState && (() => {
+        const dragPtDiff = dragState.isLong
+          ? (dragState.currentPrice - dragState.anchorLevel)
+          : (dragState.anchorLevel - dragState.currentPrice);
+        const dragPct = dragState.anchorLevel > 0 ? (dragPtDiff / dragState.anchorLevel) * 100 : 0;
+        const dragPnl = dragPtDiff * dragState.totalUnits;
+        return (
+          <div
+            data-testid="drag-ghost-chip"
+            style={{ top: dragState.y - 11 }}
+            className="absolute right-[84px] z-[60] flex items-center shadow-2xl font-mono text-[11px] pointer-events-none"
+          >
+            {dragState.kind === 'TP' ? (
+              <>
+                <div className="h-[22px] px-2 rounded-l flex items-center bg-emerald-950/95 border border-emerald-400 text-emerald-300 font-bold">
+                  TP {dragPnl >= 0 ? '+' : ''}{fmt(Math.round(dragPnl))} ({dragPct >= 0 ? '+' : ''}{dragPct.toFixed(2)}%)
+                </div>
+                <div className="h-[22px] px-2 rounded-r flex items-center bg-zinc-900 border border-emerald-500/80 border-l-0 text-zinc-100">
+                  {dragState.lots} {dragState.isLong ? 'Sell' : 'Buy'} Limit
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="h-[22px] px-2 rounded-l flex items-center bg-rose-950/95 border border-rose-400 text-rose-300 font-bold">
+                  SL {dragPnl >= 0 ? '' : ''}{fmt(Math.round(dragPnl))} ({dragPct >= 0 ? '+' : ''}{dragPct.toFixed(2)}%)
+                </div>
+                <div className="h-[22px] px-2 rounded-r flex items-center bg-zinc-900 border border-rose-500/80 border-l-0 text-zinc-100">
+                  {dragState.lots} {dragState.isLong ? 'Sell' : 'Buy'} Stop Market
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* Position chips: one per open option/fut leg, at entry level with controls */}
       {placed.map(p => {
         const top = chipTops[p.leg.id];
         if (top === undefined) return null;
-        const lots = Math.abs(p.leg.netQty);
-        const pnlCls = p.pnl === null ? 'text-zinc-400' : p.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
+        const isLong = p.leg.netQty > 0;
+        const lotSize = displayLotUnits(underlying, feedLotSize);
+        const lots = underlying === 'CRUDEOILM'
+          ? Math.abs(p.leg.netQty)
+          : Math.max(1, Math.round(Math.abs(p.leg.netQty) / lotSize));
+        const totalUnits = underlying === 'CRUDEOILM' ? lots * 10 : lots * lotSize;
+
+        const curSpot = (last?.c && last.c > 0) ? last.c : p.anchor.level;
+        const curPtDiff = isLong ? (curSpot - p.anchor.level) : (p.anchor.level - curSpot);
+        const curPct = p.anchor.level > 0 ? (curPtDiff / p.anchor.level) * 100 : 0;
+        const curPnl = p.pnl !== null ? p.pnl : (curPtDiff * totalUnits);
+        const pnlCls = curPnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
+
+        const b = activeBrackets[p.leg.id];
+
         return (
-          <div key={p.leg.id} data-testid="position-chip" style={{ top: top - 11 }}
-            className={cn('absolute right-[84px] z-[55] flex items-center gap-2 pl-2 pr-1 h-[22px] rounded border text-[11px] font-mono bg-zinc-900 shadow',
-              p.pnl === null ? 'border-zinc-600' : p.pnl >= 0 ? 'border-emerald-500/60' : 'border-rose-500/60')}>
-            <span className={cn('font-bold', p.leg.netQty > 0 ? 'text-sky-400' : 'text-amber-400')}>{p.leg.netQty > 0 ? 'B' : 'S'}</span>
-            <span className="text-zinc-100 font-bold">{p.leg.type} {p.leg.strike}</span>
-            <span className="text-zinc-400">{lots}</span>
-            <span className="text-zinc-400">@ {fmt(p.leg.avg)}</span>
-            <span className={cn('font-bold', pnlCls)}>{fmtRupees(p.pnl)}</span>
-            {p.leg.sim && <span className="text-[9px] font-bold text-amber-300 px-1 rounded bg-amber-500/10 border border-amber-500/20">SIM</span>}
-            {p.anchor.kind === 'strike' && <span className="text-[9px] text-zinc-500" title="Drawn at the strike: this position was not opened from this page">strike</span>}
-            <button type="button" aria-label={`Exit ${p.leg.type} ${p.leg.strike}`} disabled={exitingId === p.leg.id} onClick={() => onExitLeg(p.leg)}
-              className="h-[18px] px-1.5 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-[10px] font-bold disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400">
-              {exitingId === p.leg.id ? '…' : 'Exit'}
+          <div
+            key={p.leg.id}
+            data-testid="position-chip"
+            style={{ top: top - 11 }}
+            className="absolute right-[84px] z-[55] flex items-center gap-1.5 px-1.5 h-[24px] rounded border border-sky-500/70 bg-zinc-900 shadow-md font-mono text-[11px]"
+          >
+            {/* TP draggable button */}
+            <button
+              type="button"
+              title="Drag to set/adjust Target Profit"
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                startDrag('TP', p.leg, p.anchor.level, isLong, lots, totalUnits, b?.tp?.price);
+              }}
+              className="h-[18px] px-1.5 rounded bg-zinc-800 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/50 text-[10px] font-bold cursor-grab active:cursor-grabbing transition-colors"
+            >
+              TP
+            </button>
+
+            {/* SL draggable button */}
+            <button
+              type="button"
+              title="Drag to set/adjust Stop Loss"
+              onMouseDown={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                startDrag('SL', p.leg, p.anchor.level, isLong, lots, totalUnits, b?.sl?.price);
+              }}
+              className="h-[18px] px-1.5 rounded bg-zinc-800 hover:bg-rose-600/30 text-rose-400 border border-rose-500/50 text-[10px] font-bold cursor-grab active:cursor-grabbing transition-colors"
+            >
+              SL
+            </button>
+
+            {/* Reverse position button */}
+            <button
+              type="button"
+              title="Reverse position (close current and open opposite)"
+              onClick={(e) => {
+                e.stopPropagation();
+                onReversePosition?.(p.leg);
+              }}
+              className="h-[18px] w-[18px] flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white border border-zinc-700 transition-colors"
+            >
+              <ArrowUpDown className="w-2.5 h-2.5" />
+            </button>
+
+            {/* Lots quantity */}
+            <span className="h-[18px] px-1.5 flex items-center rounded bg-zinc-800/80 text-zinc-200 border border-zinc-700 text-[10px] font-semibold">
+              {lots}
+            </span>
+
+            {/* Live P&L INR (+0.00%) */}
+            <span className={cn('h-[18px] px-1 flex items-center text-[10px] font-semibold', pnlCls)}>
+              {curPnl >= 0 ? '+' : ''}{Math.round(curPnl)} INR ({curPct >= 0 ? '+' : ''}{curPct.toFixed(2)}%)
+            </span>
+
+            {p.leg.sim && (
+              <span className="text-[9px] font-bold text-amber-300 px-1 rounded bg-amber-500/10 border border-amber-500/20">
+                SIM
+              </span>
+            )}
+
+            {/* Exit button */}
+            <button
+              type="button"
+              title={`Exit ${p.leg.type} ${p.leg.strike || ''}`}
+              disabled={exitingId === p.leg.id}
+              onClick={(e) => {
+                e.stopPropagation();
+                onExitLeg(p.leg);
+              }}
+              className="h-[18px] w-[18px] flex items-center justify-center rounded bg-zinc-800 hover:bg-rose-600 text-zinc-400 hover:text-white border border-zinc-700 text-[10px] transition-colors disabled:opacity-50"
+            >
+              <X className="w-3 h-3" />
             </button>
           </div>
         );

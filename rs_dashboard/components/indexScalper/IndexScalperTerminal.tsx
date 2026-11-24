@@ -135,6 +135,7 @@ export default function IndexScalperTerminal() {
   const [armOpen, setArmOpen] = useState(false);
   const [sim, setSim] = useState<SimState>({ day: istDayKey(), legs: {}, realized: 0 });
   const [simReady, setSimReady] = useState(false);
+  const [simBrackets, setSimBrackets] = useState<Record<string, { tp?: number; sl?: number }>>({});
   const [entrySpots, setEntrySpots] = useState<Record<string, number>>({});
   const [realRows, setRealRows] = useState<Record<string, unknown>[]>([]);
   const [posErr, setPosErr] = useState<string | null>(null);
@@ -839,6 +840,170 @@ export default function IndexScalperTerminal() {
     }
   }, [ticketBusy, chartContract, placeContract, flash, loadOrders, loadPositions]);
 
+  // In SIM mode: auto-execute brackets when market price crosses TP or SL
+  useEffect(() => {
+    if (real) return;
+    for (const leg of legs) {
+      if (!leg.sim) continue;
+      const b = simBrackets[leg.id];
+      if (!b) continue;
+      const cur = leg.ltp ?? feed.spot ?? 0;
+      if (cur <= 0) continue;
+      const isLong = leg.netQty > 0;
+      if (b.tp !== undefined && b.tp > 0) {
+        const hit = isLong ? cur >= b.tp : cur <= b.tp;
+        if (hit) {
+          setSimBrackets(prev => {
+            const next = { ...prev };
+            delete next[leg.id];
+            return next;
+          });
+          exitSimLeg(leg);
+          flash({ ok: true, text: `Target hit! SIM ${leg.symbol || leg.strike} closed @ ${cur.toFixed(2)}` });
+          break;
+        }
+      }
+      if (b.sl !== undefined && b.sl > 0) {
+        const hit = isLong ? cur <= b.sl : cur >= b.sl;
+        if (hit) {
+          setSimBrackets(prev => {
+            const next = { ...prev };
+            delete next[leg.id];
+            return next;
+          });
+          exitSimLeg(leg);
+          flash({ ok: false, text: `Stop loss hit! SIM ${leg.symbol || leg.strike} closed @ ${cur.toFixed(2)}` });
+          break;
+        }
+      }
+    }
+  }, [real, legs, simBrackets, feed.spot, exitSimLeg, flash]);
+
+  const onSetBracket = useCallback(async (req: { leg: ScalperLeg; kind: 'TP' | 'SL'; price: number }) => {
+    if (!real || req.leg.sim) {
+      setSimBrackets(prev => ({
+        ...prev,
+        [req.leg.id]: {
+          ...prev[req.leg.id],
+          [req.kind === 'TP' ? 'tp' : 'sl']: req.price,
+        },
+      }));
+      flash({ ok: true, text: `SIM ${req.kind} set at ₹${req.price.toFixed(2)}` });
+      return;
+    }
+
+    const isLong = req.leg.netQty > 0;
+    const oppSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
+    const targetType: TicketOrderType = req.kind === 'TP' ? 'LIMIT' : 'STOP_LOSS_MARKET';
+
+    // Cancel any existing bracket order of this kind for this instrument
+    const existing = chartOpenOrders.find(o =>
+      o.side === oppSide &&
+      (req.kind === 'TP' ? o.orderType === 'LIMIT' : (o.orderType === 'STOP_LOSS_MARKET' || o.orderType === 'STOP_LOSS'))
+    );
+    if (existing) {
+      await cancelOrder(existing.id);
+    }
+
+    const c: PickedContract = {
+      strike: req.leg.strike,
+      type: req.leg.type,
+      expiry: feed.expiry ?? '',
+      securityId: req.leg.securityId,
+      tradingSymbol: req.leg.symbol,
+      ltp: req.leg.ltp ?? req.price,
+    };
+
+    const lotSize = displayLotUnits(underlying, feed.lotSize);
+    const lots = underlying === 'CRUDEOILM'
+      ? Math.abs(req.leg.netQty)
+      : Math.max(1, Math.round(Math.abs(req.leg.netQty) / lotSize));
+
+    const out = await placeContract({
+      contract: c,
+      side: oppSide,
+      orderType: targetType,
+      price: req.kind === 'TP' ? req.price : null,
+      trigger: req.kind === 'SL' ? req.price : null,
+      product: (req.leg.product as 'INTRADAY' | 'MARGIN') || 'INTRADAY',
+      lots,
+    });
+    flash({ ok: out.ok, text: out.text });
+    void loadOrders();
+  }, [real, chartOpenOrders, cancelOrder, feed.expiry, feed.lotSize, underlying, placeContract, flash, loadOrders]);
+
+  const onCancelBracket = useCallback(async (req: { legId: string; kind: 'TP' | 'SL'; orderId?: string }) => {
+    if (req.orderId) {
+      await cancelOrder(req.orderId);
+    }
+    setSimBrackets(prev => {
+      if (!prev[req.legId]) return prev;
+      const next = { ...prev, [req.legId]: { ...prev[req.legId] } };
+      delete next[req.legId][req.kind === 'TP' ? 'tp' : 'sl'];
+      return next;
+    });
+  }, [cancelOrder]);
+
+  const onReversePosition = useCallback(async (leg: ScalperLeg) => {
+    if (ticketBusy || exitingId) return;
+    const isLong = leg.netQty > 0;
+    const revSide: 'BUY' | 'SELL' = isLong ? 'SELL' : 'BUY';
+    const lotSize = displayLotUnits(underlying, feed.lotSize);
+    const curLots = underlying === 'CRUDEOILM'
+      ? Math.abs(leg.netQty)
+      : Math.max(1, Math.round(Math.abs(leg.netQty) / lotSize));
+    const revLots = curLots * 2;
+
+    // Clear any active brackets for this leg
+    setSimBrackets(prev => {
+      const next = { ...prev };
+      delete next[leg.id];
+      return next;
+    });
+
+    const c: PickedContract = {
+      strike: leg.strike,
+      type: leg.type,
+      expiry: feed.expiry ?? '',
+      securityId: leg.securityId,
+      tradingSymbol: leg.symbol,
+      ltp: leg.ltp ?? leg.avg,
+    };
+
+    if (!real || leg.sim) {
+      exitSimLeg(leg);
+      const out = await placeContract({
+        contract: c,
+        side: revSide,
+        orderType: 'MARKET',
+        price: null,
+        trigger: null,
+        product: 'INTRADAY',
+        lots: curLots,
+      });
+      flash({ ok: out.ok, text: `Reversed position to ${revSide} ${curLots} lot${curLots > 1 ? 's' : ''}` });
+      return;
+    }
+
+    setTicketBusy(true);
+    try {
+      const out = await placeContract({
+        contract: c,
+        side: revSide,
+        orderType: 'MARKET',
+        price: null,
+        trigger: null,
+        product: (leg.product as 'INTRADAY' | 'MARGIN') || 'INTRADAY',
+        lots: revLots,
+      });
+      flash({ ok: out.ok, text: `Reversed position: ${out.text}` });
+      loadPositions();
+      void loadOrders();
+    } finally {
+      setTicketBusy(false);
+    }
+  }, [ticketBusy, exitingId, underlying, feed.lotSize, feed.expiry, real, exitSimLeg, placeContract, flash, loadPositions, loadOrders]);
+
   const onTradeContract = useCallback(async (
     c: PickedContract,
     side: 'BUY' | 'SELL',
@@ -1041,6 +1206,12 @@ export default function IndexScalperTerminal() {
               onAlert={(sym, p) => {
                 flash({ ok: true, text: `Alert set on ${sym} at ₹${p.toFixed(2)}` });
               }}
+              simBrackets={simBrackets}
+              onSetBracket={onSetBracket}
+              onCancelBracket={onCancelBracket}
+              onReversePosition={onReversePosition}
+              underlying={underlying}
+              feedLotSize={feed.lotSize}
             />
           )}
           {liveBars.length === 0 && !loadingBars && (
