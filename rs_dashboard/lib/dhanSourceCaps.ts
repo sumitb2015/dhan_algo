@@ -20,6 +20,8 @@ export const SOURCE_QTY_CAPS: Record<string, number> = {
   pl: 1500,
   // 'fm' = Fresh Money board: FM_MAX_LOTS_PER_ORDER (20) x 75, the largest index lot seen.
   fm: 1500,
+  // 'isx' = Index Scalper (/index-scalper): MAX_LOTS (20, lib/indexScalperPositions.ts) x 75, the largest index lot seen.
+  isx: 1500,
 };
 
 /** The same backstop where Dhan's order quantity is LOTS (MCX_COMM), not units: 1500 there would mean 1500 lots. */

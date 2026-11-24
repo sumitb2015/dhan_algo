@@ -124,6 +124,7 @@ const NAV_GROUPS = [
       { href: '/market-profile', label: 'Market Profile (TPO)', desc: 'Lettered 30-min TPO profiles: POC, value area, initial balance, single prints, naked POCs, day type & weekly/monthly composites' },
       { href: '/straddle-simulator', label: 'Straddle Simulator', desc: 'Replay past NIFTY straddle sessions through the Straddle P&F engine at 1X / 50X / 100X / 200X — alerts, VWAP and the 30-alert log, signals only' },
       { href: '/focus-tool', label: 'Ultimate Scalper Terminal', desc: 'Straddles & strangles terminal — timed entry, level exits, real-money armed orders' },
+      { href: '/index-scalper', label: 'Index Scalper', desc: 'TradingView-style NIFTY chart with any indicator, live option chain and instant CE/PE orders; open option positions, P&L and one-click exit drawn on the chart (SIM, or REAL on Dhan)' },
       { href: '/cyber-scalper', label: 'Cyber Scalper (9/20 EMA)', desc: 'Futuristic 9/20 EMA & VWAP scalping terminal with live difference bias & big buy/sell order execution' },
       { href: '/breakdown-scalper', label: 'Breakdown Auto-Scalper', desc: 'Automated multi-strike option breakdown seller with NIFTY trend bias, signal ranking & trailing SL' },
       { href: '/algo-lab', label: 'Algo Lab', desc: 'Pick an automated strategy: the same Live terminal and offline Backtest for every one' },

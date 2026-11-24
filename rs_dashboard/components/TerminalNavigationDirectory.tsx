@@ -82,6 +82,12 @@ export const TERMINAL_PILLARS: TerminalPillarGroup[] = [
         desc: 'Per-strike OI change, total OI and call − put Δ OI, with live trading',
       },
       {
+        name: 'Index Scalper',
+        href: '/index-scalper',
+        badge: 'NEW',
+        desc: 'TradingView-style NIFTY chart with any indicator, live option chain, instant CE/PE orders and open positions with P&L and one-click exit on the chart',
+      },
+      {
         name: 'Cyber Scalper (9/20 EMA)',
         href: '/cyber-scalper',
         badge: 'NEW',
