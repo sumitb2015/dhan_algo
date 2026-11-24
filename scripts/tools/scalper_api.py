@@ -146,6 +146,11 @@ def main():
             f = _find_nearest_future(helper, under, exchange=exchange, instrument='FUTCOM', on_or_after=args.expiry)
             if f:
                 data['future'] = {'securityId': str(int(float(f['SECURITY_ID']))), 'expiry': str(f['SM_EXPIRY_DATE'])[:10]}
+        elif under == 'NIFTY':
+            from premarket_data import _find_nearest_future
+            f = _find_nearest_future(helper, under, exchange='NSE', instrument='FUTIDX', on_or_after=args.expiry)
+            if f:
+                data['future'] = {'securityId': str(int(float(f['SECURITY_ID']))), 'expiry': str(f['SM_EXPIRY_DATE'])[:10]}
         if 'SM_FREEZE_QTY' in rows.columns:
             freeze = pd.to_numeric(rows['SM_FREEZE_QTY'], errors='coerce')
             freeze = freeze[freeze > 1]

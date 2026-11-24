@@ -30,7 +30,10 @@ const TYPES: { v: TicketOrderType; label: string }[] = [
 
 const inr = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 
-export default function OrderTicket({ contract, liveLtp, expiry, lotSize, real, available, busy, message, onSubmit, onClose, underlying = 'NIFTY' }: {
+export default function OrderTicket({
+  contract, liveLtp, expiry, lotSize, real, available, busy, message, onSubmit, onClose,
+  underlying = 'NIFTY', initialOrderType, initialPrice, initialLots,
+}: {
   contract: PickedContract;
   liveLtp: number | null;
   expiry: string;
@@ -42,13 +45,16 @@ export default function OrderTicket({ contract, liveLtp, expiry, lotSize, real, 
   onSubmit: (r: TicketRequest) => void;
   onClose: () => void;
   underlying?: Underlying;
+  initialOrderType?: TicketOrderType;
+  initialPrice?: number | null;
+  initialLots?: number;
 }) {
   // Right of the chain panel and left of the chart's position chips, so neither is covered by default.
   const { pos, handle } = useDraggable({ x: Math.max(16, (typeof window === 'undefined' ? 1200 : window.innerWidth) - 800), y: 190 });
-  const [orderType, setOrderType] = useState<TicketOrderType>('MARKET');
+  const [orderType, setOrderType] = useState<TicketOrderType>(initialOrderType ?? 'MARKET');
   const [product, setProduct] = useState<TicketProduct>('INTRADAY');
-  const [lotsDraft, setLotsDraft] = useState('1');
-  const [priceDraft, setPriceDraft] = useState('');
+  const [lotsDraft, setLotsDraft] = useState(String(initialLots ?? 1));
+  const [priceDraft, setPriceDraft] = useState(initialPrice ? String(initialPrice) : '');
   const [trigDraft, setTrigDraft] = useState('');
   const [err, setErr] = useState<string | null>(null);
   // This contract's tick from the master list; Rs 0.05 (NSE index options) or 1.0 (MCX crude future) until it answers or when it is unknown.

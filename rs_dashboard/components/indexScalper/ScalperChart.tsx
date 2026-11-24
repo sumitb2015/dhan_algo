@@ -9,10 +9,11 @@ import {
   createChart, CandlestickSeries, LineSeries, HistogramSeries, ColorType, CrosshairMode, LineStyle, PriceScaleMode,
   type IChartApi, type ISeriesApi, type IPriceLine, type UTCTimestamp, type SeriesType, type MouseEventParams, type Time,
 } from 'lightweight-charts';
-import { Eye, EyeOff, Settings2, X } from 'lucide-react';
+import { Eye, EyeOff, Settings2, X, Plus, ArrowDown, ArrowUp, Bell, FileText, Minus } from 'lucide-react';
 import { useChartChrome } from '@/lib/chartTheme';
 import { computeIndicator, indicatorLabel, tailUnchanged, type Bar, type IndicatorInstance, pointColor, flipsAtLast } from '@/lib/indexScalperIndicators';
 import { fmtRupees, legAnchor, legPnl, type ScalperLeg } from '@/lib/indexScalperPositions';
+import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 
@@ -59,6 +60,13 @@ interface Props {
   /** Visible-range request: show the last N seconds of data. */
   /** Range-button request: show the last `seconds`; a new `seq` re-applies it even for the same range. */
   focus: { seconds: number; seq: number } | null;
+  contractName?: string;
+  lots?: number;
+  openOrders?: OrderRowView[];
+  onCancelOrder?: (orderId: string) => void;
+  onPlaceLimitOrder?: (req: { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' }) => void;
+  onOpenTicket?: (req: { price: number; lots: number; orderType: 'LIMIT' }) => void;
+  onAlert?: (symbol: string, price: number) => void;
 }
 
 interface Hover { o: number; h: number; l: number; c: number; t: number }
@@ -77,6 +85,7 @@ export default function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, legs, entrySpots,
     onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
+    contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
   } = props;
   const chrome = useChromeStable();
   const boxRef = useRef<HTMLDivElement>(null);
@@ -87,6 +96,7 @@ export default function ScalperChart(props: Props) {
   // What the last pass drew: length, first bar time, and the last two bars (to spot a refresh that rewrote history).
   const prevRef = useRef<{ n: number; first: number; tail: Bar[]; flip: boolean } | null>(null);
   const legLinesRef = useRef<Map<string, IPriceLine>>(new Map());
+  const orderLinesRef = useRef<Map<string, IPriceLine>>(new Map());
   const drawLinesRef = useRef<IPriceLine[]>([]);
   const drawSeriesRef = useRef<ISeriesApi<'Line'>[]>([]);
   const toolRef = useRef<DrawTool>(tool);
@@ -96,6 +106,10 @@ export default function ScalperChart(props: Props) {
   const [hover, setHover] = useState<Hover | null>(null);
   const [ruler, setRuler] = useState<string | null>(null);
   const [chipTops, setChipTops] = useState<Record<string, number>>({});
+  const [hoverScale, setHoverScale] = useState<{ y: number; price: number } | null>(null);
+  const [menu, setMenu] = useState<{ y: number; price: number } | null>(null);
+
+  const cName = contractName ?? symbolLabel.split(' · ')[0];
 
   // paintDrawings runs from chart click handlers created once, so it reads the theme through a ref.
   const chromeRef = useRef(chrome);
@@ -352,10 +366,28 @@ export default function ScalperChart(props: Props) {
     for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
   }, [placed, chrome]);
 
+  // ── open order lines ────────────────────────────────────────────────
+  useEffect(() => {
+    const candles = candleRef.current;
+    if (!candles) return;
+    const lines = orderLinesRef.current;
+    const seen = new Set<string>();
+    for (const ord of openOrders) {
+      const p = ord.price ?? ord.trigger;
+      if (!p) continue;
+      seen.add(ord.id);
+      const color = ord.side === 'BUY' ? '#0ea5e9' : '#f43f5e';
+      const opts = { price: p, color, lineWidth: 1 as const, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: `${ord.qty ?? ''} ${ord.side} ${ord.orderType}` };
+      const ex = lines.get(ord.id);
+      if (ex) ex.applyOptions(opts); else lines.set(ord.id, candles.createPriceLine(opts));
+    }
+    for (const [id, l] of lines) if (!seen.has(id)) { try { candles.removePriceLine(l); } catch { /* gone */ } lines.delete(id); }
+  }, [openOrders]);
+
   // Chip y-positions follow the price scale (zoom / pan / autoscale move it with no event), so re-read them on a short timer.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (placed.length === 0) { setChipTops({}); return; }
+    if (placed.length === 0 && openOrders.length === 0) { setChipTops({}); return; }
     const tick = () => {
       const candles = candleRef.current;
       if (!candles) return;
@@ -363,6 +395,13 @@ export default function ScalperChart(props: Props) {
       for (const p of placed) {
         const y = candles.priceToCoordinate(p.anchor.level);
         if (y !== null) raw.push({ id: p.leg.id, y: Number(y) });
+      }
+      for (const ord of openOrders) {
+        const p = ord.price ?? ord.trigger;
+        if (p) {
+          const y = candles.priceToCoordinate(p);
+          if (y !== null) raw.push({ id: `ord_${ord.id}`, y: Number(y) });
+        }
       }
       raw.sort((a, b) => a.y - b.y);
       const out: Record<string, number> = {};
@@ -377,7 +416,93 @@ export default function ScalperChart(props: Props) {
     tick();
     const t = setInterval(tick, 150);
     return () => clearInterval(t);
-  }, [placed]);
+  }, [placed, openOrders]);
+
+  // ── price scale hover '+' button ────────────────────────────────────
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const onMove = (e: MouseEvent) => {
+      const rect = box.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const scaleWidth = chartRef.current?.priceScale('right')?.width() || 65;
+      if (x >= rect.width - scaleWidth - 55 && y >= 15 && y <= rect.height - 30) {
+        const candles = candleRef.current;
+        if (!candles) return;
+        const rawPrice = candles.coordinateToPrice(y);
+        if (rawPrice !== null && rawPrice > 0) {
+          const tick = 0.05;
+          const snapped = Math.round(rawPrice / tick) * tick;
+          setHoverScale({ y, price: Number(snapped.toFixed(2)) });
+          return;
+        }
+      }
+      if (!menu) setHoverScale(null);
+    };
+    const onLeave = () => {
+      if (!menu) setHoverScale(null);
+    };
+    box.addEventListener('mousemove', onMove);
+    box.addEventListener('mouseleave', onLeave);
+    return () => {
+      box.removeEventListener('mousemove', onMove);
+      box.removeEventListener('mouseleave', onLeave);
+    };
+  }, [menu]);
+
+  // ── context menu events & keyboard shortcuts ────────────────────────
+  useEffect(() => {
+    if (!menu) return;
+    const onDown = (e: MouseEvent) => {
+      if ((e.target as HTMLElement).closest('[data-testid="chart-scale-menu"]')) return;
+      setMenu(null);
+      setHoverScale(null);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setMenu(null);
+        setHoverScale(null);
+        return;
+      }
+      if (e.shiftKey && (e.key === 'S' || e.key === 's')) {
+        e.preventDefault();
+        const p = menu.price;
+        const cur = last?.c ?? p;
+        onPlaceLimitOrder?.({ side: 'SELL', price: p, lots: lotsProp, orderType: p < cur ? 'STOP_LOSS' : 'LIMIT' });
+        setMenu(null); setHoverScale(null);
+        return;
+      }
+      if (e.shiftKey && (e.key === 'B' || e.key === 'b')) {
+        e.preventDefault();
+        const p = menu.price;
+        const cur = last?.c ?? p;
+        onPlaceLimitOrder?.({ side: 'BUY', price: p, lots: lotsProp, orderType: p > cur ? 'STOP_LOSS' : 'LIMIT' });
+        setMenu(null); setHoverScale(null);
+        return;
+      }
+      if (e.shiftKey && (e.key === 'T' || e.key === 't')) {
+        e.preventDefault();
+        onOpenTicket?.({ price: menu.price, lots: lotsProp, orderType: 'LIMIT' });
+        setMenu(null); setHoverScale(null);
+        return;
+      }
+      if (e.altKey && (e.key === 'H' || e.key === 'h')) {
+        e.preventDefault();
+        drawingsRef.current.h.push(menu.price);
+        savePref(DRAW_KEY, JSON.stringify(drawingsRef.current));
+        paintDrawings();
+        setMenu(null); setHoverScale(null);
+        return;
+      }
+    };
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [menu, lotsProp, last, onPlaceLimitOrder, onOpenTicket]);
 
   return (
     <div className="relative w-full h-full min-h-0">
@@ -422,6 +547,174 @@ export default function ScalperChart(props: Props) {
       {ruler && (
         <div className="absolute left-1/2 -translate-x-1/2 top-2 z-20 px-2 py-1 rounded bg-sky-600 text-oncolor text-[11px] font-mono font-bold">{ruler}</div>
       )}
+
+      {/* '+' button on price scale edge */}
+      {hoverScale && (
+        <button
+          type="button"
+          aria-label={`Order options at ${hoverScale.price}`}
+          title={`Order options at ${hoverScale.price}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            setMenu(prev => prev && prev.price === hoverScale.price ? null : { y: hoverScale.y, price: hoverScale.price });
+          }}
+          style={{
+            top: hoverScale.y - 10,
+            right: (chartRef.current?.priceScale('right')?.width() || 65) - 10,
+          }}
+          className={cn(
+            'absolute z-40 w-5 h-5 rounded-full bg-zinc-950 text-white border border-zinc-500 shadow-lg flex items-center justify-center cursor-pointer transition-transform hover:scale-125 focus:outline-none',
+            menu && menu.price === hoverScale.price ? 'ring-2 ring-sky-400 scale-110 bg-zinc-800' : 'hover:bg-zinc-800'
+          )}
+        >
+          <Plus className="w-3.5 h-3.5 stroke-[2.5]" />
+        </button>
+      )}
+
+      {/* Context Menu popup matching reference image */}
+      {menu && (
+        <div
+          data-testid="chart-scale-menu"
+          style={{
+            top: Math.max(8, Math.min(menu.y - 45, (boxRef.current?.clientHeight ?? 500) - 230)),
+            right: (chartRef.current?.priceScale('right')?.width() || 65) + 14,
+          }}
+          className="absolute z-50 w-[360px] rounded-xl border border-zinc-700/90 bg-zinc-900/95 shadow-2xl p-1.5 text-xs select-none backdrop-blur-md"
+        >
+          {/* Add alert */}
+          <button
+            type="button"
+            onClick={() => {
+              onAlert?.(cName, menu.price);
+              setMenu(null);
+              setHoverScale(null);
+            }}
+            className="w-full flex items-center justify-between px-2.5 py-2 rounded-lg hover:bg-zinc-800 text-left transition-colors text-zinc-200"
+          >
+            <span className="flex items-center gap-2.5 min-w-0">
+              <Bell className="w-4 h-4 text-zinc-400 shrink-0" />
+              <span className="truncate">Add alert on <span className="font-semibold text-white">{cName}</span> at <span className="font-semibold text-white">{fmt(menu.price)}</span></span>
+            </span>
+          </button>
+
+          {/* Sell limit */}
+          <button
+            type="button"
+            onClick={() => {
+              const cur = last?.c ?? menu.price;
+              onPlaceLimitOrder?.({
+                side: 'SELL',
+                price: menu.price,
+                lots: lotsProp,
+                orderType: menu.price < cur ? 'STOP_LOSS' : 'LIMIT',
+              });
+              setMenu(null);
+              setHoverScale(null);
+            }}
+            className="w-full flex items-center justify-between px-2.5 py-2 rounded-lg hover:bg-zinc-800 text-left transition-colors text-zinc-200 group"
+          >
+            <span className="flex items-center gap-2.5 min-w-0">
+              <ArrowDown className="w-4 h-4 text-rose-400 shrink-0" />
+              <span className="truncate">
+                Sell <span className="font-semibold text-white">{lotsProp}</span> {cName} @ <span className="font-semibold text-white">{fmt(menu.price)}</span> limit
+              </span>
+            </span>
+            <span className="text-[10px] text-zinc-500 font-mono shrink-0 ml-2">Shift+S</span>
+          </button>
+
+          {/* Buy limit */}
+          <button
+            type="button"
+            onClick={() => {
+              const cur = last?.c ?? menu.price;
+              onPlaceLimitOrder?.({
+                side: 'BUY',
+                price: menu.price,
+                lots: lotsProp,
+                orderType: menu.price > cur ? 'STOP_LOSS' : 'LIMIT',
+              });
+              setMenu(null);
+              setHoverScale(null);
+            }}
+            className="w-full flex items-center justify-between px-2.5 py-2 rounded-lg hover:bg-zinc-800 text-left transition-colors text-zinc-200 group"
+          >
+            <span className="flex items-center gap-2.5 min-w-0">
+              <ArrowUp className="w-4 h-4 text-sky-400 shrink-0" />
+              <span className="truncate">
+                Buy <span className="font-semibold text-white">{lotsProp}</span> {cName} @ <span className="font-semibold text-white">{fmt(menu.price)}</span> limit
+              </span>
+            </span>
+            <span className="text-[10px] text-zinc-500 font-mono shrink-0 ml-2">Shift+B</span>
+          </button>
+
+          {/* Add order... */}
+          <button
+            type="button"
+            onClick={() => {
+              onOpenTicket?.({
+                price: menu.price,
+                lots: lotsProp,
+                orderType: 'LIMIT',
+              });
+              setMenu(null);
+              setHoverScale(null);
+            }}
+            className="w-full flex items-center justify-between px-2.5 py-2 rounded-lg hover:bg-zinc-800 text-left transition-colors text-zinc-200 group"
+          >
+            <span className="flex items-center gap-2.5 min-w-0">
+              <FileText className="w-4 h-4 text-zinc-400 shrink-0" />
+              <span className="truncate">Add order on <span className="font-semibold text-white">{cName}</span> at <span className="font-semibold text-white">{fmt(menu.price)}</span>…</span>
+            </span>
+            <span className="text-[10px] text-zinc-500 font-mono shrink-0 ml-2">Shift+T</span>
+          </button>
+
+          <div className="border-t border-zinc-800 my-1" />
+
+          {/* Draw horizontal line */}
+          <button
+            type="button"
+            onClick={() => {
+              drawingsRef.current.h.push(menu.price);
+              savePref(DRAW_KEY, JSON.stringify(drawingsRef.current));
+              paintDrawings();
+              setMenu(null);
+              setHoverScale(null);
+            }}
+            className="w-full flex items-center justify-between px-2.5 py-2 rounded-lg hover:bg-zinc-800 text-left transition-colors text-zinc-200 group"
+          >
+            <span className="flex items-center gap-2.5 min-w-0">
+              <Minus className="w-4 h-4 text-zinc-400 shrink-0" />
+              <span className="truncate">Draw horizontal line at <span className="font-semibold text-white">{fmt(menu.price)}</span></span>
+            </span>
+            <span className="text-[10px] text-zinc-500 font-mono shrink-0 ml-2">Alt+H</span>
+          </button>
+        </div>
+      )}
+
+      {/* working order chips on chart */}
+      {openOrders.map(ord => {
+        const p = ord.price ?? ord.trigger;
+        if (!p) return null;
+        const top = chipTops[`ord_${ord.id}`];
+        if (top === undefined) return null;
+        const isBuy = ord.side === 'BUY';
+        return (
+          <div key={ord.id} data-testid="order-chip" style={{ top: top - 11 }}
+            className={cn('absolute right-[84px] z-[55] flex items-center gap-1.5 pl-2 pr-1 h-[22px] rounded border text-[11px] font-mono bg-zinc-900 shadow',
+              isBuy ? 'border-sky-500/60' : 'border-rose-500/60')}>
+            <span className={cn('font-bold', isBuy ? 'text-sky-400' : 'text-rose-400')}>{ord.side}</span>
+            <span className="text-zinc-200">{ord.qty}</span>
+            <span className="text-zinc-400">{ord.orderType}</span>
+            <span className="text-zinc-300 font-semibold">@ {fmt(p)}</span>
+            {ord.cancellable && (
+              <button type="button" aria-label={`Cancel order ${ord.id}`} onClick={() => onCancelOrder?.(ord.id)}
+                className="ml-1 h-[18px] px-1 rounded bg-zinc-800 hover:bg-rose-600 text-zinc-400 hover:text-white text-[10px] font-bold transition-colors">
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        );
+      })}
 
       {/* position chips: one per open option leg, at the index level it belongs to */}
       {placed.map(p => {

@@ -16,7 +16,7 @@ import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
 import { scalperRoute } from '@/hooks/useBrokerSelector';
 import ScalperChart, { type DrawTool } from './ScalperChart';
 import OptionChainPanel, { type PickedContract } from './OptionChainPanel';
-import OrderTicket, { type TicketRequest } from './OrderTicket';
+import OrderTicket, { type TicketRequest, type TicketOrderType } from './OrderTicket';
 import DhanScalperWidget from './DhanScalperWidget';
 import AccountPanel from './AccountPanel';
 import {
@@ -125,6 +125,9 @@ export default function IndexScalperTerminal() {
   // Two flags drifted apart: closing the widget with its X left one-click armed with nothing on screen saying so.
   const [scalperOn, setScalperOn] = useState(false);
   const [ticket, setTicket] = useState<PickedContract | null>(null);
+  const [ticketOrderType, setTicketOrderType] = useState<TicketOrderType>('MARKET');
+  const [ticketPrice, setTicketPrice] = useState<number | null>(null);
+  const [ticketLots, setTicketLots] = useState<number>(1);
   const [ticketBusy, setTicketBusy] = useState(false);
   const [ticketMsg, setTicketMsg] = useState<Toast | null>(null);
 
@@ -775,6 +778,67 @@ export default function IndexScalperTerminal() {
     void tradeNow(c, side);
   }, [feed.future, feed.expiry, tradeNow, flash]);
 
+  const chartContract = useMemo<PickedContract | null>(() => {
+    const f = feed.future;
+    const isKotak = brokerRef.current === 'kotak';
+    if (!f || (isKotak ? !f.kotakSymbol : !f.dhanId)) return null;
+    return {
+      strike: 0,
+      type: 'FUT',
+      securityId: f.dhanId ?? f.kotakSymbol ?? 'FUT',
+      ltp: f.ltp,
+      expiry: f.expiry ?? feed.expiry,
+      tradingSymbol: f.kotakSymbol ?? undefined,
+    };
+  }, [feed.future, feed.expiry]);
+
+  const chartContractName = useMemo(() => {
+    if (underlying === 'CRUDEOILM') {
+      const exp = feed.future?.expiry
+        ? new Date(feed.future.expiry).toLocaleString('en-US', { month: 'short' }).toUpperCase()
+        : 'DEC';
+      return `CRUDEOILM ${exp} FUT`;
+    }
+    return `${underlying} FUT`;
+  }, [underlying, feed.future?.expiry]);
+
+  const chartOpenOrders = useMemo(() => {
+    return panelOrders.filter(o => o.bucket === 'open' && (
+      o.symbol.toUpperCase().includes(underlying) ||
+      (underlying === 'CRUDEOILM' && (o.symbol.toUpperCase().includes('CRUDE') || o.exchange === 'MCX')) ||
+      (underlying === 'NIFTY' && o.symbol.toUpperCase().includes('NIFTY'))
+    ));
+  }, [panelOrders, underlying]);
+
+  const onPlaceChartOrder = useCallback(async (req: { side: 'BUY' | 'SELL'; price: number; lots: number; orderType?: 'LIMIT' | 'STOP_LOSS' }) => {
+    if (ticketBusy) return;
+    const c = chartContract;
+    if (!c) {
+      flash({ ok: false, text: 'No contract identifier for chart order' });
+      return;
+    }
+    setTicketBusy(true);
+    try {
+      const isStop = req.orderType === 'STOP_LOSS';
+      const out = await placeContract({
+        contract: c,
+        side: req.side,
+        orderType: isStop ? 'STOP_LOSS_MARKET' : 'LIMIT',
+        price: isStop ? null : req.price,
+        trigger: isStop ? req.price : null,
+        product: 'INTRADAY',
+        lots: req.lots,
+      });
+      flash({ ok: out.ok, text: out.text });
+      void loadOrders();
+      void loadPositions();
+    } catch (e) {
+      flash({ ok: false, text: String((e as Error)?.message ?? e) });
+    } finally {
+      setTicketBusy(false);
+    }
+  }, [ticketBusy, chartContract, placeContract, flash, loadOrders, loadPositions]);
+
   const onTradeContract = useCallback(async (
     c: PickedContract,
     side: 'BUY' | 'SELL',
@@ -958,6 +1022,25 @@ export default function IndexScalperTerminal() {
               onToggleIndicator={id => setIndicators(p => p.map(i => (i.id === id ? { ...i, visible: !i.visible } : i)))}
               onRemoveIndicator={removeIndicator} onEditIndicator={id => { setEditId(id); setPickerOpen(true); }}
               symbolLabel={underlying === 'CRUDEOILM' ? `CRUDEOILM · ${interval} · FUT` : `NIFTY · ${interval} · IDX`} focus={focus}
+              contractName={chartContractName}
+              lots={scalpLots}
+              openOrders={chartOpenOrders}
+              onCancelOrder={cancelOrder}
+              onPlaceLimitOrder={onPlaceChartOrder}
+              onOpenTicket={req => {
+                if (chartContract) {
+                  setTicket(chartContract);
+                  setTicketOrderType(req.orderType);
+                  setTicketPrice(req.price);
+                  setTicketLots(req.lots);
+                  setTicketMsg(null);
+                } else {
+                  flash({ ok: false, text: 'No contract identifier for chart order' });
+                }
+              }}
+              onAlert={(sym, p) => {
+                flash({ ok: true, text: `Alert set on ${sym} at ₹${p.toFixed(2)}` });
+              }}
             />
           )}
           {liveBars.length === 0 && !loadingBars && (
@@ -1020,8 +1103,23 @@ export default function IndexScalperTerminal() {
           onTrade={(c, side) => void tradeNow(c, side)} oneClick={scalperOn} />
       )}
       {ticket && (
-        <OrderTicket key={`${ticket.expiry}:${ticket.strike}${ticket.type}`} contract={ticket} liveLtp={ticketLtp} expiry={ticket.expiry} lotSize={feed.lotSize}
-          underlying={underlying} real={real} available={funds.available} busy={ticketBusy} message={ticketMsg} onSubmit={submitTicket} onClose={() => setTicket(null)} />
+        <OrderTicket
+          key={`${ticket.expiry}:${ticket.strike}${ticket.type}:${ticketPrice ?? ''}`}
+          contract={ticket}
+          liveLtp={ticketLtp}
+          expiry={ticket.expiry}
+          lotSize={feed.lotSize}
+          underlying={underlying}
+          real={real}
+          available={funds.available}
+          busy={ticketBusy}
+          message={ticketMsg}
+          initialOrderType={ticketOrderType}
+          initialPrice={ticketPrice}
+          initialLots={ticketLots}
+          onSubmit={submitTicket}
+          onClose={() => setTicket(null)}
+        />
       )}
       <IndicatorPicker open={pickerOpen} indicators={indicators} editId={editId} onAdd={addIndicator} onChange={patchIndicator}
         onRemove={removeIndicator} onEdit={setEditId} onClose={() => { setPickerOpen(false); setEditId(null); }} />
