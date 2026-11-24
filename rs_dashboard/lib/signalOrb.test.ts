@@ -290,3 +290,12 @@ test('signalRowExit: loss limit first, then the cutoff, then the hard / trailing
   assert.equal(signalRowExit({ ...trail, price: 5024 })?.kind, 'stop');
   assert.equal(signalRowExit({ ...base, side: 'SHORT', price: 5031 })?.kind, 'stop');
 });
+
+test('signalRowExit: the daily profit lock closes at realised + open, after the loss limit', async () => {
+  const { signalRowExit } = await import('./signalOrb.ts');
+  const times = { entryStart: '09:15', entryEnd: '22:45', eodExit: '23:00' };
+  const b = { side: 'LONG' as const, entry: 5000, price: 5010, minute: 720, times, stopPts: 30, realised: 1500, dailyLossLimit: 3000 };
+  assert.equal(signalRowExit({ ...b, openPnl: 400, profitLockRs: 2000 }), null);
+  assert.match(signalRowExit({ ...b, openPnl: 500, profitLockRs: 2000 })!.reason, /profit lock/);
+  assert.equal(signalRowExit({ ...b, openPnl: 5000 }), null);   // off
+});

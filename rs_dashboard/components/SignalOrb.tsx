@@ -16,7 +16,7 @@ import { ContextTabs } from '@/components/signalOrb/ContextPanels';
 import { PivotPanel } from '@/components/signalOrb/PivotChart';
 import { legStopForDisplay } from '@/lib/orbFocus';
 import { BLIND_WARN_MS } from '@/lib/orbFocus';
-import { isPremiumInstrument, isStuck, unknownLegIndexes, type OrbConfig, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
+import { dailyHistory, isPremiumInstrument, isStuck, unknownLegIndexes, type DayStats, type OrbConfig, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 
 // /signal-orb: one orb, one switch. A CRUDEOIL / CRUDEOILM / NIFTY future's closed bars give the consensus of the active indicators —
 // futures mode: green long, red short; options mode: green sells a PE, red sells a CE; gray holds. Real money in REAL mode; the rules and every safety limit live in lib/signalOrb*.ts and
@@ -477,7 +477,8 @@ function PositionPill({ real, now, futPrice, live, position, pnl, effectiveStop,
                 <span className="font-normal text-zinc-500 no-underline">
                   {g.entry.toLocaleString('en-IN')}→{g.status === 'closed' ? (g.exit ?? '—').toLocaleString('en-IN') : legLtps?.[i] == null ? '—' : legLtps[i]!.toLocaleString('en-IN')}
                   {g.status !== 'closed' && legLtps?.[i] != null && (() => {
-                    const v = (g.action === 'SELL' ? g.entry - legLtps[i]! : legLtps[i]! - g.entry) * live.lots * live.unitsPerLot;
+                    const b = g.entryFill ?? g.entry;
+                    const v = (g.action === 'SELL' ? b - legLtps[i]! : legLtps[i]! - b) * live.lots * live.unitsPerLot;
                     return <> <strong className={v >= 0 ? 'text-emerald-400' : 'text-red-400'}>{inr(v)}</strong></>;
                   })()}
                   {stop && <> · SL <strong className="text-zinc-300">{stop.level.toLocaleString('en-IN', { maximumFractionDigits: 1 })}</strong>{stop.trailed > 0 ? ` (trailed ${stop.trailed}×)` : ''}</>}
@@ -488,7 +489,7 @@ function PositionPill({ real, now, futPrice, live, position, pnl, effectiveStop,
         </span>
       )}
       <span className="text-zinc-400">
-        {live.lots} lot{live.lots > 1 ? 's' : ''}{!live.legs && <> @ <strong className="text-zinc-200">{live.entry.toLocaleString('en-IN')}</strong></>}
+        {live.lots} lot{live.lots > 1 ? 's' : ''}{!live.legs && <> @ <strong className="text-zinc-200" title={live.entryFill !== undefined ? `Fill (decision price ${live.entry.toLocaleString('en-IN')})` : live.mode === 'REAL' ? 'Decision price (fill not read yet)' : undefined}>{(live.entryFill ?? live.entry).toLocaleString('en-IN')}</strong>{live.mode === 'REAL' && live.entryFill === undefined && <span className="ml-0.5 text-[10px] text-zinc-500">est</span>}</>}
         {optionOf(live) && <> · now <strong className="text-zinc-100">{mark === null ? '—' : mark.toLocaleString('en-IN')}</strong></>}
       </span>
       <span className="h-3 w-px bg-zinc-800" aria-hidden />
@@ -633,12 +634,16 @@ function ConfigChips({ config: c, tfLabel }: { config: OrbConfig; tfLabel: strin
   const chips = [
     tfLabel,
     what,
-    `${c.lots} lot${c.lots > 1 ? 's' : ''}`,
+    !premium && c.riskRs > 0 ? `Risk ₹${c.riskRs.toLocaleString('en-IN')}/trade` : `${c.lots} lot${c.lots > 1 ? 's' : ''}`,
     premium ? `Leg SL ×${c.premium.legSlX || 'off'}` : `SL ${c.stopPts} pts`,
     ...(!premium && (c.trailStartPts ?? 0) > 0 ? [`Trail +${c.trailStartPts} / ${c.trailGapPts ?? 15} pts`] : []),
     `Loss limit ₹${c.dailyLossLimit.toLocaleString('en-IN')}`,
     ...(!premium && c.htfConfirm > 0 ? [`Confirm ${c.htfConfirm === 60 ? '1h' : `${c.htfConfirm}m`}`] : []),
     ...(!premium && c.levelGuardPts > 0 ? [`Pivot guard ${c.levelGuardPts} pts`] : []),
+    ...(!premium && c.profitLockRs > 0 ? [`Profit lock ₹${c.profitLockRs.toLocaleString('en-IN')}`] : []),
+    ...(!premium && c.maxTradesPerDay > 0 ? [`Max ${c.maxTradesPerDay} trades`] : []),
+    ...(!premium && c.maxLossStreak > 0 ? [`Stop after ${c.maxLossStreak} losses`] : []),
+    ...(!premium && c.cooldownBars > 0 ? [`Cooldown ${c.cooldownBars} bars`] : []),
   ];
   return (
     <ul className="mt-1 flex flex-wrap items-center gap-1" aria-label="Configuration">
@@ -675,9 +680,9 @@ const held = (ms: number): string => {
   return m < 60 ? `${m} m` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} m`;
 };
 
-type JournalTab = 'trades' | 'all' | 'trade' | 'problems';
+type JournalTab = 'trades' | 'history' | 'all' | 'trade' | 'problems';
 const JOURNAL_TABS: { v: JournalTab; label: string }[] = [
-  { v: 'trades', label: 'Trades today' }, { v: 'all', label: 'Log' }, { v: 'trade', label: 'Orders' }, { v: 'problems', label: 'Errors & warnings' },
+  { v: 'trades', label: 'Trades today' }, { v: 'history', label: 'Daily SIM vs REAL' }, { v: 'all', label: 'Log' }, { v: 'trade', label: 'Orders' }, { v: 'problems', label: 'Errors & warnings' },
 ];
 
 /** The footer panel: today's trades as a table (active mode), or the log (every stored line, filterable). */
@@ -698,14 +703,15 @@ function Journal({ ledger, today }: { ledger: OrbLedger; today: string }) {
           </button>
         ))}
       </div>
-      {tab === 'trades' ? (
+      {tab === 'history' ? <DailyHistoryTable rows={ledger.rows} /> : tab === 'trades' ? (
         rows.length ? (
           <div className="max-h-64 overflow-auto rounded-lg border border-zinc-800">
             <table className="w-full border-collapse font-mono text-xs">
               <thead className="sticky top-0 z-10">
                 <tr>
-                  {['In', 'Out', 'What', 'Lots', 'Entry', 'Exit', 'P&L', 'Reason'].map(h => (
-                    <th key={h} className={cn('bg-zinc-800 px-2 py-1 text-xs font-bold text-white', h === 'What' || h === 'Reason' ? 'text-left' : 'text-right')}>{h}</th>
+                  {['In', 'Out', 'What', 'Lots', 'Entry', 'Exit', 'P&L', 'Slip', 'Reason'].map(h => (
+                    <th key={h} title={h === 'Slip' ? 'P&L on actual fills minus P&L on the decision prices (Dhan REAL rows, once both traded prices are read)' : h === 'Entry' || h === 'Exit' ? 'Actual fill when Dhan reported it, else the decision price (est)' : undefined}
+                      className={cn('bg-zinc-800 px-2 py-1 text-xs font-bold text-white', h === 'What' || h === 'Reason' ? 'text-left' : 'text-right')}>{h}</th>
                   ))}
                 </tr>
               </thead>
@@ -718,10 +724,15 @@ function Journal({ ledger, today }: { ledger: OrbLedger; today: string }) {
                       <td className="px-2 py-1 text-right text-zinc-400">{r.exitAt ? istClock(r.exitAt).slice(0, 5) : <span className="text-amber-400">{r.status.toUpperCase()}</span>}</td>
                       <td className="px-2 py-1 text-zinc-200">{rowWhat(r)}</td>
                       <td className="px-2 py-1 text-right text-zinc-300">{r.lots}</td>
-                      <td className="px-2 py-1 text-right tabular-nums text-zinc-300">{r.legs ? '—' : r.entry.toLocaleString('en-IN')}</td>
-                      <td className="px-2 py-1 text-right tabular-nums text-zinc-300">{r.legs || r.exit === undefined ? '—' : r.exit.toLocaleString('en-IN')}</td>
-                      <td className={cn('px-2 py-1 text-right font-bold tabular-nums', open || r.pnl === undefined ? 'text-zinc-500' : r.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                      <td className="px-2 py-1 text-right tabular-nums text-zinc-300">{r.legs ? '—' : <Px fill={r.entryFill} est={r.entry} real={r.mode === 'REAL'} />}</td>
+                      <td className="px-2 py-1 text-right tabular-nums text-zinc-300">{r.legs || r.exit === undefined ? '—' : <Px fill={r.exitFill} est={r.exit} real={r.mode === 'REAL'} />}</td>
+                      <td className={cn('px-2 py-1 text-right font-bold tabular-nums', open || r.pnl === undefined ? 'text-zinc-500' : r.pnl >= 0 ? 'text-emerald-400' : 'text-red-400')}
+                        title={open ? undefined : r.pnlDecision !== undefined ? 'On actual fills' : r.mode === 'REAL' ? (r.fillUnconfirmed ? 'On decision prices: a traded price never arrived' : r.broker === 'dhan' ? 'On decision prices until both traded prices are read' : 'On decision prices (no traded-price read for this broker)') : 'Paper: the decision price is the fill'}>
                         {open || r.pnl === undefined ? '—' : inr(r.pnl)}
+                        {!open && r.mode === 'REAL' && r.pnlDecision === undefined && <span className="ml-1 text-[10px] font-normal text-zinc-500">est</span>}
+                      </td>
+                      <td className={cn('px-2 py-1 text-right tabular-nums', r.pnlDecision === undefined || r.pnl === undefined ? 'text-zinc-600' : r.pnl - r.pnlDecision >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                        {r.pnlDecision === undefined || r.pnl === undefined ? '—' : inr(r.pnl - r.pnlDecision)}
                       </td>
                       <td className="max-w-[28rem] truncate px-2 py-1 text-zinc-400" title={[r.exitReason, r.note].filter(Boolean).join(' · ')}>{r.exitReason ?? r.note ?? ''}</td>
                     </tr>
@@ -748,3 +759,50 @@ function Journal({ ledger, today }: { ledger: OrbLedger; today: string }) {
 const rowWhat = (r: OrbRow): string =>
   r.legs ? (r.structure === 'synthetic' ? `SYN ${r.side} ${legsOf(r)}` : `SHORT ${(r.structure ?? '').toUpperCase()} ${legsOf(r)}`)
     : r.target.kind === 'options' ? `SELL ${r.target.strike} ${r.target.side}` : `${r.side} FUT`;
+
+/** A price cell: the actual fill when Dhan reported it (decision price on hover), else the decision price marked "est" in REAL. */
+function Px({ fill, est, real }: { fill?: number; est: number; real: boolean }) {
+  if (fill !== undefined) return <span title={`Decision price ${est.toLocaleString('en-IN')}`}>{fill.toLocaleString('en-IN')}</span>;
+  return <>{est.toLocaleString('en-IN')}{real && <span className="ml-1 text-[10px] text-zinc-500">est</span>}</>;
+}
+
+/** Closed trades per day, SIM next to REAL (the ledger keeps its newest 200 rows, so older days drop off). */
+function DailyHistoryTable({ rows }: { rows: OrbRow[] }) {
+  const h = useMemo(() => dailyHistory(rows), [rows]);
+  if (!h.length) return <p className="text-xs text-zinc-500">No closed trades yet</p>;
+  const cells = (s: DayStats | null) => (s ? [
+    <td key="t" className="px-2 py-1 text-right text-zinc-300">{s.trades}</td>,
+    <td key="w" className="px-2 py-1 text-right text-zinc-400">{Math.round((s.wins / s.trades) * 100)}%</td>,
+    <td key="n" className={cn('px-2 py-1 text-right font-bold tabular-nums', s.net > 0 ? 'text-emerald-400' : s.net < 0 ? 'text-red-400' : 'text-zinc-300')}>{inr(s.net)}</td>,
+  ] : [<td key="t" className="px-2 py-1 text-right text-zinc-600">—</td>, <td key="w" className="px-2 py-1 text-right text-zinc-600">—</td>, <td key="n" className="px-2 py-1 text-right text-zinc-600">—</td>]);
+  const tot = (k: 'sim' | 'real') => h.reduce((a, d) => a + (d[k]?.net ?? 0), 0);
+  return (
+    <div className="max-h-64 overflow-auto rounded-lg border border-zinc-800">
+      <table className="w-full border-collapse font-mono text-xs">
+        <thead className="sticky top-0 z-10">
+          <tr>
+            {['Day', 'SIM trades', 'SIM win', 'SIM net', 'REAL trades', 'REAL win', 'REAL net', 'REAL on fills'].map(t => (
+              <th key={t} className={cn('bg-zinc-800 px-2 py-1 text-xs font-bold text-white', t === 'Day' ? 'text-left' : 'text-right')}>{t}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {h.map(d => (
+            <tr key={d.day} className="border-t border-zinc-900">
+              <td className="px-2 py-1 text-zinc-300">{d.day}</td>
+              {cells(d.sim)}
+              {cells(d.real)}
+              <td className="px-2 py-1 text-right text-zinc-500" title="REAL trades whose P&L is on Dhan's actual fills (the rest are on decision prices)">{d.real ? `${d.real.onFills}/${d.real.trades}` : '—'}</td>
+            </tr>
+          ))}
+          <tr className="border-t border-zinc-700">
+            <td className="px-2 py-1 font-bold text-zinc-200">Total ({h.length} days)</td>
+            <td colSpan={2} /><td className={cn('px-2 py-1 text-right font-bold tabular-nums', tot('sim') >= 0 ? 'text-emerald-400' : 'text-red-400')}>{inr(tot('sim'))}</td>
+            <td colSpan={2} /><td className={cn('px-2 py-1 text-right font-bold tabular-nums', tot('real') >= 0 ? 'text-emerald-400' : 'text-red-400')}>{inr(tot('real'))}</td>
+            <td />
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}

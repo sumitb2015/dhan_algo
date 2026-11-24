@@ -9,7 +9,7 @@ import { ReplayCard } from '@/components/signalOrb/ReplayCard';
 import { useOrbSettings } from '@/components/signalOrb/useOrbSettings';
 import { cn } from '@/lib/utils';
 import { KIND_LABEL, TIMEFRAMES, defaultSpec, specLabel, type IndicatorKind, type IndicatorSpec } from '@/lib/signalOrb';
-import { MAX_STRIKE_OFFSET, ORB_SYMBOLS, isPremiumInstrument, type OrbConfig, type OrbLedger } from '@/lib/signalOrbLedger';
+import { LOTS_CONFIRM_ABOVE, MAX_STRIKE_OFFSET, ORB_SYMBOLS, isPremiumInstrument, riskLots, type OrbConfig, type OrbLedger } from '@/lib/signalOrbLedger';
 import type { PremiumConfig } from '@/lib/orbFocus';
 import type { ReplaySummary } from '@/lib/signalOrb';
 
@@ -142,6 +142,7 @@ function Settings({ ledger, locked, onPatch, onMode, onResetSim, replayed, units
   const perPt = unitsPerLot > 0 ? unitsPerLot * c.lots : 0;
   const stopRs = perPt * c.stopPts;
   const lockPts = (c.trailStartPts ?? 0) - (c.trailGapPts ?? 15);
+  const sized = riskLots(c, unitsPerLot);
   const setSpecs = (indicators: IndicatorSpec[]) => onPatch({ indicators });
   const addKind = (kind: IndicatorKind) => {
     let i = 1;
@@ -149,8 +150,8 @@ function Settings({ ledger, locked, onPatch, onMode, onResetSim, replayed, units
     setSpecs([...c.indicators, defaultSpec(kind, `${kind}-${i}`)]);
   };
   const tradeSub = c.instrument === 'options' ? 'Green sells a PE, red sells a CE (nearest expiry)'
-    : c.instrument === 'synthetic' ? 'Green: long synthetic (buy the ATM CE, sell the ATM PE); red: short synthetic (buy the PE, sell the CE). Dhan or Kotak'
-    : premium ? 'Sold at the entry time on a timer, not the signal; the Focus Tool\'s SL / target rules run on the server, so closing the tab is safe. Dhan or Kotak'
+    : c.instrument === 'synthetic' ? 'Green: long synthetic (buy the ATM CE, sell the ATM PE); red: short synthetic (buy the PE, sell the CE). Dhan, Kotak or Zerodha (Zerodha MCX option units are not yet confirmed on live fills)'
+    : premium ? 'Sold at the entry time on a timer, not the signal; the Focus Tool\'s SL / target rules run on the server, so closing the tab is safe. Dhan, Kotak or Zerodha (Zerodha MCX option units are not yet confirmed on live fills)'
     : 'Green goes long the future, red short';
 
   const market = (
@@ -258,7 +259,14 @@ function Settings({ ledger, locked, onPatch, onMode, onResetSim, replayed, units
 
   const risk = (
     <Section title="Risk">
-      <Row label="Lots" sub={`${c.symbol} · no cap; the exchange rejects an order above its freeze quantity${perPt > 0 ? `. ${c.lots} × ${unitsPerLot} = ${(c.lots * unitsPerLot).toLocaleString('en-IN')} units · 1 pt = ${rs(perPt)}${price ? ` · exposure ${rs(price * c.lots * unitsPerLot)}` : ''}` : ''}`}>
+      {!premium && (
+        <Row label="Size from risk (₹)" sub={c.riskRs > 0
+          ? (typeof sized === 'number' ? `Each entry trades ${sized} lot${sized > 1 ? 's' : ''} now (₹${c.riskRs.toLocaleString('en-IN')} ÷ ${c.stopPts} pts × ₹${unitsPerLot} a point a lot); the Lots box is not used. On the future's points, so a sold option is sized conservatively` : `Cannot size: ${sized}`)
+          : `0 = off: trade the Lots below. On: lots = this ÷ (hard stop × ₹ a point a lot). REAL above ${LOTS_CONFIRM_ABOVE} lots asks to confirm`}>
+          <RuleNumInput value={c.riskRs} step={500} min={0} label="Risk rupees" disabled={locked} onCommit={v => onPatch({ riskRs: Number(v) })} className={NUM} />
+        </Row>
+      )}
+      <Row label="Lots" sub={`${c.symbol} · no cap; REAL above ${LOTS_CONFIRM_ABOVE} lots asks to confirm; the exchange rejects an order above its freeze quantity${perPt > 0 ? `. ${c.lots} × ${unitsPerLot} = ${(c.lots * unitsPerLot).toLocaleString('en-IN')} units · 1 pt = ${rs(perPt)}${price ? ` · exposure ${rs(price * c.lots * unitsPerLot)}` : ''}` : ''}`}>
         <RuleNumInput value={c.lots} step={1} min={1} label="Lots" disabled={locked} onCommit={s => onPatch({ lots: Number(s) })} className={NUM} />
       </Row>
       {!premium && (
@@ -279,6 +287,22 @@ function Settings({ ledger, locked, onPatch, onMode, onResetSim, replayed, units
       <Row label="Daily loss limit (₹)" sub={`Realised + open; closes and halts${stopRs > 0 ? `. = ${(c.dailyLossLimit / stopRs).toFixed(1)} full stops at this size` : ''}`}>
         <RuleNumInput value={c.dailyLossLimit} step={500} min={100} label="Daily loss limit" onCommit={s => onPatch({ dailyLossLimit: Number(s) })} className={NUM} />
       </Row>
+      {!premium && (
+        <>
+          <Row label="Daily profit lock (₹)" sub={c.profitLockRs > 0 ? `Realised + open at ₹${c.profitLockRs.toLocaleString('en-IN')} closes the position (on the server) and takes no new entry today` : '0 = off'}>
+            <RuleNumInput value={c.profitLockRs} step={500} min={0} label="Daily profit lock" onCommit={v => onPatch({ profitLockRs: Number(v) })} className={NUM} />
+          </Row>
+          <Row label="Max trades a day" sub={c.maxTradesPerDay > 0 ? `No new entry after ${c.maxTradesPerDay} today (a reversal then exits to flat)` : '0 = off'}>
+            <RuleNumInput value={c.maxTradesPerDay} step={1} min={0} label="Max trades a day" onCommit={v => onPatch({ maxTradesPerDay: Number(v) })} className={NUM} />
+          </Row>
+          <Row label="Stop after losses in a row" sub={c.maxLossStreak > 0 ? `No new entry today after ${c.maxLossStreak} losing trades in a row` : '0 = off'}>
+            <RuleNumInput value={c.maxLossStreak} step={1} min={0} label="Losses in a row" onCommit={v => onPatch({ maxLossStreak: Number(v) })} className={NUM} />
+          </Row>
+          <Row label="Cooldown after a stop (bars)" sub={c.cooldownBars > 0 ? `No new entry for ${c.cooldownBars} × ${c.timeframe === 60 ? '1h' : `${c.timeframe}m`} after a stop-out` : '0 = off'}>
+            <RuleNumInput value={c.cooldownBars} step={1} min={0} label="Cooldown bars" onCommit={v => onPatch({ cooldownBars: Number(v) })} className={NUM} />
+          </Row>
+        </>
+      )}
     </Section>
   );
 
@@ -365,6 +389,15 @@ export default function OrbSettings() {
       </header>
 
       {/* sticky: a refusal must stay in view wherever on the page the edit was made */}
+      {s.pending && (
+        <div className="sticky top-[53px] z-20 border-b border-red-500/30 bg-zinc-950 px-4 py-2 sm:px-6" role="alert">
+          <div className="mx-auto flex max-w-[1760px] flex-wrap items-center gap-3 rounded-lg border border-red-500/60 bg-red-500/10 px-3 py-2 text-xs font-bold text-red-300">
+            <span>Not saved yet: {s.pending}. Real money.</span>
+            <button type="button" onClick={() => void s.confirmPending()} className={cn('rounded border border-red-500/60 bg-red-600 px-2.5 py-0.5 text-oncolor hover:bg-red-500', FOCUS)}>Confirm</button>
+            <button type="button" onClick={s.cancelPending} className={cn('rounded border border-zinc-700 px-2.5 py-0.5 text-zinc-300 hover:bg-zinc-800', FOCUS)}>Cancel</button>
+          </div>
+        </div>
+      )}
       {s.error && (
         <div className="sticky top-[53px] z-20 border-b border-red-500/30 bg-zinc-950 px-4 py-2 sm:px-6" role="alert">
           <p className="mx-auto max-w-[1760px] rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">Not saved: {s.error}</p>

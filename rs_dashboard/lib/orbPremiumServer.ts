@@ -1,10 +1,11 @@
 import { globalOnce } from '@/lib/globalOnce';
 import { istDateIso } from '@/lib/nseHolidays';
 import { istMinuteOfDay } from '@/lib/istTime';
-import { hhmmToMin, rowLegsPnl, rowPnl, signalRowExit } from '@/lib/signalOrb';
+import { hhmmToMin, rowPnl, signalRowExit } from '@/lib/signalOrb';
 import { BLIND_WARN_MS, blindSince, premiumTick, type PremiumAction, type PremiumRowIn } from '@/lib/orbFocus';
 import { readOrbLedger } from '@/lib/signalOrbFile';
-import { addLog, isPremiumInstrument, liveRow, patchRow, realisedToday, type OrbLeg, type OrbRow } from '@/lib/signalOrbLedger';
+import { addLog, applyFill, entryBasis, rowLegsLivePnl, halt, isPremiumInstrument, liveRow, patchRow, pendingFills, realisedToday, type FillRef, type OrbLeg, type OrbRow } from '@/lib/signalOrbLedger';
+import { readBrokerOrder } from '@/lib/brokerOrderStatus';
 import { wsPrice, wsSync } from '@/lib/freshMoneyWs';
 import {
   exitOneLeg, exitStructure, optionFutureKey, optionLtp, orbClientOp, orbEnterPremiumAuto, orbExitRow, orbWatcher, premiumBlind, save, serial, signalTargetOf,
@@ -50,8 +51,55 @@ export function startOrbPremiumLoop(): void {
 
 const isPremiumRow = (r: OrbRow | null | undefined): r is OrbRow & { legs: OrbLeg[] } => !!r && (r.structure === 'straddle' || r.structure === 'strangle') && !!r.legs;
 
+/** Fills: retry schedule per order (in memory: a restart retries from scratch, which only costs a few reads). */
+const fills = globalOnce('signalOrb.fillReads', () => new Map<string, { tries: number; nextAt: number }>());
+const FILL_BACKOFF_MS = [2_000, 4_000, 8_000, 16_000, 32_000, 64_000];
+/** Rows older than this are not chased (a restart days later must not read a week of order history). */
+const FILL_WINDOW_MS = 3 * 86_400_000;
+
+/**
+ * Reads ONE owed traded price per tick (Dhan only; dhan-fill-price-pnl): TRADED, or CANCELLED / EXPIRED with a fill, is final; a
+ * REJECTED order the page booked as placed is a phantom position and halts the engine; no final answer after the back-off marks
+ * the row `fillUnconfirmed` (its P&L stays on decision prices, never half estimate, half fact).
+ */
+async function settleFills(now: number): Promise<void> {
+  const owed = pendingFills(readOrbLedger(), now - FILL_WINDOW_MS);
+  const f: FillRef | undefined = owed.find(x => (fills.get(x.orderId)?.nextAt ?? 0) <= now);
+  if (!f) return;
+  const st = fills.get(f.orderId) ?? { tries: 0, nextAt: 0 };
+  const o = await readBrokerOrder(f.orderId, 'dhan').catch(() => null);
+  const s = o?.orderStatus ?? '';
+  const filled = (o?.filledQty ?? 0) > 0;
+  const avg = o?.averageTradedPrice ?? 0;
+  const final = (s === 'TRADED' || ((s === 'CANCELLED' || s === 'EXPIRED') && filled)) && avg > 0;
+  const what = `${f.side} order ${f.orderId}${f.leg !== null ? ` (leg ${f.leg + 1})` : ''}`;
+  if (final) {
+    fills.delete(f.orderId);
+    await serial(async () => save(applyFill(readOrbLedger(), f, avg), Date.now()));
+    return;
+  }
+  if ((s === 'REJECTED' || s === 'CANCELLED' || s === 'EXPIRED') && !filled) {
+    fills.delete(f.orderId);
+    await serial(async () => {
+      let l = patchRow(readOrbLedger(), f.rowId, { fillUnconfirmed: true, note: `Dhan reports the ${what} ${s} with nothing filled - check the positions` });
+      l = halt(l, `Dhan reports the ${what} ${s} with nothing filled: the ledger may not match the broker - check the positions and resolve the row`, Date.now());
+      return save(l, Date.now());
+    });
+    return;
+  }
+  st.tries += 1;
+  if (st.tries >= FILL_BACKOFF_MS.length) {
+    fills.delete(f.orderId);
+    await serial(async () => save(addLog(patchRow(readOrbLedger(), f.rowId, { fillUnconfirmed: true }), 'warn', `No traded price for the ${what} after ${st.tries} reads (${s || 'no reply'}) - its P&L stays on decision prices`, Date.now()), Date.now()));
+    return;
+  }
+  st.nextAt = now + FILL_BACKOFF_MS[st.tries - 1];
+  fills.set(f.orderId, st);
+}
+
 async function tick(): Promise<void> {
   const now = Date.now();
+  await settleFills(now).catch(e => console.error(`${TAG} fill read failed:`, e));
   const l = readOrbLedger();
   const row = liveRow(l);
   if (isPremiumRow(row)) {
@@ -109,8 +157,7 @@ async function manage(rowId: string, now: number): Promise<void> {
   // the day's loss limit covers the open structure too: realised + open at or past it closes everything (the exit then halts the engine)
   const open = legs.filter(g => g.status === 'open');
   if (!actions.some(a => a.kind === 'exitAll') && open.every(g => (marks[g.target.side as 'CE' | 'PE'] ?? 0) > 0)) {
-    const px = legs.map(g => (g.status === 'closed' ? g.exit ?? g.entry : g.status === 'unknown' ? g.entry : marks[g.target.side as 'CE' | 'PE']));
-    const openPnl = rowLegsPnl({ lots, unitsPerLot: row.unitsPerLot, legs }, px);
+    const openPnl = rowLegsLivePnl({ lots, unitsPerLot: row.unitsPerLot, legs }, legs.map(g => marks[g.target.side as 'CE' | 'PE']));
     if (openPnl !== null && realisedToday(l0, l0.mode, row.day) + openPnl <= -l0.config.dailyLossLimit) {
       actions.unshift({ kind: 'exitAll', why: 'sl', reason: `Daily loss limit ₹${l0.config.dailyLossLimit}` });
     }
@@ -166,15 +213,15 @@ async function manageSignal(row: OrbRow, now: number): Promise<void> {
 
   // open P&L on the row's own instrument (unknown = null: only the stop and the cutoff can act)
   let openPnl: number | null = null;
-  if (row.legs) openPnl = rowLegsPnl({ lots: row.lots, unitsPerLot: row.unitsPerLot, legs: row.legs }, row.legs.map(g => (g.status === 'closed' ? g.exit ?? g.entry : optionLtp(g.target, now))));
-  else if (row.target.kind === 'options') { const m = optionLtp(row.target, now); openPnl = m !== null && m > 0 ? rowPnl(row, m) : null; }
-  else openPnl = fresh !== null ? rowPnl(row, fresh) : null;
+  if (row.legs) openPnl = rowLegsLivePnl(row, row.legs.map(g => (g.status === 'open' ? optionLtp(g.target, now) : null)));
+  else if (row.target.kind === 'options') { const m = optionLtp(row.target, now); openPnl = m !== null && m > 0 ? rowPnl({ ...row, entry: entryBasis(row) }, m) : null; }
+  else openPnl = fresh !== null ? rowPnl({ ...row, entry: entryBasis(row) }, fresh) : null;
 
   const cfg = l.config;
   const x = signalRowExit({
     side: row.side, entry: row.signalEntry ?? row.entry, bestPrice: best, price: fresh, minute: istMinuteOfDay(now), times: cfg,
     stopPts: cfg.stopPts, trailStartPts: cfg.trailStartPts, trailGapPts: cfg.trailGapPts,
-    openPnl, realised: realisedToday(l, l.mode, row.day), dailyLossLimit: cfg.dailyLossLimit,
+    openPnl, realised: realisedToday(l, l.mode, row.day), dailyLossLimit: cfg.dailyLossLimit, profitLockRs: cfg.profitLockRs,
   });
   if (!x) return;
   if (sig.exitRetry.id === row.id && now < sig.exitRetry.at) return;

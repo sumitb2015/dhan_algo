@@ -10,10 +10,10 @@ import {
 import { orbAlert, orbNotification, type OrbAlert, type OrbAlertSnap, type OrbSound } from '@/lib/signalOrbChime';
 import type { Target } from '@/lib/pnfTarget';
 import {
-  ORB_CODE_VERSION, closedBars, computeEffectiveStop, decideOrb, evaluate, rowLegsPnl, rowPnl, sideOf, signalRowExit,
+  ORB_CODE_VERSION, closedBars, computeEffectiveStop, decideOrb, evaluate, rowPnl, sideOf, signalRowExit,
   type EffectiveStopResult, type Evaluation, type Side, type Timeframe,
 } from '@/lib/signalOrb';
-import { isPremiumInstrument, isStuck, liveRow, realisedToday, unknownLegIndexes, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
+import { entryBasis, entryGate, isPremiumInstrument, rowLegsLivePnl, isStuck, liveRow, realisedToday, unknownLegIndexes, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
 import { keyLevels, mtfTable, sessionPath, signalChanges } from '@/lib/signalOrbPanels';
 import { BLIND_WARN_MS } from '@/lib/orbFocus';
 import { entryFilter } from '@/lib/orbFilters';
@@ -275,8 +275,9 @@ export function useOrbEngine() {
   // a multi-leg row (synthetic) has no single mark: its P&L is the signed sum over its legs' live premiums (null while any leg has none)
   const mark = live?.legs ? null : isOption ? (state?.optionLtp ?? null) : price;
   const openPnl = live?.status === 'open'
-    ? (live.legs ? rowLegsPnl({ lots: live.lots, unitsPerLot: live.unitsPerLot, legs: live.legs }, state?.legLtps ?? [])
-      : mark !== null && mark > 0 ? rowPnl(live, mark) : null)
+    // the P&L basis is the entry FILL once Dhan's traded price was read (the stop still measures the future's points)
+    ? (live.legs ? rowLegsLivePnl(live, state?.legLtps ?? [])
+      : mark !== null && mark > 0 ? rowPnl({ ...live, entry: entryBasis(live) }, mark) : null)
     : null;
   const realised = ledger && today ? realisedToday(ledger, ledger.mode, today) : 0;
 
@@ -364,6 +365,7 @@ export function useOrbEngine() {
       const x = signalRowExit({
         side: position.side, entry: position.entry, bestPrice: position.bestPrice, price: priceFresh ? price : null, minute: istMinuteOfDay(t),
         times: cfg, stopPts: cfg.stopPts, trailStartPts: cfg.trailStartPts, trailGapPts: cfg.trailGapPts, openPnl, realised, dailyLossLimit: cfg.dailyLossLimit,
+        profitLockRs: cfg.profitLockRs,
       });
       if (x) {
         // the server owns the exit while it runs (one sender, never two racing exits); this tab is only the fallback
@@ -386,7 +388,7 @@ export function useOrbEngine() {
     if (staleDay) { setNote('An earlier day\'s row is open - close it first'); return false; }
     if (realised <= -cfg.dailyLossLimit) { setNote('Daily loss limit reached'); return false; }
     // entry filters: they only stop a NEW position. A filtered reversal still leaves the old side (the signal is against it): flat.
-    const blocked = entryFilter({ side: d.side, tf: cfg.timeframe, htfConfirm: cfg.htfConfirm, htfSignal, levelGuardPts: cfg.levelGuardPts, price, pivots });
+    const blocked = entryGate(ledger, t, today) ?? entryFilter({ side: d.side, tf: cfg.timeframe, htfConfirm: cfg.htfConfirm, htfSignal, levelGuardPts: cfg.levelGuardPts, price, pivots });
     if (blocked) {
       if (d.action === 'reverse' && t >= exitRetryAt.current) {
         exitRetryAt.current = t + EXIT_RETRY_MS;

@@ -22,6 +22,8 @@ export function useOrbSettings() {
   const [loadError, setLoadError] = useState<string | null>(null);
   /** The server's refusal of the last edit, shown until the next edit succeeds. */
   const [error, setError] = useState<string | null>(null);
+  /** A REAL edit the server held back for a confirm (above the lot threshold): resent with confirm: true, or dropped. */
+  const [pending, setPending] = useState<{ body: Record<string, unknown>; msg: string } | null>(null);
   const [now, setNow] = useState(0);
 
   useEffect(() => {
@@ -56,11 +58,20 @@ export function useOrbSettings() {
   const op = useCallback(async (body: Record<string, unknown>): Promise<string | null> => {
     try {
       const r = await fetch('/api/signal-orb/state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-      const j = await r.json() as { success: boolean; error?: string; ledger?: OrbLedger };
+      const j = await r.json() as { success: boolean; error?: string; ledger?: OrbLedger; needsConfirm?: boolean };
       if (j.ledger) accept({ ledger: j.ledger });
+      if (j.needsConfirm) { setPending({ body, msg: j.error ?? 'Confirm this change' }); return null; }
+      setPending(null);
       return j.success ? null : (j.error ?? 'Refused');
     } catch (e) { return e instanceof Error ? e.message : 'Request failed'; }
   }, [accept]);
+  const confirmPending = useCallback(async () => {
+    if (!pending) return;
+    const body = pending.body;
+    setPending(null);
+    setError(await op({ ...body, confirm: true }));
+  }, [op, pending]);
+  const cancelPending = useCallback(() => setPending(null), []);
 
   const patch = useCallback(async (p: Partial<OrbConfig>) => setError(await op({ op: 'setConfig', patch: p })), [op]);
   const setMode = useCallback(async (m: 'SIM' | 'REAL') => setError(await op({ op: 'setMode', mode: m })), [op]);
@@ -83,5 +94,5 @@ export function useOrbSettings() {
   }, [feed.histVersion, cfg, unitsPerLot, hasClock]);
 
   const live: OrbRow | null = ledger ? liveRow(ledger) : null;
-  return { ledger, live, error: error ?? loadError, patch, setMode, resetSim, replayed, price, unitsPerLot, loaded: !!ledger };
+  return { ledger, live, error: error ?? loadError, pending: pending?.msg ?? null, confirmPending, cancelPending, patch, setMode, resetSim, replayed, price, unitsPerLot, loaded: !!ledger };
 }

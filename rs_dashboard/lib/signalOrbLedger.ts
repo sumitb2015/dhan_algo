@@ -29,7 +29,7 @@ export const SYMBOL_RISK: Record<OrbSymbol, { stopPts: number; trailStartPts: nu
 export type OrbInstrument = 'futures' | 'options' | 'synthetic' | 'straddle' | 'strangle';
 /** Straddle / strangle are non-directional: no indicator, a timed entry and the Focus Tool's SL / target rules (lib/orbFocus.ts). */
 export const isPremiumInstrument = (i: OrbInstrument): boolean => i === 'straddle' || i === 'strangle';
-/** Structures that are several option legs (placed leg by leg; Dhan or Kotak, Zerodha not yet). */
+/** Structures that are several option legs (placed leg by leg; Dhan, Kotak or Zerodha). */
 export const isLegInstrument = (i: OrbInstrument): boolean => i === 'synthetic' || i === 'straddle' || i === 'strangle';
 /** Strike offset bounds: 0 = ATM, +N = N strikes OTM (PE down, CE up), -N = ITM. */
 export const MAX_STRIKE_OFFSET = 10;
@@ -69,6 +69,16 @@ export interface OrbConfig {
   htfConfirm: number;
   /** Entry filter: no LONG with a pivot level this many points above, no SHORT with one this many below. 0 = off. */
   levelGuardPts: number;
+  /** Signal entries: size from rupee risk instead of `lots` (lots = riskRs / (stopPts x rupees per point per lot)). 0 = off. */
+  riskRs: number;
+  /** Signal mode: realised + open at or above this closes the position and takes no new entry today. 0 = off. */
+  profitLockRs: number;
+  /** Signal mode: no new entry once this many trades were taken today (active mode). 0 = off. */
+  maxTradesPerDay: number;
+  /** Signal mode: no new entry today after this many losing trades in a row. 0 = off. */
+  maxLossStreak: number;
+  /** Signal mode: after a stop-out, no new entry for this many bars of the trading timeframe. 0 = off. */
+  cooldownBars: number;
 }
 
 /** REAL never runs a naked structure without a stop: a signal-driven one needs the hard stop, a straddle / strangle needs a leg or total SL. */
@@ -89,6 +99,11 @@ export interface OrbLeg {
   costStop?: boolean;
   /** Straddle / strangle: Trail SL steps earned (never lost). */
   trailSteps?: number;
+  /** REAL: the orders that opened / closed this leg, and Dhan's traded prices for them once read (the P&L basis). */
+  openOrderId?: string;
+  closeOrderId?: string;
+  entryFill?: number;
+  exitFill?: number;
 }
 
 /** What a row is, for comparing with the configured instrument: legs first, else a sold option, else the future. */
@@ -127,6 +142,18 @@ export interface OrbRow {
   note?: string;
   /** When the row last went 'sending' / 'closing' (ms): an order still in flight after STUCK_MS died with the server. */
   sentAt?: number;
+  /** REAL: the orders that opened / closed a single-leg row, and Dhan's traded prices once read (the P&L basis; `entry` / `exit`
+   * stay the decision prices). Only Dhan is read: Kotak / Zerodha rows keep the decision-price P&L. */
+  entryOrderId?: string;
+  exitOrderId?: string;
+  entryFill?: number;
+  exitFill?: number;
+  /** The decision-price P&L, kept once the booked `pnl` moved to actual fills (their difference is the slippage). */
+  pnlDecision?: number;
+  /** A traded price that never arrived after the retries: the P&L stays on decision prices. */
+  fillUnconfirmed?: boolean;
+  /** How the row was closed: 'stop' (hard / trailing stop: arms the cooldown), 'eod' (cutoff) or 'manual' (anything else). */
+  exitKind?: 'stop' | 'eod' | 'manual';
   /** The best signal-future price seen while open (high for LONG, low for SHORT): the trailing stop's peak, kept here so a reload or a new leader tab does not lose it. */
   bestPrice?: number;
 }
@@ -169,6 +196,11 @@ export const DEFAULT_CONFIG: OrbConfig = {
   premium: { ...DEFAULT_PREMIUM, trail: { ...DEFAULT_PREMIUM.trail } },
   htfConfirm: 0,
   levelGuardPts: 0,
+  riskRs: 0,
+  profitLockRs: 0,
+  maxTradesPerDay: 0,
+  maxLossStreak: 0,
+  cooldownBars: 0,
 };
 
 export const emptyLedger = (): OrbLedger => ({
@@ -300,12 +332,26 @@ export function sanitizeConfigPatch(patch: unknown, cur: OrbConfig): OrbConfig |
     if (!Number.isFinite(n) || n < 0 || n > 1000) return 'levelGuardPts must be 0-1000';
     next.levelGuardPts = n;
   }
+  // money amounts: 0 = off, else bounded; counts: whole numbers
+  const money: [keyof OrbConfig, number, number][] = [['riskRs', 100, 1_000_000], ['profitLockRs', 100, 5_000_000]];
+  for (const [k, lo, hi] of money) {
+    if (p[k] === undefined) continue;
+    const n = Number(p[k]);
+    if (!Number.isFinite(n) || (n !== 0 && (n < lo || n > hi))) return `${k} must be 0 (off) or ${lo}-${hi}`;
+    (next[k] as number) = n;
+  }
+  const counts: [keyof OrbConfig, number][] = [['maxTradesPerDay', 200], ['maxLossStreak', 50], ['cooldownBars', 100]];
+  for (const [k, hi] of counts) {
+    if (p[k] === undefined) continue;
+    const n = Number(p[k]);
+    if (!Number.isInteger(n) || n < 0 || n > hi) return `${k} must be a whole number 0-${hi} (0 = off)`;
+    (next[k] as number) = n;
+  }
   if (p.premium !== undefined) {
     const pr = sanitizePremiumPatch(p.premium, cur.premium ?? DEFAULT_PREMIUM);
     if (typeof pr === 'string') return pr;
     next.premium = pr;
   }
-  if (isLegInstrument(next.instrument) && next.broker === 'zerodha') return `${next.instrument === 'synthetic' ? 'Synthetic futures' : 'Straddle / strangle'} run on Dhan or Kotak (Zerodha is not supported for them yet)`;
   if (next.instrument === 'strangle' && next.strikeOffset < 1) return 'A strangle needs a strike offset of at least 1 (strikes OTM per side)';
   let timePatched = false;
   for (const k of ['entryStart', 'entryEnd', 'eodExit'] as const) {
@@ -524,3 +570,147 @@ export function bookStructureExit(l: OrbLedger, id: string, after: OrbLeg[], rea
 
 /** Leg indexes still unknown on a row. */
 export const unknownLegIndexes = (r: Pick<OrbRow, 'legs'>): number[] => (r.legs ?? []).flatMap((g, i) => (g.status === 'unknown' ? [i] : []));
+
+// ── Sizing and the day's entry gate (signal-driven entries; pure, shared by the server and the page) ─────────────────────────
+
+/** Above this many lots a REAL setting needs an explicit confirm (lots are otherwise uncapped on this page). */
+export const LOTS_CONFIRM_ABOVE = 10;
+
+/**
+ * Lots for a signal-driven entry: `lots`, or with `riskRs` on, floor(riskRs / (stopPts x rupees per point per lot)) - the stop is
+ * on the future's points, so for a sold option this over-states the risk (it sizes conservatively). A reason when it cannot size.
+ */
+export function riskLots(c: Pick<OrbConfig, 'lots' | 'riskRs' | 'stopPts'>, unitsPerLot: number): number | string {
+  if (!(c.riskRs > 0)) return c.lots;
+  if (!(c.stopPts > 0)) return 'Risk sizing needs a hard stop above 0';
+  if (!(unitsPerLot > 0)) return 'No lot size for risk sizing';
+  const perLot = c.stopPts * unitsPerLot;
+  const n = Math.floor(c.riskRs / perLot);
+  return n >= 1 ? n : `₹${c.riskRs} risk is less than one lot at a ${c.stopPts}-pt stop (₹${Math.round(perLot).toLocaleString('en-IN')} a lot)`;
+}
+
+/** Losing trades in a row today (active mode), newest first, until a win or break-even. */
+export function lossStreak(l: OrbLedger, day: string): number {
+  const done = l.rows.filter(r => r.mode === l.mode && r.day === day && r.status === 'closed').sort((a, b) => (b.exitAt ?? 0) - (a.exitAt ?? 0));
+  let n = 0;
+  for (const r of done) { if ((r.pnl ?? 0) < 0) n++; else break; }
+  return n;
+}
+
+const hhmmIst = (ms: number): string => {
+  const m = Math.floor(((ms / 60_000) + 330) % 1440);
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+};
+
+/**
+ * Why no NEW signal-driven position may open now, or null: the daily profit lock, the trade cap, the loss streak, the cooldown
+ * after a stop. (The loss limit, the window and the filters are judged elsewhere.) A reversal blocked here exits to flat.
+ */
+export function entryGate(l: OrbLedger, now: number, day: string): string | null {
+  const c = l.config;
+  if (c.profitLockRs > 0 && realisedToday(l, l.mode, day) >= c.profitLockRs) return `Daily profit lock ₹${c.profitLockRs.toLocaleString('en-IN')} reached - no new entries today`;
+  if (c.maxTradesPerDay > 0 && tradesToday(l, l.mode, day) >= c.maxTradesPerDay) return `${c.maxTradesPerDay} trades taken today (the cap) - no new entries`;
+  if (c.maxLossStreak > 0 && lossStreak(l, day) >= c.maxLossStreak) return `${c.maxLossStreak} losses in a row - no new entries today`;
+  if (c.cooldownBars > 0) {
+    const stop = l.rows.filter(r => r.mode === l.mode && r.day === day && r.status === 'closed' && r.exitKind === 'stop')
+      .reduce<OrbRow | null>((a, r) => (!a || (r.exitAt ?? 0) > (a.exitAt ?? 0) ? r : a), null);
+    const until = stop?.exitAt ? stop.exitAt + c.cooldownBars * c.timeframe * 60_000 : 0;
+    if (now < until) return `Cooldown after the stop: ${c.cooldownBars} bar${c.cooldownBars > 1 ? 's' : ''} (until ${hhmmIst(until)} IST)`;
+  }
+  return null;
+}
+
+// ── Actual fills (Dhan): which orders still owe a traded price, and the P&L once every side has one ─────────────────────────
+
+export type FillRef = { rowId: string; leg: number | null; side: 'entry' | 'exit'; orderId: string };
+
+/** Orders of REAL Dhan rows whose traded price was not read yet (newest rows first). */
+export function pendingFills(l: OrbLedger, sinceMs: number): FillRef[] {
+  const out: FillRef[] = [];
+  for (const r of [...l.rows].reverse()) {
+    if (r.mode !== 'REAL' || r.broker !== 'dhan' || r.fillUnconfirmed || r.entryAt < sinceMs) continue;
+    if (r.legs) {
+      r.legs.forEach((g, i) => {
+        if (g.openOrderId && g.entryFill === undefined) out.push({ rowId: r.id, leg: i, side: 'entry', orderId: g.openOrderId });
+        if (g.closeOrderId && g.exitFill === undefined) out.push({ rowId: r.id, leg: i, side: 'exit', orderId: g.closeOrderId });
+      });
+      continue;
+    }
+    if (r.entryOrderId && r.entryFill === undefined) out.push({ rowId: r.id, leg: null, side: 'entry', orderId: r.entryOrderId });
+    if (r.exitOrderId && r.exitFill === undefined) out.push({ rowId: r.id, leg: null, side: 'exit', orderId: r.exitOrderId });
+  }
+  return out;
+}
+
+/** A closed row's P&L on actual fills, or null while any side is not a broker fill (never half estimate, half fact). */
+export function rowFillPnl(r: OrbRow): number | null {
+  if (r.status !== 'closed') return null;
+  if (r.legs) {
+    let t = 0;
+    for (const g of r.legs) {
+      if (g.status === 'failed') continue;
+      if (g.entryFill === undefined || g.exitFill === undefined) return null;
+      t += (g.action === 'SELL' ? g.entryFill - g.exitFill : g.exitFill - g.entryFill) * r.lots * r.unitsPerLot;
+    }
+    return Math.round(t * 100) / 100;
+  }
+  if (r.entryFill === undefined || r.exitFill === undefined) return null;
+  return Math.round(rowPnl({ ...r, entry: r.entryFill }, r.exitFill) * 100) / 100;
+}
+
+/** Stores one traded price; a closed row whose every side is now a fill books its P&L on the fills (the estimate kept aside). */
+export function applyFill(l: OrbLedger, f: Pick<FillRef, 'rowId' | 'leg' | 'side'>, price: number): OrbLedger {
+  return {
+    ...l,
+    rows: l.rows.map(r => {
+      if (r.id !== f.rowId) return r;
+      const key = f.side === 'entry' ? 'entryFill' : 'exitFill';
+      const next: OrbRow = f.leg === null ? { ...r, [key]: price } : { ...r, legs: (r.legs ?? []).map((g, i) => (i === f.leg ? { ...g, [key]: price } : g)) };
+      const fp = rowFillPnl(next);
+      return fp === null ? next : { ...next, pnlDecision: r.pnlDecision ?? r.pnl, pnl: fp };
+    }),
+  };
+}
+
+/** The live P&L basis of a single-leg row: its entry fill when read, else the decision entry. */
+export const entryBasis = (r: Pick<OrbRow, 'entry' | 'entryFill'>): number => r.entryFill ?? r.entry;
+
+/**
+ * One leg's P&L basis, both sides on the SAME footing: a closed leg uses its two fills when both were read, else its two decision
+ * prices; an open leg uses its entry fill when read (its exit is the live mark). `exit` is undefined for an open leg.
+ */
+export function legBasis(g: Pick<OrbLeg, 'status' | 'entry' | 'exit' | 'entryFill' | 'exitFill'>): { entry: number; exit?: number } {
+  if (g.status === 'closed') return g.entryFill !== undefined && g.exitFill !== undefined ? { entry: g.entryFill, exit: g.exitFill } : { entry: g.entry, exit: g.exit ?? g.entry };
+  return { entry: g.entryFill ?? g.entry };
+}
+
+/** A multi-leg row's live P&L on the basis above (null while an open leg has no mark). */
+export function rowLegsLivePnl(r: Pick<OrbRow, 'lots' | 'unitsPerLot' | 'legs'>, marks: (number | null | undefined)[]): number | null {
+  const legs = r.legs ?? [];
+  const b = legs.map(legBasis);
+  return rowLegsPnl({ lots: r.lots, unitsPerLot: r.unitsPerLot, legs: legs.map((g, i) => ({ ...g, entry: b[i].entry })) },
+    legs.map((g, i) => (b[i].exit !== undefined ? b[i].exit : g.status === 'unknown' ? b[i].entry : marks[i])));
+}
+
+// ── Daily history, SIM vs REAL (from the ledger's rows: it keeps the newest ROWS_MAX, so older days drop off) ───────────────────
+
+export type DayStats = { trades: number; wins: number; net: number; onFills: number };
+export type DayHistory = { day: string; sim: DayStats | null; real: DayStats | null };
+
+/** Closed trades per IST day and mode, newest day first (at most `days`). `onFills` = REAL rows booked on actual fills. */
+export function dailyHistory(rows: OrbRow[], days = 30): DayHistory[] {
+  const by = new Map<string, DayHistory>();
+  for (const r of rows) {
+    if (r.status !== 'closed') continue;
+    const h = by.get(r.day) ?? { day: r.day, sim: null, real: null };
+    const k = r.mode === 'REAL' ? 'real' : 'sim';
+    const s = h[k] ?? { trades: 0, wins: 0, net: 0, onFills: 0 };
+    s.trades += 1;
+    if ((r.pnl ?? 0) > 0) s.wins += 1;
+    s.net = Math.round((s.net + (r.pnl ?? 0)) * 100) / 100;
+    if (r.pnlDecision !== undefined) s.onFills += 1;
+    h[k] = s;
+    by.set(r.day, h);
+  }
+  return [...by.values()].sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0)).slice(0, days);
+}

@@ -232,18 +232,18 @@ test('closeRowLegs books each leg at its exit; a leg without one is booked at en
   assert.equal(c3.pnl, 0);                                             // no price anywhere: booked at entry, no P&L
 });
 
-test('synthetic: a row knows its instrument; Dhan or Kotak, not Zerodha; the instrument is pinned while a position is open; resolve closed books at entry', () => {
+test('synthetic: a row knows its instrument; Dhan, Kotak or Zerodha; the instrument is pinned while a position is open; resolve closed books at entry', () => {
   assert.equal(rowInstrument(synRow()), 'synthetic');
   assert.equal(rowInstrument(row({ target: cePE().pe })), 'options');
   assert.equal(rowInstrument(row()), 'futures');
   const cur = emptyLedger().config;
   const ok = sanitizeConfigPatch({ instrument: 'synthetic' }, cur);
   assert.ok(typeof ok !== 'string' && ok.instrument === 'synthetic');
-  assert.equal(typeof sanitizeConfigPatch({ instrument: 'synthetic', broker: 'zerodha' }, cur), 'string');
+  assert.notEqual(typeof sanitizeConfigPatch({ instrument: 'synthetic', broker: 'zerodha' }, cur), 'string');
   const k = sanitizeConfigPatch({ instrument: 'synthetic', broker: 'kotak' }, cur);
   assert.ok(typeof k !== 'string' && k.broker === 'kotak' && k.instrument === 'synthetic');
   const syn = { ...cur, instrument: 'synthetic' as const };
-  assert.equal(typeof sanitizeConfigPatch({ broker: 'zerodha' }, syn), 'string');
+  assert.notEqual(typeof sanitizeConfigPatch({ broker: 'zerodha' }, syn), 'string');
   assert.equal(typeof sanitizeConfigPatch({ broker: 'kotak' }, syn), 'object');
   assert.equal(applyClientOp(withRow(synRow()), { op: 'setConfig', patch: { instrument: 'options' } }, 1).ok, false);
   const r = applyClientOp(withRow(synRow({ status: 'unknown' })), { op: 'resolve', id: 's1', as: 'closed' }, 1);
@@ -253,11 +253,11 @@ test('synthetic: a row knows its instrument; Dhan or Kotak, not Zerodha; the ins
   assert.equal(l.rows[0].legs, undefined);
 });
 
-test('straddle / strangle config: Dhan or Kotak, a strangle needs an offset, premium rules are merged and bounded, REAL needs a leg or total SL', () => {
+test('straddle / strangle config: Dhan, Kotak or Zerodha, a strangle needs an offset, premium rules are merged and bounded, REAL needs a leg or total SL', () => {
   const cur = emptyLedger().config;
   const st = sanitizePremiumConfig({ instrument: 'straddle' }, cur);
   assert.equal(st.instrument, 'straddle');
-  assert.equal(typeof sanitizeConfigPatch({ instrument: 'straddle', broker: 'zerodha' }, cur), 'string');
+  assert.notEqual(typeof sanitizeConfigPatch({ instrument: 'straddle', broker: 'zerodha' }, cur), 'string');
   assert.equal(typeof sanitizeConfigPatch({ instrument: 'straddle', broker: 'kotak' }, cur), 'object');
   assert.equal(typeof sanitizeConfigPatch({ instrument: 'strangle' }, cur), 'string');                    // strikeOffset 0
   const g = sanitizeConfigPatch({ instrument: 'strangle', strikeOffset: 2 }, cur);
@@ -388,4 +388,98 @@ test('entry filter config: confirm timeframe must be off or above the trading ti
   // a stored ledger without the fields (written before they existed) loads with both off
   assert.equal(nl({ config: { lots: 2 } }).config.htfConfirm, 0);
   assert.equal(nl({ config: { htfConfirm: 15, levelGuardPts: 25 } }).config.levelGuardPts, 25);
+});
+
+test('riskLots: lots as typed when off; floor(risk / (stop x rupees a point a lot)); refuses below one lot or without a stop', async () => {
+  const { riskLots: rl } = await import('./signalOrbLedger.ts');
+  assert.equal(rl({ lots: 3, riskRs: 0, stopPts: 30 }, 10), 3);
+  assert.equal(rl({ lots: 3, riskRs: 5000, stopPts: 30 }, 10), 16);      // 5000 / 300
+  assert.equal(rl({ lots: 3, riskRs: 5000, stopPts: 40 }, 65), 1);       // 5000 / 2600
+  assert.match(rl({ lots: 3, riskRs: 2000, stopPts: 40 }, 65) as string, /less than one lot/);
+  assert.match(rl({ lots: 3, riskRs: 2000, stopPts: 0 }, 65) as string, /hard stop/);
+  assert.match(rl({ lots: 3, riskRs: 2000, stopPts: 30 }, 0) as string, /No lot size/);
+});
+
+test('entryGate: profit lock, trade cap, loss streak and the cooldown after a stop; all off by default', async () => {
+  const { entryGate: g, emptyLedger: el, lossStreak: ls } = await import('./signalOrbLedger.ts');
+  const day = '2026-11-24';
+  const t0 = Date.parse('2026-11-24T05:00:00Z');   // 10:30 IST
+  const closed = (id: string, pnl: number, exitAt: number, exitKind: 'stop' | 'manual' = 'manual'): OrbRow =>
+    ({ ...row({ id, status: 'closed', mode: 'SIM' }), day, pnl, exitAt, exitKind });
+  const base = el();
+  const l = { ...base, rows: [closed('a', 500, t0 - 30 * 60_000), closed('b', -300, t0 - 20 * 60_000), closed('c', -200, t0 - 2 * 60_000, 'stop')] };
+  assert.equal(g(l, t0, day), null);
+  assert.equal(ls(l, day), 2);
+  assert.match(g({ ...l, config: { ...l.config, maxLossStreak: 2 } }, t0, day)!, /2 losses in a row/);
+  assert.match(g({ ...l, config: { ...l.config, maxTradesPerDay: 3 } }, t0, day)!, /3 trades taken today/);
+  assert.equal(g({ ...l, config: { ...l.config, maxTradesPerDay: 4 } }, t0, day), null);
+  // realised is 0 here; a lock of 100 is not reached, a profitable day is
+  assert.equal(g({ ...l, config: { ...l.config, profitLockRs: 100 } }, t0, day), null);
+  const up = { ...l, rows: [...l.rows, closed('d', 400, t0 - 60_000)] };
+  assert.match(g({ ...up, config: { ...up.config, profitLockRs: 400 } }, t0, day)!, /profit lock/);
+  // cooldown: 5 x 1m bars after the stop at t0-2m -> blocked until t0+3m (10:33 IST)
+  const cd = { ...l, config: { ...l.config, cooldownBars: 5 } };
+  assert.match(g(cd, t0, day)!, /Cooldown after the stop: 5 bars \(until 10:33 IST\)/);
+  assert.equal(g(cd, t0 + 3 * 60_000, day), null);
+  // another mode's rows never count
+  assert.equal(g({ ...l, mode: 'REAL', config: { ...l.config, maxTradesPerDay: 1 } }, t0, day), null);
+});
+
+test('config bounds for sizing and the day limits', () => {
+  const c = emptyLedger().config;
+  assert.equal(c.riskRs + c.profitLockRs + c.maxTradesPerDay + c.maxLossStreak + c.cooldownBars, 0);
+  assert.match(sanitizeConfigPatch({ riskRs: 50 }, c) as string, /riskRs/);
+  assert.match(sanitizeConfigPatch({ maxTradesPerDay: 2.5 }, c) as string, /maxTradesPerDay/);
+  assert.equal((sanitizeConfigPatch({ cooldownBars: 3, riskRs: 0, profitLockRs: 2000 }, c) as typeof c).profitLockRs, 2000);
+});
+
+test('fills: only REAL Dhan orders are owed; P&L moves to fills only when every side is a fill (estimate kept as pnlDecision)', async () => {
+  const { pendingFills: pf, applyFill: af, rowFillPnl: rf } = await import('./signalOrbLedger.ts');
+  const t = Date.parse('2026-11-24T05:00:00Z');
+  // a closed REAL futures row: LONG 1 lot x 10 a point, decided 5000 -> 5020 (+200), filled 5001 -> 5018 (+170)
+  const r = row({ id: 'f1', mode: 'REAL', broker: 'dhan', status: 'closed', side: 'LONG', entry: 5000, exit: 5020, lots: 1, unitsPerLot: 10, pnl: 200,
+    entryAt: t, entryOrderId: 'E1', exitOrderId: 'X1' });
+  const l = withRow(r);
+  assert.deepEqual(pf(l, 0).map(x => x.orderId), ['E1', 'X1']);
+  assert.deepEqual(pf(withRow({ ...r, broker: 'kotak' }), 0), []);       // no traded-price read for Kotak / Zerodha
+  assert.deepEqual(pf(withRow({ ...r, mode: 'SIM' }), 0), []);
+  assert.deepEqual(pf(l, t + 1), []);                                     // older than the window
+  const half = af(l, { rowId: 'f1', leg: null, side: 'entry' }, 5001);
+  assert.equal(half.rows[0].pnl, 200);                                    // never half estimate, half fact
+  assert.equal(rf(half.rows[0]), null);
+  const both = af(half, { rowId: 'f1', leg: null, side: 'exit' }, 5018);
+  assert.equal(both.rows[0].pnl, 170);
+  assert.equal(both.rows[0].pnlDecision, 200);
+  assert.deepEqual(pf(both, 0), []);
+});
+
+test('fills: a structure books on fills once every opened leg has both; legBasis keeps each leg on one footing', async () => {
+  const { applyFill: af, legBasis: lb, rowLegsLivePnl: lp } = await import('./signalOrbLedger.ts');
+  const s = strad({ status: 'closed', mode: 'REAL', broker: 'dhan', pnl: 0, legs: strad().legs!.map((g, i) => ({ ...g, status: 'closed' as const, exit: i ? 80 : 90, openOrderId: `O${i}`, closeOrderId: `C${i}` })) });
+  let l = withRow(s);
+  for (const [i, side, px] of [[0, 'entry', 101], [0, 'exit', 92], [1, 'entry', 89]] as const) l = af(l, { rowId: s.id, leg: i, side }, px);
+  assert.equal(l.rows[0].pnlDecision, undefined);
+  l = af(l, { rowId: s.id, leg: 1, side: 'exit' }, 81);
+  // both legs SOLD, 2 lots x 65: (101-92 + 89-81) x 130 = 2210
+  assert.equal(l.rows[0].pnl, 2210);
+  assert.deepEqual(lb({ status: 'closed', entry: 100, exit: 90, entryFill: 101 }), { entry: 100, exit: 90 });
+  assert.deepEqual(lb({ status: 'closed', entry: 100, exit: 90, entryFill: 101, exitFill: 92 }), { entry: 101, exit: 92 });
+  assert.deepEqual(lb({ status: 'open', entry: 100, entryFill: 101 }), { entry: 101 });
+  // live: open CE sold at a 101 fill marked 95, PE closed on decision prices 90 -> 80: (6 + 10) x 130
+  const live = strad({ legs: [{ ...strad().legs![0], entryFill: 101 }, { ...strad().legs![1], status: 'closed', exit: 80 }] });
+  assert.equal(lp(live, [95, null]), 16 * 130);
+  assert.equal(lp(live, [null, null]), null);
+});
+
+test('dailyHistory: closed trades per day and mode, newest first; open / failed rows ignored', async () => {
+  const { dailyHistory: dh } = await import('./signalOrbLedger.ts');
+  const c = (id: string, day: string, mode: 'SIM' | 'REAL', pnl: number, onFills = false): OrbRow =>
+    ({ ...row({ id, day, mode, status: 'closed' }), pnl, ...(onFills ? { pnlDecision: pnl + 10 } : {}) });
+  const h = dh([c('a', '2026-11-20', 'SIM', 100), c('b', '2026-11-20', 'SIM', -40), c('c', '2026-11-21', 'REAL', 250, true), c('d', '2026-11-21', 'SIM', 30),
+    row({ id: 'e', day: '2026-11-22', status: 'open' }), row({ id: 'f', day: '2026-11-22', status: 'failed' })]);
+  assert.deepEqual(h.map(x => x.day), ['2026-11-21', '2026-11-20']);
+  assert.deepEqual(h[0].real, { trades: 1, wins: 1, net: 250, onFills: 1 });
+  assert.deepEqual(h[0].sim, { trades: 1, wins: 1, net: 30, onFills: 0 });
+  assert.deepEqual(h[1].sim, { trades: 2, wins: 1, net: 60, onFills: 0 });
+  assert.equal(h[1].real, null);
 });

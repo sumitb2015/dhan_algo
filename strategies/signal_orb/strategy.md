@@ -36,6 +36,25 @@ Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest ye
   4. Entries and reversals only inside the entry window (default 09:15–22:45).
 - **Daily loss limit:** when realised plus open P&L reaches it, the page closes the position and the server halts the engine.
 
+## Sizing and the day's limits (signal-driven only, all off by default)
+
+- **Size from risk** (`riskRs`): lots = floor(riskRs / (hard stop x rupees a point a lot)), at entry (`riskLots`). The stop is on the future's points, so a sold option is sized conservatively. Below one lot the entry is refused. The Lots box is then not used.
+- **REAL above 10 lots** (`LOTS_CONFIRM_ABOVE`), typed or as risk sizing works out, needs an explicit confirm on the Rules page when it grows (setConfig / setMode with `confirm: true`). Lots stay uncapped.
+- **Daily profit lock** (`profitLockRs`): realised + open at or above it closes the position (server watcher, `signalRowExit`) and no new entry is taken today.
+- **Max trades a day**, **stop after N losses in a row**, **cooldown N bars after a stop** (rows now record `exitKind`). One gate, `entryGate` in `lib/signalOrbLedger.ts`, is asked by the page before an entry and enforced again by the trade route. A gated reversal exits to flat.
+
+## Actual fills (Dhan REAL rows)
+
+- Every REAL order's id is kept on its row / leg (`entryOrderId` / `exitOrderId`, `openOrderId` / `closeOrderId`). The server watcher reads ONE owed traded price per tick from Dhan (2 / 4 / 8 / 16 / 32 / 64 s back-off; rows up to 3 days old). TRADED, or CANCELLED / EXPIRED with a fill, is final.
+- A closed row's `pnl` moves to the fills only when EVERY side of it has one (`rowFillPnl`); the decision-price P&L is kept as `pnlDecision` (the Journal's Slip column). Never half estimate, half fact. A price that never arrives marks the row `fillUnconfirmed` and its P&L stays on decision prices.
+- Live P&L uses the entry fill once read (`entryBasis`, `legBasis`); the stops still measure the future's points and the straddle rules keep the decision entry as their reference (dhan-fill-price-pnl).
+- An order the page booked as placed that Dhan reports REJECTED / CANCELLED with nothing filled halts the engine (the ledger may not match the broker).
+- Kotak / Zerodha rows are not read (no traded-price read is wired for them here): their P&L stays on decision prices ("est"). Charges are not included anywhere.
+
+## Daily history
+
+- The footer's "Daily SIM vs REAL" tab: closed trades, win rate and net per day and mode, and how many REAL rows are on actual fills. From the ledger, which keeps its newest 200 rows, so older days drop off.
+
 ## Entry filters (lib/orbFilters.ts, optional, off by default)
 
 - **Higher timeframe must agree** (`htfConfirm`: 3m / 5m / 15m / 1h, above the trading timeframe): an entry or reversal goes only when that timeframe's consensus (all indicators, closed bars: the Timeframes table's own rule) shows the entry's colour.
@@ -61,7 +80,7 @@ Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest ye
 - **P&L uses the decision price (the LTP when the order was sent), not the broker fill.** Futures: points × barrels per lot × lots; options (always sold): (entry premium − exit premium) × barrels per lot × lots (`rowPnl`). The replay stays in future points in options mode (labelled "fut pts").
 
 ## Safety
-- SIM is the default. Switching mode always leaves the engine paused. REAL needs a hard stop above 0 and the **Arm real money** click on each page load (**Disarm** undoes it; the stage is framed red in REAL, solid when armed, and Close needs a second click within 4 s); the arm is never saved. The click also arms the server for the IST day (in memory), and the trade route refuses REAL entries and reversals without it, so a dashboard restart or a mode switch disarms every tab. A naked sold option (Options mode, Dhan / Kotak) gets the same fail-closed margin check as a structure.
+- SIM is the default. Switching mode always leaves the engine paused. REAL needs a hard stop above 0 and the **Arm real money** click on each page load (**Disarm** undoes it; the stage is framed red in REAL, solid when armed, and Close needs a second click within 4 s); the arm is never saved. The click also arms the server for the IST day (in memory), and the trade route refuses REAL entries and reversals without it, so a dashboard restart or a mode switch disarms every tab. Every REAL entry that blocks margin gets the fail-closed funds / margin check (`lib/orbMargin.ts`) on every broker: a sold option, a structure with a short leg, and the future long or short (Dhan's margin calculator against the chosen broker's funds).
 - Entries and reversals are decided only in an open browser tab, and only in the leader tab (localStorage lock): closing the tab stops new entries. **Stops do not depend on the tab**: `lib/orbPremiumServer.ts` judges every open signal-driven row (futures, sold option, synthetic) every 2.5 s on the server's own WebSocket price of the signal future: the daily loss limit (realised + open), the cutoff, and the hard / trailing stop, by the same rule as the page (`signalRowExit` in `lib/signalOrb.ts`). It keeps the trailing peak in the ledger, exits through `orbExitRow` (only if the row is still the same open row), retries a refused exit after 5 s and warns after 60 s without a fresh price. The page shows where the stops run ("STOPS RUN ON THE SERVER"). While the watcher's heartbeat is fresh (< 10 s) the browser sends no stop exits (one sender); when it is stale (e.g. `DASHBOARD_NO_BACKGROUND=1`, or the loop died) the leader tab sends them as before and the page shows a red strip and buzzes. Stopping the dashboard stops both: the broker's MIS square-off is then the only backstop.
 - A price feed with no new price for 30 s blocks entries, never exits.
 - A row from an earlier IST day is not managed automatically.
@@ -83,7 +102,7 @@ Dashboard page `/signal-orb`. **Real money in REAL mode.** It has no backtest ye
 - **Autoplay:** browsers keep the page silent until the first click or key press. Until then the header shows "click to enable sound". On-screen messages always show, sound or not.
 
 ## Synthetic futures, short straddle and short strangle
-Three structures beyond the future and the one sold option. Every leg is its own single-option market order (`lib/orbLegs.ts`); REAL runs on **Dhan or Kotak** (the config refuses Zerodha for these structures; market data and the Focus rules always run on Dhan's feed, only the orders and the fill reads go to the row's broker). Kotak's MCX option legs and fills are unconfirmed against a live order.
+Three structures beyond the future and the one sold option. Every leg is its own single-option market order (`lib/orbLegs.ts`); REAL runs on **Dhan, Kotak or Zerodha** (market data and the Focus rules always run on Dhan's feed, only the orders and the fill reads go to the row's broker). Kotak's and Zerodha's MCX option legs and fills are unconfirmed against a live order (Zerodha structures were enabled 2026-11-24 without a live test).
 
 - **Synthetic** (signal-driven, like futures): BULL = long synthetic (BUY the ATM CE + SELL the ATM PE, same strike and expiry), BEAR = short synthetic (BUY the PE + SELL the CE). The stop, trail, cutoff and daily loss limit are the future-point ones above; BULL <-> BEAR closes both legs and opens the opposite pair.
 - **Straddle / strangle** (NOT signal-driven): a short straddle (ATM CE + PE) or strangle (each `strikeOffset` strikes OTM). The indicators are ignored. They are sold at the entry time (`premium.entryTime`, default 09:20 NIFTY / 09:30 crude) once a day when Auto is on, or with **Enter now**, and managed by the **Ultimate Scalper's own rule functions** (`lib/orbFocus.ts` builds their inputs and calls `lib/focusToolRules.ts`): leg SL x (+ Trail SL every/by/start), SL to cost, leg target %, total SL (% of premium and / or rupees), overall target (% of premium or rupees), the cutoff and the daily loss limit. A leg's SL / target / cost stop closes that leg; the total SL, overall target, cutoff and loss limit close everything.

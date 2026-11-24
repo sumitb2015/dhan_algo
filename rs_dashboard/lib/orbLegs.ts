@@ -175,7 +175,7 @@ export async function enterLegs(plans: LegPlan[], deps: LegDeps): Promise<EnterR
 // ── Exit ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 export type ExitState = 'closed' | 'open' | 'unknown';
-export interface ExitRun { index: number; state: ExitState; flat: boolean; error?: string }
+export interface ExitRun { index: number; state: ExitState; flat: boolean; error?: string; /** the closing order (null: flat, or no id in the reply) */ orderId?: string | null }
 export interface ExitResult {
   /** Every leg asked for is closed. */
   ok: boolean;
@@ -197,7 +197,7 @@ export async function exitLegs(legs: { target: Target; action: LegAction; units:
   for (const { l, index } of order) {
     if (l.action === 'BUY' && shortOpen) { runs.push({ index, state: 'open', flat: false, error: 'a short leg is still open' }); continue; }
     const o = outcomeOf(await sendClose(deps, { target: l.target, action: opposite(l.action), units: l.units }));
-    if (o.kind === 'placed' || o.kind === 'flat') { runs.push({ index, state: 'closed', flat: o.kind === 'flat' }); continue; }
+    if (o.kind === 'placed' || o.kind === 'flat') { runs.push({ index, state: 'closed', flat: o.kind === 'flat', orderId: o.orderId }); continue; }
     if (o.kind === 'unknown') {
       runs.push({ index, state: 'unknown', flat: false, error: o.error });
       return { ok: false, unknown: true, error: o.error, legs: runs };

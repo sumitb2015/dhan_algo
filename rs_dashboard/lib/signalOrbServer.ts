@@ -10,7 +10,7 @@ import { targetKey, type Target } from '@/lib/pnfTarget';
 import { resolveOption } from '@/lib/pnfContracts';
 import { pickTarget } from '@/lib/gearboxCore';
 import { readBrokerOrder } from '@/lib/brokerOrderStatus';
-import { enterLegs, exitLegs, premiumLegs, syntheticLegs, type LegDeps } from '@/lib/orbLegs';
+import { enterLegs, exitLegs, outcomeOf, premiumLegs, syntheticLegs, type LegDeps } from '@/lib/orbLegs';
 import { premiumEntryCheck } from '@/lib/orbFocus';
 import { isTradingDayFor } from '@/lib/focusToolUnderlyings';
 import { istMinuteOfDay } from '@/lib/istTime';
@@ -19,7 +19,7 @@ import { wsPrice, wsSync, wsWant } from '@/lib/freshMoneyWs';
 import { ORB_CODE_VERSION, hhmmToMin, type Side } from '@/lib/signalOrb';
 import { ORB_STATE_FILE, readOrbLedger } from '@/lib/signalOrbFile';
 import {
-  MAX_REJECTS, addLog, applyClientOp, bookStructureExit, closeRow, closeRowLegs, halt, legHeld, unknownLegIndexes, isLegInstrument, isPremiumInstrument, legsAfterClose, liveRow, patchRow, realisedToday, rowInstrument, statusAfterUnknown, trimRows,
+  LOTS_CONFIRM_ABOVE, MAX_REJECTS, addLog, applyClientOp, bookStructureExit, entryGate, riskLots, closeRow, closeRowLegs, halt, legHeld, unknownLegIndexes, isLegInstrument, isPremiumInstrument, legsAfterClose, liveRow, patchRow, realisedToday, rowInstrument, statusAfterUnknown, trimRows,
   type OrbBroker, type OrbConfig, type OrbLedger, type OrbLeg, type OrbRow, type OrbSymbol,
 } from '@/lib/signalOrbLedger';
 
@@ -176,6 +176,19 @@ export function orbClientOp(op: unknown): Promise<Reply> {
     }
     const r = applyClientOp(base, op, now);
     if (!r.ok) return { status: r.status, body: { success: false, error: r.error } };
+    // REAL above LOTS_CONFIRM_ABOVE lots (as typed, or as risk sizing works out now) needs an explicit confirm when it grows
+    if ((kind === 'setConfig' || kind === 'setMode') && r.ledger.mode === 'REAL' && (op as { confirm?: unknown }).confirm !== true) {
+      const lotsOf = (c: OrbConfig) => {
+        if (isPremiumInstrument(c.instrument)) return c.lots;
+        const n = riskLots(c, unitsPerLotOf(c.symbol, now));
+        return typeof n === 'number' ? n : 0;
+      };
+      const after = lotsOf(r.ledger.config);
+      const before = base.mode === 'REAL' ? lotsOf(base.config) : 0;
+      if (after > LOTS_CONFIRM_ABOVE && after > before) {
+        return { status: 409, body: { success: false, needsConfirm: true, error: `REAL at ${after} lots${r.ledger.config.riskRs > 0 && !isPremiumInstrument(r.ledger.config.instrument) ? ` (₹${r.ledger.config.riskRs.toLocaleString('en-IN')} risk at a ${r.ledger.config.stopPts}-pt stop)` : ''} - above ${LOTS_CONFIRM_ABOVE} lots needs a confirm` } };
+      }
+    }
     return { status: 200, body: { success: true, ledger: save(r.ledger, now) } };
   });
 }
@@ -300,6 +313,9 @@ export function orbTrade(req: TradeRequest): Promise<Reply> {
     if (l.mode === 'REAL' && !isArmedToday(now)) return fail('REAL is not armed - press Arm real money', 409);
     if (req.barT! <= l.watermarkT) return fail('This bar was already acted on', 409);
     if (req.action === 'enter' && live) return fail('A position is already open', 409);
+    // the day's gate (profit lock, trade cap, loss streak, cooldown): the page asks it first and exits a gated reversal to flat
+    const gate = entryGate(l, now, day);
+    if (gate) return fail(gate, 409);
     if (req.action === 'reverse') {
       if (!live) return fail('Nothing to reverse', 409);
       if (live.status !== 'open') return fail(`The position is ${live.status.toUpperCase()}`, 409);
@@ -372,7 +388,9 @@ async function enterRow(l0: OrbLedger, side: Side, futPrice: number, opt: OptPic
   if (!(unitsPerLot > 0)) return { ok: false, error: `No lot size for ${config.symbol} in the master list`, ledger: addLog(l0, 'error', 'No lot size', now) };
   const target = opt ? opt.target : fut;
   const entry = opt ? opt.premium : futPrice;
-  const lots = config.lots;
+  const sized = riskLots(config, unitsPerLot);
+  if (typeof sized === 'string') return { ok: false, error: sized, ledger: addLog(l0, 'error', `Entry not sent: ${sized}`, now) };
+  const lots = sized;
   const action = openAction(side, !!opt);
   const what = `${action} ${optLabel(target)} x${lots}`;
   const row: OrbRow = {
@@ -390,9 +408,9 @@ async function enterRow(l0: OrbLedger, side: Side, futPrice: number, opt: OptPic
   if (typeof legs === 'string') return { ok: false, error: legs, ledger: bumpReject(patchRow(l, row.id, { status: 'failed', note: legs }), legs, now) };
   const onBroker = await brokerLegs(config.broker, target, legs).catch((e: Error) => `Contract lookup failed: ${e.message}`);
   if (typeof onBroker === 'string') return { ok: false, error: onBroker, ledger: bumpReject(patchRow(l, row.id, { status: 'failed', note: onBroker }), onBroker, now) };
-  // a naked sold option is margin-checked like a structure (fail closed). Zerodha has no funds read here; a future is left to the broker.
-  if (opt && config.broker !== 'zerodha') {
-    const block = await orbMarginBlock(config.broker, [{ target, action: 'SELL', lots, lotUnits: onBroker[0].lotUnits, unitsPerLot, premium: opt.premium }]);
+  // margin-checked like a structure, fail closed: a naked sold option, or the future (long or short), on every broker
+  {
+    const block = await orbMarginBlock(config.broker, [{ target, action, lots, lotUnits: onBroker[0].lotUnits, unitsPerLot, premium: entry }]);
     if (block) return { ok: false, error: block, ledger: bumpReject(patchRow(l, row.id, { status: 'failed', note: block }), `Entry refused: ${block}`, now) };
   }
   const order = parsePnfOrder({ broker: config.broker, mode: 'REAL', target, action, lots, product: 'INTRADAY', source: 'bar' }, { uncapped: true });
@@ -401,8 +419,9 @@ async function enterRow(l0: OrbLedger, side: Side, futPrice: number, opt: OptPic
   const outcome = String(r.body.outcome ?? '');
   const msg = String(r.body.message ?? r.body.error ?? '');
   const units = lots * onBroker[0].lotUnits;
+  const placedId = outcome === 'placed' ? (outcomeOf(r) as { orderId?: string | null }).orderId ?? undefined : undefined;
   if (outcome === 'placed') {
-    l = addLog(patchRow({ ...l, rejects: 0 }, row.id, { status: 'open', units }), 'trade', `REAL ${side}: ${what} @ ~${entry} - ${reason}`, now);
+    l = addLog(patchRow({ ...l, rejects: 0 }, row.id, { status: 'open', units, ...(placedId ? { entryOrderId: placedId } : {}) }), 'trade', `REAL ${side}: ${what} @ ~${entry} - ${reason}`, now);
     return { ok: true, ledger: l };
   }
   if (outcome === 'unknown' || r.status === 504) {
@@ -422,10 +441,11 @@ function exitMark(row: OrbRow, futPrice: number, now: number): { px: number; not
 async function exitRow(l0: OrbLedger, row: OrbRow, req: TradeRequest, now: number): Promise<Step> {
   if (row.legs) return exitStructure(l0, row, req, now);
   const tag = req.exitKind === 'stop' ? { blockedSide: row.side } : {};
+  const kind = { exitKind: req.exitKind ?? 'manual' } as const;
   const mark = exitMark(row, req.price, now);
   const what = `${closeAction(row)} ${optLabel(row.target)}`;
   if (row.mode === 'SIM') {
-    let l = addLog({ ...closeRow(l0, row.id, mark.px, req.reason, now), ...tag }, 'trade', `SIM exit ${row.side}: ${what} @ ${mark.px} - ${req.reason}`, now);
+    let l = addLog({ ...patchRow(closeRow(l0, row.id, mark.px, req.reason, now), row.id, kind), ...tag }, 'trade', `SIM exit ${row.side}: ${what} @ ${mark.px} - ${req.reason}`, now);
     if (mark.note) l = patchRow(l, row.id, { note: mark.note });
     return { ok: true, ledger: lossCheck(l, now) };
   }
@@ -440,9 +460,11 @@ async function exitRow(l0: OrbLedger, row: OrbRow, req: TradeRequest, now: numbe
   const outcome = String(r.body.outcome ?? '');
   const msg = String(r.body.message ?? r.body.error ?? '');
   if (outcome === 'placed' || outcome === 'flat') {
+    const exitId = outcome === 'placed' ? (outcomeOf(r) as { orderId?: string | null }).orderId ?? undefined : undefined;
+    if (exitId) l = patchRow(l, row.id, { exitOrderId: exitId });
     const flat = outcome === 'flat' ? 'nothing was left at the broker (closed outside this page)' : undefined;
     const note = [flat, mark.note].filter(Boolean).join('; ') || undefined;
-    l = addLog({ ...closeRow(l, row.id, mark.px, req.reason, now), ...tag, rejects: 0 }, 'trade', `REAL exit ${row.side}: ${what} @ ~${mark.px} - ${req.reason}${note ? ` (${note})` : ''}`, now);
+    l = addLog({ ...patchRow(closeRow(l, row.id, mark.px, req.reason, now), row.id, kind), ...tag, rejects: 0 }, 'trade', `REAL exit ${row.side}: ${what} @ ~${mark.px} - ${req.reason}${note ? ` (${note})` : ''}`, now);
     if (note) l = patchRow(l, row.id, { note });
     return { ok: true, ledger: lossCheck(l, now) };
   }
@@ -484,7 +506,9 @@ export async function enterStructure(l0: OrbLedger, structure: 'synthetic' | 'st
   if (!fut) return { ok: false, error: `No live ${config.symbol} future in the master list`, ledger: addLog(l0, 'error', 'No contract', now) };
   const unitsPerLot = unitsPerLotOf(config.symbol, now);
   if (!(unitsPerLot > 0)) return { ok: false, error: `No lot size for ${config.symbol} in the master list`, ledger: addLog(l0, 'error', 'No lot size', now) };
-  const lots = config.lots;
+  const sized = structure === 'synthetic' ? riskLots(config, unitsPerLot) : config.lots;
+  if (typeof sized === 'string') return { ok: false, error: sized, ledger: addLog(l0, 'error', `Entry not sent: ${sized}`, now) };
+  const lots = sized;
   const what = `${structure === 'synthetic' ? `${side} synthetic` : `short ${structure}`} ${pick.legs.map(legWord).join(' + ')} x${lots}`;
   const legs: OrbLeg[] = pick.legs.map(g => ({ target: g.target, action: g.action, entry: g.premium, units: 0, status: 'open' }));
   const row: OrbRow = {
@@ -501,8 +525,6 @@ export async function enterStructure(l0: OrbLedger, structure: 'synthetic' | 'st
     return { ok: true, ledger: addLog({ ...paper, rejects: 0 }, 'trade', `SIM ${what} - ${reason}`, now) };
   }
 
-  // (the config already refuses it; this keeps a hand-edited ledger from reaching a broker lookup)
-  if (config.broker === 'zerodha') return { ok: false, error: 'Zerodha is not supported for this structure yet', ledger: addLog(l0, 'error', 'Entry not sent: Zerodha is not supported for this structure', now) };
   // REAL: contract units and funds are checked BEFORE the row is written or anything is sent (nothing to undo if they refuse)
   const lotUnits: number[] = [];
   for (const g of pick.legs) {
@@ -519,7 +541,8 @@ export async function enterStructure(l0: OrbLedger, structure: 'synthetic' | 'st
   const res = await enterLegs(pick.legs.map((g, i) => ({ target: g.target, action: g.action, lots, lotUnits: lotUnits[i] })), legDeps(config.broker));
   const legsOut: OrbLeg[] = legs.map((g, i) => {
     const st = res.legs[i].state;
-    return { ...g, units: lots * lotUnits[i], status: st === 'open' ? 'open' : st === 'unknown' ? 'unknown' : 'failed', ...(st === 'unknown' ? { note: 'outcome unknown' } : {}) };
+    const oid = res.legs[i].orderId;
+    return { ...g, units: lots * lotUnits[i], status: st === 'open' ? 'open' : st === 'unknown' ? 'unknown' : 'failed', ...(st === 'unknown' ? { note: 'outcome unknown' } : {}), ...(oid ? { openOrderId: oid } : {}) };
   });
   const units = legsOut[0].units;
   if (res.ok) {
@@ -548,7 +571,7 @@ export async function exitStructure(l0: OrbLedger, row: OrbRow, req: TradeReques
   const note = unpriced ? 'no premium quote on a leg: its P&L is booked at entry - check the broker fills' : undefined;
   const what = `exit ${row.structure === 'synthetic' ? `${row.side} synthetic` : `short ${row.structure}`} ${legs.map(g => `${g.action === 'BUY' ? 'SELL' : 'BUY'} ${optLabel(g.target)}`).join(' + ')}`;
   if (row.mode === 'SIM') {
-    let l = addLog({ ...closeRowLegs(l0, row.id, marks, req.reason, now), ...tag }, 'trade', `SIM ${what} - ${req.reason}`, now);
+    let l = addLog({ ...patchRow(closeRowLegs(l0, row.id, marks, req.reason, now), row.id, { exitKind: req.exitKind ?? 'manual' }), ...tag }, 'trade', `SIM ${what} - ${req.reason}`, now);
     if (note) l = patchRow(l, row.id, { note });
     return { ok: true, ledger: lossCheck(l, now) };
   }
@@ -560,7 +583,7 @@ export async function exitStructure(l0: OrbLedger, row: OrbRow, req: TradeReques
   const after = legs.map(g => ({ ...g }));
   for (const r of res.legs) {
     const i = todo[r.index].i;
-    if (r.state === 'closed') after[i] = { ...after[i], status: 'closed', exit: marks[i] ?? after[i].entry };
+    if (r.state === 'closed') after[i] = { ...after[i], status: 'closed', exit: marks[i] ?? after[i].entry, ...(r.orderId ? { closeOrderId: r.orderId } : {}) };
     else if (r.state === 'unknown') after[i] = { ...after[i], status: 'unknown', note: 'exit unknown' };
   }
   if (res.ok) {
@@ -574,7 +597,7 @@ export async function exitStructure(l0: OrbLedger, row: OrbRow, req: TradeReques
       l = addLog({ ...patchRow(booked.ledger, row.id, { note: [msg, notes].filter(Boolean).join('; ') }), ...tag, rejects: 0 }, 'warn', `REAL ${what} - ${req.reason}: ${msg}`, now);
       return { ok: false, unknown: true, error: msg, ledger: l };
     }
-    l = addLog({ ...booked.ledger, ...tag, rejects: 0 }, 'trade', `REAL ${what} - ${req.reason}${notes ? ` (${notes})` : ''}`, now);
+    l = addLog({ ...patchRow(booked.ledger, row.id, { exitKind: req.exitKind ?? 'manual' }), ...tag, rejects: 0 }, 'trade', `REAL ${what} - ${req.reason}${notes ? ` (${notes})` : ''}`, now);
     if (notes) l = patchRow(l, row.id, { note: notes });
     return { ok: true, ledger: lossCheck(l, now) };
   }
@@ -657,9 +680,10 @@ export async function exitOneLeg(l0: OrbLedger, row: OrbRow, index: number, why:
   const px = mark ?? g.entry;
   const note = mark === null ? 'no premium quote: this leg is booked at entry - check the broker fill' : undefined;
   const word = `${g.action === 'BUY' ? 'SELL' : 'BUY'} ${optLabel(g.target)}`;
-  const finish = (l: OrbLedger, tagWord: string): Step => {
+  const finish = (l: OrbLedger, tagWord: string, closeOrderId?: string | null): Step => {
     // after a leg's SL, the other open leg gets its cost stop (Focus: SL to cost) when that option is on
-    const c = legsAfterClose(legs, index, px, why === 'sl' && l0.config.premium.slToCost);
+    const c0 = legsAfterClose(legs, index, px, why === 'sl' && l0.config.premium.slToCost);
+    const c = closeOrderId ? { ...c0, legs: c0.legs.map((x, i) => (i === index ? { ...x, closeOrderId } : x)) } : c0;
     let out = patchRow(l, row.id, { legs: c.legs, status: 'open', note });
     if (!c.anyHeld) {
       out = closeRowLegs(out, row.id, c.legs.map(x => x.exit ?? null), `${reason}`, now);
@@ -673,7 +697,7 @@ export async function exitOneLeg(l0: OrbLedger, row: OrbRow, index: number, why:
   let l = patchRow(l0, row.id, { status: 'closing', sentAt: now });
   save(l, now);
   const res = await exitLegs([{ target: g.target, action: g.action, units: g.units }], legDeps(row.broker));
-  if (res.ok) return finish(l, 'REAL');
+  if (res.ok) return finish(l, 'REAL', res.legs[0]?.orderId);
   if (res.unknown) {
     // only this leg is unknown: the other leg stays open and keeps being judged; this one is never resent
     const unk = legs.map((x, i) => (i === index ? { ...x, status: 'unknown' as const, note: 'exit unknown' } : x));
