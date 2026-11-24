@@ -28,6 +28,8 @@ const STATUS_CLS: Record<OrderBucket, string> = {
 
 export interface AccountPanelProps {
   real: boolean;
+  /** The account the panel reads (Dhan or Kotak). */
+  brokerName: string;
   positions: PositionRowView[];
   /** The positions book was actually read (REAL: a successful read and no current error). Until then the day P&L is
    *  unknown, never 0.00. */
@@ -103,9 +105,9 @@ export default function AccountPanel(p: AccountPanelProps) {
       {/* account + day summary */}
       <div className="flex items-start justify-between gap-4 px-3 pt-2">
         <div className="flex items-center gap-2 pt-1">
-          <span className="font-bold text-zinc-100 text-xs">DHAN</span>
+          <span className="font-bold text-zinc-100 text-xs">{p.brokerName.toUpperCase()}</span>
           <span className={cn('text-[9px] font-bold px-1.5 py-px rounded border', p.real ? 'text-rose-400 border-rose-500/40 bg-rose-500/10' : 'text-amber-300 border-amber-500/40 bg-amber-500/10')}>
-            {p.real ? 'REAL' : 'SIM · paper positions'}
+            {p.real ? `REAL · ${p.brokerName}` : 'SIM · paper positions'}
           </span>
           <button type="button" aria-label="Download this table as CSV" title="Download CSV" onClick={download}
             className={cn('p-1 rounded text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800', FOCUS)}><Download className="w-3.5 h-3.5" /></button>

@@ -35,6 +35,9 @@ const FOCUS = 'focus-visible:outline-none focus-visible:ring-2 focus-visible:rin
 export interface DhanScalperWidgetProps {
   feed: IndexScalperFeed;
   real: boolean;
+  /** REAL orders' account: on Kotak the sell margin is not shown (Kotak has no basket-aware margin calculator) and
+   *  quantities use Kotak's lot size. */
+  broker: 'dhan' | 'kotak';
   busy: boolean;
   /** Lots for the top PUT / CALL bar; shared with the toolbar's Buy CE / Buy PE and the chain's one-click B / S. */
   topLots: number;
@@ -105,7 +108,7 @@ function useSellMargin(expiry: string, strike: number | null, type: 'CE' | 'PE',
   return margin && margin.key === key ? margin.value : null;
 }
 
-export default function DhanScalperWidget({ feed, real, busy, topLots, onTopLotsChange, onTradeContract, onClose }: DhanScalperWidgetProps) {
+export default function DhanScalperWidget({ feed, real, broker, busy, topLots, onTopLotsChange, onTradeContract, onClose }: DhanScalperWidgetProps) {
   const { pos, handle } = useDraggable({ x: Math.max(16, (typeof window === 'undefined' ? 1200 : window.innerWidth) - 400), y: 65 });
 
   const [ceLots, setCeLots] = useState(1);
@@ -119,7 +122,9 @@ export default function DhanScalperWidget({ feed, real, busy, topLots, onTopLots
   const [productType, setProductType] = useState<'INTRADAY' | 'MARGIN'>('INTRADAY');
   const clickBusyRef = useRef(false);
 
-  const lotSize = feed.lotSize; // null until the lookup for THIS expiry lands: no order then
+  // null until the lookup for THIS expiry lands: no order then. REAL on Kotak sizes with Kotak's lot.
+  const kotakReal = real && broker === 'kotak';
+  const lotSize = kotakReal ? feed.kotak?.lotSize ?? null : feed.lotSize;
   const spot = feed.spot ?? feed.chain?.spot ?? null;
   const expiry = feed.expiry;
   const strikes = computeAtmStrikes(spot, STEP, peOffset, ceOffset);
@@ -140,11 +145,12 @@ export default function DhanScalperWidget({ feed, real, busy, topLots, onTopLots
     return { strike, type, securityId: type === 'CE' ? ceId : peId, ltp: (type === 'CE' ? ceLtp : peLtp) || null, expiry };
   };
 
-  const ceSellReq = useSellMargin(expiry, ceStrike, 'CE', ceLots, ceLtp, ceCardOpen);
-  const peSellReq = useSellMargin(expiry, peStrike, 'PE', peLots, peLtp, peCardOpen);
+  // Dhan's margin calculator is asked only for a Dhan account: on Kotak it would be another broker's figure.
+  const ceSellReq = useSellMargin(expiry, ceStrike, 'CE', ceLots, ceLtp, ceCardOpen && !kotakReal);
+  const peSellReq = useSellMargin(expiry, peStrike, 'PE', peLots, peLtp, peCardOpen && !kotakReal);
 
   const ready = strikes !== null && lotSize !== null;
-  const why = spot === null ? 'Waiting for a NIFTY price' : lotSize === null ? 'Waiting for the lot size of this expiry' : null;
+  const why = spot === null ? 'Waiting for a NIFTY price' : lotSize === null ? (kotakReal ? 'Waiting for Kotak contracts for this expiry' : 'Waiting for the lot size of this expiry') : null;
 
   const trade = async (type: 'CE' | 'PE', side: 'BUY' | 'SELL', lots: number) => {
     if (clickBusyRef.current || busy) return;
@@ -185,7 +191,7 @@ export default function DhanScalperWidget({ feed, real, busy, topLots, onTopLots
                 className={cn(tradeBtn, 'h-9 text-xs bg-sky-600 hover:bg-sky-500')}>Buy</button>
             </div>
             <div className="grid grid-cols-2 gap-2 text-[10px] text-zinc-400 tabular-nums px-0.5 mt-0.5">
-              <div title="Dhan's margin calculator for this sell">Margin: {inr(sellReq)}</div>
+              <div title={kotakReal ? 'Kotak has no basket-aware margin calculator: check margin at Kotak' : "Dhan's margin calculator for this sell"}>Margin: {kotakReal ? '—' : inr(sellReq)}</div>
               <div className="text-right" title="Premium to buy at the shown price">Premium: {inr(buyReq)}</div>
             </div>
           </div>
@@ -203,7 +209,7 @@ export default function DhanScalperWidget({ feed, real, busy, topLots, onTopLots
             <Zap className="w-4 h-4 text-sky-400 fill-sky-400 shrink-0" />
             <span className="text-sm font-bold text-zinc-100 tracking-tight">NIFTY 50</span>
             <span className={cn('text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border',
-              real ? 'bg-rose-500/10 text-rose-400 border-rose-500/30' : 'bg-amber-500/10 text-amber-400 border-amber-500/30')}>{real ? 'REAL' : 'SIM'}</span>
+              real ? 'bg-rose-500/10 text-rose-400 border-rose-500/30' : 'bg-amber-500/10 text-amber-400 border-amber-500/30')}>{real ? `REAL · ${broker === 'kotak' ? 'Kotak' : 'Dhan'}` : 'SIM'}</span>
             <span className="text-[9px] font-bold text-amber-300" title="Buttons here send a market order at once">ONE-CLICK</span>
           </div>
           <div className="flex items-center gap-2 text-zinc-400">

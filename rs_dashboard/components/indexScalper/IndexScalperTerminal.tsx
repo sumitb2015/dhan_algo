@@ -12,6 +12,8 @@ import {
 } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import DataChip, { toIsoDate } from '@/components/DataChip';
+import { BrokerPicker, usePageBroker } from '@/components/BrokerPicker';
+import { scalperRoute } from '@/hooks/useBrokerSelector';
 import ScalperChart, { type DrawTool } from './ScalperChart';
 import OptionChainPanel, { type PickedContract } from './OptionChainPanel';
 import OrderTicket, { type TicketRequest } from './OrderTicket';
@@ -30,6 +32,10 @@ import {
   MAX_LOTS, applyFill, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, type ScalperLeg,
 } from '@/lib/indexScalperPositions';
 import { closeOrderProduct } from '@/lib/positionProduct';
+import {
+  dashProduct, heldByUnknown, kotakOrdersAsDhan, legsFromKotakPositions, ownedQtyFromKotakOrders, recordedIds,
+  type KotakRecord, type KotakSymbolInfo,
+} from '@/lib/indexScalperKotak';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 
@@ -63,7 +69,15 @@ function defaultIndicators(): IndicatorInstance[] {
 interface Toast { ok: boolean; text: string }
 
 export default function IndexScalperTerminal() {
-  const feed = useIndexScalperFeed();
+  // Broker for REAL orders and the account panel (Dhan or Kotak). Prices are always Dhan's live feed. The first render
+  // is always Dhan; every account read and REAL send waits for `brokerLoaded` so a page saved on Kotak never touches
+  // Dhan's account. The picker is locked while REAL is armed: a REAL session trades one account.
+  const [broker, setBroker, brokerLoaded] = usePageBroker('indexScalper.broker');
+  const brokerRef = useRef(broker);
+  const brokerLoadedRef = useRef(brokerLoaded);
+  useEffect(() => { brokerRef.current = broker; brokerLoadedRef.current = brokerLoaded; });
+  const brokerName = broker === 'kotak' ? 'Kotak' : 'Dhan';
+  const feed = useIndexScalperFeed(broker);
 
   const [interval, setIntervalSel] = useState<Interval>('5');
   const [days, setDays] = useState(15);
@@ -110,6 +124,8 @@ export default function IndexScalperTerminal() {
   const [holdingsRaw, setHoldingsRaw] = useState<Record<string, unknown>[]>([]);
   const [holdingsErr, setHoldingsErr] = useState<string | null>(null);
   const [holdingsLoaded, setHoldingsLoaded] = useState(false);
+  // Kotak: the order IDs this page placed today (server day file), i.e. what it owns and may cancel on Kotak.
+  const [kotakRecords, setKotakRecords] = useState<KotakRecord[]>([]);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   // REAL positions have been read successfully at least once since REAL was armed (the day P&L is unknown before).
   const [realLoaded, setRealLoaded] = useState(false);
@@ -217,19 +233,34 @@ export default function IndexScalperTerminal() {
 
   // ── funds + REAL positions ─────────────────────────────────────────
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFunds(fundsView(null));
+    if (!brokerLoaded) return;
     let dead = false;
-    const load = () => fetch('/api/scalper/funds').then(r => r.json()).then((j: { success: boolean; data?: Record<string, unknown> }) => {
+    const load = () => fetch(scalperRoute(broker, 'funds')).then(r => r.json()).then((j: { success: boolean; data?: Record<string, unknown> }) => {
       if (dead || !j.success || !j.data) return;
       setFunds(fundsView(j.data));
     }).catch(() => {});
     load();
     const t = setInterval(load, 20_000);
     return () => { dead = true; clearInterval(t); };
+  }, [broker, brokerLoaded]);
+
+  const loadKotakRecords = useCallback(async (): Promise<KotakRecord[] | null> => {
+    if (brokerRef.current !== 'kotak') return [];
+    try {
+      const r = await fetch('/api/index-scalper/kotak-order');
+      const j = await r.json() as { success: boolean; records?: KotakRecord[] };
+      if (!j.success || !Array.isArray(j.records)) return null;
+      setKotakRecords(j.records);
+      return j.records;
+    } catch { return null; }
   }, []);
 
   const loadPositions = useCallback(async (): Promise<Record<string, unknown>[] | null> => {
     try {
-      const r = await fetch('/api/scalper/positions');
+      if (!brokerLoadedRef.current) return null;
+      const r = await fetch(scalperRoute(brokerRef.current, 'positions'));
       const j = await r.json() as { success: boolean; data?: Record<string, unknown>[]; error?: string };
       if (!j.success || !j.data) { setPosErr(j.error ?? 'Could not load positions'); return null; }
       setPosErr(null);
@@ -249,7 +280,9 @@ export default function IndexScalperTerminal() {
     const seq = ++ordersSeqRef.current;
     ordersInFlightRef.current = true;
     try {
-      const r = await fetch('/api/scalper/orders');
+      if (!brokerLoadedRef.current) return;
+      if (brokerRef.current === 'kotak') void loadKotakRecords();
+      const r = await fetch(scalperRoute(brokerRef.current, 'orders'));
       const j = await r.json() as { success: boolean; data?: Record<string, unknown>[]; error?: string };
       if (seq !== ordersSeqRef.current) return;
       if (!j.success || !Array.isArray(j.data)) { setOrdersErr(j.error ?? 'Could not load orders'); return; }
@@ -260,29 +293,40 @@ export default function IndexScalperTerminal() {
     } finally {
       if (seq === ordersSeqRef.current) ordersInFlightRef.current = false;
     }
-  }, []);
+  }, [loadKotakRecords]);
   useEffect(() => {
-    // the order book is read on mount and then every 5 s (state is set after the fetch resolves, not synchronously)
+    // the order book is read on mount (and on a broker change) and then every 5 s
     // eslint-disable-next-line react-hooks/set-state-in-effect
+    setOrderBook([]); setOrdersErr(null); setKotakRecords([]);
+    if (!brokerLoaded) return;
     void loadOrders();
     const t = setInterval(() => { void loadOrders(true); }, 5000);
     const onVis = () => { if (document.visibilityState === 'visible') void loadOrders(); };
     document.addEventListener('visibilitychange', onVis);
     return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVis); };
-  }, [loadOrders]);
+  }, [loadOrders, broker, brokerLoaded]);
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setHoldingsRaw([]); setHoldingsLoaded(false); setHoldingsErr(null);
+    if (!brokerLoaded) return;
     let dead = false;
-    const load = () => fetch('/api/index-scalper/holdings').then(r => r.json()).then((j: { success: boolean; data?: Record<string, unknown>[]; error?: string }) => {
+    // Kotak holdings come from the equity ticket's read (quantity + average, no price: Holding P&L stays unknown there).
+    const url = broker === 'kotak' ? '/api/equity-order/holdings?broker=kotak' : '/api/index-scalper/holdings';
+    const load = () => fetch(url).then(r => r.json()).then((j: { success: boolean; data?: unknown; error?: string }) => {
       if (dead) return;
-      if (!j.success || !Array.isArray(j.data)) { setHoldingsErr(j.error ?? 'Could not load holdings'); return; }
+      const rows = broker === 'kotak' && j.success && j.data && typeof j.data === 'object' && !Array.isArray(j.data)
+        ? Object.values(j.data as Record<string, { symbol?: string; securityId?: string; totalQty?: number; avgCost?: number }>)
+          .map(h => ({ tradingSymbol: h.symbol, securityId: h.securityId ?? h.symbol, totalQty: h.totalQty, avgCostPrice: h.avgCost, lastTradedPrice: 0 }))
+        : j.data;
+      if (!j.success || !Array.isArray(rows)) { setHoldingsErr(j.error ?? 'Could not load holdings'); return; }
       setHoldingsErr(null);
-      setHoldingsRaw(j.data);
+      setHoldingsRaw(rows as Record<string, unknown>[]);
       setHoldingsLoaded(true);
     }).catch(e => { if (!dead) setHoldingsErr(String((e as Error)?.message ?? e)); });
     load();
     const t = setInterval(load, 60_000);
     return () => { dead = true; clearInterval(t); };
-  }, []);
+  }, [broker, brokerLoaded]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -290,18 +334,43 @@ export default function IndexScalperTerminal() {
     loadPositions();
     const t = setInterval(loadPositions, 3000);
     return () => clearInterval(t);
-  }, [real, loadPositions]);
+  }, [real, loadPositions, broker, brokerLoaded]);
 
   // ── legs shown on the chart ────────────────────────────────────────
+  // A Kotak contract's live premium: Kotak rows carry no price, so they are priced off Dhan's feed through the
+  // contract (expiry, strike, side). Only the expiry on screen is in the feed; anything else is unpriced (null).
+  const kotakPrice = useCallback((info: KotakSymbolInfo): number | null => {
+    if (info.side === 'FUT' || info.expiry !== feed.expiry) return null;
+    const ids = feed.strikeIds.get(info.strike);
+    const id = info.side === 'CE' ? ids?.ceId : ids?.peId;
+    return id ? feed.ltpById.get(id) ?? null : null;
+  }, [feed.expiry, feed.strikeIds, feed.ltpById]);
+  const kotakSymbols = feed.kotak?.symbols;
+
   const legs: ScalperLeg[] = useMemo(() => {
+    if (real && broker === 'kotak') return legsFromKotakPositions(realRows, kotakSymbols ?? {}, kotakPrice);
     if (real) return legsFromDhanPositions(realRows, feed.ltpById);
     return Object.values(sim.legs).filter(l => l.netQty !== 0).map(l => {
       const live = feed.ltpById.get(l.securityId);
       return { id: l.securityId, securityId: l.securityId, product: '', symbol: l.symbol, strike: l.strike, type: l.type, netQty: l.netQty, avg: l.avg, ltp: live ?? null, sim: true };
     });
-  }, [real, realRows, sim.legs, feed.ltpById]);
+  }, [real, broker, realRows, sim.legs, feed.ltpById, kotakSymbols, kotakPrice]);
   // Bottom panel rows: the REAL Dhan book (open + closed rows), or the SIM paper book in the same shape.
   const panelPositions: PositionRowView[] = useMemo(() => {
+    if (real && broker === 'kotak') {
+      // Kotak rows into the Dhan row shape: the trading symbol is the identity (in securityId, the repo rule), the
+      // product in Dhan's words, contract fields from the symbol map, and NO unrealized figure (Kotak sends none: the
+      // open part is priced off the live feed or stays unknown).
+      const rows = realRows.map(r => {
+        const sym = String(r.tradingSymbol ?? '');
+        const info = kotakSymbols?.[sym];
+        return {
+          ...r, securityId: sym, productType: dashProduct(r.productType), exchangeSegment: 'NSE_FNO', unrealizedProfit: undefined,
+          ...(info && info.side !== 'FUT' ? { drvExpiryDate: info.expiry, drvOptionType: info.side === 'CE' ? 'CALL' : 'PUT', drvStrikePrice: info.strike } : {}),
+        };
+      });
+      return positionRows(rows, row => { const info = kotakSymbols?.[String(row.securityId ?? '')]; return info ? kotakPrice(info) ?? undefined : undefined; });
+    }
     if (real) return positionRows(realRows, feed.ltpById);
     return Object.values(sim.legs).map(l => {
       const m = /^NIFTY-(\d{4}-\d{2}-\d{2})-/.exec(l.symbol);
@@ -316,31 +385,40 @@ export default function IndexScalperTerminal() {
         avg: l.netQty !== 0 ? l.avg : null, ltp, realized, unrealized, pnl: unrealized === null ? realized : realized + unrealized,
       };
     });
-  }, [real, realRows, sim.legs, feed.ltpById]);
+  }, [real, broker, realRows, sim.legs, feed.ltpById, kotakSymbols, kotakPrice]);
   const legForRow = useCallback((row: PositionRowView): ScalperLeg | undefined =>
     legs.find(l => (real ? l.id === `${row.securityId}|${row.productCode}` : l.id === row.securityId)), [legs, real]);
   const exitingRowKey = exitingId === null ? null : (panelPositions.find(r => legForRow(r)?.id === exitingId)?.key ?? 'busy');
-  const panelOrders = useMemo(() => orderRows(orderBook), [orderBook]);
+  const panelOrders = useMemo(
+    () => orderRows(broker === 'kotak' ? kotakOrdersAsDhan(orderBook, kotakSymbols ?? {}, recordedIds(kotakRecords)) : orderBook),
+    [orderBook, broker, kotakSymbols, kotakRecords],
+  );
   const panelHoldings = useMemo(() => holdingRows(holdingsRaw), [holdingsRaw]);
 
   // ── order placement ────────────────────────────────────────────────
   interface Outcome { ok: boolean; unknown?: boolean; text: string }
 
-  const sendReal = useCallback(async (body: Record<string, unknown>): Promise<Outcome> => {
+  /** One REAL order on the page's broker. Dhan: /api/scalper/fast-order (security id, `isx` correlation). Kotak: the
+   *  page's own route, which records the order ID as this page's (trading symbol; opens capped, closes not). */
+  const sendReal = useCallback(async (body: Record<string, unknown>, intent: 'open' | 'close' = 'open'): Promise<Outcome> => {
     try {
-      const res = await fetch('/api/scalper/fast-order', {
+      const kotak = brokerRef.current === 'kotak';
+      const res = await fetch(kotak ? '/api/index-scalper/kotak-order' : '/api/scalper/fast-order', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...body, exchangeSegment: 'NSE_FNO', source: 'isx', idempotencyKey: newKey() }),
+        body: JSON.stringify(kotak
+          ? { ...body, intent, idempotencyKey: newKey() }
+          : { ...body, exchangeSegment: 'NSE_FNO', source: 'isx', idempotencyKey: newKey() }),
       });
-      const j = await res.json() as { success: boolean; order_id?: string; error?: string; unknown?: boolean };
-      if (j.success) return { ok: true, text: `Order ${j.order_id ?? ''} placed` };
+      const j = await res.json() as { success: boolean; order_id?: string; error?: string; unknown?: boolean; warning?: string };
+      if (kotak) void loadKotakRecords();
+      if (j.success) return { ok: true, text: `Order ${j.order_id ?? ''} placed${j.warning ? ` (${j.warning})` : ''}` };
       if (j.unknown || res.status === 504) return { ok: false, unknown: true, text: j.error ?? 'Order status unknown: check Positions / Orders before retrying' };
       return { ok: false, text: j.error ?? 'Order rejected' };
     } catch (e) {
       // A throw after the request left may still have booked it: report unknown, never retry.
       return { ok: false, unknown: true, text: `No reply (${String((e as Error).message ?? e)}). Check Positions / Orders before retrying` };
     }
-  }, []);
+  }, [loadKotakRecords]);
 
   const simFill = useCallback((c: PickedContract, side: 'BUY' | 'SELL', units: number, price: number, symbol: string) => {
     const id = c.securityId ?? `${c.type}${c.strike}`;
@@ -397,6 +475,26 @@ export default function IndexScalperTerminal() {
     // A market order needs a live feed: stale ticks, or none at all (the chain may be a REST snapshot then), refuse it.
     if (req.orderType === 'MARKET' && !f.marketOpen) return { ok: false, text: 'NSE is closed: refusing a market order' };
     if (req.orderType === 'MARKET' && (f.stale || f.feedAgeSec === null)) return { ok: false, text: f.stale ? 'Live prices are stale: refusing a market order' : 'No live prices (tick feed not running): refusing a market order' };
+    if (!brokerLoadedRef.current) return { ok: false, text: 'Broker not loaded yet' };
+    if (brokerRef.current === 'kotak') {
+      // Kotak: its own trading symbol and lot size for the contract on screen, never the Dhan security id.
+      const k = f.kotak;
+      if (!k) return { ok: false, text: 'Kotak contracts are still loading' };
+      if (k.expiry !== c.expiry) return { ok: false, text: 'Kotak contracts are for another expiry: wait for them to load' };
+      const sym = c.type === 'CE' ? k.strikes.get(c.strike)?.ceSymbol : k.strikes.get(c.strike)?.peSymbol;
+      if (!sym) return { ok: false, text: `No Kotak contract for ${c.strike} ${c.type} on ${c.expiry}` };
+      const ks = orderUnits(req.lots, k.lotSize);
+      if (!ks.ok) return { ok: false, text: ks.error };
+      const before = legs.find(l => l.securityId === sym)?.netQty ?? 0;
+      const out = await sendReal({
+        tradingSymbol: sym, quantity: ks.units, side: req.side, orderType: req.orderType,
+        price: req.price ?? undefined, triggerPrice: req.trigger ?? undefined, product: req.product,
+      }, 'open');
+      if (out.ok && before === 0) rememberSpot(sym, f.spot);
+      loadPositions();
+      void loadOrders();
+      return out;
+    }
     const before = legs.find(l => l.securityId === c.securityId)?.netQty ?? 0;
     const out = await sendReal({
       securityId: c.securityId, quantity: size.units, side: req.side, orderType: req.orderType,
@@ -430,23 +528,37 @@ export default function IndexScalperTerminal() {
 
   /** Signed units this page's own (`isx`-tagged) orders filled today, per security + product, from Dhan's order book.
    *  null when the book cannot be read: an exit is then refused rather than sized off the broker's whole position. */
-  const loadOwned = useCallback(async (): Promise<Map<string, number> | null> => {
+  const loadOwned = useCallback(async (): Promise<{ owned: Map<string, number>; records: KotakRecord[] } | null> => {
     try {
+      if (brokerRef.current === 'kotak') {
+        // Kotak: what THIS page's recorded order IDs filled, from Kotak's own order book.
+        const [records, r] = await Promise.all([loadKotakRecords(), fetch(scalperRoute('kotak', 'orders'))]);
+        const j = await r.json() as { success: boolean; data?: Record<string, unknown>[] };
+        if (!records || !j.success || !Array.isArray(j.data)) return null;
+        return { owned: ownedQtyFromKotakOrders(j.data, records), records };
+      }
       const r = await fetch('/api/scalper/orders');
       const j = await r.json() as { success: boolean; data?: Record<string, unknown>[] };
-      return j.success && Array.isArray(j.data) ? ownedQtyFromOrders(j.data) : null;
+      return j.success && Array.isArray(j.data) ? { owned: ownedQtyFromOrders(j.data), records: [] } : null;
     } catch { return null; }
-  }, []);
+  }, [loadKotakRecords]);
 
   /** Close what THIS page opened on one broker row (security + product), clamped by what the broker still shows.
    *  Quantity a strategy, another terminal or a manual order holds on the same contract is never touched. */
-  const exitRealRow = useCallback(async (leg: ScalperLeg, owned: Map<string, number>): Promise<Outcome & { skipped?: boolean }> => {
+  const exitRealRow = useCallback(async (leg: ScalperLeg, owned: Map<string, number>, records: KotakRecord[] = []): Promise<Outcome & { skipped?: boolean }> => {
     const label = `${leg.strike} ${leg.type}${leg.product ? ` ${leg.product}` : ''}`;
+    const kotak = brokerRef.current === 'kotak';
+    // Kotak: an order on this contract whose outcome is unknown may still fill; an exit sized before it lands could flip.
+    if (kotak && heldByUnknown(records, leg.securityId, Date.now())) {
+      return { ok: false, text: `${label}: an order on this contract has an unknown outcome; exit held for up to 60 s (check Orders)` };
+    }
     const order = ownedCloseOrder(leg.netQty, owned.get(leg.id) ?? 0);
     if (!order) return { ok: false, skipped: true, text: `${label}: not opened from this page today, left open (square it off where it was opened)` };
-    const product = closeOrderProduct('dhan', leg.product);
+    const product = closeOrderProduct(kotak ? 'kotak' : 'dhan', kotak ? (leg.product === 'MARGIN' ? 'NRML' : leg.product === 'INTRADAY' ? 'MIS' : leg.product) : leg.product);
     if (!product || product.assumed) return { ok: false, text: `${label}: unsupported or missing product "${leg.product}", square it off at the broker` };
-    const out = await sendReal({ securityId: leg.securityId, quantity: order.units, side: order.side, orderType: 'MARKET', ...product.fields });
+    const out = kotak
+      ? await sendReal({ tradingSymbol: leg.securityId, quantity: order.units, side: order.side, orderType: 'MARKET', product: leg.product }, 'close')
+      : await sendReal({ securityId: leg.securityId, quantity: order.units, side: order.side, orderType: 'MARKET', ...product.fields });
     if (out.ok && order.units < Math.abs(leg.netQty)) {
       return { ...out, text: `${out.text}: closed ${order.units} of ${Math.abs(leg.netQty)}, the rest was not opened from this page` };
     }
@@ -454,11 +566,16 @@ export default function IndexScalperTerminal() {
   }, [sendReal]);
 
   /** Fresh broker rows + ownership, read together right before an exit. */
-  const readExitState = useCallback(async (): Promise<{ live: ScalperLeg[]; owned: Map<string, number> } | string> => {
-    const [rows, owned] = await Promise.all([loadPositions(), loadOwned()]);
+  const readExitState = useCallback(async (): Promise<{ live: ScalperLeg[]; owned: Map<string, number>; records: KotakRecord[] } | string> => {
+    const [rows, own] = await Promise.all([loadPositions(), loadOwned()]);
     if (!rows) return 'Could not read live positions: nothing was closed';
-    if (!owned) return 'Could not read the order book to tell which quantity this page opened: nothing was closed';
-    return { live: legsFromDhanPositions(rows, feedRef.current.ltpById), owned };
+    if (!own) return 'Could not read the order book to tell which quantity this page opened: nothing was closed';
+    const f = feedRef.current;
+    if (brokerRef.current === 'kotak' && !f.kotak) return 'Kotak contracts are not loaded yet: nothing was closed';
+    const live = brokerRef.current === 'kotak'
+      ? legsFromKotakPositions(rows, f.kotak?.symbols ?? {}, () => null)
+      : legsFromDhanPositions(rows, f.ltpById);
+    return { live, owned: own.owned, records: own.records };
   }, [loadPositions, loadOwned]);
 
   const exitLeg = useCallback(async (leg: ScalperLeg) => {
@@ -472,7 +589,7 @@ export default function IndexScalperTerminal() {
         if (typeof st === 'string') out = { ok: false, text: st };
         else {
           const row = st.live.find(l => l.id === leg.id);
-          out = row ? await exitRealRow(row, st.owned) : { ok: true, text: 'Already flat' };
+          out = row ? await exitRealRow(row, st.owned, st.records) : { ok: true, text: 'Already flat' };
         }
         loadPositions();
       }
@@ -499,7 +616,7 @@ export default function IndexScalperTerminal() {
       let skipped = 0;
       let sent = 0;
       for (const l of ordered) {
-        const o = await exitRealRow(l, st.owned);
+        const o = await exitRealRow(l, st.owned, st.records);
         if (o.skipped) { skipped++; continue; }
         if (!o.ok) { problems.push(o.text); if (o.unknown) break; continue; }
         sent++;
@@ -529,7 +646,9 @@ export default function IndexScalperTerminal() {
     if (cancellingId) return;
     setCancellingId(orderId);
     try {
-      const r = await fetch('/api/scalper/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId, broker: 'dhan' }) });
+      const r = brokerRef.current === 'kotak'
+        ? await fetch('/api/scalper/kotak/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId }) })
+        : await fetch('/api/scalper/orders', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orderId, broker: 'dhan' }) });
       const j = await r.json() as { success: boolean; error?: string };
       flash({ ok: j.success, text: j.success ? `Cancel sent for order ${orderId}` : (j.error ?? 'Cancel failed') });
     } catch (e) {
@@ -666,6 +785,8 @@ export default function IndexScalperTerminal() {
           <span className={cn('text-[11px] tabular-nums font-mono', feed.stale ? 'text-amber-400' : 'text-zinc-400')} title="Live tick bridge">
             {spotDisplay ? spotDisplay.toFixed(2) : '—'} <span className={cn('inline-block w-1.5 h-1.5 rounded-full align-middle', feed.feedAgeSec === null ? 'bg-zinc-600' : feed.stale ? 'bg-amber-400' : 'bg-emerald-400')} />
           </span>
+          <BrokerPicker value={broker} onChange={setBroker} brokers={['dhan', 'kotak']} disabled={real || !brokerLoaded}
+            disabledReason={real ? 'Switch to SIM to change the broker: a REAL session trades one account' : 'Loading the saved broker'} />
           <div role="group" aria-label="Order mode" className="flex rounded border border-zinc-700 overflow-hidden">
             <button type="button" aria-pressed={!real} onClick={goSim} className={cn('h-7 px-2 text-xs font-bold', !real ? 'bg-amber-500/20 text-amber-300' : 'text-zinc-400 hover:bg-zinc-800')}>SIM</button>
             <button type="button" aria-pressed={real} onClick={() => (real ? undefined : setArmOpen(true))} className={cn('h-7 px-2 text-xs font-bold', real ? 'bg-rose-600 text-oncolor' : 'text-zinc-400 hover:bg-zinc-800')}>REAL</button>
@@ -737,6 +858,7 @@ export default function IndexScalperTerminal() {
       {/* account panel (Dhan-style) */}
       <AccountPanel
         real={real}
+        brokerName={brokerName}
         positions={panelPositions}
         positionsLoaded={real ? realLoaded && !posErr : true}
         canExit={r => r.netQty !== 0 && !!legForRow(r)}
@@ -755,6 +877,7 @@ export default function IndexScalperTerminal() {
         <DhanScalperWidget
           feed={feed}
           real={real}
+          broker={broker}
           busy={ticketBusy}
           topLots={scalpLots}
           onTopLotsChange={setScalpLots}
@@ -776,11 +899,11 @@ export default function IndexScalperTerminal() {
       {armOpen && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center bg-oncolor-dark/70">
           <div role="alertdialog" aria-label="Arm real orders" className="w-[380px] rounded-lg border border-rose-500/70 bg-zinc-900 p-5 shadow-2xl">
-            <h2 className="text-sm font-bold text-rose-300 mb-2">Arm REAL orders on Dhan?</h2>
-            <p className="text-xs text-zinc-300 mb-4">Buy/Sell, Scalper and Exit will place live orders with real money (max {MAX_LOTS} lots per order). The chart then shows your Dhan NIFTY option positions. REAL is switched off again whenever this page reloads.</p>
+            <h2 className="text-sm font-bold text-rose-300 mb-2">Arm REAL orders on {brokerName}?</h2>
+            <p className="text-xs text-zinc-300 mb-4">Buy/Sell, Scalper and Exit will place live orders with real money on your {brokerName} account (max {MAX_LOTS} lots per order). The chart then shows your {brokerName} NIFTY option positions; prices stay Dhan&apos;s live feed. REAL is switched off again whenever this page reloads.</p>
             <div className="flex justify-end gap-2">
               <button type="button" onClick={() => setArmOpen(false)} className="h-8 px-3 rounded text-xs font-semibold text-zinc-300 hover:bg-zinc-800">Cancel</button>
-              <button type="button" autoFocus onClick={() => { setReal(true); setArmOpen(false); }} className="h-8 px-3 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold">Arm REAL</button>
+              <button type="button" autoFocus disabled={!brokerLoaded} onClick={() => { if (brokerLoaded) { setReal(true); setArmOpen(false); } }} className="h-8 px-3 rounded bg-rose-600 hover:bg-rose-500 text-oncolor text-xs font-bold disabled:opacity-50">Arm REAL on {brokerName}</button>
             </div>
           </div>
         </div>

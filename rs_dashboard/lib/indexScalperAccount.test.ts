@@ -46,6 +46,10 @@ test('symbol and time labels: futures, equity, Dhan\'s 0001 placeholder', () => 
   assert.equal(symbolLabel({ tradingSymbol: 'RELIANCE-EQ' }), 'RELIANCE');
   assert.equal(symbolLabel({ tradingSymbol: 'NIFTY-Dec2026-25350-PE', drvExpiryDate: '2026-12-01', drvOptionType: 'PUT', drvStrikePrice: 25350 }), 'NIFTY 01 DEC 25350 PUT');
   assert.equal(timeLabel('0001-01-01 00:00:00'), '');
+  // Kotak: symbol without dashes, contract fields from its symbol map; its order-book time format
+  assert.equal(symbolLabel({ tradingSymbol: 'NIFTY2612025350PE', drvExpiryDate: '2026-12-01', drvOptionType: 'PUT', drvStrikePrice: 25350 }), 'NIFTY 01 DEC 25350 PUT');
+  assert.equal(timeLabel('25-Nov-2026 10:20:05'), '25 Nov 2026, 10:20:05');
+  assert.equal(timeLabel('25/11/2026 10:20:05'), '25 Nov 2026, 10:20:05');
 });
 
 test('positions: live LTP marks the open part, realized is Dhan\'s, closed rows carry realized only', () => {

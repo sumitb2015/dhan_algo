@@ -12,7 +12,7 @@ const num = (v: unknown): number | null => {
 const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 
 const EXCHANGE: Record<string, string> = { NSE_FNO: 'NSE', NSE_EQ: 'NSE', BSE_FNO: 'BSE', BSE_EQ: 'BSE', MCX_COMM: 'MCX', IDX_I: 'NSE' };
-const PRODUCT: Record<string, string> = { INTRADAY: 'Intraday', MARGIN: 'Normal', CNC: 'Delivery', MTF: 'MTF', CO: 'Cover', BO: 'Bracket' };
+const PRODUCT: Record<string, string> = { INTRADAY: 'Intraday', MIS: 'Intraday', MARGIN: 'Normal', NRML: 'Normal', CNC: 'Delivery', MTF: 'MTF', CO: 'Cover', BO: 'Bracket' };
 const ORDER_TYPE: Record<string, string> = { MARKET: 'Market', LIMIT: 'Limit', STOP_LOSS: 'SL', STOP_LOSS_MARKET: 'SL-M' };
 
 export const exchangeLabel = (seg: unknown) => EXCHANGE[String(seg ?? '').toUpperCase()] ?? String(seg ?? '');
@@ -21,7 +21,8 @@ export const productLabel = (p: unknown) => PRODUCT[String(p ?? '').toUpperCase(
 /** Dhan-style contract name: "NIFTY 01 DEC 25550 CALL", "NIFTY DEC FUT", else the trading symbol (equity: no -EQ). */
 export function symbolLabel(r: Row): string {
   const ts = String(r.tradingSymbol ?? r.trading_symbol ?? '');
-  const under = ts.split('-')[0] || ts;
+  // Dhan: "NIFTY-Dec2026-25550-CE"; Kotak: "NIFTY2612025550CE" (no dashes): the root is the letters before the digits.
+  const under = ts.includes('-') ? ts.split('-')[0] : (/^([A-Z&]+?)(?=\d)/.exec(ts)?.[1] ?? ts);
   const exp = String(r.drvExpiryDate ?? '');
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(exp);
   const strike = num(r.drvStrikePrice);
@@ -33,10 +34,26 @@ export function symbolLabel(r: Row): string {
   return ts.replace(/-EQ$/i, '');
 }
 
-/** "2026-11-24 09:47:40" (IST, as Dhan sends it) -> "24 Nov 2026, 09:47:40"; '' for Dhan's "0001-01-01" placeholder. */
+/** An order time as sortable "YYYY-MM-DD HH:MM:SS": Dhan sends that already; Kotak sends "24-Nov-2026 09:47:40" (or
+ *  "24/11/2026 09:47:40"). '' when unreadable or Dhan's "0001-01-01" placeholder. */
+export function normTime(v: unknown): string {
+  const s = String(v ?? '').trim();
+  let m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2}:\d{2})/.exec(s);
+  if (m) return m[1] === '0001' ? '' : `${m[1]}-${m[2]}-${m[3]} ${m[4]}`;
+  m = /^(\d{1,2})[-/ ]([A-Za-z]{3})[-/ ](\d{4})[ ,]+(\d{2}:\d{2}:\d{2})/.exec(s);
+  if (m) {
+    const mi = MONTHS.indexOf(m[2].toUpperCase());
+    if (mi >= 0) return `${m[3]}-${String(mi + 1).padStart(2, '0')}-${m[1].padStart(2, '0')} ${m[4]}`;
+  }
+  m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})[ ,]+(\d{2}:\d{2}:\d{2})/.exec(s);
+  if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')} ${m[4]}`;
+  return '';
+}
+
+/** Order time for the panel: "24 Nov 2026, 09:47:40"; '' when unreadable. */
 export function timeLabel(v: unknown): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2}:\d{2})/.exec(String(v ?? ''));
-  if (!m || m[1] === '0001') return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}:\d{2})$/.exec(normTime(v));
+  if (!m) return '';
   const mon = MONTHS[Number(m[2]) - 1];
   return `${m[3]} ${mon.charAt(0)}${mon.slice(1).toLowerCase()} ${m[1]}, ${m[4]}`;
 }
@@ -70,7 +87,7 @@ export function orderRows(orders: Row[], ownSource = 'isx'): OrderRowView[] {
     const trigger = num(o.triggerPrice);
     const avg = num(o.averageTradedPrice);
     const time = String(o.updateTime ?? o.createTime ?? '');
-    const created = String(o.createTime ?? o.updateTime ?? '');
+    const created = normTime(o.createTime ?? o.updateTime) || String(o.createTime ?? o.updateTime ?? '');
     return {
       id: String(o.orderId ?? ''),
       symbol: symbolLabel(o),
@@ -113,7 +130,9 @@ export interface PositionRowView {
 /** Dhan position rows -> display rows (open AND closed). MCX P&L is rescaled first (lots, not units). The open part is
  *  marked at our live LTP when we have one (`ltpById`), else at Dhan's own unrealizedProfit. Realized is Dhan's
  *  realizedProfit: never total-minus-unrealized. */
-export function positionRows(rows: Row[], ltpById: Map<string, number>): PositionRowView[] {
+export function positionRows(rows: Row[], prices: Map<string, number> | ((row: Row) => number | undefined)): PositionRowView[] {
+  // Dhan rows are priced by security id; Kotak rows (no id the feed knows) through a resolver from their contract.
+  const priceOf = typeof prices === 'function' ? prices : (row: Row) => prices.get(String(row.securityId ?? row.security_id ?? ''));
   return rows.map(raw => {
     const r = scaleBrokerPnl(raw);
     const securityId = String(r.securityId ?? r.security_id ?? '');
@@ -123,7 +142,7 @@ export function positionRows(rows: Row[], ltpById: Map<string, number>): Positio
     const dayAvg = netQty > 0 ? buyAvg : netQty < 0 ? sellAvg : null;
     const cost = num(r.costPrice);
     const avg = netQty === 0 ? null : dayAvg !== null && dayAvg > 0 ? dayAvg : cost !== null && cost > 0 ? cost : null;
-    const live = ltpById.get(securityId);
+    const live = priceOf(r);
     const realized = num(r.realizedProfit);
     let unrealized: number | null = netQty === 0 ? 0 : num(r.unrealizedProfit);
     let ltp: number | null = null;

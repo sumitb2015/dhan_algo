@@ -8,6 +8,7 @@ import { useLiveOptionsWS } from '@/lib/useLiveOptionsWS';
 import type { LiveQuotes } from '@/components/Scalper';
 import { chainSnapshot, type RestChain } from '@/lib/indexScalperChain';
 import { inNseSession } from '@/lib/indexScalperSession';
+import type { KotakSymbolInfo } from '@/lib/indexScalperKotak';
 
 export interface StrikeIds { ceId?: string; peId?: string }
 
@@ -42,9 +43,21 @@ export interface IndexScalperFeed {
   strikeIds: Map<number, StrikeIds>;
   /** security id -> last premium, for every strike the bridge tracks. */
   ltpById: Map<string, number>;
+  /** Kotak contracts when Kotak is the page's broker (null on Dhan, and until both reads land). Prices stay Dhan's: a
+   *  Kotak order only needs Kotak's trading symbol and lot size for the contract on screen. */
+  kotak: KotakContracts | null;
 }
 
-export function useIndexScalperFeed(): IndexScalperFeed {
+export interface KotakContracts {
+  /** For `expiry` only (the expiry on screen): strike -> Kotak trading symbols. */
+  expiry: string;
+  strikes: Map<number, { ceSymbol?: string; peSymbol?: string }>;
+  lotSize: number | null;
+  /** Every NIFTY Kotak symbol -> its contract, to place and price Kotak positions of any expiry. */
+  symbols: Record<string, KotakSymbolInfo>;
+}
+
+export function useIndexScalperFeed(broker: 'dhan' | 'kotak' = 'dhan'): IndexScalperFeed {
   const [viewerId] = useState(newId);
   const [expiries, setExpiries] = useState<string[]>([]);
   const [expiry, setExpiry] = useState('');
@@ -117,6 +130,37 @@ export function useIndexScalperFeed(): IndexScalperFeed {
     return () => { dead = true; };
   }, [expiry]);
 
+  // Kotak's contracts for the expiry on screen, and its NIFTY symbol map, only while Kotak is the broker.
+  const [kotakLookup, setKotakLookup] = useState<{ expiry: string; strikes: Record<string, { ceSymbol?: string; peSymbol?: string }>; lotSize: number | null } | null>(null);
+  const [kotakSymbols, setKotakSymbols] = useState<Record<string, KotakSymbolInfo> | null>(null);
+  useEffect(() => {
+    if (broker !== 'kotak' || !expiry) return;
+    let dead = false;
+    fetch(`/api/scalper/kotak/lookup?underlying=${UNDERLYING}&expiry=${expiry}`)
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: { lotSize?: number; strikes?: Record<string, { ceSymbol?: string; peSymbol?: string }> } }) => {
+        if (dead || !j.success || !j.data) return;
+        setKotakLookup({ expiry, strikes: j.data.strikes ?? {}, lotSize: typeof j.data.lotSize === 'number' && j.data.lotSize > 0 ? j.data.lotSize : null });
+      })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [broker, expiry]);
+  useEffect(() => {
+    if (broker !== 'kotak' || kotakSymbols) return;
+    let dead = false;
+    fetch(`/api/scalper/kotak/symbol-lookup?underlying=${UNDERLYING}`)
+      .then(r => r.json())
+      .then((j: { success: boolean; data?: Record<string, KotakSymbolInfo> }) => { if (!dead && j.success && j.data) setKotakSymbols(j.data); })
+      .catch(() => {});
+    return () => { dead = true; };
+  }, [broker, kotakSymbols]);
+  const kotak = useMemo<KotakContracts | null>(() => {
+    if (broker !== 'kotak' || !kotakSymbols || !kotakLookup || kotakLookup.expiry !== expiry) return null;
+    const strikes = new Map<number, { ceSymbol?: string; peSymbol?: string }>();
+    for (const [k, v] of Object.entries(kotakLookup.strikes)) strikes.set(Number(k), v);
+    return { expiry, strikes, lotSize: kotakLookup.lotSize, symbols: kotakSymbols };
+  }, [broker, kotakSymbols, kotakLookup, expiry]);
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setNowMs(Date.now());
@@ -185,6 +229,6 @@ export function useIndexScalperFeed(): IndexScalperFeed {
     marketOpen: nowMs > 0 && inNseSession(nowMs),
     // The lookup that produced this lot size must be for the expiry on screen; until then an order is refused.
     lotSize: lookupFor === expiry ? lotSize : null,
-    strikeIds, ltpById,
+    strikeIds, ltpById, kotak,
   };
 }
