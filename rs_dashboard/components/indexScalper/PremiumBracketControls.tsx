@@ -81,6 +81,10 @@ export default function PremiumBracketControls({ leg, units, tick, brackets, onS
 
   return (
     <div ref={boxRef} className="relative flex items-center gap-1">
+      {/* Which leg this is: a straddle has two chips on one strike line (B = long, S = short). */}
+      <span data-testid="leg-label" className="text-[10px] font-semibold text-zinc-300 whitespace-nowrap" title={`${isLong ? 'Long' : 'Short'} ${leg.type} ${leg.strike}`}>
+        <span className={isLong ? 'text-emerald-400' : 'text-rose-400'}>{isLong ? 'B' : 'S'}</span> {leg.type} {leg.strike}
+      </span>
       {brackets.tp ? badge('TP') : btn('TP')}
       {brackets.sl ? badge('SL') : btn('SL')}
       {edit && (

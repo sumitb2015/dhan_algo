@@ -18,7 +18,7 @@ import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { INSTRUMENTS, displayLotUnits, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
-import { fmtOI, fmtOIChange, oiBars, type OiMode, type OiProfile } from '@/lib/indexScalperOiProfile';
+import { fmtOI, fmtOIChange, oiBars, placeOiLabels, type OiMode, type OiProfile } from '@/lib/indexScalperOiProfile';
 import { legPremiumPnl, premiumBracketsFor } from '@/lib/indexScalperPremiumBrackets';
 import PremiumBracketControls from './PremiumBracketControls';
 
@@ -67,6 +67,8 @@ interface Props {
   /** Index level each leg was opened at from this page (security id -> spot). */
   entrySpots: Record<string, number>;
   onExitLeg: (leg: ScalperLeg) => void;
+  /** Quick Trade: "+" adds one lot in the leg's direction, "-" takes one lot off (absent = no +/- on the chip). */
+  onAdjustLeg?: (leg: ScalperLeg, delta: 1 | -1) => void;
   exitingId: string | null;
   onToggleIndicator: (id: string) => void;
   onRemoveIndicator: (id: string) => void;
@@ -141,7 +143,7 @@ function seriesData(s: OutSeries, bars: Bar[]) {
 function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, legs, entrySpots,
-    onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
+    onExitLeg, onAdjustLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
     premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, oiProfile = null, oiMode = 'total', viewportRef, strikeAnchor = false, premiumOrders,
@@ -826,7 +828,11 @@ function ScalperChart(props: Props) {
       ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
       ctx.textBaseline = 'middle';
       ctx.textAlign = 'right';
-      for (const b of bars) {
+      // Labels by priority without overlap (largest Call / Put first, then by OI): zoomed out, the strikes are a few px
+      // apart and every bar's label used to pile onto its neighbours.
+      const text = (b: (typeof bars)[number]) => (oiMode === 'change' ? fmtOIChange(b.oi) : fmtOI(b.oi).replace(' ', ''));
+      const labelled = placeOiLabels(bars, b => ctx.measureText(text(b)).width);
+      bars.forEach((b, i) => {
         // Data colours (CLAUDE.md theming exception): Calls rose, Puts emerald; the largest of each stronger.
         const rgb = b.side === 'CE' ? '244,63,94' : '16,185,129';
         if (b.neg) {
@@ -838,11 +844,11 @@ function ScalperChart(props: Props) {
           ctx.fillStyle = `rgba(${rgb},${b.max ? 0.7 : 0.32})`;
           ctx.fillRect(b.x, b.y, b.w, b.h);
         }
-        if (b.h >= 6) {
+        if (labelled.has(i)) {
           ctx.fillStyle = chromeRef.current.textSecondary;
-          ctx.fillText(oiMode === 'change' ? fmtOIChange(b.oi) : fmtOI(b.oi).replace(' ', ''), b.x - 3, b.y + b.h / 2);
+          ctx.fillText(text(b), b.x - 3, b.y + b.h / 2);
         }
-      }
+      });
     };
     paint();
     const t = setInterval(paint, 150);
@@ -1467,7 +1473,9 @@ function ScalperChart(props: Props) {
                 onSet={(kind, price) => onSetBracket?.({ leg: p.leg, kind, price })}
                 onCancel={(kind, orderId) => onCancelBracket?.({ legId: p.leg.id, kind, orderId })} />
             ) : (
-              <span title="Set TP / SL on this option's own chart: its levels are premiums" className="text-[10px] text-zinc-500">{p.leg.type} {p.leg.strike}</span>
+              <span title="Set TP / SL on this option's own chart: its levels are premiums" className="text-[10px] text-zinc-500">
+                <span className={isLong ? 'text-emerald-400' : 'text-rose-400'}>{isLong ? 'B' : 'S'}</span> {p.leg.type} {p.leg.strike}
+              </span>
             )}
 
             {/* Reverse position button */}
@@ -1483,10 +1491,22 @@ function ScalperChart(props: Props) {
               <ArrowUpDown className="w-2.5 h-2.5" />
             </button>
 
-            {/* Lots quantity */}
+            {/* Lots quantity; Quick Trade adds - / + around it on an option leg */}
+            {onAdjustLeg && optOnIndex && (
+              <button type="button" aria-label={`One lot less ${p.leg.type} ${p.leg.strike}`} disabled={lots <= 1 || exitingId !== null}
+                title={lots <= 1 ? 'One lot left: use Exit (x) to close the leg' : `Take one lot off (${isLong ? 'sell' : 'buy'} 1 lot at market)`}
+                onClick={e => { e.stopPropagation(); onAdjustLeg(p.leg, -1); }}
+                className="h-[18px] w-[18px] flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold leading-none disabled:opacity-35 disabled:cursor-not-allowed">−</button>
+            )}
             <span data-testid="position-lots" title={`${isLong ? 'Long' : 'Short'} ${lots} lot${lots === 1 ? '' : 's'} (${Math.abs(totalUnits)} units)`} className="h-[18px] px-1.5 flex items-center rounded bg-zinc-800/80 text-zinc-200 border border-zinc-700 text-[10px] font-semibold">
               {lots}
             </span>
+            {onAdjustLeg && optOnIndex && (
+              <button type="button" aria-label={`One lot more ${p.leg.type} ${p.leg.strike}`} disabled={exitingId !== null}
+                title={`Add one lot (${isLong ? 'buy' : 'sell'} 1 lot ${p.leg.type} ${p.leg.strike} at market)`}
+                onClick={e => { e.stopPropagation(); onAdjustLeg(p.leg, 1); }}
+                className="h-[18px] w-[18px] flex items-center justify-center rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[12px] font-bold leading-none disabled:opacity-35 disabled:cursor-not-allowed">+</button>
+            )}
 
             {/* Live P&L INR (+0.00%) */}
             <span className={cn('h-[18px] px-1 flex items-center text-[10px] font-semibold', pnlCls)}>

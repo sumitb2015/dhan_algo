@@ -178,9 +178,10 @@ export default function QuickStrikeOverlay({ viewportRef, underlying, feed, sett
                       <span data-live={live ? '1' : '0'} className={cn('px-1.5 flex items-center bg-zinc-900', live && !why ? 'text-zinc-100' : shown !== null ? 'text-zinc-400 italic' : 'text-zinc-500')}>{fmt(shown)}</span>
                     </button>
                     {isOpen && (
-                      // Compact: two small B / S buttons beside the chip (the lots and any reason are in the tooltip).
+                      // Compact: two small B / S buttons LEFT of the chip (lots and any reason in the tooltip). Not right of
+                      // it: that is where the strike's position chip sits once it holds a leg, and it would cover them.
                       <div ref={popRef} role="group" aria-label={`Trade ${r.strike} ${t}`} data-reason={why ?? ''}
-                        className="absolute left-full top-1/2 -translate-y-1/2 ml-1 z-10 flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-600 bg-zinc-900 shadow-xl">
+                        className="absolute right-full top-1/2 -translate-y-1/2 mr-1 z-10 flex items-center gap-0.5 p-0.5 rounded-md border border-zinc-600 bg-zinc-900 shadow-xl">
                         <button type="button" disabled={!!why || sending} onClick={() => void send(r.strike, t, 'BUY')}
                           aria-label={`Quick buy ${r.strike} ${t} ${settings.buyLots} lot${settings.buyLots === 1 ? '' : 's'}`}
                           title={why ? `${why}${shownTitle}` : `Buy ${settings.buyLots} lot${settings.buyLots === 1 ? '' : 's'} ${r.strike} ${t} at market${real ? ' (REAL)' : ' (SIM)'}`}

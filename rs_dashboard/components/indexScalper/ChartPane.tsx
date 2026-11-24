@@ -56,6 +56,8 @@ interface Props {
   legs: ScalperLeg[];
   entrySpots: Record<string, number>;
   onExitLeg: (leg: ScalperLeg) => void;
+  /** Quick Trade chip +/-: one lot more in the leg's direction (+1) or one lot taken off (-1). */
+  onAdjustLeg: (leg: ScalperLeg, delta: 1 | -1) => void;
   exitingId: string | null;
   onToggleIndicator: (id: string) => void;
   onRemoveIndicator: (id: string) => void;
@@ -219,7 +221,7 @@ function ChartPane(p: Props) {
           key={drawKey}
           bars={bars} indicators={p.indicators} tool={p.tool} onToolDone={p.onToolDone} clearToken={p.clearToken}
           logScale={p.logScale} pctScale={p.pctScale} autoScale={p.autoScale}
-          legs={paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} exitingId={p.exitingId}
+          legs={paneLegs} entrySpots={p.entrySpots} onExitLeg={p.onExitLeg} onAdjustLeg={quickOn ? p.onAdjustLeg : undefined} exitingId={p.exitingId}
           onToggleIndicator={p.onToggleIndicator} onRemoveIndicator={p.onRemoveIndicator} onEditIndicator={p.onEditIndicator}
           symbolLabel={isOption ? `${label} · ${tfLabel}` : (underlying === 'CRUDEOILM' ? `CRUDEOILM · ${tfLabel} · FUT` : `NIFTY · ${tfLabel} · IDX`)}
           focus={p.focus}

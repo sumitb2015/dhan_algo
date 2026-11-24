@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildOiProfile, fmtOI, fmtOIChange, oiBars, oiChange, oiProfileKey } from './indexScalperOiProfile.ts';
+import { buildOiProfile, fmtOI, fmtOIChange, oiBars, oiChange, oiProfileKey, placeOiLabels, type OiBar } from './indexScalperOiProfile.ts';
 
 const chain = {
   '25300': { strike: 25300, ce: { oi: 1_000_000 }, pe: { oi: 4_000_000 } },
@@ -106,4 +106,31 @@ test('fmtOIChange', () => {
   assert.equal(fmtOIChange(120_000), '+1.20L');
   assert.equal(fmtOIChange(-45_000), '-45.0K');
   assert.equal(fmtOIChange(0), '0');
+});
+
+const bar = (o: Partial<OiBar>): OiBar => ({ strike: 25000, side: 'CE', x: 400, y: 100, w: 100, h: 8, oi: 1_000_000, max: false, neg: false, ...o });
+
+test('labels never overlap: the highlighted max first, then the largest OI; thin bars get none', () => {
+  const bars = [
+    bar({ strike: 1, y: 100, oi: 500_000 }),                // overlaps the next one vertically and horizontally
+    bar({ strike: 2, y: 104, oi: 2_000_000 }),              // larger: wins
+    bar({ strike: 3, y: 106, oi: 100_000, max: true }),     // highlighted max: placed first
+    bar({ strike: 4, y: 200, oi: 50_000 }),                 // far away: kept
+    bar({ strike: 5, y: 300, oi: 9_000_000, h: 2 }),        // too thin for text
+  ];
+  const got = placeOiLabels(bars, () => 40);
+  assert.deepEqual([...got].sort(), [2, 3]); // max (index 2) and the far bar (index 3) only
+  // side by side horizontally (different bar ends) at the same height do not collide
+  const side = [bar({ x: 400, y: 100 }), bar({ x: 200, y: 100, oi: 10 })];
+  assert.equal(placeOiLabels(side, () => 40).size, 2);
+  // every placed pair is disjoint
+  const many = Array.from({ length: 60 }, (_, i) => bar({ strike: i, y: 50 + i * 3, x: 300 + (i % 5) * 10, oi: (i * 7919) % 1000 }));
+  const idx = [...placeOiLabels(many, () => 36)];
+  for (const a of idx) for (const b of idx) {
+    if (a >= b) continue;
+    const A = many[a], B = many[b];
+    const overlapY = Math.abs((A.y + A.h / 2) - (B.y + B.h / 2)) < 11;
+    const overlapX = (A.x - 3 - 36) < (B.x - 3) && (A.x - 3) > (B.x - 3 - 36);
+    assert.ok(!(overlapX && overlapY), `labels ${a} and ${b} overlap`);
+  }
 });

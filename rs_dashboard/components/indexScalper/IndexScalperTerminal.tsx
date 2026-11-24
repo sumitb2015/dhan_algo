@@ -656,15 +656,20 @@ export default function IndexScalperTerminal() {
 
   /** Close what THIS page opened on one broker row (security + product), clamped by what the broker still shows.
    *  Quantity a strategy, another terminal or a manual order holds on the same contract is never touched. */
-  const exitRealRow = useCallback(async (leg: ScalperLeg, owned: Map<string, number>, records: KotakRecord[] = [], book: Record<string, unknown>[] = []): Promise<Outcome & { skipped?: boolean }> => {
+  // `maxUnits` (broker units) caps the close: the chip's "-" takes one lot off through this same owned-quantity path.
+  const exitRealRow = useCallback(async (leg: ScalperLeg, owned: Map<string, number>, records: KotakRecord[] = [], book: Record<string, unknown>[] = [], maxUnits?: number): Promise<Outcome & { skipped?: boolean }> => {
     const label = `${leg.strike} ${leg.type}${leg.product ? ` ${leg.product}` : ''}`;
     const kotak = brokerRef.current === 'kotak';
     // Kotak: an order on this contract whose outcome is unknown may still fill; an exit sized before it lands could flip.
     if (kotak && heldByUnknown(records, leg.securityId, Date.now(), 60_000, book)) {
       return { ok: false, text: `${label}: an order on this contract has an unknown outcome; exit held for up to 60 s (check Orders)` };
     }
-    const order = ownedCloseOrder(leg.netQty, owned.get(leg.id) ?? 0);
-    if (!order) return { ok: false, skipped: true, text: `${label}: not opened from this page today, left open (square it off where it was opened)` };
+    const full = ownedCloseOrder(leg.netQty, owned.get(leg.id) ?? 0);
+    if (!full) return { ok: false, skipped: true, text: `${label}: not opened from this page today, left open (square it off where it was opened)` };
+    if (maxUnits !== undefined && full.units < maxUnits) {
+      return { ok: false, text: `${label}: this page opened less than one lot of it, nothing taken off` };
+    }
+    const order = maxUnits !== undefined ? { ...full, units: Math.min(full.units, maxUnits) } : full;
     const product = closeOrderProduct(kotak ? 'kotak' : 'dhan', kotak ? (leg.product === 'MARGIN' ? 'NRML' : leg.product === 'INTRADAY' ? 'MIS' : leg.product) : leg.product);
     if (!product || product.assumed) return { ok: false, text: `${label}: unsupported or missing product "${leg.product}", square it off at the broker` };
     let out: Outcome;
@@ -688,7 +693,7 @@ export default function IndexScalperTerminal() {
     } else {
       out = await sendReal({ securityId: leg.securityId, quantity: order.units, side: order.side, orderType: 'MARKET', ...product.fields });
     }
-    if (out.ok && order.units < Math.abs(leg.netQty)) {
+    if (out.ok && maxUnits === undefined && order.units < Math.abs(leg.netQty)) {
       return { ...out, text: `${out.text}: closed ${order.units} of ${Math.abs(leg.netQty)}, the rest was not opened from this page` };
     }
     return out;
@@ -1117,6 +1122,43 @@ export default function IndexScalperTerminal() {
       setTicketBusy(false);
     }
   }, [ticketBusy, placeContract, flash]);
+  // Quick Trade chip +/-: one lot more in the leg's own direction, or one lot taken off. "+" is an opening order
+  // (placeContract: lot cap, live price, session, isx). "-" closes through the exit path (fresh broker read, only what
+  // this page opened, Kotak freeze slices, unknown-outcome hold), capped at one lot; SIM fills one lot the other way.
+  const adjustLeg = useCallback(async (leg: ScalperLeg, delta: 1 | -1) => {
+    if (exitingId || ticketBusy) return;
+    const f = feedRef.current;
+    const isLong = leg.netQty > 0;
+    const lotSize = brokerRef.current === 'kotak' && real ? f.kotak?.lotSize ?? null : f.lotSize;
+    const contractUnits = lotUnits(underlying, lotSize);
+    if (contractUnits === null) { flash({ ok: false, text: 'Lot size not known yet: nothing sent' }); return; }
+    const c: PickedContract = { strike: leg.strike, type: leg.type, securityId: leg.securityId, tradingSymbol: leg.symbol, ltp: leg.ltp, expiry: f.expiry };
+    const product = (leg.product as 'INTRADAY' | 'MARGIN') || 'INTRADAY';
+    if (delta === 1) {
+      await onTradeContract(c, isLong ? 'BUY' : 'SELL', 1, product);
+      return;
+    }
+    // One lot in the leg's own quantity unit (Dhan MCX counts lots, Kotak / SIM / NSE count contract units).
+    const brokerUnitsPerLot = contractUnits / (leg.mult && leg.mult > 0 ? leg.mult : 1);
+    if (Math.abs(leg.netQty) <= brokerUnitsPerLot) { flash({ ok: false, text: 'One lot left: use Exit (x) to close the leg' }); return; }
+    setExitingId(leg.id);
+    try {
+      let out: Outcome;
+      if (!real || leg.sim) {
+        out = await placeContract({ contract: c, side: isLong ? 'SELL' : 'BUY', orderType: 'MARKET', price: null, trigger: null, product, lots: 1, closesLeg: true });
+      } else {
+        const st = await readExitState();
+        if (typeof st === 'string') out = { ok: false, text: st };
+        else {
+          const row = st.live.find(l => l.id === leg.id);
+          out = row ? await exitRealRow(row, st.owned, st.records, st.book, brokerUnitsPerLot) : { ok: false, text: 'Position not found at the broker' };
+        }
+        loadPositions();
+      }
+      flash({ ok: out.ok, text: out.ok ? `${leg.type} ${leg.strike}: one lot taken off` : out.text });
+    } finally { setExitingId(null); }
+  }, [exitingId, ticketBusy, real, underlying, placeContract, onTradeContract, readExitState, exitRealRow, loadPositions, flash]);
+
 
   // ── REAL arming ────────────────────────────────────────────────────
   const goSim = () => { setReal(false); };
@@ -1331,7 +1373,7 @@ export default function IndexScalperTerminal() {
               futureContract={chartContract} futureName={chartContractName}
               indicators={indicators} tool={tool} onToolDone={onToolDone} clearToken={clearToken}
               logScale={logScale} pctScale={pctScale} autoScale={autoScale}
-              legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} exitingId={exitingId}
+              legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} onAdjustLeg={adjustLeg} exitingId={exitingId}
               onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
               focus={focus} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
@@ -1347,7 +1389,7 @@ export default function IndexScalperTerminal() {
               futureContract={chartContract} futureName={chartContractName}
               indicators={indicators} tool={tool} onToolDone={onToolDone} clearToken={clearToken}
               logScale={logScale} pctScale={pctScale} autoScale={autoScale}
-              legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} exitingId={exitingId}
+              legs={legs} entrySpots={entrySpots} onExitLeg={exitLeg} onAdjustLeg={adjustLeg} exitingId={exitingId}
               onToggleIndicator={onToggleIndicator} onRemoveIndicator={removeIndicator} onEditIndicator={onEditIndicator}
               focus={focus} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}

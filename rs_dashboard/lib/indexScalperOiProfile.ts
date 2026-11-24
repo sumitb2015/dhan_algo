@@ -126,6 +126,29 @@ export function oiBars(
   return out;
 }
 
+/**
+ * Which bars get a text label so that no two labels overlap. A label sits just left of its bar, vertically centred on it,
+ * `lineH` px tall and `widthOf(bar)` px wide. Priority: the highlighted largest Call / Put first, then by |OI| (the walls
+ * a trader reads first); a label that would touch one already placed is dropped. Bars thinner than `minH` get none
+ * (text would sit on the neighbouring bar). Returns the indexes of the labelled bars.
+ */
+export function placeOiLabels(bars: OiBar[], widthOf: (b: OiBar) => number, lineH = 11, minH = 4, pad = 3): Set<number> {
+  const order = bars.map((b, i) => i).filter(i => bars[i].h >= minH)
+    .sort((a, b) => (Number(bars[b].max) - Number(bars[a].max)) || (Math.abs(bars[b].oi) - Math.abs(bars[a].oi)));
+  const placed: { l: number; r: number; t: number; b: number }[] = [];
+  const out = new Set<number>();
+  for (const i of order) {
+    const bar = bars[i];
+    const w = widthOf(bar);
+    const cy = bar.y + bar.h / 2;
+    const rect = { l: bar.x - pad - w, r: bar.x - pad, t: cy - lineH / 2, b: cy + lineH / 2 };
+    if (placed.some(p => rect.l < p.r && rect.r > p.l && rect.t < p.b && rect.b > p.t)) continue;
+    placed.push(rect);
+    out.add(i);
+  }
+  return out;
+}
+
 /** Compact OI: 1.23 Cr / 4.56 L / 7.8 K; "—" for none. */
 export function fmtOI(n: number | undefined): string {
   if (!n) return '—';
