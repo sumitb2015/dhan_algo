@@ -10,7 +10,7 @@ import {
 import { orbAlert, type OrbAlertSnap, type OrbSound } from '@/lib/signalOrbChime';
 import type { Target } from '@/lib/pnfTarget';
 import {
-  ORB_CODE_VERSION, closedBars, computeEffectiveStop, decideOrb, evaluate, rowLegsPnl, rowPnl, sideOf,
+  ORB_CODE_VERSION, closedBars, computeEffectiveStop, decideOrb, evaluate, rowLegsPnl, rowPnl, sideOf, signalRowExit,
   type EffectiveStopResult, type Evaluation, type Side,
 } from '@/lib/signalOrb';
 import { isPremiumInstrument, isStuck, liveRow, realisedToday, unknownLegIndexes, type OrbLedger, type OrbRow } from '@/lib/signalOrbLedger';
@@ -19,11 +19,12 @@ import { BLIND_WARN_MS } from '@/lib/orbFocus';
 
 // The Signal Orb's live engine (browser). Leader tab only (localStorage lock); the tick is rebuilt every render and called through
 // a ref from ONE interval, so quotes never restart it. It decides on closed bars (lib/signalOrb.ts) and asks the server to act
-// (/api/signal-orb/trade); the server sizes, sends and books. Stale feed blocks entries, never exits; a missing price skips the stop
-// but not the cutoff. REAL entries also need this page load's ARM click, which is never saved.
+// (/api/signal-orb/trade); the server sizes, sends and books. Stops, cutoff and loss limit belong to the server watcher while its
+// heartbeat is fresh; this tab sends them only as the fallback. Stale feed blocks entries, never exits; a missing price skips the
+// stop but not the cutoff. REAL entries also need this page load's ARM click (never saved) and the server's ARM.
 
 /** `contract` is always the FUTURE the signal reads; `optionLtp` is a live option row's premium (server WebSocket), else null. */
-type StateReply = { success: boolean; ledger: OrbLedger; contract: Target | null; unitsPerLot: number; optionLtp?: number | null; legLtps?: (number | null)[] | null; armedToday?: boolean; premiumBlindMs?: number; today: string; codeVersion?: string };
+type StateReply = { success: boolean; ledger: OrbLedger; contract: Target | null; unitsPerLot: number; optionLtp?: number | null; legLtps?: (number | null)[] | null; armedToday?: boolean; watcherMs?: number | null; premiumBlindMs?: number; today: string; codeVersion?: string };
 
 const STATE_POLL_MS = 3_000;
 const LOCK_KEY = 'signalOrb.engineLock';
@@ -31,6 +32,8 @@ const LOCK_TTL_MS = 5_000;
 /** No new price for this long = no entries (MCX futures tick every second in session). */
 const PRICE_STALE_MS = 30_000;
 const EXIT_RETRY_MS = 5_000;
+/** The server watcher's heartbeat older than this = it is not running: this tab's engine falls back to sending the stop exits. */
+const WATCHER_STALE_MS = 10_000;
 /**
  * 1-minute bars the indicators read (x timeframe). The feed holds every session the contract has traded (tens of thousands of
  * bars); the slowest default (Wilder RSI / StochRSI, EMA up to 400) has converged long before 3000 bars, and the tick stays cheap.
@@ -53,6 +56,8 @@ export function useOrbEngine() {
   const [isLeader, setIsLeader] = useState(false);
   const [note, setNote] = useState('Loading…');
   const [armed, setArmed] = useState(false);
+  // when the server watcher last ticked (this tab's clock), from the state poll; 0 = never seen
+  const [watcherAt, setWatcherAt] = useState(0);
   const [busy, setBusy] = useState(false);
   // the last refused order's reason: the 1 s engine note would overwrite it before it could be read
   const [tradeErr, setTradeErr] = useState<string | null>(null);
@@ -105,6 +110,7 @@ export function useOrbEngine() {
       const j = await r.json() as StateReply & { error?: string };
       if (!j.success) { setStateError(j.error ?? 'State unavailable'); return; }
       setStateError(null);
+      if (typeof j.watcherMs === 'number') setWatcherAt(Date.now() - j.watcherMs);
       // unchanged rev + contract keeps the same ledger/contract objects (so indicator memos don't recompute every poll),
       // but optionLtp and unitsPerLot always refresh — they change every tick independent of the ledger rev.
       setState(prev => {
@@ -140,6 +146,8 @@ export function useOrbEngine() {
   const ledger = state?.ledger ?? null;
   const live = ledger ? liveRow(ledger) : null;
   const isPremiumRow = live?.structure === 'straddle' || live?.structure === 'strangle';
+  // the server watcher runs every open row's stops while its heartbeat is fresh (a failing state poll ages it out too)
+  const serverStops = watcherAt > 0 && now > 0 && now - watcherAt < WATCHER_STALE_MS;
   const contract = state?.contract ?? null;
   // the leader tab keeps its prices flowing even hidden (its stops and exits depend on them); a tab that only watches pauses
   const feed = usePnfFeed(contract, 0, now, null, { pauseWhenHidden: !isLeader });
@@ -204,13 +212,14 @@ export function useOrbEngine() {
       const peak = bestPriceRef.current.price;
       const t = Date.now();
       const better = live.bestPrice === undefined || (live.side === 'LONG' ? peak > live.bestPrice : peak < live.bestPrice);
-      if (better && isLeader && t - peakSentAt.current >= 3_000) {
+      // while the server watcher runs it keeps the peak from its own price; this tab reports one only as the fallback engine
+      if (better && isLeader && !serverStops && t - peakSentAt.current >= 3_000) {
         peakSentAt.current = t;
         void op({ op: 'peak', id: live.id, price: peak });
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [price, live?.id, live?.status, live?.side, live?.bestPrice, isLeader]);
+  }, [price, live?.id, live?.status, live?.side, live?.bestPrice, isLeader, serverStops]);
   const priceFresh = price !== null && priceAt > 0 && now - priceAt < PRICE_STALE_MS && !feed.stale;
 
   const today = now ? istDateIso(now) : '';
@@ -302,20 +311,23 @@ export function useOrbEngine() {
       minute: istMinuteOfDay(t), times: cfg, stopPts: cfg.stopPts, trailStartPts: cfg.trailStartPts, trailGapPts: cfg.trailGapPts, blockedSide,
     });
 
-    // E11: realised + open P&L past the limit closes the position (the server then halts)
-    if (position && openPnl !== null && realised + openPnl <= -cfg.dailyLossLimit && t >= exitRetryAt.current) {
-      exitRetryAt.current = t + EXIT_RETRY_MS;
-      void trade({ action: 'exit', price: price ?? live!.signalEntry ?? live!.entry, reason: `Daily loss limit ₹${cfg.dailyLossLimit}`, exitKind: 'manual', auto: true });
-      return false;
+    // E11 + stops: the loss limit (realised + open), the cutoff and the hard / trailing stop - the server watcher's own rule
+    if (position) {
+      const x = signalRowExit({
+        side: position.side, entry: position.entry, bestPrice: position.bestPrice, price: priceFresh ? price : null, minute: istMinuteOfDay(t),
+        times: cfg, stopPts: cfg.stopPts, trailStartPts: cfg.trailStartPts, trailGapPts: cfg.trailGapPts, openPnl, realised, dailyLossLimit: cfg.dailyLossLimit,
+      });
+      if (x) {
+        // the server owns the exit while it runs (one sender, never two racing exits); this tab is only the fallback
+        if (serverStops) { setNote(`${x.reason} - the server is closing it`); return false; }
+        if (t < exitRetryAt.current) return false;
+        exitRetryAt.current = t + EXIT_RETRY_MS;
+        // the cutoff exits without a quote: the ledger books the last price seen
+        void trade({ action: 'exit', price: price ?? live!.signalEntry ?? live!.entry, reason: x.reason, exitKind: x.kind, auto: true });
+        return false;
+      }
     }
-    if (d.action === 'exit') {
-      if (t < exitRetryAt.current) return false;
-      exitRetryAt.current = t + EXIT_RETRY_MS;
-      // the cutoff exits without a quote: the ledger books the last price seen
-      const px = price ?? live!.signalEntry ?? live!.entry;
-      void trade({ action: 'exit', price: px, reason: d.reason, exitKind: d.kind, auto: true });
-      return false;
-    }
+    if (d.action === 'exit') return false;   // (signalRowExit judged the same exit above)
     if (d.action === 'none') { setNote(ledger.engineActive ? d.reason : 'Auto is OFF'); return false; }
     // entries / reversals
     if (!ledger.engineActive) { setNote(ledger.haltReason ? `Halted: ${ledger.haltReason}` : 'Auto is OFF'); return false; }
@@ -345,7 +357,8 @@ export function useOrbEngine() {
       unresolved: !live ? null : live.status === 'unknown' ? `Row ${live.id} outcome UNKNOWN`
         : unknownLegIndexes(live).length ? `Row ${live.id} has a leg with an UNKNOWN outcome`
         : isStuck(live, t) ? `Row ${live.id} stuck in flight` : live.day !== today ? `Row ${live.id} is from ${live.day}`
-        : (state?.premiumBlindMs ?? 0) >= BLIND_WARN_MS ? 'No live premium: the stops are not being judged' : null,
+        : (state?.premiumBlindMs ?? 0) >= BLIND_WARN_MS ? 'No live price: the stops are not being judged'
+        : live.status === 'open' && live.day === today && !serverStops ? 'The server stop watcher is not running' : null,
     };
     const alert = orbAlert(prevSnap.current, snap, traded);
     prevSnap.current = snap;
@@ -382,7 +395,7 @@ export function useOrbEngine() {
 
   return {
     state, ledger, live: live as OrbRow | null, contract, feed, ev, price, priceFresh, openPnl, mark, realised, now, isLeader, note, stateError,
-    armed, setArmed, armedToday: state?.armedToday === true, isPremiumRow, busy, op, trade, tradeErr, clearTradeErr: () => setTradeErr(null), closeAndStop, today, secsToClose, barSecs,
+    armed, setArmed, armedToday: state?.armedToday === true, serverStops, watcherSeen: watcherAt > 0, isPremiumRow, busy, op, trade, tradeErr, clearTradeErr: () => setTradeErr(null), closeAndStop, today, secsToClose, barSecs,
     tradeSound, setTradeSound, alertSound, setAlertSound, soundReady, outdated, effectiveStop, mtf, history, levels, dayPath, tf,
   };
 }

@@ -10,7 +10,7 @@ import { VWAP_START, vwapFrom } from './straddlePnf.ts';
  * update never reached) shows a reload banner and its entries are refused (lib/signalOrbServer.ts). Bump on every change to
  * the rules, the indicators or the engine.
  */
-export const ORB_CODE_VERSION = '2026-11-22.2';
+export const ORB_CODE_VERSION = '2026-11-24.1';
 
 export type Vote = 1 | -1 | 0;
 export type Signal = 'BULL' | 'BEAR' | 'NEUTRAL';
@@ -477,6 +477,23 @@ export function decideOrb(i: DecideInput): Decision {
   return i.position
     ? { action: 'reverse', side: want, reason: `${i.signal} - reverse ${i.position.side} -> ${want}` }
     : { action: 'enter', side: want, reason: `${i.signal} - enter ${want}` };
+}
+
+/**
+ * The exit an open signal-driven row (futures / sold option / synthetic) owes now, or null: the daily loss limit (realised + open),
+ * then the cutoff and the hard / trailing stop exactly as decideOrb judges them. One rule for the server watcher and the browser's
+ * fallback, so they cannot drift. `price` = the signal future's fresh price (null = stale: only the cutoff and a known loss can act).
+ */
+export function signalRowExit(i: {
+  side: Side; entry: number; bestPrice?: number; price: number | null; minute: number; times: OrbTimes;
+  stopPts: number; trailStartPts?: number; trailGapPts?: number; openPnl: number | null; realised: number; dailyLossLimit: number;
+}): { kind: 'stop' | 'eod' | 'manual'; reason: string } | null {
+  if (i.openPnl !== null && i.realised + i.openPnl <= -i.dailyLossLimit) return { kind: 'manual', reason: `Daily loss limit ₹${i.dailyLossLimit}` };
+  const d = decideOrb({
+    signal: 'NEUTRAL', barT: null, watermarkT: 0, position: { side: i.side, entry: i.entry, bestPrice: i.bestPrice }, price: i.price,
+    minute: i.minute, times: i.times, stopPts: i.stopPts, trailStartPts: i.trailStartPts, trailGapPts: i.trailGapPts, blockedSide: null,
+  });
+  return d.action === 'exit' ? { kind: d.kind, reason: d.reason } : null;
 }
 
 /** The stop-out block lifts once the colour is anything other than the stopped side. */

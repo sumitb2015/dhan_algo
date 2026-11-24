@@ -272,3 +272,21 @@ test('rowPnl with NIFTY lot units: futures row by side, options row always a sol
   assert.equal(rowPnl(opt, 80), 20 * 65);
   assert.equal(rowPnl(opt, 120), -20 * 65);
 });
+
+test('signalRowExit: loss limit first, then the cutoff, then the hard / trailing stop; a stale price judges only the cutoff and a known loss', async () => {
+  const { signalRowExit } = await import('./signalOrb.ts');
+  const times = { entryStart: '09:15', entryEnd: '22:45', eodExit: '23:00' };
+  const base = { side: 'LONG' as const, entry: 5000, minute: 12 * 60, times, stopPts: 30, trailStartPts: 0, trailGapPts: 15, openPnl: 0, realised: 0, dailyLossLimit: 3000 };
+  assert.equal(signalRowExit({ ...base, price: 4990 }), null);
+  assert.equal(signalRowExit({ ...base, price: 4970 })?.kind, 'stop');                       // 30 pts against
+  assert.equal(signalRowExit({ ...base, price: null }), null);                                // stale: the stop is not judged
+  assert.equal(signalRowExit({ ...base, price: null, minute: 23 * 60 })?.kind, 'eod');        // the cutoff needs no price
+  const loss = signalRowExit({ ...base, price: 4990, realised: -2500, openPnl: -600 });
+  assert.equal(loss?.kind, 'manual');
+  assert.match(loss!.reason, /Daily loss limit/);
+  // trailing: +40 peak with start 25 / gap 15 locks the stop at 5025; a fall to 5024 exits as a stop
+  const trail = { ...base, trailStartPts: 25, trailGapPts: 15, bestPrice: 5040 };
+  assert.equal(signalRowExit({ ...trail, price: 5030 }), null);
+  assert.equal(signalRowExit({ ...trail, price: 5024 })?.kind, 'stop');
+  assert.equal(signalRowExit({ ...base, side: 'SHORT', price: 5031 })?.kind, 'stop');
+});

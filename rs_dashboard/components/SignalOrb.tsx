@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Bell, BellOff, ChevronDown, ChevronUp, Clock, Info, PauseCircle, Power, Settings2, ShieldAlert, Volume2, VolumeX, X } from 'lucide-react';
 import NavBar from '@/components/NavBar';
 import { Orb } from '@/components/signalOrb/Orb';
@@ -20,7 +20,7 @@ import { isPremiumInstrument, isStuck, unknownLegIndexes, type OrbConfig, type O
 
 // /signal-orb: one orb, one switch. A CRUDEOIL / CRUDEOILM / NIFTY future's closed bars give the consensus of the active indicators —
 // futures mode: green long, red short; options mode: green sells a PE, red sells a CE; gray holds. Real money in REAL mode; the rules and every safety limit live in lib/signalOrb*.ts and
-// strategies/signal_orb/strategy.md. The engine runs only while this page is open (leader tab).
+// strategies/signal_orb/strategy.md. Entries need this page open (leader tab); every open row's stops run on the server (lib/orbPremiumServer.ts).
 
 const FOCUS = 'focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500';
 const inr = (n: number) => `${n >= 0 ? '+' : '−'}₹${Math.abs(n).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`;
@@ -50,6 +50,38 @@ export default function SignalOrb() {
   // load's ARM and the server's (which a dashboard restart or a mode switch clears), so a tab cannot trade REAL on a stale arm.
   const armedEff = premiumMode ? e.armedToday : e.armed && e.armedToday;
   const autoLabel = ledger?.engineActive ? (real && !armedEff ? 'Auto on · not armed' : 'Auto on') : 'Auto off';
+  const resolveBtn = (label: string, body: Record<string, unknown>) => ({ label, run: async () => setErr(await e.op(body)) });
+  // Every condition that needs the user, in one place, most serious first (red: money may be unprotected; amber: a decision).
+  const attention: AttentionItem[] = [];
+  if (e.stateError || e.feed.loadError) attention.push({ tone: 'red', text: e.stateError ?? e.feed.loadError ?? '' });
+  if (ledger?.haltReason) attention.push({ tone: 'red', text: `HALTED - ${ledger.haltReason}` });
+  if ((e.state?.premiumBlindMs ?? 0) >= BLIND_WARN_MS && live?.status === 'open') {
+    attention.push({ tone: 'red', text: `No live price for ${Math.round((e.state?.premiumBlindMs ?? 0) / 1000)} s - the stops are NOT being judged (only the cutoff). Check the price feed and the broker.` });
+  }
+  if (live?.legs) {
+    for (const i of unknownLegIndexes(live)) {
+      const g = live.legs[i];
+      attention.push({
+        tone: 'amber', text: `Leg ${i + 1} (${g.action === 'BUY' ? 'bought' : 'sold'} ${g.target.strike} ${g.target.side}) outcome UNKNOWN - check the ${live.broker} book, then:`,
+        actions: [resolveBtn('It is open', { op: 'resolveLeg', id: live.id, leg: i, as: 'open' }), resolveBtn('It is closed', { op: 'resolveLeg', id: live.id, leg: i, as: 'closed', price: e.state?.legLtps?.[i] ?? undefined })],
+      });
+    }
+  }
+  if (unresolved) {
+    const unk = unresolved.status === 'unknown' || stuck;
+    attention.push({
+      tone: 'amber',
+      text: unk ? `Order outcome UNKNOWN (${unresolved.side} ${unresolved.lots}) - check the ${unresolved.broker} book, then:` : `Open row from ${unresolved.day} - check the broker, then:`,
+      actions: [
+        ...(unk ? [resolveBtn('It is open', { op: 'resolve', id: unresolved.id, as: 'open' }), resolveBtn('Never filled', { op: 'resolve', id: unresolved.id, as: 'failed' })] : []),
+        resolveBtn('It is closed', { op: 'resolve', id: unresolved.id, as: 'closed', price: (unresolved.target.kind === 'options' ? e.state?.optionLtp : e.price) ?? undefined }),
+      ],
+    });
+  }
+  if (e.outdated) {
+    attention.push({ tone: 'amber', text: 'This tab is running an older version of the Signal Orb. Its numbers may be wrong and new entries are blocked.', actions: [{ label: 'Reload', run: () => window.location.reload() }] });
+  }
+
   // the engine note, unless it only repeats the switch label
   const note = /^Auto is OFF$/i.test(e.note) ? null : e.note;
 
@@ -126,7 +158,7 @@ export default function SignalOrb() {
           {ledger && (
             <span className={cn('whitespace-nowrap rounded-full border px-2.5 py-0.5 font-mono text-[10px] font-bold tracking-widest',
               real ? 'border-red-500/40 bg-red-500/10 text-red-400' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400')}>
-              {ledger.mode} · {ledger.config.broker.toUpperCase()}
+              {ledger.mode} · {ledger.config.broker.toUpperCase()}{real ? (armedEff ? ' · ARMED' : ' · NOT ARMED') : ''}
             </span>
           )}
           <div className="flex items-center rounded-lg border border-zinc-800 bg-zinc-900" role="group" aria-label="Sound">
@@ -157,55 +189,24 @@ export default function SignalOrb() {
 
       {/* stage: the CPR window | the orb | the context window on a wide screen; the orb and the context window side by side on a
           laptop, with the CPR window under the orb; everything stacked on a narrow one */}
-      <div className="relative z-10 grid flex-1 grid-cols-1 gap-2 lg:grid-cols-[minmax(0,1fr)_24rem] xl:grid-cols-[27rem_minmax(0,1fr)_29rem] 2xl:grid-cols-[35rem_minmax(0,1fr)_29rem]">
+      <div className={cn('relative z-10 grid flex-1 grid-cols-1 gap-2 lg:grid-cols-[minmax(0,1fr)_24rem] xl:grid-cols-[27rem_minmax(0,1fr)_29rem] 2xl:grid-cols-[35rem_minmax(0,1fr)_29rem]',
+        // REAL money: the whole stage is framed in red (solid when armed), so the mode is never one small pill away
+        real && (armedEff ? 'm-1 rounded-xl ring-2 ring-inset ring-red-500/70' : 'm-1 rounded-xl ring-1 ring-inset ring-red-500/35'))}>
+      {real && (
+        <span className={cn('pointer-events-none absolute left-1/2 top-1 z-20 -translate-x-1/2 rounded-full border px-3 py-0.5 font-mono text-[10px] font-black tracking-[0.3em]',
+          armedEff ? 'border-red-500/70 bg-red-600 text-oncolor' : 'border-red-500/40 bg-zinc-950 text-red-300')}>
+          REAL MONEY · {armedEff ? 'ARMED' : 'NOT ARMED'}
+        </span>
+      )}
       <main className="flex flex-col items-center justify-center gap-4 px-4 py-4 xl:col-start-2 xl:row-start-1">
-        {(e.stateError || e.feed.loadError) && (
-          <p className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs text-red-300">{e.stateError ?? e.feed.loadError}</p>
-        )}
-        {e.outdated && (
-          <div role="alert" className="flex flex-wrap items-center justify-center gap-3 rounded-lg border border-amber-500/50 bg-amber-500/10 px-3 py-2 text-xs font-bold text-amber-300">
-            <span>This tab is running an older version of the Signal Orb. Its numbers may be wrong and new entries are blocked.</span>
-            <button type="button" onClick={() => window.location.reload()}
-              className={cn('rounded border border-amber-500/50 px-2.5 py-0.5 hover:bg-amber-500/20', FOCUS)}>Reload</button>
-          </div>
-        )}
-        {ledger?.haltReason && (
-          <p className="flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-bold text-red-300">
-            <ShieldAlert className="h-3.5 w-3.5" /> HALTED — {ledger.haltReason}
-          </p>
-        )}
-        {live?.legs && unknownLegIndexes(live).map(i => (
-          <div key={i} className="flex flex-wrap items-center justify-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-            <span className="font-bold">Leg {i + 1} ({live.legs![i].action === 'BUY' ? 'bought' : 'sold'} {live.legs![i].target.strike} {live.legs![i].target.side}) outcome UNKNOWN - check the {live.broker} book, then:</span>
-            <button type="button" className={cn('rounded border border-amber-500/40 px-2 py-0.5 font-bold hover:bg-amber-500/20', FOCUS)} onClick={async () => setErr(await e.op({ op: 'resolveLeg', id: live.id, leg: i, as: 'open' }))}>It is open</button>
-            <button type="button" className={cn('rounded border border-amber-500/40 px-2 py-0.5 font-bold hover:bg-amber-500/20', FOCUS)} onClick={async () => setErr(await e.op({ op: 'resolveLeg', id: live.id, leg: i, as: 'closed', price: e.state?.legLtps?.[i] ?? undefined }))}>It is closed</button>
-          </div>
-        ))}
-        {(e.state?.premiumBlindMs ?? 0) >= BLIND_WARN_MS && live?.status === 'open' && (
-          <p role="alert" className="flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-xs font-bold text-red-300">
-            <ShieldAlert className="h-3.5 w-3.5" /> No live premium for {Math.round((e.state?.premiumBlindMs ?? 0) / 1000)} s - this structure&apos;s stops are NOT being judged (only the cutoff). Check the price feed and the broker.
-          </p>
-        )}
-        {unresolved && (
-          <div className="flex flex-wrap items-center justify-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
-            <span className="font-bold">
-              {unresolved.status === 'unknown' || stuck ? `Order outcome UNKNOWN (${unresolved.side} ${unresolved.lots}) — check the ${unresolved.broker} book, then:` : `Open row from ${unresolved.day} — check the broker, then:`}
-            </span>
-            {(unresolved.status === 'unknown' || stuck) && (
-              <>
-                <button type="button" className={cn('rounded border border-amber-500/40 px-2 py-0.5 font-bold hover:bg-amber-500/20', FOCUS)} onClick={async () => setErr(await e.op({ op: 'resolve', id: unresolved.id, as: 'open' }))}>It is open</button>
-                <button type="button" className={cn('rounded border border-amber-500/40 px-2 py-0.5 font-bold hover:bg-amber-500/20', FOCUS)} onClick={async () => setErr(await e.op({ op: 'resolve', id: unresolved.id, as: 'failed' }))}>Never filled</button>
-              </>
-            )}
-            <button type="button" className={cn('rounded border border-amber-500/40 px-2 py-0.5 font-bold hover:bg-amber-500/20', FOCUS)} onClick={async () => setErr(await e.op({ op: 'resolve', id: unresolved.id, as: 'closed', price: (unresolved.target.kind === 'options' ? e.state?.optionLtp : e.price) ?? undefined }))}>It is closed</button>
-          </div>
-        )}
+        <Attention items={attention} />
+        {live?.status === 'open' && live.day === e.today && <StopsWhere server={e.serverStops} seen={e.watcherSeen} leader={e.isLeader} premium={e.isPremiumRow} />}
 
         <Orb signal={ev.signal} readings={ev.readings} positionLabel={position} busy={e.busy}
           since={ev.sinceT ? sinceLabel(ev.sinceT, e.today) : null} progress={1 - e.secsToClose / e.barSecs} secsLeft={e.secsToClose} />
 
         {/* position: its own element, coloured by side (the orb shows the signal) */}
-        <PositionPill live={live} position={position} pnl={e.openPnl} effectiveStop={e.effectiveStop} config={ledger?.config} mark={e.mark} legLtps={e.state?.legLtps}
+        <PositionPill real={real} live={live} position={position} pnl={e.openPnl} effectiveStop={e.effectiveStop} config={ledger?.config} mark={e.mark} legLtps={e.state?.legLtps}
           onClose={live?.status === 'open' ? () => void e.closeAndStop() : null} />
 
         {/* readout: the price first, then one chip per indicator */}
@@ -290,6 +291,13 @@ export default function SignalOrb() {
               )}
             >
               Arm real money
+            </button>
+          )}
+          {real && armedEff && (
+            <button type="button" onClick={() => { e.setArmed(false); void e.op({ op: 'disarm' }); }}
+              title="Disarm: no new REAL entries until armed again (open positions keep their stops and exits)"
+              className={cn('ml-2 whitespace-nowrap rounded-full border border-zinc-700 bg-zinc-900 px-3.5 py-1 text-[10px] font-black uppercase tracking-[0.25em] text-zinc-300 hover:border-zinc-500 hover:text-zinc-100', FOCUS)}>
+              Disarm
             </button>
           )}
         </div>
@@ -397,7 +405,9 @@ const optionOf = (r: OrbRow) => (!r.legs && r.target.kind === 'options' ? `${r.t
 /** A multi-leg row's legs, e.g. "+25800 CE −25800 PE" (+ bought, − sold). */
 const legsOf = (r: OrbRow) => (r.legs ?? []).map(g => `${g.action === 'BUY' ? '+' : '−'}${g.target.strike} ${g.target.side}`).join('  ');
 
-function PositionPill({ live, position, pnl, effectiveStop, config, mark, legLtps, onClose }: {
+function PositionPill({ real, live, position, pnl, effectiveStop, config, mark, legLtps, onClose }: {
+  /** REAL: Close needs a second click within a few seconds (it sends a market exit and turns Auto off) */
+  real: boolean;
   live: OrbRow | null; position: 'LONG' | 'SHORT' | 'FLAT' | 'PENDING'; pnl: number | null; effectiveStop: EffectiveStopResult | null; config?: OrbConfig;
   /** the row's own live price (an option's premium for an options row) */
   mark: number | null;
@@ -498,20 +508,7 @@ function PositionPill({ live, position, pnl, effectiveStop, config, mark, legLtp
           </span>
         )
       )}
-      {onClose && (
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="Close the position and turn auto off"
-          title="Close the position and turn auto off"
-          className={cn(
-            'ml-1 flex items-center gap-1 rounded-full border border-zinc-700 bg-zinc-900/60 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-zinc-300 hover:border-red-500/70 hover:bg-red-500/15 hover:text-red-300 transition-colors',
-            FOCUS,
-          )}
-        >
-          <X className="h-3 w-3" aria-hidden /> Close
-        </button>
-      )}
+      {onClose && <CloseButton real={real} onClose={onClose} />}
     </div>
   );
 }
@@ -522,4 +519,84 @@ function NoteIcon({ note, active }: { note: string | null; active: boolean }) {
   if (!active) return <PauseCircle className={cn(cls, 'text-zinc-500')} aria-hidden />;
   if (note && /window|cutoff|waiting|next closed bar/i.test(note)) return <Clock className={cn(cls, 'text-sky-400')} aria-hidden />;
   return <Info className={cn(cls, 'text-zinc-400')} aria-hidden />;
+}
+
+/** Close (market exit + Auto off). In REAL the first click only arms it: a second click within 4 s sends; otherwise it resets. */
+function CloseButton({ real, onClose }: { real: boolean; onClose: () => void }) {
+  const [confirming, setConfirming] = useState(false);
+  useEffect(() => {
+    if (!confirming) return;
+    const t = setTimeout(() => setConfirming(false), 4_000);
+    return () => clearTimeout(t);
+  }, [confirming]);
+  const click = () => {
+    if (real && !confirming) { setConfirming(true); return; }
+    setConfirming(false);
+    onClose();
+  };
+  return (
+    <button type="button" onClick={click}
+      aria-label={confirming ? 'Confirm: close the REAL position at market and turn auto off' : 'Close the position and turn auto off'}
+      title={real ? 'REAL: click, then click again within 4 s to close at market (Auto turns off)' : 'Close the position and turn auto off'}
+      className={cn(
+        'ml-1 flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider transition-colors',
+        confirming ? 'border-red-500 bg-red-600 text-oncolor' : 'border-zinc-700 bg-zinc-900/60 text-zinc-300 hover:border-red-500/70 hover:bg-red-500/15 hover:text-red-300',
+        FOCUS,
+      )}>
+      <X className="h-3 w-3" aria-hidden /> {confirming ? 'Confirm close' : 'Close'}
+    </button>
+  );
+}
+
+type AttentionItem = { tone: 'red' | 'amber'; text: string; actions?: { label: string; run: () => void | Promise<void> }[] };
+
+/** Everything that needs the user, in ONE box above the orb (red first), instead of a stack of separate banners. */
+function Attention({ items }: { items: AttentionItem[] }) {
+  if (!items.length) return null;
+  const sorted = [...items].sort((a, b) => (a.tone === b.tone ? 0 : a.tone === 'red' ? -1 : 1));
+  const red = sorted[0].tone === 'red';
+  return (
+    <section role="alert" aria-label="Needs attention"
+      className={cn('w-full max-w-2xl rounded-lg border bg-zinc-950/90 text-xs', red ? 'border-red-500/50' : 'border-amber-500/50')}>
+      <h2 className={cn('flex items-center gap-1.5 border-b px-3 py-1 text-[10px] font-black uppercase tracking-[0.25em]', red ? 'border-red-500/30 text-red-300' : 'border-amber-500/30 text-amber-300')}>
+        <ShieldAlert className="h-3.5 w-3.5" aria-hidden /> Needs attention{sorted.length > 1 ? ` (${sorted.length})` : ''}
+      </h2>
+      <ul>
+        {sorted.map((it, i) => (
+          <li key={i} className={cn('flex flex-wrap items-center gap-2 px-3 py-1.5', i > 0 && 'border-t border-zinc-900', it.tone === 'red' ? 'text-red-300' : 'text-amber-300')}>
+            <span className="font-bold">{it.text}</span>
+            {it.actions?.map(a => (
+              <button key={a.label} type="button" onClick={() => void a.run()}
+                className={cn('rounded border px-2 py-0.5 font-bold', it.tone === 'red' ? 'border-red-500/40 hover:bg-red-500/20' : 'border-amber-500/40 hover:bg-amber-500/20', FOCUS)}>
+                {a.label}
+              </button>
+            ))}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/**
+ * Where the open position's stops are running. Server: they run with every tab closed. Otherwise only the engine tab sends them,
+ * so closing it leaves the position without a stop (or, for a straddle / strangle, without any of its rules).
+ */
+function StopsWhere({ server, seen, leader, premium }: { server: boolean; seen: boolean; leader: boolean; premium: boolean }) {
+  if (server) {
+    return (
+      <p className="flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-0.5 font-mono text-[10px] font-bold text-emerald-300"
+        title="The dashboard server judges the cutoff, the stop, the trail and the daily loss limit on its own price feed: closing this tab is safe (stopping the dashboard is not)">
+        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" aria-hidden /> STOPS RUN ON THE SERVER · safe to close this tab
+      </p>
+    );
+  }
+  return (
+    <p role="alert" className="flex max-w-2xl items-center gap-2 rounded-lg border border-red-500/50 bg-red-500/10 px-3 py-1.5 text-xs font-bold text-red-300">
+      <ShieldAlert className="h-3.5 w-3.5 shrink-0" aria-hidden />
+      {premium
+        ? `The server watcher is ${seen ? 'not responding' : 'not running'}: this straddle / strangle's stops and targets are NOT running. Restart the dashboard.`
+        : `The server watcher is ${seen ? 'not responding' : 'not running'}: the stops run only in the engine tab${leader ? ' (this one) - keep it open' : ' (another tab) - keep it open'}.`}
+    </p>
+  );
 }

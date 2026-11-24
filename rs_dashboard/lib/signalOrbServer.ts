@@ -49,6 +49,12 @@ export const isArmedToday = (now: number): boolean => armed.day === istDateIso(n
 /** When an open straddle / strangle first had no live premium on a leg (0 = priced). In memory: the watcher and the state route share it. */
 export const premiumBlind = globalOnce('signalOrb.premiumBlind', () => ({ since: 0, warnedAt: 0 }));
 
+/**
+ * The server watcher's heartbeat (lib/orbPremiumServer.ts sets it every tick, busy or not). While it is fresh the server owns every
+ * open row's stops; the browser sends stop / cutoff / loss-limit exits only as a fallback when it is stale (e.g. DASHBOARD_NO_BACKGROUND).
+ */
+export const orbWatcher = globalOnce('signalOrb.watcher', () => ({ at: 0 }));
+
 /** An option premium older than this (no change) is not used to book an entry. */
 const OPT_FRESH_MS = 30_000;
 
@@ -140,7 +146,7 @@ export function orbState(): Reply {
     }
   }
   const unitsPerLot = live?.unitsPerLot ?? unitsPerLotOf(ledger.config.symbol, now);
-  return { status: 200, body: { success: true, ledger, contract, unitsPerLot, optionLtp: optLtp, legLtps, armedToday: isArmedToday(now), premiumBlindMs: premiumBlind.since > 0 ? now - premiumBlind.since : 0, today, codeVersion: ORB_CODE_VERSION } };
+  return { status: 200, body: { success: true, ledger, contract, unitsPerLot, optionLtp: optLtp, legLtps, armedToday: isArmedToday(now), watcherMs: orbWatcher.at > 0 ? now - orbWatcher.at : null, premiumBlindMs: premiumBlind.since > 0 ? now - premiumBlind.since : 0, today, codeVersion: ORB_CODE_VERSION } };
 }
 
 /** The signal future's WebSocket key (subscribing it): the strike pick for the warm-up reads its price. */
@@ -328,6 +334,21 @@ export function orbTrade(req: TradeRequest): Promise<Reply> {
     const out = syn ? await enterStructure(l, 'synthetic', req.side!, req.price, syn, req.reason, now, day) : await enterRow(l, req.side!, req.price, opt, req.reason, now, day);
     l = out.ledger;
     return { status: out.ok ? 200 : out.unknown ? 504 : 502, body: { success: out.ok, error: out.error, ledger: save(l, now) } };
+  });
+}
+
+/**
+ * An automatic exit of ONE row (the server watcher's): judged outside the chain, so inside it the row must still be the same open
+ * row - a reversal or a manual close in between must never be followed by a stale exit of the next row.
+ */
+export function orbExitRow(rowId: string, req: TradeRequest): Promise<Reply> {
+  return serial(async () => {
+    const l = readOrbLedger();
+    const live = liveRow(l);
+    if (!live || live.id !== rowId || live.status !== 'open') return fail('The row is no longer open', 409);
+    const now = Date.now();
+    const out = await exitRow(l, live, req, now);
+    return { status: out.ok ? 200 : out.unknown ? 504 : 502, body: { success: out.ok, error: out.error, ledger: save(out.ledger, now) } };
   });
 }
 
