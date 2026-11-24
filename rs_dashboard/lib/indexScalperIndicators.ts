@@ -261,3 +261,23 @@ export function mergeHistory(history: Bar[], live: Bar[], intervalMin: number, n
   }
   return out;
 }
+
+/** Colour of point `i` when an indicator is drawn as ONE chart series. A Supertrend is a single line coloured by
+ *  direction; drawing it as one series per colour made each colour's series join its last point to its next across the
+ *  other direction's run (lightweight-charts draws a line straight over whitespace), so the bearish line cut diagonally
+ *  across bullish stretches. lightweight-charts paints the segment i -> i+1 in point i's colour, so the last bar BEFORE
+ *  a flip is transparent: that hides the jump from one band to the other, the gap TradingView leaves at a flip. */
+export function pointColor(s: OutSeries, i: number): string | undefined {
+  if (!s.colors) return undefined;
+  const c = s.colors[i] ?? s.color;
+  if (s.style !== 'line') return c;
+  const next = i + 1 < s.colors.length ? s.colors[i + 1] : null;
+  return next && s.colors[i] && next !== s.colors[i] ? 'transparent' : c;
+}
+
+/** Whether the last bar flips a direction-coloured line: its previous point's colour then depends on the forming bar,
+ *  which an update of the last point alone cannot repaint, so the chart must redraw the series. */
+export function flipsAtLast(s: OutSeries): boolean {
+  const n = s.values.length;
+  return s.style === 'line' && !!s.colors && n >= 2 && !!s.colors[n - 1] && !!s.colors[n - 2] && s.colors[n - 1] !== s.colors[n - 2];
+}

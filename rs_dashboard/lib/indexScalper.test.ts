@@ -4,7 +4,7 @@ import {
   applyFill, legAnchor, legPnl, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, parseNiftyOption, pnlSummary, totalPnl,
   type ScalperLeg,
 } from './indexScalperPositions.ts';
-import { applyTick, computeIndicator, mergeHistory, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
+import { applyTick, computeIndicator, flipsAtLast, mergeHistory, pointColor, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
 import { emaSmaSeeded, supertrendSeries } from './indicators.ts';
 
 const leg = (o: Partial<ScalperLeg> = {}): ScalperLeg => ({
@@ -195,4 +195,16 @@ test('ticks accumulate: a closed bar keeps its range and the forming bar keeps e
   bars = applyTick(bars, 103, 5, t0 + 620); // rolls again
   assert.deepEqual(bars.map(b => b.t), [t0, t0 + 300, t0 + 600]);
   assert.deepEqual(bars[0], { t: t0, o: 100, h: 104, l: 97, c: 101 });
+});
+
+test('Supertrend is one series coloured per point, with a gap at each flip (no line drawn across the other trend)', () => {
+  const G = '#22c55e', R = '#ef4444';
+  const s = { key: 'v', label: 'ST', color: G, style: 'line' as const, values: [1, 2, 3, 9, 8, 7, 3], colors: [G, G, G, R, R, R, G] };
+  // the segment from point i is drawn in point i's colour: the bar before each flip is transparent
+  assert.deepEqual(s.values.map((_, i) => pointColor(s, i)), [G, G, 'transparent', R, R, 'transparent', G]);
+  assert.equal(flipsAtLast(s), true);
+  assert.equal(flipsAtLast({ ...s, colors: [G, G, G, R, R, R, R] }), false);
+  // histograms keep their own per-bar colour; plain lines have none
+  assert.equal(pointColor({ ...s, style: 'histogram' }, 2), G);
+  assert.equal(pointColor({ ...s, colors: undefined }, 2), undefined);
 });

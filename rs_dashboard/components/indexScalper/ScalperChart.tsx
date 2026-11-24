@@ -11,7 +11,7 @@ import {
 } from 'lightweight-charts';
 import { Eye, EyeOff, Settings2, X } from 'lucide-react';
 import { useChartChrome } from '@/lib/chartTheme';
-import { computeIndicator, indicatorLabel, tailUnchanged, type Bar, type IndicatorInstance, type OutSeries } from '@/lib/indexScalperIndicators';
+import { computeIndicator, indicatorLabel, tailUnchanged, type Bar, type IndicatorInstance, pointColor, flipsAtLast } from '@/lib/indexScalperIndicators';
 import { fmtRupees, legAnchor, legPnl, type ScalperLeg } from '@/lib/indexScalperPositions';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
@@ -73,15 +73,6 @@ function istLabel(shifted: number): string {
 }
 
 /** Split a coloured line into one series per colour, blank where the colour differs, so a flip leaves a gap instead of a diagonal. */
-function splitByColor(s: OutSeries): OutSeries[] {
-  if (!s.colors || s.style !== 'line') return [s];
-  const colors = Array.from(new Set(s.colors.filter((c): c is string => !!c)));
-  return colors.map(c => ({
-    ...s, key: `${s.key}:${c}`, color: c, colors: undefined,
-    values: s.values.map((v, i) => (s.colors![i] === c ? v : null)),
-  }));
-}
-
 export default function ScalperChart(props: Props) {
   const {
     bars, indicators, tool, onToolDone, clearToken, logScale, pctScale, autoScale, legs, entrySpots,
@@ -94,7 +85,7 @@ export default function ScalperChart(props: Props) {
   const indSeriesRef = useRef<ISeriesApi<SeriesType>[]>([]);
   const sigRef = useRef('');
   // What the last pass drew: length, first bar time, and the last two bars (to spot a refresh that rewrote history).
-  const prevRef = useRef<{ n: number; first: number; tail: Bar[] } | null>(null);
+  const prevRef = useRef<{ n: number; first: number; tail: Bar[]; flip: boolean } | null>(null);
   const legLinesRef = useRef<Map<string, IPriceLine>>(new Map());
   const drawLinesRef = useRef<IPriceLine[]>([]);
   const drawSeriesRef = useRef<ISeriesApi<'Line'>[]>([]);
@@ -253,9 +244,12 @@ export default function ScalperChart(props: Props) {
     // Fast path only when nothing but the forming bar moved: the bars before it must be exactly what was drawn. A candle
     // refresh that corrected an earlier tick-built bar (missed high/low) falls through to a full setData, which also
     // recomputes every indicator value.
+    const flip = outputs.some(({ out }) => out.series.some(flipsAtLast));
     const tail = !!prev && sig === sigRef.current && prev.first === bars[0].t
       && (bars.length === prev.n || bars.length === prev.n + 1)
-      && tailUnchanged(prev.tail, prev.n, bars);
+      && tailUnchanged(prev.tail, prev.n, bars)
+      // A Supertrend flipping on the forming bar (now, or on the last pass) recolours the point before it: redraw.
+      && !flip && !prev.flip;
     const lastBar = bars[bars.length - 1];
 
     if (tail) {
@@ -263,17 +257,17 @@ export default function ScalperChart(props: Props) {
         candles.update({ time: toTime(lastBar.t), open: lastBar.o, high: lastBar.h, low: lastBar.l, close: lastBar.c });
         let k = 0;
         for (const { out } of outputs) {
-          for (const raw of out.series) for (const s of splitByColor(raw)) {
+          for (const s of out.series) {
             const api = indSeriesRef.current[k++];
             const v = s.values[s.values.length - 1];
             if (!api) continue;
             if (v === null) continue;
-            if (s.style === 'histogram') api.update({ time: toTime(lastBar.t), value: v, color: s.colors?.[s.values.length - 1] ?? s.color } as never);
-            else api.update({ time: toTime(lastBar.t), value: v } as never);
+            const color = pointColor(s, s.values.length - 1);
+            api.update((color ? { time: toTime(lastBar.t), value: v, color } : { time: toTime(lastBar.t), value: v }) as never);
           }
         }
       } catch { /* "Cannot update oldest data": next full pass repairs it */ prevRef.current = null; }
-      prevRef.current = { n: bars.length, first: bars[0].t, tail: bars.slice(-2) };
+      prevRef.current = { n: bars.length, first: bars[0].t, tail: bars.slice(-2), flip };
       return;
     }
 
@@ -286,17 +280,17 @@ export default function ScalperChart(props: Props) {
       let pane = 0;
       for (const { out } of outputs) {
         const paneIdx = out.pane === 'sub' ? ++pane : 0;
-        for (const raw of out.series) for (const s of splitByColor(raw)) {
+        for (const s of out.series) {
           let api: ISeriesApi<SeriesType>;
           if (s.style === 'histogram') {
             api = chart.addSeries(HistogramSeries, { color: s.color, priceLineVisible: false, lastValueVisible: false }, paneIdx);
           } else {
-            const thick = raw.colors ? 3 : 2;
+            const thick = s.colors ? 3 : 2;
             api = chart.addSeries(LineSeries, {
-              color: s.color, lineWidth: (paneIdx === 0 ? thick : 1) as 1 | 2 | 3, priceLineVisible: false, lastValueVisible: paneIdx !== 0 || !raw.colors,
+              color: s.color, lineWidth: (paneIdx === 0 ? thick : 1) as 1 | 2 | 3, priceLineVisible: false, lastValueVisible: paneIdx !== 0 || !s.colors,
               crosshairMarkerVisible: false,
             }, paneIdx);
-            for (const g of raw.guides ?? []) api.createPriceLine({ price: g, color: chrome.baseline, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' });
+            for (const g of s.guides ?? []) api.createPriceLine({ price: g, color: chrome.baseline, lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: '' });
           }
           indSeriesRef.current.push(api);
         }
@@ -311,18 +305,18 @@ export default function ScalperChart(props: Props) {
 
     let k = 0;
     for (const { out } of outputs) {
-      for (const raw of out.series) for (const s of splitByColor(raw)) {
+      for (const s of out.series) {
         const api = indSeriesRef.current[k++];
         if (!api) continue;
-        const data = s.values.map((v, i) => (v === null || !Number.isFinite(v)
-          ? { time: toTime(bars[i].t) }
-          : s.style === 'histogram'
-            ? { time: toTime(bars[i].t), value: v, color: s.colors?.[i] ?? s.color }
-            : { time: toTime(bars[i].t), value: v }));
+        const data = s.values.map((v, i) => {
+          if (v === null || !Number.isFinite(v)) return { time: toTime(bars[i].t) };
+          const color = pointColor(s, i);
+          return color ? { time: toTime(bars[i].t), value: v, color } : { time: toTime(bars[i].t), value: v };
+        });
         api.setData(data as never);
       }
     }
-    prevRef.current = { n: bars.length, first: bars[0].t, tail: bars.slice(-2) };
+    prevRef.current = { n: bars.length, first: bars[0].t, tail: bars.slice(-2), flip };
   }, [bars, outputs, indicators, chrome]);
 
   // Visible range request (1D / 1W / ... buttons). Applied on every click (`seq`), and again when a different history
