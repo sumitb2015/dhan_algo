@@ -16,7 +16,7 @@ import {
   legOnChart, nearestStrike, orderOnChart, resolveSource, sourceLabel, type ChartSource,
 } from '@/lib/indexScalperChartSource';
 import { legsKey, type ScalperLeg } from '@/lib/indexScalperPositions';
-import { buildOiProfile, oiProfileKey } from '@/lib/indexScalperOiProfile';
+import { buildOiProfile, oiProfileKey, type OiMode } from '@/lib/indexScalperOiProfile';
 import type { IndicatorInstance } from '@/lib/indexScalperIndicators';
 import type { OrderRowView } from '@/lib/indexScalperAccount';
 import type { Underlying } from '@/lib/indexScalperInstrument';
@@ -72,6 +72,7 @@ interface Props {
   orderQtyMult: number;
   /** Draw the Call / Put OI profile (underlying panes only: strikes are underlying levels, not premiums). */
   showOi: boolean;
+  oiMode: OiMode;
 }
 
 function ChartPane(p: Props) {
@@ -190,6 +191,12 @@ function ChartPane(p: Props) {
           </span>
         )}
         {error && <span className="text-[10px] text-amber-400 truncate" title={error}>Candles: {error}</span>}
+        {oiProfile && p.oiMode === 'change' && !oiProfile.hasChange && (
+          <span data-testid="oi-change-unavailable" className="text-[10px] text-amber-400 shrink-0"
+            title="The chain has no previous-day OI for this expiry, so the change cannot be computed (it is not shown as zero).">
+            OI change: no previous-day OI
+          </span>
+        )}
       </div>
       <div className="relative flex-1 min-w-0 min-h-0">
         <ScalperChart
@@ -219,6 +226,7 @@ function ChartPane(p: Props) {
           drawKey={drawKey}
           viewKey={viewKey}
           oiProfile={oiProfile}
+          oiMode={p.oiMode}
         />
         {bars.length === 0 && !loading && (
           <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500 pointer-events-none">

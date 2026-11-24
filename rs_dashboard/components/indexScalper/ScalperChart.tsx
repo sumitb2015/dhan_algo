@@ -18,7 +18,7 @@ import type { OrderRowView } from '@/lib/indexScalperAccount';
 import { displayLotUnits, qtyUnits, type Underlying } from '@/lib/indexScalperInstrument';
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
-import { fmtOI, oiBars, type OiProfile } from '@/lib/indexScalperOiProfile';
+import { fmtOI, fmtOIChange, oiBars, type OiMode, type OiProfile } from '@/lib/indexScalperOiProfile';
 
 export type DrawTool = 'cursor' | 'hline' | 'trend' | 'ruler';
 
@@ -92,6 +92,8 @@ interface Props {
   /** Call / Put open interest per strike, drawn as horizontal bars at each strike's level (underlying chart only; null
    *  hides it). Display only. */
   oiProfile?: OiProfile | null;
+  /** Bars show the total OI, or today's change in OI (added = filled, shed = outlined). */
+  oiMode?: OiMode;
 }
 
 interface Hover { o: number; h: number; l: number; c: number; t: number }
@@ -125,7 +127,7 @@ function ScalperChart(props: Props) {
     onExitLeg, exitingId, onToggleIndicator, onRemoveIndicator, onEditIndicator, symbolLabel, focus,
     contractName, lots: lotsProp = 1, openOrders = [], onCancelOrder, onPlaceLimitOrder, onOpenTicket, onAlert,
     simBrackets = {}, onSetBracket, onCancelBracket, onReversePosition, underlying = 'NIFTY', feedLotSize, orderQtyMult = 1,
-    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, oiProfile = null,
+    premium = false, tickSize: tickProp, drawKey: drawKeyProp = DRAW_KEY, viewKey, oiProfile = null, oiMode = 'total',
   } = props;
   const drawKeyRef = useRef(drawKeyProp);
   const tickSize = tickProp ?? (underlying === 'CRUDEOILM' ? 1.0 : 0.05);
@@ -783,8 +785,8 @@ function ScalperChart(props: Props) {
       // The main pane only: an oscillator pane below it has its own price scale.
       const plotH = chart.panes()[0]?.getHeight() ?? H;
       const right = W - axisW;
-      const bars = oiProfile ? oiBars(oiProfile, p => candles.priceToCoordinate(p), right, plotH, Math.min(260, right * 0.3)) : [];
-      const sig = `${W}x${H}|${chromeRef.current.textSecondary}|` + bars.map(b => `${b.side}${b.strike}:${b.y.toFixed(1)}:${b.w.toFixed(1)}:${b.h.toFixed(1)}`).join(',');
+      const bars = oiProfile ? oiBars(oiProfile, p => candles.priceToCoordinate(p), right, plotH, Math.min(260, right * 0.3), oiMode) : [];
+      const sig = `${W}x${H}|${oiMode}|${chromeRef.current.textSecondary}|` + bars.map(b => `${b.side}${b.strike}:${b.y.toFixed(1)}:${b.w.toFixed(1)}:${b.h.toFixed(1)}`).join(',');
       if (sig === oiSigRef.current) return;
       oiSigRef.current = sig;
       const dpr = window.devicePixelRatio || 1;
@@ -801,18 +803,25 @@ function ScalperChart(props: Props) {
       for (const b of bars) {
         // Data colours (CLAUDE.md theming exception): Calls rose, Puts emerald; the largest of each stronger.
         const rgb = b.side === 'CE' ? '244,63,94' : '16,185,129';
-        ctx.fillStyle = `rgba(${rgb},${b.max ? 0.7 : 0.32})`;
-        ctx.fillRect(b.x, b.y, b.w, b.h);
+        if (b.neg) {
+          // OI shed today: an outline of the same length, so it reads as "taken off", not as fresh writing.
+          ctx.strokeStyle = `rgba(${rgb},0.85)`;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(b.x + 0.5, b.y + 0.5, Math.max(0, b.w - 1), Math.max(0, b.h - 1));
+        } else {
+          ctx.fillStyle = `rgba(${rgb},${b.max ? 0.7 : 0.32})`;
+          ctx.fillRect(b.x, b.y, b.w, b.h);
+        }
         if (b.h >= 6) {
           ctx.fillStyle = chromeRef.current.textSecondary;
-          ctx.fillText(fmtOI(b.oi).replace(' ', ''), b.x - 3, b.y + b.h / 2);
+          ctx.fillText(oiMode === 'change' ? fmtOIChange(b.oi) : fmtOI(b.oi).replace(' ', ''), b.x - 3, b.y + b.h / 2);
         }
       }
     };
     paint();
     const t = setInterval(paint, 150);
     return () => clearInterval(t);
-  }, [oiProfile, chrome]);
+  }, [oiProfile, oiMode, chrome]);
 
   // ── price scale hover '+' button ────────────────────────────────────
   useEffect(() => {

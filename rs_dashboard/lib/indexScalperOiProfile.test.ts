@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildOiProfile, fmtOI, oiBars, oiProfileKey } from './indexScalperOiProfile.ts';
+import { buildOiProfile, fmtOI, fmtOIChange, oiBars, oiChange, oiProfileKey } from './indexScalperOiProfile.ts';
 
 const chain = {
   '25300': { strike: 25300, ce: { oi: 1_000_000 }, pe: { oi: 4_000_000 } },
@@ -58,4 +58,52 @@ test('fmtOI', () => {
   assert.equal(fmtOI(456_000), '4.56 L');
   assert.equal(fmtOI(7_800), '7.8 K');
   assert.equal(fmtOI(0), '—');
+});
+
+test('OI change: exact from prev_oi; from a non-zero pct otherwise; unknown is null, never 0', () => {
+  assert.equal(oiChange({ oi: 1_200_000, prev_oi: 1_000_000, oi_chg_pct: 20 }), 200_000);
+  assert.equal(oiChange({ oi: 800_000, prev_oi: 1_000_000 }), -200_000); // shed OI is a real negative
+  assert.equal(oiChange({ oi: 1_000_000, prev_oi: 1_000_000, oi_chg_pct: 0 }), 0); // real flat (baseline known)
+  assert.equal(oiChange({ oi: 1_200_000, oi_chg_pct: 20 }), 200_000); // older bridge: backed out of the pct
+  assert.equal(oiChange({ oi: 1_200_000, oi_chg_pct: 0 }), null); // 0.0 with no baseline = unknown
+  assert.equal(oiChange({ oi: 1_200_000, prev_oi: 0, oi_chg_pct: 0 }), null);
+  assert.equal(oiChange({ oi: 1_200_000 }), null);
+  assert.equal(oiChange({ oi: 0, prev_oi: 1_000_000 }), null); // no current OI reading
+  assert.equal(oiChange(null), null);
+});
+
+test('change mode: bars by |change|, shed OI flagged neg, unknown sides skipped, max = most OI added', () => {
+  const p = buildOiProfile({
+    '25300': { strike: 25300, ce: { oi: 1_000_000, prev_oi: 1_500_000 }, pe: { oi: 4_000_000, prev_oi: 3_000_000 } },
+    '25350': { strike: 25350, ce: { oi: 2_000_000, prev_oi: 1_800_000 }, pe: { oi: 2_000_000, oi_chg_pct: 0 } },
+    '25400': { strike: 25400, ce: { oi: 5_000_000, prev_oi: 4_800_000 }, pe: { oi: 500_000, prev_oi: 500_000 } },
+  })!;
+  assert.equal(p.hasChange, true);
+  assert.equal(p.maxCeChgStrike, 25350); // 25350 and 25400 both added 2.0L: strict '>' keeps the first
+  assert.equal(p.maxPeChgStrike, 25300); // +10L
+  const yOf = (price: number) => 100 + (25400 - price);
+  const bars = oiBars(p, yOf, 500, 400, 200, 'change');
+  const ce300 = bars.find(b => b.strike === 25300 && b.side === 'CE')!;
+  const pe300 = bars.find(b => b.strike === 25300 && b.side === 'PE')!;
+  assert.equal(pe300.w, 200); // +10L is the largest magnitude on screen
+  assert.equal(ce300.w, 100); // -5L: half of it, flagged as shed OI
+  assert.equal(ce300.neg, true);
+  assert.equal(ce300.oi, -500_000);
+  assert.equal(bars.some(b => b.strike === 25350 && b.side === 'PE'), false); // unknown change: no bar
+  assert.equal(bars.some(b => b.strike === 25400 && b.side === 'PE'), false); // real zero change: nothing to draw
+  // total mode is unchanged by the change fields
+  assert.equal(oiBars(p, yOf, 500, 400, 200).find(b => b.strike === 25400 && b.side === 'CE')!.w, 200);
+});
+
+test('no previous-day OI anywhere: hasChange false and no change bars', () => {
+  const p = buildOiProfile({ '25300': { strike: 25300, ce: { oi: 1_000_000, oi_chg_pct: 0 }, pe: { oi: 2_000_000 } } })!;
+  assert.equal(p.hasChange, false);
+  assert.deepEqual(oiBars(p, () => 100, 500, 400, 200, 'change'), []);
+  assert.equal(p.maxCeChgStrike, null);
+});
+
+test('fmtOIChange', () => {
+  assert.equal(fmtOIChange(120_000), '+1.20L');
+  assert.equal(fmtOIChange(-45_000), '-45.0K');
+  assert.equal(fmtOIChange(0), '0');
 });

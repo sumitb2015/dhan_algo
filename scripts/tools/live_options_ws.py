@@ -882,6 +882,9 @@ def main():
                         'change':     round(change, 2),
                         'change_pct': round(change_pct, 4),
                         'oi_chg_pct': round(oi_chg_pct, 2),
+                        # Previous-day OI (0 = no baseline): oi_chg_pct reads 0.0 both for "no change" and for "no
+                        # baseline", so readers that need the OI change take oi - prev_oi only when prev_oi > 0.
+                        'prev_oi':    int(side_prev_oi) if side_prev_oi > 0 else 0,
                         'buildup':    _classify_buildup(change_pct, oi_chg_pct),
                     }
 

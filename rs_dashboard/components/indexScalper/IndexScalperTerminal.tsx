@@ -43,12 +43,14 @@ import {
 import { readPref, savePref } from '@/lib/localPref';
 import { cn } from '@/lib/utils';
 import { Switch } from '@/components/ui/switch';
+import type { OiMode } from '@/lib/indexScalperOiProfile';
 
 // v2: v1 could hold an ATM pin taken before any spot was known (the middle of the strike list, e.g. 24200). v1 is
 // read for the layout, instruments and timeframes only; its option strikes go back to ATM.
 const LAYOUT_KEY = 'indexScalper.layout.v2';
 const LAYOUT_KEY_V1 = 'indexScalper.layout.v1';
 const OI_KEY = 'indexScalper.oiProfile';
+const OI_MODE_KEY = 'indexScalper.oiMode';
 /** Default panes: the underlying, and its ATM CE (strike 0 resolves to ATM once, then stays pinned). */
 const DEFAULT_PANES: [PaneCfg, PaneCfg] = [
   { source: { kind: 'underlying' }, interval: '5' },
@@ -131,6 +133,8 @@ export default function IndexScalperTerminal() {
   const [paneStatus, setPaneStatus] = useState<[PaneStatus, PaneStatus]>([NO_STATUS, NO_STATUS]);
   // Call / Put OI bars at each strike on the underlying chart(s). Per viewer, on by default.
   const [showOi, setShowOi] = useState(true);
+  // What the bars show: the total OI, or today's change in OI.
+  const [oiMode, setOiModeState] = useState<OiMode>('total');
   const [days, setDays] = useState(15);
   // Range-button request; `seq` makes a repeat click of the same range a new request.
   const [focus, setFocus] = useState<{ seconds: number; seq: number } | null>(null);
@@ -219,9 +223,11 @@ export default function IndexScalperTerminal() {
       }
     }
     if (readPref(OI_KEY) === '0') setShowOi(false);
+    if (readPref(OI_MODE_KEY) === 'change') setOiModeState('change');
     setLayoutReady(true);
   }, []);
   const setOi = (on: boolean) => { setShowOi(on); savePref(OI_KEY, on ? '1' : '0'); };
+  const setOiMode = (m: OiMode) => { setOiModeState(m); savePref(OI_MODE_KEY, m); };
   // An ATM pin the pane made itself is saved as ATM (0), so the next session resolves today's ATM; a picked strike is kept.
   useEffect(() => {
     if (!layoutReady) return;
@@ -1156,8 +1162,9 @@ export default function IndexScalperTerminal() {
   return (
     <div ref={rootRef} data-testid="index-scalper" className={cn('flex flex-col h-screen overflow-hidden bg-zinc-950 text-white', real && 'ring-2 ring-inset ring-rose-600/70')}>
       {/* header toolbar */}
-      <div className="flex items-center justify-between gap-2 px-3 h-11 border-b border-zinc-800 bg-zinc-950 shrink-0">
-        <div className="flex items-center gap-1.5 min-w-0">
+      {/* Wraps onto a second line when the controls do not fit (a laptop width): overlapping groups hid REAL / SIM. */}
+      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 px-3 py-1.5 min-h-11 border-b border-zinc-800 bg-zinc-950 shrink-0">
+        <div className="flex items-center gap-1.5 whitespace-nowrap [&>*]:shrink-0">
           <div role="group" aria-label="Underlying" className="flex rounded border border-zinc-700 overflow-hidden" title={real ? 'Switch to SIM to change underlying: a REAL session trades one account' : undefined}>
             <button
               type="button"
@@ -1193,6 +1200,15 @@ export default function IndexScalperTerminal() {
             <Switch size="sm" checked={showOi} onCheckedChange={setOi} aria-label="OI profile" />
             <span className={cn('w-6 text-[10px] font-bold', showOi ? 'text-emerald-400' : 'text-zinc-500')} aria-hidden>{showOi ? 'ON' : 'OFF'}</span>
           </label>
+          <div role="group" aria-label="OI shows" className={cn('flex rounded border border-zinc-700 overflow-hidden', !showOi && 'opacity-50')}
+            title={showOi ? 'Bars show the total OI, or today\'s change in OI (added = filled, shed = outlined)' : 'Turn the OI profile on first'}>
+            {([['total', 'Total'], ['change', 'Chg']] as const).map(([m, label]) => (
+              <button key={m} type="button" aria-pressed={oiMode === m} disabled={!showOi} onClick={() => setOiMode(m)}
+                aria-label={m === 'total' ? 'Total OI' : 'Change in OI'}
+                className={cn('h-6 px-2 text-[11px] font-bold transition-colors disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/60',
+                  oiMode === m ? 'bg-zinc-700 text-white' : 'text-zinc-400 hover:bg-zinc-800')}>{label}</button>
+            ))}
+          </div>
           {sep}
           <button type="button" onClick={() => { setEditId(null); setPickerOpen(true); }} className={cn(btn, 'flex items-center gap-1')}>
             <BarChart3 className="w-4 h-4" />Indicators{indicators.length > 0 && <span className="text-sky-400">{indicators.length}</span>}
@@ -1232,7 +1248,7 @@ export default function IndexScalperTerminal() {
             Exit All
           </button>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 ml-auto">
           <span className={cn('text-[11px] tabular-nums font-mono', feed.stale ? 'text-amber-400' : 'text-zinc-400')} title="Live tick bridge">
             {spotDisplay ? spotDisplay.toFixed(2) : '—'} <span className={cn('inline-block w-1.5 h-1.5 rounded-full align-middle', feed.feedAgeSec === null ? 'bg-zinc-600' : feed.stale ? 'bg-amber-400' : 'bg-emerald-400')} />
           </span>
@@ -1285,7 +1301,7 @@ export default function IndexScalperTerminal() {
               focus={focus} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
-              onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi}
+              onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
             />
               {layout === 2 && <div className="w-px bg-zinc-800 shrink-0" />}
               {layout === 2 && (
@@ -1300,7 +1316,7 @@ export default function IndexScalperTerminal() {
               focus={focus} lots={scalpLots} openOrders={chartOpenOrders} onCancelOrder={cancelOrder}
               onPlaceChartOrder={onPlaceChartOrder} onOpenTicket={onOpenChartTicket} onAlert={onChartAlert}
               simBrackets={simBrackets} onSetBracket={onSetBracket} onCancelBracket={onCancelBracket}
-              onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi}
+              onReversePosition={onReversePosition} feedLotSize={feed.lotSize} orderQtyMult={orderQtyMult} showOi={showOi} oiMode={oiMode}
             />
               )}
             </>

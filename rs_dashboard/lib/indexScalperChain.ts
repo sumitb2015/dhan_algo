@@ -30,7 +30,7 @@ function side(s: RestSide | undefined): OptionSide {
   const oi_chg_pct = poi && poi > 0 ? ((oi - poi) / poi) * 100 : undefined;
   return {
     ltp, oi, volume: finite(s?.volume) ?? 0,
-    prev_close: pc ?? undefined, change_pct, oi_chg_pct,
+    prev_close: pc ?? undefined, change_pct, oi_chg_pct, prev_oi: poi && poi > 0 ? poi : undefined,
     // the live bridge's own rule (same dead-bands), so a strike reads the same label live and in a snapshot
     buildup: change_pct !== undefined && oi_chg_pct !== undefined ? classifyBuildup(change_pct, oi_chg_pct) : undefined,
   };

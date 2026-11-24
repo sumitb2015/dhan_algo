@@ -20,7 +20,7 @@ function bars(level: number, swing: number) {
   });
 }
 
-interface State { calls: Call[]; blocked: Call[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean }
+interface State { calls: Call[]; blocked: Call[]; candleReqs: string[]; positions: Record<string, unknown>[]; orders: Record<string, unknown>[]; noSpot?: boolean; noPrevOi?: boolean }
 
 async function mockApi(page: Page, state: State) {
   await page.route('**/api/**', async (route: Route) => {
@@ -44,11 +44,22 @@ async function mockApi(page: Page, state: State) {
       if (state.noSpot) return json(route, { success: true, status: { status: 'STARTING' }, quotes: null });
       // 21 strikes around ATM; Call OI peaks above spot (25600), Put OI below it (25100)
       const live = ALL_STRIKES.filter(k => Math.abs(k - SPOT) <= 500);
-      const strikes = Object.fromEntries(live.map(k => [String(k), {
-        strike: k,
-        ce: { ltp: IDS[String(k)] ? 210.5 : 100, oi: Math.round(4_000_000 * Math.exp(-(((k - 25600) / 180) ** 2))) + 200_000, oi_chg_pct: 1, change_pct: -3, buildup: 'SB' },
-        pe: { ltp: IDS[String(k)] ? 229.95 : 100, oi: Math.round(3_500_000 * Math.exp(-(((k - 25100) / 180) ** 2))) + 200_000, oi_chg_pct: -4, change_pct: 5, buildup: 'LB' },
-      }]));
+      // previous-day OI: Calls added above spot and shed below it; Puts the other way round
+      const side = (oi: number, grew: boolean) => {
+        const prev = Math.round(oi / (grew ? 1.25 : 0.8));
+        return state.noPrevOi
+          ? { oi, oi_chg_pct: 0 } // a bridge without a baseline: 0.0 means unknown
+          : { oi, prev_oi: prev, oi_chg_pct: ((oi - prev) / prev) * 100 };
+      };
+      const strikes = Object.fromEntries(live.map(k => {
+        const ceOi = Math.round(4_000_000 * Math.exp(-(((k - 25600) / 180) ** 2))) + 200_000;
+        const peOi = Math.round(3_500_000 * Math.exp(-(((k - 25100) / 180) ** 2))) + 200_000;
+        return [String(k), {
+          strike: k,
+          ce: { ltp: IDS[String(k)] ? 210.5 : 100, change_pct: -3, buildup: 'SB', ...side(ceOi, k >= SPOT) },
+          pe: { ltp: IDS[String(k)] ? 229.95 : 100, change_pct: 5, buildup: 'LB', ...side(peOi, k < SPOT) },
+        }];
+      }));
       return json(route, { success: true, status: { status: 'RUNNING' }, quotes: { underlying: 'NIFTY', expiry: '2026-12-01', spot: SPOT, atm: SPOT, updated_at: sessionIso(), strikes } });
     }
     if (p === '/api/options/chain') return json(route, { success: false, error: 'e2e: no chain' }, 502);
@@ -154,6 +165,54 @@ test.describe('Index Scalper layout + option charts', () => {
     await page.locator('label').filter({ has: page.getByRole('switch', { name: 'OI profile' }) }).click({ position: { x: 10, y: 14 } });
     await expect(page.getByRole('switch', { name: 'OI profile' })).toBeChecked();
     await expect(page.getByTestId('chart-pane-0').getByTestId('oi-profile')).toHaveCount(1);
+    expect(state.blocked).toEqual([]);
+  });
+
+  test('OI profile shows total OI or the change in OI (added filled, shed outlined); no baseline is said, not drawn as 0', async ({ page, context }) => {
+    const state = newState();
+    await signIn(context);
+    await mockApi(page, state);
+    await page.goto('/index-scalper', { waitUntil: 'domcontentloaded' });
+    const left = page.getByTestId('chart-pane-0');
+    await expect(left.getByTestId('oi-profile')).toHaveCount(1, { timeout: 60_000 });
+    const total = page.getByRole('button', { name: 'Total OI' }), chg = page.getByRole('button', { name: 'Change in OI' });
+    await expect(total).toHaveAttribute('aria-pressed', 'true');
+    // pixels: filled red / green, and in change mode also outline-only rows (shed OI)
+    const painted = () => left.getByTestId('oi-profile').evaluate((c: HTMLCanvasElement) => {
+      const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+      let n = 0;
+      for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
+      return n;
+    });
+    await expect.poll(painted, { timeout: 10_000 }).toBeGreaterThan(200);
+    const totalPx = await painted();
+
+    await chg.click();
+    await expect(chg).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(async () => (await painted()) !== totalPx, { timeout: 10_000 }).toBe(true); // a different picture
+    await expect.poll(painted).toBeGreaterThan(100);
+    await expect(left.getByTestId('oi-change-unavailable')).toHaveCount(0);
+
+    // remembered across a reload
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(page.getByRole('button', { name: 'Change in OI' })).toHaveAttribute('aria-pressed', 'true', { timeout: 60_000 });
+
+    // the OI switch off disables the choice
+    await page.getByRole('switch', { name: 'OI profile' }).click();
+    await expect(page.getByRole('button', { name: 'Change in OI' })).toBeDisabled();
+    await page.getByRole('switch', { name: 'OI profile' }).click();
+
+    // a chain with no previous-day OI: change mode draws nothing and says why
+    state.noPrevOi = true;
+    await expect(page.getByTestId('chart-pane-0').getByTestId('oi-change-unavailable')).toBeVisible({ timeout: 15_000 });
+    await expect.poll(() => page.getByTestId('chart-pane-0').getByTestId('oi-profile').evaluate((c: HTMLCanvasElement) => {
+      const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+      for (let i = 3; i < d.length; i += 4) if (d[i] > 0) return false;
+      return true;
+    }), { timeout: 10_000 }).toBe(true);
+    // ...while total OI still draws
+    await page.getByRole('button', { name: 'Total OI' }).click();
+    await expect(page.getByTestId('chart-pane-0').getByTestId('oi-change-unavailable')).toHaveCount(0);
     expect(state.blocked).toEqual([]);
   });
 

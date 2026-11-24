@@ -135,6 +135,8 @@ export interface OptionSide {
   ltp: number; oi: number; volume: number; high?: number; low?: number; open?: number; prev_close?: number; change?: number; change_pct?: number;
   /** Prev-day OI change % and 4-way buildup label ('LB'|'SB'|'SC'|'LU'|'') from the WS bridge */
   oi_chg_pct?: number; buildup?: string;
+  /** Previous-day OI from the bridge / snapshot; 0 or missing = no baseline (then oi_chg_pct 0 means unknown, not flat). */
+  prev_oi?: number;
 }
 export interface StrikeData  { strike: number; ce: OptionSide; pe: OptionSide }
 
