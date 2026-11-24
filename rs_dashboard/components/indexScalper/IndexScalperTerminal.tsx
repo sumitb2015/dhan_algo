@@ -18,8 +18,9 @@ import OrderTicket, { type TicketRequest } from './OrderTicket';
 import IndicatorPicker from './IndicatorPicker';
 import { useIndexScalperFeed } from './useIndexScalperFeed';
 import {
-  applyTick, newIndicator, type Bar, type IndicatorInstance, type IndicatorKind,
+  applyTick, mergeHistory, newIndicator, type Bar, type IndicatorInstance, type IndicatorKind,
 } from '@/lib/indexScalperIndicators';
+import { istDateIso, isRegularSession } from '@/lib/nseHolidays';
 import {
   MAX_LOTS, applyFill, fmtRupees, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, pnlSummary, type ScalperLeg,
 } from '@/lib/indexScalperPositions';
@@ -61,7 +62,8 @@ export default function IndexScalperTerminal() {
   const [interval, setIntervalSel] = useState<Interval>('5');
   const [days, setDays] = useState(15);
   const [focusSeconds, setFocusSeconds] = useState<number | null>(null);
-  const [bars, setBars] = useState<Bar[]>([]);
+  // REST history, tagged with the interval it was loaded for so a switch never mixes two intervals' bars.
+  const [history, setHistory] = useState<{ interval: Interval; bars: Bar[] } | null>(null);
   const [liveBars, setLiveBars] = useState<Bar[]>([]);
   const [candleErr, setCandleErr] = useState<string | null>(null);
   const [loadingBars, setLoadingBars] = useState(true);
@@ -146,23 +148,50 @@ export default function IndexScalperTerminal() {
         if (dead) return;
         if (!j.success || !j.candles) { setCandleErr(j.error ?? 'No candles'); return; }
         setCandleErr(null);
-        setBars(j.candles);
+        setHistory({ interval, bars: j.candles });
       })
       .catch(e => { if (!dead) setCandleErr(String(e?.message ?? e)); })
       .finally(() => { if (!dead) setLoadingBars(false); });
     return () => { dead = true; };
   }, [interval, days, refreshTick]);
 
-  // completed bars arrive from the API; refresh every 60 s so the live tick only has to carry the forming bar
+  // Live candles are built from the WebSocket index ticks (the shared options bridge pushes every tick); the REST
+  // history above is only the backfill: loaded per interval / range, and again after a gap the ticks cannot have covered
+  // (the tab was hidden, or the feed went stale and came back). Nothing polls it on a timer.
+  const liveIntervalRef = useRef<Interval | null>(null);
   useEffect(() => {
-    const t = setInterval(() => setRefreshTick(n => n + 1), 60_000);
-    return () => clearInterval(t);
-  }, []);
+    if (!history || history.interval !== interval) {
+      // Switched interval, history not loaded yet: show nothing rather than the old interval's bars, and take no ticks.
+      liveIntervalRef.current = null;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setLiveBars([]);
+      return;
+    }
+    const same = liveIntervalRef.current === interval;
+    liveIntervalRef.current = interval;
+    setLiveBars(prev => (same ? mergeHistory(history.bars, prev, Number(interval), Date.now() / 1000) : history.bars));
+  }, [history, interval]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setLiveBars(applyTick(bars, feed.spot ?? 0, Number(interval), Date.now() / 1000));
-  }, [bars, feed.spot, interval]);
+    const spot = feed.spot;
+    if (spot === null || feed.stale || feed.feedAgeSec === null) return;
+    // A held-over spot on a holiday / weekend (the bridge still answers with the last close) must not invent a candle.
+    if (!isRegularSession(istDateIso(Date.now()))) return;
+    setLiveBars(prev => (liveIntervalRef.current === interval ? applyTick(prev, spot, Number(interval), Date.now() / 1000) : prev));
+    // feed.stale / feedAgeSec are read as guards only: a new tick is what moves a bar.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [feed.spot, interval]);
+
+  const wasStaleRef = useRef(false);
+  useEffect(() => {
+    if (wasStaleRef.current && !feed.stale && feed.feedAgeSec !== null) setRefreshTick(n => n + 1);
+    wasStaleRef.current = feed.stale;
+  }, [feed.stale, feed.feedAgeSec]);
+  useEffect(() => {
+    const onVis = () => { if (document.visibilityState === 'visible') setRefreshTick(n => n + 1); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, []);
 
   // ── funds + REAL positions ─────────────────────────────────────────
   useEffect(() => {

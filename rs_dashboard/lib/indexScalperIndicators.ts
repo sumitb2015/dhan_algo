@@ -2,7 +2,7 @@
 // indicator instance it returns plain series the chart component draws. Maths comes from lib/indicators.ts (never a
 // private copy), except VWAP, which has no shared index-safe version.
 
-import { emaArray, smaArray, rsiArray, macdSeries, adxDmiArray, supertrendSeries } from './indicators.ts';
+import { emaSmaSeeded, smaArray, rsiArray, macdSeries, adxDmiArray, supertrendSeries } from './indicators.ts';
 
 export interface Bar { t: number; o: number; h: number; l: number; c: number }
 
@@ -139,8 +139,8 @@ export function computeIndicator(bars: Bar[], ind: IndicatorInstance): Indicator
   const label = indicatorLabel(ind);
   switch (ind.kind) {
     case 'ema': {
-      const period = p('period');
-      const v = emaArray(closes, period).map((x, i) => (i < period - 1 ? null : x));
+      // TradingView ta.ema (SMA seed, null before `period` bars): the definition Dhan's own charts use.
+      const v = emaSmaSeeded(closes, p('period'));
       return { pane: 'price', series: [{ key: 'v', label, color: ind.color, style: 'line', values: v }] };
     }
     case 'sma':
@@ -148,7 +148,10 @@ export function computeIndicator(bars: Bar[], ind: IndicatorInstance): Indicator
     case 'vwap':
       return { pane: 'price', series: [{ key: 'v', label, color: ind.color, style: 'line', values: sessionVwap(bars) }] };
     case 'supertrend': {
-      const st = supertrendSeries(bars.map(b => ({ high: b.h, low: b.l, close: b.c })), p('period'), p('mult'));
+      // Pine-exact ta.supertrend, as on Dhan's (TradingView) charts. The default path differs where the trailing bands
+      // cross in a flat stretch, and NIFTY has one every session: the index is frozen from 15:15 to ~15:28 (closing
+      // session), so the default path flipped on a different bar on 18 of 750 5-min bars (lines up to 266 pts apart).
+      const st = supertrendSeries(bars.map(b => ({ high: b.h, low: b.l, close: b.c })), p('period'), p('mult'), { pine: true });
       return {
         pane: 'price',
         series: [{
@@ -237,4 +240,24 @@ export function tailUnchanged(drawnTail: Bar[], prevN: number, bars: Bar[]): boo
   }
   if (bars.length === prevN + 1) return sameBar(drawnTail[k - 1], bars[prevN - 1]);
   return false;
+}
+
+/** Fold freshly loaded history into the bars the live ticks built. History wins for every bar it has, except that its
+ *  last bar, when it is the bucket still forming at `nowSec`, keeps the tick-built high / low / close (the REST snapshot
+ *  of a forming bar is older than the ticks). Tick-built bars newer than the history are kept. `live` must be bars of
+ *  the same interval. */
+export function mergeHistory(history: Bar[], live: Bar[], intervalMin: number, nowSec: number): Bar[] {
+  if (history.length === 0) return live;
+  const out = history.slice();
+  const last = history[history.length - 1];
+  const forming = last.t + intervalMin * 60 > nowSec;
+  for (const b of live) {
+    if (b.t < last.t) continue;
+    if (b.t === last.t) {
+      if (forming) out[out.length - 1] = { t: last.t, o: last.o, h: Math.max(last.h, b.h), l: Math.min(last.l, b.l), c: b.c };
+      continue;
+    }
+    out.push(b);
+  }
+  return out;
 }

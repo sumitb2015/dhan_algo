@@ -4,7 +4,8 @@ import {
   applyFill, legAnchor, legPnl, legsFromDhanPositions, orderUnits, ownedCloseOrder, ownedQtyFromOrders, parseNiftyOption, pnlSummary, totalPnl,
   type ScalperLeg,
 } from './indexScalperPositions.ts';
-import { applyTick, computeIndicator, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
+import { applyTick, computeIndicator, mergeHistory, newIndicator, sessionVwap, bollinger, clampParam, tailUnchanged, type Bar } from './indexScalperIndicators.ts';
+import { emaSmaSeeded, supertrendSeries } from './indicators.ts';
 
 const leg = (o: Partial<ScalperLeg> = {}): ScalperLeg => ({
   id: '1', securityId: '1', product: '', symbol: 'NIFTY-Dec2026-25350-PE', strike: 25350, type: 'PE', netQty: 65, avg: 100, ltp: 110, sim: true, ...o,
@@ -155,4 +156,43 @@ test('chart fast path only when every bar but the forming one is as drawn', () =
   assert.equal(tailUnchanged(drawn, 2, [a, c]), false); // last bar replaced by a different time
   assert.equal(tailUnchanged([a], 1, [{ ...a, c: 99 }]), true);
   assert.equal(tailUnchanged([], 0, [a]), false);
+});
+
+test('EMA and Supertrend are the TradingView definitions (SMA-seeded EMA, Pine supertrend)', () => {
+  // A session ending in a frozen closing stretch, like NIFTY's 15:15-15:28 every day.
+  const bars: Bar[] = [];
+  for (let i = 0; i < 80; i++) { const c = 25000 + Math.sin(i / 5) * 40 + i; bars.push({ t: 1_790_000_000 + i * 300, o: c - 3, h: c + 8, l: c - 8, c }); }
+  const last = bars[bars.length - 1].c;
+  for (let i = 0; i < 15; i++) bars.push({ t: bars[bars.length - 1].t + 300, o: last, h: last, l: last, c: last });
+  const closes = bars.map(b => b.c);
+  assert.deepEqual(computeIndicator(bars, newIndicator('ema', 'e')).series[0].values, emaSmaSeeded(closes, 20));
+  const pine = supertrendSeries(bars.map(b => ({ high: b.h, low: b.l, close: b.c })), 10, 3, { pine: true });
+  assert.deepEqual(computeIndicator(bars, newIndicator('supertrend', 's')).series[0].values, pine.map(x => x.line));
+});
+
+test('history merge keeps tick-built bars newer than the history and the ticks\' range on the forming bar', () => {
+  const t0 = 1_790_000_000;
+  const hist: Bar[] = [{ t: t0, o: 100, h: 104, l: 98, c: 101 }, { t: t0 + 300, o: 101, h: 102, l: 100, c: 101.5 }];
+  const live: Bar[] = [{ t: t0, o: 100, h: 103, l: 99, c: 101 }, { t: t0 + 300, o: 101, h: 106, l: 97, c: 105 }];
+  // the second bar is still forming at t0+400: ticks saw 106 / 97, REST's snapshot of it is older
+  assert.deepEqual(mergeHistory(hist, live, 5, t0 + 400)[1], { t: t0 + 300, o: 101, h: 106, l: 97, c: 105 });
+  assert.deepEqual(mergeHistory(hist, live, 5, t0 + 400)[0], hist[0]); // closed bars: history wins
+  // once that bar has closed, the history's version is the truth
+  assert.deepEqual(mergeHistory(hist, live, 5, t0 + 700)[1], hist[1]);
+  // a bar the ticks opened after the history ends is kept
+  const more = [...live, { t: t0 + 600, o: 105, h: 107, l: 104, c: 106 }];
+  assert.equal(mergeHistory(hist, more, 5, t0 + 650).length, 3);
+  assert.equal(mergeHistory([], live, 5, t0), live);
+});
+
+test('ticks accumulate: a closed bar keeps its range and the forming bar keeps every tick high / low', () => {
+  const t0 = Date.UTC(2026, 10, 25, 4, 30, 0) / 1000; // 10:00 IST
+  let bars: Bar[] = [{ t: t0, o: 100, h: 100, l: 100, c: 100 }];
+  bars = applyTick(bars, 104, 5, t0 + 30);
+  bars = applyTick(bars, 97, 5, t0 + 60);
+  bars = applyTick(bars, 101, 5, t0 + 90);
+  bars = applyTick(bars, 102, 5, t0 + 310); // rolls
+  bars = applyTick(bars, 103, 5, t0 + 620); // rolls again
+  assert.deepEqual(bars.map(b => b.t), [t0, t0 + 300, t0 + 600]);
+  assert.deepEqual(bars[0], { t: t0, o: 100, h: 104, l: 97, c: 101 });
 });
